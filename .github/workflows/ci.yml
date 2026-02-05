@@ -17,9 +17,9 @@ jobs:
           python-version: "3.11"
       - run: python -m pip install --upgrade pip
       - run: |
-          PY_FILES=$(git ls-files "*.py")
+          PY_FILES=$(git ls-files -z "*.py")
           if [ -n "$PY_FILES" ]; then
-            python -m py_compile $PY_FILES
+            echo "$PY_FILES" | xargs -0 python -m py_compile
           else
             echo "No python files"
           fi
