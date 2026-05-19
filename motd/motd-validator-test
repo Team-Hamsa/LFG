@@ -50,6 +50,24 @@ u=$(format_uptime 90061)
 u=$(format_uptime 3600)
 [[ "$u" == "0d 01h 00m" ]]  && ok "format_uptime: 1h"       || fail "format_uptime: 1h"       "$u" "0d 01h 00m"
 
+# format_uptime: float input and full /proc/uptime line format
+u=$(format_uptime "3661.42")
+[[ "$u" == "0d 01h 01m" ]] && ok "format_uptime: float input" || fail "format_uptime: float input" "$u" "0d 01h 01m"
+
+u=$(format_uptime "6079645.54 111925743.89")
+[[ "$u" == "70d 08h 47m" ]] && ok "format_uptime: full uptime line" || fail "format_uptime: full uptime line" "$u" "70d 08h 47m"
+
+u=$(format_uptime "0")
+[[ "$u" == "0d 00h 00m" ]] && ok "format_uptime: zero" || fail "format_uptime: zero" "$u" "0d 00h 00m"
+
+# center_str: overlong string truncation
+c=$(center_str "this is way too long for five chars" 5)
+[[ ${#c} -eq 5 ]] && ok "center_str: truncates overlong" || fail "center_str: truncates overlong" "${#c}" "5"
+
+# progress_bar: no negative input explosion
+b=$(strip_ansi "$(progress_bar 0)")
+[[ ${#b} -eq 10 ]] && ok "progress_bar: zero is 10 chars" || fail "progress_bar: zero is 10 chars" "${#b}" "10"
+
 echo ""
 echo "Results: ${PASS} passed, ${FAIL} failed"
 [[ $FAIL -eq 0 ]]

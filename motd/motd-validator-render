@@ -45,10 +45,12 @@ rpad() {
 center_str() {
     local str="$1" width="$2"
     local len=${#str}
+    if (( len >= width )); then
+        printf '%s' "${str:0:$width}"
+        return
+    fi
     local lp=$(( (width - len) / 2 ))
     local rp=$(( width - len - lp ))
-    (( lp < 0 )) && lp=0
-    (( rp < 0 )) && rp=0
     printf '%*s%s%*s' "$lp" "" "$str" "$rp" ""
 }
 
@@ -57,6 +59,7 @@ progress_bar() {
     local pct="$1"
     local filled=$(( pct * 10 / 100 ))
     (( filled > 10 )) && filled=10
+    (( filled < 0  )) && filled=0
     local empty=$(( 10 - filled ))
     local bar="" i
     local color
@@ -71,7 +74,8 @@ progress_bar() {
 
 # Format /proc/uptime seconds as "Xd XXh XXm".
 format_uptime() {
-    local secs="${1%.*}"
+    local raw="${1%% *}"    # strip from first space (handles "X.Y Z.W" format)
+    local secs="${raw%.*}"  # strip decimal
     local d=$(( secs / 86400 ))
     local h=$(( (secs % 86400) / 3600 ))
     local m=$(( (secs % 3600) / 60 ))
