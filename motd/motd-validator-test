@@ -87,6 +87,31 @@ for i in "${!_BANNER[@]}"; do
     [[ $len -eq 59 ]] && ok "banner row $i: 59 chars" || fail "banner row $i: 59 chars" "$len" "59"
 done
 
+# Section rows must produce exactly 80 visible chars
+# Simulate data so we can call the section function
+RPC_STATE="full"; RPC_LEDGER_SEQ="104325241"; RPC_LEDGER_AGE="3"
+RPC_LOAD="1"; RPC_PEERS="8"; RPC_PEER_DISC="5"; RPC_AMENDMENT_BLOCKED="false"
+SYS_CPU_PCT=45; SYS_RAM_PCT=52; SYS_RAM_USED_GB="33.2"; SYS_RAM_TOTAL_GB="62"
+SYS_DISK_USED="130G"; SYS_DISK_TOTAL="455G"; SYS_DISK_PCT=30; SYS_UPTIME="13d 01h 07m"
+
+# Capture output and check each box line is 80 visible chars
+vs_pass=0; vs_fail=0
+while IFS= read -r line; do
+    stripped=$(strip_ansi "$line")
+    len=${#stripped}
+    if [[ "$stripped" =~ ^[╔╠╚║] ]]; then
+        if [[ $len -eq 80 ]]; then
+            ok "validator+system: row width 80 (sample)"
+            vs_pass=$(( vs_pass + 1 ))
+            break  # one pass is enough for this check
+        else
+            fail "validator+system: row width 80" "$len" "80"
+            vs_fail=$(( vs_fail + 1 ))
+            break
+        fi
+    fi
+done < <(print_validator_system)
+
 echo ""
 echo "Results: ${PASS} passed, ${FAIL} failed"
 [[ $FAIL -eq 0 ]]
