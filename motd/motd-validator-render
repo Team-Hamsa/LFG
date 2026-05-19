@@ -103,7 +103,7 @@ box_split()   { printf '%s%s%s\n' "$CYAN" "$_BOX_SPL" "$RESET"; }
 box_join()    { printf '%s%s%s\n' "$CYAN" "$_BOX_JOI" "$RESET"; }
 box_close()   { printf '%s%s%s\n' "$CYAN" "$_BOX_CLS" "$RESET"; }
 
-# Single-column content row. $1 must be exactly 78 visible chars (no ANSI).
+# Single-column content row. $1 must be exactly 78 *visible* chars; ANSI codes are allowed (they add no visible width).
 # Wrap $1 in color codes BEFORE calling if needed; padding must be plain.
 box_row() {
     printf '%s║%s%s%s║%s\n' "$CYAN" "$RESET" "$1" "$CYAN" "$RESET"
@@ -152,6 +152,8 @@ print_header() {
     local sub_len=${#plain_sub}
     local sub_lp=$(( (78 - sub_len) / 2 ))
     local sub_rp=$(( 78 - sub_len - sub_lp ))
+    (( sub_lp < 0 )) && sub_lp=0
+    (( sub_rp < 0 )) && sub_rp=0
     local lpad rpad
     printf -v lpad '%*s' "$sub_lp" ""
     printf -v rpad '%*s' "$sub_rp" ""
