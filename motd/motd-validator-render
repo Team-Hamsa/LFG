@@ -238,7 +238,7 @@ collect_data() {
     # Tailscale uses the 100.x.x.x range
     NET_TAILSCALE=$(ip addr show 2>/dev/null \
         | grep -oP '(?<=inet )100\.[0-9]+\.[0-9]+\.[0-9]+' | head -1 || echo "—")
-    NET_SSH_SESSIONS=$(ss -tnp 2>/dev/null | grep -c ':22 ' || true)
+    NET_SSH_SESSIONS=$(ss -tnp 2>/dev/null | awk '$1=="ESTAB" && $4 ~ /:22$/' | wc -l)
     if ss -tlnp 2>/dev/null | grep -q ':51235'; then
         NET_P2P_STATUS="OPEN"
     else
@@ -265,7 +265,7 @@ main() {
     echo "STATE=$RPC_STATE PEERS=$RPC_PEERS CPU=${SYS_CPU_PCT}% RAM=${SYS_RAM_PCT}%"
     echo "LAN=$NET_LAN TAILSCALE=$NET_TAILSCALE SSH=$NET_SSH_SESSIONS P2P=$NET_P2P_STATUS"
     echo "UPTIME=$SYS_UPTIME DISK=${SYS_DISK_USED}/${SYS_DISK_TOTAL}"
-    for line in "${ALERT_LINES[@]:-}"; do echo "ALERT: $line"; done
+    for line in "${ALERT_LINES[@]}"; do echo "ALERT: $line"; done
 }
 
 [[ -n "${_SOURCED:-}" ]] || main "$@"
