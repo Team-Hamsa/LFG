@@ -68,6 +68,18 @@ c=$(center_str "this is way too long for five chars" 5)
 b=$(strip_ansi "$(progress_bar 0)")
 [[ ${#b} -eq 10 ]] && ok "progress_bar: zero is 10 chars" || fail "progress_bar: zero is 10 chars" "${#b}" "10"
 
+# box_row: full-width single-column row must be exactly 80 visible chars
+r=$(strip_ansi "$(box_row "$(rpad "hello" 78)")")
+[[ ${#r} -eq 80 ]] && ok "box_row: total width 80"   || fail "box_row: total width 80"   "${#r}" "80"
+[[ "${r:0:1}" == "║" ]] && ok "box_row: starts with ║" || fail "box_row: starts with ║" "${r:0:1}" "║"
+[[ "${r: -1}" == "║" ]] && ok "box_row: ends with ║"   || fail "box_row: ends with ║"   "${r: -1}" "║"
+
+r=$(strip_ansi "$(box_row2 "$(rpad "left" 38)" "$(rpad "right" 39)")")
+[[ ${#r} -eq 80 ]] && ok "box_row2: total width 80"  || fail "box_row2: total width 80"  "${#r}" "80"
+
+r=$(strip_ansi "$(box_top)")
+[[ ${#r} -eq 80 ]] && ok "box_top: total width 80"   || fail "box_top: total width 80"   "${#r}" "80"
+
 echo ""
 echo "Results: ${PASS} passed, ${FAIL} failed"
 [[ $FAIL -eq 0 ]]
