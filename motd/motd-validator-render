@@ -160,8 +160,112 @@ print_header() {
     box_row "${lpad}${WHITE}${plain_sub}${RESET}${rpad}"
 }
 
+# ── Data collection (called once in main, sets globals) ───────────────────────
+
+# Validator / rippled globals
+RPC_STATE="OFFLINE"
+RPC_LEDGER_SEQ="—"
+RPC_LEDGER_AGE="—"
+RPC_LOAD="—"
+RPC_PEERS="—"
+RPC_PEER_DISC="—"
+RPC_UPTIME_S="0"
+RPC_AMENDMENT_BLOCKED="false"
+
+# System globals
+SYS_CPU_PCT=0
+SYS_RAM_USED_GB="—"
+SYS_RAM_TOTAL_GB="—"
+SYS_RAM_PCT=0
+SYS_DISK_USED="—"
+SYS_DISK_TOTAL="—"
+SYS_DISK_PCT=0
+SYS_UPTIME="—"
+
+# Network globals
+NET_LAN="—"
+NET_TAILSCALE="—"
+NET_SSH_SESSIONS=0
+NET_P2P_STATUS="CLOSED"
+
+# Alert globals (arrays)
+ALERT_LINES=()
+
+collect_data() {
+    # ── rippled ──
+    local rpc_json
+    if rpc_json=$(timeout 5 /usr/local/bin/rippled server_info 2>/dev/null); then
+        RPC_STATE=$(printf '%s' "$rpc_json"   | jq -r '.result.info.server_state    // "unknown"')
+        RPC_LEDGER_SEQ=$(printf '%s' "$rpc_json" | jq -r '.result.info.validated_ledger.seq // "—"')
+        RPC_LEDGER_AGE=$(printf '%s' "$rpc_json" | jq -r '.result.info.validated_ledger.age // "—"')
+        RPC_LOAD=$(printf '%s' "$rpc_json"    | jq -r '.result.info.load_factor      // "—"')
+        RPC_PEERS=$(printf '%s' "$rpc_json"   | jq -r '.result.info.peers            // "—"')
+        RPC_PEER_DISC=$(printf '%s' "$rpc_json" | jq -r '.result.info.peer_disconnects // "—"')
+        RPC_UPTIME_S=$(printf '%s' "$rpc_json" | jq -r '.result.info.uptime          // "0"')
+        local ab
+        ab=$(printf '%s' "$rpc_json" | jq -r '.result.info.amendment_blocked // false')
+        RPC_AMENDMENT_BLOCKED="$ab"
+    fi
+
+    # ── CPU: 1-min load / core count as percent ──
+    local load_avg cores
+    load_avg=$(awk '{print $1}' /proc/loadavg)
+    cores=$(grep -c '^processor' /proc/cpuinfo)
+    SYS_CPU_PCT=$(awk "BEGIN { v=int(($load_avg/$cores)*100); print (v>100?100:v) }")
+
+    # ── RAM ──
+    local total_kb avail_kb used_kb
+    total_kb=$(awk '/^MemTotal:/{print $2}'     /proc/meminfo)
+    avail_kb=$(awk '/^MemAvailable:/{print $2}' /proc/meminfo)
+    used_kb=$(( total_kb - avail_kb ))
+    SYS_RAM_PCT=$(( used_kb * 100 / total_kb ))
+    SYS_RAM_USED_GB=$(awk "BEGIN { printf \"%.1f\", $used_kb/1048576 }")
+    SYS_RAM_TOTAL_GB=$(awk "BEGIN { printf \"%.0f\",  $total_kb/1048576 }")
+
+    # ── Disk ──
+    read -r _ total used _ pct _ < <(df -h / | tail -1)
+    SYS_DISK_TOTAL="$total"
+    SYS_DISK_USED="$used"
+    SYS_DISK_PCT="${pct%%%}"   # strip trailing %
+
+    # ── Uptime ──
+    local up_secs
+    up_secs=$(awk '{print $1}' /proc/uptime)
+    SYS_UPTIME=$(format_uptime "$up_secs")
+
+    # ── Network ──
+    NET_LAN=$(ip route get 8.8.8.8 2>/dev/null | grep -oP 'src \K[^ ]+' || echo "—")
+    # Tailscale uses the 100.x.x.x range
+    NET_TAILSCALE=$(ip addr show 2>/dev/null \
+        | grep -oP '(?<=inet )100\.[0-9]+\.[0-9]+\.[0-9]+' | head -1 || echo "—")
+    NET_SSH_SESSIONS=$(ss -tnp 2>/dev/null | grep -c ':22 ' || true)
+    if ss -tlnp 2>/dev/null | grep -q ':51235'; then
+        NET_P2P_STATUS="OPEN"
+    else
+        NET_P2P_STATUS="CLOSED"
+    fi
+
+    # ── Alerts: last 3 notable rippled log lines ──
+    mapfile -t ALERT_LINES < <(
+        journalctl -u rippled -n 60 --no-pager -o short-iso 2>/dev/null \
+        | grep -iE 'warn|error|amendment|consensus lost|slow ledger' \
+        | tail -3 \
+        | awk '{
+            ts = substr($1, 12, 5)
+            $1=""; sub(/^ /, "")
+            sub(/[^ ]+ rippled\[[0-9]+\]: /, "")
+            printf "[%s] %s\n", ts, substr($0, 1, 60)
+          }'
+    ) || true
+}
+
 main() {
-    print_header
+    VALIDATOR_JSON=$(ls /home/hamsa/.ripple/*.json 2>/dev/null | head -1 || true)
+    collect_data
+    echo "STATE=$RPC_STATE PEERS=$RPC_PEERS CPU=${SYS_CPU_PCT}% RAM=${SYS_RAM_PCT}%"
+    echo "LAN=$NET_LAN TAILSCALE=$NET_TAILSCALE SSH=$NET_SSH_SESSIONS P2P=$NET_P2P_STATUS"
+    echo "UPTIME=$SYS_UPTIME DISK=${SYS_DISK_USED}/${SYS_DISK_TOTAL}"
+    for line in "${ALERT_LINES[@]:-}"; do echo "ALERT: $line"; done
 }
 
 [[ -n "${_SOURCED:-}" ]] || main "$@"
