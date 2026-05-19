@@ -446,6 +446,11 @@ print_identity() {
     local rev_color="$GREEN" rev_label="NO"
     [[ "$revoked" == "true" ]] && { rev_color="$RED"; rev_label="YES ⚠"; }
 
+    # Ensure domain fits within the 78-char budget
+    # Fixed chars: 59 (prefix + key + separators). Available = 78-59=19.
+    local max_domain=$(( 19 - ${#rev_label} ))
+    [[ ${#domain} -gt $max_domain ]] && domain="${domain:0:$max_domain}"
+
     # Build the plain-text version for length measurement
     local plain="  ◈ IDENTITY  Key: ${key_short}  ·  Domain: ${domain}  ·  Revoked: ${rev_label}"
     local plain_len=${#plain}
