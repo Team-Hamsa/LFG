@@ -28,8 +28,12 @@ RIGHT_COL=39   # visible inner width of right column
 
 # ── Helper functions ──────────────────────────────────────────────────────────
 
-# Right-pad a plain-text string to exactly N visible chars.
-# Do NOT pass strings containing ANSI codes — measure before coloring.
+# Right-pad a string to exactly N visible chars.
+# Two usage patterns:
+#   Plain text:    rpad "text" width
+#                  width = desired visible chars
+#   Pre-colored:   rpad "${COLOR}text${RESET}" $(( width + ${#COLOR} + ${#RESET} ))
+#                  compensate for ANSI code bytes so visible width stays correct
 rpad() {
     local str="$1" width="$2"
     local len=${#str}
@@ -294,8 +298,12 @@ print_validator_system() {
     fi
 
     # Amendment blocked warning
-    local amend_warn=""
-    [[ "$RPC_AMENDMENT_BLOCKED" == "true" ]] && amend_warn=" ${RED}[BLOCKED]${RESET}"
+    # amend_vis tracks visible chars consumed by the warning (0 or 10: " [BLOCKED]")
+    local amend_warn="" amend_vis=0
+    if [[ "$RPC_AMENDMENT_BLOCKED" == "true" ]]; then
+        amend_warn=" ${RED}[BLOCKED]${RESET}"
+        amend_vis=10
+    fi
 
     # ── Right column: System ──────────────────────────────────────────────────
     local cpu_bar ram_bar disk_bar
@@ -317,8 +325,9 @@ print_validator_system() {
     # Right rows:      "    Label " (10) + bar(10) + "  " + value fills to 39
     #   value visible width = 39 - 10 - 10 - 2 = 17
 
-    local state_label="${RPC_STATE^^}${amend_warn}"
-    local state_label_vis=$(( 38 - 12 - 10 - 1 ))  # 15
+    # state_label_vis: visible chars for state text = 15 total minus amend_vis
+    # visible budget: "    State   "(12) + bar(10) + " "(1) + state_label_vis + amend_vis = 38
+    local state_label_vis=$(( 15 - amend_vis ))
 
     box_split
     # Header row
@@ -327,7 +336,7 @@ print_validator_system() {
         "$(rpad "  ${YELLOW}◈ SYSTEM${RESET}"    $(( RIGHT_COL + ${#YELLOW} + ${#RESET} )))"
     # State / CPU row
     box_row2 \
-        "    State   ${state_bar} ${state_color}$(rpad "${RPC_STATE^^}" $state_label_vis)${RESET}" \
+        "    State   ${state_bar} ${state_color}$(rpad "${RPC_STATE^^}" $state_label_vis)${RESET}${amend_warn}" \
         "    CPU   ${cpu_bar}  ${GREEN}$(rpad "${SYS_CPU_PCT}%" $rv_width)${RESET}"
     # Ledger / RAM row
     box_row2 \
