@@ -80,6 +80,13 @@ r=$(strip_ansi "$(box_row2 "$(rpad "left" 38)" "$(rpad "right" 39)")")
 r=$(strip_ansi "$(box_top)")
 [[ ${#r} -eq 80 ]] && ok "box_top: total width 80"   || fail "box_top: total width 80"   "${#r}" "80"
 
+# Each banner row must be exactly 59 visible chars
+for i in "${!_BANNER[@]}"; do
+    row="${_BANNER[$i]}"
+    len=${#row}
+    [[ $len -eq 59 ]] && ok "banner row $i: 59 chars" || fail "banner row $i: 59 chars" "$len" "59"
+done
+
 echo ""
 echo "Results: ${PASS} passed, ${FAIL} failed"
 [[ $FAIL -eq 0 ]]

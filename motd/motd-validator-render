@@ -115,8 +115,51 @@ box_row2() {
         "$CYAN" "$RESET" "$1" "$CYAN" "$RESET" "$2" "$CYAN" "$RESET"
 }
 
+# ── LFG XRPL banner (figlet block font, 59 chars wide, 6 rows) ───────────────
+# Each string is exactly 59 visible chars: LFG(25) + sep(2) + XRPL(32)
+_BANNER=(
+    "██╗     ███████╗ ██████╗   ██╗  ██╗██████╗ ██████╗ ██╗     "
+    "██║     ██╔════╝██╔════╝   ╚██╗██╔╝██╔══██╗██╔══██╗██║     "
+    "██║     █████╗  ██║  ███╗   ╚███╔╝ ██████╔╝██████╔╝██║     "
+    "██║     ██╔══╝  ██║   ██║   ██╔██╗ ██╔══██╗██╔═══╝ ██║     "
+    "███████╗██║     ╚██████╔╝  ██╔╝ ██╗██║  ██║██║     ███████╗"
+    "╚══════╝╚═╝      ╚═════╝   ╚═╝  ╚═╝╚═╝  ╚═╝╚═╝     ╚══════╝"
+)
+# Centering: (78 - 59) / 2 = 9 left pad, 10 right pad
+_BANNER_LPAD="         "   # 9 spaces
+_BANNER_RPAD="          "  # 10 spaces
+
+print_header() {
+    local pubkey="unknown" manifest_seq="?" domain="joshuahamsa.com"
+
+    if [[ -n "$VALIDATOR_JSON" && -f "$VALIDATOR_JSON" ]]; then
+        pubkey=$(jq -r '.public_key // "unknown"' "$VALIDATOR_JSON" 2>/dev/null)
+        manifest_seq=$(jq -r '.token_sequence // "?"' "$VALIDATOR_JSON" 2>/dev/null)
+        domain=$(jq -r '.domain // "joshuahamsa.com"' "$VALIDATOR_JSON" 2>/dev/null)
+    fi
+
+    local key_short="${pubkey:0:6}···${pubkey: -4}"
+
+    box_top
+    local row
+    for row in "${_BANNER[@]}"; do
+        # 9 spaces (plain) + colored banner + 10 spaces (plain) = 78 visible chars
+        box_row "${_BANNER_LPAD}${MAGENTA}${row}${RESET}${_BANNER_RPAD}"
+    done
+
+    # Subtitle: "▸▸  domain  ·  key  ·  Manifest #N  ◂◂" centered in 78
+    local plain_sub="▸▸  ${domain}  ·  ${key_short}  ·  Manifest #${manifest_seq}  ◂◂"
+    local sub_len=${#plain_sub}
+    local sub_lp=$(( (78 - sub_len) / 2 ))
+    local sub_rp=$(( 78 - sub_len - sub_lp ))
+    local lpad rpad
+    printf -v lpad '%*s' "$sub_lp" ""
+    printf -v rpad '%*s' "$sub_rp" ""
+    box_row "${lpad}${WHITE}${plain_sub}${RESET}${rpad}"
+}
+
 main() {
-    echo "skeleton ok"
+    print_header
 }
 
 [[ -n "${_SOURCED:-}" ]] || main "$@"
