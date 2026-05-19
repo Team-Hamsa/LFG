@@ -426,8 +426,8 @@ print_alerts() {
         local line
         for line in "${ALERT_LINES[@]}"; do
             local color="$DIM"
-            [[ "$line" =~ [Ww][Aa][Rr][Nn] ]] && color="$AMBER"
-            [[ "$line" =~ [Ee][Rr][Rr][Oo][Rr] ]] && color="$RED"
+            [[ "$line" =~ ([Ww][Aa][Rr][Nn]|[Ww][Rr][Nn]) ]] && color="$AMBER"
+            [[ "$line" =~ [Ee][Rr][Rr] ]] && color="$RED"
             box_row "$(rpad "    ${color}${line}${RESET}" $(( 78 + ${#color} + ${#RESET} )))"
         done
     fi
