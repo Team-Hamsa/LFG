@@ -352,12 +352,77 @@ print_validator_system() {
         "    Up    ${GREEN}$(rpad "$SYS_UPTIME" $(( RIGHT_COL - 10 )))${RESET}"
 }
 
+print_peers_network() {
+    local lw=$LEFT_COL rw=$RIGHT_COL  # 38 and 39
+
+    # Peer count color
+    local peer_color="$GREEN"
+    local peer_num
+    peer_num=$(printf '%s' "$RPC_PEERS" | grep -oP '^[0-9]+' || echo "0")
+    (( peer_num < 4  )) && peer_color="$AMBER"
+    (( peer_num == 0 )) && peer_color="$RED"
+
+    # P2P port status color
+    local p2p_color="$GREEN" p2p_sym="✓"
+    [[ "$NET_P2P_STATUS" != "OPEN" ]] && { p2p_color="$RED"; p2p_sym="✗"; }
+
+    # Tailscale — show dash if unavailable
+    local ts_val="${NET_TAILSCALE:-—}"
+
+    # Rippled process uptime (RPC_UPTIME_S is seconds as integer from server_info)
+    local rippled_uptime="—"
+    if [[ "$RPC_UPTIME_S" =~ ^[0-9]+$ ]]; then
+        rippled_uptime=$(format_uptime "$RPC_UPTIME_S")
+    fi
+
+    # Disconnect count color
+    local disc_color="$GREEN"
+    local disc_num
+    disc_num=$(printf '%s' "$RPC_PEER_DISC" | grep -oP '^[0-9]+' || echo "0")
+    (( disc_num > 10  )) && disc_color="$AMBER"
+    (( disc_num > 50  )) && disc_color="$RED"
+
+    # Label widths (verified by character count):
+    #   Left headers:    "  ◈ PEERS"      = 9  vis → rpad lw+YELLOW+RESET = 47
+    #   Left data rows:  "    Connected   " / "    Disconnects " / "    Uptime      "
+    #                    each = 16 vis → value fills lw-16 = 22 vis
+    #   Left empty row:  "" padded to lw = 38
+    #
+    #   Right header:    "  ◈ NETWORK"    = 11 vis → rpad rw+YELLOW+RESET = 48
+    #   Right data rows: "    LAN        " / "    Tailscale  " / "    SSH        "
+    #                    each = 15 vis → value fills rw-15 = 24 vis
+    #   Right P2P row:   "    P2P :51235 " = 15 vis + sym(1) + " "(1) → value fills rw-17 = 22 vis
+
+    box_join
+    # Header row
+    box_row2 \
+        "$(rpad "  ${YELLOW}◈ PEERS${RESET}"   $(( lw + ${#YELLOW} + ${#RESET} )))" \
+        "$(rpad "  ${YELLOW}◈ NETWORK${RESET}" $(( rw + ${#YELLOW} + ${#RESET} )))"
+    # Connected / LAN
+    box_row2 \
+        "    Connected   ${peer_color}$(rpad "${RPC_PEERS} peers" $(( lw - 16 )))${RESET}" \
+        "    LAN        ${GREEN}$(rpad "$NET_LAN" $(( rw - 15 )))${RESET}"
+    # Disconnects / Tailscale
+    box_row2 \
+        "    Disconnects ${disc_color}$(rpad "$RPC_PEER_DISC" $(( lw - 16 )))${RESET}" \
+        "    Tailscale  ${GREEN}$(rpad "$ts_val" $(( rw - 15 )))${RESET}"
+    # Rippled uptime / SSH sessions
+    box_row2 \
+        "    Uptime      ${GREEN}$(rpad "$rippled_uptime" $(( lw - 16 )))${RESET}" \
+        "    SSH        ${GREEN}$(rpad "${NET_SSH_SESSIONS} active" $(( rw - 15 )))${RESET}"
+    # Empty left / P2P status
+    box_row2 \
+        "$(rpad "" $lw)" \
+        "    P2P :51235 ${p2p_color}${p2p_sym} $(rpad "$NET_P2P_STATUS" $(( rw - 17 )))${RESET}"
+}
+
 main() {
     VALIDATOR_JSON=$(ls /home/hamsa/.ripple/*.json 2>/dev/null | head -1 || true)
     collect_data
     {
         print_header
         print_validator_system
+        print_peers_network
     } | cat
 }
 
