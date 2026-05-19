@@ -471,15 +471,27 @@ print_footer() {
 
 main() {
     VALIDATOR_JSON=$(ls /home/hamsa/.ripple/*.json 2>/dev/null | head -1 || true)
-    collect_data
+
+    # Render full dashboard to temp file. On failure, write an error notice instead.
     {
+        collect_data
         print_header
         print_validator_system
         print_peers_network
         print_alerts
         print_identity
         print_footer
-    } | cat
+    } > "$CACHE_TMP" 2>/dev/null \
+    || {
+        {
+            box_top
+            box_row "$(rpad "  ${RED}LFG XRPL VALIDATOR — DASHBOARD RENDER FAILED${RESET}" $(( 78 + ${#RED} + ${#RESET} )))"
+            box_row "$(rpad "  ${DIM}Check: sudo journalctl -u rippled -n 20${RESET}"       $(( 78 + ${#DIM} + ${#RESET} )))"
+            box_bottom
+        } > "$CACHE_TMP"
+    }
+
+    mv "$CACHE_TMP" "$CACHE_FILE"
 }
 
 [[ -n "${_SOURCED:-}" ]] || main "$@"
