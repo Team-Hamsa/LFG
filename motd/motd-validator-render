@@ -82,6 +82,39 @@ format_uptime() {
     printf '%dd %02dh %02dm' "$d" "$h" "$m"
 }
 
+# ── Pre-built border strings (computed once at source time) ───────────────────
+_hline() { local n="$1" s=""; for (( i=0; i<n; i++ )); do s+="═"; done; printf '%s' "$s"; }
+
+_H78=$(_hline 78)
+_H38=$(_hline 38)
+_H39=$(_hline 39)
+
+_BOX_TOP="╔${_H78}╗"
+_BOX_BOT="╚${_H78}╝"
+_BOX_MID="╠${_H78}╣"
+_BOX_SPL="╠${_H38}╦${_H39}╣"   # open two-column split
+_BOX_JOI="╠${_H38}╬${_H39}╣"   # mid two-column join
+_BOX_CLS="╠${_H38}╩${_H39}╣"   # close two-column (╩ rejoins)
+
+box_top()     { printf '%s%s%s\n' "$CYAN" "$_BOX_TOP" "$RESET"; }
+box_bottom()  { printf '%s%s%s\n' "$CYAN" "$_BOX_BOT" "$RESET"; }
+box_mid()     { printf '%s%s%s\n' "$CYAN" "$_BOX_MID" "$RESET"; }
+box_split()   { printf '%s%s%s\n' "$CYAN" "$_BOX_SPL" "$RESET"; }
+box_join()    { printf '%s%s%s\n' "$CYAN" "$_BOX_JOI" "$RESET"; }
+box_close()   { printf '%s%s%s\n' "$CYAN" "$_BOX_CLS" "$RESET"; }
+
+# Single-column content row. $1 must be exactly 78 visible chars (no ANSI).
+# Wrap $1 in color codes BEFORE calling if needed; padding must be plain.
+box_row() {
+    printf '%s║%s%s%s║%s\n' "$CYAN" "$RESET" "$1" "$CYAN" "$RESET"
+}
+
+# Two-column content row. $1=38 visible chars, $2=39 visible chars (plain or pre-colored).
+box_row2() {
+    printf '%s║%s%s%s║%s%s%s║%s\n' \
+        "$CYAN" "$RESET" "$1" "$CYAN" "$RESET" "$2" "$CYAN" "$RESET"
+}
+
 main() {
     echo "skeleton ok"
 }
