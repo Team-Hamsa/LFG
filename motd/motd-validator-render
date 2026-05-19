@@ -259,13 +259,97 @@ collect_data() {
     ) || true
 }
 
+print_validator_system() {
+    # ── Left column: Validator ────────────────────────────────────────────────
+    local state_color="$GREEN"
+    [[ "$RPC_STATE" != "full" ]] && state_color="$RED"
+
+    # State bar — full filled green when FULL, else empty red
+    local state_bar
+    if [[ "$RPC_STATE" == "full" ]]; then
+        state_bar=$(printf '%s%s%s' "$GREEN" "▓▓▓▓▓▓▓▓▓▓" "$RESET")
+    else
+        state_bar=$(printf '%s%s%s' "$RED"   "░░░░░░░░░░" "$RESET")
+    fi
+
+    # Load color thresholds
+    local load_color="$GREEN"
+    local load_num
+    load_num=$(printf '%s' "$RPC_LOAD" | grep -oP '^[0-9]+(\.[0-9]+)?' || echo "0")
+    (( $(awk "BEGIN{print ($load_num > 5) ? 1 : 0}") )) && load_color="$AMBER"
+    (( $(awk "BEGIN{print ($load_num > 20) ? 1 : 0}") )) && load_color="$RED"
+
+    # Ledger age color thresholds
+    local age_color="$GREEN"
+    local age_num
+    age_num=$(printf '%s' "$RPC_LEDGER_AGE" | grep -oP '^[0-9]+' || echo "0")
+    (( age_num > 10 )) && age_color="$AMBER"
+    (( age_num > 30 )) && age_color="$RED"
+
+    # Format ledger seq with commas
+    local seq_fmt="$RPC_LEDGER_SEQ"
+    if [[ "$RPC_LEDGER_SEQ" =~ ^[0-9]+$ ]]; then
+        seq_fmt=$(printf '%d' "$RPC_LEDGER_SEQ" \
+            | sed ':a;s/\B[0-9]\{3\}\>/,&/;ta')
+    fi
+
+    # Amendment blocked warning
+    local amend_warn=""
+    [[ "$RPC_AMENDMENT_BLOCKED" == "true" ]] && amend_warn=" ${RED}[BLOCKED]${RESET}"
+
+    # ── Right column: System ──────────────────────────────────────────────────
+    local cpu_bar ram_bar disk_bar
+    cpu_bar=$(progress_bar "$SYS_CPU_PCT")
+    ram_bar=$(progress_bar "$SYS_RAM_PCT")
+    disk_bar=$(progress_bar "$SYS_DISK_PCT")
+
+    # Right column value width: RIGHT_COL(39) - label(10) - bar(10) - gap(2) = 17
+    local rv_width=17
+
+    # ── Render rows ───────────────────────────────────────────────────────────
+    # Each left cell = 38 visible chars, each right cell = 39 visible chars.
+    # Label widths are fixed plain-text; colored values fill the remainder.
+    #
+    # State row left:  "    State   " (12) + bar(10) + " " + state_label fills to 38
+    #   state_label visible width = 38 - 12 - 10 - 1 = 15
+    # Other left rows: "    Label   " (12) + value fills to 38
+    #   value visible width = 38 - 12 = 26
+    # Right rows:      "    Label " (10) + bar(10) + "  " + value fills to 39
+    #   value visible width = 39 - 10 - 10 - 2 = 17
+
+    local state_label="${RPC_STATE^^}${amend_warn}"
+    local state_label_vis=$(( 38 - 12 - 10 - 1 ))  # 15
+
+    box_split
+    # Header row
+    box_row2 \
+        "$(rpad "  ${YELLOW}◈ VALIDATOR${RESET}" $(( LEFT_COL + ${#YELLOW} + ${#RESET} )))" \
+        "$(rpad "  ${YELLOW}◈ SYSTEM${RESET}"    $(( RIGHT_COL + ${#YELLOW} + ${#RESET} )))"
+    # State / CPU row
+    box_row2 \
+        "    State   ${state_bar} ${state_color}$(rpad "${RPC_STATE^^}" $state_label_vis)${RESET}" \
+        "    CPU   ${cpu_bar}  ${GREEN}$(rpad "${SYS_CPU_PCT}%" $rv_width)${RESET}"
+    # Ledger / RAM row
+    box_row2 \
+        "    Ledger  ${GREEN}$(rpad "$seq_fmt" $(( LEFT_COL - 12 )))${RESET}" \
+        "    RAM   ${ram_bar}  ${GREEN}$(rpad "${SYS_RAM_USED_GB} / ${SYS_RAM_TOTAL_GB} GB" $rv_width)${RESET}"
+    # Age / Disk row
+    box_row2 \
+        "    Age     ${age_color}$(rpad "${RPC_LEDGER_AGE}s" $(( LEFT_COL - 12 )))${RESET}" \
+        "    Disk  ${disk_bar}  ${GREEN}$(rpad "${SYS_DISK_USED} / ${SYS_DISK_TOTAL}" $rv_width)${RESET}"
+    # Load / Uptime row
+    box_row2 \
+        "    Load    ${load_color}$(rpad "${RPC_LOAD}x" $(( LEFT_COL - 12 )))${RESET}" \
+        "    Up    ${GREEN}$(rpad "$SYS_UPTIME" $(( RIGHT_COL - 10 )))${RESET}"
+}
+
 main() {
     VALIDATOR_JSON=$(ls /home/hamsa/.ripple/*.json 2>/dev/null | head -1 || true)
     collect_data
-    echo "STATE=$RPC_STATE PEERS=$RPC_PEERS CPU=${SYS_CPU_PCT}% RAM=${SYS_RAM_PCT}%"
-    echo "LAN=$NET_LAN TAILSCALE=$NET_TAILSCALE SSH=$NET_SSH_SESSIONS P2P=$NET_P2P_STATUS"
-    echo "UPTIME=$SYS_UPTIME DISK=${SYS_DISK_USED}/${SYS_DISK_TOTAL}"
-    for line in "${ALERT_LINES[@]}"; do echo "ALERT: $line"; done
+    {
+        print_header
+        print_validator_system
+    } | cat
 }
 
 [[ -n "${_SOURCED:-}" ]] || main "$@"
