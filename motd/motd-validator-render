@@ -175,6 +175,7 @@ RPC_PEERS="—"
 RPC_PEER_DISC="—"
 RPC_UPTIME_S="0"
 RPC_AMENDMENT_BLOCKED="false"
+RPC_VERSION="—"
 
 # System globals
 SYS_CPU_PCT=0
@@ -206,6 +207,7 @@ collect_data() {
         RPC_PEERS=$(printf '%s' "$rpc_json"   | jq -r '.result.info.peers            // "—"')
         RPC_PEER_DISC=$(printf '%s' "$rpc_json" | jq -r '.result.info.peer_disconnects // "—"')
         RPC_UPTIME_S=$(printf '%s' "$rpc_json" | jq -r '.result.info.uptime          // "0"')
+        RPC_VERSION=$(printf '%s' "$rpc_json"  | jq -r '.result.info.build_version   // "—"')
         local ab
         ab=$(printf '%s' "$rpc_json" | jq -r '.result.info.amendment_blocked // false')
         RPC_AMENDMENT_BLOCKED="$ab"
@@ -412,7 +414,7 @@ print_peers_network() {
         "    SSH        ${GREEN}$(rpad "${NET_SSH_SESSIONS} active" $(( rw - 15 )))${RESET}"
     # Empty left / P2P status
     box_row2 \
-        "$(rpad "" $lw)" \
+        "    Version     ${GREEN}$(rpad "$RPC_VERSION" $(( lw - 16 )))${RESET}" \
         "    P2P :51235 ${p2p_color}${p2p_sym} $(rpad "$NET_P2P_STATUS" $(( rw - 17 )))${RESET}"
 }
 
