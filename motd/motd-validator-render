@@ -416,6 +416,54 @@ print_peers_network() {
         "    P2P :51235 ${p2p_color}${p2p_sym} $(rpad "$NET_P2P_STATUS" $(( rw - 17 )))${RESET}"
 }
 
+print_alerts() {
+    box_close   # closes the two-column split back to full width (╠══╩══╣)
+    box_row "$(rpad "  ${YELLOW}◈ ALERTS${RESET}" $(( 78 + ${#YELLOW} + ${#RESET} )))"
+
+    if [[ ${#ALERT_LINES[@]} -eq 0 ]]; then
+        box_row "$(rpad "    ${DIM}No recent warnings or errors${RESET}" $(( 78 + ${#DIM} + ${#RESET} )))"
+    else
+        local line
+        for line in "${ALERT_LINES[@]}"; do
+            local color="$DIM"
+            [[ "$line" =~ [Ww][Aa][Rr][Nn] ]] && color="$AMBER"
+            [[ "$line" =~ [Ee][Rr][Rr][Oo][Rr] ]] && color="$RED"
+            box_row "$(rpad "    ${color}${line}${RESET}" $(( 78 + ${#color} + ${#RESET} )))"
+        done
+    fi
+}
+
+print_identity() {
+    local pubkey="unknown" revoked="false" domain="joshuahamsa.com" seq="?"
+    if [[ -n "$VALIDATOR_JSON" && -f "$VALIDATOR_JSON" ]]; then
+        pubkey=$(jq -r '.public_key // "unknown"' "$VALIDATOR_JSON" 2>/dev/null)
+        revoked=$(jq -r '.revoked // false'       "$VALIDATOR_JSON" 2>/dev/null)
+        domain=$(jq -r '.domain // "joshuahamsa.com"' "$VALIDATOR_JSON" 2>/dev/null)
+        seq=$(jq -r '.token_sequence // "?"'      "$VALIDATOR_JSON" 2>/dev/null)
+    fi
+
+    local key_short="${pubkey:0:6}···${pubkey: -4}"
+    local rev_color="$GREEN" rev_label="NO"
+    [[ "$revoked" == "true" ]] && { rev_color="$RED"; rev_label="YES ⚠"; }
+
+    # Build the plain-text version for length measurement
+    local plain="  ◈ IDENTITY  Key: ${key_short}  ·  Domain: ${domain}  ·  Revoked: ${rev_label}"
+    local plain_len=${#plain}
+    local trail=$(( 78 - plain_len ))
+    (( trail < 0 )) && trail=0
+
+    box_mid
+    box_row "  ${YELLOW}◈ IDENTITY${RESET}  Key: ${WHITE}${key_short}${RESET}  ·  Domain: ${WHITE}${domain}${RESET}  ·  Revoked: ${rev_color}${rev_label}${RESET}$(printf '%*s' $trail '')"
+}
+
+print_footer() {
+    box_bottom
+    local now
+    now=$(date -u '+%Y-%m-%d %H:%M:%S UTC')
+    local cache_line="⟨ cached ${now} ⟩"
+    printf '%s%s%s\n' "$DIM" "$(center_str "$cache_line" 80)" "$RESET"
+}
+
 main() {
     VALIDATOR_JSON=$(ls /home/hamsa/.ripple/*.json 2>/dev/null | head -1 || true)
     collect_data
@@ -423,6 +471,9 @@ main() {
         print_header
         print_validator_system
         print_peers_network
+        print_alerts
+        print_identity
+        print_footer
     } | cat
 }
 
