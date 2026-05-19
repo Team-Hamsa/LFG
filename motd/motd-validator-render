@@ -1,0 +1,85 @@
+#!/usr/bin/env bash
+# XRPL Validator MOTD Renderer
+# Writes a pre-rendered ANSI dashboard to /var/cache/motd-validator.
+# Designed to be called by cron every 60s as root.
+set -euo pipefail
+export LC_ALL=en_US.UTF-8
+export PATH="/usr/local/sbin:/usr/local/bin:/sbin:/bin:/usr/sbin:/usr/bin"
+
+VALIDATOR_JSON=""
+CACHE_FILE="/var/cache/motd-validator"
+CACHE_TMP="${CACHE_FILE}.tmp"
+
+# ── ANSI color codes ──────────────────────────────────────────────────────────
+RESET=$'\e[0m'
+CYAN=$'\e[96m'
+MAGENTA=$'\e[35m'
+YELLOW=$'\e[93m'
+GREEN=$'\e[92m'
+RED=$'\e[91m'
+AMBER=$'\e[33m'
+WHITE=$'\e[37m'
+DIM=$'\e[2m'
+
+# ── Layout ────────────────────────────────────────────────────────────────────
+LEFT_COL=38    # visible inner width of left column
+RIGHT_COL=39   # visible inner width of right column
+# Box total: ║(1) + LEFT_COL(38) + ╬(1) + RIGHT_COL(39) + ║(1) = 80
+
+# ── Helper functions ──────────────────────────────────────────────────────────
+
+# Right-pad a plain-text string to exactly N visible chars.
+# Do NOT pass strings containing ANSI codes — measure before coloring.
+rpad() {
+    local str="$1" width="$2"
+    local len=${#str}
+    local pad=$(( width - len ))
+    if (( pad <= 0 )); then
+        printf '%s' "${str:0:$width}"
+    else
+        printf '%s%*s' "$str" "$pad" ""
+    fi
+}
+
+# Center a plain-text string in N visible chars.
+center_str() {
+    local str="$1" width="$2"
+    local len=${#str}
+    local lp=$(( (width - len) / 2 ))
+    local rp=$(( width - len - lp ))
+    (( lp < 0 )) && lp=0
+    (( rp < 0 )) && rp=0
+    printf '%*s%s%*s' "$lp" "" "$str" "$rp" ""
+}
+
+# 10-char progress bar with color based on percentage.
+progress_bar() {
+    local pct="$1"
+    local filled=$(( pct * 10 / 100 ))
+    (( filled > 10 )) && filled=10
+    local empty=$(( 10 - filled ))
+    local bar="" i
+    local color
+    if   (( pct >= 81 )); then color="$RED"
+    elif (( pct >= 61 )); then color="$AMBER"
+    else                       color="$GREEN"
+    fi
+    for (( i=0; i<filled; i++ )); do bar+="█"; done
+    for (( i=0; i<empty;  i++ )); do bar+="░"; done
+    printf '%s%s%s' "$color" "$bar" "$RESET"
+}
+
+# Format /proc/uptime seconds as "Xd XXh XXm".
+format_uptime() {
+    local secs="${1%.*}"
+    local d=$(( secs / 86400 ))
+    local h=$(( (secs % 86400) / 3600 ))
+    local m=$(( (secs % 3600) / 60 ))
+    printf '%dd %02dh %02dm' "$d" "$h" "$m"
+}
+
+main() {
+    echo "skeleton ok"
+}
+
+[[ -n "${_SOURCED:-}" ]] || main "$@"

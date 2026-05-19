@@ -1,0 +1,55 @@
+#!/usr/bin/env bash
+# Test harness — sources the render script to test helper functions in isolation.
+export LC_ALL=en_US.UTF-8
+set -euo pipefail
+
+# Prevent main() from running when we source the render script
+_SOURCED=1
+# shellcheck source=/home/hamsa/motd/motd-validator-render
+source "$(dirname "$0")/motd-validator-render"
+
+PASS=0; FAIL=0
+ok()   { echo "  PASS: $1"; (( PASS++ )) || true; }
+fail() { echo "  FAIL: $1 — got: $(printf '%q' "$2")  want: $(printf '%q' "$3")"; (( FAIL++ )) || true; }
+strip_ansi() { printf '%s' "$1" | sed 's/\x1b\[[0-9;]*m//g'; }
+
+echo "=== motd-validator-render helpers ==="
+
+# rpad
+r=$(rpad "hi" 5)
+[[ "$r" == "hi   " ]]  && ok "rpad: pads to width"     || fail "rpad: pads to width"     "$r" "hi   "
+[[ ${#r} -eq 5 ]]      && ok "rpad: length correct"    || fail "rpad: length correct"    "${#r}" "5"
+
+r=$(rpad "toolong" 4)
+[[ "$r" == "tool" ]]   && ok "rpad: truncates"         || fail "rpad: truncates"         "$r" "tool"
+
+r=$(rpad "" 3)
+[[ ${#r} -eq 3 ]]      && ok "rpad: empty string"      || fail "rpad: empty string"      "${#r}" "3"
+
+# center_str
+c=$(center_str "hi" 10)
+[[ ${#c} -eq 10 ]]     && ok "center_str: length"      || fail "center_str: length"      "${#c}" "10"
+[[ "$c" == "    hi    " ]] && ok "center_str: content"     || fail "center_str: content"     "$c" "    hi    "
+
+# progress_bar (strip ANSI to check visible chars)
+b=$(strip_ansi "$(progress_bar 0)")
+[[ "$b" == "░░░░░░░░░░" ]]  && ok "progress_bar: 0%"   || fail "progress_bar: 0%"   "$b" "░░░░░░░░░░"
+
+b=$(strip_ansi "$(progress_bar 70)")
+[[ "$b" == "███████░░░" ]]  && ok "progress_bar: 70%"  || fail "progress_bar: 70%"  "$b" "███████░░░"
+
+b=$(strip_ansi "$(progress_bar 100)")
+[[ "$b" == "██████████" ]]  && ok "progress_bar: 100%" || fail "progress_bar: 100%" "$b" "██████████"
+
+[[ ${#b} -eq 10 ]]          && ok "progress_bar: length" || fail "progress_bar: length" "${#b}" "10"
+
+# format_uptime
+u=$(format_uptime 90061)
+[[ "$u" == "1d 01h 01m" ]]  && ok "format_uptime: 1d1h1m"  || fail "format_uptime: 1d1h1m"  "$u" "1d 01h 01m"
+
+u=$(format_uptime 3600)
+[[ "$u" == "0d 01h 00m" ]]  && ok "format_uptime: 1h"       || fail "format_uptime: 1h"       "$u" "0d 01h 00m"
+
+echo ""
+echo "Results: ${PASS} passed, ${FAIL} failed"
+[[ $FAIL -eq 0 ]]
