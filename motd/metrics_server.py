@@ -103,6 +103,24 @@ def get_system_info():
     with open("/proc/uptime") as f:
         uptime_s = int(float(f.read().split()[0]))
 
+    # CPU temperature (lm-sensors coretemp — Package id 0 is the die temp)
+    cpu_temp_c = None
+    try:
+        sens = json.loads(subprocess.check_output(
+            ["sensors", "-j"], text=True, stderr=subprocess.DEVNULL
+        ))
+        for chip, chip_data in sens.items():
+            if chip.startswith("coretemp") and isinstance(chip_data, dict):
+                pkg = chip_data.get("Package id 0", {})
+                for k, v in pkg.items():
+                    if k.endswith("_input"):
+                        cpu_temp_c = round(float(v))
+                        break
+            if cpu_temp_c is not None:
+                break
+    except Exception:
+        pass
+
     return {
         "cpu_pct": cpu_pct,
         "ram_pct": ram_pct,
@@ -110,6 +128,7 @@ def get_system_info():
         "ram_total_gb": ram_total_gb,
         "disk_pct": disk_pct,
         "uptime_s": uptime_s,
+        "cpu_temp_c": cpu_temp_c,
     }
 
 
