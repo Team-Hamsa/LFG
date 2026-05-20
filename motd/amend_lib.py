@@ -150,7 +150,7 @@ def write_cfg_vote(hash_: str, vote: str, default_vote: str) -> None:
 
 def save_session(amendments: list, path: str = SESSION_FILE) -> None:
     """Save current in-memory votes to a JSON temp file for later resumption."""
-    data = [{"hash": a["hash"], "name": a["name"], "vote": a.get("your_vote", a.get("vote", "no"))}
+    data = [{"hash": a["hash"], "name": a["name"], "vote": a["your_vote"]}
             for a in amendments]
     Path(path).write_text(json.dumps(data, indent=2))
 

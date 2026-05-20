@@ -151,7 +151,7 @@ class TestUpdateCfgText(unittest.TestCase):
 class TestSessionSaveLoad(unittest.TestCase):
     def test_roundtrip(self):
         amendments = [
-            {"hash": "ABC", "name": "TestAmend", "vote": "no",
+            {"hash": "ABC", "name": "TestAmend", "your_vote": "no",
              "default_vote": "yes", "majority": False, "supported": True, "description": ""},
         ]
         with tempfile.NamedTemporaryFile(suffix=".json", delete=False) as f:
