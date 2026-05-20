@@ -28,12 +28,12 @@ def get_validator_info():
         vl = info.get("validated_ledger", {})
         return {
             "state": info.get("server_state", "unknown"),
-            "ledger_seq": vl.get("seq", 0),
+            "ledger_seq": int(vl.get("seq", 0) or 0),
             "ledger_age_s": vl.get("age", 0),
             "load_factor": info.get("load_factor", 1.0),
-            "peers": info.get("peers", 0),
+            "peers": int(info.get("peers", 0) or 0),
             "peer_disconnects": int(info.get("peer_disconnects", 0) or 0),
-            "rippled_uptime_s": info.get("uptime", 0),
+            "rippled_uptime_s": int(info.get("uptime", 0) or 0),
             "build_version": info.get("build_version", "unknown"),
             "amendment_blocked": info.get("amendment_blocked", False),
         }
