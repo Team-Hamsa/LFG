@@ -19,27 +19,59 @@ PORT = 8080
 
 
 def get_validator_info():
-    return {
-        "state": "unknown",
-        "ledger_seq": 0,
-        "ledger_age_s": 0,
-        "load_factor": 0.0,
-        "peers": 0,
-        "peer_disconnects": 0,
-        "rippled_uptime_s": 0,
-        "build_version": "unknown",
-        "amendment_blocked": False,
-    }
+    try:
+        raw = subprocess.check_output(
+            ["sudo", RIPPLED, "server_info"],
+            timeout=5, text=True, stderr=subprocess.DEVNULL
+        )
+        info = json.loads(raw)["result"]["info"]
+        vl = info.get("validated_ledger", {})
+        return {
+            "state": info.get("server_state", "unknown"),
+            "ledger_seq": vl.get("seq", 0),
+            "ledger_age_s": vl.get("age", 0),
+            "load_factor": info.get("load_factor", 1.0),
+            "peers": info.get("peers", 0),
+            "peer_disconnects": info.get("peer_disconnects", 0),
+            "rippled_uptime_s": info.get("uptime", 0),
+            "build_version": info.get("build_version", "unknown"),
+            "amendment_blocked": info.get("amendment_blocked", False),
+        }
+    except Exception:
+        return {
+            "state": "error",
+            "ledger_seq": 0,
+            "ledger_age_s": 0,
+            "load_factor": 0.0,
+            "peers": 0,
+            "peer_disconnects": 0,
+            "rippled_uptime_s": 0,
+            "build_version": "unknown",
+            "amendment_blocked": False,
+        }
 
 
 def get_identity():
-    return {
-        "public_key": "unknown",
-        "public_key_short": "unkn...own",
-        "domain": "joshuahamsa.com",
-        "manifest_seq": "?",
-        "revoked": False,
-    }
+    try:
+        with open(VALIDATOR_JSON) as f:
+            data = json.load(f)
+        pubkey = data.get("public_key", "unknown")
+        short = (pubkey[:6] + "..." + pubkey[-4:]) if len(pubkey) > 10 else pubkey
+        return {
+            "public_key": pubkey,
+            "public_key_short": short,
+            "domain": data.get("domain", "joshuahamsa.com"),
+            "manifest_seq": str(data.get("token_sequence", "?")),
+            "revoked": data.get("revoked", False),
+        }
+    except Exception:
+        return {
+            "public_key": "unknown",
+            "public_key_short": "unkn...own",
+            "domain": "joshuahamsa.com",
+            "manifest_seq": "?",
+            "revoked": False,
+        }
 
 
 def get_system_info():
