@@ -171,11 +171,13 @@ class TestGetSystemInfo(unittest.TestCase):
         def side(cmd, **kw):
             if cmd[0] == "sensors":
                 return self.SENSORS_JSON
+            if "rapl-energy-uj" in " ".join(cmd):
+                return "100000000\n"
             return "Use%\n45%\n"
         mock_sub.side_effect = side
         # Reads real /proc files — validates structure and value ranges.
         result = metrics_server.get_system_info()
-        for key in ("cpu_pct", "ram_pct", "ram_used_gb", "ram_total_gb", "disk_pct", "uptime_s", "cpu_temp_c"):
+        for key in ("cpu_pct", "ram_pct", "ram_used_gb", "ram_total_gb", "disk_pct", "uptime_s", "cpu_temp_c", "cpu_w"):
             self.assertIn(key, result, f"missing key: {key}")
         self.assertGreaterEqual(result["cpu_pct"], 0)
         self.assertLessEqual(result["cpu_pct"], 100)
@@ -190,10 +192,40 @@ class TestGetSystemInfo(unittest.TestCase):
         def side(cmd, **kw):
             if cmd[0] == "sensors":
                 raise Exception("sensors not found")
+            if "rapl-energy-uj" in " ".join(cmd):
+                return "100000000\n"
             return "Use%\n45%\n"
         mock_sub.side_effect = side
         result = metrics_server.get_system_info()
         self.assertIsNone(result["cpu_temp_c"])
+
+
+class TestGetCpuPowerW(unittest.TestCase):
+    def setUp(self):
+        metrics_server._rapl_prev_uj = None
+        metrics_server._rapl_prev_ts = None
+
+    @patch("metrics_server.time.monotonic", return_value=1000.0)
+    @patch("metrics_server.subprocess.check_output", return_value="500000000\n")
+    def test_returns_none_on_first_call(self, _sub, _time):
+        self.assertIsNone(metrics_server.get_cpu_power_w())
+
+    @patch("metrics_server.time.monotonic")
+    @patch("metrics_server.subprocess.check_output")
+    def test_returns_watts_on_second_call(self, mock_sub, mock_time):
+        # First call: establish baseline
+        mock_time.return_value = 1000.0
+        mock_sub.return_value = "0\n"
+        metrics_server.get_cpu_power_w()
+        # Second call: 5s later, 250 J consumed = 50 W
+        mock_time.return_value = 1005.0
+        mock_sub.return_value = "250000000\n"
+        result = metrics_server.get_cpu_power_w()
+        self.assertEqual(result, 50.0)
+
+    @patch("metrics_server.subprocess.check_output", side_effect=Exception("no rapl"))
+    def test_returns_none_on_exception(self, _):
+        self.assertIsNone(metrics_server.get_cpu_power_w())
 
 
 class TestGetNetworkInfo(unittest.TestCase):

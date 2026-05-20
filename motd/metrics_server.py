@@ -10,12 +10,18 @@ import json
 import os
 import re
 import subprocess
+import time
 from pathlib import Path
 
 RIPPLED = "/usr/local/bin/rippled"
+RAPL_READER = "/usr/local/bin/rapl-energy-uj"
 _json_files = list(Path("/home/hamsa/.ripple").glob("*.json"))
 VALIDATOR_JSON = str(_json_files[0]) if _json_files else ""
 PORT = 8080
+
+# RAPL inter-sample state — power is Δenergy / Δtime across fetch interval
+_rapl_prev_uj: "int | None" = None
+_rapl_prev_ts: "float | None" = None
 
 
 def get_validator_info():
@@ -129,7 +135,29 @@ def get_system_info():
         "disk_pct": disk_pct,
         "uptime_s": uptime_s,
         "cpu_temp_c": cpu_temp_c,
+        "cpu_w": get_cpu_power_w(),
     }
+
+
+def get_cpu_power_w():
+    """Return CPU package power in watts (RAPL), or None on first call/error."""
+    global _rapl_prev_uj, _rapl_prev_ts
+    try:
+        now = time.monotonic()
+        cur_uj = int(subprocess.check_output(
+            ["sudo", RAPL_READER], text=True, stderr=subprocess.DEVNULL
+        ).strip())
+        power_w = None
+        if _rapl_prev_uj is not None and _rapl_prev_ts is not None:
+            dt_s = now - _rapl_prev_ts
+            delta_uj = cur_uj - _rapl_prev_uj
+            if dt_s > 0 and delta_uj >= 0:
+                power_w = round(delta_uj / (dt_s * 1_000_000), 1)
+        _rapl_prev_uj = cur_uj
+        _rapl_prev_ts = now
+        return power_w
+    except Exception:
+        return None
 
 
 def get_network_info():
