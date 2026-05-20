@@ -75,27 +75,112 @@ def get_identity():
 
 
 def get_system_info():
+    # CPU: 1-min load average / core count (same method as MOTD bash script)
+    with open("/proc/loadavg") as f:
+        load_avg = float(f.read().split()[0])
+    cores = os.cpu_count() or 1
+    cpu_pct = min(100, round(load_avg / cores * 100))
+
+    # RAM
+    mem = {}
+    with open("/proc/meminfo") as f:
+        for line in f:
+            parts = line.split()
+            if len(parts) >= 2:
+                mem[parts[0].rstrip(":")] = int(parts[1])
+    total_kb = mem.get("MemTotal", 1)
+    avail_kb = mem.get("MemAvailable", 0)
+    used_kb = total_kb - avail_kb
+    ram_pct = round(used_kb * 100 / total_kb)
+    ram_used_gb = round(used_kb / 1_048_576, 1)
+    ram_total_gb = round(total_kb / 1_048_576)
+
+    # Disk
+    out = subprocess.check_output(["df", "/", "--output=pcent"], text=True)
+    disk_pct = int(out.strip().split("\n")[1].strip().rstrip("%"))
+
+    # Uptime
+    with open("/proc/uptime") as f:
+        uptime_s = int(float(f.read().split()[0]))
+
     return {
-        "cpu_pct": 0,
-        "ram_pct": 0,
-        "ram_used_gb": 0.0,
-        "ram_total_gb": 0,
-        "disk_pct": 0,
-        "uptime_s": 0,
+        "cpu_pct": cpu_pct,
+        "ram_pct": ram_pct,
+        "ram_used_gb": ram_used_gb,
+        "ram_total_gb": ram_total_gb,
+        "disk_pct": disk_pct,
+        "uptime_s": uptime_s,
     }
 
 
 def get_network_info():
+    lan_ip = "unknown"
+    try:
+        out = subprocess.check_output(
+            ["ip", "route", "get", "8.8.8.8"],
+            text=True, stderr=subprocess.DEVNULL
+        )
+        m = re.search(r'src (\S+)', out)
+        if m:
+            lan_ip = m.group(1)
+    except Exception:
+        pass
+
+    tailscale_ip = "unknown"
+    try:
+        out = subprocess.check_output(
+            ["ip", "addr", "show"], text=True, stderr=subprocess.DEVNULL
+        )
+        m = re.search(r'inet (100\.\d+\.\d+\.\d+)', out)
+        if m:
+            tailscale_ip = m.group(1)
+    except Exception:
+        pass
+
+    ssh_sessions = 0
+    try:
+        out = subprocess.check_output(
+            ["ss", "-tnp"], text=True, stderr=subprocess.DEVNULL
+        )
+        ssh_sessions = sum(
+            1 for line in out.splitlines()
+            if line.startswith("ESTAB") and
+            re.search(r':22\b', line.split()[3] if len(line.split()) > 3 else "")
+        )
+    except Exception:
+        pass
+
+    p2p_open = False
+    try:
+        out = subprocess.check_output(
+            ["ss", "-l", "-tnlp"], text=True, stderr=subprocess.DEVNULL
+        )
+        p2p_open = ":51235" in out
+    except Exception:
+        pass
+
     return {
-        "lan_ip": "unknown",
-        "tailscale_ip": "unknown",
-        "ssh_sessions": 0,
-        "p2p_open": False,
+        "lan_ip": lan_ip,
+        "tailscale_ip": tailscale_ip,
+        "ssh_sessions": ssh_sessions,
+        "p2p_open": p2p_open,
     }
 
 
 def get_alerts():
-    return []
+    try:
+        out = subprocess.check_output(
+            ["journalctl", "-u", "rippled", "-n", "60", "--no-pager", "-o", "short-iso"],
+            text=True, timeout=5, stderr=subprocess.DEVNULL
+        )
+        alerts = []
+        for line in out.splitlines():
+            if re.search(r'(?i)\b(warn|error|wrn|err)\b', line):
+                cleaned = re.sub(r'^\S+ \S+ rippled\[\d+\]: ', '', line)
+                alerts.append(cleaned[:120])
+        return alerts[-3:] if alerts else []
+    except Exception:
+        return []
 
 
 def collect_metrics():
