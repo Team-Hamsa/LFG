@@ -300,5 +300,117 @@ class TestGetAlerts(unittest.TestCase):
         self.assertFalse(result[0].startswith("2026"))
 
 
+MOCK_AMENDMENTS_FEATURE_JSON = json.dumps({
+    "result": {
+        "features": {
+            "AAAA0001": {"enabled": True,  "name": "AlreadyEnabled", "supported": True},
+            "BBBB0002": {"enabled": True,  "name": "AlsoEnabled",    "supported": True},
+            "CCCC0003": {"enabled": False, "name": "HasMajority",    "supported": True,
+                         "majority": {"since": 99999}},
+            "DDDD0004": {"enabled": False, "name": "NoPriority",     "supported": True},
+            "EEEE0005": {"enabled": False, "name": "NotSupported",   "supported": False},
+        }
+    }
+})
+
+MOCK_MACRO_SOURCE = """
+XRPL_FEATURE(HasMajority, Supported::yes, VoteBehavior::DefaultYes)
+XRPL_FEATURE(NoPriority,  Supported::yes, VoteBehavior::DefaultNo)
+XRPL_FEATURE(NotSupported, Supported::no, VoteBehavior::DefaultNo)
+"""
+
+
+class TestVoteDefaults(unittest.TestCase):
+    def test_parses_default_yes(self):
+        with patch("builtins.open", mock_open(read_data=MOCK_MACRO_SOURCE)):
+            result = metrics_server._parse_vote_defaults()
+        self.assertEqual(result["HasMajority"], "yes")
+
+    def test_parses_default_no(self):
+        with patch("builtins.open", mock_open(read_data=MOCK_MACRO_SOURCE)):
+            result = metrics_server._parse_vote_defaults()
+        self.assertEqual(result["NoPriority"], "no")
+
+    def test_returns_empty_dict_on_missing_file(self):
+        with patch("builtins.open", side_effect=FileNotFoundError):
+            result = metrics_server._parse_vote_defaults()
+        self.assertEqual(result, {})
+
+
+class TestGetAmendments(unittest.TestCase):
+    def setUp(self):
+        self._orig = metrics_server._VOTE_DEFAULTS.copy()
+        metrics_server._VOTE_DEFAULTS.clear()
+        metrics_server._VOTE_DEFAULTS.update({
+            "HasMajority": "yes",
+            "NoPriority": "no",
+            "NotSupported": "no",
+        })
+
+    def tearDown(self):
+        metrics_server._VOTE_DEFAULTS.clear()
+        metrics_server._VOTE_DEFAULTS.update(self._orig)
+
+    @patch("metrics_server._parse_cfg_overrides", return_value={})
+    @patch("metrics_server.subprocess.check_output",
+           return_value=MOCK_AMENDMENTS_FEATURE_JSON)
+    def test_returns_only_unenabled(self, _sub, _cfg):
+        result = metrics_server.get_amendments()
+        names = [a["name"] for a in result]
+        self.assertNotIn("AlreadyEnabled", names)
+        self.assertNotIn("AlsoEnabled", names)
+        self.assertEqual(len(result), 3)
+
+    @patch("metrics_server._parse_cfg_overrides", return_value={})
+    @patch("metrics_server.subprocess.check_output",
+           return_value=MOCK_AMENDMENTS_FEATURE_JSON)
+    def test_vote_from_defaults(self, _sub, _cfg):
+        result = metrics_server.get_amendments()
+        by_name = {a["name"]: a for a in result}
+        self.assertEqual(by_name["HasMajority"]["vote"], "yes")
+        self.assertEqual(by_name["NoPriority"]["vote"], "no")
+
+    @patch("metrics_server._parse_cfg_overrides", return_value={})
+    @patch("metrics_server.subprocess.check_output",
+           return_value=MOCK_AMENDMENTS_FEATURE_JSON)
+    def test_majority_flag_set(self, _sub, _cfg):
+        result = metrics_server.get_amendments()
+        by_name = {a["name"]: a for a in result}
+        self.assertTrue(by_name["HasMajority"]["majority"])
+        self.assertFalse(by_name["NoPriority"]["majority"])
+
+    @patch("metrics_server._parse_cfg_overrides", return_value={})
+    @patch("metrics_server.subprocess.check_output",
+           return_value=MOCK_AMENDMENTS_FEATURE_JSON)
+    def test_majority_sorted_first(self, _sub, _cfg):
+        result = metrics_server.get_amendments()
+        self.assertTrue(result[0]["majority"])
+
+    @patch("metrics_server._parse_cfg_overrides",
+           return_value={"CCCC0003": "no"})
+    @patch("metrics_server.subprocess.check_output",
+           return_value=MOCK_AMENDMENTS_FEATURE_JSON)
+    def test_config_veto_overrides_default_yes(self, _sub, _cfg):
+        result = metrics_server.get_amendments()
+        by_name = {a["name"]: a for a in result}
+        self.assertEqual(by_name["HasMajority"]["vote"], "no")
+
+    @patch("metrics_server._parse_cfg_overrides",
+           return_value={"DDDD0004": "yes"})
+    @patch("metrics_server.subprocess.check_output",
+           return_value=MOCK_AMENDMENTS_FEATURE_JSON)
+    def test_config_vote_overrides_default_no(self, _sub, _cfg):
+        result = metrics_server.get_amendments()
+        by_name = {a["name"]: a for a in result}
+        self.assertEqual(by_name["NoPriority"]["vote"], "yes")
+
+    @patch("metrics_server._parse_cfg_overrides", return_value={})
+    @patch("metrics_server.subprocess.check_output",
+           side_effect=Exception("rippled unavailable"))
+    def test_returns_empty_on_exception(self, _sub, _cfg):
+        result = metrics_server.get_amendments()
+        self.assertEqual(result, [])
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)
