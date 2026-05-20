@@ -196,6 +196,11 @@ NET_P2P_STATUS="CLOSED"
 # Alert globals (arrays)
 ALERT_LINES=()
 
+# Amendment globals
+METRICS_JSON='{}'
+AMD_JSON='[]'
+AMD_ERROR=false
+
 collect_data() {
     # ── rippled ──
     local rpc_json
@@ -263,6 +268,17 @@ collect_data() {
             printf "[%s] %s\n", ts, substr($0, 1, 60)
           }'
     ) || true
+
+    # ── Amendments: fetch from metrics server ──
+    local _metrics
+    _metrics=$(curl -s --max-time 3 http://localhost:8080/metrics 2>/dev/null) || true
+    if [[ -z "$_metrics" ]]; then
+        AMD_ERROR=true
+    else
+        METRICS_JSON="$_metrics"
+        AMD_JSON=$(printf '%s' "$METRICS_JSON" | jq -c '.amendments // []' 2>/dev/null) \
+            || AMD_ERROR=true
+    fi
 }
 
 print_validator_system() {
@@ -435,6 +451,83 @@ print_alerts() {
     fi
 }
 
+print_amendments() {
+    box_mid
+
+    if [[ "$AMD_ERROR" == "true" ]]; then
+        box_row "$(rpad "  ${YELLOW}◈ AMENDMENTS${RESET}" $(( 78 + ${#YELLOW} + ${#RESET} )))"
+        box_row "$(rpad "    ${DIM}amendments unavailable${RESET}" $(( 78 + ${#DIM} + ${#RESET} )))"
+        return
+    fi
+
+    local count
+    count=$(printf '%s' "$AMD_JSON" | jq 'length' 2>/dev/null || echo '0')
+
+    # Centered section header with ─ dashes
+    local label="PENDING AMENDMENTS (${count})"
+    local label_len=${#label}
+    local dashes=$(( 78 - label_len - 2 ))
+    local left=$(( dashes / 2 ))
+    local right=$(( dashes - left ))
+    local hdash_l="" hdash_r="" _i
+    for (( _i=0; _i<left;  _i++ )); do hdash_l+="─"; done
+    for (( _i=0; _i<right; _i++ )); do hdash_r+="─"; done
+    box_row "${CYAN}${hdash_l} ${label} ${hdash_r}${RESET}"
+
+    if [[ "$count" == "0" ]]; then
+        box_row "$(rpad "    ${DIM}no pending amendments${RESET}" $(( 78 + ${#DIM} + ${#RESET} )))"
+        return
+    fi
+
+    # Column headers
+    box_row "$(rpad "  Name                                 Vote  Status" 78)"
+    local div=""
+    for (( _i=0; _i<76; _i++ )); do div+="─"; done
+    box_row "$(rpad "  ${DIM}${div}${RESET}" $(( 78 + ${#DIM} + ${#RESET} )))"
+
+    # Data rows — AMD_JSON is already sorted (majority first, then alpha) by metrics server
+    while IFS= read -r entry; do
+        local name vote supported majority
+        name=$(printf '%s' "$entry"     | jq -r '.name      // ""')
+        vote=$(printf '%s' "$entry"     | jq -r '.vote      // "no"')
+        supported=$(printf '%s' "$entry" | jq -r '.supported // false')
+        majority=$(printf '%s' "$entry"  | jq -r '.majority  // false')
+
+        # Name: truncate to 35 chars, pad to 35
+        local name_padded
+        name_padded=$(rpad "${name:0:35}" 35)
+
+        # Vote: 3 visible chars, colored
+        local vote_str vote_color
+        if [[ "$vote" == "yes" ]]; then
+            vote_str="YES"; vote_color="$GREEN"
+        else
+            vote_str="NO "; vote_color="$RED"
+        fi
+        local vote_padded
+        vote_padded=$(rpad "${vote_color}${vote_str}${RESET}" \
+            $(( 3 + ${#vote_color} + ${#RESET} )))
+
+        # Status: 33 visible chars, colored
+        local status_str status_color
+        if [[ "$majority" == "true" ]]; then
+            status_str="★ MAJORITY"
+            status_color="$AMBER"
+        elif [[ "$supported" == "false" ]]; then
+            status_str="pending · unsupported"
+            status_color="$DIM"
+        else
+            status_str="pending"
+            status_color="$DIM"
+        fi
+        local status_padded
+        status_padded=$(rpad "${status_color}${status_str}${RESET}" \
+            $(( 33 + ${#status_color} + ${#RESET} )))
+
+        box_row "  ${name_padded}  ${vote_padded}   ${status_padded}"
+    done < <(printf '%s' "$AMD_JSON" | jq -c '.[]' 2>/dev/null)
+}
+
 print_identity() {
     local pubkey="unknown" revoked="false" domain="joshuahamsa.com" seq="?"
     if [[ -n "$VALIDATOR_JSON" && -f "$VALIDATOR_JSON" ]]; then
@@ -481,6 +574,7 @@ main() {
         print_validator_system
         print_peers_network
         print_alerts
+        print_amendments
         print_identity
         print_footer
     } > "$CACHE_TMP" 2>/dev/null \

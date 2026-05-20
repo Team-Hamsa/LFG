@@ -13,6 +13,7 @@ tee /etc/sudoers.d/metrics-server > /dev/null << 'EOF'
 hamsa ALL=(ALL) NOPASSWD: /usr/local/bin/rippled server_info
 hamsa ALL=(ALL) NOPASSWD: /usr/local/bin/rippled feature
 hamsa ALL=(ALL) NOPASSWD: /usr/local/bin/rapl-energy-uj
+hamsa ALL=(ALL) NOPASSWD: /usr/local/bin/motd-validator-render
 EOF
 chmod 0440 /etc/sudoers.d/metrics-server
 visudo -c
