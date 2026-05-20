@@ -112,6 +112,84 @@ while IFS= read -r line; do
     fi
 done < <(print_validator_system)
 
+# ── print_amendments ─────────────────────────────────────────────────────────
+echo ""
+echo "=== print_amendments ==="
+
+# Test 1: all box rows are 80 visible chars with amendment data
+AMD_JSON='[{"name":"AMMClawback","vote":"yes","supported":true,"majority":true},{"name":"Batch","vote":"no","supported":false,"majority":false}]'
+AMD_ERROR=false
+amd_w_pass=0; amd_w_fail=0
+while IFS= read -r line; do
+    stripped=$(strip_ansi "$line")
+    if [[ "$stripped" =~ ^[╠║] ]]; then
+        if [[ ${#stripped} -eq 80 ]]; then
+            (( amd_w_pass++ )) || true
+        else
+            fail "print_amendments: row width 80" "${#stripped}" "80"
+            (( amd_w_fail++ )) || true
+        fi
+    fi
+done < <(print_amendments)
+[[ $amd_w_pass -gt 0 && $amd_w_fail -eq 0 ]] \
+    && ok "print_amendments: all rows width 80 (with data)" \
+    || fail "print_amendments: all rows width 80 (with data)" "${amd_w_fail} bad rows" "0 bad rows"
+
+# Test 2: empty state row is 80 visible chars
+AMD_JSON='[]'
+AMD_ERROR=false
+amd_empty_ok=false
+while IFS= read -r line; do
+    stripped=$(strip_ansi "$line")
+    if [[ "$stripped" =~ ^║ ]]; then
+        [[ ${#stripped} -eq 80 ]] \
+            && { ok "print_amendments: empty state row width 80"; amd_empty_ok=true; } \
+            || fail "print_amendments: empty state row width 80" "${#stripped}" "80"
+        break
+    fi
+done < <(print_amendments)
+$amd_empty_ok || fail "print_amendments: empty state produced no rows" "" "at least one row"
+
+# Test 3: error state row is 80 visible chars
+AMD_JSON='[]'
+AMD_ERROR=true
+amd_err_ok=false
+while IFS= read -r line; do
+    stripped=$(strip_ansi "$line")
+    if [[ "$stripped" =~ ^║ ]]; then
+        [[ ${#stripped} -eq 80 ]] \
+            && { ok "print_amendments: error state row width 80"; amd_err_ok=true; } \
+            || fail "print_amendments: error state row width 80" "${#stripped}" "80"
+        break
+    fi
+done < <(print_amendments)
+$amd_err_ok || fail "print_amendments: error state produced no rows" "" "at least one row"
+AMD_ERROR=false
+
+# Test 4: YES vote text present in data row
+AMD_JSON='[{"name":"AMMClawback","vote":"yes","supported":true,"majority":false}]'
+AMD_ERROR=false
+found_yes=false
+while IFS= read -r line; do
+    stripped=$(strip_ansi "$line")
+    if [[ "$stripped" =~ "AMMClawback" && "$stripped" =~ "YES" ]]; then
+        ok "print_amendments: YES vote rendered"; found_yes=true; break
+    fi
+done < <(print_amendments)
+$found_yes || fail "print_amendments: YES vote rendered" "" "row with AMMClawback + YES"
+
+# Test 5: MAJORITY status present in data row
+AMD_JSON='[{"name":"fixSomething","vote":"yes","supported":true,"majority":true}]'
+AMD_ERROR=false
+found_maj=false
+while IFS= read -r line; do
+    stripped=$(strip_ansi "$line")
+    if [[ "$stripped" =~ "fixSomething" && "$stripped" =~ "MAJORITY" ]]; then
+        ok "print_amendments: MAJORITY status rendered"; found_maj=true; break
+    fi
+done < <(print_amendments)
+$found_maj || fail "print_amendments: MAJORITY status rendered" "" "row with fixSomething + MAJORITY"
+
 echo ""
 echo "Results: ${PASS} passed, ${FAIL} failed"
 [[ $FAIL -eq 0 ]]
