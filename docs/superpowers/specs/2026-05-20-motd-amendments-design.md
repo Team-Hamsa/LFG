@@ -120,10 +120,10 @@ majority = .majority  (bool)
 
 ### Empty and error states
 
-| `AMD_JSON` value | Displayed row                              |
-|------------------|--------------------------------------------|
-| `[]` (empty)     | `    no pending amendments` in `$DIM`      |
-| parse failure    | `    amendments unavailable` in `$DIM`     |
+| `AMD_JSON` value | Displayed                                                        |
+|------------------|------------------------------------------------------------------|
+| `[]` (empty)     | Single row: `    no pending amendments` in `$DIM`                |
+| `AMD_ERROR=true` | Two rows: yellow `  ◈ AMENDMENTS` header + dim `    amendments unavailable` |
 
 ---
 

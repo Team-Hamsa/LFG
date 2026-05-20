@@ -190,6 +190,54 @@ while IFS= read -r line; do
 done < <(print_amendments)
 $found_maj || fail "print_amendments: MAJORITY status rendered" "" "row with fixSomething + MAJORITY"
 
+# Test 6: NO vote text present in data row
+AMD_JSON='[{"name":"AMMClawback","vote":"no","supported":true,"majority":false}]'
+AMD_ERROR=false
+found_no=false
+while IFS= read -r line; do
+    stripped=$(strip_ansi "$line")
+    if [[ "$stripped" =~ "AMMClawback" && "$stripped" =~ "NO" ]]; then
+        ok "print_amendments: NO vote rendered"; found_no=true; break
+    fi
+done < <(print_amendments)
+$found_no || fail "print_amendments: NO vote rendered" "" "row with AMMClawback + NO"
+
+# Test 7: pending status (majority=false, supported=true) — check width too
+AMD_JSON='[{"name":"fixPending","vote":"no","supported":true,"majority":false}]'
+AMD_ERROR=false
+found_pending=false
+while IFS= read -r line; do
+    stripped=$(strip_ansi "$line")
+    if [[ "$stripped" =~ "fixPending" ]]; then
+        [[ ${#stripped} -eq 80 ]] \
+            && ok "print_amendments: pending row width 80" \
+            || fail "print_amendments: pending row width 80" "${#stripped}" "80"
+        [[ "$stripped" =~ "pending" ]] \
+            && ok "print_amendments: pending status rendered" \
+            || fail "print_amendments: pending status rendered" "$stripped" "contains pending"
+        found_pending=true; break
+    fi
+done < <(print_amendments)
+$found_pending || fail "print_amendments: pending row found" "" "row with fixPending"
+
+# Test 8: pending · unsupported status — check width too
+AMD_JSON='[{"name":"CryptoConditions","vote":"no","supported":false,"majority":false}]'
+AMD_ERROR=false
+found_unsup=false
+while IFS= read -r line; do
+    stripped=$(strip_ansi "$line")
+    if [[ "$stripped" =~ "CryptoConditions" ]]; then
+        [[ ${#stripped} -eq 80 ]] \
+            && ok "print_amendments: unsupported row width 80" \
+            || fail "print_amendments: unsupported row width 80" "${#stripped}" "80"
+        [[ "$stripped" =~ "unsupported" ]] \
+            && ok "print_amendments: pending unsupported status rendered" \
+            || fail "print_amendments: pending unsupported status rendered" "$stripped" "contains unsupported"
+        found_unsup=true; break
+    fi
+done < <(print_amendments)
+$found_unsup || fail "print_amendments: unsupported row found" "" "row with CryptoConditions"
+
 echo ""
 echo "Results: ${PASS} passed, ${FAIL} failed"
 [[ $FAIL -eq 0 ]]
