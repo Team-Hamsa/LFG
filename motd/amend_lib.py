@@ -1,8 +1,10 @@
 #!/usr/bin/env python3
 """Shared data layer for the amend CLI and metrics_server."""
+import html.parser
 import json
 import re
 import subprocess
+import urllib.request
 from pathlib import Path
 
 RIPPLED = "/usr/local/bin/rippled"
@@ -161,3 +163,62 @@ def load_session(path: str = SESSION_FILE) -> list:
         return json.loads(Path(path).read_text())
     except Exception:
         return []
+
+
+class _AmendmentDescriptionParser(html.parser.HTMLParser):
+    """Scrape amendment name → first paragraph description from xrpl.org."""
+
+    def __init__(self):
+        super().__init__()
+        self._descriptions: dict = {}
+        self._current_name: str | None = None
+        self._in_h2 = False
+        self._in_p = False
+        self._h2_buf = ""
+        self._p_buf = ""
+
+    def handle_starttag(self, tag, attrs):
+        if tag == "h2":
+            self._in_h2 = True
+            self._h2_buf = ""
+            self._current_name = None
+        elif tag == "p" and self._current_name and self._current_name not in self._descriptions:
+            self._in_p = True
+            self._p_buf = ""
+
+    def handle_endtag(self, tag):
+        if tag == "h2":
+            self._in_h2 = False
+            name = self._h2_buf.strip()
+            if name:
+                self._current_name = name
+        elif tag == "p" and self._in_p:
+            self._in_p = False
+            text = self._p_buf.strip()
+            if self._current_name and text:
+                self._descriptions[self._current_name] = text
+
+    def handle_data(self, data):
+        if self._in_h2:
+            self._h2_buf += data
+        elif self._in_p:
+            self._p_buf += data
+
+    def get_descriptions(self) -> dict:
+        return self._descriptions
+
+
+def fetch_amendment_descriptions() -> dict:
+    """Fetch xrpl.org Known Amendments page and return {name: description}. Returns {} on error."""
+    try:
+        req = urllib.request.Request(
+            XRPL_AMENDMENTS_URL,
+            headers={"User-Agent": "amend-cli/1.0 (XRPL validator tool)"},
+        )
+        with urllib.request.urlopen(req, timeout=10) as resp:
+            html_text = resp.read().decode("utf-8")
+        parser = _AmendmentDescriptionParser()
+        parser.feed(html_text)
+        return parser.get_descriptions()
+    except Exception:
+        return {}
