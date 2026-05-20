@@ -165,5 +165,36 @@ class TestSessionSaveLoad(unittest.TestCase):
             os.unlink(path)
 
 
+class TestAmendmentDescriptionParser(unittest.TestCase):
+    SAMPLE_HTML = """
+    <html><body>
+    <h2 id="multisignreserve">MultiSignReserve</h2>
+    <p>Reduces the reserve for multi-signing from 5 XRP to 1 XRP per signer.</p>
+    <p>Second paragraph, should be ignored.</p>
+    <h2 id="fix1781">fix1781</h2>
+    <p>Fixes an edge case in payment path finding.</p>
+    </body></html>
+    """
+
+    def test_parses_first_paragraph(self):
+        parser = amend_lib._AmendmentDescriptionParser()
+        parser.feed(self.SAMPLE_HTML)
+        desc = parser.get_descriptions()
+        self.assertEqual(desc["MultiSignReserve"],
+                         "Reduces the reserve for multi-signing from 5 XRP to 1 XRP per signer.")
+
+    def test_parses_multiple_amendments(self):
+        parser = amend_lib._AmendmentDescriptionParser()
+        parser.feed(self.SAMPLE_HTML)
+        desc = parser.get_descriptions()
+        self.assertIn("fix1781", desc)
+
+    def test_only_first_paragraph_per_amendment(self):
+        parser = amend_lib._AmendmentDescriptionParser()
+        parser.feed(self.SAMPLE_HTML)
+        desc = parser.get_descriptions()
+        self.assertNotIn("Second paragraph", desc.get("MultiSignReserve", ""))
+
+
 if __name__ == "__main__":
     unittest.main()
