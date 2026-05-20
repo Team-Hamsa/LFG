@@ -32,7 +32,7 @@ def get_validator_info():
             "ledger_age_s": vl.get("age", 0),
             "load_factor": info.get("load_factor", 1.0),
             "peers": info.get("peers", 0),
-            "peer_disconnects": info.get("peer_disconnects", 0),
+            "peer_disconnects": int(info.get("peer_disconnects", 0) or 0),
             "rippled_uptime_s": info.get("uptime", 0),
             "build_version": info.get("build_version", "unknown"),
             "amendment_blocked": info.get("amendment_blocked", False),
