@@ -23,38 +23,32 @@ FEATURES_MACRO = "/home/hamsa/rippled/include/xrpl/protocol/detail/features.macr
 RIPPLED_CFG = "/etc/opt/ripple/rippled.cfg"
 
 
+import amend_lib as _alib
+
+
 def _parse_vote_defaults() -> dict:
     try:
-        source = open(FEATURES_MACRO).read()
-        matches = re.findall(
-            r'XRPL_(?:FEATURE|FIX)\s*\(\s*(\w+)\s*,\s*Supported::\w+\s*,'
-            r'\s*VoteBehavior::(\w+)\s*\)',
-            source,
-        )
-        return {name: ("yes" if vote == "DefaultYes" else "no") for name, vote in matches}
+        return _alib.parse_vote_defaults(open(FEATURES_MACRO).read())
     except Exception:
         return {}
 
 
+def _parse_obsolete_features() -> set:
+    try:
+        return _alib.parse_obsolete_features(open(FEATURES_MACRO).read())
+    except Exception:
+        return set()
+
+
 _VOTE_DEFAULTS: dict = _parse_vote_defaults()
+_OBSOLETE_FEATURES: set = _parse_obsolete_features()
 
 
 def _parse_cfg_overrides() -> dict:
     try:
-        text = open(RIPPLED_CFG).read()
+        return _alib.parse_cfg_overrides(open(RIPPLED_CFG).read())
     except Exception:
         return {}
-    overrides: dict = {}
-    section = None
-    for line in text.splitlines():
-        line = line.strip()
-        if line.startswith("["):
-            section = line.strip("[]")
-        elif section == "veto_amendments" and line and not line.startswith("#"):
-            overrides[line] = "no"
-        elif section == "amendments" and line and not line.startswith("#"):
-            overrides[line] = "yes"
-    return overrides
 
 
 # RAPL inter-sample state — power is Δenergy / Δtime across fetch interval
@@ -281,6 +275,8 @@ def get_amendments() -> list:
             if data.get("enabled"):
                 continue
             name = data.get("name", "")
+            if name in _OBSOLETE_FEATURES:
+                continue
             vote = overrides.get(hash_) or _VOTE_DEFAULTS.get(name, "no")
             result.append({
                 "name": name,
