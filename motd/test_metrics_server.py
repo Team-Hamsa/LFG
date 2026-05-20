@@ -38,6 +38,7 @@ MOCK_METRICS = {
         "ssh_sessions": 1, "p2p_open": True,
     },
     "alerts": ["WRN slow_close 4.2s"],
+    "amendments": [],
 }
 
 
@@ -82,7 +83,7 @@ class TestHTTPIntegration(unittest.TestCase):
             f"http://127.0.0.1:{self.port}/metrics"
         ) as resp:
             data = json.loads(resp.read())
-        for key in ("timestamp", "validator", "identity", "system", "network", "alerts"):
+        for key in ("timestamp", "validator", "identity", "system", "network", "alerts", "amendments"):
             self.assertIn(key, data, f"missing top-level key: {key}")
 
     def test_unknown_path_returns_404(self):
