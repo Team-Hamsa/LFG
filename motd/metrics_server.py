@@ -19,6 +19,44 @@ _json_files = list(Path("/home/hamsa/.ripple").glob("*.json"))
 VALIDATOR_JSON = str(_json_files[0]) if _json_files else ""
 PORT = 8080
 
+FEATURES_MACRO = "/home/hamsa/rippled/include/xrpl/protocol/detail/features.macro"
+RIPPLED_CFG = "/etc/opt/ripple/rippled.cfg"
+
+
+def _parse_vote_defaults() -> dict:
+    try:
+        source = open(FEATURES_MACRO).read()
+        matches = re.findall(
+            r'XRPL_(?:FEATURE|FIX)\s*\(\s*(\w+)\s*,\s*Supported::\w+\s*,'
+            r'\s*VoteBehavior::(\w+)\s*\)',
+            source,
+        )
+        return {name: ("yes" if vote == "DefaultYes" else "no") for name, vote in matches}
+    except Exception:
+        return {}
+
+
+_VOTE_DEFAULTS: dict = _parse_vote_defaults()
+
+
+def _parse_cfg_overrides() -> dict:
+    try:
+        text = open(RIPPLED_CFG).read()
+    except Exception:
+        return {}
+    overrides: dict = {}
+    section = None
+    for line in text.splitlines():
+        line = line.strip()
+        if line.startswith("["):
+            section = line.strip("[]")
+        elif section == "veto_amendments" and line and not line.startswith("#"):
+            overrides[line] = "no"
+        elif section == "amendments" and line and not line.startswith("#"):
+            overrides[line] = "yes"
+    return overrides
+
+
 # RAPL inter-sample state — power is Δenergy / Δtime across fetch interval
 _rapl_prev_uj: "int | None" = None
 _rapl_prev_ts: "float | None" = None
@@ -230,6 +268,32 @@ def get_alerts():
         return []
 
 
+def get_amendments() -> list:
+    try:
+        raw = subprocess.check_output(
+            ["sudo", RIPPLED, "feature"],
+            timeout=10, text=True, stderr=subprocess.DEVNULL,
+        )
+        features = json.loads(raw)["result"]["features"]
+        overrides = _parse_cfg_overrides()
+        result = []
+        for hash_, data in features.items():
+            if data.get("enabled"):
+                continue
+            name = data.get("name", "")
+            vote = overrides.get(hash_) or _VOTE_DEFAULTS.get(name, "no")
+            result.append({
+                "name": name,
+                "vote": vote,
+                "supported": data.get("supported", False),
+                "majority": "majority" in data,
+            })
+        result.sort(key=lambda x: (not x["majority"], x["name"]))
+        return result
+    except Exception:
+        return []
+
+
 def collect_metrics():
     return {
         "timestamp": datetime.datetime.utcnow().strftime("%Y-%m-%dT%H:%M:%SZ"),
@@ -238,6 +302,7 @@ def collect_metrics():
         "system": get_system_info(),
         "network": get_network_info(),
         "alerts": get_alerts(),
+        "amendments": get_amendments(),
     }
 
 
