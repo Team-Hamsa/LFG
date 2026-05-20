@@ -156,11 +156,26 @@ class TestGetIdentity(unittest.TestCase):
 
 
 class TestGetSystemInfo(unittest.TestCase):
-    @patch("metrics_server.subprocess.check_output", return_value="Use%\n45%\n")
-    def test_returns_expected_fields_and_ranges(self, _):
+    SENSORS_JSON = json.dumps({
+        "coretemp-isa-0000": {
+            "Adapter": "ISA adapter",
+            "Package id 0": {
+                "temp1_input": 55.0, "temp1_max": 86.0,
+                "temp1_crit": 100.0, "temp1_crit_alarm": 0.0,
+            },
+        }
+    })
+
+    @patch("metrics_server.subprocess.check_output")
+    def test_returns_expected_fields_and_ranges(self, mock_sub):
+        def side(cmd, **kw):
+            if cmd[0] == "sensors":
+                return self.SENSORS_JSON
+            return "Use%\n45%\n"
+        mock_sub.side_effect = side
         # Reads real /proc files — validates structure and value ranges.
         result = metrics_server.get_system_info()
-        for key in ("cpu_pct", "ram_pct", "ram_used_gb", "ram_total_gb", "disk_pct", "uptime_s"):
+        for key in ("cpu_pct", "ram_pct", "ram_used_gb", "ram_total_gb", "disk_pct", "uptime_s", "cpu_temp_c"):
             self.assertIn(key, result, f"missing key: {key}")
         self.assertGreaterEqual(result["cpu_pct"], 0)
         self.assertLessEqual(result["cpu_pct"], 100)
@@ -168,6 +183,17 @@ class TestGetSystemInfo(unittest.TestCase):
         self.assertLessEqual(result["ram_pct"], 100)
         self.assertEqual(result["disk_pct"], 45)
         self.assertGreater(result["uptime_s"], 0)
+        self.assertEqual(result["cpu_temp_c"], 55)
+
+    @patch("metrics_server.subprocess.check_output")
+    def test_cpu_temp_none_when_sensors_unavailable(self, mock_sub):
+        def side(cmd, **kw):
+            if cmd[0] == "sensors":
+                raise Exception("sensors not found")
+            return "Use%\n45%\n"
+        mock_sub.side_effect = side
+        result = metrics_server.get_system_info()
+        self.assertIsNone(result["cpu_temp_c"])
 
 
 class TestGetNetworkInfo(unittest.TestCase):
