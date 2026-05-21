@@ -76,5 +76,5 @@ def test_vector_file_loads():
         pytest.skip("ed25519_vectors.json not generated yet (Task 5)")
     vecs = json.loads(p.read_text())
     assert len(vecs) == 1000
-    assert len(bytes.fromhex(vecs[0]["scalar_hex"])) == 32
+    assert len(bytes.fromhex(vecs[0]["seed_hex"])) == 16
     assert len(bytes.fromhex(vecs[0]["point_hex"])) == 32
