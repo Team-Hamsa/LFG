@@ -1,47 +1,66 @@
 # xrp_vanity_gpu
 
-GPU-accelerated XRP vanity address search (work in progress). Target CLI:
-`python xrp_vanity_gpu.py PATTERN [--case-sensitive] [--threads N]`
+GPU-accelerated XRP (Ed25519) vanity address search. The GPU derives public
+keys from random seeds; the CPU sieves them for prefix matches across all cores.
 
-Run in `rapids-23.12` conda env:
-`source ~/miniconda3/etc/profile.d/conda.sh && conda run -n rapids-23.12 python ...`
+## Usage
 
-## Status (2026-05-20)
+```bash
+source ~/miniconda3/etc/profile.d/conda.sh
+conda run -n rapids-23.12 python xrp_vanity_gpu.py PATTERN [options]
+```
 
-| Component | File | Status |
+`PATTERN` matches the address characters immediately after the leading `r`
+(e.g. `Daimyo` matches `rDaimyo...`).
+
+| Option | Default | Meaning |
 |---|---|---|
-| SHA-512 (CUDA NVRTC) | `kernels/sha_kernels.cu` | PASS |
-| SHA-256 (CUDA NVRTC) | `kernels/sha_kernels.cu` | **FAIL — see debug/** |
-| Base58 + icase match | `kernels/base58_kernel.cu` | PASS |
-| RIPEMD-160 | `kernels/ripemd160_kernel.cu` | Untested |
-| Ed25519 scalarmult | — | NOT WRITTEN |
-| `xrp_vanity_gpu.py` CLI | — | NOT WRITTEN |
+| `--case-sensitive` | off | exact-case prefix match |
+| `--batch-size N` | 1048576 | seeds derived per GPU launch |
+| `--workers N` | 0 (all cores) | CPU sieve processes |
+| `--max-matches N` | 0 (until Ctrl-C) | stop after N hits |
+| `--out FILE` | — | append matches to FILE |
+| `--stats-interval S` | 5.0 | seconds between throughput lines |
+| `--seed-rng-seed N` | random | deterministic run (testing) |
 
-## SHA-256 bug
+Only the base58 alphabet is legal in `PATTERN`
+(`rpshnaf39wBUDNEGHJKLM4PQRST7VWXYZ2bcdeCg65jkm8oFqi1tuvAxyz`); `--case-sensitive`
+off also accepts upper/lowercase variants.
 
-GPU kernel AND every from-scratch pure-Python rewrite produce
-`7aa2b8f31bdc8f35...` for `sha256(b'abc')` instead of the correct
-`ba7816bf8f01cfea...`. OpenSSL, hashlib, sha256sum, pycryptodome,
-and `libcrypto.SHA256_Transform` all agree on the correct answer.
+## Architecture: hybrid GPU/CPU
 
-Verified correct in mine: K constants, W schedule (W[16..18] match FIPS B.2),
-round 0 transition, round 1 `a` value, sigma rotations, Ch/Maj, padding,
-endianness. Yet final hash diverges. Magic offset at round 1 T1: `0x82439887`.
+- **GPU** (`kernels/`, `vanity/gpu.py`): seed16 -> double SHA-512 + Ed25519 clamp
+  -> scalar-mult base point -> packed 33-byte pubkey. Compiled once via CuPy NVRTC.
+- **CPU** (`vanity/sieve.py`): SHA-256 + RIPEMD-160 -> account_id -> base58check
+  address -> prefix match, fanned across all cores by `ParallelSieve`.
 
-See `../.claude/projects/-home-hamsa/memory/project_xrp_vanity_gpu.md` for
-the full debug history.
+The CPU sieve is the throughput bottleneck (pure-Python base58check), so it runs
+in a persistent multiprocessing pool while the GPU pipeline stays well ahead.
+
+## Throughput (RTX 2060 Super, 20-core CPU)
+
+| Stage | Rate |
+|---|---|
+| GPU pipeline | ~4.6M seeds/s |
+| CPU sieve, single core | ~31K/s |
+| CPU sieve, 20 cores | ~283K/s |
+| End-to-end CLI | ~280-310K/s |
+
+~3x the ~100K/s Java CPU baseline.
 
 ## Layout
 
 ```
-kernels/   CUDA device code (NVRTC-compatible, ASCII-only, no #include)
-tests/     Functional tests against xrpl-py / hashlib vectors
-debug/     Step-by-step bug isolation scripts for the SHA-256 mystery
+kernels/      CUDA device code (NVRTC-compatible, ASCII-only, no #include)
+vanity/       encoding.py, sieve.py, gpu.py, stats.py
+tests/        functional tests vs xrpl-py / hashlib / donna vectors
+third_party/  vendored ed25519-donna (reference + vector generator)
+archive/      parked all-GPU SHA-256 experiment (see archive/README.md)
 ```
 
 ## NVRTC gotchas
 
-- Prepend PREAMBLE with `typedef unsigned int uint32_t;` (no stdint.h)
-- No non-ASCII characters in source strings (em-dashes break compilation)
-- Scalar kernel args: pass `np.uint32(N)`, NOT `cp.array(N)` — the latter
-  causes `cudaErrorIllegalAddress`
+- Prepend a PREAMBLE with `typedef unsigned int uint32_t;` (no `stdint.h`).
+- ASCII-only source (em-dashes and other non-ASCII break compilation).
+- Pass scalar kernel args as `np.uint32(N)`, not `cp.array(N)` — the latter
+  causes `cudaErrorIllegalAddress`.

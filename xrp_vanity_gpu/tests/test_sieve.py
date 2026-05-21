@@ -70,6 +70,18 @@ def test_sieve_batch_finds_known_hit():
     assert hits[0].seed_b58 == encoding.family_seed_encode(target_seed)
 
 
+def test_parallel_sieve_matches_serial():
+    pubkeys = secrets.token_bytes(2000 * 33)
+    seeds = secrets.token_bytes(2000 * 16)
+    serial = sieve.sieve_batch(pubkeys, seeds, "r", False, 0)
+    ps = sieve.ParallelSieve(n_workers=4)
+    try:
+        parallel = ps.sieve_batch(pubkeys, seeds, "r", False, 0)
+    finally:
+        ps.close()
+    assert sorted(parallel) == sorted(serial)
+
+
 def test_vector_file_loads():
     p = pathlib.Path(__file__).parent / "data" / "ed25519_vectors.json"
     if not p.exists():
