@@ -1,5 +1,7 @@
 """CPU sieve: pubkey -> address -> prefix match."""
 import hashlib
+import multiprocessing as mp
+import os
 from typing import NamedTuple
 
 from Crypto.Hash import RIPEMD160
@@ -65,9 +67,19 @@ def sieve_batch(
     needle = pattern if case_sensitive else pattern.lower()
     n = len(pattern)
 
+    sha256 = hashlib.sha256
+    ripemd = RIPEMD160.new
+    b58 = encoding.b58encode
+    acct_prefix = encoding._ACCOUNT_ID_PREFIX
+    dsha = encoding._double_sha256
+
     for i in range(b_pub):
         pub = pubkeys[i * PUBKEY_LEN : (i + 1) * PUBKEY_LEN]
-        addr = address_from_pubkey(pub)
+        h = ripemd()
+        h.update(sha256(pub).digest())
+        account_id = h.digest()
+        payload = acct_prefix + account_id
+        addr = b58(payload + dsha(payload)[:4])
         region = addr[1 : 1 + n]
         if not case_sensitive:
             region = region.lower()
@@ -81,3 +93,52 @@ def sieve_batch(
                 )
             )
     return hits
+
+
+_POOL: "mp.pool.Pool | None" = None
+
+
+def _chunk_worker(args) -> list[Match]:
+    pubkeys, seeds, pattern, case_sensitive, attempt_offset = args
+    return sieve_batch(pubkeys, seeds, pattern, case_sensitive, attempt_offset)
+
+
+class ParallelSieve:
+    """Persistent process pool that fans sieve_batch across CPU cores."""
+
+    def __init__(self, n_workers: int | None = None):
+        self.n_workers = n_workers or os.cpu_count() or 1
+        self.pool = mp.Pool(self.n_workers)
+
+    def sieve_batch(
+        self,
+        pubkeys: bytes,
+        seeds: bytes,
+        pattern: str,
+        case_sensitive: bool,
+        first_attempt_index: int,
+    ) -> list[Match]:
+        b_pub = len(pubkeys) // PUBKEY_LEN
+        nw = self.n_workers
+        per = (b_pub + nw - 1) // nw
+        tasks = []
+        for w in range(nw):
+            lo = w * per
+            hi = min(lo + per, b_pub)
+            if lo >= hi:
+                break
+            tasks.append((
+                pubkeys[lo * PUBKEY_LEN : hi * PUBKEY_LEN],
+                seeds[lo * SEED_LEN : hi * SEED_LEN],
+                pattern,
+                case_sensitive,
+                first_attempt_index + lo,
+            ))
+        hits: list[Match] = []
+        for chunk_hits in self.pool.map(_chunk_worker, tasks):
+            hits.extend(chunk_hits)
+        return hits
+
+    def close(self) -> None:
+        self.pool.close()
+        self.pool.join()
