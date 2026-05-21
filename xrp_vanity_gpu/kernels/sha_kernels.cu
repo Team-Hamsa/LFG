@@ -109,3 +109,71 @@ __device__ void sha512_16(const uint8_t *in, uint8_t *out) {
     STORE64BE(h7, out + 56)
     #undef STORE64BE
 }
+
+// SHA-512 on exactly 32 bytes of input -> 64 bytes output (single 128-byte block)
+__device__ void sha512_32(const uint8_t *in, uint8_t *out) {
+    uint64_t h0 = 0x6a09e667f3bcc908ULL;
+    uint64_t h1 = 0xbb67ae8584caa73bULL;
+    uint64_t h2 = 0x3c6ef372fe94f82bULL;
+    uint64_t h3 = 0xa54ff53a5f1d36f1ULL;
+    uint64_t h4 = 0x510e527fade682d1ULL;
+    uint64_t h5 = 0x9b05688c2b3e6c1fULL;
+    uint64_t h6 = 0x1f83d9abfb41bd6bULL;
+    uint64_t h7 = 0x5be0cd19137e2179ULL;
+
+    // 32 bytes = 4 BE 64-bit words; padding fits in same 128-byte block.
+    // W[4] = 0x8000... pad; W[5..14] = 0; W[15] = 256 (bit length).
+    #define LOAD64BE(ptr) ( \
+        ((uint64_t)(ptr)[0] << 56) | ((uint64_t)(ptr)[1] << 48) | \
+        ((uint64_t)(ptr)[2] << 40) | ((uint64_t)(ptr)[3] << 32) | \
+        ((uint64_t)(ptr)[4] << 24) | ((uint64_t)(ptr)[5] << 16) | \
+        ((uint64_t)(ptr)[6] <<  8) |  (uint64_t)(ptr)[7])
+
+    uint64_t W[80];
+    W[0]  = LOAD64BE(in +  0);
+    W[1]  = LOAD64BE(in +  8);
+    W[2]  = LOAD64BE(in + 16);
+    W[3]  = LOAD64BE(in + 24);
+    W[4]  = 0x8000000000000000ULL;
+    W[5]  = 0ULL; W[6]  = 0ULL; W[7]  = 0ULL;
+    W[8]  = 0ULL; W[9]  = 0ULL; W[10] = 0ULL;
+    W[11] = 0ULL; W[12] = 0ULL; W[13] = 0ULL;
+    W[14] = 0ULL;
+    W[15] = 256ULL; // bit length
+    #undef LOAD64BE
+
+    for (int i = 16; i < 80; i++) {
+        W[i] = SHA512_GAM1(W[i-2]) + W[i-7] + SHA512_GAM0(W[i-15]) + W[i-16];
+    }
+
+    uint64_t a = h0, b = h1, c = h2, d = h3;
+    uint64_t e = h4, f = h5, g = h6, h = h7;
+    for (int i = 0; i < 80; i++) {
+        uint64_t T1 = h + SHA512_SIG1(e) + SHA512_CH(e, f, g) + SHA512_K[i] + W[i];
+        uint64_t T2 = SHA512_SIG0(a) + SHA512_MAJ(a, b, c);
+        h = g; g = f; f = e; e = d + T1;
+        d = c; c = b; b = a; a = T1 + T2;
+    }
+    h0 += a; h1 += b; h2 += c; h3 += d;
+    h4 += e; h5 += f; h6 += g; h7 += h;
+
+    #define STORE64BE(val, ptr) \
+        (ptr)[0] = (uint8_t)((val) >> 56); (ptr)[1] = (uint8_t)((val) >> 48); \
+        (ptr)[2] = (uint8_t)((val) >> 40); (ptr)[3] = (uint8_t)((val) >> 32); \
+        (ptr)[4] = (uint8_t)((val) >> 24); (ptr)[5] = (uint8_t)((val) >> 16); \
+        (ptr)[6] = (uint8_t)((val) >>  8); (ptr)[7] = (uint8_t)((val));
+
+    STORE64BE(h0, out +  0); STORE64BE(h1, out +  8);
+    STORE64BE(h2, out + 16); STORE64BE(h3, out + 24);
+    STORE64BE(h4, out + 32); STORE64BE(h5, out + 40);
+    STORE64BE(h6, out + 48); STORE64BE(h7, out + 56);
+    #undef STORE64BE
+}
+
+// Test-only entry points (single-thread; used by test_gpu_compile.py)
+extern "C" __global__ void sha512_16_test(const uint8_t *in, uint8_t *out) {
+    sha512_16(in, out);
+}
+extern "C" __global__ void sha512_32_test(const uint8_t *in, uint8_t *out) {
+    sha512_32(in, out);
+}
