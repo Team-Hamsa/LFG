@@ -1,3 +1,12 @@
+import pytest
+
+pytest.skip(
+    "SHA-256 archived per design 2026-05-20; this script-style test also "
+    "references /home/hamsa/xrp_vanity_parts/ which no longer exists. "
+    "Kept for reference only.",
+    allow_module_level=True,
+)
+
 import hashlib, sys
 import cupy as cp
 import base58
