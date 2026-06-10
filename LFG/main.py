@@ -960,14 +960,15 @@ class MintView(View):
                     json.dump(metadata, f, indent=2)
                 
                 # Upload metadata to BunnyCDN
+                metadata_upload_url = f"https://storage.bunnycdn.com/lfgo/minttest/{metadata_filename}"
+                metadata_cdn_url = f"https://lfgo.b-cdn.net/minttest/{metadata_filename}"
                 async with aiohttp.ClientSession() as session:
-                    metadata_cdn_url = f"https://storage.bunnycdn.com/lfgo/minttest/{metadata_filename}"
                     headers = {
                         "AccessKey": BUNNY_CDN_ACCESS_KEY,
                         "Content-Type": "application/json",
                     }
                     with open(metadata_filename, 'rb') as file:
-                        await session.put(metadata_cdn_url, headers=headers, data=file.read())
+                        await session.put(metadata_upload_url, headers=headers, data=file.read())
                 
                 # Clean up local files
                 os.remove(combined_image_path)
@@ -987,8 +988,7 @@ class MintView(View):
                     )
                     return
                 
-                # Define the CDN URLs for both image and metadata
-                metadata_cdn_url = f"https://lfgo.b-cdn.net/minttest/{metadata_filename}"
+                # Define the CDN URL for the image
                 image_cdn_url = f"https://lfgo.b-cdn.net/minttest/{image_filename}"
 
                 # Convert attributes list to dictionary format needed for database
