@@ -229,22 +229,6 @@ NFT_TOKEN_TAXON = int(os.getenv("NFT_TOKEN_TAXON", "0"))  # Defaults to 0 if not
 # Path to the trait layers directory
 TRAIT_LAYERS_DIR = "trait_layers"
 
-# Metadata template used for generating NFT metadata
-METADATA_TEMPLATE = {
-    "schema": "ipfs://QmNpi8rcXEkohca8iXu7zysKKSJYqCvBJn3xJwga8jXqWU",
-    "name": "",  # Will be filled in with "Let's Effing Go! #{number}"
-    "description": "Test",
-    "image": "",  # Will be filled with CDN URL
-    "video": "",  # Empty string instead of None
-    "external_link": "https://letseffinggo.com",
-    "collection": {
-        "name": "Let's Effing Go!",
-        "family": "Test"
-    },
-    "edition": 0,  # Integer instead of None
-    "attributes": []  # Will be filled with the traits
-}
-
 # Add these constants (or get from env)
 X_API_KEY = os.getenv("XUMM_API_KEY")
 X_API_SECRET = os.getenv("XUMM_API_SECRET")
