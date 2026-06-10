@@ -13,7 +13,7 @@ import traceback
 
 import aiohttp
 
-from lfg_core import config, xrpl_ops, xumm_ops, swap_meta, swap_compose
+from lfg_core import config, xrpl_ops, xumm_ops, swap_meta, swap_compose, layer_store
 
 COMPOSING = "composing"
 UPLOADING = "uploading"
@@ -84,13 +84,12 @@ def _swap_metadata(nft: dict, attributes: list, image_url: str, video_url):
     return meta
 
 
-async def _build_and_upload(nft: dict, attributes: list):
+async def _build_and_upload(nft: dict, attributes: list, store):
     """Compose the re-crafted NFT and upload image/video; returns
     (image_url, video_url, new_burn_count)."""
     new_burn = nft["burn_count"] + 1
-    path, is_video = await asyncio.to_thread(
-        swap_compose.compose_swapped_nft, attributes, nft["gender"],
-        nft["number"], new_burn, config.SWAP_LAYERS_DIR)
+    path, is_video = await swap_compose.compose_nft(
+        attributes, nft["gender"], store, f"{nft['number']}_{new_burn}")
     num = nft["number"]
     video_url = None
     try:
@@ -122,9 +121,11 @@ async def run_swap_session(session: SwapSession) -> None:
         new_attrs1, new_attrs2 = swap_meta.swap_traits(
             nft1["attributes"], nft2["attributes"], session.traits_to_swap)
 
-        # 0. Verify every layer file exists BEFORE touching anything on-chain
-        missing = (swap_compose.missing_layers(new_attrs1, nft1["gender"], config.SWAP_LAYERS_DIR)
-                   + swap_compose.missing_layers(new_attrs2, nft2["gender"], config.SWAP_LAYERS_DIR))
+        # 0. Verify every layer exists in the store BEFORE touching anything
+        #    on-chain (this also pre-warms the CDN download cache)
+        store = layer_store.get_layer_store()
+        missing = (await swap_compose.missing_layers(new_attrs1, nft1["gender"], store)
+                   + await swap_compose.missing_layers(new_attrs2, nft2["gender"], store))
         if missing:
             session.state = FAILED
             session.error = f"Missing trait layer files: {', '.join(missing)}"
@@ -133,7 +134,7 @@ async def run_swap_session(session: SwapSession) -> None:
         # 1–2. Compose and upload both new NFTs (images + metadata)
         uploaded = []
         for nft, attrs in ((nft1, new_attrs1), (nft2, new_attrs2)):
-            image_url, video_url, new_burn = await _build_and_upload(nft, attrs)
+            image_url, video_url, new_burn = await _build_and_upload(nft, attrs, store)
             session.state = UPLOADING
             meta = _swap_metadata(nft, attrs, image_url, video_url)
             meta_url = await _upload_swap_file(

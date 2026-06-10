@@ -51,10 +51,16 @@ WEBAPP_PORT = int(os.getenv("WEBAPP_PORT", "8080"))
 TRAIT_LAYERS_DIR = os.getenv("TRAIT_LAYERS_DIR", "trait_layers")
 PAYMENT_TIMEOUT_SECONDS = int(os.getenv("PAYMENT_TIMEOUT_SECONDS", "300"))
 
+# Unified trait layer store (shared by mint + swap).
+# Canonical structure: <gender>/<TraitType>/<Value>.png|.gif|.mp4
+LAYER_SOURCE = os.getenv("LAYER_SOURCE", "cdn")  # "cdn" or "local"
+LAYERS_CDN_FOLDER = os.getenv("LAYERS_CDN_FOLDER", "layers")
+LAYERS_DIR = os.getenv("LAYERS_DIR", "layers")          # local mode root
+LAYER_CACHE_DIR = os.getenv("LAYER_CACHE_DIR", ".layer_cache")
+
 # Trait Swapper (defaults match the original Trait-Swapper bot)
 SWAP_ISSUER_ADDRESS = os.getenv("SWAP_ISSUER_ADDRESS", "rLfgoMintj3KBcs4s2XKtquvDwEte2kYfJ")
 SWAP_TAXON = int(os.getenv("SWAP_TAXON", "1760"))
-SWAP_LAYERS_DIR = os.getenv("SWAP_LAYERS_DIR", "swap_layers")
 SWAP_CDN_FOLDER = os.getenv("SWAP_CDN_FOLDER", "LFGO")
 SWAP_OFFER_CURRENCY_HEX = os.getenv(
     "SWAP_OFFER_CURRENCY_HEX", "4252495800000000000000000000000000000000")  # BRIX

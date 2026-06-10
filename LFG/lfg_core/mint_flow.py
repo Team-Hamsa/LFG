@@ -13,7 +13,7 @@ import traceback
 
 import aiohttp
 
-from lfg_core import config, traits, xrpl_ops, xumm_ops
+from lfg_core import config, traits, xrpl_ops, xumm_ops, layer_store, swap_compose
 from db_helpers import get_next_nft_number, record_nft_mint
 
 # Session states (terminal: done, failed, payment_timeout)
@@ -82,33 +82,46 @@ async def run_mint_session(session: MintSession) -> None:
             session.state = PAYMENT_TIMEOUT
             return
 
-        # 2. Generate the composite image
+        # 2. Compose a random NFT from the unified layer store (same tree
+        #    the Trait Swapper uses: <gender>/<TraitType>/<Value>.ext)
         session.state = GENERATING
         session.nft_number = get_next_nft_number()
-        selected_traits = traits.select_random_traits(config.TRAIT_LAYERS_DIR)
-        combined_image_path = f"output_nft_{session.nft_number}.png"
-        await asyncio.to_thread(
-            traits.compose_image, config.TRAIT_LAYERS_DIR, selected_traits, combined_image_path
-        )
+        store = layer_store.get_layer_store()
+        gender, attributes = await traits.select_random_attributes(store)
+        output_path, is_video = await swap_compose.compose_nft(
+            attributes, gender, store, f"lfg_{session.nft_number}")
 
-        # 3. Upload image + metadata to BunnyCDN
-        with open(combined_image_path, 'rb') as f:
-            image_bytes = f.read()
-        os.remove(combined_image_path)
-        image_cdn_url = await _upload_to_bunny(
-            f"lfg_{session.nft_number}.png", image_bytes, "image/png")
+        # 3. Upload image (+ video) and metadata to BunnyCDN
+        video_cdn_url = None
+        try:
+            if is_video:
+                with open(output_path, 'rb') as f:
+                    video_cdn_url = await _upload_to_bunny(
+                        f"lfg_{session.nft_number}.mp4", f.read(), "video/mp4")
+                thumb = await asyncio.to_thread(
+                    swap_compose.extract_first_frame, output_path,
+                    os.path.splitext(output_path)[0] + ".png")
+                with open(thumb, 'rb') as f:
+                    image_cdn_url = await _upload_to_bunny(
+                        f"lfg_{session.nft_number}.png", f.read(), "image/png")
+                os.remove(thumb)
+            else:
+                with open(output_path, 'rb') as f:
+                    image_cdn_url = await _upload_to_bunny(
+                        f"lfg_{session.nft_number}.png", f.read(), "image/png")
+        finally:
+            if os.path.exists(output_path):
+                os.remove(output_path)
         session.image_url = image_cdn_url
 
         metadata = {
             "name": f"{config.NFT_COLLECTION_NAME} #{session.nft_number}",
             "image": image_cdn_url,
             "edition": session.nft_number,
-            "attributes": [
-                {"trait_type": layer,
-                 "value": traits.format_trait_name(os.path.splitext(filename)[0])}
-                for layer, filename in selected_traits.items()
-            ],
+            "attributes": attributes,
         }
+        if video_cdn_url:
+            metadata["video"] = video_cdn_url
         metadata_cdn_url = await _upload_to_bunny(
             f"metadata_{session.nft_number}.json",
             json.dumps(metadata, indent=2).encode(), "application/json")
@@ -127,6 +140,9 @@ async def run_mint_session(session: MintSession) -> None:
         session.nft_id = nft_id
 
         traits_dict = {t["trait_type"]: t["value"] for t in metadata["attributes"]}
+        # The LFG table's headwear column is named Hat (layer tree uses Head)
+        if "Head" in traits_dict:
+            traits_dict.setdefault("Hat", traits_dict["Head"])
         if not record_nft_mint(
             nft_number=session.nft_number,
             nft_id=nft_id,

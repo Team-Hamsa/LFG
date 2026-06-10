@@ -1,10 +1,11 @@
 # lfg_core/swap_compose.py
-# Recompose a swapped NFT from the gender-specific layer directories
-# (<layers_dir>/<gender>/<TraitType>/<Value>.png|.gif|.mp4) with ffmpeg.
-# Ported from Trait-Swapper/helpers.py makeNft(), using only ffmpeg-python
-# (audio is mapped directly from the video trait instead of via moviepy).
+# NFT composition from the unified layer store (shared by mint and swap).
+# Layers resolve through a LayerStore (CDN-backed or local) and are overlaid
+# with ffmpeg: PNG output when every layer is a PNG, otherwise MP4 (audio is
+# carried over from the first video trait that has it).
 
 import os
+import asyncio
 import logging
 
 import ffmpeg
@@ -19,16 +20,6 @@ TOP_TRAITS = [
     {"trait_type": "Eyes", "value": "Laser"},
 ]
 
-_EXTENSIONS = (".png", ".gif", ".mp4")
-
-
-def _layer_file(layers_dir: str, gender: str, trait_type: str, value: str):
-    base = os.path.join(layers_dir, gender, trait_type, value)
-    for ext in _EXTENSIONS:
-        if os.path.isfile(base + ext):
-            return base + ext
-    return None
-
 
 def _ordered_traits(attributes: list) -> list:
     """Canonical layer order, with TOP_TRAITS moved to the end (on top).
@@ -42,23 +33,22 @@ def _ordered_traits(attributes: list) -> list:
     return rest + tops
 
 
-def missing_layers(attributes: list, gender: str, layers_dir: str) -> list:
-    """Trait files that don't exist on disk — checked BEFORE any burn."""
+async def missing_layers(attributes: list, gender: str, store) -> list:
+    """Trait files the store can't provide — checked BEFORE any burn."""
     missing = []
     for a in _ordered_traits(attributes):
-        if not _layer_file(layers_dir, gender, a["trait_type"], a["value"]):
+        if not await store.resolve(gender, a["trait_type"], a["value"]):
             missing.append(f"{gender}/{a['trait_type']}/{a['value']}")
     return missing
 
 
-def compose_swapped_nft(attributes: list, gender: str, nft_number: int,
-                        burn_count: int, layers_dir: str, out_dir: str = "generated"):
-    """Overlay all trait layers; returns (output_path, is_video).
-    Output is PNG when every layer is a PNG, otherwise MP4."""
-    os.makedirs(out_dir, exist_ok=True)
+async def compose_nft(attributes: list, gender: str, store,
+                      output_basename: str, out_dir: str = "generated"):
+    """Resolve all trait layers through the store and overlay them.
+    Returns (output_path, is_video)."""
     files = []
     for a in _ordered_traits(attributes):
-        path = _layer_file(layers_dir, gender, a["trait_type"], a["value"])
+        path = await store.resolve(gender, a["trait_type"], a["value"])
         if not path:
             raise FileNotFoundError(
                 f"Layer not found: {gender}/{a['trait_type']}/{a['value']}")
@@ -66,16 +56,21 @@ def compose_swapped_nft(attributes: list, gender: str, nft_number: int,
     if not files:
         raise ValueError("No trait layers to compose")
 
+    os.makedirs(out_dir, exist_ok=True)
     is_video = any(not f.endswith(".png") for f in files)
     ext = "mp4" if is_video else "png"
-    output_path = os.path.join(out_dir, f"{nft_number}_{burn_count}.{ext}")
+    output_path = os.path.join(out_dir, f"{output_basename}.{ext}")
+    await asyncio.to_thread(_run_ffmpeg, files, output_path, is_video)
+    logging.info(f"Composed NFT: {output_path}")
+    return output_path, is_video
 
+
+def _run_ffmpeg(files: list, output_path: str, is_video: bool) -> None:
     inputs = [ffmpeg.input(f) for f in files]
     stream = inputs[0]
     for inp in inputs[1:]:
         stream = stream.overlay(inp)
 
-    out_kwargs = {}
     audio = None
     if is_video:
         # Carry audio over from the first video trait that has it.
@@ -83,14 +78,13 @@ def compose_swapped_nft(attributes: list, gender: str, nft_number: int,
             if f.endswith(".mp4") and _has_audio(f):
                 audio = inp.audio
                 break
+    kwargs = {} if is_video else {"vframes": 1, "update": 1}
     if audio is not None:
-        ffmpeg.output(stream, audio, output_path, **out_kwargs)\
+        ffmpeg.output(stream, audio, output_path, **kwargs)\
               .overwrite_output().run(quiet=True)
     else:
-        ffmpeg.output(stream, output_path, **out_kwargs)\
+        ffmpeg.output(stream, output_path, **kwargs)\
               .overwrite_output().run(quiet=True)
-    logging.info(f"Composed swap NFT: {output_path}")
-    return output_path, is_video
 
 
 def _has_audio(path: str) -> bool:

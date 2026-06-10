@@ -59,20 +59,42 @@ your app. The flow inside the Activity:
    traits to exchange, confirm — the originals are burned, re-crafted NFTs
    are reminted and offered back (priced in BRIX); accept both via QR.
 
+## Unified trait layer store (mint + swap)
+
+Both the mint flow and the Trait Swapper pull trait layers from a **single
+tree** hosted on BunnyCDN storage (no local copies, no double upload):
+
+```
+<storage zone>/layers/          # LAYERS_CDN_FOLDER (default "layers")
+├── male/
+│   ├── Background/<Value>.png|.gif|.mp4
+│   ├── Back/ Body/ Clothing/ Mouth/ Eyebrows/ Eyes/ Head/ Accessory/
+├── female/
+├── ape/
+└── skeleton/
+```
+
+Rules:
+- The **file stem is the metadata trait value, verbatim** (`Rainbow Puke.png`
+  → trait value "Rainbow Puke") — exact case and spaces; no normalization.
+- Trait-type folder names are exact-case: `Background, Back, Body, Clothing,
+  Mouth, Eyebrows, Eyes, Head, Accessory` (compositing order; a value of
+  `None` means "no file").
+- `.png`, `.gif`, `.mp4` are allowed; any non-PNG layer makes the composed
+  NFT a video (audio carried over, PNG thumbnail generated for metadata).
+- Mint picks a random gender directory, then one random value per trait
+  type. Swap resolves exact values from the NFT metadata.
+
+Layer files are downloaded on demand and cached in `LAYER_CACHE_DIR`
+(default `.layer_cache/`); directory listings use the Bunny storage API.
+For development without a CDN, set `LAYER_SOURCE=local` and put the same
+tree in `LAYERS_DIR` (default `layers/`).
+
 ## Trait Swapper configuration
 
-The swap feature (ported from github.com/joshuahamsa/Trait-Swapper) needs the
-gender-specific layer directories on disk:
-
-```
-swap_layers/            # SWAP_LAYERS_DIR
-├── male/ female/ ape/ skeleton/
-│   └── <TraitType>/<Value>.png|.gif|.mp4
-```
-
-Optional env overrides (defaults match the original bot):
-`SWAP_ISSUER_ADDRESS`, `SWAP_TAXON` (1760), `SWAP_LAYERS_DIR` (swap_layers),
-`SWAP_CDN_FOLDER` (LFGO), `SWAP_OFFER_CURRENCY_HEX` / `SWAP_OFFER_ISSUER` /
+Optional env overrides (defaults match the original Trait-Swapper bot):
+`SWAP_ISSUER_ADDRESS`, `SWAP_TAXON` (1760), `SWAP_CDN_FOLDER` (LFGO, output
+uploads), `SWAP_OFFER_CURRENCY_HEX` / `SWAP_OFFER_ISSUER` /
 `SWAP_OFFER_AMOUNT` (10 BRIX), `SWAP_MAX_NFT_NUMBER` (3535).
 
 Safety: nothing is burned until both replacement images and metadata are

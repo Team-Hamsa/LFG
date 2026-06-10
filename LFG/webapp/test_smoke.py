@@ -18,8 +18,9 @@ os.environ.setdefault("TOKEN_ISSUER_ADDRESS", "rrrrrrrrrrrrrrrrrrrrrhoLvTp")
 os.environ.setdefault("TOKEN_CURRENCY_HEX", "4C46474F00000000000000000000000000000000")
 os.environ.setdefault("BUNNY_CDN_ACCESS_KEY", "test")
 os.environ.setdefault("BUNNY_CDN_STORAGE_ZONE", "test")
+os.environ.setdefault("LAYER_SOURCE", "local")
 
-from lfg_core import mint_flow, xumm_ops, traits, swap_meta, swap_flow  # noqa: E402
+from lfg_core import mint_flow, xumm_ops, traits, swap_meta, swap_flow, layer_store  # noqa: E402
 from webapp import server  # noqa: E402
 
 
@@ -89,21 +90,30 @@ def test_mint_session_happy_path(monkeypatch, tmp_path):
         return {"qr_url": "https://xumm.test/qr.png",
                 "xumm_url": "https://xumm.test/sign", "uuid": "u"}
 
-    def fake_compose(layers_dir, selected, output_path):
-        with open(output_path, "wb") as f:
-            f.write(b"\x89PNG fake")
-        return output_path
+    async def fake_select(store, gender=None):
+        return "male", [{"trait_type": "Background", "value": "Blue"},
+                        {"trait_type": "Head", "value": "Crown"}]
+
+    async def fake_compose(attributes, gender, store, basename, out_dir="generated"):
+        p = tmp_path / f"{basename}.png"
+        p.write_bytes(b"\x89PNG fake")
+        return str(p), False
+
+    recorded = {}
+    def fake_record(**kw):
+        recorded.update(kw)
+        return True
 
     monkeypatch.setattr(mint_flow.xrpl_ops, "wait_for_payment", paid)
     monkeypatch.setattr(mint_flow, "_upload_to_bunny", fake_upload)
     monkeypatch.setattr(mint_flow.xrpl_ops, "mint_nft", fake_mint)
     monkeypatch.setattr(mint_flow.xrpl_ops, "create_nft_offer", fake_offer)
     monkeypatch.setattr(mint_flow.xumm_ops, "create_accept_offer_payload", fake_accept)
-    monkeypatch.setattr(mint_flow.traits, "compose_image", fake_compose)
-    monkeypatch.setattr(mint_flow.traits, "select_random_traits",
-                        lambda d: {"1 background": "blue.png"})
+    monkeypatch.setattr(mint_flow.traits, "select_random_attributes", fake_select)
+    monkeypatch.setattr(mint_flow.swap_compose, "compose_nft", fake_compose)
+    monkeypatch.setattr(mint_flow.layer_store, "get_layer_store", lambda: object())
     monkeypatch.setattr(mint_flow, "get_next_nft_number", lambda: 9999)
-    monkeypatch.setattr(mint_flow, "record_nft_mint", lambda **kw: True)
+    monkeypatch.setattr(mint_flow, "record_nft_mint", fake_record)
     monkeypatch.chdir(tmp_path)
 
     session = mint_flow.MintSession(discord_id="1", wallet_address="rTest")
@@ -113,6 +123,7 @@ def test_mint_session_happy_path(monkeypatch, tmp_path):
     assert session.nft_id == "NFTID123"
     assert session.accept_deeplink == "https://xumm.test/sign"
     assert session.image_url == "https://cdn.test/lfg_9999.png"
+    assert recorded["traits"]["Hat"] == "Crown"  # Head mapped to the Hat column
 
 # --- Trait Swapper ---
 
@@ -173,9 +184,11 @@ def test_swap_session_missing_layers_fails_before_burn(monkeypatch):
     async def fake_burn(nft_id, owner):
         burned.append(nft_id)
         return "HASH"
+    async def missing(attrs, gender, store):
+        return ["male/Eyes/Eyes20"]
     monkeypatch.setattr(swap_flow.xrpl_ops, "burn_nft", fake_burn)
-    monkeypatch.setattr(swap_flow.swap_compose, "missing_layers",
-                        lambda attrs, gender, d: ["male/Eyes/Eyes20"])
+    monkeypatch.setattr(swap_flow.layer_store, "get_layer_store", lambda: object())
+    monkeypatch.setattr(swap_flow.swap_compose, "missing_layers", missing)
 
     session = _swap_session()
     asyncio.get_event_loop().run_until_complete(swap_flow.run_swap_session(session))
@@ -188,10 +201,13 @@ def test_swap_session_happy_path(monkeypatch, tmp_path):
     async def fake_upload(path_on_cdn, data, content_type):
         return f"https://cdn.test/LFGO/{path_on_cdn}"
 
-    def fake_compose(attrs, gender, number, burn, layers_dir, out_dir="generated"):
-        p = tmp_path / f"{number}_{burn}.png"
+    async def fake_compose(attrs, gender, store, basename, out_dir="generated"):
+        p = tmp_path / f"{basename}.png"
         p.write_bytes(b"\x89PNG fake")
         return str(p), False
+
+    async def no_missing(attrs, gender, store):
+        return []
 
     burned = []
     async def fake_burn(nft_id, owner):
@@ -211,9 +227,9 @@ def test_swap_session_happy_path(monkeypatch, tmp_path):
         return {"qr_url": "https://xumm.test/qr.png",
                 "xumm_url": f"https://xumm.test/{offer_id}", "uuid": "u"}
 
-    monkeypatch.setattr(swap_flow.swap_compose, "missing_layers",
-                        lambda attrs, gender, d: [])
-    monkeypatch.setattr(swap_flow.swap_compose, "compose_swapped_nft", fake_compose)
+    monkeypatch.setattr(swap_flow.layer_store, "get_layer_store", lambda: object())
+    monkeypatch.setattr(swap_flow.swap_compose, "missing_layers", no_missing)
+    monkeypatch.setattr(swap_flow.swap_compose, "compose_nft", fake_compose)
     monkeypatch.setattr(swap_flow, "_upload_swap_file", fake_upload)
     monkeypatch.setattr(swap_flow.xrpl_ops, "burn_nft", fake_burn)
     monkeypatch.setattr(swap_flow.xrpl_ops, "mint_nft", fake_mint)
@@ -231,3 +247,67 @@ def test_swap_session_happy_path(monkeypatch, tmp_path):
     assert r["image_url"] == "https://cdn.test/LFGO/10/10_1.png"
     assert r["metadata_url"].endswith("10/10_1.json")
     assert r["accept_deeplink"].startswith("https://xumm.test/OFFER_")
+
+# --- Unified layer store ---
+
+def _make_layer_tree(root):
+    for gender, traits_ in (("male", {"Background": ["Blue"], "Body": ["Straight Light"],
+                                      "Eyes": ["Laser", "Hypno"]}),
+                            ("ape", {"Background": ["Red"], "Body": ["Ape"]})):
+        for trait, values in traits_.items():
+            d = root / gender / trait
+            d.mkdir(parents=True)
+            for v in values:
+                (d / f"{v}.png").write_bytes(b"\x89PNG fake")
+
+
+def test_local_layer_store(tmp_path):
+    _make_layer_tree(tmp_path)
+    store = layer_store.LocalLayerStore(str(tmp_path))
+    loop = asyncio.get_event_loop()
+    assert loop.run_until_complete(store.list_genders()) == ["ape", "male"]
+    assert loop.run_until_complete(store.list_values("male", "Eyes")) == ["Hypno", "Laser"]
+    path = loop.run_until_complete(store.resolve("male", "Eyes", "Laser"))
+    assert path and path.endswith("Eyes/Laser.png")
+    assert loop.run_until_complete(store.resolve("male", "Eyes", "Nope")) is None
+
+
+def test_select_random_attributes_from_store(tmp_path):
+    _make_layer_tree(tmp_path)
+    store = layer_store.LocalLayerStore(str(tmp_path))
+    loop = asyncio.get_event_loop()
+    gender, attrs = loop.run_until_complete(
+        traits.select_random_attributes(store, gender="male"))
+    assert gender == "male"
+    by_type = {a["trait_type"]: a["value"] for a in attrs}
+    assert by_type["Background"] == "Blue"
+    assert by_type["Eyes"] in ("Laser", "Hypno")
+    # attributes follow canonical layer order
+    order = [a["trait_type"] for a in attrs]
+    assert order == sorted(order, key=swap_meta.TRAIT_ORDER.index)
+
+
+def test_cdn_layer_store_resolve_uses_cache(monkeypatch, tmp_path):
+    store = layer_store.CdnLayerStore()
+    store.cache_dir = str(tmp_path / "cache")
+    downloads = []
+
+    async def fake_list(rel_path):
+        return [("Laser.png", False), ("Hypno.gif", False), ("sub", True)]
+
+    async def fake_download(rel_path):
+        downloads.append(rel_path)
+        local = os.path.join(store.cache_dir, rel_path)
+        os.makedirs(os.path.dirname(local), exist_ok=True)
+        with open(local, "wb") as f:
+            f.write(b"\x89PNG fake")
+        return local
+
+    monkeypatch.setattr(store, "_list_dir", fake_list)
+    monkeypatch.setattr(store, "_download", fake_download)
+    loop = asyncio.get_event_loop()
+    assert loop.run_until_complete(store.list_values("male", "Eyes")) == ["Hypno", "Laser"]
+    path = loop.run_until_complete(store.resolve("male", "Eyes", "Laser"))
+    assert path.endswith("male/Eyes/Laser.png")
+    assert downloads == ["male/Eyes/Laser.png"]
+    assert loop.run_until_complete(store.resolve("male", "Eyes", "Missing")) is None

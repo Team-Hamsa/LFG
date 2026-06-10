@@ -1,5 +1,8 @@
 # lfg_core/traits.py
-# Trait layer selection and ffmpeg image composition (extracted from main.py).
+# Trait layer selection and ffmpeg image composition.
+# select_random_attributes() works against the unified LayerStore (used by
+# the webapp mint flow); the directory-based helpers below are kept for the
+# classic bot's local trait_layers/ tree.
 
 import os
 import re
@@ -7,6 +10,28 @@ import random
 import logging
 
 import ffmpeg
+
+from lfg_core.swap_meta import TRAIT_ORDER
+
+
+async def select_random_attributes(store, gender: str = None):
+    """Pick a random gender (unless given) and one random value per trait
+    type from the unified layer store. Returns (gender, attributes) where
+    attributes is a metadata-style [{trait_type, value}] list in layer order."""
+    if gender is None:
+        genders = await store.list_genders()
+        if not genders:
+            raise ValueError("Layer store has no gender directories")
+        gender = random.choice(genders)
+    attributes = []
+    for trait_type in TRAIT_ORDER:
+        values = await store.list_values(gender, trait_type)
+        if values:
+            attributes.append({"trait_type": trait_type,
+                               "value": random.choice(values)})
+    if not attributes:
+        raise ValueError(f"No trait layers found for gender '{gender}'")
+    return gender, attributes
 
 
 def get_sorted_trait_layers(trait_layers_dir: str) -> list:
