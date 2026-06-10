@@ -10,9 +10,10 @@ import traceback
 from xrpl.clients import JsonRpcClient
 from xrpl.asyncio.clients import AsyncWebsocketClient
 from xrpl.wallet import Wallet
-from xrpl.models.transactions import NFTokenMint, NFTokenCreateOffer
+from xrpl.models import IssuedCurrencyAmount
+from xrpl.models.transactions import NFTokenMint, NFTokenCreateOffer, NFTokenBurn
 from xrpl.models.transactions.nftoken_create_offer import NFTokenCreateOfferFlag
-from xrpl.models.requests import Tx, Subscribe
+from xrpl.models.requests import Tx, Subscribe, AccountNFTs
 from xrpl.transaction import submit_and_wait
 
 from lfg_core import config
@@ -79,8 +80,9 @@ async def mint_nft(metadata_cdn_url: str, taxon: int, issuer: str):
         return None
 
 
-async def create_nft_offer(nft_id: str, destination: str):
-    """Create a zero-amount sell offer transferring the NFT; returns offer ID or None."""
+async def create_nft_offer(nft_id: str, destination: str, amount="0"):
+    """Create a sell offer transferring the NFT to destination; returns offer ID
+    or None. amount may be an XRP-drops string or an IssuedCurrencyAmount."""
     try:
         client = JsonRpcClient(config.JSON_RPC_URL)
         wallet = Wallet.from_seed(config.SEED)
@@ -88,7 +90,7 @@ async def create_nft_offer(nft_id: str, destination: str):
         offer = NFTokenCreateOffer(
             account=wallet.classic_address,
             destination=destination,
-            amount="0",
+            amount=amount,
             nftoken_id=nft_id,
             flags=NFTokenCreateOfferFlag.TF_SELL_NFTOKEN,
         )
@@ -112,6 +114,79 @@ async def create_nft_offer(nft_id: str, destination: str):
 
     except Exception as e:
         logging.error(f"create_nft_offer error: {e}")
+        return None
+
+
+def swap_offer_amount() -> IssuedCurrencyAmount:
+    """The token amount (e.g. 10 BRIX) charged for re-crafted swap NFTs."""
+    return IssuedCurrencyAmount(
+        currency=config.SWAP_OFFER_CURRENCY_HEX,
+        issuer=config.SWAP_OFFER_ISSUER,
+        value=config.SWAP_OFFER_AMOUNT,
+    )
+
+
+async def get_account_nfts(address: str, issuer: str):
+    """List NFTs held by `address` that were issued by `issuer`.
+    Returns a list of {"nft_id", "uri_hex"} dicts."""
+    nfts = []
+    marker = None
+    async with AsyncWebsocketClient(config.WS_URL) as websocket:
+        while True:
+            response = await websocket.request(
+                AccountNFTs(account=address, marker=marker, limit=400))
+            result = response.result
+            for nft in result.get("account_nfts", []):
+                if nft.get("Issuer") != issuer:
+                    continue
+                nfts.append({"nft_id": nft["NFTokenID"], "uri_hex": nft.get("URI", "")})
+            marker = result.get("marker")
+            if not marker:
+                break
+    return nfts
+
+
+async def burn_nft(nft_id: str, owner: str):
+    """Burn an NFT held by `owner` using the issuer wallet's burn authority.
+    Returns the transaction hash or None."""
+    try:
+        wallet = Wallet.from_seed(config.SEED)
+        client = JsonRpcClient(config.JSON_RPC_URL)
+        kwargs = dict(account=wallet.classic_address, nftoken_id=nft_id)
+        if owner != wallet.classic_address:
+            kwargs["owner"] = owner
+        burn = NFTokenBurn(**kwargs)
+
+        retries = 5
+        hash_txn = None
+        for attempt in range(1, retries + 1):
+            try:
+                response = await asyncio.to_thread(submit_and_wait, burn, client, wallet)
+                hash_txn = response.result["hash"]
+                break
+            except Exception as e:
+                logging.error(f"Burn attempt {attempt} failed: {e}")
+                if attempt == retries:
+                    return None
+                await asyncio.sleep(5)
+
+        for check_attempt in range(1, retries + 1):
+            try:
+                txn = await asyncio.to_thread(client.request, Tx(transaction=hash_txn))
+                res = txn.result
+                if res["meta"]["TransactionResult"] in ("tesSUCCESS", "terQUEUED"):
+                    logging.info(f"NFT burned: {nft_id} ({hash_txn})")
+                    return hash_txn
+                logging.warning(f"Burn result: {res['meta']['TransactionResult']}")
+                return None
+            except Exception as e:
+                logging.error(f"Burn status check {check_attempt} failed: {e}")
+                if check_attempt == retries:
+                    return None
+                await asyncio.sleep(5)
+        return None
+    except Exception:
+        logging.error(f"burn_nft error: {traceback.format_exc()}")
         return None
 
 

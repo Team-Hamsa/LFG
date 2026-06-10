@@ -50,3 +50,19 @@ WEBAPP_PORT = int(os.getenv("WEBAPP_PORT", "8080"))
 # Misc
 TRAIT_LAYERS_DIR = os.getenv("TRAIT_LAYERS_DIR", "trait_layers")
 PAYMENT_TIMEOUT_SECONDS = int(os.getenv("PAYMENT_TIMEOUT_SECONDS", "300"))
+
+# Trait Swapper (defaults match the original Trait-Swapper bot)
+SWAP_ISSUER_ADDRESS = os.getenv("SWAP_ISSUER_ADDRESS", "rLfgoMintj3KBcs4s2XKtquvDwEte2kYfJ")
+SWAP_TAXON = int(os.getenv("SWAP_TAXON", "1760"))
+SWAP_LAYERS_DIR = os.getenv("SWAP_LAYERS_DIR", "swap_layers")
+SWAP_CDN_FOLDER = os.getenv("SWAP_CDN_FOLDER", "LFGO")
+SWAP_OFFER_CURRENCY_HEX = os.getenv(
+    "SWAP_OFFER_CURRENCY_HEX", "4252495800000000000000000000000000000000")  # BRIX
+SWAP_OFFER_ISSUER = os.getenv("SWAP_OFFER_ISSUER", "rLfgoBriX5ZaMP32mtc7RUZJcjnisKh2Px")
+SWAP_OFFER_AMOUNT = os.getenv("SWAP_OFFER_AMOUNT", "10")
+SWAP_MAX_NFT_NUMBER = int(os.getenv("SWAP_MAX_NFT_NUMBER", "3535"))
+NFT_SCHEMA_URL = os.getenv("NFT_SCHEMA_URL",
+                           "ipfs://QmNpi8rcXEkohca8iXu7zysKKSJYqCvBJn3xJwga8jXqWU")
+EXTERNAL_WEBSITE_URL = os.getenv("EXTERNAL_WEBSITE_URL", "https://letseffinggo.com")
+NFT_COLLECTION_LOGO = os.getenv("NFT_COLLECTION_LOGO",
+                                "https://lfgo.b-cdn.net/LFGO_square_logo.png")
