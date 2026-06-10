@@ -20,7 +20,7 @@ from xrpl.core.addresscodec import is_valid_classic_address
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-from lfg_core import config, mint_flow, xumm_ops
+from lfg_core import config, mint_flow, xumm_ops, xrpl_ops, swap_meta, swap_flow
 from user_db import create_users_table, register_user, get_user
 
 logging.basicConfig(level=logging.INFO,
@@ -30,8 +30,9 @@ CLIENT_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "client")
 DISCORD_API = "https://discord.com/api"
 SESSION_TTL = 6 * 3600
 
-# In-memory mint sessions: session_id -> MintSession
+# In-memory sessions: session_id -> MintSession / SwapSession
 mint_sessions = {}
+swap_sessions = {}
 
 
 def _session_secret() -> bytes:
@@ -169,6 +170,76 @@ async def handle_mint_status(request):
     return web.json_response(session.to_dict())
 
 
+@require_auth
+async def handle_nfts(request):
+    """List the user's swappable collection NFTs (normalized metadata)."""
+    user = request["user"]
+    record = get_user(user["id"])
+    if not record or not record.get("address"):
+        return web.json_response({"error": "no wallet registered"}, status=400)
+    try:
+        nfts = await swap_meta.load_wallet_nfts(record["address"],
+                                                xrpl_ops.get_account_nfts)
+    except Exception as e:
+        logging.error(f"NFT listing failed: {e}")
+        return web.json_response({"error": "failed to load wallet NFTs"}, status=502)
+    return web.json_response({"nfts": nfts,
+                              "swappable_traits": swap_meta.SWAPPABLE_TRAITS})
+
+
+@require_auth
+async def handle_swap_start(request):
+    user = request["user"]
+    record = get_user(user["id"])
+    if not record or not record.get("address"):
+        return web.json_response({"error": "no wallet registered"}, status=400)
+
+    body = await request.json()
+    nft1_id = body.get("nft1_id")
+    nft2_id = body.get("nft2_id")
+    traits_to_swap = body.get("traits", [])
+    if not nft1_id or not nft2_id or nft1_id == nft2_id:
+        return web.json_response({"error": "select two different NFTs"}, status=400)
+    if not traits_to_swap or any(t not in swap_meta.SWAPPABLE_TRAITS
+                                 for t in traits_to_swap):
+        return web.json_response({"error": "invalid trait selection"}, status=400)
+
+    for s in swap_sessions.values():
+        if s.discord_id == user["id"] and s.state not in swap_flow.TERMINAL_STATES:
+            return web.json_response({"error": "swap already in progress",
+                                      "session": s.to_dict()}, status=409)
+
+    # Re-verify ownership and metadata server-side (never trust client data)
+    try:
+        nfts = await swap_meta.load_wallet_nfts(record["address"],
+                                                xrpl_ops.get_account_nfts)
+    except Exception as e:
+        logging.error(f"NFT verification failed: {e}")
+        return web.json_response({"error": "failed to verify wallet NFTs"}, status=502)
+    by_id = {n["nft_id"]: n for n in nfts}
+    nft1, nft2 = by_id.get(nft1_id), by_id.get(nft2_id)
+    if not nft1 or not nft2:
+        return web.json_response({"error": "NFT not found in your wallet"}, status=400)
+    if nft1["gender"] != nft2["gender"]:
+        return web.json_response(
+            {"error": "NFTs must share the same body type to swap traits"}, status=400)
+
+    session = swap_flow.SwapSession(
+        discord_id=user["id"], wallet_address=record["address"],
+        nft1=nft1, nft2=nft2, traits_to_swap=traits_to_swap)
+    swap_sessions[session.id] = session
+    asyncio.get_event_loop().create_task(swap_flow.run_swap_session(session))
+    return web.json_response(session.to_dict())
+
+
+@require_auth
+async def handle_swap_status(request):
+    session = swap_sessions.get(request.match_info["session_id"])
+    if not session or session.discord_id != request["user"]["id"]:
+        return web.json_response({"error": "not found"}, status=404)
+    return web.json_response(session.to_dict())
+
+
 async def handle_config(request):
     """Public config the frontend needs before auth (client_id for authorize())."""
     return web.json_response({"client_id": config.DISCORD_CLIENT_ID})
@@ -196,6 +267,9 @@ def create_app() -> web.Application:
     app.router.add_post("/api/trustline", handle_trustline)
     app.router.add_post("/api/mint", handle_mint_start)
     app.router.add_get("/api/mint/{session_id}", handle_mint_status)
+    app.router.add_get("/api/nfts", handle_nfts)
+    app.router.add_post("/api/swap", handle_swap_start)
+    app.router.add_get("/api/swap/{session_id}", handle_swap_status)
     app.router.add_get("/api/qr.png", handle_qr)
     app.router.add_get("/", handle_index)
     app.router.add_static("/", CLIENT_DIR)

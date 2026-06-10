@@ -60,8 +60,11 @@ async function setupDiscord() {
   return tokenData.user;
 }
 
+const ALL_PANELS = ['register-panel', 'mint-panel', 'flow-panel',
+                    'swap-panel', 'swap-traits-panel', 'swap-result-panel'];
+
 function showPanel(id) {
-  for (const panel of ['register-panel', 'mint-panel', 'flow-panel']) {
+  for (const panel of ALL_PANELS) {
     el(panel).hidden = panel !== id;
   }
 }
@@ -166,10 +169,168 @@ async function registerWallet() {
   }
 }
 
+// --- Trait Swapper ---
+
+let swapNfts = [];
+let swapPick = [];
+let swapPollTimer = null;
+
+const showSwapPanel = showPanel;
+
+async function openSwapper() {
+  showSwapPanel('swap-panel');
+  swapPick = [];
+  el('nft-grid').innerHTML = '';
+  status('Loading your NFTs…');
+  try {
+    const data = await api('/api/nfts');
+    swapNfts = data.nfts;
+    status('');
+    if (!swapNfts.length) {
+      el('swap-help').textContent = 'No swappable NFTs found in your wallet.';
+      return;
+    }
+    el('swap-help').textContent =
+      'Pick two NFTs with the same body type to swap traits between them.';
+    for (const nft of swapNfts) {
+      const card = document.createElement('button');
+      card.className = 'nft-card';
+      card.innerHTML = `<img src="${nft.image}" alt=""><span>${nft.name}</span>`;
+      card.onclick = () => toggleNftPick(nft, card);
+      el('nft-grid').appendChild(card);
+    }
+  } catch (e) {
+    status(e.message);
+  }
+}
+
+function toggleNftPick(nft, card) {
+  const idx = swapPick.findIndex((p) => p.nft.nft_id === nft.nft_id);
+  if (idx >= 0) {
+    swapPick.splice(idx, 1);
+    card.classList.remove('selected');
+    return;
+  }
+  if (swapPick.length === 2) return;
+  if (swapPick.length === 1 && swapPick[0].nft.gender !== nft.gender) {
+    status('Both NFTs must share the same body type.');
+    return;
+  }
+  swapPick.push({ nft, card });
+  card.classList.add('selected');
+  status('');
+  if (swapPick.length === 2) showTraitChooser();
+}
+
+function traitValue(nft, traitType) {
+  const a = nft.attributes.find((t) => t.trait_type === traitType);
+  return a ? a.value : 'None';
+}
+
+function showTraitChooser() {
+  const [a, b] = swapPick.map((p) => p.nft);
+  showSwapPanel('swap-traits-panel');
+  el('swap-img1').src = a.image;
+  el('swap-img2').src = b.image;
+  el('swap-name1').textContent = a.name;
+  el('swap-name2').textContent = b.name;
+  const list = el('trait-list');
+  list.innerHTML = '';
+  const swappable = ['Background', 'Back', 'Clothing', 'Mouth',
+                     'Eyebrows', 'Eyes', 'Head', 'Accessory'];
+  for (const trait of swappable) {
+    const row = document.createElement('label');
+    row.className = 'trait-row';
+    row.innerHTML = `<input type="checkbox" value="${trait}">
+      <strong>${trait}</strong>
+      <span>${traitValue(a, trait)} ↔ ${traitValue(b, trait)}</span>`;
+    list.appendChild(row);
+  }
+}
+
+const SWAP_STAGE_TEXT = {
+  composing: ['🎨 Crafting new NFTs', 'Composing the swapped images…'],
+  uploading: ['☁️ Uploading', 'Saving the new images and metadata to the CDN…'],
+  burning: ['🔥 Burning originals', 'Burning the two original NFTs on XRPL…'],
+  minting: ['⛏️ Reminting', 'Minting the re-crafted NFTs…'],
+  creating_offers: ['📨 Creating offers', 'Preparing the offers back to your wallet…'],
+};
+
+async function confirmSwap() {
+  const traits = [...el('trait-list').querySelectorAll('input:checked')]
+    .map((i) => i.value);
+  if (!traits.length) { status('Select at least one trait to swap.'); return; }
+  const [a, b] = swapPick.map((p) => p.nft);
+  try {
+    const s = await api('/api/swap', {
+      method: 'POST',
+      body: JSON.stringify({ nft1_id: a.nft_id, nft2_id: b.nft_id, traits }),
+    });
+    showSwapPanel('swap-result-panel');
+    el('swap-results').innerHTML = '';
+    el('swap-done-btn').hidden = true;
+    pollSwap(s.id);
+  } catch (e) {
+    status(e.message);
+  }
+}
+
+function renderSwapProgress(state) {
+  const [title, text] = SWAP_STAGE_TEXT[state] || ['Working…', ''];
+  el('swap-result-title').textContent = title;
+  el('swap-result-text').textContent = text;
+}
+
+function renderSwapResults(s) {
+  el('swap-result-title').textContent = '🎉 New NFTs crafted!';
+  el('swap-result-text').textContent =
+    'Scan each QR (or open in Xaman) to accept your re-crafted NFTs.';
+  const box = el('swap-results');
+  box.innerHTML = '';
+  for (const r of s.results) {
+    const div = document.createElement('div');
+    div.className = 'swap-result';
+    div.innerHTML = `<h3>${r.name}</h3>
+      <img class="result-img" src="${r.image_url}" alt="">
+      <img class="result-qr" src="${qrUrl(r.accept_deeplink)}" alt="QR">`;
+    const btn = document.createElement('button');
+    btn.className = 'link';
+    btn.textContent = 'Open in Xaman';
+    btn.onclick = () => openExternal(r.accept_deeplink);
+    div.appendChild(btn);
+    box.appendChild(div);
+  }
+  el('swap-done-btn').hidden = false;
+}
+
+async function pollSwap(sessionId) {
+  clearInterval(swapPollTimer);
+  swapPollTimer = setInterval(async () => {
+    let s;
+    try { s = await api(`/api/swap/${sessionId}`); } catch (e) { return; }
+    if (SWAP_STAGE_TEXT[s.state]) {
+      renderSwapProgress(s.state);
+    } else if (s.state === 'offers_ready') {
+      clearInterval(swapPollTimer);
+      renderSwapResults(s);
+    } else if (s.state === 'failed') {
+      clearInterval(swapPollTimer);
+      el('swap-result-title').textContent = '❌ Swap failed';
+      el('swap-result-text').textContent = s.error || 'Something went wrong.';
+      el('swap-done-btn').hidden = false;
+    }
+  }, 3000);
+}
+
 async function main() {
   el('register-btn').onclick = registerWallet;
   el('mint-btn').onclick = startMint;
   el('trustline-btn').onclick = startTrustline;
+  el('swap-btn').onclick = openSwapper;
+  el('swap-back-btn').onclick = () => showMintHome();
+  el('swap-cancel-btn').onclick = () => openSwapper();
+  el('swap-confirm-btn').onclick = confirmSwap;
+  el('swap-done-btn').onclick = () => showMintHome();
   el('change-wallet-btn').onclick = () => { showPanel('register-panel'); };
   el('flow-done-btn').onclick = () => { showMintHome(); };
 

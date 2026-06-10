@@ -55,6 +55,28 @@ your app. The flow inside the Activity:
 2. Register your XRPL wallet (first time only).
 3. Optionally set the LFGO trustline (QR / Xaman deep link).
 4. Mint: pay 1 LFGO (QR), watch progress, then accept the NFT offer (QR).
+5. Trait Swapper: pick two of your collection NFTs (same body type), choose
+   traits to exchange, confirm — the originals are burned, re-crafted NFTs
+   are reminted and offered back (priced in BRIX); accept both via QR.
+
+## Trait Swapper configuration
+
+The swap feature (ported from github.com/joshuahamsa/Trait-Swapper) needs the
+gender-specific layer directories on disk:
+
+```
+swap_layers/            # SWAP_LAYERS_DIR
+├── male/ female/ ape/ skeleton/
+│   └── <TraitType>/<Value>.png|.gif|.mp4
+```
+
+Optional env overrides (defaults match the original bot):
+`SWAP_ISSUER_ADDRESS`, `SWAP_TAXON` (1760), `SWAP_LAYERS_DIR` (swap_layers),
+`SWAP_CDN_FOLDER` (LFGO), `SWAP_OFFER_CURRENCY_HEX` / `SWAP_OFFER_ISSUER` /
+`SWAP_OFFER_AMOUNT` (10 BRIX), `SWAP_MAX_NFT_NUMBER` (3535).
+
+Safety: nothing is burned until both replacement images and metadata are
+uploaded to the CDN; missing layer files fail the swap before any burn.
 
 ## Notes
 

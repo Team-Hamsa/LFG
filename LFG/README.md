@@ -10,6 +10,10 @@ The **LFG Bot** is a Discord bot that allows users to mint NFTs on the XRP Ledge
 > and API (`python -m webapp.server`). Setup: [docs/ACTIVITY_SETUP.md](docs/ACTIVITY_SETUP.md).
 > Tests: `python3 -m pytest webapp/test_smoke.py`. The classic bot
 > (`python main.py`) still works unchanged.
+>
+> The Activity also includes the **Trait Swapper** (ported from
+> [Trait-Swapper](https://github.com/joshuahamsa/Trait-Swapper)): pick two of
+> your NFTs, swap traits, burn-and-remint with offers back to your wallet.
 
 ---
 
