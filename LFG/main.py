@@ -1374,19 +1374,6 @@ class BurnConfirmView(View):
                 conn = sqlite3.connect(DATABASE)
                 cursor = conn.cursor()
                 
-                # Create burned_nfts table if it doesn't exist
-                cursor.execute('''
-                    CREATE TABLE IF NOT EXISTS burned_nfts (
-                        nft_number INTEGER PRIMARY KEY,
-                        nft_id TEXT,
-                        discord_id TEXT,
-                        burned_by TEXT,
-                        reason TEXT,
-                        burned_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-                        original_mint_time TIMESTAMP
-                    )
-                ''')
-                
                 # Get all data from LFG table before deleting
                 cursor.execute('''
                     SELECT nft_number, nft_id, discord_id, created_at
