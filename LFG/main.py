@@ -86,7 +86,7 @@ if not DISCORD_BOT_TOKEN:
     raise ValueError("DISCORD_BOT_TOKEN not found in environment variables")
 
 # Discord Settings
-ADMIN_LOG_CHANNEL_ID = os.getenv("ADMIN_LOG_CHANNEL_ID")
+ADMIN_LOG_CHANNEL_ID = int(os.getenv("ADMIN_LOG_CHANNEL_ID", "0"))
 if not ADMIN_LOG_CHANNEL_ID:
     raise ValueError("ADMIN_LOG_CHANNEL_ID not found in environment variables")
 
