@@ -1,0 +1,40 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Let's Effing Go! — Mint</title>
+  <link rel="stylesheet" href="style.css">
+</head>
+<body>
+  <main id="app">
+    <h1>Let's Effing Go!</h1>
+    <p id="status" class="status">Connecting to Discord…</p>
+
+    <section id="register-panel" hidden>
+      <h2>Register your wallet</h2>
+      <p>Enter your XRPL wallet address to receive NFT offers.</p>
+      <input id="wallet-input" type="text" placeholder="r..." autocomplete="off">
+      <button id="register-btn">Register</button>
+    </section>
+
+    <section id="mint-panel" hidden>
+      <p>Wallet: <code id="wallet-display"></code> <button id="change-wallet-btn" class="link">change</button></p>
+      <div class="actions">
+        <button id="mint-btn" class="primary">🎨 Mint NFT</button>
+        <button id="trustline-btn">🔗 Set LFGO Trustline</button>
+      </div>
+    </section>
+
+    <section id="flow-panel" hidden>
+      <h2 id="flow-title"></h2>
+      <p id="flow-text"></p>
+      <img id="flow-qr" alt="QR code" hidden>
+      <p><button id="flow-link-btn" class="link" hidden>Open in Xaman</button></p>
+      <img id="nft-image" alt="Your NFT" hidden>
+      <p><button id="flow-done-btn" hidden>Back</button></p>
+    </section>
+  </main>
+  <script type="module" src="app.js"></script>
+</body>
+</html>
