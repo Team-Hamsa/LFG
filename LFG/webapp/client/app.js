@@ -167,6 +167,21 @@ async function startTrustline() {
   }
 }
 
+async function startBrixTrustline() {
+  try {
+    const t = await api('/api/brix-trustline', { method: 'POST' });
+    showFlow({
+      title: '🔗 Set BRIX Trustline',
+      text: 'Scan with Xaman/XUMM and approve the TrustSet. Required to pay trait swap fees. Expires in 5 minutes.',
+      qrData: t.xumm_url,
+      link: t.xumm_url,
+      done: true,
+    });
+  } catch (e) {
+    status(e.message);
+  }
+}
+
 async function registerWallet() {
   const wallet = el('wallet-input').value.trim();
   try {
@@ -412,6 +427,7 @@ async function main() {
   el('trustline-btn').onclick = startTrustline;
   el('swap-btn').onclick = openSwapper;
   el('swap-back-btn').onclick = () => showMintHome();
+  el('brix-trustline-btn').onclick = startBrixTrustline;
   el('swap-cancel-btn').onclick = () => openSwapper();
   el('swap-confirm-btn').onclick = confirmSwap;
   el('swap-done-btn').onclick = () => showMintHome();
