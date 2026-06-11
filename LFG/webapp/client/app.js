@@ -11,6 +11,24 @@ const insideDiscord = params.has('frame_id');
 const el = (id) => document.getElementById(id);
 const status = (msg) => { el('status').textContent = msg; };
 
+// Errors surface as dismissing toasts instead of easily-missed status text.
+function toast(msg) {
+  const t = document.createElement('div');
+  t.className = 'toast';
+  t.setAttribute('role', 'alert');
+  t.textContent = msg;
+  el('toasts').appendChild(t);
+  setTimeout(() => {
+    t.classList.add('out');
+    setTimeout(() => t.remove(), 350);
+  }, 4500);
+}
+
+function showError(msg) {
+  toast(msg);
+  status('');
+}
+
 let sessionToken = null;
 let me = null;
 let pollTimer = null;
@@ -76,15 +94,37 @@ function showMintHome() {
   status(`Hey ${me.username}! Ready to mint.`);
 }
 
-function showFlow({ title, text, qrData, link, image, done }) {
+// Mint flow step indicator (hidden for flows without a stage, e.g. trustlines)
+const MINT_STEPS = ['Pay', 'Generate', 'Mint', 'Claim'];
+const STAGE_STEP = { awaiting_payment: 0, generating: 1, minting: 2, creating_offer: 2, offer_ready: 3 };
+
+function renderSteps(stage) {
+  const ol = el('flow-steps');
+  if (!(stage in STAGE_STEP)) { ol.hidden = true; return; }
+  const active = STAGE_STEP[stage];
+  const finished = stage === 'offer_ready';
+  ol.hidden = false;
+  ol.replaceChildren(...MINT_STEPS.map((name, i) => {
+    const li = document.createElement('li');
+    li.textContent = name;
+    if (finished || i < active) li.className = 'done';
+    else if (i === active) li.className = 'active';
+    return li;
+  }));
+}
+
+function showFlow({ title, text, qrData, link, image, done, stage, spinner, celebrate }) {
   showPanel('flow-panel');
+  renderSteps(stage);
   el('flow-title').textContent = title;
   el('flow-text').textContent = text || '';
+  el('flow-spinner').hidden = !spinner;
   el('flow-qr').hidden = !qrData;
   if (qrData) el('flow-qr').src = qrUrl(qrData);
   el('flow-link-btn').hidden = !link;
   if (link) el('flow-link-btn').onclick = () => openExternal(link);
   el('nft-image').hidden = !image;
+  el('nft-image').classList.toggle('celebrate', !!(image && celebrate));
   if (image) el('nft-image').src = image;
   el('flow-done-btn').hidden = !done;
 }
@@ -118,6 +158,8 @@ function pollMint(sessionId) {
         link: s.accept_deeplink,
         image: s.image_url,
         done: true,
+        stage: s.state,
+        celebrate: true,
       });
       return;
     }
@@ -132,10 +174,10 @@ function pollMint(sessionId) {
 
     if (s.state === 'awaiting_payment') {
       const [title, text] = STAGE_TEXT.awaiting_payment;
-      showFlow({ title, text, qrData: s.payment_link, link: s.payment_link });
+      showFlow({ title, text, qrData: s.payment_link, link: s.payment_link, stage: s.state });
     } else if (STAGE_TEXT[s.state]) {
       const [title, text] = STAGE_TEXT[s.state];
-      showFlow({ title, text });
+      showFlow({ title, text, stage: s.state, spinner: true });
     }
     pollTimer = setTimeout(tick, 3000);
   };
@@ -146,10 +188,10 @@ async function startMint() {
   try {
     const s = await api('/api/mint', { method: 'POST' });
     const [title, text] = STAGE_TEXT.awaiting_payment;
-    showFlow({ title, text, qrData: s.payment_link, link: s.payment_link });
+    showFlow({ title, text, qrData: s.payment_link, link: s.payment_link, stage: s.state });
     pollMint(s.id);
   } catch (e) {
-    status(e.message);
+    showError(e.message);
   }
 }
 
@@ -164,7 +206,7 @@ async function startTrustline() {
       done: true,
     });
   } catch (e) {
-    status(e.message);
+    showError(e.message);
   }
 }
 
@@ -179,7 +221,7 @@ async function startBrixTrustline() {
       done: true,
     });
   } catch (e) {
-    status(e.message);
+    showError(e.message);
   }
 }
 
@@ -190,7 +232,7 @@ async function registerWallet() {
     me.wallet = wallet;
     showMintHome();
   } catch (e) {
-    status(e.message);
+    showError(e.message);
   }
 }
 
@@ -201,16 +243,31 @@ let swapPick = [];
 let swapPollTimer = null;
 let swappableTraits = [];
 
+function showGridSkeletons(grid, count = 6) {
+  grid.replaceChildren(...Array.from({ length: count }, () => {
+    const card = document.createElement('div');
+    card.className = 'nft-card skeleton';
+    card.setAttribute('aria-hidden', 'true');
+    const img = document.createElement('div');
+    img.className = 'ph-img';
+    const line = document.createElement('div');
+    line.className = 'ph-line';
+    card.replaceChildren(img, line);
+    return card;
+  }));
+}
+
 async function openSwapper() {
   showPanel('swap-panel');
   swapPick = [];
-  el('nft-grid').innerHTML = '';
+  showGridSkeletons(el('nft-grid'));
   status('Loading your NFTs…');
   try {
     const data = await api('/api/nfts');
     swapNfts = data.nfts;
     swappableTraits = data.swappable_traits || [];
     status('');
+    el('nft-grid').replaceChildren(); // drop the skeleton loaders
     if (!swapNfts.length) {
       el('swap-help').textContent = 'No swappable NFTs found in your wallet.';
       return;
@@ -231,7 +288,8 @@ async function openSwapper() {
       el('nft-grid').appendChild(card);
     }
   } catch (e) {
-    status(e.message);
+    el('nft-grid').replaceChildren(); // drop the skeleton loaders
+    showError(e.message);
   }
 }
 
@@ -306,7 +364,7 @@ async function confirmSwap() {
     el('swap-done-btn').hidden = true;
     pollSwap(s.id);
   } catch (e) {
-    status(e.message);
+    showError(e.message);
   }
 }
 

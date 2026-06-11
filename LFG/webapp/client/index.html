@@ -4,67 +4,76 @@
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
   <title>Let's Effing Go! — Mint</title>
-  <link rel="stylesheet" href="style.css">
+  <link rel="stylesheet" href="style.css?v=3">
 </head>
 <body>
   <main id="app">
-    <h1>Let's Effing Go!</h1>
-    <p id="status" class="status">Connecting to Discord…</p>
+    <header class="app-header">
+      <h1 class="wordmark">Let's <span>Effing</span> Go!</h1>
+      <p id="status" class="status" role="status" aria-live="polite">Connecting to Discord…</p>
+    </header>
 
-    <section id="register-panel" hidden>
-      <h2>Register your wallet</h2>
-      <p>Enter your XRPL wallet address to receive NFT offers.</p>
-      <input id="wallet-input" type="text" placeholder="r..." autocomplete="off">
-      <button id="register-btn">Register</button>
+    <section id="register-panel" class="card" hidden>
+      <h2>👋 Register your wallet</h2>
+      <p class="card-sub">Enter your XRPL wallet address to receive NFT offers.</p>
+      <input id="wallet-input" type="text" placeholder="r..." autocomplete="off"
+             spellcheck="false" aria-label="XRPL wallet address">
+      <button id="register-btn" class="primary">Register</button>
     </section>
 
-    <section id="mint-panel" hidden>
-      <p>Wallet: <code id="wallet-display"></code> <button id="change-wallet-btn" class="link">change</button></p>
+    <section id="mint-panel" class="card" hidden>
+      <p class="wallet-line">Wallet: <code id="wallet-display"></code>
+        <button id="change-wallet-btn" class="link">change</button></p>
       <div class="actions">
-        <button id="mint-btn" class="primary">🎨 Mint NFT</button>
+        <button id="mint-btn" class="primary big">🎨 Mint NFT</button>
         <button id="trustline-btn">🔗 Set LFGO Trustline</button>
         <button id="swap-btn">🔁 Trait Swapper</button>
       </div>
     </section>
 
-    <section id="swap-panel" hidden>
+    <section id="swap-panel" class="card" hidden>
       <h2>🔁 Trait Swapper</h2>
-      <p id="swap-help">Pick two NFTs with the same body type to swap traits between them.</p>
-      <div id="nft-grid" class="nft-grid"></div>
-      <p>
-        <button id="swap-back-btn" class="link">Back</button>
-        &nbsp;·&nbsp;
+      <p id="swap-help" class="card-sub">Pick two NFTs with the same body type to swap traits between them.</p>
+      <div id="nft-grid" class="nft-grid" role="group" aria-label="Your NFTs"></div>
+      <p class="row-links">
+        <button id="swap-back-btn" class="link">⬅ Back</button>
+        <span class="dot" aria-hidden="true">·</span>
         <button id="brix-trustline-btn" class="link">🔗 Set BRIX Trustline</button>
       </p>
     </section>
 
-    <section id="swap-traits-panel" hidden>
+    <section id="swap-traits-panel" class="card" hidden>
       <h2>Select traits to swap</h2>
       <div class="swap-pair">
-        <figure><img id="swap-img1" alt=""><figcaption id="swap-name1"></figcaption></figure>
-        <figure><img id="swap-img2" alt=""><figcaption id="swap-name2"></figcaption></figure>
+        <figure><img id="swap-img1" alt="First selected NFT"><figcaption id="swap-name1"></figcaption></figure>
+        <div class="swap-arrows" aria-hidden="true">⇄</div>
+        <figure><img id="swap-img2" alt="Second selected NFT"><figcaption id="swap-name2"></figcaption></figure>
       </div>
       <div id="trait-list" class="trait-list"></div>
-      <button id="swap-confirm-btn" class="primary">Swap selected traits</button>
+      <button id="swap-confirm-btn" class="primary big">Swap selected traits</button>
       <p><button id="swap-cancel-btn" class="link">Cancel</button></p>
     </section>
 
-    <section id="swap-result-panel" hidden>
+    <section id="swap-result-panel" class="card" hidden>
       <h2 id="swap-result-title"></h2>
       <p id="swap-result-text"></p>
       <div id="swap-results"></div>
-      <p><button id="swap-done-btn" hidden>Back</button></p>
+      <p><button id="swap-done-btn" hidden>⬅ Back</button></p>
     </section>
 
-    <section id="flow-panel" hidden>
+    <section id="flow-panel" class="card" hidden>
+      <ol id="flow-steps" class="steps" aria-label="Mint progress" hidden></ol>
       <h2 id="flow-title"></h2>
       <p id="flow-text"></p>
-      <img id="flow-qr" alt="QR code" hidden>
-      <p><button id="flow-link-btn" class="link" hidden>Open in Xaman</button></p>
-      <img id="nft-image" alt="Your NFT" hidden>
-      <p><button id="flow-done-btn" hidden>Back</button></p>
+      <div id="flow-spinner" class="spinner" role="img" aria-label="Working…" hidden></div>
+      <img id="flow-qr" class="qr" alt="QR code — scan with Xaman" hidden>
+      <p><button id="flow-link-btn" class="link" hidden>Open in Xaman ↗</button></p>
+      <img id="nft-image" alt="Your freshly minted NFT" hidden>
+      <p><button id="flow-done-btn" hidden>⬅ Back</button></p>
     </section>
   </main>
-  <script type="module" src="app.js?v=2"></script>
+
+  <div id="toasts" class="toasts" aria-live="assertive"></div>
+  <script type="module" src="app.js?v=3"></script>
 </body>
 </html>
