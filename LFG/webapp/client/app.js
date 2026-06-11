@@ -96,24 +96,20 @@ const STAGE_TEXT = {
   creating_offer: ['📨 Creating transfer offer', 'Almost there — preparing the offer to your wallet…'],
 };
 
-async function pollMint(sessionId) {
-  clearInterval(pollTimer);
-  pollTimer = setInterval(async () => {
+// Chained setTimeout (not setInterval) so a slow response can never overlap
+// the next request or apply stale state out of order.
+function pollMint(sessionId) {
+  clearTimeout(pollTimer);
+  const tick = async () => {
     let s;
     try {
       s = await api(`/api/mint/${sessionId}`);
     } catch (e) {
-      return; // transient; keep polling
+      pollTimer = setTimeout(tick, 3000); // transient; keep polling
+      return;
     }
 
-    if (s.state === 'awaiting_payment') {
-      const [title, text] = STAGE_TEXT.awaiting_payment;
-      showFlow({ title, text, qrData: s.payment_link, link: s.payment_link });
-    } else if (STAGE_TEXT[s.state]) {
-      const [title, text] = STAGE_TEXT[s.state];
-      showFlow({ title, text });
-    } else if (s.state === 'offer_ready') {
-      clearInterval(pollTimer);
+    if (s.state === 'offer_ready') {
       showFlow({
         title: `🎉 NFT #${s.nft_number} minted!`,
         text: 'Scan the QR (or open in Xaman) to accept the offer and claim your NFT.',
@@ -122,14 +118,27 @@ async function pollMint(sessionId) {
         image: s.image_url,
         done: true,
       });
-    } else if (s.state === 'payment_timeout') {
-      clearInterval(pollTimer);
-      showFlow({ title: '⏰ Payment timed out', text: 'No payment was received in time. Try again.', done: true });
-    } else if (s.state === 'failed') {
-      clearInterval(pollTimer);
-      showFlow({ title: '❌ Mint failed', text: s.error || 'Something went wrong.', done: true });
+      return;
     }
-  }, 3000);
+    if (s.state === 'payment_timeout') {
+      showFlow({ title: '⏰ Payment timed out', text: 'No payment was received in time. Try again.', done: true });
+      return;
+    }
+    if (s.state === 'failed') {
+      showFlow({ title: '❌ Mint failed', text: s.error || 'Something went wrong.', done: true });
+      return;
+    }
+
+    if (s.state === 'awaiting_payment') {
+      const [title, text] = STAGE_TEXT.awaiting_payment;
+      showFlow({ title, text, qrData: s.payment_link, link: s.payment_link });
+    } else if (STAGE_TEXT[s.state]) {
+      const [title, text] = STAGE_TEXT[s.state];
+      showFlow({ title, text });
+    }
+    pollTimer = setTimeout(tick, 3000);
+  };
+  pollTimer = setTimeout(tick, 3000);
 }
 
 async function startMint() {
@@ -195,7 +204,13 @@ async function openSwapper() {
     for (const nft of swapNfts) {
       const card = document.createElement('button');
       card.className = 'nft-card';
-      card.innerHTML = `<img src="${nft.image}" alt=""><span>${nft.name}</span>`;
+      // NFT metadata is untrusted — build DOM nodes, never innerHTML.
+      const img = document.createElement('img');
+      img.src = nft.image;
+      img.alt = '';
+      const name = document.createElement('span');
+      name.textContent = nft.name;
+      card.replaceChildren(img, name);
       card.onclick = () => toggleNftPick(nft, card);
       el('nft-grid').appendChild(card);
     }
@@ -239,9 +254,14 @@ function showTraitChooser() {
   for (const trait of swappableTraits) {
     const row = document.createElement('label');
     row.className = 'trait-row';
-    row.innerHTML = `<input type="checkbox" value="${trait}">
-      <strong>${trait}</strong>
-      <span>${traitValue(a, trait)} ↔ ${traitValue(b, trait)}</span>`;
+    const input = document.createElement('input');
+    input.type = 'checkbox';
+    input.value = trait;
+    const label = document.createElement('strong');
+    label.textContent = trait;
+    const values = document.createElement('span');
+    values.textContent = `${traitValue(a, trait)} ↔ ${traitValue(b, trait)}`;
+    row.replaceChildren(input, label, values);
     list.appendChild(row);
   }
 }
@@ -288,9 +308,17 @@ function renderSwapResults(s) {
   for (const r of s.results) {
     const div = document.createElement('div');
     div.className = 'swap-result';
-    div.innerHTML = `<h3>${r.name}</h3>
-      <img class="result-img" src="${r.image_url}" alt="">
-      <img class="result-qr" src="${qrUrl(r.accept_deeplink)}" alt="QR">`;
+    const h3 = document.createElement('h3');
+    h3.textContent = r.name;
+    const resultImg = document.createElement('img');
+    resultImg.className = 'result-img';
+    resultImg.src = r.image_url;
+    resultImg.alt = '';
+    const qrImg = document.createElement('img');
+    qrImg.className = 'result-qr';
+    qrImg.src = qrUrl(r.accept_deeplink);
+    qrImg.alt = 'QR';
+    div.replaceChildren(h3, resultImg, qrImg);
     const btn = document.createElement('button');
     btn.className = 'link';
     btn.textContent = 'Open in Xaman';
@@ -301,18 +329,21 @@ function renderSwapResults(s) {
   el('swap-done-btn').hidden = false;
 }
 
-async function pollSwap(sessionId) {
-  clearInterval(swapPollTimer);
-  swapPollTimer = setInterval(async () => {
+function pollSwap(sessionId) {
+  clearTimeout(swapPollTimer);
+  const tick = async () => {
     let s;
-    try { s = await api(`/api/swap/${sessionId}`); } catch (e) { return; }
-    if (SWAP_STAGE_TEXT[s.state]) {
-      renderSwapProgress(s.state);
-    } else if (s.state === 'offers_ready') {
-      clearInterval(swapPollTimer);
+    try {
+      s = await api(`/api/swap/${sessionId}`);
+    } catch (e) {
+      swapPollTimer = setTimeout(tick, 3000); // transient; keep polling
+      return;
+    }
+    if (s.state === 'offers_ready') {
       renderSwapResults(s);
-    } else if (s.state === 'failed') {
-      clearInterval(swapPollTimer);
+      return;
+    }
+    if (s.state === 'failed') {
       // A partial failure can still carry accept offers the user MUST claim
       // (their original was burned) — render them alongside the error.
       if (s.results && s.results.length) renderSwapResults(s);
@@ -320,8 +351,12 @@ async function pollSwap(sessionId) {
         s.results && s.results.length ? '⚠️ Swap partially failed' : '❌ Swap failed';
       el('swap-result-text').textContent = s.error || 'Something went wrong.';
       el('swap-done-btn').hidden = false;
+      return;
     }
-  }, 3000);
+    if (SWAP_STAGE_TEXT[s.state]) renderSwapProgress(s.state);
+    swapPollTimer = setTimeout(tick, 3000);
+  };
+  swapPollTimer = setTimeout(tick, 3000);
 }
 
 async function main() {

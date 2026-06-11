@@ -318,6 +318,23 @@ def test_normalize_nft_and_season():
     assert swap_meta.normalize_nft("ID3", {"name": "LFG #9999", "attributes": []}) is None
 
 
+def test_normalize_nft_tolerates_malformed_metadata():
+    # External metadata is untrusted: junk shapes must not raise or leak in.
+    rec = swap_meta.normalize_nft("ID4", {
+        "name": "LFG #5",
+        "burnCount": "not-a-number",
+        "attributes": ["junk", {"no_trait_type": 1},
+                       {"trait_type": "Eyes"},  # missing value
+                       {"trait_type": "Body", "value": "Ape"}],
+    })
+    assert rec["burn_count"] == 0
+    assert swap_meta.get_attr(rec["attributes"], "Eyes") == "None"
+    assert rec["gender"] == "ape"
+    # Non-list attributes and non-string name are rejected, not crashed on
+    assert swap_meta.normalize_nft("ID5", {"name": "LFG #5", "attributes": {"a": 1}})
+    assert swap_meta.normalize_nft("ID6", {"name": 42}) is None
+
+
 def _swap_session():
     nft = lambda i: {  # noqa: E731
         "nft_id": f"OLD{i}", "name": f"Let's Effing Go! #{i}", "number": i,

@@ -19,6 +19,11 @@ from lfg_core import config
 
 LAYER_EXTENSIONS = (".png", ".gif", ".mp4")
 
+# Bunny storage can stall; never let a listing or layer download hang a
+# mint/swap session forever. Downloads get longer for multi-MB video layers.
+LIST_TIMEOUT = aiohttp.ClientTimeout(total=30, connect=10)
+DOWNLOAD_TIMEOUT = aiohttp.ClientTimeout(total=120, connect=10)
+
 
 class LocalLayerStore:
     def __init__(self, base_dir: str = None):
@@ -74,7 +79,7 @@ class CdnLayerStore:
         if not url.endswith("/"):
             url += "/"
         headers = {"AccessKey": config.BUNNY_CDN_ACCESS_KEY}
-        async with aiohttp.ClientSession() as session:
+        async with aiohttp.ClientSession(timeout=LIST_TIMEOUT) as session:
             async with session.get(url, headers=headers) as resp:
                 if resp.status != 200:
                     raise Exception(f"CDN listing failed ({resp.status}) for {rel_path or '/'}")
@@ -115,7 +120,7 @@ class CdnLayerStore:
             return local_path
         os.makedirs(os.path.dirname(local_path), exist_ok=True)
         headers = {"AccessKey": config.BUNNY_CDN_ACCESS_KEY}
-        async with aiohttp.ClientSession() as session:
+        async with aiohttp.ClientSession(timeout=DOWNLOAD_TIMEOUT) as session:
             async with session.get(self._storage_url(rel_path), headers=headers) as resp:
                 if resp.status != 200:
                     raise Exception(f"CDN download failed ({resp.status}) for {rel_path}")
