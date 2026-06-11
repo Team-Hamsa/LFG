@@ -1,222 +1,208 @@
-# LFG Bot - XRPL NFT Minting and Token Trading Bot
+# LFG — XRPL NFT Minting Bot & Discord Activity
 
-![Discord](https://img.shields.io/badge/Discord-Bot-blue) ![XRPL](https://img.shields.io/badge/XRPL-NFT-green) ![XUMM](https://img.shields.io/badge/XUMM-Integration-orange)
+![Discord](https://img.shields.io/badge/Discord-Bot%20%2B%20Activity-blue) ![XRPL](https://img.shields.io/badge/XRPL-NFT-green) ![Xaman](https://img.shields.io/badge/Xaman%20(XUMM)-Integration-orange)
 
-The **LFG Bot** is a Discord bot that allows users to mint NFTs on the XRP Ledger (XRPL) and trade tokens (`LFGO`) using the XUMM app. The bot dynamically generates NFT images by combining traits from different layers, uploads them to BunnyCDN, and mints them on the XRPL. It also supports token trading via AMM pools.
+**LFG** lets users mint NFTs on the XRP Ledger (XRPL) and swap traits between
+NFTs they own, paying with the `LFGO` token via the Xaman (XUMM) app. NFT
+images are composed dynamically from trait layers with ffmpeg, uploaded to
+BunnyCDN, and minted on the XRPL.
 
-> **This branch (`webapp-activity`)** adds a webapp version that runs as a
-> **Discord Activity** (embedded app). The mint pipeline is extracted into the
-> shared `lfg_core/` package; `webapp/server.py` serves the Activity frontend
-> and API (`python -m webapp.server`). Setup: [docs/ACTIVITY_SETUP.md](docs/ACTIVITY_SETUP.md).
-> Tests: `python3 -m pytest webapp/test_smoke.py`. The classic bot
-> (`python main.py`) still works unchanged.
->
-> The Activity also includes the **Trait Swapper** (ported from
-> [Trait-Swapper](https://github.com/joshuahamsa/Trait-Swapper)): pick two of
-> your NFTs, swap traits, burn-and-remint with offers back to your wallet.
+This branch (`webapp-activity`) ships **two front ends over one shared
+pipeline** (`lfg_core/`):
 
----
+- **Discord Activity webapp** (`python -m webapp.server`) — an embedded app
+  that runs inside Discord: wallet registration, LFGO trustline setup, NFT
+  minting, and the **Trait Swapper** (ported from
+  [Trait-Swapper](https://github.com/joshuahamsa/Trait-Swapper)). Setup guide:
+  [docs/ACTIVITY_SETUP.md](docs/ACTIVITY_SETUP.md).
+- **Classic Discord bot** (`python main.py`) — slash-command/button interface
+  for the same mint flow.
 
-## Table of Contents
-
-1. [Features](#features)
-2. [Prerequisites](#prerequisites)
-3. [Installation](#installation)
-4. [Directory Structure](#directory-structure)
-5. [Configuration](#configuration)
-6. [Usage](#usage)
-7. [Commands](#commands)
-8. [Contributing](#contributing)
-9. [License](#license)
-10. [Acknowledgments](#acknowledgments)
+Both can run side by side; they share `lfg_nfts.db` and the `lfg_core`
+modules.
 
 ---
 
 ## Features
 
-- **Dynamic NFT Generation**: Randomly selects traits from directories, combines them into an image using `ffmpeg`, and generates metadata.
-- **BunnyCDN Integration**: Uploads generated NFT images and metadata files to BunnyCDN.
-- **XRPL NFT Minting**: Mints NFTs on the XRPL using XUMM for secure transaction signing.
-- **Token Trading**: Allows users to trade `XRP` or `BRIX` for `LFGO` tokens via AMM pools.
-- **Interactive Buttons**: Provides an intuitive interface with buttons for actions like "Mint NFT" and "Buy LFGO".
-- **Scalable Trait System**: Dynamically loads traits from directories, making it easy to add new traits without modifying the code.
+- **Dynamic NFT generation** — random trait selection per body type
+  (male/female/ape/skeleton), composited with ffmpeg; `.gif`/`.mp4` layers
+  produce animated (video) NFTs with a PNG thumbnail.
+- **Unified trait layer store** — mint and swap pull layers from a single
+  CDN tree (`layers/<gender>/<TraitType>/<Value>.ext`), downloaded on demand
+  and cached locally; `LAYER_SOURCE=local` for development.
+- **Trait Swapper** — pick two of your collection NFTs (same body type),
+  choose traits to exchange; replacements are minted **before** the originals
+  are burned, every on-chain step is journaled to `swap_records/`, and
+  failures roll back so no NFT is lost.
+- **Xaman (XUMM) signing** — all user transactions (payment, trustline, NFT
+  offer acceptance) are signed in the user's own wallet via QR code or deep
+  link; the server never holds user keys.
+- **Replay-safe payment watching** — payments are verified against
+  `meta.delivered_amount` over the XRPL websocket (rippled API v2 shapes),
+  with a time-bounded backfill so a payment that lands during a reconnect is
+  still caught but old payments can't be replayed.
+- **BunnyCDN hosting** — images and metadata JSON uploaded to Bunny storage,
+  served from the public CDN.
+
+---
+
+## Repository layout
+
+```
+LFG/
+├── main.py                  # Classic Discord bot entry point
+├── lfg_core/                # Shared pipeline (used by both front ends)
+│   ├── config.py            # All environment configuration
+│   ├── xrpl_ops.py          # Mint, burn, offers, payment watching
+│   ├── xumm_ops.py          # Xaman payloads + QR generation
+│   ├── mint_flow.py         # Mint session state machine
+│   ├── swap_flow.py         # Trait-swap state machine (mint-before-burn)
+│   ├── swap_meta.py         # Wallet NFT + metadata fetching
+│   ├── swap_compose.py      # ffmpeg compositing + output upload
+│   ├── layer_store.py       # Unified CDN/local trait layer store
+│   ├── traits.py            # Random trait selection
+│   └── cdn.py               # BunnyCDN upload helper
+├── webapp/
+│   ├── server.py            # aiohttp backend for the Discord Activity
+│   ├── client/              # No-build frontend (index.html, app.js, style.css)
+│   └── test_smoke.py        # Smoke tests
+├── db_helpers.py            # LFG (mint records) table helpers
+├── user_db.py               # Users table (wallet registration)
+├── init_db.py               # Database initialization
+├── scripts/upload_layers_cdn.py  # One-shot upload of layers/ to BunnyCDN
+├── docs/ACTIVITY_SETUP.md   # Discord Activity setup guide
+└── legacy/linode/           # Preserved legacy production code (see its README)
+```
 
 ---
 
 ## Prerequisites
 
-Before running the bot, ensure you have the following:
-
-- Python 3.8 or higher
-- A Discord bot token from the [Discord Developer Portal](https://discord.com/developers/applications)
-- XUMM API credentials (API Key and Secret) from the [XUMM Developer Console](https://apps.xumm.dev/)
-- An XRPL testnet account (for testing purposes)
-- BunnyCDN credentials (Access Key and Storage Zone)
-- `ffmpeg` installed on your system for image processing
-- Basic knowledge of XRPL, XUMM, and BunnyCDN
+- Python 3.10+
+- `ffmpeg` on the system path
+- A Discord application (bot token; plus Client ID/Secret for the Activity)
+- Xaman (XUMM) API credentials — [Xaman Developer Console](https://apps.xumm.dev/)
+- BunnyCDN storage zone credentials
+- A funded XRPL account ([testnet faucet](https://xrpl.org/xrp-testnet-faucet.html) for testing)
 
 ---
 
 ## Installation
 
-1. **Clone the Repository**
+```bash
+git clone https://github.com/joshuahamsa/Mint-Bot.git
+cd Mint-Bot
+sudo apt-get update && sudo apt-get install -y ffmpeg
+pip install -r requirements.txt
+```
 
-   ```bash
-   git clone https://github.com/yourusername/lfg-bot.git
-   cd lfg-bot
-   ```
+### Environment variables
 
-2. **Install Dependencies**
+Create a `.env` in the repo root. Required:
 
-   Run the setup script to install both Python dependencies and system dependencies (like ffmpeg):
+```plaintext
+DISCORD_BOT_TOKEN=...        # classic bot only
+XUMM_API_KEY=...
+XUMM_API_SECRET=...
+SEED=...                     # XRPL wallet seed used for minting
+TOKEN_ISSUER_ADDRESS=...
+TOKEN_CURRENCY_HEX=...
+BUNNY_CDN_ACCESS_KEY=...
+BUNNY_CDN_STORAGE_ZONE=...
+```
 
-   ```bash
-   ./setup.sh
-   ```
+Discord Activity (webapp) additionally needs:
 
-   Or manually install:
+```plaintext
+DISCORD_CLIENT_ID=...
+DISCORD_CLIENT_SECRET=...
+WEBAPP_SESSION_SECRET=...    # long random string
+WEBAPP_PORT=8080
+```
 
-   ```bash
-   # Install system dependency (ffmpeg)
-   sudo apt-get update && sudo apt-get install -y ffmpeg  # For Debian/Ubuntu
-   
-   # Install Python dependencies
-   pip install -r requirements.txt
-   ```
+Everything else has sensible defaults — see `lfg_core/config.py` for the full
+list (XRPL endpoints, NFT taxon/fees, layer store, Trait Swapper settings).
+Defaults point at **testnet**; set `XRPL_JSON_RPC_URL` / `XRPL_WS_URL` for
+mainnet.
 
-3. **Set Up Environment Variables**
+### Trait layers
 
-   Create a `.env` file in the root directory and add the following variables:
+Upload the canonical layer tree to BunnyCDN (default folder `layers/`):
 
-   ```plaintext
-   DISCORD_BOT_TOKEN=YOUR_DISCORD_BOT_TOKEN
-   XUMM_API_KEY=YOUR_XUMM_API_KEY
-   XUMM_API_SECRET=YOUR_XUMM_API_SECRET
-   BUNNY_CDN_ACCESS_KEY=YOUR_BUNNY_CDN_ACCESS_KEY
-   BUNNY_CDN_STORAGE_ZONE=YOUR_BUNNY_CDN_STORAGE_ZONE
-   ```
+```
+layers/
+├── male/
+│   ├── Background/<Value>.png|.gif|.mp4
+│   ├── Back/ Body/ Clothing/ Mouth/ Eyebrows/ Eyes/ Head/ Accessory/
+├── female/
+├── ape/
+└── skeleton/
+```
 
-4. **Prepare Trait Layers**
-
-   Create a `trait_layers` directory in the root folder. Inside this directory, create subdirectories for each trait layer (e.g., `background`, `body`, `eyes`). Add image files for each trait in the respective directories.
-
-   Example structure:
-
-   ```
-   /trait_layers/
-       /background/
-           background1.png
-           background2.png
-       /body/
-           body1.png
-           body2.png
-       /eyes/
-           eyes1.png
-           eyes2.png
-   ```
-
-5. **Run the Bot**
-
-   Start the bot using the following command:
-
-   ```bash
-   python bot.py
-   ```
+File stems are the metadata trait values, verbatim. Use
+`scripts/upload_layers_cdn.py` to push a local `layers/` tree to the CDN, or
+set `LAYER_SOURCE=local` to develop without a CDN.
 
 ---
 
-## Directory Structure
+## Running
 
+**Discord Activity webapp** (see [docs/ACTIVITY_SETUP.md](docs/ACTIVITY_SETUP.md)
+for portal configuration and HTTPS tunneling):
+
+```bash
+python -m webapp.server
 ```
-lfg-bot/
-├── bot.py                # Main bot script
-├── .env                  # Environment variables (DO NOT COMMIT TO GIT)
-├── trait_layers/         # Directory containing trait layers
-│   ├── background/       # Background trait images
-│   ├── body/             # Body trait images
-│   ├── eyes/             # Eyes trait images
-│   └── ...               # Add more layers as needed
-├── output_nft.png        # Generated NFT image (temporary)
-├── metadata.json         # Generated metadata file (temporary)
-└── README.md             # This file
+
+**Classic bot:**
+
+```bash
+python main.py
+```
+
+**Tests:**
+
+```bash
+python3 -m pytest webapp/test_smoke.py
 ```
 
 ---
 
-## Configuration
+## Usage (inside the Activity)
 
-### Environment Variables
+1. Launch the Activity from a voice channel or the App Launcher.
+2. Register your XRPL wallet (first time only).
+3. Optionally set the LFGO trustline (QR / Xaman deep link).
+4. **Mint** — pay 1 LFGO, watch progress, accept the NFT offer in Xaman.
+5. **Trait Swapper** — pick two of your NFTs, choose traits to exchange,
+   confirm; accept both re-minted NFTs via QR (priced in BRIX).
 
-| Variable                | Description                                      |
-|-------------------------|--------------------------------------------------|
-| `DISCORD_BOT_TOKEN`     | Your Discord bot token                           |
-| `XUMM_API_KEY`          | XUMM API key                                     |
-| `XUMM_API_SECRET`       | XUMM API secret                                  |
-| `BUNNY_CDN_ACCESS_KEY`  | BunnyCDN access key                              |
-| `BUNNY_CDN_STORAGE_ZONE`| BunnyCDN storage zone name                       |
-
-### XRPL Testnet Account
-
-Ensure you have a funded XRPL testnet account for testing. You can get testnet funds from the [XRPL Faucet](https://xrpl.org/xrp-testnet-faucet.html).
-
----
-
-## Usage
-
-1. **Invite the Bot to Your Server**
-
-   Use the Discord Developer Portal to invite the bot to your server.
-
-2. **Interact with the Bot**
-
-   Use the `/LFG` slash command to interact with the bot. The bot will present buttons for "Mint NFT" and "Buy LFGO".
-
-3. **Mint NFT**
-
-   - Click the "Mint NFT" button.
-   - The bot will generate an NFT image by randomly selecting traits, upload it to BunnyCDN, and mint it on the XRPL.
-   - Follow the QR code or deep link provided by XUMM to complete the minting process.
-
-4. **Buy LFGO Tokens**
-
-   - Click the "Buy LFGO" button.
-   - Select the currency (`XRP` or `BRIX`) to trade.
-   - Follow the QR code or deep link provided by XUMM to complete the trade.
-
----
-
-## Commands
-
-### `/LFG`
-
-- **Description**: Displays an embed with buttons for "Mint NFT" and "Buy LFGO".
-- **Usage**: `/LFG`
+The classic bot exposes the same mint flow via `/letsgo`, wallet registration
+via `/register <wallet>`, and an admin panel via `/admin` (stats, NFT lookup,
+burns with audit logging).
 
 ---
 
 ## Contributing
 
-Contributions are welcome! If you'd like to contribute to this project, please follow these steps:
-
 1. Fork the repository.
-2. Create a new branch (`git checkout -b feature/YourFeatureName`).
-3. Commit your changes (`git commit -m 'Add some feature'`).
-4. Push to the branch (`git push origin feature/YourFeatureName`).
-5. Open a pull request.
-
-Please ensure your code adheres to the project's coding standards and includes appropriate documentation.
+2. Create a branch (`git checkout -b feature/YourFeatureName`).
+3. Commit and push your changes.
+4. Open a pull request.
 
 ---
 
 ## License
 
-This project is licensed under the MIT License. See the [LICENSE](LICENSE) file for details.
+MIT — see [LICENSE](LICENSE).
 
 ---
 
 ## Acknowledgments
 
-- [XUMM SDK](https://github.com/XRPL-Labs/XUMM-SDK): For secure transaction signing on the XRPL.
-- [XRPL-Py](https://github.com/XRPLF/xrpl-py): For interacting with the XRPL.
-- [BunnyCDN](https://bunny.net/): For hosting NFT images and metadata.
-- [FFmpeg](https://ffmpeg.org/): For combining images into NFTs.
+- [xrpl-py](https://github.com/XRPLF/xrpl-py) — XRPL client library
+- [Xaman (XUMM) SDK](https://github.com/XRPL-Labs/XUMM-SDK) — transaction signing
+- [Discord Embedded App SDK](https://github.com/discord/embedded-app-sdk) — Activity runtime
+- [BunnyCDN](https://bunny.net/) — image/metadata hosting
+- [FFmpeg](https://ffmpeg.org/) — trait layer compositing
