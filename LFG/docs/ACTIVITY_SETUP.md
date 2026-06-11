@@ -52,6 +52,7 @@ The Activity can only be launched in a server where the app is installed.
 
 1. **Activities → Settings**: toggle **Enable Activities** ON.
 2. **Activities → URL Mappings**: add one row:
+
    | Prefix | Target |
    |---|---|
    | `/` | `your-backend-host.example.com` (the host running `webapp/server.py`, HTTPS, no scheme) |
