@@ -52,6 +52,14 @@ class MintSession:
         self.accept_qr_url = None
         self.accept_deeplink = None
 
+    async def prepare_payment_link(self) -> None:
+        """Replace the static fallback link with a real XUMM sign-request
+        payload. Xaman cannot parse the raw-JSON detect link, so the payload
+        URL is the one that must end up in the payment QR (issue #8)."""
+        payload = await xumm_ops.create_payment_payload(config.TOKEN_ISSUER_ADDRESS)
+        if payload:
+            self.payment_link = payload["xumm_url"]
+
     def to_dict(self) -> dict:
         return {
             "id": self.id,

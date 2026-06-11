@@ -49,8 +49,67 @@ def test_session_token_tamper_rejected():
 
 
 def test_payment_link_is_xaman_detect():
+    # Last-resort fallback only (used when the XUMM API is down); the real
+    # payment link is a XUMM sign-request payload — see the tests below.
     link = xumm_ops.generate_static_payment_link("rrrrrrrrrrrrrrrrrrrrrhoLvTp")
     assert link.startswith("https://xaman.app/detect/")
+
+
+def _fake_xumm_api(monkeypatch, captured):
+    class FakeResp:
+        def json(self):
+            return {"refs": {"qr_png": "https://xumm.test/qr.png"},
+                    "next": {"always": "https://xumm.app/sign/UUID1"},
+                    "uuid": "UUID1"}
+
+    def fake_post(url, json=None, headers=None):
+        captured.update(json)
+        return FakeResp()
+
+    monkeypatch.setattr(xumm_ops.requests, "post", fake_post)
+
+
+def test_create_payment_payload_is_xumm_sign_request(monkeypatch):
+    """The payment QR must encode a real XUMM sign-request URL — Xaman cannot
+    parse the hand-rolled raw-JSON xaman.app/detect link (issue #8)."""
+    captured = {}
+    _fake_xumm_api(monkeypatch, captured)
+    payload = asyncio.get_event_loop().run_until_complete(
+        xumm_ops.create_payment_payload("rDest"))
+    assert payload["xumm_url"] == "https://xumm.app/sign/UUID1"
+    tx = captured["txjson"]
+    assert tx["TransactionType"] == "Payment"
+    assert tx["Destination"] == "rDest"
+    assert tx["Amount"]["value"] == "1"
+    assert captured["options"]["expire"] >= 1
+
+
+def test_create_payment_payload_custom_currency(monkeypatch):
+    captured = {}
+    _fake_xumm_api(monkeypatch, captured)
+    brix = "4252495800000000000000000000000000000000"
+    asyncio.get_event_loop().run_until_complete(xumm_ops.create_payment_payload(
+        "rDest", value="20", currency=brix, issuer="rBrixIssuer"))
+    assert captured["txjson"]["Amount"] == {"currency": brix, "value": "20",
+                                            "issuer": "rBrixIssuer"}
+
+
+def test_mint_session_prepare_uses_xumm_payload(monkeypatch):
+    async def fake_payload(destination, **kw):
+        return {"qr_url": "q", "xumm_url": "https://xumm.app/sign/PAY", "uuid": "u"}
+    monkeypatch.setattr(mint_flow.xumm_ops, "create_payment_payload", fake_payload)
+    session = mint_flow.MintSession(discord_id="1", wallet_address="rTest")
+    asyncio.get_event_loop().run_until_complete(session.prepare_payment_link())
+    assert session.payment_link == "https://xumm.app/sign/PAY"
+
+
+def test_mint_session_prepare_falls_back_to_static(monkeypatch):
+    async def fail(destination, **kw):
+        return None
+    monkeypatch.setattr(mint_flow.xumm_ops, "create_payment_payload", fail)
+    session = mint_flow.MintSession(discord_id="1", wallet_address="rTest")
+    asyncio.get_event_loop().run_until_complete(session.prepare_payment_link())
+    assert session.payment_link.startswith("https://xaman.app/detect/")
 
 
 def test_qr_png():
@@ -209,6 +268,49 @@ def test_wait_for_payment_backfills_missed_payment(monkeypatch):
     paid = loop.run_until_complete(xrpl_ops.wait_for_payment(
         "rDest", "rSender", timeout_seconds=1, not_before=tx_unix + 60))
     assert paid is False
+
+
+def test_wait_for_payment_reconnects_after_stream_drop(monkeypatch):
+    """A dropped websocket must reconnect (and re-check recent history)
+    instead of reporting 'no payment' while time remains (issue #6)."""
+    import copy
+    entry = copy.deepcopy(V2_STREAM_MSG)
+    entry["tx_json"]["date"] = 800000000
+    connections = []
+
+    class FakeWS:
+        def __init__(self, url):
+            connections.append(self)
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *a):
+            return False
+
+        async def send(self, req):
+            pass
+
+        async def request(self, req):
+            # The payment "lands" while the first connection is down
+            class R:
+                result = {"transactions": [entry] if len(connections) > 1 else []}
+            return R()
+
+        def __aiter__(self):
+            return self
+
+        async def __anext__(self):
+            raise StopAsyncIteration  # stream closes immediately
+
+    monkeypatch.setattr(xrpl_ops, "AsyncWebsocketClient", FakeWS)
+    monkeypatch.setattr(xrpl_ops.config, "TOKEN_CURRENCY_HEX", CUR)
+    monkeypatch.setattr(xrpl_ops.config, "TOKEN_ISSUER_ADDRESS", "rIssuer")
+    tx_unix = 800000000 + xrpl_ops.RIPPLE_EPOCH_OFFSET
+    paid = asyncio.get_event_loop().run_until_complete(xrpl_ops.wait_for_payment(
+        "rDest", "rSender", timeout_seconds=10, not_before=tx_unix - 60))
+    assert paid is True
+    assert len(connections) >= 2
 
 
 def test_mint_session_payment_timeout(monkeypatch):
@@ -425,6 +527,12 @@ def _patch_swap_stubs(monkeypatch, tmp_path, events,
         events.append(f"fee_requested {kwargs['expected_amount']}")
         return fee_paid
 
+    async def fake_payment_payload(destination, value="1", **kw):
+        return {"qr_url": "https://xumm.test/qr.png",
+                "xumm_url": f"https://xumm.app/sign/PAY_{value}", "uuid": "u"}
+
+    monkeypatch.setattr(swap_flow.xumm_ops, "create_payment_payload",
+                        fake_payment_payload)
     monkeypatch.setattr(swap_flow.xrpl_ops, "modify_nft", fake_modify)
     monkeypatch.setattr(swap_flow.xrpl_ops, "wait_for_payment", fake_wait_for_payment)
     monkeypatch.setattr(swap_flow.xrpl_ops, "bot_wallet_address", lambda: "rBotWallet")
@@ -531,7 +639,8 @@ def test_swap_session_both_mutable_modifies_in_place(monkeypatch, tmp_path):
     # Fee charged upfront (2 × 10 BRIX); no mint/burn/offer at all
     assert events == ["fee_requested 20", "modify OLD10", "modify OLD20"]
     assert session.fee_amount == "20"
-    assert session.payment_link and "xaman.app/detect" in session.payment_link
+    # Fee QR is a real XUMM sign request, not the unscannable detect link
+    assert session.payment_link == "https://xumm.app/sign/PAY_20"
     assert all(r["modified"] for r in session.results)
     # NFTokenModify keeps the token IDs
     assert {r["nft_id"] for r in session.results} == {"OLD10", "OLD20"}

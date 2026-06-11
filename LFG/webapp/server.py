@@ -206,6 +206,10 @@ async def handle_mint_start(request):
 
     session = mint_flow.MintSession(discord_id=user["id"], wallet_address=request["wallet"])
     mint_sessions[session.id] = session
+    # Swap the static fallback link for a real XUMM sign request before the
+    # first QR is rendered (after the insert above, so the one-active-session
+    # guard stays race-free).
+    await session.prepare_payment_link()
     asyncio.get_event_loop().create_task(mint_flow.run_mint_session(session))
     return web.json_response(session.to_dict())
 
