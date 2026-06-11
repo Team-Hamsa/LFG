@@ -184,6 +184,14 @@ async def handle_trustline(request):
     return web.json_response(payload)
 
 
+@require_auth
+async def handle_brix_trustline(request):
+    payload = await xumm_ops.create_brix_trustline_payload()
+    if not payload:
+        return web.json_response({"error": "failed to create BRIX trustline request"}, status=502)
+    return web.json_response(payload)
+
+
 @require_wallet
 async def handle_mint_start(request):
     user = request["user"]
@@ -287,6 +295,7 @@ def create_app() -> web.Application:
     app.router.add_get("/api/me", handle_me)
     app.router.add_post("/api/register", handle_register)
     app.router.add_post("/api/trustline", handle_trustline)
+    app.router.add_post("/api/brix-trustline", handle_brix_trustline)
     app.router.add_post("/api/mint", handle_mint_start)
     app.router.add_get("/api/mint/{session_id}", handle_mint_status)
     app.router.add_get("/api/nfts", handle_nfts)
