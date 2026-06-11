@@ -4,21 +4,69 @@ How to run the LFG mint webapp as a Discord Activity (embedded app).
 
 ## 1. Discord Developer Portal
 
-In your application at https://discord.com/developers/applications:
+Everything in this section is one-time portal configuration at
+https://discord.com/developers/applications → your application. Do the steps
+**in order** — each tab depends on the one before it. Tab names are in the
+left sidebar.
 
-1. **OAuth2 → General**: note the **Client ID** and **Client Secret**.
-2. **Activities → Settings** (or "Embedded App SDK"): enable Activities for
-   the app.
-3. **Activities → URL Mappings**: add
+### 1a. Bot — credentials and privileged intents
+
+1. **Bot → Token**: copy the bot token → `DISCORD_BOT_TOKEN` in `.env`
+   (classic bot only; the Activity does not use it).
+2. **Bot → Privileged Gateway Intents**: turn **all three ON**:
+   - ☑ **Presence Intent**
+   - ☑ **Server Members Intent**
+   - ☑ **Message Content Intent**
+
+   > ⚠️ Required by `main.py` (it sets `intents.presences`,
+   > `intents.members`, `intents.message_content`). If any is off, the
+   > classic bot **crashes on startup** with `PrivilegedIntentsRequired`.
+   > The Activity webapp alone does not need these, but enable them anyway
+   > if you'll run both.
+
+### 1b. OAuth2 — credentials and redirect
+
+1. **OAuth2 → General**: copy the **Client ID** → `DISCORD_CLIENT_ID` and the
+   **Client Secret** → `DISCORD_CLIENT_SECRET` in `.env`.
+2. **OAuth2 → Redirects**: add your HTTPS backend URL (your tunnel hostname,
+   see §3). Any valid mapped URL works — the Embedded App SDK uses an in-app
+   `response_type: code` flow and the server exchanges the code for an
+   `identify`-scoped token. Without a registered redirect, the in-app
+   `authorize()` call fails.
+
+### 1c. Installation — how the app gets added to a server
+
+The Activity can only be launched in a server where the app is installed.
+
+1. **Installation → Installation Contexts**: enable **Guild Install** (and
+   **User Install** if you want it launchable from DMs).
+2. **Installation → Default Install Settings → Guild Install**:
+   - **Scopes:** `bot`, `applications.commands`
+   - **Permissions:** `Send Messages`, `Embed Links`, `Attach Files`,
+     `Read Message History`, `Use Application Commands`
+3. **Installation → Install Link**: copy it, open it, and add the app to your
+   server. (This is also what registers the `/letsgo`, `/register`, `/admin`
+   slash commands for the classic bot.)
+
+### 1d. Activities — enable the embedded app
+
+1. **Activities → Settings**: toggle **Enable Activities** ON.
+2. **Activities → URL Mappings**: add both rows:
    | Prefix | Target |
    |---|---|
-   | `/` | `your-backend-host.example.com` (the host running `webapp/server.py`, HTTPS) |
+   | `/` | `your-backend-host.example.com` (the host running `webapp/server.py`, HTTPS, no scheme) |
    | `/esm` | `esm.sh` |
 
-   The `/esm` mapping lets the frontend import `@discord/embedded-app-sdk`
-   through the Activity proxy (`/.proxy/esm/...`) without a Node build step.
-4. **OAuth2 → Redirects**: add your mapped URL (any valid URL works; the
-   Embedded App SDK uses `response_type: code` with an in-app flow).
+   > The `/esm` mapping is **mandatory** — `webapp/client/app.js` imports
+   > `@discord/embedded-app-sdk` through the Activity proxy
+   > (`/.proxy/esm/...`) with no Node build step. If it's missing, the
+   > Activity loads to a **blank screen**.
+
+   > ⚠️ With an ngrok-free / cloudflared quick tunnel, the hostname **changes
+   > every time the tunnel restarts**. When that happens you must re-paste the
+   > new hostname into both the `/` URL Mapping (here) **and** the OAuth2
+   > Redirect (§1b). This is the single most common "it stopped working"
+   > cause — see §3 for a stable-URL option.
 
 ## 2. Environment variables
 
@@ -34,17 +82,37 @@ WEBAPP_PORT=8080
 ## 3. Run the backend
 
 ```bash
-python -m webapp.server
+python -m webapp.server          # listens on WEBAPP_PORT (default 8080)
 ```
 
-Expose it over HTTPS (Discord requires it). For development, a tunnel works:
+Verify it's up locally before tunnelling:
+
+```bash
+curl -s -o /dev/null -w "%{http_code}\n" http://localhost:$WEBAPP_PORT/   # expect 200
+```
+
+Discord requires the Activity to be served over **HTTPS**. For development, a
+tunnel works (point it at your `WEBAPP_PORT`):
 
 ```bash
 cloudflared tunnel --url http://localhost:8080
 # or: ngrok http 8080
 ```
 
-Put the tunnel hostname in the `/` URL mapping.
+Copy the tunnel's HTTPS hostname into the `/` URL Mapping (§1d) **and** the
+OAuth2 Redirect (§1b).
+
+**Stable URL (recommended).** Quick tunnels hand you a new random hostname on
+every restart, and each change means re-editing two portal fields. To stop
+the churn, use a hostname that doesn't move:
+
+- **ngrok reserved domain** (paid): `ngrok http --domain=your-name.ngrok.app 8080`
+- **cloudflared named tunnel** (free, needs a domain on Cloudflare):
+  `cloudflared tunnel route dns <tunnel> activity.yourdomain.com`
+- Or run the tunnel under pm2 so it survives reboots, and only re-paste the
+  portal fields when the hostname actually changes.
+
+With a fixed hostname you configure the portal once and never touch it again.
 
 ## 4. Launch in Discord
 
