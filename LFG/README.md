@@ -31,10 +31,14 @@ modules.
 - **Unified trait layer store** — mint and swap pull layers from a single
   CDN tree (`layers/<gender>/<TraitType>/<Value>.ext`), downloaded on demand
   and cached locally; `LAYER_SOURCE=local` for development.
-- **Trait Swapper** — pick two of your collection NFTs (same body type),
-  choose traits to exchange; replacements are minted **before** the originals
-  are burned, every on-chain step is journaled to `swap_records/`, and
-  failures roll back so no NFT is lost.
+- **Trait Swapper** — pick two of your collection NFTs (same body type) and
+  choose traits to exchange. Since the XRPL **Dynamic NFTs** amendment, new
+  mints are mutable (not burnable, `NFT_FLAGS=24`) and are swapped **in
+  place** via `NFTokenModify` (fee collected upfront via a XUMM BRIX
+  payment); legacy burnable NFTs are still burned and reminted — as mutable —
+  with replacements minted **before** the originals are burned. Every
+  on-chain step is journaled to `swap_records/`, and failures roll back
+  (replacements burned, modifies reverted) so no NFT is lost.
 - **Xaman (XUMM) signing** — all user transactions (payment, trustline, NFT
   offer acceptance) are signed in the user's own wallet via QR code or deep
   link; the server never holds user keys.
@@ -57,7 +61,7 @@ LFG/
 │   ├── xrpl_ops.py          # Mint, burn, offers, payment watching
 │   ├── xumm_ops.py          # Xaman payloads + QR generation
 │   ├── mint_flow.py         # Mint session state machine
-│   ├── swap_flow.py         # Trait-swap state machine (mint-before-burn)
+│   ├── swap_flow.py         # Trait-swap state machine (modify-in-place / mint-before-burn)
 │   ├── swap_meta.py         # Wallet NFT + metadata fetching
 │   ├── swap_compose.py      # ffmpeg compositing + output upload
 │   ├── layer_store.py       # Unified CDN/local trait layer store

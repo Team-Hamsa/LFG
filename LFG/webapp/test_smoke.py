@@ -335,17 +335,20 @@ def test_normalize_nft_tolerates_malformed_metadata():
     assert swap_meta.normalize_nft("ID6", {"name": 42}) is None
 
 
-def _swap_session():
-    nft = lambda i: {  # noqa: E731
-        "nft_id": f"OLD{i}", "name": f"Let's Effing Go! #{i}", "number": i,
-        "season": 1, "image": f"https://cdn.test/{i}.png", "video": None,
-        "burn_count": 0, "gender": "male",
-        "attributes": swap_meta.normalize_attributes(
-            [{"trait_type": "Eyes", "value": f"Eyes{i}"},
-             {"trait_type": "Body", "value": "Straight Light"}]),
-    }
+def _swap_session(mutable=(False, False)):
+    def nft(i, mut):
+        return {
+            "nft_id": f"OLD{i}", "name": f"Let's Effing Go! #{i}", "number": i,
+            "season": 1, "image": f"https://cdn.test/{i}.png", "video": None,
+            "burn_count": 0, "gender": "male",
+            "mutable": mut,
+            "uri_hex": f"https://old/{i}.json".encode().hex().upper() if mut else "",
+            "attributes": swap_meta.normalize_attributes(
+                [{"trait_type": "Eyes", "value": f"Eyes{i}"},
+                 {"trait_type": "Body", "value": "Straight Light"}]),
+        }
     return swap_flow.SwapSession(discord_id="1", wallet_address="rTest",
-                                 nft1=nft(10), nft2=nft(20),
+                                 nft1=nft(10, mutable[0]), nft2=nft(20, mutable[1]),
                                  traits_to_swap=["Eyes"])
 
 
@@ -368,7 +371,8 @@ def test_swap_session_missing_layers_fails_before_burn(monkeypatch):
 
 
 def _patch_swap_stubs(monkeypatch, tmp_path, events,
-                      burn_fails=(), mint_fails=()):
+                      burn_fails=(), mint_fails=(), modify_fails=(),
+                      fee_paid=True):
     """Stub the swap flow's externals; `events` records on-chain call order."""
     async def fake_upload(path_on_cdn, data, content_type):
         return f"https://cdn.test/LFGO/{path_on_cdn}"
@@ -407,6 +411,23 @@ def _patch_swap_stubs(monkeypatch, tmp_path, events,
         return {"qr_url": "https://xumm.test/qr.png",
                 "xumm_url": f"https://xumm.test/{offer_id}", "uuid": "u"}
 
+    async def fake_modify(nft_id, owner, uri):
+        if uri.startswith("https://old/"):  # rollback to the original URI
+            events.append(f"revert {nft_id}")
+            return "RHASH"
+        if nft_id in modify_fails:
+            events.append(f"modify_failed {nft_id}")
+            return None
+        events.append(f"modify {nft_id}")
+        return "MHASH"
+
+    async def fake_wait_for_payment(**kwargs):
+        events.append(f"fee_requested {kwargs['expected_amount']}")
+        return fee_paid
+
+    monkeypatch.setattr(swap_flow.xrpl_ops, "modify_nft", fake_modify)
+    monkeypatch.setattr(swap_flow.xrpl_ops, "wait_for_payment", fake_wait_for_payment)
+    monkeypatch.setattr(swap_flow.xrpl_ops, "bot_wallet_address", lambda: "rBotWallet")
     monkeypatch.setattr(swap_flow.config, "SWAP_RECORDS_DIR",
                         str(tmp_path / "swap_records"))
     monkeypatch.setattr(swap_flow.layer_store, "get_layer_store", lambda: object())
@@ -473,6 +494,104 @@ def test_swap_session_partial_burn_failure_delivers_first_replacement(
     assert len(session.results) == 1
     assert session.results[0]["nft_id"] == "NEW1"
     assert "still in your wallet" in session.error
+
+# --- Dynamic NFTs (NFTokenModify path) ---
+
+def test_normalize_nft_carries_mutability():
+    meta = {"name": "LFG #800", "attributes": []}
+    mutable = swap_meta.normalize_nft("ID1", meta, flags=0x18, uri_hex="AB")
+    burnable = swap_meta.normalize_nft("ID2", meta, flags=0x9)
+    assert mutable["mutable"] is True and mutable["uri_hex"] == "AB"
+    assert burnable["mutable"] is False
+
+
+def test_swap_fee_total():
+    assert swap_flow.swap_fee_total(1) == "10"
+    assert swap_flow.swap_fee_total(2) == "20"
+
+
+def test_payment_link_supports_custom_currency():
+    import json as _json
+    brix = "4252495800000000000000000000000000000000"
+    link = xumm_ops.generate_static_payment_link(
+        "rDest", value="20", currency=brix, issuer="rBrixIssuer")
+    tx = _json.loads(bytes.fromhex(link.split("/detect/")[1]))
+    assert tx["Amount"] == {"currency": brix, "value": "20",
+                            "issuer": "rBrixIssuer"}
+
+
+def test_swap_session_both_mutable_modifies_in_place(monkeypatch, tmp_path):
+    events = []
+    _patch_swap_stubs(monkeypatch, tmp_path, events)
+
+    session = _swap_session(mutable=(True, True))
+    asyncio.get_event_loop().run_until_complete(swap_flow.run_swap_session(session))
+
+    assert session.state == swap_flow.OFFERS_READY
+    # Fee charged upfront (2 × 10 BRIX); no mint/burn/offer at all
+    assert events == ["fee_requested 20", "modify OLD10", "modify OLD20"]
+    assert session.fee_amount == "20"
+    assert session.payment_link and "xaman.app/detect" in session.payment_link
+    assert all(r["modified"] for r in session.results)
+    # NFTokenModify keeps the token IDs
+    assert {r["nft_id"] for r in session.results} == {"OLD10", "OLD20"}
+    assert all("accept_deeplink" not in r for r in session.results)
+
+
+def test_swap_session_mixed_mints_modifies_then_burns(monkeypatch, tmp_path):
+    events = []
+    _patch_swap_stubs(monkeypatch, tmp_path, events)
+
+    session = _swap_session(mutable=(True, False))
+    asyncio.get_event_loop().run_until_complete(swap_flow.run_swap_session(session))
+
+    assert session.state == swap_flow.OFFERS_READY
+    # Reversible steps first, the irreversible burn last
+    assert events == ["fee_requested 10", "mint NEW1", "modify OLD10",
+                      "burn OLD20", "offer NEW1"]
+    modified = [r for r in session.results if r["modified"]]
+    offered = [r for r in session.results if not r["modified"]]
+    assert modified[0]["nft_id"] == "OLD10"
+    assert offered[0]["nft_id"] == "NEW1"
+
+
+def test_swap_session_payment_timeout_touches_nothing(monkeypatch, tmp_path):
+    events = []
+    _patch_swap_stubs(monkeypatch, tmp_path, events, fee_paid=False)
+
+    session = _swap_session(mutable=(True, True))
+    asyncio.get_event_loop().run_until_complete(swap_flow.run_swap_session(session))
+
+    assert session.state == swap_flow.PAYMENT_TIMEOUT
+    assert events == ["fee_requested 20"]  # nothing reached the chain
+
+
+def test_swap_session_modify_failure_reverts(monkeypatch, tmp_path):
+    events = []
+    _patch_swap_stubs(monkeypatch, tmp_path, events, modify_fails={"OLD20"})
+
+    session = _swap_session(mutable=(True, True))
+    asyncio.get_event_loop().run_until_complete(swap_flow.run_swap_session(session))
+
+    assert session.state == swap_flow.FAILED
+    assert "untouched" in session.error
+    assert events == ["fee_requested 20", "modify OLD10",
+                      "modify_failed OLD20", "revert OLD10"]
+
+
+def test_swap_session_burn_failure_after_modify_unwinds_all(monkeypatch, tmp_path):
+    events = []
+    _patch_swap_stubs(monkeypatch, tmp_path, events, burn_fails={"OLD20"})
+
+    session = _swap_session(mutable=(True, False))
+    asyncio.get_event_loop().run_until_complete(swap_flow.run_swap_session(session))
+
+    # The modify is rolled back and the orphaned replacement burned: the
+    # user keeps both originals exactly as they were.
+    assert session.state == swap_flow.FAILED
+    assert events == ["fee_requested 10", "mint NEW1", "modify OLD10",
+                      "burn_failed OLD20", "revert OLD10", "burn NEW1"]
+    assert session.results == []
 
 # --- Unified layer store ---
 
