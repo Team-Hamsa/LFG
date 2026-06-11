@@ -62,7 +62,7 @@ def _fake_xumm_api(monkeypatch, captured):
                     "next": {"always": "https://xumm.app/sign/UUID1"},
                     "uuid": "UUID1"}
 
-    def fake_post(url, json=None, headers=None):
+    def fake_post(url, json=None, headers=None, timeout=None):
         captured.update(json)
         return FakeResp()
 
