@@ -31,7 +31,10 @@ WS_URL = os.getenv("XRPL_WS_URL", "wss://s.altnet.rippletest.net:51233")
 # NFT settings
 NFT_TAXON = int(os.getenv("NFT_TAXON", "0"))
 NFT_TRANSFER_FEE = int(os.getenv("NFT_TRANSFER_FEE", "7000"))
-NFT_FLAGS = int(os.getenv("NFT_FLAGS", "9"))
+# 24 = tfTransferable (8) + tfMutable (16): since the Dynamic NFTs amendment,
+# new mints are NOT burnable — trait swaps update them in place via
+# NFTokenModify instead of burn-and-remint.
+NFT_FLAGS = int(os.getenv("NFT_FLAGS", "24"))
 NFT_COLLECTION_NAME = os.getenv("NFT_COLLECTION_NAME", "Let's Effing Go!")
 
 # BunnyCDN

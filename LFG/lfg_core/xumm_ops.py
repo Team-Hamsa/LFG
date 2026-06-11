@@ -20,15 +20,17 @@ _XUMM_HEADERS = {
 }
 
 
-def generate_static_payment_link(destination: str, value: str = "1") -> str:
-    """xaman.app/detect deep link for a 1-token payment; works in any XRPL wallet."""
+def generate_static_payment_link(destination: str, value: str = "1",
+                                 currency: str = None, issuer: str = None) -> str:
+    """xaman.app/detect deep link for a token payment; works in any XRPL
+    wallet. currency/issuer default to the LFGO mint token."""
     transaction_json = {
         "TransactionType": "Payment",
         "Destination": destination,
         "Amount": {
-            "currency": config.TOKEN_CURRENCY_HEX,
+            "currency": currency or config.TOKEN_CURRENCY_HEX,
             "value": value,
-            "issuer": config.TOKEN_ISSUER_ADDRESS,
+            "issuer": issuer or config.TOKEN_ISSUER_ADDRESS,
         },
     }
     tx_hex = json.dumps(transaction_json).encode('utf-8').hex()
