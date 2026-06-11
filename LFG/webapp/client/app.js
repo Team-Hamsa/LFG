@@ -47,6 +47,12 @@ function qrUrl(data) {
   return `/api/qr.png?d=${encodeURIComponent(data)}`;
 }
 
+// CDN images are cross-origin and blocked by the Activity's CSP, so they are
+// routed through the backend's same-origin proxy (like the QR codes).
+function imgUrl(url) {
+  return url ? `/api/img?u=${encodeURIComponent(url)}` : url;
+}
+
 function openExternal(url) {
   if (externalOpener) externalOpener(url);
   else window.open(url, '_blank');
@@ -156,7 +162,7 @@ function pollMint(sessionId) {
         text: 'Scan the QR (or open in Xaman) to accept the offer and claim your NFT.',
         qrData: s.accept_deeplink,
         link: s.accept_deeplink,
-        image: s.image_url,
+        image: imgUrl(s.image_url),
         done: true,
         stage: s.state,
         celebrate: true,
@@ -279,7 +285,7 @@ async function openSwapper() {
       card.className = 'nft-card';
       // NFT metadata is untrusted — build DOM nodes, never innerHTML.
       const img = document.createElement('img');
-      img.src = nft.image;
+      img.src = imgUrl(nft.image);
       img.alt = '';
       const name = document.createElement('span');
       name.textContent = nft.name;
@@ -319,8 +325,8 @@ function traitValue(nft, traitType) {
 function showTraitChooser() {
   const [a, b] = swapPick.map((p) => p.nft);
   showPanel('swap-traits-panel');
-  el('swap-img1').src = a.image;
-  el('swap-img2').src = b.image;
+  el('swap-img1').src = imgUrl(a.image);
+  el('swap-img2').src = imgUrl(b.image);
   el('swap-name1').textContent = a.name;
   el('swap-name2').textContent = b.name;
   const list = el('trait-list');
@@ -411,7 +417,7 @@ function renderSwapResults(s) {
     h3.textContent = r.name;
     const resultImg = document.createElement('img');
     resultImg.className = 'result-img';
-    resultImg.src = r.image_url;
+    resultImg.src = imgUrl(r.image_url);
     resultImg.alt = '';
     div.replaceChildren(h3, resultImg);
     if (r.modified) {
