@@ -127,9 +127,16 @@ async def fetch_metadata(uri_hex: str, http: aiohttp.ClientSession = None):
         return None
 
 
-def normalize_nft(nft_id: str, metadata: dict):
+# lsfMutable bit on the on-ledger NFToken (Dynamic NFTs amendment)
+NFT_FLAG_MUTABLE = 0x0010
+
+
+def normalize_nft(nft_id: str, metadata: dict, flags: int = 0, uri_hex: str = ""):
     """Build the normalized NFT record used by the swap UI/flow, or None if
-    the NFT isn't a swappable collection piece."""
+    the NFT isn't a swappable collection piece. `flags` are the on-ledger
+    NFToken flags (mutable NFTs are swapped via NFTokenModify; legacy
+    burnable ones via burn-and-remint); `uri_hex` is the current on-chain
+    URI, kept so a modify can be reverted."""
     name = metadata.get("name", "")
     if not isinstance(name, str) or "#" not in name:
         return None
@@ -152,6 +159,8 @@ def normalize_nft(nft_id: str, metadata: dict):
         "burn_count": burn_count,
         "gender": detect_gender(attributes),
         "attributes": attributes,
+        "mutable": bool(flags & NFT_FLAG_MUTABLE),
+        "uri_hex": uri_hex,
     }
 
 
@@ -166,7 +175,9 @@ async def load_wallet_nfts(wallet: str, get_account_nfts):
         if not isinstance(meta, dict):
             continue
         try:
-            record = normalize_nft(nft["nft_id"], meta)
+            record = normalize_nft(nft["nft_id"], meta,
+                                   flags=nft.get("flags", 0),
+                                   uri_hex=nft.get("uri_hex", ""))
         except Exception as e:
             # One token with malformed metadata must not break the listing.
             logging.warning(f"Skipping NFT {nft['nft_id']}: bad metadata ({e})")

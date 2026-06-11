@@ -269,8 +269,9 @@ function showTraitChooser() {
 const SWAP_STAGE_TEXT = {
   composing: ['🎨 Crafting new NFTs', 'Composing the swapped images…'],
   uploading: ['☁️ Uploading', 'Saving the new images and metadata to the CDN…'],
-  burning: ['🔥 Burning originals', 'Burning the two original NFTs on XRPL…'],
+  burning: ['🔥 Burning originals', 'Burning the original NFTs on XRPL…'],
   minting: ['⛏️ Reminting', 'Minting the re-crafted NFTs…'],
+  modifying: ['🔄 Updating on-chain', 'Updating your mutable NFTs in place via NFTokenModify…'],
   creating_offers: ['📨 Creating offers', 'Preparing the offers back to your wallet…'],
 };
 
@@ -297,12 +298,36 @@ function renderSwapProgress(state) {
   const [title, text] = SWAP_STAGE_TEXT[state] || ['Working…', ''];
   el('swap-result-title').textContent = title;
   el('swap-result-text').textContent = text;
+  el('swap-results').replaceChildren();
+}
+
+// In-place (NFTokenModify) swaps are paid upfront: show the BRIX payment QR.
+let swapPaymentShown = null; // session id the QR is rendered for
+function renderSwapPayment(s) {
+  if (swapPaymentShown === s.id) return; // already on screen; don't rebuild
+  swapPaymentShown = s.id;
+  el('swap-result-title').textContent = '💰 Swap fee required';
+  el('swap-result-text').textContent =
+    `Pay ${s.fee_amount} BRIX to swap your mutable NFT(s) in place. ` +
+    'Scan the QR with Xaman/XUMM or open the link, approve, then wait here.';
+  const box = el('swap-results');
+  const qrImg = document.createElement('img');
+  qrImg.className = 'result-qr';
+  qrImg.src = qrUrl(s.payment_link);
+  qrImg.alt = 'QR';
+  const btn = document.createElement('button');
+  btn.className = 'link';
+  btn.textContent = 'Open in Xaman';
+  btn.onclick = () => openExternal(s.payment_link);
+  box.replaceChildren(qrImg, btn);
 }
 
 function renderSwapResults(s) {
-  el('swap-result-title').textContent = '🎉 New NFTs crafted!';
-  el('swap-result-text').textContent =
-    'Scan each QR (or open in Xaman) to accept your re-crafted NFTs.';
+  const needsAccept = s.results.some((r) => !r.modified);
+  el('swap-result-title').textContent = '🎉 Traits swapped!';
+  el('swap-result-text').textContent = needsAccept
+    ? 'Scan each QR (or open in Xaman) to accept your re-crafted NFTs.'
+    : 'Your NFTs were updated in place — the new traits are already in your wallet.';
   const box = el('swap-results');
   box.innerHTML = '';
   for (const r of s.results) {
@@ -314,16 +339,25 @@ function renderSwapResults(s) {
     resultImg.className = 'result-img';
     resultImg.src = r.image_url;
     resultImg.alt = '';
-    const qrImg = document.createElement('img');
-    qrImg.className = 'result-qr';
-    qrImg.src = qrUrl(r.accept_deeplink);
-    qrImg.alt = 'QR';
-    div.replaceChildren(h3, resultImg, qrImg);
-    const btn = document.createElement('button');
-    btn.className = 'link';
-    btn.textContent = 'Open in Xaman';
-    btn.onclick = () => openExternal(r.accept_deeplink);
-    div.appendChild(btn);
+    div.replaceChildren(h3, resultImg);
+    if (r.modified) {
+      // Updated via NFTokenModify — nothing to accept.
+      const note = document.createElement('span');
+      note.className = 'modified-note';
+      note.textContent = '✅ Updated in your wallet — no action needed.';
+      div.appendChild(note);
+    } else {
+      const qrImg = document.createElement('img');
+      qrImg.className = 'result-qr';
+      qrImg.src = qrUrl(r.accept_deeplink);
+      qrImg.alt = 'QR';
+      div.appendChild(qrImg);
+      const btn = document.createElement('button');
+      btn.className = 'link';
+      btn.textContent = 'Open in Xaman';
+      btn.onclick = () => openExternal(r.accept_deeplink);
+      div.appendChild(btn);
+    }
     box.appendChild(div);
   }
   el('swap-done-btn').hidden = false;
@@ -341,6 +375,19 @@ function pollSwap(sessionId) {
     }
     if (s.state === 'offers_ready') {
       renderSwapResults(s);
+      return;
+    }
+    if (s.state === 'payment_timeout') {
+      el('swap-result-title').textContent = '⏰ Payment timed out';
+      el('swap-result-text').textContent =
+        s.error || 'No swap fee was received in time. Your NFTs are untouched.';
+      el('swap-results').replaceChildren();
+      el('swap-done-btn').hidden = false;
+      return;
+    }
+    if (s.state === 'awaiting_payment') {
+      if (s.payment_link) renderSwapPayment(s);
+      swapPollTimer = setTimeout(tick, 3000);
       return;
     }
     if (s.state === 'failed') {
