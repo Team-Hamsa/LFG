@@ -382,8 +382,10 @@ async def wait_for_payment(destination: str, expected_sender: str,
                 logging.info(f"Subscribed to {destination}; waiting up to "
                              f"{int(remaining)}s for {context}")
 
-                if await _recent_payment_exists(websocket, destination,
-                                                matches, not_before):
+                if await asyncio.wait_for(
+                        _recent_payment_exists(websocket, destination,
+                                               matches, not_before),
+                        timeout=max(1, min(remaining, 15))):
                     logging.info(f"✅ Payment found in recent history ({context})")
                     return True
 
@@ -392,10 +394,15 @@ async def wait_for_payment(destination: str, expected_sender: str,
                 logging.warning(f"Payment subscription stream closed; "
                                 f"reconnecting ({context})")
         except asyncio.TimeoutError:
-            logging.warning(
-                f"Payment wait timed out after {timeout_seconds}s "
-                f"({context}; {reconnects} reconnects)")
-            return False
+            # Only terminal once the overall deadline is spent — a stalled
+            # history check times out well before that and just reconnects.
+            if time.time() >= deadline:
+                logging.warning(
+                    f"Payment wait timed out after {timeout_seconds}s "
+                    f"({context}; {reconnects} reconnects)")
+                return False
+            logging.warning(f"Payment history check timed out; "
+                            f"reconnecting ({context})")
         except Exception as e:
             logging.error(f"Payment subscription error ({context}): {e}")
             logging.error(traceback.format_exc())

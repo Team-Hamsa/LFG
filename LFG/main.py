@@ -1137,21 +1137,41 @@ class MintView(View):
                 # call gets its own timeout, so a slow/hanging API can never
                 # stretch the handler past Discord's 15-minute webhook token.
                 if 'uuid' in trustline_data:
+                    # Poll the XUMM REST endpoint directly with a real network
+                    # timeout: the SDK's payload.get exposes none, and a
+                    # hanging call inside to_thread outlives any asyncio-level
+                    # timeout and piles up worker threads.
+                    status_headers = {
+                        "accept": "application/json",
+                        "X-API-Key": X_API_KEY,
+                        "X-API-Secret": X_API_SECRET,
+                    }
+                    status_url = f"{XUMM_API_URL}/{trustline_data['uuid']}"
                     deadline = time.monotonic() + 300  # matches the 5-min payload expiry
                     while time.monotonic() < deadline:
                         try:
-                            response = await asyncio.wait_for(
-                                asyncio.to_thread(sdk.payload.get, trustline_data['uuid']),
-                                timeout=15,
-                            )
-                            if response.meta.signed and response.meta.resolved:
-                                await safe_followup(
-                                    interaction,
-                                    "✅ Trustline set up successfully! You can now hold LFGO tokens.",
-                                    ephemeral=True
-                                )
+                            response = await asyncio.to_thread(
+                                requests.get, status_url,
+                                headers=status_headers, timeout=10)
+                            meta = response.json().get('meta', {})
+                            if meta.get('resolved'):
+                                if meta.get('signed'):
+                                    await safe_followup(
+                                        interaction,
+                                        "✅ Trustline set up successfully! You can now hold LFGO tokens.",
+                                        ephemeral=True
+                                    )
+                                else:
+                                    # resolved without signed = user declined:
+                                    # terminal, so stop polling immediately
+                                    await safe_followup(
+                                        interaction,
+                                        "Trustline request was declined or cancelled. "
+                                        "Run it again whenever you're ready.",
+                                        ephemeral=True
+                                    )
                                 return
-                        except asyncio.TimeoutError:
+                        except requests.Timeout:
                             logging.warning("XUMM payload status check timed out; retrying")
                         except Exception as e:
                             logging.error(f"Error checking trustline status: {e}")

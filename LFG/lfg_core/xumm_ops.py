@@ -60,7 +60,8 @@ async def _create_xumm_payload(txjson: dict, options: dict = None):
         payload["options"] = options
     try:
         response = await asyncio.to_thread(
-            requests.post, config.XUMM_API_URL, json=payload, headers=_XUMM_HEADERS
+            requests.post, config.XUMM_API_URL, json=payload,
+            headers=_XUMM_HEADERS, timeout=10
         )
         data = response.json()
         return {
