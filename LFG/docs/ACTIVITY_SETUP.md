@@ -51,16 +51,20 @@ The Activity can only be launched in a server where the app is installed.
 ### 1d. Activities — enable the embedded app
 
 1. **Activities → Settings**: toggle **Enable Activities** ON.
-2. **Activities → URL Mappings**: add both rows:
+2. **Activities → URL Mappings**: add one row:
+
    | Prefix | Target |
    |---|---|
    | `/` | `your-backend-host.example.com` (the host running `webapp/server.py`, HTTPS, no scheme) |
-   | `/esm` | `esm.sh` |
 
-   > The `/esm` mapping is **mandatory** — `webapp/client/app.js` imports
-   > `@discord/embedded-app-sdk` through the Activity proxy
-   > (`/.proxy/esm/...`) with no Node build step. If it's missing, the
-   > Activity loads to a **blank screen**.
+   > No `/esm` mapping is needed: the Embedded App SDK is **vendored
+   > same-origin** at `webapp/client/vendor/embedded-app-sdk.js`, and
+   > `app.js` loads it with
+   > `const { DiscordSDK } = await import('./vendor/embedded-app-sdk.js');`.
+   > (esm.sh bundles re-export root-absolute paths that resolve outside the
+   > Activity's `/.proxy` sub-path and are blocked by the CSP, so the old
+   > `/esm` → `esm.sh` mapping never worked reliably — **remove it** if you
+   > still have it configured.)
 
    > ⚠️ With an ngrok-free / cloudflared quick tunnel, the hostname **changes
    > every time the tunnel restarts**. When that happens you must re-paste the

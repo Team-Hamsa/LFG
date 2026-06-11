@@ -230,10 +230,16 @@ async def _collect_modify_fee(session: SwapSession, modify_count: int) -> bool:
     fee = swap_fee_total(modify_count)
     destination = xrpl_ops.bot_wallet_address()
     session.fee_amount = fee
-    session.payment_link = xumm_ops.generate_static_payment_link(
+    payload = await xumm_ops.create_payment_payload(
         destination, value=fee,
         currency=config.SWAP_OFFER_CURRENCY_HEX,
         issuer=config.SWAP_OFFER_ISSUER)
+    # Sign-request payload normally; raw detect link only if XUMM is down
+    session.payment_link = payload["xumm_url"] if payload else \
+        xumm_ops.generate_static_payment_link(
+            destination, value=fee,
+            currency=config.SWAP_OFFER_CURRENCY_HEX,
+            issuer=config.SWAP_OFFER_ISSUER)
     session.state = AWAITING_PAYMENT
     return await xrpl_ops.wait_for_payment(
         destination=destination,

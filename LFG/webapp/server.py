@@ -206,6 +206,16 @@ async def handle_mint_start(request):
 
     session = mint_flow.MintSession(discord_id=user["id"], wallet_address=request["wallet"])
     mint_sessions[session.id] = session
+    # Swap the static fallback link for a real XUMM sign request before the
+    # first QR is rendered (after the insert above, so the one-active-session
+    # guard stays race-free). Bounded so a stalled XUMM API can't hang
+    # /api/mint — on timeout the session keeps the static fallback link.
+    try:
+        await asyncio.wait_for(session.prepare_payment_link(), timeout=5)
+    except asyncio.TimeoutError:
+        logging.warning("prepare_payment_link timed out; serving static fallback link")
+    except Exception as e:
+        logging.warning(f"prepare_payment_link failed; serving static fallback link: {e}")
     asyncio.get_event_loop().create_task(mint_flow.run_mint_session(session))
     return web.json_response(session.to_dict())
 

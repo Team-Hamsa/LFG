@@ -750,6 +750,20 @@ async def create_trustline_request() -> dict:
         logging.error(f"Error generating trustline request: {e}")
         return None
 
+async def safe_followup(interaction: discord.Interaction, *args, **kwargs):
+    """followup.send that survives an expired/invalid interaction token.
+    Discord webhook tokens last 15 minutes; long-running handlers (payment
+    or trustline polling) can outlive them, and the resulting 401 (50027)
+    must not crash the handler. Returns True if the message was delivered."""
+    try:
+        await interaction.followup.send(*args, **kwargs)
+        return True
+    except (discord.NotFound, discord.HTTPException) as e:
+        logging.warning(f"Follow-up message not delivered "
+                        f"(interaction token likely expired): {e}")
+        return False
+
+
 class MintView(View):
     def __init__(self):
         logging.info("=== Initializing MintView ===")
@@ -1077,7 +1091,8 @@ class MintView(View):
         # Get user's wallet address
         user_data = get_user(interaction.user)
         if not user_data or not user_data.get("address"):
-            await interaction.followup.send(
+            await safe_followup(
+                interaction,
                 "Please register your wallet first using /register",
                 ephemeral=True
             )
@@ -1087,7 +1102,8 @@ class MintView(View):
             # Create trustline request
             trustline_data = await create_trustline_request()
             if not trustline_data:
-                await interaction.followup.send(
+                await safe_followup(
+                    interaction,
                     "Failed to create trustline request. Please try again.",
                     ephemeral=True
                 )
@@ -1111,37 +1127,76 @@ class MintView(View):
             embed.set_footer(text="Trustline request expires in 5 minutes")
             
             # Send trustline request
-            await interaction.followup.send(
-                embed=embed,
-                ephemeral=True
-            )
+            await safe_followup(interaction, embed=embed, ephemeral=True)
 
             # Trustline checking - keeping XUMM API for now since trustlines are one-time setup
             # Could be converted to static links if needed
             try:
-                # Check trustline status using XUMM payload
+                # Check trustline status using XUMM payload. The loop is
+                # bounded by wall clock (not iteration count) and each XUMM
+                # call gets its own timeout, so a slow/hanging API can never
+                # stretch the handler past Discord's 15-minute webhook token.
                 if 'uuid' in trustline_data:
-                    for _ in range(60):  # 5 minutes = 60 * 5 seconds
+                    # Poll the XUMM REST endpoint directly with a real network
+                    # timeout: the SDK's payload.get exposes none, and a
+                    # hanging call inside to_thread outlives any asyncio-level
+                    # timeout and piles up worker threads.
+                    status_headers = {
+                        "accept": "application/json",
+                        "X-API-Key": X_API_KEY,
+                        "X-API-Secret": X_API_SECRET,
+                    }
+                    status_url = f"{XUMM_API_URL}/{trustline_data['uuid']}"
+                    deadline = time.monotonic() + 300  # matches the 5-min payload expiry
+                    while time.monotonic() < deadline:
                         try:
-                            response = await asyncio.to_thread(sdk.payload.get, trustline_data['uuid'])
-                            if response.meta.signed and response.meta.resolved:
-                                await interaction.followup.send(
-                                    "✅ Trustline set up successfully! You can now hold LFGO tokens.",
+                            response = await asyncio.to_thread(
+                                requests.get, status_url,
+                                headers=status_headers, timeout=10)
+                            meta = response.json().get('meta', {})
+                            if meta.get('resolved'):
+                                if meta.get('signed'):
+                                    await safe_followup(
+                                        interaction,
+                                        "✅ Trustline set up successfully! You can now hold LFGO tokens.",
+                                        ephemeral=True
+                                    )
+                                else:
+                                    # resolved without signed = user declined:
+                                    # terminal, so stop polling immediately
+                                    await safe_followup(
+                                        interaction,
+                                        "Trustline request was declined or cancelled. "
+                                        "Run it again whenever you're ready.",
+                                        ephemeral=True
+                                    )
+                                return
+                            if meta.get('cancelled') or meta.get('expired'):
+                                # Also terminal: cancelled/expired payloads can
+                                # never be signed even though resolved is false
+                                await safe_followup(
+                                    interaction,
+                                    "Trustline request expired or was cancelled. "
+                                    "Please try again.",
                                     ephemeral=True
                                 )
                                 return
+                        except requests.Timeout:
+                            logging.warning("XUMM payload status check timed out; retrying")
                         except Exception as e:
                             logging.error(f"Error checking trustline status: {e}")
                         await asyncio.sleep(5)
-                
+
                 # If we get here, request timed out
-                await interaction.followup.send(
+                await safe_followup(
+                    interaction,
                     "Trustline request timed out. Please try again.",
                     ephemeral=True
                 )
             except Exception as e:
                 logging.error(f"Error in trustline checking: {e}")
-                await interaction.followup.send(
+                await safe_followup(
+                    interaction,
                     "Error checking trustline status. Please try again.",
                     ephemeral=True
                 )
@@ -1150,7 +1205,8 @@ class MintView(View):
             error_msg = str(e)
             short_error = error_msg[:500] + "..." if len(error_msg) > 500 else error_msg
             logging.error(f"Error in trustline setup: {error_msg}")
-            await interaction.followup.send(
+            await safe_followup(
+                interaction,
                 f"An error occurred during trustline setup: {short_error}",
                 ephemeral=True
             )

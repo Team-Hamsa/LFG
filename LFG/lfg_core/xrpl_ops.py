@@ -347,8 +347,11 @@ async def wait_for_payment(destination: str, expected_sender: str,
     currency = currency or config.TOKEN_CURRENCY_HEX
     issuer = issuer or config.TOKEN_ISSUER_ADDRESS
     start_time = time.time()
+    deadline = start_time + timeout_seconds
     if not_before is None:
         not_before = start_time - 10
+    context = (f"{expected_amount} {currency} from {expected_sender} "
+               f"to {destination}")
 
     def matches(tx, meta):
         return _payment_matches(tx, meta, destination, expected_sender,
@@ -360,24 +363,48 @@ async def wait_for_payment(destination: str, expected_sender: str,
             if tx and matches(tx, meta):
                 logging.info(f"✅ Payment received from {expected_sender}: {tx.get('hash')}")
                 return True
-        return False
+        return False  # stream closed without a matching payment
 
-    try:
-        async with AsyncWebsocketClient(config.WS_URL) as websocket:
-            await websocket.send(Subscribe(accounts=[destination]))
-            logging.info(f"Subscribed to {destination}; waiting for payment from {expected_sender}")
+    # A dropped websocket must not look like "payment never arrived": keep
+    # reconnecting until the deadline, re-checking recent history each time
+    # to catch a payment that validated while the connection was down.
+    reconnects = 0
+    while True:
+        remaining = deadline - time.time()
+        if remaining <= 0:
+            logging.warning(
+                f"Payment wait timed out after {timeout_seconds}s "
+                f"({context}; {reconnects} reconnects)")
+            return False
+        try:
+            async with AsyncWebsocketClient(config.WS_URL) as websocket:
+                await websocket.send(Subscribe(accounts=[destination]))
+                logging.info(f"Subscribed to {destination}; waiting up to "
+                             f"{int(remaining)}s for {context}")
 
-            if await _recent_payment_exists(websocket, destination, matches, not_before):
-                logging.info(f"✅ Payment from {expected_sender} found in recent history")
-                return True
+                if await asyncio.wait_for(
+                        _recent_payment_exists(websocket, destination,
+                                               matches, not_before),
+                        timeout=max(1, min(remaining, 15))):
+                    logging.info(f"✅ Payment found in recent history ({context})")
+                    return True
 
-            remaining = timeout_seconds - (time.time() - start_time)
-            return await asyncio.wait_for(watch(websocket), timeout=max(remaining, 1))
-
-    except asyncio.TimeoutError:
-        logging.info("Payment subscription timeout")
-        return False
-    except Exception as e:
-        logging.error(f"Error in payment subscription: {e}")
-        logging.error(traceback.format_exc())
-        return False
+                if await asyncio.wait_for(watch(websocket), timeout=remaining):
+                    return True
+                logging.warning(f"Payment subscription stream closed; "
+                                f"reconnecting ({context})")
+        except asyncio.TimeoutError:
+            # Only terminal once the overall deadline is spent — a stalled
+            # history check times out well before that and just reconnects.
+            if time.time() >= deadline:
+                logging.warning(
+                    f"Payment wait timed out after {timeout_seconds}s "
+                    f"({context}; {reconnects} reconnects)")
+                return False
+            logging.warning(f"Payment history check timed out; "
+                            f"reconnecting ({context})")
+        except Exception as e:
+            logging.error(f"Payment subscription error ({context}): {e}")
+            logging.error(traceback.format_exc())
+        await asyncio.sleep(min(2 ** reconnects, 15))
+        reconnects += 1
