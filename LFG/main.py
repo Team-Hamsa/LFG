@@ -1171,6 +1171,16 @@ class MintView(View):
                                         ephemeral=True
                                     )
                                 return
+                            if meta.get('cancelled') or meta.get('expired'):
+                                # Also terminal: cancelled/expired payloads can
+                                # never be signed even though resolved is false
+                                await safe_followup(
+                                    interaction,
+                                    "Trustline request expired or was cancelled. "
+                                    "Please try again.",
+                                    ephemeral=True
+                                )
+                                return
                         except requests.Timeout:
                             logging.warning("XUMM payload status check timed out; retrying")
                         except Exception as e:
