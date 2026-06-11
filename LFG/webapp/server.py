@@ -288,8 +288,18 @@ async def handle_index(request):
     return web.FileResponse(os.path.join(CLIENT_DIR, "index.html"))
 
 
+@web.middleware
+async def no_cache_mw(request, handler):
+    # The Activity is served behind Discord's caching proxy; without this an
+    # updated frontend (index.html / app.js / vendored SDK) keeps serving stale
+    # from Discord's edge or the browser, even after relaunching the Activity.
+    resp = await handler(request)
+    resp.headers["Cache-Control"] = "no-store, must-revalidate"
+    return resp
+
+
 def create_app() -> web.Application:
-    app = web.Application()
+    app = web.Application(middlewares=[no_cache_mw])
     app.router.add_get("/api/config", handle_config)
     app.router.add_post("/api/token", handle_token)
     app.router.add_get("/api/me", handle_me)
