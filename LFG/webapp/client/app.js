@@ -1,7 +1,7 @@
 // LFG Discord Activity frontend.
 //
 // Inside Discord the page is served through the Activity proxy; the SDK is
-// loaded via the "/.proxy/esm" URL mapping (-> esm.sh, see docs/ACTIVITY_SETUP.md).
+// vendored same-origin at vendor/embedded-app-sdk.js (see docs/ACTIVITY_SETUP.md).
 // Outside Discord (no frame_id query param) it runs in a degraded dev mode
 // without Discord auth, so the API will return 401 — useful only for UI work.
 
@@ -35,8 +35,9 @@ function openExternal(url) {
 }
 
 async function setupDiscord() {
-  // The SDK must be reached through the Activity proxy URL mapping.
-  const { DiscordSDK } = await import('/.proxy/esm/@discord/embedded-app-sdk');
+  // SDK is vendored same-origin (webapp/client/vendor/) to avoid esm.sh's
+  // root-absolute re-exports, which break under the Activity's /.proxy sub-path.
+  const { DiscordSDK } = await import('./vendor/embedded-app-sdk.js');
   const { client_id: clientId } = await api('/api/config');
   const sdk = new DiscordSDK(clientId);
   await sdk.ready();

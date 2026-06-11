@@ -85,7 +85,10 @@ LFG/
 
 - Python 3.10+
 - `ffmpeg` on the system path
-- A Discord application (bot token; plus Client ID/Secret for the Activity)
+- A Discord application — bot token plus Client ID/Secret for the Activity.
+  The portal also needs privileged gateway intents (classic bot) and the app
+  installed + Activities enabled (webapp); full step-by-step in
+  [docs/ACTIVITY_SETUP.md](docs/ACTIVITY_SETUP.md#1-discord-developer-portal).
 - Xaman (XUMM) API credentials — [Xaman Developer Console](https://apps.xumm.dev/)
 - BunnyCDN storage zone credentials
 - A funded XRPL account ([testnet faucet](https://xrpl.org/xrp-testnet-faucet.html) for testing)
