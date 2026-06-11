@@ -72,6 +72,7 @@ def record_nft_mint(nft_number: int, nft_id: str, discord_id: str, owner_address
             'metadata_url': 'TEXT',
             'image_url': 'TEXT',
             'Background': 'TEXT',
+            'Back': 'TEXT',
             'Body': 'TEXT',
             'Clothing': 'TEXT',
             'Eyes': 'TEXT',
@@ -95,9 +96,9 @@ def record_nft_mint(nft_number: int, nft_id: str, discord_id: str, owner_address
         INSERT INTO LFG (
             nft_number, nft_id, discord_id, owner_address,
             metadata_url, image_url,
-            Background, Body, Clothing, Eyes, Eyebrows,
+            Background, Back, Body, Clothing, Eyes, Eyebrows,
             Mouth, Hat, Accessory
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         ''', (
             nft_number,
             nft_id,
@@ -106,6 +107,7 @@ def record_nft_mint(nft_number: int, nft_id: str, discord_id: str, owner_address
             metadata_url,
             image_url,
             traits.get('Background', ''),
+            traits.get('Back', ''),
             traits.get('Body', ''),
             traits.get('Clothing', ''),
             traits.get('Eyes', ''),
@@ -130,31 +132,41 @@ def get_nft_data(nft_number: int) -> Optional[Dict]:
     """Get data for a specific NFT number"""
     try:
         conn = sqlite3.connect('lfg_nfts.db')
+        conn.row_factory = sqlite3.Row
         cursor = conn.cursor()
-        
+
         cursor.execute('''
         SELECT * FROM LFG WHERE nft_number = ?
         ''', (nft_number,))
-        
+
         row = cursor.fetchone()
         conn.close()
-        
+
         if row:
+            # Columns are added over time by record_nft_mint's auto-ALTER, so
+            # map by name (never by position) and tolerate missing ones.
+            cols = set(row.keys())
+            def col(name):
+                return row[name] if name in cols else None
             return {
-                'nft_number': row[0],
-                'metadata_url': row[1],
-                'image_url': row[2],
+                'nft_number': row['nft_number'],
+                'nft_id': col('nft_id'),
+                'discord_id': col('discord_id'),
+                'owner_address': col('owner_address'),
+                'metadata_url': col('metadata_url'),
+                'image_url': col('image_url'),
                 'traits': {
-                    'background': row[3],
-                    'body': row[4],
-                    'clothing': row[5],
-                    'eyes': row[6],
-                    'eyebrows': row[7],
-                    'mouth': row[8],
-                    'hat': row[9],
-                    'accessory': row[10]
+                    'background': col('Background'),
+                    'back': col('Back'),
+                    'body': col('Body'),
+                    'clothing': col('Clothing'),
+                    'eyes': col('Eyes'),
+                    'eyebrows': col('Eyebrows'),
+                    'mouth': col('Mouth'),
+                    'hat': col('Hat'),
+                    'accessory': col('Accessory')
                 },
-                'created_at': row[11]
+                'created_at': col('created_at')
             }
         return None
         

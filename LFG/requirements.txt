@@ -18,7 +18,7 @@ numpy
 opencv-python
 Pillow
 ffmpeg-python  # Note: Also requires system ffmpeg binary (install via ./setup.sh)
-# qrcode[pil]  # For generating QR codes locally
+qrcode[pil]  # For generating QR codes locally
 
 # Environment variable management
 python-dotenv
@@ -28,3 +28,6 @@ aiohttp
 
 # Voice support for Discord (optional)
 PyNaCl
+
+# Testing (webapp smoke tests)
+pytest

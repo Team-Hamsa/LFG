@@ -61,6 +61,22 @@ def init_db():
 
             logging.info("Placeholder rows added successfully")
 
+        # Create the burned_nfts table. Surrogate key: the same nft_number can
+        # be burned more than once over time (burn → remint → burn), and each
+        # burn must be kept as its own audit row.
+        cursor.execute('''
+        CREATE TABLE IF NOT EXISTS burned_nfts (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            nft_number INTEGER,
+            nft_id TEXT,
+            discord_id TEXT,
+            burned_by TEXT,
+            reason TEXT,
+            burned_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+            original_mint_time TIMESTAMP
+        )
+        ''')
+
         # Commit the changes and close the connection
         conn.commit()
         conn.close()

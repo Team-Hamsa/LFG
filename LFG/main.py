@@ -34,7 +34,7 @@ from discord.ext import commands
 from discord.errors import DiscordServerError
 import signal
 import traceback
-from user_db import register_user, create_users_table
+from user_db import register_user, create_users_table, get_user as get_user_from_db
 import sqlite3
 import shutil
 
@@ -86,7 +86,7 @@ if not DISCORD_BOT_TOKEN:
     raise ValueError("DISCORD_BOT_TOKEN not found in environment variables")
 
 # Discord Settings
-ADMIN_LOG_CHANNEL_ID = os.getenv("ADMIN_LOG_CHANNEL_ID")
+ADMIN_LOG_CHANNEL_ID = int(os.getenv("ADMIN_LOG_CHANNEL_ID", "0"))
 if not ADMIN_LOG_CHANNEL_ID:
     raise ValueError("ADMIN_LOG_CHANNEL_ID not found in environment variables")
 
@@ -229,22 +229,6 @@ NFT_TOKEN_TAXON = int(os.getenv("NFT_TOKEN_TAXON", "0"))  # Defaults to 0 if not
 # Path to the trait layers directory
 TRAIT_LAYERS_DIR = "trait_layers"
 
-# Metadata template used for generating NFT metadata
-METADATA_TEMPLATE = {
-    "schema": "ipfs://QmNpi8rcXEkohca8iXu7zysKKSJYqCvBJn3xJwga8jXqWU",
-    "name": "",  # Will be filled in with "Let's Effing Go! #{number}"
-    "description": "Test",
-    "image": "",  # Will be filled with CDN URL
-    "video": "",  # Empty string instead of None
-    "external_link": "https://letseffinggo.com",
-    "collection": {
-        "name": "Let's Effing Go!",
-        "family": "Test"
-    },
-    "edition": 0,  # Integer instead of None
-    "attributes": []  # Will be filled with the traits
-}
-
 # Add these constants (or get from env)
 X_API_KEY = os.getenv("XUMM_API_KEY")
 X_API_SECRET = os.getenv("XUMM_API_SECRET")
@@ -252,20 +236,7 @@ X_API_SECRET = os.getenv("XUMM_API_SECRET")
 DATABASE = "lfg_nfts.db"
 
 def get_user(user):
-    try:
-        with open("users.json", "r") as f:
-            data = json.load(f)
-            users = data.get("users", [])  # Get users list or empty list if not found
-            
-        for userr in users:
-            if userr["id"] == str(user.id):
-                return userr
-        return None
-    except (FileNotFoundError, json.JSONDecodeError):
-        # If file doesn't exist or is invalid, create it with empty users list
-        with open("users.json", "w") as f:
-            json.dump({"users": []}, f, indent=2)
-        return None
+    return get_user_from_db(str(user.id))
 
 
 def get_trait_files(trait_layer_dir):
@@ -973,14 +944,15 @@ class MintView(View):
                     json.dump(metadata, f, indent=2)
                 
                 # Upload metadata to BunnyCDN
+                metadata_upload_url = f"https://storage.bunnycdn.com/lfgo/minttest/{metadata_filename}"
+                metadata_cdn_url = f"https://lfgo.b-cdn.net/minttest/{metadata_filename}"
                 async with aiohttp.ClientSession() as session:
-                    metadata_cdn_url = f"https://storage.bunnycdn.com/lfgo/minttest/{metadata_filename}"
                     headers = {
                         "AccessKey": BUNNY_CDN_ACCESS_KEY,
                         "Content-Type": "application/json",
                     }
                     with open(metadata_filename, 'rb') as file:
-                        await session.put(metadata_cdn_url, headers=headers, data=file.read())
+                        await session.put(metadata_upload_url, headers=headers, data=file.read())
                 
                 # Clean up local files
                 os.remove(combined_image_path)
@@ -1000,8 +972,7 @@ class MintView(View):
                     )
                     return
                 
-                # Define the CDN URLs for both image and metadata
-                metadata_cdn_url = f"https://lfgo.b-cdn.net/minttest/{metadata_filename}"
+                # Define the CDN URL for the image
                 image_cdn_url = f"https://lfgo.b-cdn.net/minttest/{image_filename}"
 
                 # Convert attributes list to dictionary format needed for database
@@ -1402,19 +1373,6 @@ class BurnConfirmView(View):
             if success:
                 conn = sqlite3.connect(DATABASE)
                 cursor = conn.cursor()
-                
-                # Create burned_nfts table if it doesn't exist
-                cursor.execute('''
-                    CREATE TABLE IF NOT EXISTS burned_nfts (
-                        nft_number INTEGER PRIMARY KEY,
-                        nft_id TEXT,
-                        discord_id TEXT,
-                        burned_by TEXT,
-                        reason TEXT,
-                        burned_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-                        original_mint_time TIMESTAMP
-                    )
-                ''')
                 
                 # Get all data from LFG table before deleting
                 cursor.execute('''

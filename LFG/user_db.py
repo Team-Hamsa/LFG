@@ -31,30 +31,29 @@ def create_users_table() -> None:
 
 def register_user(discord_id: str, discord_name: str, wallet: str) -> bool:
     """
-    Register a new user in the Users table.
-    If the user is already registered (based on discord_id), 
-    it logs the fact and does not duplicate the entry.
-    
+    Register a user in the Users table, or update their wallet/name if the
+    discord_id is already registered (so "change wallet" actually changes it).
+
     Args:
         discord_id (str): The Discord user's ID.
         discord_name (str): The Discord user's name.
         wallet (str): The user's wallet address.
-    
+
     Returns:
-        bool: True if registration is successful or the user is already registered; False on error.
+        bool: True if the row was inserted or updated; False on error.
     """
     try:
         conn = sqlite3.connect(DATABASE)
         cursor = conn.cursor()
-        try:
-            cursor.execute('''
-                INSERT INTO Users (discord_id, discord_name, wallet)
-                VALUES (?, ?, ?)
-            ''', (discord_id, discord_name, wallet))
-            conn.commit()
-            logging.info(f"Registered new user: {discord_name} ({discord_id})")
-        except sqlite3.IntegrityError:
-            logging.info(f"User {discord_name} ({discord_id}) is already registered.")
+        cursor.execute('''
+            INSERT INTO Users (discord_id, discord_name, wallet)
+            VALUES (?, ?, ?)
+            ON CONFLICT(discord_id) DO UPDATE SET
+                discord_name = excluded.discord_name,
+                wallet = excluded.wallet
+        ''', (discord_id, discord_name, wallet))
+        conn.commit()
+        logging.info(f"Registered user: {discord_name} ({discord_id}) -> {wallet}")
         return True
     except Exception as e:
         logging.error(f"Error registering user: {e}")

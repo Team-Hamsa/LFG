@@ -1,0 +1,66 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Let's Effing Go! — Mint</title>
+  <link rel="stylesheet" href="style.css">
+</head>
+<body>
+  <main id="app">
+    <h1>Let's Effing Go!</h1>
+    <p id="status" class="status">Connecting to Discord…</p>
+
+    <section id="register-panel" hidden>
+      <h2>Register your wallet</h2>
+      <p>Enter your XRPL wallet address to receive NFT offers.</p>
+      <input id="wallet-input" type="text" placeholder="r..." autocomplete="off">
+      <button id="register-btn">Register</button>
+    </section>
+
+    <section id="mint-panel" hidden>
+      <p>Wallet: <code id="wallet-display"></code> <button id="change-wallet-btn" class="link">change</button></p>
+      <div class="actions">
+        <button id="mint-btn" class="primary">🎨 Mint NFT</button>
+        <button id="trustline-btn">🔗 Set LFGO Trustline</button>
+        <button id="swap-btn">🔁 Trait Swapper</button>
+      </div>
+    </section>
+
+    <section id="swap-panel" hidden>
+      <h2>🔁 Trait Swapper</h2>
+      <p id="swap-help">Pick two NFTs with the same body type to swap traits between them.</p>
+      <div id="nft-grid" class="nft-grid"></div>
+      <p><button id="swap-back-btn" class="link">Back</button></p>
+    </section>
+
+    <section id="swap-traits-panel" hidden>
+      <h2>Select traits to swap</h2>
+      <div class="swap-pair">
+        <figure><img id="swap-img1" alt=""><figcaption id="swap-name1"></figcaption></figure>
+        <figure><img id="swap-img2" alt=""><figcaption id="swap-name2"></figcaption></figure>
+      </div>
+      <div id="trait-list" class="trait-list"></div>
+      <button id="swap-confirm-btn" class="primary">Swap selected traits</button>
+      <p><button id="swap-cancel-btn" class="link">Cancel</button></p>
+    </section>
+
+    <section id="swap-result-panel" hidden>
+      <h2 id="swap-result-title"></h2>
+      <p id="swap-result-text"></p>
+      <div id="swap-results"></div>
+      <p><button id="swap-done-btn" hidden>Back</button></p>
+    </section>
+
+    <section id="flow-panel" hidden>
+      <h2 id="flow-title"></h2>
+      <p id="flow-text"></p>
+      <img id="flow-qr" alt="QR code" hidden>
+      <p><button id="flow-link-btn" class="link" hidden>Open in Xaman</button></p>
+      <img id="nft-image" alt="Your NFT" hidden>
+      <p><button id="flow-done-btn" hidden>Back</button></p>
+    </section>
+  </main>
+  <script type="module" src="app.js"></script>
+</body>
+</html>
