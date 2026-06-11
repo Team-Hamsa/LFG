@@ -73,6 +73,32 @@ async def _create_xumm_payload(txjson: dict, options: dict = None):
         return None
 
 
+async def create_payment_payload(destination: str, value: str = "1",
+                                 currency: str = None, issuer: str = None,
+                                 expire_minutes: int = None):
+    """XUMM sign-request payload for a token Payment. This is what payment
+    QRs must encode: Xaman only understands its own payload links
+    (xumm.app/sign/<uuid>) — it cannot parse the raw-transaction-JSON
+    xaman.app/detect link from generate_static_payment_link, which is kept
+    only as a last-resort fallback when the XUMM API is unreachable."""
+    if expire_minutes is None:
+        # Match the on-ledger payment wait so the sign request and the
+        # subscription expire together.
+        expire_minutes = max(1, -(-config.PAYMENT_TIMEOUT_SECONDS // 60))
+    return await _create_xumm_payload(
+        {
+            "TransactionType": "Payment",
+            "Destination": destination,
+            "Amount": {
+                "currency": currency or config.TOKEN_CURRENCY_HEX,
+                "value": value,
+                "issuer": issuer or config.TOKEN_ISSUER_ADDRESS,
+            },
+        },
+        options={"expire": expire_minutes},
+    )
+
+
 async def create_accept_offer_payload(offer_id: str):
     """XUMM payload for NFTokenAcceptOffer."""
     return await _create_xumm_payload({
