@@ -12,12 +12,17 @@ from xrpl.clients import JsonRpcClient
 from xrpl.asyncio.clients import AsyncWebsocketClient
 from xrpl.wallet import Wallet
 from xrpl.models import IssuedCurrencyAmount
-from xrpl.models.transactions import NFTokenMint, NFTokenCreateOffer, NFTokenBurn
+from xrpl.models.transactions import (NFTokenMint, NFTokenCreateOffer,
+                                      NFTokenBurn, NFTokenModify)
 from xrpl.models.transactions.nftoken_create_offer import NFTokenCreateOfferFlag
 from xrpl.models.requests import Tx, Subscribe, AccountNFTs, AccountTx
 from xrpl.transaction import submit_and_wait
 
 from lfg_core import config
+
+# On-ledger NFToken flag bits (mirror the tf* mint flags)
+NFT_FLAG_BURNABLE = 0x0001
+NFT_FLAG_MUTABLE = 0x0010
 
 
 def convert_str_to_hex(string: str) -> str:
@@ -129,7 +134,7 @@ def swap_offer_amount() -> IssuedCurrencyAmount:
 
 async def get_account_nfts(address: str, issuer: str):
     """List NFTs held by `address` that were issued by `issuer`.
-    Returns a list of {"nft_id", "uri_hex"} dicts."""
+    Returns a list of {"nft_id", "uri_hex", "flags"} dicts."""
     nfts = []
     marker = None
     async with AsyncWebsocketClient(config.WS_URL) as websocket:
@@ -140,7 +145,9 @@ async def get_account_nfts(address: str, issuer: str):
             for nft in result.get("account_nfts", []):
                 if nft.get("Issuer") != issuer:
                     continue
-                nfts.append({"nft_id": nft["NFTokenID"], "uri_hex": nft.get("URI", "")})
+                nfts.append({"nft_id": nft["NFTokenID"],
+                             "uri_hex": nft.get("URI", ""),
+                             "flags": nft.get("Flags", 0)})
             marker = result.get("marker")
             if not marker:
                 break
@@ -190,6 +197,59 @@ async def burn_nft(nft_id: str, owner: str = None):
     except Exception:
         logging.error(f"burn_nft error: {traceback.format_exc()}")
         return None
+
+
+async def modify_nft(nft_id: str, owner: str, uri: str):
+    """Update a mutable NFT's URI in place via NFTokenModify (Dynamic NFTs
+    amendment). `owner` is the current holder (None/issuer-wallet = held by
+    the issuer wallet itself); `uri` is the plain (non-hex) new metadata URL.
+    Requires the NFT to have the mutable flag. Returns the transaction hash
+    or None."""
+    try:
+        wallet = Wallet.from_seed(config.SEED)
+        client = JsonRpcClient(config.JSON_RPC_URL)
+        kwargs = dict(account=wallet.classic_address, nftoken_id=nft_id,
+                      uri=convert_str_to_hex(uri))
+        if owner and owner != wallet.classic_address:
+            kwargs["owner"] = owner
+        modify = NFTokenModify(**kwargs)
+
+        retries = 5
+        hash_txn = None
+        for attempt in range(1, retries + 1):
+            try:
+                response = await asyncio.to_thread(submit_and_wait, modify, client, wallet)
+                hash_txn = response.result["hash"]
+                break
+            except Exception as e:
+                logging.error(f"Modify attempt {attempt} failed: {e}")
+                if attempt == retries:
+                    return None
+                await asyncio.sleep(5)
+
+        for check_attempt in range(1, retries + 1):
+            try:
+                txn = await asyncio.to_thread(client.request, Tx(transaction=hash_txn))
+                res = txn.result
+                if res["meta"]["TransactionResult"] == "tesSUCCESS":
+                    logging.info(f"NFT modified: {nft_id} ({hash_txn})")
+                    return hash_txn
+                logging.warning(f"Modify result: {res['meta']['TransactionResult']}")
+                return None
+            except Exception as e:
+                logging.error(f"Modify status check {check_attempt} failed: {e}")
+                if check_attempt == retries:
+                    return None
+                await asyncio.sleep(5)
+        return None
+    except Exception:
+        logging.error(f"modify_nft error: {traceback.format_exc()}")
+        return None
+
+
+def bot_wallet_address() -> str:
+    """Classic address of the wallet behind SEED (mint/offer/fee account)."""
+    return Wallet.from_seed(config.SEED).classic_address
 
 
 RIPPLE_EPOCH_OFFSET = 946684800  # seconds between the Unix and Ripple epochs
@@ -272,17 +332,20 @@ async def _recent_payment_exists(websocket, account: str, matches,
 async def wait_for_payment(destination: str, expected_sender: str,
                            expected_amount: str = "1",
                            timeout_seconds: int = None,
-                           not_before: float = None) -> bool:
+                           not_before: float = None,
+                           currency: str = None,
+                           issuer: str = None) -> bool:
     """
     Subscribe to the destination account and wait for a token payment from
     expected_sender. Sender verification prevents one user's payment from
     triggering another user's mint. `not_before` (Unix time, default now-10s)
     bounds the backfill check for payments that landed before the
-    subscription was active.
+    subscription was active. currency/issuer default to the LFGO mint token;
+    pass others (e.g. BRIX) for swap fees.
     """
     timeout_seconds = timeout_seconds or config.PAYMENT_TIMEOUT_SECONDS
-    currency = config.TOKEN_CURRENCY_HEX
-    issuer = config.TOKEN_ISSUER_ADDRESS
+    currency = currency or config.TOKEN_CURRENCY_HEX
+    issuer = issuer or config.TOKEN_ISSUER_ADDRESS
     start_time = time.time()
     if not_before is None:
         not_before = start_time - 10

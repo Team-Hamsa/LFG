@@ -137,3 +137,12 @@ code { color: var(--green); word-break: break-all; }
   display: block;
   margin: 8px auto 0;
 }
+.swap-result .modified-note { display: block; margin-top: 8px; color: var(--muted); }
+#swap-results .result-qr {
+  width: 160px;
+  border-radius: 8px;
+  background: white;
+  padding: 6px;
+  display: block;
+  margin: 12px auto 0;
+}
