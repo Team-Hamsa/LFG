@@ -10,7 +10,7 @@ import aiohttp
 from dotenv import load_dotenv
 
 load_dotenv()
-BASE = os.getenv("BUNNY_CDN_BASE_URL")
+BASE = (os.getenv("BUNNY_CDN_BASE_URL") or "").rstrip("/")
 ZONE = os.getenv("BUNNY_CDN_STORAGE_ZONE")
 KEY = os.getenv("BUNNY_CDN_ACCESS_KEY")
 FOLDER = os.getenv("LAYERS_CDN_FOLDER", "layers")

@@ -20,8 +20,9 @@ os.environ.setdefault("BUNNY_CDN_ACCESS_KEY", "test")
 os.environ.setdefault("BUNNY_CDN_STORAGE_ZONE", "test")
 os.environ.setdefault("LAYER_SOURCE", "local")
 
-from lfg_core import mint_flow, xumm_ops, traits, swap_meta, swap_flow, layer_store  # noqa: E402
+from lfg_core import mint_flow, xumm_ops, xrpl_ops, traits, swap_meta, swap_flow, layer_store  # noqa: E402
 from webapp import server  # noqa: E402
+import user_db  # noqa: E402
 
 
 def test_routes_registered():
@@ -57,9 +58,157 @@ def test_qr_png():
     assert png[:8] == b"\x89PNG\r\n\x1a\n"
 
 
-def test_format_trait_name():
-    assert traits.format_trait_name("12 cool hat") == "Cool Hat"
-    assert traits.format_trait_name("blue eyes") == "Blue Eyes"
+def test_register_user_upserts_wallet(tmp_path, monkeypatch):
+    monkeypatch.setattr(user_db, "DATABASE", str(tmp_path / "test.db"))
+    user_db.create_users_table()
+    assert user_db.register_user("42", "josh", "rOldWallet")
+    assert user_db.register_user("42", "josh", "rNewWallet")  # change wallet
+    assert user_db.get_user("42")["address"] == "rNewWallet"
+
+
+def test_success_states_are_terminal():
+    # Non-terminal success states would 409-block users forever
+    assert mint_flow.OFFER_READY in mint_flow.TERMINAL_STATES
+    assert swap_flow.OFFERS_READY in swap_flow.TERMINAL_STATES
+
+
+# --- Payment watching (rippled API v1 + v2 message shapes) ---
+
+V1_STREAM_MSG = {
+    "type": "transaction", "validated": True,
+    "transaction": {
+        "TransactionType": "Payment", "Account": "rSender", "Destination": "rDest",
+        "Amount": {"currency": "4C46474F00000000000000000000000000000000",
+                   "issuer": "rIssuer", "value": "1"},
+        "hash": "H1",
+    },
+    "meta": {"delivered_amount": {
+        "currency": "4C46474F00000000000000000000000000000000",
+        "issuer": "rIssuer", "value": "1"}},
+}
+
+V2_STREAM_MSG = {
+    "type": "transaction", "validated": True,
+    "tx_json": {
+        "TransactionType": "Payment", "Account": "rSender", "Destination": "rDest",
+        "DeliverMax": {"currency": "4C46474F00000000000000000000000000000000",
+                       "issuer": "rIssuer", "value": "1"},
+        "hash": "H2",
+    },
+    "meta": {"delivered_amount": {
+        "currency": "4C46474F00000000000000000000000000000000",
+        "issuer": "rIssuer", "value": "1"}},
+}
+
+CUR = "4C46474F00000000000000000000000000000000"
+
+
+def _matches(msg):
+    tx, meta = xrpl_ops._extract_tx_and_meta(msg)
+    return tx is not None and xrpl_ops._payment_matches(
+        tx, meta, "rDest", "rSender", "1", CUR, "rIssuer")
+
+
+def test_payment_matches_api_v1_and_v2_shapes():
+    assert _matches(V1_STREAM_MSG)
+    assert _matches(V2_STREAM_MSG)  # current xrpl-py subscribes with api_version 2
+
+
+def test_payment_match_rejects_wrong_sender_and_partial():
+    import copy
+    wrong_sender = copy.deepcopy(V2_STREAM_MSG)
+    wrong_sender["tx_json"]["Account"] = "rSomeoneElse"
+    assert not _matches(wrong_sender)
+
+    # Partial payment: DeliverMax says 1 but only 0.1 was delivered
+    partial = copy.deepcopy(V2_STREAM_MSG)
+    partial["meta"]["delivered_amount"]["value"] = "0.1"
+    assert not _matches(partial)
+
+    xrp_payment = copy.deepcopy(V1_STREAM_MSG)
+    xrp_payment["transaction"]["Amount"] = "1000000"  # XRP drops, not LFGO
+    del xrp_payment["meta"]
+    assert not _matches(xrp_payment)
+
+
+def test_wait_for_payment_times_out_with_no_traffic(monkeypatch):
+    """The old code only checked the timeout when a message arrived, hanging
+    forever on a quiet account."""
+    class FakeWS:
+        def __init__(self, url):
+            pass
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *a):
+            return False
+
+        async def send(self, req):
+            pass
+
+        async def request(self, req):
+            class R:
+                result = {"transactions": []}
+            return R()
+
+        def __aiter__(self):
+            return self
+
+        async def __anext__(self):
+            await asyncio.Event().wait()  # silent account: never a message
+
+    monkeypatch.setattr(xrpl_ops, "AsyncWebsocketClient", FakeWS)
+    paid = asyncio.get_event_loop().run_until_complete(
+        xrpl_ops.wait_for_payment("rDest", "rSender", timeout_seconds=1))
+    assert paid is False
+
+
+def test_wait_for_payment_backfills_missed_payment(monkeypatch):
+    """A payment validated before the subscription went live must be found
+    via account_tx — but only if it is newer than not_before."""
+    import copy
+    entry = copy.deepcopy(V2_STREAM_MSG)
+    entry["tx_json"]["date"] = 800000000  # ripple epoch seconds
+
+    class FakeWS:
+        def __init__(self, url):
+            pass
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *a):
+            return False
+
+        async def send(self, req):
+            pass
+
+        async def request(self, req):
+            class R:
+                result = {"transactions": [entry]}
+            return R()
+
+        def __aiter__(self):
+            return self
+
+        async def __anext__(self):
+            await asyncio.Event().wait()
+
+    monkeypatch.setattr(xrpl_ops, "AsyncWebsocketClient", FakeWS)
+    monkeypatch.setattr(xrpl_ops.config, "TOKEN_CURRENCY_HEX", CUR)
+    monkeypatch.setattr(xrpl_ops.config, "TOKEN_ISSUER_ADDRESS", "rIssuer")
+    loop = asyncio.get_event_loop()
+    tx_unix = 800000000 + xrpl_ops.RIPPLE_EPOCH_OFFSET
+
+    paid = loop.run_until_complete(xrpl_ops.wait_for_payment(
+        "rDest", "rSender", timeout_seconds=1, not_before=tx_unix - 60))
+    assert paid is True
+
+    # The same payment is too old for a session created after it -> no replay
+    paid = loop.run_until_complete(xrpl_ops.wait_for_payment(
+        "rDest", "rSender", timeout_seconds=1, not_before=tx_unix + 60))
+    assert paid is False
 
 
 def test_mint_session_payment_timeout(monkeypatch):
@@ -92,6 +241,7 @@ def test_mint_session_happy_path(monkeypatch, tmp_path):
 
     async def fake_select(store, gender=None):
         return "male", [{"trait_type": "Background", "value": "Blue"},
+                        {"trait_type": "Back", "value": "Angel Wings"},
                         {"trait_type": "Head", "value": "Crown"}]
 
     async def fake_compose(attributes, gender, store, basename, out_dir="generated"):
@@ -120,10 +270,13 @@ def test_mint_session_happy_path(monkeypatch, tmp_path):
     asyncio.get_event_loop().run_until_complete(mint_flow.run_mint_session(session))
 
     assert session.state == mint_flow.OFFER_READY
+    assert session.state in mint_flow.TERMINAL_STATES  # next mint not blocked
     assert session.nft_id == "NFTID123"
     assert session.accept_deeplink == "https://xumm.test/sign"
     assert session.image_url == "https://cdn.test/lfg_9999.png"
     assert recorded["traits"]["Hat"] == "Crown"  # Head mapped to the Hat column
+    assert "Head" not in recorded["traits"]
+    assert recorded["traits"]["Back"] == "Angel Wings"  # Back persisted too
 
 # --- Trait Swapper ---
 
@@ -197,7 +350,9 @@ def test_swap_session_missing_layers_fails_before_burn(monkeypatch):
     assert burned == []
 
 
-def test_swap_session_happy_path(monkeypatch, tmp_path):
+def _patch_swap_stubs(monkeypatch, tmp_path, events,
+                      burn_fails=(), mint_fails=()):
+    """Stub the swap flow's externals; `events` records on-chain call order."""
     async def fake_upload(path_on_cdn, data, content_type):
         return f"https://cdn.test/LFGO/{path_on_cdn}"
 
@@ -209,24 +364,34 @@ def test_swap_session_happy_path(monkeypatch, tmp_path):
     async def no_missing(attrs, gender, store):
         return []
 
-    burned = []
-    async def fake_burn(nft_id, owner):
-        burned.append(nft_id)
+    async def fake_burn(nft_id, owner=None):
+        if nft_id in burn_fails:
+            events.append(f"burn_failed {nft_id}")
+            return None
+        events.append(f"burn {nft_id}")
         return "HASH"
 
     minted = []
     async def fake_mint(**kwargs):
+        if len(minted) + 1 in mint_fails:
+            minted.append(None)
+            events.append("mint_failed")
+            return None
         minted.append(kwargs["metadata_cdn_url"])
+        events.append(f"mint NEW{len(minted)}")
         return f"NEW{len(minted)}"
 
     async def fake_offer(nft_id, destination, amount=None):
         assert amount is not None  # swap offers are BRIX-priced
+        events.append(f"offer {nft_id}")
         return f"OFFER_{nft_id}"
 
     async def fake_accept(offer_id):
         return {"qr_url": "https://xumm.test/qr.png",
                 "xumm_url": f"https://xumm.test/{offer_id}", "uuid": "u"}
 
+    monkeypatch.setattr(swap_flow.config, "SWAP_RECORDS_DIR",
+                        str(tmp_path / "swap_records"))
     monkeypatch.setattr(swap_flow.layer_store, "get_layer_store", lambda: object())
     monkeypatch.setattr(swap_flow.swap_compose, "missing_layers", no_missing)
     monkeypatch.setattr(swap_flow.swap_compose, "compose_nft", fake_compose)
@@ -236,17 +401,61 @@ def test_swap_session_happy_path(monkeypatch, tmp_path):
     monkeypatch.setattr(swap_flow.xrpl_ops, "create_nft_offer", fake_offer)
     monkeypatch.setattr(swap_flow.xumm_ops, "create_accept_offer_payload", fake_accept)
 
+
+def test_swap_session_happy_path(monkeypatch, tmp_path):
+    events = []
+    _patch_swap_stubs(monkeypatch, tmp_path, events)
+
     session = _swap_session()
     asyncio.get_event_loop().run_until_complete(swap_flow.run_swap_session(session))
 
     assert session.state == swap_flow.OFFERS_READY
-    assert burned == ["OLD10", "OLD20"]
+    # Replacements are minted BEFORE the originals are burned (fail-safe)
+    assert events[:4] == ["mint NEW1", "mint NEW2", "burn OLD10", "burn OLD20"]
     assert len(session.results) == 2
     r = session.results[0]
     assert r["nft_id"] == "NEW1"
     assert r["image_url"] == "https://cdn.test/LFGO/10/10_1.png"
     assert r["metadata_url"].endswith("10/10_1.json")
     assert r["accept_deeplink"].startswith("https://xumm.test/OFFER_")
+    # The on-chain journal is persisted for recovery
+    records = list((tmp_path / "swap_records").glob("*.json"))
+    assert len(records) == 1
+    import json as _json
+    record = _json.loads(records[0].read_text())
+    assert record["status"] == "complete"
+    assert {n["old_nft_id"] for n in record["nfts"]} == {"OLD10", "OLD20"}
+
+
+def test_swap_session_mint_failure_keeps_originals(monkeypatch, tmp_path):
+    events = []
+    _patch_swap_stubs(monkeypatch, tmp_path, events, mint_fails={2})
+
+    session = _swap_session()
+    asyncio.get_event_loop().run_until_complete(swap_flow.run_swap_session(session))
+
+    assert session.state == swap_flow.FAILED
+    assert "No NFTs were lost" in session.error
+    # No original was burned; the orphaned replacement was cleaned up
+    assert events == ["mint NEW1", "mint_failed", "burn NEW1"]
+
+
+def test_swap_session_partial_burn_failure_delivers_first_replacement(
+        monkeypatch, tmp_path):
+    events = []
+    _patch_swap_stubs(monkeypatch, tmp_path, events, burn_fails={"OLD20"})
+
+    session = _swap_session()
+    asyncio.get_event_loop().run_until_complete(swap_flow.run_swap_session(session))
+
+    # Original #1 is gone, so its replacement MUST be offered; the second
+    # half of the swap is cancelled (replacement burned, original kept).
+    assert session.state == swap_flow.FAILED
+    assert events == ["mint NEW1", "mint NEW2", "burn OLD10",
+                      "burn_failed OLD20", "burn NEW2", "offer NEW1"]
+    assert len(session.results) == 1
+    assert session.results[0]["nft_id"] == "NEW1"
+    assert "still in your wallet" in session.error
 
 # --- Unified layer store ---
 

@@ -37,7 +37,7 @@ NFT_COLLECTION_NAME = os.getenv("NFT_COLLECTION_NAME", "Let's Effing Go!")
 # BunnyCDN
 BUNNY_CDN_ACCESS_KEY = _require("BUNNY_CDN_ACCESS_KEY")
 BUNNY_CDN_STORAGE_ZONE = _require("BUNNY_CDN_STORAGE_ZONE")
-BUNNY_CDN_BASE_URL = os.getenv("BUNNY_CDN_BASE_URL", "https://storage.bunnycdn.com")
+BUNNY_CDN_BASE_URL = os.getenv("BUNNY_CDN_BASE_URL", "https://storage.bunnycdn.com").rstrip("/")
 BUNNY_CDN_FOLDER = os.getenv("BUNNY_CDN_FOLDER", "minttest")
 BUNNY_CDN_PUBLIC_BASE = os.getenv("BUNNY_CDN_PUBLIC_BASE", "https://lfgo.b-cdn.net")
 
@@ -48,7 +48,6 @@ WEBAPP_SESSION_SECRET = os.getenv("WEBAPP_SESSION_SECRET", "")
 WEBAPP_PORT = int(os.getenv("WEBAPP_PORT", "8080"))
 
 # Misc
-TRAIT_LAYERS_DIR = os.getenv("TRAIT_LAYERS_DIR", "trait_layers")
 PAYMENT_TIMEOUT_SECONDS = int(os.getenv("PAYMENT_TIMEOUT_SECONDS", "300"))
 
 # Unified trait layer store (shared by mint + swap).
@@ -67,6 +66,7 @@ SWAP_OFFER_CURRENCY_HEX = os.getenv(
 SWAP_OFFER_ISSUER = os.getenv("SWAP_OFFER_ISSUER", "rLfgoBriX5ZaMP32mtc7RUZJcjnisKh2Px")
 SWAP_OFFER_AMOUNT = os.getenv("SWAP_OFFER_AMOUNT", "10")
 SWAP_MAX_NFT_NUMBER = int(os.getenv("SWAP_MAX_NFT_NUMBER", "3535"))
+SWAP_RECORDS_DIR = os.getenv("SWAP_RECORDS_DIR", "swap_records")
 NFT_SCHEMA_URL = os.getenv("NFT_SCHEMA_URL",
                            "ipfs://QmNpi8rcXEkohca8iXu7zysKKSJYqCvBJn3xJwga8jXqWU")
 EXTERNAL_WEBSITE_URL = os.getenv("EXTERNAL_WEBSITE_URL", "https://letseffinggo.com")

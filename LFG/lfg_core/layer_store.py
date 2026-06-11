@@ -128,7 +128,13 @@ class CdnLayerStore:
         return local_path
 
 
+_store = None
+
+
 def get_layer_store():
-    if config.LAYER_SOURCE == "local":
-        return LocalLayerStore()
-    return CdnLayerStore()
+    """Process-wide store singleton so CDN directory listings and the
+    download cache survive across mint/swap sessions."""
+    global _store
+    if _store is None:
+        _store = LocalLayerStore() if config.LAYER_SOURCE == "local" else CdnLayerStore()
+    return _store

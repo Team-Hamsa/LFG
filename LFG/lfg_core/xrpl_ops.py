@@ -1,11 +1,12 @@
 # lfg_core/xrpl_ops.py
 # XRPL operations: mint, offer creation, payment watching (extracted from main.py).
 
-import json
 import time
 import asyncio
 import logging
 import traceback
+from datetime import datetime
+from decimal import Decimal, InvalidOperation
 
 from xrpl.clients import JsonRpcClient
 from xrpl.asyncio.clients import AsyncWebsocketClient
@@ -13,7 +14,7 @@ from xrpl.wallet import Wallet
 from xrpl.models import IssuedCurrencyAmount
 from xrpl.models.transactions import NFTokenMint, NFTokenCreateOffer, NFTokenBurn
 from xrpl.models.transactions.nftoken_create_offer import NFTokenCreateOfferFlag
-from xrpl.models.requests import Tx, Subscribe, AccountNFTs
+from xrpl.models.requests import Tx, Subscribe, AccountNFTs, AccountTx
 from xrpl.transaction import submit_and_wait
 
 from lfg_core import config
@@ -146,14 +147,15 @@ async def get_account_nfts(address: str, issuer: str):
     return nfts
 
 
-async def burn_nft(nft_id: str, owner: str):
-    """Burn an NFT held by `owner` using the issuer wallet's burn authority.
-    Returns the transaction hash or None."""
+async def burn_nft(nft_id: str, owner: str = None):
+    """Burn an NFT held by `owner` (None = held by the issuer wallet itself)
+    using the issuer wallet's burn authority. Returns the transaction hash
+    or None."""
     try:
         wallet = Wallet.from_seed(config.SEED)
         client = JsonRpcClient(config.JSON_RPC_URL)
         kwargs = dict(account=wallet.classic_address, nftoken_id=nft_id)
-        if owner != wallet.classic_address:
+        if owner and owner != wallet.classic_address:
             kwargs["owner"] = owner
         burn = NFTokenBurn(**kwargs)
 
@@ -174,7 +176,7 @@ async def burn_nft(nft_id: str, owner: str):
             try:
                 txn = await asyncio.to_thread(client.request, Tx(transaction=hash_txn))
                 res = txn.result
-                if res["meta"]["TransactionResult"] in ("tesSUCCESS", "terQUEUED"):
+                if res["meta"]["TransactionResult"] == "tesSUCCESS":
                     logging.info(f"NFT burned: {nft_id} ({hash_txn})")
                     return hash_txn
                 logging.warning(f"Burn result: {res['meta']['TransactionResult']}")
@@ -190,7 +192,23 @@ async def burn_nft(nft_id: str, owner: str):
         return None
 
 
-def _payment_matches(tx: dict, destination: str, expected_sender: str,
+RIPPLE_EPOCH_OFFSET = 946684800  # seconds between the Unix and Ripple epochs
+
+
+def _extract_tx_and_meta(message: dict):
+    """Pull (tx, meta) out of a subscription stream message or an account_tx
+    entry. rippled API v1 nests the transaction under 'transaction'/'tx';
+    API v2 (the default for current xrpl-py) uses 'tx_json'."""
+    if not isinstance(message, dict):
+        return None, None
+    tx = message.get('tx_json') or message.get('transaction') or message.get('tx')
+    if not isinstance(tx, dict):
+        return None, None
+    meta = message.get('meta') or message.get('metaData')
+    return tx, meta
+
+
+def _payment_matches(tx: dict, meta, destination: str, expected_sender: str,
                      expected_amount: str, currency: str, issuer: str) -> bool:
     if tx.get('TransactionType') != 'Payment':
         return False
@@ -198,46 +216,100 @@ def _payment_matches(tx: dict, destination: str, expected_sender: str,
         return False
     if tx.get('Destination') != destination:
         return False
-    amount = tx.get('Amount', {})
-    return (isinstance(amount, dict)
-            and amount.get('currency') == currency
-            and amount.get('issuer') == issuer
-            and amount.get('value') == expected_amount)
+    # Prefer the validated delivered amount (also guards against partial
+    # payments); fall back to Amount (API v1) / DeliverMax (API v2).
+    amount = None
+    if isinstance(meta, dict):
+        amount = meta.get('delivered_amount') or meta.get('DeliveredAmount')
+    if amount is None:
+        amount = tx.get('Amount', tx.get('DeliverMax'))
+    if not isinstance(amount, dict):
+        return False
+    if amount.get('currency') != currency or amount.get('issuer') != issuer:
+        return False
+    try:
+        return Decimal(amount.get('value', '0')) >= Decimal(expected_amount)
+    except (InvalidOperation, TypeError):
+        return False
+
+
+def _tx_unix_time(entry: dict, tx: dict):
+    """Validation time of an account_tx entry as a Unix timestamp, or None."""
+    date = tx.get('date')
+    if isinstance(date, (int, float)):
+        return date + RIPPLE_EPOCH_OFFSET
+    iso = entry.get('close_time_iso')  # API v2 puts the time on the entry
+    if iso:
+        try:
+            return datetime.fromisoformat(iso.replace('Z', '+00:00')).timestamp()
+        except ValueError:
+            return None
+    return None
+
+
+async def _recent_payment_exists(websocket, account: str, matches,
+                                 not_before_unix: float) -> bool:
+    """Check already-validated transactions for a matching payment. Covers
+    payments that land between the payment link being shown to the user and
+    the live subscription becoming active."""
+    response = await websocket.request(AccountTx(account=account, limit=20))
+    for entry in response.result.get('transactions', []):
+        if not entry.get('validated', True):
+            continue
+        tx, meta = _extract_tx_and_meta(entry)
+        if tx is None:
+            continue
+        when = _tx_unix_time(entry, tx)
+        # Unknown-age transactions are skipped so an old payment can't be
+        # replayed for a free mint.
+        if when is None or when < not_before_unix:
+            continue
+        if matches(tx, meta):
+            return True
+    return False
 
 
 async def wait_for_payment(destination: str, expected_sender: str,
                            expected_amount: str = "1",
-                           timeout_seconds: int = None) -> bool:
+                           timeout_seconds: int = None,
+                           not_before: float = None) -> bool:
     """
     Subscribe to the destination account and wait for a token payment from
     expected_sender. Sender verification prevents one user's payment from
-    triggering another user's mint.
+    triggering another user's mint. `not_before` (Unix time, default now-10s)
+    bounds the backfill check for payments that landed before the
+    subscription was active.
     """
     timeout_seconds = timeout_seconds or config.PAYMENT_TIMEOUT_SECONDS
     currency = config.TOKEN_CURRENCY_HEX
     issuer = config.TOKEN_ISSUER_ADDRESS
     start_time = time.time()
+    if not_before is None:
+        not_before = start_time - 10
+
+    def matches(tx, meta):
+        return _payment_matches(tx, meta, destination, expected_sender,
+                                expected_amount, currency, issuer)
+
+    async def watch(websocket):
+        async for message in websocket:
+            tx, meta = _extract_tx_and_meta(message)
+            if tx and matches(tx, meta):
+                logging.info(f"✅ Payment received from {expected_sender}: {tx.get('hash')}")
+                return True
+        return False
 
     try:
         async with AsyncWebsocketClient(config.WS_URL) as websocket:
             await websocket.send(Subscribe(accounts=[destination]))
             logging.info(f"Subscribed to {destination}; waiting for payment from {expected_sender}")
 
-            async for message in websocket:
-                if time.time() - start_time > timeout_seconds:
-                    logging.info("Payment subscription timeout")
-                    return False
+            if await _recent_payment_exists(websocket, destination, matches, not_before):
+                logging.info(f"✅ Payment from {expected_sender} found in recent history")
+                return True
 
-                tx = None
-                if message.get('type') == 'transaction' and 'transaction' in message:
-                    tx = message['transaction']
-                elif message.get('account') == destination and 'transaction' in message:
-                    tx = message['transaction']
-
-                if tx and _payment_matches(tx, destination, expected_sender,
-                                           expected_amount, currency, issuer):
-                    logging.info(f"✅ Payment received from {expected_sender}: {tx.get('hash')}")
-                    return True
+            remaining = timeout_seconds - (time.time() - start_time)
+            return await asyncio.wait_for(watch(websocket), timeout=max(remaining, 1))
 
     except asyncio.TimeoutError:
         logging.info("Payment subscription timeout")
@@ -246,5 +318,3 @@ async def wait_for_payment(destination: str, expected_sender: str,
         logging.error(f"Error in payment subscription: {e}")
         logging.error(traceback.format_exc())
         return False
-
-    return False

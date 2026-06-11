@@ -33,6 +33,21 @@ SESSION_TTL = 6 * 3600
 # In-memory sessions: session_id -> MintSession / SwapSession
 mint_sessions = {}
 swap_sessions = {}
+SESSION_RETENTION = 3600  # keep terminal sessions briefly for late polls
+
+
+def _prune_sessions(sessions: dict, terminal_states: set) -> None:
+    cutoff = time.time() - SESSION_RETENTION
+    for sid, s in list(sessions.items()):
+        if s.state in terminal_states and s.created_at < cutoff:
+            del sessions[sid]
+
+
+def _active_session(sessions: dict, terminal_states: set, discord_id: str):
+    for s in sessions.values():
+        if s.discord_id == discord_id and s.state not in terminal_states:
+            return s
+    return None
 
 
 def _session_secret() -> bytes:
@@ -77,6 +92,28 @@ def require_auth(handler):
     return wrapper
 
 
+def require_wallet(handler):
+    """require_auth + a registered wallet; puts the address in request["wallet"]."""
+    @require_auth
+    async def wrapper(request):
+        record = await asyncio.to_thread(get_user, request["user"]["id"])
+        if not record or not record.get("address"):
+            return web.json_response({"error": "no wallet registered"}, status=400)
+        request["wallet"] = record["address"]
+        return await handler(request)
+    return wrapper
+
+
+def make_status_handler(sessions: dict):
+    @require_auth
+    async def handler(request):
+        session = sessions.get(request.match_info["session_id"])
+        if not session or session.discord_id != request["user"]["id"]:
+            return web.json_response({"error": "not found"}, status=404)
+        return web.json_response(session.to_dict())
+    return handler
+
+
 # --- API handlers ---
 
 async def handle_token(request):
@@ -103,6 +140,10 @@ async def handle_token(request):
         me = await http.get(f"{DISCORD_API}/users/@me",
                             headers={"Authorization": f"Bearer {access_token}"})
         user = await me.json()
+        if me.status != 200 or "id" not in user:
+            logging.error(f"Discord /users/@me failed ({me.status}): {user}")
+            return web.json_response({"error": "discord identity lookup failed"},
+                                     status=502)
 
     session_token = make_session_token({"id": user["id"], "name": user.get("username", "")})
     return web.json_response({
@@ -115,7 +156,7 @@ async def handle_token(request):
 @require_auth
 async def handle_me(request):
     user = request["user"]
-    record = get_user(user["id"])
+    record = await asyncio.to_thread(get_user, user["id"])
     return web.json_response({
         "id": user["id"],
         "username": user["name"],
@@ -130,7 +171,7 @@ async def handle_register(request):
     wallet = (body.get("wallet") or "").strip()
     if not is_valid_classic_address(wallet):
         return web.json_response({"error": "invalid XRPL address"}, status=400)
-    if not register_user(user["id"], user["name"], wallet):
+    if not await asyncio.to_thread(register_user, user["id"], user["name"], wallet):
         return web.json_response({"error": "registration failed"}, status=500)
     return web.json_response({"ok": True, "wallet": wallet})
 
@@ -143,42 +184,29 @@ async def handle_trustline(request):
     return web.json_response(payload)
 
 
-@require_auth
+@require_wallet
 async def handle_mint_start(request):
     user = request["user"]
-    record = get_user(user["id"])
-    if not record or not record.get("address"):
-        return web.json_response({"error": "no wallet registered"}, status=400)
+    _prune_sessions(mint_sessions, mint_flow.TERMINAL_STATES)
 
-    # One active session per user
-    for s in mint_sessions.values():
-        if s.discord_id == user["id"] and s.state not in mint_flow.TERMINAL_STATES:
-            return web.json_response({"error": "mint already in progress",
-                                      "session": s.to_dict()}, status=409)
+    # One active session per user (no awaits between this check and the
+    # insert below, so it cannot race)
+    active = _active_session(mint_sessions, mint_flow.TERMINAL_STATES, user["id"])
+    if active:
+        return web.json_response({"error": "mint already in progress",
+                                  "session": active.to_dict()}, status=409)
 
-    session = mint_flow.MintSession(discord_id=user["id"], wallet_address=record["address"])
+    session = mint_flow.MintSession(discord_id=user["id"], wallet_address=request["wallet"])
     mint_sessions[session.id] = session
     asyncio.get_event_loop().create_task(mint_flow.run_mint_session(session))
     return web.json_response(session.to_dict())
 
 
-@require_auth
-async def handle_mint_status(request):
-    session = mint_sessions.get(request.match_info["session_id"])
-    if not session or session.discord_id != request["user"]["id"]:
-        return web.json_response({"error": "not found"}, status=404)
-    return web.json_response(session.to_dict())
-
-
-@require_auth
+@require_wallet
 async def handle_nfts(request):
     """List the user's swappable collection NFTs (normalized metadata)."""
-    user = request["user"]
-    record = get_user(user["id"])
-    if not record or not record.get("address"):
-        return web.json_response({"error": "no wallet registered"}, status=400)
     try:
-        nfts = await swap_meta.load_wallet_nfts(record["address"],
+        nfts = await swap_meta.load_wallet_nfts(request["wallet"],
                                                 xrpl_ops.get_account_nfts)
     except Exception as e:
         logging.error(f"NFT listing failed: {e}")
@@ -187,13 +215,9 @@ async def handle_nfts(request):
                               "swappable_traits": swap_meta.SWAPPABLE_TRAITS})
 
 
-@require_auth
+@require_wallet
 async def handle_swap_start(request):
     user = request["user"]
-    record = get_user(user["id"])
-    if not record or not record.get("address"):
-        return web.json_response({"error": "no wallet registered"}, status=400)
-
     body = await request.json()
     nft1_id = body.get("nft1_id")
     nft2_id = body.get("nft2_id")
@@ -204,14 +228,13 @@ async def handle_swap_start(request):
                                  for t in traits_to_swap):
         return web.json_response({"error": "invalid trait selection"}, status=400)
 
-    for s in swap_sessions.values():
-        if s.discord_id == user["id"] and s.state not in swap_flow.TERMINAL_STATES:
-            return web.json_response({"error": "swap already in progress",
-                                      "session": s.to_dict()}, status=409)
+    _prune_sessions(swap_sessions, swap_flow.TERMINAL_STATES)
+    if _active_session(swap_sessions, swap_flow.TERMINAL_STATES, user["id"]):
+        return web.json_response({"error": "swap already in progress"}, status=409)
 
     # Re-verify ownership and metadata server-side (never trust client data)
     try:
-        nfts = await swap_meta.load_wallet_nfts(record["address"],
+        nfts = await swap_meta.load_wallet_nfts(request["wallet"],
                                                 xrpl_ops.get_account_nfts)
     except Exception as e:
         logging.error(f"NFT verification failed: {e}")
@@ -224,20 +247,19 @@ async def handle_swap_start(request):
         return web.json_response(
             {"error": "NFTs must share the same body type to swap traits"}, status=400)
 
+    # The load_wallet_nfts call above awaited, so re-check before inserting
+    if _active_session(swap_sessions, swap_flow.TERMINAL_STATES, user["id"]):
+        return web.json_response({"error": "swap already in progress"}, status=409)
     session = swap_flow.SwapSession(
-        discord_id=user["id"], wallet_address=record["address"],
+        discord_id=user["id"], wallet_address=request["wallet"],
         nft1=nft1, nft2=nft2, traits_to_swap=traits_to_swap)
     swap_sessions[session.id] = session
     asyncio.get_event_loop().create_task(swap_flow.run_swap_session(session))
     return web.json_response(session.to_dict())
 
 
-@require_auth
-async def handle_swap_status(request):
-    session = swap_sessions.get(request.match_info["session_id"])
-    if not session or session.discord_id != request["user"]["id"]:
-        return web.json_response({"error": "not found"}, status=404)
-    return web.json_response(session.to_dict())
+handle_mint_status = make_status_handler(mint_sessions)
+handle_swap_status = make_status_handler(swap_sessions)
 
 
 async def handle_config(request):
@@ -250,7 +272,7 @@ async def handle_qr(request):
     data = request.query.get("d", "")
     if not data or len(data) > 2048:
         return web.json_response({"error": "bad data"}, status=400)
-    png = xumm_ops.generate_qr_png(data)
+    png = await asyncio.to_thread(xumm_ops.generate_qr_png, data)
     return web.Response(body=png, content_type="image/png")
 
 

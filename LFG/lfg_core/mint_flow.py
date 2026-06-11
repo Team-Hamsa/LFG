@@ -6,17 +6,16 @@
 
 import os
 import json
+import time
 import uuid
 import asyncio
 import logging
 import traceback
 
-import aiohttp
-
-from lfg_core import config, traits, xrpl_ops, xumm_ops, layer_store, swap_compose
+from lfg_core import config, cdn, traits, xrpl_ops, xumm_ops, layer_store, swap_compose
 from db_helpers import get_next_nft_number, record_nft_mint
 
-# Session states (terminal: done, failed, payment_timeout)
+# Session states
 AWAITING_PAYMENT = "awaiting_payment"
 GENERATING = "generating"
 MINTING = "minting"
@@ -26,7 +25,16 @@ DONE = "done"
 FAILED = "failed"
 PAYMENT_TIMEOUT = "payment_timeout"
 
-TERMINAL_STATES = {DONE, FAILED, PAYMENT_TIMEOUT}
+# offer_ready is the success end-state: the background task is finished and
+# the user has the accept QR. It must be terminal or the one-active-session
+# guard would block every subsequent mint.
+TERMINAL_STATES = {OFFER_READY, DONE, FAILED, PAYMENT_TIMEOUT}
+
+# nft_numbers handed to in-flight sessions but not yet in the database.
+# get_next_nft_number() is MAX+1, so without this two concurrent mints would
+# get the same number and overwrite each other's CDN files.
+_nft_number_lock = asyncio.Lock()
+_reserved_numbers = set()
 
 
 class MintSession:
@@ -34,6 +42,7 @@ class MintSession:
         self.id = uuid.uuid4().hex
         self.discord_id = discord_id
         self.wallet_address = wallet_address
+        self.created_at = time.time()
         self.state = AWAITING_PAYMENT
         self.error = None
         self.payment_link = xumm_ops.generate_static_payment_link(config.TOKEN_ISSUER_ADDRESS)
@@ -58,25 +67,43 @@ class MintSession:
 
 
 async def _upload_to_bunny(path_on_cdn: str, data: bytes, content_type: str) -> str:
-    """PUT bytes to BunnyCDN storage; returns the public CDN URL."""
-    storage_url = (f"{config.BUNNY_CDN_BASE_URL}/{config.BUNNY_CDN_STORAGE_ZONE}/"
-                   f"{config.BUNNY_CDN_FOLDER}/{path_on_cdn}")
-    headers = {"AccessKey": config.BUNNY_CDN_ACCESS_KEY, "Content-Type": content_type}
-    async with aiohttp.ClientSession() as session:
-        resp = await session.put(storage_url, headers=headers, data=data)
-        if resp.status not in (200, 201):
-            raise Exception(f"BunnyCDN upload failed ({resp.status}) for {path_on_cdn}")
-    return f"{config.BUNNY_CDN_PUBLIC_BASE}/{config.BUNNY_CDN_FOLDER}/{path_on_cdn}"
+    return await cdn.upload_to_bunny(config.BUNNY_CDN_FOLDER, path_on_cdn,
+                                     data, content_type)
+
+
+async def _allocate_nft_number() -> int:
+    """Next NFT number, skipping numbers reserved by in-flight sessions."""
+    async with _nft_number_lock:
+        number = await asyncio.to_thread(get_next_nft_number)
+        while number in _reserved_numbers:
+            number += 1
+        _reserved_numbers.add(number)
+        return number
+
+
+def _save_recovery_record(record: dict) -> None:
+    """If the DB insert fails after an on-chain mint, persist the record to
+    disk so an administrator can backfill the LFG table."""
+    try:
+        os.makedirs("failed_db_records", exist_ok=True)
+        path = os.path.join("failed_db_records", f"nft_{record['nft_number']}.json")
+        with open(path, "w") as f:
+            json.dump(record, f, indent=2)
+        logging.error(f"DB insert failed; recovery record written to {path}")
+    except Exception:
+        logging.error(f"Failed to write recovery record: {traceback.format_exc()}")
 
 
 async def run_mint_session(session: MintSession) -> None:
     """Drive a MintSession to a terminal state. Run as a background task."""
     try:
-        # 1. Wait for the sender-verified token payment
+        # 1. Wait for the sender-verified token payment. not_before bounds
+        #    the missed-payment backfill to this session's lifetime.
         paid = await xrpl_ops.wait_for_payment(
             destination=config.TOKEN_ISSUER_ADDRESS,
             expected_sender=session.wallet_address,
             expected_amount="1",
+            not_before=session.created_at - 10,
         )
         if not paid:
             session.state = PAYMENT_TIMEOUT
@@ -85,33 +112,15 @@ async def run_mint_session(session: MintSession) -> None:
         # 2. Compose a random NFT from the unified layer store (same tree
         #    the Trait Swapper uses: <gender>/<TraitType>/<Value>.ext)
         session.state = GENERATING
-        session.nft_number = get_next_nft_number()
+        session.nft_number = await _allocate_nft_number()
         store = layer_store.get_layer_store()
         gender, attributes = await traits.select_random_attributes(store)
         output_path, is_video = await swap_compose.compose_nft(
             attributes, gender, store, f"lfg_{session.nft_number}")
 
         # 3. Upload image (+ video) and metadata to BunnyCDN
-        video_cdn_url = None
-        try:
-            if is_video:
-                with open(output_path, 'rb') as f:
-                    video_cdn_url = await _upload_to_bunny(
-                        f"lfg_{session.nft_number}.mp4", f.read(), "video/mp4")
-                thumb = await asyncio.to_thread(
-                    swap_compose.extract_first_frame, output_path,
-                    os.path.splitext(output_path)[0] + ".png")
-                with open(thumb, 'rb') as f:
-                    image_cdn_url = await _upload_to_bunny(
-                        f"lfg_{session.nft_number}.png", f.read(), "image/png")
-                os.remove(thumb)
-            else:
-                with open(output_path, 'rb') as f:
-                    image_cdn_url = await _upload_to_bunny(
-                        f"lfg_{session.nft_number}.png", f.read(), "image/png")
-        finally:
-            if os.path.exists(output_path):
-                os.remove(output_path)
+        image_cdn_url, video_cdn_url = await swap_compose.upload_output(
+            output_path, is_video, _upload_to_bunny, f"lfg_{session.nft_number}")
         session.image_url = image_cdn_url
 
         metadata = {
@@ -142,8 +151,8 @@ async def run_mint_session(session: MintSession) -> None:
         traits_dict = {t["trait_type"]: t["value"] for t in metadata["attributes"]}
         # The LFG table's headwear column is named Hat (layer tree uses Head)
         if "Head" in traits_dict:
-            traits_dict.setdefault("Hat", traits_dict["Head"])
-        if not record_nft_mint(
+            traits_dict["Hat"] = traits_dict.pop("Head")
+        record = dict(
             nft_number=session.nft_number,
             nft_id=nft_id,
             discord_id=session.discord_id,
@@ -151,8 +160,13 @@ async def run_mint_session(session: MintSession) -> None:
             metadata_url=metadata_cdn_url,
             image_url=image_cdn_url,
             traits=traits_dict,
-        ):
-            logging.error(f"Failed to record NFT #{session.nft_number} in database")
+        )
+        if await asyncio.to_thread(record_nft_mint, **record):
+            _reserved_numbers.discard(session.nft_number)
+        else:
+            # Keep the number reserved so it can't be reused this process,
+            # and persist the record for manual recovery.
+            _save_recovery_record(record)
 
         # 5. Create the transfer offer and the XUMM accept payload
         session.state = CREATING_OFFER

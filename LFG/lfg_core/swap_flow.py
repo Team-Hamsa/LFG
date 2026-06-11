@@ -1,24 +1,28 @@
 # lfg_core/swap_flow.py
 # Trait-swap session state machine: compose both re-crafted NFTs → upload to
-# CDN → burn the originals → remint → create BRIX-priced offers → XUMM accept
-# payloads. Same polling pattern as mint_flow. Nothing is burned until both
-# new images and metadata are safely on the CDN.
+# CDN → mint the replacements → burn the originals → create BRIX-priced
+# offers → XUMM accept payloads. Same polling pattern as mint_flow.
+#
+# Ordering is fail-safe for the user: nothing is burned until both
+# replacements are already minted (the issuer wallet has burn authority over
+# the originals, so a user can't block the burn after receiving offers). If
+# anything fails before the burns, the replacements are burned back and the
+# user keeps both originals. Every on-chain step is journaled to
+# SWAP_RECORDS_DIR so an administrator can recover a partial swap.
 
 import os
 import json
+import time
 import uuid
-import asyncio
 import logging
 import traceback
 
-import aiohttp
-
-from lfg_core import config, xrpl_ops, xumm_ops, swap_meta, swap_compose, layer_store
+from lfg_core import config, cdn, xrpl_ops, xumm_ops, swap_meta, swap_compose, layer_store
 
 COMPOSING = "composing"
 UPLOADING = "uploading"
-BURNING = "burning"
 MINTING = "minting"
+BURNING = "burning"
 CREATING_OFFERS = "creating_offers"
 OFFERS_READY = "offers_ready"
 DONE = "done"
@@ -33,6 +37,7 @@ class SwapSession:
         self.id = uuid.uuid4().hex
         self.discord_id = discord_id
         self.wallet_address = wallet_address
+        self.created_at = time.time()
         self.nft1 = nft1  # normalized records from swap_meta.normalize_nft
         self.nft2 = nft2
         self.traits_to_swap = traits_to_swap
@@ -53,14 +58,8 @@ class SwapSession:
 
 
 async def _upload_swap_file(path_on_cdn: str, data: bytes, content_type: str) -> str:
-    storage_url = (f"{config.BUNNY_CDN_BASE_URL}/{config.BUNNY_CDN_STORAGE_ZONE}/"
-                   f"{config.SWAP_CDN_FOLDER}/{path_on_cdn}")
-    headers = {"AccessKey": config.BUNNY_CDN_ACCESS_KEY, "Content-Type": content_type}
-    async with aiohttp.ClientSession() as session:
-        resp = await session.put(storage_url, headers=headers, data=data)
-        if resp.status not in (200, 201):
-            raise Exception(f"BunnyCDN upload failed ({resp.status}) for {path_on_cdn}")
-    return f"{config.BUNNY_CDN_PUBLIC_BASE}/{config.SWAP_CDN_FOLDER}/{path_on_cdn}"
+    return await cdn.upload_to_bunny(config.SWAP_CDN_FOLDER, path_on_cdn,
+                                     data, content_type)
 
 
 def _swap_metadata(nft: dict, attributes: list, image_url: str, video_url):
@@ -91,27 +90,82 @@ async def _build_and_upload(nft: dict, attributes: list, store):
     path, is_video = await swap_compose.compose_nft(
         attributes, nft["gender"], store, f"{nft['number']}_{new_burn}")
     num = nft["number"]
-    video_url = None
-    try:
-        if is_video:
-            with open(path, "rb") as f:
-                video_url = await _upload_swap_file(
-                    f"{num}/{num}_{new_burn}.mp4", f.read(), "video/mp4")
-            thumb = await asyncio.to_thread(
-                swap_compose.extract_first_frame, path,
-                os.path.splitext(path)[0] + ".png")
-            with open(thumb, "rb") as f:
-                image_url = await _upload_swap_file(
-                    f"{num}/{num}_{new_burn}.png", f.read(), "image/png")
-            os.remove(thumb)
-        else:
-            with open(path, "rb") as f:
-                image_url = await _upload_swap_file(
-                    f"{num}/{num}_{new_burn}.png", f.read(), "image/png")
-    finally:
-        if os.path.exists(path):
-            os.remove(path)
+    image_url, video_url = await swap_compose.upload_output(
+        path, is_video, _upload_swap_file, f"{num}/{num}_{new_burn}")
     return image_url, video_url, new_burn
+
+
+def _write_swap_record(session: SwapSession, items: list, status: str) -> None:
+    """Journal the swap's on-chain progress to disk (survives restarts;
+    the in-memory session does not)."""
+    try:
+        os.makedirs(config.SWAP_RECORDS_DIR, exist_ok=True)
+        path = os.path.join(config.SWAP_RECORDS_DIR, f"{session.id}.json")
+        record = {
+            "session_id": session.id,
+            "discord_id": session.discord_id,
+            "wallet": session.wallet_address,
+            "traits_swapped": session.traits_to_swap,
+            "status": status,
+            "updated_at": time.time(),
+            "nfts": [{
+                "name": it["nft"]["name"],
+                "number": it["nft"]["number"],
+                "old_nft_id": it["nft"]["nft_id"],
+                "new_nft_id": it.get("new_nft_id"),
+                "burn_hash": it.get("burn_hash"),
+                "offer_id": it.get("offer_id"),
+                "metadata_url": it["metadata_url"],
+                "image_url": it["image_url"],
+            } for it in items],
+        }
+        with open(path, "w") as f:
+            json.dump(record, f, indent=2)
+    except Exception:
+        logging.error(f"Failed to write swap record: {traceback.format_exc()}")
+
+
+async def _burn_replacements(items: list) -> None:
+    """Best-effort cleanup: burn re-minted replacements that will never be
+    offered (they sit in the issuer wallet, so failure harms no user)."""
+    for item in items:
+        nft_id = item.get("new_nft_id")
+        if not nft_id:
+            continue
+        if await xrpl_ops.burn_nft(nft_id):
+            item["new_nft_id"] = None
+        else:
+            logging.error(f"Cleanup burn failed for replacement {nft_id}; "
+                          "it remains in the issuer wallet")
+
+
+async def _create_offer_and_accept(session: SwapSession, item: dict) -> bool:
+    """Offer one replacement back to the user (BRIX-priced) and append the
+    XUMM accept payload to session.results. Returns False on failure."""
+    offer_id = await xrpl_ops.create_nft_offer(
+        item["new_nft_id"], session.wallet_address,
+        amount=xrpl_ops.swap_offer_amount())
+    if not offer_id:
+        session.error = (f"{item['nft']['name']} was reminted "
+                         f"({item['new_nft_id']}) but the offer failed — "
+                         "contact an administrator.")
+        return False
+    item["offer_id"] = offer_id
+    accept = await xumm_ops.create_accept_offer_payload(offer_id)
+    if not accept:
+        session.error = (f"Offer {offer_id} created for {item['nft']['name']} "
+                         "but the XUMM request failed — accept it manually.")
+        return False
+    session.results.append({
+        "name": item["nft"]["name"],
+        "nft_id": item["new_nft_id"],
+        "image_url": item["image_url"],
+        "video_url": item["video_url"],
+        "metadata_url": item["metadata_url"],
+        "accept_qr_url": accept["qr_url"],
+        "accept_deeplink": accept["xumm_url"],
+    })
+    return True
 
 
 async def run_swap_session(session: SwapSession) -> None:
@@ -143,18 +197,10 @@ async def run_swap_session(session: SwapSession) -> None:
             uploaded.append({"nft": nft, "image_url": image_url,
                              "video_url": video_url, "metadata_url": meta_url})
 
-        # 3. Burn the originals (only now that replacements are safe on CDN)
-        session.state = BURNING
-        for item in uploaded:
-            if not await xrpl_ops.burn_nft(item["nft"]["nft_id"], session.wallet_address):
-                session.state = FAILED
-                session.error = (f"Failed to burn {item['nft']['name']} "
-                                 f"({item['nft']['nft_id']}). No NFTs were lost — "
-                                 "contact an administrator.")
-                return
-
-        # 4. Remint with the new metadata
+        # 3. Mint the replacements FIRST — if this fails, the originals are
+        #    untouched and nothing is lost.
         session.state = MINTING
+        _write_swap_record(session, uploaded, "minting")
         for item in uploaded:
             nft_id = await xrpl_ops.mint_nft(
                 metadata_cdn_url=item["metadata_url"],
@@ -162,41 +208,64 @@ async def run_swap_session(session: SwapSession) -> None:
                 issuer=config.SWAP_ISSUER_ADDRESS,
             )
             if not nft_id:
+                await _burn_replacements(uploaded)
+                _write_swap_record(session, uploaded, "failed_minting")
+                session.error = (f"Reminting {item['nft']['name']} failed. "
+                                 "No NFTs were lost — your originals are "
+                                 "untouched. Try again later.")
                 session.state = FAILED
-                session.error = (f"Originals were burned but reminting "
-                                 f"{item['nft']['name']} failed. Metadata is saved at "
-                                 f"{item['metadata_url']} — contact an administrator.")
                 return
             item["new_nft_id"] = nft_id
+        _write_swap_record(session, uploaded, "minted")
+
+        # 4. Burn the originals (replacements are already safely minted)
+        session.state = BURNING
+        for i, item in enumerate(uploaded):
+            burn_hash = await xrpl_ops.burn_nft(item["nft"]["nft_id"],
+                                                session.wallet_address)
+            if burn_hash:
+                item["burn_hash"] = burn_hash
+                continue
+
+            if i == 0:
+                # Nothing burned yet: clean up the replacements; the user
+                # keeps both originals.
+                await _burn_replacements(uploaded)
+                _write_swap_record(session, uploaded, "failed_burning")
+                session.error = (f"Failed to burn {item['nft']['name']} "
+                                 f"({item['nft']['nft_id']}). No NFTs were "
+                                 "lost — contact an administrator.")
+                session.state = FAILED
+                return
+
+            # Original #1 is already burned, so its replacement MUST reach
+            # the user. Cancel only the second half of the swap.
+            other = uploaded[0]
+            await _burn_replacements([item])
+            _write_swap_record(session, uploaded, "partial_burn_failure")
+            if not await _create_offer_and_accept(session, other):
+                _write_swap_record(session, uploaded, "partial_burn_failure_no_offer")
+                session.state = FAILED
+                return
+            session.error = (f"{item['nft']['name']} could not be burned, so "
+                             "its traits were not swapped (it is still in "
+                             f"your wallet). {other['nft']['name']} was "
+                             "re-crafted — accept it below, then contact an "
+                             "administrator.")
+            _write_swap_record(session, uploaded, "partial")
+            session.state = FAILED
+            return
+        _write_swap_record(session, uploaded, "burned")
 
         # 5. Offers (priced in BRIX, as the original swapper) + XUMM accept links
         session.state = CREATING_OFFERS
         for item in uploaded:
-            offer_id = await xrpl_ops.create_nft_offer(
-                item["new_nft_id"], session.wallet_address,
-                amount=xrpl_ops.swap_offer_amount())
-            if not offer_id:
+            if not await _create_offer_and_accept(session, item):
+                _write_swap_record(session, uploaded, "failed_offers")
                 session.state = FAILED
-                session.error = (f"{item['nft']['name']} was reminted "
-                                 f"({item['new_nft_id']}) but the offer failed — "
-                                 "contact an administrator.")
                 return
-            accept = await xumm_ops.create_accept_offer_payload(offer_id)
-            if not accept:
-                session.state = FAILED
-                session.error = (f"Offer {offer_id} created for {item['nft']['name']} "
-                                 "but the XUMM request failed — accept it manually.")
-                return
-            session.results.append({
-                "name": item["nft"]["name"],
-                "nft_id": item["new_nft_id"],
-                "image_url": item["image_url"],
-                "video_url": item["video_url"],
-                "metadata_url": item["metadata_url"],
-                "accept_qr_url": accept["qr_url"],
-                "accept_deeplink": accept["xumm_url"],
-            })
 
+        _write_swap_record(session, uploaded, "complete")
         session.state = OFFERS_READY
 
     except Exception as e:
