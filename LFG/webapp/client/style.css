@@ -1,148 +1,409 @@
+/* LFG Discord Activity — Discord-native dark theme.
+   No frameworks; CSS variables for theming, system motion preferences
+   respected. Designed for the embedded Activity webview (desktop + mobile). */
+
 :root {
+  /* Discord palette */
   --bg: #1e1f22;
+  --bg-elevated: #232428;
   --panel: #2b2d31;
+  --panel-raised: #313338;
+  --border: #3f4147;
   --text: #f2f3f5;
   --muted: #949ba4;
   --accent: #5865f2;
+  --accent-hover: #4752c4;
   --green: #23a55a;
+  --green-hover: #1e8e4d;
+  --red: #f23f43;
+  --yellow: #f0b232;
+
+  /* Branding */
+  --brand-grad: linear-gradient(135deg, #5865f2 0%, #9b59f6 50%, #eb459e 100%);
+
+  --radius: 12px;
+  --radius-sm: 8px;
+  --shadow: 0 4px 12px rgba(0, 0, 0, .35);
+  --shadow-soft: 0 1px 4px rgba(0, 0, 0, .25);
+  --speed: 180ms;
 }
 
 * { box-sizing: border-box; }
 
 body {
   margin: 0;
-  background: var(--bg);
+  min-height: 100vh;
+  background:
+    radial-gradient(1200px 500px at 50% -200px, rgba(88, 101, 242, .18), transparent 60%),
+    var(--bg);
   color: var(--text);
   font-family: 'gg sans', 'Noto Sans', 'Helvetica Neue', Helvetica, Arial, sans-serif;
+  line-height: 1.45;
   display: flex;
   justify-content: center;
+  -webkit-font-smoothing: antialiased;
 }
 
 #app {
   width: 100%;
   max-width: 480px;
-  padding: 24px 16px;
+  padding: 24px 16px 48px;
   text-align: center;
 }
 
-h1 { margin: 0 0 8px; }
-h2 { margin: 16px 0 8px; }
+/* --- Header / branding --- */
 
-.status { color: var(--muted); min-height: 1.4em; }
+.app-header { margin-bottom: 4px; }
 
-section {
-  background: var(--panel);
-  border-radius: 12px;
-  padding: 20px;
-  margin-top: 16px;
+.wordmark {
+  margin: 0 0 6px;
+  font-size: 28px;
+  font-weight: 800;
+  letter-spacing: .5px;
+  background: var(--brand-grad);
+  -webkit-background-clip: text;
+  background-clip: text;
+  color: transparent;
 }
+.wordmark span { font-style: italic; }
+
+.status {
+  color: var(--muted);
+  min-height: 1.4em;
+  font-size: 14px;
+  margin: 0 0 4px;
+}
+
+/* --- Typography --- */
+
+h2 { margin: 0 0 8px; font-size: 19px; }
+.card-sub { color: var(--muted); font-size: 14px; margin: 0 0 14px; }
+code { color: var(--green); word-break: break-all; font-size: 13px; }
+.wallet-line { font-size: 14px; color: var(--muted); margin: 0 0 14px; }
+
+/* --- Cards --- */
+
+.card {
+  background: linear-gradient(180deg, var(--panel-raised), var(--panel));
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  padding: 22px 20px;
+  margin-top: 16px;
+  box-shadow: var(--shadow);
+  animation: card-in var(--speed) ease-out;
+}
+
+@keyframes card-in {
+  from { opacity: 0; transform: translateY(6px); }
+  to   { opacity: 1; transform: none; }
+}
+
+/* --- Inputs --- */
 
 input[type="text"] {
   width: 100%;
-  padding: 10px 12px;
-  margin: 8px 0;
-  border-radius: 8px;
-  border: 1px solid #3f4147;
-  background: var(--bg);
+  padding: 12px 14px;
+  margin: 8px 0 12px;
+  border-radius: var(--radius-sm);
+  border: 1px solid var(--border);
+  background: var(--bg-elevated);
   color: var(--text);
-  font-family: monospace;
+  font-family: ui-monospace, 'SF Mono', Menlo, Consolas, monospace;
+  font-size: 14px;
+  transition: border-color var(--speed), box-shadow var(--speed);
 }
+input[type="text"]:focus {
+  outline: none;
+  border-color: var(--accent);
+  box-shadow: 0 0 0 3px rgba(88, 101, 242, .25);
+}
+input::placeholder { color: var(--muted); }
+
+/* --- Buttons --- */
 
 button {
   background: var(--accent);
   color: white;
   border: none;
-  border-radius: 8px;
-  padding: 10px 18px;
+  border-radius: var(--radius-sm);
+  padding: 11px 18px;
   font-size: 15px;
+  font-weight: 600;
+  font-family: inherit;
   cursor: pointer;
   margin: 4px;
+  box-shadow: var(--shadow-soft);
+  transition: background var(--speed), transform var(--speed),
+              box-shadow var(--speed), opacity var(--speed);
 }
-button:hover { filter: brightness(1.1); }
+button:hover { background: var(--accent-hover); }
+button:active { transform: translateY(1px) scale(.99); box-shadow: none; }
+button:disabled { opacity: .45; cursor: not-allowed; transform: none; }
+button:focus-visible {
+  outline: 2px solid var(--text);
+  outline-offset: 2px;
+}
+
 button.primary { background: var(--green); }
+button.primary:hover { background: var(--green-hover); }
+button.big { padding: 14px 20px; font-size: 16px; }
+
 button.link {
   background: none;
   color: var(--accent);
   text-decoration: underline;
   padding: 2px 4px;
+  font-weight: 500;
+  box-shadow: none;
+}
+button.link:hover { background: none; color: #7984f5; }
+
+.actions { display: flex; flex-direction: column; gap: 10px; align-items: stretch; }
+.row-links { margin: 14px 0 0; }
+.row-links .dot { color: var(--muted); margin: 0 6px; }
+
+/* --- Mint flow: step indicator --- */
+
+.steps {
+  display: flex;
+  justify-content: center;
+  gap: 4px;
+  list-style: none;
+  margin: 0 0 16px;
+  padding: 0;
+  counter-reset: step;
+}
+.steps li {
+  counter-increment: step;
+  font-size: 12px;
+  color: var(--muted);
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+.steps li::before {
+  content: counter(step);
+  width: 22px;
+  height: 22px;
+  border-radius: 50%;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  background: var(--bg-elevated);
+  border: 1px solid var(--border);
+  font-weight: 700;
+  font-size: 11px;
+  transition: background var(--speed), border-color var(--speed), color var(--speed);
+}
+.steps li:not(:last-child)::after {
+  content: "";
+  width: 18px;
+  height: 1px;
+  background: var(--border);
+  margin: 0 2px;
+}
+.steps li.active { color: var(--text); }
+.steps li.active::before {
+  background: var(--accent);
+  border-color: var(--accent);
+  color: white;
+  box-shadow: 0 0 0 3px rgba(88, 101, 242, .25);
+}
+.steps li.done { color: var(--green); }
+.steps li.done::before {
+  content: "✓";
+  background: var(--green);
+  border-color: var(--green);
+  color: white;
 }
 
-.actions { display: flex; flex-direction: column; gap: 8px; align-items: stretch; }
+/* --- Mint flow: QR, spinner, result image --- */
 
-#flow-qr {
+.qr, #flow-qr {
   width: 220px;
   height: 220px;
-  border-radius: 8px;
+  border-radius: var(--radius-sm);
   background: white;
   padding: 8px;
   margin-top: 12px;
+  box-shadow: var(--shadow);
 }
 
 #nft-image {
   width: 220px;
-  border-radius: 8px;
+  border-radius: var(--radius-sm);
   margin-top: 12px;
+  box-shadow: var(--shadow);
+}
+#nft-image.celebrate { animation: pop-in 500ms cubic-bezier(.2, 1.4, .4, 1); }
+
+@keyframes pop-in {
+  0%   { opacity: 0; transform: scale(.6) rotate(-3deg); }
+  70%  { transform: scale(1.05) rotate(1deg); }
+  100% { opacity: 1; transform: none; }
 }
 
-code { color: var(--green); word-break: break-all; }
+.spinner {
+  width: 36px;
+  height: 36px;
+  margin: 18px auto 6px;
+  border-radius: 50%;
+  border: 3px solid var(--border);
+  border-top-color: var(--accent);
+  animation: spin 800ms linear infinite;
+}
 
-/* Trait Swapper */
+@keyframes spin { to { transform: rotate(360deg); } }
+
+/* --- Trait Swapper --- */
 
 .nft-grid {
   display: grid;
   grid-template-columns: repeat(auto-fill, minmax(110px, 1fr));
-  gap: 8px;
+  gap: 10px;
   max-height: 340px;
   overflow-y: auto;
+  padding: 2px;
+  scrollbar-width: thin;
+  scrollbar-color: var(--border) transparent;
 }
 
 .nft-card {
-  background: var(--bg);
-  border: 2px solid #3f4147;
-  border-radius: 8px;
+  background: var(--bg-elevated);
+  border: 2px solid var(--border);
+  border-radius: var(--radius-sm);
   padding: 6px;
   display: flex;
   flex-direction: column;
   gap: 4px;
   align-items: center;
   font-size: 12px;
+  font-weight: 500;
   color: var(--text);
+  box-shadow: none;
+  margin: 0;
+  transition: border-color var(--speed), transform var(--speed), box-shadow var(--speed);
 }
-.nft-card img { width: 100%; border-radius: 6px; }
-.nft-card.selected { border-color: var(--green); }
+.nft-card:hover {
+  background: var(--bg-elevated);
+  border-color: var(--accent);
+  transform: translateY(-2px);
+  box-shadow: var(--shadow-soft);
+}
+.nft-card img { width: 100%; border-radius: 6px; aspect-ratio: 1; object-fit: cover; }
+.nft-card.selected {
+  border-color: var(--green);
+  box-shadow: 0 0 0 3px rgba(35, 165, 90, .25);
+}
 
-.swap-pair { display: flex; gap: 12px; justify-content: center; }
+/* Skeleton loaders while the wallet's NFTs are fetched */
+.nft-card.skeleton {
+  pointer-events: none;
+  border-color: transparent;
+}
+.nft-card.skeleton .ph-img,
+.nft-card.skeleton .ph-line {
+  background: linear-gradient(90deg, var(--panel) 25%, var(--panel-raised) 50%, var(--panel) 75%);
+  background-size: 200% 100%;
+  animation: shimmer 1.2s ease-in-out infinite;
+  border-radius: 6px;
+}
+.nft-card.skeleton .ph-img { width: 100%; aspect-ratio: 1; }
+.nft-card.skeleton .ph-line { width: 70%; height: 10px; }
+
+@keyframes shimmer { to { background-position: -200% 0; } }
+
+.swap-pair {
+  display: flex;
+  gap: 12px;
+  justify-content: center;
+  align-items: center;
+}
 .swap-pair figure { margin: 0; font-size: 12px; color: var(--muted); }
-.swap-pair img { width: 140px; border-radius: 8px; }
+.swap-pair img { width: 140px; border-radius: var(--radius-sm); box-shadow: var(--shadow-soft); }
+.swap-arrows { font-size: 22px; color: var(--accent); }
 
-.trait-list { text-align: left; margin: 12px 0; }
+.trait-list { text-align: left; margin: 14px 0; }
 .trait-row {
   display: flex;
-  gap: 8px;
+  gap: 10px;
   align-items: baseline;
-  padding: 6px 4px;
-  border-bottom: 1px solid #3f4147;
+  padding: 9px 8px;
+  border-radius: var(--radius-sm);
+  border-bottom: 1px solid var(--border);
   font-size: 14px;
   cursor: pointer;
+  transition: background var(--speed);
 }
+.trait-row:hover { background: var(--bg-elevated); }
+.trait-row input[type="checkbox"] { accent-color: var(--green); }
 .trait-row span { color: var(--muted); margin-left: auto; text-align: right; }
 
-.swap-result { margin-top: 16px; }
-.swap-result .result-img { width: 160px; border-radius: 8px; }
+.swap-result { margin-top: 18px; }
+.swap-result .result-img {
+  width: 160px;
+  border-radius: var(--radius-sm);
+  box-shadow: var(--shadow-soft);
+}
+.swap-result .modified-note { display: block; margin-top: 8px; color: var(--green); }
+
+#swap-results .result-qr,
 .swap-result .result-qr {
   width: 160px;
-  border-radius: 8px;
-  background: white;
-  padding: 6px;
-  display: block;
-  margin: 8px auto 0;
-}
-.swap-result .modified-note { display: block; margin-top: 8px; color: var(--muted); }
-#swap-results .result-qr {
-  width: 160px;
-  border-radius: 8px;
+  border-radius: var(--radius-sm);
   background: white;
   padding: 6px;
   display: block;
   margin: 12px auto 0;
+  box-shadow: var(--shadow-soft);
+}
+
+/* --- Toasts --- */
+
+.toasts {
+  position: fixed;
+  bottom: 16px;
+  left: 50%;
+  transform: translateX(-50%);
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  z-index: 100;
+  width: min(420px, calc(100vw - 32px));
+}
+.toast {
+  background: var(--bg-elevated);
+  border: 1px solid var(--red);
+  border-left: 4px solid var(--red);
+  color: var(--text);
+  border-radius: var(--radius-sm);
+  padding: 10px 14px;
+  font-size: 14px;
+  text-align: left;
+  box-shadow: var(--shadow);
+  animation: toast-in var(--speed) ease-out;
+}
+.toast.out { opacity: 0; transition: opacity 300ms; }
+
+@keyframes toast-in {
+  from { opacity: 0; transform: translateY(8px); }
+  to   { opacity: 1; transform: none; }
+}
+
+/* --- Motion preferences --- */
+
+@media (prefers-reduced-motion: reduce) {
+  *, *::before, *::after {
+    animation-duration: .01ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: .01ms !important;
+  }
+  .spinner { animation-duration: 800ms !important; animation-iteration-count: infinite !important; }
+}
+
+/* --- Small screens --- */
+
+@media (max-width: 380px) {
+  .swap-pair img { width: 110px; }
+  .qr, #flow-qr { width: 190px; height: 190px; }
 }
