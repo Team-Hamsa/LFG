@@ -81,6 +81,14 @@ async def _allocate_nft_number() -> int:
         return number
 
 
+def _release_unused_number(session) -> None:
+    """Release a reserved number when the session fails before anything was
+    minted on-chain with it. Numbers that reached the chain stay reserved
+    until the DB record lands (or forever, if it never does)."""
+    if session.nft_number is not None and session.nft_id is None:
+        _reserved_numbers.discard(session.nft_number)
+
+
 def _save_recovery_record(record: dict) -> None:
     """If the DB insert fails after an on-chain mint, persist the record to
     disk so an administrator can backfill the LFG table."""
@@ -143,6 +151,7 @@ async def run_mint_session(session: MintSession) -> None:
             issuer=config.TOKEN_ISSUER_ADDRESS,
         )
         if not nft_id:
+            _release_unused_number(session)
             session.state = FAILED
             session.error = "Failed to mint NFT on XRPL. Please contact an administrator."
             return
@@ -161,7 +170,14 @@ async def run_mint_session(session: MintSession) -> None:
             image_url=image_cdn_url,
             traits=traits_dict,
         )
-        if await asyncio.to_thread(record_nft_mint, **record):
+        # The mint is on-chain at this point; a DB failure must not stop the
+        # transfer offer from reaching the user.
+        try:
+            saved = await asyncio.to_thread(record_nft_mint, **record)
+        except Exception:
+            logging.error(f"record_nft_mint raised: {traceback.format_exc()}")
+            saved = False
+        if saved:
             _reserved_numbers.discard(session.nft_number)
         else:
             # Keep the number reserved so it can't be reused this process,
@@ -190,5 +206,6 @@ async def run_mint_session(session: MintSession) -> None:
 
     except Exception as e:
         logging.error(f"Mint session {session.id} failed: {traceback.format_exc()}")
+        _release_unused_number(session)
         session.state = FAILED
         session.error = str(e)

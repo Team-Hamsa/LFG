@@ -39,8 +39,11 @@ def resolve_ipfs(uri: str) -> str:
 def normalize_attributes(attributes: list) -> list:
     """Fix the 'Accesory' typo, fill missing trait types with 'None',
     relocate Back values stored under Accessory, and order canonically."""
-    attrs = [dict(a) for a in attributes]
+    # Metadata is untrusted: drop entries that aren't {"trait_type": str, ...}
+    attrs = [dict(a) for a in attributes
+             if isinstance(a, dict) and isinstance(a.get("trait_type"), str)]
     for a in attrs:
+        a.setdefault("value", "None")
         if a.get("trait_type") == "Accesory":
             a["trait_type"] = "Accessory"
     present = {a["trait_type"] for a in attrs}
@@ -128,12 +131,17 @@ def normalize_nft(nft_id: str, metadata: dict):
     """Build the normalized NFT record used by the swap UI/flow, or None if
     the NFT isn't a swappable collection piece."""
     name = metadata.get("name", "")
-    if "#" not in name:
+    if not isinstance(name, str) or "#" not in name:
         return None
     num = extract_nft_number(name)
     if not num or num < 1 or num > config.SWAP_MAX_NFT_NUMBER:
         return None
-    attributes = normalize_attributes(metadata.get("attributes", []))
+    raw_attrs = metadata.get("attributes")
+    attributes = normalize_attributes(raw_attrs if isinstance(raw_attrs, list) else [])
+    try:
+        burn_count = int(metadata.get("burnCount") or 0)
+    except (TypeError, ValueError):
+        burn_count = 0
     return {
         "nft_id": nft_id,
         "name": name,
@@ -141,7 +149,7 @@ def normalize_nft(nft_id: str, metadata: dict):
         "season": season_for_number(num),
         "image": resolve_ipfs(metadata.get("image", "")),
         "video": metadata.get("video"),
-        "burn_count": int(metadata.get("burnCount", 0)),
+        "burn_count": burn_count,
         "gender": detect_gender(attributes),
         "attributes": attributes,
     }
@@ -155,9 +163,14 @@ async def load_wallet_nfts(wallet: str, get_account_nfts):
         metas = await asyncio.gather(*[fetch_metadata(n["uri_hex"], http) for n in raw])
     nfts = []
     for nft, meta in zip(raw, metas):
-        if not meta:
+        if not isinstance(meta, dict):
             continue
-        record = normalize_nft(nft["nft_id"], meta)
+        try:
+            record = normalize_nft(nft["nft_id"], meta)
+        except Exception as e:
+            # One token with malformed metadata must not break the listing.
+            logging.warning(f"Skipping NFT {nft['nft_id']}: bad metadata ({e})")
+            continue
         if record:
             nfts.append(record)
     nfts.sort(key=lambda n: n["number"])

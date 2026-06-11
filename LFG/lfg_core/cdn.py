@@ -12,8 +12,10 @@ async def upload_to_bunny(folder: str, path_on_cdn: str, data: bytes,
     storage_url = (f"{config.BUNNY_CDN_BASE_URL}/{config.BUNNY_CDN_STORAGE_ZONE}/"
                    f"{folder}/{path_on_cdn}")
     headers = {"AccessKey": config.BUNNY_CDN_ACCESS_KEY, "Content-Type": content_type}
-    async with aiohttp.ClientSession() as session:
-        resp = await session.put(storage_url, headers=headers, data=data)
-        if resp.status not in (200, 201):
-            raise Exception(f"BunnyCDN upload failed ({resp.status}) for {path_on_cdn}")
+    # Generous total to cover multi-MB video uploads, but never hang forever.
+    timeout = aiohttp.ClientTimeout(total=120, connect=10)
+    async with aiohttp.ClientSession(timeout=timeout) as session:
+        async with session.put(storage_url, headers=headers, data=data) as resp:
+            if resp.status not in (200, 201):
+                raise Exception(f"BunnyCDN upload failed ({resp.status}) for {path_on_cdn}")
     return f"{config.BUNNY_CDN_PUBLIC_BASE}/{folder}/{path_on_cdn}"
