@@ -8,3 +8,5 @@ metadata_*.json
 .layer_cache/
 generated/
 layers/
+swap_records/
+failed_db_records/

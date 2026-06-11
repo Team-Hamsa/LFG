@@ -35,24 +35,24 @@ def _ordered_traits(attributes: list) -> list:
 
 async def missing_layers(attributes: list, gender: str, store) -> list:
     """Trait files the store can't provide — checked BEFORE any burn."""
-    missing = []
-    for a in _ordered_traits(attributes):
-        if not await store.resolve(gender, a["trait_type"], a["value"]):
-            missing.append(f"{gender}/{a['trait_type']}/{a['value']}")
-    return missing
+    ordered = _ordered_traits(attributes)
+    resolved = await asyncio.gather(
+        *(store.resolve(gender, a["trait_type"], a["value"]) for a in ordered))
+    return [f"{gender}/{a['trait_type']}/{a['value']}"
+            for a, path in zip(ordered, resolved) if not path]
 
 
 async def compose_nft(attributes: list, gender: str, store,
                       output_basename: str, out_dir: str = "generated"):
     """Resolve all trait layers through the store and overlay them.
     Returns (output_path, is_video)."""
-    files = []
-    for a in _ordered_traits(attributes):
-        path = await store.resolve(gender, a["trait_type"], a["value"])
+    ordered = _ordered_traits(attributes)
+    files = await asyncio.gather(
+        *(store.resolve(gender, a["trait_type"], a["value"]) for a in ordered))
+    for a, path in zip(ordered, files):
         if not path:
             raise FileNotFoundError(
                 f"Layer not found: {gender}/{a['trait_type']}/{a['value']}")
-        files.append(path)
     if not files:
         raise ValueError("No trait layers to compose")
 
@@ -100,3 +100,31 @@ def extract_first_frame(video_path: str, image_path: str) -> str:
     ffmpeg.input(video_path).output(image_path, vframes=1)\
           .overwrite_output().run(quiet=True)
     return image_path
+
+
+async def upload_output(output_path: str, is_video: bool, upload,
+                        cdn_basename: str):
+    """Upload a composed NFT (mp4 + png thumbnail for videos, png otherwise)
+    via `upload(path_on_cdn, data, content_type) -> url`, cleaning up local
+    files. Returns (image_url, video_url)."""
+    video_url = None
+    try:
+        if is_video:
+            with open(output_path, "rb") as f:
+                video_url = await upload(f"{cdn_basename}.mp4", f.read(), "video/mp4")
+            thumb = await asyncio.to_thread(
+                extract_first_frame, output_path,
+                os.path.splitext(output_path)[0] + ".png")
+            try:
+                with open(thumb, "rb") as f:
+                    image_url = await upload(f"{cdn_basename}.png", f.read(), "image/png")
+            finally:
+                if os.path.exists(thumb):
+                    os.remove(thumb)
+        else:
+            with open(output_path, "rb") as f:
+                image_url = await upload(f"{cdn_basename}.png", f.read(), "image/png")
+    finally:
+        if os.path.exists(output_path):
+            os.remove(output_path)
+    return image_url, video_url

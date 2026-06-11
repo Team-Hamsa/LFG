@@ -107,15 +107,18 @@ def swap_traits(attrs1: list, attrs2: list, traits_to_swap: list):
     return new1, new2
 
 
-async def fetch_metadata(uri_hex: str):
-    """Fetch and parse the metadata JSON behind an on-chain hex URI."""
+async def fetch_metadata(uri_hex: str, http: aiohttp.ClientSession = None):
+    """Fetch and parse the metadata JSON behind an on-chain hex URI.
+    Pass `http` to reuse a session across many fetches."""
     try:
         url = decode_uri(uri_hex)
-        async with aiohttp.ClientSession() as session:
-            async with session.get(url, timeout=aiohttp.ClientTimeout(total=20)) as resp:
-                if resp.status != 200:
-                    return None
-                return json.loads(await resp.text())
+        if http is None:
+            async with aiohttp.ClientSession() as session:
+                return await fetch_metadata(uri_hex, session)
+        async with http.get(url, timeout=aiohttp.ClientTimeout(total=20)) as resp:
+            if resp.status != 200:
+                return None
+            return json.loads(await resp.text())
     except Exception as e:
         logging.warning(f"fetch_metadata failed for {uri_hex[:24]}…: {e}")
         return None
@@ -148,7 +151,8 @@ async def load_wallet_nfts(wallet: str, get_account_nfts):
     """List + normalize all swappable NFTs in a wallet. get_account_nfts is
     injected (xrpl_ops.get_account_nfts) to keep this module network-light."""
     raw = await get_account_nfts(wallet, config.SWAP_ISSUER_ADDRESS)
-    metas = await asyncio.gather(*[fetch_metadata(n["uri_hex"]) for n in raw])
+    async with aiohttp.ClientSession() as http:
+        metas = await asyncio.gather(*[fetch_metadata(n["uri_hex"], http) for n in raw])
     nfts = []
     for nft, meta in zip(raw, metas):
         if not meta:

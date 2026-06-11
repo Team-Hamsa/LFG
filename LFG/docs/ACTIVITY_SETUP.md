@@ -95,10 +95,14 @@ tree in `LAYERS_DIR` (default `layers/`).
 Optional env overrides (defaults match the original Trait-Swapper bot):
 `SWAP_ISSUER_ADDRESS`, `SWAP_TAXON` (1760), `SWAP_CDN_FOLDER` (LFGO, output
 uploads), `SWAP_OFFER_CURRENCY_HEX` / `SWAP_OFFER_ISSUER` /
-`SWAP_OFFER_AMOUNT` (10 BRIX), `SWAP_MAX_NFT_NUMBER` (3535).
+`SWAP_OFFER_AMOUNT` (10 BRIX), `SWAP_MAX_NFT_NUMBER` (3535),
+`SWAP_RECORDS_DIR` (swap_records, on-chain journal for recovery).
 
-Safety: nothing is burned until both replacement images and metadata are
-uploaded to the CDN; missing layer files fail the swap before any burn.
+Safety: nothing is burned until both replacement images and metadata are on
+the CDN *and* both replacement NFTs are already minted; missing layer files
+fail the swap before any burn, a mint failure burns the orphaned replacements
+back (originals untouched), and every on-chain step is journaled to
+`SWAP_RECORDS_DIR` so an administrator can recover a partial swap.
 
 ## Notes
 

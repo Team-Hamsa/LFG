@@ -174,17 +174,17 @@ async function registerWallet() {
 let swapNfts = [];
 let swapPick = [];
 let swapPollTimer = null;
-
-const showSwapPanel = showPanel;
+let swappableTraits = [];
 
 async function openSwapper() {
-  showSwapPanel('swap-panel');
+  showPanel('swap-panel');
   swapPick = [];
   el('nft-grid').innerHTML = '';
   status('Loading your NFTs…');
   try {
     const data = await api('/api/nfts');
     swapNfts = data.nfts;
+    swappableTraits = data.swappable_traits || [];
     status('');
     if (!swapNfts.length) {
       el('swap-help').textContent = 'No swappable NFTs found in your wallet.';
@@ -229,16 +229,14 @@ function traitValue(nft, traitType) {
 
 function showTraitChooser() {
   const [a, b] = swapPick.map((p) => p.nft);
-  showSwapPanel('swap-traits-panel');
+  showPanel('swap-traits-panel');
   el('swap-img1').src = a.image;
   el('swap-img2').src = b.image;
   el('swap-name1').textContent = a.name;
   el('swap-name2').textContent = b.name;
   const list = el('trait-list');
   list.innerHTML = '';
-  const swappable = ['Background', 'Back', 'Clothing', 'Mouth',
-                     'Eyebrows', 'Eyes', 'Head', 'Accessory'];
-  for (const trait of swappable) {
+  for (const trait of swappableTraits) {
     const row = document.createElement('label');
     row.className = 'trait-row';
     row.innerHTML = `<input type="checkbox" value="${trait}">
@@ -266,7 +264,7 @@ async function confirmSwap() {
       method: 'POST',
       body: JSON.stringify({ nft1_id: a.nft_id, nft2_id: b.nft_id, traits }),
     });
-    showSwapPanel('swap-result-panel');
+    showPanel('swap-result-panel');
     el('swap-results').innerHTML = '';
     el('swap-done-btn').hidden = true;
     pollSwap(s.id);
@@ -315,7 +313,11 @@ async function pollSwap(sessionId) {
       renderSwapResults(s);
     } else if (s.state === 'failed') {
       clearInterval(swapPollTimer);
-      el('swap-result-title').textContent = '❌ Swap failed';
+      // A partial failure can still carry accept offers the user MUST claim
+      // (their original was burned) — render them alongside the error.
+      if (s.results && s.results.length) renderSwapResults(s);
+      el('swap-result-title').textContent =
+        s.results && s.results.length ? '⚠️ Swap partially failed' : '❌ Swap failed';
       el('swap-result-text').textContent = s.error || 'Something went wrong.';
       el('swap-done-btn').hidden = false;
     }
