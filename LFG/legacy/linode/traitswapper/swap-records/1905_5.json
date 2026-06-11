@@ -1,0 +1,53 @@
+{
+  "schema": "ipfs://QmNpi8rcXEkohca8iXu7zysKKSJYqCvBJn3xJwga8jXqWU",
+  "name": "Let's Effing Go! #1905",
+  "description": "Season 3",
+  "image": "https://lfgo.b-cdn.net/LFGO/1905/1905_5.png",
+  "video": "https://lfgo.b-cdn.net/LFGO/1905/1905_5.mp4",
+  "external_link": "https://letseffinggo.com",
+  "collection": {
+    "name": "Let's Effing Go!",
+    "family": "Season 3",
+    "image": "https://lfgo.b-cdn.net/LFGO_square_logo.png"
+  },
+  "edition": 1,
+  "burnCount": 6,
+  "attributes": [
+    {
+      "trait_type": "Background",
+      "value": "Gradient Bright"
+    },
+    {
+      "trait_type": "Back",
+      "value": "None"
+    },
+    {
+      "trait_type": "Body",
+      "value": "Straight Wood"
+    },
+    {
+      "trait_type": "Clothing",
+      "value": "Sailor"
+    },
+    {
+      "trait_type": "Mouth",
+      "value": "Stubble"
+    },
+    {
+      "trait_type": "Eyebrows",
+      "value": "Hmm"
+    },
+    {
+      "trait_type": "Eyes",
+      "value": "Jutan Spectacles"
+    },
+    {
+      "trait_type": "Head",
+      "value": "TV Glitch"
+    },
+    {
+      "trait_type": "Accessory",
+      "value": "Fried Chicken"
+    }
+  ]
+}

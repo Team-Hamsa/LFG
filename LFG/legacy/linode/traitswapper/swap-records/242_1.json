@@ -1,0 +1,53 @@
+{
+  "schema": "ipfs://QmNpi8rcXEkohca8iXu7zysKKSJYqCvBJn3xJwga8jXqWU",
+  "name": "Let's Effing Go! #242",
+  "description": "Season 1",
+  "image": "https://lfgo.b-cdn.net/LFGO/242/242_1.png",
+  "video": "https://lfgo.b-cdn.net/LFGO/242/242_1.mp4",
+  "external_link": "https://letseffinggo.com",
+  "collection": {
+    "name": "Let's Effing Go!",
+    "family": "Season 1",
+    "image": "https://lfgo.b-cdn.net/LFGO_square_logo.png"
+  },
+  "edition": 1,
+  "burnCount": 2,
+  "attributes": [
+    {
+      "trait_type": "Background",
+      "value": "Claw Diamond"
+    },
+    {
+      "trait_type": "Back",
+      "value": "None"
+    },
+    {
+      "trait_type": "Body",
+      "value": "Curved Light"
+    },
+    {
+      "trait_type": "Clothing",
+      "value": "Powersuit Plaid"
+    },
+    {
+      "trait_type": "Mouth",
+      "value": "Confident"
+    },
+    {
+      "trait_type": "Eyebrows",
+      "value": "Interested"
+    },
+    {
+      "trait_type": "Eyes",
+      "value": "Black Red Tint"
+    },
+    {
+      "trait_type": "Head",
+      "value": "Medium Black"
+    },
+    {
+      "trait_type": "Accessory",
+      "value": "Cross"
+    }
+  ]
+}
