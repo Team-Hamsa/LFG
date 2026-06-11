@@ -1,0 +1,52 @@
+{
+  "schema": "ipfs://QmNpi8rcXEkohca8iXu7zysKKSJYqCvBJn3xJwga8jXqWU",
+  "name": "Let's Effing Go! #2003",
+  "description": "Season 2",
+  "image": "https://lfgo.b-cdn.net/LFGO/2003/2003_34.png",
+  "external_link": "https://letseffinggo.com",
+  "collection": {
+    "name": "Let's Effing Go!",
+    "family": "Season 2",
+    "image": "https://lfgo.b-cdn.net/LFGO_square_logo.png"
+  },
+  "edition": 1,
+  "burnCount": 35,
+  "attributes": [
+    {
+      "trait_type": "Background",
+      "value": "Pastel Aqua"
+    },
+    {
+      "trait_type": "Back",
+      "value": "None"
+    },
+    {
+      "trait_type": "Body",
+      "value": "Straight Wood"
+    },
+    {
+      "trait_type": "Clothing",
+      "value": "Hoodie GO Punk"
+    },
+    {
+      "trait_type": "Mouth",
+      "value": "Determined"
+    },
+    {
+      "trait_type": "Eyebrows",
+      "value": "Questioning"
+    },
+    {
+      "trait_type": "Eyes",
+      "value": "Hypno"
+    },
+    {
+      "trait_type": "Head",
+      "value": "Egg Head"
+    },
+    {
+      "trait_type": "Accessory",
+      "value": "None"
+    }
+  ]
+}

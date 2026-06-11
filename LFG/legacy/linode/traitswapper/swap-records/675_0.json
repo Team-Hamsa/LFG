@@ -1,0 +1,53 @@
+{
+  "schema": "ipfs://QmNpi8rcXEkohca8iXu7zysKKSJYqCvBJn3xJwga8jXqWU",
+  "name": "Let's Effing Go! #675",
+  "description": "Season 2",
+  "image": "https://lfgo.b-cdn.net/LFGO/675/675_0.png",
+  "video": "https://lfgo.b-cdn.net/LFGO/675/675_0.mp4",
+  "external_link": "https://letseffinggo.com",
+  "collection": {
+    "name": "Let's Effing Go!",
+    "family": "Season 2",
+    "image": "https://lfgo.b-cdn.net/LFGO_square_logo.png"
+  },
+  "edition": 1,
+  "burnCount": 1,
+  "attributes": [
+    {
+      "trait_type": "Background",
+      "value": "Shattered Dreams"
+    },
+    {
+      "trait_type": "Back",
+      "value": "None"
+    },
+    {
+      "trait_type": "Body",
+      "value": "Straight Gold"
+    },
+    {
+      "trait_type": "Clothing",
+      "value": "Letterman Pink"
+    },
+    {
+      "trait_type": "Mouth",
+      "value": "Determined"
+    },
+    {
+      "trait_type": "Eyebrows",
+      "value": "Questioning"
+    },
+    {
+      "trait_type": "Eyes",
+      "value": "Hypno"
+    },
+    {
+      "trait_type": "Head",
+      "value": "Egg Head"
+    },
+    {
+      "trait_type": "Accessory",
+      "value": "Lightsaber Red"
+    }
+  ]
+}

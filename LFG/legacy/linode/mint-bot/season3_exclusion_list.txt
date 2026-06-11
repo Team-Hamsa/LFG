@@ -1,0 +1,85 @@
+Season 3 Unique Traits - Exclusion List
+============================================================
+
+Generated from analysis of 1414 Season 3 original mints
+(NFTs #2122-#3535 with burnCount = 0)
+
+These traits should NOT be included in the next season's minter.
+
+
+Background:
+  - Burnt Orange
+  - Rosewood
+
+Body:
+  - Curved Green
+  - Curved Grey
+  - Curved White
+  - Straight Green
+  - Straight Grey
+
+Clothing:
+  - Bloody Smock
+  - Blue Monster Costume
+  - Cincy
+  - Corsette
+  - Dolly
+  - Frankenbride
+  - Go Zombies Green
+  - If I Only Had A Brain
+  - Jason Threads
+  - Mummy Suit
+  - Ring Dress
+  - Slam Dancer
+  - Teenage Werewolf
+  - The Count
+  - Wednesday
+  - Wolfy
+
+Mouth:
+  - Davy Jones Beard
+  - Day of the Dead
+  - Despondent
+  - Evil Clown
+  - Freckled Freak
+  - I Vant to Suck Your Blahd
+  - Lycanthrope
+  - Stitched
+  - Uhhhhh
+
+Eyebrows:
+  - Flat
+  - Nightmare
+  - Wicked Brow
+
+Eyes:
+  - Mindless
+  - Unfinished Business
+
+Head:
+  - Billy
+  - Bloody Chef
+  - Bride of Frankenstein
+  - Chucky Hair
+  - Doll
+  - Dracula
+  - Emo Hair
+  - Frankensteins Monster
+  - Ghoste
+  - Hockey Mask
+  - Jack O Lantern
+  - Kong Mask
+  - Open Mind
+  - Pigtails Green
+  - Pigtails Yellow
+  - Pink Monster Mask
+  - Samara
+  - Scarecrow
+  - Scream
+  - Scream Wazzaaaa
+  - Superbowl Bengals
+  - Wednesday Braids
+  - Werewolf
+
+Accessory:
+  - Knife

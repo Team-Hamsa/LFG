@@ -7,3 +7,4 @@ output_nft_*.png
 metadata_*.json
 .layer_cache/
 generated/
+layers/
