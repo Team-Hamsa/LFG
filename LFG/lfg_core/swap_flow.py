@@ -176,6 +176,10 @@ async def _revert_modifies(items: list, owner: str) -> None:
         if not item.get("modify_hash"):
             continue
         old_uri_hex = item["nft"].get("uri_hex") or ""
+        if not old_uri_hex or not old_uri_hex.strip():
+            logging.warning(f"Skipping revert for {item['nft']['nft_id']}: "
+                            "original URI hex is empty or whitespace")
+            continue
         try:
             old_uri = bytes.fromhex(old_uri_hex).decode("ascii")
         except ValueError:

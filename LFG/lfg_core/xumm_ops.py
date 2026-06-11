@@ -95,3 +95,19 @@ async def create_trustline_payload():
         },
         options={"expire": 5},
     )
+
+
+async def create_brix_trustline_payload():
+    """XUMM payload for the BRIX TrustSet (required to pay swap fees)."""
+    return await _create_xumm_payload(
+        {
+            "TransactionType": "TrustSet",
+            "Flags": 131072,  # tfSetNoRipple
+            "LimitAmount": {
+                "currency": config.SWAP_OFFER_CURRENCY_HEX,
+                "issuer": config.SWAP_OFFER_ISSUER,
+                "value": "1000000",
+            },
+        },
+        options={"expire": 5},
+    )
