@@ -294,6 +294,32 @@ async def handle_qr(request):
     return web.Response(body=png, content_type="image/png")
 
 
+async def _fetch_cdn(url):
+    """Fetch an image from the public CDN. Returns (body, content_type)."""
+    timeout = aiohttp.ClientTimeout(total=15)
+    async with aiohttp.ClientSession(timeout=timeout) as session:
+        async with session.get(url, allow_redirects=False) as resp:
+            if resp.status != 200:
+                raise RuntimeError(f"CDN returned {resp.status}")
+            return await resp.read(), resp.content_type
+
+
+async def handle_img(request):
+    """Same-origin proxy for CDN images: the Activity's CSP blocks cross-origin
+    <img> loads, so the client routes BUNNY_CDN_PUBLIC_BASE URLs through here."""
+    url = request.query.get("u", "")
+    if len(url) > 2048 or not url.startswith(config.BUNNY_CDN_PUBLIC_BASE + "/"):
+        return web.json_response({"error": "bad image url"}, status=400)
+    try:
+        body, ctype = await _fetch_cdn(url)
+    except Exception as e:
+        logging.error(f"Image proxy fetch failed for {url}: {e}")
+        return web.json_response({"error": "image fetch failed"}, status=502)
+    # Mint/swap outputs get unique CDN basenames, so they are safe to cache.
+    return web.Response(body=body, content_type=ctype,
+                        headers={"Cache-Control": "public, max-age=86400"})
+
+
 async def handle_index(request):
     return web.FileResponse(os.path.join(CLIENT_DIR, "index.html"))
 
@@ -304,7 +330,8 @@ async def no_cache_mw(request, handler):
     # updated frontend (index.html / app.js / vendored SDK) keeps serving stale
     # from Discord's edge or the browser, even after relaunching the Activity.
     resp = await handler(request)
-    resp.headers["Cache-Control"] = "no-store, must-revalidate"
+    if "Cache-Control" not in resp.headers:  # handlers may opt out (image proxy)
+        resp.headers["Cache-Control"] = "no-store, must-revalidate"
     return resp
 
 
@@ -322,6 +349,7 @@ def create_app() -> web.Application:
     app.router.add_post("/api/swap", handle_swap_start)
     app.router.add_get("/api/swap/{session_id}", handle_swap_status)
     app.router.add_get("/api/qr.png", handle_qr)
+    app.router.add_get("/api/img", handle_img)
     app.router.add_get("/", handle_index)
     app.router.add_static("/", CLIENT_DIR)
     return app
