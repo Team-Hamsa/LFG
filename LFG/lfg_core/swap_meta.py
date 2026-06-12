@@ -70,16 +70,19 @@ def get_attr(attributes: list, trait_type: str):
     return None
 
 
-def detect_gender(attributes: list) -> str:
+def detect_body(attributes: list) -> str:
     """Body class determines which layer directory set is used."""
-    body = get_attr(attributes, "Body") or ""
-    if "Straight" in body:
+    body_val = get_attr(attributes, "Body") or ""
+    if "Straight" in body_val:
         return "male"
-    if "Curved" in body:
+    if "Curved" in body_val:
         return "female"
-    if "Ape" in body:
+    if "Ape" in body_val:
         return "ape"
     return "skeleton"
+
+
+detect_gender = detect_body  # backward-compat alias
 
 
 def extract_nft_number(name: str):

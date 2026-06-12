@@ -156,6 +156,10 @@ def recalculate_rarity(conn, network=None):
     """
     network = network or config.XRPL_NETWORK
     ensure_schema(conn)
+    if not conn.execute(
+            "SELECT 1 FROM sqlite_master WHERE type='table' AND name='LFG'"
+            ).fetchone():
+        return  # LFG table not yet created; nothing to recount
     where, params = _live_where(network)
 
     conn.execute("UPDATE trait_rarity SET live_count=0 WHERE network=?",
@@ -241,6 +245,10 @@ def _is_stale(conn, network, category):
     column = LFG_COLUMN_FOR_CATEGORY.get(category)
     if column is None:
         return False  # Body Type and unknown categories: recalc handles them
+    if not conn.execute(
+            "SELECT 1 FROM sqlite_master WHERE type='table' AND name='LFG'"
+            ).fetchone():
+        return False  # LFG table not yet created; nothing to be stale about
     (cached,) = conn.execute(
         """SELECT COALESCE(SUM(live_count), 0) FROM trait_rarity
            WHERE network=? AND category=?""", (network, category)).fetchone()
