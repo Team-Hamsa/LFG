@@ -33,26 +33,26 @@ def _ordered_traits(attributes: list) -> list:
     return rest + tops
 
 
-async def missing_layers(attributes: list, gender: str, store) -> list:
+async def missing_layers(attributes: list, body: str, store) -> list:
     """Trait files the store can't provide — checked BEFORE any burn."""
     ordered = _ordered_traits(attributes)
     resolved = await asyncio.gather(
-        *(store.resolve(gender, a["trait_type"], a["value"]) for a in ordered))
-    return [f"{gender}/{a['trait_type']}/{a['value']}"
+        *(store.resolve(body, a["trait_type"], a["value"]) for a in ordered))
+    return [f"{body}/{a['trait_type']}/{a['value']}"
             for a, path in zip(ordered, resolved) if not path]
 
 
-async def compose_nft(attributes: list, gender: str, store,
+async def compose_nft(attributes: list, body: str, store,
                       output_basename: str, out_dir: str = "generated"):
     """Resolve all trait layers through the store and overlay them.
     Returns (output_path, is_video)."""
     ordered = _ordered_traits(attributes)
     files = await asyncio.gather(
-        *(store.resolve(gender, a["trait_type"], a["value"]) for a in ordered))
+        *(store.resolve(body, a["trait_type"], a["value"]) for a in ordered))
     for a, path in zip(ordered, files):
         if not path:
             raise FileNotFoundError(
-                f"Layer not found: {gender}/{a['trait_type']}/{a['value']}")
+                f"Layer not found: {body}/{a['trait_type']}/{a['value']}")
     if not files:
         raise ValueError("No trait layers to compose")
 
