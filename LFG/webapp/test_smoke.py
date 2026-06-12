@@ -259,12 +259,15 @@ def _fake_xumm_get(monkeypatch, meta=None, response=None):
     return fake_get
 
 
+VALID_UUID = "01234567-89ab-cdef-0123-456789abcdef"
+
+
 def test_get_payload_status(monkeypatch):
     fake = _fake_xumm_get(monkeypatch, meta={"opened": True, "signed": True},
                           response={"account": "rSigner"})
     s = asyncio.get_event_loop().run_until_complete(
-        xumm_ops.get_payload_status("UUID9"))
-    assert fake.url.endswith("/UUID9")
+        xumm_ops.get_payload_status(VALID_UUID))
+    assert fake.url.endswith(f"/{VALID_UUID}")
     assert s == {"opened": True, "signed": True, "expired": False,
                  "account": "rSigner"}
 
@@ -274,7 +277,16 @@ def test_get_payload_status_error_returns_none(monkeypatch):
         raise RuntimeError("xumm down")
     monkeypatch.setattr(xumm_ops.requests, "get", boom)
     assert asyncio.get_event_loop().run_until_complete(
-        xumm_ops.get_payload_status("U")) is None
+        xumm_ops.get_payload_status(VALID_UUID)) is None
+
+
+def test_get_payload_status_rejects_malformed_uuid(monkeypatch):
+    def boom(url, headers=None, timeout=None):
+        raise AssertionError("must not be called for a malformed uuid")
+    monkeypatch.setattr(xumm_ops.requests, "get", boom)
+    loop = asyncio.get_event_loop()
+    for bad in ("../admin", "UUID9", "", None):
+        assert loop.run_until_complete(xumm_ops.get_payload_status(bad)) is None
 
 
 # --- Issue #24: Xaman Sign In payload for registration ---
