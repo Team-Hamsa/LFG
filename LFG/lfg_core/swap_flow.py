@@ -24,7 +24,9 @@ import time
 import uuid
 import logging
 import traceback
-from decimal import Decimal
+from decimal import Decimal, ROUND_UP
+
+from xrpl.utils import xrp_to_drops
 
 from lfg_core import config, cdn, xrpl_ops, xumm_ops, swap_meta, swap_compose, layer_store
 
@@ -49,6 +51,25 @@ def swap_fee_total(modify_count: int) -> str:
     return str(Decimal(config.SWAP_OFFER_AMOUNT) * modify_count)
 
 
+async def detect_swap_payment(wallet_address: str, brix_amount: str):
+    """Silent fee-path detection: wallets holding >= brix_amount BRIX pay in
+    BRIX (burned); everyone else pays the live AMM XRP equivalent — the
+    buyback is never surfaced to the user. Returns ("BRIX"|"XRP", amount);
+    raises if the wallet holds no BRIX and the AMM can't quote a price."""
+    balance = await xrpl_ops.get_trustline_balance(
+        wallet_address, config.SWAP_OFFER_CURRENCY_HEX, config.SWAP_OFFER_ISSUER)
+    if balance is not None and balance >= Decimal(brix_amount):
+        return "BRIX", brix_amount
+    cost = await xrpl_ops.get_amm_xrp_cost(
+        config.SWAP_OFFER_CURRENCY_HEX, config.SWAP_OFFER_ISSUER,
+        Decimal(brix_amount))
+    if cost is None:
+        raise RuntimeError("Swap fee pricing is unavailable right now — "
+                           "please try again in a moment.")
+    xrp = cost * Decimal(config.SWAP_XRP_FEE_BUFFER)
+    return "XRP", str(xrp.quantize(Decimal("0.000001"), rounding=ROUND_UP))
+
+
 class SwapSession:
     def __init__(self, discord_id: str, wallet_address: str,
                  nft1: dict, nft2: dict, traits_to_swap: list,
@@ -65,6 +86,8 @@ class SwapSession:
         self.error = None
         self.results = []  # one dict per re-crafted NFT
         self.payment_link = None  # set when an upfront modify fee is due
+        self.pay_with = None   # "BRIX" or "XRP", set at session start
+        self.fee_per_nft = None  # Decimal, in pay_with units
         self.fee_amount = None
 
     def to_dict(self) -> dict:
@@ -77,6 +100,7 @@ class SwapSession:
             "traits": self.traits_to_swap,
             "results": self.results,
             "payment_link": self.payment_link,
+            "pay_with": self.pay_with,
             "fee_amount": self.fee_amount,
         }
 
@@ -196,12 +220,21 @@ async def _revert_modifies(items: list, owner: str) -> None:
                           "it keeps the new URI")
 
 
+def _offer_amount(session: SwapSession):
+    """Replacement-offer price on the session's fee path: BRIX for holders,
+    the AMM XRP equivalent (in drops) for everyone else."""
+    if session.pay_with == "XRP":
+        return xrp_to_drops(session.fee_per_nft)
+    return xrpl_ops.swap_offer_amount()
+
+
 async def _create_offer_and_accept(session: SwapSession, item: dict) -> bool:
-    """Offer one replacement back to the user (BRIX-priced) and append the
-    XUMM accept payload to session.results. Returns False on failure."""
+    """Offer one replacement back to the user (priced on the session's fee
+    path) and append the XUMM accept payload to session.results. Returns
+    False on failure."""
     offer_id = await xrpl_ops.create_nft_offer(
         item["new_nft_id"], session.wallet_address,
-        amount=xrpl_ops.swap_offer_amount())
+        amount=_offer_amount(session))
     if not offer_id:
         session.error = (f"{item['nft']['name']} was reminted "
                          f"({item['new_nft_id']}) but the offer failed — "
@@ -228,30 +261,43 @@ async def _create_offer_and_accept(session: SwapSession, item: dict) -> bool:
 
 
 async def _collect_modify_fee(session: SwapSession, modify_count: int) -> bool:
-    """Charge the upfront BRIX fee for in-place swaps via XUMM and wait for
-    the verified payment. Returns False on timeout/failure."""
-    fee = swap_fee_total(modify_count)
+    """Charge the upfront fee for in-place swaps via XUMM (in BRIX or its
+    AMM XRP equivalent, per the session's detected path) and wait for the
+    verified payment. Returns False on timeout/failure."""
+    if session.pay_with == "XRP":
+        fee = str(session.fee_per_nft * modify_count)
+        currency, issuer = "XRP", None
+    else:
+        fee = swap_fee_total(modify_count)
+        currency, issuer = config.SWAP_OFFER_CURRENCY_HEX, config.SWAP_OFFER_ISSUER
     destination = xrpl_ops.bot_wallet_address()
     session.fee_amount = fee
     payload = await xumm_ops.create_payment_payload(
-        destination, value=fee,
-        currency=config.SWAP_OFFER_CURRENCY_HEX,
-        issuer=config.SWAP_OFFER_ISSUER,
+        destination, value=fee, currency=currency, issuer=issuer,
         return_url=session.return_url)
     # Sign-request payload normally; raw detect link only if XUMM is down
     session.payment_link = payload["xumm_url"] if payload else \
         xumm_ops.generate_static_payment_link(
-            destination, value=fee,
-            currency=config.SWAP_OFFER_CURRENCY_HEX,
-            issuer=config.SWAP_OFFER_ISSUER)
+            destination, value=fee, currency=currency, issuer=issuer)
     session.state = AWAITING_PAYMENT
-    return await xrpl_ops.wait_for_payment(
+    paid = await xrpl_ops.wait_for_payment(
         destination=destination,
         expected_sender=session.wallet_address,
         expected_amount=fee,
         not_before=session.created_at - 10,
-        currency=config.SWAP_OFFER_CURRENCY_HEX,
-        issuer=config.SWAP_OFFER_ISSUER)
+        currency=currency,
+        issuer=issuer)
+    if paid:
+        # Burn the fee's BRIX: holders' BRIX is forwarded straight to the
+        # issuer; XRP fees fund an AMM buy first (capped at the XRP just
+        # collected). Best-effort — a failed burn must not block the swap.
+        if not await xrpl_ops.buy_and_burn(
+                config.SWAP_OFFER_CURRENCY_HEX, config.SWAP_OFFER_ISSUER,
+                swap_fee_total(modify_count),
+                max_xrp=fee if session.pay_with == "XRP" else None):
+            logging.error(f"BRIX fee burn failed for swap session "
+                          f"{session.id}; fee stays in the bot wallet")
+    return paid
 
 
 async def run_swap_session(session: SwapSession) -> None:
@@ -270,6 +316,14 @@ async def run_swap_session(session: SwapSession) -> None:
             session.state = FAILED
             session.error = f"Missing trait layer files: {', '.join(missing)}"
             return
+
+        # Detect the fee path up front: it prices the modify fee AND the
+        # replacement offers, so even burn-only swaps need it.
+        session.pay_with, total = await detect_swap_payment(
+            session.wallet_address, swap_fee_total(2))
+        # Re-quantize: XRP amounts must not exceed 6 decimal places (drops)
+        session.fee_per_nft = (Decimal(total) / 2).quantize(
+            Decimal("0.000001"), rounding=ROUND_UP)
 
         items = [{"nft": nft1, "attrs": new_attrs1},
                  {"nft": nft2, "attrs": new_attrs2}]

@@ -13,9 +13,11 @@ from xrpl.asyncio.clients import AsyncWebsocketClient
 from xrpl.wallet import Wallet
 from xrpl.models import IssuedCurrencyAmount
 from xrpl.models.transactions import (NFTokenMint, NFTokenCreateOffer,
-                                      NFTokenBurn, NFTokenModify)
+                                      NFTokenBurn, NFTokenModify, Payment)
 from xrpl.models.transactions.nftoken_create_offer import NFTokenCreateOfferFlag
-from xrpl.models.requests import Tx, Subscribe, AccountNFTs, AccountTx
+from xrpl.models.requests import (Tx, Subscribe, AccountNFTs, AccountTx,
+                                  AccountLines, AMMInfo)
+from xrpl.utils import xrp_to_drops
 from xrpl.transaction import submit_and_wait
 
 from lfg_core import config
@@ -154,6 +156,83 @@ async def get_account_nfts(address: str, issuer: str):
     return nfts
 
 
+async def get_trustline_balance(address: str, currency: str, issuer: str):
+    """Balance `address` holds on its trustline to issuer/currency, as a
+    Decimal — or None if there is no trustline or the lookup failed (callers
+    treat both the same: not a holder)."""
+    try:
+        marker = None
+        async with AsyncWebsocketClient(config.WS_URL) as websocket:
+            while True:
+                response = await websocket.request(AccountLines(
+                    account=address, peer=issuer, marker=marker, limit=400))
+                result = response.result
+                for line in result.get("lines", []):
+                    if (line.get("currency") == currency
+                            and line.get("account") == issuer):
+                        return Decimal(line.get("balance", "0"))
+                marker = result.get("marker")
+                if not marker:
+                    return None
+    except Exception as e:
+        logging.warning(f"account_lines lookup failed for {address}: {e}")
+        return None
+
+
+async def get_amm_xrp_cost(currency: str, issuer: str, token_amount: Decimal):
+    """XRP needed to buy `token_amount` of the token from its XRP/token AMM
+    pool, including the pool's trading fee (constant-product exact-output
+    quote). Returns the XRP value as a Decimal, or None if the pool cannot
+    cover the amount or the lookup failed."""
+    try:
+        async with AsyncWebsocketClient(config.WS_URL) as websocket:
+            response = await websocket.request(AMMInfo(
+                asset={"currency": "XRP"},
+                asset2={"currency": currency, "issuer": issuer}))
+            amm = response.result["amm"]
+        xrp_pool = Decimal(amm["amount"]) / 1_000_000  # drops -> XRP
+        token_pool = Decimal(amm["amount2"]["value"])
+        dy = Decimal(token_amount)
+        if dy >= token_pool:
+            return None
+        fee = Decimal(amm.get("trading_fee", 0)) / 100_000  # 1/100000 units
+        return (xrp_pool * dy / (token_pool - dy)) / (1 - fee)
+    except Exception as e:
+        logging.error(f"AMM quote failed for {currency}.{issuer}: {e}")
+        return None
+
+
+async def buy_and_burn(currency: str, issuer: str, value: str,
+                       max_xrp: str = None):
+    """Deliver `value` of an IOU to its own issuer — which destroys it. With
+    `max_xrp` set this is a cross-currency Payment that buys the token off
+    the DEX/AMM with at most that much of the bot wallet's XRP; without it,
+    the bot wallet's existing token balance is spent. Returns the tx hash or
+    None (callers treat the burn as best-effort)."""
+    try:
+        wallet = Wallet.from_seed(config.SEED)
+        client = JsonRpcClient(config.JSON_RPC_URL)
+        kwargs = dict(
+            account=wallet.classic_address,
+            destination=issuer,
+            amount=IssuedCurrencyAmount(currency=currency, issuer=issuer,
+                                        value=value),
+        )
+        if max_xrp is not None:
+            kwargs["send_max"] = xrp_to_drops(Decimal(max_xrp))
+        response = await asyncio.to_thread(
+            submit_and_wait, Payment(**kwargs), client, wallet)
+        result = response.result["meta"]["TransactionResult"]
+        if result == "tesSUCCESS":
+            logging.info(f"Burned {value} {currency}: {response.result['hash']}")
+            return response.result["hash"]
+        logging.error(f"buy_and_burn result: {result}")
+        return None
+    except Exception:
+        logging.error(f"buy_and_burn error: {traceback.format_exc()}")
+        return None
+
+
 async def burn_nft(nft_id: str, owner: str = None):
     """Burn an NFT held by `owner` (None = held by the issuer wallet itself)
     using the issuer wallet's burn authority. Returns the transaction hash
@@ -283,6 +362,14 @@ def _payment_matches(tx: dict, meta, destination: str, expected_sender: str,
         amount = meta.get('delivered_amount') or meta.get('DeliveredAmount')
     if amount is None:
         amount = tx.get('Amount', tx.get('DeliverMax'))
+    if currency == "XRP":
+        # Native XRP amounts are drops strings; expected_amount is in XRP.
+        if isinstance(amount, dict):
+            return False
+        try:
+            return Decimal(amount) >= Decimal(xrp_to_drops(Decimal(expected_amount)))
+        except (InvalidOperation, TypeError, ValueError):
+            return False
     if not isinstance(amount, dict):
         return False
     if amount.get('currency') != currency or amount.get('issuer') != issuer:

@@ -11,6 +11,7 @@ import uuid
 import asyncio
 import logging
 import traceback
+from decimal import Decimal
 
 from lfg_core import config, cdn, traits, xrpl_ops, xumm_ops, layer_store, swap_compose
 from db_helpers import get_next_nft_number, record_nft_mint
@@ -47,27 +48,70 @@ class MintSession:
         self.created_at = time.time()
         self.state = AWAITING_PAYMENT
         self.error = None
-        self.payment_link = xumm_ops.generate_static_payment_link(config.TOKEN_ISSUER_ADDRESS)
+        self.pay_with = None    # "LFGO" or "XRP", set by prepare_payment
+        self.pay_amount = None
+        self.payment_link = None
         self.nft_number = None
         self.nft_id = None
         self.image_url = None
         self.accept_qr_url = None
         self.accept_deeplink = None
 
-    async def prepare_payment_link(self) -> None:
-        """Replace the static fallback link with a real XUMM sign-request
-        payload. Xaman cannot parse the raw-JSON detect link, so the payload
-        URL is the one that must end up in the payment QR (issue #8)."""
+    def _payment_params(self) -> dict:
+        """Destination/amount for this session's payment path. LFGO goes to
+        the issuer (= burned on arrival); XRP goes to the bot wallet, which
+        buys and burns the LFGO off the DEX after payment."""
+        if self.pay_with == "XRP":
+            return dict(destination=xrpl_ops.bot_wallet_address(),
+                        value=self.pay_amount, currency="XRP", issuer=None)
+        return dict(destination=config.TOKEN_ISSUER_ADDRESS,
+                    value=self.pay_amount,
+                    currency=config.TOKEN_CURRENCY_HEX,
+                    issuer=config.TOKEN_ISSUER_ADDRESS)
+
+    async def prepare_payment(self) -> None:
+        """Detect the payment path (LFGO holders burn LFGO; everyone else
+        pays XRP — never explained to the user beyond the pay pill) and
+        create the XUMM sign-request payload. Xaman cannot parse the
+        raw-JSON detect link, so the payload URL is the one that must end
+        up in the payment QR (issue #8)."""
+        balance = await xrpl_ops.get_trustline_balance(
+            self.wallet_address, config.TOKEN_CURRENCY_HEX,
+            config.TOKEN_ISSUER_ADDRESS)
+        if balance is not None and balance >= Decimal(config.MINT_PRICE_LFGO):
+            self.pay_with, self.pay_amount = "LFGO", config.MINT_PRICE_LFGO
+        else:
+            self.pay_with, self.pay_amount = "XRP", config.MINT_PRICE_XRP
+        p = self._payment_params()
+        self.payment_link = xumm_ops.generate_static_payment_link(
+            p["destination"], value=p["value"],
+            currency=p["currency"], issuer=p["issuer"])
         payload = await xumm_ops.create_payment_payload(
-            config.TOKEN_ISSUER_ADDRESS, return_url=self.return_url)
+            p["destination"], value=p["value"],
+            currency=p["currency"], issuer=p["issuer"],
+            return_url=self.return_url)
         if payload:
             self.payment_link = payload["xumm_url"]
+
+    def ensure_payment_fallback(self) -> None:
+        """If prepare_payment was cancelled or failed, default to the XRP
+        path (any wallet can pay XRP; a trustline-less wallet could never
+        complete an LFGO payment) with the static detect link."""
+        if self.pay_with is None:
+            self.pay_with, self.pay_amount = "XRP", config.MINT_PRICE_XRP
+        if not self.payment_link:
+            p = self._payment_params()
+            self.payment_link = xumm_ops.generate_static_payment_link(
+                p["destination"], value=p["value"],
+                currency=p["currency"], issuer=p["issuer"])
 
     def to_dict(self) -> dict:
         return {
             "id": self.id,
             "state": self.state,
             "error": self.error,
+            "pay_with": self.pay_with,
+            "pay_amount": self.pay_amount,
             "payment_link": self.payment_link,
             "nft_number": self.nft_number,
             "nft_id": self.nft_id,
@@ -116,17 +160,31 @@ def _save_recovery_record(record: dict) -> None:
 async def run_mint_session(session: MintSession) -> None:
     """Drive a MintSession to a terminal state. Run as a background task."""
     try:
-        # 1. Wait for the sender-verified token payment. not_before bounds
-        #    the missed-payment backfill to this session's lifetime.
+        # 1. Wait for the sender-verified payment on whichever path
+        #    prepare_payment detected. not_before bounds the missed-payment
+        #    backfill to this session's lifetime.
+        session.ensure_payment_fallback()
+        p = session._payment_params()
         paid = await xrpl_ops.wait_for_payment(
-            destination=config.TOKEN_ISSUER_ADDRESS,
+            destination=p["destination"],
             expected_sender=session.wallet_address,
-            expected_amount="1",
+            expected_amount=p["value"],
             not_before=session.created_at - 10,
+            currency=p["currency"],
         )
         if not paid:
             session.state = PAYMENT_TIMEOUT
             return
+
+        if session.pay_with == "XRP":
+            # Buy the mint's LFGO off the DEX and burn it, spending at most
+            # the XRP just collected. Best-effort: a failed buyback must
+            # never cost the user their mint.
+            if not await xrpl_ops.buy_and_burn(
+                    config.TOKEN_CURRENCY_HEX, config.TOKEN_ISSUER_ADDRESS,
+                    config.MINT_PRICE_LFGO, max_xrp=session.pay_amount):
+                logging.error(f"LFGO buy-and-burn failed for mint session "
+                              f"{session.id}; XRP stays in the bot wallet")
 
         # 2. Compose a random NFT from the unified layer store (same tree
         #    the Trait Swapper uses: <gender>/<TraitType>/<Value>.ext)

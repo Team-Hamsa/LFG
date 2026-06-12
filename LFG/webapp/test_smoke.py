@@ -5,6 +5,7 @@
 import os
 import sys
 import asyncio
+from decimal import Decimal
 
 import pytest
 
@@ -32,10 +33,13 @@ def test_routes_registered():
     app = server.create_app()
     paths = {getattr(r.resource, 'canonical', '') for r in app.router.routes()}
     for expected in ["/api/config", "/api/token", "/api/me", "/api/register",
-                     "/api/trustline", "/api/mint", "/api/mint/{session_id}",
+                     "/api/mint", "/api/mint/{session_id}",
                      "/api/nfts", "/api/swap", "/api/swap/{session_id}",
                      "/api/qr.png", "/"]:
         assert expected in paths, f"missing route {expected}"
+    # Trustline endpoints were removed in v2: never user-facing again
+    assert "/api/trustline" not in paths
+    assert "/api/brix-trustline" not in paths
 
 
 def test_session_token_roundtrip():
@@ -121,17 +125,27 @@ def test_payment_payload_includes_return_url(monkeypatch):
     assert captured["options"]["return_url"] == ru
 
 
-def test_trustline_payloads_include_return_url(monkeypatch):
+def test_accept_offer_payload_includes_return_url(monkeypatch):
     captured = {}
     _fake_xumm_api(monkeypatch, captured)
     ru = {"app": "discord://-/channels/1/2", "web": "https://discord.com/channels/1/2"}
-    loop = asyncio.get_event_loop()
-    loop.run_until_complete(xumm_ops.create_trustline_payload(return_url=ru))
+    asyncio.get_event_loop().run_until_complete(
+        xumm_ops.create_accept_offer_payload("OFFER", return_url=ru))
     assert captured["options"]["return_url"] == ru
-    loop.run_until_complete(xumm_ops.create_brix_trustline_payload(return_url=ru))
-    assert captured["options"]["return_url"] == ru
-    loop.run_until_complete(xumm_ops.create_accept_offer_payload("OFFER", return_url=ru))
-    assert captured["options"]["return_url"] == ru
+
+
+def test_xrp_payment_payload_uses_drops(monkeypatch):
+    captured = {}
+    _fake_xumm_api(monkeypatch, captured)
+    asyncio.get_event_loop().run_until_complete(xumm_ops.create_payment_payload(
+        "rDest", value="10", currency="XRP"))
+    assert captured["txjson"]["Amount"] == "10000000"  # drops string, not dict
+
+
+def _stub_balance(monkeypatch, balance):
+    async def fake_balance(address, currency, issuer):
+        return balance
+    monkeypatch.setattr(mint_flow.xrpl_ops, "get_trustline_balance", fake_balance)
 
 
 def test_mint_session_threads_return_url(monkeypatch):
@@ -141,28 +155,61 @@ def test_mint_session_threads_return_url(monkeypatch):
         seen.update(kw)
         return {"qr_url": "q", "xumm_url": "https://xumm.app/sign/PAY", "uuid": "u"}
 
+    _stub_balance(monkeypatch, Decimal("5"))
     monkeypatch.setattr(mint_flow.xumm_ops, "create_payment_payload", fake_payload)
     ru = {"app": "discord://-/channels/1/2", "web": "https://discord.com/channels/1/2"}
     session = mint_flow.MintSession(discord_id="1", wallet_address="rTest", return_url=ru)
-    asyncio.get_event_loop().run_until_complete(session.prepare_payment_link())
+    asyncio.get_event_loop().run_until_complete(session.prepare_payment())
     assert seen["return_url"] == ru
 
 
 def test_mint_session_prepare_uses_xumm_payload(monkeypatch):
     async def fake_payload(destination, **kw):
         return {"qr_url": "q", "xumm_url": "https://xumm.app/sign/PAY", "uuid": "u"}
+    _stub_balance(monkeypatch, Decimal("5"))
     monkeypatch.setattr(mint_flow.xumm_ops, "create_payment_payload", fake_payload)
     session = mint_flow.MintSession(discord_id="1", wallet_address="rTest")
-    asyncio.get_event_loop().run_until_complete(session.prepare_payment_link())
+    asyncio.get_event_loop().run_until_complete(session.prepare_payment())
+    assert session.pay_with == "LFGO"
     assert session.payment_link == "https://xumm.app/sign/PAY"
 
 
 def test_mint_session_prepare_falls_back_to_static(monkeypatch):
     async def fail(destination, **kw):
         return None
+    _stub_balance(monkeypatch, Decimal("5"))
     monkeypatch.setattr(mint_flow.xumm_ops, "create_payment_payload", fail)
     session = mint_flow.MintSession(discord_id="1", wallet_address="rTest")
-    asyncio.get_event_loop().run_until_complete(session.prepare_payment_link())
+    asyncio.get_event_loop().run_until_complete(session.prepare_payment())
+    assert session.payment_link.startswith("https://xaman.app/detect/")
+
+
+def test_mint_payment_path_detection(monkeypatch):
+    """Silent path detection: LFGO trustline + balance pays LFGO to the
+    issuer; everything else (no line, low balance, lookup failure) pays XRP
+    to the bot wallet."""
+    async def fake_payload(destination, **kw):
+        return None
+    monkeypatch.setattr(mint_flow.xumm_ops, "create_payment_payload", fake_payload)
+    loop = asyncio.get_event_loop()
+    for balance, expected in ((Decimal("1"), "LFGO"), (Decimal("0"), "XRP"),
+                              (None, "XRP")):
+        _stub_balance(monkeypatch, balance)
+        session = mint_flow.MintSession(discord_id="1", wallet_address="rTest")
+        loop.run_until_complete(session.prepare_payment())
+        assert session.pay_with == expected, f"balance={balance}"
+    assert session.pay_amount == config.MINT_PRICE_XRP
+    p = session._payment_params()
+    assert p["currency"] == "XRP"
+    assert p["destination"] == xrpl_ops.bot_wallet_address()
+
+
+def test_mint_fallback_defaults_to_xrp_path():
+    # prepare_payment cancelled/failed -> any wallet can still pay XRP
+    session = mint_flow.MintSession(discord_id="1", wallet_address="rTest")
+    session.ensure_payment_fallback()
+    assert session.pay_with == "XRP"
+    assert session.pay_amount == config.MINT_PRICE_XRP
     assert session.payment_link.startswith("https://xaman.app/detect/")
 
 
@@ -242,6 +289,28 @@ def test_payment_match_rejects_wrong_sender_and_partial():
     xrp_payment["transaction"]["Amount"] = "1000000"  # XRP drops, not LFGO
     del xrp_payment["meta"]
     assert not _matches(xrp_payment)
+
+
+def test_payment_match_native_xrp():
+    """The XRP mint/swap paths watch for native (drops string) payments."""
+    msg = {
+        "type": "transaction", "validated": True,
+        "tx_json": {"TransactionType": "Payment", "Account": "rSender",
+                    "Destination": "rDest", "DeliverMax": "10000000",
+                    "hash": "H3"},
+        "meta": {"delivered_amount": "10000000"},
+    }
+    tx, meta = xrpl_ops._extract_tx_and_meta(msg)
+
+    def match(expected):
+        return xrpl_ops._payment_matches(tx, meta, "rDest", "rSender",
+                                         expected, "XRP", None)
+    assert match("10")
+    assert not match("10.5")  # short payment rejected
+    # and a token payment never satisfies an XRP expectation
+    tok, tok_meta = xrpl_ops._extract_tx_and_meta(V2_STREAM_MSG)
+    assert not xrpl_ops._payment_matches(tok, tok_meta, "rDest", "rSender",
+                                         "10", "XRP", None)
 
 
 def test_wait_for_payment_times_out_with_no_traffic(monkeypatch):
@@ -379,8 +448,17 @@ def test_mint_session_payment_timeout(monkeypatch):
 
 
 def test_mint_session_happy_path(monkeypatch, tmp_path):
+    waited = {}
     async def paid(**kwargs):
+        waited.update(kwargs)
         return True
+
+    burned = []
+    async def fake_buy_and_burn(currency, issuer, value, max_xrp=None):
+        burned.append((currency, value, max_xrp))
+        return "BURNHASH"
+
+    monkeypatch.setattr(mint_flow.xrpl_ops, "buy_and_burn", fake_buy_and_burn)
 
     async def fake_upload(path_on_cdn, data, content_type):
         return f"https://cdn.test/{path_on_cdn}"
@@ -427,6 +505,14 @@ def test_mint_session_happy_path(monkeypatch, tmp_path):
 
     assert session.state == mint_flow.OFFER_READY
     assert session.state in mint_flow.TERMINAL_STATES  # next mint not blocked
+    # No prepare_payment ran, so the session fell back to the XRP path:
+    # native-XRP watch on the bot wallet, then the LFGO buyback burn.
+    assert session.pay_with == "XRP"
+    assert waited["currency"] == "XRP"
+    assert waited["destination"] == xrpl_ops.bot_wallet_address()
+    assert waited["expected_amount"] == config.MINT_PRICE_XRP
+    assert burned == [(config.TOKEN_CURRENCY_HEX, config.MINT_PRICE_LFGO,
+                       config.MINT_PRICE_XRP)]
     assert session.nft_id == "NFTID123"
     assert session.accept_deeplink == "https://xumm.test/sign"
     assert session.image_url == "https://cdn.test/lfg_9999.png"
@@ -531,8 +617,22 @@ def test_swap_session_missing_layers_fails_before_burn(monkeypatch):
 
 def _patch_swap_stubs(monkeypatch, tmp_path, events,
                       burn_fails=(), mint_fails=(), modify_fails=(),
-                      fee_paid=True):
+                      fee_paid=True, brix_balance=Decimal("100"),
+                      amm_cost=Decimal("12.5")):
     """Stub the swap flow's externals; `events` records on-chain call order."""
+    async def fake_balance(address, currency, issuer):
+        return brix_balance
+
+    async def fake_amm_cost(currency, issuer, amount):
+        return amm_cost
+
+    async def fake_buy_and_burn(currency, issuer, value, max_xrp=None):
+        events.append(f"burn_fee {value}")
+        return "BURNHASH"
+
+    monkeypatch.setattr(swap_flow.xrpl_ops, "get_trustline_balance", fake_balance)
+    monkeypatch.setattr(swap_flow.xrpl_ops, "get_amm_xrp_cost", fake_amm_cost)
+    monkeypatch.setattr(swap_flow.xrpl_ops, "buy_and_burn", fake_buy_and_burn)
     async def fake_upload(path_on_cdn, data, content_type):
         return f"https://cdn.test/LFGO/{path_on_cdn}"
 
@@ -561,8 +661,10 @@ def _patch_swap_stubs(monkeypatch, tmp_path, events,
         events.append(f"mint NEW{len(minted)}")
         return f"NEW{len(minted)}"
 
+    offers = []
     async def fake_offer(nft_id, destination, amount=None):
-        assert amount is not None  # swap offers are BRIX-priced
+        assert amount is not None  # swap offers are fee-priced, never free
+        offers.append(amount)
         events.append(f"offer {nft_id}")
         return f"OFFER_{nft_id}"
 
@@ -603,6 +705,7 @@ def _patch_swap_stubs(monkeypatch, tmp_path, events,
     monkeypatch.setattr(swap_flow.xrpl_ops, "mint_nft", fake_mint)
     monkeypatch.setattr(swap_flow.xrpl_ops, "create_nft_offer", fake_offer)
     monkeypatch.setattr(swap_flow.xumm_ops, "create_accept_offer_payload", fake_accept)
+    return offers
 
 
 def test_swap_session_happy_path(monkeypatch, tmp_path):
@@ -675,6 +778,55 @@ def test_swap_fee_total():
     assert swap_flow.swap_fee_total(2) == "20"
 
 
+def test_detect_swap_payment_paths(monkeypatch):
+    """BRIX holders pay BRIX; everyone else the AMM XRP quote (+ buffer);
+    no path at all (no BRIX, no AMM quote) raises."""
+    state = {}
+
+    async def fake_balance(address, currency, issuer):
+        return state["balance"]
+
+    async def fake_amm(currency, issuer, amount):
+        return state["amm"]
+
+    monkeypatch.setattr(swap_flow.xrpl_ops, "get_trustline_balance", fake_balance)
+    monkeypatch.setattr(swap_flow.xrpl_ops, "get_amm_xrp_cost", fake_amm)
+    loop = asyncio.get_event_loop()
+
+    state.update(balance=Decimal("20"), amm=None)
+    assert loop.run_until_complete(
+        swap_flow.detect_swap_payment("rW", "20")) == ("BRIX", "20")
+
+    state.update(balance=Decimal("5"), amm=Decimal("12.5"))  # insufficient BRIX
+    pay_with, amount = loop.run_until_complete(
+        swap_flow.detect_swap_payment("rW", "20"))
+    assert pay_with == "XRP"
+    assert Decimal(amount) == Decimal("12.5") * Decimal(config.SWAP_XRP_FEE_BUFFER)
+
+    state.update(balance=None, amm=None)
+    with pytest.raises(RuntimeError, match="unavailable"):
+        loop.run_until_complete(swap_flow.detect_swap_payment("rW", "20"))
+
+
+def test_swap_session_xrp_path_prices_fee_and_offers(monkeypatch, tmp_path):
+    """No BRIX trustline: the modify fee is charged in XRP (AMM quote), the
+    BRIX is bought + burned, and replacement offers are priced in drops."""
+    events = []
+    offers = _patch_swap_stubs(monkeypatch, tmp_path, events,
+                               brix_balance=None, amm_cost=Decimal("12.5"))
+
+    session = _swap_session(mutable=(True, False))
+    asyncio.get_event_loop().run_until_complete(swap_flow.run_swap_session(session))
+
+    assert session.state == swap_flow.OFFERS_READY
+    assert session.pay_with == "XRP"
+    # 12.5 XRP for 20 BRIX, x1.05 buffer = 13.125 total -> 6.5625 per NFT
+    assert session.fee_amount == "6.562500"
+    assert events == ["fee_requested 6.562500", "burn_fee 10", "mint NEW1",
+                      "modify OLD10", "burn OLD20", "offer NEW1"]
+    assert offers == ["6562500"]  # drops string, not a BRIX amount
+
+
 def test_payment_link_supports_custom_currency():
     import json as _json
     brix = "4252495800000000000000000000000000000000"
@@ -694,7 +846,8 @@ def test_swap_session_both_mutable_modifies_in_place(monkeypatch, tmp_path):
 
     assert session.state == swap_flow.OFFERS_READY
     # Fee charged upfront (2 × 10 BRIX); no mint/burn/offer at all
-    assert events == ["fee_requested 20", "modify OLD10", "modify OLD20"]
+    assert events == ["fee_requested 20", "burn_fee 20",
+                      "modify OLD10", "modify OLD20"]
     assert session.fee_amount == "20"
     # Fee QR is a real XUMM sign request, not the unscannable detect link
     assert session.payment_link == "https://xumm.app/sign/PAY_20"
@@ -713,8 +866,8 @@ def test_swap_session_mixed_mints_modifies_then_burns(monkeypatch, tmp_path):
 
     assert session.state == swap_flow.OFFERS_READY
     # Reversible steps first, the irreversible burn last
-    assert events == ["fee_requested 10", "mint NEW1", "modify OLD10",
-                      "burn OLD20", "offer NEW1"]
+    assert events == ["fee_requested 10", "burn_fee 10", "mint NEW1",
+                      "modify OLD10", "burn OLD20", "offer NEW1"]
     modified = [r for r in session.results if r["modified"]]
     offered = [r for r in session.results if not r["modified"]]
     assert modified[0]["nft_id"] == "OLD10"
@@ -741,7 +894,7 @@ def test_swap_session_modify_failure_reverts(monkeypatch, tmp_path):
 
     assert session.state == swap_flow.FAILED
     assert "untouched" in session.error
-    assert events == ["fee_requested 20", "modify OLD10",
+    assert events == ["fee_requested 20", "burn_fee 20", "modify OLD10",
                       "modify_failed OLD20", "revert OLD10"]
 
 
@@ -755,8 +908,9 @@ def test_swap_session_burn_failure_after_modify_unwinds_all(monkeypatch, tmp_pat
     # The modify is rolled back and the orphaned replacement burned: the
     # user keeps both originals exactly as they were.
     assert session.state == swap_flow.FAILED
-    assert events == ["fee_requested 10", "mint NEW1", "modify OLD10",
-                      "burn_failed OLD20", "revert OLD10", "burn NEW1"]
+    assert events == ["fee_requested 10", "burn_fee 10", "mint NEW1",
+                      "modify OLD10", "burn_failed OLD20", "revert OLD10",
+                      "burn NEW1"]
     assert session.results == []
 
 # --- Unified layer store ---
@@ -991,13 +1145,3 @@ def test_no_cache_middleware_respects_handler_cache_header():
     resp = loop.run_until_complete(server.no_cache_mw(req, handler))
     assert resp.headers["Cache-Control"] == "public, max-age=60"
 
-
-def test_trustline_handlers_require_auth():
-    """Both trustline endpoints must reject unauthenticated requests — a
-    misplaced decorator once left /api/trustline open (PR #16 review)."""
-    from aiohttp.test_utils import make_mocked_request
-    loop = asyncio.get_event_loop()
-    for handler in (server.handle_trustline, server.handle_brix_trustline):
-        req = make_mocked_request("POST", "/x")  # no Authorization header
-        resp = loop.run_until_complete(handler(req))
-        assert resp.status == 401, f"{handler} let an unauthenticated request through"
