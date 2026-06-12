@@ -1,14 +1,16 @@
 # lfg_core/xumm_ops.py
-# XUMM/Xaman payload helpers: payment links, QR rendering, trustline and
-# NFT-accept payloads (extracted from main.py).
+# XUMM/Xaman payload helpers: payment links, QR rendering and NFT-accept
+# payloads (extracted from main.py).
 
 import io
 import json
 import asyncio
 import logging
+from decimal import Decimal
 
 import qrcode
 import requests
+from xrpl.utils import xrp_to_drops
 
 from lfg_core import config
 
@@ -20,18 +22,26 @@ _XUMM_HEADERS = {
 }
 
 
+def _payment_amount(value: str, currency: str, issuer: str):
+    """XRPL Amount field for a Payment: native XRP is a drops string, IOUs
+    are a currency dict. currency/issuer default to the LFGO mint token."""
+    if currency == "XRP":
+        return xrp_to_drops(Decimal(value))
+    return {
+        "currency": currency or config.TOKEN_CURRENCY_HEX,
+        "value": value,
+        "issuer": issuer or config.TOKEN_ISSUER_ADDRESS,
+    }
+
+
 def generate_static_payment_link(destination: str, value: str = "1",
                                  currency: str = None, issuer: str = None) -> str:
-    """xaman.app/detect deep link for a token payment; works in any XRPL
-    wallet. currency/issuer default to the LFGO mint token."""
+    """xaman.app/detect deep link for a payment; works in any XRPL wallet.
+    currency/issuer default to the LFGO mint token; "XRP" means native XRP."""
     transaction_json = {
         "TransactionType": "Payment",
         "Destination": destination,
-        "Amount": {
-            "currency": currency or config.TOKEN_CURRENCY_HEX,
-            "value": value,
-            "issuer": issuer or config.TOKEN_ISSUER_ADDRESS,
-        },
+        "Amount": _payment_amount(value, currency, issuer),
     }
     tx_hex = json.dumps(transaction_json).encode('utf-8').hex()
     return f"https://xaman.app/detect/{tx_hex}"
@@ -110,11 +120,7 @@ async def create_payment_payload(destination: str, value: str = "1",
         {
             "TransactionType": "Payment",
             "Destination": destination,
-            "Amount": {
-                "currency": currency or config.TOKEN_CURRENCY_HEX,
-                "value": value,
-                "issuer": issuer or config.TOKEN_ISSUER_ADDRESS,
-            },
+            "Amount": _payment_amount(value, currency, issuer),
         },
         options=_with_return_url({"expire": expire_minutes}, return_url),
     )
@@ -126,35 +132,3 @@ async def create_accept_offer_payload(offer_id: str, return_url: dict = None):
         "TransactionType": "NFTokenAcceptOffer",
         "NFTokenSellOffer": offer_id,
     }, options=_with_return_url({}, return_url))
-
-
-async def create_trustline_payload(return_url: dict = None):
-    """XUMM payload for the LFGO TrustSet."""
-    return await _create_xumm_payload(
-        {
-            "TransactionType": "TrustSet",
-            "Flags": 131072,  # tfSetNoRipple
-            "LimitAmount": {
-                "currency": config.TOKEN_CURRENCY_HEX,
-                "issuer": config.TOKEN_ISSUER_ADDRESS,
-                "value": config.TOKEN_TRUSTLINE_LIMIT,
-            },
-        },
-        options=_with_return_url({"expire": 5}, return_url),
-    )
-
-
-async def create_brix_trustline_payload(return_url: dict = None):
-    """XUMM payload for the BRIX TrustSet (required to pay swap fees)."""
-    return await _create_xumm_payload(
-        {
-            "TransactionType": "TrustSet",
-            "Flags": 131072,  # tfSetNoRipple
-            "LimitAmount": {
-                "currency": config.SWAP_OFFER_CURRENCY_HEX,
-                "issuer": config.SWAP_OFFER_ISSUER,
-                "value": "1000000",
-            },
-        },
-        options=_with_return_url({"expire": 5}, return_url),
-    )

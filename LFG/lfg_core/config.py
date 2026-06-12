@@ -66,6 +66,13 @@ NFT_TRANSFER_FEE = int(os.getenv("NFT_TRANSFER_FEE", "7000"))
 NFT_FLAGS = int(os.getenv("NFT_FLAGS", "24"))
 NFT_COLLECTION_NAME = os.getenv("NFT_COLLECTION_NAME", "Let's Effing Go!")
 
+# Mint pricing. Holders with an LFGO trustline + balance pay MINT_PRICE_LFGO
+# (sent to the issuer, i.e. burned). Wallets without one pay MINT_PRICE_XRP
+# and the backend buys MINT_PRICE_LFGO off the DEX and burns it. The path is
+# detected silently per-wallet; the user only ever sees their own price.
+MINT_PRICE_LFGO = os.getenv("MINT_PRICE_LFGO", "1")
+MINT_PRICE_XRP = os.getenv("MINT_PRICE_XRP", "10")
+
 # BunnyCDN
 BUNNY_CDN_ACCESS_KEY = _require("BUNNY_CDN_ACCESS_KEY")
 BUNNY_CDN_STORAGE_ZONE = _require("BUNNY_CDN_STORAGE_ZONE")
@@ -103,6 +110,9 @@ SWAP_OFFER_CURRENCY_HEX = os.getenv(
     "SWAP_OFFER_CURRENCY_HEX", "4252495800000000000000000000000000000000")  # BRIX
 SWAP_OFFER_ISSUER = os.getenv("SWAP_OFFER_ISSUER", _default_brix_issuer)
 SWAP_OFFER_AMOUNT = os.getenv("SWAP_OFFER_AMOUNT", "10")
+# Multiplier over the AMM spot quote when a swap fee is charged in XRP, so
+# the follow-up BRIX buy-and-burn still clears if the pool moves slightly.
+SWAP_XRP_FEE_BUFFER = os.getenv("SWAP_XRP_FEE_BUFFER", "1.05")
 SWAP_MAX_NFT_NUMBER = int(os.getenv("SWAP_MAX_NFT_NUMBER", "3535"))
 SWAP_RECORDS_DIR = os.getenv("SWAP_RECORDS_DIR", "swap_records")
 NFT_SCHEMA_URL = os.getenv("NFT_SCHEMA_URL",

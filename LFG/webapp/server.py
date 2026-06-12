@@ -1,6 +1,6 @@
 # webapp/server.py
 # Discord Activity backend: aiohttp app serving the embedded-app frontend,
-# OAuth token exchange, and the mint/trustline/register API.
+# OAuth token exchange, and the mint/swap/register API.
 #
 # Run with:  python -m webapp.server   (from the repo root)
 
@@ -186,24 +186,6 @@ async def _request_return_url(request):
     return xumm_ops.discord_return_url(body.get("guild_id"), body.get("channel_id"))
 
 
-@require_auth
-async def handle_trustline(request):
-    payload = await xumm_ops.create_trustline_payload(
-        return_url=await _request_return_url(request))
-    if not payload:
-        return web.json_response({"error": "failed to create trustline request"}, status=502)
-    return web.json_response(payload)
-
-
-@require_auth
-async def handle_brix_trustline(request):
-    payload = await xumm_ops.create_brix_trustline_payload(
-        return_url=await _request_return_url(request))
-    if not payload:
-        return web.json_response({"error": "failed to create BRIX trustline request"}, status=502)
-    return web.json_response(payload)
-
-
 @require_wallet
 async def handle_mint_start(request):
     user = request["user"]
@@ -219,16 +201,18 @@ async def handle_mint_start(request):
     session = mint_flow.MintSession(discord_id=user["id"], wallet_address=request["wallet"],
                                     return_url=await _request_return_url(request))
     mint_sessions[session.id] = session
-    # Swap the static fallback link for a real XUMM sign request before the
-    # first QR is rendered (after the insert above, so the one-active-session
-    # guard stays race-free). Bounded so a stalled XUMM API can't hang
-    # /api/mint — on timeout the session keeps the static fallback link.
+    # Detect the payment path (LFGO holder vs XRP newcomer) and create the
+    # XUMM sign request before the first QR is rendered (after the insert
+    # above, so the one-active-session guard stays race-free). Bounded so a
+    # stalled XRPL/XUMM API can't hang /api/mint — on timeout the session
+    # falls back to the XRP path with the static detect link.
     try:
-        await asyncio.wait_for(session.prepare_payment_link(), timeout=5)
+        await asyncio.wait_for(session.prepare_payment(), timeout=8)
     except asyncio.TimeoutError:
-        logging.warning("prepare_payment_link timed out; serving static fallback link")
+        logging.warning("prepare_payment timed out; falling back to XRP path")
     except Exception as e:
-        logging.warning(f"prepare_payment_link failed; serving static fallback link: {e}")
+        logging.warning(f"prepare_payment failed; falling back to XRP path: {e}")
+    session.ensure_payment_fallback()
     asyncio.get_event_loop().create_task(mint_flow.run_mint_session(session))
     return web.json_response(session.to_dict())
 
@@ -242,8 +226,20 @@ async def handle_nfts(request):
     except Exception as e:
         logging.error(f"NFT listing failed: {e}")
         return web.json_response({"error": "failed to load wallet NFTs"}, status=502)
+    # Quote the swap fee for the cost line (BRIX holders pay BRIX; everyone
+    # else the AMM XRP equivalent). Advisory only — the swap session
+    # re-detects the path server-side when the fee is actually charged.
+    swap_fee = None
+    try:
+        pay_with, amount = await swap_flow.detect_swap_payment(
+            request["wallet"], swap_flow.swap_fee_total(2))
+        swap_fee = {"pay_with": pay_with, "amount": amount,
+                    "per_nft": swap_flow.swap_fee_total(1)}
+    except Exception as e:
+        logging.warning(f"Swap fee quote failed: {e}")
     return web.json_response({"nfts": nfts,
-                              "swappable_traits": swap_meta.SWAPPABLE_TRAITS})
+                              "swappable_traits": swap_meta.SWAPPABLE_TRAITS,
+                              "swap_fee": swap_fee})
 
 
 @require_wallet
@@ -358,8 +354,6 @@ def create_app() -> web.Application:
     app.router.add_post("/api/token", handle_token)
     app.router.add_get("/api/me", handle_me)
     app.router.add_post("/api/register", handle_register)
-    app.router.add_post("/api/trustline", handle_trustline)
-    app.router.add_post("/api/brix-trustline", handle_brix_trustline)
     app.router.add_post("/api/mint", handle_mint_start)
     app.router.add_get("/api/mint/{session_id}", handle_mint_status)
     app.router.add_get("/api/nfts", handle_nfts)
