@@ -176,7 +176,6 @@ async def handle_register(request):
     return web.json_response({"ok": True, "wallet": wallet})
 
 
-@require_auth
 async def _request_return_url(request):
     """Optional XUMM return_url from the client's guild/channel context;
     bad/missing IDs simply mean no return button in Xaman (issue #14)."""
@@ -187,6 +186,7 @@ async def _request_return_url(request):
     return xumm_ops.discord_return_url(body.get("guild_id"), body.get("channel_id"))
 
 
+@require_auth
 async def handle_trustline(request):
     payload = await xumm_ops.create_trustline_payload(
         return_url=await _request_return_url(request))
