@@ -183,6 +183,59 @@ def recalculate_rarity(conn, network=None):
     conn.commit()
 
 
+def arm_boost(conn, body, category, trait, *, network=None,
+              boost_initial=None, boost_step_hours=None):
+    """Admin opt-in: configure a dormant boost. Resets the clock, so it also
+    re-arms a finished boost (comeback event)."""
+    network = network or config.XRPL_NETWORK
+    cur = conn.execute(
+        """UPDATE trait_rarity
+           SET boost_initial=?, boost_step_hours=?, boost_started_at=NULL
+           WHERE network=? AND body=? AND category=? AND trait=?""",
+        (boost_initial if boost_initial is not None
+         else config.RARITY_BOOST_INITIAL,
+         boost_step_hours if boost_step_hours is not None
+         else config.RARITY_BOOST_STEP_HOURS,
+         network, body, category, trait))
+    conn.commit()
+    if cur.rowcount == 0:
+        raise ValueError(f"No trait_rarity row for "
+                         f"{network}/{body}/{category}/{trait}")
+
+
+def start_boost_clock(conn, body, category, trait, *, network=None,
+                      now=None):
+    """Called when a mint completes: if the picked trait has an armed,
+    dormant boost, start its clock. No-op otherwise."""
+    network = network or config.XRPL_NETWORK
+    now = now or utcnow()
+    conn.execute(
+        """UPDATE trait_rarity SET boost_started_at=?
+           WHERE network=? AND body=? AND category=? AND trait=?
+             AND boost_initial IS NOT NULL AND boost_started_at IS NULL""",
+        (now.isoformat(), network, body, category, trait))
+    conn.commit()
+
+
+def boost_status(boost_initial, boost_step_hours, boost_started_at, now):
+    """Human-readable boost state for admin views."""
+    if not boost_initial:
+        return "—"
+    if not boost_started_at:
+        return "dormant"
+    mult = boost_multiplier(boost_initial, boost_step_hours,
+                            boost_started_at, now)
+    if mult <= 1.0:
+        return "finished"
+    started = datetime.fromisoformat(boost_started_at)
+    if started.tzinfo is None:
+        started = started.replace(tzinfo=timezone.utc)
+    step = boost_step_hours or 24
+    total_h = (boost_initial - 1) * step
+    left_h = total_h - (now - started).total_seconds() / 3600.0
+    return f"active {mult:g}x — {left_h / 24:.1f}d left"
+
+
 def _is_stale(conn, network, category):
     """True when cached category counts disagree with the live collection."""
     column = LFG_COLUMN_FOR_CATEGORY.get(category)
