@@ -3,6 +3,7 @@
 # payloads (extracted from main.py).
 
 import io
+import os
 import json
 import asyncio
 import logging
@@ -10,6 +11,7 @@ from decimal import Decimal
 
 import qrcode
 import requests
+from PIL import Image
 from xrpl.utils import xrp_to_drops
 
 from lfg_core import config
@@ -47,17 +49,43 @@ def generate_static_payment_link(destination: str, value: str = "1",
     return f"https://xaman.app/detect/{tx_hex}"
 
 
+# Mascot composited into the center of every QR (issue #19). High error
+# correction tolerates the covered modules; a missing file means plain QRs.
+QR_LOGO_PATH = os.getenv("QR_LOGO_PATH", os.path.join(
+    os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
+    "webapp", "client", "assets", "mascot.png"))
+
+
+def _apply_qr_logo(img: Image.Image) -> Image.Image:
+    logo = Image.open(QR_LOGO_PATH).convert("RGBA")
+    # ~1/4 of the QR width keeps well under ERROR_CORRECT_H's 30% budget
+    side = img.size[0] // 4
+    logo.thumbnail((side, side), Image.LANCZOS)
+    lw, lh = logo.size
+    cx, cy = (img.size[0] - lw) // 2, (img.size[1] - lh) // 2
+    # white backing pad so the mascot never sits directly on dark modules
+    pad = max(4, side // 10)
+    backing = Image.new("RGB", (lw + 2 * pad, lh + 2 * pad), "white")
+    img.paste(backing, (cx - pad, cy - pad))
+    img.paste(logo, (cx, cy), logo)
+    return img
+
+
 def generate_qr_png(data: str) -> bytes:
-    """Render a QR code PNG for the given string."""
+    """Render a QR code PNG with the brand mascot in the center."""
     qr = qrcode.QRCode(
         version=1,
-        error_correction=qrcode.constants.ERROR_CORRECT_L,
+        error_correction=qrcode.constants.ERROR_CORRECT_H,
         box_size=10,
         border=4,
     )
     qr.add_data(data)
     qr.make(fit=True)
-    img = qr.make_image(fill_color="black", back_color="white")
+    img = qr.make_image(fill_color="black", back_color="white").convert("RGB")
+    try:
+        img = _apply_qr_logo(img)
+    except Exception as e:  # missing/corrupt logo: serve the plain QR
+        logging.warning(f"QR branding skipped: {e}")
     buf = io.BytesIO()
     img.save(buf, format='PNG')
     return buf.getvalue()
@@ -132,3 +160,32 @@ async def create_accept_offer_payload(offer_id: str, return_url: dict = None):
         "TransactionType": "NFTokenAcceptOffer",
         "NFTokenSellOffer": offer_id,
     }, options=_with_return_url({}, return_url))
+
+
+async def create_signin_payload(return_url: dict = None):
+    """XUMM SignIn payload: the user scans/approves in Xaman and the signed
+    payload reveals their wallet address (registration flow, issue #24)."""
+    return await _create_xumm_payload({
+        "TransactionType": "SignIn",
+    }, options=_with_return_url({}, return_url))
+
+
+async def get_payload_status(uuid: str):
+    """Poll a XUMM payload: whether it was opened (QR scanned) / signed /
+    expired, and the signing account once signed. None on API errors."""
+    try:
+        response = await asyncio.to_thread(
+            requests.get, f"{config.XUMM_API_URL}/{uuid}",
+            headers=_XUMM_HEADERS, timeout=10
+        )
+        data = response.json()
+        meta = data.get("meta") or {}
+        return {
+            "opened": bool(meta.get("opened")),
+            "signed": bool(meta.get("signed")),
+            "expired": bool(meta.get("expired")),
+            "account": (data.get("response") or {}).get("account"),
+        }
+    except Exception as e:
+        logging.error(f"Error fetching XUMM payload status: {e}")
+        return None
