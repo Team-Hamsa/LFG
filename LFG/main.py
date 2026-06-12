@@ -1483,7 +1483,11 @@ class BurnConfirmView(View):
                 conn.commit()
 
                 try:
-                    _rarity.recalculate_rarity(conn)
+                    rarity_conn = _rarity.connect()
+                    try:
+                        _rarity.recalculate_rarity(rarity_conn)
+                    finally:
+                        rarity_conn.close()
                 except Exception as e:
                     logging.error(f"rarity recalc after burn failed: {e}")
 
