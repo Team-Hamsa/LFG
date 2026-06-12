@@ -53,6 +53,25 @@ def generate_qr_png(data: str) -> bytes:
     return buf.getvalue()
 
 
+def _with_return_url(options: dict, return_url: dict) -> dict:
+    if return_url:
+        options["return_url"] = return_url
+    return options or None
+
+
+def discord_return_url(guild_id, channel_id):
+    """XUMM return_url dict that bounces the user back to the Discord channel
+    hosting the Activity after signing in Xaman (issue #14). The IDs come
+    from the untrusted client, so anything non-numeric is rejected."""
+    if not (isinstance(guild_id, str) and guild_id.isdigit()
+            and isinstance(channel_id, str) and channel_id.isdigit()):
+        return None
+    return {
+        "app": f"discord://-/channels/{guild_id}/{channel_id}",
+        "web": f"https://discord.com/channels/{guild_id}/{channel_id}",
+    }
+
+
 async def _create_xumm_payload(txjson: dict, options: dict = None):
     """POST a payload to the XUMM platform API; returns qr/deeplink dict or None."""
     payload = {"txjson": txjson}
@@ -76,7 +95,8 @@ async def _create_xumm_payload(txjson: dict, options: dict = None):
 
 async def create_payment_payload(destination: str, value: str = "1",
                                  currency: str = None, issuer: str = None,
-                                 expire_minutes: int = None):
+                                 expire_minutes: int = None,
+                                 return_url: dict = None):
     """XUMM sign-request payload for a token Payment. This is what payment
     QRs must encode: Xaman only understands its own payload links
     (xumm.app/sign/<uuid>) — it cannot parse the raw-transaction-JSON
@@ -96,19 +116,19 @@ async def create_payment_payload(destination: str, value: str = "1",
                 "issuer": issuer or config.TOKEN_ISSUER_ADDRESS,
             },
         },
-        options={"expire": expire_minutes},
+        options=_with_return_url({"expire": expire_minutes}, return_url),
     )
 
 
-async def create_accept_offer_payload(offer_id: str):
+async def create_accept_offer_payload(offer_id: str, return_url: dict = None):
     """XUMM payload for NFTokenAcceptOffer."""
     return await _create_xumm_payload({
         "TransactionType": "NFTokenAcceptOffer",
         "NFTokenSellOffer": offer_id,
-    })
+    }, options=_with_return_url({}, return_url))
 
 
-async def create_trustline_payload():
+async def create_trustline_payload(return_url: dict = None):
     """XUMM payload for the LFGO TrustSet."""
     return await _create_xumm_payload(
         {
@@ -120,11 +140,11 @@ async def create_trustline_payload():
                 "value": config.TOKEN_TRUSTLINE_LIMIT,
             },
         },
-        options={"expire": 5},
+        options=_with_return_url({"expire": 5}, return_url),
     )
 
 
-async def create_brix_trustline_payload():
+async def create_brix_trustline_payload(return_url: dict = None):
     """XUMM payload for the BRIX TrustSet (required to pay swap fees)."""
     return await _create_xumm_payload(
         {
@@ -136,5 +156,5 @@ async def create_brix_trustline_payload():
                 "value": "1000000",
             },
         },
-        options={"expire": 5},
+        options=_with_return_url({"expire": 5}, return_url),
     )

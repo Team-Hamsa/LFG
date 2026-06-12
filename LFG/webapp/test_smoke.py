@@ -100,6 +100,54 @@ def test_create_payment_payload_custom_currency(monkeypatch):
                                             "issuer": "rBrixIssuer"}
 
 
+def test_discord_return_url_builder():
+    ru = xumm_ops.discord_return_url("970785471686905867", "970785471686905871")
+    assert ru == {
+        "app": "discord://-/channels/970785471686905867/970785471686905871",
+        "web": "https://discord.com/channels/970785471686905867/970785471686905871",
+    }
+    # anything non-numeric (or missing) is rejected — these come from the client
+    assert xumm_ops.discord_return_url("evil://x", "123") is None
+    assert xumm_ops.discord_return_url("123", "") is None
+    assert xumm_ops.discord_return_url(None, None) is None
+
+
+def test_payment_payload_includes_return_url(monkeypatch):
+    captured = {}
+    _fake_xumm_api(monkeypatch, captured)
+    ru = {"app": "discord://-/channels/1/2", "web": "https://discord.com/channels/1/2"}
+    asyncio.get_event_loop().run_until_complete(
+        xumm_ops.create_payment_payload("rDest", return_url=ru))
+    assert captured["options"]["return_url"] == ru
+
+
+def test_trustline_payloads_include_return_url(monkeypatch):
+    captured = {}
+    _fake_xumm_api(monkeypatch, captured)
+    ru = {"app": "discord://-/channels/1/2", "web": "https://discord.com/channels/1/2"}
+    loop = asyncio.get_event_loop()
+    loop.run_until_complete(xumm_ops.create_trustline_payload(return_url=ru))
+    assert captured["options"]["return_url"] == ru
+    loop.run_until_complete(xumm_ops.create_brix_trustline_payload(return_url=ru))
+    assert captured["options"]["return_url"] == ru
+    loop.run_until_complete(xumm_ops.create_accept_offer_payload("OFFER", return_url=ru))
+    assert captured["options"]["return_url"] == ru
+
+
+def test_mint_session_threads_return_url(monkeypatch):
+    seen = {}
+
+    async def fake_payload(destination, **kw):
+        seen.update(kw)
+        return {"qr_url": "q", "xumm_url": "https://xumm.app/sign/PAY", "uuid": "u"}
+
+    monkeypatch.setattr(mint_flow.xumm_ops, "create_payment_payload", fake_payload)
+    ru = {"app": "discord://-/channels/1/2", "web": "https://discord.com/channels/1/2"}
+    session = mint_flow.MintSession(discord_id="1", wallet_address="rTest", return_url=ru)
+    asyncio.get_event_loop().run_until_complete(session.prepare_payment_link())
+    assert seen["return_url"] == ru
+
+
 def test_mint_session_prepare_uses_xumm_payload(monkeypatch):
     async def fake_payload(destination, **kw):
         return {"qr_url": "q", "xumm_url": "https://xumm.app/sign/PAY", "uuid": "u"}
@@ -343,7 +391,7 @@ def test_mint_session_happy_path(monkeypatch, tmp_path):
     async def fake_offer(nft_id, destination):
         return "OFFER456"
 
-    async def fake_accept(offer_id):
+    async def fake_accept(offer_id, **kw):
         return {"qr_url": "https://xumm.test/qr.png",
                 "xumm_url": "https://xumm.test/sign", "uuid": "u"}
 
@@ -518,7 +566,7 @@ def _patch_swap_stubs(monkeypatch, tmp_path, events,
         events.append(f"offer {nft_id}")
         return f"OFFER_{nft_id}"
 
-    async def fake_accept(offer_id):
+    async def fake_accept(offer_id, **kw):
         return {"qr_url": "https://xumm.test/qr.png",
                 "xumm_url": f"https://xumm.test/{offer_id}", "uuid": "u"}
 
