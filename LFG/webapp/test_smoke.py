@@ -773,6 +773,70 @@ def test_cdn_layer_store_resolve_uses_cache(monkeypatch, tmp_path):
     assert loop.run_until_complete(store.resolve("male", "Eyes", "Missing")) is None
 
 
+# --- XRPL_NETWORK flag: one switch for endpoints + collection/BRIX issuers ---
+
+def _reload_config(monkeypatch, network):
+    import importlib
+    # .env must not leak back in when config re-runs load_dotenv()
+    monkeypatch.setattr("dotenv.load_dotenv", lambda *a, **k: False)
+    for var in ("XRPL_JSON_RPC_URL", "XRPL_WS_URL",
+                "SWAP_ISSUER_ADDRESS", "SWAP_OFFER_ISSUER"):
+        monkeypatch.delenv(var, raising=False)
+    monkeypatch.setenv("XRPL_NETWORK", network)
+    return importlib.reload(config)
+
+
+def test_xrpl_network_flag_testnet_uses_seed_wallet(monkeypatch):
+    from xrpl.wallet import Wallet
+    try:
+        cfg = _reload_config(monkeypatch, "testnet")
+        seed_addr = Wallet.from_seed(cfg.SEED).classic_address
+        assert cfg.IS_TESTNET is True
+        assert "altnet" in cfg.JSON_RPC_URL and "altnet" in cfg.WS_URL
+        assert cfg.SWAP_ISSUER_ADDRESS == seed_addr
+        assert cfg.SWAP_OFFER_ISSUER == seed_addr
+    finally:
+        monkeypatch.undo()
+        import importlib
+        importlib.reload(config)
+
+
+def test_xrpl_network_flag_defaults_to_mainnet_addresses(monkeypatch):
+    try:
+        for network in ("mainnet", ""):  # flag off / unset → mainnet
+            if network:
+                cfg = _reload_config(monkeypatch, network)
+            else:
+                monkeypatch.delenv("XRPL_NETWORK", raising=False)
+                cfg = _reload_config(monkeypatch, "")
+                monkeypatch.delenv("XRPL_NETWORK", raising=False)
+                import importlib
+                cfg = importlib.reload(config)
+            assert cfg.IS_TESTNET is False
+            assert "altnet" not in cfg.JSON_RPC_URL
+            assert cfg.SWAP_ISSUER_ADDRESS == "rLfgoMintj3KBcs4s2XKtquvDwEte2kYfJ"
+            assert cfg.SWAP_OFFER_ISSUER == "rLfgoBriX5ZaMP32mtc7RUZJcjnisKh2Px"
+    finally:
+        monkeypatch.undo()
+        import importlib
+        importlib.reload(config)
+
+
+def test_explicit_env_overrides_beat_network_flag(monkeypatch):
+    try:
+        monkeypatch.setenv("SWAP_OFFER_ISSUER", "rCustomIssuer111111111111111111111")
+        cfg = _reload_config(monkeypatch, "testnet")
+        # _reload_config cleared it; set and reload again to assert precedence
+        monkeypatch.setenv("SWAP_OFFER_ISSUER", "rCustomIssuer111111111111111111111")
+        import importlib
+        cfg = importlib.reload(config)
+        assert cfg.SWAP_OFFER_ISSUER == "rCustomIssuer111111111111111111111"
+    finally:
+        monkeypatch.undo()
+        import importlib
+        importlib.reload(config)
+
+
 # --- same-origin image proxy (Activity CSP blocks cross-origin <img> loads) ---
 
 def _img_request(query):
