@@ -43,6 +43,11 @@ BUNNY_CDN_STORAGE_ZONE = _require("BUNNY_CDN_STORAGE_ZONE")
 BUNNY_CDN_BASE_URL = os.getenv("BUNNY_CDN_BASE_URL", "https://storage.bunnycdn.com").rstrip("/")
 BUNNY_CDN_FOLDER = os.getenv("BUNNY_CDN_FOLDER", "minttest")
 BUNNY_CDN_PUBLIC_BASE = os.getenv("BUNNY_CDN_PUBLIC_BASE", "https://lfgo.b-cdn.net")
+# Custom domain for the same pull zone (bare hostname); legacy NFT metadata
+# bakes this host into its image URLs, so the image proxy must allow both.
+BUNNY_PULL_ZONE = os.getenv("BUNNY_PULL_ZONE", "").strip().rstrip("/")
+IMG_PROXY_ALLOWED_BASES = tuple(
+    {BUNNY_CDN_PUBLIC_BASE} | ({f"https://{BUNNY_PULL_ZONE}"} if BUNNY_PULL_ZONE else set()))
 
 # Discord Activity (webapp only — not required by the bot)
 DISCORD_CLIENT_ID = os.getenv("DISCORD_CLIENT_ID", "")
