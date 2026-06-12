@@ -4,6 +4,7 @@
 
 import io
 import os
+import re
 import json
 import asyncio
 import logging
@@ -56,8 +57,21 @@ QR_LOGO_PATH = os.getenv("QR_LOGO_PATH", os.path.join(
     "webapp", "client", "assets", "mascot.png"))
 
 
+# Decoded once per path (not per QR) to avoid disk I/O on every render;
+# keyed by path so a QR_LOGO_PATH override picks up the new file.
+_qr_logo_cache = {}
+
+
+def _load_qr_logo() -> Image.Image:
+    logo = _qr_logo_cache.get(QR_LOGO_PATH)
+    if logo is None:
+        logo = Image.open(QR_LOGO_PATH).convert("RGBA")
+        _qr_logo_cache[QR_LOGO_PATH] = logo
+    return logo.copy()  # thumbnail() mutates; never resize the cached original
+
+
 def _apply_qr_logo(img: Image.Image) -> Image.Image:
-    logo = Image.open(QR_LOGO_PATH).convert("RGBA")
+    logo = _load_qr_logo()
     # ~1/4 of the QR width keeps well under ERROR_CORRECT_H's 30% budget
     side = img.size[0] // 4
     logo.thumbnail((side, side), Image.Resampling.LANCZOS)
@@ -170,9 +184,18 @@ async def create_signin_payload(return_url: dict = None):
     }, options=_with_return_url({}, return_url))
 
 
+_UUID_RE = re.compile(
+    r"^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$",
+    re.IGNORECASE)
+
+
 async def get_payload_status(uuid: str):
     """Poll a XUMM payload: whether it was opened (QR scanned) / signed /
-    expired, and the signing account once signed. None on API errors."""
+    expired, and the signing account once signed. None on API errors or a
+    malformed uuid (which is interpolated into the API URL)."""
+    if not (isinstance(uuid, str) and _UUID_RE.match(uuid)):
+        logging.error(f"Invalid XUMM payload uuid: {uuid!r}")
+        return None
     try:
         response = await asyncio.to_thread(
             requests.get, f"{config.XUMM_API_URL}/{uuid}",
