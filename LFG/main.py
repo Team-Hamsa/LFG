@@ -37,6 +37,7 @@ import traceback
 from user_db import register_user, create_users_table, get_user as get_user_from_db
 import sqlite3
 import shutil
+from lfg_core import rarity as _rarity
 
 # Import the NFT minting helper function from ts_helpers.py
 from ts_helpers import mint_nft as helper_mint_nft
@@ -255,12 +256,34 @@ def get_trait_files(trait_layer_dir):
 
 def get_random_trait(trait_layer_dir):
     """
-    Randomly select an image file from the given trait layer directory.
+    Select an image file from the given trait layer directory, weighted by
+    the rarity engine (proportional-with-floor). Falls back to uniform
+    random if the engine is unavailable so the bot never bricks.
     """
     files = get_trait_files(trait_layer_dir)
     if not files:
         raise ValueError(f"No valid image files found in directory: {trait_layer_dir}")
-    return random.choice(files)
+    category = _rarity.category_for_folder(os.path.basename(trait_layer_dir))
+    if category is None:
+        return random.choice(files)
+    try:
+        by_stem = {os.path.splitext(f)[0]: f for f in files}
+        pick = _rarity_pick_for_legacy(category, list(by_stem))
+        return by_stem[pick]
+    except Exception as e:
+        logging.warning(f"rarity engine unavailable, uniform fallback: {e}")
+        return random.choice(files)
+
+
+def _rarity_pick_for_legacy(category, stems):
+    """Open a short-lived connection and run a weighted pick for the legacy
+    (ungendered) path."""
+    conn = _rarity.connect()
+    try:
+        return _rarity.weighted_pick(conn, _rarity.BODY_SENTINEL, category,
+                                     stems)
+    finally:
+        conn.close()
 
 
 def get_sorted_trait_layers(trait_layers_dir):
@@ -1456,9 +1479,14 @@ class BurnConfirmView(View):
                 
                 # Remove from LFG table
                 cursor.execute('DELETE FROM LFG WHERE nft_number = ?', (self.nft_number,))
-                
+
                 conn.commit()
-                
+
+                try:
+                    _rarity.recalculate_rarity(conn)
+                except Exception as e:
+                    logging.error(f"rarity recalc after burn failed: {e}")
+
                 await interaction.followup.send(
                     f"✅ Successfully burned NFT #{self.nft_number}",
                     ephemeral=True
