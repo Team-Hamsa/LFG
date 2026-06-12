@@ -89,3 +89,48 @@ def effective_weight(live_count, category_total, floor_weight,
     base = max(share, floor_weight)
     return base * boost_multiplier(boost_initial, boost_step_hours,
                                    boost_started_at, now)
+
+
+def _ensure_rows(conn, network, body, category, available, now):
+    """Auto-detect: insert floor-weight rows for traits the engine hasn't
+    seen (e.g. a PNG just dropped into the layer store). No boost."""
+    for trait in available:
+        conn.execute(
+            """INSERT OR IGNORE INTO trait_rarity
+               (network, body, category, trait, live_count, floor_weight,
+                first_seen_at)
+               VALUES (?, ?, ?, ?, 0, ?, ?)""",
+            (network, body, category, trait, config.RARITY_FLOOR,
+             now.isoformat()))
+    conn.commit()
+
+
+def weighted_pick(conn, body, category, available, *, network=None,
+                  now=None, rng=_random):
+    """Pick one trait from `available` (the values that exist in the layer
+    store — the store stays the authority on what's mintable) using
+    proportional-with-floor × boost weights from trait_rarity."""
+    if not available:
+        raise ValueError(f"No traits available for {body}/{category}")
+    network = network or config.XRPL_NETWORK
+    now = now or utcnow()
+    ensure_schema(conn)
+    _ensure_rows(conn, network, body, category, available, now)
+
+    placeholders = ",".join("?" * len(available))
+    rows = conn.execute(
+        f"""SELECT trait, live_count, floor_weight, boost_initial,
+                   boost_step_hours, boost_started_at
+            FROM trait_rarity
+            WHERE network=? AND body=? AND category=? AND enabled=1
+              AND trait IN ({placeholders})""",
+        (network, body, category, *available)).fetchall()
+    if not rows:
+        raise ValueError(
+            f"All traits disabled for {body}/{category} on {network}")
+
+    total = sum(r[1] for r in rows)
+    traits = [r[0] for r in rows]
+    weights = [effective_weight(r[1], total, r[2], r[3], r[4], r[5], now)
+               for r in rows]
+    return rng.choices(traits, weights=weights, k=1)[0]
