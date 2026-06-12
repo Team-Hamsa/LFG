@@ -624,12 +624,12 @@ def test_mint_session_happy_path(monkeypatch, tmp_path):
         return {"qr_url": "https://xumm.test/qr.png",
                 "xumm_url": "https://xumm.test/sign", "uuid": "u"}
 
-    async def fake_select(store, body=None, **kw):
+    async def fake_select(store, gender=None):
         return "male", [{"trait_type": "Background", "value": "Blue"},
                         {"trait_type": "Back", "value": "Angel Wings"},
                         {"trait_type": "Head", "value": "Crown"}]
 
-    async def fake_compose(attributes, body, store, basename, out_dir="generated"):
+    async def fake_compose(attributes, gender, store, basename, out_dir="generated"):
         p = tmp_path / f"{basename}.png"
         p.write_bytes(b"\x89PNG fake")
         return str(p), False
@@ -753,7 +753,7 @@ def test_swap_session_missing_layers_fails_before_burn(monkeypatch):
     async def fake_burn(nft_id, owner):
         burned.append(nft_id)
         return "HASH"
-    async def missing(attrs, body, store):
+    async def missing(attrs, gender, store):
         return ["male/Eyes/Eyes20"]
     monkeypatch.setattr(swap_flow.xrpl_ops, "burn_nft", fake_burn)
     monkeypatch.setattr(swap_flow.layer_store, "get_layer_store", lambda: object())
@@ -787,12 +787,12 @@ def _patch_swap_stubs(monkeypatch, tmp_path, events,
     async def fake_upload(path_on_cdn, data, content_type):
         return f"https://cdn.test/LFGO/{path_on_cdn}"
 
-    async def fake_compose(attrs, body, store, basename, out_dir="generated"):
+    async def fake_compose(attrs, gender, store, basename, out_dir="generated"):
         p = tmp_path / f"{basename}.png"
         p.write_bytes(b"\x89PNG fake")
         return str(p), False
 
-    async def no_missing(attrs, body, store):
+    async def no_missing(attrs, gender, store):
         return []
 
     async def fake_burn(nft_id, owner=None):
@@ -1081,7 +1081,7 @@ def test_local_layer_store(tmp_path):
     _make_layer_tree(tmp_path)
     store = layer_store.LocalLayerStore(str(tmp_path))
     loop = asyncio.get_event_loop()
-    assert loop.run_until_complete(store.list_bodies()) == ["ape", "male"]
+    assert loop.run_until_complete(store.list_genders()) == ["ape", "male"]
     assert loop.run_until_complete(store.list_values("male", "Eyes")) == ["Hypno", "Laser"]
     path = loop.run_until_complete(store.resolve("male", "Eyes", "Laser"))
     assert path and path.endswith("Eyes/Laser.png")
@@ -1093,7 +1093,7 @@ def test_select_random_attributes_from_store(tmp_path):
     store = layer_store.LocalLayerStore(str(tmp_path))
     loop = asyncio.get_event_loop()
     gender, attrs = loop.run_until_complete(
-        traits.select_random_attributes(store, body="male"))
+        traits.select_random_attributes(store, gender="male"))
     assert gender == "male"
     by_type = {a["trait_type"]: a["value"] for a in attrs}
     assert by_type["Background"] == "Blue"
