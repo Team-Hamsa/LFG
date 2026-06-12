@@ -4,41 +4,45 @@
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
   <title>Let's Effing Go! — Mint</title>
-  <link rel="stylesheet" href="style.css?v=3">
+  <link rel="stylesheet" href="fonts/fonts.css">
+  <link rel="stylesheet" href="style.css?v=4">
 </head>
 <body>
   <main id="app">
     <header class="app-header">
-      <h1 class="wordmark">Let's <span>Effing</span> Go!</h1>
+      <div class="lockup">
+        <img class="mascot" src="assets/mascot.png" alt="LFG mascot — the hard-hat builder">
+        <h1 class="wordmark"><span class="l">L</span><span class="f">F</span><span class="g">G</span></h1>
+      </div>
       <p id="status" class="status" role="status" aria-live="polite">Connecting to Discord…</p>
     </header>
 
-    <section id="register-panel" class="card" hidden>
+    <section id="register-panel" class="card sticker" hidden>
       <h2>👋 Register your wallet</h2>
-      <p class="card-sub">Enter your XRPL wallet address to receive NFT offers.</p>
+      <p class="card-sub">Drop in your XRPL address so we know where to send your build.</p>
       <input id="wallet-input" type="text" placeholder="r..." autocomplete="off"
              spellcheck="false" aria-label="XRPL wallet address">
       <button id="register-btn" class="primary">Register</button>
     </section>
 
-    <section id="mint-panel" class="card" hidden>
-      <p class="wallet-line">Wallet: <code id="wallet-display"></code>
+    <section id="mint-panel" class="card sticker" hidden>
+      <p class="wallet-line"><span class="wallet-lbl">Wallet</span> <code id="wallet-display"></code>
         <button id="change-wallet-btn" class="link">change</button></p>
       <div class="actions">
-        <button id="mint-btn" class="primary big">🎨 Mint NFT</button>
-        <button id="trustline-btn">🔗 Set LFGO Trustline</button>
-        <button id="swap-btn">🔁 Trait Swapper</button>
+        <button id="mint-btn" class="primary big">⛏️ Mint NFT</button>
+        <button id="trustline-btn" class="secondary">🔗 Set LFGO Trustline</button>
+        <button id="swap-btn" class="secondary">🔁 Trait Swapper</button>
       </div>
     </section>
 
     <section id="swap-panel" class="card" hidden>
       <h2>🔁 Trait Swapper</h2>
-      <p id="swap-help" class="card-sub">Pick two NFTs with the same body type to swap traits between them.</p>
+      <p id="swap-help" class="card-sub">Pick two avatars with the same body type to swap parts between them.</p>
       <div id="nft-grid" class="nft-grid" role="group" aria-label="Your NFTs"></div>
       <p class="row-links">
-        <button id="swap-back-btn" class="link">⬅ Back</button>
+        <button id="swap-back-btn" class="back">← Back</button>
         <span class="dot" aria-hidden="true">·</span>
-        <button id="brix-trustline-btn" class="link">🔗 Set BRIX Trustline</button>
+        <button id="brix-trustline-btn" class="link">Set BRIX Trustline</button>
       </p>
     </section>
 
@@ -51,29 +55,29 @@
       </div>
       <div id="trait-list" class="trait-list"></div>
       <button id="swap-confirm-btn" class="primary big">Swap selected traits</button>
-      <p><button id="swap-cancel-btn" class="link">Cancel</button></p>
+      <p><button id="swap-cancel-btn" class="back">← Cancel</button></p>
     </section>
 
     <section id="swap-result-panel" class="card" hidden>
       <h2 id="swap-result-title"></h2>
-      <p id="swap-result-text"></p>
+      <p id="swap-result-text" class="card-sub"></p>
       <div id="swap-results"></div>
-      <p><button id="swap-done-btn" hidden>⬅ Back</button></p>
+      <p><button id="swap-done-btn" class="back" hidden>← Back to the job site</button></p>
     </section>
 
     <section id="flow-panel" class="card" hidden>
       <ol id="flow-steps" class="steps" aria-label="Mint progress" hidden></ol>
       <h2 id="flow-title"></h2>
-      <p id="flow-text"></p>
+      <p id="flow-text" class="card-sub"></p>
       <div id="flow-spinner" class="spinner" role="img" aria-label="Working…" hidden></div>
       <img id="flow-qr" class="qr" alt="QR code — scan with Xaman" hidden>
       <p><button id="flow-link-btn" class="link" hidden>Open in Xaman ↗</button></p>
       <img id="nft-image" alt="Your freshly minted NFT" hidden>
-      <p><button id="flow-done-btn" hidden>⬅ Back</button></p>
+      <p><button id="flow-done-btn" class="back" hidden>← Back to the job site</button></p>
     </section>
   </main>
 
   <div id="toasts" class="toasts" aria-live="assertive"></div>
-  <script type="module" src="app.js?v=3"></script>
+  <script type="module" src="app.js?v=4"></script>
 </body>
 </html>
