@@ -1,0 +1,68 @@
+# lfg_core/rarity.py
+# Variable rarity engine: proportional-with-floor trait weights cached in
+# the trait_rarity table, with a dormant-then-stepped boost for new traits.
+# Pure sqlite3 + stdlib; time and randomness are injectable for tests.
+# Spec: docs/superpowers/specs/2026-06-12-variable-rarity-engine-design.md
+
+import logging
+import random as _random
+import sqlite3
+from datetime import datetime, timezone
+
+from lfg_core import config
+
+BODY_SENTINEL = "*"          # legacy/ungendered rows and Body Type rows
+BODY_CATEGORY = "Body Type"  # reserved category weighting the body pick
+
+# trait_rarity.category uses layer-store trait-type names (TRAIT_ORDER);
+# the LFG table's headwear column is named Hat (layer tree uses Head).
+LFG_COLUMN_FOR_CATEGORY = {
+    "Background": "Background", "Back": "Back", "Body": "Body",
+    "Clothing": "Clothing", "Mouth": "Mouth", "Eyebrows": "Eyebrows",
+    "Eyes": "Eyes", "Head": "Hat", "Accessory": "Accessory",
+}
+
+_SCHEMA = """
+CREATE TABLE IF NOT EXISTS trait_rarity (
+    network          TEXT NOT NULL DEFAULT 'mainnet',
+    body             TEXT NOT NULL,
+    category         TEXT NOT NULL,
+    trait            TEXT NOT NULL,
+    live_count       INTEGER NOT NULL DEFAULT 0,
+    floor_weight     REAL NOT NULL DEFAULT 0.005,
+    boost_initial    REAL,
+    boost_step_hours INTEGER DEFAULT 24,
+    boost_started_at TIMESTAMP,
+    enabled          INTEGER NOT NULL DEFAULT 1,
+    first_seen_at    TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    PRIMARY KEY (network, body, category, trait)
+)
+"""
+
+
+def utcnow():
+    return datetime.now(timezone.utc)
+
+
+def connect(db_path=None):
+    return sqlite3.connect(db_path or config.DB_PATH)
+
+
+def ensure_schema(conn):
+    """Create trait_rarity and add network/body_type columns to LFG. Idempotent.
+
+    Note: the LFG table already has a `Body` column (body trait value e.g.
+    "Straight Dark"). The new `body_type` column stores the body class
+    (male/female/skeleton/ape). Using a distinct name avoids SQLite's
+    case-insensitive column name handling.
+    """
+    conn.execute(_SCHEMA)
+    lfg_cols = {r[1] for r in conn.execute("PRAGMA table_info(LFG)")}
+    if lfg_cols:  # LFG may not exist yet on a fresh DB; init_db owns it
+        if "network" not in lfg_cols:
+            conn.execute(
+                "ALTER TABLE LFG ADD COLUMN network TEXT NOT NULL DEFAULT 'mainnet'")
+        if "body_type" not in lfg_cols:
+            conn.execute(
+                "ALTER TABLE LFG ADD COLUMN body_type TEXT NOT NULL DEFAULT '*'")
+    conn.commit()
