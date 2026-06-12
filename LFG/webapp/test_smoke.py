@@ -47,7 +47,10 @@ def test_session_token_roundtrip():
 
 def test_session_token_tamper_rejected():
     token = server.make_session_token({"id": "123", "name": "josh"})
-    assert server.verify_session_token(token[:-2] + "ff") is None
+    # flip the last signature char to one it isn't — replacing with a fixed
+    # value was flaky (1/256 runs the signature already ended that way)
+    flipped = "0" if token[-1] != "0" else "1"
+    assert server.verify_session_token(token[:-1] + flipped) is None
     assert server.verify_session_token("garbage") is None
 
 
