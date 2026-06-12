@@ -19,6 +19,7 @@ os.environ.setdefault("TOKEN_CURRENCY_HEX", "4C46474F000000000000000000000000000
 os.environ.setdefault("BUNNY_CDN_ACCESS_KEY", "test")
 os.environ.setdefault("BUNNY_CDN_STORAGE_ZONE", "test")
 os.environ.setdefault("LAYER_SOURCE", "local")
+os.environ.setdefault("BUNNY_PULL_ZONE", "nft.pullzone.example")
 
 from aiohttp import web  # noqa: E402
 from lfg_core import (mint_flow, xumm_ops, xrpl_ops, traits, swap_meta,  # noqa: E402
@@ -419,7 +420,10 @@ def test_normalize_nft_and_season():
     assert rec["season"] == 2 and rec["gender"] == "ape" and rec["burn_count"] == 2
     assert rec["image"].startswith("https://cid.ipfs.dweb.link/")
     assert swap_meta.normalize_nft("ID2", {"name": "no number"}) is None
-    assert swap_meta.normalize_nft("ID3", {"name": "LFG #9999", "attributes": []}) is None
+    # numbers above the configured collection cap are not swappable
+    over_max = config.SWAP_MAX_NFT_NUMBER + 1
+    assert swap_meta.normalize_nft(
+        "ID3", {"name": f"LFG #{over_max}", "attributes": []}) is None
 
 
 def test_normalize_nft_tolerates_malformed_metadata():
@@ -812,6 +816,27 @@ def test_img_proxy_streams_allowed_cdn_url(monkeypatch):
     # images are immutable; they must opt out of the global no-store middleware
     assert "no-store" not in resp.headers.get("Cache-Control", "")
     assert fetched == [url]
+
+
+def test_img_proxy_accepts_pull_zone_host(monkeypatch):
+    """Legacy NFT metadata bakes in the BUNNY_PULL_ZONE custom domain (e.g.
+    nft.letseffinggo.com) instead of BUNNY_CDN_PUBLIC_BASE; both point at the
+    same pull zone and both must be proxyable."""
+    async def fake_fetch(url):
+        return b"\x89PNG fake", "image/png"
+
+    monkeypatch.setattr(server, "_fetch_cdn", fake_fetch)
+    from urllib.parse import quote
+    url = "https://nft.pullzone.example/LFGO/3545/3545.png"
+    loop = asyncio.get_event_loop()
+    resp = loop.run_until_complete(
+        server.handle_img(_img_request("u=" + quote(url, safe=""))))
+    assert resp.status == 200
+    # and a look-alike of the pull zone is still rejected
+    bad = "https://nft.pullzone.example.evil.test/x.png"
+    resp = loop.run_until_complete(
+        server.handle_img(_img_request("u=" + quote(bad, safe=""))))
+    assert resp.status == 400
 
 
 def test_img_proxy_cdn_error_is_502(monkeypatch):
