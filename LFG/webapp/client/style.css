@@ -71,6 +71,15 @@ code, .mono { font-family: 'JetBrains Mono', monospace; }
   filter: drop-shadow(4px 4px 0 var(--ink));
 }
 
+/* Brand wordmark image; the .wordmark text below is the fallback when
+   assets/logo.png is missing or fails to load. */
+.wordmark-img {
+  height: 56px;
+  width: auto;
+  max-width: 220px;
+  object-fit: contain;
+}
+
 .wordmark {
   margin: 0;
   font-weight: 700;
@@ -300,6 +309,33 @@ button.back:hover { color: var(--text); border: none; }
 }
 .steps li.done:not(:last-child)::after { background: var(--green); }
 
+/* --- Payment-method pill ("Paying with LFGO" / "Paying with XRP") --- */
+
+.method { margin: -2px 0 12px; }
+.pill {
+  display: inline-block;
+  font-family: 'JetBrains Mono', monospace;
+  font-size: .68rem;
+  letter-spacing: .06em;
+  text-transform: uppercase;
+  font-weight: 700;
+  border-radius: 99px;
+  padding: 5px 13px;
+  border: 2px solid var(--ink);
+}
+.pill.lfgo, .pill.brix { background: var(--yellow); color: var(--ink); }
+.pill.xrp { background: var(--blue); color: #fff; }
+
+/* Swap cost line above the final CTA */
+.cost {
+  text-align: center;
+  color: var(--muted);
+  font-size: .82rem;
+  line-height: 1.5;
+  margin: 8px auto 14px;
+  max-width: 36ch;
+}
+
 /* --- Mint flow: QR, spinner, result image --- */
 
 .qr, #flow-qr {
@@ -382,6 +418,14 @@ button.back:hover { color: var(--text); border: none; }
 .nft-card .cap {
   padding: 7px 6px;
   font-family: 'JetBrains Mono', monospace;
+}
+.nft-card .cap .body {
+  display: block;
+  color: #7c7a74;
+  font-size: .64rem;
+  letter-spacing: .05em;
+  text-transform: uppercase;
+  margin-top: 3px;
 }
 .nft-card.dim {
   opacity: .32;
@@ -556,6 +600,7 @@ button.back:hover { color: var(--text); border: none; }
 
 @media (max-width: 380px) {
   .wordmark { font-size: 2.1rem; }
+  .wordmark-img { height: 46px; max-width: 180px; }
   .lockup .mascot { width: 46px; }
   .swap-pair img { width: 80px; }
   .qr, #flow-qr { width: 180px; height: 180px; }

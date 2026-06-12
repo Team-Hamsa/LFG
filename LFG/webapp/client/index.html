@@ -5,14 +5,15 @@
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
   <title>Let's Effing Go! — Mint</title>
   <link rel="stylesheet" href="fonts/fonts.css">
-  <link rel="stylesheet" href="style.css?v=4">
+  <link rel="stylesheet" href="style.css?v=6">
 </head>
 <body>
   <main id="app">
     <header class="app-header">
       <div class="lockup">
         <img class="mascot" src="assets/mascot.png" alt="LFG mascot — the hard-hat builder">
-        <h1 class="wordmark"><span class="l">L</span><span class="f">F</span><span class="g">G</span></h1>
+        <img id="logo-img" class="wordmark-img" src="assets/logo.png" alt="LFG">
+        <h1 id="wordmark" class="wordmark" hidden aria-hidden="true"><span class="l">L</span><span class="f">F</span><span class="g">G</span></h1>
       </div>
       <p id="status" class="status" role="status" aria-live="polite">Connecting to Discord…</p>
     </header>
@@ -30,19 +31,17 @@
         <button id="change-wallet-btn" class="link">change</button></p>
       <div class="actions">
         <button id="mint-btn" class="primary big">⛏️ Mint NFT</button>
-        <button id="trustline-btn" class="secondary">🔗 Set LFGO Trustline</button>
         <button id="swap-btn" class="secondary">🔁 Trait Swapper</button>
       </div>
     </section>
 
     <section id="swap-panel" class="card" hidden>
       <h2>🔁 Trait Swapper</h2>
-      <p id="swap-help" class="card-sub">Pick two avatars with the same body type to swap parts between them.</p>
+      <p id="swap-help" class="card-sub">Pick two avatars of the same body — male, female, skeleton, or ape. Mismatches dim out.</p>
       <div id="nft-grid" class="nft-grid" role="group" aria-label="Your NFTs"></div>
+      <button id="pick-traits-btn" class="primary big" disabled>Pick traits to swap</button>
       <p class="row-links">
         <button id="swap-back-btn" class="back">← Back</button>
-        <span class="dot" aria-hidden="true">·</span>
-        <button id="brix-trustline-btn" class="link">Set BRIX Trustline</button>
       </p>
     </section>
 
@@ -54,6 +53,7 @@
         <figure><img id="swap-img2" alt="Second selected NFT"><figcaption id="swap-name2"></figcaption></figure>
       </div>
       <div id="trait-list" class="trait-list"></div>
+      <p id="swap-cost" class="cost" hidden></p>
       <button id="swap-confirm-btn" class="primary big">Swap selected traits</button>
       <p><button id="swap-cancel-btn" class="back">← Cancel</button></p>
     </section>
@@ -67,6 +67,7 @@
 
     <section id="flow-panel" class="card" hidden>
       <ol id="flow-steps" class="steps" aria-label="Mint progress" hidden></ol>
+      <p id="pay-method" class="method" hidden><span id="pay-pill" class="pill"></span></p>
       <h2 id="flow-title"></h2>
       <p id="flow-text" class="card-sub"></p>
       <div id="flow-spinner" class="spinner" role="img" aria-label="Working…" hidden></div>
@@ -78,6 +79,6 @@
   </main>
 
   <div id="toasts" class="toasts" aria-live="assertive"></div>
-  <script type="module" src="app.js?v=4"></script>
+  <script type="module" src="app.js?v=6"></script>
 </body>
 </html>
