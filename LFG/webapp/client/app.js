@@ -117,11 +117,11 @@ function showPanel(id) {
 function showMintHome() {
   el('wallet-display').textContent = me.wallet;
   showPanel('mint-panel');
-  status(`Hey ${me.username}! Ready to mint.`);
+  status(`Hey ${me.username} — welcome to the job site.`);
 }
 
 // Mint flow step indicator (hidden for flows without a stage, e.g. trustlines)
-const MINT_STEPS = ['Pay', 'Generate', 'Mint', 'Claim'];
+const MINT_STEPS = ['Pay', 'Build', 'Mint', 'Claim'];
 const STAGE_STEP = { awaiting_payment: 0, generating: 1, minting: 2, creating_offer: 2, offer_ready: 3 };
 
 function renderSteps(stage) {
@@ -156,10 +156,10 @@ function showFlow({ title, text, qrData, link, image, done, stage, spinner, cele
 }
 
 const STAGE_TEXT = {
-  awaiting_payment: ['💰 Payment required',
-    'Pay 1 LFGO token to mint. Scan the QR with Xaman/XUMM or open the link, approve, then wait here.'],
-  generating: ['🎨 Generating your NFT', 'Payment received! Composing your one-of-a-kind image…'],
-  minting: ['⛏️ Minting on XRPL', 'Submitting the NFTokenMint transaction…'],
+  awaiting_payment: ['💰 Pay to build',
+    'Send 1 LFGO to mint your avatar. Scan with Xaman, approve, and hang tight here.'],
+  generating: ['🎨 Building your avatar', "Payment's in. Laying the bricks on your one-of-a-kind build…"],
+  minting: ['⛏️ Minting on XRPL', 'Stamping your build onto the ledger…'],
   creating_offer: ['📨 Creating transfer offer', 'Almost there — preparing the offer to your wallet…'],
 };
 
@@ -178,8 +178,8 @@ function pollMint(sessionId) {
 
     if (s.state === 'offer_ready') {
       showFlow({
-        title: `🎉 NFT #${s.nft_number} minted!`,
-        text: 'Scan the QR (or open in Xaman) to accept the offer and claim your NFT.',
+        title: `🎉 Minted! #${s.nft_number} is yours`,
+        text: 'Scan to accept the transfer and claim it to your wallet. Welcome to the job site.',
         qrData: s.accept_deeplink,
         link: s.accept_deeplink,
         image: imgUrl(s.image_url),
@@ -190,7 +190,7 @@ function pollMint(sessionId) {
       return;
     }
     if (s.state === 'payment_timeout') {
-      showFlow({ title: '⏰ Payment timed out', text: 'No payment was received in time. Try again.', done: true });
+      showFlow({ title: '⏰ Payment timed out', text: 'No payment came through in time. Give it another go.', done: true });
       return;
     }
     if (s.state === 'failed') {
@@ -266,6 +266,7 @@ async function registerWallet() {
 
 let swapNfts = [];
 let swapPick = [];
+let swapCards = []; // {nft, card} for every grid tile, for re-rendering picks
 let swapPollTimer = null;
 let swappableTraits = [];
 
@@ -286,8 +287,9 @@ function showGridSkeletons(grid, count = 6) {
 async function openSwapper() {
   showPanel('swap-panel');
   swapPick = [];
+  swapCards = [];
   showGridSkeletons(el('nft-grid'));
-  status('Loading your NFTs…');
+  status('Loading your GOs…');
   try {
     const data = await api('/api/nfts');
     swapNfts = data.nfts;
@@ -295,24 +297,28 @@ async function openSwapper() {
     status('');
     el('nft-grid').replaceChildren(); // drop the skeleton loaders
     if (!swapNfts.length) {
-      el('swap-help').textContent = 'No swappable NFTs found in your wallet.';
+      el('swap-help').textContent = 'No swappable GOs here yet. Time to build.';
       return;
     }
-    el('swap-help').textContent =
-      'Pick two NFTs with the same body type to swap traits between them.';
     for (const nft of swapNfts) {
       const card = document.createElement('button');
       card.className = 'nft-card';
       // NFT metadata is untrusted — build DOM nodes, never innerHTML.
+      const pick = document.createElement('span');
+      pick.className = 'pick';
+      pick.setAttribute('aria-hidden', 'true');
       const img = document.createElement('img');
       img.src = imgUrl(nft.image);
       img.alt = '';
       const name = document.createElement('span');
+      name.className = 'cap';
       name.textContent = nft.name;
-      card.replaceChildren(img, name);
+      card.replaceChildren(pick, img, name);
       card.onclick = () => toggleNftPick(nft, card);
       el('nft-grid').appendChild(card);
+      swapCards.push({ nft, card });
     }
+    renderPicks();
   } catch (e) {
     el('nft-grid').replaceChildren(); // drop the skeleton loaders
     showError(e.message);
@@ -321,26 +327,47 @@ async function openSwapper() {
 
 function toggleNftPick(nft, card) {
   const idx = swapPick.findIndex((p) => p.nft.nft_id === nft.nft_id);
-  if (idx >= 0) {
-    swapPick.splice(idx, 1);
-    card.classList.remove('selected');
-    return;
-  }
-  if (swapPick.length === 2) return;
-  if (swapPick.length === 1 && swapPick[0].nft.gender !== nft.gender) {
-    status('Both NFTs must share the same body type.');
-    return;
-  }
-  swapPick.push({ nft, card });
-  card.classList.add('selected');
-  status('');
+  if (idx >= 0) swapPick.splice(idx, 1);
+  // Enforce the matching-body rule here too — dimming alone doesn't stop
+  // keyboard activation of the underlying <button>.
+  else if (swapPick.length === 1 && nft.gender !== swapPick[0].nft.gender) return;
+  else if (swapPick.length < 2) swapPick.push({ nft, card });
+  else return;
+  renderPicks();
   if (swapPick.length === 2) showTraitChooser();
+}
+
+// Mockup behavior: first pick locks the body type — matches stay lit,
+// the rest dim out and are disabled.
+function renderPicks() {
+  const body = swapPick[0] ? swapPick[0].nft.gender : null;
+  for (const { nft, card } of swapCards) {
+    card.classList.remove('sel-1', 'sel-2', 'dim');
+    card.disabled = false;
+    const badge = card.querySelector('.pick');
+    badge.textContent = '';
+    const i = swapPick.findIndex((p) => p.nft.nft_id === nft.nft_id);
+    if (i >= 0) {
+      card.classList.add(`sel-${i + 1}`);
+      badge.textContent = String(i + 1);
+    } else if (body !== null && nft.gender !== body) {
+      card.classList.add('dim');
+      card.disabled = true;
+    }
+  }
+  el('swap-help').textContent = swapPick.length === 0
+    ? 'Pick your first avatar — matches stay lit, the rest dim out.'
+    : 'Now pick a matching body type to swap with.';
 }
 
 function traitValue(nft, traitType) {
   const a = nft.attributes.find((t) => t.trait_type === traitType);
   return a ? a.value : 'None';
 }
+
+// Category color rotation for the trait-row dots (brand kit series palette).
+const TRAIT_DOT_COLORS = ['#4890C0', '#601878', '#D84830', '#D89030',
+                          '#F0D848', '#3DA35D', '#7FB3D8', '#B07A3A'];
 
 function showTraitChooser() {
   const [a, b] = swapPick.map((p) => p.nft);
@@ -351,9 +378,10 @@ function showTraitChooser() {
   el('swap-name2').textContent = b.name;
   const list = el('trait-list');
   list.innerHTML = '';
-  for (const trait of swappableTraits) {
+  for (const [i, trait] of swappableTraits.entries()) {
     const row = document.createElement('label');
     row.className = 'trait-row';
+    row.style.setProperty('--cat', TRAIT_DOT_COLORS[i % TRAIT_DOT_COLORS.length]);
     const input = document.createElement('input');
     input.type = 'checkbox';
     input.value = trait;
@@ -367,7 +395,7 @@ function showTraitChooser() {
 }
 
 const SWAP_STAGE_TEXT = {
-  composing: ['🎨 Crafting new NFTs', 'Composing the swapped images…'],
+  composing: ['🎨 Crafting new builds', 'Composing the swapped images…'],
   uploading: ['☁️ Uploading', 'Saving the new images and metadata to the CDN…'],
   burning: ['🔥 Burning originals', 'Burning the original NFTs on XRPL…'],
   minting: ['⛏️ Reminting', 'Minting the re-crafted NFTs…'],
@@ -530,7 +558,7 @@ async function main() {
     if (me.wallet) showMintHome();
     else {
       showPanel('register-panel');
-      status(`Hey ${me.username}! Register your XRPL wallet to get started.`);
+      status(`Hey ${me.username} — register your XRPL wallet to start building.`);
     }
   } catch (e) {
     console.error(e);
