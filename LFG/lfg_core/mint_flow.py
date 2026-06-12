@@ -272,6 +272,8 @@ async def run_mint_session(session: MintSession) -> None:
             metadata_url=metadata_cdn_url,
             image_url=image_cdn_url,
             traits=traits_dict,
+            network=config.XRPL_NETWORK,
+            body_type=body,
         )
         # The mint is on-chain at this point; a DB failure must not stop the
         # transfer offer from reaching the user.
