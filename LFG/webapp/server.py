@@ -306,9 +306,11 @@ async def _fetch_cdn(url):
 
 async def handle_img(request):
     """Same-origin proxy for CDN images: the Activity's CSP blocks cross-origin
-    <img> loads, so the client routes BUNNY_CDN_PUBLIC_BASE URLs through here."""
+    <img> loads, so the client routes CDN image URLs through here (allowed
+    bases: BUNNY_CDN_PUBLIC_BASE and the BUNNY_PULL_ZONE custom domain)."""
     url = request.query.get("u", "")
-    if len(url) > 2048 or not url.startswith(config.BUNNY_CDN_PUBLIC_BASE + "/"):
+    allowed = tuple(base + "/" for base in config.IMG_PROXY_ALLOWED_BASES)
+    if len(url) > 2048 or not url.startswith(allowed):
         return web.json_response({"error": "bad image url"}, status=400)
     try:
         body, ctype = await _fetch_cdn(url)
