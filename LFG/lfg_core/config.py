@@ -95,7 +95,7 @@ WEBAPP_PORT = int(os.getenv("WEBAPP_PORT", "8176"))
 PAYMENT_TIMEOUT_SECONDS = int(os.getenv("PAYMENT_TIMEOUT_SECONDS", "300"))
 
 # Unified trait layer store (shared by mint + swap).
-# Canonical structure: <gender>/<TraitType>/<Value>.png|.gif|.mp4
+# Canonical structure: <body>/<TraitType>/<Value>.png|.gif|.mp4
 LAYER_SOURCE = os.getenv("LAYER_SOURCE", "cdn")  # "cdn" or "local"
 LAYERS_CDN_FOLDER = os.getenv("LAYERS_CDN_FOLDER", "layers")
 LAYERS_DIR = os.getenv("LAYERS_DIR", "layers")          # local mode root
@@ -120,3 +120,9 @@ NFT_SCHEMA_URL = os.getenv("NFT_SCHEMA_URL",
 EXTERNAL_WEBSITE_URL = os.getenv("EXTERNAL_WEBSITE_URL", "https://letseffinggo.com")
 NFT_COLLECTION_LOGO = os.getenv("NFT_COLLECTION_LOGO",
                                 "https://lfgo.b-cdn.net/LFGO_square_logo.png")
+
+# Variable rarity engine
+DB_PATH = os.getenv("DB_PATH", "lfg_nfts.db")
+RARITY_FLOOR = float(os.getenv("RARITY_FLOOR", "0.005"))
+RARITY_BOOST_INITIAL = float(os.getenv("RARITY_BOOST_INITIAL", "7"))
+RARITY_BOOST_STEP_HOURS = int(os.getenv("RARITY_BOOST_STEP_HOURS", "24"))

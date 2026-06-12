@@ -37,6 +37,7 @@ import traceback
 from user_db import register_user, create_users_table, get_user as get_user_from_db
 import sqlite3
 import shutil
+from lfg_core import rarity as _rarity
 
 # Import the NFT minting helper function from ts_helpers.py
 from ts_helpers import mint_nft as helper_mint_nft
@@ -255,12 +256,34 @@ def get_trait_files(trait_layer_dir):
 
 def get_random_trait(trait_layer_dir):
     """
-    Randomly select an image file from the given trait layer directory.
+    Select an image file from the given trait layer directory, weighted by
+    the rarity engine (proportional-with-floor). Falls back to uniform
+    random if the engine is unavailable so the bot never bricks.
     """
     files = get_trait_files(trait_layer_dir)
     if not files:
         raise ValueError(f"No valid image files found in directory: {trait_layer_dir}")
-    return random.choice(files)
+    category = _rarity.category_for_folder(os.path.basename(trait_layer_dir))
+    if category is None:
+        return random.choice(files)
+    try:
+        by_stem = {os.path.splitext(f)[0]: f for f in files}
+        pick = _rarity_pick_for_legacy(category, list(by_stem))
+        return by_stem[pick]
+    except Exception as e:
+        logging.warning(f"rarity engine unavailable, uniform fallback: {e}")
+        return random.choice(files)
+
+
+def _rarity_pick_for_legacy(category, stems):
+    """Open a short-lived connection and run a weighted pick for the legacy
+    (ungendered) path."""
+    conn = _rarity.connect()
+    try:
+        return _rarity.weighted_pick(conn, _rarity.BODY_SENTINEL, category,
+                                     stems)
+    finally:
+        conn.close()
 
 
 def get_sorted_trait_layers(trait_layers_dir):
@@ -1456,9 +1479,18 @@ class BurnConfirmView(View):
                 
                 # Remove from LFG table
                 cursor.execute('DELETE FROM LFG WHERE nft_number = ?', (self.nft_number,))
-                
+
                 conn.commit()
-                
+
+                try:
+                    rarity_conn = _rarity.connect()
+                    try:
+                        _rarity.recalculate_rarity(rarity_conn)
+                    finally:
+                        rarity_conn.close()
+                except Exception as e:
+                    logging.error(f"rarity recalc after burn failed: {e}")
+
                 await interaction.followup.send(
                     f"✅ Successfully burned NFT #{self.nft_number}",
                     ephemeral=True
@@ -1508,6 +1540,117 @@ class BurnConfirmView(View):
             ephemeral=True
         )
         self.stop()
+
+async def log_admin_action(client: discord.Client, message: str) -> None:
+    """Send a one-liner to the admin log channel. Best-effort — errors logged."""
+    try:
+        ch = client.get_channel(ADMIN_LOG_CHANNEL_ID)
+        if ch:
+            await ch.send(message)
+    except Exception as e:
+        logging.error(f"log_admin_action failed: {e}")
+
+
+class RarityOddsModal(Modal, title="View Rarity Odds"):
+    body = TextInput(label="Body (* for legacy/Body Type)",
+                     default="*", max_length=20)
+    category = TextInput(
+        label="Category (Background, Head, Body Type, ...)", max_length=30)
+
+    async def on_submit(self, interaction: discord.Interaction):
+        conn = _rarity.connect()
+        try:
+            rows = _rarity.get_odds(conn, self.body.value.strip(),
+                                    self.category.value.strip())
+        finally:
+            conn.close()
+        if not rows:
+            await interaction.response.send_message(
+                "No rarity rows for that body/category.", ephemeral=True)
+            return
+        lines = [f"`{t:24.24s}` n={c:<5d} {s:5.1f}% w={w:.4f}  {st}"
+                 for t, c, s, w, st in rows[:25]]
+        embed = Embed(
+            title=f"Odds — {self.body.value} / {self.category.value}",
+            description="\n".join(lines), color=0x00FF00)
+        await interaction.response.send_message(embed=embed, ephemeral=True)
+
+
+class RarityBoostModal(Modal, title="Arm Trait Boost"):
+    body = TextInput(label="Body (* for legacy)", default="*", max_length=20)
+    category = TextInput(label="Category", max_length=30)
+    trait = TextInput(label="Trait value", max_length=60)
+    initial = TextInput(label="Boost multiplier", default="7", max_length=5)
+    confirm = TextInput(
+        label="Type CONFIRM if trait already has mints", required=False,
+        max_length=10)
+
+    async def on_submit(self, interaction: discord.Interaction):
+        from lfg_core import config as _cfg
+        conn = _rarity.connect()
+        try:
+            row = conn.execute(
+                """SELECT live_count FROM trait_rarity WHERE network=?
+                   AND body=? AND category=? AND trait=?""",
+                (_cfg.XRPL_NETWORK, self.body.value.strip(),
+                 self.category.value.strip(),
+                 self.trait.value.strip())).fetchone()
+            if row is None:
+                await interaction.response.send_message(
+                    "Unknown trait — it must exist in the rarity table "
+                    "(mint once or run seed).", ephemeral=True)
+                return
+            if row[0] > 0 and self.confirm.value.strip() != "CONFIRM":
+                await interaction.response.send_message(
+                    f"'{self.trait.value}' already has {row[0]} mints. "
+                    "Re-submit with CONFIRM to arm a comeback boost.",
+                    ephemeral=True)
+                return
+            _rarity.arm_boost(conn, self.body.value.strip(),
+                              self.category.value.strip(),
+                              self.trait.value.strip(),
+                              boost_initial=float(self.initial.value))
+        finally:
+            conn.close()
+        await interaction.response.send_message(
+            f"Boost armed for **{self.trait.value}** "
+            f"({self.initial.value}×, dormant until first organic mint).",
+            ephemeral=True)
+        await log_admin_action(
+            interaction.client,
+            f"🎚️ Boost armed by {interaction.user}: "
+            f"{self.body.value}/{self.category.value}/{self.trait.value} "
+            f"@ {self.initial.value}x")
+
+
+class RarityDisableModal(Modal, title="Toggle Trait"):
+    body = TextInput(label="Body (* for legacy)", default="*", max_length=20)
+    category = TextInput(label="Category", max_length=30)
+    trait = TextInput(label="Trait value", max_length=60)
+    action = TextInput(label="Action (DISABLE or ENABLE)", max_length=10)
+
+    async def on_submit(self, interaction: discord.Interaction):
+        val = self.action.value.strip().upper()
+        if val not in ("DISABLE", "ENABLE"):
+            await interaction.response.send_message(
+                "Action must be exactly DISABLE or ENABLE.", ephemeral=True)
+            return
+        enabled = val == "ENABLE"
+        conn = _rarity.connect()
+        try:
+            _rarity.set_enabled(conn, self.body.value.strip(),
+                                self.category.value.strip(),
+                                self.trait.value.strip(), enabled)
+        finally:
+            conn.close()
+        state = "enabled" if enabled else "disabled"
+        await interaction.response.send_message(
+            f"**{self.trait.value}** {state}.", ephemeral=True)
+        await log_admin_action(
+            interaction.client,
+            f"🚫 Trait {state} by {interaction.user}: "
+            f"{self.body.value}/{self.category.value}/{self.trait.value}")
+
 
 # Add burn button to AdminView
 class AdminView(View):
@@ -1601,6 +1744,21 @@ class AdminView(View):
     async def burn_button(self, interaction: discord.Interaction, button: Button):
         logging.info(f"Burn button pressed by {interaction.user}")
         await interaction.response.send_modal(BurnNFTModal())
+
+    @discord.ui.button(label="View Odds", style=discord.ButtonStyle.secondary,
+                       emoji="🎲", row=1)
+    async def view_odds(self, interaction: discord.Interaction, button: Button):
+        await interaction.response.send_modal(RarityOddsModal())
+
+    @discord.ui.button(label="Boost Trait", style=discord.ButtonStyle.primary,
+                       emoji="🚀", row=1)
+    async def boost_trait(self, interaction: discord.Interaction, button: Button):
+        await interaction.response.send_modal(RarityBoostModal())
+
+    @discord.ui.button(label="Toggle Trait", style=discord.ButtonStyle.danger,
+                       emoji="🚫", row=1)
+    async def toggle_trait(self, interaction: discord.Interaction, button: Button):
+        await interaction.response.send_modal(RarityDisableModal())
 
 @tree.command(
     name="admin",
