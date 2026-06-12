@@ -204,6 +204,7 @@ const STAGE_TEXT = {
 function pollMint(sessionId) {
   clearTimeout(pollTimer);
   const tick = async () => {
+    if (el('flow-panel').hidden) return; // user navigated away
     let s;
     try {
       s = await api(`/api/mint/${sessionId}`);

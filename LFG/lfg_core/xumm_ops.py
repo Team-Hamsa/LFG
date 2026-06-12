@@ -60,7 +60,7 @@ def _apply_qr_logo(img: Image.Image) -> Image.Image:
     logo = Image.open(QR_LOGO_PATH).convert("RGBA")
     # ~1/4 of the QR width keeps well under ERROR_CORRECT_H's 30% budget
     side = img.size[0] // 4
-    logo.thumbnail((side, side), Image.LANCZOS)
+    logo.thumbnail((side, side), Image.Resampling.LANCZOS)
     lw, lh = logo.size
     cx, cy = (img.size[0] - lw) // 2, (img.size[1] - lh) // 2
     # white backing pad so the mascot never sits directly on dark modules
