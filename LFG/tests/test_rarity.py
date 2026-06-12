@@ -298,3 +298,58 @@ def test_staleness_guard_triggers_recalc(conn):
         """SELECT live_count FROM trait_rarity WHERE network='testnet'
            AND category='Background' AND trait='Red' AND body='*'""").fetchone()
     assert count == 1
+
+
+# Task 5: Boost lifecycle
+
+def test_arm_boost_sets_columns(conn):
+    seed_row(conn, "Fresh", 0)
+    rarity.arm_boost(conn, "*", "Background", "Fresh", network="testnet",
+                     boost_initial=7.0, boost_step_hours=24)
+    row = conn.execute(
+        """SELECT boost_initial, boost_step_hours, boost_started_at
+           FROM trait_rarity WHERE trait='Fresh'""").fetchone()
+    assert row == (7.0, 24, None)  # armed but dormant
+
+
+def test_arm_boost_rearms_finished_boost(conn):
+    seed_row(conn, "Old", 5, boost_initial=7.0,
+             boost_started_at=iso(NOW - timedelta(days=30)))
+    rarity.arm_boost(conn, "*", "Background", "Old", network="testnet",
+                     boost_initial=5.0, boost_step_hours=24)
+    row = conn.execute(
+        """SELECT boost_initial, boost_started_at FROM trait_rarity
+           WHERE trait='Old'""").fetchone()
+    assert row == (5.0, None)  # clock reset to dormant
+
+
+def test_start_boost_clock_only_when_armed_and_dormant(conn):
+    seed_row(conn, "Fresh", 0, boost_initial=7.0)
+    seed_row(conn, "Plain", 0)
+    started_at = iso(NOW - timedelta(hours=2))
+    seed_row(conn, "Running", 0, boost_initial=7.0,
+             boost_started_at=started_at)
+
+    rarity.start_boost_clock(conn, "*", "Background", "Fresh",
+                             network="testnet", now=NOW)
+    rarity.start_boost_clock(conn, "*", "Background", "Plain",
+                             network="testnet", now=NOW)
+    rarity.start_boost_clock(conn, "*", "Background", "Running",
+                             network="testnet", now=NOW)
+
+    rows = dict(conn.execute(
+        "SELECT trait, boost_started_at FROM trait_rarity"))
+    assert rows["Fresh"] == NOW.isoformat()   # clock started
+    assert rows["Plain"] is None              # no boost configured
+    assert rows["Running"] == started_at      # already running: untouched
+
+
+def test_boost_status_strings(conn):
+    seed_row(conn, "Dormant", 0, boost_initial=7.0)
+    seed_row(conn, "Active", 0, boost_initial=7.0,
+             boost_started_at=iso(NOW - timedelta(hours=25)))
+    seed_row(conn, "None", 0)
+    assert rarity.boost_status(7.0, 24, None, NOW) == "dormant"
+    assert rarity.boost_status(7.0, 24, iso(NOW - timedelta(hours=25)),
+                               NOW).startswith("active 6x")
+    assert rarity.boost_status(None, 24, None, NOW) == "—"
