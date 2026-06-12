@@ -2,7 +2,7 @@
 # Unified trait-layer source shared by the mint and swap flows.
 #
 # Canonical structure (one tree, locally or on BunnyCDN storage):
-#   <body>/<TraitType>/<Value>.png|.gif|.mp4
+#   <gender>/<TraitType>/<Value>.png|.gif|.mp4
 # e.g. male/Eyes/Laser.png  —  the file stem IS the metadata trait value.
 #
 # CdnLayerStore lists directories via the Bunny storage API and downloads
@@ -29,19 +29,19 @@ class LocalLayerStore:
     def __init__(self, base_dir: str = None):
         self.base_dir = base_dir or config.LAYERS_DIR
 
-    async def list_bodies(self) -> list:
+    async def list_genders(self) -> list:
         return sorted(
             d for d in os.listdir(self.base_dir)
             if os.path.isdir(os.path.join(self.base_dir, d)) and not d.startswith("."))
 
-    async def list_trait_types(self, body: str) -> list:
-        path = os.path.join(self.base_dir, body)
+    async def list_trait_types(self, gender: str) -> list:
+        path = os.path.join(self.base_dir, gender)
         return sorted(
             d for d in os.listdir(path)
             if os.path.isdir(os.path.join(path, d)) and not d.startswith("."))
 
-    async def list_values(self, body: str, trait_type: str) -> list:
-        path = os.path.join(self.base_dir, body, trait_type)
+    async def list_values(self, gender: str, trait_type: str) -> list:
+        path = os.path.join(self.base_dir, gender, trait_type)
         if not os.path.isdir(path):
             return []
         values = []
@@ -51,9 +51,9 @@ class LocalLayerStore:
                 values.append(stem)
         return sorted(set(values))
 
-    async def resolve(self, body: str, trait_type: str, value: str):
+    async def resolve(self, gender: str, trait_type: str, value: str):
         """Local path of a layer file, or None if it doesn't exist."""
-        base = os.path.join(self.base_dir, body, trait_type, value)
+        base = os.path.join(self.base_dir, gender, trait_type, value)
         for ext in LAYER_EXTENSIONS:
             if os.path.isfile(base + ext):
                 return base + ext
@@ -88,15 +88,15 @@ class CdnLayerStore:
         self._listings[rel_path] = listing
         return listing
 
-    async def list_bodies(self) -> list:
+    async def list_genders(self) -> list:
         return sorted(name for name, is_dir in await self._list_dir("") if is_dir)
 
-    async def list_trait_types(self, body: str) -> list:
-        return sorted(name for name, is_dir in await self._list_dir(body) if is_dir)
+    async def list_trait_types(self, gender: str) -> list:
+        return sorted(name for name, is_dir in await self._list_dir(gender) if is_dir)
 
-    async def list_values(self, body: str, trait_type: str) -> list:
+    async def list_values(self, gender: str, trait_type: str) -> list:
         values = set()
-        for name, is_dir in await self._list_dir(f"{body}/{trait_type}"):
+        for name, is_dir in await self._list_dir(f"{gender}/{trait_type}"):
             if is_dir:
                 continue
             stem, ext = os.path.splitext(name)
@@ -104,14 +104,14 @@ class CdnLayerStore:
                 values.add(stem)
         return sorted(values)
 
-    async def resolve(self, body: str, trait_type: str, value: str):
+    async def resolve(self, gender: str, trait_type: str, value: str):
         """Download (or reuse cached) layer file; returns local path or None."""
-        listing = await self._list_dir(f"{body}/{trait_type}")
+        listing = await self._list_dir(f"{gender}/{trait_type}")
         names = {name for name, is_dir in listing if not is_dir}
         for ext in LAYER_EXTENSIONS:
             filename = value + ext
             if filename in names:
-                return await self._download(f"{body}/{trait_type}/{filename}")
+                return await self._download(f"{gender}/{trait_type}/{filename}")
         return None
 
     async def _download(self, rel_path: str) -> str:
