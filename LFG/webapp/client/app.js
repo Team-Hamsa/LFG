@@ -328,6 +328,9 @@ async function openSwapper() {
 function toggleNftPick(nft, card) {
   const idx = swapPick.findIndex((p) => p.nft.nft_id === nft.nft_id);
   if (idx >= 0) swapPick.splice(idx, 1);
+  // Enforce the matching-body rule here too — dimming alone doesn't stop
+  // keyboard activation of the underlying <button>.
+  else if (swapPick.length === 1 && nft.gender !== swapPick[0].nft.gender) return;
   else if (swapPick.length < 2) swapPick.push({ nft, card });
   else return;
   renderPicks();
@@ -335,11 +338,12 @@ function toggleNftPick(nft, card) {
 }
 
 // Mockup behavior: first pick locks the body type — matches stay lit,
-// the rest dim out (and become unclickable via pointer-events).
+// the rest dim out and are disabled.
 function renderPicks() {
   const body = swapPick[0] ? swapPick[0].nft.gender : null;
   for (const { nft, card } of swapCards) {
     card.classList.remove('sel-1', 'sel-2', 'dim');
+    card.disabled = false;
     const badge = card.querySelector('.pick');
     badge.textContent = '';
     const i = swapPick.findIndex((p) => p.nft.nft_id === nft.nft_id);
@@ -348,6 +352,7 @@ function renderPicks() {
       badge.textContent = String(i + 1);
     } else if (body !== null && nft.gender !== body) {
       card.classList.add('dim');
+      card.disabled = true;
     }
   }
   el('swap-help').textContent = swapPick.length === 0
