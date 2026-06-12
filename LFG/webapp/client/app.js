@@ -139,9 +139,14 @@ function renderSteps(stage) {
   }));
 }
 
-function showFlow({ title, text, qrData, link, image, done, stage, spinner, celebrate }) {
+function showFlow({ title, text, qrData, link, image, done, stage, spinner, celebrate, pill }) {
   showPanel('flow-panel');
   renderSteps(stage);
+  el('pay-method').hidden = !pill;
+  if (pill) {
+    el('pay-pill').className = `pill ${pill.kind}`;
+    el('pay-pill').textContent = pill.text;
+  }
   el('flow-title').textContent = title;
   el('flow-text').textContent = text || '';
   el('flow-spinner').hidden = !spinner;
@@ -155,9 +160,24 @@ function showFlow({ title, text, qrData, link, image, done, stage, spinner, cele
   el('flow-done-btn').hidden = !done;
 }
 
+// The pay screen adapts to the backend's silently-detected payment path:
+// LFGO holders pay LFGO, everyone else pays XRP. Only the pill and the
+// price differ — the mechanics are never explained.
+function mintPayView(s) {
+  const xrp = s.pay_with === 'XRP';
+  return {
+    title: '💰 Pay to build',
+    text: xrp
+      ? `Pay ${s.pay_amount} XRP to mint your avatar — no trustline needed. Scan with Xaman, approve, and hang tight here.`
+      : `Pay ${s.pay_amount || 1} LFGO — burned on mint. Scan with Xaman, approve, and hang tight here.`,
+    pill: { kind: xrp ? 'xrp' : 'lfgo', text: `Paying with ${xrp ? 'XRP' : 'LFGO'}` },
+    qrData: s.payment_link,
+    link: s.payment_link,
+    stage: s.state,
+  };
+}
+
 const STAGE_TEXT = {
-  awaiting_payment: ['💰 Pay to build',
-    'Send 1 LFGO to mint your avatar. Scan with Xaman, approve, and hang tight here.'],
   generating: ['🎨 Building your avatar', "Payment's in. Laying the bricks on your one-of-a-kind build…"],
   minting: ['⛏️ Minting on XRPL', 'Stamping your build onto the ledger…'],
   creating_offer: ['📨 Creating transfer offer', 'Almost there — preparing the offer to your wallet…'],
@@ -199,8 +219,7 @@ function pollMint(sessionId) {
     }
 
     if (s.state === 'awaiting_payment') {
-      const [title, text] = STAGE_TEXT.awaiting_payment;
-      showFlow({ title, text, qrData: s.payment_link, link: s.payment_link, stage: s.state });
+      showFlow(mintPayView(s));
     } else if (STAGE_TEXT[s.state]) {
       const [title, text] = STAGE_TEXT[s.state];
       showFlow({ title, text, stage: s.state, spinner: true });
@@ -213,39 +232,8 @@ function pollMint(sessionId) {
 async function startMint() {
   try {
     const s = await api('/api/mint', { method: 'POST', body: JSON.stringify(discordCtx()) });
-    const [title, text] = STAGE_TEXT.awaiting_payment;
-    showFlow({ title, text, qrData: s.payment_link, link: s.payment_link, stage: s.state });
+    showFlow(mintPayView(s));
     pollMint(s.id);
-  } catch (e) {
-    showError(e.message);
-  }
-}
-
-async function startTrustline() {
-  try {
-    const t = await api('/api/trustline', { method: 'POST', body: JSON.stringify(discordCtx()) });
-    showFlow({
-      title: '🔗 Set LFGO Trustline',
-      text: 'Scan with Xaman/XUMM and approve the TrustSet. Expires in 5 minutes.',
-      qrData: t.xumm_url,
-      link: t.xumm_url,
-      done: true,
-    });
-  } catch (e) {
-    showError(e.message);
-  }
-}
-
-async function startBrixTrustline() {
-  try {
-    const t = await api('/api/brix-trustline', { method: 'POST', body: JSON.stringify(discordCtx()) });
-    showFlow({
-      title: '🔗 Set BRIX Trustline',
-      text: 'Scan with Xaman/XUMM and approve the TrustSet. Required to pay trait swap fees. Expires in 5 minutes.',
-      qrData: t.xumm_url,
-      link: t.xumm_url,
-      done: true,
-    });
   } catch (e) {
     showError(e.message);
   }
@@ -269,6 +257,7 @@ let swapPick = [];
 let swapCards = []; // {nft, card} for every grid tile, for re-rendering picks
 let swapPollTimer = null;
 let swappableTraits = [];
+let swapFee = null; // {pay_with, amount, per_nft} quote from /api/nfts
 
 function showGridSkeletons(grid, count = 6) {
   grid.replaceChildren(...Array.from({ length: count }, () => {
@@ -288,12 +277,14 @@ async function openSwapper() {
   showPanel('swap-panel');
   swapPick = [];
   swapCards = [];
+  el('pick-traits-btn').disabled = true;
   showGridSkeletons(el('nft-grid'));
   status('Loading your GOs…');
   try {
     const data = await api('/api/nfts');
     swapNfts = data.nfts;
     swappableTraits = data.swappable_traits || [];
+    swapFee = data.swap_fee || null;
     status('');
     el('nft-grid').replaceChildren(); // drop the skeleton loaders
     if (!swapNfts.length) {
@@ -313,6 +304,10 @@ async function openSwapper() {
       const name = document.createElement('span');
       name.className = 'cap';
       name.textContent = nft.name;
+      const body = document.createElement('span');
+      body.className = 'body';
+      body.textContent = nft.gender; // male / female / skeleton / ape
+      name.appendChild(body);
       card.replaceChildren(pick, img, name);
       card.onclick = () => toggleNftPick(nft, card);
       el('nft-grid').appendChild(card);
@@ -334,7 +329,6 @@ function toggleNftPick(nft, card) {
   else if (swapPick.length < 2) swapPick.push({ nft, card });
   else return;
   renderPicks();
-  if (swapPick.length === 2) showTraitChooser();
 }
 
 // Mockup behavior: first pick locks the body type — matches stay lit,
@@ -355,9 +349,12 @@ function renderPicks() {
       card.disabled = true;
     }
   }
+  el('pick-traits-btn').disabled = swapPick.length !== 2;
   el('swap-help').textContent = swapPick.length === 0
     ? 'Pick your first avatar — matches stay lit, the rest dim out.'
-    : 'Now pick a matching body type to swap with.';
+    : swapPick.length === 1
+      ? 'Now pick a matching body type to swap with.'
+      : 'Pair locked in — pick the traits to swap.';
 }
 
 function traitValue(nft, traitType) {
@@ -369,9 +366,25 @@ function traitValue(nft, traitType) {
 const TRAIT_DOT_COLORS = ['#4890C0', '#601878', '#D84830', '#D89030',
                           '#F0D848', '#3DA35D', '#7FB3D8', '#B07A3A'];
 
+// Cost line above the final CTA. Same silent-path pattern as the mint: BRIX
+// holders see BRIX, everyone else the XRP price — no trustline talk.
+function renderSwapCost() {
+  const cost = el('swap-cost');
+  if (!swapFee) { cost.hidden = true; return; }
+  cost.hidden = false;
+  if (swapFee.pay_with === 'XRP') {
+    const xrp = Number(swapFee.amount);
+    cost.textContent = `Swap cost: ~${Number.isFinite(xrp) ? xrp.toFixed(2) : swapFee.amount} XRP`;
+  } else {
+    cost.textContent = `Swap cost: ${swapFee.amount} BRIX — ${swapFee.per_nft} per avatar.`;
+  }
+}
+
 function showTraitChooser() {
+  if (swapPick.length !== 2) return;
   const [a, b] = swapPick.map((p) => p.nft);
   showPanel('swap-traits-panel');
+  renderSwapCost();
   el('swap-img1').src = imgUrl(a.image);
   el('swap-img2').src = imgUrl(b.image);
   el('swap-name1').textContent = a.name;
@@ -436,7 +449,7 @@ function renderSwapPayment(s) {
   swapPaymentShown = s.id;
   el('swap-result-title').textContent = '💰 Swap fee required';
   el('swap-result-text').textContent =
-    `Pay ${s.fee_amount} BRIX to swap your mutable NFT(s) in place. ` +
+    `Pay ${s.fee_amount} ${s.pay_with || 'BRIX'} to swap your NFT(s) in place. ` +
     'Scan the QR with Xaman/XUMM or open the link, approve, then wait here.';
   const box = el('swap-results');
   const qrImg = document.createElement('img');
@@ -537,10 +550,9 @@ function pollSwap(sessionId) {
 async function main() {
   el('register-btn').onclick = registerWallet;
   el('mint-btn').onclick = startMint;
-  el('trustline-btn').onclick = startTrustline;
   el('swap-btn').onclick = openSwapper;
   el('swap-back-btn').onclick = () => showMintHome();
-  el('brix-trustline-btn').onclick = startBrixTrustline;
+  el('pick-traits-btn').onclick = showTraitChooser;
   el('swap-cancel-btn').onclick = () => openSwapper();
   el('swap-confirm-btn').onclick = confirmSwap;
   el('swap-done-btn').onclick = () => showMintHome();
