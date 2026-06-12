@@ -990,3 +990,14 @@ def test_no_cache_middleware_respects_handler_cache_header():
     req = make_mocked_request("GET", "/x")
     resp = loop.run_until_complete(server.no_cache_mw(req, handler))
     assert resp.headers["Cache-Control"] == "public, max-age=60"
+
+
+def test_trustline_handlers_require_auth():
+    """Both trustline endpoints must reject unauthenticated requests — a
+    misplaced decorator once left /api/trustline open (PR #16 review)."""
+    from aiohttp.test_utils import make_mocked_request
+    loop = asyncio.get_event_loop()
+    for handler in (server.handle_trustline, server.handle_brix_trustline):
+        req = make_mocked_request("POST", "/x")  # no Authorization header
+        resp = loop.run_until_complete(handler(req))
+        assert resp.status == 401, f"{handler} let an unauthenticated request through"
