@@ -389,6 +389,16 @@ def test_select_random_attributes_uses_engine(conn):
     assert n >= 3  # 2 backgrounds + 1 body trait (+ Body Type row)
 
 
+# Task 8: Legacy bot integration
+
+def test_category_for_folder():
+    assert rarity.category_for_folder("1 background") == "Background"
+    assert rarity.category_for_folder("8 hat:hair") == "Head"
+    assert rarity.category_for_folder("9 accessory") == "Accessory"
+    assert rarity.category_for_folder("2 back") == "Back"
+    assert rarity.category_for_folder("99 unknown_thing") is None
+
+
 def test_select_random_attributes_weights_body_pick(conn):
     import asyncio
     from lfg_core import traits
