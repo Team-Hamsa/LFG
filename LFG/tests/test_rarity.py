@@ -133,9 +133,11 @@ def test_weighted_pick_returns_available_trait(conn):
 
 
 def test_weighted_pick_respects_weights(conn):
-    # 99:1 split — with floor 0.005 the rare trait sits at floor.
-    seed_row(conn, "Common", 990)
-    seed_row(conn, "Rare", 10)
+    # 99:1 split — use body='*' to match the pick's body parameter so
+    # recalculate_rarity produces the correct counts for the * path.
+    for i in range(99):
+        insert_nft(conn, i + 1, background="Common", body="*")
+    insert_nft(conn, 100, background="Rare", body="*")
     rng = random.Random(42)
     picks = [rarity.weighted_pick(conn, "*", "Background",
                                   ["Common", "Rare"], network="testnet",
@@ -198,3 +200,101 @@ def test_weighted_pick_active_boost_dominates(conn):
     fresh = picks.count("Fresh")
     # unboosted expectation ≈ 5% → 100; boosted ≈ 35/130 ≈ 27% → ~540
     assert fresh > 350
+
+
+# Task 4: recalculate_rarity + staleness guard
+
+def insert_nft(conn, number, background="Red", body_trait="Straight Dark",
+               hat="Cap", body="male", network="testnet"):
+    conn.execute(
+        """INSERT INTO LFG (nft_number, Background, Body, Hat, body_type, network)
+           VALUES (?,?,?,?,?,?)""",
+        (number, background, body_trait, hat, body, network))
+    conn.commit()
+
+
+def test_recalc_counts_live_nfts(conn):
+    insert_nft(conn, 1, background="Red")
+    insert_nft(conn, 2, background="Red")
+    insert_nft(conn, 3, background="Blue")
+    rarity.recalculate_rarity(conn, network="testnet")
+    rows = dict(conn.execute(
+        """SELECT trait, live_count FROM trait_rarity
+           WHERE network='testnet' AND category='Background'"""))
+    assert rows == {"Red": 2, "Blue": 1}
+
+
+def test_recalc_excludes_burned(conn):
+    insert_nft(conn, 1, background="Red")
+    insert_nft(conn, 2, background="Red")
+    conn.execute("INSERT INTO burned_nfts (nft_number) VALUES (2)")
+    rarity.recalculate_rarity(conn, network="testnet")
+    (count,) = conn.execute(
+        """SELECT live_count FROM trait_rarity WHERE network='testnet'
+           AND category='Background' AND trait='Red'""").fetchone()
+    assert count == 1
+
+
+def test_recalc_maps_hat_column_to_head_category(conn):
+    insert_nft(conn, 1, hat="Crown")
+    rarity.recalculate_rarity(conn, network="testnet")
+    (count,) = conn.execute(
+        """SELECT live_count FROM trait_rarity WHERE network='testnet'
+           AND category='Head' AND trait='Crown'""").fetchone()
+    assert count == 1
+
+
+def test_recalc_builds_body_type_category(conn):
+    insert_nft(conn, 1, body="male")
+    insert_nft(conn, 2, body="male")
+    insert_nft(conn, 3, body="ape")
+    rarity.recalculate_rarity(conn, network="testnet")
+    rows = dict(conn.execute(
+        """SELECT trait, live_count FROM trait_rarity
+           WHERE network='testnet' AND body='*' AND category=?""",
+        (rarity.BODY_CATEGORY,)))
+    assert rows == {"male": 2, "ape": 1}
+
+
+def test_recalc_network_scoped(conn):
+    insert_nft(conn, 1, background="Red", network="mainnet")
+    insert_nft(conn, 2, background="Blue", network="testnet")
+    rarity.recalculate_rarity(conn, network="testnet")
+    rows = list(conn.execute(
+        """SELECT trait FROM trait_rarity WHERE network='testnet'
+           AND category='Background'"""))
+    assert rows == [("Blue",)]
+
+
+def test_recalc_preserves_boost_columns(conn):
+    # Use body='*' so insert_nft's body_type matches the seed_row's body='*'
+    insert_nft(conn, 1, background="Red", body="*")
+    seed_row(conn, "Red", 0, boost_initial=7.0)
+    rarity.recalculate_rarity(conn, network="testnet")
+    boost, count = conn.execute(
+        """SELECT boost_initial, live_count FROM trait_rarity
+           WHERE network='testnet' AND category='Background'
+           AND trait='Red' AND body='*'""").fetchone()
+    assert boost == 7.0 and count == 1
+
+
+def test_recalc_resets_stale_counts_to_zero(conn):
+    seed_row(conn, "Ghost", 99)  # trait no longer present in any live NFT
+    rarity.recalculate_rarity(conn, network="testnet")
+    (count,) = conn.execute(
+        """SELECT live_count FROM trait_rarity WHERE network='testnet'
+           AND category='Background' AND trait='Ghost'""").fetchone()
+    assert count == 0
+
+
+def test_staleness_guard_triggers_recalc(conn):
+    # Cached counts disagree with the live collection → pick must recalc first.
+    # Use body='*' so body_type matches the seed_row (body='*') after recalc.
+    insert_nft(conn, 1, background="Red", body="*")
+    seed_row(conn, "Red", 42)  # wrong cache
+    rarity.weighted_pick(conn, "*", "Background", ["Red"],
+                         network="testnet", now=NOW, rng=random.Random(1))
+    (count,) = conn.execute(
+        """SELECT live_count FROM trait_rarity WHERE network='testnet'
+           AND category='Background' AND trait='Red' AND body='*'""").fetchone()
+    assert count == 1
