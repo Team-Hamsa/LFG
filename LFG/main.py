@@ -1537,6 +1537,117 @@ class BurnConfirmView(View):
         )
         self.stop()
 
+async def log_admin_action(client: discord.Client, message: str) -> None:
+    """Send a one-liner to the admin log channel. Best-effort — errors logged."""
+    try:
+        ch = client.get_channel(ADMIN_LOG_CHANNEL_ID)
+        if ch:
+            await ch.send(message)
+    except Exception as e:
+        logging.error(f"log_admin_action failed: {e}")
+
+
+class RarityOddsModal(Modal, title="View Rarity Odds"):
+    body = TextInput(label="Body (* for legacy/Body Type)",
+                     default="*", max_length=20)
+    category = TextInput(
+        label="Category (Background, Head, Body Type, ...)", max_length=30)
+
+    async def on_submit(self, interaction: discord.Interaction):
+        conn = _rarity.connect()
+        try:
+            rows = _rarity.get_odds(conn, self.body.value.strip(),
+                                    self.category.value.strip())
+        finally:
+            conn.close()
+        if not rows:
+            await interaction.response.send_message(
+                "No rarity rows for that body/category.", ephemeral=True)
+            return
+        lines = [f"`{t:24.24s}` n={c:<5d} {s:5.1f}% w={w:.4f}  {st}"
+                 for t, c, s, w, st in rows[:25]]
+        embed = Embed(
+            title=f"Odds — {self.body.value} / {self.category.value}",
+            description="\n".join(lines), color=0x00FF00)
+        await interaction.response.send_message(embed=embed, ephemeral=True)
+
+
+class RarityBoostModal(Modal, title="Arm Trait Boost"):
+    body = TextInput(label="Body (* for legacy)", default="*", max_length=20)
+    category = TextInput(label="Category", max_length=30)
+    trait = TextInput(label="Trait value", max_length=60)
+    initial = TextInput(label="Boost multiplier", default="7", max_length=5)
+    confirm = TextInput(
+        label="Type CONFIRM if trait already has mints", required=False,
+        max_length=10)
+
+    async def on_submit(self, interaction: discord.Interaction):
+        from lfg_core import config as _cfg
+        conn = _rarity.connect()
+        try:
+            row = conn.execute(
+                """SELECT live_count FROM trait_rarity WHERE network=?
+                   AND body=? AND category=? AND trait=?""",
+                (_cfg.XRPL_NETWORK, self.body.value.strip(),
+                 self.category.value.strip(),
+                 self.trait.value.strip())).fetchone()
+            if row is None:
+                await interaction.response.send_message(
+                    "Unknown trait — it must exist in the rarity table "
+                    "(mint once or run seed).", ephemeral=True)
+                return
+            if row[0] > 0 and self.confirm.value.strip() != "CONFIRM":
+                await interaction.response.send_message(
+                    f"'{self.trait.value}' already has {row[0]} mints. "
+                    "Re-submit with CONFIRM to arm a comeback boost.",
+                    ephemeral=True)
+                return
+            _rarity.arm_boost(conn, self.body.value.strip(),
+                              self.category.value.strip(),
+                              self.trait.value.strip(),
+                              boost_initial=float(self.initial.value))
+        finally:
+            conn.close()
+        await interaction.response.send_message(
+            f"Boost armed for **{self.trait.value}** "
+            f"({self.initial.value}×, dormant until first organic mint).",
+            ephemeral=True)
+        await log_admin_action(
+            interaction.client,
+            f"🎚️ Boost armed by {interaction.user}: "
+            f"{self.body.value}/{self.category.value}/{self.trait.value} "
+            f"@ {self.initial.value}x")
+
+
+class RarityDisableModal(Modal, title="Toggle Trait"):
+    body = TextInput(label="Body (* for legacy)", default="*", max_length=20)
+    category = TextInput(label="Category", max_length=30)
+    trait = TextInput(label="Trait value", max_length=60)
+    action = TextInput(label="Action (DISABLE or ENABLE)", max_length=10)
+
+    async def on_submit(self, interaction: discord.Interaction):
+        val = self.action.value.strip().upper()
+        if val not in ("DISABLE", "ENABLE"):
+            await interaction.response.send_message(
+                "Action must be exactly DISABLE or ENABLE.", ephemeral=True)
+            return
+        enabled = val == "ENABLE"
+        conn = _rarity.connect()
+        try:
+            _rarity.set_enabled(conn, self.body.value.strip(),
+                                self.category.value.strip(),
+                                self.trait.value.strip(), enabled)
+        finally:
+            conn.close()
+        state = "enabled" if enabled else "disabled"
+        await interaction.response.send_message(
+            f"**{self.trait.value}** {state}.", ephemeral=True)
+        await log_admin_action(
+            interaction.client,
+            f"🚫 Trait {state} by {interaction.user}: "
+            f"{self.body.value}/{self.category.value}/{self.trait.value}")
+
+
 # Add burn button to AdminView
 class AdminView(View):
     def __init__(self):
@@ -1629,6 +1740,21 @@ class AdminView(View):
     async def burn_button(self, interaction: discord.Interaction, button: Button):
         logging.info(f"Burn button pressed by {interaction.user}")
         await interaction.response.send_modal(BurnNFTModal())
+
+    @discord.ui.button(label="View Odds", style=discord.ButtonStyle.secondary,
+                       emoji="🎲", row=1)
+    async def view_odds(self, interaction: discord.Interaction, button: Button):
+        await interaction.response.send_modal(RarityOddsModal())
+
+    @discord.ui.button(label="Boost Trait", style=discord.ButtonStyle.primary,
+                       emoji="🚀", row=1)
+    async def boost_trait(self, interaction: discord.Interaction, button: Button):
+        await interaction.response.send_modal(RarityBoostModal())
+
+    @discord.ui.button(label="Toggle Trait", style=discord.ButtonStyle.danger,
+                       emoji="🚫", row=1)
+    async def toggle_trait(self, interaction: discord.Interaction, button: Button):
+        await interaction.response.send_modal(RarityDisableModal())
 
 @tree.command(
     name="admin",
