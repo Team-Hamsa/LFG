@@ -120,3 +120,9 @@ NFT_SCHEMA_URL = os.getenv("NFT_SCHEMA_URL",
 EXTERNAL_WEBSITE_URL = os.getenv("EXTERNAL_WEBSITE_URL", "https://letseffinggo.com")
 NFT_COLLECTION_LOGO = os.getenv("NFT_COLLECTION_LOGO",
                                 "https://lfgo.b-cdn.net/LFGO_square_logo.png")
+
+# Variable rarity engine
+DB_PATH = os.getenv("DB_PATH", "lfg_nfts.db")
+RARITY_FLOOR = float(os.getenv("RARITY_FLOOR", "0.005"))
+RARITY_BOOST_INITIAL = float(os.getenv("RARITY_BOOST_INITIAL", "7"))
+RARITY_BOOST_STEP_HOURS = int(os.getenv("RARITY_BOOST_STEP_HOURS", "24"))
