@@ -399,6 +399,27 @@ def test_category_for_folder():
     assert rarity.category_for_folder("99 unknown_thing") is None
 
 
+# Task 9: Network/body stamping in db_helpers.record_nft_mint
+
+def test_record_nft_mint_stamps_network_and_body(tmp_path):
+    import db_helpers
+    db = str(tmp_path / "t.db")
+    c = sqlite3.connect(db)
+    c.execute("CREATE TABLE LFG (nft_number INTEGER PRIMARY KEY)")
+    c.commit()
+    c.close()
+    ok = db_helpers.record_nft_mint(
+        nft_number=9001, nft_id="ABC", discord_id="1", owner_address="r1",
+        metadata_url="m", image_url="i", traits={"Background": "Red"},
+        network="testnet", body_type="male", db_path=db)
+    assert ok
+    c = sqlite3.connect(db)
+    row = c.execute("""SELECT network, body_type, Background FROM LFG
+                       WHERE nft_number=9001""").fetchone()
+    c.close()
+    assert row == ("testnet", "male", "Red")
+
+
 def test_select_random_attributes_weights_body_pick(conn):
     import asyncio
     from lfg_core import traits
@@ -415,3 +436,51 @@ def test_select_random_attributes_weights_body_pick(conn):
                                         now=NOW, rng=rng))[0]
         for _ in range(200)]
     assert bodies.count("male") > 150
+
+
+# Task 10: seed_from_collection, set_floor, set_enabled, get_odds
+
+def test_seed_backfills_body_from_traits(conn):
+    # Legacy rows have body_type='*'; seed derives it from Body trait via detect_body
+    insert_nft(conn, 1, body_trait="Straight Dark", body="*")   # → male
+    insert_nft(conn, 2, body_trait="Curved Light", body="*")    # → female
+    insert_nft(conn, 3, body_trait="Ape Body", body="*")        # → ape
+    insert_nft(conn, 4, body_trait="Bones", body="*")           # → skeleton
+    rarity.seed_from_collection(conn, network="testnet")
+    rows = dict(conn.execute("SELECT nft_number, body_type FROM LFG"))
+    assert rows == {1: "male", 2: "female", 3: "ape", 4: "skeleton"}
+    body_counts = dict(conn.execute(
+        """SELECT trait, live_count FROM trait_rarity
+           WHERE category=? AND network='testnet'""",
+        (rarity.BODY_CATEGORY,)))
+    assert body_counts == {"male": 1, "female": 1, "ape": 1, "skeleton": 1}
+
+
+def test_seed_marks_testnet_numbers(conn):
+    insert_nft(conn, 1, network="mainnet")
+    insert_nft(conn, 2, network="mainnet")
+    rarity.seed_from_collection(conn, network="mainnet", mark_testnet=[2])
+    rows = dict(conn.execute("SELECT nft_number, network FROM LFG"))
+    assert rows == {1: "mainnet", 2: "testnet"}
+
+
+def test_set_floor_global_and_per_trait(conn):
+    seed_row(conn, "Red", 10)
+    seed_row(conn, "Blue", 10)
+    rarity.set_floor(conn, 0.01, network="testnet")
+    floors = {r[0] for r in conn.execute(
+        "SELECT floor_weight FROM trait_rarity WHERE network='testnet'")}
+    assert floors == {0.01}
+    rarity.set_floor(conn, 0.05, network="testnet", body="*",
+                     category="Background", trait="Red")
+    (red,) = conn.execute(
+        "SELECT floor_weight FROM trait_rarity WHERE trait='Red'").fetchone()
+    assert red == 0.05
+
+
+def test_set_enabled(conn):
+    seed_row(conn, "Red", 10)
+    rarity.set_enabled(conn, "*", "Background", "Red", False, network="testnet")
+    (e,) = conn.execute(
+        "SELECT enabled FROM trait_rarity WHERE trait='Red'").fetchone()
+    assert e == 0
