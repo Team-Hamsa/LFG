@@ -51,11 +51,16 @@ class MintSession:
         self.pay_with = None    # "LFGO" or "XRP", set by prepare_payment
         self.pay_amount = None
         self.payment_link = None
+        self.payment_uuid = None   # XUMM payload uuid for scan tracking
+        self.qr_scanned = False    # payment QR opened in Xaman (issue #22)
         self.nft_number = None
         self.nft_id = None
         self.image_url = None
         self.accept_qr_url = None
         self.accept_deeplink = None
+        self.accept_uuid = None
+        self.accept_scanned = False
+        self.accept_signed = False
 
     def _payment_params(self) -> dict:
         """Destination/amount for this session's payment path. LFGO goes to
@@ -92,6 +97,14 @@ class MintSession:
             return_url=self.return_url)
         if payload:
             self.payment_link = payload["xumm_url"]
+            self.payment_uuid = payload.get("uuid")
+
+    async def regenerate_payment(self) -> None:
+        """Replace an expired/missed payment QR with a fresh XUMM payload
+        without restarting the whole session (issue #22)."""
+        self.qr_scanned = False
+        self.payment_uuid = None
+        await self.prepare_payment()
 
     def ensure_payment_fallback(self) -> None:
         """If prepare_payment was cancelled or failed, default to the XRP
@@ -113,6 +126,9 @@ class MintSession:
             "pay_with": self.pay_with,
             "pay_amount": self.pay_amount,
             "payment_link": self.payment_link,
+            "qr_scanned": self.qr_scanned,
+            "accept_scanned": self.accept_scanned,
+            "accept_signed": self.accept_signed,
             "nft_number": self.nft_number,
             "nft_id": self.nft_id,
             "image_url": self.image_url,
@@ -155,6 +171,24 @@ def _save_recovery_record(record: dict) -> None:
         logging.error(f"DB insert failed; recovery record written to {path}")
     except Exception:
         logging.error(f"Failed to write recovery record: {traceback.format_exc()}")
+
+
+async def update_scan_state(session: MintSession) -> None:
+    """Refresh the session's QR-scan flags from the XUMM payload status so
+    the frontend can swap a scanned QR for a spinner (issue #22). Queries
+    stop once a payload is seen opened/signed; API errors leave the flags
+    untouched."""
+    if (session.state == AWAITING_PAYMENT and session.payment_uuid
+            and not session.qr_scanned):
+        s = await xumm_ops.get_payload_status(session.payment_uuid)
+        if s:
+            session.qr_scanned = s["opened"] or s["signed"]
+    elif (session.state == OFFER_READY and session.accept_uuid
+            and not session.accept_signed):
+        s = await xumm_ops.get_payload_status(session.accept_uuid)
+        if s:
+            session.accept_scanned = s["opened"] or s["signed"]
+            session.accept_signed = s["signed"]
 
 
 async def run_mint_session(session: MintSession) -> None:
@@ -272,6 +306,7 @@ async def run_mint_session(session: MintSession) -> None:
 
         session.accept_qr_url = accept['qr_url']
         session.accept_deeplink = accept['xumm_url']
+        session.accept_uuid = accept.get('uuid')
         session.state = OFFER_READY
 
     except Exception as e:

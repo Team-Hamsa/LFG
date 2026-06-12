@@ -32,6 +32,10 @@
 
 * { box-sizing: border-box; }
 
+/* Author display rules below (e.g. .qr { display:block }) would otherwise
+   beat the UA stylesheet's [hidden] rule. */
+[hidden] { display: none !important; }
+
 body {
   margin: 0;
   min-height: 100vh;
@@ -47,7 +51,8 @@ body {
 #app {
   width: 100%;
   max-width: 440px;
-  padding: 28px 16px 64px;
+  /* Clear notches and Discord's overlaid activity controls (issue #23) */
+  padding: calc(28px + env(safe-area-inset-top, 0px)) 16px 64px;
   text-align: center;
 }
 
@@ -65,12 +70,6 @@ code, .mono { font-family: 'JetBrains Mono', monospace; }
   gap: 12px;
   margin-bottom: 6px;
 }
-.lockup .mascot {
-  width: 54px;
-  height: auto;
-  filter: drop-shadow(4px 4px 0 var(--ink));
-}
-
 /* Brand wordmark image; the .wordmark text below is the fallback when
    assets/logo.png is missing or fails to load. */
 .wordmark-img {
@@ -351,11 +350,20 @@ button.back:hover { color: var(--text); border: none; }
 }
 
 #nft-image {
-  width: 200px;
+  width: 240px;
   border-radius: 16px;
   border: 3px solid var(--ink);
   box-shadow: var(--sticker);
   margin-top: 16px;
+}
+
+/* With the minted NFT on screen the art is the hero and the accept QR
+   shrinks to a companion size (issue #22). */
+#flow-panel.with-image #flow-qr {
+  width: 150px;
+  height: 150px;
+  padding: 8px;
+  box-shadow: var(--sticker-sm);
 }
 #nft-image.celebrate { animation: pop-in 500ms cubic-bezier(.2, 1.4, .4, 1); }
 
@@ -601,7 +609,37 @@ button.back:hover { color: var(--text); border: none; }
 @media (max-width: 380px) {
   .wordmark { font-size: 2.1rem; }
   .wordmark-img { height: 46px; max-width: 180px; }
-  .lockup .mascot { width: 46px; }
   .swap-pair img { width: 80px; }
   .qr, #flow-qr { width: 180px; height: 180px; }
+}
+
+/* --- Discord mobile overlay spacer (issue #23) ---
+   On touch devices in portrait, Discord draws its activity controls over
+   the top edge of the iframe; push the header below them. */
+
+@media (pointer: coarse) and (orientation: portrait) {
+  .app-header { padding-top: 52px; }
+}
+
+/* --- Responsive layout (issue #20) ---
+   Portrait/mobile keeps the default single stacked column; landscape on
+   desktop/tablet widens the shell and puts the mint flow's copy and visual
+   (QR / NFT art) side by side. */
+
+@media (min-width: 760px) and (orientation: landscape) {
+  #app { max-width: 880px; }
+  .card { padding: 26px 30px; }
+  .actions { flex-direction: row; justify-content: center; }
+  .actions button { width: auto; flex: 1; max-width: 280px; }
+  .nft-grid { max-height: 420px; }
+  .flow-body {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    gap: 36px;
+    text-align: left;
+  }
+  .flow-body .flow-copy { max-width: 40ch; }
+  .flow-body .card-sub { margin-left: 0; }
+  .flow-body .flow-visual { flex-shrink: 0; }
 }

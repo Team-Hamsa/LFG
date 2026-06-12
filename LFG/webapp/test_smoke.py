@@ -35,7 +35,9 @@ def test_routes_registered():
     for expected in ["/api/config", "/api/token", "/api/me", "/api/register",
                      "/api/mint", "/api/mint/{session_id}",
                      "/api/nfts", "/api/swap", "/api/swap/{session_id}",
-                     "/api/qr.png", "/"]:
+                     "/api/qr.png", "/",
+                     "/api/mint/{session_id}/regenerate",
+                     "/api/signin", "/api/signin/{payload_uuid}"]:
         assert expected in paths, f"missing route {expected}"
     # Trustline endpoints were removed in v2: never user-facing again
     assert "/api/trustline" not in paths
@@ -216,6 +218,155 @@ def test_mint_fallback_defaults_to_xrp_path():
 def test_qr_png():
     png = xumm_ops.generate_qr_png("https://example.com")
     assert png[:8] == b"\x89PNG\r\n\x1a\n"
+
+
+# --- Issue #19: branded QR codes (mascot composited in the center) ---
+
+def test_qr_png_branded_with_logo(tmp_path, monkeypatch):
+    import io
+    from PIL import Image
+    logo = tmp_path / "mascot.png"
+    Image.new("RGBA", (64, 64), (216, 72, 48, 255)).save(logo)
+    monkeypatch.setattr(xumm_ops, "QR_LOGO_PATH", str(logo))
+    png = xumm_ops.generate_qr_png("https://example.com")
+    assert png[:8] == b"\x89PNG\r\n\x1a\n"
+    img = Image.open(io.BytesIO(png)).convert("RGB")
+    w, h = img.size
+    # the logo (solid red) sits dead-center over the QR modules
+    assert img.getpixel((w // 2, h // 2)) == (216, 72, 48)
+
+
+def test_qr_png_missing_logo_falls_back_plain(monkeypatch):
+    monkeypatch.setattr(xumm_ops, "QR_LOGO_PATH", "/nonexistent/mascot.png")
+    png = xumm_ops.generate_qr_png("https://example.com")
+    assert png[:8] == b"\x89PNG\r\n\x1a\n"
+
+
+# --- Issues #22/#24: XUMM payload status lookup ---
+
+def _fake_xumm_get(monkeypatch, meta=None, response=None):
+    class FakeResp:
+        def json(self):
+            return {"meta": {"opened": False, "signed": False, "expired": False,
+                             **(meta or {})},
+                    "response": {"account": None, **(response or {})}}
+
+    def fake_get(url, headers=None, timeout=None):
+        fake_get.url = url
+        return FakeResp()
+
+    monkeypatch.setattr(xumm_ops.requests, "get", fake_get)
+    return fake_get
+
+
+VALID_UUID = "01234567-89ab-cdef-0123-456789abcdef"
+
+
+def test_get_payload_status(monkeypatch):
+    fake = _fake_xumm_get(monkeypatch, meta={"opened": True, "signed": True},
+                          response={"account": "rSigner"})
+    s = asyncio.get_event_loop().run_until_complete(
+        xumm_ops.get_payload_status(VALID_UUID))
+    assert fake.url.endswith(f"/{VALID_UUID}")
+    assert s == {"opened": True, "signed": True, "expired": False,
+                 "account": "rSigner"}
+
+
+def test_get_payload_status_error_returns_none(monkeypatch):
+    def boom(url, headers=None, timeout=None):
+        raise RuntimeError("xumm down")
+    monkeypatch.setattr(xumm_ops.requests, "get", boom)
+    assert asyncio.get_event_loop().run_until_complete(
+        xumm_ops.get_payload_status(VALID_UUID)) is None
+
+
+def test_get_payload_status_rejects_malformed_uuid(monkeypatch):
+    def boom(url, headers=None, timeout=None):
+        raise AssertionError("must not be called for a malformed uuid")
+    monkeypatch.setattr(xumm_ops.requests, "get", boom)
+    loop = asyncio.get_event_loop()
+    for bad in ("../admin", "UUID9", "", None):
+        assert loop.run_until_complete(xumm_ops.get_payload_status(bad)) is None
+
+
+# --- Issue #24: Xaman Sign In payload for registration ---
+
+def test_create_signin_payload(monkeypatch):
+    captured = {}
+    _fake_xumm_api(monkeypatch, captured)
+    ru = {"app": "discord://-/channels/1/2",
+          "web": "https://discord.com/channels/1/2"}
+    payload = asyncio.get_event_loop().run_until_complete(
+        xumm_ops.create_signin_payload(return_url=ru))
+    assert payload["xumm_url"] == "https://xumm.app/sign/UUID1"
+    assert payload["uuid"] == "UUID1"
+    assert captured["txjson"] == {"TransactionType": "SignIn"}
+    assert captured["options"]["return_url"] == ru
+
+
+# --- Issue #22: QR scan tracking + regenerate ---
+
+def test_mint_session_tracks_payment_uuid(monkeypatch):
+    async def fake_payload(destination, **kw):
+        return {"qr_url": "q", "xumm_url": "https://xumm.app/sign/PAY",
+                "uuid": "PAYUUID"}
+    _stub_balance(monkeypatch, Decimal("5"))
+    monkeypatch.setattr(mint_flow.xumm_ops, "create_payment_payload", fake_payload)
+    session = mint_flow.MintSession(discord_id="1", wallet_address="rTest")
+    asyncio.get_event_loop().run_until_complete(session.prepare_payment())
+    assert session.payment_uuid == "PAYUUID"
+    assert session.to_dict()["qr_scanned"] is False
+
+
+def test_update_scan_state_marks_payment_scanned(monkeypatch):
+    session = mint_flow.MintSession(discord_id="1", wallet_address="rTest")
+    session.payment_uuid = "PAYUUID"
+    calls = []
+
+    async def fake_status(uuid):
+        calls.append(uuid)
+        return {"opened": True, "signed": False, "expired": False, "account": None}
+    monkeypatch.setattr(mint_flow.xumm_ops, "get_payload_status", fake_status)
+    loop = asyncio.get_event_loop()
+    loop.run_until_complete(mint_flow.update_scan_state(session))
+    assert session.to_dict()["qr_scanned"] is True
+    # once scanned, no further XUMM queries are made
+    loop.run_until_complete(mint_flow.update_scan_state(session))
+    assert calls == ["PAYUUID"]
+
+
+def test_update_scan_state_checks_accept_payload(monkeypatch):
+    session = mint_flow.MintSession(discord_id="1", wallet_address="rTest")
+    session.state = mint_flow.OFFER_READY
+    session.accept_uuid = "ACCUUID"
+
+    async def fake_status(uuid):
+        assert uuid == "ACCUUID"
+        return {"opened": True, "signed": True, "expired": False,
+                "account": "rTest"}
+    monkeypatch.setattr(mint_flow.xumm_ops, "get_payload_status", fake_status)
+    asyncio.get_event_loop().run_until_complete(mint_flow.update_scan_state(session))
+    d = session.to_dict()
+    assert d["accept_scanned"] is True
+    assert d["accept_signed"] is True
+
+
+def test_mint_session_regenerate_payment(monkeypatch):
+    links = iter(["https://xumm.app/sign/ONE", "https://xumm.app/sign/TWO"])
+    uuids = iter(["U1", "U2"])
+
+    async def fake_payload(destination, **kw):
+        return {"qr_url": "q", "xumm_url": next(links), "uuid": next(uuids)}
+    _stub_balance(monkeypatch, Decimal("5"))
+    monkeypatch.setattr(mint_flow.xumm_ops, "create_payment_payload", fake_payload)
+    session = mint_flow.MintSession(discord_id="1", wallet_address="rTest")
+    loop = asyncio.get_event_loop()
+    loop.run_until_complete(session.prepare_payment())
+    session.qr_scanned = True
+    loop.run_until_complete(session.regenerate_payment())
+    assert session.payment_link == "https://xumm.app/sign/TWO"
+    assert session.payment_uuid == "U2"
+    assert session.qr_scanned is False
 
 
 def test_register_user_upserts_wallet(tmp_path, monkeypatch):
