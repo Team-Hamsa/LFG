@@ -71,6 +71,15 @@ code, .mono { font-family: 'JetBrains Mono', monospace; }
   filter: drop-shadow(4px 4px 0 var(--ink));
 }
 
+/* Brand wordmark image; the .wordmark text below is the fallback when
+   assets/logo.png is missing or fails to load. */
+.wordmark-img {
+  height: 56px;
+  width: auto;
+  max-width: 220px;
+  object-fit: contain;
+}
+
 .wordmark {
   margin: 0;
   font-weight: 700;
@@ -591,6 +600,7 @@ button.back:hover { color: var(--text); border: none; }
 
 @media (max-width: 380px) {
   .wordmark { font-size: 2.1rem; }
+  .wordmark-img { height: 46px; max-width: 180px; }
   .lockup .mascot { width: 46px; }
   .swap-pair img { width: 80px; }
   .qr, #flow-qr { width: 180px; height: 180px; }

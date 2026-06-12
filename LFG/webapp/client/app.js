@@ -547,7 +547,22 @@ function pollSwap(sessionId) {
   swapPollTimer = setTimeout(tick, 3000);
 }
 
+// Header logo with a text-wordmark fallback. The Activity's CSP forbids
+// inline handlers, so the swap is wired here; the load may already have
+// failed before this module ran, hence the complete/naturalWidth check.
+function setupLogo() {
+  const logo = el('logo-img');
+  const fallback = () => {
+    logo.hidden = true;
+    el('wordmark').hidden = false;
+    el('wordmark').removeAttribute('aria-hidden');
+  };
+  logo.addEventListener('error', fallback);
+  if (logo.complete && logo.naturalWidth === 0) fallback();
+}
+
 async function main() {
+  setupLogo();
   el('register-btn').onclick = registerWallet;
   el('mint-btn').onclick = startMint;
   el('swap-btn').onclick = openSwapper;

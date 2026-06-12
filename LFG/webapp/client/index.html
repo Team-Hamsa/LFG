@@ -5,14 +5,15 @@
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
   <title>Let's Effing Go! — Mint</title>
   <link rel="stylesheet" href="fonts/fonts.css">
-  <link rel="stylesheet" href="style.css?v=5">
+  <link rel="stylesheet" href="style.css?v=6">
 </head>
 <body>
   <main id="app">
     <header class="app-header">
       <div class="lockup">
         <img class="mascot" src="assets/mascot.png" alt="LFG mascot — the hard-hat builder">
-        <h1 class="wordmark"><span class="l">L</span><span class="f">F</span><span class="g">G</span></h1>
+        <img id="logo-img" class="wordmark-img" src="assets/logo.png" alt="LFG">
+        <h1 id="wordmark" class="wordmark" hidden aria-hidden="true"><span class="l">L</span><span class="f">F</span><span class="g">G</span></h1>
       </div>
       <p id="status" class="status" role="status" aria-live="polite">Connecting to Discord…</p>
     </header>
@@ -78,6 +79,6 @@
   </main>
 
   <div id="toasts" class="toasts" aria-live="assertive"></div>
-  <script type="module" src="app.js?v=5"></script>
+  <script type="module" src="app.js?v=6"></script>
 </body>
 </html>
