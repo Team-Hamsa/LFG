@@ -25,8 +25,37 @@ SEED = _require("SEED")
 TOKEN_ISSUER_ADDRESS = _require("TOKEN_ISSUER_ADDRESS")
 TOKEN_CURRENCY_HEX = _require("TOKEN_CURRENCY_HEX")
 TOKEN_TRUSTLINE_LIMIT = os.getenv("TOKEN_TRUSTLINE_LIMIT", "1000")
-JSON_RPC_URL = os.getenv("XRPL_JSON_RPC_URL", "https://s.altnet.rippletest.net:51234/")
-WS_URL = os.getenv("XRPL_WS_URL", "wss://s.altnet.rippletest.net:51233")
+
+# One flag flips network endpoints and the collection/BRIX issuer defaults
+# between testnet (the SEED minter account issues everything) and mainnet
+# (the original LFGO/BRIX issuer accounts). Individual env vars still win.
+XRPL_NETWORK = os.getenv("XRPL_NETWORK", "mainnet").strip().lower()
+IS_TESTNET = XRPL_NETWORK == "testnet"
+
+
+def _seed_address() -> str:
+    from xrpl.wallet import Wallet  # deferred: keep config import light
+    try:
+        return Wallet.from_seed(SEED).classic_address
+    except Exception as e:
+        raise ValueError(
+            f"SEED is not a valid XRPL family seed (expected an 's…' base58 "
+            f"secret): {e}") from e
+
+
+if IS_TESTNET:
+    _default_rpc = "https://s.altnet.rippletest.net:51234/"
+    _default_ws = "wss://s.altnet.rippletest.net:51233"
+    _default_swap_issuer = _seed_address()
+    _default_brix_issuer = _default_swap_issuer
+else:
+    _default_rpc = "https://s1.ripple.com:51234/"
+    _default_ws = "wss://xrplcluster.com"
+    _default_swap_issuer = "rLfgoMintj3KBcs4s2XKtquvDwEte2kYfJ"
+    _default_brix_issuer = "rLfgoBriX5ZaMP32mtc7RUZJcjnisKh2Px"
+
+JSON_RPC_URL = os.getenv("XRPL_JSON_RPC_URL", _default_rpc)
+WS_URL = os.getenv("XRPL_WS_URL", _default_ws)
 
 # NFT settings
 NFT_TAXON = int(os.getenv("NFT_TAXON", "0"))
@@ -65,13 +94,14 @@ LAYERS_CDN_FOLDER = os.getenv("LAYERS_CDN_FOLDER", "layers")
 LAYERS_DIR = os.getenv("LAYERS_DIR", "layers")          # local mode root
 LAYER_CACHE_DIR = os.getenv("LAYER_CACHE_DIR", ".layer_cache")
 
-# Trait Swapper (defaults match the original Trait-Swapper bot)
-SWAP_ISSUER_ADDRESS = os.getenv("SWAP_ISSUER_ADDRESS", "rLfgoMintj3KBcs4s2XKtquvDwEte2kYfJ")
+# Trait Swapper (defaults follow XRPL_NETWORK; mainnet values match the
+# original Trait-Swapper bot)
+SWAP_ISSUER_ADDRESS = os.getenv("SWAP_ISSUER_ADDRESS", _default_swap_issuer)
 SWAP_TAXON = int(os.getenv("SWAP_TAXON", "1760"))
 SWAP_CDN_FOLDER = os.getenv("SWAP_CDN_FOLDER", "LFGO")
 SWAP_OFFER_CURRENCY_HEX = os.getenv(
     "SWAP_OFFER_CURRENCY_HEX", "4252495800000000000000000000000000000000")  # BRIX
-SWAP_OFFER_ISSUER = os.getenv("SWAP_OFFER_ISSUER", "rLfgoBriX5ZaMP32mtc7RUZJcjnisKh2Px")
+SWAP_OFFER_ISSUER = os.getenv("SWAP_OFFER_ISSUER", _default_brix_issuer)
 SWAP_OFFER_AMOUNT = os.getenv("SWAP_OFFER_AMOUNT", "10")
 SWAP_MAX_NFT_NUMBER = int(os.getenv("SWAP_MAX_NFT_NUMBER", "3535"))
 SWAP_RECORDS_DIR = os.getenv("SWAP_RECORDS_DIR", "swap_records")
