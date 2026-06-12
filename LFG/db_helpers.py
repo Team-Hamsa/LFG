@@ -54,16 +54,19 @@ def get_next_nft_number() -> int:
         if 'conn' in locals():
             conn.close()
 
-def record_nft_mint(nft_number: int, nft_id: str, discord_id: str, owner_address: str, metadata_url: str, image_url: str, traits: dict) -> bool:
+def record_nft_mint(nft_number: int, nft_id: str, discord_id: str,
+                    owner_address: str, metadata_url: str, image_url: str,
+                    traits: dict, network: str = 'mainnet',
+                    body_type: str = '*', db_path: str = 'lfg_nfts.db') -> bool:
     """Record a new NFT mint in the database"""
     try:
-        conn = sqlite3.connect('lfg_nfts.db')
+        conn = sqlite3.connect(db_path)
         cursor = conn.cursor()
-        
+
         # Check existing columns
         cursor.execute("PRAGMA table_info(LFG)")
         existing_columns = {col[1] for col in cursor.fetchall()}
-        
+
         # Add any missing columns
         new_columns = {
             'nft_id': 'TEXT',
@@ -80,9 +83,11 @@ def record_nft_mint(nft_number: int, nft_id: str, discord_id: str, owner_address
             'Mouth': 'TEXT',
             'Hat': 'TEXT',
             'Accessory': 'TEXT',
-            'created_at': 'TIMESTAMP DEFAULT CURRENT_TIMESTAMP'
+            'created_at': 'TIMESTAMP DEFAULT CURRENT_TIMESTAMP',
+            'network': "TEXT NOT NULL DEFAULT 'mainnet'",
+            'body_type': "TEXT NOT NULL DEFAULT '*'",
         }
-        
+
         for col_name, col_type in new_columns.items():
             if col_name not in existing_columns:
                 try:
@@ -90,15 +95,15 @@ def record_nft_mint(nft_number: int, nft_id: str, discord_id: str, owner_address
                     logging.info(f"Added column {col_name} to LFG table")
                 except Exception as e:
                     logging.error(f"Error adding column {col_name}: {e}")
-        
+
         # Insert the mint record with all data
         cursor.execute('''
         INSERT INTO LFG (
             nft_number, nft_id, discord_id, owner_address,
             metadata_url, image_url,
             Background, Back, Body, Clothing, Eyes, Eyebrows,
-            Mouth, Hat, Accessory
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            Mouth, Hat, Accessory, network, body_type
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         ''', (
             nft_number,
             nft_id,
@@ -114,13 +119,15 @@ def record_nft_mint(nft_number: int, nft_id: str, discord_id: str, owner_address
             traits.get('Eyebrows', ''),
             traits.get('Mouth', ''),
             traits.get('Hat', ''),
-            traits.get('Accessory', '')
+            traits.get('Accessory', ''),
+            network,
+            body_type,
         ))
-        
+
         conn.commit()
         logging.info(f"Recorded NFT mint: #{nft_number} to owner {owner_address}")
         return True
-        
+
     except Exception as e:
         logging.error(f"Error recording NFT mint: {e}")
         return False
