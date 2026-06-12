@@ -53,6 +53,15 @@ function imgUrl(url) {
   return url ? `/api/img?u=${encodeURIComponent(url)}` : url;
 }
 
+// Guild/channel hosting the Activity; the backend turns these into a XUMM
+// return_url so Xaman's post-sign button bounces back into Discord.
+function discordCtx() {
+  return {
+    guild_id: params.get('guild_id'),
+    channel_id: params.get('channel_id'),
+  };
+}
+
 function openExternal(url) {
   if (externalOpener) externalOpener(url);
   else window.open(url, '_blank');
@@ -61,10 +70,21 @@ function openExternal(url) {
 async function setupDiscord() {
   // SDK is vendored same-origin (webapp/client/vendor/) to avoid esm.sh's
   // root-absolute re-exports, which break under the Activity's /.proxy sub-path.
-  const { DiscordSDK } = await import('./vendor/embedded-app-sdk.js');
+  const { DiscordSDK, Common } = await import('./vendor/embedded-app-sdk.js');
   const { client_id: clientId } = await api('/api/config');
   const sdk = new DiscordSDK(clientId);
   await sdk.ready();
+
+  // Follow device orientation instead of Discord's landscape default (#13).
+  // Mobile-only command: ignore the rejection on desktop / older clients.
+  try {
+    const unlocked = Common.OrientationLockStateTypeObject.UNLOCKED;
+    await sdk.commands.setOrientationLockState({
+      lock_state: unlocked,
+      picture_in_picture_lock_state: unlocked,
+      grid_lock_state: unlocked,
+    });
+  } catch (e) { /* not supported here */ }
 
   const { code } = await sdk.commands.authorize({
     client_id: clientId,
@@ -192,7 +212,7 @@ function pollMint(sessionId) {
 
 async function startMint() {
   try {
-    const s = await api('/api/mint', { method: 'POST' });
+    const s = await api('/api/mint', { method: 'POST', body: JSON.stringify(discordCtx()) });
     const [title, text] = STAGE_TEXT.awaiting_payment;
     showFlow({ title, text, qrData: s.payment_link, link: s.payment_link, stage: s.state });
     pollMint(s.id);
@@ -203,7 +223,7 @@ async function startMint() {
 
 async function startTrustline() {
   try {
-    const t = await api('/api/trustline', { method: 'POST' });
+    const t = await api('/api/trustline', { method: 'POST', body: JSON.stringify(discordCtx()) });
     showFlow({
       title: '🔗 Set LFGO Trustline',
       text: 'Scan with Xaman/XUMM and approve the TrustSet. Expires in 5 minutes.',
@@ -218,7 +238,7 @@ async function startTrustline() {
 
 async function startBrixTrustline() {
   try {
-    const t = await api('/api/brix-trustline', { method: 'POST' });
+    const t = await api('/api/brix-trustline', { method: 'POST', body: JSON.stringify(discordCtx()) });
     showFlow({
       title: '🔗 Set BRIX Trustline',
       text: 'Scan with Xaman/XUMM and approve the TrustSet. Required to pay trait swap fees. Expires in 5 minutes.',
@@ -363,7 +383,7 @@ async function confirmSwap() {
   try {
     const s = await api('/api/swap', {
       method: 'POST',
-      body: JSON.stringify({ nft1_id: a.nft_id, nft2_id: b.nft_id, traits }),
+      body: JSON.stringify({ nft1_id: a.nft_id, nft2_id: b.nft_id, traits, ...discordCtx() }),
     });
     showPanel('swap-result-panel');
     el('swap-results').innerHTML = '';

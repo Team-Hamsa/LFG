@@ -176,9 +176,20 @@ async def handle_register(request):
     return web.json_response({"ok": True, "wallet": wallet})
 
 
+async def _request_return_url(request):
+    """Optional XUMM return_url from the client's guild/channel context;
+    bad/missing IDs simply mean no return button in Xaman (issue #14)."""
+    try:
+        body = await request.json()
+    except Exception:
+        body = {}
+    return xumm_ops.discord_return_url(body.get("guild_id"), body.get("channel_id"))
+
+
 @require_auth
 async def handle_trustline(request):
-    payload = await xumm_ops.create_trustline_payload()
+    payload = await xumm_ops.create_trustline_payload(
+        return_url=await _request_return_url(request))
     if not payload:
         return web.json_response({"error": "failed to create trustline request"}, status=502)
     return web.json_response(payload)
@@ -186,7 +197,8 @@ async def handle_trustline(request):
 
 @require_auth
 async def handle_brix_trustline(request):
-    payload = await xumm_ops.create_brix_trustline_payload()
+    payload = await xumm_ops.create_brix_trustline_payload(
+        return_url=await _request_return_url(request))
     if not payload:
         return web.json_response({"error": "failed to create BRIX trustline request"}, status=502)
     return web.json_response(payload)
@@ -204,7 +216,8 @@ async def handle_mint_start(request):
         return web.json_response({"error": "mint already in progress",
                                   "session": active.to_dict()}, status=409)
 
-    session = mint_flow.MintSession(discord_id=user["id"], wallet_address=request["wallet"])
+    session = mint_flow.MintSession(discord_id=user["id"], wallet_address=request["wallet"],
+                                    return_url=await _request_return_url(request))
     mint_sessions[session.id] = session
     # Swap the static fallback link for a real XUMM sign request before the
     # first QR is rendered (after the insert above, so the one-active-session
@@ -270,7 +283,9 @@ async def handle_swap_start(request):
         return web.json_response({"error": "swap already in progress"}, status=409)
     session = swap_flow.SwapSession(
         discord_id=user["id"], wallet_address=request["wallet"],
-        nft1=nft1, nft2=nft2, traits_to_swap=traits_to_swap)
+        nft1=nft1, nft2=nft2, traits_to_swap=traits_to_swap,
+        return_url=xumm_ops.discord_return_url(body.get("guild_id"),
+                                               body.get("channel_id")))
     swap_sessions[session.id] = session
     asyncio.get_event_loop().create_task(swap_flow.run_swap_session(session))
     return web.json_response(session.to_dict())
