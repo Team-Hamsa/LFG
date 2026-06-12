@@ -484,3 +484,26 @@ def test_set_enabled(conn):
     (e,) = conn.execute(
         "SELECT enabled FROM trait_rarity WHERE trait='Red'").fetchone()
     assert e == 0
+
+
+# Task 12: distribution sanity
+
+def test_distribution_matches_weights(conn):
+    # 60/30/10 split, floor small enough not to bind. 10k draws → observed
+    # frequencies within ±3 percentage points of expected.
+    # Use body="*" so recalc puts counts in the "*" body rows that
+    # weighted_pick(body="*") will read.
+    for i in range(60):
+        insert_nft(conn, i + 1, background="A", body="*")
+    for i in range(30):
+        insert_nft(conn, i + 61, background="B", body="*")
+    for i in range(10):
+        insert_nft(conn, i + 91, background="C", body="*")
+    rarity.recalculate_rarity(conn, network="testnet")
+    rng = random.Random(1234)
+    picks = [rarity.weighted_pick(conn, "*", "Background", ["A", "B", "C"],
+                                  network="testnet", now=NOW, rng=rng)
+             for _ in range(10000)]
+    for trait, expected in (("A", 0.60), ("B", 0.30), ("C", 0.10)):
+        observed = picks.count(trait) / 10000
+        assert abs(observed - expected) < 0.03, (trait, observed)
