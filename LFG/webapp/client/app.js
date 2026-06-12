@@ -139,7 +139,7 @@ function renderSteps(stage) {
   }));
 }
 
-function showFlow({ title, text, qrData, link, image, done, stage, spinner, celebrate, pill }) {
+function showFlow({ title, text, qrData, link, image, done, stage, spinner, celebrate, pill, regen }) {
   showPanel('flow-panel');
   renderSteps(stage);
   el('pay-method').hidden = !pill;
@@ -155,8 +155,12 @@ function showFlow({ title, text, qrData, link, image, done, stage, spinner, cele
   el('flow-link-btn').hidden = !link;
   if (link) el('flow-link-btn').onclick = () => openExternal(link);
   el('nft-image').hidden = !image;
+  // The minted NFT is the hero: with an image on screen the QR drops to a
+  // compact companion size (issue #22).
+  el('flow-panel').classList.toggle('with-image', !!image);
   el('nft-image').classList.toggle('celebrate', !!(image && celebrate));
   if (image) el('nft-image').src = image;
+  el('flow-regen-btn').hidden = !regen;
   el('flow-done-btn').hidden = !done;
 }
 
@@ -165,15 +169,27 @@ function showFlow({ title, text, qrData, link, image, done, stage, spinner, cele
 // price differ — the mechanics are never explained.
 function mintPayView(s) {
   const xrp = s.pay_with === 'XRP';
+  const pill = { kind: xrp ? 'xrp' : 'lfgo', text: `Paying with ${xrp ? 'XRP' : 'LFGO'}` };
+  // QR already scanned: drop it and show a spinner while Xaman finishes (issue #22)
+  if (s.qr_scanned) {
+    return {
+      title: '📲 Approve in Xaman',
+      text: 'QR scanned — approve the payment in Xaman and hang tight here.',
+      pill,
+      spinner: true,
+      stage: s.state,
+    };
+  }
   return {
     title: '💰 Pay to build',
     text: xrp
       ? `Pay ${s.pay_amount} XRP to mint your avatar — no trustline needed. Scan with Xaman, approve, and hang tight here.`
       : `Pay ${s.pay_amount || 1} LFGO — burned on mint. Scan with Xaman, approve, and hang tight here.`,
-    pill: { kind: xrp ? 'xrp' : 'lfgo', text: `Paying with ${xrp ? 'XRP' : 'LFGO'}` },
+    pill,
     qrData: s.payment_link,
     link: s.payment_link,
     stage: s.state,
+    regen: true,
   };
 }
 
@@ -197,16 +213,31 @@ function pollMint(sessionId) {
     }
 
     if (s.state === 'offer_ready') {
+      if (s.accept_signed) {
+        showFlow({
+          title: `🎉 #${s.nft_number} claimed!`,
+          text: 'The transfer is signed — your new avatar is heading to your wallet. Welcome to the job site.',
+          image: imgUrl(s.image_url),
+          done: true,
+          stage: s.state,
+          celebrate: true,
+        });
+        return;
+      }
       showFlow({
         title: `🎉 Minted! #${s.nft_number} is yours`,
-        text: 'Scan to accept the transfer and claim it to your wallet. Welcome to the job site.',
-        qrData: s.accept_deeplink,
+        text: s.accept_scanned
+          ? 'Approve the transfer in Xaman to claim it to your wallet…'
+          : 'Scan to accept the transfer and claim it to your wallet. Welcome to the job site.',
+        qrData: s.accept_scanned ? null : s.accept_deeplink,
+        spinner: s.accept_scanned,
         link: s.accept_deeplink,
         image: imgUrl(s.image_url),
         done: true,
         stage: s.state,
         celebrate: true,
       });
+      pollTimer = setTimeout(tick, 3000); // keep watching for the accept signature
       return;
     }
     if (s.state === 'payment_timeout') {
@@ -229,9 +260,12 @@ function pollMint(sessionId) {
   pollTimer = setTimeout(tick, 3000);
 }
 
+let currentMintId = null;
+
 async function startMint() {
   try {
     const s = await api('/api/mint', { method: 'POST', body: JSON.stringify(discordCtx()) });
+    currentMintId = s.id;
     showFlow(mintPayView(s));
     pollMint(s.id);
   } catch (e) {
@@ -239,15 +273,81 @@ async function startMint() {
   }
 }
 
-async function registerWallet() {
-  const wallet = el('wallet-input').value.trim();
+// Missed the QR before it expired? Mint a fresh payment payload without
+// restarting the whole session (issue #22).
+async function regeneratePaymentQr() {
+  if (!currentMintId) return;
+  const btn = el('flow-regen-btn');
+  btn.disabled = true;
   try {
-    await api('/api/register', { method: 'POST', body: JSON.stringify({ wallet }) });
-    me.wallet = wallet;
-    showMintHome();
+    const s = await api(`/api/mint/${currentMintId}/regenerate`, {
+      method: 'POST', body: JSON.stringify(discordCtx()),
+    });
+    showFlow(mintPayView(s));
   } catch (e) {
     showError(e.message);
+  } finally {
+    btn.disabled = false;
   }
+}
+
+// --- Registration via Xaman Sign In (issue #24) ---
+
+let signinPollTimer = null;
+
+function renderSignin({ sub, spinner, qrLink, retry }) {
+  el('register-sub').textContent = sub;
+  el('register-spinner').hidden = !spinner;
+  el('register-qr').hidden = !qrLink;
+  if (qrLink) el('register-qr').src = qrUrl(qrLink);
+  el('register-link-btn').hidden = !qrLink;
+  if (qrLink) el('register-link-btn').onclick = () => openExternal(qrLink);
+  el('register-retry-btn').hidden = !retry;
+}
+
+async function startSignin() {
+  clearTimeout(signinPollTimer);
+  showPanel('register-panel');
+  renderSignin({ sub: 'Setting up your Xaman sign-in…', spinner: true });
+  try {
+    const s = await api('/api/signin', { method: 'POST', body: JSON.stringify(discordCtx()) });
+    renderSignin({
+      sub: 'Scan with Xaman and approve the sign-in — your wallet address is captured automatically.',
+      qrLink: s.signin_link,
+    });
+    pollSignin(s.uuid);
+  } catch (e) {
+    showError(e.message);
+    renderSignin({ sub: 'Could not start the Xaman sign-in.', retry: true });
+  }
+}
+
+function pollSignin(uuid) {
+  clearTimeout(signinPollTimer);
+  const tick = async () => {
+    if (el('register-panel').hidden) return; // user navigated away
+    let s;
+    try {
+      s = await api(`/api/signin/${uuid}`);
+    } catch (e) {
+      signinPollTimer = setTimeout(tick, 3000); // transient; keep polling
+      return;
+    }
+    if (s.state === 'signed') {
+      me.wallet = s.wallet;
+      showMintHome();
+      return;
+    }
+    if (s.state === 'expired') {
+      renderSignin({ sub: 'The sign-in request expired.', retry: true });
+      return;
+    }
+    if (s.state === 'opened') {
+      renderSignin({ sub: 'QR scanned — approve the sign-in in Xaman…', spinner: true });
+    }
+    signinPollTimer = setTimeout(tick, 3000);
+  };
+  signinPollTimer = setTimeout(tick, 3000);
 }
 
 // --- Trait Swapper ---
@@ -563,15 +663,16 @@ function setupLogo() {
 
 async function main() {
   setupLogo();
-  el('register-btn').onclick = registerWallet;
+  el('register-retry-btn').onclick = startSignin;
   el('mint-btn').onclick = startMint;
+  el('flow-regen-btn').onclick = regeneratePaymentQr;
   el('swap-btn').onclick = openSwapper;
   el('swap-back-btn').onclick = () => showMintHome();
   el('pick-traits-btn').onclick = showTraitChooser;
   el('swap-cancel-btn').onclick = () => openSwapper();
   el('swap-confirm-btn').onclick = confirmSwap;
   el('swap-done-btn').onclick = () => showMintHome();
-  el('change-wallet-btn').onclick = () => { showPanel('register-panel'); };
+  el('change-wallet-btn').onclick = () => startSignin();
   el('flow-done-btn').onclick = () => { showMintHome(); };
 
   if (!insideDiscord) {
@@ -584,8 +685,8 @@ async function main() {
     me = await api('/api/me');
     if (me.wallet) showMintHome();
     else {
-      showPanel('register-panel');
-      status(`Hey ${me.username} — register your XRPL wallet to start building.`);
+      status(`Hey ${me.username} — sign in with Xaman to start building.`);
+      await startSignin();
     }
   } catch (e) {
     console.error(e);
