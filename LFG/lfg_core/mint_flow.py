@@ -225,9 +225,9 @@ async def run_mint_session(session: MintSession) -> None:
         session.state = GENERATING
         session.nft_number = await _allocate_nft_number()
         store = layer_store.get_layer_store()
-        gender, attributes = await traits.select_random_attributes(store)
+        body, attributes = await traits.select_random_attributes(store)
         output_path, is_video = await swap_compose.compose_nft(
-            attributes, gender, store, f"lfg_{session.nft_number}")
+            attributes, body, store, f"lfg_{session.nft_number}")
 
         # 3. Upload image (+ video) and metadata to BunnyCDN
         image_cdn_url, video_cdn_url = await swap_compose.upload_output(
