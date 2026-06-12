@@ -20,7 +20,9 @@ os.environ.setdefault("BUNNY_CDN_ACCESS_KEY", "test")
 os.environ.setdefault("BUNNY_CDN_STORAGE_ZONE", "test")
 os.environ.setdefault("LAYER_SOURCE", "local")
 
-from lfg_core import mint_flow, xumm_ops, xrpl_ops, traits, swap_meta, swap_flow, layer_store  # noqa: E402
+from aiohttp import web  # noqa: E402
+from lfg_core import (mint_flow, xumm_ops, xrpl_ops, traits, swap_meta,  # noqa: E402
+                      swap_flow, layer_store, config)
 from webapp import server  # noqa: E402
 import user_db  # noqa: E402
 
@@ -765,3 +767,75 @@ def test_cdn_layer_store_resolve_uses_cache(monkeypatch, tmp_path):
     assert path.endswith("male/Eyes/Laser.png")
     assert downloads == ["male/Eyes/Laser.png"]
     assert loop.run_until_complete(store.resolve("male", "Eyes", "Missing")) is None
+
+
+# --- same-origin image proxy (Activity CSP blocks cross-origin <img> loads) ---
+
+def _img_request(query):
+    from aiohttp.test_utils import make_mocked_request
+    return make_mocked_request("GET", f"/api/img?{query}")
+
+
+def test_img_proxy_route_registered():
+    app = server.create_app()
+    paths = {getattr(r.resource, 'canonical', '') for r in app.router.routes()}
+    assert "/api/img" in paths
+
+
+def test_img_proxy_rejects_missing_and_foreign_urls():
+    loop = asyncio.get_event_loop()
+    from urllib.parse import quote
+    for q in ("", "u=" + quote("https://evil.example/x.png", safe=""),
+              # same prefix as the CDN base but a different host
+              "u=" + quote(config.BUNNY_CDN_PUBLIC_BASE + ".evil.example/x.png",
+                           safe="")):
+        resp = loop.run_until_complete(server.handle_img(_img_request(q)))
+        assert resp.status == 400, f"query {q!r} should be rejected"
+
+
+def test_img_proxy_streams_allowed_cdn_url(monkeypatch):
+    fetched = []
+
+    async def fake_fetch(url):
+        fetched.append(url)
+        return b"\x89PNG fake", "image/png"
+
+    monkeypatch.setattr(server, "_fetch_cdn", fake_fetch)
+    from urllib.parse import quote
+    url = config.BUNNY_CDN_PUBLIC_BASE + "/LFGO/123.png"
+    loop = asyncio.get_event_loop()
+    resp = loop.run_until_complete(
+        server.handle_img(_img_request("u=" + quote(url, safe=""))))
+    assert resp.status == 200
+    assert resp.body == b"\x89PNG fake"
+    assert resp.content_type == "image/png"
+    # images are immutable; they must opt out of the global no-store middleware
+    assert "no-store" not in resp.headers.get("Cache-Control", "")
+    assert fetched == [url]
+
+
+def test_img_proxy_cdn_error_is_502(monkeypatch):
+    async def fake_fetch(url):
+        raise RuntimeError("CDN unreachable")
+
+    monkeypatch.setattr(server, "_fetch_cdn", fake_fetch)
+    from urllib.parse import quote
+    url = config.BUNNY_CDN_PUBLIC_BASE + "/LFGO/123.png"
+    loop = asyncio.get_event_loop()
+    resp = loop.run_until_complete(
+        server.handle_img(_img_request("u=" + quote(url, safe=""))))
+    assert resp.status == 502
+
+
+def test_no_cache_middleware_respects_handler_cache_header():
+    """no_cache_mw must not clobber a Cache-Control the handler set (the image
+    proxy marks responses cacheable)."""
+    from aiohttp.test_utils import make_mocked_request
+
+    async def handler(request):
+        return web.Response(text="x", headers={"Cache-Control": "public, max-age=60"})
+
+    loop = asyncio.get_event_loop()
+    req = make_mocked_request("GET", "/x")
+    resp = loop.run_until_complete(server.no_cache_mw(req, handler))
+    assert resp.headers["Cache-Control"] == "public, max-age=60"
