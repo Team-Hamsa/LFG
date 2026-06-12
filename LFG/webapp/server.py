@@ -287,8 +287,88 @@ async def handle_swap_start(request):
     return web.json_response(session.to_dict())
 
 
-handle_mint_status = make_status_handler(mint_sessions)
+@require_auth
+async def handle_mint_status(request):
+    session = mint_sessions.get(request.match_info["session_id"])
+    if not session or session.discord_id != request["user"]["id"]:
+        return web.json_response({"error": "not found"}, status=404)
+    # Refresh the QR-scanned flags so the client can swap the QR for a
+    # spinner the moment Xaman opens the payload (issue #22).
+    await mint_flow.update_scan_state(session)
+    return web.json_response(session.to_dict())
+
+
+@require_auth
+async def handle_mint_regenerate(request):
+    """Issue a fresh payment QR for a session whose payload expired before
+    the user could scan it (issue #22)."""
+    session = mint_sessions.get(request.match_info["session_id"])
+    if not session or session.discord_id != request["user"]["id"]:
+        return web.json_response({"error": "not found"}, status=404)
+    if session.state != mint_flow.AWAITING_PAYMENT:
+        return web.json_response({"error": "session is past payment"}, status=409)
+    try:
+        await asyncio.wait_for(session.regenerate_payment(), timeout=8)
+    except Exception as e:
+        logging.warning(f"regenerate_payment failed: {e}")
+    session.ensure_payment_fallback()
+    return web.json_response(session.to_dict())
+
+
 handle_swap_status = make_status_handler(swap_sessions)
+
+
+# --- Xaman Sign In registration (issue #24) ---
+
+# payload uuid -> {discord_id, name, created_at}; pruned by age
+signin_payloads = {}
+SIGNIN_TTL = 900
+
+
+def _prune_signin_payloads():
+    cutoff = time.time() - SIGNIN_TTL
+    for uuid, rec in list(signin_payloads.items()):
+        if rec["created_at"] < cutoff:
+            del signin_payloads[uuid]
+
+
+@require_auth
+async def handle_signin_start(request):
+    """Create a XUMM SignIn payload; the user scans it in Xaman and their
+    wallet address is captured on approval — no manual address entry."""
+    user = request["user"]
+    _prune_signin_payloads()
+    payload = await xumm_ops.create_signin_payload(
+        return_url=await _request_return_url(request))
+    if not payload:
+        return web.json_response({"error": "could not reach Xaman"}, status=502)
+    signin_payloads[payload["uuid"]] = {
+        "discord_id": user["id"], "name": user["name"],
+        "created_at": time.time(),
+    }
+    return web.json_response({"uuid": payload["uuid"],
+                              "signin_link": payload["xumm_url"]})
+
+
+@require_auth
+async def handle_signin_status(request):
+    uuid = request.match_info["payload_uuid"]
+    rec = signin_payloads.get(uuid)
+    if not rec or rec["discord_id"] != request["user"]["id"]:
+        return web.json_response({"error": "not found"}, status=404)
+    s = await xumm_ops.get_payload_status(uuid)
+    if not s:
+        return web.json_response({"error": "could not reach Xaman"}, status=502)
+    if s["signed"] and s["account"] and is_valid_classic_address(s["account"]):
+        if not await asyncio.to_thread(register_user, rec["discord_id"],
+                                       rec["name"], s["account"]):
+            return web.json_response({"error": "registration failed"}, status=500)
+        del signin_payloads[uuid]
+        return web.json_response({"state": "signed", "wallet": s["account"]})
+    if s["expired"]:
+        del signin_payloads[uuid]
+        return web.json_response({"state": "expired"})
+    return web.json_response({"state": "opened" if s["opened"] else "pending"})
 
 
 async def handle_config(request):
@@ -356,6 +436,9 @@ def create_app() -> web.Application:
     app.router.add_post("/api/register", handle_register)
     app.router.add_post("/api/mint", handle_mint_start)
     app.router.add_get("/api/mint/{session_id}", handle_mint_status)
+    app.router.add_post("/api/mint/{session_id}/regenerate", handle_mint_regenerate)
+    app.router.add_post("/api/signin", handle_signin_start)
+    app.router.add_get("/api/signin/{payload_uuid}", handle_signin_status)
     app.router.add_get("/api/nfts", handle_nfts)
     app.router.add_post("/api/swap", handle_swap_start)
     app.router.add_get("/api/swap/{session_id}", handle_swap_status)
