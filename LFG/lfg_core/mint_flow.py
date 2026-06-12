@@ -13,7 +13,7 @@ import logging
 import traceback
 from decimal import Decimal
 
-from lfg_core import config, cdn, traits, xrpl_ops, xumm_ops, layer_store, swap_compose, rarity
+from lfg_core import config, cdn, traits, xrpl_ops, xumm_ops, layer_store, swap_compose
 from db_helpers import get_next_nft_number, record_nft_mint
 
 # Session states
@@ -225,9 +225,9 @@ async def run_mint_session(session: MintSession) -> None:
         session.state = GENERATING
         session.nft_number = await _allocate_nft_number()
         store = layer_store.get_layer_store()
-        body, attributes = await traits.select_random_attributes(store)
+        gender, attributes = await traits.select_random_attributes(store)
         output_path, is_video = await swap_compose.compose_nft(
-            attributes, body, store, f"lfg_{session.nft_number}")
+            attributes, gender, store, f"lfg_{session.nft_number}")
 
         # 3. Upload image (+ video) and metadata to BunnyCDN
         image_cdn_url, video_cdn_url = await swap_compose.upload_output(
@@ -272,8 +272,6 @@ async def run_mint_session(session: MintSession) -> None:
             metadata_url=metadata_cdn_url,
             image_url=image_cdn_url,
             traits=traits_dict,
-            network=config.XRPL_NETWORK,
-            body_type=body,
         )
         # The mint is on-chain at this point; a DB failure must not stop the
         # transfer offer from reaching the user.
@@ -284,22 +282,6 @@ async def run_mint_session(session: MintSession) -> None:
             saved = False
         if saved:
             _reserved_numbers.discard(session.nft_number)
-            def _update_rarity():
-                conn = rarity.connect()
-                try:
-                    for attr in metadata["attributes"]:
-                        rarity.start_boost_clock(conn, body,
-                                                 attr["trait_type"],
-                                                 attr["value"])
-                    rarity.start_boost_clock(conn, rarity.BODY_SENTINEL,
-                                             rarity.BODY_CATEGORY, body)
-                    rarity.recalculate_rarity(conn)
-                finally:
-                    conn.close()
-            try:
-                await asyncio.to_thread(_update_rarity)
-            except Exception:
-                logging.error(f"rarity update failed: {traceback.format_exc()}")
         else:
             # Keep the number reserved so it can't be reused this process,
             # and persist the record for manual recovery.
