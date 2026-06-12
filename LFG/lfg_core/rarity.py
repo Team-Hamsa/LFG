@@ -116,6 +116,8 @@ def weighted_pick(conn, body, category, available, *, network=None,
     now = now or utcnow()
     ensure_schema(conn)
     _ensure_rows(conn, network, body, category, available, now)
+    if _is_stale(conn, network, category):
+        recalculate_rarity(conn, network=network)
 
     placeholders = ",".join("?" * len(available))
     rows = conn.execute(
@@ -134,3 +136,64 @@ def weighted_pick(conn, body, category, available, *, network=None,
     weights = [effective_weight(r[1], total, r[2], r[3], r[4], r[5], now)
                for r in rows]
     return rng.choices(traits, weights=weights, k=1)[0]
+
+
+def _live_where(network):
+    """WHERE fragment selecting live (unburned) LFG rows for a network."""
+    return ("""network=? AND nft_number NOT IN
+               (SELECT nft_number FROM burned_nfts)""", (network,))
+
+
+def recalculate_rarity(conn, network=None):
+    """Recount live_count for every (body_type, category, trait) from the LFG
+    table minus burned_nfts, plus the reserved Body Type category. Upserts
+    counts; preserves boost/floor/enabled columns; zeroes traits that no
+    longer occur. Cheap (GROUP BY over a few thousand rows).
+
+    Note: LFG.body_type stores the body class (male/female/skeleton/ape).
+    LFG.Body (capitalized) stores the body trait value (e.g. Straight Dark).
+    SQLite is case-insensitive for column names, hence the distinct name.
+    """
+    network = network or config.XRPL_NETWORK
+    ensure_schema(conn)
+    where, params = _live_where(network)
+
+    conn.execute("UPDATE trait_rarity SET live_count=0 WHERE network=?",
+                 (network,))
+    upsert = """INSERT INTO trait_rarity
+                (network, body, category, trait, live_count, floor_weight)
+                VALUES (?, ?, ?, ?, ?, ?)
+                ON CONFLICT(network, body, category, trait)
+                DO UPDATE SET live_count=excluded.live_count"""
+    for category, column in LFG_COLUMN_FOR_CATEGORY.items():
+        rows = conn.execute(
+            f"""SELECT body_type, "{column}", COUNT(*) FROM LFG
+                WHERE {where} AND "{column}" != '' AND "{column}" IS NOT NULL
+                GROUP BY body_type, "{column}" """, params).fetchall()
+        for body, trait, count in rows:
+            conn.execute(upsert, (network, body or BODY_SENTINEL, category,
+                                  trait, count, config.RARITY_FLOOR))
+    body_rows = conn.execute(
+        f"SELECT body_type, COUNT(*) FROM LFG WHERE {where} GROUP BY body_type",
+        params).fetchall()
+    for body, count in body_rows:
+        if body and body != BODY_SENTINEL:
+            conn.execute(upsert, (network, BODY_SENTINEL, BODY_CATEGORY,
+                                  body, count, config.RARITY_FLOOR))
+    conn.commit()
+
+
+def _is_stale(conn, network, category):
+    """True when cached category counts disagree with the live collection."""
+    column = LFG_COLUMN_FOR_CATEGORY.get(category)
+    if column is None:
+        return False  # Body Type and unknown categories: recalc handles them
+    (cached,) = conn.execute(
+        """SELECT COALESCE(SUM(live_count), 0) FROM trait_rarity
+           WHERE network=? AND category=?""", (network, category)).fetchone()
+    where, params = _live_where(network)
+    (actual,) = conn.execute(
+        f"""SELECT COUNT(*) FROM LFG WHERE {where}
+            AND "{column}" != '' AND "{column}" IS NOT NULL""",
+        params).fetchone()
+    return cached != actual
