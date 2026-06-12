@@ -273,3 +273,81 @@ def _is_stale(conn, network, category):
             AND "{column}" != '' AND "{column}" IS NOT NULL""",
         params).fetchone()
     return cached != actual
+
+
+# ---------------------------------------------------------------------------
+# Admin functions (CLI + Discord /admin)
+# ---------------------------------------------------------------------------
+
+def seed_from_collection(conn, network=None, mark_testnet=None,
+                         layer_values=None):
+    """Bootstrap: optionally mark known test mints as testnet, backfill
+    LFG.body_type from the stored Body trait value, register any layer-store
+    values, then full recount."""
+    from lfg_core.swap_meta import detect_body
+    network = network or config.XRPL_NETWORK
+    ensure_schema(conn)
+    if mark_testnet:
+        qs = ",".join("?" * len(mark_testnet))
+        conn.execute(
+            f"UPDATE LFG SET network='testnet' WHERE nft_number IN ({qs})",
+            list(mark_testnet))
+    rows = conn.execute(
+        "SELECT nft_number, Body FROM LFG WHERE body_type=?",
+        (BODY_SENTINEL,)).fetchall()
+    for number, body_trait in rows:
+        conn.execute(
+            "UPDATE LFG SET body_type=? WHERE nft_number=?",
+            (detect_body([{"trait_type": "Body",
+                           "value": body_trait or ""}]), number))
+    now = utcnow()
+    for body, categories in (layer_values or {}).items():
+        for category, values in categories.items():
+            _ensure_rows(conn, network, body, category, values, now)
+    conn.commit()
+    recalculate_rarity(conn, network=network)
+
+
+def set_floor(conn, floor, *, network=None, body=None, category=None,
+              trait=None):
+    """Set floor_weight globally for a network, or for one specific trait."""
+    network = network or config.XRPL_NETWORK
+    if trait is not None:
+        conn.execute(
+            """UPDATE trait_rarity SET floor_weight=?
+               WHERE network=? AND body=? AND category=? AND trait=?""",
+            (floor, network, body, category, trait))
+    else:
+        conn.execute(
+            "UPDATE trait_rarity SET floor_weight=? WHERE network=?",
+            (floor, network))
+    conn.commit()
+
+
+def set_enabled(conn, body, category, trait, enabled, *, network=None):
+    network = network or config.XRPL_NETWORK
+    conn.execute(
+        """UPDATE trait_rarity SET enabled=?
+           WHERE network=? AND body=? AND category=? AND trait=?""",
+        (1 if enabled else 0, network, body, category, trait))
+    conn.commit()
+
+
+def get_odds(conn, body, category, *, network=None, now=None):
+    """Rows for admin display: (trait, live_count, share%, weight, status)
+    sorted by effective weight descending."""
+    network = network or config.XRPL_NETWORK
+    now = now or utcnow()
+    rows = conn.execute(
+        """SELECT trait, live_count, floor_weight, boost_initial,
+                  boost_step_hours, boost_started_at, enabled
+           FROM trait_rarity WHERE network=? AND body=? AND category=?""",
+        (network, body, category)).fetchall()
+    total = sum(r[1] for r in rows)
+    out = []
+    for trait, count, floor, bi, bs, bsa, enabled in rows:
+        share = (count / total * 100) if total else 0.0
+        weight = effective_weight(count, total, floor, bi, bs, bsa, now)
+        status = "disabled" if not enabled else boost_status(bi, bs, bsa, now)
+        out.append((trait, count, share, weight, status))
+    return sorted(out, key=lambda r: -r[3])
