@@ -13,7 +13,7 @@ import logging
 import traceback
 from decimal import Decimal
 
-from lfg_core import config, cdn, traits, xrpl_ops, xumm_ops, layer_store, swap_compose
+from lfg_core import config, cdn, traits, xrpl_ops, xumm_ops, layer_store, swap_compose, rarity
 from db_helpers import get_next_nft_number, record_nft_mint
 
 # Session states
@@ -282,6 +282,22 @@ async def run_mint_session(session: MintSession) -> None:
             saved = False
         if saved:
             _reserved_numbers.discard(session.nft_number)
+            def _update_rarity():
+                conn = rarity.connect()
+                try:
+                    for attr in metadata["attributes"]:
+                        rarity.start_boost_clock(conn, body,
+                                                 attr["trait_type"],
+                                                 attr["value"])
+                    rarity.start_boost_clock(conn, rarity.BODY_SENTINEL,
+                                             rarity.BODY_CATEGORY, body)
+                    rarity.recalculate_rarity(conn)
+                finally:
+                    conn.close()
+            try:
+                await asyncio.to_thread(_update_rarity)
+            except Exception:
+                logging.error(f"rarity update failed: {traceback.format_exc()}")
         else:
             # Keep the number reserved so it can't be reused this process,
             # and persist the record for manual recovery.

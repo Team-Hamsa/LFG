@@ -353,3 +353,55 @@ def test_boost_status_strings(conn):
     assert rarity.boost_status(7.0, 24, iso(NOW - timedelta(hours=25)),
                                NOW).startswith("active 6x")
     assert rarity.boost_status(None, 24, None, NOW) == "—"
+
+
+# Task 7: Webapp integration
+
+class FakeStore:
+    """Minimal async layer store for selection tests."""
+    def __init__(self, tree):
+        self.tree = tree  # {body: {trait_type: [values]}}
+
+    async def list_bodies(self):
+        return sorted(self.tree)
+
+    async def list_trait_types(self, body):
+        return sorted(self.tree[body])
+
+    async def list_values(self, body, trait_type):
+        return self.tree[body].get(trait_type, [])
+
+
+def test_select_random_attributes_uses_engine(conn):
+    import asyncio
+    from lfg_core import traits
+    store = FakeStore({"male": {"Background": ["Red", "Blue"],
+                                "Body": ["Straight Dark"]}})
+    body, attrs = asyncio.get_event_loop().run_until_complete(
+        traits.select_random_attributes(store, conn=conn, network="testnet",
+                                        now=NOW, rng=random.Random(1)))
+    assert body == "male"
+    types = {a["trait_type"] for a in attrs}
+    assert types == {"Background", "Body"}
+    # Engine left auto-detected rows behind
+    n = conn.execute("""SELECT COUNT(*) FROM trait_rarity
+                        WHERE network='testnet'""").fetchone()[0]
+    assert n >= 3  # 2 backgrounds + 1 body trait (+ Body Type row)
+
+
+def test_select_random_attributes_weights_body_pick(conn):
+    import asyncio
+    from lfg_core import traits
+    # 99 male : 1 ape in the collection → male should dominate body picks
+    for i in range(99):
+        insert_nft(conn, i + 1, body="male")
+    insert_nft(conn, 100, body="ape")
+    rarity.recalculate_rarity(conn, network="testnet")
+    store = FakeStore({"male": {"Background": ["Red"]},
+                       "ape": {"Background": ["Red"]}})
+    rng = random.Random(9)
+    bodies = [asyncio.get_event_loop().run_until_complete(
+        traits.select_random_attributes(store, conn=conn, network="testnet",
+                                        now=NOW, rng=rng))[0]
+        for _ in range(200)]
+    assert bodies.count("male") > 150
