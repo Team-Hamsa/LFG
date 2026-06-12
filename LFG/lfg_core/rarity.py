@@ -187,6 +187,21 @@ def recalculate_rarity(conn, network=None):
     conn.commit()
 
 
+FOLDER_CATEGORY = {
+    "background": "Background", "back": "Back", "body": "Body",
+    "clothing": "Clothing", "mouth": "Mouth", "eyebrows": "Eyebrows",
+    "eyes": "Eyes", "hat:hair": "Head", "accessory": "Accessory",
+}
+
+
+def category_for_folder(folder_name):
+    """Map a legacy trait_layers folder name ('8 hat:hair') to a rarity
+    category ('Head'). None if unrecognized."""
+    import re
+    name = re.sub(r"^\d+\s*", "", folder_name).strip().lower()
+    return FOLDER_CATEGORY.get(name)
+
+
 def arm_boost(conn, body, category, trait, *, network=None,
               boost_initial=None, boost_step_hours=None):
     """Admin opt-in: configure a dormant boost. Resets the clock, so it also
