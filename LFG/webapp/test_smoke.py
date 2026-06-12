@@ -801,6 +801,17 @@ def test_xrpl_network_flag_testnet_uses_seed_wallet(monkeypatch):
         importlib.reload(config)
 
 
+def test_invalid_seed_on_testnet_raises_clear_error(monkeypatch):
+    try:
+        monkeypatch.setenv("SEED", "not-a-valid-seed")
+        with pytest.raises(ValueError, match="SEED"):
+            _reload_config(monkeypatch, "testnet")
+    finally:
+        monkeypatch.undo()
+        import importlib
+        importlib.reload(config)
+
+
 def test_xrpl_network_flag_defaults_to_mainnet_addresses(monkeypatch):
     try:
         for network in ("mainnet", ""):  # flag off / unset → mainnet

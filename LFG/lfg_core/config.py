@@ -35,7 +35,12 @@ IS_TESTNET = XRPL_NETWORK == "testnet"
 
 def _seed_address() -> str:
     from xrpl.wallet import Wallet  # deferred: keep config import light
-    return Wallet.from_seed(SEED).classic_address
+    try:
+        return Wallet.from_seed(SEED).classic_address
+    except Exception as e:
+        raise ValueError(
+            f"SEED is not a valid XRPL family seed (expected an 's…' base58 "
+            f"secret): {e}") from e
 
 
 if IS_TESTNET:
