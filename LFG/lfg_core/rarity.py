@@ -66,3 +66,26 @@ def ensure_schema(conn):
             conn.execute(
                 "ALTER TABLE LFG ADD COLUMN body_type TEXT NOT NULL DEFAULT '*'")
     conn.commit()
+
+
+def boost_multiplier(boost_initial, boost_step_hours, boost_started_at, now):
+    """Stepped decay: boost_initial for the first window, −1 per window,
+    never below 1. Dormant (clock unstarted) or unconfigured → 1."""
+    if not boost_initial or not boost_started_at:
+        return 1.0
+    started = datetime.fromisoformat(boost_started_at)
+    if started.tzinfo is None:
+        started = started.replace(tzinfo=timezone.utc)
+    hours = (now - started).total_seconds() / 3600.0
+    windows = int(hours // (boost_step_hours or 24))
+    return max(1.0, boost_initial - windows)
+
+
+def effective_weight(live_count, category_total, floor_weight,
+                     boost_initial, boost_step_hours, boost_started_at, now):
+    """weight = max(live_share, floor) × boost multiplier. Relative weight,
+    not a normalized probability."""
+    share = (live_count / category_total) if category_total else 0.0
+    base = max(share, floor_weight)
+    return base * boost_multiplier(boost_initial, boost_step_hours,
+                                   boost_started_at, now)

@@ -58,3 +58,52 @@ def test_ensure_schema_adds_lfg_columns(conn):
 
 def test_ensure_schema_idempotent(conn):
     rarity.ensure_schema(conn)  # second call must not raise
+
+
+def iso(dt):
+    return dt.isoformat()
+
+
+def test_share_is_proportional():
+    # 30 of 100 → 0.3 (floor 0.005 doesn't bind)
+    assert rarity.effective_weight(30, 100, 0.005, None, 24, None, NOW) == pytest.approx(0.3)
+
+
+def test_floor_clamps_zero_and_low_counts():
+    assert rarity.effective_weight(0, 100, 0.005, None, 24, None, NOW) == pytest.approx(0.005)
+    assert rarity.effective_weight(1, 10000, 0.005, None, 24, None, NOW) == pytest.approx(0.005)
+
+
+def test_empty_category_uses_floor():
+    assert rarity.effective_weight(0, 0, 0.005, None, 24, None, NOW) == pytest.approx(0.005)
+
+
+def test_dormant_boost_is_floor_only():
+    # boost configured but clock not started → multiplier 1
+    assert rarity.effective_weight(0, 100, 0.005, 7.0, 24, None, NOW) == pytest.approx(0.005)
+
+
+def test_boost_steps_down_per_window():
+    started = iso(NOW - timedelta(hours=1))
+    assert rarity.boost_multiplier(7.0, 24, started, NOW) == pytest.approx(7.0)
+    started = iso(NOW - timedelta(hours=25))
+    assert rarity.boost_multiplier(7.0, 24, started, NOW) == pytest.approx(6.0)
+    started = iso(NOW - timedelta(hours=24 * 6 + 1))
+    assert rarity.boost_multiplier(7.0, 24, started, NOW) == pytest.approx(1.0)
+
+
+def test_boost_window_boundary_exact():
+    # Exactly 24h elapsed → second window begins → 6x
+    started = iso(NOW - timedelta(hours=24))
+    assert rarity.boost_multiplier(7.0, 24, started, NOW) == pytest.approx(6.0)
+
+
+def test_boost_never_below_one():
+    started = iso(NOW - timedelta(days=365))
+    assert rarity.boost_multiplier(7.0, 24, started, NOW) == pytest.approx(1.0)
+
+
+def test_active_boost_multiplies_base():
+    started = iso(NOW - timedelta(hours=1))
+    # base = max(0.0, 0.005) = 0.005; ×7
+    assert rarity.effective_weight(0, 100, 0.005, 7.0, 24, started, NOW) == pytest.approx(0.035)
