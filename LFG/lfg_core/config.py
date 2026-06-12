@@ -95,7 +95,7 @@ WEBAPP_PORT = int(os.getenv("WEBAPP_PORT", "8176"))
 PAYMENT_TIMEOUT_SECONDS = int(os.getenv("PAYMENT_TIMEOUT_SECONDS", "300"))
 
 # Unified trait layer store (shared by mint + swap).
-# Canonical structure: <gender>/<TraitType>/<Value>.png|.gif|.mp4
+# Canonical structure: <body>/<TraitType>/<Value>.png|.gif|.mp4
 LAYER_SOURCE = os.getenv("LAYER_SOURCE", "cdn")  # "cdn" or "local"
 LAYERS_CDN_FOLDER = os.getenv("LAYERS_CDN_FOLDER", "layers")
 LAYERS_DIR = os.getenv("LAYERS_DIR", "layers")          # local mode root
