@@ -51,8 +51,10 @@ def swap_fee_total(modify_count: int) -> str:
 
 class SwapSession:
     def __init__(self, discord_id: str, wallet_address: str,
-                 nft1: dict, nft2: dict, traits_to_swap: list):
+                 nft1: dict, nft2: dict, traits_to_swap: list,
+                 return_url: dict = None):
         self.id = uuid.uuid4().hex
+        self.return_url = return_url  # XUMM return_url back into Discord
         self.discord_id = discord_id
         self.wallet_address = wallet_address
         self.created_at = time.time()
@@ -206,7 +208,8 @@ async def _create_offer_and_accept(session: SwapSession, item: dict) -> bool:
                          "contact an administrator.")
         return False
     item["offer_id"] = offer_id
-    accept = await xumm_ops.create_accept_offer_payload(offer_id)
+    accept = await xumm_ops.create_accept_offer_payload(
+        offer_id, return_url=session.return_url)
     if not accept:
         session.error = (f"Offer {offer_id} created for {item['nft']['name']} "
                          "but the XUMM request failed — accept it manually.")
@@ -233,7 +236,8 @@ async def _collect_modify_fee(session: SwapSession, modify_count: int) -> bool:
     payload = await xumm_ops.create_payment_payload(
         destination, value=fee,
         currency=config.SWAP_OFFER_CURRENCY_HEX,
-        issuer=config.SWAP_OFFER_ISSUER)
+        issuer=config.SWAP_OFFER_ISSUER,
+        return_url=session.return_url)
     # Sign-request payload normally; raw detect link only if XUMM is down
     session.payment_link = payload["xumm_url"] if payload else \
         xumm_ops.generate_static_payment_link(

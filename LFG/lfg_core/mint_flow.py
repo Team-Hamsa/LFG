@@ -38,10 +38,12 @@ _reserved_numbers = set()
 
 
 class MintSession:
-    def __init__(self, discord_id: str, wallet_address: str):
+    def __init__(self, discord_id: str, wallet_address: str,
+                 return_url: dict = None):
         self.id = uuid.uuid4().hex
         self.discord_id = discord_id
         self.wallet_address = wallet_address
+        self.return_url = return_url  # XUMM return_url back into Discord
         self.created_at = time.time()
         self.state = AWAITING_PAYMENT
         self.error = None
@@ -56,7 +58,8 @@ class MintSession:
         """Replace the static fallback link with a real XUMM sign-request
         payload. Xaman cannot parse the raw-JSON detect link, so the payload
         URL is the one that must end up in the payment QR (issue #8)."""
-        payload = await xumm_ops.create_payment_payload(config.TOKEN_ISSUER_ADDRESS)
+        payload = await xumm_ops.create_payment_payload(
+            config.TOKEN_ISSUER_ADDRESS, return_url=self.return_url)
         if payload:
             self.payment_link = payload["xumm_url"]
 
@@ -201,7 +204,8 @@ async def run_mint_session(session: MintSession) -> None:
                              "Please contact an administrator.")
             return
 
-        accept = await xumm_ops.create_accept_offer_payload(offer_id)
+        accept = await xumm_ops.create_accept_offer_payload(
+            offer_id, return_url=session.return_url)
         if not accept:
             session.state = FAILED
             session.error = (f"NFT minted and offer created ({offer_id}) but the XUMM "
