@@ -57,6 +57,12 @@ def ensure_schema(conn):
     case-insensitive column name handling.
     """
     conn.execute(_SCHEMA)
+    # Create burned_nfts if absent (older DBs may not have it yet)
+    conn.execute("""CREATE TABLE IF NOT EXISTS burned_nfts (
+        nft_number INTEGER PRIMARY KEY, nft_id TEXT, discord_id TEXT,
+        burned_by TEXT, reason TEXT,
+        burned_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+        original_mint_time TIMESTAMP)""")
     lfg_cols = {r[1] for r in conn.execute("PRAGMA table_info(LFG)")}
     if lfg_cols:  # LFG may not exist yet on a fresh DB; init_db owns it
         if "network" not in lfg_cols:
