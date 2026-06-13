@@ -29,6 +29,9 @@ traits resolved from the live on-chain collection.
 - Metadata trait_type `Accesory` (misspelled in the source) → LFG column **`Accessory`**.
 - The metadata `edition` field is unreliable for Season 1 (returns `1`); the real
   edition number is parsed from `name` (`"Let's Effing Go! #N"`).
+- The `Back` layer was added in a later season, so earlier NFTs omit it from their
+  metadata. Step 4 normalizes that absence to `Back="None"` (see `OPTIONAL_LAYERS`)
+  so backless NFTs form one rarity bucket instead of being dropped from the count.
 
 ## Pipeline
 
