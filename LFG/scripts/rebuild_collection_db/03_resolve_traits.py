@@ -39,6 +39,7 @@ _lock = threading.Lock()
 
 
 def main():
+    """Resolve traits for every live NFT (CDN first, IPFS fallback)."""
     p = argparse.ArgumentParser(description=__doc__,
                                 formatter_class=argparse.RawDescriptionHelpFormatter)
     p.add_argument("--onchain", default="work/onchain.json")
@@ -51,6 +52,7 @@ def main():
     os.makedirs(args.cache, exist_ok=True)
 
     def cache_path(uri):
+        """Stable per-URI cache file path (sha1 of the URI)."""
         return os.path.join(args.cache, hashlib.sha1(uri.encode()).hexdigest() + ".json")
 
     def fetch_ipfs(ipfs_path):
@@ -72,6 +74,7 @@ def main():
         return {"_error": last}
 
     def edition_from(md, ipfs_path):
+        """Edition number from name '#N' (preferred), else filename, else field."""
         m = re.search(r"#(\d+)", md.get("name") or "")
         if m:
             return int(m.group(1))
@@ -88,6 +91,7 @@ def main():
     state = {"done": 0, "fetched": 0}
 
     def handle(nft):
+        """Resolve one NFT's traits from CDN/cache/IPFS into a record dict."""
         uri = nft["uri"]
         ipfs_path = uri[7:] if uri.lower().startswith("ipfs://") else None
         fname_ed = None

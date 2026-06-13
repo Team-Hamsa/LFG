@@ -23,6 +23,7 @@ DEFAULT_WS = "wss://s2-clio.ripple.com"
 
 
 async def enumerate_collection(ws, issuer, taxon, limit):
+    """Page through nfts_by_issuer and return every NFT (live + burned)."""
     out = []
     marker = None
     async with AsyncWebsocketClient(ws) as client:
@@ -43,6 +44,7 @@ async def enumerate_collection(ws, issuer, taxon, limit):
 
 
 def main():
+    """Parse args, enumerate the collection, and write the JSON output."""
     p = argparse.ArgumentParser(description=__doc__,
                                 formatter_class=argparse.RawDescriptionHelpFormatter)
     p.add_argument("--issuer", default=DEFAULT_ISSUER)
