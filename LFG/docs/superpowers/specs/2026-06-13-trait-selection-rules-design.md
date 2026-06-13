@@ -135,9 +135,10 @@ TraitConfig.apply_group_rules(attributes) -> attributes  # NO-OP stub (docstring
 - **`selection_order()`** derives a pick order so trigger layers are chosen before
   their targets (topological-ish ordering over the rule graph), guaranteeing no
   "backward" conflict against an already-locked earlier pick. Falls back to
-  `layer_order` when rules impose no ordering constraint. Cycles in the rule graph
-  fall back to `layer_order` and log a warning (symmetric exclusion filtering still
-  applies, so output stays valid).
+  `layer_order` when rules impose no ordering constraint. **Cycles in the rule
+  graph are a config error raised at load time** (fail loudly) — a cyclic rule set
+  cannot be enforced order-independently, so it must be fixed by the author rather
+  than silently degraded.
 - **Inclusions** are forced assignments applied when the target layer is reached
   (after its trigger, guaranteed by `selection_order()`); they override the
   rarity-weighted pick for that layer.
@@ -168,9 +169,12 @@ TraitConfig.apply_group_rules(attributes) -> attributes  # NO-OP stub (docstring
 - **Missing config file:** fall back to a built-in default config that reproduces
   today's behavior (current `TRAIT_ORDER` + laser/wavy/rainbow-puke on top); log a
   warning. The repo ships an explicit `trait_config.yaml` so this is a safety net.
-- **Over-constrained layer** (all candidates excluded): the layer resolves to
-  `None` (valid — `None` means "no layer file") and logs a warning rather than
-  raising, so a mint never hard-fails on rules alone.
+- **Over-constrained layer** (rules exclude every candidate for a layer): **raise
+  loudly.** Where the config makes a layer statically unsatisfiable, detect it at
+  load time; otherwise raise at selection time. A rule that silently drops a whole
+  layer is almost always an authoring mistake, so it must surface rather than
+  degrade. (A layer legitimately having no value is expressed by an actual `None`
+  candidate in the store, not by exclusion wiping the candidate set.)
 - **Inclusion target value not in store:** raise at compose time via the existing
   `missing_layers` check (unchanged) so it surfaces before any on-chain action.
 - **Malformed config:** raise a clear, line-referenced error at load.
@@ -189,8 +193,10 @@ Unit tests (`tests/test_trait_config.py`, `tests/test_traits_rules.py`):
   directionality (reverse does not fire).
 - **Z-index ordering:** Girl's Best Friend composes above Clothing and below
   Mouth; laser/wavy/rainbow-puke render on top.
-- **`selection_order()`:** triggers ordered before targets; cycle → fallback +
-  warning.
+- **`selection_order()`:** triggers ordered before targets; cycle → config-load
+  error (fail loudly).
+- **Over-constrained layer:** rules excluding all candidates raises (statically at
+  load where detectable, else at selection time).
 - **Validation:** unknown trait_type, both `value` and `values` set,
   inclusion/exclusion conflict, YAML "Norway" coercion.
 - **Default-config snapshot:** with no config file, output matches current
