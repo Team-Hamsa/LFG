@@ -35,6 +35,11 @@ TRAIT_TO_COL = {
     "Accesory": "Accessory", "Accessory": "Accessory",
 }
 
+# Layers introduced in a later season: NFTs minted before they existed simply
+# omit the trait from their metadata. Treat that absence as an explicit "None"
+# so backless NFTs are counted as one rarity bucket instead of being dropped.
+OPTIONAL_LAYERS = ("Back",)
+
 
 def row_for(rec):
     """Map a resolved record's traits to LFG columns; return (cols, body_type)."""
@@ -43,6 +48,9 @@ def row_for(rec):
         col = TRAIT_TO_COL.get(tt)
         if col:
             cols[col] = val if val is not None else ""
+    for col in OPTIONAL_LAYERS:
+        if not cols.get(col):
+            cols[col] = "None"
     body_type = detect_body([{"trait_type": "Body", "value": cols.get("Body", "")}])
     return cols, body_type
 
