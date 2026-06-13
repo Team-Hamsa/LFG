@@ -37,6 +37,7 @@ TRAIT_TO_COL = {
 
 
 def row_for(rec):
+    """Map a resolved record's traits to LFG columns; return (cols, body_type)."""
     cols = {c: "" for c in LFG_COLS}
     for tt, val in rec.get("attrs", {}).items():
         col = TRAIT_TO_COL.get(tt)
@@ -47,6 +48,7 @@ def row_for(rec):
 
 
 def main():
+    """Report the rebuild plan; with --apply, write traits into the LFG table."""
     p = argparse.ArgumentParser(description=__doc__,
                                 formatter_class=argparse.RawDescriptionHelpFormatter)
     p.add_argument("--traits", default="work/traits.json")

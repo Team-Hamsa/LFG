@@ -20,6 +20,7 @@ DEFAULT_BASE = "https://lfgo.b-cdn.net/LFGO"
 
 
 def main():
+    """Scan the CDN by edition number and write present traits to JSON."""
     p = argparse.ArgumentParser(description=__doc__,
                                 formatter_class=argparse.RawDescriptionHelpFormatter)
     p.add_argument("--base", default=DEFAULT_BASE, help="CDN base path (no trailing /)")
@@ -31,6 +32,7 @@ def main():
     sess = requests.Session()
 
     def fetch(n):
+        """Fetch one edition's CDN metadata; return (n, trait/status dict)."""
         try:
             r = sess.get(f"{args.base}/{n}/{n}_0.json", timeout=15)
             if r.status_code != 200:
