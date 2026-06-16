@@ -30,7 +30,7 @@ def _payment_amount(value: str, currency: str | None, issuer: str | None) -> str
     """XRPL Amount field for a Payment: native XRP is a drops string, IOUs
     are a currency dict. currency/issuer default to the LFGO mint token."""
     if currency == "XRP":
-        return xrp_to_drops(Decimal(value))  # type: ignore[no-any-return]
+        return xrp_to_drops(Decimal(value))
     return {
         "currency": currency or config.TOKEN_CURRENCY_HEX,
         "value": value,

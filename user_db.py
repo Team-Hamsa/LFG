@@ -2,6 +2,7 @@
 
 import logging
 import sqlite3
+from typing import Any
 
 DATABASE = "lfg_nfts.db"
 
@@ -66,7 +67,7 @@ def register_user(discord_id: str, discord_name: str, wallet: str) -> bool:
         conn.close()
 
 
-def get_user(discord_id: str) -> dict | None:
+def get_user(discord_id: str) -> dict[str, Any] | None:
     """
     Retrieve a user from the Users table by Discord ID.
 
@@ -97,7 +98,7 @@ def get_user(discord_id: str) -> dict | None:
         conn.close()
 
 
-def get_all_registered_users() -> list[dict]:
+def get_all_registered_users() -> list[dict[str, Any]]:
     """
     Retrieve all registered users from the Users table.
 

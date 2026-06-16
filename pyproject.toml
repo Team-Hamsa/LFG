@@ -1,7 +1,7 @@
 [tool.ruff]
 target-version = "py310"
 line-length = 100
-extend-exclude = ["legacy", "backup", ".venv", "generated"]
+extend-exclude = ["legacy", ".venv", "generated"]
 
 [tool.ruff.lint]
 # Standard sane defaults: pyflakes(F), pycodestyle(E,W), isort(I),
@@ -12,7 +12,7 @@ ignore = ["E501"]  # line-length enforced by formatter, not linter
 [tool.mypy]
 python_version = "3.10"
 strict = true
-exclude = ["^legacy/", "^backup/", "^\\.venv/", "^generated/", "^scripts/"]
+exclude = ["^legacy/", "^\\.venv/", "^generated/", "^scripts/"]
 # Keep output actionable during the Phase-B grind:
 show_error_codes = true
 pretty = true
@@ -47,12 +47,21 @@ disallow_incomplete_defs = false
 warn_return_any = false
 ignore_errors = true
 
-# Legacy bot entry-point, helpers, and webapp server (aiohttp handler stubs).
+# Production code (bot entry-point, webapp backend, DB helpers): relax the
+# high-churn *annotation* requirements (full strict annotation of this legacy
+# surface is low-value), but KEEP real-bug detection on — arg-type, union-attr,
+# return-value, assignment, attr-defined, call-arg all still fail the gate here.
 [[tool.mypy.overrides]]
-module = ["main", "ts_helpers", "db_helpers", "user_db", "rarity_admin",
-          "init_db", "scripts.*", "webapp.server"]
+module = ["main", "webapp.server", "db_helpers", "user_db"]
 disallow_untyped_defs = false
 disallow_untyped_calls = false
 disallow_incomplete_defs = false
 warn_return_any = false
+
+# One-off / standalone ops scripts: run manually, never imported by the bot or
+# webapp. Fully ignored — typing them is pure cost. Re-promote if they re-enter
+# the runtime path. (ts_helpers, the old trait-swap helper, was retired to
+# legacy/ — superseded by lfg_core/swap_*.py.)
+[[tool.mypy.overrides]]
+module = ["rarity_admin", "init_db", "scripts.*"]
 ignore_errors = true

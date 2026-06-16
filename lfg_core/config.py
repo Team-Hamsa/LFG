@@ -38,7 +38,7 @@ def _seed_address() -> str:
     from xrpl.wallet import Wallet  # deferred: keep config import light
 
     try:
-        return Wallet.from_seed(SEED).classic_address  # type: ignore[no-any-return]
+        return Wallet.from_seed(SEED).classic_address
     except Exception as e:
         raise ValueError(
             f"SEED is not a valid XRPL family seed (expected an 's…' base58 secret): {e}"
