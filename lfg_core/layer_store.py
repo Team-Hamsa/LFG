@@ -10,8 +10,8 @@
 # reused). LocalLayerStore serves the same API from a local directory for
 # development and tests. Select with LAYER_SOURCE=cdn|local.
 
-import os
 import logging
+import os
 
 import aiohttp
 
@@ -26,21 +26,25 @@ DOWNLOAD_TIMEOUT = aiohttp.ClientTimeout(total=120, connect=10)
 
 
 class LocalLayerStore:
-    def __init__(self, base_dir: str = None):
+    def __init__(self, base_dir: str | None = None) -> None:
         self.base_dir = base_dir or config.LAYERS_DIR
 
-    async def list_bodies(self) -> list:
+    async def list_bodies(self) -> list[str]:
         return sorted(
-            d for d in os.listdir(self.base_dir)
-            if os.path.isdir(os.path.join(self.base_dir, d)) and not d.startswith("."))
+            d
+            for d in os.listdir(self.base_dir)
+            if os.path.isdir(os.path.join(self.base_dir, d)) and not d.startswith(".")
+        )
 
-    async def list_trait_types(self, body: str) -> list:
+    async def list_trait_types(self, body: str) -> list[str]:
         path = os.path.join(self.base_dir, body)
         return sorted(
-            d for d in os.listdir(path)
-            if os.path.isdir(os.path.join(path, d)) and not d.startswith("."))
+            d
+            for d in os.listdir(path)
+            if os.path.isdir(os.path.join(path, d)) and not d.startswith(".")
+        )
 
-    async def list_values(self, body: str, trait_type: str) -> list:
+    async def list_values(self, body: str, trait_type: str) -> list[str]:
         path = os.path.join(self.base_dir, body, trait_type)
         if not os.path.isdir(path):
             return []
@@ -51,7 +55,7 @@ class LocalLayerStore:
                 values.append(stem)
         return sorted(set(values))
 
-    async def resolve(self, body: str, trait_type: str, value: str):
+    async def resolve(self, body: str, trait_type: str, value: str) -> str | None:
         """Local path of a layer file, or None if it doesn't exist."""
         base = os.path.join(self.base_dir, body, trait_type, value)
         for ext in LAYER_EXTENSIONS:
@@ -64,15 +68,17 @@ class CdnLayerStore:
     """BunnyCDN storage-backed layer tree with an on-disk download cache.
     Directory listings are cached in memory for the life of the instance."""
 
-    def __init__(self):
+    def __init__(self) -> None:
         self.cache_dir = config.LAYER_CACHE_DIR
-        self._listings = {}  # relative dir path -> list of (name, is_dir)
+        self._listings: dict[str, list[tuple[str, bool]]] = {}
 
     def _storage_url(self, rel_path: str) -> str:
-        return (f"{config.BUNNY_CDN_BASE_URL}/{config.BUNNY_CDN_STORAGE_ZONE}/"
-                f"{config.LAYERS_CDN_FOLDER}/{rel_path}")
+        return (
+            f"{config.BUNNY_CDN_BASE_URL}/{config.BUNNY_CDN_STORAGE_ZONE}/"
+            f"{config.LAYERS_CDN_FOLDER}/{rel_path}"
+        )
 
-    async def _list_dir(self, rel_path: str) -> list:
+    async def _list_dir(self, rel_path: str) -> list[tuple[str, bool]]:
         if rel_path in self._listings:
             return self._listings[rel_path]
         url = self._storage_url(rel_path)
@@ -88,14 +94,14 @@ class CdnLayerStore:
         self._listings[rel_path] = listing
         return listing
 
-    async def list_bodies(self) -> list:
+    async def list_bodies(self) -> list[str]:
         return sorted(name for name, is_dir in await self._list_dir("") if is_dir)
 
-    async def list_trait_types(self, body: str) -> list:
+    async def list_trait_types(self, body: str) -> list[str]:
         return sorted(name for name, is_dir in await self._list_dir(body) if is_dir)
 
-    async def list_values(self, body: str, trait_type: str) -> list:
-        values = set()
+    async def list_values(self, body: str, trait_type: str) -> list[str]:
+        values: set[str] = set()
         for name, is_dir in await self._list_dir(f"{body}/{trait_type}"):
             if is_dir:
                 continue
@@ -104,7 +110,7 @@ class CdnLayerStore:
                 values.add(stem)
         return sorted(values)
 
-    async def resolve(self, body: str, trait_type: str, value: str):
+    async def resolve(self, body: str, trait_type: str, value: str) -> str | None:
         """Download (or reuse cached) layer file; returns local path or None."""
         listing = await self._list_dir(f"{body}/{trait_type}")
         names = {name for name, is_dir in listing if not is_dir}
@@ -133,10 +139,10 @@ class CdnLayerStore:
         return local_path
 
 
-_store = None
+_store: LocalLayerStore | CdnLayerStore | None = None
 
 
-def get_layer_store():
+def get_layer_store() -> LocalLayerStore | CdnLayerStore:
     """Process-wide store singleton so CDN directory listings and the
     download cache survive across mint/swap sessions."""
     global _store

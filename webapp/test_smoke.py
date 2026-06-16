@@ -2,9 +2,9 @@
 # session tokens, wallet validation, and the mint session state machine with
 # XRPL/XUMM stubbed out. Run from repo root: python -m pytest webapp/test_smoke.py
 
+import asyncio
 import os
 import sys
-import asyncio
 from decimal import Decimal
 
 import pytest
@@ -23,21 +23,40 @@ os.environ.setdefault("LAYER_SOURCE", "local")
 os.environ.setdefault("BUNNY_PULL_ZONE", "nft.pullzone.example")
 
 from aiohttp import web  # noqa: E402
-from lfg_core import (mint_flow, xumm_ops, xrpl_ops, traits, swap_meta,  # noqa: E402
-                      swap_flow, layer_store, config)
-from webapp import server  # noqa: E402
+
 import user_db  # noqa: E402
+from lfg_core import (  # noqa: E402
+    config,
+    layer_store,
+    mint_flow,
+    swap_flow,
+    swap_meta,
+    traits,
+    xrpl_ops,
+    xumm_ops,
+)
+from webapp import server  # noqa: E402
 
 
 def test_routes_registered():
     app = server.create_app()
-    paths = {getattr(r.resource, 'canonical', '') for r in app.router.routes()}
-    for expected in ["/api/config", "/api/token", "/api/me", "/api/register",
-                     "/api/mint", "/api/mint/{session_id}",
-                     "/api/nfts", "/api/swap", "/api/swap/{session_id}",
-                     "/api/qr.png", "/",
-                     "/api/mint/{session_id}/regenerate",
-                     "/api/signin", "/api/signin/{payload_uuid}"]:
+    paths = {getattr(r.resource, "canonical", "") for r in app.router.routes()}
+    for expected in [
+        "/api/config",
+        "/api/token",
+        "/api/me",
+        "/api/register",
+        "/api/mint",
+        "/api/mint/{session_id}",
+        "/api/nfts",
+        "/api/swap",
+        "/api/swap/{session_id}",
+        "/api/qr.png",
+        "/",
+        "/api/mint/{session_id}/regenerate",
+        "/api/signin",
+        "/api/signin/{payload_uuid}",
+    ]:
         assert expected in paths, f"missing route {expected}"
     # Trustline endpoints were removed in v2: never user-facing again
     assert "/api/trustline" not in paths
@@ -70,9 +89,11 @@ def test_payment_link_is_xaman_detect():
 def _fake_xumm_api(monkeypatch, captured):
     class FakeResp:
         def json(self):
-            return {"refs": {"qr_png": "https://xumm.test/qr.png"},
-                    "next": {"always": "https://xumm.app/sign/UUID1"},
-                    "uuid": "UUID1"}
+            return {
+                "refs": {"qr_png": "https://xumm.test/qr.png"},
+                "next": {"always": "https://xumm.app/sign/UUID1"},
+                "uuid": "UUID1",
+            }
 
     def fake_post(url, json=None, headers=None, timeout=None):
         captured.update(json)
@@ -86,8 +107,7 @@ def test_create_payment_payload_is_xumm_sign_request(monkeypatch):
     parse the hand-rolled raw-JSON xaman.app/detect link (issue #8)."""
     captured = {}
     _fake_xumm_api(monkeypatch, captured)
-    payload = asyncio.get_event_loop().run_until_complete(
-        xumm_ops.create_payment_payload("rDest"))
+    payload = asyncio.get_event_loop().run_until_complete(xumm_ops.create_payment_payload("rDest"))
     assert payload["xumm_url"] == "https://xumm.app/sign/UUID1"
     tx = captured["txjson"]
     assert tx["TransactionType"] == "Payment"
@@ -100,10 +120,14 @@ def test_create_payment_payload_custom_currency(monkeypatch):
     captured = {}
     _fake_xumm_api(monkeypatch, captured)
     brix = "4252495800000000000000000000000000000000"
-    asyncio.get_event_loop().run_until_complete(xumm_ops.create_payment_payload(
-        "rDest", value="20", currency=brix, issuer="rBrixIssuer"))
-    assert captured["txjson"]["Amount"] == {"currency": brix, "value": "20",
-                                            "issuer": "rBrixIssuer"}
+    asyncio.get_event_loop().run_until_complete(
+        xumm_ops.create_payment_payload("rDest", value="20", currency=brix, issuer="rBrixIssuer")
+    )
+    assert captured["txjson"]["Amount"] == {
+        "currency": brix,
+        "value": "20",
+        "issuer": "rBrixIssuer",
+    }
 
 
 def test_discord_return_url_builder():
@@ -123,7 +147,8 @@ def test_payment_payload_includes_return_url(monkeypatch):
     _fake_xumm_api(monkeypatch, captured)
     ru = {"app": "discord://-/channels/1/2", "web": "https://discord.com/channels/1/2"}
     asyncio.get_event_loop().run_until_complete(
-        xumm_ops.create_payment_payload("rDest", return_url=ru))
+        xumm_ops.create_payment_payload("rDest", return_url=ru)
+    )
     assert captured["options"]["return_url"] == ru
 
 
@@ -132,21 +157,24 @@ def test_accept_offer_payload_includes_return_url(monkeypatch):
     _fake_xumm_api(monkeypatch, captured)
     ru = {"app": "discord://-/channels/1/2", "web": "https://discord.com/channels/1/2"}
     asyncio.get_event_loop().run_until_complete(
-        xumm_ops.create_accept_offer_payload("OFFER", return_url=ru))
+        xumm_ops.create_accept_offer_payload("OFFER", return_url=ru)
+    )
     assert captured["options"]["return_url"] == ru
 
 
 def test_xrp_payment_payload_uses_drops(monkeypatch):
     captured = {}
     _fake_xumm_api(monkeypatch, captured)
-    asyncio.get_event_loop().run_until_complete(xumm_ops.create_payment_payload(
-        "rDest", value="10", currency="XRP"))
+    asyncio.get_event_loop().run_until_complete(
+        xumm_ops.create_payment_payload("rDest", value="10", currency="XRP")
+    )
     assert captured["txjson"]["Amount"] == "10000000"  # drops string, not dict
 
 
 def _stub_balance(monkeypatch, balance):
     async def fake_balance(address, currency, issuer):
         return balance
+
     monkeypatch.setattr(mint_flow.xrpl_ops, "get_trustline_balance", fake_balance)
 
 
@@ -168,6 +196,7 @@ def test_mint_session_threads_return_url(monkeypatch):
 def test_mint_session_prepare_uses_xumm_payload(monkeypatch):
     async def fake_payload(destination, **kw):
         return {"qr_url": "q", "xumm_url": "https://xumm.app/sign/PAY", "uuid": "u"}
+
     _stub_balance(monkeypatch, Decimal("5"))
     monkeypatch.setattr(mint_flow.xumm_ops, "create_payment_payload", fake_payload)
     session = mint_flow.MintSession(discord_id="1", wallet_address="rTest")
@@ -179,6 +208,7 @@ def test_mint_session_prepare_uses_xumm_payload(monkeypatch):
 def test_mint_session_prepare_falls_back_to_static(monkeypatch):
     async def fail(destination, **kw):
         return None
+
     _stub_balance(monkeypatch, Decimal("5"))
     monkeypatch.setattr(mint_flow.xumm_ops, "create_payment_payload", fail)
     session = mint_flow.MintSession(discord_id="1", wallet_address="rTest")
@@ -190,12 +220,13 @@ def test_mint_payment_path_detection(monkeypatch):
     """Silent path detection: LFGO trustline + balance pays LFGO to the
     issuer; everything else (no line, low balance, lookup failure) pays XRP
     to the bot wallet."""
+
     async def fake_payload(destination, **kw):
         return None
+
     monkeypatch.setattr(mint_flow.xumm_ops, "create_payment_payload", fake_payload)
     loop = asyncio.get_event_loop()
-    for balance, expected in ((Decimal("1"), "LFGO"), (Decimal("0"), "XRP"),
-                              (None, "XRP")):
+    for balance, expected in ((Decimal("1"), "LFGO"), (Decimal("0"), "XRP"), (None, "XRP")):
         _stub_balance(monkeypatch, balance)
         session = mint_flow.MintSession(discord_id="1", wallet_address="rTest")
         loop.run_until_complete(session.prepare_payment())
@@ -222,9 +253,12 @@ def test_qr_png():
 
 # --- Issue #19: branded QR codes (mascot composited in the center) ---
 
+
 def test_qr_png_branded_with_logo(tmp_path, monkeypatch):
     import io
+
     from PIL import Image
+
     logo = tmp_path / "mascot.png"
     Image.new("RGBA", (64, 64), (216, 72, 48, 255)).save(logo)
     monkeypatch.setattr(xumm_ops, "QR_LOGO_PATH", str(logo))
@@ -244,12 +278,14 @@ def test_qr_png_missing_logo_falls_back_plain(monkeypatch):
 
 # --- Issues #22/#24: XUMM payload status lookup ---
 
+
 def _fake_xumm_get(monkeypatch, meta=None, response=None):
     class FakeResp:
         def json(self):
-            return {"meta": {"opened": False, "signed": False, "expired": False,
-                             **(meta or {})},
-                    "response": {"account": None, **(response or {})}}
+            return {
+                "meta": {"opened": False, "signed": False, "expired": False, **(meta or {})},
+                "response": {"account": None, **(response or {})},
+            }
 
     def fake_get(url, headers=None, timeout=None):
         fake_get.url = url
@@ -263,26 +299,28 @@ VALID_UUID = "01234567-89ab-cdef-0123-456789abcdef"
 
 
 def test_get_payload_status(monkeypatch):
-    fake = _fake_xumm_get(monkeypatch, meta={"opened": True, "signed": True},
-                          response={"account": "rSigner"})
-    s = asyncio.get_event_loop().run_until_complete(
-        xumm_ops.get_payload_status(VALID_UUID))
+    fake = _fake_xumm_get(
+        monkeypatch, meta={"opened": True, "signed": True}, response={"account": "rSigner"}
+    )
+    s = asyncio.get_event_loop().run_until_complete(xumm_ops.get_payload_status(VALID_UUID))
     assert fake.url.endswith(f"/{VALID_UUID}")
-    assert s == {"opened": True, "signed": True, "expired": False,
-                 "account": "rSigner"}
+    assert s == {"opened": True, "signed": True, "expired": False, "account": "rSigner"}
 
 
 def test_get_payload_status_error_returns_none(monkeypatch):
     def boom(url, headers=None, timeout=None):
         raise RuntimeError("xumm down")
+
     monkeypatch.setattr(xumm_ops.requests, "get", boom)
-    assert asyncio.get_event_loop().run_until_complete(
-        xumm_ops.get_payload_status(VALID_UUID)) is None
+    assert (
+        asyncio.get_event_loop().run_until_complete(xumm_ops.get_payload_status(VALID_UUID)) is None
+    )
 
 
 def test_get_payload_status_rejects_malformed_uuid(monkeypatch):
     def boom(url, headers=None, timeout=None):
         raise AssertionError("must not be called for a malformed uuid")
+
     monkeypatch.setattr(xumm_ops.requests, "get", boom)
     loop = asyncio.get_event_loop()
     for bad in ("../admin", "UUID9", "", None):
@@ -291,13 +329,14 @@ def test_get_payload_status_rejects_malformed_uuid(monkeypatch):
 
 # --- Issue #24: Xaman Sign In payload for registration ---
 
+
 def test_create_signin_payload(monkeypatch):
     captured = {}
     _fake_xumm_api(monkeypatch, captured)
-    ru = {"app": "discord://-/channels/1/2",
-          "web": "https://discord.com/channels/1/2"}
+    ru = {"app": "discord://-/channels/1/2", "web": "https://discord.com/channels/1/2"}
     payload = asyncio.get_event_loop().run_until_complete(
-        xumm_ops.create_signin_payload(return_url=ru))
+        xumm_ops.create_signin_payload(return_url=ru)
+    )
     assert payload["xumm_url"] == "https://xumm.app/sign/UUID1"
     assert payload["uuid"] == "UUID1"
     assert captured["txjson"] == {"TransactionType": "SignIn"}
@@ -306,10 +345,11 @@ def test_create_signin_payload(monkeypatch):
 
 # --- Issue #22: QR scan tracking + regenerate ---
 
+
 def test_mint_session_tracks_payment_uuid(monkeypatch):
     async def fake_payload(destination, **kw):
-        return {"qr_url": "q", "xumm_url": "https://xumm.app/sign/PAY",
-                "uuid": "PAYUUID"}
+        return {"qr_url": "q", "xumm_url": "https://xumm.app/sign/PAY", "uuid": "PAYUUID"}
+
     _stub_balance(monkeypatch, Decimal("5"))
     monkeypatch.setattr(mint_flow.xumm_ops, "create_payment_payload", fake_payload)
     session = mint_flow.MintSession(discord_id="1", wallet_address="rTest")
@@ -326,6 +366,7 @@ def test_update_scan_state_marks_payment_scanned(monkeypatch):
     async def fake_status(uuid):
         calls.append(uuid)
         return {"opened": True, "signed": False, "expired": False, "account": None}
+
     monkeypatch.setattr(mint_flow.xumm_ops, "get_payload_status", fake_status)
     loop = asyncio.get_event_loop()
     loop.run_until_complete(mint_flow.update_scan_state(session))
@@ -342,8 +383,8 @@ def test_update_scan_state_checks_accept_payload(monkeypatch):
 
     async def fake_status(uuid):
         assert uuid == "ACCUUID"
-        return {"opened": True, "signed": True, "expired": False,
-                "account": "rTest"}
+        return {"opened": True, "signed": True, "expired": False, "account": "rTest"}
+
     monkeypatch.setattr(mint_flow.xumm_ops, "get_payload_status", fake_status)
     asyncio.get_event_loop().run_until_complete(mint_flow.update_scan_state(session))
     d = session.to_dict()
@@ -357,6 +398,7 @@ def test_mint_session_regenerate_payment(monkeypatch):
 
     async def fake_payload(destination, **kw):
         return {"qr_url": "q", "xumm_url": next(links), "uuid": next(uuids)}
+
     _stub_balance(monkeypatch, Decimal("5"))
     monkeypatch.setattr(mint_flow.xumm_ops, "create_payment_payload", fake_payload)
     session = mint_flow.MintSession(discord_id="1", wallet_address="rTest")
@@ -386,29 +428,49 @@ def test_success_states_are_terminal():
 # --- Payment watching (rippled API v1 + v2 message shapes) ---
 
 V1_STREAM_MSG = {
-    "type": "transaction", "validated": True,
+    "type": "transaction",
+    "validated": True,
     "transaction": {
-        "TransactionType": "Payment", "Account": "rSender", "Destination": "rDest",
-        "Amount": {"currency": "4C46474F00000000000000000000000000000000",
-                   "issuer": "rIssuer", "value": "1"},
+        "TransactionType": "Payment",
+        "Account": "rSender",
+        "Destination": "rDest",
+        "Amount": {
+            "currency": "4C46474F00000000000000000000000000000000",
+            "issuer": "rIssuer",
+            "value": "1",
+        },
         "hash": "H1",
     },
-    "meta": {"delivered_amount": {
-        "currency": "4C46474F00000000000000000000000000000000",
-        "issuer": "rIssuer", "value": "1"}},
+    "meta": {
+        "delivered_amount": {
+            "currency": "4C46474F00000000000000000000000000000000",
+            "issuer": "rIssuer",
+            "value": "1",
+        }
+    },
 }
 
 V2_STREAM_MSG = {
-    "type": "transaction", "validated": True,
+    "type": "transaction",
+    "validated": True,
     "tx_json": {
-        "TransactionType": "Payment", "Account": "rSender", "Destination": "rDest",
-        "DeliverMax": {"currency": "4C46474F00000000000000000000000000000000",
-                       "issuer": "rIssuer", "value": "1"},
+        "TransactionType": "Payment",
+        "Account": "rSender",
+        "Destination": "rDest",
+        "DeliverMax": {
+            "currency": "4C46474F00000000000000000000000000000000",
+            "issuer": "rIssuer",
+            "value": "1",
+        },
         "hash": "H2",
     },
-    "meta": {"delivered_amount": {
-        "currency": "4C46474F00000000000000000000000000000000",
-        "issuer": "rIssuer", "value": "1"}},
+    "meta": {
+        "delivered_amount": {
+            "currency": "4C46474F00000000000000000000000000000000",
+            "issuer": "rIssuer",
+            "value": "1",
+        }
+    },
 }
 
 CUR = "4C46474F00000000000000000000000000000000"
@@ -417,7 +479,8 @@ CUR = "4C46474F00000000000000000000000000000000"
 def _matches(msg):
     tx, meta = xrpl_ops._extract_tx_and_meta(msg)
     return tx is not None and xrpl_ops._payment_matches(
-        tx, meta, "rDest", "rSender", "1", CUR, "rIssuer")
+        tx, meta, "rDest", "rSender", "1", CUR, "rIssuer"
+    )
 
 
 def test_payment_matches_api_v1_and_v2_shapes():
@@ -427,6 +490,7 @@ def test_payment_matches_api_v1_and_v2_shapes():
 
 def test_payment_match_rejects_wrong_sender_and_partial():
     import copy
+
     wrong_sender = copy.deepcopy(V2_STREAM_MSG)
     wrong_sender["tx_json"]["Account"] = "rSomeoneElse"
     assert not _matches(wrong_sender)
@@ -445,28 +509,33 @@ def test_payment_match_rejects_wrong_sender_and_partial():
 def test_payment_match_native_xrp():
     """The XRP mint/swap paths watch for native (drops string) payments."""
     msg = {
-        "type": "transaction", "validated": True,
-        "tx_json": {"TransactionType": "Payment", "Account": "rSender",
-                    "Destination": "rDest", "DeliverMax": "10000000",
-                    "hash": "H3"},
+        "type": "transaction",
+        "validated": True,
+        "tx_json": {
+            "TransactionType": "Payment",
+            "Account": "rSender",
+            "Destination": "rDest",
+            "DeliverMax": "10000000",
+            "hash": "H3",
+        },
         "meta": {"delivered_amount": "10000000"},
     }
     tx, meta = xrpl_ops._extract_tx_and_meta(msg)
 
     def match(expected):
-        return xrpl_ops._payment_matches(tx, meta, "rDest", "rSender",
-                                         expected, "XRP", None)
+        return xrpl_ops._payment_matches(tx, meta, "rDest", "rSender", expected, "XRP", None)
+
     assert match("10")
     assert not match("10.5")  # short payment rejected
     # and a token payment never satisfies an XRP expectation
     tok, tok_meta = xrpl_ops._extract_tx_and_meta(V2_STREAM_MSG)
-    assert not xrpl_ops._payment_matches(tok, tok_meta, "rDest", "rSender",
-                                         "10", "XRP", None)
+    assert not xrpl_ops._payment_matches(tok, tok_meta, "rDest", "rSender", "10", "XRP", None)
 
 
 def test_wait_for_payment_times_out_with_no_traffic(monkeypatch):
     """The old code only checked the timeout when a message arrived, hanging
     forever on a quiet account."""
+
     class FakeWS:
         def __init__(self, url):
             pass
@@ -483,6 +552,7 @@ def test_wait_for_payment_times_out_with_no_traffic(monkeypatch):
         async def request(self, req):
             class R:
                 result = {"transactions": []}
+
             return R()
 
         def __aiter__(self):
@@ -493,7 +563,8 @@ def test_wait_for_payment_times_out_with_no_traffic(monkeypatch):
 
     monkeypatch.setattr(xrpl_ops, "AsyncWebsocketClient", FakeWS)
     paid = asyncio.get_event_loop().run_until_complete(
-        xrpl_ops.wait_for_payment("rDest", "rSender", timeout_seconds=1))
+        xrpl_ops.wait_for_payment("rDest", "rSender", timeout_seconds=1)
+    )
     assert paid is False
 
 
@@ -501,6 +572,7 @@ def test_wait_for_payment_backfills_missed_payment(monkeypatch):
     """A payment validated before the subscription went live must be found
     via account_tx — but only if it is newer than not_before."""
     import copy
+
     entry = copy.deepcopy(V2_STREAM_MSG)
     entry["tx_json"]["date"] = 800000000  # ripple epoch seconds
 
@@ -520,6 +592,7 @@ def test_wait_for_payment_backfills_missed_payment(monkeypatch):
         async def request(self, req):
             class R:
                 result = {"transactions": [entry]}
+
             return R()
 
         def __aiter__(self):
@@ -534,13 +607,15 @@ def test_wait_for_payment_backfills_missed_payment(monkeypatch):
     loop = asyncio.get_event_loop()
     tx_unix = 800000000 + xrpl_ops.RIPPLE_EPOCH_OFFSET
 
-    paid = loop.run_until_complete(xrpl_ops.wait_for_payment(
-        "rDest", "rSender", timeout_seconds=1, not_before=tx_unix - 60))
+    paid = loop.run_until_complete(
+        xrpl_ops.wait_for_payment("rDest", "rSender", timeout_seconds=1, not_before=tx_unix - 60)
+    )
     assert paid is True
 
     # The same payment is too old for a session created after it -> no replay
-    paid = loop.run_until_complete(xrpl_ops.wait_for_payment(
-        "rDest", "rSender", timeout_seconds=1, not_before=tx_unix + 60))
+    paid = loop.run_until_complete(
+        xrpl_ops.wait_for_payment("rDest", "rSender", timeout_seconds=1, not_before=tx_unix + 60)
+    )
     assert paid is False
 
 
@@ -548,6 +623,7 @@ def test_wait_for_payment_reconnects_after_stream_drop(monkeypatch):
     """A dropped websocket must reconnect (and re-check recent history)
     instead of reporting 'no payment' while time remains (issue #6)."""
     import copy
+
     entry = copy.deepcopy(V2_STREAM_MSG)
     entry["tx_json"]["date"] = 800000000
     connections = []
@@ -569,6 +645,7 @@ def test_wait_for_payment_reconnects_after_stream_drop(monkeypatch):
             # The payment "lands" while the first connection is down
             class R:
                 result = {"transactions": [entry] if len(connections) > 1 else []}
+
             return R()
 
         def __aiter__(self):
@@ -581,8 +658,9 @@ def test_wait_for_payment_reconnects_after_stream_drop(monkeypatch):
     monkeypatch.setattr(xrpl_ops.config, "TOKEN_CURRENCY_HEX", CUR)
     monkeypatch.setattr(xrpl_ops.config, "TOKEN_ISSUER_ADDRESS", "rIssuer")
     tx_unix = 800000000 + xrpl_ops.RIPPLE_EPOCH_OFFSET
-    paid = asyncio.get_event_loop().run_until_complete(xrpl_ops.wait_for_payment(
-        "rDest", "rSender", timeout_seconds=10, not_before=tx_unix - 60))
+    paid = asyncio.get_event_loop().run_until_complete(
+        xrpl_ops.wait_for_payment("rDest", "rSender", timeout_seconds=10, not_before=tx_unix - 60)
+    )
     assert paid is True
     assert len(connections) >= 2
 
@@ -590,6 +668,7 @@ def test_wait_for_payment_reconnects_after_stream_drop(monkeypatch):
 def test_mint_session_payment_timeout(monkeypatch):
     async def no_payment(**kwargs):
         return False
+
     monkeypatch.setattr(mint_flow.xrpl_ops, "wait_for_payment", no_payment)
 
     session = mint_flow.MintSession(discord_id="1", wallet_address="rTest")
@@ -600,11 +679,13 @@ def test_mint_session_payment_timeout(monkeypatch):
 
 def test_mint_session_happy_path(monkeypatch, tmp_path):
     waited = {}
+
     async def paid(**kwargs):
         waited.update(kwargs)
         return True
 
     burned = []
+
     async def fake_buy_and_burn(currency, issuer, value, max_xrp=None):
         burned.append((currency, value, max_xrp))
         return "BURNHASH"
@@ -621,13 +702,18 @@ def test_mint_session_happy_path(monkeypatch, tmp_path):
         return "OFFER456"
 
     async def fake_accept(offer_id, **kw):
-        return {"qr_url": "https://xumm.test/qr.png",
-                "xumm_url": "https://xumm.test/sign", "uuid": "u"}
+        return {
+            "qr_url": "https://xumm.test/qr.png",
+            "xumm_url": "https://xumm.test/sign",
+            "uuid": "u",
+        }
 
     async def fake_select(store, body=None, **kw):
-        return "male", [{"trait_type": "Background", "value": "Blue"},
-                        {"trait_type": "Back", "value": "Angel Wings"},
-                        {"trait_type": "Head", "value": "Crown"}]
+        return "male", [
+            {"trait_type": "Background", "value": "Blue"},
+            {"trait_type": "Back", "value": "Angel Wings"},
+            {"trait_type": "Head", "value": "Crown"},
+        ]
 
     async def fake_compose(attributes, body, store, basename, out_dir="generated"):
         p = tmp_path / f"{basename}.png"
@@ -635,6 +721,7 @@ def test_mint_session_happy_path(monkeypatch, tmp_path):
         return str(p), False
 
     recorded = {}
+
     def fake_record(**kw):
         recorded.update(kw)
         return True
@@ -662,8 +749,7 @@ def test_mint_session_happy_path(monkeypatch, tmp_path):
     assert waited["currency"] == "XRP"
     assert waited["destination"] == xrpl_ops.bot_wallet_address()
     assert waited["expected_amount"] == config.MINT_PRICE_XRP
-    assert burned == [(config.TOKEN_CURRENCY_HEX, config.MINT_PRICE_LFGO,
-                       config.MINT_PRICE_XRP)]
+    assert burned == [(config.TOKEN_CURRENCY_HEX, config.MINT_PRICE_LFGO, config.MINT_PRICE_XRP)]
     assert session.nft_id == "NFTID123"
     assert session.accept_deeplink == "https://xumm.test/sign"
     assert session.image_url == "https://cdn.test/lfg_9999.png"
@@ -671,7 +757,9 @@ def test_mint_session_happy_path(monkeypatch, tmp_path):
     assert "Head" not in recorded["traits"]
     assert recorded["traits"]["Back"] == "Angel Wings"  # Back persisted too
 
+
 # --- Trait Swapper ---
+
 
 def test_normalize_attributes():
     raw = [
@@ -688,12 +776,12 @@ def test_normalize_attributes():
 
 
 def test_swap_traits_merge():
-    a1 = swap_meta.normalize_attributes([
-        {"trait_type": "Eyes", "value": "Laser"},
-        {"trait_type": "Head", "value": "Crown"}])
-    a2 = swap_meta.normalize_attributes([
-        {"trait_type": "Eyes", "value": "Hypno"},
-        {"trait_type": "Head", "value": "Halo"}])
+    a1 = swap_meta.normalize_attributes(
+        [{"trait_type": "Eyes", "value": "Laser"}, {"trait_type": "Head", "value": "Crown"}]
+    )
+    a2 = swap_meta.normalize_attributes(
+        [{"trait_type": "Eyes", "value": "Hypno"}, {"trait_type": "Head", "value": "Halo"}]
+    )
     n1, n2 = swap_meta.swap_traits(a1, a2, ["Eyes"])
     assert swap_meta.get_attr(n1, "Eyes") == "Hypno"
     assert swap_meta.get_attr(n2, "Eyes") == "Laser"
@@ -702,27 +790,36 @@ def test_swap_traits_merge():
 
 
 def test_normalize_nft_and_season():
-    meta = {"name": "Let's Effing Go! #800", "image": "ipfs://cid/800.png",
-            "burnCount": 2, "attributes": [{"trait_type": "Body", "value": "Ape"}]}
+    meta = {
+        "name": "Let's Effing Go! #800",
+        "image": "ipfs://cid/800.png",
+        "burnCount": 2,
+        "attributes": [{"trait_type": "Body", "value": "Ape"}],
+    }
     rec = swap_meta.normalize_nft("ID1", meta)
     assert rec["season"] == 2 and rec["gender"] == "ape" and rec["burn_count"] == 2
     assert rec["image"].startswith("https://cid.ipfs.dweb.link/")
     assert swap_meta.normalize_nft("ID2", {"name": "no number"}) is None
     # numbers above the configured collection cap are not swappable
     over_max = config.SWAP_MAX_NFT_NUMBER + 1
-    assert swap_meta.normalize_nft(
-        "ID3", {"name": f"LFG #{over_max}", "attributes": []}) is None
+    assert swap_meta.normalize_nft("ID3", {"name": f"LFG #{over_max}", "attributes": []}) is None
 
 
 def test_normalize_nft_tolerates_malformed_metadata():
     # External metadata is untrusted: junk shapes must not raise or leak in.
-    rec = swap_meta.normalize_nft("ID4", {
-        "name": "LFG #5",
-        "burnCount": "not-a-number",
-        "attributes": ["junk", {"no_trait_type": 1},
-                       {"trait_type": "Eyes"},  # missing value
-                       {"trait_type": "Body", "value": "Ape"}],
-    })
+    rec = swap_meta.normalize_nft(
+        "ID4",
+        {
+            "name": "LFG #5",
+            "burnCount": "not-a-number",
+            "attributes": [
+                "junk",
+                {"no_trait_type": 1},
+                {"trait_type": "Eyes"},  # missing value
+                {"trait_type": "Body", "value": "Ape"},
+            ],
+        },
+    )
     assert rec["burn_count"] == 0
     assert swap_meta.get_attr(rec["attributes"], "Eyes") == "None"
     assert rec["gender"] == "ape"
@@ -734,27 +831,43 @@ def test_normalize_nft_tolerates_malformed_metadata():
 def _swap_session(mutable=(False, False)):
     def nft(i, mut):
         return {
-            "nft_id": f"OLD{i}", "name": f"Let's Effing Go! #{i}", "number": i,
-            "season": 1, "image": f"https://cdn.test/{i}.png", "video": None,
-            "burn_count": 0, "gender": "male",
+            "nft_id": f"OLD{i}",
+            "name": f"Let's Effing Go! #{i}",
+            "number": i,
+            "season": 1,
+            "image": f"https://cdn.test/{i}.png",
+            "video": None,
+            "burn_count": 0,
+            "gender": "male",
             "mutable": mut,
             "uri_hex": f"https://old/{i}.json".encode().hex().upper() if mut else "",
             "attributes": swap_meta.normalize_attributes(
-                [{"trait_type": "Eyes", "value": f"Eyes{i}"},
-                 {"trait_type": "Body", "value": "Straight Light"}]),
+                [
+                    {"trait_type": "Eyes", "value": f"Eyes{i}"},
+                    {"trait_type": "Body", "value": "Straight Light"},
+                ]
+            ),
         }
-    return swap_flow.SwapSession(discord_id="1", wallet_address="rTest",
-                                 nft1=nft(10, mutable[0]), nft2=nft(20, mutable[1]),
-                                 traits_to_swap=["Eyes"])
+
+    return swap_flow.SwapSession(
+        discord_id="1",
+        wallet_address="rTest",
+        nft1=nft(10, mutable[0]),
+        nft2=nft(20, mutable[1]),
+        traits_to_swap=["Eyes"],
+    )
 
 
 def test_swap_session_missing_layers_fails_before_burn(monkeypatch):
     burned = []
+
     async def fake_burn(nft_id, owner):
         burned.append(nft_id)
         return "HASH"
+
     async def missing(attrs, body, store):
         return ["male/Eyes/Eyes20"]
+
     monkeypatch.setattr(swap_flow.xrpl_ops, "burn_nft", fake_burn)
     monkeypatch.setattr(swap_flow.layer_store, "get_layer_store", lambda: object())
     monkeypatch.setattr(swap_flow.swap_compose, "missing_layers", missing)
@@ -766,11 +879,19 @@ def test_swap_session_missing_layers_fails_before_burn(monkeypatch):
     assert burned == []
 
 
-def _patch_swap_stubs(monkeypatch, tmp_path, events,
-                      burn_fails=(), mint_fails=(), modify_fails=(),
-                      fee_paid=True, brix_balance=Decimal("100"),
-                      amm_cost=Decimal("12.5")):
+def _patch_swap_stubs(
+    monkeypatch,
+    tmp_path,
+    events,
+    burn_fails=(),
+    mint_fails=(),
+    modify_fails=(),
+    fee_paid=True,
+    brix_balance=Decimal("100"),
+    amm_cost=Decimal("12.5"),
+):
     """Stub the swap flow's externals; `events` records on-chain call order."""
+
     async def fake_balance(address, currency, issuer):
         return brix_balance
 
@@ -784,6 +905,7 @@ def _patch_swap_stubs(monkeypatch, tmp_path, events,
     monkeypatch.setattr(swap_flow.xrpl_ops, "get_trustline_balance", fake_balance)
     monkeypatch.setattr(swap_flow.xrpl_ops, "get_amm_xrp_cost", fake_amm_cost)
     monkeypatch.setattr(swap_flow.xrpl_ops, "buy_and_burn", fake_buy_and_burn)
+
     async def fake_upload(path_on_cdn, data, content_type):
         return f"https://cdn.test/LFGO/{path_on_cdn}"
 
@@ -803,6 +925,7 @@ def _patch_swap_stubs(monkeypatch, tmp_path, events,
         return "HASH"
 
     minted = []
+
     async def fake_mint(**kwargs):
         if len(minted) + 1 in mint_fails:
             minted.append(None)
@@ -813,6 +936,7 @@ def _patch_swap_stubs(monkeypatch, tmp_path, events,
         return f"NEW{len(minted)}"
 
     offers = []
+
     async def fake_offer(nft_id, destination, amount=None):
         assert amount is not None  # swap offers are fee-priced, never free
         offers.append(amount)
@@ -820,8 +944,11 @@ def _patch_swap_stubs(monkeypatch, tmp_path, events,
         return f"OFFER_{nft_id}"
 
     async def fake_accept(offer_id, **kw):
-        return {"qr_url": "https://xumm.test/qr.png",
-                "xumm_url": f"https://xumm.test/{offer_id}", "uuid": "u"}
+        return {
+            "qr_url": "https://xumm.test/qr.png",
+            "xumm_url": f"https://xumm.test/{offer_id}",
+            "uuid": "u",
+        }
 
     async def fake_modify(nft_id, owner, uri):
         if uri.startswith("https://old/"):  # rollback to the original URI
@@ -838,16 +965,17 @@ def _patch_swap_stubs(monkeypatch, tmp_path, events,
         return fee_paid
 
     async def fake_payment_payload(destination, value="1", **kw):
-        return {"qr_url": "https://xumm.test/qr.png",
-                "xumm_url": f"https://xumm.app/sign/PAY_{value}", "uuid": "u"}
+        return {
+            "qr_url": "https://xumm.test/qr.png",
+            "xumm_url": f"https://xumm.app/sign/PAY_{value}",
+            "uuid": "u",
+        }
 
-    monkeypatch.setattr(swap_flow.xumm_ops, "create_payment_payload",
-                        fake_payment_payload)
+    monkeypatch.setattr(swap_flow.xumm_ops, "create_payment_payload", fake_payment_payload)
     monkeypatch.setattr(swap_flow.xrpl_ops, "modify_nft", fake_modify)
     monkeypatch.setattr(swap_flow.xrpl_ops, "wait_for_payment", fake_wait_for_payment)
     monkeypatch.setattr(swap_flow.xrpl_ops, "bot_wallet_address", lambda: "rBotWallet")
-    monkeypatch.setattr(swap_flow.config, "SWAP_RECORDS_DIR",
-                        str(tmp_path / "swap_records"))
+    monkeypatch.setattr(swap_flow.config, "SWAP_RECORDS_DIR", str(tmp_path / "swap_records"))
     monkeypatch.setattr(swap_flow.layer_store, "get_layer_store", lambda: object())
     monkeypatch.setattr(swap_flow.swap_compose, "missing_layers", no_missing)
     monkeypatch.setattr(swap_flow.swap_compose, "compose_nft", fake_compose)
@@ -879,6 +1007,7 @@ def test_swap_session_happy_path(monkeypatch, tmp_path):
     records = list((tmp_path / "swap_records").glob("*.json"))
     assert len(records) == 1
     import json as _json
+
     record = _json.loads(records[0].read_text())
     assert record["status"] == "complete"
     assert {n["old_nft_id"] for n in record["nfts"]} == {"OLD10", "OLD20"}
@@ -897,8 +1026,7 @@ def test_swap_session_mint_failure_keeps_originals(monkeypatch, tmp_path):
     assert events == ["mint NEW1", "mint_failed", "burn NEW1"]
 
 
-def test_swap_session_partial_burn_failure_delivers_first_replacement(
-        monkeypatch, tmp_path):
+def test_swap_session_partial_burn_failure_delivers_first_replacement(monkeypatch, tmp_path):
     events = []
     _patch_swap_stubs(monkeypatch, tmp_path, events, burn_fails={"OLD20"})
 
@@ -908,13 +1036,21 @@ def test_swap_session_partial_burn_failure_delivers_first_replacement(
     # Original #1 is gone, so its replacement MUST be offered; the second
     # half of the swap is cancelled (replacement burned, original kept).
     assert session.state == swap_flow.FAILED
-    assert events == ["mint NEW1", "mint NEW2", "burn OLD10",
-                      "burn_failed OLD20", "burn NEW2", "offer NEW1"]
+    assert events == [
+        "mint NEW1",
+        "mint NEW2",
+        "burn OLD10",
+        "burn_failed OLD20",
+        "burn NEW2",
+        "offer NEW1",
+    ]
     assert len(session.results) == 1
     assert session.results[0]["nft_id"] == "NEW1"
     assert "still in your wallet" in session.error
 
+
 # --- Dynamic NFTs (NFTokenModify path) ---
+
 
 def test_normalize_nft_carries_mutability():
     meta = {"name": "LFG #800", "attributes": []}
@@ -945,12 +1081,10 @@ def test_detect_swap_payment_paths(monkeypatch):
     loop = asyncio.get_event_loop()
 
     state.update(balance=Decimal("20"), amm=None)
-    assert loop.run_until_complete(
-        swap_flow.detect_swap_payment("rW", "20")) == ("BRIX", "20")
+    assert loop.run_until_complete(swap_flow.detect_swap_payment("rW", "20")) == ("BRIX", "20")
 
     state.update(balance=Decimal("5"), amm=Decimal("12.5"))  # insufficient BRIX
-    pay_with, amount = loop.run_until_complete(
-        swap_flow.detect_swap_payment("rW", "20"))
+    pay_with, amount = loop.run_until_complete(swap_flow.detect_swap_payment("rW", "20"))
     assert pay_with == "XRP"
     assert Decimal(amount) == Decimal("12.5") * Decimal(config.SWAP_XRP_FEE_BUFFER)
 
@@ -963,8 +1097,9 @@ def test_swap_session_xrp_path_prices_fee_and_offers(monkeypatch, tmp_path):
     """No BRIX trustline: the modify fee is charged in XRP (AMM quote), the
     BRIX is bought + burned, and replacement offers are priced in drops."""
     events = []
-    offers = _patch_swap_stubs(monkeypatch, tmp_path, events,
-                               brix_balance=None, amm_cost=Decimal("12.5"))
+    offers = _patch_swap_stubs(
+        monkeypatch, tmp_path, events, brix_balance=None, amm_cost=Decimal("12.5")
+    )
 
     session = _swap_session(mutable=(True, False))
     asyncio.get_event_loop().run_until_complete(swap_flow.run_swap_session(session))
@@ -973,19 +1108,26 @@ def test_swap_session_xrp_path_prices_fee_and_offers(monkeypatch, tmp_path):
     assert session.pay_with == "XRP"
     # 12.5 XRP for 20 BRIX, x1.05 buffer = 13.125 total -> 6.5625 per NFT
     assert session.fee_amount == "6.562500"
-    assert events == ["fee_requested 6.562500", "burn_fee 10", "mint NEW1",
-                      "modify OLD10", "burn OLD20", "offer NEW1"]
+    assert events == [
+        "fee_requested 6.562500",
+        "burn_fee 10",
+        "mint NEW1",
+        "modify OLD10",
+        "burn OLD20",
+        "offer NEW1",
+    ]
     assert offers == ["6562500"]  # drops string, not a BRIX amount
 
 
 def test_payment_link_supports_custom_currency():
     import json as _json
+
     brix = "4252495800000000000000000000000000000000"
     link = xumm_ops.generate_static_payment_link(
-        "rDest", value="20", currency=brix, issuer="rBrixIssuer")
+        "rDest", value="20", currency=brix, issuer="rBrixIssuer"
+    )
     tx = _json.loads(bytes.fromhex(link.split("/detect/")[1]))
-    assert tx["Amount"] == {"currency": brix, "value": "20",
-                            "issuer": "rBrixIssuer"}
+    assert tx["Amount"] == {"currency": brix, "value": "20", "issuer": "rBrixIssuer"}
 
 
 def test_swap_session_both_mutable_modifies_in_place(monkeypatch, tmp_path):
@@ -997,8 +1139,7 @@ def test_swap_session_both_mutable_modifies_in_place(monkeypatch, tmp_path):
 
     assert session.state == swap_flow.OFFERS_READY
     # Fee charged upfront (2 × 10 BRIX); no mint/burn/offer at all
-    assert events == ["fee_requested 20", "burn_fee 20",
-                      "modify OLD10", "modify OLD20"]
+    assert events == ["fee_requested 20", "burn_fee 20", "modify OLD10", "modify OLD20"]
     assert session.fee_amount == "20"
     # Fee QR is a real XUMM sign request, not the unscannable detect link
     assert session.payment_link == "https://xumm.app/sign/PAY_20"
@@ -1017,8 +1158,14 @@ def test_swap_session_mixed_mints_modifies_then_burns(monkeypatch, tmp_path):
 
     assert session.state == swap_flow.OFFERS_READY
     # Reversible steps first, the irreversible burn last
-    assert events == ["fee_requested 10", "burn_fee 10", "mint NEW1",
-                      "modify OLD10", "burn OLD20", "offer NEW1"]
+    assert events == [
+        "fee_requested 10",
+        "burn_fee 10",
+        "mint NEW1",
+        "modify OLD10",
+        "burn OLD20",
+        "offer NEW1",
+    ]
     modified = [r for r in session.results if r["modified"]]
     offered = [r for r in session.results if not r["modified"]]
     assert modified[0]["nft_id"] == "OLD10"
@@ -1045,8 +1192,13 @@ def test_swap_session_modify_failure_reverts(monkeypatch, tmp_path):
 
     assert session.state == swap_flow.FAILED
     assert "untouched" in session.error
-    assert events == ["fee_requested 20", "burn_fee 20", "modify OLD10",
-                      "modify_failed OLD20", "revert OLD10"]
+    assert events == [
+        "fee_requested 20",
+        "burn_fee 20",
+        "modify OLD10",
+        "modify_failed OLD20",
+        "revert OLD10",
+    ]
 
 
 def test_swap_session_burn_failure_after_modify_unwinds_all(monkeypatch, tmp_path):
@@ -1059,17 +1211,26 @@ def test_swap_session_burn_failure_after_modify_unwinds_all(monkeypatch, tmp_pat
     # The modify is rolled back and the orphaned replacement burned: the
     # user keeps both originals exactly as they were.
     assert session.state == swap_flow.FAILED
-    assert events == ["fee_requested 10", "burn_fee 10", "mint NEW1",
-                      "modify OLD10", "burn_failed OLD20", "revert OLD10",
-                      "burn NEW1"]
+    assert events == [
+        "fee_requested 10",
+        "burn_fee 10",
+        "mint NEW1",
+        "modify OLD10",
+        "burn_failed OLD20",
+        "revert OLD10",
+        "burn NEW1",
+    ]
     assert session.results == []
+
 
 # --- Unified layer store ---
 
+
 def _make_layer_tree(root):
-    for gender, traits_ in (("male", {"Background": ["Blue"], "Body": ["Straight Light"],
-                                      "Eyes": ["Laser", "Hypno"]}),
-                            ("ape", {"Background": ["Red"], "Body": ["Ape"]})):
+    for gender, traits_ in (
+        ("male", {"Background": ["Blue"], "Body": ["Straight Light"], "Eyes": ["Laser", "Hypno"]}),
+        ("ape", {"Background": ["Red"], "Body": ["Ape"]}),
+    ):
         for trait, values in traits_.items():
             d = root / gender / trait
             d.mkdir(parents=True)
@@ -1092,8 +1253,7 @@ def test_select_random_attributes_from_store(tmp_path):
     _make_layer_tree(tmp_path)
     store = layer_store.LocalLayerStore(str(tmp_path))
     loop = asyncio.get_event_loop()
-    gender, attrs = loop.run_until_complete(
-        traits.select_random_attributes(store, body="male"))
+    gender, attrs = loop.run_until_complete(traits.select_random_attributes(store, body="male"))
     assert gender == "male"
     by_type = {a["trait_type"]: a["value"] for a in attrs}
     assert by_type["Background"] == "Blue"
@@ -1131,12 +1291,13 @@ def test_cdn_layer_store_resolve_uses_cache(monkeypatch, tmp_path):
 
 # --- XRPL_NETWORK flag: one switch for endpoints + collection/BRIX issuers ---
 
+
 def _reload_config(monkeypatch, network):
     import importlib
+
     # .env must not leak back in when config re-runs load_dotenv()
     monkeypatch.setattr("dotenv.load_dotenv", lambda *a, **k: False)
-    for var in ("XRPL_JSON_RPC_URL", "XRPL_WS_URL",
-                "SWAP_ISSUER_ADDRESS", "SWAP_OFFER_ISSUER"):
+    for var in ("XRPL_JSON_RPC_URL", "XRPL_WS_URL", "SWAP_ISSUER_ADDRESS", "SWAP_OFFER_ISSUER"):
         monkeypatch.delenv(var, raising=False)
     monkeypatch.setenv("XRPL_NETWORK", network)
     return importlib.reload(config)
@@ -1144,6 +1305,7 @@ def _reload_config(monkeypatch, network):
 
 def test_xrpl_network_flag_testnet_uses_seed_wallet(monkeypatch):
     from xrpl.wallet import Wallet
+
     try:
         cfg = _reload_config(monkeypatch, "testnet")
         seed_addr = Wallet.from_seed(cfg.SEED).classic_address
@@ -1154,6 +1316,7 @@ def test_xrpl_network_flag_testnet_uses_seed_wallet(monkeypatch):
     finally:
         monkeypatch.undo()
         import importlib
+
         importlib.reload(config)
 
 
@@ -1165,6 +1328,7 @@ def test_invalid_seed_on_testnet_raises_clear_error(monkeypatch):
     finally:
         monkeypatch.undo()
         import importlib
+
         importlib.reload(config)
 
 
@@ -1178,6 +1342,7 @@ def test_xrpl_network_flag_defaults_to_mainnet_addresses(monkeypatch):
                 cfg = _reload_config(monkeypatch, "")
                 monkeypatch.delenv("XRPL_NETWORK", raising=False)
                 import importlib
+
                 cfg = importlib.reload(config)
             assert cfg.IS_TESTNET is False
             assert "altnet" not in cfg.JSON_RPC_URL
@@ -1186,6 +1351,7 @@ def test_xrpl_network_flag_defaults_to_mainnet_addresses(monkeypatch):
     finally:
         monkeypatch.undo()
         import importlib
+
         importlib.reload(config)
 
 
@@ -1196,34 +1362,41 @@ def test_explicit_env_overrides_beat_network_flag(monkeypatch):
         # _reload_config cleared it; set and reload again to assert precedence
         monkeypatch.setenv("SWAP_OFFER_ISSUER", "rCustomIssuer111111111111111111111")
         import importlib
+
         cfg = importlib.reload(config)
         assert cfg.SWAP_OFFER_ISSUER == "rCustomIssuer111111111111111111111"
     finally:
         monkeypatch.undo()
         import importlib
+
         importlib.reload(config)
 
 
 # --- same-origin image proxy (Activity CSP blocks cross-origin <img> loads) ---
 
+
 def _img_request(query):
     from aiohttp.test_utils import make_mocked_request
+
     return make_mocked_request("GET", f"/api/img?{query}")
 
 
 def test_img_proxy_route_registered():
     app = server.create_app()
-    paths = {getattr(r.resource, 'canonical', '') for r in app.router.routes()}
+    paths = {getattr(r.resource, "canonical", "") for r in app.router.routes()}
     assert "/api/img" in paths
 
 
 def test_img_proxy_rejects_missing_and_foreign_urls():
     loop = asyncio.get_event_loop()
     from urllib.parse import quote
-    for q in ("", "u=" + quote("https://evil.example/x.png", safe=""),
-              # same prefix as the CDN base but a different host
-              "u=" + quote(config.BUNNY_CDN_PUBLIC_BASE + ".evil.example/x.png",
-                           safe="")):
+
+    for q in (
+        "",
+        "u=" + quote("https://evil.example/x.png", safe=""),
+        # same prefix as the CDN base but a different host
+        "u=" + quote(config.BUNNY_CDN_PUBLIC_BASE + ".evil.example/x.png", safe=""),
+    ):
         resp = loop.run_until_complete(server.handle_img(_img_request(q)))
         assert resp.status == 400, f"query {q!r} should be rejected"
 
@@ -1237,10 +1410,10 @@ def test_img_proxy_streams_allowed_cdn_url(monkeypatch):
 
     monkeypatch.setattr(server, "_fetch_cdn", fake_fetch)
     from urllib.parse import quote
+
     url = config.BUNNY_CDN_PUBLIC_BASE + "/LFGO/123.png"
     loop = asyncio.get_event_loop()
-    resp = loop.run_until_complete(
-        server.handle_img(_img_request("u=" + quote(url, safe=""))))
+    resp = loop.run_until_complete(server.handle_img(_img_request("u=" + quote(url, safe=""))))
     assert resp.status == 200
     assert resp.body == b"\x89PNG fake"
     assert resp.content_type == "image/png"
@@ -1253,20 +1426,20 @@ def test_img_proxy_accepts_pull_zone_host(monkeypatch):
     """Legacy NFT metadata bakes in the BUNNY_PULL_ZONE custom domain (e.g.
     nft.letseffinggo.com) instead of BUNNY_CDN_PUBLIC_BASE; both point at the
     same pull zone and both must be proxyable."""
+
     async def fake_fetch(url):
         return b"\x89PNG fake", "image/png"
 
     monkeypatch.setattr(server, "_fetch_cdn", fake_fetch)
     from urllib.parse import quote
+
     url = "https://nft.pullzone.example/LFGO/3545/3545.png"
     loop = asyncio.get_event_loop()
-    resp = loop.run_until_complete(
-        server.handle_img(_img_request("u=" + quote(url, safe=""))))
+    resp = loop.run_until_complete(server.handle_img(_img_request("u=" + quote(url, safe=""))))
     assert resp.status == 200
     # and a look-alike of the pull zone is still rejected
     bad = "https://nft.pullzone.example.evil.test/x.png"
-    resp = loop.run_until_complete(
-        server.handle_img(_img_request("u=" + quote(bad, safe=""))))
+    resp = loop.run_until_complete(server.handle_img(_img_request("u=" + quote(bad, safe=""))))
     assert resp.status == 400
 
 
@@ -1276,10 +1449,10 @@ def test_img_proxy_cdn_error_is_502(monkeypatch):
 
     monkeypatch.setattr(server, "_fetch_cdn", fake_fetch)
     from urllib.parse import quote
+
     url = config.BUNNY_CDN_PUBLIC_BASE + "/LFGO/123.png"
     loop = asyncio.get_event_loop()
-    resp = loop.run_until_complete(
-        server.handle_img(_img_request("u=" + quote(url, safe=""))))
+    resp = loop.run_until_complete(server.handle_img(_img_request("u=" + quote(url, safe=""))))
     assert resp.status == 502
 
 
@@ -1295,4 +1468,3 @@ def test_no_cache_middleware_respects_handler_cache_header():
     req = make_mocked_request("GET", "/x")
     resp = loop.run_until_complete(server.no_cache_mw(req, handler))
     assert resp.headers["Cache-Control"] == "public, max-age=60"
-

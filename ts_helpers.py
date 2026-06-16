@@ -1,39 +1,41 @@
 # SYSTEM LIBRARIES
-import io
-import os
-import time
-import requests
 import json
-from dotenv import load_dotenv
-import traceback
+import os
+import pprint
 import re
+import time
+import traceback
+
+import cv2
+import ffmpeg
+import requests
+from dotenv import load_dotenv
 
 # IMAGE LIBRARIES
 from PIL import Image
-import cv2
-import ffmpeg
-import pprint
+
+try:
+    import moviepy.editor as mp  # type: ignore[import-untyped]
+except ImportError:
+    mp = None  # type: ignore[assignment]
 
 # CDN LIBRARIES
 import aiohttp
-from BunnyCDN.Storage import Storage
-from BunnyCDN.CDN import CDN
+from xrpl.asyncio.clients import AsyncWebsocketClient
+from xrpl.clients import JsonRpcClient
+from xrpl.models import IssuedCurrencyAmount
 
 # XRPL LIBRARIES
 from xrpl.models.requests import AccountInfo, AccountNFTs, Tx
-from xrpl.clients import JsonRpcClient
-from xrpl.asyncio.clients import AsyncWebsocketClient
-from xrpl.transaction.reliable_submission import submit_and_wait
-from xrpl.transaction import autofill_and_sign
-from xrpl.models import IssuedCurrencyAmount
-from xrpl.wallet import Wallet
 from xrpl.models.transactions import (
     NFTokenBurn,
-    NFTokenMint,
     NFTokenCreateOffer,
     NFTokenCreateOfferFlag,
     Payment,
 )
+from xrpl.transaction import autofill_and_sign
+from xrpl.transaction.reliable_submission import submit_and_wait
+from xrpl.wallet import Wallet
 
 load_dotenv()
 
@@ -65,14 +67,12 @@ async def get_nft_metadata(uri):
         ascii_uri = bytes.fromhex(uri).decode("ascii")
         print(f"Decoded URI: {ascii_uri}")
 
-        if ascii_uri.startswith("ipfs://"): 
-            print("URI is hosted on IPFS")   
+        if ascii_uri.startswith("ipfs://"):
+            print("URI is hosted on IPFS")
             ascii_uri = ascii_uri.replace("ipfs://", "")
             # print(ascii_uri)
-            parts = ascii_uri.split(
-                "/"
-            )  
-            # For example, if the link is ipfs://bafybeiahdnp4q3fntlnfk544zmqiersjbmrzwir4l4xqzbeip3wx4vwz74/475.json, 
+            parts = ascii_uri.split("/")
+            # For example, if the link is ipfs://bafybeiahdnp4q3fntlnfk544zmqiersjbmrzwir4l4xqzbeip3wx4vwz74/475.json,
             # make it https://bafybeiahdnp4q3fntlnfk544zmqiersjbmrzwir4l4xqzbeip3wx4vwz74.ipfs.dweb.link/475.json (append .ipfs.dweb.link)
             # ascii_uri = "https://" + parts[0] + ".ipfs.dweb.link/" + parts[1]
             print(parts)
@@ -82,7 +82,7 @@ async def get_nft_metadata(uri):
             else:
                 print("1 part")
                 ascii_uri = "https://" + parts[0] + ".ipfs.dweb.link/"
-        
+
         # Otherwise, assume it's a BunnyCDN link or a valid HTTP URL
         elif ascii_uri.startswith("https://") or ascii_uri.startswith("http://"):
             print("Assuming BunnyCDN or HTTP URL")
@@ -91,20 +91,19 @@ async def get_nft_metadata(uri):
             raise ValueError("Invalid URL format")
 
         print(f"Final URI: {ascii_uri}")
-        
+
         # Make the request to fetch the metadata
         response = requests.get(ascii_uri)
         response.raise_for_status()  # Raise an error for bad responses
         return response.json()
-    
+
     except Exception as e:
         print(f"Error fetching metadata: {e}")
         return None
 
 
-
 def register_user(user, address):
-    with open("users.json", "r") as f:
+    with open("users.json") as f:
         users = json.load(f)["users"]  # list of dicts of users
     if str(user.id) not in [user["id"] for user in users]:
         users.append({"id": str(user.id), "address": address})
@@ -117,7 +116,7 @@ def register_user(user, address):
 
 
 def get_user(user):
-    with open("users.json", "r") as f:
+    with open("users.json") as f:
         users = json.load(f)["users"]  # list of dicts of users
     for userr in users:
         if userr["id"] == str(user.id):
@@ -133,9 +132,7 @@ async def get_nfts(address, issuer):
         print(f"Getting nfts for {address}")
         async with AsyncWebsocketClient(WS_URL) as websocket:
             while marker:
-                account_nfts_request = AccountNFTs(
-                    account=address, marker=markerVal, limit=400
-                )
+                account_nfts_request = AccountNFTs(account=address, marker=markerVal, limit=400)
                 account_nfts_response = await websocket.request(account_nfts_request)
                 a1 = account_nfts_response.to_dict()
                 print(f"Got {len(a1['result']['account_nfts'])} nfts")
@@ -165,7 +162,6 @@ def makeNft(traits, gender, wallet, name, burnCount):
         nftNumber = match.group(1)
         print(f"Extracted NFT number: {nftNumber}")
     else:
-        number = "null"
         print("No NFT number found")
     # each file is stored in "trait_type/trait_value.png" or "trait_type/trait_value.gif" or "trait_type/trait_value.mp4"
     # check if all files are png
@@ -186,18 +182,6 @@ def makeNft(traits, gender, wallet, name, burnCount):
         "Accessory",
     ]
 
-    medTraitOrder = [
-        "Background",
-        "Back",
-        "Body",
-        "Clothing",
-        "Accessory",
-        "Mouth",
-        "Eyebrows",
-        "Eyes",
-        "Head",
-    ]
-
     # put traits in order
     traits = sorted(traits, key=lambda k: traitsInOrder.index(k["trait_type"]))
     # medFlag = False
@@ -213,26 +197,12 @@ def makeNft(traits, gender, wallet, name, burnCount):
     # check if .png files are present for each trait
     pprint.pprint(traits)
     for trait in traits:
-        if not os.path.isfile(
-            gender + "/" + trait["trait_type"] + "/" + trait["value"] + ".png"
-        ):
-            print(
-                gender
-                + "/"
-                + trait["trait_type"]
-                + "/"
-                + trait["value"]
-                + ".png"
-                + " not found"
-            )
+        if not os.path.isfile(gender + "/" + trait["trait_type"] + "/" + trait["value"] + ".png"):
+            print(gender + "/" + trait["trait_type"] + "/" + trait["value"] + ".png" + " not found")
             isAllPng = False
-        if os.path.isfile(
-            gender + "/" + trait["trait_type"] + "/" + trait["value"] + ".gif"
-        ):
+        if os.path.isfile(gender + "/" + trait["trait_type"] + "/" + trait["value"] + ".gif"):
             anyGif = True
-        if os.path.isfile(
-            gender + "/" + trait["trait_type"] + "/" + trait["value"] + ".mp4"
-        ):
+        if os.path.isfile(gender + "/" + trait["trait_type"] + "/" + trait["value"] + ".mp4"):
             anyMp4 = True
         # check if any trait is in top traits, if so, put it in the front, i.e the last index so that its rendered on top of other traits
         for topTrait in TOP_TRAITS:
@@ -246,7 +216,7 @@ def makeNft(traits, gender, wallet, name, burnCount):
                 traitsInOrder.remove(trait["trait_type"])
                 traitsInOrder.append(trait["trait_type"])
                 break
-        
+
     pprint.pprint(traits)
     print("isAllPng: " + str(isAllPng))
     print("anyGif: " + str(anyGif))
@@ -271,22 +241,18 @@ def makeNft(traits, gender, wallet, name, burnCount):
             # print(f"Index: {traitsInOrder.index(trait)}")
             # print(json.dumps(traits, indent=2))
             pngFiles.append(
-                gender
-                + "/"
-                + trait
-                + "/"
-                + traits[traitsInOrder.index(trait)]["value"]
-                + ".png"
+                gender + "/" + trait + "/" + traits[traitsInOrder.index(trait)]["value"] + ".png"
             )
         # combine png files dynamically
         input_stream = ffmpeg.input(pngFiles[0])  # start with the first input
-        for index, file in enumerate(pngFiles[1:], start=1):
-            input_stream = input_stream.overlay(ffmpeg.input(file))  # add overlay for each additional file
+        for _, file in enumerate(pngFiles[1:], start=1):
+            input_stream = input_stream.overlay(
+                ffmpeg.input(file)
+            )  # add overlay for each additional file
 
         # output the final combined file
         (
-            input_stream
-            .output(f"generated/{nftNumber}_{burnCount}.png")
+            input_stream.output(f"generated/{nftNumber}_{burnCount}.png")
             .overwrite_output()  # automatically say yes to overwrite
             .run()
         )
@@ -299,12 +265,7 @@ def makeNft(traits, gender, wallet, name, burnCount):
         gifFiles = []
         for trait in traitsInOrder:
             if os.path.isfile(
-                gender
-                + "/"
-                + trait
-                + "/"
-                + traits[traitsInOrder.index(trait)]["value"]
-                + ".gif"
+                gender + "/" + trait + "/" + traits[traitsInOrder.index(trait)]["value"] + ".gif"
             ):
                 gifFiles.append(
                     gender
@@ -325,19 +286,20 @@ def makeNft(traits, gender, wallet, name, burnCount):
                 )
         # combine gif files dynamically
         input_stream = ffmpeg.input(gifFiles[0])  # start with the first input
-        for index, file in enumerate(gifFiles[1:], start=1):
-            input_stream = input_stream.overlay(ffmpeg.input(file))  # add overlay for each additional file
+        for _, file in enumerate(gifFiles[1:], start=1):
+            input_stream = input_stream.overlay(
+                ffmpeg.input(file)
+            )  # add overlay for each additional file
 
         # output the final combined file
         (
-            input_stream
-            .output(f"generated/{nftNumber}_{burnCount}.mp4")
+            input_stream.output(f"generated/{nftNumber}_{burnCount}.mp4")
             .overwrite_output()  # automatically say yes to overwrite
             .run()
         )
         print("output.gif created")
         return f"generated/{nftNumber}_{burnCount}.mp4"
-    
+
     elif anyMp4 and not anyGif:
         print("mp4")
         # create a list of all mp4 files, also have the audio ported over to the final mp4
@@ -346,12 +308,7 @@ def makeNft(traits, gender, wallet, name, burnCount):
         for trait in traitsInOrder:
             print(f"Checking for {trait}")
             if os.path.isfile(
-                gender
-                + "/"
-                + trait
-                + "/"
-                + traits[traitsInOrder.index(trait)]["value"]
-                + ".mp4"
+                gender + "/" + trait + "/" + traits[traitsInOrder.index(trait)]["value"] + ".mp4"
             ):
                 print(f"Video file found for {trait}")
                 mp4Files.append(
@@ -385,13 +342,14 @@ def makeNft(traits, gender, wallet, name, burnCount):
 
         # combine mp4 files dynamically
         input_stream = ffmpeg.input(mp4Files[0])  # start with the first input
-        for index, file in enumerate(mp4Files[1:], start=1):
-            input_stream = input_stream.overlay(ffmpeg.input(file))  # add overlay for each additional file
+        for _, file in enumerate(mp4Files[1:], start=1):
+            input_stream = input_stream.overlay(
+                ffmpeg.input(file)
+            )  # add overlay for each additional file
 
         # output the final combined file
         (
-            input_stream
-            .output(f"generated/{nftNumber}_{burnCount}.mp4")
+            input_stream.output(f"generated/{nftNumber}_{burnCount}.mp4")
             .overwrite_output()  # automatically say yes to overwrite
             .run()
         )
@@ -409,12 +367,7 @@ def makeNft(traits, gender, wallet, name, burnCount):
         allFiles = []
         for trait in traitsInOrder:
             if os.path.isfile(
-                gender
-                + "/"
-                + trait
-                + "/"
-                + traits[traitsInOrder.index(trait)]["value"]
-                + ".png"
+                gender + "/" + trait + "/" + traits[traitsInOrder.index(trait)]["value"] + ".png"
             ):
                 allFiles.append(
                     gender
@@ -425,12 +378,7 @@ def makeNft(traits, gender, wallet, name, burnCount):
                     + ".png"
                 )
             elif os.path.isfile(
-                gender
-                + "/"
-                + trait
-                + "/"
-                + traits[traitsInOrder.index(trait)]["value"]
-                + ".mp4"
+                gender + "/" + trait + "/" + traits[traitsInOrder.index(trait)]["value"] + ".mp4"
             ):
                 allFiles.append(
                     gender
@@ -451,12 +399,7 @@ def makeNft(traits, gender, wallet, name, burnCount):
                 )
                 clip.audio.write_audiofile(f"generated/{nftNumber}_audio_{burnCount}.mp3")
             elif os.path.isfile(
-                gender
-                + "/"
-                + trait
-                + "/"
-                + traits[traitsInOrder.index(trait)]["value"]
-                + ".gif"
+                gender + "/" + trait + "/" + traits[traitsInOrder.index(trait)]["value"] + ".gif"
             ):
                 allFiles.append(
                     gender
@@ -477,17 +420,18 @@ def makeNft(traits, gender, wallet, name, burnCount):
 
         # combine mp4 files dynamically
         input_stream = ffmpeg.input(allFiles[0])  # start with the first input
-        for index, file in enumerate(allFiles[1:], start=1):
-            input_stream = input_stream.overlay(ffmpeg.input(file))  # add overlay for each additional file
+        for _, file in enumerate(allFiles[1:], start=1):
+            input_stream = input_stream.overlay(
+                ffmpeg.input(file)
+            )  # add overlay for each additional file
 
         # output the final combined file
         (
-            input_stream
-            .output(f"generated/{nftNumber}_{burnCount}.mp4")
+            input_stream.output(f"generated/{nftNumber}_{burnCount}.mp4")
             .overwrite_output()  # automatically say yes to overwrite
             .run()
         )
-        '''
+        """
         # combine mp4 files
         (
             ffmpeg.input(allFiles[0])
@@ -505,8 +449,7 @@ def makeNft(traits, gender, wallet, name, burnCount):
             .overwrite_output()
             .run()
         )
-        '''
-
+        """
 
         # add audio to mp4 using ffmpeg
         audio = ffmpeg.input(f"generated/{nftNumber}_audio_{burnCount}.mp3")
@@ -526,7 +469,7 @@ def makeNftSingle(nft, gender, userWallet):
     bg = None
     for trait in nft:
         if trait["trait_type"] == "Background":
-            bg = Image.open(f'{folder}/Background/{trait["value"]}.png')
+            bg = Image.open(f"{folder}/Background/{trait['value']}.png")
             break
     # order of traits to put images in: ['Clothing', 'Mouth', 'Eyebrows', 'Eyes', 'Head', 'Accessory']
     traits = ["Body", "Clothing", "Mouth", "Eyebrows", "Eyes", "Head", "Accessory"]
@@ -540,14 +483,13 @@ def makeNftSingle(nft, gender, userWallet):
         for t in nft:
             if t["trait_type"] == trait:
                 bg.paste(
-                    Image.open(f'{folder}/{trait}/{t["value"]}.png'),
+                    Image.open(f"{folder}/{trait}/{t['value']}.png"),
                     (0, 0),
-                    mask=Image.open(f'{folder}/{trait}/{t["value"]}.png'),
+                    mask=Image.open(f"{folder}/{trait}/{t['value']}.png"),
                 )
                 break
     bg.save(f"generated/{userWallet}_nft1.png")
     return f"generated/{userWallet}_nft1.png"
-
 
 
 async def upload_to_bunnycdn(file_path, name, burnCount):
@@ -557,28 +499,22 @@ async def upload_to_bunnycdn(file_path, name, burnCount):
     if match:
         nftNumber = match.group(1)
     else:
-        number = "null"
         print("No NFT number found")
 
-    key = os.getenv("BUNNYCDN_ACCESS_KEY") # Bunny Access Key
-    base_url = "https://storage.bunnycdn.com/lfgo/LFGO/" # Base URL for CDN
-        
+    key = os.getenv("BUNNYCDN_ACCESS_KEY")  # Bunny Access Key
+    base_url = "https://storage.bunnycdn.com/lfgo/LFGO/"  # Base URL for CDN
+
     file_name = os.path.basename(file_path)
-    
+
     file_extension = file_name.split(".")[-1].lower()
 
-    with open(file_path, 'rb') as file:
-            file_bytes = file.read()
+    with open(file_path, "rb") as file:
+        file_bytes = file.read()
 
-    content_types = {
-        "png" : "image/png",
-        "mp4" : "video/mp4",
-        "json" : "application/json"
-    }
+    content_types = {"png": "image/png", "mp4": "video/mp4", "json": "application/json"}
     if file_extension not in content_types:
         raise ValueError("Unsupported file type. Only PNG, MP4 and json are allowed.")
-    
-    
+
     async with aiohttp.ClientSession() as session:
         url = f"{base_url}{nftNumber}/{nftNumber}_{burnCount}.{file_extension}"
         print(f"Passing URL: {url}")
@@ -587,18 +523,17 @@ async def upload_to_bunnycdn(file_path, name, burnCount):
             "AccessKey": key,
             "Content-Type": content_types.get(file_extension),
         }
-        async with session.put(url, headers=headers,data=file_bytes) as response:
+        async with session.put(url, headers=headers, data=file_bytes) as response:
             if response.status == 201:
-                 print("File uploaded")
-                 publicUrl = f"https://lfgo.b-cdn.net/LFGO/{nftNumber}/{nftNumber}_{burnCount}.{file_extension}"
-                 return publicUrl
+                print("File uploaded")
+                publicUrl = f"https://lfgo.b-cdn.net/LFGO/{nftNumber}/{nftNumber}_{burnCount}.{file_extension}"
+                return publicUrl
             else:
-                 print(traceback.format_exc())
-                 return None
+                print(traceback.format_exc())
+                return None
 
 
-
-'''
+"""
  async def upload_image_to_nft_storage(file_path):
     print(file_path)
     url = "https://api.nft.storage/upload"
@@ -623,7 +558,8 @@ async def upload_to_bunnycdn(file_path, name, burnCount):
 # asyncio.run(upload_image_to_nft_storage("generated/test_nft_video.mp4"))
 # asyncio.run(upload_image_to_nft_storage("generated/up.png"))
 # asyncio.run(upload_image_to_nft_storage("meta.json"))
-'''
+"""
+
 
 async def combineAudio(nft_video, userWallet):
     audio = mp.AudioFileClip(f"generated/{userWallet}_audio.mp3")
@@ -636,9 +572,7 @@ async def combineAudio(nft_video, userWallet):
 def burn_nft(nftid, owner):
     try:
         wallet = Wallet.from_seed(SEED)
-        payment = NFTokenBurn(
-            account=wallet.classic_address, nftoken_id=nftid, owner=owner
-        )
+        payment = NFTokenBurn(account=wallet.classic_address, nftoken_id=nftid, owner=owner)
         client = JsonRpcClient(JSON_RPC_URL)
 
         retries = 5  # Number of retries for submission
@@ -696,7 +630,8 @@ def burn_nft(nftid, owner):
 def convert_str_to_hex(string):
     return string.encode().hex().upper()
 
-'''
+
+"""
 def get_nft_token(res):
     try:
         # Extract the URI from the transaction response
@@ -738,31 +673,35 @@ def get_nft_token(res):
     except Exception as e:
         print(f"Error in get_nft_token: {e}")
         return None
-'''
+"""
+
 
 def mint_nft(metadata_url, nft_token_taxon, issuer):
     """
     Mint an NFT on the XRPL using the provided metadata URL, NFT token taxon, and issuer.
-    
+
     Parameters:
         metadata_url (str): The URL of the uploaded metadata.
         nft_token_taxon (int): The taxon value for the NFT.
         issuer (str): The XRPL address of the issuer.
-    
+
     Returns:
         str: The NFT ID if the minting was successful; otherwise, None.
     """
     # Dummy implementation for now:
-    print(f"Minting NFT with metadata URL: {metadata_url}, taxon: {nft_token_taxon}, issuer: {issuer}")
+    print(
+        f"Minting NFT with metadata URL: {metadata_url}, taxon: {nft_token_taxon}, issuer: {issuer}"
+    )
     # Here, add your XRPL minting transaction logic (using xrpl-py, XUMM SDK, etc.)
     # For now, let's just return a dummy NFT ID
     return "dummy_nft_id"
+
 
 # Create thumbnail for video NFTs
 async def extractFirstFrame(video_path, output_image_path):
     print(video_path)
     print(output_image_path)
-    
+
     # Open the video file
     cap = cv2.VideoCapture(video_path)
 
@@ -792,7 +731,7 @@ async def extractFirstFrame(video_path, output_image_path):
 
 def create_nft_offer(nftId, destination):
     try:
-        for i in range(0, 3):
+        for _ in range(3):
             client = JsonRpcClient(JSON_RPC_URL)
             wallet = Wallet.from_seed(SEED)
             payment = NFTokenCreateOffer(
@@ -806,15 +745,16 @@ def create_nft_offer(nftId, destination):
                 nftoken_id=nftId,
                 flags=NFTokenCreateOfferFlag.TF_SELL_NFTOKEN,
             )
-            
-            
+
             payment_response = submit_and_wait(payment, client, wallet)
             print(f"Transaction was submitted: {payment_response.result['hash']}")
             hashTxn = payment_response.result["hash"]
 
             for _ in range(0, 3):
                 try:
-                    txn = client.request(Tx(transaction=hashTxn))  # Query the transaction by its hash
+                    txn = client.request(
+                        Tx(transaction=hashTxn)
+                    )  # Query the transaction by its hash
                     res = txn.result
                     print(f"Transaction {hashTxn} status:\n{json.dumps(res, indent=4)}")
                     if "meta" in res and "TransactionResult" in res["meta"]:
@@ -841,7 +781,7 @@ def create_nft_offer(nftId, destination):
 
 # create_nft_offer("00091B58D1AE1BC312BEF9C68233FB0C8CF6A338F7C227BEB1A990C60000118B","rhA5i9dWtXprHXYiAzgUdRoyybGmfnV9Pj")
 
-'''
+"""
 def get_offer_id(res):
     try:
         for node in res["meta"]["AffectedNodes"]:
@@ -859,7 +799,7 @@ def get_offer_id(res):
     except Exception as e:
         print(e)
         return None
-'''
+"""
 
 if __name__ == "__main__":
     # import asyncio
@@ -906,13 +846,11 @@ def cleanup(userWallet):
         for file in os.listdir("generated"):
             if userWallet in file:
                 files.append(f"generated/{file}")
-        for (
-            file
-        ) in os.listdir():  # check in root folder for files with userWallet in it
+        for file in os.listdir():  # check in root folder for files with userWallet in it
             if userWallet in file:
                 files.append(file)
         cleanupFiles(files)
-    except:
+    except Exception:
         pass
 
 
@@ -921,7 +859,7 @@ def cleanupVid(userWallet):
         os.remove(f"generated/{userWallet}_nft_video.mp4")
         os.remove(f"generated/{userWallet}_audio.mp3")
         os.remove(f"generated/{userWallet}_nft_video_full.mp4")
-    except:
+    except Exception:
         pass
 
 
@@ -929,7 +867,7 @@ def cleanupFiles(files):
     for file in files:
         try:
             os.remove(file)
-        except:
+        except Exception:
             pass
 
 
@@ -946,7 +884,7 @@ def gen_nft_accept_txn(offer):
     tjson = {
         "Account": "rJAFQ2d6mUTgHHtLogPx5BB5NRT97ASFDy",
         "NFTokenSellOffer": offer,
-        "TransactionType": "NFTokenAcceptOffer"
+        "TransactionType": "NFTokenAcceptOffer",
     }
     payload = {
         "txjson": tjson,
@@ -978,7 +916,7 @@ class wall(JsonRpcClient):
         """send asset...
         max amount = 15 decimal places"""
         acc_info = AccountInfo(account=sender_addr, ledger_index="validated")
-        response = self.client.request(acc_info).result
+        self.client.request(acc_info)
         sender_wallet = Wallet(seed=sender_seed)
 
         txn_payment = Payment(
@@ -992,8 +930,8 @@ class wall(JsonRpcClient):
             transaction=txn_payment, wallet=sender_wallet, client=self.client
         )
         try:
-            stxn_response = submit_and_wait(stxn_payment, self.client)
-        except Exception as e:
+            submit_and_wait(stxn_payment, self.client)
+        except Exception:
             pass
 
 
@@ -1002,6 +940,7 @@ def example_request():
     req = requests.get(url)
     data = req.json()
     print(data)
+
 
 def send_brix(a, radd):
     wallet1 = wall(

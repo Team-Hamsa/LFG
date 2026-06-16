@@ -10,19 +10,22 @@ Output JSON: {edition: {status, desc, edition, name, image, attrs}}.
 
   python 02_scan_cdn.py --max 3535 --out work/cdn_scan.json
 """
+
 import argparse
 import json
 import os
-import requests
 from concurrent.futures import ThreadPoolExecutor
+
+import requests
 
 DEFAULT_BASE = "https://lfgo.b-cdn.net/LFGO"
 
 
 def main():
     """Scan the CDN by edition number and write present traits to JSON."""
-    p = argparse.ArgumentParser(description=__doc__,
-                                formatter_class=argparse.RawDescriptionHelpFormatter)
+    p = argparse.ArgumentParser(
+        description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter
+    )
     p.add_argument("--base", default=DEFAULT_BASE, help="CDN base path (no trailing /)")
     p.add_argument("--max", type=int, default=3535, help="highest edition to probe")
     p.add_argument("--workers", type=int, default=40)
@@ -38,11 +41,18 @@ def main():
             if r.status_code != 200:
                 return (n, {"status": r.status_code})
             md = r.json()
-            attrs = {a.get("trait_type"): a.get("value")
-                     for a in md.get("attributes", [])}
-            return (n, {"status": 200, "desc": md.get("description"),
-                        "edition": md.get("edition"), "name": md.get("name"),
-                        "image": md.get("image"), "attrs": attrs})
+            attrs = {a.get("trait_type"): a.get("value") for a in md.get("attributes", [])}
+            return (
+                n,
+                {
+                    "status": 200,
+                    "desc": md.get("description"),
+                    "edition": md.get("edition"),
+                    "name": md.get("name"),
+                    "image": md.get("image"),
+                    "attrs": attrs,
+                },
+            )
         except Exception as e:
             return (n, {"status": type(e).__name__})
 

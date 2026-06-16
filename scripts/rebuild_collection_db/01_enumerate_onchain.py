@@ -9,6 +9,7 @@ Output JSON: list of {serial, nft_id, burned, uri}.
 
   python 01_enumerate_onchain.py --out work/onchain.json
 """
+
 import argparse
 import asyncio
 import json
@@ -28,15 +29,20 @@ async def enumerate_collection(ws, issuer, taxon, limit):
     marker = None
     async with AsyncWebsocketClient(ws) as client:
         while True:
-            req = {"method": "nfts_by_issuer", "issuer": issuer,
-                   "nft_taxon": taxon, "limit": limit}
+            req = {"method": "nfts_by_issuer", "issuer": issuer, "nft_taxon": taxon, "limit": limit}
             if marker:
                 req["marker"] = marker
             r = await client.request(Request.from_dict(req))
             for x in r.result.get("nfts", []):
                 uri = bytes.fromhex(x["uri"]).decode("utf8") if x.get("uri") else ""
-                out.append({"serial": x.get("nft_serial"), "nft_id": x["nft_id"],
-                            "burned": bool(x.get("is_burned")), "uri": uri})
+                out.append(
+                    {
+                        "serial": x.get("nft_serial"),
+                        "nft_id": x["nft_id"],
+                        "burned": bool(x.get("is_burned")),
+                        "uri": uri,
+                    }
+                )
             marker = r.result.get("marker")
             if not marker:
                 break
@@ -45,8 +51,9 @@ async def enumerate_collection(ws, issuer, taxon, limit):
 
 def main():
     """Parse args, enumerate the collection, and write the JSON output."""
-    p = argparse.ArgumentParser(description=__doc__,
-                                formatter_class=argparse.RawDescriptionHelpFormatter)
+    p = argparse.ArgumentParser(
+        description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter
+    )
     p.add_argument("--issuer", default=DEFAULT_ISSUER)
     p.add_argument("--taxon", type=int, default=DEFAULT_TAXON)
     p.add_argument("--ws", default=DEFAULT_WS, help="XRPL clio websocket")
@@ -56,6 +63,7 @@ def main():
 
     nfts = asyncio.run(enumerate_collection(args.ws, args.issuer, args.taxon, args.limit))
     import os
+
     os.makedirs(os.path.dirname(args.out) or ".", exist_ok=True)
     json.dump(nfts, open(args.out, "w"))
     live = sum(1 for x in nfts if not x["burned"])

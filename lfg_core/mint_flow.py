@@ -4,17 +4,18 @@
 # the bot's mint button, but exposes state for polling instead of sending
 # Discord messages.
 
-import os
-import json
-import time
-import uuid
 import asyncio
+import json
 import logging
+import os
+import time
 import traceback
+import uuid
 from decimal import Decimal
+from typing import Any
 
-from lfg_core import config, cdn, traits, xrpl_ops, xumm_ops, layer_store, swap_compose, rarity
 from db_helpers import get_next_nft_number, record_nft_mint
+from lfg_core import cdn, config, layer_store, rarity, swap_compose, traits, xrpl_ops, xumm_ops
 
 # Session states
 AWAITING_PAYMENT = "awaiting_payment"
@@ -35,44 +36,51 @@ TERMINAL_STATES = {OFFER_READY, DONE, FAILED, PAYMENT_TIMEOUT}
 # get_next_nft_number() is MAX+1, so without this two concurrent mints would
 # get the same number and overwrite each other's CDN files.
 _nft_number_lock = asyncio.Lock()
-_reserved_numbers = set()
+_reserved_numbers: set[int] = set()
 
 
 class MintSession:
-    def __init__(self, discord_id: str, wallet_address: str,
-                 return_url: dict = None):
+    def __init__(
+        self, discord_id: str, wallet_address: str, return_url: dict[str, str] | None = None
+    ) -> None:
         self.id = uuid.uuid4().hex
         self.discord_id = discord_id
         self.wallet_address = wallet_address
         self.return_url = return_url  # XUMM return_url back into Discord
         self.created_at = time.time()
         self.state = AWAITING_PAYMENT
-        self.error = None
-        self.pay_with = None    # "LFGO" or "XRP", set by prepare_payment
-        self.pay_amount = None
-        self.payment_link = None
-        self.payment_uuid = None   # XUMM payload uuid for scan tracking
-        self.qr_scanned = False    # payment QR opened in Xaman (issue #22)
-        self.nft_number = None
-        self.nft_id = None
-        self.image_url = None
-        self.accept_qr_url = None
-        self.accept_deeplink = None
-        self.accept_uuid = None
+        self.error: str | None = None
+        self.pay_with: str | None = None  # "LFGO" or "XRP", set by prepare_payment
+        self.pay_amount: str | None = None
+        self.payment_link: str | None = None
+        self.payment_uuid: str | None = None  # XUMM payload uuid for scan tracking
+        self.qr_scanned = False  # payment QR opened in Xaman (issue #22)
+        self.nft_number: int | None = None
+        self.nft_id: str | None = None
+        self.image_url: str | None = None
+        self.accept_qr_url: str | None = None
+        self.accept_deeplink: str | None = None
+        self.accept_uuid: str | None = None
         self.accept_scanned = False
         self.accept_signed = False
 
-    def _payment_params(self) -> dict:
+    def _payment_params(self) -> dict[str, Any]:
         """Destination/amount for this session's payment path. LFGO goes to
         the issuer (= burned on arrival); XRP goes to the bot wallet, which
         buys and burns the LFGO off the DEX after payment."""
         if self.pay_with == "XRP":
-            return dict(destination=xrpl_ops.bot_wallet_address(),
-                        value=self.pay_amount, currency="XRP", issuer=None)
-        return dict(destination=config.TOKEN_ISSUER_ADDRESS,
-                    value=self.pay_amount,
-                    currency=config.TOKEN_CURRENCY_HEX,
-                    issuer=config.TOKEN_ISSUER_ADDRESS)
+            return {
+                "destination": xrpl_ops.bot_wallet_address(),
+                "value": self.pay_amount,
+                "currency": "XRP",
+                "issuer": None,
+            }
+        return {
+            "destination": config.TOKEN_ISSUER_ADDRESS,
+            "value": self.pay_amount,
+            "currency": config.TOKEN_CURRENCY_HEX,
+            "issuer": config.TOKEN_ISSUER_ADDRESS,
+        }
 
     async def prepare_payment(self) -> None:
         """Detect the payment path (LFGO holders burn LFGO; everyone else
@@ -81,20 +89,23 @@ class MintSession:
         raw-JSON detect link, so the payload URL is the one that must end
         up in the payment QR (issue #8)."""
         balance = await xrpl_ops.get_trustline_balance(
-            self.wallet_address, config.TOKEN_CURRENCY_HEX,
-            config.TOKEN_ISSUER_ADDRESS)
+            self.wallet_address, config.TOKEN_CURRENCY_HEX, config.TOKEN_ISSUER_ADDRESS
+        )
         if balance is not None and balance >= Decimal(config.MINT_PRICE_LFGO):
             self.pay_with, self.pay_amount = "LFGO", config.MINT_PRICE_LFGO
         else:
             self.pay_with, self.pay_amount = "XRP", config.MINT_PRICE_XRP
         p = self._payment_params()
         self.payment_link = xumm_ops.generate_static_payment_link(
-            p["destination"], value=p["value"],
-            currency=p["currency"], issuer=p["issuer"])
+            p["destination"], value=p["value"], currency=p["currency"], issuer=p["issuer"]
+        )
         payload = await xumm_ops.create_payment_payload(
-            p["destination"], value=p["value"],
-            currency=p["currency"], issuer=p["issuer"],
-            return_url=self.return_url)
+            p["destination"],
+            value=p["value"],
+            currency=p["currency"],
+            issuer=p["issuer"],
+            return_url=self.return_url,
+        )
         if payload:
             self.payment_link = payload["xumm_url"]
             self.payment_uuid = payload.get("uuid")
@@ -115,10 +126,10 @@ class MintSession:
         if not self.payment_link:
             p = self._payment_params()
             self.payment_link = xumm_ops.generate_static_payment_link(
-                p["destination"], value=p["value"],
-                currency=p["currency"], issuer=p["issuer"])
+                p["destination"], value=p["value"], currency=p["currency"], issuer=p["issuer"]
+            )
 
-    def to_dict(self) -> dict:
+    def to_dict(self) -> dict[str, Any]:
         return {
             "id": self.id,
             "state": self.state,
@@ -138,8 +149,7 @@ class MintSession:
 
 
 async def _upload_to_bunny(path_on_cdn: str, data: bytes, content_type: str) -> str:
-    return await cdn.upload_to_bunny(config.BUNNY_CDN_FOLDER, path_on_cdn,
-                                     data, content_type)
+    return await cdn.upload_to_bunny(config.BUNNY_CDN_FOLDER, path_on_cdn, data, content_type)
 
 
 async def _allocate_nft_number() -> int:
@@ -152,7 +162,7 @@ async def _allocate_nft_number() -> int:
         return number
 
 
-def _release_unused_number(session) -> None:
+def _release_unused_number(session: MintSession) -> None:
     """Release a reserved number when the session fails before anything was
     minted on-chain with it. Numbers that reached the chain stay reserved
     until the DB record lands (or forever, if it never does)."""
@@ -160,7 +170,7 @@ def _release_unused_number(session) -> None:
         _reserved_numbers.discard(session.nft_number)
 
 
-def _save_recovery_record(record: dict) -> None:
+def _save_recovery_record(record: dict[str, Any]) -> None:
     """If the DB insert fails after an on-chain mint, persist the record to
     disk so an administrator can backfill the LFG table."""
     try:
@@ -178,13 +188,11 @@ async def update_scan_state(session: MintSession) -> None:
     the frontend can swap a scanned QR for a spinner (issue #22). Queries
     stop once a payload is seen opened/signed; API errors leave the flags
     untouched."""
-    if (session.state == AWAITING_PAYMENT and session.payment_uuid
-            and not session.qr_scanned):
+    if session.state == AWAITING_PAYMENT and session.payment_uuid and not session.qr_scanned:
         s = await xumm_ops.get_payload_status(session.payment_uuid)
         if s:
             session.qr_scanned = s["opened"] or s["signed"]
-    elif (session.state == OFFER_READY and session.accept_uuid
-            and not session.accept_signed):
+    elif session.state == OFFER_READY and session.accept_uuid and not session.accept_signed:
         s = await xumm_ops.get_payload_status(session.accept_uuid)
         if s:
             session.accept_scanned = s["opened"] or s["signed"]
@@ -215,10 +223,15 @@ async def run_mint_session(session: MintSession) -> None:
             # the XRP just collected. Best-effort: a failed buyback must
             # never cost the user their mint.
             if not await xrpl_ops.buy_and_burn(
-                    config.TOKEN_CURRENCY_HEX, config.TOKEN_ISSUER_ADDRESS,
-                    config.MINT_PRICE_LFGO, max_xrp=session.pay_amount):
-                logging.error(f"LFGO buy-and-burn failed for mint session "
-                              f"{session.id}; XRP stays in the bot wallet")
+                config.TOKEN_CURRENCY_HEX,
+                config.TOKEN_ISSUER_ADDRESS,
+                config.MINT_PRICE_LFGO,
+                max_xrp=session.pay_amount,
+            ):
+                logging.error(
+                    f"LFGO buy-and-burn failed for mint session "
+                    f"{session.id}; XRP stays in the bot wallet"
+                )
 
         # 2. Compose a random NFT from the unified layer store (same tree
         #    the Trait Swapper uses: <gender>/<TraitType>/<Value>.ext)
@@ -227,14 +240,16 @@ async def run_mint_session(session: MintSession) -> None:
         store = layer_store.get_layer_store()
         body, attributes = await traits.select_random_attributes(store)
         output_path, is_video = await swap_compose.compose_nft(
-            attributes, body, store, f"lfg_{session.nft_number}")
+            attributes, body, store, f"lfg_{session.nft_number}"
+        )
 
         # 3. Upload image (+ video) and metadata to BunnyCDN
         image_cdn_url, video_cdn_url = await swap_compose.upload_output(
-            output_path, is_video, _upload_to_bunny, f"lfg_{session.nft_number}")
+            output_path, is_video, _upload_to_bunny, f"lfg_{session.nft_number}"
+        )
         session.image_url = image_cdn_url
 
-        metadata = {
+        metadata: dict[str, Any] = {
             "name": f"{config.NFT_COLLECTION_NAME} #{session.nft_number}",
             "image": image_cdn_url,
             "edition": session.nft_number,
@@ -244,7 +259,9 @@ async def run_mint_session(session: MintSession) -> None:
             metadata["video"] = video_cdn_url
         metadata_cdn_url = await _upload_to_bunny(
             f"metadata_{session.nft_number}.json",
-            json.dumps(metadata, indent=2).encode(), "application/json")
+            json.dumps(metadata, indent=2).encode(),
+            "application/json",
+        )
 
         # 4. Mint on XRPL
         session.state = MINTING
@@ -264,38 +281,37 @@ async def run_mint_session(session: MintSession) -> None:
         # The LFG table's headwear column is named Hat (layer tree uses Head)
         if "Head" in traits_dict:
             traits_dict["Hat"] = traits_dict.pop("Head")
-        record = dict(
-            nft_number=session.nft_number,
-            nft_id=nft_id,
-            discord_id=session.discord_id,
-            owner_address=session.wallet_address,
-            metadata_url=metadata_cdn_url,
-            image_url=image_cdn_url,
-            traits=traits_dict,
-            network=config.XRPL_NETWORK,
-            body_type=body,
-        )
+        record: dict[str, Any] = {
+            "nft_number": session.nft_number,
+            "nft_id": nft_id,
+            "discord_id": session.discord_id,
+            "owner_address": session.wallet_address,
+            "metadata_url": metadata_cdn_url,
+            "image_url": image_cdn_url,
+            "traits": traits_dict,
+            "network": config.XRPL_NETWORK,
+            "body_type": body,
+        }
         # The mint is on-chain at this point; a DB failure must not stop the
         # transfer offer from reaching the user.
         try:
-            saved = await asyncio.to_thread(record_nft_mint, **record)
+            saved = await asyncio.to_thread(lambda: record_nft_mint(**record))
         except Exception:
             logging.error(f"record_nft_mint raised: {traceback.format_exc()}")
             saved = False
         if saved:
             _reserved_numbers.discard(session.nft_number)
-            def _update_rarity():
+
+            def _update_rarity() -> None:
                 conn = rarity.connect()
                 try:
                     for attr in metadata["attributes"]:
-                        rarity.start_boost_clock(conn, body,
-                                                 attr["trait_type"],
-                                                 attr["value"])
-                    rarity.start_boost_clock(conn, rarity.BODY_SENTINEL,
-                                             rarity.BODY_CATEGORY, body)
+                        rarity.start_boost_clock(conn, body, attr["trait_type"], attr["value"])
+                    rarity.start_boost_clock(conn, rarity.BODY_SENTINEL, rarity.BODY_CATEGORY, body)
                     rarity.recalculate_rarity(conn)
                 finally:
                     conn.close()
+
             try:
                 await asyncio.to_thread(_update_rarity)
             except Exception:
@@ -310,21 +326,24 @@ async def run_mint_session(session: MintSession) -> None:
         offer_id = await xrpl_ops.create_nft_offer(nft_id, session.wallet_address)
         if not offer_id:
             session.state = FAILED
-            session.error = (f"NFT minted (ID: {nft_id}) but offer creation failed. "
-                             "Please contact an administrator.")
+            session.error = (
+                f"NFT minted (ID: {nft_id}) but offer creation failed. "
+                "Please contact an administrator."
+            )
             return
 
-        accept = await xumm_ops.create_accept_offer_payload(
-            offer_id, return_url=session.return_url)
+        accept = await xumm_ops.create_accept_offer_payload(offer_id, return_url=session.return_url)
         if not accept:
             session.state = FAILED
-            session.error = (f"NFT minted and offer created ({offer_id}) but the XUMM "
-                             "request failed. Please accept the offer manually.")
+            session.error = (
+                f"NFT minted and offer created ({offer_id}) but the XUMM "
+                "request failed. Please accept the offer manually."
+            )
             return
 
-        session.accept_qr_url = accept['qr_url']
-        session.accept_deeplink = accept['xumm_url']
-        session.accept_uuid = accept.get('uuid')
+        session.accept_qr_url = accept["qr_url"]
+        session.accept_deeplink = accept["xumm_url"]
+        session.accept_uuid = accept.get("uuid")
         session.state = OFFER_READY
 
     except Exception as e:
