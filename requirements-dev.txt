@@ -1,0 +1,13 @@
+# Dev-only tooling. Install with: pip install -r requirements-dev.txt
+# Runtime deps stay in requirements.txt.
+
+# Manages the pre-push hook gate (ruff, ruff-format, mypy, gitleaks, pytest).
+pre-commit>=3.7,<5
+
+# Type checker (also pulled by the pre-commit mypy hook; pinned here so it can
+# be run directly during the Phase-B grind: `.venv/bin/mypy .`).
+mypy>=1.13,<2
+
+# Linter/formatter (also run via pre-commit; pinned here for direct CLI use
+# during the Phase-B grind: `.venv/bin/ruff check --fix .`).
+ruff>=0.8,<1
