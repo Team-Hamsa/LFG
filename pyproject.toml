@@ -1,0 +1,33 @@
+[tool.ruff]
+target-version = "py310"
+line-length = 100
+extend-exclude = ["legacy", "backup", ".venv", "generated"]
+
+[tool.ruff.lint]
+# Standard sane defaults: pyflakes(F), pycodestyle(E,W), isort(I),
+# pyupgrade(UP), flake8-bugbear(B), comprehensions(C4).
+select = ["E", "W", "F", "I", "UP", "B", "C4"]
+ignore = ["E501"]  # line-length enforced by formatter, not linter
+
+[tool.mypy]
+python_version = "3.10"
+strict = true
+exclude = ["^legacy/", "^backup/", "^\\.venv/", "^generated/"]
+# Keep output actionable during the Phase-B grind:
+show_error_codes = true
+pretty = true
+
+# Third-party libs without type information — ignore missing imports.
+# (Finalize this list from the actual baseline errors in Task 6.)
+[[tool.mypy.overrides]]
+module = [
+    "discord.*",
+    "xrpl.*",
+    "xumm.*",
+    "bunnycdn_storage.*",
+    "BunnyCDN.*",
+    "cv2.*",
+    "ffmpeg.*",
+    "qrcode.*",
+]
+ignore_missing_imports = true
