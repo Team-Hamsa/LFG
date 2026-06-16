@@ -4,15 +4,15 @@
 #
 # Run with:  python -m webapp.server   (from the repo root)
 
-import os
-import sys
-import hmac
-import json
-import time
+import asyncio
 import base64
 import hashlib
+import hmac
+import json
 import logging
-import asyncio
+import os
+import sys
+import time
 
 import aiohttp
 from aiohttp import web
@@ -20,11 +20,10 @@ from xrpl.core.addresscodec import is_valid_classic_address
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-from lfg_core import config, mint_flow, xumm_ops, xrpl_ops, swap_meta, swap_flow
-from user_db import create_users_table, register_user, get_user
+from lfg_core import config, mint_flow, swap_flow, swap_meta, xrpl_ops, xumm_ops
+from user_db import create_users_table, get_user, register_user
 
-logging.basicConfig(level=logging.INFO,
-                    format='%(asctime)s - %(levelname)s - %(message)s')
+logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s")
 
 CLIENT_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "client")
 DISCORD_API = "https://discord.com/api"
@@ -89,11 +88,13 @@ def require_auth(handler):
             return web.json_response({"error": "unauthorized"}, status=401)
         request["user"] = user
         return await handler(request)
+
     return wrapper
 
 
 def require_wallet(handler):
     """require_auth + a registered wallet; puts the address in request["wallet"]."""
+
     @require_auth
     async def wrapper(request):
         record = await asyncio.to_thread(get_user, request["user"]["id"])
@@ -101,6 +102,7 @@ def require_wallet(handler):
             return web.json_response({"error": "no wallet registered"}, status=400)
         request["wallet"] = record["address"]
         return await handler(request)
+
     return wrapper
 
 
@@ -111,10 +113,12 @@ def make_status_handler(sessions: dict):
         if not session or session.discord_id != request["user"]["id"]:
             return web.json_response({"error": "not found"}, status=404)
         return web.json_response(session.to_dict())
+
     return handler
 
 
 # --- API handlers ---
+
 
 async def handle_token(request):
     """Exchange the Embedded App SDK authorize() code for an access token,
@@ -125,43 +129,51 @@ async def handle_token(request):
         return web.json_response({"error": "missing code"}, status=400)
 
     async with aiohttp.ClientSession() as http:
-        resp = await http.post(f"{DISCORD_API}/oauth2/token", data={
-            "client_id": config.DISCORD_CLIENT_ID,
-            "client_secret": config.DISCORD_CLIENT_SECRET,
-            "grant_type": "authorization_code",
-            "code": code,
-        }, headers={"Content-Type": "application/x-www-form-urlencoded"})
+        resp = await http.post(
+            f"{DISCORD_API}/oauth2/token",
+            data={
+                "client_id": config.DISCORD_CLIENT_ID,
+                "client_secret": config.DISCORD_CLIENT_SECRET,
+                "grant_type": "authorization_code",
+                "code": code,
+            },
+            headers={"Content-Type": "application/x-www-form-urlencoded"},
+        )
         token_data = await resp.json()
         access_token = token_data.get("access_token")
         if not access_token:
             logging.error(f"OAuth exchange failed: {token_data}")
             return web.json_response({"error": "oauth exchange failed"}, status=400)
 
-        me = await http.get(f"{DISCORD_API}/users/@me",
-                            headers={"Authorization": f"Bearer {access_token}"})
+        me = await http.get(
+            f"{DISCORD_API}/users/@me", headers={"Authorization": f"Bearer {access_token}"}
+        )
         user = await me.json()
         if me.status != 200 or "id" not in user:
             logging.error(f"Discord /users/@me failed ({me.status}): {user}")
-            return web.json_response({"error": "discord identity lookup failed"},
-                                     status=502)
+            return web.json_response({"error": "discord identity lookup failed"}, status=502)
 
     session_token = make_session_token({"id": user["id"], "name": user.get("username", "")})
-    return web.json_response({
-        "access_token": access_token,  # the SDK needs this for authenticate()
-        "session_token": session_token,
-        "user": {"id": user["id"], "username": user.get("username", "")},
-    })
+    return web.json_response(
+        {
+            "access_token": access_token,  # the SDK needs this for authenticate()
+            "session_token": session_token,
+            "user": {"id": user["id"], "username": user.get("username", "")},
+        }
+    )
 
 
 @require_auth
 async def handle_me(request):
     user = request["user"]
     record = await asyncio.to_thread(get_user, user["id"])
-    return web.json_response({
-        "id": user["id"],
-        "username": user["name"],
-        "wallet": record["address"] if record else None,
-    })
+    return web.json_response(
+        {
+            "id": user["id"],
+            "username": user["name"],
+            "wallet": record["address"] if record else None,
+        }
+    )
 
 
 @require_auth
@@ -195,11 +207,15 @@ async def handle_mint_start(request):
     # insert below, so it cannot race)
     active = _active_session(mint_sessions, mint_flow.TERMINAL_STATES, user["id"])
     if active:
-        return web.json_response({"error": "mint already in progress",
-                                  "session": active.to_dict()}, status=409)
+        return web.json_response(
+            {"error": "mint already in progress", "session": active.to_dict()}, status=409
+        )
 
-    session = mint_flow.MintSession(discord_id=user["id"], wallet_address=request["wallet"],
-                                    return_url=await _request_return_url(request))
+    session = mint_flow.MintSession(
+        discord_id=user["id"],
+        wallet_address=request["wallet"],
+        return_url=await _request_return_url(request),
+    )
     mint_sessions[session.id] = session
     # Detect the payment path (LFGO holder vs XRP newcomer) and create the
     # XUMM sign request before the first QR is rendered (after the insert
@@ -221,8 +237,7 @@ async def handle_mint_start(request):
 async def handle_nfts(request):
     """List the user's swappable collection NFTs (normalized metadata)."""
     try:
-        nfts = await swap_meta.load_wallet_nfts(request["wallet"],
-                                                xrpl_ops.get_account_nfts)
+        nfts = await swap_meta.load_wallet_nfts(request["wallet"], xrpl_ops.get_account_nfts)
     except Exception as e:
         logging.error(f"NFT listing failed: {e}")
         return web.json_response({"error": "failed to load wallet NFTs"}, status=502)
@@ -232,14 +247,14 @@ async def handle_nfts(request):
     swap_fee = None
     try:
         pay_with, amount = await swap_flow.detect_swap_payment(
-            request["wallet"], swap_flow.swap_fee_total(2))
-        swap_fee = {"pay_with": pay_with, "amount": amount,
-                    "per_nft": swap_flow.swap_fee_total(1)}
+            request["wallet"], swap_flow.swap_fee_total(2)
+        )
+        swap_fee = {"pay_with": pay_with, "amount": amount, "per_nft": swap_flow.swap_fee_total(1)}
     except Exception as e:
         logging.warning(f"Swap fee quote failed: {e}")
-    return web.json_response({"nfts": nfts,
-                              "swappable_traits": swap_meta.SWAPPABLE_TRAITS,
-                              "swap_fee": swap_fee})
+    return web.json_response(
+        {"nfts": nfts, "swappable_traits": swap_meta.SWAPPABLE_TRAITS, "swap_fee": swap_fee}
+    )
 
 
 @require_wallet
@@ -251,8 +266,7 @@ async def handle_swap_start(request):
     traits_to_swap = body.get("traits", [])
     if not nft1_id or not nft2_id or nft1_id == nft2_id:
         return web.json_response({"error": "select two different NFTs"}, status=400)
-    if not traits_to_swap or any(t not in swap_meta.SWAPPABLE_TRAITS
-                                 for t in traits_to_swap):
+    if not traits_to_swap or any(t not in swap_meta.SWAPPABLE_TRAITS for t in traits_to_swap):
         return web.json_response({"error": "invalid trait selection"}, status=400)
 
     _prune_sessions(swap_sessions, swap_flow.TERMINAL_STATES)
@@ -261,8 +275,7 @@ async def handle_swap_start(request):
 
     # Re-verify ownership and metadata server-side (never trust client data)
     try:
-        nfts = await swap_meta.load_wallet_nfts(request["wallet"],
-                                                xrpl_ops.get_account_nfts)
+        nfts = await swap_meta.load_wallet_nfts(request["wallet"], xrpl_ops.get_account_nfts)
     except Exception as e:
         logging.error(f"NFT verification failed: {e}")
         return web.json_response({"error": "failed to verify wallet NFTs"}, status=502)
@@ -272,16 +285,20 @@ async def handle_swap_start(request):
         return web.json_response({"error": "NFT not found in your wallet"}, status=400)
     if nft1["gender"] != nft2["gender"]:
         return web.json_response(
-            {"error": "NFTs must share the same body type to swap traits"}, status=400)
+            {"error": "NFTs must share the same body type to swap traits"}, status=400
+        )
 
     # The load_wallet_nfts call above awaited, so re-check before inserting
     if _active_session(swap_sessions, swap_flow.TERMINAL_STATES, user["id"]):
         return web.json_response({"error": "swap already in progress"}, status=409)
     session = swap_flow.SwapSession(
-        discord_id=user["id"], wallet_address=request["wallet"],
-        nft1=nft1, nft2=nft2, traits_to_swap=traits_to_swap,
-        return_url=xumm_ops.discord_return_url(body.get("guild_id"),
-                                               body.get("channel_id")))
+        discord_id=user["id"],
+        wallet_address=request["wallet"],
+        nft1=nft1,
+        nft2=nft2,
+        traits_to_swap=traits_to_swap,
+        return_url=xumm_ops.discord_return_url(body.get("guild_id"), body.get("channel_id")),
+    )
     swap_sessions[session.id] = session
     asyncio.get_event_loop().create_task(swap_flow.run_swap_session(session))
     return web.json_response(session.to_dict())
@@ -338,16 +355,15 @@ async def handle_signin_start(request):
     wallet address is captured on approval — no manual address entry."""
     user = request["user"]
     _prune_signin_payloads()
-    payload = await xumm_ops.create_signin_payload(
-        return_url=await _request_return_url(request))
+    payload = await xumm_ops.create_signin_payload(return_url=await _request_return_url(request))
     if not payload:
         return web.json_response({"error": "could not reach Xaman"}, status=502)
     signin_payloads[payload["uuid"]] = {
-        "discord_id": user["id"], "name": user["name"],
+        "discord_id": user["id"],
+        "name": user["name"],
         "created_at": time.time(),
     }
-    return web.json_response({"uuid": payload["uuid"],
-                              "signin_link": payload["xumm_url"]})
+    return web.json_response({"uuid": payload["uuid"], "signin_link": payload["xumm_url"]})
 
 
 @require_auth
@@ -360,8 +376,7 @@ async def handle_signin_status(request):
     if not s:
         return web.json_response({"error": "could not reach Xaman"}, status=502)
     if s["signed"] and s["account"] and is_valid_classic_address(s["account"]):
-        if not await asyncio.to_thread(register_user, rec["discord_id"],
-                                       rec["name"], s["account"]):
+        if not await asyncio.to_thread(register_user, rec["discord_id"], rec["name"], s["account"]):
             return web.json_response({"error": "registration failed"}, status=500)
         del signin_payloads[uuid]
         return web.json_response({"state": "signed", "wallet": s["account"]})
@@ -409,8 +424,9 @@ async def handle_img(request):
         logging.error(f"Image proxy fetch failed for {url}: {e}")
         return web.json_response({"error": "image fetch failed"}, status=502)
     # Mint/swap outputs get unique CDN basenames, so they are safe to cache.
-    return web.Response(body=body, content_type=ctype,
-                        headers={"Cache-Control": "public, max-age=86400"})
+    return web.Response(
+        body=body, content_type=ctype, headers={"Cache-Control": "public, max-age=86400"}
+    )
 
 
 async def handle_index(request):
@@ -451,8 +467,10 @@ def create_app() -> web.Application:
 
 def main():
     if not config.DISCORD_CLIENT_ID or not config.DISCORD_CLIENT_SECRET:
-        raise ValueError("DISCORD_CLIENT_ID and DISCORD_CLIENT_SECRET must be set "
-                         "for the Activity webapp (see docs/ACTIVITY_SETUP.md)")
+        raise ValueError(
+            "DISCORD_CLIENT_ID and DISCORD_CLIENT_SECRET must be set "
+            "for the Activity webapp (see docs/ACTIVITY_SETUP.md)"
+        )
     create_users_table()
     logging.info(f"Starting LFG Activity webapp on port {config.WEBAPP_PORT}")
     web.run_app(create_app(), port=config.WEBAPP_PORT)

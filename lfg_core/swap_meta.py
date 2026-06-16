@@ -3,20 +3,38 @@
 # main.py): NFT URI decoding, metadata fetch, attribute normalization,
 # gender / season detection, trait-swap merge logic. Pure / async; no Discord.
 
-import re
-import json
 import asyncio
+import json
 import logging
+import re
+from typing import Any
 
 import aiohttp
 
 from lfg_core import config
 
 # Layering / canonical attribute order. Body is structural and never swapped.
-TRAIT_ORDER = ["Background", "Back", "Body", "Clothing", "Mouth",
-               "Eyebrows", "Eyes", "Head", "Accessory"]
-SWAPPABLE_TRAITS = ["Background", "Back", "Clothing", "Mouth",
-                    "Eyebrows", "Eyes", "Head", "Accessory"]
+TRAIT_ORDER = [
+    "Background",
+    "Back",
+    "Body",
+    "Clothing",
+    "Mouth",
+    "Eyebrows",
+    "Eyes",
+    "Head",
+    "Accessory",
+]
+SWAPPABLE_TRAITS = [
+    "Background",
+    "Back",
+    "Clothing",
+    "Mouth",
+    "Eyebrows",
+    "Eyes",
+    "Head",
+    "Accessory",
+]
 # Values that belong on the Back layer even when stored under Accessory.
 BACK_VALUES = ["Angel Wings", "Angel Wings Open"]
 
@@ -29,19 +47,20 @@ def decode_uri(uri_hex: str) -> str:
 
 def resolve_ipfs(uri: str) -> str:
     if uri.startswith("ipfs://"):
-        parts = uri[len("ipfs://"):].split("/")
+        parts = uri[len("ipfs://") :].split("/")
         if len(parts) >= 2:
             return f"https://{parts[0]}.ipfs.dweb.link/{'/'.join(parts[1:])}"
         return f"https://{parts[0]}.ipfs.dweb.link/"
     return uri
 
 
-def normalize_attributes(attributes: list) -> list:
+def normalize_attributes(attributes: list[Any]) -> list[dict[str, str]]:
     """Fix the 'Accesory' typo, fill missing trait types with 'None',
     relocate Back values stored under Accessory, and order canonically."""
     # Metadata is untrusted: drop entries that aren't {"trait_type": str, ...}
-    attrs = [dict(a) for a in attributes
-             if isinstance(a, dict) and isinstance(a.get("trait_type"), str)]
+    attrs = [
+        dict(a) for a in attributes if isinstance(a, dict) and isinstance(a.get("trait_type"), str)
+    ]
     for a in attrs:
         a.setdefault("value", "None")
         if a.get("trait_type") == "Accesory":
@@ -63,14 +82,14 @@ def normalize_attributes(attributes: list) -> list:
     return attrs
 
 
-def get_attr(attributes: list, trait_type: str):
+def get_attr(attributes: list[dict[str, Any]], trait_type: str) -> str | None:
     for a in attributes:
         if a["trait_type"] == trait_type:
-            return a["value"]
+            return a["value"]  # type: ignore[no-any-return]
     return None
 
 
-def detect_body(attributes: list) -> str:
+def detect_body(attributes: list[dict[str, Any]]) -> str:
     """Body class determines which layer directory set is used."""
     body_val = get_attr(attributes, "Body") or ""
     if "Straight" in body_val:
@@ -85,7 +104,7 @@ def detect_body(attributes: list) -> str:
 detect_gender = detect_body  # backward-compat alias
 
 
-def extract_nft_number(name: str):
+def extract_nft_number(name: str) -> int | None:
     match = re.search(r"#(\d+)", name or "")
     return int(match.group(1)) if match else None
 
@@ -98,7 +117,11 @@ def season_for_number(num: int) -> int:
     return 3
 
 
-def swap_traits(attrs1: list, attrs2: list, traits_to_swap: list):
+def swap_traits(
+    attrs1: list[dict[str, Any]],
+    attrs2: list[dict[str, Any]],
+    traits_to_swap: list[str],
+) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
     """Exchange the selected trait values between two attribute lists.
     Returns (new_attrs1, new_attrs2), canonically ordered."""
     new1, new2 = [], []
@@ -106,14 +129,18 @@ def swap_traits(attrs1: list, attrs2: list, traits_to_swap: list):
         a1 = {"trait_type": trait, "value": get_attr(attrs1, trait)}
         a2 = {"trait_type": trait, "value": get_attr(attrs2, trait)}
         if trait in traits_to_swap:
-            a1, a2 = ({"trait_type": trait, "value": a2["value"]},
-                      {"trait_type": trait, "value": a1["value"]})
+            a1, a2 = (
+                {"trait_type": trait, "value": a2["value"]},
+                {"trait_type": trait, "value": a1["value"]},
+            )
         new1.append(a1)
         new2.append(a2)
     return new1, new2
 
 
-async def fetch_metadata(uri_hex: str, http: aiohttp.ClientSession = None):
+async def fetch_metadata(
+    uri_hex: str, http: aiohttp.ClientSession | None = None
+) -> dict[str, Any] | None:
     """Fetch and parse the metadata JSON behind an on-chain hex URI.
     Pass `http` to reuse a session across many fetches."""
     try:
@@ -124,7 +151,7 @@ async def fetch_metadata(uri_hex: str, http: aiohttp.ClientSession = None):
         async with http.get(url, timeout=aiohttp.ClientTimeout(total=20)) as resp:
             if resp.status != 200:
                 return None
-            return json.loads(await resp.text())
+            return json.loads(await resp.text())  # type: ignore[no-any-return]
     except Exception as e:
         logging.warning(f"fetch_metadata failed for {uri_hex[:24]}…: {e}")
         return None
@@ -134,7 +161,9 @@ async def fetch_metadata(uri_hex: str, http: aiohttp.ClientSession = None):
 NFT_FLAG_MUTABLE = 0x0010
 
 
-def normalize_nft(nft_id: str, metadata: dict, flags: int = 0, uri_hex: str = ""):
+def normalize_nft(
+    nft_id: str, metadata: dict[str, Any], flags: int = 0, uri_hex: str = ""
+) -> dict[str, Any] | None:
     """Build the normalized NFT record used by the swap UI/flow, or None if
     the NFT isn't a swappable collection piece. `flags` are the on-ledger
     NFToken flags (mutable NFTs are swapped via NFTokenModify; legacy
@@ -167,20 +196,20 @@ def normalize_nft(nft_id: str, metadata: dict, flags: int = 0, uri_hex: str = ""
     }
 
 
-async def load_wallet_nfts(wallet: str, get_account_nfts):
+async def load_wallet_nfts(wallet: str, get_account_nfts: Any) -> list[dict[str, Any]]:
     """List + normalize all swappable NFTs in a wallet. get_account_nfts is
     injected (xrpl_ops.get_account_nfts) to keep this module network-light."""
     raw = await get_account_nfts(wallet, config.SWAP_ISSUER_ADDRESS)
     async with aiohttp.ClientSession() as http:
         metas = await asyncio.gather(*[fetch_metadata(n["uri_hex"], http) for n in raw])
     nfts = []
-    for nft, meta in zip(raw, metas):
+    for nft, meta in zip(raw, metas, strict=False):
         if not isinstance(meta, dict):
             continue
         try:
-            record = normalize_nft(nft["nft_id"], meta,
-                                   flags=nft.get("flags", 0),
-                                   uri_hex=nft.get("uri_hex", ""))
+            record = normalize_nft(
+                nft["nft_id"], meta, flags=nft.get("flags", 0), uri_hex=nft.get("uri_hex", "")
+            )
         except Exception as e:
             # One token with malformed metadata must not break the listing.
             logging.warning(f"Skipping NFT {nft['nft_id']}: bad metadata ({e})")

@@ -1,16 +1,17 @@
-import sqlite3
 import logging
+import sqlite3
 
 logging.basicConfig(level=logging.INFO)
+
 
 def init_db():
     try:
         # Connect to SQLite database (creates it if it doesn't exist)
-        conn = sqlite3.connect('lfg_nfts.db')
+        conn = sqlite3.connect("lfg_nfts.db")
         cursor = conn.cursor()
 
         # Create the LFG table with capitalized column names
-        cursor.execute('''
+        cursor.execute("""
         CREATE TABLE IF NOT EXISTS LFG (
             nft_number INTEGER PRIMARY KEY,
             metadata_url TEXT,
@@ -25,46 +26,51 @@ def init_db():
             Accessory TEXT,
             created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
         )
-        ''')
+        """)
 
         # Get the current max NFT number (if any)
-        cursor.execute('SELECT MAX(nft_number) FROM LFG')
+        cursor.execute("SELECT MAX(nft_number) FROM LFG")
         max_nft = cursor.fetchone()[0]
 
         if not max_nft:
             # Add placeholder rows for NFTs 1-3535
             logging.info("Adding placeholder rows for NFTs 1-3535...")
-            
+
             placeholder_data = []
             for i in range(1, 3536):
-                placeholder_data.append((
-                    i,                          # nft_number
-                    'placeholder_metadata',     # metadata_url
-                    'placeholder_image',        # image_url
-                    'placeholder',              # background
-                    'placeholder',              # body
-                    'placeholder',              # clothing
-                    'placeholder',              # eyes
-                    'placeholder',              # eyebrows
-                    'placeholder',              # mouth
-                    'placeholder',              # hat
-                    'placeholder'               # accessory
-                ))
+                placeholder_data.append(
+                    (
+                        i,  # nft_number
+                        "placeholder_metadata",  # metadata_url
+                        "placeholder_image",  # image_url
+                        "placeholder",  # background
+                        "placeholder",  # body
+                        "placeholder",  # clothing
+                        "placeholder",  # eyes
+                        "placeholder",  # eyebrows
+                        "placeholder",  # mouth
+                        "placeholder",  # hat
+                        "placeholder",  # accessory
+                    )
+                )
 
-            cursor.executemany('''
+            cursor.executemany(
+                """
             INSERT INTO LFG (
-                nft_number, metadata_url, image_url, 
-                background, body, clothing, eyes, eyebrows, 
+                nft_number, metadata_url, image_url,
+                background, body, clothing, eyes, eyebrows,
                 mouth, hat, accessory
             ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-            ''', placeholder_data)
+            """,
+                placeholder_data,
+            )
 
             logging.info("Placeholder rows added successfully")
 
         # Create the burned_nfts table. Surrogate key: the same nft_number can
         # be burned more than once over time (burn → remint → burn), and each
         # burn must be kept as its own audit row.
-        cursor.execute('''
+        cursor.execute("""
         CREATE TABLE IF NOT EXISTS burned_nfts (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
             nft_number INTEGER,
@@ -75,7 +81,7 @@ def init_db():
             burned_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
             original_mint_time TIMESTAMP
         )
-        ''')
+        """)
 
         # Commit the changes and close the connection
         conn.commit()
@@ -86,5 +92,6 @@ def init_db():
         logging.error(f"Error initializing database: {e}")
         raise
 
+
 if __name__ == "__main__":
-    init_db() 
+    init_db()

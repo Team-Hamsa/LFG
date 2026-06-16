@@ -15,15 +15,17 @@ unreliable for Season 1. Output JSON: {results:{edition:rec}, errors, conflicts}
   python 03_resolve_traits.py --onchain work/onchain.json \
       --cdn work/cdn_scan.json --out work/traits.json
 """
+
 import argparse
+import hashlib
 import json
 import os
 import re
-import time
-import hashlib
 import threading
-import requests
+import time
 from concurrent.futures import ThreadPoolExecutor
+
+import requests
 
 GATEWAYS = [
     "https://nftstorage.link/ipfs/",
@@ -40,8 +42,9 @@ _lock = threading.Lock()
 
 def main():
     """Resolve traits for every live NFT (CDN first, IPFS fallback)."""
-    p = argparse.ArgumentParser(description=__doc__,
-                                formatter_class=argparse.RawDescriptionHelpFormatter)
+    p = argparse.ArgumentParser(
+        description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter
+    )
     p.add_argument("--onchain", default="work/onchain.json")
     p.add_argument("--cdn", default="work/cdn_scan.json")
     p.add_argument("--cache", default="work/meta_cache")
@@ -102,8 +105,14 @@ def main():
 
         if fname_ed is not None and fname_ed in cdn:
             d = cdn[fname_ed]
-            rec = {"edition": fname_ed, "attrs": d["attrs"], "name": d.get("name"),
-                   "desc": d.get("desc"), "image": d.get("image"), "source": "cdn"}
+            rec = {
+                "edition": fname_ed,
+                "attrs": d["attrs"],
+                "name": d.get("name"),
+                "desc": d.get("desc"),
+                "image": d.get("image"),
+                "source": "cdn",
+            }
         else:
             cp = cache_path(uri)
             if os.path.exists(cp):
@@ -124,21 +133,26 @@ def main():
                 md = {"_error": "unknown-scheme"}
 
             if "_error" not in md:
-                rec = {"edition": edition_from(md, ipfs_path or ""),
-                       "attrs": {a.get("trait_type"): a.get("value")
-                                 for a in md.get("attributes", [])},
-                       "name": md.get("name"), "desc": md.get("description"),
-                       "image": md.get("image"), "source": "ipfs"}
+                rec = {
+                    "edition": edition_from(md, ipfs_path or ""),
+                    "attrs": {
+                        a.get("trait_type"): a.get("value") for a in md.get("attributes", [])
+                    },
+                    "name": md.get("name"),
+                    "desc": md.get("description"),
+                    "image": md.get("image"),
+                    "source": "ipfs",
+                }
             else:
-                rec = {"edition": fname_ed, "error": md["_error"],
-                       "source": "error", "uri": uri}
+                rec = {"edition": fname_ed, "error": md["_error"], "source": "error", "uri": uri}
 
         rec["nft_id"] = nft["nft_id"]
         with _lock:
             state["done"] += 1
             if state["done"] % 50 == 0:
                 open(args.progress, "w").write(
-                    f"{state['done']}/{len(live)} done, {state['fetched']} fetched\n")
+                    f"{state['done']}/{len(live)} done, {state['fetched']} fetched\n"
+                )
         return rec
 
     with ThreadPoolExecutor(max_workers=args.workers) as ex:
@@ -154,10 +168,14 @@ def main():
             conflicts.append(ed)
         results[ed] = rec
 
-    json.dump({"results": results, "errors": errors,
-               "conflicts": sorted(set(conflicts))}, open(args.out, "w"))
-    print(f"resolved {len(results)} editions | errors {len(errors)} | "
-          f"conflicts {len(set(conflicts))} | fetched {state['fetched']}")
+    json.dump(
+        {"results": results, "errors": errors, "conflicts": sorted(set(conflicts))},
+        open(args.out, "w"),
+    )
+    print(
+        f"resolved {len(results)} editions | errors {len(errors)} | "
+        f"conflicts {len(set(conflicts))} | fetched {state['fetched']}"
+    )
     if errors:
         print("re-run to retry errors (transient gateway failures are common)")
 

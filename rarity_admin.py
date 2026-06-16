@@ -18,6 +18,7 @@ import sys
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 from dotenv import load_dotenv
+
 load_dotenv()
 
 from lfg_core import config, rarity  # noqa: E402
@@ -43,15 +44,19 @@ def scan_layer_values():
 
 def main():
     p = argparse.ArgumentParser(description="Rarity engine admin")
-    p.add_argument("--network", default=None,
-                   help="testnet|mainnet (default: XRPL_NETWORK env)")
+    p.add_argument("--network", default=None, help="testnet|mainnet (default: XRPL_NETWORK env)")
     p.add_argument("--db", default=None, help="path to sqlite db")
     sub = p.add_subparsers(dest="cmd", required=True)
 
     s = sub.add_parser("seed", help="bootstrap/backfill rarity from LFG table")
-    s.add_argument("--mark-testnet", nargs="*", type=int, default=None,
-                   metavar="NFT_NUMBER",
-                   help="NFT numbers to retroactively mark as testnet")
+    s.add_argument(
+        "--mark-testnet",
+        nargs="*",
+        type=int,
+        default=None,
+        metavar="NFT_NUMBER",
+        help="NFT numbers to retroactively mark as testnet",
+    )
 
     sub.add_parser("refresh", help="recount live_count from LFG table")
 
@@ -69,10 +74,18 @@ def main():
         c.add_argument("--category", required=True)
         c.add_argument("--trait", required=True)
         if cmd == "boost":
-            c.add_argument("--initial", type=float, default=None,
-                           help="initial boost multiplier (default: RARITY_BOOST_INITIAL)")
-            c.add_argument("--step-hours", type=int, default=None,
-                           help="hours per step (default: RARITY_BOOST_STEP_HOURS)")
+            c.add_argument(
+                "--initial",
+                type=float,
+                default=None,
+                help="initial boost multiplier (default: RARITY_BOOST_INITIAL)",
+            )
+            c.add_argument(
+                "--step-hours",
+                type=int,
+                default=None,
+                help="hours per step (default: RARITY_BOOST_STEP_HOURS)",
+            )
 
     f = sub.add_parser("set-floor", help="set floor_weight globally or per trait")
     f.add_argument("floor", type=float)
@@ -91,9 +104,9 @@ def main():
             except Exception as e:
                 print(f"layer store scan skipped: {e}", file=sys.stderr)
                 layer_values = None
-            rarity.seed_from_collection(conn, network=net,
-                                        mark_testnet=args.mark_testnet,
-                                        layer_values=layer_values)
+            rarity.seed_from_collection(
+                conn, network=net, mark_testnet=args.mark_testnet, layer_values=layer_values
+            )
             print(f"seeded ({net})")
         elif args.cmd == "refresh":
             rarity.recalculate_rarity(conn, network=net)
@@ -103,20 +116,32 @@ def main():
             if not rows:
                 print(f"(no rows for {args.body}/{args.category} on {net})")
             for trait, count, share, weight, status in rows:
-                print(f"{trait:30s}  n={count:5d}  share={share:6.2f}%  "
-                      f"w={weight:.4f}  {status}")
+                print(f"{trait:30s}  n={count:5d}  share={share:6.2f}%  w={weight:.4f}  {status}")
         elif args.cmd == "boost":
-            rarity.arm_boost(conn, args.body, args.category, args.trait,
-                             network=net, boost_initial=args.initial,
-                             boost_step_hours=args.step_hours)
+            rarity.arm_boost(
+                conn,
+                args.body,
+                args.category,
+                args.trait,
+                network=net,
+                boost_initial=args.initial,
+                boost_step_hours=args.step_hours,
+            )
             print(f"boost armed: {args.trait} (dormant until first mint)")
         elif args.cmd in ("disable", "enable"):
-            rarity.set_enabled(conn, args.body, args.category, args.trait,
-                               args.cmd == "enable", network=net)
+            rarity.set_enabled(
+                conn, args.body, args.category, args.trait, args.cmd == "enable", network=net
+            )
             print(f"{args.trait}: {args.cmd}d")
         elif args.cmd == "set-floor":
-            rarity.set_floor(conn, args.floor, network=net, body=args.body,
-                             category=args.category, trait=args.trait)
+            rarity.set_floor(
+                conn,
+                args.floor,
+                network=net,
+                body=args.body,
+                category=args.category,
+                trait=args.trait,
+            )
             print("floor updated")
     finally:
         conn.close()
