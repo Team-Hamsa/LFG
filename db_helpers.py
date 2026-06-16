@@ -1,6 +1,7 @@
 import logging
 import sqlite3
 import traceback
+from typing import Any
 
 
 def get_next_nft_number() -> int:
@@ -62,7 +63,7 @@ def record_nft_mint(
     owner_address: str,
     metadata_url: str,
     image_url: str,
-    traits: dict,
+    traits: dict[str, Any],
     network: str = "mainnet",
     body_type: str = "*",
     db_path: str = "lfg_nfts.db",
@@ -148,7 +149,7 @@ def record_nft_mint(
             conn.close()
 
 
-def get_nft_data(nft_number: int) -> dict | None:
+def get_nft_data(nft_number: int) -> dict[str, Any] | None:
     """Get data for a specific NFT number"""
     try:
         conn = sqlite3.connect("lfg_nfts.db")

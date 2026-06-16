@@ -342,7 +342,7 @@ async def modify_nft(nft_id: str, owner: str, uri: str) -> str | None:
 
 def bot_wallet_address() -> str:
     """Classic address of the wallet behind SEED (mint/offer/fee account)."""
-    return Wallet.from_seed(config.SEED).classic_address  # type: ignore[no-any-return]
+    return Wallet.from_seed(config.SEED).classic_address
 
 
 RIPPLE_EPOCH_OFFSET = 946684800  # seconds between the Unix and Ripple epochs

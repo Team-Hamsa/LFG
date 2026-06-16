@@ -10,6 +10,7 @@ import signal
 import sqlite3
 import time
 import traceback
+from typing import Any
 
 import aiohttp
 import discord
@@ -36,8 +37,6 @@ from xumm import XummSdk
 
 from db_helpers import get_next_nft_number, record_nft_mint
 from lfg_core import rarity as _rarity
-
-# Import the NFT minting helper function from ts_helpers.py
 from user_db import create_users_table, register_user
 from user_db import get_user as get_user_from_db
 
@@ -67,21 +66,24 @@ logging.basicConfig(
 # Load environment variables from .env
 load_dotenv()
 
-# API Keys and Core Settings
-XUMM_API_KEY = os.getenv("XUMM_API_KEY")
-if not XUMM_API_KEY:
-    raise ValueError("XUMM_API_KEY not found in environment variables")
 
-XUMM_API_SECRET = os.getenv("XUMM_API_SECRET")
-if not XUMM_API_SECRET:
-    raise ValueError("XUMM_API_SECRET not found in environment variables")
+def _require(name: str) -> str:
+    """Fetch a required env var, failing fast (and narrowing the type to ``str``
+    for the type checker) if it is missing."""
+    value = os.getenv(name)
+    if not value:
+        raise ValueError(f"{name} not found in environment variables")
+    return value
+
+
+# API Keys and Core Settings
+XUMM_API_KEY = _require("XUMM_API_KEY")
+XUMM_API_SECRET = _require("XUMM_API_SECRET")
 
 XUMM_API_URL = os.getenv("XUMM_API_URL", "https://xumm.app/api/v1/platform/payload")
 
 # Discord Settings
-DISCORD_BOT_TOKEN = os.getenv("DISCORD_BOT_TOKEN")
-if not DISCORD_BOT_TOKEN:
-    raise ValueError("DISCORD_BOT_TOKEN not found in environment variables")
+DISCORD_BOT_TOKEN = _require("DISCORD_BOT_TOKEN")
 
 # Discord Settings
 ADMIN_LOG_CHANNEL_ID = int(os.getenv("ADMIN_LOG_CHANNEL_ID", "0"))
@@ -89,18 +91,12 @@ if not ADMIN_LOG_CHANNEL_ID:
     raise ValueError("ADMIN_LOG_CHANNEL_ID not found in environment variables")
 
 # XRPL Settings
-SEED = os.getenv("SEED")
-if not SEED:
-    raise ValueError("SEED not found in environment variables")
+SEED = _require("SEED")
 
-TOKEN_ISSUER_ADDRESS = os.getenv("TOKEN_ISSUER_ADDRESS")
-if not TOKEN_ISSUER_ADDRESS:
-    raise ValueError("TOKEN_ISSUER_ADDRESS not found in environment variables")
+TOKEN_ISSUER_ADDRESS = _require("TOKEN_ISSUER_ADDRESS")
 logging.info(f"Loaded TOKEN_ISSUER_ADDRESS: {TOKEN_ISSUER_ADDRESS}")
 
-TOKEN_CURRENCY_HEX = os.getenv("TOKEN_CURRENCY_HEX")
-if not TOKEN_CURRENCY_HEX:
-    raise ValueError("TOKEN_CURRENCY_HEX not found in environment variables")
+TOKEN_CURRENCY_HEX = _require("TOKEN_CURRENCY_HEX")
 
 NFT_TAXON = int(os.getenv("NFT_TAXON", "0"))
 logging.info(f"Using NFT_TAXON: {NFT_TAXON}")
@@ -225,7 +221,6 @@ client = JsonRpcClient(JSON_RPC_URL)
 # Initialize BunnyCDN
 storage = Storage(BUNNY_CDN_ACCESS_KEY, BUNNY_CDN_STORAGE_ZONE)
 
-# Constants for NFT minting using the helper function from ts_helpers.py
 NFT_TOKEN_TAXON = int(os.getenv("NFT_TOKEN_TAXON", "0"))  # Defaults to 0 if not defined
 
 # Path to the trait layers directory
@@ -530,7 +525,7 @@ def generate_qr_code_image(data: str) -> io.BytesIO:
     return img_bytes
 
 
-async def create_payment_request_static(destination: str) -> dict:
+async def create_payment_request_static(destination: str) -> dict[str, Any] | None:
     """
     Create a static payment link and QR code (no XUMM API required).
     Returns dict with 'payment_link' and 'qr_image_bytes' (BytesIO).
@@ -720,7 +715,7 @@ async def generate_xumm_qr(offer_id):
         return None
 
 
-async def create_payment_request(destination: str) -> dict:
+async def create_payment_request(destination: str) -> dict[str, Any] | None:
     """
     Create a static payment request (no XUMM API required).
     Uses xaman.app/detect format that works with all XRPL wallets.
@@ -751,7 +746,7 @@ async def check_payment_status(
     )
 
 
-async def create_trustline_request() -> dict:
+async def create_trustline_request() -> dict[str, Any] | None:
     """Create a XUMM request to set up token trustline"""
     logging.info("Creating trustline request")
     headers = {
@@ -818,14 +813,14 @@ class MintView(View):
         super().__init__(timeout=VIEW_TIMEOUT)
         logging.info(f"View timeout set to: {VIEW_TIMEOUT}")
 
-        self.buy_button = Button(
+        self.buy_button: Button[Any] = Button(
             label="💰 Buy Token", style=discord.ButtonStyle.success, url=EXTERNAL_WEBSITE_URL
         )
         self.add_item(self.buy_button)
         logging.info("Buy button added to view")
 
     @discord.ui.button(label="🎨 Mint NFT", style=discord.ButtonStyle.primary)
-    async def mint_button(self, interaction: discord.Interaction, button: Button):
+    async def mint_button(self, interaction: discord.Interaction, button: Button[Any]):
         logging.info("=== Mint button pressed ===")
         logging.info(f"User ID: {interaction.user.id}")
         logging.info(f"Username: {interaction.user.name}")
@@ -990,14 +985,14 @@ class MintView(View):
                         "AccessKey": BUNNY_CDN_ACCESS_KEY,
                         "Content-Type": "image/png",
                     }
-                    with open(combined_image_path, "rb") as file:
-                        await session.put(image_url, headers=headers, data=file.read())
+                    with open(combined_image_path, "rb") as fh:
+                        await session.put(image_url, headers=headers, data=fh.read())
 
                 # Define the CDN URL for the uploaded image
                 image_cdn_url = f"https://lfgo.b-cdn.net/minttest/{image_filename}"
 
                 # Generate and upload metadata
-                metadata = {
+                metadata: dict[str, Any] = {
                     "name": f"Let's Effing Go! #{nft_number}",
                     "image": image_cdn_url,
                     "edition": nft_number,
@@ -1024,8 +1019,8 @@ class MintView(View):
                         "AccessKey": BUNNY_CDN_ACCESS_KEY,
                         "Content-Type": "application/json",
                     }
-                    with open(metadata_filename, "rb") as file:
-                        await session.put(metadata_upload_url, headers=headers, data=file.read())
+                    with open(metadata_filename, "rb") as fh:
+                        await session.put(metadata_upload_url, headers=headers, data=fh.read())
 
                 # Clean up local files
                 os.remove(combined_image_path)
@@ -1139,7 +1134,7 @@ class MintView(View):
             )
 
     @discord.ui.button(label="🔗 Set LFGO Trustline", style=discord.ButtonStyle.secondary)
-    async def trustline_button(self, interaction: discord.Interaction, button: Button):
+    async def trustline_button(self, interaction: discord.Interaction, button: Button[Any]):
         await interaction.response.defer(ephemeral=True)
 
         # Get user's wallet address
@@ -1345,6 +1340,7 @@ signal.signal(signal.SIGTERM, signal_handler)
 async def on_ready():
     create_users_table()  # Initialize the users table
     await tree.sync()  # Sync slash commands
+    assert bot.user is not None  # always set once on_ready fires
     logging.info(f"Logged in as {bot.user} (ID: {bot.user.id})")
 
 
@@ -1377,7 +1373,7 @@ async def burn_nft(nft_id: str) -> bool:
 
 
 class BurnNFTModal(Modal, title="Burn NFT"):
-    nft_number = TextInput(
+    nft_number: TextInput[Any] = TextInput(
         label="Enter NFT Number to Burn",
         placeholder="e.g., 3535",
         required=True,
@@ -1385,7 +1381,7 @@ class BurnNFTModal(Modal, title="Burn NFT"):
         max_length=10,
     )
 
-    reason = TextInput(
+    reason: TextInput[Any] = TextInput(
         label="Reason for Burning",
         placeholder="Enter reason for audit purposes",
         required=True,
@@ -1459,7 +1455,7 @@ class BurnConfirmView(View):
         self.reason = reason
 
     @discord.ui.button(label="Confirm Burn", style=discord.ButtonStyle.danger)
-    async def confirm_burn(self, interaction: discord.Interaction, button: Button):
+    async def confirm_burn(self, interaction: discord.Interaction, button: Button[Any]):
         await interaction.response.defer(ephemeral=True)
 
         try:
@@ -1520,8 +1516,9 @@ class BurnConfirmView(View):
 
                 # Log the burn in the admin channel
                 try:
-                    log_channel = interaction.guild.get_channel(ADMIN_LOG_CHANNEL_ID)
-                    if log_channel:
+                    guild = interaction.guild
+                    log_channel = guild.get_channel(ADMIN_LOG_CHANNEL_ID) if guild else None
+                    if isinstance(log_channel, discord.TextChannel):
                         log_embed = Embed(
                             title="🔥 NFT Burned",
                             description=(
@@ -1555,7 +1552,7 @@ class BurnConfirmView(View):
             self.stop()
 
     @discord.ui.button(label="Cancel", style=discord.ButtonStyle.secondary)
-    async def cancel_burn(self, interaction: discord.Interaction, button: Button):
+    async def cancel_burn(self, interaction: discord.Interaction, button: Button[Any]):
         await interaction.response.send_message("❌ NFT burn cancelled.", ephemeral=True)
         self.stop()
 
@@ -1564,15 +1561,19 @@ async def log_admin_action(client: discord.Client, message: str) -> None:
     """Send a one-liner to the admin log channel. Best-effort — errors logged."""
     try:
         ch = client.get_channel(ADMIN_LOG_CHANNEL_ID)
-        if ch:
+        if isinstance(ch, discord.TextChannel):
             await ch.send(message)
     except Exception as e:
         logging.error(f"log_admin_action failed: {e}")
 
 
 class RarityOddsModal(Modal, title="View Rarity Odds"):
-    body = TextInput(label="Body (* for legacy/Body Type)", default="*", max_length=20)
-    category = TextInput(label="Category (Background, Head, Body Type, ...)", max_length=30)
+    body: TextInput[Any] = TextInput(
+        label="Body (* for legacy/Body Type)", default="*", max_length=20
+    )
+    category: TextInput[Any] = TextInput(
+        label="Category (Background, Head, Body Type, ...)", max_length=30
+    )
 
     async def on_submit(self, interaction: discord.Interaction):
         conn = _rarity.connect()
@@ -1597,11 +1598,11 @@ class RarityOddsModal(Modal, title="View Rarity Odds"):
 
 
 class RarityBoostModal(Modal, title="Arm Trait Boost"):
-    body = TextInput(label="Body (* for legacy)", default="*", max_length=20)
-    category = TextInput(label="Category", max_length=30)
-    trait = TextInput(label="Trait value", max_length=60)
-    initial = TextInput(label="Boost multiplier", default="7", max_length=5)
-    confirm = TextInput(
+    body: TextInput[Any] = TextInput(label="Body (* for legacy)", default="*", max_length=20)
+    category: TextInput[Any] = TextInput(label="Category", max_length=30)
+    trait: TextInput[Any] = TextInput(label="Trait value", max_length=60)
+    initial: TextInput[Any] = TextInput(label="Boost multiplier", default="7", max_length=5)
+    confirm: TextInput[Any] = TextInput(
         label="Type CONFIRM if trait already has mints", required=False, max_length=10
     )
 
@@ -1656,10 +1657,10 @@ class RarityBoostModal(Modal, title="Arm Trait Boost"):
 
 
 class RarityDisableModal(Modal, title="Toggle Trait"):
-    body = TextInput(label="Body (* for legacy)", default="*", max_length=20)
-    category = TextInput(label="Category", max_length=30)
-    trait = TextInput(label="Trait value", max_length=60)
-    action = TextInput(label="Action (DISABLE or ENABLE)", max_length=10)
+    body: TextInput[Any] = TextInput(label="Body (* for legacy)", default="*", max_length=20)
+    category: TextInput[Any] = TextInput(label="Category", max_length=30)
+    trait: TextInput[Any] = TextInput(label="Trait value", max_length=60)
+    action: TextInput[Any] = TextInput(label="Action (DISABLE or ENABLE)", max_length=10)
 
     async def on_submit(self, interaction: discord.Interaction):
         val = self.action.value.strip().upper()
@@ -1696,7 +1697,7 @@ class AdminView(View):
         logging.info("Initializing AdminView")
 
     @discord.ui.button(label="📊 View Stats", style=discord.ButtonStyle.primary)
-    async def stats_button(self, interaction: discord.Interaction, button: Button):
+    async def stats_button(self, interaction: discord.Interaction, button: Button[Any]):
         await interaction.response.defer(ephemeral=True)
         logging.info(f"Stats button pressed by {interaction.user}")
 
@@ -1754,25 +1755,25 @@ class AdminView(View):
                 conn.close()
 
     @discord.ui.button(label="🔍 Lookup NFT", style=discord.ButtonStyle.primary)
-    async def lookup_button(self, interaction: discord.Interaction, button: Button):
+    async def lookup_button(self, interaction: discord.Interaction, button: Button[Any]):
         logging.info(f"Lookup button pressed by {interaction.user}")
         await interaction.response.send_modal(NFTLookupModal())
 
     @discord.ui.button(label="🔥 Burn NFT", style=discord.ButtonStyle.danger)
-    async def burn_button(self, interaction: discord.Interaction, button: Button):
+    async def burn_button(self, interaction: discord.Interaction, button: Button[Any]):
         logging.info(f"Burn button pressed by {interaction.user}")
         await interaction.response.send_modal(BurnNFTModal())
 
     @discord.ui.button(label="View Odds", style=discord.ButtonStyle.secondary, emoji="🎲", row=1)
-    async def view_odds(self, interaction: discord.Interaction, button: Button):
+    async def view_odds(self, interaction: discord.Interaction, button: Button[Any]):
         await interaction.response.send_modal(RarityOddsModal())
 
     @discord.ui.button(label="Boost Trait", style=discord.ButtonStyle.primary, emoji="🚀", row=1)
-    async def boost_trait(self, interaction: discord.Interaction, button: Button):
+    async def boost_trait(self, interaction: discord.Interaction, button: Button[Any]):
         await interaction.response.send_modal(RarityBoostModal())
 
     @discord.ui.button(label="Toggle Trait", style=discord.ButtonStyle.danger, emoji="🚫", row=1)
-    async def toggle_trait(self, interaction: discord.Interaction, button: Button):
+    async def toggle_trait(self, interaction: discord.Interaction, button: Button[Any]):
         await interaction.response.send_modal(RarityDisableModal())
 
 
@@ -1804,7 +1805,7 @@ async def admin_command(interaction: discord.Interaction):
 
 
 class NFTLookupModal(Modal, title="NFT Lookup"):
-    nft_number = TextInput(
+    nft_number: TextInput[Any] = TextInput(
         label="Enter NFT Number",
         placeholder="e.g., 3535",
         required=True,

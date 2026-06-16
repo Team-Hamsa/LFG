@@ -13,6 +13,7 @@ import logging
 import os
 import sys
 import time
+from typing import Any
 
 import aiohttp
 from aiohttp import web
@@ -30,19 +31,19 @@ DISCORD_API = "https://discord.com/api"
 SESSION_TTL = 6 * 3600
 
 # In-memory sessions: session_id -> MintSession / SwapSession
-mint_sessions = {}
-swap_sessions = {}
+mint_sessions: dict[str, Any] = {}
+swap_sessions: dict[str, Any] = {}
 SESSION_RETENTION = 3600  # keep terminal sessions briefly for late polls
 
 
-def _prune_sessions(sessions: dict, terminal_states: set) -> None:
+def _prune_sessions(sessions: dict[str, Any], terminal_states: set[str]) -> None:
     cutoff = time.time() - SESSION_RETENTION
     for sid, s in list(sessions.items()):
         if s.state in terminal_states and s.created_at < cutoff:
             del sessions[sid]
 
 
-def _active_session(sessions: dict, terminal_states: set, discord_id: str):
+def _active_session(sessions: dict[str, Any], terminal_states: set[str], discord_id: str):
     for s in sessions.values():
         if s.discord_id == discord_id and s.state not in terminal_states:
             return s
@@ -57,7 +58,7 @@ def _session_secret() -> bytes:
     return hashlib.sha256(b"lfg-webapp:" + config.XUMM_API_SECRET.encode()).digest()
 
 
-def make_session_token(user: dict) -> str:
+def make_session_token(user: dict[str, Any]) -> str:
     payload = {"id": user["id"], "name": user["name"], "exp": int(time.time()) + SESSION_TTL}
     body = base64.urlsafe_b64encode(json.dumps(payload).encode()).decode()
     sig = hmac.new(_session_secret(), body.encode(), hashlib.sha256).hexdigest()
@@ -106,7 +107,7 @@ def require_wallet(handler):
     return wrapper
 
 
-def make_status_handler(sessions: dict):
+def make_status_handler(sessions: dict[str, Any]):
     @require_auth
     async def handler(request):
         session = sessions.get(request.match_info["session_id"])
@@ -338,7 +339,7 @@ handle_swap_status = make_status_handler(swap_sessions)
 # --- Xaman Sign In registration (issue #24) ---
 
 # payload uuid -> {discord_id, name, created_at}; pruned by age
-signin_payloads = {}
+signin_payloads: dict[str, Any] = {}
 SIGNIN_TTL = 900
 
 
