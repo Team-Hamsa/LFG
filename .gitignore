@@ -9,6 +9,9 @@ metadata_*.json
 .layer_cache/
 generated/
 layers/
+# Archived/dead code — kept on disk for reference, backed up at ~/linode-backup
+# and tracked in issue #53. Untracked from the repo; also excluded from the gate.
+legacy/
 swap_records/
 failed_db_records/
 *.db.bak*
