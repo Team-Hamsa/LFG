@@ -1,0 +1,52 @@
+{
+  "schema": "ipfs://QmNpi8rcXEkohca8iXu7zysKKSJYqCvBJn3xJwga8jXqWU",
+  "name": "Let's Effing Go! #1450",
+  "description": "Season 2",
+  "image": "https://lfgo.b-cdn.net/LFGO/1450/1450_0.png",
+  "external_link": "https://letseffinggo.com",
+  "collection": {
+    "name": "Let's Effing Go!",
+    "family": "Season 2",
+    "image": "https://lfgo.b-cdn.net/LFGO_square_logo.png"
+  },
+  "edition": 1,
+  "burnCount": 1,
+  "attributes": [
+    {
+      "trait_type": "Background",
+      "value": "Shattered Dreams"
+    },
+    {
+      "trait_type": "Back",
+      "value": "None"
+    },
+    {
+      "trait_type": "Body",
+      "value": "Straight Medium"
+    },
+    {
+      "trait_type": "Clothing",
+      "value": "Shelby Suit"
+    },
+    {
+      "trait_type": "Mouth",
+      "value": "Irridescent"
+    },
+    {
+      "trait_type": "Eyebrows",
+      "value": "Questioning"
+    },
+    {
+      "trait_type": "Eyes",
+      "value": "Goggles"
+    },
+    {
+      "trait_type": "Head",
+      "value": "Paint Spill"
+    },
+    {
+      "trait_type": "Accessory",
+      "value": "Paddle"
+    }
+  ]
+}

@@ -1,0 +1,645 @@
+/* LFG Discord Activity — brand-kit theme (v3 "sticker" direction).
+   Dark shell, restrained sticker treatment on key elements only:
+   the hub card, primary CTAs, QR codes, and NFT art. Fonts are
+   self-hosted in fonts/ (the Activity CSP blocks third-party origins). */
+
+:root {
+  /* Primary accents (sampled from logo assets) */
+  --orange: #D89030;
+  --red: #D84830;
+  --blue: #4890C0;
+  --yellow: #F0D848;
+  --green: #3DA35D;
+  --purple: #601878;
+
+  /* Structure + surfaces */
+  --ink: #0A0A0A;
+  --paper: #FFFFFF;
+  --bg: #0A0A0A;
+  --surface: #181818;
+  --surface-2: #222;
+  --line: #2C2C2C;
+  --text: #F5F4F1;
+  --muted: #9C9A94;
+
+  /* Signature: the sticker frame */
+  --sticker: 0 0 0 3px var(--paper), 5px 5px 0 var(--ink);
+  --sticker-sm: 0 0 0 2px var(--paper), 3px 3px 0 var(--ink);
+  --sticker-pressed: 0 0 0 2px var(--paper), 1px 1px 0 var(--ink);
+  --radius: 18px;
+  --speed: 180ms;
+}
+
+* { box-sizing: border-box; }
+
+/* Author display rules below (e.g. .qr { display:block }) would otherwise
+   beat the UA stylesheet's [hidden] rule. */
+[hidden] { display: none !important; }
+
+body {
+  margin: 0;
+  min-height: 100vh;
+  background: radial-gradient(120% 80% at 50% -10%, #14110d 0%, var(--bg) 55%);
+  color: var(--text);
+  font-family: 'Inter', system-ui, sans-serif;
+  line-height: 1.5;
+  display: flex;
+  justify-content: center;
+  -webkit-font-smoothing: antialiased;
+}
+
+#app {
+  width: 100%;
+  max-width: 440px;
+  /* Clear notches and Discord's overlaid activity controls (issue #23) */
+  padding: calc(28px + env(safe-area-inset-top, 0px)) 16px 64px;
+  text-align: center;
+}
+
+h1, h2, h3 { font-family: 'Fredoka', sans-serif; line-height: 1.1; }
+code, .mono { font-family: 'JetBrains Mono', monospace; }
+
+/* --- Header / lockup --- */
+
+.app-header { margin-bottom: 10px; }
+
+.lockup {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 12px;
+  margin-bottom: 6px;
+}
+/* Brand wordmark image; the .wordmark text below is the fallback when
+   assets/logo.png is missing or fails to load. */
+.wordmark-img {
+  height: 56px;
+  width: auto;
+  max-width: 220px;
+  object-fit: contain;
+}
+
+.wordmark {
+  margin: 0;
+  font-weight: 700;
+  font-size: 2.5rem;
+  letter-spacing: .01em;
+}
+.wordmark span {
+  -webkit-text-stroke: 2.5px var(--ink);
+  paint-order: stroke fill;
+}
+.wordmark .l { color: var(--orange); }
+.wordmark .f { color: var(--red); }
+.wordmark .g { color: var(--blue); }
+
+.status {
+  color: var(--muted);
+  min-height: 1.4em;
+  font-size: .92rem;
+  margin: 0 0 4px;
+}
+
+/* --- Typography --- */
+
+h2 {
+  margin: 0 0 8px;
+  font-size: 1.25rem;
+  font-weight: 600;
+}
+.card-sub {
+  color: #cfcdc7;
+  font-size: .95rem;
+  line-height: 1.55;
+  margin: 0 auto 14px;
+  max-width: 36ch;
+}
+code {
+  color: var(--green);
+  word-break: break-all;
+  font-size: .8rem;
+}
+.wallet-line {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  justify-content: space-between;
+  background: #111;
+  border: 1px solid var(--line);
+  border-radius: 12px;
+  padding: 10px 14px;
+  margin: 0 0 18px;
+  font-size: .85rem;
+  text-align: left;
+}
+.wallet-lbl { color: var(--muted); flex-shrink: 0; }
+.wallet-line code { flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+
+/* --- Cards --- */
+
+.card {
+  background: var(--surface);
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+  padding: 22px;
+  margin-top: 16px;
+  animation: rise .35s ease;
+}
+.card.sticker {
+  border: 3px solid var(--ink);
+  box-shadow: var(--sticker);
+}
+
+@keyframes rise {
+  from { opacity: 0; transform: translateY(8px); }
+  to   { opacity: 1; transform: none; }
+}
+
+/* --- Inputs --- */
+
+input[type="text"] {
+  width: 100%;
+  padding: 12px 14px;
+  margin: 8px 0 14px;
+  border-radius: 12px;
+  border: 1px solid var(--line);
+  background: #111;
+  color: var(--text);
+  font-family: 'JetBrains Mono', monospace;
+  font-size: .9rem;
+  transition: border-color var(--speed), box-shadow var(--speed);
+}
+input[type="text"]:focus {
+  outline: none;
+  border-color: var(--blue);
+  box-shadow: 0 0 0 3px rgba(72, 144, 192, .25);
+}
+input::placeholder { color: var(--muted); }
+
+/* --- Buttons ---
+   One primary per view; it gets the sticker. Everything else stays calm. */
+
+button {
+  font-family: 'Inter', sans-serif;
+  font-weight: 600;
+  font-size: 1rem;
+  color: var(--text);
+  background: transparent;
+  border: 2px solid #3a3a3a;
+  border-radius: 99px;
+  padding: 12px 20px;
+  cursor: pointer;
+  margin: 4px;
+  transition: transform .08s, box-shadow .08s, border-color var(--speed), color var(--speed);
+}
+button:hover { border-color: var(--blue); color: var(--blue); }
+button:disabled {
+  opacity: .45;
+  cursor: not-allowed;
+  transform: none;
+}
+button:focus-visible {
+  outline: 3px solid var(--blue);
+  outline-offset: 2px;
+}
+
+button.primary {
+  font-family: 'Fredoka', sans-serif;
+  font-size: 1.05rem;
+  background: var(--yellow);
+  color: var(--ink);
+  border: 3px solid var(--ink);
+  box-shadow: var(--sticker-sm);
+}
+button.primary:hover { color: var(--ink); border-color: var(--ink); }
+button.primary:active {
+  transform: translate(2px, 2px);
+  box-shadow: var(--sticker-pressed);
+}
+button.primary:disabled {
+  filter: grayscale(.6) brightness(.7);
+  box-shadow: var(--sticker-sm);
+}
+button.big { padding: 14px 20px; }
+
+/* .secondary is the default button style above — no extra rules needed */
+
+button.link {
+  background: none;
+  border: none;
+  color: var(--blue);
+  padding: 2px 4px;
+  font-weight: 600;
+  font-size: .9rem;
+}
+button.link:hover { text-decoration: underline; color: var(--blue); }
+
+button.back {
+  background: none;
+  border: none;
+  color: var(--muted);
+  padding: 2px 4px;
+  font-weight: 500;
+  font-size: .9rem;
+}
+button.back:hover { color: var(--text); border: none; }
+
+.actions { display: flex; flex-direction: column; gap: 10px; align-items: stretch; }
+.actions button { margin: 0; width: 100%; }
+.row-links { margin: 14px 0 0; }
+.row-links .dot { color: var(--muted); margin: 0 6px; }
+
+/* --- Mint flow: step indicator --- */
+
+.steps {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 0;
+  list-style: none;
+  margin: 0 0 20px;
+  padding: 0;
+  counter-reset: step;
+}
+.steps li {
+  counter-increment: step;
+  font-size: .8rem;
+  color: var(--muted);
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  flex-shrink: 0;
+}
+.steps li::before {
+  content: counter(step);
+  width: 26px;
+  height: 26px;
+  border-radius: 99px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  background: #111;
+  border: 2px solid var(--line);
+  color: var(--muted);
+  font-family: 'JetBrains Mono', monospace;
+  font-weight: 700;
+  font-size: .78rem;
+  transition: background var(--speed), border-color var(--speed), color var(--speed);
+}
+.steps li:not(:last-child)::after {
+  content: "";
+  width: 16px;
+  height: 2px;
+  background: var(--line);
+  margin: 0 8px;
+}
+.steps li.active { color: var(--text); font-weight: 600; }
+.steps li.active::before {
+  background: var(--blue);
+  border-color: var(--blue);
+  color: #fff;
+}
+.steps li.done { color: var(--green); }
+.steps li.done::before {
+  content: "✓";
+  background: var(--green);
+  border-color: var(--green);
+  color: #fff;
+}
+.steps li.done:not(:last-child)::after { background: var(--green); }
+
+/* --- Payment-method pill ("Paying with LFGO" / "Paying with XRP") --- */
+
+.method { margin: -2px 0 12px; }
+.pill {
+  display: inline-block;
+  font-family: 'JetBrains Mono', monospace;
+  font-size: .68rem;
+  letter-spacing: .06em;
+  text-transform: uppercase;
+  font-weight: 700;
+  border-radius: 99px;
+  padding: 5px 13px;
+  border: 2px solid var(--ink);
+}
+.pill.lfgo, .pill.brix { background: var(--yellow); color: var(--ink); }
+.pill.xrp { background: var(--blue); color: #fff; }
+
+/* Swap cost line above the final CTA */
+.cost {
+  text-align: center;
+  color: var(--muted);
+  font-size: .82rem;
+  line-height: 1.5;
+  margin: 8px auto 14px;
+  max-width: 36ch;
+}
+
+/* --- Mint flow: QR, spinner, result image --- */
+
+.qr, #flow-qr {
+  width: 210px;
+  height: 210px;
+  border-radius: 16px;
+  background: var(--paper);
+  border: 3px solid var(--ink);
+  box-shadow: var(--sticker);
+  padding: 12px;
+  margin: 18px auto 6px;
+  display: block;
+}
+
+#nft-image {
+  width: 240px;
+  border-radius: 16px;
+  border: 3px solid var(--ink);
+  box-shadow: var(--sticker);
+  margin-top: 16px;
+}
+
+/* With the minted NFT on screen the art is the hero and the accept QR
+   shrinks to a companion size (issue #22). */
+#flow-panel.with-image #flow-qr {
+  width: 150px;
+  height: 150px;
+  padding: 8px;
+  box-shadow: var(--sticker-sm);
+}
+#nft-image.celebrate { animation: pop-in 500ms cubic-bezier(.2, 1.4, .4, 1); }
+
+@keyframes pop-in {
+  0%   { opacity: 0; transform: scale(.6) rotate(-3deg); }
+  70%  { transform: scale(1.05) rotate(1deg); }
+  100% { opacity: 1; transform: none; }
+}
+
+.spinner {
+  width: 46px;
+  height: 46px;
+  margin: 26px auto 10px;
+  border-radius: 99px;
+  border: 4px solid #2a2a2a;
+  border-top-color: var(--blue);
+  animation: spin 1s linear infinite;
+}
+
+@keyframes spin { to { transform: rotate(360deg); } }
+
+/* --- Trait Swapper: the dress-up grid --- */
+
+.nft-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(120px, 1fr));
+  gap: 14px;
+  max-height: 360px;
+  overflow-y: auto;
+  padding: 4px;
+  scrollbar-width: thin;
+  scrollbar-color: var(--line) transparent;
+}
+
+.nft-card {
+  position: relative;
+  background: var(--surface-2);
+  border: 3px solid var(--ink);
+  border-radius: 14px;
+  overflow: hidden;
+  padding: 0;
+  margin: 0;
+  display: flex;
+  flex-direction: column;
+  font-size: .78rem;
+  color: var(--muted);
+  transition: transform .12s, opacity .15s, box-shadow .12s;
+}
+.nft-card:hover {
+  transform: translate(-2px, -2px);
+  border-color: var(--ink);
+  color: var(--muted);
+}
+.nft-card img {
+  width: 100%;
+  aspect-ratio: 1;
+  object-fit: cover;
+  display: block;
+}
+.nft-card .cap {
+  padding: 7px 6px;
+  font-family: 'JetBrains Mono', monospace;
+}
+.nft-card .cap .body {
+  display: block;
+  color: #7c7a74;
+  font-size: .64rem;
+  letter-spacing: .05em;
+  text-transform: uppercase;
+  margin-top: 3px;
+}
+.nft-card.dim {
+  opacity: .32;
+  filter: grayscale(.5);
+  pointer-events: none;
+}
+.nft-card.sel-1 { box-shadow: 0 0 0 4px var(--blue); }
+.nft-card.sel-2 { box-shadow: 0 0 0 4px var(--green); }
+.nft-card .pick {
+  position: absolute;
+  top: 7px;
+  left: 7px;
+  width: 24px;
+  height: 24px;
+  border-radius: 99px;
+  display: none;
+  place-items: center;
+  font-family: 'Fredoka', sans-serif;
+  font-weight: 700;
+  font-size: .85rem;
+  color: #fff;
+  border: 2px solid var(--ink);
+}
+.nft-card.sel-1 .pick { display: grid; background: var(--blue); }
+.nft-card.sel-2 .pick { display: grid; background: var(--green); }
+
+/* Skeleton loaders while the wallet's NFTs are fetched */
+.nft-card.skeleton {
+  pointer-events: none;
+  border-color: var(--line);
+  padding: 6px;
+  gap: 6px;
+  align-items: center;
+}
+.nft-card.skeleton .ph-img,
+.nft-card.skeleton .ph-line {
+  background: linear-gradient(90deg, var(--surface) 25%, var(--surface-2) 50%, var(--surface) 75%);
+  background-size: 200% 100%;
+  animation: shimmer 1.2s ease-in-out infinite;
+  border-radius: 8px;
+}
+.nft-card.skeleton .ph-img { width: 100%; aspect-ratio: 1; }
+.nft-card.skeleton .ph-line { width: 70%; height: 10px; }
+
+@keyframes shimmer { to { background-position: -200% 0; } }
+
+/* --- Trait Swapper: chooser --- */
+
+.swap-pair {
+  display: flex;
+  gap: 14px;
+  justify-content: center;
+  align-items: center;
+  margin: 16px 0 6px;
+}
+.swap-pair figure {
+  margin: 0;
+  font-family: 'JetBrains Mono', monospace;
+  font-size: .7rem;
+  color: var(--muted);
+}
+.swap-pair img {
+  width: 96px;
+  border-radius: 12px;
+  border: 3px solid var(--ink);
+  display: block;
+  margin-bottom: 6px;
+}
+.swap-arrows { font-size: 1.5rem; color: var(--blue); }
+
+.trait-list { text-align: left; margin: 6px 0 18px; }
+.trait-row {
+  display: flex;
+  gap: 12px;
+  align-items: center;
+  padding: 12px 4px;
+  border-bottom: 1px solid var(--line);
+  font-size: .95rem;
+  cursor: pointer;
+  transition: background var(--speed);
+}
+.trait-row:last-child { border-bottom: none; }
+.trait-row:hover { background: #111; }
+.trait-row input[type="checkbox"] {
+  width: 22px;
+  height: 22px;
+  accent-color: var(--green);
+  flex-shrink: 0;
+}
+.trait-row::after {
+  /* category color dot, set per-row via --cat in JS */
+  content: "";
+  order: 1;
+  width: 9px;
+  height: 9px;
+  border-radius: 99px;
+  background: var(--cat, var(--muted));
+  flex-shrink: 0;
+}
+.trait-row strong { order: 2; font-weight: 600; }
+.trait-row span {
+  order: 3;
+  color: var(--muted);
+  margin-left: auto;
+  text-align: right;
+  font-family: 'JetBrains Mono', monospace;
+  font-size: .8rem;
+}
+
+.swap-result { margin-top: 20px; }
+.swap-result h3 { font-size: 1.05rem; font-weight: 600; margin: 0 0 10px; }
+.swap-result .result-img {
+  width: 160px;
+  border-radius: 14px;
+  border: 3px solid var(--ink);
+  box-shadow: var(--sticker-sm);
+}
+.swap-result .modified-note { display: block; margin-top: 10px; color: var(--green); font-size: .9rem; }
+
+#swap-results .result-qr,
+.swap-result .result-qr {
+  width: 160px;
+  border-radius: 14px;
+  background: var(--paper);
+  border: 3px solid var(--ink);
+  box-shadow: var(--sticker-sm);
+  padding: 8px;
+  display: block;
+  margin: 14px auto 4px;
+}
+
+/* --- Toasts --- */
+
+.toasts {
+  position: fixed;
+  bottom: 16px;
+  left: 50%;
+  transform: translateX(-50%);
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  z-index: 100;
+  width: min(420px, calc(100vw - 32px));
+}
+.toast {
+  background: var(--surface-2);
+  color: var(--text);
+  border: 3px solid var(--ink);
+  border-left: 6px solid var(--red);
+  border-radius: 12px;
+  box-shadow: var(--sticker-sm);
+  padding: 10px 14px;
+  font-size: .9rem;
+  font-weight: 500;
+  text-align: left;
+  animation: rise var(--speed) ease-out;
+}
+.toast.out { opacity: 0; transition: opacity 300ms; }
+
+/* --- Motion preferences --- */
+
+@media (prefers-reduced-motion: reduce) {
+  *, *::before, *::after {
+    animation-duration: .01ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: .01ms !important;
+  }
+  .spinner { animation-duration: 1s !important; animation-iteration-count: infinite !important; }
+}
+
+/* --- Small screens --- */
+
+@media (max-width: 380px) {
+  .wordmark { font-size: 2.1rem; }
+  .wordmark-img { height: 46px; max-width: 180px; }
+  .swap-pair img { width: 80px; }
+  .qr, #flow-qr { width: 180px; height: 180px; }
+}
+
+/* --- Discord mobile overlay spacer (issue #23) ---
+   On touch devices in portrait, Discord draws its activity controls over
+   the top edge of the iframe; push the header below them. */
+
+@media (pointer: coarse) and (orientation: portrait) {
+  .app-header { padding-top: 52px; }
+}
+
+/* --- Responsive layout (issue #20) ---
+   Portrait/mobile keeps the default single stacked column; landscape on
+   desktop/tablet widens the shell and puts the mint flow's copy and visual
+   (QR / NFT art) side by side. */
+
+@media (min-width: 760px) and (orientation: landscape) {
+  #app { max-width: 880px; }
+  .card { padding: 26px 30px; }
+  .actions { flex-direction: row; justify-content: center; }
+  .actions button { width: auto; flex: 1; max-width: 280px; }
+  .nft-grid { max-height: 420px; }
+  .flow-body {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    gap: 36px;
+    text-align: left;
+  }
+  .flow-body .flow-copy { max-width: 40ch; }
+  .flow-body .card-sub { margin-left: 0; }
+  .flow-body .flow-visual { flex-shrink: 0; }
+}

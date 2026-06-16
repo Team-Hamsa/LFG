@@ -1,0 +1,53 @@
+{
+  "schema": "ipfs://QmNpi8rcXEkohca8iXu7zysKKSJYqCvBJn3xJwga8jXqWU",
+  "name": "Let's Effing Go! #1735",
+  "description": "Season 1",
+  "image": "https://lfgo.b-cdn.net/LFGO/1735/1735_5.png",
+  "video": "https://lfgo.b-cdn.net/LFGO/1735/1735_5.mp4",
+  "external_link": "https://letseffinggo.com",
+  "collection": {
+    "name": "Let's Effing Go!",
+    "family": "Season 1",
+    "image": "https://lfgo.b-cdn.net/LFGO_square_logo.png"
+  },
+  "edition": 1,
+  "burnCount": 6,
+  "attributes": [
+    {
+      "trait_type": "Background",
+      "value": "Paintsplosion"
+    },
+    {
+      "trait_type": "Back",
+      "value": "None"
+    },
+    {
+      "trait_type": "Body",
+      "value": "Straight Dark"
+    },
+    {
+      "trait_type": "Clothing",
+      "value": "Chicken Suit"
+    },
+    {
+      "trait_type": "Mouth",
+      "value": "Cheeky"
+    },
+    {
+      "trait_type": "Eyebrows",
+      "value": "Questioning"
+    },
+    {
+      "trait_type": "Eyes",
+      "value": "Hypno"
+    },
+    {
+      "trait_type": "Head",
+      "value": "TV Static"
+    },
+    {
+      "trait_type": "Accessory",
+      "value": "Headphones"
+    }
+  ]
+}

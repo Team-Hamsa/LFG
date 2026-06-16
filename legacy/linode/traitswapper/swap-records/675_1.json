@@ -1,0 +1,53 @@
+{
+  "schema": "ipfs://QmNpi8rcXEkohca8iXu7zysKKSJYqCvBJn3xJwga8jXqWU",
+  "name": "Let's Effing Go! #675",
+  "description": "Season 2",
+  "image": "https://lfgo.b-cdn.net/LFGO/675/675_1.png",
+  "video": "https://lfgo.b-cdn.net/LFGO/675/675_1.mp4",
+  "external_link": "https://letseffinggo.com",
+  "collection": {
+    "name": "Let's Effing Go!",
+    "family": "Season 2",
+    "image": "https://lfgo.b-cdn.net/LFGO_square_logo.png"
+  },
+  "edition": 1,
+  "burnCount": 2,
+  "attributes": [
+    {
+      "trait_type": "Background",
+      "value": "Colorsplosion"
+    },
+    {
+      "trait_type": "Back",
+      "value": "None"
+    },
+    {
+      "trait_type": "Body",
+      "value": "Straight Gold"
+    },
+    {
+      "trait_type": "Clothing",
+      "value": "Letterman Pink"
+    },
+    {
+      "trait_type": "Mouth",
+      "value": "Determined"
+    },
+    {
+      "trait_type": "Eyebrows",
+      "value": "None"
+    },
+    {
+      "trait_type": "Eyes",
+      "value": "Wavy"
+    },
+    {
+      "trait_type": "Head",
+      "value": "Short Swept Blonde"
+    },
+    {
+      "trait_type": "Accessory",
+      "value": "Lightsaber Red"
+    }
+  ]
+}

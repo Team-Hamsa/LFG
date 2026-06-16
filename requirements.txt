@@ -1,0 +1,33 @@
+# Discord bot framework supporting slash commands and UI components
+discord.py>=2.0.0
+
+# XUMM SDK for generating transaction payloads
+xumm-sdk-py
+
+# XRP Ledger client libraries
+xrpl-py
+
+# BunnyCDN storage client library for file uploads
+bunnycdn-storage
+bunnycdnpython
+
+# NumPy (required by OpenCV)
+numpy
+
+# Image processing
+opencv-python
+Pillow
+ffmpeg-python  # Note: Also requires system ffmpeg binary (install via ./setup.sh)
+qrcode[pil]  # For generating QR codes locally
+
+# Environment variable management
+python-dotenv
+
+# Async HTTP client
+aiohttp
+
+# Voice support for Discord (optional)
+PyNaCl
+
+# Testing (webapp smoke tests)
+pytest

@@ -1,0 +1,52 @@
+{
+  "schema": "ipfs://QmNpi8rcXEkohca8iXu7zysKKSJYqCvBJn3xJwga8jXqWU",
+  "name": "Let's Effing Go! #659",
+  "description": "Season 2",
+  "image": "https://lfgo.b-cdn.net/LFGO/659/659_9.png",
+  "external_link": "https://letseffinggo.com",
+  "collection": {
+    "name": "Let's Effing Go!",
+    "family": "Season 2",
+    "image": "https://lfgo.b-cdn.net/LFGO_square_logo.png"
+  },
+  "edition": 1,
+  "burnCount": 10,
+  "attributes": [
+    {
+      "trait_type": "Background",
+      "value": "Orange Grave"
+    },
+    {
+      "trait_type": "Back",
+      "value": "Infernal Wings"
+    },
+    {
+      "trait_type": "Body",
+      "value": "Straight Gold"
+    },
+    {
+      "trait_type": "Clothing",
+      "value": "Scarf"
+    },
+    {
+      "trait_type": "Mouth",
+      "value": "Monster"
+    },
+    {
+      "trait_type": "Eyebrows",
+      "value": "Ghost"
+    },
+    {
+      "trait_type": "Eyes",
+      "value": "Laser"
+    },
+    {
+      "trait_type": "Head",
+      "value": "Charizard Onesie"
+    },
+    {
+      "trait_type": "Accessory",
+      "value": "Devil Pitchfork"
+    }
+  ]
+}
