@@ -313,7 +313,6 @@ def get_sorted_trait_layers(trait_layers_dir):
             "mouth",
             "eyebrows",
             "eyes",
-            "mouth",
             "hat:hair",
             "accessory",
         ]

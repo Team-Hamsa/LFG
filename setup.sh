@@ -47,16 +47,18 @@ else
 fi
 
 echo ""
-echo "📦 Installing Python dependencies..."
-pip install -r requirements.txt
+echo "📦 Creating virtualenv (.venv) and installing dependencies..."
+# The pre-push hooks (mypy, pytest) run from .venv/bin/python, so create and
+# populate that venv explicitly here — otherwise the installed hook fails every
+# push with FileNotFoundError for .venv/bin/python.
+python3 -m venv .venv
+.venv/bin/python -m pip install --upgrade pip
+.venv/bin/pip install -r requirements.txt -r requirements-dev.txt
 
 echo ""
-echo "📦 Installing dev tooling + pre-push CI gate..."
-pip install -r requirements-dev.txt
-# Install the blocking pre-push gate (ruff, mypy, gitleaks, pytest). The mypy
-# and pytest hooks run from .venv, so activate this repo's virtualenv before
-# pushing. Bypass in genuine emergencies with: git push --no-verify
-pre-commit install --hook-type pre-push
+echo "📦 Installing the blocking pre-push gate (ruff, mypy, gitleaks, pytest)..."
+# Bypass in genuine emergencies with: git push --no-verify
+.venv/bin/pre-commit install --hook-type pre-push
 
 echo ""
 echo "✅ Setup complete!"
