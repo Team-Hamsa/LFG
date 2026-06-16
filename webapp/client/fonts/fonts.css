@@ -1,0 +1,24 @@
+/* Self-hosted variable fonts (the Activity CSP blocks third-party origins,
+   so Google Fonts can't be linked directly — same reason the SDK is vendored).
+   Latin subsets; each file is a variable font covering all needed weights. */
+@font-face {
+  font-family: 'Fredoka';
+  font-style: normal;
+  font-weight: 300 700;
+  font-display: swap;
+  src: url(Fredoka.woff2) format('woff2');
+}
+@font-face {
+  font-family: 'Inter';
+  font-style: normal;
+  font-weight: 100 900;
+  font-display: swap;
+  src: url(Inter.woff2) format('woff2');
+}
+@font-face {
+  font-family: 'JetBrains Mono';
+  font-style: normal;
+  font-weight: 400 800;
+  font-display: swap;
+  src: url(JetBrainsMono.woff2) format('woff2');
+}
