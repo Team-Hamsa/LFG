@@ -51,6 +51,14 @@ echo "📦 Installing Python dependencies..."
 pip install -r requirements.txt
 
 echo ""
+echo "📦 Installing dev tooling + pre-push CI gate..."
+pip install -r requirements-dev.txt
+# Install the blocking pre-push gate (ruff, mypy, gitleaks, pytest). The mypy
+# and pytest hooks run from .venv, so activate this repo's virtualenv before
+# pushing. Bypass in genuine emergencies with: git push --no-verify
+pre-commit install --hook-type pre-push
+
+echo ""
 echo "✅ Setup complete!"
 echo ""
 echo "Next steps:"

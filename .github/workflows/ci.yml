@@ -9,8 +9,6 @@ on:
 jobs:
   gate:
     runs-on: ubuntu-latest
-    # NON-BLOCKING during Phase A/B. Remove this line at the Phase-B flip.
-    continue-on-error: true
     steps:
       - uses: actions/checkout@v4
 
@@ -19,12 +17,14 @@ jobs:
           python-version: "3.10"
           cache: pip
 
-      - name: Install dependencies
+      - name: Create venv and install dependencies
+        # Build the SAME .venv the local pre-push hook expects: the mypy and
+        # pytest hooks run `.venv/bin/python` so they type-check/test against the
+        # real installed deps (discord.py/xrpl-py are typed). Keeps local == CI.
         run: |
-          python -m pip install --upgrade pip
-          pip install -r requirements.txt -r requirements-dev.txt
+          python -m venv .venv
+          .venv/bin/python -m pip install --upgrade pip
+          .venv/bin/pip install -r requirements.txt -r requirements-dev.txt
 
       - name: Run gate (ruff, mypy, gitleaks, pytest)
-        # The pytest hook entry is `python -m pytest`, which resolves correctly
-        # here since deps are installed into the runner's system Python.
-        run: pre-commit run --all-files --hook-stage pre-push --show-diff-on-failure
+        run: .venv/bin/pre-commit run --all-files --hook-stage pre-push --show-diff-on-failure
