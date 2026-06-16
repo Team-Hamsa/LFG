@@ -1,0 +1,36 @@
+# Single source of truth for the check gate. Runs at pre-push locally and in CI.
+# Pin/refresh revs with: pre-commit autoupdate
+default_stages: [pre-push]
+default_install_hook_types: [pre-push]
+
+repos:
+  - repo: https://github.com/astral-sh/ruff-pre-commit
+    rev: v0.15.17
+    hooks:
+      - id: ruff
+        args: [--fix]
+      - id: ruff-format
+
+  - repo: https://github.com/pre-commit/mirrors-mypy
+    rev: v2.1.0
+    hooks:
+      - id: mypy
+        # mypy reads config from pyproject.toml; run over the repo.
+        args: []
+        # Stubs/deps mypy needs in its isolated env (extend from Task 6 baseline):
+        additional_dependencies: []
+
+  - repo: https://github.com/gitleaks/gitleaks
+    rev: v8.30.0
+    hooks:
+      - id: gitleaks
+
+  - repo: local
+    hooks:
+      - id: pytest
+        name: pytest
+        # Venv-agnostic so it works locally (via `.venv/bin/pre-commit`) and in CI.
+        entry: python -m pytest
+        language: system
+        pass_filenames: false
+        always_run: true
