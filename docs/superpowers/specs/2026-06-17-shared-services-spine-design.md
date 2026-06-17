@@ -127,12 +127,17 @@ Envelope:
 
 Event types (this spec): `mint.completed`, `mint.failed`, `swap.completed`, `swap.failed`. (`x.*` share events deferred to #41.)
 
-Consumers:
-- **Telegram** → posts mint announcements to a channel / DMs the minter; failures to a private admin channel.
-- **Discord** → drives the existing admin-log channel + optional user DM.
-- **Browser** does *not* use `/events`; it keeps polling its own `session_id` (it only cares about its own session).
+Two endpoints over the same bus, distinguished by **who** connects:
 
-**Delivery semantics:** at-most-once, in-memory pub/sub, no broker. A subscriber disconnected when an event fires misses it — acceptable for notifications at this stage. Replay/guaranteed delivery is the Redis-later upgrade (§6).
+- **`GET /events`** — **service-token** auth. For trusted backend surfaces (Discord bot, Telegram bot) that fan out to many users; the connection receives the firehose (subject to its type filter) because one process serves all its users.
+- **`GET /events/me`** — **user-session-token** (HMAC) auth. For untrusted single-user clients (the browser). The service **filters strictly** to the authenticated user's own events (matched on resolved identity/wallet) — a browser can never observe another user's events, and never holds a service token.
+
+Consumers:
+- **Telegram** (`/events`) → posts mint announcements to a channel / DMs the minter; failures to a private admin channel.
+- **Discord** (`/events`) → drives the existing admin-log channel + optional user DM.
+- **Browser** (`/events/me`) → push replaces per-session polling: instant `mint.completed` / `swap.completed` for that user, fewer requests, lower latency. (Polling remains as a fallback if the WS drops.)
+
+**Delivery semantics:** at-most-once, in-memory pub/sub, no broker. A subscriber disconnected when an event fires misses it — acceptable for notifications at this stage (the browser's polling fallback covers its own session). Replay/guaranteed delivery is the Redis-later upgrade (§6).
 
 ## 5. Surfaces
 
@@ -196,6 +201,7 @@ Session storage stays in-process: `MintSession`/`SwapSession` hold live `asyncio
 - `lfg_core` keeps its existing tests (unchanged domain).
 - **Service route tests** with a fake `lfg_core`: assert service-token auth, identity resolution, and session lifecycle.
 - **`EventBus` contract tests** (publish / subscribe / filter) that the future Redis impl must also pass.
+- **`/events/me` scoping test**: a user-session WS receives only its own user's events and never another user's (security-critical filter).
 - **Surface SDK tests** against a mock service (auth headers, retry, event subscription).
 - **Smoke test per surface**; existing `webapp/test_smoke.py` migrates to `lfg_service`.
 - **Identity-migration test**: `Users` → `identities` backfill is idempotent and preserves wallets.
@@ -204,7 +210,7 @@ Session storage stays in-process: `MintSession`/`SwapSession` hold live `asyncio
 
 This spec is the **spine + two clients**. Suggested implementation order:
 
-1. **Service spine** — promote `webapp/server.py` → `lfg_service/`; add `auth.py`, `identity.py` (+ migration), `events.py` (`EventBus` + in-memory), `/api/session`, `/events`. Web client keeps working throughout.
+1. **Service spine** — promote `webapp/server.py` → `lfg_service/`; add `auth.py`, `identity.py` (+ migration), `events.py` (`EventBus` + in-memory), `/api/session`, `/events` (service-token) and `/events/me` (user-scoped); switch the browser client from polling to `/events/me` with polling fallback. Web client keeps working throughout.
 2. **Surface SDK** — `surfaces/_client/` with REST+WS + retry, plus tests against a mock service.
 3. **Discord migration (#53)** — invert `main.py` onto the SDK; subscribe to events; delete the parallel pipeline and `trait_layers/`.
 4. **Telegram surface (#43)** — new process on the SDK; first event-bus consumer.
