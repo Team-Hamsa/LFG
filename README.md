@@ -45,6 +45,9 @@ The following features are scoped for the hackathon sprint. Each links to its tr
 - [ ] [#42 Web UI (standalone browser-based mint + collection viewer)](../../issues/42)
 - [ ] [#46 Dress-up game (visual trait composer, supersedes Trait Swapper)](../../issues/46)
 - [ ] [#43 Telegram integration (commands, notifications, wallet linking)](../../issues/43)
+  - Built on the shared-services spine ([#53](../../issues/53)) — one `lfg_service` backend, thin surface clients
+  - Spec: [shared-services spine design](docs/superpowers/specs/2026-06-17-shared-services-spine-design.md)
+  - Plan: [shared-services spine (Plan 1 of 4)](docs/superpowers/plans/2026-06-17-shared-services-spine.md)
 - [ ] [#41 X (Twitter) integration (OAuth2, auto-post on mint)](../../issues/41)
 
 ### Trading & Economy
