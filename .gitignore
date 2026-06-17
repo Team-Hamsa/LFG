@@ -21,3 +21,6 @@ users.json
 .mypy_cache/
 .ruff_cache/
 .remember/
+
+# Legacy test trait art (superseded by layers/ on the CDN)
+trait_layers/
