@@ -258,6 +258,14 @@ CREATE TABLE burned_nfts (
 - All NFT minting uses `NFTokenMint` with transfer fees (7000 basis points = 70% secondary sales fee)
 - NFT flags = 24 (transferable + mutable — Dynamic NFTs amendment). New mints are NOT burnable; trait swaps update them in place via `NFTokenModify` (lfg_core/xrpl_ops.py). Legacy burnable NFTs are still burned and reminted (as mutable).
 
+### Testnet AMM (BRIX/XRP)
+
+- **AMM account (pool ID):** `rLUnD5mskBnHfwFxCjakDA3RVgK584XQXG`
+- **Pair / ratio:** 50 XRP : 5,000 BRIX (BRIX issuer = SEED account on testnet)
+- **Starting price:** 0.01 XRP/BRIX · **Trading fee:** 0.5%
+- **Purpose:** lets the trait-swap XRP-fee path (`get_amm_xrp_cost` / `buy_and_burn`) quote and clear on testnet.
+- **Recreate after a testnet reset:** `.venv/bin/python scripts/testnet_amm_setup.py` (idempotent).
+
 ## Important Notes
 
 1. **Token Trustline Required**: Users must set up a trustline for LFGO tokens before receiving payment instructions. The `/letsgo` command provides a "Set LFGO Trustline" button.
