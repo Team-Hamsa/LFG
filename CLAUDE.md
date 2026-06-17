@@ -6,6 +6,27 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 **LFG Bot** is a Discord bot that allows users to mint NFTs on the XRP Ledger (XRPL) and trade tokens (LFGO) using the XUMM app. The bot dynamically generates NFT images by compositing trait layers, uploads them to BunnyCDN, and mints them on the XRPL.
 
+## Feature Workflow: Brainstorming → Spec → Plan → Issue Link
+
+**Rule:** Any brainstorming session that starts from a GitHub issue MUST end by linking that issue's spec and plan markdown files back to the issue on GitHub.
+
+Specs and plans live under `docs/superpowers/`:
+- Specs: `docs/superpowers/specs/<YYYY-MM-DD>-<feature>-design.md`
+- Plans: `docs/superpowers/plans/<YYYY-MM-DD>-<feature>.md`
+
+When a brainstorming session begins with an issue (e.g., "let's spec out #41"):
+
+1. Produce the spec (design doc) in `docs/superpowers/specs/`.
+2. Produce the plan in `docs/superpowers/plans/`.
+3. **Before the session is considered done, link both files to the issue** by posting a comment on the issue with permalinks (blob URLs at the current commit SHA, not branch-relative paths) to the spec and plan. Use:
+   ```bash
+   gh issue comment <number> --repo Team-Hamsa/LFG --body "Spec: <url>
+   Plan: <url>"
+   ```
+   Commit the spec/plan files first so the permalinks resolve.
+
+A brainstorming-from-issue session is not complete until the issue carries links to its spec and plan.
+
 ## Setup & Installation
 
 ### Dependencies
