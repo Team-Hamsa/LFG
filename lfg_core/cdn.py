@@ -6,11 +6,11 @@ import aiohttp
 from lfg_core import config
 
 
-async def upload_to_bunny(folder: str, path_on_cdn: str, data: bytes,
-                          content_type: str) -> str:
+async def upload_to_bunny(folder: str, path_on_cdn: str, data: bytes, content_type: str) -> str:
     """PUT bytes to BunnyCDN storage under `folder`; returns the public URL."""
-    storage_url = (f"{config.BUNNY_CDN_BASE_URL}/{config.BUNNY_CDN_STORAGE_ZONE}/"
-                   f"{folder}/{path_on_cdn}")
+    storage_url = (
+        f"{config.BUNNY_CDN_BASE_URL}/{config.BUNNY_CDN_STORAGE_ZONE}/{folder}/{path_on_cdn}"
+    )
     headers = {"AccessKey": config.BUNNY_CDN_ACCESS_KEY, "Content-Type": content_type}
     # Generous total to cover multi-MB video uploads, but never hang forever.
     timeout = aiohttp.ClientTimeout(total=120, connect=10)

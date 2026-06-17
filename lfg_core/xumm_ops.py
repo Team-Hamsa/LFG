@@ -2,13 +2,14 @@
 # XUMM/Xaman payload helpers: payment links, QR rendering and NFT-accept
 # payloads (extracted from main.py).
 
+import asyncio
 import io
+import json
+import logging
 import os
 import re
-import json
-import asyncio
-import logging
 from decimal import Decimal
+from typing import Any
 
 import qrcode
 import requests
@@ -25,7 +26,7 @@ _XUMM_HEADERS = {
 }
 
 
-def _payment_amount(value: str, currency: str, issuer: str):
+def _payment_amount(value: str, currency: str | None, issuer: str | None) -> str | dict[str, str]:
     """XRPL Amount field for a Payment: native XRP is a drops string, IOUs
     are a currency dict. currency/issuer default to the LFGO mint token."""
     if currency == "XRP":
@@ -37,8 +38,9 @@ def _payment_amount(value: str, currency: str, issuer: str):
     }
 
 
-def generate_static_payment_link(destination: str, value: str = "1",
-                                 currency: str = None, issuer: str = None) -> str:
+def generate_static_payment_link(
+    destination: str, value: str = "1", currency: str | None = None, issuer: str | None = None
+) -> str:
     """xaman.app/detect deep link for a payment; works in any XRPL wallet.
     currency/issuer default to the LFGO mint token; "XRP" means native XRP."""
     transaction_json = {
@@ -46,20 +48,27 @@ def generate_static_payment_link(destination: str, value: str = "1",
         "Destination": destination,
         "Amount": _payment_amount(value, currency, issuer),
     }
-    tx_hex = json.dumps(transaction_json).encode('utf-8').hex()
+    tx_hex = json.dumps(transaction_json).encode("utf-8").hex()
     return f"https://xaman.app/detect/{tx_hex}"
 
 
 # Mascot composited into the center of every QR (issue #19). High error
 # correction tolerates the covered modules; a missing file means plain QRs.
-QR_LOGO_PATH = os.getenv("QR_LOGO_PATH", os.path.join(
-    os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
-    "webapp", "client", "assets", "mascot.png"))
+QR_LOGO_PATH = os.getenv(
+    "QR_LOGO_PATH",
+    os.path.join(
+        os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
+        "webapp",
+        "client",
+        "assets",
+        "mascot.png",
+    ),
+)
 
 
 # Decoded once per path (not per QR) to avoid disk I/O on every render;
 # keyed by path so a QR_LOGO_PATH override picks up the new file.
-_qr_logo_cache = {}
+_qr_logo_cache: dict[str, Image.Image] = {}
 
 
 def _load_qr_logo() -> Image.Image:
@@ -101,22 +110,28 @@ def generate_qr_png(data: str) -> bytes:
     except Exception as e:  # missing/corrupt logo: serve the plain QR
         logging.warning(f"QR branding skipped: {e}")
     buf = io.BytesIO()
-    img.save(buf, format='PNG')
+    img.save(buf, format="PNG")
     return buf.getvalue()
 
 
-def _with_return_url(options: dict, return_url: dict) -> dict:
+def _with_return_url(
+    options: dict[str, Any], return_url: dict[str, str] | None
+) -> dict[str, Any] | None:
     if return_url:
         options["return_url"] = return_url
     return options or None
 
 
-def discord_return_url(guild_id, channel_id):
+def discord_return_url(guild_id: Any, channel_id: Any) -> dict[str, str] | None:
     """XUMM return_url dict that bounces the user back to the Discord channel
     hosting the Activity after signing in Xaman (issue #14). The IDs come
     from the untrusted client, so anything non-numeric is rejected."""
-    if not (isinstance(guild_id, str) and guild_id.isdigit()
-            and isinstance(channel_id, str) and channel_id.isdigit()):
+    if not (
+        isinstance(guild_id, str)
+        and guild_id.isdigit()
+        and isinstance(channel_id, str)
+        and channel_id.isdigit()
+    ):
         return None
     return {
         "app": f"discord://-/channels/{guild_id}/{channel_id}",
@@ -124,31 +139,36 @@ def discord_return_url(guild_id, channel_id):
     }
 
 
-async def _create_xumm_payload(txjson: dict, options: dict = None):
+async def _create_xumm_payload(
+    txjson: dict[str, Any], options: dict[str, Any] | None = None
+) -> dict[str, Any] | None:
     """POST a payload to the XUMM platform API; returns qr/deeplink dict or None."""
     payload = {"txjson": txjson}
     if options:
         payload["options"] = options
     try:
         response = await asyncio.to_thread(
-            requests.post, config.XUMM_API_URL, json=payload,
-            headers=_XUMM_HEADERS, timeout=10
+            requests.post, config.XUMM_API_URL, json=payload, headers=_XUMM_HEADERS, timeout=10
         )
         data = response.json()
         return {
-            'qr_url': data['refs']['qr_png'],
-            'xumm_url': data['next']['always'],
-            'uuid': data['uuid'],
+            "qr_url": data["refs"]["qr_png"],
+            "xumm_url": data["next"]["always"],
+            "uuid": data["uuid"],
         }
     except Exception as e:
         logging.error(f"Error creating XUMM payload: {e}")
         return None
 
 
-async def create_payment_payload(destination: str, value: str = "1",
-                                 currency: str = None, issuer: str = None,
-                                 expire_minutes: int = None,
-                                 return_url: dict = None):
+async def create_payment_payload(
+    destination: str,
+    value: str = "1",
+    currency: str | None = None,
+    issuer: str | None = None,
+    expire_minutes: int | None = None,
+    return_url: dict[str, str] | None = None,
+) -> dict[str, Any] | None:
     """XUMM sign-request payload for a token Payment. This is what payment
     QRs must encode: Xaman only understands its own payload links
     (xumm.app/sign/<uuid>) — it cannot parse the raw-transaction-JSON
@@ -168,28 +188,36 @@ async def create_payment_payload(destination: str, value: str = "1",
     )
 
 
-async def create_accept_offer_payload(offer_id: str, return_url: dict = None):
+async def create_accept_offer_payload(
+    offer_id: str, return_url: dict[str, str] | None = None
+) -> dict[str, Any] | None:
     """XUMM payload for NFTokenAcceptOffer."""
-    return await _create_xumm_payload({
-        "TransactionType": "NFTokenAcceptOffer",
-        "NFTokenSellOffer": offer_id,
-    }, options=_with_return_url({}, return_url))
+    return await _create_xumm_payload(
+        {
+            "TransactionType": "NFTokenAcceptOffer",
+            "NFTokenSellOffer": offer_id,
+        },
+        options=_with_return_url({}, return_url),
+    )
 
 
-async def create_signin_payload(return_url: dict = None):
+async def create_signin_payload(return_url: dict[str, str] | None = None) -> dict[str, Any] | None:
     """XUMM SignIn payload: the user scans/approves in Xaman and the signed
     payload reveals their wallet address (registration flow, issue #24)."""
-    return await _create_xumm_payload({
-        "TransactionType": "SignIn",
-    }, options=_with_return_url({}, return_url))
+    return await _create_xumm_payload(
+        {
+            "TransactionType": "SignIn",
+        },
+        options=_with_return_url({}, return_url),
+    )
 
 
 _UUID_RE = re.compile(
-    r"^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$",
-    re.IGNORECASE)
+    r"^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$", re.IGNORECASE
+)
 
 
-async def get_payload_status(uuid: str):
+async def get_payload_status(uuid: str) -> dict[str, Any] | None:
     """Poll a XUMM payload: whether it was opened (QR scanned) / signed /
     expired, and the signing account once signed. None on API errors or a
     malformed uuid (which is interpolated into the API URL)."""
@@ -198,8 +226,7 @@ async def get_payload_status(uuid: str):
         return None
     try:
         response = await asyncio.to_thread(
-            requests.get, f"{config.XUMM_API_URL}/{uuid}",
-            headers=_XUMM_HEADERS, timeout=10
+            requests.get, f"{config.XUMM_API_URL}/{uuid}", headers=_XUMM_HEADERS, timeout=10
         )
         data = response.json()
         meta = data.get("meta") or {}

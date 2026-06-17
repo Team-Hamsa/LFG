@@ -4,13 +4,23 @@
 # main.py. Weights come from lfg_core.rarity (proportional-with-floor).
 
 import random
+import sqlite3
+from datetime import datetime
+from typing import Any
 
 from lfg_core import rarity
 from lfg_core.swap_meta import TRAIT_ORDER
 
 
-async def select_random_attributes(store, body: str = None, *, conn=None,
-                                   network=None, now=None, rng=random):
+async def select_random_attributes(
+    store: Any,
+    body: str | None = None,
+    *,
+    conn: sqlite3.Connection | None = None,
+    network: str | None = None,
+    now: datetime | None = None,
+    rng: Any = random,
+) -> tuple[str, list[dict[str, str]]]:
     """Pick a body (rarity-weighted unless given) and one rarity-weighted
     value per trait type from the unified layer store. Returns
     (body, attributes) where attributes is a metadata-style
@@ -18,21 +28,28 @@ async def select_random_attributes(store, body: str = None, *, conn=None,
     own_conn = conn is None
     if own_conn:
         conn = rarity.connect()
+    assert conn is not None
     try:
         if body is None:
             bodies = await store.list_bodies()
             if not bodies:
                 raise ValueError("Layer store has no body directories")
             body = rarity.weighted_pick(
-                conn, rarity.BODY_SENTINEL, rarity.BODY_CATEGORY, bodies,
-                network=network, now=now, rng=rng)
+                conn,
+                rarity.BODY_SENTINEL,
+                rarity.BODY_CATEGORY,
+                bodies,
+                network=network,
+                now=now,
+                rng=rng,
+            )
         attributes = []
         for trait_type in TRAIT_ORDER:
             values = await store.list_values(body, trait_type)
             if values:
-                value = rarity.weighted_pick(conn, body, trait_type, values,
-                                             network=network, now=now,
-                                             rng=rng)
+                value = rarity.weighted_pick(
+                    conn, body, trait_type, values, network=network, now=now, rng=rng
+                )
                 attributes.append({"trait_type": trait_type, "value": value})
         if not attributes:
             raise ValueError(f"No trait layers found for body '{body}'")
