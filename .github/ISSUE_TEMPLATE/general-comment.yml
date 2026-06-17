@@ -1,0 +1,11 @@
+name: "General Comment / Question"
+description: "Anything else"
+labels: ["question"]
+body:
+  - type: textarea
+    id: comment
+    attributes:
+      label: "Comment"
+      description: "Share your thoughts or question."
+    validations:
+      required: true
