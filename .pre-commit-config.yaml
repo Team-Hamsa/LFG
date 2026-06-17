@@ -11,14 +11,19 @@ repos:
         args: [--fix]
       - id: ruff-format
 
-  - repo: https://github.com/pre-commit/mirrors-mypy
-    rev: v2.1.0
+  - repo: local
     hooks:
       - id: mypy
-        # mypy reads config from pyproject.toml; run over the repo.
-        args: []
-        # Stubs/deps mypy needs in its isolated env (extend from Task 6 baseline):
-        additional_dependencies: []
+        name: mypy
+        # Run from the project venv (like pytest below) so mypy type-checks
+        # against the REAL installed deps (discord.py/xrpl-py are typed). The
+        # isolated mirrors-mypy env has no deps, which forces every third-party
+        # import to Any — that both hides real bugs and emits false
+        # subclass-Any / untyped-decorator noise. mypy reads pyproject.toml.
+        entry: .venv/bin/python -m mypy .
+        language: system
+        pass_filenames: false
+        always_run: true
 
   - repo: https://github.com/gitleaks/gitleaks
     rev: v8.30.0
@@ -29,8 +34,7 @@ repos:
     hooks:
       - id: pytest
         name: pytest
-        # Venv-agnostic so it works locally (via `.venv/bin/pre-commit`) and in CI.
-        entry: python -m pytest
+        entry: .venv/bin/python -m pytest
         language: system
         pass_filenames: false
         always_run: true

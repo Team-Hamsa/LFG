@@ -13,6 +13,7 @@ Metadata trait_type -> LFG column mapping:
   python 04_populate_lfg.py --traits work/traits.json --db ../../lfg_nfts.db
   python 04_populate_lfg.py --traits work/traits.json --db ../../lfg_nfts.db --apply --prune
 """
+
 import argparse
 import json
 import os
@@ -25,14 +26,30 @@ REPO_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", ".."))
 sys.path.insert(0, REPO_ROOT)
 from lfg_core.swap_meta import detect_body  # noqa: E402
 
-LFG_COLS = ["Background", "Back", "Body", "Clothing", "Eyes",
-            "Eyebrows", "Mouth", "Hat", "Accessory"]
+LFG_COLS = [
+    "Background",
+    "Back",
+    "Body",
+    "Clothing",
+    "Eyes",
+    "Eyebrows",
+    "Mouth",
+    "Hat",
+    "Accessory",
+]
 
 TRAIT_TO_COL = {
-    "Background": "Background", "Back": "Back", "Body": "Body",
-    "Clothing": "Clothing", "Eyes": "Eyes", "Eyebrows": "Eyebrows",
-    "Mouth": "Mouth", "Head": "Hat", "Hat": "Hat",
-    "Accesory": "Accessory", "Accessory": "Accessory",
+    "Background": "Background",
+    "Back": "Back",
+    "Body": "Body",
+    "Clothing": "Clothing",
+    "Eyes": "Eyes",
+    "Eyebrows": "Eyebrows",
+    "Mouth": "Mouth",
+    "Head": "Hat",
+    "Hat": "Hat",
+    "Accesory": "Accessory",
+    "Accessory": "Accessory",
 }
 
 # Layers introduced in a later season: NFTs minted before they existed simply
@@ -43,7 +60,7 @@ OPTIONAL_LAYERS = ("Back",)
 
 def row_for(rec):
     """Map a resolved record's traits to LFG columns; return (cols, body_type)."""
-    cols = {c: "" for c in LFG_COLS}
+    cols = dict.fromkeys(LFG_COLS, "")
     for tt, val in rec.get("attrs", {}).items():
         col = TRAIT_TO_COL.get(tt)
         if col:
@@ -57,8 +74,9 @@ def row_for(rec):
 
 def main():
     """Report the rebuild plan; with --apply, write traits into the LFG table."""
-    p = argparse.ArgumentParser(description=__doc__,
-                                formatter_class=argparse.RawDescriptionHelpFormatter)
+    p = argparse.ArgumentParser(
+        description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter
+    )
     p.add_argument("--traits", default="work/traits.json")
     p.add_argument("--db", default=os.path.join(REPO_ROOT, "lfg_nfts.db"))
     p.add_argument("--network", default="mainnet")
@@ -91,8 +109,10 @@ def main():
     print(f"  UPDATE w/ traits     : {len(to_update)}")
     print(f"  INSERT new rows      : {len(to_insert)}")
     print(f"  non-live rows        : {len(non_live)}  (prune candidates: {sorted(non_live)[:20]})")
-    bt = Counter(detect_body([{"trait_type": "Body", "value": r["attrs"].get("Body", "")}])
-                 for r in results.values())
+    bt = Counter(
+        detect_body([{"trait_type": "Body", "value": r["attrs"].get("Body", "")}])
+        for r in results.values()
+    )
     print(f"body_type distribution : {dict(bt)}")
 
     if not args.apply:
@@ -107,22 +127,23 @@ def main():
         if ed in existing:
             setclause = ", ".join(f'"{c}"=?' for c in LFG_COLS)
             cur.execute(
-                f'UPDATE LFG SET {setclause}, body_type=?, network=?, '
-                f'nft_id=COALESCE(nft_id, ?) WHERE nft_number=?',
-                [cols[c] for c in LFG_COLS] + [body_type, args.network, nft_id, ed])
+                f"UPDATE LFG SET {setclause}, body_type=?, network=?, "
+                f"nft_id=COALESCE(nft_id, ?) WHERE nft_number=?",
+                [cols[c] for c in LFG_COLS] + [body_type, args.network, nft_id, ed],
+            )
             upd += 1
         else:
             collist = ", ".join(f'"{c}"' for c in LFG_COLS)
             ph = ", ".join("?" for _ in LFG_COLS)
             cur.execute(
-                f'INSERT INTO LFG (nft_number, {collist}, body_type, network, nft_id) '
-                f'VALUES (?, {ph}, ?, ?, ?)',
-                [ed] + [cols[c] for c in LFG_COLS] + [body_type, args.network, nft_id])
+                f"INSERT INTO LFG (nft_number, {collist}, body_type, network, nft_id) "
+                f"VALUES (?, {ph}, ?, ?, ?)",
+                [ed] + [cols[c] for c in LFG_COLS] + [body_type, args.network, nft_id],
+            )
             ins += 1
     if args.prune:
         for ed in non_live:
-            cur.execute("DELETE FROM LFG WHERE nft_number=? AND network=?",
-                        (ed, args.network))
+            cur.execute("DELETE FROM LFG WHERE nft_number=? AND network=?", (ed, args.network))
             pruned += 1
     conn.commit()
     conn.close()

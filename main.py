@@ -1,49 +1,47 @@
+import asyncio
+import io
+import json
+import logging
 import os
 import random
-import json
-import asyncio
-import discord
-from discord import app_commands, TextStyle
-from discord.ui import Button, View, Modal, TextInput
-from xumm import XummSdk
-from xrpl.clients import JsonRpcClient
-from xrpl.wallet import Wallet
-from xrpl.models.transactions import NFTokenMint, NFTokenBurn
-from BunnyCDN.Storage import Storage
-from BunnyCDN.CDN import CDN
-import ffmpeg
-from dotenv import load_dotenv
-import logging
 import re
-import requests
-import aiohttp
-import time
-from xrpl.models.requests import Tx
-from xrpl.models.transactions import NFTokenCreateOffer, NFTokenCreateOfferFlag
-from xrpl.models import IssuedCurrencyAmount
-from xrpl.transaction import submit_and_wait
-from discord import Embed
-import tempfile
-from PIL import Image
-import qrcode
-import io
-from xrpl.asyncio.clients import AsyncWebsocketClient
-from xrpl.models.requests import Subscribe, StreamParameter
-from db_helpers import get_next_nft_number, record_nft_mint
-from discord.ext import commands
-from discord.errors import DiscordServerError
-import signal
-import traceback
-from user_db import register_user, create_users_table, get_user as get_user_from_db
-import sqlite3
 import shutil
-from lfg_core import rarity as _rarity
+import signal
+import sqlite3
+import time
+import traceback
+from typing import Any
 
-# Import the NFT minting helper function from ts_helpers.py
-from ts_helpers import mint_nft as helper_mint_nft
+import aiohttp
+import discord
+import ffmpeg
+import qrcode
+import requests
+from BunnyCDN.Storage import Storage
+from discord import Embed, TextStyle, app_commands
+from discord.ext import commands
+from discord.ui import Button, Modal, TextInput, View
+from dotenv import load_dotenv
+from xrpl.asyncio.clients import AsyncWebsocketClient
+from xrpl.clients import JsonRpcClient
+from xrpl.models.requests import Subscribe, Tx
+from xrpl.models.transactions import (
+    NFTokenBurn,
+    NFTokenCreateOffer,
+    NFTokenCreateOfferFlag,
+    NFTokenMint,
+)
+from xrpl.transaction import submit_and_wait
+from xrpl.wallet import Wallet
+from xumm import XummSdk
+
+from db_helpers import get_next_nft_number, record_nft_mint
+from lfg_core import rarity as _rarity
+from user_db import create_users_table, register_user
+from user_db import get_user as get_user_from_db
 
 # Check if ffmpeg is installed
-if not shutil.which('ffmpeg'):
+if not shutil.which("ffmpeg"):
     logging.error("=" * 60)
     logging.error("ERROR: ffmpeg is not installed!")
     logging.error("=" * 60)
@@ -54,37 +52,38 @@ if not shutil.which('ffmpeg'):
     logging.error("  - Or manually: sudo apt-get install ffmpeg")
     logging.error("  - Or see: https://ffmpeg.org/download.html")
     logging.error("")
-    raise RuntimeError(
-        "ffmpeg is not installed. Please install it using ./setup.sh or manually."
-    )
+    raise RuntimeError("ffmpeg is not installed. Please install it using ./setup.sh or manually.")
 
 # Set up logging configuration
 logging.basicConfig(
     level=logging.INFO,
-    format='%(asctime)s - %(levelname)s - %(message)s',
+    format="%(asctime)s - %(levelname)s - %(message)s",
     handlers=[
         logging.StreamHandler()  # This sends output to terminal
-    ]
+    ],
 )
 
 # Load environment variables from .env
 load_dotenv()
 
-# API Keys and Core Settings
-XUMM_API_KEY = os.getenv("XUMM_API_KEY")
-if not XUMM_API_KEY:
-    raise ValueError("XUMM_API_KEY not found in environment variables")
 
-XUMM_API_SECRET = os.getenv("XUMM_API_SECRET")
-if not XUMM_API_SECRET:
-    raise ValueError("XUMM_API_SECRET not found in environment variables")
+def _require(name: str) -> str:
+    """Fetch a required env var, failing fast (and narrowing the type to ``str``
+    for the type checker) if it is missing."""
+    value = os.getenv(name)
+    if not value:
+        raise ValueError(f"{name} not found in environment variables")
+    return value
+
+
+# API Keys and Core Settings
+XUMM_API_KEY = _require("XUMM_API_KEY")
+XUMM_API_SECRET = _require("XUMM_API_SECRET")
 
 XUMM_API_URL = os.getenv("XUMM_API_URL", "https://xumm.app/api/v1/platform/payload")
 
 # Discord Settings
-DISCORD_BOT_TOKEN = os.getenv("DISCORD_BOT_TOKEN")
-if not DISCORD_BOT_TOKEN:
-    raise ValueError("DISCORD_BOT_TOKEN not found in environment variables")
+DISCORD_BOT_TOKEN = _require("DISCORD_BOT_TOKEN")
 
 # Discord Settings
 ADMIN_LOG_CHANNEL_ID = int(os.getenv("ADMIN_LOG_CHANNEL_ID", "0"))
@@ -92,18 +91,12 @@ if not ADMIN_LOG_CHANNEL_ID:
     raise ValueError("ADMIN_LOG_CHANNEL_ID not found in environment variables")
 
 # XRPL Settings
-SEED = os.getenv("SEED")
-if not SEED:
-    raise ValueError("SEED not found in environment variables")
+SEED = _require("SEED")
 
-TOKEN_ISSUER_ADDRESS = os.getenv("TOKEN_ISSUER_ADDRESS")
-if not TOKEN_ISSUER_ADDRESS:
-    raise ValueError("TOKEN_ISSUER_ADDRESS not found in environment variables")
+TOKEN_ISSUER_ADDRESS = _require("TOKEN_ISSUER_ADDRESS")
 logging.info(f"Loaded TOKEN_ISSUER_ADDRESS: {TOKEN_ISSUER_ADDRESS}")
 
-TOKEN_CURRENCY_HEX = os.getenv("TOKEN_CURRENCY_HEX")
-if not TOKEN_CURRENCY_HEX:
-    raise ValueError("TOKEN_CURRENCY_HEX not found in environment variables")
+TOKEN_CURRENCY_HEX = _require("TOKEN_CURRENCY_HEX")
 
 NFT_TAXON = int(os.getenv("NFT_TAXON", "0"))
 logging.info(f"Using NFT_TAXON: {NFT_TAXON}")
@@ -150,7 +143,9 @@ NFT_FLAGS = int(os.getenv("NFT_FLAGS", "24"))
 if not NFT_FLAGS:
     raise ValueError("NFT_FLAGS not found in environment variables")
 
-NFT_SCHEMA_URL = os.getenv("NFT_SCHEMA_URL", "ipfs://QmNpi8rcXEkohca8iXu7zysKKSJYqCvBJn3xJwga8jXqWU")
+NFT_SCHEMA_URL = os.getenv(
+    "NFT_SCHEMA_URL", "ipfs://QmNpi8rcXEkohca8iXu7zysKKSJYqCvBJn3xJwga8jXqWU"
+)
 if not NFT_SCHEMA_URL:
     raise ValueError("NFT_SCHEMA_URL not found in environment variables")
 
@@ -175,12 +170,9 @@ METADATA_TEMPLATE = {
     "image": "",  # Will be filled with CDN URL
     "video": "",  # Empty string instead of None
     "external_link": EXTERNAL_WEBSITE_URL,
-    "collection": {
-        "name": NFT_COLLECTION_NAME,
-        "family": NFT_COLLECTION_FAMILY
-    },
+    "collection": {"name": NFT_COLLECTION_NAME, "family": NFT_COLLECTION_FAMILY},
     "edition": 0,  # Integer instead of None
-    "attributes": []  # Will be filled with the traits
+    "attributes": [],  # Will be filled with the traits
 }
 
 logging.basicConfig(level=logging.INFO)
@@ -191,25 +183,30 @@ intents.message_content = True
 intents.members = True
 intents.presences = True
 
+
 class RetryBot(commands.Bot):
     async def start(self, *args, **kwargs):
         max_retries = RETRY_MAX_ATTEMPTS
         base_delay = RETRY_BASE_DELAY
-        
+
         for attempt in range(max_retries):
             try:
                 if attempt > 0:
                     jitter = random.uniform(0, 2)
-                    actual_delay = (base_delay * (2 ** attempt)) + jitter
-                    logging.info(f"Retry attempt {attempt + 1}/{max_retries} after {actual_delay:.2f}s delay")
+                    actual_delay = (base_delay * (2**attempt)) + jitter
+                    logging.info(
+                        f"Retry attempt {attempt + 1}/{max_retries} after {actual_delay:.2f}s delay"
+                    )
                     await asyncio.sleep(actual_delay)
-                    
+
                 await super().start(*args, **kwargs)
                 return
             except Exception as e:
                 logging.error(f"Connection attempt {attempt + 1} failed: {e}")
                 if attempt == max_retries - 1:
                     raise
+
+
 bot = RetryBot(command_prefix="!", intents=intents)
 tree = bot.tree
 
@@ -224,7 +221,6 @@ client = JsonRpcClient(JSON_RPC_URL)
 # Initialize BunnyCDN
 storage = Storage(BUNNY_CDN_ACCESS_KEY, BUNNY_CDN_STORAGE_ZONE)
 
-# Constants for NFT minting using the helper function from ts_helpers.py
 NFT_TOKEN_TAXON = int(os.getenv("NFT_TOKEN_TAXON", "0"))  # Defaults to 0 if not defined
 
 # Path to the trait layers directory
@@ -236,6 +232,7 @@ X_API_SECRET = os.getenv("XUMM_API_SECRET")
 
 DATABASE = "lfg_nfts.db"
 
+
 def get_user(user):
     return get_user_from_db(str(user.id))
 
@@ -245,12 +242,14 @@ def get_trait_files(trait_layer_dir):
     Get a list of image files in the given trait layer directory.
     Filters out system files and only includes supported image formats.
     """
-    SUPPORTED_FORMATS = ['.png', '.jpg', '.jpeg', '.gif']
+    SUPPORTED_FORMATS = [".png", ".jpg", ".jpeg", ".gif"]
     return [
-        f for f in os.listdir(trait_layer_dir) 
+        f
+        for f in os.listdir(trait_layer_dir)
         if os.path.isfile(os.path.join(trait_layer_dir, f))
-        and not f.startswith('.')  # Exclude hidden files
-        and os.path.splitext(f)[1].lower() in SUPPORTED_FORMATS  # Only include supported image formats
+        and not f.startswith(".")  # Exclude hidden files
+        and os.path.splitext(f)[1].lower()
+        in SUPPORTED_FORMATS  # Only include supported image formats
     ]
 
 
@@ -280,8 +279,7 @@ def _rarity_pick_for_legacy(category, stems):
     (ungendered) path."""
     conn = _rarity.connect()
     try:
-        return _rarity.weighted_pick(conn, _rarity.BODY_SENTINEL, category,
-                                     stems)
+        return _rarity.weighted_pick(conn, _rarity.BODY_SENTINEL, category, stems)
     finally:
         conn.close()
 
@@ -293,53 +291,68 @@ def get_sorted_trait_layers(trait_layers_dir):
     - Otherwise, use a fallback trait order.
     """
     directories = [
-        d for d in os.listdir(trait_layers_dir)
-        if os.path.isdir(os.path.join(trait_layers_dir, d))
+        d for d in os.listdir(trait_layers_dir) if os.path.isdir(os.path.join(trait_layers_dir, d))
     ]
-    
+
     # Check if any folder starts with a number
-    has_numeric_prefix = any(re.match(r'^\d+', d) for d in directories)
-    
+    has_numeric_prefix = any(re.match(r"^\d+", d) for d in directories)
+
     if has_numeric_prefix:
+
         def sort_key(folder_name):
-            match = re.match(r'^(\d+)', folder_name)
-            return int(match.group(1)) if match else float('inf')
+            match = re.match(r"^(\d+)", folder_name)
+            return int(match.group(1)) if match else float("inf")
+
         sorted_dirs = sorted(directories, key=sort_key)
     else:
         # Use a fallback order for common NFT trait layers
-        TRAIT_ORDER = ["background", "body", "clothing", "mouth", "eyebrows", "eyes", "mouth", "hat:hair", "accessory"]
+        TRAIT_ORDER = [
+            "background",
+            "body",
+            "clothing",
+            "mouth",
+            "eyebrows",
+            "eyes",
+            "hat:hair",
+            "accessory",
+        ]
         sorted_dirs = sorted(
             directories,
-            key=lambda d: (TRAIT_ORDER.index(d.lower()) if d.lower() in TRAIT_ORDER else float('inf'), d)
+            key=lambda d: (
+                TRAIT_ORDER.index(d.lower()) if d.lower() in TRAIT_ORDER else float("inf"),
+                d,
+            ),
         )
-    
+
     return sorted_dirs
 
 
 # Add these helper functions
 def convert_str_to_hex(string):
     """Convert string to hex for XRPL URI"""
-    return string.encode('utf-8').hex().upper()
+    return string.encode("utf-8").hex().upper()
+
 
 def format_trait_name(text: str) -> str:
     """Convert a trait name to capitalized format"""
     # Remove numeric prefix and extra spaces
-    clean_text = re.sub(r'^\d+\s+', '', text).strip()
+    clean_text = re.sub(r"^\d+\s+", "", text).strip()
     # Capitalize each word
-    return ' '.join(word.capitalize() for word in clean_text.split())
+    return " ".join(word.capitalize() for word in clean_text.split())
+
 
 async def mint_nft_for_user(metadata_cdn_url, taxon, issuer):
     """Async wrapper for minting NFT"""
     try:
         logging.info("=== Starting NFT minting process ===")
-        logging.info(f"Parameters received:")
+        logging.info("Parameters received:")
         logging.info(f"Metadata URL: {metadata_cdn_url}")
         logging.info(f"Taxon: {taxon}")
         logging.info(f"Issuer: {issuer}")
 
         wallet = Wallet.from_seed(SEED)
         logging.info(f"Wallet initialized with address: {wallet.classic_address}")
-        
+
         client = JsonRpcClient(JSON_RPC_URL)
         logging.info(f"XRPL client initialized with URL: {JSON_RPC_URL}")
 
@@ -363,7 +376,7 @@ async def mint_nft_for_user(metadata_cdn_url, taxon, issuer):
                 transfer_fee=NFT_TRANSFER_FEE,
                 flags=NFT_FLAGS,
             )
-        
+
         logging.info(f"NFTokenMint transaction prepared: {payment.to_dict()}")
 
         retries = 5
@@ -371,7 +384,7 @@ async def mint_nft_for_user(metadata_cdn_url, taxon, issuer):
             try:
                 logging.info(f"Submitting transaction (attempt {attempt}/{retries})")
                 payment_response = await asyncio.to_thread(submit_and_wait, payment, client, wallet)
-                logging.info(f"Transaction submitted successfully")
+                logging.info("Transaction submitted successfully")
                 logging.info(f"Response: {json.dumps(payment_response.result, indent=2)}")
                 hashTxn = payment_response.result["hash"]
                 logging.info(f"Transaction hash: {hashTxn}")
@@ -384,7 +397,7 @@ async def mint_nft_for_user(metadata_cdn_url, taxon, issuer):
                 if attempt == retries:
                     logging.error("All mint attempts failed")
                     return None
-                logging.info(f"Waiting 5 seconds before retry...")
+                logging.info("Waiting 5 seconds before retry...")
                 await asyncio.sleep(5)
 
         # Check transaction status
@@ -395,7 +408,7 @@ async def mint_nft_for_user(metadata_cdn_url, taxon, issuer):
                 txn = await asyncio.to_thread(client.request, Tx(transaction=hashTxn))
                 res = txn.result
                 logging.info(f"Transaction result: {json.dumps(res, indent=2)}")
-                
+
                 if res["meta"]["TransactionResult"] == "tesSUCCESS":
                     nft_id = res["meta"].get("nftoken_id")
                     if nft_id:
@@ -404,7 +417,9 @@ async def mint_nft_for_user(metadata_cdn_url, taxon, issuer):
                     else:
                         logging.warning("Transaction successful but no NFT ID found")
                 else:
-                    logging.warning(f"Transaction result was not successful: {res['meta']['TransactionResult']}")
+                    logging.warning(
+                        f"Transaction result was not successful: {res['meta']['TransactionResult']}"
+                    )
                 break
             except Exception as e:
                 logging.error(f"=== Error in status check attempt {check_attempt} ===")
@@ -414,7 +429,7 @@ async def mint_nft_for_user(metadata_cdn_url, taxon, issuer):
                 if check_attempt == retries:
                     logging.error("All status check attempts failed")
                     return None
-                logging.info(f"Waiting 5 seconds before retry...")
+                logging.info("Waiting 5 seconds before retry...")
                 await asyncio.sleep(5)
 
         logging.warning("NFT minting process completed but no NFT ID returned")
@@ -427,12 +442,13 @@ async def mint_nft_for_user(metadata_cdn_url, taxon, issuer):
         logging.error(f"Full traceback: {traceback.format_exc()}")
         return None
 
+
 async def create_nft_offer(nft_id, destination):
     """Async wrapper for creating NFT offer"""
     try:
         client = JsonRpcClient(JSON_RPC_URL)
         wallet = Wallet.from_seed(SEED)
-        
+
         payment = NFTokenCreateOffer(
             account=wallet.classic_address,
             destination=destination,
@@ -465,7 +481,10 @@ async def create_nft_offer(nft_id, destination):
         logging.error(f"Error in create_nft_offer: {e}")
         return None
 
-def generate_static_payment_link(destination: str, currency: str, issuer: str, value: str = "1") -> str:
+
+def generate_static_payment_link(
+    destination: str, currency: str, issuer: str, value: str = "1"
+) -> str:
     """
     Generate a static payment link using xaman.app/detect format.
     This works with XUMM, Xaman, and other XRPL wallets.
@@ -473,20 +492,17 @@ def generate_static_payment_link(destination: str, currency: str, issuer: str, v
     transaction_json = {
         "TransactionType": "Payment",
         "Destination": destination,
-        "Amount": {
-            "currency": currency,
-            "value": value,
-            "issuer": issuer
-        }
+        "Amount": {"currency": currency, "value": value, "issuer": issuer},
     }
-    
+
     # Convert transaction JSON to hex string
     tx_str = json.dumps(transaction_json)
-    tx_hex = tx_str.encode('utf-8').hex()
-    
+    tx_hex = tx_str.encode("utf-8").hex()
+
     # Generate the static link
     payment_link = f"https://xaman.app/detect/{tx_hex}"
     return payment_link
+
 
 def generate_qr_code_image(data: str) -> io.BytesIO:
     """
@@ -500,45 +516,47 @@ def generate_qr_code_image(data: str) -> io.BytesIO:
     )
     qr.add_data(data)
     qr.make(fit=True)
-    
+
     img = qr.make_image(fill_color="black", back_color="white")
     img_bytes = io.BytesIO()
-    img.save(img_bytes, format='PNG')
+    img.save(img_bytes, format="PNG")
     img_bytes.seek(0)
     return img_bytes
 
-async def create_payment_request_static(destination: str) -> dict:
+
+async def create_payment_request_static(destination: str) -> dict[str, Any] | None:
     """
     Create a static payment link and QR code (no XUMM API required).
     Returns dict with 'payment_link' and 'qr_image_bytes' (BytesIO).
     """
     logging.info("=== Creating static payment request ===")
     logging.info(f"Destination address: {destination}")
-    
+
     try:
         # Generate static payment link
         payment_link = generate_static_payment_link(
             destination=destination,
             currency=TOKEN_CURRENCY_HEX,
             issuer=TOKEN_ISSUER_ADDRESS,
-            value="1"
+            value="1",
         )
-        
+
         logging.info(f"Generated payment link: {payment_link}")
-        
+
         # Generate QR code locally
         qr_image_bytes = generate_qr_code_image(payment_link)
-        
+
         return {
-            'payment_link': payment_link,
-            'qr_image_bytes': qr_image_bytes,
-            'destination': destination
+            "payment_link": payment_link,
+            "qr_image_bytes": qr_image_bytes,
+            "destination": destination,
         }
-        
+
     except Exception as e:
         logging.error(f"Error creating static payment request: {e}")
         logging.error(f"Full traceback: {traceback.format_exc()}")
         return None
+
 
 async def wait_for_payment_via_subscription(
     destination: str,
@@ -546,17 +564,17 @@ async def wait_for_payment_via_subscription(
     expected_amount: str,
     currency: str,
     issuer: str,
-    timeout_seconds: int = 300
+    timeout_seconds: int = 300,
 ) -> bool:
     """
     Subscribe to account transactions and wait for a payment matching the criteria.
-    
+
     IMPORTANT: This verifies BOTH:
     1. Payment is received at the destination address
     2. Payment is FROM the expected sender address (user's wallet)
-    
+
     This prevents one user's payment from triggering another user's mint.
-    
+
     Args:
         destination: The address receiving the payment (TOKEN_ISSUER_ADDRESS)
         expected_sender: The wallet address of the user who should send the payment
@@ -564,54 +582,58 @@ async def wait_for_payment_via_subscription(
         currency: Currency code (hex format)
         issuer: Issuer address
         timeout_seconds: How long to wait for payment
-        
+
     Returns:
         True if payment is received from the expected sender, False if timeout
     """
     logging.info(f"Starting payment subscription for {destination}")
     logging.info(f"Waiting for payment FROM {expected_sender} TO {destination}")
     logging.info(f"Payment details: {expected_amount} {currency} from issuer {issuer}")
-    
+
     start_time = time.time()
-    
+
     try:
         async with AsyncWebsocketClient(WS_URL) as websocket:
             # Subscribe to account transactions for the destination
-            subscribe_request = Subscribe(
-                accounts=[destination]
-            )
+            subscribe_request = Subscribe(accounts=[destination])
             await websocket.send(subscribe_request)
             logging.info(f"Subscribed to account: {destination}")
-            
+
             # Listen for transactions
             async for message in websocket:
                 # Check timeout
                 if time.time() - start_time > timeout_seconds:
                     logging.info("Payment subscription timeout")
                     return False
-                
+
                 # Check if this is a transaction message
-                if 'transaction' in message and message.get('type') == 'transaction':
-                    tx = message.get('transaction', {})
-                    
+                if "transaction" in message and message.get("type") == "transaction":
+                    tx = message.get("transaction", {})
+
                     # Check if it's a Payment transaction
-                    if tx.get('TransactionType') == 'Payment':
+                    if tx.get("TransactionType") == "Payment":
                         # CRITICAL: Verify the sender matches the expected user
-                        sender = tx.get('Account', '')
+                        sender = tx.get("Account", "")
                         if sender != expected_sender:
-                            logging.debug(f"Ignoring payment from {sender} (expected {expected_sender})")
+                            logging.debug(
+                                f"Ignoring payment from {sender} (expected {expected_sender})"
+                            )
                             continue
-                        
+
                         # Check if payment is TO the destination (incoming)
-                        if tx.get('Destination') == destination:
-                            amount = tx.get('Amount', {})
-                            
+                        if tx.get("Destination") == destination:
+                            amount = tx.get("Amount", {})
+
                             # Check if it's the expected currency
                             if isinstance(amount, dict):
-                                if (amount.get('currency') == currency and 
-                                    amount.get('issuer') == issuer and
-                                    amount.get('value') == expected_amount):
-                                    logging.info(f"✅ Payment received from {expected_sender}! Transaction: {tx.get('hash')}")
+                                if (
+                                    amount.get("currency") == currency
+                                    and amount.get("issuer") == issuer
+                                    and amount.get("value") == expected_amount
+                                ):
+                                    logging.info(
+                                        f"✅ Payment received from {expected_sender}! Transaction: {tx.get('hash')}"
+                                    )
                                     logging.info(f"   Amount: {expected_amount} {currency}")
                                     logging.info(f"   From: {sender}")
                                     logging.info(f"   To: {destination}")
@@ -620,29 +642,35 @@ async def wait_for_payment_via_subscription(
                             elif isinstance(amount, str):
                                 # XRP payment - not what we're looking for
                                 pass
-                
+
                 # Also check for account transactions in different message formats
-                if 'account' in message and message.get('account') == destination:
-                    if 'transaction' in message:
-                        tx = message['transaction']
-                        if tx.get('TransactionType') == 'Payment':
+                if "account" in message and message.get("account") == destination:
+                    if "transaction" in message:
+                        tx = message["transaction"]
+                        if tx.get("TransactionType") == "Payment":
                             # CRITICAL: Verify the sender matches the expected user
-                            sender = tx.get('Account', '')
+                            sender = tx.get("Account", "")
                             if sender != expected_sender:
-                                logging.debug(f"Ignoring payment from {sender} (expected {expected_sender})")
+                                logging.debug(
+                                    f"Ignoring payment from {sender} (expected {expected_sender})"
+                                )
                                 continue
-                                
-                            amount = tx.get('Amount', {})
+
+                            amount = tx.get("Amount", {})
                             if isinstance(amount, dict):
-                                if (amount.get('currency') == currency and 
-                                    amount.get('issuer') == issuer and
-                                    amount.get('value') == expected_amount):
-                                    logging.info(f"✅ Payment received from {expected_sender}! Transaction: {tx.get('hash')}")
+                                if (
+                                    amount.get("currency") == currency
+                                    and amount.get("issuer") == issuer
+                                    and amount.get("value") == expected_amount
+                                ):
+                                    logging.info(
+                                        f"✅ Payment received from {expected_sender}! Transaction: {tx.get('hash')}"
+                                    )
                                     logging.info(f"   Amount: {expected_amount} {currency}")
                                     logging.info(f"   From: {sender}")
                                     logging.info(f"   To: {destination}")
                                     return True
-                                    
+
     except asyncio.TimeoutError:
         logging.info("Payment subscription timeout")
         return False
@@ -650,8 +678,9 @@ async def wait_for_payment_via_subscription(
         logging.error(f"Error in payment subscription: {e}")
         logging.error(f"Full traceback: {traceback.format_exc()}")
         return False
-    
+
     return False
+
 
 async def generate_xumm_qr(offer_id):
     """Generate XUMM QR code for NFT acceptance"""
@@ -663,52 +692,46 @@ async def generate_xumm_qr(offer_id):
     }
 
     # Create the transaction JSON
-    transaction_json = {
-        "TransactionType": "NFTokenAcceptOffer",
-        "NFTokenSellOffer": offer_id
-    }
+    transaction_json = {"TransactionType": "NFTokenAcceptOffer", "NFTokenSellOffer": offer_id}
 
-    payload = {
-        "txjson": transaction_json
-    }
+    payload = {"txjson": transaction_json}
 
     try:
         # Make the API request
         response = await asyncio.to_thread(
-            requests.post,
-            XUMM_API_URL,
-            json=payload,
-            headers=headers
+            requests.post, XUMM_API_URL, json=payload, headers=headers
         )
         response_data = response.json()
 
         return {
-            'qr_url': response_data['refs']['qr_png'],
-            'xumm_url': response_data['next']['always'],
-            'uuid': response_data['uuid']
+            "qr_url": response_data["refs"]["qr_png"],
+            "xumm_url": response_data["next"]["always"],
+            "uuid": response_data["uuid"],
         }
 
     except Exception as e:
         logging.error(f"Error generating XUMM QR: {e}")
         return None
 
-async def create_payment_request(destination: str) -> dict:
+
+async def create_payment_request(destination: str) -> dict[str, Any] | None:
     """
     Create a static payment request (no XUMM API required).
     Uses xaman.app/detect format that works with all XRPL wallets.
     """
     return await create_payment_request_static(destination)
 
+
 async def check_payment_status(
-    destination: str, 
+    destination: str,
     expected_sender: str,  # User's wallet address
-    expected_amount: str = "1", 
-    timeout_seconds: int = 300
+    expected_amount: str = "1",
+    timeout_seconds: int = 300,
 ) -> bool:
     """
     Check if a payment has been received by subscribing to account transactions.
     This replaces the old UUID-based checking with direct XRPL subscription.
-    
+
     IMPORTANT: Verifies the payment came from the expected sender to prevent
     one user's payment from triggering another user's mint.
     """
@@ -718,10 +741,11 @@ async def check_payment_status(
         expected_amount=expected_amount,
         currency=TOKEN_CURRENCY_HEX,
         issuer=TOKEN_ISSUER_ADDRESS,
-        timeout_seconds=timeout_seconds
+        timeout_seconds=timeout_seconds,
     )
 
-async def create_trustline_request() -> dict:
+
+async def create_trustline_request() -> dict[str, Any] | None:
     """Create a XUMM request to set up token trustline"""
     logging.info("Creating trustline request")
     headers = {
@@ -738,8 +762,8 @@ async def create_trustline_request() -> dict:
         "LimitAmount": {
             "currency": TOKEN_CURRENCY_HEX,
             "issuer": TOKEN_ISSUER_ADDRESS,
-            "value": TOKEN_TRUSTLINE_LIMIT
-        }
+            "value": TOKEN_TRUSTLINE_LIMIT,
+        },
     }
     logging.info(f"Trustline transaction JSON: {json.dumps(transaction_json, indent=2)}")
 
@@ -747,31 +771,27 @@ async def create_trustline_request() -> dict:
         "txjson": transaction_json,
         "options": {
             "expire": 5,  # Expires in 5 minutes
-            "return_url": {
-                "web": "https://letseffinggo.com/"
-            }
-        }
+            "return_url": {"web": "https://letseffinggo.com/"},
+        },
     }
 
     try:
         # Make the API request
         response = await asyncio.to_thread(
-            requests.post,
-            XUMM_API_URL,
-            json=payload,
-            headers=headers
+            requests.post, XUMM_API_URL, json=payload, headers=headers
         )
         response_data = response.json()
 
         return {
-            'qr_url': response_data['refs']['qr_png'],
-            'xumm_url': response_data['next']['always'],
-            'uuid': response_data['uuid']
+            "qr_url": response_data["refs"]["qr_png"],
+            "xumm_url": response_data["next"]["always"],
+            "uuid": response_data["uuid"],
         }
 
     except Exception as e:
         logging.error(f"Error generating trustline request: {e}")
         return None
+
 
 async def safe_followup(interaction: discord.Interaction, *args, **kwargs):
     """followup.send that survives an expired/invalid interaction token.
@@ -782,8 +802,7 @@ async def safe_followup(interaction: discord.Interaction, *args, **kwargs):
         await interaction.followup.send(*args, **kwargs)
         return True
     except (discord.NotFound, discord.HTTPException) as e:
-        logging.warning(f"Follow-up message not delivered "
-                        f"(interaction token likely expired): {e}")
+        logging.warning(f"Follow-up message not delivered (interaction token likely expired): {e}")
         return False
 
 
@@ -792,53 +811,51 @@ class MintView(View):
         logging.info("=== Initializing MintView ===")
         super().__init__(timeout=VIEW_TIMEOUT)
         logging.info(f"View timeout set to: {VIEW_TIMEOUT}")
-        
-        self.buy_button = Button(
-            label="💰 Buy Token", 
-            style=discord.ButtonStyle.success, 
-            url=EXTERNAL_WEBSITE_URL
+
+        self.buy_button: Button[Any] = Button(
+            label="💰 Buy Token", style=discord.ButtonStyle.success, url=EXTERNAL_WEBSITE_URL
         )
         self.add_item(self.buy_button)
         logging.info("Buy button added to view")
 
     @discord.ui.button(label="🎨 Mint NFT", style=discord.ButtonStyle.primary)
-    async def mint_button(self, interaction: discord.Interaction, button: Button):
+    async def mint_button(self, interaction: discord.Interaction, button: Button[Any]):
         logging.info("=== Mint button pressed ===")
         logging.info(f"User ID: {interaction.user.id}")
         logging.info(f"Username: {interaction.user.name}")
-        
+
         await interaction.response.defer(ephemeral=True)
         logging.info("Interaction deferred")
-        
+
         # Get user's wallet address
         user_data = get_user(interaction.user)
-        logging.info(f"Retrieved user data: {json.dumps(user_data, indent=2) if user_data else 'None'}")
-        
+        logging.info(
+            f"Retrieved user data: {json.dumps(user_data, indent=2) if user_data else 'None'}"
+        )
+
         if not user_data or not user_data.get("address"):
             logging.warning("No wallet address found for user")
             await interaction.followup.send(
-                "Please register your wallet first using /register",
-                ephemeral=True
+                "Please register your wallet first using /register", ephemeral=True
             )
             return
 
         try:
             logging.info("=== Starting payment process ===")
             logging.info(f"Using TOKEN_ISSUER_ADDRESS: {TOKEN_ISSUER_ADDRESS}")
-            
+
             # Create payment request
             payment_data = await create_payment_request(TOKEN_ISSUER_ADDRESS)
-            
+
             if not payment_data:
                 logging.error("Failed to create payment request")
                 await interaction.followup.send(
-                    "Failed to create payment request. Please try again.",
-                    ephemeral=True
+                    "Failed to create payment request. Please try again.", ephemeral=True
                 )
                 return
 
             logging.info(f"Payment request created: {payment_data['payment_link']}")
-            
+
             # Upload QR code to CDN
             qr_filename = f"payment_qr_{int(time.time())}.png"
             qr_cdn_url = None
@@ -849,15 +866,17 @@ class MintView(View):
                         "AccessKey": BUNNY_CDN_ACCESS_KEY,
                         "Content-Type": "image/png",
                     }
-                    payment_data['qr_image_bytes'].seek(0)
-                    await session.put(qr_url, headers=headers, data=payment_data['qr_image_bytes'].read())
+                    payment_data["qr_image_bytes"].seek(0)
+                    await session.put(
+                        qr_url, headers=headers, data=payment_data["qr_image_bytes"].read()
+                    )
                     qr_cdn_url = f"https://lfgo.b-cdn.net/minttest/{qr_filename}"
                     logging.info(f"QR code uploaded to: {qr_cdn_url}")
             except Exception as e:
                 logging.error(f"Failed to upload QR code to CDN: {e}")
                 # Fallback: use file attachment
                 pass
-            
+
             # Create embed for payment
             embed = Embed(
                 title="💰 Token Payment Required",
@@ -869,88 +888,94 @@ class MintView(View):
                     "3. Wait for confirmation\n\n"
                     f"[Open Payment Link]({payment_data['payment_link']})"
                 ),
-                color=0x00ff00
+                color=0x00FF00,
             )
-            
+
             if qr_cdn_url:
                 embed.set_image(url=qr_cdn_url)
             else:
                 # Fallback: attach QR code as file
-                payment_data['qr_image_bytes'].seek(0)
-                file = discord.File(payment_data['qr_image_bytes'], filename="payment_qr.png")
+                payment_data["qr_image_bytes"].seek(0)
+                file = discord.File(payment_data["qr_image_bytes"], filename="payment_qr.png")
                 embed.set_image(url="attachment://payment_qr.png")
-            
+
             embed.set_footer(text="Payment request expires in 5 minutes")
-            
+
             logging.info("Payment embed created, sending to user")
             if qr_cdn_url:
                 await interaction.followup.send(embed=embed, ephemeral=True)
             else:
-                payment_data['qr_image_bytes'].seek(0)
-                file = discord.File(payment_data['qr_image_bytes'], filename="payment_qr.png")
+                payment_data["qr_image_bytes"].seek(0)
+                file = discord.File(payment_data["qr_image_bytes"], filename="payment_qr.png")
                 await interaction.followup.send(embed=embed, file=file, ephemeral=True)
 
             # Wait for payment using subscription
             # CRITICAL: Pass the user's wallet address to verify payment came from them
             user_wallet_address = user_data["address"]
-            logging.info(f"Starting payment subscription monitoring for user: {user_wallet_address}")
+            logging.info(
+                f"Starting payment subscription monitoring for user: {user_wallet_address}"
+            )
             payment_received = await check_payment_status(
                 destination=TOKEN_ISSUER_ADDRESS,
                 expected_sender=user_wallet_address,  # Verify payment came from this user
                 expected_amount="1",
-                timeout_seconds=300
+                timeout_seconds=300,
             )
-            
+
             if payment_received:
                 logging.info("Payment confirmed! Proceeding with NFT mint")
                 await interaction.followup.send(
-                    "✅ Payment received! Starting NFT mint process...",
-                    ephemeral=True
+                    "✅ Payment received! Starting NFT mint process...", ephemeral=True
                 )
-                
+
                 # Get the next NFT number from the LFG table
                 nft_number = get_next_nft_number()
                 logging.info(f"Generated NFT number: {nft_number}")
-                
+
                 # Generate and upload NFT image and metadata
                 selected_traits = {}
                 combined_image_path = f"output_nft_{nft_number}.png"
                 input_images = []
-                
+
                 # Select and combine trait images
                 trait_layer_folders = get_sorted_trait_layers(TRAIT_LAYERS_DIR)
                 for layer in trait_layer_folders:
                     layer_dir = os.path.join(TRAIT_LAYERS_DIR, layer)
                     if os.path.isdir(layer_dir):
-                        valid_files = [f for f in os.listdir(layer_dir) 
-                                     if not f.startswith('.') and f.lower().endswith('.png')]
+                        valid_files = [
+                            f
+                            for f in os.listdir(layer_dir)
+                            if not f.startswith(".") and f.lower().endswith(".png")
+                        ]
                         if valid_files:
                             selected_file = random.choice(valid_files)
                             selected_traits[layer] = selected_file
                             input_images.append(os.path.join(layer_dir, selected_file))
-                
+
                 # Generate composite image using ffmpeg
                 if input_images:
                     try:
                         stream = ffmpeg.input(input_images[0])
                         for additional_image in input_images[1:]:
                             stream = ffmpeg.overlay(stream, ffmpeg.input(additional_image))
-                        
+
                         # Modified ffmpeg output command with proper parameters for single image
                         stream = ffmpeg.output(
-                            stream, 
+                            stream,
                             combined_image_path,
                             vframes=1,
                             update=1,  # Allows overwriting single image
-                            loglevel='error'  # Reduce logging output
+                            loglevel="error",  # Reduce logging output
                         )
-                        ffmpeg.run(stream, overwrite_output=True, capture_stdout=True, capture_stderr=True)
-                        
+                        ffmpeg.run(
+                            stream, overwrite_output=True, capture_stdout=True, capture_stderr=True
+                        )
+
                     except ffmpeg.Error as e:
                         error_msg = e.stderr.decode() if e.stderr else str(e)
                         logging.error(f"FFmpeg error: {error_msg}")
-                        raise Exception(f"Failed to generate composite image: {error_msg}")
-                
+                        raise Exception(f"Failed to generate composite image: {error_msg}") from e
+
                 # Upload image to BunnyCDN
                 image_filename = f"lfg_{nft_number}.png"
                 async with aiohttp.ClientSession() as session:
@@ -959,56 +984,58 @@ class MintView(View):
                         "AccessKey": BUNNY_CDN_ACCESS_KEY,
                         "Content-Type": "image/png",
                     }
-                    with open(combined_image_path, 'rb') as file:
-                        await session.put(image_url, headers=headers, data=file.read())
-                
+                    with open(combined_image_path, "rb") as fh:
+                        await session.put(image_url, headers=headers, data=fh.read())
+
                 # Define the CDN URL for the uploaded image
                 image_cdn_url = f"https://lfgo.b-cdn.net/minttest/{image_filename}"
-                
+
                 # Generate and upload metadata
-                metadata = {
+                metadata: dict[str, Any] = {
                     "name": f"Let's Effing Go! #{nft_number}",
                     "image": image_cdn_url,
                     "edition": nft_number,
                     "attributes": [
-                        {"trait_type": layer, "value": format_trait_name(os.path.splitext(selected_file)[0])} 
+                        {
+                            "trait_type": layer,
+                            "value": format_trait_name(os.path.splitext(selected_file)[0]),
+                        }
                         for layer, selected_file in selected_traits.items()
-                    ]
+                    ],
                 }
-                
+
                 metadata_filename = f"metadata_{nft_number}.json"
-                with open(metadata_filename, 'w') as f:
+                with open(metadata_filename, "w") as f:
                     json.dump(metadata, f, indent=2)
-                
+
                 # Upload metadata to BunnyCDN
-                metadata_upload_url = f"https://storage.bunnycdn.com/lfgo/minttest/{metadata_filename}"
+                metadata_upload_url = (
+                    f"https://storage.bunnycdn.com/lfgo/minttest/{metadata_filename}"
+                )
                 metadata_cdn_url = f"https://lfgo.b-cdn.net/minttest/{metadata_filename}"
                 async with aiohttp.ClientSession() as session:
                     headers = {
                         "AccessKey": BUNNY_CDN_ACCESS_KEY,
                         "Content-Type": "application/json",
                     }
-                    with open(metadata_filename, 'rb') as file:
-                        await session.put(metadata_upload_url, headers=headers, data=file.read())
-                
+                    with open(metadata_filename, "rb") as fh:
+                        await session.put(metadata_upload_url, headers=headers, data=fh.read())
+
                 # Clean up local files
                 os.remove(combined_image_path)
                 os.remove(metadata_filename)
-                
+
                 # Mint the NFT
                 nft_id = await mint_nft_for_user(
-                    metadata_cdn_url=metadata_cdn_url,
-                    taxon=NFT_TAXON,
-                    issuer=TOKEN_ISSUER_ADDRESS
+                    metadata_cdn_url=metadata_cdn_url, taxon=NFT_TAXON, issuer=TOKEN_ISSUER_ADDRESS
                 )
-                
+
                 if not nft_id:
                     await interaction.followup.send(
-                        "Failed to mint NFT. Please try again later.",
-                        ephemeral=True
+                        "Failed to mint NFT. Please try again later.", ephemeral=True
                     )
                     return
-                
+
                 # Define the CDN URL for the image
                 image_cdn_url = f"https://lfgo.b-cdn.net/minttest/{image_filename}"
 
@@ -1027,29 +1054,29 @@ class MintView(View):
                     owner_address=user_data["address"],
                     metadata_url=metadata_cdn_url,
                     image_url=image_cdn_url,
-                    traits=traits_dict
+                    traits=traits_dict,
                 )
-                
+
                 if not mint_record:
                     logging.error(f"Failed to record NFT #{nft_number} in database")
-                
+
                 # Get user's wallet address from the database
                 user_data = get_user(interaction.user)
                 if not user_data or not user_data.get("address"):
                     await interaction.followup.send(
                         "NFT minted but couldn't create offer: User wallet not found.",
-                        ephemeral=True
+                        ephemeral=True,
                     )
                     return
-                    
+
                 # Create offer to the user
                 logging.info(f"Creating NFT offer to wallet: {user_data['address']}")
                 offer_id = await create_nft_offer(nft_id, user_data["address"])
-                
+
                 if not offer_id:
                     await interaction.followup.send(
                         f"NFT minted (ID: {nft_id}) but failed to create offer. Please contact an administrator.",
-                        ephemeral=True
+                        ephemeral=True,
                     )
                     return
 
@@ -1058,10 +1085,10 @@ class MintView(View):
                 if not xumm_data:
                     await interaction.followup.send(
                         f"NFT minted and offer created (ID: {offer_id}) but failed to generate QR code. Please accept manually.",
-                        ephemeral=True
+                        ephemeral=True,
                     )
                     return
-                
+
                 # Create embed for success message with QR code and NFT image
                 embed = Embed(
                     title="🎨 NFT Minted Successfully!",
@@ -1074,17 +1101,17 @@ class MintView(View):
                         f"3. Your NFT will appear in your wallet!\n\n"
                         f"[Open in XUMM]({xumm_data['xumm_url']})"
                     ),
-                    color=0x00ff00
+                    color=0x00FF00,
                 )
-                
+
                 # Add the NFT image as a thumbnail
                 embed.set_thumbnail(url=image_cdn_url)
-                
+
                 # Add the XUMM QR code as the main image
-                embed.set_image(url=xumm_data['qr_url'])
-                
+                embed.set_image(url=xumm_data["qr_url"])
+
                 embed.set_footer(text="Offer acceptance request expires in 24 hours")
-                
+
                 # Send the success message with both images
                 await interaction.followup.send(embed=embed, ephemeral=True)
                 return
@@ -1092,8 +1119,7 @@ class MintView(View):
                 # Payment timed out
                 logging.warning("Payment request timed out")
                 await interaction.followup.send(
-                    "Payment request timed out. Please try again.",
-                    ephemeral=True
+                    "Payment request timed out. Please try again.", ephemeral=True
                 )
 
         except Exception as e:
@@ -1101,23 +1127,20 @@ class MintView(View):
             logging.error(f"Error type: {type(e).__name__}")
             logging.error(f"Error message: {str(e)}")
             logging.error(f"Full traceback: {traceback.format_exc()}")
-            
+
             await interaction.followup.send(
-                f"An error occurred during payment: {str(e)}",
-                ephemeral=True
+                f"An error occurred during payment: {str(e)}", ephemeral=True
             )
-    
+
     @discord.ui.button(label="🔗 Set LFGO Trustline", style=discord.ButtonStyle.secondary)
-    async def trustline_button(self, interaction: discord.Interaction, button: Button):
+    async def trustline_button(self, interaction: discord.Interaction, button: Button[Any]):
         await interaction.response.defer(ephemeral=True)
-        
+
         # Get user's wallet address
         user_data = get_user(interaction.user)
         if not user_data or not user_data.get("address"):
             await safe_followup(
-                interaction,
-                "Please register your wallet first using /register",
-                ephemeral=True
+                interaction, "Please register your wallet first using /register", ephemeral=True
             )
             return
 
@@ -1128,7 +1151,7 @@ class MintView(View):
                 await safe_followup(
                     interaction,
                     "Failed to create trustline request. Please try again.",
-                    ephemeral=True
+                    ephemeral=True,
                 )
                 return
 
@@ -1143,12 +1166,12 @@ class MintView(View):
                     "3. Wait for confirmation\n\n"
                     f"[Open in XUMM]({trustline_data['xumm_url']})"
                 ),
-                color=0x00ff00
+                color=0x00FF00,
             )
-            
-            embed.set_image(url=trustline_data['qr_url'])
+
+            embed.set_image(url=trustline_data["qr_url"])
             embed.set_footer(text="Trustline request expires in 5 minutes")
-            
+
             # Send trustline request
             await safe_followup(interaction, embed=embed, ephemeral=True)
 
@@ -1159,7 +1182,7 @@ class MintView(View):
                 # bounded by wall clock (not iteration count) and each XUMM
                 # call gets its own timeout, so a slow/hanging API can never
                 # stretch the handler past Discord's 15-minute webhook token.
-                if 'uuid' in trustline_data:
+                if "uuid" in trustline_data:
                     # Poll the XUMM REST endpoint directly with a real network
                     # timeout: the SDK's payload.get exposes none, and a
                     # hanging call inside to_thread outlives any asyncio-level
@@ -1174,15 +1197,15 @@ class MintView(View):
                     while time.monotonic() < deadline:
                         try:
                             response = await asyncio.to_thread(
-                                requests.get, status_url,
-                                headers=status_headers, timeout=10)
-                            meta = response.json().get('meta', {})
-                            if meta.get('resolved'):
-                                if meta.get('signed'):
+                                requests.get, status_url, headers=status_headers, timeout=10
+                            )
+                            meta = response.json().get("meta", {})
+                            if meta.get("resolved"):
+                                if meta.get("signed"):
                                     await safe_followup(
                                         interaction,
                                         "✅ Trustline set up successfully! You can now hold LFGO tokens.",
-                                        ephemeral=True
+                                        ephemeral=True,
                                     )
                                 else:
                                     # resolved without signed = user declined:
@@ -1191,17 +1214,16 @@ class MintView(View):
                                         interaction,
                                         "Trustline request was declined or cancelled. "
                                         "Run it again whenever you're ready.",
-                                        ephemeral=True
+                                        ephemeral=True,
                                     )
                                 return
-                            if meta.get('cancelled') or meta.get('expired'):
+                            if meta.get("cancelled") or meta.get("expired"):
                                 # Also terminal: cancelled/expired payloads can
                                 # never be signed even though resolved is false
                                 await safe_followup(
                                     interaction,
-                                    "Trustline request expired or was cancelled. "
-                                    "Please try again.",
-                                    ephemeral=True
+                                    "Trustline request expired or was cancelled. Please try again.",
+                                    ephemeral=True,
                                 )
                                 return
                         except requests.Timeout:
@@ -1212,16 +1234,14 @@ class MintView(View):
 
                 # If we get here, request timed out
                 await safe_followup(
-                    interaction,
-                    "Trustline request timed out. Please try again.",
-                    ephemeral=True
+                    interaction, "Trustline request timed out. Please try again.", ephemeral=True
                 )
             except Exception as e:
                 logging.error(f"Error in trustline checking: {e}")
                 await safe_followup(
                     interaction,
                     "Error checking trustline status. Please try again.",
-                    ephemeral=True
+                    ephemeral=True,
                 )
 
         except Exception as e:
@@ -1231,8 +1251,9 @@ class MintView(View):
             await safe_followup(
                 interaction,
                 f"An error occurred during trustline setup: {short_error}",
-                ephemeral=True
+                ephemeral=True,
             )
+
 
 @tree.command(name="letsgo", description="Open the NFT minting interface")
 async def mint(interaction: discord.Interaction):
@@ -1247,34 +1268,29 @@ async def mint(interaction: discord.Interaction):
             "• XRPL Trustline\n\n"
             "Choose an action below:"
         ),
-        color=0x00ff00  # Green color
+        color=0x00FF00,  # Green color
     )
-    
+
     # Add fields with information
     embed.add_field(
-        name="🎨 Mint NFT",
-        value="Create a unique NFT with random traits",
-        inline=False
+        name="🎨 Mint NFT", value="Create a unique NFT with random traits", inline=False
     )
     embed.add_field(
         name="🔗 Set LFGO Trustline",
         value="Set up your XRPL trustline for LFGO tokens",
-        inline=False
+        inline=False,
     )
-    embed.add_field(
-        name="💰 Buy LFGO",
-        value="Purchase LFGO tokens to mint NFTs",
-        inline=False
-    )
-    
+    embed.add_field(name="💰 Buy LFGO", value="Purchase LFGO tokens to mint NFTs", inline=False)
+
     # Add footer with additional info
     embed.set_footer(text="Buttons are active for 10 minutes • All actions are ephemeral")
-    
+
     # Create the view with buttons
     view = MintView()
-    
+
     # Send the embed with the view
     await interaction.response.send_message(embed=embed, view=view, ephemeral=True)
+
 
 # Add this after your mint command
 @tree.command(name="register", description="Register your wallet")
@@ -1285,12 +1301,15 @@ async def register(interaction: discord.Interaction, wallet: str):
     """
     discord_id = str(interaction.user.id)
     discord_name = str(interaction.user)
-    
+
     success = register_user(discord_id, discord_name, wallet)
     if success:
         await interaction.response.send_message("Your wallet has been registered!", ephemeral=True)
     else:
-        await interaction.response.send_message("There was an error registering your wallet.", ephemeral=True)
+        await interaction.response.send_message(
+            "There was an error registering your wallet.", ephemeral=True
+        )
+
 
 # Add cleanup handler
 async def cleanup():
@@ -1302,6 +1321,7 @@ async def cleanup():
     except Exception as e:
         logging.error(f"Error during cleanup: {e}")
 
+
 def signal_handler(sig, frame):
     """Handle shutdown signals"""
     logging.info(f"Received signal {sig}, initiating shutdown...")
@@ -1309,95 +1329,94 @@ def signal_handler(sig, frame):
     loop.create_task(cleanup())
     loop.stop()
 
+
 # Register signal handlers
 signal.signal(signal.SIGINT, signal_handler)
 signal.signal(signal.SIGTERM, signal_handler)
 
+
 @bot.event
 async def on_ready():
     create_users_table()  # Initialize the users table
-    await tree.sync()     # Sync slash commands
+    await tree.sync()  # Sync slash commands
+    assert bot.user is not None  # always set once on_ready fires
     logging.info(f"Logged in as {bot.user} (ID: {bot.user.id})")
+
 
 async def burn_nft(nft_id: str) -> bool:
     """Burn an NFT using the issuer's seed"""
     try:
         logging.info(f"Attempting to burn NFT: {nft_id}")
-        
+
         wallet = Wallet.from_seed(SEED)
         client = JsonRpcClient(JSON_RPC_URL)
-        
+
         # Create NFTokenBurn transaction
-        burn_tx = NFTokenBurn(
-            account=wallet.classic_address,
-            nftoken_id=nft_id
-        )
-        
+        burn_tx = NFTokenBurn(account=wallet.classic_address, nftoken_id=nft_id)
+
         # Submit and wait for validation
         logging.info("Submitting burn transaction...")
-        response = await asyncio.to_thread(
-            submit_and_wait,
-            burn_tx,
-            client,
-            wallet
-        )
-        
+        response = await asyncio.to_thread(submit_and_wait, burn_tx, client, wallet)
+
         if response.result.get("meta", {}).get("TransactionResult") == "tesSUCCESS":
             logging.info(f"Successfully burned NFT: {nft_id}")
             return True
         else:
             logging.error(f"Failed to burn NFT. Response: {response.result}")
             return False
-            
+
     except Exception as e:
         logging.error(f"Error burning NFT: {e}")
         logging.error(f"Full traceback: {traceback.format_exc()}")
         return False
 
+
 class BurnNFTModal(Modal, title="Burn NFT"):
-    nft_number = TextInput(
+    nft_number: TextInput[Any] = TextInput(
         label="Enter NFT Number to Burn",
         placeholder="e.g., 3535",
         required=True,
         min_length=1,
-        max_length=10
+        max_length=10,
     )
-    
-    reason = TextInput(
+
+    reason: TextInput[Any] = TextInput(
         label="Reason for Burning",
         placeholder="Enter reason for audit purposes",
         required=True,
-        style=TextStyle.paragraph
+        style=TextStyle.paragraph,
     )
-    
+
     async def on_submit(self, interaction: discord.Interaction):
         await interaction.response.defer(ephemeral=True)
-        
+
         try:
             nft_num = int(self.nft_number.value)
-            
+
             # Get NFT details from database
             conn = sqlite3.connect(DATABASE)
             cursor = conn.cursor()
-            
-            cursor.execute('''
-                SELECT nft_id, discord_id 
-                FROM LFG 
+
+            cursor.execute(
+                """
+                SELECT nft_id, discord_id
+                FROM LFG
                 WHERE nft_number = ?
-            ''', (nft_num,))
-            
+            """,
+                (nft_num,),
+            )
+
             result = cursor.fetchone()
-            
+
             if not result or not result[0]:
                 await interaction.followup.send(
-                    f"❌ NFT #{nft_num} not found or hasn't been minted.",
-                    ephemeral=True
+                    f"❌ NFT #{nft_num} not found or hasn't been minted.", ephemeral=True
                 )
                 return
-                
+
             nft_id = result[0]
             discord_id = result[1]
-            
+
             # Confirm burn with a button
             confirm_embed = Embed(
                 title="🔥 Confirm NFT Burn",
@@ -1408,31 +1427,24 @@ class BurnNFTModal(Modal, title="Burn NFT"):
                     f"**Reason:** {self.reason.value}\n\n"
                     "⚠️ This action cannot be undone!"
                 ),
-                color=0xFF0000  # Red color for warning
+                color=0xFF0000,  # Red color for warning
             )
-            
+
             # Create confirmation view
             view = BurnConfirmView(nft_num, nft_id, self.reason.value)
-            await interaction.followup.send(
-                embed=confirm_embed,
-                view=view,
-                ephemeral=True
-            )
-            
+            await interaction.followup.send(embed=confirm_embed, view=view, ephemeral=True)
+
         except ValueError:
-            await interaction.followup.send(
-                "❌ Please enter a valid NFT number.",
-                ephemeral=True
-            )
+            await interaction.followup.send("❌ Please enter a valid NFT number.", ephemeral=True)
         except Exception as e:
             logging.error(f"Error in burn modal: {e}")
             await interaction.followup.send(
-                "❌ Error processing burn request. Check logs for details.",
-                ephemeral=True
+                "❌ Error processing burn request. Check logs for details.", ephemeral=True
             )
         finally:
-            if 'conn' in locals():
+            if "conn" in locals():
                 conn.close()
+
 
 class BurnConfirmView(View):
     def __init__(self, nft_number: int, nft_id: str, reason: str):
@@ -1440,45 +1452,51 @@ class BurnConfirmView(View):
         self.nft_number = nft_number
         self.nft_id = nft_id
         self.reason = reason
-    
+
     @discord.ui.button(label="Confirm Burn", style=discord.ButtonStyle.danger)
-    async def confirm_burn(self, interaction: discord.Interaction, button: Button):
+    async def confirm_burn(self, interaction: discord.Interaction, button: Button[Any]):
         await interaction.response.defer(ephemeral=True)
-        
+
         try:
             # Attempt to burn the NFT
             success = await burn_nft(self.nft_id)
-            
+
             if success:
                 conn = sqlite3.connect(DATABASE)
                 cursor = conn.cursor()
-                
+
                 # Get all data from LFG table before deleting
-                cursor.execute('''
+                cursor.execute(
+                    """
                     SELECT nft_number, nft_id, discord_id, created_at
-                    FROM LFG 
+                    FROM LFG
                     WHERE nft_number = ?
-                ''', (self.nft_number,))
+                """,
+                    (self.nft_number,),
+                )
                 nft_data = cursor.fetchone()
-                
+
                 # Insert into burned_nfts with original data
-                cursor.execute('''
+                cursor.execute(
+                    """
                     INSERT INTO burned_nfts (
-                        nft_number, nft_id, discord_id, burned_by, 
+                        nft_number, nft_id, discord_id, burned_by,
                         reason, original_mint_time
                     )
                     VALUES (?, ?, ?, ?, ?, ?)
-                ''', (
-                    nft_data[0],  # nft_number
-                    nft_data[1],  # nft_id
-                    nft_data[2],  # original discord_id
-                    str(interaction.user.id),  # burned_by
-                    self.reason,  # reason
-                    nft_data[3]   # original_mint_time
-                ))
-                
+                """,
+                    (
+                        nft_data[0],  # nft_number
+                        nft_data[1],  # nft_id
+                        nft_data[2],  # original discord_id
+                        str(interaction.user.id),  # burned_by
+                        self.reason,  # reason
+                        nft_data[3],  # original_mint_time
+                    ),
+                )
+
                 # Remove from LFG table
-                cursor.execute('DELETE FROM LFG WHERE nft_number = ?', (self.nft_number,))
+                cursor.execute("DELETE FROM LFG WHERE nft_number = ?", (self.nft_number,))
 
                 conn.commit()
 
@@ -1492,14 +1510,14 @@ class BurnConfirmView(View):
                     logging.error(f"rarity recalc after burn failed: {e}")
 
                 await interaction.followup.send(
-                    f"✅ Successfully burned NFT #{self.nft_number}",
-                    ephemeral=True
+                    f"✅ Successfully burned NFT #{self.nft_number}", ephemeral=True
                 )
-                
+
                 # Log the burn in the admin channel
                 try:
-                    log_channel = interaction.guild.get_channel(ADMIN_LOG_CHANNEL_ID)
-                    if log_channel:
+                    guild = interaction.guild
+                    log_channel = guild.get_channel(ADMIN_LOG_CHANNEL_ID) if guild else None
+                    if isinstance(log_channel, discord.TextChannel):
                         log_embed = Embed(
                             title="🔥 NFT Burned",
                             description=(
@@ -1509,147 +1527,166 @@ class BurnConfirmView(View):
                                 f"**Reason:** {self.reason}\n"
                                 f"**NFT ID:** {self.nft_id}"
                             ),
-                            color=0xFF0000
+                            color=0xFF0000,
                         )
                         await log_channel.send(embed=log_embed)
                 except Exception as e:
                     logging.error(f"Failed to send burn log: {e}")
-                
+
             else:
                 await interaction.followup.send(
                     f"❌ Failed to burn NFT #{self.nft_number}. Check logs for details.",
-                    ephemeral=True
+                    ephemeral=True,
                 )
-                
+
         except Exception as e:
             logging.error(f"Error in burn confirmation: {e}")
             logging.error(f"Full traceback: {traceback.format_exc()}")
             await interaction.followup.send(
-                "❌ Error processing burn confirmation. Check logs for details.",
-                ephemeral=True
+                "❌ Error processing burn confirmation. Check logs for details.", ephemeral=True
             )
         finally:
-            if 'conn' in locals():
+            if "conn" in locals():
                 conn.close()
             self.stop()
-    
+
     @discord.ui.button(label="Cancel", style=discord.ButtonStyle.secondary)
-    async def cancel_burn(self, interaction: discord.Interaction, button: Button):
-        await interaction.response.send_message(
-            "❌ NFT burn cancelled.",
-            ephemeral=True
-        )
+    async def cancel_burn(self, interaction: discord.Interaction, button: Button[Any]):
+        await interaction.response.send_message("❌ NFT burn cancelled.", ephemeral=True)
         self.stop()
+
 
 async def log_admin_action(client: discord.Client, message: str) -> None:
     """Send a one-liner to the admin log channel. Best-effort — errors logged."""
     try:
         ch = client.get_channel(ADMIN_LOG_CHANNEL_ID)
-        if ch:
+        if isinstance(ch, discord.TextChannel):
             await ch.send(message)
     except Exception as e:
         logging.error(f"log_admin_action failed: {e}")
 
 
 class RarityOddsModal(Modal, title="View Rarity Odds"):
-    body = TextInput(label="Body (* for legacy/Body Type)",
-                     default="*", max_length=20)
-    category = TextInput(
-        label="Category (Background, Head, Body Type, ...)", max_length=30)
+    body: TextInput[Any] = TextInput(
+        label="Body (* for legacy/Body Type)", default="*", max_length=20
+    )
+    category: TextInput[Any] = TextInput(
+        label="Category (Background, Head, Body Type, ...)", max_length=30
+    )
 
     async def on_submit(self, interaction: discord.Interaction):
         conn = _rarity.connect()
         try:
-            rows = _rarity.get_odds(conn, self.body.value.strip(),
-                                    self.category.value.strip())
+            rows = _rarity.get_odds(conn, self.body.value.strip(), self.category.value.strip())
         finally:
             conn.close()
         if not rows:
             await interaction.response.send_message(
-                "No rarity rows for that body/category.", ephemeral=True)
+                "No rarity rows for that body/category.", ephemeral=True
+            )
             return
-        lines = [f"`{t:24.24s}` n={c:<5d} {s:5.1f}% w={w:.4f}  {st}"
-                 for t, c, s, w, st in rows[:25]]
+        lines = [
+            f"`{t:24.24s}` n={c:<5d} {s:5.1f}% w={w:.4f}  {st}" for t, c, s, w, st in rows[:25]
+        ]
         embed = Embed(
             title=f"Odds — {self.body.value} / {self.category.value}",
-            description="\n".join(lines), color=0x00FF00)
+            description="\n".join(lines),
+            color=0x00FF00,
+        )
         await interaction.response.send_message(embed=embed, ephemeral=True)
 
 
 class RarityBoostModal(Modal, title="Arm Trait Boost"):
-    body = TextInput(label="Body (* for legacy)", default="*", max_length=20)
-    category = TextInput(label="Category", max_length=30)
-    trait = TextInput(label="Trait value", max_length=60)
-    initial = TextInput(label="Boost multiplier", default="7", max_length=5)
-    confirm = TextInput(
-        label="Type CONFIRM if trait already has mints", required=False,
-        max_length=10)
+    body: TextInput[Any] = TextInput(label="Body (* for legacy)", default="*", max_length=20)
+    category: TextInput[Any] = TextInput(label="Category", max_length=30)
+    trait: TextInput[Any] = TextInput(label="Trait value", max_length=60)
+    initial: TextInput[Any] = TextInput(label="Boost multiplier", default="7", max_length=5)
+    confirm: TextInput[Any] = TextInput(
+        label="Type CONFIRM if trait already has mints", required=False, max_length=10
+    )
 
     async def on_submit(self, interaction: discord.Interaction):
         from lfg_core import config as _cfg
+
         conn = _rarity.connect()
         try:
             row = conn.execute(
                 """SELECT live_count FROM trait_rarity WHERE network=?
                    AND body=? AND category=? AND trait=?""",
-                (_cfg.XRPL_NETWORK, self.body.value.strip(),
-                 self.category.value.strip(),
-                 self.trait.value.strip())).fetchone()
+                (
+                    _cfg.XRPL_NETWORK,
+                    self.body.value.strip(),
+                    self.category.value.strip(),
+                    self.trait.value.strip(),
+                ),
+            ).fetchone()
             if row is None:
                 await interaction.response.send_message(
-                    "Unknown trait — it must exist in the rarity table "
-                    "(mint once or run seed).", ephemeral=True)
+                    "Unknown trait — it must exist in the rarity table (mint once or run seed).",
+                    ephemeral=True,
+                )
                 return
             if row[0] > 0 and self.confirm.value.strip() != "CONFIRM":
                 await interaction.response.send_message(
                     f"'{self.trait.value}' already has {row[0]} mints. "
                     "Re-submit with CONFIRM to arm a comeback boost.",
-                    ephemeral=True)
+                    ephemeral=True,
+                )
                 return
-            _rarity.arm_boost(conn, self.body.value.strip(),
-                              self.category.value.strip(),
-                              self.trait.value.strip(),
-                              boost_initial=float(self.initial.value))
+            _rarity.arm_boost(
+                conn,
+                self.body.value.strip(),
+                self.category.value.strip(),
+                self.trait.value.strip(),
+                boost_initial=float(self.initial.value),
+            )
         finally:
             conn.close()
         await interaction.response.send_message(
             f"Boost armed for **{self.trait.value}** "
             f"({self.initial.value}×, dormant until first organic mint).",
-            ephemeral=True)
+            ephemeral=True,
+        )
         await log_admin_action(
             interaction.client,
             f"🎚️ Boost armed by {interaction.user}: "
             f"{self.body.value}/{self.category.value}/{self.trait.value} "
-            f"@ {self.initial.value}x")
+            f"@ {self.initial.value}x",
+        )
 
 
 class RarityDisableModal(Modal, title="Toggle Trait"):
-    body = TextInput(label="Body (* for legacy)", default="*", max_length=20)
-    category = TextInput(label="Category", max_length=30)
-    trait = TextInput(label="Trait value", max_length=60)
-    action = TextInput(label="Action (DISABLE or ENABLE)", max_length=10)
+    body: TextInput[Any] = TextInput(label="Body (* for legacy)", default="*", max_length=20)
+    category: TextInput[Any] = TextInput(label="Category", max_length=30)
+    trait: TextInput[Any] = TextInput(label="Trait value", max_length=60)
+    action: TextInput[Any] = TextInput(label="Action (DISABLE or ENABLE)", max_length=10)
 
     async def on_submit(self, interaction: discord.Interaction):
         val = self.action.value.strip().upper()
         if val not in ("DISABLE", "ENABLE"):
             await interaction.response.send_message(
-                "Action must be exactly DISABLE or ENABLE.", ephemeral=True)
+                "Action must be exactly DISABLE or ENABLE.", ephemeral=True
+            )
             return
         enabled = val == "ENABLE"
         conn = _rarity.connect()
         try:
-            _rarity.set_enabled(conn, self.body.value.strip(),
-                                self.category.value.strip(),
-                                self.trait.value.strip(), enabled)
+            _rarity.set_enabled(
+                conn,
+                self.body.value.strip(),
+                self.category.value.strip(),
+                self.trait.value.strip(),
+                enabled,
+            )
         finally:
             conn.close()
         state = "enabled" if enabled else "disabled"
-        await interaction.response.send_message(
-            f"**{self.trait.value}** {state}.", ephemeral=True)
+        await interaction.response.send_message(f"**{self.trait.value}** {state}.", ephemeral=True)
         await log_admin_action(
             interaction.client,
             f"🚫 Trait {state} by {interaction.user}: "
-            f"{self.body.value}/{self.category.value}/{self.trait.value}")
+            f"{self.body.value}/{self.category.value}/{self.trait.value}",
+        )
 
 
 # Add burn button to AdminView
@@ -1657,119 +1694,95 @@ class AdminView(View):
     def __init__(self):
         super().__init__(timeout=600)  # 10 minute timeout
         logging.info("Initializing AdminView")
-    
+
     @discord.ui.button(label="📊 View Stats", style=discord.ButtonStyle.primary)
-    async def stats_button(self, interaction: discord.Interaction, button: Button):
+    async def stats_button(self, interaction: discord.Interaction, button: Button[Any]):
         await interaction.response.defer(ephemeral=True)
         logging.info(f"Stats button pressed by {interaction.user}")
-        
+
         try:
-            conn = sqlite3.connect('lfg_nfts.db')
+            conn = sqlite3.connect("lfg_nfts.db")
             cursor = conn.cursor()
-            
+
             # Get total NFTs minted
-            cursor.execute('SELECT COUNT(*) FROM LFG WHERE nft_id IS NOT NULL')
+            cursor.execute("SELECT COUNT(*) FROM LFG WHERE nft_id IS NOT NULL")
             total_minted = cursor.fetchone()[0]
-            
+
             # Get total unique users
-            cursor.execute('SELECT COUNT(DISTINCT discord_id) FROM LFG WHERE discord_id IS NOT NULL')
+            cursor.execute(
+                "SELECT COUNT(DISTINCT discord_id) FROM LFG WHERE discord_id IS NOT NULL"
+            )
             unique_users = cursor.fetchone()[0]
-            
+
             # Get recent mints
-            cursor.execute('''
-                SELECT nft_number, discord_id, created_at 
-                FROM LFG 
-                WHERE nft_id IS NOT NULL 
-                ORDER BY created_at DESC 
+            cursor.execute("""
+                SELECT nft_number, discord_id, created_at
+                FROM LFG
+                WHERE nft_id IS NOT NULL
+                ORDER BY created_at DESC
                 LIMIT 5
-            ''')
+            """)
             recent_mints = cursor.fetchall()
-            
+
             # Get burned NFTs count
-            cursor.execute('SELECT COUNT(*) FROM burned_nfts')
+            cursor.execute("SELECT COUNT(*) FROM burned_nfts")
             burned_count = cursor.fetchone()[0]
-            
-            stats_embed = Embed(
-                title="📊 Minting Statistics",
-                color=0x9C84EF
-            )
-            
-            stats_embed.add_field(
-                name="Total NFTs Minted",
-                value=str(total_minted),
-                inline=True
-            )
-            
-            stats_embed.add_field(
-                name="Unique Users",
-                value=str(unique_users),
-                inline=True
-            )
-            
-            stats_embed.add_field(
-                name="Burned NFTs",
-                value=str(burned_count),
-                inline=True
-            )
-            
+
+            stats_embed = Embed(title="📊 Minting Statistics", color=0x9C84EF)
+
+            stats_embed.add_field(name="Total NFTs Minted", value=str(total_minted), inline=True)
+
+            stats_embed.add_field(name="Unique Users", value=str(unique_users), inline=True)
+
+            stats_embed.add_field(name="Burned NFTs", value=str(burned_count), inline=True)
+
             if recent_mints:
                 recent_mints_text = "\n".join(
-                    f"#{num} by <@{uid}> on {date[:10]}"
-                    for num, uid, date in recent_mints
+                    f"#{num} by <@{uid}> on {date[:10]}" for num, uid, date in recent_mints
                 )
-                stats_embed.add_field(
-                    name="Recent Mints",
-                    value=recent_mints_text,
-                    inline=False
-                )
-            
+                stats_embed.add_field(name="Recent Mints", value=recent_mints_text, inline=False)
+
             await interaction.followup.send(embed=stats_embed, ephemeral=True)
-            
+
         except Exception as e:
             logging.error(f"Error in stats button: {e}")
             await interaction.followup.send(
-                "❌ Error retrieving statistics. Check logs for details.",
-                ephemeral=True
+                "❌ Error retrieving statistics. Check logs for details.", ephemeral=True
             )
         finally:
-            if 'conn' in locals():
+            if "conn" in locals():
                 conn.close()
-    
+
     @discord.ui.button(label="🔍 Lookup NFT", style=discord.ButtonStyle.primary)
-    async def lookup_button(self, interaction: discord.Interaction, button: Button):
+    async def lookup_button(self, interaction: discord.Interaction, button: Button[Any]):
         logging.info(f"Lookup button pressed by {interaction.user}")
         await interaction.response.send_modal(NFTLookupModal())
-    
+
     @discord.ui.button(label="🔥 Burn NFT", style=discord.ButtonStyle.danger)
-    async def burn_button(self, interaction: discord.Interaction, button: Button):
+    async def burn_button(self, interaction: discord.Interaction, button: Button[Any]):
         logging.info(f"Burn button pressed by {interaction.user}")
         await interaction.response.send_modal(BurnNFTModal())
 
-    @discord.ui.button(label="View Odds", style=discord.ButtonStyle.secondary,
-                       emoji="🎲", row=1)
-    async def view_odds(self, interaction: discord.Interaction, button: Button):
+    @discord.ui.button(label="View Odds", style=discord.ButtonStyle.secondary, emoji="🎲", row=1)
+    async def view_odds(self, interaction: discord.Interaction, button: Button[Any]):
         await interaction.response.send_modal(RarityOddsModal())
 
-    @discord.ui.button(label="Boost Trait", style=discord.ButtonStyle.primary,
-                       emoji="🚀", row=1)
-    async def boost_trait(self, interaction: discord.Interaction, button: Button):
+    @discord.ui.button(label="Boost Trait", style=discord.ButtonStyle.primary, emoji="🚀", row=1)
+    async def boost_trait(self, interaction: discord.Interaction, button: Button[Any]):
         await interaction.response.send_modal(RarityBoostModal())
 
-    @discord.ui.button(label="Toggle Trait", style=discord.ButtonStyle.danger,
-                       emoji="🚫", row=1)
-    async def toggle_trait(self, interaction: discord.Interaction, button: Button):
+    @discord.ui.button(label="Toggle Trait", style=discord.ButtonStyle.danger, emoji="🚫", row=1)
+    async def toggle_trait(self, interaction: discord.Interaction, button: Button[Any]):
         await interaction.response.send_modal(RarityDisableModal())
 
-@tree.command(
-    name="admin",
-    description="Admin control panel for NFT management"
-)
+
+@tree.command(name="admin", description="Admin control panel for NFT management")
 @app_commands.checks.has_permissions(administrator=True)  # Add explicit permission check
 async def admin_command(interaction: discord.Interaction):
     """Admin control panel for NFT management"""
-    
+
     logging.info(f"Admin command triggered by {interaction.user}")
-    
+
     # Create the admin panel embed
     embed = Embed(
         title="🔧 Admin Control Panel",
@@ -1780,76 +1793,72 @@ async def admin_command(interaction: discord.Interaction):
             "• 🔍 Lookup NFT - View details of specific NFT\n"
             "• 🔥 Burn NFT - Burn a specific NFT"
         ),
-        color=0x9C84EF
+        color=0x9C84EF,
     )
-    
+
     embed.set_footer(text="Admin panel will timeout after 10 minutes")
-    
+
     # Create view with admin buttons
     view = AdminView()
     await interaction.response.send_message(embed=embed, view=view, ephemeral=True)
 
+
 class NFTLookupModal(Modal, title="NFT Lookup"):
-    nft_number = TextInput(
+    nft_number: TextInput[Any] = TextInput(
         label="Enter NFT Number",
         placeholder="e.g., 3535",
         required=True,
         min_length=1,
-        max_length=10
+        max_length=10,
     )
-    
+
     async def on_submit(self, interaction: discord.Interaction):
         await interaction.response.defer(ephemeral=True)
-        logging.info(f"NFT lookup requested for number {self.nft_number.value} by {interaction.user}")
-        
+        logging.info(
+            f"NFT lookup requested for number {self.nft_number.value} by {interaction.user}"
+        )
+
         try:
             nft_num = int(self.nft_number.value)
-            conn = sqlite3.connect('lfg_nfts.db')
+            conn = sqlite3.connect("lfg_nfts.db")
             cursor = conn.cursor()
-            
+
             # Check main NFT table
-            cursor.execute('''
+            cursor.execute(
+                """
                 SELECT nft_number, nft_id, discord_id, created_at
-                FROM LFG 
+                FROM LFG
                 WHERE nft_number = ?
-            ''', (nft_num,))
-            
+            """,
+                (nft_num,),
+            )
+
             result = cursor.fetchone()
-            
+
             # Check if NFT was burned
-            cursor.execute('''
+            cursor.execute(
+                """
                 SELECT burned_by, reason, burned_at
-                FROM burned_nfts 
+                FROM burned_nfts
                 WHERE nft_number = ?
-            ''', (nft_num,))
-            
+            """,
+                (nft_num,),
+            )
+
             burn_info = cursor.fetchone()
-            
+
             if result:
-                nft_embed = Embed(
-                    title=f"🔍 NFT #{result[0]} Details",
-                    color=0x9C84EF
-                )
-                
-                nft_embed.add_field(
-                    name="NFT ID",
-                    value=result[1] or "Not minted",
-                    inline=True
-                )
-                
+                nft_embed = Embed(title=f"🔍 NFT #{result[0]} Details", color=0x9C84EF)
+
+                nft_embed.add_field(name="NFT ID", value=result[1] or "Not minted", inline=True)
+
                 if result[2]:  # If discord_id exists
-                    nft_embed.add_field(
-                        name="Minted By",
-                        value=f"<@{result[2]}>",
-                        inline=True
-                    )
-                
+                    nft_embed.add_field(name="Minted By", value=f"<@{result[2]}>", inline=True)
+
                 nft_embed.add_field(
-                    name="Minted On",
-                    value=result[3][:10] if result[3] else "N/A",
-                    inline=True
+                    name="Minted On", value=result[3][:10] if result[3] else "N/A", inline=True
                 )
-                
+
                 # Add burn information if it exists
                 if burn_info:
                     nft_embed.add_field(
@@ -1859,30 +1868,26 @@ class NFTLookupModal(Modal, title="NFT Lookup"):
                             f"Reason: {burn_info[1]}\n"
                             f"Date: {burn_info[2][:10]}"
                         ),
-                        inline=False
+                        inline=False,
                     )
-                
+
                 await interaction.followup.send(embed=nft_embed, ephemeral=True)
             else:
                 await interaction.followup.send(
-                    f"❌ NFT #{nft_num} not found in database.",
-                    ephemeral=True
+                    f"❌ NFT #{nft_num} not found in database.", ephemeral=True
                 )
-                
+
         except ValueError:
-            await interaction.followup.send(
-                "❌ Please enter a valid NFT number.",
-                ephemeral=True
-            )
+            await interaction.followup.send("❌ Please enter a valid NFT number.", ephemeral=True)
         except Exception as e:
             logging.error(f"Error in NFT lookup: {e}")
             await interaction.followup.send(
-                "❌ Error looking up NFT. Check logs for details.",
-                ephemeral=True
+                "❌ Error looking up NFT. Check logs for details.", ephemeral=True
             )
         finally:
-            if 'conn' in locals():
+            if "conn" in locals():
                 conn.close()
+
 
 # Main execution
 if __name__ == "__main__":

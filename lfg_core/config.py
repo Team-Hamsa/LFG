@@ -3,6 +3,7 @@
 # main.py keeps its own loading for backwards compatibility.
 
 import os
+
 from dotenv import load_dotenv
 
 load_dotenv()
@@ -35,12 +36,13 @@ IS_TESTNET = XRPL_NETWORK == "testnet"
 
 def _seed_address() -> str:
     from xrpl.wallet import Wallet  # deferred: keep config import light
+
     try:
         return Wallet.from_seed(SEED).classic_address
     except Exception as e:
         raise ValueError(
-            f"SEED is not a valid XRPL family seed (expected an 's…' base58 "
-            f"secret): {e}") from e
+            f"SEED is not a valid XRPL family seed (expected an 's…' base58 secret): {e}"
+        ) from e
 
 
 if IS_TESTNET:
@@ -83,7 +85,8 @@ BUNNY_CDN_PUBLIC_BASE = os.getenv("BUNNY_CDN_PUBLIC_BASE", "https://lfgo.b-cdn.n
 # bakes this host into its image URLs, so the image proxy must allow both.
 BUNNY_PULL_ZONE = os.getenv("BUNNY_PULL_ZONE", "").strip().rstrip("/")
 IMG_PROXY_ALLOWED_BASES = tuple(
-    {BUNNY_CDN_PUBLIC_BASE} | ({f"https://{BUNNY_PULL_ZONE}"} if BUNNY_PULL_ZONE else set()))
+    {BUNNY_CDN_PUBLIC_BASE} | ({f"https://{BUNNY_PULL_ZONE}"} if BUNNY_PULL_ZONE else set())
+)
 
 # Discord Activity (webapp only — not required by the bot)
 DISCORD_CLIENT_ID = os.getenv("DISCORD_CLIENT_ID", "")
@@ -98,7 +101,7 @@ PAYMENT_TIMEOUT_SECONDS = int(os.getenv("PAYMENT_TIMEOUT_SECONDS", "300"))
 # Canonical structure: <body>/<TraitType>/<Value>.png|.gif|.mp4
 LAYER_SOURCE = os.getenv("LAYER_SOURCE", "cdn")  # "cdn" or "local"
 LAYERS_CDN_FOLDER = os.getenv("LAYERS_CDN_FOLDER", "layers")
-LAYERS_DIR = os.getenv("LAYERS_DIR", "layers")          # local mode root
+LAYERS_DIR = os.getenv("LAYERS_DIR", "layers")  # local mode root
 LAYER_CACHE_DIR = os.getenv("LAYER_CACHE_DIR", ".layer_cache")
 
 # Trait Swapper (defaults follow XRPL_NETWORK; mainnet values match the
@@ -107,7 +110,8 @@ SWAP_ISSUER_ADDRESS = os.getenv("SWAP_ISSUER_ADDRESS", _default_swap_issuer)
 SWAP_TAXON = int(os.getenv("SWAP_TAXON", "1760"))
 SWAP_CDN_FOLDER = os.getenv("SWAP_CDN_FOLDER", "LFGO")
 SWAP_OFFER_CURRENCY_HEX = os.getenv(
-    "SWAP_OFFER_CURRENCY_HEX", "4252495800000000000000000000000000000000")  # BRIX
+    "SWAP_OFFER_CURRENCY_HEX", "4252495800000000000000000000000000000000"
+)  # BRIX
 SWAP_OFFER_ISSUER = os.getenv("SWAP_OFFER_ISSUER", _default_brix_issuer)
 SWAP_OFFER_AMOUNT = os.getenv("SWAP_OFFER_AMOUNT", "10")
 # Multiplier over the AMM spot quote when a swap fee is charged in XRP, so
@@ -115,11 +119,13 @@ SWAP_OFFER_AMOUNT = os.getenv("SWAP_OFFER_AMOUNT", "10")
 SWAP_XRP_FEE_BUFFER = os.getenv("SWAP_XRP_FEE_BUFFER", "1.05")
 SWAP_MAX_NFT_NUMBER = int(os.getenv("SWAP_MAX_NFT_NUMBER", "3535"))
 SWAP_RECORDS_DIR = os.getenv("SWAP_RECORDS_DIR", "swap_records")
-NFT_SCHEMA_URL = os.getenv("NFT_SCHEMA_URL",
-                           "ipfs://QmNpi8rcXEkohca8iXu7zysKKSJYqCvBJn3xJwga8jXqWU")
+NFT_SCHEMA_URL = os.getenv(
+    "NFT_SCHEMA_URL", "ipfs://QmNpi8rcXEkohca8iXu7zysKKSJYqCvBJn3xJwga8jXqWU"
+)
 EXTERNAL_WEBSITE_URL = os.getenv("EXTERNAL_WEBSITE_URL", "https://letseffinggo.com")
-NFT_COLLECTION_LOGO = os.getenv("NFT_COLLECTION_LOGO",
-                                "https://lfgo.b-cdn.net/LFGO_square_logo.png")
+NFT_COLLECTION_LOGO = os.getenv(
+    "NFT_COLLECTION_LOGO", "https://lfgo.b-cdn.net/LFGO_square_logo.png"
+)
 
 # Variable rarity engine
 DB_PATH = os.getenv("DB_PATH", "lfg_nfts.db")

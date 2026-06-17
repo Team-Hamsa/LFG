@@ -4,9 +4,10 @@
 # with ffmpeg: PNG output when every layer is a PNG, otherwise MP4 (audio is
 # carried over from the first video trait that has it).
 
-import os
 import asyncio
 import logging
+import os
+from typing import Any
 
 import ffmpeg
 
@@ -21,38 +22,49 @@ TOP_TRAITS = [
 ]
 
 
-def _ordered_traits(attributes: list) -> list:
+def _ordered_traits(attributes: list[dict[str, Any]]) -> list[dict[str, Any]]:
     """Canonical layer order, with TOP_TRAITS moved to the end (on top).
     'None' values are skipped (no layer file)."""
     ordered = sorted(
         (a for a in attributes if a.get("value") and a["value"] != "None"),
-        key=lambda a: TRAIT_ORDER.index(a["trait_type"]))
-    tops = [a for a in ordered
-            if {"trait_type": a["trait_type"], "value": a["value"]} in TOP_TRAITS]
+        key=lambda a: TRAIT_ORDER.index(a["trait_type"]),
+    )
+    tops = [
+        a for a in ordered if {"trait_type": a["trait_type"], "value": a["value"]} in TOP_TRAITS
+    ]
     rest = [a for a in ordered if a not in tops]
     return rest + tops
 
 
-async def missing_layers(attributes: list, body: str, store) -> list:
+async def missing_layers(attributes: list[dict[str, Any]], body: str, store: Any) -> list[str]:
     """Trait files the store can't provide — checked BEFORE any burn."""
     ordered = _ordered_traits(attributes)
     resolved = await asyncio.gather(
-        *(store.resolve(body, a["trait_type"], a["value"]) for a in ordered))
-    return [f"{body}/{a['trait_type']}/{a['value']}"
-            for a, path in zip(ordered, resolved) if not path]
+        *(store.resolve(body, a["trait_type"], a["value"]) for a in ordered)
+    )
+    return [
+        f"{body}/{a['trait_type']}/{a['value']}"
+        for a, path in zip(ordered, resolved, strict=False)
+        if not path
+    ]
 
 
-async def compose_nft(attributes: list, body: str, store,
-                      output_basename: str, out_dir: str = "generated"):
+async def compose_nft(
+    attributes: list[dict[str, Any]],
+    body: str,
+    store: Any,
+    output_basename: str,
+    out_dir: str = "generated",
+) -> tuple[str, bool]:
     """Resolve all trait layers through the store and overlay them.
     Returns (output_path, is_video)."""
     ordered = _ordered_traits(attributes)
     files = await asyncio.gather(
-        *(store.resolve(body, a["trait_type"], a["value"]) for a in ordered))
-    for a, path in zip(ordered, files):
+        *(store.resolve(body, a["trait_type"], a["value"]) for a in ordered)
+    )
+    for a, path in zip(ordered, files, strict=False):
         if not path:
-            raise FileNotFoundError(
-                f"Layer not found: {body}/{a['trait_type']}/{a['value']}")
+            raise FileNotFoundError(f"Layer not found: {body}/{a['trait_type']}/{a['value']}")
     if not files:
         raise ValueError("No trait layers to compose")
 
@@ -65,7 +77,7 @@ async def compose_nft(attributes: list, body: str, store,
     return output_path, is_video
 
 
-def _run_ffmpeg(files: list, output_path: str, is_video: bool) -> None:
+def _run_ffmpeg(files: list[str], output_path: str, is_video: bool) -> None:
     inputs = [ffmpeg.input(f) for f in files]
     stream = inputs[0]
     for inp in inputs[1:]:
@@ -74,17 +86,15 @@ def _run_ffmpeg(files: list, output_path: str, is_video: bool) -> None:
     audio = None
     if is_video:
         # Carry audio over from the first video trait that has it.
-        for f, inp in zip(files, inputs):
+        for f, inp in zip(files, inputs, strict=False):
             if f.endswith(".mp4") and _has_audio(f):
                 audio = inp.audio
                 break
     kwargs = {} if is_video else {"vframes": 1, "update": 1}
     if audio is not None:
-        ffmpeg.output(stream, audio, output_path, **kwargs)\
-              .overwrite_output().run(quiet=True)
+        ffmpeg.output(stream, audio, output_path, **kwargs).overwrite_output().run(quiet=True)
     else:
-        ffmpeg.output(stream, output_path, **kwargs)\
-              .overwrite_output().run(quiet=True)
+        ffmpeg.output(stream, output_path, **kwargs).overwrite_output().run(quiet=True)
 
 
 def _has_audio(path: str) -> bool:
@@ -97,13 +107,13 @@ def _has_audio(path: str) -> bool:
 
 def extract_first_frame(video_path: str, image_path: str) -> str:
     """PNG thumbnail of a video NFT (used as the metadata image)."""
-    ffmpeg.input(video_path).output(image_path, vframes=1)\
-          .overwrite_output().run(quiet=True)
+    ffmpeg.input(video_path).output(image_path, vframes=1).overwrite_output().run(quiet=True)
     return image_path
 
 
-async def upload_output(output_path: str, is_video: bool, upload,
-                        cdn_basename: str):
+async def upload_output(
+    output_path: str, is_video: bool, upload: Any, cdn_basename: str
+) -> tuple[str, str | None]:
     """Upload a composed NFT (mp4 + png thumbnail for videos, png otherwise)
     via `upload(path_on_cdn, data, content_type) -> url`, cleaning up local
     files. Returns (image_url, video_url)."""
@@ -113,8 +123,8 @@ async def upload_output(output_path: str, is_video: bool, upload,
             with open(output_path, "rb") as f:
                 video_url = await upload(f"{cdn_basename}.mp4", f.read(), "video/mp4")
             thumb = await asyncio.to_thread(
-                extract_first_frame, output_path,
-                os.path.splitext(output_path)[0] + ".png")
+                extract_first_frame, output_path, os.path.splitext(output_path)[0] + ".png"
+            )
             try:
                 with open(thumb, "rb") as f:
                     image_url = await upload(f"{cdn_basename}.png", f.read(), "image/png")

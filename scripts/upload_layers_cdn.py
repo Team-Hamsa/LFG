@@ -2,6 +2,7 @@
 """Upload the canonical layer tree (layers/<gender>/<TraitType>/<file>) to
 BunnyCDN storage under LAYERS_CDN_FOLDER. Idempotent: skips files that
 already exist with the same size."""
+
 import asyncio
 import os
 import sys
@@ -49,7 +50,7 @@ async def upload(session, local_path, rel_path):
             async with session.put(url, data=data, headers={"AccessKey": KEY}) as r:
                 if r.status in (200, 201):
                     return rel_path, True
-            await asyncio.sleep(2 ** attempt)
+            await asyncio.sleep(2**attempt)
         return rel_path, False
 
 
@@ -62,10 +63,12 @@ async def main():
     async with aiohttp.ClientSession() as session:
         done = await existing_sizes(session)
         todo = [(p, r) for p, r in files if done.get(r) != os.path.getsize(p)]
-        print(f"{len(files)} local files, {len(files) - len(todo)} already on CDN, uploading {len(todo)}")
+        print(
+            f"{len(files)} local files, {len(files) - len(todo)} already on CDN, uploading {len(todo)}"
+        )
         failed = []
         for i in range(0, len(todo), 50):
-            batch = todo[i:i + 50]
+            batch = todo[i : i + 50]
             results = await asyncio.gather(*(upload(session, p, r) for p, r in batch))
             failed += [r for r, ok in results if not ok]
             print(f"progress: {min(i + 50, len(todo))}/{len(todo)}", flush=True)
