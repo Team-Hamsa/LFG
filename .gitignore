@@ -24,3 +24,6 @@ users.json
 
 # Legacy test trait art (superseded by layers/ on the CDN)
 trait_layers/
+
+# Generated audit reports
+reports/
