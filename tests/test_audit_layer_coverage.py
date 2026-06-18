@@ -1,7 +1,6 @@
 # Tests for scripts/audit_layer_coverage.py (CDN layer coverage auditor).
 import asyncio
 import os
-import sqlite3
 import sys
 
 import pytest
@@ -27,96 +26,117 @@ sys.path.insert(
 )
 import audit_layer_coverage as alc  # noqa: E402
 
-# A minimal "available" set: male has a Body + a Clothing, nothing under
-# Accessory; skeleton has nothing. Mirrors how the real store reports values.
+# A minimal "available" set: female has its own traits but NOT the 'Wonder' set;
+# male has 'Wonder Hair'. Mirrors how the real store reports values.
 AVAILABLE = {
+    ("female", "Body"): {"Curved Green"},
+    ("female", "Clothing"): {"Crop Hoodie Pink"},
+    ("female", "Mouth"): {"Dark Lipstick"},
+    ("female", "Head"): {"Fish Bowl"},
     ("male", "Body"): {"Straight Burned"},
-    ("male", "Clothing"): {"Open Heart"},
-    ("male", "Head"): {"Cowboy"},
-    ("male", "Accessory"): {"Banana"},  # NOT "Super Soaker"
-    ("male", "Background"): {"Muted Tan"},
+    ("male", "Head"): {"Wonder Hair"},  # exists for male, not female
 }
 
 
-def _attrs(**cols):
-    row = {col: cols.get(col, "None") for col in alc.COLUMN_TO_TRAIT}
-    return alc.row_attributes(row)
+def _meta(name, **traits):
+    attrs = [{"trait_type": k, "value": v} for k, v in traits.items()]
+    return {"name": name, "attributes": attrs}
 
 
 def test_clean_nft_has_no_gaps():
-    body, attributes = _attrs(Body="Straight Burned", Clothing="Open Heart", Background="Muted Tan")
-    assert body == "male"
-    assert alc.audit_row(body, attributes, AVAILABLE) == []
+    body, attributes = alc.meta_attributes(
+        _meta("#1", Body="Curved Green", Clothing="Crop Hoodie Pink")
+    )
+    assert body == "female"
+    assert alc.audit_attributes(body, attributes, AVAILABLE) == []
 
 
-def test_missing_accessory_is_reported():
-    # The real #3536 case: Super Soaker has no layer file.
-    body, attributes = _attrs(Body="Straight Burned", Accessory="Super Soaker")
-    missing = alc.audit_row(body, attributes, AVAILABLE)
-    assert [m.asset() for m in missing] == ["male/Accessory/Super Soaker"]
+def test_wonder_variant_is_reported():
+    # The real #3547 'Wonder' variant: its own traits have no female layer.
+    body, attributes = alc.meta_attributes(
+        _meta(
+            "#3547",
+            Body="Curved Green",
+            Clothing="Wonder",
+            Mouth="Lipstick Smile",
+            Head="Wonder Hair",
+        )
+    )
+    assert body == "female"
+    missing = sorted(m.asset() for m in alc.audit_attributes(body, attributes, AVAILABLE))
+    assert missing == [
+        "female/Clothing/Wonder",
+        "female/Head/Wonder Hair",
+        "female/Mouth/Lipstick Smile",
+    ]
+
+
+def test_cross_body_gap_is_caught():
+    # 'Wonder Hair' exists for male but not female -> a female NFT carrying it
+    # (e.g. received via swap) is correctly flagged. This is the class the old
+    # per-edition DB audit could not see.
+    body, attributes = alc.meta_attributes(_meta("#9", Body="Curved Green", Head="Wonder Hair"))
+    assert body == "female"
+    assert [m.asset() for m in alc.audit_attributes(body, attributes, AVAILABLE)] == [
+        "female/Head/Wonder Hair"
+    ]
 
 
 def test_all_none_nft_reports_no_gaps():
-    # The #3538 case: every attribute None -> skeleton, nothing to resolve.
-    body, attributes = _attrs()
+    body, attributes = alc.meta_attributes(_meta("#2"))
     assert body == "skeleton"
-    assert alc.audit_row(body, attributes, AVAILABLE) == []
+    assert alc.audit_attributes(body, attributes, AVAILABLE) == []
 
 
-def test_hat_column_maps_to_head_trait():
-    # A value supplied in the DB 'Hat' column is checked under layer 'Head'.
-    body, attributes = _attrs(Body="Straight Burned", Hat="Cowboy")
-    assert alc.audit_row(body, attributes, AVAILABLE) == []  # Cowboy exists under male/Head
-
-    body, attributes = _attrs(Body="Straight Burned", Hat="Sombrero")
-    missing = alc.audit_row(body, attributes, AVAILABLE)
-    assert [m.asset() for m in missing] == ["male/Head/Sombrero"]
-
-
-def test_aggregation_collapses_shared_asset(tmp_path):
+def test_aggregation_collapses_shared_asset():
     results = [
-        alc.NftResult(1, "testnet", "male", [alc.Missing("male", "Accessory", "Super Soaker")]),
-        alc.NftResult(2, "testnet", "male", [alc.Missing("male", "Accessory", "Super Soaker")]),
-        alc.NftResult(3, "testnet", "male", []),
+        alc.NftResult("A", 3547, "female", [alc.Missing("female", "Clothing", "Wonder")]),
+        alc.NftResult("B", 3601, "female", [alc.Missing("female", "Clothing", "Wonder")]),
+        alc.NftResult("C", 1, "female", []),
     ]
-    report = alc.format_reports(results, "2026-06-18T00-00-00Z", total=3)
-    assert "| `male/Accessory/Super Soaker` | 2 |" in report
-    assert "NFTs that cannot be swapped: **2**" in report
+    report = alc.format_reports(results, "2026-06-18T00-00-00Z", "testnet")
+    assert "| `female/Clothing/Wonder` | 2 |" in report
+    assert "cannot be swapped: **2**" in report
 
 
-def test_run_audit_against_local_store(tmp_path):
-    # End-to-end over a sqlite DB + LocalLayerStore fixture tree.
-    base = tmp_path / "layers"
-    for trait, value in [("Body", "Straight Burned"), ("Accessory", "Banana")]:
-        d = base / "male" / trait
-        d.mkdir(parents=True, exist_ok=True)
-        (d / f"{value}.png").write_bytes(b"x")
+def test_run_audit_with_injected_chain():
+    # End-to-end with injected enumerator + metadata fetcher (no network) over a
+    # LocalLayerStore fixture. Two on-chain tokens share edition #3547: the clean
+    # variant passes, the 'Wonder' variant fails — the duplicate the DB hid.
+    import tempfile
 
-    from lfg_core import layer_store
+    with tempfile.TemporaryDirectory() as tmp:
+        base = os.path.join(tmp, "layers")
+        for trait, value in [("Body", "Curved Green"), ("Clothing", "Crop Hoodie Pink")]:
+            d = os.path.join(base, "female", trait)
+            os.makedirs(d, exist_ok=True)
+            open(os.path.join(d, f"{value}.png"), "wb").write(b"x")
 
-    store = layer_store.LocalLayerStore(str(base))
+        from lfg_core import layer_store
 
-    db = tmp_path / "lfg.db"
-    conn = sqlite3.connect(db)
-    cols = ", ".join(f"{c} TEXT" for c in alc.COLUMN_TO_TRAIT)
-    conn.execute(f"CREATE TABLE LFG (nft_number INTEGER, network TEXT, {cols})")
-    conn.execute(
-        "INSERT INTO LFG (nft_number, network, Body, Accessory) VALUES (1, 'testnet', ?, ?)",
-        ("Straight Burned", "Banana"),
-    )
-    conn.execute(
-        "INSERT INTO LFG (nft_number, network, Body, Accessory) VALUES (2, 'testnet', ?, ?)",
-        ("Straight Burned", "Super Soaker"),
-    )
-    conn.commit()
-    conn.close()
+        store = layer_store.LocalLayerStore(base)
 
-    # Mirror the other suites' loop handling: asyncio.run() would close the
-    # process-wide loop and break the aiohttp-based webapp tests that follow.
-    results = asyncio.get_event_loop().run_until_complete(alc.run_audit(str(db), store))
-    by_num = {r.nft_number: r for r in results}
-    assert by_num[1].missing == []
-    assert [m.asset() for m in by_num[2].missing] == ["male/Accessory/Super Soaker"]
+        tokens = [
+            {"nft_id": "AAA", "uri_hex": "aa"},
+            {"nft_id": "BBB", "uri_hex": "bb"},
+            {"nft_id": "CCC", "uri_hex": ""},  # no URI -> error bucket
+        ]
+        meta = {
+            "aa": _meta("#3547", Body="Curved Green", Clothing="Crop Hoodie Pink"),
+            "bb": _meta("#3547", Body="Curved Green", Clothing="Wonder"),
+        }
+
+        async def enum():
+            return tokens
+
+        async def fetch(uri_hex):
+            return meta.get(uri_hex)
+
+        results = asyncio.get_event_loop().run_until_complete(alc.run_audit(enum, fetch, store))
+        by_id = {r.nft_id: r for r in results}
+        assert by_id["AAA"].missing == []
+        assert [m.asset() for m in by_id["BBB"].missing] == ["female/Clothing/Wonder"]
+        assert by_id["CCC"].error is not None
 
 
 if __name__ == "__main__":

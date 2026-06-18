@@ -1,7 +1,18 @@
 # Layer Coverage Auditor — Design
 
 **Date:** 2026-06-18
-**Status:** Approved
+**Status:** Approved (revised — source pivoted from DB to on-chain, see below)
+
+## Revision note: why the source is on-chain, not the DB
+
+The first cut audited the `LFG` table. That is **structurally wrong** for this
+purpose and produced a false negative (it passed edition #3547, which a live
+swap then rejected). Root cause: `LFG.nft_number` is the **primary key — one row
+per edition** — but the chain holds **multiple NFTokens per edition** (duplicate
+/ divergent variants created by prior swaps and reminting). The swap reads live
+on-chain metadata, so the only faithful source is an on-chain enumeration. The
+audit now pages clio's `nfts_by_issuer` (live tokens only), fetches each token's
+real metadata, and checks that. The DB is no longer consulted.
 
 ## Problem
 
@@ -30,83 +41,87 @@ In scope:
 Out of scope:
 - Per-NFT baked image liveness (check A — whether `image_url` returns 200).
 - Uploading the missing layer files.
-- Live on-chain enumeration / metadata fetch (the audit reads the DB, the
-  stated source of truth).
+- The `LFG` DB as a source (it cannot represent per-edition duplicates).
 
 ## Data Sources
 
-- `lfg_nfts.db` → `LFG` table (3552 rows). Relevant columns:
-  `nft_number, network, body_type, Body, Background, Back, Clothing, Mouth,
-  Eyebrows, Eyes, Hat, Accessory`.
+- **On-chain enumeration** via clio's `nfts_by_issuer` (issuer + taxon), which
+  returns every NFToken — live and burned — with its metadata URI inline. Burned
+  tokens are skipped. Endpoints: mainnet `wss://s2-clio.ripple.com`, testnet
+  `wss://clio.altnet.rippletest.net:51233` (plain altnet rippled does NOT serve
+  this method). Mainnet issuer is the fixed collection issuer; the testnet issuer
+  is the SEED minter account (from `config.SWAP_ISSUER_ADDRESS`). All overridable
+  via `--issuer/--taxon/--clio`; `--network` selects the defaults.
+- **Per-NFT metadata** fetched from each token's URI (`swap_meta.fetch_metadata`,
+  shared `aiohttp` session, bounded concurrency).
 - CDN layer tree via `lfg_core.layer_store` (the same store the swap uses).
 
-### Column → trait-type mapping
-
-The DB trait columns map onto layer trait-types 1:1 **except** `Hat → Head`
-(the layer tree and `swap_meta.TRAIT_ORDER` use `Head`). Full set checked:
-`Background, Back, Body, Clothing, Mouth, Eyebrows, Eyes, Head, Accessory`.
-
-Body class is derived with `swap_meta.detect_body(Body)` (`Straight`→male,
-`Curved`→female, `Ape`→ape, else `skeleton`) so it matches the swap path rather
-than trusting the stored `body_type` column.
+Body class is derived with `swap_meta.detect_body` (`Straight`→male,
+`Curved`→female, `Ape`→ape, else `skeleton`), matching the swap path.
 
 ## Behavior / Faithfulness
 
-To guarantee the audit cannot drift from real swap behavior, each row is run
-through `swap_meta.normalize_attributes` (fixes the `Accesory` typo, fills
-missing traits with `None`, relocates Angel-Wings values to `Back`) before
-checking. Values equal to `None` (or empty) are skipped — they need no layer
-file, exactly as `swap_compose._ordered_traits` skips them.
+Each NFT's metadata is run through `swap_meta.normalize_attributes` (fixes the
+`Accesory` typo, fills missing traits with `None`, relocates Angel-Wings to
+`Back`) before checking — the same normalization the swap uses, so results can't
+drift. `None`/empty values are skipped (no layer needed), exactly as
+`swap_compose._ordered_traits` skips them.
 
 Existence is checked against a **cached set** of available values per
-`(body, trait_type)`, built from `store.list_values()` — which reads only the
-(cached) directory listing. The auditor never calls `store.resolve()`, so it
-performs **no layer downloads**.
+`(body, trait_type)`, built from `store.list_values()` (reads only the cached
+directory listing). The auditor never calls `store.resolve()`, so it performs
+**no layer downloads**. Because the available sets cover all four bodies, a value
+that exists for one body but not another is correctly flagged — covering the
+cross-body case where a swap moves a trait onto a body that lacks its layer.
 
 ## Components / Boundaries
 
-- `build_available_sets(store) -> dict[(body, trait_type), set[str]]`
-  Warms one set per `(body, trait_type)` for the four bodies. I/O-bound, async.
-- `row_attributes(row) -> tuple[str, list[dict]]`
-  Pure: maps a DB row to `(body, normalized_attributes)`.
-- `audit_row(body, attributes, available) -> list[Missing]`
-  Pure, no I/O. Returns missing `(trait_type, value)` for one NFT. Fully
-  unit-testable with a synthetic `available` dict.
-- `format_reports(results) -> (per_nft_md, worklist_md)`
-  Pure: builds the two report views.
-- `main()` — sqlite read, orchestrates the above, writes the report file,
-  prints a summary, sets exit code.
+- `enumerate_onchain(clio, issuer, taxon) -> [{nft_id, uri_hex}]` — pages clio,
+  live tokens only. The single networked enumeration step.
+- `build_available_sets(store) -> dict[(body, trait_type), set[str]]` — warms the
+  CDN listings. I/O-bound, async.
+- `meta_attributes(metadata) -> (body, attributes)` — pure: normalize + body.
+- `audit_attributes(body, attributes, available) -> list[Missing]` — pure, no
+  I/O. Fully unit-testable with a synthetic `available` dict.
+- `run_audit(enumerate_fn, fetch_meta_fn, store)` — orchestrates with injected
+  enumerator + metadata fetcher (so it is testable without a network), bounded
+  by a fetch-concurrency semaphore. Returns one `NftResult` per token.
+- `format_reports(results, timestamp, network)` — pure: builds the report.
+- `main()` — wires real clio enumeration + HTTP fetch, writes the report, prints
+  a summary, sets exit code.
 
-`Missing` is a small dataclass/namedtuple: `(body, trait_type, value)`.
+`Missing` is a frozen dataclass `(body, trait_type, value)`. `NftResult` carries
+`nft_id, number, body, missing, error` — keyed on `nft_id` since edition numbers
+duplicate on-chain. NFTs whose metadata can't be fetched land in an `error`
+bucket and are reported separately (not silently dropped).
 
 ## Reports
 
 Console summary plus a written Markdown report at
-`reports/layer-coverage-<timestamp>.md` (timestamp passed into `main()`).
+`reports/layer-coverage-<network>-<timestamp>.md`. Three views:
+1. **Aggregated worklist** — unique `(body, trait_type, value)` missing across
+   live NFTs, each with the count of NFTs it blocks, sorted by impact. The
+   actionable list of layer files to upload.
+2. **Per-NFT failures** — `# | body | nft_id | missing traits`. The NFTs that
+   currently cannot be swapped.
+3. **Unreadable metadata** — tokens that could not be audited (surfaced, not
+   hidden, so coverage gaps in the audit itself are visible).
 
-Two views:
-1. **Per-NFT failures** — table of `nft_number | network | body |
-   missing traits`. These are the NFTs that currently cannot be swapped.
-2. **Aggregated worklist** — unique `(body, trait_type, value)` missing across
-   the collection, each with the count of NFTs it blocks, sorted by impact.
-   This is the actionable list of layer files to upload to the CDN.
-
-Exit code is non-zero when any gap is found, so the script can later be wired
-into CI as a regression gate (Approach 2) without changes.
+Exit code is non-zero when any gap is found (CI-ready, Approach 2).
 
 ## Testing
 
-Unit tests using `LocalLayerStore` over a small fixture tree plus synthetic
-rows:
-- Clean NFT — no gaps reported.
-- Missing accessory (the #3536 case) — reports `male/Accessory/Super Soaker`.
-- All-`None` NFT (the #3538 case) — reports zero gaps.
-- `Hat → Head` mapping — a value present under `Head` is found when the row
-  supplies it in the `Hat` column.
-- Aggregation — two NFTs missing the same asset collapse to one worklist entry
-  with count 2.
+Unit tests using `LocalLayerStore` over a fixture tree plus synthetic metadata,
+with injected enumerator/fetcher for the end-to-end path:
+- Clean NFT — no gaps.
+- The real #3547 `Wonder` variant — reports its three missing female layers.
+- Cross-body gap — a value present for `male` but not `female` is flagged on a
+  female NFT (the class the per-edition DB audit could not see).
+- All-`None` NFT — zero gaps.
+- Aggregation — two NFTs missing the same asset collapse to one worklist entry.
+- End-to-end — two on-chain tokens sharing edition #3547 (clean + `Wonder`); the
+  clean one passes, the duplicate fails, and a URI-less token lands in `error`.
 
 ## Location
 
-`scripts/audit_layer_coverage.py`, alongside `scripts/rebuild_collection_db/`.
-Tests in `scripts/test_audit_layer_coverage.py` (or the repo's test location).
+`scripts/audit_layer_coverage.py`. Tests in `tests/test_audit_layer_coverage.py`.
