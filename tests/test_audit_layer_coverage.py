@@ -132,7 +132,14 @@ def test_run_audit_with_injected_chain():
         async def fetch(uri_hex):
             return meta.get(uri_hex)
 
-        results = asyncio.get_event_loop().run_until_complete(alc.run_audit(enum, fetch, store))
+        # Run on a fresh loop that is NOT installed as the thread default, so we
+        # neither hit get_event_loop()'s 3.12 deprecation nor close the loop the
+        # aiohttp-based webapp tests rely on.
+        loop = asyncio.new_event_loop()
+        try:
+            results = loop.run_until_complete(alc.run_audit(enum, fetch, store))
+        finally:
+            loop.close()
         by_id = {r.nft_id: r for r in results}
         assert by_id["AAA"].missing == []
         assert [m.asset() for m in by_id["BBB"].missing] == ["female/Clothing/Wonder"]
