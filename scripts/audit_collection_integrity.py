@@ -19,6 +19,8 @@ from __future__ import annotations
 import argparse
 import os
 import sys
+from datetime import datetime, timezone
+from typing import Any
 
 REPO_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
 sys.path.insert(0, REPO_ROOT)
@@ -31,6 +33,75 @@ from lfg_core import config, nft_index  # noqa: E402
 COLLECTION_SIZE = 3535
 
 
+def _fmt_list(nums: list[int]) -> str:
+    return ", ".join(str(n) for n in nums) if nums else "—"
+
+
+def format_integrity_report(
+    anomalies: dict[str, Any],
+    by_id: dict[str, nft_index.OnchainNft],
+    network: str,
+    max_edition: int,
+    live_count: int,
+    timestamp: str,
+) -> str:
+    """Markdown integrity report (pure). `by_id` maps nft_id -> record for the
+    out-of-range / unparsed detail lines."""
+    a = anomalies
+    lines: list[str] = []
+    lines.append(f"# Collection Integrity ({network}) — {timestamp}")
+    lines.append("")
+    lines.append(f"- Expected editions: **1..{max_edition}**")
+    lines.append(f"- Live tokens: **{live_count}**")
+    lines.append(f"- Missing editions: **{len(a['missing'])}**")
+    lines.append(f"- Editions with >1 live token: **{len(a['multi_live'])}**")
+    lines.append(f"- Out-of-range edition names: **{len(a['out_of_range'])}**")
+    lines.append(f"- Unparsed-name live tokens: **{len(a['unparsed'])}**")
+    lines.append("")
+
+    lines.append("## Missing editions (burned, never re-minted)")
+    lines.append("")
+    lines.append(_fmt_list(a["missing"]))
+    lines.append("")
+
+    lines.append("## Editions with >1 live token (original burn likely failed)")
+    lines.append("")
+    if a["multi_live"]:
+        lines.append("| Edition | live tokens |")
+        lines.append("| --- | --- |")
+        for ed, count in a["multi_live"].items():
+            lines.append(f"| {ed} | {count} |")
+    else:
+        lines.append("_None._")
+    lines.append("")
+
+    lines.append("## Out-of-range edition names (bad re-mint naming)")
+    lines.append("")
+    if a["out_of_range"]:
+        lines.append("| # | nft_id | owner |")
+        lines.append("| --- | --- | --- |")
+        for nid in a["out_of_range"]:
+            r = by_id[nid]
+            lines.append(f"| {r.nft_number} | `{nid}` | {r.owner or ''} |")
+    else:
+        lines.append("_None._")
+    lines.append("")
+
+    lines.append("## Live tokens with no parsed edition (metadata naming bug)")
+    lines.append("")
+    if a["unparsed"]:
+        lines.append("| nft_id | uri |")
+        lines.append("| --- | --- |")
+        for nid in a["unparsed"]:
+            r = by_id[nid]
+            uri = bytes.fromhex(r.uri_hex).decode("ascii", "ignore") if r.uri_hex else ""
+            lines.append(f"| `{nid}` | {uri} |")
+    else:
+        lines.append("_None._")
+    lines.append("")
+    return "\n".join(lines)
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(description="Collection-integrity report over the index.")
     parser.add_argument("--network", choices=["mainnet", "testnet"], default=config.XRPL_NETWORK)
@@ -40,6 +111,7 @@ def main() -> int:
         default=COLLECTION_SIZE,
         help="highest expected edition number (default: the 3535 collection size)",
     )
+    parser.add_argument("--report-dir", default=os.path.join(REPO_ROOT, "reports"))
     args = parser.parse_args()
 
     db_path = nft_index.index_db_path(args.network)
@@ -73,6 +145,16 @@ def main() -> int:
             else ""
         )
         print(f"  {nid}  uri={uri}")
+
+    timestamp = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H-%M-%SZ")
+    report = format_integrity_report(a, by_id, args.network, args.max_edition, len(live), timestamp)
+    os.makedirs(args.report_dir, exist_ok=True)
+    report_path = os.path.join(
+        args.report_dir, f"collection-integrity-{args.network}-{timestamp}.md"
+    )
+    with open(report_path, "w") as f:
+        f.write(report)
+    print(f"\n  Report: {report_path}")
 
     total = len(a["missing"]) + len(a["multi_live"]) + len(a["out_of_range"]) + len(a["unparsed"])
     return 1 if total else 0
