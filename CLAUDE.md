@@ -280,6 +280,13 @@ dedicated per-`nft_id` index instead.
   `.venv/bin/python scripts/backfill_onchain.py --network testnet|mainnet`
   (or `onchain_listener.py … snapshot`). Idempotent. Mainnet metadata is on IPFS
   (slow/flaky); unreadable tokens are recorded with empty attributes, not dropped.
+- **Preferred mainnet source — Bithomp CSV:** clio+IPFS backfill leaves ~20% of
+  mainnet unreadable. A Bithomp export (CDN-cached, metadata pre-parsed) is far
+  more complete: `scripts/import_bithomp_csv.py --network mainnet --csv LFGOdata.csv`
+  for the live set, and `--csv LFGOburned.csv --burned` for the burned history
+  (separate burned-only export has no flag column). This cut unreadable-live from
+  1174 → 1 and captured full per-edition history (718 editions with multiple
+  tokens). CSVs are gitignored (`LFGO*.csv`).
 - **Live sync (pm2):** `lfg-index-testnet` + `lfg-index-mainnet` run
   `scripts/onchain_listener.py --network <net> listen` — subscribe to the clio tx
   stream and apply NFTokenMint / AcceptOffer / Burn / **Modify** (in-place trait
