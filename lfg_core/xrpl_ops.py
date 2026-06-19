@@ -168,6 +168,38 @@ async def get_account_nfts(address: str, issuer: str) -> list[dict[str, Any]]:
     return nfts
 
 
+def _parse_nft_info(result: dict[str, Any]) -> dict[str, Any]:
+    """Normalize a clio `nft_info` result into the token shape the index uses."""
+    return {
+        "nft_id": result.get("nft_id"),
+        "owner": result.get("owner"),
+        "flags": int(result.get("flags") or 0),
+        "uri_hex": result.get("uri", "") or "",
+        "is_burned": bool(result.get("is_burned")),
+    }
+
+
+async def nft_info(nft_id: str, clio: str | None = None) -> dict[str, Any] | None:
+    """Current owner/flags/uri/burn state for a single NFToken via clio's
+    `nft_info` (needed to resolve the owner after a transfer — the XLS-46 path).
+    Returns None on error."""
+    from xrpl.models.requests import Request
+
+    endpoint = clio or config.WS_URL
+    try:
+        async with AsyncWebsocketClient(endpoint) as websocket:
+            response = await websocket.request(
+                Request.from_dict({"method": "nft_info", "nft_id": nft_id})
+            )
+        result = response.result
+        if not isinstance(result, dict) or result.get("error"):
+            return None
+        return _parse_nft_info(result)
+    except Exception as e:
+        logging.warning(f"nft_info failed for {nft_id}: {e}")
+        return None
+
+
 async def get_trustline_balance(address: str, currency: str, issuer: str) -> Decimal | None:
     """Balance `address` holds on its trustline to issuer/currency, as a
     Decimal — or None if there is no trustline or the lookup failed (callers
