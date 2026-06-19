@@ -77,6 +77,31 @@ def test_live_nfts_excludes_burned_and_roundtrips_attributes(tmp_path):
     assert live[0].attributes == attrs
 
 
+def test_metadata_urls_expands_ipfs_across_gateways():
+    uri_hex = b"ipfs://bafyCID/meta.json".hex()
+    urls = nft_index._metadata_urls(uri_hex)
+    assert len(urls) == len(nft_index.IPFS_GATEWAYS)
+    assert "https://bafyCID.ipfs.dweb.link/meta.json" in urls
+    assert "https://ipfs.io/ipfs/bafyCID/meta.json" in urls
+
+
+def test_metadata_urls_passes_through_http():
+    uri_hex = b"https://lfgo.b-cdn.net/x.json".hex()
+    assert nft_index._metadata_urls(uri_hex) == ["https://lfgo.b-cdn.net/x.json"]
+
+
+def test_retryable_unreadable_query(tmp_path):
+    conn = nft_index.init_db(str(tmp_path / "x.db"))
+    # empty attributes + uri -> retryable; empty attrs + no uri -> not; has attrs -> not
+    nft_index.upsert(conn, _nft("RETRY", attrs=[], body=""))
+    nft_index.upsert(conn, _nft("NOURI", attrs=[], body=""))
+    conn.execute("UPDATE onchain_nfts SET uri_hex='' WHERE nft_id='NOURI'")
+    nft_index.upsert(conn, _nft("OK", attrs=[{"trait_type": "Body", "value": "Straight"}]))
+    conn.commit()
+    ids = [n.nft_id for n in nft_index.retryable_unreadable(conn)]
+    assert ids == ["RETRY"]
+
+
 def test_token_record_with_metadata():
     token = {"nft_id": "AAA", "owner": "rO", "is_burned": False, "flags": 0x10, "uri_hex": "6868"}
     meta = {
