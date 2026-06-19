@@ -99,6 +99,20 @@ def test_aggregation_collapses_shared_asset():
     assert "cannot be swapped: **2**" in report
 
 
+def test_metadata_urls_expands_ipfs_across_gateways():
+    # ipfs:// URI -> same CID across every configured gateway.
+    uri_hex = b"ipfs://bafyCID/meta.json".hex()
+    urls = alc._metadata_urls(uri_hex)
+    assert len(urls) == len(alc.IPFS_GATEWAYS)
+    assert "https://bafyCID.ipfs.dweb.link/meta.json" in urls
+    assert "https://ipfs.io/ipfs/bafyCID/meta.json" in urls
+
+
+def test_metadata_urls_passes_through_http():
+    uri_hex = b"https://lfgo.b-cdn.net/minttest/metadata_3547.json".hex()
+    assert alc._metadata_urls(uri_hex) == ["https://lfgo.b-cdn.net/minttest/metadata_3547.json"]
+
+
 def test_run_audit_with_injected_chain():
     # End-to-end with injected enumerator + metadata fetcher (no network) over a
     # LocalLayerStore fixture. Two on-chain tokens share edition #3547: the clean

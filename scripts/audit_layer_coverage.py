@@ -27,6 +27,7 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+import json
 import os
 import sys
 from collections import Counter
@@ -68,6 +69,50 @@ NETWORKS: dict[str, dict[str, Any]] = {
 # Bound concurrent metadata fetches so a large collection can't open thousands
 # of sockets at once.
 FETCH_CONCURRENCY = 16
+
+# Mainnet metadata lives on IPFS; a single gateway is flaky at collection scale.
+# The audit (not the live swap) tries several gateways with a couple of passes so
+# transient gateway timeouts don't silently shrink coverage. {cid}/{path} style.
+IPFS_GATEWAYS = [
+    "https://{cid}.ipfs.dweb.link/{path}",  # subdomain form (swap_meta default)
+    "https://ipfs.io/ipfs/{cid}/{path}",
+    "https://cloudflare-ipfs.com/ipfs/{cid}/{path}",
+    "https://{cid}.ipfs.w3s.link/{path}",
+]
+FETCH_ATTEMPTS = 3
+FETCH_TIMEOUT_SECONDS = 15
+
+
+def _metadata_urls(uri_hex: str) -> list[str]:
+    """Candidate URLs for a token's metadata: for ipfs:// URIs, the same CID
+    across several gateways; otherwise the http(s) URL as-is."""
+    try:
+        uri = bytes.fromhex(uri_hex).decode("ascii")
+    except ValueError:
+        return []
+    if not uri.startswith("ipfs://"):
+        return [uri]
+    cid, _, path = uri[len("ipfs://") :].partition("/")
+    return [g.format(cid=cid, path=path) for g in IPFS_GATEWAYS]
+
+
+async def fetch_metadata_resilient(
+    http: aiohttp.ClientSession, uri_hex: str
+) -> dict[str, Any] | None:
+    """Fetch metadata JSON, trying multiple IPFS gateways over a few passes so a
+    flaky gateway doesn't drop NFTs from the audit. Audit-local — does not touch
+    the swap path's fetch_metadata."""
+    urls = _metadata_urls(uri_hex)
+    timeout = aiohttp.ClientTimeout(total=FETCH_TIMEOUT_SECONDS)
+    for _ in range(FETCH_ATTEMPTS):
+        for url in urls:
+            try:
+                async with http.get(url, timeout=timeout) as resp:
+                    if resp.status == 200:
+                        return json.loads(await resp.text())  # type: ignore[no-any-return]
+            except Exception:
+                continue
+    return None
 
 
 @dataclass(frozen=True)
@@ -267,7 +312,7 @@ async def _amain() -> int:
     async with aiohttp.ClientSession() as http:
 
         async def fetch(uri_hex: str) -> dict[str, Any] | None:
-            return await swap_meta.fetch_metadata(uri_hex, http)
+            return await fetch_metadata_resilient(http, uri_hex)
 
         results = await run_audit(enum, fetch, store)
 
