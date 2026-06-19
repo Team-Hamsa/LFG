@@ -73,3 +73,28 @@ def test_backfill_keeps_duplicates_burned_and_unreadable(tmp_path):
     # idempotent re-run: row count stable
     _run(bf.run_backfill(conn, enum, fetch))
     assert conn.execute("SELECT COUNT(*) FROM onchain_nfts").fetchone()[0] == 4
+
+
+def test_retry_unreadable_recovers_then_stops(tmp_path):
+    conn = nft_index.init_db(str(tmp_path / "idx.db"))
+    # Seed one unreadable token (empty attrs, has uri).
+    nft_index.upsert(
+        conn,
+        nft_index.token_record(
+            {"nft_id": "ID_X", "flags": 0x10, "uri_hex": "dd", "is_burned": False}, None
+        ),
+    )
+    assert len(nft_index.retryable_unreadable(conn)) == 1
+
+    calls = {"n": 0}
+
+    async def fetch_first_fails(uri_hex):
+        # Fails on pass 1, succeeds on pass 2 -> exercises the loop.
+        calls["n"] += 1
+        if calls["n"] < 2:
+            return None
+        return {"name": "#5", "attributes": [{"trait_type": "Clothing", "value": "Hoodie"}]}
+
+    counts = _run(bf.retry_unreadable(conn, fetch_first_fails, max_passes=5))
+    assert counts["recovered"] == 1
+    assert nft_index.retryable_unreadable(conn) == []  # nothing left to retry

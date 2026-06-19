@@ -12,6 +12,7 @@ import sqlite3
 from dataclasses import dataclass
 from typing import Any
 
+import aiohttp
 from xrpl.asyncio.clients import AsyncWebsocketClient
 from xrpl.models.requests import Request
 
@@ -19,6 +20,49 @@ from lfg_core import swap_meta
 
 # lsfMutable bit on the on-ledger NFToken (Dynamic NFTs amendment).
 NFT_FLAG_MUTABLE = 0x0010
+
+# Mainnet metadata is on IPFS; one gateway is flaky at collection scale. The
+# index (not the live swap) tries several gateways over a few passes so
+# transient timeouts don't permanently shrink coverage. {cid}/{path} style.
+IPFS_GATEWAYS = [
+    "https://{cid}.ipfs.dweb.link/{path}",
+    "https://ipfs.io/ipfs/{cid}/{path}",
+    "https://cloudflare-ipfs.com/ipfs/{cid}/{path}",
+    "https://{cid}.ipfs.w3s.link/{path}",
+]
+FETCH_ATTEMPTS = 3
+FETCH_TIMEOUT_SECONDS = 15
+
+
+def _metadata_urls(uri_hex: str) -> list[str]:
+    """Candidate URLs for a token's metadata: ipfs:// -> same CID across several
+    gateways; otherwise the http(s) URL as-is."""
+    try:
+        uri = bytes.fromhex(uri_hex).decode("ascii")
+    except ValueError:
+        return []
+    if not uri.startswith("ipfs://"):
+        return [uri]
+    cid, _, path = uri[len("ipfs://") :].partition("/")
+    return [g.format(cid=cid, path=path) for g in IPFS_GATEWAYS]
+
+
+async def fetch_metadata_multi(
+    http: aiohttp.ClientSession, uri_hex: str
+) -> dict[str, Any] | None:
+    """Fetch metadata JSON, trying multiple IPFS gateways over a few passes.
+    Returns the parsed dict or None if every attempt fails."""
+    urls = _metadata_urls(uri_hex)
+    timeout = aiohttp.ClientTimeout(total=FETCH_TIMEOUT_SECONDS)
+    for _ in range(FETCH_ATTEMPTS):
+        for url in urls:
+            try:
+                async with http.get(url, timeout=timeout) as resp:
+                    if resp.status == 200:
+                        return json.loads(await resp.text())  # type: ignore[no-any-return]
+            except Exception:
+                continue
+    return None
 
 _SCHEMA = """
 CREATE TABLE IF NOT EXISTS onchain_nfts (
@@ -130,6 +174,30 @@ def live_nfts(conn: sqlite3.Connection) -> list[OnchainNft]:
     conn.row_factory = sqlite3.Row
     cur = conn.execute("SELECT * FROM onchain_nfts WHERE is_burned=0 ORDER BY nft_number, nft_id")
     return [_row_to_nft(r) for r in cur.fetchall()]
+
+
+def retryable_unreadable(conn: sqlite3.Connection) -> list[OnchainNft]:
+    """Non-burned tokens whose metadata never resolved (empty attributes) but
+    that still carry a URI — candidates for a re-fetch pass."""
+    conn.row_factory = sqlite3.Row
+    cur = conn.execute(
+        "SELECT * FROM onchain_nfts "
+        "WHERE is_burned=0 AND attributes_json='[]' "
+        "AND uri_hex IS NOT NULL AND uri_hex!='' ORDER BY nft_id"
+    )
+    return [_row_to_nft(r) for r in cur.fetchall()]
+
+
+def to_token(rec: OnchainNft) -> dict[str, Any]:
+    """Reconstruct the enumerated-token shape from an index row (for re-fetch)."""
+    return {
+        "nft_id": rec.nft_id,
+        "owner": rec.owner,
+        "is_burned": rec.is_burned,
+        "flags": NFT_FLAG_MUTABLE if rec.mutable else 0,
+        "uri_hex": rec.uri_hex,
+        "ledger_index": rec.ledger_index,
+    }
 
 
 async def enumerate_tokens(

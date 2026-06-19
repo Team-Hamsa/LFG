@@ -28,7 +28,7 @@ import aiohttp
 REPO_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
 sys.path.insert(0, REPO_ROOT)
 
-from lfg_core import nft_index, swap_meta  # noqa: E402
+from lfg_core import nft_index  # noqa: E402
 
 # Per-network enumeration defaults (mirrors the auditor).
 NETWORKS: dict[str, dict[str, Any]] = {
@@ -73,6 +73,43 @@ async def run_backfill(
     return {"total": len(tokens), "with_metadata": with_meta, "unreadable": len(tokens) - with_meta}
 
 
+async def retry_unreadable(
+    conn: sqlite3.Connection,
+    fetch_meta_fn: Callable[[str], Awaitable[dict[str, Any] | None]],
+    max_passes: int = 5,
+    concurrency: int = FETCH_CONCURRENCY,
+) -> dict[str, int]:
+    """Re-fetch metadata for tokens whose attributes never resolved, looping
+    until a pass recovers nothing (or max_passes). Idempotent. Returns
+    {recovered, remaining, passes}."""
+    sem = asyncio.Semaphore(concurrency)
+    recovered = 0
+    passes = 0
+    while passes < max_passes:
+        pending = nft_index.retryable_unreadable(conn)
+        if not pending:
+            break
+        passes += 1
+
+        async def refetch(rec: nft_index.OnchainNft) -> bool:
+            async with sem:
+                metadata = await fetch_meta_fn(rec.uri_hex)
+            if not isinstance(metadata, dict):
+                return False
+            nft_index.upsert(conn, nft_index.token_record(nft_index.to_token(rec), metadata))
+            return True
+
+        got = sum(await asyncio.gather(*(refetch(r) for r in pending)))
+        recovered += got
+        # Don't break on a zero-recovery pass: IPFS failures are transient, so a
+        # later pass may still succeed. max_passes bounds the loop instead.
+    return {
+        "recovered": recovered,
+        "remaining": len(nft_index.retryable_unreadable(conn)),
+        "passes": passes,
+    }
+
+
 async def _amain() -> int:
     from lfg_core import config
 
@@ -81,6 +118,11 @@ async def _amain() -> int:
     parser.add_argument("--issuer")
     parser.add_argument("--taxon", type=int)
     parser.add_argument("--clio")
+    parser.add_argument(
+        "--retry-unreadable",
+        action="store_true",
+        help="skip enumeration; only re-fetch tokens whose metadata never resolved",
+    )
     args = parser.parse_args()
 
     net = NETWORKS[args.network]
@@ -94,9 +136,16 @@ async def _amain() -> int:
         return await nft_index.enumerate_tokens(clio, issuer, taxon)
 
     async with aiohttp.ClientSession() as http:
-
+        # Multi-gateway fetch so flaky IPFS doesn't permanently shrink coverage.
         async def fetch(uri_hex: str) -> dict[str, Any] | None:
-            return await swap_meta.fetch_metadata(uri_hex, http)
+            return await nft_index.fetch_metadata_multi(http, uri_hex)
+
+        if args.retry_unreadable:
+            counts = await retry_unreadable(conn, fetch)
+            print(f"Network: {args.network}  DB: {nft_index.index_db_path(args.network)}")
+            print(f"  Recovered: {counts['recovered']} (over {counts['passes']} pass(es))")
+            print(f"  Still unreadable: {counts['remaining']}")
+            return 0
 
         counts = await run_backfill(conn, enum, fetch)
 
