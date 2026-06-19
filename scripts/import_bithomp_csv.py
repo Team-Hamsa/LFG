@@ -44,11 +44,12 @@ def _is_burned(row: dict[str, str]) -> bool:
     return False
 
 
-def csv_record(row: dict[str, str]) -> nft_index.OnchainNft:
+def csv_record(row: dict[str, str], force_burned: bool = False) -> nft_index.OnchainNft:
     """Map one Bithomp CSV row to an OnchainNft. Pure — no I/O. Attributes come
     from `Attribute <TraitType>` columns, normalized the same way the swap path
     does; `mutable` is unknown from a CSV (left None, filled later by the
-    listener); `uri_hex` is the hex of the CSV's decoded URI."""
+    listener); `uri_hex` is the hex of the CSV's decoded URI. `force_burned`
+    marks every row burned (for a separate burned-only export with no flag col)."""
     raw_attrs = [
         {"trait_type": key[len(_ATTR_PREFIX) :], "value": (value or "").strip()}
         for key, value in row.items()
@@ -62,7 +63,7 @@ def csv_record(row: dict[str, str]) -> nft_index.OnchainNft:
         nft_id=(row.get("NFT ID") or "").strip(),
         nft_number=swap_meta.extract_nft_number(name),
         owner=(row.get("Owner") or "").strip() or None,
-        is_burned=_is_burned(row),
+        is_burned=force_burned or _is_burned(row),
         mutable=None,
         uri_hex=uri.encode("ascii", "ignore").hex() if uri else "",
         body=body,
@@ -72,14 +73,15 @@ def csv_record(row: dict[str, str]) -> nft_index.OnchainNft:
     )
 
 
-def import_csv(conn: sqlite3.Connection, path: str) -> dict[str, int]:
+def import_csv(conn: sqlite3.Connection, path: str, force_burned: bool = False) -> dict[str, int]:
     """Import every row of a Bithomp CSV into the index. Idempotent (upsert by
-    nft_id). Returns {imported, skipped} (skipped = rows with no NFT ID)."""
+    nft_id). `force_burned` marks all rows burned (separate burned export).
+    Returns {imported, skipped} (skipped = rows with no NFT ID)."""
     imported = 0
     skipped = 0
     with open(path, encoding="utf-8-sig", newline="") as f:
         for row in csv.DictReader(f):
-            rec = csv_record(row)
+            rec = csv_record(row, force_burned=force_burned)
             if not rec.nft_id:
                 skipped += 1
                 continue
@@ -94,11 +96,16 @@ def main() -> int:
     parser = argparse.ArgumentParser(description="Import a Bithomp collection CSV into the index.")
     parser.add_argument("--network", choices=["mainnet", "testnet"], default=config.XRPL_NETWORK)
     parser.add_argument("--csv", required=True, help="path to the Bithomp CSV export")
+    parser.add_argument(
+        "--burned",
+        action="store_true",
+        help="mark every row burned (for a separate burned-only export)",
+    )
     args = parser.parse_args()
 
     db_path = nft_index.index_db_path(args.network)
     conn = nft_index.init_db(db_path)
-    counts = import_csv(conn, args.csv)
+    counts = import_csv(conn, args.csv, force_burned=args.burned)
     print(f"Network: {args.network}  DB: {db_path}")
     print(f"  Imported: {counts['imported']}  Skipped (no NFT ID): {counts['skipped']}")
     return 0
