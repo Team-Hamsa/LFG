@@ -187,6 +187,34 @@ def retryable_unreadable(conn: sqlite3.Connection) -> list[OnchainNft]:
     return [_row_to_nft(r) for r in cur.fetchall()]
 
 
+def collection_anomalies(records: list[OnchainNft], max_edition: int) -> dict[str, Any]:
+    """Collection-integrity report over LIVE token records (pure, no I/O):
+    - missing: editions in 1..max_edition with no live token (burned, never re-minted)
+    - multi_live: {edition: count} for editions with >1 live token (failed-burn dupes)
+    - out_of_range: nft_ids of live tokens whose edition is outside 1..max_edition
+    - unparsed: nft_ids of live tokens whose name yielded no edition number"""
+    from collections import Counter
+
+    present: Counter[int] = Counter()
+    out_of_range: list[str] = []
+    unparsed: list[str] = []
+    for r in records:
+        if r.nft_number is None:
+            unparsed.append(r.nft_id)
+        elif 1 <= r.nft_number <= max_edition:
+            present[r.nft_number] += 1
+        else:
+            out_of_range.append(r.nft_id)
+    missing = [n for n in range(1, max_edition + 1) if n not in present]
+    multi_live = {n: c for n, c in sorted(present.items()) if c > 1}
+    return {
+        "missing": missing,
+        "multi_live": multi_live,
+        "out_of_range": out_of_range,
+        "unparsed": unparsed,
+    }
+
+
 def to_token(rec: OnchainNft) -> dict[str, Any]:
     """Reconstruct the enumerated-token shape from an index row (for re-fetch)."""
     return {

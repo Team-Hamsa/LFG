@@ -102,6 +102,21 @@ def test_retryable_unreadable_query(tmp_path):
     assert ids == ["RETRY"]
 
 
+def test_collection_anomalies():
+    recs = [
+        _nft("A", number=1),
+        _nft("B", number=2),
+        _nft("C", number=2),  # edition 2 has two live tokens
+        _nft("D", number=9),  # out of range (max=5)
+        _nft("E", number=None),  # unparsed name
+    ]
+    a = nft_index.collection_anomalies(recs, max_edition=5)
+    assert a["missing"] == [3, 4, 5]  # 1,2 present; 3,4,5 absent
+    assert a["multi_live"] == {2: 2}
+    assert a["out_of_range"] == ["D"]
+    assert a["unparsed"] == ["E"]
+
+
 def test_token_record_with_metadata():
     token = {"nft_id": "AAA", "owner": "rO", "is_burned": False, "flags": 0x10, "uri_hex": "6868"}
     meta = {
