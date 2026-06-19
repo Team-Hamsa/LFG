@@ -56,6 +56,12 @@ Out of scope:
   shared `aiohttp` session, bounded concurrency).
 - CDN layer tree via `lfg_core.layer_store` (the same store the swap uses).
 
+This is primarily a **testnet** tool — testnet metadata is on BunnyCDN, so a run
+completes in seconds and is authoritative. `--network mainnet` works but mainnet
+metadata is on IPFS (slow/flaky at collection scale); a meaningful chunk lands in
+the "unreadable metadata" bucket, so a mainnet run is best-effort, not
+authoritative. Making mainnet authoritative is deferred (see DB-sync follow-up).
+
 Body class is derived with `swap_meta.detect_body` (`Straight`→male,
 `Curved`→female, `Ape`→ape, else `skeleton`), matching the swap path.
 
