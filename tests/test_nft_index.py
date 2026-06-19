@@ -43,8 +43,19 @@ def test_index_db_path_per_network(monkeypatch):
 def test_init_db_creates_table(tmp_path):
     conn = nft_index.init_db(str(tmp_path / "x.db"))
     cols = {r[1] for r in conn.execute("PRAGMA table_info(onchain_nfts)")}
-    assert {"nft_id", "nft_number", "owner", "is_burned", "mutable", "uri_hex",
-            "body", "attributes_json", "image", "ledger_index", "last_synced_at"} <= cols
+    assert {
+        "nft_id",
+        "nft_number",
+        "owner",
+        "is_burned",
+        "mutable",
+        "uri_hex",
+        "body",
+        "attributes_json",
+        "image",
+        "ledger_index",
+        "last_synced_at",
+    } <= cols
 
 
 def test_upsert_inserts_then_updates(tmp_path):
@@ -71,8 +82,10 @@ def test_token_record_with_metadata():
     meta = {
         "name": "Let's Effing Go! #3547",
         "image": "https://img/x.png",
-        "attributes": [{"trait_type": "Body", "value": "Curved Green"},
-                       {"trait_type": "Clothing", "value": "Wonder"}],
+        "attributes": [
+            {"trait_type": "Body", "value": "Curved Green"},
+            {"trait_type": "Clothing", "value": "Wonder"},
+        ],
     }
     rec = nft_index.token_record(token, meta)
     assert rec.nft_id == "AAA"
