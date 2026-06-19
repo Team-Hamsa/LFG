@@ -176,6 +176,8 @@ def _parse_nft_info(result: dict[str, Any]) -> dict[str, Any]:
         "flags": int(result.get("flags") or 0),
         "uri_hex": result.get("uri", "") or "",
         "is_burned": bool(result.get("is_burned")),
+        "issuer": result.get("issuer"),
+        "taxon": result.get("nft_taxon"),
     }
 
 

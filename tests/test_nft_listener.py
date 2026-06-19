@@ -25,6 +25,8 @@ def test_parse_nft_info():
         "is_burned": False,
         "flags": 16,
         "uri": "6868",
+        "issuer": "rIssuer",
+        "nft_taxon": 1760,
     }
     parsed = xrpl_ops._parse_nft_info(result)
     assert parsed == {
@@ -33,6 +35,8 @@ def test_parse_nft_info():
         "flags": 16,
         "uri_hex": "6868",
         "is_burned": False,
+        "issuer": "rIssuer",
+        "taxon": 1760,
     }
 
 
@@ -138,3 +142,36 @@ def test_apply_tx_mint_accept_burn_modify(tmp_path):
 
     changed_attrs = [a["value"] for a in json.loads(rows["CHANGED"]["attributes_json"])]
     assert "Wonder" in changed_attrs and "Old" not in changed_attrs
+
+
+def test_apply_tx_skips_foreign_collection(tmp_path):
+    # accept/burn/modify arrive for ALL NFTs on the network; is_ours scopes upserts.
+    conn = nft_index.init_db(str(tmp_path / "idx.db"))
+
+    async def fetch_token(nft_id):
+        return {"nft_id": nft_id, "owner": "rX", "flags": 0, "uri_hex": "", "issuer": "rOTHER"}
+
+    async def fetch_meta(uri_hex):
+        return None
+
+    foreign = {"TransactionType": "NFTokenAcceptOffer", "meta": {"nftoken_id": "FOREIGN"}}
+    _run(
+        nft_listener.apply_tx(
+            conn, foreign, fetch_token, fetch_meta, is_ours=lambda t: t.get("issuer") == "rMINE"
+        )
+    )
+    assert conn.execute("SELECT COUNT(*) FROM onchain_nfts").fetchone()[0] == 0
+
+
+def test_burn_ignores_unknown_token(tmp_path):
+    conn = nft_index.init_db(str(tmp_path / "idx.db"))
+
+    async def fetch_token(nft_id):
+        return None
+
+    async def fetch_meta(uri_hex):
+        return None
+
+    _run(nft_listener.apply_tx(conn, BURN, fetch_token, fetch_meta))
+    # GONE was never in the index -> burn adds nothing
+    assert conn.execute("SELECT COUNT(*) FROM onchain_nfts").fetchone()[0] == 0
