@@ -66,6 +66,9 @@ async def _listen(network: str, issuer: str, taxon: int, clio: str) -> None:
         async def fetch_token(nft_id: str) -> dict[str, Any] | None:
             return await xrpl_ops.nft_info(nft_id, clio)
 
+        def is_ours(token: dict[str, Any]) -> bool:
+            return token.get("issuer") == issuer and int(token.get("taxon") or -1) == taxon
+
         while True:
             try:
                 async with AsyncWebsocketClient(clio) as client:
@@ -82,7 +85,7 @@ async def _listen(network: str, issuer: str, taxon: int, clio: str) -> None:
                             # still scope correctness, so only skip clear mismatches.
                             if tx.get("TransactionType") == "NFTokenMint":
                                 continue
-                        await nft_listener.apply_tx(conn, tx, fetch_token, fetch_meta)
+                        await nft_listener.apply_tx(conn, tx, fetch_token, fetch_meta, is_ours)
             except Exception as e:
                 logging.warning(f"[{network}] stream error: {e}; reconnecting in {backoff}s")
                 await asyncio.sleep(backoff)

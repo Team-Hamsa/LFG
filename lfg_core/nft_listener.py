@@ -57,12 +57,9 @@ def affected_nft_ids(tx: dict[str, Any]) -> list[str]:
 
 
 def _set_burned(conn: sqlite3.Connection, nft_id: str) -> None:
-    cur = conn.execute("UPDATE onchain_nfts SET is_burned=1 WHERE nft_id=?", (nft_id,))
-    if cur.rowcount == 0:
-        # never seen this token; record it as a burned stub
-        nft_index.upsert(
-            conn, nft_index.token_record({"nft_id": nft_id, "is_burned": True}, None)
-        )
+    """Flip is_burned on a known token. Unknown tokens are ignored — a burn of an
+    NFT outside our collection must not add a stub row to the index."""
+    conn.execute("UPDATE onchain_nfts SET is_burned=1 WHERE nft_id=?", (nft_id,))
     conn.commit()
 
 
@@ -71,11 +68,14 @@ async def apply_tx(
     tx: dict[str, Any],
     fetch_token_fn: FetchTokenFn,
     fetch_meta_fn: FetchMetaFn,
+    is_ours: Callable[[dict[str, Any]], bool] | None = None,
 ) -> None:
-    """Update the index for one NFToken transaction. Burn flips the flag;
-    mint/accept/modify (re)fetch the token's current owner/flags/uri (nft_info —
-    the Kinesis pattern) and its metadata, then upsert. Per-id errors are logged,
-    never raised, so a bad tx can't kill the stream."""
+    """Update the index for one NFToken transaction. Burn flips the flag (only on
+    tokens already in the index); mint/accept/modify (re)fetch the token's current
+    owner/flags/uri (nft_info — the Kinesis pattern) and its metadata, then upsert.
+    `is_ours(token)` scopes upserts to the collection (skips foreign NFTs the
+    network-wide stream carries). Per-id errors are logged, never raised, so a bad
+    tx can't kill the stream."""
     kind = classify_tx(tx)
     if kind is None:
         return
@@ -88,6 +88,8 @@ async def apply_tx(
             if not token:
                 logging.warning(f"apply_tx: could not resolve token {nft_id} ({kind})")
                 continue
+            if is_ours is not None and not is_ours(token):
+                continue  # NFT outside our collection; ignore
             uri_hex = token.get("uri_hex") or ""
             metadata = await fetch_meta_fn(uri_hex) if uri_hex else None
             nft_index.upsert(conn, nft_index.token_record(token, metadata))
