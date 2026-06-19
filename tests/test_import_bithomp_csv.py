@@ -82,6 +82,13 @@ def test_burned_column_is_detected():
     assert imp.csv_record(row2).is_burned is True
 
 
+def test_force_burned_marks_whole_file():
+    # A separate burned-export file has no Burned column; force_burned marks all.
+    row = {"NFT ID": "00B", "Name": "#2003", "Owner": "", "Attribute Body": "Straight Wood"}
+    assert imp.csv_record(row).is_burned is False
+    assert imp.csv_record(row, force_burned=True).is_burned is True
+
+
 def test_import_csv_upserts(tmp_path):
     csv_path = tmp_path / "data.csv"
     _write_csv(str(csv_path), ROW_MALE)

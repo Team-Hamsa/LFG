@@ -33,4 +33,4 @@ onchain_*.db
 onchain_*.db-*
 
 # Bithomp collection CSV exports (source data, not code)
-LFGOdata*.csv
+LFGO*.csv
