@@ -47,9 +47,7 @@ def _metadata_urls(uri_hex: str) -> list[str]:
     return [g.format(cid=cid, path=path) for g in IPFS_GATEWAYS]
 
 
-async def fetch_metadata_multi(
-    http: aiohttp.ClientSession, uri_hex: str
-) -> dict[str, Any] | None:
+async def fetch_metadata_multi(http: aiohttp.ClientSession, uri_hex: str) -> dict[str, Any] | None:
     """Fetch metadata JSON, trying multiple IPFS gateways over a few passes.
     Returns the parsed dict or None if every attempt fails."""
     urls = _metadata_urls(uri_hex)
@@ -63,6 +61,7 @@ async def fetch_metadata_multi(
             except Exception:
                 continue
     return None
+
 
 _SCHEMA = """
 CREATE TABLE IF NOT EXISTS onchain_nfts (
