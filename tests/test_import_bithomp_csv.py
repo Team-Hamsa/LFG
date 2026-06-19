@@ -17,9 +17,9 @@ os.environ.setdefault("BUNNY_PULL_ZONE", "nft.pullzone.example")
 sys.path.insert(
     0, os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "scripts")
 )
-from lfg_core import nft_index  # noqa: E402
-
 import import_bithomp_csv as imp  # noqa: E402
+
+from lfg_core import nft_index  # noqa: E402
 
 HEADER = (
     '"NFT ID","Issuer","Taxon","Serial","Name","URI","Owner","Image",'
