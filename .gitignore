@@ -27,3 +27,7 @@ trait_layers/
 
 # Generated audit reports
 reports/
+
+# On-chain NFT index DBs (regenerable via backfill)
+onchain_*.db
+onchain_*.db-*
