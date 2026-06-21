@@ -63,7 +63,7 @@ The following features are scoped for the hackathon sprint. Each links to its tr
 - [ ] [#26 Stand up testnet BRIX/XRP AMM pool](../../issues/26)
 
 ### Research
-- [ ] [#49 Explore: AI agent integration via XRPL Payments skill](../../issues/49)
+- [x] [#49 Explore: AI agent integration via XRPL Payments skill](../../issues/49)
 
 ---
 
