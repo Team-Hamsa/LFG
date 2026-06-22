@@ -266,6 +266,36 @@ CREATE TABLE burned_nfts (
 - **Purpose:** lets the trait-swap XRP-fee path (`get_amm_xrp_cost` / `buy_and_burn`) quote and clear on testnet.
 - **Recreate after a testnet reset:** `.venv/bin/python scripts/testnet_amm_setup.py` (idempotent).
 
+### On-chain NFT index (per-`nft_id`, listener-fresh)
+
+The chain holds **multiple NFTokens per edition number** (duplicates from
+trait-swaps / reminting). The app's `lfg_nfts.db` `LFG` table is keyed one row
+per edition and **cannot** represent those duplicates, so swap tooling reads a
+dedicated per-`nft_id` index instead.
+
+- **Store:** per-network SQLite files `onchain_testnet.db` / `onchain_mainnet.db`
+  (gitignored, regenerable), one `onchain_nfts` table keyed by `nft_id`. Built by
+  `lfg_core/nft_index.py`; kept fresh by `lfg_core/nft_listener.py`.
+- **Backfill (one-time / after a reset):**
+  `.venv/bin/python scripts/backfill_onchain.py --network testnet|mainnet`
+  (or `onchain_listener.py … snapshot`). Idempotent. Mainnet metadata is on IPFS
+  (slow/flaky); unreadable tokens are recorded with empty attributes, not dropped.
+- **Preferred mainnet source — Bithomp CSV:** clio+IPFS backfill leaves ~20% of
+  mainnet unreadable. A Bithomp export (CDN-cached, metadata pre-parsed) is far
+  more complete: `scripts/import_bithomp_csv.py --network mainnet --csv LFGOdata.csv`
+  for the live set, and `--csv LFGOburned.csv --burned` for the burned history
+  (separate burned-only export has no flag column). This cut unreadable-live from
+  1174 → 1 and captured full per-edition history (718 editions with multiple
+  tokens). CSVs are gitignored (`LFGO*.csv`).
+- **Live sync (pm2):** `lfg-index-testnet` + `lfg-index-mainnet` run
+  `scripts/onchain_listener.py --network <net> listen` — subscribe to the clio tx
+  stream and apply NFTokenMint / AcceptOffer / Burn / **Modify** (in-place trait
+  changes from swaps) to the index, resolving post-transfer owners via `nft_info`.
+- **Consumer:** `scripts/audit_layer_coverage.py` reads this index by default
+  (instant, offline, complete); pass `--live` to bypass it and scrape the chain.
+- clio endpoints: mainnet `wss://s2-clio.ripple.com`, testnet
+  `wss://clio.altnet.rippletest.net:51233`.
+
 ## Important Notes
 
 1. **Token Trustline Required**: Users must set up a trustline for LFGO tokens before receiving payment instructions. The `/letsgo` command provides a "Set LFGO Trustline" button.

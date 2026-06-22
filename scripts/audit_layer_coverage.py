@@ -192,6 +192,36 @@ async def run_audit(
     return await asyncio.gather(*(audit_one(t) for t in tokens))
 
 
+async def run_audit_from_db(conn: Any, store: Any) -> list[NftResult]:
+    """Audit the live NFTs already recorded in the on-chain index DB — instant
+    and offline (no chain/IPFS). Tokens with empty cached attributes (metadata
+    was unfetchable at index time) are surfaced as errors, not silently passed."""
+    from lfg_core import nft_index
+
+    available = await build_available_sets(store)
+    results: list[NftResult] = []
+    for n in nft_index.live_nfts(conn):
+        if not n.attributes:
+            results.append(
+                NftResult(
+                    nft_id=n.nft_id,
+                    number=n.nft_number,
+                    body=n.body,
+                    error="no cached metadata (re-backfill)",
+                )
+            )
+            continue
+        results.append(
+            NftResult(
+                nft_id=n.nft_id,
+                number=n.nft_number,
+                body=n.body,
+                missing=audit_attributes(n.body, n.attributes, available),
+            )
+        )
+    return results
+
+
 def format_reports(results: list[NftResult], timestamp: str, network: str) -> str:
     """Markdown report: per-NFT failures + aggregated upload worklist."""
     failures = [r for r in results if r.missing]
@@ -256,6 +286,11 @@ async def _amain() -> int:
     parser.add_argument(
         "--report-dir", default=os.path.join(REPO_ROOT, "reports"), help="where to write the report"
     )
+    parser.add_argument(
+        "--live",
+        action="store_true",
+        help="enumerate the chain directly instead of reading the on-chain index DB",
+    )
     args = parser.parse_args()
 
     net = NETWORKS[args.network]
@@ -265,15 +300,29 @@ async def _amain() -> int:
 
     store = layer_store.get_layer_store()
 
-    async def enum() -> list[dict[str, Any]]:
-        return await enumerate_onchain(clio, issuer, taxon)
+    if args.live:
 
-    async with aiohttp.ClientSession() as http:
+        async def enum() -> list[dict[str, Any]]:
+            return await enumerate_onchain(clio, issuer, taxon)
 
-        async def fetch(uri_hex: str) -> dict[str, Any] | None:
-            return await swap_meta.fetch_metadata(uri_hex, http)
+        async with aiohttp.ClientSession() as http:
 
-        results = await run_audit(enum, fetch, store)
+            async def fetch(uri_hex: str) -> dict[str, Any] | None:
+                return await swap_meta.fetch_metadata(uri_hex, http)
+
+            results = await run_audit(enum, fetch, store)
+    else:
+        from lfg_core import nft_index
+
+        db_path = nft_index.index_db_path(args.network)
+        if not os.path.isfile(db_path):
+            print(
+                f"No index DB at {db_path}. Run "
+                f"`scripts/backfill_onchain.py --network {args.network}` first, "
+                f"or pass --live to enumerate the chain directly."
+            )
+            return 2
+        results = await run_audit_from_db(nft_index.init_db(db_path), store)
 
     timestamp = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H-%M-%SZ")
     report = format_reports(results, timestamp, args.network)
