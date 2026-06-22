@@ -146,5 +146,54 @@ def test_run_audit_with_injected_chain():
         assert by_id["CCC"].error is not None
 
 
+def test_run_audit_from_db_flags_wonder_variant():
+    # The index DB holds both #3547 variants; auditing it flags only the Wonder
+    # one. This is the DB-sourced path (no network, no IPFS).
+    import tempfile
+
+    from lfg_core import layer_store, nft_index
+
+    with tempfile.TemporaryDirectory() as tmp:
+        base = os.path.join(tmp, "layers")
+        for trait, value in [("Body", "Curved Green"), ("Clothing", "Crop Hoodie Pink")]:
+            d = os.path.join(base, "female", trait)
+            os.makedirs(d, exist_ok=True)
+            open(os.path.join(d, f"{value}.png"), "wb").write(b"x")
+        store = layer_store.LocalLayerStore(base)
+
+        conn = nft_index.init_db(os.path.join(tmp, "idx.db"))
+        clean = nft_index.token_record(
+            {"nft_id": "ID_CLEAN", "flags": 0x10, "uri_hex": "aa", "is_burned": False},
+            {
+                "name": "#3547",
+                "attributes": [
+                    {"trait_type": "Body", "value": "Curved Green"},
+                    {"trait_type": "Clothing", "value": "Crop Hoodie Pink"},
+                ],
+            },
+        )
+        wonder = nft_index.token_record(
+            {"nft_id": "ID_WONDER", "flags": 0x10, "uri_hex": "bb", "is_burned": False},
+            {
+                "name": "#3547",
+                "attributes": [
+                    {"trait_type": "Body", "value": "Curved Green"},
+                    {"trait_type": "Clothing", "value": "Wonder"},
+                ],
+            },
+        )
+        nft_index.upsert(conn, clean)
+        nft_index.upsert(conn, wonder)
+
+        loop = asyncio.new_event_loop()
+        try:
+            results = loop.run_until_complete(alc.run_audit_from_db(conn, store))
+        finally:
+            loop.close()
+        by_id = {r.nft_id: r for r in results}
+        assert by_id["ID_CLEAN"].missing == []
+        assert [m.asset() for m in by_id["ID_WONDER"].missing] == ["female/Clothing/Wonder"]
+
+
 if __name__ == "__main__":
     sys.exit(pytest.main([__file__, "-v"]))
