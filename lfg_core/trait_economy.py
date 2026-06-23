@@ -161,7 +161,7 @@ def verify_completeness(characters: dict[int, OnchainNft], genesis: Genesis) -> 
         seen: Counter[str] = Counter(
             a["trait_type"] for a in rec.attributes if a.get("trait_type") in NON_BODY_SLOTS
         )
-        bad_slots = [s for s in NON_BODY_SLOTS if seen.get(s, 0) > 1]
+        bad_slots = [s for s in NON_BODY_SLOTS if seen.get(s, 0) != 1]
         if bad_slots:
             slot_anomalies[edition] = bad_slots
 

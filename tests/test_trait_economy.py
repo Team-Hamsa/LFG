@@ -14,7 +14,7 @@ os.environ.setdefault("TOKEN_CURRENCY_HEX", "4C46474F000000000000000000000000000
 os.environ.setdefault("XRPL_NETWORK", "testnet")
 os.environ.setdefault("BUNNY_PULL_ZONE", "nft.pullzone.example")
 
-from lfg_core import nft_index, trait_economy  # noqa: E402
+from lfg_core import nft_index, swap_meta, trait_economy  # noqa: E402
 
 
 def _attrs(body="Straight", **slots):
@@ -143,7 +143,8 @@ def test_verify_conservation_flags_ghost_edition_in_census():
 
 
 def test_verify_completeness_ok_for_normalized_characters():
-    a = _nft("a", 1, body_class="male", attrs=_attrs(body="Straight", Background="Sky"))
+    attrs = swap_meta.normalize_attributes(_attrs(body="Straight", Background="Sky"))
+    a = _nft("a", 1, body_class="male", attrs=attrs)
     g = trait_economy.build_genesis({1: a})
     rep = trait_economy.verify_completeness({1: a}, g)
     assert rep.ok
