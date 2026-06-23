@@ -31,7 +31,7 @@ sys.path.insert(0, os.path.dirname(__file__))
 
 import _economy_deps as deps  # noqa: E402
 
-from lfg_core import cdn, config, swap_meta  # noqa: E402
+from lfg_core import cdn, config, swap_meta, xrpl_ops  # noqa: E402
 
 
 def _source_attributes(conn: object, source_edition: int) -> list[dict[str, str]]:
@@ -83,8 +83,6 @@ async def _amain(args: argparse.Namespace) -> int:
         config.ECONOMY_CDN_FOLDER, path, json.dumps(meta, indent=2).encode(), "application/json"
     )
     print(f"metadata: {meta_url}")
-
-    from lfg_core import xrpl_ops
 
     nft_id = await xrpl_ops.mint_nft(
         meta_url, config.SWAP_TAXON, config.SWAP_ISSUER_ADDRESS, flags=config.ECONOMY_NFT_FLAGS
