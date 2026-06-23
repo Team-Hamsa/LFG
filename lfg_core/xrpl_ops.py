@@ -39,8 +39,11 @@ def convert_str_to_hex(string: str) -> str:
     return string.encode("utf-8").hex().upper()
 
 
-async def mint_nft(metadata_cdn_url: str, taxon: int, issuer: str) -> str | None:
-    """Mint an NFT on XRPL; returns the NFToken ID or None."""
+async def mint_nft(
+    metadata_cdn_url: str, taxon: int, issuer: str, flags: int | None = None
+) -> str | None:
+    """Mint an NFT on XRPL; returns the NFToken ID or None. `flags` overrides
+    config.NFT_FLAGS (e.g. burnable economy characters / soulbound buckets)."""
     try:
         wallet = Wallet.from_seed(config.SEED)
         client = JsonRpcClient(config.JSON_RPC_URL)
@@ -50,7 +53,8 @@ async def mint_nft(metadata_cdn_url: str, taxon: int, issuer: str) -> str | None
             "uri": convert_str_to_hex(metadata_cdn_url),
             "nftoken_taxon": taxon,
             "transfer_fee": config.NFT_TRANSFER_FEE,
-            "flags": config.NFT_FLAGS,
+            "flags": config.NFT_FLAGS if flags is None else flags,
+            "source_tag": config.SOURCE_TAG,
         }
         if issuer != wallet.classic_address:
             kwargs["issuer"] = issuer
@@ -108,6 +112,7 @@ async def create_nft_offer(nft_id: str, destination: str, amount: Any = "0") -> 
             amount=amount,
             nftoken_id=nft_id,
             flags=NFTokenCreateOfferFlag.TF_SELL_NFTOKEN,
+            source_tag=config.SOURCE_TAG,
         )
 
         response = await asyncio.to_thread(submit_and_wait, offer, client, wallet)
@@ -263,6 +268,7 @@ async def buy_and_burn(
             "account": wallet.classic_address,
             "destination": issuer,
             "amount": IssuedCurrencyAmount(currency=currency, issuer=issuer, value=value),
+            "source_tag": config.SOURCE_TAG,
         }
         if max_xrp is not None:
             kwargs["send_max"] = xrp_to_drops(Decimal(max_xrp))
@@ -285,7 +291,11 @@ async def burn_nft(nft_id: str, owner: str | None = None) -> str | None:
     try:
         wallet = Wallet.from_seed(config.SEED)
         client = JsonRpcClient(config.JSON_RPC_URL)
-        kwargs: dict[str, Any] = {"account": wallet.classic_address, "nftoken_id": nft_id}
+        kwargs: dict[str, Any] = {
+            "account": wallet.classic_address,
+            "nftoken_id": nft_id,
+            "source_tag": config.SOURCE_TAG,
+        }
         if owner and owner != wallet.classic_address:
             kwargs["owner"] = owner
         burn = NFTokenBurn(**kwargs)
@@ -336,6 +346,7 @@ async def modify_nft(nft_id: str, owner: str, uri: str) -> str | None:
             "account": wallet.classic_address,
             "nftoken_id": nft_id,
             "uri": convert_str_to_hex(uri),
+            "source_tag": config.SOURCE_TAG,
         }
         if owner and owner != wallet.classic_address:
             kwargs["owner"] = owner
