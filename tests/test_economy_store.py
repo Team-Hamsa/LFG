@@ -46,3 +46,25 @@ def test_clear_genesis_empties_baseline():
     economy_store.freeze_genesis(conn, g, {})
     economy_store.clear_genesis(conn)
     assert economy_store.genesis_exists(conn) is False
+
+
+def test_live_state_readers_empty_then_populated():
+    conn = _conn()
+    assert economy_store.read_bucket_assets(conn) == []
+    assert economy_store.read_bucket_bodies(conn) == []
+    assert economy_store.read_trait_tokens(conn) == []
+
+    conn.execute(
+        "INSERT INTO bucket_assets (owner, slot, value, count) VALUES (?, ?, ?, ?)",
+        ("rA", "Background", "Sky", 3),
+    )
+    conn.execute("INSERT INTO bucket_bodies (owner, edition) VALUES (?, ?)", ("rA", 7))
+    conn.execute(
+        "INSERT INTO trait_tokens (nft_id, owner, slot, value) VALUES (?, ?, ?, ?)",
+        ("tok1", "rB", "Head", "Crown"),
+    )
+    conn.commit()
+
+    assert economy_store.read_bucket_assets(conn) == [("rA", "Background", "Sky", 3)]
+    assert economy_store.read_bucket_bodies(conn) == [("rA", 7)]
+    assert economy_store.read_trait_tokens(conn) == [("tok1", "rB", "Head", "Crown")]

@@ -104,3 +104,28 @@ def read_meta(conn: sqlite3.Connection, key: str) -> str | None:
     cur = conn.execute("SELECT value FROM genesis_meta WHERE key = ?", (key,))
     row = cur.fetchone()
     return None if row is None else str(row[0])
+
+
+def read_bucket_assets(conn: sqlite3.Connection) -> list[tuple[str, str, str, int]]:
+    return [
+        (str(owner), str(slot), str(value), int(count))
+        for owner, slot, value, count in conn.execute(
+            "SELECT owner, slot, value, count FROM bucket_assets"
+        )
+    ]
+
+
+def read_bucket_bodies(conn: sqlite3.Connection) -> list[tuple[str, int]]:
+    return [
+        (str(owner), int(edition))
+        for owner, edition in conn.execute("SELECT owner, edition FROM bucket_bodies")
+    ]
+
+
+def read_trait_tokens(conn: sqlite3.Connection) -> list[tuple[str, str, str, str]]:
+    return [
+        (str(nft_id), str(owner), str(slot), str(value))
+        for nft_id, owner, slot, value in conn.execute(
+            "SELECT nft_id, owner, slot, value FROM trait_tokens"
+        )
+    ]
