@@ -48,6 +48,41 @@ def test_clear_genesis_empties_baseline():
     assert economy_store.genesis_exists(conn) is False
 
 
+def test_genesis_exists_keys_off_complete_flag_not_table_rows():
+    # Rows in a genesis table without the completion flag (e.g. an interrupted
+    # freeze) must NOT read as a complete genesis.
+    conn = _conn()
+    conn.execute(
+        "INSERT INTO trait_genesis (slot, value, genesis_count) VALUES (?, ?, ?)",
+        ("Background", "Sky", 1),
+    )
+    conn.commit()
+    assert economy_store.genesis_exists(conn) is False
+    # A full freeze writes the flag and flips existence to True.
+    g = trait_economy.Genesis(trait_counts={("Head", "None"): 1}, edition_bodies={1: ("S", "male")})
+    economy_store.freeze_genesis(conn, g, {"max_edition": "3535"})
+    assert economy_store.genesis_exists(conn) is True
+
+
+def test_freeze_genesis_replaces_atomically():
+    # A second freeze fully replaces the first (no leftover rows from the old set).
+    conn = _conn()
+    first = trait_economy.Genesis(
+        trait_counts={("Background", "Sky"): 5},
+        edition_bodies={1: ("S", "male"), 2: ("C", "female")},
+    )
+    economy_store.freeze_genesis(conn, first, {"max_edition": "2"})
+    second = trait_economy.Genesis(
+        trait_counts={("Head", "Crown"): 1},
+        edition_bodies={1: ("S", "male")},
+    )
+    economy_store.freeze_genesis(conn, second, {"max_edition": "1"})
+    got = economy_store.read_genesis(conn)
+    assert got.trait_counts == {("Head", "Crown"): 1}
+    assert got.edition_bodies == {1: ("S", "male")}
+    assert economy_store.read_meta(conn, "max_edition") == "1"
+
+
 def test_live_state_readers_empty_then_populated():
     conn = _conn()
     assert economy_store.read_bucket_assets(conn) == []

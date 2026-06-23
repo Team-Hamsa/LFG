@@ -9,6 +9,11 @@ import sqlite3
 
 from lfg_core import trait_economy
 
+# Written into genesis_meta as the final step of a freeze; genesis_exists keys
+# off this flag alone, so a partially-written (e.g. interrupted) genesis never
+# reads as complete.
+_GENESIS_COMPLETE_KEY = "genesis_complete"
+
 _ECONOMY_SCHEMA = """
 CREATE TABLE IF NOT EXISTS trait_genesis (
     slot          TEXT,
@@ -52,10 +57,10 @@ def init_economy_schema(conn: sqlite3.Connection) -> None:
 
 
 def genesis_exists(conn: sqlite3.Connection) -> bool:
-    cur = conn.execute("SELECT 1 FROM trait_genesis LIMIT 1")
-    if cur.fetchone() is not None:
-        return True
-    cur = conn.execute("SELECT 1 FROM edition_bodies LIMIT 1")
+    """True only if a genesis was fully written. Keyed off the genesis_complete
+    flag (not the presence of rows in either table), so an interrupted freeze is
+    never mistaken for a complete one."""
+    cur = conn.execute("SELECT 1 FROM genesis_meta WHERE key = ?", (_GENESIS_COMPLETE_KEY,))
     return cur.fetchone() is not None
 
 
@@ -69,8 +74,14 @@ def clear_genesis(conn: sqlite3.Connection) -> None:
 def freeze_genesis(
     conn: sqlite3.Connection, genesis: trait_economy.Genesis, meta: dict[str, str]
 ) -> None:
-    """Persist a genesis baseline (replacing any existing one)."""
-    clear_genesis(conn)
+    """Persist a genesis baseline, atomically replacing any existing one.
+
+    The DELETEs, the INSERTs, and the genesis_complete flag all land in a single
+    transaction (one commit at the end), so a crash mid-freeze leaves the prior
+    genesis intact rather than an empty/partial one."""
+    conn.execute("DELETE FROM trait_genesis")
+    conn.execute("DELETE FROM edition_bodies")
+    conn.execute("DELETE FROM genesis_meta")
     conn.executemany(
         "INSERT INTO trait_genesis (slot, value, genesis_count) VALUES (?, ?, ?)",
         [(slot, value, count) for (slot, value), count in genesis.trait_counts.items()],
@@ -82,6 +93,11 @@ def freeze_genesis(
     conn.executemany(
         "INSERT INTO genesis_meta (key, value) VALUES (?, ?)",
         list(meta.items()),
+    )
+    # The completeness flag is the last write before the single commit.
+    conn.execute(
+        "INSERT INTO genesis_meta (key, value) VALUES (?, ?)",
+        (_GENESIS_COMPLETE_KEY, "1"),
     )
     conn.commit()
 

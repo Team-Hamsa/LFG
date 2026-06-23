@@ -112,7 +112,11 @@ def main() -> int:
         return 2
 
     genesis = economy_store.read_genesis(conn)
-    max_edition = int(economy_store.read_meta(conn, "max_edition") or "3535")
+    max_edition_str = economy_store.read_meta(conn, "max_edition")
+    if max_edition_str is None:
+        print("Corrupt genesis: missing 'max_edition' in genesis_meta. Re-run freeze_genesis.py.")
+        return 2
+    max_edition = int(max_edition_str)
 
     live = nft_index.live_nfts(conn)
     canonical, _ = trait_economy.dedupe_editions(live, max_edition)
