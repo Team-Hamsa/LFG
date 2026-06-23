@@ -5,7 +5,9 @@
 
 from __future__ import annotations
 
+import json
 import sqlite3
+from typing import Any
 
 from lfg_core import trait_economy
 
@@ -46,6 +48,23 @@ CREATE TABLE IF NOT EXISTS trait_tokens (
     owner  TEXT,
     slot   TEXT,
     value  TEXT
+);
+CREATE TABLE IF NOT EXISTS bucket_tokens (
+    owner      TEXT PRIMARY KEY,
+    nft_id     TEXT,
+    uri_hex    TEXT,
+    updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+);
+CREATE TABLE IF NOT EXISTS supply_changes (
+    id                INTEGER PRIMARY KEY AUTOINCREMENT,
+    kind              TEXT,   -- 'mint' (supply +) | 'burn' (supply -)
+    edition           INTEGER,
+    body_value        TEXT,
+    body_class        TEXT,
+    trait_deltas_json TEXT,   -- {"slot|value": signed_count, ...}
+    actor             TEXT,
+    reason            TEXT,
+    applied_at        TIMESTAMP DEFAULT CURRENT_TIMESTAMP
 );
 """
 
@@ -145,3 +164,95 @@ def read_trait_tokens(conn: sqlite3.Connection) -> list[tuple[str, str, str, str
             "SELECT nft_id, owner, slot, value FROM trait_tokens"
         )
     ]
+
+
+# --- Phase 2: per-user Bucket contents + supply-change ledger ---
+
+
+def set_bucket_contents(
+    conn: sqlite3.Connection,
+    owner: str,
+    assets: list[tuple[str, str, int]],
+    bodies: list[int],
+) -> None:
+    """Replace ALL of `owner`'s loose-asset and loose-body rows in one
+    transaction. Used by both the flows (optimistic write) and the listener
+    (rebuild from the Bucket NFToken's metadata). Rows with count <= 0 are
+    dropped so the mirror never carries empty entries."""
+    conn.execute("DELETE FROM bucket_assets WHERE owner = ?", (owner,))
+    conn.execute("DELETE FROM bucket_bodies WHERE owner = ?", (owner,))
+    conn.executemany(
+        "INSERT INTO bucket_assets (owner, slot, value, count) VALUES (?, ?, ?, ?)",
+        [(owner, slot, value, count) for slot, value, count in assets if count > 0],
+    )
+    conn.executemany(
+        "INSERT INTO bucket_bodies (owner, edition) VALUES (?, ?)",
+        [(owner, edition) for edition in bodies],
+    )
+    conn.commit()
+
+
+def set_bucket_token(conn: sqlite3.Connection, owner: str, nft_id: str, uri_hex: str) -> None:
+    """Record (or update) the on-ledger Bucket NFToken id + current URI for an owner."""
+    conn.execute(
+        """
+        INSERT INTO bucket_tokens (owner, nft_id, uri_hex, updated_at)
+        VALUES (?, ?, ?, CURRENT_TIMESTAMP)
+        ON CONFLICT(owner) DO UPDATE SET
+            nft_id=excluded.nft_id, uri_hex=excluded.uri_hex, updated_at=CURRENT_TIMESTAMP
+        """,
+        (owner, nft_id, uri_hex),
+    )
+    conn.commit()
+
+
+def get_bucket_token(conn: sqlite3.Connection, owner: str) -> tuple[str, str] | None:
+    """The (nft_id, uri_hex) of an owner's Bucket NFToken, or None if unminted."""
+    cur = conn.execute("SELECT nft_id, uri_hex FROM bucket_tokens WHERE owner = ?", (owner,))
+    row = cur.fetchone()
+    return None if row is None else (str(row[0]), str(row[1]))
+
+
+def record_supply_change(
+    conn: sqlite3.Connection,
+    kind: str,
+    edition: int | None,
+    body_value: str,
+    body_class: str,
+    trait_deltas: dict[str, int],
+    actor: str,
+    reason: str,
+) -> None:
+    """Append one intentional supply change (kind 'mint' grows supply, 'burn'
+    shrinks it). trait_deltas keys are "slot|value", values are signed counts."""
+    conn.execute(
+        """
+        INSERT INTO supply_changes
+            (kind, edition, body_value, body_class, trait_deltas_json, actor, reason)
+        VALUES (?, ?, ?, ?, ?, ?, ?)
+        """,
+        (kind, edition, body_value, body_class, json.dumps(trait_deltas), actor, reason),
+    )
+    conn.commit()
+
+
+def read_supply_changes(conn: sqlite3.Connection) -> list[dict[str, Any]]:
+    """Every supply-change row, oldest first, with trait_deltas parsed back to a dict."""
+    rows = conn.execute(
+        "SELECT kind, edition, body_value, body_class, trait_deltas_json, actor, reason "
+        "FROM supply_changes ORDER BY id"
+    )
+    out: list[dict[str, Any]] = []
+    for kind, edition, body_value, body_class, deltas_json, actor, reason in rows:
+        out.append(
+            {
+                "kind": str(kind),
+                "edition": None if edition is None else int(edition),
+                "body_value": str(body_value),
+                "body_class": str(body_class),
+                "trait_deltas": dict(json.loads(deltas_json)) if deltas_json else {},
+                "actor": str(actor),
+                "reason": str(reason),
+            }
+        )
+    return out
