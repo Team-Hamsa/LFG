@@ -88,13 +88,13 @@ def freeze_genesis(
 
 def read_genesis(conn: sqlite3.Connection) -> trait_economy.Genesis:
     trait_counts: dict[tuple[str, str], int] = {
-        (slot, value): count
+        (str(slot), str(value)): int(count)
         for slot, value, count in conn.execute(
             "SELECT slot, value, genesis_count FROM trait_genesis"
         )
     }
     edition_bodies: dict[int, tuple[str, str]] = {
-        ed: (bv, bc)
+        int(ed): (str(bv), str(bc))
         for ed, bv, bc in conn.execute("SELECT edition, body_value, body_class FROM edition_bodies")
     }
     return trait_economy.Genesis(trait_counts=trait_counts, edition_bodies=edition_bodies)
