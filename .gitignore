@@ -24,3 +24,13 @@ users.json
 
 # Legacy test trait art (superseded by layers/ on the CDN)
 trait_layers/
+
+# Generated audit reports
+reports/
+
+# On-chain NFT index DBs (regenerable via backfill)
+onchain_*.db
+onchain_*.db-*
+
+# Bithomp collection CSV exports (source data, not code)
+LFGO*.csv
