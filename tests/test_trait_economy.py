@@ -163,6 +163,7 @@ def test_verify_completeness_flags_wrong_body_and_orphan():
     assert not rep.ok
     assert rep.wrong_body[1] == ("Curved", "Straight")
     assert rep.orphan_bodies == [9]
+    assert 1 in rep.slot_anomalies  # missing non-body slots are flagged
 
 
 def test_verify_completeness_flags_duplicate_slot():
