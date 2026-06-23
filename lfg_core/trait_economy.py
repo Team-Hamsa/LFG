@@ -6,13 +6,20 @@
 
 from __future__ import annotations
 
-from collections import defaultdict
+from collections import Counter, defaultdict
+from dataclasses import dataclass
 from typing import Any
 
 from lfg_core import swap_meta
 from lfg_core.nft_index import OnchainNft
 
 NON_BODY_SLOTS: list[str] = [s for s in swap_meta.TRAIT_ORDER if s != "Body"]
+
+
+@dataclass
+class Genesis:
+    trait_counts: dict[tuple[str, str], int]
+    edition_bodies: dict[int, tuple[str, str]]
 
 
 def slot_value(rec: OnchainNft, slot: str) -> str:
@@ -61,3 +68,16 @@ def dedupe_editions(
         "unparsed": unparsed,
     }
     return canonical, reconciliation
+
+
+def build_genesis(canonical: dict[int, OnchainNft]) -> Genesis:
+    """Freeze the canonical reconciled editions into a conservation baseline:
+    per non-body (slot, value) counts (incl. "None") and the per-edition body."""
+    trait_counts: Counter[tuple[str, str]] = Counter()
+    edition_bodies: dict[int, tuple[str, str]] = {}
+    for edition, rec in canonical.items():
+        body_value = swap_meta.get_attr(rec.attributes, "Body") or ""
+        edition_bodies[edition] = (body_value, rec.body)
+        for slot in NON_BODY_SLOTS:
+            trait_counts[(slot, slot_value(rec, slot))] += 1
+    return Genesis(trait_counts=dict(trait_counts), edition_bodies=edition_bodies)

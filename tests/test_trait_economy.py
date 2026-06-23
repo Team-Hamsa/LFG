@@ -69,3 +69,21 @@ def test_dedupe_classifies_missing_unparsed_out_of_range():
     assert recon["missing"] == [1, 3]
     assert recon["unparsed"] == ["u"]
     assert recon["out_of_range"] == ["o"]
+
+
+def test_build_genesis_counts_traits_and_bodies():
+    a = _nft(
+        "a", 1, body_class="male", attrs=_attrs(body="Straight", Background="Sky", Head="Crown")
+    )
+    b = _nft("b", 2, body_class="male", attrs=_attrs(body="Straight", Background="Sky"))
+    g = trait_economy.build_genesis({1: a, 2: b})
+    # Background:Sky appears on both editions.
+    assert g.trait_counts[("Background", "Sky")] == 2
+    # Head:Crown only on edition 1; edition 2's Head is absent -> ("Head","None").
+    assert g.trait_counts[("Head", "Crown")] == 1
+    assert g.trait_counts[("Head", "None")] == 1
+    # Bodies are identity-bound per edition.
+    assert g.edition_bodies[1] == ("Straight", "male")
+    assert g.edition_bodies[2] == ("Straight", "male")
+    # Body is never a non-body trait key.
+    assert not any(slot == "Body" for slot, _ in g.trait_counts)
