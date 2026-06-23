@@ -252,6 +252,23 @@ CREATE TABLE burned_nfts (
 
 ## XRPL Integration
 
+### Make Waves Hackathon — required SourceTag `2606160021`
+
+This project is accepted into the **XRPL Make Waves Hackathon**. Per the rules,
+**transaction volume only counts when every transaction carries our unique
+source tag**. **ALL** XRPL transactions and XUMM/Xaman signing payloads built or
+submitted by the app MUST set:
+
+```
+SourceTag = 2606160021
+```
+
+This applies to every transaction type without exception — `NFTokenMint`,
+`NFTokenCreateOffer`, `NFTokenAcceptOffer`, `NFTokenBurn`, `NFTokenModify`,
+`Payment` (token + XRP), `TrustSet`, AMM trades (`buy_and_burn`), and any XUMM
+payload `txjson`. When adding a new transaction path, set `SourceTag` on the tx
+dict / payload before signing or submitting, or hackathon volume credit is lost.
+
 - **Testnet URL**: `https://s.altnet.rippletest.net:51234/` (main.py:198)
 - **Mainnet URL**: `https://s1.ripple.com:51234/` (ts_helpers.py:40)
 - Wallet is initialized from SEED environment variable
@@ -295,6 +312,40 @@ dedicated per-`nft_id` index instead.
   (instant, offline, complete); pass `--live` to bypass it and scrape the chain.
 - clio endpoints: mainnet `wss://s2-clio.ripple.com`, testnet
   `wss://clio.altnet.rippletest.net:51233`.
+
+### Dress-up trait economy — Phase 2 (testnet, on-ledger ops)
+
+Phase 2 (#64) makes the three trait-economy ops real on-chain, mirroring
+`lfg_core/swap_flow.py` (fail-safe ordering, on-disk journaling to
+`ECONOMY_RECORDS_DIR`, partial-failure recovery). MVP ops are **free**.
+
+- **Harvest** (`scripts/economy_harvest.py`): burn a live character → its 8
+  assets + body drop into the owner's Bucket (collection size ↓).
+- **Assemble** (`scripts/economy_assemble.py`): a body + a full asset set from
+  the Bucket → mint that edition + offer it back (collection size ↑, rebirth).
+- **Equip** (`scripts/economy_equip.py`): `NFTokenModify` a loose Bucket asset
+  onto a live character; the displaced asset returns to the Bucket (size =).
+
+Model:
+- **Economy characters are minted burnable + transferable + mutable**
+  (`ECONOMY_NFT_FLAGS = 25`) so the issuer can harvest-burn / assemble-mint /
+  equip-modify them. (A character already swapped to mutable-only can't be
+  issuer-burned, so it is equip-only until re-minted — surfaced as a precondition
+  error.) The per-user **Bucket** is a soulbound mutable NFToken
+  (`BUCKET_NFT_FLAGS = 16`, `BUCKET_TAXON`), minted on first use.
+- **DB tables are authoritative for accounting; the Bucket NFToken mirrors them**
+  (its metadata `lfg_bucket` block is the on-chain truth the listener rebuilds
+  the DB from). Each flow modifies the token *before* the DB so a crash leaves
+  the DB rebuildable from the chain.
+- **Supply accounting** (`lfg_core/trait_economy.py`): genesis stays frozen; an
+  append-only `supply_changes` ledger records intentional growth/shrinkage
+  (new-edition mint / permanent burn). Conservation:
+  `census == genesis + Σ supply_changes`; `max_edition` is dynamic. The auditor
+  (`scripts/audit_trait_economy.py`) flags any unlogged delta as drift.
+- Core modules: `lfg_core/economy_flow.py` (flows + `EconomyDeps`),
+  `lfg_core/bucket_token.py` (Bucket metadata + lifecycle),
+  `lfg_core/economy_store.py` (`bucket_tokens`/`supply_changes`); the listener
+  applies bucket/supply events via `nft_listener.apply_economy_tx`.
 
 ## Important Notes
 
