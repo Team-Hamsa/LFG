@@ -35,6 +35,14 @@ class ConservationReport:
     ok: bool
 
 
+@dataclass
+class CompletenessReport:
+    wrong_body: dict[int, tuple[str, str]]
+    orphan_bodies: list[int]
+    slot_anomalies: dict[int, list[str]]
+    ok: bool
+
+
 def slot_value(rec: OnchainNft, slot: str) -> str:
     """The asset value held in `slot` for this character; absent -> "None"."""
     return swap_meta.get_attr(rec.attributes, slot) or "None"
@@ -140,3 +148,35 @@ def verify_conservation(genesis: Genesis, census: Census) -> ConservationReport:
 
     ok = not trait_drift and not body_drift
     return ConservationReport(trait_drift=trait_drift, body_drift=body_drift, ok=ok)
+
+
+def verify_completeness(characters: dict[int, OnchainNft], genesis: Genesis) -> CompletenessReport:
+    """Completeness: every live character holds exactly one asset per non-body
+    slot and its body matches the genesis body ledger."""
+    wrong_body: dict[int, tuple[str, str]] = {}
+    orphan_bodies: list[int] = []
+    slot_anomalies: dict[int, list[str]] = {}
+
+    for edition, rec in characters.items():
+        seen: Counter[str] = Counter(
+            a["trait_type"] for a in rec.attributes if a.get("trait_type") in NON_BODY_SLOTS
+        )
+        bad_slots = [s for s in NON_BODY_SLOTS if seen.get(s, 0) > 1]
+        if bad_slots:
+            slot_anomalies[edition] = bad_slots
+
+        expected = genesis.edition_bodies.get(edition)
+        if expected is None:
+            orphan_bodies.append(edition)
+            continue
+        found_body = swap_meta.get_attr(rec.attributes, "Body") or ""
+        if found_body != expected[0]:
+            wrong_body[edition] = (found_body, expected[0])
+
+    ok = not wrong_body and not orphan_bodies and not slot_anomalies
+    return CompletenessReport(
+        wrong_body=wrong_body,
+        orphan_bodies=sorted(orphan_bodies),
+        slot_anomalies=slot_anomalies,
+        ok=ok,
+    )

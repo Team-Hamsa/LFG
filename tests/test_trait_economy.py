@@ -140,3 +140,40 @@ def test_verify_conservation_flags_ghost_edition_in_census():
     assert not rep.ok
     assert rep.body_drift[99] == 1
     assert 1 not in rep.body_drift  # edition 1 is healthy (presence == 1)
+
+
+def test_verify_completeness_ok_for_normalized_characters():
+    a = _nft("a", 1, body_class="male", attrs=_attrs(body="Straight", Background="Sky"))
+    g = trait_economy.build_genesis({1: a})
+    rep = trait_economy.verify_completeness({1: a}, g)
+    assert rep.ok
+    assert rep.wrong_body == {}
+    assert rep.orphan_bodies == []
+    assert rep.slot_anomalies == {}
+
+
+def test_verify_completeness_flags_wrong_body_and_orphan():
+    a = _nft("a", 1, body_class="male", attrs=_attrs(body="Straight"))
+    g = trait_economy.build_genesis({1: a})
+    # Edition 1 now shows a different body value; edition 9 isn't in genesis.
+    mutated = _nft("a2", 1, body_class="male", attrs=_attrs(body="Curved"))
+    orphan = _nft("z", 9, attrs=_attrs(body="Straight"))
+    rep = trait_economy.verify_completeness({1: mutated, 9: orphan}, g)
+    assert not rep.ok
+    assert rep.wrong_body[1] == ("Curved", "Straight")
+    assert rep.orphan_bodies == [9]
+
+
+def test_verify_completeness_flags_duplicate_slot():
+    dup = _nft(
+        "d",
+        1,
+        attrs=[
+            {"trait_type": "Body", "value": "Straight"},
+            {"trait_type": "Head", "value": "Crown"},
+            {"trait_type": "Head", "value": "Hat"},  # Head twice
+        ],
+    )
+    g = trait_economy.Genesis(trait_counts={}, edition_bodies={1: ("Straight", "male")})
+    rep = trait_economy.verify_completeness({1: dup}, g)
+    assert "Head" in rep.slot_anomalies[1]
