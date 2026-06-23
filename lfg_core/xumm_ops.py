@@ -143,6 +143,10 @@ async def _create_xumm_payload(
     txjson: dict[str, Any], options: dict[str, Any] | None = None
 ) -> dict[str, Any] | None:
     """POST a payload to the XUMM platform API; returns qr/deeplink dict or None."""
+    # Make Waves hackathon: every signed transaction must carry the source tag.
+    # SignIn is a pseudo-transaction (no ledger effect), so it is exempt.
+    if txjson.get("TransactionType") != "SignIn":
+        txjson.setdefault("SourceTag", config.SOURCE_TAG)
     payload = {"txjson": txjson}
     if options:
         payload["options"] = options
