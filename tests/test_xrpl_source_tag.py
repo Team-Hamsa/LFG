@@ -69,6 +69,29 @@ def test_mint_flags_override(monkeypatch):
     assert captured["tx"].flags == 25
 
 
+def test_mint_omits_transfer_fee_when_not_transferable(monkeypatch):
+    # A soulbound/non-transferable NFToken (no tfTransferable flag, e.g. the
+    # Bucket flags=16) must NOT carry a TransferFee — XRPL rejects that as
+    # temMALFORMED. The fee is only valid on transferable tokens.
+    captured: dict = {}
+    _patch_client(monkeypatch, captured)
+    _run(
+        xrpl_ops.mint_nft("https://x/m.json", taxon=1, issuer=config.SWAP_ISSUER_ADDRESS, flags=16)
+    )
+    assert captured["tx"].transfer_fee is None
+
+
+def test_mint_sets_transfer_fee_when_transferable(monkeypatch):
+    # Transferable economy characters (flags=25 include tfTransferable) keep the
+    # configured transfer fee.
+    captured: dict = {}
+    _patch_client(monkeypatch, captured)
+    _run(
+        xrpl_ops.mint_nft("https://x/m.json", taxon=1, issuer=config.SWAP_ISSUER_ADDRESS, flags=25)
+    )
+    assert captured["tx"].transfer_fee == config.NFT_TRANSFER_FEE
+
+
 def test_create_offer_sets_source_tag(monkeypatch):
     captured: dict = {}
     _patch_client(monkeypatch, captured)
