@@ -87,3 +87,18 @@ def test_build_genesis_counts_traits_and_bodies():
     assert g.edition_bodies[2] == ("Straight", "male")
     # Body is never a non-body trait key.
     assert not any(slot == "Body" for slot, _ in g.trait_counts)
+
+
+def test_asset_census_sums_chars_buckets_and_tokens():
+    char = _nft("c", 1, attrs=_attrs(Background="Sky"))
+    census = trait_economy.asset_census(
+        characters={1: char},
+        bucket_assets=[("rA", "Background", "Sky", 2), ("rA", "Head", "None", 1)],
+        bucket_bodies=[("rA", 7)],
+        trait_tokens=[("tok1", "rB", "Background", "Sky")],
+    )
+    # 1 on the live character + 2 in a bucket + 1 standalone token.
+    assert census.trait_counts[("Background", "Sky")] == 4
+    assert census.trait_counts[("Head", "None")] == 1 + 1  # char's empty Head + bucket
+    # Body presence: edition 1 live, edition 7 loose in a bucket.
+    assert census.body_presence == {1: 1, 7: 1}

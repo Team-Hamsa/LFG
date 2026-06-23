@@ -22,6 +22,12 @@ class Genesis:
     edition_bodies: dict[int, tuple[str, str]]
 
 
+@dataclass
+class Census:
+    trait_counts: dict[tuple[str, str], int]
+    body_presence: dict[int, int]
+
+
 def slot_value(rec: OnchainNft, slot: str) -> str:
     """The asset value held in `slot` for this character; absent -> "None"."""
     return swap_meta.get_attr(rec.attributes, slot) or "None"
@@ -81,3 +87,27 @@ def build_genesis(canonical: dict[int, OnchainNft]) -> Genesis:
         for slot in NON_BODY_SLOTS:
             trait_counts[(slot, slot_value(rec, slot))] += 1
     return Genesis(trait_counts=dict(trait_counts), edition_bodies=edition_bodies)
+
+
+def asset_census(
+    characters: dict[int, OnchainNft],
+    bucket_assets: list[tuple[str, str, str, int]],
+    bucket_bodies: list[tuple[str, int]],
+    trait_tokens: list[tuple[str, str, str, str]],
+) -> Census:
+    """Tally every asset across live characters, Buckets and standalone trait
+    tokens. trait_counts are non-body (slot, value); body_presence counts how
+    many places each edition's body currently exists (should be exactly 1)."""
+    trait_counts: Counter[tuple[str, str]] = Counter()
+    body_presence: Counter[int] = Counter()
+    for edition, rec in characters.items():
+        body_presence[edition] += 1
+        for slot in NON_BODY_SLOTS:
+            trait_counts[(slot, slot_value(rec, slot))] += 1
+    for _owner, slot, value, count in bucket_assets:
+        trait_counts[(slot, value)] += count
+    for _nft_id, _owner, slot, value in trait_tokens:
+        trait_counts[(slot, value)] += 1
+    for _owner, edition in bucket_bodies:
+        body_presence[edition] += 1
+    return Census(trait_counts=dict(trait_counts), body_presence=dict(body_presence))
