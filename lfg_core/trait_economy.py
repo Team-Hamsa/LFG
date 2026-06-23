@@ -28,6 +28,13 @@ class Census:
     body_presence: dict[int, int]
 
 
+@dataclass
+class ConservationReport:
+    trait_drift: dict[tuple[str, str], int]
+    body_drift: dict[int, int]
+    ok: bool
+
+
 def slot_value(rec: OnchainNft, slot: str) -> str:
     """The asset value held in `slot` for this character; absent -> "None"."""
     return swap_meta.get_attr(rec.attributes, slot) or "None"
@@ -111,3 +118,25 @@ def asset_census(
     for _owner, edition in bucket_bodies:
         body_presence[edition] += 1
     return Census(trait_counts=dict(trait_counts), body_presence=dict(body_presence))
+
+
+def verify_conservation(genesis: Genesis, census: Census) -> ConservationReport:
+    """Conservation: census must equal genesis for every (slot, value), and each
+    genesis edition's body must exist in exactly one place. Drift is reported."""
+    trait_drift: dict[tuple[str, str], int] = {}
+    for key in set(genesis.trait_counts) | set(census.trait_counts):
+        delta = census.trait_counts.get(key, 0) - genesis.trait_counts.get(key, 0)
+        if delta != 0:
+            trait_drift[key] = delta
+
+    body_drift: dict[int, int] = {}
+    for edition in genesis.edition_bodies:
+        presence = census.body_presence.get(edition, 0)
+        if presence != 1:
+            body_drift[edition] = presence
+    for edition, presence in census.body_presence.items():
+        if edition not in genesis.edition_bodies:
+            body_drift[edition] = presence
+
+    ok = not trait_drift and not body_drift
+    return ConservationReport(trait_drift=trait_drift, body_drift=body_drift, ok=ok)

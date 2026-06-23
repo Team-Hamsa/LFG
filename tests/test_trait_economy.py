@@ -102,3 +102,31 @@ def test_asset_census_sums_chars_buckets_and_tokens():
     assert census.trait_counts[("Head", "None")] == 1 + 1  # char's empty Head + bucket
     # Body presence: edition 1 live, edition 7 loose in a bucket.
     assert census.body_presence == {1: 1, 7: 1}
+
+
+def test_verify_conservation_ok_when_census_matches_genesis():
+    g = trait_economy.Genesis(
+        trait_counts={("Background", "Sky"): 2}, edition_bodies={1: ("S", "male")}
+    )
+    c = trait_economy.Census(trait_counts={("Background", "Sky"): 2}, body_presence={1: 1})
+    rep = trait_economy.verify_conservation(g, c)
+    assert rep.ok
+    assert rep.trait_drift == {}
+    assert rep.body_drift == {}
+
+
+def test_verify_conservation_flags_trait_and_body_drift():
+    g = trait_economy.Genesis(
+        trait_counts={("Background", "Sky"): 2, ("Head", "Crown"): 1},
+        edition_bodies={1: ("S", "male"), 2: ("S", "male")},
+    )
+    c = trait_economy.Census(
+        trait_counts={("Background", "Sky"): 3},  # +1 created; Crown destroyed
+        body_presence={1: 2},  # edition 1 duplicated, edition 2 vanished
+    )
+    rep = trait_economy.verify_conservation(g, c)
+    assert not rep.ok
+    assert rep.trait_drift[("Background", "Sky")] == 1
+    assert rep.trait_drift[("Head", "Crown")] == -1
+    assert rep.body_drift[1] == 2
+    assert rep.body_drift[2] == 0
