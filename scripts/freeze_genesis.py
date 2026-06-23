@@ -110,13 +110,6 @@ def main() -> int:
     genesis = trait_economy.build_genesis(canonical)
 
     timestamp = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H-%M-%SZ")
-    meta = {
-        "network": args.network,
-        "max_edition": str(args.max_edition),
-        "genesis_editions": str(len(canonical)),
-        "frozen_at": timestamp,
-    }
-    economy_store.freeze_genesis(conn, genesis, meta)
 
     report = format_reconciliation_report(
         reconciliation, args.network, args.max_edition, len(live), len(canonical), timestamp
@@ -127,6 +120,14 @@ def main() -> int:
     )
     with open(report_path, "w") as f:
         f.write(report)
+
+    meta = {
+        "network": args.network,
+        "max_edition": str(args.max_edition),
+        "genesis_editions": str(len(canonical)),
+        "frozen_at": timestamp,
+    }
+    economy_store.freeze_genesis(conn, genesis, meta)
 
     print(f"Network: {args.network}  live tokens: {len(live)}  genesis editions: {len(canonical)}")
     print(
