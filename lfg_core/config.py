@@ -132,3 +132,17 @@ DB_PATH = os.getenv("DB_PATH", "lfg_nfts.db")
 RARITY_FLOOR = float(os.getenv("RARITY_FLOOR", "0.005"))
 RARITY_BOOST_INITIAL = float(os.getenv("RARITY_BOOST_INITIAL", "7"))
 RARITY_BOOST_STEP_HOURS = int(os.getenv("RARITY_BOOST_STEP_HOURS", "24"))
+
+# Make Waves hackathon: every XRPL transaction / XUMM payload must carry this
+# source tag or its volume does not count toward the hackathon.
+SOURCE_TAG = int(os.getenv("SOURCE_TAG", "2606160021"))
+
+# Dress-up trait economy (Phase 2). Economy characters are minted burnable so
+# the issuer can harvest (burn) them; the per-user Bucket is a soulbound
+# (non-transferable) mutable NFToken the issuer updates in place.
+BUCKET_TAXON = int(os.getenv("BUCKET_TAXON", "1761"))
+BUCKET_IMAGE_URL = os.getenv("BUCKET_IMAGE_URL", NFT_COLLECTION_LOGO)
+ECONOMY_NFT_FLAGS = int(os.getenv("ECONOMY_NFT_FLAGS", "25"))  # burnable+transferable+mutable
+BUCKET_NFT_FLAGS = int(os.getenv("BUCKET_NFT_FLAGS", "16"))  # mutable only (soulbound)
+ECONOMY_RECORDS_DIR = os.getenv("ECONOMY_RECORDS_DIR", "economy_records")
+ECONOMY_CDN_FOLDER = os.getenv("ECONOMY_CDN_FOLDER", SWAP_CDN_FOLDER)
