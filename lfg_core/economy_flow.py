@@ -321,3 +321,102 @@ async def run_assemble(session: AssembleSession, deps: EconomyDeps) -> None:
     except Exception as e:
         logging.error(f"Assemble {session.id} failed: {traceback.format_exc()}")
         session.fail(str(e))
+
+
+def _raw_uri(uri_hex: str) -> str:
+    """Decode an on-chain hex URI to its exact plain string (NOT ipfs-resolved,
+    so re-hexing reproduces the same on-chain URI for a revert)."""
+    try:
+        return bytes.fromhex(uri_hex).decode("ascii")
+    except ValueError:
+        return ""
+
+
+# --- Equip: move a loose asset onto a live character; displaced -> Bucket ---
+
+
+@dataclass
+class EquipSession:
+    owner: str
+    character: OnchainNft
+    slot: str
+    incoming_value: str
+    state: str = RUNNING
+    error: str | None = None
+    displaced_value: str = ""
+    modify_hash: str | None = None
+    id: str = field(default_factory=lambda: uuid.uuid4().hex)
+
+    def _record(self, status: str) -> dict[str, Any]:
+        return {
+            "op": "equip",
+            "id": self.id,
+            "owner": self.owner,
+            "nft_id": self.character.nft_id,
+            "slot": self.slot,
+            "incoming": self.incoming_value,
+            "displaced": self.displaced_value,
+            "modify_hash": self.modify_hash,
+            "status": status,
+            "error": self.error,
+        }
+
+    def fail(self, msg: str) -> None:
+        self.state = FAILED
+        self.error = msg
+
+
+async def run_equip(session: EquipSession, deps: EconomyDeps) -> None:
+    """Drive an equip to a terminal state. Order: precheck -> compose+upload ->
+    MODIFY the character in place (reversible: modify back to the old URI) ->
+    swap the Bucket (-incoming, +displaced; token then DB). If the bucket swap
+    fails after the modify, the character is reverted and the Bucket untouched."""
+    conn, owner, rec = deps.conn, session.owner, session.character
+    slot, incoming = session.slot, session.incoming_value
+    try:
+        assets, _bodies = _owner_contents(conn, owner)
+        chk = te.can_equip(rec, slot, incoming, assets, mutable=bool(rec.mutable))
+        if not chk.ok:
+            session.fail(f"cannot equip: {chk.reason}")
+            return
+        session.displaced_value = te.slot_value(rec, slot)
+
+        new_attrs = [
+            {
+                "trait_type": a["trait_type"],
+                "value": incoming if a["trait_type"] == slot else a["value"],
+            }
+            for a in rec.attributes
+        ]
+        _image_url, _video_url, meta_url = await deps.char_compose_fn(
+            new_attrs, rec.body, rec.nft_number or 0, 0
+        )
+        _write_record(deps.records_dir, "equip", session.id, session._record("equipping"))
+
+        # Reversible: NFTokenModify keeps the nft_id; we can modify back.
+        modify_hash = await deps.char_modify_fn(rec.nft_id, owner, meta_url)
+        if not modify_hash:
+            session.fail(f"failed to update character {rec.nft_id}; your character is unchanged")
+            _write_record(deps.records_dir, "equip", session.id, session._record("failed_modify"))
+            return
+        session.modify_hash = modify_hash
+
+        # Swap the bucket: -incoming, +displaced. Token first, then DB.
+        assets[(slot, incoming)] = assets.get((slot, incoming), 0) - 1
+        assets[(slot, session.displaced_value)] = assets.get((slot, session.displaced_value), 0) + 1
+        try:
+            await _sync_then_persist(deps, owner, assets, _bodies)
+        except Exception as e:
+            # Roll the character back to its old traits; the bucket is untouched.
+            old_uri = _raw_uri(rec.uri_hex)
+            if old_uri:
+                await deps.char_modify_fn(rec.nft_id, owner, old_uri)
+            session.fail(f"equip failed updating the bucket ({e}); your character was reverted")
+            _write_record(deps.records_dir, "equip", session.id, session._record("reverted_modify"))
+            return
+
+        session.state = DONE
+        _write_record(deps.records_dir, "equip", session.id, session._record("complete"))
+    except Exception as e:
+        logging.error(f"Equip {session.id} failed: {traceback.format_exc()}")
+        session.fail(str(e))
