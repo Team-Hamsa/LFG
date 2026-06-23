@@ -130,3 +130,13 @@ def test_verify_conservation_flags_trait_and_body_drift():
     assert rep.trait_drift[("Head", "Crown")] == -1
     assert rep.body_drift[1] == 2
     assert rep.body_drift[2] == 0
+
+
+def test_verify_conservation_flags_ghost_edition_in_census():
+    """Ghost edition: in census.body_presence but not in genesis.edition_bodies."""
+    g = trait_economy.Genesis(trait_counts={}, edition_bodies={1: ("S", "male")})
+    c = trait_economy.Census(trait_counts={}, body_presence={1: 1, 99: 1})
+    rep = trait_economy.verify_conservation(g, c)
+    assert not rep.ok
+    assert rep.body_drift[99] == 1
+    assert 1 not in rep.body_drift  # edition 1 is healthy (presence == 1)
