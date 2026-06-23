@@ -84,14 +84,34 @@ async def process_stream_tx(
     extracted so the listen path is testable without a websocket. Economy apply
     (supply-growth logging + Bucket rebuild) is gated on a frozen genesis — until
     one exists every mint would look like an unknown edition and log spurious
-    growth."""
-    await nft_listener.apply_tx(conn, tx, fetch_token, fetch_meta, is_ours)
-    if economy_store.genesis_exists(conn):
+    growth.
+
+    The index and economy applies both resolve the same token/metadata per
+    nft_id, so per-tx memo caches feed both helpers from a single clio nft_info
+    call and (on mainnet) a single IPFS metadata fetch — the token/meta state is
+    fixed for the duration of one tx, so caching is correctness-safe."""
+    token_cache: dict[str, dict[str, Any] | None] = {}
+    meta_cache: dict[str, dict[str, Any] | None] = {}
+
+    async def cached_token(nft_id: str) -> dict[str, Any] | None:
+        if nft_id not in token_cache:
+            token_cache[nft_id] = await fetch_token(nft_id)
+        return token_cache[nft_id]
+
+    async def cached_meta(uri_hex: str) -> dict[str, Any] | None:
+        if uri_hex not in meta_cache:
+            meta_cache[uri_hex] = await fetch_meta(uri_hex)
+        return meta_cache[uri_hex]
+
+    await nft_listener.apply_tx(conn, tx, cached_token, cached_meta, is_ours)
+    # Only mint/modify reach economy logic; skip the genesis read (two DB queries)
+    # on the far more common accept/burn, where apply_economy_tx early-returns.
+    if nft_listener.classify_tx(tx) in ("mint", "modify") and economy_store.genesis_exists(conn):
         await nft_listener.apply_economy_tx(
             conn,
             tx,
-            fetch_token_fn=fetch_token,
-            fetch_meta_fn=fetch_meta,
+            fetch_token_fn=cached_token,
+            fetch_meta_fn=cached_meta,
             genesis=_effective_genesis(conn),
         )
 

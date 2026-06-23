@@ -167,6 +167,35 @@ def test_listen_path_skips_economy_when_genesis_unfrozen():
     assert es.read_supply_changes(conn) == []
 
 
+def test_listen_path_fetches_token_and_meta_once_per_mint():
+    """apply_tx and apply_economy_tx both resolve the same token/metadata; the
+    per-tx memo caches must collapse that to a single clio + IPFS round-trip."""
+    conn = _conn()
+    _freeze(conn)
+    token_calls = {"n": 0}
+    meta_calls = {"n": 0}
+
+    async def fetch_token(nft_id):
+        token_calls["n"] += 1
+        return _char_token()
+
+    async def fetch_meta(uri_hex):
+        meta_calls["n"] += 1
+        return _char_meta(3536)
+
+    _run(
+        oln.process_stream_tx(
+            conn,
+            _mint_tx(),
+            fetch_token=fetch_token,
+            fetch_meta=fetch_meta,
+            is_ours=_is_ours,
+        )
+    )
+    assert token_calls["n"] == 1
+    assert meta_calls["n"] == 1
+
+
 def test_listen_path_rebuilds_bucket_from_modify():
     conn = _conn()
     _freeze(conn)
