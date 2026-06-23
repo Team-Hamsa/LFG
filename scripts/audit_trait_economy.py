@@ -31,14 +31,31 @@ def format_economy_report(
     live_count: int,
     genesis_editions: int,
     timestamp: str,
+    supply_changes: list[dict] | None = None,
 ) -> str:
+    supply_changes = supply_changes or []
     lines: list[str] = []
     lines.append(f"# Trait Economy Audit ({network}) — {timestamp}")
     lines.append("")
     lines.append(f"- Live characters: **{live_count}**")
     lines.append(f"- Genesis editions: **{genesis_editions}**")
+    lines.append(f"- Supply changes (ledger): **{len(supply_changes)}**")
     lines.append(f"- Conservation: **{'OK' if conservation.ok else 'DRIFT'}**")
     lines.append(f"- Completeness: **{'OK' if completeness.ok else 'VIOLATIONS'}**")
+    lines.append("")
+
+    lines.append("## Supply changes (intentional growth/shrinkage, from ledger)")
+    lines.append("")
+    if supply_changes:
+        lines.append("| Kind | Edition | Body | Actor | Reason |")
+        lines.append("| --- | --- | --- | --- | --- |")
+        for ch in supply_changes:
+            lines.append(
+                f"| {ch['kind']} | {ch['edition']} | {ch['body_value']} "
+                f"| {ch['actor']} | {ch['reason']} |"
+            )
+    else:
+        lines.append("_None._")
     lines.append("")
 
     lines.append("## Trait conservation drift (census − genesis)")
@@ -112,13 +129,15 @@ def main() -> int:
         return 2
 
     genesis = economy_store.read_genesis(conn)
-    max_edition_str = economy_store.read_meta(conn, "max_edition")
-    if max_edition_str is None:
-        print("Corrupt genesis: missing 'max_edition' in genesis_meta. Re-run freeze_genesis.py.")
-        return 2
-    max_edition = int(max_edition_str)
-
+    supply_changes = economy_store.read_supply_changes(conn)
     live = nft_index.live_nfts(conn)
+    # The dedupe cap spans the genesis max, the ledger, AND any live edition, so
+    # NO live token is silently dropped as out-of-range: a legitimately-minted
+    # edition is explained by the ledger, while an UNLOGGED one stays in the
+    # census and surfaces as conservation drift rather than vanishing.
+    live_max = max((r.nft_number for r in live if r.nft_number is not None), default=0)
+    max_edition = max(trait_economy.effective_max_edition(genesis, supply_changes), live_max)
+
     canonical, _ = trait_economy.dedupe_editions(live, max_edition)
     census = trait_economy.asset_census(
         canonical,
@@ -126,8 +145,11 @@ def main() -> int:
         economy_store.read_bucket_bodies(conn),
         economy_store.read_trait_tokens(conn),
     )
-    conservation = trait_economy.verify_conservation(genesis, census)
-    completeness = trait_economy.verify_completeness(canonical, genesis)
+    conservation = trait_economy.verify_conservation(genesis, census, supply_changes)
+    # Completeness checks bodies against the EFFECTIVE genesis so legitimately
+    # minted new editions are not mistaken for orphan bodies.
+    effective = trait_economy.effective_genesis(genesis, supply_changes)
+    completeness = trait_economy.verify_completeness(canonical, effective)
 
     timestamp = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H-%M-%SZ")
     report = format_economy_report(
@@ -137,6 +159,7 @@ def main() -> int:
         len(canonical),
         len(genesis.edition_bodies),
         timestamp,
+        supply_changes,
     )
     os.makedirs(args.report_dir, exist_ok=True)
     report_path = os.path.join(
