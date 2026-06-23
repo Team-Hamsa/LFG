@@ -293,12 +293,24 @@ async def run_assemble(session: AssembleSession, deps: EconomyDeps) -> None:
         except Exception as e:
             # Mint succeeded but the bucket drain failed: burn the mint back so
             # the user's bucket is exactly as it was.
-            await deps.char_burn_fn(nft_id, "")
-            session.new_nft_id = None
-            session.fail(f"assemble failed draining the bucket ({e}); your bucket is untouched")
-            _write_record(
-                deps.records_dir, "assemble", session.id, session._record("reverted_mint")
-            )
+            revert_hash = await deps.char_burn_fn(nft_id, "")
+            if revert_hash:
+                session.new_nft_id = None
+                session.fail(f"assemble failed draining the bucket ({e}); your bucket is untouched")
+                _write_record(
+                    deps.records_dir, "assemble", session.id, session._record("reverted_mint")
+                )
+            else:
+                # The compensating burn ALSO failed: the minted token is stranded
+                # in the issuer wallet. Keep its nft_id in the journal so an admin
+                # can locate and burn it — do NOT wipe it.
+                session.fail(
+                    f"assemble failed draining the bucket ({e}) and the compensating burn of "
+                    f"{nft_id} failed — admin must burn it manually (journal {session.id})"
+                )
+                _write_record(
+                    deps.records_dir, "assemble", session.id, session._record("failed_revert_mint")
+                )
             return
 
         # Deliver the new character to the user (offer + XUMM accept).
@@ -411,8 +423,21 @@ async def run_equip(session: EquipSession, deps: EconomyDeps) -> None:
             old_uri = _raw_uri(rec.uri_hex)
             if old_uri:
                 await deps.char_modify_fn(rec.nft_id, owner, old_uri)
-            session.fail(f"equip failed updating the bucket ({e}); your character was reverted")
-            _write_record(deps.records_dir, "equip", session.id, session._record("reverted_modify"))
+                session.fail(f"equip failed updating the bucket ({e}); your character was reverted")
+                _write_record(
+                    deps.records_dir, "equip", session.id, session._record("reverted_modify")
+                )
+            else:
+                # No decodable old URI to revert to: the character keeps the new
+                # traits while the bucket was not updated. Report honestly and
+                # flag for recovery rather than claiming a revert that didn't happen.
+                session.fail(
+                    f"equip failed updating the bucket ({e}); the character's URI could not be "
+                    f"decoded to revert — it may retain the new traits (journal {session.id})"
+                )
+                _write_record(
+                    deps.records_dir, "equip", session.id, session._record("failed_revert")
+                )
             return
 
         session.state = DONE

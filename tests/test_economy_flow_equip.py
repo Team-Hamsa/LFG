@@ -144,3 +144,19 @@ def test_equip_modify_then_bucket_fails_reverts(tmp_path):
     # bucket untouched
     assets = {(slot, v): n for o, slot, v, n in es.read_bucket_assets(conn)}
     assert assets == {("Head", "Crown"): 1}
+
+
+def test_equip_bucket_fails_and_uri_undecodable_reports_honestly(tmp_path):
+    import json
+
+    conn, f = _conn_with_bucket(), _Fakes(fail_bucket_modify=True)
+    rec = _char()
+    rec.uri_hex = ""  # no decodable old URI to revert to
+    s = ef.EquipSession(owner="rUser", character=rec, slot="Head", incoming_value="Crown")
+    _run(ef.run_equip(s, _deps(conn, f, tmp_path)))
+
+    assert s.state == ef.FAILED
+    # only the forward modify happened; NO false revert was attempted
+    assert f.char_modifies == [("NFT7", "rUser", "https://cdn/new.json")]
+    record = json.loads((tmp_path / f"equip-{s.id}.json").read_text())
+    assert record["status"] == "failed_revert"

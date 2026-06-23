@@ -36,9 +36,10 @@ def _conn_with_bucket(edition: int = 7) -> sqlite3.Connection:
 
 
 class _Fakes:
-    def __init__(self, *, fail_bucket_modify=False, fail_offer=False) -> None:
+    def __init__(self, *, fail_bucket_modify=False, fail_offer=False, fail_char_burn=False) -> None:
         self.fail_bucket_modify = fail_bucket_modify
         self.fail_offer = fail_offer
+        self.fail_char_burn = fail_char_burn
         self.mints: list[str] = []
         self.char_burns: list[tuple[str, str]] = []
         self.bucket_modifies = 0
@@ -73,7 +74,7 @@ class _Fakes:
 
     async def char_burn(self, nft_id, owner):
         self.char_burns.append((nft_id, owner))
-        return "BURN"
+        return None if self.fail_char_burn else "BURN"
 
     async def char_offer(self, nft_id, owner):
         return None if self.fail_offer else "OFFER"
@@ -146,6 +147,20 @@ def test_assemble_mint_then_drain_fails_reverts(tmp_path):
     assert f.char_burns == [("CHAR7", "")]  # ...then burned back (issuer-held)
     assert s.new_nft_id is None
     assert es.read_bucket_bodies(conn) == [("rUser", 7)]  # bucket untouched
+
+
+def test_assemble_drain_fail_then_burnback_fail_keeps_nft_id(tmp_path):
+    # Mint succeeds, bucket drain fails, AND the compensating burn-back fails:
+    # the minted token's id MUST be retained in the journal for admin recovery.
+    conn, f = _conn_with_bucket(), _Fakes(fail_bucket_modify=True, fail_char_burn=True)
+    s = _session()
+    _run(ef.run_assemble(s, _deps(conn, f, tmp_path)))
+
+    assert s.state == ef.FAILED
+    assert s.new_nft_id == "CHAR7"  # NOT wiped — token is stranded, id preserved
+    record = json.loads((tmp_path / f"assemble-{s.id}.json").read_text())
+    assert record["status"] == "failed_revert_mint"
+    assert record["new_nft_id"] == "CHAR7"
 
 
 def test_assemble_offer_fail_parks_token(tmp_path):
