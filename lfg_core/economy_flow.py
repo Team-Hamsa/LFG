@@ -203,3 +203,121 @@ async def run_harvest(session: HarvestSession, deps: EconomyDeps) -> None:
     except Exception as e:
         logging.error(f"Harvest {session.id} failed: {traceback.format_exc()}")
         session.fail(str(e))
+
+
+def _character_attributes(body_value: str, chosen: dict[str, str]) -> list[dict[str, str]]:
+    """A full normalized attribute list: the body plus one chosen value per
+    non-body slot (canonical order)."""
+    attrs = [{"trait_type": "Body", "value": body_value}]
+    attrs += [{"trait_type": slot, "value": chosen[slot]} for slot in te.NON_BODY_SLOTS]
+    return attrs
+
+
+# --- Assemble: take a body + a full set from the Bucket and mint the edition ---
+
+
+@dataclass
+class AssembleSession:
+    owner: str
+    edition: int
+    chosen: dict[str, str]  # slot -> value for each non-body slot
+    body_value: str
+    body_class: str
+    live_editions: set[int] = field(default_factory=set)
+    state: str = RUNNING
+    error: str | None = None
+    new_nft_id: str | None = None
+    results: list[dict[str, Any]] = field(default_factory=list)
+    id: str = field(default_factory=lambda: uuid.uuid4().hex)
+
+    def _record(self, status: str) -> dict[str, Any]:
+        return {
+            "op": "assemble",
+            "id": self.id,
+            "owner": self.owner,
+            "edition": self.edition,
+            "chosen": self.chosen,
+            "new_nft_id": self.new_nft_id,
+            "status": status,
+            "error": self.error,
+        }
+
+    def fail(self, msg: str) -> None:
+        self.state = FAILED
+        self.error = msg
+
+
+async def run_assemble(session: AssembleSession, deps: EconomyDeps) -> None:
+    """Drive an assemble (rebirth) to a terminal state. Order: precheck ->
+    compose+upload -> MINT (reversible: burn back) -> drain the Bucket (token
+    then DB) -> offer+accept. If the drain fails the mint is burned back and the
+    Bucket is untouched; if the offer fails after the drain the minted token is
+    parked in the issuer wallet for re-offer (no asset loss)."""
+    conn, owner, edition = deps.conn, session.owner, session.edition
+    try:
+        assets, bodies = _owner_contents(conn, owner)
+        chk = te.can_assemble(
+            edition,
+            session.chosen,
+            bodies,
+            assets,
+            session.live_editions,
+            _effective_genesis(conn),
+        )
+        if not chk.ok:
+            session.fail(f"cannot assemble: {chk.reason}")
+            return
+
+        attrs = _character_attributes(session.body_value, session.chosen)
+        image_url, _video_url, meta_url = await deps.char_compose_fn(
+            attrs, session.body_class, edition, 0
+        )
+        _write_record(deps.records_dir, "assemble", session.id, session._record("assembling"))
+
+        # Reversible: a freshly minted character can be burned back.
+        nft_id = await deps.char_mint_fn(meta_url)
+        if not nft_id:
+            session.fail(f"failed to mint edition {edition}; your bucket is untouched")
+            _write_record(deps.records_dir, "assemble", session.id, session._record("failed_mint"))
+            return
+        session.new_nft_id = nft_id
+        _write_record(deps.records_dir, "assemble", session.id, session._record("minted"))
+
+        # Drain the bucket: token first (authoritative), then DB mirror.
+        bodies.discard(edition)
+        for slot in te.NON_BODY_SLOTS:
+            key = (slot, session.chosen[slot])
+            assets[key] = assets.get(key, 0) - 1
+        try:
+            await _sync_then_persist(deps, owner, assets, bodies)
+        except Exception as e:
+            # Mint succeeded but the bucket drain failed: burn the mint back so
+            # the user's bucket is exactly as it was.
+            await deps.char_burn_fn(nft_id, "")
+            session.new_nft_id = None
+            session.fail(f"assemble failed draining the bucket ({e}); your bucket is untouched")
+            _write_record(
+                deps.records_dir, "assemble", session.id, session._record("reverted_mint")
+            )
+            return
+
+        # Deliver the new character to the user (offer + XUMM accept).
+        offer_id = await deps.char_offer_fn(nft_id, owner)
+        if not offer_id:
+            session.fail(
+                f"edition {edition} was minted ({nft_id}) and your bucket drained, but the offer "
+                f"failed — contact an admin to re-offer it (journal {session.id})"
+            )
+            _write_record(
+                deps.records_dir, "assemble", session.id, session._record("minted_no_offer")
+            )
+            return
+        accept = await deps.char_accept_fn(offer_id)
+        session.results.append(
+            {"nft_id": nft_id, "image_url": image_url, "metadata_url": meta_url, "accept": accept}
+        )
+        session.state = DONE
+        _write_record(deps.records_dir, "assemble", session.id, session._record("complete"))
+    except Exception as e:
+        logging.error(f"Assemble {session.id} failed: {traceback.format_exc()}")
+        session.fail(str(e))
