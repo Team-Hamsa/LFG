@@ -28,6 +28,9 @@ trait_layers/
 # Generated audit reports
 reports/
 
+# Economy flow journals (runtime recovery records)
+economy_records/
+
 # On-chain NFT index DBs (regenerable via backfill)
 onchain_*.db
 onchain_*.db-*

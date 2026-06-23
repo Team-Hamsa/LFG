@@ -31,6 +31,7 @@ from lfg_core import config
 
 # On-ledger NFToken flag bits (mirror the tf* mint flags)
 NFT_FLAG_BURNABLE = 0x0001
+TF_TRANSFERABLE = 0x0008
 NFT_FLAG_MUTABLE = 0x0010
 
 
@@ -48,14 +49,18 @@ async def mint_nft(
         wallet = Wallet.from_seed(config.SEED)
         client = JsonRpcClient(config.JSON_RPC_URL)
 
+        eff_flags = config.NFT_FLAGS if flags is None else flags
         kwargs: dict[str, Any] = {
             "account": wallet.classic_address,
             "uri": convert_str_to_hex(metadata_cdn_url),
             "nftoken_taxon": taxon,
-            "transfer_fee": config.NFT_TRANSFER_FEE,
-            "flags": config.NFT_FLAGS if flags is None else flags,
+            "flags": eff_flags,
             "source_tag": config.SOURCE_TAG,
         }
+        # TransferFee is only valid on transferable tokens; XRPL rejects it as
+        # temMALFORMED otherwise (e.g. the soulbound Bucket, flags=16).
+        if eff_flags & TF_TRANSFERABLE:
+            kwargs["transfer_fee"] = config.NFT_TRANSFER_FEE
         if issuer != wallet.classic_address:
             kwargs["issuer"] = issuer
         payment = NFTokenMint(**kwargs)

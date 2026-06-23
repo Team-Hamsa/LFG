@@ -23,6 +23,24 @@ from lfg_core import (
 
 NFT_FLAG_BURNABLE = 0x0001
 
+# Issuer-as-owner (headless test/admin) runs can't create an NFT offer to the
+# issuer itself — XRPL rejects destination == account. The token is already held
+# by the owner in that case, so the delivery offer/accept is a no-op we skip.
+# (Cross-account runs with a real owner take the normal offer + XUMM accept path.)
+_SELF_OFFER_SKIPPED = "self-offer-skipped"
+
+
+async def _offer_or_skip(nft_id: str, owner: str) -> str | None:
+    if owner == config.SWAP_ISSUER_ADDRESS:
+        return _SELF_OFFER_SKIPPED
+    return await xrpl_ops.create_nft_offer(nft_id, owner, amount="0")
+
+
+async def _accept_or_skip(offer_id: str) -> Any:
+    if offer_id == _SELF_OFFER_SKIPPED:
+        return None
+    return await xumm_ops.create_accept_offer_payload(offer_id)
+
 
 async def _upload(path_on_cdn: str, data: bytes, content_type: str) -> str:
     return await cdn.upload_to_bunny(config.ECONOMY_CDN_FOLDER, path_on_cdn, data, content_type)
@@ -73,8 +91,8 @@ def build_economy_deps(conn: sqlite3.Connection) -> economy_flow.EconomyDeps:
         bucket_mint_fn=lambda url: xrpl_ops.mint_nft(
             url, config.BUCKET_TAXON, config.SWAP_ISSUER_ADDRESS, flags=config.BUCKET_NFT_FLAGS
         ),
-        bucket_offer_fn=lambda nft_id, owner: xrpl_ops.create_nft_offer(nft_id, owner, amount="0"),
-        bucket_accept_fn=lambda offer_id: xumm_ops.create_accept_offer_payload(offer_id),
+        bucket_offer_fn=_offer_or_skip,
+        bucket_accept_fn=_accept_or_skip,
         bucket_modify_fn=lambda nft_id, owner, url: xrpl_ops.modify_nft(nft_id, owner, url),
         char_compose_fn=_compose_char,
         char_mint_fn=lambda url: xrpl_ops.mint_nft(
@@ -82,8 +100,8 @@ def build_economy_deps(conn: sqlite3.Connection) -> economy_flow.EconomyDeps:
         ),
         char_modify_fn=lambda nft_id, owner, url: xrpl_ops.modify_nft(nft_id, owner, url),
         char_burn_fn=lambda nft_id, owner: xrpl_ops.burn_nft(nft_id, owner or None),
-        char_offer_fn=lambda nft_id, owner: xrpl_ops.create_nft_offer(nft_id, owner, amount="0"),
-        char_accept_fn=lambda offer_id: xumm_ops.create_accept_offer_payload(offer_id),
+        char_offer_fn=_offer_or_skip,
+        char_accept_fn=_accept_or_skip,
     )
 
 
