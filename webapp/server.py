@@ -23,6 +23,7 @@ from xrpl.core.addresscodec import is_valid_classic_address
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from lfg_core import config, layer_store, mint_flow, swap_flow, swap_meta, xrpl_ops, xumm_ops
+from lfg_service import identity as identity_store
 from user_db import create_users_table, get_user, register_user
 from webapp import economy_api, mock_economy
 
@@ -176,14 +177,11 @@ async def handle_token(request):
 @require_auth
 async def handle_me(request):
     user = request["user"]
-    record = await asyncio.to_thread(get_user, user["id"])
-    return web.json_response(
-        {
-            "id": user["id"],
-            "username": user["name"],
-            "wallet": record["address"] if record else None,
-        }
-    )
+    wallet = await asyncio.to_thread(identity_store.resolve, "discord", user["id"])
+    if wallet is None:
+        record = await asyncio.to_thread(get_user, user["id"])
+        wallet = record["address"] if record else None
+    return web.json_response({"id": user["id"], "username": user["name"], "wallet": wallet})
 
 
 @require_auth
@@ -194,7 +192,10 @@ async def handle_register(request):
     if not is_valid_classic_address(wallet):
         return web.json_response({"error": "invalid XRPL address"}, status=400)
     if not await asyncio.to_thread(register_user, user["id"], user["name"], wallet):
-        return web.json_response({"error": "registration failed"}, status=500)
+        return web.json_response(
+            {"error": "registration failed", "code": "register_failed"}, status=500
+        )
+    await asyncio.to_thread(identity_store.link, "discord", user["id"], user["name"], wallet)
     return web.json_response({"ok": True, "wallet": wallet})
 
 
@@ -573,6 +574,8 @@ async def no_cache_mw(request, handler):
 
 def create_app() -> web.Application:
     app = web.Application(middlewares=[no_cache_mw])
+    identity_store.ensure_identities_table()
+    identity_store.migrate_users_to_identities()
     app.router.add_get("/api/config", handle_config)
     app.router.add_post("/api/token", handle_token)
     app.router.add_get("/api/me", handle_me)
