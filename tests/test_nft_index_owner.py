@@ -1,4 +1,6 @@
-import os, sys
+import os
+import sys
+
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from lfg_core import nft_index
 from lfg_core.nft_index import OnchainNft

@@ -1498,6 +1498,7 @@ def test_economy_routes_registered():
         assert expected in paths, f"missing route {expected}"
 
 
+@pytest.mark.filterwarnings("ignore::aiohttp.web_exceptions.NotAppKeyWarning")
 def test_economy_dev_mode_read(monkeypatch):
     from aiohttp.test_utils import make_mocked_request
 
