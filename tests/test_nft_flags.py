@@ -62,7 +62,7 @@ def test_flag25_token_is_mutable_so_swap_modifies_in_place():
     # swap_flow routes it to modify_items (NFTokenModify), never burn-and-remint.
     rec = swap_meta.normalize_nft(
         "NFTID",
-        {"name": "Let's Effing Go! #3540", "attributes": []},
+        {"name": "Let's Effing Go! #3534", "attributes": []},
         flags=25,
     )
     assert rec is not None
