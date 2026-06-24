@@ -3,6 +3,16 @@ import asyncio
 import lfg_service.auth as auth
 
 
+def _run(coro):
+    # new_event_loop (not asyncio.run) so the policy's current loop is not
+    # poisoned for later tests that rely on asyncio.get_event_loop().
+    loop = asyncio.new_event_loop()
+    try:
+        return loop.run_until_complete(coro)
+    finally:
+        loop.close()
+
+
 def test_surface_for_token(monkeypatch):
     monkeypatch.setenv("SERVICE_TOKEN_DISCORD", "tok-d")
     monkeypatch.setenv("SERVICE_TOKEN_TELEGRAM", "tok-t")
@@ -35,7 +45,7 @@ def test_require_service_token_rejects_missing(monkeypatch):
     async def handler(request):
         return "ok"
 
-    resp = asyncio.run(handler(_fake_request({})))
+    resp = _run(handler(_fake_request({})))
     assert resp.status == 401
 
 
@@ -48,6 +58,6 @@ def test_require_service_token_accepts_valid_and_tags_surface(monkeypatch):
         seen["surface"] = request["surface"]
         return "ok"
 
-    result = asyncio.run(handler(_fake_request({"Authorization": "Bearer tok-d"})))
+    result = _run(handler(_fake_request({"Authorization": "Bearer tok-d"})))
     assert result == "ok"
     assert seen["surface"] == "discord"
