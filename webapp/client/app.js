@@ -29,6 +29,29 @@ function showError(msg) {
   status('');
 }
 
+// Discord serves the Activity in a sandboxed iframe where native window.confirm
+// is a silent no-op (returns false), so confirmations use an in-app overlay.
+// Returns a Promise<boolean> that resolves true only when the user confirms.
+function confirmDialog({ title, text, confirmLabel = 'Confirm' }) {
+  const overlay = el('confirm-overlay');
+  el('confirm-title').textContent = title;
+  el('confirm-text').textContent = text || '';
+  el('confirm-ok').textContent = confirmLabel;
+  overlay.hidden = false;
+  return new Promise((resolve) => {
+    const close = (result) => {
+      overlay.hidden = true;
+      el('confirm-ok').onclick = null;
+      el('confirm-cancel').onclick = null;
+      overlay.onclick = null;
+      resolve(result);
+    };
+    el('confirm-ok').onclick = () => close(true);
+    el('confirm-cancel').onclick = () => close(false);
+    overlay.onclick = (e) => { if (e.target === overlay) close(false); }; // backdrop = cancel
+  });
+}
+
 let sessionToken = null;
 let me = null;
 let pollTimer = null;
@@ -824,10 +847,11 @@ function pollEconomyOp(kind, startResp) {
 async function harvestActive() {
   const char = activeChar();
   if (!char) return;
-  if (!window.confirm(
-    `This permanently burns #${char.edition}. Its parts go to your Bucket. Continue?`)) {
-    return;
-  }
+  if (!(await confirmDialog({
+    title: 'Harvest this character?',
+    text: `This permanently burns #${char.edition}. Its parts go to your Bucket.`,
+    confirmLabel: '🔥 Harvest',
+  }))) return;
   status('Harvesting…');
   try {
     const res = await api('/api/harvest', {
@@ -852,7 +876,7 @@ async function harvestActive() {
   }
 }
 
-function openAssemble() {
+async function openAssemble() {
   const bodies = economyState.bucket.bodies;
   if (!bodies.length) { showError('No bodies in your Bucket to assemble.'); return; }
   // MVP: assemble the first available body edition, auto-filling each slot with the
@@ -868,7 +892,11 @@ function openAssemble() {
     showError(`Bucket is missing assets for: ${missing.join(', ')}`);
     return;
   }
-  if (!window.confirm(`Assemble a new character for edition #${edition}?`)) return;
+  if (!(await confirmDialog({
+    title: 'Assemble new character?',
+    text: `Assemble a new character for edition #${edition}?`,
+    confirmLabel: 'Assemble',
+  }))) return;
   commitAssemble(edition, chosen);
 }
 

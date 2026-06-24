@@ -593,6 +593,24 @@ button.back:hover { color: var(--text); border: none; }
 }
 .toast.out { opacity: 0; transition: opacity 300ms; }
 
+/* --- In-app confirm dialog ---
+   Discord serves the Activity in a sandboxed iframe where native window.confirm
+   is a silent no-op, so destructive actions confirm through this overlay. */
+.confirm-overlay {
+  position: fixed; inset: 0; z-index: 200;
+  display: flex; align-items: center; justify-content: center;
+  padding: 16px; background: rgba(0, 0, 0, .55);
+}
+.confirm-overlay[hidden] { display: none; }
+.confirm-box {
+  width: min(380px, 100%); text-align: center;
+  animation: rise var(--speed) ease-out;
+}
+.confirm-actions {
+  display: flex; gap: 10px; justify-content: center; margin-top: 18px;
+}
+.confirm-actions button { flex: 1; max-width: 160px; }
+
 /* --- Motion preferences --- */
 
 @media (prefers-reduced-motion: reduce) {
