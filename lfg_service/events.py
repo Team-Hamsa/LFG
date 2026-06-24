@@ -44,7 +44,11 @@ class InMemoryEventBus:
                 if predicate(event):
                     queue.put_nowait(event)
             except Exception:
-                # a misbehaving predicate or full queue must not break fan-out
+                # Each subscriber's queue is unbounded (asyncio.Queue maxsize=0),
+                # so put_nowait cannot raise QueueFull here; this guard isolates a
+                # misbehaving predicate so one bad subscriber can't break fan-out
+                # to the others. If a bounded queue is ever introduced, handle
+                # QueueFull explicitly (log/drop-with-signal) instead of swallowing.
                 pass
 
     @asynccontextmanager
