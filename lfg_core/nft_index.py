@@ -175,6 +175,16 @@ def live_nfts(conn: sqlite3.Connection) -> list[OnchainNft]:
     return [_row_to_nft(r) for r in cur.fetchall()]
 
 
+def owner_live_nfts(conn: sqlite3.Connection, owner: str) -> list[OnchainNft]:
+    """Non-burned tokens currently owned by `owner`, in edition order."""
+    conn.row_factory = sqlite3.Row
+    cur = conn.execute(
+        "SELECT * FROM onchain_nfts WHERE is_burned=0 AND owner=? ORDER BY nft_number, nft_id",
+        (owner,),
+    )
+    return [_row_to_nft(row) for row in cur.fetchall()]
+
+
 def retryable_unreadable(conn: sqlite3.Connection) -> list[OnchainNft]:
     """Non-burned tokens whose metadata never resolved (empty attributes) but
     that still carry a URI — candidates for a re-fetch pass."""

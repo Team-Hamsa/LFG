@@ -17,7 +17,9 @@ failed_db_records/
 *.db.bak*
 webapp.log
 users.json
+# root-level design mockups are ignored, but the Activity frontend IS source
 *.html
+!webapp/client/index.html
 .mypy_cache/
 .ruff_cache/
 .remember/

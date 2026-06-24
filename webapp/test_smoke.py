@@ -1468,3 +1468,126 @@ def test_no_cache_middleware_respects_handler_cache_header():
     req = make_mocked_request("GET", "/x")
     resp = loop.run_until_complete(server.no_cache_mw(req, handler))
     assert resp.headers["Cache-Control"] == "public, max-age=60"
+
+
+def test_economy_config_defaults():
+    from lfg_core import config
+
+    assert config.ECONOMY_NETWORK in ("testnet", "mainnet")
+    assert isinstance(config.WEBAPP_DEV_MODE, bool)
+
+
+def test_layer_route_registered():
+    app = server.create_app()
+    paths = {getattr(r.resource, "canonical", "") for r in app.router.routes()}
+    assert "/api/layer" in paths
+
+
+def test_layer_handler_bad_params(monkeypatch):
+    from aiohttp.test_utils import make_mocked_request
+
+    req = make_mocked_request("GET", "/api/layer")  # no query
+    resp = asyncio.get_event_loop().run_until_complete(server.handle_layer(req))
+    assert resp.status == 400
+
+
+def test_economy_routes_registered():
+    app = server.create_app()
+    paths = {getattr(r.resource, "canonical", "") for r in app.router.routes()}
+    for expected in [
+        "/api/economy",
+        "/api/equip",
+        "/api/equip/{session_id}",
+        "/api/harvest",
+        "/api/harvest/{session_id}",
+        "/api/assemble",
+        "/api/assemble/{session_id}",
+    ]:
+        assert expected in paths, f"missing route {expected}"
+
+
+@pytest.mark.filterwarnings("ignore::aiohttp.web_exceptions.NotAppKeyWarning")
+def test_economy_dev_mode_read(monkeypatch):
+    from aiohttp.test_utils import make_mocked_request
+
+    from webapp import mock_economy
+
+    monkeypatch.setattr(server.config, "WEBAPP_DEV_MODE", True)
+    # require_wallet is bypassed in dev mode; handler reads the dev owner.
+    req = make_mocked_request("GET", "/api/economy")
+    req["user"] = {"id": "dev", "name": "dev"}
+    req["wallet"] = mock_economy.DEV_OWNER
+    resp = asyncio.get_event_loop().run_until_complete(server.handle_economy(req))
+    assert resp.status == 200
+
+
+def test_require_auth_dev_bypass(monkeypatch):
+    from aiohttp.test_utils import make_mocked_request
+
+    monkeypatch.setattr(server.config, "WEBAPP_DEV_MODE", True)
+
+    @server.require_wallet
+    async def probe(request):
+        return server.web.json_response({"wallet": request["wallet"]})
+
+    req = make_mocked_request("GET", "/x")  # no Authorization header
+    resp = asyncio.get_event_loop().run_until_complete(probe(req))
+    assert resp.status == 200
+
+
+def test_config_reports_dev_mode(monkeypatch):
+    from aiohttp.test_utils import make_mocked_request
+
+    monkeypatch.setattr(server.config, "WEBAPP_DEV_MODE", True)
+    req = make_mocked_request("GET", "/api/config")
+    resp = asyncio.get_event_loop().run_until_complete(server.handle_config(req))
+    import json
+
+    assert json.loads(resp.body)["dev_mode"] is True
+
+
+def test_dev_reload_route_404_when_off(monkeypatch):
+    from aiohttp.test_utils import make_mocked_request
+
+    monkeypatch.setattr(server.config, "WEBAPP_DEV_MODE", False)
+    req = make_mocked_request("GET", "/__dev/reload")
+    resp = asyncio.get_event_loop().run_until_complete(server.handle_dev_reload(req))
+    assert resp.status == 404
+
+
+def test_client_dir_mtime_is_float():
+    assert isinstance(server._client_dir_mtime(), float)
+
+
+# --- Fix 3 regression: missing body field → 400, not 502 ---
+
+
+@pytest.mark.filterwarnings("ignore::aiohttp.web_exceptions.NotAppKeyWarning")
+def test_equip_missing_body_field_returns_400(monkeypatch):
+    """Regression: a POST body missing required fields (e.g. nft_id) must
+    return 400 (bad request), not 502.  Exercises the new (KeyError, ValueError)
+    catch in _economy_post for the non-dev code path."""
+    from aiohttp.test_utils import make_mocked_request
+
+    # Force non-dev mode so the real start_coro path is exercised.
+    monkeypatch.setattr(server.config, "WEBAPP_DEV_MODE", False)
+
+    # The lambda for handle_equip_start accesses b["nft_id"], b["slot"], b["value"].
+    # Sending an empty body dict will raise KeyError on b["nft_id"] before any
+    # DB/network call, so no other stubs are needed.
+    req = make_mocked_request("POST", "/api/equip")
+    req["user"] = {"id": "u1", "name": "test"}
+    req["wallet"] = "rOwner"
+
+    async def empty_json():
+        return {}  # missing nft_id, slot, value
+
+    req.json = empty_json  # type: ignore[method-assign]
+
+    loop = asyncio.get_event_loop()
+    resp = loop.run_until_complete(server.handle_equip_start(req))
+    assert resp.status == 400, f"expected 400, got {resp.status}"
+    import json
+
+    body = json.loads(resp.body)
+    assert "missing or invalid field" in body.get("error", "")

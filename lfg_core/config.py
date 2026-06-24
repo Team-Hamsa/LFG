@@ -93,6 +93,8 @@ DISCORD_CLIENT_ID = os.getenv("DISCORD_CLIENT_ID", "")
 DISCORD_CLIENT_SECRET = os.getenv("DISCORD_CLIENT_SECRET", "")
 WEBAPP_SESSION_SECRET = os.getenv("WEBAPP_SESSION_SECRET", "")
 WEBAPP_PORT = int(os.getenv("WEBAPP_PORT", "8176"))
+ECONOMY_NETWORK = os.getenv("ECONOMY_NETWORK", "testnet")  # economy DB network
+WEBAPP_DEV_MODE = os.getenv("WEBAPP_DEV_MODE", "") not in ("", "0", "false", "False")
 
 # Misc
 PAYMENT_TIMEOUT_SECONDS = int(os.getenv("PAYMENT_TIMEOUT_SECONDS", "300"))
