@@ -943,8 +943,8 @@ async function main() {
   el('register-retry-btn').onclick = startSignin;
   el('mint-btn').onclick = startMint;
   el('flow-regen-btn').onclick = regeneratePaymentQr;
-  el('swap-btn').textContent = '👗 Dress Up';
   el('swap-btn').onclick = () => openDressup();
+  el('swapper-btn').onclick = () => openSwapper();
   el('swap-back-btn').onclick = () => showMintHome();
   el('pick-traits-btn').onclick = showTraitChooser;
   el('swap-cancel-btn').onclick = () => openSwapper();
