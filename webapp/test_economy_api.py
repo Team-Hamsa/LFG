@@ -32,6 +32,8 @@ def test_read_economy_state_shape():
     state = economy_api.read_economy_state(conn, "rOwner")
     assert state["characters"][0]["edition"] == 3537
     assert state["characters"][0]["attributes"][0]["value"] == "Crown"
+    assert state["characters"][0]["image_url"] == "https://cdn.example/3537.png"
+    assert state["characters"][0]["mutable"] is True
     assert state["bucket"]["assets"][0] == {"slot": "Head", "value": "Halo", "count": 2}
     assert state["bucket"]["bodies"] == [42]
     assert state["trait_order"][0] == "Background"
@@ -43,3 +45,4 @@ def test_read_economy_state_excludes_other_owners():
     state = economy_api.read_economy_state(conn, "rNobody")
     assert state["characters"] == []
     assert state["bucket"]["assets"] == []
+    assert state["bucket"]["bodies"] == []
