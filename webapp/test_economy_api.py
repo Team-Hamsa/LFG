@@ -1,5 +1,7 @@
 import asyncio
+import json
 import os
+import sqlite3
 import sys
 
 import pytest
@@ -124,3 +126,70 @@ def test_start_equip_happy_returns_session(monkeypatch):
     ws = asyncio.get_event_loop().run_until_complete(go())
     assert ws.kind == "equip" and ws.discord_id == "123"
     assert captured.get("ran") is True
+
+
+def test_start_equip_closes_conn_after_task(monkeypatch):
+    """Regression: the sqlite conn opened for the scheduled flow must be closed
+    after the background task completes (no file-descriptor leak)."""
+
+    class _TrackingConn(sqlite3.Connection):
+        """sqlite3.Connection subclass that counts close() calls."""
+
+        close_count: int
+
+        def __init__(self, *args, **kwargs):
+            super().__init__(*args, **kwargs)
+            self.close_count = 0
+
+        def close(self) -> None:  # type: ignore[override]
+            self.close_count += 1
+            super().close()
+
+    # Build a _TrackingConn seeded with the same schema/data as _seed_conn().
+    tracked = sqlite3.connect(":memory:", factory=_TrackingConn)
+    # Replay what _seed_conn does, but on our tracking conn.
+    tracked.executescript("""
+        CREATE TABLE IF NOT EXISTS onchain_nfts (
+            nft_id TEXT PRIMARY KEY,
+            nft_number INTEGER,
+            owner TEXT,
+            is_burned INTEGER DEFAULT 0,
+            mutable INTEGER,
+            uri_hex TEXT,
+            body TEXT,
+            attributes_json TEXT,
+            image TEXT,
+            ledger_index INTEGER
+        );
+    """)
+    economy_store.init_economy_schema(tracked)
+    tracked.execute(
+        "INSERT INTO onchain_nfts VALUES (?,?,?,?,?,?,?,?,?,?)",
+        ("A", 3537, "rOwner", 0, 1, "", "male",
+         json.dumps([{"trait_type": "Head", "value": "Crown"}]),
+         "https://cdn.example/3537.png", 1),
+    )
+    tracked.commit()
+    economy_store.set_bucket_contents(tracked, "rOwner", [("Head", "Halo", 2)], [42])
+
+    monkeypatch.setattr(economy_api, "open_conn", lambda: tracked)
+
+    async def fake_run_equip(session, deps):
+        session.state = economy_flow.DONE
+        session.displaced_value = "Crown"
+
+    monkeypatch.setattr(economy_flow, "run_equip", fake_run_equip)
+    from scripts import _economy_deps
+    monkeypatch.setattr(_economy_deps, "build_economy_deps", lambda c: object())
+
+    async def go():
+        await economy_api.start_equip("123", "rOwner", "A", "Head", "Halo")
+        # One sleep(0) tick lets the create_task coroutine begin; a second tick
+        # ensures the finally-block runs before we assert.
+        await asyncio.sleep(0)
+        await asyncio.sleep(0)
+
+    asyncio.get_event_loop().run_until_complete(go())
+    assert tracked.close_count == 1, (
+        f"expected conn.close() called exactly once, got {tracked.close_count}"
+    )

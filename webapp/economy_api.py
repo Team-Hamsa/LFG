@@ -101,10 +101,17 @@ def _load_owned_character(conn: sqlite3.Connection, owner: str, nft_id: str) -> 
     return rec
 
 
+async def _run_and_close(runner: Any, session: Any, deps: Any, conn: sqlite3.Connection) -> None:
+    try:
+        await runner(session, deps)
+    finally:
+        conn.close()
+
+
 def _schedule(kind: str, discord_id: str, session: Any, conn: sqlite3.Connection,
               runner: Any) -> EconomyWebSession:
     deps = _economy_deps.build_economy_deps(conn)
-    asyncio.get_event_loop().create_task(runner(session, deps))
+    asyncio.get_event_loop().create_task(_run_and_close(runner, session, deps, conn))
     return EconomyWebSession(discord_id=discord_id, kind=kind, inner=session)
 
 
