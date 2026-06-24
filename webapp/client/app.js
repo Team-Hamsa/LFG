@@ -706,6 +706,7 @@ function selectCharacter(nftId) {
 
 async function openDressup() {
   showPanel('dressup-panel');
+  el('dressup-harvest-btn').onclick = () => harvestActive();
   status('Loading your wardrobe…');
   try {
     economyState = await api('/api/economy');
@@ -813,8 +814,76 @@ function pollEconomyOp(kind, startResp) {
   });
 }
 
-// STUB: replaced in Task 15
-function openAssemble() {}
+async function harvestActive() {
+  const char = activeChar();
+  if (!char) return;
+  if (!window.confirm(
+    `This permanently burns #${char.edition}. Its parts go to your Bucket. Continue?`)) {
+    return;
+  }
+  status('Harvesting…');
+  try {
+    const res = await api('/api/harvest', {
+      method: 'POST', body: JSON.stringify({ nft_id: char.nft_id }),
+    });
+    const final = await pollEconomyOp('harvest', res);
+    status('');
+    if (final.state === 'failed') throw new Error(final.error || 'harvest failed');
+    if (final.accept) {
+      // First-ever Bucket: user must accept the soulbound token in Xaman.
+      showFlow({ title: '👜 Claim your Bucket',
+        text: 'Scan to accept your trait Bucket in Xaman.',
+        qrData: final.accept, link: final.accept, done: true });
+    }
+    economyState = await api('/api/economy');
+    activeNftId = economyState.characters[0] ? economyState.characters[0].nft_id : null;
+    showPanel('dressup-panel');
+    if (activeNftId) selectCharacter(activeNftId);
+    else { renderRoster(); renderBucket(); el('dressup-canvas').replaceChildren(); }
+  } catch (e) {
+    showError(e.message);
+  }
+}
+
+function openAssemble() {
+  const bodies = economyState.bucket.bodies;
+  if (!bodies.length) { showError('No bodies in your Bucket to assemble.'); return; }
+  // MVP: assemble the first available body edition, auto-filling each slot with the
+  // first compatible Bucket asset; the user reviews the preview before committing.
+  const edition = bodies[0];
+  const chosen = {};
+  for (const slot of economyState.slots) {
+    const asset = economyState.bucket.assets.find((a) => a.slot === slot && a.count > 0);
+    if (asset) chosen[slot] = asset.value;
+  }
+  const missing = economyState.slots.filter((s) => !(s in chosen));
+  if (missing.length) {
+    showError(`Bucket is missing assets for: ${missing.join(', ')}`);
+    return;
+  }
+  if (!window.confirm(`Assemble a new character for edition #${edition}?`)) return;
+  commitAssemble(edition, chosen);
+}
+
+async function commitAssemble(edition, chosen) {
+  status('Assembling…');
+  try {
+    const res = await api('/api/assemble', {
+      method: 'POST', body: JSON.stringify({ edition, chosen }),
+    });
+    const final = await pollEconomyOp('assemble', res);
+    status('');
+    if (final.state === 'failed') throw new Error(final.error || 'assemble failed');
+    showFlow({ title: `🎉 #${edition} assembled!`,
+      text: final.accept ? 'Scan to accept your new character in Xaman.'
+                         : 'Your new character is on its way.',
+      qrData: final.accept || null, link: final.accept || null,
+      image: imgUrl(final.image_url), done: true, celebrate: true });
+    economyState = await api('/api/economy');
+  } catch (e) {
+    showError(e.message);
+  }
+}
 
 // Header logo with a text-wordmark fallback. The Activity's CSP forbids
 // inline handlers, so the swap is wired here; the load may already have
