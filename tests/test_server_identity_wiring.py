@@ -15,7 +15,7 @@ os.environ.setdefault("LAYER_SOURCE", "local")
 os.environ.setdefault("BUNNY_PULL_ZONE", "nft.pullzone.example")
 
 import lfg_service.identity as identity  # noqa: E402
-from webapp import server  # noqa: E402
+from lfg_service import app as server  # noqa: E402
 
 
 def test_create_app_ensures_and_migrates(tmp_path, monkeypatch):

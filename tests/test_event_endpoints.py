@@ -16,8 +16,8 @@ os.environ.setdefault("BUNNY_PULL_ZONE", "nft.pullzone.example")
 import asyncio
 
 import lfg_service.identity as identity
+from lfg_service import app as server
 from lfg_service.events import Event
-from webapp import server
 
 
 def _run(coro):

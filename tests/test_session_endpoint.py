@@ -1,4 +1,4 @@
-# Env-guard preamble: importing webapp.server freezes lfg_core.config constants
+# Env-guard preamble: importing lfg_service.app freezes lfg_core.config constants
 # at import time; set the same defaults test_smoke.py / test_server_identity_wiring.py
 # use so collection order can't strand IMG_PROXY_ALLOWED_BASES. (Copy the block
 # verbatim from tests/test_server_identity_wiring.py — same keys/values.)
@@ -18,7 +18,7 @@ import asyncio
 import json
 
 import lfg_service.identity as identity
-from webapp import server
+from lfg_service import app as server
 
 
 def _run(coro):
