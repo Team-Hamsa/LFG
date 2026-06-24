@@ -3,7 +3,7 @@
 import asyncio
 
 import lfg_core.xrpl_ops as xrpl_ops
-from lfg_core import config
+from lfg_core import config, swap_meta
 
 
 def test_flag_bit_constants():
@@ -55,3 +55,15 @@ def test_default_mint_is_burnable(monkeypatch):
     _run(xrpl_ops.mint_nft("https://x/m.json", taxon=1, issuer=config.SWAP_ISSUER_ADDRESS))
     assert captured["tx"].flags & config.NFT_FLAG_BURNABLE, "mint tx must be burnable"
     assert captured["tx"].flags & config.NFT_FLAG_MUTABLE, "mint tx must stay mutable"
+
+
+def test_flag25_token_is_mutable_so_swap_modifies_in_place():
+    # A burnable+transferable+mutable (25) token must still report mutable, so
+    # swap_flow routes it to modify_items (NFTokenModify), never burn-and-remint.
+    rec = swap_meta.normalize_nft(
+        "NFTID",
+        {"name": "Let's Effing Go! #3540", "attributes": []},
+        flags=25,
+    )
+    assert rec is not None
+    assert rec["mutable"] is True
