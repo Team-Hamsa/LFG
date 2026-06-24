@@ -792,8 +792,26 @@ async function equipTrait(slot, value, tileEl) {
   }
 }
 
-// STUB: replaced in Task 14
-function pollEconomyOp(kind, startResp){ return Promise.resolve(startResp); }
+function isTerminal(s) { return s === 'done' || s === 'failed'; }
+
+function pollEconomyOp(kind, startResp) {
+  if (isTerminal(startResp.state)) return Promise.resolve(startResp);
+  const id = startResp.id;
+  return new Promise((resolve) => {
+    const tick = async () => {
+      let s;
+      try {
+        s = await api(`/api/${kind}/${id}`);
+      } catch (e) {
+        setTimeout(tick, 3000); // transient; keep polling
+        return;
+      }
+      if (isTerminal(s.state)) resolve(s);
+      else setTimeout(tick, 3000);
+    };
+    setTimeout(tick, 3000);
+  });
+}
 
 // STUB: replaced in Task 15
 function openAssemble() {}
