@@ -467,6 +467,9 @@ async def handle_signin_status(request):
     if s["signed"] and s["account"] and is_valid_classic_address(s["account"]):
         if not await asyncio.to_thread(register_user, rec["discord_id"], rec["name"], s["account"]):
             return web.json_response({"error": "registration failed"}, status=500)
+        await asyncio.to_thread(
+            identity_store.link, "discord", rec["discord_id"], rec["name"], s["account"]
+        )
         del signin_payloads[uuid]
         return web.json_response({"state": "signed", "wallet": s["account"]})
     if s["expired"]:
