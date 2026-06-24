@@ -59,7 +59,7 @@ class MockEconomy:
         attr = next(a for a in char["attributes"] if a["trait_type"] == slot)
         displaced = attr["value"]
         if self.assets.get((slot, value), 0) <= 0:
-            return {"id": "mock", "state": "failed", "error": "asset not in bucket"}
+            return {"id": "mock", "state": "failed", "error": "asset not in bucket", "displaced": None}
         attr["value"] = value
         self.assets[(slot, value)] -= 1
         if displaced != "None":
