@@ -106,6 +106,8 @@ def _load_owned_character(
 async def _run_and_close(runner: Any, session: Any, deps: Any, conn: sqlite3.Connection) -> None:
     try:
         await runner(session, deps)
+    except Exception as e:  # unexpected crash: ensure the session reaches a terminal state
+        session.fail(f"internal error: {e}")
     finally:
         conn.close()
 
@@ -114,7 +116,7 @@ def _schedule(
     kind: str, discord_id: str, session: Any, conn: sqlite3.Connection, runner: Any
 ) -> EconomyWebSession:
     deps = _economy_deps.build_economy_deps(conn)
-    asyncio.get_event_loop().create_task(_run_and_close(runner, session, deps, conn))
+    asyncio.get_running_loop().create_task(_run_and_close(runner, session, deps, conn))
     return EconomyWebSession(discord_id=discord_id, kind=kind, inner=session)
 
 

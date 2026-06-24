@@ -233,3 +233,80 @@ def test_start_equip_closes_conn_after_task(monkeypatch):
     assert tracked.close_count == 1, (
         f"expected conn.close() called exactly once, got {tracked.close_count}"
     )
+
+
+def test_run_and_close_marks_session_failed_on_runner_crash(monkeypatch):
+    """Regression: if the runner raises unexpectedly the inner session must reach
+    a terminal (FAILED) state so it is never left as a zombie RUNNING session."""
+
+    class _TrackingConn(sqlite3.Connection):
+        """sqlite3.Connection subclass that counts close() calls."""
+
+        close_count: int
+
+        def __init__(self, *args, **kwargs):
+            super().__init__(*args, **kwargs)
+            self.close_count = 0
+
+        def close(self) -> None:  # type: ignore[override]
+            self.close_count += 1
+            super().close()
+
+    # Build a seeded tracking connection equivalent to _seed_conn().
+    tracked = sqlite3.connect(":memory:", factory=_TrackingConn)
+    tracked.executescript("""
+        CREATE TABLE IF NOT EXISTS onchain_nfts (
+            nft_id TEXT PRIMARY KEY,
+            nft_number INTEGER,
+            owner TEXT,
+            is_burned INTEGER DEFAULT 0,
+            mutable INTEGER,
+            uri_hex TEXT,
+            body TEXT,
+            attributes_json TEXT,
+            image TEXT,
+            ledger_index INTEGER
+        );
+    """)
+    economy_store.init_economy_schema(tracked)
+    tracked.execute(
+        "INSERT INTO onchain_nfts VALUES (?,?,?,?,?,?,?,?,?,?)",
+        (
+            "A",
+            3537,
+            "rOwner",
+            0,
+            1,
+            "",
+            "male",
+            json.dumps([{"trait_type": "Head", "value": "Crown"}]),
+            "https://cdn.example/3537.png",
+            1,
+        ),
+    )
+    tracked.commit()
+    economy_store.set_bucket_contents(tracked, "rOwner", [("Head", "Halo", 2)], [42])
+
+    monkeypatch.setattr(economy_api, "open_conn", lambda: tracked)
+
+    async def crashing_runner(session, deps):
+        raise RuntimeError("simulated unexpected crash")
+
+    monkeypatch.setattr(economy_flow, "run_equip", crashing_runner)
+    from scripts import _economy_deps
+
+    monkeypatch.setattr(_economy_deps, "build_economy_deps", lambda c: object())
+
+    async def go():
+        ws = await economy_api.start_equip("123", "rOwner", "A", "Head", "Halo")
+        # Two ticks: first starts the task body, second runs the except/finally
+        await asyncio.sleep(0)
+        await asyncio.sleep(0)
+        return ws
+
+    ws = asyncio.get_event_loop().run_until_complete(go())
+    # The inner session must be in a terminal FAILED state (not stuck RUNNING)
+    assert ws.inner.state == economy_flow.FAILED
+    assert "internal error" in (ws.inner.error or "")
+    # The conn must be closed regardless of the crash
+    assert tracked.close_count == 1

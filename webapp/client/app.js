@@ -798,8 +798,15 @@ function isTerminal(s) { return s === 'done' || s === 'failed'; }
 function pollEconomyOp(kind, startResp) {
   if (isTerminal(startResp.state)) return Promise.resolve(startResp);
   const id = startResp.id;
+  const MAX_ATTEMPTS = 100; // ~5 min at 3 s/tick
+  let attempts = 0;
   return new Promise((resolve) => {
     const tick = async () => {
+      attempts++;
+      if (attempts > MAX_ATTEMPTS) {
+        resolve({ state: 'failed', error: 'timed out — please refresh and try again' });
+        return;
+      }
       let s;
       try {
         s = await api(`/api/${kind}/${id}`);

@@ -493,6 +493,8 @@ def _economy_post(kind, start_coro, mock_call):
             ws = await start_coro(user["id"], request["wallet"], body)
         except economy_api.EconomyError as e:
             return web.json_response({"error": str(e)}, status=400)
+        except (KeyError, ValueError) as e:
+            return web.json_response({"error": f"missing or invalid field: {e}"}, status=400)
         except Exception as e:
             logging.error(f"{kind} failed to start: {e}")
             return web.json_response({"error": "could not start the action"}, status=502)

@@ -1557,3 +1557,37 @@ def test_dev_reload_route_404_when_off(monkeypatch):
 
 def test_client_dir_mtime_is_float():
     assert isinstance(server._client_dir_mtime(), float)
+
+
+# --- Fix 3 regression: missing body field → 400, not 502 ---
+
+
+@pytest.mark.filterwarnings("ignore::aiohttp.web_exceptions.NotAppKeyWarning")
+def test_equip_missing_body_field_returns_400(monkeypatch):
+    """Regression: a POST body missing required fields (e.g. nft_id) must
+    return 400 (bad request), not 502.  Exercises the new (KeyError, ValueError)
+    catch in _economy_post for the non-dev code path."""
+    from aiohttp.test_utils import make_mocked_request
+
+    # Force non-dev mode so the real start_coro path is exercised.
+    monkeypatch.setattr(server.config, "WEBAPP_DEV_MODE", False)
+
+    # The lambda for handle_equip_start accesses b["nft_id"], b["slot"], b["value"].
+    # Sending an empty body dict will raise KeyError on b["nft_id"] before any
+    # DB/network call, so no other stubs are needed.
+    req = make_mocked_request("POST", "/api/equip")
+    req["user"] = {"id": "u1", "name": "test"}
+    req["wallet"] = "rOwner"
+
+    async def empty_json():
+        return {}  # missing nft_id, slot, value
+
+    req.json = empty_json  # type: ignore[method-assign]
+
+    loop = asyncio.get_event_loop()
+    resp = loop.run_until_complete(server.handle_equip_start(req))
+    assert resp.status == 400, f"expected 400, got {resp.status}"
+    import json
+
+    body = json.loads(resp.body)
+    assert "missing or invalid field" in body.get("error", "")
