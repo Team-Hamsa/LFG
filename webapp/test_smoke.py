@@ -1468,3 +1468,9 @@ def test_no_cache_middleware_respects_handler_cache_header():
     req = make_mocked_request("GET", "/x")
     resp = loop.run_until_complete(server.no_cache_mw(req, handler))
     assert resp.headers["Cache-Control"] == "public, max-age=60"
+
+
+def test_economy_config_defaults():
+    from lfg_core import config
+    assert config.ECONOMY_NETWORK in ("testnet", "mainnet")
+    assert isinstance(config.WEBAPP_DEV_MODE, bool)
