@@ -10,9 +10,14 @@ os.environ.setdefault("BUNNY_CDN_STORAGE_ZONE", "test")
 os.environ.setdefault("LAYER_SOURCE", "local")
 os.environ.setdefault("BUNNY_PULL_ZONE", "nft.pullzone.example")
 
-from lfg_core import nft_index, economy_store
+from lfg_core import nft_index, economy_store, economy_flow
 from lfg_core.nft_index import OnchainNft
 from webapp import economy_api
+
+
+def _char():
+    return OnchainNft(nft_id="A", nft_number=1, owner="rOwner", is_burned=False, mutable=True,
+                      uri_hex="", body="male", attributes=[], image="", ledger_index=1)
 
 
 def _seed_conn():
@@ -46,3 +51,31 @@ def test_read_economy_state_excludes_other_owners():
     assert state["characters"] == []
     assert state["bucket"]["assets"] == []
     assert state["bucket"]["bodies"] == []
+
+
+def test_equip_session_dict():
+    s = economy_flow.EquipSession(owner="rOwner", character=_char(), slot="Head",
+                                  incoming_value="Halo")
+    s.state = economy_flow.DONE
+    s.displaced_value = "Crown"
+    d = economy_api.economy_session_dict("equip", s)
+    assert d["state"] == "done" and d["displaced"] == "Crown" and d["error"] is None
+
+
+def test_assemble_session_dict_surfaces_accept_link():
+    s = economy_flow.AssembleSession(owner="rOwner", edition=42, chosen={},
+                                     body_value="male", body_class="male")
+    s.results = [{"nft_id": "N", "image_url": "img", "metadata_url": "m",
+                  "accept": {"xumm_url": "https://xaman/abc"}}]
+    d = economy_api.economy_session_dict("assemble", s)
+    assert d["accept"] == "https://xaman/abc" and d["nft_id"] == "N"
+
+
+def test_web_session_delegates():
+    s = economy_flow.EquipSession(owner="rOwner", character=_char(), slot="Head",
+                                  incoming_value="Halo")
+    ws = economy_api.EconomyWebSession(discord_id="123", kind="equip", inner=s)
+    assert ws.state == economy_flow.RUNNING
+    assert ws.id == s.id
+    assert ws.to_dict()["state"] == economy_flow.RUNNING
+    assert isinstance(ws.created_at, float)
