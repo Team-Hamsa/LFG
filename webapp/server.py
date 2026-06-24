@@ -84,6 +84,9 @@ def verify_session_token(token: str):
 
 def require_auth(handler):
     async def wrapper(request):
+        if config.WEBAPP_DEV_MODE:
+            request["user"] = {"id": "dev", "name": "dev"}
+            return await handler(request)
         auth = request.headers.get("Authorization", "")
         if not auth.startswith("Bearer "):
             return web.json_response({"error": "unauthorized"}, status=401)
@@ -101,6 +104,9 @@ def require_wallet(handler):
 
     @require_auth
     async def wrapper(request):
+        if config.WEBAPP_DEV_MODE:
+            request["wallet"] = mock_economy.DEV_OWNER
+            return await handler(request)
         record = await asyncio.to_thread(get_user, request["user"]["id"])
         if not record or not record.get("address"):
             return web.json_response({"error": "no wallet registered"}, status=400)
@@ -391,8 +397,10 @@ async def handle_signin_status(request):
 
 
 async def handle_config(request):
-    """Public config the frontend needs before auth (client_id for authorize())."""
-    return web.json_response({"client_id": config.DISCORD_CLIENT_ID})
+    """Public config the frontend needs before auth (client_id, dev flag)."""
+    return web.json_response(
+        {"client_id": config.DISCORD_CLIENT_ID, "dev_mode": config.WEBAPP_DEV_MODE}
+    )
 
 
 async def handle_qr(request):

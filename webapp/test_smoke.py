@@ -1508,3 +1508,26 @@ def test_economy_dev_mode_read(monkeypatch):
     req["wallet"] = mock_economy.DEV_OWNER
     resp = asyncio.get_event_loop().run_until_complete(server.handle_economy(req))
     assert resp.status == 200
+
+
+def test_require_auth_dev_bypass(monkeypatch):
+    from aiohttp.test_utils import make_mocked_request
+    from webapp import mock_economy
+    monkeypatch.setattr(server.config, "WEBAPP_DEV_MODE", True)
+
+    @server.require_wallet
+    async def probe(request):
+        return server.web.json_response({"wallet": request["wallet"]})
+
+    req = make_mocked_request("GET", "/x")  # no Authorization header
+    resp = asyncio.get_event_loop().run_until_complete(probe(req))
+    assert resp.status == 200
+
+
+def test_config_reports_dev_mode(monkeypatch):
+    from aiohttp.test_utils import make_mocked_request
+    monkeypatch.setattr(server.config, "WEBAPP_DEV_MODE", True)
+    req = make_mocked_request("GET", "/api/config")
+    resp = asyncio.get_event_loop().run_until_complete(server.handle_config(req))
+    import json
+    assert json.loads(resp.body)["dev_mode"] is True
