@@ -63,9 +63,9 @@ WS_URL = os.getenv("XRPL_WS_URL", _default_ws)
 NFT_TAXON = int(os.getenv("NFT_TAXON", "0"))
 NFT_TRANSFER_FEE = int(os.getenv("NFT_TRANSFER_FEE", "7000"))
 # XLS-20 / Dynamic NFTs NFToken flag bits.
-NFT_FLAG_BURNABLE = 0x0001      # lsfBurnable — issuer may burn (required for Harvest)
+NFT_FLAG_BURNABLE = 0x0001  # lsfBurnable — issuer may burn (required for Harvest)
 NFT_FLAG_TRANSFERABLE = 0x0008  # tfTransferable
-NFT_FLAG_MUTABLE = 0x0010       # tfMutable — Dynamic NFT, in-place NFTokenModify
+NFT_FLAG_MUTABLE = 0x0010  # tfMutable — Dynamic NFT, in-place NFTokenModify
 
 # 25 = burnable + transferable + mutable. Burnable so the trait economy can
 # harvest (issuer-burn) characters; mutable so trait swaps update in place
