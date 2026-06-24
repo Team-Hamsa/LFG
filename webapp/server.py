@@ -24,6 +24,7 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from lfg_core import config, layer_store, mint_flow, swap_flow, swap_meta, xrpl_ops, xumm_ops
 from lfg_service import identity as identity_store
+from lfg_service.auth import require_service_token
 from user_db import create_users_table, get_user, register_user
 from webapp import economy_api, mock_economy
 
@@ -172,6 +173,19 @@ async def handle_token(request):
             "user": {"id": user["id"], "username": user.get("username", "")},
         }
     )
+
+
+@require_service_token
+async def handle_session(request):
+    body = await request.json()
+    pid = (body.get("platform_user_id") or "").strip()
+    pname = (body.get("platform_username") or "").strip()
+    if not pid:
+        return web.json_response(
+            {"error": "missing platform_user_id", "code": "bad_request"}, status=400
+        )
+    token = make_session_token({"id": pid, "name": pname})
+    return web.json_response({"session_token": token, "user": {"id": pid, "username": pname}})
 
 
 @require_auth
@@ -578,6 +592,7 @@ def create_app() -> web.Application:
     identity_store.migrate_users_to_identities()
     app.router.add_get("/api/config", handle_config)
     app.router.add_post("/api/token", handle_token)
+    app.router.add_post("/api/session", handle_session)
     app.router.add_get("/api/me", handle_me)
     app.router.add_post("/api/register", handle_register)
     app.router.add_post("/api/mint", handle_mint_start)
