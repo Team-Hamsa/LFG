@@ -68,6 +68,19 @@ def test_session_issues_token(monkeypatch):
     assert body["session_token"]
 
 
+def test_session_missing_pid_returns_400(monkeypatch):
+    monkeypatch.setenv("SERVICE_TOKEN_TELEGRAM", "tok-t")
+    resp = _run(
+        server.handle_session(
+            _FakeRequest(
+                {"Authorization": "Bearer tok-t"},
+                {"platform_username": "neo"},  # no platform_user_id
+            )
+        )
+    )
+    assert resp.status == 400
+
+
 def test_session_route_registered(tmp_path, monkeypatch):
     monkeypatch.setattr(identity, "DATABASE", str(tmp_path / "t.db"))
     app = server.create_app()
