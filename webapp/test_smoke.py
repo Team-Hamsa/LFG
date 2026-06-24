@@ -1532,3 +1532,15 @@ def test_config_reports_dev_mode(monkeypatch):
     resp = asyncio.get_event_loop().run_until_complete(server.handle_config(req))
     import json
     assert json.loads(resp.body)["dev_mode"] is True
+
+
+def test_dev_reload_route_404_when_off(monkeypatch):
+    from aiohttp.test_utils import make_mocked_request
+    monkeypatch.setattr(server.config, "WEBAPP_DEV_MODE", False)
+    req = make_mocked_request("GET", "/__dev/reload")
+    resp = asyncio.get_event_loop().run_until_complete(server.handle_dev_reload(req))
+    assert resp.status == 404
+
+
+def test_client_dir_mtime_is_float():
+    assert isinstance(server._client_dir_mtime(), float)

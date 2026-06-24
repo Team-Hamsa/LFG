@@ -519,6 +519,36 @@ handle_harvest_status = make_status_handler(economy_sessions)
 handle_assemble_status = make_status_handler(economy_sessions)
 
 
+def _client_dir_mtime() -> float:
+    latest = 0.0
+    for root, _dirs, files in os.walk(CLIENT_DIR):
+        for f in files:
+            try:
+                latest = max(latest, os.path.getmtime(os.path.join(root, f)))
+            except OSError:
+                continue
+    return latest
+
+
+async def handle_dev_reload(request):
+    if not config.WEBAPP_DEV_MODE:
+        return web.json_response({"error": "not found"}, status=404)
+    resp = web.StreamResponse(headers={"Content-Type": "text/event-stream",
+                                       "Cache-Control": "no-store"})
+    await resp.prepare(request)
+    last = _client_dir_mtime()
+    try:
+        while True:
+            await asyncio.sleep(0.5)
+            now = _client_dir_mtime()
+            if now > last:
+                last = now
+                await resp.write(b"data: reload\n\n")
+    except (ConnectionResetError, asyncio.CancelledError):
+        pass
+    return resp
+
+
 async def handle_index(request):
     return web.FileResponse(os.path.join(CLIENT_DIR, "index.html"))
 
@@ -558,6 +588,7 @@ def create_app() -> web.Application:
     app.router.add_get("/api/harvest/{session_id}", handle_harvest_status)
     app.router.add_post("/api/assemble", require_wallet(handle_assemble_start))
     app.router.add_get("/api/assemble/{session_id}", handle_assemble_status)
+    app.router.add_get("/__dev/reload", handle_dev_reload)
     app.router.add_get("/", handle_index)
     app.router.add_static("/", CLIENT_DIR)
     return app
