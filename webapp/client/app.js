@@ -701,7 +701,7 @@ function selectCharacter(nftId) {
   const char = economyState.characters.find((c) => c.nft_id === nftId);
   if (char) renderCanvas(char);
   renderRoster();
-  renderBucket(); // STUB: replaced in Task 13
+  renderBucket();
 }
 
 async function openDressup() {
@@ -718,8 +718,82 @@ async function openDressup() {
   }
 }
 
-// STUB: replaced in Task 13
-function renderBucket() {}
+let bucketFilter = 'All';
+let equipBusy = false;
+
+function activeChar() {
+  return economyState.characters.find((c) => c.nft_id === activeNftId) || null;
+}
+
+function renderBucketFilter() {
+  const sel = el('bucket-filter');
+  const slots = ['All', ...economyState.slots];
+  sel.replaceChildren();
+  for (const s of slots) {
+    const o = document.createElement('option');
+    o.value = s; o.textContent = s; sel.appendChild(o);
+  }
+  sel.value = bucketFilter;
+  sel.onchange = () => { bucketFilter = sel.value; renderBucket(); };
+}
+
+function renderBucket() {
+  renderBucketFilter();
+  const grid = el('bucket-grid');
+  grid.replaceChildren();
+  const char = activeChar();
+  for (const asset of economyState.bucket.assets) {
+    if (bucketFilter !== 'All' && asset.slot !== bucketFilter) continue;
+    const item = document.createElement('button');
+    item.className = 'bucket-item';
+    // Compatibility: only enable when this asset can go on the active character.
+    // Client mirrors the server precheck (server re-verifies on commit).
+    const compatible = char && economyState.slots.includes(asset.slot);
+    if (!compatible) item.disabled = true;
+    const img = document.createElement('img');
+    img.src = char ? layerSrc(char.body, asset.slot, asset.value) : '';
+    img.alt = `${asset.slot}: ${asset.value}`;
+    const count = document.createElement('span');
+    count.className = 'count';
+    count.textContent = `×${asset.count}`;
+    item.replaceChildren(img, count);
+    item.onclick = () => equipTrait(asset.slot, asset.value, item);
+    grid.appendChild(item);
+  }
+}
+
+async function equipTrait(slot, value, tileEl) {
+  if (equipBusy || !activeChar()) return;       // in-flight lock
+  equipBusy = true;
+  tileEl.classList.add('busy');
+  // Optimistic client stack: update the active character's attribute now.
+  const char = activeChar();
+  const attr = char.attributes.find((a) => a.trait_type === slot);
+  const previous = attr ? attr.value : 'None';
+  if (attr) attr.value = value;
+  renderCanvas(char);
+  try {
+    const res = await api('/api/equip', {
+      method: 'POST',
+      body: JSON.stringify({ nft_id: activeNftId, slot, value }),
+    });
+    const final = await pollEconomyOp('equip', res);
+    if (final.state === 'failed') throw new Error(final.error || 'equip failed');
+    // Reconcile the Bucket from authoritative state.
+    economyState = await api('/api/economy');
+    selectCharacter(activeNftId);
+  } catch (e) {
+    if (attr) attr.value = previous;             // revert optimistic stack
+    renderCanvas(char);
+    showError(e.message);
+  } finally {
+    equipBusy = false;
+    tileEl.classList.remove('busy');
+  }
+}
+
+// STUB: replaced in Task 14
+function pollEconomyOp(kind, startResp){ return Promise.resolve(startResp); }
 
 // STUB: replaced in Task 15
 function openAssemble() {}
