@@ -79,3 +79,46 @@ def test_web_session_delegates():
     assert ws.id == s.id
     assert ws.to_dict()["state"] == economy_flow.RUNNING
     assert isinstance(ws.created_at, float)
+
+
+import asyncio
+import pytest
+
+
+def test_start_equip_precheck_rejects_unowned(monkeypatch):
+    conn = _seed_conn()  # owner rOwner holds edition 3537 (nft_id "A"), Bucket has Head=Halo
+    monkeypatch.setattr(economy_api, "open_conn", lambda: conn)
+
+    async def go():
+        with pytest.raises(economy_api.EconomyError):
+            # nft_id "A" is owned by rOwner, not rNobody -> precheck fails
+            await economy_api.start_equip("123", "rNobody", "A", "Head", "Halo")
+
+    asyncio.get_event_loop().run_until_complete(go())
+
+
+def test_start_equip_happy_returns_session(monkeypatch):
+    conn = _seed_conn()
+    monkeypatch.setattr(economy_api, "open_conn", lambda: conn)
+
+    captured = {}
+
+    async def fake_run_equip(session, deps):
+        captured["ran"] = True
+        session.state = economy_flow.DONE
+        session.displaced_value = "Crown"
+
+    monkeypatch.setattr(economy_flow, "run_equip", fake_run_equip)
+    # Stub the real deps builder so no XRPL/CDN is touched.
+    from scripts import _economy_deps
+    monkeypatch.setattr(_economy_deps, "build_economy_deps", lambda c: object())
+
+    async def go():
+        ws = await economy_api.start_equip("123", "rOwner", "A", "Head", "Halo")
+        # give the scheduled task a tick to run
+        await asyncio.sleep(0)
+        return ws
+
+    ws = asyncio.get_event_loop().run_until_complete(go())
+    assert ws.kind == "equip" and ws.discord_id == "123"
+    assert captured.get("ran") is True
