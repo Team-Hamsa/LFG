@@ -139,7 +139,10 @@ NFT_TRANSFER_FEE = int(os.getenv("NFT_TRANSFER_FEE", "7000"))
 if not NFT_TRANSFER_FEE:
     raise ValueError("NFT_TRANSFER_FEE not found in environment variables")
 
-NFT_FLAGS = int(os.getenv("NFT_FLAGS", "24"))
+# 25 = burnable + transferable + mutable (see lfg_core/config.py). Burnable so
+# the trait economy can harvest minted characters; mutable so swaps modify in
+# place. Env (NFT_FLAGS) still overrides.
+NFT_FLAGS = int(os.getenv("NFT_FLAGS", "25"))
 if not NFT_FLAGS:
     raise ValueError("NFT_FLAGS not found in environment variables")
 
