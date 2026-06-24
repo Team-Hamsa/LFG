@@ -24,7 +24,8 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from lfg_core import config, layer_store, mint_flow, swap_flow, swap_meta, xrpl_ops, xumm_ops
 from lfg_service import identity as identity_store
-from lfg_service.auth import require_service_token
+from lfg_service.auth import require_service_token, surface_for_token
+from lfg_service.events import Event, InMemoryEventBus
 from user_db import create_users_table, get_user, register_user
 from webapp import economy_api, mock_economy
 
@@ -39,6 +40,57 @@ mint_sessions: dict[str, Any] = {}
 swap_sessions: dict[str, Any] = {}
 economy_sessions: dict[str, Any] = {}
 SESSION_RETENTION = 3600  # keep terminal sessions briefly for late polls
+
+BUS = InMemoryEventBus()
+
+
+async def publish_event(
+    type_: str,
+    identity_obj: Any,
+    wallet: str | None,
+    data: Any,
+) -> None:
+    await BUS.publish(
+        Event(
+            type=type_,
+            ts=int(time.time()),
+            identity=identity_obj,
+            wallet=wallet,
+            data=data or {},
+        )
+    )
+
+
+async def _ws_stream(request: Any, predicate: Any) -> Any:
+    ws = web.WebSocketResponse()
+    await ws.prepare(request)
+    async with BUS.subscribe(predicate) as stream:
+        async for event in stream:
+            if ws.closed:
+                break
+            await ws.send_str(json.dumps(event.to_dict()))
+    return ws
+
+
+async def handle_events(request: Any) -> Any:
+    token = request.query.get("token") or (
+        request.headers.get("Authorization", "").removeprefix("Bearer ")
+    )
+    if not surface_for_token(token):
+        return web.json_response({"error": "unauthorized", "code": "bad_service_token"}, status=401)
+    types_param = request.query.get("types")
+    allowed: set[str] | None = set(types_param.split(",")) if types_param else None
+    return await _ws_stream(request, lambda e: allowed is None or e.type in allowed)
+
+
+async def handle_events_me(request: Any) -> Any:
+    payload = verify_session_token(request.query.get("token", ""))
+    if not payload:
+        return web.json_response({"error": "unauthorized", "code": "bad_session"}, status=401)
+    wallet = await asyncio.to_thread(identity_store.resolve, "discord", payload["id"])
+    if wallet is None:
+        return web.json_response({"error": "no wallet", "code": "no_wallet"}, status=403)
+    return await _ws_stream(request, lambda e: e.wallet == wallet)
 
 
 def _prune_sessions(sessions: dict[str, Any], terminal_states: set[str]) -> None:
@@ -337,6 +389,15 @@ async def handle_mint_status(request):
     # Refresh the QR-scanned flags so the client can swap the QR for a
     # spinner the moment Xaman opens the payload (issue #22).
     await mint_flow.update_scan_state(session)
+    if session.state in mint_flow.TERMINAL_STATES and not getattr(session, "_published", False):
+        session._published = True
+        ok = session.state not in (mint_flow.FAILED, mint_flow.PAYMENT_TIMEOUT)
+        await publish_event(
+            "mint.completed" if ok else "mint.failed",
+            {"platform": "discord", "platform_user_id": session.discord_id},
+            session.wallet_address,
+            session.to_dict(),
+        )
     return web.json_response(session.to_dict())
 
 
@@ -613,6 +674,8 @@ def create_app() -> web.Application:
     app.router.add_get("/api/harvest/{session_id}", handle_harvest_status)
     app.router.add_post("/api/assemble", require_wallet(handle_assemble_start))
     app.router.add_get("/api/assemble/{session_id}", handle_assemble_status)
+    app.router.add_get("/events", handle_events)
+    app.router.add_get("/events/me", handle_events_me)
     app.router.add_get("/__dev/reload", handle_dev_reload)
     app.router.add_get("/", handle_index)
     app.router.add_static("/", CLIENT_DIR)
