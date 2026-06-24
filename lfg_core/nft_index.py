@@ -179,8 +179,7 @@ def owner_live_nfts(conn: sqlite3.Connection, owner: str) -> list[OnchainNft]:
     """Non-burned tokens currently owned by `owner`, in edition order."""
     conn.row_factory = sqlite3.Row
     cur = conn.execute(
-        "SELECT * FROM onchain_nfts WHERE is_burned=0 AND owner=? "
-        "ORDER BY nft_number, nft_id",
+        "SELECT * FROM onchain_nfts WHERE is_burned=0 AND owner=? ORDER BY nft_number, nft_id",
         (owner,),
     )
     return [_row_to_nft(row) for row in cur.fetchall()]

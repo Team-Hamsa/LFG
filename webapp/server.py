@@ -448,8 +448,11 @@ async def handle_layer(request):
     body = request.query.get("body", "")
     trait = request.query.get("trait", "")
     value = request.query.get("value", "")
-    if not body or not trait or not value or any(
-        len(x) > 128 or "/" in x or ".." in x for x in (body, trait, value)
+    if (
+        not body
+        or not trait
+        or not value
+        or any(len(x) > 128 or "/" in x or ".." in x for x in (body, trait, value))
     ):
         return web.json_response({"error": "bad layer params"}, status=400)
     store = layer_store.get_layer_store()
@@ -483,8 +486,9 @@ def _economy_post(kind, start_coro, mock_call):
                 return web.json_response({"error": str(e)}, status=400)
         _prune_sessions(economy_sessions, economy_api.TERMINAL_STATES)
         if _active_session(economy_sessions, economy_api.TERMINAL_STATES, user["id"]):
-            return web.json_response({"error": "an economy action is already in progress"},
-                                     status=409)
+            return web.json_response(
+                {"error": "an economy action is already in progress"}, status=409
+            )
         try:
             ws = await start_coro(user["id"], request["wallet"], body)
         except economy_api.EconomyError as e:
@@ -533,8 +537,9 @@ def _client_dir_mtime() -> float:
 async def handle_dev_reload(request):
     if not config.WEBAPP_DEV_MODE:
         return web.json_response({"error": "not found"}, status=404)
-    resp = web.StreamResponse(headers={"Content-Type": "text/event-stream",
-                                       "Cache-Control": "no-store"})
+    resp = web.StreamResponse(
+        headers={"Content-Type": "text/event-stream", "Cache-Control": "no-store"}
+    )
     await resp.prepare(request)
     last = _client_dir_mtime()
     try:

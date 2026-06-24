@@ -24,18 +24,38 @@ from webapp import economy_api  # noqa: E402
 
 
 def _char():
-    return OnchainNft(nft_id="A", nft_number=1, owner="rOwner", is_burned=False, mutable=True,
-                      uri_hex="", body="male", attributes=[], image="", ledger_index=1)
+    return OnchainNft(
+        nft_id="A",
+        nft_number=1,
+        owner="rOwner",
+        is_burned=False,
+        mutable=True,
+        uri_hex="",
+        body="male",
+        attributes=[],
+        image="",
+        ledger_index=1,
+    )
 
 
 def _seed_conn():
     conn = nft_index.init_db(":memory:")
     economy_store.init_economy_schema(conn)
-    nft_index.upsert(conn, OnchainNft(
-        nft_id="A", nft_number=3537, owner="rOwner", is_burned=False, mutable=True,
-        uri_hex="", body="male",
-        attributes=[{"trait_type": "Head", "value": "Crown"}],
-        image="https://cdn.example/3537.png", ledger_index=1))
+    nft_index.upsert(
+        conn,
+        OnchainNft(
+            nft_id="A",
+            nft_number=3537,
+            owner="rOwner",
+            is_burned=False,
+            mutable=True,
+            uri_hex="",
+            body="male",
+            attributes=[{"trait_type": "Head", "value": "Crown"}],
+            image="https://cdn.example/3537.png",
+            ledger_index=1,
+        ),
+    )
     economy_store.set_bucket_contents(conn, "rOwner", [("Head", "Halo", 2)], [42])
     return conn
 
@@ -62,8 +82,9 @@ def test_read_economy_state_excludes_other_owners():
 
 
 def test_equip_session_dict():
-    s = economy_flow.EquipSession(owner="rOwner", character=_char(), slot="Head",
-                                  incoming_value="Halo")
+    s = economy_flow.EquipSession(
+        owner="rOwner", character=_char(), slot="Head", incoming_value="Halo"
+    )
     s.state = economy_flow.DONE
     s.displaced_value = "Crown"
     d = economy_api.economy_session_dict("equip", s)
@@ -71,17 +92,25 @@ def test_equip_session_dict():
 
 
 def test_assemble_session_dict_surfaces_accept_link():
-    s = economy_flow.AssembleSession(owner="rOwner", edition=42, chosen={},
-                                     body_value="male", body_class="male")
-    s.results = [{"nft_id": "N", "image_url": "img", "metadata_url": "m",
-                  "accept": {"xumm_url": "https://xaman/abc"}}]
+    s = economy_flow.AssembleSession(
+        owner="rOwner", edition=42, chosen={}, body_value="male", body_class="male"
+    )
+    s.results = [
+        {
+            "nft_id": "N",
+            "image_url": "img",
+            "metadata_url": "m",
+            "accept": {"xumm_url": "https://xaman/abc"},
+        }
+    ]
     d = economy_api.economy_session_dict("assemble", s)
     assert d["accept"] == "https://xaman/abc" and d["nft_id"] == "N"
 
 
 def test_web_session_delegates():
-    s = economy_flow.EquipSession(owner="rOwner", character=_char(), slot="Head",
-                                  incoming_value="Halo")
+    s = economy_flow.EquipSession(
+        owner="rOwner", character=_char(), slot="Head", incoming_value="Halo"
+    )
     ws = economy_api.EconomyWebSession(discord_id="123", kind="equip", inner=s)
     assert ws.state == economy_flow.RUNNING
     assert ws.id == s.id
@@ -115,6 +144,7 @@ def test_start_equip_happy_returns_session(monkeypatch):
     monkeypatch.setattr(economy_flow, "run_equip", fake_run_equip)
     # Stub the real deps builder so no XRPL/CDN is touched.
     from scripts import _economy_deps
+
     monkeypatch.setattr(_economy_deps, "build_economy_deps", lambda c: object())
 
     async def go():
@@ -165,9 +195,18 @@ def test_start_equip_closes_conn_after_task(monkeypatch):
     economy_store.init_economy_schema(tracked)
     tracked.execute(
         "INSERT INTO onchain_nfts VALUES (?,?,?,?,?,?,?,?,?,?)",
-        ("A", 3537, "rOwner", 0, 1, "", "male",
-         json.dumps([{"trait_type": "Head", "value": "Crown"}]),
-         "https://cdn.example/3537.png", 1),
+        (
+            "A",
+            3537,
+            "rOwner",
+            0,
+            1,
+            "",
+            "male",
+            json.dumps([{"trait_type": "Head", "value": "Crown"}]),
+            "https://cdn.example/3537.png",
+            1,
+        ),
     )
     tracked.commit()
     economy_store.set_bucket_contents(tracked, "rOwner", [("Head", "Halo", 2)], [42])
@@ -180,6 +219,7 @@ def test_start_equip_closes_conn_after_task(monkeypatch):
 
     monkeypatch.setattr(economy_flow, "run_equip", fake_run_equip)
     from scripts import _economy_deps
+
     monkeypatch.setattr(_economy_deps, "build_economy_deps", lambda c: object())
 
     async def go():

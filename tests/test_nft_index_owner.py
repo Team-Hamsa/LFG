@@ -8,8 +8,16 @@ from lfg_core.nft_index import OnchainNft
 
 def _nft(nft_id, num, owner, burned=False):
     return OnchainNft(
-        nft_id=nft_id, nft_number=num, owner=owner, is_burned=burned,
-        mutable=True, uri_hex="", body="male", attributes=[], image="", ledger_index=1,
+        nft_id=nft_id,
+        nft_number=num,
+        owner=owner,
+        is_burned=burned,
+        mutable=True,
+        uri_hex="",
+        body="male",
+        attributes=[],
+        image="",
+        ledger_index=1,
     )
 
 

@@ -1472,6 +1472,7 @@ def test_no_cache_middleware_respects_handler_cache_header():
 
 def test_economy_config_defaults():
     from lfg_core import config
+
     assert config.ECONOMY_NETWORK in ("testnet", "mainnet")
     assert isinstance(config.WEBAPP_DEV_MODE, bool)
 
@@ -1484,6 +1485,7 @@ def test_layer_route_registered():
 
 def test_layer_handler_bad_params(monkeypatch):
     from aiohttp.test_utils import make_mocked_request
+
     req = make_mocked_request("GET", "/api/layer")  # no query
     resp = asyncio.get_event_loop().run_until_complete(server.handle_layer(req))
     assert resp.status == 400
@@ -1492,9 +1494,15 @@ def test_layer_handler_bad_params(monkeypatch):
 def test_economy_routes_registered():
     app = server.create_app()
     paths = {getattr(r.resource, "canonical", "") for r in app.router.routes()}
-    for expected in ["/api/economy", "/api/equip", "/api/equip/{session_id}",
-                     "/api/harvest", "/api/harvest/{session_id}",
-                     "/api/assemble", "/api/assemble/{session_id}"]:
+    for expected in [
+        "/api/economy",
+        "/api/equip",
+        "/api/equip/{session_id}",
+        "/api/harvest",
+        "/api/harvest/{session_id}",
+        "/api/assemble",
+        "/api/assemble/{session_id}",
+    ]:
         assert expected in paths, f"missing route {expected}"
 
 
@@ -1503,6 +1511,7 @@ def test_economy_dev_mode_read(monkeypatch):
     from aiohttp.test_utils import make_mocked_request
 
     from webapp import mock_economy
+
     monkeypatch.setattr(server.config, "WEBAPP_DEV_MODE", True)
     # require_wallet is bypassed in dev mode; handler reads the dev owner.
     req = make_mocked_request("GET", "/api/economy")
@@ -1528,15 +1537,18 @@ def test_require_auth_dev_bypass(monkeypatch):
 
 def test_config_reports_dev_mode(monkeypatch):
     from aiohttp.test_utils import make_mocked_request
+
     monkeypatch.setattr(server.config, "WEBAPP_DEV_MODE", True)
     req = make_mocked_request("GET", "/api/config")
     resp = asyncio.get_event_loop().run_until_complete(server.handle_config(req))
     import json
+
     assert json.loads(resp.body)["dev_mode"] is True
 
 
 def test_dev_reload_route_404_when_off(monkeypatch):
     from aiohttp.test_utils import make_mocked_request
+
     monkeypatch.setattr(server.config, "WEBAPP_DEV_MODE", False)
     req = make_mocked_request("GET", "/__dev/reload")
     resp = asyncio.get_event_loop().run_until_complete(server.handle_dev_reload(req))

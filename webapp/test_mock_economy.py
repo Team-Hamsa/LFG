@@ -23,8 +23,10 @@ def test_equip_swaps_and_returns_displaced():
     assert res["state"] == "done" and res["displaced"] == old
     # incoming now on the character; displaced now in the bucket
     char2 = m.read_state(owner)["characters"][0]
-    assert any(a["trait_type"] == asset["slot"] and a["value"] == asset["value"]
-               for a in char2["attributes"])
+    assert any(
+        a["trait_type"] == asset["slot"] and a["value"] == asset["value"]
+        for a in char2["attributes"]
+    )
 
 
 def test_harvest_moves_parts_to_bucket():
@@ -33,5 +35,4 @@ def test_harvest_moves_parts_to_bucket():
     char = m.read_state(owner)["characters"][0]
     res = m.harvest(owner, char["nft_id"])
     assert res["state"] == "done"
-    assert not any(c["nft_id"] == char["nft_id"]
-                   for c in m.read_state(owner)["characters"])
+    assert not any(c["nft_id"] == char["nft_id"] for c in m.read_state(owner)["characters"])

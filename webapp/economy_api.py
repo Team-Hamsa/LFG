@@ -92,7 +92,9 @@ def open_conn() -> sqlite3.Connection:
     return _economy_deps.open_index(config.ECONOMY_NETWORK)
 
 
-def _load_owned_character(conn: sqlite3.Connection, owner: str, nft_id: str) -> nft_index.OnchainNft:
+def _load_owned_character(
+    conn: sqlite3.Connection, owner: str, nft_id: str
+) -> nft_index.OnchainNft:
     rec = _economy_deps.load_index_character(conn, nft_id)
     if rec is None:
         raise EconomyError("character not found in the index")
@@ -108,24 +110,24 @@ async def _run_and_close(runner: Any, session: Any, deps: Any, conn: sqlite3.Con
         conn.close()
 
 
-def _schedule(kind: str, discord_id: str, session: Any, conn: sqlite3.Connection,
-              runner: Any) -> EconomyWebSession:
+def _schedule(
+    kind: str, discord_id: str, session: Any, conn: sqlite3.Connection, runner: Any
+) -> EconomyWebSession:
     deps = _economy_deps.build_economy_deps(conn)
     asyncio.get_event_loop().create_task(_run_and_close(runner, session, deps, conn))
     return EconomyWebSession(discord_id=discord_id, kind=kind, inner=session)
 
 
-async def start_equip(discord_id: str, owner: str, nft_id: str, slot: str,
-                      value: str) -> EconomyWebSession:
+async def start_equip(
+    discord_id: str, owner: str, nft_id: str, slot: str, value: str
+) -> EconomyWebSession:
     conn = open_conn()
     rec = _load_owned_character(conn, owner, nft_id)
-    assets = {(s, v): c for (o, s, v, c) in economy_store.read_bucket_assets(conn)
-              if o == owner}
+    assets = {(s, v): c for (o, s, v, c) in economy_store.read_bucket_assets(conn) if o == owner}
     chk = trait_economy.can_equip(rec, slot, value, assets, mutable=bool(rec.mutable))
     if not chk.ok:
         raise EconomyError(f"cannot equip: {chk.reason}")
-    session = economy_flow.EquipSession(owner=owner, character=rec, slot=slot,
-                                        incoming_value=value)
+    session = economy_flow.EquipSession(owner=owner, character=rec, slot=slot, incoming_value=value)
     return _schedule("equip", discord_id, session, conn, economy_flow.run_equip)
 
 
@@ -133,7 +135,8 @@ async def start_harvest(discord_id: str, owner: str, nft_id: str) -> EconomyWebS
     conn = open_conn()
     rec = _load_owned_character(conn, owner, nft_id)
     genesis = trait_economy.effective_genesis(
-        economy_store.read_genesis(conn), economy_store.read_supply_changes(conn))
+        economy_store.read_genesis(conn), economy_store.read_supply_changes(conn)
+    )
     burnable = await _economy_deps.fetch_burnable(owner, nft_id)
     chk = trait_economy.can_harvest(rec, genesis, burnable)
     if not chk.ok:
@@ -142,24 +145,28 @@ async def start_harvest(discord_id: str, owner: str, nft_id: str) -> EconomyWebS
     return _schedule("harvest", discord_id, session, conn, economy_flow.run_harvest)
 
 
-async def start_assemble(discord_id: str, owner: str, edition: int,
-                         chosen: dict[str, str]) -> EconomyWebSession:
+async def start_assemble(
+    discord_id: str, owner: str, edition: int, chosen: dict[str, str]
+) -> EconomyWebSession:
     conn = open_conn()
     genesis = trait_economy.effective_genesis(
-        economy_store.read_genesis(conn), economy_store.read_supply_changes(conn))
+        economy_store.read_genesis(conn), economy_store.read_supply_changes(conn)
+    )
     body = genesis.edition_bodies.get(edition)
     if body is None:
         raise EconomyError(f"edition {edition} has no known body")
-    assets = {(s, v): c for (o, s, v, c) in economy_store.read_bucket_assets(conn)
-              if o == owner}
+    assets = {(s, v): c for (o, s, v, c) in economy_store.read_bucket_assets(conn) if o == owner}
     bodies = {ed for (o, ed) in economy_store.read_bucket_bodies(conn) if o == owner}
-    live_editions = {r.nft_number for r in nft_index.live_nfts(conn)
-                     if r.nft_number is not None}
-    chk = trait_economy.can_assemble(edition, chosen, bodies, assets, live_editions,
-                                     genesis)
+    live_editions = {r.nft_number for r in nft_index.live_nfts(conn) if r.nft_number is not None}
+    chk = trait_economy.can_assemble(edition, chosen, bodies, assets, live_editions, genesis)
     if not chk.ok:
         raise EconomyError(f"cannot assemble: {chk.reason}")
     session = economy_flow.AssembleSession(
-        owner=owner, edition=edition, chosen=chosen,
-        body_value=body[0], body_class=body[1], live_editions=live_editions)
+        owner=owner,
+        edition=edition,
+        chosen=chosen,
+        body_value=body[0],
+        body_class=body[1],
+        live_editions=live_editions,
+    )
     return _schedule("assemble", discord_id, session, conn, economy_flow.run_assemble)
