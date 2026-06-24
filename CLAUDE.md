@@ -63,7 +63,7 @@ NFT_COLLECTION_NAME=Let's Effing Go!
 NFT_COLLECTION_FAMILY=Test
 NFT_DESCRIPTION=Test
 NFT_TRANSFER_FEE=7000
-NFT_FLAGS=24
+NFT_FLAGS=25
 NFT_SCHEMA_URL=ipfs://QmNpi8rcXEkohca8iXu7zysKKSJYqCvBJn3xJwga8jXqWU
 EXTERNAL_WEBSITE_URL=https://letseffinggo.com
 RETRY_MAX_ATTEMPTS=5
@@ -273,7 +273,12 @@ dict / payload before signing or submitting, or hackathon volume credit is lost.
 - **Mainnet URL**: `https://s1.ripple.com:51234/` (ts_helpers.py:40)
 - Wallet is initialized from SEED environment variable
 - All NFT minting uses `NFTokenMint` with transfer fees (7000 basis points = 70% secondary sales fee)
-- NFT flags = 24 (transferable + mutable — Dynamic NFTs amendment). New mints are NOT burnable; trait swaps update them in place via `NFTokenModify` (lfg_core/xrpl_ops.py). Legacy burnable NFTs are still burned and reminted (as mutable).
+- NFT flags = 25 (burnable + transferable + mutable — Dynamic NFTs amendment).
+  New mints ARE burnable so the dress-up trait economy can harvest (issuer-burn)
+  them. Trait swaps still update them in place via NFTokenModify — the swap path
+  is selected by mutability, not burnability (lfg_core/swap_flow.py). Legacy
+  non-mutable NFTs are still burned and reminted (now as burnable+mutable, per
+  NFT_FLAGS). NFTs minted before this change at flag 24 remain non-harvestable.
 
 ### Testnet AMM (BRIX/XRP)
 

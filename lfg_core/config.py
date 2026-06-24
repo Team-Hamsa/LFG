@@ -62,10 +62,20 @@ WS_URL = os.getenv("XRPL_WS_URL", _default_ws)
 # NFT settings
 NFT_TAXON = int(os.getenv("NFT_TAXON", "0"))
 NFT_TRANSFER_FEE = int(os.getenv("NFT_TRANSFER_FEE", "7000"))
-# 24 = tfTransferable (8) + tfMutable (16): since the Dynamic NFTs amendment,
-# new mints are NOT burnable — trait swaps update them in place via
-# NFTokenModify instead of burn-and-remint.
-NFT_FLAGS = int(os.getenv("NFT_FLAGS", "24"))
+# XLS-20 / Dynamic NFTs NFToken flag bits.
+NFT_FLAG_BURNABLE = 0x0001  # lsfBurnable — issuer may burn (required for Harvest)
+NFT_FLAG_TRANSFERABLE = 0x0008  # tfTransferable
+NFT_FLAG_MUTABLE = 0x0010  # tfMutable — Dynamic NFT, in-place NFTokenModify
+
+# 25 = burnable + transferable + mutable. Burnable so the trait economy can
+# harvest (issuer-burn) characters; mutable so trait swaps update in place
+# (mutability, not burnability, selects the swap path — see swap_flow.py).
+NFT_FLAGS = int(
+    os.getenv(
+        "NFT_FLAGS",
+        str(NFT_FLAG_BURNABLE | NFT_FLAG_TRANSFERABLE | NFT_FLAG_MUTABLE),
+    )
+)
 NFT_COLLECTION_NAME = os.getenv("NFT_COLLECTION_NAME", "Let's Effing Go!")
 
 # Mint pricing. Holders with an LFGO trustline + balance pay MINT_PRICE_LFGO
