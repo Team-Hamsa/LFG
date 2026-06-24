@@ -40,7 +40,7 @@ ignore_missing_imports = true
 
 # Test files: relax strict annotation requirements (high cost, low value).
 [[tool.mypy.overrides]]
-module = ["tests.*", "webapp.test_smoke"]
+module = ["tests.*", "webapp.test_smoke", "webapp.test_mock_economy", "webapp.test_economy_api"]
 disallow_untyped_defs = false
 disallow_untyped_calls = false
 disallow_incomplete_defs = false

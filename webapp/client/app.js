@@ -106,7 +106,8 @@ async function setupDiscord() {
 }
 
 const ALL_PANELS = ['register-panel', 'mint-panel', 'flow-panel',
-                    'swap-panel', 'swap-traits-panel', 'swap-result-panel'];
+                    'swap-panel', 'swap-traits-panel', 'swap-result-panel',
+                    'dressup-panel'];
 
 function showPanel(id) {
   for (const panel of ALL_PANELS) {
@@ -648,6 +649,249 @@ function pollSwap(sessionId) {
   swapPollTimer = setTimeout(tick, 3000);
 }
 
+// --- Dressing Room ---
+let economyState = null;
+let activeNftId = null;
+
+function layerSrc(body, trait, value) {
+  return `/api/layer?body=${encodeURIComponent(body)}` +
+         `&trait=${encodeURIComponent(trait)}&value=${encodeURIComponent(value)}`;
+}
+
+function renderCanvas(char) {
+  const canvas = el('dressup-canvas');
+  canvas.replaceChildren();
+  const order = economyState.trait_order;
+  const byType = Object.fromEntries(char.attributes.map((a) => [a.trait_type, a.value]));
+  for (const slot of order) {
+    const value = byType[slot];
+    if (!value || value === 'None') continue;
+    const img = document.createElement('img');
+    img.src = layerSrc(char.body, slot, value);
+    img.alt = '';
+    canvas.appendChild(img);
+  }
+  el('dressup-id').textContent = `#${char.edition} · ${char.body} · live`;
+}
+
+function renderRoster() {
+  const strip = el('roster-strip');
+  strip.replaceChildren();
+  for (const char of economyState.characters) {
+    const tile = document.createElement('button');
+    tile.className = 'roster-tile' + (char.nft_id === activeNftId ? ' active' : '');
+    const img = document.createElement('img');
+    img.src = imgUrl(char.image_url) || layerSrc(char.body, 'Body',
+      (char.attributes.find((a) => a.trait_type === 'Body') || {}).value || 'None');
+    img.alt = `#${char.edition}`;
+    tile.appendChild(img);
+    tile.onclick = () => selectCharacter(char.nft_id);
+    strip.appendChild(tile);
+  }
+  const add = document.createElement('button');
+  add.className = 'roster-tile assemble';
+  add.textContent = '＋';
+  add.title = 'Assemble new';
+  add.onclick = () => openAssemble();
+  strip.appendChild(add);
+}
+
+function selectCharacter(nftId) {
+  activeNftId = nftId;
+  const char = economyState.characters.find((c) => c.nft_id === nftId);
+  if (char) renderCanvas(char);
+  renderRoster();
+  renderBucket();
+}
+
+async function openDressup() {
+  showPanel('dressup-panel');
+  el('dressup-harvest-btn').onclick = () => harvestActive();
+  status('Loading your wardrobe…');
+  try {
+    economyState = await api('/api/economy');
+    status('');
+    activeNftId = economyState.characters[0] ? economyState.characters[0].nft_id : null;
+    if (activeNftId) selectCharacter(activeNftId);
+    else { renderRoster(); el('dressup-canvas').replaceChildren(); }
+  } catch (e) {
+    showError(e.message);
+  }
+}
+
+let bucketFilter = 'All';
+let equipBusy = false;
+
+function activeChar() {
+  return economyState.characters.find((c) => c.nft_id === activeNftId) || null;
+}
+
+function renderBucketFilter() {
+  const sel = el('bucket-filter');
+  const slots = ['All', ...economyState.slots];
+  sel.replaceChildren();
+  for (const s of slots) {
+    const o = document.createElement('option');
+    o.value = s; o.textContent = s; sel.appendChild(o);
+  }
+  sel.value = bucketFilter;
+  sel.onchange = () => { bucketFilter = sel.value; renderBucket(); };
+}
+
+function renderBucket() {
+  renderBucketFilter();
+  const grid = el('bucket-grid');
+  grid.replaceChildren();
+  const char = activeChar();
+  for (const asset of economyState.bucket.assets) {
+    if (bucketFilter !== 'All' && asset.slot !== bucketFilter) continue;
+    const item = document.createElement('button');
+    item.className = 'bucket-item';
+    // Compatibility: only enable when this asset can go on the active character.
+    // Client mirrors the server precheck (server re-verifies on commit).
+    const compatible = char && economyState.slots.includes(asset.slot);
+    if (!compatible) item.disabled = true;
+    const img = document.createElement('img');
+    img.src = char ? layerSrc(char.body, asset.slot, asset.value) : '';
+    img.alt = `${asset.slot}: ${asset.value}`;
+    const count = document.createElement('span');
+    count.className = 'count';
+    count.textContent = `×${asset.count}`;
+    item.replaceChildren(img, count);
+    item.onclick = () => equipTrait(asset.slot, asset.value, item);
+    grid.appendChild(item);
+  }
+}
+
+async function equipTrait(slot, value, tileEl) {
+  if (equipBusy || !activeChar()) return;       // in-flight lock
+  equipBusy = true;
+  tileEl.classList.add('busy');
+  // Optimistic client stack: update the active character's attribute now.
+  const char = activeChar();
+  const attr = char.attributes.find((a) => a.trait_type === slot);
+  const previous = attr ? attr.value : 'None';
+  if (attr) attr.value = value;
+  renderCanvas(char);
+  try {
+    const res = await api('/api/equip', {
+      method: 'POST',
+      body: JSON.stringify({ nft_id: activeNftId, slot, value }),
+    });
+    const final = await pollEconomyOp('equip', res);
+    if (final.state === 'failed') throw new Error(final.error || 'equip failed');
+    // Reconcile the Bucket from authoritative state.
+    economyState = await api('/api/economy');
+    selectCharacter(activeNftId);
+  } catch (e) {
+    if (attr) attr.value = previous;             // revert optimistic stack
+    renderCanvas(char);
+    showError(e.message);
+  } finally {
+    equipBusy = false;
+    tileEl.classList.remove('busy');
+  }
+}
+
+function isTerminal(s) { return s === 'done' || s === 'failed'; }
+
+function pollEconomyOp(kind, startResp) {
+  if (isTerminal(startResp.state)) return Promise.resolve(startResp);
+  const id = startResp.id;
+  const MAX_ATTEMPTS = 100; // ~5 min at 3 s/tick
+  let attempts = 0;
+  return new Promise((resolve) => {
+    const tick = async () => {
+      attempts++;
+      if (attempts > MAX_ATTEMPTS) {
+        resolve({ state: 'failed', error: 'timed out — please refresh and try again' });
+        return;
+      }
+      let s;
+      try {
+        s = await api(`/api/${kind}/${id}`);
+      } catch (e) {
+        setTimeout(tick, 3000); // transient; keep polling
+        return;
+      }
+      if (isTerminal(s.state)) resolve(s);
+      else setTimeout(tick, 3000);
+    };
+    setTimeout(tick, 3000);
+  });
+}
+
+async function harvestActive() {
+  const char = activeChar();
+  if (!char) return;
+  if (!window.confirm(
+    `This permanently burns #${char.edition}. Its parts go to your Bucket. Continue?`)) {
+    return;
+  }
+  status('Harvesting…');
+  try {
+    const res = await api('/api/harvest', {
+      method: 'POST', body: JSON.stringify({ nft_id: char.nft_id }),
+    });
+    const final = await pollEconomyOp('harvest', res);
+    status('');
+    if (final.state === 'failed') throw new Error(final.error || 'harvest failed');
+    if (final.accept) {
+      // First-ever Bucket: user must accept the soulbound token in Xaman.
+      showFlow({ title: '👜 Claim your Bucket',
+        text: 'Scan to accept your trait Bucket in Xaman.',
+        qrData: final.accept, link: final.accept, done: true });
+    }
+    economyState = await api('/api/economy');
+    activeNftId = economyState.characters[0] ? economyState.characters[0].nft_id : null;
+    showPanel('dressup-panel');
+    if (activeNftId) selectCharacter(activeNftId);
+    else { renderRoster(); renderBucket(); el('dressup-canvas').replaceChildren(); }
+  } catch (e) {
+    showError(e.message);
+  }
+}
+
+function openAssemble() {
+  const bodies = economyState.bucket.bodies;
+  if (!bodies.length) { showError('No bodies in your Bucket to assemble.'); return; }
+  // MVP: assemble the first available body edition, auto-filling each slot with the
+  // first compatible Bucket asset; the user reviews the preview before committing.
+  const edition = bodies[0];
+  const chosen = {};
+  for (const slot of economyState.slots) {
+    const asset = economyState.bucket.assets.find((a) => a.slot === slot && a.count > 0);
+    if (asset) chosen[slot] = asset.value;
+  }
+  const missing = economyState.slots.filter((s) => !(s in chosen));
+  if (missing.length) {
+    showError(`Bucket is missing assets for: ${missing.join(', ')}`);
+    return;
+  }
+  if (!window.confirm(`Assemble a new character for edition #${edition}?`)) return;
+  commitAssemble(edition, chosen);
+}
+
+async function commitAssemble(edition, chosen) {
+  status('Assembling…');
+  try {
+    const res = await api('/api/assemble', {
+      method: 'POST', body: JSON.stringify({ edition, chosen }),
+    });
+    const final = await pollEconomyOp('assemble', res);
+    status('');
+    if (final.state === 'failed') throw new Error(final.error || 'assemble failed');
+    showFlow({ title: `🎉 #${edition} assembled!`,
+      text: final.accept ? 'Scan to accept your new character in Xaman.'
+                         : 'Your new character is on its way.',
+      qrData: final.accept || null, link: final.accept || null,
+      image: imgUrl(final.image_url), done: true, celebrate: true });
+    economyState = await api('/api/economy');
+  } catch (e) {
+    showError(e.message);
+  }
+}
+
 // Header logo with a text-wordmark fallback. The Activity's CSP forbids
 // inline handlers, so the swap is wired here; the load may already have
 // failed before this module ran, hence the complete/naturalWidth check.
@@ -667,7 +911,8 @@ async function main() {
   el('register-retry-btn').onclick = startSignin;
   el('mint-btn').onclick = startMint;
   el('flow-regen-btn').onclick = regeneratePaymentQr;
-  el('swap-btn').onclick = openSwapper;
+  el('swap-btn').textContent = '👗 Dress Up';
+  el('swap-btn').onclick = () => openDressup();
   el('swap-back-btn').onclick = () => showMintHome();
   el('pick-traits-btn').onclick = showTraitChooser;
   el('swap-cancel-btn').onclick = () => openSwapper();
@@ -675,6 +920,14 @@ async function main() {
   el('swap-done-btn').onclick = () => showMintHome();
   el('change-wallet-btn').onclick = () => startSignin();
   el('flow-done-btn').onclick = () => { showMintHome(); };
+
+  // Dev live-reload: runs even in degraded mode (no frame_id).
+  try {
+    const cfg = await api('/api/config');
+    if (cfg.dev_mode && 'EventSource' in window) {
+      new EventSource('/__dev/reload').onmessage = () => location.reload();
+    }
+  } catch (_) { /* non-dev or offline: ignore */ }
 
   if (!insideDiscord) {
     status('Not running inside Discord — open this as an Activity. (Dev mode: API calls will be unauthorized.)');
