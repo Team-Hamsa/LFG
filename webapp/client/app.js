@@ -106,7 +106,8 @@ async function setupDiscord() {
 }
 
 const ALL_PANELS = ['register-panel', 'mint-panel', 'flow-panel',
-                    'swap-panel', 'swap-traits-panel', 'swap-result-panel'];
+                    'swap-panel', 'swap-traits-panel', 'swap-result-panel',
+                    'dressup-panel'];
 
 function showPanel(id) {
   for (const panel of ALL_PANELS) {
@@ -647,6 +648,81 @@ function pollSwap(sessionId) {
   };
   swapPollTimer = setTimeout(tick, 3000);
 }
+
+// --- Dressing Room ---
+let economyState = null;
+let activeNftId = null;
+
+function layerSrc(body, trait, value) {
+  return `/api/layer?body=${encodeURIComponent(body)}` +
+         `&trait=${encodeURIComponent(trait)}&value=${encodeURIComponent(value)}`;
+}
+
+function renderCanvas(char) {
+  const canvas = el('dressup-canvas');
+  canvas.replaceChildren();
+  const order = economyState.trait_order;
+  const byType = Object.fromEntries(char.attributes.map((a) => [a.trait_type, a.value]));
+  for (const slot of order) {
+    const value = byType[slot];
+    if (!value || value === 'None') continue;
+    const img = document.createElement('img');
+    img.src = layerSrc(char.body, slot, value);
+    img.alt = '';
+    canvas.appendChild(img);
+  }
+  el('dressup-id').textContent = `#${char.edition} · ${char.body} · live`;
+}
+
+function renderRoster() {
+  const strip = el('roster-strip');
+  strip.replaceChildren();
+  for (const char of economyState.characters) {
+    const tile = document.createElement('button');
+    tile.className = 'roster-tile' + (char.nft_id === activeNftId ? ' active' : '');
+    const img = document.createElement('img');
+    img.src = imgUrl(char.image_url) || layerSrc(char.body, 'Body',
+      (char.attributes.find((a) => a.trait_type === 'Body') || {}).value || 'None');
+    img.alt = `#${char.edition}`;
+    tile.appendChild(img);
+    tile.onclick = () => selectCharacter(char.nft_id);
+    strip.appendChild(tile);
+  }
+  const add = document.createElement('button');
+  add.className = 'roster-tile assemble';
+  add.textContent = '＋';
+  add.title = 'Assemble new';
+  add.onclick = () => openAssemble();
+  strip.appendChild(add);
+}
+
+function selectCharacter(nftId) {
+  activeNftId = nftId;
+  const char = economyState.characters.find((c) => c.nft_id === nftId);
+  if (char) renderCanvas(char);
+  renderRoster();
+  renderBucket(); // STUB: replaced in Task 13
+}
+
+async function openDressup() {
+  showPanel('dressup-panel');
+  status('Loading your wardrobe…');
+  try {
+    economyState = await api('/api/economy');
+    status('');
+    activeNftId = economyState.characters[0] ? economyState.characters[0].nft_id : null;
+    if (activeNftId) selectCharacter(activeNftId);
+    else { renderRoster(); el('dressup-canvas').replaceChildren(); }
+  } catch (e) {
+    showError(e.message);
+  }
+}
+
+// STUB: replaced in Task 13
+function renderBucket() {}
+
+// STUB: replaced in Task 15
+function openAssemble() {}
 
 // Header logo with a text-wordmark fallback. The Activity's CSP forbids
 // inline handlers, so the swap is wired here; the load may already have
