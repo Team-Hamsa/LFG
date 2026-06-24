@@ -34,21 +34,25 @@ function showError(msg) {
 // Returns a Promise<boolean> that resolves true only when the user confirms.
 function confirmDialog({ title, text, confirmLabel = 'Confirm' }) {
   const overlay = el('confirm-overlay');
+  if (!overlay.hidden) return Promise.resolve(false); // a dialog is already open
   el('confirm-title').textContent = title;
   el('confirm-text').textContent = text || '';
   el('confirm-ok').textContent = confirmLabel;
   overlay.hidden = false;
   return new Promise((resolve) => {
+    const onKey = (e) => { if (e.key === 'Escape') close(false); }; // ARIA: Esc cancels
     const close = (result) => {
       overlay.hidden = true;
       el('confirm-ok').onclick = null;
       el('confirm-cancel').onclick = null;
       overlay.onclick = null;
+      document.removeEventListener('keydown', onKey);
       resolve(result);
     };
     el('confirm-ok').onclick = () => close(true);
     el('confirm-cancel').onclick = () => close(false);
     overlay.onclick = (e) => { if (e.target === overlay) close(false); }; // backdrop = cancel
+    document.addEventListener('keydown', onKey);
   });
 }
 
