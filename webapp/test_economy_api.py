@@ -1,5 +1,11 @@
-import os, sys
+import asyncio
+import os
+import sys
+
+import pytest
+
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+
 os.environ.setdefault("XUMM_API_KEY", "test")
 os.environ.setdefault("XUMM_API_SECRET", "test")
 os.environ.setdefault("SEED", "sEdTM1uX8pu2do5XvTnutH6HsouMaM2")
@@ -10,9 +16,9 @@ os.environ.setdefault("BUNNY_CDN_STORAGE_ZONE", "test")
 os.environ.setdefault("LAYER_SOURCE", "local")
 os.environ.setdefault("BUNNY_PULL_ZONE", "nft.pullzone.example")
 
-from lfg_core import nft_index, economy_store, economy_flow
-from lfg_core.nft_index import OnchainNft
-from webapp import economy_api
+from lfg_core import economy_flow, economy_store, nft_index  # noqa: E402
+from lfg_core.nft_index import OnchainNft  # noqa: E402
+from webapp import economy_api  # noqa: E402
 
 
 def _char():
@@ -79,10 +85,6 @@ def test_web_session_delegates():
     assert ws.id == s.id
     assert ws.to_dict()["state"] == economy_flow.RUNNING
     assert isinstance(ws.created_at, float)
-
-
-import asyncio
-import pytest
 
 
 def test_start_equip_precheck_rejects_unowned(monkeypatch):
