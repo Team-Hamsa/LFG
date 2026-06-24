@@ -1474,3 +1474,16 @@ def test_economy_config_defaults():
     from lfg_core import config
     assert config.ECONOMY_NETWORK in ("testnet", "mainnet")
     assert isinstance(config.WEBAPP_DEV_MODE, bool)
+
+
+def test_layer_route_registered():
+    app = server.create_app()
+    paths = {getattr(r.resource, "canonical", "") for r in app.router.routes()}
+    assert "/api/layer" in paths
+
+
+def test_layer_handler_bad_params(monkeypatch):
+    from aiohttp.test_utils import make_mocked_request
+    req = make_mocked_request("GET", "/api/layer")  # no query
+    resp = asyncio.get_event_loop().run_until_complete(server.handle_layer(req))
+    assert resp.status == 400

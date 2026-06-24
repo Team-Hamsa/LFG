@@ -10,6 +10,7 @@ import hashlib
 import hmac
 import json
 import logging
+import mimetypes
 import os
 import sys
 import time
@@ -21,7 +22,7 @@ from xrpl.core.addresscodec import is_valid_classic_address
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-from lfg_core import config, mint_flow, swap_flow, swap_meta, xrpl_ops, xumm_ops
+from lfg_core import config, layer_store, mint_flow, swap_flow, swap_meta, xrpl_ops, xumm_ops
 from user_db import create_users_table, get_user, register_user
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s")
@@ -430,6 +431,27 @@ async def handle_img(request):
     )
 
 
+async def handle_layer(request):
+    """Same-origin layer file for client-side compositing (CSP-safe).
+    Resolves (body, trait, value) through the configured layer_store, which
+    serves from local disk or the CDN download cache."""
+    body = request.query.get("body", "")
+    trait = request.query.get("trait", "")
+    value = request.query.get("value", "")
+    if not body or not trait or not value or any(
+        len(x) > 128 or "/" in x or ".." in x for x in (body, trait, value)
+    ):
+        return web.json_response({"error": "bad layer params"}, status=400)
+    store = layer_store.get_layer_store()
+    path = await store.resolve(body, trait, value)
+    if not path or not os.path.exists(path):
+        return web.json_response({"error": "layer not found"}, status=404)
+    ctype = mimetypes.guess_type(path)[0] or "application/octet-stream"
+    return web.FileResponse(
+        path, headers={"Content-Type": ctype, "Cache-Control": "public, max-age=86400"}
+    )
+
+
 async def handle_index(request):
     return web.FileResponse(os.path.join(CLIENT_DIR, "index.html"))
 
@@ -461,6 +483,7 @@ def create_app() -> web.Application:
     app.router.add_get("/api/swap/{session_id}", handle_swap_status)
     app.router.add_get("/api/qr.png", handle_qr)
     app.router.add_get("/api/img", handle_img)
+    app.router.add_get("/api/layer", handle_layer)
     app.router.add_get("/", handle_index)
     app.router.add_static("/", CLIENT_DIR)
     return app
