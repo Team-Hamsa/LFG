@@ -1487,3 +1487,24 @@ def test_layer_handler_bad_params(monkeypatch):
     req = make_mocked_request("GET", "/api/layer")  # no query
     resp = asyncio.get_event_loop().run_until_complete(server.handle_layer(req))
     assert resp.status == 400
+
+
+def test_economy_routes_registered():
+    app = server.create_app()
+    paths = {getattr(r.resource, "canonical", "") for r in app.router.routes()}
+    for expected in ["/api/economy", "/api/equip", "/api/equip/{session_id}",
+                     "/api/harvest", "/api/harvest/{session_id}",
+                     "/api/assemble", "/api/assemble/{session_id}"]:
+        assert expected in paths, f"missing route {expected}"
+
+
+def test_economy_dev_mode_read(monkeypatch):
+    from aiohttp.test_utils import make_mocked_request
+    from webapp import mock_economy
+    monkeypatch.setattr(server.config, "WEBAPP_DEV_MODE", True)
+    # require_wallet is bypassed in dev mode; handler reads the dev owner.
+    req = make_mocked_request("GET", "/api/economy")
+    req["user"] = {"id": "dev", "name": "dev"}
+    req["wallet"] = mock_economy.DEV_OWNER
+    resp = asyncio.get_event_loop().run_until_complete(server.handle_economy(req))
+    assert resp.status == 200

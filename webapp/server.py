@@ -24,6 +24,7 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from lfg_core import config, layer_store, mint_flow, swap_flow, swap_meta, xrpl_ops, xumm_ops
 from user_db import create_users_table, get_user, register_user
+from webapp import economy_api, mock_economy
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s")
 
@@ -31,9 +32,10 @@ CLIENT_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "client")
 DISCORD_API = "https://discord.com/api"
 SESSION_TTL = 6 * 3600
 
-# In-memory sessions: session_id -> MintSession / SwapSession
+# In-memory sessions: session_id -> MintSession / SwapSession / EconomyWebSession
 mint_sessions: dict[str, Any] = {}
 swap_sessions: dict[str, Any] = {}
+economy_sessions: dict[str, Any] = {}
 SESSION_RETENTION = 3600  # keep terminal sessions briefly for late polls
 
 
@@ -452,6 +454,63 @@ async def handle_layer(request):
     )
 
 
+async def handle_economy(request):
+    if config.WEBAPP_DEV_MODE:
+        return web.json_response(mock_economy.INSTANCE.read_state(request["wallet"]))
+    conn = economy_api.open_conn()
+    try:
+        return web.json_response(economy_api.read_economy_state(conn, request["wallet"]))
+    finally:
+        conn.close()
+
+
+def _economy_post(kind, start_coro, mock_call):
+    async def handler(request):
+        user = request["user"]
+        body = await request.json()
+        if config.WEBAPP_DEV_MODE:
+            try:
+                return web.json_response(mock_call(request["wallet"], body))
+            except Exception as e:
+                return web.json_response({"error": str(e)}, status=400)
+        _prune_sessions(economy_sessions, economy_api.TERMINAL_STATES)
+        if _active_session(economy_sessions, economy_api.TERMINAL_STATES, user["id"]):
+            return web.json_response({"error": "an economy action is already in progress"},
+                                     status=409)
+        try:
+            ws = await start_coro(user["id"], request["wallet"], body)
+        except economy_api.EconomyError as e:
+            return web.json_response({"error": str(e)}, status=400)
+        except Exception as e:
+            logging.error(f"{kind} failed to start: {e}")
+            return web.json_response({"error": "could not start the action"}, status=502)
+        economy_sessions[ws.id] = ws
+        return web.json_response(ws.to_dict())
+
+    return handler
+
+
+handle_equip_start = _economy_post(
+    "equip",
+    lambda uid, w, b: economy_api.start_equip(uid, w, b["nft_id"], b["slot"], b["value"]),
+    lambda w, b: mock_economy.INSTANCE.equip(w, b["nft_id"], b["slot"], b["value"]),
+)
+handle_harvest_start = _economy_post(
+    "harvest",
+    lambda uid, w, b: economy_api.start_harvest(uid, w, b["nft_id"]),
+    lambda w, b: mock_economy.INSTANCE.harvest(w, b["nft_id"]),
+)
+handle_assemble_start = _economy_post(
+    "assemble",
+    lambda uid, w, b: economy_api.start_assemble(uid, w, int(b["edition"]), b["chosen"]),
+    lambda w, b: mock_economy.INSTANCE.assemble(w, int(b["edition"]), b["chosen"]),
+)
+
+handle_equip_status = make_status_handler(economy_sessions)
+handle_harvest_status = make_status_handler(economy_sessions)
+handle_assemble_status = make_status_handler(economy_sessions)
+
+
 async def handle_index(request):
     return web.FileResponse(os.path.join(CLIENT_DIR, "index.html"))
 
@@ -484,6 +543,13 @@ def create_app() -> web.Application:
     app.router.add_get("/api/qr.png", handle_qr)
     app.router.add_get("/api/img", handle_img)
     app.router.add_get("/api/layer", handle_layer)
+    app.router.add_get("/api/economy", require_wallet(handle_economy))
+    app.router.add_post("/api/equip", require_wallet(handle_equip_start))
+    app.router.add_get("/api/equip/{session_id}", handle_equip_status)
+    app.router.add_post("/api/harvest", require_wallet(handle_harvest_start))
+    app.router.add_get("/api/harvest/{session_id}", handle_harvest_status)
+    app.router.add_post("/api/assemble", require_wallet(handle_assemble_start))
+    app.router.add_get("/api/assemble/{session_id}", handle_assemble_status)
     app.router.add_get("/", handle_index)
     app.router.add_static("/", CLIENT_DIR)
     return app
