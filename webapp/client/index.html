@@ -5,7 +5,7 @@
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
   <title>Let's Effing Go! — Mint</title>
   <link rel="stylesheet" href="fonts/fonts.css">
-  <link rel="stylesheet" href="style.css?v=8">
+  <link rel="stylesheet" href="style.css?v=10">
 </head>
 <body>
   <main id="app">
@@ -105,6 +105,20 @@
   </main>
 
   <div id="toasts" class="toasts" aria-live="assertive"></div>
-  <script type="module" src="app.js?v=8"></script>
+
+  <!-- In-app confirm: Discord's sandboxed iframe makes native window.confirm a no-op. -->
+  <div id="confirm-overlay" class="confirm-overlay" role="dialog" aria-modal="true"
+       aria-labelledby="confirm-title" hidden>
+    <div class="confirm-box card">
+      <h2 id="confirm-title"></h2>
+      <p id="confirm-text" class="card-sub"></p>
+      <div class="confirm-actions">
+        <button id="confirm-cancel" class="secondary">Cancel</button>
+        <button id="confirm-ok">Confirm</button>
+      </div>
+    </div>
+  </div>
+
+  <script type="module" src="app.js?v=10"></script>
 </body>
 </html>
