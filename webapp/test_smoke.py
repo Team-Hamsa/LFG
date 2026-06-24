@@ -1500,6 +1500,7 @@ def test_economy_routes_registered():
 
 def test_economy_dev_mode_read(monkeypatch):
     from aiohttp.test_utils import make_mocked_request
+
     from webapp import mock_economy
     monkeypatch.setattr(server.config, "WEBAPP_DEV_MODE", True)
     # require_wallet is bypassed in dev mode; handler reads the dev owner.
@@ -1512,7 +1513,7 @@ def test_economy_dev_mode_read(monkeypatch):
 
 def test_require_auth_dev_bypass(monkeypatch):
     from aiohttp.test_utils import make_mocked_request
-    from webapp import mock_economy
+
     monkeypatch.setattr(server.config, "WEBAPP_DEV_MODE", True)
 
     @server.require_wallet
