@@ -12,7 +12,7 @@ from typing import Any, Literal, overload
 import aiohttp
 
 from ._retry import RETRY_BASE_DELAY, RETRY_MAX_ATTEMPTS, with_retry
-from .errors import ServiceError, ServiceUnavailable, error_for
+from .errors import AuthError, ServiceError, ServiceUnavailable, error_for
 
 
 class LFGServiceClient:
@@ -138,3 +138,41 @@ class LFGServiceClient:
 
     async def img(self, url: str) -> bytes:
         return await self._request("GET", "/api/img", params={"u": url}, expect="bytes")
+
+    # ---- identity / session ----
+
+    async def create_session(self, user_id: str, username: str = "") -> str:
+        body = await self._request(
+            "POST",
+            "/api/session",
+            token=self._service_token,
+            json={"platform_user_id": user_id, "platform_username": username},
+        )
+        return body["session_token"]
+
+    async def _session_token(self, user_id: str, username: str = "") -> str:
+        token = self._user_sessions.get(user_id)
+        if token is None:
+            token = await self.create_session(user_id, username)
+            self._user_sessions[user_id] = token
+        return token
+
+    async def _user_request(
+        self, method: str, path: str, user_id: str, *, username: str = "", **kw: Any
+    ) -> Any:
+        token = await self._session_token(user_id, username)
+        try:
+            return await self._request(method, path, token=token, **kw)
+        except AuthError:
+            # cached session rejected: evict, re-mint once, retry exactly once
+            self._user_sessions.pop(user_id, None)
+            token = await self._session_token(user_id, username)
+            return await self._request(method, path, token=token, **kw)
+
+    async def register(self, user_id: str, username: str, wallet: str) -> dict[str, Any]:
+        return await self._user_request(
+            "POST", "/api/register", user_id, username=username, json={"wallet": wallet}
+        )
+
+    async def me(self, user_id: str, *, username: str = "") -> dict[str, Any]:
+        return await self._user_request("GET", "/api/me", user_id, username=username)
