@@ -1,0 +1,65 @@
+# surfaces/discord_bot/render.py
+# Embed/QR builders shared by the inverted mint handler. Pure functions: given
+# the session dicts the service returns (lfg_core.mint_flow.MintSession.to_dict)
+# they build discord.Embed / discord.File objects, so they are trivially
+# unit-testable with no SDK or XRPL involvement.
+import io
+from typing import Any
+
+import discord
+from discord import Embed
+
+
+def payment_embed(payment_link: str) -> Embed:
+    """Step-1 embed. The payment QR is always rendered locally from the
+    deeplink and attached, so the image points at the attachment."""
+    embed = Embed(
+        title="💰 Token Payment Required",
+        description=(
+            "Please pay 1 token to mint your NFT.\n\n"
+            "**Steps:**\n"
+            "1. Scan the QR code with your XRPL wallet (XUMM, Xaman, etc.)\n"
+            "2. Approve the payment\n"
+            "3. Wait for confirmation\n\n"
+            f"[Open Payment Link]({payment_link})"
+        ),
+        color=0x00FF00,
+    )
+    embed.set_footer(text="Payment request expires in 5 minutes")
+    embed.set_image(url="attachment://payment_qr.png")
+    return embed
+
+
+def offer_embed(final: dict[str, Any], qr_image_url: str) -> Embed:
+    """Terminal-success embed. ``qr_image_url`` is either the service-hosted
+    ``accept_qr_url`` or ``attachment://offer_qr.png`` when the handler had to
+    render the accept deeplink itself."""
+    number = final.get("nft_number", "?")
+    accept_link = final.get("accept_deeplink", "")
+    embed = Embed(
+        title="🎨 NFT Minted Successfully!",
+        description=(
+            "Your NFT has been minted and an offer has been created!\n\n"
+            f"**NFT Number:** #{number}\n"
+            "**To claim your NFT:**\n"
+            "1. Scan the QR code with XUMM\n"
+            "2. Review and accept the offer\n"
+            "3. Your NFT will appear in your wallet!\n\n"
+            f"[Open in XUMM]({accept_link})"
+        ),
+        color=0x00FF00,
+    )
+    image_url = final.get("image_url")
+    if image_url:
+        embed.set_thumbnail(url=image_url)
+    embed.set_image(url=qr_image_url)
+    embed.set_footer(text="Offer acceptance request expires in 24 hours")
+    return embed
+
+
+def error_embed(message: str) -> Embed:
+    return Embed(title="⚠️ Mint failed", description=message, color=0xFF0000)
+
+
+def file_from_png(data: bytes, filename: str) -> discord.File:
+    return discord.File(io.BytesIO(data), filename=filename)

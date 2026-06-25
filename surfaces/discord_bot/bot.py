@@ -93,5 +93,9 @@ if __name__ == "__main__":
 
 
 # Register handlers (import for side effects: @tree.command + View classes).
+# These run after `svc`/`tree` are defined above, so views/commands can import
+# them. Listed order is irrelevant: commands imports MintView from views, which
+# pulls views in transitively regardless of which line comes first.
 from surfaces.discord_bot import admin  # noqa: E402,F401
 from surfaces.discord_bot import commands as _cmds  # noqa: E402,F401
+from surfaces.discord_bot import views as _views  # noqa: E402,F401

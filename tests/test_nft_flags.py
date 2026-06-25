@@ -73,20 +73,10 @@ def test_flag25_token_is_mutable_so_swap_modifies_in_place():
     assert rec["mutable"] is True
 
 
-def test_main_letsgo_mint_default_is_burnable():
-    # main.py builds the /letsgo NFTokenMint inline with its OWN module-level
-    # NFT_FLAGS default, separate from lfg_core.config. Importing main.py spins
-    # up a Discord client, so guard the raw source default instead: if it drifts
-    # back to "24", every /letsgo mint silently becomes non-harvestable while all
-    # the config-path tests above still pass.
-    import os
-    import re
-
-    main_path = os.path.join(os.path.dirname(os.path.dirname(__file__)), "main.py")
-    with open(main_path, encoding="utf-8") as fh:
-        source = fh.read()
-    match = re.search(r'NFT_FLAGS\s*=\s*int\(os\.getenv\(\s*"NFT_FLAGS",\s*"(\d+)"\s*\)\)', source)
-    assert match is not None, "main.py NFT_FLAGS default line not found"
-    default = int(match.group(1))
-    assert default & config.NFT_FLAG_BURNABLE, "main.py /letsgo mint default must be burnable"
-    assert default == 25
+# NOTE: the former test_main_letsgo_mint_default_is_burnable greps main.py for an
+# inline `NFT_FLAGS = int(os.getenv("NFT_FLAGS", "25"))`. Spine Plan 3 (Task 4)
+# inverted the /letsgo mint onto lfg_service, deleting that inline pipeline —
+# the mint now reads lfg_core.config.NFT_FLAGS, whose burnable+mutable=25
+# guarantee is covered by test_default_nft_flags_compose_to_25,
+# test_live_nft_flags_are_burnable_and_mutable, and test_default_mint_is_burnable
+# above. The source-grep test was removed as obsolete.
