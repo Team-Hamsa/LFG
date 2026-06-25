@@ -41,10 +41,15 @@ _reserved_numbers: set[int] = set()
 
 class MintSession:
     def __init__(
-        self, discord_id: str, wallet_address: str, return_url: dict[str, str] | None = None
+        self,
+        discord_id: str,
+        wallet_address: str,
+        return_url: dict[str, str] | None = None,
+        platform: str = "discord",
     ) -> None:
         self.id = uuid.uuid4().hex
         self.discord_id = discord_id
+        self.platform = platform
         self.wallet_address = wallet_address
         self.return_url = return_url  # XUMM return_url back into Discord
         self.created_at = time.time()
@@ -132,6 +137,7 @@ class MintSession:
     def to_dict(self) -> dict[str, Any]:
         return {
             "id": self.id,
+            "platform": self.platform,
             "state": self.state,
             "error": self.error,
             "pay_with": self.pay_with,
