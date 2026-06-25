@@ -101,10 +101,7 @@ async def handle_events_me(request: Any) -> Any:
     payload = verify_session_token(request.query.get("token", ""))
     if not payload:
         return web.json_response({"error": "unauthorized", "code": "bad_session"}, status=401)
-    wallet = await asyncio.to_thread(identity_store.resolve, "discord", payload["id"])
-    if wallet is None:
-        record = await asyncio.to_thread(get_user, payload["id"])
-        wallet = record["address"] if record else None
+    wallet = await _resolve_wallet(_platform(payload), payload["id"])
     if wallet is None:
         return web.json_response({"error": "no wallet", "code": "no_wallet"}, status=403)
     return await _ws_stream(request, lambda e: e.wallet == wallet)
@@ -158,6 +155,18 @@ def verify_session_token(token: str):
         return None
 
 
+def _platform(user: dict[str, Any]) -> str:
+    return user.get("platform", "discord")
+
+
+async def _resolve_wallet(platform: str, uid: str) -> str | None:
+    wallet = await asyncio.to_thread(identity_store.resolve, platform, uid)
+    if wallet is None and platform == "discord":
+        record = await asyncio.to_thread(get_user, uid)
+        wallet = record["address"] if record else None
+    return wallet
+
+
 def require_auth(handler):
     async def wrapper(request):
         if config.WEBAPP_DEV_MODE:
@@ -183,10 +192,10 @@ def require_wallet(handler):
         if config.WEBAPP_DEV_MODE:
             request["wallet"] = mock_economy.DEV_OWNER
             return await handler(request)
-        record = await asyncio.to_thread(get_user, request["user"]["id"])
-        if not record or not record.get("address"):
+        wallet = await _resolve_wallet(_platform(request["user"]), request["user"]["id"])
+        if not wallet:
             return web.json_response({"error": "no wallet registered"}, status=400)
-        request["wallet"] = record["address"]
+        request["wallet"] = wallet
         return await handler(request)
 
     return wrapper
@@ -265,10 +274,7 @@ async def handle_session(request):
 @require_auth
 async def handle_me(request):
     user = request["user"]
-    wallet = await asyncio.to_thread(identity_store.resolve, "discord", user["id"])
-    if wallet is None:
-        record = await asyncio.to_thread(get_user, user["id"])
-        wallet = record["address"] if record else None
+    wallet = await _resolve_wallet(_platform(user), user["id"])
     return web.json_response({"id": user["id"], "username": user["name"], "wallet": wallet})
 
 
