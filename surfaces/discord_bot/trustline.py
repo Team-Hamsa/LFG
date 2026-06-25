@@ -96,8 +96,9 @@ async def poll_trustline_status(
                 "X-API-Secret": config.XUMM_API_SECRET,
             }
             status_url = f"{config.XUMM_API_URL}/{trustline_data['uuid']}"
-            deadline = asyncio.get_event_loop().time() + 300  # matches the 5-min payload expiry
-            while asyncio.get_event_loop().time() < deadline:
+            loop = asyncio.get_running_loop()  # get_event_loop() is deprecated in a coroutine
+            deadline = loop.time() + 300  # matches the 5-min payload expiry
+            while loop.time() < deadline:
                 try:
                     response = await asyncio.to_thread(
                         requests.get, status_url, headers=status_headers, timeout=10

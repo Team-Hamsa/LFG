@@ -16,12 +16,15 @@ from xrpl.transaction import submit_and_wait
 from xrpl.wallet import Wallet
 
 from lfg_core import rarity as _rarity
-from lfg_core.config import SOURCE_TAG
+from lfg_core.config import JSON_RPC_URL, SOURCE_TAG
 from surfaces.discord_bot import config
 from surfaces.discord_bot.bot import tree
 
 SEED = config.SEED
-JSON_RPC_URL = "https://s.altnet.rippletest.net:51234/"
+# JSON_RPC_URL is the network-aware endpoint from lfg_core.config (resolves via
+# XRPL_NETWORK / XRPL_JSON_RPC_URL) — same source lfg_core/xrpl_ops uses, so
+# admin burns hit mainnet on a mainnet deploy. (Was hardcoded to testnet;
+# Greptile P1 on #79.)
 DATABASE = "lfg_nfts.db"
 ADMIN_LOG_CHANNEL_ID = config.ADMIN_LOG_CHANNEL_ID
 

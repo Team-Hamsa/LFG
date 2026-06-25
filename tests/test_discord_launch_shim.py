@@ -4,6 +4,7 @@ def test_bot_main_is_importable(monkeypatch):
         "ADMIN_LOG_CHANNEL_ID": "123",
         "LFG_SERVICE_URL": "http://svc",
         "SERVICE_TOKEN_DISCORD": "stk",
+        "SEED": "sEdSKaCy2JT7JaM7v95H9SxkhP9wS2r",
         "XUMM_API_KEY": "k",
         "XUMM_API_SECRET": "s",
         "TOKEN_ISSUER_ADDRESS": "rIssuer",
