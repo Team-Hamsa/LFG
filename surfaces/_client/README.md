@@ -26,3 +26,44 @@ async with LFGServiceClient(BASE_URL, SERVICE_TOKEN, "discord") as svc:
 
 Configuration knobs: `RETRY_MAX_ATTEMPTS` (default 5), `RETRY_BASE_DELAY`
 (default 1.0) via environment.
+
+## Lifecycle — events() teardown
+
+`events()` is an **infinite async generator** that reconnects automatically.
+A consumer that `break`s out of `async for ev in svc.events()` without closing
+the generator leaks the open WebSocket until the client itself is closed.
+
+Always run it as a background task you cancel on shutdown:
+
+```python
+async def _listen(svc):
+    async for ev in svc.events():
+        await handle(ev)
+
+task = asyncio.create_task(_listen(svc))
+# ... on shutdown:
+task.cancel()
+await asyncio.gather(task, return_exceptions=True)
+```
+
+Or, if consuming inline, call `aclose()` when done:
+
+```python
+agen = svc.events()
+try:
+    async for ev in agen:
+        ...
+        break  # early exit
+finally:
+    await agen.aclose()
+```
+
+## Not wrapped (by design)
+
+The following `lfg_service` endpoints are intentionally absent from this SDK:
+
+- **`/events/me`** — user-scoped browser firehose (spec Non-Goal; bots use the
+  `/events` service-token firehose wrapped above).
+- **`/api/layer`** — browser image-proxy detail endpoint (browser-only concern).
+
+Plan 3/4 authors: these omissions are deliberate, not gaps.

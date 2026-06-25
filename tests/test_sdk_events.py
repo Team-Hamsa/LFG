@@ -1,8 +1,30 @@
 # tests/test_sdk_events.py
 import asyncio
 
+import pytest
+from aiohttp.test_utils import TestServer
+
+from surfaces._client.client import LFGServiceClient
+from surfaces._client.errors import AuthError
 from tests.mock_service import build_mock_service
 from tests.sdk_helpers import make_client, run
+
+
+def test_events_raises_auth_error_on_bad_service_token():
+    async def _inner():
+        app = build_mock_service()  # /events requires the real SERVICE_TOKEN
+        server = TestServer(app)
+        await server.start_server()
+        base = str(server.make_url("")).rstrip("/")
+        client = LFGServiceClient(base, "WRONG-TOKEN", "test", base_delay=0.0)
+        async with client:
+            agen = client.events()
+            with pytest.raises(AuthError):
+                await agen.__anext__()
+            await agen.aclose()
+        await server.close()
+
+    run(_inner())
 
 
 def test_events_yields_across_a_reconnect():
