@@ -281,21 +281,29 @@ async def handle_me(request):
 @require_auth
 async def handle_register(request):
     user = request["user"]
+    platform = _platform(user)
     body = await request.json()
     wallet = (body.get("wallet") or "").strip()
     if not is_valid_classic_address(wallet):
         return web.json_response({"error": "invalid XRPL address"}, status=400)
-    if not await asyncio.to_thread(register_user, user["id"], user["name"], wallet):
-        return web.json_response(
-            {"error": "registration failed", "code": "register_failed"}, status=500
-        )
+    # The legacy Users table is keyed by discord_id with no platform column, so
+    # only the discord platform may write it — a colliding numeric id from
+    # another platform would silently overwrite a discord user's wallet (and be
+    # mismigrated into identities as a discord row on the next startup). Non-
+    # discord platforms live in identities only; _resolve_wallet gates its legacy
+    # fallback on discord, so it never consults this table for them.
+    if platform == "discord":
+        if not await asyncio.to_thread(register_user, user["id"], user["name"], wallet):
+            return web.json_response(
+                {"error": "registration failed", "code": "register_failed"}, status=500
+            )
     linked = await asyncio.to_thread(
-        identity_store.link, _platform(user), user["id"], user["name"], wallet
+        identity_store.link, platform, user["id"], user["name"], wallet
     )
     if not linked:
         logging.error(
             "identity.link failed for %s:%s — /events/me may 403 until restart-migrate",
-            _platform(user),
+            platform,
             user["id"],
         )
     return web.json_response({"ok": True, "wallet": wallet})
@@ -499,11 +507,15 @@ async def handle_signin_status(request):
     if not s:
         return web.json_response({"error": "could not reach Xaman"}, status=502)
     if s["signed"] and s["account"] and is_valid_classic_address(s["account"]):
-        if not await asyncio.to_thread(register_user, rec["discord_id"], rec["name"], s["account"]):
-            return web.json_response({"error": "registration failed"}, status=500)
+        platform = _platform(request["user"])
+        if platform == "discord":
+            if not await asyncio.to_thread(
+                register_user, rec["discord_id"], rec["name"], s["account"]
+            ):
+                return web.json_response({"error": "registration failed"}, status=500)
         linked = await asyncio.to_thread(
             identity_store.link,
-            _platform(request["user"]),
+            platform,
             rec["discord_id"],
             rec["name"],
             s["account"],
@@ -511,7 +523,7 @@ async def handle_signin_status(request):
         if not linked:
             logging.error(
                 "identity.link failed for %s:%s — /events/me may 403 until restart-migrate",
-                _platform(request["user"]),
+                platform,
                 rec["discord_id"],
             )
         del signin_payloads[uuid]

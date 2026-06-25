@@ -44,3 +44,50 @@ def test_register_links_under_token_platform(monkeypatch):
     resp = _run(app.handle_register(_Req(token, {"wallet": "rXRPL"})))
     assert resp.status == 200
     assert linked["args"] == ("telegram", "55", "rXRPL")
+
+
+def test_register_telegram_skips_legacy_users(monkeypatch):
+    """A non-discord (telegram) registration must NOT touch the legacy Users
+    table (keyed by discord_id) — only identities. Prevents a colliding numeric
+    id from overwriting a discord user's wallet (and being mismigrated into
+    identities as a discord row on the next startup)."""
+    legacy = {"called": False}
+    linked = {}
+    monkeypatch.setattr(app, "is_valid_classic_address", lambda w: True)
+
+    def fake_register_user(uid, name, w):
+        legacy["called"] = True
+        return True
+
+    def fake_link(platform, uid, name, wallet):
+        linked["args"] = (platform, uid, wallet)
+        return True
+
+    monkeypatch.setattr(app, "register_user", fake_register_user)
+    monkeypatch.setattr(app.identity_store, "link", fake_link)
+    monkeypatch.setattr(app.config, "WEBAPP_DEV_MODE", False)
+
+    token = make_session_token({"id": "55", "name": "tg", "platform": "telegram"})
+    resp = _run(app.handle_register(_Req(token, {"wallet": "rXRPL"})))
+    assert resp.status == 200
+    assert legacy["called"] is False
+    assert linked["args"] == ("telegram", "55", "rXRPL")
+
+
+def test_register_discord_writes_legacy_users(monkeypatch):
+    """A discord registration still writes the legacy Users table (regression)."""
+    legacy = {}
+    monkeypatch.setattr(app, "is_valid_classic_address", lambda w: True)
+
+    def fake_register_user(uid, name, w):
+        legacy["args"] = (uid, name, w)
+        return True
+
+    monkeypatch.setattr(app, "register_user", fake_register_user)
+    monkeypatch.setattr(app.identity_store, "link", lambda *a: True)
+    monkeypatch.setattr(app.config, "WEBAPP_DEV_MODE", False)
+
+    token = make_session_token({"id": "9", "name": "d", "platform": "discord"})
+    resp = _run(app.handle_register(_Req(token, {"wallet": "rDISCORD"})))
+    assert resp.status == 200
+    assert legacy["args"] == ("9", "d", "rDISCORD")
