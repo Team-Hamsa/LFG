@@ -83,10 +83,12 @@ class SwapSession:
         nft2: dict[str, Any],
         traits_to_swap: list[str],
         return_url: dict[str, str] | None = None,
+        platform: str = "discord",
     ) -> None:
         self.id = uuid.uuid4().hex
         self.return_url = return_url  # XUMM return_url back into Discord
         self.discord_id = discord_id
+        self.platform = platform
         self.wallet_address = wallet_address
         self.created_at = time.time()
         self.nft1 = nft1  # normalized records from swap_meta.normalize_nft
@@ -103,6 +105,7 @@ class SwapSession:
     def to_dict(self) -> dict[str, Any]:
         return {
             "id": self.id,
+            "platform": self.platform,
             "state": self.state,
             "error": self.error,
             "nft1": {"name": self.nft1["name"], "image": self.nft1["image"]},
