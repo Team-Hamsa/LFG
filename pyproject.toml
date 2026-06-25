@@ -35,6 +35,7 @@ module = [
     "PIL.*",
     "pprint",
     "requests.*",
+    "telegram.*",
 ]
 ignore_missing_imports = true
 
@@ -52,7 +53,7 @@ ignore_errors = true
 # surface is low-value), but KEEP real-bug detection on — arg-type, union-attr,
 # return-value, assignment, attr-defined, call-arg all still fail the gate here.
 [[tool.mypy.overrides]]
-module = ["main", "lfg_service.app", "webapp.server", "db_helpers", "user_db", "surfaces.discord_bot.*", "surfaces._shared.*"]
+module = ["main", "lfg_service.app", "webapp.server", "db_helpers", "user_db", "surfaces.discord_bot.*", "surfaces.telegram_bot.*", "surfaces._shared.*"]
 disallow_untyped_defs = false
 disallow_untyped_calls = false
 disallow_incomplete_defs = false

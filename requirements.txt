@@ -31,3 +31,6 @@ PyNaCl
 
 # Testing (webapp smoke tests)
 pytest
+
+# Telegram bot framework
+python-telegram-bot>=21
