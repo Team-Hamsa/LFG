@@ -74,14 +74,19 @@ def build_mock_service(
 
     async def handle_session(request: web.Request) -> web.StreamResponse:
         if _bearer(request) != SERVICE_TOKEN:
-            return web.json_response({"error": "unauthorized", "code": "bad_service_token"}, status=401)
+            return web.json_response(
+                {"error": "unauthorized", "code": "bad_service_token"}, status=401
+            )
         body = await request.json()
         state["session_hits"] += 1
         pid = body.get("platform_user_id", "")
         tok = f"sess-{pid}-{state['session_hits']}"
         state["live_sessions"].add(tok)
         return web.json_response(
-            {"session_token": tok, "user": {"id": pid, "username": body.get("platform_username", "")}}
+            {
+                "session_token": tok,
+                "user": {"id": pid, "username": body.get("platform_username", "")},
+            }
         )
 
     async def handle_me(request: web.Request) -> web.StreamResponse:
@@ -113,7 +118,9 @@ def build_mock_service(
         sid = request.match_info["session_id"]
         state["mint_polls"][sid] = state["mint_polls"].get(sid, 0) + 1
         ready = state["mint_polls"][sid] >= 2
-        return web.json_response({"session_id": sid, "state": "offer_ready" if ready else "minting"})
+        return web.json_response(
+            {"session_id": sid, "state": "offer_ready" if ready else "minting"}
+        )
 
     async def handle_swap_start(request: web.Request) -> web.StreamResponse:
         _count("/api/swap")

@@ -25,7 +25,9 @@ def test_returns_on_first_success():
         return "ok"
 
     result = _run(
-        with_retry(factory, max_attempts=5, base_delay=1.0, retryable=lambda e: True, sleep=_noop_sleep)
+        with_retry(
+            factory, max_attempts=5, base_delay=1.0, retryable=lambda e: True, sleep=_noop_sleep
+        )
     )
     assert result == "ok"
     assert calls["n"] == 1
@@ -41,7 +43,9 @@ def test_retries_then_succeeds():
         return "ok"
 
     result = _run(
-        with_retry(factory, max_attempts=5, base_delay=1.0, retryable=lambda e: True, sleep=_noop_sleep)
+        with_retry(
+            factory, max_attempts=5, base_delay=1.0, retryable=lambda e: True, sleep=_noop_sleep
+        )
     )
     assert result == "ok"
     assert calls["n"] == 3
@@ -57,7 +61,11 @@ def test_does_not_retry_when_not_retryable():
     with pytest.raises(ValueError):
         _run(
             with_retry(
-                factory, max_attempts=5, base_delay=1.0, retryable=lambda e: False, sleep=_noop_sleep
+                factory,
+                max_attempts=5,
+                base_delay=1.0,
+                retryable=lambda e: False,
+                sleep=_noop_sleep,
             )
         )
     assert calls["n"] == 1
@@ -77,7 +85,11 @@ def test_raises_last_error_after_exhausting_attempts():
     with pytest.raises(RuntimeError, match="fail-3"):
         _run(
             with_retry(
-                factory, max_attempts=3, base_delay=1.0, retryable=lambda e: True, sleep=record_sleep
+                factory,
+                max_attempts=3,
+                base_delay=1.0,
+                retryable=lambda e: True,
+                sleep=record_sleep,
             )
         )
     assert calls["n"] == 3
