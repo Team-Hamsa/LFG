@@ -6,7 +6,7 @@
 
 **Architecture:** A single client class owns one `aiohttp.ClientSession` for REST and a reconnecting WebSocket for events. It holds a per-surface service token, lazily mints + caches a per-user HMAC session token (refreshing on 401), retries transient REST failures with backoff, maps `{error, code}` responses to typed exceptions, and exposes `/events` as an auto-reconnecting async iterator. Built bottom-up: pure primitives (errors, retry) → client core + a mock service → auth/session cache → endpoint method groups → events iterator → public exports.
 
-**Tech Stack:** Python 3.10, aiohttp (client + test server), pytest + pytest-asyncio (`asyncio_mode=auto`, already configured in Plan 1).
+**Tech Stack:** Python 3.10, aiohttp (client + `aiohttp.test_utils.TestServer`), pytest. **The repo has no `pytest-asyncio` and no `asyncio_mode`** — async tests run via a sync `def test_` wrapper that drives a private event loop (`_run(coro)` / shared `tests/sdk_helpers.run`), mirroring `tests/test_event_endpoints.py`.
 
 **Spec:** `docs/superpowers/specs/2026-06-25-surface-sdk-design.md`
 
@@ -18,8 +18,13 @@
 - **Do not import retry constants from `main.py`** (legacy bot). The SDK reads the same env knobs itself: `RETRY_MAX_ATTEMPTS` (default `5`) and `RETRY_BASE_DELAY` (default `1.0`) via `os.getenv`.
 - **Auth model (from the live service):** user-scoped endpoints use `require_auth`/`require_wallet` and expect `Authorization: Bearer <user-session-token>`. `POST /api/session` and `GET /events` expect `Authorization: Bearer <service-token>` (or `?token=` for the WS). `GET /api/config`, `/api/qr.png`, `/api/img` are public (no auth).
 - All blocking sleeps in retry/reconnect use an **injectable `sleep`** parameter (default `asyncio.sleep`) so tests run without real delays.
-- Tests follow the repo-native async style already in `tests/` (`async def test_*` + aiohttp `TestServer`/`TestClient`), mirroring `tests/test_event_endpoints.py`.
-- Pre-commit gate is real and blocking (ruff, ruff-format, mypy strict, gitleaks, pytest). Run `pre-commit run --files <changed>` before each commit; types must satisfy mypy strict (annotate everything).
+- **Tests must run under plain pytest with no async plugin.** Write sync `def test_*` functions; drive coroutines through a private event loop helper (`_run(coro)` using `asyncio.new_event_loop()` / `run_until_complete` / `close`), exactly as `tests/test_event_endpoints.py` does. Do **not** add `pytest-asyncio` or `asyncio_mode` (the repo deliberately avoids them — bare `async def test_*` would be silently skipped). Tasks 3+ share `tests/sdk_helpers.py` (`run`, `make_client`) to avoid duplicating the helper.
+- SDK test files do **not** need the `os.environ.setdefault(...)` preamble that the service tests carry: the SDK imports only `lfg_service.events.Event` (a pure dataclass with no `lfg_core.config` dependency) and the mock service imports nothing from the app — so no module-level config constants are frozen at import.
+- Pre-commit gate is real and blocking (ruff, ruff-format, mypy strict, gitleaks, pytest). Run `pre-commit run --files <changed>` before each commit.
+- **mypy `--strict` applies in full to `surfaces._client.*`** (it is production code in NO relaxed override — unlike `lfg_service.app`/`main`/`webapp`). The snippets below favour readability; when transcribing **SDK source** (`surfaces/_client/*.py`) satisfy strict exactly as `lfg_service/events.py` does:
+  - **Parametrize every generic.** A bare `-> dict` / `dict | None` parameter in a snippet means `dict[str, Any]` in code (add `from typing import Any`). `list[str]`, `bytes`, `str`, `frozenset[str]` are already concrete — leave them.
+  - **`warn_return_any` is on.** The transport `_request` yields `await resp.json()` (typed `Any`), so a method declared `-> dict[str, Any]` that does `return await self._request(...)` would warn. Solve it **once** at the boundary: give `_request` typed `@overload`s on its `expect` argument — `expect: Literal["json"]` → `dict[str, Any]`, `expect: Literal["bytes"]` → `bytes` — with the implementation signature returning `Any`. Then typed callers need no per-call `cast`. (See Task 3.)
+  - **Test/helper/mock files need no annotations** — `tests.*` is `ignore_errors=true` in mypy config. Do not spend effort typing them.
 
 ---
 
@@ -110,6 +115,8 @@ Expected: FAIL with `ModuleNotFoundError: No module named 'surfaces'`.
 # surfaces/_client/errors.py
 # Typed exceptions mapped from the service's {error, code} responses + HTTP status.
 
+from typing import Any
+
 
 class ServiceError(Exception):
     """Base for all SDK errors. Carries the service's structured error fields."""
@@ -144,7 +151,7 @@ _STATUS_MAP: dict[int, type[ServiceError]] = {
 }
 
 
-def error_for(status: int, body: dict | None) -> ServiceError | None:
+def error_for(status: int, body: dict[str, Any] | None) -> ServiceError | None:
     """Return the typed exception for a >= 400 status, or None for success."""
     if status < 400:
         return None
@@ -186,30 +193,40 @@ git commit -m "feat(sdk): error hierarchy + status->exception mapping"
 
 ```python
 # tests/test_sdk_retry.py
+import asyncio
+
 import pytest
 
 from surfaces._client._retry import with_retry
+
+
+def _run(coro):
+    loop = asyncio.new_event_loop()
+    try:
+        return loop.run_until_complete(coro)
+    finally:
+        loop.close()
 
 
 async def _noop_sleep(_delay: float) -> None:
     return None
 
 
-async def test_returns_on_first_success():
+def test_returns_on_first_success():
     calls = {"n": 0}
 
     async def factory():
         calls["n"] += 1
         return "ok"
 
-    result = await with_retry(
-        factory, max_attempts=5, base_delay=1.0, retryable=lambda e: True, sleep=_noop_sleep
+    result = _run(
+        with_retry(factory, max_attempts=5, base_delay=1.0, retryable=lambda e: True, sleep=_noop_sleep)
     )
     assert result == "ok"
     assert calls["n"] == 1
 
 
-async def test_retries_then_succeeds():
+def test_retries_then_succeeds():
     calls = {"n": 0}
 
     async def factory():
@@ -218,14 +235,14 @@ async def test_retries_then_succeeds():
             raise RuntimeError("transient")
         return "ok"
 
-    result = await with_retry(
-        factory, max_attempts=5, base_delay=1.0, retryable=lambda e: True, sleep=_noop_sleep
+    result = _run(
+        with_retry(factory, max_attempts=5, base_delay=1.0, retryable=lambda e: True, sleep=_noop_sleep)
     )
     assert result == "ok"
     assert calls["n"] == 3
 
 
-async def test_does_not_retry_when_not_retryable():
+def test_does_not_retry_when_not_retryable():
     calls = {"n": 0}
 
     async def factory():
@@ -233,13 +250,15 @@ async def test_does_not_retry_when_not_retryable():
         raise ValueError("deterministic")
 
     with pytest.raises(ValueError):
-        await with_retry(
-            factory, max_attempts=5, base_delay=1.0, retryable=lambda e: False, sleep=_noop_sleep
+        _run(
+            with_retry(
+                factory, max_attempts=5, base_delay=1.0, retryable=lambda e: False, sleep=_noop_sleep
+            )
         )
     assert calls["n"] == 1
 
 
-async def test_raises_last_error_after_exhausting_attempts():
+def test_raises_last_error_after_exhausting_attempts():
     calls = {"n": 0}
     delays: list[float] = []
 
@@ -251,8 +270,10 @@ async def test_raises_last_error_after_exhausting_attempts():
         delays.append(delay)
 
     with pytest.raises(RuntimeError, match="fail-3"):
-        await with_retry(
-            factory, max_attempts=3, base_delay=1.0, retryable=lambda e: True, sleep=record_sleep
+        _run(
+            with_retry(
+                factory, max_attempts=3, base_delay=1.0, retryable=lambda e: True, sleep=record_sleep
+            )
         )
     assert calls["n"] == 3
     assert delays == [1.0, 2.0]  # backoff between the 3 attempts: 1*2^0, 1*2^1
@@ -324,6 +345,7 @@ git commit -m "feat(sdk): exponential-backoff retry helper"
 **Files:**
 - Create: `surfaces/_client/client.py`
 - Create: `tests/mock_service.py` (shared aiohttp mock used by Tasks 3–8)
+- Create: `tests/sdk_helpers.py` (shared `run`/`make_client` used by Tasks 3–7)
 - Test: `tests/test_sdk_client_core.py`
 
 **Interfaces:**
@@ -542,77 +564,120 @@ def build_mock_service(
     return app
 ```
 
-- [ ] **Step 2: Write the failing test**
+- [ ] **Step 2: Write the shared test helpers**
+
+```python
+# tests/sdk_helpers.py
+# Shared event-loop driver + client/server builder for the SDK test suite.
+# The repo has no pytest-asyncio; tests stay sync and drive coroutines here.
+
+import asyncio
+from collections.abc import Awaitable, Callable, Coroutine
+from typing import Any, TypeVar
+
+from aiohttp import web
+from aiohttp.test_utils import TestServer
+
+from surfaces._client.client import LFGServiceClient
+from tests.mock_service import SERVICE_TOKEN
+
+T = TypeVar("T")
+
+
+def run(coro: Coroutine[Any, Any, T]) -> T:
+    loop = asyncio.new_event_loop()
+    try:
+        return loop.run_until_complete(coro)
+    finally:
+        loop.close()
+
+
+async def make_client(app: web.Application, **kw: Any) -> tuple[TestServer, LFGServiceClient]:
+    server = TestServer(app)
+    await server.start_server()
+    base = str(server.make_url("")).rstrip("/")
+    return server, LFGServiceClient(base, SERVICE_TOKEN, "test", base_delay=0.0, **kw)
+
+
+async def noop_sleep(_delay: float) -> None:
+    return None
+```
+
+- [ ] **Step 3: Write the failing test**
 
 ```python
 # tests/test_sdk_client_core.py
 import pytest
-from aiohttp.test_utils import TestServer
 
-from surfaces._client.client import LFGServiceClient
 from surfaces._client.errors import NotFound, ServiceUnavailable
-from tests.mock_service import SERVICE_TOKEN, build_mock_service
+from tests.mock_service import build_mock_service
+from tests.sdk_helpers import make_client, run
 
 
-async def _client(app, **kw):
-    server = TestServer(app)
-    await server.start_server()
-    base = str(server.make_url("")).rstrip("/")
-    client = LFGServiceClient(base, SERVICE_TOKEN, "test", base_delay=0.0, **kw)
-    return server, client
+def test_config_roundtrip():
+    async def _inner():
+        server, client = await make_client(build_mock_service())
+        async with client:
+            assert await client.config() == {"ok": True, "network": "testnet"}
+        await server.close()
+
+    run(_inner())
 
 
-async def test_config_roundtrip():
-    server, client = await _client(build_mock_service())
-    async with client:
-        body = await client.config()
-        assert body == {"ok": True, "network": "testnet"}
-    await server.close()
+def test_qr_and_img_return_bytes():
+    async def _inner():
+        server, client = await make_client(build_mock_service())
+        async with client:
+            assert await client.qr_png("HELLO") == b"\x89PNG\r\n"
+            assert await client.img("https://cdn/x.png") == b"IMGDATA"
+        await server.close()
+
+    run(_inner())
 
 
-async def test_qr_and_img_return_bytes():
-    server, client = await _client(build_mock_service())
-    async with client:
-        assert await client.qr_png("HELLO") == b"\x89PNG\r\n"
-        assert await client.img("https://cdn/x.png") == b"IMGDATA"
-    await server.close()
+def test_retries_5xx_then_succeeds():
+    async def _inner():
+        app = build_mock_service(flaky={"/api/config": 2})
+        server, client = await make_client(app)
+        async with client:
+            body = await client.config()  # 503, 503, then 200
+            assert body["ok"] is True
+            assert app["state"]["hits"]["/api/config"] == 3
+        await server.close()
+
+    run(_inner())
 
 
-async def test_retries_5xx_then_succeeds():
-    app = build_mock_service(flaky={"/api/config": 2})
-    server, client = await _client(app)
-    async with client:
-        body = await client.config()  # 503, 503, then 200
-        assert body["ok"] is True
-        assert app["state"]["hits"]["/api/config"] == 3
-    await server.close()
+def test_exhausted_retries_raise_service_unavailable():
+    async def _inner():
+        app = build_mock_service(flaky={"/api/config": 9})
+        server, client = await make_client(app, max_attempts=2)
+        async with client:
+            with pytest.raises(ServiceUnavailable):
+                await client.config()
+        await server.close()
+
+    run(_inner())
 
 
-async def test_exhausted_retries_raise_service_unavailable():
-    app = build_mock_service(flaky={"/api/config": 9})
-    server, client = await _client(app, max_attempts=2)
-    async with client:
-        with pytest.raises(ServiceUnavailable):
-            await client.config()
-    await server.close()
+def test_4xx_raises_immediately_without_retry():
+    async def _inner():
+        server, client = await make_client(build_mock_service())
+        async with client:
+            with pytest.raises(NotFound):
+                # a definitely-missing route returns 404 -> NotFound, no retry
+                await client._request("GET", "/api/nope")
+        await server.close()
 
-
-async def test_4xx_raises_immediately_without_retry():
-    app = build_mock_service()
-    server, client = await _client(app)
-    async with client:
-        with pytest.raises(NotFound):
-            # /api/qr.png with no ?d= returns 400; use a definitely-missing route for 404
-            await client._request("GET", "/api/nope")
-    await server.close()
+    run(_inner())
 ```
 
-- [ ] **Step 3: Run test to verify it fails**
+- [ ] **Step 4: Run test to verify it fails**
 
 Run: `pytest tests/test_sdk_client_core.py -v`
 Expected: FAIL with `ModuleNotFoundError: No module named 'surfaces._client.client'`.
 
-- [ ] **Step 4: Write minimal implementation**
+- [ ] **Step 5: Write minimal implementation**
 
 ```python
 # surfaces/_client/client.py
@@ -624,7 +689,7 @@ from __future__ import annotations
 
 import asyncio
 from types import TracebackType
-from typing import Any
+from typing import Any, Literal, overload
 
 import aiohttp
 
@@ -680,14 +745,38 @@ class LFGServiceClient:
             return exc.status is not None and (exc.status >= 500 or exc.status == 429)
         return isinstance(exc, (aiohttp.ClientError, asyncio.TimeoutError))
 
+    @overload
+    async def _request(
+        self,
+        method: str,
+        path: str,
+        *,
+        token: str | None = ...,
+        json: dict[str, Any] | None = ...,
+        params: dict[str, str] | None = ...,
+        expect: Literal["json"] = ...,
+    ) -> dict[str, Any]: ...
+
+    @overload
+    async def _request(
+        self,
+        method: str,
+        path: str,
+        *,
+        token: str | None = ...,
+        json: dict[str, Any] | None = ...,
+        params: dict[str, str] | None = ...,
+        expect: Literal["bytes"],
+    ) -> bytes: ...
+
     async def _request(
         self,
         method: str,
         path: str,
         *,
         token: str | None = None,
-        json: dict | None = None,
-        params: dict | None = None,
+        json: dict[str, Any] | None = None,
+        params: dict[str, str] | None = None,
         expect: str = "json",
     ) -> Any:
         session = self._require_session()
@@ -723,7 +812,7 @@ class LFGServiceClient:
 
     # ---- public (no-auth) endpoints ----
 
-    async def config(self) -> dict:
+    async def config(self) -> dict[str, Any]:
         return await self._request("GET", "/api/config")
 
     async def qr_png(self, data: str) -> bytes:
@@ -733,15 +822,15 @@ class LFGServiceClient:
         return await self._request("GET", "/api/img", params={"u": url}, expect="bytes")
 ```
 
-- [ ] **Step 5: Run test to verify it passes**
+- [ ] **Step 6: Run test to verify it passes**
 
 Run: `pytest tests/test_sdk_client_core.py -v`
 Expected: PASS (5 tests).
 
-- [ ] **Step 6: Commit**
+- [ ] **Step 7: Commit**
 
 ```bash
-git add surfaces/_client/client.py tests/mock_service.py tests/test_sdk_client_core.py
+git add surfaces/_client/client.py tests/mock_service.py tests/sdk_helpers.py tests/test_sdk_client_core.py
 git commit -m "feat(sdk): client core (retry transport + public endpoints) + mock service"
 ```
 
@@ -771,57 +860,63 @@ from aiohttp.test_utils import TestServer
 
 from surfaces._client.client import LFGServiceClient
 from surfaces._client.errors import AuthError
-from tests.mock_service import SERVICE_TOKEN, build_mock_service
+from tests.mock_service import build_mock_service
+from tests.sdk_helpers import make_client, run
 
 
-async def _client(app, **kw):
-    server = TestServer(app)
-    await server.start_server()
-    base = str(server.make_url("")).rstrip("/")
-    return server, LFGServiceClient(base, SERVICE_TOKEN, "test", base_delay=0.0, **kw)
+def test_session_minted_once_and_reused():
+    async def _inner():
+        app = build_mock_service()
+        server, client = await make_client(app)
+        async with client:
+            await client.me("42", username="neo")
+            await client.me("42")
+            await client.register("42", "neo", "rWALLET")
+            assert app["state"]["session_hits"] == 1  # one mint for user 42, reused
+        await server.close()
+
+    run(_inner())
 
 
-async def test_session_minted_once_and_reused():
-    app = build_mock_service()
-    server, client = await _client(app)
-    async with client:
-        await client.me("42", username="neo")
-        await client.me("42")
-        await client.register("42", "neo", "rWALLET")
-        assert app["state"]["session_hits"] == 1  # one mint for user 42, reused
-    await server.close()
+def test_distinct_users_get_distinct_sessions():
+    async def _inner():
+        app = build_mock_service()
+        server, client = await make_client(app)
+        async with client:
+            await client.me("1")
+            await client.me("2")
+            assert app["state"]["session_hits"] == 2
+        await server.close()
+
+    run(_inner())
 
 
-async def test_distinct_users_get_distinct_sessions():
-    app = build_mock_service()
-    server, client = await _client(app)
-    async with client:
-        await client.me("1")
-        await client.me("2")
-        assert app["state"]["session_hits"] == 2
-    await server.close()
+def test_401_triggers_refresh_and_retry():
+    async def _inner():
+        app = build_mock_service(expire_session_once=True)
+        server, client = await make_client(app)
+        async with client:
+            body = await client.me("42", username="neo")  # first call 401s, then refresh succeeds
+            assert body["wallet"] == "rMOCK"
+            assert app["state"]["session_hits"] == 2  # initial mint + one refresh
+        await server.close()
+
+    run(_inner())
 
 
-async def test_401_triggers_refresh_and_retry():
-    app = build_mock_service(expire_session_once=True)
-    server, client = await _client(app)
-    async with client:
-        body = await client.me("42", username="neo")  # first call 401s, then refresh succeeds
-        assert body["wallet"] == "rMOCK"
-        assert app["state"]["session_hits"] == 2  # initial mint + one refresh
-    await server.close()
+def test_bad_service_token_raises_auth_error():
+    async def _inner():
+        app = build_mock_service()
+        server = TestServer(app)
+        await server.start_server()
+        base = str(server.make_url("")).rstrip("/")
+        client = LFGServiceClient(base, "WRONG", "test", base_delay=0.0)
+        async with client:
+            with pytest.raises(AuthError):
+                await client.create_session("42", "neo")
+        await server.close()
 
-
-async def test_bad_service_token_raises_auth_error():
-    app = build_mock_service()
-    server = TestServer(app)
-    await server.start_server()
-    base = str(server.make_url("")).rstrip("/")
-    client = LFGServiceClient(base, "WRONG", "test", base_delay=0.0)
-    async with client:
-        with pytest.raises(AuthError):
-            await client.create_session("42", "neo")
-    await server.close()
+    run(_inner())
 ```
 
 - [ ] **Step 2: Run test to verify it fails**
@@ -915,54 +1010,50 @@ git commit -m "feat(sdk): service-token auth + per-user session cache with 401 r
 
 ```python
 # tests/test_sdk_mint_swap.py
-from aiohttp.test_utils import TestServer
-
-from surfaces._client.client import LFGServiceClient
-from tests.mock_service import SERVICE_TOKEN, build_mock_service
+from tests.mock_service import build_mock_service
+from tests.sdk_helpers import make_client, noop_sleep, run
 
 
-async def _noop_sleep(_delay: float) -> None:
-    return None
+def test_start_mint_returns_session_id():
+    async def _inner():
+        server, client = await make_client(build_mock_service())
+        async with client:
+            assert (await client.start_mint("42"))["session_id"] == "m1"
+        await server.close()
+
+    run(_inner())
 
 
-async def _client(app):
-    server = TestServer(app)
-    await server.start_server()
-    base = str(server.make_url("")).rstrip("/")
-    return server, LFGServiceClient(base, SERVICE_TOKEN, "test", base_delay=0.0)
+def test_wait_for_mint_polls_until_terminal():
+    async def _inner():
+        server, client = await make_client(build_mock_service())
+        async with client:
+            await client.start_mint("42")
+            final = await client.wait_for_mint("42", "m1", interval=0.0, sleep=noop_sleep)
+            assert final["state"] == "offer_ready"  # mock flips to terminal on the 2nd poll
+        await server.close()
+
+    run(_inner())
 
 
-async def test_start_mint_returns_session_id():
-    server, client = await _client(build_mock_service())
-    async with client:
-        body = await client.start_mint("42")
-        assert body["session_id"] == "m1"
-    await server.close()
+def test_start_swap_sends_trait_body():
+    async def _inner():
+        server, client = await make_client(build_mock_service())
+        async with client:
+            assert (await client.start_swap("42", "nftA", "nftB", ["Hat"]))["session_id"] == "s1"
+        await server.close()
+
+    run(_inner())
 
 
-async def test_wait_for_mint_polls_until_terminal():
-    server, client = await _client(build_mock_service())
-    async with client:
-        await client.start_mint("42")
-        final = await client.wait_for_mint("42", "m1", interval=0.0, sleep=_noop_sleep)
-        assert final["state"] == "offer_ready"  # mock flips to terminal on the 2nd poll
-    await server.close()
+def test_swap_status():
+    async def _inner():
+        server, client = await make_client(build_mock_service())
+        async with client:
+            assert (await client.swap_status("42", "s1"))["state"] == "done"
+        await server.close()
 
-
-async def test_start_swap_sends_trait_body():
-    server, client = await _client(build_mock_service())
-    async with client:
-        body = await client.start_swap("42", "nftA", "nftB", ["Hat"])
-        assert body["session_id"] == "s1"
-    await server.close()
-
-
-async def test_swap_status():
-    server, client = await _client(build_mock_service())
-    async with client:
-        body = await client.swap_status("42", "s1")
-        assert body["state"] == "done"
-    await server.close()
+    run(_inner())
 ```
 
 - [ ] **Step 2: Run test to verify it fails**
@@ -1097,39 +1188,36 @@ git commit -m "feat(sdk): mint/swap methods + poll-to-terminal helpers"
 
 ```python
 # tests/test_sdk_remaining.py
-from aiohttp.test_utils import TestServer
-
-from surfaces._client.client import LFGServiceClient
-from tests.mock_service import SERVICE_TOKEN, build_mock_service
+from tests.mock_service import build_mock_service
+from tests.sdk_helpers import make_client, run
 
 
-async def _client(app):
-    server = TestServer(app)
-    await server.start_server()
-    base = str(server.make_url("")).rstrip("/")
-    return server, LFGServiceClient(base, SERVICE_TOKEN, "test", base_delay=0.0)
+def test_signin_and_nfts_and_economy():
+    async def _inner():
+        server, client = await make_client(build_mock_service())
+        async with client:
+            assert (await client.signin_start("42"))["uuid"] == "sg1"
+            assert (await client.signin_status("42", "sg1"))["signed"] is True
+            assert "nfts" in await client.nfts("42")
+            assert (await client.economy("42"))["ok"] is True
+        await server.close()
+
+    run(_inner())
 
 
-async def test_signin_and_nfts_and_economy():
-    server, client = await _client(build_mock_service())
-    async with client:
-        assert (await client.signin_start("42"))["uuid"] == "sg1"
-        assert (await client.signin_status("42", "sg1"))["signed"] is True
-        assert "nfts" in await client.nfts("42")
-        assert (await client.economy("42"))["ok"] is True
-    await server.close()
+def test_equip_harvest_assemble_start_and_status():
+    async def _inner():
+        server, client = await make_client(build_mock_service())
+        async with client:
+            assert (await client.equip_start("42", {"asset": "x"}))["session_id"] == "x1"
+            assert (await client.equip_status("42", "x1"))["ok"] is True
+            assert (await client.harvest_start("42", {"nft": "y"}))["session_id"] == "x1"
+            assert (await client.harvest_status("42", "x1"))["ok"] is True
+            assert (await client.assemble_start("42", {"body": "z"}))["session_id"] == "x1"
+            assert (await client.assemble_status("42", "x1"))["ok"] is True
+        await server.close()
 
-
-async def test_equip_harvest_assemble_start_and_status():
-    server, client = await _client(build_mock_service())
-    async with client:
-        assert (await client.equip_start("42", {"asset": "x"}))["session_id"] == "x1"
-        assert (await client.equip_status("42", "x1"))["ok"] is True
-        assert (await client.harvest_start("42", {"nft": "y"}))["session_id"] == "x1"
-        assert (await client.harvest_status("42", "x1"))["ok"] is True
-        assert (await client.assemble_start("42", {"body": "z"}))["session_id"] == "x1"
-        assert (await client.assemble_status("42", "x1"))["ok"] is True
-    await server.close()
+    run(_inner())
 ```
 
 - [ ] **Step 2: Run test to verify it fails**
@@ -1210,40 +1298,34 @@ git commit -m "feat(sdk): signin/nfts/economy + equip/harvest/assemble methods"
 # tests/test_sdk_events.py
 import asyncio
 
-from aiohttp.test_utils import TestServer
-
-from surfaces._client.client import LFGServiceClient
-from tests.mock_service import SERVICE_TOKEN, build_mock_service
+from tests.mock_service import build_mock_service
+from tests.sdk_helpers import make_client, run
 
 
-async def _noop_sleep(_delay: float) -> None:
-    return None
-
-
-async def test_events_yields_across_a_reconnect():
+def test_events_yields_across_a_reconnect():
     # connection 1 emits evt #1 then the mock closes the WS (forcing reconnect);
     # connection 2 emits evt #2.
     script = {
         1: [{"type": "mint.completed", "ts": 1, "identity": None, "wallet": "rA", "data": {"n": 1}}],
         2: [{"type": "mint.failed", "ts": 2, "identity": None, "wallet": "rB", "data": {"n": 2}}],
     }
-    app = build_mock_service(events_script=script)
-    server = TestServer(app)
-    await server.start_server()
-    base = str(server.make_url("")).rstrip("/")
-    client = LFGServiceClient(base, SERVICE_TOKEN, "test", base_delay=0.0)
 
-    received = []
-    async with client:
-        agen = client.events(types=["mint.completed", "mint.failed"])
-        for _ in range(2):
-            received.append(await asyncio.wait_for(agen.__anext__(), timeout=2))
-        await agen.aclose()
+    async def _inner():
+        app = build_mock_service(events_script=script)
+        server, client = await make_client(app)
+        received = []
+        async with client:
+            agen = client.events(types=["mint.completed", "mint.failed"])
+            for _ in range(2):
+                received.append(await asyncio.wait_for(agen.__anext__(), timeout=2))
+            await agen.aclose()
+        await server.close()
+        return app, received
 
+    app, received = run(_inner())
     assert [e.data["n"] for e in received] == [1, 2]
     assert received[0].type == "mint.completed"
     assert app["state"]["last_event_types"] == "mint.completed,mint.failed"
-    await server.close()
 ```
 
 - [ ] **Step 2: Run test to verify it fails**
