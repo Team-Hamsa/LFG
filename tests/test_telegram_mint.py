@@ -1,7 +1,7 @@
 import asyncio
 from types import SimpleNamespace
 
-from surfaces._client.errors import BadRequest
+from surfaces._client.errors import BadRequest, ServiceError
 from surfaces.telegram_bot import mint_view
 
 
@@ -19,7 +19,7 @@ class _Bot:
         self.messages = []
 
     async def send_photo(self, chat_id, photo, caption=None):
-        self.photos.append((chat_id, caption))
+        self.photos.append((chat_id, photo, caption))
 
     async def send_message(self, chat_id, text):
         self.messages.append((chat_id, text))
@@ -60,9 +60,9 @@ def test_happy_path_sends_payment_and_offer_qr():
         final={"state": "offer_ready", "nft_number": 3600, "accept_deeplink": "https://accept"},
     )
     _run(mint_view.handle_mint(svc, update, ctx))
-    # two photos: payment QR + offer QR
+    # two photos: payment QR + offer QR. caption is now at index 2.
     assert len(bot.photos) == 2
-    assert "3600" in bot.photos[1][1]
+    assert "3600" in bot.photos[1][2]
 
 
 def test_hosted_qr_url_used_directly():
@@ -75,6 +75,7 @@ def test_hosted_qr_url_used_directly():
     _run(mint_view.handle_mint(svc, update, ctx))
     # offer photo sent with the hosted URL as the photo arg
     assert bot.photos[1][0] == 999
+    assert bot.photos[1][1] == "https://cdn/qr.png"
 
 
 def test_no_wallet_sends_register_hint():
@@ -94,3 +95,31 @@ def test_bad_terminal_state_reports_failure():
     )
     _run(mint_view.handle_mint(svc, update, ctx))
     assert any("timed out" in m[1].lower() for m in bot.messages)
+
+
+class _SvcQrFailsOnAccept(_Svc):
+    """Payment QR renders fine; the accept-deeplink QR render fails."""
+
+    def __init__(self, start, final):
+        super().__init__(start, final)
+        self._n = 0
+
+    async def qr_png(self, data):
+        self._n += 1
+        if self._n >= 2:
+            raise ServiceError("qr down")
+        return b"PNG"
+
+
+def test_offer_qr_render_failure_falls_back_to_message():
+    bot = _Bot()
+    update, ctx = _update_ctx(bot)
+    svc = _SvcQrFailsOnAccept(
+        start={"id": "sid", "payment_link": "https://pay"},
+        final={"state": "offer_ready", "nft_number": 4242, "accept_deeplink": "https://accept"},
+    )
+    _run(mint_view.handle_mint(svc, update, ctx))
+    # payment QR went out, but the offer QR render failed -> no second photo,
+    # and the offer caption (carrying the nft_number) is surfaced as a message.
+    assert len(bot.photos) == 1
+    assert any("4242" in m[1] for m in bot.messages)
