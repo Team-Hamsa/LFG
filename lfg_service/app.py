@@ -466,7 +466,11 @@ async def handle_mint_regenerate(request):
     """Issue a fresh payment QR for a session whose payload expired before
     the user could scan it (issue #22)."""
     session = mint_sessions.get(request.match_info["session_id"])
-    if not session or session.discord_id != request["user"]["id"]:
+    if (
+        not session
+        or session.discord_id != request["user"]["id"]
+        or getattr(session, "platform", "discord") != _platform(request["user"])
+    ):
         return web.json_response({"error": "not found"}, status=404)
     if session.state != mint_flow.AWAITING_PAYMENT:
         return web.json_response({"error": "session is past payment"}, status=409)
