@@ -133,7 +133,12 @@ def _session_secret() -> bytes:
 
 
 def make_session_token(user: dict[str, Any]) -> str:
-    payload = {"id": user["id"], "name": user["name"], "exp": int(time.time()) + SESSION_TTL}
+    payload = {
+        "id": user["id"],
+        "name": user["name"],
+        "platform": user.get("platform", "discord"),
+        "exp": int(time.time()) + SESSION_TTL,
+    }
     body = base64.urlsafe_b64encode(json.dumps(payload).encode()).decode()
     sig = hmac.new(_session_secret(), body.encode(), hashlib.sha256).hexdigest()
     return f"{body}.{sig}"
@@ -253,7 +258,7 @@ async def handle_session(request):
         return web.json_response(
             {"error": "missing platform_user_id", "code": "bad_request"}, status=400
         )
-    token = make_session_token({"id": pid, "name": pname})
+    token = make_session_token({"id": pid, "name": pname, "platform": request["surface"]})
     return web.json_response({"session_token": token, "user": {"id": pid, "username": pname}})
 
 
