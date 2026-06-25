@@ -293,6 +293,22 @@ class LFGServiceClient:
     # ---- events ----
 
     async def events(self, types: list[str] | None = None) -> AsyncIterator[Event]:
+        """Subscribe to the /events service-token firehose.
+
+        The iterator is **infinite** and reconnects transparently on dropped
+        connections.  The consumer MUST either run this in a cancellable task
+        or call ``aclose()`` on the generator to release the open WebSocket;
+        otherwise the connection leaks until the client is closed.
+
+        Args:
+            types: optional list of event type names to filter (e.g.
+                ``["mint.completed", "mint.failed"]``).  ``None`` receives all
+                event types.
+
+        Raises:
+            AuthError: immediately (no retry) when the /events handshake is
+                rejected with HTTP 401 or 403.
+        """
         session = self._require_session()
         async for event in stream_events(
             session, self._base, self._service_token, types, base_delay=self._base_delay

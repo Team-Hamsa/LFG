@@ -10,6 +10,8 @@ import aiohttp
 
 from lfg_service.events import Event  # shared event dataclass (allowed cross-import)
 
+from .errors import AuthError
+
 _MAX_BACKOFF = 30.0
 
 
@@ -22,8 +24,20 @@ async def stream_events(
     base_delay: float,
     sleep: Callable[[float], Awaitable[None]] = asyncio.sleep,
 ) -> AsyncIterator[Event]:
+    """Reconnecting /events WebSocket subscription.
+
+    The iterator is **infinite** and reconnects transparently on dropped
+    connections or transient server errors.  The consumer MUST either run this
+    in a cancellable task or call ``aclose()`` on the generator to release the
+    open WebSocket; otherwise the connection leaks until the client is closed.
+
+    Raises:
+        AuthError: immediately (no retry) when the /events handshake is
+            rejected with HTTP 401 or 403, indicating a bad or expired
+            ``service_token``.
+    """
     url = base_url + "/events"
-    params = {"token": service_token}
+    params: dict[str, str] = {"token": service_token}
     if types:
         params["types"] = ",".join(types)
     backoff = base_delay
@@ -43,6 +57,14 @@ async def stream_events(
                         )
                     elif msg.type in (aiohttp.WSMsgType.CLOSE, aiohttp.WSMsgType.ERROR):
                         break
+        except aiohttp.WSServerHandshakeError as exc:
+            if exc.status in (401, 403):
+                raise AuthError(
+                    "events subscription rejected",
+                    code="bad_service_token",
+                    status=exc.status,
+                ) from exc
+            # transient handshake failure (e.g. 5xx) -> fall through to reconnect
         except (aiohttp.ClientError, asyncio.TimeoutError):
             pass
         # connection ended or dropped -> reconnect after backoff
