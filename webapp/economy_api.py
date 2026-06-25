@@ -70,6 +70,7 @@ class EconomyWebSession:
     kind: str  # "equip" | "harvest" | "assemble"
     inner: Any
     created_at: float = field(default_factory=time.time)
+    platform: str = "discord"
 
     @property
     def id(self) -> str:
@@ -80,7 +81,7 @@ class EconomyWebSession:
         return self.inner.state  # type: ignore[no-any-return]
 
     def to_dict(self) -> dict[str, Any]:
-        return economy_session_dict(self.kind, self.inner)
+        return {**economy_session_dict(self.kind, self.inner), "platform": self.platform}
 
 
 class EconomyError(Exception):

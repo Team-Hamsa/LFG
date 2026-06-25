@@ -6,11 +6,18 @@
 # HarvestSession / AssembleSession / EquipSession are @dataclass and have NO
 # to_dict() — the test only asserts on the attribute. SwapSession has to_dict(),
 # so its round-trip is also tested.
+#
+# EconomyWebSession (webapp/economy_api.py) is the OUTER wrapper actually stored
+# in the economy_sessions dict (has discord_id/id/state/to_dict) — the one BV2's
+# ownership check sees — so it gets the field + to_dict round-trip too.
+
+from types import SimpleNamespace
 
 from lfg_core import trait_economy as te
 from lfg_core.economy_flow import AssembleSession, EquipSession, HarvestSession
 from lfg_core.nft_index import OnchainNft
 from lfg_core.swap_flow import SwapSession
+from webapp.economy_api import EconomyWebSession
 
 
 def _nft() -> dict:
@@ -88,3 +95,16 @@ def test_equip_session_platform_default_and_explicit():
         platform="telegram",
     )
     assert t.platform == "telegram"
+
+
+def test_economy_web_session_platform_default_and_explicit():
+    # Minimal fake inner: economy_session_dict needs .id/.state/.error, and the
+    # "equip" branch reads .displaced_value.
+    inner = SimpleNamespace(id="x", state="running", error=None, displaced_value="")
+    s = EconomyWebSession(discord_id="9", kind="equip", inner=inner)
+    assert s.platform == "discord"
+    assert s.to_dict()["platform"] == "discord"
+
+    t = EconomyWebSession(discord_id="55", kind="equip", inner=inner, platform="telegram")
+    assert t.platform == "telegram"
+    assert t.to_dict()["platform"] == "telegram"
