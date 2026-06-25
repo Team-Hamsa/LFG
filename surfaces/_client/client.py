@@ -14,6 +14,7 @@ from typing import Any, Literal, overload
 import aiohttp
 
 from lfg_service.events import Event
+
 from ._retry import RETRY_BASE_DELAY, RETRY_MAX_ATTEMPTS, with_retry
 from .errors import AuthError, ServiceError, ServiceUnavailable, error_for
 from .events import stream_events
@@ -157,7 +158,8 @@ class LFGServiceClient:
             token=self._service_token,
             json={"platform_user_id": user_id, "platform_username": username},
         )
-        return body["session_token"]
+        session_token: str = body["session_token"]
+        return session_token
 
     async def _session_token(self, user_id: str, username: str = "") -> str:
         token = self._user_sessions.get(user_id)
@@ -168,15 +170,17 @@ class LFGServiceClient:
 
     async def _user_request(
         self, method: str, path: str, user_id: str, *, username: str = "", **kw: Any
-    ) -> Any:
+    ) -> dict[str, Any]:
         token = await self._session_token(user_id, username)
         try:
-            return await self._request(method, path, token=token, **kw)
+            result: dict[str, Any] = await self._request(method, path, token=token, **kw)
+            return result
         except AuthError:
             # cached session rejected: evict, re-mint once, retry exactly once
             self._user_sessions.pop(user_id, None)
             token = await self._session_token(user_id, username)
-            return await self._request(method, path, token=token, **kw)
+            result = await self._request(method, path, token=token, **kw)
+            return result
 
     async def register(self, user_id: str, username: str, wallet: str) -> dict[str, Any]:
         return await self._user_request(
