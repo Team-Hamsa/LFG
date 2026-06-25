@@ -90,3 +90,7 @@ def main() -> None:
 
 if __name__ == "__main__":
     main()
+
+
+# Register handlers (import for side effects: @tree.command + View classes).
+from surfaces.discord_bot import admin  # noqa: E402,F401

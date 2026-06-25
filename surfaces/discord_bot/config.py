@@ -26,6 +26,9 @@ if not ADMIN_LOG_CHANNEL_ID:
 LFG_SERVICE_URL = _require("LFG_SERVICE_URL")
 SERVICE_TOKEN_DISCORD = _require("SERVICE_TOKEN_DISCORD")
 
+# --- XRPL issuer seed (admin burn, bot-local, D1=B) ---
+SEED = _require("SEED")
+
 # --- XUMM (trustline stays bot-local, D2=A) ---
 XUMM_API_KEY = _require("XUMM_API_KEY")
 XUMM_API_SECRET = _require("XUMM_API_SECRET")
