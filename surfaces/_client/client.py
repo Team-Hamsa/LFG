@@ -7,7 +7,7 @@ from __future__ import annotations
 
 import asyncio
 import time
-from collections.abc import AsyncIterator, Awaitable, Callable
+from collections.abc import AsyncGenerator, Awaitable, Callable
 from types import TracebackType
 from typing import Any, Literal, overload
 
@@ -317,7 +317,7 @@ class LFGServiceClient:
 
     # ---- events ----
 
-    async def events(self, types: list[str] | None = None) -> AsyncIterator[Event]:
+    async def events(self, types: list[str] | None = None) -> AsyncGenerator[Event, None]:
         """Subscribe to the /events service-token firehose.
 
         The iterator is **infinite** and reconnects transparently on dropped
