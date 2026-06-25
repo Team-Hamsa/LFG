@@ -35,7 +35,7 @@ from lfg_core import (  # noqa: E402
     xrpl_ops,
     xumm_ops,
 )
-from webapp import server  # noqa: E402
+from lfg_service import app as server  # noqa: E402
 
 
 def test_routes_registered():

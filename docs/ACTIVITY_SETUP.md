@@ -55,7 +55,7 @@ The Activity can only be launched in a server where the app is installed.
 
    | Prefix | Target |
    |---|---|
-   | `/` | `your-backend-host.example.com` (the host running `webapp/server.py`, HTTPS, no scheme) |
+   | `/` | `your-backend-host.example.com` (the host running `lfg_service/app.py`, HTTPS, no scheme) |
 
    > No `/esm` mapping is needed: the Embedded App SDK is **vendored
    > same-origin** at `webapp/client/vendor/embedded-app-sdk.js`, and
@@ -86,7 +86,7 @@ WEBAPP_PORT=8080
 ## 3. Run the backend
 
 ```bash
-python -m webapp.server          # listens on WEBAPP_PORT (default 8080)
+python -m lfg_service.app        # listens on WEBAPP_PORT (default 8080)
 ```
 
 Verify it's up locally before tunnelling:

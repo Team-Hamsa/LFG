@@ -6,7 +6,7 @@
 
 Two front ends share one pipeline (`lfg_core/`):
 
-- **Discord Activity webapp** (`python -m webapp.server`) — embedded app running inside Discord: wallet registration, LFGO trustline setup, NFT minting, and the Trait Swapper. Setup: [docs/ACTIVITY_SETUP.md](docs/ACTIVITY_SETUP.md).
+- **Discord Activity webapp** (`python -m lfg_service.app`) — embedded app running inside Discord: wallet registration, LFGO trustline setup, NFT minting, and the Trait Swapper. Setup: [docs/ACTIVITY_SETUP.md](docs/ACTIVITY_SETUP.md).
 - **Classic Discord bot** (`python main.py`) — slash-command/button interface for the same mint flow.
 
 Both run side by side and share `lfg_nfts.db` and `lfg_core`.
@@ -165,7 +165,7 @@ Use `scripts/upload_layers_cdn.py` to push a local `layers/` tree.
 
 ```bash
 # Discord Activity
-python -m webapp.server
+python -m lfg_service.app
 
 # Classic bot
 python main.py
