@@ -31,7 +31,9 @@ def test_events_yields_across_a_reconnect():
     # connection 1 emits evt #1 then the mock closes the WS (forcing reconnect);
     # connection 2 emits evt #2.
     script = {
-        1: [{"type": "mint.completed", "ts": 1, "identity": None, "wallet": "rA", "data": {"n": 1}}],
+        1: [
+            {"type": "mint.completed", "ts": 1, "identity": None, "wallet": "rA", "data": {"n": 1}}
+        ],
         2: [{"type": "mint.failed", "ts": 2, "identity": None, "wallet": "rB", "data": {"n": 2}}],
     }
 
