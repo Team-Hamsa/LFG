@@ -52,7 +52,7 @@ ignore_errors = true
 # surface is low-value), but KEEP real-bug detection on — arg-type, union-attr,
 # return-value, assignment, attr-defined, call-arg all still fail the gate here.
 [[tool.mypy.overrides]]
-module = ["main", "lfg_service.app", "webapp.server", "db_helpers", "user_db"]
+module = ["main", "lfg_service.app", "webapp.server", "db_helpers", "user_db", "surfaces.discord_bot.*"]
 disallow_untyped_defs = false
 disallow_untyped_calls = false
 disallow_incomplete_defs = false
