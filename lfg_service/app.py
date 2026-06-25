@@ -68,10 +68,21 @@ async def _ws_stream(request: Any, predicate: Any) -> Any:
     ws = web.WebSocketResponse()
     await ws.prepare(request)
     async with BUS.subscribe(predicate) as stream:
-        async for event in stream:
-            if ws.closed:
-                break
-            await ws.send_str(json.dumps(event.to_dict()))
+        nxt = asyncio.ensure_future(stream.__anext__())
+        disconnect = asyncio.ensure_future(ws.receive())
+        try:
+            while True:
+                done, _ = await asyncio.wait({nxt, disconnect}, return_when=asyncio.FIRST_COMPLETED)
+                if disconnect in done:
+                    break  # client closed/sent a frame -> stop (context exit removes subscriber)
+                event = nxt.result()
+                if ws.closed:
+                    break
+                await ws.send_str(json.dumps(event.to_dict()))
+                nxt = asyncio.ensure_future(stream.__anext__())
+        finally:
+            nxt.cancel()
+            disconnect.cancel()
     return ws
 
 
@@ -91,6 +102,9 @@ async def handle_events_me(request: Any) -> Any:
     if not payload:
         return web.json_response({"error": "unauthorized", "code": "bad_session"}, status=401)
     wallet = await asyncio.to_thread(identity_store.resolve, "discord", payload["id"])
+    if wallet is None:
+        record = await asyncio.to_thread(get_user, payload["id"])
+        wallet = record["address"] if record else None
     if wallet is None:
         return web.json_response({"error": "no wallet", "code": "no_wallet"}, status=403)
     return await _ws_stream(request, lambda e: e.wallet == wallet)
@@ -264,7 +278,14 @@ async def handle_register(request):
         return web.json_response(
             {"error": "registration failed", "code": "register_failed"}, status=500
         )
-    await asyncio.to_thread(identity_store.link, "discord", user["id"], user["name"], wallet)
+    linked = await asyncio.to_thread(
+        identity_store.link, "discord", user["id"], user["name"], wallet
+    )
+    if not linked:
+        logging.error(
+            "identity.link failed for discord:%s — /events/me may 403 until restart-migrate",
+            user["id"],
+        )
     return web.json_response({"ok": True, "wallet": wallet})
 
 
@@ -467,9 +488,14 @@ async def handle_signin_status(request):
     if s["signed"] and s["account"] and is_valid_classic_address(s["account"]):
         if not await asyncio.to_thread(register_user, rec["discord_id"], rec["name"], s["account"]):
             return web.json_response({"error": "registration failed"}, status=500)
-        await asyncio.to_thread(
+        linked = await asyncio.to_thread(
             identity_store.link, "discord", rec["discord_id"], rec["name"], s["account"]
         )
+        if not linked:
+            logging.error(
+                "identity.link failed for discord:%s — /events/me may 403 until restart-migrate",
+                rec["discord_id"],
+            )
         del signin_payloads[uuid]
         return web.json_response({"state": "signed", "wallet": s["account"]})
     if s["expired"]:

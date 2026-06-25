@@ -120,3 +120,81 @@ def test_event_routes_registered(tmp_path, monkeypatch):
     paths = {r.resource.canonical for r in app.router.routes() if r.resource is not None}
     assert "/events" in paths
     assert "/events/me" in paths
+
+
+def test_ws_subscriber_cleaned_up_on_disconnect(monkeypatch):
+    """FIX 1: subscriber entry must be removed promptly when the WS client
+    disconnects, even if no events arrive (i.e. the queue is idle)."""
+
+    async def body():
+        from aiohttp.test_utils import TestClient, TestServer
+
+        from lfg_service import app as server  # noqa: F811 (already imported above)
+
+        app = (
+            server.create_app.__wrapped__()
+            if hasattr(server.create_app, "__wrapped__")
+            else server.create_app()
+        )  # type: ignore[attr-defined]
+
+        async with TestClient(TestServer(app)) as client:
+            monkeypatch.setenv("SERVICE_TOKEN_DISCORD", "svc-tok")
+            # Open a /events WS (service-token auth)
+            ws = await client.ws_connect("/events?token=svc-tok")
+            # Give the server a tick to register the subscriber
+            await asyncio.sleep(0.05)
+            assert len(server.BUS._subscribers) == 1, "subscriber should be registered"
+            # Close the client side
+            await ws.close()
+            # Give the event loop a couple of ticks for the disconnect to propagate
+            await asyncio.sleep(0.1)
+            assert len(server.BUS._subscribers) == 0, (
+                "subscriber should be cleaned up after disconnect"
+            )
+
+    loop = asyncio.new_event_loop()
+    try:
+        loop.run_until_complete(body())
+    finally:
+        loop.close()
+
+
+def test_events_me_falls_back_to_legacy_users(tmp_path, monkeypatch):
+    """FIX 2b: a user present in Users but NOT in identities must still get events
+    (no 403) — the legacy get_user fallback must supply the wallet."""
+
+    import user_db
+
+    # Point both identity and user_db to the same fresh DB
+    db_path = str(tmp_path / "t.db")
+    monkeypatch.setattr(identity, "DATABASE", db_path)
+    monkeypatch.setattr(user_db, "DATABASE", db_path)
+    # Also patch the module-level import inside app (it imported get_user from user_db at load time)
+    monkeypatch.setattr(server, "get_user", user_db.get_user)
+
+    # Create tables
+    identity.ensure_identities_table()
+    user_db.create_users_table()
+
+    # Seed user into legacy Users ONLY (not identities)
+    user_db.register_user("u-legacyonly", "legacyuser", "rLEGACY1")
+    # Confirm identity resolve returns None
+    assert identity.resolve("discord", "u-legacyonly") is None
+
+    captured: dict = {}
+
+    async def fake_ws_stream(request, predicate):
+        captured["predicate"] = predicate
+        return "WS_OK"
+
+    monkeypatch.setattr(server, "_ws_stream", fake_ws_stream)
+
+    token = server.make_session_token({"id": "u-legacyonly", "name": "legacyuser"})
+    result = _run(server.handle_events_me(_FakeRequest(query={"token": token})))
+
+    # Must NOT return a 403 — the fake_ws_stream returns "WS_OK"
+    assert result == "WS_OK", f"Expected WS_OK (legacy fallback), got {result!r}"
+    # The predicate must filter to the legacy wallet
+    predicate = captured["predicate"]
+    assert predicate(_evt("mint.completed", "rLEGACY1")) is True
+    assert predicate(_evt("mint.completed", "rOTHER")) is False
