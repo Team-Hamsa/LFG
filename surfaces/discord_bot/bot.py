@@ -94,3 +94,4 @@ if __name__ == "__main__":
 
 # Register handlers (import for side effects: @tree.command + View classes).
 from surfaces.discord_bot import admin  # noqa: E402,F401
+from surfaces.discord_bot import commands as _cmds  # noqa: E402,F401
