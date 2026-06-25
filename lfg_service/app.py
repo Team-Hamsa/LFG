@@ -114,10 +114,16 @@ def _prune_sessions(sessions: dict[str, Any], terminal_states: set[str]) -> None
             del sessions[sid]
 
 
-def _active_session(sessions: dict[str, Any], terminal_states: set[str], discord_id: str):
+def _active_session(
+    sessions: dict[str, Any],
+    terminal_states: set[str],
+    discord_id: str,
+    platform: str | None = None,
+):
     for s in sessions.values():
         if s.discord_id == discord_id and s.state not in terminal_states:
-            return s
+            if platform is None or getattr(s, "platform", "discord") == platform:
+                return s
     return None
 
 
@@ -205,7 +211,11 @@ def make_status_handler(sessions: dict[str, Any]):
     @require_auth
     async def handler(request):
         session = sessions.get(request.match_info["session_id"])
-        if not session or session.discord_id != request["user"]["id"]:
+        if (
+            not session
+            or session.discord_id != request["user"]["id"]
+            or getattr(session, "platform", "discord") != _platform(request["user"])
+        ):
             return web.json_response({"error": "not found"}, status=404)
         return web.json_response(session.to_dict())
 
@@ -326,7 +336,7 @@ async def handle_mint_start(request):
 
     # One active session per user (no awaits between this check and the
     # insert below, so it cannot race)
-    active = _active_session(mint_sessions, mint_flow.TERMINAL_STATES, user["id"])
+    active = _active_session(mint_sessions, mint_flow.TERMINAL_STATES, user["id"], _platform(user))
     if active:
         return web.json_response(
             {"error": "mint already in progress", "session": active.to_dict()}, status=409
@@ -392,7 +402,7 @@ async def handle_swap_start(request):
         return web.json_response({"error": "invalid trait selection"}, status=400)
 
     _prune_sessions(swap_sessions, swap_flow.TERMINAL_STATES)
-    if _active_session(swap_sessions, swap_flow.TERMINAL_STATES, user["id"]):
+    if _active_session(swap_sessions, swap_flow.TERMINAL_STATES, user["id"], _platform(user)):
         return web.json_response({"error": "swap already in progress"}, status=409)
 
     # Re-verify ownership and metadata server-side (never trust client data)
@@ -411,7 +421,7 @@ async def handle_swap_start(request):
         )
 
     # The load_wallet_nfts call above awaited, so re-check before inserting
-    if _active_session(swap_sessions, swap_flow.TERMINAL_STATES, user["id"]):
+    if _active_session(swap_sessions, swap_flow.TERMINAL_STATES, user["id"], _platform(user)):
         return web.json_response({"error": "swap already in progress"}, status=409)
     session = swap_flow.SwapSession(
         discord_id=user["id"],
@@ -420,6 +430,7 @@ async def handle_swap_start(request):
         nft2=nft2,
         traits_to_swap=traits_to_swap,
         return_url=xumm_ops.discord_return_url(body.get("guild_id"), body.get("channel_id")),
+        platform=_platform(user),
     )
     swap_sessions[session.id] = session
     asyncio.get_event_loop().create_task(swap_flow.run_swap_session(session))
@@ -429,7 +440,11 @@ async def handle_swap_start(request):
 @require_auth
 async def handle_mint_status(request):
     session = mint_sessions.get(request.match_info["session_id"])
-    if not session or session.discord_id != request["user"]["id"]:
+    if (
+        not session
+        or session.discord_id != request["user"]["id"]
+        or getattr(session, "platform", "discord") != _platform(request["user"])
+    ):
         return web.json_response({"error": "not found"}, status=404)
     # Refresh the QR-scanned flags so the client can swap the QR for a
     # spinner the moment Xaman opens the payload (issue #22).
@@ -623,7 +638,9 @@ def _economy_post(kind, start_coro, mock_call):
             except Exception as e:
                 return web.json_response({"error": str(e)}, status=400)
         _prune_sessions(economy_sessions, economy_api.TERMINAL_STATES)
-        if _active_session(economy_sessions, economy_api.TERMINAL_STATES, user["id"]):
+        if _active_session(
+            economy_sessions, economy_api.TERMINAL_STATES, user["id"], _platform(user)
+        ):
             return web.json_response(
                 {"error": "an economy action is already in progress"}, status=409
             )
@@ -636,6 +653,7 @@ def _economy_post(kind, start_coro, mock_call):
         except Exception as e:
             logging.error(f"{kind} failed to start: {e}")
             return web.json_response({"error": "could not start the action"}, status=502)
+        ws.platform = _platform(user)
         economy_sessions[ws.id] = ws
         return web.json_response(ws.to_dict())
 
