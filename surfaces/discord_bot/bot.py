@@ -44,11 +44,31 @@ tree = bot.tree
 # One shared client for every handler (constructed here, entered in setup_hook).
 svc = LFGServiceClient(config.LFG_SERVICE_URL, config.SERVICE_TOKEN_DISCORD, "discord")
 
+# Background firehose consumer handle (started in setup_hook, cancelled in cleanup).
+_events_task: asyncio.Task[None] | None = None
+
 
 @bot.event
 async def setup_hook() -> None:
+    global _events_task
     # Enter the SDK's aiohttp session for the bot's lifetime.
     await svc.__aenter__()
+
+    async def _announce(message: str) -> None:
+        channel = bot.get_channel(config.ADMIN_LOG_CHANNEL_ID)
+        if isinstance(channel, discord.TextChannel):
+            await channel.send(message)
+
+    async def _dm(uid: str, message: str) -> None:
+        try:
+            user = await bot.fetch_user(int(uid))
+            await user.send(message)
+        except Exception as e:
+            logging.warning(f"DM to {uid} failed: {e}")
+
+    from surfaces.discord_bot.events import run_event_loop
+
+    _events_task = asyncio.create_task(run_event_loop(svc, _announce, _dm))
 
 
 @bot.event
@@ -60,7 +80,14 @@ async def on_ready() -> None:
 
 
 async def cleanup() -> None:
+    global _events_task
     logging.info("Performing cleanup before shutdown...")
+    # Stop the firehose consumer BEFORE closing svc, so the generator's aclose()
+    # can release the WebSocket on a still-live aiohttp session.
+    if _events_task is not None:
+        _events_task.cancel()
+        await asyncio.gather(_events_task, return_exceptions=True)
+        _events_task = None
     try:
         await svc.close()
     except Exception as e:
