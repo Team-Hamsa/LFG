@@ -328,6 +328,7 @@ async def handle_mint_start(request):
         discord_id=user["id"],
         wallet_address=request["wallet"],
         return_url=await _request_return_url(request),
+        platform=_platform(user),
     )
     mint_sessions[session.id] = session
     # Detect the payment path (LFGO holder vs XRP newcomer) and create the
@@ -430,7 +431,7 @@ async def handle_mint_status(request):
         ok = session.state not in (mint_flow.FAILED, mint_flow.PAYMENT_TIMEOUT)
         await publish_event(
             "mint.completed" if ok else "mint.failed",
-            {"platform": "discord", "platform_user_id": session.discord_id},
+            {"platform": session.platform, "platform_user_id": session.discord_id},
             session.wallet_address,
             session.to_dict(),
         )
