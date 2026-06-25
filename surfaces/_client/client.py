@@ -6,6 +6,8 @@
 from __future__ import annotations
 
 import asyncio
+import time
+from collections.abc import Awaitable, Callable
 from types import TracebackType
 from typing import Any, Literal, overload
 
@@ -13,6 +15,11 @@ import aiohttp
 
 from ._retry import RETRY_BASE_DELAY, RETRY_MAX_ATTEMPTS, with_retry
 from .errors import AuthError, ServiceError, ServiceUnavailable, error_for
+
+# Terminal states copied from lfg_core.mint_flow / swap_flow TERMINAL_STATES.
+# Duplicated (not imported) so the SDK never depends on lfg_core.
+MINT_TERMINAL: frozenset[str] = frozenset({"offer_ready", "done", "failed", "payment_timeout"})
+SWAP_TERMINAL: frozenset[str] = frozenset({"done", "failed", "offers_ready", "payment_timeout"})
 
 
 class LFGServiceClient:
@@ -176,3 +183,73 @@ class LFGServiceClient:
 
     async def me(self, user_id: str, *, username: str = "") -> dict[str, Any]:
         return await self._user_request("GET", "/api/me", user_id, username=username)
+
+    # ---- mint ----
+
+    async def start_mint(self, user_id: str, *, username: str = "") -> dict[str, Any]:
+        return await self._user_request("POST", "/api/mint", user_id, username=username)
+
+    async def mint_status(self, user_id: str, session_id: str) -> dict[str, Any]:
+        return await self._user_request("GET", f"/api/mint/{session_id}", user_id)
+
+    async def regenerate(self, user_id: str, session_id: str) -> dict[str, Any]:
+        return await self._user_request("POST", f"/api/mint/{session_id}/regenerate", user_id)
+
+    async def wait_for_mint(
+        self,
+        user_id: str,
+        session_id: str,
+        *,
+        interval: float = 2.0,
+        timeout: float = 180.0,
+        sleep: Callable[[float], Awaitable[None]] = asyncio.sleep,
+    ) -> dict[str, Any]:
+        return await self._poll(
+            lambda: self.mint_status(user_id, session_id), MINT_TERMINAL, interval, timeout, sleep
+        )
+
+    # ---- swap ----
+
+    async def start_swap(
+        self, user_id: str, nft1_id: str, nft2_id: str, traits: list[str], *, username: str = ""
+    ) -> dict[str, Any]:
+        return await self._user_request(
+            "POST",
+            "/api/swap",
+            user_id,
+            username=username,
+            json={"nft1_id": nft1_id, "nft2_id": nft2_id, "traits": traits},
+        )
+
+    async def swap_status(self, user_id: str, session_id: str) -> dict[str, Any]:
+        return await self._user_request("GET", f"/api/swap/{session_id}", user_id)
+
+    async def wait_for_swap(
+        self,
+        user_id: str,
+        session_id: str,
+        *,
+        interval: float = 2.0,
+        timeout: float = 180.0,
+        sleep: Callable[[float], Awaitable[None]] = asyncio.sleep,
+    ) -> dict[str, Any]:
+        return await self._poll(
+            lambda: self.swap_status(user_id, session_id), SWAP_TERMINAL, interval, timeout, sleep
+        )
+
+    async def _poll(
+        self,
+        fetch: Callable[[], Awaitable[dict[str, Any]]],
+        terminal: frozenset[str],
+        interval: float,
+        timeout: float,
+        sleep: Callable[[float], Awaitable[None]],
+    ) -> dict[str, Any]:
+        deadline = time.monotonic() + timeout
+        while True:
+            status = await fetch()
+            if status.get("state") in terminal:
+                return status
+            if time.monotonic() >= deadline:
+                return status  # caller inspects non-terminal state on timeout
+            await sleep(interval)
