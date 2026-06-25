@@ -253,3 +253,37 @@ class LFGServiceClient:
             if time.monotonic() >= deadline:
                 return status  # caller inspects non-terminal state on timeout
             await sleep(interval)
+
+    # ---- sign-in / nfts / economy ----
+
+    async def signin_start(self, user_id: str, *, username: str = "") -> dict[str, Any]:
+        return await self._user_request("POST", "/api/signin", user_id, username=username)
+
+    async def signin_status(self, user_id: str, payload_uuid: str) -> dict[str, Any]:
+        return await self._user_request("GET", f"/api/signin/{payload_uuid}", user_id)
+
+    async def nfts(self, user_id: str) -> dict[str, Any]:
+        return await self._user_request("GET", "/api/nfts", user_id)
+
+    async def economy(self, user_id: str) -> dict[str, Any]:
+        return await self._user_request("GET", "/api/economy", user_id)
+
+    # ---- trait-economy ops ----
+
+    async def equip_start(self, user_id: str, body: dict[str, Any]) -> dict[str, Any]:
+        return await self._user_request("POST", "/api/equip", user_id, json=body)
+
+    async def equip_status(self, user_id: str, session_id: str) -> dict[str, Any]:
+        return await self._user_request("GET", f"/api/equip/{session_id}", user_id)
+
+    async def harvest_start(self, user_id: str, body: dict[str, Any]) -> dict[str, Any]:
+        return await self._user_request("POST", "/api/harvest", user_id, json=body)
+
+    async def harvest_status(self, user_id: str, session_id: str) -> dict[str, Any]:
+        return await self._user_request("GET", f"/api/harvest/{session_id}", user_id)
+
+    async def assemble_start(self, user_id: str, body: dict[str, Any]) -> dict[str, Any]:
+        return await self._user_request("POST", "/api/assemble", user_id, json=body)
+
+    async def assemble_status(self, user_id: str, session_id: str) -> dict[str, Any]:
+        return await self._user_request("GET", f"/api/assemble/{session_id}", user_id)
