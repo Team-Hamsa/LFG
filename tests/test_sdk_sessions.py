@@ -1,3 +1,5 @@
+import asyncio
+
 import pytest
 from aiohttp.test_utils import TestServer
 
@@ -60,3 +62,21 @@ def test_bad_service_token_raises_auth_error():
         await server.close()
 
     run(_inner())
+
+
+def test_concurrent_calls_mint_session_once():
+    # FIX 1: per-user double-checked locking — 5 concurrent me() for the same user
+    # must result in exactly one session mint (not 5 orphaned sessions).
+    async def _inner():
+        app = build_mock_service()
+        server, client = await make_client(app)
+        async with client:
+            results = await asyncio.gather(*[client.me("42") for _ in range(5)])
+        await server.close()
+        return app, results
+
+    app, results = run(_inner())
+    assert app["state"]["session_hits"] == 1, (
+        f"Expected 1 session mint, got {app['state']['session_hits']}"
+    )
+    assert all(r["wallet"] == "rMOCK" for r in results)

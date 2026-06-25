@@ -44,6 +44,7 @@ class LFGServiceClient:
         self._base_delay = base_delay
         self._session: aiohttp.ClientSession | None = None
         self._user_sessions: dict[str, str] = {}  # user_id -> session token (Task 4)
+        self._session_locks: dict[str, asyncio.Lock] = {}  # per-user lock for double-checked mint
 
     async def __aenter__(self) -> LFGServiceClient:
         self._session = aiohttp.ClientSession()
@@ -162,10 +163,19 @@ class LFGServiceClient:
         return session_token
 
     async def _session_token(self, user_id: str, username: str = "") -> str:
+        # Fast path: already cached (no lock needed for read).
         token = self._user_sessions.get(user_id)
-        if token is None:
-            token = await self.create_session(user_id, username)
-            self._user_sessions[user_id] = token
+        if token is not None:
+            return token
+        # Slow path: lazily create a per-user lock and double-check inside it so
+        # only the first concurrent caller mints a session; the rest reuse it.
+        if user_id not in self._session_locks:
+            self._session_locks[user_id] = asyncio.Lock()
+        async with self._session_locks[user_id]:
+            token = self._user_sessions.get(user_id)  # re-check inside lock
+            if token is None:
+                token = await self.create_session(user_id, username)
+                self._user_sessions[user_id] = token
         return token
 
     async def _user_request(
@@ -176,8 +186,19 @@ class LFGServiceClient:
             result: dict[str, Any] = await self._request(method, path, token=token, **kw)
             return result
         except AuthError:
-            # cached session rejected: evict, re-mint once, retry exactly once
-            self._user_sessions.pop(user_id, None)
+            # cached session rejected: evict only if we still hold the stale token
+            # (another concurrent 401-refresh may have already replaced it).
+            if user_id not in self._session_locks:
+                self._session_locks[user_id] = asyncio.Lock()
+            stale_token = token
+            async with self._session_locks[user_id]:
+                if self._user_sessions.get(user_id) == stale_token:
+                    # We still own the stale entry — re-mint.
+                    self._user_sessions.pop(user_id, None)
+                    new_token = await self.create_session(user_id, username)
+                    self._user_sessions[user_id] = new_token
+            # Always retry with whatever is now cached (freshly minted or
+            # already refreshed by a concurrent caller).
             token = await self._session_token(user_id, username)
             result = await self._request(method, path, token=token, **kw)
             return result
@@ -313,6 +334,10 @@ class LFGServiceClient:
             AuthError: immediately (no retry) when the /events handshake is
                 rejected with HTTP 401 or 403.
         """
+        # FIX 3: if the client was closed before the generator is first iterated,
+        # stop cleanly rather than raising RuntimeError from _require_session.
+        if self._session is None or self._session.closed:
+            return
         session = self._require_session()
         async for event in stream_events(
             session, self._base, self._service_token, types, base_delay=self._base_delay

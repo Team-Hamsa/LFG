@@ -170,7 +170,11 @@ def build_mock_service(
         return web.json_response({"session_id": "x1", "state": "started"})
 
     async def handle_events(request: web.Request) -> web.WebSocketResponse:
-        if request.query.get("token") != SERVICE_TOKEN:
+        # FIX 2: accept token via ?token= (legacy) OR Authorization: Bearer header
+        token = request.query.get("token") or request.headers.get("Authorization", "").removeprefix(
+            "Bearer "
+        )
+        if token != SERVICE_TOKEN:
             # aiohttp WS handshake can't carry a JSON 401 cleanly; reject pre-upgrade
             raise web.HTTPUnauthorized()
         state["last_event_types"] = request.query.get("types")
