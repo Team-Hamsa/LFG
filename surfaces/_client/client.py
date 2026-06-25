@@ -7,14 +7,16 @@ from __future__ import annotations
 
 import asyncio
 import time
-from collections.abc import Awaitable, Callable
+from collections.abc import AsyncIterator, Awaitable, Callable
 from types import TracebackType
 from typing import Any, Literal, overload
 
 import aiohttp
 
+from lfg_service.events import Event
 from ._retry import RETRY_BASE_DELAY, RETRY_MAX_ATTEMPTS, with_retry
 from .errors import AuthError, ServiceError, ServiceUnavailable, error_for
+from .events import stream_events
 
 # Terminal states copied from lfg_core.mint_flow / swap_flow TERMINAL_STATES.
 # Duplicated (not imported) so the SDK never depends on lfg_core.
@@ -287,3 +289,12 @@ class LFGServiceClient:
 
     async def assemble_status(self, user_id: str, session_id: str) -> dict[str, Any]:
         return await self._user_request("GET", f"/api/assemble/{session_id}", user_id)
+
+    # ---- events ----
+
+    async def events(self, types: list[str] | None = None) -> AsyncIterator[Event]:
+        session = self._require_session()
+        async for event in stream_events(
+            session, self._base, self._service_token, types, base_delay=self._base_delay
+        ):
+            yield event
