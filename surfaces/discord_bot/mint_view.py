@@ -13,9 +13,6 @@ from surfaces._client.errors import ServiceError
 from surfaces._shared.mint_result import BAD_STATE_MESSAGES, MINT_OK_STATES, friendly_error
 from surfaces.discord_bot import render
 
-# Backward-compat alias so any code that referenced the private name still works.
-_friendly = friendly_error
-
 
 async def handle_mint(svc: LFGServiceClient, interaction: discord.Interaction) -> None:
     await interaction.response.defer(ephemeral=True)
