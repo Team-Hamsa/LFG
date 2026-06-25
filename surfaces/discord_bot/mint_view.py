@@ -9,27 +9,12 @@ import logging
 import discord
 
 from surfaces._client import LFGServiceClient
-from surfaces._client.errors import BadRequest, ServiceError
+from surfaces._client.errors import ServiceError
+from surfaces._shared.mint_result import BAD_STATE_MESSAGES, MINT_OK_STATES, friendly_error
 from surfaces.discord_bot import render
 
-# Success end-states from lfg_core.mint_flow (offer_ready is the success state;
-# done is the post-accept state). failed / payment_timeout are the bad ones.
-MINT_OK_STATES = frozenset({"offer_ready", "done"})
-
-_BAD_STATE_MESSAGES = {
-    "payment_timeout": "Payment request timed out. Please try again.",
-    "failed": "The mint failed. Please try again or contact an admin.",
-}
-
-
-def _friendly(err: ServiceError) -> str:
-    code = (err.code or "").lower()
-    message = (err.message or "").lower()
-    if isinstance(err, BadRequest) and ("wallet" in code or "wallet" in message):
-        return "Please register your wallet first using /register."
-    if err.status == 409 or "in_progress" in code or "already" in message:
-        return "You already have a mint in progress — finish or wait for it to time out."
-    return err.message or "The mint service is unavailable. Please try again shortly."
+# Backward-compat alias so any code that referenced the private name still works.
+_friendly = friendly_error
 
 
 async def handle_mint(svc: LFGServiceClient, interaction: discord.Interaction) -> None:
@@ -42,7 +27,7 @@ async def handle_mint(svc: LFGServiceClient, interaction: discord.Interaction) -
     try:
         session = await svc.start_mint(user_id, username=username)
     except ServiceError as e:
-        await interaction.followup.send(embed=render.error_embed(_friendly(e)), ephemeral=True)
+        await interaction.followup.send(embed=render.error_embed(friendly_error(e)), ephemeral=True)
         return
 
     session_id = session["id"]
@@ -54,7 +39,7 @@ async def handle_mint(svc: LFGServiceClient, interaction: discord.Interaction) -
         qr_png = await svc.qr_png(payment_link)
     except ServiceError as e:
         logging.error(f"payment QR render failed: {e}")
-        await interaction.followup.send(embed=render.error_embed(_friendly(e)), ephemeral=True)
+        await interaction.followup.send(embed=render.error_embed(friendly_error(e)), ephemeral=True)
         return
     await interaction.followup.send(
         embed=render.payment_embed(payment_link),
@@ -66,12 +51,12 @@ async def handle_mint(svc: LFGServiceClient, interaction: discord.Interaction) -
     try:
         final = await svc.wait_for_mint(user_id, session_id)
     except ServiceError as e:
-        await interaction.followup.send(embed=render.error_embed(_friendly(e)), ephemeral=True)
+        await interaction.followup.send(embed=render.error_embed(friendly_error(e)), ephemeral=True)
         return
 
     state = str(final.get("state") or "")
     if state not in MINT_OK_STATES:
-        reason = _BAD_STATE_MESSAGES.get(state, "Mint did not complete. Please try again.")
+        reason = BAD_STATE_MESSAGES.get(state, "Mint did not complete. Please try again.")
         await interaction.followup.send(embed=render.error_embed(reason), ephemeral=True)
         return
 
