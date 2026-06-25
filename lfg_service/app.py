@@ -290,11 +290,12 @@ async def handle_register(request):
             {"error": "registration failed", "code": "register_failed"}, status=500
         )
     linked = await asyncio.to_thread(
-        identity_store.link, "discord", user["id"], user["name"], wallet
+        identity_store.link, _platform(user), user["id"], user["name"], wallet
     )
     if not linked:
         logging.error(
-            "identity.link failed for discord:%s — /events/me may 403 until restart-migrate",
+            "identity.link failed for %s:%s — /events/me may 403 until restart-migrate",
+            _platform(user),
             user["id"],
         )
     return web.json_response({"ok": True, "wallet": wallet})
@@ -500,11 +501,16 @@ async def handle_signin_status(request):
         if not await asyncio.to_thread(register_user, rec["discord_id"], rec["name"], s["account"]):
             return web.json_response({"error": "registration failed"}, status=500)
         linked = await asyncio.to_thread(
-            identity_store.link, "discord", rec["discord_id"], rec["name"], s["account"]
+            identity_store.link,
+            _platform(request["user"]),
+            rec["discord_id"],
+            rec["name"],
+            s["account"],
         )
         if not linked:
             logging.error(
-                "identity.link failed for discord:%s — /events/me may 403 until restart-migrate",
+                "identity.link failed for %s:%s — /events/me may 403 until restart-migrate",
+                _platform(request["user"]),
                 rec["discord_id"],
             )
         del signin_payloads[uuid]
