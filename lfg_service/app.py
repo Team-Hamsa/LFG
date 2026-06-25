@@ -101,10 +101,7 @@ async def handle_events_me(request: Any) -> Any:
     payload = verify_session_token(request.query.get("token", ""))
     if not payload:
         return web.json_response({"error": "unauthorized", "code": "bad_session"}, status=401)
-    wallet = await asyncio.to_thread(identity_store.resolve, "discord", payload["id"])
-    if wallet is None:
-        record = await asyncio.to_thread(get_user, payload["id"])
-        wallet = record["address"] if record else None
+    wallet = await _resolve_wallet(_platform(payload), payload["id"])
     if wallet is None:
         return web.json_response({"error": "no wallet", "code": "no_wallet"}, status=403)
     return await _ws_stream(request, lambda e: e.wallet == wallet)
@@ -133,7 +130,12 @@ def _session_secret() -> bytes:
 
 
 def make_session_token(user: dict[str, Any]) -> str:
-    payload = {"id": user["id"], "name": user["name"], "exp": int(time.time()) + SESSION_TTL}
+    payload = {
+        "id": user["id"],
+        "name": user["name"],
+        "platform": user.get("platform", "discord"),
+        "exp": int(time.time()) + SESSION_TTL,
+    }
     body = base64.urlsafe_b64encode(json.dumps(payload).encode()).decode()
     sig = hmac.new(_session_secret(), body.encode(), hashlib.sha256).hexdigest()
     return f"{body}.{sig}"
@@ -151,6 +153,18 @@ def verify_session_token(token: str):
         return payload
     except Exception:
         return None
+
+
+def _platform(user: dict[str, Any]) -> str:
+    return user.get("platform", "discord")
+
+
+async def _resolve_wallet(platform: str, uid: str) -> str | None:
+    wallet = await asyncio.to_thread(identity_store.resolve, platform, uid)
+    if wallet is None and platform == "discord":
+        record = await asyncio.to_thread(get_user, uid)
+        wallet = record["address"] if record else None
+    return wallet
 
 
 def require_auth(handler):
@@ -178,10 +192,10 @@ def require_wallet(handler):
         if config.WEBAPP_DEV_MODE:
             request["wallet"] = mock_economy.DEV_OWNER
             return await handler(request)
-        record = await asyncio.to_thread(get_user, request["user"]["id"])
-        if not record or not record.get("address"):
+        wallet = await _resolve_wallet(_platform(request["user"]), request["user"]["id"])
+        if not wallet:
             return web.json_response({"error": "no wallet registered"}, status=400)
-        request["wallet"] = record["address"]
+        request["wallet"] = wallet
         return await handler(request)
 
     return wrapper
@@ -253,37 +267,43 @@ async def handle_session(request):
         return web.json_response(
             {"error": "missing platform_user_id", "code": "bad_request"}, status=400
         )
-    token = make_session_token({"id": pid, "name": pname})
+    token = make_session_token({"id": pid, "name": pname, "platform": request["surface"]})
     return web.json_response({"session_token": token, "user": {"id": pid, "username": pname}})
 
 
 @require_auth
 async def handle_me(request):
     user = request["user"]
-    wallet = await asyncio.to_thread(identity_store.resolve, "discord", user["id"])
-    if wallet is None:
-        record = await asyncio.to_thread(get_user, user["id"])
-        wallet = record["address"] if record else None
+    wallet = await _resolve_wallet(_platform(user), user["id"])
     return web.json_response({"id": user["id"], "username": user["name"], "wallet": wallet})
 
 
 @require_auth
 async def handle_register(request):
     user = request["user"]
+    platform = _platform(user)
     body = await request.json()
     wallet = (body.get("wallet") or "").strip()
     if not is_valid_classic_address(wallet):
         return web.json_response({"error": "invalid XRPL address"}, status=400)
-    if not await asyncio.to_thread(register_user, user["id"], user["name"], wallet):
-        return web.json_response(
-            {"error": "registration failed", "code": "register_failed"}, status=500
-        )
+    # The legacy Users table is keyed by discord_id with no platform column, so
+    # only the discord platform may write it — a colliding numeric id from
+    # another platform would silently overwrite a discord user's wallet (and be
+    # mismigrated into identities as a discord row on the next startup). Non-
+    # discord platforms live in identities only; _resolve_wallet gates its legacy
+    # fallback on discord, so it never consults this table for them.
+    if platform == "discord":
+        if not await asyncio.to_thread(register_user, user["id"], user["name"], wallet):
+            return web.json_response(
+                {"error": "registration failed", "code": "register_failed"}, status=500
+            )
     linked = await asyncio.to_thread(
-        identity_store.link, "discord", user["id"], user["name"], wallet
+        identity_store.link, platform, user["id"], user["name"], wallet
     )
     if not linked:
         logging.error(
-            "identity.link failed for discord:%s — /events/me may 403 until restart-migrate",
+            "identity.link failed for %s:%s — /events/me may 403 until restart-migrate",
+            platform,
             user["id"],
         )
     return web.json_response({"ok": True, "wallet": wallet})
@@ -316,6 +336,7 @@ async def handle_mint_start(request):
         discord_id=user["id"],
         wallet_address=request["wallet"],
         return_url=await _request_return_url(request),
+        platform=_platform(user),
     )
     mint_sessions[session.id] = session
     # Detect the payment path (LFGO holder vs XRP newcomer) and create the
@@ -418,7 +439,7 @@ async def handle_mint_status(request):
         ok = session.state not in (mint_flow.FAILED, mint_flow.PAYMENT_TIMEOUT)
         await publish_event(
             "mint.completed" if ok else "mint.failed",
-            {"platform": "discord", "platform_user_id": session.discord_id},
+            {"platform": session.platform, "platform_user_id": session.discord_id},
             session.wallet_address,
             session.to_dict(),
         )
@@ -486,14 +507,23 @@ async def handle_signin_status(request):
     if not s:
         return web.json_response({"error": "could not reach Xaman"}, status=502)
     if s["signed"] and s["account"] and is_valid_classic_address(s["account"]):
-        if not await asyncio.to_thread(register_user, rec["discord_id"], rec["name"], s["account"]):
-            return web.json_response({"error": "registration failed"}, status=500)
+        platform = _platform(request["user"])
+        if platform == "discord":
+            if not await asyncio.to_thread(
+                register_user, rec["discord_id"], rec["name"], s["account"]
+            ):
+                return web.json_response({"error": "registration failed"}, status=500)
         linked = await asyncio.to_thread(
-            identity_store.link, "discord", rec["discord_id"], rec["name"], s["account"]
+            identity_store.link,
+            platform,
+            rec["discord_id"],
+            rec["name"],
+            s["account"],
         )
         if not linked:
             logging.error(
-                "identity.link failed for discord:%s — /events/me may 403 until restart-migrate",
+                "identity.link failed for %s:%s — /events/me may 403 until restart-migrate",
+                platform,
                 rec["discord_id"],
             )
         del signin_payloads[uuid]
