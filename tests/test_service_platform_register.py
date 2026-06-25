@@ -17,6 +17,7 @@ class _Req:
         self.headers = {"Authorization": f"Bearer {token}"}
         self._body = body
         self._store: dict = {}
+        self.match_info: dict = {}
 
     async def json(self):
         return self._body
@@ -91,3 +92,39 @@ def test_register_discord_writes_legacy_users(monkeypatch):
     resp = _run(app.handle_register(_Req(token, {"wallet": "rDISCORD"})))
     assert resp.status == 200
     assert legacy["args"] == ("9", "d", "rDISCORD")
+
+
+def test_signin_status_telegram_skips_legacy_users(monkeypatch):
+    """Mirror of the register gate for the second P1 call site: a telegram
+    signed-payload status check must NOT write the legacy Users table — only
+    identities. Guards against a future revert of the handle_signin_status gate."""
+    legacy = {"called": False}
+    linked = {}
+    monkeypatch.setattr(app, "is_valid_classic_address", lambda w: True)
+    monkeypatch.setattr(app.config, "WEBAPP_DEV_MODE", False)
+    monkeypatch.setitem(app.signin_payloads, "u1", {"discord_id": "55", "name": "tg"})
+
+    async def fake_status(uuid):
+        return {"opened": True, "signed": True, "expired": False, "account": "rXRPL"}
+
+    monkeypatch.setattr(app.xumm_ops, "get_payload_status", fake_status)
+
+    def fake_register_user(uid, name, w):
+        legacy["called"] = True
+        return True
+
+    monkeypatch.setattr(app, "register_user", fake_register_user)
+
+    def fake_link(platform, uid, name, wallet):
+        linked["args"] = (platform, uid, wallet)
+        return True
+
+    monkeypatch.setattr(app.identity_store, "link", fake_link)
+
+    token = make_session_token({"id": "55", "name": "tg", "platform": "telegram"})
+    req = _Req(token, {})
+    req.match_info = {"payload_uuid": "u1"}
+    resp = _run(app.handle_signin_status(req))
+    assert resp.status == 200
+    assert legacy["called"] is False
+    assert linked["args"] == ("telegram", "55", "rXRPL")
