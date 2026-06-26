@@ -11,6 +11,7 @@ from discord.ui import Button, View
 from surfaces.discord_bot import config, trustline
 from surfaces.discord_bot.bot import svc
 from surfaces.discord_bot.mint_view import handle_mint
+from surfaces.discord_bot.register_view import handle_register
 from surfaces.discord_bot.trustline import safe_followup
 from user_db import get_user
 
@@ -28,6 +29,10 @@ class MintView(View):
     @discord.ui.button(label="🎨 Mint NFT", style=discord.ButtonStyle.primary)
     async def mint_button(self, interaction: discord.Interaction, button: Button[Any]) -> None:
         await handle_mint(svc, interaction)
+
+    @discord.ui.button(label="🔐 Register Wallet", style=discord.ButtonStyle.primary)
+    async def register_button(self, interaction: discord.Interaction, button: Button[Any]) -> None:
+        await handle_register(svc, interaction)
 
     @discord.ui.button(label="🔗 Set LFGO Trustline", style=discord.ButtonStyle.secondary)
     async def trustline_button(self, interaction: discord.Interaction, button: Button[Any]) -> None:
