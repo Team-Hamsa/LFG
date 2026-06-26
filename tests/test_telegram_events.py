@@ -97,6 +97,25 @@ def test_announcement_falls_back_to_a_user():
     assert "a user" in msg
 
 
+def test_make_announcement_unknown_event_uses_generic_fallback(caplog):
+    """An unhandled event type must NOT render the 'equip failed' copy; it
+    hits the generic fallback and logs a warning."""
+    e = Event(
+        type="frobnicate.completed",
+        ts=0,
+        identity=_tg_identity("55"),
+        wallet=None,
+        data={},
+    )
+    import logging
+
+    with caplog.at_level(logging.WARNING):
+        msg = ev_mod.make_announcement(e)
+    assert "equip" not in msg.lower()
+    assert "Unknown event" in msg
+    assert any("unhandled event type" in r.message for r in caplog.records)
+
+
 def test_announce_and_dm_on_telegram_completed():
     agen = _FakeAgen(
         [

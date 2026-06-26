@@ -165,6 +165,25 @@ def test_make_announcement_falls_back_to_a_user(ev_mod):
     assert "a user" in msg
 
 
+def test_make_announcement_unknown_event_uses_generic_fallback(ev_mod, caplog):
+    """An unhandled event type must NOT render the 'equip failed' copy; it
+    hits the generic fallback and logs a warning."""
+    e = Event(
+        type="frobnicate.completed",
+        ts=0,
+        identity=_discord_identity("42"),
+        wallet=None,
+        data={},
+    )
+    import logging
+
+    with caplog.at_level(logging.WARNING):
+        msg = ev_mod.make_announcement(e)
+    assert "equip" not in msg.lower()
+    assert "Unknown event" in msg
+    assert any("unhandled event type" in r.message for r in caplog.records)
+
+
 def test_run_event_loop_announces_dms_and_closes(ev_mod):
     agen = _FakeAgen(
         [

@@ -74,7 +74,10 @@ def make_announcement(ev: Event) -> str:
         return f"❌ {who}'s harvest failed."
     if ev.type == "equip.completed":
         return f"👕 {who} equipped a trait."
-    return f"❌ {who}'s equip failed."
+    if ev.type == "equip.failed":
+        return f"❌ {who}'s equip failed."
+    logging.warning("make_announcement: unhandled event type %r", ev.type)
+    return f"❌ Unknown event for {who}."
 
 
 def announcement_image(ev: Event) -> str | None:

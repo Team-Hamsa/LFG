@@ -155,7 +155,6 @@ async def publish_terminal(
         return
     if session.state not in (success_states | fail_states):
         return
-    session._published = True
     ok = session.state in success_states
     data = session.to_dict()
     if image_url and not data.get("image_url"):
@@ -166,6 +165,11 @@ async def publish_terminal(
         wallet,
         data,
     )
+    # Mark published only after the await succeeds: if the request task is
+    # cancelled mid-publish, the session stays unpublished so a later poll
+    # retries. The resulting sub-tick double-publish window under concurrent
+    # polls is acceptable.
+    session._published = True
 
 
 async def _ws_stream(request: Any, predicate: Any) -> Any:
@@ -862,6 +866,12 @@ def _make_economy_status_handler(prefix: str):
             or session.discord_id != request["user"]["id"]
             or getattr(session, "platform", "discord") != _platform(request["user"])
         ):
+            return web.json_response({"error": "not found"}, status=404)
+        # The three economy ops share one `economy_sessions` dict. Guard against
+        # polling e.g. assemble/{harvest_id}/status, which would otherwise
+        # publish `assemble.completed` for a harvest session and burn its
+        # `_published` slot. `EconomyWebSession.kind` is the authoritative op.
+        if getattr(session, "kind", prefix) != prefix:
             return web.json_response({"error": "not found"}, status=404)
         # The wallet is nested as inner.owner; enrichment never raises on a
         # missing wallet, so identity falls back to the bare id if absent.

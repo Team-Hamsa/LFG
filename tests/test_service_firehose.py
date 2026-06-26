@@ -263,3 +263,102 @@ def test_assemble_status_publishes_with_wallet_and_image(monkeypatch):
     assert evt.type == "assemble.completed"
     assert evt.wallet == "rOWNER"
     assert evt.data["image_url"] == "https://cdn/assemble.png"
+
+
+def test_publish_terminal_does_not_mark_published_when_publish_raises(monkeypatch):
+    """If publish_event raises/cancels mid-await, the session must stay
+    unpublished so a later poll retries (the idempotency guard is set only
+    after the await succeeds)."""
+    monkeypatch.setattr(identity_store, "identities_for_wallet", lambda w: [])
+    s = _Session("done", {})
+
+    async def boom(*a, **k):
+        raise asyncio.CancelledError
+
+    monkeypatch.setattr(server, "publish_event", boom)
+
+    async def body():
+        await server.publish_terminal(
+            s,
+            "swap",
+            wallet="rW",
+            user_id="1",
+            platform="discord",
+            image_url=None,
+            success_states={"done"},
+            fail_states={"failed"},
+        )
+
+    import pytest
+
+    with pytest.raises(asyncio.CancelledError):
+        _run(body())
+    assert getattr(s, "_published", False) is False
+
+
+def _economy_session(kind, inner_state="done"):
+    from webapp import economy_api
+
+    class _Inner:
+        id = "inner-id"
+        state = inner_state
+        error = None
+        owner = "rOWNER"
+        results = [{"image_url": "https://cdn/x.png", "nft_id": "N", "accept": None}]
+        bucket_accept: dict = {}
+        moved_assets: list = []
+        displaced_value = None
+
+    return economy_api.EconomyWebSession(discord_id="dev", kind=kind, inner=_Inner())
+
+
+class _EconReq:
+    headers: dict = {}
+
+    def __init__(self, session_id):
+        self.match_info = {"session_id": session_id}
+        self._store = {"user": {"id": "dev", "name": "n", "platform": "discord"}}
+
+    def __getitem__(self, k):
+        return self._store[k]
+
+    def __setitem__(self, k, v):
+        self._store[k] = v
+
+
+def test_economy_status_404_on_kind_mismatch(monkeypatch):
+    """Polling assemble/{harvest_id}/status must not publish assemble.* for a
+    harvest session; it returns 404 and never burns the _published slot."""
+    monkeypatch.setattr(config, "WEBAPP_DEV_MODE", True)
+    monkeypatch.setattr(identity_store, "identities_for_wallet", lambda w: [])
+    sess = _economy_session("harvest")
+    server.economy_sessions[sess.id] = sess
+    published = []
+
+    async def fake_publish(*a, **k):
+        published.append(a)
+
+    monkeypatch.setattr(server, "publish_event", fake_publish)
+    try:
+        resp = _run(server.handle_assemble_status(_EconReq(sess.id)))
+    finally:
+        server.economy_sessions.pop(sess.id, None)
+
+    assert resp.status == 404
+    assert published == []
+    assert getattr(sess, "_published", False) is False
+
+
+def test_economy_status_publishes_on_kind_match(monkeypatch):
+    """A matching prefix still publishes the terminal event (200)."""
+    monkeypatch.setattr(config, "WEBAPP_DEV_MODE", True)
+    monkeypatch.setattr(identity_store, "identities_for_wallet", lambda w: [])
+    sess = _economy_session("harvest")
+    server.economy_sessions[sess.id] = sess
+    try:
+        evt = _next_event(lambda: server.handle_harvest_status(_EconReq(sess.id)))
+    finally:
+        server.economy_sessions.pop(sess.id, None)
+
+    assert evt.type == "harvest.completed"
+    assert evt.wallet == "rOWNER"
