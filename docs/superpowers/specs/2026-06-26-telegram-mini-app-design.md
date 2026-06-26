@@ -179,11 +179,9 @@ The Telegram WebApp JS bridge (`telegram-web-app.js`) must be loaded in
 **before** `app.js`. It is a no-op outside Telegram (`window.Telegram` simply
 stays undefined), so it is safe to always include and does not affect the
 Discord path. Discord's CSP currently forbids cross-origin scripts; the vendored
-SDK exists for that reason. **Decision needed:** either (a) load
-`telegram-web-app.js` only when a `?tgWebApp=1` (or similar) query hint is
-present so it never trips Discord's CSP, or (b) vendor it same-origin like the
-Discord SDK. Recommend **(b) vendor it** — same pattern, no CSP surprises,
-offline-safe (see §6, Parity gaps).
+SDK exists for that reason. **Resolved:** `telegram-web-app.js` is vendored
+same-origin like the Discord SDK — same pattern, no CSP surprises, offline-safe
+(see §6, Parity gaps).
 
 ### 4.2 Telegram setup
 
@@ -350,20 +348,24 @@ header. Keep it one origin.
   server extracts `user.id` from the *validated* payload, never from anything
   the client asserts separately.
 
-## 9. Open questions / decisions for the user
+## 9. Resolved decisions
 
-1. **HTTPS / hosting (BLOCKER):** Cloudflare Tunnel (recommended) vs reverse
-   proxy + Let's Encrypt vs reuse existing fronting? Need a stable public HTTPS
-   hostname for `TELEGRAM_MINI_APP_URL` + BotFather. **Nothing ships without
-   this.**
-2. **Launch surface:** inline `WebAppInfo` button only, BotFather menu button
-   only, or both (recommended)? Set the menu button programmatically in
-   `_post_init` or manually via BotFather?
+Part A (auth + launch, feature-flagged) ships behind `TELEGRAM_MINI_APP_URL` /
+`TELEGRAM_BOT_TOKEN`: the feature stays dormant until the env vars are set, so
+none of these block the merge. The decisions below are settled (see the plan's
+Resolved Decisions):
+
+1. **HTTPS / hosting:** `TELEGRAM_MINI_APP_URL` must be a stable public
+   `https://` hostname (Telegram requires absolute HTTPS WebApp URLs; the
+   surface config rejects non-HTTPS at startup). Provisioning the host is an ops
+   step, gated by the feature flag — it does not block the code merge.
+2. **Launch surface:** both — an inline `WebAppInfo` button (private chats only)
+   plus the BotFather menu button set programmatically in `_post_init`. Both are
+   gated on `TELEGRAM_MINI_APP_URL`.
 3. **Registration gate:** load the app for unregistered Telegram users and
-   prompt Xaman sign-in inline (recommended — mirrors Discord), or require
-   `/register` first and refuse to open the Mini App until registered? Design
-   assumes the former.
-4. **Vendor `telegram-web-app.js` vs CDN load:** vendor same-origin
-   (recommended, CSP/offline-safe) or load from `telegram.org`?
-5. **`initData` max age:** confirm `3600`s default acceptable for the replay
-   window.
+   prompt Xaman sign-in inline (mirrors Discord). `/api/telegram/auth` mints a
+   session token without any wallet creation/lookup.
+4. **Vendor `telegram-web-app.js`:** vendored same-origin like the Discord SDK
+   (CSP/offline-safe).
+5. **`initData` max age:** `3600`s default replay window; `TELEGRAM_INITDATA_MAX_AGE`
+   must be a positive integer (rejected at startup otherwise).

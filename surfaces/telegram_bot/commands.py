@@ -54,9 +54,12 @@ async def start(update: Any, context: Any) -> None:
         [InlineKeyboardButton("🔄 Swap Traits", callback_data="swap")],
         [InlineKeyboardButton("🔐 Register Wallet", callback_data="register")],
     ]
-    # Mini App launch button (#89) — only when the public HTTPS URL is configured;
-    # web_app buttons work only in private chats (DMs with the bot).
-    if config.TELEGRAM_MINI_APP_URL:
+    # Mini App launch button (#89) — only when the public HTTPS URL is configured
+    # AND the chat is private: web_app inline buttons work ONLY in private chats
+    # (DMs with the bot); they fail in groups/supergroups, so omit them there.
+    chat = getattr(update, "effective_chat", None)
+    is_private = chat is not None and chat.type == "private"
+    if config.TELEGRAM_MINI_APP_URL and is_private:
         rows.append(
             [
                 InlineKeyboardButton(

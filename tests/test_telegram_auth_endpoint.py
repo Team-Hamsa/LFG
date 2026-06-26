@@ -116,6 +116,16 @@ def test_auth_rejects_bad_initdata(monkeypatch):
     assert resp.status == 401
 
 
+def test_auth_rejects_non_object_body(monkeypatch):
+    # request.json() can return a list/str/null; the handler must take the
+    # auth-failure path (401), not 500 on a non-dict body.
+    monkeypatch.setattr(app.config, "TELEGRAM_BOT_TOKEN", DUMMY_TOKEN)
+    monkeypatch.setattr(app.config, "TELEGRAM_INITDATA_MAX_AGE", 3600)
+    for bad_body in ([1, 2, 3], "a string", None):
+        resp = _run(app.handle_telegram_auth(_Req(bad_body)))
+        assert resp.status == 401
+
+
 def test_auth_503_when_unconfigured(monkeypatch):
     monkeypatch.setattr(app.config, "TELEGRAM_BOT_TOKEN", "")
     init_data = _valid_init_data(DUMMY_TOKEN)
@@ -170,12 +180,16 @@ def test_telegram_token_cannot_read_discord_session(monkeypatch):
         def __setitem__(self, k, v):
             self._store[k] = v
 
-    r = _run(app.handle_signin_status(_AuthReq(tg_token, {"payload_uuid": "tgx"})))
-    assert r.status == 404
-    app.signin_payloads.pop("tgx", None)
+    try:
+        r = _run(app.handle_signin_status(_AuthReq(tg_token, {"payload_uuid": "tgx"})))
+        assert r.status == 404
+    finally:
+        # Always clean up the seeded global so a failing assertion above doesn't
+        # leave global state polluted for other tests.
+        app.signin_payloads.pop("tgx", None)
 
 
-def _make_session_token_default_platform():
+def test_make_session_token_default_platform():
     # Sanity: tokens minted without a platform default to discord (regression).
     tok = make_session_token({"id": "1", "name": "x"})
     assert verify_session_token(tok)["platform"] == "discord"

@@ -112,6 +112,8 @@ WEBAPP_DEV_MODE = os.getenv("WEBAPP_DEV_MODE", "") not in ("", "0", "false", "Fa
 TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN", "")
 # initData replay window (initData carries no nonce, so freshness is the guard).
 TELEGRAM_INITDATA_MAX_AGE = int(os.getenv("TELEGRAM_INITDATA_MAX_AGE", "3600"))
+if TELEGRAM_INITDATA_MAX_AGE <= 0:
+    raise ValueError("TELEGRAM_INITDATA_MAX_AGE must be greater than 0")
 
 # Misc
 PAYMENT_TIMEOUT_SECONDS = int(os.getenv("PAYMENT_TIMEOUT_SECONDS", "300"))

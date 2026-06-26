@@ -38,14 +38,17 @@ def _reload_config(monkeypatch, url):
     return cfg
 
 
-def _start_update():
+def _start_update(chat_type="private"):
     sent = {}
 
     async def reply_text(text, reply_markup=None):
         sent["text"] = text
         sent["markup"] = reply_markup
 
-    update = SimpleNamespace(message=SimpleNamespace(reply_text=reply_text))
+    update = SimpleNamespace(
+        message=SimpleNamespace(reply_text=reply_text),
+        effective_chat=SimpleNamespace(type=chat_type),
+    )
     return update, sent
 
 
@@ -65,6 +68,16 @@ def test_start_menu_includes_app_button_when_configured(monkeypatch):
     webapps = _webapp_buttons(sent["markup"])
     assert len(webapps) == 1
     assert webapps[0].web_app.url == "https://lfg.example.com"
+
+
+def test_start_menu_omits_app_button_in_group_chat(monkeypatch):
+    # web_app inline buttons only work in private chats, so even with the URL set
+    # the Open App button must be omitted in groups/supergroups.
+    _reload_config(monkeypatch, "https://lfg.example.com")
+    for chat_type in ("group", "supergroup"):
+        update, sent = _start_update(chat_type=chat_type)
+        _run(cmds.start(update, SimpleNamespace()))
+        assert _webapp_buttons(sent["markup"]) == []
 
 
 def test_start_menu_omits_app_button_when_unset(monkeypatch):

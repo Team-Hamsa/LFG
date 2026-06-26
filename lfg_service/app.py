@@ -412,7 +412,11 @@ async def handle_telegram_auth(request):
         body = await request.json()
     except Exception:
         body = {}
+    if not isinstance(body, dict):
+        body = {}
     init_data = body.get("init_data") or ""
+    if not isinstance(init_data, str):
+        init_data = ""
     fields = validate_init_data(init_data, bot_token, config.TELEGRAM_INITDATA_MAX_AGE)
     if not fields:
         return web.json_response({"error": "invalid initData", "code": "bad_initdata"}, status=401)
