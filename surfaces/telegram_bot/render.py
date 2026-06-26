@@ -44,5 +44,15 @@ def error_caption(message: str) -> str:
     return f"⚠️ {message}"
 
 
+def signin_caption(signin_link: str) -> str:
+    return (
+        "🔐 Verify your wallet with Xaman\n\n"
+        "Scan the QR with Xaman (or open the link) and approve the sign-in.\n"
+        "Your wallet address is captured on approval — nothing to type.\n\n"
+        f"Open in Xaman: {signin_link}\n"
+        "(the request expires after a few minutes)"
+    )
+
+
 def photo_input(data: bytes, filename: str) -> InputFile:
     return InputFile(io.BytesIO(data), filename=filename)

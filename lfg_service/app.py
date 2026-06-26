@@ -487,7 +487,7 @@ handle_swap_status = make_status_handler(swap_sessions)
 
 # --- Xaman Sign In registration (issue #24) ---
 
-# payload uuid -> {discord_id, name, created_at}; pruned by age
+# payload uuid -> {platform, user_id, name, created_at}; pruned by age
 signin_payloads: dict[str, Any] = {}
 SIGNIN_TTL = 900
 
@@ -504,18 +504,13 @@ async def handle_signin_start(request):
     """Create a XUMM SignIn payload; the user scans it in Xaman and their
     wallet address is captured on approval — no manual address entry."""
     user = request["user"]
-    # Signin is the webapp's Xaman wallet-connect (discord-identity only). Gate
-    # to discord so a colliding numeric id on another surface can't drive it
-    # (cross-surface identity-store isolation). Webapp tokens default to
-    # platform="discord", so this does not affect the webapp.
-    if _platform(user) != "discord":
-        return web.json_response({"error": "not found"}, status=404)
     _prune_signin_payloads()
     payload = await xumm_ops.create_signin_payload(return_url=await _request_return_url(request))
     if not payload:
         return web.json_response({"error": "could not reach Xaman"}, status=502)
     signin_payloads[payload["uuid"]] = {
-        "discord_id": user["id"],
+        "platform": _platform(user),
+        "user_id": user["id"],
         "name": user["name"],
         "created_at": time.time(),
     }
@@ -526,37 +521,34 @@ async def handle_signin_start(request):
 async def handle_signin_status(request):
     uuid = request.match_info["payload_uuid"]
     rec = signin_payloads.get(uuid)
-    # Gate to discord (cross-surface identity-store isolation): the rec carries
-    # no platform, so without this a colliding numeric id on another surface
-    # could bind a discord-created payload's wallet into its own identity.
+    # Ownership keyed by (platform, user_id) — cross-surface isolation: a
+    # colliding numeric id on another platform cannot read/complete this payload.
     if (
         not rec
-        or rec["discord_id"] != request["user"]["id"]
-        or _platform(request["user"]) != "discord"
+        or rec["user_id"] != request["user"]["id"]
+        or rec["platform"] != _platform(request["user"])
     ):
         return web.json_response({"error": "not found"}, status=404)
     s = await xumm_ops.get_payload_status(uuid)
     if not s:
         return web.json_response({"error": "could not reach Xaman"}, status=502)
     if s["signed"] and s["account"] and is_valid_classic_address(s["account"]):
-        platform = _platform(request["user"])
+        platform = rec["platform"]
+        # Legacy Users table is keyed by discord_id with no platform column —
+        # only discord writes it; other platforms live in identities only.
         if platform == "discord":
             if not await asyncio.to_thread(
-                register_user, rec["discord_id"], rec["name"], s["account"]
+                register_user, rec["user_id"], rec["name"], s["account"]
             ):
                 return web.json_response({"error": "registration failed"}, status=500)
         linked = await asyncio.to_thread(
-            identity_store.link,
-            platform,
-            rec["discord_id"],
-            rec["name"],
-            s["account"],
+            identity_store.link, platform, rec["user_id"], rec["name"], s["account"]
         )
         if not linked:
             logging.error(
                 "identity.link failed for %s:%s — /events/me may 403 until restart-migrate",
                 platform,
-                rec["discord_id"],
+                rec["user_id"],
             )
         del signin_payloads[uuid]
         return web.json_response({"state": "signed", "wallet": s["account"]})

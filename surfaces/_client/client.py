@@ -23,6 +23,7 @@ from .events import stream_events
 # Duplicated (not imported) so the SDK never depends on lfg_core.
 MINT_TERMINAL: frozenset[str] = frozenset({"offer_ready", "done", "failed", "payment_timeout"})
 SWAP_TERMINAL: frozenset[str] = frozenset({"done", "failed", "offers_ready", "payment_timeout"})
+SIGNIN_TERMINAL: frozenset[str] = frozenset({"signed", "expired"})
 
 
 class LFGServiceClient:
@@ -288,6 +289,19 @@ class LFGServiceClient:
 
     async def signin_status(self, user_id: str, payload_uuid: str) -> dict[str, Any]:
         return await self._user_request("GET", f"/api/signin/{payload_uuid}", user_id)
+
+    async def wait_for_signin(
+        self,
+        user_id: str,
+        uuid: str,
+        *,
+        interval: float = 2.0,
+        timeout: float = 180.0,
+        sleep: Callable[[float], Awaitable[None]] = asyncio.sleep,
+    ) -> dict[str, Any]:
+        return await self._poll(
+            lambda: self.signin_status(user_id, uuid), SIGNIN_TERMINAL, interval, timeout, sleep
+        )
 
     async def nfts(self, user_id: str) -> dict[str, Any]:
         return await self._user_request("GET", "/api/nfts", user_id)
