@@ -504,6 +504,12 @@ async def handle_signin_start(request):
     """Create a XUMM SignIn payload; the user scans it in Xaman and their
     wallet address is captured on approval — no manual address entry."""
     user = request["user"]
+    # Signin is the webapp's Xaman wallet-connect (discord-identity only). Gate
+    # to discord so a colliding numeric id on another surface can't drive it
+    # (cross-surface identity-store isolation). Webapp tokens default to
+    # platform="discord", so this does not affect the webapp.
+    if _platform(user) != "discord":
+        return web.json_response({"error": "not found"}, status=404)
     _prune_signin_payloads()
     payload = await xumm_ops.create_signin_payload(return_url=await _request_return_url(request))
     if not payload:
@@ -520,7 +526,14 @@ async def handle_signin_start(request):
 async def handle_signin_status(request):
     uuid = request.match_info["payload_uuid"]
     rec = signin_payloads.get(uuid)
-    if not rec or rec["discord_id"] != request["user"]["id"]:
+    # Gate to discord (cross-surface identity-store isolation): the rec carries
+    # no platform, so without this a colliding numeric id on another surface
+    # could bind a discord-created payload's wallet into its own identity.
+    if (
+        not rec
+        or rec["discord_id"] != request["user"]["id"]
+        or _platform(request["user"]) != "discord"
+    ):
         return web.json_response({"error": "not found"}, status=404)
     s = await xumm_ops.get_payload_status(uuid)
     if not s:
