@@ -285,7 +285,27 @@ async def handle_session(request):
 async def handle_me(request):
     user = request["user"]
     wallet = await _resolve_wallet(_platform(user), user["id"])
+    # Opportunistic handle refresh (#90): the session token carries the current
+    # name, so any authenticated touch keeps display_handle fresh — no crawler.
+    # Best-effort: a failure here must never block the /api/me response.
+    try:
+        await asyncio.to_thread(
+            identity_store.touch_handle, _platform(user), user["id"], user["name"]
+        )
+    except Exception as e:
+        logging.warning(f"touch_handle failed for {_platform(user)}:{user['id']}: {e}")
     return web.json_response({"id": user["id"], "username": user["name"], "wallet": wallet})
+
+
+@require_wallet
+async def handle_account(request):
+    """The caller's account: their resolved wallet plus every identity linked to
+    it. A caller only ever sees their OWN account (keyed by their resolved
+    wallet) — there is no public arbitrary wallet -> identities lookup (privacy);
+    internal consumers call identity_store.identities_for_wallet in-process."""
+    wallet = request["wallet"]
+    identities = await asyncio.to_thread(identity_store.identities_for_wallet, wallet)
+    return web.json_response({"wallet": wallet, "identities": identities})
 
 
 @require_auth
@@ -505,6 +525,14 @@ async def handle_signin_start(request):
     wallet address is captured on approval — no manual address entry."""
     user = request["user"]
     _prune_signin_payloads()
+    # Optional link-intent (#90): proving the same wallet on a 2nd surface IS
+    # the link. The only difference from a plain sign-in is the signed response
+    # carries the account view; the request/response shape here is unchanged.
+    try:
+        body = await request.json()
+    except Exception:
+        body = {}
+    link_intent = bool(body.get("link"))
     payload = await xumm_ops.create_signin_payload(return_url=await _request_return_url(request))
     if not payload:
         return web.json_response({"error": "could not reach Xaman"}, status=502)
@@ -512,6 +540,7 @@ async def handle_signin_start(request):
         "platform": _platform(user),
         "user_id": user["id"],
         "name": user["name"],
+        "link": link_intent,
         "created_at": time.time(),
     }
     return web.json_response({"uuid": payload["uuid"], "signin_link": payload["xumm_url"]})
@@ -551,7 +580,14 @@ async def handle_signin_status(request):
                 rec["user_id"],
             )
         del signin_payloads[uuid]
-        return web.json_response({"state": "signed", "wallet": s["account"]})
+        resp = {"state": "signed", "wallet": s["account"]}
+        # Link-intent (#90): attach the full account view so the surface can
+        # confirm "linked — also on Discord as @alice". Plain sign-in stays
+        # byte-identical (no account key).
+        if rec.get("link"):
+            identities = await asyncio.to_thread(identity_store.identities_for_wallet, s["account"])
+            resp["account"] = {"wallet": s["account"], "identities": identities}
+        return web.json_response(resp)
     if s["expired"]:
         del signin_payloads[uuid]
         return web.json_response({"state": "expired"})
@@ -744,6 +780,7 @@ def create_app() -> web.Application:
     app.router.add_post("/api/token", handle_token)
     app.router.add_post("/api/session", handle_session)
     app.router.add_get("/api/me", handle_me)
+    app.router.add_get("/api/account", handle_account)
     app.router.add_post("/api/register", handle_register)
     app.router.add_post("/api/mint", handle_mint_start)
     app.router.add_get("/api/mint/{session_id}", handle_mint_status)

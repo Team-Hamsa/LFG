@@ -80,6 +80,12 @@ def signin_embed(signin_link: str) -> Embed:
     return embed
 
 
+def linked_embed(summary: str) -> Embed:
+    """Confirmation for a completed cross-surface link (#90). ``summary`` comes
+    from surfaces._shared.account_result.linked_summary."""
+    return Embed(title="✅ Linked to your account", description=summary, color=0x00FF00)
+
+
 def error_embed(message: str, *, title: str = "⚠️ Mint failed") -> Embed:
     return Embed(title=title, description=message, color=0xFF0000)
 

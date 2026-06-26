@@ -13,6 +13,13 @@ async def register(interaction: discord.Interaction) -> None:
     await handle_register(svc, interaction)
 
 
+@tree.command(name="link", description="Link another surface to your wallet account")
+async def link(interaction: discord.Interaction) -> None:
+    from surfaces.discord_bot.link_view import handle_link
+
+    await handle_link(svc, interaction)
+
+
 @tree.command(name="letsgo", description="Open the NFT minting interface")
 async def letsgo(interaction: discord.Interaction) -> None:
     embed = Embed(

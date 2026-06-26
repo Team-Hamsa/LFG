@@ -25,23 +25,51 @@ def ensure_identities_table() -> None:
             )
             """
         )
+        # Self-migrating, forward-only: add the #90 columns if an older table
+        # shape is on disk, then backfill display_handle from the value we
+        # already captured (platform_username). SQLite ADD COLUMN is non-
+        # destructive; safe to run on every boot (mirrors migrate_users_*).
+        cols = {r[1] for r in conn.execute("PRAGMA table_info(identities)")}
+        if "display_handle" not in cols:
+            conn.execute("ALTER TABLE identities ADD COLUMN display_handle TEXT")
+            conn.execute(
+                "UPDATE identities SET display_handle = platform_username "
+                "WHERE display_handle IS NULL"
+            )
+        if "updated_at" not in cols:
+            conn.execute("ALTER TABLE identities ADD COLUMN updated_at TIMESTAMP")
+        conn.execute("CREATE INDEX IF NOT EXISTS idx_identities_wallet ON identities(wallet)")
         conn.commit()
     finally:
         conn.close()
 
 
-def link(platform: str, platform_user_id: str, platform_username: str, wallet: str) -> bool:
+def link(
+    platform: str,
+    platform_user_id: str,
+    platform_username: str,
+    wallet: str,
+    *,
+    display_handle: str | None = None,
+) -> bool:
+    # display_handle defaults to platform_username when not supplied, so legacy
+    # positional callers (register / signin) keep their existing behaviour while
+    # the column is always populated and updated_at is stamped on every upsert.
+    handle = display_handle if display_handle is not None else platform_username
     try:
         conn = sqlite3.connect(DATABASE)
         conn.execute(
             """
-            INSERT INTO identities (platform, platform_user_id, platform_username, wallet)
-            VALUES (?, ?, ?, ?)
+            INSERT INTO identities
+                (platform, platform_user_id, platform_username, display_handle, wallet, updated_at)
+            VALUES (?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
             ON CONFLICT(platform, platform_user_id) DO UPDATE SET
                 platform_username = excluded.platform_username,
-                wallet = excluded.wallet
+                display_handle = excluded.display_handle,
+                wallet = excluded.wallet,
+                updated_at = CURRENT_TIMESTAMP
             """,
-            (platform, platform_user_id, platform_username, wallet),
+            (platform, platform_user_id, platform_username, handle, wallet),
         )
         conn.commit()
         return True
@@ -50,6 +78,29 @@ def link(platform: str, platform_user_id: str, platform_username: str, wallet: s
         return False
     finally:
         conn.close()
+
+
+def touch_handle(platform: str, platform_user_id: str, handle: str) -> None:
+    """Best-effort refresh of a known identity's display_handle. No-op if the
+    row doesn't exist or the handle is unchanged; never raises (caller treats
+    this as a fire-and-forget side effect on authenticated touches)."""
+    if not handle:
+        return
+    conn = None
+    try:
+        conn = sqlite3.connect(DATABASE)
+        conn.execute(
+            "UPDATE identities SET display_handle = ?, updated_at = CURRENT_TIMESTAMP "
+            "WHERE platform = ? AND platform_user_id = ? "
+            "AND (display_handle IS NULL OR display_handle != ?)",
+            (handle, platform, platform_user_id, handle),
+        )
+        conn.commit()
+    except Exception as e:
+        logging.error(f"identity.touch_handle failed: {e}")
+    finally:
+        if conn is not None:
+            conn.close()
 
 
 def resolve(platform: str, platform_user_id: str) -> str | None:
@@ -66,6 +117,40 @@ def resolve(platform: str, platform_user_id: str) -> str | None:
         return None
     finally:
         conn.close()
+
+
+def identities_for_wallet(wallet: str) -> list[dict[str, object]]:
+    """All surface identities linked to a wallet-account, ordered by created_at.
+
+    Returns [] when none. The wallet is matched verbatim — XRPL classic
+    addresses are case-sensitive (the base58check checksum makes a case-folded
+    address invalid), so callers must NEVER lower-case the wallet.
+    """
+    conn = None
+    try:
+        conn = sqlite3.connect(DATABASE)
+        cur = conn.execute(
+            "SELECT platform, platform_user_id, display_handle, platform_username, "
+            "created_at, updated_at FROM identities WHERE wallet = ? ORDER BY created_at",
+            (wallet,),
+        )
+        return [
+            {
+                "platform": r[0],
+                "platform_user_id": r[1],
+                "display_handle": r[2],
+                "platform_username": r[3],
+                "created_at": r[4],
+                "updated_at": r[5],
+            }
+            for r in cur.fetchall()
+        ]
+    except Exception as e:
+        logging.error(f"identity.identities_for_wallet failed: {e}")
+        return []
+    finally:
+        if conn is not None:
+            conn.close()
 
 
 def migrate_users_to_identities() -> int:

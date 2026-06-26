@@ -142,12 +142,31 @@ def build_mock_service(
             return bad
         return web.json_response({"nfts": []})
 
+    async def handle_account(request: web.Request) -> web.StreamResponse:
+        _count("/api/account")
+        bad = _require_session(request)
+        if bad is not None:
+            return bad
+        return web.json_response(
+            {
+                "wallet": "rMOCK",
+                "identities": [
+                    {"platform": "test", "platform_user_id": "u", "display_handle": "u"}
+                ],
+            }
+        )
+
     async def handle_signin_start(request: web.Request) -> web.StreamResponse:
         _count("/api/signin")
         bad = _require_session(request)
         if bad is not None:
             return bad
-        return web.json_response({"uuid": "sg1", "qr": "data:..."})
+        try:
+            body = await request.json()
+        except Exception:
+            body = {}
+        state["last_signin_link_flag"] = bool(body.get("link"))
+        return web.json_response({"uuid": "sg1", "signin_link": "https://xumm.app/sign/mock"})
 
     async def handle_signin_status(request: web.Request) -> web.StreamResponse:
         bad = _require_session(request)
@@ -191,6 +210,7 @@ def build_mock_service(
     app.router.add_get("/api/img", handle_img)
     app.router.add_post("/api/session", handle_session)
     app.router.add_get("/api/me", handle_me)
+    app.router.add_get("/api/account", handle_account)
     app.router.add_post("/api/register", handle_register)
     app.router.add_post("/api/mint", handle_mint_start)
     app.router.add_get("/api/mint/{session_id}", handle_mint_status)

@@ -212,6 +212,10 @@ class LFGServiceClient:
     async def me(self, user_id: str, *, username: str = "") -> dict[str, Any]:
         return await self._user_request("GET", "/api/me", user_id, username=username)
 
+    async def account(self, user_id: str, *, username: str = "") -> dict[str, Any]:
+        """The caller's account view: {wallet, identities} (#90)."""
+        return await self._user_request("GET", "/api/account", user_id, username=username)
+
     # ---- mint ----
 
     async def start_mint(self, user_id: str, *, username: str = "") -> dict[str, Any]:
@@ -301,6 +305,32 @@ class LFGServiceClient:
     ) -> dict[str, Any]:
         return await self._poll(
             lambda: self.signin_status(user_id, uuid), SIGNIN_TERMINAL, interval, timeout, sleep
+        )
+
+    # ---- cross-surface link (#90) ----
+    # Proving the SAME wallet on a 2nd surface IS the link. These reuse the
+    # sign-in machinery with a link=true flag; the service adds an "account"
+    # view to the signed response so the surface can confirm the linked handles.
+
+    async def link_start(self, user_id: str, *, username: str = "") -> dict[str, Any]:
+        return await self._user_request(
+            "POST", "/api/signin", user_id, username=username, json={"link": True}
+        )
+
+    async def link_status(self, user_id: str, uuid: str) -> dict[str, Any]:
+        return await self._user_request("GET", f"/api/signin/{uuid}", user_id)
+
+    async def wait_for_link(
+        self,
+        user_id: str,
+        uuid: str,
+        *,
+        interval: float = 2.0,
+        timeout: float = 180.0,
+        sleep: Callable[[float], Awaitable[None]] = asyncio.sleep,
+    ) -> dict[str, Any]:
+        return await self._poll(
+            lambda: self.link_status(user_id, uuid), SIGNIN_TERMINAL, interval, timeout, sleep
         )
 
     async def nfts(self, user_id: str) -> dict[str, Any]:

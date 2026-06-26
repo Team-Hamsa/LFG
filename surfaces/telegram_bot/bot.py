@@ -68,6 +68,7 @@ def build_application() -> Application:  # type: ignore[type-arg]
 
     application.add_handler(CommandHandler("mint", cmds.mint))
     application.add_handler(CommandHandler("register", cmds.register))
+    application.add_handler(CommandHandler("link", cmds.link))
     application.add_handler(CommandHandler(["start", "help"], cmds.start))
     # Inline-keyboard buttons from /start reuse the same handlers (#87).
     application.add_handler(CallbackQueryHandler(cmds.mint_button, pattern="^mint$"))
