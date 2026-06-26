@@ -68,4 +68,13 @@ def main() -> None:
 
 
 if __name__ == "__main__":
-    main()
+    # Prefer the run_telegram.py shim. If this module is run directly
+    # (`python -m surfaces.telegram_bot.bot`), it executes as __main__ and would
+    # be imported a SECOND time under its canonical name when commands.py does
+    # `from surfaces.telegram_bot.bot import svc` — two LFGServiceClient
+    # instances, only one of which is entered (broke /register, /mint). Re-enter
+    # through the canonical module so the same instance is used everywhere,
+    # disarming that footgun even when the shim is bypassed.
+    from surfaces.telegram_bot.bot import main as _canonical_main
+
+    _canonical_main()

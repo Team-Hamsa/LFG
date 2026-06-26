@@ -24,6 +24,10 @@ def test_config_exposes_spine_vars(monkeypatch):
 
 
 def test_config_fails_fast_without_service_url(monkeypatch):
+    # Neutralize load_dotenv so the reload below can't repopulate LFG_SERVICE_URL
+    # from a real local .env (a deployed box has it set there). This test must
+    # verify the _require() fast-fail purely from os.environ.
+    monkeypatch.setattr("dotenv.load_dotenv", lambda *a, **k: False)
     for k, v in REQUIRED.items():
         if k != "LFG_SERVICE_URL":
             monkeypatch.setenv(k, v)
