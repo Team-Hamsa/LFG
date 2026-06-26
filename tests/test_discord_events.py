@@ -109,6 +109,62 @@ def test_make_announcement_non_discord_has_no_mention(ev_mod):
     assert "<@" not in msg and "#7" in msg
 
 
+def test_make_announcement_pings_linked_discord_identity(ev_mod):
+    # Cross-surface mint (webapp) by someone who ALSO linked Discord -> ping them.
+    e = Event(
+        type="mint.completed",
+        ts=0,
+        identity={
+            "platform": "webapp",
+            "platform_user_id": "w",
+            "display_handle": "alice",
+            "linked": [
+                {"platform": "discord", "platform_user_id": "999", "display_handle": "alice"}
+            ],
+        },
+        wallet=None,
+        data={"nft_number": 7},
+    )
+    msg = ev_mod.make_announcement(e)
+    assert "<@999>" in msg
+
+
+def test_make_announcement_uses_display_handle_when_no_discord(ev_mod):
+    e = Event(
+        type="mint.completed",
+        ts=0,
+        identity={"platform": "telegram", "platform_user_id": "55", "display_handle": "alice"},
+        wallet=None,
+        data={"nft_number": 7},
+    )
+    msg = ev_mod.make_announcement(e)
+    assert "<@" not in msg and "alice" in msg and "a user" not in msg
+
+
+def test_make_announcement_falls_back_to_wallet(ev_mod):
+    e = Event(
+        type="mint.completed",
+        ts=0,
+        identity={"platform": "telegram", "platform_user_id": "55", "display_handle": None},
+        wallet="rWALLET123",
+        data={"nft_number": 7},
+    )
+    msg = ev_mod.make_announcement(e)
+    assert "rWALLET123" in msg and "a user" not in msg
+
+
+def test_make_announcement_falls_back_to_a_user(ev_mod):
+    e = Event(
+        type="mint.completed",
+        ts=0,
+        identity=None,
+        wallet=None,
+        data={"nft_number": 7},
+    )
+    msg = ev_mod.make_announcement(e)
+    assert "a user" in msg
+
+
 def test_run_event_loop_announces_dms_and_closes(ev_mod):
     agen = _FakeAgen(
         [
