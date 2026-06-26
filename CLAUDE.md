@@ -82,7 +82,12 @@ TELEGRAM_ANNOUNCE_CHAT_ID=<telegram-channel-id>
 python main.py
 ```
 
-The Telegram surface runs as pm2 process `lfg-telegram` → `python -m surfaces.telegram_bot.bot`.
+The Telegram surface runs as pm2 process `lfg-telegram` → `.venv/bin/python run_telegram.py`.
+Launch via the `run_telegram.py` shim, **not** `python -m surfaces.telegram_bot.bot`: running `bot.py`
+as `__main__` makes it load a second time under its canonical name when `commands.py` imports `svc`,
+creating two `LFGServiceClient` instances — the events task enters one while the command handlers use
+the other, whose aiohttp session is never opened, so `/register` and `/mint` fail. The shim imports
+`bot` canonically once.
 
 ## Directory Structure
 
