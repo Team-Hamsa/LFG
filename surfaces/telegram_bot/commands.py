@@ -13,7 +13,7 @@ from surfaces._client.errors import ServiceError
 
 
 async def mint(update: Any, context: Any) -> None:
-    from surfaces.telegram_bot.bot import svc  # type: ignore[import-not-found]  # noqa: PLC0415
+    from surfaces.telegram_bot.bot import svc  # noqa: PLC0415
     from surfaces.telegram_bot.mint_view import handle_mint  # noqa: PLC0415
 
     await handle_mint(svc, update, context)
