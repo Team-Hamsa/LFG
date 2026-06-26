@@ -69,10 +69,21 @@ def build_application() -> Application:  # type: ignore[type-arg]
     application.add_handler(CommandHandler("mint", cmds.mint))
     application.add_handler(CommandHandler("register", cmds.register))
     application.add_handler(CommandHandler("link", cmds.link))
+    application.add_handler(CommandHandler("swap", cmds.swap))
     application.add_handler(CommandHandler(["start", "help"], cmds.start))
     # Inline-keyboard buttons from /start reuse the same handlers (#87).
     application.add_handler(CallbackQueryHandler(cmds.mint_button, pattern="^mint$"))
     application.add_handler(CallbackQueryHandler(cmds.register_button, pattern="^register$"))
+    # Trait-swapper inline keyboards (#88). Register the specific swap_* patterns
+    # so the multi-step conversation routes to the right handler.
+    application.add_handler(CallbackQueryHandler(cmds.swap_button, pattern="^swap$"))
+    application.add_handler(CallbackQueryHandler(cmds.swap_pick_button, pattern="^swap_pick_"))
+    application.add_handler(CallbackQueryHandler(cmds.swap_trait_button, pattern="^swap_trait_"))
+    application.add_handler(
+        CallbackQueryHandler(cmds.swap_confirm_button, pattern="^swap_confirm$")
+    )
+    application.add_handler(CallbackQueryHandler(cmds.swap_cancel_button, pattern="^swap_cancel$"))
+    application.add_handler(CallbackQueryHandler(cmds.swap_page_button, pattern="^swap_page_"))
     return application
 
 

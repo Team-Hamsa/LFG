@@ -31,14 +31,22 @@ async def link(update: Any, context: Any) -> None:
     await handle_link(svc, update, context)
 
 
+async def swap(update: Any, context: Any) -> None:
+    from surfaces.telegram_bot.bot import svc  # noqa: PLC0415  # lazy — bot.py
+    from surfaces.telegram_bot.swap_view import handle_swap  # noqa: PLC0415
+
+    await handle_swap(svc, update, context)
+
+
 async def start(update: Any, context: Any) -> None:
-    # Inline-keyboard menu (#87): the two buttons fire the mint/register callbacks
-    # below, which reuse the SAME handlers as the /mint and /register commands.
+    # Inline-keyboard menu (#87, #88): the buttons fire the mint/register/swap
+    # callbacks below, which reuse the SAME handlers as the slash commands.
     from telegram import InlineKeyboardButton, InlineKeyboardMarkup  # noqa: PLC0415
 
     keyboard = InlineKeyboardMarkup(
         [
             [InlineKeyboardButton("🎨 Mint NFT", callback_data="mint")],
+            [InlineKeyboardButton("🔄 Swap Traits", callback_data="swap")],
             [InlineKeyboardButton("🔐 Register Wallet", callback_data="register")],
         ]
     )
@@ -62,3 +70,53 @@ async def register_button(update: Any, context: Any) -> None:
 
     await update.callback_query.answer()
     await handle_register(svc, update, context)
+
+
+# ---- trait-swapper callbacks (#88) ----------------------------------------
+# Each delegates to a swap_view handler that owns answering the query (toasts
+# for guards) — the swap flow needs fine-grained control over the toast text,
+# so unlike mint/register these do NOT pre-answer here.
+
+
+async def swap_button(update: Any, context: Any) -> None:
+    # 🔄 Swap Traits on the /start menu — same handler as the /swap command.
+    from surfaces.telegram_bot.bot import svc  # noqa: PLC0415  # lazy — bot.py
+    from surfaces.telegram_bot.swap_view import handle_swap  # noqa: PLC0415
+
+    await update.callback_query.answer()
+    await handle_swap(svc, update, context)
+
+
+async def swap_pick_button(update: Any, context: Any) -> None:
+    from surfaces.telegram_bot.bot import svc  # noqa: PLC0415  # lazy — bot.py
+    from surfaces.telegram_bot.swap_view import handle_swap_pick  # noqa: PLC0415
+
+    await handle_swap_pick(svc, update, context)
+
+
+async def swap_trait_button(update: Any, context: Any) -> None:
+    from surfaces.telegram_bot.bot import svc  # noqa: PLC0415  # lazy — bot.py
+    from surfaces.telegram_bot.swap_view import handle_swap_trait  # noqa: PLC0415
+
+    await handle_swap_trait(svc, update, context)
+
+
+async def swap_confirm_button(update: Any, context: Any) -> None:
+    from surfaces.telegram_bot.bot import svc  # noqa: PLC0415  # lazy — bot.py
+    from surfaces.telegram_bot.swap_view import handle_swap_confirm  # noqa: PLC0415
+
+    await handle_swap_confirm(svc, update, context)
+
+
+async def swap_cancel_button(update: Any, context: Any) -> None:
+    from surfaces.telegram_bot.bot import svc  # noqa: PLC0415  # lazy — bot.py
+    from surfaces.telegram_bot.swap_view import handle_swap_cancel  # noqa: PLC0415
+
+    await handle_swap_cancel(svc, update, context)
+
+
+async def swap_page_button(update: Any, context: Any) -> None:
+    from surfaces.telegram_bot.bot import svc  # noqa: PLC0415  # lazy — bot.py
+    from surfaces.telegram_bot.swap_view import handle_swap_page  # noqa: PLC0415
+
+    await handle_swap_page(svc, update, context)

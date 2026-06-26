@@ -44,7 +44,7 @@ def test_start_shows_mint_and_register_buttons():
     markup = sent["markup"]
     assert markup is not None  # an InlineKeyboardMarkup was attached
     callbacks = {btn.callback_data for row in markup.inline_keyboard for btn in row}
-    assert callbacks == {"mint", "register"}
+    assert callbacks == {"mint", "swap", "register"}
 
 
 def test_mint_button_answers_query_and_runs_handler(monkeypatch):
@@ -105,4 +105,5 @@ def test_build_application_registers_callback_handlers(monkeypatch):
     cb_handlers = [
         h for group in app.handlers.values() for h in group if isinstance(h, CallbackQueryHandler)
     ]
-    assert len(cb_handlers) == 2  # mint + register
+    # mint + register + swap menu button + 5 swap_* conversation patterns (#88)
+    assert len(cb_handlers) == 8
