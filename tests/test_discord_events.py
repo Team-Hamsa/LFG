@@ -165,6 +165,25 @@ def test_make_announcement_falls_back_to_a_user(ev_mod):
     assert "a user" in msg
 
 
+def test_make_announcement_unknown_event_uses_generic_fallback(ev_mod, caplog):
+    """An unhandled event type must NOT render the 'equip failed' copy; it
+    hits the generic fallback and logs a warning."""
+    e = Event(
+        type="frobnicate.completed",
+        ts=0,
+        identity=_discord_identity("42"),
+        wallet=None,
+        data={},
+    )
+    import logging
+
+    with caplog.at_level(logging.WARNING):
+        msg = ev_mod.make_announcement(e)
+    assert "equip" not in msg.lower()
+    assert "Unknown event" in msg
+    assert any("unhandled event type" in r.message for r in caplog.records)
+
+
 def test_run_event_loop_announces_dms_and_closes(ev_mod):
     agen = _FakeAgen(
         [
@@ -187,7 +206,7 @@ def test_run_event_loop_announces_dms_and_closes(ev_mod):
         dmed.append((uid, m, image))
 
     _run(ev_mod.run_event_loop(svc, announce, dm))
-    assert svc.types == ["mint.completed", "mint.failed"]
+    assert "mint.completed" in svc.types and "mint.failed" in svc.types
     assert sent and "3600" in sent[0][0]
     # no image_url in data -> image arg is None
     assert sent[0][1] is None
@@ -305,3 +324,83 @@ def test_run_event_loop_survives_handler_error(ev_mod):
     _run(ev_mod.run_event_loop(_FakeSvc(agen), announce, None))
     assert calls["n"] == 2  # second event still processed
     assert agen.closed is True
+
+
+def _ev(type_, **data):
+    return Event(
+        type=type_,
+        ts=0,
+        identity=_discord_identity("42"),
+        wallet=None,
+        data=data,
+    )
+
+
+def test_subscribes_to_all_announce_types(ev_mod):
+    agen = _FakeAgen([])
+    svc = _FakeSvc(agen)
+
+    async def announce(m, image):
+        pass
+
+    _run(ev_mod.run_event_loop(svc, announce, None))
+    assert set(svc.types) == {
+        "mint.completed",
+        "mint.failed",
+        "swap.completed",
+        "swap.failed",
+        "harvest.completed",
+        "harvest.failed",
+        "assemble.completed",
+        "assemble.failed",
+        "equip.completed",
+        "equip.failed",
+    }
+
+
+def test_swap_announcements(ev_mod):
+    assert "<@42>" in ev_mod.make_announcement(_ev("swap.completed"))
+    assert "swapped" in ev_mod.make_announcement(_ev("swap.completed"))
+    assert "ailed" in ev_mod.make_announcement(_ev("swap.failed"))
+
+
+def test_assemble_announcements(ev_mod):
+    assert "assembled" in ev_mod.make_announcement(_ev("assemble.completed"))
+    assert "ailed" in ev_mod.make_announcement(_ev("assemble.failed"))
+
+
+def test_harvest_announcements(ev_mod):
+    assert "harvested" in ev_mod.make_announcement(_ev("harvest.completed"))
+    assert "ailed" in ev_mod.make_announcement(_ev("harvest.failed"))
+
+
+def test_equip_announcements(ev_mod):
+    assert "equipped" in ev_mod.make_announcement(_ev("equip.completed"))
+    assert "ailed" in ev_mod.make_announcement(_ev("equip.failed"))
+
+
+def test_image_on_new_completed_types(ev_mod):
+    assert (
+        ev_mod.announcement_image(_ev("swap.completed", image_url="https://cdn/s.png"))
+        == "https://cdn/s.png"
+    )
+    assert (
+        ev_mod.announcement_image(_ev("assemble.completed", image_url="https://cdn/a.png"))
+        == "https://cdn/a.png"
+    )
+    assert ev_mod.announcement_image(_ev("swap.failed", image_url="https://cdn/s.png")) is None
+
+
+def test_no_dm_on_swap_completed(ev_mod):
+    agen = _FakeAgen([_ev("swap.completed", image_url="https://cdn/s.png")])
+    sent, dmed = [], []
+
+    async def announce(m, image):
+        sent.append((m, image))
+
+    async def dm(uid, m, image):
+        dmed.append((uid, m, image))
+
+    _run(ev_mod.run_event_loop(_FakeSvc(agen), announce, dm))
+    assert sent and "swapped" in sent[0][0]
+    assert dmed == []  # only mint.completed DMs
