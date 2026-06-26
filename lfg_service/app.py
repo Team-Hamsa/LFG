@@ -36,6 +36,7 @@ from lfg_core import (
 from lfg_service import identity as identity_store
 from lfg_service.auth import require_service_token, surface_for_token
 from lfg_service.events import Event, InMemoryEventBus
+from lfg_service.telegram_auth import validate_init_data
 from user_db import create_users_table, get_user, register_user
 from webapp import economy_api, mock_economy
 
@@ -387,6 +388,43 @@ async def handle_session(request):
         )
     token = make_session_token({"id": pid, "name": pname, "platform": request["surface"]})
     return web.json_response({"session_token": token, "user": {"id": pid, "username": pname}})
+
+
+async def handle_telegram_auth(request):
+    """Validate a Telegram Mini App `initData` payload and mint a
+    platform="telegram" session token (#89).
+
+    Client-callable (unlike /api/session, which needs a service secret): trust
+    is established by HMAC-validating Telegram's signed launch payload with the
+    bot token. NO wallet creation/lookup — unregistered users just get a valid
+    telegram-platform token and the app prompts them to Xaman sign-in inline.
+
+    503 when the service has no bot token configured (feature-off); 401 on a
+    bad/stale/forged initData. Never logs `init_data` or the bot token.
+    """
+    bot_token = config.TELEGRAM_BOT_TOKEN
+    if not bot_token:
+        return web.json_response(
+            {"error": "telegram mini app not configured", "code": "telegram_not_configured"},
+            status=503,
+        )
+    try:
+        body = await request.json()
+    except Exception:
+        body = {}
+    if not isinstance(body, dict):
+        body = {}
+    init_data = body.get("init_data") or ""
+    if not isinstance(init_data, str):
+        init_data = ""
+    fields = validate_init_data(init_data, bot_token, config.TELEGRAM_INITDATA_MAX_AGE)
+    if not fields:
+        return web.json_response({"error": "invalid initData", "code": "bad_initdata"}, status=401)
+    user = fields["user"]
+    tg_id = str(user["id"])
+    handle = user.get("username") or user.get("first_name") or ""
+    token = make_session_token({"id": tg_id, "name": handle, "platform": "telegram"})
+    return web.json_response({"session_token": token, "user": {"id": tg_id, "username": handle}})
 
 
 @require_auth
@@ -951,6 +989,7 @@ def create_app() -> web.Application:
     app.router.add_get("/api/config", handle_config)
     app.router.add_post("/api/token", handle_token)
     app.router.add_post("/api/session", handle_session)
+    app.router.add_post("/api/telegram/auth", handle_telegram_auth)
     app.router.add_get("/api/me", handle_me)
     app.router.add_get("/api/account", handle_account)
     app.router.add_post("/api/register", handle_register)

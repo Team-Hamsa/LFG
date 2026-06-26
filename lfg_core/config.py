@@ -106,6 +106,15 @@ WEBAPP_PORT = int(os.getenv("WEBAPP_PORT", "8176"))
 ECONOMY_NETWORK = os.getenv("ECONOMY_NETWORK", "testnet")  # economy DB network
 WEBAPP_DEV_MODE = os.getenv("WEBAPP_DEV_MODE", "") not in ("", "0", "false", "False")
 
+# Telegram Mini App (#89). All optional — the feature is OFF when unset:
+# an empty bot token makes POST /api/telegram/auth return 503. The service and
+# the Telegram bot read the same .env, so the bot token is available here.
+TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN", "")
+# initData replay window (initData carries no nonce, so freshness is the guard).
+TELEGRAM_INITDATA_MAX_AGE = int(os.getenv("TELEGRAM_INITDATA_MAX_AGE", "3600"))
+if TELEGRAM_INITDATA_MAX_AGE <= 0:
+    raise ValueError("TELEGRAM_INITDATA_MAX_AGE must be greater than 0")
+
 # Misc
 PAYMENT_TIMEOUT_SECONDS = int(os.getenv("PAYMENT_TIMEOUT_SECONDS", "300"))
 

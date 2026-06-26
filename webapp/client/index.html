@@ -14,7 +14,7 @@
         <img id="logo-img" class="wordmark-img" src="assets/logo.png" alt="LFG">
         <h1 id="wordmark" class="wordmark" hidden aria-hidden="true"><span class="l">L</span><span class="f">F</span><span class="g">G</span></h1>
       </div>
-      <p id="status" class="status" role="status" aria-live="polite">Connecting to Discord…</p>
+      <p id="status" class="status" role="status" aria-live="polite">Connecting…</p>
     </header>
 
     <section id="register-panel" class="card sticker" hidden>
@@ -120,6 +120,10 @@
     </div>
   </div>
 
-  <script type="module" src="app.js?v=11"></script>
+  <!-- Telegram Mini App bridge (#89), vendored same-origin. A no-op outside
+       Telegram (window.Telegram stays undefined); loaded BEFORE app.js so the
+       dual-mode boot can detect the Telegram context. -->
+  <script src="telegram-web-app.js"></script>
+  <script type="module" src="app.js?v=12"></script>
 </body>
 </html>
