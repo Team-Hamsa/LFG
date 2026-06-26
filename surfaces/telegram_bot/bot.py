@@ -7,7 +7,7 @@
 import asyncio
 import logging
 
-from telegram.ext import Application, CommandHandler
+from telegram.ext import Application, CallbackQueryHandler, CommandHandler
 
 from surfaces._client import LFGServiceClient
 from surfaces.telegram_bot import config
@@ -69,6 +69,9 @@ def build_application() -> Application:  # type: ignore[type-arg]
     application.add_handler(CommandHandler("mint", cmds.mint))
     application.add_handler(CommandHandler("register", cmds.register))
     application.add_handler(CommandHandler(["start", "help"], cmds.start))
+    # Inline-keyboard buttons from /start reuse the same handlers (#87).
+    application.add_handler(CallbackQueryHandler(cmds.mint_button, pattern="^mint$"))
+    application.add_handler(CallbackQueryHandler(cmds.register_button, pattern="^register$"))
     return application
 
 
