@@ -119,9 +119,54 @@ def test_buy_and_burn_sets_source_tag(monkeypatch):
     # max_xrp set so the Payment carries send_max (on testnet the SEED account
     # is itself the BRIX issuer, so a same-currency burn would be a circular
     # self-payment the model rejects — unrelated to the source tag under test).
+    # Use a DIFFERENT issuer than the bot wallet so the self-issuer no-op guard
+    # (which short-circuits before building the Payment) does not fire here.
     _run(
         xrpl_ops.buy_and_burn(
-            config.SWAP_OFFER_CURRENCY_HEX, config.SWAP_OFFER_ISSUER, "10", max_xrp="10"
+            config.SWAP_OFFER_CURRENCY_HEX,
+            "rDifferentIssuerXXXXXXXXXXXXXXXXXXX",
+            "10",
+            max_xrp="10",
         )
     )
     assert captured["tx"].source_tag == config.SOURCE_TAG
+
+
+def test_buy_and_burn_self_issuer_is_noop(monkeypatch):
+    # When the bot wallet IS the issuer of the IOU (the testnet case, where the
+    # SEED account issues BRIX), paying the IOU to its own issuer would redeem
+    # it on receipt — there is nothing to burn and you cannot send your own IOU
+    # to yourself. buy_and_burn must short-circuit: return a TRUTHY sentinel
+    # (so `if not await buy_and_burn(...)` callers don't log a spurious error),
+    # never call submit_and_wait, and never raise.
+    from xrpl.wallet import Wallet
+
+    issuer = Wallet.from_seed(config.SEED).classic_address
+    called = {"submit": False}
+
+    def boom(*a, **k):
+        called["submit"] = True
+        raise AssertionError("submit_and_wait must not be called in the self-issuer no-op")
+
+    monkeypatch.setattr(xrpl_ops, "submit_and_wait", boom)
+
+    result = _run(xrpl_ops.buy_and_burn(config.SWAP_OFFER_CURRENCY_HEX, issuer, "10"))
+    assert result  # truthy sentinel, not None
+    assert called["submit"] is False
+
+
+def test_buy_and_burn_different_issuer_submits(monkeypatch):
+    # Regression: the real-burn path (mainnet, where the issuer is a separate
+    # account) must still build and submit a Payment.
+    captured: dict = {}
+    _patch_client(monkeypatch, captured)
+    result = _run(
+        xrpl_ops.buy_and_burn(
+            config.SWAP_OFFER_CURRENCY_HEX,
+            "rDifferentIssuerXXXXXXXXXXXXXXXXXXX",
+            "10",
+            max_xrp="10",
+        )
+    )
+    assert result == "HASH"  # the fake tesSUCCESS response's hash
+    assert "tx" in captured  # submit_and_wait was called

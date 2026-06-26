@@ -18,6 +18,10 @@ def _require(name: str) -> str:
 
 # --- Discord ---
 DISCORD_BOT_TOKEN = _require("DISCORD_BOT_TOKEN")
+# Optional test/home guild. When set (non-zero) the bot also does an instant
+# guild-scoped command sync so slash commands appear immediately there; the
+# global sync (eventual, ~1h) still runs. 0 = unset, global-only (default).
+DISCORD_GUILD_ID = int(os.getenv("DISCORD_GUILD_ID", "0"))
 ADMIN_LOG_CHANNEL_ID = int(os.getenv("ADMIN_LOG_CHANNEL_ID", "0"))
 if not ADMIN_LOG_CHANNEL_ID:
     raise ValueError("ADMIN_LOG_CHANNEL_ID not found in environment variables")

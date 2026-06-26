@@ -3,6 +3,7 @@ import asyncio
 import logging
 import random
 import signal
+from typing import Any
 
 import discord
 from discord.ext import commands
@@ -81,10 +82,23 @@ async def setup_hook() -> None:
     _events_task = asyncio.create_task(run_event_loop(svc, _announce, _dm))
 
 
+async def _sync_commands(
+    command_tree: "discord.app_commands.CommandTree[Any]", guild_id: int
+) -> None:
+    """Sync slash commands. Always does the global sync (eventual, propagates
+    to all guilds in ~1h). When guild_id is non-zero, ALSO does an instant
+    guild-scoped sync so commands appear immediately in that test/home guild."""
+    await command_tree.sync()  # global (eventual, for all guilds)
+    if guild_id:
+        guild = discord.Object(id=guild_id)
+        command_tree.copy_global_to(guild=guild)
+        await command_tree.sync(guild=guild)  # instant in the configured guild
+
+
 @bot.event
 async def on_ready() -> None:
     create_users_table()
-    await tree.sync()
+    await _sync_commands(tree, config.DISCORD_GUILD_ID)
     assert bot.user is not None
     logging.info(f"Logged in as {bot.user} (ID: {bot.user.id})")
 
