@@ -57,8 +57,23 @@ def offer_embed(final: dict[str, Any], qr_image_url: str) -> Embed:
     return embed
 
 
-def error_embed(message: str) -> Embed:
-    return Embed(title="⚠️ Mint failed", description=message, color=0xFF0000)
+def signin_embed(signin_link: str) -> Embed:
+    embed = Embed(
+        title="🔐 Verify your wallet with Xaman",
+        description=(
+            "Scan the QR with Xaman and approve the sign-in — your wallet "
+            "address is captured on approval, nothing to type.\n\n"
+            f"[Open in Xaman]({signin_link})"
+        ),
+        color=0x00FF00,
+    )
+    embed.set_image(url="attachment://signin_qr.png")
+    embed.set_footer(text="The sign-in request expires after a few minutes")
+    return embed
+
+
+def error_embed(message: str, *, title: str = "⚠️ Mint failed") -> Embed:
+    return Embed(title=title, description=message, color=0xFF0000)
 
 
 def file_from_png(data: bytes, filename: str) -> discord.File:

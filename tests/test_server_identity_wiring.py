@@ -63,7 +63,12 @@ def test_signin_status_mirrors_wallet_into_identities(tmp_path, monkeypatch):
     identity.ensure_identities_table()
     monkeypatch.setattr(server, "register_user", lambda *a, **k: True)
     monkeypatch.setattr(server, "is_valid_classic_address", lambda a: True)
-    server.signin_payloads["u-1"] = {"discord_id": "dev", "name": "dev", "created_at": 0}
+    server.signin_payloads["u-1"] = {
+        "platform": "discord",
+        "user_id": "dev",
+        "name": "dev",
+        "created_at": 0,
+    }
 
     async def fake_status(uuid):
         return {"signed": True, "account": "rWALLET", "expired": False}
