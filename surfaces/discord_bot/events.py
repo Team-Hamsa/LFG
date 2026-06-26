@@ -44,7 +44,7 @@ def make_announcement(ev: Event) -> str:
     number = data.get("nft_number", "?")
     who = _minter_display(ev)
     if ev.type == "mint.completed":
-        return f"🎨 NFT #{number} minted for {who}."
+        return f"🎨 NFT #{number} minted by {who}."
     return f"❌ Mint failed for {who} (#{number})."
 
 
