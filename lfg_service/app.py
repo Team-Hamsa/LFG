@@ -23,7 +23,16 @@ from xrpl.core.addresscodec import is_valid_classic_address
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-from lfg_core import config, layer_store, mint_flow, swap_flow, swap_meta, xrpl_ops, xumm_ops
+from lfg_core import (
+    config,
+    economy_flow,
+    layer_store,
+    mint_flow,
+    swap_flow,
+    swap_meta,
+    xrpl_ops,
+    xumm_ops,
+)
 from lfg_service import identity as identity_store
 from lfg_service.auth import require_service_token, surface_for_token
 from lfg_service.events import Event, InMemoryEventBus
@@ -115,6 +124,47 @@ async def publish_event(
             wallet=wallet,
             data=data or {},
         )
+    )
+
+
+async def publish_terminal(
+    session: Any,
+    prefix: str,
+    *,
+    wallet: str | None,
+    user_id: str,
+    platform: str,
+    image_url: str | None,
+    success_states: set[str],
+    fail_states: set[str],
+) -> None:
+    """Publish a `<prefix>.completed`/`<prefix>.failed` firehose event once a
+    session reaches a terminal state. Shared by mint, swap, and the economy ops
+    so every in-process NFT interaction announces uniformly.
+
+    - Idempotent: guarded by `session._published` so a polled session can't
+      double-publish.
+    - Only fires when `session.state in (success_states | fail_states)`.
+    - Normalizes the artwork onto a uniform top-level `data["image_url"]` so the
+      surface consumers read one field regardless of interaction.
+    NOTE: standalone burns are deliberately NOT published here — Discord-admin /
+    CLI burns run out-of-process, and swap's internal burns are already covered
+    by `swap.*`. (X/Twitter consumer deferred to #41.)
+    """
+    if getattr(session, "_published", False):
+        return
+    if session.state not in (success_states | fail_states):
+        return
+    session._published = True
+    ok = session.state in success_states
+    data = session.to_dict()
+    if image_url and not data.get("image_url"):
+        data["image_url"] = image_url
+    await publish_event(
+        f"{prefix}.completed" if ok else f"{prefix}.failed",
+        enrich_minter_identity(platform, user_id, wallet),
+        wallet,
+        data,
     )
 
 
@@ -556,7 +606,34 @@ async def handle_mint_regenerate(request):
     return web.json_response(session.to_dict())
 
 
-handle_swap_status = make_status_handler(swap_sessions)
+def _first_result_image(session: Any) -> str | None:
+    for r in getattr(session, "results", None) or []:
+        img = r.get("image_url")
+        if img:
+            return str(img)
+    return None
+
+
+@require_auth
+async def handle_swap_status(request):
+    session = swap_sessions.get(request.match_info["session_id"])
+    if (
+        not session
+        or session.discord_id != request["user"]["id"]
+        or getattr(session, "platform", "discord") != _platform(request["user"])
+    ):
+        return web.json_response({"error": "not found"}, status=404)
+    await publish_terminal(
+        session,
+        "swap",
+        wallet=session.wallet_address,
+        user_id=session.discord_id,
+        platform=session.platform,
+        image_url=_first_result_image(session),
+        success_states={swap_flow.OFFERS_READY, swap_flow.DONE},
+        fail_states={swap_flow.FAILED, swap_flow.PAYMENT_TIMEOUT},
+    )
+    return web.json_response(session.to_dict())
 
 
 # --- Xaman Sign In registration (issue #24) ---
@@ -775,9 +852,40 @@ handle_assemble_start = _economy_post(
     lambda w, b: mock_economy.INSTANCE.assemble(w, int(b["edition"]), b["chosen"]),
 )
 
-handle_equip_status = make_status_handler(economy_sessions)
-handle_harvest_status = make_status_handler(economy_sessions)
-handle_assemble_status = make_status_handler(economy_sessions)
+
+def _make_economy_status_handler(prefix: str):
+    @require_auth
+    async def handler(request):
+        session = economy_sessions.get(request.match_info["session_id"])
+        if (
+            not session
+            or session.discord_id != request["user"]["id"]
+            or getattr(session, "platform", "discord") != _platform(request["user"])
+        ):
+            return web.json_response({"error": "not found"}, status=404)
+        # The wallet is nested as inner.owner; enrichment never raises on a
+        # missing wallet, so identity falls back to the bare id if absent.
+        wallet = getattr(getattr(session, "inner", None), "owner", None)
+        # Only assemble yields a new artwork; equip/harvest carry no image.
+        image_url = session.to_dict().get("image_url") if prefix == "assemble" else None
+        await publish_terminal(
+            session,
+            prefix,
+            wallet=wallet,
+            user_id=session.discord_id,
+            platform=getattr(session, "platform", "discord"),
+            image_url=image_url,
+            success_states={economy_flow.DONE},
+            fail_states={economy_flow.FAILED},
+        )
+        return web.json_response(session.to_dict())
+
+    return handler
+
+
+handle_equip_status = _make_economy_status_handler("equip")
+handle_harvest_status = _make_economy_status_handler("harvest")
+handle_assemble_status = _make_economy_status_handler("assemble")
 
 
 def _client_dir_mtime() -> float:

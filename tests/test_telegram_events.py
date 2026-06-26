@@ -119,7 +119,7 @@ def test_announce_and_dm_on_telegram_completed():
         dmed.append((uid, m, image))
 
     _run(ev_mod.run_event_loop(svc, announce, dm))
-    assert svc.types == ["mint.completed", "mint.failed"]
+    assert "mint.completed" in svc.types and "mint.failed" in svc.types
     assert sent and "3600" in sent[0][0]
     # no image_url in data -> image arg is None
     assert sent[0][1] is None
@@ -206,6 +206,82 @@ def test_no_dm_for_failed_or_non_telegram():
     _run(ev_mod.run_event_loop(_FakeSvc(agen), announce, dm))
     assert len(sent) == 2
     assert dmed == []
+
+
+def test_subscribes_to_all_announce_types():
+    agen = _FakeAgen([])
+    svc = _FakeSvc(agen)
+    _run(ev_mod.run_event_loop(svc, lambda m, i: _noop(), None))
+    assert set(svc.types) == {
+        "mint.completed",
+        "mint.failed",
+        "swap.completed",
+        "swap.failed",
+        "harvest.completed",
+        "harvest.failed",
+        "assemble.completed",
+        "assemble.failed",
+        "equip.completed",
+        "equip.failed",
+    }
+
+
+async def _noop():
+    return None
+
+
+def _ev(type_, **data):
+    return Event(
+        type=type_,
+        ts=0,
+        identity={"platform": "telegram", "platform_user_id": "55", "display_handle": "alice"},
+        wallet=None,
+        data=data,
+    )
+
+
+def test_swap_announcements():
+    assert "alice" in ev_mod.make_announcement(_ev("swap.completed"))
+    assert "swapped" in ev_mod.make_announcement(_ev("swap.completed"))
+    assert "ailed" in ev_mod.make_announcement(_ev("swap.failed"))
+
+
+def test_assemble_announcements():
+    assert "assembled" in ev_mod.make_announcement(_ev("assemble.completed"))
+    assert "ailed" in ev_mod.make_announcement(_ev("assemble.failed"))
+
+
+def test_harvest_announcements():
+    assert "harvested" in ev_mod.make_announcement(_ev("harvest.completed"))
+    assert "ailed" in ev_mod.make_announcement(_ev("harvest.failed"))
+
+
+def test_equip_announcements():
+    assert "equipped" in ev_mod.make_announcement(_ev("equip.completed"))
+    assert "ailed" in ev_mod.make_announcement(_ev("equip.failed"))
+
+
+def test_image_on_new_completed_types():
+    e = _ev("swap.completed", image_url="https://cdn/s.png")
+    assert ev_mod.announcement_image(e) == "https://cdn/s.png"
+    e = _ev("assemble.completed", image_url="https://cdn/a.png")
+    assert ev_mod.announcement_image(e) == "https://cdn/a.png"
+    assert ev_mod.announcement_image(_ev("swap.failed", image_url="https://cdn/s.png")) is None
+
+
+def test_no_dm_on_swap_completed():
+    agen = _FakeAgen([_ev("swap.completed", image_url="https://cdn/s.png")])
+    sent, dmed = [], []
+
+    async def announce(m, image):
+        sent.append((m, image))
+
+    async def dm(uid, m, image):
+        dmed.append((uid, m, image))
+
+    _run(ev_mod.run_event_loop(_FakeSvc(agen), announce, dm))
+    assert sent and "swapped" in sent[0][0]
+    assert dmed == []  # only mint.completed DMs
 
 
 def test_loop_survives_handler_error():
