@@ -58,5 +58,11 @@ def signin_caption(signin_link: str) -> str:
     )
 
 
+def linked_caption(summary: str) -> str:
+    """Confirmation for a completed cross-surface link (#90). ``summary`` comes
+    from surfaces._shared.account_result.linked_summary."""
+    return f"✅ {summary}"
+
+
 def photo_input(data: bytes, filename: str) -> InputFile:
     return InputFile(io.BytesIO(data), filename=filename)

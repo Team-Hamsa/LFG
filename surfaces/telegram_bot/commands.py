@@ -24,6 +24,13 @@ async def register(update: Any, context: Any) -> None:
     await handle_register(svc, update, context)
 
 
+async def link(update: Any, context: Any) -> None:
+    from surfaces.telegram_bot.bot import svc  # noqa: PLC0415  # lazy — bot.py
+    from surfaces.telegram_bot.link_view import handle_link  # noqa: PLC0415
+
+    await handle_link(svc, update, context)
+
+
 async def start(update: Any, context: Any) -> None:
     # Inline-keyboard menu (#87): the two buttons fire the mint/register callbacks
     # below, which reuse the SAME handlers as the /mint and /register commands.
