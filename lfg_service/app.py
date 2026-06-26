@@ -47,6 +47,60 @@ SESSION_RETENTION = 3600  # keep terminal sessions briefly for late polls
 BUS = InMemoryEventBus()
 
 
+def enrich_minter_identity(
+    platform: str, platform_user_id: str, wallet: str | None
+) -> dict[str, Any]:
+    """Build the event identity dict that carries the minter's display handle.
+
+    Consumers (the bot surfaces) run as separate processes and cannot read the
+    identity DB, so the handle is resolved here — at publish time, where the DB
+    lives — and attached to the event. Returns:
+        {platform, platform_user_id, display_handle, linked: [{platform,
+         platform_user_id, display_handle}, ...]}
+    where display_handle is the minter's own handle (None if unknown) and
+    linked is every identity sharing this wallet.
+
+    Resilient by design: a missing wallet or a failing lookup must never break
+    publishing, so we fall back to the bare identity. The wallet is matched
+    verbatim and NEVER altered (XRPL classic addresses are case-sensitive).
+    """
+    bare: dict[str, Any] = {
+        "platform": platform,
+        "platform_user_id": platform_user_id,
+        "display_handle": None,
+        "linked": [],
+    }
+    if not wallet:
+        return bare
+    try:
+        rows = identity_store.identities_for_wallet(wallet)
+    except Exception as e:
+        logging.error(f"enrich_minter_identity lookup failed: {e}")
+        return bare
+    linked = [
+        {
+            "platform": r.get("platform"),
+            "platform_user_id": r.get("platform_user_id"),
+            "display_handle": r.get("display_handle"),
+        }
+        for r in rows
+    ]
+    display_handle = next(
+        (
+            link["display_handle"]
+            for link in linked
+            if link["platform"] == platform and link["platform_user_id"] == platform_user_id
+        ),
+        None,
+    )
+    return {
+        "platform": platform,
+        "platform_user_id": platform_user_id,
+        "display_handle": display_handle,
+        "linked": linked,
+    }
+
+
 async def publish_event(
     type_: str,
     identity_obj: Any,
@@ -474,7 +528,7 @@ async def handle_mint_status(request):
         ok = session.state not in (mint_flow.FAILED, mint_flow.PAYMENT_TIMEOUT)
         await publish_event(
             "mint.completed" if ok else "mint.failed",
-            {"platform": session.platform, "platform_user_id": session.discord_id},
+            enrich_minter_identity(session.platform, session.discord_id, session.wallet_address),
             session.wallet_address,
             session.to_dict(),
         )
