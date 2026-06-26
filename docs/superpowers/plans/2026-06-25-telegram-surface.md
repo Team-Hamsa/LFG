@@ -458,6 +458,177 @@ Wait for review; resolve findings; merge only after review is handled. **PR B de
 
 Branch: `feat/spine-plan4b-telegram` **off `main` after PR A merges**. New package `surfaces/telegram_bot/` mirroring `surfaces/discord_bot/`.
 
+> **PR B revisions (user decisions, 2026-06-25), executed before the adapter tasks:**
+> 1. **Close the `(platform, id)` ownership-key blocker across ALL session types** (the PR A final-review must-fix) — Tasks **BV1** + **BV2** below. PR A added `platform` only to `MintSession`; here `SwapSession` + the three economy sessions get it too, and every ownership / one-active-session check compares `(platform, id)`.
+> 2. **Extract the shared mint-result helpers** (`_friendly`, `MINT_OK_STATES`, `_BAD_STATE_MESSAGES`) into a surface-agnostic module both adapters import — Task **BS** — instead of duplicating them in the Telegram `mint_view`. Task B3 imports from it.
+>
+> Execution order: **BV1 → BV2 → BS → B1 → B2 → B3 → B4 → B5 → B6 → B7.**
+
+### Task BV1: `platform` field on the remaining session types
+
+**Files:**
+- Modify: `lfg_core/swap_flow.py` (`SwapSession.__init__` ~78-96, its `to_dict`)
+- Modify: `lfg_core/economy_flow.py` (`HarvestSession` ~114, `AssembleSession` ~220, `EquipSession` ~351 — each `__init__` + `to_dict`)
+- Test: `tests/test_session_platform_fields.py` (create)
+
+**Interfaces:**
+- Produces: each of `SwapSession`, `HarvestSession`, `AssembleSession`, `EquipSession` accepts `platform: str = "discord"` (keyword, added last after existing params), stores `self.platform`, and includes `"platform": self.platform` in `to_dict()`. Mirrors the `MintSession.platform` field shipped in PR A. **Backward-compatible** — default `"discord"`.
+
+- [ ] **Step 1: Write the failing test** (one parametrized-style block; repo-native sync `def test_`):
+
+```python
+# tests/test_session_platform_fields.py
+from lfg_core.swap_flow import SwapSession
+from lfg_core.economy_flow import HarvestSession, AssembleSession, EquipSession
+
+
+def _nft():
+    return {"NFTokenID": "x", "attributes": []}
+
+
+def test_swap_session_platform_default_and_explicit():
+    s = SwapSession("9", "rA", _nft(), _nft(), ["Hat"])
+    assert s.platform == "discord" and s.to_dict()["platform"] == "discord"
+    t = SwapSession("55", "rA", _nft(), _nft(), ["Hat"], platform="telegram")
+    assert t.platform == "telegram" and t.to_dict()["platform"] == "telegram"
+```
+
+(Add analogous assertions for `HarvestSession`/`AssembleSession`/`EquipSession` using their real constructor signatures — read each `__init__` first and pass the minimal valid args; assert `.platform` default `"discord"` and that `platform="telegram"` round-trips through `to_dict()`.)
+
+- [ ] **Step 2: Run it — RED** (`platform` kwarg/attr/to_dict key missing).
+  Run: `.venv/bin/pytest tests/test_session_platform_fields.py -v`
+- [ ] **Step 3: Implement** — for each class add the kwarg + assignment + to_dict key, mirroring `MintSession`:
+  ```python
+  def __init__(self, ..., platform: str = "discord") -> None:
+      ...
+      self.platform = platform
+  ```
+  and in each `to_dict()`: `"platform": self.platform,` (next to `"id"`/`"discord_id"`).
+- [ ] **Step 4: GREEN** + regression: `.venv/bin/pytest tests/ -k "swap or economy or harvest or assemble or equip" -q` (existing tests unaffected — default `discord`).
+- [ ] **Step 5: Commit** — `feat(service): platform field on swap + economy sessions`
+
+### Task BV2: harden ownership / one-active-session checks to `(platform, id)`
+
+**Files:**
+- Modify: `lfg_service/app.py` — `_active_session` (~117-124), `make_status_handler` (~204-212), `handle_mint_start` (~329 + the `MintSession(...)` already takes platform), `handle_mint_status` ownership (~411), `handle_swap_start` (~395, ~414, ~416 `SwapSession(...)`), `_economy_post` (~626 active-check + ~639 set platform on the session)
+- Test: `tests/test_service_ownership_platform.py` (create)
+
+**Interfaces:**
+- Consumes: `_platform` (PR A), `.platform` on every session type (BV1 + MintSession).
+- Produces: `_active_session(sessions, terminal_states, discord_id, platform=None)` — when `platform` is provided, a session matches only if `getattr(s, "platform", "discord") == platform AND s.discord_id == discord_id`. All four call sites pass `_platform(user)`. Mint/swap construct with `platform=_platform(user)`; economy sets `ws.platform = _platform(user)` before storing. `handle_mint_status` and `make_status_handler` ownership checks reject when `getattr(session, "platform", "discord") != _platform(request["user"])` **or** the id differs.
+
+- [ ] **Step 1: Write the failing test** — cross-platform isolation:
+
+```python
+# tests/test_service_ownership_platform.py
+import asyncio
+import lfg_core.mint_flow as mint_flow
+import lfg_service.app as app
+from lfg_service.app import make_session_token
+
+
+def _run(coro):
+    loop = asyncio.new_event_loop()
+    try:
+        return loop.run_until_complete(coro)
+    finally:
+        loop.close()
+
+
+def test_active_session_distinguishes_platform():
+    sessions = {}
+    s = mint_flow.MintSession("55", "rA", platform="discord")
+    sessions[s.id] = s
+    # a discord:55 active session must NOT count as active for telegram:55
+    assert app._active_session(sessions, mint_flow.TERMINAL_STATES, "55", "telegram") is None
+    # ...but DOES for discord:55
+    assert app._active_session(sessions, mint_flow.TERMINAL_STATES, "55", "discord") is s
+
+
+def test_mint_status_rejects_cross_platform(monkeypatch):
+    monkeypatch.setattr(app.config, "WEBAPP_DEV_MODE", False)
+    s = mint_flow.MintSession("55", "rA", platform="telegram")
+    app.mint_sessions[s.id] = s
+    try:
+        # a discord session with the same numeric id must get 404, not the telegram session
+        token = make_session_token({"id": "55", "name": "d", "platform": "discord"})
+
+        class _Req:
+            def __init__(self, sid, token):
+                self.headers = {"Authorization": f"Bearer {token}"}
+                self.match_info = {"session_id": sid}
+                self._s = {}
+
+            def __getitem__(self, k):
+                return self._s[k]
+
+            def __setitem__(self, k, v):
+                self._s[k] = v
+
+        resp = _run(app.handle_mint_status(_Req(s.id, token)))
+        assert resp.status == 404
+    finally:
+        app.mint_sessions.pop(s.id, None)
+```
+
+(Add a same-platform regression: discord:55 token CAN read a discord:55 session.)
+
+- [ ] **Step 2: RED.** Run: `.venv/bin/pytest tests/test_service_ownership_platform.py -v`
+- [ ] **Step 3: Implement.**
+  - `_active_session`: add `platform: str | None = None`; in the loop, `if s.discord_id == discord_id and s.state not in terminal_states and (platform is None or getattr(s, "platform", "discord") == platform): return s`.
+  - `handle_mint_start`: `active = _active_session(mint_sessions, mint_flow.TERMINAL_STATES, user["id"], _platform(user))`.
+  - `handle_mint_status` (and `make_status_handler`): change `session.discord_id != request["user"]["id"]` to `session.discord_id != request["user"]["id"] or getattr(session, "platform", "discord") != _platform(request["user"])`.
+  - `handle_swap_start`: both `_active_session(swap_sessions, ..., user["id"], _platform(user))`; `SwapSession(..., platform=_platform(user))`.
+  - `_economy_post`: `_active_session(economy_sessions, ..., user["id"], _platform(user))`; after `ws = await start_coro(...)`, set `ws.platform = _platform(user)` before `economy_sessions[ws.id] = ws`.
+- [ ] **Step 4: GREEN** + regression `.venv/bin/pytest tests/ -q` (mint/swap/economy existing tests green; discord default preserved).
+- [ ] **Step 5: Commit** — `fix(service): ownership + active-session checks compare (platform, id)`
+
+### Task BS: extract shared mint-result helpers
+
+**Files:**
+- Create: `surfaces/_shared/__init__.py`, `surfaces/_shared/mint_result.py`
+- Modify: `surfaces/discord_bot/mint_view.py` (import from the shared module instead of defining locally)
+- Modify: `pyproject.toml` mypy — add `"surfaces._shared.*"` (decide: full-strict like `_client`, or relaxed like the adapters; these are tiny pure helpers — put under the relaxed adapter override for simplicity)
+- Test: `tests/test_shared_mint_result.py` (create)
+
+**Interfaces:**
+- Produces `surfaces/_shared/mint_result.py`:
+  - `MINT_OK_STATES: frozenset[str] = frozenset({"offer_ready", "done"})`
+  - `BAD_STATE_MESSAGES: dict[str, str]` (the `payment_timeout`/`failed` map)
+  - `friendly_error(err: ServiceError) -> str` (the current `_friendly` body verbatim — imports `BadRequest, ServiceError` from `surfaces._client.errors`)
+- `surfaces/discord_bot/mint_view.py` imports `MINT_OK_STATES`, `BAD_STATE_MESSAGES`, `friendly_error` from `surfaces._shared.mint_result`; deletes its local copies; replaces `_friendly(` calls with `friendly_error(` and `_BAD_STATE_MESSAGES` with `BAD_STATE_MESSAGES`. **Behaviour unchanged** — the existing `tests/test_discord_mint.py` must stay green.
+
+- [ ] **Step 1: Write the failing test**
+
+```python
+# tests/test_shared_mint_result.py
+from surfaces._client.errors import BadRequest, ServiceError, NotFound
+from surfaces._shared.mint_result import MINT_OK_STATES, BAD_STATE_MESSAGES, friendly_error
+
+
+def test_ok_states():
+    assert "offer_ready" in MINT_OK_STATES and "done" in MINT_OK_STATES
+
+
+def test_friendly_no_wallet():
+    assert "register" in friendly_error(BadRequest("no wallet registered", status=400)).lower()
+
+
+def test_friendly_in_progress():
+    assert "in progress" in friendly_error(ServiceError("already", status=409)).lower()
+
+
+def test_bad_state_messages_has_timeout():
+    assert "timed out" in BAD_STATE_MESSAGES["payment_timeout"].lower()
+```
+
+(Confirm the `BadRequest`/`ServiceError` constructor signatures in `surfaces/_client/errors.py` and match them — the existing `tests/test_discord_mint.py` shows the canonical construction.)
+
+- [ ] **Step 2: RED.** Run: `.venv/bin/pytest tests/test_shared_mint_result.py -v`
+- [ ] **Step 3: Implement** the shared module (move the three definitions out of `surfaces/discord_bot/mint_view.py` verbatim, rename `_friendly`→`friendly_error`, `_BAD_STATE_MESSAGES`→`BAD_STATE_MESSAGES`), then update `discord_bot/mint_view.py` to import + use them. Add the mypy override entry.
+- [ ] **Step 4: GREEN** + regression: `.venv/bin/pytest tests/test_discord_mint.py tests/test_shared_mint_result.py -q` (discord mint behaviour identical) and `.venv/bin/mypy .` clean.
+- [ ] **Step 5: Commit** — `refactor(surfaces): extract shared mint-result helpers`
+
 ### Task B1: Dependency, mypy config, package config
 
 **Files:**
@@ -693,8 +864,8 @@ git commit -m "feat(telegram): pure caption/photo render builders"
 - Test: `tests/test_telegram_mint.py` (create)
 
 **Interfaces:**
-- Consumes: `render` (B2); `LFGServiceClient.start_mint/qr_png/wait_for_mint`; `surfaces._client.errors.{ServiceError,BadRequest}`.
-- Produces: `async handle_mint(svc, update, context) -> None`. Sends payment QR photo → polls → sends offer QR (hosted `accept_qr_url` URL if present, else rendered from `accept_deeplink`). Module constants `MINT_OK_STATES`, `_BAD_STATE_MESSAGES`, `_friendly(err)` (duplicated from the Discord adapter — kept local so Telegram never imports `discord`).
+- Consumes: `render` (B2); `LFGServiceClient.start_mint/qr_png/wait_for_mint`; `surfaces._client.errors.ServiceError`; `surfaces._shared.mint_result.{MINT_OK_STATES, BAD_STATE_MESSAGES, friendly_error}` (Task BS).
+- Produces: `async handle_mint(svc, update, context) -> None`. Sends payment QR photo → polls → sends offer QR (hosted `accept_qr_url` URL if present, else rendered from `accept_deeplink`). Mint-result helpers come from the shared `surfaces._shared.mint_result` — no `discord` dependency pulled in.
 
 - [ ] **Step 1: Write the failing test**
 
@@ -816,33 +987,16 @@ Expected: FAIL — module/handle_mint missing.
 # Make Waves SourceTag); this module only orchestrates SDK calls and sends
 # Telegram photos/messages. handle_mint(svc, update, context) is standalone so
 # tests can drive it with fakes.
-#
-# _friendly / MINT_OK_STATES / _BAD_STATE_MESSAGES are intentionally duplicated
-# from surfaces.discord_bot.mint_view: keeping them local means the Telegram
-# package never imports `discord`. They are ~15 trivial lines.
+# The mint-result helpers (friendly_error / MINT_OK_STATES / BAD_STATE_MESSAGES)
+# come from the surface-agnostic surfaces._shared.mint_result (Task BS) — shared
+# with the Discord adapter, no `discord` import pulled in.
 import logging
 from typing import Any
 
 from surfaces._client import LFGServiceClient
-from surfaces._client.errors import BadRequest, ServiceError
+from surfaces._client.errors import ServiceError
+from surfaces._shared.mint_result import BAD_STATE_MESSAGES, MINT_OK_STATES, friendly_error
 from surfaces.telegram_bot import render
-
-MINT_OK_STATES = frozenset({"offer_ready", "done"})
-
-_BAD_STATE_MESSAGES = {
-    "payment_timeout": "Payment request timed out. Please try again.",
-    "failed": "The mint failed. Please try again or contact an admin.",
-}
-
-
-def _friendly(err: ServiceError) -> str:
-    code = (err.code or "").lower()
-    message = (err.message or "").lower()
-    if isinstance(err, BadRequest) and ("wallet" in code or "wallet" in message):
-        return "Please register your wallet first using /register."
-    if err.status == 409 or "in_progress" in code or "already" in message:
-        return "You already have a mint in progress — finish or wait for it to time out."
-    return err.message or "The mint service is unavailable. Please try again shortly."
 
 
 async def handle_mint(svc: LFGServiceClient, update: Any, context: Any) -> None:
@@ -855,7 +1009,7 @@ async def handle_mint(svc: LFGServiceClient, update: Any, context: Any) -> None:
     try:
         session = await svc.start_mint(user_id, username=username)
     except ServiceError as e:
-        await bot.send_message(chat_id, render.error_caption(_friendly(e)))
+        await bot.send_message(chat_id, render.error_caption(friendly_error(e)))
         return
 
     session_id = session["id"]
@@ -865,7 +1019,7 @@ async def handle_mint(svc: LFGServiceClient, update: Any, context: Any) -> None:
         qr_png = await svc.qr_png(payment_link)
     except ServiceError as e:
         logging.error(f"payment QR render failed: {e}")
-        await bot.send_message(chat_id, render.error_caption(_friendly(e)))
+        await bot.send_message(chat_id, render.error_caption(friendly_error(e)))
         return
     await bot.send_photo(
         chat_id,
@@ -876,12 +1030,12 @@ async def handle_mint(svc: LFGServiceClient, update: Any, context: Any) -> None:
     try:
         final = await svc.wait_for_mint(user_id, session_id)
     except ServiceError as e:
-        await bot.send_message(chat_id, render.error_caption(_friendly(e)))
+        await bot.send_message(chat_id, render.error_caption(friendly_error(e)))
         return
 
     state = str(final.get("state") or "")
     if state not in MINT_OK_STATES:
-        reason = _BAD_STATE_MESSAGES.get(state, "Mint did not complete. Please try again.")
+        reason = BAD_STATE_MESSAGES.get(state, "Mint did not complete. Please try again.")
         await bot.send_message(chat_id, render.error_caption(reason))
         return
 

@@ -94,12 +94,15 @@ def test_register_discord_writes_legacy_users(monkeypatch):
     assert legacy["args"] == ("9", "d", "rDISCORD")
 
 
-def test_signin_status_telegram_skips_legacy_users(monkeypatch):
-    """Mirror of the register gate for the second P1 call site: a telegram
-    signed-payload status check must NOT write the legacy Users table — only
-    identities. Guards against a future revert of the handle_signin_status gate."""
+def test_signin_status_rejects_non_discord(monkeypatch):
+    """Signin is the webapp's Xaman wallet-connect (discord-identity only). A
+    non-discord (telegram) token — even with a numeric id matching a payload
+    created by discord:55 — must get 404 and link NOTHING (neither the legacy
+    Users table nor identities). This closes the cross-surface identity-store
+    isolation hole: the rec carries no platform, so a bare-id ownership check
+    would otherwise let telegram bind a discord user's freshly-signed wallet."""
     legacy = {"called": False}
-    linked = {}
+    linked = {"called": False}
     monkeypatch.setattr(app, "is_valid_classic_address", lambda w: True)
     monkeypatch.setattr(app.config, "WEBAPP_DEV_MODE", False)
     monkeypatch.setitem(app.signin_payloads, "u1", {"discord_id": "55", "name": "tg"})
@@ -116,7 +119,7 @@ def test_signin_status_telegram_skips_legacy_users(monkeypatch):
     monkeypatch.setattr(app, "register_user", fake_register_user)
 
     def fake_link(platform, uid, name, wallet):
-        linked["args"] = (platform, uid, wallet)
+        linked["called"] = True
         return True
 
     monkeypatch.setattr(app.identity_store, "link", fake_link)
@@ -125,6 +128,25 @@ def test_signin_status_telegram_skips_legacy_users(monkeypatch):
     req = _Req(token, {})
     req.match_info = {"payload_uuid": "u1"}
     resp = _run(app.handle_signin_status(req))
-    assert resp.status == 200
+    assert resp.status == 404
     assert legacy["called"] is False
-    assert linked["args"] == ("telegram", "55", "rXRPL")
+    assert linked["called"] is False
+
+
+def test_signin_start_rejects_non_discord(monkeypatch):
+    """handle_signin_start is gated to discord — a telegram token gets 404 and
+    never reaches the XUMM payload creation."""
+    monkeypatch.setattr(app.config, "WEBAPP_DEV_MODE", False)
+    reached = {"called": False}
+
+    async def fake_create(return_url):
+        reached["called"] = True
+        return {"uuid": "u1", "xumm_url": "x"}
+
+    monkeypatch.setattr(app.xumm_ops, "create_signin_payload", fake_create)
+
+    token = make_session_token({"id": "55", "name": "tg", "platform": "telegram"})
+    req = _Req(token, {})
+    resp = _run(app.handle_signin_start(req))
+    assert resp.status == 404
+    assert reached["called"] is False
