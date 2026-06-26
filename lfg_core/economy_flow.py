@@ -121,7 +121,6 @@ class HarvestSession:
     moved_assets: list[tuple[str, str]] = field(default_factory=list)
     bucket_accept: dict[str, Any] | None = None
     id: str = field(default_factory=lambda: uuid.uuid4().hex)
-    platform: str = "discord"
 
     @property
     def edition(self) -> int:
@@ -230,7 +229,6 @@ class AssembleSession:
     new_nft_id: str | None = None
     results: list[dict[str, Any]] = field(default_factory=list)
     id: str = field(default_factory=lambda: uuid.uuid4().hex)
-    platform: str = "discord"
 
     def _record(self, status: str) -> dict[str, Any]:
         return {
@@ -360,7 +358,6 @@ class EquipSession:
     displaced_value: str = ""
     modify_hash: str | None = None
     id: str = field(default_factory=lambda: uuid.uuid4().hex)
-    platform: str = "discord"
 
     def _record(self, status: str) -> dict[str, Any]:
         return {
