@@ -41,15 +41,30 @@ async def swap(update: Any, context: Any) -> None:
 async def start(update: Any, context: Any) -> None:
     # Inline-keyboard menu (#87, #88): the buttons fire the mint/register/swap
     # callbacks below, which reuse the SAME handlers as the slash commands.
-    from telegram import InlineKeyboardButton, InlineKeyboardMarkup  # noqa: PLC0415
-
-    keyboard = InlineKeyboardMarkup(
-        [
-            [InlineKeyboardButton("🎨 Mint NFT", callback_data="mint")],
-            [InlineKeyboardButton("🔄 Swap Traits", callback_data="swap")],
-            [InlineKeyboardButton("🔐 Register Wallet", callback_data="register")],
-        ]
+    from telegram import (  # noqa: PLC0415
+        InlineKeyboardButton,
+        InlineKeyboardMarkup,
+        WebAppInfo,
     )
+
+    from surfaces.telegram_bot import config  # noqa: PLC0415
+
+    rows = [
+        [InlineKeyboardButton("🎨 Mint NFT", callback_data="mint")],
+        [InlineKeyboardButton("🔄 Swap Traits", callback_data="swap")],
+        [InlineKeyboardButton("🔐 Register Wallet", callback_data="register")],
+    ]
+    # Mini App launch button (#89) — only when the public HTTPS URL is configured;
+    # web_app buttons work only in private chats (DMs with the bot).
+    if config.TELEGRAM_MINI_APP_URL:
+        rows.append(
+            [
+                InlineKeyboardButton(
+                    "🎮 Open App", web_app=WebAppInfo(url=config.TELEGRAM_MINI_APP_URL)
+                )
+            ]
+        )
+    keyboard = InlineKeyboardMarkup(rows)
     await update.message.reply_text(
         "Welcome to LFG! Tap a button below — register your wallet with Xaman, then mint an NFT.",
         reply_markup=keyboard,

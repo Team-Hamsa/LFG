@@ -75,7 +75,18 @@ SERVICE_TOKEN_DISCORD=<discord-surface-token>
 TELEGRAM_BOT_TOKEN=<telegram-bot-token>
 SERVICE_TOKEN_TELEGRAM=<telegram-surface-token>
 TELEGRAM_ANNOUNCE_CHAT_ID=<telegram-channel-id>
+TELEGRAM_MINI_APP_URL=<public-https-url-of-the-mini-app>   # optional (#89); unset = launch button omitted
+TELEGRAM_INITDATA_MAX_AGE=3600                              # optional (#89); initData replay window in seconds
 ```
+
+> **Telegram Mini App (#89):** the Mini App serves the same vanilla-JS Activity
+> inside Telegram. It is feature-flagged OFF by default: with
+> `TELEGRAM_MINI_APP_URL` unset, no launch/menu button appears; with
+> `TELEGRAM_BOT_TOKEN` unset on the service side, `POST /api/telegram/auth`
+> returns 503. `TELEGRAM_BOT_TOKEN` doubles as the service-side HMAC secret used
+> to validate Telegram's signed `initData`. Going live (Part B) is an ops step:
+> expose `:8176` over public HTTPS, set `TELEGRAM_MINI_APP_URL` to that host,
+> and confirm BotFather accepts the URL.
 
 ### Running the Bot
 ```bash

@@ -7,6 +7,11 @@
 
 const params = new URLSearchParams(window.location.search);
 const insideDiscord = params.has('frame_id');
+// Telegram injects a signed launch payload as Telegram.WebApp.initData; the
+// vendored telegram-web-app.js (loaded before this module) defines window.Telegram
+// inside Telegram and stays undefined everywhere else.
+const tg = window.Telegram && window.Telegram.WebApp;
+const insideTelegram = !!(tg && tg.initData);
 
 const el = (id) => document.getElementById(id);
 const status = (msg) => { el('status').textContent = msg; };
@@ -129,6 +134,21 @@ async function setupDiscord() {
 
   await sdk.commands.authenticate({ access_token: tokenData.access_token });
   externalOpener = (url) => sdk.commands.openExternalLink({ url });
+  return tokenData.user;
+}
+
+// Telegram Mini App handshake (#89): validate the signed initData server-side,
+// store the returned platform="telegram" session token the same way the Discord
+// path stores its token, then run the IDENTICAL UI.
+async function setupTelegram() {
+  tg.ready();
+  tg.expand(); // use the full available height
+  const tokenData = await api('/api/telegram/auth', {
+    method: 'POST',
+    body: JSON.stringify({ init_data: tg.initData }),
+  });
+  sessionToken = tokenData.session_token;
+  externalOpener = (url) => tg.openLink(url);
   return tokenData.user;
 }
 
@@ -961,13 +981,15 @@ async function main() {
     }
   } catch (_) { /* non-dev or offline: ignore */ }
 
-  if (!insideDiscord) {
-    status('Not running inside Discord — open this as an Activity. (Dev mode: API calls will be unauthorized.)');
+  if (!insideTelegram && !insideDiscord) {
+    status('Open this inside Telegram or Discord. (Dev mode: API calls will be unauthorized.)');
     return;
   }
 
   try {
-    await setupDiscord();
+    // Same UI either way — only the auth handshake differs by host.
+    if (insideTelegram) await setupTelegram();
+    else await setupDiscord();
     me = await api('/api/me');
     if (me.wallet) showMintHome();
     else {

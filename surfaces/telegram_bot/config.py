@@ -28,6 +28,11 @@ if not TELEGRAM_ANNOUNCE_CHAT_ID:
 RETRY_MAX_ATTEMPTS = int(os.getenv("RETRY_MAX_ATTEMPTS", "5"))
 RETRY_BASE_DELAY = float(os.getenv("RETRY_BASE_DELAY", "1.0"))
 
+# Telegram Mini App (#89). Public HTTPS URL the launch button / menu button
+# point at. Optional: when empty, no launch button is shown and the menu button
+# is not set (the feature stays dormant until the ops step provisions hosting).
+TELEGRAM_MINI_APP_URL = os.getenv("TELEGRAM_MINI_APP_URL", "")
+
 logging.basicConfig(
     level=logging.INFO,
     format="%(asctime)s - %(levelname)s - %(message)s",

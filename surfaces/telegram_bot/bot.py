@@ -22,6 +22,22 @@ async def _post_init(application: Application) -> None:  # type: ignore[type-arg
     global _events_task
     await svc.__aenter__()
 
+    # Mini App (#89): pin a persistent BotFather chat menu button pointing at the
+    # public HTTPS URL — only when configured, so the feature stays dormant until
+    # the ops step provisions hosting. Setting it programmatically here survives
+    # redeploys without a manual BotFather step.
+    if config.TELEGRAM_MINI_APP_URL:
+        from telegram import MenuButtonWebApp, WebAppInfo  # noqa: PLC0415
+
+        try:
+            await application.bot.set_chat_menu_button(
+                menu_button=MenuButtonWebApp(
+                    text="Open App", web_app=WebAppInfo(url=config.TELEGRAM_MINI_APP_URL)
+                )
+            )
+        except Exception as e:
+            logging.warning(f"set_chat_menu_button failed: {e}")
+
     async def _announce(message: str, image_url: str | None) -> None:
         if image_url:
             await application.bot.send_photo(
