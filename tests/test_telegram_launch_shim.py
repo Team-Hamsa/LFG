@@ -9,6 +9,9 @@ import importlib
 
 
 def test_shim_targets_canonical_bot_main(monkeypatch):
+    # Neutralize load_dotenv so a real local .env can't interfere with the
+    # telegram config reload below (mirrors the fix in test_discord_config.py).
+    monkeypatch.setattr("dotenv.load_dotenv", lambda *a, **k: False)
     for k, v in {
         "TELEGRAM_BOT_TOKEN": "t",
         "LFG_SERVICE_URL": "http://svc",
