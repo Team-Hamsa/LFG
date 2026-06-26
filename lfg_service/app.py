@@ -487,7 +487,7 @@ handle_swap_status = make_status_handler(swap_sessions)
 
 # --- Xaman Sign In registration (issue #24) ---
 
-# payload uuid -> {discord_id, name, created_at}; pruned by age
+# payload uuid -> {platform, user_id, name, created_at}; pruned by age
 signin_payloads: dict[str, Any] = {}
 SIGNIN_TTL = 900
 
