@@ -1,5 +1,5 @@
 # surfaces/telegram_bot/bot.py
-# python-telegram-bot v21 application lifecycle for the Telegram surface. One
+# python-telegram-bot v21+ application lifecycle for the Telegram surface. One
 # shared LFGServiceClient drives every handler. The firehose consumer runs as a
 # cancellable task started in post_init and stopped BEFORE svc.close() in
 # post_shutdown, so the generator's aclose() releases the WebSocket on a live
