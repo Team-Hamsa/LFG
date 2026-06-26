@@ -1,9 +1,8 @@
 import asyncio
-from unittest.mock import AsyncMock, MagicMock
+from types import SimpleNamespace
 
-import pytest
-
-from surfaces._client.errors import BadRequest
+from surfaces._client.errors import ServiceError
+from surfaces.discord_bot import register_view
 
 
 def _run(coro):
@@ -14,52 +13,52 @@ def _run(coro):
         loop.close()
 
 
-@pytest.fixture
-def reg(monkeypatch):
-    for k, v in {
-        "DISCORD_BOT_TOKEN": "t",
-        "ADMIN_LOG_CHANNEL_ID": "1",
-        "LFG_SERVICE_URL": "http://svc",
-        "SERVICE_TOKEN_DISCORD": "s",
-        "XUMM_API_KEY": "k",
-        "XUMM_API_SECRET": "s",
-        "TOKEN_ISSUER_ADDRESS": "rI",
-        "TOKEN_CURRENCY_HEX": "ABC",
-    }.items():
-        monkeypatch.setenv(k, v)
-    import importlib
+def _interaction():
+    sent = []
 
-    import surfaces.discord_bot.config as cfg
+    async def defer(ephemeral=True):
+        return None
 
-    importlib.reload(cfg)
-    import surfaces.discord_bot.commands as cmds
+    async def followup_send(embed=None, file=None, ephemeral=True):
+        sent.append(embed)
 
-    # Do NOT reload cmds — @tree.command re-registration would fail.
-    # _register_impl is the testable impl; the @tree.command shell just delegates.
-    return cmds
+    inter = SimpleNamespace(
+        user=SimpleNamespace(id=9, __str__=lambda self: "d#1"),
+        response=SimpleNamespace(defer=defer),
+        followup=SimpleNamespace(send=followup_send),
+    )
+    return inter, sent
 
 
-def _fake_interaction():
-    ix = MagicMock()
-    ix.user.id = 42
-    ix.user.__str__ = lambda self: "alice#0001"
-    ix.response.send_message = AsyncMock()
-    return ix
+class _Svc:
+    def __init__(self, start, final, qr=b"PNG"):
+        self._start, self._final, self._qr = start, final, qr
+
+    async def signin_start(self, user_id):
+        if isinstance(self._start, Exception):
+            raise self._start
+        return self._start
+
+    async def qr_png(self, data):
+        return self._qr
+
+    async def wait_for_signin(self, user_id, uuid):
+        return self._final
 
 
-def test_register_calls_service_and_confirms(reg):
-    fake_svc = MagicMock()
-    fake_svc.register = AsyncMock(return_value={"ok": True})
-    ix = _fake_interaction()
-    _run(reg._register_impl(ix, "rWALLET", _svc=fake_svc))
-    fake_svc.register.assert_awaited_once_with("42", "alice#0001", "rWALLET")
-    ix.response.send_message.assert_awaited_once()
-    assert "registered" in ix.response.send_message.call_args.args[0].lower()
+def test_signed_reports_wallet():
+    inter, sent = _interaction()
+    svc = _Svc(
+        start={"uuid": "u1", "signin_link": "https://xumm.app/sign/abc"},
+        final={"state": "signed", "wallet": "rXRPL"},
+    )
+    _run(register_view.handle_register(svc, inter))
+    # at least the QR embed + a success embed mentioning the wallet
+    assert any("rXRPL" in (e.description or "") for e in sent if e is not None)
 
 
-def test_register_maps_service_error_to_failure(reg):
-    fake_svc = MagicMock()
-    fake_svc.register = AsyncMock(side_effect=BadRequest("bad wallet", status=400))
-    ix = _fake_interaction()
-    _run(reg._register_impl(ix, "nope", _svc=fake_svc))
-    ix.response.send_message.assert_awaited_once()
+def test_service_error_reports_friendly():
+    inter, sent = _interaction()
+    svc = _Svc(start=ServiceError("down", status=503), final={})
+    _run(register_view.handle_register(svc, inter))
+    assert sent  # an error embed was sent
