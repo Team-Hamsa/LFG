@@ -86,6 +86,7 @@ def touch_handle(platform: str, platform_user_id: str, handle: str) -> None:
     this as a fire-and-forget side effect on authenticated touches)."""
     if not handle:
         return
+    conn = None
     try:
         conn = sqlite3.connect(DATABASE)
         conn.execute(
@@ -98,7 +99,8 @@ def touch_handle(platform: str, platform_user_id: str, handle: str) -> None:
     except Exception as e:
         logging.error(f"identity.touch_handle failed: {e}")
     finally:
-        conn.close()
+        if conn is not None:
+            conn.close()
 
 
 def resolve(platform: str, platform_user_id: str) -> str | None:
@@ -124,6 +126,7 @@ def identities_for_wallet(wallet: str) -> list[dict[str, object]]:
     addresses are case-sensitive (the base58check checksum makes a case-folded
     address invalid), so callers must NEVER lower-case the wallet.
     """
+    conn = None
     try:
         conn = sqlite3.connect(DATABASE)
         cur = conn.execute(
@@ -146,7 +149,8 @@ def identities_for_wallet(wallet: str) -> list[dict[str, object]]:
         logging.error(f"identity.identities_for_wallet failed: {e}")
         return []
     finally:
-        conn.close()
+        if conn is not None:
+            conn.close()
 
 
 def migrate_users_to_identities() -> int:

@@ -166,7 +166,7 @@ def build_mock_service(
         except Exception:
             body = {}
         state["last_signin_link_flag"] = bool(body.get("link"))
-        return web.json_response({"uuid": "sg1", "qr": "data:..."})
+        return web.json_response({"uuid": "sg1", "signin_link": "https://xumm.app/sign/mock"})
 
     async def handle_signin_status(request: web.Request) -> web.StreamResponse:
         bad = _require_session(request)
