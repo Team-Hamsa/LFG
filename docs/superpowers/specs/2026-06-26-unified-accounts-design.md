@@ -303,11 +303,13 @@ All three lean on the **same two additions**: the inverse lookup and a fresh `di
 
 ---
 
-## 8. Open Questions / Decisions for the User
+## 8. Resolved Decisions
 
-- **O1 — Separate `/api/link/*` endpoints, or a `link=true` flag on `/api/signin`?** The mechanics are identical; the only difference is the success payload (link returns the account view). A flag is less code; separate endpoints are clearer in logs/SDK. **Recommendation:** flag on `/api/signin` internally, expose `link_*` SDK methods for readability. *Need a decision.*
-- **O2 — Handle freshness.** Proposed: refresh opportunistically on `/api/me` and on any re-link, no background crawler. Is opportunistic freshness acceptable, or do #85/#91 want a guaranteed-fresh handle (which would need a background refresh or a fetch-at-announce call to each platform's API)? **Recommendation:** opportunistic; revisit if announcements show stale names.
-- **O3 — Two humans, one wallet.** If two different people both prove the *same* wallet on different surfaces, they collapse into one account. Acceptable (a shared/custodial wallet *is* one account), or do we need a guard? **Recommendation:** accept it — wallet possession is the identity.
-- **O4 — Drop the unused `account_id` column?** It's been a NULL reserved hook since the spine. With the wallet-as-key decision we never populate it. Keep as documentation of intent, or drop it to avoid implying a table that doesn't exist? **Recommendation:** keep (harmless, self-documenting), but stop referencing it as "future."
-- **O5 — Privacy of the account view.** `GET /api/account` returns only the *caller's* account. Confirm we do **not** want any endpoint that maps an arbitrary wallet → identities over HTTP (it would leak that two handles are the same person). Internal consumers use the in-process helper only. **Recommendation:** keep the inverse lookup in-process only.
-- **O6 — Unlinking.** Out of scope for #90? A user might want to detach a surface from their account. No issue currently requests it. **Recommendation:** defer; note as a follow-up.
+These were the open questions at spec time; all were decided before implementation and the PR (#90) was built to match. Recorded here so the merged spec reflects what shipped.
+
+- **O1 — Link transport: `link=true` flag on `/api/signin` (NOT separate `/api/link/*` endpoints).** `POST /api/signin` accepts an optional `{"link": true}`, recorded on the payload record; `GET /api/signin/{uuid}` adds the `account` view to the signed response only when link-intent was set. Plain sign-in is byte-identical (no `account` key). The SDK exposes readable `link_start` / `link_status` / `wait_for_link` aliases over this same machinery.
+- **O2 — Handle freshness: opportunistic only.** `touch_handle(platform, user_id, handle)` is called best-effort on `GET /api/me` (and every `link(...)` overwrites the handle). No background crawler. Revisit only if announcements show stale names.
+- **O3 — Two humans, one wallet: collapse into one account.** Wallet possession (proven via Xaman) is the identity; a shared/custodial wallet is one account by design. No extra guard — inherent in wallet-as-key.
+- **O4 — `account_id` column: kept, never populated.** No new `account_id` column is added and the existing NULL reserved hook stays as-is. The wallet IS the account key; there is no `accounts` table.
+- **O5 — Account-view privacy: in-process inverse lookup only.** `GET /api/account` returns ONLY the caller's own resolved-wallet account. No HTTP endpoint maps an arbitrary wallet → identities; internal consumers (#85/#91 announcements/firehose) call `identity.identities_for_wallet(...)` in-process.
+- **O6 — Unlinking: out of scope for #90.** No unlink flow ships in this PR; deferred as a possible follow-up.

@@ -18,7 +18,16 @@
 - **Inverse lookup is in-process only** — no HTTP endpoint maps an arbitrary wallet → identities (privacy). `GET /api/account` returns only the caller's own account.
 - **Test style:** repo-native sync (`def test_...` + a `_run(coro)` loop helper, the `_Req` shim from `tests/test_service_signin_platform.py`). Seeds, if needed, use the throwaway `sEdSKaCy2JT7JaM7v95H9SxkhP9wS2r`.
 - **mypy:** `lfg_service.app` + `surfaces.*` are in the relaxed override; run the FULL `.venv/bin/mypy .` before claiming clean.
-- **Resolve O1 before Task 5** (separate `/api/link/*` endpoints vs. a `link=true` flag). Plan assumes a `link=true` flag on the existing sign-in handlers with `link_*` SDK aliases; adjust if the user chooses separate endpoints.
+## Resolved Decisions
+
+The spec's open questions (O1–O6) were all decided before implementation; the PR (#90) was built to match. Recorded here so the merged plan reflects what shipped.
+
+- **O1 — `link=true` flag on the existing `/api/signin` handlers** (NOT separate `/api/link/*` endpoints). The SDK exposes `link_start` / `link_status` / `wait_for_link` aliases over the sign-in machinery. The signed response carries an `account` view only when link-intent was set.
+- **O2 — Opportunistic handle refresh only:** `touch_handle` on `GET /api/me` (and on every `link`); no background crawler.
+- **O3 — Shared wallet collapses into one account** — inherent in wallet-as-key; no extra guard.
+- **O4 — No `account_id` column added** — the wallet IS the account key; the existing NULL hook stays untouched.
+- **O5 — Inverse lookup is in-process only;** `GET /api/account` returns ONLY the caller's own resolved-wallet account.
+- **O6 — No unlink flow** in this PR.
 
 ---
 
@@ -108,7 +117,7 @@ Unblocks: **#89** (Mini App single account object).
 
 Unblocks: **#85/#91** (cross-surface handles only *exist* once users link).
 
-> **Decision gate (O1):** this task assumes a `link=true` flag on the existing sign-in handlers. If the user chose separate `/api/link/*` endpoints, split accordingly — the test assertions are the same.
+> **Decided (O1):** a `link=true` flag on the existing sign-in handlers (see Resolved Decisions above). The SDK exposes `link_*` aliases over the same machinery; the signed response carries the `account` view only under link-intent.
 
 **Files:**
 - Modify: `lfg_service/app.py` — `handle_signin_start` (record `link` intent in `signin_payloads[uuid]`), `handle_signin_status` (on `signed`, when link-intent, include `"account": {wallet, identities}` in the response)
