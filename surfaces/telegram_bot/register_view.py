@@ -16,10 +16,12 @@ from surfaces.telegram_bot import render
 async def handle_register(svc: LFGServiceClient, update: Any, context: Any) -> None:
     bot = context.bot
     chat_id = update.effective_chat.id
-    user_id = str(update.effective_user.id)
+    user = update.effective_user
+    user_id = str(user.id)
+    username = user.username or getattr(user, "full_name", "") or ""
 
     try:
-        session = await svc.signin_start(user_id)
+        session = await svc.signin_start(user_id, username=username)
     except ServiceError as e:
         await bot.send_message(chat_id, render.error_caption(friendly_error(e)))
         return

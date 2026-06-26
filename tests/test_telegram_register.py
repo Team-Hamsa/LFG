@@ -38,8 +38,10 @@ class _Svc:
         self._start = start
         self._final = final
         self._qr = qr
+        self.signin_start_username: str = ""
 
-    async def signin_start(self, user_id):
+    async def signin_start(self, user_id, *, username=""):
+        self.signin_start_username = username
         if isinstance(self._start, Exception):
             raise self._start
         return self._start
@@ -61,6 +63,8 @@ def test_signed_registers_and_reports_wallet():
     _run(register_view.handle_register(svc, update, ctx))
     assert bot.photos and bot.photos[0][0] == 999  # QR sent
     assert any("rXRPL" in m[1] for m in bot.messages)  # verified wallet reported
+    # username must be forwarded — not empty — so the service stores the real name
+    assert svc.signin_start_username == "tg"
 
 
 def test_expired_reports_retry():

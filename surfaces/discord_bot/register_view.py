@@ -16,9 +16,10 @@ from surfaces.discord_bot import render
 async def handle_register(svc: LFGServiceClient, interaction: discord.Interaction) -> None:
     await interaction.response.defer(ephemeral=True)
     user_id = str(interaction.user.id)
+    username = str(interaction.user)
 
     try:
-        session = await svc.signin_start(user_id)
+        session = await svc.signin_start(user_id, username=username)
     except ServiceError as e:
         await interaction.followup.send(
             embed=render.error_embed(friendly_error(e), title="⚠️ Wallet registration"),

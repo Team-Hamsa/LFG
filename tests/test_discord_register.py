@@ -13,6 +13,15 @@ def _run(coro):
         loop.close()
 
 
+class _FakeUser:
+    """Fake Discord user whose str() returns a predictable display name."""
+
+    id = 9
+
+    def __str__(self) -> str:
+        return "d#1"
+
+
 def _interaction():
     sent = []
 
@@ -23,7 +32,7 @@ def _interaction():
         sent.append(embed)
 
     inter = SimpleNamespace(
-        user=SimpleNamespace(id=9, __str__=lambda self: "d#1"),
+        user=_FakeUser(),
         response=SimpleNamespace(defer=defer),
         followup=SimpleNamespace(send=followup_send),
     )
@@ -33,8 +42,10 @@ def _interaction():
 class _Svc:
     def __init__(self, start, final, qr=b"PNG"):
         self._start, self._final, self._qr = start, final, qr
+        self.signin_start_username: str = ""
 
-    async def signin_start(self, user_id):
+    async def signin_start(self, user_id, *, username=""):
+        self.signin_start_username = username
         if isinstance(self._start, Exception):
             raise self._start
         return self._start
@@ -55,6 +66,8 @@ def test_signed_reports_wallet():
     _run(register_view.handle_register(svc, inter))
     # at least the QR embed + a success embed mentioning the wallet
     assert any("rXRPL" in (e.description or "") for e in sent if e is not None)
+    # username must be forwarded — not empty — so the service stores the real name
+    assert svc.signin_start_username == "d#1"
 
 
 def test_service_error_reports_friendly():
