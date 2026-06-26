@@ -45,3 +45,19 @@ def test_only_global_sync_when_guild_id_unset():
 
     tree.sync.assert_awaited_once_with()  # bare global sync only
     tree.copy_global_to.assert_not_called()
+
+
+def test_sync_runs_only_once_across_reconnects(monkeypatch):
+    # on_ready can re-fire on reconnect; _sync_commands_once must sync only the
+    # first time so we don't burn Discord's application-command rate budget.
+    import surfaces.discord_bot.bot as bot_mod
+
+    monkeypatch.setattr(bot_mod, "_commands_synced", False)
+    inner = AsyncMock()
+    monkeypatch.setattr(bot_mod, "_sync_commands", inner)
+
+    _run(bot_mod._sync_commands_once(_fake_tree(), guild_id=987654321))
+    _run(bot_mod._sync_commands_once(_fake_tree(), guild_id=987654321))
+    _run(bot_mod._sync_commands_once(_fake_tree(), guild_id=987654321))
+
+    inner.assert_awaited_once()  # synced once despite three on_ready cycles

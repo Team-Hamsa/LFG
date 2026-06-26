@@ -95,10 +95,28 @@ async def _sync_commands(
         await command_tree.sync(guild=guild)  # instant in the configured guild
 
 
+# on_ready can fire again on every gateway reconnect/resume; syncing the command
+# tree each time would burn Discord's application-command rate budget (and risk a
+# 24h lockout). Sync exactly once per process.
+_commands_synced = False
+
+
+async def _sync_commands_once(
+    command_tree: "discord.app_commands.CommandTree[Any]", guild_id: int
+) -> None:
+    """Sync the command tree at most once per process (on_ready can re-fire on
+    every reconnect)."""
+    global _commands_synced
+    if _commands_synced:
+        return
+    await _sync_commands(command_tree, guild_id)
+    _commands_synced = True
+
+
 @bot.event
 async def on_ready() -> None:
-    create_users_table()
-    await _sync_commands(tree, config.DISCORD_GUILD_ID)
+    create_users_table()  # idempotent (CREATE TABLE IF NOT EXISTS)
+    await _sync_commands_once(tree, config.DISCORD_GUILD_ID)
     assert bot.user is not None
     logging.info(f"Logged in as {bot.user} (ID: {bot.user.id})")
 
