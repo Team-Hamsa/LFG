@@ -103,6 +103,7 @@ async def handle_swap_pick(svc: Any, update: Any, context: Any) -> None:
         # First pick — lock gender, re-render the grid filtered to that body type.
         session["nft1_id"] = nft_id
         gender = picked.get("gender")
+        await query.answer()  # dismiss the loading spinner on this happy path
         await query.edit_message_text(
             "Now pick a matching body type to swap with.",
             reply_markup=swap_render.nft_grid_keyboard(roster, gender=gender, page=0),
@@ -119,6 +120,7 @@ async def handle_swap_pick(svc: Any, update: Any, context: Any) -> None:
         return
 
     session["nft2_id"] = nft_id
+    await query.answer()  # dismiss the loading spinner on this happy path
     await _show_trait_picker(update, context)
 
 

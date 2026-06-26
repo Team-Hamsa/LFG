@@ -84,6 +84,9 @@ def build_application() -> Application:  # type: ignore[type-arg]
     )
     application.add_handler(CallbackQueryHandler(cmds.swap_cancel_button, pattern="^swap_cancel$"))
     application.add_handler(CallbackQueryHandler(cmds.swap_page_button, pattern="^swap_page_"))
+    # Dimmed wrong-gender grid buttons fire swap_noop — answer silently so the
+    # loading spinner doesn't hang.
+    application.add_handler(CallbackQueryHandler(cmds.swap_noop_button, pattern="^swap_noop$"))
     return application
 
 

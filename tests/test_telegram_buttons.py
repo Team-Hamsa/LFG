@@ -105,5 +105,6 @@ def test_build_application_registers_callback_handlers(monkeypatch):
     cb_handlers = [
         h for group in app.handlers.values() for h in group if isinstance(h, CallbackQueryHandler)
     ]
-    # mint + register + swap menu button + 5 swap_* conversation patterns (#88)
-    assert len(cb_handlers) == 8
+    # mint + register + swap menu button + 6 swap_* conversation patterns (#88,
+    # incl. swap_noop for dimmed wrong-gender buttons)
+    assert len(cb_handlers) == 9

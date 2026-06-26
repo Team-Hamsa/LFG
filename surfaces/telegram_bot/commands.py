@@ -120,3 +120,10 @@ async def swap_page_button(update: Any, context: Any) -> None:
     from surfaces.telegram_bot.swap_view import handle_swap_page  # noqa: PLC0415
 
     await handle_swap_page(svc, update, context)
+
+
+async def swap_noop_button(update: Any, context: Any) -> None:
+    # Dimmed wrong-gender grid buttons emit callback_data="swap_noop". With no
+    # handler, tapping one leaves the loading spinner stuck ~10s. Silently
+    # dismiss it — answer() with no text shows no toast.
+    await update.callback_query.answer()

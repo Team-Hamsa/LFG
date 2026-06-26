@@ -213,6 +213,24 @@ def test_swap_result_caption_modified_vs_offer():
     assert "LFGO #2" in offer and "xaman" in offer.lower()
 
 
+def test_swap_cost_line_free_when_no_fee():
+    assert "free" in swap_render.swap_cost_line(None).lower()
+
+
+def test_swap_cost_line_full_fee():
+    line = swap_render.swap_cost_line({"per_nft": "10", "pay_with": "BRIX"})
+    assert "10" in line and "BRIX" in line
+
+
+def test_swap_cost_line_partial_fee_never_emits_none():
+    # A truthy fee object missing per_nft or pay_with must not render "None".
+    missing_amount = swap_render.swap_cost_line({"pay_with": "BRIX"})
+    missing_currency = swap_render.swap_cost_line({"per_nft": "10"})
+    empty_obj = swap_render.swap_cost_line({"per_nft": None, "pay_with": None})
+    for line in (missing_amount, missing_currency, empty_obj):
+        assert "None" not in line
+
+
 # ---- entry: /swap ---------------------------------------------------------
 
 
@@ -253,6 +271,25 @@ def _session(roster, **over):
     s = {"roster": roster, "nft1_id": None, "nft2_id": None, "traits": {}, "page": 0}
     s.update(over)
     return s
+
+
+def test_first_pick_answers_query_once():
+    bot = _Bot()
+    nfts = [_nft("m1", 1, "male"), _nft("m2", 3, "male")]
+    user_data = {"swap_session": _session(nfts)}
+    update, ctx, query = _callback_update(bot, "swap_pick_m1", user_data)
+    _run(swap_view.handle_swap_pick(None, update, ctx))
+    # the loading spinner must be dismissed exactly once on the happy path
+    assert query.answer.await_count == 1
+
+
+def test_second_pick_answers_query_once():
+    bot = _Bot()
+    nfts = [_nft("m1", 1, "male", Eyes="Blue"), _nft("m2", 3, "male", Eyes="Green")]
+    user_data = {"swap_session": _session(nfts, nft1_id="m1")}
+    update, ctx, query = _callback_update(bot, "swap_pick_m2", user_data)
+    _run(swap_view.handle_swap_pick(None, update, ctx))
+    assert query.answer.await_count == 1
 
 
 def test_first_pick_locks_gender_and_filters_grid():
@@ -407,6 +444,19 @@ def test_cancel_clears_state():
     assert "swap_session" not in ctx.user_data
     assert query.edits
     assert "cancel" in query.edits[-1][0].lower()
+
+
+# ---- no-op (dimmed wrong-gender button) -----------------------------------
+
+
+def test_swap_noop_button_answers_query_silently():
+    from surfaces.telegram_bot import commands
+
+    bot = _Bot()
+    update, ctx, query = _callback_update(bot, "swap_noop", {})
+    # Must not raise; just dismisses the spinner with a silent answer().
+    _run(commands.swap_noop_button(update, ctx))
+    query.answer.assert_awaited_once_with()
 
 
 # ---- pagination -----------------------------------------------------------

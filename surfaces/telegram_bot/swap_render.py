@@ -121,7 +121,9 @@ def swap_cost_line(swap_fee: Any) -> str:
     """Cost line from the /api/nfts swap_fee block (or 'free' when null)."""
     if not swap_fee:
         return "Cost: free 🎉"
-    return f"Cost: {swap_fee.get('per_nft')} {swap_fee.get('pay_with')} per NFT"
+    per_nft = swap_fee.get("per_nft") or "?"
+    pay_with = swap_fee.get("pay_with") or "?"
+    return f"Cost: {per_nft} {pay_with} per NFT"
 
 
 def swap_payment_caption(fee_amount: str, pay_with: str) -> str:
