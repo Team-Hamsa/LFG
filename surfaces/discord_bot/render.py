@@ -72,8 +72,8 @@ def signin_embed(signin_link: str) -> Embed:
     return embed
 
 
-def error_embed(message: str) -> Embed:
-    return Embed(title="⚠️ Mint failed", description=message, color=0xFF0000)
+def error_embed(message: str, *, title: str = "⚠️ Mint failed") -> Embed:
+    return Embed(title=title, description=message, color=0xFF0000)
 
 
 def file_from_png(data: bytes, filename: str) -> discord.File:

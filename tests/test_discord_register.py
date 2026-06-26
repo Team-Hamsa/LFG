@@ -62,3 +62,4 @@ def test_service_error_reports_friendly():
     svc = _Svc(start=ServiceError("down", status=503), final={})
     _run(register_view.handle_register(svc, inter))
     assert sent  # an error embed was sent
+    assert any("down" in (e.description or "") for e in sent if e is not None)
