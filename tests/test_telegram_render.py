@@ -11,6 +11,20 @@ def test_offer_caption_has_number_and_link():
     cap = render.offer_caption({"nft_number": 3600, "accept_deeplink": "https://xumm.app/sign/xyz"})
     assert "3600" in cap
     assert "https://xumm.app/sign/xyz" in cap
+    # default with_qr=True still mentions QR scanning
+    assert "qr" in cap.lower() or "scan" in cap.lower()
+
+
+def test_offer_caption_no_qr_omits_scan_instructions():
+    cap = render.offer_caption(
+        {"nft_number": 4242, "accept_deeplink": "https://xumm.app/sign/abc"},
+        with_qr=False,
+    )
+    assert "4242" in cap
+    assert "https://xumm.app/sign/abc" in cap
+    # must NOT instruct scanning a QR
+    assert "scan" not in cap.lower()
+    assert "qr" not in cap.lower()
 
 
 def test_error_caption_passthrough():

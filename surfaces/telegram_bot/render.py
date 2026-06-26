@@ -21,14 +21,18 @@ def payment_caption(payment_link: str) -> str:
     )
 
 
-def offer_caption(final: dict[str, Any]) -> str:
+def offer_caption(final: dict[str, Any], *, with_qr: bool = True) -> str:
     number = final.get("nft_number", "?")
     accept_link = final.get("accept_deeplink", "")
+    if with_qr:
+        step1 = "1. Scan the QR with XUMM"
+    else:
+        step1 = "1. Open the link below in XUMM"
     return (
         "🎨 NFT Minted Successfully!\n\n"
         f"NFT Number: #{number}\n\n"
         "To claim it:\n"
-        "1. Scan the QR with XUMM\n"
+        f"{step1}\n"
         "2. Review and accept the offer\n"
         "3. Your NFT appears in your wallet\n\n"
         f"Open in XUMM: {accept_link}\n"

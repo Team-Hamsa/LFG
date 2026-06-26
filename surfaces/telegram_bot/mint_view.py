@@ -73,7 +73,7 @@ async def handle_mint(svc: LFGServiceClient, update: Any, context: Any) -> None:
         qr_png = await svc.qr_png(accept_link)
     except ServiceError:
         # Mint succeeded; only the QR render failed. Still surface the offer link.
-        await bot.send_message(chat_id, render.offer_caption(final))
+        await bot.send_message(chat_id, render.offer_caption(final, with_qr=False))
         return
     await bot.send_photo(
         chat_id,

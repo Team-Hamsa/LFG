@@ -122,4 +122,9 @@ def test_offer_qr_render_failure_falls_back_to_message():
     # payment QR went out, but the offer QR render failed -> no second photo,
     # and the offer caption (carrying the nft_number) is surfaced as a message.
     assert len(bot.photos) == 1
-    assert any("4242" in m[1] for m in bot.messages)
+    fallback_texts = [m[1] for m in bot.messages]
+    assert any("4242" in t for t in fallback_texts)
+    # fallback must NOT instruct scanning a QR (no QR was sent)
+    for t in fallback_texts:
+        assert "scan" not in t.lower()
+        assert "qr" not in t.lower()
