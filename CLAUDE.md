@@ -72,12 +72,17 @@ SESSION_TIMEOUT_TOTAL=60
 VIEW_TIMEOUT=600
 LFG_SERVICE_URL=http://localhost:8000
 SERVICE_TOKEN_DISCORD=<discord-surface-token>
+TELEGRAM_BOT_TOKEN=<telegram-bot-token>
+SERVICE_TOKEN_TELEGRAM=<telegram-surface-token>
+TELEGRAM_ANNOUNCE_CHAT_ID=<telegram-channel-id>
 ```
 
 ### Running the Bot
 ```bash
 python main.py
 ```
+
+The Telegram surface runs as pm2 process `lfg-telegram` → `python -m surfaces.telegram_bot.bot`.
 
 ## Directory Structure
 
