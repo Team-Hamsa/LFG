@@ -40,6 +40,10 @@ def offer_caption(final: dict[str, Any], *, with_qr: bool = True) -> str:
     )
 
 
+def artwork_caption(final: dict[str, Any]) -> str:
+    return f"🖼️ Your NFT #{final.get('nft_number', '?')}"
+
+
 def error_caption(message: str) -> str:
     return f"⚠️ {message}"
 

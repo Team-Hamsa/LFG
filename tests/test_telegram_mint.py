@@ -57,12 +57,21 @@ def test_happy_path_sends_payment_and_offer_qr():
     update, ctx = _update_ctx(bot)
     svc = _Svc(
         start={"id": "sid", "payment_link": "https://pay"},
-        final={"state": "offer_ready", "nft_number": 3600, "accept_deeplink": "https://accept"},
+        final={
+            "state": "offer_ready",
+            "nft_number": 3600,
+            "image_url": "https://cdn/art.png",
+            "accept_deeplink": "https://accept",
+        },
     )
     _run(mint_view.handle_mint(svc, update, ctx))
-    # two photos: payment QR + offer QR. caption is now at index 2.
-    assert len(bot.photos) == 2
+    # three photos: payment QR + artwork + offer QR. caption (with the number)
+    # is on the final offer photo (index 2).
+    assert len(bot.photos) == 3
+    # artwork photo carries the image_url and an artwork caption
+    assert bot.photos[1][1] == "https://cdn/art.png"
     assert "3600" in bot.photos[1][2]
+    assert "3600" in bot.photos[2][2]
 
 
 def test_hosted_qr_url_used_directly():

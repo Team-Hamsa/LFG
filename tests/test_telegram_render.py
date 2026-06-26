@@ -27,6 +27,16 @@ def test_offer_caption_no_qr_omits_scan_instructions():
     assert "qr" not in cap.lower()
 
 
+def test_artwork_caption_has_number():
+    cap = render.artwork_caption({"nft_number": 3600, "image_url": "https://cdn/x.png"})
+    assert "3600" in cap
+
+
+def test_artwork_caption_missing_number():
+    cap = render.artwork_caption({})
+    assert "?" in cap
+
+
 def test_error_caption_passthrough():
     assert "boom" in render.error_caption("boom")
 

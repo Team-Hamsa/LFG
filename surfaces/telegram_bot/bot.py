@@ -22,12 +22,22 @@ async def _post_init(application: Application) -> None:  # type: ignore[type-arg
     global _events_task
     await svc.__aenter__()
 
-    async def _announce(message: str) -> None:
-        await application.bot.send_message(chat_id=config.TELEGRAM_ANNOUNCE_CHAT_ID, text=message)
+    async def _announce(message: str, image_url: str | None) -> None:
+        if image_url:
+            await application.bot.send_photo(
+                chat_id=config.TELEGRAM_ANNOUNCE_CHAT_ID, photo=image_url, caption=message
+            )
+        else:
+            await application.bot.send_message(
+                chat_id=config.TELEGRAM_ANNOUNCE_CHAT_ID, text=message
+            )
 
-    async def _dm(uid: str, message: str) -> None:
+    async def _dm(uid: str, message: str, image_url: str | None) -> None:
         try:
-            await application.bot.send_message(chat_id=int(uid), text=message)
+            if image_url:
+                await application.bot.send_photo(chat_id=int(uid), photo=image_url, caption=message)
+            else:
+                await application.bot.send_message(chat_id=int(uid), text=message)
         except Exception as e:
             logging.warning(f"DM to {uid} failed: {e}")
 

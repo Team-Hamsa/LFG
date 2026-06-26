@@ -57,17 +57,68 @@ def test_announce_and_dm_on_telegram_completed():
     svc = _FakeSvc(agen)
     sent, dmed = [], []
 
-    async def announce(m):
-        sent.append(m)
+    async def announce(m, image):
+        sent.append((m, image))
 
-    async def dm(uid, m):
-        dmed.append((uid, m))
+    async def dm(uid, m, image):
+        dmed.append((uid, m, image))
 
     _run(ev_mod.run_event_loop(svc, announce, dm))
     assert svc.types == ["mint.completed", "mint.failed"]
-    assert sent and "3600" in sent[0]
-    assert dmed == [("55", sent[0])]
+    assert sent and "3600" in sent[0][0]
+    # no image_url in data -> image arg is None
+    assert sent[0][1] is None
+    assert dmed == [("55", sent[0][0], None)]
     assert agen.closed is True
+
+
+def test_image_url_passed_through_on_completed():
+    agen = _FakeAgen(
+        [
+            Event(
+                type="mint.completed",
+                ts=0,
+                identity=_tg_identity("55"),
+                wallet=None,
+                data={"nft_number": 3600, "image_url": "https://cdn/x.png"},
+            ),
+        ]
+    )
+    svc = _FakeSvc(agen)
+    sent, dmed = [], []
+
+    async def announce(m, image):
+        sent.append((m, image))
+
+    async def dm(uid, m, image):
+        dmed.append((uid, m, image))
+
+    _run(ev_mod.run_event_loop(svc, announce, dm))
+    assert sent[0][1] == "https://cdn/x.png"
+    assert dmed == [("55", sent[0][0], "https://cdn/x.png")]
+
+
+def test_no_image_on_failed():
+    agen = _FakeAgen(
+        [
+            Event(
+                type="mint.failed",
+                ts=0,
+                identity=_tg_identity("55"),
+                wallet=None,
+                data={"nft_number": 1, "image_url": "https://cdn/x.png"},
+            ),
+        ]
+    )
+    svc = _FakeSvc(agen)
+    sent = []
+
+    async def announce(m, image):
+        sent.append((m, image))
+
+    _run(ev_mod.run_event_loop(svc, announce, None))
+    # mint.failed -> announcement_image returns None even if data has a url
+    assert sent[0][1] is None
 
 
 def test_no_dm_for_failed_or_non_telegram():
@@ -91,10 +142,10 @@ def test_no_dm_for_failed_or_non_telegram():
     )
     sent, dmed = [], []
 
-    async def announce(m):
+    async def announce(m, image):
         sent.append(m)
 
-    async def dm(uid, m):
+    async def dm(uid, m, image):
         dmed.append((uid, m))
 
     _run(ev_mod.run_event_loop(_FakeSvc(agen), announce, dm))
@@ -123,7 +174,7 @@ def test_loop_survives_handler_error():
     )
     calls = {"n": 0}
 
-    async def announce(m):
+    async def announce(m, image):
         calls["n"] += 1
         if calls["n"] == 1:
             raise RuntimeError("boom")
