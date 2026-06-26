@@ -12,7 +12,20 @@ from collections.abc import Awaitable, Callable
 from lfg_service.events import Event
 from surfaces._client import LFGServiceClient
 
-_MINT_EVENT_TYPES = ["mint.completed", "mint.failed"]
+# Every in-process NFT interaction the service publishes (#91). Burns are NOT
+# here (out-of-process / covered by swap.*); the X surface is deferred to #41.
+_ANNOUNCE_EVENT_TYPES = [
+    "mint.completed",
+    "mint.failed",
+    "swap.completed",
+    "swap.failed",
+    "harvest.completed",
+    "harvest.failed",
+    "assemble.completed",
+    "assemble.failed",
+    "equip.completed",
+    "equip.failed",
+]
 
 
 def _is_discord(ev: Event) -> bool:
@@ -45,13 +58,33 @@ def make_announcement(ev: Event) -> str:
     who = _minter_display(ev)
     if ev.type == "mint.completed":
         return f"🎨 NFT #{number} minted by {who}."
-    return f"❌ Mint failed for {who} (#{number})."
+    if ev.type == "mint.failed":
+        return f"❌ Mint failed for {who} (#{number})."
+    if ev.type == "swap.completed":
+        return f"🔄 {who} swapped traits."
+    if ev.type == "swap.failed":
+        return f"❌ {who}'s trait swap failed."
+    if ev.type == "assemble.completed":
+        return f"🛠️ {who} assembled a new character."
+    if ev.type == "assemble.failed":
+        return f"❌ {who}'s assemble failed."
+    if ev.type == "harvest.completed":
+        return f"🌾 {who} harvested a character into their bucket."
+    if ev.type == "harvest.failed":
+        return f"❌ {who}'s harvest failed."
+    if ev.type == "equip.completed":
+        return f"👕 {who} equipped a trait."
+    if ev.type == "equip.failed":
+        return f"❌ {who}'s equip failed."
+    logging.warning("make_announcement: unhandled event type %r", ev.type)
+    return f"❌ Unknown event for {who}."
 
 
 def announcement_image(ev: Event) -> str | None:
-    """The minted artwork URL to attach to a completed-mint announcement, or
-    None for failures / events that carry no image."""
-    if ev.type == "mint.completed":
+    """The artwork URL to attach to a completed announcement, or None for
+    failures / events that carry no image. The service normalizes the image
+    onto a uniform top-level data.image_url across interactions."""
+    if ev.type.endswith(".completed"):
         return (ev.data or {}).get("image_url")
     return None
 
@@ -64,7 +97,7 @@ async def run_event_loop(
     """Consume the service firehose forever. The SDK reconnects internally;
     cancel the enclosing task to stop (the finally block aclose()s the
     generator to release the WebSocket)."""
-    agen = svc.events(types=_MINT_EVENT_TYPES)
+    agen = svc.events(types=_ANNOUNCE_EVENT_TYPES)
     try:
         async for ev in agen:
             try:
