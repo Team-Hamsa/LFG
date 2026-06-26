@@ -19,11 +19,30 @@ def _is_discord(ev: Event) -> bool:
     return (ev.identity or {}).get("platform") == "discord"
 
 
+def _minter_display(ev: Event) -> str:
+    """Who to credit in the channel. Prefer a real Discord ping: the event's own
+    discord identity, else a linked discord identity (so a webapp/telegram mint
+    by someone who ALSO linked Discord still pings them here). Otherwise fall
+    back to the minter's display_handle, then the wallet, then a generic name."""
+    ident = ev.identity or {}
+    uid = ident.get("platform_user_id")
+    if _is_discord(ev) and uid:
+        return f"<@{uid}>"
+    for link in ident.get("linked") or []:
+        if link.get("platform") == "discord" and link.get("platform_user_id"):
+            return f"<@{link['platform_user_id']}>"
+    handle = ident.get("display_handle")
+    if handle:
+        return str(handle)
+    if ev.wallet:
+        return str(ev.wallet)
+    return "a user"
+
+
 def make_announcement(ev: Event) -> str:
     data = ev.data or {}
     number = data.get("nft_number", "?")
-    uid = (ev.identity or {}).get("platform_user_id")
-    who = f"<@{uid}>" if (_is_discord(ev) and uid) else "a user"
+    who = _minter_display(ev)
     if ev.type == "mint.completed":
         return f"🎨 NFT #{number} minted for {who}."
     return f"❌ Mint failed for {who} (#{number})."

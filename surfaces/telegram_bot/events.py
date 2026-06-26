@@ -15,12 +15,29 @@ def _is_telegram(ev: Event) -> bool:
     return (ev.identity or {}).get("platform") == "telegram"
 
 
+def _minter_display(ev: Event) -> str:
+    """A human name for the minter. Telegram cannot @-mention by numeric id, so
+    we never build a mention — we prefer the minter's own display_handle, then
+    any linked surface's handle, then the wallet, then a generic fallback."""
+    ident = ev.identity or {}
+    handle = ident.get("display_handle")
+    if handle:
+        return str(handle)
+    for link in ident.get("linked") or []:
+        if link.get("display_handle"):
+            return str(link["display_handle"])
+    if ev.wallet:
+        return str(ev.wallet)
+    return "a user"
+
+
 def make_announcement(ev: Event) -> str:
     data = ev.data or {}
     number = data.get("nft_number", "?")
+    name = _minter_display(ev)
     if ev.type == "mint.completed":
-        return f"🎨 NFT #{number} minted for a user."
-    return f"❌ Mint failed for a user (#{number})."
+        return f"🎨 NFT #{number} minted by {name}."
+    return f"❌ Mint failed for {name} (#{number})."
 
 
 def announcement_image(ev: Event) -> str | None:
