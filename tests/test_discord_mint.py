@@ -84,8 +84,12 @@ def test_mint_happy_path(mint_mod):
     # (no second qr_png round-trip).
     svc.qr_png.assert_awaited_once_with("L")
     assert ix.followup.send.await_count == 2
-    offer_embed = ix.followup.send.await_args_list[1].kwargs["embed"]
+    embeds = ix.followup.send.await_args_list[1].kwargs["embeds"]
+    offer_embed = embeds[0]
     assert "Minted Successfully" in offer_embed.title
+    # the large artwork embed is included alongside the offer embed
+    art = [e for e in embeds if "Your NFT" in (e.title or "")]
+    assert art and art[0].image.url == "https://cdn/x.png"
 
 
 def test_mint_offer_falls_back_to_qr_png(mint_mod):

@@ -124,17 +124,67 @@ def test_run_event_loop_announces_dms_and_closes(ev_mod):
     svc = _FakeSvc(agen)
     sent, dmed = [], []
 
-    async def announce(m):
-        sent.append(m)
+    async def announce(m, image):
+        sent.append((m, image))
 
-    async def dm(uid, m):
-        dmed.append((uid, m))
+    async def dm(uid, m, image):
+        dmed.append((uid, m, image))
 
     _run(ev_mod.run_event_loop(svc, announce, dm))
     assert svc.types == ["mint.completed", "mint.failed"]
-    assert sent and "3600" in sent[0]
-    assert dmed == [("42", sent[0])]
+    assert sent and "3600" in sent[0][0]
+    # no image_url in data -> image arg is None
+    assert sent[0][1] is None
+    assert dmed == [("42", sent[0][0], None)]
     assert agen.closed is True
+
+
+def test_run_event_loop_passes_image_url_through(ev_mod):
+    agen = _FakeAgen(
+        [
+            Event(
+                type="mint.completed",
+                ts=0,
+                identity=_discord_identity("42"),
+                wallet=None,
+                data={"nft_number": 3600, "image_url": "https://cdn/x.png"},
+            )
+        ]
+    )
+    svc = _FakeSvc(agen)
+    sent, dmed = [], []
+
+    async def announce(m, image):
+        sent.append((m, image))
+
+    async def dm(uid, m, image):
+        dmed.append((uid, m, image))
+
+    _run(ev_mod.run_event_loop(svc, announce, dm))
+    assert sent[0][1] == "https://cdn/x.png"
+    assert dmed == [("42", sent[0][0], "https://cdn/x.png")]
+
+
+def test_run_event_loop_no_image_on_failed(ev_mod):
+    agen = _FakeAgen(
+        [
+            Event(
+                type="mint.failed",
+                ts=0,
+                identity=_discord_identity("42"),
+                wallet=None,
+                data={"nft_number": 1, "image_url": "https://cdn/x.png"},
+            )
+        ]
+    )
+    sent = []
+
+    async def announce(m, image):
+        sent.append((m, image))
+
+    _run(ev_mod.run_event_loop(_FakeSvc(agen), announce, None))
+    # mint.failed -> announcement_image is None even if data carries a url
+    assert sent[0][1] is None
 
 
 def test_run_event_loop_no_dm_for_failed_or_non_discord(ev_mod):
@@ -158,10 +208,10 @@ def test_run_event_loop_no_dm_for_failed_or_non_discord(ev_mod):
     )
     sent, dmed = [], []
 
-    async def announce(m):
+    async def announce(m, image):
         sent.append(m)
 
-    async def dm(uid, m):
+    async def dm(uid, m, image):
         dmed.append((uid, m))
 
     _run(ev_mod.run_event_loop(_FakeSvc(agen), announce, dm))
@@ -191,7 +241,7 @@ def test_run_event_loop_survives_handler_error(ev_mod):
     )
     calls = {"n": 0}
 
-    async def announce(m):
+    async def announce(m, image):
         calls["n"] += 1
         if calls["n"] == 1:
             raise RuntimeError("boom")  # first event blows up; loop must continue

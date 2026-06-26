@@ -49,11 +49,19 @@ def offer_embed(final: dict[str, Any], qr_image_url: str) -> Embed:
         ),
         color=0x00FF00,
     )
-    image_url = final.get("image_url")
-    if image_url:
-        embed.set_thumbnail(url=image_url)
     embed.set_image(url=qr_image_url)
     embed.set_footer(text="Offer acceptance request expires in 24 hours")
+    return embed
+
+
+def artwork_embed(final: dict[str, Any]) -> Embed | None:
+    """Large standalone embed showing the minted artwork to the minter (#86).
+    Returns None when the session carries no image_url."""
+    image_url = final.get("image_url")
+    if not image_url:
+        return None
+    embed = Embed(title=f"🖼️ Your NFT #{final.get('nft_number', '?')}", color=0x00FF00)
+    embed.set_image(url=image_url)
     return embed
 
 

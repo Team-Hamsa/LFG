@@ -57,11 +57,17 @@ async def handle_mint(svc: LFGServiceClient, interaction: discord.Interaction) -
         await interaction.followup.send(embed=render.error_embed(reason), ephemeral=True)
         return
 
+    # Large standalone artwork embed shown to the minter alongside the offer (#86).
+    art = render.artwork_embed(final)
+
     # 4. offer-accept QR. Prefer the service-hosted accept_qr_url (no extra
     #    round-trip); otherwise render the accept deeplink ourselves.
     hosted_qr = final.get("accept_qr_url")
     if hosted_qr:
-        await interaction.followup.send(embed=render.offer_embed(final, hosted_qr), ephemeral=True)
+        await interaction.followup.send(
+            embeds=[render.offer_embed(final, hosted_qr)] + ([art] if art else []),
+            ephemeral=True,
+        )
         return
 
     accept_link = final.get("accept_deeplink", "")
@@ -70,10 +76,13 @@ async def handle_mint(svc: LFGServiceClient, interaction: discord.Interaction) -
     except ServiceError:
         # The mint succeeded; only the QR render failed. Still surface the offer
         # with the deeplink so the user can claim it.
-        await interaction.followup.send(embed=render.offer_embed(final, ""), ephemeral=True)
+        await interaction.followup.send(
+            embeds=[render.offer_embed(final, "")] + ([art] if art else []),
+            ephemeral=True,
+        )
         return
     await interaction.followup.send(
-        embed=render.offer_embed(final, "attachment://offer_qr.png"),
+        embeds=[render.offer_embed(final, "attachment://offer_qr.png")] + ([art] if art else []),
         file=render.file_from_png(qr_png, "offer_qr.png"),
         ephemeral=True,
     )
