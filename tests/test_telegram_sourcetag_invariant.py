@@ -13,7 +13,9 @@ _FORBIDDEN = ("TransactionType", "NFTokenMint", "NFTokenBurn", "TrustSet", "subm
 
 def test_no_inline_xrpl_tx_in_telegram_package():
     offenders = []
-    for py in _PKG.glob("*.py"):
+    # rglob (not glob) so the invariant still catches an inline tx if a future
+    # subpackage is added (e.g. surfaces/telegram_bot/handlers/foo.py).
+    for py in _PKG.rglob("*.py"):
         text = py.read_text()
         for needle in _FORBIDDEN:
             if needle in text:
