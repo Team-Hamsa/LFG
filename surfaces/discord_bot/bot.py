@@ -58,7 +58,7 @@ async def setup_hook() -> None:
         channel = bot.get_channel(config.ADMIN_LOG_CHANNEL_ID)
         if isinstance(channel, discord.TextChannel):
             if image_url:
-                embed = discord.Embed(description=message)
+                embed = discord.Embed(description=message, color=0x00FF00)
                 embed.set_image(url=image_url)
                 await channel.send(embed=embed)
             else:
@@ -68,7 +68,7 @@ async def setup_hook() -> None:
         try:
             user = await bot.fetch_user(int(uid))
             if image_url:
-                embed = discord.Embed(description=message)
+                embed = discord.Embed(description=message, color=0x00FF00)
                 embed.set_image(url=image_url)
                 await user.send(embed=embed)
             else:
