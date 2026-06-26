@@ -61,6 +61,11 @@ async def handle_mint(svc: LFGServiceClient, update: Any, context: Any) -> None:
         await bot.send_message(chat_id, render.error_caption(reason))
         return
 
+    # 3b. show the minter their artwork first (large), then the claim QR.
+    image_url = final.get("image_url")
+    if image_url:
+        await bot.send_photo(chat_id, photo=image_url, caption=render.artwork_caption(final))
+
     # 4. offer-accept QR. Prefer the service-hosted accept_qr_url (no extra
     #    round-trip); otherwise render the accept deeplink ourselves.
     hosted_qr = final.get("accept_qr_url")

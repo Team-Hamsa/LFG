@@ -54,15 +54,25 @@ async def setup_hook() -> None:
     # Enter the SDK's aiohttp session for the bot's lifetime.
     await svc.__aenter__()
 
-    async def _announce(message: str) -> None:
+    async def _announce(message: str, image_url: str | None) -> None:
         channel = bot.get_channel(config.ADMIN_LOG_CHANNEL_ID)
         if isinstance(channel, discord.TextChannel):
-            await channel.send(message)
+            if image_url:
+                embed = discord.Embed(description=message)
+                embed.set_image(url=image_url)
+                await channel.send(embed=embed)
+            else:
+                await channel.send(message)
 
-    async def _dm(uid: str, message: str) -> None:
+    async def _dm(uid: str, message: str, image_url: str | None) -> None:
         try:
             user = await bot.fetch_user(int(uid))
-            await user.send(message)
+            if image_url:
+                embed = discord.Embed(description=message)
+                embed.set_image(url=image_url)
+                await user.send(embed=embed)
+            else:
+                await user.send(message)
         except Exception as e:
             logging.warning(f"DM to {uid} failed: {e}")
 
