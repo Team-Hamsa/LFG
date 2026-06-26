@@ -21,7 +21,10 @@ DISCORD_BOT_TOKEN = _require("DISCORD_BOT_TOKEN")
 # Optional test/home guild. When set (non-zero) the bot also does an instant
 # guild-scoped command sync so slash commands appear immediately there; the
 # global sync (eventual, ~1h) still runs. 0 = unset, global-only (default).
-DISCORD_GUILD_ID = int(os.getenv("DISCORD_GUILD_ID", "0"))
+# Tolerate a blank/non-numeric value (e.g. `DISCORD_GUILD_ID=` in .env): fall
+# back to 0 (= disabled) instead of crashing the bot at import with int("").
+_raw_guild_id = os.getenv("DISCORD_GUILD_ID", "0").strip()
+DISCORD_GUILD_ID = int(_raw_guild_id) if _raw_guild_id.isdigit() else 0
 ADMIN_LOG_CHANNEL_ID = int(os.getenv("ADMIN_LOG_CHANNEL_ID", "0"))
 if not ADMIN_LOG_CHANNEL_ID:
     raise ValueError("ADMIN_LOG_CHANNEL_ID not found in environment variables")

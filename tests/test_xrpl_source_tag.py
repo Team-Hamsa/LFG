@@ -129,7 +129,8 @@ def test_buy_and_burn_sets_source_tag(monkeypatch):
             max_xrp="10",
         )
     )
-    assert captured["tx"].source_tag == config.SOURCE_TAG
+    # Pin the literal Make Waves hackathon SourceTag, not just config consistency.
+    assert captured["tx"].source_tag == 2606160021 == config.SOURCE_TAG
 
 
 def test_buy_and_burn_self_issuer_is_noop(monkeypatch):
