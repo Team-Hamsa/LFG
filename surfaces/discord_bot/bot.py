@@ -3,6 +3,7 @@ import asyncio
 import logging
 import random
 import signal
+from typing import Any
 
 import discord
 from discord.ext import commands
@@ -81,10 +82,41 @@ async def setup_hook() -> None:
     _events_task = asyncio.create_task(run_event_loop(svc, _announce, _dm))
 
 
+async def _sync_commands(
+    command_tree: "discord.app_commands.CommandTree[Any]", guild_id: int
+) -> None:
+    """Sync slash commands. Always does the global sync (eventual, propagates
+    to all guilds in ~1h). When guild_id is non-zero, ALSO does an instant
+    guild-scoped sync so commands appear immediately in that test/home guild."""
+    await command_tree.sync()  # global (eventual, for all guilds)
+    if guild_id:
+        guild = discord.Object(id=guild_id)
+        command_tree.copy_global_to(guild=guild)
+        await command_tree.sync(guild=guild)  # instant in the configured guild
+
+
+# on_ready can fire again on every gateway reconnect/resume; syncing the command
+# tree each time would burn Discord's application-command rate budget (and risk a
+# 24h lockout). Sync exactly once per process.
+_commands_synced = False
+
+
+async def _sync_commands_once(
+    command_tree: "discord.app_commands.CommandTree[Any]", guild_id: int
+) -> None:
+    """Sync the command tree at most once per process (on_ready can re-fire on
+    every reconnect)."""
+    global _commands_synced
+    if _commands_synced:
+        return
+    await _sync_commands(command_tree, guild_id)
+    _commands_synced = True
+
+
 @bot.event
 async def on_ready() -> None:
-    create_users_table()
-    await tree.sync()
+    create_users_table()  # idempotent (CREATE TABLE IF NOT EXISTS)
+    await _sync_commands_once(tree, config.DISCORD_GUILD_ID)
     assert bot.user is not None
     logging.info(f"Logged in as {bot.user} (ID: {bot.user.id})")
 

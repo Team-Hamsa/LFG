@@ -268,6 +268,17 @@ async def buy_and_burn(
     None (callers treat the burn as best-effort)."""
     try:
         wallet = Wallet.from_seed(config.SEED)
+        if wallet.classic_address == issuer:
+            # The bot wallet IS the issuer (testnet, where the SEED account
+            # issues the IOU). Paying an IOU to its own issuer redeems/destroys
+            # it on receipt, and you cannot send your own IOU to yourself —
+            # there is nothing to burn. Return a truthy sentinel so callers'
+            # `if not await buy_and_burn(...)` does not log a spurious error.
+            logging.info(
+                f"buy_and_burn: wallet is the issuer of {currency}; the IOU is redeemed on "
+                f"receipt, nothing to burn (no-op)."
+            )
+            return "self-issuer-noop"
         client = JsonRpcClient(config.JSON_RPC_URL)
         kwargs: dict[str, Any] = {
             "account": wallet.classic_address,
