@@ -184,6 +184,26 @@ def read_trait_tokens(conn: sqlite3.Connection) -> list[tuple[str, str, str, str
     ]
 
 
+def upsert_trait_token(
+    conn: sqlite3.Connection, nft_id: str, owner: str, slot: str, value: str
+) -> None:
+    """Insert/replace a standalone trait NFToken row (PK nft_id). Used by the
+    listener (mint/transfer rebuild) and the extract flow (optimistic write)."""
+    conn.execute(
+        """
+        INSERT INTO trait_tokens (nft_id, owner, slot, value) VALUES (?, ?, ?, ?)
+        ON CONFLICT(nft_id) DO UPDATE SET owner=excluded.owner, slot=excluded.slot, value=excluded.value
+        """,
+        (nft_id, owner, slot, value),
+    )
+    conn.commit()
+
+
+def delete_trait_token(conn: sqlite3.Connection, nft_id: str) -> None:
+    conn.execute("DELETE FROM trait_tokens WHERE nft_id = ?", (nft_id,))
+    conn.commit()
+
+
 # --- Phase 2: per-user Closet contents + supply-change ledger ---
 
 

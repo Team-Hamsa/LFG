@@ -122,3 +122,15 @@ def test_closet_record_roundtrip_and_status_update():
     assert es.get_closet_record(c, "rA") == ("NFTC", "ABCD", ct.PENDING_ACCEPT, "OF1")
     es.set_closet_status(c, "rA", ct.ACTIVE)
     assert es.get_closet_record(c, "rA") == ("NFTC", "ABCD", ct.ACTIVE, "OF1")
+
+
+def test_trait_token_upsert_and_delete():
+    c = sqlite3.connect(":memory:")
+    es.init_economy_schema(c)
+    es.upsert_trait_token(c, "NFT1", "rA", "Hat", "Cap")
+    assert ("NFT1", "rA", "Hat", "Cap") in es.read_trait_tokens(c)
+    es.upsert_trait_token(c, "NFT1", "rB", "Hat", "Cap")  # ownership transfer
+    rows = es.read_trait_tokens(c)
+    assert ("NFT1", "rB", "Hat", "Cap") in rows and len(rows) == 1
+    es.delete_trait_token(c, "NFT1")
+    assert es.read_trait_tokens(c) == []
