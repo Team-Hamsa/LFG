@@ -695,7 +695,7 @@ button.back:hover { color: var(--text); border: none; }
   border-radius: 10px; overflow: hidden; background: var(--surface-2);
   cursor: pointer; padding: 0;
 }
-.closet-item[disabled] { opacity: .35; cursor: not-allowed; }
+.closet-item.incompatible { opacity: .35; cursor: not-allowed; }
 .closet-item img { width: 100%; height: 100%; object-fit: contain; }
 .closet-item .count {
   position: absolute; bottom: 2px; right: 4px; font-size: .7rem; font-weight: 700;
@@ -720,14 +720,15 @@ button.back:hover { color: var(--text); border: none; }
 }
 .dressup-canvas.incomplete::after { content: '…'; font-size: 2rem; }
 
-/* Extract button on each closet tile */
+/* Extract button on each closet tile — a comfortable touch target (>=28px). */
 .closet-item .extract {
   position: absolute; top: 2px; right: 2px;
-  width: 18px; height: 18px; padding: 0;
-  font-size: .65rem; font-weight: 700; line-height: 1;
+  min-width: 28px; min-height: 28px; padding: 4px;
+  display: grid; place-items: center;
+  font-size: .8rem; font-weight: 700; line-height: 1;
   background: var(--surface); color: var(--text);
-  border: 1px solid var(--line); border-radius: 4px;
-  cursor: pointer; opacity: .75;
+  border: 1px solid var(--line); border-radius: 6px;
+  cursor: pointer; opacity: .8;
   z-index: 1;
 }
 .closet-item .extract:hover { opacity: 1; background: var(--blue); }

@@ -247,6 +247,33 @@ def test_trait_mint_inserts_row():
     assert value == "Cap"
 
 
+def test_trait_mint_applies_without_frozen_genesis():
+    """Trait-token mirror maintenance must NOT depend on a frozen genesis: with
+    genesis=None (no genesis frozen) a TRAIT_TAXON mint still inserts its row.
+    Only the supply-growth path needs genesis."""
+    conn = _conn()
+    meta = _trait_meta("Hat", "Cap")
+
+    async def fetch_token(nft_id):
+        return _trait_token_dict("TRAITNG", "rUser")
+
+    async def fetch_meta(uri_hex):
+        return meta
+
+    tx = {"TransactionType": "NFTokenMint", "meta": {"nftoken_id": "TRAITNG"}}
+    _run(
+        nft_listener.apply_economy_tx(
+            conn,
+            tx,
+            fetch_token_fn=fetch_token,
+            fetch_meta_fn=fetch_meta,
+            genesis=None,
+        )
+    )
+    rows = es.read_trait_tokens(conn)
+    assert ("TRAITNG", "rUser", "Hat", "Cap") in rows
+
+
 def test_trait_transfer_updates_owner():
     """A TRAIT_TAXON NFTokenAcceptOffer whose post-transfer owner is rNew should
     update the existing trait_tokens row's owner field."""

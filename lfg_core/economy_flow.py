@@ -566,8 +566,14 @@ async def run_extract(session: ExtractSession, deps: EconomyDeps) -> None:
         # best-effort: the listener rebuilds trait_tokens from the on-chain mint, so a
         # failure here is non-fatal — journal it for the auditor rather than reverting
         # a successful on-chain extract.
+        #
+        # The freshly-minted token is held by the ISSUER until the owner accepts the
+        # offer in Xaman, so the current on-ledger owner is the issuer (not `owner`).
+        # Recording the issuer here keeps it out of the owner's deposit candidates
+        # (read_economy_state filters by wallet); the listener flips the owner to the
+        # wallet when it observes the AcceptOffer, at which point it becomes depositable.
         try:
-            es.upsert_trait_token(conn, nft_id, owner, slot, value)
+            es.upsert_trait_token(conn, nft_id, config.SWAP_ISSUER_ADDRESS, slot, value)
         except Exception:
             logging.error(
                 f"extract {session.id} trait_tokens mirror failed: {traceback.format_exc()}"

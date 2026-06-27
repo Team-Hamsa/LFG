@@ -182,15 +182,17 @@ async def apply_economy_tx(
     *,
     fetch_token_fn: FetchTokenFn,
     fetch_meta_fn: FetchMetaFn,
-    genesis: trait_economy.Genesis,
+    genesis: trait_economy.Genesis | None = None,
 ) -> None:
     """Apply a Mint/Modify/Accept/Burn to the trait-economy tables. A Closet NFToken
     (taxon == config.CLOSET_TAXON or config.LEGACY_BUCKET_TAXON) rebuilds its
     owner's closet from metadata and, on accept, promotes pending_accept → active;
     a standalone trait NFToken (taxon == config.TRAIT_TAXON) is upserted on
-    mint/accept or deleted on burn; a character mint of an unknown edition appends
-    a supply_changes row. Per-id errors are logged, never raised. `genesis` must be
-    the EFFECTIVE genesis so already-recorded editions are recognised (idempotent)."""
+    mint/accept or deleted on burn. Closet/trait mirror maintenance runs regardless
+    of genesis. Only the supply-growth path (a character mint of an unknown edition)
+    needs `genesis`; pass the EFFECTIVE genesis (so recorded editions are recognised)
+    to enable it, or `None` when no genesis is frozen to skip growth. Per-id errors
+    are logged, never raised."""
     kind = classify_tx(tx)
     if kind not in ("mint", "modify", "accept", "burn"):
         return
@@ -213,7 +215,7 @@ async def apply_economy_tx(
                 _apply_closet(conn, token, metadata)
             elif taxon == config.TRAIT_TAXON:
                 _apply_trait_token(conn, kind, token, metadata)
-            elif kind == "mint":
+            elif kind == "mint" and genesis is not None:
                 _apply_possible_growth(conn, token, metadata, genesis)
         except Exception:
             logging.exception(f"apply_economy_tx failed for {nft_id} ({kind})")

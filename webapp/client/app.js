@@ -908,12 +908,17 @@ function renderCloset() {
   const char = activeChar();
   for (const asset of economyState.closet.assets) {
     if (closetFilter !== 'All' && asset.slot !== closetFilter) continue;
-    const item = document.createElement('button');
+    // The tile is a non-button container (not a <button>) so the Extract control
+    // can be a valid nested <button> AND remain usable even when equip is not
+    // available — extraction does not depend on equip compatibility.
+    const item = document.createElement('div');
     item.className = 'closet-item';
-    // Compatibility: only enable when this asset can go on the active character.
+    item.setAttribute('role', 'button');
+    item.tabIndex = 0;
+    // Compatibility: only allow equip when this asset can go on the active character.
     // Client mirrors the server precheck (server re-verifies on commit).
     const compatible = char && economyState.slots.includes(asset.slot);
-    if (!compatible) item.disabled = true;
+    if (!compatible) item.classList.add('incompatible');
     const img = document.createElement('img');
     // Guard: a missing active body or empty asset value would 400 the layer fetch.
     img.src = (char && layerComplete(char.body, asset.value))
@@ -933,7 +938,9 @@ function renderCloset() {
       extractTrait(asset.slot, asset.value, extractBtn);
     };
     item.replaceChildren(img, count, extractBtn);
-    item.onclick = () => equipTrait(asset.slot, asset.value, item);
+    // Equip is wired only when the asset is compatible with the active character;
+    // the tile still renders (and Extract still works) when it isn't.
+    if (compatible) item.onclick = () => equipTrait(asset.slot, asset.value, item);
     grid.appendChild(item);
   }
   renderTraitStrip();

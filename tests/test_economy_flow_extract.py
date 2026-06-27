@@ -2,6 +2,7 @@ import asyncio
 import sqlite3
 
 from lfg_core import closet_token as ct
+from lfg_core import config
 from lfg_core import economy_flow as ef
 from lfg_core import economy_store as es
 
@@ -94,7 +95,10 @@ def test_extract_happy_path(tmp_path):
     # Closet decremented to 1, trait_tokens has the new token
     assets = {(sl, v): n for o, sl, v, n in es.read_closet_assets(conn) if o == "rUser"}
     assert assets[("Hat", "Cap")] == 1
-    assert ("TRAIT0", "rUser", "Hat", "Cap") in es.read_trait_tokens(conn)
+    # The optimistic mirror records the issuer as the current holder (the token is
+    # issuer-held until the owner accepts the offer); the listener flips owner→wallet
+    # on the AcceptOffer, at which point it becomes a deposit candidate.
+    assert ("TRAIT0", config.SWAP_ISSUER_ADDRESS, "Hat", "Cap") in es.read_trait_tokens(conn)
 
 
 def test_extract_rejected_without_active_closet(tmp_path):

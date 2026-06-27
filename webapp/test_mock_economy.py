@@ -194,7 +194,10 @@ def test_deposit_reverses_extract():
         (a for a in state_after["closet"]["assets"] if a["slot"] == "Hat" and a["value"] == "Cap"),
         None,
     )
-    assert cap_asset is not None and cap_asset["count"] >= 1, "Hat/Cap should be back in closet"
+    # Exactly 1 (started from 1): == catches a double-credit regression in deposit().
+    assert cap_asset is not None and cap_asset["count"] == 1, (
+        "Hat/Cap should be back in closet (×1)"
+    )
 
 
 def test_deposit_raises_for_unknown_nft_id():
