@@ -1,5 +1,5 @@
-# lfg_core/bucket_token.py
-# The per-user on-ledger Bucket NFToken. Its metadata JSON is the authoritative
+# lfg_core/closet_token.py
+# The per-user on-ledger Closet NFToken. Its metadata JSON is the authoritative
 # on-chain record of a user's loose assets + bodies (the DB tables mirror it).
 # This module builds/parses that metadata (pure) and wraps the mint-on-first-use
 # + modify lifecycle (injectable, so tests need no network).
@@ -24,15 +24,15 @@ ModifyFn = Callable[[str, str, str], Awaitable[str | None]]  # (nft_id, owner, u
 ExistsFn = Callable[[str], Awaitable[bool]]  # nft_id -> does it exist on-ledger?
 
 
-class BucketError(RuntimeError):
-    """A Bucket NFToken lifecycle step (mint/offer/modify) failed."""
+class ClosetError(RuntimeError):
+    """A Closet NFToken lifecycle step (mint/offer/modify) failed."""
 
 
 @dataclass
-class BucketRef:
-    """A user's Bucket NFToken. `accept_payload` is set only when the bucket was
+class ClosetRef:
+    """A user's Closet NFToken. `accept_payload` is set only when the closet was
     just minted (the user must accept the offer to take custody); it is None for
-    an already-existing bucket or when the XUMM payload could not be built."""
+    an already-existing closet or when the XUMM payload could not be built."""
 
     nft_id: str
     uri_hex: str
@@ -44,17 +44,17 @@ def _hex(url: str) -> str:
     return url.encode("utf-8").hex().upper()
 
 
-def build_bucket_metadata(owner: str, assets: list[Asset], bodies: list[int]) -> dict[str, Any]:
-    """The Bucket NFToken metadata JSON. `lfg_bucket` enumerates the loose
+def build_closet_metadata(owner: str, assets: list[Asset], bodies: list[int]) -> dict[str, Any]:
+    """The Closet NFToken metadata JSON. `lfg_closet` enumerates the loose
     contents deterministically (assets sorted by (slot, value), bodies sorted)
     so the same state always produces byte-identical metadata."""
     return {
         "schema": config.NFT_SCHEMA_URL,
-        "name": f"LFG Bucket — {owner}",
+        "name": f"LFG Closet — {owner}",
         "description": f"Loose traits and bodies held by {owner}.",
-        "image": config.BUCKET_IMAGE_URL,
+        "image": config.CLOSET_IMAGE_URL,
         "external_link": config.EXTERNAL_WEBSITE_URL,
-        "lfg_bucket": {
+        "lfg_closet": {
             "assets": [
                 {"slot": slot, "value": value, "count": count}
                 for slot, value, count in sorted(assets)
@@ -64,12 +64,14 @@ def build_bucket_metadata(owner: str, assets: list[Asset], bodies: list[int]) ->
     }
 
 
-def parse_bucket_metadata(meta: dict[str, Any]) -> tuple[list[Asset], list[int]]:
-    """Inverse of build_bucket_metadata: read (assets, bodies) back out of a
-    Bucket NFToken's metadata. Tolerant of missing/garbage fields — anything
+def parse_closet_metadata(meta: dict[str, Any]) -> tuple[list[Asset], list[int]]:
+    """Inverse of build_closet_metadata: read (assets, bodies) back out of a
+    Closet NFToken's metadata. Tolerant of missing/garbage fields — anything
     malformed yields empty lists rather than raising (the listener consumes
-    untrusted on-chain metadata)."""
-    block = meta.get("lfg_bucket")
+    untrusted on-chain metadata). Tries lfg_closet first, falls back to lfg_bucket."""
+    block = meta.get("lfg_closet")
+    if not isinstance(block, dict):
+        block = meta.get("lfg_bucket")  # backward compat: old Bucket tokens
     if not isinstance(block, dict):
         return [], []
     assets: list[Asset] = []
@@ -88,7 +90,7 @@ def parse_bucket_metadata(meta: dict[str, Any]) -> tuple[list[Asset], list[int]]
     return assets, bodies
 
 
-async def ensure_bucket(
+async def ensure_closet(
     conn: Any,
     owner: str,
     *,
@@ -97,37 +99,37 @@ async def ensure_bucket(
     offer_fn: OfferFn,
     accept_payload_fn: AcceptFn,
     exists_fn: ExistsFn | None = None,
-) -> BucketRef:
-    """Return the owner's Bucket NFToken, minting it on first use. A fresh bucket
+) -> ClosetRef:
+    """Return the owner's Closet NFToken, minting it on first use. A fresh closet
     is minted empty, offered to the owner, and recorded; the returned
     `accept_payload` lets the caller surface the XUMM accept to the user. This is
-    a reversible step (an empty bucket simply sits in the wallet), so flows call
-    it before any irreversible action. Raises BucketError on mint/offer failure.
+    a reversible step (an empty closet simply sits in the wallet), so flows call
+    it before any irreversible action. Raises ClosetError on mint/offer failure.
 
     When `exists_fn` is supplied, a DB record is verified against the ledger
     before it is trusted: a recorded token that no longer exists on-chain (e.g.
-    after a testnet reset, or a bucket that never actually landed) is treated as
-    STALE and a fresh bucket is minted, overwriting the dead row. This prevents a
+    after a testnet reset, or a closet that never actually landed) is treated as
+    STALE and a fresh closet is minted, overwriting the dead row. This prevents a
     later NFTokenModify from targeting a non-existent token (tecNO_ENTRY) and, in
     harvest, losing the just-burned character's assets (#101). With `exists_fn`
     None, the record is trusted (legacy/test behavior)."""
-    existing = economy_store.get_bucket_token(conn, owner)
+    existing = economy_store.get_closet_token(conn, owner)
     if existing is not None and (exists_fn is None or await exists_fn(existing[0])):
-        return BucketRef(nft_id=existing[0], uri_hex=existing[1], accept_payload=None)
+        return ClosetRef(nft_id=existing[0], uri_hex=existing[1], accept_payload=None)
 
-    url = await upload_fn(build_bucket_metadata(owner, [], []))
+    url = await upload_fn(build_closet_metadata(owner, [], []))
     nft_id = await mint_fn(url)
     if not nft_id:
-        raise BucketError("failed to mint Bucket NFToken")
+        raise ClosetError("failed to mint Closet NFToken")
     offer_id = await offer_fn(nft_id, owner)
     if not offer_id:
-        raise BucketError("failed to offer Bucket NFToken to owner")
+        raise ClosetError("failed to offer Closet NFToken to owner")
     payload = await accept_payload_fn(offer_id)  # None is non-fatal (accept later)
-    economy_store.set_bucket_token(conn, owner, nft_id, _hex(url))
-    return BucketRef(nft_id=nft_id, uri_hex=_hex(url), accept_payload=payload, minted=True)
+    economy_store.set_closet_token(conn, owner, nft_id, _hex(url))
+    return ClosetRef(nft_id=nft_id, uri_hex=_hex(url), accept_payload=payload, minted=True)
 
 
-async def sync_bucket(
+async def sync_closet(
     conn: Any,
     owner: str,
     assets: list[Asset],
@@ -136,15 +138,15 @@ async def sync_bucket(
     upload_fn: UploadFn,
     modify_fn: ModifyFn,
 ) -> None:
-    """Recompose the Bucket NFToken's metadata from the given contents and
+    """Recompose the Closet NFToken's metadata from the given contents and
     NFTokenModify its URI in place (the token id is stable). Persists the new
-    URI. Raises BucketError if the bucket is unknown or the modify fails."""
-    existing = economy_store.get_bucket_token(conn, owner)
+    URI. Raises ClosetError if the closet is unknown or the modify fails."""
+    existing = economy_store.get_closet_token(conn, owner)
     if existing is None:
-        raise BucketError(f"no Bucket NFToken on record for {owner}")
+        raise ClosetError(f"no Closet NFToken on record for {owner}")
     nft_id = existing[0]
-    url = await upload_fn(build_bucket_metadata(owner, assets, bodies))
+    url = await upload_fn(build_closet_metadata(owner, assets, bodies))
     tx_hash = await modify_fn(nft_id, owner, url)
     if not tx_hash:
-        raise BucketError("failed to modify Bucket NFToken URI")
-    economy_store.set_bucket_token(conn, owner, nft_id, _hex(url))
+        raise ClosetError("failed to modify Closet NFToken URI")
+    economy_store.set_closet_token(conn, owner, nft_id, _hex(url))

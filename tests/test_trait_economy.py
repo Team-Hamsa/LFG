@@ -93,8 +93,8 @@ def test_asset_census_sums_chars_buckets_and_tokens():
     char = _nft("c", 1, attrs=_attrs(Background="Sky"))
     census = trait_economy.asset_census(
         characters={1: char},
-        bucket_assets=[("rA", "Background", "Sky", 2), ("rA", "Head", "None", 1)],
-        bucket_bodies=[("rA", 7)],
+        closet_assets=[("rA", "Background", "Sky", 2), ("rA", "Head", "None", 1)],
+        closet_bodies=[("rA", 7)],
         trait_tokens=[("tok1", "rB", "Background", "Sky")],
     )
     # 1 on the live character + 2 in a bucket + 1 standalone token.

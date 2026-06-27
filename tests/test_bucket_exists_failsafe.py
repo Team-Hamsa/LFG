@@ -1,5 +1,5 @@
 # nft_exists must distinguish a definitive on-ledger absence from a transient
-# lookup failure, and _bucket_exists must be fail-safe: re-mint only on a
+# lookup failure, and _closet_exists must be fail-safe: re-mint only on a
 # definitive absence, never on a network blip (which would orphan a live Bucket).
 
 import asyncio
@@ -74,7 +74,7 @@ def test_nft_exists_none_on_unknown_error(monkeypatch):
     assert _run(xrpl_ops.nft_exists("N", attempts=2)) is None
 
 
-def test_bucket_exists_failsafe_mapping(monkeypatch):
+def test_closet_exists_failsafe_mapping(monkeypatch):
     import _economy_deps as deps
 
     async def fake(nft_id, value):
@@ -82,8 +82,8 @@ def test_bucket_exists_failsafe_mapping(monkeypatch):
 
     # present -> exists; definitive absence -> stale; transient -> assume exists.
     monkeypatch.setattr(xrpl_ops, "nft_exists", lambda nft_id: fake(nft_id, True))
-    assert _run(deps._bucket_exists("N")) is True
+    assert _run(deps._closet_exists("N")) is True
     monkeypatch.setattr(xrpl_ops, "nft_exists", lambda nft_id: fake(nft_id, False))
-    assert _run(deps._bucket_exists("N")) is False
+    assert _run(deps._closet_exists("N")) is False
     monkeypatch.setattr(xrpl_ops, "nft_exists", lambda nft_id: fake(nft_id, None))
-    assert _run(deps._bucket_exists("N")) is True  # fail-safe: do NOT re-mint
+    assert _run(deps._closet_exists("N")) is True  # fail-safe: do NOT re-mint

@@ -38,5 +38,5 @@ def test_build_economy_deps_wires_all_callables():
     economy_store.init_economy_schema(conn)
     d = deps.build_economy_deps(conn)
     assert d.conn is conn
-    for fn in (d.bucket_mint_fn, d.char_mint_fn, d.char_burn_fn, d.char_compose_fn):
+    for fn in (d.closet_mint_fn, d.char_mint_fn, d.char_burn_fn, d.char_compose_fn):
         assert callable(fn)

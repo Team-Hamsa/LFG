@@ -4,7 +4,7 @@
 import asyncio
 import sqlite3
 
-from lfg_core import bucket_token as bt
+from lfg_core import closet_token as bt
 from lfg_core import config, nft_listener
 from lfg_core import economy_store as es
 from lfg_core import trait_economy as te
@@ -32,17 +32,17 @@ def _char_meta(edition: int, body: str = "Straight Blue") -> dict:
     return {"name": f"LFG #{edition}", "attributes": attrs}
 
 
-def test_bucket_modify_rebuilds_tables():
+def test_closet_modify_rebuilds_tables():
     conn = _conn()
-    meta = bt.build_bucket_metadata("rUser", [("Head", "None", 2), ("Eyes", "Blue", 1)], [3536])
+    meta = bt.build_closet_metadata("rUser", [("Head", "None", 2), ("Eyes", "Blue", 1)], [3536])
 
     async def fetch_token(nft_id):
-        return {"nft_id": "BUCKET", "owner": "rUser", "taxon": config.BUCKET_TAXON, "uri_hex": "AB"}
+        return {"nft_id": "CLOSET", "owner": "rUser", "taxon": config.CLOSET_TAXON, "uri_hex": "AB"}
 
     async def fetch_meta(uri_hex):
         return meta
 
-    tx = {"TransactionType": "NFTokenModify", "NFTokenID": "BUCKET"}
+    tx = {"TransactionType": "NFTokenModify", "NFTokenID": "CLOSET"}
     _run(
         nft_listener.apply_economy_tx(
             conn,
@@ -52,10 +52,10 @@ def test_bucket_modify_rebuilds_tables():
             genesis=te.Genesis(trait_counts={}, edition_bodies={}),
         )
     )
-    assets = {(s, v): n for o, s, v, n in es.read_bucket_assets(conn)}
+    assets = {(s, v): n for o, s, v, n in es.read_closet_assets(conn)}
     assert assets == {("Head", "None"): 2, ("Eyes", "Blue"): 1}
-    assert es.read_bucket_bodies(conn) == [("rUser", 3536)]
-    assert es.get_bucket_token(conn, "rUser") == ("BUCKET", "AB")
+    assert es.read_closet_bodies(conn) == [("rUser", 3536)]
+    assert es.get_closet_token(conn, "rUser") == ("CLOSET", "AB")
 
 
 def test_unknown_edition_mint_logs_growth():

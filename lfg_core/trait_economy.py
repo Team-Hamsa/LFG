@@ -106,11 +106,11 @@ def build_genesis(canonical: dict[int, OnchainNft]) -> Genesis:
 
 def asset_census(
     characters: dict[int, OnchainNft],
-    bucket_assets: list[tuple[str, str, str, int]],
-    bucket_bodies: list[tuple[str, int]],
+    closet_assets: list[tuple[str, str, str, int]],
+    closet_bodies: list[tuple[str, int]],
     trait_tokens: list[tuple[str, str, str, str]],
 ) -> Census:
-    """Tally every asset across live characters, Buckets and standalone trait
+    """Tally every asset across live characters, Closets and standalone trait
     tokens. trait_counts are non-body (slot, value); body_presence counts how
     many places each edition's body currently exists (should be exactly 1)."""
     trait_counts: Counter[tuple[str, str]] = Counter()
@@ -119,11 +119,11 @@ def asset_census(
         body_presence[edition] += 1
         for slot in NON_BODY_SLOTS:
             trait_counts[(slot, slot_value(rec, slot))] += 1
-    for _owner, slot, value, count in bucket_assets:
+    for _owner, slot, value, count in closet_assets:
         trait_counts[(slot, value)] += count
     for _nft_id, _owner, slot, value in trait_tokens:
         trait_counts[(slot, value)] += 1
-    for _owner, edition in bucket_bodies:
+    for _owner, edition in closet_bodies:
         body_presence[edition] += 1
     return Census(trait_counts=dict(trait_counts), body_presence=dict(body_presence))
 

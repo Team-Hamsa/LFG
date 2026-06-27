@@ -29,17 +29,17 @@ def _char_dict(r: nft_index.OnchainNft) -> dict[str, Any]:
 
 
 def read_economy_state(conn: sqlite3.Connection, owner: str) -> dict[str, Any]:
-    """The Dressing Room's full view for one owner: live characters + Bucket."""
+    """The Dressing Room's full view for one owner: live characters + Closet."""
     chars = [_char_dict(r) for r in nft_index.owner_live_nfts(conn, owner)]
     assets = [
         {"slot": s, "value": v, "count": c}
-        for (o, s, v, c) in economy_store.read_bucket_assets(conn)
+        for (o, s, v, c) in economy_store.read_closet_assets(conn)
         if o == owner
     ]
-    bodies = [ed for (o, ed) in economy_store.read_bucket_bodies(conn) if o == owner]
+    bodies = [ed for (o, ed) in economy_store.read_closet_bodies(conn) if o == owner]
     return {
         "characters": chars,
-        "bucket": {"assets": assets, "bodies": bodies},
+        "closet": {"assets": assets, "bodies": bodies},
         "trait_order": swap_meta.TRAIT_ORDER,
         "slots": trait_economy.NON_BODY_SLOTS,
     }
@@ -51,7 +51,7 @@ def economy_session_dict(kind: str, s: Any) -> dict[str, Any]:
     if kind == "equip":
         base["displaced"] = s.displaced_value
     elif kind == "harvest":
-        base["accept"] = (s.bucket_accept or {}).get("xumm_url")
+        base["accept"] = (s.closet_accept or {}).get("xumm_url")
         base["moved_assets"] = s.moved_assets
     elif kind == "assemble":
         r = s.results[0] if s.results else None
@@ -126,7 +126,7 @@ async def start_equip(
 ) -> EconomyWebSession:
     conn = open_conn()
     rec = _load_owned_character(conn, owner, nft_id)
-    assets = {(s, v): c for (o, s, v, c) in economy_store.read_bucket_assets(conn) if o == owner}
+    assets = {(s, v): c for (o, s, v, c) in economy_store.read_closet_assets(conn) if o == owner}
     chk = trait_economy.can_equip(rec, slot, value, assets, mutable=bool(rec.mutable))
     if not chk.ok:
         raise EconomyError(f"cannot equip: {chk.reason}")
@@ -158,8 +158,8 @@ async def start_assemble(
     body = genesis.edition_bodies.get(edition)
     if body is None:
         raise EconomyError(f"edition {edition} has no known body")
-    assets = {(s, v): c for (o, s, v, c) in economy_store.read_bucket_assets(conn) if o == owner}
-    bodies = {ed for (o, ed) in economy_store.read_bucket_bodies(conn) if o == owner}
+    assets = {(s, v): c for (o, s, v, c) in economy_store.read_closet_assets(conn) if o == owner}
+    bodies = {ed for (o, ed) in economy_store.read_closet_bodies(conn) if o == owner}
     live_editions = {r.nft_number for r in nft_index.live_nfts(conn) if r.nft_number is not None}
     chk = trait_economy.can_assemble(edition, chosen, bodies, assets, live_editions, genesis)
     if not chk.ok:

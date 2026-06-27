@@ -42,14 +42,14 @@ async def _accept_or_skip(offer_id: str) -> Any:
     return await xumm_ops.create_accept_offer_payload(offer_id)
 
 
-async def _bucket_exists(nft_id: str) -> bool:
-    """Whether a recorded Bucket NFToken still exists on-ledger, for ensure_bucket's
+async def _closet_exists(nft_id: str) -> bool:
+    """Whether a recorded Closet NFToken still exists on-ledger, for ensure_closet's
     stale-record / re-mint decision (#101).
 
     Fail-safe: only a DEFINITIVE on-ledger absence (clio objectNotFound) returns
     False — the one case where re-minting is correct (burned / never-existed /
     post-testnet-reset). A transient lookup failure (`nft_exists` -> None) returns
-    True so a network blip never re-mints and orphans a live Bucket."""
+    True so a network blip never re-mints and orphans a live Closet."""
     return (await xrpl_ops.nft_exists(nft_id)) is not False
 
 
@@ -57,10 +57,10 @@ async def _upload(path_on_cdn: str, data: bytes, content_type: str) -> str:
     return await cdn.upload_to_bunny(config.ECONOMY_CDN_FOLDER, path_on_cdn, data, content_type)
 
 
-async def _upload_bucket(meta: dict[str, Any]) -> str:
-    """Upload bucket metadata JSON to a fresh CDN path (unique per sync so the
+async def _upload_closet(meta: dict[str, Any]) -> str:
+    """Upload closet metadata JSON to a fresh CDN path (unique per sync so the
     modified URI is never a stale cache hit)."""
-    path = f"buckets/{uuid.uuid4().hex}.json"
+    path = f"closets/{uuid.uuid4().hex}.json"
     return await _upload(path, json.dumps(meta, indent=2).encode(), "application/json")
 
 
@@ -98,14 +98,14 @@ def build_economy_deps(conn: sqlite3.Connection) -> economy_flow.EconomyDeps:
     """An EconomyDeps backed by the real testnet/mainnet operations."""
     return economy_flow.EconomyDeps(
         conn=conn,
-        bucket_upload_fn=_upload_bucket,
-        bucket_mint_fn=lambda url: xrpl_ops.mint_nft(
-            url, config.BUCKET_TAXON, config.SWAP_ISSUER_ADDRESS, flags=config.BUCKET_NFT_FLAGS
+        closet_upload_fn=_upload_closet,
+        closet_mint_fn=lambda url: xrpl_ops.mint_nft(
+            url, config.CLOSET_TAXON, config.SWAP_ISSUER_ADDRESS, flags=config.CLOSET_NFT_FLAGS
         ),
-        bucket_offer_fn=_offer_or_skip,
-        bucket_accept_fn=_accept_or_skip,
-        bucket_modify_fn=lambda nft_id, owner, url: xrpl_ops.modify_nft(nft_id, owner, url),
-        bucket_exists_fn=lambda nft_id: _bucket_exists(nft_id),
+        closet_offer_fn=_offer_or_skip,
+        closet_accept_fn=_accept_or_skip,
+        closet_modify_fn=lambda nft_id, owner, url: xrpl_ops.modify_nft(nft_id, owner, url),
+        closet_exists_fn=lambda nft_id: _closet_exists(nft_id),
         char_compose_fn=_compose_char,
         char_mint_fn=lambda url: xrpl_ops.mint_nft(
             url, config.SWAP_TAXON, config.SWAP_ISSUER_ADDRESS, flags=config.ECONOMY_NFT_FLAGS

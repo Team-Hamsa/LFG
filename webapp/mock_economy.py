@@ -51,7 +51,7 @@ class MockEconomy:
                 ),
             },
         ]
-        # Bucket assets keyed (slot, value) -> count; only male-compatible for demo.
+        # Closet assets keyed (slot, value) -> count; only male-compatible for demo.
         self.assets: dict[tuple[str, str], int] = {
             ("Head", "Halo"): 2,
             ("Head", "Tophat"): 1,
@@ -71,7 +71,7 @@ class MockEconomy:
         bodies = list(self.bodies) if owner == DEV_OWNER else []
         return {
             "characters": chars,
-            "bucket": {"assets": assets, "bodies": bodies},
+            "closet": {"assets": assets, "bodies": bodies},
             "trait_order": swap_meta.TRAIT_ORDER,
             "slots": trait_economy.NON_BODY_SLOTS,
         }
@@ -91,7 +91,7 @@ class MockEconomy:
             return {
                 "id": "mock",
                 "state": "failed",
-                "error": "asset not in bucket",
+                "error": "asset not in closet",
                 "displaced": None,
             }
         attr["value"] = value

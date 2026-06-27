@@ -778,7 +778,7 @@ function selectCharacter(nftId) {
   const char = economyState.characters.find((c) => c.nft_id === nftId);
   if (char) renderCanvas(char);
   renderRoster();
-  renderBucket();
+  renderCloset();
 }
 
 async function openDressup() {
@@ -796,34 +796,34 @@ async function openDressup() {
   }
 }
 
-let bucketFilter = 'All';
+let closetFilter = 'All';
 let equipBusy = false;
 
 function activeChar() {
   return economyState.characters.find((c) => c.nft_id === activeNftId) || null;
 }
 
-function renderBucketFilter() {
-  const sel = el('bucket-filter');
+function renderClosetFilter() {
+  const sel = el('closet-filter');
   const slots = ['All', ...economyState.slots];
   sel.replaceChildren();
   for (const s of slots) {
     const o = document.createElement('option');
     o.value = s; o.textContent = s; sel.appendChild(o);
   }
-  sel.value = bucketFilter;
-  sel.onchange = () => { bucketFilter = sel.value; renderBucket(); };
+  sel.value = closetFilter;
+  sel.onchange = () => { closetFilter = sel.value; renderCloset(); };
 }
 
-function renderBucket() {
-  renderBucketFilter();
-  const grid = el('bucket-grid');
+function renderCloset() {
+  renderClosetFilter();
+  const grid = el('closet-grid');
   grid.replaceChildren();
   const char = activeChar();
-  for (const asset of economyState.bucket.assets) {
-    if (bucketFilter !== 'All' && asset.slot !== bucketFilter) continue;
+  for (const asset of economyState.closet.assets) {
+    if (closetFilter !== 'All' && asset.slot !== closetFilter) continue;
     const item = document.createElement('button');
-    item.className = 'bucket-item';
+    item.className = 'closet-item';
     // Compatibility: only enable when this asset can go on the active character.
     // Client mirrors the server precheck (server re-verifies on commit).
     const compatible = char && economyState.slots.includes(asset.slot);
@@ -860,7 +860,7 @@ async function equipTrait(slot, value, tileEl) {
     });
     const final = await pollEconomyOp('equip', res);
     if (final.state === 'failed') throw new Error(final.error || 'equip failed');
-    // Reconcile the Bucket from authoritative state.
+    // Reconcile the Closet from authoritative state.
     economyState = await api('/api/economy');
     selectCharacter(activeNftId);
   } catch (e) {
@@ -906,7 +906,7 @@ async function harvestActive() {
   if (!char) return;
   if (!(await confirmDialog({
     title: 'Harvest this character?',
-    text: `This permanently burns #${char.edition}. Its parts go to your Bucket.`,
+    text: `This permanently burns #${char.edition}. Its parts go to your Closet.`,
     confirmLabel: '🔥 Harvest',
   }))) return;
   status('Harvesting…');
@@ -918,35 +918,35 @@ async function harvestActive() {
     status('');
     if (final.state === 'failed') throw new Error(final.error || 'harvest failed');
     if (final.accept) {
-      // First-ever Bucket: user must accept the soulbound token in Xaman.
-      showFlow({ title: '👜 Claim your Bucket',
-        text: 'Scan to accept your trait Bucket in Xaman.',
+      // First-ever Closet: user must accept the soulbound token in Xaman.
+      showFlow({ title: '👜 Claim your Closet',
+        text: 'Scan to accept your trait Closet in Xaman.',
         qrData: final.accept, link: final.accept, done: true });
     }
     economyState = await api('/api/economy');
     activeNftId = economyState.characters[0] ? economyState.characters[0].nft_id : null;
     showPanel('dressup-panel');
     if (activeNftId) selectCharacter(activeNftId);
-    else { renderRoster(); renderBucket(); el('dressup-canvas').replaceChildren(); }
+    else { renderRoster(); renderCloset(); el('dressup-canvas').replaceChildren(); }
   } catch (e) {
     showError(e.message);
   }
 }
 
 async function openAssemble() {
-  const bodies = economyState.bucket.bodies;
-  if (!bodies.length) { showError('No bodies in your Bucket to assemble.'); return; }
+  const bodies = economyState.closet.bodies;
+  if (!bodies.length) { showError('No bodies in your Closet to assemble.'); return; }
   // MVP: assemble the first available body edition, auto-filling each slot with the
-  // first compatible Bucket asset; the user reviews the preview before committing.
+  // first compatible Closet asset; the user reviews the preview before committing.
   const edition = bodies[0];
   const chosen = {};
   for (const slot of economyState.slots) {
-    const asset = economyState.bucket.assets.find((a) => a.slot === slot && a.count > 0);
+    const asset = economyState.closet.assets.find((a) => a.slot === slot && a.count > 0);
     if (asset) chosen[slot] = asset.value;
   }
   const missing = economyState.slots.filter((s) => !(s in chosen));
   if (missing.length) {
-    showError(`Bucket is missing assets for: ${missing.join(', ')}`);
+    showError(`Closet is missing assets for: ${missing.join(', ')}`);
     return;
   }
   if (!(await confirmDialog({

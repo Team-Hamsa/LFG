@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
-"""Equip a loose Bucket asset onto a live character; the displaced asset returns
-to the Bucket (in-place NFTokenModify).
+"""Equip a loose Closet asset onto a live character; the displaced asset returns
+to the Closet (in-place NFTokenModify).
 
   python scripts/economy_equip.py --network testnet --owner rUSER \\
       --nft-id 00... --slot Head --value Crown
@@ -39,13 +39,13 @@ async def _amain(args: argparse.Namespace) -> int:
         print(f"Error: {session.error}")
     if session.state == economy_flow.DONE:
         print(
-            f"Equipped {args.slot}={args.value}; {session.displaced_value} returned to the Bucket."
+            f"Equipped {args.slot}={args.value}; {session.displaced_value} returned to the Closet."
         )
     return 0 if session.state == economy_flow.DONE else 1
 
 
 def main() -> int:
-    parser = argparse.ArgumentParser(description="Equip a Bucket asset onto a character.")
+    parser = argparse.ArgumentParser(description="Equip a Closet asset onto a character.")
     parser.add_argument("--network", choices=["mainnet", "testnet"], default=config.XRPL_NETWORK)
     parser.add_argument("--owner", required=True, help="owner's XRPL address")
     parser.add_argument("--nft-id", required=True, help="character NFTokenID to modify")

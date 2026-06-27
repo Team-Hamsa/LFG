@@ -69,7 +69,7 @@ def make_announcement(ev: Event) -> str:
     if ev.type == "assemble.failed":
         return f"❌ {who}'s assemble failed."
     if ev.type == "harvest.completed":
-        return f"🌾 {who} harvested a character into their bucket."
+        return f"🌾 {who} harvested a character into their closet."
     if ev.type == "harvest.failed":
         return f"❌ {who}'s harvest failed."
     if ev.type == "equip.completed":

@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Harvest a live character into its owner's Bucket (burn -> assets to Bucket).
+"""Harvest a live character into its owner's Closet (burn -> assets to Closet).
 
   python scripts/economy_harvest.py --network testnet --owner rUSER --nft-id 00...
 
@@ -34,13 +34,13 @@ async def _amain(args: argparse.Namespace) -> int:
     print(f"State: {session.state}")
     if session.error:
         print(f"Error: {session.error}")
-    if session.bucket_accept:
-        print(f"Accept your new Bucket: {session.bucket_accept.get('xumm_url')}")
+    if session.closet_accept:
+        print(f"Accept your new Closet: {session.closet_accept.get('xumm_url')}")
     return 0 if session.state == economy_flow.DONE else 1
 
 
 def main() -> int:
-    parser = argparse.ArgumentParser(description="Harvest a character into the Bucket.")
+    parser = argparse.ArgumentParser(description="Harvest a character into the Closet.")
     parser.add_argument("--network", choices=["mainnet", "testnet"], default=config.XRPL_NETWORK)
     parser.add_argument("--owner", required=True, help="owner's XRPL address")
     parser.add_argument("--nft-id", required=True, help="character NFTokenID to harvest")

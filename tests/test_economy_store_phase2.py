@@ -1,4 +1,4 @@
-# Phase 2 economy_store additions: bucket_tokens + supply_changes + the
+# Phase 2 economy_store additions: closet_tokens + supply_changes + the
 # replace-all bucket-contents helper used by both the flows and the listener.
 
 import sqlite3
@@ -40,34 +40,34 @@ def test_supply_changes_ordered():
     assert [r["reason"] for r in rows] == ["first", "second"]
 
 
-def test_set_bucket_contents_replaces():
+def test_set_closet_contents_replaces():
     c = _conn()
-    es.set_bucket_contents(c, "rUser", [("Head", "None", 2)], [3536])
-    es.set_bucket_contents(c, "rUser", [("Eyes", "Blue", 1)], [])
-    assert es.read_bucket_assets(c) == [("rUser", "Eyes", "Blue", 1)]
-    assert es.read_bucket_bodies(c) == []
+    es.set_closet_contents(c, "rUser", [("Head", "None", 2)], [3536])
+    es.set_closet_contents(c, "rUser", [("Eyes", "Blue", 1)], [])
+    assert es.read_closet_assets(c) == [("rUser", "Eyes", "Blue", 1)]
+    assert es.read_closet_bodies(c) == []
 
 
-def test_set_bucket_contents_drops_nonpositive():
+def test_set_closet_contents_drops_nonpositive():
     c = _conn()
-    es.set_bucket_contents(c, "rUser", [("Head", "None", 0), ("Eyes", "Blue", 3)], [])
-    assert es.read_bucket_assets(c) == [("rUser", "Eyes", "Blue", 3)]
+    es.set_closet_contents(c, "rUser", [("Head", "None", 0), ("Eyes", "Blue", 3)], [])
+    assert es.read_closet_assets(c) == [("rUser", "Eyes", "Blue", 3)]
 
 
-def test_set_bucket_contents_is_per_owner():
+def test_set_closet_contents_is_per_owner():
     c = _conn()
-    es.set_bucket_contents(c, "rA", [("Head", "None", 1)], [1])
-    es.set_bucket_contents(c, "rB", [("Eyes", "Red", 1)], [2])
-    es.set_bucket_contents(c, "rA", [("Head", "None", 5)], [1])  # only rA replaced
-    assets = {(o, s, v): n for o, s, v, n in es.read_bucket_assets(c)}
+    es.set_closet_contents(c, "rA", [("Head", "None", 1)], [1])
+    es.set_closet_contents(c, "rB", [("Eyes", "Red", 1)], [2])
+    es.set_closet_contents(c, "rA", [("Head", "None", 5)], [1])  # only rA replaced
+    assets = {(o, s, v): n for o, s, v, n in es.read_closet_assets(c)}
     assert assets[("rA", "Head", "None")] == 5
     assert assets[("rB", "Eyes", "Red")] == 1
 
 
-def test_bucket_token_roundtrip():
+def test_closet_token_roundtrip():
     c = _conn()
-    es.set_bucket_token(c, "rUser", "NFTID", "ABCD")
-    assert es.get_bucket_token(c, "rUser") == ("NFTID", "ABCD")
-    assert es.get_bucket_token(c, "rNope") is None
-    es.set_bucket_token(c, "rUser", "NFTID", "EF01")  # uri update in place
-    assert es.get_bucket_token(c, "rUser") == ("NFTID", "EF01")
+    es.set_closet_token(c, "rUser", "NFTID", "ABCD")
+    assert es.get_closet_token(c, "rUser") == ("NFTID", "ABCD")
+    assert es.get_closet_token(c, "rNope") is None
+    es.set_closet_token(c, "rUser", "NFTID", "EF01")  # uri update in place
+    assert es.get_closet_token(c, "rUser") == ("NFTID", "EF01")
