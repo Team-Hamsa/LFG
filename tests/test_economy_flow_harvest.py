@@ -160,7 +160,7 @@ def test_harvest_burn_then_bucket_sync_fails(tmp_path):
     # assets are NOT in the DB (deposit failed) but ARE preserved in the journal
     assert es.read_closet_bodies(conn) == []
     record = json.loads((tmp_path / f"harvest-{session.id}.json").read_text())
-    assert record["status"] == "harvested_pending_bucket"
+    assert record["status"] == "harvested_pending_closet"
     assert record["burn_hash"] == "BURNHASH"
     assert len(record["moved_assets"]) == len(NON_BODY)
 

@@ -71,3 +71,43 @@ def test_closet_token_roundtrip():
     assert es.get_closet_token(c, "rNope") is None
     es.set_closet_token(c, "rUser", "NFTID", "EF01")  # uri update in place
     assert es.get_closet_token(c, "rUser") == ("NFTID", "EF01")
+
+
+def test_migration_copies_legacy_bucket_tables():
+    """Fix 1+2 interaction: legacy bucket_* rows must be copied into the new
+    closet_* tables (which already exist with the full column set) after schema
+    creation. status should default to 'pending_accept'; offer_id to NULL."""
+    c = sqlite3.connect(":memory:")
+
+    # Simulate a DB created before the Bucket→Closet rename.
+    c.executescript("""
+        CREATE TABLE bucket_assets (
+            owner TEXT, slot TEXT, value TEXT, count INTEGER,
+            PRIMARY KEY (owner, slot, value)
+        );
+        CREATE TABLE bucket_bodies (
+            owner TEXT, edition INTEGER PRIMARY KEY
+        );
+        CREATE TABLE bucket_tokens (
+            owner TEXT PRIMARY KEY, nft_id TEXT, uri_hex TEXT,
+            updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+        );
+    """)
+    c.execute("INSERT INTO bucket_assets VALUES ('rA', 'Head', 'None', 3)")
+    c.execute("INSERT INTO bucket_bodies VALUES ('rA', 42)")
+    c.execute("INSERT INTO bucket_tokens VALUES ('rA', 'NFTABC', 'DEADBEEF', CURRENT_TIMESTAMP)")
+    c.commit()
+
+    # init_economy_schema must: create new closet_* tables first, then copy rows.
+    es.init_economy_schema(c)
+
+    # Rows are accessible via the store helpers.
+    assert es.read_closet_assets(c) == [("rA", "Head", "None", 3)]
+    assert es.read_closet_bodies(c) == [("rA", 42)]
+    assert es.get_closet_token(c, "rA") == ("NFTABC", "DEADBEEF")
+
+    # New columns exist and carry their schema defaults.
+    row = c.execute("SELECT status, offer_id FROM closet_tokens WHERE owner = 'rA'").fetchone()
+    assert row is not None
+    assert row[0] == "pending_accept"
+    assert row[1] is None

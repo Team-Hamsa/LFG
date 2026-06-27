@@ -91,7 +91,7 @@ def _assets_to_list(assets: dict[tuple[str, str], int]) -> list[bt.Asset]:
 async def _sync_then_persist(
     deps: EconomyDeps, owner: str, assets: dict[tuple[str, str], int], bodies: set[int]
 ) -> None:
-    """Write the new bucket contents to the on-chain token FIRST (authoritative),
+    """Write the new Closet contents to the on-chain token FIRST (authoritative),
     then mirror to the local DB. Raises bt.ClosetError if the on-chain modify
     fails (caller decides recovery)."""
     asset_list = _assets_to_list(assets)
@@ -149,8 +149,8 @@ class HarvestSession:
 
 
 async def run_harvest(session: HarvestSession, deps: EconomyDeps) -> None:
-    """Drive a harvest to a terminal state. Order: precheck -> ensure bucket
-    (reversible) -> BURN (irreversible) -> deposit assets to the Bucket token
+    """Drive a harvest to a terminal state. Order: precheck -> ensure Closet
+    (reversible) -> BURN (irreversible) -> deposit assets to the Closet token
     then DB. If the deposit fails after the burn, the journal carries the moved
     assets + burn hash for recovery; the assets are never silently lost."""
     conn = deps.conn
@@ -199,7 +199,7 @@ async def run_harvest(session: HarvestSession, deps: EconomyDeps) -> None:
                 f"the journal ({session.id}) for recovery"
             )
             _write_record(
-                deps.records_dir, "harvest", session.id, session._record("harvested_pending_bucket")
+                deps.records_dir, "harvest", session.id, session._record("harvested_pending_closet")
             )
             return
 
@@ -282,13 +282,13 @@ async def run_assemble(session: AssembleSession, deps: EconomyDeps) -> None:
         # Reversible: a freshly minted character can be burned back.
         nft_id = await deps.char_mint_fn(meta_url)
         if not nft_id:
-            session.fail(f"failed to mint edition {edition}; your closet is untouched")
+            session.fail(f"failed to mint edition {edition}; your Closet is untouched")
             _write_record(deps.records_dir, "assemble", session.id, session._record("failed_mint"))
             return
         session.new_nft_id = nft_id
         _write_record(deps.records_dir, "assemble", session.id, session._record("minted"))
 
-        # Drain the closet: token first (authoritative), then DB mirror.
+        # Drain the Closet: token first (authoritative), then DB mirror.
         bodies.discard(edition)
         for slot in te.NON_BODY_SLOTS:
             key = (slot, session.chosen[slot])
@@ -296,12 +296,12 @@ async def run_assemble(session: AssembleSession, deps: EconomyDeps) -> None:
         try:
             await _sync_then_persist(deps, owner, assets, bodies)
         except Exception as e:
-            # Mint succeeded but the bucket drain failed: burn the mint back so
-            # the user's bucket is exactly as it was.
+            # Mint succeeded but the Closet drain failed: burn the mint back so
+            # the user's Closet is exactly as it was.
             revert_hash = await deps.char_burn_fn(nft_id, "")
             if revert_hash:
                 session.new_nft_id = None
-                session.fail(f"assemble failed draining the bucket ({e}); your bucket is untouched")
+                session.fail(f"assemble failed draining the Closet ({e}); your Closet is untouched")
                 _write_record(
                     deps.records_dir, "assemble", session.id, session._record("reverted_mint")
                 )
@@ -310,7 +310,7 @@ async def run_assemble(session: AssembleSession, deps: EconomyDeps) -> None:
                 # in the issuer wallet. Keep its nft_id in the journal so an admin
                 # can locate and burn it — do NOT wipe it.
                 session.fail(
-                    f"assemble failed draining the bucket ({e}) and the compensating burn of "
+                    f"assemble failed draining the Closet ({e}) and the compensating burn of "
                     f"{nft_id} failed — admin must burn it manually (journal {session.id})"
                 )
                 _write_record(
@@ -322,7 +322,7 @@ async def run_assemble(session: AssembleSession, deps: EconomyDeps) -> None:
         offer_id = await deps.char_offer_fn(nft_id, owner)
         if not offer_id:
             session.fail(
-                f"edition {edition} was minted ({nft_id}) and your bucket drained, but the offer "
+                f"edition {edition} was minted ({nft_id}) and your Closet drained, but the offer "
                 f"failed — contact an admin to re-offer it (journal {session.id})"
             )
             _write_record(
@@ -434,7 +434,7 @@ async def run_equip(session: EquipSession, deps: EconomyDeps) -> None:
                 )
             else:
                 # No decodable old URI to revert to: the character keeps the new
-                # traits while the bucket was not updated. Report honestly and
+                # traits while the Closet was not updated. Report honestly and
                 # flag for recovery rather than claiming a revert that didn't happen.
                 session.fail(
                     f"equip failed updating the closet ({e}); the character's URI could not be "

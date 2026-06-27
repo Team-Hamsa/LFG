@@ -53,6 +53,8 @@ CREATE TABLE IF NOT EXISTS closet_tokens (
     owner      TEXT PRIMARY KEY,
     nft_id     TEXT,
     uri_hex    TEXT,
+    status     TEXT DEFAULT 'pending_accept',
+    offer_id   TEXT,
     updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
 );
 CREATE TABLE IF NOT EXISTS supply_changes (
@@ -70,26 +72,25 @@ CREATE TABLE IF NOT EXISTS supply_changes (
 
 
 def _migrate_bucket_tables(conn: sqlite3.Connection) -> None:
-    """Rename legacy bucket_* tables to closet_* if they exist (one-time migration).
-    Safe to call repeatedly — each ALTER is skipped if the source table is absent."""
-    cur = conn.execute("SELECT name FROM sqlite_master WHERE type='table'")
-    tables = {row[0] for row in cur.fetchall()}
-    renames = [
-        ("bucket_assets", "closet_assets"),
-        ("bucket_bodies", "closet_bodies"),
-        ("bucket_tokens", "closet_tokens"),
-    ]
-    for old_name, new_name in renames:
-        if old_name in tables and new_name not in tables:
-            conn.execute(f"ALTER TABLE {old_name} RENAME TO {new_name}")
+    """One-time copy of legacy bucket_* rows into the closet_* tables (for index
+    DBs created before the Bucket→Closet rename). Copies the shared base columns;
+    new closet_tokens columns (status/offer_id) take their schema defaults."""
+    have = {r[0] for r in conn.execute("SELECT name FROM sqlite_master WHERE type='table'")}
+    for old, new, cols in (
+        ("bucket_assets", "closet_assets", "owner, slot, value, count"),
+        ("bucket_bodies", "closet_bodies", "owner, edition"),
+        ("bucket_tokens", "closet_tokens", "owner, nft_id, uri_hex"),
+    ):
+        if old in have:
+            conn.execute(f"INSERT OR IGNORE INTO {new} ({cols}) SELECT {cols} FROM {old}")
     conn.commit()
 
 
 def init_economy_schema(conn: sqlite3.Connection) -> None:
     """Create the genesis + live-state tables if absent, and migrate legacy bucket_* tables."""
-    _migrate_bucket_tables(conn)
     conn.executescript(_ECONOMY_SCHEMA)
     conn.commit()
+    _migrate_bucket_tables(conn)
 
 
 def genesis_exists(conn: sqlite3.Connection) -> bool:
