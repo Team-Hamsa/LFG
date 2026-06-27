@@ -700,3 +700,11 @@ button.back:hover { color: var(--text); border: none; }
 .roster-tile.active { box-shadow: 0 0 0 4px var(--blue); }
 .roster-tile img { width: 100%; height: 100%; object-fit: contain; }
 .roster-tile.assemble { display: grid; place-items: center; font-size: 1.6rem; }
+/* NFT with empty/missing on-chain metadata (freshly minted, not yet indexed):
+   show a calm placeholder instead of a wall of broken layer images. */
+.roster-tile.incomplete { background: repeating-linear-gradient(
+    45deg, var(--surface-2), var(--surface-2) 6px, var(--surface) 6px, var(--surface) 12px); }
+.dressup-canvas.incomplete {
+  display: grid; place-items: center; color: var(--muted, #888); font-weight: 700;
+}
+.dressup-canvas.incomplete::after { content: '…'; font-size: 2rem; }

@@ -705,14 +705,34 @@ function layerSrc(body, trait, value) {
          `&trait=${encodeURIComponent(trait)}&value=${encodeURIComponent(value)}`;
 }
 
+// A layer request only renders when both body and value are present and the
+// value isn't the literal "None". Freshly-minted / not-yet-indexed tokens have
+// an empty body and/or missing attributes; issuing a layer fetch for those 400s
+// (empty params), so callers must guard with this before building a layerSrc.
+function layerComplete(body, value) {
+  return Boolean(body) && Boolean(value) && value !== 'None';
+}
+
+// 1x1 transparent PNG — a non-broken placeholder for incomplete NFTs.
+const BLANK_IMG =
+  'data:image/gif;base64,R0lGODlhAQABAAAAACH5BAEKAAEALAAAAAABAAEAAAICTAEAOw==';
+
 function renderCanvas(char) {
   const canvas = el('dressup-canvas');
   canvas.replaceChildren();
   const order = economyState.trait_order;
+  // Incomplete metadata (empty body) means every layer fetch would 400; show a
+  // graceful "still indexing" state instead of a wall of broken images.
+  if (!char.body) {
+    canvas.classList.add('incomplete');
+    el('dressup-id').textContent = `#${char.edition} · still indexing…`;
+    return;
+  }
+  canvas.classList.remove('incomplete');
   const byType = Object.fromEntries(char.attributes.map((a) => [a.trait_type, a.value]));
   for (const slot of order) {
     const value = byType[slot];
-    if (!value || value === 'None') continue;
+    if (!layerComplete(char.body, value)) continue;
     const img = document.createElement('img');
     img.src = layerSrc(char.body, slot, value);
     img.alt = '';
@@ -728,8 +748,18 @@ function renderRoster() {
     const tile = document.createElement('button');
     tile.className = 'roster-tile' + (char.nft_id === activeNftId ? ' active' : '');
     const img = document.createElement('img');
-    img.src = imgUrl(char.image_url) || layerSrc(char.body, 'Body',
-      (char.attributes.find((a) => a.trait_type === 'Body') || {}).value || 'None');
+    const cdn = imgUrl(char.image_url);
+    const bodyVal = (char.attributes.find((a) => a.trait_type === 'Body') || {}).value;
+    if (cdn) {
+      img.src = cdn;
+    } else if (layerComplete(char.body, bodyVal)) {
+      img.src = layerSrc(char.body, 'Body', bodyVal);
+    } else {
+      // No CDN image and incomplete metadata: a layer fetch would 400. Render a
+      // placeholder tile (transparent img) rather than a broken one.
+      tile.classList.add('incomplete');
+      img.src = BLANK_IMG;
+    }
     img.alt = `#${char.edition}`;
     tile.appendChild(img);
     tile.onclick = () => selectCharacter(char.nft_id);
@@ -799,7 +829,10 @@ function renderBucket() {
     const compatible = char && economyState.slots.includes(asset.slot);
     if (!compatible) item.disabled = true;
     const img = document.createElement('img');
-    img.src = char ? layerSrc(char.body, asset.slot, asset.value) : '';
+    // Guard: a missing active body or empty asset value would 400 the layer fetch.
+    img.src = (char && layerComplete(char.body, asset.value))
+      ? layerSrc(char.body, asset.slot, asset.value)
+      : BLANK_IMG;
     img.alt = `${asset.slot}: ${asset.value}`;
     const count = document.createElement('span');
     count.className = 'count';
