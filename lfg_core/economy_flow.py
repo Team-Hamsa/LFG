@@ -25,6 +25,7 @@ from lfg_core import closet_token as bt
 from lfg_core import config
 from lfg_core import economy_store as es
 from lfg_core import trait_economy as te
+from lfg_core import trait_token as tt
 from lfg_core.nft_index import OnchainNft
 
 RUNNING = "running"
@@ -36,6 +37,11 @@ FAILED = "failed"
 # metadata JSON; tests return canned URLs.
 ComposeFn = Callable[[list[dict[str, str]], str, int, int], Awaitable[tuple[str, str | None, str]]]
 BurnFn = Callable[[str, str], Awaitable[str | None]]  # (nft_id, owner) -> tx hash
+TraitComposeFn = Callable[[str, str], Awaitable[str]]  # (slot, value) -> image_url
+TraitInfoFn = Callable[
+    [str], Awaitable[dict[str, Any] | None]
+]  # nft_id -> {taxon, issuer, owner} | None
+TraitMetaFn = Callable[[str], Awaitable[dict[str, Any] | None]]  # nft_id -> metadata dict | None
 
 
 @dataclass
@@ -64,6 +70,14 @@ class EconomyDeps:
     # pending_accept → active before checking the precondition. Optional so
     # existing test constructions that omit it skip the confirmation step.
     closet_owner_fn: bt.OwnerFn | None = None
+    trait_compose_fn: TraitComposeFn | None = None
+    trait_upload_fn: bt.UploadFn | None = None
+    trait_mint_fn: bt.MintFn | None = None
+    trait_burn_fn: BurnFn | None = None
+    # On-ledger trait token lookup fns (used by run_deposit for fail-closed
+    # ownership/issuer checks before the irreversible burn).
+    trait_info_fn: TraitInfoFn | None = None
+    trait_meta_fn: TraitMetaFn | None = None
     records_dir: str = config.ECONOMY_RECORDS_DIR
 
 
@@ -466,4 +480,210 @@ async def run_equip(session: EquipSession, deps: EconomyDeps) -> None:
         _write_record(deps.records_dir, "equip", session.id, session._record("complete"))
     except Exception as e:
         logging.error(f"Equip {session.id} failed: {traceback.format_exc()}")
+        session.fail(str(e))
+
+
+# --- Extract: turn a loose Closet trait into a standalone tradeable NFToken ---
+
+
+@dataclass
+class ExtractSession:
+    owner: str
+    slot: str
+    value: str
+    state: str = RUNNING
+    error: str | None = None
+    nft_id: str | None = None
+    accept: dict[str, Any] | None = None
+    id: str = field(default_factory=lambda: uuid.uuid4().hex)
+
+    def _record(self, status: str) -> dict[str, Any]:
+        return {
+            "op": "extract",
+            "id": self.id,
+            "owner": self.owner,
+            "slot": self.slot,
+            "value": self.value,
+            "nft_id": self.nft_id,
+            "status": status,
+            "error": self.error,
+        }
+
+    def fail(self, msg: str) -> None:
+        self.state = FAILED
+        self.error = msg
+
+
+async def run_extract(session: ExtractSession, deps: EconomyDeps) -> None:
+    """Extract a loose Closet trait into a standalone tradeable NFToken. Order:
+    precheck (active Closet + trait present) -> compose+mint (reversible) ->
+    decrement Closet + record trait_token -> burn-back on Closet failure ->
+    offer+accept. Supply-neutral (no supply_changes)."""
+    conn, owner, slot, value = deps.conn, session.owner, session.slot, session.value
+    try:
+        err = await _require_active_closet(deps, owner)
+        if err:
+            session.fail(err)
+            return
+        assets, bodies = _owner_contents(conn, owner)
+        if assets.get((slot, value), 0) < 1:
+            session.fail(f"no loose '{value}' {slot} in your Closet to extract")
+            return
+
+        image_url = await deps.trait_compose_fn(slot, value)  # type: ignore[misc]
+        meta_url = await deps.trait_upload_fn(tt.build_trait_metadata(slot, value, image_url))  # type: ignore[misc]
+        _write_record(deps.records_dir, "extract", session.id, session._record("minting"))
+
+        nft_id = await deps.trait_mint_fn(meta_url)  # type: ignore[misc]
+        if not nft_id:
+            session.fail(f"failed to mint trait token for {value} {slot}; your Closet is untouched")
+            _write_record(deps.records_dir, "extract", session.id, session._record("failed_mint"))
+            return
+        session.nft_id = nft_id
+        _write_record(deps.records_dir, "extract", session.id, session._record("minted"))
+
+        assets[(slot, value)] = assets.get((slot, value), 0) - 1
+        try:
+            await _sync_then_persist(deps, owner, assets, bodies)
+        except Exception as e:
+            revert = await deps.trait_burn_fn(nft_id, "")  # type: ignore[misc]
+            if revert:
+                session.nft_id = None
+                session.fail(f"extract failed updating the Closet ({e}); your Closet is untouched")
+                _write_record(
+                    deps.records_dir, "extract", session.id, session._record("reverted_mint")
+                )
+            else:
+                session.fail(
+                    f"extract failed updating the Closet ({e}) and the compensating burn of "
+                    f"{nft_id} failed — admin must burn it (journal {session.id})"
+                )
+                _write_record(
+                    deps.records_dir, "extract", session.id, session._record("failed_revert_mint")
+                )
+            return
+        # Closet decremented on-chain + DB. Mirror the trait token in the DB
+        # best-effort: the listener rebuilds trait_tokens from the on-chain mint, so a
+        # failure here is non-fatal — journal it for the auditor rather than reverting
+        # a successful on-chain extract.
+        #
+        # The freshly-minted token is held by the ISSUER until the owner accepts the
+        # offer in Xaman, so the current on-ledger owner is the issuer (not `owner`).
+        # Recording the issuer here keeps it out of the owner's deposit candidates
+        # (read_economy_state filters by wallet); the listener flips the owner to the
+        # wallet when it observes the AcceptOffer, at which point it becomes depositable.
+        try:
+            es.upsert_trait_token(conn, nft_id, config.SWAP_ISSUER_ADDRESS, slot, value)
+        except Exception:
+            logging.error(
+                f"extract {session.id} trait_tokens mirror failed: {traceback.format_exc()}"
+            )
+            _write_record(
+                deps.records_dir, "extract", session.id, session._record("complete_pending_mirror")
+            )
+
+        offer_id = await deps.closet_offer_fn(nft_id, owner)
+        session.accept = await deps.closet_accept_fn(offer_id) if offer_id else None
+        session.state = DONE
+        _write_record(deps.records_dir, "extract", session.id, session._record("complete"))
+    except Exception as e:
+        logging.error(f"Extract {session.id} failed: {traceback.format_exc()}")
+        session.fail(str(e))
+
+
+# --- Deposit: burn a standalone trait NFToken back into the owner's Closet ---
+
+
+@dataclass
+class DepositSession:
+    owner: str
+    nft_id: str
+    state: str = RUNNING
+    error: str | None = None
+    slot: str | None = None
+    value: str | None = None
+    burn_hash: str | None = None
+    id: str = field(default_factory=lambda: uuid.uuid4().hex)
+
+    def _record(self, status: str) -> dict[str, Any]:
+        return {
+            "op": "deposit",
+            "id": self.id,
+            "owner": self.owner,
+            "nft_id": self.nft_id,
+            "slot": self.slot,
+            "value": self.value,
+            "burn_hash": self.burn_hash,
+            "status": status,
+            "error": self.error,
+        }
+
+    def fail(self, msg: str) -> None:
+        self.state = FAILED
+        self.error = msg
+
+
+async def run_deposit(session: DepositSession, deps: EconomyDeps) -> None:
+    """Deposit a standalone trait NFToken back into the owner's Closet. Order:
+    precheck (active Closet + token is ours + on-ledger owner == depositor) ->
+    issuer BURN (irreversible) -> credit Closet + delete trait_token row ->
+    journal on credit failure. Supply-neutral. Fail-closed on any ownership
+    uncertainty."""
+    conn, owner, nft_id = deps.conn, session.owner, session.nft_id
+    try:
+        err = await _require_active_closet(deps, owner)
+        if err:
+            session.fail(err)
+            return
+        info = await deps.trait_info_fn(nft_id)  # type: ignore[misc]
+        if not info:
+            session.fail("could not verify the trait token on-ledger; nothing was changed")
+            return
+        if (
+            int(info.get("taxon") or -1) != config.TRAIT_TAXON
+            or info.get("issuer") != config.SWAP_ISSUER_ADDRESS
+        ):
+            session.fail("that NFToken is not an LFG trait token")
+            return
+        if info.get("owner") != owner:
+            session.fail("you do not own that trait token on-ledger; nothing was changed")
+            return
+        meta = await deps.trait_meta_fn(nft_id)  # type: ignore[misc]
+        parsed = tt.parse_trait_metadata(meta or {})
+        if parsed is None:
+            session.fail("that trait token has unreadable metadata; nothing was changed")
+            return
+        session.slot, session.value = parsed
+        _write_record(deps.records_dir, "deposit", session.id, session._record("depositing"))
+
+        burn_hash = await deps.trait_burn_fn(nft_id, owner)  # type: ignore[misc]
+        if not burn_hash:
+            session.fail(f"failed to burn trait token {nft_id}; nothing was lost")
+            _write_record(deps.records_dir, "deposit", session.id, session._record("failed_burn"))
+            return
+        session.burn_hash = burn_hash
+        es.delete_trait_token(conn, nft_id)
+        _write_record(deps.records_dir, "deposit", session.id, session._record("burned"))
+
+        assets, bodies = _owner_contents(conn, owner)
+        assets[(session.slot, session.value)] = assets.get((session.slot, session.value), 0) + 1
+        try:
+            await _sync_then_persist(deps, owner, assets, bodies)
+        except Exception as e:
+            session.fail(
+                f"trait burned but Closet credit failed ({e}); recorded in the journal "
+                f"({session.id}) for recovery"
+            )
+            _write_record(
+                deps.records_dir,
+                "deposit",
+                session.id,
+                session._record("deposited_pending_closet"),
+            )
+            return
+
+        session.state = DONE
+        _write_record(deps.records_dir, "deposit", session.id, session._record("complete"))
+    except Exception as e:
+        logging.error(f"Deposit {session.id} failed: {traceback.format_exc()}")
         session.fail(str(e))

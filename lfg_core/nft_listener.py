@@ -11,7 +11,15 @@ import sqlite3
 from collections.abc import Awaitable, Callable
 from typing import Any
 
-from lfg_core import closet_token, config, economy_store, nft_index, swap_meta, trait_economy
+from lfg_core import (
+    closet_token,
+    config,
+    economy_store,
+    nft_index,
+    swap_meta,
+    trait_economy,
+    trait_token,
+)
 
 _TYPE_TO_KIND = {
     "NFTokenMint": "mint",
@@ -125,6 +133,21 @@ def _apply_closet(conn: sqlite3.Connection, token: dict[str, Any], metadata: Any
     )
 
 
+def _apply_trait_token(
+    conn: sqlite3.Connection, kind: str, token: dict[str, Any], metadata: Any
+) -> None:
+    """Maintain the trait_tokens table from a standalone trait NFToken's chain
+    events: mint/accept upsert (current owner), burn deletes."""
+    nft_id = token["nft_id"]
+    if kind == "burn" or token.get("is_burned"):
+        economy_store.delete_trait_token(conn, nft_id)
+        return
+    owner = token.get("owner")
+    parsed = trait_token.parse_trait_metadata(metadata if isinstance(metadata, dict) else {})
+    if owner and parsed:
+        economy_store.upsert_trait_token(conn, nft_id, owner, parsed[0], parsed[1])
+
+
 def _apply_possible_growth(
     conn: sqlite3.Connection, token: dict[str, Any], metadata: Any, genesis: trait_economy.Genesis
 ) -> None:
@@ -159,27 +182,40 @@ async def apply_economy_tx(
     *,
     fetch_token_fn: FetchTokenFn,
     fetch_meta_fn: FetchMetaFn,
-    genesis: trait_economy.Genesis,
+    genesis: trait_economy.Genesis | None = None,
 ) -> None:
-    """Apply a Mint/Modify/Accept to the trait-economy tables. A Closet NFToken
+    """Apply a Mint/Modify/Accept/Burn to the trait-economy tables. A Closet NFToken
     (taxon == config.CLOSET_TAXON or config.LEGACY_BUCKET_TAXON) rebuilds its
     owner's closet from metadata and, on accept, promotes pending_accept → active;
-    a character mint of an unknown edition appends a supply_changes row. Per-id
-    errors are logged, never raised. `genesis` must be the EFFECTIVE genesis so
-    already-recorded editions are recognised (idempotent)."""
+    a standalone trait NFToken (taxon == config.TRAIT_TAXON) is upserted on
+    mint/accept or deleted on burn. Closet/trait mirror maintenance runs regardless
+    of genesis. Only the supply-growth path (a character mint of an unknown edition)
+    needs `genesis`; pass the EFFECTIVE genesis (so recorded editions are recognised)
+    to enable it, or `None` when no genesis is frozen to skip growth. Per-id errors
+    are logged, never raised."""
     kind = classify_tx(tx)
-    if kind not in ("mint", "modify", "accept"):
+    if kind not in ("mint", "modify", "accept", "burn"):
         return
     for nft_id in affected_nft_ids(tx):
         try:
+            if kind == "burn":
+                # A burn may leave nft_info returning None (token gone from ledger),
+                # so route the burn by nft_id alone. delete_trait_token is idempotent
+                # and a no-op for non-trait tokens; characters/closets need no economy
+                # action on burn (the harvest flow already updated the Closet).
+                economy_store.delete_trait_token(conn, nft_id)
+                continue
             token = await fetch_token_fn(nft_id)
             if not token:
                 continue
             uri_hex = token.get("uri_hex") or ""
             metadata = await fetch_meta_fn(uri_hex) if uri_hex else None
-            if int(token.get("taxon") or -1) in (config.CLOSET_TAXON, config.LEGACY_BUCKET_TAXON):
+            taxon = int(token.get("taxon") or -1)
+            if taxon in (config.CLOSET_TAXON, config.LEGACY_BUCKET_TAXON):
                 _apply_closet(conn, token, metadata)
-            elif kind == "mint":
+            elif taxon == config.TRAIT_TAXON:
+                _apply_trait_token(conn, kind, token, metadata)
+            elif kind == "mint" and genesis is not None:
                 _apply_possible_growth(conn, token, metadata, genesis)
         except Exception:
             logging.exception(f"apply_economy_tx failed for {nft_id} ({kind})")

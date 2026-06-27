@@ -920,6 +920,16 @@ handle_assemble_start = _economy_post(
     lambda uid, w, b: economy_api.start_assemble(uid, w, int(b["edition"]), b["chosen"]),
     lambda w, b: mock_economy.INSTANCE.assemble(w, int(b["edition"]), b["chosen"]),
 )
+handle_extract_start = _economy_post(
+    "extract",
+    lambda uid, w, b: economy_api.start_extract(uid, w, b),
+    lambda w, b: mock_economy.INSTANCE.extract(w, b),
+)
+handle_deposit_start = _economy_post(
+    "deposit",
+    lambda uid, w, b: economy_api.start_deposit(uid, w, b),
+    lambda w, b: mock_economy.INSTANCE.deposit(w, b),
+)
 
 
 def _make_economy_status_handler(prefix: str):
@@ -961,6 +971,8 @@ def _make_economy_status_handler(prefix: str):
 handle_equip_status = _make_economy_status_handler("equip")
 handle_harvest_status = _make_economy_status_handler("harvest")
 handle_assemble_status = _make_economy_status_handler("assemble")
+handle_extract_status = _make_economy_status_handler("extract")
+handle_deposit_status = _make_economy_status_handler("deposit")
 
 
 def _client_dir_mtime() -> float:
@@ -1039,6 +1051,10 @@ def create_app() -> web.Application:
     app.router.add_get("/api/harvest/{session_id}", handle_harvest_status)
     app.router.add_post("/api/assemble", require_wallet(handle_assemble_start))
     app.router.add_get("/api/assemble/{session_id}", handle_assemble_status)
+    app.router.add_post("/api/extract", require_wallet(handle_extract_start))
+    app.router.add_get("/api/extract/{session_id}", handle_extract_status)
+    app.router.add_post("/api/deposit", require_wallet(handle_deposit_start))
+    app.router.add_get("/api/deposit/{session_id}", handle_deposit_status)
     app.router.add_get("/events", handle_events)
     app.router.add_get("/events/me", handle_events_me)
     app.router.add_get("/__dev/reload", handle_dev_reload)

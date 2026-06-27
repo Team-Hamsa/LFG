@@ -882,6 +882,8 @@ async function openDressup() {
 
 let closetFilter = 'All';
 let equipBusy = false;
+let extractBusy = {};   // keyed by `${slot}:${value}` to guard per-tile double-clicks
+let depositBusy = {};   // keyed by nft_id
 
 function activeChar() {
   return economyState.characters.find((c) => c.nft_id === activeNftId) || null;
@@ -906,12 +908,17 @@ function renderCloset() {
   const char = activeChar();
   for (const asset of economyState.closet.assets) {
     if (closetFilter !== 'All' && asset.slot !== closetFilter) continue;
-    const item = document.createElement('button');
+    // The tile is a non-button container (not a <button>) so the Extract control
+    // can be a valid nested <button> AND remain usable even when equip is not
+    // available — extraction does not depend on equip compatibility.
+    const item = document.createElement('div');
     item.className = 'closet-item';
-    // Compatibility: only enable when this asset can go on the active character.
+    item.setAttribute('role', 'button');
+    item.tabIndex = 0;
+    // Compatibility: only allow equip when this asset can go on the active character.
     // Client mirrors the server precheck (server re-verifies on commit).
     const compatible = char && economyState.slots.includes(asset.slot);
-    if (!compatible) item.disabled = true;
+    if (!compatible) item.classList.add('incompatible');
     const img = document.createElement('img');
     // Guard: a missing active body or empty asset value would 400 the layer fetch.
     img.src = (char && layerComplete(char.body, asset.value))
@@ -921,9 +928,114 @@ function renderCloset() {
     const count = document.createElement('span');
     count.className = 'count';
     count.textContent = `×${asset.count}`;
-    item.replaceChildren(img, count);
-    item.onclick = () => equipTrait(asset.slot, asset.value, item);
+    // Extract button: pull this loose trait out as a tradeable NFToken.
+    const extractBtn = document.createElement('button');
+    extractBtn.className = 'extract';
+    extractBtn.title = 'Extract as tradeable trait';
+    extractBtn.textContent = '↑';
+    extractBtn.onclick = (e) => {
+      e.stopPropagation();  // don't also fire the tile equip click
+      extractTrait(asset.slot, asset.value, extractBtn);
+    };
+    item.replaceChildren(img, count, extractBtn);
+    // Equip is wired only when the asset is compatible with the active character;
+    // the tile still renders (and Extract still works) when it isn't.
+    if (compatible) item.onclick = () => equipTrait(asset.slot, asset.value, item);
     grid.appendChild(item);
+  }
+  renderTraitStrip();
+}
+
+function renderTraitStrip() {
+  const strip = el('trait-strip');
+  if (!strip) return;
+  strip.replaceChildren();
+  const tokens = (economyState.trait_tokens) || [];
+  if (!tokens.length) {
+    const hint = document.createElement('p');
+    hint.className = 'trait-strip-empty';
+    hint.textContent = 'No extracted traits';
+    strip.appendChild(hint);
+    return;
+  }
+  const char = activeChar();
+  for (const t of tokens) {
+    const chip = document.createElement('div');
+    chip.className = 'trait-chip';
+    const img = document.createElement('img');
+    img.src = (char && layerComplete(char.body, t.value))
+      ? layerSrc(char.body, t.slot, t.value)
+      : BLANK_IMG;
+    img.alt = `${t.slot}: ${t.value}`;
+    const label = document.createElement('span');
+    label.className = 'trait-chip-label';
+    label.textContent = `${t.slot}: ${t.value}`;
+    const depositBtn = document.createElement('button');
+    depositBtn.className = 'deposit';
+    depositBtn.textContent = 'Deposit';
+    depositBtn.onclick = () => depositTrait(t.nft_id, depositBtn);
+    chip.replaceChildren(img, label, depositBtn);
+    strip.appendChild(chip);
+  }
+}
+
+async function extractTrait(slot, value, btnEl) {
+  if (closetStatus() !== 'active') return;
+  const key = `${slot}:${value}`;
+  if (extractBusy[key]) return;
+  extractBusy[key] = true;
+  btnEl.disabled = true;
+  status('Extracting trait…');
+  try {
+    const res = await api('/api/extract', {
+      method: 'POST',
+      body: JSON.stringify({ slot, value }),
+    });
+    const final = await pollEconomyOp('extract', res);
+    status('');
+    if (final.state === 'failed') throw new Error(final.error || 'extract failed');
+    if (final.accept) {
+      showFlow({
+        title: '🎟️ Extract trait',
+        text: 'Scan to accept your tradeable trait in Xaman.',
+        qrData: final.accept,
+        link: final.accept,
+        done: true,
+      });
+    }
+    economyState = await api('/api/economy');
+    renderCloset();
+  } catch (e) {
+    showError(e.message);
+    status('');
+  } finally {
+    extractBusy[key] = false;
+    btnEl.disabled = false;
+  }
+}
+
+async function depositTrait(nftId, btnEl) {
+  if (closetStatus() !== 'active') return;
+  if (depositBusy[nftId]) return;
+  depositBusy[nftId] = true;
+  btnEl.disabled = true;
+  status('Depositing trait…');
+  try {
+    const res = await api('/api/deposit', {
+      method: 'POST',
+      body: JSON.stringify({ nft_id: nftId }),
+    });
+    const final = await pollEconomyOp('deposit', res);
+    status('');
+    if (final.state === 'failed') throw new Error(final.error || 'deposit failed');
+    economyState = await api('/api/economy');
+    renderCloset();
+  } catch (e) {
+    showError(e.message);
+    status('');
+  } finally {
+    depositBusy[nftId] = false;
+    btnEl.disabled = false;
   }
 }
 

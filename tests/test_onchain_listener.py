@@ -25,7 +25,7 @@ sys.path.insert(0, os.path.join(REPO, "scripts"))
 import onchain_listener as oln  # noqa: E402
 
 from lfg_core import closet_token as bt  # noqa: E402
-from lfg_core import config, nft_index  # noqa: E402
+from lfg_core import config, nft_index, trait_token  # noqa: E402
 from lfg_core import economy_store as es  # noqa: E402
 from lfg_core import trait_economy as te  # noqa: E402
 
@@ -254,3 +254,40 @@ def test_listen_path_accept_closet_promotes_pending_to_active():
     record = es.get_closet_record(conn, "rUser")
     assert record is not None, "accept was filtered before reaching economy handler"
     assert record[2] == bt.ACTIVE, f"expected ACTIVE, got {record[2]}"
+
+
+def test_listen_path_burn_deletes_trait_token():
+    """Drive a TRAIT_TAXON NFTokenBurn through process_stream_tx (the production
+    entrypoint) and confirm the trait_tokens row is deleted. This guards the
+    integration gap where a unit test on apply_economy_tx would pass even if the
+    live dispatch filter dropped the burn kind."""
+    conn = _conn()
+    _freeze(conn)
+    # Seed an existing trait_tokens row to be deleted.
+    es.upsert_trait_token(conn, "TRAIT_BURN", "rUser", "Hat", "Cap")
+    assert len(es.read_trait_tokens(conn)) == 1
+
+    async def fetch_token(nft_id):
+        return {
+            "nft_id": "TRAIT_BURN",
+            "owner": "rUser",
+            "taxon": config.TRAIT_TAXON,
+            "uri_hex": "BB",
+            "is_burned": True,
+        }
+
+    async def fetch_meta(uri_hex):
+        return trait_token.build_trait_metadata("Hat", "Cap", "https://example.com/img.png")
+
+    # NFTokenBurn carries NFTokenID directly (not in meta.nftoken_id).
+    tx = {"TransactionType": "NFTokenBurn", "NFTokenID": "TRAIT_BURN"}
+    _run(
+        oln.process_stream_tx(
+            conn,
+            tx,
+            fetch_token=fetch_token,
+            fetch_meta=fetch_meta,
+            is_ours=_is_ours,
+        )
+    )
+    assert es.read_trait_tokens(conn) == [], "Burn did not delete trait_tokens row"

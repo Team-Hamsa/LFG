@@ -166,3 +166,57 @@ def test_can_equip_rejects_immutable_bad_slot_and_lacking():
     assert not te.can_equip(_char(7), "Head", "Crown", assets, mutable=False).ok
     assert not te.can_equip(_char(7), "Body", "X", assets, mutable=True).ok  # not equippable
     assert not te.can_equip(_char(7), "Head", "Tiara", assets, mutable=True).ok  # not in bucket
+
+
+# --- extract + deposit conservation round-trip ---
+
+
+def test_extract_then_deposit_conserves_census():
+    """Moving a trait between the Closet and a standalone trait token is
+    supply-neutral: asset_census tallies both, so no supply_changes are needed
+    and verify_conservation reports OK throughout."""
+    import sqlite3
+
+    from lfg_core import economy_store as es
+
+    c = sqlite3.connect(":memory:")
+    es.init_economy_schema(c)
+
+    genesis = te.Genesis(trait_counts={("Hat", "Cap"): 1}, edition_bodies={})
+    es.freeze_genesis(c, genesis, {})
+
+    # Trait starts loose in a Closet (count=1, no bodies).
+    es.set_closet_contents(c, "rA", [("Hat", "Cap", 1)], [])
+    base = te.asset_census(
+        characters={},
+        closet_assets=es.read_closet_assets(c),
+        closet_bodies=es.read_closet_bodies(c),
+        trait_tokens=es.read_trait_tokens(c),
+    )
+    assert base.trait_counts[("Hat", "Cap")] == 1
+
+    # EXTRACT: Closet -1, standalone trait token +1 — census must not change.
+    es.set_closet_contents(c, "rA", [("Hat", "Cap", 0)], [])
+    es.upsert_trait_token(c, "T1", "rA", "Hat", "Cap")
+    after_extract = te.asset_census(
+        characters={},
+        closet_assets=es.read_closet_assets(c),
+        closet_bodies=es.read_closet_bodies(c),
+        trait_tokens=es.read_trait_tokens(c),
+    )
+    assert after_extract == base
+
+    # DEPOSIT: standalone token -1, Closet +1 — census returns to baseline.
+    es.delete_trait_token(c, "T1")
+    es.set_closet_contents(c, "rA", [("Hat", "Cap", 1)], [])
+    after_deposit = te.asset_census(
+        characters={},
+        closet_assets=es.read_closet_assets(c),
+        closet_bodies=es.read_closet_bodies(c),
+        trait_tokens=es.read_trait_tokens(c),
+    )
+    assert after_deposit == base
+
+    # No supply_changes needed: conservation is clean at every step.
+    report = te.verify_conservation(te.effective_genesis(genesis, []), after_deposit, [])
+    assert report.ok

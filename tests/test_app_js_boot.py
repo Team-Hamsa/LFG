@@ -62,6 +62,14 @@ def test_app_js_has_closet_states():
     assert "👜 Claim your Closet" not in src
 
 
+def test_app_js_has_extract_deposit():
+    src = _read("app.js")
+    assert "/api/extract" in src and "/api/deposit" in src
+    assert "economyState.trait_tokens" in src or "trait_tokens" in src
+    assert "Extract" in src and "Deposit" in src
+    assert "renderTraitStrip" in src
+
+
 def test_telegram_webapp_js_vendored_same_origin():
     # Vendored same-origin (not hotlinked) per the spec.
     assert os.path.exists(os.path.join(CLIENT, "telegram-web-app.js"))

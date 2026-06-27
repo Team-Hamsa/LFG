@@ -65,6 +65,7 @@ NFT_DESCRIPTION=Test
 NFT_TRANSFER_FEE=7000
 NFT_FLAGS=25
 CLOSET_TAXON=1762                                           # optional; Closet soulbound taxon (default 1762)
+TRAIT_TAXON=1763                                            # optional; tradeable trait token taxon (default 1763)
 NFT_SCHEMA_URL=ipfs://QmNpi8rcXEkohca8iXu7zysKKSJYqCvBJn3xJwga8jXqWU
 EXTERNAL_WEBSITE_URL=https://letseffinggo.com
 RETRY_MAX_ATTEMPTS=5
@@ -401,6 +402,55 @@ Model:
   the process dies between the `closet_tokens` delete and the new mint, re-run
   with `--owner <addr>` for the affected address; contents in `closet_assets` /
   `closet_bodies` are safe — only the token pointer is transiently lost.
+
+### Dress-up trait economy — Phase 4 (tradeable trait tokens)
+
+Phase 4 (#66) adds **Extract** and **Deposit**: a loose Closet asset can be
+pulled out as a standalone tradeable NFToken, and that token can later be
+burned back into the Closet. This creates a secondary market for individual
+traits without changing the character supply.
+
+**Trait token model:**
+- **`TRAIT_TAXON = 1763`** (env var `TRAIT_TAXON`, default 1763).
+- **`TRAIT_NFT_FLAGS = 9`** (burnable + transferable, NOT mutable). The 70%
+  royalty is inherited automatically from `NFT_TRANSFER_FEE` because `mint_nft`
+  applies the fee to all transferable tokens. Trait tokens are intentionally
+  NOT mutable — they represent a fixed slot/value pair whose identity must
+  never change in place.
+- **`trait_tokens` table** (in `onchain_testnet.db` / `onchain_mainnet.db`,
+  maintained by `lfg_core/nft_listener.py`): one row per live trait token,
+  keyed by `nft_id`, carrying `owner`, `slot`, `value`. The listener applies
+  NFTokenMint / AcceptOffer / Burn events for `TRAIT_TAXON` tokens.
+
+**Supply-neutral property:** Extract and Deposit write **no `supply_changes`**
+rows. `asset_census` already tallies `trait_tokens` alongside `closet_assets`,
+so the conservation check (`census == genesis + Σ supply_changes`) holds without
+any additional ledger entry.
+
+**Extract** (`scripts/economy_extract.py`): compose+mint the trait token →
+decrement the Closet asset → send the token to the owner via XUMM accept offer.
+Fail-safe: if the Closet update fails after mint, the trait token is burned back
+(revert). If the compensating burn also fails, the session journals
+`failed_revert_mint` and requires admin intervention.
+
+**Deposit** (`scripts/economy_deposit.py`): issuer-burn the trait token →
+credit the Closet asset. **Fail-closed:** ownership is verified on-ledger before
+the burn; the burn is irreversible, so if on-ledger ownership cannot be
+confirmed, the op aborts with no state change. If the Closet credit fails after
+a successful burn, the session journals `deposited_pending_closet` for recovery.
+
+**CLI invocations:**
+```bash
+# Extract: pull a loose Closet trait out as a tradeable NFToken
+.venv/bin/python scripts/economy_extract.py --network testnet --owner rUSER --slot Hat --value "Wizard Hat"
+
+# Deposit: burn a trait NFToken back into the owner's Closet
+.venv/bin/python scripts/economy_deposit.py --network testnet --owner rUSER --nft-id 000800007D...
+```
+
+Both scripts print `State: done` / `State: failed` and `Error: <msg>` on
+failure. Extract additionally prints `Accept your trait: <xumm_url>` when the
+on-chain offer is ready for the owner to sign.
 
 ## Important Notes
 
