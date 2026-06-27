@@ -104,12 +104,13 @@ async def process_stream_tx(
         return meta_cache[uri_hex]
 
     await nft_listener.apply_tx(conn, tx, cached_token, cached_meta, is_ours)
-    # mint/modify/accept reach economy logic; Closet NFTokenAcceptOffer promotes
-    # pending_accept → active. Skip the genesis read on the more common burn path.
+    # mint/modify/accept/burn reach economy logic; Closet NFTokenAcceptOffer promotes
+    # pending_accept → active; TRAIT_TAXON burn deletes the trait_tokens row.
     if nft_listener.classify_tx(tx) in (
         "mint",
         "modify",
         "accept",
+        "burn",
     ) and economy_store.genesis_exists(conn):
         await nft_listener.apply_economy_tx(
             conn,
