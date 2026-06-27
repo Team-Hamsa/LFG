@@ -1,4 +1,4 @@
-# Bucket NFToken lifecycle wrappers, exercised with in-memory fakes (no network).
+# Closet NFToken lifecycle wrappers, exercised with in-memory fakes (no network).
 
 import asyncio
 import sqlite3

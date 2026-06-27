@@ -101,7 +101,8 @@ def _apply_closet(conn: sqlite3.Connection, token: dict[str, Any], metadata: Any
     """Rebuild an owner's closet_assets/closet_bodies rows from their Closet
     NFToken's metadata and set its lifecycle status: a token held by anyone other
     than the issuer has been accepted (active); one still in the issuer wallet is
-    pending_accept."""
+    pending_accept. The offer_id is NOT on-chain — preserve any stored value so
+    the UI can re-show the pending accept QR."""
     owner = token.get("owner")
     if not owner:
         return
@@ -112,8 +113,15 @@ def _apply_closet(conn: sqlite3.Connection, token: dict[str, Any], metadata: Any
     status = (
         closet_token.ACTIVE if owner != config.SWAP_ISSUER_ADDRESS else closet_token.PENDING_ACCEPT
     )
+    existing = economy_store.get_closet_record(conn, owner)
+    existing_offer_id = existing[3] if existing is not None else None
     economy_store.set_closet_token(
-        conn, owner, token["nft_id"], token.get("uri_hex") or "", status=status
+        conn,
+        owner,
+        token["nft_id"],
+        token.get("uri_hex") or "",
+        status=status,
+        offer_id=existing_offer_id,
     )
 
 
@@ -153,11 +161,12 @@ async def apply_economy_tx(
     fetch_meta_fn: FetchMetaFn,
     genesis: trait_economy.Genesis,
 ) -> None:
-    """Apply a Mint/Modify to the trait-economy tables. A Closet NFToken (taxon
-    == config.CLOSET_TAXON or config.LEGACY_BUCKET_TAXON) rebuilds its owner's
-    closet from metadata; a character mint of an unknown edition appends a
-    supply_changes row. Per-id errors are logged, never raised. `genesis` must be
-    the EFFECTIVE genesis so already-recorded editions are recognised (idempotent)."""
+    """Apply a Mint/Modify/Accept to the trait-economy tables. A Closet NFToken
+    (taxon == config.CLOSET_TAXON or config.LEGACY_BUCKET_TAXON) rebuilds its
+    owner's closet from metadata and, on accept, promotes pending_accept → active;
+    a character mint of an unknown edition appends a supply_changes row. Per-id
+    errors are logged, never raised. `genesis` must be the EFFECTIVE genesis so
+    already-recorded editions are recognised (idempotent)."""
     kind = classify_tx(tx)
     if kind not in ("mint", "modify", "accept"):
         return

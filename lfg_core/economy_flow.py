@@ -266,9 +266,9 @@ class AssembleSession:
 
 async def run_assemble(session: AssembleSession, deps: EconomyDeps) -> None:
     """Drive an assemble (rebirth) to a terminal state. Order: precheck ->
-    compose+upload -> MINT (reversible: burn back) -> drain the Bucket (token
+    compose+upload -> MINT (reversible: burn back) -> drain the Closet (token
     then DB) -> offer+accept. If the drain fails the mint is burned back and the
-    Bucket is untouched; if the offer fails after the drain the minted token is
+    Closet is untouched; if the offer fails after the drain the minted token is
     parked in the issuer wallet for re-offer (no asset loss)."""
     conn, owner, edition = deps.conn, session.owner, session.edition
     try:

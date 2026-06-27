@@ -220,3 +220,37 @@ def test_listen_path_rebuilds_bucket_from_modify():
     assets = {(s, v): n for o, s, v, n in es.read_closet_assets(conn)}
     assert assets == {("Head", "None"): 2, ("Eyes", "Blue"): 1}
     assert es.read_closet_bodies(conn) == [("rUser", 3536)]
+
+
+def test_listen_path_accept_closet_promotes_pending_to_active():
+    """NFTokenAcceptOffer for a CLOSET_TAXON token must reach the economy handler
+    via process_stream_tx (C1 fix) and promote the record to ACTIVE. Before the
+    fix the accept kind was filtered out, leaving the DB record as None."""
+    conn = _conn()
+    _freeze(conn)
+    meta = bt.build_closet_metadata("rUser", [], [])
+
+    async def fetch_token(nft_id):
+        return {
+            "nft_id": "CLOSET_ACC",
+            "owner": "rUser",
+            "taxon": config.CLOSET_TAXON,
+            "uri_hex": "EF",
+        }
+
+    async def fetch_meta(uri_hex):
+        return meta
+
+    tx = {"TransactionType": "NFTokenAcceptOffer", "meta": {"nftoken_id": "CLOSET_ACC"}}
+    _run(
+        oln.process_stream_tx(
+            conn,
+            tx,
+            fetch_token=fetch_token,
+            fetch_meta=fetch_meta,
+            is_ours=_is_ours,
+        )
+    )
+    record = es.get_closet_record(conn, "rUser")
+    assert record is not None, "accept was filtered before reaching economy handler"
+    assert record[2] == bt.ACTIVE, f"expected ACTIVE, got {record[2]}"

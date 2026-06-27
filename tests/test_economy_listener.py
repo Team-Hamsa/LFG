@@ -161,3 +161,41 @@ def test_closet_mint_marks_pending():
     record = es.get_closet_record(conn, config.SWAP_ISSUER_ADDRESS)
     assert record is not None
     assert record[2] == bt.PENDING_ACCEPT
+
+
+def test_closet_listener_preserves_offer_id():
+    """_apply_closet must not overwrite a stored offer_id with None (I1 fix).
+    The offer_id is set by ensure_closet (not on-chain), so a subsequent
+    listener mint/modify/accept must pass the existing offer_id through rather
+    than defaulting to None and clobbering it."""
+    conn = _conn()
+    # Seed a closet record with a non-null offer_id (as ensure_closet would do).
+    es.set_closet_token(conn, "rUser", "CLOSET1", "AB", status=bt.PENDING_ACCEPT, offer_id="OF1")
+
+    meta = bt.build_closet_metadata("rUser", [], [])
+
+    async def fetch_token(nft_id):
+        return {
+            "nft_id": "CLOSET1",
+            "owner": "rUser",
+            "taxon": config.CLOSET_TAXON,
+            "uri_hex": "AB",
+        }
+
+    async def fetch_meta(uri_hex):
+        return meta
+
+    # Drive a modify through the listener (simulates an NFTokenModify event on the Closet).
+    tx = {"TransactionType": "NFTokenModify", "NFTokenID": "CLOSET1"}
+    _run(
+        nft_listener.apply_economy_tx(
+            conn,
+            tx,
+            fetch_token_fn=fetch_token,
+            fetch_meta_fn=fetch_meta,
+            genesis=te.Genesis(trait_counts={}, edition_bodies={}),
+        )
+    )
+    record = es.get_closet_record(conn, "rUser")
+    assert record is not None
+    assert record[3] == "OF1", f"offer_id was clobbered; got {record[3]!r}"

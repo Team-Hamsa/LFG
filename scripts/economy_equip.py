@@ -51,7 +51,7 @@ def main() -> int:
     parser.add_argument("--nft-id", required=True, help="character NFTokenID to modify")
     parser.add_argument("--slot", required=True, help="non-body slot to change")
     parser.add_argument(
-        "--value", required=True, help="incoming asset value (must be in the Bucket)"
+        "--value", required=True, help="incoming asset value (must be in the Closet)"
     )
     return asyncio.run(_amain(parser.parse_args()))
 

@@ -265,14 +265,14 @@ def can_assemble(
     genesis: Genesis,
 ) -> Precheck:
     """An edition can be (re)assembled iff it is currently dead, its body is in
-    the owner's bucket, and the owner's bucket covers a full, valid asset set
+    the owner's Closet, and the owner's Closet covers a full, valid asset set
     (exactly one chosen value per non-body slot). `genesis` is effective."""
     if edition in live_editions:
         return Precheck(False, f"edition {edition} is already live")
     if edition not in genesis.edition_bodies:
         return Precheck(False, f"edition {edition} has no known body")
     if edition not in owner_bodies:
-        return Precheck(False, f"bucket does not hold edition {edition}'s body")
+        return Precheck(False, f"Closet does not hold edition {edition}'s body")
     missing = [s for s in NON_BODY_SLOTS if s not in chosen]
     if missing:
         return Precheck(False, f"incomplete set, missing slots: {', '.join(missing)}")
@@ -282,7 +282,7 @@ def can_assemble(
     need = Counter((s, chosen[s]) for s in NON_BODY_SLOTS)
     for (slot, value), qty in need.items():
         if owner_assets.get((slot, value), 0) < qty:
-            return Precheck(False, f"bucket lacks asset {slot}={value}")
+            return Precheck(False, f"Closet lacks asset {slot}={value}")
     return _OK
 
 
@@ -294,7 +294,7 @@ def can_equip(
     mutable: bool,
 ) -> Precheck:
     """A loose asset can be equipped onto a live, mutable character iff the slot
-    is a non-body slot and the owner's bucket holds the incoming asset."""
+    is a non-body slot and the owner's Closet holds the incoming asset."""
     if rec.is_burned:
         return Precheck(False, "character is burned")
     if not mutable:
@@ -302,5 +302,5 @@ def can_equip(
     if slot not in NON_BODY_SLOTS:
         return Precheck(False, f"{slot} is not an equippable slot")
     if owner_assets.get((slot, value), 0) < 1:
-        return Precheck(False, f"bucket lacks asset {slot}={value}")
+        return Precheck(False, f"Closet lacks asset {slot}={value}")
     return _OK
