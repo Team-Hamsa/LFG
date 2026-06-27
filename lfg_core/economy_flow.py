@@ -117,13 +117,18 @@ def _effective_genesis(conn: Any) -> te.Genesis:
 
 
 async def _require_active_closet(deps: EconomyDeps, owner: str) -> str | None:
-    """Returns an error string if the owner has no ACTIVE Closet, else None.
-    Runs an on-demand accept confirmation first (promotes pending→active)."""
+    """Error string if the owner has no usable ACTIVE Closet, else None. Runs an
+    on-demand accept confirmation first (pending->active), then — before any
+    irreversible economy op — verifies the recorded Closet is still owned by the
+    user on-ledger. Fail-closed: any non-match / indeterminate lookup refuses the
+    op rather than risk burning a character against a Closet that is gone (#101)."""
     if deps.closet_owner_fn is not None:
         await ct.confirm_accept(deps.conn, owner, owner_fn=deps.closet_owner_fn)
     rec = es.get_closet_record(deps.conn, owner)
     if rec is None or rec[2] != ct.ACTIVE:
         return "Create and claim your Closet first."
+    if deps.closet_owner_fn is not None and (await deps.closet_owner_fn(rec[0])) != owner:
+        return "Your Closet could not be verified on-ledger. Re-create it before continuing."
     return None
 
 

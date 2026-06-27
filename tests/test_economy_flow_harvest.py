@@ -219,3 +219,19 @@ def test_harvest_succeeds_with_active_closet(tmp_path):
     _run(ef.run_harvest(session, _deps(conn, f, tmp_path)))
     assert session.state == ef.DONE
     assert f.burns == [("NFT7", "rUser")]
+
+
+def test_harvest_rejected_when_active_closet_gone_onledger(tmp_path):
+    """ACTIVE in the DB but owner-check returns None (token gone on-ledger) → the
+    gate fires before the irreversible burn, so no character is lost (#101)."""
+    conn, f = _conn_with_genesis(), _Fakes()
+    es.set_closet_token(conn, "rUser", "CLOSETX", "AB", status=ct.ACTIVE)
+    # Simulate the token no longer owned by the user (gone/transferred).
+    f.closet_owner_addr = None
+
+    session = ef.HarvestSession(owner="rUser", character=_char(), burnable=True)
+    _run(ef.run_harvest(session, _deps(conn, f, tmp_path)))
+
+    assert session.state == ef.FAILED
+    assert f.burns == []  # character was NOT burned
+    assert "closet" in (session.error or "").lower() or "verified" in (session.error or "").lower()
