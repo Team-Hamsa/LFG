@@ -111,3 +111,14 @@ def test_migration_copies_legacy_bucket_tables():
     assert row is not None
     assert row[0] == "pending_accept"
     assert row[1] is None
+
+
+def test_closet_record_roundtrip_and_status_update():
+    import lfg_core.closet_token as ct
+
+    c = _conn()
+    assert es.get_closet_record(c, "rA") is None
+    es.set_closet_token(c, "rA", "NFTC", "ABCD", status=ct.PENDING_ACCEPT, offer_id="OF1")
+    assert es.get_closet_record(c, "rA") == ("NFTC", "ABCD", ct.PENDING_ACCEPT, "OF1")
+    es.set_closet_status(c, "rA", ct.ACTIVE)
+    assert es.get_closet_record(c, "rA") == ("NFTC", "ABCD", ct.ACTIVE, "OF1")

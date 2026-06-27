@@ -12,6 +12,9 @@ from typing import Any
 
 from lfg_core import config, economy_store
 
+PENDING_ACCEPT = "pending_accept"
+ACTIVE = "active"
+
 # Asset triples are (slot, value, count); bodies are edition ints.
 Asset = tuple[str, str, int]
 

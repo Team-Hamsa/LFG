@@ -210,18 +210,46 @@ def set_closet_contents(
     conn.commit()
 
 
-def set_closet_token(conn: sqlite3.Connection, owner: str, nft_id: str, uri_hex: str) -> None:
-    """Record (or update) the on-ledger Closet NFToken id + current URI for an owner."""
+def set_closet_token(
+    conn: sqlite3.Connection,
+    owner: str,
+    nft_id: str,
+    uri_hex: str,
+    status: str = "pending_accept",
+    offer_id: str | None = None,
+) -> None:
+    """Record/update an owner's Closet NFToken id, URI, lifecycle status, and the
+    outstanding accept offer id (kept so the UI can re-show the Xaman accept)."""
     conn.execute(
         """
-        INSERT INTO closet_tokens (owner, nft_id, uri_hex, updated_at)
-        VALUES (?, ?, ?, CURRENT_TIMESTAMP)
+        INSERT INTO closet_tokens (owner, nft_id, uri_hex, status, offer_id, updated_at)
+        VALUES (?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
         ON CONFLICT(owner) DO UPDATE SET
-            nft_id=excluded.nft_id, uri_hex=excluded.uri_hex, updated_at=CURRENT_TIMESTAMP
+            nft_id=excluded.nft_id, uri_hex=excluded.uri_hex,
+            status=excluded.status, offer_id=excluded.offer_id, updated_at=CURRENT_TIMESTAMP
         """,
-        (owner, nft_id, uri_hex),
+        (owner, nft_id, uri_hex, status, offer_id),
     )
     conn.commit()
+
+
+def set_closet_status(conn: sqlite3.Connection, owner: str, status: str) -> None:
+    conn.execute(
+        "UPDATE closet_tokens SET status=?, updated_at=CURRENT_TIMESTAMP WHERE owner=?",
+        (status, owner),
+    )
+    conn.commit()
+
+
+def get_closet_record(
+    conn: sqlite3.Connection, owner: str
+) -> tuple[str, str, str, str | None] | None:
+    """(nft_id, uri_hex, status, offer_id) for an owner's Closet, or None."""
+    cur = conn.execute(
+        "SELECT nft_id, uri_hex, status, offer_id FROM closet_tokens WHERE owner=?", (owner,)
+    )
+    row = cur.fetchone()
+    return None if row is None else (str(row[0]), str(row[1]), str(row[2]), row[3])
 
 
 def get_closet_token(conn: sqlite3.Connection, owner: str) -> tuple[str, str] | None:
