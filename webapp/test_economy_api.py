@@ -310,3 +310,104 @@ def test_run_and_close_marks_session_failed_on_runner_crash(monkeypatch):
     assert "internal error" in (ws.inner.error or "")
     # The conn must be closed regardless of the crash
     assert tracked.close_count == 1
+
+
+# --- Task 6: closet token status in read_economy_state ---
+
+
+def test_economy_state_reports_closet_status_none():
+    """read_economy_state includes a closet.token block: status='none' when no record."""
+    conn = _seed_conn()  # no closet_tokens row
+    state = economy_api.read_economy_state(conn, "rOwner")
+    assert "token" in state["closet"], "closet block must include 'token' key"
+    assert state["closet"]["token"]["status"] == "none"
+    assert state["closet"]["token"]["nft_id"] is None
+
+
+def test_economy_state_reports_closet_status_active():
+    """read_economy_state includes closet.token.status='active' when a token row exists."""
+    conn = _seed_conn()
+    economy_store.set_closet_token(conn, "rOwner", "NFT_ABC", "deadbeef", status="active")
+    state = economy_api.read_economy_state(conn, "rOwner")
+    assert state["closet"]["token"]["status"] == "active"
+    assert state["closet"]["token"]["nft_id"] == "NFT_ABC"
+
+
+def test_economy_state_reports_closet_status_pending_accept():
+    """read_economy_state reports pending_accept when the token is minted but not claimed."""
+    conn = _seed_conn()
+    economy_store.set_closet_token(
+        conn, "rOwner", "NFT_XYZ", "cafebabe", status="pending_accept", offer_id="OFFER1"
+    )
+    state = economy_api.read_economy_state(conn, "rOwner")
+    assert state["closet"]["token"]["status"] == "pending_accept"
+    assert state["closet"]["token"]["nft_id"] == "NFT_XYZ"
+
+
+# --- Task 6: harvest/assemble gated on active Closet ---
+
+
+def test_start_harvest_rejects_without_active_closet(monkeypatch):
+    """start_harvest raises EconomyError if the owner has no active Closet."""
+    conn = _seed_conn()  # no closet_tokens row -> no active closet
+    monkeypatch.setattr(economy_api, "open_conn", lambda: conn)
+
+    async def go():
+        with pytest.raises(economy_api.EconomyError, match="Closet"):
+            await economy_api.start_harvest("123", "rOwner", "A")
+
+    asyncio.get_event_loop().run_until_complete(go())
+
+
+def test_start_assemble_rejects_without_active_closet(monkeypatch):
+    """start_assemble raises EconomyError if the owner has no active Closet."""
+    conn = _seed_conn()  # no closet_tokens row -> no active closet
+    # Seed genesis so the edition lookup doesn't fail before the closet gate
+    from lfg_core import trait_economy
+
+    economy_store.freeze_genesis(
+        conn,
+        trait_economy.Genesis(
+            trait_counts={("Head", "Crown"): 1},
+            edition_bodies={3537: ("male", "male")},
+        ),
+        {},
+    )
+    monkeypatch.setattr(economy_api, "open_conn", lambda: conn)
+
+    async def go():
+        with pytest.raises(economy_api.EconomyError, match="Closet"):
+            await economy_api.start_assemble("123", "rOwner", 3537, {"Head": "Crown"})
+
+    asyncio.get_event_loop().run_until_complete(go())
+
+
+# --- Task 6: start_closet returns session-like dict ---
+
+
+def test_start_closet_returns_status_dict(monkeypatch):
+    """start_closet returns a dict with status, nft_id, and accept link."""
+    conn = _seed_conn()
+    monkeypatch.setattr(economy_api, "open_conn", lambda: conn)
+
+    async def fake_ensure_closet(conn, owner, **kw):
+        from lfg_core.closet_token import ClosetRef
+
+        return ClosetRef(
+            nft_id="NFT_NEW",
+            uri_hex="aabbcc",
+            status="pending_accept",
+            accept_payload={"xumm_url": "https://xaman/pay"},
+        )
+
+    import lfg_core.closet_token as ct
+
+    monkeypatch.setattr(ct, "ensure_closet", fake_ensure_closet)
+
+    async def go():
+        return await economy_api.start_closet("123", "rOwner")
+
+    result = asyncio.get_event_loop().run_until_complete(go())
+    assert result["status"] == "pending_accept"
+    assert result["nft_id"] == "NFT_NEW"
+    assert result["accept"] == "https://xaman/pay"

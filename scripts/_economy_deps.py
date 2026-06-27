@@ -53,6 +53,14 @@ async def _closet_exists(nft_id: str) -> bool:
     return (await xrpl_ops.nft_exists(nft_id)) is not False
 
 
+async def _closet_owner(nft_id: str) -> str | None:
+    """The current on-ledger owner of a Closet NFToken, for confirm_accept's
+    pending->active promotion. Returns None on any lookup failure (fail-safe:
+    the promotion is skipped, not the op)."""
+    info = await xrpl_ops.nft_info(nft_id)
+    return info.get("owner") if info else None
+
+
 async def _upload(path_on_cdn: str, data: bytes, content_type: str) -> str:
     return await cdn.upload_to_bunny(config.ECONOMY_CDN_FOLDER, path_on_cdn, data, content_type)
 
@@ -106,6 +114,7 @@ def build_economy_deps(conn: sqlite3.Connection) -> economy_flow.EconomyDeps:
         closet_accept_fn=_accept_or_skip,
         closet_modify_fn=lambda nft_id, owner, url: xrpl_ops.modify_nft(nft_id, owner, url),
         closet_exists_fn=lambda nft_id: _closet_exists(nft_id),
+        closet_owner_fn=lambda nft_id: _closet_owner(nft_id),
         char_compose_fn=_compose_char,
         char_mint_fn=lambda url: xrpl_ops.mint_nft(
             url, config.SWAP_TAXON, config.SWAP_ISSUER_ADDRESS, flags=config.ECONOMY_NFT_FLAGS
