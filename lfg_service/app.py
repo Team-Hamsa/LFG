@@ -459,9 +459,7 @@ async def handle_closet(request):
     """Ensure the caller has a Closet NFToken, minting on first use. In dev mode
     returns a stub active record (Task 7 will expand the mock)."""
     if config.WEBAPP_DEV_MODE:
-        # DEV_MODE stub: report active so the UI can exercise the gated flows.
-        # Task 7 will wire the full mock_economy.INSTANCE path here.
-        return web.json_response({"status": "active", "nft_id": "DEV_CLOSET", "accept": None})
+        return web.json_response(mock_economy.INSTANCE.create_closet(request["wallet"]))
     user = request["user"]
     try:
         result = await economy_api.start_closet(user["id"], request["wallet"])
