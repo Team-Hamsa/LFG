@@ -761,6 +761,7 @@ function renderRoster(assembleEnabled = true) {
       img.src = BLANK_IMG;
     }
     img.alt = `#${char.edition}`;
+    tile.appendChild(img);
     tile.onclick = () => selectCharacter(char.nft_id);
     strip.appendChild(tile);
   }
