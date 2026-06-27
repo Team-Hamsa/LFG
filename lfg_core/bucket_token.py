@@ -21,6 +21,7 @@ MintFn = Callable[[str], Awaitable[str | None]]  # url -> nft_id
 OfferFn = Callable[[str, str], Awaitable[str | None]]  # (nft_id, owner) -> offer_id
 AcceptFn = Callable[[str], Awaitable[dict[str, Any] | None]]  # offer_id -> XUMM payload
 ModifyFn = Callable[[str, str, str], Awaitable[str | None]]  # (nft_id, owner, url) -> tx hash
+ExistsFn = Callable[[str], Awaitable[bool]]  # nft_id -> does it exist on-ledger?
 
 
 class BucketError(RuntimeError):
@@ -95,14 +96,23 @@ async def ensure_bucket(
     mint_fn: MintFn,
     offer_fn: OfferFn,
     accept_payload_fn: AcceptFn,
+    exists_fn: ExistsFn | None = None,
 ) -> BucketRef:
     """Return the owner's Bucket NFToken, minting it on first use. A fresh bucket
     is minted empty, offered to the owner, and recorded; the returned
     `accept_payload` lets the caller surface the XUMM accept to the user. This is
     a reversible step (an empty bucket simply sits in the wallet), so flows call
-    it before any irreversible action. Raises BucketError on mint/offer failure."""
+    it before any irreversible action. Raises BucketError on mint/offer failure.
+
+    When `exists_fn` is supplied, a DB record is verified against the ledger
+    before it is trusted: a recorded token that no longer exists on-chain (e.g.
+    after a testnet reset, or a bucket that never actually landed) is treated as
+    STALE and a fresh bucket is minted, overwriting the dead row. This prevents a
+    later NFTokenModify from targeting a non-existent token (tecNO_ENTRY) and, in
+    harvest, losing the just-burned character's assets (#101). With `exists_fn`
+    None, the record is trusted (legacy/test behavior)."""
     existing = economy_store.get_bucket_token(conn, owner)
-    if existing is not None:
+    if existing is not None and (exists_fn is None or await exists_fn(existing[0])):
         return BucketRef(nft_id=existing[0], uri_hex=existing[1], accept_payload=None)
 
     url = await upload_fn(build_bucket_metadata(owner, [], []))

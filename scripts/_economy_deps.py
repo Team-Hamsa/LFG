@@ -42,6 +42,13 @@ async def _accept_or_skip(offer_id: str) -> Any:
     return await xumm_ops.create_accept_offer_payload(offer_id)
 
 
+async def _bucket_exists(nft_id: str) -> bool:
+    """Whether a recorded Bucket NFToken still exists on-ledger. nft_info returns
+    None for a token that has been burned or never existed (e.g. after a testnet
+    reset) — a stale record we must not trust (#101)."""
+    return (await xrpl_ops.nft_info(nft_id)) is not None
+
+
 async def _upload(path_on_cdn: str, data: bytes, content_type: str) -> str:
     return await cdn.upload_to_bunny(config.ECONOMY_CDN_FOLDER, path_on_cdn, data, content_type)
 
@@ -94,6 +101,7 @@ def build_economy_deps(conn: sqlite3.Connection) -> economy_flow.EconomyDeps:
         bucket_offer_fn=_offer_or_skip,
         bucket_accept_fn=_accept_or_skip,
         bucket_modify_fn=lambda nft_id, owner, url: xrpl_ops.modify_nft(nft_id, owner, url),
+        bucket_exists_fn=lambda nft_id: _bucket_exists(nft_id),
         char_compose_fn=_compose_char,
         char_mint_fn=lambda url: xrpl_ops.mint_nft(
             url, config.SWAP_TAXON, config.SWAP_ISSUER_ADDRESS, flags=config.ECONOMY_NFT_FLAGS

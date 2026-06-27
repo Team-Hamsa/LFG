@@ -53,15 +53,26 @@ class _Fakes:
     def __init__(self, *, fail_bucket_modify: bool = False) -> None:
         self.burns: list[tuple[str, str]] = []
         self.bucket_modifies: list[tuple[str, str, str]] = []
+        self.bucket_mints: list[str] = []
         self.fail_bucket_modify = fail_bucket_modify
         self.uploads = 0
+        # nft_ids that exist_fn should report as on-ledger; everything else is stale.
+        self.live_bucket_ids: set[str] = set()
+        self.events: list[str] = []
 
     async def bucket_upload(self, meta: dict) -> str:
         self.uploads += 1
         return f"https://cdn/b/{self.uploads}.json"
 
     async def bucket_mint(self, url: str) -> str:
-        return "BUCKET"
+        nft_id = f"BUCKET{len(self.bucket_mints)}"
+        self.bucket_mints.append(nft_id)
+        self.events.append("bucket_mint")
+        self.live_bucket_ids.add(nft_id)
+        return nft_id
+
+    async def bucket_exists(self, nft_id: str) -> bool:
+        return nft_id in self.live_bucket_ids
 
     async def bucket_offer(self, nft_id: str, owner: str) -> str:
         return "OFFER"
@@ -73,10 +84,12 @@ class _Fakes:
         if self.fail_bucket_modify:
             return None
         self.bucket_modifies.append((nft_id, owner, url))
+        self.events.append("bucket_modify")
         return "MODHASH"
 
     async def char_burn(self, nft_id: str, owner: str):
         self.burns.append((nft_id, owner))
+        self.events.append("char_burn")
         return "BURNHASH"
 
     async def char_compose(self, attrs, body, edition, rev):
@@ -109,6 +122,7 @@ def _deps(conn, f, records_dir):
         char_burn_fn=f.char_burn,
         char_offer_fn=f.char_offer,
         char_accept_fn=f.char_accept,
+        bucket_exists_fn=f.bucket_exists,
         records_dir=str(records_dir),
     )
 
@@ -149,3 +163,34 @@ def test_harvest_burn_then_bucket_sync_fails(tmp_path):
     assert record["status"] == "harvested_pending_bucket"
     assert record["burn_hash"] == "BURNHASH"
     assert len(record["moved_assets"]) == len(NON_BODY)
+
+
+def test_harvest_remints_stale_bucket_before_burn(tmp_path):
+    """#101: a stale bucket record (token gone from the ledger) must be detected
+    and re-minted BEFORE the irreversible character burn — otherwise the later
+    NFTokenModify hits tecNO_ENTRY and the harvested assets are lost. With the
+    on-ledger check wired, the bucket is re-minted, the burn proceeds, and the
+    assets land in the (fresh) bucket."""
+    conn, f = _conn_with_genesis(), _Fakes()
+    # A stale row: an nft_id that exists in the DB but NOT on-ledger.
+    es.set_bucket_token(conn, "rUser", "DEADBUCKET", "AABB")
+    assert "DEADBUCKET" not in f.live_bucket_ids  # exists_fn -> False
+
+    session = ef.HarvestSession(owner="rUser", character=_char(), burnable=True)
+    _run(ef.run_harvest(session, _deps(conn, f, tmp_path)))
+
+    assert session.state == ef.DONE
+    # The dead bucket was re-minted...
+    assert len(f.bucket_mints) == 1
+    fresh_id = f.bucket_mints[0]
+    assert es.get_bucket_token(conn, "rUser")[0] == fresh_id
+    # ...the character was burned...
+    assert f.burns == [("NFT7", "rUser")]
+    # ...the bucket modify succeeded against the fresh token...
+    assert [m[0] for m in f.bucket_modifies] == [fresh_id]
+    # ...and the assets/body landed.
+    assets = {(s, v): n for o, s, v, n in es.read_bucket_assets(conn)}
+    assert all(assets[(s, "None")] == 1 for s in NON_BODY)
+    assert es.read_bucket_bodies(conn) == [("rUser", 7)]
+    # Ordering: bucket ensured (re-mint) BEFORE the burn, which is before the deposit.
+    assert f.events == ["bucket_mint", "char_burn", "bucket_modify"]

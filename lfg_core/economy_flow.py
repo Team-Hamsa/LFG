@@ -56,6 +56,10 @@ class EconomyDeps:
     char_burn_fn: BurnFn
     char_offer_fn: bt.OfferFn
     char_accept_fn: bt.AcceptFn
+    # Verifies a recorded Bucket NFToken still exists on-ledger before it is
+    # trusted (see bucket_token.ensure_bucket). Optional so existing test
+    # constructions that omit it keep the legacy trust-the-record behavior.
+    bucket_exists_fn: bt.ExistsFn | None = None
     records_dir: str = config.ECONOMY_RECORDS_DIR
 
 
@@ -165,6 +169,7 @@ async def run_harvest(session: HarvestSession, deps: EconomyDeps) -> None:
             mint_fn=deps.bucket_mint_fn,
             offer_fn=deps.bucket_offer_fn,
             accept_payload_fn=deps.bucket_accept_fn,
+            exists_fn=deps.bucket_exists_fn,
         )
         session.bucket_accept = ref.accept_payload
 
