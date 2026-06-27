@@ -99,7 +99,9 @@ async def apply_tx(
 
 def _apply_closet(conn: sqlite3.Connection, token: dict[str, Any], metadata: Any) -> None:
     """Rebuild an owner's closet_assets/closet_bodies rows from their Closet
-    NFToken's metadata — the on-chain source of truth the DB mirrors."""
+    NFToken's metadata and set its lifecycle status: a token held by anyone other
+    than the issuer has been accepted (active); one still in the issuer wallet is
+    pending_accept."""
     owner = token.get("owner")
     if not owner:
         return
@@ -107,7 +109,12 @@ def _apply_closet(conn: sqlite3.Connection, token: dict[str, Any], metadata: Any
         metadata if isinstance(metadata, dict) else {}
     )
     economy_store.set_closet_contents(conn, owner, assets, bodies)
-    economy_store.set_closet_token(conn, owner, token["nft_id"], token.get("uri_hex") or "")
+    status = (
+        closet_token.ACTIVE if owner != config.SWAP_ISSUER_ADDRESS else closet_token.PENDING_ACCEPT
+    )
+    economy_store.set_closet_token(
+        conn, owner, token["nft_id"], token.get("uri_hex") or "", status=status
+    )
 
 
 def _apply_possible_growth(
@@ -152,7 +159,7 @@ async def apply_economy_tx(
     supply_changes row. Per-id errors are logged, never raised. `genesis` must be
     the EFFECTIVE genesis so already-recorded editions are recognised (idempotent)."""
     kind = classify_tx(tx)
-    if kind not in ("mint", "modify"):
+    if kind not in ("mint", "modify", "accept"):
         return
     for nft_id in affected_nft_ids(tx):
         try:

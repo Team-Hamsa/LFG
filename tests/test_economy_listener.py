@@ -97,3 +97,67 @@ def test_known_edition_mint_logs_nothing():
         )
     )
     assert es.read_supply_changes(conn) == []
+
+
+def test_closet_accept_marks_active():
+    """An NFTokenAcceptOffer for a CLOSET_TAXON token whose post-transfer owner is
+    a user (not the issuer) should record status == ACTIVE."""
+    conn = _conn()
+    meta = bt.build_closet_metadata("rUser", [], [])
+
+    async def fetch_token(nft_id):
+        return {
+            "nft_id": "CLOSET_ACC",
+            "owner": "rUser",
+            "taxon": config.CLOSET_TAXON,
+            "uri_hex": "EF",
+        }
+
+    async def fetch_meta(uri_hex):
+        return meta
+
+    tx = {"TransactionType": "NFTokenAcceptOffer", "meta": {"nftoken_id": "CLOSET_ACC"}}
+    _run(
+        nft_listener.apply_economy_tx(
+            conn,
+            tx,
+            fetch_token_fn=fetch_token,
+            fetch_meta_fn=fetch_meta,
+            genesis=te.Genesis(trait_counts={}, edition_bodies={}),
+        )
+    )
+    record = es.get_closet_record(conn, "rUser")
+    assert record is not None
+    assert record[2] == bt.ACTIVE
+
+
+def test_closet_mint_marks_pending():
+    """An NFTokenMint of a CLOSET_TAXON token owned by the issuer should record
+    status == PENDING_ACCEPT (the token hasn't been transferred to the user yet)."""
+    conn = _conn()
+    meta = bt.build_closet_metadata(config.SWAP_ISSUER_ADDRESS, [], [])
+
+    async def fetch_token(nft_id):
+        return {
+            "nft_id": "CLOSET_MINT",
+            "owner": config.SWAP_ISSUER_ADDRESS,
+            "taxon": config.CLOSET_TAXON,
+            "uri_hex": "GH",
+        }
+
+    async def fetch_meta(uri_hex):
+        return meta
+
+    tx = {"TransactionType": "NFTokenMint", "meta": {"nftoken_id": "CLOSET_MINT"}}
+    _run(
+        nft_listener.apply_economy_tx(
+            conn,
+            tx,
+            fetch_token_fn=fetch_token,
+            fetch_meta_fn=fetch_meta,
+            genesis=te.Genesis(trait_counts={}, edition_bodies={}),
+        )
+    )
+    record = es.get_closet_record(conn, config.SWAP_ISSUER_ADDRESS)
+    assert record is not None
+    assert record[2] == bt.PENDING_ACCEPT
