@@ -5,6 +5,7 @@ and remain unit-testable with fakes. (scripts/ is excluded from mypy --strict.)"
 from __future__ import annotations
 
 import json
+import os
 import sqlite3
 import uuid
 from typing import Any
@@ -102,6 +103,37 @@ async def _compose_char(
     return image_url, video_url, meta_url
 
 
+async def _compose_trait(slot: str, value: str) -> str:
+    """Resolve the bare layer from the FIRST body that has it, upload, return URL."""
+    store = layer_store.get_layer_store()
+    for body in await store.list_bodies():
+        path = await store.resolve(body, slot, value)
+        if path:
+            ext = os.path.splitext(path)[1].lstrip(".") or "png"
+            with open(path, "rb") as f:
+                data = f.read()
+            return await _upload(
+                f"{config.TRAIT_CDN_SUBDIR}/{uuid.uuid4().hex}.{ext}",
+                data,
+                f"image/{ext}",
+            )
+    raise RuntimeError(f"no layer found for {slot}={value!r}")
+
+
+async def _trait_info(nft_id: str) -> dict[str, Any] | None:
+    return await xrpl_ops.nft_info(nft_id)
+
+
+async def _trait_meta(nft_id: str) -> dict[str, Any] | None:
+    info = await xrpl_ops.nft_info(nft_id)
+    if not info:
+        return None
+    uri_hex = (info or {}).get("uri_hex") or ""
+    if not uri_hex:
+        return None
+    return await swap_meta.fetch_metadata(uri_hex)
+
+
 def build_economy_deps(conn: sqlite3.Connection) -> economy_flow.EconomyDeps:
     """An EconomyDeps backed by the real testnet/mainnet operations."""
     return economy_flow.EconomyDeps(
@@ -123,6 +155,14 @@ def build_economy_deps(conn: sqlite3.Connection) -> economy_flow.EconomyDeps:
         char_burn_fn=lambda nft_id, owner: xrpl_ops.burn_nft(nft_id, owner or None),
         char_offer_fn=_offer_or_skip,
         char_accept_fn=_accept_or_skip,
+        trait_compose_fn=lambda slot, value: _compose_trait(slot, value),
+        trait_upload_fn=_upload_closet,
+        trait_mint_fn=lambda url: xrpl_ops.mint_nft(
+            url, config.TRAIT_TAXON, config.SWAP_ISSUER_ADDRESS, flags=config.TRAIT_NFT_FLAGS
+        ),
+        trait_burn_fn=lambda nft_id, owner: xrpl_ops.burn_nft(nft_id, owner or None),
+        trait_info_fn=lambda nft_id: _trait_info(nft_id),
+        trait_meta_fn=lambda nft_id: _trait_meta(nft_id),
     )
 
 
