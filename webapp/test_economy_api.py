@@ -462,3 +462,80 @@ def test_start_deposit_rejects_without_active_closet(monkeypatch):
             await economy_api.start_deposit("123", "rOwner", {"nft_id": "TOK1"})
 
     asyncio.get_event_loop().run_until_complete(go())
+
+
+# --- Fix 1: body validation before open_conn (no connection leak on malformed body) ---
+
+
+def test_start_extract_missing_field_does_not_leak_conn(monkeypatch):
+    """start_extract must raise KeyError BEFORE opening a connection when body fields are missing."""
+    open_count = {"n": 0}
+    real_open_conn = economy_api.open_conn
+
+    def counting_open_conn():
+        open_count["n"] += 1
+        return real_open_conn()
+
+    monkeypatch.setattr(economy_api, "open_conn", counting_open_conn)
+
+    async def go():
+        with pytest.raises(KeyError):
+            await economy_api.start_extract("123", "rOwner", {})  # missing slot + value
+
+    asyncio.get_event_loop().run_until_complete(go())
+    assert open_count["n"] == 0, (
+        f"open_conn must NOT be called when body fields are missing, got {open_count['n']} calls"
+    )
+
+
+def test_start_deposit_missing_field_does_not_leak_conn(monkeypatch):
+    """start_deposit must raise KeyError BEFORE opening a connection when body fields are missing."""
+    open_count = {"n": 0}
+    real_open_conn = economy_api.open_conn
+
+    def counting_open_conn():
+        open_count["n"] += 1
+        return real_open_conn()
+
+    monkeypatch.setattr(economy_api, "open_conn", counting_open_conn)
+
+    async def go():
+        with pytest.raises(KeyError):
+            await economy_api.start_deposit("123", "rOwner", {})  # missing nft_id
+
+    asyncio.get_event_loop().run_until_complete(go())
+    assert open_count["n"] == 0, (
+        f"open_conn must NOT be called when body fields are missing, got {open_count['n']} calls"
+    )
+
+
+def test_start_extract_pending_closet_is_gated(monkeypatch):
+    """start_extract raises EconomyError when the Closet exists but is pending_accept (not active)."""
+    conn = _seed_conn()
+    # Insert a closet_tokens row with status='pending_accept' (not 'active')
+    economy_store.set_closet_token(
+        conn, "rOwner", "NFT_PENDING", "deadbeef", status="pending_accept"
+    )
+    monkeypatch.setattr(economy_api, "open_conn", lambda: conn)
+
+    async def go():
+        with pytest.raises(economy_api.EconomyError, match="Closet"):
+            await economy_api.start_extract("123", "rOwner", {"slot": "Head", "value": "Crown"})
+
+    asyncio.get_event_loop().run_until_complete(go())
+
+
+def test_start_deposit_pending_closet_is_gated(monkeypatch):
+    """start_deposit raises EconomyError when the Closet exists but is pending_accept (not active)."""
+    conn = _seed_conn()
+    # Insert a closet_tokens row with status='pending_accept' (not 'active')
+    economy_store.set_closet_token(
+        conn, "rOwner", "NFT_PENDING", "deadbeef", status="pending_accept"
+    )
+    monkeypatch.setattr(economy_api, "open_conn", lambda: conn)
+
+    async def go():
+        with pytest.raises(economy_api.EconomyError, match="Closet"):
+            await economy_api.start_deposit("123", "rOwner", {"nft_id": "TOK1"})
+
+    asyncio.get_event_loop().run_until_complete(go())
