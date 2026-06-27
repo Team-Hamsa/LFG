@@ -102,21 +102,31 @@ async def migrate_owner(
     owner_bodies: list[int] = [edition for o, edition in all_bodies if o == owner]
 
     # 4. Clear the stale record so ensure_closet will mint a NEW Closet (not
-    #    return the existing one).  We do this atomically: delete, then mint.
+    #    return the existing one), then mint. If the mint/offer fails we RESTORE
+    #    the legacy record so a re-run retries instead of dead-ending on
+    #    "no record — nothing to migrate" (the owner's assets/bodies are never
+    #    touched here, so nothing is lost on a failed attempt).
     conn.execute("DELETE FROM closet_tokens WHERE owner = ?", (owner,))
     conn.commit()
 
     # 5. Mint the new Closet under CLOSET_TAXON via ensure_closet.
     #    ensure_closet finds no record (we just deleted it) and mints fresh.
-    new_ref = await ct.ensure_closet(
-        conn,
-        owner,
-        upload_fn=economy_deps.closet_upload_fn,
-        mint_fn=economy_deps.closet_mint_fn,
-        offer_fn=economy_deps.closet_offer_fn,
-        accept_payload_fn=economy_deps.closet_accept_fn,
-        exists_fn=economy_deps.closet_exists_fn,
-    )
+    try:
+        new_ref = await ct.ensure_closet(
+            conn,
+            owner,
+            upload_fn=economy_deps.closet_upload_fn,
+            mint_fn=economy_deps.closet_mint_fn,
+            offer_fn=economy_deps.closet_offer_fn,
+            accept_payload_fn=economy_deps.closet_accept_fn,
+            exists_fn=economy_deps.closet_exists_fn,
+        )
+    except Exception:
+        es.set_closet_token(
+            conn, owner, old_nft_id, old_uri_hex, status=old_status, offer_id=old_offer_id
+        )
+        conn.commit()
+        raise
 
     # 6. Sync the owner's existing contents into the new token (NFTokenModify).
     #    This also persists the updated URI hex in closet_tokens.

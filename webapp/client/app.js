@@ -806,8 +806,11 @@ async function openDressup() {
     const harvestBtn = el('dressup-harvest-btn');
 
     if (cStatus !== 'active') {
-      // Show gate; hide/disable Harvest
+      // Show gate; hide/disable Harvest. Reset the gate button: it gets disabled
+      // while a POST /api/closet is in flight, and the same persistent DOM node
+      // is reused when we re-render the gate (e.g. still pending_accept).
       gate.hidden = false;
+      gateBtn.disabled = false;
       harvestBtn.disabled = true;
       harvestBtn.hidden = true;
 

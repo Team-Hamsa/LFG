@@ -195,6 +195,37 @@ def test_migrate_path_remints_and_syncs_contents(tmp_path):
     assert result["status"] == ct.PENDING_ACCEPT
 
 
+def test_migrate_restores_legacy_record_on_mint_failure(tmp_path):
+    """If ensure_closet fails (mint/offer error) after the legacy record was
+    deleted, migrate_owner restores the legacy record (and re-raises) so a
+    re-run retries instead of dead-ending on 'no record — nothing to migrate'."""
+    import pytest
+
+    conn = _mem_conn()
+    owner = "rUser"
+    old_nft_id = "LEGACY_BUCKET_0001"
+    es.set_closet_token(conn, owner, old_nft_id, "AABB", status=ct.ACTIVE, offer_id="OF9")
+    es.set_closet_contents(conn, owner, [("Eyes", "Blue", 2)], [42])
+
+    f = _Fakes(taxon_for={old_nft_id: config.LEGACY_BUCKET_TAXON})
+
+    async def _failing_mint(_url: str):
+        return None  # ensure_closet raises ClosetError on a falsy nft_id
+
+    f.closet_mint = _failing_mint  # type: ignore[method-assign]
+    d = _economy_deps(conn, f, tmp_path)
+
+    with pytest.raises(ct.ClosetError):
+        _run(migrate_owner(conn, owner, d, nft_info_fn=f.nft_info))
+
+    # The legacy record is restored intact (nft_id, status, offer_id preserved).
+    rec = es.get_closet_record(conn, owner)
+    assert rec is not None
+    assert rec[0] == old_nft_id
+    assert rec[2] == ct.ACTIVE
+    assert rec[3] == "OF9"
+
+
 def test_idempotent_already_on_closet_taxon(tmp_path):
     """An owner whose recorded token is already on CLOSET_TAXON is skipped."""
     conn = _mem_conn()
