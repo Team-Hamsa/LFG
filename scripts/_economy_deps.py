@@ -43,10 +43,14 @@ async def _accept_or_skip(offer_id: str) -> Any:
 
 
 async def _bucket_exists(nft_id: str) -> bool:
-    """Whether a recorded Bucket NFToken still exists on-ledger. nft_info returns
-    None for a token that has been burned or never existed (e.g. after a testnet
-    reset) — a stale record we must not trust (#101)."""
-    return (await xrpl_ops.nft_info(nft_id)) is not None
+    """Whether a recorded Bucket NFToken still exists on-ledger, for ensure_bucket's
+    stale-record / re-mint decision (#101).
+
+    Fail-safe: only a DEFINITIVE on-ledger absence (clio objectNotFound) returns
+    False — the one case where re-minting is correct (burned / never-existed /
+    post-testnet-reset). A transient lookup failure (`nft_exists` -> None) returns
+    True so a network blip never re-mints and orphans a live Bucket."""
+    return (await xrpl_ops.nft_exists(nft_id)) is not False
 
 
 async def _upload(path_on_cdn: str, data: bytes, content_type: str) -> str:

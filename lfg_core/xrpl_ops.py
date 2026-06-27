@@ -212,6 +212,39 @@ async def nft_info(nft_id: str, clio: str | None = None) -> dict[str, Any] | Non
         return None
 
 
+async def nft_exists(nft_id: str, clio: str | None = None, attempts: int = 3) -> bool | None:
+    """On-ledger existence of an NFToken, distinguishing a DEFINITIVE absence
+    from a transient lookup failure — unlike `nft_info`, which returns None for
+    both. Returns True (present), False (clio definitively reports it absent), or
+    None (could not determine after retries — network/ws error).
+
+    Callers that re-mint on absence MUST treat None as "assume present", so a
+    transient blip never re-mints and orphans a live token."""
+    from xrpl.models.requests import Request
+
+    endpoint = clio or config.WS_URL
+    for attempt in range(attempts):
+        try:
+            async with AsyncWebsocketClient(endpoint) as websocket:
+                response = await websocket.request(
+                    Request.from_dict({"method": "nft_info", "nft_id": nft_id})
+                )
+            result = response.result
+            if isinstance(result, dict) and not result.get("error"):
+                return True
+            err = str(result.get("error", "")).lower() if isinstance(result, dict) else ""
+            # clio reports a missing/never-minted token as objectNotFound; that is
+            # the only result we treat as a definitive absence. Any other error
+            # code is indeterminate — retry, then fall through to None.
+            if "notfound" in err:
+                return False
+        except Exception as e:
+            logging.warning(f"nft_exists failed for {nft_id} (attempt {attempt + 1}): {e}")
+        if attempt + 1 < attempts:
+            await asyncio.sleep(0.5 * (attempt + 1))
+    return None
+
+
 async def get_trustline_balance(address: str, currency: str, issuer: str) -> Decimal | None:
     """Balance `address` holds on its trustline to issuer/currency, as a
     Decimal — or None if there is no trustline or the lookup failed (callers
