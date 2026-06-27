@@ -537,7 +537,6 @@ async def run_extract(session: ExtractSession, deps: EconomyDeps) -> None:
         assets[(slot, value)] = assets.get((slot, value), 0) - 1
         try:
             await _sync_then_persist(deps, owner, assets, bodies)
-            es.upsert_trait_token(conn, nft_id, owner, slot, value)
         except Exception as e:
             revert = await deps.trait_burn_fn(nft_id, "")  # type: ignore[misc]
             if revert:
@@ -555,6 +554,19 @@ async def run_extract(session: ExtractSession, deps: EconomyDeps) -> None:
                     deps.records_dir, "extract", session.id, session._record("failed_revert_mint")
                 )
             return
+        # Closet decremented on-chain + DB. Mirror the trait token in the DB
+        # best-effort: the listener rebuilds trait_tokens from the on-chain mint, so a
+        # failure here is non-fatal — journal it for the auditor rather than reverting
+        # a successful on-chain extract.
+        try:
+            es.upsert_trait_token(conn, nft_id, owner, slot, value)
+        except Exception:
+            logging.error(
+                f"extract {session.id} trait_tokens mirror failed: {traceback.format_exc()}"
+            )
+            _write_record(
+                deps.records_dir, "extract", session.id, session._record("complete_pending_mirror")
+            )
 
         offer_id = await deps.closet_offer_fn(nft_id, owner)
         session.accept = await deps.closet_accept_fn(offer_id) if offer_id else None

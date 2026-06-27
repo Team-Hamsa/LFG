@@ -126,3 +126,26 @@ def test_extract_burns_back_on_closet_sync_failure(tmp_path):
     assert es.read_trait_tokens(conn) == []  # no token row left
     assets = {(sl, v): n for o, sl, v, n in es.read_closet_assets(conn) if o == "rUser"}
     assert assets[("Hat", "Cap")] == 2  # closet untouched
+
+
+def test_extract_succeeds_when_mirror_write_fails(tmp_path, monkeypatch):
+    """If _sync_then_persist succeeds but the trait_tokens mirror write raises,
+    the on-chain extract is NOT reverted — the session ends DONE, no burn fires,
+    and the Closet is decremented."""
+    import lfg_core.economy_store as _es_module
+
+    conn = sqlite3.connect(":memory:")
+    _active_closet_with_trait(conn)
+    f = _F()
+    monkeypatch.setattr(
+        _es_module,
+        "upsert_trait_token",
+        lambda *a, **kw: (_ for _ in ()).throw(RuntimeError("boom")),
+    )
+    s = ef.ExtractSession(owner="rUser", slot="Hat", value="Cap")
+    _run(ef.run_extract(s, _deps(conn, f, tmp_path)))
+    assert s.state == ef.DONE  # on-chain extract succeeded
+    assert f.burns == []  # NO compensating burn
+    assets = {(sl, v): n for o, sl, v, n in es.read_closet_assets(conn) if o == "rUser"}
+    assert assets[("Hat", "Cap")] == 1  # Closet decremented
+    assert s.nft_id == "TRAIT0"  # token kept
