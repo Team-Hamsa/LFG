@@ -169,3 +169,10 @@ ECONOMY_NFT_FLAGS = int(os.getenv("ECONOMY_NFT_FLAGS", "25"))  # burnable+transf
 CLOSET_NFT_FLAGS = int(os.getenv("CLOSET_NFT_FLAGS", "16"))  # mutable only (soulbound)
 ECONOMY_RECORDS_DIR = os.getenv("ECONOMY_RECORDS_DIR", "economy_records")
 ECONOMY_CDN_FOLDER = os.getenv("ECONOMY_CDN_FOLDER", SWAP_CDN_FOLDER)
+
+# Standalone tradeable trait NFTokens (Phase 4). Burnable + transferable (NOT
+# soulbound, NOT mutable); xrpl_ops.mint_nft applies NFT_TRANSFER_FEE to any
+# transferable token, so the trait royalty is inherited (no separate constant).
+TRAIT_TAXON = int(os.getenv("TRAIT_TAXON", "1763"))
+TRAIT_NFT_FLAGS = int(os.getenv("TRAIT_NFT_FLAGS", "9"))  # burnable(1)+transferable(8)
+TRAIT_CDN_SUBDIR = os.getenv("TRAIT_CDN_SUBDIR", "traits")
