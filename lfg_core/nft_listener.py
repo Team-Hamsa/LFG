@@ -196,6 +196,13 @@ async def apply_economy_tx(
         return
     for nft_id in affected_nft_ids(tx):
         try:
+            if kind == "burn":
+                # A burn may leave nft_info returning None (token gone from ledger),
+                # so route the burn by nft_id alone. delete_trait_token is idempotent
+                # and a no-op for non-trait tokens; characters/closets need no economy
+                # action on burn (the harvest flow already updated the Closet).
+                economy_store.delete_trait_token(conn, nft_id)
+                continue
             token = await fetch_token_fn(nft_id)
             if not token:
                 continue

@@ -321,3 +321,63 @@ def test_trait_burn_deletes_row():
         )
     )
     assert es.read_trait_tokens(conn) == [], "Row was not deleted on burn"
+
+
+def test_trait_burn_deletes_row_even_when_token_fetch_returns_none():
+    """Regression guard for the latent bug: when nft_info returns None for a
+    burned token (it's gone from the ledger), the trait_tokens row must still be
+    deleted. Old code hit `if not token: continue` before taxon dispatch, so the
+    row was never deleted — a silent inconsistency."""
+    conn = _conn()
+    # Seed a pre-existing trait_tokens row.
+    es.upsert_trait_token(conn, "TRAIT_GONE", "rUser", "Hat", "Cap")
+    assert len(es.read_trait_tokens(conn)) == 1
+
+    tx = {"TransactionType": "NFTokenBurn", "NFTokenID": "TRAIT_GONE"}
+
+    async def fetch_token(nft_id):
+        # Simulate nft_info returning None for a token already purged from the ledger.
+        return None
+
+    async def fetch_meta(uri_hex):
+        return _trait_meta("Hat", "Cap")
+
+    _run(
+        nft_listener.apply_economy_tx(
+            conn,
+            tx,
+            fetch_token_fn=fetch_token,
+            fetch_meta_fn=fetch_meta,
+            genesis=te.Genesis(trait_counts={}, edition_bodies={}),
+        )
+    )
+    assert es.read_trait_tokens(conn) == [], "Row was not deleted when token fetch returned None"
+
+
+def test_trait_burn_of_unknown_nft_id_is_idempotent():
+    """A burn for an nft_id with no trait_tokens row must not error — delete is
+    a no-op for non-trait (or already-deleted) tokens."""
+    conn = _conn()
+    # No rows seeded: table is empty.
+    assert es.read_trait_tokens(conn) == []
+
+    tx = {"TransactionType": "NFTokenBurn", "NFTokenID": "UNKNOWN_NFT"}
+
+    async def fetch_token(nft_id):
+        return None  # gone from ledger
+
+    async def fetch_meta(uri_hex):
+        return None
+
+    # Must complete without raising.
+    _run(
+        nft_listener.apply_economy_tx(
+            conn,
+            tx,
+            fetch_token_fn=fetch_token,
+            fetch_meta_fn=fetch_meta,
+            genesis=te.Genesis(trait_counts={}, edition_bodies={}),
+        )
+    )
+    # Table still empty — no spurious inserts.
+    assert es.read_trait_tokens(conn) == []
