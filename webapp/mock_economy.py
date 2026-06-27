@@ -70,6 +70,10 @@ class MockEconomy:
         self.bodies: list[int] = [42]
         # Per-wallet closet token state: maps owner -> {status, nft_id}
         self._closet: dict[str, dict[str, Any]] = {}
+        # Per-wallet standalone trait tokens: maps owner -> list of {nft_id, slot, value}
+        self._trait_tokens: dict[str, list[dict[str, Any]]] = {}
+        # Counter for fabricating unique trait nft_ids
+        self._trait_token_counter: int = 0
 
     # --- reads ---
     def read_state(self, owner: str) -> dict[str, Any]:
@@ -85,11 +89,13 @@ class MockEconomy:
             "status": closet_rec["status"] if closet_rec else _CLOSET_NONE,
             "nft_id": closet_rec["nft_id"] if closet_rec else None,
         }
+        trait_tokens = list(self._trait_tokens.get(owner, []))
         return {
             "characters": chars,
             "closet": {"assets": assets, "bodies": bodies, "token": token},
             "trait_order": swap_meta.TRAIT_ORDER,
             "slots": trait_economy.NON_BODY_SLOTS,
+            "trait_tokens": trait_tokens,
         }
 
     def _char(self, nft_id: str) -> dict[str, Any]:
@@ -184,6 +190,58 @@ class MockEconomy:
             "accept": "https://xaman/MOCK",
             "nft_id": f"MOCK-{edition}",
             "image_url": "",
+        }
+
+    def extract(self, owner: str, body: dict[str, Any]) -> dict[str, Any]:
+        """Extract a closet asset into a standalone trait token.
+
+        Gates on an active Closet. Decrements the (slot, value) asset count and
+        mints a fake trait NFToken, returning a terminal session-like dict matching
+        ``economy_session_dict('extract', ...)`` shape.
+        """
+        if not self._closet_active(owner):
+            raise MockEconomyError("Create and claim your Closet first.")
+        slot: str = body["slot"]
+        value: str = body["value"]
+        if self.assets.get((slot, value), 0) <= 0:
+            raise MockEconomyError(f"asset ({slot}, {value}) not in closet")
+        self.assets[(slot, value)] -= 1
+        self._trait_token_counter += 1
+        nft_id = f"DEVTRAIT{self._trait_token_counter}"
+        tokens = self._trait_tokens.setdefault(owner, [])
+        tokens.append({"nft_id": nft_id, "slot": slot, "value": value})
+        return {
+            "id": "mock",
+            "state": "done",
+            "error": None,
+            "accept": "https://dev/accept",
+            "nft_id": nft_id,
+        }
+
+    def deposit(self, owner: str, body: dict[str, Any]) -> dict[str, Any]:
+        """Deposit a standalone trait token back into the closet.
+
+        Gates on an active Closet. Removes the trait token by nft_id and credits
+        its (slot, value) back into the closet, returning a terminal session-like
+        dict matching ``economy_session_dict('deposit', ...)`` shape.
+        """
+        if not self._closet_active(owner):
+            raise MockEconomyError("Create and claim your Closet first.")
+        nft_id: str = body["nft_id"]
+        tokens = self._trait_tokens.get(owner, [])
+        tok = next((t for t in tokens if t["nft_id"] == nft_id), None)
+        if tok is None:
+            raise MockEconomyError(f"trait token {nft_id!r} not found in wallet")
+        tokens.remove(tok)
+        slot = tok["slot"]
+        value = tok["value"]
+        self.assets[(slot, value)] = self.assets.get((slot, value), 0) + 1
+        return {
+            "id": "mock",
+            "state": "done",
+            "error": None,
+            "slot": slot,
+            "value": value,
         }
 
 

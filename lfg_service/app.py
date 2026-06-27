@@ -923,12 +923,12 @@ handle_assemble_start = _economy_post(
 handle_extract_start = _economy_post(
     "extract",
     lambda uid, w, b: economy_api.start_extract(uid, w, b),
-    lambda w, b: mock_economy.INSTANCE.extract(w, b),  # type: ignore[attr-defined]
+    lambda w, b: mock_economy.INSTANCE.extract(w, b),
 )
 handle_deposit_start = _economy_post(
     "deposit",
     lambda uid, w, b: economy_api.start_deposit(uid, w, b),
-    lambda w, b: mock_economy.INSTANCE.deposit(w, b),  # type: ignore[attr-defined]
+    lambda w, b: mock_economy.INSTANCE.deposit(w, b),
 )
 
 
