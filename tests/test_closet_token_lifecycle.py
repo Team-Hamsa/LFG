@@ -70,7 +70,7 @@ def test_ensure_closet_mints_once():
     assert es.get_closet_token(c, "rUser")[0] == "BUCKETNFT"
     assert len(f.mints) == 1
 
-    # Second call is a no-op: no new mint, no accept payload.
+    # Second call is a no-op (no re-mint); still returns accept payload while pending.
     ref2 = _run(
         bt.ensure_closet(
             c,
@@ -82,7 +82,9 @@ def test_ensure_closet_mints_once():
         )
     )
     assert ref2.minted is False
-    assert ref2.accept_payload is None
+    # New lifecycle: accept payload is re-shown while status is pending_accept.
+    assert ref2.status == bt.PENDING_ACCEPT
+    assert ref2.accept_payload is not None
     assert len(f.mints) == 1
 
 

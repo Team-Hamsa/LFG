@@ -25,6 +25,7 @@ OfferFn = Callable[[str, str], Awaitable[str | None]]  # (nft_id, owner) -> offe
 AcceptFn = Callable[[str], Awaitable[dict[str, Any] | None]]  # offer_id -> XUMM payload
 ModifyFn = Callable[[str, str, str], Awaitable[str | None]]  # (nft_id, owner, url) -> tx hash
 ExistsFn = Callable[[str], Awaitable[bool]]  # nft_id -> does it exist on-ledger?
+OwnerFn = Callable[[str], Awaitable[str | None]]  # nft_id -> current owner address or None
 
 
 class ClosetError(RuntimeError):
@@ -33,12 +34,14 @@ class ClosetError(RuntimeError):
 
 @dataclass
 class ClosetRef:
-    """A user's Closet NFToken. `accept_payload` is set only when the closet was
-    just minted (the user must accept the offer to take custody); it is None for
-    an already-existing closet or when the XUMM payload could not be built."""
+    """A user's Closet NFToken. `accept_payload` is set when the closet was
+    just minted or is pending acceptance (the user must accept the offer to take
+    custody); it is None for an already-active closet or when the XUMM payload
+    could not be built."""
 
     nft_id: str
     uri_hex: str
+    status: str = PENDING_ACCEPT
     accept_payload: dict[str, Any] | None = None
     minted: bool = False
 
@@ -103,33 +106,56 @@ async def ensure_closet(
     accept_payload_fn: AcceptFn,
     exists_fn: ExistsFn | None = None,
 ) -> ClosetRef:
-    """Return the owner's Closet NFToken, minting it on first use. A fresh closet
-    is minted empty, offered to the owner, and recorded; the returned
-    `accept_payload` lets the caller surface the XUMM accept to the user. This is
-    a reversible step (an empty closet simply sits in the wallet), so flows call
-    it before any irreversible action. Raises ClosetError on mint/offer failure.
-
-    When `exists_fn` is supplied, a DB record is verified against the ledger
-    before it is trusted: a recorded token that no longer exists on-chain (e.g.
-    after a testnet reset, or a closet that never actually landed) is treated as
-    STALE and a fresh closet is minted, overwriting the dead row. This prevents a
-    later NFTokenModify from targeting a non-existent token (tecNO_ENTRY) and, in
-    harvest, losing the just-burned character's assets (#101). With `exists_fn`
-    None, the record is trusted (legacy/test behavior)."""
-    existing = economy_store.get_closet_token(conn, owner)
-    if existing is not None and (exists_fn is None or await exists_fn(existing[0])):
-        return ClosetRef(nft_id=existing[0], uri_hex=existing[1], accept_payload=None)
+    """Return the owner's Closet, minting on first use. A fresh Closet is minted
+    empty, offered to the owner, and recorded `pending_accept` with its offer id.
+    A recorded but on-ledger-absent Closet (verified via `exists_fn`) is treated
+    as stale and re-minted. While pending, this is idempotent and regenerates the
+    Xaman accept payload from the stored offer id so the UI can re-show it."""
+    existing = economy_store.get_closet_record(conn, owner)
+    if existing is not None:
+        nft_id, uri_hex, status, offer_id = existing
+        stale = exists_fn is not None and not await exists_fn(nft_id)
+        if not stale:
+            payload = None
+            if status == PENDING_ACCEPT and offer_id:
+                payload = await accept_payload_fn(offer_id)
+            return ClosetRef(nft_id=nft_id, uri_hex=uri_hex, status=status, accept_payload=payload)
 
     url = await upload_fn(build_closet_metadata(owner, [], []))
-    nft_id = await mint_fn(url)
-    if not nft_id:
+    new_nft_id = await mint_fn(url)
+    if not new_nft_id:
         raise ClosetError("failed to mint Closet NFToken")
+    nft_id = new_nft_id
     offer_id = await offer_fn(nft_id, owner)
     if not offer_id:
         raise ClosetError("failed to offer Closet NFToken to owner")
     payload = await accept_payload_fn(offer_id)  # None is non-fatal (accept later)
-    economy_store.set_closet_token(conn, owner, nft_id, _hex(url))
-    return ClosetRef(nft_id=nft_id, uri_hex=_hex(url), accept_payload=payload, minted=True)
+    economy_store.set_closet_token(
+        conn, owner, nft_id, _hex(url), status=PENDING_ACCEPT, offer_id=offer_id
+    )
+    return ClosetRef(
+        nft_id=nft_id,
+        uri_hex=_hex(url),
+        status=PENDING_ACCEPT,
+        accept_payload=payload,
+        minted=True,
+    )
+
+
+async def confirm_accept(conn: Any, owner: str, *, owner_fn: OwnerFn) -> str:
+    """Promote `pending_accept → active` once the Closet is owned by `owner`
+    (offer accepted on-ledger). Returns the resulting status; `none` if no Closet
+    is recorded. Idempotent."""
+    rec = economy_store.get_closet_record(conn, owner)
+    if rec is None:
+        return "none"
+    nft_id, _uri, status, _offer = rec
+    if status == ACTIVE:
+        return ACTIVE
+    if await owner_fn(nft_id) == owner:
+        economy_store.set_closet_status(conn, owner, ACTIVE)
+        return ACTIVE
+    return status
 
 
 async def sync_closet(

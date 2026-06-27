@@ -78,12 +78,122 @@ def test_parse_tolerates_garbage():
     assert bt.parse_closet_metadata(mixed) == ([("Eyes", "Blue", 1)], [7])
 
 
+# --- Task 3 tests (new lifecycle: pending_accept → active) ---
+
+
+class _F:
+    def __init__(self, exists=True, owner=None):
+        self.minted = 0
+        self.offers = 0
+        self.exists = exists
+        self.owner = owner
+
+    async def up(self, meta):
+        return "https://cdn/c.json"
+
+    async def mint(self, url):
+        self.minted += 1
+        return f"NFT{self.minted}"
+
+    async def offer(self, nft_id, owner):
+        self.offers += 1
+        return f"OF{self.offers}"
+
+    async def accept(self, offer_id):
+        return {"xumm_url": f"x/{offer_id}"}
+
+    async def exists_fn(self, nft_id):
+        return self.exists
+
+    async def owner_fn(self, nft_id):
+        return self.owner
+
+
+def test_ensure_closet_first_use_records_pending():
+    c, f = _conn(), _F()
+    ref = _run(
+        bt.ensure_closet(
+            c, "rA", upload_fn=f.up, mint_fn=f.mint, offer_fn=f.offer, accept_payload_fn=f.accept
+        )
+    )
+    assert ref.status == bt.PENDING_ACCEPT and ref.minted and ref.accept_payload
+    assert es.get_closet_record(c, "rA")[2] == bt.PENDING_ACCEPT
+    assert f.minted == 1
+
+
+def test_ensure_closet_pending_is_idempotent_and_reshows_accept():
+    c, f = _conn(), _F()
+    _run(
+        bt.ensure_closet(
+            c, "rA", upload_fn=f.up, mint_fn=f.mint, offer_fn=f.offer, accept_payload_fn=f.accept
+        )
+    )
+    ref = _run(
+        bt.ensure_closet(
+            c,
+            "rA",
+            upload_fn=f.up,
+            mint_fn=f.mint,
+            offer_fn=f.offer,
+            accept_payload_fn=f.accept,
+            exists_fn=f.exists_fn,
+        )
+    )
+    assert f.minted == 1  # did NOT re-mint
+    assert ref.status == bt.PENDING_ACCEPT and ref.accept_payload  # re-showed accept
+
+
+def test_ensure_closet_stale_record_remints():
+    c, f = _conn(), _F(exists=False)
+    _run(
+        bt.ensure_closet(
+            c, "rA", upload_fn=f.up, mint_fn=f.mint, offer_fn=f.offer, accept_payload_fn=f.accept
+        )
+    )
+    ref = _run(
+        bt.ensure_closet(
+            c,
+            "rA",
+            upload_fn=f.up,
+            mint_fn=f.mint,
+            offer_fn=f.offer,
+            accept_payload_fn=f.accept,
+            exists_fn=f.exists_fn,
+        )
+    )
+    assert f.minted == 2 and ref.nft_id == "NFT2"
+
+
+def test_confirm_accept_promotes_when_owner_matches():
+    c, f = _conn(), _F(owner="rA")
+    _run(
+        bt.ensure_closet(
+            c, "rA", upload_fn=f.up, mint_fn=f.mint, offer_fn=f.offer, accept_payload_fn=f.accept
+        )
+    )
+    assert _run(bt.confirm_accept(c, "rA", owner_fn=f.owner_fn)) == bt.ACTIVE
+    assert es.get_closet_record(c, "rA")[2] == bt.ACTIVE
+
+
+def test_confirm_accept_stays_pending_when_owner_mismatch():
+    c, f = _conn(), _F(owner="rISSUER")
+    _run(
+        bt.ensure_closet(
+            c, "rA", upload_fn=f.up, mint_fn=f.mint, offer_fn=f.offer, accept_payload_fn=f.accept
+        )
+    )
+    assert _run(bt.confirm_accept(c, "rA", owner_fn=f.owner_fn)) == bt.PENDING_ACCEPT
+
+
+# --- Legacy tests updated for new lifecycle ---
+
+
 def test_ensure_closet_remints_when_record_stale():
     """A DB record that no longer exists on-ledger (e.g. after a testnet reset)
-    is treated as stale: ensure_closet mints a fresh bucket rather than trusting
+    is treated as stale: ensure_closet mints a fresh closet rather than trusting
     the dead nft_id (which would later make NFTokenModify fail tecNO_ENTRY)."""
     c, f = _conn(), _ClosetFakes()
-    es.set_closet_token(c, "rUser", "STALENFT", "AABB")
+    es.set_closet_token(c, "rUser", "STALENFT", "AABB", status=bt.ACTIVE)
 
     async def absent(nft_id: str) -> bool:
         return False
@@ -109,7 +219,7 @@ def test_ensure_closet_remints_when_record_stale():
 def test_ensure_closet_keeps_record_when_on_ledger():
     """A DB record that still exists on-ledger is returned as-is (no re-mint)."""
     c, f = _conn(), _ClosetFakes()
-    es.set_closet_token(c, "rUser", "LIVENFT", "AABB")
+    es.set_closet_token(c, "rUser", "LIVENFT", "AABB", status=bt.ACTIVE)
 
     async def present(nft_id: str) -> bool:
         return True
@@ -133,7 +243,7 @@ def test_ensure_closet_keeps_record_when_on_ledger():
 def test_ensure_closet_no_exists_fn_trusts_record():
     """Back-compat: callers that don't pass exists_fn trust the DB record."""
     c, f = _conn(), _ClosetFakes()
-    es.set_closet_token(c, "rUser", "LIVENFT", "AABB")
+    es.set_closet_token(c, "rUser", "LIVENFT", "AABB", status=bt.ACTIVE)
 
     ref = _run(
         bt.ensure_closet(
