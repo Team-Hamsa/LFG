@@ -21,7 +21,9 @@ sys.path.insert(0, REPO)
 sys.path.insert(0, os.path.join(REPO, "scripts"))
 
 
-@pytest.mark.parametrize("mod_name", ["economy_harvest", "economy_assemble", "economy_equip"])
+@pytest.mark.parametrize(
+    "mod_name", ["economy_harvest", "economy_assemble", "economy_equip", "migrate_bucket_to_closet"]
+)
 def test_cli_driver_exposes_main(mod_name):
     mod = importlib.import_module(mod_name)
     assert hasattr(mod, "main") and callable(mod.main)
