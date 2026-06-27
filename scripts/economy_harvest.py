@@ -34,8 +34,6 @@ async def _amain(args: argparse.Namespace) -> int:
     print(f"State: {session.state}")
     if session.error:
         print(f"Error: {session.error}")
-    if session.closet_accept:
-        print(f"Accept your new Closet: {session.closet_accept.get('xumm_url')}")
     return 0 if session.state == economy_flow.DONE else 1
 
 

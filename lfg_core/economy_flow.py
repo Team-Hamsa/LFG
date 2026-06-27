@@ -22,7 +22,6 @@ from dataclasses import dataclass, field
 from typing import Any
 
 from lfg_core import closet_token as bt
-from lfg_core import closet_token as ct
 from lfg_core import config
 from lfg_core import economy_store as es
 from lfg_core import trait_economy as te
@@ -64,7 +63,7 @@ class EconomyDeps:
     # Resolves the current owner of a Closet NFToken; used to promote
     # pending_accept → active before checking the precondition. Optional so
     # existing test constructions that omit it skip the confirmation step.
-    closet_owner_fn: ct.OwnerFn | None = None
+    closet_owner_fn: bt.OwnerFn | None = None
     records_dir: str = config.ECONOMY_RECORDS_DIR
 
 
@@ -123,9 +122,9 @@ async def _require_active_closet(deps: EconomyDeps, owner: str) -> str | None:
     user on-ledger. Fail-closed: any non-match / indeterminate lookup refuses the
     op rather than risk burning a character against a Closet that is gone (#101)."""
     if deps.closet_owner_fn is not None:
-        await ct.confirm_accept(deps.conn, owner, owner_fn=deps.closet_owner_fn)
+        await bt.confirm_accept(deps.conn, owner, owner_fn=deps.closet_owner_fn)
     rec = es.get_closet_record(deps.conn, owner)
-    if rec is None or rec[2] != ct.ACTIVE:
+    if rec is None or rec[2] != bt.ACTIVE:
         return "Create and claim your Closet first."
     if deps.closet_owner_fn is not None and (await deps.closet_owner_fn(rec[0])) != owner:
         return "Your Closet could not be verified on-ledger. Re-create it before continuing."
@@ -169,10 +168,10 @@ class HarvestSession:
 
 
 async def run_harvest(session: HarvestSession, deps: EconomyDeps) -> None:
-    """Drive a harvest to a terminal state. Order: precheck -> ensure Closet
-    (reversible) -> BURN (irreversible) -> deposit assets to the Closet token
-    then DB. If the deposit fails after the burn, the journal carries the moved
-    assets + burn hash for recovery; the assets are never silently lost."""
+    """Drive a harvest to a terminal state. Order: precheck -> require ACTIVE
+    Closet -> BURN (irreversible) -> deposit assets to the Closet token then DB.
+    If the deposit fails after the burn, the journal carries the moved assets +
+    burn hash for recovery; the assets are never silently lost."""
     conn = deps.conn
     rec, owner = session.character, session.owner
     try:

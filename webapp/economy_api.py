@@ -51,7 +51,6 @@ def economy_session_dict(kind: str, s: Any) -> dict[str, Any]:
     if kind == "equip":
         base["displaced"] = s.displaced_value
     elif kind == "harvest":
-        base["accept"] = (s.closet_accept or {}).get("xumm_url")
         base["moved_assets"] = s.moved_assets
     elif kind == "assemble":
         r = s.results[0] if s.results else None

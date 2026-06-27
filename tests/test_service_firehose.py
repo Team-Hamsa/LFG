@@ -305,7 +305,6 @@ def _economy_session(kind, inner_state="done"):
         error = None
         owner = "rOWNER"
         results = [{"image_url": "https://cdn/x.png", "nft_id": "N", "accept": None}]
-        closet_accept: dict = {}
         moved_assets: list = []
         displaced_value = None
 
