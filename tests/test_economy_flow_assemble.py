@@ -43,6 +43,11 @@ class _Fakes:
         self.mints: list[str] = []
         self.char_burns: list[tuple[str, str]] = []
         self.bucket_modifies = 0
+        # address returned by closet_owner; None means not yet owned by user.
+        self.closet_owner_addr: str | None = "rUser"
+
+    async def closet_owner(self, nft_id: str) -> str | None:
+        return self.closet_owner_addr
 
     async def closet_upload(self, meta: dict) -> str:
         return "https://cdn/b.json"
@@ -97,6 +102,7 @@ def _deps(conn, f, records_dir):
         char_burn_fn=f.char_burn,
         char_offer_fn=f.char_offer,
         char_accept_fn=f.char_accept,
+        closet_owner_fn=f.closet_owner,
         records_dir=str(records_dir),
     )
 
@@ -174,3 +180,24 @@ def test_assemble_offer_fail_parks_token(tmp_path):
     assert es.read_closet_bodies(conn) == []  # drained
     record = json.loads((tmp_path / f"assemble-{s.id}.json").read_text())
     assert record["status"] == "minted_no_offer"
+
+
+def test_assemble_rejected_without_active_closet(tmp_path):
+    conn, f = _conn_with_bucket(), _Fakes()
+    # Remove the closet token seeded by _conn_with_bucket so there is no record.
+    conn.execute("DELETE FROM closet_tokens WHERE owner = 'rUser'")
+    conn.commit()
+    s = _session()
+    _run(ef.run_assemble(s, _deps(conn, f, tmp_path)))
+    assert s.state == ef.FAILED
+    assert f.mints == []  # never minted
+    assert "closet" in (s.error or "").lower()
+
+
+def test_assemble_succeeds_with_active_closet(tmp_path):
+    conn, f = _conn_with_bucket(), _Fakes()
+    # closet is already seeded via _conn_with_bucket; closet_owner_fn promotes it
+    s = _session()
+    _run(ef.run_assemble(s, _deps(conn, f, tmp_path)))
+    assert s.state == ef.DONE
+    assert s.new_nft_id == "CHAR7"

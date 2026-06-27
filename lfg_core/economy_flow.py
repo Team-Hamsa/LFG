@@ -22,6 +22,7 @@ from dataclasses import dataclass, field
 from typing import Any
 
 from lfg_core import closet_token as bt
+from lfg_core import closet_token as ct
 from lfg_core import config
 from lfg_core import economy_store as es
 from lfg_core import trait_economy as te
@@ -60,6 +61,10 @@ class EconomyDeps:
     # trusted (see closet_token.ensure_closet). Optional so existing test
     # constructions that omit it keep the legacy trust-the-record behavior.
     closet_exists_fn: bt.ExistsFn | None = None
+    # Resolves the current owner of a Closet NFToken; used to promote
+    # pending_accept → active before checking the precondition. Optional so
+    # existing test constructions that omit it skip the confirmation step.
+    closet_owner_fn: ct.OwnerFn | None = None
     records_dir: str = config.ECONOMY_RECORDS_DIR
 
 
@@ -111,6 +116,17 @@ def _effective_genesis(conn: Any) -> te.Genesis:
     return te.effective_genesis(es.read_genesis(conn), es.read_supply_changes(conn))
 
 
+async def _require_active_closet(deps: EconomyDeps, owner: str) -> str | None:
+    """Returns an error string if the owner has no ACTIVE Closet, else None.
+    Runs an on-demand accept confirmation first (promotes pending→active)."""
+    if deps.closet_owner_fn is not None:
+        await ct.confirm_accept(deps.conn, owner, owner_fn=deps.closet_owner_fn)
+    rec = es.get_closet_record(deps.conn, owner)
+    if rec is None or rec[2] != ct.ACTIVE:
+        return "Create and claim your Closet first."
+    return None
+
+
 # --- Harvest: burn a live character; its 8 assets + body drop into the Closet ---
 
 
@@ -123,7 +139,6 @@ class HarvestSession:
     error: str | None = None
     burn_hash: str | None = None
     moved_assets: list[tuple[str, str]] = field(default_factory=list)
-    closet_accept: dict[str, Any] | None = None
     id: str = field(default_factory=lambda: uuid.uuid4().hex)
 
     @property
@@ -161,17 +176,10 @@ async def run_harvest(session: HarvestSession, deps: EconomyDeps) -> None:
             session.fail(f"cannot harvest: {chk.reason}")
             return
 
-        # Reversible: an empty bucket simply sits in the wallet.
-        ref = await bt.ensure_closet(
-            conn,
-            owner,
-            upload_fn=deps.closet_upload_fn,
-            mint_fn=deps.closet_mint_fn,
-            offer_fn=deps.closet_offer_fn,
-            accept_payload_fn=deps.closet_accept_fn,
-            exists_fn=deps.closet_exists_fn,
-        )
-        session.closet_accept = ref.accept_payload
+        err = await _require_active_closet(deps, owner)
+        if err:
+            session.fail(err)
+            return
 
         # Snapshot the assets to move BEFORE the burn (the character is gone after).
         session.moved_assets = [(s, te.slot_value(rec, s)) for s in te.NON_BODY_SLOTS]
@@ -271,6 +279,11 @@ async def run_assemble(session: AssembleSession, deps: EconomyDeps) -> None:
         )
         if not chk.ok:
             session.fail(f"cannot assemble: {chk.reason}")
+            return
+
+        err = await _require_active_closet(deps, owner)
+        if err:
+            session.fail(err)
             return
 
         attrs = _character_attributes(session.body_value, session.chosen)
