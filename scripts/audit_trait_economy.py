@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Audit the dress-up trait economy against the frozen genesis baseline.
 
-Verifies the two invariants over the on-chain index + Bucket/trait-token state:
+Verifies the two invariants over the on-chain index + Closet/trait-token state:
   - Completeness: every live character holds one asset per slot and the right body
   - Conservation: no asset is silently created/destroyed; each body lives in
     exactly one place
@@ -141,8 +141,8 @@ def main() -> int:
     canonical, _ = trait_economy.dedupe_editions(live, max_edition)
     census = trait_economy.asset_census(
         canonical,
-        economy_store.read_bucket_assets(conn),
-        economy_store.read_bucket_bodies(conn),
+        economy_store.read_closet_assets(conn),
+        economy_store.read_closet_bodies(conn),
         economy_store.read_trait_tokens(conn),
     )
     conservation = trait_economy.verify_conservation(genesis, census, supply_changes)

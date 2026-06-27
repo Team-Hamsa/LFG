@@ -106,11 +106,11 @@ def build_genesis(canonical: dict[int, OnchainNft]) -> Genesis:
 
 def asset_census(
     characters: dict[int, OnchainNft],
-    bucket_assets: list[tuple[str, str, str, int]],
-    bucket_bodies: list[tuple[str, int]],
+    closet_assets: list[tuple[str, str, str, int]],
+    closet_bodies: list[tuple[str, int]],
     trait_tokens: list[tuple[str, str, str, str]],
 ) -> Census:
-    """Tally every asset across live characters, Buckets and standalone trait
+    """Tally every asset across live characters, Closets and standalone trait
     tokens. trait_counts are non-body (slot, value); body_presence counts how
     many places each edition's body currently exists (should be exactly 1)."""
     trait_counts: Counter[tuple[str, str]] = Counter()
@@ -119,11 +119,11 @@ def asset_census(
         body_presence[edition] += 1
         for slot in NON_BODY_SLOTS:
             trait_counts[(slot, slot_value(rec, slot))] += 1
-    for _owner, slot, value, count in bucket_assets:
+    for _owner, slot, value, count in closet_assets:
         trait_counts[(slot, value)] += count
     for _nft_id, _owner, slot, value in trait_tokens:
         trait_counts[(slot, value)] += 1
-    for _owner, edition in bucket_bodies:
+    for _owner, edition in closet_bodies:
         body_presence[edition] += 1
     return Census(trait_counts=dict(trait_counts), body_presence=dict(body_presence))
 
@@ -265,14 +265,14 @@ def can_assemble(
     genesis: Genesis,
 ) -> Precheck:
     """An edition can be (re)assembled iff it is currently dead, its body is in
-    the owner's bucket, and the owner's bucket covers a full, valid asset set
+    the owner's Closet, and the owner's Closet covers a full, valid asset set
     (exactly one chosen value per non-body slot). `genesis` is effective."""
     if edition in live_editions:
         return Precheck(False, f"edition {edition} is already live")
     if edition not in genesis.edition_bodies:
         return Precheck(False, f"edition {edition} has no known body")
     if edition not in owner_bodies:
-        return Precheck(False, f"bucket does not hold edition {edition}'s body")
+        return Precheck(False, f"Closet does not hold edition {edition}'s body")
     missing = [s for s in NON_BODY_SLOTS if s not in chosen]
     if missing:
         return Precheck(False, f"incomplete set, missing slots: {', '.join(missing)}")
@@ -282,7 +282,7 @@ def can_assemble(
     need = Counter((s, chosen[s]) for s in NON_BODY_SLOTS)
     for (slot, value), qty in need.items():
         if owner_assets.get((slot, value), 0) < qty:
-            return Precheck(False, f"bucket lacks asset {slot}={value}")
+            return Precheck(False, f"Closet lacks asset {slot}={value}")
     return _OK
 
 
@@ -294,7 +294,7 @@ def can_equip(
     mutable: bool,
 ) -> Precheck:
     """A loose asset can be equipped onto a live, mutable character iff the slot
-    is a non-body slot and the owner's bucket holds the incoming asset."""
+    is a non-body slot and the owner's Closet holds the incoming asset."""
     if rec.is_burned:
         return Precheck(False, "character is burned")
     if not mutable:
@@ -302,5 +302,5 @@ def can_equip(
     if slot not in NON_BODY_SLOTS:
         return Precheck(False, f"{slot} is not an equippable slot")
     if owner_assets.get((slot, value), 0) < 1:
-        return Precheck(False, f"bucket lacks asset {slot}={value}")
+        return Precheck(False, f"Closet lacks asset {slot}={value}")
     return _OK

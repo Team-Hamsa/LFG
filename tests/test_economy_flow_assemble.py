@@ -1,4 +1,4 @@
-# Assemble flow: body + full set from the Bucket -> mint the edition + offer.
+# Assemble flow: body + full set from the Closet -> mint the edition + offer.
 # Driven through injected fakes — no network.
 
 import asyncio
@@ -30,34 +30,39 @@ def _conn_with_bucket(edition: int = 7) -> sqlite3.Connection:
         edition_bodies={edition: ("Straight Blue", "male")},
     )
     es.freeze_genesis(c, genesis, {})
-    es.set_bucket_token(c, "rUser", "BUCKET", "00")
-    es.set_bucket_contents(c, "rUser", [(s, "None", 1) for s in NON_BODY], [edition])
+    es.set_closet_token(c, "rUser", "CLOSET", "00")
+    es.set_closet_contents(c, "rUser", [(s, "None", 1) for s in NON_BODY], [edition])
     return c
 
 
 class _Fakes:
-    def __init__(self, *, fail_bucket_modify=False, fail_offer=False, fail_char_burn=False) -> None:
-        self.fail_bucket_modify = fail_bucket_modify
+    def __init__(self, *, fail_closet_modify=False, fail_offer=False, fail_char_burn=False) -> None:
+        self.fail_closet_modify = fail_closet_modify
         self.fail_offer = fail_offer
         self.fail_char_burn = fail_char_burn
         self.mints: list[str] = []
         self.char_burns: list[tuple[str, str]] = []
         self.bucket_modifies = 0
+        # address returned by closet_owner; None means not yet owned by user.
+        self.closet_owner_addr: str | None = "rUser"
 
-    async def bucket_upload(self, meta: dict) -> str:
+    async def closet_owner(self, nft_id: str) -> str | None:
+        return self.closet_owner_addr
+
+    async def closet_upload(self, meta: dict) -> str:
         return "https://cdn/b.json"
 
-    async def bucket_mint(self, url: str):
-        return "BUCKET"
+    async def closet_mint(self, url: str):
+        return "CLOSET"
 
-    async def bucket_offer(self, nft_id, owner):
+    async def closet_offer(self, nft_id, owner):
         return "O"
 
-    async def bucket_accept(self, offer_id):
+    async def closet_accept(self, offer_id):
         return {"xumm_url": "x"}
 
-    async def bucket_modify(self, nft_id, owner, url):
-        if self.fail_bucket_modify:
+    async def closet_modify(self, nft_id, owner, url):
+        if self.fail_closet_modify:
             return None
         self.bucket_modifies += 1
         return "MODHASH"
@@ -86,17 +91,18 @@ class _Fakes:
 def _deps(conn, f, records_dir):
     return ef.EconomyDeps(
         conn=conn,
-        bucket_upload_fn=f.bucket_upload,
-        bucket_mint_fn=f.bucket_mint,
-        bucket_offer_fn=f.bucket_offer,
-        bucket_accept_fn=f.bucket_accept,
-        bucket_modify_fn=f.bucket_modify,
+        closet_upload_fn=f.closet_upload,
+        closet_mint_fn=f.closet_mint,
+        closet_offer_fn=f.closet_offer,
+        closet_accept_fn=f.closet_accept,
+        closet_modify_fn=f.closet_modify,
         char_compose_fn=f.char_compose,
         char_mint_fn=f.char_mint,
         char_modify_fn=f.char_modify,
         char_burn_fn=f.char_burn,
         char_offer_fn=f.char_offer,
         char_accept_fn=f.char_accept,
+        closet_owner_fn=f.closet_owner,
         records_dir=str(records_dir),
     )
 
@@ -121,8 +127,8 @@ def test_assemble_happy_path(tmp_path):
     assert s.new_nft_id == "CHAR7"
     assert f.bucket_modifies == 1
     # bucket fully drained
-    assert es.read_bucket_bodies(conn) == []
-    assert es.read_bucket_assets(conn) == []
+    assert es.read_closet_bodies(conn) == []
+    assert es.read_closet_assets(conn) == []
     assert s.results[0]["accept"] == {"xumm_url": "accept"}
 
 
@@ -134,11 +140,11 @@ def test_assemble_rejects_incomplete_set(tmp_path):
 
     assert s.state == ef.FAILED
     assert f.mints == []  # never minted
-    assert es.read_bucket_bodies(conn) == [("rUser", 7)]  # bucket untouched
+    assert es.read_closet_bodies(conn) == [("rUser", 7)]  # bucket untouched
 
 
 def test_assemble_mint_then_drain_fails_reverts(tmp_path):
-    conn, f = _conn_with_bucket(), _Fakes(fail_bucket_modify=True)
+    conn, f = _conn_with_bucket(), _Fakes(fail_closet_modify=True)
     s = _session()
     _run(ef.run_assemble(s, _deps(conn, f, tmp_path)))
 
@@ -146,13 +152,13 @@ def test_assemble_mint_then_drain_fails_reverts(tmp_path):
     assert f.mints == ["meta"]  # minted...
     assert f.char_burns == [("CHAR7", "")]  # ...then burned back (issuer-held)
     assert s.new_nft_id is None
-    assert es.read_bucket_bodies(conn) == [("rUser", 7)]  # bucket untouched
+    assert es.read_closet_bodies(conn) == [("rUser", 7)]  # bucket untouched
 
 
 def test_assemble_drain_fail_then_burnback_fail_keeps_nft_id(tmp_path):
     # Mint succeeds, bucket drain fails, AND the compensating burn-back fails:
     # the minted token's id MUST be retained in the journal for admin recovery.
-    conn, f = _conn_with_bucket(), _Fakes(fail_bucket_modify=True, fail_char_burn=True)
+    conn, f = _conn_with_bucket(), _Fakes(fail_closet_modify=True, fail_char_burn=True)
     s = _session()
     _run(ef.run_assemble(s, _deps(conn, f, tmp_path)))
 
@@ -171,6 +177,27 @@ def test_assemble_offer_fail_parks_token(tmp_path):
     assert s.state == ef.FAILED
     assert s.new_nft_id == "CHAR7"  # token exists, parked for re-offer
     assert f.char_burns == []  # NOT burned — bucket already drained, no asset loss
-    assert es.read_bucket_bodies(conn) == []  # drained
+    assert es.read_closet_bodies(conn) == []  # drained
     record = json.loads((tmp_path / f"assemble-{s.id}.json").read_text())
     assert record["status"] == "minted_no_offer"
+
+
+def test_assemble_rejected_without_active_closet(tmp_path):
+    conn, f = _conn_with_bucket(), _Fakes()
+    # Remove the closet token seeded by _conn_with_bucket so there is no record.
+    conn.execute("DELETE FROM closet_tokens WHERE owner = 'rUser'")
+    conn.commit()
+    s = _session()
+    _run(ef.run_assemble(s, _deps(conn, f, tmp_path)))
+    assert s.state == ef.FAILED
+    assert f.mints == []  # never minted
+    assert "closet" in (s.error or "").lower()
+
+
+def test_assemble_succeeds_with_active_closet(tmp_path):
+    conn, f = _conn_with_bucket(), _Fakes()
+    # closet is already seeded via _conn_with_bucket; closet_owner_fn promotes it
+    s = _session()
+    _run(ef.run_assemble(s, _deps(conn, f, tmp_path)))
+    assert s.state == ef.DONE
+    assert s.new_nft_id == "CHAR7"

@@ -1,6 +1,6 @@
 # lfg_core/economy_store.py
 # Persistence for the trait economy: the frozen genesis baseline plus the
-# (initially empty) live-state tables (Buckets, standalone trait tokens). Lives
+# (initially empty) live-state tables (Closets, standalone trait tokens). Lives
 # in the same per-network onchain_{network}.db as the nft_index.
 
 from __future__ import annotations
@@ -32,14 +32,14 @@ CREATE TABLE IF NOT EXISTS genesis_meta (
     key   TEXT PRIMARY KEY,
     value TEXT
 );
-CREATE TABLE IF NOT EXISTS bucket_assets (
+CREATE TABLE IF NOT EXISTS closet_assets (
     owner TEXT,
     slot  TEXT,
     value TEXT,
     count INTEGER,
     PRIMARY KEY (owner, slot, value)
 );
-CREATE TABLE IF NOT EXISTS bucket_bodies (
+CREATE TABLE IF NOT EXISTS closet_bodies (
     owner   TEXT,
     edition INTEGER PRIMARY KEY
 );
@@ -49,10 +49,12 @@ CREATE TABLE IF NOT EXISTS trait_tokens (
     slot   TEXT,
     value  TEXT
 );
-CREATE TABLE IF NOT EXISTS bucket_tokens (
+CREATE TABLE IF NOT EXISTS closet_tokens (
     owner      TEXT PRIMARY KEY,
     nft_id     TEXT,
     uri_hex    TEXT,
+    status     TEXT DEFAULT 'pending_accept',
+    offer_id   TEXT,
     updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
 );
 CREATE TABLE IF NOT EXISTS supply_changes (
@@ -69,10 +71,26 @@ CREATE TABLE IF NOT EXISTS supply_changes (
 """
 
 
+def _migrate_bucket_tables(conn: sqlite3.Connection) -> None:
+    """One-time copy of legacy bucket_* rows into the closet_* tables (for index
+    DBs created before the Bucket→Closet rename). Copies the shared base columns;
+    new closet_tokens columns (status/offer_id) take their schema defaults."""
+    have = {r[0] for r in conn.execute("SELECT name FROM sqlite_master WHERE type='table'")}
+    for old, new, cols in (
+        ("bucket_assets", "closet_assets", "owner, slot, value, count"),
+        ("bucket_bodies", "closet_bodies", "owner, edition"),
+        ("bucket_tokens", "closet_tokens", "owner, nft_id, uri_hex"),
+    ):
+        if old in have:
+            conn.execute(f"INSERT OR IGNORE INTO {new} ({cols}) SELECT {cols} FROM {old}")
+    conn.commit()
+
+
 def init_economy_schema(conn: sqlite3.Connection) -> None:
-    """Create the genesis + live-state tables if absent."""
+    """Create the genesis + live-state tables if absent, and migrate legacy bucket_* tables."""
     conn.executescript(_ECONOMY_SCHEMA)
     conn.commit()
+    _migrate_bucket_tables(conn)
 
 
 def genesis_exists(conn: sqlite3.Connection) -> bool:
@@ -141,19 +159,19 @@ def read_meta(conn: sqlite3.Connection, key: str) -> str | None:
     return None if row is None else str(row[0])
 
 
-def read_bucket_assets(conn: sqlite3.Connection) -> list[tuple[str, str, str, int]]:
+def read_closet_assets(conn: sqlite3.Connection) -> list[tuple[str, str, str, int]]:
     return [
         (str(owner), str(slot), str(value), int(count))
         for owner, slot, value, count in conn.execute(
-            "SELECT owner, slot, value, count FROM bucket_assets"
+            "SELECT owner, slot, value, count FROM closet_assets"
         )
     ]
 
 
-def read_bucket_bodies(conn: sqlite3.Connection) -> list[tuple[str, int]]:
+def read_closet_bodies(conn: sqlite3.Connection) -> list[tuple[str, int]]:
     return [
         (str(owner), int(edition))
-        for owner, edition in conn.execute("SELECT owner, edition FROM bucket_bodies")
+        for owner, edition in conn.execute("SELECT owner, edition FROM closet_bodies")
     ]
 
 
@@ -166,10 +184,10 @@ def read_trait_tokens(conn: sqlite3.Connection) -> list[tuple[str, str, str, str
     ]
 
 
-# --- Phase 2: per-user Bucket contents + supply-change ledger ---
+# --- Phase 2: per-user Closet contents + supply-change ledger ---
 
 
-def set_bucket_contents(
+def set_closet_contents(
     conn: sqlite3.Connection,
     owner: str,
     assets: list[tuple[str, str, int]],
@@ -177,38 +195,66 @@ def set_bucket_contents(
 ) -> None:
     """Replace ALL of `owner`'s loose-asset and loose-body rows in one
     transaction. Used by both the flows (optimistic write) and the listener
-    (rebuild from the Bucket NFToken's metadata). Rows with count <= 0 are
+    (rebuild from the Closet NFToken's metadata). Rows with count <= 0 are
     dropped so the mirror never carries empty entries."""
-    conn.execute("DELETE FROM bucket_assets WHERE owner = ?", (owner,))
-    conn.execute("DELETE FROM bucket_bodies WHERE owner = ?", (owner,))
+    conn.execute("DELETE FROM closet_assets WHERE owner = ?", (owner,))
+    conn.execute("DELETE FROM closet_bodies WHERE owner = ?", (owner,))
     conn.executemany(
-        "INSERT INTO bucket_assets (owner, slot, value, count) VALUES (?, ?, ?, ?)",
+        "INSERT INTO closet_assets (owner, slot, value, count) VALUES (?, ?, ?, ?)",
         [(owner, slot, value, count) for slot, value, count in assets if count > 0],
     )
     conn.executemany(
-        "INSERT INTO bucket_bodies (owner, edition) VALUES (?, ?)",
+        "INSERT INTO closet_bodies (owner, edition) VALUES (?, ?)",
         [(owner, edition) for edition in bodies],
     )
     conn.commit()
 
 
-def set_bucket_token(conn: sqlite3.Connection, owner: str, nft_id: str, uri_hex: str) -> None:
-    """Record (or update) the on-ledger Bucket NFToken id + current URI for an owner."""
+def set_closet_token(
+    conn: sqlite3.Connection,
+    owner: str,
+    nft_id: str,
+    uri_hex: str,
+    status: str = "pending_accept",
+    offer_id: str | None = None,
+) -> None:
+    """Record/update an owner's Closet NFToken id, URI, lifecycle status, and the
+    outstanding accept offer id (kept so the UI can re-show the Xaman accept)."""
     conn.execute(
         """
-        INSERT INTO bucket_tokens (owner, nft_id, uri_hex, updated_at)
-        VALUES (?, ?, ?, CURRENT_TIMESTAMP)
+        INSERT INTO closet_tokens (owner, nft_id, uri_hex, status, offer_id, updated_at)
+        VALUES (?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
         ON CONFLICT(owner) DO UPDATE SET
-            nft_id=excluded.nft_id, uri_hex=excluded.uri_hex, updated_at=CURRENT_TIMESTAMP
+            nft_id=excluded.nft_id, uri_hex=excluded.uri_hex,
+            status=excluded.status, offer_id=excluded.offer_id, updated_at=CURRENT_TIMESTAMP
         """,
-        (owner, nft_id, uri_hex),
+        (owner, nft_id, uri_hex, status, offer_id),
     )
     conn.commit()
 
 
-def get_bucket_token(conn: sqlite3.Connection, owner: str) -> tuple[str, str] | None:
-    """The (nft_id, uri_hex) of an owner's Bucket NFToken, or None if unminted."""
-    cur = conn.execute("SELECT nft_id, uri_hex FROM bucket_tokens WHERE owner = ?", (owner,))
+def set_closet_status(conn: sqlite3.Connection, owner: str, status: str) -> None:
+    conn.execute(
+        "UPDATE closet_tokens SET status=?, updated_at=CURRENT_TIMESTAMP WHERE owner=?",
+        (status, owner),
+    )
+    conn.commit()
+
+
+def get_closet_record(
+    conn: sqlite3.Connection, owner: str
+) -> tuple[str, str, str, str | None] | None:
+    """(nft_id, uri_hex, status, offer_id) for an owner's Closet, or None."""
+    cur = conn.execute(
+        "SELECT nft_id, uri_hex, status, offer_id FROM closet_tokens WHERE owner=?", (owner,)
+    )
+    row = cur.fetchone()
+    return None if row is None else (str(row[0]), str(row[1]), str(row[2]), row[3])
+
+
+def get_closet_token(conn: sqlite3.Connection, owner: str) -> tuple[str, str] | None:
+    """The (nft_id, uri_hex) of an owner's Closet NFToken, or None if unminted."""
+    cur = conn.execute("SELECT nft_id, uri_hex FROM closet_tokens WHERE owner = ?", (owner,))
     row = cur.fetchone()
     return None if row is None else (str(row[0]), str(row[1]))
 

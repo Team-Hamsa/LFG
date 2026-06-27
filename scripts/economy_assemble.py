@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Assemble (rebirth) an edition: body + a full asset set from the Bucket -> mint.
+"""Assemble (rebirth) an edition: body + a full asset set from the Closet -> mint.
 
   python scripts/economy_assemble.py --network testnet --owner rUSER --edition 42 \\
       --set Background=Blue --set Back=None --set Clothing=Hoodie ... (all 8 slots)
@@ -63,7 +63,7 @@ async def _amain(args: argparse.Namespace) -> int:
 
 
 def main() -> int:
-    parser = argparse.ArgumentParser(description="Assemble an edition from the Bucket.")
+    parser = argparse.ArgumentParser(description="Assemble an edition from the Closet.")
     parser.add_argument("--network", choices=["mainnet", "testnet"], default=config.XRPL_NETWORK)
     parser.add_argument("--owner", required=True, help="owner's XRPL address")
     parser.add_argument("--edition", required=True, type=int, help="edition number to rebirth")

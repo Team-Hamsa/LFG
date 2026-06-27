@@ -11,7 +11,7 @@ import sqlite3
 from collections.abc import Awaitable, Callable
 from typing import Any
 
-from lfg_core import bucket_token, config, economy_store, nft_index, swap_meta, trait_economy
+from lfg_core import closet_token, config, economy_store, nft_index, swap_meta, trait_economy
 
 _TYPE_TO_KIND = {
     "NFTokenMint": "mint",
@@ -97,17 +97,32 @@ async def apply_tx(
             logging.exception(f"apply_tx failed for {nft_id} ({kind})")
 
 
-def _apply_bucket(conn: sqlite3.Connection, token: dict[str, Any], metadata: Any) -> None:
-    """Rebuild an owner's bucket_assets/bucket_bodies rows from their Bucket
-    NFToken's metadata — the on-chain source of truth the DB mirrors."""
+def _apply_closet(conn: sqlite3.Connection, token: dict[str, Any], metadata: Any) -> None:
+    """Rebuild an owner's closet_assets/closet_bodies rows from their Closet
+    NFToken's metadata and set its lifecycle status: a token held by anyone other
+    than the issuer has been accepted (active); one still in the issuer wallet is
+    pending_accept. The offer_id is NOT on-chain — preserve any stored value so
+    the UI can re-show the pending accept QR."""
     owner = token.get("owner")
     if not owner:
         return
-    assets, bodies = bucket_token.parse_bucket_metadata(
+    assets, bodies = closet_token.parse_closet_metadata(
         metadata if isinstance(metadata, dict) else {}
     )
-    economy_store.set_bucket_contents(conn, owner, assets, bodies)
-    economy_store.set_bucket_token(conn, owner, token["nft_id"], token.get("uri_hex") or "")
+    economy_store.set_closet_contents(conn, owner, assets, bodies)
+    status = (
+        closet_token.ACTIVE if owner != config.SWAP_ISSUER_ADDRESS else closet_token.PENDING_ACCEPT
+    )
+    existing = economy_store.get_closet_record(conn, owner)
+    existing_offer_id = existing[3] if existing is not None else None
+    economy_store.set_closet_token(
+        conn,
+        owner,
+        token["nft_id"],
+        token.get("uri_hex") or "",
+        status=status,
+        offer_id=existing_offer_id,
+    )
 
 
 def _apply_possible_growth(
@@ -146,13 +161,14 @@ async def apply_economy_tx(
     fetch_meta_fn: FetchMetaFn,
     genesis: trait_economy.Genesis,
 ) -> None:
-    """Apply a Mint/Modify to the trait-economy tables. A Bucket NFToken (taxon
-    == config.BUCKET_TAXON) rebuilds its owner's bucket from metadata; a
-    character mint of an unknown edition appends a supply_changes row. Per-id
+    """Apply a Mint/Modify/Accept to the trait-economy tables. A Closet NFToken
+    (taxon == config.CLOSET_TAXON or config.LEGACY_BUCKET_TAXON) rebuilds its
+    owner's closet from metadata and, on accept, promotes pending_accept → active;
+    a character mint of an unknown edition appends a supply_changes row. Per-id
     errors are logged, never raised. `genesis` must be the EFFECTIVE genesis so
     already-recorded editions are recognised (idempotent)."""
     kind = classify_tx(tx)
-    if kind not in ("mint", "modify"):
+    if kind not in ("mint", "modify", "accept"):
         return
     for nft_id in affected_nft_ids(tx):
         try:
@@ -161,8 +177,8 @@ async def apply_economy_tx(
                 continue
             uri_hex = token.get("uri_hex") or ""
             metadata = await fetch_meta_fn(uri_hex) if uri_hex else None
-            if int(token.get("taxon") or -1) == config.BUCKET_TAXON:
-                _apply_bucket(conn, token, metadata)
+            if int(token.get("taxon") or -1) in (config.CLOSET_TAXON, config.LEGACY_BUCKET_TAXON):
+                _apply_closet(conn, token, metadata)
             elif kind == "mint":
                 _apply_possible_growth(conn, token, metadata, genesis)
         except Exception:

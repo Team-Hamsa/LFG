@@ -159,11 +159,13 @@ RARITY_BOOST_STEP_HOURS = int(os.getenv("RARITY_BOOST_STEP_HOURS", "24"))
 SOURCE_TAG = int(os.getenv("SOURCE_TAG", "2606160021"))
 
 # Dress-up trait economy (Phase 2). Economy characters are minted burnable so
-# the issuer can harvest (burn) them; the per-user Bucket is a soulbound
+# the issuer can harvest (burn) them; the per-user Closet is a soulbound
 # (non-transferable) mutable NFToken the issuer updates in place.
-BUCKET_TAXON = int(os.getenv("BUCKET_TAXON", "1761"))
-BUCKET_IMAGE_URL = os.getenv("BUCKET_IMAGE_URL", NFT_COLLECTION_LOGO)
+# Closet (per-user soulbound trait container; formerly "Bucket").
+LEGACY_BUCKET_TAXON = int(os.getenv("BUCKET_TAXON", "1761"))
+CLOSET_TAXON = int(os.getenv("CLOSET_TAXON", "1762"))
+CLOSET_IMAGE_URL = os.getenv("CLOSET_IMAGE_URL", NFT_COLLECTION_LOGO)
 ECONOMY_NFT_FLAGS = int(os.getenv("ECONOMY_NFT_FLAGS", "25"))  # burnable+transferable+mutable
-BUCKET_NFT_FLAGS = int(os.getenv("BUCKET_NFT_FLAGS", "16"))  # mutable only (soulbound)
+CLOSET_NFT_FLAGS = int(os.getenv("CLOSET_NFT_FLAGS", "16"))  # mutable only (soulbound)
 ECONOMY_RECORDS_DIR = os.getenv("ECONOMY_RECORDS_DIR", "economy_records")
 ECONOMY_CDN_FOLDER = os.getenv("ECONOMY_CDN_FOLDER", SWAP_CDN_FOLDER)

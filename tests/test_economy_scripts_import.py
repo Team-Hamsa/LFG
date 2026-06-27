@@ -21,7 +21,9 @@ sys.path.insert(0, REPO)
 sys.path.insert(0, os.path.join(REPO, "scripts"))
 
 
-@pytest.mark.parametrize("mod_name", ["economy_harvest", "economy_assemble", "economy_equip"])
+@pytest.mark.parametrize(
+    "mod_name", ["economy_harvest", "economy_assemble", "economy_equip", "migrate_bucket_to_closet"]
+)
 def test_cli_driver_exposes_main(mod_name):
     mod = importlib.import_module(mod_name)
     assert hasattr(mod, "main") and callable(mod.main)
@@ -38,5 +40,5 @@ def test_build_economy_deps_wires_all_callables():
     economy_store.init_economy_schema(conn)
     d = deps.build_economy_deps(conn)
     assert d.conn is conn
-    for fn in (d.bucket_mint_fn, d.char_mint_fn, d.char_burn_fn, d.char_compose_fn):
+    for fn in (d.closet_mint_fn, d.char_mint_fn, d.char_burn_fn, d.char_compose_fn):
         assert callable(fn)

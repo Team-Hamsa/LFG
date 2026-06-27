@@ -45,30 +45,30 @@ def _conn_with_bucket() -> sqlite3.Connection:
     es.freeze_genesis(
         c, te.Genesis(trait_counts={}, edition_bodies={7: ("Straight Blue", "male")}), {}
     )
-    es.set_bucket_token(c, "rUser", "BUCKET", "00")
-    es.set_bucket_contents(c, "rUser", [("Head", "Crown", 1)], [])
+    es.set_closet_token(c, "rUser", "CLOSET", "00")
+    es.set_closet_contents(c, "rUser", [("Head", "Crown", 1)], [])
     return c
 
 
 class _Fakes:
-    def __init__(self, *, fail_bucket_modify=False) -> None:
-        self.fail_bucket_modify = fail_bucket_modify
+    def __init__(self, *, fail_closet_modify=False) -> None:
+        self.fail_closet_modify = fail_closet_modify
         self.char_modifies: list[tuple[str, str, str]] = []
 
-    async def bucket_upload(self, meta: dict) -> str:
+    async def closet_upload(self, meta: dict) -> str:
         return "https://cdn/b.json"
 
-    async def bucket_mint(self, url):
-        return "BUCKET"
+    async def closet_mint(self, url):
+        return "CLOSET"
 
-    async def bucket_offer(self, nft_id, owner):
+    async def closet_offer(self, nft_id, owner):
         return "O"
 
-    async def bucket_accept(self, offer_id):
+    async def closet_accept(self, offer_id):
         return {}
 
-    async def bucket_modify(self, nft_id, owner, url):
-        return None if self.fail_bucket_modify else "MODHASH"
+    async def closet_modify(self, nft_id, owner, url):
+        return None if self.fail_closet_modify else "MODHASH"
 
     async def char_compose(self, attrs, body, edition, rev):
         return ("img", None, "https://cdn/new.json")
@@ -93,11 +93,11 @@ class _Fakes:
 def _deps(conn, f, records_dir):
     return ef.EconomyDeps(
         conn=conn,
-        bucket_upload_fn=f.bucket_upload,
-        bucket_mint_fn=f.bucket_mint,
-        bucket_offer_fn=f.bucket_offer,
-        bucket_accept_fn=f.bucket_accept,
-        bucket_modify_fn=f.bucket_modify,
+        closet_upload_fn=f.closet_upload,
+        closet_mint_fn=f.closet_mint,
+        closet_offer_fn=f.closet_offer,
+        closet_accept_fn=f.closet_accept,
+        closet_modify_fn=f.closet_modify,
         char_compose_fn=f.char_compose,
         char_mint_fn=f.char_mint,
         char_modify_fn=f.char_modify,
@@ -116,7 +116,7 @@ def test_equip_happy_path(tmp_path):
     assert s.state == ef.DONE
     assert s.displaced_value == "None"
     assert f.char_modifies == [("NFT7", "rUser", "https://cdn/new.json")]
-    assets = {(slot, v): n for o, slot, v, n in es.read_bucket_assets(conn)}
+    assets = {(slot, v): n for o, slot, v, n in es.read_closet_assets(conn)}
     assert ("Head", "Crown") not in assets  # incoming consumed
     assert assets[("Head", "None")] == 1  # displaced returned
 
@@ -131,7 +131,7 @@ def test_equip_rejects_missing_asset(tmp_path):
 
 
 def test_equip_modify_then_bucket_fails_reverts(tmp_path):
-    conn, f = _conn_with_bucket(), _Fakes(fail_bucket_modify=True)
+    conn, f = _conn_with_bucket(), _Fakes(fail_closet_modify=True)
     s = ef.EquipSession(owner="rUser", character=_char(), slot="Head", incoming_value="Crown")
     _run(ef.run_equip(s, _deps(conn, f, tmp_path)))
 
@@ -142,14 +142,14 @@ def test_equip_modify_then_bucket_fails_reverts(tmp_path):
         ("NFT7", "rUser", OLD_URL),
     ]
     # bucket untouched
-    assets = {(slot, v): n for o, slot, v, n in es.read_bucket_assets(conn)}
+    assets = {(slot, v): n for o, slot, v, n in es.read_closet_assets(conn)}
     assert assets == {("Head", "Crown"): 1}
 
 
 def test_equip_bucket_fails_and_uri_undecodable_reports_honestly(tmp_path):
     import json
 
-    conn, f = _conn_with_bucket(), _Fakes(fail_bucket_modify=True)
+    conn, f = _conn_with_bucket(), _Fakes(fail_closet_modify=True)
     rec = _char()
     rec.uri_hex = ""  # no decodable old URI to revert to
     s = ef.EquipSession(owner="rUser", character=rec, slot="Head", incoming_value="Crown")

@@ -454,6 +454,21 @@ async def handle_account(request):
     return web.json_response({"wallet": wallet, "identities": identities})
 
 
+@require_wallet
+async def handle_closet(request):
+    """Ensure the caller has a Closet NFToken, minting on first use. In dev mode
+    returns a stub active record (Task 7 will expand the mock)."""
+    if config.WEBAPP_DEV_MODE:
+        return web.json_response(mock_economy.INSTANCE.create_closet(request["wallet"]))
+    user = request["user"]
+    try:
+        result = await economy_api.start_closet(user["id"], request["wallet"])
+    except Exception as e:
+        logging.error(f"start_closet failed for {user['id']}: {e}")
+        return web.json_response({"error": "could not create or retrieve Closet"}, status=502)
+    return web.json_response(result)
+
+
 @require_auth
 async def handle_register(request):
     user = request["user"]
@@ -482,7 +497,19 @@ async def handle_register(request):
             platform,
             user["id"],
         )
-    return web.json_response({"ok": True, "wallet": wallet})
+    # Best-effort Closet issuance post-registration: kick off ensure_closet so the
+    # user's Closet NFToken is minted immediately on registration. This never blocks
+    # or fails the registration response — any error is logged and ignored.
+    closet_result: dict[str, Any] | None = None
+    if not config.WEBAPP_DEV_MODE:
+        try:
+            closet_result = await economy_api.start_closet(user["id"], wallet)
+        except Exception as e:
+            logging.warning(f"post-register ensure_closet failed for {wallet}: {e}")
+    resp: dict[str, Any] = {"ok": True, "wallet": wallet}
+    if closet_result is not None:
+        resp["closet_accept"] = closet_result.get("accept")
+    return web.json_response(resp)
 
 
 async def _request_return_url(request):
@@ -1004,6 +1031,7 @@ def create_app() -> web.Application:
     app.router.add_get("/api/qr.png", handle_qr)
     app.router.add_get("/api/img", handle_img)
     app.router.add_get("/api/layer", handle_layer)
+    app.router.add_post("/api/closet", handle_closet)
     app.router.add_get("/api/economy", require_wallet(handle_economy))
     app.router.add_post("/api/equip", require_wallet(handle_equip_start))
     app.router.add_get("/api/equip/{session_id}", handle_equip_status)

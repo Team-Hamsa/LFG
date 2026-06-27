@@ -51,6 +51,17 @@ def test_app_js_guards_layer_requests_against_incomplete_metadata():
     assert "|| 'None')" not in src
 
 
+def test_app_js_has_closet_states():
+    src = _read("app.js")
+    assert "Create your Closet" in src
+    assert "Finish claiming your Closet" in src
+    assert "/api/closet" in src
+    # reads the nested token path (not the flat .status that the brief had wrong)
+    assert "closet.token" in src
+    # post-harvest claim block is gone — "Claim your Closet" was the old title
+    assert "👜 Claim your Closet" not in src
+
+
 def test_telegram_webapp_js_vendored_same_origin():
     # Vendored same-origin (not hotlinked) per the spec.
     assert os.path.exists(os.path.join(CLIENT, "telegram-web-app.js"))

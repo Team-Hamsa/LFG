@@ -1,10 +1,11 @@
-# Harvest flow: burn a live character, drop its 8 assets + body into the Bucket.
+# Harvest flow: burn a live character, drop its 8 assets + body into the Closet.
 # Driven entirely through injected fakes — no network.
 
 import asyncio
 import json
 import sqlite3
 
+from lfg_core import closet_token as ct
 from lfg_core import economy_flow as ef
 from lfg_core import economy_store as es
 from lfg_core import trait_economy as te
@@ -50,41 +51,46 @@ def _conn_with_genesis(edition: int = 7, body: str = "Straight Blue") -> sqlite3
 
 
 class _Fakes:
-    def __init__(self, *, fail_bucket_modify: bool = False) -> None:
+    def __init__(self, *, fail_closet_modify: bool = False) -> None:
         self.burns: list[tuple[str, str]] = []
         self.bucket_modifies: list[tuple[str, str, str]] = []
-        self.bucket_mints: list[str] = []
-        self.fail_bucket_modify = fail_bucket_modify
+        self.closet_mints: list[str] = []
+        self.fail_closet_modify = fail_closet_modify
         self.uploads = 0
         # nft_ids that exist_fn should report as on-ledger; everything else is stale.
-        self.live_bucket_ids: set[str] = set()
+        self.live_closet_ids: set[str] = set()
         self.events: list[str] = []
+        # address returned by closet_owner; None means not yet owned by user.
+        self.closet_owner_addr: str | None = "rUser"
 
-    async def bucket_upload(self, meta: dict) -> str:
+    async def closet_owner(self, nft_id: str) -> str | None:
+        return self.closet_owner_addr
+
+    async def closet_upload(self, meta: dict) -> str:
         self.uploads += 1
         return f"https://cdn/b/{self.uploads}.json"
 
-    async def bucket_mint(self, url: str) -> str:
-        nft_id = f"BUCKET{len(self.bucket_mints)}"
-        self.bucket_mints.append(nft_id)
-        self.events.append("bucket_mint")
-        self.live_bucket_ids.add(nft_id)
+    async def closet_mint(self, url: str) -> str:
+        nft_id = f"CLOSET{len(self.closet_mints)}"
+        self.closet_mints.append(nft_id)
+        self.events.append("closet_mint")
+        self.live_closet_ids.add(nft_id)
         return nft_id
 
-    async def bucket_exists(self, nft_id: str) -> bool:
-        return nft_id in self.live_bucket_ids
+    async def closet_exists(self, nft_id: str) -> bool:
+        return nft_id in self.live_closet_ids
 
-    async def bucket_offer(self, nft_id: str, owner: str) -> str:
+    async def closet_offer(self, nft_id: str, owner: str) -> str:
         return "OFFER"
 
-    async def bucket_accept(self, offer_id: str) -> dict:
+    async def closet_accept(self, offer_id: str) -> dict:
         return {"xumm_url": "x"}
 
-    async def bucket_modify(self, nft_id: str, owner: str, url: str):
-        if self.fail_bucket_modify:
+    async def closet_modify(self, nft_id: str, owner: str, url: str):
+        if self.fail_closet_modify:
             return None
         self.bucket_modifies.append((nft_id, owner, url))
-        self.events.append("bucket_modify")
+        self.events.append("closet_modify")
         return "MODHASH"
 
     async def char_burn(self, nft_id: str, owner: str):
@@ -111,33 +117,35 @@ class _Fakes:
 def _deps(conn, f, records_dir):
     return ef.EconomyDeps(
         conn=conn,
-        bucket_upload_fn=f.bucket_upload,
-        bucket_mint_fn=f.bucket_mint,
-        bucket_offer_fn=f.bucket_offer,
-        bucket_accept_fn=f.bucket_accept,
-        bucket_modify_fn=f.bucket_modify,
+        closet_upload_fn=f.closet_upload,
+        closet_mint_fn=f.closet_mint,
+        closet_offer_fn=f.closet_offer,
+        closet_accept_fn=f.closet_accept,
+        closet_modify_fn=f.closet_modify,
         char_compose_fn=f.char_compose,
         char_mint_fn=f.char_mint,
         char_modify_fn=f.char_modify,
         char_burn_fn=f.char_burn,
         char_offer_fn=f.char_offer,
         char_accept_fn=f.char_accept,
-        bucket_exists_fn=f.bucket_exists,
+        closet_exists_fn=f.closet_exists,
+        closet_owner_fn=f.closet_owner,
         records_dir=str(records_dir),
     )
 
 
 def test_harvest_happy_path(tmp_path):
     conn, f = _conn_with_genesis(), _Fakes()
+    es.set_closet_token(conn, "rUser", "CLOSET0", "00", status=ct.ACTIVE, offer_id=None)
     session = ef.HarvestSession(owner="rUser", character=_char(), burnable=True)
     _run(ef.run_harvest(session, _deps(conn, f, tmp_path)))
 
     assert session.state == ef.DONE
     assert f.burns == [("NFT7", "rUser")]
     assert len(f.bucket_modifies) == 1  # bucket synced on-chain
-    assets = {(s, v): n for o, s, v, n in es.read_bucket_assets(conn)}
+    assets = {(s, v): n for o, s, v, n in es.read_closet_assets(conn)}
     assert all(assets[(s, "None")] == 1 for s in NON_BODY)
-    assert es.read_bucket_bodies(conn) == [("rUser", 7)]
+    assert es.read_closet_bodies(conn) == [("rUser", 7)]
 
 
 def test_harvest_rejects_non_burnable(tmp_path):
@@ -147,50 +155,83 @@ def test_harvest_rejects_non_burnable(tmp_path):
 
     assert session.state == ef.FAILED
     assert f.burns == []  # never touched the chain
-    assert es.read_bucket_bodies(conn) == []
+    assert es.read_closet_bodies(conn) == []
 
 
 def test_harvest_burn_then_bucket_sync_fails(tmp_path):
-    conn, f = _conn_with_genesis(), _Fakes(fail_bucket_modify=True)
+    conn, f = _conn_with_genesis(), _Fakes(fail_closet_modify=True)
+    es.set_closet_token(conn, "rUser", "CLOSET0", "00", status=ct.ACTIVE, offer_id=None)
     session = ef.HarvestSession(owner="rUser", character=_char(), burnable=True)
     _run(ef.run_harvest(session, _deps(conn, f, tmp_path)))
 
     assert session.state == ef.FAILED
     assert f.burns == [("NFT7", "rUser")]  # burn happened (irreversible)
     # assets are NOT in the DB (deposit failed) but ARE preserved in the journal
-    assert es.read_bucket_bodies(conn) == []
+    assert es.read_closet_bodies(conn) == []
     record = json.loads((tmp_path / f"harvest-{session.id}.json").read_text())
-    assert record["status"] == "harvested_pending_bucket"
+    assert record["status"] == "harvested_pending_closet"
     assert record["burn_hash"] == "BURNHASH"
     assert len(record["moved_assets"]) == len(NON_BODY)
 
 
-def test_harvest_remints_stale_bucket_before_burn(tmp_path):
-    """#101: a stale bucket record (token gone from the ledger) must be detected
-    and re-minted BEFORE the irreversible character burn — otherwise the later
-    NFTokenModify hits tecNO_ENTRY and the harvested assets are lost. With the
-    on-ledger check wired, the bucket is re-minted, the burn proceeds, and the
-    assets land in the (fresh) bucket."""
-    conn, f = _conn_with_genesis(), _Fakes()
-    # A stale row: an nft_id that exists in the DB but NOT on-ledger.
-    es.set_bucket_token(conn, "rUser", "DEADBUCKET", "AABB")
-    assert "DEADBUCKET" not in f.live_bucket_ids  # exists_fn -> False
+def test_harvest_stale_active_closet_fails_after_burn(tmp_path):
+    """A Closet that is ACTIVE in the DB but missing from the ledger (stale) passes
+    the precondition check (DB status is ACTIVE), so the burn proceeds. The
+    subsequent NFTokenModify (sync_closet) then hits a missing token and fails,
+    leaving assets in the journal for recovery.
+
+    Previously (#101) the old ensure_closet block would re-mint before the burn.
+    That block is now removed: users must hold an ACTIVE Closet via the issuance
+    UI before harvesting; staleness caught here is a post-burn failure recorded in
+    the journal."""
+    conn, f = _conn_with_genesis(), _Fakes(fail_closet_modify=True)
+    # A stale row: ACTIVE in the DB but the on-ledger token is gone (modify fails).
+    es.set_closet_token(conn, "rUser", "DEADBUCKET", "AABB", status=ct.ACTIVE)
 
     session = ef.HarvestSession(owner="rUser", character=_char(), burnable=True)
     _run(ef.run_harvest(session, _deps(conn, f, tmp_path)))
 
+    # Precondition passes (DB says ACTIVE), burn happens, then deposit fails.
+    assert session.state == ef.FAILED
+    assert f.burns == [("NFT7", "rUser")]  # burn happened (irreversible)
+    assert f.closet_mints == []  # no re-mint; ensure_closet block removed
+    assert es.read_closet_bodies(conn) == []  # deposit not committed to DB
+    record = json.loads((tmp_path / f"harvest-{session.id}.json").read_text())
+    assert record["status"] == "harvested_pending_closet"
+    assert record["burn_hash"] == "BURNHASH"
+    assert len(record["moved_assets"]) == len(NON_BODY)
+
+
+def test_harvest_rejected_without_active_closet(tmp_path):
+    conn, f = _conn_with_genesis(), _Fakes()
+    # no closet row at all → status none
+    session = ef.HarvestSession(owner="rUser", character=_char(), burnable=True)
+    _run(ef.run_harvest(session, _deps(conn, f, tmp_path)))
+    assert session.state == ef.FAILED
+    assert f.burns == []  # never burned
+    assert "closet" in (session.error or "").lower()
+
+
+def test_harvest_succeeds_with_active_closet(tmp_path):
+    conn, f = _conn_with_genesis(), _Fakes()
+    es.set_closet_token(conn, "rUser", "NFTC", "AB", status=ct.ACTIVE, offer_id=None)
+    session = ef.HarvestSession(owner="rUser", character=_char(), burnable=True)
+    _run(ef.run_harvest(session, _deps(conn, f, tmp_path)))
     assert session.state == ef.DONE
-    # The dead bucket was re-minted...
-    assert len(f.bucket_mints) == 1
-    fresh_id = f.bucket_mints[0]
-    assert es.get_bucket_token(conn, "rUser")[0] == fresh_id
-    # ...the character was burned...
     assert f.burns == [("NFT7", "rUser")]
-    # ...the bucket modify succeeded against the fresh token...
-    assert [m[0] for m in f.bucket_modifies] == [fresh_id]
-    # ...and the assets/body landed.
-    assets = {(s, v): n for o, s, v, n in es.read_bucket_assets(conn)}
-    assert all(assets[(s, "None")] == 1 for s in NON_BODY)
-    assert es.read_bucket_bodies(conn) == [("rUser", 7)]
-    # Ordering: bucket ensured (re-mint) BEFORE the burn, which is before the deposit.
-    assert f.events == ["bucket_mint", "char_burn", "bucket_modify"]
+
+
+def test_harvest_rejected_when_active_closet_gone_onledger(tmp_path):
+    """ACTIVE in the DB but owner-check returns None (token gone on-ledger) → the
+    gate fires before the irreversible burn, so no character is lost (#101)."""
+    conn, f = _conn_with_genesis(), _Fakes()
+    es.set_closet_token(conn, "rUser", "CLOSETX", "AB", status=ct.ACTIVE)
+    # Simulate the token no longer owned by the user (gone/transferred).
+    f.closet_owner_addr = None
+
+    session = ef.HarvestSession(owner="rUser", character=_char(), burnable=True)
+    _run(ef.run_harvest(session, _deps(conn, f, tmp_path)))
+
+    assert session.state == ef.FAILED
+    assert f.burns == []  # character was NOT burned
+    assert "closet" in (session.error or "").lower() or "verified" in (session.error or "").lower()

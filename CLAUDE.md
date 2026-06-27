@@ -64,6 +64,7 @@ NFT_COLLECTION_FAMILY=Test
 NFT_DESCRIPTION=Test
 NFT_TRANSFER_FEE=7000
 NFT_FLAGS=25
+CLOSET_TAXON=1762                                           # optional; Closet soulbound taxon (default 1762)
 NFT_SCHEMA_URL=ipfs://QmNpi8rcXEkohca8iXu7zysKKSJYqCvBJn3xJwga8jXqWU
 EXTERNAL_WEBSITE_URL=https://letseffinggo.com
 RETRY_MAX_ATTEMPTS=5
@@ -348,22 +349,38 @@ Phase 2 (#64) makes the three trait-economy ops real on-chain, mirroring
 `lfg_core/swap_flow.py` (fail-safe ordering, on-disk journaling to
 `ECONOMY_RECORDS_DIR`, partial-failure recovery). MVP ops are **free**.
 
+Harvest, Assemble, and Equip all require an **active Closet** (see below).
+
 - **Harvest** (`scripts/economy_harvest.py`): burn a live character → its 8
-  assets + body drop into the owner's Bucket (collection size ↓).
+  assets + body drop into the owner's Closet (collection size ↓).
 - **Assemble** (`scripts/economy_assemble.py`): a body + a full asset set from
-  the Bucket → mint that edition + offer it back (collection size ↑, rebirth).
-- **Equip** (`scripts/economy_equip.py`): `NFTokenModify` a loose Bucket asset
-  onto a live character; the displaced asset returns to the Bucket (size =).
+  the Closet → mint that edition + offer it back (collection size ↑, rebirth).
+- **Equip** (`scripts/economy_equip.py`): `NFTokenModify` a loose Closet asset
+  onto a live character; the displaced asset returns to the Closet (size =).
 
 Model:
 - **Economy characters are minted burnable + transferable + mutable**
   (`ECONOMY_NFT_FLAGS = 25`) so the issuer can harvest-burn / assemble-mint /
   equip-modify them. (A character already swapped to mutable-only can't be
   issuer-burned, so it is equip-only until re-minted — surfaced as a precondition
-  error.) The per-user **Bucket** is a soulbound mutable NFToken
-  (`BUCKET_NFT_FLAGS = 16`, `BUCKET_TAXON`), minted on first use.
-- **DB tables are authoritative for accounting; the Bucket NFToken mirrors them**
-  (its metadata `lfg_bucket` block is the on-chain truth the listener rebuilds
+  error.)
+- **The per-user Closet** is a soulbound mutable NFToken (`CLOSET_NFT_FLAGS = 16`,
+  `CLOSET_TAXON = 1762`). Unlike the legacy Bucket, issuance is a **standalone,
+  up-front step** — the user must explicitly accept the Closet offer in Xaman
+  before Harvest or Assemble unlock.
+  - Lifecycle: `none → pending_accept → active`. `ensure_closet` mints the token
+    and creates an on-chain offer, recording status `pending_accept`. The listener
+    promotes the record to `active` when it observes `NFTokenAcceptOffer` with
+    `owner != issuer`. Harvest/Assemble gate on `status == active`; an offer
+    payload is returned to the caller while status is `pending_accept` so the
+    user can be prompted to accept.
+- **Taxon transition:** `CLOSET_TAXON = 1762` (new, default).
+  `LEGACY_BUCKET_TAXON = 1761` (old; read from `BUCKET_TAXON` env var, default
+  1761). The listener dual-reads both `lfg_closet` and `lfg_bucket` metadata
+  keys and matches both taxons so existing Bucket holders keep working during
+  the transition.
+- **DB tables are authoritative for accounting; the Closet NFToken mirrors them**
+  (its metadata `lfg_closet` block is the on-chain truth the listener rebuilds
   the DB from). Each flow modifies the token *before* the DB so a crash leaves
   the DB rebuildable from the chain.
 - **Supply accounting** (`lfg_core/trait_economy.py`): genesis stays frozen; an
@@ -372,9 +389,18 @@ Model:
   `census == genesis + Σ supply_changes`; `max_edition` is dynamic. The auditor
   (`scripts/audit_trait_economy.py`) flags any unlogged delta as drift.
 - Core modules: `lfg_core/economy_flow.py` (flows + `EconomyDeps`),
-  `lfg_core/bucket_token.py` (Bucket metadata + lifecycle),
-  `lfg_core/economy_store.py` (`bucket_tokens`/`supply_changes`); the listener
-  applies bucket/supply events via `nft_listener.apply_economy_tx`.
+  `lfg_core/closet_token.py` (Closet metadata + lifecycle — `ensure_closet`,
+  `confirm_accept`, `sync_closet`, `ClosetRef`),
+  `lfg_core/economy_store.py` (`closet_tokens`/`closet_assets`/`closet_bodies`/`supply_changes`);
+  the listener applies closet/supply events via `nft_listener.apply_economy_tx`.
+- **Migration** (legacy Bucket → Closet):
+  `.venv/bin/python scripts/migrate_bucket_to_closet.py --network testnet|mainnet [--owner rXXX]`
+  Idempotent: owners already on `CLOSET_TAXON` are skipped. The old soulbound
+  Bucket (flags 16, non-burnable) is abandoned in place — it cannot be
+  issuer-burned, so tracking is simply stopped. **Crash-recovery caveat:** if
+  the process dies between the `closet_tokens` delete and the new mint, re-run
+  with `--owner <addr>` for the affected address; contents in `closet_assets` /
+  `closet_bodies` are safe — only the token pointer is transiently lost.
 
 ## Important Notes
 

@@ -1,4 +1,4 @@
-# Phase 2 economy_store additions: bucket_tokens + supply_changes + the
+# Phase 2 economy_store additions: closet_tokens + supply_changes + the
 # replace-all bucket-contents helper used by both the flows and the listener.
 
 import sqlite3
@@ -40,34 +40,85 @@ def test_supply_changes_ordered():
     assert [r["reason"] for r in rows] == ["first", "second"]
 
 
-def test_set_bucket_contents_replaces():
+def test_set_closet_contents_replaces():
     c = _conn()
-    es.set_bucket_contents(c, "rUser", [("Head", "None", 2)], [3536])
-    es.set_bucket_contents(c, "rUser", [("Eyes", "Blue", 1)], [])
-    assert es.read_bucket_assets(c) == [("rUser", "Eyes", "Blue", 1)]
-    assert es.read_bucket_bodies(c) == []
+    es.set_closet_contents(c, "rUser", [("Head", "None", 2)], [3536])
+    es.set_closet_contents(c, "rUser", [("Eyes", "Blue", 1)], [])
+    assert es.read_closet_assets(c) == [("rUser", "Eyes", "Blue", 1)]
+    assert es.read_closet_bodies(c) == []
 
 
-def test_set_bucket_contents_drops_nonpositive():
+def test_set_closet_contents_drops_nonpositive():
     c = _conn()
-    es.set_bucket_contents(c, "rUser", [("Head", "None", 0), ("Eyes", "Blue", 3)], [])
-    assert es.read_bucket_assets(c) == [("rUser", "Eyes", "Blue", 3)]
+    es.set_closet_contents(c, "rUser", [("Head", "None", 0), ("Eyes", "Blue", 3)], [])
+    assert es.read_closet_assets(c) == [("rUser", "Eyes", "Blue", 3)]
 
 
-def test_set_bucket_contents_is_per_owner():
+def test_set_closet_contents_is_per_owner():
     c = _conn()
-    es.set_bucket_contents(c, "rA", [("Head", "None", 1)], [1])
-    es.set_bucket_contents(c, "rB", [("Eyes", "Red", 1)], [2])
-    es.set_bucket_contents(c, "rA", [("Head", "None", 5)], [1])  # only rA replaced
-    assets = {(o, s, v): n for o, s, v, n in es.read_bucket_assets(c)}
+    es.set_closet_contents(c, "rA", [("Head", "None", 1)], [1])
+    es.set_closet_contents(c, "rB", [("Eyes", "Red", 1)], [2])
+    es.set_closet_contents(c, "rA", [("Head", "None", 5)], [1])  # only rA replaced
+    assets = {(o, s, v): n for o, s, v, n in es.read_closet_assets(c)}
     assert assets[("rA", "Head", "None")] == 5
     assert assets[("rB", "Eyes", "Red")] == 1
 
 
-def test_bucket_token_roundtrip():
+def test_closet_token_roundtrip():
     c = _conn()
-    es.set_bucket_token(c, "rUser", "NFTID", "ABCD")
-    assert es.get_bucket_token(c, "rUser") == ("NFTID", "ABCD")
-    assert es.get_bucket_token(c, "rNope") is None
-    es.set_bucket_token(c, "rUser", "NFTID", "EF01")  # uri update in place
-    assert es.get_bucket_token(c, "rUser") == ("NFTID", "EF01")
+    es.set_closet_token(c, "rUser", "NFTID", "ABCD")
+    assert es.get_closet_token(c, "rUser") == ("NFTID", "ABCD")
+    assert es.get_closet_token(c, "rNope") is None
+    es.set_closet_token(c, "rUser", "NFTID", "EF01")  # uri update in place
+    assert es.get_closet_token(c, "rUser") == ("NFTID", "EF01")
+
+
+def test_migration_copies_legacy_bucket_tables():
+    """Fix 1+2 interaction: legacy bucket_* rows must be copied into the new
+    closet_* tables (which already exist with the full column set) after schema
+    creation. status should default to 'pending_accept'; offer_id to NULL."""
+    c = sqlite3.connect(":memory:")
+
+    # Simulate a DB created before the Bucket→Closet rename.
+    c.executescript("""
+        CREATE TABLE bucket_assets (
+            owner TEXT, slot TEXT, value TEXT, count INTEGER,
+            PRIMARY KEY (owner, slot, value)
+        );
+        CREATE TABLE bucket_bodies (
+            owner TEXT, edition INTEGER PRIMARY KEY
+        );
+        CREATE TABLE bucket_tokens (
+            owner TEXT PRIMARY KEY, nft_id TEXT, uri_hex TEXT,
+            updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+        );
+    """)
+    c.execute("INSERT INTO bucket_assets VALUES ('rA', 'Head', 'None', 3)")
+    c.execute("INSERT INTO bucket_bodies VALUES ('rA', 42)")
+    c.execute("INSERT INTO bucket_tokens VALUES ('rA', 'NFTABC', 'DEADBEEF', CURRENT_TIMESTAMP)")
+    c.commit()
+
+    # init_economy_schema must: create new closet_* tables first, then copy rows.
+    es.init_economy_schema(c)
+
+    # Rows are accessible via the store helpers.
+    assert es.read_closet_assets(c) == [("rA", "Head", "None", 3)]
+    assert es.read_closet_bodies(c) == [("rA", 42)]
+    assert es.get_closet_token(c, "rA") == ("NFTABC", "DEADBEEF")
+
+    # New columns exist and carry their schema defaults.
+    row = c.execute("SELECT status, offer_id FROM closet_tokens WHERE owner = 'rA'").fetchone()
+    assert row is not None
+    assert row[0] == "pending_accept"
+    assert row[1] is None
+
+
+def test_closet_record_roundtrip_and_status_update():
+    import lfg_core.closet_token as ct
+
+    c = _conn()
+    assert es.get_closet_record(c, "rA") is None
+    es.set_closet_token(c, "rA", "NFTC", "ABCD", status=ct.PENDING_ACCEPT, offer_id="OF1")
+    assert es.get_closet_record(c, "rA") == ("NFTC", "ABCD", ct.PENDING_ACCEPT, "OF1")
+    es.set_closet_status(c, "rA", ct.ACTIVE)
+    assert es.get_closet_record(c, "rA") == ("NFTC", "ABCD", ct.ACTIVE, "OF1")

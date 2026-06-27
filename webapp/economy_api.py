@@ -11,7 +11,17 @@ import time
 from dataclasses import dataclass, field
 from typing import Any
 
-from lfg_core import config, economy_flow, economy_store, nft_index, swap_meta, trait_economy
+from lfg_core import (
+    closet_token as ct,
+)
+from lfg_core import (
+    config,
+    economy_flow,
+    economy_store,
+    nft_index,
+    swap_meta,
+    trait_economy,
+)
 from scripts import _economy_deps
 
 TERMINAL_STATES: set[str] = {economy_flow.DONE, economy_flow.FAILED}
@@ -29,20 +39,45 @@ def _char_dict(r: nft_index.OnchainNft) -> dict[str, Any]:
 
 
 def read_economy_state(conn: sqlite3.Connection, owner: str) -> dict[str, Any]:
-    """The Dressing Room's full view for one owner: live characters + Bucket."""
+    """The Dressing Room's full view for one owner: live characters + Closet."""
     chars = [_char_dict(r) for r in nft_index.owner_live_nfts(conn, owner)]
     assets = [
         {"slot": s, "value": v, "count": c}
-        for (o, s, v, c) in economy_store.read_bucket_assets(conn)
+        for (o, s, v, c) in economy_store.read_closet_assets(conn)
         if o == owner
     ]
-    bodies = [ed for (o, ed) in economy_store.read_bucket_bodies(conn) if o == owner]
+    bodies = [ed for (o, ed) in economy_store.read_closet_bodies(conn) if o == owner]
+    rec = economy_store.get_closet_record(conn, owner)
+    closet_token = {"status": "none", "nft_id": None}
+    if rec is not None:
+        closet_token = {"status": rec[2], "nft_id": rec[0]}
     return {
         "characters": chars,
-        "bucket": {"assets": assets, "bodies": bodies},
+        "closet": {"assets": assets, "bodies": bodies, "token": closet_token},
         "trait_order": swap_meta.TRAIT_ORDER,
         "slots": trait_economy.NON_BODY_SLOTS,
     }
+
+
+async def start_closet(discord_id: str, owner: str) -> dict[str, Any]:
+    """Ensure the owner has a Closet NFToken, minting on first use. Returns a
+    status dict with {status, nft_id, accept} (accept is the Xaman URL or None)."""
+    conn = open_conn()
+    try:
+        deps = _economy_deps.build_economy_deps(conn)
+        ref = await ct.ensure_closet(
+            conn,
+            owner,
+            upload_fn=deps.closet_upload_fn,
+            mint_fn=deps.closet_mint_fn,
+            offer_fn=deps.closet_offer_fn,
+            accept_payload_fn=deps.closet_accept_fn,
+            exists_fn=deps.closet_exists_fn,
+        )
+        accept_url = (ref.accept_payload or {}).get("xumm_url") if ref.accept_payload else None
+        return {"status": ref.status, "nft_id": ref.nft_id, "accept": accept_url}
+    finally:
+        conn.close()
 
 
 def economy_session_dict(kind: str, s: Any) -> dict[str, Any]:
@@ -51,7 +86,6 @@ def economy_session_dict(kind: str, s: Any) -> dict[str, Any]:
     if kind == "equip":
         base["displaced"] = s.displaced_value
     elif kind == "harvest":
-        base["accept"] = (s.bucket_accept or {}).get("xumm_url")
         base["moved_assets"] = s.moved_assets
     elif kind == "assemble":
         r = s.results[0] if s.results else None
@@ -126,7 +160,7 @@ async def start_equip(
 ) -> EconomyWebSession:
     conn = open_conn()
     rec = _load_owned_character(conn, owner, nft_id)
-    assets = {(s, v): c for (o, s, v, c) in economy_store.read_bucket_assets(conn) if o == owner}
+    assets = {(s, v): c for (o, s, v, c) in economy_store.read_closet_assets(conn) if o == owner}
     chk = trait_economy.can_equip(rec, slot, value, assets, mutable=bool(rec.mutable))
     if not chk.ok:
         raise EconomyError(f"cannot equip: {chk.reason}")
@@ -136,6 +170,10 @@ async def start_equip(
 
 async def start_harvest(discord_id: str, owner: str, nft_id: str) -> EconomyWebSession:
     conn = open_conn()
+    closet_rec = economy_store.get_closet_record(conn, owner)
+    if closet_rec is None or closet_rec[2] != ct.ACTIVE:
+        conn.close()
+        raise EconomyError("Create and claim your Closet first.")
     rec = _load_owned_character(conn, owner, nft_id)
     genesis = trait_economy.effective_genesis(
         economy_store.read_genesis(conn), economy_store.read_supply_changes(conn)
@@ -143,6 +181,7 @@ async def start_harvest(discord_id: str, owner: str, nft_id: str) -> EconomyWebS
     burnable = await _economy_deps.fetch_burnable(owner, nft_id)
     chk = trait_economy.can_harvest(rec, genesis, burnable)
     if not chk.ok:
+        conn.close()
         raise EconomyError(f"cannot harvest: {chk.reason}")
     session = economy_flow.HarvestSession(owner=owner, character=rec, burnable=burnable)
     return _schedule("harvest", discord_id, session, conn, economy_flow.run_harvest)
@@ -152,14 +191,18 @@ async def start_assemble(
     discord_id: str, owner: str, edition: int, chosen: dict[str, str]
 ) -> EconomyWebSession:
     conn = open_conn()
+    closet_rec = economy_store.get_closet_record(conn, owner)
+    if closet_rec is None or closet_rec[2] != ct.ACTIVE:
+        conn.close()
+        raise EconomyError("Create and claim your Closet first.")
     genesis = trait_economy.effective_genesis(
         economy_store.read_genesis(conn), economy_store.read_supply_changes(conn)
     )
     body = genesis.edition_bodies.get(edition)
     if body is None:
         raise EconomyError(f"edition {edition} has no known body")
-    assets = {(s, v): c for (o, s, v, c) in economy_store.read_bucket_assets(conn) if o == owner}
-    bodies = {ed for (o, ed) in economy_store.read_bucket_bodies(conn) if o == owner}
+    assets = {(s, v): c for (o, s, v, c) in economy_store.read_closet_assets(conn) if o == owner}
+    bodies = {ed for (o, ed) in economy_store.read_closet_bodies(conn) if o == owner}
     live_editions = {r.nft_number for r in nft_index.live_nfts(conn) if r.nft_number is not None}
     chk = trait_economy.can_assemble(edition, chosen, bodies, assets, live_editions, genesis)
     if not chk.ok:
