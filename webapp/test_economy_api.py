@@ -411,3 +411,54 @@ def test_start_closet_returns_status_dict(monkeypatch):
     assert result["status"] == "pending_accept"
     assert result["nft_id"] == "NFT_NEW"
     assert result["accept"] == "https://xaman/pay"
+
+
+# --- Task 8: trait_tokens in read_economy_state ---
+
+
+def test_read_economy_state_includes_trait_tokens_filtered_to_wallet():
+    """read_economy_state includes a trait_tokens list filtered to the requesting wallet."""
+    conn = _seed_conn()
+    # Seed two trait_tokens rows: one for rOwner, one for rOther
+    economy_store.upsert_trait_token(conn, "TOK1", "rOwner", "Head", "Crown")
+    economy_store.upsert_trait_token(conn, "TOK2", "rOther", "Eyes", "Shades")
+
+    state = economy_api.read_economy_state(conn, "rOwner")
+
+    assert "trait_tokens" in state, "read_economy_state must include trait_tokens key"
+    tokens = state["trait_tokens"]
+    assert len(tokens) == 1, f"expected 1 trait_token for rOwner, got {len(tokens)}"
+    tok = tokens[0]
+    assert tok["nft_id"] == "TOK1"
+    assert tok["slot"] == "Head"
+    assert tok["value"] == "Crown"
+
+
+# --- Task 8: start_extract gated on active Closet ---
+
+
+def test_start_extract_rejects_without_active_closet(monkeypatch):
+    """start_extract raises EconomyError('Create and claim your Closet first.') when no active closet."""
+    conn = _seed_conn()  # no closet_tokens row -> no active closet
+    monkeypatch.setattr(economy_api, "open_conn", lambda: conn)
+
+    async def go():
+        with pytest.raises(economy_api.EconomyError, match="Closet"):
+            await economy_api.start_extract("123", "rOwner", {"slot": "Head", "value": "Crown"})
+
+    asyncio.get_event_loop().run_until_complete(go())
+
+
+# --- Task 8: start_deposit gated on active Closet ---
+
+
+def test_start_deposit_rejects_without_active_closet(monkeypatch):
+    """start_deposit raises EconomyError('Create and claim your Closet first.') when no active closet."""
+    conn = _seed_conn()  # no closet_tokens row -> no active closet
+    monkeypatch.setattr(economy_api, "open_conn", lambda: conn)
+
+    async def go():
+        with pytest.raises(economy_api.EconomyError, match="Closet"):
+            await economy_api.start_deposit("123", "rOwner", {"nft_id": "TOK1"})
+
+    asyncio.get_event_loop().run_until_complete(go())
