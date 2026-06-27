@@ -36,6 +36,21 @@ def test_app_js_uses_tg_initdata_and_openlink():
     assert "tg.openLink" in src
 
 
+def test_app_js_guards_layer_requests_against_incomplete_metadata():
+    # #100: NFTs with empty body / "None" Body value must not issue layer fetches
+    # (those 400 on empty params). Assert the guard helper exists and is used at
+    # every layerSrc() call site, and that the renderRoster fallback no longer
+    # unconditionally builds a layer URL from a possibly-empty body.
+    src = _read("app.js")
+    # The guard helper is defined and exercised.
+    assert "function layerComplete(" in src
+    assert src.count("layerComplete(") >= 4  # definition + 3 call-site guards
+    # renderCanvas degrades to an "indexing" placeholder for empty body.
+    assert "still indexing" in src
+    # The old guaranteed-400 roster fallback (layerSrc(... 'None')) is gone.
+    assert "|| 'None')" not in src
+
+
 def test_telegram_webapp_js_vendored_same_origin():
     # Vendored same-origin (not hotlinked) per the spec.
     assert os.path.exists(os.path.join(CLIENT, "telegram-web-app.js"))
