@@ -170,12 +170,12 @@ async def sync_closet(
     """Recompose the Closet NFToken's metadata from the given contents and
     NFTokenModify its URI in place (the token id is stable). Persists the new
     URI. Raises ClosetError if the closet is unknown or the modify fails."""
-    existing = economy_store.get_closet_token(conn, owner)
-    if existing is None:
+    record = economy_store.get_closet_record(conn, owner)
+    if record is None:
         raise ClosetError(f"no Closet NFToken on record for {owner}")
-    nft_id = existing[0]
+    nft_id, _uri_hex, status, offer_id = record
     url = await upload_fn(build_closet_metadata(owner, assets, bodies))
     tx_hash = await modify_fn(nft_id, owner, url)
     if not tx_hash:
         raise ClosetError("failed to modify Closet NFToken URI")
-    economy_store.set_closet_token(conn, owner, nft_id, _hex(url))
+    economy_store.set_closet_token(conn, owner, nft_id, _hex(url), status=status, offer_id=offer_id)

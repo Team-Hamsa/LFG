@@ -258,3 +258,71 @@ def test_ensure_closet_no_exists_fn_trusts_record():
     assert ref.minted is False
     assert ref.nft_id == "LIVENFT"
     assert f.mints == []
+
+
+# --- Task 3 Fix 1 coverage: sync_closet must preserve status + offer_id ---
+
+
+class _SyncFakes:
+    """Minimal fakes for sync_closet (upload + modify)."""
+
+    def __init__(self) -> None:
+        self.uploads = 0
+        self.modifies: list[tuple[str, str, str]] = []
+
+    async def upload(self, meta: dict) -> str:
+        self.uploads += 1
+        return f"https://cdn/closet/sync{self.uploads}.json"
+
+    async def modify(self, nft_id: str, owner: str, url: str) -> str:
+        self.modifies.append((nft_id, owner, url))
+        return "SYNCHASH"
+
+
+def test_sync_closet_preserves_active_status():
+    """sync_closet must not reset an ACTIVE closet back to pending_accept."""
+    c = _conn()
+    es.set_closet_token(c, "rB", "NFT_ACTIVE", "AABB", status=bt.ACTIVE, offer_id="OF1")
+    f = _SyncFakes()
+    _run(bt.sync_closet(c, "rB", [("Head", "Blue", 1)], [], upload_fn=f.upload, modify_fn=f.modify))
+    rec = es.get_closet_record(c, "rB")
+    assert rec is not None
+    assert rec[2] == bt.ACTIVE, f"expected ACTIVE, got {rec[2]!r}"
+    assert rec[3] == "OF1", f"expected offer_id OF1, got {rec[3]!r}"
+
+
+def test_confirm_accept_returns_none_without_record():
+    """confirm_accept returns 'none' when no closet is recorded for the owner."""
+    c = _conn()
+
+    async def owner_fn(nft_id: str) -> str | None:
+        return "rISSUER"
+
+    result = _run(bt.confirm_accept(c, "rNoone", owner_fn=owner_fn))
+    assert result == "none"
+
+
+def test_ensure_closet_stale_remint_records_pending():
+    """After a stale-remint, the NEW record is recorded as pending_accept."""
+    c, f = _conn(), _F(exists=False)
+    # Seed a stale record
+    _run(
+        bt.ensure_closet(
+            c, "rA", upload_fn=f.up, mint_fn=f.mint, offer_fn=f.offer, accept_payload_fn=f.accept
+        )
+    )
+    # Now remint (exists=False triggers stale path)
+    _run(
+        bt.ensure_closet(
+            c,
+            "rA",
+            upload_fn=f.up,
+            mint_fn=f.mint,
+            offer_fn=f.offer,
+            accept_payload_fn=f.accept,
+            exists_fn=f.exists_fn,
+        )
+    )
+    rec = es.get_closet_record(c, "rA")
+    assert rec is not None
+    assert rec[2] == bt.PENDING_ACCEPT, f"expected PENDING_ACCEPT, got {rec[2]!r}"
