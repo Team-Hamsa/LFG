@@ -741,7 +741,7 @@ function renderCanvas(char) {
   el('dressup-id').textContent = `#${char.edition} · ${char.body} · live`;
 }
 
-function renderRoster() {
+function renderRoster(assembleEnabled = true) {
   const strip = el('roster-strip');
   strip.replaceChildren();
   for (const char of economyState.characters) {
@@ -761,7 +761,6 @@ function renderRoster() {
       img.src = BLANK_IMG;
     }
     img.alt = `#${char.edition}`;
-    tile.appendChild(img);
     tile.onclick = () => selectCharacter(char.nft_id);
     strip.appendChild(tile);
   }
@@ -769,7 +768,12 @@ function renderRoster() {
   add.className = 'roster-tile assemble';
   add.textContent = '＋';
   add.title = 'Assemble new';
-  add.onclick = () => openAssemble();
+  if (assembleEnabled) {
+    add.onclick = () => openAssemble();
+  } else {
+    add.disabled = true;
+    add.title = 'Create your Closet first';
+  }
   strip.appendChild(add);
 }
 
@@ -781,16 +785,92 @@ function selectCharacter(nftId) {
   renderCloset();
 }
 
+// Returns the Closet issuance status from the nested token path.
+// economyState.closet.token.status is the authoritative key (not .closet.status).
+function closetStatus() {
+  return (economyState.closet && economyState.closet.token && economyState.closet.token.status) || 'none';
+}
+
 async function openDressup() {
   showPanel('dressup-panel');
-  el('dressup-harvest-btn').onclick = () => harvestActive();
   status('Loading your wardrobe…');
   try {
     economyState = await api('/api/economy');
     status('');
+
+    const cStatus = closetStatus();
+    const gate = el('closet-gate');
+    const gateMsg = el('closet-gate-msg');
+    const gateBtn = el('closet-gate-btn');
+    const harvestBtn = el('dressup-harvest-btn');
+
+    if (cStatus !== 'active') {
+      // Show gate; hide/disable Harvest
+      gate.hidden = false;
+      harvestBtn.disabled = true;
+      harvestBtn.hidden = true;
+
+      if (cStatus === 'none') {
+        gateMsg.textContent = 'You need a Closet to store your traits.';
+        gateBtn.textContent = 'Create your Closet';
+        gateBtn.onclick = async () => {
+          gateBtn.disabled = true;
+          status('Creating your Closet…');
+          try {
+            const r = await api('/api/closet', { method: 'POST' });
+            if (r.accept) {
+              showFlow({ title: '👜 Create your Closet',
+                text: 'Scan to accept your Closet in Xaman.',
+                qrData: r.accept, link: r.accept, done: true });
+            }
+            economyState = await api('/api/economy');
+            openDressup();
+          } catch (e) {
+            showError(e.message);
+            gateBtn.disabled = false;
+            status('');
+          }
+        };
+      } else {
+        // pending_accept
+        gateMsg.textContent = 'Your Closet is waiting — accept it in Xaman to continue.';
+        gateBtn.textContent = 'Finish claiming your Closet';
+        gateBtn.onclick = async () => {
+          gateBtn.disabled = true;
+          status('Fetching your Closet QR…');
+          try {
+            const r = await api('/api/closet', { method: 'POST' });
+            if (r.accept) {
+              showFlow({ title: '👜 Finish claiming your Closet',
+                text: 'Scan to accept your Closet in Xaman.',
+                qrData: r.accept, link: r.accept, done: true });
+            }
+            economyState = await api('/api/economy');
+            openDressup();
+          } catch (e) {
+            showError(e.message);
+            gateBtn.disabled = false;
+            status('');
+          }
+        };
+      }
+
+      // Render roster (no-op visually) but don't wire assemble tile
+      renderRoster(/* assembleEnabled= */ false);
+      el('dressup-canvas').replaceChildren();
+      return;
+    }
+
+    // Closet active — full Dressing Room
+    gate.hidden = true;
+    harvestBtn.disabled = false;
+    harvestBtn.hidden = false;
+    harvestBtn.onclick = () => harvestActive();
+
     activeNftId = economyState.characters[0] ? economyState.characters[0].nft_id : null;
+    renderRoster(/* assembleEnabled= */ true);
     if (activeNftId) selectCharacter(activeNftId);
-    else { renderRoster(); el('dressup-canvas').replaceChildren(); }
+    else { el('dressup-canvas').replaceChildren(); renderCloset(); }
   } catch (e) {
     showError(e.message);
   }
@@ -917,12 +997,6 @@ async function harvestActive() {
     const final = await pollEconomyOp('harvest', res);
     status('');
     if (final.state === 'failed') throw new Error(final.error || 'harvest failed');
-    if (final.accept) {
-      // First-ever Closet: user must accept the soulbound token in Xaman.
-      showFlow({ title: '👜 Claim your Closet',
-        text: 'Scan to accept your trait Closet in Xaman.',
-        qrData: final.accept, link: final.accept, done: true });
-    }
     economyState = await api('/api/economy');
     activeNftId = economyState.characters[0] ? economyState.characters[0].nft_id : null;
     showPanel('dressup-panel');

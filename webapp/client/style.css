@@ -662,6 +662,17 @@ button.back:hover { color: var(--text); border: none; }
   .flow-body .flow-visual { flex-shrink: 0; }
 }
 
+/* --- Closet gate (create / pending-accept prompt) --- */
+.closet-gate {
+  text-align: center;
+  padding: 24px 0 16px;
+}
+.closet-gate-msg {
+  color: var(--muted);
+  font-size: .95rem;
+  margin: 0 0 14px;
+}
+
 /* --- Dressing Room --- */
 .dressup { display: flex; gap: 18px; flex-wrap: wrap; }
 .dressup-stage { flex: 1 1 240px; text-align: center; }
