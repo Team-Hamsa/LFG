@@ -719,3 +719,38 @@ button.back:hover { color: var(--text); border: none; }
   display: grid; place-items: center; color: var(--muted, #888); font-weight: 700;
 }
 .dressup-canvas.incomplete::after { content: '…'; font-size: 2rem; }
+
+/* Extract button on each closet tile */
+.closet-item .extract {
+  position: absolute; top: 2px; right: 2px;
+  width: 18px; height: 18px; padding: 0;
+  font-size: .65rem; font-weight: 700; line-height: 1;
+  background: var(--surface); color: var(--text);
+  border: 1px solid var(--line); border-radius: 4px;
+  cursor: pointer; opacity: .75;
+  z-index: 1;
+}
+.closet-item .extract:hover { opacity: 1; background: var(--blue); }
+.closet-item .extract:disabled { opacity: .35; cursor: not-allowed; }
+
+/* Tradeable traits strip */
+.trait-strip-section { margin-top: 20px; }
+.trait-strip-heading { margin: 0 0 8px; font-size: .85rem; color: var(--muted); text-transform: uppercase; letter-spacing: .04em; }
+.trait-strip {
+  display: flex; flex-wrap: wrap; gap: 8px;
+}
+.trait-strip-empty { margin: 0; font-size: .85rem; color: var(--muted); font-style: italic; }
+.trait-chip {
+  display: flex; align-items: center; gap: 6px;
+  background: var(--surface-2); border: 1px solid var(--line);
+  border-radius: 8px; padding: 4px 8px 4px 4px;
+}
+.trait-chip img { width: 36px; height: 36px; object-fit: contain; border-radius: 5px; background: var(--surface); }
+.trait-chip-label { font-size: .75rem; color: var(--text); flex: 1; }
+.trait-chip .deposit {
+  padding: 3px 8px; font-size: .72rem; font-weight: 600;
+  background: var(--surface); color: var(--blue);
+  border: 1px solid var(--blue); border-radius: 5px; cursor: pointer;
+}
+.trait-chip .deposit:hover { background: var(--blue); color: var(--ink); }
+.trait-chip .deposit:disabled { opacity: .4; cursor: not-allowed; }
