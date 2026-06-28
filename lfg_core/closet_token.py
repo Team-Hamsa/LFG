@@ -110,15 +110,30 @@ async def ensure_closet(
     empty, offered to the owner, and recorded `pending_accept` with its offer id.
     A recorded but on-ledger-absent Closet (verified via `exists_fn`) is treated
     as stale and re-minted. While pending, this is idempotent and regenerates the
-    Xaman accept payload from the stored offer id so the UI can re-show it."""
+    Xaman accept payload (from the stored offer id, or a fresh offer when that id
+    is missing/unusable — offer ids are not on-chain) so the UI can re-show it."""
     existing = economy_store.get_closet_record(conn, owner)
     if existing is not None:
         nft_id, uri_hex, status, offer_id = existing
         stale = exists_fn is not None and not await exists_fn(nft_id)
         if not stale:
             payload = None
-            if status == PENDING_ACCEPT and offer_id:
-                payload = await accept_payload_fn(offer_id)
+            if status == PENDING_ACCEPT:
+                # Re-show the Xaman accept for a pending Closet. The offer id is NOT
+                # on-chain, so a listener-rebuilt record can have lost it (offer_id
+                # is None), and a stored offer can expire. If we can't regenerate a
+                # payload from the recorded offer, create a FRESH offer for the
+                # existing (still issuer-held) token and persist the new id so the
+                # QR works again.
+                if offer_id:
+                    payload = await accept_payload_fn(offer_id)
+                if payload is None:
+                    new_offer_id = await offer_fn(nft_id, owner)
+                    if new_offer_id:
+                        payload = await accept_payload_fn(new_offer_id)
+                        economy_store.set_closet_token(
+                            conn, owner, nft_id, uri_hex, status=status, offer_id=new_offer_id
+                        )
             return ClosetRef(nft_id=nft_id, uri_hex=uri_hex, status=status, accept_payload=payload)
 
     url = await upload_fn(build_closet_metadata(owner, [], []))
