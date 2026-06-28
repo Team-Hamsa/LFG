@@ -342,7 +342,11 @@ dedicated per-`nft_id` index instead.
 - **Consumer:** `scripts/audit_layer_coverage.py` reads this index by default
   (instant, offline, complete); pass `--live` to bypass it and scrape the chain.
 - clio endpoints: mainnet `wss://s2-clio.ripple.com`, testnet
-  `wss://clio.altnet.rippletest.net:51233`.
+  `wss://clio.altnet.rippletest.net:51233`. These are the per-network defaults
+  of `config.CLIO_WS_URL` (env `XRPL_CLIO_WS_URL`). `nft_info` / `nft_exists`
+  are **clio-only** methods — they default to `CLIO_WS_URL`, NOT `WS_URL` (the
+  plain rippled WS answers them with `unknownCmd` → `None`, which the
+  fail-closed Closet on-ledger verify gate would read as "not owned").
 
 ### Dress-up trait economy — Phase 2 (testnet, on-ledger ops)
 

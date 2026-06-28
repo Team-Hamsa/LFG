@@ -191,13 +191,20 @@ def _parse_nft_info(result: dict[str, Any]) -> dict[str, Any]:
     }
 
 
+def _clio_endpoint(clio: str | None) -> str:
+    """Resolve the clio endpoint for clio-only methods (nft_info / nft_exists):
+    the explicit arg when given, else config.CLIO_WS_URL. Never WS_URL — the
+    plain rippled WS cannot answer nft_info (returns `unknownCmd`)."""
+    return clio or config.CLIO_WS_URL
+
+
 async def nft_info(nft_id: str, clio: str | None = None) -> dict[str, Any] | None:
     """Current owner/flags/uri/burn state for a single NFToken via clio's
     `nft_info` (needed to resolve the owner after a transfer — the XLS-46 path).
     Returns None on error."""
     from xrpl.models.requests import Request
 
-    endpoint = clio or config.WS_URL
+    endpoint = _clio_endpoint(clio)
     try:
         async with AsyncWebsocketClient(endpoint) as websocket:
             response = await websocket.request(
@@ -222,7 +229,7 @@ async def nft_exists(nft_id: str, clio: str | None = None, attempts: int = 3) ->
     transient blip never re-mints and orphans a live token."""
     from xrpl.models.requests import Request
 
-    endpoint = clio or config.WS_URL
+    endpoint = _clio_endpoint(clio)
     for attempt in range(attempts):
         try:
             async with AsyncWebsocketClient(endpoint) as websocket:
