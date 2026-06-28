@@ -48,16 +48,23 @@ def _seed_address() -> str:
 if IS_TESTNET:
     _default_rpc = "https://s.altnet.rippletest.net:51234/"
     _default_ws = "wss://s.altnet.rippletest.net:51233"
+    _default_clio = "wss://clio.altnet.rippletest.net:51233"
     _default_swap_issuer = _seed_address()
     _default_brix_issuer = _default_swap_issuer
 else:
     _default_rpc = "https://s1.ripple.com:51234/"
     _default_ws = "wss://xrplcluster.com"
+    _default_clio = "wss://s2-clio.ripple.com"
     _default_swap_issuer = "rLfgoMintj3KBcs4s2XKtquvDwEte2kYfJ"
     _default_brix_issuer = "rLfgoBriX5ZaMP32mtc7RUZJcjnisKh2Px"
 
 JSON_RPC_URL = os.getenv("XRPL_JSON_RPC_URL", _default_rpc)
 WS_URL = os.getenv("XRPL_WS_URL", _default_ws)
+# clio (XLS-46) endpoint. nft_info / nft_exists are clio-only methods — the
+# plain rippled WS (WS_URL) answers them with `unknownCmd` -> None, which the
+# fail-closed Closet on-ledger verify gate reads as "not owned" and refuses the
+# op. Default to a clio host so those lookups work without per-deploy env tuning.
+CLIO_WS_URL = os.getenv("XRPL_CLIO_WS_URL", _default_clio)
 
 # NFT settings
 NFT_TAXON = int(os.getenv("NFT_TAXON", "0"))
