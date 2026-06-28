@@ -162,6 +162,32 @@ def test_ensure_closet_pending_without_offer_id_creates_fresh_offer():
     assert es.get_closet_record(c, "rA")[3] == "OF1"
 
 
+def test_ensure_closet_pending_raises_when_fresh_offer_fails():
+    """If the fresh-offer recovery itself fails (offer_fn returns falsey), surface
+    it as an error instead of silently returning accept=None."""
+
+    class _FNoOffer(_F):
+        async def offer(self, nft_id, owner):
+            return None  # offer creation fails
+
+    c, f = _conn(), _FNoOffer()
+    es.set_closet_token(c, "rA", "NFTC", "AABB", status=bt.PENDING_ACCEPT, offer_id=None)
+    try:
+        _run(
+            bt.ensure_closet(
+                c,
+                "rA",
+                upload_fn=f.up,
+                mint_fn=f.mint,
+                offer_fn=f.offer,
+                accept_payload_fn=f.accept,
+            )
+        )
+        raise AssertionError("expected ClosetError")
+    except bt.ClosetError:
+        pass
+
+
 def test_ensure_closet_stale_record_remints():
     c, f = _conn(), _F(exists=False)
     _run(

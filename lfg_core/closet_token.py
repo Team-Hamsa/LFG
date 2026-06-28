@@ -129,11 +129,17 @@ async def ensure_closet(
                     payload = await accept_payload_fn(offer_id)
                 if payload is None:
                     new_offer_id = await offer_fn(nft_id, owner)
-                    if new_offer_id:
-                        payload = await accept_payload_fn(new_offer_id)
-                        economy_store.set_closet_token(
-                            conn, owner, nft_id, uri_hex, status=status, offer_id=new_offer_id
-                        )
+                    # Mirror the first-time path: a falsey id is a real offer
+                    # failure — raise so the caller surfaces it rather than
+                    # silently returning accept=None (the bug this path fixes).
+                    # (A truthy self-offer-skipped sentinel passes through and
+                    # legitimately yields no payload — the issuer needs no accept.)
+                    if not new_offer_id:
+                        raise ClosetError("failed to create a fresh Closet offer to owner")
+                    payload = await accept_payload_fn(new_offer_id)
+                    economy_store.set_closet_token(
+                        conn, owner, nft_id, uri_hex, status=status, offer_id=new_offer_id
+                    )
             return ClosetRef(nft_id=nft_id, uri_hex=uri_hex, status=status, accept_payload=payload)
 
     url = await upload_fn(build_closet_metadata(owner, [], []))
