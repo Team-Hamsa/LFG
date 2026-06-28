@@ -143,6 +143,23 @@ def test_ensure_closet_pending_is_idempotent_and_reshows_accept():
     assert ref.status == bt.PENDING_ACCEPT and ref.accept_payload  # re-showed accept
 
 
+def test_ensure_closet_pending_with_offer_id_reuses_stored_offer():
+    """When a pending Closet still has its offer_id, re-show must regenerate the
+    accept payload FROM the stored offer and NOT create a fresh offer."""
+    c, f = _conn(), _F()
+    # Seed a pending closet that already has a usable offer id (the happy path).
+    es.set_closet_token(c, "rA", "NFTC", "AABB", status=bt.PENDING_ACCEPT, offer_id="OF1")
+    ref = _run(
+        bt.ensure_closet(
+            c, "rA", upload_fn=f.up, mint_fn=f.mint, offer_fn=f.offer, accept_payload_fn=f.accept
+        )
+    )
+    assert f.minted == 0  # did NOT re-mint
+    assert f.offers == 0  # did NOT create a fresh offer — reused the stored one
+    assert ref.status == bt.PENDING_ACCEPT and ref.accept_payload  # re-showed accept
+    assert es.get_closet_record(c, "rA")[3] == "OF1"  # stored offer id unchanged
+
+
 def test_ensure_closet_pending_without_offer_id_creates_fresh_offer():
     """A listener-rebuilt pending Closet loses its offer_id (offer ids are not
     on-chain). ensure_closet must self-heal by creating a fresh offer for the
