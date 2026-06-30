@@ -32,16 +32,27 @@ def _float_tops(layers: list[tuple[str, str, str]]) -> list[tuple[str, str, str]
 
 
 async def missing_layers(attributes: list[dict[str, Any]], body: str, store: Any) -> list[str]:
-    """Trait files the store can't provide — checked BEFORE any burn."""
+    """Trait + ape-structural files the store can't provide — checked BEFORE
+    any burn."""
     canonical = _canonical(attributes)
     resolved = await asyncio.gather(
         *(store.resolve(body, a["trait_type"], a["value"]) for a in canonical)
     )
-    return [
+    missing = [
         f"{body}/{a['trait_type']}/{a['value']}"
         for a, path in zip(canonical, resolved, strict=False)
         if not path
     ]
+    if body == "ape":
+        if await store.resolve_asset(f"{body}/{ape_face.NOSE_ASSET}") is None:
+            missing.append(f"{body}/{ape_face.NOSE_ASSET}")
+        body_value = swap_meta.get_attr(attributes, "Body") or ""
+        if (
+            body_value in ape_face.MASKED_BODY_VALUES
+            and await store.resolve_asset(f"{body}/{ape_face.MASK_ASSET}") is None
+        ):
+            missing.append(f"{body}/{ape_face.MASK_ASSET}")
+    return missing
 
 
 async def compose_nft(

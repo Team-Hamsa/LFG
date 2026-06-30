@@ -83,3 +83,36 @@ def test_compose_nft_non_ape_has_no_nose(tmp_path, monkeypatch):
     _run(swap_compose.compose_nft(attrs, "male", store, "out", out_dir=str(tmp_path / "gen")))
     names = [os.path.basename(f) for f in captured["files"]]
     assert "Nose.png" not in names
+
+
+def test_missing_layers_flags_ape_assets(tmp_path):
+    base = tmp_path / "layers" / "ape"
+    _png(str(base / "Body" / "Ape Melting.png"))
+    _png(str(base / "Eyes" / "Creepy.png"))
+    # No Nose.png and no Ape Mask.png present.
+    store = layer_store.LocalLayerStore(str(tmp_path / "layers"))
+
+    attrs = _attrs(Body="Ape Melting", Eyes="Creepy")
+    missing = _run(swap_compose.missing_layers(attrs, "ape", store))
+    assert "ape/Nose.png" in missing
+    assert "ape/Ape Mask.png" in missing
+
+
+def test_missing_layers_non_melt_ape_needs_nose_not_mask(tmp_path):
+    base = tmp_path / "layers" / "ape"
+    _png(str(base / "Body" / "Ape Gold.png"))
+    _png(str(base / "Eyes" / "Creepy.png"))
+    _png(str(base / "Nose.png"))
+    store = layer_store.LocalLayerStore(str(tmp_path / "layers"))
+
+    attrs = _attrs(Body="Ape Gold", Eyes="Creepy")
+    missing = _run(swap_compose.missing_layers(attrs, "ape", store))
+    assert missing == []  # nose present; mask not required for Ape Gold
+
+
+def test_missing_layers_non_ape_ignores_ape_assets(tmp_path):
+    base = tmp_path / "layers" / "male"
+    _png(str(base / "Body" / "Straight Dark.png"))
+    store = layer_store.LocalLayerStore(str(tmp_path / "layers"))
+    attrs = _attrs(Body="Straight Dark")
+    assert _run(swap_compose.missing_layers(attrs, "male", store)) == []
