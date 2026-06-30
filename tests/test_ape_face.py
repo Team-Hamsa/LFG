@@ -8,7 +8,11 @@ from lfg_core import ape_face, layer_store
 
 
 def _run(coro):
-    return asyncio.get_event_loop().run_until_complete(coro)
+    loop = asyncio.new_event_loop()
+    try:
+        return loop.run_until_complete(coro)
+    finally:
+        loop.close()
 
 
 def test_should_mask_normal_face_feature_on_melt_body():
@@ -129,6 +133,10 @@ def test_inject_and_mask_clips_face_features_on_melt_body(tmp_path):
     res = Image.open(eyes_path).convert("RGBA")
     assert res.getpixel((0, 0))[3] == 255  # left kept
     assert res.getpixel((3, 0))[3] == 0  # right cleared
+    # Melt/xray apes are still apes: the nose must also be injected, above Eyes.
+    types = [t for t, _v, _p in out]
+    assert "Nose" in types
+    assert types.index("Eyes") < types.index("Nose")
 
 
 def test_inject_and_mask_nose_fallback_when_no_eyes(tmp_path):
