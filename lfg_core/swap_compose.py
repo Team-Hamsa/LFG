@@ -11,15 +11,9 @@ from typing import Any
 
 import ffmpeg
 
+from lfg_core import ape_face
+from lfg_core.ape_face import TOP_TRAITS
 from lfg_core.swap_meta import TRAIT_ORDER
-
-# Traits that must render on top of everything else (e.g. laser eyes).
-TOP_TRAITS = [
-    {"trait_type": "Eyes", "value": "Wavy"},
-    {"trait_type": "Mouth", "value": "Rainbow Puke"},
-    {"trait_type": "Eyes", "value": "Laser Eyes"},
-    {"trait_type": "Eyes", "value": "Laser"},
-]
 
 
 def _ordered_traits(attributes: list[dict[str, Any]]) -> list[dict[str, Any]]:
