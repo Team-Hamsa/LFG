@@ -1,10 +1,26 @@
 # tests/test_ape_face.py
-import asyncio
+# Env-guard preamble: importing lfg_core.config freezes its constants (e.g.
+# IMG_PROXY_ALLOWED_BASES, LAYER_SOURCE) at import time; set the same defaults
+# test_smoke.py uses so collection order can't strand them. (Copy the block
+# verbatim from tests/test_server_identity_wiring.py — same keys/values.)
+import os
 
-import pytest
-from PIL import Image
+os.environ.setdefault("XUMM_API_KEY", "test")
+os.environ.setdefault("XUMM_API_SECRET", "test")
+os.environ.setdefault("SEED", "sEdTM1uX8pu2do5XvTnutH6HsouMaM2")
+os.environ.setdefault("TOKEN_ISSUER_ADDRESS", "rrrrrrrrrrrrrrrrrrrrrhoLvTp")
+os.environ.setdefault("TOKEN_CURRENCY_HEX", "4C46474F00000000000000000000000000000000")
+os.environ.setdefault("BUNNY_CDN_ACCESS_KEY", "test")
+os.environ.setdefault("BUNNY_CDN_STORAGE_ZONE", "test")
+os.environ.setdefault("LAYER_SOURCE", "local")
+os.environ.setdefault("BUNNY_PULL_ZONE", "nft.pullzone.example")
 
-from lfg_core import ape_face, layer_store
+import asyncio  # noqa: E402
+
+import pytest  # noqa: E402
+from PIL import Image  # noqa: E402
+
+from lfg_core import ape_face, layer_store  # noqa: E402
 
 
 def _run(coro):
