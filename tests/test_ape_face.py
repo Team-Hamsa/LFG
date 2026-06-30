@@ -1,8 +1,14 @@
 # tests/test_ape_face.py
+import asyncio
+
 import pytest
 from PIL import Image
 
-from lfg_core import ape_face
+from lfg_core import ape_face, layer_store
+
+
+def _run(coro):
+    return asyncio.get_event_loop().run_until_complete(coro)
 
 
 def test_should_mask_normal_face_feature_on_melt_body():
@@ -73,3 +79,61 @@ def test_apply_alpha_mask_rejects_non_png(tmp_path):
         ape_face.apply_alpha_mask(
             str(tmp_path / "x.mp4"), str(tmp_path / "m.png"), str(tmp_path / "gen")
         )
+
+
+def _ape_store_with_assets(tmp_path):
+    ape = tmp_path / "layers" / "ape"
+    ape.mkdir(parents=True)
+    Image.new("RGBA", (4, 4), (0, 0, 0, 0)).save(ape / "Nose.png")
+    _mask_right_opaque(ape / "Ape Mask.png")
+    return layer_store.LocalLayerStore(str(tmp_path / "layers")), ape
+
+
+def test_inject_and_mask_non_ape_unchanged(tmp_path):
+    store, _ = _ape_store_with_assets(tmp_path)
+    layers = [("Body", "Straight Dark", "/x/body.png"), ("Eyes", "Standard", "/x/eyes.png")]
+    out = _run(
+        ape_face.inject_and_mask(layers, "male", "Straight Dark", store, str(tmp_path / "gen"))
+    )
+    assert out == layers
+
+
+def test_inject_and_mask_inserts_nose_above_eyes(tmp_path):
+    store, _ = _ape_store_with_assets(tmp_path)
+    layers = [
+        ("Body", "Ape Gold", "/x/body.png"),
+        ("Eyes", "Standard", "/x/eyes.png"),
+        ("Head", "Cap", "/x/head.png"),
+    ]
+    out = _run(ape_face.inject_and_mask(layers, "ape", "Ape Gold", store, str(tmp_path / "gen")))
+    types = [t for t, _v, _p in out]
+    assert types == ["Body", "Eyes", "Nose", "Head"]
+    # Ape Gold is not a melt body -> nose injected, no masking.
+    assert all(not p.endswith(".masked.png") for _t, _v, p in out)
+
+
+def test_inject_and_mask_clips_face_features_on_melt_body(tmp_path):
+    store, ape = _ape_store_with_assets(tmp_path)
+    eyes = ape / "Eyes"
+    eyes.mkdir()
+    Image.new("RGBA", (4, 4), (0, 255, 0, 255)).save(eyes / "Creepy.png")
+    layers = [
+        ("Body", "Ape Melting XRay", "/x/body.png"),
+        ("Eyes", "Creepy", str(eyes / "Creepy.png")),
+    ]
+    out = _run(
+        ape_face.inject_and_mask(layers, "ape", "Ape Melting XRay", store, str(tmp_path / "gen"))
+    )
+    eyes_path = next(p for t, _v, p in out if t == "Eyes")
+    assert eyes_path.endswith(".masked.png")
+    res = Image.open(eyes_path).convert("RGBA")
+    assert res.getpixel((0, 0))[3] == 255  # left kept
+    assert res.getpixel((3, 0))[3] == 0  # right cleared
+
+
+def test_inject_and_mask_nose_fallback_when_no_eyes(tmp_path):
+    store, _ = _ape_store_with_assets(tmp_path)
+    layers = [("Eyebrows", "Flat", "/x/brow.png"), ("Head", "Cap", "/x/head.png")]
+    out = _run(ape_face.inject_and_mask(layers, "ape", "Ape Gold", store, str(tmp_path / "gen")))
+    types = [t for t, _v, _p in out]
+    assert types == ["Eyebrows", "Nose", "Head"]  # nose at canonical Eyes slot

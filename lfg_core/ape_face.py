@@ -15,8 +15,11 @@ never swappable.
 from __future__ import annotations
 
 import os
+from typing import Any
 
 from PIL import Image, ImageChops
+
+from lfg_core import swap_meta
 
 # Effect traits that render on top of everything else (e.g. laser eyes).
 # Lives here (not swap_compose) so the masking rule can reuse it without a
@@ -72,3 +75,49 @@ def apply_alpha_mask(layer_path: str, mask_path: str, out_dir: str) -> str:
     out_path = os.path.join(out_dir, f"{stem}.masked.png")
     layer.save(out_path)
     return out_path
+
+
+def _nose_index(layers: list[tuple[str, str, str]]) -> int:
+    """Index at which to insert the nose: directly after the Eyes layer, else
+    the canonical Eyes slot (before the first layer that sorts after Eyes)."""
+    for i, (trait_type, _v, _p) in enumerate(layers):
+        if trait_type == "Eyes":
+            return i + 1
+    eyes_rank = swap_meta.TRAIT_ORDER.index("Eyes")
+    for i, (trait_type, _v, _p) in enumerate(layers):
+        if (
+            trait_type in swap_meta.TRAIT_ORDER
+            and swap_meta.TRAIT_ORDER.index(trait_type) > eyes_rank
+        ):
+            return i
+    return len(layers)
+
+
+async def inject_and_mask(
+    layers: list[tuple[str, str, str]],
+    body: str,
+    body_value: str,
+    store: Any,
+    out_dir: str,
+) -> list[tuple[str, str, str]]:
+    """Apply ape compose rules to a canonical-ordered (trait_type, value, path)
+    list: clip masked face features (melt/xray apes) and inject the fixed nose
+    above Eyes (all apes). Non-ape bodies are returned unchanged."""
+    if body != "ape":
+        return layers
+
+    result = list(layers)
+    if body_value in MASKED_BODY_VALUES:
+        mask_path = await store.resolve_asset(f"{body}/{MASK_ASSET}")
+        if mask_path is None:
+            raise FileNotFoundError(f"{body}/{MASK_ASSET}")
+        result = [
+            (t, v, apply_alpha_mask(p, mask_path, out_dir) if should_mask(t, v, body_value) else p)
+            for (t, v, p) in result
+        ]
+
+    nose_path = await store.resolve_asset(f"{body}/{NOSE_ASSET}")
+    if nose_path is None:
+        raise FileNotFoundError(f"{body}/{NOSE_ASSET}")
+    result.insert(_nose_index(result), ("Nose", "Nose", nose_path))
+    return result
