@@ -14,6 +14,10 @@ never swappable.
 
 from __future__ import annotations
 
+import os
+
+from PIL import Image, ImageChops
+
 # Effect traits that render on top of everything else (e.g. laser eyes).
 # Lives here (not swap_compose) so the masking rule can reuse it without a
 # circular import; swap_compose imports TOP_TRAITS from this module.
@@ -48,3 +52,23 @@ def should_mask(trait_type: str, value: str, body_value: str) -> bool:
     if pair in NO_MASK_VALUES:
         return False
     return True
+
+
+def apply_alpha_mask(layer_path: str, mask_path: str, out_dir: str) -> str:
+    """Write a temp PNG of ``layer`` with its alpha cleared where ``mask`` is
+    opaque (subtractive: out_alpha = layer_alpha * (255 - mask_alpha) / 255).
+    Returns the temp path. Raises ValueError if ``layer_path`` is not a PNG."""
+    if not layer_path.lower().endswith(".png"):
+        raise ValueError(f"cannot mask non-PNG slot: {layer_path}")
+    layer = Image.open(layer_path).convert("RGBA")
+    mask = Image.open(mask_path).convert("RGBA")
+    if mask.size != layer.size:
+        mask = mask.resize(layer.size)
+    inv = ImageChops.invert(mask.getchannel("A"))
+    new_alpha = ImageChops.multiply(layer.getchannel("A"), inv)
+    layer.putalpha(new_alpha)
+    os.makedirs(out_dir, exist_ok=True)
+    stem = os.path.splitext(os.path.basename(layer_path))[0]
+    out_path = os.path.join(out_dir, f"{stem}.masked.png")
+    layer.save(out_path)
+    return out_path
