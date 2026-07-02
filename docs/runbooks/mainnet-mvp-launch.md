@@ -46,10 +46,15 @@ would sign for the wrong account.
 
 **Status:** PR #112 (awaiting CodeRabbit review/merge).
 
-## Blocker 2 — BunnyCDN out of credit (OPS)
+## Blocker 2 — BunnyCDN out of credit (OPS) — ✅ RESOLVED 2026-07-02
 
-`LAYER_SOURCE=local` only covers trait-layer **reads**. Still hard-dependent on
-Bunny:
+Credit restored and verified: storage-zone PUT (201) + pull-zone GET (200)
+both succeed. Architecture decision confirmed: keep `LAYER_SOURCE=local`
+permanently — trait-layer reads stay local (latency + Bunny usage), Bunny is
+used only for the final NFT image/metadata uploads and legacy metadata reads.
+
+Original problem, for reference — `LAYER_SOURCE=local` only covers trait-layer
+**reads**. Still hard-dependent on Bunny:
 
 - **Mint uploads** — image + metadata PUT via `cdn.upload_to_bunny`
   (`lfg_core/cdn.py:9`, raises on non-2xx; called from `mint_flow.py:253/266`).
@@ -78,7 +83,16 @@ unconditionally at swap start and raises for any wallet holding < 20 BRIX →
    used when the AMM quote fails, or launch swaps BRIX-holders-only.
 
 The swapper has **no free mode** (the free-ops carve-out is Phase 2 economy
-only). Decision needed before launch.
+only).
+
+**Decision 2026-07-02: option 1 — a small mainnet BRIX/XRP pool will be
+created** (user-side capital op). Notes for that op: `AMMCreate` must be signed
+by an account holding both XRP and BRIX (not the BRIX issuer itself — an
+issuer cannot hold its own IOU); AMMCreate burns the special AMMCreate fee
+(one incremental owner reserve, currently 0.2 XRP). After creation, verify
+with `amm_info` for XRP/BRIX (`rLfgoBriX5ZaMP32mtc7RUZJcjnisKh2Px`) on
+`s1.ripple.com`, then confirm `get_amm_xrp_cost` returns a quote. Until the
+pool exists, swaps work only for wallets holding ≥ 20 BRIX.
 
 ## Blocker 4 — Closet has no feature flag (CODE)
 
@@ -123,9 +137,12 @@ Defaults in `lfg_core/config.py:48–60` (RPC/WS/clio URLs, issuer addresses)
 flip correctly on `XRPL_NETWORK=mainnet` — clio stays `wss://s2-clio.ripple.com`
 (nft_info/nft_exists are clio-only; do not point at a plain rippled WS).
 
-## Blocker 6 — Issuer XRP reserves (OPS)
+## Blocker 6 — Issuer XRP reserves (OPS) — ✅ RESOLVED 2026-07-02
 
-Issuer holds ~11.4 XRP. Each pending `NFTokenCreateOffer` and each NFTokenPage
+Issuer topped up with 100 XRP. Keep watching for `tecINSUFFICIENT_RESERVE`
+during mint rushes (each pending offer locks 0.2 XRP owner reserve).
+
+Original problem, for reference — issuer held ~11.4 XRP. Each pending `NFTokenCreateOffer` and each NFTokenPage
 locks 0.2 XRP owner reserve (5 offers already outstanding from the census
 reconciliation). ~11 XRP ≈ ~50 concurrent objects — fine for a soft launch, a
 mint rush of unaccepted offers hits `tecINSUFFICIENT_RESERVE`. **Top up the
