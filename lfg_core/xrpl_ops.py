@@ -307,7 +307,6 @@ async def buy_and_burn(
     the bot wallet's existing token balance is spent. Returns the tx hash or
     None (callers treat the burn as best-effort)."""
     try:
-        wallet = Wallet.from_seed(config.SEED)
         if config.SIGNING_ACCOUNT == issuer:
             # The bot wallet IS the issuer (testnet, where the SEED account
             # issues the IOU). Paying an IOU to its own issuer redeems/destroys
@@ -319,6 +318,7 @@ async def buy_and_burn(
                 f"receipt, nothing to burn (no-op)."
             )
             return "self-issuer-noop"
+        wallet = Wallet.from_seed(config.SEED)
         client = JsonRpcClient(config.JSON_RPC_URL)
         kwargs: dict[str, Any] = {
             "account": config.SIGNING_ACCOUNT,

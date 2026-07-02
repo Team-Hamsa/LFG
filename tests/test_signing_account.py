@@ -60,6 +60,34 @@ def _patch(monkeypatch, captured):
     monkeypatch.setattr(config, "SIGNING_ACCOUNT", ISSUER)
 
 
+def test_config_rejects_invalid_signing_account(monkeypatch):
+    # A typo'd SIGNING_ACCOUNT must fail fast at config load, not surface as an
+    # opaque temMALFORMED/actNotFound on every tx.
+    import importlib
+
+    import pytest
+
+    monkeypatch.setenv("SIGNING_ACCOUNT", "rNotAValidAddress!!!")
+    try:
+        with pytest.raises(ValueError, match="SIGNING_ACCOUNT"):
+            importlib.reload(config)
+    finally:
+        monkeypatch.undo()
+        importlib.reload(config)
+
+
+def test_config_strips_signing_account_whitespace(monkeypatch):
+    import importlib
+
+    monkeypatch.setenv("SIGNING_ACCOUNT", f"  {ISSUER}  ")
+    try:
+        cfg = importlib.reload(config)
+        assert cfg.SIGNING_ACCOUNT == ISSUER
+    finally:
+        monkeypatch.undo()
+        importlib.reload(config)
+
+
 def test_config_default_is_seed_address():
     # With no SIGNING_ACCOUNT env override, behavior is unchanged: the account
     # is the one derived from SEED.
