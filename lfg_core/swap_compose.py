@@ -11,42 +11,48 @@ from typing import Any
 
 import ffmpeg
 
+from lfg_core import ape_face, swap_meta
+from lfg_core.ape_face import TOP_TRAITS
 from lfg_core.swap_meta import TRAIT_ORDER
 
-# Traits that must render on top of everything else (e.g. laser eyes).
-TOP_TRAITS = [
-    {"trait_type": "Eyes", "value": "Wavy"},
-    {"trait_type": "Mouth", "value": "Rainbow Puke"},
-    {"trait_type": "Eyes", "value": "Laser Eyes"},
-    {"trait_type": "Eyes", "value": "Laser"},
-]
 
-
-def _ordered_traits(attributes: list[dict[str, Any]]) -> list[dict[str, Any]]:
-    """Canonical layer order, with TOP_TRAITS moved to the end (on top).
-    'None' values are skipped (no layer file)."""
-    ordered = sorted(
+def _canonical(attributes: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Canonical layer order; 'None'/empty values skipped (no layer file)."""
+    return sorted(
         (a for a in attributes if a.get("value") and a["value"] != "None"),
         key=lambda a: TRAIT_ORDER.index(a["trait_type"]),
     )
-    tops = [
-        a for a in ordered if {"trait_type": a["trait_type"], "value": a["value"]} in TOP_TRAITS
-    ]
-    rest = [a for a in ordered if a not in tops]
+
+
+def _float_tops(layers: list[tuple[str, str, str]]) -> list[tuple[str, str, str]]:
+    """Move TOP_TRAITS effect layers to the end (rendered on top)."""
+    tops = [lyr for lyr in layers if {"trait_type": lyr[0], "value": lyr[1]} in TOP_TRAITS]
+    rest = [lyr for lyr in layers if lyr not in tops]
     return rest + tops
 
 
 async def missing_layers(attributes: list[dict[str, Any]], body: str, store: Any) -> list[str]:
-    """Trait files the store can't provide — checked BEFORE any burn."""
-    ordered = _ordered_traits(attributes)
+    """Trait + ape-structural files the store can't provide — checked BEFORE
+    any burn."""
+    canonical = _canonical(attributes)
     resolved = await asyncio.gather(
-        *(store.resolve(body, a["trait_type"], a["value"]) for a in ordered)
+        *(store.resolve(body, a["trait_type"], a["value"]) for a in canonical)
     )
-    return [
+    missing = [
         f"{body}/{a['trait_type']}/{a['value']}"
-        for a, path in zip(ordered, resolved, strict=False)
+        for a, path in zip(canonical, resolved, strict=False)
         if not path
     ]
+    if body == "ape":
+        if await store.resolve_asset(f"{body}/{ape_face.NOSE_ASSET}") is None:
+            missing.append(f"{body}/{ape_face.NOSE_ASSET}")
+        body_value = swap_meta.get_attr(attributes, "Body") or ""
+        if (
+            body_value in ape_face.MASKED_BODY_VALUES
+            and await store.resolve_asset(f"{body}/{ape_face.MASK_ASSET}") is None
+        ):
+            missing.append(f"{body}/{ape_face.MASK_ASSET}")
+    return missing
 
 
 async def compose_nft(
@@ -56,23 +62,36 @@ async def compose_nft(
     output_basename: str,
     out_dir: str = "generated",
 ) -> tuple[str, bool]:
-    """Resolve all trait layers through the store and overlay them.
+    """Resolve all trait layers through the store, apply the ape face rule
+    (nose + melt-ape masking), float TOP effects, and overlay.
     Returns (output_path, is_video)."""
-    ordered = _ordered_traits(attributes)
-    files = await asyncio.gather(
-        *(store.resolve(body, a["trait_type"], a["value"]) for a in ordered)
+    canonical = _canonical(attributes)
+    paths = await asyncio.gather(
+        *(store.resolve(body, a["trait_type"], a["value"]) for a in canonical)
     )
-    for a, path in zip(ordered, files, strict=False):
+    for a, path in zip(canonical, paths, strict=False):
         if not path:
             raise FileNotFoundError(f"Layer not found: {body}/{a['trait_type']}/{a['value']}")
-    if not files:
+    if not canonical:
         raise ValueError("No trait layers to compose")
+
+    layers = [(a["trait_type"], a["value"], p) for a, p in zip(canonical, paths, strict=False)]
+    body_value = swap_meta.get_attr(attributes, "Body") or ""
+    layers = await ape_face.inject_and_mask(layers, body, body_value, store, out_dir)
+    layers = _float_tops(layers)
+    files = [p for _t, _v, p in layers]
+    masked_temps = [p for p in files if p.endswith(".masked.png")]
 
     os.makedirs(out_dir, exist_ok=True)
     is_video = any(not f.endswith(".png") for f in files)
     ext = "mp4" if is_video else "png"
     output_path = os.path.join(out_dir, f"{output_basename}.{ext}")
-    await asyncio.to_thread(_run_ffmpeg, files, output_path, is_video)
+    try:
+        await asyncio.to_thread(_run_ffmpeg, files, output_path, is_video)
+    finally:
+        for tmp in masked_temps:
+            if os.path.exists(tmp):
+                os.remove(tmp)
     logging.info(f"Composed NFT: {output_path}")
     return output_path, is_video
 

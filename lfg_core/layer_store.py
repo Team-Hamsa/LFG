@@ -63,6 +63,12 @@ class LocalLayerStore:
                 return base + ext
         return None
 
+    async def resolve_asset(self, rel_path: str) -> str | None:
+        """Local path of an arbitrary file under the layer root (e.g.
+        'ape/Nose.png'), or None if it doesn't exist."""
+        path = os.path.join(self.base_dir, rel_path)
+        return path if os.path.isfile(path) else None
+
 
 class CdnLayerStore:
     """BunnyCDN storage-backed layer tree with an on-disk download cache.
@@ -118,6 +124,15 @@ class CdnLayerStore:
             filename = value + ext
             if filename in names:
                 return await self._download(f"{body}/{trait_type}/{filename}")
+        return None
+
+    async def resolve_asset(self, rel_path: str) -> str | None:
+        """Download (or reuse cached) an arbitrary file under the layer root
+        (e.g. 'ape/Nose.png'); returns local path or None if absent."""
+        parent, _, name = rel_path.rpartition("/")
+        listing = await self._list_dir(parent)
+        if name in {n for n, is_dir in listing if not is_dir}:
+            return await self._download(rel_path)
         return None
 
     async def _download(self, rel_path: str) -> str:
