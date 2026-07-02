@@ -7,6 +7,7 @@
 
 import asyncio
 import base64
+import functools
 import hashlib
 import hmac
 import json
@@ -454,6 +455,26 @@ async def handle_account(request):
     return web.json_response({"wallet": wallet, "identities": identities})
 
 
+def _economy_disabled_response():
+    return web.json_response(
+        {"error": "the trait economy is not enabled", "code": "economy_disabled"}, status=403
+    )
+
+
+def require_economy(handler):
+    """Gate an economy/Closet route on config.ECONOMY_ENABLED (checked before
+    auth so a disabled deploy exposes nothing of the economy surface)."""
+
+    @functools.wraps(handler)
+    async def wrapper(request):
+        if not config.ECONOMY_ENABLED:
+            return _economy_disabled_response()
+        return await handler(request)
+
+    return wrapper
+
+
+@require_economy
 @require_wallet
 async def handle_closet(request):
     """Ensure the caller has a Closet NFToken, minting on first use. In dev mode
@@ -501,7 +522,7 @@ async def handle_register(request):
     # user's Closet NFToken is minted immediately on registration. This never blocks
     # or fails the registration response — any error is logged and ignored.
     closet_result: dict[str, Any] | None = None
-    if not config.WEBAPP_DEV_MODE:
+    if config.ECONOMY_ENABLED and not config.WEBAPP_DEV_MODE:
         try:
             closet_result = await economy_api.start_closet(user["id"], wallet)
         except Exception as e:
@@ -797,7 +818,11 @@ async def handle_signin_status(request):
 async def handle_config(request):
     """Public config the frontend needs before auth (client_id, dev flag)."""
     return web.json_response(
-        {"client_id": config.DISCORD_CLIENT_ID, "dev_mode": config.WEBAPP_DEV_MODE}
+        {
+            "client_id": config.DISCORD_CLIENT_ID,
+            "dev_mode": config.WEBAPP_DEV_MODE,
+            "economy_enabled": config.ECONOMY_ENABLED,
+        }
     )
 
 
@@ -864,6 +889,8 @@ async def handle_layer(request):
 
 
 async def handle_economy(request):
+    if not config.ECONOMY_ENABLED:
+        return _economy_disabled_response()
     if config.WEBAPP_DEV_MODE:
         return web.json_response(mock_economy.INSTANCE.read_state(request["wallet"]))
     conn = economy_api.open_conn()
@@ -875,6 +902,8 @@ async def handle_economy(request):
 
 def _economy_post(kind, start_coro, mock_call):
     async def handler(request):
+        if not config.ECONOMY_ENABLED:
+            return _economy_disabled_response()
         user = request["user"]
         body = await request.json()
         if config.WEBAPP_DEV_MODE:

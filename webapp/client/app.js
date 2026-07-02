@@ -1199,6 +1199,9 @@ async function main() {
   // Dev live-reload: runs even in degraded mode (no frame_id).
   try {
     const cfg = await api('/api/config');
+    // Closet / trait economy ships after the mainnet MVP: with the feature
+    // off, hide the Dress Up entry point (the API answers 403 regardless).
+    if (cfg.economy_enabled === false) el('swap-btn').hidden = true;
     if (cfg.dev_mode && 'EventSource' in window) {
       new EventSource('/__dev/reload').onmessage = () => location.reload();
     }

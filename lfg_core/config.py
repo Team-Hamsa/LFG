@@ -111,6 +111,11 @@ DISCORD_CLIENT_SECRET = os.getenv("DISCORD_CLIENT_SECRET", "")
 WEBAPP_SESSION_SECRET = os.getenv("WEBAPP_SESSION_SECRET", "")
 WEBAPP_PORT = int(os.getenv("WEBAPP_PORT", "8176"))
 ECONOMY_NETWORK = os.getenv("ECONOMY_NETWORK", "testnet")  # economy DB network
+# Master switch for the Closet / dress-up trait economy surface. When off the
+# service answers economy routes with 403 economy_disabled, registration does
+# not auto-issue Closets, and the client hides the Dress Up UI — lets the
+# Minter + Trait Swapper launch on mainnet before the Closet ships.
+ECONOMY_ENABLED = os.getenv("ECONOMY_ENABLED", "1") not in ("0", "false", "False")
 WEBAPP_DEV_MODE = os.getenv("WEBAPP_DEV_MODE", "") not in ("", "0", "false", "False")
 
 # Telegram Mini App (#89). All optional — the feature is OFF when unset:
