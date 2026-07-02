@@ -58,6 +58,14 @@ else:
     _default_swap_issuer = "rLfgoMintj3KBcs4s2XKtquvDwEte2kYfJ"
     _default_brix_issuer = "rLfgoBriX5ZaMP32mtc7RUZJcjnisKh2Px"
 
+# Account all bot-signed txs are submitted for. Defaults to the SEED-derived
+# address (testnet: the seed IS the issuer). On mainnet the issuer signs via a
+# regular key: SEED holds the regkey seed and SIGNING_ACCOUNT must be set to
+# the issuer address (rLfgoMint…) — Wallet.from_seed would otherwise derive
+# the regkey pair's own address and every issuer op would sign for the wrong
+# account.
+SIGNING_ACCOUNT = os.getenv("SIGNING_ACCOUNT") or _seed_address()
+
 JSON_RPC_URL = os.getenv("XRPL_JSON_RPC_URL", _default_rpc)
 WS_URL = os.getenv("XRPL_WS_URL", _default_ws)
 # clio (XLS-46) endpoint. nft_info / nft_exists are clio-only methods — the

@@ -16,6 +16,7 @@ from xrpl.transaction import submit_and_wait
 from xrpl.wallet import Wallet
 
 from lfg_core import rarity as _rarity
+from lfg_core import config as core_config
 from lfg_core.config import JSON_RPC_URL, SOURCE_TAG
 from surfaces.discord_bot import config
 from surfaces.discord_bot.bot import tree
@@ -37,9 +38,11 @@ async def burn_nft(nft_id: str) -> bool:
         wallet = Wallet.from_seed(SEED)
         client = JsonRpcClient(JSON_RPC_URL)
 
-        # Create NFTokenBurn transaction
+        # Create NFTokenBurn transaction. Account is SIGNING_ACCOUNT, not the
+        # seed-derived address — on mainnet SEED holds the issuer's regular-key
+        # seed and the tx must run as the issuer.
         burn_tx = NFTokenBurn(
-            account=wallet.classic_address,
+            account=core_config.SIGNING_ACCOUNT,
             nftoken_id=nft_id,
             source_tag=SOURCE_TAG,
         )

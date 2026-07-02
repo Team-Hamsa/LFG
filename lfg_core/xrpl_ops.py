@@ -51,7 +51,7 @@ async def mint_nft(
 
         eff_flags = config.NFT_FLAGS if flags is None else flags
         kwargs: dict[str, Any] = {
-            "account": wallet.classic_address,
+            "account": config.SIGNING_ACCOUNT,
             "uri": convert_str_to_hex(metadata_cdn_url),
             "nftoken_taxon": taxon,
             "flags": eff_flags,
@@ -61,7 +61,7 @@ async def mint_nft(
         # temMALFORMED otherwise (e.g. the soulbound Bucket, flags=16).
         if eff_flags & TF_TRANSFERABLE:
             kwargs["transfer_fee"] = config.NFT_TRANSFER_FEE
-        if issuer != wallet.classic_address:
+        if issuer != config.SIGNING_ACCOUNT:
             kwargs["issuer"] = issuer
         payment = NFTokenMint(**kwargs)
 
@@ -112,7 +112,7 @@ async def create_nft_offer(nft_id: str, destination: str, amount: Any = "0") -> 
         wallet = Wallet.from_seed(config.SEED)
 
         offer = NFTokenCreateOffer(
-            account=wallet.classic_address,
+            account=config.SIGNING_ACCOUNT,
             destination=destination,
             amount=amount,
             nftoken_id=nft_id,
@@ -308,7 +308,7 @@ async def buy_and_burn(
     None (callers treat the burn as best-effort)."""
     try:
         wallet = Wallet.from_seed(config.SEED)
-        if wallet.classic_address == issuer:
+        if config.SIGNING_ACCOUNT == issuer:
             # The bot wallet IS the issuer (testnet, where the SEED account
             # issues the IOU). Paying an IOU to its own issuer redeems/destroys
             # it on receipt, and you cannot send your own IOU to yourself —
@@ -321,7 +321,7 @@ async def buy_and_burn(
             return "self-issuer-noop"
         client = JsonRpcClient(config.JSON_RPC_URL)
         kwargs: dict[str, Any] = {
-            "account": wallet.classic_address,
+            "account": config.SIGNING_ACCOUNT,
             "destination": issuer,
             "amount": IssuedCurrencyAmount(currency=currency, issuer=issuer, value=value),
             "source_tag": config.SOURCE_TAG,
@@ -348,11 +348,11 @@ async def burn_nft(nft_id: str, owner: str | None = None) -> str | None:
         wallet = Wallet.from_seed(config.SEED)
         client = JsonRpcClient(config.JSON_RPC_URL)
         kwargs: dict[str, Any] = {
-            "account": wallet.classic_address,
+            "account": config.SIGNING_ACCOUNT,
             "nftoken_id": nft_id,
             "source_tag": config.SOURCE_TAG,
         }
-        if owner and owner != wallet.classic_address:
+        if owner and owner != config.SIGNING_ACCOUNT:
             kwargs["owner"] = owner
         burn = NFTokenBurn(**kwargs)
 
@@ -399,12 +399,12 @@ async def modify_nft(nft_id: str, owner: str, uri: str) -> str | None:
         wallet = Wallet.from_seed(config.SEED)
         client = JsonRpcClient(config.JSON_RPC_URL)
         kwargs: dict[str, Any] = {
-            "account": wallet.classic_address,
+            "account": config.SIGNING_ACCOUNT,
             "nftoken_id": nft_id,
             "uri": convert_str_to_hex(uri),
             "source_tag": config.SOURCE_TAG,
         }
-        if owner and owner != wallet.classic_address:
+        if owner and owner != config.SIGNING_ACCOUNT:
             kwargs["owner"] = owner
         modify = NFTokenModify(**kwargs)
 
@@ -442,8 +442,10 @@ async def modify_nft(nft_id: str, owner: str, uri: str) -> str | None:
 
 
 def bot_wallet_address() -> str:
-    """Classic address of the wallet behind SEED (mint/offer/fee account)."""
-    return Wallet.from_seed(config.SEED).classic_address
+    """The account bot txs run as (mint/offer/fee account). SEED-derived by
+    default; on mainnet SIGNING_ACCOUNT overrides it to the issuer address
+    (SEED then holds the issuer's regular-key seed)."""
+    return config.SIGNING_ACCOUNT
 
 
 RIPPLE_EPOCH_OFFSET = 946684800  # seconds between the Unix and Ripple epochs
