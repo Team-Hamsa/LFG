@@ -27,6 +27,7 @@ REPO_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
 sys.path.insert(0, REPO_ROOT)
 
 from xrpl.core import addresscodec  # noqa: E402
+from xrpl.core.addresscodec.exceptions import XRPLAddressCodecException  # noqa: E402
 
 from lfg_core import nft_index, swap_meta  # noqa: E402
 
@@ -42,7 +43,7 @@ def _row_issuer(row: dict[str, str], nft_id: str) -> str | None:
     if len(nft_id) == 64:
         try:
             return addresscodec.encode_classic_address(bytes.fromhex(nft_id)[4:24])
-        except ValueError:
+        except (ValueError, XRPLAddressCodecException):
             return None
     return None
 
@@ -99,22 +100,35 @@ def import_csv(
     nft_id). `force_burned` marks all rows burned (separate burned export).
     `issuer` scopes the import to one collection: rows whose issuer (Issuer
     column, else decoded from the NFT ID) differs are skipped — Bithomp exports
-    can contain foreign tokens. Returns {imported, skipped, skipped_foreign}."""
+    can contain foreign tokens. Rows whose issuer cannot be determined at all
+    are also skipped (fail-closed) but counted separately. Returns
+    {imported, skipped, skipped_foreign, skipped_unknown_issuer}."""
     imported = 0
     skipped = 0
     skipped_foreign = 0
+    skipped_unknown = 0
     with open(path, encoding="utf-8-sig", newline="") as f:
         for row in csv.DictReader(f):
             rec = csv_record(row, force_burned=force_burned)
             if not rec.nft_id:
                 skipped += 1
                 continue
-            if issuer is not None and _row_issuer(row, rec.nft_id) != issuer:
-                skipped_foreign += 1
-                continue
+            if issuer is not None:
+                row_issuer = _row_issuer(row, rec.nft_id)
+                if row_issuer is None:
+                    skipped_unknown += 1
+                    continue
+                if row_issuer != issuer:
+                    skipped_foreign += 1
+                    continue
             nft_index.upsert(conn, rec)
             imported += 1
-    return {"imported": imported, "skipped": skipped, "skipped_foreign": skipped_foreign}
+    return {
+        "imported": imported,
+        "skipped": skipped,
+        "skipped_foreign": skipped_foreign,
+        "skipped_unknown_issuer": skipped_unknown,
+    }
 
 
 def main() -> int:
@@ -136,6 +150,12 @@ def main() -> int:
     )
     args = parser.parse_args()
 
+    if not args.issuer:
+        parser.error(
+            "no issuer to filter by: SWAP_ISSUER_ADDRESS is unset and --issuer "
+            "was not given — refusing to import unfiltered"
+        )
+
     db_path = nft_index.index_db_path(args.network)
     conn = nft_index.init_db(db_path)
     counts = import_csv(conn, args.csv, force_burned=args.burned, issuer=args.issuer)
@@ -143,6 +163,7 @@ def main() -> int:
     print(
         f"  Imported: {counts['imported']}  Skipped (no NFT ID): {counts['skipped']}"
         f"  Skipped (foreign issuer): {counts['skipped_foreign']}"
+        f"  Skipped (unknown issuer): {counts['skipped_unknown_issuer']}"
     )
     return 0
 
