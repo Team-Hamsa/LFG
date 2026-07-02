@@ -59,7 +59,7 @@ scope. Implementing the rule once in `swap_compose` covers all live paths.
 
 ## Architecture
 
-```
+```text
 lfg_core/ape_face.py        # NEW — constants, should_mask(), plan helpers,
                             #       apply_alpha_mask() (pure Pillow)
 lfg_core/swap_compose.py    # calls ape_face from compose_nft + missing_layers
@@ -90,11 +90,8 @@ NO_MASK_VALUES: list[dict[str, str]] = [
 ]
 ```
 
-The `TOP_TRAITS` effect set currently lives in `swap_compose.py`. To avoid a
-circular import, the implementation will either (a) have `ape_face` reference it
-one-way, or (b) move the constant into `ape_face` and have `swap_compose` import
-it. Either is acceptable; the implementer picks the cleaner direction. This
-design assumes the effect set is reachable from `ape_face`.
+The `TOP_TRAITS` effect set lives in `lfg_core/ape_face.py`; `swap_compose`
+imports it from there (option (b) below was chosen to avoid a circular import).
 
 ### Masking decision
 
@@ -119,7 +116,7 @@ The nose is injected for every ape (body class `"ape"`) as a normal,
 non-top layer placed directly **above** the Eyes layer. Final overlay order for
 a melt ape (bottom → top):
 
-```
+```text
 Background · Back · Body · Clothing · Mouth* · Eyebrows* · Eyes* · Nose · Head · Accessory
                                        └──── *right-clipped via Ape Mask.png ────┘
    (TOP_TRAITS — Laser / Laser Eyes / Wavy / Rainbow Puke — still float to the very

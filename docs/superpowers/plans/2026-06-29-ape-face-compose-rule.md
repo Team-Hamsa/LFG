@@ -368,7 +368,7 @@ def apply_alpha_mask(layer_path: str, mask_path: str, out_dir: str) -> str:
     layer = Image.open(layer_path).convert("RGBA")
     mask = Image.open(mask_path).convert("RGBA")
     if mask.size != layer.size:
-        mask = mask.resize(layer.size)
+        mask = mask.resize(layer.size, Image.Resampling.NEAREST)
     inv = ImageChops.invert(mask.getchannel("A"))
     new_alpha = ImageChops.multiply(layer.getchannel("A"), inv)
     layer.putalpha(new_alpha)
