@@ -102,3 +102,69 @@ def test_import_csv_upserts(tmp_path):
     # idempotent
     imp.import_csv(conn, str(csv_path))
     assert conn.execute("SELECT COUNT(*) FROM onchain_nfts").fetchone()[0] == 1
+
+
+ROW_FOREIGN = (
+    '"0018FOREIGN","ray45Nw7yp1EJiYCL7f87oPVpTkp1YuoQV","8","1","Other Thing #5195",'
+    '"https://other.example/5195.json","rOther1","https://other.example/5195.png",'
+    '"None","None","None","Wide Open Gold","None","Monobrow","None","None"'
+)
+
+# A real-format NFT ID whose embedded issuer is NOT rLfgo... (decoded from bytes 4..24).
+FOREIGN_NFT_ID = "0018138841820BC9F31E42B45003AC33EBEDF4DAABF2CF95A462983B05987698"
+
+
+def test_import_csv_skips_foreign_issuer_column(tmp_path):
+    csv_path = tmp_path / "data.csv"
+    _write_csv(str(csv_path), ROW_MALE, ROW_FOREIGN)
+    conn = nft_index.init_db(str(tmp_path / "idx.db"))
+    counts = imp.import_csv(conn, str(csv_path), issuer="rLfgo")
+    assert counts["imported"] == 1
+    assert counts["skipped_foreign"] == 1
+    assert conn.execute("SELECT COUNT(*) FROM onchain_nfts").fetchone()[0] == 1
+    assert conn.execute("SELECT nft_id FROM onchain_nfts").fetchone()[0] == "00ABC"
+
+
+def test_import_csv_decodes_issuer_from_nft_id_when_column_absent(tmp_path):
+    # No Issuer column: fall back to decoding the issuer from the NFT ID bytes.
+    header = '"NFT ID","Name","Owner","URI","Image"'
+    row = f'"{FOREIGN_NFT_ID}","Other #1","rOther1","https://x/1.json","https://x/1.png"'
+    csv_path = tmp_path / "data.csv"
+    _write_csv(str(csv_path), row, header=header)
+    conn = nft_index.init_db(str(tmp_path / "idx.db"))
+    counts = imp.import_csv(conn, str(csv_path), issuer="rLfgoMintj3KBcs4s2XKtquvDwEte2kYfJ")
+    assert counts["imported"] == 0
+    assert counts["skipped_foreign"] == 1
+
+
+def test_import_csv_no_issuer_arg_imports_everything(tmp_path):
+    # Backwards compatible: without an expected issuer, nothing is filtered.
+    csv_path = tmp_path / "data.csv"
+    _write_csv(str(csv_path), ROW_MALE, ROW_FOREIGN)
+    conn = nft_index.init_db(str(tmp_path / "idx.db"))
+    counts = imp.import_csv(conn, str(csv_path))
+    assert counts["imported"] == 2
+
+
+def test_import_csv_unknown_issuer_counted_separately(tmp_path):
+    # No Issuer column and an NFT ID too short to decode: fail-closed skip,
+    # but reported as unknown-issuer, not as confirmed-foreign.
+    header = '"NFT ID","Name","Owner","URI","Image"'
+    row = '"00SHORT","Mystery #1","rOther1","https://x/1.json","https://x/1.png"'
+    csv_path = tmp_path / "data.csv"
+    _write_csv(str(csv_path), row, header=header)
+    conn = nft_index.init_db(str(tmp_path / "idx.db"))
+    counts = imp.import_csv(conn, str(csv_path), issuer="rLfgoMintj3KBcs4s2XKtquvDwEte2kYfJ")
+    assert counts["imported"] == 0
+    assert counts["skipped_foreign"] == 0
+    assert counts["skipped_unknown_issuer"] == 1
+    assert conn.execute("SELECT COUNT(*) FROM onchain_nfts").fetchone()[0] == 0
+
+
+def test_row_issuer_bad_hex_and_codec_errors_return_none():
+    # Non-hex 64-char ID -> ValueError path; a 64-char hex ID is always 32
+    # bytes so the codec gets valid-length input — the codec-exception path is
+    # covered by construction (bytes 4..24 always decode); assert the wrapper
+    # never raises for odd inputs.
+    assert imp._row_issuer({}, "Z" * 64) is None
+    assert imp._row_issuer({}, "00" * 10) is None
