@@ -44,7 +44,7 @@ would sign for the wrong account.
   (xrpl_ops.py:64) is skipped — correct; do NOT set `Issuer` (that would
   require `NFTokenMinter` authorization).
 
-**Status:** PR in progress (see PR referenced from this runbook's commit).
+**Status:** PR #112 (awaiting CodeRabbit review/merge).
 
 ## Blocker 2 — BunnyCDN out of credit (OPS)
 
@@ -95,7 +95,7 @@ Launching Closet-off is currently impossible:
 
 **Fix.** `ECONOMY_ENABLED` flag (default on): when `0`, hide the Dress Up
 button and return 403/feature-disabled from all economy routes.
-**Status:** PR in progress.
+**Status:** PR #113 (awaiting CodeRabbit review/merge).
 
 ## Blocker 5 — Env cutover + restart (OPS)
 
