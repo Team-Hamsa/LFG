@@ -69,7 +69,14 @@ Original problem, for reference — `LAYER_SOURCE=local` only covers trait-layer
 account before launch. There is no code fallback for uploads. Verify with a
 test PUT to the storage zone and a GET through the pull zone.
 
-## Blocker 3 — No mainnet BRIX/XRP AMM (OPS + DECISION)
+## Blocker 3 — No mainnet BRIX/XRP AMM (OPS + DECISION) — ✅ RESOLVED 2026-07-02
+
+Pool created and verified on-ledger: AMM account
+`rn6TaseGA12G2Lyf5BL5MjrKS4MYb9bGrc`, 104 XRP / 19,238 BRIX, 1% trading fee
+(~0.0054 XRP/BRIX). `get_amm_xrp_cost` quotes the 10-BRIX swap fee at
+~0.055 XRP, so the non-BRIX-holder XRP fee path now clears.
+
+Original problem, for reference:
 
 `amm_info` for XRP/BRIX (`rLfgoBriX5ZaMP32mtc7RUZJcjnisKh2Px`) on mainnet
 returns `actNotFound`. `detect_swap_payment` (`swap_flow.py:56–74`) runs
