@@ -58,6 +58,23 @@ else:
     _default_swap_issuer = "rLfgoMintj3KBcs4s2XKtquvDwEte2kYfJ"
     _default_brix_issuer = "rLfgoBriX5ZaMP32mtc7RUZJcjnisKh2Px"
 
+# Account all bot-signed txs are submitted for. Defaults to the SEED-derived
+# address (testnet: the seed IS the issuer). On mainnet the issuer signs via a
+# regular key: SEED holds the regkey seed and SIGNING_ACCOUNT must be set to
+# the issuer address (rLfgoMint…) — Wallet.from_seed would otherwise derive
+# the regkey pair's own address and every issuer op would sign for the wrong
+# account. Validated eagerly (like the SEED path) so a typo fails fast at
+# startup instead of as an opaque temMALFORMED/actNotFound on every tx.
+_signing_override = (os.getenv("SIGNING_ACCOUNT") or "").strip()
+if _signing_override:
+    from xrpl.core.addresscodec import is_valid_classic_address as _is_valid_addr
+
+    if not _is_valid_addr(_signing_override):
+        raise ValueError(
+            f"SIGNING_ACCOUNT is not a valid XRPL classic address: {_signing_override!r}"
+        )
+SIGNING_ACCOUNT = _signing_override or _seed_address()
+
 JSON_RPC_URL = os.getenv("XRPL_JSON_RPC_URL", _default_rpc)
 WS_URL = os.getenv("XRPL_WS_URL", _default_ws)
 # clio (XLS-46) endpoint. nft_info / nft_exists are clio-only methods — the
