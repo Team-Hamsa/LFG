@@ -79,6 +79,52 @@ def build_manifest(
     return manifest
 
 
+def build_premiere_manifest(
+    records: list[tuple[str, list[str], int]],
+    layer_tree: dict[str, dict[str, list[str]]],
+    *,
+    aliases: dict[tuple[str, str], str] | None = None,
+    overrides: dict[tuple[str, str], int] | None = None,
+) -> dict[str, int]:
+    """Tag layer-store traits with their premiere season.
+
+    records are (category, candidate_names, season) from the all-seasons
+    premiere CSV — candidate_names is the collapsed trait_name plus its
+    variant spellings. Matching is case-insensitive per category across every
+    body; a stray "z9," layer-ordering prefix and a trailing "#N" duplicate
+    suffix are stripped before comparison. "None" (the absent-trait sentinel)
+    is never tagged. aliases maps a CSV (category, name) to the store's
+    spelling; overrides force (category, store_value) -> season for traits
+    the CSV missed, applied last across all bodies.
+    """
+    aliases = aliases or {}
+    overrides = overrides or {}
+
+    def norm(name: str) -> str:
+        return strip_dup_suffix(name.removeprefix("z9,")).lower()
+
+    # (category, normalized value) -> [(body, exact store value), ...]
+    store: dict[tuple[str, str], list[tuple[str, str]]] = {}
+    for body, categories in layer_tree.items():
+        for category, values in categories.items():
+            for value in values:
+                store.setdefault((category, norm(value)), []).append((body, value))
+
+    manifest: dict[str, int] = {}
+    for category, names, season in records:
+        names = [aliases.get((category, n), n) for n in names]
+        for name in names:
+            key = norm(name)
+            if key == "none":
+                continue
+            for body, value in store.get((category, key), []):
+                manifest[f"{body}/{category}/{value}"] = season
+    for (category, value), season in overrides.items():
+        for body, exact in store.get((category, norm(value)), []):
+            manifest[f"{body}/{category}/{exact}"] = season
+    return manifest
+
+
 def disable_season(
     conn: sqlite3.Connection,
     manifest: dict[str, int],

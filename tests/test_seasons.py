@@ -102,6 +102,55 @@ def test_build_manifest_skips_none_sentinel():
 
 
 # ---------------------------------------------------------------------------
+# build_premiere_manifest — seed from the all-seasons premiere CSV
+# ---------------------------------------------------------------------------
+
+
+def test_premiere_manifest_matches_across_bodies_case_insensitive():
+    tree = {"male": {"Eyes": ["Laser"]}, "ape": {"Eyes": ["Laser"]}}
+    records = [("Eyes", ["laser"], 3)]
+    manifest = seasons.build_premiere_manifest(records, tree)
+    assert manifest == {"male/Eyes/Laser": 3, "ape/Eyes/Laser": 3}
+
+
+def test_premiere_manifest_strips_z9_prefix_and_dup_suffix():
+    # Codex export left the "z9," layer-ordering prefix in a few names.
+    tree = {"male": {"Eyes": ["Laser", "Wavy#1"]}}
+    records = [("Eyes", ["z9,Laser"], 3), ("Eyes", ["z9,Wavy"], 3)]
+    manifest = seasons.build_premiere_manifest(records, tree)
+    assert manifest == {"male/Eyes/Laser": 3, "male/Eyes/Wavy#1": 3}
+
+
+def test_premiere_manifest_falls_back_to_variant_names():
+    # trait_name "Blackhole" collapsed from variants "Blackhole STATIC" etc.;
+    # the store may only carry a variant spelling.
+    tree = {"male": {"Background": ["Blackhole STATIC"]}}
+    records = [("Background", ["Blackhole", "Blackhole STATIC"], 1)]
+    manifest = seasons.build_premiere_manifest(records, tree)
+    assert manifest == {"male/Background/Blackhole STATIC": 1}
+
+
+def test_premiere_manifest_applies_aliases():
+    tree = {"male": {"Clothing": ["Prison Jumpsuit"]}}
+    records = [("Clothing", ["Prisoner Jumpsuit"], 3)]
+    aliases = {("Clothing", "Prisoner Jumpsuit"): "Prison Jumpsuit"}
+    manifest = seasons.build_premiere_manifest(records, tree, aliases=aliases)
+    assert manifest == {"male/Clothing/Prison Jumpsuit": 3}
+
+
+def test_premiere_manifest_applies_overrides_for_traits_absent_from_csv():
+    tree = {"male": {"Eyes": ["Third Eye"]}, "female": {"Eyes": ["Third Eye"]}}
+    manifest = seasons.build_premiere_manifest([], tree, overrides={("Eyes", "Third Eye"): 3})
+    assert manifest == {"male/Eyes/Third Eye": 3, "female/Eyes/Third Eye": 3}
+
+
+def test_premiere_manifest_skips_none_sentinel():
+    tree = {"male": {"Back": ["None", "Angel Wings"]}}
+    records = [("Back", ["None"], 3)]
+    assert seasons.build_premiere_manifest(records, tree) == {}
+
+
+# ---------------------------------------------------------------------------
 # disable_season — flip trait_rarity.enabled=0 for a season, guarded
 # ---------------------------------------------------------------------------
 
