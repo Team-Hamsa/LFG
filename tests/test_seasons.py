@@ -149,6 +149,20 @@ def test_disable_season_guard_refuses_to_empty_a_category():
     assert _enabled(conn, "male", "Eyes", "Laser") == 1
 
 
+def test_disable_season_inserts_disabled_row_when_missing():
+    # A manifest trait with no trait_rarity row yet must not be skipped:
+    # rarity._ensure_rows would auto-insert it as enabled at the first mint,
+    # silently re-admitting an excluded trait. Pre-insert it disabled.
+    conn = _seeded_conn({"male": {"Eyes": ["Classic"]}})  # no "Laser" row
+    manifest = {"male/Eyes/Laser": 3}
+    changed = seasons.disable_season(conn, manifest, season=3, network="mainnet")
+    assert ("male", "Eyes", "Laser") in changed
+    assert _enabled(conn, "male", "Eyes", "Laser") == 0
+    # And _ensure_rows must not resurrect it.
+    rarity._ensure_rows(conn, "mainnet", "male", "Eyes", ["Laser"], rarity.utcnow())
+    assert _enabled(conn, "male", "Eyes", "Laser") == 0
+
+
 def test_disable_season_ignores_other_seasons_and_networks():
     conn = _seeded_conn({"male": {"Eyes": ["Laser", "Classic"]}})
     manifest = {"male/Eyes/Laser": 2}

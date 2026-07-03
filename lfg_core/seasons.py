@@ -17,6 +17,7 @@ import re
 import sqlite3
 
 from lfg_core import config
+from lfg_core.rarity import utcnow
 
 _DUP_SUFFIX = re.compile(r"#\d+$")
 
@@ -114,6 +115,18 @@ def disable_season(
             """UPDATE trait_rarity SET enabled=0
                WHERE network=? AND body=? AND category=? AND trait=? AND enabled=1""",
             (network, body, category, trait),
+        )
+        if cur.rowcount:
+            changed.append((body, category, trait))
+            continue
+        # No row yet: pre-insert it disabled, or rarity._ensure_rows would
+        # auto-insert it as enabled at the first mint that sees the file.
+        cur = conn.execute(
+            """INSERT OR IGNORE INTO trait_rarity
+               (network, body, category, trait, live_count, floor_weight,
+                enabled, first_seen_at)
+               VALUES (?, ?, ?, ?, 0, ?, 0, ?)""",
+            (network, body, category, trait, config.RARITY_FLOOR, utcnow().isoformat()),
         )
         if cur.rowcount:
             changed.append((body, category, trait))
