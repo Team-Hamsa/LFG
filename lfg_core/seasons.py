@@ -94,8 +94,9 @@ def build_premiere_manifest(
     body; a stray "z9," layer-ordering prefix and a trailing "#N" duplicate
     suffix are stripped before comparison. "None" (the absent-trait sentinel)
     is never tagged. aliases maps a CSV (category, name) to the store's
-    spelling; overrides force (category, store_value) -> season for traits
-    the CSV missed, applied last across all bodies.
+    spelling; overrides force (category, store_value) -> season across all
+    bodies. Overrides are applied last and take precedence over any
+    CSV-derived season — they carry artist-confirmed corrections.
     """
     aliases = aliases or {}
     overrides = overrides or {}

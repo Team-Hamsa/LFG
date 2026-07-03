@@ -78,14 +78,19 @@ def main() -> None:
         sys.exit(f"{args.csv} has no usable rows")
 
     tree = asyncio.run(_layer_tree())
+    csv_manifest = seasons.build_premiere_manifest(records, tree, aliases=ALIASES)
     manifest = seasons.build_premiere_manifest(records, tree, aliases=ALIASES, overrides=OVERRIDES)
+    for key in sorted(k for k in manifest if k in csv_manifest and manifest[k] != csv_manifest[k]):
+        print(f"OVERRIDE beats CSV: {key} S{csv_manifest[key]} -> S{manifest[key]}")
 
-    matched_pairs = {tuple(k.split("/", 2)[1:]) for k in manifest}
+    # Matching is case-insensitive (build_premiere_manifest lowercases both
+    # sides), so the unmatched report must compare lowercased too.
+    matched_pairs = {(c, v.lower()) for c, v in (tuple(k.split("/", 2)[1:]) for k in manifest)}
     unmatched = 0
     for category, names, season in records:
         names = [ALIASES.get((category, n), n) for n in names]
-        stems = {seasons.strip_dup_suffix(n.removeprefix("z9,")) for n in names}
-        if all(s != "None" and (category, s) not in matched_pairs for s in stems):
+        stems = {seasons.strip_dup_suffix(n.removeprefix("z9,")).lower() for n in names}
+        if all(s != "none" and (category, s) not in matched_pairs for s in stems):
             unmatched += 1
             print(f"UNMATCHED (S{season}, not in any body's layer store): {category}/{names[0]}")
 
