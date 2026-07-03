@@ -23,7 +23,7 @@ def main() -> None:
     parser = argparse.ArgumentParser(description="Disable a season's traits for minting")
     parser.add_argument("--network", required=True, choices=["testnet", "mainnet"])
     parser.add_argument("--season", type=int, required=True)
-    parser.add_argument("--db", default="lfg_nfts.db")
+    parser.add_argument("--db", default=None, help="database path (default: config.DB_PATH)")
     parser.add_argument("--apply", action="store_true", help="write changes (default: dry-run)")
     args = parser.parse_args()
 
