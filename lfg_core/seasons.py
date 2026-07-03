@@ -21,6 +21,11 @@ from lfg_core import config
 _DUP_SUFFIX = re.compile(r"#\d+$")
 
 
+def strip_dup_suffix(value: str) -> str:
+    """Drop a trailing "#N" duplicate-export suffix ("Basketball#1" -> "Basketball")."""
+    return _DUP_SUFFIX.sub("", value)
+
+
 def manifest_path() -> str:
     return os.path.join(config.LAYERS_DIR, "seasons.json")
 
@@ -63,7 +68,7 @@ def build_manifest(
     manifest: dict[str, int] = {}
     for rel in csv_paths:
         cat_dir, _, filename = rel.rpartition("/")
-        value = _DUP_SUFFIX.sub("", os.path.splitext(filename)[0])
+        value = strip_dup_suffix(os.path.splitext(filename)[0])
         if value == "None":
             # Absent-trait sentinel, present in every season — never tag it.
             continue

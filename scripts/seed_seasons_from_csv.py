@@ -45,10 +45,14 @@ def main() -> None:
     tree = asyncio.run(_layer_tree())
     new_entries = seasons.build_manifest(rel_paths, tree, season=args.season)
 
-    matched_values = {k.rsplit("/", 1)[1] for k in new_entries}
+    # Compare (category, value) pairs — a name matched in one category must
+    # not suppress the warning for the same name unmatched in another.
+    matched_pairs = {tuple(k.split("/", 2)[1:]) for k in new_entries}
     for rel in rel_paths:
-        stem = seasons._DUP_SUFFIX.sub("", os.path.splitext(rel.rsplit("/", 1)[-1])[0])
-        if stem != "None" and stem not in matched_values:
+        cat_dir, _, filename = rel.rpartition("/")
+        category = cat_dir if cat_dir == "Background" else cat_dir.split(" ", 1)[-1]
+        stem = seasons.strip_dup_suffix(os.path.splitext(filename)[0])
+        if stem != "None" and (category, stem) not in matched_pairs:
             print(f"UNMATCHED (not in any body's layer store): {rel}")
 
     manifest = seasons.load_seasons()
