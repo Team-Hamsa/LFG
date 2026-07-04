@@ -8,7 +8,7 @@ import sqlite3
 from datetime import datetime
 from typing import Any
 
-from lfg_core import rarity
+from lfg_core import rarity, trait_config
 from lfg_core.swap_meta import TRAIT_ORDER
 
 
@@ -43,9 +43,16 @@ async def select_random_attributes(
                 now=now,
                 rng=rng,
             )
-        attributes = []
+        attributes: list[dict[str, str]] = []
+        cfg = trait_config.get_config()
         for trait_type in TRAIT_ORDER:
             values = await store.list_values(body, trait_type)
+            values = [
+                v
+                for v in values
+                if cfg.value_allowed(body, trait_type, v)
+                and not cfg.conflicts(attributes, trait_type, v)
+            ]
             if values:
                 value = rarity.weighted_pick(
                     conn, body, trait_type, values, network=network, now=now, rng=rng
