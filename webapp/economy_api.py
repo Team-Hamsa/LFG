@@ -18,8 +18,11 @@ from lfg_core import (
     config,
     economy_flow,
     economy_store,
+    layer_store,
     nft_index,
+    swap_compose,
     swap_meta,
+    trait_config,
     trait_economy,
 )
 from scripts import _economy_deps
@@ -167,6 +170,23 @@ def _schedule(
     return EconomyWebSession(discord_id=discord_id, kind=kind, inner=session)
 
 
+async def _require_body_affinity(char_body: str, slot: str, value: str) -> None:
+    """Raise EconomyError unless (slot, value) can legally render on
+    char_body: trait_config's affinity allows it AND a layer actually
+    resolves (own body dir, or a matrix-permitted foreign dir per
+    swap_compose.resolve_layer). "None" is always legal — it's the
+    real-but-file-less asset for an empty slot, same convention
+    swap_compose._canonical uses when filtering attributes before compose."""
+    if value == "None":
+        return
+    cfg = trait_config.get_config()
+    store = layer_store.get_layer_store()
+    if not cfg.value_allowed(char_body, slot, value) or not await swap_compose.resolve_layer(
+        store, cfg, char_body, slot, value
+    ):
+        raise EconomyError(f"'{value}' does not fit a {char_body} body")
+
+
 async def start_equip(
     discord_id: str, owner: str, nft_id: str, slot: str, value: str
 ) -> EconomyWebSession:
@@ -176,6 +196,7 @@ async def start_equip(
     chk = trait_economy.can_equip(rec, slot, value, assets, mutable=bool(rec.mutable))
     if not chk.ok:
         raise EconomyError(f"cannot equip: {chk.reason}")
+    await _require_body_affinity(rec.body, slot, value)
     session = economy_flow.EquipSession(owner=owner, character=rec, slot=slot, incoming_value=value)
     return _schedule("equip", discord_id, session, conn, economy_flow.run_equip)
 
@@ -219,6 +240,8 @@ async def start_assemble(
     chk = trait_economy.can_assemble(edition, chosen, bodies, assets, live_editions, genesis)
     if not chk.ok:
         raise EconomyError(f"cannot assemble: {chk.reason}")
+    for slot, value in chosen.items():
+        await _require_body_affinity(body[1], slot, value)
     session = economy_flow.AssembleSession(
         owner=owner,
         edition=edition,

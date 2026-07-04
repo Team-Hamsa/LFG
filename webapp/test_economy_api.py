@@ -18,9 +18,28 @@ os.environ.setdefault("BUNNY_CDN_STORAGE_ZONE", "test")
 os.environ.setdefault("LAYER_SOURCE", "local")
 os.environ.setdefault("BUNNY_PULL_ZONE", "nft.pullzone.example")
 
-from lfg_core import economy_flow, economy_store, nft_index  # noqa: E402
+from lfg_core import economy_flow, economy_store, layer_store, nft_index, trait_config  # noqa: E402
 from lfg_core.nft_index import OnchainNft  # noqa: E402
 from webapp import economy_api  # noqa: E402
+
+
+class _PermissiveLayerStore:
+    """Stub layer store whose resolve() always succeeds. Task 16's body-affinity
+    gate (economy_api._require_body_affinity) calls swap_compose.resolve_layer,
+    which needs a real layer file on disk to return non-None. Tests below that
+    are about scheduling/connection-lifecycle plumbing (not about affinity
+    itself) use synthetic closet assets like ("Head", "Halo") that don't
+    correspond to any real art file, so they patch the store to this stub —
+    mirrors the `lambda: object()` stub webapp/test_smoke.py uses for flows
+    that don't care about layer resolution, except this one actually gets
+    called and must resolve."""
+
+    async def resolve(self, body: str, trait_type: str, value: str) -> str:
+        return f"/fake/{body}/{trait_type}/{value}.png"
+
+
+def _stub_permissive_layer_store(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(economy_api.layer_store, "get_layer_store", lambda: _PermissiveLayerStore())
 
 
 def _char():
@@ -133,6 +152,7 @@ def test_start_equip_precheck_rejects_unowned(monkeypatch):
 def test_start_equip_happy_returns_session(monkeypatch):
     conn = _seed_conn()
     monkeypatch.setattr(economy_api, "open_conn", lambda: conn)
+    _stub_permissive_layer_store(monkeypatch)
 
     captured = {}
 
@@ -212,6 +232,7 @@ def test_start_equip_closes_conn_after_task(monkeypatch):
     economy_store.set_closet_contents(tracked, "rOwner", [("Head", "Halo", 2)], [42])
 
     monkeypatch.setattr(economy_api, "open_conn", lambda: tracked)
+    _stub_permissive_layer_store(monkeypatch)
 
     async def fake_run_equip(session, deps):
         session.state = economy_flow.DONE
@@ -288,6 +309,7 @@ def test_run_and_close_marks_session_failed_on_runner_crash(monkeypatch):
     economy_store.set_closet_contents(tracked, "rOwner", [("Head", "Halo", 2)], [42])
 
     monkeypatch.setattr(economy_api, "open_conn", lambda: tracked)
+    _stub_permissive_layer_store(monkeypatch)
 
     async def crashing_runner(session, deps):
         raise RuntimeError("simulated unexpected crash")
@@ -537,5 +559,132 @@ def test_start_deposit_pending_closet_is_gated(monkeypatch):
     async def go():
         with pytest.raises(economy_api.EconomyError, match="Closet"):
             await economy_api.start_deposit("123", "rOwner", {"nft_id": "TOK1"})
+
+    asyncio.get_event_loop().run_until_complete(go())
+
+
+# --- Task 16 (#30): body-affinity gating on equip / assemble ---
+#
+# Deposit is intentionally NOT gated here: run_deposit (lfg_core/economy_flow.py)
+# only ever reads nft_id/slot/value — it never resolves or checks a character's
+# body, and the trait token being deposited isn't tied to any character. Gating
+# it would be inventing a constraint the implementation doesn't have.
+
+_BODY_GATE_CFG = """
+version: 1
+layers:
+  - {name: Background, z: 10}
+  - {name: Back, z: 20}
+  - {name: Body, z: 30}
+  - {name: Clothing, z: 40}
+  - {name: Mouth, z: 50}
+  - {name: Eyebrows, z: 60}
+  - {name: Eyes, z: 70}
+  - {name: Head, z: 80}
+  - {name: Accessory, z: 90}
+affinity:
+  Clothing:
+    "Summer Dress": [female]
+"""
+
+
+def _mk_body_gate_layers(tmp_path):
+    for body, values in {"male": ["Hoodie"], "female": ["Hoodie", "Summer Dress"]}.items():
+        d = tmp_path / "layers" / body / "Clothing"
+        d.mkdir(parents=True, exist_ok=True)
+        for v in values:
+            (d / f"{v}.png").write_bytes(b"x")
+    return str(tmp_path / "layers")
+
+
+@pytest.fixture
+def body_gate_store(tmp_path):
+    """Fixture trait_config ('Summer Dress' is female-only) + a matching
+    local layer tree, mirroring tests/test_traits_affinity.py's pattern."""
+    cfg_path = tmp_path / "trait_config.yaml"
+    cfg_path.write_text(_BODY_GATE_CFG)
+    trait_config.reset_config()
+    trait_config.get_config(str(cfg_path))
+    store = layer_store.LocalLayerStore(_mk_body_gate_layers(tmp_path))
+    try:
+        yield store
+    finally:
+        trait_config.reset_config()
+
+
+def test_start_equip_rejects_incompatible_body_value(monkeypatch, body_gate_store):
+    """A female-only Clothing value ('Summer Dress') cannot be equipped onto
+    a male character, even though the Closet holds the asset."""
+    conn = _seed_conn()  # owner rOwner holds a male character (edition 3537, nft_id "A")
+    economy_store.set_closet_contents(
+        conn, "rOwner", [("Head", "Halo", 2), ("Clothing", "Summer Dress", 1)], [42]
+    )
+    monkeypatch.setattr(economy_api, "open_conn", lambda: conn)
+    monkeypatch.setattr(economy_api.layer_store, "get_layer_store", lambda: body_gate_store)
+
+    async def go():
+        with pytest.raises(economy_api.EconomyError, match="does not fit"):
+            await economy_api.start_equip("123", "rOwner", "A", "Clothing", "Summer Dress")
+
+    asyncio.get_event_loop().run_until_complete(go())
+
+
+def test_start_equip_compatible_value_still_starts(monkeypatch, body_gate_store):
+    """A value that's both affinity-allowed and file-resolvable on the
+    character's body must still schedule the equip session (no regression)."""
+    conn = _seed_conn()
+    economy_store.set_closet_contents(
+        conn, "rOwner", [("Head", "Halo", 2), ("Clothing", "Hoodie", 1)], [42]
+    )
+    monkeypatch.setattr(economy_api, "open_conn", lambda: conn)
+    monkeypatch.setattr(economy_api.layer_store, "get_layer_store", lambda: body_gate_store)
+
+    captured = {}
+
+    async def fake_run_equip(session, deps):
+        captured["ran"] = True
+        session.state = economy_flow.DONE
+
+    monkeypatch.setattr(economy_flow, "run_equip", fake_run_equip)
+    from scripts import _economy_deps
+
+    monkeypatch.setattr(_economy_deps, "build_economy_deps", lambda c: object())
+
+    async def go():
+        ws = await economy_api.start_equip("123", "rOwner", "A", "Clothing", "Hoodie")
+        await asyncio.sleep(0)
+        return ws
+
+    ws = asyncio.get_event_loop().run_until_complete(go())
+    assert ws.kind == "equip"
+    assert captured.get("ran") is True
+
+
+def test_start_assemble_rejects_incompatible_asset_in_set(monkeypatch, body_gate_store):
+    """assemble must gate EVERY asset in the requested set: a female-only
+    Clothing value in the chosen set for a male-bodied edition is rejected,
+    even though every other slot in the set is the legal 'None' asset."""
+    from lfg_core import trait_economy
+
+    conn = nft_index.init_db(":memory:")
+    economy_store.init_economy_schema(conn)
+    edition = 99
+    economy_store.freeze_genesis(
+        conn,
+        trait_economy.Genesis(trait_counts={}, edition_bodies={edition: ("male", "male")}),
+        {},
+    )
+    economy_store.set_closet_token(conn, "rOwner", "NFT_CLOSET", "deadbeef", status="active")
+    chosen = dict.fromkeys(trait_economy.NON_BODY_SLOTS, "None")
+    chosen["Clothing"] = "Summer Dress"
+    economy_store.set_closet_contents(
+        conn, "rOwner", [(slot, value, 1) for slot, value in chosen.items()], [edition]
+    )
+    monkeypatch.setattr(economy_api, "open_conn", lambda: conn)
+    monkeypatch.setattr(economy_api.layer_store, "get_layer_store", lambda: body_gate_store)
+
+    async def go():
+        with pytest.raises(economy_api.EconomyError, match="does not fit"):
+            await economy_api.start_assemble("123", "rOwner", edition, chosen)
 
     asyncio.get_event_loop().run_until_complete(go())
