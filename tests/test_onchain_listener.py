@@ -328,3 +328,49 @@ def test_stream_tx_feeds_history(tmp_path):
     )
     assert hconn.execute("SELECT COUNT(*) FROM xrpl_txs").fetchone()[0] == 1
     assert hconn.execute("SELECT COUNT(*) FROM brix_events").fetchone()[0] == 2
+
+
+def test_stream_tx_history_filters_foreign_collection(tmp_path):
+    """Firehose txs from OTHER NFT collections must not pollute the archive."""
+    from lfg_core import history_events, history_store
+    from tests.fixtures import history_txs as fx
+
+    hconn = history_store.init_history_db(str(tmp_path / "h.db"))
+    conn = _conn()
+    ctx = {
+        "nft_issuer": fx.ISSUER,
+        "issuer_hex": history_events.issuer_account_hex(fx.ISSUER),
+        "brix_issuer": fx.BRIX_ISSUER,
+        "brix_hex": fx.BRIX_HEX,
+        "distributor": None,
+        "numbers": {},
+    }
+    for tx in (dict(fx.FOREIGN_BURN), dict(fx.FOREIGN_MODIFY)):
+        _run(
+            oln.process_stream_tx(
+                conn,
+                tx,
+                fetch_token=_none_token,
+                fetch_meta=_none_meta,
+                is_ours=lambda t: False,
+                history_conn=hconn,
+                history_ctx=ctx,
+            )
+        )
+    assert hconn.execute("SELECT COUNT(*) FROM xrpl_txs").fetchone()[0] == 0
+    assert hconn.execute("SELECT COUNT(*) FROM nft_events").fetchone()[0] == 0
+
+    # Our-collection burn is still recorded.
+    _run(
+        oln.process_stream_tx(
+            conn,
+            dict(fx.BURN),
+            fetch_token=_none_token,
+            fetch_meta=_none_meta,
+            is_ours=lambda t: False,
+            history_conn=hconn,
+            history_ctx=ctx,
+        )
+    )
+    assert hconn.execute("SELECT COUNT(*) FROM xrpl_txs").fetchone()[0] == 1
+    assert hconn.execute("SELECT COUNT(*) FROM nft_events").fetchone()[0] == 1

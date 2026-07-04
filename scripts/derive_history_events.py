@@ -20,8 +20,6 @@ sys.path.insert(0, REPO_ROOT)
 
 from lfg_core import config, history_events, history_store  # noqa: E402
 
-BRIX_HEX = "4252495800000000000000000000000000000000"
-
 
 def rederive(
     hconn: Any,
@@ -41,15 +39,23 @@ def rederive(
     numbers = dict(oconn.execute("SELECT nft_id, nft_number FROM onchain_nfts"))
 
     history_store.clear_derived(hconn)
+    # Same per-collection scoping as the live listener: the raw archive may
+    # contain foreign-collection txs that touched our accounts.
+    issuer_hex = history_events.issuer_account_hex(nft_issuer)
     n_nft = n_brix = 0
     for row in hconn.execute("SELECT raw_json FROM xrpl_txs ORDER BY ledger_index"):
         tx = json.loads(row["raw_json"])
         for ev in history_events.derive_nft_events(tx, nft_issuer=nft_issuer):
+            if not history_events.nft_id_issuer_matches(ev["nft_id"], issuer_hex):
+                continue
             ev["nft_number"] = numbers.get(ev["nft_id"])
             history_store.insert_nft_event(hconn, ev)
             n_nft += 1
         for ev in history_events.derive_brix_events(
-            tx, brix_issuer=brix_issuer, brix_hex=BRIX_HEX, distributor=distributor
+            tx,
+            brix_issuer=brix_issuer,
+            brix_hex=config.SWAP_OFFER_CURRENCY_HEX,
+            distributor=distributor,
         ):
             history_store.insert_brix_event(hconn, ev)
             n_brix += 1

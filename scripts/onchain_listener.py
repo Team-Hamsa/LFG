@@ -132,8 +132,20 @@ async def process_stream_tx(
 
 
 def _record_history(hconn: Any, tx: dict[str, Any], ctx: dict[str, Any]) -> None:
-    """Append one stream tx to the history archive iff it produces events."""
+    """Append one stream tx to the history archive iff it produces events.
+
+    The listener subscribes to the WHOLE network tx stream, so derived NFT
+    events must be scoped to our collection: every NFTokenID embeds its
+    issuer's AccountID, and events whose nft_id embeds a foreign issuer are
+    dropped. The raw tx is archived only if any events survive."""
     nft_evs = history_events.derive_nft_events(tx, nft_issuer=ctx["nft_issuer"])
+    if nft_evs:
+        issuer_hex = ctx.get("issuer_hex")
+        if issuer_hex is None:
+            issuer_hex = ctx["issuer_hex"] = history_events.issuer_account_hex(ctx["nft_issuer"])
+        nft_evs = [
+            ev for ev in nft_evs if history_events.nft_id_issuer_matches(ev["nft_id"], issuer_hex)
+        ]
     brix_evs = history_events.derive_brix_events(
         tx,
         brix_issuer=ctx["brix_issuer"],
@@ -176,6 +188,7 @@ async def _listen(network: str, issuer: str, taxon: int, clio: str) -> None:
     numbers = dict(conn.execute("SELECT nft_id, nft_number FROM onchain_nfts"))
     history_ctx: dict[str, Any] = {
         "nft_issuer": issuer,
+        "issuer_hex": history_events.issuer_account_hex(issuer),
         "brix_issuer": config.SWAP_OFFER_ISSUER,
         "brix_hex": config.SWAP_OFFER_CURRENCY_HEX,
         "distributor": config.BRIX_DISTRIBUTOR_ADDRESS,

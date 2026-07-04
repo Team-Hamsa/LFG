@@ -196,7 +196,37 @@ def test_audit_history_drift(capsys):
     result = ah.audit_history(hconn, oconn)
     assert result == {"mints": 2, "burns": 0, "live_events": 2, "live_index": 1, "drift": 1}
 
-    rc = ah.main(["--history-db", ":memory-not-used:", "--network", "testnet"], hconn=hconn, oconn=oconn)
+    rc = ah.main(
+        ["--history-db", ":memory-not-used:", "--network", "testnet"], hconn=hconn, oconn=oconn
+    )
     assert rc == 1
     out = capsys.readouterr().out
     assert "FAIL" in out
+
+
+def test_rederive_filters_foreign_collection(tmp_path):
+    """Raw archive may hold foreign txs that touched our accounts; rederive
+    must drop nft events whose nft_id embeds another issuer."""
+    import importlib
+    import sqlite3
+
+    dh = importlib.import_module("scripts.derive_history_events")
+    from lfg_core import history_events
+
+    conn = history_store.init_history_db(str(tmp_path / "h.db"))
+    for tx, h in ((fx.MINT, "01" * 32), (fx.FOREIGN_BURN, "F1" * 32)):
+        bh.store_raw_tx(conn, history_events.normalize_entry(_entry(tx, h)))
+
+    oconn = sqlite3.connect(":memory:")
+    oconn.execute("CREATE TABLE onchain_nfts (nft_id TEXT PRIMARY KEY, nft_number INTEGER)")
+
+    counts = dh.rederive(
+        conn,
+        "testnet",
+        oconn=oconn,
+        nft_issuer=fx.ISSUER,
+        brix_issuer=fx.BRIX_ISSUER,
+    )
+    assert counts["nft_events"] == 1
+    rows = conn.execute("SELECT event, nft_id FROM nft_events").fetchall()
+    assert [(r["event"], r["nft_id"]) for r in rows] == [("mint", fx.NFT_A)]

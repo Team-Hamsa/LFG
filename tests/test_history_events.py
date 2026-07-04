@@ -134,3 +134,42 @@ def test_amm_deposit_kind():
 
 def test_non_brix_tx_no_events():
     assert _brix(fx.SALE_XRP) == []
+
+
+def test_issuer_account_hex_roundtrip():
+    hexid = history_events.issuer_account_hex(fx.ISSUER)
+    assert len(hexid) == 40 and hexid == hexid.upper()
+
+
+def test_nft_id_issuer_matches():
+    ihex = history_events.issuer_account_hex(fx.ISSUER)
+    assert history_events.nft_id_issuer_matches(fx.NFT_A, ihex)
+    assert not history_events.nft_id_issuer_matches(fx.NFT_FOREIGN, ihex)
+    # malformed ids never match
+    assert not history_events.nft_id_issuer_matches("", ihex)
+    assert not history_events.nft_id_issuer_matches("000A", ihex)
+    assert not history_events.nft_id_issuer_matches(None, ihex)  # type: ignore[arg-type]
+
+
+def test_brix_deltas_skips_malformed_ripplestate():
+    # RippleState node with a non-string holder issuer must be skipped, not crash.
+    meta = {
+        "AffectedNodes": [
+            {
+                "ModifiedNode": {
+                    "LedgerEntryType": "RippleState",
+                    "FinalFields": {
+                        "Balance": {"currency": fx.BRIX_HEX, "value": "5"},
+                        "HighLimit": {"issuer": fx.BRIX_ISSUER, "currency": fx.BRIX_HEX},
+                        "LowLimit": {"currency": fx.BRIX_HEX},  # missing issuer -> holder None
+                    },
+                    "PreviousFields": {"Balance": {"currency": fx.BRIX_HEX, "value": "2"}},
+                }
+            }
+        ]
+    }
+    tx = {"TransactionType": "Payment", "Account": fx.ALICE, "hash": "AB" * 32, "meta": meta}
+    assert (
+        history_events.derive_brix_events(tx, brix_issuer=fx.BRIX_ISSUER, brix_hex=fx.BRIX_HEX)
+        == []
+    )

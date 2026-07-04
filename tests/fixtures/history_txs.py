@@ -2,13 +2,30 @@
 derivation tests. Shapes mirror clio account_tx / nft_history output after
 history_events.normalize_entry."""
 
-ISSUER = "rIssuerXXXXXXXXXXXXXXXXXXXXXXXXXXX"
-BRIX_ISSUER = "rBrixIssuerXXXXXXXXXXXXXXXXXXXXXXX"
-DISTRIBUTOR = "rAirdropXXXXXXXXXXXXXXXXXXXXXXXXXX"
-ALICE = "rAliceXXXXXXXXXXXXXXXXXXXXXXXXXXXXX"
-BOB = "rBobXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXX"
-BROKER = "rBrokerXXXXXXXXXXXXXXXXXXXXXXXXXXXXX"
-NFT_A = "000A" + "0" * 60
+from xrpl.core import addresscodec
+
+
+def _addr(tag: int) -> str:
+    """Deterministic VALID classic address (decodable by addresscodec)."""
+    return addresscodec.encode_classic_address(bytes([tag]) * 20)
+
+
+def nft_id_for(issuer: str, *, flags: int = 10, fee: int = 0, taxon: int = 0, seq: int = 1) -> str:
+    """Build a valid 64-hex NFTokenID embedding `issuer`'s AccountID at
+    bytes 4-24 (hex chars 8..48), like the ledger does."""
+    acct = addresscodec.decode_classic_address(issuer).hex().upper()
+    return f"{flags:04X}{fee:04X}{acct}{taxon:08X}{seq:08X}"
+
+
+ISSUER = _addr(0x01)
+BRIX_ISSUER = _addr(0x02)
+DISTRIBUTOR = _addr(0x03)
+ALICE = _addr(0x04)
+BOB = _addr(0x05)
+BROKER = _addr(0x06)
+FOREIGN_ISSUER = _addr(0x07)
+NFT_A = nft_id_for(ISSUER)
+NFT_FOREIGN = nft_id_for(FOREIGN_ISSUER)
 BRIX_HEX = "4252495800000000000000000000000000000000"
 
 MINT = {
@@ -28,6 +45,30 @@ BURN = {
     "hash": "02" * 32,
     "ledger_index": 101,
     "date": 800000100,
+    "meta": {"AffectedNodes": []},
+}
+
+# Foreign-collection txs (nft_id embeds FOREIGN_ISSUER): the listener firehose
+# sees every network tx, so these must be filtered OUT of the history archive.
+FOREIGN_BURN = {
+    "TransactionType": "NFTokenBurn",
+    "Account": FOREIGN_ISSUER,
+    "Owner": BOB,
+    "NFTokenID": NFT_FOREIGN,
+    "hash": "F1" * 32,
+    "ledger_index": 201,
+    "date": 800009100,
+    "meta": {"AffectedNodes": []},
+}
+
+FOREIGN_MODIFY = {
+    "TransactionType": "NFTokenModify",
+    "Account": FOREIGN_ISSUER,
+    "Owner": BOB,
+    "NFTokenID": NFT_FOREIGN,
+    "hash": "F2" * 32,
+    "ledger_index": 202,
+    "date": 800009200,
     "meta": {"AffectedNodes": []},
 }
 

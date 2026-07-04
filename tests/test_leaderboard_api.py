@@ -95,23 +95,17 @@ def _mocked_request(method, path):
 
 @pytest.mark.filterwarnings("ignore::aiohttp.web_exceptions.NotAppKeyWarning")
 def test_leaderboard_200_ranked_rows(seeded_env):
-    req = _mocked_request(
-        "GET", "/api/leaderboard?board=users_swaps&period=all"
-    )
+    req = _mocked_request("GET", "/api/leaderboard?board=users_swaps&period=all")
     resp = _run(server.handle_leaderboard(req))
     assert resp.status == 200
 
 
 @pytest.mark.filterwarnings("ignore::aiohttp.web_exceptions.NotAppKeyWarning")
 def test_leaderboard_200_users_nfts_ranked(seeded_env):
-    req = _mocked_request(
-        "GET", "/api/leaderboard?board=users_nfts&period=week"
-    )
+    req = _mocked_request("GET", "/api/leaderboard?board=users_nfts&period=week")
     resp = _run(server.handle_leaderboard(req))
     assert resp.status == 200
-    body = asyncio.get_event_loop().run_until_complete(
-        _read_json(resp)
-    )
+    body = asyncio.get_event_loop().run_until_complete(_read_json(resp))
     assert body["board"] == "users_nfts"
     assert body["period"] == "week"
     assert len(body["rows"]) >= 1
@@ -125,17 +119,14 @@ async def _read_json(resp):
 
 @pytest.mark.filterwarnings("ignore::aiohttp.web_exceptions.NotAppKeyWarning")
 def test_leaderboard_bad_board_400(seeded_env):
-    req = _mocked_request(
-        "GET", "/api/leaderboard?board=nope&period=all")
+    req = _mocked_request("GET", "/api/leaderboard?board=nope&period=all")
     resp = _run(server.handle_leaderboard(req))
     assert resp.status == 400
 
 
 @pytest.mark.filterwarnings("ignore::aiohttp.web_exceptions.NotAppKeyWarning")
 def test_leaderboard_bad_period_400(seeded_env):
-    req = _mocked_request(
-        "GET", "/api/leaderboard?board=users_nfts&period=fortnight"
-    )
+    req = _mocked_request("GET", "/api/leaderboard?board=users_nfts&period=fortnight")
     resp = _run(server.handle_leaderboard(req))
     assert resp.status == 400
 
@@ -156,8 +147,7 @@ def test_leaderboard_me_block(seeded_env):
 
 @pytest.mark.filterwarnings("ignore::aiohttp.web_exceptions.NotAppKeyWarning")
 def test_leaderboard_cache_hit(seeded_env, monkeypatch):
-    req1 = _mocked_request(
-        "GET", "/api/leaderboard?board=users_nfts&period=week")
+    req1 = _mocked_request("GET", "/api/leaderboard?board=users_nfts&period=week")
     resp1 = _run(server.handle_leaderboard(req1))
     assert resp1.status == 200
 
@@ -166,7 +156,45 @@ def test_leaderboard_cache_hit(seeded_env, monkeypatch):
 
     monkeypatch.setattr(server.leaderboard, "compute", _boom)
 
-    req2 = _mocked_request(
-        "GET", "/api/leaderboard?board=users_nfts&period=week")
+    req2 = _mocked_request("GET", "/api/leaderboard?board=users_nfts&period=week")
     resp2 = _run(server.handle_leaderboard(req2))
     assert resp2.status == 200
+
+
+@pytest.mark.filterwarnings("ignore::aiohttp.web_exceptions.NotAppKeyWarning")
+def test_leaderboard_start_too_early_400(seeded_env):
+    req = _mocked_request("GET", "/api/leaderboard?board=users_nfts&period=week&start=1999-01-01")
+    resp = _run(server.handle_leaderboard(req))
+    assert resp.status == 400
+
+
+@pytest.mark.filterwarnings("ignore::aiohttp.web_exceptions.NotAppKeyWarning")
+def test_leaderboard_start_in_future_400(seeded_env):
+    req = _mocked_request("GET", "/api/leaderboard?board=users_nfts&period=week&start=2999-01-01")
+    resp = _run(server.handle_leaderboard(req))
+    assert resp.status == 400
+
+
+def test_lb_cache_bounded():
+    server._LB_CACHE.clear()
+    try:
+        for i in range(300):
+            server._lb_cache_put(("net", "b", "all", str(i)), {"rows": []}, float(i))
+        assert len(server._LB_CACHE) <= server._LB_CACHE_MAX
+        # oldest entries evicted first
+        assert ("net", "b", "all", "0") not in server._LB_CACHE
+        assert ("net", "b", "all", "299") in server._LB_CACHE
+    finally:
+        server._LB_CACHE.clear()
+
+
+def test_lb_cache_put_drops_expired():
+    server._LB_CACHE.clear()
+    try:
+        server._lb_cache_put(("k1",), {"rows": []}, 0.0)
+        # inserting much later (past TTL) purges the expired entry
+        server._lb_cache_put(("k2",), {"rows": []}, server._LB_CACHE_TTL + 1.0)
+        assert ("k1",) not in server._LB_CACHE
+        assert ("k2",) in server._LB_CACHE
+    finally:
+        server._LB_CACHE.clear()

@@ -11,11 +11,29 @@ import json
 from datetime import datetime
 from typing import Any
 
+from xrpl.core import addresscodec
+
 from lfg_core import nft_listener
 
 RIPPLE_EPOCH = 946684800
 
 _LSF_SELL = 0x00000001  # lsfSellNFToken on NFTokenOffer
+
+
+def issuer_account_hex(address: str) -> str:
+    """Classic r-address -> 40-hex uppercase AccountID (as embedded in NFTokenIDs)."""
+    return addresscodec.decode_classic_address(address).hex().upper()
+
+
+def nft_id_issuer_matches(nft_id: str, issuer_account_hex: str) -> bool:
+    """True iff `nft_id` is a 64-hex NFTokenID whose issuer field (bytes 4-24,
+    hex chars 8..48) equals `issuer_account_hex`. Used to scope firehose-derived
+    NFT events to our collection."""
+    return (
+        isinstance(nft_id, str)
+        and len(nft_id) == 64
+        and nft_id[8:48].upper() == issuer_account_hex.upper()
+    )
 
 
 def normalize_entry(entry: dict[str, Any]) -> dict[str, Any]:
@@ -81,11 +99,11 @@ def _is_zero_price(amount: Any) -> bool:
 def derive_nft_events(tx: dict[str, Any], *, nft_issuer: str) -> list[dict[str, Any]]:
     """Derive event rows for one normalized tx.
 
-    Per-collection scoping (by `nft_issuer`) happens upstream: raw rows only
-    enter this pipeline via issuer/nft_history-scoped scrapes, so every tx
-    passed here already belongs to the collection being processed.
-    `nft_issuer` is accepted and reserved for future in-function filtering
-    but is currently unused.
+    Per-collection scoping (by `nft_issuer`) happens in the CALLERS, not here:
+    the listener firehose and the rederive pass both filter the returned events
+    with `nft_id_issuer_matches(ev["nft_id"], issuer_account_hex(nft_issuer))`
+    — every NFTokenID embeds its issuer's AccountID at hex chars 8..48.
+    `nft_issuer` is accepted for signature stability but is unused in-function.
     """
     ttype = str(tx.get("TransactionType", ""))
     meta = tx.get("meta") or {}
@@ -231,7 +249,8 @@ def _brix_deltas(meta: dict[str, Any], brix_issuer: str, brix_hex: str) -> dict[
         if brix_issuer not in (low, high):
             continue
         holder = high if low == brix_issuer else low
-        assert isinstance(holder, str)
+        if not isinstance(holder, str):
+            continue  # malformed node (firehose input): skip, don't crash
         sign = 1.0 if holder == low else -1.0
         prev_bal = (wrapper.get("PreviousFields") or {}).get("Balance") or {}
         old = float(prev_bal.get("value") or 0.0)

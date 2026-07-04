@@ -7,6 +7,7 @@
 
 import asyncio
 import base64
+import datetime
 import functools
 import hashlib
 import hmac
@@ -459,8 +460,22 @@ async def handle_account(request):
 
 _LB_CACHE: dict[tuple, tuple[float, dict]] = {}
 _LB_CACHE_TTL = 60.0
+_LB_CACHE_MAX = 256
 _LB_FULL_LIMIT = 500
 _LB_PAGE_SIZE = 25
+_LB_MIN_START = datetime.date(2013, 1, 1)  # ~XRPL genesis; clamp `start` below this
+
+
+def _lb_cache_put(key: tuple, value: dict, now_mono: float) -> None:
+    """Insert into the leaderboard cache, dropping expired entries and — if
+    still over _LB_CACHE_MAX — evicting the oldest by timestamp (bounds memory
+    against arbitrary `start` values fanning out the key space)."""
+    for k in [k for k, (ts, _) in _LB_CACHE.items() if now_mono - ts >= _LB_CACHE_TTL]:
+        del _LB_CACHE[k]
+    _LB_CACHE[key] = (now_mono, value)
+    while len(_LB_CACHE) > _LB_CACHE_MAX:
+        oldest = min(_LB_CACHE, key=lambda k: _LB_CACHE[k][0])
+        del _LB_CACHE[oldest]
 
 
 def _lb_get_conns(request):
@@ -514,6 +529,14 @@ async def handle_leaderboard(request):
     if board not in leaderboard.BOARDS:
         return web.json_response({"error": f"unknown board: {board!r}"}, status=400)
 
+    if start is not None:
+        try:
+            start_date = datetime.date.fromisoformat(start)
+        except ValueError:
+            return web.json_response({"error": f"bad start date: {start!r}"}, status=400)
+        if start_date < _LB_MIN_START or start_date > datetime.date.today():
+            return web.json_response({"error": f"start out of range: {start!r}"}, status=400)
+
     network = config.XRPL_NETWORK
     cache_key = (network, board, period, start)
     now_mono = time.monotonic()
@@ -529,23 +552,40 @@ async def handle_leaderboard(request):
         except ValueError as e:
             return web.json_response({"error": str(e)}, status=400)
 
-        hconn, oconn = _lb_get_conns(request)
+        system_accounts = _lb_system_accounts()
+
+        def _compute_sync():
+            # Runs on an executor thread so sqlite work never stalls the event
+            # loop. Python's sqlite3 here is not serialized (threadsafety=1),
+            # so open short-lived connections IN this thread rather than
+            # sharing the loop-thread conns across threads.
+            sqlite3 = __import__("sqlite3")
+            hconn = history_store.init_history_db(history_store.history_db_path(network))
+            oconn = nft_index.init_db(nft_index.index_db_path(network))
+            oconn.row_factory = sqlite3.Row
+            try:
+                return leaderboard.compute(
+                    board,
+                    hconn,
+                    oconn,
+                    start_ts=start_ts,
+                    end_ts=end_ts,
+                    network=network,
+                    system_accounts=system_accounts,
+                    limit=_LB_FULL_LIMIT,
+                )
+            finally:
+                hconn.close()
+                oconn.close()
+
         try:
-            full_rows = leaderboard.compute(
-                board,
-                hconn,
-                oconn,
-                start_ts=start_ts,
-                end_ts=end_ts,
-                network=network,
-                system_accounts=_lb_system_accounts(),
-                limit=_LB_FULL_LIMIT,
-            )
+            full_rows = await asyncio.get_event_loop().run_in_executor(None, _compute_sync)
         except ValueError as e:
             return web.json_response({"error": str(e)}, status=400)
-        _LB_CACHE[cache_key] = (
-            now_mono,
+        _lb_cache_put(
+            cache_key,
             {"rows": full_rows, "start_ts": start_ts, "end_ts": end_ts},
+            now_mono,
         )
 
     page_rows = full_rows[:_LB_PAGE_SIZE]
