@@ -82,9 +82,16 @@ def apply_alpha_mask(layer_path: str, mask_path: str, out_dir: str) -> str:
 
 def _nose_index(layers: list[tuple[str, str, str]]) -> int:
     """Index at which to insert the nose: directly after the Eyes layer, else
-    the canonical Eyes slot (before the first layer that sorts after Eyes)."""
-    for i, (trait_type, _v, _p) in enumerate(layers):
-        if trait_type == "Eyes":
+    the canonical Eyes slot (before the first layer that sorts after Eyes).
+
+    TOP_TRAITS Eyes (Wavy / Laser…) are skipped as anchors: compose z-sorts
+    them to the very end of the list (z_override 95, above Head/Accessory),
+    so anchoring the nose on a floated effect Eyes tuple would drag it to
+    the top of the stack instead of its face slot below Head. With the
+    effect Eyes skipped, the canonical-slot fallback places the nose where
+    it belongs."""
+    for i, (trait_type, value, _p) in enumerate(layers):
+        if trait_type == "Eyes" and {"trait_type": trait_type, "value": value} not in TOP_TRAITS:
             return i + 1
     eyes_rank = swap_meta.TRAIT_ORDER.index("Eyes")
     for i, (trait_type, _v, _p) in enumerate(layers):

@@ -161,3 +161,45 @@ def test_inject_and_mask_nose_fallback_when_no_eyes(tmp_path):
     out = _run(ape_face.inject_and_mask(layers, "ape", "Ape Gold", store, str(tmp_path / "gen")))
     types = [t for t, _v, _p in out]
     assert types == ["Eyebrows", "Nose", "Head"]  # nose at canonical Eyes slot
+
+
+def test_compose_nose_stays_below_head_with_effect_eyes(tmp_path, monkeypatch):
+    """Regression: compose z-sorts TOP_TRAITS Eyes (e.g. Laser Eyes, z 95) to
+    the very end of the layer list BEFORE nose injection runs. _nose_index
+    must not anchor on that floated effect tuple, or the nose lands at the
+    top of the stack (above Head/Accessory/the effect) instead of its face
+    slot below Head."""
+    from lfg_core import swap_compose, trait_config
+
+    captured = {}
+
+    def fake_run(files, output_path, is_video):
+        captured["files"] = list(files)
+        with open(output_path, "wb") as f:
+            f.write(b"x")
+
+    monkeypatch.setattr(swap_compose, "_run_ffmpeg", fake_run)
+
+    store, ape = _ape_store_with_assets(tmp_path)
+    for trait_type, value in [("Body", "Ape Gold"), ("Eyes", "Laser Eyes"), ("Head", "Cap")]:
+        d = ape / trait_type
+        d.mkdir(exist_ok=True)
+        Image.new("RGBA", (4, 4), (0, 0, 0, 255)).save(d / f"{value}.png")
+
+    attrs = [
+        {"trait_type": "Body", "value": "Ape Gold"},
+        {"trait_type": "Eyes", "value": "Laser Eyes"},
+        {"trait_type": "Head", "value": "Cap"},
+    ]
+    trait_config.reset_config()
+    try:
+        _run(swap_compose.compose_nft(attrs, "ape", store, "out", out_dir=str(tmp_path / "gen")))
+    finally:
+        trait_config.reset_config()
+
+    names = [os.path.basename(f) for f in captured["files"]]
+    # Final stack: nose below Head AND below the floated effect Eyes.
+    assert names.index("Nose.png") < names.index("Cap.png")
+    assert names.index("Nose.png") < names.index("Laser Eyes.png")
+    # Byte-identical to the pre-config-sort output for this combo.
+    assert names == ["Ape Gold.png", "Nose.png", "Cap.png", "Laser Eyes.png"]
