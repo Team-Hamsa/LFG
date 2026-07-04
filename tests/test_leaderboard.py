@@ -4,6 +4,8 @@ import sqlite3
 import sys
 from datetime import datetime, timezone
 
+import pytest
+
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 os.environ.setdefault("DISCORD_BOT_TOKEN", "x")
 os.environ.setdefault("XUMM_API_KEY", "x")
@@ -67,11 +69,8 @@ def test_period_bounds_today_and_anchored_month():
 
 def test_period_bounds_unknown_raises():
     now = int(datetime(2026, 7, 4, tzinfo=timezone.utc).timestamp())
-    try:
+    with pytest.raises(ValueError):
         leaderboard.period_bounds("century", None, now=now)
-        assert False, "expected ValueError"
-    except ValueError:
-        pass
 
 
 def test_users_nfts_alltime_and_windowed():
@@ -140,13 +139,10 @@ def test_users_builds_counts_only_rebirths():
 
 def test_compute_unknown_board_raises():
     h, o = _dbs()
-    try:
+    with pytest.raises(ValueError):
         leaderboard.compute(
             "nope", h, o, start_ts=0, end_ts=1, network="testnet", system_accounts=SYS
         )
-        assert False, "expected ValueError"
-    except ValueError:
-        pass
 
 
 def test_brix_rich_alltime_and_windowed():
