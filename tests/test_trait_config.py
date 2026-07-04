@@ -246,9 +246,9 @@ def test_default_config_parity_with_legacy_constants():
     cfg = trait_config.get_config()  # loads repo-root trait_config.yaml
     assert cfg.layer_order() == TRAIT_ORDER
     for top in ape_face.TOP_TRAITS:
-        assert cfg.z_for(top["trait_type"], top["value"]) > max(
-            layer.z for layer in cfg.layers
-        ), f"{top} must render above all layers"
+        assert cfg.z_for(top["trait_type"], top["value"]) > max(layer.z for layer in cfg.layers), (
+            f"{top} must render above all layers"
+        )
     assert cfg.universal_layers == frozenset({"Accessory", "Back"})
     assert cfg.swap_allowed("ape", "skeleton", "Clothing")
     assert cfg.swap_allowed("male", "female", "Eyes")
