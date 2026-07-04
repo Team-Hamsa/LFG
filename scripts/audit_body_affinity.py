@@ -43,16 +43,13 @@ def _dir_tree(layers_dir: str) -> dict[str, dict[str, set[str]]]:
 
 def run(db_path: str, layers_dir: str, out_dir: str) -> dict:
     conn = sqlite3.connect(db_path)
-    rows = conn.execute(
-        "SELECT nft_number, body, attributes_json FROM onchain_nfts"
-    ).fetchall()
+    rows = conn.execute("SELECT nft_number, body, attributes_json FROM onchain_nfts").fetchall()
     conn.close()
     counts = affinity_audit.count_affinities(rows)
     dir_tree = _dir_tree(layers_dir)
     if not any(values for types in dir_tree.values() for values in types.values()):
         raise SystemExit(
-            f"layers dir '{layers_dir}' contains no trait files — sync layers "
-            "before auditing"
+            f"layers dir '{layers_dir}' contains no trait files — sync layers before auditing"
         )
     misplacements, gaps = affinity_audit.cross_check(counts, dir_tree)
     os.makedirs(out_dir, exist_ok=True)

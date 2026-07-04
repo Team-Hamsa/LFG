@@ -213,6 +213,8 @@ def test_run_end_to_end(tmp_path):
 def test_run_raises_systemexit_on_empty_layers_dir(tmp_path):
     import sqlite3
 
+    import pytest
+
     db = tmp_path / "onchain.db"
     conn = sqlite3.connect(db)
     conn.execute(
@@ -226,8 +228,5 @@ def test_run_raises_systemexit_on_empty_layers_dir(tmp_path):
 
     from scripts.audit_body_affinity import run
 
-    try:
+    with pytest.raises(SystemExit, match="no trait files"):
         run(str(db), str(layers), str(tmp_path / "reports"))
-        assert False, "expected SystemExit"
-    except SystemExit as exc:
-        assert "no trait files" in str(exc)
