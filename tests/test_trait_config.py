@@ -320,3 +320,51 @@ def test_default_config_parity_with_legacy_constants():
     assert cfg.swap_allowed("male", "female", "Eyes")
     assert not cfg.swap_allowed("male", "female", "Clothing")
     trait_config.reset_config()
+
+
+def test_compose_ordering_uses_config_sort():
+    import inspect
+
+    from lfg_core import swap_compose
+
+    src = inspect.getsource(swap_compose)
+    assert "sort_attributes" in src, "compose must order layers via trait_config"
+
+
+def test_compose_nft_resolves_top_trait_after_accessory(tmp_path, monkeypatch):
+    """Behavioral check for the same rule: a stub store records the order
+    compose_nft resolves layers in. A Wavy-Eyes attr (z_override 95) must
+    resolve AFTER Accessory (z 90) — i.e. ordering flows from trait_config's
+    z-order, not the legacy TRAIT_ORDER position (where Eyes sorts before
+    Accessory). Non-ape body keeps the stub store simple (no resolve_asset
+    needed for the ape nose/mask structural assets)."""
+    from lfg_core import swap_compose
+
+    class _RecordingStore:
+        def __init__(self) -> None:
+            self.order: list[str] = []
+
+        async def resolve(self, body, trait_type, value):
+            self.order.append(trait_type)
+            return f"/fake/{trait_type}.png"
+
+    def fake_run(files, output_path, is_video):
+        with open(output_path, "wb") as f:
+            f.write(b"x")
+
+    monkeypatch.setattr(swap_compose, "_run_ffmpeg", fake_run)
+
+    store = _RecordingStore()
+    attrs = [
+        {"trait_type": "Accessory", "value": "Hat"},
+        {"trait_type": "Eyes", "value": "Wavy"},
+    ]
+
+    trait_config.reset_config()
+    try:
+        asyncio.run(swap_compose.compose_nft(attrs, "female", store, "out", out_dir=str(tmp_path)))
+    finally:
+        asyncio.set_event_loop(asyncio.new_event_loop())
+        trait_config.reset_config()
+
+    assert store.order.index("Eyes") > store.order.index("Accessory")

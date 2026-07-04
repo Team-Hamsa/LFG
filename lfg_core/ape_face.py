@@ -24,6 +24,8 @@ from lfg_core import swap_meta
 # Effect traits that render on top of everything else (e.g. laser eyes).
 # Lives here (not swap_compose) so the masking rule can reuse it without a
 # circular import; swap_compose imports TOP_TRAITS from this module.
+# Source of truth is trait_config.yaml (z_overrides / layers). Keep in sync;
+# test_default_config_parity_with_legacy_constants enforces the parity.
 TOP_TRAITS: list[dict[str, str]] = [
     {"trait_type": "Eyes", "value": "Wavy"},
     {"trait_type": "Mouth", "value": "Rainbow Puke"},
