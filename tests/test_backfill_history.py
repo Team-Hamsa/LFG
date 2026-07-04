@@ -267,3 +267,68 @@ def test_rederive_filters_foreign_collection(tmp_path):
     assert counts["nft_events"] == 1
     rows = conn.execute("SELECT event, nft_id FROM nft_events").fetchall()
     assert [(r["event"], r["nft_id"]) for r in rows] == [("mint", fx.NFT_A)]
+
+
+def test_issuers_for_network_cross_env(monkeypatch):
+    """--network mainnet under a testnet env must resolve mainnet issuers
+    (regression: mainnet rederive under testnet .env filtered out all events).
+
+    config is patched rather than read: in full-suite order another module may
+    have frozen lfg_core.config before this file's env-guard preamble ran."""
+    import importlib
+
+    dh = importlib.import_module("scripts.derive_history_events")
+    from lfg_core import config
+
+    monkeypatch.setattr(config, "XRPL_NETWORK", "testnet")
+    monkeypatch.setattr(config, "SWAP_ISSUER_ADDRESS", "rEnvNativeNftIssuer")
+    monkeypatch.setattr(config, "SWAP_OFFER_ISSUER", "rEnvNativeBrixIssuer")
+    nft, brix = dh.issuers_for_network("mainnet")
+    assert nft == "rLfgoMintj3KBcs4s2XKtquvDwEte2kYfJ"
+    assert brix == "rLfgoBriX5ZaMP32mtc7RUZJcjnisKh2Px"
+    assert dh.issuers_for_network("testnet") == (
+        "rEnvNativeNftIssuer",
+        "rEnvNativeBrixIssuer",
+    )
+
+
+def test_audit_history_scopes_by_taxon(tmp_path):
+    """Issuer-minted other-taxon tokens (e.g. old taxon-1337 tests) must not
+    count as drift against the taxon-scoped on-chain index."""
+    import importlib
+    import sqlite3
+
+    ah = importlib.import_module("scripts.audit_history")
+
+    # Real mainnet taxon-1337 token id (issuer rLfgoMint..., decodes to 1337)
+    odd = "00010000D1AE1BC312BEF9C68233FB0C8CF6A338F7C227BEDCBA2C8200000020"
+    assert ah.nftoken_taxon(odd) == 1337
+
+    h = history_store.init_history_db(str(tmp_path / "h.db"))
+    # One collection token (taxon 1760) + the odd 1337 token, both minted.
+    coll = "000813886B27B69875E7C6C1D0D9BB1EBF162F1E67DF54C05C77D2EE00000001"
+    for nft_id in (coll, odd):
+        history_store.insert_nft_event(
+            h,
+            {
+                "tx_hash": nft_id[:10],
+                "nft_id": nft_id,
+                "nft_number": 1,
+                "event": "mint",
+                "from_addr": None,
+                "to_addr": "rI",
+                "price_drops": None,
+                "price_token": None,
+                "ledger_index": 1,
+                "ts": 1,
+            },
+        )
+    h.commit()
+    o = sqlite3.connect(":memory:")
+    o.execute("CREATE TABLE onchain_nfts (nft_id TEXT PRIMARY KEY, is_burned INT DEFAULT 0)")
+    o.execute("INSERT INTO onchain_nfts VALUES (?, 0)", (coll,))
+
+    unscoped = ah.audit_history(h, o)
+    assert unscoped["drift"] == 1
+    scoped = ah.audit_history(h, o, taxon=ah.nftoken_taxon(coll))
+    assert scoped["drift"] == 0

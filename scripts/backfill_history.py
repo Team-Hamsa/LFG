@@ -25,13 +25,20 @@ REPO_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
 sys.path.insert(0, REPO_ROOT)
 sys.path.insert(0, os.path.join(REPO_ROOT, "scripts"))
 
+from websockets.exceptions import WebSocketException  # noqa: E402
 from xrpl.asyncio.clients import AsyncWebsocketClient  # noqa: E402
+from xrpl.asyncio.clients.exceptions import XRPLWebsocketException  # noqa: E402
 from xrpl.models.requests import Request  # noqa: E402
 
 from lfg_core import history_events, history_store  # noqa: E402
 
 PAGE_LIMIT = 200
 REQUEST_TIMEOUT = 60
+# clio rate-limits public endpoints ('slowDown'); pace requests and back off.
+THROTTLE_SECONDS = 0.25
+RETRYABLE_ERRORS = {"slowDown", "tooBusy"}
+RETRY_MAX = 8
+RETRY_BASE_DELAY = 5.0
 VALID_SOURCES = {"issuer", "brix", "distributor", "nfts"}
 
 
@@ -122,9 +129,12 @@ async def _amain() -> int:
     if unknown:
         parser.error(f"unknown --sources value(s): {', '.join(sorted(unknown))}")
 
+    from derive_history_events import issuers_for_network
+
     net = bf.NETWORKS[args.network]
     clio = net["clio"]
-    issuer = net["issuer"] or config.SWAP_ISSUER_ADDRESS
+    issuer, brix_issuer = issuers_for_network(args.network)
+    issuer = net["issuer"] or issuer
     conn = history_store.init_history_db(history_store.history_db_path(args.network))
 
     if args.derive_only:
@@ -136,18 +146,46 @@ async def _amain() -> int:
     async with AsyncWebsocketClient(clio) as client:
 
         async def request_fn(req: dict[str, Any]) -> dict[str, Any]:
-            r = await asyncio.wait_for(
-                client.request(Request.from_dict(req)), timeout=REQUEST_TIMEOUT
-            )
-            if not r.is_successful():
+            delay = RETRY_BASE_DELAY
+            for attempt in range(RETRY_MAX):
+                await asyncio.sleep(THROTTLE_SECONDS)
+                try:
+                    r = await asyncio.wait_for(
+                        client.request(Request.from_dict(req)), timeout=REQUEST_TIMEOUT
+                    )
+                except (
+                    TimeoutError,
+                    asyncio.TimeoutError,
+                    ConnectionError,
+                    OSError,
+                    WebSocketException,
+                    XRPLWebsocketException,
+                ) as e:
+                    # Transient transport trouble gets the same bounded backoff as
+                    # slowDown. A torn-down websocket will keep failing and exhaust
+                    # the attempts — the run is cursor-resumable, so that is safe.
+                    if attempt < RETRY_MAX - 1:
+                        logging.warning(f"{req['method']}: {e!r}; backing off {delay:.0f}s")
+                        await asyncio.sleep(delay)
+                        delay = min(delay * 2, 120.0)
+                        continue
+                    raise
+                if r.is_successful():
+                    return r.result
+                error = r.result.get("error") if isinstance(r.result, dict) else None
+                if error in RETRYABLE_ERRORS and attempt < RETRY_MAX - 1:
+                    logging.warning(f"{req['method']}: {error}; backing off {delay:.0f}s")
+                    await asyncio.sleep(delay)
+                    delay = min(delay * 2, 120.0)
+                    continue
                 raise RuntimeError(f"{req['method']} failed: {r.result}")
-            return r.result
+            raise RuntimeError(f"{req['method']} failed after {RETRY_MAX} attempts")
 
         if "issuer" in wanted:
             n = await backfill_account_tx(conn, request_fn, issuer, "issuer_tx")
             logging.info(f"issuer_tx: +{n}")
         if "brix" in wanted:
-            n = await backfill_account_tx(conn, request_fn, config.SWAP_OFFER_ISSUER, "brix_tx")
+            n = await backfill_account_tx(conn, request_fn, brix_issuer, "brix_tx")
             logging.info(f"brix_tx: +{n}")
         if "distributor" in wanted and args.distributor:
             n = await backfill_account_tx(conn, request_fn, args.distributor, "distributor_tx")

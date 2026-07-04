@@ -23,6 +23,7 @@ REPO_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
 sys.path.insert(0, REPO_ROOT)
 sys.path.insert(0, os.path.join(REPO_ROOT, "scripts"))
 
+from derive_history_events import issuers_for_network  # noqa: E402
 from xrpl.asyncio.clients import AsyncWebsocketClient  # noqa: E402
 from xrpl.models.requests import Request  # noqa: E402
 
@@ -101,7 +102,7 @@ async def _amain() -> int:
 
     net = bf.NETWORKS[args.network]
     clio = net["clio"]
-    brix_issuer = config.SWAP_OFFER_ISSUER
+    brix_issuer = issuers_for_network(args.network)[1]
     amm_account = args.amm_account or config.BRIX_AMM_ACCOUNT
     snap_date = args.date or datetime.now(timezone.utc).strftime("%Y-%m-%d")
 

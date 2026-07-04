@@ -20,6 +20,25 @@ sys.path.insert(0, REPO_ROOT)
 
 from lfg_core import config, history_events, history_store  # noqa: E402
 
+# Per-network issuer defaults so `--network X` works regardless of the
+# process env's XRPL_NETWORK (config's defaults follow the env, which made a
+# mainnet rederive under a testnet .env silently filter every event out).
+NETWORK_ISSUERS = {
+    "mainnet": {
+        "nft": "rLfgoMintj3KBcs4s2XKtquvDwEte2kYfJ",
+        "brix": "rLfgoBriX5ZaMP32mtc7RUZJcjnisKh2Px",
+    },
+}
+
+
+def issuers_for_network(network: str) -> tuple[str, str]:
+    """(nft_issuer, brix_issuer) for a named network; config supplies the
+    values for the env-native network (testnet: the SEED account)."""
+    net = NETWORK_ISSUERS.get(network)
+    if net is not None and network != config.XRPL_NETWORK:
+        return net["nft"], net["brix"]
+    return config.SWAP_ISSUER_ADDRESS, config.SWAP_OFFER_ISSUER
+
 
 def rederive(
     hconn: Any,
@@ -70,7 +89,14 @@ def main() -> int:
     parser.add_argument("--distributor")
     args = parser.parse_args()
     hconn = history_store.init_history_db(history_store.history_db_path(args.network))
-    counts = rederive(hconn, args.network, distributor=args.distributor)
+    nft_issuer, brix_issuer = issuers_for_network(args.network)
+    counts = rederive(
+        hconn,
+        args.network,
+        distributor=args.distributor,
+        nft_issuer=nft_issuer,
+        brix_issuer=brix_issuer,
+    )
     print(f"[{args.network}] derived: {counts}")
     return 0
 
