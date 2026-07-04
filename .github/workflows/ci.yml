@@ -27,4 +27,20 @@ jobs:
           .venv/bin/pip install -r requirements.txt -r requirements-dev.txt
 
       - name: Run gate (ruff, mypy, gitleaks, pytest)
+        # The validate-trait-config hook runs scripts/validate_trait_config.py
+        # directly (not via pytest), so it doesn't get the env-guard preamble
+        # test files copy (tests/test_trait_config.py etc.) — its import chain
+        # (lfg_core.layer_store -> lfg_core.config) calls _require() at module
+        # load time and crashes without these. CI has no .env/secrets, so
+        # supply the same dummy values the test env-guard preamble uses.
+        env:
+          XUMM_API_KEY: test
+          XUMM_API_SECRET: test
+          SEED: sEdTM1uX8pu2do5XvTnutH6HsouMaM2
+          TOKEN_ISSUER_ADDRESS: rrrrrrrrrrrrrrrrrrrrrhoLvTp
+          TOKEN_CURRENCY_HEX: 4C46474F00000000000000000000000000000000
+          BUNNY_CDN_ACCESS_KEY: test
+          BUNNY_CDN_STORAGE_ZONE: test
+          LAYER_SOURCE: local
+          BUNNY_PULL_ZONE: nft.pullzone.example
         run: .venv/bin/pre-commit run --all-files --hook-stage pre-push --show-diff-on-failure
