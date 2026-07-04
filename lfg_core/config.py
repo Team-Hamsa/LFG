@@ -169,6 +169,9 @@ SWAP_OFFER_AMOUNT = os.getenv("SWAP_OFFER_AMOUNT", "10")
 SWAP_XRP_FEE_BUFFER = os.getenv("SWAP_XRP_FEE_BUFFER", "1.05")
 SWAP_MAX_NFT_NUMBER = int(os.getenv("SWAP_MAX_NFT_NUMBER", "3535"))
 SWAP_RECORDS_DIR = os.getenv("SWAP_RECORDS_DIR", "swap_records")
+# Distributor account for BRIX airdrops; used to classify history archive
+# BRIX events as "airdrop" vs plain "payment".
+BRIX_DISTRIBUTOR_ADDRESS = os.getenv("BRIX_DISTRIBUTOR_ADDRESS")
 NFT_SCHEMA_URL = os.getenv(
     "NFT_SCHEMA_URL", "ipfs://QmNpi8rcXEkohca8iXu7zysKKSJYqCvBJn3xJwga8jXqWU"
 )

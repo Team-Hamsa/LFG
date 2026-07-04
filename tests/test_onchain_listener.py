@@ -291,3 +291,40 @@ def test_listen_path_burn_deletes_trait_token():
         )
     )
     assert es.read_trait_tokens(conn) == [], "Burn did not delete trait_tokens row"
+
+
+async def _none_token(nft_id):
+    return None
+
+
+async def _none_meta(uri_hex):
+    return None
+
+
+def test_stream_tx_feeds_history(tmp_path):
+    from lfg_core import history_store
+    from tests.fixtures import history_txs as fx
+
+    hconn = history_store.init_history_db(str(tmp_path / "h.db"))
+    conn = _conn()
+    ctx = {
+        "nft_issuer": fx.ISSUER,
+        "brix_issuer": fx.BRIX_ISSUER,
+        "brix_hex": fx.BRIX_HEX,
+        "distributor": None,
+        "numbers": {},
+    }
+    tx = dict(fx.AIRDROP)  # BRIX-only tx: index apply is a no-op, history isn't
+    _run(
+        oln.process_stream_tx(
+            conn,
+            tx,
+            fetch_token=_none_token,
+            fetch_meta=_none_meta,
+            is_ours=lambda t: False,
+            history_conn=hconn,
+            history_ctx=ctx,
+        )
+    )
+    assert hconn.execute("SELECT COUNT(*) FROM xrpl_txs").fetchone()[0] == 1
+    assert hconn.execute("SELECT COUNT(*) FROM brix_events").fetchone()[0] == 2
