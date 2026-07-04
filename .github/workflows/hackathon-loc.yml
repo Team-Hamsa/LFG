@@ -27,10 +27,10 @@ jobs:
 
       - name: Commit if changed
         run: |
-          if ! git diff --quiet README.md; then
+          git add README.md assets/hackathon_loc.svg
+          if ! git diff --quiet --cached; then
             git config user.name "github-actions[bot]"
             git config user.email "github-actions[bot]@users.noreply.github.com"
-            git add README.md
             git commit -m "docs(README): refresh hackathon LoC stats [skip ci]"
             git push
           fi

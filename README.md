@@ -48,7 +48,9 @@ Everything below was designed, built, and merged during the Make Waves sprint. P
 ### Lines of Code
 
 <!-- hackathon-loc:start -->
-*Hand-written code merged since the hackathon baseline (`e296308`, 2026-06-19 — last commit before June 21), measured by `git diff --numstat`. Counts `.py`/`.js`/`.css`/`.html` only; docs, markdown, data files (CSV/JSON manifests), dependency lists, and the legacy/backup trees are excluded. Updated automatically on every push to `main`.*
+<img src="assets/hackathon_loc.svg" alt="Hackathon code growth bar" width="728">
+
+*Hand-written code merged since the hackathon baseline (`e296308`, 2026-06-19 — last commit before June 21, 12,080 lines), measured by `git diff --numstat`. Counts `.py`/`.js`/`.css`/`.html` only; docs, markdown, data files (CSV/JSON manifests), dependency lists, and the legacy/backup trees are excluded. Updated automatically on every push to `main`.*
 
 | Category | Lines added | Lines removed | Net |
 |---|---:|---:|---:|
