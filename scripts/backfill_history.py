@@ -127,9 +127,12 @@ async def _amain() -> int:
     if unknown:
         parser.error(f"unknown --sources value(s): {', '.join(sorted(unknown))}")
 
+    from derive_history_events import issuers_for_network
+
     net = bf.NETWORKS[args.network]
     clio = net["clio"]
-    issuer = net["issuer"] or config.SWAP_ISSUER_ADDRESS
+    issuer, brix_issuer = issuers_for_network(args.network)
+    issuer = net["issuer"] or issuer
     conn = history_store.init_history_db(history_store.history_db_path(args.network))
 
     if args.derive_only:
@@ -173,7 +176,7 @@ async def _amain() -> int:
             n = await backfill_account_tx(conn, request_fn, issuer, "issuer_tx")
             logging.info(f"issuer_tx: +{n}")
         if "brix" in wanted:
-            n = await backfill_account_tx(conn, request_fn, config.SWAP_OFFER_ISSUER, "brix_tx")
+            n = await backfill_account_tx(conn, request_fn, brix_issuer, "brix_tx")
             logging.info(f"brix_tx: +{n}")
         if "distributor" in wanted and args.distributor:
             n = await backfill_account_tx(conn, request_fn, args.distributor, "distributor_tx")
