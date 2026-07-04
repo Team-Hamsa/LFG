@@ -269,21 +269,26 @@ def test_rederive_filters_foreign_collection(tmp_path):
     assert [(r["event"], r["nft_id"]) for r in rows] == [("mint", fx.NFT_A)]
 
 
-def test_issuers_for_network_cross_env():
+def test_issuers_for_network_cross_env(monkeypatch):
     """--network mainnet under a testnet env must resolve mainnet issuers
-    (regression: mainnet rederive under testnet .env filtered out all events)."""
+    (regression: mainnet rederive under testnet .env filtered out all events).
+
+    config is patched rather than read: in full-suite order another module may
+    have frozen lfg_core.config before this file's env-guard preamble ran."""
     import importlib
 
     dh = importlib.import_module("scripts.derive_history_events")
     from lfg_core import config
 
-    assert config.XRPL_NETWORK == "testnet"  # env-guard preamble pins this
+    monkeypatch.setattr(config, "XRPL_NETWORK", "testnet")
+    monkeypatch.setattr(config, "SWAP_ISSUER_ADDRESS", "rEnvNativeNftIssuer")
+    monkeypatch.setattr(config, "SWAP_OFFER_ISSUER", "rEnvNativeBrixIssuer")
     nft, brix = dh.issuers_for_network("mainnet")
     assert nft == "rLfgoMintj3KBcs4s2XKtquvDwEte2kYfJ"
     assert brix == "rLfgoBriX5ZaMP32mtc7RUZJcjnisKh2Px"
     assert dh.issuers_for_network("testnet") == (
-        config.SWAP_ISSUER_ADDRESS,
-        config.SWAP_OFFER_ISSUER,
+        "rEnvNativeNftIssuer",
+        "rEnvNativeBrixIssuer",
     )
 
 
