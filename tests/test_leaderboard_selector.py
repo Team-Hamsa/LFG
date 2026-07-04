@@ -20,7 +20,7 @@ def test_index_has_category_row():
     for cat in ("users", "nfts", "brix"):
         assert f'data-cat="{cat}"' in html
     # Sub-board chips are JS-rendered from CATEGORIES; none hardcoded in HTML.
-    assert 'data-board=' not in html
+    assert "data-board=" not in html
     assert 'id="lb-boards"' in html
 
 
@@ -30,13 +30,17 @@ def test_app_js_categories_map_covers_all_8_boards():
     assert m, "CATEGORIES map missing from app.js"
     block = m.group(0)
     for board in (
-        "users_nfts", "users_swaps", "users_builds",
-        "nft_swaps", "nft_rarity",
-        "brix_rich", "brix_lp", "brix_earned",
+        "users_nfts",
+        "users_swaps",
+        "users_builds",
+        "nft_swaps",
+        "nft_rarity",
+        "brix_rich",
+        "brix_lp",
+        "brix_earned",
     ):
         assert board in block, f"{board} missing from CATEGORIES"
-    for label in ("Holders", "Swappers", "Builders", "Swaps", "Rarest",
-                  "Richlist", "LP", "Earned"):
+    for label in ("Holders", "Swappers", "Builders", "Swaps", "Rarest", "Richlist", "LP", "Earned"):
         assert f"'{label}'" in block, f"label {label} missing"
     assert "Hot" not in block  # renamed to Swaps
 
