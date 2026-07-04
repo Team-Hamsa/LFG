@@ -24,8 +24,11 @@ def _canonical(attributes: list[dict[str, Any]]) -> list[dict[str, Any]]:
 
 
 async def resolve_layer(store: Any, cfg: Any, body: str, trait_type: str, value: str) -> str | None:
-    """Own dir first; else any matrix-permitted foreign dir (cross-body swaps
-    render the source body's asset). Affinity narrower than the matrix wins.
+    """Own dir first, then layers/shared/ (both via store.resolve — shared
+    values are body-independent and bypass matrix gating, short-circuiting
+    before the foreign loop); else any matrix-permitted foreign dir
+    (cross-body swaps render the source body's asset). Affinity narrower
+    than the matrix wins.
 
     NOTE: the foreign-body loop is FIRST-MATCH in list_bodies() order
     (alphabetical). That's only deterministic-by-construction because of a

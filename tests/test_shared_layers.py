@@ -17,7 +17,28 @@ os.environ.setdefault("BUNNY_PULL_ZONE", "nft.pullzone.example")
 
 import asyncio  # noqa: E402
 
+from lfg_core import swap_compose, trait_config  # noqa: E402
 from lfg_core.layer_store import CdnLayerStore, LocalLayerStore  # noqa: E402
+
+# Minimal trait config mirroring tests/test_cross_body_resolve.py: ape<->skeleton
+# may swap Head/Clothing; Eyes is NOT matrix-permitted between them.
+CFG = """
+version: 1
+layers:
+  - {name: Background, z: 10}
+  - {name: Back, z: 20}
+  - {name: Body, z: 30}
+  - {name: Clothing, z: 40}
+  - {name: Mouth, z: 50}
+  - {name: Eyebrows, z: 60}
+  - {name: Eyes, z: 70}
+  - {name: Head, z: 80}
+  - {name: Accessory, z: 90}
+swap_matrix:
+  universal_layers: [Accessory, Back]
+  pairs:
+    - {bodies: [ape, skeleton], layers: [Head, Clothing]}
+"""
 
 
 def test_shared_dir_union(tmp_path):
@@ -63,6 +84,46 @@ def test_shared_dir_unions_trait_types(tmp_path):
     store = LocalLayerStore(str(tmp_path))
     try:
         assert asyncio.run(store.list_trait_types("male")) == ["Backdrop", "Background"]
+    finally:
+        asyncio.set_event_loop(asyncio.new_event_loop())
+
+
+def test_resolve_layer_shared_hop_bypasses_matrix(tmp_path):
+    cfg_path = tmp_path / "cfg.yaml"
+    cfg_path.write_text(CFG)
+    cfg = trait_config.load_config(str(cfg_path))
+    layers = tmp_path / "layers"
+    # Eyes is matrix-FORBIDDEN between ape and skeleton, but the value lives
+    # in shared/: store.resolve's shared hop short-circuits BEFORE the
+    # foreign-body loop, so no matrix gating applies to shared values.
+    (layers / "ape" / "Eyes").mkdir(parents=True)
+    (layers / "shared" / "Eyes").mkdir(parents=True)
+    (layers / "shared" / "Eyes" / "Hypno.png").write_bytes(b"x")
+    store = LocalLayerStore(str(layers))
+    try:
+        path = asyncio.run(swap_compose.resolve_layer(store, cfg, "ape", "Eyes", "Hypno"))
+        assert path and path.endswith("shared/Eyes/Hypno.png")
+    finally:
+        asyncio.set_event_loop(asyncio.new_event_loop())
+
+
+def test_resolve_layer_foreign_fallback_survives_shared_dir(tmp_path):
+    cfg_path = tmp_path / "cfg.yaml"
+    cfg_path.write_text(CFG)
+    cfg = trait_config.load_config(str(cfg_path))
+    layers = tmp_path / "layers"
+    # shared/ exists but misses this value; ape misses it too; skeleton has it
+    # and ape<->skeleton Head is matrix-permitted: the foreign fallback must
+    # still fire (the shared hop can't break it or match shared/ as a body).
+    (layers / "ape" / "Head").mkdir(parents=True)
+    (layers / "shared" / "Head").mkdir(parents=True)
+    (layers / "shared" / "Head" / "Halo.png").write_bytes(b"x")
+    (layers / "skeleton" / "Head").mkdir(parents=True)
+    (layers / "skeleton" / "Head" / "Crown.png").write_bytes(b"x")
+    store = LocalLayerStore(str(layers))
+    try:
+        path = asyncio.run(swap_compose.resolve_layer(store, cfg, "ape", "Head", "Crown"))
+        assert path and path.endswith("skeleton/Head/Crown.png")
     finally:
         asyncio.set_event_loop(asyncio.new_event_loop())
 
