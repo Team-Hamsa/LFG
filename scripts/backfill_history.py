@@ -23,6 +23,7 @@ from typing import Any
 
 REPO_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
 sys.path.insert(0, REPO_ROOT)
+sys.path.insert(0, os.path.join(REPO_ROOT, "scripts"))
 
 from xrpl.asyncio.clients import AsyncWebsocketClient  # noqa: E402
 from xrpl.models.requests import Request  # noqa: E402
