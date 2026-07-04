@@ -89,3 +89,36 @@ def test_render_report_md_sections():
     assert "## Candidate misplacements" in out
     assert "male/Clothing/X" in out
     assert "female-only" in out
+
+
+def test_run_end_to_end(tmp_path):
+    import sqlite3
+
+    db = tmp_path / "onchain.db"
+    conn = sqlite3.connect(db)
+    conn.execute(
+        "CREATE TABLE onchain_nfts (nft_id TEXT PRIMARY KEY, body TEXT,"
+        " attributes_json TEXT, is_burned INTEGER DEFAULT 0)"
+    )
+    conn.execute(
+        "INSERT INTO onchain_nfts VALUES ('A', 'female', ?, 0)",
+        (_attrs(Body="Curved", Clothing="Summer Dress"),),
+    )
+    conn.execute(  # burned tokens still count — history is the point
+        "INSERT INTO onchain_nfts VALUES ('B', 'male', ?, 1)",
+        (_attrs(Body="Straight", Clothing="Hoodie"),),
+    )
+    conn.commit()
+    conn.close()
+    layers = tmp_path / "layers"
+    (layers / "female" / "Clothing").mkdir(parents=True)
+    (layers / "female" / "Clothing" / "Summer Dress.png").write_bytes(b"x")
+    (layers / "male" / "Clothing").mkdir(parents=True)
+
+    from scripts.audit_body_affinity import run
+
+    result = run(str(db), str(layers), str(tmp_path / "reports"))
+    assert (tmp_path / "reports" / "body_affinity_report.md").exists()
+    assert (tmp_path / "reports" / "body_affinity_draft.yaml").exists()
+    assert result["values"] == 2
+    assert ("male", "Clothing", "Hoodie") in result["coverage_gaps"]
