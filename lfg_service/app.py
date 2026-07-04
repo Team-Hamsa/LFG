@@ -28,12 +28,14 @@ from lfg_core import (
     config,
     economy_flow,
     layer_store,
+    leaderboard,
     mint_flow,
     swap_flow,
     swap_meta,
     xrpl_ops,
     xumm_ops,
 )
+from lfg_core import history_store, nft_index
 from lfg_service import identity as identity_store
 from lfg_service.auth import require_service_token, surface_for_token
 from lfg_service.events import Event, InMemoryEventBus
@@ -453,6 +455,144 @@ async def handle_account(request):
     wallet = request["wallet"]
     identities = await asyncio.to_thread(identity_store.identities_for_wallet, wallet)
     return web.json_response({"wallet": wallet, "identities": identities})
+
+
+_LB_CACHE: dict[tuple, tuple[float, dict]] = {}
+_LB_CACHE_TTL = 60.0
+_LB_FULL_LIMIT = 500
+_LB_PAGE_SIZE = 25
+
+
+def _lb_get_conns(request):
+    """Lazily open (and cache on request.app) the history/onchain DB conns
+    for the current XRPL network, read at request time so tests can
+    monkeypatch env vars / config.XRPL_NETWORK per-test."""
+    network = config.XRPL_NETWORK
+    hconn = request.app.get("history_db")
+    if hconn is None:
+        hconn = history_store.init_history_db(history_store.history_db_path(network))
+        request.app["history_db"] = hconn
+    oconn = request.app.get("onchain_db")
+    if oconn is None:
+        oconn = nft_index.init_db(nft_index.index_db_path(network))
+        oconn.row_factory = __import__("sqlite3").Row
+        request.app["onchain_db"] = oconn
+    return hconn, oconn
+
+
+def _lb_system_accounts() -> frozenset[str]:
+    return frozenset(
+        a
+        for a in (
+            config.SWAP_ISSUER_ADDRESS,
+            config.SWAP_OFFER_ISSUER,
+            config.BRIX_DISTRIBUTOR_ADDRESS,
+            config.BRIX_AMM_ACCOUNT,
+        )
+        if a
+    )
+
+
+def _lb_display_name(wallet: str) -> str:
+    handle = identity_store.handle_for_wallet(wallet)
+    if handle:
+        return handle
+    return wallet[:6] + "…" + wallet[-4:] if len(wallet) > 10 else wallet
+
+
+async def handle_leaderboard(request):
+    """Public leaderboard: GET /api/leaderboard?board=&period=&start=&me=.
+
+    Full (up to rank 500) results are cached for 60s keyed on
+    (network, board, period, start); `me` is computed post-cache by scanning
+    the cached full row set so it never invalidates the cache."""
+    board = request.query.get("board", "")
+    period = request.query.get("period", "all")
+    start = request.query.get("start") or None
+    me = request.query.get("me") or None
+
+    if board not in leaderboard.BOARDS:
+        return web.json_response({"error": f"unknown board: {board!r}"}, status=400)
+
+    network = config.XRPL_NETWORK
+    cache_key = (network, board, period, start)
+    now_mono = time.monotonic()
+    cached = _LB_CACHE.get(cache_key)
+
+    if cached is not None and now_mono - cached[0] < _LB_CACHE_TTL:
+        full_rows = cached[1]["rows"]
+        start_ts = cached[1]["start_ts"]
+        end_ts = cached[1]["end_ts"]
+    else:
+        try:
+            start_ts, end_ts = leaderboard.period_bounds(period, start, now=int(time.time()))
+        except ValueError as e:
+            return web.json_response({"error": str(e)}, status=400)
+
+        hconn, oconn = _lb_get_conns(request)
+        try:
+            full_rows = leaderboard.compute(
+                board,
+                hconn,
+                oconn,
+                start_ts=start_ts,
+                end_ts=end_ts,
+                network=network,
+                system_accounts=_lb_system_accounts(),
+                limit=_LB_FULL_LIMIT,
+            )
+        except ValueError as e:
+            return web.json_response({"error": str(e)}, status=400)
+        _LB_CACHE[cache_key] = (
+            now_mono,
+            {"rows": full_rows, "start_ts": start_ts, "end_ts": end_ts},
+        )
+
+    page_rows = full_rows[:_LB_PAGE_SIZE]
+
+    nft_ids = [r["nft_id"] for r in page_rows if r.get("nft_id")]
+    images: dict[str, str | None] = {}
+    if nft_ids:
+        _, oconn = _lb_get_conns(request)
+        placeholders = ",".join("?" * len(nft_ids))
+        cur = oconn.execute(
+            f"SELECT nft_id, image FROM onchain_nfts WHERE nft_id IN ({placeholders})",
+            nft_ids,
+        )
+        images = {r["nft_id"]: r["image"] for r in cur.fetchall()}
+
+    rows = []
+    for i, r in enumerate(page_rows):
+        wallet = r.get("wallet")
+        rows.append(
+            {
+                "rank": i + 1,
+                "wallet": wallet,
+                "display_name": _lb_display_name(wallet) if wallet else None,
+                "nft_id": r.get("nft_id"),
+                "nft_number": r.get("nft_number"),
+                "image": images.get(r.get("nft_id")),
+                "value": r["value"],
+            }
+        )
+
+    me_block = None
+    if me is not None:
+        for i, r in enumerate(full_rows):
+            if r.get("wallet") == me:
+                me_block = {"rank": i + 1, "value": r["value"]}
+                break
+
+    return web.json_response(
+        {
+            "board": board,
+            "period": period,
+            "start_ts": start_ts,
+            "end_ts": end_ts,
+            "rows": rows,
+            "me": me_block,
+        }
+    )
 
 
 def _economy_disabled_response():
@@ -1067,6 +1207,7 @@ def create_app() -> web.Application:
     app.router.add_post("/api/signin", handle_signin_start)
     app.router.add_get("/api/signin/{payload_uuid}", handle_signin_status)
     app.router.add_get("/api/nfts", handle_nfts)
+    app.router.add_get("/api/leaderboard", handle_leaderboard)
     app.router.add_post("/api/swap", handle_swap_start)
     app.router.add_get("/api/swap/{session_id}", handle_swap_status)
     app.router.add_get("/api/qr.png", handle_qr)
