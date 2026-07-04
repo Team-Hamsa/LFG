@@ -39,6 +39,19 @@ def test_get_season_lookup(tmp_path):
     assert seasons.get_season("male", "Eyes", "Classic", manifest=manifest) is None
 
 
+def test_get_season_falls_back_to_shared_key():
+    manifest = {"shared/Background/Sunset": 2}
+    assert seasons.get_season("male", "Background", "Sunset", manifest=manifest) == 2
+
+
+def test_get_season_prefers_per_body_over_shared():
+    manifest = {
+        "male/Eyes/Laser": 4,
+        "shared/Eyes/Laser": 2,
+    }
+    assert seasons.get_season("male", "Eyes", "Laser", manifest=manifest) == 4
+
+
 # ---------------------------------------------------------------------------
 # build_manifest — seed from the S3 CSV export
 # ---------------------------------------------------------------------------

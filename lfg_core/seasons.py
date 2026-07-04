@@ -44,7 +44,10 @@ def get_season(
     body: str, category: str, value: str, *, manifest: dict[str, int] | None = None
 ) -> int | None:
     manifest = load_seasons() if manifest is None else manifest
-    return manifest.get(f"{body}/{category}/{value}")
+    per_body_result = manifest.get(f"{body}/{category}/{value}")
+    if per_body_result is not None:
+        return per_body_result
+    return manifest.get(f"shared/{category}/{value}")
 
 
 def build_manifest(
