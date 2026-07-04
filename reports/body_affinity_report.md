@@ -619,12 +619,6 @@
 - ape/Background/Temptress
 - ape/Background/Verdun Green
 - ape/Background/Wave
-- ape/Body/Ape
-- ape/Body/Ape Gold
-- ape/Body/Ape Melting
-- ape/Body/Ape Melting XRay
-- ape/Body/Ape Xray
-- ape/Body/Ape Yellow
 - ape/Eyebrows/Angry
 - ape/Eyebrows/Beauty
 - ape/Eyebrows/Billy
@@ -807,15 +801,6 @@
 - female/Background/Pale Pale
 - female/Background/Red Candle
 - female/Background/Wave
-- female/Body/Curved Burned
-- female/Body/Curved Dark
-- female/Body/Curved Gold
-- female/Body/Curved Green
-- female/Body/Curved Grey
-- female/Body/Curved Irridescent
-- female/Body/Curved Light
-- female/Body/Curved Medium
-- female/Body/Curved White
 - female/Clothing/Bathrobe
 - female/Clothing/Wonder
 - female/Head/Towel
@@ -830,18 +815,6 @@
 - male/Background/Pastel Purple
 - male/Background/Red Candle
 - male/Background/Wave
-- male/Body/Straight Burned
-- male/Body/Straight Dark
-- male/Body/Straight Diamond
-- male/Body/Straight Gold
-- male/Body/Straight Green
-- male/Body/Straight Grey
-- male/Body/Straight Irridescent
-- male/Body/Straight Light
-- male/Body/Straight Medium
-- male/Body/Straight White
-- male/Body/Straight Wood
-- male/Body/Straight Yellow
 - male/Clothing/Batman
 - male/Clothing/Batman Camo
 - male/Clothing/Bear
@@ -899,11 +872,6 @@
 - skeleton/Background/Temptress
 - skeleton/Background/Verdun Green
 - skeleton/Background/Wave
-- skeleton/Body/Gold Skeleton
-- skeleton/Body/Iridescent Skeleton
-- skeleton/Body/Irridescent Skeleton
-- skeleton/Body/Metal Skeleton
-- skeleton/Body/White Skeleton
 
 ## Coverage gaps (minted historically, missing from dir)
 

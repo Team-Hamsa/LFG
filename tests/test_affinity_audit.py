@@ -114,6 +114,9 @@ def test_run_end_to_end(tmp_path):
     (layers / "female" / "Clothing").mkdir(parents=True)
     (layers / "female" / "Clothing" / "Summer Dress.png").write_bytes(b"x")
     (layers / "male" / "Clothing").mkdir(parents=True)
+    # Body/ dirs are the shape itself — never misplacement candidates
+    (layers / "female" / "Body").mkdir(parents=True)
+    (layers / "female" / "Body" / "Curved.png").write_bytes(b"x")
 
     from scripts.audit_body_affinity import run
 
@@ -122,3 +125,4 @@ def test_run_end_to_end(tmp_path):
     assert (tmp_path / "reports" / "body_affinity_draft.yaml").exists()
     assert result["values"] == 2
     assert ("male", "Clothing", "Hoodie") in result["coverage_gaps"]
+    assert not any(t == "Body" for _b, t, _v in result["misplacements"])

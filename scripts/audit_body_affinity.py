@@ -1,4 +1,4 @@
-#!/usr/bin/env python
+#!/usr/bin/env python3
 # scripts/audit_body_affinity.py
 # One-time (re-runnable) audit: derive per-value body affinity from the
 # on-chain index (burned included) and cross-check against layers/.
@@ -14,7 +14,7 @@ import sys
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-from lfg_core import affinity_audit  # noqa: E402
+from lfg_core import affinity_audit, nft_index  # noqa: E402
 
 
 def _dir_tree(layers_dir: str) -> dict[str, dict[str, set[str]]]:
@@ -27,6 +27,10 @@ def _dir_tree(layers_dir: str) -> dict[str, dict[str, set[str]]]:
         for trait_type in sorted(os.listdir(body_path)):
             type_path = os.path.join(body_path, trait_type)
             if not os.path.isdir(type_path) or trait_type.startswith("."):
+                continue
+            if trait_type == "Body":
+                # Body IS the shape — untracked in counts by design, so its
+                # files would all read as false-positive misplacements.
                 continue
             tree[body][trait_type] = {
                 os.path.splitext(f)[0]
@@ -71,7 +75,7 @@ def main() -> None:
     p.add_argument("--layers-dir", default="layers")
     p.add_argument("--out-dir", default="reports")
     args = p.parse_args()
-    result = run(f"onchain_{args.network}.db", args.layers_dir, args.out_dir)
+    result = run(nft_index.index_db_path(args.network), args.layers_dir, args.out_dir)
     print(
         f"{result['values']} values audited; "
         f"{len(result['misplacements'])} candidate misplacements; "
