@@ -33,7 +33,9 @@ from datetime import datetime, timedelta, timezone
 from typing import Any
 
 Row = dict[str, Any]
-BoardFn = Callable[[sqlite3.Connection, sqlite3.Connection, int, int, frozenset[str]], list[Row]]
+BoardFn = Callable[
+    [sqlite3.Connection, sqlite3.Connection, int, int, frozenset[str], int], list[Row]
+]
 
 _LIMIT = 25
 
@@ -80,9 +82,7 @@ def period_bounds(period: str, start: str | None, *, now: int) -> tuple[int, int
         return start_ts, end_ts
 
     if period == "year":
-        year_start = anchor.replace(
-            month=1, day=1, hour=0, minute=0, second=0, microsecond=0
-        )
+        year_start = anchor.replace(month=1, day=1, hour=0, minute=0, second=0, microsecond=0)
         next_year_start = year_start.replace(year=year_start.year + 1)
         start_ts = int(year_start.timestamp())
         end_ts = now if start is None else int(next_year_start.timestamp())
@@ -99,8 +99,11 @@ def _exclude_clause(col: str, system_accounts: frozenset[str]) -> tuple[str, lis
 
 
 def _row(
-    *, wallet: str | None = None, nft_id: str | None = None,
-    nft_number: int | None = None, value: float
+    *,
+    wallet: str | None = None,
+    nft_id: str | None = None,
+    nft_number: int | None = None,
+    value: float,
 ) -> Row:
     return {"wallet": wallet, "nft_id": nft_id, "nft_number": nft_number, "value": value}
 
@@ -111,15 +114,17 @@ def _board_users_nfts(
     start_ts: int,
     end_ts: int,
     system_accounts: frozenset[str],
+    limit: int,
 ) -> list[Row]:
     if start_ts == 0:
         excl, params = _exclude_clause("owner", system_accounts)
         sql = (
             "SELECT owner, COUNT(*) AS value FROM onchain_nfts"
-            " WHERE is_burned=0 AND owner IS NOT NULL" + excl +
-            " GROUP BY owner ORDER BY value DESC LIMIT ?"
+            " WHERE is_burned=0 AND owner IS NOT NULL"
+            + excl
+            + " GROUP BY owner ORDER BY value DESC LIMIT ?"
         )
-        cur = oconn.execute(sql, (*params, _LIMIT))
+        cur = oconn.execute(sql, (*params, limit))
         return [_row(wallet=r["owner"], value=r["value"]) for r in cur.fetchall()]
 
     excl_to, params_to = _exclude_clause("to_addr", system_accounts)
@@ -136,9 +141,13 @@ def _board_users_nfts(
         ) GROUP BY wallet HAVING SUM(delta) > 0 ORDER BY value DESC LIMIT ?
     """
     query_params: tuple[Any, ...] = (
-        start_ts, end_ts, *params_to,
-        start_ts, end_ts, *params_from,
-        _LIMIT,
+        start_ts,
+        end_ts,
+        *params_to,
+        start_ts,
+        end_ts,
+        *params_from,
+        limit,
     )
     cur = hconn.execute(sql, query_params)
     return [_row(wallet=r["wallet"], value=r["value"]) for r in cur.fetchall()]
@@ -150,14 +159,16 @@ def _board_users_swaps(
     start_ts: int,
     end_ts: int,
     system_accounts: frozenset[str],
+    limit: int,
 ) -> list[Row]:
     excl, excl_params = _exclude_clause("to_addr", system_accounts)
     sql = (
         "SELECT to_addr, COUNT(*) AS value FROM nft_events"
-        " WHERE event='modify' AND ts>=? AND ts<?" + excl +
-        " GROUP BY to_addr ORDER BY value DESC LIMIT ?"
+        " WHERE event='modify' AND ts>=? AND ts<?"
+        + excl
+        + " GROUP BY to_addr ORDER BY value DESC LIMIT ?"
     )
-    cur = hconn.execute(sql, (start_ts, end_ts, *excl_params, _LIMIT))
+    cur = hconn.execute(sql, (start_ts, end_ts, *excl_params, limit))
     return [_row(wallet=r["to_addr"], value=r["value"]) for r in cur.fetchall()]
 
 
@@ -167,7 +178,13 @@ def _board_users_builds(
     start_ts: int,
     end_ts: int,
     system_accounts: frozenset[str],
+    limit: int,
 ) -> list[Row]:
+    """Counts rebirth deliveries from any system account (issuer-side delivery).
+
+    Note: Any system account counts as a delivering issuer; broader than strictly
+    the NFT issuer, but harmless since only the NFT issuer mints/burns NFTs.
+    """
     issuers = list(system_accounts) if system_accounts else [None]
     excl, excl_params = _exclude_clause("t.to_addr", system_accounts)
     placeholders = ",".join("?" * len(issuers))
@@ -182,7 +199,7 @@ def _board_users_builds(
                         AND b.nft_id != t.nft_id AND b.ts < m.ts){excl}
         GROUP BY t.to_addr ORDER BY value DESC LIMIT ?
     """
-    params = (*issuers, start_ts, end_ts, *excl_params, _LIMIT)
+    params = (*issuers, start_ts, end_ts, *excl_params, limit)
     cur = hconn.execute(sql, params)
     return [_row(wallet=r["wallet"], value=r["value"]) for r in cur.fetchall()]
 
@@ -193,13 +210,14 @@ def _board_nft_swaps(
     start_ts: int,
     end_ts: int,
     system_accounts: frozenset[str],
+    limit: int,
 ) -> list[Row]:
     sql = (
         "SELECT nft_id, nft_number, COUNT(*) AS value FROM nft_events"
         " WHERE event='modify' AND ts>=? AND ts<?"
         " GROUP BY nft_id ORDER BY value DESC LIMIT ?"
     )
-    cur = hconn.execute(sql, (start_ts, end_ts, _LIMIT))
+    cur = hconn.execute(sql, (start_ts, end_ts, limit))
     return [
         _row(nft_id=r["nft_id"], nft_number=r["nft_number"], value=r["value"])
         for r in cur.fetchall()
@@ -229,5 +247,4 @@ def compute(
     fn = BOARDS.get(board)
     if fn is None:
         raise ValueError(f"unknown board: {board!r}")
-    rows = fn(hconn, oconn, start_ts, end_ts, system_accounts)
-    return rows[:limit]
+    return fn(hconn, oconn, start_ts, end_ts, system_accounts, limit)
