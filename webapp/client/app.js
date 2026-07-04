@@ -166,6 +166,149 @@ function showMintHome() {
   el('wallet-display').textContent = me.wallet;
   showPanel('mint-panel');
   status(`Hey ${me.username} — welcome to the job site.`);
+  loadLeaderboard();
+}
+
+// --- Leaderboard (home-screen card) ---
+
+const STEPPED_PERIODS = ['week', 'month', 'year'];
+const NFT_BOARDS = ['nft_swaps', 'nft_rarity'];
+const lbState = { period: 'week', board: 'users_nfts', anchor: null };
+const numberFmt = new Intl.NumberFormat();
+
+// Anchor date math: returns the ISO (YYYY-MM-DD, UTC) start of the
+// previous/next period relative to `anchor` (or today when anchor is null).
+function stepAnchor(period, anchor, dir) {
+  const base = anchor ? new Date(`${anchor}T00:00:00Z`) : new Date();
+  let d;
+  if (period === 'week') {
+    d = new Date(Date.UTC(base.getUTCFullYear(), base.getUTCMonth(), base.getUTCDate()));
+    d.setUTCDate(d.getUTCDate() + dir * 7);
+  } else if (period === 'month') {
+    const y = base.getUTCFullYear();
+    const m = base.getUTCMonth();
+    d = new Date(Date.UTC(y, m + dir, 1));
+  } else if (period === 'year') {
+    const y = base.getUTCFullYear();
+    d = new Date(Date.UTC(y + dir, 0, 1));
+  }
+  return d.toISOString().slice(0, 10);
+}
+
+function medal(rank) {
+  if (rank === 1) return '🥇';
+  if (rank === 2) return '🥈';
+  if (rank === 3) return '🥉';
+  return `#${rank}`;
+}
+
+function renderLbRow(row, isNftBoard) {
+  const li = document.createElement('li');
+  li.className = 'lb-row';
+  const rank = document.createElement('span');
+  rank.className = 'lb-rank';
+  rank.textContent = medal(row.rank);
+  const label = document.createElement('span');
+  label.className = 'lb-label';
+  if (isNftBoard && row.image) {
+    const img = document.createElement('img');
+    img.className = 'lb-thumb';
+    img.src = imgUrl(row.image);
+    img.alt = '';
+    label.appendChild(img);
+  }
+  const name = document.createElement('span');
+  name.textContent = isNftBoard
+    ? (row.display_name || (row.nft_number != null ? `#${row.nft_number}` : '—'))
+    : (row.display_name || row.wallet || '—');
+  label.appendChild(name);
+  const value = document.createElement('span');
+  value.className = 'lb-value';
+  value.textContent = numberFmt.format(row.value);
+  li.replaceChildren(rank, label, value);
+  return li;
+}
+
+async function loadLeaderboard() {
+  // Chip active states reflect current selection.
+  for (const btn of el('lb-periods').querySelectorAll('.lb-chip')) {
+    const active = btn.dataset.period === lbState.period;
+    btn.classList.toggle('active', active);
+    btn.setAttribute('aria-selected', String(active));
+  }
+  for (const btn of el('lb-boards').querySelectorAll('.lb-chip')) {
+    const active = btn.dataset.board === lbState.board;
+    btn.classList.toggle('active', active);
+    btn.setAttribute('aria-selected', String(active));
+  }
+
+  const stepper = el('lb-stepper');
+  const stepped = STEPPED_PERIODS.includes(lbState.period);
+  stepper.hidden = !stepped;
+  if (stepped) {
+    el('lb-range').textContent = lbState.anchor || 'Current';
+    el('lb-next').disabled = !lbState.anchor;
+  }
+
+  const list = el('lb-list');
+  const empty = el('lb-empty');
+  empty.hidden = true;
+  list.replaceChildren();
+
+  try {
+    const wallet = me && me.wallet ? me.wallet : '';
+    const qs = new URLSearchParams({ board: lbState.board, period: lbState.period, me: wallet });
+    if (lbState.anchor) qs.set('start', lbState.anchor);
+    const data = await api(`/api/leaderboard?${qs.toString()}`);
+    const isNftBoard = NFT_BOARDS.includes(lbState.board);
+    if (!data.rows || !data.rows.length) {
+      empty.textContent = 'Nothing here yet for this period.';
+      empty.hidden = false;
+    } else {
+      list.replaceChildren(...data.rows.map((row) => renderLbRow(row, isNftBoard)));
+    }
+
+    const meEl = el('lb-me');
+    const inTop = data.me && data.rows && data.rows.some((r) => r.rank === data.me.rank);
+    if (data.me && !inTop) {
+      meEl.hidden = false;
+      meEl.textContent = `You: ${medal(data.me.rank)} — ${numberFmt.format(data.me.value)}`;
+    } else {
+      meEl.hidden = true;
+    }
+  } catch (e) {
+    list.replaceChildren();
+    el('lb-me').hidden = true;
+    empty.textContent = 'Leaderboard unavailable.';
+    empty.hidden = false;
+  }
+}
+
+function setupLeaderboard() {
+  el('lb-periods').addEventListener('click', (e) => {
+    const btn = e.target.closest('.lb-chip');
+    if (!btn) return;
+    lbState.period = btn.dataset.period;
+    lbState.anchor = null;
+    loadLeaderboard();
+  });
+  el('lb-boards').addEventListener('click', (e) => {
+    const btn = e.target.closest('.lb-chip');
+    if (!btn) return;
+    lbState.board = btn.dataset.board;
+    loadLeaderboard();
+  });
+  el('lb-prev').addEventListener('click', () => {
+    lbState.anchor = stepAnchor(lbState.period, lbState.anchor, -1);
+    loadLeaderboard();
+  });
+  el('lb-next').addEventListener('click', () => {
+    if (!lbState.anchor) return;
+    const next = stepAnchor(lbState.period, lbState.anchor, 1);
+    const today = new Date().toISOString().slice(0, 10);
+    lbState.anchor = next >= today ? null : next;
+    loadLeaderboard();
+  });
 }
 
 // Mint flow step indicator (hidden for flows without a stage, e.g. trustlines)
@@ -1183,6 +1326,7 @@ function setupLogo() {
 
 async function main() {
   setupLogo();
+  setupLeaderboard();
   el('register-retry-btn').onclick = startSignin;
   el('mint-btn').onclick = startMint;
   el('flow-regen-btn').onclick = regeneratePaymentQr;

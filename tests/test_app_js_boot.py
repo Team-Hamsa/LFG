@@ -70,6 +70,16 @@ def test_app_js_has_extract_deposit():
     assert "renderTraitStrip" in src
 
 
+def test_leaderboard_card_present():
+    html = _read("index.html")
+    assert 'id="leaderboard"' in html and 'data-board="brix_rich"' in html
+
+
+def test_app_js_wires_leaderboard():
+    js = _read("app.js")
+    assert "/api/leaderboard" in js and "loadLeaderboard" in js
+
+
 def test_telegram_webapp_js_vendored_same_origin():
     # Vendored same-origin (not hotlinked) per the spec.
     assert os.path.exists(os.path.join(CLIENT, "telegram-web-app.js"))

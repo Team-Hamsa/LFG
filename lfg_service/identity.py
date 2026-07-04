@@ -153,6 +153,30 @@ def identities_for_wallet(wallet: str) -> list[dict[str, object]]:
             conn.close()
 
 
+def handle_for_wallet(wallet: str) -> str | None:
+    """Best display handle for a wallet, or None if no identity is linked.
+
+    Most-recently-updated identity wins (falls back to created_at for rows
+    that predate the updated_at column)."""
+    conn = None
+    try:
+        conn = sqlite3.connect(DATABASE)
+        cur = conn.execute(
+            "SELECT display_handle FROM identities WHERE wallet = ? "
+            "AND display_handle IS NOT NULL "
+            "ORDER BY COALESCE(updated_at, created_at) DESC LIMIT 1",
+            (wallet,),
+        )
+        row = cur.fetchone()
+        return row[0] if row else None
+    except Exception as e:
+        logging.error(f"identity.handle_for_wallet failed: {e}")
+        return None
+    finally:
+        if conn is not None:
+            conn.close()
+
+
 def migrate_users_to_identities() -> int:
     """Copy legacy Users rows into identities as platform='discord'. Idempotent."""
     conn = sqlite3.connect(DATABASE)

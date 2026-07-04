@@ -41,3 +41,7 @@ onchain_*.db-*
 
 # Bithomp collection CSV exports (source data, not code)
 LFGO*.csv
+
+# Per-network ledger history DBs (regenerable via backfill)
+history_testnet.db*
+history_mainnet.db*

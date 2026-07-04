@@ -291,3 +291,125 @@ def test_listen_path_burn_deletes_trait_token():
         )
     )
     assert es.read_trait_tokens(conn) == [], "Burn did not delete trait_tokens row"
+
+
+async def _none_token(nft_id):
+    return None
+
+
+async def _none_meta(uri_hex):
+    return None
+
+
+def test_stream_tx_feeds_history(tmp_path):
+    from lfg_core import history_store
+    from tests.fixtures import history_txs as fx
+
+    hconn = history_store.init_history_db(str(tmp_path / "h.db"))
+    conn = _conn()
+    ctx = {
+        "nft_issuer": fx.ISSUER,
+        "brix_issuer": fx.BRIX_ISSUER,
+        "brix_hex": fx.BRIX_HEX,
+        "distributor": None,
+        "numbers": {},
+    }
+    tx = dict(fx.AIRDROP)  # BRIX-only tx: index apply is a no-op, history isn't
+    _run(
+        oln.process_stream_tx(
+            conn,
+            tx,
+            fetch_token=_none_token,
+            fetch_meta=_none_meta,
+            is_ours=lambda t: False,
+            history_conn=hconn,
+            history_ctx=ctx,
+        )
+    )
+    assert hconn.execute("SELECT COUNT(*) FROM xrpl_txs").fetchone()[0] == 1
+    assert hconn.execute("SELECT COUNT(*) FROM brix_events").fetchone()[0] == 2
+
+
+def test_stream_tx_history_resolves_number_from_live_index(tmp_path):
+    """ctx["numbers"] is a startup snapshot; a token present in the index (with
+    a number) but absent from that snapshot must still get its nft_number
+    resolved via a live lookup on the index conn, instead of staying None."""
+    from lfg_core import history_store
+    from tests.fixtures import history_txs as fx
+
+    hconn = history_store.init_history_db(str(tmp_path / "h.db"))
+    conn = _conn()
+    conn.execute(
+        "INSERT INTO onchain_nfts (nft_id, nft_number, owner, is_burned, mutable, uri_hex, body) "
+        "VALUES (?, ?, 'rOwner', 0, 0, '', NULL)",
+        (fx.NFT_A, 42),
+    )
+    conn.commit()
+    ctx = {
+        "nft_issuer": fx.ISSUER,
+        "brix_issuer": fx.BRIX_ISSUER,
+        "brix_hex": fx.BRIX_HEX,
+        "distributor": None,
+        "numbers": {},  # missing the just-minted token's number, by design
+    }
+    _run(
+        oln.process_stream_tx(
+            conn,
+            dict(fx.BURN),
+            fetch_token=_none_token,
+            fetch_meta=_none_meta,
+            is_ours=lambda t: False,
+            history_conn=hconn,
+            history_ctx=ctx,
+        )
+    )
+    row = hconn.execute("SELECT nft_number FROM nft_events WHERE nft_id=?", (fx.NFT_A,)).fetchone()
+    assert row["nft_number"] == 42
+    # and it's cached for next time
+    assert ctx["numbers"][fx.NFT_A] == 42
+
+
+def test_stream_tx_history_filters_foreign_collection(tmp_path):
+    """Firehose txs from OTHER NFT collections must not pollute the archive."""
+    from lfg_core import history_events, history_store
+    from tests.fixtures import history_txs as fx
+
+    hconn = history_store.init_history_db(str(tmp_path / "h.db"))
+    conn = _conn()
+    ctx = {
+        "nft_issuer": fx.ISSUER,
+        "issuer_hex": history_events.issuer_account_hex(fx.ISSUER),
+        "brix_issuer": fx.BRIX_ISSUER,
+        "brix_hex": fx.BRIX_HEX,
+        "distributor": None,
+        "numbers": {},
+    }
+    for tx in (dict(fx.FOREIGN_BURN), dict(fx.FOREIGN_MODIFY)):
+        _run(
+            oln.process_stream_tx(
+                conn,
+                tx,
+                fetch_token=_none_token,
+                fetch_meta=_none_meta,
+                is_ours=lambda t: False,
+                history_conn=hconn,
+                history_ctx=ctx,
+            )
+        )
+    assert hconn.execute("SELECT COUNT(*) FROM xrpl_txs").fetchone()[0] == 0
+    assert hconn.execute("SELECT COUNT(*) FROM nft_events").fetchone()[0] == 0
+
+    # Our-collection burn is still recorded.
+    _run(
+        oln.process_stream_tx(
+            conn,
+            dict(fx.BURN),
+            fetch_token=_none_token,
+            fetch_meta=_none_meta,
+            is_ours=lambda t: False,
+            history_conn=hconn,
+            history_ctx=ctx,
+        )
+    )
+    assert hconn.execute("SELECT COUNT(*) FROM xrpl_txs").fetchone()[0] == 1
+    assert hconn.execute("SELECT COUNT(*) FROM nft_events").fetchone()[0] == 1

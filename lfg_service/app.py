@@ -7,6 +7,7 @@
 
 import asyncio
 import base64
+import datetime
 import functools
 import hashlib
 import hmac
@@ -27,8 +28,11 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from lfg_core import (
     config,
     economy_flow,
+    history_store,
     layer_store,
+    leaderboard,
     mint_flow,
+    nft_index,
     swap_flow,
     swap_meta,
     xrpl_ops,
@@ -453,6 +457,170 @@ async def handle_account(request):
     wallet = request["wallet"]
     identities = await asyncio.to_thread(identity_store.identities_for_wallet, wallet)
     return web.json_response({"wallet": wallet, "identities": identities})
+
+
+_LbKey = tuple[str, str, str, str | None]
+_LB_CACHE: dict[_LbKey, tuple[float, dict[str, Any]]] = {}
+_LB_CACHE_TTL = 60.0
+_LB_CACHE_MAX = 256
+_LB_FULL_LIMIT = 500
+_LB_PAGE_SIZE = 25
+_LB_MIN_START = datetime.date(2013, 1, 1)  # ~XRPL genesis; clamp `start` below this
+
+
+def _lb_cache_put(key: _LbKey, value: dict[str, Any], now_mono: float) -> None:
+    """Insert into the leaderboard cache, dropping expired entries and — if
+    still over _LB_CACHE_MAX — evicting the oldest by timestamp (bounds memory
+    against arbitrary `start` values fanning out the key space)."""
+    for k in [k for k, (ts, _) in _LB_CACHE.items() if now_mono - ts >= _LB_CACHE_TTL]:
+        del _LB_CACHE[k]
+    _LB_CACHE[key] = (now_mono, value)
+    while len(_LB_CACHE) > _LB_CACHE_MAX:
+        oldest = min(_LB_CACHE, key=lambda k: _LB_CACHE[k][0])
+        del _LB_CACHE[oldest]
+
+
+def _lb_system_accounts() -> frozenset[str]:
+    return frozenset(
+        a
+        for a in (
+            config.SWAP_ISSUER_ADDRESS,
+            config.SWAP_OFFER_ISSUER,
+            config.BRIX_DISTRIBUTOR_ADDRESS,
+            config.BRIX_AMM_ACCOUNT,
+        )
+        if a
+    )
+
+
+def _lb_display_name(wallet: str) -> str:
+    handle = identity_store.handle_for_wallet(wallet)
+    if handle:
+        return handle
+    return wallet[:6] + "…" + wallet[-4:] if len(wallet) > 10 else wallet
+
+
+async def handle_leaderboard(request):
+    """Public leaderboard: GET /api/leaderboard?board=&period=&start=&me=.
+
+    Full (up to rank 500) results are cached for 60s keyed on
+    (network, board, period, start); `me` is computed post-cache by scanning
+    the cached full row set so it never invalidates the cache."""
+    board = request.query.get("board", "")
+    period = request.query.get("period", "all")
+    start = request.query.get("start") or None
+    me = request.query.get("me") or None
+
+    if board not in leaderboard.BOARDS:
+        return web.json_response({"error": f"unknown board: {board!r}"}, status=400)
+
+    if start is not None:
+        try:
+            start_date = datetime.date.fromisoformat(start)
+        except ValueError:
+            return web.json_response({"error": f"bad start date: {start!r}"}, status=400)
+        today_utc = datetime.datetime.now(datetime.timezone.utc).date()
+        if start_date < _LB_MIN_START or start_date > today_utc:
+            return web.json_response({"error": f"start out of range: {start!r}"}, status=400)
+
+    network = config.XRPL_NETWORK
+    cache_key = (network, board, period, start)
+    now_mono = time.monotonic()
+    cached = _LB_CACHE.get(cache_key)
+
+    if cached is not None and now_mono - cached[0] < _LB_CACHE_TTL:
+        full_rows = cached[1]["rows"]
+        start_ts = cached[1]["start_ts"]
+        end_ts = cached[1]["end_ts"]
+    else:
+        try:
+            start_ts, end_ts = leaderboard.period_bounds(period, start, now=int(time.time()))
+        except ValueError as e:
+            return web.json_response({"error": str(e)}, status=400)
+
+        system_accounts = _lb_system_accounts()
+
+        def _compute_sync():
+            # Runs on an executor thread so sqlite work never stalls the event
+            # loop. Python's sqlite3 here is not serialized (threadsafety=1),
+            # so open short-lived connections IN this thread rather than
+            # sharing the loop-thread conns across threads.
+            sqlite3 = __import__("sqlite3")
+            hconn = history_store.init_history_db(history_store.history_db_path(network))
+            oconn = nft_index.init_db(nft_index.index_db_path(network))
+            oconn.row_factory = sqlite3.Row
+            try:
+                computed_rows = leaderboard.compute(
+                    board,
+                    hconn,
+                    oconn,
+                    start_ts=start_ts,
+                    end_ts=end_ts,
+                    network=network,
+                    system_accounts=system_accounts,
+                    limit=_LB_FULL_LIMIT,
+                )
+                nft_ids = [r["nft_id"] for r in computed_rows if r.get("nft_id")]
+                images: dict[str, str | None] = {}
+                if nft_ids:
+                    placeholders = ",".join("?" * len(nft_ids))
+                    cur = oconn.execute(
+                        f"SELECT nft_id, image FROM onchain_nfts WHERE nft_id IN ({placeholders})",
+                        nft_ids,
+                    )
+                    images = {r["nft_id"]: r["image"] for r in cur.fetchall()}
+                for r in computed_rows:
+                    nft_id = r.get("nft_id")
+                    r["image"] = images.get(nft_id) if nft_id else None
+                return computed_rows
+            finally:
+                hconn.close()
+                oconn.close()
+
+        try:
+            full_rows = await asyncio.get_event_loop().run_in_executor(None, _compute_sync)
+        except ValueError as e:
+            return web.json_response({"error": str(e)}, status=400)
+        _lb_cache_put(
+            cache_key,
+            {"rows": full_rows, "start_ts": start_ts, "end_ts": end_ts},
+            now_mono,
+        )
+
+    page_rows = full_rows[:_LB_PAGE_SIZE]
+
+    rows = []
+    for i, r in enumerate(page_rows):
+        wallet = r.get("wallet")
+        rows.append(
+            {
+                "rank": i + 1,
+                "wallet": wallet,
+                "display_name": _lb_display_name(wallet) if wallet else None,
+                "nft_id": r.get("nft_id"),
+                "nft_number": r.get("nft_number"),
+                "image": r.get("image"),
+                "value": r["value"],
+            }
+        )
+
+    me_block = None
+    if me is not None:
+        for i, r in enumerate(full_rows):
+            if r.get("wallet") == me:
+                me_block = {"rank": i + 1, "value": r["value"]}
+                break
+
+    return web.json_response(
+        {
+            "board": board,
+            "period": period,
+            "start_ts": start_ts,
+            "end_ts": end_ts,
+            "rows": rows,
+            "me": me_block,
+        }
+    )
 
 
 def _economy_disabled_response():
@@ -1067,6 +1235,7 @@ def create_app() -> web.Application:
     app.router.add_post("/api/signin", handle_signin_start)
     app.router.add_get("/api/signin/{payload_uuid}", handle_signin_status)
     app.router.add_get("/api/nfts", handle_nfts)
+    app.router.add_get("/api/leaderboard", handle_leaderboard)
     app.router.add_post("/api/swap", handle_swap_start)
     app.router.add_get("/api/swap/{session_id}", handle_swap_status)
     app.router.add_get("/api/qr.png", handle_qr)
