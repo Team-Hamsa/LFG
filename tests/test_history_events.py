@@ -59,6 +59,25 @@ def test_buy_offer_iou_sale():
     assert ev["price_drops"] is None and '"value": "10"' in ev["price_token"]
 
 
+def test_brokered_sale_attribution():
+    (ev,) = _nft(fx.SALE_BROKERED)
+    assert ev["event"] == "sale"
+    assert (ev["from_addr"], ev["to_addr"]) == (fx.ALICE, fx.BOB)
+    assert ev["price_drops"] == 6000000 and ev["price_token"] is None
+
+
+def test_zero_value_iou_is_transfer():
+    (ev,) = _nft(fx.TRANSFER_ZERO_IOU)
+    assert ev["event"] == "transfer"
+    assert ev["price_drops"] is None and ev["price_token"] is None
+
+
+def test_missing_amount_is_transfer():
+    (ev,) = _nft(fx.TRANSFER_NO_AMOUNT)
+    assert ev["event"] == "transfer"
+    assert ev["price_drops"] is None and ev["price_token"] is None
+
+
 def test_offer_create_and_cancel():
     (c,) = _nft(fx.OFFER_CREATE)
     assert c["event"] == "offer_create" and c["price_drops"] == 9000000

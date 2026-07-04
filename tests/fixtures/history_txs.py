@@ -7,6 +7,7 @@ BRIX_ISSUER = "rBrixIssuerXXXXXXXXXXXXXXXXXXXXXXX"
 DISTRIBUTOR = "rAirdropXXXXXXXXXXXXXXXXXXXXXXXXXX"
 ALICE = "rAliceXXXXXXXXXXXXXXXXXXXXXXXXXXXXX"
 BOB = "rBobXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXX"
+BROKER = "rBrokerXXXXXXXXXXXXXXXXXXXXXXXXXXXXX"
 NFT_A = "000A" + "0" * 60
 BRIX_HEX = "4252495800000000000000000000000000000000"
 
@@ -83,6 +84,63 @@ SALE_IOU = {
         "AffectedNodes": [
             _deleted_offer(BOB, {"currency": BRIX_HEX, "issuer": BRIX_ISSUER, "value": "10"}, 0)
         ],
+    },
+}
+
+# Brokered sale: broker (third party) accepts BOTH a sell offer (Alice, flag 1)
+# and a buy offer (Bob, flag 0) in the same tx. tx.Account is the broker, not
+# the buyer. Seller = sell offer Owner (Alice), buyer = buy offer Owner (Bob),
+# price = the BUY offer's Amount (what the buyer paid), not the sell offer's ask.
+SALE_BROKERED = {
+    "TransactionType": "NFTokenAcceptOffer",
+    "Account": BROKER,
+    "hash": "0C" * 32,
+    "ledger_index": 111,
+    "date": 800001100,
+    "meta": {
+        "nftoken_id": NFT_A,
+        "AffectedNodes": [
+            _deleted_offer(ALICE, "5000000", 1),
+            _deleted_offer(BOB, "6000000", 0),
+        ],
+    },
+}
+
+# Zero-value IOU offer accepted: must classify as transfer, not sale.
+TRANSFER_ZERO_IOU = {
+    "TransactionType": "NFTokenAcceptOffer",
+    "Account": BOB,
+    "hash": "0D" * 32,
+    "ledger_index": 112,
+    "date": 800001200,
+    "meta": {
+        "nftoken_id": NFT_A,
+        "AffectedNodes": [
+            _deleted_offer(ALICE, {"currency": BRIX_HEX, "issuer": BRIX_ISSUER, "value": "0"}, 1)
+        ],
+    },
+}
+
+
+def _deleted_offer_no_amount(owner, flags):
+    return {
+        "DeletedNode": {
+            "LedgerEntryType": "NFTokenOffer",
+            "FinalFields": {"Owner": owner, "Flags": flags, "NFTokenID": NFT_A},
+        }
+    }
+
+
+# Deleted offer with no Amount key at all: must classify as transfer.
+TRANSFER_NO_AMOUNT = {
+    "TransactionType": "NFTokenAcceptOffer",
+    "Account": BOB,
+    "hash": "0E" * 32,
+    "ledger_index": 113,
+    "date": 800001300,
+    "meta": {
+        "nftoken_id": NFT_A,
+        "AffectedNodes": [_deleted_offer_no_amount(ALICE, 1)],
     },
 }
 

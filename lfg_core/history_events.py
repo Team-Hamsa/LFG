@@ -61,7 +61,32 @@ def _price_fields(amount: Any) -> tuple[int | None, str | None]:
     return None, None
 
 
+def _is_zero_price(amount: Any) -> bool:
+    """True for a zero-value IOU Amount or a missing/None Amount."""
+    if amount is None:
+        return True
+    if isinstance(amount, str):
+        try:
+            return int(amount) == 0
+        except ValueError:
+            return False
+    if isinstance(amount, dict):
+        try:
+            return float(amount.get("value", "0")) == 0
+        except (TypeError, ValueError):
+            return False
+    return False
+
+
 def derive_nft_events(tx: dict[str, Any], *, nft_issuer: str) -> list[dict[str, Any]]:
+    """Derive event rows for one normalized tx.
+
+    Per-collection scoping (by `nft_issuer`) happens upstream: raw rows only
+    enter this pipeline via issuer/nft_history-scoped scrapes, so every tx
+    passed here already belongs to the collection being processed.
+    `nft_issuer` is accepted and reserved for future in-function filtering
+    but is currently unused.
+    """
     ttype = str(tx.get("TransactionType", ""))
     meta = tx.get("meta") or {}
     ts = tx_unix_time(tx)
@@ -121,15 +146,24 @@ def derive_nft_events(tx: dict[str, Any], *, nft_issuer: str) -> list[dict[str, 
         offers = _deleted_nft_offers(meta)
         if not ids or not offers:
             return []
-        # Prefer the sell offer for price/seller; fall back to the first.
         sell = next((o for o in offers if int(o.get("Flags") or 0) & _LSF_SELL), None)
-        offer = sell or offers[0]
-        drops, token = _price_fields(offer.get("Amount"))
-        if sell is not None:
+        buy = next((o for o in offers if not (int(o.get("Flags") or 0) & _LSF_SELL)), None)
+        if sell is not None and buy is not None:
+            # Brokered sale: tx.Account is the broker, not a party to the
+            # trade. Seller = sell offer's Owner, buyer = buy offer's Owner,
+            # price = what the buyer paid (the buy offer's Amount).
+            seller, buyer = sell.get("Owner"), buy.get("Owner")
+            price_amount = buy.get("Amount")
+        elif sell is not None:
             seller, buyer = sell.get("Owner"), account
+            price_amount = sell.get("Amount")
         else:  # buy offer accepted: offer owner is the buyer, accepter sells
+            offer = buy or offers[0]
             seller, buyer = account, offer.get("Owner")
-        event = "transfer" if (drops == 0 and token is None) else "sale"
+            price_amount = offer.get("Amount")
+        is_transfer = _is_zero_price(price_amount)
+        event = "transfer" if is_transfer else "sale"
+        drops, token = (None, None) if is_transfer else _price_fields(price_amount)
         out = {
             **base,
             "nft_id": ids[0],
