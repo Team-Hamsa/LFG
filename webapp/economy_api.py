@@ -192,12 +192,18 @@ async def start_equip(
     discord_id: str, owner: str, nft_id: str, slot: str, value: str
 ) -> EconomyWebSession:
     conn = open_conn()
-    rec = _load_owned_character(conn, owner, nft_id)
-    assets = {(s, v): c for (o, s, v, c) in economy_store.read_closet_assets(conn) if o == owner}
-    chk = trait_economy.can_equip(rec, slot, value, assets, mutable=bool(rec.mutable))
-    if not chk.ok:
-        raise EconomyError(f"cannot equip: {chk.reason}")
-    await _require_body_affinity(rec.body, slot, value)
+    try:
+        rec = _load_owned_character(conn, owner, nft_id)
+        assets = {
+            (s, v): c for (o, s, v, c) in economy_store.read_closet_assets(conn) if o == owner
+        }
+        chk = trait_economy.can_equip(rec, slot, value, assets, mutable=bool(rec.mutable))
+        if not chk.ok:
+            raise EconomyError(f"cannot equip: {chk.reason}")
+        await _require_body_affinity(rec.body, slot, value)
+    except Exception:
+        conn.close()
+        raise
     session = economy_flow.EquipSession(owner=owner, character=rec, slot=slot, incoming_value=value)
     return _schedule("equip", discord_id, session, conn, economy_flow.run_equip)
 
@@ -225,24 +231,31 @@ async def start_assemble(
     discord_id: str, owner: str, edition: int, chosen: dict[str, str]
 ) -> EconomyWebSession:
     conn = open_conn()
-    closet_rec = economy_store.get_closet_record(conn, owner)
-    if closet_rec is None or closet_rec[2] != ct.ACTIVE:
+    try:
+        closet_rec = economy_store.get_closet_record(conn, owner)
+        if closet_rec is None or closet_rec[2] != ct.ACTIVE:
+            raise EconomyError("Create and claim your Closet first.")
+        genesis = trait_economy.effective_genesis(
+            economy_store.read_genesis(conn), economy_store.read_supply_changes(conn)
+        )
+        body = genesis.edition_bodies.get(edition)
+        if body is None:
+            raise EconomyError(f"edition {edition} has no known body")
+        assets = {
+            (s, v): c for (o, s, v, c) in economy_store.read_closet_assets(conn) if o == owner
+        }
+        bodies = {ed for (o, ed) in economy_store.read_closet_bodies(conn) if o == owner}
+        live_editions = {
+            r.nft_number for r in nft_index.live_nfts(conn) if r.nft_number is not None
+        }
+        chk = trait_economy.can_assemble(edition, chosen, bodies, assets, live_editions, genesis)
+        if not chk.ok:
+            raise EconomyError(f"cannot assemble: {chk.reason}")
+        for slot, value in chosen.items():
+            await _require_body_affinity(body[1], slot, value)
+    except Exception:
         conn.close()
-        raise EconomyError("Create and claim your Closet first.")
-    genesis = trait_economy.effective_genesis(
-        economy_store.read_genesis(conn), economy_store.read_supply_changes(conn)
-    )
-    body = genesis.edition_bodies.get(edition)
-    if body is None:
-        raise EconomyError(f"edition {edition} has no known body")
-    assets = {(s, v): c for (o, s, v, c) in economy_store.read_closet_assets(conn) if o == owner}
-    bodies = {ed for (o, ed) in economy_store.read_closet_bodies(conn) if o == owner}
-    live_editions = {r.nft_number for r in nft_index.live_nfts(conn) if r.nft_number is not None}
-    chk = trait_economy.can_assemble(edition, chosen, bodies, assets, live_editions, genesis)
-    if not chk.ok:
-        raise EconomyError(f"cannot assemble: {chk.reason}")
-    for slot, value in chosen.items():
-        await _require_body_affinity(body[1], slot, value)
+        raise
     session = economy_flow.AssembleSession(
         owner=owner,
         edition=edition,
