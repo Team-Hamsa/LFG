@@ -144,9 +144,20 @@ async def _amain() -> int:
             delay = RETRY_BASE_DELAY
             for attempt in range(RETRY_MAX):
                 await asyncio.sleep(THROTTLE_SECONDS)
-                r = await asyncio.wait_for(
-                    client.request(Request.from_dict(req)), timeout=REQUEST_TIMEOUT
-                )
+                try:
+                    r = await asyncio.wait_for(
+                        client.request(Request.from_dict(req)), timeout=REQUEST_TIMEOUT
+                    )
+                except (TimeoutError, asyncio.TimeoutError, ConnectionError, OSError) as e:
+                    # Transient transport trouble gets the same bounded backoff as
+                    # slowDown. A torn-down websocket will keep failing and exhaust
+                    # the attempts — the run is cursor-resumable, so that is safe.
+                    if attempt < RETRY_MAX - 1:
+                        logging.warning(f"{req['method']}: {e!r}; backing off {delay:.0f}s")
+                        await asyncio.sleep(delay)
+                        delay = min(delay * 2, 120.0)
+                        continue
+                    raise
                 if r.is_successful():
                     return r.result
                 error = r.result.get("error") if isinstance(r.result, dict) else None
