@@ -94,3 +94,73 @@ def test_get_config_singleton(tmp_path):
     path = _write(tmp_path, GOOD)
     assert trait_config.get_config(path) is trait_config.get_config()
     trait_config.reset_config()
+
+
+def _cfg(tmp_path):
+    return trait_config.load_config(_write(tmp_path, GOOD))
+
+
+def test_layer_order_sorted_by_z(tmp_path):
+    assert _cfg(tmp_path).layer_order() == [
+        "Background", "Back", "Body", "Clothing", "Mouth",
+        "Eyebrows", "Eyes", "Head", "Accessory",
+    ]
+
+
+def test_z_for_override_beats_layer_z(tmp_path):
+    cfg = _cfg(tmp_path)
+    assert cfg.z_for("Eyes", "Wavy") == 95
+    assert cfg.z_for("Eyes", "Hypno") == 70
+
+
+def test_sort_attributes_moves_override_on_top(tmp_path):
+    cfg = _cfg(tmp_path)
+    attrs = [
+        {"trait_type": "Eyes", "value": "Wavy"},
+        {"trait_type": "Body", "value": "Straight"},
+        {"trait_type": "Background", "value": "Sunset"},
+    ]
+    assert [a["value"] for a in cfg.sort_attributes(attrs)] == [
+        "Sunset", "Straight", "Wavy",
+    ]
+
+
+def test_affinity_queries(tmp_path):
+    cfg = _cfg(tmp_path)
+    assert cfg.allowed_bodies("Clothing", "Summer Dress") == frozenset({"female"})
+    assert cfg.allowed_bodies("Clothing", "Hoodie") is None
+    assert cfg.value_allowed("female", "Clothing", "Summer Dress")
+    assert not cfg.value_allowed("male", "Clothing", "Summer Dress")
+    assert cfg.value_allowed("male", "Clothing", "Hoodie")  # no entry -> dirs decide
+
+
+def test_swap_allowed_matrix(tmp_path):
+    cfg = _cfg(tmp_path)
+    assert cfg.swap_allowed("male", "male", "Clothing")          # same body
+    assert cfg.swap_allowed("ape", "female", "Accessory")        # universal layer
+    assert cfg.swap_allowed("ape", "skeleton", "Head")           # pair layers
+    assert not cfg.swap_allowed("ape", "skeleton", "Eyes")       # not in pair layers
+    assert cfg.swap_allowed("male", "female", "Eyes")            # layers_except
+    assert not cfg.swap_allowed("male", "female", "Clothing")    # excepted
+    assert not cfg.swap_allowed("ape", "male", "Head")           # no pair
+
+
+EXCL = GOOD.replace(
+    "exclusions: []",
+    """exclusions:
+  - trait_type: Eyes
+    value: Laser
+    excludes:
+      - {trait_type: Head, values: [Crown]}
+""",
+)
+
+
+def test_conflicts_enforced_symmetrically(tmp_path):
+    cfg = trait_config.load_config(_write(tmp_path, EXCL))
+    laser = [{"trait_type": "Eyes", "value": "Laser"}]
+    crown = [{"trait_type": "Head", "value": "Crown"}]
+    assert cfg.conflicts(laser, "Head", "Crown")        # authored direction
+    assert cfg.conflicts(crown, "Eyes", "Laser")        # symmetric direction
+    assert not cfg.conflicts(laser, "Head", "Beanie Black")
+    assert not cfg.conflicts([], "Head", "Crown")

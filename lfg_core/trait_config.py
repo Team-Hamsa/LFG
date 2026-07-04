@@ -54,6 +54,68 @@ class TraitConfig:
     exclusions: tuple[Any, ...] = ()
     inclusions: tuple[Any, ...] = ()
 
+    def layer_order(self) -> list[str]:
+        return [layer.name for layer in sorted(self.layers, key=lambda s: s.z)]
+
+    def z_for(self, trait_type: str, value: str) -> float:
+        for o in self.z_overrides:
+            if o.trait_type == trait_type and o.value == value:
+                return o.z
+        for layer in self.layers:
+            if layer.name == trait_type:
+                return layer.z
+        raise TraitConfigError(f"unknown layer {trait_type!r}")
+
+    def sort_attributes(self, attrs: list[dict[str, Any]]) -> list[dict[str, Any]]:
+        return sorted(attrs, key=lambda a: self.z_for(a["trait_type"], a["value"]))
+
+    def allowed_bodies(self, trait_type: str, value: str) -> frozenset[str] | None:
+        entry = self.affinity.get(trait_type, {}).get(value)
+        return frozenset(entry) if entry is not None else None
+
+    def value_allowed(self, body: str, trait_type: str, value: str) -> bool:
+        allowed = self.allowed_bodies(trait_type, value)
+        return allowed is None or body in allowed
+
+    def swap_allowed(self, body_a: str, body_b: str, layer: str) -> bool:
+        if body_a == body_b or layer in self.universal_layers:
+            return True
+        for pair in self.swap_pairs:
+            if not {body_a, body_b} <= pair.bodies:
+                continue
+            if pair.layers is not None and layer in pair.layers:
+                return True
+            if pair.layers_except is not None and layer not in pair.layers_except:
+                return True
+        return False
+
+    def conflicts(self, selected: list[dict[str, Any]], trait_type: str, value: str) -> bool:
+        def _hits(rule: dict[str, Any], t: str, v: str) -> bool:
+            values: Any = rule.get("values", "*")
+            return rule["trait_type"] == t and (values == "*" or v in values)
+
+        for entry in self.exclusions:
+            entry_dict: dict = entry  # type: ignore
+            src_t, src_v = entry_dict["trait_type"], entry_dict["value"]
+            for rule in entry_dict.get("excludes", []):
+                for sel in selected:
+                    sel_dict: dict = sel  # type: ignore
+                    # authored direction: candidate is the excluded side
+                    if (
+                        sel_dict["trait_type"] == src_t
+                        and sel_dict["value"] == src_v
+                        and _hits(rule, trait_type, value)
+                    ):
+                        return True
+                    # symmetric direction: candidate is the authoring side
+                    if (
+                        trait_type == src_t
+                        and value == src_v
+                        and _hits(rule, sel_dict["trait_type"], sel_dict["value"])
+                    ):
+                        return True
+        return False
+
 
 def _check_bodies(bodies: Iterable[str], where: str) -> None:
     unknown = set(bodies) - VALID_BODIES
@@ -97,8 +159,8 @@ def load_config(path: str) -> TraitConfig:
     if not universal <= set(names):
         raise TraitConfigError("universal_layers contains unknown layer")
     pairs = []
-    for p in matrix.get("pairs", []):
-        _check_bodies(p.get("bodies", []), "swap_matrix pair")
+    for p in matrix.get("pairs") or []:
+        _check_bodies(p.get("bodies") or [], "swap_matrix pair")
         if ("layers" in p) == ("layers_except" in p):
             raise TraitConfigError("swap pair needs exactly one of layers or layers_except")
         pairs.append(
