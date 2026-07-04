@@ -459,7 +459,8 @@ async def handle_account(request):
     return web.json_response({"wallet": wallet, "identities": identities})
 
 
-_LB_CACHE: dict[tuple, tuple[float, dict]] = {}
+_LbKey = tuple[str, str, str, str | None]
+_LB_CACHE: dict[_LbKey, tuple[float, dict[str, Any]]] = {}
 _LB_CACHE_TTL = 60.0
 _LB_CACHE_MAX = 256
 _LB_FULL_LIMIT = 500
@@ -467,7 +468,7 @@ _LB_PAGE_SIZE = 25
 _LB_MIN_START = datetime.date(2013, 1, 1)  # ~XRPL genesis; clamp `start` below this
 
 
-def _lb_cache_put(key: tuple, value: dict, now_mono: float) -> None:
+def _lb_cache_put(key: _LbKey, value: dict[str, Any], now_mono: float) -> None:
     """Insert into the leaderboard cache, dropping expired entries and — if
     still over _LB_CACHE_MAX — evicting the oldest by timestamp (bounds memory
     against arbitrary `start` values fanning out the key space)."""
