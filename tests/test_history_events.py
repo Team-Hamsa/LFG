@@ -1,0 +1,83 @@
+# Tests for lfg_core/history_events.py
+import os
+import sys
+
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+os.environ.setdefault("DISCORD_BOT_TOKEN", "x")
+os.environ.setdefault("XUMM_API_KEY", "x")
+os.environ.setdefault("XUMM_API_SECRET", "x")
+os.environ.setdefault("BUNNY_CDN_ACCESS_KEY", "x")
+os.environ.setdefault("BUNNY_CDN_STORAGE_ZONE", "x")
+os.environ.setdefault("SEED", "sEdTM1uX8pu2do5XvTnutH6HsouMaM2")
+os.environ.setdefault("TOKEN_ISSUER_ADDRESS", "rrrrrrrrrrrrrrrrrrrrrhoLvTp")
+os.environ.setdefault("TOKEN_CURRENCY_HEX", "4C46474F00000000000000000000000000000000")
+os.environ.setdefault("XRPL_NETWORK", "testnet")
+os.environ.setdefault("BUNNY_PULL_ZONE", "nft.pullzone.example")
+
+from lfg_core import history_events
+from tests.fixtures import history_txs as fx
+
+
+def _nft(tx):
+    return history_events.derive_nft_events(tx, nft_issuer=fx.ISSUER)
+
+
+def test_mint():
+    (ev,) = _nft(fx.MINT)
+    assert ev["event"] == "mint" and ev["nft_id"] == fx.NFT_A
+    assert ev["to_addr"] == fx.ISSUER
+    assert ev["ts"] == 800000000 + history_events.RIPPLE_EPOCH
+
+
+def test_burn_records_owner():
+    (ev,) = _nft(fx.BURN)
+    assert ev["event"] == "burn" and ev["from_addr"] == fx.ALICE
+
+
+def test_modify_is_swap():
+    (ev,) = _nft(fx.MODIFY)
+    assert ev["event"] == "modify" and ev["to_addr"] == fx.ALICE
+
+
+def test_sale_xrp_seller_buyer_price():
+    (ev,) = _nft(fx.SALE_XRP)
+    assert ev["event"] == "sale"
+    assert (ev["from_addr"], ev["to_addr"]) == (fx.ALICE, fx.BOB)
+    assert ev["price_drops"] == 5000000 and ev["price_token"] is None
+
+
+def test_zero_price_is_transfer():
+    (ev,) = _nft(fx.TRANSFER_FREE)
+    assert ev["event"] == "transfer"
+    assert (ev["from_addr"], ev["to_addr"]) == (fx.ISSUER, fx.ALICE)
+
+
+def test_buy_offer_iou_sale():
+    (ev,) = _nft(fx.SALE_IOU)
+    assert ev["event"] == "sale"
+    assert (ev["from_addr"], ev["to_addr"]) == (fx.ALICE, fx.BOB)
+    assert ev["price_drops"] is None and '"value": "10"' in ev["price_token"]
+
+
+def test_offer_create_and_cancel():
+    (c,) = _nft(fx.OFFER_CREATE)
+    assert c["event"] == "offer_create" and c["price_drops"] == 9000000
+    (x,) = _nft(fx.OFFER_CANCEL)
+    assert x["event"] == "offer_cancel" and x["nft_id"] == fx.NFT_A
+
+
+def test_non_nft_tx_yields_nothing():
+    assert _nft(fx.AIRDROP) == []
+
+
+def test_normalize_entry_account_tx_shape():
+    entry = {
+        "tx": {"TransactionType": "Payment", "Account": "rX", "date": 1},
+        "meta": {"AffectedNodes": []},
+        "hash": "FF" * 32,
+        "ledger_index": 42,
+        "validated": True,
+    }
+    tx = history_events.normalize_entry(entry)
+    assert tx["hash"] == "FF" * 32 and tx["ledger_index"] == 42
+    assert tx["meta"] == {"AffectedNodes": []}
