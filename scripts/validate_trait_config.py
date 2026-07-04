@@ -21,6 +21,9 @@ def main(argv: list[str] | None = None) -> int:
     args = p.parse_args(argv)
     try:
         cfg = trait_config.load_config(args.config)
+    except FileNotFoundError as e:
+        print(f"ERROR: {e}")
+        return 1
     except trait_config.TraitConfigError as e:
         print(f"ERROR: {e}")
         return 1

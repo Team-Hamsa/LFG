@@ -174,6 +174,43 @@ def test_conflicts_enforced_symmetrically(tmp_path):
     assert not cfg.conflicts([], "Head", "Crown")
 
 
+def test_load_config_rejects_scalar_exclusion_values(tmp_path):
+    # A bare scalar (`values: Crown` instead of `values: [Crown]`) would make
+    # conflicts()'s `v in values` a substring test ("Cr" in "Crown" -> True)
+    # instead of membership. Reject it at load time instead of letting it
+    # silently misfire at query time.
+    bad = GOOD.replace(
+        "exclusions: []",
+        """exclusions:
+  - trait_type: Eyes
+    value: Laser
+    excludes:
+      - {trait_type: Head, values: Crown}
+""",
+    )
+    with pytest.raises(trait_config.TraitConfigError, match="values"):
+        trait_config.load_config(_write(tmp_path, bad))
+
+
+def test_load_config_rejects_exclusion_missing_excludes_key(tmp_path):
+    bad = GOOD.replace(
+        "exclusions: []",
+        """exclusions:
+  - trait_type: Eyes
+    value: Laser
+""",
+    )
+    with pytest.raises(trait_config.TraitConfigError, match="excludes"):
+        trait_config.load_config(_write(tmp_path, bad))
+
+
+def test_load_config_valid_exclusions_still_loads_and_conflicts_works(tmp_path):
+    cfg = trait_config.load_config(_write(tmp_path, EXCL))
+    laser = [{"trait_type": "Eyes", "value": "Laser"}]
+    assert cfg.conflicts(laser, "Head", "Crown")
+    assert not cfg.conflicts(laser, "Head", "Beanie Black")
+
+
 def test_validate_against_store(tmp_path):
     import asyncio
 
@@ -211,6 +248,27 @@ def test_validate_against_store(tmp_path):
     assert any("Accessory" in w for w in warnings)  # layer-with-no-dir warning path
 
 
+def test_validate_against_store_empty_tree_skips_checks(tmp_path):
+    # layers/** is gitignored, so a clean checkout (CI) has a `layers/` dir
+    # with no body subdirectories at all. That must NOT produce hundreds of
+    # false "no such file" errors -- it should skip cross-checks and return
+    # a single explanatory warning instead.
+    from lfg_core.layer_store import LocalLayerStore
+
+    empty_layers = tmp_path / "layers"
+    empty_layers.mkdir()
+    cfg = trait_config.load_config(_write(tmp_path, GOOD))
+    store = LocalLayerStore(str(empty_layers))
+    try:
+        errors, warnings = asyncio.run(trait_config.validate_against_store(cfg, store))
+    finally:
+        asyncio.set_event_loop(asyncio.new_event_loop())
+    assert errors == []
+    assert len(warnings) == 1
+    assert "empty" in warnings[0]
+    assert "skipped" in warnings[0]
+
+
 def test_validate_cli_exit_codes(tmp_path, capsys):
     from scripts.validate_trait_config import main
 
@@ -236,6 +294,14 @@ def test_validate_cli_exit_codes(tmp_path, capsys):
         assert main(["--config", str(bad), "--layers-dir", str(layers)]) == 1
     finally:
         asyncio.set_event_loop(asyncio.new_event_loop())
+
+
+def test_validate_cli_missing_config_prints_error_and_exits_1(tmp_path, capsys):
+    from scripts.validate_trait_config import main
+
+    missing = str(tmp_path / "does-not-exist.yaml")
+    assert main(["--config", missing, "--layers-dir", str(tmp_path)]) == 1
+    assert "ERROR" in capsys.readouterr().out
 
 
 def test_default_config_parity_with_legacy_constants():

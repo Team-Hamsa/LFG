@@ -8,7 +8,7 @@
 import os
 from collections.abc import Iterable
 from dataclasses import dataclass
-from typing import Any, cast
+from typing import Any
 
 import yaml
 
@@ -95,15 +95,13 @@ class TraitConfig:
             return rule["trait_type"] == t and (values == "*" or v in values)
 
         for entry in self.exclusions:
-            entry_dict: dict = entry  # type: ignore
-            src_t, src_v = entry_dict["trait_type"], entry_dict["value"]
-            for rule in entry_dict.get("excludes", []):
+            src_t, src_v = entry["trait_type"], entry["value"]
+            for rule in entry.get("excludes", []):
                 for sel in selected:
-                    sel_dict: dict = sel  # type: ignore
                     # authored direction: candidate is the excluded side
                     if (
-                        sel_dict["trait_type"] == src_t
-                        and sel_dict["value"] == src_v
+                        sel["trait_type"] == src_t
+                        and sel["value"] == src_v
                         and _hits(rule, trait_type, value)
                     ):
                         return True
@@ -111,7 +109,7 @@ class TraitConfig:
                     if (
                         trait_type == src_t
                         and value == src_v
-                        and _hits(rule, sel_dict["trait_type"], sel_dict["value"])
+                        and _hits(rule, sel["trait_type"], sel["value"])
                     ):
                         return True
         return False
@@ -123,9 +121,22 @@ async def validate_against_store(cfg: TraitConfig, store: Any) -> tuple[list[str
     errors: list[str] = []
     warnings: list[str] = []
     bodies = await store.list_bodies()
+    if not bodies:
+        # layers/** (the actual trait art) is gitignored — only the empty
+        # `layers/` directory itself is tracked. CI and any other clean
+        # checkout therefore has no body subdirectories at all, so every
+        # file-existence cross-check below would fail with "no such file"
+        # for all ~500 config entries. There's nothing wrong with the repo
+        # in that state; skip the cross-checks entirely and fall back to
+        # structural validation only (load_config already guards CI). Full
+        # validation still runs anywhere the art tree is actually present
+        # (dev machines, deploy targets).
+        return [], [
+            "layer tree is empty — file-existence checks skipped (structural validation only)"
+        ]
     tree: dict[str, dict[str, set[str]]] = {}
     for body in bodies:
-        tree[body] = cast(dict[str, set[str]], {})
+        tree[body] = {}
         for trait_type in await store.list_trait_types(body):
             tree[body][trait_type] = set(await store.list_values(body, trait_type))
 
@@ -161,6 +172,45 @@ def _check_bodies(bodies: Iterable[str], where: str) -> None:
     unknown = set(bodies) - VALID_BODIES
     if unknown:
         raise TraitConfigError(f"unknown body {sorted(unknown)} in {where}")
+
+
+def _check_exclusions(exclusions: Any) -> None:
+    """Validate exclusions shape at load time. conflicts() does
+    `v in values` on each rule's "values" — if that's a bare string (e.g. a
+    typo'd `values: Crown` instead of `values: [Crown]`), YAML parses it as
+    a scalar and `"Cr" in "Crown"` is a *substring* test, not membership, so
+    a rule can silently misfire on partial matches. Rejecting anything but
+    the literal "*" or a list of strings here means conflicts() never has
+    to guess."""
+    for entry in exclusions:
+        if not isinstance(entry, dict):
+            raise TraitConfigError(f"exclusions entry must be a mapping, got {entry!r}")
+        trait_type = entry.get("trait_type")
+        value = entry.get("value")
+        if not isinstance(trait_type, str) or not isinstance(value, str):
+            raise TraitConfigError(
+                f"exclusions entry needs string trait_type and value, got {entry!r}"
+            )
+        if "excludes" not in entry:
+            raise TraitConfigError(f"exclusions {trait_type}/{value} missing 'excludes'")
+        excludes = entry["excludes"]
+        if not isinstance(excludes, list):
+            raise TraitConfigError(f"exclusions {trait_type}/{value} 'excludes' must be a list")
+        for rule in excludes:
+            if not isinstance(rule, dict) or not isinstance(rule.get("trait_type"), str):
+                raise TraitConfigError(
+                    f"exclusions {trait_type}/{value} rule needs a string trait_type, got {rule!r}"
+                )
+            values = rule.get("values", "*")
+            valid_values = values == "*" or (
+                isinstance(values, list) and all(isinstance(v, str) for v in values)
+            )
+            if not valid_values:
+                raise TraitConfigError(
+                    f"exclusions {trait_type}/{value} rule 'values' must be the literal "
+                    f"'*' or a list of strings (a bare scalar like 'values: Crown' silently "
+                    f"becomes a substring match) — got {values!r}"
+                )
 
 
 def load_config(path: str) -> TraitConfig:
@@ -210,14 +260,28 @@ def load_config(path: str) -> TraitConfig:
             )
         )
 
+    exclusions = raw.get("exclusions") or []
+    if not isinstance(exclusions, list):
+        raise TraitConfigError("exclusions must be a list")
+    _check_exclusions(exclusions)
+
+    # Inclusions has no consumer yet (machinery is scaffolded, unused), so
+    # only the outer shape is validated here. Contents (and any cycle
+    # detection between inclusion rules) are deferred to whichever PR gives
+    # inclusions an actual reader — validating unused fields in detail now
+    # would just be guessing at a shape that hasn't been exercised yet.
+    inclusions = raw.get("inclusions") or []
+    if not isinstance(inclusions, list):
+        raise TraitConfigError("inclusions must be a list")
+
     return TraitConfig(
         layers=layers,
         z_overrides=z_overrides,
         affinity=affinity,
         universal_layers=universal,
         swap_pairs=tuple(pairs),
-        exclusions=tuple(raw.get("exclusions", []) or ()),
-        inclusions=tuple(raw.get("inclusions", []) or ()),
+        exclusions=tuple(exclusions),
+        inclusions=tuple(inclusions),
     )
 
 

@@ -11,3 +11,7 @@ mypy>=1.13,<2
 # Linter/formatter (also run via pre-commit; pinned here for direct CLI use
 # during the Phase-B grind: `.venv/bin/ruff check --fix .`).
 ruff>=0.8,<1
+
+# Type stubs for PyYAML (lfg_core/trait_config.py does `import yaml`); mypy
+# needs these installed or it fails CI with "Library stubs not installed".
+types-PyYAML
