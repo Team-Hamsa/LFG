@@ -70,9 +70,9 @@ affinity:
     "AniMang": [male, skeleton]
     "August Tech Vest": [male, skeleton]
     "Badass Leather": [ape, male]
-    "Banana Dress": [female]  # LOW CONFIDENCE: only 2 mint(s) — verify by eye
+    "Banana Dress": [female]  # low sample: 2 mint(s) — owner-confirmed 2026-07-04
     "Banana Shirt": [ape, male]
-    "Banana Sleeveless": [female]  # LOW CONFIDENCE: only 1 mint(s) — verify by eye
+    "Banana Sleeveless": [female]  # low sample: 1 mint(s) — owner-confirmed 2026-07-04
     "Belford Suit": [male]
     "Billy Tux": [male]
     "Blazer Pale Blue": [female]
@@ -107,7 +107,7 @@ affinity:
     "Crop Hoodie Pale Purple": [female]
     "Crop Hoodie Pink": [female]
     "Crop Stuck in the 90s": [female]
-    "Denim Rose": [female]  # LOW CONFIDENCE: only 2 mint(s) — verify by eye
+    "Denim Rose": [female]  # low sample: 2 mint(s) — owner-confirmed 2026-07-04
     "Desiordia": [male, skeleton]
     "Doctor": [ape, male]
     "Dolly": [female]
@@ -138,7 +138,7 @@ affinity:
     "Hoodie Blue": [male, skeleton]
     "Hoodie GO": [male, skeleton]
     "Hoodie GO Orange": [female]
-    "Hoodie GO Pink": [female]  # LOW CONFIDENCE: only 1 mint(s) — verify by eye
+    "Hoodie GO Pink": [female]  # low sample: 1 mint(s) — owner-confirmed 2026-07-04
     "Hoodie GO Punk": [male]
     "Hoodie Irridescent Multicord": [female]
     "Hoodie LFGO Camo": [male]
@@ -150,7 +150,7 @@ affinity:
     "Irridescent Erkel": [ape, male, skeleton]
     "Jacket Black": [female]
     "Jacket Denim": [ape, male, skeleton]
-    "Jacket Tan": [female]  # LOW CONFIDENCE: only 1 mint(s) — verify by eye
+    "Jacket Tan": [female]  # low sample: 1 mint(s) — owner-confirmed 2026-07-04
     "Jason Threads": [male]
     "Juberry Collared Shirt Blue": [male]
     "Judge Camo": [male, skeleton]
@@ -211,7 +211,7 @@ affinity:
     "The Count": [male]
     "Tinkerbell": [female]
     "Turtleneck": [female]
-    "Ugly Christmas Sweater": [male]  # LOW CONFIDENCE: only 2 mint(s) — verify by eye
+    "Ugly Christmas Sweater": [male]  # low sample: 2 mint(s) — owner-confirmed 2026-07-04
     "Vestements": [male, skeleton]
     "Wednesday": [female]
     "Witch Costume": [female]
@@ -278,7 +278,7 @@ affinity:
     "Its Alive": [female, male]
     "Jutan Spectacles": [female, male]
     "Laser": [male]
-    "Mindless": [male]  # LOW CONFIDENCE: only 2 mint(s) — verify by eye
+    "Mindless": [male]  # low sample: 2 mint(s) — owner-confirmed 2026-07-04
     "Money": [female, male]
     "Nerd": [female, male]
     "No Lens Circle": [female, male]
@@ -298,8 +298,8 @@ affinity:
     "Sugar": [female, male]
     "The Millionaires": [female, male]
     "The Millionaires Pink": [female, male]
-    "Third Eye": [male]  # LOW CONFIDENCE: only 1 mint(s) — verify by eye
-    "Third Eyelashes": [female]  # LOW CONFIDENCE: only 2 mint(s) — verify by eye
+    "Third Eye": [male]  # low sample: 1 mint(s) — owner-confirmed 2026-07-04
+    "Third Eyelashes": [female]  # low sample: 2 mint(s) — owner-confirmed 2026-07-04
     "Three Eyes": [male]
     "Three Eyes Lashes": [female]
     "Trance": [male]
@@ -359,7 +359,7 @@ affinity:
     "Fresh Prince": [ape, male, skeleton]
     "Fry Hat": [ape, male]
     "Ghoste": [male]
-    "Golden Whale": [male]  # LOW CONFIDENCE: only 1 mint(s) — verify by eye
+    "Golden Whale": [male]  # low sample: 1 mint(s) — owner-confirmed 2026-07-04
     "Green Monster Mask": [female]
     "Gumball": [ape, female, male]
     "Hamsa": [male]
@@ -420,12 +420,12 @@ affinity:
     "Scream": [male]
     "Scream Wazzaaaa": [male]
     "Shelby Hat": [ape, male, skeleton]
-    "Shiny Shark": [male]  # LOW CONFIDENCE: only 2 mint(s) — verify by eye
+    "Shiny Shark": [male]  # low sample: 2 mint(s) — owner-confirmed 2026-07-04
     "Shogun": [male, skeleton]
     "Short Afro Black": [male, skeleton]
-    "Short Afro Brown": [skeleton]  # LOW CONFIDENCE: only 1 mint(s) — verify by eye
+    "Short Afro Brown": [skeleton]  # low sample: 1 mint(s) — owner-confirmed 2026-07-04
     "Short Spikey Black": [male, skeleton]
-    "Short Spikey Blonde": [male, skeleton]  # LOW CONFIDENCE: only 2 mint(s) — verify by eye
+    "Short Spikey Blonde": [male, skeleton]  # low sample: 2 mint(s) — owner-confirmed 2026-07-04
     "Short Spikey Brown": [male, skeleton]
     "Short Spikey Ginger": [male, skeleton]
     "Short Swept Black": [male, skeleton]
@@ -445,8 +445,8 @@ affinity:
     "Sombrero": [ape, male, skeleton]
     "Spikey Black": [skeleton]
     "Spikey Blonde": [skeleton]
-    "Spikey Brown": [skeleton]  # LOW CONFIDENCE: only 1 mint(s) — verify by eye
-    "Spikey Ginger": [skeleton]  # LOW CONFIDENCE: only 2 mint(s) — verify by eye
+    "Spikey Brown": [skeleton]  # low sample: 1 mint(s) — owner-confirmed 2026-07-04
+    "Spikey Ginger": [skeleton]  # low sample: 2 mint(s) — owner-confirmed 2026-07-04
     "Straw Hat": [male]
     "Suave": [male, skeleton]
     "Super Saiyan": [male]
@@ -498,8 +498,8 @@ affinity:
     "Day of the Dead": [female, male]
     "Despondent": [female]
     "Determined": [male]
-    "Don't Mess With Mojo": [male]  # LOW CONFIDENCE: only 1 mint(s) — verify by eye
-    "Evil Clown": [female]  # LOW CONFIDENCE: only 2 mint(s) — verify by eye
+    "Don't Mess With Mojo": [male]  # low sample: 1 mint(s) — owner-confirmed 2026-07-04
+    "Evil Clown": [female]  # low sample: 2 mint(s) — owner-confirmed 2026-07-04
     "Expressive": [female]
     "Fang": [female, male]
     "Fangs": [male]
