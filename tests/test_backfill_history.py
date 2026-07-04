@@ -100,6 +100,43 @@ def test_backfill_marker_persisted_midway(tmp_path):
     assert history_store.get_cursor(conn, "issuer_tx") == '{"ledger": 7}'
 
 
+def test_backfill_nft_history_resumes_after_failure(tmp_path):
+    """A 2-page nft_history where page 2 raises must leave the page-1 marker
+    persisted, and a resumed run must send that marker on its first request."""
+    conn = history_store.init_history_db(str(tmp_path / "h.db"))
+    nft_id = fx.NFT_A
+    source = f"nft_history:{nft_id}"
+
+    calls = []
+
+    async def flaky_request_fn(req):
+        calls.append(dict(req))
+        if len(calls) == 1:
+            return {"transactions": [_entry(fx.MINT, "10" * 32)], "marker": {"seq": 3}}
+        raise RuntimeError("boom")
+
+    try:
+        _run(bh.backfill_nft_history(conn, flaky_request_fn, nft_id))
+    except RuntimeError:
+        pass
+    assert history_store.get_cursor(conn, source) == '{"seq": 3}'
+
+    # resume: stored marker is sent on the first request, and completion marks "done"
+    calls2 = []
+
+    async def resuming_request_fn(req):
+        calls2.append(dict(req))
+        return {"transactions": [_entry(fx.BURN, "11" * 32)]}
+
+    n = _run(bh.backfill_nft_history(conn, resuming_request_fn, nft_id))
+    assert calls2[0]["marker"] == {"seq": 3}
+    assert n == 1
+    assert history_store.get_cursor(conn, source) == "done"
+
+    # re-running after "done" is a no-op
+    assert _run(bh.backfill_nft_history(conn, resuming_request_fn, nft_id)) == 0
+
+
 def test_rederive_from_raw(tmp_path):
     import importlib
     import sqlite3

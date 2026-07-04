@@ -59,6 +59,15 @@ def test_buy_offer_iou_sale():
     assert ev["price_drops"] is None and '"value": "10"' in ev["price_token"]
 
 
+def test_accept_offer_uses_authoritative_offer_nftoken_id():
+    """The deleted offer's own NFTokenID must win over affected_nft_ids'
+    page-diff fallback, which can surface an unrelated token shuffled between
+    NFTokenPages in the same tx."""
+    (ev,) = _nft(fx.SALE_XRP_PAGE_DIFF_MISMATCH)
+    assert ev["nft_id"] == fx.NFT_A
+    assert ev["nft_id"] != fx.NFT_B
+
+
 def test_brokered_sale_attribution():
     (ev,) = _nft(fx.SALE_BROKERED)
     assert ev["event"] == "sale"

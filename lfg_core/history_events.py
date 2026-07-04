@@ -182,9 +182,16 @@ def derive_nft_events(tx: dict[str, Any], *, nft_issuer: str) -> list[dict[str, 
         is_transfer = _is_zero_price(price_amount)
         event = "transfer" if is_transfer else "sale"
         drops, token = (None, None) if is_transfer else _price_fields(price_amount)
+        # The deleted offer's own NFTokenID is authoritative for which token
+        # changed hands. affected_nft_ids' page-diff fallback scans
+        # NFTokenPage NewFields/FinalFields, which can include *other* tokens
+        # shuffled between pages in the same tx — falling back to ids[0] there
+        # can silently attribute the event to the wrong nft_id.
+        chosen_offer = sell if sell is not None else (buy or offers[0])
+        nft_id = chosen_offer.get("NFTokenID") or meta.get("nftoken_id") or ids[0]
         out = {
             **base,
-            "nft_id": ids[0],
+            "nft_id": nft_id,
             "event": event,
             "from_addr": seller,
             "to_addr": buyer,

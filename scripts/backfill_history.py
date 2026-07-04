@@ -76,11 +76,16 @@ async def backfill_account_tx(conn: Any, request_fn: Any, account: str, source: 
 
 
 async def backfill_nft_history(conn: Any, request_fn: Any, nft_id: str) -> int:
-    """Full nft_history (clio) for one token; cursor keyed per nft_id."""
+    """Full nft_history (clio) for one token; cursor keyed per nft_id.
+
+    The pagination marker is persisted after every page (like
+    backfill_account_tx) so an interrupted long token history resumes from
+    where it left off instead of restarting from page 1."""
     source = f"nft_history:{nft_id}"
-    if history_store.get_cursor(conn, source) == "done":
+    stored = history_store.get_cursor(conn, source)
+    if stored == "done":
         return 0
-    marker: Any = None
+    marker: Any = json.loads(stored) if stored else None
     new = 0
     while True:
         req: dict[str, Any] = {"method": "nft_history", "nft_id": nft_id, "limit": 100}
@@ -92,8 +97,8 @@ async def backfill_nft_history(conn: Any, request_fn: Any, nft_id: str) -> int:
             if store_raw_tx(conn, tx):
                 new += 1
         marker = result.get("marker")
+        history_store.set_cursor(conn, source, json.dumps(marker) if marker else "done")
         if not marker:
-            history_store.set_cursor(conn, source, "done")
             return new
 
 

@@ -128,10 +128,12 @@ async def process_stream_tx(
             genesis=genesis,
         )
     if history_conn is not None and history_ctx is not None:
-        _record_history(history_conn, tx, history_ctx)
+        _record_history(history_conn, tx, history_ctx, index_conn=conn)
 
 
-def _record_history(hconn: Any, tx: dict[str, Any], ctx: dict[str, Any]) -> None:
+def _record_history(
+    hconn: Any, tx: dict[str, Any], ctx: dict[str, Any], *, index_conn: Any = None
+) -> None:
     """Append one stream tx to the history archive iff it produces events.
 
     The listener subscribes to the WHOLE network tx stream, so derived NFT
@@ -167,7 +169,20 @@ def _record_history(hconn: Any, tx: dict[str, Any], ctx: dict[str, Any]) -> None
         raw_json=_json.dumps(tx, sort_keys=True),
     )
     for ev in nft_evs:
-        ev["nft_number"] = ctx["numbers"].get(ev["nft_id"])
+        nft_id = ev["nft_id"]
+        numbers = ctx["numbers"]
+        if nft_id not in numbers and index_conn is not None:
+            # ctx["numbers"] is a startup snapshot: a token minted while this
+            # process is running isn't in it yet. apply_tx (above, same tx)
+            # has already upserted the index row before _record_history runs,
+            # so a live lookup on index_conn resolves the number instead of
+            # leaving it None until the nightly --derive-only rerun.
+            row = index_conn.execute(
+                "SELECT nft_number FROM onchain_nfts WHERE nft_id=?", (nft_id,)
+            ).fetchone()
+            if row is not None and row[0] is not None:
+                numbers[nft_id] = row[0]
+        ev["nft_number"] = numbers.get(nft_id)
         history_store.insert_nft_event(hconn, ev)
     for ev in brix_evs:
         history_store.insert_brix_event(hconn, ev)

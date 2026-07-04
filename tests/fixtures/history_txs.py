@@ -172,6 +172,34 @@ def _deleted_offer_no_amount(owner, flags):
     }
 
 
+def _nftoken_page_node(nft_id):
+    return {
+        "ModifiedNode": {
+            "LedgerEntryType": "NFTokenPage",
+            "FinalFields": {"NFTokens": [{"NFToken": {"NFTokenID": nft_id}}]},
+        }
+    }
+
+
+NFT_B = nft_id_for(ISSUER, seq=2)
+
+# No meta.nftoken_id (clio omits it on some entries) and a NFTokenPage diff
+# that would surface NFT_B via affected_nft_ids' page-diff fallback — but the
+# deleted offer's own NFTokenID (authoritative) says NFT_A actually traded.
+SALE_XRP_PAGE_DIFF_MISMATCH = {
+    "TransactionType": "NFTokenAcceptOffer",
+    "Account": BOB,
+    "hash": "0F" * 32,
+    "ledger_index": 114,
+    "date": 800001400,
+    "meta": {
+        "AffectedNodes": [
+            _deleted_offer(ALICE, "5000000", 1),
+            _nftoken_page_node(NFT_B),
+        ]
+    },
+}
+
 # Deleted offer with no Amount key at all: must classify as transfer.
 TRANSFER_NO_AMOUNT = {
     "TransactionType": "NFTokenAcceptOffer",
