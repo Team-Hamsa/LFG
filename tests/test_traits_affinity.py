@@ -95,7 +95,9 @@ def test_property_random_mints_are_affinity_valid():
 
     trait_config.reset_config()
     cfg = trait_config.get_config()  # real repo config
-    store = LocalLayerStore("layers")  # real repo layers
+    store = LocalLayerStore(  # real repo layers, anchored to repo root (cwd-independent)
+        os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "layers")
+    )
     conn = sqlite3.connect(":memory:")
     rng = random.Random(1234)
     try:
