@@ -31,6 +31,8 @@ from xrpl.models.requests import Request  # noqa: E402
 from lfg_core import history_events, history_store  # noqa: E402
 
 PAGE_LIMIT = 200
+REQUEST_TIMEOUT = 60
+VALID_SOURCES = {"issuer", "brix", "distributor", "nfts"}
 
 
 def store_raw_tx(conn: Any, tx: dict[str, Any]) -> bool:
@@ -115,6 +117,11 @@ async def _amain() -> int:
     parser.add_argument("--derive-only", action="store_true")
     args = parser.parse_args()
 
+    wanted = set(args.sources.split(","))
+    unknown = wanted - VALID_SOURCES
+    if unknown:
+        parser.error(f"unknown --sources value(s): {', '.join(sorted(unknown))}")
+
     net = bf.NETWORKS[args.network]
     clio = net["clio"]
     issuer = net["issuer"] or config.SWAP_ISSUER_ADDRESS
@@ -126,11 +133,12 @@ async def _amain() -> int:
         rederive(conn, args.network, distributor=args.distributor)
         return 0
 
-    wanted = set(args.sources.split(","))
     async with AsyncWebsocketClient(clio) as client:
 
         async def request_fn(req: dict[str, Any]) -> dict[str, Any]:
-            r = await client.request(Request.from_dict(req))
+            r = await asyncio.wait_for(
+                client.request(Request.from_dict(req)), timeout=REQUEST_TIMEOUT
+            )
             if not r.is_successful():
                 raise RuntimeError(f"{req['method']} failed: {r.result}")
             return r.result

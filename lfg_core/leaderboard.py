@@ -227,10 +227,15 @@ def _snapshot_ts(snap_date: str) -> int:
     return int(datetime.strptime(snap_date, "%Y-%m-%d").replace(tzinfo=timezone.utc).timestamp())
 
 
+_SNAPSHOT_COLUMNS = frozenset({"brix", "lp_tokens"})
+
+
 def _snapshot_values(
     hconn: sqlite3.Connection, column: str, as_of_ts: int | None
 ) -> dict[str, float]:
     """account -> value for `column` at the latest snapshot <= as_of_ts (None = latest overall)."""
+    if column not in _SNAPSHOT_COLUMNS:
+        raise ValueError(f"invalid snapshot column: {column!r}")
     rows = hconn.execute(f"SELECT snap_date, account, {column} AS value FROM balance_snapshots")
     latest: dict[str, tuple[str, float]] = {}
     for r in rows.fetchall():
@@ -310,15 +315,17 @@ def _board_brix_earned(
     sources = earn_sources if earn_sources is not None else system_accounts
     source_list = list(sources) if sources else [None]
     placeholders = ",".join("?" * len(source_list))
+    excl, excl_params = _exclude_clause("account", system_accounts)
     sql = f"""
         SELECT account, SUM(delta) AS value FROM brix_events
         WHERE delta > 0
           AND (kind IN ('airdrop','claim')
                OR (kind='payment' AND counterparty IN ({placeholders})))
           AND ts >= ? AND ts < ?
+          {excl}
         GROUP BY account ORDER BY value DESC LIMIT ?
     """
-    params = (*source_list, start_ts, end_ts, limit)
+    params = (*source_list, start_ts, end_ts, *excl_params, limit)
     cur = hconn.execute(sql, params)
     return [_row(wallet=r["account"], value=r["value"]) for r in cur.fetchall()]
 

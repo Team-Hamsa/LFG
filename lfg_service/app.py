@@ -480,23 +480,6 @@ def _lb_cache_put(key: _LbKey, value: dict[str, Any], now_mono: float) -> None:
         del _LB_CACHE[oldest]
 
 
-def _lb_get_conns(request):
-    """Lazily open (and cache on request.app) the history/onchain DB conns
-    for the current XRPL network, read at request time so tests can
-    monkeypatch env vars / config.XRPL_NETWORK per-test."""
-    network = config.XRPL_NETWORK
-    hconn = request.app.get("history_db")
-    if hconn is None:
-        hconn = history_store.init_history_db(history_store.history_db_path(network))
-        request.app["history_db"] = hconn
-    oconn = request.app.get("onchain_db")
-    if oconn is None:
-        oconn = nft_index.init_db(nft_index.index_db_path(network))
-        oconn.row_factory = __import__("sqlite3").Row
-        request.app["onchain_db"] = oconn
-    return hconn, oconn
-
-
 def _lb_system_accounts() -> frozenset[str]:
     return frozenset(
         a
@@ -536,7 +519,8 @@ async def handle_leaderboard(request):
             start_date = datetime.date.fromisoformat(start)
         except ValueError:
             return web.json_response({"error": f"bad start date: {start!r}"}, status=400)
-        if start_date < _LB_MIN_START or start_date > datetime.date.today():
+        today_utc = datetime.datetime.now(datetime.timezone.utc).date()
+        if start_date < _LB_MIN_START or start_date > today_utc:
             return web.json_response({"error": f"start out of range: {start!r}"}, status=400)
 
     network = config.XRPL_NETWORK
@@ -566,7 +550,7 @@ async def handle_leaderboard(request):
             oconn = nft_index.init_db(nft_index.index_db_path(network))
             oconn.row_factory = sqlite3.Row
             try:
-                return leaderboard.compute(
+                computed_rows = leaderboard.compute(
                     board,
                     hconn,
                     oconn,
@@ -576,6 +560,19 @@ async def handle_leaderboard(request):
                     system_accounts=system_accounts,
                     limit=_LB_FULL_LIMIT,
                 )
+                nft_ids = [r["nft_id"] for r in computed_rows if r.get("nft_id")]
+                images: dict[str, str | None] = {}
+                if nft_ids:
+                    placeholders = ",".join("?" * len(nft_ids))
+                    cur = oconn.execute(
+                        f"SELECT nft_id, image FROM onchain_nfts WHERE nft_id IN ({placeholders})",
+                        nft_ids,
+                    )
+                    images = {r["nft_id"]: r["image"] for r in cur.fetchall()}
+                for r in computed_rows:
+                    nft_id = r.get("nft_id")
+                    r["image"] = images.get(nft_id) if nft_id else None
+                return computed_rows
             finally:
                 hconn.close()
                 oconn.close()
@@ -592,17 +589,6 @@ async def handle_leaderboard(request):
 
     page_rows = full_rows[:_LB_PAGE_SIZE]
 
-    nft_ids = [r["nft_id"] for r in page_rows if r.get("nft_id")]
-    images: dict[str, str | None] = {}
-    if nft_ids:
-        _, oconn = _lb_get_conns(request)
-        placeholders = ",".join("?" * len(nft_ids))
-        cur = oconn.execute(
-            f"SELECT nft_id, image FROM onchain_nfts WHERE nft_id IN ({placeholders})",
-            nft_ids,
-        )
-        images = {r["nft_id"]: r["image"] for r in cur.fetchall()}
-
     rows = []
     for i, r in enumerate(page_rows):
         wallet = r.get("wallet")
@@ -613,7 +599,7 @@ async def handle_leaderboard(request):
                 "display_name": _lb_display_name(wallet) if wallet else None,
                 "nft_id": r.get("nft_id"),
                 "nft_number": r.get("nft_number"),
-                "image": images.get(r.get("nft_id")),
+                "image": r.get("image"),
                 "value": r["value"],
             }
         )

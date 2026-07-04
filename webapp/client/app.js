@@ -232,10 +232,14 @@ function renderLbRow(row, isNftBoard) {
 async function loadLeaderboard() {
   // Chip active states reflect current selection.
   for (const btn of el('lb-periods').querySelectorAll('.lb-chip')) {
-    btn.classList.toggle('active', btn.dataset.period === lbState.period);
+    const active = btn.dataset.period === lbState.period;
+    btn.classList.toggle('active', active);
+    btn.setAttribute('aria-selected', String(active));
   }
   for (const btn of el('lb-boards').querySelectorAll('.lb-chip')) {
-    btn.classList.toggle('active', btn.dataset.board === lbState.board);
+    const active = btn.dataset.board === lbState.board;
+    btn.classList.toggle('active', active);
+    btn.setAttribute('aria-selected', String(active));
   }
 
   const stepper = el('lb-stepper');

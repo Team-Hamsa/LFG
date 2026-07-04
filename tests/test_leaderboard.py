@@ -209,6 +209,16 @@ def test_brix_earned_from_system_sources():
     assert {(r["wallet"], r["value"]) for r in rows} == {("rA", 3), ("rB", 2)}
 
 
+def test_brix_earned_excludes_system_account_recipients():
+    h, o = _dbs()
+    _brixev(h, tx_hash="e1", account="rA", counterparty=None, delta=3, kind="airdrop", ts=5)
+    _brixev(h, tx_hash="e2", account=ISSUER, counterparty=None, delta=10, kind="airdrop", ts=6)
+    rows = leaderboard.compute(
+        "brix_earned", h, o, start_ts=0, end_ts=99, network="testnet", system_accounts=SYS
+    )
+    assert {(r["wallet"], r["value"]) for r in rows} == {("rA", 3)}
+
+
 def test_nft_rarity_scores_unique_traits_highest_and_excludes_burned():
     h, o = _dbs()
     o.executemany(

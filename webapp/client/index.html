@@ -37,26 +37,26 @@
       <div id="leaderboard" class="leaderboard">
         <h3 class="lb-title">🏆 Leaderboard</h3>
         <div id="lb-periods" class="lb-chips" role="tablist" aria-label="Time period">
-          <button class="lb-chip active" data-period="today">Today</button>
-          <button class="lb-chip" data-period="week">Week</button>
-          <button class="lb-chip" data-period="month">Month</button>
-          <button class="lb-chip" data-period="year">Year</button>
-          <button class="lb-chip" data-period="all">All Time</button>
+          <button class="lb-chip active" role="tab" aria-selected="true" data-period="today">Today</button>
+          <button class="lb-chip" role="tab" aria-selected="false" data-period="week">Week</button>
+          <button class="lb-chip" role="tab" aria-selected="false" data-period="month">Month</button>
+          <button class="lb-chip" role="tab" aria-selected="false" data-period="year">Year</button>
+          <button class="lb-chip" role="tab" aria-selected="false" data-period="all">All Time</button>
         </div>
         <div id="lb-stepper" class="lb-stepper" hidden>
           <button id="lb-prev" class="link">‹</button>
           <span id="lb-range"></span>
           <button id="lb-next" class="link" disabled>›</button>
         </div>
-        <div id="lb-boards" class="lb-chips lb-boards">
-          <button class="lb-chip active" data-board="users_nfts">Holders</button>
-          <button class="lb-chip" data-board="users_swaps">Swappers</button>
-          <button class="lb-chip" data-board="users_builds">Builders</button>
-          <button class="lb-chip" data-board="nft_swaps">Hot NFTs</button>
-          <button class="lb-chip" data-board="nft_rarity">Rarest</button>
-          <button class="lb-chip" data-board="brix_rich">BRIX Rich</button>
-          <button class="lb-chip" data-board="brix_lp">LP</button>
-          <button class="lb-chip" data-board="brix_earned">Earned</button>
+        <div id="lb-boards" class="lb-chips lb-boards" role="tablist" aria-label="Board">
+          <button class="lb-chip active" role="tab" aria-selected="true" data-board="users_nfts">Holders</button>
+          <button class="lb-chip" role="tab" aria-selected="false" data-board="users_swaps">Swappers</button>
+          <button class="lb-chip" role="tab" aria-selected="false" data-board="users_builds">Builders</button>
+          <button class="lb-chip" role="tab" aria-selected="false" data-board="nft_swaps">Hot NFTs</button>
+          <button class="lb-chip" role="tab" aria-selected="false" data-board="nft_rarity">Rarest</button>
+          <button class="lb-chip" role="tab" aria-selected="false" data-board="brix_rich">BRIX Rich</button>
+          <button class="lb-chip" role="tab" aria-selected="false" data-board="brix_lp">LP</button>
+          <button class="lb-chip" role="tab" aria-selected="false" data-board="brix_earned">Earned</button>
         </div>
         <ol id="lb-list" class="lb-list"></ol>
         <p id="lb-me" class="lb-me" hidden></p>

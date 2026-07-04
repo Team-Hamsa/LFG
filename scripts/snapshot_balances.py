@@ -83,6 +83,7 @@ def write_snapshot(hconn: Any, balances: dict[str, dict], snap_date: str) -> int
     Returns the count of holders recorded."""
     for account, b in balances.items():
         history_store.upsert_snapshot(hconn, snap_date, account, b["brix"], b["lp"])
+    hconn.commit()
     return len(balances)
 
 
@@ -109,7 +110,7 @@ async def _amain() -> int:
     async with AsyncWebsocketClient(clio) as client:
 
         async def request_fn(req: dict[str, Any]) -> dict[str, Any]:
-            r = await client.request(Request.from_dict(req))
+            r = await asyncio.wait_for(client.request(Request.from_dict(req)), timeout=60)
             if not r.is_successful():
                 raise RuntimeError(f"{req['method']} failed: {r.result}")
             return r.result

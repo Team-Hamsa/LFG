@@ -80,6 +80,7 @@ def init_history_db(path: str) -> sqlite3.Connection:
     conn = sqlite3.connect(path)
     conn.row_factory = sqlite3.Row
     conn.execute("PRAGMA journal_mode=WAL")
+    conn.execute("PRAGMA busy_timeout=30000")
     conn.executescript(_SCHEMA)
     conn.commit()
     return conn
@@ -101,7 +102,6 @@ def insert_tx(
         "INSERT OR IGNORE INTO xrpl_txs VALUES (?, ?, ?, ?, ?, ?, ?)",
         (tx_hash, ledger_index, close_time, tx_type, account, source_tag, raw_json),
     )
-    conn.commit()
     return cur.rowcount > 0
 
 
@@ -160,7 +160,6 @@ def clear_derived(conn: sqlite3.Connection) -> None:
     """Truncate derived event tables (nft_events, brix_events)."""
     conn.execute("DELETE FROM nft_events")
     conn.execute("DELETE FROM brix_events")
-    conn.commit()
 
 
 def upsert_snapshot(
@@ -173,4 +172,3 @@ def upsert_snapshot(
         " brix=excluded.brix, lp_tokens=excluded.lp_tokens",
         (snap_date, account, brix, lp_tokens),
     )
-    conn.commit()
