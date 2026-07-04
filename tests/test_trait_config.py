@@ -191,6 +191,13 @@ def test_validate_against_store(tmp_path):
         )
     )
     store = LocalLayerStore(str(layers))
-    errors, warnings = asyncio.run(trait_config.validate_against_store(cfg, store))
+    try:
+        errors, warnings = asyncio.run(trait_config.validate_against_store(cfg, store))
+    finally:
+        # asyncio.run() leaves the main-thread event loop unset on exit;
+        # webapp tests later in full-suite order still rely on the legacy
+        # asyncio.get_event_loop() auto-create, so restore a loop for them.
+        asyncio.set_event_loop(asyncio.new_event_loop())
     assert any("Ghost Coat" in e for e in errors)            # claimed, no file
     assert any("Hypno" in w for w in warnings)               # file, no entry
+    assert any("Accessory" in w for w in warnings)           # layer-with-no-dir warning path
