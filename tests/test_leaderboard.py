@@ -149,6 +149,117 @@ def test_compute_unknown_board_raises():
         pass
 
 
+def test_brix_rich_alltime_and_windowed():
+    h, o = _dbs()
+    history_store.upsert_snapshot(h, "2026-07-01", "rA", 10, 0)
+    history_store.upsert_snapshot(h, "2026-07-03", "rA", 25, 0)
+    history_store.upsert_snapshot(h, "2026-07-03", "rB", 5, 0)
+    rows = leaderboard.compute(
+        "brix_rich", h, o, start_ts=0, end_ts=99, network="testnet", system_accounts=SYS
+    )
+    assert [(r["wallet"], r["value"]) for r in rows] == [("rA", 25), ("rB", 5)]
+
+    start = int(datetime(2026, 7, 2, tzinfo=timezone.utc).timestamp())
+    end = int(datetime(2026, 7, 4, tzinfo=timezone.utc).timestamp())
+    rows = leaderboard.compute(
+        "brix_rich", h, o, start_ts=start, end_ts=end, network="testnet", system_accounts=SYS
+    )
+    assert [(r["wallet"], r["value"]) for r in rows] == [("rA", 15), ("rB", 5)]
+
+
+def test_brix_lp_uses_lp_tokens_column():
+    h, o = _dbs()
+    history_store.upsert_snapshot(h, "2026-07-01", "rA", 0, 10)
+    history_store.upsert_snapshot(h, "2026-07-03", "rA", 0, 25)
+    history_store.upsert_snapshot(h, "2026-07-03", "rB", 0, 5)
+    rows = leaderboard.compute(
+        "brix_lp", h, o, start_ts=0, end_ts=99, network="testnet", system_accounts=SYS
+    )
+    assert [(r["wallet"], r["value"]) for r in rows] == [("rA", 25), ("rB", 5)]
+
+
+def test_brix_rich_excludes_system_accounts():
+    h, o = _dbs()
+    history_store.upsert_snapshot(h, "2026-07-03", "rA", 25, 0)
+    history_store.upsert_snapshot(h, "2026-07-03", ISSUER, 999, 0)
+    rows = leaderboard.compute(
+        "brix_rich", h, o, start_ts=0, end_ts=99, network="testnet", system_accounts=SYS
+    )
+    assert [r["wallet"] for r in rows] == ["rA"]
+
+
+def _brixev(h, **kw):
+    base = {
+        "tx_hash": str(id(kw)),
+        "account": None,
+        "counterparty": None,
+        "delta": 0,
+        "kind": "payment",
+        "ts": 0,
+    }
+    base.update(kw)
+    history_store.insert_brix_event(h, base)
+    h.commit()
+
+
+def test_brix_earned_from_system_sources():
+    h, o = _dbs()
+    _brixev(h, tx_hash="e1", account="rA", counterparty=None, delta=3, kind="airdrop", ts=5)
+    _brixev(h, tx_hash="e2", account="rA", counterparty="rB", delta=5, kind="payment", ts=6)
+    _brixev(h, tx_hash="e3", account="rB", counterparty=ISSUER, delta=2, kind="payment", ts=7)
+    rows = leaderboard.compute(
+        "brix_earned", h, o, start_ts=0, end_ts=99, network="testnet", system_accounts=SYS
+    )
+    assert {(r["wallet"], r["value"]) for r in rows} == {("rA", 3), ("rB", 2)}
+
+
+def test_nft_rarity_scores_unique_traits_highest_and_excludes_burned():
+    h, o = _dbs()
+    o.executemany(
+        "INSERT INTO onchain_nfts (nft_id, nft_number, owner, is_burned, attributes_json)"
+        " VALUES (?,?,?,?,?)",
+        [
+            (
+                "N1",
+                1,
+                "rA",
+                0,
+                '[{"trait_type": "Background", "value": "Blue"},'
+                ' {"trait_type": "Hat", "value": "Common"}]',
+            ),
+            (
+                "N2",
+                2,
+                "rB",
+                0,
+                '[{"trait_type": "Background", "value": "Blue"},'
+                ' {"trait_type": "Hat", "value": "Unique"}]',
+            ),
+            (
+                "N3",
+                3,
+                "rC",
+                0,
+                '[{"trait_type": "Background", "value": "Blue"},'
+                ' {"trait_type": "Hat", "value": "Common"}]',
+            ),
+            (
+                "N4",
+                4,
+                ISSUER,
+                1,
+                '[{"trait_type": "Background", "value": "Blue"},'
+                ' {"trait_type": "Hat", "value": "Unique"}]',
+            ),
+        ],
+    )
+    rows = leaderboard.compute(
+        "nft_rarity", h, o, start_ts=0, end_ts=99, network="testnet", system_accounts=SYS
+    )
+    assert rows[0]["nft_id"] == "N2"
+    assert len(rows) == 3
+
+
 def test_limit_parameter_threads_through():
     """Verify limit parameter is threaded through board functions, not capped at _LIMIT."""
     h, o = _dbs()

@@ -224,11 +224,158 @@ def _board_nft_swaps(
     ]
 
 
+def _snapshot_ts(snap_date: str) -> int:
+    return int(datetime.strptime(snap_date, "%Y-%m-%d").replace(tzinfo=timezone.utc).timestamp())
+
+
+def _snapshot_values(
+    hconn: sqlite3.Connection, column: str, as_of_ts: int | None
+) -> dict[str, float]:
+    """account -> value for `column` at the latest snapshot <= as_of_ts (None = latest overall)."""
+    rows = hconn.execute(f"SELECT snap_date, account, {column} AS value FROM balance_snapshots")
+    latest: dict[str, tuple[str, float]] = {}
+    for r in rows.fetchall():
+        snap_date = r["snap_date"]
+        if as_of_ts is not None and _snapshot_ts(snap_date) > as_of_ts:
+            continue
+        account = r["account"]
+        prev = latest.get(account)
+        if prev is None or snap_date > prev[0]:
+            latest[account] = (snap_date, r["value"])
+    return {account: value for account, (_, value) in latest.items()}
+
+
+def _board_balance_snapshot(
+    column: str,
+    hconn: sqlite3.Connection,
+    oconn: sqlite3.Connection,
+    start_ts: int,
+    end_ts: int,
+    system_accounts: frozenset[str],
+    limit: int,
+) -> list[Row]:
+    if start_ts == 0:
+        values = _snapshot_values(hconn, column, None)
+        rows = [
+            _row(wallet=account, value=value)
+            for account, value in values.items()
+            if account not in system_accounts
+        ]
+    else:
+        end_values = _snapshot_values(hconn, column, end_ts)
+        start_values = _snapshot_values(hconn, column, start_ts)
+        rows = []
+        for account, end_value in end_values.items():
+            if account in system_accounts:
+                continue
+            delta = end_value - start_values.get(account, 0)
+            if delta > 0:
+                rows.append(_row(wallet=account, value=delta))
+    rows.sort(key=lambda r: r["value"], reverse=True)
+    return rows[:limit]
+
+
+def _board_brix_rich(
+    hconn: sqlite3.Connection,
+    oconn: sqlite3.Connection,
+    start_ts: int,
+    end_ts: int,
+    system_accounts: frozenset[str],
+    limit: int,
+) -> list[Row]:
+    return _board_balance_snapshot("brix", hconn, oconn, start_ts, end_ts, system_accounts, limit)
+
+
+def _board_brix_lp(
+    hconn: sqlite3.Connection,
+    oconn: sqlite3.Connection,
+    start_ts: int,
+    end_ts: int,
+    system_accounts: frozenset[str],
+    limit: int,
+) -> list[Row]:
+    return _board_balance_snapshot(
+        "lp_tokens", hconn, oconn, start_ts, end_ts, system_accounts, limit
+    )
+
+
+def _board_brix_earned(
+    hconn: sqlite3.Connection,
+    oconn: sqlite3.Connection,
+    start_ts: int,
+    end_ts: int,
+    system_accounts: frozenset[str],
+    limit: int,
+    earn_sources: frozenset[str] | None = None,
+) -> list[Row]:
+    sources = earn_sources if earn_sources is not None else system_accounts
+    source_list = list(sources) if sources else [None]
+    placeholders = ",".join("?" * len(source_list))
+    sql = f"""
+        SELECT account, SUM(delta) AS value FROM brix_events
+        WHERE delta > 0
+          AND (kind IN ('airdrop','claim')
+               OR (kind='payment' AND counterparty IN ({placeholders})))
+          AND ts >= ? AND ts < ?
+        GROUP BY account ORDER BY value DESC LIMIT ?
+    """
+    params = (*source_list, start_ts, end_ts, limit)
+    cur = hconn.execute(sql, params)
+    return [_row(wallet=r["account"], value=r["value"]) for r in cur.fetchall()]
+
+
+def _nft_rarity(
+    hconn: sqlite3.Connection,
+    oconn: sqlite3.Connection,
+    start_ts: int,
+    end_ts: int,
+    system_accounts: frozenset[str],
+    limit: int,
+) -> list[Row]:
+    import json as _j
+    from collections import Counter
+
+    rows = oconn.execute(
+        "SELECT nft_id, nft_number, attributes_json FROM onchain_nfts"
+        " WHERE is_burned=0 AND attributes_json IS NOT NULL AND attributes_json != ''"
+    ).fetchall()
+    token_traits: dict[str, tuple[int | None, list[tuple[str, str]]]] = {}
+    freq: Counter[tuple[str, str]] = Counter()
+    for r in rows:
+        try:
+            attrs = _j.loads(r["attributes_json"])
+        except ValueError:
+            continue
+        pairs = [
+            (str(t.get("trait_type")), str(t.get("value")))
+            for t in attrs
+            if isinstance(t, dict) and t.get("trait_type") is not None
+        ]
+        token_traits[r["nft_id"]] = (r["nft_number"], pairs)
+        freq.update(pairs)
+    n_live = len(token_traits) or 1
+    scored = [
+        _row(
+            nft_id=nft_id,
+            nft_number=number,
+            value=round(sum(n_live / freq[p] for p in pairs), 2),
+        )
+        for nft_id, (number, pairs) in token_traits.items()
+        if pairs
+    ]
+    scored.sort(key=lambda x: x["value"], reverse=True)
+    return scored[:limit]
+
+
 BOARDS: dict[str, BoardFn] = {
     "users_nfts": _board_users_nfts,
     "users_swaps": _board_users_swaps,
     "users_builds": _board_users_builds,
     "nft_swaps": _board_nft_swaps,
+    "brix_rich": _board_brix_rich,
+    "brix_lp": _board_brix_lp,
+    "brix_earned": _board_brix_earned,
+    "nft_rarity": _nft_rarity,
 }
 
 
@@ -242,9 +389,14 @@ def compute(
     network: str,
     system_accounts: frozenset[str],
     limit: int = _LIMIT,
+    earn_sources: frozenset[str] | None = None,
 ) -> list[Row]:
     """Compute a leaderboard's rows, sorted desc, top `limit` (default 25)."""
     fn = BOARDS.get(board)
     if fn is None:
         raise ValueError(f"unknown board: {board!r}")
+    if board == "brix_earned":
+        return _board_brix_earned(
+            hconn, oconn, start_ts, end_ts, system_accounts, limit, earn_sources
+        )
     return fn(hconn, oconn, start_ts, end_ts, system_accounts, limit)
