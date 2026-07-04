@@ -15,10 +15,10 @@ BODIES = ["ape", "female", "male", "skeleton"]
 
 def count_affinities(
     rows: list[tuple[str | None, str]],
-) -> dict[tuple[str, str], Counter]:
+) -> dict[tuple[str, str], Counter[str]]:
     """rows: (body, attributes_json) per historical token (burned included).
     Body falls back to detect_body(attributes) when the column is empty."""
-    counts: dict[tuple[str, str], Counter] = {}
+    counts: dict[tuple[str, str], Counter[str]] = {}
     for body, attributes_json in rows:
         try:
             attributes = json.loads(attributes_json) if attributes_json else []
@@ -35,7 +35,7 @@ def count_affinities(
     return counts
 
 
-def classify(counts: Counter) -> str:
+def classify(counts: Counter[str]) -> str:
     bodies = {b for b, n in counts.items() if n > 0}
     if bodies == {"female"}:
         return "female-only"
@@ -49,7 +49,7 @@ def classify(counts: Counter) -> str:
 
 
 def cross_check(
-    counts: dict[tuple[str, str], Counter],
+    counts: dict[tuple[str, str], Counter[str]],
     dir_tree: dict[str, dict[str, set[str]]],
 ) -> tuple[list[tuple[str, str, str]], list[tuple[str, str, str]]]:
     """misplacements: value present in a body dir but never minted on that
@@ -72,7 +72,7 @@ def cross_check(
     return sorted(misplacements), sorted(coverage_gaps)
 
 
-def render_affinity_yaml(counts: dict[tuple[str, str], Counter]) -> str:
+def render_affinity_yaml(counts: dict[tuple[str, str], Counter[str]]) -> str:
     """Draft affinity: section, values grouped by trait type, alphabetical,
     low-confidence entries commented with their counts."""
     by_type: dict[str, list[str]] = {}
@@ -91,7 +91,7 @@ def render_affinity_yaml(counts: dict[tuple[str, str], Counter]) -> str:
 
 
 def render_report_md(
-    counts: dict[tuple[str, str], Counter],
+    counts: dict[tuple[str, str], Counter[str]],
     misplacements: list[tuple[str, str, str]],
     coverage_gaps: list[tuple[str, str, str]],
 ) -> str:

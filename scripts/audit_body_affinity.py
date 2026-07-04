@@ -51,9 +51,7 @@ def run(db_path: str, layers_dir: str, out_dir: str) -> dict:
     with open(os.path.join(out_dir, "body_affinity.json"), "w") as f:
         json.dump(
             {
-                "counts": {
-                    f"{t}/{v}": dict(c) for (t, v), c in sorted(counts.items())
-                },
+                "counts": {f"{t}/{v}": dict(c) for (t, v), c in sorted(counts.items())},
                 "misplacements": misplacements,
                 "coverage_gaps": gaps,
             },
