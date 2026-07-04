@@ -3,6 +3,7 @@
 # IMG_PROXY_ALLOWED_BASES, LAYER_SOURCE) at import time; set the same defaults
 # test_smoke.py uses so collection order can't strand them. (Copy the block
 # verbatim from tests/test_server_identity_wiring.py — same keys/values.)
+import asyncio
 import os
 
 os.environ.setdefault("XUMM_API_KEY", "test")
@@ -201,3 +202,30 @@ def test_validate_against_store(tmp_path):
     assert any("Ghost Coat" in e for e in errors)            # claimed, no file
     assert any("Hypno" in w for w in warnings)               # file, no entry
     assert any("Accessory" in w for w in warnings)           # layer-with-no-dir warning path
+
+
+def test_validate_cli_exit_codes(tmp_path, capsys):
+    from scripts.validate_trait_config import main
+
+    layers = tmp_path / "layers"
+    (layers / "female" / "Background").mkdir(parents=True)
+    (layers / "female" / "Background" / "Sunset.png").write_bytes(b"x")
+    (layers / "female" / "Body").mkdir()
+    (layers / "female" / "Body" / "Curved.png").write_bytes(b"x")
+    (layers / "female" / "Eyes").mkdir()
+    (layers / "female" / "Eyes" / "Wavy.png").write_bytes(b"x")
+    (layers / "female" / "Clothing").mkdir()
+    (layers / "female" / "Clothing" / "Summer Dress.png").write_bytes(b"x")
+
+    good = _write(tmp_path, GOOD)
+    try:
+        assert main(["--config", good, "--layers-dir", str(layers)]) == 0
+    finally:
+        asyncio.set_event_loop(asyncio.new_event_loop())
+
+    bad = tmp_path / "bad.yaml"
+    bad.write_text(GOOD.replace("[female]", "[male]"))  # claims male, file is female-only
+    try:
+        assert main(["--config", str(bad), "--layers-dir", str(layers)]) == 1
+    finally:
+        asyncio.set_event_loop(asyncio.new_event_loop())
