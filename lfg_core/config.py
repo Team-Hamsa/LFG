@@ -172,6 +172,8 @@ SWAP_RECORDS_DIR = os.getenv("SWAP_RECORDS_DIR", "swap_records")
 # Distributor account for BRIX airdrops; used to classify history archive
 # BRIX events as "airdrop" vs plain "payment".
 BRIX_DISTRIBUTOR_ADDRESS = os.getenv("BRIX_DISTRIBUTOR_ADDRESS")
+# AMM account for LP token snapshots (testnet rLUnD5mskBnHfwFxCjakDA3RVgK584XQXG)
+BRIX_AMM_ACCOUNT = os.getenv("BRIX_AMM_ACCOUNT")
 NFT_SCHEMA_URL = os.getenv(
     "NFT_SCHEMA_URL", "ipfs://QmNpi8rcXEkohca8iXu7zysKKSJYqCvBJn3xJwga8jXqWU"
 )
