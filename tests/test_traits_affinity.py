@@ -88,3 +88,25 @@ def test_mint_selection_respects_affinity(tmp_path):
     finally:
         trait_config.reset_config()
         asyncio.set_event_loop(asyncio.new_event_loop())
+
+
+def test_property_random_mints_are_affinity_valid():
+    import random
+
+    trait_config.reset_config()
+    cfg = trait_config.get_config()  # real repo config
+    store = LocalLayerStore("layers")  # real repo layers
+    conn = sqlite3.connect(":memory:")
+    rng = random.Random(1234)
+    try:
+        for _ in range(200):
+            body, attrs = asyncio.run(
+                traits.select_random_attributes(store, conn=conn, network="testnet", rng=rng)
+            )
+            for a in attrs:
+                assert cfg.value_allowed(body, a["trait_type"], a["value"]), (
+                    f"illegal mint: {body}/{a['trait_type']}/{a['value']}"
+                )
+    finally:
+        trait_config.reset_config()
+        asyncio.set_event_loop(asyncio.new_event_loop())
