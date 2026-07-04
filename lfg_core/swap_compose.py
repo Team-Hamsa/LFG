@@ -55,8 +55,8 @@ async def compose_nft(
     out_dir: str = "generated",
 ) -> tuple[str, bool]:
     """Resolve all trait layers through the store, apply the ape face rule
-    (nose + melt-ape masking), float TOP effects, and overlay.
-    Returns (output_path, is_video)."""
+    (nose + melt-ape masking), and overlay in order determined by trait_config
+    z-values (including effect layers on top). Returns (output_path, is_video)."""
     canonical = _canonical(attributes)
     paths = await asyncio.gather(
         *(store.resolve(body, a["trait_type"], a["value"]) for a in canonical)

@@ -45,6 +45,8 @@ async def select_random_attributes(
             )
         attributes: list[dict[str, str]] = []
         cfg = trait_config.get_config()
+        # Layers added only to trait_config.yaml won't mint until TRAIT_ORDER is updated too.
+        # The parity test (test_default_config_parity_with_legacy_constants) fails on divergence.
         for trait_type in TRAIT_ORDER:
             values = await store.list_values(body, trait_type)
             values = [

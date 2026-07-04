@@ -109,6 +109,13 @@ def test_property_random_mints_are_affinity_valid():
                 assert cfg.value_allowed(body, a["trait_type"], a["value"]), (
                     f"illegal mint: {body}/{a['trait_type']}/{a['value']}"
                 )
+            # Guard against over-filtering regression: ensure each mint has candidates
+            # for all its trait types, particularly Clothing and Eyes which are always
+            # present in the real layers tree and should never be filtered out.
+            assert len(attrs) > 0, "mint attributes list is empty (over-filtered)"
+            trait_types = {a["trait_type"] for a in attrs}
+            assert "Clothing" in trait_types, f"Clothing missing for {body} (over-filtered)"
+            assert "Eyes" in trait_types, f"Eyes missing for {body} (over-filtered)"
     finally:
         trait_config.reset_config()
         asyncio.set_event_loop(asyncio.new_event_loop())
