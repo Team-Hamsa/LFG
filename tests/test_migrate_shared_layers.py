@@ -195,3 +195,164 @@ def test_seasons_manifest_default_path_derives_from_layers_dir(tmp_path):
     assert result["season_conflicts"] == []
     manifest = json.loads((tmp_path / "seasons.json").read_text())
     assert manifest == {"shared/Background/Sunset": 5}
+
+
+# ---------------------------------------------------------------------------
+# Pre-existing shared/ destination: never blind-overwrite (review finding 1)
+# ---------------------------------------------------------------------------
+
+
+def test_existing_identical_shared_dest_is_not_overwritten_and_bodies_removed(tmp_path):
+    # A manual preload, or a prior run that copied but crashed before the
+    # removal loop, already left the correct bytes at shared/. The value is
+    # still reported as moved (the removals still need to happen) but copy2
+    # must never run again.
+    _make_body_dirs(tmp_path)
+    shared_dir = tmp_path / "shared" / "Background"
+    shared_dir.mkdir(parents=True)
+    (shared_dir / "Sunset.png").write_bytes(b"same")
+    dest_mtime_before = (shared_dir / "Sunset.png").stat().st_mtime_ns
+
+    result = migrate(str(tmp_path), ["Background"], dry_run=False)
+
+    assert ("Background", "Sunset") in result["moved"]
+    assert result["skipped"] == [("Background", "City", "divergent")]
+    assert (shared_dir / "Sunset.png").stat().st_mtime_ns == dest_mtime_before  # untouched
+    for body in ("ape", "female", "male", "skeleton"):
+        assert not (tmp_path / body / "Background" / "Sunset.png").exists()
+
+
+def test_existing_divergent_shared_dest_is_reported_and_never_overwritten(tmp_path):
+    _make_body_dirs(tmp_path)
+    shared_dir = tmp_path / "shared" / "Background"
+    shared_dir.mkdir(parents=True)
+    (shared_dir / "Sunset.png").write_bytes(b"totally different bytes")
+
+    result = migrate(str(tmp_path), ["Background"], dry_run=False)
+
+    assert ("Background", "Sunset") not in result["moved"]
+    assert ("Background", "Sunset", "shared-conflict") in result["skipped"]
+    # The pre-existing shared file is untouched, and so are the 4 body copies.
+    assert (shared_dir / "Sunset.png").read_bytes() == b"totally different bytes"
+    for body in ("ape", "female", "male", "skeleton"):
+        assert (tmp_path / body / "Background" / "Sunset.png").exists()
+
+
+def test_dry_run_never_touches_existing_shared_dest(tmp_path):
+    _make_body_dirs(tmp_path)
+    shared_dir = tmp_path / "shared" / "Background"
+    shared_dir.mkdir(parents=True)
+    (shared_dir / "Sunset.png").write_bytes(b"same")
+
+    result = migrate(str(tmp_path), ["Background"], dry_run=True)
+
+    assert ("Background", "Sunset") in result["moved"]
+    for body in ("ape", "female", "male", "skeleton"):
+        assert (tmp_path / body / "Background" / "Sunset.png").exists()
+
+
+# ---------------------------------------------------------------------------
+# Partial-crash recovery: shared/ copy already exists but some per-body
+# copies weren't removed (review finding 2) — convergent from any partial
+# state, including repeated repair runs.
+# ---------------------------------------------------------------------------
+
+
+def _simulate_partial_crash(tmp_path, trait_type="Background", value="Sunset", surviving=("male",)):
+    """Shared copy already landed; only `surviving` bodies still have their
+    (removed-everywhere-else) copy, as if os.remove crashed partway through."""
+    _make_body_dirs(tmp_path, trait_type)
+    shared_dir = tmp_path / "shared" / trait_type
+    shared_dir.mkdir(parents=True)
+    (shared_dir / f"{value}.png").write_bytes(b"same")
+    for body in ("ape", "female", "male", "skeleton"):
+        p = tmp_path / body / trait_type / f"{value}.png"
+        if body not in surviving:
+            p.unlink()
+
+
+def test_partial_crash_repair_removes_surviving_identical_body_copies(tmp_path):
+    _simulate_partial_crash(tmp_path, surviving=("male",))
+
+    result = migrate(str(tmp_path), ["Background"], dry_run=False)
+
+    assert ("Background", "Sunset") in result["repaired"]
+    assert ("Background", "Sunset") not in result["moved"]
+    assert not (tmp_path / "male" / "Background" / "Sunset.png").exists()
+    assert (tmp_path / "shared" / "Background" / "Sunset.png").read_bytes() == b"same"
+    # Convergent: a second run finds nothing left to repair.
+    result2 = migrate(str(tmp_path), ["Background"], dry_run=False)
+    assert result2["repaired"] == []
+    assert result2["moved"] == []
+
+
+def test_partial_crash_repair_rewrites_seasons_manifest_if_still_present(tmp_path):
+    # The crash happened before _rewrite_seasons ran, so the per-body keys
+    # are still in the manifest; the repair run must still collapse them.
+    _simulate_partial_crash(tmp_path, surviving=("male", "female"))
+    manifest_path = tmp_path / "seasons.json"
+    manifest_path.write_text(
+        json.dumps(
+            {
+                "ape/Background/Sunset": 1,
+                "female/Background/Sunset": 1,
+                "male/Background/Sunset": 1,
+                "skeleton/Background/Sunset": 1,
+            }
+        )
+    )
+
+    result = migrate(
+        str(tmp_path), ["Background"], dry_run=False, seasons_manifest=str(manifest_path)
+    )
+
+    assert ("Background", "Sunset") in result["repaired"]
+    manifest = json.loads(manifest_path.read_text())
+    assert manifest == {"shared/Background/Sunset": 1}
+
+
+def test_partial_crash_repair_is_idempotent_when_manifest_already_collapsed(tmp_path):
+    # A prior run already repaired the files AND collapsed the manifest
+    # (or the value was migrated cleanly to begin with); re-running with a
+    # manifest that only has the shared/ key must be a no-op, not an error.
+    _simulate_partial_crash(tmp_path, surviving=("male",))
+    manifest_path = tmp_path / "seasons.json"
+    manifest_path.write_text(json.dumps({"shared/Background/Sunset": 2}))
+
+    result = migrate(
+        str(tmp_path), ["Background"], dry_run=False, seasons_manifest=str(manifest_path)
+    )
+
+    assert ("Background", "Sunset") in result["repaired"]
+    assert result["season_conflicts"] == []
+    manifest = json.loads(manifest_path.read_text())
+    assert manifest == {"shared/Background/Sunset": 2}  # untouched, already collapsed
+
+
+def test_partial_crash_with_divergent_survivor_is_shared_conflict(tmp_path):
+    # A body copy survived but its bytes don't match the shared copy — this
+    # is not a safe repair (the shared copy might be wrong, or the survivor
+    # is a genuinely different, not-yet-migrated file). Never delete it.
+    _make_body_dirs(tmp_path)
+    shared_dir = tmp_path / "shared" / "Background"
+    shared_dir.mkdir(parents=True)
+    (shared_dir / "Sunset.png").write_bytes(b"same")
+    for body in ("ape", "female", "skeleton"):
+        (tmp_path / body / "Background" / "Sunset.png").unlink()
+    (tmp_path / "male" / "Background" / "Sunset.png").write_bytes(b"different bytes on male")
+
+    result = migrate(str(tmp_path), ["Background"], dry_run=False)
+
+    assert ("Background", "Sunset", "shared-conflict") in result["skipped"]
+    assert ("Background", "Sunset") not in result["repaired"]
+    assert ("Background", "Sunset") not in result["moved"]
+    assert (tmp_path / "male" / "Background" / "Sunset.png").exists()  # never removed
+
+
+def test_dry_run_does_not_repair_partial_crash_state(tmp_path):
+    _simulate_partial_crash(tmp_path, surviving=("male",))
+
+    result = migrate(str(tmp_path), ["Background"], dry_run=True)
+
+    assert ("Background", "Sunset") in result["repaired"]
+    assert (tmp_path / "male" / "Background" / "Sunset.png").exists()  # untouched

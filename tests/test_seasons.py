@@ -231,3 +231,50 @@ def test_disable_season_ignores_other_seasons_and_networks():
     changed = seasons.disable_season(conn, manifest, season=3, network="mainnet")
     assert changed == []
     assert _enabled(conn, "male", "Eyes", "Laser") == 1
+
+
+# ---------------------------------------------------------------------------
+# disable_season — "shared/" keys (migrate_shared_layers.py) expand to all
+# four real bodies instead of targeting a literal body "shared"
+# ---------------------------------------------------------------------------
+
+_ALL_BODIES = ("ape", "female", "male", "skeleton")
+
+
+def test_disable_season_expands_shared_key_to_all_real_bodies():
+    conn = _seeded_conn({body: {"Background": ["Sunset", "Sky"]} for body in _ALL_BODIES})
+    manifest = {"shared/Background/Sunset": 3}
+    changed = seasons.disable_season(conn, manifest, season=3, network="mainnet")
+    assert set(changed) == {(body, "Background", "Sunset") for body in _ALL_BODIES}
+    for body in _ALL_BODIES:
+        assert _enabled(conn, body, "Background", "Sunset") == 0
+        assert _enabled(conn, body, "Background", "Sky") == 1  # untouched sibling
+
+
+def test_disable_season_shared_key_guard_checks_every_expanded_body():
+    # "Sunset" is the ONLY Background value for "ape" — expanding the shared
+    # key must still run the zero-enabled-traits guard per real body, not
+    # just skip it because the manifest key says "shared".
+    layer_values = {body: {"Background": ["Sunset", "Sky"]} for body in _ALL_BODIES}
+    layer_values["ape"] = {"Background": ["Sunset"]}
+    conn = _seeded_conn(layer_values)
+    manifest = {"shared/Background/Sunset": 3}
+    with pytest.raises(ValueError, match="ape/Background"):
+        seasons.disable_season(conn, manifest, season=3, network="mainnet")
+    # Guard aborts before any change, including on the other three bodies.
+    assert _enabled(conn, "female", "Background", "Sunset") == 1
+
+
+def test_disable_season_shared_key_inserts_disabled_rows_when_missing():
+    # No trait_rarity rows exist yet for any body's "Laser" — the shared key
+    # must pre-insert a disabled row per real body, not one row for "shared".
+    conn = _seeded_conn({body: {"Eyes": ["Classic"]} for body in _ALL_BODIES})
+    manifest = {"shared/Eyes/Laser": 3}
+    changed = seasons.disable_season(conn, manifest, season=3, network="mainnet")
+    assert set(changed) == {(body, "Eyes", "Laser") for body in _ALL_BODIES}
+    for body in _ALL_BODIES:
+        assert _enabled(conn, body, "Eyes", "Laser") == 0
+    no_shared_rows = conn.execute(
+        "SELECT COUNT(*) FROM trait_rarity WHERE body='shared'"
+    ).fetchone()[0]
+    assert no_shared_rows == 0

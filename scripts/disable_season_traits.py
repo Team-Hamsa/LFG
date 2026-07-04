@@ -41,17 +41,23 @@ def main() -> None:
         if not args.apply:
             for key in targets:
                 body, category, trait = key.split("/", 2)
-                row = conn.execute(
-                    """SELECT enabled FROM trait_rarity
-                       WHERE network=? AND body=? AND category=? AND trait=?""",
-                    (args.network, body, category, trait),
-                ).fetchone()
-                state = (
-                    "no rarity row"
-                    if row is None
-                    else ("enabled" if row[0] else "already disabled")
-                )
-                print(f"  would disable {key}  [{state}]")
+                # A "shared/<category>/<value>" key (migrate_shared_layers.py
+                # collapses the four per-body keys into this one) applies to
+                # all four real bodies — there is no rarity row for a literal
+                # body "shared", so preview each real body instead.
+                bodies = seasons.BODIES if body == "shared" else (body,)
+                for b in bodies:
+                    row = conn.execute(
+                        """SELECT enabled FROM trait_rarity
+                           WHERE network=? AND body=? AND category=? AND trait=?""",
+                        (args.network, b, category, trait),
+                    ).fetchone()
+                    state = (
+                        "no rarity row"
+                        if row is None
+                        else ("enabled" if row[0] else "already disabled")
+                    )
+                    print(f"  would disable {b}/{category}/{trait}  [{state}]")
             print("dry-run: pass --apply to write")
             return
         changed = seasons.disable_season(conn, manifest, season=args.season, network=args.network)

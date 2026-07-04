@@ -103,6 +103,7 @@ def migrate(
 
     moved: list[tuple[str, str]] = []
     skipped: list[tuple[str, str, str]] = []
+    repaired: list[tuple[str, str]] = []
     for trait_type in trait_types:
         values: set[str] = set()
         for body in BODIES:
@@ -113,6 +114,7 @@ def migrate(
                     for f in os.listdir(d)
                     if os.path.splitext(f)[1].lower() in EXTS and not f.startswith(".")
                 }
+        dest_dir = os.path.join(layers_dir, "shared", trait_type)
         for value in sorted(values):
             paths = []
             for body in BODIES:
@@ -121,13 +123,48 @@ def migrate(
                     if os.path.isfile(p):
                         paths.append(p)
                         break
+
+            existing_dest = None
+            for ext in EXTS:
+                p = os.path.join(dest_dir, value + ext)
+                if os.path.isfile(p):
+                    existing_dest = p
+                    break
+
             if len(paths) < len(BODIES):
+                if existing_dest is not None:
+                    # Possible partial-crash state: the shared copy already
+                    # exists (a prior run's copy2 succeeded) but not every
+                    # per-body copy was removed (os.remove failed or the
+                    # process crashed mid-loop). Verify whatever remains
+                    # against the shared copy rather than stranding it
+                    # forever as "not-in-all-bodies".
+                    shared_digest = _digest(existing_dest)
+                    if all(_digest(p) == shared_digest for p in paths):
+                        if not dry_run:
+                            for p in paths:
+                                os.remove(p)
+                        repaired.append((trait_type, value))
+                    else:
+                        skipped.append((trait_type, value, "shared-conflict"))
+                    continue
                 skipped.append((trait_type, value, "not-in-all-bodies"))
                 continue
             if len({_digest(p) for p in paths}) != 1:
                 skipped.append((trait_type, value, "divergent"))
                 continue
-            dest_dir = os.path.join(layers_dir, "shared", trait_type)
+            if existing_dest is not None:
+                # A shared copy already exists (manual preload, or a prior
+                # run that copied but crashed before removing the per-body
+                # files). Never blind-overwrite it: verify first.
+                if _digest(existing_dest) == _digest(paths[0]):
+                    moved.append((trait_type, value))
+                    if not dry_run:
+                        for p in paths:
+                            os.remove(p)
+                else:
+                    skipped.append((trait_type, value, "shared-conflict"))
+                continue
             dest = os.path.join(dest_dir, os.path.basename(paths[0]))
             moved.append((trait_type, value))
             if not dry_run:
@@ -136,9 +173,17 @@ def migrate(
                 for p in paths:
                     os.remove(p)
 
-    season_conflicts = _rewrite_seasons(seasons_manifest, moved, dry_run)
+    # Repaired values were already collapsed onto the shared copy by a prior
+    # (partial) run; their per-body seasons.json keys, if still present, need
+    # the same collapse the newly-moved values get.
+    season_conflicts = _rewrite_seasons(seasons_manifest, moved + repaired, dry_run)
 
-    return {"moved": moved, "skipped": skipped, "season_conflicts": season_conflicts}
+    return {
+        "moved": moved,
+        "skipped": skipped,
+        "repaired": repaired,
+        "season_conflicts": season_conflicts,
+    }
 
 
 def main() -> None:
@@ -161,6 +206,8 @@ def main() -> None:
     )
     for t, v in result["moved"]:
         print(f"{'would move' if not args.execute else 'moved'}: {t}/{v}")
+    for t, v in result["repaired"]:
+        print(f"{'would repair' if not args.execute else 'repaired'}: {t}/{v}")
     for t, v, why in result["skipped"]:
         print(f"skipped ({why}): {t}/{v}")
     for t, v, per_body in result["season_conflicts"]:
