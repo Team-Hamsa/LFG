@@ -207,3 +207,82 @@ def derive_nft_events(tx: dict[str, Any], *, nft_issuer: str) -> list[dict[str, 
         ]
 
     return []
+
+
+def _is_brix(cur: Any, brix_hex: str) -> bool:
+    return isinstance(cur, str) and cur.upper() in (brix_hex.upper(), "BRIX")
+
+
+def _brix_deltas(meta: dict[str, Any], brix_issuer: str, brix_hex: str) -> dict[str, float]:
+    """Per-holder BRIX balance change from RippleState node diffs."""
+    deltas: dict[str, float] = {}
+    for node in meta.get("AffectedNodes", []):
+        wrapper = (
+            node.get("ModifiedNode") or node.get("CreatedNode") or node.get("DeletedNode") or {}
+        )
+        if wrapper.get("LedgerEntryType") != "RippleState":
+            continue
+        final = wrapper.get("FinalFields") or wrapper.get("NewFields") or {}
+        bal = final.get("Balance") or {}
+        if not _is_brix(bal.get("currency"), brix_hex):
+            continue
+        low = (final.get("LowLimit") or {}).get("issuer")
+        high = (final.get("HighLimit") or {}).get("issuer")
+        if brix_issuer not in (low, high):
+            continue
+        holder = high if low == brix_issuer else low
+        assert isinstance(holder, str)
+        sign = 1.0 if holder == low else -1.0
+        prev_bal = (wrapper.get("PreviousFields") or {}).get("Balance") or {}
+        old = float(prev_bal.get("value") or 0.0)
+        new = float(bal.get("value") or 0.0)
+        if node.get("DeletedNode"):
+            new = 0.0
+        delta = sign * (new - old)
+        if delta:
+            deltas[holder] = deltas.get(holder, 0.0) + delta
+    return deltas
+
+
+def derive_brix_events(
+    tx: dict[str, Any],
+    *,
+    brix_issuer: str,
+    brix_hex: str,
+    distributor: str | None = None,
+) -> list[dict[str, Any]]:
+    """Derive BRIX balance-event rows for one normalized tx.
+
+    Per-holder BRIX trustline balance changes, shaped for history_store.insert_brix_event.
+    """
+    ttype = str(tx.get("TransactionType", ""))
+    account = tx.get("Account")
+    deltas = _brix_deltas(tx.get("meta") or {}, brix_issuer, brix_hex)
+    if not deltas:
+        return []
+    if ttype == "TrustSet":
+        kind = "trustset"
+    elif ttype == "Payment":
+        kind = "airdrop" if distributor and account == distributor else "payment"
+    elif ttype == "AMMDeposit":
+        kind = "amm_deposit"
+    elif ttype == "AMMWithdraw":
+        kind = "amm_withdraw"
+    else:
+        kind = "amm_swap"
+    ts = tx_unix_time(tx)
+    accounts = sorted(deltas)
+    return [
+        {
+            "tx_hash": tx.get("hash"),
+            "account": a,
+            # counterparty: the other mover if exactly two, else the tx sender.
+            "counterparty": (
+                next((b for b in accounts if b != a), account) if len(accounts) == 2 else account
+            ),
+            "delta": deltas[a],
+            "kind": kind,
+            "ts": ts,
+        }
+        for a in accounts
+    ]

@@ -100,3 +100,37 @@ def test_normalize_entry_account_tx_shape():
     tx = history_events.normalize_entry(entry)
     assert tx["hash"] == "FF" * 32 and tx["ledger_index"] == 42
     assert tx["meta"] == {"AffectedNodes": []}
+
+
+def _brix(tx, distributor=None):
+    return history_events.derive_brix_events(
+        tx, brix_issuer=fx.BRIX_ISSUER, brix_hex=fx.BRIX_HEX, distributor=distributor
+    )
+
+
+def test_airdrop_deltas_and_kind():
+    evs = _brix(fx.AIRDROP, distributor=fx.DISTRIBUTOR)
+    by = {e["account"]: e for e in evs}
+    assert by[fx.ALICE]["delta"] == 3.0 and by[fx.ALICE]["kind"] == "airdrop"
+    assert by[fx.DISTRIBUTOR]["delta"] == -3.0
+    assert by[fx.ALICE]["counterparty"] == fx.DISTRIBUTOR
+
+
+def test_payment_without_distributor_is_payment():
+    evs = _brix(fx.AIRDROP)
+    assert all(e["kind"] == "payment" for e in evs)
+
+
+def test_trustset_kind():
+    evs = _brix(fx.TRUSTSET)
+    assert evs == [] or all(e["kind"] == "trustset" for e in evs)
+
+
+def test_amm_deposit_kind():
+    evs = _brix(fx.AMM_DEPOSIT)
+    assert len(evs) == 1 and evs[0]["kind"] == "amm_deposit"
+    assert evs[0]["delta"] == -10.0
+
+
+def test_non_brix_tx_no_events():
+    assert _brix(fx.SALE_XRP) == []
