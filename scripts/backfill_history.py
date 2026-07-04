@@ -32,6 +32,11 @@ from lfg_core import history_events, history_store  # noqa: E402
 
 PAGE_LIMIT = 200
 REQUEST_TIMEOUT = 60
+# clio rate-limits public endpoints ('slowDown'); pace requests and back off.
+THROTTLE_SECONDS = 0.25
+RETRYABLE_ERRORS = {"slowDown", "tooBusy"}
+RETRY_MAX = 8
+RETRY_BASE_DELAY = 5.0
 VALID_SOURCES = {"issuer", "brix", "distributor", "nfts"}
 
 
@@ -136,12 +141,22 @@ async def _amain() -> int:
     async with AsyncWebsocketClient(clio) as client:
 
         async def request_fn(req: dict[str, Any]) -> dict[str, Any]:
-            r = await asyncio.wait_for(
-                client.request(Request.from_dict(req)), timeout=REQUEST_TIMEOUT
-            )
-            if not r.is_successful():
+            delay = RETRY_BASE_DELAY
+            for attempt in range(RETRY_MAX):
+                await asyncio.sleep(THROTTLE_SECONDS)
+                r = await asyncio.wait_for(
+                    client.request(Request.from_dict(req)), timeout=REQUEST_TIMEOUT
+                )
+                if r.is_successful():
+                    return r.result
+                error = r.result.get("error") if isinstance(r.result, dict) else None
+                if error in RETRYABLE_ERRORS and attempt < RETRY_MAX - 1:
+                    logging.warning(f"{req['method']}: {error}; backing off {delay:.0f}s")
+                    await asyncio.sleep(delay)
+                    delay = min(delay * 2, 120.0)
+                    continue
                 raise RuntimeError(f"{req['method']} failed: {r.result}")
-            return r.result
+            raise RuntimeError(f"{req['method']} failed after {RETRY_MAX} attempts")
 
         if "issuer" in wanted:
             n = await backfill_account_tx(conn, request_fn, issuer, "issuer_tx")
