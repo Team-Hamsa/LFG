@@ -26,7 +26,6 @@ always excluded from user-keyed boards via `wallet NOT IN (...)`.
 
 from __future__ import annotations
 
-import calendar
 import sqlite3
 from collections.abc import Callable
 from datetime import datetime, timedelta, timezone

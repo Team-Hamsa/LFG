@@ -25,7 +25,6 @@ os.environ.setdefault("BUNNY_PULL_ZONE", "nft.pullzone.example")
 from aiohttp import web  # noqa: E402
 from aiohttp.test_utils import make_mocked_request  # noqa: E402
 
-from lfg_core import leaderboard  # noqa: E402
 from lfg_core.history_store import init_history_db, insert_nft_event  # noqa: E402
 from lfg_core.nft_index import init_db as init_onchain_db  # noqa: E402
 from lfg_service import app as server  # noqa: E402

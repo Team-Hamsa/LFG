@@ -1,7 +1,7 @@
 # Tests for lfg_core/leaderboard.py
 import os
-import sys
 import sqlite3
+import sys
 from datetime import datetime, timezone
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
@@ -34,18 +34,18 @@ def _dbs():
 
 
 def _ev(h, **kw):
-    base = dict(
-        tx_hash=kw.get("tx_hash", str(id(kw))),
-        nft_id="N1",
-        nft_number=1,
-        event="mint",
-        from_addr=None,
-        to_addr=None,
-        price_drops=None,
-        price_token=None,
-        ledger_index=1,
-        ts=0,
-    )
+    base = {
+        "tx_hash": kw.get("tx_hash", str(id(kw))),
+        "nft_id": "N1",
+        "nft_number": 1,
+        "event": "mint",
+        "from_addr": None,
+        "to_addr": None,
+        "price_drops": None,
+        "price_token": None,
+        "ledger_index": 1,
+        "ts": 0,
+    }
     base.update(kw)
     history_store.insert_nft_event(h, base)
     h.commit()

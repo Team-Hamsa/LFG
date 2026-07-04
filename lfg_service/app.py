@@ -28,15 +28,16 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from lfg_core import (
     config,
     economy_flow,
+    history_store,
     layer_store,
     leaderboard,
     mint_flow,
+    nft_index,
     swap_flow,
     swap_meta,
     xrpl_ops,
     xumm_ops,
 )
-from lfg_core import history_store, nft_index
 from lfg_service import identity as identity_store
 from lfg_service.auth import require_service_token, surface_for_token
 from lfg_service.events import Event, InMemoryEventBus

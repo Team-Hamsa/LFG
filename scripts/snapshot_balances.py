@@ -92,7 +92,9 @@ async def _amain() -> int:
 
     parser = argparse.ArgumentParser(description="Snapshot BRIX and AMM LP balances.")
     parser.add_argument("--network", choices=sorted(bf.NETWORKS), default=config.XRPL_NETWORK)
-    parser.add_argument("--amm-account", help="AMM account address (overrides env BRIX_AMM_ACCOUNT)")
+    parser.add_argument(
+        "--amm-account", help="AMM account address (overrides env BRIX_AMM_ACCOUNT)"
+    )
     parser.add_argument("--date", help="Snapshot date YYYY-MM-DD (default: today in UTC)")
     args = parser.parse_args()
 

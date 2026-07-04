@@ -37,9 +37,7 @@ def audit_history(hconn: Any, oconn: Any) -> dict[str, int]:
         "SELECT COUNT(DISTINCT nft_id) FROM nft_events WHERE event='burn'"
     ).fetchone()[0]
     live_events = mints - burns
-    live_index = oconn.execute(
-        "SELECT COUNT(*) FROM onchain_nfts WHERE is_burned=0"
-    ).fetchone()[0]
+    live_index = oconn.execute("SELECT COUNT(*) FROM onchain_nfts WHERE is_burned=0").fetchone()[0]
     drift = live_events - live_index
     return {
         "mints": mints,
