@@ -6,7 +6,9 @@
 # the authority on which combinations are legal.
 
 import os
+from collections.abc import Iterable
 from dataclasses import dataclass, field
+from typing import Any
 
 import yaml
 
@@ -49,11 +51,11 @@ class TraitConfig:
     affinity: dict[str, dict[str, list[str]]]
     universal_layers: frozenset[str]
     swap_pairs: tuple[SwapPair, ...]
-    exclusions: tuple = ()
-    inclusions: tuple = ()
+    exclusions: tuple[Any, ...] = ()
+    inclusions: tuple[Any, ...] = ()
 
 
-def _check_bodies(bodies, where: str) -> None:
+def _check_bodies(bodies: Iterable[str], where: str) -> None:
     unknown = set(bodies) - VALID_BODIES
     if unknown:
         raise TraitConfigError(f"unknown body {sorted(unknown)} in {where}")
