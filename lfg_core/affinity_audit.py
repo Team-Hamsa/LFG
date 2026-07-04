@@ -12,14 +12,39 @@ LOW_CONFIDENCE_THRESHOLD = 3
 
 BODIES = ["ape", "female", "male", "skeleton"]
 
+# Physically 4 identical per-body copies today (not per-body art) — per-body
+# affinity for these is sampling noise, not signal. They become `shared: true`
+# in trait_config, so the draft YAML must not propose per-body restrictions
+# for them. (The report table still lists their rows; its existing note
+# already tells reviewers to be skeptical of them.)
+SHARED_LAYERS = ("Background", "Back")
+
 
 def count_affinities(
-    rows: list[tuple[str | None, str]],
+    rows: list[tuple[int | None, str | None, str]],
 ) -> dict[tuple[str, str], Counter[str]]:
-    """rows: (body, attributes_json) per historical token (burned included).
-    Body falls back to detect_body(attributes) when the column is empty."""
+    """rows: (nft_number, body, attributes_json) per historical token (burned
+    included). Body falls back to detect_body(attributes) when the column is
+    empty.
+
+    `onchain_nfts` is keyed by nft_id, not nft_number — one edition can have
+    several tokens on chain (remints / trait-swaps), so without dedupe a
+    single edition's (value, body) pair would be counted once per token
+    instead of once per edition. Evidence is deduped on
+    (nft_number, body, trait_type, value): each edition contributes a given
+    (value, body) pair at most once, but different values seen across an
+    edition's swap history (e.g. Hat swapped from A to B) still each count —
+    that's real historical evidence the value was minted on that body.
+
+    Rows with a NULL nft_number (should not happen post-backfill, but the
+    column is nullable) fall back to their row position as a uniqueness key,
+    i.e. dedupe is skipped for them — simpler than a synthetic identity, and
+    they're rare/legacy so a little over-counting there is an acceptable
+    tradeoff.
+    """
     counts: dict[tuple[str, str], Counter[str]] = {}
-    for body, attributes_json in rows:
+    seen: set[tuple[int, str, str, str]] = set()
+    for idx, (nft_number, body, attributes_json) in enumerate(rows):
         try:
             attributes = json.loads(attributes_json) if attributes_json else []
         except (TypeError, ValueError):
@@ -27,10 +52,16 @@ def count_affinities(
         if not attributes:
             continue
         body = body or detect_body(attributes)
+        edition_key = nft_number if nft_number is not None else -(idx + 1)
         for attr in attributes:
             trait_type, value = attr.get("trait_type"), attr.get("value")
             if not trait_type or not value or trait_type == "Body":
                 continue
+            if nft_number is not None:
+                dedupe_key = (edition_key, body, trait_type, value)
+                if dedupe_key in seen:
+                    continue
+                seen.add(dedupe_key)
             counts.setdefault((trait_type, value), Counter())[body] += 1
     return counts
 
@@ -66,6 +97,8 @@ def cross_check(
                     misplacements.append((body, trait_type, value))
     coverage_gaps = []
     for (trait_type, value), body_counts in counts.items():
+        if value == "None":
+            continue
         for body, n in body_counts.items():
             if n > 0 and value not in dir_tree.get(body, {}).get(trait_type, set()):
                 coverage_gaps.append((body, trait_type, value))
@@ -79,6 +112,10 @@ def render_affinity_yaml(counts: dict[tuple[str, str], Counter[str]]) -> str:
     for (trait_type, value), body_counts in sorted(counts.items()):
         if value == "None":
             # None = empty slot, structural, never a real affinity.
+            continue
+        if trait_type in SHARED_LAYERS:
+            # Shared layers (see SHARED_LAYERS) get no per-body affinity
+            # entries — they become `shared: true` in trait_config instead.
             continue
         bodies = sorted(b for b, n in body_counts.items() if n > 0)
         total = sum(body_counts.values())

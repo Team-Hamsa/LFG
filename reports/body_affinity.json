@@ -1,198 +1,198 @@
 {
   "counts": {
     "Accessory/Balloon": {
-      "male": 12,
-      "female": 7
+      "male": 10,
+      "female": 6
     },
     "Accessory/Banana": {
-      "male": 60,
-      "ape": 16,
-      "female": 7,
-      "skeleton": 2
+      "male": 39,
+      "ape": 13,
+      "female": 5,
+      "skeleton": 1
     },
     "Accessory/Baseball Bat": {
-      "skeleton": 11,
-      "female": 61,
-      "male": 153,
+      "skeleton": 7,
+      "female": 52,
+      "male": 112,
       "ape": 3
     },
     "Accessory/Basketball": {
-      "male": 35,
+      "male": 14,
       "female": 1,
       "skeleton": 1
     },
     "Accessory/Bible": {
-      "male": 156,
-      "female": 45,
-      "ape": 35,
-      "skeleton": 4
+      "male": 99,
+      "female": 36,
+      "ape": 29,
+      "skeleton": 3
     },
     "Accessory/Bone": {
-      "male": 28,
+      "male": 13,
       "female": 4
     },
     "Accessory/Cocktail Blue": {
-      "male": 36,
-      "female": 22
+      "male": 18,
+      "female": 11
     },
     "Accessory/Cross": {
-      "male": 47,
-      "female": 35,
-      "skeleton": 6
+      "male": 25,
+      "female": 19,
+      "skeleton": 4
     },
     "Accessory/Cross Body Bag": {
-      "female": 24,
-      "male": 14,
-      "skeleton": 3
+      "female": 8,
+      "male": 7,
+      "skeleton": 2
     },
     "Accessory/Devil Pitchfork": {
-      "male": 67
+      "male": 22
     },
     "Accessory/Fire Axe": {
-      "female": 16,
-      "male": 13,
-      "skeleton": 14
+      "female": 7,
+      "male": 11,
+      "skeleton": 6
     },
     "Accessory/Freddy Claws": {
-      "male": 11,
+      "male": 7,
       "female": 1
     },
     "Accessory/Fried Chicken": {
-      "male": 89,
-      "ape": 31,
-      "female": 33
+      "male": 69,
+      "ape": 26,
+      "female": 27
     },
     "Accessory/Gavel": {
-      "male": 29,
-      "female": 14,
-      "skeleton": 3
+      "male": 11,
+      "female": 9,
+      "skeleton": 2
     },
     "Accessory/Girls Best Friend": {
-      "female": 50
+      "female": 22
     },
     "Accessory/Halo": {
-      "male": 17,
-      "skeleton": 19,
-      "female": 8
+      "male": 10,
+      "skeleton": 8,
+      "female": 7
     },
     "Accessory/Halo Shine": {
       "female": 5,
-      "male": 32
+      "male": 18
     },
     "Accessory/Handlebars": {
       "female": 4,
       "male": 5
     },
     "Accessory/Headphones": {
-      "male": 41,
-      "female": 19,
-      "ape": 9,
+      "male": 37,
+      "female": 17,
+      "ape": 6,
       "skeleton": 1
     },
     "Accessory/Hockey Stick": {
-      "male": 19
+      "male": 10
     },
     "Accessory/Ice Cream": {
-      "female": 17,
-      "male": 77,
+      "female": 11,
+      "male": 35,
       "skeleton": 1
     },
     "Accessory/Just A Vase": {
       "male": 6
     },
     "Accessory/Knife": {
-      "male": 8
+      "male": 5
     },
     "Accessory/Lightsaber Blue": {
       "ape": 12,
-      "male": 17,
+      "male": 16,
       "female": 5
     },
     "Accessory/Lightsaber Green": {
-      "male": 38,
+      "male": 18,
       "ape": 2,
-      "female": 11
+      "female": 9
     },
     "Accessory/Lightsaber Red": {
       "female": 4,
-      "male": 37
+      "male": 15
     },
     "Accessory/Nail Bat": {
-      "male": 12,
-      "female": 7
+      "male": 9,
+      "female": 4
     },
     "Accessory/None": {
-      "ape": 46,
-      "skeleton": 129,
-      "male": 967,
-      "female": 154
+      "ape": 41,
+      "skeleton": 71,
+      "male": 582,
+      "female": 112
     },
     "Accessory/Paddle": {
-      "male": 105,
-      "ape": 31
+      "male": 94,
+      "ape": 22
     },
     "Accessory/Pitchfork": {
-      "ape": 17,
-      "male": 85
+      "ape": 15,
+      "male": 73
     },
     "Accessory/Rattie Brown": {
-      "male": 50,
-      "female": 19,
+      "male": 24,
+      "female": 14,
       "skeleton": 6
     },
     "Accessory/Rattie Grey": {
-      "male": 46,
-      "female": 35,
+      "male": 38,
+      "female": 22,
       "skeleton": 4
     },
     "Accessory/Scythe": {
-      "male": 107,
-      "ape": 28
+      "male": 87,
+      "ape": 20
     },
     "Accessory/Skateboard": {
-      "female": 37,
-      "male": 66,
-      "skeleton": 26
+      "female": 13,
+      "male": 30,
+      "skeleton": 9
     },
     "Accessory/Smoke": {
-      "female": 28,
-      "male": 56,
-      "ape": 10
+      "female": 17,
+      "male": 47,
+      "ape": 9
     },
     "Accessory/Staff": {
-      "male": 44,
+      "male": 33,
       "ape": 11
     },
     "Accessory/Sword": {
-      "skeleton": 15,
-      "female": 36,
+      "skeleton": 10,
+      "female": 28,
       "ape": 7,
-      "male": 71
+      "male": 38
     },
     "Accessory/Test Tube": {
-      "male": 22,
-      "female": 9,
-      "skeleton": 6
+      "male": 12,
+      "female": 7,
+      "skeleton": 5
     },
     "Accessory/Trident": {
-      "male": 31,
-      "female": 40
+      "male": 28,
+      "female": 37
     },
     "Accessory/Turtle": {
-      "male": 25,
-      "skeleton": 9,
+      "male": 17,
+      "skeleton": 5,
       "female": 10
     },
     "Accessory/Wand": {
-      "female": 29
+      "female": 24
     },
     "Accessory/Water": {
-      "male": 40,
+      "male": 33,
       "female": 8
     },
     "Accessory/Water to Wine": {
-      "female": 18,
-      "male": 53
+      "female": 15,
+      "male": 45
     },
     "Back/Angel Wings": {
       "male": 52
@@ -201,397 +201,397 @@
       "male": 48
     },
     "Back/None": {
-      "male": 3832,
-      "ape": 258,
-      "female": 1108,
-      "skeleton": 262
+      "male": 2444,
+      "ape": 200,
+      "female": 720,
+      "skeleton": 102
     },
     "Background/Blackhole": {
-      "skeleton": 26,
-      "male": 65,
-      "female": 26
+      "skeleton": 15,
+      "male": 32,
+      "female": 15
     },
     "Background/Burnt Orange": {
-      "male": 95,
-      "female": 27
+      "male": 81,
+      "female": 25
     },
     "Background/Claw Diamond": {
-      "male": 77,
-      "female": 16,
+      "male": 28,
+      "female": 12,
       "skeleton": 2
     },
     "Background/Claw Gold": {
-      "male": 61,
-      "female": 23,
+      "male": 22,
+      "female": 7,
       "skeleton": 2
     },
     "Background/Claw Silver": {
-      "skeleton": 12,
-      "male": 77,
-      "female": 27
+      "skeleton": 10,
+      "male": 51,
+      "female": 15
     },
     "Background/Claw Yellow": {
-      "male": 23,
-      "female": 11,
+      "male": 11,
+      "female": 5,
       "skeleton": 3
     },
     "Background/Clouds Blue": {
-      "skeleton": 2
+      "skeleton": 1
     },
     "Background/Clouds Gradient": {
-      "male": 22,
-      "female": 13,
+      "male": 12,
+      "female": 8,
       "skeleton": 2
     },
     "Background/Color Burst": {
-      "skeleton": 29,
-      "male": 85,
-      "female": 16
-    },
-    "Background/Colorsplosion": {
-      "male": 72,
-      "skeleton": 3,
-      "female": 30
-    },
-    "Background/Concrete": {
-      "male": 92,
+      "skeleton": 15,
+      "male": 56,
       "female": 12
     },
+    "Background/Colorsplosion": {
+      "male": 30,
+      "skeleton": 3,
+      "female": 17
+    },
+    "Background/Concrete": {
+      "male": 56,
+      "female": 8
+    },
     "Background/Glitch": {
-      "skeleton": 29,
-      "female": 23,
-      "male": 30
+      "skeleton": 20,
+      "female": 12,
+      "male": 19
     },
     "Background/Gradient Bright": {
-      "male": 102,
-      "female": 43,
-      "skeleton": 4,
-      "ape": 11
+      "male": 72,
+      "female": 30,
+      "skeleton": 3,
+      "ape": 10
     },
     "Background/Gradient Pink Blue": {
-      "male": 107,
-      "ape": 21,
-      "female": 29,
+      "male": 85,
+      "ape": 16,
+      "female": 20,
       "skeleton": 2
     },
     "Background/Irridescent": {
-      "male": 215,
-      "ape": 45,
-      "female": 52,
-      "skeleton": 6
-    },
-    "Background/Jaffa": {
-      "female": 21,
-      "male": 112
-    },
-    "Background/Laflame": {
-      "female": 44,
-      "male": 122,
-      "ape": 11,
+      "male": 157,
+      "ape": 35,
+      "female": 41,
       "skeleton": 4
     },
+    "Background/Jaffa": {
+      "female": 16,
+      "male": 91
+    },
+    "Background/Laflame": {
+      "female": 33,
+      "male": 103,
+      "ape": 11,
+      "skeleton": 3
+    },
     "Background/Lucid Dreams": {
-      "male": 52,
-      "female": 18,
-      "skeleton": 10
+      "male": 44,
+      "female": 16,
+      "skeleton": 5
     },
     "Background/Moon Grave": {
       "female": 9,
-      "male": 70
+      "male": 50
     },
     "Background/Moving Blue Clouds": {
-      "male": 107,
-      "skeleton": 23,
+      "male": 41,
+      "skeleton": 10,
       "female": 4
     },
     "Background/Moving Pink Clouds": {
-      "male": 69,
-      "female": 16,
-      "skeleton": 14
+      "male": 16,
+      "female": 7,
+      "skeleton": 3
     },
     "Background/Muted Tan": {
-      "male": 112,
-      "female": 22
+      "male": 93,
+      "female": 20
     },
     "Background/Orange Grave": {
-      "male": 75,
+      "male": 55,
       "female": 4
     },
     "Background/Orange Spider": {
-      "female": 8,
-      "male": 68
+      "female": 7,
+      "male": 60
     },
     "Background/Paintsplosion": {
-      "female": 50,
-      "ape": 21,
-      "male": 217,
-      "skeleton": 19
+      "female": 39,
+      "ape": 19,
+      "male": 148,
+      "skeleton": 10
     },
     "Background/Pale Blue": {
-      "male": 37,
-      "female": 23,
-      "skeleton": 3,
-      "ape": 9
+      "male": 28,
+      "female": 16,
+      "skeleton": 2,
+      "ape": 8
     },
     "Background/Pale Pink": {
-      "male": 74,
-      "female": 19
+      "male": 52,
+      "female": 12
     },
     "Background/Pale Purple": {
-      "female": 32,
-      "male": 96,
-      "skeleton": 3
+      "female": 19,
+      "male": 51,
+      "skeleton": 2
     },
     "Background/Pale Tan": {
-      "male": 105,
-      "female": 38,
-      "skeleton": 3,
-      "ape": 13
+      "male": 89,
+      "female": 30,
+      "skeleton": 1,
+      "ape": 11
     },
     "Background/Pastel Aqua": {
-      "ape": 17,
-      "male": 61,
+      "ape": 15,
+      "male": 44,
       "female": 3,
-      "skeleton": 7
+      "skeleton": 3
     },
     "Background/Pastel Green": {
-      "female": 20,
-      "skeleton": 10,
-      "male": 99,
-      "ape": 19
+      "female": 19,
+      "skeleton": 4,
+      "male": 71,
+      "ape": 15
     },
     "Background/Pastel Orange": {
-      "ape": 26,
-      "female": 18,
-      "male": 59,
+      "ape": 20,
+      "female": 16,
+      "male": 45,
       "skeleton": 1
     },
     "Background/Pastel Pink": {
-      "male": 71,
-      "female": 22,
+      "male": 53,
+      "female": 12,
       "skeleton": 1
     },
     "Background/Pastel Purple": {
-      "female": 10
+      "female": 3
     },
     "Background/Pastel Red": {
-      "female": 22,
-      "male": 64,
+      "female": 18,
+      "male": 58,
       "ape": 10
     },
     "Background/Pirate Gold": {
-      "female": 29,
-      "male": 72
+      "female": 23,
+      "male": 63
     },
     "Background/Rainbow": {
-      "male": 41,
-      "female": 15,
-      "skeleton": 13
+      "male": 28,
+      "female": 8,
+      "skeleton": 9
     },
     "Background/Red Damask": {
-      "male": 98,
-      "female": 17
+      "male": 86,
+      "female": 16
     },
     "Background/Red Devil": {
-      "male": 115,
-      "female": 43
+      "male": 96,
+      "female": 34
     },
     "Background/Reef Gold": {
-      "male": 100,
-      "female": 42
+      "male": 79,
+      "female": 34
     },
     "Background/Rosewood": {
-      "male": 125,
-      "female": 31
+      "male": 105,
+      "female": 27
     },
     "Background/Shattered Dreams": {
-      "female": 28,
-      "skeleton": 13,
-      "male": 50
+      "female": 17,
+      "skeleton": 11,
+      "male": 34
     },
     "Background/Sound": {
-      "male": 77,
-      "skeleton": 4,
-      "ape": 15,
-      "female": 28
+      "male": 62,
+      "skeleton": 3,
+      "ape": 13,
+      "female": 21
     },
     "Background/Space Sunset": {
-      "male": 193,
-      "female": 56,
-      "ape": 25,
-      "skeleton": 6
-    },
-    "Background/Temptress": {
-      "male": 87,
-      "female": 30
-    },
-    "Background/Verdun Green": {
-      "male": 111,
-      "female": 24
-    },
-    "Background/Vignette Aqua": {
-      "male": 70,
-      "ape": 15,
-      "female": 14,
-      "skeleton": 4
-    },
-    "Clothing/AniMang": {
-      "skeleton": 21,
-      "male": 8
-    },
-    "Clothing/August Tech Vest": {
-      "male": 44,
+      "male": 149,
+      "female": 41,
+      "ape": 20,
       "skeleton": 5
     },
+    "Background/Temptress": {
+      "male": 70,
+      "female": 28
+    },
+    "Background/Verdun Green": {
+      "male": 103,
+      "female": 19
+    },
+    "Background/Vignette Aqua": {
+      "male": 40,
+      "ape": 13,
+      "female": 13,
+      "skeleton": 2
+    },
+    "Clothing/AniMang": {
+      "skeleton": 13,
+      "male": 7
+    },
+    "Clothing/August Tech Vest": {
+      "male": 22,
+      "skeleton": 3
+    },
     "Clothing/Badass Leather": {
-      "male": 83,
-      "ape": 13
+      "male": 60,
+      "ape": 10
     },
     "Clothing/Banana Dress": {
-      "female": 7
+      "female": 2
     },
     "Clothing/Banana Shirt": {
       "male": 9,
-      "ape": 10
+      "ape": 6
     },
     "Clothing/Banana Sleeveless": {
       "female": 1
     },
     "Clothing/Belford Suit": {
-      "male": 44
+      "male": 32
     },
     "Clothing/Billy Tux": {
-      "male": 52
+      "male": 47
     },
     "Clothing/Blazer Pale Blue": {
       "female": 8
     },
     "Clothing/Blazer Pale Carnation": {
-      "female": 14
+      "female": 4
     },
     "Clothing/Blazer Pale Coral": {
-      "female": 23
+      "female": 21
     },
     "Clothing/Blazer Pale Green": {
-      "female": 27
+      "female": 9
     },
     "Clothing/Blazer Pale Purple": {
-      "female": 15
+      "female": 7
     },
     "Clothing/Blazer Pink": {
-      "female": 13
+      "female": 10
     },
     "Clothing/Bloody Smock": {
-      "male": 27
+      "male": 25
     },
     "Clothing/Blue Monster Costume": {
-      "female": 19
+      "female": 8
     },
     "Clothing/Broke Boy Suit": {
-      "male": 17
+      "male": 10
     },
     "Clothing/Brooklyn Zoo Jersey": {
-      "male": 8
+      "male": 3
     },
     "Clothing/Chicken Suit": {
-      "male": 66,
-      "female": 22,
+      "male": 41,
+      "female": 17,
       "ape": 7
     },
     "Clothing/Chicken Suit Iridescent": {
-      "female": 8,
-      "male": 23
+      "female": 4,
+      "male": 16
     },
     "Clothing/Chitown Jersey": {
-      "male": 9
+      "male": 5
     },
     "Clothing/Chucky Overalls": {
-      "male": 17
+      "male": 4
     },
     "Clothing/Cincy": {
-      "male": 45
+      "male": 41
     },
     "Clothing/City of Angels": {
-      "male": 58,
-      "skeleton": 7
+      "male": 23,
+      "skeleton": 6
     },
     "Clothing/City of Angels Jersey": {
-      "male": 43
+      "male": 22
     },
     "Clothing/Clown Outfit": {
-      "male": 18
+      "male": 10
     },
     "Clothing/Corleone Suit": {
-      "male": 47,
-      "ape": 6
+      "male": 22,
+      "ape": 5
     },
     "Clothing/Corsette": {
-      "female": 4
+      "female": 3
     },
     "Clothing/Cow Town": {
       "male": 10
     },
     "Clothing/Crop Hoodie Blue": {
-      "female": 19
+      "female": 14
     },
     "Clothing/Crop Hoodie Camo Green": {
-      "female": 11
-    },
-    "Clothing/Crop Hoodie Cheetah": {
       "female": 10
     },
+    "Clothing/Crop Hoodie Cheetah": {
+      "female": 9
+    },
     "Clothing/Crop Hoodie Grey": {
-      "female": 43
+      "female": 36
     },
     "Clothing/Crop Hoodie Pale Blue": {
       "female": 7
     },
     "Clothing/Crop Hoodie Pale Carnation": {
-      "female": 19
+      "female": 12
     },
     "Clothing/Crop Hoodie Pale Coral": {
-      "female": 25
+      "female": 16
     },
     "Clothing/Crop Hoodie Pale Green": {
-      "female": 13
+      "female": 8
     },
     "Clothing/Crop Hoodie Pale Purple": {
       "female": 8
     },
     "Clothing/Crop Hoodie Pink": {
-      "female": 20
+      "female": 7
     },
     "Clothing/Crop Stuck in the 90s": {
-      "female": 16
-    },
-    "Clothing/Denim Rose": {
       "female": 11
     },
+    "Clothing/Denim Rose": {
+      "female": 2
+    },
     "Clothing/Desiordia": {
-      "skeleton": 15,
-      "male": 73
+      "skeleton": 13,
+      "male": 49
     },
     "Clothing/Doctor": {
-      "male": 31,
-      "ape": 11
+      "male": 23,
+      "ape": 9
     },
     "Clothing/Dolly": {
-      "female": 79
+      "female": 78
     },
     "Clothing/England Top": {
       "ape": 4,
-      "male": 19
+      "male": 16
     },
     "Clothing/Explorer": {
-      "male": 51,
+      "male": 38,
       "ape": 4
     },
     "Clothing/Farmer": {
-      "ape": 14,
-      "male": 36
+      "ape": 13,
+      "male": 34
     },
     "Clothing/Firefighter": {
-      "male": 40
+      "male": 31
     },
     "Clothing/Flannel Blue": {
       "female": 4
@@ -600,70 +600,70 @@
       "female": 4
     },
     "Clothing/Flannel Purple": {
-      "female": 13
-    },
-    "Clothing/Flannel Red": {
-      "female": 9
-    },
-    "Clothing/Flannel Yellow": {
       "female": 6
     },
+    "Clothing/Flannel Red": {
+      "female": 7
+    },
+    "Clothing/Flannel Yellow": {
+      "female": 4
+    },
     "Clothing/Flannel Yellow Closed": {
-      "female": 12
+      "female": 9
     },
     "Clothing/Flight Attendant": {
-      "female": 15
+      "female": 12
     },
     "Clothing/Flight Attendant Scarf": {
-      "female": 8
+      "female": 7
     },
     "Clothing/Frankenbride": {
-      "female": 35
+      "female": 29
     },
     "Clothing/Go Zombies Green": {
-      "female": 17
+      "female": 14
     },
     "Clothing/Go Zombies Purple": {
-      "female": 21
+      "female": 15
     },
     "Clothing/Gr0in Zip Up": {
-      "skeleton": 15,
-      "male": 5
+      "skeleton": 10,
+      "male": 3
     },
     "Clothing/Grandmas Ugly Sweater": {
-      "male": 17
+      "male": 11
     },
     "Clothing/Greek": {
-      "male": 40,
-      "ape": 6
+      "male": 23,
+      "ape": 4
     },
     "Clothing/Green Monster Costume": {
-      "female": 19
+      "female": 5
     },
     "Clothing/Hamsa Suit": {
-      "male": 57
+      "male": 12
     },
     "Clothing/Hanna Suit": {
-      "male": 50,
+      "male": 28,
       "ape": 6
     },
     "Clothing/Henley Black": {
-      "male": 50
+      "male": 26
     },
     "Clothing/Henley Camo": {
       "ape": 4,
-      "male": 29
+      "male": 27
     },
     "Clothing/Hoodie Black": {
-      "female": 35
+      "female": 26
     },
     "Clothing/Hoodie Blue": {
-      "skeleton": 8,
+      "skeleton": 5,
       "male": 2
     },
     "Clothing/Hoodie GO": {
-      "skeleton": 15,
-      "male": 11
+      "skeleton": 9,
+      "male": 6
     },
     "Clothing/Hoodie GO Orange": {
       "female": 7
@@ -672,105 +672,105 @@
       "female": 1
     },
     "Clothing/Hoodie GO Punk": {
-      "male": 76
+      "male": 38
     },
     "Clothing/Hoodie Irridescent Multicord": {
-      "female": 47
+      "female": 22
     },
     "Clothing/Hoodie LFGO Camo": {
-      "male": 22
+      "male": 12
     },
     "Clothing/Hoodie LFGO Made": {
-      "skeleton": 19,
-      "male": 23
+      "skeleton": 11,
+      "male": 13
     },
     "Clothing/Hoodie Stuck in the 90s": {
-      "skeleton": 10,
+      "skeleton": 6,
       "male": 5
     },
     "Clothing/Hoodie Tan": {
-      "female": 10
+      "female": 7
     },
     "Clothing/If I Only Had A Brain": {
-      "male": 45
+      "male": 41
     },
     "Clothing/Intern Suit": {
-      "male": 8,
-      "skeleton": 9
+      "male": 7,
+      "skeleton": 6
     },
     "Clothing/Irridescent Erkel": {
-      "male": 90,
-      "skeleton": 13,
+      "male": 63,
+      "skeleton": 10,
       "ape": 4
     },
     "Clothing/Jacket Black": {
-      "female": 40
+      "female": 28
     },
     "Clothing/Jacket Denim": {
-      "male": 14,
-      "ape": 7,
+      "male": 13,
+      "ape": 6,
       "skeleton": 1
     },
     "Clothing/Jacket Tan": {
       "female": 1
     },
     "Clothing/Jason Threads": {
-      "male": 60
+      "male": 58
     },
     "Clothing/Juberry Collared Shirt Blue": {
-      "male": 5
+      "male": 4
     },
     "Clothing/Judge Camo": {
-      "male": 68,
-      "skeleton": 9
+      "male": 47,
+      "skeleton": 8
     },
     "Clothing/Karate Kid": {
-      "ape": 19,
-      "male": 82
+      "ape": 17,
+      "male": 56
     },
     "Clothing/Kong Suit": {
-      "male": 25
+      "male": 12
     },
     "Clothing/Kreuger Sweater": {
-      "male": 18
+      "male": 16
     },
     "Clothing/Leather Crop": {
       "female": 12
     },
     "Clothing/Leather Jacket Black": {
-      "male": 42,
-      "ape": 3
+      "male": 24,
+      "ape": 2
     },
     "Clothing/Leather Jacket Open": {
-      "male": 71,
-      "ape": 6
+      "male": 55,
+      "ape": 5
     },
     "Clothing/Letterman Black": {
-      "male": 32,
+      "male": 21,
       "ape": 4
     },
     "Clothing/Letterman Blue": {
-      "male": 25,
+      "male": 17,
       "ape": 8
     },
     "Clothing/Letterman Pink": {
-      "male": 47
+      "male": 25
     },
     "Clothing/Letterman Red": {
-      "male": 27
+      "male": 24
     },
     "Clothing/Lion Suit": {
-      "ape": 8,
-      "male": 18
+      "ape": 6,
+      "male": 15
     },
     "Clothing/McGo": {
-      "female": 5
+      "female": 3
     },
     "Clothing/McWin": {
-      "male": 30
+      "male": 25
     },
     "Clothing/Mermaid": {
-      "female": 19
+      "female": 16
     },
     "Clothing/Messi": {
       "male": 2,
@@ -778,888 +778,888 @@
     },
     "Clothing/Messiah": {
       "ape": 7,
-      "male": 36
+      "male": 21
     },
     "Clothing/MiB": {
-      "male": 17,
+      "male": 14,
       "ape": 4
     },
     "Clothing/Monster Garb": {
-      "male": 76
+      "male": 62
     },
     "Clothing/Moon Suit": {
-      "male": 32,
-      "skeleton": 5
+      "male": 22,
+      "skeleton": 2
     },
     "Clothing/Mummy Suit": {
-      "male": 29
+      "male": 20
     },
     "Clothing/Nun Habit": {
-      "female": 44
+      "female": 39
     },
     "Clothing/Open Heart": {
-      "male": 32
+      "male": 15
     },
     "Clothing/PJs Pink": {
-      "female": 8
+      "female": 3
     },
     "Clothing/PJs Red": {
-      "female": 15
+      "female": 8
     },
     "Clothing/Palm Shirt": {
       "male": 11
     },
     "Clothing/Pilot": {
-      "male": 24,
+      "male": 20,
       "ape": 11
     },
     "Clothing/Pimp Coat": {
-      "male": 56
+      "male": 35
     },
     "Clothing/Pink Monster Costume": {
-      "female": 46
+      "female": 35
     },
     "Clothing/Pool Party": {
-      "male": 44
+      "male": 27
     },
     "Clothing/Power Suit": {
-      "female": 22
+      "female": 17
     },
     "Clothing/Powersuit Plaid": {
-      "female": 33
+      "female": 20
     },
     "Clothing/Prison Jumpsuit": {
-      "male": 55
+      "male": 49
     },
     "Clothing/Puffer Camo": {
-      "skeleton": 16,
-      "male": 90,
-      "ape": 16
+      "skeleton": 9,
+      "male": 58,
+      "ape": 13
     },
     "Clothing/Puffer Leopard": {
-      "male": 28,
-      "ape": 10
+      "male": 22,
+      "ape": 8
     },
     "Clothing/Puffer Vest Pink": {
-      "female": 16
+      "female": 13
     },
     "Clothing/Puffer Zebra": {
-      "male": 79,
-      "skeleton": 14,
+      "male": 62,
+      "skeleton": 8,
       "ape": 4
     },
     "Clothing/Reaper Robe": {
-      "male": 183,
-      "ape": 17
+      "male": 154,
+      "ape": 16
     },
     "Clothing/Red Zip": {
-      "male": 42,
+      "male": 29,
       "ape": 1
     },
     "Clothing/Ring Dress": {
-      "female": 37
+      "female": 32
     },
     "Clothing/Sailor": {
-      "ape": 14,
-      "male": 103
+      "ape": 13,
+      "male": 83
     },
     "Clothing/Scarf": {
       "ape": 4,
-      "male": 34
+      "male": 18
     },
     "Clothing/Scrubs": {
-      "male": 36,
+      "male": 25,
       "ape": 6
     },
     "Clothing/Shelby Suit": {
-      "male": 28,
+      "male": 23,
       "ape": 1
     },
     "Clothing/Shelby Vest": {
-      "male": 116,
-      "ape": 12,
-      "skeleton": 32
+      "male": 86,
+      "ape": 9,
+      "skeleton": 16
     },
     "Clothing/Shogun": {
-      "male": 22
+      "male": 12
     },
     "Clothing/Skeleton Leather": {
-      "skeleton": 18
+      "skeleton": 13
     },
     "Clothing/Skelly Suit": {
-      "male": 119
+      "male": 98
     },
     "Clothing/Slam Dancer": {
-      "male": 113
+      "male": 100
     },
     "Clothing/Stitched Up": {
-      "male": 90
+      "male": 75
     },
     "Clothing/Sunday Best": {
-      "male": 18
+      "male": 8
     },
     "Clothing/Swashbuckler": {
-      "male": 61
+      "male": 51
     },
     "Clothing/Sweater Stuck in the 80s": {
-      "male": 37,
-      "skeleton": 12
+      "male": 24,
+      "skeleton": 5
     },
     "Clothing/Teenage Werewolf": {
-      "male": 34
+      "male": 28
     },
     "Clothing/Tfield Denim": {
-      "male": 29
+      "male": 8
     },
     "Clothing/The Count": {
       "male": 15
     },
     "Clothing/Tinkerbell": {
-      "female": 14
+      "female": 5
     },
     "Clothing/Turtleneck": {
-      "female": 42
+      "female": 28
     },
     "Clothing/Ugly Christmas Sweater": {
       "male": 2
     },
     "Clothing/Vestements": {
-      "male": 42,
-      "skeleton": 16
+      "male": 20,
+      "skeleton": 6
     },
     "Clothing/Wednesday": {
-      "female": 19
+      "female": 18
     },
     "Clothing/Witch Costume": {
-      "female": 30
+      "female": 24
     },
     "Clothing/Wizard Robe": {
-      "male": 51,
+      "male": 21,
       "ape": 2
     },
     "Clothing/Wolfy": {
-      "male": 39
+      "male": 24
     },
     "Clothing/Zombie Suit": {
-      "male": 135
+      "male": 104
     },
     "Eyebrows/Angry": {
-      "male": 191
+      "male": 123
     },
     "Eyebrows/Beauty": {
-      "female": 84
+      "female": 57
     },
     "Eyebrows/Billy": {
-      "male": 100,
-      "female": 16
+      "male": 84,
+      "female": 13
     },
     "Eyebrows/Bindi": {
       "female": 7
     },
     "Eyebrows/Bindi Decorative": {
-      "female": 32
+      "female": 12
     },
     "Eyebrows/Concerned": {
-      "male": 192
+      "male": 122
     },
     "Eyebrows/Curious": {
-      "female": 85,
-      "male": 151
+      "female": 53,
+      "male": 102
     },
     "Eyebrows/Demented": {
-      "male": 51
+      "male": 41
     },
     "Eyebrows/Emo": {
-      "male": 157,
-      "female": 13
+      "male": 126,
+      "female": 12
     },
     "Eyebrows/Evil Clown": {
-      "male": 60,
-      "female": 4
+      "male": 16,
+      "female": 2
     },
     "Eyebrows/Eye Shadow": {
-      "female": 63
+      "female": 43
     },
     "Eyebrows/Eyebrows": {
-      "male": 189,
-      "female": 62
+      "male": 112,
+      "female": 43
     },
     "Eyebrows/Flat": {
-      "male": 43,
+      "male": 41,
       "female": 10
     },
     "Eyebrows/Furious": {
-      "male": 185,
-      "female": 77
+      "male": 149,
+      "female": 56
     },
     "Eyebrows/Ghost": {
-      "male": 75
+      "male": 51
     },
     "Eyebrows/Happy Ghost": {
-      "female": 36
+      "female": 25
     },
     "Eyebrows/Hmm": {
-      "male": 187,
-      "female": 58
+      "male": 147,
+      "female": 46
     },
     "Eyebrows/Incensed": {
-      "male": 233
+      "male": 157
     },
     "Eyebrows/Interested": {
-      "female": 60,
-      "male": 210
+      "female": 48,
+      "male": 116
     },
     "Eyebrows/Muddled": {
-      "female": 13,
-      "male": 38
+      "female": 12,
+      "male": 32
     },
     "Eyebrows/Nightmare": {
-      "male": 52,
-      "female": 16
+      "male": 44,
+      "female": 14
     },
     "Eyebrows/None": {
-      "ape": 258,
-      "skeleton": 260,
-      "male": 140,
+      "ape": 200,
+      "skeleton": 100,
+      "male": 114,
       "female": 2
     },
     "Eyebrows/Questioning": {
-      "male": 181,
-      "female": 80
+      "male": 122,
+      "female": 55
     },
     "Eyebrows/Raised": {
-      "female": 69,
-      "male": 184
+      "female": 53,
+      "male": 128
     },
     "Eyebrows/Rhinestone": {
-      "female": 66
+      "female": 46
     },
     "Eyebrows/Sad": {
-      "male": 196
+      "male": 144
     },
     "Eyebrows/Scarred": {
-      "male": 61
+      "male": 53
     },
     "Eyebrows/Shadows": {
-      "male": 59,
-      "female": 12
+      "male": 50,
+      "female": 11
     },
     "Eyebrows/Skeptical": {
-      "male": 179
+      "male": 120
     },
     "Eyebrows/Skeptical Lashes": {
-      "female": 104
+      "female": 79
     },
     "Eyebrows/Strong": {
-      "male": 166
+      "male": 118
     },
     "Eyebrows/Surprised": {
-      "male": 166
+      "male": 113
     },
     "Eyebrows/Thin": {
-      "female": 98
+      "female": 64
     },
     "Eyebrows/Transylvanian": {
-      "male": 95
+      "male": 48
     },
     "Eyebrows/Unhinged": {
-      "male": 54
+      "male": 43
     },
     "Eyebrows/Upset": {
-      "male": 201
+      "male": 114
     },
     "Eyebrows/Voodoo": {
-      "female": 22,
-      "male": 74
+      "female": 17,
+      "male": 60
     },
     "Eyebrows/Wicked Brow": {
-      "female": 19,
-      "male": 62
+      "female": 15,
+      "male": 49
     },
     "Eyes/3D": {
-      "male": 59,
-      "female": 28
-    },
-    "Eyes/Aviators": {
-      "male": 109,
-      "female": 34
-    },
-    "Eyes/Black Blue Tint": {
-      "male": 71,
+      "male": 51,
       "female": 16
     },
+    "Eyes/Aviators": {
+      "male": 87,
+      "female": 27
+    },
+    "Eyes/Black Blue Tint": {
+      "male": 36,
+      "female": 10
+    },
     "Eyes/Black C3m3nt": {
-      "male": 105,
-      "female": 20
+      "male": 50,
+      "female": 10
     },
     "Eyes/Black Red Tint": {
-      "female": 30,
-      "male": 123
+      "female": 24,
+      "male": 88
     },
     "Eyes/Black on Black": {
-      "female": 14,
-      "male": 47
+      "female": 8,
+      "male": 36
     },
     "Eyes/Blindfold": {
-      "female": 26,
-      "male": 115
+      "female": 20,
+      "male": 79
     },
     "Eyes/Chucky": {
-      "male": 30,
-      "female": 3
+      "male": 23,
+      "female": 2
     },
     "Eyes/Flower": {
-      "male": 98,
-      "female": 20
+      "male": 57,
+      "female": 17
     },
     "Eyes/GM": {
-      "male": 61,
-      "female": 30
+      "male": 46,
+      "female": 20
     },
     "Eyes/GN": {
       "female": 7,
-      "male": 29
+      "male": 25
     },
     "Eyes/Ghoul": {
-      "male": 18,
-      "female": 3
+      "male": 9,
+      "female": 1
     },
     "Eyes/Glasses Round Lashes": {
-      "female": 54
+      "female": 35
     },
     "Eyes/Glitter": {
-      "female": 26
+      "female": 15
     },
     "Eyes/Goggles": {
-      "male": 57,
+      "male": 30,
       "female": 5
     },
     "Eyes/Heart": {
-      "male": 34,
-      "female": 15
+      "male": 27,
+      "female": 13
     },
     "Eyes/Heartbreaks": {
-      "male": 124,
-      "female": 25
+      "male": 87,
+      "female": 19
     },
     "Eyes/Hypno": {
-      "male": 236,
-      "female": 93
+      "male": 172,
+      "female": 80
     },
     "Eyes/Its Alive": {
-      "male": 372,
-      "female": 54
+      "male": 322,
+      "female": 43
     },
     "Eyes/Jutan Spectacles": {
-      "male": 154,
-      "female": 32
+      "male": 97,
+      "female": 23
     },
     "Eyes/Laser": {
-      "male": 72
+      "male": 36
     },
     "Eyes/Mindless": {
       "male": 2
     },
     "Eyes/Money": {
-      "male": 54,
-      "female": 12
+      "male": 34,
+      "female": 10
     },
     "Eyes/Nerd": {
-      "male": 163,
-      "female": 33
+      "male": 128,
+      "female": 25
     },
     "Eyes/No Lens Circle": {
-      "male": 164,
-      "female": 18
+      "male": 108,
+      "female": 16
     },
     "Eyes/No Sleep": {
-      "male": 359,
-      "female": 34
+      "male": 300,
+      "female": 31
     },
     "Eyes/None": {
-      "ape": 258,
-      "skeleton": 260
+      "ape": 200,
+      "skeleton": 100
     },
     "Eyes/Pennywise": {
-      "male": 54,
+      "male": 42,
       "female": 2
     },
     "Eyes/Pink Lemonades": {
-      "male": 42,
-      "female": 23
+      "male": 32,
+      "female": 12
     },
     "Eyes/Pleading": {
-      "female": 9,
-      "male": 59
+      "female": 6,
+      "male": 52
     },
     "Eyes/Pop Eyes": {
-      "male": 181
+      "male": 155
     },
     "Eyes/Poppet": {
-      "male": 28,
-      "female": 4
+      "male": 24,
+      "female": 2
     },
     "Eyes/Scary": {
       "male": 3
     },
     "Eyes/Sleepless Lashes": {
-      "female": 43
+      "female": 32
     },
     "Eyes/Spooky Lashes": {
-      "female": 37
+      "female": 34
     },
     "Eyes/Standard": {
-      "male": 119,
-      "female": 18
+      "male": 91,
+      "female": 16
     },
     "Eyes/Standard Lashes": {
-      "female": 68
+      "female": 58
     },
     "Eyes/Star": {
-      "female": 42,
-      "male": 27
+      "female": 16,
+      "male": 10
     },
     "Eyes/Sticky Face": {
-      "female": 8,
-      "male": 56
+      "female": 5,
+      "male": 40
     },
     "Eyes/Sugar": {
-      "male": 38,
+      "male": 30,
       "female": 3
     },
     "Eyes/The Millionaires": {
-      "male": 69,
-      "female": 23
+      "male": 50,
+      "female": 15
     },
     "Eyes/The Millionaires Pink": {
-      "female": 29,
-      "male": 55
+      "female": 15,
+      "male": 32
     },
     "Eyes/Third Eye": {
       "male": 1
     },
     "Eyes/Third Eyelashes": {
-      "female": 5
+      "female": 2
     },
     "Eyes/Three Eyes": {
-      "male": 38
+      "male": 33
     },
     "Eyes/Three Eyes Lashes": {
-      "female": 14
+      "female": 10
     },
     "Eyes/Trance": {
-      "male": 19
+      "male": 4
     },
     "Eyes/Unfinished Business": {
       "female": 7,
-      "male": 62
+      "male": 50
     },
     "Eyes/Verified": {
-      "male": 50,
+      "male": 24,
       "female": 2
     },
     "Eyes/Waffer Black": {
-      "male": 97,
-      "female": 48
+      "male": 69,
+      "female": 27
     },
     "Eyes/Waffer Red": {
       "female": 8,
-      "male": 51
+      "male": 33
     },
     "Eyes/Wavy": {
-      "male": 78
+      "male": 37
     },
     "Eyes/White": {
-      "female": 30,
-      "male": 95
+      "female": 24,
+      "male": 69
     },
     "Eyes/Wicked Lashes": {
-      "female": 53
+      "female": 44
     },
     "Eyes/Wink": {
-      "male": 54
+      "male": 45
     },
     "Head/Bag Head": {
-      "male": 49,
+      "male": 37,
       "skeleton": 3
     },
     "Head/Balaclava Black": {
-      "male": 39
+      "male": 29
     },
     "Head/Banana Sleeveless": {
-      "male": 11
+      "male": 6
     },
     "Head/Banana Suit": {
-      "male": 39
+      "male": 15
     },
     "Head/Beanie Black": {
-      "male": 33,
+      "male": 13,
       "skeleton": 2
     },
     "Head/Beanie Orange": {
       "male": 16,
-      "ape": 26,
+      "ape": 20,
       "skeleton": 2
     },
     "Head/Beauty School Dropout": {
-      "female": 10
+      "female": 9
     },
     "Head/Big Afro Black": {
-      "female": 12
+      "female": 9
     },
     "Head/Big Afro Brown": {
-      "male": 39
+      "male": 25
     },
     "Head/Big Afro Front Black": {
-      "skeleton": 10
+      "skeleton": 7
     },
     "Head/Billy": {
-      "male": 71
+      "male": 65
     },
     "Head/Biretta": {
-      "male": 24,
+      "male": 14,
       "skeleton": 1
     },
     "Head/Bleached Dreads": {
-      "male": 53,
-      "skeleton": 10
+      "male": 50,
+      "skeleton": 5
     },
     "Head/Bloody Chef": {
-      "male": 37
+      "male": 33
     },
     "Head/Blue": {
-      "female": 16
+      "female": 13
     },
     "Head/Blue Monster Mask": {
-      "female": 17
+      "female": 10
     },
     "Head/Books": {
-      "male": 28,
-      "skeleton": 7
+      "male": 15,
+      "skeleton": 3
     },
     "Head/Brains": {
-      "male": 53
+      "male": 36
     },
     "Head/Bride of Frankenstein": {
-      "female": 35
+      "female": 29
     },
     "Head/Bucket Hat Black": {
-      "skeleton": 10
+      "skeleton": 7
     },
     "Head/Bucket Hat Pink": {
-      "male": 25,
+      "male": 18,
       "skeleton": 1
     },
     "Head/Camp Hat": {
-      "skeleton": 8,
-      "male": 19
+      "skeleton": 5,
+      "male": 12
     },
     "Head/Cap Black": {
-      "skeleton": 12,
-      "male": 17
+      "skeleton": 6,
+      "male": 13
     },
     "Head/Charizard Onesie": {
-      "male": 27
+      "male": 14
     },
     "Head/Chicken Head": {
-      "male": 42,
+      "male": 30,
       "female": 9
     },
     "Head/Chicken Head Iridescent": {
-      "male": 12,
-      "female": 4
+      "male": 6,
+      "female": 3
     },
     "Head/Chucky Hair": {
-      "male": 21
+      "male": 12
     },
     "Head/Clown Wig": {
-      "male": 22
+      "male": 15
     },
     "Head/Crown": {
-      "male": 42,
-      "skeleton": 3
+      "male": 10,
+      "skeleton": 2
     },
     "Head/Cupid of Crime": {
-      "female": 37
+      "female": 16
     },
     "Head/Debonair": {
-      "male": 127
+      "male": 88
     },
     "Head/Dixie Cup": {
-      "male": 98,
-      "ape": 29
+      "male": 78,
+      "ape": 25
     },
     "Head/Doll": {
-      "female": 79
+      "female": 78
     },
     "Head/Dracula": {
       "male": 21
     },
     "Head/Egg Head": {
-      "skeleton": 4,
-      "male": 80
+      "skeleton": 3,
+      "male": 64
     },
     "Head/Elf": {
-      "male": 19
+      "male": 16
     },
     "Head/Emo Hair": {
-      "male": 36
+      "male": 29
     },
     "Head/Fairy Bun Blonde": {
-      "female": 16
+      "female": 10
     },
     "Head/Fireman": {
       "skeleton": 5,
-      "male": 35,
-      "ape": 12
+      "male": 28,
+      "ape": 10
     },
     "Head/Fish Bowl": {
-      "ape": 11,
-      "male": 9,
+      "ape": 7,
+      "male": 8,
       "female": 2
     },
     "Head/Flat Brim": {
-      "male": 21,
+      "male": 13,
       "skeleton": 2
     },
     "Head/Flight Cap": {
-      "female": 20
+      "female": 15
     },
     "Head/Frankensteins Monster": {
-      "male": 81
+      "male": 72
     },
     "Head/Fredora": {
-      "male": 36
+      "male": 34
     },
     "Head/Fresh Prince": {
-      "male": 76,
-      "ape": 21,
-      "skeleton": 8
+      "male": 58,
+      "ape": 17,
+      "skeleton": 4
     },
     "Head/Fry Hat": {
-      "male": 34,
-      "ape": 4
+      "male": 22,
+      "ape": 3
     },
     "Head/Ghoste": {
-      "male": 29
+      "male": 26
     },
     "Head/Golden Whale": {
       "male": 1
     },
     "Head/Green Monster Mask": {
-      "female": 20
+      "female": 5
     },
     "Head/Gumball": {
       "male": 14,
-      "female": 5,
+      "female": 4,
       "ape": 4
     },
     "Head/Hamsa": {
-      "male": 45
+      "male": 21
     },
     "Head/Hannibal": {
-      "male": 32
+      "male": 30
     },
     "Head/Hard Hat": {
-      "male": 70,
+      "male": 28,
       "skeleton": 1
     },
     "Head/High Pony": {
-      "female": 19
+      "female": 17
     },
     "Head/Hockey Mask": {
-      "male": 81
+      "male": 74
     },
     "Head/Hodl Hat": {
-      "male": 26
+      "male": 18
     },
     "Head/Jack O Lantern": {
       "male": 16
     },
     "Head/Judge Wig": {
-      "male": 75,
-      "ape": 25
+      "male": 63,
+      "ape": 21
     },
     "Head/Kong Mask": {
-      "male": 17
+      "male": 9
     },
     "Head/LFGO Cap Brim": {
-      "male": 28
+      "male": 14
     },
     "Head/LFGO Cap Side": {
-      "male": 26,
-      "skeleton": 2
+      "male": 16,
+      "skeleton": 1
     },
     "Head/Layered Black": {
-      "female": 22
+      "female": 17
     },
     "Head/Layered Blonde": {
-      "female": 13
+      "female": 8
     },
     "Head/Layered Brown": {
-      "female": 31
+      "female": 23
     },
     "Head/Layered Ginger": {
       "female": 6
     },
     "Head/Lion Head": {
-      "male": 18
+      "male": 17
     },
     "Head/Long Black": {
-      "female": 20
+      "female": 14
     },
     "Head/Long Curly Black": {
-      "female": 43
+      "female": 22
     },
     "Head/Long Curly Brown": {
-      "female": 26
+      "female": 18
     },
     "Head/Long Straight Blonde": {
-      "female": 16
+      "female": 8
     },
     "Head/Long Straight Brown": {
-      "female": 38
+      "female": 29
     },
     "Head/Long Straight Ginger": {
       "female": 7
     },
     "Head/Long Wavy Black": {
-      "female": 14
-    },
-    "Head/Long Wavy Blonde": {
       "female": 13
     },
+    "Head/Long Wavy Blonde": {
+      "female": 10
+    },
     "Head/Long Wavy Brown": {
-      "female": 40
+      "female": 30
     },
     "Head/Long Wavy Ginger": {
-      "female": 21
+      "female": 15
     },
     "Head/Long_Black": {
-      "female": 38
+      "female": 19
     },
     "Head/Mang": {
-      "male": 29,
-      "skeleton": 7
+      "male": 19,
+      "skeleton": 5
     },
     "Head/Medium Black": {
-      "female": 29
-    },
-    "Head/Medusa": {
-      "male": 18
-    },
-    "Head/Moon Helmet": {
-      "male": 25,
-      "skeleton": 4
-    },
-    "Head/Mummy Mask": {
-      "male": 26
-    },
-    "Head/Mushroom": {
-      "skeleton": 8,
-      "male": 35,
-      "ape": 6
-    },
-    "Head/None": {
-      "ape": 12,
-      "male": 29
-    },
-    "Head/Nun Camo": {
-      "female": 38
-    },
-    "Head/Open Mind": {
-      "male": 24
-    },
-    "Head/Paint Spill": {
-      "male": 31
-    },
-    "Head/Peaked Cap": {
-      "male": 18
-    },
-    "Head/Pepe Hat": {
-      "male": 22,
-      "ape": 7
-    },
-    "Head/Pig Tails Blue": {
-      "female": 9
-    },
-    "Head/Pigtails Green": {
-      "female": 18
-    },
-    "Head/Pigtails Yellow": {
       "female": 21
     },
-    "Head/Pimp Hat": {
-      "male": 50
+    "Head/Medusa": {
+      "male": 9
     },
-    "Head/Pink Monster Mask": {
-      "female": 42
+    "Head/Moon Helmet": {
+      "male": 16,
+      "skeleton": 2
     },
-    "Head/Pot Head": {
-      "male": 76
+    "Head/Mummy Mask": {
+      "male": 21
     },
-    "Head/Prince of Peace": {
-      "male": 64
+    "Head/Mushroom": {
+      "skeleton": 6,
+      "male": 25,
+      "ape": 5
     },
-    "Head/Princess": {
-      "female": 25
+    "Head/None": {
+      "ape": 11,
+      "male": 23
     },
-    "Head/Purple": {
-      "female": 7
+    "Head/Nun Camo": {
+      "female": 37
     },
-    "Head/Rattie Hat": {
+    "Head/Open Mind": {
+      "male": 19
+    },
+    "Head/Paint Spill": {
+      "male": 16
+    },
+    "Head/Peaked Cap": {
+      "male": 16
+    },
+    "Head/Pepe Hat": {
+      "male": 16,
+      "ape": 4
+    },
+    "Head/Pig Tails Blue": {
       "female": 8
     },
+    "Head/Pigtails Green": {
+      "female": 15
+    },
+    "Head/Pigtails Yellow": {
+      "female": 14
+    },
+    "Head/Pimp Hat": {
+      "male": 34
+    },
+    "Head/Pink Monster Mask": {
+      "female": 34
+    },
+    "Head/Pot Head": {
+      "male": 61
+    },
+    "Head/Prince of Peace": {
+      "male": 51
+    },
+    "Head/Princess": {
+      "female": 20
+    },
+    "Head/Purple": {
+      "female": 3
+    },
+    "Head/Rattie Hat": {
+      "female": 6
+    },
     "Head/Reaper Hood": {
-      "male": 57,
+      "male": 40,
       "ape": 5
     },
     "Head/Reaper Mask": {
-      "male": 40
+      "male": 30
     },
     "Head/Red Bull": {
-      "male": 35
+      "male": 28
     },
     "Head/Renman Snapback": {
-      "male": 33
+      "male": 25
     },
     "Head/Saiyan": {
-      "male": 16
+      "male": 13
     },
     "Head/Samara": {
-      "female": 40
+      "female": 34
     },
     "Head/Scarecrow": {
-      "male": 59
+      "male": 48
     },
     "Head/Scream": {
       "male": 47
     },
     "Head/Scream Wazzaaaa": {
-      "male": 44
+      "male": 41
     },
     "Head/Shelby Hat": {
-      "male": 83,
-      "ape": 16,
-      "skeleton": 10
+      "male": 59,
+      "ape": 15,
+      "skeleton": 6
     },
     "Head/Shiny Shark": {
-      "male": 5
+      "male": 2
     },
     "Head/Shogun": {
-      "male": 19,
-      "skeleton": 9
+      "male": 12,
+      "skeleton": 7
     },
     "Head/Short Afro Black": {
-      "male": 24,
-      "skeleton": 6
+      "male": 13,
+      "skeleton": 4
     },
     "Head/Short Afro Brown": {
       "skeleton": 1
     },
     "Head/Short Spikey Black": {
-      "skeleton": 11,
-      "male": 23
+      "skeleton": 8,
+      "male": 17
     },
     "Head/Short Spikey Blonde": {
       "male": 1,
@@ -1667,244 +1667,244 @@
     },
     "Head/Short Spikey Brown": {
       "skeleton": 6,
-      "male": 22
+      "male": 10
     },
     "Head/Short Spikey Ginger": {
-      "male": 25,
+      "male": 13,
       "skeleton": 1
     },
     "Head/Short Swept Black": {
-      "male": 24,
-      "skeleton": 5
+      "male": 15,
+      "skeleton": 2
     },
     "Head/Short Swept Blonde": {
-      "male": 43
-    },
-    "Head/Short Swept Brown": {
-      "male": 35,
-      "skeleton": 6
-    },
-    "Head/Short Swept Ginger": {
-      "male": 24,
-      "skeleton": 8
-    },
-    "Head/Short Swept Grey": {
       "male": 15
     },
+    "Head/Short Swept Brown": {
+      "male": 19,
+      "skeleton": 2
+    },
+    "Head/Short Swept Ginger": {
+      "male": 9,
+      "skeleton": 3
+    },
+    "Head/Short Swept Grey": {
+      "male": 13
+    },
     "Head/Short Wavy Black": {
-      "female": 24
+      "female": 20
     },
     "Head/Short Wavy Blonde": {
-      "female": 12
+      "female": 5
     },
     "Head/Short Wavy Brown": {
-      "female": 29
+      "female": 26
     },
     "Head/Short Wavy Ginger": {
-      "female": 6
+      "female": 5
     },
     "Head/Skeleton Hat": {
-      "male": 131
+      "male": 110
     },
     "Head/Slick": {
-      "male": 22
+      "male": 16
     },
     "Head/Slot Jackpot": {
       "ape": 13,
       "female": 4,
-      "male": 21
+      "male": 17
     },
     "Head/Slot Try Again": {
-      "male": 29,
-      "ape": 16,
+      "male": 24,
+      "ape": 14,
       "female": 8
     },
     "Head/Soft Serve": {
-      "male": 26,
+      "male": 22,
       "ape": 13
     },
     "Head/Sombrero": {
-      "male": 50,
-      "ape": 17,
+      "male": 43,
+      "ape": 16,
       "skeleton": 1
     },
     "Head/Spikey Black": {
-      "skeleton": 15
+      "skeleton": 4
     },
     "Head/Spikey Blonde": {
-      "skeleton": 4
+      "skeleton": 3
     },
     "Head/Spikey Brown": {
       "skeleton": 1
     },
     "Head/Spikey Ginger": {
-      "skeleton": 3
+      "skeleton": 2
     },
     "Head/Straw Hat": {
-      "male": 29
+      "male": 26
     },
     "Head/Suave": {
-      "male": 71,
+      "male": 40,
       "skeleton": 1
     },
     "Head/Super Saiyan": {
-      "male": 11
+      "male": 3
     },
     "Head/Superbowl Bengals": {
-      "male": 46
+      "male": 42
     },
     "Head/Superbowl Rams": {
-      "skeleton": 11,
-      "male": 51
+      "skeleton": 5,
+      "male": 16
     },
     "Head/Swept Black": {
-      "skeleton": 5,
-      "male": 18
+      "skeleton": 4,
+      "male": 13
     },
     "Head/Swept Blonde": {
-      "skeleton": 13,
+      "skeleton": 5,
       "male": 4
     },
     "Head/Swept Brown": {
-      "male": 32,
-      "skeleton": 6
-    },
-    "Head/Swept Ginger": {
-      "male": 7,
+      "male": 19,
       "skeleton": 3
     },
+    "Head/Swept Ginger": {
+      "male": 4,
+      "skeleton": 2
+    },
     "Head/Swept Grey": {
-      "male": 21
+      "male": 17
     },
     "Head/TV Glitch": {
-      "male": 36,
-      "female": 4,
+      "male": 21,
+      "female": 3,
       "ape": 2
     },
     "Head/TV Static": {
-      "male": 30,
-      "female": 14,
+      "male": 21,
+      "female": 9,
       "ape": 3
     },
     "Head/Tall Beanie Black": {
-      "male": 27
-    },
-    "Head/Tall Beanie Orange": {
-      "ape": 16,
-      "male": 18
-    },
-    "Head/Tidal": {
-      "skeleton": 23,
-      "male": 18
-    },
-    "Head/Tiger Shark": {
       "male": 13
     },
+    "Head/Tall Beanie Orange": {
+      "ape": 15,
+      "male": 17
+    },
+    "Head/Tidal": {
+      "skeleton": 9,
+      "male": 3
+    },
+    "Head/Tiger Shark": {
+      "male": 3
+    },
     "Head/Tousled Ginger": {
-      "female": 17
+      "female": 7
     },
     "Head/Tricorn": {
-      "male": 82
+      "male": 72
     },
     "Head/Very Long Pink": {
-      "female": 21
+      "female": 8
     },
     "Head/Waterfall": {
-      "female": 29
+      "female": 10
     },
     "Head/Wednesday Braids": {
-      "female": 19
+      "female": 18
     },
     "Head/Werewolf": {
-      "male": 84
+      "male": 65
     },
     "Head/Witch": {
-      "female": 30
+      "female": 24
     },
     "Head/Wizard Hat": {
-      "male": 64
+      "male": 33
     },
     "Head/Yona": {
-      "female": 5
+      "female": 3
     },
     "Mouth/Anchor": {
-      "male": 73
-    },
-    "Mouth/Angry": {
-      "male": 73
-    },
-    "Mouth/Assured": {
-      "male": 86
-    },
-    "Mouth/Beard Smile": {
-      "male": 41
-    },
-    "Mouth/Bite Mask": {
-      "male": 75
-    },
-    "Mouth/Blood Sucker": {
-      "male": 71,
-      "female": 40
-    },
-    "Mouth/Blue": {
-      "female": 40
-    },
-    "Mouth/Blue Bandana": {
       "male": 51
     },
+    "Mouth/Angry": {
+      "male": 44
+    },
+    "Mouth/Assured": {
+      "male": 48
+    },
+    "Mouth/Beard Smile": {
+      "male": 25
+    },
+    "Mouth/Bite Mask": {
+      "male": 66
+    },
+    "Mouth/Blood Sucker": {
+      "male": 60,
+      "female": 34
+    },
+    "Mouth/Blue": {
+      "female": 28
+    },
+    "Mouth/Blue Bandana": {
+      "male": 18
+    },
     "Mouth/Botox": {
-      "female": 149
+      "female": 92
     },
     "Mouth/Buck": {
-      "male": 62
+      "male": 45
     },
     "Mouth/Cackle": {
-      "female": 16
+      "female": 7
     },
     "Mouth/Casper": {
-      "male": 15
+      "male": 3
     },
     "Mouth/Cheeky": {
-      "male": 57
+      "male": 41
     },
     "Mouth/Cheery": {
-      "male": 88
+      "male": 55
     },
     "Mouth/Cheesy": {
-      "male": 60
+      "male": 43
     },
     "Mouth/Cheshire Closed": {
-      "male": 32
+      "male": 20
     },
     "Mouth/Confident": {
-      "female": 141,
-      "male": 80
+      "female": 95,
+      "male": 45
     },
     "Mouth/Crush Mouth": {
-      "male": 22,
-      "female": 13
+      "male": 14,
+      "female": 11
     },
     "Mouth/Cupid of Crime": {
-      "female": 15
+      "female": 8
     },
     "Mouth/Dandy": {
-      "male": 67
+      "male": 47
     },
     "Mouth/Dark Lipstick": {
-      "female": 59
+      "female": 52
     },
     "Mouth/Davy Jones Beard": {
-      "male": 6
+      "male": 5
     },
     "Mouth/Day of the Dead": {
       "male": 6,
       "female": 3
     },
     "Mouth/Despondent": {
-      "female": 59
+      "female": 55
     },
     "Mouth/Determined": {
-      "male": 88
+      "male": 43
     },
     "Mouth/Don't Mess With Mojo": {
       "male": 1
@@ -1913,148 +1913,148 @@
       "female": 2
     },
     "Mouth/Expressive": {
-      "female": 139
+      "female": 99
     },
     "Mouth/Fang": {
-      "male": 143,
+      "male": 127,
       "female": 7
     },
     "Mouth/Fangs": {
-      "male": 170
+      "male": 139
     },
     "Mouth/Fangs Overbite": {
-      "male": 163
+      "male": 132
     },
     "Mouth/Freckled Freak": {
-      "male": 108,
-      "female": 61
+      "male": 93,
+      "female": 53
     },
     "Mouth/Freckles": {
-      "male": 81
-    },
-    "Mouth/Frown": {
-      "male": 60
-    },
-    "Mouth/Goatie Smile": {
-      "male": 61
-    },
-    "Mouth/Gragh": {
-      "male": 17
-    },
-    "Mouth/Grit": {
-      "male": 172
-    },
-    "Mouth/Hopeful": {
-      "male": 69
-    },
-    "Mouth/I Vant to Suck Your Blahd": {
-      "male": 61
-    },
-    "Mouth/Inspiring": {
-      "female": 110,
-      "male": 97
-    },
-    "Mouth/Irridescent": {
-      "male": 60
-    },
-    "Mouth/Jovial": {
-      "female": 129
-    },
-    "Mouth/Joyful": {
-      "male": 60
-    },
-    "Mouth/Kisses": {
       "male": 37
     },
-    "Mouth/Lopsided Grin": {
-      "male": 109
+    "Mouth/Frown": {
+      "male": 30
     },
-    "Mouth/Lycanthrope": {
-      "male": 10
+    "Mouth/Goatie Smile": {
+      "male": 40
     },
-    "Mouth/Missing Tooth": {
-      "male": 25,
-      "female": 8
+    "Mouth/Gragh": {
+      "male": 12
     },
-    "Mouth/Monster": {
-      "male": 38
+    "Mouth/Grit": {
+      "male": 142
     },
-    "Mouth/Moustache Iridescent": {
+    "Mouth/Hopeful": {
+      "male": 49
+    },
+    "Mouth/I Vant to Suck Your Blahd": {
+      "male": 46
+    },
+    "Mouth/Inspiring": {
+      "female": 74,
       "male": 56
     },
+    "Mouth/Irridescent": {
+      "male": 39
+    },
+    "Mouth/Jovial": {
+      "female": 90
+    },
+    "Mouth/Joyful": {
+      "male": 48
+    },
+    "Mouth/Kisses": {
+      "male": 34
+    },
+    "Mouth/Lopsided Grin": {
+      "male": 60
+    },
+    "Mouth/Lycanthrope": {
+      "male": 8
+    },
+    "Mouth/Missing Tooth": {
+      "male": 15,
+      "female": 3
+    },
+    "Mouth/Monster": {
+      "male": 13
+    },
+    "Mouth/Moustache Iridescent": {
+      "male": 43
+    },
     "Mouth/My First Mustache": {
-      "male": 28
+      "male": 22
     },
     "Mouth/Nightmare Grin": {
-      "male": 18
+      "male": 9
     },
     "Mouth/None": {
-      "ape": 258,
-      "skeleton": 260
+      "ape": 200,
+      "skeleton": 100
     },
     "Mouth/Pink Bandana": {
       "male": 4
     },
     "Mouth/Rainbow Puke": {
-      "female": 20,
-      "male": 16
+      "female": 8,
+      "male": 7
     },
     "Mouth/Scared": {
-      "male": 169
+      "male": 136
     },
     "Mouth/Silly": {
-      "male": 41
+      "male": 31
     },
     "Mouth/Sludge Mouth": {
-      "male": 11
+      "male": 8
     },
     "Mouth/Smile Convincing": {
-      "male": 72
+      "male": 47
     },
     "Mouth/Smirk": {
-      "male": 70
+      "male": 43
     },
     "Mouth/Smirk Confident": {
-      "male": 81
+      "male": 52
     },
     "Mouth/Stitched": {
       "male": 8
     },
     "Mouth/Stubble": {
-      "male": 103
+      "male": 55
     },
     "Mouth/Stubble Grin": {
-      "male": 45
+      "male": 40
     },
     "Mouth/Successful": {
-      "male": 61
+      "male": 40
     },
     "Mouth/Surprised": {
-      "male": 182
+      "male": 139
     },
     "Mouth/Threaded": {
-      "male": 21,
-      "female": 18
+      "male": 12,
+      "female": 8
     },
     "Mouth/Too Cold": {
-      "male": 84
+      "male": 69
     },
     "Mouth/Uhhhhh": {
-      "male": 97,
-      "female": 75
+      "male": 91,
+      "female": 54
     },
     "Mouth/Urgh": {
-      "male": 14
+      "male": 12
     },
     "Mouth/Wanna Play A Game": {
-      "female": 4,
+      "female": 2,
       "male": 1
     },
     "Mouth/Wise": {
-      "male": 72
+      "male": 44
     },
     "Mouth/Wizard Beard": {
-      "male": 82
+      "male": 61
     }
   },
   "misplacements": [

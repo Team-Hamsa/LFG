@@ -27,10 +27,10 @@ def _attrs(**kw):
 
 def test_count_affinities_groups_by_type_value_and_body():
     rows = [
-        ("female", _attrs(Body="Curved", Clothing="Summer Dress")),
-        ("female", _attrs(Body="Curved 2", Clothing="Summer Dress")),
-        ("male", _attrs(Body="Straight", Clothing="Hoodie")),
-        ("female", _attrs(Body="Curved", Clothing="Hoodie")),
+        (1, "female", _attrs(Body="Curved", Clothing="Summer Dress")),
+        (2, "female", _attrs(Body="Curved 2", Clothing="Summer Dress")),
+        (3, "male", _attrs(Body="Straight", Clothing="Hoodie")),
+        (4, "female", _attrs(Body="Curved", Clothing="Hoodie")),
     ]
     counts = affinity_audit.count_affinities(rows)
     assert counts[("Clothing", "Summer Dress")] == Counter({"female": 2})
@@ -38,9 +38,46 @@ def test_count_affinities_groups_by_type_value_and_body():
 
 
 def test_count_affinities_derives_body_when_column_empty():
-    rows = [(None, _attrs(Body="Ape Strong", Eyes="Hypno"))]
+    rows = [(None, None, _attrs(Body="Ape Strong", Eyes="Hypno"))]
     counts = affinity_audit.count_affinities(rows)
     assert counts[("Eyes", "Hypno")] == Counter({"ape": 1})
+
+
+def test_count_affinities_dedupes_duplicate_editions():
+    # Same edition (nft_number=1) minted twice on chain (remint/trait-swap
+    # history) with the identical (value, body) pair — must count once, not
+    # twice, per Greptile P1: onchain_nfts is keyed by nft_id so duplicate
+    # tokens for one edition would otherwise inflate the count.
+    rows = [
+        (1, "female", _attrs(Body="Curved", Clothing="Summer Dress")),
+        (1, "female", _attrs(Body="Curved", Clothing="Summer Dress")),
+    ]
+    counts = affinity_audit.count_affinities(rows)
+    assert counts[("Clothing", "Summer Dress")] == Counter({"female": 1})
+
+
+def test_count_affinities_edition_swap_history_counts_each_value():
+    # Same edition, but the Hat value differs across its two on-chain tokens
+    # (a real trait-swap) — both values are genuine historical evidence and
+    # must each be counted once for that edition.
+    rows = [
+        (1, "female", _attrs(Hat="Wizard Hat")),
+        (1, "female", _attrs(Hat="Crown")),
+    ]
+    counts = affinity_audit.count_affinities(rows)
+    assert counts[("Hat", "Wizard Hat")] == Counter({"female": 1})
+    assert counts[("Hat", "Crown")] == Counter({"female": 1})
+
+
+def test_count_affinities_null_nft_number_skips_dedupe():
+    # NULL nft_number rows fall back to row position as the uniqueness key,
+    # i.e. dedupe is skipped for them entirely (documented tradeoff).
+    rows = [
+        (None, "female", _attrs(Clothing="Summer Dress")),
+        (None, "female", _attrs(Clothing="Summer Dress")),
+    ]
+    counts = affinity_audit.count_affinities(rows)
+    assert counts[("Clothing", "Summer Dress")] == Counter({"female": 2})
 
 
 def test_classify_labels():
@@ -73,6 +110,16 @@ def test_cross_check_flags_never_minted_dir_values_and_missing_files():
     assert ("skeleton", "Clothing", "None") not in misplacements  # None exempt
 
 
+def test_cross_check_coverage_gaps_skip_structural_none():
+    # A ("Eyes", "None") count with no None file on that body must not
+    # produce a coverage gap — None is a structural empty-slot marker, not a
+    # real value that could be "missing from the dir" (CodeRabbit Major).
+    counts = {("Eyes", "None"): Counter({"ape": 3})}
+    dir_tree = {"ape": {"Eyes": {"Hypno"}}}  # no None file present
+    _misplacements, gaps = affinity_audit.cross_check(counts, dir_tree)
+    assert gaps == []
+
+
 def test_render_affinity_yaml_lists_bodies_and_flags_low_confidence():
     counts = {
         ("Clothing", "Summer Dress"): Counter({"female": 4}),
@@ -81,6 +128,16 @@ def test_render_affinity_yaml_lists_bodies_and_flags_low_confidence():
     out = affinity_audit.render_affinity_yaml(counts)
     assert '"Summer Dress": [female]' in out
     assert "LOW CONFIDENCE" in out and "Rare Glint" in out
+
+
+def test_render_affinity_yaml_skips_shared_layers():
+    # Background/Back are shared (identical per-body copies) — per-body
+    # affinity for them is sampling noise, so they must not appear in the
+    # draft YAML at all (Greptile P1).
+    counts = {("Background", "Sunset"): Counter({"female": 4, "male": 4})}
+    out = affinity_audit.render_affinity_yaml(counts)
+    assert "Sunset" not in out
+    assert "Background" not in out
 
 
 def test_render_report_md_sections():
@@ -111,16 +168,22 @@ def test_run_end_to_end(tmp_path):
     db = tmp_path / "onchain.db"
     conn = sqlite3.connect(db)
     conn.execute(
-        "CREATE TABLE onchain_nfts (nft_id TEXT PRIMARY KEY, body TEXT,"
-        " attributes_json TEXT, is_burned INTEGER DEFAULT 0)"
+        "CREATE TABLE onchain_nfts (nft_id TEXT PRIMARY KEY, nft_number INTEGER,"
+        " body TEXT, attributes_json TEXT, is_burned INTEGER DEFAULT 0)"
     )
     conn.execute(
-        "INSERT INTO onchain_nfts VALUES ('A', 'female', ?, 0)",
+        "INSERT INTO onchain_nfts VALUES ('A', 1, 'female', ?, 0)",
         (_attrs(Body="Curved", Clothing="Summer Dress"),),
     )
     conn.execute(  # burned tokens still count — history is the point
-        "INSERT INTO onchain_nfts VALUES ('B', 'male', ?, 1)",
+        "INSERT INTO onchain_nfts VALUES ('B', 2, 'male', ?, 1)",
         (_attrs(Body="Straight", Clothing="Hoodie"),),
+    )
+    # Duplicate token for edition 1 (remint/trait-swap) with the identical
+    # (value, body) pair — must not inflate the count (Greptile P1).
+    conn.execute(
+        "INSERT INTO onchain_nfts VALUES ('A2', 1, 'female', ?, 0)",
+        (_attrs(Body="Curved", Clothing="Summer Dress"),),
     )
     conn.commit()
     conn.close()
@@ -140,3 +203,31 @@ def test_run_end_to_end(tmp_path):
     assert result["values"] == 2
     assert ("male", "Clothing", "Hoodie") in result["coverage_gaps"]
     assert not any(t == "Body" for _b, t, _v in result["misplacements"])
+
+    with open(tmp_path / "reports" / "body_affinity.json") as f:
+        data = json.load(f)
+    # Deduped: edition 1's duplicate token contributes the pair once, not twice.
+    assert data["counts"]["Clothing/Summer Dress"] == {"female": 1}
+
+
+def test_run_raises_systemexit_on_empty_layers_dir(tmp_path):
+    import sqlite3
+
+    db = tmp_path / "onchain.db"
+    conn = sqlite3.connect(db)
+    conn.execute(
+        "CREATE TABLE onchain_nfts (nft_id TEXT PRIMARY KEY, nft_number INTEGER,"
+        " body TEXT, attributes_json TEXT, is_burned INTEGER DEFAULT 0)"
+    )
+    conn.commit()
+    conn.close()
+    layers = tmp_path / "layers"
+    layers.mkdir()  # exists, but contains no trait files at all
+
+    from scripts.audit_body_affinity import run
+
+    try:
+        run(str(db), str(layers), str(tmp_path / "reports"))
+        assert False, "expected SystemExit"
+    except SystemExit as exc:
+        assert "no trait files" in str(exc)
