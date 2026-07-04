@@ -63,9 +63,11 @@ def test_cross_check_flags_never_minted_dir_values_and_missing_files():
         "female": {"Clothing": {"Summer Dress"}},
         "male": {"Clothing": {"Summer Dress"}},  # present but never minted on male
         "ape": {"Clothing": set()},
-        "skeleton": {"Clothing": set()},
+        # None.png placeholder never minted on skeleton — structural, exempt
+        "skeleton": {"Clothing": {"None"}},
     }
     misplacements, gaps = affinity_audit.cross_check(counts, dir_tree)
     assert ("male", "Clothing", "Summer Dress") in misplacements
     assert ("male", "Clothing", "Retired Coat") in gaps  # minted on male, no file
     assert ("female", "Clothing", "Summer Dress") not in misplacements
+    assert ("skeleton", "Clothing", "None") not in misplacements  # None exempt
