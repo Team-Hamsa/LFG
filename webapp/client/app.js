@@ -180,13 +180,17 @@ const numberFmt = new Intl.NumberFormat();
 // previous/next period relative to `anchor` (or today when anchor is null).
 function stepAnchor(period, anchor, dir) {
   const base = anchor ? new Date(`${anchor}T00:00:00Z`) : new Date();
-  const d = new Date(Date.UTC(base.getUTCFullYear(), base.getUTCMonth(), base.getUTCDate()));
+  let d;
   if (period === 'week') {
+    d = new Date(Date.UTC(base.getUTCFullYear(), base.getUTCMonth(), base.getUTCDate()));
     d.setUTCDate(d.getUTCDate() + dir * 7);
   } else if (period === 'month') {
-    d.setUTCMonth(d.getUTCMonth() + dir);
+    const y = base.getUTCFullYear();
+    const m = base.getUTCMonth();
+    d = new Date(Date.UTC(y, m + dir, 1));
   } else if (period === 'year') {
-    d.setUTCFullYear(d.getUTCFullYear() + dir);
+    const y = base.getUTCFullYear();
+    d = new Date(Date.UTC(y + dir, 0, 1));
   }
   return d.toISOString().slice(0, 10);
 }
