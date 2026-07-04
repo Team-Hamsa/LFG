@@ -83,9 +83,11 @@ def _rewrite_seasons(
         changed = True
 
     if changed and not dry_run:
-        with open(manifest_path, "w") as f:
+        tmp_path = manifest_path + ".part"
+        with open(tmp_path, "w") as f:
             json.dump(manifest, f, indent=1, sort_keys=True)
             f.write("\n")
+        os.replace(tmp_path, manifest_path)
 
     return conflicts
 
@@ -145,16 +147,17 @@ def main() -> None:
     p.add_argument("--trait-types", nargs="+", default=["Background", "Back"])
     p.add_argument(
         "--seasons-manifest",
-        default="layers/seasons.json",
-        help="season manifest to rewrite moved-value keys in (default: layers/seasons.json)",
+        default=None,
+        help="season manifest to rewrite moved-value keys in (default: <layers-dir>/seasons.json)",
     )
     p.add_argument("--execute", action="store_true", help="default is dry-run")
     args = p.parse_args()
+    seasons_manifest = args.seasons_manifest or os.path.join(args.layers_dir, "seasons.json")
     result = migrate(
         args.layers_dir,
         args.trait_types,
         dry_run=not args.execute,
-        seasons_manifest=args.seasons_manifest,
+        seasons_manifest=seasons_manifest,
     )
     for t, v in result["moved"]:
         print(f"{'would move' if not args.execute else 'moved'}: {t}/{v}")
