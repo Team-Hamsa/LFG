@@ -172,18 +172,19 @@ def _schedule(
 
 async def _require_body_affinity(char_body: str, slot: str, value: str) -> None:
     """Raise EconomyError unless (slot, value) can legally render on
-    char_body: trait_config's affinity allows it AND a layer actually
-    resolves (own body dir, or a matrix-permitted foreign dir per
-    swap_compose.resolve_layer). "None" is always legal — it's the
-    real-but-file-less asset for an empty slot, same convention
-    swap_compose._canonical uses when filtering attributes before compose."""
+    char_body. Spec §5: economy ops gate on the SAME check as the swap path —
+    allowed = own-dir ∪ (matrix-permitted foreign ∩ source-body affinity),
+    which is exactly swap_compose.resolve_layer (source-body affinity is
+    enforced inside its foreign branch; do NOT add a target-body
+    value_allowed term here — that would reject placements the swap path
+    legally produces). "None" is always legal — it's the real-but-file-less
+    asset for an empty slot, same convention swap_compose._canonical uses
+    when filtering attributes before compose."""
     if value == "None":
         return
     cfg = trait_config.get_config()
     store = layer_store.get_layer_store()
-    if not cfg.value_allowed(char_body, slot, value) or not await swap_compose.resolve_layer(
-        store, cfg, char_body, slot, value
-    ):
+    if await swap_compose.resolve_layer(store, cfg, char_body, slot, value) is None:
         raise EconomyError(f"'{value}' does not fit a {char_body} body")
 
 

@@ -582,15 +582,27 @@ layers:
   - {name: Eyes, z: 70}
   - {name: Head, z: 80}
   - {name: Accessory, z: 90}
+swap_matrix:
+  pairs:
+    - {bodies: [ape, skeleton], layers: [Head]}
 affinity:
   Clothing:
     "Summer Dress": [female]
+  Head:
+    "Spikey Black": [skeleton]
 """
 
 
 def _mk_body_gate_layers(tmp_path):
-    for body, values in {"male": ["Hoodie"], "female": ["Hoodie", "Summer Dress"]}.items():
-        d = tmp_path / "layers" / body / "Clothing"
+    for body, trait_type, values in [
+        ("male", "Clothing", ["Hoodie"]),
+        ("female", "Clothing", ["Hoodie", "Summer Dress"]),
+        # Spikey Black exists ONLY in the skeleton dir; the ape+skeleton
+        # matrix pair (Head) makes it resolvable on an ape through the
+        # foreign branch of swap_compose.resolve_layer.
+        ("skeleton", "Head", ["Spikey Black"]),
+    ]:
+        d = tmp_path / "layers" / body / trait_type
         d.mkdir(parents=True, exist_ok=True)
         for v in values:
             (d / f"{v}.png").write_bytes(b"x")
@@ -614,7 +626,8 @@ def body_gate_store(tmp_path):
 
 def test_start_equip_rejects_incompatible_body_value(monkeypatch, body_gate_store):
     """A female-only Clothing value ('Summer Dress') cannot be equipped onto
-    a male character, even though the Closet holds the asset."""
+    a male character, even though the Closet holds the asset: resolve_layer
+    finds no male file and male<->female Clothing isn't matrix-permitted."""
     conn = _seed_conn()  # owner rOwner holds a male character (edition 3537, nft_id "A")
     economy_store.set_closet_contents(
         conn, "rOwner", [("Head", "Halo", 2), ("Clothing", "Summer Dress", 1)], [42]
@@ -652,6 +665,55 @@ def test_start_equip_compatible_value_still_starts(monkeypatch, body_gate_store)
 
     async def go():
         ws = await economy_api.start_equip("123", "rOwner", "A", "Clothing", "Hoodie")
+        await asyncio.sleep(0)
+        return ws
+
+    ws = asyncio.get_event_loop().run_until_complete(go())
+    assert ws.kind == "equip"
+    assert captured.get("ran") is True
+
+
+def test_start_equip_accepts_matrix_permitted_foreign_value(monkeypatch, body_gate_store):
+    """Spec §5 parity with the swap path: a value with foreign-only affinity
+    ('Spikey Black' Head, skeleton-affinity, file only in the skeleton dir)
+    that IS matrix-permitted (ape+skeleton pair covers Head) must be
+    ACCEPTED on an ape character — exactly the placement a cross-body swap
+    legally produces. A target-body value_allowed() term would wrongly
+    reject this."""
+    conn = nft_index.init_db(":memory:")
+    economy_store.init_economy_schema(conn)
+    nft_index.upsert(
+        conn,
+        OnchainNft(
+            nft_id="APE1",
+            nft_number=77,
+            owner="rOwner",
+            is_burned=False,
+            mutable=True,
+            uri_hex="",
+            body="ape",
+            attributes=[{"trait_type": "Head", "value": "None"}],
+            image="",
+            ledger_index=1,
+        ),
+    )
+    economy_store.set_closet_contents(conn, "rOwner", [("Head", "Spikey Black", 1)], [])
+    monkeypatch.setattr(economy_api, "open_conn", lambda: conn)
+    monkeypatch.setattr(economy_api.layer_store, "get_layer_store", lambda: body_gate_store)
+
+    captured = {}
+
+    async def fake_run_equip(session, deps):
+        captured["ran"] = True
+        session.state = economy_flow.DONE
+
+    monkeypatch.setattr(economy_flow, "run_equip", fake_run_equip)
+    from scripts import _economy_deps
+
+    monkeypatch.setattr(_economy_deps, "build_economy_deps", lambda c: object())
+
+    async def go():
+        ws = await economy_api.start_equip("123", "rOwner", "APE1", "Head", "Spikey Black")
         await asyncio.sleep(0)
         return ws
 

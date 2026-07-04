@@ -25,7 +25,16 @@ def _canonical(attributes: list[dict[str, Any]]) -> list[dict[str, Any]]:
 
 async def resolve_layer(store: Any, cfg: Any, body: str, trait_type: str, value: str) -> str | None:
     """Own dir first; else any matrix-permitted foreign dir (cross-body swaps
-    render the source body's asset). Affinity narrower than the matrix wins."""
+    render the source body's asset). Affinity narrower than the matrix wins.
+
+    NOTE: the foreign-body loop is FIRST-MATCH in list_bodies() order
+    (alphabetical). That's only deterministic-by-construction because of a
+    config invariant: universal-layer art (Accessory/Back) is body-independent,
+    and every non-universal cross-body pair currently permits exactly ONE
+    foreign body per (body, layer) — so at most one foreign dir can matter.
+    If PR-5's layers/shared/ move (or a future swap_matrix change) breaks
+    that invariant, first-match silently picks the alphabetically-first
+    body's art; revisit the ordering here before relying on it."""
     path: str | None = await store.resolve(body, trait_type, value)
     if path:
         return path
