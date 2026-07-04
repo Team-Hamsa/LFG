@@ -52,3 +52,20 @@ def test_classify_labels():
         == "universal"
     )
     assert affinity_audit.classify(Counter({"ape": 3, "skeleton": 1})) == "bodies:ape+skeleton"
+
+
+def test_cross_check_flags_never_minted_dir_values_and_missing_files():
+    counts = {
+        ("Clothing", "Summer Dress"): Counter({"female": 4}),
+        ("Clothing", "Retired Coat"): Counter({"male": 2}),
+    }
+    dir_tree = {
+        "female": {"Clothing": {"Summer Dress"}},
+        "male": {"Clothing": {"Summer Dress"}},  # present but never minted on male
+        "ape": {"Clothing": set()},
+        "skeleton": {"Clothing": set()},
+    }
+    misplacements, gaps = affinity_audit.cross_check(counts, dir_tree)
+    assert ("male", "Clothing", "Summer Dress") in misplacements
+    assert ("male", "Clothing", "Retired Coat") in gaps  # minted on male, no file
+    assert ("female", "Clothing", "Summer Dress") not in misplacements

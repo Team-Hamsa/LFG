@@ -46,3 +46,27 @@ def classify(counts: Counter) -> str:
     if bodies == set(BODIES):
         return "universal"
     return "bodies:" + "+".join(sorted(bodies))
+
+
+def cross_check(
+    counts: dict[tuple[str, str], Counter],
+    dir_tree: dict[str, dict[str, set[str]]],
+) -> tuple[list[tuple[str, str, str]], list[tuple[str, str, str]]]:
+    """misplacements: value present in a body dir but never minted on that
+    body (candidate misplacement OR intentionally-new — human decides).
+    coverage_gaps: value minted on a body historically but absent from its
+    dir today."""
+    misplacements = []
+    for body, types in dir_tree.items():
+        for trait_type, values in types.items():
+            for value in values:
+                if value == "None":
+                    continue
+                if counts.get((trait_type, value), Counter()).get(body, 0) == 0:
+                    misplacements.append((body, trait_type, value))
+    coverage_gaps = []
+    for (trait_type, value), body_counts in counts.items():
+        for body, n in body_counts.items():
+            if n > 0 and value not in dir_tree.get(body, {}).get(trait_type, set()):
+                coverage_gaps.append((body, trait_type, value))
+    return sorted(misplacements), sorted(coverage_gaps)
