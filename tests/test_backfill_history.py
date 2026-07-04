@@ -267,3 +267,21 @@ def test_rederive_filters_foreign_collection(tmp_path):
     assert counts["nft_events"] == 1
     rows = conn.execute("SELECT event, nft_id FROM nft_events").fetchall()
     assert [(r["event"], r["nft_id"]) for r in rows] == [("mint", fx.NFT_A)]
+
+
+def test_issuers_for_network_cross_env():
+    """--network mainnet under a testnet env must resolve mainnet issuers
+    (regression: mainnet rederive under testnet .env filtered out all events)."""
+    import importlib
+
+    dh = importlib.import_module("scripts.derive_history_events")
+    from lfg_core import config
+
+    assert config.XRPL_NETWORK == "testnet"  # env-guard preamble pins this
+    nft, brix = dh.issuers_for_network("mainnet")
+    assert nft == "rLfgoMintj3KBcs4s2XKtquvDwEte2kYfJ"
+    assert brix == "rLfgoBriX5ZaMP32mtc7RUZJcjnisKh2Px"
+    assert dh.issuers_for_network("testnet") == (
+        config.SWAP_ISSUER_ADDRESS,
+        config.SWAP_OFFER_ISSUER,
+    )
