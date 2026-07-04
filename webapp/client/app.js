@@ -202,6 +202,9 @@ function renderLbBoards() {
       btn.className = 'lb-chip';
       btn.setAttribute('role', 'tab');
       btn.dataset.board = board;
+      const active = board === lbState.board;
+      btn.classList.toggle('active', active);
+      btn.setAttribute('aria-selected', String(active));
       btn.textContent = label;
       return btn;
     })

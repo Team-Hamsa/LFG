@@ -761,7 +761,7 @@ button.back:hover { color: var(--text); border: none; }
 .lb-title { margin: 0 0 10px; font-size: 1rem; color: var(--text); }
 .lb-chips { display: flex; flex-wrap: wrap; gap: .4rem; padding-bottom: 4px; }
 .lb-boards { margin-top: 6px; }
-.lb-cat { font-size: .85rem; font-weight: 700; }
+.lb-chip.lb-cat { font-size: .85rem; font-weight: 700; }
 .lb-chip {
   flex: 0 0 auto; margin: 0; padding: 6px 12px;
   border-radius: 99px; border: 1px solid var(--line);
