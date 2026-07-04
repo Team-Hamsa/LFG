@@ -203,3 +203,40 @@ def test_compose_nose_stays_below_head_with_effect_eyes(tmp_path, monkeypatch):
     assert names.index("Nose.png") < names.index("Laser Eyes.png")
     # Byte-identical to the pre-config-sort output for this combo.
     assert names == ["Ape Gold.png", "Nose.png", "Cap.png", "Laser Eyes.png"]
+
+
+def test_compose_nose_below_effect_without_head_accessory(tmp_path, monkeypatch):
+    """Regression: when an ape has no Head and no Accessory but has TOP_TRAITS
+    Eyes (e.g. Laser Eyes), the fallback path of _nose_index must detect and
+    stop before the TOP_TRAIT, ensuring nose stays below the effect layer."""
+    from lfg_core import swap_compose, trait_config
+
+    captured = {}
+
+    def fake_run(files, output_path, is_video):
+        captured["files"] = list(files)
+        with open(output_path, "wb") as f:
+            f.write(b"x")
+
+    monkeypatch.setattr(swap_compose, "_run_ffmpeg", fake_run)
+
+    store, ape = _ape_store_with_assets(tmp_path)
+    for trait_type, value in [("Body", "Ape Gold"), ("Eyes", "Laser Eyes")]:
+        d = ape / trait_type
+        d.mkdir(exist_ok=True)
+        Image.new("RGBA", (4, 4), (0, 0, 0, 255)).save(d / f"{value}.png")
+
+    attrs = [
+        {"trait_type": "Body", "value": "Ape Gold"},
+        {"trait_type": "Eyes", "value": "Laser Eyes"},
+    ]
+    trait_config.reset_config()
+    try:
+        _run(swap_compose.compose_nft(attrs, "ape", store, "out", out_dir=str(tmp_path / "gen")))
+    finally:
+        trait_config.reset_config()
+
+    names = [os.path.basename(f) for f in captured["files"]]
+    # Nose must be below the floated effect Eyes even without Head/Accessory.
+    assert names.index("Nose.png") < names.index("Laser Eyes.png")
+    assert names == ["Ape Gold.png", "Nose.png", "Laser Eyes.png"]

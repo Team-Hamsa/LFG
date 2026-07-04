@@ -94,7 +94,10 @@ def _nose_index(layers: list[tuple[str, str, str]]) -> int:
         if trait_type == "Eyes" and {"trait_type": trait_type, "value": value} not in TOP_TRAITS:
             return i + 1
     eyes_rank = swap_meta.TRAIT_ORDER.index("Eyes")
-    for i, (trait_type, _v, _p) in enumerate(layers):
+    for i, (trait_type, value, _p) in enumerate(layers):
+        # Stop before any TOP_TRAIT to keep nose below effect layers (e.g. Laser Eyes).
+        if {"trait_type": trait_type, "value": value} in TOP_TRAITS:
+            return i
         if (
             trait_type in swap_meta.TRAIT_ORDER
             and swap_meta.TRAIT_ORDER.index(trait_type) > eyes_rank
