@@ -1,5 +1,4 @@
 # Tests for lfg_core/history_store.py
-import asyncio
 import os
 import sys
 
@@ -15,7 +14,6 @@ os.environ.setdefault("TOKEN_CURRENCY_HEX", "4C46474F000000000000000000000000000
 os.environ.setdefault("XRPL_NETWORK", "testnet")
 os.environ.setdefault("BUNNY_PULL_ZONE", "nft.pullzone.example")
 
-import sqlite3
 
 from lfg_core import history_store
 
@@ -26,15 +24,15 @@ def _conn(tmp_path):
 
 def test_insert_tx_idempotent(tmp_path):
     conn = _conn(tmp_path)
-    kw = dict(
-        tx_hash="AB" * 32,
-        ledger_index=5,
-        close_time=1700000000,
-        tx_type="Payment",
-        account="rSender",
-        source_tag=None,
-        raw_json="{}",
-    )
+    kw = {
+        "tx_hash": "AB" * 32,
+        "ledger_index": 5,
+        "close_time": 1700000000,
+        "tx_type": "Payment",
+        "account": "rSender",
+        "source_tag": None,
+        "raw_json": "{}",
+    }
     assert history_store.insert_tx(conn, **kw) is True
     assert history_store.insert_tx(conn, **kw) is False
     n = conn.execute("SELECT COUNT(*) FROM xrpl_txs").fetchone()[0]
