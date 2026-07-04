@@ -45,6 +45,18 @@ All surfaces run side by side against the shared `lfg_service` backend.
 
 Everything below was designed, built, and merged during the Make Waves sprint. PR numbers link the work.
 
+### Lines of Code
+
+<!-- hackathon-loc:start -->
+*Hand-written code merged since the hackathon baseline (`e296308`, 2026-06-19 — last commit before June 21), measured by `git diff --numstat`. Counts `.py`/`.js`/`.css`/`.html` only; docs, markdown, data files (CSV/JSON manifests), dependency lists, and the legacy/backup trees are excluded. Updated automatically on every push to `main`.*
+
+| Category | Lines added | Lines removed | Net |
+|---|---:|---:|---:|
+| Application code | +15,830 | −2,434 | 13,396 |
+| Tests | +13,048 | −1 | 13,047 |
+| **Total** | **+28,878** | **−2,435** | **26,443** |
+<!-- hackathon-loc:end -->
+
 ### Shared-Services Spine ([#43](../../issues/43) / [#53](../../issues/53)) — #76, #78–#81
 One `lfg_service` backend now serves every surface through a shared Surface SDK: the REST/WS backend (Plan 1), the `LFGServiceClient` SDK (Plan 2), the Discord bot migration (Plan 3), and the new Telegram surface (Plan 4).
 

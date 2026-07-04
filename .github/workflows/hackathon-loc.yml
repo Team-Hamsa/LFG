@@ -1,0 +1,36 @@
+name: Hackathon LoC stats
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+concurrency:
+  group: hackathon-loc
+  cancel-in-progress: true
+
+jobs:
+  update-loc:
+    runs-on: ubuntu-latest
+    # Skip the run triggered by this workflow's own README commit
+    if: github.actor != 'github-actions[bot]'
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Update README LoC block
+        run: python3 scripts/hackathon_loc.py
+
+      - name: Commit if changed
+        run: |
+          if ! git diff --quiet README.md; then
+            git config user.name "github-actions[bot]"
+            git config user.email "github-actions[bot]@users.noreply.github.com"
+            git add README.md
+            git commit -m "docs(README): refresh hackathon LoC stats [skip ci]"
+            git push
+          fi
