@@ -23,6 +23,14 @@ from lfg_core import history_store
 sb = importlib.import_module("scripts.snapshot_balances")
 
 
+def _run(coro):
+    loop = asyncio.new_event_loop()
+    try:
+        return loop.run_until_complete(coro)
+    finally:
+        loop.close()
+
+
 def test_collect_and_write(tmp_path):
     async def request_fn(req):
         if req["method"] == "account_lines" and req["account"] == "rBrix":
@@ -31,7 +39,7 @@ def test_collect_and_write(tmp_path):
             return {"lines": [{"account": "rA", "balance": "-2.5"}]}
         raise AssertionError(req)
 
-    bal = asyncio.run(sb.collect_balances(request_fn, "rBrix", "rAmm"))
+    bal = _run(sb.collect_balances(request_fn, "rBrix", "rAmm"))
     assert bal == {"rA": {"brix": 10.0, "lp": 2.5}}
 
     conn = history_store.init_history_db(str(tmp_path / "h.db"))

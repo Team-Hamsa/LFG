@@ -22,6 +22,14 @@ from tests.fixtures import history_txs as fx
 bh = importlib.import_module("scripts.backfill_history")
 
 
+def _run(coro):
+    loop = asyncio.new_event_loop()
+    try:
+        return loop.run_until_complete(coro)
+    finally:
+        loop.close()
+
+
 def _entry(tx, hash_, ledger=100):
     t = {k: v for k, v in tx.items() if k != "meta"}
     return {"tx": t, "meta": tx["meta"], "hash": hash_, "ledger_index": ledger, "validated": True}
@@ -62,7 +70,7 @@ def test_backfill_pages_and_resumes(tmp_path):
             ([_entry(fx.BURN, "02" * 32)], None),
         ]
     )
-    n = asyncio.run(bh.backfill_account_tx(conn, fn, fx.ISSUER, "issuer_tx"))
+    n = _run(bh.backfill_account_tx(conn, fn, fx.ISSUER, "issuer_tx"))
     assert n == 2
     assert fn.calls[0]["forward"] is True
     assert fn.calls[1]["marker"] == {"ledger": 5, "seq": 0}
@@ -72,7 +80,7 @@ def test_backfill_pages_and_resumes(tmp_path):
     # resume: a stored cursor is sent on the first request
     history_store.set_cursor(conn, "issuer_tx", '{"ledger": 9, "seq": 1}')
     fn2 = _fake_request_fn([([], None)])
-    asyncio.run(bh.backfill_account_tx(conn, fn2, fx.ISSUER, "issuer_tx"))
+    _run(bh.backfill_account_tx(conn, fn2, fx.ISSUER, "issuer_tx"))
     assert fn2.calls[0]["marker"] == {"ledger": 9, "seq": 1}
 
 
@@ -86,7 +94,7 @@ def test_backfill_marker_persisted_midway(tmp_path):
         return {"transactions": [_entry(fx.MINT, "03" * 32)], "marker": {"ledger": 7}}
 
     try:
-        asyncio.run(bh.backfill_account_tx(conn, request_fn, fx.ISSUER, "issuer_tx"))
+        _run(bh.backfill_account_tx(conn, request_fn, fx.ISSUER, "issuer_tx"))
     except RuntimeError:
         pass
     assert history_store.get_cursor(conn, "issuer_tx") == '{"ledger": 7}'
