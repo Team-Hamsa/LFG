@@ -75,9 +75,7 @@ def test_load_config_rejects_unknown_body_in_affinity(tmp_path):
 
 
 def test_load_config_rejects_pair_with_both_layer_forms(tmp_path):
-    bad = GOOD.replace(
-        "layers_except: [Clothing]}", "layers_except: [Clothing], layers: [Eyes]}"
-    )
+    bad = GOOD.replace("layers_except: [Clothing]}", "layers_except: [Clothing], layers: [Eyes]}")
     with pytest.raises(trait_config.TraitConfigError, match="layers or layers_except"):
         trait_config.load_config(_write(tmp_path, bad))
 
@@ -103,8 +101,15 @@ def _cfg(tmp_path):
 
 def test_layer_order_sorted_by_z(tmp_path):
     assert _cfg(tmp_path).layer_order() == [
-        "Background", "Back", "Body", "Clothing", "Mouth",
-        "Eyebrows", "Eyes", "Head", "Accessory",
+        "Background",
+        "Back",
+        "Body",
+        "Clothing",
+        "Mouth",
+        "Eyebrows",
+        "Eyes",
+        "Head",
+        "Accessory",
     ]
 
 
@@ -122,7 +127,9 @@ def test_sort_attributes_moves_override_on_top(tmp_path):
         {"trait_type": "Background", "value": "Sunset"},
     ]
     assert [a["value"] for a in cfg.sort_attributes(attrs)] == [
-        "Sunset", "Straight", "Wavy",
+        "Sunset",
+        "Straight",
+        "Wavy",
     ]
 
 
@@ -137,13 +144,13 @@ def test_affinity_queries(tmp_path):
 
 def test_swap_allowed_matrix(tmp_path):
     cfg = _cfg(tmp_path)
-    assert cfg.swap_allowed("male", "male", "Clothing")          # same body
-    assert cfg.swap_allowed("ape", "female", "Accessory")        # universal layer
-    assert cfg.swap_allowed("ape", "skeleton", "Head")           # pair layers
-    assert not cfg.swap_allowed("ape", "skeleton", "Eyes")       # not in pair layers
-    assert cfg.swap_allowed("male", "female", "Eyes")            # layers_except
-    assert not cfg.swap_allowed("male", "female", "Clothing")    # excepted
-    assert not cfg.swap_allowed("ape", "male", "Head")           # no pair
+    assert cfg.swap_allowed("male", "male", "Clothing")  # same body
+    assert cfg.swap_allowed("ape", "female", "Accessory")  # universal layer
+    assert cfg.swap_allowed("ape", "skeleton", "Head")  # pair layers
+    assert not cfg.swap_allowed("ape", "skeleton", "Eyes")  # not in pair layers
+    assert cfg.swap_allowed("male", "female", "Eyes")  # layers_except
+    assert not cfg.swap_allowed("male", "female", "Clothing")  # excepted
+    assert not cfg.swap_allowed("ape", "male", "Head")  # no pair
 
 
 EXCL = GOOD.replace(
@@ -161,8 +168,8 @@ def test_conflicts_enforced_symmetrically(tmp_path):
     cfg = trait_config.load_config(_write(tmp_path, EXCL))
     laser = [{"trait_type": "Eyes", "value": "Laser"}]
     crown = [{"trait_type": "Head", "value": "Crown"}]
-    assert cfg.conflicts(laser, "Head", "Crown")        # authored direction
-    assert cfg.conflicts(crown, "Eyes", "Laser")        # symmetric direction
+    assert cfg.conflicts(laser, "Head", "Crown")  # authored direction
+    assert cfg.conflicts(crown, "Eyes", "Laser")  # symmetric direction
     assert not cfg.conflicts(laser, "Head", "Beanie Black")
     assert not cfg.conflicts([], "Head", "Crown")
 
@@ -199,9 +206,9 @@ def test_validate_against_store(tmp_path):
         # webapp tests later in full-suite order still rely on the legacy
         # asyncio.get_event_loop() auto-create, so restore a loop for them.
         asyncio.set_event_loop(asyncio.new_event_loop())
-    assert any("Ghost Coat" in e for e in errors)            # claimed, no file
-    assert any("Hypno" in w for w in warnings)               # file, no entry
-    assert any("Accessory" in w for w in warnings)           # layer-with-no-dir warning path
+    assert any("Ghost Coat" in e for e in errors)  # claimed, no file
+    assert any("Hypno" in w for w in warnings)  # file, no entry
+    assert any("Accessory" in w for w in warnings)  # layer-with-no-dir warning path
 
 
 def test_validate_cli_exit_codes(tmp_path, capsys):

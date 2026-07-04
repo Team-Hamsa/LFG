@@ -180,8 +180,7 @@ def load_config(path: str) -> TraitConfig:
         raise TraitConfigError("layers section is required")
 
     z_overrides = tuple(
-        ZOverride(o["trait_type"], o["value"], float(o["z"]))
-        for o in raw.get("z_overrides") or []
+        ZOverride(o["trait_type"], o["value"], float(o["z"])) for o in raw.get("z_overrides") or []
     )
     for o in z_overrides:
         if o.trait_type not in names:
@@ -207,9 +206,7 @@ def load_config(path: str) -> TraitConfig:
             SwapPair(
                 bodies=frozenset(p["bodies"]),
                 layers=frozenset(p["layers"]) if "layers" in p else None,
-                layers_except=(
-                    frozenset(p["layers_except"]) if "layers_except" in p else None
-                ),
+                layers_except=(frozenset(p["layers_except"]) if "layers_except" in p else None),
             )
         )
 
