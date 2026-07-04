@@ -109,7 +109,7 @@ def build_svg(base: int, app: int, tests: int) -> str:
         '<g clip-path="url(#pill)">',
     ]
     x = float(bar_x)
-    for (_, _, color), seg_w in zip(segs, widths):
+    for (_, _, color), seg_w in zip(segs, widths, strict=True):
         parts.append(
             f'<rect x="{x:.1f}" y="{bar_y}" width="{seg_w:.1f}" height="{bar_h}" fill="{color}"/>'
         )
@@ -118,7 +118,7 @@ def build_svg(base: int, app: int, tests: int) -> str:
     # legend: dot + name + value per segment
     lx = float(pad)
     ly = bar_y + bar_h + 28
-    for (name, value, color), seg_w in zip(segs, widths):
+    for name, value, color in segs:
         pct = 100 * value / total
         label = f"{name}  {fmt(value)} ({pct:.0f}%)"
         parts.append(f'<circle cx="{lx + 6:.1f}" cy="{ly - 4}" r="6" fill="{color}"/>')
