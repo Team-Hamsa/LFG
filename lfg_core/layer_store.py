@@ -92,6 +92,15 @@ class LocalLayerStore:
         return path if os.path.isfile(path) else None
 
 
+class CdnListingNotFound(Exception):
+    """Raised by _list_dir when the CDN reports 404 for a listed path. This
+    is the ONLY failure mode callers may treat as "empty directory" — a
+    body's own trait dir can legitimately 404 post shared-layers-migration
+    (its values moved to shared/), same as an unmigrated/empty shared/ tree.
+    Any other failure (timeout, 5xx, auth) is a real outage and must not be
+    caught here — it propagates as a bare Exception."""
+
+
 class CdnLayerStore:
     """BunnyCDN storage-backed layer tree with an on-disk download cache.
     Directory listings are cached in memory for the life of the instance."""
@@ -115,6 +124,8 @@ class CdnLayerStore:
         headers = {"AccessKey": config.BUNNY_CDN_ACCESS_KEY}
         async with aiohttp.ClientSession(timeout=LIST_TIMEOUT) as session:
             async with session.get(url, headers=headers) as resp:
+                if resp.status == 404:
+                    raise CdnListingNotFound(f"CDN listing not found for {rel_path or '/'}")
                 if resp.status != 200:
                     raise Exception(f"CDN listing failed ({resp.status}) for {rel_path or '/'}")
                 items = await resp.json()
@@ -122,12 +133,14 @@ class CdnLayerStore:
         self._listings[rel_path] = listing
         return listing
 
-    async def _list_shared_dir(self, rel_path: str) -> list[tuple[str, bool]]:
-        """Like _list_dir, but a missing shared/ tree (no migration yet, or
-        nothing shared for this trait type) is not an error — treat as empty."""
+    async def _list_dir_tolerant(self, rel_path: str) -> list[tuple[str, bool]]:
+        """Like _list_dir, but a missing directory (404 — no shared/
+        migration yet, nothing shared for this trait type, or a body's own
+        trait dir emptied by the shared-layers migration) is not an error —
+        treat as empty. Real failures (timeouts, 5xx, auth) still propagate."""
         try:
             return await self._list_dir(rel_path)
-        except Exception:
+        except CdnListingNotFound:
             return []
 
     async def list_bodies(self) -> list[str]:
@@ -136,14 +149,14 @@ class CdnLayerStore:
         )
 
     async def list_trait_types(self, body: str) -> list[str]:
-        types = {name for name, is_dir in await self._list_dir(body) if is_dir}
-        types |= {name for name, is_dir in await self._list_shared_dir(SHARED_DIR) if is_dir}
+        types = {name for name, is_dir in await self._list_dir_tolerant(body) if is_dir}
+        types |= {name for name, is_dir in await self._list_dir_tolerant(SHARED_DIR) if is_dir}
         return sorted(types)
 
     async def list_values(self, body: str, trait_type: str) -> list[str]:
         values: set[str] = set()
-        for dirname, lister in ((body, self._list_dir), (SHARED_DIR, self._list_shared_dir)):
-            for name, is_dir in await lister(f"{dirname}/{trait_type}"):
+        for dirname in (body, SHARED_DIR):
+            for name, is_dir in await self._list_dir_tolerant(f"{dirname}/{trait_type}"):
                 if is_dir:
                     continue
                 stem, ext = os.path.splitext(name)
@@ -154,8 +167,8 @@ class CdnLayerStore:
     async def resolve(self, body: str, trait_type: str, value: str) -> str | None:
         """Download (or reuse cached) layer file, checking the body dir then
         shared/; returns local path or None if absent from both."""
-        for dirname, lister in ((body, self._list_dir), (SHARED_DIR, self._list_shared_dir)):
-            listing = await lister(f"{dirname}/{trait_type}")
+        for dirname in (body, SHARED_DIR):
+            listing = await self._list_dir_tolerant(f"{dirname}/{trait_type}")
             names = {name for name, is_dir in listing if not is_dir}
             for ext in LAYER_EXTENSIONS:
                 filename = value + ext

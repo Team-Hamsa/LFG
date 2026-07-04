@@ -17,8 +17,10 @@ os.environ.setdefault("BUNNY_PULL_ZONE", "nft.pullzone.example")
 
 import asyncio  # noqa: E402
 
+import pytest  # noqa: E402
+
 from lfg_core import swap_compose, trait_config  # noqa: E402
-from lfg_core.layer_store import CdnLayerStore, LocalLayerStore  # noqa: E402
+from lfg_core.layer_store import CdnLayerStore, CdnListingNotFound, LocalLayerStore  # noqa: E402
 
 # Minimal trait config mirroring tests/test_cross_body_resolve.py: ape<->skeleton
 # may swap Head/Clothing; Eyes is NOT matrix-permitted between them.
@@ -140,7 +142,7 @@ def test_cdn_shared_union(monkeypatch):
             "shared/Background": [("Sunset.png", False)],
         }
         if rel_path not in listings:
-            raise Exception(f"CDN listing failed (404) for {rel_path or '/'}")
+            raise CdnListingNotFound(f"CDN listing not found for {rel_path or '/'}")
         return listings[rel_path]
 
     async def fake_download(rel_path):
@@ -176,7 +178,7 @@ def test_cdn_shared_dir_missing_is_noop(monkeypatch):
             "male/Background": [("Exclusive.png", False)],
         }
         if rel_path not in listings:
-            raise Exception(f"CDN listing failed (404) for {rel_path or '/'}")
+            raise CdnListingNotFound(f"CDN listing not found for {rel_path or '/'}")
         return listings[rel_path]
 
     async def fake_download(rel_path):
@@ -193,5 +195,82 @@ def test_cdn_shared_dir_missing_is_noop(monkeypatch):
         assert asyncio.run(store.resolve("male", "Background", "Exclusive")) == (
             "/cache/male/Background/Exclusive.png"
         )
+    finally:
+        asyncio.set_event_loop(asyncio.new_event_loop())
+
+
+def test_cdn_body_dir_missing_falls_through_to_shared(monkeypatch):
+    """Post shared-layers-migration, a body's own trait dir can 404 (its
+    values moved to shared/ entirely). That's the same "not found" shape as
+    a missing shared/ tree, so the body leg must tolerate it too and fall
+    through to shared/ rather than raising."""
+    store = CdnLayerStore()
+
+    async def fake_list_dir(rel_path):
+        listings = {
+            "": [("male", True), ("shared", True)],
+            "male": [("Background", True)],
+            "shared": [("Background", True)],
+            # male/Background missing entirely: all values moved to shared/.
+            "shared/Background": [("Sunset.png", False)],
+        }
+        if rel_path not in listings:
+            raise CdnListingNotFound(f"CDN listing not found for {rel_path or '/'}")
+        return listings[rel_path]
+
+    async def fake_download(rel_path):
+        return f"/cache/{rel_path}"
+
+    monkeypatch.setattr(store, "_list_dir", fake_list_dir)
+    monkeypatch.setattr(store, "_download", fake_download)
+
+    try:
+        assert asyncio.run(store.list_values("male", "Background")) == ["Sunset"]
+        assert asyncio.run(store.resolve("male", "Background", "Sunset")) == (
+            "/cache/shared/Background/Sunset.png"
+        )
+    finally:
+        asyncio.set_event_loop(asyncio.new_event_loop())
+
+
+def test_cdn_body_dir_real_error_still_raises(monkeypatch):
+    """A non-404 failure (timeout, 5xx, auth) on the body leg must NOT be
+    swallowed as "empty" — only CdnListingNotFound (404) is tolerated."""
+    store = CdnLayerStore()
+
+    async def fake_list_dir(rel_path):
+        if rel_path == "male/Background":
+            raise Exception("CDN listing failed (500) for male/Background")
+        raise CdnListingNotFound(f"CDN listing not found for {rel_path or '/'}")
+
+    monkeypatch.setattr(store, "_list_dir", fake_list_dir)
+
+    try:
+        with pytest.raises(Exception, match="500"):
+            asyncio.run(store.resolve("male", "Background", "Sunset"))
+    finally:
+        asyncio.set_event_loop(asyncio.new_event_loop())
+
+
+def test_cdn_shared_dir_real_error_still_raises(monkeypatch):
+    """A non-404 failure on the shared leg must also propagate — this is a
+    deliberate behavior change from the prior blanket `except Exception`
+    swallow, which silently dropped layers from renders on real outages."""
+    store = CdnLayerStore()
+
+    async def fake_list_dir(rel_path):
+        if rel_path == "male":
+            return [("Background", True)]
+        if rel_path == "male/Background":
+            return [("Exclusive.png", False)]
+        if rel_path == "shared/Background":
+            raise Exception("CDN listing failed (500) for shared/Background")
+        raise CdnListingNotFound(f"CDN listing not found for {rel_path or '/'}")
+
+    monkeypatch.setattr(store, "_list_dir", fake_list_dir)
+
+    try:
+        with pytest.raises(Exception, match="500"):
+            asyncio.run(store.resolve("male", "Background", "Sunset"))
     finally:
         asyncio.set_event_loop(asyncio.new_event_loop())
