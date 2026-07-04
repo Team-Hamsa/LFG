@@ -173,7 +173,40 @@ function showMintHome() {
 
 const STEPPED_PERIODS = ['week', 'month', 'year'];
 const NFT_BOARDS = ['nft_swaps', 'nft_rarity'];
-const lbState = { period: 'week', board: 'users_nfts', anchor: null };
+// Two-tier board selector: category tabs → sub-board chips. The sub-row is
+// rendered from this map so HTML and JS can't drift. Board keys match the
+// /api/leaderboard contract and are unchanged.
+const CATEGORIES = {
+  users: [
+    { board: 'users_nfts', label: 'Holders' },
+    { board: 'users_swaps', label: 'Swappers' },
+    { board: 'users_builds', label: 'Builders' },
+  ],
+  nfts: [
+    { board: 'nft_swaps', label: 'Swaps' },
+    { board: 'nft_rarity', label: 'Rarest' },
+  ],
+  brix: [
+    { board: 'brix_rich', label: 'Richlist' },
+    { board: 'brix_lp', label: 'LP' },
+    { board: 'brix_earned', label: 'Earned' },
+  ],
+};
+const lbState = { period: 'week', cat: 'users', board: 'users_nfts', anchor: null };
+
+function renderLbBoards() {
+  const row = el('lb-boards');
+  row.replaceChildren(
+    ...CATEGORIES[lbState.cat].map(({ board, label }) => {
+      const btn = document.createElement('button');
+      btn.className = 'lb-chip';
+      btn.setAttribute('role', 'tab');
+      btn.dataset.board = board;
+      btn.textContent = label;
+      return btn;
+    })
+  );
+}
 const numberFmt = new Intl.NumberFormat();
 
 // Anchor date math: returns the ISO (YYYY-MM-DD, UTC) start of the
@@ -236,6 +269,11 @@ async function loadLeaderboard() {
     btn.classList.toggle('active', active);
     btn.setAttribute('aria-selected', String(active));
   }
+  for (const btn of el('lb-cats').querySelectorAll('.lb-chip')) {
+    const active = btn.dataset.cat === lbState.cat;
+    btn.classList.toggle('active', active);
+    btn.setAttribute('aria-selected', String(active));
+  }
   for (const btn of el('lb-boards').querySelectorAll('.lb-chip')) {
     const active = btn.dataset.board === lbState.board;
     btn.classList.toggle('active', active);
@@ -290,6 +328,15 @@ function setupLeaderboard() {
     if (!btn) return;
     lbState.period = btn.dataset.period;
     lbState.anchor = null;
+    loadLeaderboard();
+  });
+  renderLbBoards();
+  el('lb-cats').addEventListener('click', (e) => {
+    const btn = e.target.closest('.lb-chip');
+    if (!btn || btn.dataset.cat === lbState.cat) return;
+    lbState.cat = btn.dataset.cat;
+    lbState.board = CATEGORIES[lbState.cat][0].board;
+    renderLbBoards();
     loadLeaderboard();
   });
   el('lb-boards').addEventListener('click', (e) => {

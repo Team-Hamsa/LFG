@@ -48,16 +48,12 @@
           <span id="lb-range"></span>
           <button id="lb-next" class="link" disabled>›</button>
         </div>
-        <div id="lb-boards" class="lb-chips lb-boards" role="tablist" aria-label="Board">
-          <button class="lb-chip active" role="tab" aria-selected="true" data-board="users_nfts">Holders</button>
-          <button class="lb-chip" role="tab" aria-selected="false" data-board="users_swaps">Swappers</button>
-          <button class="lb-chip" role="tab" aria-selected="false" data-board="users_builds">Builders</button>
-          <button class="lb-chip" role="tab" aria-selected="false" data-board="nft_swaps">Hot NFTs</button>
-          <button class="lb-chip" role="tab" aria-selected="false" data-board="nft_rarity">Rarest</button>
-          <button class="lb-chip" role="tab" aria-selected="false" data-board="brix_rich">BRIX Rich</button>
-          <button class="lb-chip" role="tab" aria-selected="false" data-board="brix_lp">LP</button>
-          <button class="lb-chip" role="tab" aria-selected="false" data-board="brix_earned">Earned</button>
+        <div id="lb-cats" class="lb-chips lb-cats" role="tablist" aria-label="Category">
+          <button class="lb-chip lb-cat active" role="tab" aria-selected="true" data-cat="users">Users</button>
+          <button class="lb-chip lb-cat" role="tab" aria-selected="false" data-cat="nfts">NFTs</button>
+          <button class="lb-chip lb-cat" role="tab" aria-selected="false" data-cat="brix">BRIX</button>
         </div>
+        <div id="lb-boards" class="lb-chips lb-boards" role="tablist" aria-label="Board"></div>
         <ol id="lb-list" class="lb-list"></ol>
         <p id="lb-me" class="lb-me" hidden></p>
         <p id="lb-empty" class="card-sub" hidden>Nothing here yet for this period.</p>
