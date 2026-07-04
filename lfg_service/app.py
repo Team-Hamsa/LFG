@@ -35,6 +35,7 @@ from lfg_core import (
     nft_index,
     swap_flow,
     swap_meta,
+    trait_config,
     xrpl_ops,
     xumm_ops,
 )
@@ -797,9 +798,17 @@ async def handle_swap_start(request):
     nft1, nft2 = by_id.get(nft1_id), by_id.get(nft2_id)
     if not nft1 or not nft2:
         return web.json_response({"error": "NFT not found in your wallet"}, status=400)
-    if nft1["gender"] != nft2["gender"]:
+    cfg = trait_config.get_config()
+    blocked = [t for t in traits_to_swap if not cfg.swap_allowed(nft1["gender"], nft2["gender"], t)]
+    if blocked:
         return web.json_response(
-            {"error": "NFTs must share the same body type to swap traits"}, status=400
+            {
+                "error": (
+                    f"trait(s) {', '.join(blocked)} cannot swap between "
+                    f"{nft1['gender']} and {nft2['gender']} bodies"
+                )
+            },
+            status=400,
         )
 
     # The load_wallet_nfts call above awaited, so re-check before inserting
