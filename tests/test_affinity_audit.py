@@ -71,3 +71,21 @@ def test_cross_check_flags_never_minted_dir_values_and_missing_files():
     assert ("male", "Clothing", "Retired Coat") in gaps  # minted on male, no file
     assert ("female", "Clothing", "Summer Dress") not in misplacements
     assert ("skeleton", "Clothing", "None") not in misplacements  # None exempt
+
+
+def test_render_affinity_yaml_lists_bodies_and_flags_low_confidence():
+    counts = {
+        ("Clothing", "Summer Dress"): Counter({"female": 4}),
+        ("Eyes", "Rare Glint"): Counter({"male": 1}),  # < LOW_CONFIDENCE_THRESHOLD
+    }
+    out = affinity_audit.render_affinity_yaml(counts)
+    assert '"Summer Dress": [female]' in out
+    assert "LOW CONFIDENCE" in out and "Rare Glint" in out
+
+
+def test_render_report_md_sections():
+    counts = {("Clothing", "Summer Dress"): Counter({"female": 4})}
+    out = affinity_audit.render_report_md(counts, [("male", "Clothing", "X")], [])
+    assert "## Candidate misplacements" in out
+    assert "male/Clothing/X" in out
+    assert "female-only" in out

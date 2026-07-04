@@ -70,3 +70,45 @@ def cross_check(
             if n > 0 and value not in dir_tree.get(body, {}).get(trait_type, set()):
                 coverage_gaps.append((body, trait_type, value))
     return sorted(misplacements), sorted(coverage_gaps)
+
+
+def render_affinity_yaml(counts: dict[tuple[str, str], Counter]) -> str:
+    """Draft affinity: section, values grouped by trait type, alphabetical,
+    low-confidence entries commented with their counts."""
+    by_type: dict[str, list[str]] = {}
+    for (trait_type, value), body_counts in sorted(counts.items()):
+        bodies = sorted(b for b, n in body_counts.items() if n > 0)
+        total = sum(body_counts.values())
+        line = f'    "{value}": [{", ".join(bodies)}]'
+        if total < LOW_CONFIDENCE_THRESHOLD:
+            line += f"  # LOW CONFIDENCE: only {total} mint(s) — verify by eye"
+        by_type.setdefault(trait_type, []).append(line)
+    out = ["affinity:"]
+    for trait_type in sorted(by_type):
+        out.append(f"  {trait_type}:")
+        out.extend(by_type[trait_type])
+    return "\n".join(out) + "\n"
+
+
+def render_report_md(
+    counts: dict[tuple[str, str], Counter],
+    misplacements: list[tuple[str, str, str]],
+    coverage_gaps: list[tuple[str, str, str]],
+) -> str:
+    """Render body-affinity audit report with counts table, misplacements, and
+    coverage gaps."""
+    lines = ["# Body-affinity audit report", ""]
+    lines.append("## Per-value affinity (from mint history, burned included)")
+    lines.append("")
+    lines.append("| Trait type | Value | Classification | Counts |")
+    lines.append("|---|---|---|---|")
+    for (trait_type, value), body_counts in sorted(counts.items()):
+        label = classify(body_counts)
+        detail = ", ".join(f"{b}:{n}" for b, n in sorted(body_counts.items()) if n)
+        flag = " ⚠️" if sum(body_counts.values()) < LOW_CONFIDENCE_THRESHOLD else ""
+        lines.append(f"| {trait_type} | {value} | {label}{flag} | {detail} |")
+    lines += ["", "## Candidate misplacements (in dir, never minted there)", ""]
+    lines += [f"- {b}/{t}/{v}" for b, t, v in misplacements] or ["- none"]
+    lines += ["", "## Coverage gaps (minted historically, missing from dir)", ""]
+    lines += [f"- {b}/{t}/{v}" for b, t, v in coverage_gaps] or ["- none"]
+    return "\n".join(lines) + "\n"
