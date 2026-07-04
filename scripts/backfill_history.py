@@ -25,7 +25,9 @@ REPO_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
 sys.path.insert(0, REPO_ROOT)
 sys.path.insert(0, os.path.join(REPO_ROOT, "scripts"))
 
+from websockets.exceptions import WebSocketException  # noqa: E402
 from xrpl.asyncio.clients import AsyncWebsocketClient  # noqa: E402
+from xrpl.asyncio.clients.exceptions import XRPLWebsocketException  # noqa: E402
 from xrpl.models.requests import Request  # noqa: E402
 
 from lfg_core import history_events, history_store  # noqa: E402
@@ -151,7 +153,14 @@ async def _amain() -> int:
                     r = await asyncio.wait_for(
                         client.request(Request.from_dict(req)), timeout=REQUEST_TIMEOUT
                     )
-                except (TimeoutError, asyncio.TimeoutError, ConnectionError, OSError) as e:
+                except (
+                    TimeoutError,
+                    asyncio.TimeoutError,
+                    ConnectionError,
+                    OSError,
+                    WebSocketException,
+                    XRPLWebsocketException,
+                ) as e:
                     # Transient transport trouble gets the same bounded backoff as
                     # slowDown. A torn-down websocket will keep failing and exhaust
                     # the attempts — the run is cursor-resumable, so that is safe.
