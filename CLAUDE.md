@@ -80,6 +80,8 @@ SERVICE_TOKEN_TELEGRAM=<telegram-surface-token>
 TELEGRAM_ANNOUNCE_CHAT_ID=<telegram-channel-id>
 TELEGRAM_MINI_APP_URL=<public-https-url-of-the-mini-app>   # optional (#89); unset = launch button omitted
 TELEGRAM_INITDATA_MAX_AGE=3600                              # optional (#89); initData replay window in seconds
+BRIX_DISTRIBUTOR_ADDRESS=<xrpl-address>                     # optional; airdrop distributor wallet, excluded from BRIX leaderboards/derivation as a counterparty
+BRIX_AMM_ACCOUNT=<xrpl-address>                             # optional; mainnet BRIX/XRP AMM pool account, used by snapshot_balances.py
 ```
 
 > **Telegram Mini App (#89):** the Mini App serves the same vanilla-JS Activity
@@ -347,6 +349,63 @@ dedicated per-`nft_id` index instead.
   are **clio-only** methods — they default to `CLIO_WS_URL`, NOT `WS_URL` (the
   plain rippled WS answers them with `unknownCmd` → `None`, which the
   fail-closed Closet on-ledger verify gate would read as "not owned").
+
+### Ledger history + leaderboards
+
+A second per-network store, separate from the on-chain index above, archives
+the raw transaction history and derives per-NFT / per-BRIX events so the
+Activity can serve leaderboards and per-user history without re-scraping the
+chain on every request.
+
+- **Store:** per-network SQLite files `history_testnet.db` / `history_mainnet.db`
+  (gitignored, regenerable), managed by `lfg_core/history_store.py`. Raw
+  `xrpl_txs` (verbatim `{tx, meta}` JSON, keyed by hash) is the source of
+  truth; `nft_events` (mint/burn/transfer/sale/offer_create/offer_cancel/modify,
+  keyed by `(tx_hash, nft_id)`) and `brix_events` (BRIX debits/credits) are
+  **derived, droppable, rebuildable** from it.
+- **Backfill (one-time / after a reset):**
+  `.venv/bin/python scripts/backfill_history.py --network testnet|mainnet [--distributor rXXX]`
+  Pages `account_tx` over four sources — the NFT issuer, the BRIX issuer, the
+  optional `--distributor` (airdrop wallet), and per-`nft_id` `nft_history`
+  for every token known to the on-chain index — plus a derivation pass.
+  Every source's pagination marker persists to `backfill_state` after each
+  page, so Ctrl-C and re-run is always safe (resumable, idempotent).
+- **Rebuilding derived events:** `scripts/derive_history_events.py --network <net>
+  [--distributor rXXX]` clears and rebuilds `nft_events` / `brix_events` from
+  the raw `xrpl_txs` archive in one pass — use this after fixing derivation
+  logic or supplying/correcting `--distributor` without re-scraping the chain.
+  `scripts/backfill_history.py --derive-only` is an alias that calls the same
+  `rederive()` without paging any new raw transactions.
+- **Live sync:** the same pm2 listeners that keep the on-chain index fresh
+  (`lfg-index-testnet` / `lfg-index-mainnet`, `scripts/onchain_listener.py`)
+  now **dual-write** each streamed transaction into the history DB's raw
+  `xrpl_txs` table and derive its events inline, so `history_<net>.db` stays
+  current without a separate poller.
+- **Nightly balance snapshots:** `scripts/snapshot_balances.py` records daily
+  BRIX/LP balances (including the `BRIX_AMM_ACCOUNT` pool) for trend charts.
+  Suggested pm2 cron:
+  ```bash
+  pm2 start scripts/snapshot_balances.py --name lfg-snapshot --cron "10 0 * * *" --no-autorestart --interpreter .venv/bin/python -- --network mainnet
+  ```
+- **API:** `GET /api/leaderboard?board=&period=&start=&me=` — public, no auth.
+  `board` selects one of 8 boards (`users_nfts`, `users_swaps`,
+  `users_builds`, `nft_swaps`, `brix_rich`, `brix_lp`, `brix_earned`,
+  `nft_rarity`); `period` is a rolling window (`all`/`week`/`month`/etc.) with
+  an optional `start` anchor; `me` (a wallet address) is resolved against the
+  cached full row set post-cache so passing it never invalidates the cache.
+  Full result sets (up to rank 500) are cached for 60s keyed on
+  `(network, board, period, start)`.
+- **Conservation audit:** `scripts/audit_history.py --network <net>` cross-checks
+  `nft_events` mint/burn counts (COUNT DISTINCT `nft_id`, tolerating
+  re-derivation overlap) against the live-token count in the on-chain index —
+  `live_events = mints - burns` should equal `live_index` (`onchain_nfts` rows
+  with `is_burned=0`). Prints PASS/FAIL and exits non-zero on any drift; run
+  it after a fresh backfill or whenever leaderboard numbers look suspicious,
+  before trusting them.
+- **New env vars:** `BRIX_DISTRIBUTOR_ADDRESS` (airdrop distributor wallet,
+  excluded as a counterparty when deriving/ranking BRIX events) and
+  `BRIX_AMM_ACCOUNT` (mainnet BRIX/XRP AMM pool account, tracked by
+  `snapshot_balances.py`).
 
 ### Dress-up trait economy — Phase 2 (testnet, on-ledger ops)
 

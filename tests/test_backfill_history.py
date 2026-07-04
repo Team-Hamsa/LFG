@@ -136,3 +136,67 @@ def test_rederive_from_raw(tmp_path):
         brix_issuer=fx.BRIX_ISSUER,
     )
     assert counts2 == counts
+
+
+def test_audit_history_clean():
+    import sqlite3
+
+    ah = importlib.import_module("scripts.audit_history")
+
+    hconn = history_store.init_history_db(":memory:")
+    hconn.execute(
+        "INSERT INTO nft_events (tx_hash, nft_id, event, ts) VALUES (?, ?, 'mint', 1)",
+        ("h1", "N1"),
+    )
+    hconn.execute(
+        "INSERT INTO nft_events (tx_hash, nft_id, event, ts) VALUES (?, ?, 'mint', 2)",
+        ("h2", "N2"),
+    )
+    hconn.execute(
+        "INSERT INTO nft_events (tx_hash, nft_id, event, ts) VALUES (?, ?, 'mint', 3)",
+        ("h3", "N3"),
+    )
+    hconn.execute(
+        "INSERT INTO nft_events (tx_hash, nft_id, event, ts) VALUES (?, ?, 'burn', 4)",
+        ("h4", "N3"),
+    )
+    hconn.commit()
+
+    oconn = sqlite3.connect(":memory:")
+    oconn.execute("CREATE TABLE onchain_nfts (nft_id TEXT PRIMARY KEY, is_burned INTEGER)")
+    oconn.execute("INSERT INTO onchain_nfts VALUES ('N1', 0)")
+    oconn.execute("INSERT INTO onchain_nfts VALUES ('N2', 0)")
+    oconn.commit()
+
+    result = ah.audit_history(hconn, oconn)
+    assert result == {"mints": 3, "burns": 1, "live_events": 2, "live_index": 2, "drift": 0}
+
+
+def test_audit_history_drift(capsys):
+    import sqlite3
+
+    ah = importlib.import_module("scripts.audit_history")
+
+    hconn = history_store.init_history_db(":memory:")
+    hconn.execute(
+        "INSERT INTO nft_events (tx_hash, nft_id, event, ts) VALUES (?, ?, 'mint', 1)",
+        ("h1", "N1"),
+    )
+    hconn.execute(
+        "INSERT INTO nft_events (tx_hash, nft_id, event, ts) VALUES (?, ?, 'mint', 2)",
+        ("h2", "N2"),
+    )
+    hconn.commit()
+
+    oconn = sqlite3.connect(":memory:")
+    oconn.execute("CREATE TABLE onchain_nfts (nft_id TEXT PRIMARY KEY, is_burned INTEGER)")
+    oconn.execute("INSERT INTO onchain_nfts VALUES ('N1', 0)")
+    oconn.commit()
+
+    result = ah.audit_history(hconn, oconn)
+    assert result == {"mints": 2, "burns": 0, "live_events": 2, "live_index": 1, "drift": 1}
+
+    rc = ah.main(["--history-db", ":memory-not-used:", "--network", "testnet"], hconn=hconn, oconn=oconn)
+    assert rc == 1
+    out = capsys.readouterr().out
+    assert "FAIL" in out
