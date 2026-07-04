@@ -26,7 +26,7 @@ def test_index_has_category_row():
 
 def test_app_js_categories_map_covers_all_8_boards():
     src = _read("app.js")
-    m = re.search(r"const CATEGORIES = \{.*?\n\};", src, re.S)
+    m = re.search(r"const CATEGORIES\s*=\s*\{.*?\};", src, re.S)
     assert m, "CATEGORIES map missing from app.js"
     block = m.group(0)
     for board in (
@@ -41,7 +41,7 @@ def test_app_js_categories_map_covers_all_8_boards():
     ):
         assert board in block, f"{board} missing from CATEGORIES"
     for label in ("Holders", "Swappers", "Builders", "Swaps", "Rarest", "Richlist", "LP", "Earned"):
-        assert f"'{label}'" in block, f"label {label} missing"
+        assert re.search(rf"label:\s*['\"]{re.escape(label)}['\"]", block), f"label {label} missing"
     assert "Hot" not in block  # renamed to Swaps
 
 

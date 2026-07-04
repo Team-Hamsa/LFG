@@ -265,23 +265,19 @@ function renderLbRow(row, isNftBoard) {
   return li;
 }
 
+function highlightChips(containerId, dataKey, activeValue) {
+  for (const btn of el(containerId).querySelectorAll('.lb-chip')) {
+    const active = btn.dataset[dataKey] === activeValue;
+    btn.classList.toggle('active', active);
+    btn.setAttribute('aria-selected', String(active));
+  }
+}
+
 async function loadLeaderboard() {
   // Chip active states reflect current selection.
-  for (const btn of el('lb-periods').querySelectorAll('.lb-chip')) {
-    const active = btn.dataset.period === lbState.period;
-    btn.classList.toggle('active', active);
-    btn.setAttribute('aria-selected', String(active));
-  }
-  for (const btn of el('lb-cats').querySelectorAll('.lb-chip')) {
-    const active = btn.dataset.cat === lbState.cat;
-    btn.classList.toggle('active', active);
-    btn.setAttribute('aria-selected', String(active));
-  }
-  for (const btn of el('lb-boards').querySelectorAll('.lb-chip')) {
-    const active = btn.dataset.board === lbState.board;
-    btn.classList.toggle('active', active);
-    btn.setAttribute('aria-selected', String(active));
-  }
+  highlightChips('lb-periods', 'period', lbState.period);
+  highlightChips('lb-cats', 'cat', lbState.cat);
+  highlightChips('lb-boards', 'board', lbState.board);
 
   const stepper = el('lb-stepper');
   const stepped = STEPPED_PERIODS.includes(lbState.period);
@@ -336,7 +332,7 @@ function setupLeaderboard() {
   renderLbBoards();
   el('lb-cats').addEventListener('click', (e) => {
     const btn = e.target.closest('.lb-chip');
-    if (!btn || btn.dataset.cat === lbState.cat) return;
+    if (!btn || btn.dataset.cat === lbState.cat || !CATEGORIES[btn.dataset.cat]) return;
     lbState.cat = btn.dataset.cat;
     lbState.board = CATEGORIES[lbState.cat][0].board;
     renderLbBoards();
