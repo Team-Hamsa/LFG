@@ -28,9 +28,7 @@ END_MARK = "<!-- hackathon-loc:end -->"
 
 
 def git(*args: str) -> str:
-    return subprocess.run(
-        ["git", *args], check=True, capture_output=True, text=True
-    ).stdout.strip()
+    return subprocess.run(["git", *args], check=True, capture_output=True, text=True).stdout.strip()
 
 
 def numstat(baseline: str) -> list[tuple[int, int, str]]:
@@ -78,8 +76,7 @@ def build_block(baseline: str) -> str:
     for name, (a, d) in cats.items():
         lines.append(f"| {name} | +{fmt(a)} | −{fmt(d)} | {fmt(a - d)} |")
     lines.append(
-        f"| **Total** | **+{fmt(total_a)}** | **−{fmt(total_d)}** "
-        f"| **{fmt(total_a - total_d)}** |"
+        f"| **Total** | **+{fmt(total_a)}** | **−{fmt(total_d)}** | **{fmt(total_a - total_d)}** |"
     )
     lines.append(END_MARK)
     return "\n".join(lines)
