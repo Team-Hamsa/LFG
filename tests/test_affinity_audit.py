@@ -91,6 +91,20 @@ def test_render_report_md_sections():
     assert "female-only" in out
 
 
+def test_none_value_excluded_from_yaml_and_report():
+    # None = empty slot, structural, never a real affinity — must not leak
+    # into the draft YAML or the report table as a restricted value.
+    counts = {
+        ("Eyes", "None"): Counter({"ape": 2, "skeleton": 1}),
+        ("Clothing", "Summer Dress"): Counter({"female": 4}),
+    }
+    yaml_out = affinity_audit.render_affinity_yaml(counts)
+    assert '"None"' not in yaml_out
+    report_out = affinity_audit.render_report_md(counts, [], [])
+    assert "| Eyes | None |" not in report_out
+    assert "Summer Dress" in report_out  # other entries still render
+
+
 def test_run_end_to_end(tmp_path):
     import sqlite3
 

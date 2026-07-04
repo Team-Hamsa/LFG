@@ -77,6 +77,9 @@ def render_affinity_yaml(counts: dict[tuple[str, str], Counter[str]]) -> str:
     low-confidence entries commented with their counts."""
     by_type: dict[str, list[str]] = {}
     for (trait_type, value), body_counts in sorted(counts.items()):
+        if value == "None":
+            # None = empty slot, structural, never a real affinity.
+            continue
         bodies = sorted(b for b, n in body_counts.items() if n > 0)
         total = sum(body_counts.values())
         line = f'    "{value}": [{", ".join(bodies)}]'
@@ -98,11 +101,20 @@ def render_report_md(
     """Render body-affinity audit report with counts table, misplacements, and
     coverage gaps."""
     lines = ["# Body-affinity audit report", ""]
+    lines.append(
+        "> Note: Background and Back are shared layers (4 identical per-body "
+        "copies today); treat their per-body restrictions in this report as "
+        "sampling noise, not signal."
+    )
+    lines.append("")
     lines.append("## Per-value affinity (from mint history, burned included)")
     lines.append("")
     lines.append("| Trait type | Value | Classification | Counts |")
     lines.append("|---|---|---|---|")
     for (trait_type, value), body_counts in sorted(counts.items()):
+        if value == "None":
+            # None = empty slot, structural, never a real affinity.
+            continue
         label = classify(body_counts)
         detail = ", ".join(f"{b}:{n}" for b, n in sorted(body_counts.items()) if n)
         flag = " ⚠️" if sum(body_counts.values()) < LOW_CONFIDENCE_THRESHOLD else ""

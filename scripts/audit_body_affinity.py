@@ -63,7 +63,9 @@ def run(db_path: str, layers_dir: str, out_dir: str) -> dict:
             indent=2,
         )
     return {
-        "values": len(counts),
+        # None = empty slot, structural, never a real affinity — excluded
+        # here so this count matches what actually lands in the draft/report.
+        "values": sum(1 for (_t, v) in counts if v != "None"),
         "misplacements": misplacements,
         "coverage_gaps": gaps,
     }

@@ -1,5 +1,7 @@
 # Body-affinity audit report
 
+> Note: Background and Back are shared layers (4 identical per-body copies today); treat their per-body restrictions in this report as sampling noise, not signal.
+
 ## Per-value affinity (from mint history, burned included)
 
 | Trait type | Value | Classification | Counts |
@@ -31,7 +33,6 @@
 | Accessory | Lightsaber Green | bodies:ape+female+male | ape:2, female:11, male:38 |
 | Accessory | Lightsaber Red | shared-MF | female:4, male:37 |
 | Accessory | Nail Bat | shared-MF | female:7, male:12 |
-| Accessory | None | universal | ape:46, female:154, male:967, skeleton:129 |
 | Accessory | Paddle | bodies:ape+male | ape:31, male:105 |
 | Accessory | Pitchfork | bodies:ape+male | ape:17, male:85 |
 | Accessory | Rattie Brown | bodies:female+male+skeleton | female:19, male:50, skeleton:6 |
@@ -49,7 +50,6 @@
 | Accessory | Water to Wine | shared-MF | female:18, male:53 |
 | Back | Angel Wings | male-only | male:52 |
 | Back | Angel Wings Open | male-only | male:48 |
-| Back | None | universal | ape:258, female:1108, male:3832, skeleton:262 |
 | Background | Blackhole | bodies:female+male+skeleton | female:26, male:65, skeleton:26 |
 | Background | Burnt Orange | shared-MF | female:27, male:95 |
 | Background | Claw Diamond | bodies:female+male+skeleton | female:16, male:77, skeleton:2 |
@@ -269,7 +269,6 @@
 | Eyebrows | Interested | shared-MF | female:60, male:210 |
 | Eyebrows | Muddled | shared-MF | female:13, male:38 |
 | Eyebrows | Nightmare | shared-MF | female:16, male:52 |
-| Eyebrows | None | universal | ape:258, female:2, male:140, skeleton:260 |
 | Eyebrows | Questioning | shared-MF | female:80, male:181 |
 | Eyebrows | Raised | shared-MF | female:69, male:184 |
 | Eyebrows | Rhinestone | female-only | female:66 |
@@ -312,7 +311,6 @@
 | Eyes | Nerd | shared-MF | female:33, male:163 |
 | Eyes | No Lens Circle | shared-MF | female:18, male:164 |
 | Eyes | No Sleep | shared-MF | female:34, male:359 |
-| Eyes | None | bodies:ape+skeleton | ape:258, skeleton:260 |
 | Eyes | Pennywise | shared-MF | female:2, male:54 |
 | Eyes | Pink Lemonades | shared-MF | female:23, male:42 |
 | Eyes | Pleading | shared-MF | female:9, male:59 |
@@ -424,7 +422,6 @@
 | Head | Moon Helmet | bodies:male+skeleton | male:25, skeleton:4 |
 | Head | Mummy Mask | male-only | male:26 |
 | Head | Mushroom | bodies:ape+male+skeleton | ape:6, male:35, skeleton:8 |
-| Head | None | bodies:ape+male | ape:12, male:29 |
 | Head | Nun Camo | female-only | female:38 |
 | Head | Open Mind | male-only | male:24 |
 | Head | Paint Spill | male-only | male:31 |
@@ -553,7 +550,6 @@
 | Mouth | Moustache Iridescent | male-only | male:56 |
 | Mouth | My First Mustache | male-only | male:28 |
 | Mouth | Nightmare Grin | male-only | male:18 |
-| Mouth | None | bodies:ape+skeleton | ape:258, skeleton:260 |
 | Mouth | Pink Bandana | male-only | male:4 |
 | Mouth | Rainbow Puke | shared-MF | female:20, male:16 |
 | Mouth | Scared | male-only | male:169 |
