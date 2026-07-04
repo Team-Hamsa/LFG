@@ -596,6 +596,20 @@ let swapCards = []; // {nft, card} for every grid tile, for re-rendering picks
 let swapPollTimer = null;
 let swappableTraits = [];
 let swapFee = null; // {pay_with, amount, per_nft} quote from /api/nfts
+let swapMatrix = null; // {universal_layers, pairs} quote from /api/nfts
+
+// Mirrors trait_config.TraitConfig.swap_allowed() (lfg_core/trait_config.py)
+// so the trait checklist can be filtered client-side to what the server
+// will actually accept for the selected pair's bodies (#30 Task 15). The
+// server re-enforces this in handle_swap_start — this is UI-only.
+function swapAllowed(matrix, bodyA, bodyB, layer) {
+  if (bodyA === bodyB || matrix.universal_layers.includes(layer)) return true;
+  return matrix.pairs.some((p) => {
+    if (!p.bodies.includes(bodyA) || !p.bodies.includes(bodyB)) return false;
+    if (p.layers) return p.layers.includes(layer);
+    return !p.layers_except.includes(layer);
+  });
+}
 
 function showGridSkeletons(grid, count = 6) {
   grid.replaceChildren(...Array.from({ length: count }, () => {
@@ -623,6 +637,7 @@ async function openSwapper() {
     swapNfts = data.nfts;
     swappableTraits = data.swappable_traits || [];
     swapFee = data.swap_fee || null;
+    swapMatrix = data.swap_matrix || null;
     status('');
     el('nft-grid').replaceChildren(); // drop the skeleton loaders
     if (!swapNfts.length) {
@@ -661,20 +676,17 @@ async function openSwapper() {
 function toggleNftPick(nft, card) {
   const idx = swapPick.findIndex((p) => p.nft.nft_id === nft.nft_id);
   if (idx >= 0) swapPick.splice(idx, 1);
-  // Enforce the matching-body rule here too — dimming alone doesn't stop
-  // keyboard activation of the underlying <button>.
-  else if (swapPick.length === 1 && nft.gender !== swapPick[0].nft.gender) return;
   else if (swapPick.length < 2) swapPick.push({ nft, card });
   else return;
   renderPicks();
 }
 
-// Mockup behavior: first pick locks the body type — matches stay lit,
-// the rest dim out and are disabled.
+// Cross-body pairs are allowed now (#30) — picking no longer locks to a
+// matching body type. Which traits are offered for the selected pair is
+// decided later, per layer, in showTraitChooser() via swapAllowed().
 function renderPicks() {
-  const body = swapPick[0] ? swapPick[0].nft.gender : null;
   for (const { nft, card } of swapCards) {
-    card.classList.remove('sel-1', 'sel-2', 'dim');
+    card.classList.remove('sel-1', 'sel-2');
     card.disabled = false;
     const badge = card.querySelector('.pick');
     badge.textContent = '';
@@ -682,16 +694,13 @@ function renderPicks() {
     if (i >= 0) {
       card.classList.add(`sel-${i + 1}`);
       badge.textContent = String(i + 1);
-    } else if (body !== null && nft.gender !== body) {
-      card.classList.add('dim');
-      card.disabled = true;
     }
   }
   el('pick-traits-btn').disabled = swapPick.length !== 2;
   el('swap-help').textContent = swapPick.length === 0
-    ? 'Pick your first avatar — matches stay lit, the rest dim out.'
+    ? 'Pick your first avatar.'
     : swapPick.length === 1
-      ? 'Now pick a matching body type to swap with.'
+      ? 'Now pick a second avatar to swap with.'
       : 'Pair locked in — pick the traits to swap.';
 }
 
@@ -729,7 +738,13 @@ function showTraitChooser() {
   el('swap-name2').textContent = b.name;
   const list = el('trait-list');
   list.innerHTML = '';
-  for (const [i, trait] of swappableTraits.entries()) {
+  // Only offer traits the server's swap matrix actually permits for this
+  // pair's bodies (#30 Task 15) — swap_allowed() on the server is still the
+  // real gate; this just keeps the checklist from showing dead ends.
+  const offeredTraits = swapMatrix
+    ? swappableTraits.filter((trait) => swapAllowed(swapMatrix, a.gender, b.gender, trait))
+    : swappableTraits;
+  for (const [i, trait] of offeredTraits.entries()) {
     const row = document.createElement('label');
     row.className = 'trait-row';
     row.style.setProperty('--cat', TRAIT_DOT_COLORS[i % TRAIT_DOT_COLORS.length]);

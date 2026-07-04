@@ -767,8 +767,28 @@ async def handle_nfts(request):
         swap_fee = {"pay_with": pay_with, "amount": amount, "per_nft": swap_flow.swap_fee_total(1)}
     except Exception as e:
         logging.warning(f"Swap fee quote failed: {e}")
+    # Serialize the cross-body swap matrix so the client can mirror
+    # swap_allowed() and only offer traits legal for the selected pair
+    # (#30 Task 15) — swap_allowed() itself remains the server-side gate.
+    cfg = trait_config.get_config()
+    matrix = {
+        "universal_layers": sorted(cfg.universal_layers),
+        "pairs": [
+            {
+                "bodies": sorted(p.bodies),
+                "layers": sorted(p.layers) if p.layers is not None else None,
+                "layers_except": (sorted(p.layers_except) if p.layers_except is not None else None),
+            }
+            for p in cfg.swap_pairs
+        ],
+    }
     return web.json_response(
-        {"nfts": nfts, "swappable_traits": swap_meta.SWAPPABLE_TRAITS, "swap_fee": swap_fee}
+        {
+            "nfts": nfts,
+            "swappable_traits": swap_meta.SWAPPABLE_TRAITS,
+            "swap_fee": swap_fee,
+            "swap_matrix": matrix,
+        }
     )
 
 

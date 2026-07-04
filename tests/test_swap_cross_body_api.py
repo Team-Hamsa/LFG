@@ -155,3 +155,30 @@ def test_same_body_swap_unaffected(monkeypatch, same_body_nfts):
     resp = asyncio.get_event_loop().run_until_complete(server.handle_swap_start(req))
 
     assert resp.status == 200
+
+
+def test_nfts_payload_includes_swap_matrix(monkeypatch, ape_skeleton_nfts):
+    """Task 15 (#30): handle_nfts serializes trait_config's swap matrix so
+    the client can mirror swap_allowed() and filter offered traits per the
+    selected NFT pair's bodies, instead of only enforcing it server-side."""
+    _stub_wallet_nfts(monkeypatch, ape_skeleton_nfts)
+
+    async def _no_fee(wallet: str, amount: str) -> tuple[str, str]:
+        raise RuntimeError("no fee quote available in this test")
+
+    monkeypatch.setattr(server.swap_flow, "detect_swap_payment", _no_fee)
+    req = make_mocked_request("GET", "/api/nfts")
+
+    resp = asyncio.get_event_loop().run_until_complete(server.handle_nfts(req))
+
+    assert resp.status == 200
+    body = json.loads(resp.body)
+    matrix = body["swap_matrix"]
+    assert matrix["universal_layers"] == ["Accessory", "Back"]
+    pairs = {frozenset(p["bodies"]): p for p in matrix["pairs"]}
+    ape_skel = pairs[frozenset({"ape", "skeleton"})]
+    assert ape_skel["layers"] == ["Clothing", "Head"]
+    assert ape_skel["layers_except"] is None
+    male_female = pairs[frozenset({"female", "male"})]
+    assert male_female["layers"] is None
+    assert male_female["layers_except"] == ["Clothing"]
