@@ -34,3 +34,6 @@ pytest
 
 # Telegram bot framework
 python-telegram-bot>=21
+
+# YAML config parsing
+PyYAML
