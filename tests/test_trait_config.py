@@ -164,3 +164,33 @@ def test_conflicts_enforced_symmetrically(tmp_path):
     assert cfg.conflicts(crown, "Eyes", "Laser")        # symmetric direction
     assert not cfg.conflicts(laser, "Head", "Beanie Black")
     assert not cfg.conflicts([], "Head", "Crown")
+
+
+def test_validate_against_store(tmp_path):
+    import asyncio
+
+    from lfg_core.layer_store import LocalLayerStore
+
+    layers = tmp_path / "layers"
+    (layers / "female" / "Clothing").mkdir(parents=True)
+    (layers / "female" / "Clothing" / "Summer Dress.png").write_bytes(b"x")
+    (layers / "female" / "Background").mkdir()
+    (layers / "female" / "Background" / "Sunset.png").write_bytes(b"x")
+    (layers / "female" / "Body").mkdir()
+    (layers / "female" / "Body" / "Curved.png").write_bytes(b"x")
+    (layers / "female" / "Eyes").mkdir()
+    (layers / "female" / "Eyes" / "Hypno.png").write_bytes(b"x")
+
+    cfg = trait_config.load_config(
+        _write(
+            tmp_path,
+            GOOD.replace(
+                '"Summer Dress": [female]',
+                '"Summer Dress": [female]\n    "Ghost Coat": [female]',
+            ),
+        )
+    )
+    store = LocalLayerStore(str(layers))
+    errors, warnings = asyncio.run(trait_config.validate_against_store(cfg, store))
+    assert any("Ghost Coat" in e for e in errors)            # claimed, no file
+    assert any("Hypno" in w for w in warnings)               # file, no entry

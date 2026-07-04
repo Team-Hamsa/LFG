@@ -8,7 +8,7 @@
 import os
 from collections.abc import Iterable
 from dataclasses import dataclass
-from typing import Any
+from typing import Any, cast
 
 import yaml
 
@@ -115,6 +115,46 @@ class TraitConfig:
                     ):
                         return True
         return False
+
+
+async def validate_against_store(cfg: TraitConfig, store: Any) -> tuple[list[str], list[str]]:
+    """Cross-check config claims against what the layer store actually has.
+    Errors block; warnings are dir values falling back to dir-derived affinity."""
+    errors: list[str] = []
+    warnings: list[str] = []
+    bodies = await store.list_bodies()
+    tree: dict[str, dict[str, set[str]]] = {}
+    for body in bodies:
+        tree[body] = cast(dict[str, set[str]], {})
+        for trait_type in await store.list_trait_types(body):
+            tree[body][trait_type] = set(await store.list_values(body, trait_type))
+
+    layer_names = {layer.name for layer in cfg.layers}
+    seen_types = {t for types in tree.values() for t in types}
+    for name in sorted(layer_names - seen_types):
+        # warning, not error: the dirs are the authority on what exists; a
+        # config layer with no directory anywhere just never yields a trait
+        warnings.append(f"config layer {name!r} has no directory under any body")
+
+    for trait_type, values in cfg.affinity.items():
+        for value, claimed in values.items():
+            present = {b for b in claimed if value in tree.get(b, {}).get(trait_type, set())}
+            if not present:
+                errors.append(
+                    f"affinity {trait_type}/{value} claims {sorted(claimed)} "
+                    "but no such file exists in any claimed body dir"
+                )
+    for body, types in tree.items():
+        for trait_type, file_values in types.items():
+            if trait_type not in layer_names:
+                continue
+            for value in file_values:
+                if value != "None" and cfg.allowed_bodies(trait_type, value) is None:
+                    warnings.append(
+                        f"{body}/{trait_type}/{value} has no affinity entry "
+                        "(dir-derived default applies)"
+                    )
+    return errors, warnings
 
 
 def _check_bodies(bodies: Iterable[str], where: str) -> None:
