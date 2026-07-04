@@ -7,7 +7,7 @@
 
 import os
 from collections.abc import Iterable
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from typing import Any
 
 import yaml
@@ -69,7 +69,7 @@ def load_config(path: str) -> TraitConfig:
 
     layers = tuple(
         LayerSpec(entry["name"], float(entry["z"]), bool(entry.get("shared", False)))
-        for entry in raw.get("layers", [])
+        for entry in raw.get("layers") or []
     )
     names = [layer.name for layer in layers]
     if len(names) != len(set(names)):
@@ -79,7 +79,7 @@ def load_config(path: str) -> TraitConfig:
 
     z_overrides = tuple(
         ZOverride(o["trait_type"], o["value"], float(o["z"]))
-        for o in raw.get("z_overrides", [])
+        for o in raw.get("z_overrides") or []
     )
     for o in z_overrides:
         if o.trait_type not in names:
@@ -93,7 +93,7 @@ def load_config(path: str) -> TraitConfig:
             _check_bodies(bodies, f"affinity {trait_type}/{value}")
 
     matrix = raw.get("swap_matrix", {}) or {}
-    universal = frozenset(matrix.get("universal_layers", []))
+    universal = frozenset(matrix.get("universal_layers") or [])
     if not universal <= set(names):
         raise TraitConfigError("universal_layers contains unknown layer")
     pairs = []

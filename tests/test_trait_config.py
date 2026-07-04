@@ -81,6 +81,14 @@ def test_load_config_rejects_pair_with_both_layer_forms(tmp_path):
         trait_config.load_config(_write(tmp_path, bad))
 
 
+def test_load_config_rejects_null_layers_section(tmp_path):
+    # YAML parses a bare "layers:" key as None; the loader must raise
+    # TraitConfigError ("layers section is required"), not a bare TypeError.
+    bad = "version: 1\nlayers:\n"
+    with pytest.raises(trait_config.TraitConfigError, match="layers section is required"):
+        trait_config.load_config(_write(tmp_path, bad))
+
+
 def test_get_config_singleton(tmp_path):
     trait_config.reset_config()
     path = _write(tmp_path, GOOD)
