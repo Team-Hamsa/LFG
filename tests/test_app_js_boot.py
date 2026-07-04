@@ -72,7 +72,7 @@ def test_app_js_has_extract_deposit():
 
 def test_leaderboard_card_present():
     html = _read("index.html")
-    assert 'id="leaderboard"' in html and 'data-board="brix_rich"' in html
+    assert 'id="leaderboard"' in html and 'data-cat="brix"' in html
 
 
 def test_app_js_wires_leaderboard():

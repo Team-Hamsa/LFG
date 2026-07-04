@@ -759,12 +759,9 @@ button.back:hover { color: var(--text); border: none; }
 /* Home-screen leaderboard card */
 .leaderboard { margin-top: 20px; text-align: left; }
 .lb-title { margin: 0 0 10px; font-size: 1rem; color: var(--text); }
-.lb-chips {
-  display: flex; gap: .4rem; overflow-x: auto; padding-bottom: 4px;
-  -ms-overflow-style: none; scrollbar-width: none;
-}
-.lb-chips::-webkit-scrollbar { display: none; }
+.lb-chips { display: flex; flex-wrap: wrap; gap: .4rem; padding-bottom: 4px; }
 .lb-boards { margin-top: 6px; }
+.lb-chip.lb-cat { font-size: .85rem; font-weight: 700; }
 .lb-chip {
   flex: 0 0 auto; margin: 0; padding: 6px 12px;
   border-radius: 99px; border: 1px solid var(--line);
