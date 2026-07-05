@@ -35,6 +35,7 @@ from lfg_core import (
     nft_index,
     swap_flow,
     swap_meta,
+    trait_config,
     xrpl_ops,
     xumm_ops,
 )
@@ -766,8 +767,28 @@ async def handle_nfts(request):
         swap_fee = {"pay_with": pay_with, "amount": amount, "per_nft": swap_flow.swap_fee_total(1)}
     except Exception as e:
         logging.warning(f"Swap fee quote failed: {e}")
+    # Serialize the cross-body swap matrix so the client can mirror
+    # swap_allowed() and only offer traits legal for the selected pair
+    # (#30 Task 15) — swap_allowed() itself remains the server-side gate.
+    cfg = trait_config.get_config()
+    matrix = {
+        "universal_layers": sorted(cfg.universal_layers),
+        "pairs": [
+            {
+                "bodies": sorted(p.bodies),
+                "layers": sorted(p.layers) if p.layers is not None else None,
+                "layers_except": (sorted(p.layers_except) if p.layers_except is not None else None),
+            }
+            for p in cfg.swap_pairs
+        ],
+    }
     return web.json_response(
-        {"nfts": nfts, "swappable_traits": swap_meta.SWAPPABLE_TRAITS, "swap_fee": swap_fee}
+        {
+            "nfts": nfts,
+            "swappable_traits": swap_meta.SWAPPABLE_TRAITS,
+            "swap_fee": swap_fee,
+            "swap_matrix": matrix,
+        }
     )
 
 
@@ -797,9 +818,17 @@ async def handle_swap_start(request):
     nft1, nft2 = by_id.get(nft1_id), by_id.get(nft2_id)
     if not nft1 or not nft2:
         return web.json_response({"error": "NFT not found in your wallet"}, status=400)
-    if nft1["gender"] != nft2["gender"]:
+    cfg = trait_config.get_config()
+    blocked = [t for t in traits_to_swap if not cfg.swap_allowed(nft1["gender"], nft2["gender"], t)]
+    if blocked:
         return web.json_response(
-            {"error": "NFTs must share the same body type to swap traits"}, status=400
+            {
+                "error": (
+                    f"trait(s) {', '.join(blocked)} cannot swap between "
+                    f"{nft1['gender']} and {nft2['gender']} bodies"
+                )
+            },
+            status=400,
         )
 
     # The load_wallet_nfts call above awaited, so re-check before inserting

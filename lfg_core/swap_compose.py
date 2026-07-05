@@ -23,12 +23,39 @@ def _canonical(attributes: list[dict[str, Any]]) -> list[dict[str, Any]]:
     return trait_config.get_config().sort_attributes(non_empty)
 
 
+async def resolve_layer(store: Any, cfg: Any, body: str, trait_type: str, value: str) -> str | None:
+    """Own dir first; else any matrix-permitted foreign dir (cross-body swaps
+    render the source body's asset). Affinity narrower than the matrix wins.
+
+    NOTE: the foreign-body loop is FIRST-MATCH in list_bodies() order
+    (alphabetical). That's only deterministic-by-construction because of a
+    config invariant: universal-layer art (Accessory/Back) is body-independent,
+    and every non-universal cross-body pair currently permits exactly ONE
+    foreign body per (body, layer) — so at most one foreign dir can matter.
+    If PR-5's layers/shared/ move (or a future swap_matrix change) breaks
+    that invariant, first-match silently picks the alphabetically-first
+    body's art; revisit the ordering here before relying on it."""
+    path: str | None = await store.resolve(body, trait_type, value)
+    if path:
+        return path
+    for foreign in await store.list_bodies():
+        if foreign == body or not cfg.swap_allowed(body, foreign, trait_type):
+            continue
+        if not cfg.value_allowed(foreign, trait_type, value):
+            continue
+        path = await store.resolve(foreign, trait_type, value)
+        if path:
+            return path
+    return None
+
+
 async def missing_layers(attributes: list[dict[str, Any]], body: str, store: Any) -> list[str]:
     """Trait + ape-structural files the store can't provide — checked BEFORE
     any burn."""
     canonical = _canonical(attributes)
+    cfg = trait_config.get_config()
     resolved = await asyncio.gather(
-        *(store.resolve(body, a["trait_type"], a["value"]) for a in canonical)
+        *(resolve_layer(store, cfg, body, a["trait_type"], a["value"]) for a in canonical)
     )
     missing = [
         f"{body}/{a['trait_type']}/{a['value']}"
@@ -58,16 +85,18 @@ async def compose_nft(
     (nose + melt-ape masking), and overlay in order determined by trait_config
     z-values (including effect layers on top). Returns (output_path, is_video)."""
     canonical = _canonical(attributes)
+    cfg = trait_config.get_config()
     paths = await asyncio.gather(
-        *(store.resolve(body, a["trait_type"], a["value"]) for a in canonical)
+        *(resolve_layer(store, cfg, body, a["trait_type"], a["value"]) for a in canonical)
     )
+    layers: list[tuple[str, str, str]] = []
     for a, path in zip(canonical, paths, strict=False):
         if not path:
             raise FileNotFoundError(f"Layer not found: {body}/{a['trait_type']}/{a['value']}")
+        layers.append((a["trait_type"], a["value"], path))
     if not canonical:
         raise ValueError("No trait layers to compose")
 
-    layers = [(a["trait_type"], a["value"], p) for a, p in zip(canonical, paths, strict=False)]
     body_value = swap_meta.get_attr(attributes, "Body") or ""
     layers = await ape_face.inject_and_mask(layers, body, body_value, store, out_dir)
     files = [p for _t, _v, p in layers]

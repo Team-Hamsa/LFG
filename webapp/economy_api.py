@@ -18,8 +18,11 @@ from lfg_core import (
     config,
     economy_flow,
     economy_store,
+    layer_store,
     nft_index,
+    swap_compose,
     swap_meta,
+    trait_config,
     trait_economy,
 )
 from scripts import _economy_deps
@@ -167,15 +170,40 @@ def _schedule(
     return EconomyWebSession(discord_id=discord_id, kind=kind, inner=session)
 
 
+async def _require_body_affinity(char_body: str, slot: str, value: str) -> None:
+    """Raise EconomyError unless (slot, value) can legally render on
+    char_body. Spec §5: economy ops gate on the SAME check as the swap path —
+    allowed = own-dir ∪ (matrix-permitted foreign ∩ source-body affinity),
+    which is exactly swap_compose.resolve_layer (source-body affinity is
+    enforced inside its foreign branch; do NOT add a target-body
+    value_allowed term here — that would reject placements the swap path
+    legally produces). "None" is always legal — it's the real-but-file-less
+    asset for an empty slot, same convention swap_compose._canonical uses
+    when filtering attributes before compose."""
+    if value == "None":
+        return
+    cfg = trait_config.get_config()
+    store = layer_store.get_layer_store()
+    if await swap_compose.resolve_layer(store, cfg, char_body, slot, value) is None:
+        raise EconomyError(f"'{value}' does not fit a {char_body} body")
+
+
 async def start_equip(
     discord_id: str, owner: str, nft_id: str, slot: str, value: str
 ) -> EconomyWebSession:
     conn = open_conn()
-    rec = _load_owned_character(conn, owner, nft_id)
-    assets = {(s, v): c for (o, s, v, c) in economy_store.read_closet_assets(conn) if o == owner}
-    chk = trait_economy.can_equip(rec, slot, value, assets, mutable=bool(rec.mutable))
-    if not chk.ok:
-        raise EconomyError(f"cannot equip: {chk.reason}")
+    try:
+        rec = _load_owned_character(conn, owner, nft_id)
+        assets = {
+            (s, v): c for (o, s, v, c) in economy_store.read_closet_assets(conn) if o == owner
+        }
+        chk = trait_economy.can_equip(rec, slot, value, assets, mutable=bool(rec.mutable))
+        if not chk.ok:
+            raise EconomyError(f"cannot equip: {chk.reason}")
+        await _require_body_affinity(rec.body, slot, value)
+    except Exception:
+        conn.close()
+        raise
     session = economy_flow.EquipSession(owner=owner, character=rec, slot=slot, incoming_value=value)
     return _schedule("equip", discord_id, session, conn, economy_flow.run_equip)
 
@@ -203,22 +231,31 @@ async def start_assemble(
     discord_id: str, owner: str, edition: int, chosen: dict[str, str]
 ) -> EconomyWebSession:
     conn = open_conn()
-    closet_rec = economy_store.get_closet_record(conn, owner)
-    if closet_rec is None or closet_rec[2] != ct.ACTIVE:
+    try:
+        closet_rec = economy_store.get_closet_record(conn, owner)
+        if closet_rec is None or closet_rec[2] != ct.ACTIVE:
+            raise EconomyError("Create and claim your Closet first.")
+        genesis = trait_economy.effective_genesis(
+            economy_store.read_genesis(conn), economy_store.read_supply_changes(conn)
+        )
+        body = genesis.edition_bodies.get(edition)
+        if body is None:
+            raise EconomyError(f"edition {edition} has no known body")
+        assets = {
+            (s, v): c for (o, s, v, c) in economy_store.read_closet_assets(conn) if o == owner
+        }
+        bodies = {ed for (o, ed) in economy_store.read_closet_bodies(conn) if o == owner}
+        live_editions = {
+            r.nft_number for r in nft_index.live_nfts(conn) if r.nft_number is not None
+        }
+        chk = trait_economy.can_assemble(edition, chosen, bodies, assets, live_editions, genesis)
+        if not chk.ok:
+            raise EconomyError(f"cannot assemble: {chk.reason}")
+        for slot, value in chosen.items():
+            await _require_body_affinity(body[1], slot, value)
+    except Exception:
         conn.close()
-        raise EconomyError("Create and claim your Closet first.")
-    genesis = trait_economy.effective_genesis(
-        economy_store.read_genesis(conn), economy_store.read_supply_changes(conn)
-    )
-    body = genesis.edition_bodies.get(edition)
-    if body is None:
-        raise EconomyError(f"edition {edition} has no known body")
-    assets = {(s, v): c for (o, s, v, c) in economy_store.read_closet_assets(conn) if o == owner}
-    bodies = {ed for (o, ed) in economy_store.read_closet_bodies(conn) if o == owner}
-    live_editions = {r.nft_number for r in nft_index.live_nfts(conn) if r.nft_number is not None}
-    chk = trait_economy.can_assemble(edition, chosen, bodies, assets, live_editions, genesis)
-    if not chk.ok:
-        raise EconomyError(f"cannot assemble: {chk.reason}")
+        raise
     session = economy_flow.AssembleSession(
         owner=owner,
         edition=edition,
