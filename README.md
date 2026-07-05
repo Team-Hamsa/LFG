@@ -99,9 +99,9 @@ Per-network SQLite index of every live NFToken (the chain holds multiple tokens 
 
 ## Roadmap — Remaining
 
-- [ ] [#40 Trait selection rules engine (declarative `trait_config.yaml`)](../../issues/40)
+- [ ] [#40 Trait selection rules engine (declarative `trait_config.yaml`)](../../issues/40) In Progress: PRs #123 & #124
 - [ ] [#28 Port generation rules and exclusions from legacy scripts](../../issues/28)
-- [ ] [#30 Cross-body-type trait layer swapping rules](../../issues/30)
+- [ ] [#30 Cross-body-type trait layer swapping rules](../../issues/30) In Progress: PR #125
 - [ ] [#42 Web UI (standalone browser-based mint + collection viewer)](../../issues/42)
 - [ ] [#41 X (Twitter) integration (OAuth2, auto-post on mint)](../../issues/41)
 - [ ] [#44 In-app collection Marketplace (list, browse, buy via Xaman)](../../issues/44)
