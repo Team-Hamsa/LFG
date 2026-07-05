@@ -79,7 +79,7 @@ A full on-ledger trait economy in four phases:
 - **Phase 1** — supply model, genesis reconciliation, conservation auditor [#62](https://github.com/Team-Hamsa/LFG/pull/62).
 - **Phase 2** — on-ledger ops: **Harvest** (burn a character → its traits drop into your Closet), **Assemble** (body + full trait set → re-mint), **Equip** (`NFTokenModify` a loose trait onto a live character) [#67](https://github.com/Team-Hamsa/LFG/pull/67).
 - **Phase 3** — **Dressing Room UI** in the Discord Activity: visual composer with canvas + roster [#71](https://github.com/Team-Hamsa/LFG/pull/71),.
-- **Phase 4** — **tradeable trait tokens**: Extract a Closet trait as a standalone transferable NFToken (70% royalty) and Deposit it back, creating a secondary market for individual traits [#106](https://github.com/Team-Hamsa/LFG/pull/106).
+- **Phase 4** — **tradeable trait tokens**: Extract a Closet trait as a standalone transferable NFToken (7% royalty) and Deposit it back, creating a secondary market for individual traits [#106](https://github.com/Team-Hamsa/LFG/pull/106).
 - The per-user **Closet** is a soulbound mutable NFToken with standalone issuance [#105](https://github.com/Team-Hamsa/LFG/pull/105).
 
 ### Ledger History + Leaderboards (not in original scope) — #118–#121

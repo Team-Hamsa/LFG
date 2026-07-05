@@ -300,7 +300,7 @@ dict / payload before signing or submitting, or hackathon volume credit is lost.
 - **Testnet URL**: `https://s.altnet.rippletest.net:51234/` (main.py:198)
 - **Mainnet URL**: `https://s1.ripple.com:51234/` (ts_helpers.py:40)
 - Wallet is initialized from SEED environment variable
-- All NFT minting uses `NFTokenMint` with transfer fees (7000 basis points = 70% secondary sales fee)
+- All NFT minting uses `NFTokenMint` with transfer fees (`TransferFee = 7000`; the field is in units of 1/100,000, so 7000 = **7%** secondary sales fee — not 70%, which the 50000-unit field cap makes impossible)
 - NFT flags = 25 (burnable + transferable + mutable — Dynamic NFTs amendment).
   New mints ARE burnable so the dress-up trait economy can harvest (issuer-burn)
   them. Trait swaps still update them in place via NFTokenModify — the swap path
@@ -475,8 +475,9 @@ traits without changing the character supply.
 
 **Trait token model:**
 - **`TRAIT_TAXON = 1763`** (env var `TRAIT_TAXON`, default 1763).
-- **`TRAIT_NFT_FLAGS = 9`** (burnable + transferable, NOT mutable). The 70%
-  royalty is inherited automatically from `NFT_TRANSFER_FEE` because `mint_nft`
+- **`TRAIT_NFT_FLAGS = 9`** (burnable + transferable, NOT mutable). The 7%
+  royalty (TransferFee 7000, units of 1/100,000) is inherited automatically
+  from `NFT_TRANSFER_FEE` because `mint_nft`
   applies the fee to all transferable tokens. Trait tokens are intentionally
   NOT mutable — they represent a fixed slot/value pair whose identity must
   never change in place.
