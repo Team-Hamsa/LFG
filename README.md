@@ -38,6 +38,10 @@ All surfaces run side by side against the shared `lfg_service` backend.
 | On-chain NFT index with live listeners | ✅ |
 | Seasonal trait manifest (Season 3 mint exclusion) | ✅ |
 | Mainnet launch hardening (regular-key signing, feature flags, live BRIX/XRP AMM) | ✅ |
+| Declarative trait rules engine (`trait_config.yaml`: z-order, body affinity, validation CLI) | ✅ |
+| Body-affinity matrix derived from full mint history (3,535 editions audited) | ✅ |
+| Cross-body trait swapping (compatibility matrix, API-enforced + UI-filtered) | ✅ |
+| Shared trait layers (`layers/shared/` with verify-then-move migration) | ✅ |
 
 ---
 
@@ -91,6 +95,14 @@ Per-network SQLite index of every live NFToken (the chain holds multiple tokens 
 - **Ape face compose rule** — nose injection + melt-ape masking, fixing face traits on ape bodies ([#38](../../issues/38)) (#110).
 - **Seasonal trait manifest** — sidecar `layers/seasons.json` (1,167 traits across 3 seasons) with Season 3 excluded from minting (#115–#117).
 
+### Trait Rules Engine + Body Affinity ([#40](../../issues/40), [#28](../../issues/28), [#30](../../issues/30)) — #122, #123, #126–#128
+Trait legality is no longer an accident of directory layout — a single validated `trait_config.yaml` drives mint, swap, and economy:
+- **Body-affinity audit** — derived the per-value body-compatibility matrix from the full 3,535-edition mint history (per-edition deduped, burned included), with a human-review report gate ([#122](https://github.com/Team-Hamsa/LFG/pull/122)). Closed #28 by proving the "legacy exclusion rules" never existed in code.
+- **Rules engine** — declarative `trait_config.yaml` (layer z-order, per-value z-overrides absorbing TOP_TRAITS, owner-confirmed affinity, swap matrix, exclusion machinery) with strict load-time validation and a pre-commit/CI validation CLI ([#123](https://github.com/Team-Hamsa/LFG/pull/123)).
+- **Mint + compose integration** — affinity-filtered selection that fails loud on over-constrained layers; compose ordering flows through config z-values; 200-mint property test ([#127](https://github.com/Team-Hamsa/LFG/pull/127)).
+- **Cross-body trait swapping** — Ape↔Skeleton headwear/clothing, Straight↔Curved everything-but-clothing, universal Accessory/Back; enforced per-trait at the API, mirrored in the UI, and applied identically to economy equip/assemble ([#128](https://github.com/Team-Hamsa/LFG/pull/128)). Closes #30.
+- **Shared trait layers** — byte-identical universal art (52 Backgrounds + 4 Backs) physically deduplicated into `layers/shared/` via an idempotent verify-then-move migration with atomic seasons-manifest rewrite ([#126](https://github.com/Team-Hamsa/LFG/pull/126)).
+
 ### Mainnet Launch Hardening
 - Regular-key signing for the issuer (`SIGNING_ACCOUNT` override) (#112).
 - `ECONOMY_ENABLED` flag to launch with the trait economy off (#113).
@@ -101,9 +113,6 @@ Per-network SQLite index of every live NFToken (the chain holds multiple tokens 
 
 ## Roadmap — Remaining
 
-- [ ] [#40 Trait selection rules engine (declarative `trait_config.yaml`)](../../issues/40) In Progress: PRs #123 & #124
-- [ ] [#28 Port generation rules and exclusions from legacy scripts](../../issues/28)
-- [ ] [#30 Cross-body-type trait layer swapping rules](../../issues/30) In Progress: PR #125
 - [ ] [#42 Web UI (standalone browser-based mint + collection viewer)](../../issues/42)
 - [ ] [#41 X (Twitter) integration (OAuth2, auto-post on mint)](../../issues/41)
 - [ ] [#44 In-app collection Marketplace (list, browse, buy via Xaman)](../../issues/44)
@@ -115,8 +124,11 @@ Per-network SQLite index of every live NFToken (the chain holds multiple tokens 
 
 ### Completed
 - [x] [#26 Testnet BRIX/XRP AMM pool](../../issues/26)
+- [x] [#28 Port generation rules and exclusions from legacy scripts](../../issues/28) — reframed: body-affinity matrix derived from mint history
 - [x] [#29 NFT rarity logic (tiers, weights, metadata scoring)](../../issues/29)
+- [x] [#30 Cross-body-type trait layer swapping rules](../../issues/30)
 - [x] [#38 Ape bodies incorrectly assigned face traits](../../issues/38)
+- [x] [#40 Trait selection rules engine (declarative `trait_config.yaml`)](../../issues/40)
 - [x] [#43 Telegram integration](../../issues/43)
 - [x] [#46 Dress-up game](../../issues/46)
 - [x] [#49 Explore: AI agent integration via XRPL Payments skill](../../issues/49)
@@ -207,13 +219,17 @@ Upload layers to BunnyCDN or set `LAYER_SOURCE=local` for development:
 
 ```
 layers/
-├── male/
+├── shared/                  # universal art every body pulls from (Background, Back)
 │   ├── Background/<Value>.png|.gif|.mp4
-│   ├── Back/ Body/ Clothing/ Mouth/ Eyebrows/ Eyes/ Head/ Accessory/
+│   └── Back/
+├── male/
+│   ├── Body/ Clothing/ Mouth/ Eyebrows/ Eyes/ Head/ Accessory/
 ├── female/
 ├── ape/
 └── skeleton/
 ```
+
+Trait legality (layer order, per-value body affinity, cross-body swap matrix) lives in `trait_config.yaml` at the repo root, validated by `scripts/validate_trait_config.py` (runs in pre-commit and CI).
 
 Use `scripts/upload_layers_cdn.py` to push a local `layers/` tree.
 
