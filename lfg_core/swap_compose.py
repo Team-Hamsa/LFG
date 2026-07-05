@@ -11,24 +11,16 @@ from typing import Any
 
 import ffmpeg
 
-from lfg_core import ape_face, swap_meta
-from lfg_core.ape_face import TOP_TRAITS
-from lfg_core.swap_meta import TRAIT_ORDER
+from lfg_core import ape_face, swap_meta, trait_config
 
 
 def _canonical(attributes: list[dict[str, Any]]) -> list[dict[str, Any]]:
-    """Canonical layer order; 'None'/empty values skipped (no layer file)."""
-    return sorted(
-        (a for a in attributes if a.get("value") and a["value"] != "None"),
-        key=lambda a: TRAIT_ORDER.index(a["trait_type"]),
-    )
-
-
-def _float_tops(layers: list[tuple[str, str, str]]) -> list[tuple[str, str, str]]:
-    """Move TOP_TRAITS effect layers to the end (rendered on top)."""
-    tops = [lyr for lyr in layers if {"trait_type": lyr[0], "value": lyr[1]} in TOP_TRAITS]
-    rest = [lyr for lyr in layers if lyr not in tops]
-    return rest + tops
+    """Canonical layer order (z-order from trait_config: layer z, or a
+    per-value z_override — this is what floats effect traits like Wavy Eyes
+    to render on top of everything else); 'None'/empty values skipped (no
+    layer file)."""
+    non_empty = [a for a in attributes if a.get("value") and a["value"] != "None"]
+    return trait_config.get_config().sort_attributes(non_empty)
 
 
 async def missing_layers(attributes: list[dict[str, Any]], body: str, store: Any) -> list[str]:
@@ -63,8 +55,8 @@ async def compose_nft(
     out_dir: str = "generated",
 ) -> tuple[str, bool]:
     """Resolve all trait layers through the store, apply the ape face rule
-    (nose + melt-ape masking), float TOP effects, and overlay.
-    Returns (output_path, is_video)."""
+    (nose + melt-ape masking), and overlay in order determined by trait_config
+    z-values (including effect layers on top). Returns (output_path, is_video)."""
     canonical = _canonical(attributes)
     paths = await asyncio.gather(
         *(store.resolve(body, a["trait_type"], a["value"]) for a in canonical)
@@ -78,7 +70,6 @@ async def compose_nft(
     layers = [(a["trait_type"], a["value"], p) for a, p in zip(canonical, paths, strict=False)]
     body_value = swap_meta.get_attr(attributes, "Body") or ""
     layers = await ape_face.inject_and_mask(layers, body, body_value, store, out_dir)
-    layers = _float_tops(layers)
     files = [p for _t, _v, p in layers]
     masked_temps = [p for p in files if p.endswith(".masked.png")]
 

@@ -14,6 +14,8 @@ import aiohttp
 from lfg_core import config
 
 # Layering / canonical attribute order. Body is structural and never swapped.
+# Source of truth is trait_config.yaml (z_overrides / layers). Keep in sync;
+# test_default_config_parity_with_legacy_constants enforces the parity.
 TRAIT_ORDER = [
     "Background",
     "Back",

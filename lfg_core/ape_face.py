@@ -24,6 +24,8 @@ from lfg_core import swap_meta
 # Effect traits that render on top of everything else (e.g. laser eyes).
 # Lives here (not swap_compose) so the masking rule can reuse it without a
 # circular import; swap_compose imports TOP_TRAITS from this module.
+# Source of truth is trait_config.yaml (z_overrides / layers). Keep in sync;
+# test_default_config_parity_with_legacy_constants enforces the parity.
 TOP_TRAITS: list[dict[str, str]] = [
     {"trait_type": "Eyes", "value": "Wavy"},
     {"trait_type": "Mouth", "value": "Rainbow Puke"},
@@ -80,12 +82,22 @@ def apply_alpha_mask(layer_path: str, mask_path: str, out_dir: str) -> str:
 
 def _nose_index(layers: list[tuple[str, str, str]]) -> int:
     """Index at which to insert the nose: directly after the Eyes layer, else
-    the canonical Eyes slot (before the first layer that sorts after Eyes)."""
-    for i, (trait_type, _v, _p) in enumerate(layers):
-        if trait_type == "Eyes":
+    the canonical Eyes slot (before the first layer that sorts after Eyes).
+
+    TOP_TRAITS Eyes (Wavy / Laser…) are skipped as anchors: compose z-sorts
+    them to the very end of the list (z_override 95, above Head/Accessory),
+    so anchoring the nose on a floated effect Eyes tuple would drag it to
+    the top of the stack instead of its face slot below Head. With the
+    effect Eyes skipped, the canonical-slot fallback places the nose where
+    it belongs."""
+    for i, (trait_type, value, _p) in enumerate(layers):
+        if trait_type == "Eyes" and {"trait_type": trait_type, "value": value} not in TOP_TRAITS:
             return i + 1
     eyes_rank = swap_meta.TRAIT_ORDER.index("Eyes")
-    for i, (trait_type, _v, _p) in enumerate(layers):
+    for i, (trait_type, value, _p) in enumerate(layers):
+        # Stop before any TOP_TRAIT to keep nose below effect layers (e.g. Laser Eyes).
+        if {"trait_type": trait_type, "value": value} in TOP_TRAITS:
+            return i
         if (
             trait_type in swap_meta.TRAIT_ORDER
             and swap_meta.TRAIT_ORDER.index(trait_type) > eyes_rank
