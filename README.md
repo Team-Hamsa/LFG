@@ -60,7 +60,7 @@ Everything below was designed, built, and merged during the Make Waves sprint. P
 <!-- hackathon-loc:end -->
 
 ### Shared-Services Spine 
-**Issues[#43](../../issues/43) / [#53](../../issues/53)**
+**Issues[#43](../../issues/43) / [#53](../../issues/53)**. 
 **PRs [#76](https://github.com/Team-Hamsa/LFG/pull/76#), [#78](https://github.com/Team-Hamsa/LFG/pull/76#), [#77](https://github.com/Team-Hamsa/LFG/pull/77), [#78](https://github.com/Team-Hamsa/LFG/pull/78), [#79](https://github.com/Team-Hamsa/LFG/pull/79), [#80](https://github.com/Team-Hamsa/LFG/pull/80), [#81](https://github.com/Team-Hamsa/LFG/pull/81)**.  
 One `lfg_service` backend now serves every surface through a shared Surface SDK: the REST/WS backend (Plan 1), the `LFGServiceClient` SDK (Plan 2), the Discord bot migration (Plan 3), and the new Telegram surface (Plan 4).
 
