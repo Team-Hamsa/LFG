@@ -19,6 +19,12 @@ from lfg_core import config
 
 LAYER_EXTENSIONS = (".png", ".gif", ".mp4")
 
+# Traits under this directory are available to every body (e.g. seasonal
+# cosmetics that aren't body-specific). list_values/list_trait_types union it
+# in; resolve tries the body's own dir first, then falls back here. A missing
+# shared/ dir (e.g. before the Task 19 migration lands) degrades to a no-op.
+SHARED_DIR = "shared"
+
 # Bunny storage can stall; never let a listing or layer download hang a
 # mint/swap session forever. Downloads get longer for multi-MB video layers.
 LIST_TIMEOUT = aiohttp.ClientTimeout(total=30, connect=10)
@@ -33,19 +39,33 @@ class LocalLayerStore:
         return sorted(
             d
             for d in os.listdir(self.base_dir)
-            if os.path.isdir(os.path.join(self.base_dir, d)) and not d.startswith(".")
+            if os.path.isdir(os.path.join(self.base_dir, d))
+            and not d.startswith(".")
+            and d != SHARED_DIR
         )
 
     async def list_trait_types(self, body: str) -> list[str]:
-        path = os.path.join(self.base_dir, body)
-        return sorted(
+        types = set(self._list_trait_types_one(body))
+        types |= set(self._list_trait_types_one(SHARED_DIR))
+        return sorted(types)
+
+    def _list_trait_types_one(self, dirname: str) -> list[str]:
+        path = os.path.join(self.base_dir, dirname)
+        if not os.path.isdir(path):
+            return []
+        return [
             d
             for d in os.listdir(path)
             if os.path.isdir(os.path.join(path, d)) and not d.startswith(".")
-        )
+        ]
 
     async def list_values(self, body: str, trait_type: str) -> list[str]:
-        path = os.path.join(self.base_dir, body, trait_type)
+        values = set(self._list_values_one(body, trait_type))
+        values |= set(self._list_values_one(SHARED_DIR, trait_type))
+        return sorted(values)
+
+    def _list_values_one(self, dirname: str, trait_type: str) -> list[str]:
+        path = os.path.join(self.base_dir, dirname, trait_type)
         if not os.path.isdir(path):
             return []
         values = []
@@ -56,11 +76,13 @@ class LocalLayerStore:
         return sorted(set(values))
 
     async def resolve(self, body: str, trait_type: str, value: str) -> str | None:
-        """Local path of a layer file, or None if it doesn't exist."""
-        base = os.path.join(self.base_dir, body, trait_type, value)
-        for ext in LAYER_EXTENSIONS:
-            if os.path.isfile(base + ext):
-                return base + ext
+        """Local path of a layer file, checking the body dir then shared/,
+        or None if it doesn't exist in either."""
+        for dirname in (body, SHARED_DIR):
+            base = os.path.join(self.base_dir, dirname, trait_type, value)
+            for ext in LAYER_EXTENSIONS:
+                if os.path.isfile(base + ext):
+                    return base + ext
         return None
 
     async def resolve_asset(self, rel_path: str) -> str | None:
@@ -68,6 +90,15 @@ class LocalLayerStore:
         'ape/Nose.png'), or None if it doesn't exist."""
         path = os.path.join(self.base_dir, rel_path)
         return path if os.path.isfile(path) else None
+
+
+class CdnListingNotFound(Exception):
+    """Raised by _list_dir when the CDN reports 404 for a listed path. This
+    is the ONLY failure mode callers may treat as "empty directory" — a
+    body's own trait dir can legitimately 404 post shared-layers-migration
+    (its values moved to shared/), same as an unmigrated/empty shared/ tree.
+    Any other failure (timeout, 5xx, auth) is a real outage and must not be
+    caught here — it propagates as a bare Exception."""
 
 
 class CdnLayerStore:
@@ -93,6 +124,8 @@ class CdnLayerStore:
         headers = {"AccessKey": config.BUNNY_CDN_ACCESS_KEY}
         async with aiohttp.ClientSession(timeout=LIST_TIMEOUT) as session:
             async with session.get(url, headers=headers) as resp:
+                if resp.status == 404:
+                    raise CdnListingNotFound(f"CDN listing not found for {rel_path or '/'}")
                 if resp.status != 200:
                     raise Exception(f"CDN listing failed ({resp.status}) for {rel_path or '/'}")
                 items = await resp.json()
@@ -100,30 +133,47 @@ class CdnLayerStore:
         self._listings[rel_path] = listing
         return listing
 
+    async def _list_dir_tolerant(self, rel_path: str) -> list[tuple[str, bool]]:
+        """Like _list_dir, but a missing directory (404 — no shared/
+        migration yet, nothing shared for this trait type, or a body's own
+        trait dir emptied by the shared-layers migration) is not an error —
+        treat as empty. Real failures (timeouts, 5xx, auth) still propagate."""
+        try:
+            return await self._list_dir(rel_path)
+        except CdnListingNotFound:
+            return []
+
     async def list_bodies(self) -> list[str]:
-        return sorted(name for name, is_dir in await self._list_dir("") if is_dir)
+        return sorted(
+            name for name, is_dir in await self._list_dir("") if is_dir and name != SHARED_DIR
+        )
 
     async def list_trait_types(self, body: str) -> list[str]:
-        return sorted(name for name, is_dir in await self._list_dir(body) if is_dir)
+        types = {name for name, is_dir in await self._list_dir_tolerant(body) if is_dir}
+        types |= {name for name, is_dir in await self._list_dir_tolerant(SHARED_DIR) if is_dir}
+        return sorted(types)
 
     async def list_values(self, body: str, trait_type: str) -> list[str]:
         values: set[str] = set()
-        for name, is_dir in await self._list_dir(f"{body}/{trait_type}"):
-            if is_dir:
-                continue
-            stem, ext = os.path.splitext(name)
-            if ext.lower() in LAYER_EXTENSIONS:
-                values.add(stem)
+        for dirname in (body, SHARED_DIR):
+            for name, is_dir in await self._list_dir_tolerant(f"{dirname}/{trait_type}"):
+                if is_dir:
+                    continue
+                stem, ext = os.path.splitext(name)
+                if ext.lower() in LAYER_EXTENSIONS:
+                    values.add(stem)
         return sorted(values)
 
     async def resolve(self, body: str, trait_type: str, value: str) -> str | None:
-        """Download (or reuse cached) layer file; returns local path or None."""
-        listing = await self._list_dir(f"{body}/{trait_type}")
-        names = {name for name, is_dir in listing if not is_dir}
-        for ext in LAYER_EXTENSIONS:
-            filename = value + ext
-            if filename in names:
-                return await self._download(f"{body}/{trait_type}/{filename}")
+        """Download (or reuse cached) layer file, checking the body dir then
+        shared/; returns local path or None if absent from both."""
+        for dirname in (body, SHARED_DIR):
+            listing = await self._list_dir_tolerant(f"{dirname}/{trait_type}")
+            names = {name for name, is_dir in listing if not is_dir}
+            for ext in LAYER_EXTENSIONS:
+                filename = value + ext
+                if filename in names:
+                    return await self._download(f"{dirname}/{trait_type}/{filename}")
         return None
 
     async def resolve_asset(self, rel_path: str) -> str | None:

@@ -21,6 +21,11 @@ from lfg_core.rarity import utcnow
 
 _DUP_SUFFIX = re.compile(r"#\d+$")
 
+# The four real bodies a "shared/<category>/<value>" manifest key (written by
+# scripts/migrate_shared_layers.py once a value is byte-identical across all
+# of them) actually applies to. There is no body literally named "shared".
+BODIES = ("ape", "female", "male", "skeleton")
+
 
 def strip_dup_suffix(value: str) -> str:
     """Drop a trailing "#N" duplicate-export suffix ("Basketball#1" -> "Basketball")."""
@@ -44,7 +49,10 @@ def get_season(
     body: str, category: str, value: str, *, manifest: dict[str, int] | None = None
 ) -> int | None:
     manifest = load_seasons() if manifest is None else manifest
-    return manifest.get(f"{body}/{category}/{value}")
+    per_body_result = manifest.get(f"{body}/{category}/{value}")
+    if per_body_result is not None:
+        return per_body_result
+    return manifest.get(f"shared/{category}/{value}")
 
 
 def build_manifest(
@@ -137,12 +145,25 @@ def disable_season(
     """Set trait_rarity.enabled=0 for every manifest trait of `season` on
     `network`. Guarded: refuses (no changes at all) if any (body, category)
     would be left with zero enabled traits — weighted_pick raises on empty
-    categories, which would break minting."""
-    targets = [
-        tuple(key.split("/", 2))
-        for key, s in manifest.items()
-        if s == season and len(key.split("/", 2)) == 3
-    ]
+    categories, which would break minting.
+
+    A manifest key of the form "shared/<category>/<value>" (written once a
+    value is migrated to layers/shared/ because it's byte-identical across
+    all four bodies) is expanded to all four real bodies here — there is no
+    literal body "shared" in trait_rarity, so disabling it un-expanded would
+    leave the value enabled for minting on ape/female/male/skeleton."""
+    targets: list[tuple[str, str, str]] = []
+    for key, s in manifest.items():
+        if s != season:
+            continue
+        parts = key.split("/", 2)
+        if len(parts) != 3:
+            continue
+        body, category, trait = parts
+        if body == "shared":
+            targets.extend((b, category, trait) for b in BODIES)
+        else:
+            targets.append((body, category, trait))
     for body, category in {(b, c) for b, c, _ in targets}:
         disabled_values = {t for b, c, t in targets if (b, c) == (body, category)}
         survivors = conn.execute(
