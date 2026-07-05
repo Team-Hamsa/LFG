@@ -48,13 +48,19 @@ async def select_random_attributes(
         # Layers added only to trait_config.yaml won't mint until TRAIT_ORDER is updated too.
         # The parity test (test_default_config_parity_with_legacy_constants) fails on divergence.
         for trait_type in TRAIT_ORDER:
-            values = await store.list_values(body, trait_type)
+            raw_values = await store.list_values(body, trait_type)
             values = [
                 v
-                for v in values
+                for v in raw_values
                 if cfg.value_allowed(body, trait_type, v)
                 and not cfg.conflicts(attributes, trait_type, v)
             ]
+            if raw_values and not values:
+                # The layer exists on this body but rules (affinity/conflict)
+                # eliminated every candidate — that's an over-constrained rule
+                # set, not missing coverage, so fail loud instead of silently
+                # dropping the layer from the minted attributes.
+                raise ValueError(f"trait rules leave no legal {trait_type} value for body '{body}'")
             if values:
                 value = rarity.weighted_pick(
                     conn, body, trait_type, values, network=network, now=now, rng=rng
