@@ -174,14 +174,18 @@ def _check_bodies(bodies: Iterable[str], where: str) -> None:
         raise TraitConfigError(f"unknown body {sorted(unknown)} in {where}")
 
 
-def _check_exclusions(exclusions: Any) -> None:
+def _check_exclusions(exclusions: Any, layer_names: set[str]) -> None:
     """Validate exclusions shape at load time. conflicts() does
     `v in values` on each rule's "values" — if that's a bare string (e.g. a
     typo'd `values: Crown` instead of `values: [Crown]`), YAML parses it as
     a scalar and `"Cr" in "Crown"` is a *substring* test, not membership, so
     a rule can silently misfire on partial matches. Rejecting anything but
     the literal "*" or a list of strings here means conflicts() never has
-    to guess."""
+    to guess.
+
+    Also reject any trait_type (the excluding entry's own, or any rule's
+    inside "excludes") that isn't a configured layer name — a typo'd layer
+    there would silently never match anything in conflicts()."""
     for entry in exclusions:
         if not isinstance(entry, dict):
             raise TraitConfigError(f"exclusions entry must be a mapping, got {entry!r}")
@@ -191,6 +195,8 @@ def _check_exclusions(exclusions: Any) -> None:
             raise TraitConfigError(
                 f"exclusions entry needs string trait_type and value, got {entry!r}"
             )
+        if trait_type not in layer_names:
+            raise TraitConfigError(f"exclusions entry for unknown layer {trait_type!r}")
         if "excludes" not in entry:
             raise TraitConfigError(f"exclusions {trait_type}/{value} missing 'excludes'")
         excludes = entry["excludes"]
@@ -200,6 +206,12 @@ def _check_exclusions(exclusions: Any) -> None:
             if not isinstance(rule, dict) or not isinstance(rule.get("trait_type"), str):
                 raise TraitConfigError(
                     f"exclusions {trait_type}/{value} rule needs a string trait_type, got {rule!r}"
+                )
+            rule_trait_type = rule["trait_type"]
+            if rule_trait_type not in layer_names:
+                raise TraitConfigError(
+                    f"exclusions {trait_type}/{value} rule references unknown layer "
+                    f"{rule_trait_type!r}"
                 )
             values = rule.get("values", "*")
             valid_values = values == "*" or (
@@ -247,11 +259,23 @@ def load_config(path: str) -> TraitConfig:
     universal = frozenset(matrix.get("universal_layers") or [])
     if not universal <= set(names):
         raise TraitConfigError("universal_layers contains unknown layer")
+
+    def _check_pair_layers(value: Any, where: str) -> None:
+        if not isinstance(value, list) or not all(isinstance(v, str) for v in value):
+            raise TraitConfigError(f"{where} must be a list of strings, got {value!r}")
+        unknown = set(value) - set(names)
+        if unknown:
+            raise TraitConfigError(f"{where} contains unknown layer {sorted(unknown)}")
+
     pairs = []
     for p in matrix.get("pairs") or []:
         _check_bodies(p.get("bodies") or [], "swap_matrix pair")
         if ("layers" in p) == ("layers_except" in p):
             raise TraitConfigError("swap pair needs exactly one of layers or layers_except")
+        if "layers" in p:
+            _check_pair_layers(p["layers"], "swap_matrix pair 'layers'")
+        else:
+            _check_pair_layers(p["layers_except"], "swap_matrix pair 'layers_except'")
         pairs.append(
             SwapPair(
                 bodies=frozenset(p["bodies"]),
@@ -263,7 +287,7 @@ def load_config(path: str) -> TraitConfig:
     exclusions = raw.get("exclusions") or []
     if not isinstance(exclusions, list):
         raise TraitConfigError("exclusions must be a list")
-    _check_exclusions(exclusions)
+    _check_exclusions(exclusions, set(names))
 
     # Inclusions has no consumer yet (machinery is scaffolded, unused), so
     # only the outer shape is validated here. Contents (and any cycle

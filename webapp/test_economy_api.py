@@ -750,3 +750,112 @@ def test_start_assemble_rejects_incompatible_asset_in_set(monkeypatch, body_gate
             await economy_api.start_assemble("123", "rOwner", edition, chosen)
 
     asyncio.get_event_loop().run_until_complete(go())
+
+
+# --- Fix (review, PR #125): conn must close on every reject between
+# open_conn() and _schedule(), including the body-affinity gate ---
+
+
+class _TrackingConn(sqlite3.Connection):
+    """sqlite3.Connection subclass that counts close() calls."""
+
+    close_count: int
+
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        self.close_count = 0
+
+    def close(self) -> None:  # type: ignore[override]
+        self.close_count += 1
+        super().close()
+
+
+def _tracked_char_conn():
+    """A _TrackingConn seeded with the same schema/data as _seed_conn()."""
+    tracked = sqlite3.connect(":memory:", factory=_TrackingConn)
+    tracked.executescript("""
+        CREATE TABLE IF NOT EXISTS onchain_nfts (
+            nft_id TEXT PRIMARY KEY,
+            nft_number INTEGER,
+            owner TEXT,
+            is_burned INTEGER DEFAULT 0,
+            mutable INTEGER,
+            uri_hex TEXT,
+            body TEXT,
+            attributes_json TEXT,
+            image TEXT,
+            ledger_index INTEGER
+        );
+    """)
+    economy_store.init_economy_schema(tracked)
+    tracked.execute(
+        "INSERT INTO onchain_nfts VALUES (?,?,?,?,?,?,?,?,?,?)",
+        (
+            "A",
+            3537,
+            "rOwner",
+            0,
+            1,
+            "",
+            "male",
+            json.dumps([{"trait_type": "Head", "value": "Crown"}]),
+            "https://cdn.example/3537.png",
+            1,
+        ),
+    )
+    tracked.commit()
+    return tracked
+
+
+def test_start_equip_closes_conn_on_body_affinity_reject(monkeypatch, body_gate_store):
+    """Regression: _require_body_affinity rejecting AFTER open_conn() but
+    BEFORE _schedule() hands the conn to _run_and_close() must still close
+    the conn -- this leaked before the try/except wrap in start_equip."""
+    tracked = _tracked_char_conn()
+    economy_store.set_closet_contents(
+        tracked, "rOwner", [("Head", "Halo", 2), ("Clothing", "Summer Dress", 1)], [42]
+    )
+    monkeypatch.setattr(economy_api, "open_conn", lambda: tracked)
+    monkeypatch.setattr(economy_api.layer_store, "get_layer_store", lambda: body_gate_store)
+
+    async def go():
+        with pytest.raises(economy_api.EconomyError, match="does not fit"):
+            await economy_api.start_equip("123", "rOwner", "A", "Clothing", "Summer Dress")
+
+    asyncio.get_event_loop().run_until_complete(go())
+    assert tracked.close_count == 1, (
+        f"expected conn.close() called exactly once on reject, got {tracked.close_count}"
+    )
+
+
+def test_start_assemble_closes_conn_on_body_affinity_reject(monkeypatch, body_gate_store):
+    """Regression: the per-slot _require_body_affinity loop rejecting an
+    assemble request AFTER open_conn() but BEFORE _schedule() must still
+    close the conn -- this leaked before the try/except wrap in
+    start_assemble."""
+    from lfg_core import trait_economy
+
+    tracked = _tracked_char_conn()
+    edition = 99
+    economy_store.freeze_genesis(
+        tracked,
+        trait_economy.Genesis(trait_counts={}, edition_bodies={edition: ("male", "male")}),
+        {},
+    )
+    economy_store.set_closet_token(tracked, "rOwner", "NFT_CLOSET", "deadbeef", status="active")
+    chosen = dict.fromkeys(trait_economy.NON_BODY_SLOTS, "None")
+    chosen["Clothing"] = "Summer Dress"
+    economy_store.set_closet_contents(
+        tracked, "rOwner", [(slot, value, 1) for slot, value in chosen.items()], [edition]
+    )
+    monkeypatch.setattr(economy_api, "open_conn", lambda: tracked)
+    monkeypatch.setattr(economy_api.layer_store, "get_layer_store", lambda: body_gate_store)
+
+    async def go():
+        with pytest.raises(economy_api.EconomyError, match="does not fit"):
+            await economy_api.start_assemble("123", "rOwner", edition, chosen)
+
+    asyncio.get_event_loop().run_until_complete(go())
+    assert tracked.close_count == 1, (
+        f"expected conn.close() called exactly once on reject, got {tracked.close_count}"
+    )

@@ -80,6 +80,24 @@ def test_load_config_rejects_pair_with_both_layer_forms(tmp_path):
         trait_config.load_config(_write(tmp_path, bad))
 
 
+def test_load_config_rejects_pair_layers_with_unknown_layer(tmp_path):
+    bad = GOOD.replace(
+        "{bodies: [ape, skeleton], layers: [Head, Clothing]}",
+        "{bodies: [ape, skeleton], layers: [Head, Wingspan]}",
+    )
+    with pytest.raises(trait_config.TraitConfigError, match="unknown layer"):
+        trait_config.load_config(_write(tmp_path, bad))
+
+
+def test_load_config_rejects_pair_layers_not_a_list(tmp_path):
+    bad = GOOD.replace(
+        "{bodies: [ape, skeleton], layers: [Head, Clothing]}",
+        "{bodies: [ape, skeleton], layers: Head}",
+    )
+    with pytest.raises(trait_config.TraitConfigError, match="must be a list of strings"):
+        trait_config.load_config(_write(tmp_path, bad))
+
+
 def test_load_config_rejects_null_layers_section(tmp_path):
     # YAML parses a bare "layers:" key as None; the loader must raise
     # TraitConfigError ("layers section is required"), not a bare TypeError.
@@ -204,6 +222,34 @@ def test_load_config_rejects_exclusion_missing_excludes_key(tmp_path):
         trait_config.load_config(_write(tmp_path, bad))
 
 
+def test_load_config_rejects_exclusion_entry_with_unknown_layer(tmp_path):
+    bad = GOOD.replace(
+        "exclusions: []",
+        """exclusions:
+  - trait_type: Wingspan
+    value: Laser
+    excludes:
+      - {trait_type: Head, values: [Crown]}
+""",
+    )
+    with pytest.raises(trait_config.TraitConfigError, match="unknown layer"):
+        trait_config.load_config(_write(tmp_path, bad))
+
+
+def test_load_config_rejects_exclusion_rule_with_unknown_layer(tmp_path):
+    bad = GOOD.replace(
+        "exclusions: []",
+        """exclusions:
+  - trait_type: Eyes
+    value: Laser
+    excludes:
+      - {trait_type: Wingspan, values: [Crown]}
+""",
+    )
+    with pytest.raises(trait_config.TraitConfigError, match="unknown layer"):
+        trait_config.load_config(_write(tmp_path, bad))
+
+
 def test_load_config_valid_exclusions_still_loads_and_conflicts_works(tmp_path):
     cfg = trait_config.load_config(_write(tmp_path, EXCL))
     laser = [{"trait_type": "Eyes", "value": "Laser"}]
@@ -301,6 +347,29 @@ def test_validate_cli_missing_config_prints_error_and_exits_1(tmp_path, capsys):
 
     missing = str(tmp_path / "does-not-exist.yaml")
     assert main(["--config", missing, "--layers-dir", str(tmp_path)]) == 1
+    assert "ERROR" in capsys.readouterr().out
+
+
+def test_validate_cli_malformed_yaml_exits_1_no_traceback(tmp_path, capsys):
+    from scripts.validate_trait_config import main
+
+    bad = tmp_path / "malformed.yaml"
+    # Unbalanced flow mapping -> yaml.YAMLError (a YAMLError subclass), not
+    # a TraitConfigError -- must be caught by the same consolidated handler.
+    bad.write_text("version: 1\nlayers: [{name: Background, z: 10\n")
+    assert main(["--config", str(bad), "--layers-dir", str(tmp_path)]) == 1
+    assert "ERROR" in capsys.readouterr().out
+
+
+def test_validate_cli_nonexistent_layers_dir_exits_1(tmp_path, capsys):
+    from scripts.validate_trait_config import main
+
+    good = _write(tmp_path, GOOD)
+    missing_layers = str(tmp_path / "does-not-exist")
+    try:
+        assert main(["--config", good, "--layers-dir", missing_layers]) == 1
+    finally:
+        asyncio.set_event_loop(asyncio.new_event_loop())
     assert "ERROR" in capsys.readouterr().out
 
 

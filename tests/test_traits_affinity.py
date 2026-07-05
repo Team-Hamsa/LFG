@@ -18,8 +18,16 @@ os.environ.setdefault("BUNNY_PULL_ZONE", "nft.pullzone.example")
 import asyncio  # noqa: E402
 import sqlite3  # noqa: E402
 
+import pytest  # noqa: E402
+
 from lfg_core import trait_config, traits  # noqa: E402
 from lfg_core.layer_store import LocalLayerStore  # noqa: E402
+
+# Module-level check for real layer art (gitignored; only exists on dev/prod)
+_REPO_LAYERS = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "layers")
+_HAS_LAYER_ART = any(
+    os.path.isdir(os.path.join(_REPO_LAYERS, b)) for b in ("ape", "female", "male", "skeleton")
+)
 
 CFG = """
 version: 1
@@ -90,14 +98,56 @@ def test_mint_selection_respects_affinity(tmp_path):
         asyncio.set_event_loop(asyncio.new_event_loop())
 
 
+def test_mint_raises_when_rules_over_constrain_a_layer(tmp_path):
+    # Every Clothing value for male is marked female-only, so after filtering
+    # the male Clothing layer has zero legal values even though the layer
+    # exists on disk. That's over-constraint, not missing coverage — must
+    # raise instead of silently dropping Clothing from the minted attributes.
+    cfg_text = """
+version: 1
+layers:
+  - {name: Background, z: 10}
+  - {name: Back, z: 20}
+  - {name: Body, z: 30}
+  - {name: Clothing, z: 40}
+  - {name: Mouth, z: 50}
+  - {name: Eyebrows, z: 60}
+  - {name: Eyes, z: 70}
+  - {name: Head, z: 80}
+  - {name: Accessory, z: 90}
+affinity:
+  Clothing:
+    "Summer Dress": [female]
+    "Hoodie": [female]
+"""
+    cfg_path = tmp_path / "trait_config.yaml"
+    cfg_path.write_text(cfg_text)
+    trait_config.reset_config()
+    trait_config.get_config(str(cfg_path))
+    store = LocalLayerStore(_mklayers(tmp_path))
+    conn = sqlite3.connect(":memory:")
+    try:
+        with pytest.raises(ValueError, match="Clothing"):
+            asyncio.run(
+                traits.select_random_attributes(store, "male", conn=conn, network="testnet")
+            )
+    finally:
+        trait_config.reset_config()
+        asyncio.set_event_loop(asyncio.new_event_loop())
+
+
+@pytest.mark.skipif(
+    not _HAS_LAYER_ART,
+    reason="layers/ art is gitignored; the property test needs the real tree (CI has none)",
+)
 def test_property_random_mints_are_affinity_valid():
     import random
 
     trait_config.reset_config()
     cfg = trait_config.get_config()  # real repo config
-    store = LocalLayerStore(  # real repo layers, anchored to repo root (cwd-independent)
-        os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "layers")
-    )
+    store = LocalLayerStore(
+        _REPO_LAYERS
+    )  # real repo layers, anchored to repo root (cwd-independent)
     conn = sqlite3.connect(":memory:")
     rng = random.Random(1234)
     try:
