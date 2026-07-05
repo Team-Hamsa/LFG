@@ -38,3 +38,10 @@ repos:
         language: system
         pass_filenames: false
         always_run: true
+
+      - id: validate-trait-config
+        name: validate trait_config.yaml
+        entry: .venv/bin/python scripts/validate_trait_config.py
+        language: system
+        files: ^(trait_config\.yaml|layers/)
+        pass_filenames: false
