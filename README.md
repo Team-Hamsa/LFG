@@ -54,9 +54,9 @@ Everything below was designed, built, and merged during the Make Waves sprint. P
 
 | Category | Lines added | Lines removed | Net |
 |---|---:|---:|---:|
-| Application code | +16,284 | −2,434 | 13,850 |
-| Tests | +13,280 | −1 | 13,279 |
-| **Total** | **+29,564** | **−2,435** | **27,129** |
+| Application code | +16,669 | −2,434 | 14,235 |
+| Tests | +13,671 | −1 | 13,670 |
+| **Total** | **+30,340** | **−2,435** | **27,905** |
 <!-- hackathon-loc:end -->
 
 ### Shared-Services Spine 
