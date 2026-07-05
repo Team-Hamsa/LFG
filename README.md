@@ -54,12 +54,14 @@ Everything below was designed, built, and merged during the Make Waves sprint. P
 
 | Category | Lines added | Lines removed | Net |
 |---|---:|---:|---:|
-| Application code | +16,284 | −2,434 | 13,850 |
-| Tests | +13,280 | −1 | 13,279 |
-| **Total** | **+29,564** | **−2,435** | **27,129** |
+| Application code | +16,669 | −2,434 | 14,235 |
+| Tests | +13,671 | −1 | 13,670 |
+| **Total** | **+30,340** | **−2,435** | **27,905** |
 <!-- hackathon-loc:end -->
 
-### Shared-Services Spine ([#43](../../issues/43) / [#53](../../issues/53)) — #76, #78–#81
+### Shared-Services Spine 
+**Issues[#43](../../issues/43) / [#53](../../issues/53)**. 
+**PRs [#76](https://github.com/Team-Hamsa/LFG/pull/76#), [#78](https://github.com/Team-Hamsa/LFG/pull/76#), [#77](https://github.com/Team-Hamsa/LFG/pull/77), [#78](https://github.com/Team-Hamsa/LFG/pull/78), [#79](https://github.com/Team-Hamsa/LFG/pull/79), [#80](https://github.com/Team-Hamsa/LFG/pull/80), [#81](https://github.com/Team-Hamsa/LFG/pull/81)**.  
 One `lfg_service` backend now serves every surface through a shared Surface SDK: the REST/WS backend (Plan 1), the `LFGServiceClient` SDK (Plan 2), the Discord bot migration (Plan 3), and the new Telegram surface (Plan 4).
 
 ### Telegram Integration — #81–#83, #92–#98
@@ -70,11 +72,11 @@ One `lfg_service` backend now serves every surface through a shared Surface SDK:
 
 ### Dress-up Trait Economy ([#46](../../issues/46)) — #62, #67, #71, #105, #106
 A full on-ledger trait economy in four phases:
-- **Phase 1** — supply model, genesis reconciliation, conservation auditor (#62).
-- **Phase 2** — on-ledger ops: **Harvest** (burn a character → its traits drop into your Closet), **Assemble** (body + full trait set → re-mint), **Equip** (`NFTokenModify` a loose trait onto a live character) (#67).
-- **Phase 3** — **Dressing Room UI** in the Discord Activity: visual composer with canvas + roster (#71).
-- **Phase 4** — **tradeable trait tokens**: Extract a Closet trait as a standalone transferable NFToken (70% royalty) and Deposit it back, creating a secondary market for individual traits (#106).
-- The per-user **Closet** is a soulbound mutable NFToken with standalone issuance (#105).
+- **Phase 1** — supply model, genesis reconciliation, conservation auditor [#62](https://github.com/Team-Hamsa/LFG/pull/62).
+- **Phase 2** — on-ledger ops: **Harvest** (burn a character → its traits drop into your Closet), **Assemble** (body + full trait set → re-mint), **Equip** (`NFTokenModify` a loose trait onto a live character) [#67](https://github.com/Team-Hamsa/LFG/pull/67).
+- **Phase 3** — **Dressing Room UI** in the Discord Activity: visual composer with canvas + roster [#71](https://github.com/Team-Hamsa/LFG/pull/71),.
+- **Phase 4** — **tradeable trait tokens**: Extract a Closet trait as a standalone transferable NFToken (70% royalty) and Deposit it back, creating a secondary market for individual traits [#106](https://github.com/Team-Hamsa/LFG/pull/106).
+- The per-user **Closet** is a soulbound mutable NFToken with standalone issuance [#105](https://github.com/Team-Hamsa/LFG/pull/105).
 
 ### Ledger History + Leaderboards (not in original scope) — #118–#121
 - Per-network **ledger history database**: raw `account_tx` archive with derived NFT and BRIX events, resumable backfill (95k+ mainnet txs), and live dual-write from the index listeners (#118, #119).
@@ -99,9 +101,9 @@ Per-network SQLite index of every live NFToken (the chain holds multiple tokens 
 
 ## Roadmap — Remaining
 
-- [ ] [#40 Trait selection rules engine (declarative `trait_config.yaml`)](../../issues/40)
+- [ ] [#40 Trait selection rules engine (declarative `trait_config.yaml`)](../../issues/40) In Progress: PRs #123 & #124
 - [ ] [#28 Port generation rules and exclusions from legacy scripts](../../issues/28)
-- [ ] [#30 Cross-body-type trait layer swapping rules](../../issues/30)
+- [ ] [#30 Cross-body-type trait layer swapping rules](../../issues/30) In Progress: PR #125
 - [ ] [#42 Web UI (standalone browser-based mint + collection viewer)](../../issues/42)
 - [ ] [#41 X (Twitter) integration (OAuth2, auto-post on mint)](../../issues/41)
 - [ ] [#44 In-app collection Marketplace (list, browse, buy via Xaman)](../../issues/44)
