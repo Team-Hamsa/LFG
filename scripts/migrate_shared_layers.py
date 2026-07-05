@@ -48,6 +48,23 @@ def _digest(path: str) -> str:
     return h.hexdigest()
 
 
+def _find_by_stem(dirpath: str, stem: str) -> str | None:
+    """Return the actual filename in dirpath whose basename (sans extension)
+    exactly matches stem, case-insensitively only on the extension (the stem
+    itself must match exactly). None if dirpath doesn't exist or nothing
+    matches. Used for the shared/ destination lookup, which — unlike the
+    per-body discovery pass — only ever needs a single stem resolved."""
+    if not os.path.isdir(dirpath):
+        return None
+    for f in sorted(os.listdir(dirpath)):
+        if f.startswith("."):
+            continue
+        s, ext = os.path.splitext(f)
+        if s == stem and ext.lower() in EXTS:
+            return f
+    return None
+
+
 def _rewrite_seasons(
     manifest_path: str,
     moved: list[tuple[str, str]],
@@ -105,31 +122,50 @@ def migrate(
     skipped: list[tuple[str, str, str]] = []
     repaired: list[tuple[str, str]] = []
     for trait_type in trait_types:
-        values: set[str] = set()
+        # value -> body -> actual filename found for that body (case
+        # preserved). Discovery matches extensions case-insensitively (real
+        # trees carry "Sunset.PNG" alongside "sunset.png"), so the filename
+        # actually on disk must be recorded here and reused for every
+        # downstream lookup — reconstructing `value + ext` with only the
+        # lowercase members of EXTS silently misses uppercase-extension files
+        # on case-sensitive filesystems.
+        value_files: dict[str, dict[str, str]] = {}
         for body in BODIES:
             d = os.path.join(layers_dir, body, trait_type)
-            if os.path.isdir(d):
-                values |= {
-                    os.path.splitext(f)[0]
-                    for f in os.listdir(d)
-                    if os.path.splitext(f)[1].lower() in EXTS and not f.startswith(".")
-                }
+            if not os.path.isdir(d):
+                continue
+            for f in os.listdir(d):
+                if f.startswith("."):
+                    continue
+                stem, ext = os.path.splitext(f)
+                if ext.lower() not in EXTS:
+                    continue
+                by_body = value_files.setdefault(stem, {})
+                prior = by_body.get(body)
+                if prior is not None:
+                    prior_ext = os.path.splitext(prior)[1].lower()
+                    if EXTS.index(prior_ext) <= EXTS.index(ext.lower()):
+                        continue  # keep the higher-priority extension already recorded
+                by_body[body] = f
+
         dest_dir = os.path.join(layers_dir, "shared", trait_type)
-        for value in sorted(values):
+        for value in sorted(value_files):
+            body_files = value_files[value]
             paths = []
             for body in BODIES:
-                for ext in EXTS:
-                    p = os.path.join(layers_dir, body, trait_type, value + ext)
-                    if os.path.isfile(p):
-                        paths.append(p)
-                        break
+                fname = body_files.get(body)
+                if fname is None:
+                    continue
+                p = os.path.join(layers_dir, body, trait_type, fname)
+                if os.path.isfile(p):
+                    paths.append(p)
 
             existing_dest = None
-            for ext in EXTS:
-                p = os.path.join(dest_dir, value + ext)
+            dest_fname = _find_by_stem(dest_dir, value)
+            if dest_fname is not None:
+                p = os.path.join(dest_dir, dest_fname)
                 if os.path.isfile(p):
                     existing_dest = p
-                    break
 
             if len(paths) < len(BODIES):
                 if existing_dest is not None:
@@ -138,7 +174,12 @@ def migrate(
                     # per-body copy was removed (os.remove failed or the
                     # process crashed mid-loop). Verify whatever remains
                     # against the shared copy rather than stranding it
-                    # forever as "not-in-all-bodies".
+                    # forever as "not-in-all-bodies". An empty `paths` proves
+                    # nothing (all([]) is vacuously True) — never conclude
+                    # "repaired" without at least one verified survivor.
+                    if not paths:
+                        skipped.append((trait_type, value, "not-found"))
+                        continue
                     shared_digest = _digest(existing_dest)
                     if all(_digest(p) == shared_digest for p in paths):
                         if not dry_run:

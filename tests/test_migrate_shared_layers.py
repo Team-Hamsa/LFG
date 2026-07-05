@@ -356,3 +356,71 @@ def test_dry_run_does_not_repair_partial_crash_state(tmp_path):
 
     assert ("Background", "Sunset") in result["repaired"]
     assert (tmp_path / "male" / "Background" / "Sunset.png").exists()  # untouched
+
+
+# ---------------------------------------------------------------------------
+# Case-insensitive discovery must use the actual on-disk filename everywhere
+# downstream, not a reconstructed `value + ext` guess (review finding).
+# ---------------------------------------------------------------------------
+
+
+def test_uppercase_extension_migrates_preserving_actual_filename(tmp_path):
+    # Real trees can carry "Sunset.PNG" instead of "sunset.png". Discovery
+    # matches extensions case-insensitively, but on a case-sensitive
+    # filesystem a naive `value + ".png"` reconstruction never finds the file
+    # again — it must be looked up by its recorded actual name.
+    for body in ("ape", "female", "male", "skeleton"):
+        d = tmp_path / body / "Background"
+        d.mkdir(parents=True)
+        (d / "Sunset.PNG").write_bytes(b"same")
+
+    result = migrate(str(tmp_path), ["Background"], dry_run=False)
+
+    assert ("Background", "Sunset") in result["moved"]
+    assert (tmp_path / "shared" / "Background" / "Sunset.PNG").exists()  # case preserved
+    for body in ("ape", "female", "male", "skeleton"):
+        assert not (tmp_path / body / "Background" / "Sunset.PNG").exists()
+
+
+def test_repair_branch_requires_nonempty_survivor_set(tmp_path):
+    # Discovery can record a value for a body (matching listdir + extension)
+    # whose path later fails the isfile check (here: a directory squatting on
+    # the filename, standing in for any real-world race between discovery and
+    # path-reconstruction). That leaves `paths` empty for every body. With a
+    # pre-existing shared/ copy, `all(... for p in paths)` over an empty list
+    # is vacuously True — the old code reported this as "repaired" and
+    # rewrote seasons.json even though nothing was actually verified or
+    # removed. It must instead be skipped with a distinct reason and the
+    # manifest must be left alone.
+    for body in ("ape", "female", "male", "skeleton"):
+        d = tmp_path / body / "Background"
+        d.mkdir(parents=True)
+        (d / "Sunset.png").mkdir()  # not a real file: isfile() is False
+
+    shared_dir = tmp_path / "shared" / "Background"
+    shared_dir.mkdir(parents=True)
+    (shared_dir / "Sunset.png").write_bytes(b"same")
+
+    manifest_path = tmp_path / "seasons.json"
+    manifest = {
+        "ape/Background/Sunset": 1,
+        "female/Background/Sunset": 1,
+        "male/Background/Sunset": 1,
+        "skeleton/Background/Sunset": 1,
+    }
+    manifest_path.write_text(json.dumps(manifest))
+
+    result = migrate(
+        str(tmp_path), ["Background"], dry_run=False, seasons_manifest=str(manifest_path)
+    )
+
+    assert ("Background", "Sunset") not in result["repaired"]
+    assert ("Background", "Sunset") not in result["moved"]
+    assert any(
+        t == "Background" and v == "Sunset" and why != "repaired" for t, v, why in result["skipped"]
+    )
+    # Never invented a repair: the bogus per-body directories are untouched
+    # and the manifest was never rewritten.
+    for body in ("ape", "female", "male", "skeleton"):
+        assert (tmp_path / body / "Background" / "Sunset.png").is_dir()
+    assert json.loads(manifest_path.read_text()) == manifest
