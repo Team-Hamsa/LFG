@@ -19,6 +19,12 @@ a shim; do NOT resurrect it. The live equivalent leak is Task 1.
 The detect-link gap (Task 1) is losing mainnet hackathon credit today.
 
 ### Task 1: tag `generate_static_payment_link` (the live leak)
+
+> **Cross-spec note (#27):** this fix is INTERIM. The QR/deep-link routing spec
+> (`2026-07-05-qr-deeplink-routing-design.md` §5.1) owns the end state: the
+> user-facing detect fallback is retired (retry-then-error) once its device
+> matrix gates pass, which also retires the detect-hex SourceTag assertion this
+> task adds to `tests/test_xumm_source_tag.py`. If F1 lands first, drop this item.
 - [ ] Test (extend `tests/test_xumm_source_tag.py`): call
       `generate_static_payment_link("r...")`, split the `/detect/` hex tail,
       `json.loads(bytes.fromhex(tail))`, assert `SourceTag == 2606160021`.
