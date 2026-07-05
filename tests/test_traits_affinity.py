@@ -23,6 +23,12 @@ import pytest  # noqa: E402
 from lfg_core import trait_config, traits  # noqa: E402
 from lfg_core.layer_store import LocalLayerStore  # noqa: E402
 
+# Module-level check for real layer art (gitignored; only exists on dev/prod)
+_REPO_LAYERS = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "layers")
+_HAS_LAYER_ART = any(
+    os.path.isdir(os.path.join(_REPO_LAYERS, b)) for b in ("ape", "female", "male", "skeleton")
+)
+
 CFG = """
 version: 1
 layers:
@@ -130,14 +136,18 @@ affinity:
         asyncio.set_event_loop(asyncio.new_event_loop())
 
 
+@pytest.mark.skipif(
+    not _HAS_LAYER_ART,
+    reason="layers/ art is gitignored; the property test needs the real tree (CI has none)",
+)
 def test_property_random_mints_are_affinity_valid():
     import random
 
     trait_config.reset_config()
     cfg = trait_config.get_config()  # real repo config
-    store = LocalLayerStore(  # real repo layers, anchored to repo root (cwd-independent)
-        os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "layers")
-    )
+    store = LocalLayerStore(
+        _REPO_LAYERS
+    )  # real repo layers, anchored to repo root (cwd-independent)
     conn = sqlite3.connect(":memory:")
     rng = random.Random(1234)
     try:
