@@ -1,9 +1,10 @@
 # tests/test_swap_offer_recovery.py
-# Covers _create_offer_and_accept's two robustness paths (#136): the reminted
-# replacement offer must (a) be SKIPPED when the recipient is the issuer/signing
-# account itself — the token is already in their wallet and a self-offer is
-# invalid (temREDUNDANT) — and (b) RETRY a transient create_nft_offer failure
-# rather than stranding the token with "contact an administrator".
+# Covers _create_offer_and_accept's self-offer guard (#136): the reminted
+# replacement offer must be SKIPPED when the recipient is the issuer/signing
+# account itself — mint_nft always mints Account=SIGNING_ACCOUNT, so the token
+# is already in that wallet and a self-directed sell offer is invalid
+# (temREDUNDANT). A genuine offer-creation failure still surfaces the admin
+# error with no partial result.
 #
 # Env-guard preamble: importing lfg_core.config freezes its constants at import
 # time; set the same defaults test_smoke.py uses so collection order can't
@@ -89,20 +90,18 @@ def test_self_issuer_recipient_skips_offer_and_marks_delivered(monkeypatch):
     assert "accept_deeplink" not in r
 
 
-def test_transient_offer_failure_is_retried_then_succeeds(monkeypatch):
-    """A create_nft_offer that fails twice then succeeds must NOT strand."""
-    attempts = {"n": 0}
+def test_non_issuer_recipient_creates_priced_offer(monkeypatch):
+    """Recipient != issuer: create the sell offer and append the accept link."""
 
     async def fake_offer(nft_id, dest, amount=None):
-        attempts["n"] += 1
-        return None if attempts["n"] < swap_flow._OFFER_MAX_ATTEMPTS else "OFFER123"
+        assert dest == "rUSERyyyyyyyyyyyyyyyyyyyyyyyyyy"
+        return "OFFER123"
 
     async def fake_accept(offer_id, return_url=None):
         return {"qr_url": "q", "xumm_url": "x"}
 
     monkeypatch.setattr(xrpl_ops, "create_nft_offer", fake_offer)
     monkeypatch.setattr(xumm_ops, "create_accept_offer_payload", fake_accept)
-    monkeypatch.setattr(swap_flow, "_OFFER_RETRY_BASE_DELAY", 0)  # no real sleeps
     monkeypatch.setattr(config, "SIGNING_ACCOUNT", "rISSUERxxxxxxxxxxxxxxxxxxxxxxxx")
 
     s = _make_session("rUSERyyyyyyyyyyyyyyyyyyyyyyyyyy")
@@ -110,7 +109,6 @@ def test_transient_offer_failure_is_retried_then_succeeds(monkeypatch):
     ok = _run(swap_flow._create_offer_and_accept(s, item))
 
     assert ok is True
-    assert attempts["n"] == swap_flow._OFFER_MAX_ATTEMPTS
     assert item["offer_id"] == "OFFER123"
     assert s.error is None
     assert len(s.results) == 1
@@ -118,16 +116,13 @@ def test_transient_offer_failure_is_retried_then_succeeds(monkeypatch):
     assert s.results[0]["modified"] is False
 
 
-def test_persistent_offer_failure_fails_after_max_attempts(monkeypatch):
-    """Every attempt failing: fail with the admin message, no partial result."""
-    attempts = {"n": 0}
+def test_offer_creation_failure_surfaces_admin_error(monkeypatch):
+    """create_nft_offer returning None fails with the admin message, no result."""
 
     async def fake_offer(*a, **k):
-        attempts["n"] += 1
         return None
 
     monkeypatch.setattr(xrpl_ops, "create_nft_offer", fake_offer)
-    monkeypatch.setattr(swap_flow, "_OFFER_RETRY_BASE_DELAY", 0)
     monkeypatch.setattr(config, "SIGNING_ACCOUNT", "rISSUERxxxxxxxxxxxxxxxxxxxxxxxx")
 
     s = _make_session("rUSERyyyyyyyyyyyyyyyyyyyyyyyyyy")
@@ -135,6 +130,5 @@ def test_persistent_offer_failure_fails_after_max_attempts(monkeypatch):
     ok = _run(swap_flow._create_offer_and_accept(s, item))
 
     assert ok is False
-    assert attempts["n"] == swap_flow._OFFER_MAX_ATTEMPTS  # retried, not one-shot
     assert "offer failed" in (s.error or "")
     assert s.results == []
