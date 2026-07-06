@@ -5,6 +5,12 @@
 // Outside Discord (no frame_id query param) it runs in a degraded dev mode
 // without Discord auth, so the API will return 401 — useful only for UI work.
 
+// Marketplace (#44 Task 10) pure-function helpers: row mapping, filter/sort,
+// money math, and wizard-step labels. Kept in a separate module so they're
+// unit-testable under Node (tests/test_market_pure_js.py) without a browser
+// — see webapp/client/market_pure.js's own header for the full rationale.
+import * as marketPure from './market_pure.js';
+
 const params = new URLSearchParams(window.location.search);
 const insideDiscord = params.has('frame_id');
 // Telegram injects a signed launch payload as Telegram.WebApp.initData; the
@@ -154,7 +160,7 @@ async function setupTelegram() {
 
 const ALL_PANELS = ['register-panel', 'mint-panel', 'flow-panel',
                     'swap-panel', 'swap-traits-panel', 'swap-result-panel',
-                    'dressup-panel'];
+                    'dressup-panel', 'market-panel', 'market-list-form-panel'];
 
 function showPanel(id) {
   for (const panel of ALL_PANELS) {
@@ -1371,6 +1377,391 @@ async function commitAssemble(edition, chosen) {
   }
 }
 
+// --- Marketplace (#44 Task 10) ---
+//
+// IA: one market-panel with Browse (Characters|Traits kind toggle, trait/
+// price filters, price-sorted sticker-card grid) and Mine (my listings with
+// Cancel; unlisted characters + wallet trait tokens with List; loose Closet
+// traits with Sell -> the two-step wizard) — spec §Q8. Every action (list,
+// cancel, buy, the trait-sell wizard) is driven by the single marketFlow()
+// start->QR->poll helper below, reusing flow-panel/showFlow exactly like
+// the mint/swap/economy flows (no new QR machinery).
+
+const MARKET_STATUS_PATH = {
+  list: (id) => `/api/market/list/${id}`,
+  cancel: (id) => `/api/market/cancel/${id}`,
+  buy: (id) => `/api/market/buy/${id}`,
+  trait_list: (id) => `/api/market/trait/list/${id}`,
+};
+
+const marketState = { tab: 'browse', kind: 'character' };
+let marketPendingItem = null; // the character/trait/closet-asset the list-form panel is acting on
+let marketFlowTimer = null;
+
+function highlightTabs(containerId, dataKey, activeValue) {
+  for (const btn of el(containerId).querySelectorAll('.lb-chip')) {
+    const active = btn.dataset[dataKey] === activeValue;
+    btn.classList.toggle('active', active);
+    btn.setAttribute('aria-selected', String(active));
+  }
+}
+
+async function openMarket() {
+  showPanel('market-panel');
+  marketState.tab = 'browse';
+  el('market-browse').hidden = false;
+  el('market-mine').hidden = true;
+  highlightTabs('market-tabs', 'tab', 'browse');
+  highlightTabs('market-kind', 'kind', marketState.kind);
+  await loadMarketBrowse();
+}
+
+function switchMarketTab(tab) {
+  marketState.tab = tab;
+  highlightTabs('market-tabs', 'tab', tab);
+  el('market-browse').hidden = tab !== 'browse';
+  el('market-mine').hidden = tab !== 'mine';
+  if (tab === 'browse') loadMarketBrowse();
+  else loadMarketMine();
+}
+
+// A trait-image URL from the backend (/api/layer?...) is already same-origin
+// and must NOT go through the CDN proxy (imgUrl); a character's `image` is an
+// absolute CDN URL and must. Mirrors the same distinction renderCanvas/
+// renderCloset draw between layerSrc() and imgUrl() elsewhere in this file.
+function marketRowImgSrc(vm) {
+  if (!vm.image) return null;
+  return vm.kind === 'trait' ? vm.image : imgUrl(vm.image);
+}
+
+function renderMarketGrid(rows) {
+  const grid = el('market-grid');
+  const empty = el('market-empty');
+  grid.replaceChildren();
+  if (!rows.length) { empty.hidden = false; return; }
+  empty.hidden = true;
+  for (const row of rows) {
+    const vm = marketPure.mapListingRow(row);
+    const card = document.createElement('button');
+    card.className = 'nft-card';
+    const img = document.createElement('img');
+    img.src = marketRowImgSrc(vm) || BLANK_IMG;
+    img.alt = '';
+    const name = document.createElement('span');
+    name.className = 'cap';
+    name.textContent = vm.title;
+    const price = document.createElement('span');
+    price.className = 'market-card-price';
+    price.textContent = `${vm.amountXrp} XRP`;
+    name.appendChild(price);
+    card.replaceChildren(img, name);
+    card.onclick = () => openBuyFlow(row);
+    grid.appendChild(card);
+  }
+}
+
+async function loadMarketBrowse() {
+  highlightTabs('market-kind', 'kind', marketState.kind);
+  const grid = el('market-grid');
+  showGridSkeletons(grid);
+  el('market-empty').hidden = true;
+  const slot = el('market-trait-slot').value.trim();
+  const value = el('market-trait-value').value.trim();
+  const traits = slot && value ? [marketPure.traitFilterToken(slot, value)] : [];
+  const pairs = marketPure.buildListingsParams({
+    kind: marketState.kind,
+    traits,
+    minXrp: el('market-min-xrp').value.trim(),
+    maxXrp: el('market-max-xrp').value.trim(),
+    sort: el('market-sort').value,
+    limit: 24,
+    offset: 0,
+  });
+  const qs = new URLSearchParams();
+  for (const [k, v] of pairs) qs.append(k, v);
+  try {
+    const data = await api(`/api/market/listings?${qs.toString()}`);
+    renderMarketGrid(data.rows || []);
+  } catch (e) {
+    grid.replaceChildren();
+    showError(e.message);
+  }
+}
+
+// Populate the trait-slot filter <select> from the swap matrix's slot list
+// (the same swappable-traits data the Trait Swapper already fetches via
+// /api/nfts) so it reads "trait selects" rather than free text, without a
+// second wallet-specific economy fetch.
+async function ensureMarketTraitSlotOptions() {
+  const sel = el('market-trait-slot');
+  if (sel.options.length > 1) return; // already populated this session
+  try {
+    const data = await api('/api/nfts');
+    for (const slot of data.swappable_traits || []) {
+      const o = document.createElement('option');
+      o.value = slot; o.textContent = slot;
+      sel.appendChild(o);
+    }
+  } catch (e) { /* filter still works with free-text value matching */ }
+}
+
+function renderChipList(containerEl, emptyEl, entries, actionLabel, onAction) {
+  containerEl.replaceChildren();
+  if (!entries.length) { emptyEl.hidden = false; return; }
+  emptyEl.hidden = true;
+  for (const entry of entries) {
+    const chip = document.createElement('div');
+    chip.className = 'trait-chip';
+    const img = document.createElement('img');
+    img.src = entry.imgSrc || BLANK_IMG;
+    img.alt = '';
+    const label = document.createElement('span');
+    label.className = 'trait-chip-label';
+    label.textContent = entry.label;
+    const btn = document.createElement('button');
+    btn.className = 'chip-action';
+    btn.textContent = actionLabel;
+    btn.onclick = () => onAction(entry.payload);
+    chip.replaceChildren(img, label, btn);
+    containerEl.appendChild(chip);
+  }
+}
+
+// Best-effort trait art for Mine's unlisted-traits/loose-Closet chips: reuses
+// the active Dressing Room character's body (if the economy state happens to
+// be loaded already) exactly like renderTraitStrip() does; falls back to no
+// image rather than fetching economy state just for a thumbnail.
+function mineTraitImgSrc(slot, value) {
+  if (!economyState) return null;
+  const char = activeChar();
+  return char && layerComplete(char.body, value) ? layerSrc(char.body, slot, value) : null;
+}
+
+function renderMineGroups(data) {
+  const listingEntries = data.listings.map((row) => {
+    const vm = marketPure.mapListingRow(row);
+    return {
+      imgSrc: marketRowImgSrc(vm),
+      label: `${vm.title} — ${vm.amountXrp} XRP`,
+      payload: row,
+    };
+  });
+  renderChipList(el('mine-listings'), el('mine-listings-empty'), listingEntries, 'Cancel', cancelListing);
+
+  const charEntries = data.unlisted_characters.map((c) => {
+    const label = c.nft_number != null ? `#${c.nft_number}` : c.nft_id;
+    return {
+      imgSrc: c.image ? imgUrl(c.image) : null,
+      label,
+      payload: { nftId: c.nft_id, label, wizard: false },
+    };
+  });
+  renderChipList(el('mine-characters'), el('mine-characters-empty'), charEntries, 'List', openListForm);
+
+  const traitEntries = data.unlisted_trait_tokens.map((t) => ({
+    imgSrc: mineTraitImgSrc(t.slot, t.value),
+    label: `${t.slot}: ${t.value}`,
+    payload: { nftId: t.nft_id, slot: t.slot, value: t.value, label: `${t.slot}: ${t.value}`, wizard: false },
+  }));
+  renderChipList(el('mine-traits'), el('mine-traits-empty'), traitEntries, 'List', openListForm);
+
+  const closetEntries = data.closet_assets.map((a) => ({
+    imgSrc: mineTraitImgSrc(a.slot, a.value),
+    label: `${a.slot}: ${a.value} ×${a.count}`,
+    payload: { slot: a.slot, value: a.value, label: `${a.slot}: ${a.value}`, wizard: true },
+  }));
+  renderChipList(el('mine-closet'), el('mine-closet-empty'), closetEntries, 'Sell', openListForm);
+}
+
+async function loadMarketMine() {
+  try {
+    const data = await api('/api/market/mine');
+    renderMineGroups(data);
+  } catch (e) {
+    showError(e.message);
+  }
+}
+
+// --- marketFlow: the single start -> QR -> poll driver (spec §Q8), reused
+// by list/cancel/buy/trait-sell. `render(sessionDict)` maps that op's
+// session shape to a showFlow() view; marketFlow itself knows nothing
+// op-specific beyond routing to the right status endpoint by `kind`. ---
+
+async function promptClosetRequired() {
+  const go = await confirmDialog({
+    title: 'Closet required',
+    text: marketPure.CLOSET_REQUIRED_MESSAGE,
+    confirmLabel: 'Go to Closet',
+  });
+  if (go) openDressup();
+}
+
+function pollMarketFlow(kind, sessionId, render) {
+  clearTimeout(marketFlowTimer);
+  const path = MARKET_STATUS_PATH[kind](sessionId);
+  const tick = async () => {
+    if (el('flow-panel').hidden) return; // user navigated away
+    let s;
+    try {
+      s = await api(path);
+    } catch (e) {
+      marketFlowTimer = setTimeout(tick, 3000); // transient; keep polling
+      return;
+    }
+    showFlow(render(s));
+    if (!marketPure.isMarketTerminal(s.state)) marketFlowTimer = setTimeout(tick, 3000);
+  };
+  marketFlowTimer = setTimeout(tick, 3000);
+}
+
+async function marketFlow(kind, startPath, body, render) {
+  clearTimeout(marketFlowTimer);
+  showPanel('flow-panel');
+  showFlow({ title: 'Starting…', spinner: true });
+  let s;
+  try {
+    s = await api(startPath, { method: 'POST', body: JSON.stringify(body) });
+  } catch (e) {
+    if (e.message === 'closet_required') {
+      showPanel('market-panel');
+      promptClosetRequired();
+      return;
+    }
+    showFlow({ title: '❌ Could not start', text: e.message, done: true });
+    return;
+  }
+  showFlow(render(s));
+  if (!marketPure.isMarketTerminal(s.state)) pollMarketFlow(kind, s.id, render);
+}
+
+function marketListRender(s) {
+  if (s.state === 'pending') {
+    return { title: '⏳ Confirming', text: 'Signature received — waiting for the ledger to confirm…', spinner: true };
+  }
+  if (s.state === 'done') {
+    return { title: '🎉 Listed!', text: 'Your listing is live on the Marketplace.', done: true };
+  }
+  if (s.state === 'awaiting_signature') {
+    return { title: '📋 List for sale', text: 'Scan to sign the sell offer in Xaman.', qrData: s.qr_url, link: s.xumm_url };
+  }
+  return { title: '❌ Listing failed', text: s.error || 'Something went wrong.', done: true };
+}
+
+function marketCancelRender(s) {
+  if (s.state === 'done') {
+    return { title: '✅ Listing cancelled', text: 'It is no longer for sale.', done: true };
+  }
+  if (s.state === 'awaiting_signature') {
+    return { title: '🗑️ Cancel listing', text: 'Scan to sign the cancellation in Xaman.', qrData: s.qr_url, link: s.xumm_url };
+  }
+  return { title: '❌ Cancel failed', text: s.error || 'Something went wrong.', done: true };
+}
+
+function marketBuyRender(listingKind) {
+  return (s) => {
+    if (s.state === 'pending') {
+      return { title: '⏳ Confirming', text: 'Signature received — waiting for the ledger to confirm…', spinner: true };
+    }
+    if (s.state === 'done') {
+      return {
+        title: '🎉 Purchase complete!',
+        text: listingKind === 'trait' ? 'Sold — added to your Closet.' : 'The NFT is on its way to your wallet.',
+        done: true,
+      };
+    }
+    if (s.state === 'awaiting_signature') {
+      return { title: '💳 Confirm purchase', text: s.instruction || 'Scan to sign the purchase in Xaman.', qrData: s.qr_url, link: s.xumm_url };
+    }
+    if (s.reason === 'listing_unavailable') {
+      return { title: '⚠️ No longer available', text: 'That listing was just sold or cancelled.', done: true };
+    }
+    return { title: '❌ Purchase failed', text: s.error || 'Something went wrong.', done: true };
+  };
+}
+
+function marketTraitListRender(s) {
+  const step = marketPure.traitWizardStepLabel(s.state);
+  if (s.state === 'extract_pending') {
+    return { title: `🎟️ ${step}`, text: 'Preparing your trait token…', spinner: true };
+  }
+  if (s.state === 'extract_done') {
+    return { title: `🎟️ ${step}`, text: 'Scan to accept your trait token in Xaman.', qrData: s.extract_qr_url, link: s.extract_xumm_url };
+  }
+  if (s.state === 'list_pending') {
+    return { title: `📤 ${step}`, text: 'Scan to sign the sell offer in Xaman.', qrData: s.list_qr_url, link: s.list_xumm_url };
+  }
+  if (s.state === 'listed') {
+    return { title: '🎉 Listed!', text: 'Your trait is live on the Marketplace.', done: true };
+  }
+  return { title: '❌ Sell failed', text: s.error || 'Something went wrong.', done: true };
+}
+
+async function openBuyFlow(row) {
+  const vm = marketPure.mapListingRow(row);
+  const royalty = marketPure.computeRoyalty(vm.amountXrp);
+  const ok = await confirmDialog({
+    title: `Buy ${vm.title}?`,
+    text: `${vm.amountXrp} XRP — seller nets ${royalty.receiveXrp} XRP (93% — 7% collection royalty).`,
+    confirmLabel: 'Buy now',
+  });
+  if (!ok) return;
+  await marketFlow('buy', '/api/market/buy', { offer_index: row.offer_index }, marketBuyRender(row.kind));
+}
+
+async function cancelListing(row) {
+  const vm = marketPure.mapListingRow(row);
+  const ok = await confirmDialog({
+    title: 'Cancel this listing?',
+    text: `${vm.title} — ${vm.amountXrp} XRP will no longer be for sale.`,
+    confirmLabel: 'Cancel listing',
+  });
+  if (!ok) return;
+  await marketFlow('cancel', '/api/market/cancel', { offer_index: row.offer_index }, marketCancelRender);
+}
+
+function openListForm(item) {
+  marketPendingItem = item;
+  showPanel('market-list-form-panel');
+  el('market-list-form-title').textContent = item.wizard ? 'Sell a trait' : 'List for sale';
+  el('market-list-form-sub').textContent = item.label;
+  el('market-list-price').value = '';
+  el('market-list-royalty').hidden = true;
+}
+
+function updateListFormRoyaltyPreview() {
+  const out = el('market-list-royalty');
+  const check = marketPure.validatePrice(el('market-list-price').value.trim());
+  if (check.ok) {
+    out.hidden = false;
+    out.textContent = marketPure.royaltyDisclosure(el('market-list-price').value.trim());
+  } else {
+    out.hidden = true;
+  }
+}
+
+async function submitListForm() {
+  const item = marketPendingItem;
+  if (!item) return;
+  const price = el('market-list-price').value.trim();
+  const check = marketPure.validatePrice(price);
+  if (!check.ok) { showError(check.error); return; }
+  const ok = await confirmDialog({
+    title: item.wizard ? 'Post this trait for sale?' : 'List for sale?',
+    text: marketPure.royaltyDisclosure(price),
+    confirmLabel: item.wizard ? 'Post listing' : 'List it',
+  });
+  if (!ok) return;
+  if (item.wizard) {
+    await marketFlow(
+      'trait_list', '/api/market/trait/list',
+      { slot: item.slot, value: item.value, price_xrp: price },
+      marketTraitListRender,
+    );
+  } else {
+    await marketFlow('list', '/api/market/list', { nft_id: item.nftId, price_xrp: price }, marketListRender);
+  }
+}
+
 // Header logo with a text-wordmark fallback. The Activity's CSP forbids
 // inline handlers, so the swap is wired here; the load may already have
 // failed before this module ran, hence the complete/naturalWidth check.
@@ -1400,6 +1791,26 @@ async function main() {
   el('swap-done-btn').onclick = () => showMintHome();
   el('change-wallet-btn').onclick = () => startSignin();
   el('flow-done-btn').onclick = () => { showMintHome(); };
+
+  // --- Marketplace (#44 Task 10) ---
+  el('market-btn').onclick = () => { ensureMarketTraitSlotOptions(); openMarket(); };
+  el('market-back-btn').onclick = () => showMintHome();
+  el('market-tabs').addEventListener('click', (e) => {
+    const btn = e.target.closest('.lb-chip');
+    if (!btn) return;
+    switchMarketTab(btn.dataset.tab);
+  });
+  el('market-kind').addEventListener('click', (e) => {
+    const btn = e.target.closest('.lb-chip');
+    if (!btn || btn.dataset.kind === marketState.kind) return;
+    marketState.kind = btn.dataset.kind;
+    highlightTabs('market-kind', 'kind', marketState.kind);
+    loadMarketBrowse();
+  });
+  el('market-filter-apply').onclick = () => loadMarketBrowse();
+  el('market-list-price').addEventListener('input', updateListFormRoyaltyPreview);
+  el('market-list-confirm-btn').onclick = submitListForm;
+  el('market-list-cancel-btn').onclick = () => showPanel('market-panel');
 
   // Dev live-reload: runs even in degraded mode (no frame_id).
   try {

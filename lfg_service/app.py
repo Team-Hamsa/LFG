@@ -52,7 +52,7 @@ from lfg_service.auth import require_service_token, surface_for_token
 from lfg_service.events import Event, InMemoryEventBus
 from lfg_service.telegram_auth import validate_init_data
 from user_db import create_users_table, get_user, register_user
-from webapp import economy_api, mock_economy
+from webapp import economy_api, mock_economy, mock_market
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s")
 
@@ -637,6 +637,23 @@ async def handle_leaderboard(request):
 
 # --- In-app marketplace (#44): browse + mine + history ---
 
+
+def _use_market_mock() -> bool:
+    """Whether the market handlers below should serve webapp.mock_market's
+    in-memory fixture instead of touching sqlite/XRPL/XUMM. Defaults to
+    config.WEBAPP_DEV_MODE (the real dev-mode mock harness, Task 10) but is
+    its OWN indirection — not a direct `config.WEBAPP_DEV_MODE` check —
+    because several Task 7-9 tests (tests/test_market_api.py,
+    tests/test_market_trait_flow.py) already set WEBAPP_DEV_MODE=True purely
+    to get require_wallet's dev-mode wallet-injection convenience (mirrors
+    tests/test_swap_cross_body_api.py's identical trick) while exercising
+    these handlers' REAL sqlite/XUMM-mocked logic against a seeded onchain_env
+    fixture. Those tests monkeypatch this function directly to keep that
+    convenience without also getting the mock substitution; ordinary dev-mode
+    usage (`WEBAPP_DEV_MODE=1` env var, no monkeypatch) is unaffected."""
+    return config.WEBAPP_DEV_MODE
+
+
 _MarketKey = tuple[str, str]  # (network, kind)
 _MARKET_CACHE: dict[_MarketKey, tuple[float, list[dict[str, Any]]]] = {}
 _MARKET_CACHE_TTL = 60.0
@@ -820,6 +837,17 @@ async def handle_market_listings(request: web.Request) -> web.Response:
     if offset is None:
         return web.json_response({"error": "bad offset"}, status=400)
 
+    if _use_market_mock():
+        rows = mock_market.INSTANCE.browse(
+            kind=kind,
+            trait_filters=trait_filters,
+            min_drops=min_drops,
+            max_drops=max_drops,
+            sort=sort,
+        )
+        page = rows[offset : offset + limit]
+        return web.json_response({"rows": page, "total": len(rows)})
+
     # Per-kind network resolution (see _market_network): the cache key carries
     # the resolved network, so a testnet-trait entry and a mainnet-character
     # entry coexist; cardinality stays <= networks x kinds by construction.
@@ -944,6 +972,8 @@ async def handle_market_mine(request):  # untyped: matches require_wallet's othe
     + unlisted live characters + unlisted wallet trait tokens + loose Closet
     traits, grouped so the UI can offer list/cancel/sell-from-closet per item."""
     wallet = request["wallet"]
+    if _use_market_mock():
+        return web.json_response(mock_market.INSTANCE.mine(wallet))
     data = await asyncio.get_event_loop().run_in_executor(
         None,
         _compute_mine_data,
@@ -1003,6 +1033,13 @@ async def handle_market_history(request: web.Request) -> web.Response:
     nft_id = request.query.get("nft_id")
     slot = request.query.get("slot")
     value = request.query.get("value")
+
+    if _use_market_mock():
+        if nft_id:
+            return web.json_response(mock_market.INSTANCE.history(nft_id=nft_id))
+        if slot and value:
+            return web.json_response(mock_market.INSTANCE.history(slot=slot, value=value))
+        return web.json_response({"error": "nft_id or slot+value required"}, status=400)
 
     if nft_id:
         # nft_events live in history_<XRPL_NETWORK>.db (character-backed).
@@ -1145,6 +1182,12 @@ async def handle_market_list_start(request):
         # must 400 cleanly on all of them, not just the two it advertises.
         return web.json_response({"error": f"bad price_xrp: {e}"}, status=400)
 
+    if _use_market_mock():
+        try:
+            return web.json_response(mock_market.INSTANCE.start_list(wallet, nft_id, amount_drops))
+        except mock_market.MockMarketError as e:
+            return web.json_response({"error": str(e)}, status=409)
+
     loop = asyncio.get_event_loop()
     membership = await loop.run_in_executor(
         None,
@@ -1203,6 +1246,13 @@ async def handle_market_cancel_start(request):
     if not offer_index:
         return web.json_response({"error": "offer_index is required"}, status=400)
 
+    if _use_market_mock():
+        try:
+            return web.json_response(mock_market.INSTANCE.start_cancel(wallet, offer_index))
+        except mock_market.MockMarketError as e:
+            status = {"not found": 404, "not your listing": 403}.get(str(e), 400)
+            return web.json_response({"error": str(e)}, status=status)
+
     loop = asyncio.get_event_loop()
     found = await loop.run_in_executor(None, _find_listing_any_network, offer_index)
     if found is None or not found[1]["is_live"]:
@@ -1251,6 +1301,15 @@ async def handle_market_buy_start(request):
     offer_index = body.get("offer_index")
     if not offer_index:
         return web.json_response({"error": "offer_index is required"}, status=400)
+
+    if _use_market_mock():
+        try:
+            return web.json_response(mock_market.INSTANCE.start_buy(wallet, offer_index))
+        except mock_market.MockMarketError as e:
+            status = {"not found": 404, "listing_unavailable": 410, "closet_required": 403}.get(
+                str(e), 400
+            )
+            return web.json_response({"error": str(e)}, status=status)
 
     loop = asyncio.get_event_loop()
     found = await loop.run_in_executor(None, _find_listing_any_network, offer_index)
@@ -1309,6 +1368,13 @@ async def handle_market_buy_start(request):
 def _make_market_status_handler(prefix: str):
     @require_auth
     async def handler(request):
+        if _use_market_mock():
+            try:
+                return web.json_response(
+                    mock_market.INSTANCE.status(request.match_info["session_id"])
+                )
+            except KeyError:
+                return web.json_response({"error": "not found"}, status=404)
         session = market_sessions.get(request.match_info["session_id"])
         if (
             not session
@@ -1566,6 +1632,14 @@ async def handle_market_trait_list_start(request):
         # Broad on purpose: see handle_market_list_start's identical guard.
         return web.json_response({"error": f"bad price_xrp: {e}"}, status=400)
 
+    if _use_market_mock():
+        try:
+            return web.json_response(
+                mock_market.INSTANCE.start_trait_list(wallet, slot, value, amount_drops)
+            )
+        except mock_market.MockMarketError as e:
+            return web.json_response({"error": str(e)}, status=400)
+
     _prune_sessions(market_sessions, market_flow.TERMINAL_STATES)
     if _active_session(market_sessions, market_flow.TERMINAL_STATES, user["id"], _platform(user)):
         return web.json_response({"error": "a market action is already in progress"}, status=409)
@@ -1602,6 +1676,11 @@ async def handle_market_trait_list_status(request):
     exactly (same finalize-row write) once the wizard reaches its own List
     step, since advance_trait_sell_session delegates that step to
     advance_list_session directly."""
+    if _use_market_mock():
+        try:
+            return web.json_response(mock_market.INSTANCE.status(request.match_info["session_id"]))
+        except KeyError:
+            return web.json_response({"error": "not found"}, status=404)
     session = market_sessions.get(request.match_info["session_id"])
     if (
         not session

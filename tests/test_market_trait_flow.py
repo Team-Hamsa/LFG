@@ -104,6 +104,12 @@ def _reopen(onchain_path):
 def market_wallet(monkeypatch):
     monkeypatch.setattr(server.config, "WEBAPP_DEV_MODE", True)
     monkeypatch.setattr(mock_economy, "DEV_OWNER", SELLER)
+    # WEBAPP_DEV_MODE=True above is only for require_wallet's dev-mode wallet
+    # injection (request["wallet"] = mock_economy.DEV_OWNER); these tests
+    # exercise the REAL market handler logic (Task 10 added a mock-market
+    # substitution gated on the same flag — see app._use_market_mock's
+    # docstring), so pin that substitution off independently.
+    monkeypatch.setattr(server, "_use_market_mock", lambda: False)
     server.market_sessions.clear()
     yield
     server.market_sessions.clear()

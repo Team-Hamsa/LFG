@@ -408,6 +408,7 @@ def test_mine_requires_wallet_401(onchain_env, monkeypatch):
 
 def test_mine_returns_four_groups(onchain_env, monkeypatch):
     monkeypatch.setattr(server.config, "WEBAPP_DEV_MODE", True)
+    monkeypatch.setattr(server, "_use_market_mock", lambda: False)
     from webapp import mock_economy
 
     monkeypatch.setattr(mock_economy, "DEV_OWNER", SELLER)
@@ -636,6 +637,7 @@ def test_split_network_browse_per_kind_networks(split_network_env):
 
 def test_split_network_mine_all_four_groups(split_network_env, monkeypatch):
     monkeypatch.setattr(server.config, "WEBAPP_DEV_MODE", True)
+    monkeypatch.setattr(server, "_use_market_mock", lambda: False)
     from webapp import mock_economy
 
     monkeypatch.setattr(mock_economy, "DEV_OWNER", SELLER)
@@ -703,6 +705,12 @@ class _StatusReq:
 def market_wallet(monkeypatch):
     monkeypatch.setattr(server.config, "WEBAPP_DEV_MODE", True)
     monkeypatch.setattr(mock_economy, "DEV_OWNER", SELLER)
+    # WEBAPP_DEV_MODE=True above is only for require_wallet's dev-mode wallet
+    # injection (request["wallet"] = mock_economy.DEV_OWNER); these tests
+    # exercise the REAL market handler logic (Task 10 added a mock-market
+    # substitution gated on the same flag — see app._use_market_mock's
+    # docstring), so pin that substitution off independently.
+    monkeypatch.setattr(server, "_use_market_mock", lambda: False)
     server.market_sessions.clear()
     yield
     server.market_sessions.clear()
