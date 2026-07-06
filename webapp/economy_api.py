@@ -142,6 +142,18 @@ def open_conn() -> sqlite3.Connection:
     return _economy_deps.open_index(config.ECONOMY_NETWORK)
 
 
+def build_settlement_deps(conn: sqlite3.Connection) -> economy_flow.EconomyDeps:
+    """The real EconomyDeps for a service-triggered settlement deposit (Task 9,
+    spec §Q7: burn a sold trait token back into the buyer's Closet). Same
+    wiring as `start_deposit`'s, minus the session-scheduling plumbing —
+    settlement runs `run_deposit` to completion in the caller (the buy status
+    handler or the settlement sweep) rather than as a client-polled session, so
+    there is no EconomyWebSession to hand back. Exists as its own function (a
+    thin alias for `_economy_deps.build_economy_deps`) purely as a monkeypatch
+    seam for tests."""
+    return _economy_deps.build_economy_deps(conn)
+
+
 def _load_owned_character(
     conn: sqlite3.Connection, owner: str, nft_id: str
 ) -> nft_index.OnchainNft:

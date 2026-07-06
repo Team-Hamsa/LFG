@@ -1272,6 +1272,10 @@ def test_buy_status_ledger_race_failure_maps_reason(onchain_env, market_wallet, 
 def test_buy_status_trait_purchase_triggers_settlement_seam(
     onchain_env, market_wallet, monkeypatch
 ):
+    """Task 9: a validated trait buy wires into _settle_trait_sale with the
+    buyer/nft_id/offer_index/network — the real settlement behavior (mocked
+    EconomyDeps, mark_settled, the sweep) is covered end-to-end in
+    tests/test_market_trait_flow.py; this pins the buy-status call site."""
     conn = _reopen(onchain_env)
     upsert_trait_token(conn, TRAIT1, SELLER, "Hat", "Wizard Hat")
     _seed_listing(conn, nft_id=TRAIT1, kind="trait", seller=SELLER, slot="Hat", value="Wizard Hat")
@@ -1288,9 +1292,14 @@ def test_buy_status_trait_purchase_triggers_settlement_seam(
 
     monkeypatch.setattr(server.xrpl_ops, "get_tx", fake_get_tx)
     calls = []
-    monkeypatch.setattr(server.market_flow, "trigger_trait_settlement", lambda oi: calls.append(oi))
+
+    async def fake_settle(buyer, nft_id, offer_index, network):
+        calls.append((buyer, nft_id, offer_index, network))
+        return True
+
+    monkeypatch.setattr(server, "_settle_trait_sale", fake_settle)
     _run(server.handle_market_buy_status(_StatusReq(s.id)))
-    assert calls == ["A" * 64]
+    assert calls == [(s.wallet_address, TRAIT1, "A" * 64, "testnet")]
 
 
 def test_buy_status_character_purchase_does_not_trigger_settlement(
@@ -1312,10 +1321,10 @@ def test_buy_status_character_purchase_does_not_trigger_settlement(
 
     monkeypatch.setattr(server.xrpl_ops, "get_tx", fake_get_tx)
 
-    def boom(oi):
+    async def boom(buyer, nft_id, offer_index, network):
         raise AssertionError("must not trigger settlement for a character sale")
 
-    monkeypatch.setattr(server.market_flow, "trigger_trait_settlement", boom)
+    monkeypatch.setattr(server, "_settle_trait_sale", boom)
     resp = _run(server.handle_market_buy_status(_StatusReq(s.id)))
     assert resp.status == 200
 

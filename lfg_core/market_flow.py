@@ -46,7 +46,23 @@ DONE = "done"
 FAILED = "failed"
 UNKNOWN = "unknown"  # tx lookup gave up/failed (List/Buy only) — self-heals later
 
-TERMINAL_STATES = {DONE, FAILED, UNKNOWN}
+# --- Trait sell wizard (Task 9, spec §Q7): Extract (existing Phase-4 flow,
+# Xaman signature 1) -> the plain List flow on the freshly-owned token (Xaman
+# signature 2), driven together as one polled TraitSellSession so the frontend
+# can treat "sell a trait out of my Closet" as one action with two QR steps.
+EXTRACT_PENDING = "extract_pending"  # the ExtractSession's background task is still running
+EXTRACT_DONE = "extract_done"  # extract finished; showing the accept-offer QR (signature 1)
+LIST_PENDING = "list_pending"  # signature 1 confirmed; showing the sell-offer QR (signature 2)
+LISTED = "listed"  # terminal success (named for the wizard's own status field)
+
+# economy_flow.RUNNING mirrored as a literal: market_flow has never imported
+# economy_flow and TraitSellSession.extract_session is deliberately duck-typed
+# (read via .state/.error/.nft_id/.accept, the same shape EconomyWebSession.inner
+# already carries) so this module's dependency graph stays flat. DONE/FAILED
+# below already match economy_flow's own "done"/"failed" constants verbatim.
+_EXTRACT_RUNNING = "running"
+
+TERMINAL_STATES = {DONE, FAILED, UNKNOWN, LISTED}
 
 # ~30s at typical frontend poll intervals (spec §Q4: "bounded at 10 polls (~30s)").
 MAX_FINALIZE_POLLS = 10
@@ -322,14 +338,150 @@ async def advance_buy_session(
     return "stale"
 
 
-def trigger_trait_settlement(offer_index: str) -> None:
-    """Seam for Task 9 (spec §Q7): a confirmed trait sale needs the sold
-    trait token burned back into the buyer's Closet (settlement). This is
-    deliberately a no-op — Task 9 implements the real trigger (most likely
-    scheduling `run_deposit` on the buyer's behalf and `mark_settled` on
-    success). Called exactly once per confirmed trait sale, from the buy
-    status handler in lfg_service/app.py.
+@dataclass
+class TraitSellSession:
+    """The composite "sell a trait out of my Closet" wizard (spec §Q7):
+    Extract (existing Phase-4 `economy_flow.ExtractSession`, run in the
+    background by `economy_api.start_extract` — Xaman signature 1) then the
+    plain Q4 List flow on the freshly-owned token (Xaman signature 2).
 
-    TODO(Task 9): kick off trait-sale settlement here.
-    """
+    `extract_session` is intentionally `Any` (duck-typed): see the
+    `_EXTRACT_RUNNING` comment above for why this module doesn't import
+    economy_flow. `_list_session`/`_extract_payload_uuid` are private working
+    state for `advance_trait_sell_session`, not part of the client-facing
+    `to_dict()`."""
+
+    discord_id: str
+    wallet_address: str
+    slot: str
+    value: str
+    amount_drops: int
+    extract_session: Any
+    platform: str = "discord"
+    id: str = field(default_factory=lambda: uuid.uuid4().hex)
+    created_at: float = field(default_factory=time.time)
+    state: str = EXTRACT_PENDING
+    error: str | None = None
+    nft_id: str | None = None
+    offer_index: str | None = None
+    extract_qr_url: str | None = None
+    extract_xumm_url: str | None = None
+    list_qr_url: str | None = None
+    list_xumm_url: str | None = None
+    _extract_payload_uuid: str | None = field(default=None, repr=False)
+    _list_session: Any = field(default=None, repr=False)
+    kind: str = "trait_list"
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "id": self.id,
+            "platform": self.platform,
+            "state": self.state,
+            "error": self.error,
+            "nft_id": self.nft_id,
+            "offer_index": self.offer_index,
+            "extract_qr_url": self.extract_qr_url,
+            "extract_xumm_url": self.extract_xumm_url,
+            "list_qr_url": self.list_qr_url,
+            "list_xumm_url": self.list_xumm_url,
+        }
+
+
+async def advance_trait_sell_session(
+    session: TraitSellSession,
+    *,
+    get_payload_status: Any = None,
+    create_sell_offer_payload: Any = None,
+    get_tx: Any = None,
+) -> dict[str, Any] | None:
+    """Advance the trait-sell wizard through Extract -> List. Returns a dict
+    ready for `market_store.upsert_listing(conn, MarketListing(**dict))` the
+    poll the embedded List step validates a tesSUCCESS NFTokenCreateOffer
+    (mirrors `advance_list_session`'s own contract exactly — this delegates
+    to it for that step); None on every other poll.
+
+    See `advance_list_session`'s docstring for why the XUMM/tx callables are
+    resolved at call time rather than bound as default argument values."""
+    get_payload_status = get_payload_status or xumm_ops.get_payload_status
+    create_sell_offer_payload = create_sell_offer_payload or xumm_ops.create_sell_offer_payload
+    get_tx = get_tx or xrpl_ops.get_tx
+
+    if session.state == EXTRACT_PENDING:
+        extract = session.extract_session
+        if extract.state == _EXTRACT_RUNNING:
+            return None  # still minting/decrementing the Closet in the background
+        if extract.state != DONE:
+            session.state = FAILED
+            session.error = extract.error or "extract failed"
+            return None  # no listing, no orphan state beyond run_extract's own fail-safe
+        session.nft_id = extract.nft_id
+        accept = extract.accept or {}
+        session.extract_qr_url = accept.get("qr_url")
+        session.extract_xumm_url = accept.get("xumm_url")
+        session._extract_payload_uuid = accept.get("uuid")
+        session.state = EXTRACT_DONE
+        return None
+
+    if session.state == EXTRACT_DONE:
+        if session.nft_id is None:
+            # Unreachable in practice: EXTRACT_PENDING always sets nft_id
+            # before transitioning here. Guarded for mypy's benefit and as a
+            # fail-closed backstop rather than trusting the invariant blindly.
+            session.state = FAILED
+            session.error = "internal error: extract completed with no nft_id"
+            return None
+        # A self-offer skip (issuer-owned test/admin runs) carries no payload
+        # uuid to wait on — proceed straight to listing.
+        if session._extract_payload_uuid:
+            s = await get_payload_status(session._extract_payload_uuid)
+            if s is None:
+                return None  # transient XUMM API error; try again next poll
+            if s.get("expired"):
+                session.state = FAILED
+                session.error = "signing request for the trait handoff expired"
+                return None
+            if not s.get("signed"):
+                return None  # still waiting on signature 1
+
+        payload = await create_sell_offer_payload(
+            session.wallet_address, session.nft_id, str(session.amount_drops)
+        )
+        if not payload:
+            session.state = FAILED
+            session.error = "could not reach Xaman to list the extracted trait"
+            return None
+        session.list_qr_url = payload["qr_url"]
+        session.list_xumm_url = payload["xumm_url"]
+        inner = ListSession(
+            discord_id=session.discord_id,
+            wallet_address=session.wallet_address,
+            nft_id=session.nft_id,
+            listing_kind="trait",
+            amount_drops=session.amount_drops,
+            slot=session.slot,
+            value=session.value,
+            platform=session.platform,
+        )
+        inner.qr_url = payload["qr_url"]
+        inner.xumm_url = payload["xumm_url"]
+        inner.payload_uuid = payload.get("uuid")
+        session._list_session = inner
+        session.state = LIST_PENDING
+        return None
+
+    if session.state == LIST_PENDING:
+        inner = session._list_session
+        row = await advance_list_session(
+            inner, get_payload_status=get_payload_status, get_tx=get_tx
+        )
+        if inner.state in (FAILED, UNKNOWN):
+            session.state = FAILED
+            session.error = inner.error
+            return None
+        if row is not None:
+            session.offer_index = inner.offer_index
+            session.state = LISTED
+            return row
+        return None
+
     return None

@@ -18,6 +18,7 @@ import os
 import sqlite3
 import sys
 import time
+import traceback
 from typing import Any, cast
 from urllib.parse import quote as urlquote
 
@@ -1336,7 +1337,17 @@ def _make_market_status_handler(prefix: str):
                     None, _close_listing_sync, session.network, session.offer_index, "sold"
                 )
                 if session.listing_kind == "trait":
-                    market_flow.trigger_trait_settlement(session.offer_index)
+                    # Primary settlement trigger (spec §Q7): burn the sold
+                    # trait token back into the buyer's Closet right away.
+                    # Awaited (not fire-and-forget) — run_deposit's own
+                    # fail-closed/journaling guarantees mean there is nothing
+                    # to gain from detaching it, and awaiting keeps the
+                    # outcome deterministic for both callers and tests. A
+                    # failure here leaves settled=0 (already set by
+                    # close_listing above) for the settlement sweep to retry.
+                    await _settle_trait_sale(
+                        session.wallet_address, session.nft_id, session.offer_index, session.network
+                    )
             elif outcome == "stale":
                 await loop.run_in_executor(
                     None, _close_listing_sync, session.network, session.offer_index, "stale"
@@ -1350,6 +1361,155 @@ def _make_market_status_handler(prefix: str):
 handle_market_list_status = _make_market_status_handler("list")
 handle_market_cancel_status = _make_market_status_handler("cancel")
 handle_market_buy_status = _make_market_status_handler("buy")
+
+
+# --- Task 9 (spec §Q7): trait-sale settlement (burn sold trait -> buyer's Closet) ---
+
+
+async def _settle_trait_sale(buyer: str, nft_id: str, offer_index: str, network: str) -> bool:
+    """Run a Closet deposit on the buyer's behalf for one sold trait listing:
+    exactly `economy_flow.run_deposit` (the shipped Phase-4 flow, unchanged),
+    fail-closed on-ledger owner verify -> issuer burn -> Closet credit. On
+    success, flips `market_listings.settled` to 1; on any failure (including a
+    buyer with no active Closet — economy_flow's own precondition) the row is
+    left exactly as `close_listing(sold)` set it (settled=0) and
+    `run_deposit` has already journaled the failure to ECONOMY_RECORDS_DIR for
+    recovery — this function adds no journal of its own. Returns whether
+    settlement completed, so callers (the buy status handler, the sweep) can
+    decide what to do next without a second DB read."""
+    conn = nft_index.init_db(nft_index.index_db_path(network))
+    economy_store.init_economy_schema(conn)
+    market_store.init_db(conn)
+    try:
+        deps = economy_api.build_settlement_deps(conn)
+        deposit_session = economy_flow.DepositSession(owner=buyer, nft_id=nft_id)
+        await economy_flow.run_deposit(deposit_session, deps)
+        if deposit_session.state == economy_flow.DONE:
+            market_store.mark_settled(conn, offer_index)
+            return True
+        return False
+    finally:
+        conn.close()
+
+
+# Bounded retry for the settlement sweep: a buyer with no active Closet fails
+# run_deposit's precondition cleanly EVERY sweep pass (the token just sits in
+# their wallet as an ordinary trait token, recoverable via a manual Deposit
+# once they do claim a Closet) — without a bound this would retry forever.
+_SWEEP_MAX_ATTEMPTS = 5
+_SWEEP_PERIOD_SECONDS = 120
+# offer_index -> consecutive failed sweep attempts. In-memory only (not
+# persisted): a service restart resets every count to 0, so a mid-flight
+# restart costs a stuck row a few retries rather than falsely reading as
+# "already exhausted". This deployment restarts rarely (pm2, no rolling
+# restarts) and a durable counter buys nothing but a crash-loop that could
+# exhaust the budget in seconds instead of ~10 minutes.
+_sweep_attempts: dict[str, int] = {}
+
+
+def _write_sweep_giveup_record(offer_index: str, nft_id: str, buyer: str) -> None:
+    """Journal (ECONOMY_RECORDS_DIR, same convention as economy_flow's own
+    per-op records) that the sweep is no longer retrying this sale. The token
+    is NOT lost — it is an ordinary trait token in `buyer`'s wallet; they can
+    register/claim a Closet and Deposit it manually. `settled` stays 0 (spec
+    §Q7): this is a durable breadcrumb for an admin/support to find, not a
+    change to the row's meaning."""
+    try:
+        os.makedirs(config.ECONOMY_RECORDS_DIR, exist_ok=True)
+        path = os.path.join(
+            config.ECONOMY_RECORDS_DIR, f"trait-settlement-giveup-{offer_index}.json"
+        )
+        with open(path, "w") as f:
+            json.dump(
+                {
+                    "offer_index": offer_index,
+                    "nft_id": nft_id,
+                    "buyer": buyer,
+                    "attempts": _SWEEP_MAX_ATTEMPTS,
+                    "status": "abandoned",
+                },
+                f,
+                indent=2,
+            )
+    except Exception:
+        logging.error(
+            f"failed to write sweep giveup record for {offer_index}: {traceback.format_exc()}"
+        )
+
+
+async def settle_pending_trait_sales() -> None:
+    """Backstop for `_settle_trait_sale` (spec §Q7): scans
+    `market_listings(kind='trait', closed_reason='sold', settled=0)` on the
+    trait-economy network and retries settlement for each. Heals service
+    restarts mid-settlement and third-party ledger fills (a direct
+    NFTokenAcceptOffer from outside this app — the listener still marks the
+    row sold/unsettled with no buyer of record in `market_listings` itself,
+    so the buyer is resolved from `trait_tokens.owner`, which the listener
+    keeps current from the AcceptOffer it observed)."""
+    network = _market_network("trait")
+    conn = nft_index.init_db(nft_index.index_db_path(network))
+    economy_store.init_economy_schema(conn)
+    market_store.init_db(conn)
+    try:
+        rows = market_store.unsettled_trait_sales(conn)
+        owners = {nid: owner for nid, owner, _slot, _value in economy_store.read_trait_tokens(conn)}
+    finally:
+        conn.close()
+
+    for row in rows:
+        offer_index = row["offer_index"]
+        if _sweep_attempts.get(offer_index, 0) >= _SWEEP_MAX_ATTEMPTS:
+            continue  # already given up + journaled on a previous pass
+        buyer = owners.get(row["nft_id"])
+        if buyer is None:
+            # The listener hasn't (yet) recorded an owner for this token —
+            # transient lag, not a precondition failure. Try again next sweep
+            # without counting an attempt.
+            continue
+        try:
+            settled = await _settle_trait_sale(buyer, row["nft_id"], offer_index, network)
+        except Exception:
+            logging.error(f"settlement sweep crashed for {offer_index}: {traceback.format_exc()}")
+            settled = False
+        if settled:
+            _sweep_attempts.pop(offer_index, None)
+            continue
+        _sweep_attempts[offer_index] = _sweep_attempts.get(offer_index, 0) + 1
+        if _sweep_attempts[offer_index] >= _SWEEP_MAX_ATTEMPTS:
+            logging.warning(
+                f"settlement sweep giving up on {offer_index} (nft {row['nft_id']}, buyer "
+                f"{buyer}) after {_SWEEP_MAX_ATTEMPTS} attempts"
+            )
+            _write_sweep_giveup_record(offer_index, row["nft_id"], buyer)
+
+
+async def _settlement_sweep_loop() -> None:
+    while True:
+        try:
+            await settle_pending_trait_sales()
+        except Exception:
+            logging.error(f"settlement sweep loop crashed: {traceback.format_exc()}")
+        await asyncio.sleep(_SWEEP_PERIOD_SECONDS)
+
+
+async def _start_settlement_sweep(app: web.Application) -> None:
+    """aiohttp on_startup hook: schedule the settlement sweep as a background
+    task for the lifetime of the app. Gated on ECONOMY_ENABLED — with the
+    trait economy off there are no trait listings to settle."""
+    if not config.ECONOMY_ENABLED:
+        return
+    app["settlement_sweep_task"] = asyncio.get_event_loop().create_task(_settlement_sweep_loop())
+
+
+async def _stop_settlement_sweep(app: web.Application) -> None:
+    task = app.get("settlement_sweep_task")
+    if task is None:
+        return
+    task.cancel()
+    try:
+        await task
+    except asyncio.CancelledError:
+        pass
 
 
 def _economy_disabled_response():
@@ -1369,6 +1529,93 @@ def require_economy(handler):
         return await handler(request)
 
     return wrapper
+
+
+# --- Task 9 (spec §Q7): trait sell wizard — Extract then List, one action ---
+
+
+@require_economy
+@require_wallet
+async def handle_market_trait_list_start(request):
+    """POST /api/market/trait/list {slot, value, price_xrp}: the composite
+    "sell a trait out of my Closet" wizard — the existing Phase-4 Extract flow
+    (Xaman signature 1) followed by the plain Q4 List flow on the
+    freshly-owned token (Xaman signature 2), driven together as one polled
+    TraitSellSession (see market_flow.advance_trait_sell_session).
+
+    price_xrp is validated FIRST (same guard as handle_market_list_start) so a
+    bad price never starts an extract. Extract's own preconditions (active
+    Closet, the (slot, value) trait actually loose in it) surface as
+    economy_api.EconomyError -> 400 with no session started; a failure inside
+    the running extract surfaces later as the session's own error with no
+    listing ever created — an extracted-but-never-listed token is a perfectly
+    ordinary wallet trait token, recoverable under /api/market/mine."""
+    user = request["user"]
+    wallet = request["wallet"]
+    body = await request.json()
+    slot = body.get("slot")
+    value = body.get("value")
+    price_xrp = body.get("price_xrp")
+    if not slot or not value or not isinstance(price_xrp, str):
+        return web.json_response(
+            {"error": "slot, value, and price_xrp (string) are required"}, status=400
+        )
+    try:
+        amount_drops = int(market_ops.xrp_to_drops_str(price_xrp))
+    except Exception as e:
+        # Broad on purpose: see handle_market_list_start's identical guard.
+        return web.json_response({"error": f"bad price_xrp: {e}"}, status=400)
+
+    _prune_sessions(market_sessions, market_flow.TERMINAL_STATES)
+    if _active_session(market_sessions, market_flow.TERMINAL_STATES, user["id"], _platform(user)):
+        return web.json_response({"error": "a market action is already in progress"}, status=409)
+
+    try:
+        extract_ws = await economy_api.start_extract(
+            user["id"], wallet, {"slot": slot, "value": value}
+        )
+    except economy_api.EconomyError as e:
+        return web.json_response({"error": str(e)}, status=400)
+    except (KeyError, ValueError) as e:
+        return web.json_response({"error": f"missing or invalid field: {e}"}, status=400)
+    except Exception as e:
+        logging.error(f"trait sell wizard failed to start extract: {e}")
+        return web.json_response({"error": "could not start the action"}, status=502)
+
+    session = market_flow.TraitSellSession(
+        discord_id=user["id"],
+        wallet_address=wallet,
+        slot=slot,
+        value=value,
+        amount_drops=amount_drops,
+        extract_session=extract_ws.inner,
+        platform=_platform(user),
+    )
+    market_sessions[session.id] = session
+    return web.json_response(session.to_dict())
+
+
+@require_auth
+async def handle_market_trait_list_status(request):
+    """GET /api/market/trait/list/{session_id}: advance + report the
+    TraitSellSession — mirrors _make_market_status_handler's "list" branch
+    exactly (same finalize-row write) once the wizard reaches its own List
+    step, since advance_trait_sell_session delegates that step to
+    advance_list_session directly."""
+    session = market_sessions.get(request.match_info["session_id"])
+    if (
+        not session
+        or session.discord_id != request["user"]["id"]
+        or getattr(session, "platform", "discord") != _platform(request["user"])
+        or getattr(session, "kind", "trait_list") != "trait_list"
+    ):
+        return web.json_response({"error": "not found"}, status=404)
+
+    row = await market_flow.advance_trait_sell_session(session)
+    if row is not None:
+        network = _market_network("trait")
+        await asyncio.get_event_loop().run_in_executor(None, _write_listing_row, network, row)
+    return web.json_response(session.to_dict())
 
 
 @require_economy
@@ -2002,6 +2249,8 @@ def create_app() -> web.Application:
     app.router.add_get("/api/market/cancel/{session_id}", handle_market_cancel_status)
     app.router.add_post("/api/market/buy", handle_market_buy_start)
     app.router.add_get("/api/market/buy/{session_id}", handle_market_buy_status)
+    app.router.add_post("/api/market/trait/list", handle_market_trait_list_start)
+    app.router.add_get("/api/market/trait/list/{session_id}", handle_market_trait_list_status)
     app.router.add_post("/api/swap", handle_swap_start)
     app.router.add_get("/api/swap/{session_id}", handle_swap_status)
     app.router.add_get("/api/qr.png", handle_qr)
@@ -2024,6 +2273,8 @@ def create_app() -> web.Application:
     app.router.add_get("/__dev/reload", handle_dev_reload)
     app.router.add_get("/", handle_index)
     app.router.add_static("/", CLIENT_DIR)
+    app.on_startup.append(_start_settlement_sweep)
+    app.on_cleanup.append(_stop_settlement_sweep)
     return app
 
 
