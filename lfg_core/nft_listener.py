@@ -367,16 +367,45 @@ def _owner_of(conn: sqlite3.Connection, nft_id: str) -> str | None:
     return row[0] if row is not None else None
 
 
+def _accept_new_owner(
+    tx: dict[str, Any], deleted_offers: list[dict[str, Any]], seller: str | None
+) -> str | None:
+    """The account that RECEIVES the NFT in an NFTokenAcceptOffer, read from the
+    transaction itself (authoritative, index-independent). In a brokered accept
+    both a sell and a buy offer are deleted and the new owner is the buy offer's
+    `Owner`; in a direct sell-offer accept only the sell offer is deleted and the
+    accepting account (`tx.Account`) is the new owner. Returns None only when the
+    result can't be resolved to a real non-seller account (e.g. a malformed tx)."""
+    buy_wrapper = next(
+        (
+            w
+            for w in deleted_offers
+            if not (
+                int((w.get("FinalFields") or {}).get("Flags") or 0) & market_ops.LSF_SELL_NFTOKEN
+            )
+        ),
+        None,
+    )
+    if buy_wrapper is not None:
+        new_owner = (buy_wrapper.get("FinalFields") or {}).get("Owner")
+    else:
+        new_owner = tx.get("Account")
+    if isinstance(new_owner, str) and new_owner and new_owner != seller:
+        return new_owner
+    return None
+
+
 def _apply_offer_accept(conn: sqlite3.Connection, tx: dict[str, Any]) -> None:
     """NFTokenAcceptOffer: close the deleted SELL offer's market_listings row
     as sold (close_listing itself sets settled=0 for a trait-kind row), then
     delist any OTHER live row for the same nft_id whose seller no longer
-    matches the current owner-of-record -- a stale sell offer left behind by
-    the previous owner can no longer be honoured."""
+    matches the new owner -- a stale sell offer left behind by the previous
+    owner can no longer be honoured."""
+    deleted = _deleted_nft_offer_nodes(tx)
     sell_wrapper = next(
         (
             w
-            for w in _deleted_nft_offer_nodes(tx)
+            for w in deleted
             if int((w.get("FinalFields") or {}).get("Flags") or 0) & market_ops.LSF_SELL_NFTOKEN
         ),
         None,
@@ -387,30 +416,29 @@ def _apply_offer_accept(conn: sqlite3.Connection, tx: dict[str, Any]) -> None:
     final = sell_wrapper.get("FinalFields") or {}
     nft_id = final.get("NFTokenID")
     seller = final.get("Owner")
-    # Resolve the post-transfer owner (the buyer) BEFORE closing so the sold
-    # row can carry the buyer durably — the settlement sweep needs it after
-    # run_deposit deletes the token's trait_tokens ownership row.
-    owner = _owner_of(conn, nft_id) if isinstance(nft_id, str) and nft_id else None
-    # Only persist the buyer when it is KNOWN to be the post-sale owner. A
-    # genuine accept transfers ownership away from the seller, so owner==seller
-    # (or unresolved) means the owner refresh was stale/failed — persisting the
-    # seller would send the settlement sweep (which prefers the persisted buyer)
-    # to the wrong wallet. Leave buyer NULL and let the sweep fall back to the
-    # fresher trait_tokens.owner.
-    buyer = owner if (owner is not None and owner != seller) else None
+    # Resolve the post-transfer owner (the buyer) from the ACCEPT TX itself so
+    # the sold row can carry the buyer durably — the settlement sweep needs it
+    # after run_deposit deletes the token's trait_tokens ownership row. Reading
+    # the tx (not the local owner index) makes this independent of whether the
+    # listener's owner refresh has landed: a stale index can no longer leave the
+    # row without a durable buyer, nor persist the seller by mistake.
+    buyer = _accept_new_owner(tx, deleted, seller)
     if isinstance(offer_index, str) and offer_index:
         market_store.close_listing(conn, offer_index, "sold", buyer=buyer)
 
     if not isinstance(nft_id, str) or not nft_id:
         return
-    if owner is None:
+    # Stale-delist comparison uses the same tx-derived new owner when known,
+    # falling back to the owner index only if the tx couldn't resolve it.
+    new_owner = buyer if buyer is not None else _owner_of(conn, nft_id)
+    if new_owner is None:
         return  # unresolved owner; leave other rows alone rather than guess
     rows = conn.execute(
         "SELECT offer_index, seller FROM market_listings WHERE nft_id=? AND is_live=1",
         (nft_id,),
     ).fetchall()
-    for other_offer_index, seller in rows:
-        if seller != owner:
+    for other_offer_index, other_seller in rows:
+        if other_seller != new_owner:
             market_store.close_listing(conn, other_offer_index, "stale")
 
 

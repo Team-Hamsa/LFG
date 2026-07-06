@@ -357,13 +357,12 @@ def test_accept_trait_closes_sold_with_settled_zero():
     assert row["buyer"] == "rBuyer"
 
 
-def test_accept_does_not_persist_seller_as_buyer_when_owner_refresh_stale():
-    """If the owner refresh failed (or hasn't run), the local index still shows
-    the SELLER as owner. A genuine sale transfers ownership away from the seller,
-    so owner==seller signals a stale/unreliable resolution — we must NOT persist
-    the seller into market_listings.buyer (that would misdirect the settlement
-    sweep, which prefers the persisted buyer, at the wrong wallet). Leave buyer
-    NULL so the sweep falls back to trait_tokens.owner once it's fresh."""
+def test_accept_persists_buyer_from_tx_even_when_owner_refresh_stale():
+    """The durable buyer comes from the ACCEPT TX (tx.Account for a direct sell
+    accept), not the local owner index. Even when the owner refresh failed/ran
+    stale (trait_tokens.owner still == seller), the sold row must carry the real
+    accepting account as buyer — never NULL (which would strand the settlement
+    sweep) and never the seller (which would misdirect it)."""
     conn = _conn()
     nft_id = _our_nft_id(20)
     _seed_trait(conn, nft_id, owner="rSeller", slot="Hat", value="Cap")
@@ -377,6 +376,7 @@ def test_accept_does_not_persist_seller_as_buyer_when_owner_refresh_stale():
     _run(
         nft_listener.apply_market_tx(
             conn,
+            # _accept_tx sets tx.Account == "rBuyer" (the accepting account)
             _accept_tx(nft_id=nft_id, offer_index="OFF_STALE_BUYER", seller="rSeller"),
         )
     )
@@ -387,7 +387,48 @@ def test_accept_does_not_persist_seller_as_buyer_when_owner_refresh_stale():
     ).fetchone()
     assert row["is_live"] == 0
     assert row["closed_reason"] == "sold"
-    assert row["buyer"] is None  # seller NOT persisted as buyer
+    assert row["buyer"] == "rBuyer"  # resolved from the tx, index-independent
+
+
+def test_accept_brokered_persists_buy_offer_owner_not_broker():
+    """In a brokered accept the tx.Account is the BROKER, not the buyer; the new
+    owner is the buy offer's Owner. That account (not the broker) must be
+    persisted as the durable buyer."""
+    conn = _conn()
+    nft_id = _our_nft_id(21)
+    _seed_trait(conn, nft_id, owner="rSeller", slot="Hat", value="Cap")
+    _run(
+        nft_listener.apply_market_tx(
+            conn, _sell_offer_create_tx(nft_id, seller="rSeller", offer_index="OFF_BROKERED")
+        )
+    )
+    buy_offer = {
+        "LedgerEntryType": "NFTokenOffer",
+        "LedgerIndex": "BUYOFF",
+        "FinalFields": {
+            "NFTokenID": nft_id,
+            "Owner": "rRealBuyer",
+            "Flags": 0,  # buy offer (sell bit unset)
+            "Amount": "1000000",
+        },
+    }
+    _run(
+        nft_listener.apply_market_tx(
+            conn,
+            # tx.Account defaults to "rBuyer" here, standing in for the broker
+            _accept_tx(
+                nft_id=nft_id,
+                offer_index="OFF_BROKERED",
+                seller="rSeller",
+                buyer_offer=buy_offer,
+            ),
+        )
+    )
+
+    conn.row_factory = sqlite3.Row
+    row = conn.execute("SELECT * FROM market_listings WHERE offer_index='OFF_BROKERED'").fetchone()
+    assert row["closed_reason"] == "sold"
+    assert row["buyer"] == "rRealBuyer"  # buy offer Owner, not the broker
 
 
 def test_accept_delists_other_live_rows_for_stale_seller():
