@@ -1634,6 +1634,12 @@ async function marketFlow(kind, startPath, body, render) {
   if (!marketPure.isMarketTerminal(s.state)) pollMarketFlow(kind, s.id, render);
 }
 
+// qrData is the string re-encoded into the branded QR by qrUrl()/`/api/qr.png`.
+// It MUST be the Xaman deep link (`xumm_url` = the payload's next.always,
+// xumm.app/sign/<uuid>), NOT `qr_url` (XUMM's refs.qr_png IMAGE url): encoding
+// an image url into a QR makes a scan open a browser tab showing that image —
+// which is itself a QR — instead of opening the sign request in Xaman. Every
+// working flow (mint/swap) passes the deep link here; the marketplace must too.
 function marketListRender(s) {
   if (s.state === 'pending') {
     return { title: '⏳ Confirming', text: 'Signature received — waiting for the ledger to confirm…', spinner: true };
@@ -1642,7 +1648,7 @@ function marketListRender(s) {
     return { title: '🎉 Listed!', text: 'Your listing is live on the Marketplace.', done: true };
   }
   if (s.state === 'awaiting_signature') {
-    return { title: '📋 List for sale', text: 'Scan to sign the sell offer in Xaman.', qrData: s.qr_url, link: s.xumm_url };
+    return { title: '📋 List for sale', text: 'Scan to sign the sell offer in Xaman.', qrData: s.xumm_url, link: s.xumm_url };
   }
   if (s.state === 'unknown') {
     // The finalize poller gave up before confirming, but the listener/backfill
@@ -1657,7 +1663,7 @@ function marketCancelRender(s) {
     return { title: '✅ Listing cancelled', text: 'It is no longer for sale.', done: true };
   }
   if (s.state === 'awaiting_signature') {
-    return { title: '🗑️ Cancel listing', text: 'Scan to sign the cancellation in Xaman.', qrData: s.qr_url, link: s.xumm_url };
+    return { title: '🗑️ Cancel listing', text: 'Scan to sign the cancellation in Xaman.', qrData: s.xumm_url, link: s.xumm_url };
   }
   return { title: '❌ Cancel failed', text: s.error || 'Something went wrong.', done: true };
 }
@@ -1675,7 +1681,7 @@ function marketBuyRender(listingKind) {
       };
     }
     if (s.state === 'awaiting_signature') {
-      return { title: '💳 Confirm purchase', text: s.instruction || 'Scan to sign the purchase in Xaman.', qrData: s.qr_url, link: s.xumm_url };
+      return { title: '💳 Confirm purchase', text: s.instruction || 'Scan to sign the purchase in Xaman.', qrData: s.xumm_url, link: s.xumm_url };
     }
     if (s.reason === 'listing_unavailable') {
       return { title: '⚠️ No longer available', text: 'That listing was just sold or cancelled.', done: true };
@@ -1690,10 +1696,10 @@ function marketTraitListRender(s) {
     return { title: `🎟️ ${step}`, text: 'Preparing your trait token…', spinner: true };
   }
   if (s.state === 'extract_done') {
-    return { title: `🎟️ ${step}`, text: 'Scan to accept your trait token in Xaman.', qrData: s.extract_qr_url, link: s.extract_xumm_url };
+    return { title: `🎟️ ${step}`, text: 'Scan to accept your trait token in Xaman.', qrData: s.extract_xumm_url, link: s.extract_xumm_url };
   }
   if (s.state === 'list_pending') {
-    return { title: `📤 ${step}`, text: 'Scan to sign the sell offer in Xaman.', qrData: s.list_qr_url, link: s.list_xumm_url };
+    return { title: `📤 ${step}`, text: 'Scan to sign the sell offer in Xaman.', qrData: s.list_xumm_url, link: s.list_xumm_url };
   }
   if (s.state === 'listed') {
     return { title: '🎉 Listed!', text: 'Your trait is live on the Marketplace.', done: true };
