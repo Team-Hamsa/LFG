@@ -152,10 +152,18 @@ export function mapListingRow(row) {
  */
 export function sortRows(rows, sort) {
   const arr = rows.slice();
+  // BigInt compare: amount_drops can exceed Number.MAX_SAFE_INTEGER for large
+  // XRP prices, where Number() subtraction would misorder rows (money
+  // discipline — integer drops end to end).
+  const cmp = (a, b) => {
+    const x = BigInt(a.amount_drops);
+    const y = BigInt(b.amount_drops);
+    return x < y ? -1 : x > y ? 1 : 0;
+  };
   if (sort === 'price_asc') {
-    arr.sort((a, b) => Number(a.amount_drops) - Number(b.amount_drops));
+    arr.sort(cmp);
   } else if (sort === 'price_desc') {
-    arr.sort((a, b) => Number(b.amount_drops) - Number(a.amount_drops));
+    arr.sort((a, b) => cmp(b, a));
   }
   return arr;
 }

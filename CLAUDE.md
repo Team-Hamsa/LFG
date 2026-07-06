@@ -570,7 +570,13 @@ topology runs characters on mainnet while the trait economy stays
 testnet-gated — so every trait-economy-backed table (`trait_tokens`, loose
 Closet assets, trait listings, sold-trait history) must resolve via
 `ECONOMY_NETWORK` or a trait read against `XRPL_NETWORK` silently comes back
-empty for every user.
+empty for every user. The DB seam splits per-kind, but trait ON-LEDGER ops
+(`verify_sell_offer` / `get_tx` / settlement `run_deposit`, all via the single-
+network `xrpl_ops` globals) assume `ECONOMY_NETWORK == XRPL_NETWORK` and are
+therefore `ECONOMY_ENABLED`-gated (trait list/buy → 403 `economy_disabled`;
+trait browse/mine/history → empty) until the economy reaches mainnet — a trait
+buy on the deployed mainnet/testnet split would otherwise fail-verify against
+the wrong chain.
 
 **Service endpoints** (`lfg_service/app.py`):
 - `GET /api/market/listings` — public browse, `kind`/`trait`/`min_xrp`/

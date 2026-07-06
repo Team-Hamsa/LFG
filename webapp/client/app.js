@@ -1644,6 +1644,11 @@ function marketListRender(s) {
   if (s.state === 'awaiting_signature') {
     return { title: '📋 List for sale', text: 'Scan to sign the sell offer in Xaman.', qrData: s.qr_url, link: s.xumm_url };
   }
+  if (s.state === 'unknown') {
+    // The finalize poller gave up before confirming, but the listener/backfill
+    // self-heal from the ledger — the listing may well have landed.
+    return { title: '⏳ Couldn\'t confirm', text: "We couldn't confirm the listing in time — check My Listings shortly; it may still have gone through.", done: true };
+  }
   return { title: '❌ Listing failed', text: s.error || 'Something went wrong.', done: true };
 }
 
