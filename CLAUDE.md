@@ -516,6 +516,107 @@ Both scripts print `State: done` / `State: failed` and `Error: <msg>` on
 failure. Extract additionally prints `Accept your trait: <xumm_url>` when the
 on-chain offer is ready for the owner to sign.
 
+### In-app marketplace (#44)
+
+An XRP-denominated marketplace for both live characters and tradeable trait
+tokens, built entirely on native `NFTokenOffer` sell offers — no escrow
+contract, no custodial holding.
+
+**`market_listings` store** (`lfg_core/market_store.py`): a derived,
+droppable, rebuildable index in the same per-network `onchain_<net>.db` as
+`onchain_nfts`/`trait_tokens`/`economy_store` — same posture as `nft_events`
+and `onchain_nfts` themselves. The ledger is authoritative; a row exists here
+only because a live `NFTokenOffer` ledger object backs it. One row per
+`NFTokenOffer` (PK `offer_index`), `kind` ∈ `character` | `trait`,
+`closed_reason` ∈ `sold` | `cancelled` | `stale`. A sold **trait** listing
+additionally carries a `settled` lifecycle (0 = burn-back-to-Closet pending,
+1 = done; `NULL` for characters) — closing a trait row `sold` sets
+`settled=0` in the same statement (`market_store.close_listing`).
+
+**Three sync layers keep the index current:**
+- **Listener** — `lfg_core/nft_listener.apply_market_tx`, wired into the
+  streamed-tx loop in `scripts/onchain_listener.py` right after `apply_tx`.
+  Handles `offer_create` (upsert a live listing, but only if the offer is
+  sell-flagged, XRP-denominated, and the `nft_id` is ours by membership —
+  never taxon-from-ID), `offer_cancel` (close every deleted `NFTokenOffer` as
+  `cancelled`), and `accept` (close the deleted sell offer `sold`, then delist
+  any other live row for that `nft_id` whose seller no longer matches the new
+  owner-of-record, as `stale`).
+- **Finalize writes from the service** — the List/Buy/Cancel session state
+  machines in `lfg_core/market_flow.py` (`advance_list_session`,
+  `advance_cancel_session`, `advance_buy_session`) fetch the signed tx by hash
+  once XUMM reports it signed, and only write a `market_listings` row (List)
+  or close one (Buy/Cancel) once the tx is validated + `tesSUCCESS` — the
+  offer index lives inside tx meta, not knowable any earlier.
+- **`scripts/backfill_market.py --network <net>`** — idempotent rebuild:
+  sweeps every live `onchain_nfts` character (`is_burned=0`) plus every
+  `trait_tokens` row, fetches each token's current sell offers
+  (`xrpl_ops.get_nft_sell_offers`), and upserts a live row for every
+  sell-flagged, XRP-denominated offer whose `Owner` matches the token's
+  current owner-of-record. A previously-live row whose `offer_index` doesn't
+  turn up in this sweep is closed `stale`. Timestamp-preserving: `upsert_listing`
+  `COALESCE`s `created_ledger`/`created_ts` on conflict so a backfill re-run
+  never wipes the listener's original creation facts. RPC-failure-safe: a
+  per-token fetch failure is not "no offers" — the token is excluded from the
+  stale-close pass so a transient blip can never falsely close a live listing.
+  ```bash
+  .venv/bin/python scripts/backfill_market.py --network testnet
+  ```
+
+**Per-kind network seam** (`lfg_service/app.py::_market_network`): character
+reads/writes resolve on `config.XRPL_NETWORK`; trait reads/writes resolve on
+`config.ECONOMY_NETWORK`. The two can legitimately differ — the deployed
+topology runs characters on mainnet while the trait economy stays
+testnet-gated — so every trait-economy-backed table (`trait_tokens`, loose
+Closet assets, trait listings, sold-trait history) must resolve via
+`ECONOMY_NETWORK` or a trait read against `XRPL_NETWORK` silently comes back
+empty for every user.
+
+**Service endpoints** (`lfg_service/app.py`):
+- `GET /api/market/listings` — public browse, `kind`/`trait`/`min_xrp`/
+  `max_xrp`/`sort`/`limit`/`offset`. The unfiltered per-`(network, kind)` join
+  is cached 60s (`_MARKET_CACHE`); trait/amount filters apply to the cached
+  rows in Python, so passing a filter never invalidates the cache.
+- `GET /api/market/mine` — authed; four groups: the caller's own live
+  `listings` (both kinds), `unlisted_characters`, `unlisted_trait_tokens`, and
+  loose `closet_assets`.
+- `GET /api/market/history` — `?nft_id=` (character sale/offer-create/cancel
+  events from `history_store`'s `nft_events`) or `?slot=&value=` (sold trait
+  listings from `market_listings`, since per-`nft_id` history is near-useless
+  for traits — each listing is a fresh token).
+- `POST /api/market/list` / `/cancel` / `/buy` + their `GET .../{session_id}`
+  status polls drive the `ListSession`/`CancelSession`/`BuySession` state
+  machines. Buy is fail-closed: `market_ops.verify_sell_offer` re-checks the
+  offer on-ledger (amount, no foreign `Destination`) immediately before the
+  XUMM payload is built, and a trait buy additionally gates on the buyer
+  having an **active Closet** (`closet_required`, 403) since a sold trait
+  settles into one.
+- `POST /api/market/trait/list` — the two-signature "sell a trait out of my
+  Closet" wizard (`market_flow.TraitSellSession`): Extract (existing Phase-4
+  flow, signature 1) then the plain List flow on the freshly-owned token
+  (signature 2), driven together as one polled session.
+
+**Trait settlement:** a sold trait's `NFTokenAcceptOffer` must still be burned
+back into the buyer's Closet — the buy-status handler runs this as its
+primary trigger (`_settle_trait_sale`, which calls the existing Phase-4
+`economy_flow.run_deposit`: fail-closed owner verify → issuer burn → Closet
+credit) immediately after closing the listing `sold`, flipping `settled` to 1
+on success. A 2-minute sweep (`settle_pending_trait_sales`, `_SWEEP_PERIOD_SECONDS
+= 120`) backstops service restarts and third-party ledger fills, retrying each
+unsettled row up to `_SWEEP_MAX_ATTEMPTS = 5` before journaling a
+`trait-settlement-giveup-*.json` record to `ECONOMY_RECORDS_DIR` and giving up
+(the token isn't lost — it just sits in the buyer's wallet for a manual
+Deposit later). **Marketplace fee:** there is no separate marketplace cut —
+the existing 7% `TransferFee` (7000 units of 1/100,000) baked in at mint on
+every transferable token is what the seller pays; the seller nets 93% of the
+sale price.
+
+**SourceTag:** all three market payload builders (`create_sell_offer_payload`,
+`create_cancel_offer_payload`, `create_accept_offer_payload` in
+`lfg_core/xumm_ops.py`) go through the shared `_create_xumm_payload`, which
+`setdefault`s `SourceTag = config.SOURCE_TAG` on every non-`SignIn` txjson —
+marketplace code never sets it itself.
+
 ## Important Notes
 
 1. **Token Trustline Required**: Users must set up a trustline for LFGO tokens before receiving payment instructions. The `/letsgo` command provides a "Set LFGO Trustline" button.
