@@ -18,6 +18,7 @@
 # on-chain step is journaled to SWAP_RECORDS_DIR so an administrator can
 # recover a partial swap.
 
+import asyncio
 import json
 import logging
 import os
@@ -250,13 +251,52 @@ def _offer_amount(session: SwapSession) -> str | IssuedCurrencyAmount:
     return xrpl_ops.swap_offer_amount()
 
 
+# Bounded retry for replacement-offer creation. A single transient rippled/
+# submit failure used to be terminal — it stranded the reminted token in the
+# issuer wallet and told the user to "contact an administrator". A duplicate
+# offer from the rare submit-then-lost-response case is benign (the user
+# accepts one; the issuer can cancel the other), so at-least-once is the right
+# trade-off here.
+_OFFER_MAX_ATTEMPTS = 3
+_OFFER_RETRY_BASE_DELAY = 1.0
+
+
 async def _create_offer_and_accept(session: SwapSession, item: dict[str, Any]) -> bool:
     """Offer one replacement back to the user (priced on the session's fee
     path) and append the XUMM accept payload to session.results. Returns
     False on failure."""
-    offer_id = await xrpl_ops.create_nft_offer(
-        item["new_nft_id"], session.wallet_address, amount=_offer_amount(session)
-    )
+    # When the recipient IS the issuer/signing account (e.g. testnet, where the
+    # swapper registered the mint wallet itself as their own), the reminted
+    # token was minted straight into their wallet. A self-directed sell offer
+    # is invalid (temREDUNDANT) and there is nothing to accept — the token is
+    # already delivered. Record it as delivered instead of failing with the
+    # misleading "offer failed — contact an administrator".
+    if session.wallet_address == config.SIGNING_ACCOUNT:
+        item["offer_id"] = None
+        session.results.append(
+            {
+                "name": item["nft"]["name"],
+                "nft_id": item["new_nft_id"],
+                "image_url": item["image_url"],
+                "video_url": item["video_url"],
+                "metadata_url": item["metadata_url"],
+                # No accept step: the issuer already holds the reminted token.
+                # `modified` drives every surface's "already in your wallet —
+                # no action needed" branch, which is the accurate UX here too.
+                "modified": True,
+            }
+        )
+        return True
+
+    offer_id: str | None = None
+    for attempt in range(_OFFER_MAX_ATTEMPTS):
+        offer_id = await xrpl_ops.create_nft_offer(
+            item["new_nft_id"], session.wallet_address, amount=_offer_amount(session)
+        )
+        if offer_id:
+            break
+        if attempt < _OFFER_MAX_ATTEMPTS - 1:
+            await asyncio.sleep(_OFFER_RETRY_BASE_DELAY * (2**attempt))
     if not offer_id:
         session.error = (
             f"{item['nft']['name']} was reminted "
