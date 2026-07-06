@@ -140,16 +140,30 @@ def discord_return_url(guild_id: Any, channel_id: Any) -> dict[str, str] | None:
 
 
 async def _create_xumm_payload(
-    txjson: dict[str, Any], options: dict[str, Any] | None = None
+    txjson: dict[str, Any],
+    options: dict[str, Any] | None = None,
+    user_token: str | None = None,
 ) -> dict[str, Any] | None:
-    """POST a payload to the XUMM platform API; returns qr/deeplink dict or None."""
+    """POST a payload to the XUMM platform API; returns qr/deeplink dict or None.
+
+    When ``user_token`` is a stored per-user push token (issue #135), XUMM
+    delivers the sign request straight to that user's Xaman app as a push
+    notification. The returned dict's ``pushed`` flag reports whether the push
+    actually went out — a stale/expired token yields ``pushed: False`` and the
+    caller falls back to the QR / deep link that are always returned too. A
+    missing token simply omits the field, never blocking the sign."""
     # Make Waves hackathon: every signed transaction must carry the source tag.
     # SignIn is a pseudo-transaction (no ledger effect), so it is exempt.
     if txjson.get("TransactionType") != "SignIn":
         txjson.setdefault("SourceTag", config.SOURCE_TAG)
-    payload = {"txjson": txjson}
+    payload: dict[str, Any] = {"txjson": txjson}
     if options:
         payload["options"] = options
+    # user_token is a top-level payload field in the XUMM platform API (not an
+    # option). Only send it when we actually have one so an empty string can't
+    # be misread as a token.
+    if user_token:
+        payload["user_token"] = user_token
     try:
         response = await asyncio.to_thread(
             requests.post, config.XUMM_API_URL, json=payload, headers=_XUMM_HEADERS, timeout=10
@@ -159,6 +173,9 @@ async def _create_xumm_payload(
             "qr_url": data["refs"]["qr_png"],
             "xumm_url": data["next"]["always"],
             "uuid": data["uuid"],
+            # Whether XUMM push-delivered this payload to the user's Xaman app.
+            # False (or absent → False) means fall back to the QR/deep link.
+            "pushed": bool(data.get("pushed")),
         }
     except Exception as e:
         logging.error(f"Error creating XUMM payload: {e}")
@@ -172,12 +189,15 @@ async def create_payment_payload(
     issuer: str | None = None,
     expire_minutes: int | None = None,
     return_url: dict[str, str] | None = None,
+    user_token: str | None = None,
 ) -> dict[str, Any] | None:
     """XUMM sign-request payload for a token Payment. This is what payment
     QRs must encode: Xaman only understands its own payload links
     (xumm.app/sign/<uuid>) — it cannot parse the raw-transaction-JSON
     xaman.app/detect link from generate_static_payment_link, which is kept
-    only as a last-resort fallback when the XUMM API is unreachable."""
+    only as a last-resort fallback when the XUMM API is unreachable.
+
+    ``user_token`` (issue #135) push-delivers the request to a known user."""
     if expire_minutes is None:
         # Match the on-ledger payment wait so the sign request and the
         # subscription expire together.
@@ -189,19 +209,23 @@ async def create_payment_payload(
             "Amount": _payment_amount(value, currency, issuer),
         },
         options=_with_return_url({"expire": expire_minutes}, return_url),
+        user_token=user_token,
     )
 
 
 async def create_accept_offer_payload(
-    offer_id: str, return_url: dict[str, str] | None = None
+    offer_id: str,
+    return_url: dict[str, str] | None = None,
+    user_token: str | None = None,
 ) -> dict[str, Any] | None:
-    """XUMM payload for NFTokenAcceptOffer."""
+    """XUMM payload for NFTokenAcceptOffer. ``user_token`` push-delivers it (#135)."""
     return await _create_xumm_payload(
         {
             "TransactionType": "NFTokenAcceptOffer",
             "NFTokenSellOffer": offer_id,
         },
         options=_with_return_url({}, return_url),
+        user_token=user_token,
     )
 
 
@@ -210,13 +234,16 @@ async def create_sell_offer_payload(
     nft_id: str,
     drops: str,
     return_url: dict[str, str] | None = None,
+    user_token: str | None = None,
 ) -> dict[str, Any] | None:
     """XUMM payload for NFTokenCreateOffer listing an NFT for sale on the
     in-app marketplace. `drops` must already be an integer-drops string (see
     `market_ops.xrp_to_drops_str`) — no float/Decimal handling here. Flags=1
     marks a sell offer; Owner is omitted (only meaningful when someone other
     than the token owner creates the offer) and Destination is omitted so the
-    listing is open to any buyer rather than locked to one counterparty."""
+    listing is open to any buyer rather than locked to one counterparty.
+
+    ``user_token`` (issue #135) push-delivers the request to a known user."""
     return await _create_xumm_payload(
         {
             "TransactionType": "NFTokenCreateOffer",
@@ -226,6 +253,7 @@ async def create_sell_offer_payload(
             "Flags": 1,
         },
         options=_with_return_url({}, return_url),
+        user_token=user_token,
     )
 
 
@@ -233,9 +261,10 @@ async def create_cancel_offer_payload(
     account: str,
     offer_index: str,
     return_url: dict[str, str] | None = None,
+    user_token: str | None = None,
 ) -> dict[str, Any] | None:
     """XUMM payload for NFTokenCancelOffer, delisting one existing sell
-    offer by its ledger index."""
+    offer by its ledger index. ``user_token`` push-delivers it (#135)."""
     return await _create_xumm_payload(
         {
             "TransactionType": "NFTokenCancelOffer",
@@ -243,6 +272,7 @@ async def create_cancel_offer_payload(
             "NFTokenOffers": [offer_index],
         },
         options=_with_return_url({}, return_url),
+        user_token=user_token,
     )
 
 
@@ -276,6 +306,7 @@ async def get_payload_status(uuid: str) -> dict[str, Any] | None:
         data = response.json()
         meta = data.get("meta") or {}
         response_block = data.get("response") or {}
+        application = data.get("application") or {}
         return {
             "opened": bool(meta.get("opened")),
             "signed": bool(meta.get("signed")),
@@ -286,6 +317,12 @@ async def get_payload_status(uuid: str) -> dict[str, Any] | None:
             # the tx by this hash to learn the on-ledger outcome). None until
             # signed.
             "txid": response_block.get("txid"),
+            # The per-user push token XUMM issues when a user with Xaman signs
+            # and grants push permission (issue #135). Persist it against the
+            # signer's identity so future payloads can be push-delivered. None
+            # when the user declined push or signed on a channel that issues no
+            # token.
+            "user_token": application.get("issued_user_token"),
         }
     except Exception as e:
         logging.error(f"Error fetching XUMM payload status: {e}")

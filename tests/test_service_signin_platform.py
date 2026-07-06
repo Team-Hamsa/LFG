@@ -115,3 +115,49 @@ def test_signin_signed_discord_writes_legacy(monkeypatch):
     resp = _run(app.handle_signin_status(_Req(token, {"payload_uuid": "u4"})))
     assert resp.status == 200
     assert legacy["args"] == ("9", "d", "rDISCORD")  # discord still writes legacy Users
+
+
+def _signed_signin(monkeypatch, uuid, status_extra):
+    """Common harness: a signed sign-in for telegram:55 with `status_extra`
+    merged into the payload-status dict. Returns the captured set_user_token
+    calls list."""
+    monkeypatch.setattr(app.config, "WEBAPP_DEV_MODE", False)
+    app.signin_payloads[uuid] = {
+        "platform": "telegram",
+        "user_id": "55",
+        "name": "tg",
+        "created_at": time.time(),
+    }
+
+    async def fake_status(_uuid):
+        return {
+            "signed": True,
+            "account": "rXRPL",
+            "opened": True,
+            "expired": False,
+            **status_extra,
+        }
+
+    monkeypatch.setattr(app.xumm_ops, "get_payload_status", fake_status)
+    monkeypatch.setattr(app, "is_valid_classic_address", lambda w: True)
+    monkeypatch.setattr(app.identity_store, "link", lambda *a: True)
+    captured = []
+    monkeypatch.setattr(app.identity_store, "set_user_token", lambda *a: captured.append(a))
+    token = make_session_token({"id": "55", "name": "tg", "platform": "telegram"})
+    resp = _run(app.handle_signin_status(_Req(token, {"payload_uuid": uuid})))
+    assert resp.status == 200
+    return captured
+
+
+def test_signin_captures_user_token(monkeypatch):
+    # #135: a push token issued on sign-in is persisted against the identity.
+    captured = _signed_signin(monkeypatch, "u5", {"user_token": "push-tok-xyz"})
+    assert captured == [("telegram", "55", "push-tok-xyz")]
+    app.signin_payloads.pop("u5", None)
+
+
+def test_signin_without_token_skips_capture(monkeypatch):
+    # No issued token (user declined push / desktop) → no persistence attempt.
+    captured = _signed_signin(monkeypatch, "u6", {"user_token": None})
+    assert captured == []
+    app.signin_payloads.pop("u6", None)

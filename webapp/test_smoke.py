@@ -310,6 +310,9 @@ def test_get_payload_status(monkeypatch):
         "expired": False,
         "account": "rSigner",
         "txid": None,
+        # #135: the push token XUMM issues on a signed payload; None here since
+        # this fixture has no `application` block.
+        "user_token": None,
     }
 
 

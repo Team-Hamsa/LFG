@@ -299,6 +299,14 @@ async def _resolve_wallet(platform: str, uid: str) -> str | None:
     return wallet
 
 
+async def _push_token(user: dict[str, Any]) -> str | None:
+    """The stored XUMM push token for the request's user, or None (issue #135).
+    Passed into payload builders so a returning, push-enabled user gets the
+    sign request delivered to Xaman instead of a QR. None simply falls back to
+    the QR/deep link — never blocks the flow."""
+    return await asyncio.to_thread(identity_store.user_token_for, _platform(user), user["id"])
+
+
 def require_auth(handler):
     async def wrapper(request):
         if config.WEBAPP_DEV_MODE:
@@ -1258,6 +1266,7 @@ async def handle_market_list_start(request):
         nft_id,
         str(amount_drops),
         return_url=xumm_ops.discord_return_url(body.get("guild_id"), body.get("channel_id")),
+        user_token=await _push_token(user),
     )
     if not payload:
         return web.json_response({"error": "could not reach Xaman"}, status=502)
@@ -1320,6 +1329,7 @@ async def handle_market_cancel_start(request):
         wallet,
         offer_index,
         return_url=xumm_ops.discord_return_url(body.get("guild_id"), body.get("channel_id")),
+        user_token=await _push_token(user),
     )
     if not payload:
         return web.json_response({"error": "could not reach Xaman"}, status=502)
@@ -1418,6 +1428,7 @@ async def handle_market_buy_start(request):
     payload = await xumm_ops.create_accept_offer_payload(
         offer_index,
         return_url=xumm_ops.discord_return_url(body.get("guild_id"), body.get("channel_id")),
+        user_token=await _push_token(user),
     )
     if not payload:
         return web.json_response({"error": "could not reach Xaman"}, status=502)
@@ -1879,6 +1890,7 @@ async def handle_mint_start(request):
         wallet_address=request["wallet"],
         return_url=await _request_return_url(request),
         platform=_platform(user),
+        push_user_token=await _push_token(user),
     )
     mint_sessions[session.id] = session
     # Detect the payment path (LFGO holder vs XRP newcomer) and create the
@@ -1991,6 +2003,7 @@ async def handle_swap_start(request):
         traits_to_swap=traits_to_swap,
         return_url=xumm_ops.discord_return_url(body.get("guild_id"), body.get("channel_id")),
         platform=_platform(user),
+        push_user_token=await _push_token(user),
     )
     swap_sessions[session.id] = session
     asyncio.get_event_loop().create_task(swap_flow.run_swap_session(session))
@@ -2145,6 +2158,13 @@ async def handle_signin_status(request):
                 "identity.link failed for %s:%s — /events/me may 403 until restart-migrate",
                 platform,
                 rec["user_id"],
+            )
+        # #135: capture the XUMM push token issued on this sign-in so future
+        # sign requests can be push-delivered. Best-effort — link() created the
+        # row above, and set_user_token no-ops on a missing token.
+        elif s.get("user_token"):
+            await asyncio.to_thread(
+                identity_store.set_user_token, platform, rec["user_id"], s["user_token"]
             )
         del signin_payloads[uuid]
         resp = {"state": "signed", "wallet": s["account"]}

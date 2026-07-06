@@ -84,12 +84,17 @@ class SwapSession:
         traits_to_swap: list[str],
         return_url: dict[str, str] | None = None,
         platform: str = "discord",
+        push_user_token: str | None = None,
     ) -> None:
         self.id = uuid.uuid4().hex
         self.return_url = return_url  # XUMM return_url back into Discord
         self.discord_id = discord_id
         self.platform = platform
         self.wallet_address = wallet_address
+        # #135: stored XUMM push token for this user, if any — threaded into
+        # every sign request this session builds so a returning user gets a
+        # push to Xaman instead of a QR. None falls back to the QR/deep link.
+        self.push_user_token = push_user_token
         self.created_at = time.time()
         self.nft1 = nft1  # normalized records from swap_meta.normalize_nft
         self.nft2 = nft2
@@ -291,7 +296,9 @@ async def _create_offer_and_accept(session: SwapSession, item: dict[str, Any]) -
         )
         return False
     item["offer_id"] = offer_id
-    accept = await xumm_ops.create_accept_offer_payload(offer_id, return_url=session.return_url)
+    accept = await xumm_ops.create_accept_offer_payload(
+        offer_id, return_url=session.return_url, user_token=session.push_user_token
+    )
     if not accept:
         session.error = (
             f"Offer {offer_id} created for {item['nft']['name']} "
@@ -326,7 +333,12 @@ async def _collect_modify_fee(session: SwapSession, modify_count: int) -> bool:
     destination = xrpl_ops.bot_wallet_address()
     session.fee_amount = fee
     payload = await xumm_ops.create_payment_payload(
-        destination, value=fee, currency=currency, issuer=issuer, return_url=session.return_url
+        destination,
+        value=fee,
+        currency=currency,
+        issuer=issuer,
+        return_url=session.return_url,
+        user_token=session.push_user_token,
     )
     # Sign-request payload normally; raw detect link only if XUMM is down
     session.payment_link = (

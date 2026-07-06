@@ -46,12 +46,17 @@ class MintSession:
         wallet_address: str,
         return_url: dict[str, str] | None = None,
         platform: str = "discord",
+        push_user_token: str | None = None,
     ) -> None:
         self.id = uuid.uuid4().hex
         self.discord_id = discord_id
         self.platform = platform
         self.wallet_address = wallet_address
         self.return_url = return_url  # XUMM return_url back into Discord
+        # #135: stored XUMM push token for this user, if any. Threaded into
+        # every sign request this session builds so a returning user gets a
+        # push to Xaman instead of a QR. None falls back to the QR/deep link.
+        self.push_user_token = push_user_token
         self.created_at = time.time()
         self.state = AWAITING_PAYMENT
         self.error: str | None = None
@@ -110,6 +115,7 @@ class MintSession:
             currency=p["currency"],
             issuer=p["issuer"],
             return_url=self.return_url,
+            user_token=self.push_user_token,
         )
         if payload:
             self.payment_link = payload["xumm_url"]
@@ -338,7 +344,9 @@ async def run_mint_session(session: MintSession) -> None:
             )
             return
 
-        accept = await xumm_ops.create_accept_offer_payload(offer_id, return_url=session.return_url)
+        accept = await xumm_ops.create_accept_offer_payload(
+            offer_id, return_url=session.return_url, user_token=session.push_user_token
+        )
         if not accept:
             session.state = FAILED
             session.error = (
