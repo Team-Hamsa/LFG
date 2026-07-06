@@ -270,6 +270,56 @@ class TestUnsettledTraitSales:
         assert indexes == {"1" * 64}
 
 
+class TestLiveListingForNft:
+    """Task 8's list-start dedup check: is there already a live listing for
+    this nft_id? (Distinct from get_listing below, which is keyed on
+    offer_index for cancel/buy.)"""
+
+    def test_returns_row_when_live_listing_exists(self, conn):
+        market_store.init_db(conn)
+        market_store.upsert_listing(conn, _character_listing())
+        row = market_store.live_listing_for_nft(conn, CHAR_NFT)
+        assert row is not None
+        assert row["offer_index"] == "A" * 64
+
+    def test_none_when_no_listing_at_all(self, conn):
+        market_store.init_db(conn)
+        assert market_store.live_listing_for_nft(conn, CHAR_NFT) is None
+
+    def test_none_when_listing_closed(self, conn):
+        market_store.init_db(conn)
+        market_store.upsert_listing(conn, _character_listing())
+        market_store.close_listing(conn, "A" * 64, "cancelled")
+        assert market_store.live_listing_for_nft(conn, CHAR_NFT) is None
+
+
+class TestGetListing:
+    """Task 8's cancel/buy lookup: fetch a listing by offer_index regardless
+    of liveness, so callers can tell 'never existed' (None) from 'existed but
+    is now dead' (row with is_live=0) apart."""
+
+    def test_returns_live_row(self, conn):
+        market_store.init_db(conn)
+        market_store.upsert_listing(conn, _character_listing())
+        row = market_store.get_listing(conn, "A" * 64)
+        assert row is not None
+        assert row["is_live"] == 1
+        assert row["seller"] == SELLER
+
+    def test_returns_dead_row(self, conn):
+        market_store.init_db(conn)
+        market_store.upsert_listing(conn, _character_listing())
+        market_store.close_listing(conn, "A" * 64, "cancelled")
+        row = market_store.get_listing(conn, "A" * 64)
+        assert row is not None
+        assert row["is_live"] == 0
+        assert row["closed_reason"] == "cancelled"
+
+    def test_none_when_unknown(self, conn):
+        market_store.init_db(conn)
+        assert market_store.get_listing(conn, "F" * 64) is None
+
+
 class TestBrowseCharacters:
     def test_returns_live_listing_with_matching_owner(self, conn):
         market_store.init_db(conn)

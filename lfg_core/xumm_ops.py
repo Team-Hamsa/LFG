@@ -275,11 +275,17 @@ async def get_payload_status(uuid: str) -> dict[str, Any] | None:
         )
         data = response.json()
         meta = data.get("meta") or {}
+        response_block = data.get("response") or {}
         return {
             "opened": bool(meta.get("opened")),
             "signed": bool(meta.get("signed")),
             "expired": bool(meta.get("expired")),
-            "account": (data.get("response") or {}).get("account"),
+            "account": response_block.get("account"),
+            # The signed transaction's hash (XUMM's payload status carries no
+            # meta of its own — the marketplace list/buy finalize flow fetches
+            # the tx by this hash to learn the on-ledger outcome). None until
+            # signed.
+            "txid": response_block.get("txid"),
         }
     except Exception as e:
         logging.error(f"Error fetching XUMM payload status: {e}")

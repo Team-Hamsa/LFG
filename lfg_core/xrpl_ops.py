@@ -309,6 +309,26 @@ async def get_nft_sell_offers(nft_id: str, raise_on_error: bool = False) -> list
         return []
 
 
+async def get_tx(tx_hash: str) -> dict[str, Any]:
+    """Fetch a transaction by hash via the plain (non-clio) `tx` method, so
+    this goes through JSON_RPC_URL like mint/burn/offer, not CLIO_WS_URL.
+
+    Returns the raw result dict verbatim, including the not-yet-known-to-the-
+    server shape (`{"error": "txnNotFound", ...}`, no "validated"/"meta"
+    keys) — callers check `result.get("validated")`, which is falsy for both
+    "not found yet" and "found but not validated", so this needs no special-
+    casing for the not-found shape.
+
+    Raises on a genuine RPC/network/connection failure (unlike
+    get_nft_sell_offers, this does NOT swallow exceptions) — the marketplace
+    list/buy finalize pollers (lfg_service/app.py, via lfg_core/market_flow.py)
+    are fail-closed on writes and must be able to tell "the lookup itself
+    broke" apart from "still pending"."""
+    client = JsonRpcClient(config.JSON_RPC_URL)
+    response = await asyncio.to_thread(client.request, Tx(transaction=tx_hash))
+    return response.result
+
+
 async def get_trustline_balance(address: str, currency: str, issuer: str) -> Decimal | None:
     """Balance `address` holds on its trustline to issuer/currency, as a
     Decimal — or None if there is no trustline or the lookup failed (callers

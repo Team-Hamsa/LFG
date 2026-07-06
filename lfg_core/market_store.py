@@ -170,6 +170,30 @@ def unsettled_trait_sales(conn: sqlite3.Connection) -> list[dict[str, Any]]:
     return [dict(row) for row in cur.fetchall()]
 
 
+def live_listing_for_nft(conn: sqlite3.Connection, nft_id: str) -> dict[str, Any] | None:
+    """The live listing row for `nft_id`, if one exists — Task 8's list-start
+    dedup check (409 when a listing is already live for this token). Ignores
+    `destination`/ownership joins (browse's concerns); a listing being live
+    in market_listings is the only fact this check needs."""
+    conn.row_factory = sqlite3.Row
+    row = conn.execute(
+        "SELECT * FROM market_listings WHERE nft_id = ? AND is_live = 1", (nft_id,)
+    ).fetchone()
+    return dict(row) if row is not None else None
+
+
+def get_listing(conn: sqlite3.Connection, offer_index: str) -> dict[str, Any] | None:
+    """A listing row by its offer_index (primary key), live or not — Task 8's
+    cancel/buy lookup. Returns None only when no such offer_index was ever
+    written (never listed); a closed listing still returns its row (with
+    is_live=0) so callers can distinguish 'unknown' (404) from 'dead' (410)."""
+    conn.row_factory = sqlite3.Row
+    row = conn.execute(
+        "SELECT * FROM market_listings WHERE offer_index = ?", (offer_index,)
+    ).fetchone()
+    return dict(row) if row is not None else None
+
+
 def _attributes_match(attrs: list[dict[str, str]], filters: dict[str, list[str]]) -> bool:
     """AND across slots in `filters`, OR within a slot's value list. `attrs`
     is a list of {"trait_type": ..., "value": ...} entries (the normalized

@@ -121,6 +121,42 @@ class TestGetNftSellOffers:
         assert offers == []
 
 
+class TestGetTx:
+    """Task 8's list/buy finalize poller: fetch a transaction by hash via the
+    plain (non-clio) `tx` method. Returns the raw result dict verbatim —
+    including the not-yet-known-to-the-server shape ({"error": "txnNotFound"},
+    no "validated"/"meta" keys) — so callers checking `result.get("validated")`
+    treat "not found yet" the same as "found but not validated" without any
+    special-casing here. Only genuine RPC/network failures raise, so
+    fail-closed callers can tell those apart from "still pending"."""
+
+    def test_returns_raw_result_dict(self, monkeypatch) -> None:
+        result = {
+            "validated": True,
+            "meta": {"TransactionResult": "tesSUCCESS", "AffectedNodes": []},
+            "hash": "ABCDEF",
+        }
+        monkeypatch.setattr(xrpl_ops, "JsonRpcClient", _fake_json_rpc_client(result))
+        tx = _run(xrpl_ops.get_tx("ABCDEF"))
+        assert tx == result
+
+    def test_not_found_shape_has_no_validated_key(self, monkeypatch) -> None:
+        # rippled's txnNotFound response carries no validated/meta keys — the
+        # caller's `tx.get("validated")` check must treat this the same as
+        # "not yet validated" without this function raising or special-casing it.
+        result = {"error": "txnNotFound", "error_code": 29, "status": "error"}
+        monkeypatch.setattr(xrpl_ops, "JsonRpcClient", _fake_json_rpc_client(result))
+        tx = _run(xrpl_ops.get_tx("UNKNOWNHASH"))
+        assert tx.get("validated") is None
+
+    def test_raises_on_rpc_exception(self, monkeypatch) -> None:
+        monkeypatch.setattr(
+            xrpl_ops, "JsonRpcClient", _fake_json_rpc_client(exc=RuntimeError("rpc down"))
+        )
+        with pytest.raises(RuntimeError):
+            _run(xrpl_ops.get_tx("ABCDEF"))
+
+
 def _offers_fetcher(
     offers: list[dict[str, Any]],
 ) -> Callable[[str], Awaitable[list[dict[str, Any]]]]:

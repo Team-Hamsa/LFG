@@ -28,12 +28,14 @@ from xrpl.core.addresscodec import is_valid_classic_address
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from lfg_core import (
+    closet_token,
     config,
     economy_flow,
     economy_store,
     history_store,
     layer_store,
     leaderboard,
+    market_flow,
     market_ops,
     market_store,
     mint_flow,
@@ -63,6 +65,9 @@ SESSION_TTL = 6 * 3600
 mint_sessions: dict[str, Any] = {}
 swap_sessions: dict[str, Any] = {}
 economy_sessions: dict[str, Any] = {}
+# Shared by List/Cancel/Buy (market_flow.ListSession/CancelSession/BuySession),
+# same "one dict, `.kind` routes the status handler" shape as economy_sessions.
+market_sessions: dict[str, Any] = {}
 SESSION_RETENTION = 3600  # keep terminal sessions briefly for late polls
 
 BUS = InMemoryEventBus()
@@ -1021,6 +1026,327 @@ async def handle_market_history(request: web.Request) -> web.Response:
     return web.json_response({"error": "nft_id or slot+value required"}, status=400)
 
 
+# --- In-app marketplace (#44) Task 8: list / cancel / buy sessions ---
+# Each POST builds one XUMM sign request (NFTokenCreateOffer / CancelOffer /
+# AcceptOffer) via lfg_core.xumm_ops and returns immediately — the state
+# machine (including List/Buy's tx-fetch finalize step) lives in
+# lfg_core.market_flow and is driven by the GET status handlers below on
+# every poll. See market_flow's module docstring for the full design.
+
+
+def _resolve_ownable(char_network: str, econ_network: str, nft_id: str) -> dict[str, Any] | None:
+    """Resolve nft_id's marketplace kind + current owner (+ trait slot/value)
+    by checking on-chain membership: onchain_nfts (character net) first, then
+    trait_tokens (economy net). None if nft_id is unknown to both (never
+    minted, or a burned/deposited character)."""
+    conn = nft_index.init_db(nft_index.index_db_path(char_network))
+    try:
+        row = conn.execute(
+            "SELECT owner, is_burned FROM onchain_nfts WHERE nft_id = ?", (nft_id,)
+        ).fetchone()
+        if row is not None and not row[1]:
+            return {"kind": "character", "owner": row[0], "slot": None, "value": None}
+    finally:
+        conn.close()
+    conn = nft_index.init_db(nft_index.index_db_path(econ_network))
+    try:
+        economy_store.init_economy_schema(conn)
+        row = conn.execute(
+            "SELECT owner, slot, value FROM trait_tokens WHERE nft_id = ?", (nft_id,)
+        ).fetchone()
+        if row is not None:
+            return {"kind": "trait", "owner": row[0], "slot": row[1], "value": row[2]}
+    finally:
+        conn.close()
+    return None
+
+
+def _has_live_listing(network: str, nft_id: str) -> bool:
+    conn = nft_index.init_db(nft_index.index_db_path(network))
+    try:
+        market_store.init_db(conn)
+        return market_store.live_listing_for_nft(conn, nft_id) is not None
+    finally:
+        conn.close()
+
+
+def _find_listing_any_network(offer_index: str) -> tuple[str, dict[str, Any]] | None:
+    """A listing row by offer_index, live or not, searched across every
+    distinct network a marketplace kind can live in (see _market_network) —
+    the caller doesn't yet know which kind offer_index belongs to."""
+    for network in {_market_network("character"), _market_network("trait")}:
+        conn = nft_index.init_db(nft_index.index_db_path(network))
+        try:
+            market_store.init_db(conn)
+            row = market_store.get_listing(conn, offer_index)
+            if row is not None:
+                return network, row
+        finally:
+            conn.close()
+    return None
+
+
+def _closet_active(network: str, wallet: str) -> bool:
+    conn = nft_index.init_db(nft_index.index_db_path(network))
+    try:
+        economy_store.init_economy_schema(conn)
+        rec = economy_store.get_closet_record(conn, wallet)
+        return rec is not None and rec[2] == closet_token.ACTIVE
+    finally:
+        conn.close()
+
+
+def _write_listing_row(network: str, row: dict[str, Any]) -> None:
+    conn = nft_index.init_db(nft_index.index_db_path(network))
+    try:
+        market_store.init_db(conn)
+        market_store.upsert_listing(conn, market_store.MarketListing(**row))
+    finally:
+        conn.close()
+
+
+def _close_listing_sync(network: str, offer_index: str, reason: str) -> None:
+    conn = nft_index.init_db(nft_index.index_db_path(network))
+    try:
+        market_store.init_db(conn)
+        market_store.close_listing(conn, offer_index, reason)
+    finally:
+        conn.close()
+
+
+@require_wallet
+async def handle_market_list_start(request):
+    """POST /api/market/list {nft_id, price_xrp}: 409 if the caller doesn't
+    own nft_id (checked across onchain_nfts + trait_tokens) or a live listing
+    already exists for it; otherwise builds the NFTokenCreateOffer XUMM
+    payload and returns a session (mirrors mint/swap's QR/deeplink shape)."""
+    user = request["user"]
+    wallet = request["wallet"]
+    body = await request.json()
+    nft_id = body.get("nft_id")
+    price_xrp = body.get("price_xrp")
+    if not nft_id or not isinstance(price_xrp, str):
+        return web.json_response(
+            {"error": "nft_id and price_xrp (string) are required"}, status=400
+        )
+    try:
+        amount_drops = int(market_ops.xrp_to_drops_str(price_xrp))
+    except Exception as e:
+        # Broad on purpose: xrp_to_drops_str raises TypeError/ValueError for
+        # the documented cases, but Decimal("Infinity")/("nan") slip past its
+        # `<= 0` guard and raise decimal.InvalidOperation/OverflowError
+        # instead — this edge (where a user-controlled price_xrp is parsed)
+        # must 400 cleanly on all of them, not just the two it advertises.
+        return web.json_response({"error": f"bad price_xrp: {e}"}, status=400)
+
+    loop = asyncio.get_event_loop()
+    membership = await loop.run_in_executor(
+        None,
+        _resolve_ownable,
+        _market_network("character"),
+        _market_network("trait"),
+        nft_id,
+    )
+    if membership is None or membership["owner"] != wallet:
+        return web.json_response({"error": "you do not own that NFT"}, status=409)
+
+    network = _market_network(membership["kind"])
+    already_listed = await loop.run_in_executor(None, _has_live_listing, network, nft_id)
+    if already_listed:
+        return web.json_response({"error": "that NFT is already listed"}, status=409)
+
+    _prune_sessions(market_sessions, market_flow.TERMINAL_STATES)
+    if _active_session(market_sessions, market_flow.TERMINAL_STATES, user["id"], _platform(user)):
+        return web.json_response({"error": "a market action is already in progress"}, status=409)
+
+    payload = await xumm_ops.create_sell_offer_payload(
+        wallet,
+        nft_id,
+        str(amount_drops),
+        return_url=xumm_ops.discord_return_url(body.get("guild_id"), body.get("channel_id")),
+    )
+    if not payload:
+        return web.json_response({"error": "could not reach Xaman"}, status=502)
+
+    session = market_flow.ListSession(
+        discord_id=user["id"],
+        wallet_address=wallet,
+        nft_id=nft_id,
+        listing_kind=membership["kind"],
+        amount_drops=amount_drops,
+        slot=membership["slot"],
+        value=membership["value"],
+        platform=_platform(user),
+    )
+    session.qr_url = payload["qr_url"]
+    session.xumm_url = payload["xumm_url"]
+    session.payload_uuid = payload.get("uuid")
+    market_sessions[session.id] = session
+    return web.json_response(session.to_dict())
+
+
+@require_wallet
+async def handle_market_cancel_start(request):
+    """POST /api/market/cancel {offer_index}: 404 if there's no live listing
+    at that offer_index, 403 if the caller isn't its seller; otherwise builds
+    the NFTokenCancelOffer XUMM payload."""
+    user = request["user"]
+    wallet = request["wallet"]
+    body = await request.json()
+    offer_index = body.get("offer_index")
+    if not offer_index:
+        return web.json_response({"error": "offer_index is required"}, status=400)
+
+    loop = asyncio.get_event_loop()
+    found = await loop.run_in_executor(None, _find_listing_any_network, offer_index)
+    if found is None or not found[1]["is_live"]:
+        return web.json_response({"error": "not found"}, status=404)
+    network, row = found
+    if row["seller"] != wallet:
+        return web.json_response({"error": "not your listing"}, status=403)
+
+    _prune_sessions(market_sessions, market_flow.TERMINAL_STATES)
+    if _active_session(market_sessions, market_flow.TERMINAL_STATES, user["id"], _platform(user)):
+        return web.json_response({"error": "a market action is already in progress"}, status=409)
+
+    payload = await xumm_ops.create_cancel_offer_payload(
+        wallet,
+        offer_index,
+        return_url=xumm_ops.discord_return_url(body.get("guild_id"), body.get("channel_id")),
+    )
+    if not payload:
+        return web.json_response({"error": "could not reach Xaman"}, status=502)
+
+    session = market_flow.CancelSession(
+        discord_id=user["id"],
+        wallet_address=wallet,
+        offer_index=offer_index,
+        network=network,
+        platform=_platform(user),
+    )
+    session.qr_url = payload["qr_url"]
+    session.xumm_url = payload["xumm_url"]
+    session.payload_uuid = payload.get("uuid")
+    market_sessions[session.id] = session
+    return web.json_response(session.to_dict())
+
+
+@require_wallet
+async def handle_market_buy_start(request):
+    """POST /api/market/buy {offer_index}: 404/410 if the listing is unknown
+    or dead; 403 closet_required for a trait listing when the buyer has no
+    active Closet; fail-closed on-ledger re-verify (410 listing_unavailable +
+    stale on any mismatch/absence/RPC failure, including verify_sell_offer
+    itself raising); otherwise the NFTokenAcceptOffer XUMM payload, with the
+    price echoed in the response's instruction text."""
+    user = request["user"]
+    wallet = request["wallet"]
+    body = await request.json()
+    offer_index = body.get("offer_index")
+    if not offer_index:
+        return web.json_response({"error": "offer_index is required"}, status=400)
+
+    loop = asyncio.get_event_loop()
+    found = await loop.run_in_executor(None, _find_listing_any_network, offer_index)
+    if found is None:
+        return web.json_response({"error": "not found"}, status=404)
+    network, row = found
+    if not row["is_live"]:
+        return web.json_response({"error": "listing_unavailable"}, status=410)
+
+    if row["kind"] == "trait":
+        active = await loop.run_in_executor(None, _closet_active, _market_network("trait"), wallet)
+        if not active:
+            return web.json_response({"error": "closet_required"}, status=403)
+
+    try:
+        verified = await market_ops.verify_sell_offer(
+            row["nft_id"], offer_index, row["amount_drops"]
+        )
+    except Exception as e:
+        logging.warning(f"verify_sell_offer raised for offer {offer_index}: {e}")
+        verified = False
+    if not verified:
+        await loop.run_in_executor(None, _close_listing_sync, network, offer_index, "stale")
+        return web.json_response({"error": "listing_unavailable"}, status=410)
+
+    _prune_sessions(market_sessions, market_flow.TERMINAL_STATES)
+    if _active_session(market_sessions, market_flow.TERMINAL_STATES, user["id"], _platform(user)):
+        return web.json_response({"error": "a market action is already in progress"}, status=409)
+
+    payload = await xumm_ops.create_accept_offer_payload(
+        offer_index,
+        return_url=xumm_ops.discord_return_url(body.get("guild_id"), body.get("channel_id")),
+    )
+    if not payload:
+        return web.json_response({"error": "could not reach Xaman"}, status=502)
+
+    amount_xrp = market_ops.drops_to_xrp_str(str(row["amount_drops"]))
+    session = market_flow.BuySession(
+        discord_id=user["id"],
+        wallet_address=wallet,
+        offer_index=offer_index,
+        nft_id=row["nft_id"],
+        listing_kind=row["kind"],
+        network=network,
+        amount_drops=row["amount_drops"],
+        platform=_platform(user),
+    )
+    session.qr_url = payload["qr_url"]
+    session.xumm_url = payload["xumm_url"]
+    session.payload_uuid = payload.get("uuid")
+    session.instruction = f"Confirm purchase for {amount_xrp} XRP"
+    market_sessions[session.id] = session
+    return web.json_response(session.to_dict())
+
+
+def _make_market_status_handler(prefix: str):
+    @require_auth
+    async def handler(request):
+        session = market_sessions.get(request.match_info["session_id"])
+        if (
+            not session
+            or session.discord_id != request["user"]["id"]
+            or getattr(session, "platform", "discord") != _platform(request["user"])
+        ):
+            return web.json_response({"error": "not found"}, status=404)
+        if getattr(session, "kind", prefix) != prefix:
+            return web.json_response({"error": "not found"}, status=404)
+
+        loop = asyncio.get_event_loop()
+        if prefix == "list":
+            row = await market_flow.advance_list_session(session)
+            if row is not None:
+                network = _market_network(session.listing_kind)
+                await loop.run_in_executor(None, _write_listing_row, network, row)
+        elif prefix == "cancel":
+            if await market_flow.advance_cancel_session(session):
+                await loop.run_in_executor(
+                    None, _close_listing_sync, session.network, session.offer_index, "cancelled"
+                )
+        elif prefix == "buy":
+            outcome = await market_flow.advance_buy_session(session)
+            if outcome == "sold":
+                await loop.run_in_executor(
+                    None, _close_listing_sync, session.network, session.offer_index, "sold"
+                )
+                if session.listing_kind == "trait":
+                    market_flow.trigger_trait_settlement(session.offer_index)
+            elif outcome == "stale":
+                await loop.run_in_executor(
+                    None, _close_listing_sync, session.network, session.offer_index, "stale"
+                )
+
+        return web.json_response(session.to_dict())
+
+    return handler
+
+
+handle_market_list_status = _make_market_status_handler("list")
+handle_market_cancel_status = _make_market_status_handler("cancel")
+handle_market_buy_status = _make_market_status_handler("buy")
+
+
 def _economy_disabled_response():
     return web.json_response(
         {"error": "the trait economy is not enabled", "code": "economy_disabled"}, status=403
@@ -1665,6 +1991,12 @@ def create_app() -> web.Application:
     app.router.add_get("/api/market/listings", handle_market_listings)
     app.router.add_get("/api/market/mine", handle_market_mine)
     app.router.add_get("/api/market/history", handle_market_history)
+    app.router.add_post("/api/market/list", handle_market_list_start)
+    app.router.add_get("/api/market/list/{session_id}", handle_market_list_status)
+    app.router.add_post("/api/market/cancel", handle_market_cancel_start)
+    app.router.add_get("/api/market/cancel/{session_id}", handle_market_cancel_status)
+    app.router.add_post("/api/market/buy", handle_market_buy_start)
+    app.router.add_get("/api/market/buy/{session_id}", handle_market_buy_status)
     app.router.add_post("/api/swap", handle_swap_start)
     app.router.add_get("/api/swap/{session_id}", handle_swap_status)
     app.router.add_get("/api/qr.png", handle_qr)

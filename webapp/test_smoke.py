@@ -304,7 +304,26 @@ def test_get_payload_status(monkeypatch):
     )
     s = asyncio.get_event_loop().run_until_complete(xumm_ops.get_payload_status(VALID_UUID))
     assert fake.url.endswith(f"/{VALID_UUID}")
-    assert s == {"opened": True, "signed": True, "expired": False, "account": "rSigner"}
+    assert s == {
+        "opened": True,
+        "signed": True,
+        "expired": False,
+        "account": "rSigner",
+        "txid": None,
+    }
+
+
+def test_get_payload_status_extracts_txid(monkeypatch):
+    # The marketplace list/buy finalize flow (#44 Task 8) needs the signed
+    # transaction's hash to fetch it by `tx` and confirm the ledger outcome —
+    # XUMM's payload status yields the txid only, never the tx meta itself.
+    _fake_xumm_get(
+        monkeypatch,
+        meta={"opened": True, "signed": True},
+        response={"account": "rSigner", "txid": "ABCDEF0123456789"},
+    )
+    s = asyncio.get_event_loop().run_until_complete(xumm_ops.get_payload_status(VALID_UUID))
+    assert s["txid"] == "ABCDEF0123456789"
 
 
 def test_get_payload_status_error_returns_none(monkeypatch):

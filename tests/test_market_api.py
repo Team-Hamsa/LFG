@@ -34,6 +34,7 @@ from aiohttp.test_utils import make_mocked_request  # noqa: E402
 from lfg_core.economy_store import (  # noqa: E402
     _ECONOMY_SCHEMA,  # noqa: E402
     set_closet_contents,
+    set_closet_token,
     upsert_trait_token,
 )
 from lfg_core.history_store import init_history_db, insert_nft_event  # noqa: E402
@@ -41,11 +42,13 @@ from lfg_core.market_store import (
     MarketListing,  # noqa: E402
     upsert_listing,  # noqa: E402
 )
+from lfg_core.market_store import get_listing as market_get_listing  # noqa: E402
 from lfg_core.market_store import init_db as init_market_db  # noqa: E402
 from lfg_core.nft_index import OnchainNft  # noqa: E402
 from lfg_core.nft_index import init_db as init_onchain_db  # noqa: E402
 from lfg_core.nft_index import upsert as upsert_onchain_nft  # noqa: E402
 from lfg_service import app as server  # noqa: E402
+from webapp import mock_economy  # noqa: E402
 
 SELLER = "rSellerAddress0000000000000000000"
 BUYER = "rBuyerAddress000000000000000000000"
@@ -119,8 +122,10 @@ def onchain_env(tmp_path, monkeypatch):
     monkeypatch.setattr(server.config, "XRPL_NETWORK", "testnet")
     monkeypatch.setattr(server.config, "ECONOMY_NETWORK", "testnet")
     server._MARKET_CACHE.clear()
+    server.market_sessions.clear()
     yield onchain_path
     server._MARKET_CACHE.clear()
+    server.market_sessions.clear()
 
 
 def _reopen(onchain_path):
@@ -642,3 +647,671 @@ def test_split_network_history_slot_value_reads_economy_db(split_network_env):
     assert len(body["sales"]) == 1
     assert body["sales"][0]["nft_id"] == TRAIT3_SOLD
     assert body["sales"][0]["amount_drops"] == 700_000
+
+
+# ---------------------------------------------------------------------------
+# Task 8: POST/GET /api/market/{list,cancel,buy} session handlers
+# ---------------------------------------------------------------------------
+# Dev-mode auth bypass wired to a known wallet, mirroring
+# tests/test_swap_cross_body_api.py's convention — the established way app.py
+# handlers are exercised directly (no full aiohttp TestClient fixture for
+# these routes in the repo). require_auth's dev-mode branch always sets
+# request["user"] = {"id": "dev", ...}, so every session below is created
+# with discord_id="dev" to match.
+
+
+def _post_request(path, body):
+    req = make_mocked_request("POST", path)
+
+    async def _json():
+        return body
+
+    req.json = _json  # type: ignore[method-assign]
+    return req
+
+
+class _StatusReq:
+    """Minimal GET-status request stand-in (match_info + a settable
+    per-request store), mirroring tests/test_service_firehose.py's _Req."""
+
+    headers: dict = {}
+
+    def __init__(self, session_id):
+        self.match_info = {"session_id": session_id}
+        self._store = {}
+
+    def __getitem__(self, k):
+        return self._store[k]
+
+    def __setitem__(self, k, v):
+        self._store[k] = v
+
+
+@pytest.fixture
+def market_wallet(monkeypatch):
+    monkeypatch.setattr(server.config, "WEBAPP_DEV_MODE", True)
+    monkeypatch.setattr(mock_economy, "DEV_OWNER", SELLER)
+    server.market_sessions.clear()
+    yield
+    server.market_sessions.clear()
+
+
+def _fake_payload(qr="https://qr", url="https://xumm.app/sign/U1", pl_uuid="U1"):
+    async def fake(*args, **kwargs):
+        return {"qr_url": qr, "xumm_url": url, "uuid": pl_uuid}
+
+    return fake
+
+
+def _fake_status(*, signed, expired=False, txid=None):
+    async def fake(_uuid):
+        return {"opened": True, "signed": signed, "expired": expired, "txid": txid}
+
+    return fake
+
+
+def _sell_offer_meta(nft_id, offer_index, amount_drops):
+    return {
+        "TransactionResult": "tesSUCCESS",
+        "AffectedNodes": [
+            {
+                "CreatedNode": {
+                    "LedgerEntryType": "NFTokenOffer",
+                    "LedgerIndex": offer_index,
+                    "NewFields": {
+                        "NFTokenID": nft_id,
+                        "Amount": str(amount_drops),
+                        "Flags": 1,
+                    },
+                }
+            }
+        ],
+    }
+
+
+# --- POST /api/market/list ---
+
+
+def test_list_start_success_returns_session(onchain_env, market_wallet, monkeypatch):
+    conn = _reopen(onchain_env)
+    _seed_character(conn, CHAR1, SELLER, 1)
+    conn.commit()
+    conn.close()
+
+    monkeypatch.setattr(server.xumm_ops, "create_sell_offer_payload", _fake_payload())
+    req = _post_request("/api/market/list", {"nft_id": CHAR1, "price_xrp": "5"})
+    resp = _run(server.handle_market_list_start(req))
+    assert resp.status == 200
+    body = _run(_read_json(resp))
+    assert body["state"] == "awaiting_signature"
+    assert body["qr_url"] == "https://qr"
+    assert body["xumm_url"] == "https://xumm.app/sign/U1"
+    assert len(server.market_sessions) == 1
+
+
+def test_list_start_not_owner_409(onchain_env, market_wallet):
+    conn = _reopen(onchain_env)
+    _seed_character(conn, CHAR1, "rSomeoneElse00000000000000000000", 1)
+    conn.commit()
+    conn.close()
+
+    req = _post_request("/api/market/list", {"nft_id": CHAR1, "price_xrp": "5"})
+    resp = _run(server.handle_market_list_start(req))
+    assert resp.status == 409
+
+
+def test_list_start_already_listed_409(onchain_env, market_wallet):
+    conn = _reopen(onchain_env)
+    _seed_character(conn, CHAR1, SELLER, 1)
+    _seed_listing(conn)
+    conn.commit()
+    conn.close()
+
+    req = _post_request("/api/market/list", {"nft_id": CHAR1, "price_xrp": "5"})
+    resp = _run(server.handle_market_list_start(req))
+    assert resp.status == 409
+
+
+def test_list_start_trait_owner_ok(onchain_env, market_wallet, monkeypatch):
+    conn = _reopen(onchain_env)
+    upsert_trait_token(conn, TRAIT1, SELLER, "Hat", "Wizard Hat")
+    conn.commit()
+    conn.close()
+
+    monkeypatch.setattr(server.xumm_ops, "create_sell_offer_payload", _fake_payload())
+    req = _post_request("/api/market/list", {"nft_id": TRAIT1, "price_xrp": "0.5"})
+    resp = _run(server.handle_market_list_start(req))
+    assert resp.status == 200
+
+
+@pytest.mark.parametrize("bad_price", ["abc", "0", "-1", "1.1234567", "Infinity", "nan", "-nan"])
+def test_list_start_bad_price_400(onchain_env, market_wallet, bad_price):
+    req = _post_request("/api/market/list", {"nft_id": CHAR1, "price_xrp": bad_price})
+    resp = _run(server.handle_market_list_start(req))
+    assert resp.status == 400
+
+
+def test_list_start_nonstring_price_400(onchain_env, market_wallet):
+    req = _post_request("/api/market/list", {"nft_id": CHAR1, "price_xrp": 5})
+    resp = _run(server.handle_market_list_start(req))
+    assert resp.status == 400
+
+
+def test_list_start_xumm_unreachable_502(onchain_env, market_wallet, monkeypatch):
+    conn = _reopen(onchain_env)
+    _seed_character(conn, CHAR1, SELLER, 1)
+    conn.commit()
+    conn.close()
+
+    async def fake_none(*args, **kwargs):
+        return None
+
+    monkeypatch.setattr(server.xumm_ops, "create_sell_offer_payload", fake_none)
+    req = _post_request("/api/market/list", {"nft_id": CHAR1, "price_xrp": "5"})
+    resp = _run(server.handle_market_list_start(req))
+    assert resp.status == 502
+
+
+# --- GET /api/market/list/{session_id} (finalize) ---
+
+
+def _make_list_session(**overrides):
+    base = {
+        "discord_id": "dev",
+        "wallet_address": SELLER,
+        "nft_id": CHAR1,
+        "listing_kind": "character",
+        "amount_drops": 1_000_000,
+    }
+    base.update(overrides)
+    s = server.market_flow.ListSession(**base)
+    s.payload_uuid = "U1"
+    server.market_sessions[s.id] = s
+    return s
+
+
+def test_list_status_not_found_404(onchain_env, market_wallet):
+    resp = _run(server.handle_market_list_status(_StatusReq("nope")))
+    assert resp.status == 404
+
+
+def test_list_status_pending_no_write(onchain_env, market_wallet, monkeypatch):
+    s = _make_list_session()
+    monkeypatch.setattr(server.xumm_ops, "get_payload_status", _fake_status(signed=False))
+    resp = _run(server.handle_market_list_status(_StatusReq(s.id)))
+    body = _run(_read_json(resp))
+    assert body["state"] == "awaiting_signature"
+
+    conn = _reopen(onchain_env)
+    count = conn.execute("SELECT COUNT(*) FROM market_listings").fetchone()[0]
+    assert count == 0
+
+
+def test_list_status_signed_not_validated_pending_no_write(onchain_env, market_wallet, monkeypatch):
+    s = _make_list_session()
+    monkeypatch.setattr(
+        server.xumm_ops, "get_payload_status", _fake_status(signed=True, txid="TXHASH")
+    )
+
+    async def fake_get_tx(_hash):
+        return {"validated": False}
+
+    monkeypatch.setattr(server.xrpl_ops, "get_tx", fake_get_tx)
+    resp = _run(server.handle_market_list_status(_StatusReq(s.id)))
+    body = _run(_read_json(resp))
+    assert body["state"] == "pending"
+
+    conn = _reopen(onchain_env)
+    count = conn.execute("SELECT COUNT(*) FROM market_listings").fetchone()[0]
+    assert count == 0
+
+
+def test_list_status_tx_lookup_raises_unknown_no_crash(onchain_env, market_wallet, monkeypatch):
+    s = _make_list_session()
+    monkeypatch.setattr(
+        server.xumm_ops, "get_payload_status", _fake_status(signed=True, txid="TXHASH")
+    )
+
+    async def boom(_hash):
+        raise RuntimeError("rpc down")
+
+    monkeypatch.setattr(server.xrpl_ops, "get_tx", boom)
+    resp = _run(server.handle_market_list_status(_StatusReq(s.id)))
+    assert resp.status == 200
+    body = _run(_read_json(resp))
+    assert body["state"] == "unknown"
+
+    conn = _reopen(onchain_env)
+    count = conn.execute("SELECT COUNT(*) FROM market_listings").fetchone()[0]
+    assert count == 0
+
+
+def test_list_status_ten_pending_polls_flips_unknown(onchain_env, market_wallet, monkeypatch):
+    s = _make_list_session()
+    monkeypatch.setattr(
+        server.xumm_ops, "get_payload_status", _fake_status(signed=True, txid="TXHASH")
+    )
+
+    async def fake_get_tx(_hash):
+        return {"validated": False}
+
+    monkeypatch.setattr(server.xrpl_ops, "get_tx", fake_get_tx)
+    for _ in range(server.market_flow.MAX_FINALIZE_POLLS):
+        resp = _run(server.handle_market_list_status(_StatusReq(s.id)))
+    body = _run(_read_json(resp))
+    assert body["state"] == "unknown"
+
+
+def test_list_status_validated_success_writes_row(onchain_env, market_wallet, monkeypatch):
+    conn = _reopen(onchain_env)
+    _seed_character(conn, CHAR1, SELLER, 1)
+    conn.commit()
+    conn.close()
+
+    s = _make_list_session()
+    monkeypatch.setattr(
+        server.xumm_ops, "get_payload_status", _fake_status(signed=True, txid="TXHASH")
+    )
+    meta = _sell_offer_meta(CHAR1, "A" * 64, 1_000_000)
+
+    async def fake_get_tx(_hash):
+        return {"validated": True, "meta": meta}
+
+    monkeypatch.setattr(server.xrpl_ops, "get_tx", fake_get_tx)
+    resp = _run(server.handle_market_list_status(_StatusReq(s.id)))
+    body = _run(_read_json(resp))
+    assert body["state"] == "done"
+    assert body["offer_index"] == "A" * 64
+
+    conn = _reopen(onchain_env)
+    row = market_get_listing(conn, "A" * 64)
+    assert row is not None
+    assert row["nft_id"] == CHAR1
+    assert row["kind"] == "character"
+    assert row["seller"] == SELLER
+    assert row["amount_drops"] == 1_000_000
+    assert row["is_live"] == 1
+
+
+def test_list_status_idempotent_vs_listener_echo(onchain_env, market_wallet, monkeypatch):
+    """A listener that already wrote the same offer_index (with real
+    created_ledger/created_ts) must converge to exactly one row with the
+    finalize write — the finalize side passes None for those fields, which
+    upsert_listing's COALESCE preserves."""
+    conn = _reopen(onchain_env)
+    _seed_character(conn, CHAR1, SELLER, 1)
+    upsert_listing(
+        conn,
+        MarketListing(
+            offer_index="A" * 64,
+            nft_id=CHAR1,
+            kind="character",
+            seller=SELLER,
+            amount_drops=1_000_000,
+            created_ledger=555,
+            created_ts=9999,
+        ),
+    )
+    conn.commit()
+    conn.close()
+
+    s = _make_list_session()
+    monkeypatch.setattr(
+        server.xumm_ops, "get_payload_status", _fake_status(signed=True, txid="TXHASH")
+    )
+    meta = _sell_offer_meta(CHAR1, "A" * 64, 1_000_000)
+
+    async def fake_get_tx(_hash):
+        return {"validated": True, "meta": meta}
+
+    monkeypatch.setattr(server.xrpl_ops, "get_tx", fake_get_tx)
+    _run(server.handle_market_list_status(_StatusReq(s.id)))
+
+    conn = _reopen(onchain_env)
+    count = conn.execute(
+        "SELECT COUNT(*) FROM market_listings WHERE offer_index=?", ("A" * 64,)
+    ).fetchone()[0]
+    assert count == 1
+    row = market_get_listing(conn, "A" * 64)
+    assert row["created_ledger"] == 555  # preserved from the listener write
+    assert row["created_ts"] == 9999
+
+
+# --- POST /api/market/cancel ---
+
+
+def test_cancel_start_success(onchain_env, market_wallet, monkeypatch):
+    conn = _reopen(onchain_env)
+    _seed_character(conn, CHAR1, SELLER, 1)
+    _seed_listing(conn, seller=SELLER)
+    conn.commit()
+    conn.close()
+
+    monkeypatch.setattr(server.xumm_ops, "create_cancel_offer_payload", _fake_payload())
+    req = _post_request("/api/market/cancel", {"offer_index": "A" * 64})
+    resp = _run(server.handle_market_cancel_start(req))
+    assert resp.status == 200
+    body = _run(_read_json(resp))
+    assert body["state"] == "awaiting_signature"
+
+
+def test_cancel_start_foreign_seller_403(onchain_env, market_wallet):
+    conn = _reopen(onchain_env)
+    _seed_character(conn, CHAR1, "rSomeoneElse00000000000000000000", 1)
+    _seed_listing(conn, seller="rSomeoneElse00000000000000000000")
+    conn.commit()
+    conn.close()
+
+    req = _post_request("/api/market/cancel", {"offer_index": "A" * 64})
+    resp = _run(server.handle_market_cancel_start(req))
+    assert resp.status == 403
+
+
+def test_cancel_start_unknown_offer_404(onchain_env, market_wallet):
+    req = _post_request("/api/market/cancel", {"offer_index": "Z" * 64})
+    resp = _run(server.handle_market_cancel_start(req))
+    assert resp.status == 404
+
+
+def test_cancel_start_dead_listing_404(onchain_env, market_wallet):
+    conn = _reopen(onchain_env)
+    _seed_character(conn, CHAR1, SELLER, 1)
+    _seed_listing(conn, seller=SELLER)
+    conn.close()
+    conn = _reopen(onchain_env)
+    from lfg_core.market_store import close_listing
+
+    close_listing(conn, "A" * 64, "cancelled")
+    conn.commit()
+    conn.close()
+
+    req = _post_request("/api/market/cancel", {"offer_index": "A" * 64})
+    resp = _run(server.handle_market_cancel_start(req))
+    assert resp.status == 404
+
+
+def _make_cancel_session(**overrides):
+    base = {
+        "discord_id": "dev",
+        "wallet_address": SELLER,
+        "offer_index": "A" * 64,
+        "network": "testnet",
+    }
+    base.update(overrides)
+    s = server.market_flow.CancelSession(**base)
+    s.payload_uuid = "U1"
+    server.market_sessions[s.id] = s
+    return s
+
+
+def test_cancel_status_signed_closes_row(onchain_env, market_wallet, monkeypatch):
+    conn = _reopen(onchain_env)
+    _seed_character(conn, CHAR1, SELLER, 1)
+    _seed_listing(conn, seller=SELLER)
+    conn.commit()
+    conn.close()
+
+    s = _make_cancel_session()
+    monkeypatch.setattr(server.xumm_ops, "get_payload_status", _fake_status(signed=True))
+    resp = _run(server.handle_market_cancel_status(_StatusReq(s.id)))
+    body = _run(_read_json(resp))
+    assert body["state"] == "done"
+
+    conn = _reopen(onchain_env)
+    row = market_get_listing(conn, "A" * 64)
+    assert row["is_live"] == 0
+    assert row["closed_reason"] == "cancelled"
+
+
+# --- POST /api/market/buy ---
+
+
+def test_buy_start_unknown_offer_404(onchain_env, market_wallet):
+    req = _post_request("/api/market/buy", {"offer_index": "Z" * 64})
+    resp = _run(server.handle_market_buy_start(req))
+    assert resp.status == 404
+
+
+def test_buy_start_dead_listing_410(onchain_env, market_wallet):
+    conn = _reopen(onchain_env)
+    _seed_character(conn, CHAR1, SELLER, 1)
+    _seed_listing(conn, seller=SELLER)
+    conn.commit()
+    conn.close()
+    conn = _reopen(onchain_env)
+    from lfg_core.market_store import close_listing
+
+    close_listing(conn, "A" * 64, "cancelled")
+    conn.commit()
+    conn.close()
+
+    req = _post_request("/api/market/buy", {"offer_index": "A" * 64})
+    resp = _run(server.handle_market_buy_start(req))
+    assert resp.status == 410
+    body = _run(_read_json(resp))
+    assert body["error"] == "listing_unavailable"
+
+
+def test_buy_start_closet_required_403(onchain_env, market_wallet, monkeypatch):
+    monkeypatch.setattr(mock_economy, "DEV_OWNER", BUYER)
+    conn = _reopen(onchain_env)
+    upsert_trait_token(conn, TRAIT1, SELLER, "Hat", "Wizard Hat")
+    _seed_listing(conn, nft_id=TRAIT1, kind="trait", seller=SELLER, slot="Hat", value="Wizard Hat")
+    conn.commit()
+    conn.close()
+
+    req = _post_request("/api/market/buy", {"offer_index": "A" * 64})
+    resp = _run(server.handle_market_buy_start(req))
+    assert resp.status == 403
+    body = _run(_read_json(resp))
+    assert body["error"] == "closet_required"
+
+
+def test_buy_start_verify_false_410_and_marks_stale(onchain_env, market_wallet, monkeypatch):
+    monkeypatch.setattr(mock_economy, "DEV_OWNER", BUYER)
+    conn = _reopen(onchain_env)
+    _seed_character(conn, CHAR1, SELLER, 1)
+    _seed_listing(conn, seller=SELLER)
+    conn.commit()
+    conn.close()
+
+    async def fake_verify(*args, **kwargs):
+        return False
+
+    monkeypatch.setattr(server.market_ops, "verify_sell_offer", fake_verify)
+    req = _post_request("/api/market/buy", {"offer_index": "A" * 64})
+    resp = _run(server.handle_market_buy_start(req))
+    assert resp.status == 410
+    body = _run(_read_json(resp))
+    assert body["error"] == "listing_unavailable"
+
+    conn = _reopen(onchain_env)
+    row = market_get_listing(conn, "A" * 64)
+    assert row["is_live"] == 0
+    assert row["closed_reason"] == "stale"
+
+
+def test_buy_start_verify_raises_410_fail_closed(onchain_env, market_wallet, monkeypatch):
+    monkeypatch.setattr(mock_economy, "DEV_OWNER", BUYER)
+    conn = _reopen(onchain_env)
+    _seed_character(conn, CHAR1, SELLER, 1)
+    _seed_listing(conn, seller=SELLER)
+    conn.commit()
+    conn.close()
+
+    async def boom(*args, **kwargs):
+        raise RuntimeError("rpc down")
+
+    monkeypatch.setattr(server.market_ops, "verify_sell_offer", boom)
+    req = _post_request("/api/market/buy", {"offer_index": "A" * 64})
+    resp = _run(server.handle_market_buy_start(req))
+    assert resp.status == 410
+    body = _run(_read_json(resp))
+    assert body["error"] == "listing_unavailable"
+
+    conn = _reopen(onchain_env)
+    row = market_get_listing(conn, "A" * 64)
+    assert row["is_live"] == 0
+    assert row["closed_reason"] == "stale"
+
+
+def test_buy_start_happy_path_returns_accept_payload_with_price(
+    onchain_env, market_wallet, monkeypatch
+):
+    monkeypatch.setattr(mock_economy, "DEV_OWNER", BUYER)
+    conn = _reopen(onchain_env)
+    _seed_character(conn, CHAR1, SELLER, 1)
+    _seed_listing(conn, seller=SELLER, amount_drops=2_000_000)
+    conn.commit()
+    conn.close()
+
+    async def fake_verify(*args, **kwargs):
+        return True
+
+    monkeypatch.setattr(server.market_ops, "verify_sell_offer", fake_verify)
+    monkeypatch.setattr(server.xumm_ops, "create_accept_offer_payload", _fake_payload())
+    req = _post_request("/api/market/buy", {"offer_index": "A" * 64})
+    resp = _run(server.handle_market_buy_start(req))
+    assert resp.status == 200
+    body = _run(_read_json(resp))
+    assert body["state"] == "awaiting_signature"
+    assert "2" in body["instruction"]
+
+
+def _make_buy_session(**overrides):
+    base = {
+        "discord_id": "dev",
+        "wallet_address": BUYER,
+        "offer_index": "A" * 64,
+        "nft_id": CHAR1,
+        "listing_kind": "character",
+        "network": "testnet",
+        "amount_drops": 1_000_000,
+    }
+    base.update(overrides)
+    s = server.market_flow.BuySession(**base)
+    s.payload_uuid = "U1"
+    server.market_sessions[s.id] = s
+    return s
+
+
+def test_buy_status_success_marks_sold(onchain_env, market_wallet, monkeypatch):
+    conn = _reopen(onchain_env)
+    _seed_character(conn, CHAR1, SELLER, 1)
+    _seed_listing(conn, seller=SELLER)
+    conn.commit()
+    conn.close()
+
+    s = _make_buy_session()
+    monkeypatch.setattr(
+        server.xumm_ops, "get_payload_status", _fake_status(signed=True, txid="TXHASH")
+    )
+
+    async def fake_get_tx(_hash):
+        return {"validated": True, "meta": {"TransactionResult": "tesSUCCESS"}}
+
+    monkeypatch.setattr(server.xrpl_ops, "get_tx", fake_get_tx)
+    resp = _run(server.handle_market_buy_status(_StatusReq(s.id)))
+    body = _run(_read_json(resp))
+    assert body["state"] == "done"
+
+    conn = _reopen(onchain_env)
+    row = market_get_listing(conn, "A" * 64)
+    assert row["is_live"] == 0
+    assert row["closed_reason"] == "sold"
+
+
+def test_buy_status_ledger_race_failure_maps_reason(onchain_env, market_wallet, monkeypatch):
+    conn = _reopen(onchain_env)
+    _seed_character(conn, CHAR1, SELLER, 1)
+    _seed_listing(conn, seller=SELLER)
+    conn.commit()
+    conn.close()
+
+    s = _make_buy_session()
+    monkeypatch.setattr(
+        server.xumm_ops, "get_payload_status", _fake_status(signed=True, txid="TXHASH")
+    )
+
+    async def fake_get_tx(_hash):
+        return {"validated": True, "meta": {"TransactionResult": "tecOBJECT_NOT_FOUND"}}
+
+    monkeypatch.setattr(server.xrpl_ops, "get_tx", fake_get_tx)
+    resp = _run(server.handle_market_buy_status(_StatusReq(s.id)))
+    body = _run(_read_json(resp))
+    assert body == {
+        "id": s.id,
+        "platform": "discord",
+        "state": "failed",
+        "error": body["error"],
+        "reason": "listing_unavailable",
+        "qr_url": None,
+        "xumm_url": None,
+        "instruction": None,
+        "offer_index": "A" * 64,
+    }
+
+    conn = _reopen(onchain_env)
+    row = market_get_listing(conn, "A" * 64)
+    assert row["is_live"] == 0
+    assert row["closed_reason"] == "stale"
+
+
+def test_buy_status_trait_purchase_triggers_settlement_seam(
+    onchain_env, market_wallet, monkeypatch
+):
+    conn = _reopen(onchain_env)
+    upsert_trait_token(conn, TRAIT1, SELLER, "Hat", "Wizard Hat")
+    _seed_listing(conn, nft_id=TRAIT1, kind="trait", seller=SELLER, slot="Hat", value="Wizard Hat")
+    conn.commit()
+    conn.close()
+
+    s = _make_buy_session(nft_id=TRAIT1, listing_kind="trait")
+    monkeypatch.setattr(
+        server.xumm_ops, "get_payload_status", _fake_status(signed=True, txid="TXHASH")
+    )
+
+    async def fake_get_tx(_hash):
+        return {"validated": True, "meta": {"TransactionResult": "tesSUCCESS"}}
+
+    monkeypatch.setattr(server.xrpl_ops, "get_tx", fake_get_tx)
+    calls = []
+    monkeypatch.setattr(server.market_flow, "trigger_trait_settlement", lambda oi: calls.append(oi))
+    _run(server.handle_market_buy_status(_StatusReq(s.id)))
+    assert calls == ["A" * 64]
+
+
+def test_buy_status_character_purchase_does_not_trigger_settlement(
+    onchain_env, market_wallet, monkeypatch
+):
+    conn = _reopen(onchain_env)
+    _seed_character(conn, CHAR1, SELLER, 1)
+    _seed_listing(conn, seller=SELLER)
+    conn.commit()
+    conn.close()
+
+    s = _make_buy_session()
+    monkeypatch.setattr(
+        server.xumm_ops, "get_payload_status", _fake_status(signed=True, txid="TXHASH")
+    )
+
+    async def fake_get_tx(_hash):
+        return {"validated": True, "meta": {"TransactionResult": "tesSUCCESS"}}
+
+    monkeypatch.setattr(server.xrpl_ops, "get_tx", fake_get_tx)
+
+    def boom(oi):
+        raise AssertionError("must not trigger settlement for a character sale")
+
+    monkeypatch.setattr(server.market_flow, "trigger_trait_settlement", boom)
+    resp = _run(server.handle_market_buy_status(_StatusReq(s.id)))
+    assert resp.status == 200
+
+
+def test_closet_active_helper_checks_status(onchain_env, market_wallet):
+    conn = _reopen(onchain_env)
+    set_closet_token(conn, BUYER, "closet-nft-id", "hex", status="active")
+    conn.commit()
+    conn.close()
+    assert server._closet_active("testnet", BUYER) is True
+    assert server._closet_active("testnet", "rNoCloset000000000000000000000000") is False
