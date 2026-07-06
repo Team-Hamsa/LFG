@@ -34,6 +34,7 @@ from lfg_core import (  # noqa: E402
     economy_store,
     history_events,
     history_store,
+    market_store,
     nft_index,
     nft_listener,
     swap_meta,
@@ -127,6 +128,10 @@ async def process_stream_tx(
             fetch_meta_fn=cached_meta,
             genesis=genesis,
         )
+    # offer_create/offer_cancel/accept maintain market_listings; runs after apply_tx
+    # so an accept's post-transfer owner (used to delist other stale rows for the
+    # same nft_id) reads the just-updated onchain_nfts/trait_tokens row, not stale data.
+    await nft_listener.apply_market_tx(conn, tx)
     if history_conn is not None and history_ctx is not None:
         _record_history(history_conn, tx, history_ctx, index_conn=conn)
 
@@ -194,6 +199,7 @@ async def _listen(network: str, issuer: str, taxon: int, clio: str) -> None:
 
     conn = nft_index.init_db(nft_index.index_db_path(network))
     economy_store.init_economy_schema(conn)
+    market_store.init_db(conn)
     hconn = history_store.init_history_db(history_store.history_db_path(network))
     # Numbers map is read once at startup, not refreshed per-tx: a mint of a
     # brand-new edition within this process's lifetime won't have its number
