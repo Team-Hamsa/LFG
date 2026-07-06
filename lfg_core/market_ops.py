@@ -164,7 +164,12 @@ def drops_to_xrp_str(drops: str) -> str:
         raise ValueError(f"invalid drops amount: {drops!r}")
 
     value = Decimal(drops) / DROPS_PER_XRP
-    normalized = value.normalize()
-    if normalized == normalized.to_integral_value():
-        return str(normalized.to_integral_value())
-    return format(normalized, "f")
+    # Fixed-point formatting, never scientific: Decimal.normalize() turns e.g.
+    # Decimal("10") into Decimal("1E+1") (and to_integral_value() preserves that
+    # exponent form), so a 10 XRP listing rendered as "1E+1" — which also made
+    # the JS BigInt("1E+1") buy path throw. format(_, "f") never uses an
+    # exponent; trim trailing fractional zeros by hand.
+    text = format(value, "f")
+    if "." in text:
+        text = text.rstrip("0").rstrip(".")
+    return text
