@@ -64,6 +64,15 @@ _EXTRACT_RUNNING = "running"
 
 TERMINAL_STATES = {DONE, FAILED, UNKNOWN, LISTED}
 
+# On a validated-but-failed NFTokenAcceptOffer, only these tec codes mean the
+# offer itself is gone (consumed/cancelled between verify and sign — spec §Q4's
+# documented race), so the caller may stale-close the listing. Every OTHER
+# failure is buyer-side (tecINSUFFICIENT_FUNDS, tecCANT_ACCEPT_OWN_OFFER, …) or
+# unknown — the offer is still healthy, so we fail the session WITHOUT closing
+# the row (closing it would be a griefing lever: a broke/self-accepting buyer
+# could delist anyone's listing). Be conservative: unknown tec ⇒ leave live.
+_OFFER_GONE_TEC_CODES = frozenset({"tecOBJECT_NOT_FOUND"})
+
 # ~30s at typical frontend poll intervals (spec §Q4: "bounded at 10 polls (~30s)").
 MAX_FINALIZE_POLLS = 10
 
@@ -174,7 +183,7 @@ async def advance_list_session(
     get_tx: Any = None,
 ) -> dict[str, Any] | None:
     """Advance a ListSession from its XUMM + tx status. Returns a dict ready
-    for `market_store.upsert_listing(conn, MarketListing(**dict))` the poll a
+    for `market_store.record_listing_creation(conn, MarketListing(**dict))` the poll a
     tesSUCCESS NFTokenCreateOffer is confirmed and its offer index extracted;
     None every other poll (mutates session.state/error/txid/poll_count/
     offer_index in place — the caller only needs to inspect `session` and the
@@ -241,7 +250,9 @@ async def advance_list_session(
         "nft_id": session.nft_id,
         "kind": session.listing_kind,
         "seller": session.wallet_address,
-        "amount_drops": session.amount_drops,
+        # On-ledger truth from the CreatedNode, not session.amount_drops — the
+        # signed sell offer's Amount is what a buyer will actually pay.
+        "amount_drops": extracted["amount_drops"],
         "slot": session.slot,
         "value": session.value,
     }
@@ -328,14 +339,21 @@ async def advance_buy_session(
         return None
 
     meta = tx.get("meta") or {}
-    if meta.get("TransactionResult") == "tesSUCCESS":
+    result = meta.get("TransactionResult")
+    if result == "tesSUCCESS":
         session.state = DONE
         return "sold"
 
     session.state = FAILED
-    session.reason = "listing_unavailable"
-    session.error = f"transaction failed: {meta.get('TransactionResult')}"
-    return "stale"
+    session.error = f"transaction failed: {result}"
+    if result in _OFFER_GONE_TEC_CODES:
+        # The offer is genuinely gone (verify/sign race) — stale-close the row.
+        session.reason = "listing_unavailable"
+        return "stale"
+    # Buyer-side / unknown failure: the offer is still on-ledger. Fail the
+    # session but leave the listing live (return None ⇒ no close).
+    session.reason = "purchase_failed"
+    return None
 
 
 @dataclass
@@ -395,7 +413,7 @@ async def advance_trait_sell_session(
     get_tx: Any = None,
 ) -> dict[str, Any] | None:
     """Advance the trait-sell wizard through Extract -> List. Returns a dict
-    ready for `market_store.upsert_listing(conn, MarketListing(**dict))` the
+    ready for `market_store.record_listing_creation(conn, MarketListing(**dict))` the
     poll the embedded List step validates a tesSUCCESS NFTokenCreateOffer
     (mirrors `advance_list_session`'s own contract exactly — this delegates
     to it for that step); None on every other poll.

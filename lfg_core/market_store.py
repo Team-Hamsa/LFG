@@ -129,6 +129,57 @@ def upsert_listing(conn: sqlite3.Connection, listing: MarketListing) -> None:
     conn.commit()
 
 
+def record_listing_creation(conn: sqlite3.Connection, listing: MarketListing) -> None:
+    """Creation-only write for the service *finalize* paths (the list status
+    handler + the trait-sell wizard), NOT the listener/backfill.
+
+    The finalize poll only knows the offer's creation-time facts — the same
+    kind/slot/value/seller/amount the listener writes from the offer_create tx
+    on-ledger. But it can land at any time relative to the listener, including
+    long AFTER a buyer has already purchased and the listener has closed the
+    row (is_live=0, closed_reason='sold', settled=0). A full overwrite
+    (upsert_listing) would resurrect that dead row — re-listing a sold token in
+    browse AND breaking the settlement sweep's `closed_reason='sold' AND
+    settled=0` predicate so the buyer's paid-for trait is never deposited.
+
+    So this INSERTs a fresh live row when the offer_index is unseen (finalize
+    raced ahead of the listener — the row must still exist, live, with
+    kind/slot/value) and does NOTHING on conflict: whatever lifecycle state a
+    prior listener/backfill/finalize write established is authoritative and
+    must survive a late finalize poll. Raises ValueError for an unknown `kind`.
+
+    The listener's own echo of the offer_create still uses the full-overwrite
+    upsert_listing, so a finalize-then-listener ordering converges on fresh
+    on-ledger truth as before."""
+    if listing.kind not in _VALID_KINDS:
+        raise ValueError(f"unknown kind: {listing.kind!r}")
+    conn.execute(
+        """
+        INSERT INTO market_listings
+            (offer_index, nft_id, kind, seller, amount_drops, destination,
+             slot, value, created_ledger, created_ts, is_live, closed_reason, settled)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        ON CONFLICT(offer_index) DO NOTHING
+        """,
+        (
+            listing.offer_index,
+            listing.nft_id,
+            listing.kind,
+            listing.seller,
+            listing.amount_drops,
+            listing.destination,
+            listing.slot,
+            listing.value,
+            listing.created_ledger,
+            listing.created_ts,
+            listing.is_live,
+            listing.closed_reason,
+            listing.settled,
+        ),
+    )
+    conn.commit()
+
+
 def close_listing(conn: sqlite3.Connection, offer_index: str, reason: str) -> None:
     """Mark a listing no-longer-live. `reason` must be one of
     sold|cancelled|stale. Per the spec, closing a *trait* listing with

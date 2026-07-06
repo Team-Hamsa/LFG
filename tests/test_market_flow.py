@@ -166,6 +166,38 @@ class TestAdvanceListSession:
         assert s.state == market_flow.DONE
         assert s.offer_index == OFFER_INDEX
 
+    def test_finalize_row_records_on_ledger_amount_not_session_amount(self):
+        """The written amount_drops must be the on-ledger truth extracted from
+        the CreatedNode, not session.amount_drops (which could drift if the
+        signed offer differs from the requested price)."""
+        s = _list_session()  # session amount_drops = 1_000_000
+        meta = {
+            "TransactionResult": "tesSUCCESS",
+            "AffectedNodes": [
+                {
+                    "CreatedNode": {
+                        "LedgerEntryType": "NFTokenOffer",
+                        "LedgerIndex": OFFER_INDEX,
+                        "NewFields": {
+                            "NFTokenID": NFT_ID,
+                            "Amount": "7777777",
+                            "Flags": 1,
+                        },
+                    }
+                }
+            ],
+        }
+
+        async def fake_get_tx(_hash):
+            return {"validated": True, "meta": meta}
+
+        row = _run(
+            market_flow.advance_list_session(
+                s, get_payload_status=_status(signed=True, txid="TXHASH"), get_tx=fake_get_tx
+            )
+        )
+        assert row["amount_drops"] == 7_777_777
+
     def test_validated_failure_result_fails_session_no_write(self):
         s = _list_session()
 
@@ -293,4 +325,36 @@ class TestAdvanceBuySession:
             )
         )
         assert outcome is None
-        assert s.state == market_flow.UNKNOWN
+
+    def test_insufficient_funds_fails_session_but_leaves_listing_live(self):
+        """A buyer-side failure (tecINSUFFICIENT_FUNDS) means the OFFER is
+        still healthy — only offer-consumed/absent codes may stale-close it.
+        Returning None (not 'stale') keeps the caller from delisting a live
+        listing (griefing lever)."""
+        s = self._session()
+
+        async def fake_get_tx(_hash):
+            return {"validated": True, "meta": {"TransactionResult": "tecINSUFFICIENT_FUNDS"}}
+
+        outcome = _run(
+            market_flow.advance_buy_session(
+                s, get_payload_status=_status(signed=True, txid="TXHASH"), get_tx=fake_get_tx
+            )
+        )
+        assert outcome is None  # NOT "stale" — the row must stay live
+        assert s.state == market_flow.FAILED
+        assert s.reason != "listing_unavailable"
+
+    def test_self_accept_own_offer_does_not_stale_close(self):
+        s = self._session()
+
+        async def fake_get_tx(_hash):
+            return {"validated": True, "meta": {"TransactionResult": "tecCANT_ACCEPT_OWN_OFFER"}}
+
+        outcome = _run(
+            market_flow.advance_buy_session(
+                s, get_payload_status=_status(signed=True, txid="TXHASH"), get_tx=fake_get_tx
+            )
+        )
+        assert outcome is None
+        assert s.state == market_flow.FAILED

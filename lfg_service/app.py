@@ -800,6 +800,14 @@ async def handle_market_listings(request: web.Request) -> web.Response:
     if kind not in market_store._VALID_KINDS:
         return web.json_response({"error": f"unknown kind: {kind!r}"}, status=400)
 
+    # Trait listings are only transactable when the trait economy is enabled on
+    # this chain (ECONOMY_NETWORK == XRPL_NETWORK). With it off, surfacing trait
+    # rows on this public browse would advertise listings no one can actually
+    # buy (buy would 403 economy_disabled), so serve an empty page instead of a
+    # hard 403 — the character surface is unaffected. See CLAUDE.md's seam note.
+    if kind == "trait" and not config.ECONOMY_ENABLED:
+        return web.json_response({"rows": [], "total": 0})
+
     sort = request.query.get("sort", "price_asc")
     if sort not in market_store._VALID_SORTS:
         return web.json_response({"error": f"unknown sort: {sort!r}"}, status=400)
@@ -983,6 +991,19 @@ async def handle_market_mine(request):  # untyped: matches require_wallet's othe
     )
     cfg = trait_config.get_config()
     listings = [_serialize_listing_row(r, r["kind"], cfg) for r in data["listings"]]
+    # With the trait economy off, trait ops are unavailable on this chain, so
+    # drop trait content from the caller's surface (character listings + their
+    # unlisted characters are unaffected). See CLAUDE.md's marketplace seam note.
+    if not config.ECONOMY_ENABLED:
+        listings = [row for row in listings if row.get("kind") != "trait"]
+        return web.json_response(
+            {
+                "listings": listings,
+                "unlisted_characters": data["unlisted_characters"],
+                "unlisted_trait_tokens": [],
+                "closet_assets": [],
+            }
+        )
     return web.json_response(
         {
             "listings": listings,
@@ -1049,6 +1070,11 @@ async def handle_market_history(request: web.Request) -> web.Response:
         return web.json_response({"nft_id": nft_id, "events": events})
 
     if slot and value:
+        # Sold trait listings are trait-economy-backed; with the economy off on
+        # this chain there is nothing meaningful to serve (see CLAUDE.md's seam
+        # note) — return an empty sales list rather than reading the wrong net.
+        if not config.ECONOMY_ENABLED:
+            return web.json_response({"slot": slot, "value": value, "sales": []})
         # Sold trait listings are trait-economy-backed -> economy network
         # (see _market_network).
         rows = await asyncio.get_event_loop().run_in_executor(
@@ -1140,10 +1166,15 @@ def _closet_active(network: str, wallet: str) -> bool:
 
 
 def _write_listing_row(network: str, row: dict[str, Any]) -> None:
+    # Creation-only write (record_listing_creation, NOT upsert_listing): the
+    # finalize poll carries stale creation-time data and can land after the
+    # listener already closed the row (sold/settled=0). A full overwrite would
+    # resurrect a sold listing and break the settlement sweep predicate — see
+    # market_store.record_listing_creation's docstring.
     conn = nft_index.init_db(nft_index.index_db_path(network))
     try:
         market_store.init_db(conn)
-        market_store.upsert_listing(conn, market_store.MarketListing(**row))
+        market_store.record_listing_creation(conn, market_store.MarketListing(**row))
     finally:
         conn.close()
 
@@ -1199,14 +1230,26 @@ async def handle_market_list_start(request):
     if membership is None or membership["owner"] != wallet:
         return web.json_response({"error": "you do not own that NFT"}, status=409)
 
+    # Trait ON-LEDGER ops assume ECONOMY_NETWORK == XRPL_NETWORK; gate trait
+    # listing on ECONOMY_ENABLED (same as the trait wizard/sweep). Characters
+    # are unaffected. See CLAUDE.md's marketplace seam note.
+    if membership["kind"] == "trait" and not config.ECONOMY_ENABLED:
+        return _economy_disabled_response()
+
     network = _market_network(membership["kind"])
     already_listed = await loop.run_in_executor(None, _has_live_listing, network, nft_id)
     if already_listed:
         return web.json_response({"error": "that NFT is already listed"}, status=409)
 
     _prune_sessions(market_sessions, market_flow.TERMINAL_STATES)
-    if _active_session(market_sessions, market_flow.TERMINAL_STATES, user["id"], _platform(user)):
-        return web.json_response({"error": "a market action is already in progress"}, status=409)
+    active = _active_session(
+        market_sessions, market_flow.TERMINAL_STATES, user["id"], _platform(user)
+    )
+    if active:
+        return web.json_response(
+            {"error": "a market action is already in progress", "session": active.to_dict()},
+            status=409,
+        )
 
     payload = await xumm_ops.create_sell_offer_payload(
         wallet,
@@ -1262,8 +1305,14 @@ async def handle_market_cancel_start(request):
         return web.json_response({"error": "not your listing"}, status=403)
 
     _prune_sessions(market_sessions, market_flow.TERMINAL_STATES)
-    if _active_session(market_sessions, market_flow.TERMINAL_STATES, user["id"], _platform(user)):
-        return web.json_response({"error": "a market action is already in progress"}, status=409)
+    active = _active_session(
+        market_sessions, market_flow.TERMINAL_STATES, user["id"], _platform(user)
+    )
+    if active:
+        return web.json_response(
+            {"error": "a market action is already in progress", "session": active.to_dict()},
+            status=409,
+        )
 
     payload = await xumm_ops.create_cancel_offer_payload(
         wallet,
@@ -1319,6 +1368,18 @@ async def handle_market_buy_start(request):
     if not row["is_live"]:
         return web.json_response({"error": "listing_unavailable"}, status=410)
 
+    # Buying your own listing is a no-op that would fail on-ledger
+    # (tecCANT_ACCEPT_OWN_OFFER) — reject up front instead of spending a sign.
+    if row["seller"] == wallet:
+        return web.json_response({"error": "cannot buy your own listing"}, status=400)
+
+    # Trait ON-LEDGER ops (verify/accept/settlement-deposit) assume
+    # ECONOMY_NETWORK == XRPL_NETWORK; with the economy off (or on a different
+    # net) they'd fail-verify against the wrong chain, so gate trait buys on
+    # the same flag the trait wizard/sweep use. Characters are unaffected.
+    if row["kind"] == "trait" and not config.ECONOMY_ENABLED:
+        return _economy_disabled_response()
+
     if row["kind"] == "trait":
         active = await loop.run_in_executor(None, _closet_active, _market_network("trait"), wallet)
         if not active:
@@ -1326,18 +1387,31 @@ async def handle_market_buy_start(request):
 
     try:
         verified = await market_ops.verify_sell_offer(
-            row["nft_id"], offer_index, row["amount_drops"]
+            row["nft_id"], offer_index, row["amount_drops"], strict=True
         )
     except Exception as e:
-        logging.warning(f"verify_sell_offer raised for offer {offer_index}: {e}")
-        verified = False
+        # A lookup FAILURE (RPC down / rippled soft-error), NOT a verified
+        # absence — do not stale-close a possibly-healthy listing; ask the
+        # buyer to retry. No DB write (fix #3).
+        logging.warning(f"verify_sell_offer lookup failed for offer {offer_index}: {e}")
+        return web.json_response(
+            {"error": "could not verify the listing right now, please retry"}, status=503
+        )
     if not verified:
+        # Lookup succeeded and the offer is genuinely absent/mismatched/foreign
+        # — safe to stale-close and report unavailable.
         await loop.run_in_executor(None, _close_listing_sync, network, offer_index, "stale")
         return web.json_response({"error": "listing_unavailable"}, status=410)
 
     _prune_sessions(market_sessions, market_flow.TERMINAL_STATES)
-    if _active_session(market_sessions, market_flow.TERMINAL_STATES, user["id"], _platform(user)):
-        return web.json_response({"error": "a market action is already in progress"}, status=409)
+    active = _active_session(
+        market_sessions, market_flow.TERMINAL_STATES, user["id"], _platform(user)
+    )
+    if active:
+        return web.json_response(
+            {"error": "a market action is already in progress", "session": active.to_dict()},
+            status=409,
+        )
 
     payload = await xumm_ops.create_accept_offer_payload(
         offer_index,
@@ -1641,8 +1715,14 @@ async def handle_market_trait_list_start(request):
             return web.json_response({"error": str(e)}, status=400)
 
     _prune_sessions(market_sessions, market_flow.TERMINAL_STATES)
-    if _active_session(market_sessions, market_flow.TERMINAL_STATES, user["id"], _platform(user)):
-        return web.json_response({"error": "a market action is already in progress"}, status=409)
+    active = _active_session(
+        market_sessions, market_flow.TERMINAL_STATES, user["id"], _platform(user)
+    )
+    if active:
+        return web.json_response(
+            {"error": "a market action is already in progress", "session": active.to_dict()},
+            status=409,
+        )
 
     try:
         extract_ws = await economy_api.start_extract(

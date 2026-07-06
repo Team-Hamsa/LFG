@@ -1151,7 +1151,10 @@ def test_buy_start_verify_false_410_and_marks_stale(onchain_env, market_wallet, 
     assert row["closed_reason"] == "stale"
 
 
-def test_buy_start_verify_raises_410_fail_closed(onchain_env, market_wallet, monkeypatch):
+def test_buy_start_verify_lookup_failure_503_row_untouched(onchain_env, market_wallet, monkeypatch):
+    """Fix #3: a verify LOOKUP failure (RPC/soft-error, verify raises) must NOT
+    stale-close a possibly-healthy listing — respond 503 with no DB write. Only
+    a successful lookup that finds the offer genuinely absent may stale-close."""
     monkeypatch.setattr(mock_economy, "DEV_OWNER", BUYER)
     conn = _reopen(onchain_env)
     _seed_character(conn, CHAR1, SELLER, 1)
@@ -1165,14 +1168,32 @@ def test_buy_start_verify_raises_410_fail_closed(onchain_env, market_wallet, mon
     monkeypatch.setattr(server.market_ops, "verify_sell_offer", boom)
     req = _post_request("/api/market/buy", {"offer_index": "A" * 64})
     resp = _run(server.handle_market_buy_start(req))
-    assert resp.status == 410
-    body = _run(_read_json(resp))
-    assert body["error"] == "listing_unavailable"
+    assert resp.status == 503
 
     conn = _reopen(onchain_env)
     row = market_get_listing(conn, "A" * 64)
-    assert row["is_live"] == 0
-    assert row["closed_reason"] == "stale"
+    assert row["is_live"] == 1  # untouched — still live
+    assert row["closed_reason"] is None
+
+
+def test_buy_start_self_buy_400_row_untouched(onchain_env, market_wallet, monkeypatch):
+    """Fix #2: buying your own listing is rejected up front (400) with no DB
+    write and no verify/sign spent."""
+    monkeypatch.setattr(mock_economy, "DEV_OWNER", SELLER)  # buyer == seller
+    conn = _reopen(onchain_env)
+    _seed_character(conn, CHAR1, SELLER, 1)
+    _seed_listing(conn, seller=SELLER)
+    conn.commit()
+    conn.close()
+
+    req = _post_request("/api/market/buy", {"offer_index": "A" * 64})
+    resp = _run(server.handle_market_buy_start(req))
+    assert resp.status == 400
+
+    conn = _reopen(onchain_env)
+    row = market_get_listing(conn, "A" * 64)
+    assert row["is_live"] == 1
+    assert row["closed_reason"] is None
 
 
 def test_buy_start_happy_path_returns_accept_payload_with_price(
@@ -1335,6 +1356,204 @@ def test_buy_status_character_purchase_does_not_trigger_settlement(
     monkeypatch.setattr(server, "_settle_trait_sale", boom)
     resp = _run(server.handle_market_buy_status(_StatusReq(s.id)))
     assert resp.status == 200
+
+
+def test_buy_status_insufficient_funds_fails_session_leaves_row_live(
+    onchain_env, market_wallet, monkeypatch
+):
+    """Fix #2: a buyer-side failure (tecINSUFFICIENT_FUNDS) fails the session
+    but must leave the listing live — only offer-consumed/absent codes may
+    stale-close (otherwise a broke buyer griefs any listing)."""
+    conn = _reopen(onchain_env)
+    _seed_character(conn, CHAR1, SELLER, 1)
+    _seed_listing(conn, seller=SELLER)
+    conn.commit()
+    conn.close()
+
+    s = _make_buy_session()
+    monkeypatch.setattr(
+        server.xumm_ops, "get_payload_status", _fake_status(signed=True, txid="TXHASH")
+    )
+
+    async def fake_get_tx(_hash):
+        return {"validated": True, "meta": {"TransactionResult": "tecINSUFFICIENT_FUNDS"}}
+
+    monkeypatch.setattr(server.xrpl_ops, "get_tx", fake_get_tx)
+    resp = _run(server.handle_market_buy_status(_StatusReq(s.id)))
+    body = _run(_read_json(resp))
+    assert body["state"] == "failed"
+
+    conn = _reopen(onchain_env)
+    row = market_get_listing(conn, "A" * 64)
+    assert row["is_live"] == 1  # still live
+    assert row["closed_reason"] is None
+
+
+# ---------------------------------------------------------------------------
+# Fix #1: finalize write must not resurrect a listener-closed listing
+# ---------------------------------------------------------------------------
+
+
+def test_list_status_finalize_after_listener_sold_does_not_resurrect(
+    onchain_env, market_wallet, monkeypatch
+):
+    """The seller's app was backgrounded through the whole buy; the listener
+    already closed the row sold/settled=0. A late finalize poll must NOT flip
+    it back to live/NULL (phantom listing + broken settlement predicate)."""
+    conn = _reopen(onchain_env)
+    _seed_character(conn, CHAR1, SELLER, 1)
+    # Listener path: created the live row, then observed the sale + closed it.
+    upsert_listing(
+        conn,
+        MarketListing(
+            offer_index="A" * 64,
+            nft_id=CHAR1,
+            kind="character",
+            seller=SELLER,
+            amount_drops=1_000_000,
+            created_ledger=555,
+            created_ts=9999,
+        ),
+    )
+    from lfg_core.market_store import close_listing
+
+    close_listing(conn, "A" * 64, "sold")
+    conn.commit()
+    conn.close()
+
+    s = _make_list_session()
+    monkeypatch.setattr(
+        server.xumm_ops, "get_payload_status", _fake_status(signed=True, txid="TXHASH")
+    )
+    meta = _sell_offer_meta(CHAR1, "A" * 64, 1_000_000)
+
+    async def fake_get_tx(_hash):
+        return {"validated": True, "meta": meta}
+
+    monkeypatch.setattr(server.xrpl_ops, "get_tx", fake_get_tx)
+    _run(server.handle_market_list_status(_StatusReq(s.id)))
+
+    conn = _reopen(onchain_env)
+    row = market_get_listing(conn, "A" * 64)
+    assert row["is_live"] == 0  # NOT resurrected
+    assert row["closed_reason"] == "sold"
+
+
+def test_list_status_finalize_before_listener_creates_live_row(
+    onchain_env, market_wallet, monkeypatch
+):
+    """No listener echo yet: the finalize write must still create the row,
+    live, with its kind (test (b))."""
+    conn = _reopen(onchain_env)
+    _seed_character(conn, CHAR1, SELLER, 1)
+    conn.commit()
+    conn.close()
+
+    s = _make_list_session()
+    monkeypatch.setattr(
+        server.xumm_ops, "get_payload_status", _fake_status(signed=True, txid="TXHASH")
+    )
+    meta = _sell_offer_meta(CHAR1, "A" * 64, 1_000_000)
+
+    async def fake_get_tx(_hash):
+        return {"validated": True, "meta": meta}
+
+    monkeypatch.setattr(server.xrpl_ops, "get_tx", fake_get_tx)
+    _run(server.handle_market_list_status(_StatusReq(s.id)))
+
+    conn = _reopen(onchain_env)
+    row = market_get_listing(conn, "A" * 64)
+    assert row is not None
+    assert row["is_live"] == 1
+    assert row["kind"] == "character"
+
+
+# ---------------------------------------------------------------------------
+# Fix #4: ECONOMY_ENABLED gates trait-kind market ops (character unaffected)
+# ---------------------------------------------------------------------------
+
+
+def test_list_start_trait_blocked_when_economy_disabled(onchain_env, market_wallet, monkeypatch):
+    monkeypatch.setattr(server.config, "ECONOMY_ENABLED", False)
+    conn = _reopen(onchain_env)
+    upsert_trait_token(conn, TRAIT1, SELLER, "Hat", "Wizard Hat")
+    conn.commit()
+    conn.close()
+
+    req = _post_request("/api/market/list", {"nft_id": TRAIT1, "price_xrp": "5"})
+    resp = _run(server.handle_market_list_start(req))
+    assert resp.status == 403
+    body = _run(_read_json(resp))
+    assert body["code"] == "economy_disabled"
+
+
+def test_list_start_character_ok_when_economy_disabled(onchain_env, market_wallet, monkeypatch):
+    monkeypatch.setattr(server.config, "ECONOMY_ENABLED", False)
+    conn = _reopen(onchain_env)
+    _seed_character(conn, CHAR1, SELLER, 1)
+    conn.commit()
+    conn.close()
+
+    monkeypatch.setattr(server.xumm_ops, "create_sell_offer_payload", _fake_payload())
+    req = _post_request("/api/market/list", {"nft_id": CHAR1, "price_xrp": "5"})
+    resp = _run(server.handle_market_list_start(req))
+    assert resp.status == 200
+
+
+def test_buy_start_trait_blocked_when_economy_disabled(onchain_env, market_wallet, monkeypatch):
+    monkeypatch.setattr(server.config, "ECONOMY_ENABLED", False)
+    monkeypatch.setattr(mock_economy, "DEV_OWNER", BUYER)
+    conn = _reopen(onchain_env)
+    upsert_trait_token(conn, TRAIT1, SELLER, "Hat", "Wizard Hat")
+    _seed_listing(conn, nft_id=TRAIT1, kind="trait", seller=SELLER, slot="Hat", value="Wizard Hat")
+    conn.commit()
+    conn.close()
+
+    req = _post_request("/api/market/buy", {"offer_index": "A" * 64})
+    resp = _run(server.handle_market_buy_start(req))
+    assert resp.status == 403
+    body = _run(_read_json(resp))
+    assert body["code"] == "economy_disabled"
+
+
+def test_browse_trait_empty_when_economy_disabled(onchain_env, market_wallet, monkeypatch):
+    monkeypatch.setattr(server.config, "ECONOMY_ENABLED", False)
+    conn = _reopen(onchain_env)
+    upsert_trait_token(conn, TRAIT1, SELLER, "Hat", "Wizard Hat")
+    _seed_listing(conn, nft_id=TRAIT1, kind="trait", seller=SELLER, slot="Hat", value="Wizard Hat")
+    conn.commit()
+    conn.close()
+
+    req = _mocked_request("GET", "/api/market/listings?kind=trait")
+    resp = _run(server.handle_market_listings(req))
+    assert resp.status == 200
+    body = _run(_read_json(resp))
+    assert body["rows"] == []
+
+
+# ---------------------------------------------------------------------------
+# Fix #5: market 409s carry the active session dict (mint parity)
+# ---------------------------------------------------------------------------
+
+
+def test_list_start_409_carries_active_session(onchain_env, market_wallet, monkeypatch):
+    conn = _reopen(onchain_env)
+    _seed_character(conn, CHAR1, SELLER, 1)
+    _seed_character(conn, CHAR2, SELLER, 2)
+    conn.commit()
+    conn.close()
+
+    # First list: leaves an awaiting_signature session in the map.
+    existing = _make_list_session(discord_id="dev")
+    existing.state = server.market_flow.AWAITING_SIGNATURE
+
+    monkeypatch.setattr(server.xumm_ops, "create_sell_offer_payload", _fake_payload())
+    req = _post_request("/api/market/list", {"nft_id": CHAR2, "price_xrp": "5"})
+    resp = _run(server.handle_market_list_start(req))
+    assert resp.status == 409
+    body = _run(_read_json(resp))
+    assert body["session"]["id"] == existing.id
+    assert body["session"]["state"] == "awaiting_signature"
 
 
 def test_closet_active_helper_checks_status(onchain_env, market_wallet):

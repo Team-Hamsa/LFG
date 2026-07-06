@@ -198,6 +198,57 @@ class TestUpsertListing:
         assert row == (200, 2000)
 
 
+class TestRecordListingCreation:
+    """The service *finalize* write (list status handler + trait-sell wizard).
+    Unlike upsert_listing (listener/backfill fresh on-ledger truth, full
+    overwrite), this creates a row live if absent but must NEVER touch an
+    existing row's lifecycle (is_live/closed_reason/settled) — a slow finalize
+    poll can land AFTER the listener already closed the row sold/settled=0."""
+
+    def test_inserts_live_row_when_absent(self, conn):
+        market_store.init_db(conn)
+        market_store.record_listing_creation(conn, _character_listing())
+        row = conn.execute(
+            "SELECT nft_id, kind, seller, amount_drops, is_live, closed_reason, settled "
+            "FROM market_listings WHERE offer_index=?",
+            ("A" * 64,),
+        ).fetchone()
+        assert row == (CHAR_NFT, "character", SELLER, 1_000_000, 1, None, None)
+
+    def test_does_not_resurrect_a_closed_sold_row(self, conn):
+        """Finalize-after-listener-sold: the row must stay is_live=0,
+        closed_reason='sold', settled=0 (the sweep predicate) — not flip back
+        to live with NULL lifecycle (phantom listing + lost settlement)."""
+        market_store.init_db(conn)
+        market_store.upsert_listing(conn, _trait_listing())
+        market_store.close_listing(conn, "B" * 64, "sold")  # settled -> 0
+        market_store.record_listing_creation(conn, _trait_listing())
+        row = conn.execute(
+            "SELECT is_live, closed_reason, settled FROM market_listings WHERE offer_index=?",
+            ("B" * 64,),
+        ).fetchone()
+        assert row == (0, "sold", 0)
+
+    def test_preserves_listener_created_fields_on_conflict(self, conn):
+        market_store.init_db(conn)
+        market_store.upsert_listing(conn, _character_listing(created_ledger=555, created_ts=9999))
+        market_store.record_listing_creation(
+            conn, _character_listing(created_ledger=None, created_ts=None)
+        )
+        count = conn.execute("SELECT COUNT(*) FROM market_listings").fetchone()[0]
+        row = conn.execute(
+            "SELECT created_ledger, created_ts FROM market_listings WHERE offer_index=?",
+            ("A" * 64,),
+        ).fetchone()
+        assert count == 1
+        assert row == (555, 9999)
+
+    def test_rejects_unknown_kind(self, conn):
+        market_store.init_db(conn)
+        with pytest.raises(ValueError):
+            market_store.record_listing_creation(conn, _character_listing(kind="bogus"))
+
+
 class TestCloseListing:
     def test_close_character_sold_leaves_settled_null(self, conn):
         market_store.init_db(conn)

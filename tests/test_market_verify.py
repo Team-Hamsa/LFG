@@ -120,6 +120,31 @@ class TestGetNftSellOffers:
         offers = _run(xrpl_ops.get_nft_sell_offers(NFT_ID, raise_on_error=True))
         assert offers == []
 
+    def test_strict_object_not_found_result_returns_empty(self, monkeypatch) -> None:
+        """objectNotFound is the ONLY unsuccessful RESULT that legitimately
+        means "no offers" — in strict mode it must still return [], not raise."""
+        result = {"error": "objectNotFound", "status": "error"}
+        monkeypatch.setattr(xrpl_ops, "JsonRpcClient", _fake_json_rpc_client(result))
+        offers = _run(xrpl_ops.get_nft_sell_offers(NFT_ID, raise_on_error=True))
+        assert offers == []
+
+    def test_strict_soft_error_result_raises(self, monkeypatch) -> None:
+        """A rippled soft-error RESULT (e.g. tooBusy) is NOT "no offers" — in
+        strict mode it must raise, not collapse to [] (which the stale-close /
+        buy-verify paths would misread as "offer absent" and close a live
+        listing)."""
+        result = {"error": "tooBusy", "status": "error"}
+        monkeypatch.setattr(xrpl_ops, "JsonRpcClient", _fake_json_rpc_client(result))
+        with pytest.raises(RuntimeError):
+            _run(xrpl_ops.get_nft_sell_offers(NFT_ID, raise_on_error=True))
+
+    def test_non_strict_soft_error_result_returns_empty(self, monkeypatch) -> None:
+        """Non-strict callers are unchanged: any unsuccessful result -> []."""
+        result = {"error": "tooBusy", "status": "error"}
+        monkeypatch.setattr(xrpl_ops, "JsonRpcClient", _fake_json_rpc_client(result))
+        offers = _run(xrpl_ops.get_nft_sell_offers(NFT_ID))
+        assert offers == []
+
 
 class TestGetTx:
     """Task 8's list/buy finalize poller: fetch a transaction by hash via the
@@ -238,6 +263,32 @@ class TestVerifySellOffer:
         result = _run(
             market_ops.verify_sell_offer(
                 NFT_ID, OFFER_INDEX, 5_000_000, fetch_offers=_offers_fetcher(offers)
+            )
+        )
+        assert result is False
+
+    def test_strict_reraises_on_lookup_failure(self) -> None:
+        """strict=True must distinguish a lookup FAILURE from a verified
+        absence: the exception propagates so the buy-start handler can respond
+        503 without stale-closing a healthy listing (fix #3)."""
+
+        async def fetch(_nft_id: str) -> list[dict[str, Any]]:
+            raise RuntimeError("rpc down")
+
+        with pytest.raises(RuntimeError):
+            _run(
+                market_ops.verify_sell_offer(
+                    NFT_ID, OFFER_INDEX, 5_000_000, fetch_offers=fetch, strict=True
+                )
+            )
+
+    def test_strict_absent_offer_still_returns_false(self) -> None:
+        """A successful lookup that simply doesn't contain the offer is a
+        genuine absence even in strict mode — False, not a raise."""
+        offers = [{"offer_index": "SOME_OTHER_OFFER", "amount": "5000000", "destination": None}]
+        result = _run(
+            market_ops.verify_sell_offer(
+                NFT_ID, OFFER_INDEX, 5_000_000, fetch_offers=_offers_fetcher(offers), strict=True
             )
         )
         assert result is False

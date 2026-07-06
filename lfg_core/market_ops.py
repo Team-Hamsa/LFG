@@ -77,7 +77,8 @@ async def verify_sell_offer(
     nft_id: str,
     offer_index: str,
     expected_drops: int,
-    fetch_offers: FetchOffers = xrpl_ops.get_nft_sell_offers,
+    fetch_offers: FetchOffers | None = None,
+    strict: bool = False,
 ) -> bool:
     """Fail-closed check that a sell offer is exactly the listing a buyer is
     about to pay for, run immediately before money moves.
@@ -88,13 +89,32 @@ async def verify_sell_offer(
     not a type error); and it carries no Destination (a destination-locked
     offer is not a listing this buyer can accept).
 
-    False on every other case, including: `fetch_offers` raising (RPC/network
-    failure — never treated as a false positive), the offer being absent,
-    an amount mismatch, or a foreign Destination.
-    """
+    False on every other case, including: the offer being absent, an amount
+    mismatch, or a foreign Destination.
+
+    `strict` controls how a *lookup failure* is treated. In the default
+    (non-strict) mode `fetch_offers` raising is swallowed to False — a
+    fail-closed "no valid offer", never a false positive. In strict mode the
+    exception PROPAGATES so the caller (the buy-start verify, fix #3) can tell
+    "the lookup itself broke" (respond 503, touch nothing) apart from "the
+    offer is genuinely gone" (stale-close). When `fetch_offers` is left as the
+    default, strict is threaded into `get_nft_sell_offers(raise_on_error=...)`
+    so a rippled soft-error surfaces as a raise rather than an empty list."""
+    fetch: FetchOffers
+    if fetch_offers is None:
+
+        async def _default_fetch(nid: str) -> list[dict[str, Any]]:
+            return await xrpl_ops.get_nft_sell_offers(nid, raise_on_error=strict)
+
+        fetch = _default_fetch
+    else:
+        fetch = fetch_offers
+
     try:
-        offers = await fetch_offers(nft_id)
+        offers = await fetch(nft_id)
     except Exception:
+        if strict:
+            raise
         return False
     for offer in offers:
         if not isinstance(offer, dict):

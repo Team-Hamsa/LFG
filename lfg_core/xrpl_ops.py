@@ -285,6 +285,19 @@ async def get_nft_sell_offers(nft_id: str, raise_on_error: bool = False) -> list
         client = JsonRpcClient(config.JSON_RPC_URL)
         response = await asyncio.to_thread(client.request, NFTSellOffers(nft_id=nft_id))
         result = response.result
+        # A non-tesSUCCESS RESULT (status:error) never raised above, so strict
+        # callers would otherwise misread a soft error (tooBusy, slowDown, an
+        # amendment blocker, …) as "no offers" and stale-close a live listing.
+        # objectNotFound is the ONLY error that legitimately means "this NFT
+        # has no offers" — whitelist it (empty list) and re-raise every other
+        # unsuccessful response in strict mode.
+        if isinstance(result, dict) and result.get("error"):
+            if str(result.get("error")) == "objectNotFound":
+                return []
+            if raise_on_error:
+                raise RuntimeError(f"nft_sell_offers error: {result.get('error')}")
+            logging.warning(f"get_nft_sell_offers error for {nft_id}: {result.get('error')}")
+            return []
         offers = result.get("offers") if isinstance(result, dict) else None
         if not isinstance(offers, list):
             return []
