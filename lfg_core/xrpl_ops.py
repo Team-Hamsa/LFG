@@ -14,7 +14,15 @@ from xrpl.asyncio.clients import AsyncWebsocketClient
 from xrpl.clients import JsonRpcClient
 from xrpl.models import IssuedCurrencyAmount
 from xrpl.models.currencies import XRP, IssuedCurrency
-from xrpl.models.requests import AccountLines, AccountNFTs, AccountTx, AMMInfo, Subscribe, Tx
+from xrpl.models.requests import (
+    AccountLines,
+    AccountNFTs,
+    AccountTx,
+    AMMInfo,
+    NFTSellOffers,
+    Subscribe,
+    Tx,
+)
 from xrpl.models.transactions import (
     NFTokenBurn,
     NFTokenCreateOffer,
@@ -250,6 +258,49 @@ async def nft_exists(nft_id: str, clio: str | None = None, attempts: int = 3) ->
         if attempt + 1 < attempts:
             await asyncio.sleep(0.5 * (attempt + 1))
     return None
+
+
+async def get_nft_sell_offers(nft_id: str) -> list[dict[str, Any]]:
+    """List sell offers for `nft_id` via the standard (non-clio) rippled
+    `nft_sell_offers` method. Unlike nft_info/nft_exists this is a plain
+    method, so it goes through JSON_RPC_URL like mint/burn/offer, not
+    CLIO_WS_URL.
+
+    Each returned dict is normalized to
+    `{offer_index, amount, destination, flags, owner}`. `offer_index` accepts
+    either the `nft_offer_index` or `index` field — different server versions
+    key the offer's ledger index differently (drift guard, mirrors Baysed
+    market.py:386-390).
+
+    Returns an empty list when there are no offers, the NFT is unknown to the
+    server, or the RPC call raises for any reason — callers doing fail-closed
+    verification (`market_ops.verify_sell_offer`) treat an empty/non-matching
+    list as "no valid offer", never a false positive.
+    """
+    try:
+        client = JsonRpcClient(config.JSON_RPC_URL)
+        response = await asyncio.to_thread(client.request, NFTSellOffers(nft_id=nft_id))
+        result = response.result
+        offers = result.get("offers") if isinstance(result, dict) else None
+        if not isinstance(offers, list):
+            return []
+        normalized: list[dict[str, Any]] = []
+        for offer in offers:
+            if not isinstance(offer, dict):
+                continue
+            normalized.append(
+                {
+                    "offer_index": offer.get("nft_offer_index", offer.get("index")),
+                    "amount": offer.get("amount"),
+                    "destination": offer.get("destination"),
+                    "flags": offer.get("flags"),
+                    "owner": offer.get("owner"),
+                }
+            )
+        return normalized
+    except Exception as e:
+        logging.warning(f"get_nft_sell_offers failed for {nft_id}: {e}")
+        return []
 
 
 async def get_trustline_balance(address: str, currency: str, issuer: str) -> Decimal | None:

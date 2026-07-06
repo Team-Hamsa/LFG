@@ -5,14 +5,25 @@
 # integer drops; Decimal is used only at this XRP<->drops conversion edge,
 # and floats are never accepted or produced (money discipline, see
 # .superpowers/sdd/global-constraints.md).
+#
+# `verify_sell_offer` is the one exception to "no I/O": it needs a live
+# ledger lookup to be fail-closed, so the lookup is injected as a callable
+# (`fetch_offers`, defaulting to `xrpl_ops.get_nft_sell_offers`) — the
+# decision logic stays pure and unit-testable, the network dependency stays
+# at the edge.
 
+from collections.abc import Awaitable, Callable
 from decimal import Decimal, InvalidOperation
 from typing import Any
+
+from lfg_core import xrpl_ops
 
 # lsfSellNFToken bit on an NFTokenOffer ledger object's Flags field.
 LSF_SELL_NFTOKEN = 0x00000001
 
 DROPS_PER_XRP = Decimal(1_000_000)
+
+FetchOffers = Callable[[str], Awaitable[list[dict[str, Any]]]]
 
 
 def extract_created_sell_offer(meta: dict[str, Any], nft_id: str) -> dict[str, Any] | None:
@@ -60,6 +71,45 @@ def extract_created_sell_offer(meta: dict[str, Any], nft_id: str) -> dict[str, A
             "flags": flags,
         }
     return None
+
+
+async def verify_sell_offer(
+    nft_id: str,
+    offer_index: str,
+    expected_drops: int,
+    fetch_offers: FetchOffers = xrpl_ops.get_nft_sell_offers,
+) -> bool:
+    """Fail-closed check that a sell offer is exactly the listing a buyer is
+    about to pay for, run immediately before money moves.
+
+    True ONLY when all of: the offer for `nft_id` at `offer_index` is present
+    among the fetched offers; its Amount is an XRP drops string equal to
+    `expected_drops` (a dict/IOU Amount can never match — that is a mismatch,
+    not a type error); and it carries no Destination (a destination-locked
+    offer is not a listing this buyer can accept).
+
+    False on every other case, including: `fetch_offers` raising (RPC/network
+    failure — never treated as a false positive), the offer being absent,
+    an amount mismatch, or a foreign Destination.
+    """
+    try:
+        offers = await fetch_offers(nft_id)
+    except Exception:
+        return False
+    for offer in offers:
+        if not isinstance(offer, dict):
+            continue
+        if str(offer.get("offer_index")) != str(offer_index):
+            continue
+        amount = offer.get("amount")
+        if not isinstance(amount, str) or not amount.isdigit():
+            return False  # dict/IOU Amount (or malformed drops string)
+        if int(amount) != int(expected_drops):
+            return False
+        if offer.get("destination") is not None:
+            return False
+        return True
+    return False  # offer_index not present among the fetched offers
 
 
 def xrp_to_drops_str(xrp: str) -> str:
