@@ -15,9 +15,11 @@ import json
 import logging
 import mimetypes
 import os
+import sqlite3
 import sys
 import time
-from typing import Any
+from typing import Any, cast
+from urllib.parse import quote as urlquote
 
 import aiohttp
 from aiohttp import web
@@ -28,9 +30,12 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from lfg_core import (
     config,
     economy_flow,
+    economy_store,
     history_store,
     layer_store,
     leaderboard,
+    market_ops,
+    market_store,
     mint_flow,
     nft_index,
     swap_flow,
@@ -622,6 +627,358 @@ async def handle_leaderboard(request):
             "me": me_block,
         }
     )
+
+
+# --- In-app marketplace (#44): browse + mine + history ---
+
+_MarketKey = tuple[str, str]  # (network, kind)
+_MARKET_CACHE: dict[_MarketKey, tuple[float, list[dict[str, Any]]]] = {}
+_MARKET_CACHE_TTL = 60.0
+# Cardinality is bounded by construction (network x kind only — filters never
+# key the cache, see the module docstring on Task 7's spec excerpt), so this
+# ceiling is generous headroom, not a load-bearing eviction path.
+_MARKET_CACHE_MAX = 16
+# "Unfiltered" cache population cap: effectively unbounded for the realistic
+# live-listing volume (a few hundred to low thousands per market_store.browse's
+# own docstring) while still bounding a single query's result set.
+_MARKET_ROW_CAP = 50_000
+
+_MARKET_MAX_LIMIT = 100
+_MARKET_DEFAULT_LIMIT = 24
+_MARKET_MAX_OFFSET = 100_000
+
+
+def _market_cache_put(key: _MarketKey, value: list[dict[str, Any]], now_mono: float) -> None:
+    """Insert into the browse cache, dropping expired entries and — if still
+    over _MARKET_CACHE_MAX — evicting the oldest by timestamp. Mirrors
+    _lb_cache_put's shape (leaderboard cache) for the same reasons."""
+    for k in [k for k, (ts, _) in _MARKET_CACHE.items() if now_mono - ts >= _MARKET_CACHE_TTL]:
+        del _MARKET_CACHE[k]
+    _MARKET_CACHE[key] = (now_mono, value)
+    while len(_MARKET_CACHE) > _MARKET_CACHE_MAX:
+        oldest = min(_MARKET_CACHE, key=lambda k: _MARKET_CACHE[k][0])
+        del _MARKET_CACHE[oldest]
+
+
+def _attach_character_images(conn: sqlite3.Connection, rows: list[dict[str, Any]]) -> None:
+    """Mutate `rows` in place, adding an `image` key sourced from
+    onchain_nfts.image (market_store.browse's character join carries
+    nft_number/attributes_json but not image — same 2-query pattern
+    handle_leaderboard uses for the same column)."""
+    nft_ids = [r["nft_id"] for r in rows]
+    if not nft_ids:
+        return
+    placeholders = ",".join("?" * len(nft_ids))
+    cur = conn.execute(
+        f"SELECT nft_id, image FROM onchain_nfts WHERE nft_id IN ({placeholders})", nft_ids
+    )
+    images = {r["nft_id"]: r["image"] for r in cur.fetchall()}
+    for r in rows:
+        r["image"] = images.get(r["nft_id"]) or None
+
+
+def _compute_market_rows(network: str, kind: str) -> list[dict[str, Any]]:
+    """The canonical UNFILTERED live join for one (network, kind) — cached
+    for _MARKET_CACHE_TTL. Runs on an executor thread (sqlite3 threadsafety=1,
+    so this opens its own short-lived connection rather than sharing a
+    loop-thread conn across threads, same as handle_leaderboard's _compute_sync)."""
+    conn = nft_index.init_db(nft_index.index_db_path(network))
+    conn.row_factory = sqlite3.Row
+    try:
+        market_store.init_db(conn)
+        economy_store.init_economy_schema(conn)
+        rows = market_store.browse(conn, kind=kind, limit=_MARKET_ROW_CAP, offset=0)
+        if kind == "character":
+            _attach_character_images(conn, rows)
+        return rows
+    finally:
+        conn.close()
+
+
+def _trait_image_url(cfg: trait_config.TraitConfig, slot: str, value: str) -> str:
+    """A same-origin /api/layer URL for a trait value, picking a representative
+    body: the first body allowed by trait_config's affinity engine, or the
+    shared/ dir for a universal (unrestricted) value — mirrors
+    scripts/_economy_deps.py's _compose_trait ("first body that has it")
+    without the network/download cost, since affinity already tells us which
+    bodies are legal without touching the layer store."""
+    allowed = cfg.allowed_bodies(slot, value)
+    body = sorted(allowed)[0] if allowed else layer_store.SHARED_DIR
+    return (
+        f"/api/layer?body={urlquote(body, safe='')}"
+        f"&trait={urlquote(slot, safe='')}&value={urlquote(value, safe='')}"
+    )
+
+
+def _serialize_listing_row(
+    r: dict[str, Any], kind: str, cfg: trait_config.TraitConfig
+) -> dict[str, Any]:
+    out: dict[str, Any] = {
+        "nft_id": r["nft_id"],
+        "kind": kind,
+        "image": r.get("image"),
+        "amount_drops": r["amount_drops"],
+        "amount_xrp": market_ops.drops_to_xrp_str(str(r["amount_drops"])),
+        "seller": r["seller"],
+        "offer_index": r["offer_index"],
+    }
+    if kind == "character":
+        out["nft_number"] = r.get("nft_number")
+        raw_attrs = r.get("attributes_json")
+        out["attributes"] = json.loads(raw_attrs) if raw_attrs else []
+    else:
+        out["slot"] = r.get("slot")
+        out["value"] = r.get("value")
+        out["image"] = _trait_image_url(cfg, str(r.get("slot")), str(r.get("value")))
+    return out
+
+
+def _parse_market_int_param(
+    request: web.Request, name: str, default: int, *, max_value: int
+) -> int | None:
+    """Parse a non-negative, bounded int query param. Returns None (the
+    caller 400s) for a missing-required/non-integer/out-of-range value; a
+    param that is simply absent uses `default`."""
+    raw = request.query.get(name)
+    if raw is None:
+        return default
+    try:
+        value = int(raw)
+    except ValueError:
+        return None
+    if value < 0 or value > max_value:
+        return None
+    return value
+
+
+async def handle_market_listings(request: web.Request) -> web.Response:
+    """Public: GET /api/market/listings?kind=&trait=&min_xrp=&max_xrp=&sort=&limit=&offset=.
+
+    Cache holds only the canonical unfiltered live join per (network, kind),
+    TTL 60s; trait/price filter + sort + pagination run in-process on the
+    cached rows post-cache-lookup, so user-controlled filter params never
+    key (and can never fan out) the cache."""
+    kind = request.query.get("kind", "character")
+    if kind not in market_store._VALID_KINDS:
+        return web.json_response({"error": f"unknown kind: {kind!r}"}, status=400)
+
+    sort = request.query.get("sort", "price_asc")
+    if sort not in market_store._VALID_SORTS:
+        return web.json_response({"error": f"unknown sort: {sort!r}"}, status=400)
+
+    trait_filters: dict[str, list[str]] = {}
+    for raw in request.query.getall("trait", []):
+        slot, sep, value = raw.partition(":")
+        if not sep or not slot or not value:
+            return web.json_response({"error": f"bad trait filter: {raw!r}"}, status=400)
+        trait_filters.setdefault(slot, []).append(value)
+
+    min_drops: int | None = None
+    max_drops: int | None = None
+    min_xrp = request.query.get("min_xrp")
+    max_xrp = request.query.get("max_xrp")
+    try:
+        if min_xrp is not None:
+            min_drops = int(market_ops.xrp_to_drops_str(min_xrp))
+        if max_xrp is not None:
+            max_drops = int(market_ops.xrp_to_drops_str(max_xrp))
+    except (TypeError, ValueError) as e:
+        return web.json_response({"error": f"bad XRP amount: {e}"}, status=400)
+
+    limit = _parse_market_int_param(
+        request, "limit", _MARKET_DEFAULT_LIMIT, max_value=_MARKET_MAX_LIMIT
+    )
+    if limit is None:
+        return web.json_response({"error": "bad limit"}, status=400)
+    offset = _parse_market_int_param(request, "offset", 0, max_value=_MARKET_MAX_OFFSET)
+    if offset is None:
+        return web.json_response({"error": "bad offset"}, status=400)
+
+    network = config.XRPL_NETWORK
+    cache_key: _MarketKey = (network, kind)
+    now_mono = time.monotonic()
+    cached = _MARKET_CACHE.get(cache_key)
+    if cached is not None and now_mono - cached[0] < _MARKET_CACHE_TTL:
+        rows = cached[1]
+    else:
+        rows = await asyncio.get_event_loop().run_in_executor(
+            None, _compute_market_rows, network, kind
+        )
+        _market_cache_put(cache_key, rows, now_mono)
+
+    filtered = rows
+    if min_drops is not None:
+        filtered = [r for r in filtered if r["amount_drops"] >= min_drops]
+    if max_drops is not None:
+        filtered = [r for r in filtered if r["amount_drops"] <= max_drops]
+    if trait_filters:
+        # market_store._row_attrs is typed against sqlite3.Row (the shape it
+        # sees internally, pre-dict-conversion, inside browse()); our cached
+        # rows are already plain dicts (browse()'s own return type), which
+        # support the same __getitem__ access _row_attrs relies on.
+        filtered = [
+            r
+            for r in filtered
+            if market_store._attributes_match(
+                market_store._row_attrs(cast(sqlite3.Row, r), kind), trait_filters
+            )
+        ]
+
+    if sort == "price_asc":
+        filtered = sorted(filtered, key=lambda r: (r["amount_drops"], r["offer_index"]))
+    elif sort == "price_desc":
+        filtered = sorted(filtered, key=lambda r: (-r["amount_drops"], r["offer_index"]))
+    else:  # newest
+        filtered = sorted(filtered, key=lambda r: (-(r["created_ts"] or 0), r["offer_index"]))
+
+    page = filtered[offset : offset + limit]
+    cfg = trait_config.get_config()
+    return web.json_response(
+        {"rows": [_serialize_listing_row(r, kind, cfg) for r in page], "total": len(filtered)}
+    )
+
+
+def _compute_mine_data(network: str, wallet: str) -> dict[str, Any]:
+    """Sync sqlite work for GET /api/market/mine, run on an executor thread
+    (same posture as _compute_market_rows): the caller's own live listings
+    (both kinds), plus unlisted live characters / unlisted wallet trait
+    tokens / loose Closet assets — all derived from the same per-network
+    onchain_{network}.db market_store.browse() reads."""
+    conn = nft_index.init_db(nft_index.index_db_path(network))
+    conn.row_factory = sqlite3.Row
+    try:
+        market_store.init_db(conn)
+        economy_store.init_economy_schema(conn)
+
+        cur = conn.execute(
+            "SELECT * FROM market_listings WHERE seller = ? AND is_live = 1", (wallet,)
+        )
+        listing_rows = [dict(row) for row in cur.fetchall()]
+        char_listing_rows = [r for r in listing_rows if r["kind"] == "character"]
+        _attach_character_images(conn, char_listing_rows)
+        listed_char_ids = {r["nft_id"] for r in char_listing_rows}
+        listed_trait_ids = {r["nft_id"] for r in listing_rows if r["kind"] == "trait"}
+
+        unlisted_characters = [
+            {
+                "nft_id": c.nft_id,
+                "nft_number": c.nft_number,
+                "image": c.image or None,
+                "attributes": c.attributes,
+            }
+            for c in nft_index.owner_live_nfts(conn, wallet)
+            if c.nft_id not in listed_char_ids
+        ]
+
+        unlisted_trait_tokens = [
+            {"nft_id": nid, "slot": s, "value": v}
+            for nid, o, s, v in economy_store.read_trait_tokens(conn)
+            if o == wallet and nid not in listed_trait_ids
+        ]
+
+        closet_assets = [
+            {"slot": s, "value": v, "count": c}
+            for (o, s, v, c) in economy_store.read_closet_assets(conn)
+            if o == wallet and c > 0
+        ]
+
+        return {
+            "listings": listing_rows,
+            "unlisted_characters": unlisted_characters,
+            "unlisted_trait_tokens": unlisted_trait_tokens,
+            "closet_assets": closet_assets,
+        }
+    finally:
+        conn.close()
+
+
+@require_wallet
+async def handle_market_mine(request):  # untyped: matches require_wallet's other handlers
+    # (e.g. handle_account, handle_economy) — an annotated signature under an
+    # untyped decorator trips mypy's untyped-decorator check.
+    """The caller's marketplace surface: their own live listings (both kinds)
+    + unlisted live characters + unlisted wallet trait tokens + loose Closet
+    traits, grouped so the UI can offer list/cancel/sell-from-closet per item."""
+    wallet = request["wallet"]
+    network = config.XRPL_NETWORK
+    data = await asyncio.get_event_loop().run_in_executor(None, _compute_mine_data, network, wallet)
+    cfg = trait_config.get_config()
+    listings = [_serialize_listing_row(r, r["kind"], cfg) for r in data["listings"]]
+    return web.json_response(
+        {
+            "listings": listings,
+            "unlisted_characters": data["unlisted_characters"],
+            "unlisted_trait_tokens": data["unlisted_trait_tokens"],
+            "closet_assets": data["closet_assets"],
+        }
+    )
+
+
+_MARKET_HISTORY_EVENTS = ("sale", "offer_create", "offer_cancel")
+
+
+def _compute_nft_history(network: str, nft_id: str) -> list[dict[str, Any]]:
+    conn = history_store.init_history_db(history_store.history_db_path(network))
+    conn.row_factory = sqlite3.Row
+    try:
+        placeholders = ",".join("?" * len(_MARKET_HISTORY_EVENTS))
+        cur = conn.execute(
+            f"SELECT * FROM nft_events WHERE nft_id = ? AND event IN ({placeholders}) "
+            "ORDER BY ledger_index DESC LIMIT 50",
+            (nft_id, *_MARKET_HISTORY_EVENTS),
+        )
+        return [dict(row) for row in cur.fetchall()]
+    finally:
+        conn.close()
+
+
+def _compute_trait_sales(network: str, slot: str, value: str) -> list[dict[str, Any]]:
+    conn = nft_index.init_db(nft_index.index_db_path(network))
+    conn.row_factory = sqlite3.Row
+    try:
+        market_store.init_db(conn)
+        cur = conn.execute(
+            "SELECT * FROM market_listings WHERE kind = 'trait' AND slot = ? AND value = ? "
+            "AND closed_reason = 'sold' ORDER BY created_ts DESC",
+            (slot, value),
+        )
+        return [dict(row) for row in cur.fetchall()]
+    finally:
+        conn.close()
+
+
+async def handle_market_history(request: web.Request) -> web.Response:
+    """Public: GET /api/market/history?nft_id=… (character sale/offer history)
+    or ?slot=&value=… (sold trait listings — per-nft_id history is near-useless
+    for traits since each listing is a fresh token). Neither param -> 400."""
+    nft_id = request.query.get("nft_id")
+    slot = request.query.get("slot")
+    value = request.query.get("value")
+    network = config.XRPL_NETWORK
+
+    if nft_id:
+        events = await asyncio.get_event_loop().run_in_executor(
+            None, _compute_nft_history, network, nft_id
+        )
+        return web.json_response({"nft_id": nft_id, "events": events})
+
+    if slot and value:
+        rows = await asyncio.get_event_loop().run_in_executor(
+            None, _compute_trait_sales, network, slot, value
+        )
+        sales = [
+            {
+                "nft_id": r["nft_id"],
+                "seller": r["seller"],
+                "amount_drops": r["amount_drops"],
+                "amount_xrp": market_ops.drops_to_xrp_str(str(r["amount_drops"])),
+                "offer_index": r["offer_index"],
+            }
+            for r in rows
+        ]
+        return web.json_response({"slot": slot, "value": value, "sales": sales})
+
+    return web.json_response({"error": "nft_id or slot+value required"}, status=400)
 
 
 def _economy_disabled_response():
@@ -1265,6 +1622,9 @@ def create_app() -> web.Application:
     app.router.add_get("/api/signin/{payload_uuid}", handle_signin_status)
     app.router.add_get("/api/nfts", handle_nfts)
     app.router.add_get("/api/leaderboard", handle_leaderboard)
+    app.router.add_get("/api/market/listings", handle_market_listings)
+    app.router.add_get("/api/market/mine", handle_market_mine)
+    app.router.add_get("/api/market/history", handle_market_history)
     app.router.add_post("/api/swap", handle_swap_start)
     app.router.add_get("/api/swap/{session_id}", handle_swap_status)
     app.router.add_get("/api/qr.png", handle_qr)
