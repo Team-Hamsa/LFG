@@ -802,7 +802,12 @@ async def handle_market_listings(request: web.Request) -> web.Response:
             min_drops = int(market_ops.xrp_to_drops_str(min_xrp))
         if max_xrp is not None:
             max_drops = int(market_ops.xrp_to_drops_str(max_xrp))
-    except (TypeError, ValueError) as e:
+    except Exception as e:
+        # Broad on purpose (same guard as handle_market_list_start):
+        # xrp_to_drops_str raises TypeError/ValueError for its documented
+        # cases, but Decimal("Infinity")/("nan") slip past its <= 0 guard and
+        # raise OverflowError/decimal.InvalidOperation instead — on this
+        # public unauthenticated endpoint those were an uncaught 500.
         return web.json_response({"error": f"bad XRP amount: {e}"}, status=400)
 
     limit = _parse_market_int_param(

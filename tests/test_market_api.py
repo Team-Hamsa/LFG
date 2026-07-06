@@ -200,6 +200,18 @@ def test_browse_min_xrp_zero_400(onchain_env):
     assert resp.status == 400
 
 
+@pytest.mark.parametrize("param", ["min_xrp", "max_xrp"])
+@pytest.mark.parametrize("bad_value", ["Infinity", "nan", "-nan"])
+def test_browse_non_finite_xrp_400(onchain_env, param, bad_value):
+    """Decimal("Infinity")/("nan") slip past xrp_to_drops_str's <= 0 guard and
+    raise OverflowError/decimal.InvalidOperation instead of ValueError — on
+    this public unauthenticated endpoint that was an uncaught 500 (same review
+    finding already fixed for the list handler)."""
+    req = _mocked_request("GET", f"/api/market/listings?{param}={bad_value}")
+    resp = _run(server.handle_market_listings(req))
+    assert resp.status == 400
+
+
 def test_browse_negative_limit_400(onchain_env):
     req = _mocked_request("GET", "/api/market/listings?limit=-1")
     resp = _run(server.handle_market_listings(req))
