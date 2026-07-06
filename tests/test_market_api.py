@@ -117,6 +117,7 @@ def onchain_env(tmp_path, monkeypatch):
     conn.close()
     monkeypatch.setenv("ONCHAIN_DB_PATH", onchain_path)
     monkeypatch.setattr(server.config, "XRPL_NETWORK", "testnet")
+    monkeypatch.setattr(server.config, "ECONOMY_NETWORK", "testnet")
     server._MARKET_CACHE.clear()
     yield onchain_path
     server._MARKET_CACHE.clear()
@@ -523,3 +524,121 @@ def test_history_by_slot_value_returns_sold_listings(onchain_env):
     assert len(body["sales"]) == 1
     assert body["sales"][0]["nft_id"] == TRAIT1
     assert body["sales"][0]["amount_xrp"] == "0.5"
+
+
+# ---------------------------------------------------------------------------
+# Split-network topology (XRPL_NETWORK != ECONOMY_NETWORK)
+# ---------------------------------------------------------------------------
+# The deployed topology runs the app on mainnet (XRPL_NETWORK=mainnet) while
+# the trait economy stays testnet-gated (ECONOMY_NETWORK=testnet). Everything
+# trait-economy-backed (trait listings + trait_tokens join, unlisted trait
+# tokens, loose Closet assets, sold-trait history) must resolve its onchain db
+# via ECONOMY_NETWORK; everything character-backed stays on XRPL_NETWORK.
+# These tests seed trait data ONLY in the economy-network db and character
+# data ONLY in the XRPL-network db, so any handler reading the wrong network
+# comes back empty and fails the assertion.
+
+TRAIT3_SOLD = "000900001E43B0783E006F30078A64A8628F4B1B22879C8EB1CAF8C7000000a3"
+
+
+@pytest.fixture
+def split_network_env(tmp_path, monkeypatch):
+    paths = {
+        "mainnet": str(tmp_path / "onchain_mainnet.db"),
+        "testnet": str(tmp_path / "onchain_testnet.db"),
+    }
+    for p in paths.values():
+        _init_onchain(p).close()
+
+    # character data ONLY in the XRPL (mainnet) db
+    conn = _reopen(paths["mainnet"])
+    _seed_character(conn, CHAR1, SELLER, 1)
+    _seed_listing(conn, offer_index="A" * 64, nft_id=CHAR1, kind="character")
+    _seed_character(conn, CHAR3_UNLISTED, SELLER, 3)
+    conn.commit()
+    conn.close()
+
+    # trait data ONLY in the economy (testnet) db
+    conn = _reopen(paths["testnet"])
+    upsert_trait_token(conn, TRAIT1, SELLER, "Hat", "Wizard Hat")
+    _seed_listing(
+        conn,
+        offer_index="B" * 64,
+        nft_id=TRAIT1,
+        kind="trait",
+        slot="Hat",
+        value="Wizard Hat",
+        amount_drops=500_000,
+    )
+    upsert_trait_token(conn, TRAIT2_UNLISTED, SELLER, "Eyes", "Hypno")
+    set_closet_contents(conn, SELLER, [("Mouth", "Grin", 2)], [])
+    _seed_listing(
+        conn,
+        offer_index="F" * 64,
+        nft_id=TRAIT3_SOLD,
+        kind="trait",
+        slot="Hat",
+        value="Wizard Hat",
+        amount_drops=700_000,
+        is_live=0,
+        closed_reason="sold",
+    )
+    conn.commit()
+    conn.close()
+
+    # ONCHAIN_DB_PATH would collapse both networks onto one file, so route
+    # per-network paths through index_db_path directly instead.
+    monkeypatch.delenv("ONCHAIN_DB_PATH", raising=False)
+    monkeypatch.setattr(server.nft_index, "index_db_path", lambda network: paths[network])
+    monkeypatch.setattr(server.config, "XRPL_NETWORK", "mainnet")
+    monkeypatch.setattr(server.config, "ECONOMY_NETWORK", "testnet")
+    server._MARKET_CACHE.clear()
+    yield paths
+    server._MARKET_CACHE.clear()
+
+
+def test_split_network_browse_per_kind_networks(split_network_env):
+    # trait browse must read the ECONOMY_NETWORK (testnet) db
+    req = _mocked_request("GET", "/api/market/listings?kind=trait")
+    resp = _run(server.handle_market_listings(req))
+    assert resp.status == 200
+    body = _run(_read_json(resp))
+    assert [r["nft_id"] for r in body["rows"]] == [TRAIT1]
+
+    # character browse still reads the XRPL_NETWORK (mainnet) db
+    req2 = _mocked_request("GET", "/api/market/listings?kind=character")
+    resp2 = _run(server.handle_market_listings(req2))
+    body2 = _run(_read_json(resp2))
+    assert [r["nft_id"] for r in body2["rows"]] == [CHAR1]
+
+    # cache keys derive network per kind; cardinality bound unchanged
+    # (<= 2 networks x 2 kinds)
+    assert set(server._MARKET_CACHE) == {("testnet", "trait"), ("mainnet", "character")}
+    assert len(server._MARKET_CACHE) <= 4
+
+
+def test_split_network_mine_all_four_groups(split_network_env, monkeypatch):
+    monkeypatch.setattr(server.config, "WEBAPP_DEV_MODE", True)
+    from webapp import mock_economy
+
+    monkeypatch.setattr(mock_economy, "DEV_OWNER", SELLER)
+
+    req = _mocked_request("GET", "/api/market/mine")
+    resp = _run(server.handle_market_mine(req))
+    assert resp.status == 200
+    body = _run(_read_json(resp))
+
+    assert {r["nft_id"] for r in body["listings"]} == {CHAR1, TRAIT1}
+    assert {c["nft_id"] for c in body["unlisted_characters"]} == {CHAR3_UNLISTED}
+    assert {t["nft_id"] for t in body["unlisted_trait_tokens"]} == {TRAIT2_UNLISTED}
+    assert body["closet_assets"] == [{"slot": "Mouth", "value": "Grin", "count": 2}]
+
+
+def test_split_network_history_slot_value_reads_economy_db(split_network_env):
+    req = _mocked_request("GET", "/api/market/history?slot=Hat&value=" + quote("Wizard Hat"))
+    resp = _run(server.handle_market_history(req))
+    assert resp.status == 200
+    body = _run(_read_json(resp))
+    assert len(body["sales"]) == 1
+    assert body["sales"][0]["nft_id"] == TRAIT3_SOLD
+    assert body["sales"][0]["amount_drops"] == 700_000

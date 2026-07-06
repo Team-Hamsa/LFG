@@ -695,6 +695,21 @@ def _compute_market_rows(network: str, kind: str) -> list[dict[str, Any]]:
         conn.close()
 
 
+def _market_network(kind: str) -> str:
+    """Which per-network onchain db a marketplace read of `kind` lives in.
+
+    The two config knobs can legitimately differ (deployed topology: the app
+    runs XRPL_NETWORK=mainnet while the trait economy stays testnet-gated at
+    ECONOMY_NETWORK=testnet). Everything trait-economy-backed — trait listings
+    (their listener writes the economy db), the trait_tokens ownership join,
+    loose Closet assets, sold-trait history — resolves via ECONOMY_NETWORK,
+    exactly like webapp/economy_api.py::open_conn; everything character-backed
+    (onchain_nfts, character listings, nft_events) stays on XRPL_NETWORK.
+    Do NOT "simplify" this back to a single network: with the split topology
+    a trait read against XRPL_NETWORK silently returns empty for every user."""
+    return config.ECONOMY_NETWORK if kind == "trait" else config.XRPL_NETWORK
+
+
 def _trait_image_url(cfg: trait_config.TraitConfig, slot: str, value: str) -> str:
     """A same-origin /api/layer URL for a trait value, picking a representative
     body: the first body allowed by trait_config's affinity engine, or the
@@ -794,7 +809,10 @@ async def handle_market_listings(request: web.Request) -> web.Response:
     if offset is None:
         return web.json_response({"error": "bad offset"}, status=400)
 
-    network = config.XRPL_NETWORK
+    # Per-kind network resolution (see _market_network): the cache key carries
+    # the resolved network, so a testnet-trait entry and a mainnet-character
+    # entry coexist; cardinality stays <= networks x kinds by construction.
+    network = _market_network(kind)
     cache_key: _MarketKey = (network, kind)
     now_mono = time.monotonic()
     cached = _MARKET_CACHE.get(cache_key)
@@ -838,26 +856,26 @@ async def handle_market_listings(request: web.Request) -> web.Response:
     )
 
 
-def _compute_mine_data(network: str, wallet: str) -> dict[str, Any]:
+def _compute_mine_data(char_network: str, econ_network: str, wallet: str) -> dict[str, Any]:
     """Sync sqlite work for GET /api/market/mine, run on an executor thread
-    (same posture as _compute_market_rows): the caller's own live listings
-    (both kinds), plus unlisted live characters / unlisted wallet trait
-    tokens / loose Closet assets — all derived from the same per-network
-    onchain_{network}.db market_store.browse() reads."""
-    conn = nft_index.init_db(nft_index.index_db_path(network))
+    (same posture as _compute_market_rows). Two per-kind connections (see
+    _market_network — the networks can differ in the deployed topology):
+    character listings + unlisted live characters come from the XRPL-network
+    db; trait listings + unlisted wallet trait tokens + loose Closet assets
+    come from the economy-network db. When the knobs match, both connections
+    simply open the same file."""
+    # --- character-backed groups (XRPL network) ---
+    conn = nft_index.init_db(nft_index.index_db_path(char_network))
     conn.row_factory = sqlite3.Row
     try:
         market_store.init_db(conn)
-        economy_store.init_economy_schema(conn)
-
         cur = conn.execute(
-            "SELECT * FROM market_listings WHERE seller = ? AND is_live = 1", (wallet,)
+            "SELECT * FROM market_listings WHERE seller = ? AND is_live = 1 AND kind = 'character'",
+            (wallet,),
         )
-        listing_rows = [dict(row) for row in cur.fetchall()]
-        char_listing_rows = [r for r in listing_rows if r["kind"] == "character"]
+        char_listing_rows = [dict(row) for row in cur.fetchall()]
         _attach_character_images(conn, char_listing_rows)
         listed_char_ids = {r["nft_id"] for r in char_listing_rows}
-        listed_trait_ids = {r["nft_id"] for r in listing_rows if r["kind"] == "trait"}
 
         unlisted_characters = [
             {
@@ -869,6 +887,21 @@ def _compute_mine_data(network: str, wallet: str) -> dict[str, Any]:
             for c in nft_index.owner_live_nfts(conn, wallet)
             if c.nft_id not in listed_char_ids
         ]
+    finally:
+        conn.close()
+
+    # --- trait-economy-backed groups (economy network) ---
+    conn = nft_index.init_db(nft_index.index_db_path(econ_network))
+    conn.row_factory = sqlite3.Row
+    try:
+        market_store.init_db(conn)
+        economy_store.init_economy_schema(conn)
+        cur = conn.execute(
+            "SELECT * FROM market_listings WHERE seller = ? AND is_live = 1 AND kind = 'trait'",
+            (wallet,),
+        )
+        trait_listing_rows = [dict(row) for row in cur.fetchall()]
+        listed_trait_ids = {r["nft_id"] for r in trait_listing_rows}
 
         unlisted_trait_tokens = [
             {"nft_id": nid, "slot": s, "value": v}
@@ -881,15 +914,15 @@ def _compute_mine_data(network: str, wallet: str) -> dict[str, Any]:
             for (o, s, v, c) in economy_store.read_closet_assets(conn)
             if o == wallet and c > 0
         ]
-
-        return {
-            "listings": listing_rows,
-            "unlisted_characters": unlisted_characters,
-            "unlisted_trait_tokens": unlisted_trait_tokens,
-            "closet_assets": closet_assets,
-        }
     finally:
         conn.close()
+
+    return {
+        "listings": char_listing_rows + trait_listing_rows,
+        "unlisted_characters": unlisted_characters,
+        "unlisted_trait_tokens": unlisted_trait_tokens,
+        "closet_assets": closet_assets,
+    }
 
 
 @require_wallet
@@ -900,8 +933,13 @@ async def handle_market_mine(request):  # untyped: matches require_wallet's othe
     + unlisted live characters + unlisted wallet trait tokens + loose Closet
     traits, grouped so the UI can offer list/cancel/sell-from-closet per item."""
     wallet = request["wallet"]
-    network = config.XRPL_NETWORK
-    data = await asyncio.get_event_loop().run_in_executor(None, _compute_mine_data, network, wallet)
+    data = await asyncio.get_event_loop().run_in_executor(
+        None,
+        _compute_mine_data,
+        _market_network("character"),
+        _market_network("trait"),
+        wallet,
+    )
     cfg = trait_config.get_config()
     listings = [_serialize_listing_row(r, r["kind"], cfg) for r in data["listings"]]
     return web.json_response(
@@ -954,17 +992,19 @@ async def handle_market_history(request: web.Request) -> web.Response:
     nft_id = request.query.get("nft_id")
     slot = request.query.get("slot")
     value = request.query.get("value")
-    network = config.XRPL_NETWORK
 
     if nft_id:
+        # nft_events live in history_<XRPL_NETWORK>.db (character-backed).
         events = await asyncio.get_event_loop().run_in_executor(
-            None, _compute_nft_history, network, nft_id
+            None, _compute_nft_history, config.XRPL_NETWORK, nft_id
         )
         return web.json_response({"nft_id": nft_id, "events": events})
 
     if slot and value:
+        # Sold trait listings are trait-economy-backed -> economy network
+        # (see _market_network).
         rows = await asyncio.get_event_loop().run_in_executor(
-            None, _compute_trait_sales, network, slot, value
+            None, _compute_trait_sales, _market_network("trait"), slot, value
         )
         sales = [
             {
