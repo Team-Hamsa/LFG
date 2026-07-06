@@ -12,6 +12,10 @@ owner) is closed with reason 'stale'. Rows already closed (is_live=0) --
 including a sold-but-unsettled trait row -- are never revisited, so `settled`
 survives re-runs untouched.
 
+A per-token fetch FAILURE (RPC/network blip) is not "no offers": failed
+tokens are counted in the summary and their rows are excluded from the
+stale-close pass, so a transient error can never close a real live listing.
+
 Same posture/conventions as scripts/backfill_onchain.py: per-network
 onchain_<network>.db, idempotent re-run, --network testnet|mainnet.
 
@@ -23,6 +27,7 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+import logging
 import os
 import sqlite3
 import sys
@@ -35,6 +40,13 @@ from lfg_core import market_ops, market_store, nft_index, xrpl_ops  # noqa: E402
 from lfg_core.market_ops import FetchOffers  # noqa: E402
 
 FETCH_CONCURRENCY = 16
+
+
+async def _fetch_offers_strict(nft_id: str) -> list[dict[str, Any]]:
+    """Default fetcher for the sweep: raise_on_error=True so a transient RPC
+    failure is distinguishable from "no offers" -- the stale-close pass must
+    never close a live listing over a lookup blip."""
+    return await xrpl_ops.get_nft_sell_offers(nft_id, raise_on_error=True)
 
 
 def _matching_sell_offers(offers: list[dict[str, Any]], owner: str) -> list[dict[str, Any]]:
@@ -66,12 +78,14 @@ def _matching_sell_offers(offers: list[dict[str, Any]], owner: str) -> list[dict
 
 async def backfill_market(
     conn: sqlite3.Connection,
-    fetch_offers: FetchOffers = xrpl_ops.get_nft_sell_offers,
+    fetch_offers: FetchOffers = _fetch_offers_strict,
     concurrency: int = FETCH_CONCURRENCY,
 ) -> dict[str, int]:
     """Rebuild market_listings from on-ledger sell-offer state. Returns
     summary counts: characters_swept, traits_swept, live_listings (distinct
-    offer_indexes confirmed live this sweep), closed_stale."""
+    offer_indexes confirmed live this sweep), closed_stale, fetch_failures
+    (tokens whose offer lookup raised -- their rows are exempt from the
+    stale-close pass this run)."""
     market_store.init_db(conn)
     conn.row_factory = sqlite3.Row
 
@@ -81,12 +95,21 @@ async def backfill_market(
     traits = conn.execute("SELECT nft_id, owner, slot, value FROM trait_tokens").fetchall()
 
     sem = asyncio.Semaphore(concurrency)
+    failed_nft_ids: set[str] = set()
 
     async def sweep(
         nft_id: str, owner: str, kind: str, slot: str | None, value: str | None
     ) -> list[str]:
-        async with sem:
-            offers = await fetch_offers(nft_id)
+        try:
+            async with sem:
+                offers = await fetch_offers(nft_id)
+        except Exception as e:
+            # Failure != "no offers": remember the token so the stale-close
+            # pass leaves its rows alone -- closing a live listing over a
+            # transient lookup error would be a false stale.
+            logging.warning(f"backfill_market: offer fetch failed for {nft_id}: {e}")
+            failed_nft_ids.add(nft_id)
+            return []
         matches = _matching_sell_offers(offers, owner)
         for offer in matches:
             market_store.upsert_listing(
@@ -113,13 +136,14 @@ async def backfill_market(
     valid_offer_indexes = {idx for group in results for idx in group}
 
     previously_live = conn.execute(
-        "SELECT offer_index FROM market_listings WHERE is_live = 1"
+        "SELECT offer_index, nft_id FROM market_listings WHERE is_live = 1"
     ).fetchall()
     closed = 0
     for row in previously_live:
-        offer_index = row["offer_index"]
-        if offer_index not in valid_offer_indexes:
-            market_store.close_listing(conn, offer_index, "stale")
+        if row["nft_id"] in failed_nft_ids:
+            continue  # token not successfully swept; can't judge its offers
+        if row["offer_index"] not in valid_offer_indexes:
+            market_store.close_listing(conn, row["offer_index"], "stale")
             closed += 1
 
     return {
@@ -127,6 +151,7 @@ async def backfill_market(
         "traits_swept": len(traits),
         "live_listings": len(valid_offer_indexes),
         "closed_stale": closed,
+        "fetch_failures": len(failed_nft_ids),
     }
 
 
@@ -143,6 +168,7 @@ async def _amain() -> int:
     print(f"  Traits swept: {counts['traits_swept']}")
     print(f"  Live listings: {counts['live_listings']}")
     print(f"  Closed stale: {counts['closed_stale']}")
+    print(f"  Fetch failures (stale-close exempt): {counts['fetch_failures']}")
     return 0
 
 

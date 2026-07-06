@@ -76,7 +76,18 @@ def init_db(conn: sqlite3.Connection) -> None:
 def upsert_listing(conn: sqlite3.Connection, listing: MarketListing) -> None:
     """Insert a listing or overwrite it in place (keyed on offer_index) —
     used by the listener's offer_create handler and by the backfill rebuild.
-    Raises ValueError for an unrecognized `kind`."""
+    Raises ValueError for an unrecognized `kind`.
+
+    `created_ledger`/`created_ts` COALESCE on conflict: they are immutable
+    creation facts only the listener (which sees the offer_create tx) knows;
+    the backfill re-confirming a live offer passes None for them, and a
+    plain overwrite would permanently wipe the listener-written values
+    (nothing ever repopulates them), silently degrading sort=newest. Every
+    other field overwrites: an NFTokenOffer ledger object is immutable, so
+    for a given offer_index the incoming values are either identical or a
+    correction, and is_live/closed_reason/settled must overwrite so a
+    falsely-staled row can be resurrected when a later sweep re-confirms
+    the offer on-ledger."""
     if listing.kind not in _VALID_KINDS:
         raise ValueError(f"unknown kind: {listing.kind!r}")
     conn.execute(
@@ -93,8 +104,8 @@ def upsert_listing(conn: sqlite3.Connection, listing: MarketListing) -> None:
             destination=excluded.destination,
             slot=excluded.slot,
             value=excluded.value,
-            created_ledger=excluded.created_ledger,
-            created_ts=excluded.created_ts,
+            created_ledger=COALESCE(excluded.created_ledger, market_listings.created_ledger),
+            created_ts=COALESCE(excluded.created_ts, market_listings.created_ts),
             is_live=excluded.is_live,
             closed_reason=excluded.closed_reason,
             settled=excluded.settled

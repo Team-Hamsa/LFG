@@ -260,7 +260,7 @@ async def nft_exists(nft_id: str, clio: str | None = None, attempts: int = 3) ->
     return None
 
 
-async def get_nft_sell_offers(nft_id: str) -> list[dict[str, Any]]:
+async def get_nft_sell_offers(nft_id: str, raise_on_error: bool = False) -> list[dict[str, Any]]:
     """List sell offers for `nft_id` via the standard (non-clio) rippled
     `nft_sell_offers` method. Unlike nft_info/nft_exists this is a plain
     method, so it goes through JSON_RPC_URL like mint/burn/offer, not
@@ -272,10 +272,14 @@ async def get_nft_sell_offers(nft_id: str) -> list[dict[str, Any]]:
     key the offer's ledger index differently (drift guard, mirrors Baysed
     market.py:386-390).
 
-    Returns an empty list when there are no offers, the NFT is unknown to the
-    server, or the RPC call raises for any reason — callers doing fail-closed
-    verification (`market_ops.verify_sell_offer`) treat an empty/non-matching
-    list as "no valid offer", never a false positive.
+    Returns an empty list when there are no offers or the NFT is unknown to
+    the server. By default an RPC/network failure ALSO returns [] — callers
+    doing fail-closed verification (`market_ops.verify_sell_offer`) treat an
+    empty/non-matching list as "no valid offer", never a false positive.
+    Callers that must distinguish "genuinely no offers" from "lookup failed"
+    (e.g. scripts/backfill_market.py's stale-close pass, where conflating the
+    two would close a real live listing) pass `raise_on_error=True` to have
+    the exception re-raised instead.
     """
     try:
         client = JsonRpcClient(config.JSON_RPC_URL)
@@ -299,6 +303,8 @@ async def get_nft_sell_offers(nft_id: str) -> list[dict[str, Any]]:
             )
         return normalized
     except Exception as e:
+        if raise_on_error:
+            raise
         logging.warning(f"get_nft_sell_offers failed for {nft_id}: {e}")
         return []
 

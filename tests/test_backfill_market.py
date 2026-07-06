@@ -234,6 +234,95 @@ def test_rerun_idempotent_no_dupes(tmp_path):
     assert len(rows) == 1
 
 
+def _all_rows(conn: sqlite3.Connection) -> list[tuple[Any, ...]]:
+    return [
+        tuple(r)
+        for r in conn.execute("SELECT * FROM market_listings ORDER BY offer_index").fetchall()
+    ]
+
+
+def test_rerun_idempotent_field_for_field_including_listener_timestamps(tmp_path):
+    """The sweep re-confirming a LISTENER-written row (real created_ledger/
+    created_ts, which the backfill itself cannot know) must not change a
+    single field of it — this is the test that catches a backfill wiping the
+    timestamps, and full-row-set identity across runs is the real
+    idempotency claim."""
+    conn = _conn(tmp_path)
+    _seed_character(conn, CHAR_NFT, owner=SELLER)
+    # Listener-style row: real timestamps, offer still live on-ledger.
+    market_store.upsert_listing(
+        conn,
+        MarketListing(
+            offer_index="OFF_LISTENER",
+            nft_id=CHAR_NFT,
+            kind="character",
+            seller=SELLER,
+            amount_drops=1_000_000,
+            created_ledger=555,
+            created_ts=1_700_000_000,
+            is_live=1,
+        ),
+    )
+    fetch = _fetch_offers_map({CHAR_NFT: [_sell_offer("OFF_LISTENER", owner=SELLER)]})
+
+    _run(bm.backfill_market(conn, fetch_offers=fetch))
+    after_first = _all_rows(conn)
+    _run(bm.backfill_market(conn, fetch_offers=fetch))
+    after_second = _all_rows(conn)
+
+    assert after_first == after_second
+    conn.row_factory = sqlite3.Row
+    row = conn.execute("SELECT * FROM market_listings WHERE offer_index='OFF_LISTENER'").fetchone()
+    assert row["created_ledger"] == 555
+    assert row["created_ts"] == 1_700_000_000
+    assert row["is_live"] == 1
+
+
+# --- transient fetch failure must not stale-close ----------------------------
+
+
+def test_fetch_failure_excludes_token_from_stale_close(tmp_path):
+    """A per-token RPC failure is NOT "no offers": the failed token's live
+    listing must survive untouched, other tokens must still reconcile, and
+    the summary must report the failure count."""
+    conn = _conn(tmp_path)
+    ok_nft = CHAR_NFT
+    bad_nft = "000800001E43B0783E006F30078A64A8628F4B1B22879C8EB1CAF8C700000BAD"
+    _seed_character(conn, ok_nft, owner=SELLER)
+    _seed_character(conn, bad_nft, owner=SELLER)
+    for offer_index, nft_id in (("OFF_OK_GONE", ok_nft), ("OFF_BAD_LIVE", bad_nft)):
+        market_store.upsert_listing(
+            conn,
+            MarketListing(
+                offer_index=offer_index,
+                nft_id=nft_id,
+                kind="character",
+                seller=SELLER,
+                amount_drops=1_000_000,
+                is_live=1,
+            ),
+        )
+
+    async def fetch(nft_id: str) -> list[dict[str, Any]]:
+        if nft_id == bad_nft:
+            raise RuntimeError("rpc blip")
+        return []  # ok_nft: genuinely no offers on-ledger
+
+    stats = _run(bm.backfill_market(conn, fetch_offers=fetch))
+
+    conn.row_factory = sqlite3.Row
+    bad_row = conn.execute(
+        "SELECT * FROM market_listings WHERE offer_index='OFF_BAD_LIVE'"
+    ).fetchone()
+    ok_row = conn.execute(
+        "SELECT * FROM market_listings WHERE offer_index='OFF_OK_GONE'"
+    ).fetchone()
+    assert bad_row["is_live"] == 1 and bad_row["closed_reason"] is None  # survived the blip
+    assert ok_row["is_live"] == 0 and ok_row["closed_reason"] == "stale"  # still reconciled
+    assert stats["fetch_failures"] == 1
+    assert stats["closed_stale"] == 1
+
+
 # --- stale close: previously-live row absent from ledger --------------------
 
 

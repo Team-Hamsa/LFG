@@ -173,6 +173,30 @@ class TestUpsertListing:
         with pytest.raises(ValueError):
             market_store.upsert_listing(conn, _character_listing(kind="bogus"))
 
+    def test_upsert_preserves_created_fields_when_incoming_none(self, conn):
+        """A backfill re-confirmation (which has no ledger/timestamp for the
+        offer's creation) must NOT wipe the listener-written created_ledger/
+        created_ts — nothing ever repopulates them, and sort=newest degrades
+        silently."""
+        market_store.init_db(conn)
+        market_store.upsert_listing(conn, _character_listing(created_ledger=100, created_ts=1000))
+        market_store.upsert_listing(conn, _character_listing(created_ledger=None, created_ts=None))
+        row = conn.execute(
+            "SELECT created_ledger, created_ts FROM market_listings WHERE offer_index=?",
+            ("A" * 64,),
+        ).fetchone()
+        assert row == (100, 1000)
+
+    def test_upsert_overwrites_created_fields_when_incoming_non_null(self, conn):
+        market_store.init_db(conn)
+        market_store.upsert_listing(conn, _character_listing(created_ledger=100, created_ts=1000))
+        market_store.upsert_listing(conn, _character_listing(created_ledger=200, created_ts=2000))
+        row = conn.execute(
+            "SELECT created_ledger, created_ts FROM market_listings WHERE offer_index=?",
+            ("A" * 64,),
+        ).fetchone()
+        assert row == (200, 2000)
+
 
 class TestCloseListing:
     def test_close_character_sold_leaves_settled_null(self, conn):

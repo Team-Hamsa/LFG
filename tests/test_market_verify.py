@@ -20,6 +20,8 @@ import json  # noqa: E402
 from collections.abc import Awaitable, Callable  # noqa: E402
 from typing import Any  # noqa: E402
 
+import pytest  # noqa: E402
+
 from lfg_core import market_ops, xrpl_ops  # noqa: E402
 
 NFT_ID = "000800001E43B0783E006F30078A64A8628F4B1B22879C8EB1CAF8C700000019"
@@ -98,6 +100,24 @@ class TestGetNftSellOffers:
     def test_returns_empty_list_when_no_offers_key(self, monkeypatch) -> None:
         monkeypatch.setattr(xrpl_ops, "JsonRpcClient", _fake_json_rpc_client({}))
         offers = _run(xrpl_ops.get_nft_sell_offers(NFT_ID))
+        assert offers == []
+
+    def test_raise_on_error_reraises_rpc_exception(self, monkeypatch) -> None:
+        """The backfill's failure-distinguishing path: raise_on_error=True must
+        re-raise instead of collapsing an RPC blip into "no offers" — a
+        swallowed failure would let the stale-close pass close a real live
+        listing."""
+        monkeypatch.setattr(
+            xrpl_ops, "JsonRpcClient", _fake_json_rpc_client(exc=RuntimeError("rpc down"))
+        )
+        with pytest.raises(RuntimeError):
+            _run(xrpl_ops.get_nft_sell_offers(NFT_ID, raise_on_error=True))
+
+    def test_raise_on_error_no_offers_still_returns_empty(self, monkeypatch) -> None:
+        """A genuinely-empty (or objectNotFound-shaped) response is NOT a
+        failure — it must still return [] even in strict mode."""
+        monkeypatch.setattr(xrpl_ops, "JsonRpcClient", _fake_json_rpc_client({}))
+        offers = _run(xrpl_ops.get_nft_sell_offers(NFT_ID, raise_on_error=True))
         assert offers == []
 
 
