@@ -318,6 +318,20 @@ async def advance_buy_session(
             return None
         if not s.get("signed"):
             return None
+        # Signer must be the buyer who started this session. A registered
+        # buyer could start a buy, share the QR, and have a DIFFERENT wallet
+        # sign it: the ledger sale then succeeds for that other wallet while
+        # this session would otherwise close the listing and (for a trait)
+        # settle via session.wallet_address — the wrong owner, leaving the
+        # paid trait unsettled. Fail this session without touching the row;
+        # the listener's accept path closes/attributes the listing to the
+        # real signer from on-ledger truth. Fail-closed: a missing signer
+        # account is treated as a mismatch.
+        if s.get("account") != session.wallet_address:
+            session.state = FAILED
+            session.error = "buy offer signed by a different account than the buyer"
+            session.reason = "signer_mismatch"
+            return None
         txid = s.get("txid")
         if not txid:
             return None

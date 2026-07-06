@@ -53,9 +53,15 @@ def _list_session(**overrides):
     return s
 
 
-def _status(*, signed, expired=False, txid=None):
+def _status(*, signed, expired=False, txid=None, account="rBUYER"):
     async def fake(_uuid):
-        return {"opened": True, "signed": signed, "expired": expired, "txid": txid}
+        return {
+            "opened": True,
+            "signed": signed,
+            "expired": expired,
+            "txid": txid,
+            "account": account,
+        }
 
     return fake
 
@@ -344,6 +350,44 @@ class TestAdvanceBuySession:
         assert outcome is None  # NOT "stale" — the row must stay live
         assert s.state == market_flow.FAILED
         assert s.reason != "listing_unavailable"
+
+    def test_signer_mismatch_fails_session_without_touching_listing(self):
+        """The QR is signed by a wallet other than the buyer who started the
+        session: fail the session (no 'sold', no tx lookup, no close) so the
+        service never settles a trait via the wrong owner (Greptile #129)."""
+        s = self._session()  # wallet_address="rBUYER"
+
+        async def must_not_lookup(_hash):
+            raise AssertionError("must not fetch tx for a mismatched signer")
+
+        outcome = _run(
+            market_flow.advance_buy_session(
+                s,
+                get_payload_status=_status(signed=True, txid="TXHASH", account="rATTACKER"),
+                get_tx=must_not_lookup,
+            )
+        )
+        assert outcome is None
+        assert s.state == market_flow.FAILED
+        assert s.reason == "signer_mismatch"
+        assert s.txid is None  # never advanced to PENDING
+
+    def test_missing_signer_account_fails_closed(self):
+        s = self._session()
+
+        async def must_not_lookup(_hash):
+            raise AssertionError("must not fetch tx when signer is unverifiable")
+
+        outcome = _run(
+            market_flow.advance_buy_session(
+                s,
+                get_payload_status=_status(signed=True, txid="TXHASH", account=None),
+                get_tx=must_not_lookup,
+            )
+        )
+        assert outcome is None
+        assert s.state == market_flow.FAILED
+        assert s.reason == "signer_mismatch"
 
     def test_self_accept_own_offer_does_not_stale_close(self):
         s = self._session()

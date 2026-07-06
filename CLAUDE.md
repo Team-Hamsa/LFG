@@ -600,7 +600,13 @@ the wrong chain.
   offer on-ledger (amount, no foreign `Destination`) immediately before the
   XUMM payload is built, and a trait buy additionally gates on the buyer
   having an **active Closet** (`closet_required`, 403) since a sold trait
-  settles into one.
+  settles into one. `advance_buy_session` also verifies the **XUMM signer
+  account matches the session wallet** before accepting the txid (a buyer
+  could share the QR and have a different wallet sign it — the sale would
+  succeed for that wallet while settlement ran against the wrong owner,
+  stranding the paid trait); a mismatched (or missing) signer fails the
+  session `signer_mismatch` without closing the listing (the listener's
+  accept path attributes the row to the real signer from on-ledger truth).
 - `POST /api/market/trait/list` — the two-signature "sell a trait out of my
   Closet" wizard (`market_flow.TraitSellSession`): Extract (existing Phase-4
   flow, signature 1) then the plain List flow on the freshly-owned token

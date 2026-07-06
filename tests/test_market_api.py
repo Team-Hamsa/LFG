@@ -723,9 +723,15 @@ def _fake_payload(qr="https://qr", url="https://xumm.app/sign/U1", pl_uuid="U1")
     return fake
 
 
-def _fake_status(*, signed, expired=False, txid=None):
+def _fake_status(*, signed, expired=False, txid=None, account=BUYER):
     async def fake(_uuid):
-        return {"opened": True, "signed": signed, "expired": expired, "txid": txid}
+        return {
+            "opened": True,
+            "signed": signed,
+            "expired": expired,
+            "txid": txid,
+            "account": account,
+        }
 
     return fake
 
