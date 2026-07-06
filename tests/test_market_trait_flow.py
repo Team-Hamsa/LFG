@@ -38,6 +38,7 @@ from lfg_core import economy_flow as ef  # noqa: E402
 from lfg_core import economy_store as es  # noqa: E402
 from lfg_core.market_store import (  # noqa: E402
     MarketListing,
+    close_listing,  # noqa: E402
     unsettled_trait_sales,  # noqa: E402
     upsert_listing,
 )
@@ -771,6 +772,45 @@ def test_sweep_resolves_buyer_from_trait_tokens_and_settles(onchain_env, monkeyp
     row = market_get_listing(conn, "G" * 64)
     assert row["settled"] == 1
     assert unsettled_trait_sales(conn) == []
+
+
+def test_sweep_resolves_buyer_from_persisted_row_when_trait_tokens_deleted(
+    onchain_env, monkeypatch, tmp_path
+):
+    # run_deposit deletes the trait_tokens ownership row between the burn and
+    # the Closet credit; if credit then fails, a later sweep must still resolve
+    # the buyer from the durable `buyer` column persisted on the sold listing
+    # (CodeRabbit #129 Major) — never from trait_tokens.owner, which is gone.
+    conn = _reopen(onchain_env)
+    _active_buyer_closet(conn)
+    # Live listing, then close sold WITH a persisted buyer, but with NO
+    # trait_tokens row for the token (deleted mid-settlement).
+    upsert_listing(
+        conn,
+        MarketListing(
+            offer_index="K" * 64,
+            nft_id=TRAIT1,
+            kind="trait",
+            seller=SELLER,
+            amount_drops=500_000,
+            slot="Hat",
+            value="Wizard Hat",
+        ),
+    )
+    close_listing(conn, "K" * 64, "sold", buyer=BUYER)
+    conn.commit()
+    conn.close()
+
+    f = _SettleFakeDeps()
+    monkeypatch.setattr(
+        server.economy_api, "build_settlement_deps", lambda c: _settle_deps(c, f, tmp_path)
+    )
+
+    _run(server.settle_pending_trait_sales())
+    # The sweep resolved the buyer from the row (not trait_tokens) and settled.
+    assert f.burns == [(TRAIT1, BUYER)]
+    conn = _reopen(onchain_env)
+    assert market_get_listing(conn, "K" * 64)["settled"] == 1
 
 
 def test_sweep_skips_row_with_no_known_buyer_without_counting_attempt(onchain_env, monkeypatch):

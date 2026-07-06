@@ -1179,11 +1179,13 @@ def _write_listing_row(network: str, row: dict[str, Any]) -> None:
         conn.close()
 
 
-def _close_listing_sync(network: str, offer_index: str, reason: str) -> None:
+def _close_listing_sync(
+    network: str, offer_index: str, reason: str, buyer: str | None = None
+) -> None:
     conn = nft_index.init_db(nft_index.index_db_path(network))
     try:
         market_store.init_db(conn)
-        market_store.close_listing(conn, offer_index, reason)
+        market_store.close_listing(conn, offer_index, reason, buyer=buyer)
     finally:
         conn.close()
 
@@ -1473,8 +1475,16 @@ def _make_market_status_handler(prefix: str):
         elif prefix == "buy":
             outcome = await market_flow.advance_buy_session(session)
             if outcome == "sold":
+                # Persist the buyer on the sold row so settlement stays
+                # recoverable even if run_deposit deletes the trait_tokens
+                # ownership row before Closet credit (CodeRabbit #129).
                 await loop.run_in_executor(
-                    None, _close_listing_sync, session.network, session.offer_index, "sold"
+                    None,
+                    _close_listing_sync,
+                    session.network,
+                    session.offer_index,
+                    "sold",
+                    session.wallet_address,
                 )
                 if session.listing_kind == "trait":
                     # Primary settlement trigger (spec §Q7): burn the sold
@@ -1518,9 +1528,9 @@ async def _settle_trait_sale(buyer: str, nft_id: str, offer_index: str, network:
     settlement completed, so callers (the buy status handler, the sweep) can
     decide what to do next without a second DB read."""
     conn = nft_index.init_db(nft_index.index_db_path(network))
-    economy_store.init_economy_schema(conn)
-    market_store.init_db(conn)
     try:
+        economy_store.init_economy_schema(conn)
+        market_store.init_db(conn)
         deps = economy_api.build_settlement_deps(conn)
         deposit_session = economy_flow.DepositSession(owner=buyer, nft_id=nft_id)
         await economy_flow.run_deposit(deposit_session, deps)
@@ -1588,9 +1598,9 @@ async def settle_pending_trait_sales() -> None:
     keeps current from the AcceptOffer it observed)."""
     network = _market_network("trait")
     conn = nft_index.init_db(nft_index.index_db_path(network))
-    economy_store.init_economy_schema(conn)
-    market_store.init_db(conn)
     try:
+        economy_store.init_economy_schema(conn)
+        market_store.init_db(conn)
         rows = market_store.unsettled_trait_sales(conn)
         owners = {nid: owner for nid, owner, _slot, _value in economy_store.read_trait_tokens(conn)}
     finally:
@@ -1600,11 +1610,16 @@ async def settle_pending_trait_sales() -> None:
         offer_index = row["offer_index"]
         if _sweep_attempts.get(offer_index, 0) >= _SWEEP_MAX_ATTEMPTS:
             continue  # already given up + journaled on a previous pass
-        buyer = owners.get(row["nft_id"])
+        # Prefer the buyer persisted on the sold row (durable across
+        # run_deposit's trait_tokens delete); fall back to the current token
+        # owner for legacy rows written before buyer was persisted, or for
+        # third-party fills the listener recorded with no buyer on the row.
+        buyer = row.get("buyer") or owners.get(row["nft_id"])
         if buyer is None:
-            # The listener hasn't (yet) recorded an owner for this token —
-            # transient lag, not a precondition failure. Try again next sweep
-            # without counting an attempt.
+            # Neither a persisted buyer nor a current owner — the listener
+            # hasn't (yet) recorded an owner for this token: transient lag,
+            # not a precondition failure. Try again next sweep without
+            # counting an attempt.
             continue
         try:
             settled = await _settle_trait_sale(buyer, row["nft_id"], offer_index, network)

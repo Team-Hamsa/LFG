@@ -135,7 +135,8 @@ CREATE TABLE IF NOT EXISTS market_listings (
     created_ts    INTEGER,
     is_live       INTEGER NOT NULL DEFAULT 1,
     closed_reason TEXT,               -- sold | cancelled | stale
-    settled       INTEGER             -- trait kind: 0=burn-back pending, 1=done; NULL for characters
+    settled       INTEGER,            -- trait kind: 0=burn-back pending, 1=done; NULL for characters
+    buyer         TEXT                 -- sold kind: durable buyer-of-record for settlement recovery; NULL otherwise
 );
 CREATE INDEX IF NOT EXISTS idx_market_live ON market_listings(is_live, kind, nft_id);
 ```

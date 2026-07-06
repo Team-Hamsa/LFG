@@ -384,14 +384,17 @@ def _apply_offer_accept(conn: sqlite3.Connection, tx: dict[str, Any]) -> None:
     if sell_wrapper is None:
         return  # a buy-offer-only accept; no sell listing of ours to close
     offer_index = sell_wrapper.get("LedgerIndex")
-    if isinstance(offer_index, str) and offer_index:
-        market_store.close_listing(conn, offer_index, "sold")
-
     final = sell_wrapper.get("FinalFields") or {}
     nft_id = final.get("NFTokenID")
+    # Resolve the post-transfer owner (the buyer) BEFORE closing so the sold
+    # row can carry the buyer durably — the settlement sweep needs it after
+    # run_deposit deletes the token's trait_tokens ownership row.
+    owner = _owner_of(conn, nft_id) if isinstance(nft_id, str) and nft_id else None
+    if isinstance(offer_index, str) and offer_index:
+        market_store.close_listing(conn, offer_index, "sold", buyer=owner)
+
     if not isinstance(nft_id, str) or not nft_id:
         return
-    owner = _owner_of(conn, nft_id)
     if owner is None:
         return  # unresolved owner; leave other rows alone rather than guess
     rows = conn.execute(

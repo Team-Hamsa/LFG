@@ -352,6 +352,9 @@ def test_accept_trait_closes_sold_with_settled_zero():
     assert row["is_live"] == 0
     assert row["closed_reason"] == "sold"
     assert row["settled"] == 0
+    # The post-transfer owner is persisted as the durable buyer-of-record so
+    # settlement stays recoverable after run_deposit deletes trait_tokens.
+    assert row["buyer"] == "rBuyer"
 
 
 def test_accept_delists_other_live_rows_for_stale_seller():

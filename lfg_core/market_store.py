@@ -37,7 +37,8 @@ CREATE TABLE IF NOT EXISTS market_listings (
     created_ts    INTEGER,
     is_live       INTEGER NOT NULL DEFAULT 1,
     closed_reason TEXT,               -- sold | cancelled | stale
-    settled       INTEGER             -- trait kind: 0=burn-back pending, 1=done; NULL for characters
+    settled       INTEGER,            -- trait kind: 0=burn-back pending, 1=done; NULL for characters
+    buyer         TEXT                 -- sold kind: durable buyer-of-record for settlement recovery; NULL otherwise
 );
 CREATE INDEX IF NOT EXISTS idx_market_live ON market_listings(is_live, kind, nft_id);
 """
@@ -68,8 +69,15 @@ class MarketListing:
 
 def init_db(conn: sqlite3.Connection) -> None:
     """Create the market_listings table + index if absent. Idempotent —
-    calling this twice on the same connection is a no-op the second time."""
+    calling this twice on the same connection is a no-op the second time.
+
+    Also runs a forward-only migration: `buyer` was added after the initial
+    schema shipped, and `CREATE TABLE IF NOT EXISTS` will not add a column to
+    an already-created table, so ADD it when a pre-existing DB lacks it."""
     conn.executescript(_SCHEMA)
+    cols = {row[1] for row in conn.execute("PRAGMA table_info(market_listings)")}
+    if "buyer" not in cols:
+        conn.execute("ALTER TABLE market_listings ADD COLUMN buyer TEXT")
     conn.commit()
 
 
@@ -180,12 +188,20 @@ def record_listing_creation(conn: sqlite3.Connection, listing: MarketListing) ->
     conn.commit()
 
 
-def close_listing(conn: sqlite3.Connection, offer_index: str, reason: str) -> None:
+def close_listing(
+    conn: sqlite3.Connection, offer_index: str, reason: str, buyer: str | None = None
+) -> None:
     """Mark a listing no-longer-live. `reason` must be one of
     sold|cancelled|stale. Per the spec, closing a *trait* listing with
     reason='sold' also sets settled=0 (burn-back-to-Closet pending) in the
     same statement — every other case leaves `settled` untouched (NULL for
-    characters, or whatever it already was)."""
+    characters, or whatever it already was).
+
+    `buyer` (when given) is persisted as the durable buyer-of-record so the
+    settlement sweep can still resolve who to credit even after `run_deposit`
+    deletes the token's `trait_tokens` ownership row mid-settlement. Passed
+    only on a sold close (the new owner); COALESCE keeps any previously
+    recorded buyer if a later close passes None."""
     if reason not in _VALID_CLOSE_REASONS:
         raise ValueError(f"unknown close reason: {reason!r}")
     conn.execute(
@@ -193,10 +209,11 @@ def close_listing(conn: sqlite3.Connection, offer_index: str, reason: str) -> No
         UPDATE market_listings
         SET is_live = 0,
             closed_reason = ?,
-            settled = CASE WHEN kind = 'trait' AND ? = 'sold' THEN 0 ELSE settled END
+            settled = CASE WHEN kind = 'trait' AND ? = 'sold' THEN 0 ELSE settled END,
+            buyer = COALESCE(?, buyer)
         WHERE offer_index = ?
         """,
-        (reason, reason, offer_index),
+        (reason, reason, buyer, offer_index),
     )
     conn.commit()
 

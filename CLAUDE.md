@@ -531,7 +531,11 @@ only because a live `NFTokenOffer` ledger object backs it. One row per
 `closed_reason` ∈ `sold` | `cancelled` | `stale`. A sold **trait** listing
 additionally carries a `settled` lifecycle (0 = burn-back-to-Closet pending,
 1 = done; `NULL` for characters) — closing a trait row `sold` sets
-`settled=0` in the same statement (`market_store.close_listing`).
+`settled=0` in the same statement (`market_store.close_listing`). A sold row
+also persists a durable `buyer` (the new owner-of-record) in that same
+statement so settlement stays recoverable after `run_deposit` deletes the
+token's `trait_tokens` ownership row mid-burn; the sweep reads `buyer` from
+the row first, falling back to `trait_tokens.owner` only for legacy rows.
 
 **Three sync layers keep the index current:**
 - **Listener** — `lfg_core/nft_listener.apply_market_tx`, wired into the

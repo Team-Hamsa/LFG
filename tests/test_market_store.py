@@ -31,6 +31,7 @@ from lfg_core.nft_index import OnchainNft  # noqa: E402
 from lfg_core.nft_index import upsert as upsert_onchain_nft
 
 SELLER = "rSellerAddress0000000000000000000"
+BUYER = "rBuyerAddress000000000000000000000"
 OTHER = "rOtherAddress00000000000000000000"
 CHAR_NFT = "000800001E43B0783E006F30078A64A8628F4B1B22879C8EB1CAF8C700000019"
 TRAIT_NFT = "000900001E43B0783E006F30078A64A8628F4B1B22879C8EB1CAF8C700000abc"
@@ -130,6 +131,7 @@ class TestInitDb:
             "is_live",
             "closed_reason",
             "settled",
+            "buyer",
         }
 
     def test_index_created(self, conn):
@@ -285,6 +287,51 @@ class TestCloseListing:
         market_store.upsert_listing(conn, _character_listing())
         with pytest.raises(ValueError):
             market_store.close_listing(conn, "A" * 64, "bogus")
+
+    def test_close_sold_persists_buyer(self, conn):
+        market_store.init_db(conn)
+        market_store.upsert_listing(conn, _trait_listing())
+        market_store.close_listing(conn, "B" * 64, "sold", buyer=BUYER)
+        row = conn.execute(
+            "SELECT settled, buyer FROM market_listings WHERE offer_index=?", ("B" * 64,)
+        ).fetchone()
+        assert row == (0, BUYER)
+
+    def test_close_without_buyer_preserves_prior_buyer(self, conn):
+        # COALESCE keeps a previously recorded buyer if a later close passes None.
+        market_store.init_db(conn)
+        market_store.upsert_listing(conn, _trait_listing())
+        market_store.close_listing(conn, "B" * 64, "sold", buyer=BUYER)
+        market_store.close_listing(conn, "B" * 64, "stale")  # no buyer arg
+        row = conn.execute(
+            "SELECT buyer FROM market_listings WHERE offer_index=?", ("B" * 64,)
+        ).fetchone()
+        assert row[0] == BUYER
+
+
+class TestBuyerMigration:
+    def test_init_db_adds_buyer_column_to_legacy_db(self, conn):
+        # A pre-existing DB created before `buyer` shipped: build the table
+        # WITHOUT the column, then init_db must ALTER it in (not just rely on
+        # CREATE TABLE IF NOT EXISTS, which no-ops on an existing table).
+        conn.executescript(
+            """
+            CREATE TABLE market_listings (
+                offer_index TEXT PRIMARY KEY, nft_id TEXT NOT NULL, kind TEXT NOT NULL,
+                seller TEXT NOT NULL, amount_drops INTEGER NOT NULL, destination TEXT,
+                slot TEXT, value TEXT, created_ledger INTEGER, created_ts INTEGER,
+                is_live INTEGER NOT NULL DEFAULT 1, closed_reason TEXT, settled INTEGER
+            );
+            """
+        )
+        conn.commit()
+        cols_before = {r[1] for r in conn.execute("PRAGMA table_info(market_listings)")}
+        assert "buyer" not in cols_before
+        market_store.init_db(conn)
+        cols_after = {r[1] for r in conn.execute("PRAGMA table_info(market_listings)")}
+        assert "buyer" in cols_after
+        # Idempotent: a second init_db must not raise (column already present).
+        market_store.init_db(conn)
 
 
 class TestMarkSettled:
