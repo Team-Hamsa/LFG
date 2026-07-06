@@ -191,6 +191,18 @@ class TestDropsToXrpStr:
     def test_whole_number(self) -> None:
         assert drops_to_xrp_str("2000000") == "2"
 
+    def test_trailing_zero_whole_numbers_are_not_scientific(self) -> None:
+        # Decimal("10").normalize() is Decimal("1E+1"); a whole number of XRP
+        # with trailing zeros must still render in plain fixed-point (regression:
+        # a 10 XRP listing showed "1E+1 XRP" and broke the JS BigInt buy path).
+        assert drops_to_xrp_str("10000000") == "10"
+        assert drops_to_xrp_str("100000000") == "100"
+        assert drops_to_xrp_str("1000000000") == "1000"
+        assert drops_to_xrp_str("120000000") == "120"
+
+    def test_zero_drops(self) -> None:
+        assert drops_to_xrp_str("0") == "0"
+
     def test_single_drop(self) -> None:
         assert drops_to_xrp_str("1") == "0.000001"
 
@@ -204,7 +216,7 @@ class TestDropsToXrpStr:
 
     @pytest.mark.parametrize(
         "xrp",
-        ["1.5", "2", "0.000001", "100.25", "0.5"],
+        ["1.5", "2", "0.000001", "100.25", "0.5", "10", "100", "120", "1000"],
     )
     def test_round_trip(self, xrp: str) -> None:
         assert drops_to_xrp_str(xrp_to_drops_str(xrp)) == xrp
