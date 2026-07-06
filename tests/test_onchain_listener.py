@@ -25,7 +25,7 @@ sys.path.insert(0, os.path.join(REPO, "scripts"))
 import onchain_listener as oln  # noqa: E402
 
 from lfg_core import closet_token as bt  # noqa: E402
-from lfg_core import config, nft_index, trait_token  # noqa: E402
+from lfg_core import config, market_store, nft_index, trait_token  # noqa: E402
 from lfg_core import economy_store as es  # noqa: E402
 from lfg_core import trait_economy as te  # noqa: E402
 
@@ -41,10 +41,11 @@ def _run(coro):
 
 
 def _conn() -> sqlite3.Connection:
-    """The live listener's DB: index + economy schemas share one file."""
+    """The live listener's DB: index + economy + market schemas share one file."""
     c = sqlite3.connect(":memory:")
     c.executescript(nft_index._SCHEMA)
     es.init_economy_schema(c)
+    market_store.init_db(c)
     return c
 
 
@@ -254,6 +255,64 @@ def test_listen_path_accept_closet_promotes_pending_to_active():
     record = es.get_closet_record(conn, "rUser")
     assert record is not None, "accept was filtered before reaching economy handler"
     assert record[2] == bt.ACTIVE, f"expected ACTIVE, got {record[2]}"
+
+
+def test_listen_path_offer_create_reaches_market_listener():
+    """Drive an NFTokenCreateOffer through process_stream_tx (the production
+    entrypoint) and confirm a market_listings row is created. Guards the
+    integration gap where apply_market_tx has unit tests but is never actually
+    called by the live dispatch (mirrors the burn/closet wiring guards above)."""
+    from xrpl.core import addresscodec
+
+    conn = _conn()
+    _freeze(conn)
+    # A real 64-hex NFTokenID embedding OUR issuer's AccountID (hex chars
+    # 8..48) -- membership is decided by DB lookup, not by decoding this, but
+    # the issuer-bytes pre-filter still needs a well-formed id to pass.
+    acct = addresscodec.decode_classic_address(config.SWAP_ISSUER_ADDRESS).hex().upper()
+    nft_id = f"000A0000{acct}0000000000000001"
+    conn.execute(
+        "INSERT INTO onchain_nfts (nft_id, nft_number, owner, is_burned, mutable, uri_hex, body) "
+        "VALUES (?, 1, 'rSeller', 0, 0, '', NULL)",
+        (nft_id,),
+    )
+    conn.commit()
+
+    tx = {
+        "TransactionType": "NFTokenCreateOffer",
+        "Account": "rSeller",
+        "NFTokenID": nft_id,
+        "ledger_index": 42,
+        "meta": {
+            "AffectedNodes": [
+                {
+                    "CreatedNode": {
+                        "LedgerEntryType": "NFTokenOffer",
+                        "LedgerIndex": "OFFERWIRE",
+                        "NewFields": {
+                            "NFTokenID": nft_id,
+                            "Flags": 1,
+                            "Amount": "1000000",
+                        },
+                    }
+                }
+            ]
+        },
+    }
+    _run(
+        oln.process_stream_tx(
+            conn,
+            tx,
+            fetch_token=_none_token,
+            fetch_meta=_none_meta,
+            is_ours=_is_ours,
+        )
+    )
+    row = conn.execute(
+        "SELECT nft_id, kind, is_live FROM market_listings WHERE offer_index='OFFERWIRE'"
+    ).fetchone()
+    assert row is not None, "offer_create never reached apply_market_tx"
+    assert row[0] == nft_id and row[1] == "character" and row[2] == 1
 
 
 def test_listen_path_burn_deletes_trait_token():

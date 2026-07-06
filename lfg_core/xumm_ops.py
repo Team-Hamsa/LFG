@@ -205,6 +205,47 @@ async def create_accept_offer_payload(
     )
 
 
+async def create_sell_offer_payload(
+    account: str,
+    nft_id: str,
+    drops: str,
+    return_url: dict[str, str] | None = None,
+) -> dict[str, Any] | None:
+    """XUMM payload for NFTokenCreateOffer listing an NFT for sale on the
+    in-app marketplace. `drops` must already be an integer-drops string (see
+    `market_ops.xrp_to_drops_str`) — no float/Decimal handling here. Flags=1
+    marks a sell offer; Owner is omitted (only meaningful when someone other
+    than the token owner creates the offer) and Destination is omitted so the
+    listing is open to any buyer rather than locked to one counterparty."""
+    return await _create_xumm_payload(
+        {
+            "TransactionType": "NFTokenCreateOffer",
+            "Account": account,
+            "NFTokenID": nft_id,
+            "Amount": drops,
+            "Flags": 1,
+        },
+        options=_with_return_url({}, return_url),
+    )
+
+
+async def create_cancel_offer_payload(
+    account: str,
+    offer_index: str,
+    return_url: dict[str, str] | None = None,
+) -> dict[str, Any] | None:
+    """XUMM payload for NFTokenCancelOffer, delisting one existing sell
+    offer by its ledger index."""
+    return await _create_xumm_payload(
+        {
+            "TransactionType": "NFTokenCancelOffer",
+            "Account": account,
+            "NFTokenOffers": [offer_index],
+        },
+        options=_with_return_url({}, return_url),
+    )
+
+
 async def create_signin_payload(return_url: dict[str, str] | None = None) -> dict[str, Any] | None:
     """XUMM SignIn payload: the user scans/approves in Xaman and the signed
     payload reveals their wallet address (registration flow, issue #24)."""
@@ -234,11 +275,17 @@ async def get_payload_status(uuid: str) -> dict[str, Any] | None:
         )
         data = response.json()
         meta = data.get("meta") or {}
+        response_block = data.get("response") or {}
         return {
             "opened": bool(meta.get("opened")),
             "signed": bool(meta.get("signed")),
             "expired": bool(meta.get("expired")),
-            "account": (data.get("response") or {}).get("account"),
+            "account": response_block.get("account"),
+            # The signed transaction's hash (XUMM's payload status carries no
+            # meta of its own — the marketplace list/buy finalize flow fetches
+            # the tx by this hash to learn the on-ledger outcome). None until
+            # signed.
+            "txid": response_block.get("txid"),
         }
     except Exception as e:
         logging.error(f"Error fetching XUMM payload status: {e}")

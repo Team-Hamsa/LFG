@@ -9,12 +9,17 @@ from __future__ import annotations
 import logging
 import sqlite3
 from collections.abc import Awaitable, Callable
+from datetime import datetime
 from typing import Any
+
+from xrpl.core import addresscodec
 
 from lfg_core import (
     closet_token,
     config,
     economy_store,
+    market_ops,
+    market_store,
     nft_index,
     swap_meta,
     trait_economy,
@@ -26,6 +31,8 @@ _TYPE_TO_KIND = {
     "NFTokenAcceptOffer": "accept",
     "NFTokenBurn": "burn",
     "NFTokenModify": "modify",
+    "NFTokenCreateOffer": "offer_create",
+    "NFTokenCancelOffer": "offer_cancel",
 }
 
 # Resolver signatures used by apply_tx (injected so tests need no network):
@@ -219,3 +226,243 @@ async def apply_economy_tx(
                 _apply_possible_growth(conn, token, metadata, genesis)
         except Exception:
             logging.exception(f"apply_economy_tx failed for {nft_id} ({kind})")
+
+
+# --- In-app marketplace: offer_create / offer_cancel / accept ---------------
+#
+# Membership ("ours") is decided by lookup in onchain_nfts / trait_tokens,
+# NEVER by decoding the taxon out of the NFTokenID -- XLS-20 obfuscation
+# scrambles it. Only the issuer's account bytes (hex chars 8..48) are
+# unscrambled, so they are usable as a cheap pre-filter (below), but the DB
+# membership check remains the actual gate.
+
+_RIPPLE_EPOCH = 946684800
+
+
+def _issuer_account_hex() -> str:
+    """40-hex uppercase AccountID for our NFT-collection issuer
+    (config.SWAP_ISSUER_ADDRESS), as embedded in NFTokenIDs at hex chars
+    8..48."""
+    return addresscodec.decode_classic_address(config.SWAP_ISSUER_ADDRESS).hex().upper()
+
+
+def _nft_id_is_ours(nft_id: str, issuer_hex: str) -> bool:
+    """Cheap pre-filter only: the issuer bytes of an NFTokenID are NOT
+    scrambled, so this short-circuits the overwhelmingly-foreign network-wide
+    tx firehose before any DB round-trip. `_classify_membership`'s table
+    lookup remains the authoritative gate -- an our-issuer nft_id we never
+    indexed still resolves to "not ours" there."""
+    return isinstance(nft_id, str) and len(nft_id) == 64 and nft_id[8:48].upper() == issuer_hex
+
+
+def _classify_membership(
+    conn: sqlite3.Connection, nft_id: str
+) -> tuple[str, str | None, str | None] | None:
+    """(kind, slot, value) for a market listing's nft_id, or None if it isn't
+    ours. `onchain_nfts` membership -> ('character', None, None); else
+    `trait_tokens` membership -> ('trait', slot, value) from that row. Neither
+    (including a foreign-issuer nft_id, or an our-issuer nft_id we simply
+    never indexed) -> None."""
+    if not _nft_id_is_ours(nft_id, _issuer_account_hex()):
+        return None
+    if conn.execute("SELECT 1 FROM onchain_nfts WHERE nft_id=?", (nft_id,)).fetchone():
+        return ("character", None, None)
+    row = conn.execute("SELECT slot, value FROM trait_tokens WHERE nft_id=?", (nft_id,)).fetchone()
+    if row is not None:
+        return ("trait", str(row[0]), str(row[1]))
+    return None
+
+
+def _tx_unix_time(tx: dict[str, Any]) -> int | None:
+    """Best-effort unix timestamp for a streamed tx envelope: the ripple-epoch
+    `date` field (nft_history / clio entries) or `close_time_iso` (the live
+    subscribe stream). Deliberately duplicated from history_events.tx_unix_time
+    rather than imported -- history_events imports nft_listener, so importing
+    it back here would be circular."""
+    date = tx.get("date")
+    if isinstance(date, int):
+        return date + _RIPPLE_EPOCH
+    iso = tx.get("close_time_iso")
+    if isinstance(iso, str):
+        try:
+            return int(datetime.fromisoformat(iso.replace("Z", "+00:00")).timestamp())
+        except ValueError:
+            return None
+    return None
+
+
+def _deleted_nft_offer_nodes(tx: dict[str, Any]) -> list[dict[str, Any]]:
+    """Every DeletedNode wrapper of LedgerEntryType NFTokenOffer in a tx's
+    meta.AffectedNodes."""
+    meta = tx.get("meta")
+    nodes = meta.get("AffectedNodes") if isinstance(meta, dict) else None
+    if not isinstance(nodes, list):
+        return []
+    out: list[dict[str, Any]] = []
+    for node in nodes:
+        wrapper = node.get("DeletedNode") if isinstance(node, dict) else None
+        if isinstance(wrapper, dict) and wrapper.get("LedgerEntryType") == "NFTokenOffer":
+            out.append(wrapper)
+    return out
+
+
+def _apply_offer_create(conn: sqlite3.Connection, tx: dict[str, Any]) -> None:
+    """NFTokenCreateOffer: upsert a live market_listings row iff the created
+    offer is sell-flagged, XRP-denominated (market_ops.extract_created_sell_offer
+    already enforces both), and `nft_id` is ours by membership."""
+    nft_id = tx.get("NFTokenID")
+    if not isinstance(nft_id, str) or not nft_id:
+        return
+    membership = _classify_membership(conn, nft_id)
+    if membership is None:
+        return
+    kind, slot, value = membership
+    seller = tx.get("Account")
+    if not isinstance(seller, str) or not seller:
+        return
+    meta_raw = tx.get("meta")
+    meta: dict[str, Any] = meta_raw if isinstance(meta_raw, dict) else {}
+    extracted = market_ops.extract_created_sell_offer(meta, nft_id)
+    if extracted is None:
+        return  # buy offer, IOU amount, or no matching CreatedNode
+    offer_index = extracted.get("offer_index")
+    if not isinstance(offer_index, str) or not offer_index:
+        return
+    market_store.upsert_listing(
+        conn,
+        market_store.MarketListing(
+            offer_index=offer_index,
+            nft_id=nft_id,
+            kind=kind,
+            seller=seller,
+            amount_drops=int(extracted["amount_drops"]),
+            destination=extracted.get("destination"),
+            slot=slot,
+            value=value,
+            created_ledger=tx.get("ledger_index"),
+            created_ts=_tx_unix_time(tx),
+            is_live=1,
+        ),
+    )
+
+
+def _apply_offer_cancel(conn: sqlite3.Connection, tx: dict[str, Any]) -> None:
+    """NFTokenCancelOffer: every deleted NFTokenOffer ledger object closes its
+    market_listings row (if any) as cancelled. A DeletedNode for an
+    offer_index we never indexed is a harmless no-op -- close_listing
+    tolerates an unknown offer_index."""
+    for wrapper in _deleted_nft_offer_nodes(tx):
+        offer_index = wrapper.get("LedgerIndex")
+        if isinstance(offer_index, str) and offer_index:
+            market_store.close_listing(conn, offer_index, "cancelled")
+
+
+def _owner_of(conn: sqlite3.Connection, nft_id: str) -> str | None:
+    """Current owner-of-record for `nft_id` from whichever membership table
+    carries it (onchain_nfts for characters, trait_tokens for traits)."""
+    row = conn.execute("SELECT owner FROM onchain_nfts WHERE nft_id=?", (nft_id,)).fetchone()
+    if row is not None:
+        return row[0]  # type: ignore[no-any-return]
+    row = conn.execute("SELECT owner FROM trait_tokens WHERE nft_id=?", (nft_id,)).fetchone()
+    return row[0] if row is not None else None
+
+
+def _accept_new_owner(
+    tx: dict[str, Any], deleted_offers: list[dict[str, Any]], seller: str | None
+) -> str | None:
+    """The account that RECEIVES the NFT in an NFTokenAcceptOffer, read from the
+    transaction itself (authoritative, index-independent). In a brokered accept
+    both a sell and a buy offer are deleted and the new owner is the buy offer's
+    `Owner`; in a direct sell-offer accept only the sell offer is deleted and the
+    accepting account (`tx.Account`) is the new owner. Returns None only when the
+    result can't be resolved to a real non-seller account (e.g. a malformed tx)."""
+    buy_wrapper = next(
+        (
+            w
+            for w in deleted_offers
+            if not (
+                int((w.get("FinalFields") or {}).get("Flags") or 0) & market_ops.LSF_SELL_NFTOKEN
+            )
+        ),
+        None,
+    )
+    if buy_wrapper is not None:
+        new_owner = (buy_wrapper.get("FinalFields") or {}).get("Owner")
+    else:
+        new_owner = tx.get("Account")
+    if isinstance(new_owner, str) and new_owner and new_owner != seller:
+        return new_owner
+    return None
+
+
+def _apply_offer_accept(conn: sqlite3.Connection, tx: dict[str, Any]) -> None:
+    """NFTokenAcceptOffer: close the deleted SELL offer's market_listings row
+    as sold (close_listing itself sets settled=0 for a trait-kind row), then
+    delist any OTHER live row for the same nft_id whose seller no longer
+    matches the new owner -- a stale sell offer left behind by the previous
+    owner can no longer be honoured."""
+    deleted = _deleted_nft_offer_nodes(tx)
+    sell_wrapper = next(
+        (
+            w
+            for w in deleted
+            if int((w.get("FinalFields") or {}).get("Flags") or 0) & market_ops.LSF_SELL_NFTOKEN
+        ),
+        None,
+    )
+    if sell_wrapper is None:
+        return  # a buy-offer-only accept; no sell listing of ours to close
+    offer_index = sell_wrapper.get("LedgerIndex")
+    final = sell_wrapper.get("FinalFields") or {}
+    nft_id = final.get("NFTokenID")
+    seller = final.get("Owner")
+    # Resolve the post-transfer owner (the buyer) from the ACCEPT TX itself so
+    # the sold row can carry the buyer durably — the settlement sweep needs it
+    # after run_deposit deletes the token's trait_tokens ownership row. Reading
+    # the tx (not the local owner index) makes this independent of whether the
+    # listener's owner refresh has landed: a stale index can no longer leave the
+    # row without a durable buyer, nor persist the seller by mistake.
+    buyer = _accept_new_owner(tx, deleted, seller)
+    if isinstance(offer_index, str) and offer_index:
+        market_store.close_listing(conn, offer_index, "sold", buyer=buyer)
+
+    if not isinstance(nft_id, str) or not nft_id:
+        return
+    # Stale-delist comparison uses the same tx-derived new owner when known,
+    # falling back to the owner index only if the tx couldn't resolve it.
+    new_owner = buyer if buyer is not None else _owner_of(conn, nft_id)
+    if new_owner is None:
+        return  # unresolved owner; leave other rows alone rather than guess
+    rows = conn.execute(
+        "SELECT offer_index, seller FROM market_listings WHERE nft_id=? AND is_live=1",
+        (nft_id,),
+    ).fetchall()
+    for other_offer_index, other_seller in rows:
+        if other_seller != new_owner:
+            market_store.close_listing(conn, other_offer_index, "stale")
+
+
+async def apply_market_tx(conn: sqlite3.Connection, tx: dict[str, Any]) -> None:
+    """Update market_listings for one streamed tx: `offer_create` upserts a
+    live listing (sell-flagged, XRP, ours by membership -- never taxon-from-
+    ID); `offer_cancel` closes every deleted NFTokenOffer as cancelled;
+    `accept` closes the deleted sell offer as sold (settled=0 for a trait row,
+    handled by close_listing itself) and delists any other live row for that
+    nft_id whose seller no longer owns it, as stale. A no-op for every other
+    tx kind. Declared async for interface symmetry with apply_tx /
+    apply_economy_tx (same conn/tx call-site convention in
+    scripts/onchain_listener.py) even though this function itself performs no
+    I/O. Per-tx errors are logged, never raised, so one bad tx can't kill the
+    stream (same convention as apply_tx / apply_economy_tx)."""
+    kind = classify_tx(tx)
+    if kind not in ("offer_create", "offer_cancel", "accept"):
+        return
+    try:
+        if kind == "offer_create":
+            _apply_offer_create(conn, tx)
+        elif kind == "offer_cancel":
+            _apply_offer_cancel(conn, tx)
+        else:
+            _apply_offer_accept(conn, tx)
+    except Exception:
+        logging.exception(f"apply_market_tx failed ({kind})")

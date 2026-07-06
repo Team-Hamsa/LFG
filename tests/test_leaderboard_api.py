@@ -26,6 +26,7 @@ from aiohttp import web  # noqa: E402
 from aiohttp.test_utils import make_mocked_request  # noqa: E402
 
 from lfg_core.history_store import init_history_db, insert_nft_event  # noqa: E402
+from lfg_core.leaderboard import period_bounds  # noqa: E402
 from lfg_core.nft_index import init_db as init_onchain_db  # noqa: E402
 from lfg_service import app as server  # noqa: E402
 
@@ -40,12 +41,17 @@ def _seed_dbs(tmp_path):
 
     hconn = init_history_db(history_path)
     now = int(time.time())
-    # A few "mint" events within the last day so a "week"/"all" board has rows.
+    # Seed at the midpoint of the current Monday-anchored week window so the
+    # "week" boards have rows. NOT `now - 3600` (falls in the previous week
+    # during the first hour of a UTC Monday) and NOT `now` (the window is
+    # end-exclusive at request time, so same-second events are dropped).
+    week_start, _ = period_bounds("week", None, now=now)
+    ts_in_week = week_start + (now - week_start) // 2
     events = [
-        ("txA1", "0001", 1, "mint", None, WALLET_A, now - 3600),
-        ("txA2", "0002", 2, "mint", None, WALLET_A, now - 3600),
-        ("txB1", "0003", 3, "mint", None, WALLET_B, now - 3600),
-        ("txM1", "0004", 4, "mint", None, WALLET_ME, now - 3600),
+        ("txA1", "0001", 1, "mint", None, WALLET_A, ts_in_week),
+        ("txA2", "0002", 2, "mint", None, WALLET_A, ts_in_week),
+        ("txB1", "0003", 3, "mint", None, WALLET_B, ts_in_week),
+        ("txM1", "0004", 4, "mint", None, WALLET_ME, ts_in_week),
     ]
     for tx_hash, nft_id, nft_number, event, from_addr, to_addr, ts in events:
         insert_nft_event(

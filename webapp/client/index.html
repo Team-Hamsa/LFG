@@ -5,7 +5,7 @@
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
   <title>Let's Effing Go! — Mint</title>
   <link rel="stylesheet" href="fonts/fonts.css">
-  <link rel="stylesheet" href="style.css?v=12">
+  <link rel="stylesheet" href="style.css?v=13">
 </head>
 <body>
   <main id="app">
@@ -33,6 +33,7 @@
         <button id="mint-btn" class="primary big">⛏️ Mint NFT</button>
         <button id="swap-btn" class="secondary">👗 Dress Up</button>
         <button id="swapper-btn" class="secondary">🔁 Trait Swapper</button>
+        <button id="market-btn" class="secondary">🛒 Marketplace</button>
       </div>
       <div id="leaderboard" class="leaderboard">
         <h3 class="lb-title">🏆 Leaderboard</h3>
@@ -117,6 +118,73 @@
       </div>
     </section>
 
+    <section id="market-panel" class="card" hidden>
+      <h2>🛒 Marketplace</h2>
+      <div id="market-tabs" class="lb-chips" role="tablist" aria-label="Marketplace section">
+        <button class="lb-chip active" role="tab" aria-selected="true" data-tab="browse">Browse</button>
+        <button class="lb-chip" role="tab" aria-selected="false" data-tab="mine">Mine</button>
+      </div>
+
+      <div id="market-browse" class="market-section">
+        <div id="market-kind" class="lb-chips" role="tablist" aria-label="Listing kind">
+          <button class="lb-chip active" role="tab" aria-selected="true" data-kind="character">Characters</button>
+          <button class="lb-chip" role="tab" aria-selected="false" data-kind="trait">Traits</button>
+        </div>
+        <div id="market-filters" class="market-filters">
+          <select id="market-trait-slot" aria-label="Filter by trait slot">
+            <option value="">Any trait slot</option>
+          </select>
+          <input id="market-trait-value" type="text" placeholder="Trait value (e.g. Halo)">
+          <input id="market-min-xrp" type="text" inputmode="decimal" placeholder="Min XRP">
+          <input id="market-max-xrp" type="text" inputmode="decimal" placeholder="Max XRP">
+          <select id="market-sort" aria-label="Sort by">
+            <option value="price_asc">Price: low → high</option>
+            <option value="price_desc">Price: high → low</option>
+            <option value="newest">Newest</option>
+          </select>
+          <button id="market-filter-apply" class="secondary">Apply</button>
+        </div>
+        <div id="market-grid" class="nft-grid" role="group" aria-label="Marketplace listings"></div>
+        <p id="market-empty" class="card-sub" hidden>Nothing listed yet.</p>
+      </div>
+
+      <div id="market-mine" class="market-section" hidden>
+        <div class="trait-strip-section">
+          <h4 class="trait-strip-heading">My listings</h4>
+          <div id="mine-listings" class="trait-strip"></div>
+          <p id="mine-listings-empty" class="trait-strip-empty" hidden>You have nothing listed.</p>
+        </div>
+        <div class="trait-strip-section">
+          <h4 class="trait-strip-heading">Unlisted characters</h4>
+          <div id="mine-characters" class="trait-strip"></div>
+          <p id="mine-characters-empty" class="trait-strip-empty" hidden>Nothing here.</p>
+        </div>
+        <div class="trait-strip-section">
+          <h4 class="trait-strip-heading">Unlisted traits</h4>
+          <div id="mine-traits" class="trait-strip"></div>
+          <p id="mine-traits-empty" class="trait-strip-empty" hidden>Nothing here.</p>
+        </div>
+        <div class="trait-strip-section">
+          <h4 class="trait-strip-heading">Loose Closet traits</h4>
+          <div id="mine-closet" class="trait-strip"></div>
+          <p id="mine-closet-empty" class="trait-strip-empty" hidden>Your Closet has no loose traits.</p>
+        </div>
+      </div>
+
+      <p class="row-links">
+        <button id="market-back-btn" class="back">← Back</button>
+      </p>
+    </section>
+
+    <section id="market-list-form-panel" class="card" hidden>
+      <h2 id="market-list-form-title">List for sale</h2>
+      <p id="market-list-form-sub" class="card-sub"></p>
+      <input id="market-list-price" type="text" inputmode="decimal" placeholder="Price in XRP">
+      <p id="market-list-royalty" class="cost"></p>
+      <button id="market-list-confirm-btn" class="primary big">List it</button>
+      <p><button id="market-list-cancel-btn" class="back">← Cancel</button></p>
+    </section>
+
     <section id="flow-panel" class="card" hidden>
       <ol id="flow-steps" class="steps" aria-label="Mint progress" hidden></ol>
       <p id="pay-method" class="method" hidden><span id="pay-pill" class="pill"></span></p>
@@ -156,6 +224,6 @@
        Telegram (window.Telegram stays undefined); loaded BEFORE app.js so the
        dual-mode boot can detect the Telegram context. -->
   <script src="telegram-web-app.js"></script>
-  <script type="module" src="app.js?v=13"></script>
+  <script type="module" src="app.js?v=14"></script>
 </body>
 </html>

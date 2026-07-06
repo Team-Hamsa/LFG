@@ -14,7 +14,15 @@ from xrpl.asyncio.clients import AsyncWebsocketClient
 from xrpl.clients import JsonRpcClient
 from xrpl.models import IssuedCurrencyAmount
 from xrpl.models.currencies import XRP, IssuedCurrency
-from xrpl.models.requests import AccountLines, AccountNFTs, AccountTx, AMMInfo, Subscribe, Tx
+from xrpl.models.requests import (
+    AccountLines,
+    AccountNFTs,
+    AccountTx,
+    AMMInfo,
+    NFTSellOffers,
+    Subscribe,
+    Tx,
+)
 from xrpl.models.transactions import (
     NFTokenBurn,
     NFTokenCreateOffer,
@@ -250,6 +258,88 @@ async def nft_exists(nft_id: str, clio: str | None = None, attempts: int = 3) ->
         if attempt + 1 < attempts:
             await asyncio.sleep(0.5 * (attempt + 1))
     return None
+
+
+async def get_nft_sell_offers(nft_id: str, raise_on_error: bool = False) -> list[dict[str, Any]]:
+    """List sell offers for `nft_id` via the standard (non-clio) rippled
+    `nft_sell_offers` method. Unlike nft_info/nft_exists this is a plain
+    method, so it goes through JSON_RPC_URL like mint/burn/offer, not
+    CLIO_WS_URL.
+
+    Each returned dict is normalized to
+    `{offer_index, amount, destination, flags, owner}`. `offer_index` accepts
+    either the `nft_offer_index` or `index` field — different server versions
+    key the offer's ledger index differently (drift guard, mirrors Baysed
+    market.py:386-390).
+
+    Returns an empty list when there are no offers or the NFT is unknown to
+    the server. By default an RPC/network failure ALSO returns [] — callers
+    doing fail-closed verification (`market_ops.verify_sell_offer`) treat an
+    empty/non-matching list as "no valid offer", never a false positive.
+    Callers that must distinguish "genuinely no offers" from "lookup failed"
+    (e.g. scripts/backfill_market.py's stale-close pass, where conflating the
+    two would close a real live listing) pass `raise_on_error=True` to have
+    the exception re-raised instead.
+    """
+    try:
+        client = JsonRpcClient(config.JSON_RPC_URL)
+        response = await asyncio.to_thread(client.request, NFTSellOffers(nft_id=nft_id))
+        result = response.result
+        # A non-tesSUCCESS RESULT (status:error) never raised above, so strict
+        # callers would otherwise misread a soft error (tooBusy, slowDown, an
+        # amendment blocker, …) as "no offers" and stale-close a live listing.
+        # objectNotFound is the ONLY error that legitimately means "this NFT
+        # has no offers" — whitelist it (empty list) and re-raise every other
+        # unsuccessful response in strict mode.
+        if isinstance(result, dict) and result.get("error"):
+            if str(result.get("error")) == "objectNotFound":
+                return []
+            if raise_on_error:
+                raise RuntimeError(f"nft_sell_offers error: {result.get('error')}")
+            logging.warning(f"get_nft_sell_offers error for {nft_id}: {result.get('error')}")
+            return []
+        offers = result.get("offers") if isinstance(result, dict) else None
+        if not isinstance(offers, list):
+            return []
+        normalized: list[dict[str, Any]] = []
+        for offer in offers:
+            if not isinstance(offer, dict):
+                continue
+            normalized.append(
+                {
+                    "offer_index": offer.get("nft_offer_index", offer.get("index")),
+                    "amount": offer.get("amount"),
+                    "destination": offer.get("destination"),
+                    "flags": offer.get("flags"),
+                    "owner": offer.get("owner"),
+                }
+            )
+        return normalized
+    except Exception as e:
+        if raise_on_error:
+            raise
+        logging.warning(f"get_nft_sell_offers failed for {nft_id}: {e}")
+        return []
+
+
+async def get_tx(tx_hash: str) -> dict[str, Any]:
+    """Fetch a transaction by hash via the plain (non-clio) `tx` method, so
+    this goes through JSON_RPC_URL like mint/burn/offer, not CLIO_WS_URL.
+
+    Returns the raw result dict verbatim, including the not-yet-known-to-the-
+    server shape (`{"error": "txnNotFound", ...}`, no "validated"/"meta"
+    keys) — callers check `result.get("validated")`, which is falsy for both
+    "not found yet" and "found but not validated", so this needs no special-
+    casing for the not-found shape.
+
+    Raises on a genuine RPC/network/connection failure (unlike
+    get_nft_sell_offers, this does NOT swallow exceptions) — the marketplace
+    list/buy finalize pollers (lfg_service/app.py, via lfg_core/market_flow.py)
+    are fail-closed on writes and must be able to tell "the lookup itself
+    broke" apart from "still pending"."""
+    client = JsonRpcClient(config.JSON_RPC_URL)
+    response = await asyncio.to_thread(client.request, Tx(transaction=tx_hash))
+    return response.result
 
 
 async def get_trustline_balance(address: str, currency: str, issuer: str) -> Decimal | None:

@@ -15,9 +15,12 @@ import json
 import logging
 import mimetypes
 import os
+import sqlite3
 import sys
 import time
-from typing import Any
+import traceback
+from typing import Any, cast
+from urllib.parse import quote as urlquote
 
 import aiohttp
 from aiohttp import web
@@ -26,11 +29,16 @@ from xrpl.core.addresscodec import is_valid_classic_address
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from lfg_core import (
+    closet_token,
     config,
     economy_flow,
+    economy_store,
     history_store,
     layer_store,
     leaderboard,
+    market_flow,
+    market_ops,
+    market_store,
     mint_flow,
     nft_index,
     swap_flow,
@@ -44,7 +52,7 @@ from lfg_service.auth import require_service_token, surface_for_token
 from lfg_service.events import Event, InMemoryEventBus
 from lfg_service.telegram_auth import validate_init_data
 from user_db import create_users_table, get_user, register_user
-from webapp import economy_api, mock_economy
+from webapp import economy_api, mock_economy, mock_market
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s")
 
@@ -58,6 +66,9 @@ SESSION_TTL = 6 * 3600
 mint_sessions: dict[str, Any] = {}
 swap_sessions: dict[str, Any] = {}
 economy_sessions: dict[str, Any] = {}
+# Shared by List/Cancel/Buy (market_flow.ListSession/CancelSession/BuySession),
+# same "one dict, `.kind` routes the status handler" shape as economy_sessions.
+market_sessions: dict[str, Any] = {}
 SESSION_RETENTION = 3600  # keep terminal sessions briefly for late polls
 
 BUS = InMemoryEventBus()
@@ -624,6 +635,1038 @@ async def handle_leaderboard(request):
     )
 
 
+# --- In-app marketplace (#44): browse + mine + history ---
+
+
+def _use_market_mock() -> bool:
+    """Whether the market handlers below should serve webapp.mock_market's
+    in-memory fixture instead of touching sqlite/XRPL/XUMM. Defaults to
+    config.WEBAPP_DEV_MODE (the real dev-mode mock harness, Task 10) but is
+    its OWN indirection — not a direct `config.WEBAPP_DEV_MODE` check —
+    because several Task 7-9 tests (tests/test_market_api.py,
+    tests/test_market_trait_flow.py) already set WEBAPP_DEV_MODE=True purely
+    to get require_wallet's dev-mode wallet-injection convenience (mirrors
+    tests/test_swap_cross_body_api.py's identical trick) while exercising
+    these handlers' REAL sqlite/XUMM-mocked logic against a seeded onchain_env
+    fixture. Those tests monkeypatch this function directly to keep that
+    convenience without also getting the mock substitution; ordinary dev-mode
+    usage (`WEBAPP_DEV_MODE=1` env var, no monkeypatch) is unaffected."""
+    return config.WEBAPP_DEV_MODE
+
+
+_MarketKey = tuple[str, str]  # (network, kind)
+_MARKET_CACHE: dict[_MarketKey, tuple[float, list[dict[str, Any]]]] = {}
+_MARKET_CACHE_TTL = 60.0
+# Cardinality is bounded by construction (network x kind only — filters never
+# key the cache, see the module docstring on Task 7's spec excerpt), so this
+# ceiling is generous headroom, not a load-bearing eviction path.
+_MARKET_CACHE_MAX = 16
+# "Unfiltered" cache population cap: effectively unbounded for the realistic
+# live-listing volume (a few hundred to low thousands per market_store.browse's
+# own docstring) while still bounding a single query's result set.
+_MARKET_ROW_CAP = 50_000
+
+_MARKET_MAX_LIMIT = 100
+_MARKET_DEFAULT_LIMIT = 24
+_MARKET_MAX_OFFSET = 100_000
+
+
+def _market_cache_put(key: _MarketKey, value: list[dict[str, Any]], now_mono: float) -> None:
+    """Insert into the browse cache, dropping expired entries and — if still
+    over _MARKET_CACHE_MAX — evicting the oldest by timestamp. Mirrors
+    _lb_cache_put's shape (leaderboard cache) for the same reasons."""
+    for k in [k for k, (ts, _) in _MARKET_CACHE.items() if now_mono - ts >= _MARKET_CACHE_TTL]:
+        del _MARKET_CACHE[k]
+    _MARKET_CACHE[key] = (now_mono, value)
+    while len(_MARKET_CACHE) > _MARKET_CACHE_MAX:
+        oldest = min(_MARKET_CACHE, key=lambda k: _MARKET_CACHE[k][0])
+        del _MARKET_CACHE[oldest]
+
+
+def _attach_character_images(conn: sqlite3.Connection, rows: list[dict[str, Any]]) -> None:
+    """Mutate `rows` in place, adding an `image` key sourced from
+    onchain_nfts.image (market_store.browse's character join carries
+    nft_number/attributes_json but not image — same 2-query pattern
+    handle_leaderboard uses for the same column)."""
+    nft_ids = [r["nft_id"] for r in rows]
+    if not nft_ids:
+        return
+    placeholders = ",".join("?" * len(nft_ids))
+    cur = conn.execute(
+        f"SELECT nft_id, image FROM onchain_nfts WHERE nft_id IN ({placeholders})", nft_ids
+    )
+    images = {r["nft_id"]: r["image"] for r in cur.fetchall()}
+    for r in rows:
+        r["image"] = images.get(r["nft_id"]) or None
+
+
+def _compute_market_rows(network: str, kind: str) -> list[dict[str, Any]]:
+    """The canonical UNFILTERED live join for one (network, kind) — cached
+    for _MARKET_CACHE_TTL. Runs on an executor thread (sqlite3 threadsafety=1,
+    so this opens its own short-lived connection rather than sharing a
+    loop-thread conn across threads, same as handle_leaderboard's _compute_sync)."""
+    conn = nft_index.init_db(nft_index.index_db_path(network))
+    conn.row_factory = sqlite3.Row
+    try:
+        market_store.init_db(conn)
+        economy_store.init_economy_schema(conn)
+        rows = market_store.browse(conn, kind=kind, limit=_MARKET_ROW_CAP, offset=0)
+        if kind == "character":
+            _attach_character_images(conn, rows)
+        return rows
+    finally:
+        conn.close()
+
+
+def _market_network(kind: str) -> str:
+    """Which per-network onchain db a marketplace read of `kind` lives in.
+
+    The two config knobs can legitimately differ (deployed topology: the app
+    runs XRPL_NETWORK=mainnet while the trait economy stays testnet-gated at
+    ECONOMY_NETWORK=testnet). Everything trait-economy-backed — trait listings
+    (their listener writes the economy db), the trait_tokens ownership join,
+    loose Closet assets, sold-trait history — resolves via ECONOMY_NETWORK,
+    exactly like webapp/economy_api.py::open_conn; everything character-backed
+    (onchain_nfts, character listings, nft_events) stays on XRPL_NETWORK.
+    Do NOT "simplify" this back to a single network: with the split topology
+    a trait read against XRPL_NETWORK silently returns empty for every user."""
+    return config.ECONOMY_NETWORK if kind == "trait" else config.XRPL_NETWORK
+
+
+def _trait_image_url(cfg: trait_config.TraitConfig, slot: str, value: str) -> str:
+    """A same-origin /api/layer URL for a trait value, picking a representative
+    body: the first body allowed by trait_config's affinity engine, or the
+    shared/ dir for a universal (unrestricted) value — mirrors
+    scripts/_economy_deps.py's _compose_trait ("first body that has it")
+    without the network/download cost, since affinity already tells us which
+    bodies are legal without touching the layer store."""
+    allowed = cfg.allowed_bodies(slot, value)
+    body = sorted(allowed)[0] if allowed else layer_store.SHARED_DIR
+    return (
+        f"/api/layer?body={urlquote(body, safe='')}"
+        f"&trait={urlquote(slot, safe='')}&value={urlquote(value, safe='')}"
+    )
+
+
+def _serialize_listing_row(
+    r: dict[str, Any], kind: str, cfg: trait_config.TraitConfig
+) -> dict[str, Any]:
+    out: dict[str, Any] = {
+        "nft_id": r["nft_id"],
+        "kind": kind,
+        "image": r.get("image"),
+        "amount_drops": r["amount_drops"],
+        "amount_xrp": market_ops.drops_to_xrp_str(str(r["amount_drops"])),
+        "seller": r["seller"],
+        "offer_index": r["offer_index"],
+    }
+    if kind == "character":
+        out["nft_number"] = r.get("nft_number")
+        raw_attrs = r.get("attributes_json")
+        out["attributes"] = json.loads(raw_attrs) if raw_attrs else []
+    else:
+        out["slot"] = r.get("slot")
+        out["value"] = r.get("value")
+        out["image"] = _trait_image_url(cfg, str(r.get("slot")), str(r.get("value")))
+    return out
+
+
+def _parse_market_int_param(
+    request: web.Request, name: str, default: int, *, max_value: int
+) -> int | None:
+    """Parse a non-negative, bounded int query param. Returns None (the
+    caller 400s) for a missing-required/non-integer/out-of-range value; a
+    param that is simply absent uses `default`."""
+    raw = request.query.get(name)
+    if raw is None:
+        return default
+    try:
+        value = int(raw)
+    except ValueError:
+        return None
+    if value < 0 or value > max_value:
+        return None
+    return value
+
+
+async def handle_market_listings(request: web.Request) -> web.Response:
+    """Public: GET /api/market/listings?kind=&trait=&min_xrp=&max_xrp=&sort=&limit=&offset=.
+
+    Cache holds only the canonical unfiltered live join per (network, kind),
+    TTL 60s; trait/price filter + sort + pagination run in-process on the
+    cached rows post-cache-lookup, so user-controlled filter params never
+    key (and can never fan out) the cache."""
+    kind = request.query.get("kind", "character")
+    if kind not in market_store._VALID_KINDS:
+        return web.json_response({"error": f"unknown kind: {kind!r}"}, status=400)
+
+    # Trait listings are only transactable when the trait economy is enabled on
+    # this chain (ECONOMY_NETWORK == XRPL_NETWORK). With it off, surfacing trait
+    # rows on this public browse would advertise listings no one can actually
+    # buy (buy would 403 economy_disabled), so serve an empty page instead of a
+    # hard 403 — the character surface is unaffected. See CLAUDE.md's seam note.
+    if kind == "trait" and not config.ECONOMY_ENABLED:
+        return web.json_response({"rows": [], "total": 0})
+
+    sort = request.query.get("sort", "price_asc")
+    if sort not in market_store._VALID_SORTS:
+        return web.json_response({"error": f"unknown sort: {sort!r}"}, status=400)
+
+    trait_filters: dict[str, list[str]] = {}
+    for raw in request.query.getall("trait", []):
+        slot, sep, value = raw.partition(":")
+        if not sep or not slot or not value:
+            return web.json_response({"error": f"bad trait filter: {raw!r}"}, status=400)
+        trait_filters.setdefault(slot, []).append(value)
+
+    min_drops: int | None = None
+    max_drops: int | None = None
+    min_xrp = request.query.get("min_xrp")
+    max_xrp = request.query.get("max_xrp")
+    try:
+        if min_xrp is not None:
+            min_drops = int(market_ops.xrp_to_drops_str(min_xrp))
+        if max_xrp is not None:
+            max_drops = int(market_ops.xrp_to_drops_str(max_xrp))
+    except Exception as e:
+        # Broad on purpose (same guard as handle_market_list_start):
+        # xrp_to_drops_str raises TypeError/ValueError for its documented
+        # cases, but Decimal("Infinity")/("nan") slip past its <= 0 guard and
+        # raise OverflowError/decimal.InvalidOperation instead — on this
+        # public unauthenticated endpoint those were an uncaught 500.
+        return web.json_response({"error": f"bad XRP amount: {e}"}, status=400)
+
+    limit = _parse_market_int_param(
+        request, "limit", _MARKET_DEFAULT_LIMIT, max_value=_MARKET_MAX_LIMIT
+    )
+    if limit is None:
+        return web.json_response({"error": "bad limit"}, status=400)
+    offset = _parse_market_int_param(request, "offset", 0, max_value=_MARKET_MAX_OFFSET)
+    if offset is None:
+        return web.json_response({"error": "bad offset"}, status=400)
+
+    if _use_market_mock():
+        rows = mock_market.INSTANCE.browse(
+            kind=kind,
+            trait_filters=trait_filters,
+            min_drops=min_drops,
+            max_drops=max_drops,
+            sort=sort,
+        )
+        page = rows[offset : offset + limit]
+        return web.json_response({"rows": page, "total": len(rows)})
+
+    # Per-kind network resolution (see _market_network): the cache key carries
+    # the resolved network, so a testnet-trait entry and a mainnet-character
+    # entry coexist; cardinality stays <= networks x kinds by construction.
+    network = _market_network(kind)
+    cache_key: _MarketKey = (network, kind)
+    now_mono = time.monotonic()
+    cached = _MARKET_CACHE.get(cache_key)
+    if cached is not None and now_mono - cached[0] < _MARKET_CACHE_TTL:
+        rows = cached[1]
+    else:
+        rows = await asyncio.get_event_loop().run_in_executor(
+            None, _compute_market_rows, network, kind
+        )
+        _market_cache_put(cache_key, rows, now_mono)
+
+    filtered = rows
+    if min_drops is not None:
+        filtered = [r for r in filtered if r["amount_drops"] >= min_drops]
+    if max_drops is not None:
+        filtered = [r for r in filtered if r["amount_drops"] <= max_drops]
+    if trait_filters:
+        # market_store._row_attrs is typed against sqlite3.Row (the shape it
+        # sees internally, pre-dict-conversion, inside browse()); our cached
+        # rows are already plain dicts (browse()'s own return type), which
+        # support the same __getitem__ access _row_attrs relies on.
+        filtered = [
+            r
+            for r in filtered
+            if market_store._attributes_match(
+                market_store._row_attrs(cast(sqlite3.Row, r), kind), trait_filters
+            )
+        ]
+
+    if sort == "price_asc":
+        filtered = sorted(filtered, key=lambda r: (r["amount_drops"], r["offer_index"]))
+    elif sort == "price_desc":
+        filtered = sorted(filtered, key=lambda r: (-r["amount_drops"], r["offer_index"]))
+    else:  # newest
+        filtered = sorted(filtered, key=lambda r: (-(r["created_ts"] or 0), r["offer_index"]))
+
+    page = filtered[offset : offset + limit]
+    cfg = trait_config.get_config()
+    return web.json_response(
+        {"rows": [_serialize_listing_row(r, kind, cfg) for r in page], "total": len(filtered)}
+    )
+
+
+def _compute_mine_data(char_network: str, econ_network: str, wallet: str) -> dict[str, Any]:
+    """Sync sqlite work for GET /api/market/mine, run on an executor thread
+    (same posture as _compute_market_rows). Two per-kind connections (see
+    _market_network — the networks can differ in the deployed topology):
+    character listings + unlisted live characters come from the XRPL-network
+    db; trait listings + unlisted wallet trait tokens + loose Closet assets
+    come from the economy-network db. When the knobs match, both connections
+    simply open the same file."""
+    # --- character-backed groups (XRPL network) ---
+    conn = nft_index.init_db(nft_index.index_db_path(char_network))
+    conn.row_factory = sqlite3.Row
+    try:
+        market_store.init_db(conn)
+        cur = conn.execute(
+            "SELECT * FROM market_listings WHERE seller = ? AND is_live = 1 AND kind = 'character'",
+            (wallet,),
+        )
+        char_listing_rows = [dict(row) for row in cur.fetchall()]
+        _attach_character_images(conn, char_listing_rows)
+        listed_char_ids = {r["nft_id"] for r in char_listing_rows}
+
+        unlisted_characters = [
+            {
+                "nft_id": c.nft_id,
+                "nft_number": c.nft_number,
+                "image": c.image or None,
+                "attributes": c.attributes,
+            }
+            for c in nft_index.owner_live_nfts(conn, wallet)
+            if c.nft_id not in listed_char_ids
+        ]
+    finally:
+        conn.close()
+
+    # --- trait-economy-backed groups (economy network) ---
+    conn = nft_index.init_db(nft_index.index_db_path(econ_network))
+    conn.row_factory = sqlite3.Row
+    try:
+        market_store.init_db(conn)
+        economy_store.init_economy_schema(conn)
+        cur = conn.execute(
+            "SELECT * FROM market_listings WHERE seller = ? AND is_live = 1 AND kind = 'trait'",
+            (wallet,),
+        )
+        trait_listing_rows = [dict(row) for row in cur.fetchall()]
+        listed_trait_ids = {r["nft_id"] for r in trait_listing_rows}
+
+        unlisted_trait_tokens = [
+            {"nft_id": nid, "slot": s, "value": v}
+            for nid, o, s, v in economy_store.read_trait_tokens(conn)
+            if o == wallet and nid not in listed_trait_ids
+        ]
+
+        closet_assets = [
+            {"slot": s, "value": v, "count": c}
+            for (o, s, v, c) in economy_store.read_closet_assets(conn)
+            if o == wallet and c > 0
+        ]
+    finally:
+        conn.close()
+
+    return {
+        "listings": char_listing_rows + trait_listing_rows,
+        "unlisted_characters": unlisted_characters,
+        "unlisted_trait_tokens": unlisted_trait_tokens,
+        "closet_assets": closet_assets,
+    }
+
+
+@require_wallet
+async def handle_market_mine(request):  # untyped: matches require_wallet's other handlers
+    # (e.g. handle_account, handle_economy) — an annotated signature under an
+    # untyped decorator trips mypy's untyped-decorator check.
+    """The caller's marketplace surface: their own live listings (both kinds)
+    + unlisted live characters + unlisted wallet trait tokens + loose Closet
+    traits, grouped so the UI can offer list/cancel/sell-from-closet per item."""
+    wallet = request["wallet"]
+    if _use_market_mock():
+        return web.json_response(mock_market.INSTANCE.mine(wallet))
+    data = await asyncio.get_event_loop().run_in_executor(
+        None,
+        _compute_mine_data,
+        _market_network("character"),
+        _market_network("trait"),
+        wallet,
+    )
+    cfg = trait_config.get_config()
+    listings = [_serialize_listing_row(r, r["kind"], cfg) for r in data["listings"]]
+    # With the trait economy off, trait ops are unavailable on this chain, so
+    # drop trait content from the caller's surface (character listings + their
+    # unlisted characters are unaffected). See CLAUDE.md's marketplace seam note.
+    if not config.ECONOMY_ENABLED:
+        listings = [row for row in listings if row.get("kind") != "trait"]
+        return web.json_response(
+            {
+                "listings": listings,
+                "unlisted_characters": data["unlisted_characters"],
+                "unlisted_trait_tokens": [],
+                "closet_assets": [],
+            }
+        )
+    return web.json_response(
+        {
+            "listings": listings,
+            "unlisted_characters": data["unlisted_characters"],
+            "unlisted_trait_tokens": data["unlisted_trait_tokens"],
+            "closet_assets": data["closet_assets"],
+        }
+    )
+
+
+_MARKET_HISTORY_EVENTS = ("sale", "offer_create", "offer_cancel")
+
+
+def _compute_nft_history(network: str, nft_id: str) -> list[dict[str, Any]]:
+    conn = history_store.init_history_db(history_store.history_db_path(network))
+    conn.row_factory = sqlite3.Row
+    try:
+        placeholders = ",".join("?" * len(_MARKET_HISTORY_EVENTS))
+        cur = conn.execute(
+            f"SELECT * FROM nft_events WHERE nft_id = ? AND event IN ({placeholders}) "
+            "ORDER BY ledger_index DESC LIMIT 50",
+            (nft_id, *_MARKET_HISTORY_EVENTS),
+        )
+        return [dict(row) for row in cur.fetchall()]
+    finally:
+        conn.close()
+
+
+def _compute_trait_sales(network: str, slot: str, value: str) -> list[dict[str, Any]]:
+    conn = nft_index.init_db(nft_index.index_db_path(network))
+    conn.row_factory = sqlite3.Row
+    try:
+        market_store.init_db(conn)
+        cur = conn.execute(
+            "SELECT * FROM market_listings WHERE kind = 'trait' AND slot = ? AND value = ? "
+            "AND closed_reason = 'sold' ORDER BY created_ts DESC",
+            (slot, value),
+        )
+        return [dict(row) for row in cur.fetchall()]
+    finally:
+        conn.close()
+
+
+async def handle_market_history(request: web.Request) -> web.Response:
+    """Public: GET /api/market/history?nft_id=… (character sale/offer history)
+    or ?slot=&value=… (sold trait listings — per-nft_id history is near-useless
+    for traits since each listing is a fresh token). Neither param -> 400."""
+    nft_id = request.query.get("nft_id")
+    slot = request.query.get("slot")
+    value = request.query.get("value")
+
+    if _use_market_mock():
+        if nft_id:
+            return web.json_response(mock_market.INSTANCE.history(nft_id=nft_id))
+        if slot and value:
+            return web.json_response(mock_market.INSTANCE.history(slot=slot, value=value))
+        return web.json_response({"error": "nft_id or slot+value required"}, status=400)
+
+    if nft_id:
+        # nft_events live in history_<XRPL_NETWORK>.db (character-backed).
+        events = await asyncio.get_event_loop().run_in_executor(
+            None, _compute_nft_history, config.XRPL_NETWORK, nft_id
+        )
+        return web.json_response({"nft_id": nft_id, "events": events})
+
+    if slot and value:
+        # Sold trait listings are trait-economy-backed; with the economy off on
+        # this chain there is nothing meaningful to serve (see CLAUDE.md's seam
+        # note) — return an empty sales list rather than reading the wrong net.
+        if not config.ECONOMY_ENABLED:
+            return web.json_response({"slot": slot, "value": value, "sales": []})
+        # Sold trait listings are trait-economy-backed -> economy network
+        # (see _market_network).
+        rows = await asyncio.get_event_loop().run_in_executor(
+            None, _compute_trait_sales, _market_network("trait"), slot, value
+        )
+        sales = [
+            {
+                "nft_id": r["nft_id"],
+                "seller": r["seller"],
+                "amount_drops": r["amount_drops"],
+                "amount_xrp": market_ops.drops_to_xrp_str(str(r["amount_drops"])),
+                "offer_index": r["offer_index"],
+            }
+            for r in rows
+        ]
+        return web.json_response({"slot": slot, "value": value, "sales": sales})
+
+    return web.json_response({"error": "nft_id or slot+value required"}, status=400)
+
+
+# --- In-app marketplace (#44) Task 8: list / cancel / buy sessions ---
+# Each POST builds one XUMM sign request (NFTokenCreateOffer / CancelOffer /
+# AcceptOffer) via lfg_core.xumm_ops and returns immediately — the state
+# machine (including List/Buy's tx-fetch finalize step) lives in
+# lfg_core.market_flow and is driven by the GET status handlers below on
+# every poll. See market_flow's module docstring for the full design.
+
+
+def _resolve_ownable(char_network: str, econ_network: str, nft_id: str) -> dict[str, Any] | None:
+    """Resolve nft_id's marketplace kind + current owner (+ trait slot/value)
+    by checking on-chain membership: onchain_nfts (character net) first, then
+    trait_tokens (economy net). None if nft_id is unknown to both (never
+    minted, or a burned/deposited character)."""
+    conn = nft_index.init_db(nft_index.index_db_path(char_network))
+    try:
+        row = conn.execute(
+            "SELECT owner, is_burned FROM onchain_nfts WHERE nft_id = ?", (nft_id,)
+        ).fetchone()
+        if row is not None and not row[1]:
+            return {"kind": "character", "owner": row[0], "slot": None, "value": None}
+    finally:
+        conn.close()
+    conn = nft_index.init_db(nft_index.index_db_path(econ_network))
+    try:
+        economy_store.init_economy_schema(conn)
+        row = conn.execute(
+            "SELECT owner, slot, value FROM trait_tokens WHERE nft_id = ?", (nft_id,)
+        ).fetchone()
+        if row is not None:
+            return {"kind": "trait", "owner": row[0], "slot": row[1], "value": row[2]}
+    finally:
+        conn.close()
+    return None
+
+
+def _has_live_listing(network: str, nft_id: str) -> bool:
+    conn = nft_index.init_db(nft_index.index_db_path(network))
+    try:
+        market_store.init_db(conn)
+        return market_store.live_listing_for_nft(conn, nft_id) is not None
+    finally:
+        conn.close()
+
+
+def _find_listing_any_network(offer_index: str) -> tuple[str, dict[str, Any]] | None:
+    """A listing row by offer_index, live or not, searched across every
+    distinct network a marketplace kind can live in (see _market_network) —
+    the caller doesn't yet know which kind offer_index belongs to."""
+    for network in {_market_network("character"), _market_network("trait")}:
+        conn = nft_index.init_db(nft_index.index_db_path(network))
+        try:
+            market_store.init_db(conn)
+            row = market_store.get_listing(conn, offer_index)
+            if row is not None:
+                return network, row
+        finally:
+            conn.close()
+    return None
+
+
+def _closet_active(network: str, wallet: str) -> bool:
+    conn = nft_index.init_db(nft_index.index_db_path(network))
+    try:
+        economy_store.init_economy_schema(conn)
+        rec = economy_store.get_closet_record(conn, wallet)
+        return rec is not None and rec[2] == closet_token.ACTIVE
+    finally:
+        conn.close()
+
+
+def _write_listing_row(network: str, row: dict[str, Any]) -> None:
+    # Creation-only write (record_listing_creation, NOT upsert_listing): the
+    # finalize poll carries stale creation-time data and can land after the
+    # listener already closed the row (sold/settled=0). A full overwrite would
+    # resurrect a sold listing and break the settlement sweep predicate — see
+    # market_store.record_listing_creation's docstring.
+    conn = nft_index.init_db(nft_index.index_db_path(network))
+    try:
+        market_store.init_db(conn)
+        market_store.record_listing_creation(conn, market_store.MarketListing(**row))
+    finally:
+        conn.close()
+
+
+def _close_listing_sync(
+    network: str, offer_index: str, reason: str, buyer: str | None = None
+) -> None:
+    conn = nft_index.init_db(nft_index.index_db_path(network))
+    try:
+        market_store.init_db(conn)
+        market_store.close_listing(conn, offer_index, reason, buyer=buyer)
+    finally:
+        conn.close()
+
+
+@require_wallet
+async def handle_market_list_start(request):
+    """POST /api/market/list {nft_id, price_xrp}: 409 if the caller doesn't
+    own nft_id (checked across onchain_nfts + trait_tokens) or a live listing
+    already exists for it; otherwise builds the NFTokenCreateOffer XUMM
+    payload and returns a session (mirrors mint/swap's QR/deeplink shape)."""
+    user = request["user"]
+    wallet = request["wallet"]
+    body = await request.json()
+    nft_id = body.get("nft_id")
+    price_xrp = body.get("price_xrp")
+    if not nft_id or not isinstance(price_xrp, str):
+        return web.json_response(
+            {"error": "nft_id and price_xrp (string) are required"}, status=400
+        )
+    try:
+        amount_drops = int(market_ops.xrp_to_drops_str(price_xrp))
+    except Exception as e:
+        # Broad on purpose: xrp_to_drops_str raises TypeError/ValueError for
+        # the documented cases, but Decimal("Infinity")/("nan") slip past its
+        # `<= 0` guard and raise decimal.InvalidOperation/OverflowError
+        # instead — this edge (where a user-controlled price_xrp is parsed)
+        # must 400 cleanly on all of them, not just the two it advertises.
+        return web.json_response({"error": f"bad price_xrp: {e}"}, status=400)
+
+    if _use_market_mock():
+        try:
+            return web.json_response(mock_market.INSTANCE.start_list(wallet, nft_id, amount_drops))
+        except mock_market.MockMarketError as e:
+            return web.json_response({"error": str(e)}, status=409)
+
+    loop = asyncio.get_event_loop()
+    membership = await loop.run_in_executor(
+        None,
+        _resolve_ownable,
+        _market_network("character"),
+        _market_network("trait"),
+        nft_id,
+    )
+    if membership is None or membership["owner"] != wallet:
+        return web.json_response({"error": "you do not own that NFT"}, status=409)
+
+    # Trait ON-LEDGER ops assume ECONOMY_NETWORK == XRPL_NETWORK; gate trait
+    # listing on ECONOMY_ENABLED (same as the trait wizard/sweep). Characters
+    # are unaffected. See CLAUDE.md's marketplace seam note.
+    if membership["kind"] == "trait" and not config.ECONOMY_ENABLED:
+        return _economy_disabled_response()
+
+    network = _market_network(membership["kind"])
+    already_listed = await loop.run_in_executor(None, _has_live_listing, network, nft_id)
+    if already_listed:
+        return web.json_response({"error": "that NFT is already listed"}, status=409)
+
+    _prune_sessions(market_sessions, market_flow.TERMINAL_STATES)
+    active = _active_session(
+        market_sessions, market_flow.TERMINAL_STATES, user["id"], _platform(user)
+    )
+    if active:
+        return web.json_response(
+            {"error": "a market action is already in progress", "session": active.to_dict()},
+            status=409,
+        )
+
+    payload = await xumm_ops.create_sell_offer_payload(
+        wallet,
+        nft_id,
+        str(amount_drops),
+        return_url=xumm_ops.discord_return_url(body.get("guild_id"), body.get("channel_id")),
+    )
+    if not payload:
+        return web.json_response({"error": "could not reach Xaman"}, status=502)
+
+    session = market_flow.ListSession(
+        discord_id=user["id"],
+        wallet_address=wallet,
+        nft_id=nft_id,
+        listing_kind=membership["kind"],
+        amount_drops=amount_drops,
+        slot=membership["slot"],
+        value=membership["value"],
+        platform=_platform(user),
+    )
+    session.qr_url = payload["qr_url"]
+    session.xumm_url = payload["xumm_url"]
+    session.payload_uuid = payload.get("uuid")
+    market_sessions[session.id] = session
+    return web.json_response(session.to_dict())
+
+
+@require_wallet
+async def handle_market_cancel_start(request):
+    """POST /api/market/cancel {offer_index}: 404 if there's no live listing
+    at that offer_index, 403 if the caller isn't its seller; otherwise builds
+    the NFTokenCancelOffer XUMM payload."""
+    user = request["user"]
+    wallet = request["wallet"]
+    body = await request.json()
+    offer_index = body.get("offer_index")
+    if not offer_index:
+        return web.json_response({"error": "offer_index is required"}, status=400)
+
+    if _use_market_mock():
+        try:
+            return web.json_response(mock_market.INSTANCE.start_cancel(wallet, offer_index))
+        except mock_market.MockMarketError as e:
+            status = {"not found": 404, "not your listing": 403}.get(str(e), 400)
+            return web.json_response({"error": str(e)}, status=status)
+
+    loop = asyncio.get_event_loop()
+    found = await loop.run_in_executor(None, _find_listing_any_network, offer_index)
+    if found is None or not found[1]["is_live"]:
+        return web.json_response({"error": "not found"}, status=404)
+    network, row = found
+    if row["seller"] != wallet:
+        return web.json_response({"error": "not your listing"}, status=403)
+
+    _prune_sessions(market_sessions, market_flow.TERMINAL_STATES)
+    active = _active_session(
+        market_sessions, market_flow.TERMINAL_STATES, user["id"], _platform(user)
+    )
+    if active:
+        return web.json_response(
+            {"error": "a market action is already in progress", "session": active.to_dict()},
+            status=409,
+        )
+
+    payload = await xumm_ops.create_cancel_offer_payload(
+        wallet,
+        offer_index,
+        return_url=xumm_ops.discord_return_url(body.get("guild_id"), body.get("channel_id")),
+    )
+    if not payload:
+        return web.json_response({"error": "could not reach Xaman"}, status=502)
+
+    session = market_flow.CancelSession(
+        discord_id=user["id"],
+        wallet_address=wallet,
+        offer_index=offer_index,
+        network=network,
+        platform=_platform(user),
+    )
+    session.qr_url = payload["qr_url"]
+    session.xumm_url = payload["xumm_url"]
+    session.payload_uuid = payload.get("uuid")
+    market_sessions[session.id] = session
+    return web.json_response(session.to_dict())
+
+
+@require_wallet
+async def handle_market_buy_start(request):
+    """POST /api/market/buy {offer_index}: 404/410 if the listing is unknown
+    or dead; 403 closet_required for a trait listing when the buyer has no
+    active Closet; fail-closed on-ledger re-verify (410 listing_unavailable +
+    stale on any mismatch/absence/RPC failure, including verify_sell_offer
+    itself raising); otherwise the NFTokenAcceptOffer XUMM payload, with the
+    price echoed in the response's instruction text."""
+    user = request["user"]
+    wallet = request["wallet"]
+    body = await request.json()
+    offer_index = body.get("offer_index")
+    if not offer_index:
+        return web.json_response({"error": "offer_index is required"}, status=400)
+
+    if _use_market_mock():
+        try:
+            return web.json_response(mock_market.INSTANCE.start_buy(wallet, offer_index))
+        except mock_market.MockMarketError as e:
+            status = {"not found": 404, "listing_unavailable": 410, "closet_required": 403}.get(
+                str(e), 400
+            )
+            return web.json_response({"error": str(e)}, status=status)
+
+    loop = asyncio.get_event_loop()
+    found = await loop.run_in_executor(None, _find_listing_any_network, offer_index)
+    if found is None:
+        return web.json_response({"error": "not found"}, status=404)
+    network, row = found
+    if not row["is_live"]:
+        return web.json_response({"error": "listing_unavailable"}, status=410)
+
+    # Buying your own listing is a no-op that would fail on-ledger
+    # (tecCANT_ACCEPT_OWN_OFFER) — reject up front instead of spending a sign.
+    if row["seller"] == wallet:
+        return web.json_response({"error": "cannot buy your own listing"}, status=400)
+
+    # Trait ON-LEDGER ops (verify/accept/settlement-deposit) assume
+    # ECONOMY_NETWORK == XRPL_NETWORK; with the economy off (or on a different
+    # net) they'd fail-verify against the wrong chain, so gate trait buys on
+    # the same flag the trait wizard/sweep use. Characters are unaffected.
+    if row["kind"] == "trait" and not config.ECONOMY_ENABLED:
+        return _economy_disabled_response()
+
+    if row["kind"] == "trait":
+        active = await loop.run_in_executor(None, _closet_active, _market_network("trait"), wallet)
+        if not active:
+            return web.json_response({"error": "closet_required"}, status=403)
+
+    try:
+        verified = await market_ops.verify_sell_offer(
+            row["nft_id"], offer_index, row["amount_drops"], strict=True
+        )
+    except Exception as e:
+        # A lookup FAILURE (RPC down / rippled soft-error), NOT a verified
+        # absence — do not stale-close a possibly-healthy listing; ask the
+        # buyer to retry. No DB write (fix #3).
+        logging.warning(f"verify_sell_offer lookup failed for offer {offer_index}: {e}")
+        return web.json_response(
+            {"error": "could not verify the listing right now, please retry"}, status=503
+        )
+    if not verified:
+        # Lookup succeeded and the offer is genuinely absent/mismatched/foreign
+        # — safe to stale-close and report unavailable.
+        await loop.run_in_executor(None, _close_listing_sync, network, offer_index, "stale")
+        return web.json_response({"error": "listing_unavailable"}, status=410)
+
+    _prune_sessions(market_sessions, market_flow.TERMINAL_STATES)
+    active = _active_session(
+        market_sessions, market_flow.TERMINAL_STATES, user["id"], _platform(user)
+    )
+    if active:
+        return web.json_response(
+            {"error": "a market action is already in progress", "session": active.to_dict()},
+            status=409,
+        )
+
+    payload = await xumm_ops.create_accept_offer_payload(
+        offer_index,
+        return_url=xumm_ops.discord_return_url(body.get("guild_id"), body.get("channel_id")),
+    )
+    if not payload:
+        return web.json_response({"error": "could not reach Xaman"}, status=502)
+
+    amount_xrp = market_ops.drops_to_xrp_str(str(row["amount_drops"]))
+    session = market_flow.BuySession(
+        discord_id=user["id"],
+        wallet_address=wallet,
+        offer_index=offer_index,
+        nft_id=row["nft_id"],
+        listing_kind=row["kind"],
+        network=network,
+        amount_drops=row["amount_drops"],
+        platform=_platform(user),
+    )
+    session.qr_url = payload["qr_url"]
+    session.xumm_url = payload["xumm_url"]
+    session.payload_uuid = payload.get("uuid")
+    session.instruction = f"Confirm purchase for {amount_xrp} XRP"
+    market_sessions[session.id] = session
+    return web.json_response(session.to_dict())
+
+
+def _make_market_status_handler(prefix: str):
+    @require_auth
+    async def handler(request):
+        if _use_market_mock():
+            try:
+                return web.json_response(
+                    mock_market.INSTANCE.status(request.match_info["session_id"])
+                )
+            except KeyError:
+                return web.json_response({"error": "not found"}, status=404)
+        session = market_sessions.get(request.match_info["session_id"])
+        if (
+            not session
+            or session.discord_id != request["user"]["id"]
+            or getattr(session, "platform", "discord") != _platform(request["user"])
+        ):
+            return web.json_response({"error": "not found"}, status=404)
+        if getattr(session, "kind", prefix) != prefix:
+            return web.json_response({"error": "not found"}, status=404)
+
+        loop = asyncio.get_event_loop()
+        if prefix == "list":
+            row = await market_flow.advance_list_session(session)
+            if row is not None:
+                network = _market_network(session.listing_kind)
+                await loop.run_in_executor(None, _write_listing_row, network, row)
+        elif prefix == "cancel":
+            if await market_flow.advance_cancel_session(session):
+                await loop.run_in_executor(
+                    None, _close_listing_sync, session.network, session.offer_index, "cancelled"
+                )
+        elif prefix == "buy":
+            outcome = await market_flow.advance_buy_session(session)
+            if outcome == "sold":
+                # Persist the buyer on the sold row so settlement stays
+                # recoverable even if run_deposit deletes the trait_tokens
+                # ownership row before Closet credit (CodeRabbit #129).
+                await loop.run_in_executor(
+                    None,
+                    _close_listing_sync,
+                    session.network,
+                    session.offer_index,
+                    "sold",
+                    session.wallet_address,
+                )
+                if session.listing_kind == "trait":
+                    # Primary settlement trigger (spec §Q7): burn the sold
+                    # trait token back into the buyer's Closet right away.
+                    # Awaited (not fire-and-forget) — run_deposit's own
+                    # fail-closed/journaling guarantees mean there is nothing
+                    # to gain from detaching it, and awaiting keeps the
+                    # outcome deterministic for both callers and tests. A
+                    # failure here leaves settled=0 (already set by
+                    # close_listing above) for the settlement sweep to retry.
+                    await _settle_trait_sale(
+                        session.wallet_address, session.nft_id, session.offer_index, session.network
+                    )
+            elif outcome == "stale":
+                await loop.run_in_executor(
+                    None, _close_listing_sync, session.network, session.offer_index, "stale"
+                )
+
+        return web.json_response(session.to_dict())
+
+    return handler
+
+
+handle_market_list_status = _make_market_status_handler("list")
+handle_market_cancel_status = _make_market_status_handler("cancel")
+handle_market_buy_status = _make_market_status_handler("buy")
+
+
+# --- Task 9 (spec §Q7): trait-sale settlement (burn sold trait -> buyer's Closet) ---
+
+
+async def _settle_trait_sale(buyer: str, nft_id: str, offer_index: str, network: str) -> bool:
+    """Run a Closet deposit on the buyer's behalf for one sold trait listing:
+    exactly `economy_flow.run_deposit` (the shipped Phase-4 flow, unchanged),
+    fail-closed on-ledger owner verify -> issuer burn -> Closet credit. On
+    success, flips `market_listings.settled` to 1; on any failure (including a
+    buyer with no active Closet — economy_flow's own precondition) the row is
+    left exactly as `close_listing(sold)` set it (settled=0) and
+    `run_deposit` has already journaled the failure to ECONOMY_RECORDS_DIR for
+    recovery — this function adds no journal of its own. Returns whether
+    settlement completed, so callers (the buy status handler, the sweep) can
+    decide what to do next without a second DB read."""
+    conn = nft_index.init_db(nft_index.index_db_path(network))
+    try:
+        economy_store.init_economy_schema(conn)
+        market_store.init_db(conn)
+        deps = economy_api.build_settlement_deps(conn)
+        deposit_session = economy_flow.DepositSession(owner=buyer, nft_id=nft_id)
+        await economy_flow.run_deposit(deposit_session, deps)
+        if deposit_session.state == economy_flow.DONE:
+            market_store.mark_settled(conn, offer_index)
+            return True
+        return False
+    finally:
+        conn.close()
+
+
+# Bounded retry for the settlement sweep: a buyer with no active Closet fails
+# run_deposit's precondition cleanly EVERY sweep pass (the token just sits in
+# their wallet as an ordinary trait token, recoverable via a manual Deposit
+# once they do claim a Closet) — without a bound this would retry forever.
+_SWEEP_MAX_ATTEMPTS = 5
+_SWEEP_PERIOD_SECONDS = 120
+# offer_index -> consecutive failed sweep attempts. In-memory only (not
+# persisted): a service restart resets every count to 0, so a mid-flight
+# restart costs a stuck row a few retries rather than falsely reading as
+# "already exhausted". This deployment restarts rarely (pm2, no rolling
+# restarts) and a durable counter buys nothing but a crash-loop that could
+# exhaust the budget in seconds instead of ~10 minutes.
+_sweep_attempts: dict[str, int] = {}
+
+
+def _write_sweep_giveup_record(offer_index: str, nft_id: str, buyer: str) -> None:
+    """Journal (ECONOMY_RECORDS_DIR, same convention as economy_flow's own
+    per-op records) that the sweep is no longer retrying this sale. The token
+    is NOT lost — it is an ordinary trait token in `buyer`'s wallet; they can
+    register/claim a Closet and Deposit it manually. `settled` stays 0 (spec
+    §Q7): this is a durable breadcrumb for an admin/support to find, not a
+    change to the row's meaning."""
+    try:
+        os.makedirs(config.ECONOMY_RECORDS_DIR, exist_ok=True)
+        path = os.path.join(
+            config.ECONOMY_RECORDS_DIR, f"trait-settlement-giveup-{offer_index}.json"
+        )
+        with open(path, "w") as f:
+            json.dump(
+                {
+                    "offer_index": offer_index,
+                    "nft_id": nft_id,
+                    "buyer": buyer,
+                    "attempts": _SWEEP_MAX_ATTEMPTS,
+                    "status": "abandoned",
+                },
+                f,
+                indent=2,
+            )
+    except Exception:
+        logging.error(
+            f"failed to write sweep giveup record for {offer_index}: {traceback.format_exc()}"
+        )
+
+
+async def settle_pending_trait_sales() -> None:
+    """Backstop for `_settle_trait_sale` (spec §Q7): scans
+    `market_listings(kind='trait', closed_reason='sold', settled=0)` on the
+    trait-economy network and retries settlement for each. Heals service
+    restarts mid-settlement and third-party ledger fills (a direct
+    NFTokenAcceptOffer from outside this app — the listener still marks the
+    row sold/unsettled with no buyer of record in `market_listings` itself,
+    so the buyer is resolved from `trait_tokens.owner`, which the listener
+    keeps current from the AcceptOffer it observed)."""
+    network = _market_network("trait")
+    conn = nft_index.init_db(nft_index.index_db_path(network))
+    try:
+        economy_store.init_economy_schema(conn)
+        market_store.init_db(conn)
+        rows = market_store.unsettled_trait_sales(conn)
+        owners = {nid: owner for nid, owner, _slot, _value in economy_store.read_trait_tokens(conn)}
+    finally:
+        conn.close()
+
+    for row in rows:
+        offer_index = row["offer_index"]
+        if _sweep_attempts.get(offer_index, 0) >= _SWEEP_MAX_ATTEMPTS:
+            continue  # already given up + journaled on a previous pass
+        # Prefer the buyer persisted on the sold row (durable across
+        # run_deposit's trait_tokens delete); fall back to the current token
+        # owner for legacy rows written before buyer was persisted, or for
+        # third-party fills the listener recorded with no buyer on the row.
+        buyer = row.get("buyer") or owners.get(row["nft_id"])
+        if buyer is None:
+            # Neither a persisted buyer nor a current owner — the listener
+            # hasn't (yet) recorded an owner for this token: transient lag,
+            # not a precondition failure. Try again next sweep without
+            # counting an attempt.
+            continue
+        try:
+            settled = await _settle_trait_sale(buyer, row["nft_id"], offer_index, network)
+        except Exception:
+            logging.error(f"settlement sweep crashed for {offer_index}: {traceback.format_exc()}")
+            settled = False
+        if settled:
+            _sweep_attempts.pop(offer_index, None)
+            continue
+        _sweep_attempts[offer_index] = _sweep_attempts.get(offer_index, 0) + 1
+        if _sweep_attempts[offer_index] >= _SWEEP_MAX_ATTEMPTS:
+            logging.warning(
+                f"settlement sweep giving up on {offer_index} (nft {row['nft_id']}, buyer "
+                f"{buyer}) after {_SWEEP_MAX_ATTEMPTS} attempts"
+            )
+            _write_sweep_giveup_record(offer_index, row["nft_id"], buyer)
+
+
+async def _settlement_sweep_loop() -> None:
+    while True:
+        try:
+            await settle_pending_trait_sales()
+        except Exception:
+            logging.error(f"settlement sweep loop crashed: {traceback.format_exc()}")
+        await asyncio.sleep(_SWEEP_PERIOD_SECONDS)
+
+
+async def _start_settlement_sweep(app: web.Application) -> None:
+    """aiohttp on_startup hook: schedule the settlement sweep as a background
+    task for the lifetime of the app. Gated on ECONOMY_ENABLED — with the
+    trait economy off there are no trait listings to settle."""
+    if not config.ECONOMY_ENABLED:
+        return
+    app["settlement_sweep_task"] = asyncio.get_event_loop().create_task(_settlement_sweep_loop())
+
+
+async def _stop_settlement_sweep(app: web.Application) -> None:
+    task = app.get("settlement_sweep_task")
+    if task is None:
+        return
+    task.cancel()
+    try:
+        await task
+    except asyncio.CancelledError:
+        pass
+
+
 def _economy_disabled_response():
     return web.json_response(
         {"error": "the trait economy is not enabled", "code": "economy_disabled"}, status=403
@@ -641,6 +1684,112 @@ def require_economy(handler):
         return await handler(request)
 
     return wrapper
+
+
+# --- Task 9 (spec §Q7): trait sell wizard — Extract then List, one action ---
+
+
+@require_economy
+@require_wallet
+async def handle_market_trait_list_start(request):
+    """POST /api/market/trait/list {slot, value, price_xrp}: the composite
+    "sell a trait out of my Closet" wizard — the existing Phase-4 Extract flow
+    (Xaman signature 1) followed by the plain Q4 List flow on the
+    freshly-owned token (Xaman signature 2), driven together as one polled
+    TraitSellSession (see market_flow.advance_trait_sell_session).
+
+    price_xrp is validated FIRST (same guard as handle_market_list_start) so a
+    bad price never starts an extract. Extract's own preconditions (active
+    Closet, the (slot, value) trait actually loose in it) surface as
+    economy_api.EconomyError -> 400 with no session started; a failure inside
+    the running extract surfaces later as the session's own error with no
+    listing ever created — an extracted-but-never-listed token is a perfectly
+    ordinary wallet trait token, recoverable under /api/market/mine."""
+    user = request["user"]
+    wallet = request["wallet"]
+    body = await request.json()
+    slot = body.get("slot")
+    value = body.get("value")
+    price_xrp = body.get("price_xrp")
+    if not slot or not value or not isinstance(price_xrp, str):
+        return web.json_response(
+            {"error": "slot, value, and price_xrp (string) are required"}, status=400
+        )
+    try:
+        amount_drops = int(market_ops.xrp_to_drops_str(price_xrp))
+    except Exception as e:
+        # Broad on purpose: see handle_market_list_start's identical guard.
+        return web.json_response({"error": f"bad price_xrp: {e}"}, status=400)
+
+    if _use_market_mock():
+        try:
+            return web.json_response(
+                mock_market.INSTANCE.start_trait_list(wallet, slot, value, amount_drops)
+            )
+        except mock_market.MockMarketError as e:
+            return web.json_response({"error": str(e)}, status=400)
+
+    _prune_sessions(market_sessions, market_flow.TERMINAL_STATES)
+    active = _active_session(
+        market_sessions, market_flow.TERMINAL_STATES, user["id"], _platform(user)
+    )
+    if active:
+        return web.json_response(
+            {"error": "a market action is already in progress", "session": active.to_dict()},
+            status=409,
+        )
+
+    try:
+        extract_ws = await economy_api.start_extract(
+            user["id"], wallet, {"slot": slot, "value": value}
+        )
+    except economy_api.EconomyError as e:
+        return web.json_response({"error": str(e)}, status=400)
+    except (KeyError, ValueError) as e:
+        return web.json_response({"error": f"missing or invalid field: {e}"}, status=400)
+    except Exception as e:
+        logging.error(f"trait sell wizard failed to start extract: {e}")
+        return web.json_response({"error": "could not start the action"}, status=502)
+
+    session = market_flow.TraitSellSession(
+        discord_id=user["id"],
+        wallet_address=wallet,
+        slot=slot,
+        value=value,
+        amount_drops=amount_drops,
+        extract_session=extract_ws.inner,
+        platform=_platform(user),
+    )
+    market_sessions[session.id] = session
+    return web.json_response(session.to_dict())
+
+
+@require_auth
+async def handle_market_trait_list_status(request):
+    """GET /api/market/trait/list/{session_id}: advance + report the
+    TraitSellSession — mirrors _make_market_status_handler's "list" branch
+    exactly (same finalize-row write) once the wizard reaches its own List
+    step, since advance_trait_sell_session delegates that step to
+    advance_list_session directly."""
+    if _use_market_mock():
+        try:
+            return web.json_response(mock_market.INSTANCE.status(request.match_info["session_id"]))
+        except KeyError:
+            return web.json_response({"error": "not found"}, status=404)
+    session = market_sessions.get(request.match_info["session_id"])
+    if (
+        not session
+        or session.discord_id != request["user"]["id"]
+        or getattr(session, "platform", "discord") != _platform(request["user"])
+        or getattr(session, "kind", "trait_list") != "trait_list"
+    ):
+        return web.json_response({"error": "not found"}, status=404)
+
+    row = await market_flow.advance_trait_sell_session(session)
+    if row is not None:
+        network = _market_network("trait")
+        await asyncio.get_event_loop().run_in_executor(None, _write_listing_row, network, row)
+    return web.json_response(session.to_dict())
 
 
 @require_economy
@@ -1265,6 +2414,17 @@ def create_app() -> web.Application:
     app.router.add_get("/api/signin/{payload_uuid}", handle_signin_status)
     app.router.add_get("/api/nfts", handle_nfts)
     app.router.add_get("/api/leaderboard", handle_leaderboard)
+    app.router.add_get("/api/market/listings", handle_market_listings)
+    app.router.add_get("/api/market/mine", handle_market_mine)
+    app.router.add_get("/api/market/history", handle_market_history)
+    app.router.add_post("/api/market/list", handle_market_list_start)
+    app.router.add_get("/api/market/list/{session_id}", handle_market_list_status)
+    app.router.add_post("/api/market/cancel", handle_market_cancel_start)
+    app.router.add_get("/api/market/cancel/{session_id}", handle_market_cancel_status)
+    app.router.add_post("/api/market/buy", handle_market_buy_start)
+    app.router.add_get("/api/market/buy/{session_id}", handle_market_buy_status)
+    app.router.add_post("/api/market/trait/list", handle_market_trait_list_start)
+    app.router.add_get("/api/market/trait/list/{session_id}", handle_market_trait_list_status)
     app.router.add_post("/api/swap", handle_swap_start)
     app.router.add_get("/api/swap/{session_id}", handle_swap_status)
     app.router.add_get("/api/qr.png", handle_qr)
@@ -1287,6 +2447,8 @@ def create_app() -> web.Application:
     app.router.add_get("/__dev/reload", handle_dev_reload)
     app.router.add_get("/", handle_index)
     app.router.add_static("/", CLIENT_DIR)
+    app.on_startup.append(_start_settlement_sweep)
+    app.on_cleanup.append(_stop_settlement_sweep)
     return app
 
 

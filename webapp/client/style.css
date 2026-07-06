@@ -748,13 +748,32 @@ button.back:hover { color: var(--text); border: none; }
 }
 .trait-chip img { width: 36px; height: 36px; object-fit: contain; border-radius: 5px; background: var(--surface); }
 .trait-chip-label { font-size: .75rem; color: var(--text); flex: 1; }
-.trait-chip .deposit {
+.trait-chip .deposit,
+.trait-chip .chip-action {
   padding: 3px 8px; font-size: .72rem; font-weight: 600;
   background: var(--surface); color: var(--blue);
   border: 1px solid var(--blue); border-radius: 5px; cursor: pointer;
 }
-.trait-chip .deposit:hover { background: var(--blue); color: var(--ink); }
-.trait-chip .deposit:disabled { opacity: .4; cursor: not-allowed; }
+.trait-chip .deposit:hover,
+.trait-chip .chip-action:hover { background: var(--blue); color: var(--ink); }
+.trait-chip .deposit:disabled,
+.trait-chip .chip-action:disabled { opacity: .4; cursor: not-allowed; }
+
+/* --- Marketplace (#44) ---
+   Browse/Mine grid + chips reuse .nft-grid/.nft-card (swap picker) and
+   .trait-strip/.trait-chip/.chip-action (Closet strip) as-is; the filter
+   bar is the one genuinely new layout need. */
+.market-section { margin-top: 10px; }
+.market-filters {
+  display: flex; flex-wrap: wrap; gap: 8px; margin: 12px 0 4px; text-align: left;
+}
+.market-filters input[type="text"] { flex: 1 1 100px; margin: 0; }
+.market-filters select { flex: 1 1 100px; }
+.market-filters button { margin: 0; flex: 0 0 auto; }
+.market-card-price {
+  display: block; color: var(--yellow); font-size: .72rem; font-weight: 700;
+  margin-top: 2px;
+}
 
 /* Home-screen leaderboard card */
 .leaderboard { margin-top: 20px; text-align: left; }
