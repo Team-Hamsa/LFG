@@ -386,12 +386,20 @@ def _apply_offer_accept(conn: sqlite3.Connection, tx: dict[str, Any]) -> None:
     offer_index = sell_wrapper.get("LedgerIndex")
     final = sell_wrapper.get("FinalFields") or {}
     nft_id = final.get("NFTokenID")
+    seller = final.get("Owner")
     # Resolve the post-transfer owner (the buyer) BEFORE closing so the sold
     # row can carry the buyer durably — the settlement sweep needs it after
     # run_deposit deletes the token's trait_tokens ownership row.
     owner = _owner_of(conn, nft_id) if isinstance(nft_id, str) and nft_id else None
+    # Only persist the buyer when it is KNOWN to be the post-sale owner. A
+    # genuine accept transfers ownership away from the seller, so owner==seller
+    # (or unresolved) means the owner refresh was stale/failed — persisting the
+    # seller would send the settlement sweep (which prefers the persisted buyer)
+    # to the wrong wallet. Leave buyer NULL and let the sweep fall back to the
+    # fresher trait_tokens.owner.
+    buyer = owner if (owner is not None and owner != seller) else None
     if isinstance(offer_index, str) and offer_index:
-        market_store.close_listing(conn, offer_index, "sold", buyer=owner)
+        market_store.close_listing(conn, offer_index, "sold", buyer=buyer)
 
     if not isinstance(nft_id, str) or not nft_id:
         return

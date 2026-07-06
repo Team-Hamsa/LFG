@@ -357,6 +357,39 @@ def test_accept_trait_closes_sold_with_settled_zero():
     assert row["buyer"] == "rBuyer"
 
 
+def test_accept_does_not_persist_seller_as_buyer_when_owner_refresh_stale():
+    """If the owner refresh failed (or hasn't run), the local index still shows
+    the SELLER as owner. A genuine sale transfers ownership away from the seller,
+    so owner==seller signals a stale/unreliable resolution — we must NOT persist
+    the seller into market_listings.buyer (that would misdirect the settlement
+    sweep, which prefers the persisted buyer, at the wrong wallet). Leave buyer
+    NULL so the sweep falls back to trait_tokens.owner once it's fresh."""
+    conn = _conn()
+    nft_id = _our_nft_id(20)
+    _seed_trait(conn, nft_id, owner="rSeller", slot="Hat", value="Cap")
+    _run(
+        nft_listener.apply_market_tx(
+            conn, _sell_offer_create_tx(nft_id, seller="rSeller", offer_index="OFF_STALE_BUYER")
+        )
+    )
+    # NOTE: no ownership move — trait_tokens.owner still == seller (refresh stale)
+
+    _run(
+        nft_listener.apply_market_tx(
+            conn,
+            _accept_tx(nft_id=nft_id, offer_index="OFF_STALE_BUYER", seller="rSeller"),
+        )
+    )
+
+    conn.row_factory = sqlite3.Row
+    row = conn.execute(
+        "SELECT * FROM market_listings WHERE offer_index='OFF_STALE_BUYER'"
+    ).fetchone()
+    assert row["is_live"] == 0
+    assert row["closed_reason"] == "sold"
+    assert row["buyer"] is None  # seller NOT persisted as buyer
+
+
 def test_accept_delists_other_live_rows_for_stale_seller():
     """A second live sell offer from the OLD owner for the same nft_id (e.g. a
     stale/duplicate listing) must be delisted once ownership moves on, even
