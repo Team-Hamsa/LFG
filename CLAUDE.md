@@ -536,6 +536,12 @@ also persists a durable `buyer` (the new owner-of-record) in that same
 statement so settlement stays recoverable after `run_deposit` deletes the
 token's `trait_tokens` ownership row mid-burn; the sweep reads `buyer` from
 the row first, falling back to `trait_tokens.owner` only for legacy rows.
+The listener persists `buyer` only when it is *known* to be the post-sale
+owner: a genuine accept moves ownership off the seller, so a resolved owner
+equal to the sell offer's `Owner` (or an unresolved owner) means the local
+index's owner refresh was stale/failed — in that case `buyer` stays `NULL`
+rather than storing the seller and misdirecting the sweep, and the sweep
+falls back to the fresher `trait_tokens.owner`.
 
 **Three sync layers keep the index current:**
 - **Listener** — `lfg_core/nft_listener.apply_market_tx`, wired into the
