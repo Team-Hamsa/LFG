@@ -343,6 +343,22 @@ dedicated per-`nft_id` index instead.
   changes from swaps) to the index, resolving post-transfer owners via `nft_info`.
 - **Consumer:** `scripts/audit_layer_coverage.py` reads this index by default
   (instant, offline, complete); pass `--live` to bypass it and scrape the chain.
+- **Definitive trait-file reconciliation** (#137): `scripts/audit_trait_files.py
+  --network testnet|mainnet` cross-checks **every stored trait value** against
+  the local `layers/` tree (the `LAYER_SOURCE=local` runtime truth), sweeping the
+  `LFG` app table (mapping its legacy `Hat` column → `Head`, skipping
+  never-minted `nft_id IS NULL` drafts), the live `onchain_nfts` index, and the
+  loose economy stores (`closet_assets` / `trait_tokens`). Unlike
+  `audit_layer_coverage`, it calls the **real** `swap_compose.missing_layers`
+  (own dir → `shared/` → matrix-permitted foreign dir → ape `Nose.png`/`Ape
+  Mask.png` structural extras), so it sees exactly what a swap/mint sees. Exit
+  0 = clean, 1 = gaps, 2 = index DB missing (CI/pre-deploy-gate-ready). Reports
+  to `reports/` (gitignored). Point it at the deployed tree with
+  `LAYERS_DIR=…/layers ONCHAIN_DB_PATH=…/onchain_<net>.db --app-db …/lfg_nfts.db`.
+  The two ape structural files live at the **body root** (`layers/ape/`), not
+  under a `TraitType/` subdir — a CDN→local sync that only walks trait-type dirs
+  drops them and blocks every ape swap; recover from the CDN
+  (`https://<pull-zone>/layers/ape/Nose.png`).
 - clio endpoints: mainnet `wss://s2-clio.ripple.com`, testnet
   `wss://clio.altnet.rippletest.net:51233`. These are the per-network defaults
   of `config.CLIO_WS_URL` (env `XRPL_CLIO_WS_URL`). `nft_info` / `nft_exists`
