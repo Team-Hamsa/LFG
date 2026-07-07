@@ -117,10 +117,10 @@ def test_signin_signed_discord_writes_legacy(monkeypatch):
     assert legacy["args"] == ("9", "d", "rDISCORD")  # discord still writes legacy Users
 
 
-def _signed_signin(monkeypatch, uuid, status_extra):
+def _signed_signin(monkeypatch, uuid, status_extra, link_ok=True):
     """Common harness: a signed sign-in for telegram:55 with `status_extra`
     merged into the payload-status dict. Returns the captured set_user_token
-    calls list."""
+    calls list. `link_ok` controls the identity.link result."""
     monkeypatch.setattr(app.config, "WEBAPP_DEV_MODE", False)
     app.signin_payloads[uuid] = {
         "platform": "telegram",
@@ -140,7 +140,7 @@ def _signed_signin(monkeypatch, uuid, status_extra):
 
     monkeypatch.setattr(app.xumm_ops, "get_payload_status", fake_status)
     monkeypatch.setattr(app, "is_valid_classic_address", lambda w: True)
-    monkeypatch.setattr(app.identity_store, "link", lambda *a: True)
+    monkeypatch.setattr(app.identity_store, "link", lambda *a: link_ok)
     captured = []
     monkeypatch.setattr(app.identity_store, "set_user_token", lambda *a: captured.append(a))
     token = make_session_token({"id": "55", "name": "tg", "platform": "telegram"})
@@ -154,6 +154,14 @@ def test_signin_captures_user_token(monkeypatch):
     captured = _signed_signin(monkeypatch, "u5", {"user_token": "push-tok-xyz"})
     assert captured == [("telegram", "55", "push-tok-xyz")]
     app.signin_payloads.pop("u5", None)
+
+
+def test_signin_captures_token_even_when_link_fails(monkeypatch):
+    # A transient identity.link failure must NOT drop an issued push token
+    # (Greptile #139) — set_user_token no-ops on a missing row anyway.
+    captured = _signed_signin(monkeypatch, "u7", {"user_token": "push-tok-xyz"}, link_ok=False)
+    assert captured == [("telegram", "55", "push-tok-xyz")]
+    app.signin_payloads.pop("u7", None)
 
 
 def test_signin_without_token_skips_capture(monkeypatch):

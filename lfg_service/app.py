@@ -1877,6 +1877,12 @@ async def handle_mint_start(request):
     user = request["user"]
     _prune_sessions(mint_sessions, mint_flow.TERMINAL_STATES)
 
+    # Resolve every suspending value BEFORE the one-active-session check so no
+    # await sits between the check and the insert below (the guard is only
+    # race-free while that window stays await-free).
+    return_url = await _request_return_url(request)
+    push_user_token = await _push_token(user)
+
     # One active session per user (no awaits between this check and the
     # insert below, so it cannot race)
     active = _active_session(mint_sessions, mint_flow.TERMINAL_STATES, user["id"], _platform(user))
@@ -1888,9 +1894,9 @@ async def handle_mint_start(request):
     session = mint_flow.MintSession(
         discord_id=user["id"],
         wallet_address=request["wallet"],
-        return_url=await _request_return_url(request),
+        return_url=return_url,
         platform=_platform(user),
-        push_user_token=await _push_token(user),
+        push_user_token=push_user_token,
     )
     mint_sessions[session.id] = session
     # Detect the payment path (LFGO holder vs XRP newcomer) and create the
@@ -1992,6 +1998,9 @@ async def handle_swap_start(request):
             status=400,
         )
 
+    # Resolve the push token before the re-check so no await sits between the
+    # guard and the insert below (would reopen the race the re-check closes).
+    push_user_token = await _push_token(user)
     # The load_wallet_nfts call above awaited, so re-check before inserting
     if _active_session(swap_sessions, swap_flow.TERMINAL_STATES, user["id"], _platform(user)):
         return web.json_response({"error": "swap already in progress"}, status=409)
@@ -2003,7 +2012,7 @@ async def handle_swap_start(request):
         traits_to_swap=traits_to_swap,
         return_url=xumm_ops.discord_return_url(body.get("guild_id"), body.get("channel_id")),
         platform=_platform(user),
-        push_user_token=await _push_token(user),
+        push_user_token=push_user_token,
     )
     swap_sessions[session.id] = session
     asyncio.get_event_loop().create_task(swap_flow.run_swap_session(session))
@@ -2160,9 +2169,11 @@ async def handle_signin_status(request):
                 rec["user_id"],
             )
         # #135: capture the XUMM push token issued on this sign-in so future
-        # sign requests can be push-delivered. Best-effort — link() created the
-        # row above, and set_user_token no-ops on a missing token.
-        elif s.get("user_token"):
+        # sign requests can be push-delivered. Independent of link() success —
+        # a transient link failure over an already-present identity row must
+        # not drop the token; set_user_token is best-effort and no-ops on a
+        # missing row anyway.
+        if s.get("user_token"):
             await asyncio.to_thread(
                 identity_store.set_user_token, platform, rec["user_id"], s["user_token"]
             )
