@@ -308,3 +308,70 @@ def test_format_report_clean_and_dirty(tmp_path):
     dirty = atf.AuditResult(missing=[entry], unreadable=[], character_count=1, loose_count=0)
     out = atf.format_report(dirty, "testnet", "2026-07-07T00:00:00Z")
     assert "1 distinct missing" in out and "male/Head/X" in out
+
+
+# --- CLI exit-code contract (the CI gate: 0 clean / 1 gaps / 2 missing DB) ---
+
+
+def _index_db_file(tmp_path, head_value):
+    """A real onchain index DB file (path) holding one live male token whose
+    Head value is `head_value`; no loose traits. _amain opens its own conn."""
+    path = str(tmp_path / "onchain_testnet.db")
+    conn = nft_index.init_db(path)
+    economy_store.init_economy_schema(conn)
+    nft_index.upsert(
+        conn,
+        nft_index.OnchainNft(
+            nft_id="00LIVE",
+            nft_number=10,
+            owner="rA",
+            is_burned=False,
+            mutable=True,
+            uri_hex="",
+            body="male",
+            attributes=[
+                {"trait_type": "Body", "value": "Straight Body"},
+                {"trait_type": "Head", "value": head_value},
+            ],
+            image="",
+            ledger_index=1,
+        ),
+    )
+    conn.commit()
+    conn.close()
+    return path
+
+
+def _amain_ns(tmp_path):
+    return atf.argparse.Namespace(
+        network="testnet",
+        app_db=str(tmp_path / "no_app.db"),  # absent -> LFG source contributes nothing
+        report_dir=str(tmp_path / "reports"),
+    )
+
+
+def test_cli_exit_zero_when_clean(tmp_path, monkeypatch):
+    store = _make_layers(tmp_path, {"male": {"Head": ["Cap"], "Body": ["Straight Body"]}})
+    db = _index_db_file(tmp_path, "Cap")
+    monkeypatch.setattr(atf.layer_store, "get_layer_store", lambda: store)
+    monkeypatch.setattr(atf.nft_index, "index_db_path", lambda net: db)
+    rc = _run(atf._amain(_amain_ns(tmp_path)))
+    assert rc == 0
+    # the report file was written (utf-8 glyphs included)
+    reports = list((tmp_path / "reports").glob("trait-files-testnet-*.md"))
+    assert len(reports) == 1 and "0 missing" in reports[0].read_text(encoding="utf-8")
+
+
+def test_cli_exit_one_when_gap(tmp_path, monkeypatch):
+    store = _make_layers(tmp_path, {"male": {"Head": ["Cap"], "Body": ["Straight Body"]}})
+    db = _index_db_file(tmp_path, "Ghostface")  # no Ghostface art anywhere -> gap
+    monkeypatch.setattr(atf.layer_store, "get_layer_store", lambda: store)
+    monkeypatch.setattr(atf.nft_index, "index_db_path", lambda net: db)
+    assert _run(atf._amain(_amain_ns(tmp_path))) == 1
+
+
+def test_cli_exit_two_when_index_db_missing(tmp_path, monkeypatch):
+    monkeypatch.setattr(
+        atf.nft_index, "index_db_path", lambda net: str(tmp_path / "does_not_exist.db")
+    )
+    assert _run(atf._amain(_amain_ns(tmp_path))) == 2

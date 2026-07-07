@@ -380,7 +380,7 @@ async def _amain(args: argparse.Namespace) -> int:
     os.makedirs(args.report_dir, exist_ok=True)
     stamp = datetime.now(timezone.utc).strftime("%Y%m%d-%H%M%S")
     out_path = os.path.join(args.report_dir, f"trait-files-{args.network}-{stamp}.md")
-    with open(out_path, "w") as fh:
+    with open(out_path, "w", encoding="utf-8") as fh:
         fh.write(report + "\n")
     print(f"\nReport written to {out_path}", file=sys.stderr)
 
