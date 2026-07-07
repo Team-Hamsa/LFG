@@ -647,6 +647,26 @@ marketplace code never sets it itself.
 
 2. **XUMM Flow**: All signing is handled by XUMM (no private keys in bot). Users scan QR codes to approve transactions in their XUMM wallet app.
 
+   **Push delivery (#135):** for a returning, registered user the sign request
+   is *push-delivered* to their Xaman app instead of forcing a fresh QR scan.
+   XUMM issues a per-user push token (`application.issued_user_token`) whenever a
+   user with Xaman signs and grants push permission; `get_payload_status`
+   surfaces it, and the service captures it in `handle_signin_status`, persisting
+   it on the caller's `identities` row (`identity.set_user_token` → new
+   `user_token` column, self-migrating). Every Activity-driven payload builder
+   (`create_payment_payload` / `create_accept_offer_payload` /
+   `create_sell_offer_payload` / `create_cancel_offer_payload`) takes an optional
+   `user_token`; `_create_xumm_payload` sends it as the top-level `user_token`
+   field (never under `options`, never an empty string) and returns the
+   create-response `pushed` flag. The service resolves the token
+   (`identity.user_token_for`, via `_push_token`) at each build site — marketplace
+   list/buy/cancel inline, mint/swap via the session's `push_user_token` — so a
+   missing/stale token (`pushed:false`) simply falls back to the QR/deep link that
+   are always returned too. Push is delivery-only: SourceTag and the no-custody
+   model are unchanged. **Not yet wired** (QR-only, follow-up): the Discord-native
+   `main.py` mint/swap paths (legacy `Users` store), the trait-sell wizard, and
+   CLI economy extract/deposit.
+
 3. **Metadata URL Encoding**: Metadata CDN URLs are converted to hex before being stored on-chain (main.py:304).
 
 4. **Retry Logic**: NFT minting includes exponential backoff retry mechanism (max 5 attempts) to handle network issues.

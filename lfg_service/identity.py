@@ -38,6 +38,10 @@ def ensure_identities_table() -> None:
             )
         if "updated_at" not in cols:
             conn.execute("ALTER TABLE identities ADD COLUMN updated_at TIMESTAMP")
+        # #135: per-user XUMM push token so future sign requests can be
+        # push-delivered to Xaman instead of forcing a QR scan every time.
+        if "user_token" not in cols:
+            conn.execute("ALTER TABLE identities ADD COLUMN user_token TEXT")
         conn.execute("CREATE INDEX IF NOT EXISTS idx_identities_wallet ON identities(wallet)")
         conn.commit()
     finally:
@@ -98,6 +102,50 @@ def touch_handle(platform: str, platform_user_id: str, handle: str) -> None:
         conn.commit()
     except Exception as e:
         logging.error(f"identity.touch_handle failed: {e}")
+    finally:
+        if conn is not None:
+            conn.close()
+
+
+def set_user_token(platform: str, platform_user_id: str, token: str | None) -> None:
+    """Persist the XUMM push token for an identity (issue #135). Best-effort:
+    a falsy token or a missing identity row is a no-op, and DB errors are
+    swallowed — a push-token write must never fail a sign flow. The identity
+    row is created by link() at registration, so this only ever UPDATEs."""
+    if not token:
+        return
+    conn = None
+    try:
+        conn = sqlite3.connect(DATABASE)
+        conn.execute(
+            "UPDATE identities SET user_token = ?, updated_at = CURRENT_TIMESTAMP "
+            "WHERE platform = ? AND platform_user_id = ?",
+            (token, platform, platform_user_id),
+        )
+        conn.commit()
+    except Exception as e:
+        logging.error(f"identity.set_user_token failed: {e}")
+    finally:
+        if conn is not None:
+            conn.close()
+
+
+def user_token_for(platform: str, platform_user_id: str) -> str | None:
+    """The stored XUMM push token for an identity, or None if none is on file
+    (unregistered, pre-#135 row, or the user never granted push). Never raises;
+    a lookup failure returns None so the caller falls back to QR delivery."""
+    conn = None
+    try:
+        conn = sqlite3.connect(DATABASE)
+        cur = conn.execute(
+            "SELECT user_token FROM identities WHERE platform = ? AND platform_user_id = ?",
+            (platform, platform_user_id),
+        )
+        row = cur.fetchone()
+        return row[0] if row and row[0] else None
+    except Exception as e:
+        logging.error(f"identity.user_token_for failed: {e}")
+        return None
     finally:
         if conn is not None:
             conn.close()

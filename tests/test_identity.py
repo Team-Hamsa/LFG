@@ -170,6 +170,76 @@ def test_identities_for_wallet_is_case_sensitive(tmp_path, monkeypatch):
     assert identity.identities_for_wallet("rw") == []
 
 
+def test_ensure_adds_user_token_column(tmp_path, monkeypatch):
+    db = _fresh_db(tmp_path, monkeypatch)
+    # old-shape table without user_token (#135)
+    conn = sqlite3.connect(db)
+    conn.execute(
+        "CREATE TABLE identities ("
+        "platform TEXT NOT NULL, platform_user_id TEXT NOT NULL, platform_username TEXT, "
+        "wallet TEXT NOT NULL, account_id INTEGER, "
+        "created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP, "
+        "PRIMARY KEY (platform, platform_user_id))"
+    )
+    conn.commit()
+    conn.close()
+    identity.ensure_identities_table()
+    assert "user_token" in _columns(db)
+
+
+def test_set_and_get_user_token(tmp_path, monkeypatch):
+    _fresh_db(tmp_path, monkeypatch)
+    identity.ensure_identities_table()
+    identity.link("discord", "1", "alice", "rW")
+    assert identity.user_token_for("discord", "1") is None
+    identity.set_user_token("discord", "1", "push-tok")
+    assert identity.user_token_for("discord", "1") == "push-tok"
+
+
+def test_set_user_token_refreshes(tmp_path, monkeypatch):
+    _fresh_db(tmp_path, monkeypatch)
+    identity.ensure_identities_table()
+    identity.link("discord", "1", "alice", "rW")
+    identity.set_user_token("discord", "1", "tok-old")
+    identity.set_user_token("discord", "1", "tok-new")
+    assert identity.user_token_for("discord", "1") == "tok-new"
+
+
+def test_set_user_token_ignores_falsy(tmp_path, monkeypatch):
+    _fresh_db(tmp_path, monkeypatch)
+    identity.ensure_identities_table()
+    identity.link("discord", "1", "alice", "rW")
+    identity.set_user_token("discord", "1", "tok")
+    identity.set_user_token("discord", "1", None)  # must NOT wipe the token
+    identity.set_user_token("discord", "1", "")
+    assert identity.user_token_for("discord", "1") == "tok"
+
+
+def test_user_token_for_unknown_identity_is_none(tmp_path, monkeypatch):
+    _fresh_db(tmp_path, monkeypatch)
+    identity.ensure_identities_table()
+    assert identity.user_token_for("telegram", "ghost") is None
+
+
+def test_set_user_token_on_missing_row_is_noop(tmp_path, monkeypatch):
+    _fresh_db(tmp_path, monkeypatch)
+    identity.ensure_identities_table()
+    # no identity row yet — must not raise, must not create a row
+    identity.set_user_token("discord", "nobody", "tok")
+    assert identity.user_token_for("discord", "nobody") is None
+
+
+def test_user_token_is_per_identity(tmp_path, monkeypatch):
+    _fresh_db(tmp_path, monkeypatch)
+    identity.ensure_identities_table()
+    identity.link("discord", "1", "a", "rW")
+    identity.link("telegram", "1", "a", "rW")
+    identity.set_user_token("discord", "1", "tok-discord")
+    identity.set_user_token("telegram", "1", "tok-telegram")
+    assert identity.user_token_for("discord", "1") == "tok-discord"
+    assert identity.user_token_for("telegram", "1") == "tok-telegram"
+
+
 def test_migrate_users_is_idempotent(tmp_path, monkeypatch):
     db = _fresh_db(tmp_path, monkeypatch)
     # seed a legacy Users table

@@ -97,7 +97,7 @@ def test_non_issuer_recipient_creates_priced_offer(monkeypatch):
         assert dest == "rUSERyyyyyyyyyyyyyyyyyyyyyyyyyy"
         return "OFFER123"
 
-    async def fake_accept(offer_id, return_url=None):
+    async def fake_accept(offer_id, return_url=None, user_token=None):
         return {"qr_url": "q", "xumm_url": "x"}
 
     monkeypatch.setattr(xrpl_ops, "create_nft_offer", fake_offer)

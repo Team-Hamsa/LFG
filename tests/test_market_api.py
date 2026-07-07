@@ -775,6 +775,28 @@ def test_list_start_success_returns_session(onchain_env, market_wallet, monkeypa
     assert len(server.market_sessions) == 1
 
 
+def test_list_start_forwards_push_user_token(onchain_env, market_wallet, monkeypatch):
+    # #135: the seller's stored XUMM push token is threaded into the sell-offer
+    # payload so the sign request is push-delivered instead of QR-only.
+    conn = _reopen(onchain_env)
+    _seed_character(conn, CHAR1, SELLER, 1)
+    conn.commit()
+    conn.close()
+
+    captured = {}
+
+    async def capture_payload(*args, **kwargs):
+        captured["user_token"] = kwargs.get("user_token")
+        return {"qr_url": "https://qr", "xumm_url": "https://xumm.app/sign/U1", "uuid": "U1"}
+
+    monkeypatch.setattr(server.xumm_ops, "create_sell_offer_payload", capture_payload)
+    monkeypatch.setattr(server.identity_store, "user_token_for", lambda *a: "push-tok")
+    req = _post_request("/api/market/list", {"nft_id": CHAR1, "price_xrp": "5"})
+    resp = _run(server.handle_market_list_start(req))
+    assert resp.status == 200
+    assert captured["user_token"] == "push-tok"
+
+
 def test_list_start_not_owner_409(onchain_env, market_wallet):
     conn = _reopen(onchain_env)
     _seed_character(conn, CHAR1, "rSomeoneElse00000000000000000000", 1)
