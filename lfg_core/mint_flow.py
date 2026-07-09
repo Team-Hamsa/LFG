@@ -15,7 +15,17 @@ from decimal import Decimal
 from typing import Any
 
 from db_helpers import get_next_nft_number, record_nft_mint
-from lfg_core import cdn, config, layer_store, rarity, swap_compose, traits, xrpl_ops, xumm_ops
+from lfg_core import (
+    cdn,
+    config,
+    layer_store,
+    memos,
+    rarity,
+    swap_compose,
+    traits,
+    xrpl_ops,
+    xumm_ops,
+)
 
 # Session states
 AWAITING_PAYMENT = "awaiting_payment"
@@ -116,6 +126,7 @@ class MintSession:
             issuer=p["issuer"],
             return_url=self.return_url,
             user_token=self.push_user_token,
+            platform=memos.platform_for_surface(self.platform),
         )
         if payload:
             self.payment_link = payload["xumm_url"]
@@ -281,6 +292,7 @@ async def run_mint_session(session: MintSession) -> None:
             metadata_cdn_url=metadata_cdn_url,
             taxon=config.NFT_TAXON,
             issuer=config.TOKEN_ISSUER_ADDRESS,
+            platform=memos.platform_for_surface(session.platform),
         )
         if not nft_id:
             _release_unused_number(session)
@@ -335,7 +347,9 @@ async def run_mint_session(session: MintSession) -> None:
 
         # 5. Create the transfer offer and the XUMM accept payload
         session.state = CREATING_OFFER
-        offer_id = await xrpl_ops.create_nft_offer(nft_id, session.wallet_address)
+        offer_id = await xrpl_ops.create_nft_offer(
+            nft_id, session.wallet_address, platform=memos.platform_for_surface(session.platform)
+        )
         if not offer_id:
             session.state = FAILED
             session.error = (
@@ -345,7 +359,10 @@ async def run_mint_session(session: MintSession) -> None:
             return
 
         accept = await xumm_ops.create_accept_offer_payload(
-            offer_id, return_url=session.return_url, user_token=session.push_user_token
+            offer_id,
+            return_url=session.return_url,
+            user_token=session.push_user_token,
+            platform=memos.platform_for_surface(session.platform),
         )
         if not accept:
             session.state = FAILED

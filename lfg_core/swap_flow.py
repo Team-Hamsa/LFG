@@ -30,7 +30,16 @@ from typing import Any
 from xrpl.models import IssuedCurrencyAmount
 from xrpl.utils import xrp_to_drops
 
-from lfg_core import cdn, config, layer_store, swap_compose, swap_meta, xrpl_ops, xumm_ops
+from lfg_core import (
+    cdn,
+    config,
+    layer_store,
+    memos,
+    swap_compose,
+    swap_meta,
+    xrpl_ops,
+    xumm_ops,
+)
 
 AWAITING_PAYMENT = "awaiting_payment"
 COMPOSING = "composing"
@@ -286,7 +295,10 @@ async def _create_offer_and_accept(session: SwapSession, item: dict[str, Any]) -
         return True
 
     offer_id = await xrpl_ops.create_nft_offer(
-        item["new_nft_id"], session.wallet_address, amount=_offer_amount(session)
+        item["new_nft_id"],
+        session.wallet_address,
+        amount=_offer_amount(session),
+        platform=memos.platform_for_surface(session.platform),
     )
     if not offer_id:
         session.error = (
@@ -297,7 +309,10 @@ async def _create_offer_and_accept(session: SwapSession, item: dict[str, Any]) -
         return False
     item["offer_id"] = offer_id
     accept = await xumm_ops.create_accept_offer_payload(
-        offer_id, return_url=session.return_url, user_token=session.push_user_token
+        offer_id,
+        return_url=session.return_url,
+        user_token=session.push_user_token,
+        platform=memos.platform_for_surface(session.platform),
     )
     if not accept:
         session.error = (
@@ -339,6 +354,8 @@ async def _collect_modify_fee(session: SwapSession, modify_count: int) -> bool:
         issuer=issuer,
         return_url=session.return_url,
         user_token=session.push_user_token,
+        platform=memos.platform_for_surface(session.platform),
+        action=memos.ACTION_TRAIT_SWAP_FEE,
     )
     # Sign-request payload normally; raw detect link only if XUMM is down
     session.payment_link = (
@@ -442,6 +459,7 @@ async def run_swap_session(session: SwapSession) -> None:
                     metadata_cdn_url=item["metadata_url"],
                     taxon=config.SWAP_TAXON,
                     issuer=config.SWAP_ISSUER_ADDRESS,
+                    platform=memos.platform_for_surface(session.platform),
                 )
                 if not nft_id:
                     await _burn_replacements(burn_items)
@@ -464,7 +482,10 @@ async def run_swap_session(session: SwapSession) -> None:
             _write_swap_record(session, items, "modifying")
             for item in modify_items:
                 modify_hash = await xrpl_ops.modify_nft(
-                    item["nft"]["nft_id"], session.wallet_address, item["metadata_url"]
+                    item["nft"]["nft_id"],
+                    session.wallet_address,
+                    item["metadata_url"],
+                    platform=memos.platform_for_surface(session.platform),
                 )
                 if not modify_hash:
                     await _revert_modifies(modify_items, session.wallet_address)
@@ -484,7 +505,11 @@ async def run_swap_session(session: SwapSession) -> None:
         if burn_items:
             session.state = BURNING
             for i, item in enumerate(burn_items):
-                burn_hash = await xrpl_ops.burn_nft(item["nft"]["nft_id"], session.wallet_address)
+                burn_hash = await xrpl_ops.burn_nft(
+                    item["nft"]["nft_id"],
+                    session.wallet_address,
+                    platform=memos.platform_for_surface(session.platform),
+                )
                 if burn_hash:
                     item["burn_hash"] = burn_hash
                     continue

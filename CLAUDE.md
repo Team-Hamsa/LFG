@@ -297,6 +297,34 @@ This applies to every transaction type without exception — `NFTokenMint`,
 payload `txjson`. When adding a new transaction path, set `SourceTag` on the tx
 dict / payload before signing or submitting, or hackathon volume credit is lost.
 
+### Provenance Memos (#54) — who/what/where on every transaction
+
+`SourceTag` is a single assigned `UInt32`; it identifies the contest entrant but
+cannot encode *who* signed, *which surface* it came from, or *what* app action
+it was. That provenance rides in on-chain **`Memos`**, stamped alongside the
+`SourceTag` on every transaction (`SignIn` — a no-ledger pseudo-tx — is exempt
+from both).
+
+`lfg_core/memos.py` is the single source of truth for the schema. Values are a
+**closed enum** (constants, never free strings — an unknown value raises):
+- `initiator` — `user` (Xaman-signed) | `backend` (issuer-wallet-signed)
+- `platform` — `discord-bot` | `discord-activity` | `telegram` | `twitter` |
+  `webapp` | `backend` (backend-signed op with no user surface)
+- `action` — `mint` / `create-offer` / `accept-offer` / `cancel-offer` / `burn`
+  / `modify` / `trait-swap-fee` / `buy-and-burn` / `trustset` / `payment` /
+  `list` / `buy` / economy `harvest`/`assemble`/`equip`/`extract`/`deposit`
+- `campaign` — optional, present only during a campaign
+
+Two builders emit the same schema in the two wire shapes the app needs:
+`build_memo_models()` → xrpl-py `Memo` list for backend-signed builders
+(`xrpl_ops`); `build_memos_json()` → the XUMM txjson `Memos` array for
+user-signed payloads (`xumm_ops`, merged in `_create_xumm_payload` next to the
+`SourceTag` setdefault). Backend builders default `platform=backend` so a memo
+is **always** present; the mint/swap/market flows thread the real originating
+surface via `memos.platform_for_surface(session.platform)` for accurate
+attribution. When adding a new tx path, pass a `platform`/`action` (or accept
+the backend default) — the memo, like the SourceTag, must never be omitted.
+
 - **Testnet URL**: `https://s.altnet.rippletest.net:51234/` (main.py:198)
 - **Mainnet URL**: `https://s1.ripple.com:51234/` (ts_helpers.py:40)
 - Wallet is initialized from SEED environment variable

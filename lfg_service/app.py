@@ -40,6 +40,7 @@ from lfg_core import (
     market_flow,
     market_ops,
     market_store,
+    memos,
     mint_flow,
     nft_index,
     swap_flow,
@@ -1295,6 +1296,7 @@ async def handle_market_list_start(request):
         str(amount_drops),
         return_url=xumm_ops.discord_return_url(body.get("guild_id"), body.get("channel_id")),
         user_token=await _push_token(user),
+        platform=memos.platform_for_surface(_platform(user)),
     )
     if not payload:
         return web.json_response({"error": "could not reach Xaman"}, status=502)
@@ -1359,6 +1361,7 @@ async def handle_market_cancel_start(request):
         offer_index,
         return_url=xumm_ops.discord_return_url(body.get("guild_id"), body.get("channel_id")),
         user_token=await _push_token(user),
+        platform=memos.platform_for_surface(_platform(user)),
     )
     if not payload:
         return web.json_response({"error": "could not reach Xaman"}, status=502)
@@ -1459,6 +1462,7 @@ async def handle_market_buy_start(request):
         offer_index,
         return_url=xumm_ops.discord_return_url(body.get("guild_id"), body.get("channel_id")),
         user_token=await _push_token(user),
+        platform=memos.platform_for_surface(_platform(user)),
     )
     if not payload:
         return web.json_response({"error": "could not reach Xaman"}, status=502)

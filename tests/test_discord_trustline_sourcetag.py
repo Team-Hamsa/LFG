@@ -52,3 +52,25 @@ def test_trustline_payload_has_source_tag(trustline, monkeypatch):
     monkeypatch.setattr(trustline.requests, "post", fake_post)
     _run(trustline.create_trustline_request())
     assert captured["payload"]["txjson"]["SourceTag"] == 2606160021
+
+
+def test_trustline_payload_has_provenance_memos(trustline, monkeypatch):
+    from xrpl.utils import hex_to_str
+
+    captured = {}
+
+    def fake_post(url, json, headers, timeout=None):
+        captured["payload"] = json
+        return _Resp()
+
+    monkeypatch.setattr(trustline.requests, "post", fake_post)
+    _run(trustline.create_trustline_request())
+    decoded = {
+        hex_to_str(e["Memo"]["MemoType"]): hex_to_str(e["Memo"]["MemoData"])
+        for e in captured["payload"]["txjson"]["Memos"]
+    }
+    assert decoded == {
+        "initiator": "user",
+        "platform": "discord-bot",
+        "action": "trustset",
+    }

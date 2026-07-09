@@ -35,7 +35,7 @@ from xrpl.transaction import submit_and_wait
 from xrpl.utils import xrp_to_drops
 from xrpl.wallet import Wallet
 
-from lfg_core import config
+from lfg_core import config, memos
 
 # On-ledger NFToken flag bits (mirror the tf* mint flags)
 NFT_FLAG_BURNABLE = 0x0001
@@ -49,10 +49,16 @@ def convert_str_to_hex(string: str) -> str:
 
 
 async def mint_nft(
-    metadata_cdn_url: str, taxon: int, issuer: str, flags: int | None = None
+    metadata_cdn_url: str,
+    taxon: int,
+    issuer: str,
+    flags: int | None = None,
+    platform: str = memos.PLATFORM_BACKEND,
+    campaign: str | None = None,
 ) -> str | None:
     """Mint an NFT on XRPL; returns the NFToken ID or None. `flags` overrides
-    config.NFT_FLAGS (e.g. burnable economy characters / soulbound buckets)."""
+    config.NFT_FLAGS (e.g. burnable economy characters / soulbound buckets).
+    `platform` records the originating surface in the provenance memo (#54)."""
     try:
         wallet = Wallet.from_seed(config.SEED)
         client = JsonRpcClient(config.JSON_RPC_URL)
@@ -64,6 +70,9 @@ async def mint_nft(
             "nftoken_taxon": taxon,
             "flags": eff_flags,
             "source_tag": config.SOURCE_TAG,
+            "memos": memos.build_memo_models(
+                memos.INITIATOR_BACKEND, platform, memos.ACTION_MINT, campaign
+            ),
         }
         # TransferFee is only valid on transferable tokens; XRPL rejects it as
         # temMALFORMED otherwise (e.g. the soulbound Bucket, flags=16).
@@ -112,7 +121,13 @@ async def mint_nft(
         return None
 
 
-async def create_nft_offer(nft_id: str, destination: str, amount: Any = "0") -> str | None:
+async def create_nft_offer(
+    nft_id: str,
+    destination: str,
+    amount: Any = "0",
+    platform: str = memos.PLATFORM_BACKEND,
+    campaign: str | None = None,
+) -> str | None:
     """Create a sell offer transferring the NFT to destination; returns offer ID
     or None. amount may be an XRP-drops string or an IssuedCurrencyAmount."""
     try:
@@ -126,6 +141,9 @@ async def create_nft_offer(nft_id: str, destination: str, amount: Any = "0") -> 
             nftoken_id=nft_id,
             flags=NFTokenCreateOfferFlag.TF_SELL_NFTOKEN,
             source_tag=config.SOURCE_TAG,
+            memos=memos.build_memo_models(
+                memos.INITIATOR_BACKEND, platform, memos.ACTION_CREATE_OFFER, campaign
+            ),
         )
 
         response = await asyncio.to_thread(submit_and_wait, offer, client, wallet)
@@ -415,6 +433,9 @@ async def buy_and_burn(
             "destination": issuer,
             "amount": IssuedCurrencyAmount(currency=currency, issuer=issuer, value=value),
             "source_tag": config.SOURCE_TAG,
+            "memos": memos.build_memo_models(
+                memos.INITIATOR_BACKEND, memos.PLATFORM_BACKEND, memos.ACTION_BUY_AND_BURN
+            ),
         }
         if max_xrp is not None:
             kwargs["send_max"] = xrp_to_drops(Decimal(max_xrp))
@@ -430,10 +451,12 @@ async def buy_and_burn(
         return None
 
 
-async def burn_nft(nft_id: str, owner: str | None = None) -> str | None:
+async def burn_nft(
+    nft_id: str, owner: str | None = None, platform: str = memos.PLATFORM_BACKEND
+) -> str | None:
     """Burn an NFT held by `owner` (None = held by the issuer wallet itself)
     using the issuer wallet's burn authority. Returns the transaction hash
-    or None."""
+    or None. `platform` records the originating surface in the memo (#54)."""
     try:
         wallet = Wallet.from_seed(config.SEED)
         client = JsonRpcClient(config.JSON_RPC_URL)
@@ -441,6 +464,7 @@ async def burn_nft(nft_id: str, owner: str | None = None) -> str | None:
             "account": config.SIGNING_ACCOUNT,
             "nftoken_id": nft_id,
             "source_tag": config.SOURCE_TAG,
+            "memos": memos.build_memo_models(memos.INITIATOR_BACKEND, platform, memos.ACTION_BURN),
         }
         if owner and owner != config.SIGNING_ACCOUNT:
             kwargs["owner"] = owner
@@ -479,12 +503,14 @@ async def burn_nft(nft_id: str, owner: str | None = None) -> str | None:
         return None
 
 
-async def modify_nft(nft_id: str, owner: str, uri: str) -> str | None:
+async def modify_nft(
+    nft_id: str, owner: str, uri: str, platform: str = memos.PLATFORM_BACKEND
+) -> str | None:
     """Update a mutable NFT's URI in place via NFTokenModify (Dynamic NFTs
     amendment). `owner` is the current holder (None/issuer-wallet = held by
     the issuer wallet itself); `uri` is the plain (non-hex) new metadata URL.
     Requires the NFT to have the mutable flag. Returns the transaction hash
-    or None."""
+    or None. `platform` records the originating surface in the memo (#54)."""
     try:
         wallet = Wallet.from_seed(config.SEED)
         client = JsonRpcClient(config.JSON_RPC_URL)
@@ -493,6 +519,9 @@ async def modify_nft(nft_id: str, owner: str, uri: str) -> str | None:
             "nftoken_id": nft_id,
             "uri": convert_str_to_hex(uri),
             "source_tag": config.SOURCE_TAG,
+            "memos": memos.build_memo_models(
+                memos.INITIATOR_BACKEND, platform, memos.ACTION_MODIFY
+            ),
         }
         if owner and owner != config.SIGNING_ACCOUNT:
             kwargs["owner"] = owner

@@ -93,11 +93,11 @@ def test_self_issuer_recipient_skips_offer_and_marks_delivered(monkeypatch):
 def test_non_issuer_recipient_creates_priced_offer(monkeypatch):
     """Recipient != issuer: create the sell offer and append the accept link."""
 
-    async def fake_offer(nft_id, dest, amount=None):
+    async def fake_offer(nft_id, dest, amount=None, **kwargs):
         assert dest == "rUSERyyyyyyyyyyyyyyyyyyyyyyyyyy"
         return "OFFER123"
 
-    async def fake_accept(offer_id, return_url=None, user_token=None):
+    async def fake_accept(offer_id, return_url=None, user_token=None, **kwargs):
         return {"qr_url": "q", "xumm_url": "x"}
 
     monkeypatch.setattr(xrpl_ops, "create_nft_offer", fake_offer)
