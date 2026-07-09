@@ -174,8 +174,12 @@ issuer** (suggest ≥ 50 XRP) and watch for that error in logs.
    (`lfg-index-mainnet`) records it.
 5. One real swap on a mutable NFT and one on a legacy burnable NFT.
 6. Confirm the Dress Up button is gone and `/api/closet` returns
-   feature-disabled. Confirm the 🛒 Marketplace button is gone and
-   `/api/market/listings` returns 403 `market_disabled`.
+   feature-disabled. Confirm the 🛒 Marketplace button is gone and that the
+   marketplace surface is gated across its route classes — a read
+   (`GET /api/market/listings`), a money-touching write (`POST /api/market/buy`),
+   and a status poll (`GET /api/market/buy/{session_id}`) each return 403
+   `market_disabled` (every `/api/market/*` handler is wrapped by
+   `require_market`, so these three spot-checks stand in for the whole surface).
 7. Confirm which XUMM app the current `XUMM_API_KEY` belongs to — two legacy
    apps are pending retirement after the public-repo scrub; rotate if flagged.
 
