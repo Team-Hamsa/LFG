@@ -230,9 +230,12 @@ async def create_accept_offer_payload(
     user_token: str | None = None,
     platform: str = memos.PLATFORM_BACKEND,
     campaign: str | None = None,
+    action: str = memos.ACTION_ACCEPT_OFFER,
 ) -> dict[str, Any] | None:
     """XUMM payload for NFTokenAcceptOffer. ``user_token`` push-delivers it (#135).
-    ``platform`` populates the user-signed provenance memo (#54)."""
+    ``platform`` populates the user-signed provenance memo (#54). ``action``
+    distinguishes a marketplace buy from a plain offer accept — same tx type,
+    different app action on the permanent memo."""
     return await _create_xumm_payload(
         {
             "TransactionType": "NFTokenAcceptOffer",
@@ -240,9 +243,7 @@ async def create_accept_offer_payload(
         },
         options=_with_return_url({}, return_url),
         user_token=user_token,
-        memos_json=memos.build_memos_json(
-            memos.INITIATOR_USER, platform, memos.ACTION_ACCEPT_OFFER, campaign
-        ),
+        memos_json=memos.build_memos_json(memos.INITIATOR_USER, platform, action, campaign),
     )
 
 

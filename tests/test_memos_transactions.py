@@ -164,6 +164,14 @@ def test_accept_offer_payload_carries_memos(monkeypatch):
     assert _decoded_json_memos(captured["payload"])["action"] == memos.ACTION_ACCEPT_OFFER
 
 
+def test_accept_offer_payload_action_override(monkeypatch):
+    # A marketplace buy signs the same NFTokenAcceptOffer tx but is a distinct
+    # app action; the memo must say "buy", not "accept-offer".
+    captured = _capture_xumm(monkeypatch)
+    _run(xumm_ops.create_accept_offer_payload("OFFER1", action=memos.ACTION_BUY))
+    assert _decoded_json_memos(captured["payload"])["action"] == memos.ACTION_BUY
+
+
 def test_sell_offer_payload_carries_memos(monkeypatch):
     captured = _capture_xumm(monkeypatch)
     _run(xumm_ops.create_sell_offer_payload("rAcct", "NFTID", "1000000"))

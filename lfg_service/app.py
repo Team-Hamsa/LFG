@@ -1463,6 +1463,7 @@ async def handle_market_buy_start(request):
         return_url=xumm_ops.discord_return_url(body.get("guild_id"), body.get("channel_id")),
         user_token=await _push_token(user),
         platform=memos.platform_for_surface(_platform(user)),
+        action=memos.ACTION_BUY,
     )
     if not payload:
         return web.json_response({"error": "could not reach Xaman"}, status=502)
