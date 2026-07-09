@@ -180,6 +180,14 @@ def test_none_swaps_helper_flags_empty_slots():
     assert swap_meta.none_swaps(faced, faceless, ["Eyes"]) == ["Eyes"]  # other side None
     assert swap_meta.none_swaps(faced, faced, ["Eyes", "Head"]) == []  # both filled
     assert swap_meta.none_swaps(faceless, faceless, ["Eyes"]) == ["Eyes"]  # both None
+    # 1217 live mainnet NFTs encode an empty Accessory as "" (the original
+    # generator's spelling), not "None" — "" must be equally unswappable.
+    empty = [{"trait_type": "Eyes", "value": ""}, {"trait_type": "Head", "value": "Crown"}]
+    assert swap_meta.none_swaps(empty, faced, ["Eyes"]) == ["Eyes"]
+    assert swap_meta.none_swaps(faced, empty, ["Eyes"]) == ["Eyes"]
+    # a slot absent from the attribute list entirely is empty too
+    bare = [{"trait_type": "Head", "value": "Cap"}]
+    assert swap_meta.none_swaps(bare, faced, ["Eyes"]) == ["Eyes"]
 
 
 def test_swap_none_slot_rejected(monkeypatch):
@@ -196,6 +204,24 @@ def test_swap_none_slot_rejected(monkeypatch):
 
     assert resp.status == 400
     assert "Eyes" in json.loads(resp.body)["error"]
+
+
+def test_swap_empty_string_slot_rejected(monkeypatch):
+    """~34% of the live mainnet collection carries {"trait_type": "Accessory",
+    "value": ""} — empty encoded as "", not "None". normalize_attributes
+    preserves a present-but-empty value, so the guard itself must catch it or
+    the swap silently deletes the counterparty's real Accessory."""
+    nft1 = _nft("M1", "male", "LFG #10")
+    for attr in nft1["attributes"]:
+        if attr["trait_type"] == "Accessory":
+            attr["value"] = ""
+    _stub_wallet_nfts(monkeypatch, [nft1, _nft("M2", "male", "LFG #11")])
+    req = _make_swap_request("M1", "M2", ["Accessory"])
+
+    resp = asyncio.get_event_loop().run_until_complete(server.handle_swap_start(req))
+
+    assert resp.status == 400
+    assert "Accessory" in json.loads(resp.body)["error"]
 
 
 def test_swap_filled_slots_still_ok(monkeypatch):
