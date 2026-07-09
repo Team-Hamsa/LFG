@@ -12,6 +12,7 @@
 #   * build_memos_json  -> XUMM txjson "Memos" array (for user-signed payloads)
 #   * build_memo_models -> list[xrpl.models.transactions.Memo] (backend-signed)
 
+import re
 from typing import Any
 
 from xrpl.models.transactions import Memo
@@ -55,6 +56,9 @@ _SURFACE_TO_PLATFORM = {
 }
 
 # --- action: the app-level operation ----------------------------------------
+# Covers every transaction type the app actually builds/submits. The app has no
+# Clawback path (issuer never claws back holder balances), so there is
+# deliberately no `clawback` action — add one here if that ever changes.
 ACTION_MINT = "mint"
 ACTION_CREATE_OFFER = "create-offer"
 ACTION_ACCEPT_OFFER = "accept-offer"
@@ -97,6 +101,13 @@ _ACTIONS = frozenset(
 MEMO_FORMAT = "text/plain"
 _MEMO_FORMAT_HEX = str_to_hex(MEMO_FORMAT)
 
+# `campaign` is the one non-enum memo field, so unlike initiator/platform/action
+# it can't be a closed set. But it is written PERMANENTLY and PUBLICLY on-ledger,
+# so it must be a constrained admin/config tag (lowercase slug, bounded length) —
+# never free-form or user-derived text (PII / compliance exposure). A value
+# outside this shape fails loudly here rather than being memorialized on-chain.
+_CAMPAIGN_RE = re.compile(r"^[a-z0-9-]{1,32}$")
+
 # XRPL caps the total Memos payload at ~1 KB per transaction; our short closed
 # enum is far under this, but the builders assert it so an accidentally long
 # campaign string fails here rather than as an on-ledger temMALFORMED.
@@ -122,6 +133,11 @@ def _entries(
         raise ValueError(f"unknown memo action: {action!r}")
     entries = [("initiator", initiator), ("platform", platform), ("action", action)]
     if campaign:
+        if not _CAMPAIGN_RE.match(campaign):
+            raise ValueError(
+                f"unsafe campaign tag {campaign!r}: expected an admin-controlled "
+                "slug matching [a-z0-9-]{1,32} (memos are permanent & public on-ledger)"
+            )
         entries.append(("campaign", campaign))
     return entries
 

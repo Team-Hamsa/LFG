@@ -77,6 +77,36 @@ def test_rejects_values_outside_the_closed_enum(initiator, platform, action):
         memos.build_memo_models(initiator, platform, action)
 
 
+@pytest.mark.parametrize(
+    "bad_campaign",
+    [
+        "has space",  # whitespace
+        "UPPER",  # uppercase
+        "josh@example.com",  # PII/email-like
+        "a" * 33,  # too long
+        "emoji😀",  # non-ascii
+    ],
+)
+def test_rejects_unsafe_campaign_tags(bad_campaign):
+    # campaign is written permanently + publicly on-ledger, so it must be a
+    # constrained admin/config tag ([a-z0-9-], bounded) — never free/user text.
+    with pytest.raises(ValueError):
+        memos.build_memos_json(
+            memos.INITIATOR_USER, memos.PLATFORM_WEBAPP, memos.ACTION_MINT, campaign=bad_campaign
+        )
+    with pytest.raises(ValueError):
+        memos.build_memo_models(
+            memos.INITIATOR_USER, memos.PLATFORM_WEBAPP, memos.ACTION_MINT, campaign=bad_campaign
+        )
+
+
+def test_accepts_well_formed_campaign_tag():
+    arr = memos.build_memos_json(
+        memos.INITIATOR_USER, memos.PLATFORM_WEBAPP, memos.ACTION_MINT, campaign="comeback-2026"
+    )
+    assert len(arr) == 4
+
+
 def test_payload_stays_under_the_1kb_memo_limit():
     # Longest realistic combination must still fit the XRPL per-tx memo budget.
     arr = memos.build_memos_json(
