@@ -37,7 +37,7 @@ import uuid
 from dataclasses import dataclass, field
 from typing import Any
 
-from lfg_core import market_ops, xrpl_ops, xumm_ops
+from lfg_core import market_ops, memos, xrpl_ops, xumm_ops
 
 # Shared session states across List/Cancel/Buy.
 AWAITING_SIGNATURE = "awaiting_signature"
@@ -476,7 +476,10 @@ async def advance_trait_sell_session(
                 return None  # still waiting on signature 1
 
         payload = await create_sell_offer_payload(
-            session.wallet_address, session.nft_id, str(session.amount_drops)
+            session.wallet_address,
+            session.nft_id,
+            str(session.amount_drops),
+            platform=memos.platform_for_surface(session.platform),
         )
         if not payload:
             session.state = FAILED

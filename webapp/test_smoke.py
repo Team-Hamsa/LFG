@@ -720,7 +720,7 @@ def test_mint_session_happy_path(monkeypatch, tmp_path):
     async def fake_mint(**kwargs):
         return "NFTID123"
 
-    async def fake_offer(nft_id, destination):
+    async def fake_offer(nft_id, destination, **kwargs):
         return "OFFER456"
 
     async def fake_accept(offer_id, **kw):
@@ -883,7 +883,7 @@ def _swap_session(mutable=(False, False)):
 def test_swap_session_missing_layers_fails_before_burn(monkeypatch):
     burned = []
 
-    async def fake_burn(nft_id, owner):
+    async def fake_burn(nft_id, owner=None, **kwargs):
         burned.append(nft_id)
         return "HASH"
 
@@ -939,7 +939,7 @@ def _patch_swap_stubs(
     async def no_missing(attrs, body, store):
         return []
 
-    async def fake_burn(nft_id, owner=None):
+    async def fake_burn(nft_id, owner=None, **kwargs):
         if nft_id in burn_fails:
             events.append(f"burn_failed {nft_id}")
             return None
@@ -959,7 +959,7 @@ def _patch_swap_stubs(
 
     offers = []
 
-    async def fake_offer(nft_id, destination, amount=None):
+    async def fake_offer(nft_id, destination, amount=None, **kwargs):
         assert amount is not None  # swap offers are fee-priced, never free
         offers.append(amount)
         events.append(f"offer {nft_id}")
@@ -972,7 +972,7 @@ def _patch_swap_stubs(
             "uuid": "u",
         }
 
-    async def fake_modify(nft_id, owner, uri):
+    async def fake_modify(nft_id, owner, uri, **kwargs):
         if uri.startswith("https://old/"):  # rollback to the original URI
             events.append(f"revert {nft_id}")
             return "RHASH"

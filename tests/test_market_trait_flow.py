@@ -258,7 +258,7 @@ class TestAdvanceTraitSellSession:
 
         calls = []
 
-        async def fake_create_sell(account, nft_id, drops):
+        async def fake_create_sell(account, nft_id, drops, **kwargs):
             calls.append((account, nft_id, drops))
             return {
                 "qr_url": "https://list-qr",

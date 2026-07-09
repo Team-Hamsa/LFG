@@ -16,7 +16,7 @@ import requests
 from PIL import Image
 from xrpl.utils import xrp_to_drops
 
-from lfg_core import config
+from lfg_core import config, memos
 
 _XUMM_HEADERS = {
     "accept": "application/json",
@@ -143,6 +143,7 @@ async def _create_xumm_payload(
     txjson: dict[str, Any],
     options: dict[str, Any] | None = None,
     user_token: str | None = None,
+    memos_json: list[dict[str, Any]] | None = None,
 ) -> dict[str, Any] | None:
     """POST a payload to the XUMM platform API; returns qr/deeplink dict or None.
 
@@ -152,10 +153,13 @@ async def _create_xumm_payload(
     actually went out — a stale/expired token yields ``pushed: False`` and the
     caller falls back to the QR / deep link that are always returned too. A
     missing token simply omits the field, never blocking the sign."""
-    # Make Waves hackathon: every signed transaction must carry the source tag.
-    # SignIn is a pseudo-transaction (no ledger effect), so it is exempt.
+    # Make Waves hackathon: every signed transaction must carry the source tag,
+    # and provenance memos (#54). SignIn is a pseudo-transaction (no ledger
+    # effect), so it is exempt from both.
     if txjson.get("TransactionType") != "SignIn":
         txjson.setdefault("SourceTag", config.SOURCE_TAG)
+        if memos_json:
+            txjson.setdefault("Memos", memos_json)
     payload: dict[str, Any] = {"txjson": txjson}
     if options:
         payload["options"] = options
@@ -190,6 +194,9 @@ async def create_payment_payload(
     expire_minutes: int | None = None,
     return_url: dict[str, str] | None = None,
     user_token: str | None = None,
+    platform: str = memos.PLATFORM_BACKEND,
+    action: str = memos.ACTION_PAYMENT,
+    campaign: str | None = None,
 ) -> dict[str, Any] | None:
     """XUMM sign-request payload for a token Payment. This is what payment
     QRs must encode: Xaman only understands its own payload links
@@ -197,7 +204,10 @@ async def create_payment_payload(
     xaman.app/detect link from generate_static_payment_link, which is kept
     only as a last-resort fallback when the XUMM API is unreachable.
 
-    ``user_token`` (issue #135) push-delivers the request to a known user."""
+    ``user_token`` (issue #135) push-delivers the request to a known user.
+    ``platform``/``action`` populate the provenance memo (#54); this payload is
+    user-signed, so the initiator is always ``user``. Pass a specific ``action``
+    (e.g. the mint fee vs. ``trait-swap-fee``) to distinguish payment flows."""
     if expire_minutes is None:
         # Match the on-ledger payment wait so the sign request and the
         # subscription expire together.
@@ -210,6 +220,7 @@ async def create_payment_payload(
         },
         options=_with_return_url({"expire": expire_minutes}, return_url),
         user_token=user_token,
+        memos_json=memos.build_memos_json(memos.INITIATOR_USER, platform, action, campaign),
     )
 
 
@@ -217,8 +228,14 @@ async def create_accept_offer_payload(
     offer_id: str,
     return_url: dict[str, str] | None = None,
     user_token: str | None = None,
+    platform: str = memos.PLATFORM_BACKEND,
+    campaign: str | None = None,
+    action: str = memos.ACTION_ACCEPT_OFFER,
 ) -> dict[str, Any] | None:
-    """XUMM payload for NFTokenAcceptOffer. ``user_token`` push-delivers it (#135)."""
+    """XUMM payload for NFTokenAcceptOffer. ``user_token`` push-delivers it (#135).
+    ``platform`` populates the user-signed provenance memo (#54). ``action``
+    distinguishes a marketplace buy from a plain offer accept — same tx type,
+    different app action on the permanent memo."""
     return await _create_xumm_payload(
         {
             "TransactionType": "NFTokenAcceptOffer",
@@ -226,6 +243,7 @@ async def create_accept_offer_payload(
         },
         options=_with_return_url({}, return_url),
         user_token=user_token,
+        memos_json=memos.build_memos_json(memos.INITIATOR_USER, platform, action, campaign),
     )
 
 
@@ -235,6 +253,8 @@ async def create_sell_offer_payload(
     drops: str,
     return_url: dict[str, str] | None = None,
     user_token: str | None = None,
+    platform: str = memos.PLATFORM_BACKEND,
+    campaign: str | None = None,
 ) -> dict[str, Any] | None:
     """XUMM payload for NFTokenCreateOffer listing an NFT for sale on the
     in-app marketplace. `drops` must already be an integer-drops string (see
@@ -254,6 +274,9 @@ async def create_sell_offer_payload(
         },
         options=_with_return_url({}, return_url),
         user_token=user_token,
+        memos_json=memos.build_memos_json(
+            memos.INITIATOR_USER, platform, memos.ACTION_LIST, campaign
+        ),
     )
 
 
@@ -262,9 +285,12 @@ async def create_cancel_offer_payload(
     offer_index: str,
     return_url: dict[str, str] | None = None,
     user_token: str | None = None,
+    platform: str = memos.PLATFORM_BACKEND,
+    campaign: str | None = None,
 ) -> dict[str, Any] | None:
     """XUMM payload for NFTokenCancelOffer, delisting one existing sell
-    offer by its ledger index. ``user_token`` push-delivers it (#135)."""
+    offer by its ledger index. ``user_token`` push-delivers it (#135).
+    ``platform`` populates the user-signed provenance memo (#54)."""
     return await _create_xumm_payload(
         {
             "TransactionType": "NFTokenCancelOffer",
@@ -273,6 +299,9 @@ async def create_cancel_offer_payload(
         },
         options=_with_return_url({}, return_url),
         user_token=user_token,
+        memos_json=memos.build_memos_json(
+            memos.INITIATOR_USER, platform, memos.ACTION_CANCEL_OFFER, campaign
+        ),
     )
 
 

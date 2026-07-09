@@ -8,6 +8,7 @@ from typing import Any
 import discord
 import requests
 
+from lfg_core import memos
 from lfg_core.config import SOURCE_TAG
 from surfaces.discord_bot import config
 
@@ -40,6 +41,10 @@ async def create_trustline_request() -> dict[str, Any] | None:
         "TransactionType": "TrustSet",
         "Flags": 131072,  # tfSetNoRipple flag
         "SourceTag": SOURCE_TAG,  # Make Waves invariant (#75)
+        # Provenance memo (#54): user-signed TrustSet from the Discord bot.
+        "Memos": memos.build_memos_json(
+            memos.INITIATOR_USER, memos.PLATFORM_DISCORD_BOT, memos.ACTION_TRUSTSET
+        ),
         "LimitAmount": {
             "currency": config.TOKEN_CURRENCY_HEX,
             "issuer": config.TOKEN_ISSUER_ADDRESS,
