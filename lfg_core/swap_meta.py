@@ -91,6 +91,25 @@ def get_attr(attributes: list[dict[str, Any]], trait_type: str) -> str | None:
     return None
 
 
+def none_swaps(
+    attrs1: list[dict[str, Any]],
+    attrs2: list[dict[str, Any]],
+    traits_to_swap: list[str],
+) -> list[str]:
+    """Of the requested slots, those that can't be swapped because ONE side is
+    empty ('None'/missing). The Trait Swapper is a peer exchange, so swapping an
+    empty slot would hand 'None' to the other NFT — deleting a trait it has. You
+    can't trade a slot you don't fill. Returns the offending trait types (order
+    preserved) so the caller can reject them; empty list = all swappable."""
+    blocked = []
+    for trait in traits_to_swap:
+        v1 = get_attr(attrs1, trait)
+        v2 = get_attr(attrs2, trait)
+        if v1 in (None, "None") or v2 in (None, "None"):
+            blocked.append(trait)
+    return blocked
+
+
 def detect_body(attributes: list[dict[str, Any]]) -> str:
     """Body class determines which layer directory set is used."""
     body_val = get_attr(attributes, "Body") or ""
