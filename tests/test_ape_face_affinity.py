@@ -44,3 +44,14 @@ def test_skeleton_still_excluded_from_face_values():
     # from ape/male/female face art (their own folders are None-only anyway).
     cfg = trait_config.get_config()
     assert not cfg.value_allowed("skeleton", "Eyes", "3D")
+
+
+def test_ape_still_excluded_from_eyes_without_ape_art():
+    # Deliberate exclusions (owner-confirmed): these two Eyes values have no
+    # file in layers/ape/Eyes/, only male/female art. Allowing them would make
+    # value_allowed pass for art the ape dir can't supply and pull unvetted
+    # foreign-dir art onto ape bodies via resolve_layer's fallback. Pin the
+    # exclusion so a future affinity sweep can't "fix" it without adding art.
+    cfg = trait_config.get_config()
+    assert not cfg.value_allowed("ape", "Eyes", "Third Eye")
+    assert not cfg.value_allowed("ape", "Eyes", "Third Eyelashes")
