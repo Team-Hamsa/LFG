@@ -45,3 +45,7 @@ LFGO*.csv
 # Per-network ledger history DBs (regenerable via backfill)
 history_testnet.db*
 history_mainnet.db*
+
+# macOS finder metadata
+.DS_Store
+._.DS_Store

@@ -1829,6 +1829,9 @@ async function main() {
     // Closet / trait economy ships after the mainnet MVP: with the feature
     // off, hide the Dress Up entry point (the API answers 403 regardless).
     if (cfg.economy_enabled === false) el('swap-btn').hidden = true;
+    // In-app marketplace (#44) ships after the mainnet MVP: with the feature
+    // off, hide the Marketplace entry point (the API answers 403 regardless).
+    if (cfg.market_enabled === false) el('market-btn').hidden = true;
     if (cfg.dev_mode && 'EventSource' in window) {
       new EventSource('/__dev/reload').onmessage = () => location.reload();
     }

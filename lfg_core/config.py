@@ -133,6 +133,11 @@ ECONOMY_NETWORK = os.getenv("ECONOMY_NETWORK", "testnet")  # economy DB network
 # not auto-issue Closets, and the client hides the Dress Up UI — lets the
 # Minter + Trait Swapper launch on mainnet before the Closet ships.
 ECONOMY_ENABLED = os.getenv("ECONOMY_ENABLED", "1") not in ("0", "false", "False")
+# In-app marketplace (#44) feature flag (default on): when 0, every /api/market
+# route answers 403 feature-disabled and the client hides the Marketplace UI —
+# lets the Minter + Trait Swapper launch on mainnet before the money-touching
+# marketplace (native NFTokenOffer list/buy/cancel) ships.
+MARKET_ENABLED = os.getenv("MARKET_ENABLED", "1") not in ("0", "false", "False")
 WEBAPP_DEV_MODE = os.getenv("WEBAPP_DEV_MODE", "") not in ("", "0", "false", "False")
 
 # Telegram Mini App (#89). All optional — the feature is OFF when unset:
