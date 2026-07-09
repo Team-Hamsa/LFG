@@ -19,7 +19,8 @@ import sqlite3
 import sys
 import time
 import traceback
-from typing import Any, cast
+from collections.abc import Awaitable, Callable
+from typing import Any, TypeVar, cast
 from urllib.parse import quote as urlquote
 
 import aiohttp
@@ -339,6 +340,29 @@ def require_wallet(handler):
         return await handler(request)
 
     return wrapper
+
+
+def _market_disabled_response():
+    return web.json_response(
+        {"error": "the marketplace is not enabled", "code": "market_disabled"}, status=403
+    )
+
+
+_Handler = TypeVar("_Handler", bound=Callable[..., Awaitable[web.StreamResponse]])
+
+
+def require_market(handler: _Handler) -> _Handler:
+    """Gate an in-app marketplace (#44) route on config.MARKET_ENABLED (checked
+    before auth so a disabled deploy exposes nothing of the money-touching
+    market surface). Defined here so it precedes every /api/market handler."""
+
+    @functools.wraps(handler)
+    async def wrapper(request: web.Request) -> web.StreamResponse:
+        if not config.MARKET_ENABLED:
+            return _market_disabled_response()
+        return await handler(request)
+
+    return cast(_Handler, wrapper)
 
 
 def make_status_handler(sessions: dict[str, Any]):
@@ -797,6 +821,7 @@ def _parse_market_int_param(
     return value
 
 
+@require_market
 async def handle_market_listings(request: web.Request) -> web.Response:
     """Public: GET /api/market/listings?kind=&trait=&min_xrp=&max_xrp=&sort=&limit=&offset=.
 
@@ -980,6 +1005,7 @@ def _compute_mine_data(char_network: str, econ_network: str, wallet: str) -> dic
     }
 
 
+@require_market
 @require_wallet
 async def handle_market_mine(request):  # untyped: matches require_wallet's other handlers
     # (e.g. handle_account, handle_economy) — an annotated signature under an
@@ -1055,6 +1081,7 @@ def _compute_trait_sales(network: str, slot: str, value: str) -> list[dict[str, 
         conn.close()
 
 
+@require_market
 async def handle_market_history(request: web.Request) -> web.Response:
     """Public: GET /api/market/history?nft_id=… (character sale/offer history)
     or ?slot=&value=… (sold trait listings — per-nft_id history is near-useless
@@ -1198,6 +1225,7 @@ def _close_listing_sync(
         conn.close()
 
 
+@require_market
 @require_wallet
 async def handle_market_list_start(request):
     """POST /api/market/list {nft_id, price_xrp}: 409 if the caller doesn't
@@ -1288,6 +1316,7 @@ async def handle_market_list_start(request):
     return web.json_response(session.to_dict())
 
 
+@require_market
 @require_wallet
 async def handle_market_cancel_start(request):
     """POST /api/market/cancel {offer_index}: 404 if there's no live listing
@@ -1348,6 +1377,7 @@ async def handle_market_cancel_start(request):
     return web.json_response(session.to_dict())
 
 
+@require_market
 @require_wallet
 async def handle_market_buy_start(request):
     """POST /api/market/buy {offer_index}: 404/410 if the listing is unknown
@@ -1516,7 +1546,7 @@ def _make_market_status_handler(prefix: str):
 
         return web.json_response(session.to_dict())
 
-    return handler
+    return require_market(handler)
 
 
 handle_market_list_status = _make_market_status_handler("list")
@@ -1700,6 +1730,7 @@ def require_economy(handler):
 # --- Task 9 (spec §Q7): trait sell wizard — Extract then List, one action ---
 
 
+@require_market
 @require_economy
 @require_wallet
 async def handle_market_trait_list_start(request):
@@ -1775,6 +1806,7 @@ async def handle_market_trait_list_start(request):
     return web.json_response(session.to_dict())
 
 
+@require_market
 @require_auth
 async def handle_market_trait_list_status(request):
     """GET /api/market/trait/list/{session_id}: advance + report the
@@ -2199,6 +2231,7 @@ async def handle_config(request):
             "client_id": config.DISCORD_CLIENT_ID,
             "dev_mode": config.WEBAPP_DEV_MODE,
             "economy_enabled": config.ECONOMY_ENABLED,
+            "market_enabled": config.MARKET_ENABLED,
         }
     )
 

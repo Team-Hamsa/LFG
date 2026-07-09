@@ -3,7 +3,11 @@
 _Last reviewed: 2026-07-02 against main @ 7df9ded. Full test suite: 633 passed._
 
 Scope of the MVP: **Minter** and **Trait Swapper** on mainnet. The **Closet /
-trait economy ships later** and must be gated off (Blocker 4).
+trait economy ships later** and must be gated off (Blocker 4). The **in-app
+marketplace also ships later** and must be gated off via `MARKET_ENABLED=0`
+(Blocker 4b) — with it set, every `/api/market/*` route answers 403
+`market_disabled` and the client hides the 🛒 Marketplace button, so no
+money-touching list/buy/cancel path is reachable.
 
 Review verdict: both flows are logically sound end-to-end (fail-safe ordering,
 journaling, replay-safe payment verification) and SourceTag `2606160021` is
@@ -131,6 +135,7 @@ All of `lfg-bot`, `lfg-activity`, `lfg-telegram` share the repo `.env`
 | `SEED` | testnet minter seed | mainnet regkey seed (Blocker 1) |
 | `SIGNING_ACCOUNT` | — (new) | `rLfgoMintj3KBcs4s2XKtquvDwEte2kYfJ` |
 | `ECONOMY_ENABLED` | — (new) | `0` (Closet off) |
+| `MARKET_ENABLED` | — (new) | `0` (marketplace off) |
 | `TOKEN_ISSUER_ADDRESS` | testnet issuer | mainnet LFGO issuer |
 | `TOKEN_CURRENCY_HEX` | testnet value | mainnet LFGO hex |
 | `NFT_TAXON` | `1760` | confirm intended mainnet mint taxon (1760 matches SWAP_TAXON) |
@@ -169,7 +174,12 @@ issuer** (suggest ≥ 50 XRP) and watch for that error in logs.
    (`lfg-index-mainnet`) records it.
 5. One real swap on a mutable NFT and one on a legacy burnable NFT.
 6. Confirm the Dress Up button is gone and `/api/closet` returns
-   feature-disabled.
+   feature-disabled. Confirm the 🛒 Marketplace button is gone and that the
+   marketplace surface is gated across its route classes — a read
+   (`GET /api/market/listings`), a money-touching write (`POST /api/market/buy`),
+   and a status poll (`GET /api/market/buy/{session_id}`) each return 403
+   `market_disabled` (every `/api/market/*` handler is wrapped by
+   `require_market`, so these three spot-checks stand in for the whole surface).
 7. Confirm which XUMM app the current `XUMM_API_KEY` belongs to — two legacy
    apps are pending retirement after the public-repo scrub; rotate if flagged.
 
