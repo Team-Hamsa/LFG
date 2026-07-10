@@ -1982,7 +1982,9 @@ async def handle_nfts(request):
     try:
         nfts = await _wallet_nfts(request["wallet"])
     except Exception as e:
-        logging.error(f"NFT listing failed: {e}")
+        # repr, not str: asyncio.TimeoutError stringifies to "" and left this
+        # log line blank during the mainnet-cutover 502s.
+        logging.error(f"NFT listing failed: {e!r}")
         return web.json_response({"error": "failed to load wallet NFTs"}, status=502)
     # Quote the swap fee for the cost line (BRIX holders pay BRIX; everyone
     # else the AMM XRP equivalent). Advisory only — the swap session
@@ -2335,9 +2337,14 @@ def _img_url_allowed(url: str) -> bool:
 async def handle_img(request):
     """Same-origin proxy for CDN images: the Activity's CSP blocks cross-origin
     <img> loads, so the client routes image URLs through here (allowed: the
-    Bunny CDN bases plus the IPFS gateway host suffixes — see _img_url_allowed)."""
+    Bunny CDN bases plus the IPFS gateway host suffixes — see _img_url_allowed).
+    Raw ipfs:// URIs (the on-chain index stores them verbatim, and the
+    leaderboard serves them as-is) are resolved to the gateway first."""
     url = request.query.get("u", "")
-    if len(url) > 2048 or not _img_url_allowed(url):
+    if len(url) > 2048:
+        return web.json_response({"error": "bad image url"}, status=400)
+    url = swap_meta.resolve_ipfs(url)
+    if not _img_url_allowed(url):
         return web.json_response({"error": "bad image url"}, status=400)
     try:
         body, ctype = await _fetch_cdn(url)

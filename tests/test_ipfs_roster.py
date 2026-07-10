@@ -246,3 +246,64 @@ def test_load_wallet_nfts_survives_broken_cache(monkeypatch):
         swap_meta.load_wallet_nfts("rWallet", fake_account_nfts, meta_cache=BrokenCache())
     )
     assert [n["number"] for n in nfts] == [12]
+
+
+# --- D) raw ipfs:// image URIs (leaderboard rows serve onchain_nfts.image
+#         verbatim, which is ipfs:// for 3,474 of 3,535 live mainnet tokens) ---
+
+
+def test_img_proxy_resolves_raw_ipfs_uri(monkeypatch):
+    """/api/img?u=ipfs://<cid>/<path> must be translated to the dweb.link
+    gateway and served — the leaderboard client passes the index's raw image
+    URI straight through, so without this every legacy image 400s."""
+    fetched = []
+
+    async def fake_fetch(url):
+        fetched.append(url)
+        return b"\x89PNG fake", "image/png"
+
+    monkeypatch.setattr(server, "_fetch_cdn", fake_fetch)
+    cid = "bafybeih3g6qo7ozdpczkppnnxymo546xnbihlvizwphlt2gsse6enmsnn4"
+    resp = asyncio.get_event_loop().run_until_complete(
+        server.handle_img(_img_request(f"ipfs://{cid}/2946.png"))
+    )
+    assert resp.status == 200
+    assert fetched == [f"https://{cid}.ipfs.dweb.link/2946.png"]
+
+
+# --- E) roster must survive one transient XRPL fetch failure (#153: a single
+#         websocket open timeout was 502ing the whole swapper) ---
+
+
+def test_load_wallet_nfts_retries_transient_account_fetch():
+    conn = _cache_conn()
+    nft_index.meta_cache_put_many(conn, {_URI_HEX_1: _META_1})
+    calls = []
+
+    async def flaky_account_nfts(wallet, issuer):
+        calls.append(1)
+        if len(calls) == 1:
+            raise asyncio.TimeoutError  # str() is empty — the mainnet 502 signature
+        return [_raw_token(_URI_HEX_1, "A" * 64)]
+
+    nfts = asyncio.get_event_loop().run_until_complete(
+        swap_meta.load_wallet_nfts(
+            "rWallet", flaky_account_nfts, meta_cache=nft_index.UriMetadataCache(conn)
+        )
+    )
+    assert len(calls) == 2
+    assert [n["number"] for n in nfts] == [12]
+
+
+def test_load_wallet_nfts_raises_after_persistent_failure():
+    calls = []
+
+    async def dead_account_nfts(wallet, issuer):
+        calls.append(1)
+        raise asyncio.TimeoutError
+
+    with pytest.raises(asyncio.TimeoutError):
+        asyncio.get_event_loop().run_until_complete(
+            swap_meta.load_wallet_nfts("rWallet", dead_account_nfts)
+        )
+    assert len(calls) == 2  # exactly one retry, then surface the error

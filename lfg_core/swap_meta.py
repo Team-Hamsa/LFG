@@ -235,7 +235,14 @@ async def load_wallet_nfts(
     public-gateway fetch per NFT (#153). The URI is content-addressed for our
     tokens, so cached entries never go stale. Cache failures degrade to the
     live fetch — they must never break the listing."""
-    raw = await get_account_nfts(wallet, config.SWAP_ISSUER_ADDRESS)
+    # One retry on the XRPL fetch: a single websocket open timeout to the
+    # public mainnet node (asyncio.TimeoutError — whose str() is empty) was
+    # 502ing the whole roster. Log with repr so the cause is never blank.
+    try:
+        raw = await get_account_nfts(wallet, config.SWAP_ISSUER_ADDRESS)
+    except Exception as e:
+        logging.warning(f"get_account_nfts failed ({e!r}); retrying once")
+        raw = await get_account_nfts(wallet, config.SWAP_ISSUER_ADDRESS)
     cached: dict[str, dict[str, Any]] = {}
     if meta_cache is not None:
         try:
