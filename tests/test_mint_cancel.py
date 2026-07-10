@@ -96,6 +96,52 @@ def test_cancel_terminal_session_is_noop():
     assert session.state == mint_flow.OFFER_READY
 
 
+def test_cancel_refused_once_payment_confirmed_mid_buy_and_burn(monkeypatch):
+    """The moment wait_for_payment returns True the user's money is
+    irrevocably taken, so cancel() must be refused from that instant —
+    including during the multi-second buy_and_burn await that runs before
+    any further pipeline stage. Regression test for the paid-but-still-
+    cancellable window."""
+
+    async def scenario():
+        entered_buy_and_burn = asyncio.Event()
+        release_buy_and_burn = asyncio.Event()
+
+        async def fake_wait_for_payment(**kwargs):
+            return True
+
+        async def fake_buy_and_burn(*args, **kwargs):
+            entered_buy_and_burn.set()
+            await release_buy_and_burn.wait()
+            return True
+
+        monkeypatch.setattr(mint_flow.xrpl_ops, "wait_for_payment", fake_wait_for_payment)
+        monkeypatch.setattr(mint_flow.xrpl_ops, "buy_and_burn", fake_buy_and_burn)
+
+        session = mint_flow.MintSession("55", "rA")
+        session.pay_with, session.pay_amount = "XRP", 1
+        session.task = asyncio.get_event_loop().create_task(mint_flow.run_mint_session(session))
+        await asyncio.wait_for(entered_buy_and_burn.wait(), timeout=5)
+
+        # Payment is confirmed and the pipeline is mid-buy_and_burn: the
+        # session must already have left AWAITING_PAYMENT, so cancel() is
+        # refused and the task keeps running.
+        assert session.cancel() is False
+        assert session.state != mint_flow.CANCELLED
+        assert session.state != mint_flow.AWAITING_PAYMENT
+        assert not session.task.cancelled()
+
+        # Unblock and tear down without running the rest of the pipeline.
+        session.task.cancel()
+        release_buy_and_burn.set()
+        try:
+            await session.task
+        except asyncio.CancelledError:
+            pass
+
+    _run(scenario())
+
+
 # ---------------------------------------------------------------------------
 # Endpoint: POST /api/mint/{session_id}/cancel
 # ---------------------------------------------------------------------------

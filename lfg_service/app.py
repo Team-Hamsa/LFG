@@ -1949,7 +1949,7 @@ async def handle_mint_start(request):
         logging.warning(f"prepare_payment failed; falling back to XRP path: {e}")
     session.ensure_payment_fallback()
     # Keep the task handle so /cancel can stop the payment wait (#141)
-    session.task = asyncio.get_event_loop().create_task(mint_flow.run_mint_session(session))
+    session.task = asyncio.create_task(mint_flow.run_mint_session(session))
     return web.json_response(session.to_dict())
 
 
@@ -2130,7 +2130,7 @@ async def handle_mint_cancel(request):
         return web.json_response({"error": "session is past payment"}, status=409)
     # A deliberate cancel is not a mint outcome: suppress the terminal
     # mint.completed/mint.failed publish a late status poll would fire.
-    session._published = True
+    session.mark_published()
     return web.json_response(session.to_dict())
 
 

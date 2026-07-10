@@ -87,6 +87,9 @@ class MintSession:
         # The run_mint_session background task, set by the service after it
         # spawns it, so cancel() can stop the payment wait promptly (#141).
         self.task: asyncio.Task[None] | None = None
+        # Terminal-event publish guard, read/set by lfg_service.app when it
+        # publishes mint.completed/mint.failed to the event firehose.
+        self._published = False
 
     def _payment_params(self) -> dict[str, Any]:
         """Destination/amount for this session's payment path. LFGO goes to
@@ -152,7 +155,10 @@ class MintSession:
 
         The state check and CANCELLED assignment are synchronous (no await
         between them), so on the single event loop this cannot race the
-        background task's own state transitions."""
+        background task's own state transitions — and run_mint_session
+        leaves AWAITING_PAYMENT in the same synchronous step in which
+        wait_for_payment reports the payment confirmed, so a confirmed
+        (paid) session can never be cancelled."""
         if self.state != AWAITING_PAYMENT:
             return False
         self.state = CANCELLED
@@ -161,6 +167,12 @@ class MintSession:
             # `except Exception` cannot catch it and overwrite CANCELLED.
             self.task.cancel()
         return True
+
+    def mark_published(self) -> None:
+        """Mark the terminal firehose event as already published (or, for a
+        deliberate user cancel, as suppressed) — kept as a method so callers
+        never reach into the private guard attribute directly."""
+        self._published = True
 
     def ensure_payment_fallback(self) -> None:
         """If prepare_payment was cancelled or failed, default to the XRP
@@ -264,6 +276,13 @@ async def run_mint_session(session: MintSession) -> None:
             session.state = PAYMENT_TIMEOUT
             return
 
+        # The payment is irrevocably confirmed on-ledger: leave
+        # AWAITING_PAYMENT *now*, before any further await (the XRP-path
+        # buy_and_burn below is a multi-second submit_and_wait), so a
+        # concurrent cancel() can never land on a session whose money has
+        # already been taken.
+        session.state = GENERATING
+
         if session.pay_with == "XRP":
             # Buy the mint's LFGO off the DEX and burn it, spending at most
             # the XRP just collected. Best-effort: a failed buyback must
@@ -281,7 +300,6 @@ async def run_mint_session(session: MintSession) -> None:
 
         # 2. Compose a random NFT from the unified layer store (same tree
         #    the Trait Swapper uses: <gender>/<TraitType>/<Value>.ext)
-        session.state = GENERATING
         session.nft_number = await _allocate_nft_number()
         store = layer_store.get_layer_store()
         body, attributes = await traits.select_random_attributes(store)

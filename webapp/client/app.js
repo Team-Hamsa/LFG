@@ -10,6 +10,9 @@
 // unit-testable under Node (tests/test_market_pure_js.py) without a browser
 // — see webapp/client/market_pure.js's own header for the full rationale.
 import * as marketPure from './market_pure.js';
+// Mint-flow pure helpers (issue #141): the cancel-outcome decision lives in
+// its own module so it's Node-testable too (tests/test_mint_pure_js.py).
+import * as mintPure from './mint_pure.js';
 
 const params = new URLSearchParams(window.location.search);
 const insideDiscord = params.has('frame_id');
@@ -405,9 +408,11 @@ function showFlow({ title, text, qrData, link, image, done, stage, spinner, cele
   if (image) el('nft-image').src = image;
   el('flow-regen-btn').hidden = !regen;
   // Back out of an awaiting-signature screen (issue #141): callers pass a
-  // callback so each flow decides what "cancel" means for it.
+  // callback so each flow decides what "cancel" means for it. Always assign
+  // (null when absent) so a later showFlow can't leave a stale handler on
+  // the hidden button.
   el('flow-cancel-btn').hidden = !cancel;
-  if (cancel) el('flow-cancel-btn').onclick = cancel;
+  el('flow-cancel-btn').onclick = cancel || null;
   el('flow-done-btn').hidden = !done;
 }
 
@@ -425,7 +430,9 @@ function mintPayView(s) {
       pill,
       spinner: true,
       stage: s.state,
-      cancel: cancelMint,
+      // QR already scanned: the payload may already be signed in Xaman, so
+      // cancelMint warns before backing out (payment could still land).
+      cancel: () => cancelMint(true),
     };
   }
   return {
@@ -544,21 +551,42 @@ async function regeneratePaymentQr() {
 
 // Back out of the pay screen (issue #141): tell the server to cancel the
 // session (releasing the per-user mint lock immediately), then return to the
-// mint start screen. Errors (session already past payment / gone) still go
-// home — the poll's next tick would land on the real state anyway.
-async function cancelMint() {
+// mint start screen. If the server refuses — above all 409 'session is past
+// payment', meaning the money is already taken — the user must NOT be dumped
+// home: keep the session id and resume polling so the flow panel follows the
+// real pipeline through to the offer_ready accept QR (or the real failure).
+// `maybeSigned` is set by the QR-scanned variant, where the payload may
+// already be approved in Xaman: warn before backing out.
+async function cancelMint(maybeSigned) {
+  if (!currentMintId) { showMintHome(); return; }
+  if (maybeSigned) {
+    const ok = await confirmDialog({
+      title: 'Cancel this mint?',
+      text: 'If you already approved the payment in Xaman, it may still go through. Cancel anyway?',
+      confirmLabel: 'Cancel mint',
+    });
+    if (!ok) return;
+  }
   const btn = el('flow-cancel-btn');
   btn.disabled = true;
+  let cancelResult = null;
+  let refetchResult = null;
   try {
-    if (currentMintId) {
-      await api(`/api/mint/${currentMintId}/cancel`, {
-        method: 'POST', body: JSON.stringify(discordCtx()),
-      });
-    }
+    cancelResult = await api(`/api/mint/${currentMintId}/cancel`, {
+      method: 'POST', body: JSON.stringify(discordCtx()),
+    });
   } catch (e) {
-    // best-effort: the lock self-releases on payment timeout regardless
+    // Cancel refused (paid session) or failed transiently — look at the
+    // real session state before deciding anything.
+    try { refetchResult = await api(`/api/mint/${currentMintId}`); } catch (e2) { /* gone */ }
   } finally {
     btn.disabled = false;
+  }
+  if (mintPure.cancelMintOutcome(cancelResult, refetchResult) === 'resume') {
+    // Session still live (or ended some other way): stay on the flow panel
+    // and let the poll render the truth — never abandon a paid mint.
+    pollMint(currentMintId);
+    return;
   }
   clearTimeout(pollTimer);
   currentMintId = null;
