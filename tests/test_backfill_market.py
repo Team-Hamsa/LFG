@@ -442,14 +442,17 @@ def test_settled_marked_trait_sale_left_alone(tmp_path):
     assert tuple(row) == (0, "sold", 1)
 
 
-def test_network_arg_defaults_to_config_like_backfill_onchain():
+def test_network_arg_defaults_to_config_like_backfill_onchain(monkeypatch):
     """--network default parity with scripts/backfill_onchain.py (#130):
     both backfills should run against config.XRPL_NETWORK when --network is
-    omitted, instead of one requiring the flag."""
+    omitted, instead of one requiring the flag. Pin a known-valid network so
+    the machine's env (which may carry an out-of-choices value) can't turn
+    the flag required and SystemExit this test (CodeRabbit #150)."""
     from lfg_core import config
 
+    monkeypatch.setattr(config, "XRPL_NETWORK", "testnet")
     args = bm._build_parser().parse_args([])
-    assert args.network == config.XRPL_NETWORK
+    assert args.network == "testnet"
 
 
 def test_network_arg_explicit_choices_still_work():
