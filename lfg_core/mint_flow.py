@@ -329,10 +329,14 @@ async def run_mint_session(session: MintSession) -> None:
 
         # 4. Mint on XRPL
         session.state = MINTING
+        # Issuer is the NFT collection issuer (same account every other mint
+        # path uses) — NOT the LFGO token issuer. On mainnet those differ, and
+        # passing the token issuer makes mint_nft add an Issuer field = an
+        # unauthorized mint-on-behalf, tecNO_PERMISSION on every attempt.
         nft_id = await xrpl_ops.mint_nft(
             metadata_cdn_url=metadata_cdn_url,
             taxon=config.NFT_TAXON,
-            issuer=config.TOKEN_ISSUER_ADDRESS,
+            issuer=config.SWAP_ISSUER_ADDRESS,
             platform=memos.platform_for_surface(session.platform),
         )
         if not nft_id:
