@@ -31,13 +31,36 @@ NETWORK_ISSUERS = {
 }
 
 
-def issuers_for_network(network: str) -> tuple[str, str]:
-    """(nft_issuer, brix_issuer) for a named network; config supplies the
-    values for the env-native network (testnet: the SEED account)."""
+def issuer_from_index(oconn: Any) -> str | None:
+    """The collection issuer decoded from any NFTokenID in the network's own
+    index (hex chars 8..48 embed the issuer AccountID), or None if empty."""
+    row = oconn.execute("SELECT nft_id FROM onchain_nfts LIMIT 1").fetchone()
+    if not row:
+        return None
+    from xrpl.core import addresscodec
+
+    return addresscodec.encode_classic_address(bytes.fromhex(row[0][8:48]))
+
+
+def issuers_for_network(network: str, oconn: Any = None) -> tuple[str, str]:
+    """(nft_issuer, brix_issuer) for a named network. Config supplies the
+    env-native network's values; a cross-network run resolves from the static
+    table or the target network's own index (testnet's issuer changes every
+    reset, and on testnet the SEED account issues both NFTs and BRIX).
+    Unresolvable = abort — falling back to the wrong network's issuer would
+    clear the derived tables and rebuild ZERO events (bit us 2026-07-10)."""
+    if network == config.XRPL_NETWORK:
+        return config.SWAP_ISSUER_ADDRESS, config.SWAP_OFFER_ISSUER
     net = NETWORK_ISSUERS.get(network)
-    if net is not None and network != config.XRPL_NETWORK:
+    if net is not None:
         return net["nft"], net["brix"]
-    return config.SWAP_ISSUER_ADDRESS, config.SWAP_OFFER_ISSUER
+    derived = issuer_from_index(oconn) if oconn is not None else None
+    if derived:
+        return derived, derived
+    raise SystemExit(
+        f"cannot resolve issuers for {network!r} (env network is"
+        f" {config.XRPL_NETWORK!r}): no static entry and its index is empty"
+    )
 
 
 def rederive(
@@ -88,12 +111,16 @@ def main() -> int:
     parser.add_argument("--network", default=config.XRPL_NETWORK)
     parser.add_argument("--distributor")
     args = parser.parse_args()
+    from lfg_core import nft_index
+
     hconn = history_store.init_history_db(history_store.history_db_path(args.network))
-    nft_issuer, brix_issuer = issuers_for_network(args.network)
+    oconn = nft_index.init_db(nft_index.index_db_path(args.network))
+    nft_issuer, brix_issuer = issuers_for_network(args.network, oconn=oconn)
     counts = rederive(
         hconn,
         args.network,
         distributor=args.distributor,
+        oconn=oconn,
         nft_issuer=nft_issuer,
         brix_issuer=brix_issuer,
     )
