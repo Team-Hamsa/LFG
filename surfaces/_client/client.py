@@ -21,7 +21,9 @@ from .events import stream_events
 
 # Terminal states copied from lfg_core.mint_flow / swap_flow TERMINAL_STATES.
 # Duplicated (not imported) so the SDK never depends on lfg_core.
-MINT_TERMINAL: frozenset[str] = frozenset({"offer_ready", "done", "failed", "payment_timeout"})
+MINT_TERMINAL: frozenset[str] = frozenset(
+    {"offer_ready", "done", "failed", "payment_timeout", "cancelled"}
+)
 SWAP_TERMINAL: frozenset[str] = frozenset({"done", "failed", "offers_ready", "payment_timeout"})
 SIGNIN_TERMINAL: frozenset[str] = frozenset({"signed", "expired"})
 

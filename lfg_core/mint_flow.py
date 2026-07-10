@@ -36,11 +36,12 @@ OFFER_READY = "offer_ready"
 DONE = "done"
 FAILED = "failed"
 PAYMENT_TIMEOUT = "payment_timeout"
+CANCELLED = "cancelled"  # user backed out of the pay screen (issue #141)
 
 # offer_ready is the success end-state: the background task is finished and
 # the user has the accept QR. It must be terminal or the one-active-session
 # guard would block every subsequent mint.
-TERMINAL_STATES = {OFFER_READY, DONE, FAILED, PAYMENT_TIMEOUT}
+TERMINAL_STATES = {OFFER_READY, DONE, FAILED, PAYMENT_TIMEOUT, CANCELLED}
 
 # nft_numbers handed to in-flight sessions but not yet in the database.
 # get_next_nft_number() is MAX+1, so without this two concurrent mints would
@@ -83,6 +84,12 @@ class MintSession:
         self.accept_uuid: str | None = None
         self.accept_scanned = False
         self.accept_signed = False
+        # The run_mint_session background task, set by the service after it
+        # spawns it, so cancel() can stop the payment wait promptly (#141).
+        self.task: asyncio.Task[None] | None = None
+        # Terminal-event publish guard, read/set by lfg_service.app when it
+        # publishes mint.completed/mint.failed to the event firehose.
+        self._published = False
 
     def _payment_params(self) -> dict[str, Any]:
         """Destination/amount for this session's payment path. LFGO goes to
@@ -138,6 +145,34 @@ class MintSession:
         self.qr_scanned = False
         self.payment_uuid = None
         await self.prepare_payment()
+
+    def cancel(self) -> bool:
+        """Back out of the pay screen (issue #141): mark the session terminal
+        so the one-active-session lock releases immediately, and cancel the
+        background task so its payment wait stops polling. Only legal while
+        still awaiting payment — past that the user has paid and the pipeline
+        must run to completion or failure. Returns True if cancelled.
+
+        The state check and CANCELLED assignment are synchronous (no await
+        between them), so on the single event loop this cannot race the
+        background task's own state transitions — and run_mint_session
+        leaves AWAITING_PAYMENT in the same synchronous step in which
+        wait_for_payment reports the payment confirmed, so a confirmed
+        (paid) session can never be cancelled."""
+        if self.state != AWAITING_PAYMENT:
+            return False
+        self.state = CANCELLED
+        if self.task is not None:
+            # CancelledError is a BaseException, so run_mint_session's
+            # `except Exception` cannot catch it and overwrite CANCELLED.
+            self.task.cancel()
+        return True
+
+    def mark_published(self) -> None:
+        """Mark the terminal firehose event as already published (or, for a
+        deliberate user cancel, as suppressed) — kept as a method so callers
+        never reach into the private guard attribute directly."""
+        self._published = True
 
     def ensure_payment_fallback(self) -> None:
         """If prepare_payment was cancelled or failed, default to the XRP
@@ -241,6 +276,13 @@ async def run_mint_session(session: MintSession) -> None:
             session.state = PAYMENT_TIMEOUT
             return
 
+        # The payment is irrevocably confirmed on-ledger: leave
+        # AWAITING_PAYMENT *now*, before any further await (the XRP-path
+        # buy_and_burn below is a multi-second submit_and_wait), so a
+        # concurrent cancel() can never land on a session whose money has
+        # already been taken.
+        session.state = GENERATING
+
         if session.pay_with == "XRP":
             # Buy the mint's LFGO off the DEX and burn it, spending at most
             # the XRP just collected. Best-effort: a failed buyback must
@@ -258,7 +300,6 @@ async def run_mint_session(session: MintSession) -> None:
 
         # 2. Compose a random NFT from the unified layer store (same tree
         #    the Trait Swapper uses: <gender>/<TraitType>/<Value>.ext)
-        session.state = GENERATING
         session.nft_number = await _allocate_nft_number()
         store = layer_store.get_layer_store()
         body, attributes = await traits.select_random_attributes(store)
