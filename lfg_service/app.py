@@ -36,6 +36,7 @@ from lfg_core import (
     economy_flow,
     economy_store,
     history_store,
+    image_archive,
     layer_store,
     leaderboard,
     market_flow,
@@ -1982,7 +1983,9 @@ async def handle_nfts(request):
     try:
         nfts = await _wallet_nfts(request["wallet"])
     except Exception as e:
-        logging.error(f"NFT listing failed: {e}")
+        # repr, not str: asyncio.TimeoutError stringifies to "" and left this
+        # log line blank during the mainnet-cutover 502s.
+        logging.error(f"NFT listing failed: {e!r}")
         return web.json_response({"error": "failed to load wallet NFTs"}, status=502)
     # Quote the swap fee for the cost line (BRIX holders pay BRIX; everyone
     # else the AMM XRP equivalent). Advisory only — the swap session
@@ -2335,9 +2338,47 @@ def _img_url_allowed(url: str) -> bool:
 async def handle_img(request):
     """Same-origin proxy for CDN images: the Activity's CSP blocks cross-origin
     <img> loads, so the client routes image URLs through here (allowed: the
-    Bunny CDN bases plus the IPFS gateway host suffixes — see _img_url_allowed)."""
+    Bunny CDN bases plus the IPFS gateway host suffixes — see _img_url_allowed).
+    Raw ipfs:// URIs (the on-chain index stores them verbatim, and the
+    leaderboard serves them as-is) are resolved to the gateway first.
+
+    Local archive first (#153): if the requested URL maps back to a live
+    edition in the on-chain index and that edition's still is in the
+    images_<network>/ archive (scripts/rebuild_cdn_images.py), serve it
+    straight from disk — no CDN, no IPFS. The proxy below is the fallback
+    for editions the archive doesn't hold yet; any archive/index failure
+    degrades to that fallback, never to an error."""
     url = request.query.get("u", "")
-    if len(url) > 2048 or not _img_url_allowed(url):
+    if len(url) > 2048:
+        return web.json_response({"error": "bad image url"}, status=400)
+    try:
+        # SQLite lookup + disk read are synchronous — keep them off the
+        # event loop (a leaderboard page bursts ~50 concurrent requests).
+        def _archive_read() -> tuple[bytes, str] | None:
+            conn = nft_index.init_db(nft_index.index_db_path(config.XRPL_NETWORK))
+            try:
+                edition = image_archive.edition_for_url(conn, url)
+            finally:
+                conn.close()
+            if edition is None:
+                return None
+            local = image_archive.local_image(config.XRPL_NETWORK, edition)
+            if not local:
+                return None
+            path, ctype = local
+            with open(path, "rb") as f:
+                return f.read(), ctype
+
+        archived = await asyncio.to_thread(_archive_read)
+        if archived:
+            body, ctype = archived
+            return web.Response(
+                body=body, content_type=ctype, headers={"Cache-Control": "public, max-age=86400"}
+            )
+    except Exception as e:
+        logging.warning(f"image archive lookup failed for {url}: {e!r}")
+    url = swap_meta.resolve_ipfs(url)
+    if not _img_url_allowed(url):
         return web.json_response({"error": "bad image url"}, status=400)
     try:
         body, ctype = await _fetch_cdn(url)
