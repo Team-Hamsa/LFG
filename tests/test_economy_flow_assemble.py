@@ -289,3 +289,52 @@ def test_assemble_mirror_fail_then_offer_raise_keeps_mirror_journal(tmp_path):
     assert record["status"] == "failed"
     assert record["mirror_pending"] is True
     assert record["sync_tx_hash"] == "MODHASH"
+
+
+def test_assemble_journal_checkpoints_closet_synced_before_offer(tmp_path):
+    """CodeRabbit #151: the drain committed; a process CRASH during offer
+    delivery (no exception for the outer handler to catch) must not leave the
+    on-disk journal at the pre-drain 'minted' checkpoint — an admin following
+    it would burn the mint back against an already-drained Closet. A
+    'closet_synced' record carrying sync_tx_hash must be durable BEFORE the
+    offer call."""
+    import dataclasses
+
+    conn, f = _conn_with_bucket(), _Fakes()
+    s = _session()
+    deps = _deps(conn, f, tmp_path)
+    at_offer: dict = {}
+
+    async def spy_offer(nft_id, owner):
+        at_offer.update(json.loads((tmp_path / f"assemble-{s.id}.json").read_text()))
+        return await f.char_offer(nft_id, owner)
+
+    _run(ef.run_assemble(s, dataclasses.replace(deps, char_offer_fn=spy_offer)))
+
+    assert s.state == ef.DONE
+    assert at_offer["status"] == "closet_synced"
+    assert at_offer["sync_tx_hash"] == "MODHASH"
+    assert at_offer["mirror_pending"] is False
+
+
+def test_assemble_mirror_fail_checkpoint_carries_sticky_fields(tmp_path):
+    """Same checkpoint on the ClosetMirrorError path: the drain committed
+    on-chain, only the DB mirror failed — the pre-offer record must already
+    carry mirror_pending + the committed tx hash."""
+    import dataclasses
+
+    conn, f = _conn_with_bucket(), _Fakes()
+    s = _session()
+    deps = _deps(flaky_mirror_conn(conn), f, tmp_path)
+    at_offer: dict = {}
+
+    async def spy_offer(nft_id, owner):
+        at_offer.update(json.loads((tmp_path / f"assemble-{s.id}.json").read_text()))
+        return await f.char_offer(nft_id, owner)
+
+    _run(ef.run_assemble(s, dataclasses.replace(deps, char_offer_fn=spy_offer)))
+
+    assert s.state == ef.DONE
+    assert at_offer["status"] == "closet_synced"
+    assert at_offer["sync_tx_hash"] == "MODHASH"
+    assert at_offer["mirror_pending"] is True

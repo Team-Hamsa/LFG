@@ -139,10 +139,11 @@ def test_buy_and_burn_self_issuer_is_noop(monkeypatch):
     # it on receipt — there is nothing to burn and you cannot send your own IOU
     # to yourself. buy_and_burn must short-circuit: return a TRUTHY sentinel
     # (so `if not await buy_and_burn(...)` callers don't log a spurious error),
-    # never call submit_and_wait, and never raise.
-    from xrpl.wallet import Wallet
-
-    issuer = Wallet.from_seed(config.SEED).classic_address
+    # never call submit_and_wait, and never raise. The no-op compares against
+    # config.SIGNING_ACCOUNT (not the SEED-derived address — the two differ
+    # under a regular-key .env like the deployed mainnet cutover), so probe
+    # with exactly that value.
+    issuer = config.SIGNING_ACCOUNT
     called = {"submit": False}
 
     def boom(*a, **k):

@@ -459,6 +459,13 @@ async def run_assemble(session: AssembleSession, deps: EconomyDeps) -> None:
                 )
             return
 
+        # Durable checkpoint BEFORE delivery: the drain is committed (with
+        # sync_tx_hash; mirror_pending if only the DB mirror failed). A
+        # process crash during the offer/accept awaits below would otherwise
+        # leave the journal at the pre-drain "minted" record, and recovery
+        # would burn the mint back against an already-drained Closet.
+        _write_record(deps.records_dir, "assemble", session.id, session._record("closet_synced"))
+
         # Deliver the new character to the user (offer + XUMM accept).
         offer_id = await deps.char_offer_fn(nft_id, owner)
         if not offer_id:
@@ -747,6 +754,13 @@ async def run_extract(session: ExtractSession, deps: EconomyDeps) -> None:
                     deps.records_dir, "extract", session.id, session._record("failed_revert_mint")
                 )
             return
+
+        # Durable checkpoint BEFORE delivery (assemble twin): the decrement is
+        # committed with its sync_tx_hash — a crash in the offer/accept awaits
+        # below must not leave the journal at the pre-decrement "minted"
+        # record, or recovery burns the token back against a drained Closet.
+        _write_record(deps.records_dir, "extract", session.id, session._record("closet_synced"))
+
         # Closet decremented on-chain + DB. Mirror the trait token in the DB
         # best-effort: the listener rebuilds trait_tokens from the on-chain mint, so a
         # failure here is non-fatal — journal it for the auditor rather than reverting

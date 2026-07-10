@@ -245,3 +245,30 @@ def test_extract_mirror_fail_then_offer_raise_keeps_mirror_journal(tmp_path):
     assert record["status"] == "failed"
     assert record["mirror_pending"] is True
     assert record["sync_tx_hash"] == "MOD"
+
+
+def test_extract_journal_checkpoints_closet_synced_before_offer(tmp_path):
+    """CodeRabbit #151 (extract twin): the Closet decrement committed; a
+    process crash during offer delivery must not leave the journal at the
+    pre-decrement 'minted' checkpoint — a durable 'closet_synced' record with
+    the committed sync_tx_hash must exist BEFORE the offer call."""
+    import dataclasses
+
+    conn = sqlite3.connect(":memory:")
+    es.init_economy_schema(conn)
+    _active_closet_with_trait(conn)
+    f = _F()
+    s = ef.ExtractSession(owner="rUser", slot="Hat", value="Cap")
+    deps = _deps(conn, f, tmp_path)
+    at_offer: dict = {}
+
+    async def spy_offer(nft_id, owner):
+        at_offer.update(json.loads((tmp_path / f"extract-{s.id}.json").read_text()))
+        return await f.closet_offer(nft_id, owner)
+
+    _run(ef.run_extract(s, dataclasses.replace(deps, closet_offer_fn=spy_offer)))
+
+    assert s.state == ef.DONE
+    assert at_offer["status"] == "closet_synced"
+    assert at_offer["sync_tx_hash"] == "MOD"
+    assert at_offer["mirror_pending"] is False
