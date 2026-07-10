@@ -35,15 +35,27 @@ from lfg_core import trait_config  # noqa: E402
 from lfg_service import app as server  # noqa: E402
 
 
-def _nft(nft_id: str, gender: str, name: str) -> dict[str, Any]:
-    """Minimal normalized-NFT record: only the fields handle_swap_start and
-    SwapSession.to_dict() actually read (nft_id for the by_id lookup, gender
-    for the swap-matrix gate, name/image for the response body)."""
+def _nft(
+    nft_id: str, gender: str, name: str, none_slots: frozenset[str] = frozenset()
+) -> dict[str, Any]:
+    """Minimal normalized-NFT record: the fields handle_swap_start and
+    SwapSession.to_dict() read (nft_id for the by_id lookup, gender for the
+    swap-matrix gate, name/image for the response body) plus a full normalized
+    `attributes` list (every slot filled) so the None-swap guard has data to
+    read. `none_slots` marks trait types whose value is 'None' (a faceless
+    ape's Eyes/Eyebrows/Mouth)."""
+    from lfg_core import swap_meta
+
+    attributes = [
+        {"trait_type": t, "value": ("None" if t in none_slots else f"{t}-val")}
+        for t in swap_meta.TRAIT_ORDER
+    ]
     return {
         "nft_id": nft_id,
         "gender": gender,
         "name": name,
         "image": f"https://example.test/{nft_id}.png",
+        "attributes": attributes,
     }
 
 
@@ -151,6 +163,75 @@ def test_same_body_swap_unaffected(monkeypatch, same_body_nfts):
     matrix — swap_allowed() short-circuits to True whenever body_a == body_b."""
     _stub_wallet_nfts(monkeypatch, same_body_nfts)
     req = _make_swap_request("M1", "M2", ["Clothing", "Eyes"])
+
+    resp = asyncio.get_event_loop().run_until_complete(server.handle_swap_start(req))
+
+    assert resp.status == 200
+
+
+def test_none_swaps_helper_flags_empty_slots():
+    """Pure helper: a slot is unswappable if EITHER side is empty ('None') —
+    swapping None onto the other NFT would delete a trait it has."""
+    from lfg_core import swap_meta
+
+    faceless = [{"trait_type": "Eyes", "value": "None"}, {"trait_type": "Head", "value": "Crown"}]
+    faced = [{"trait_type": "Eyes", "value": "Creepy"}, {"trait_type": "Head", "value": "Cap"}]
+    assert swap_meta.none_swaps(faceless, faced, ["Eyes"]) == ["Eyes"]
+    assert swap_meta.none_swaps(faced, faceless, ["Eyes"]) == ["Eyes"]  # other side None
+    assert swap_meta.none_swaps(faced, faced, ["Eyes", "Head"]) == []  # both filled
+    assert swap_meta.none_swaps(faceless, faceless, ["Eyes"]) == ["Eyes"]  # both None
+    # 1217 live mainnet NFTs encode an empty Accessory as "" (the original
+    # generator's spelling), not "None" — "" must be equally unswappable.
+    empty = [{"trait_type": "Eyes", "value": ""}, {"trait_type": "Head", "value": "Crown"}]
+    assert swap_meta.none_swaps(empty, faced, ["Eyes"]) == ["Eyes"]
+    assert swap_meta.none_swaps(faced, empty, ["Eyes"]) == ["Eyes"]
+    # a slot absent from the attribute list entirely is empty too
+    bare = [{"trait_type": "Head", "value": "Cap"}]
+    assert swap_meta.none_swaps(bare, faced, ["Eyes"]) == ["Eyes"]
+
+
+def test_swap_none_slot_rejected(monkeypatch):
+    """Same-body pair (affinity always passes) where one NFT has Eyes=None:
+    requesting an Eyes swap must 400 rather than hand None to the other NFT."""
+    nfts = [
+        _nft("M1", "male", "LFG #10", none_slots=frozenset({"Eyes"})),
+        _nft("M2", "male", "LFG #11"),
+    ]
+    _stub_wallet_nfts(monkeypatch, nfts)
+    req = _make_swap_request("M1", "M2", ["Eyes"])
+
+    resp = asyncio.get_event_loop().run_until_complete(server.handle_swap_start(req))
+
+    assert resp.status == 400
+    assert "Eyes" in json.loads(resp.body)["error"]
+
+
+def test_swap_empty_string_slot_rejected(monkeypatch):
+    """~34% of the live mainnet collection carries {"trait_type": "Accessory",
+    "value": ""} — empty encoded as "", not "None". normalize_attributes
+    preserves a present-but-empty value, so the guard itself must catch it or
+    the swap silently deletes the counterparty's real Accessory."""
+    nft1 = _nft("M1", "male", "LFG #10")
+    for attr in nft1["attributes"]:
+        if attr["trait_type"] == "Accessory":
+            attr["value"] = ""
+    _stub_wallet_nfts(monkeypatch, [nft1, _nft("M2", "male", "LFG #11")])
+    req = _make_swap_request("M1", "M2", ["Accessory"])
+
+    resp = asyncio.get_event_loop().run_until_complete(server.handle_swap_start(req))
+
+    assert resp.status == 400
+    assert "Accessory" in json.loads(resp.body)["error"]
+
+
+def test_swap_filled_slots_still_ok(monkeypatch):
+    """The guard must not block swaps where both sides have real values."""
+    nfts = [
+        _nft("M1", "male", "LFG #10", none_slots=frozenset({"Eyes"})),
+        _nft("M2", "male", "LFG #11"),
+    ]
+    _stub_wallet_nfts(monkeypatch, nfts)
+    req = _make_swap_request("M1", "M2", ["Head"])  # both have Head-val
 
     resp = asyncio.get_event_loop().run_until_complete(server.handle_swap_start(req))
 

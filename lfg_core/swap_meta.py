@@ -91,6 +91,31 @@ def get_attr(attributes: list[dict[str, Any]], trait_type: str) -> str | None:
     return None
 
 
+def none_swaps(
+    attrs1: list[dict[str, Any]],
+    attrs2: list[dict[str, Any]],
+    traits_to_swap: list[str],
+) -> list[str]:
+    """Of the requested slots, those that can't be swapped because ONE side is
+    empty ('None'/''/missing). The Trait Swapper is a peer exchange, so swapping
+    an empty slot would hand emptiness to the other NFT — deleting a trait it
+    has. You can't trade a slot you don't fill. Returns the offending trait
+    types (order preserved) so the caller can reject them; empty list = all
+    swappable.
+
+    Emptiness must mirror swap_compose._canonical's predicate (falsy or the
+    literal 'None'): ~34% of the live mainnet collection encodes an empty
+    Accessory as '' rather than 'None', and _canonical silently drops falsy
+    values, so nothing downstream would catch what this guard lets through."""
+    blocked = []
+    for trait in traits_to_swap:
+        v1 = get_attr(attrs1, trait)
+        v2 = get_attr(attrs2, trait)
+        if not v1 or v1 == "None" or not v2 or v2 == "None":
+            blocked.append(trait)
+    return blocked
+
+
 def detect_body(attributes: list[dict[str, Any]]) -> str:
     """Body class determines which layer directory set is used."""
     body_val = get_attr(attributes, "Body") or ""

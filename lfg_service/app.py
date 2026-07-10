@@ -2034,6 +2034,15 @@ async def handle_swap_start(request):
             },
             status=400,
         )
+    # An empty ('None') slot can't be swapped: the exchange would hand None to
+    # the other NFT, deleting a trait it has. Guards against e.g. a faceless
+    # ape (Eyes/Eyebrows/Mouth = None) degrading its swap partner.
+    empty = swap_meta.none_swaps(nft1["attributes"], nft2["attributes"], traits_to_swap)
+    if empty:
+        return web.json_response(
+            {"error": f"trait(s) {', '.join(empty)} are empty (None) and can't be swapped"},
+            status=400,
+        )
 
     # Resolve the push token before the re-check so no await sits between the
     # guard and the insert below (would reopen the race the re-check closes).
