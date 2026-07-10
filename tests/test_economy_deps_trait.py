@@ -91,3 +91,28 @@ def test_compose_trait_scans_bodies(tmp_path, monkeypatch):
 
     result = _run(deps._compose_trait(slot, value))
     assert result == fake_url
+
+
+def test_mint_callables_thread_memo_actions(monkeypatch):
+    """char_mint_fn must stamp action=assemble and trait_mint_fn action=extract
+    so the on-chain provenance memo can distinguish economy remints from
+    legacy burn+remint trait swaps (leaderboard builds/swaps split)."""
+    import sqlite3
+
+    import _economy_deps as deps
+
+    from lfg_core import economy_store, memos, xrpl_ops
+
+    captured = []
+
+    async def fake_mint(url, taxon, issuer, flags=None, action=memos.ACTION_MINT, **kw):
+        captured.append(action)
+        return "NFTID"
+
+    monkeypatch.setattr(xrpl_ops, "mint_nft", fake_mint)
+    conn = sqlite3.connect(":memory:")
+    economy_store.init_economy_schema(conn)
+    d = deps.build_economy_deps(conn)
+    _run(d.char_mint_fn("https://x/m.json"))
+    _run(d.trait_mint_fn("https://x/t.json"))
+    assert captured == [memos.ACTION_ASSEMBLE, memos.ACTION_EXTRACT]

@@ -10,15 +10,18 @@ Boards (this module):
   queries instead net acquisitions/dispositions from `nft_events` in the
   window (mint/transfer/sale in +1, transfer/sale/burn out -1), keeping only
   positive totals — this is a *delta within the window*, not a live balance.
-- `users_swaps`: count of `modify` events (trait swaps) per receiving wallet.
+- `users_swaps`: trait swaps per receiving wallet — `modify` events PLUS
+  non-assemble "rebirth" deliveries (see below). Legacy trait swaps are
+  burn+remint, not NFTokenModify — mainnet has ZERO modify events — so
+  counting only `modify` left the swap boards empty there.
 - `users_builds`: count of "rebirth" deliveries — an issuer -> user transfer
   of a token that is a re-mint of a previously burned edition (same
-  `nft_number`, different `nft_id`, burned before the current token's mint).
-  v1 caveat: this also counts admin re-offers of reminted legacy editions
-  (a transfer from the issuer of an edition that happens to have been
-  reminted for any reason, not strictly a player-initiated harvest+rebirth),
-  since the SQL can only see the burn/mint/transfer shape, not intent.
-- `nft_swaps`: count of `modify` events per NFT (most-swapped tokens).
+  `nft_number`, different `nft_id`, burned before the current token's mint)
+  — whose mint carries the provenance memo `action=assemble` (#54). Rebirths
+  without that memo are legacy remint swaps (or admin re-offers), not
+  builds; they belong to the swap boards instead.
+- `nft_swaps`: swaps per *edition* (`modify` + non-assemble rebirths, keyed
+  on `nft_number` since a remint swap changes the token's `nft_id`).
 
 `system_accounts` (nft_issuer, brix_issuer, distributor, amm_account) are
 always excluded from user-keyed boards via `wallet NOT IN (...)`.
@@ -152,6 +155,34 @@ def _board_users_nfts(
     return [_row(wallet=r["wallet"], value=r["value"]) for r in cur.fetchall()]
 
 
+# A "rebirth" is an issuer -> user delivery of a token whose edition was
+# previously burned under a different nft_id: the on-chain shape of BOTH a
+# legacy burn+remint trait swap AND an economy assemble. The provenance memo
+# on the mint (#54) is the only distinguisher: assembles are stamped
+# action=assemble; legacy remints predate memos entirely (NULL).
+_REBIRTH_IS_ASSEMBLE = "m.memo_action = 'assemble'"
+_REBIRTH_NOT_ASSEMBLE = "(m.memo_action IS NULL OR m.memo_action != 'assemble')"
+
+
+def _rebirth_sql(select_cols: str, group_by: str, memo_cond: str, issuer_ph: str, excl: str) -> str:
+    """Rebirth-delivery subquery. Param order: (*issuers, start_ts, end_ts,
+    *exclude_params). Any system account counts as a delivering issuer —
+    broader than strictly the NFT issuer, but harmless since only the NFT
+    issuer mints/burns NFTs."""
+    return f"""
+        SELECT {select_cols}, COUNT(*) AS value
+        FROM nft_events t
+        JOIN nft_events m ON m.nft_id = t.nft_id AND m.event = 'mint'
+        WHERE t.event IN ('transfer','sale') AND t.from_addr IN ({issuer_ph})
+          AND t.ts >= ? AND t.ts < ?
+          AND {memo_cond}
+          AND EXISTS (SELECT 1 FROM nft_events b
+                      WHERE b.event='burn' AND b.nft_number = t.nft_number
+                        AND b.nft_id != t.nft_id AND b.ts < m.ts){excl}
+        GROUP BY {group_by}
+    """
+
+
 def _board_users_swaps(
     hconn: sqlite3.Connection,
     oconn: sqlite3.Connection,
@@ -160,15 +191,33 @@ def _board_users_swaps(
     system_accounts: frozenset[str],
     limit: int,
 ) -> list[Row]:
-    excl, excl_params = _exclude_clause("to_addr", system_accounts)
-    sql = (
-        "SELECT to_addr, COUNT(*) AS value FROM nft_events"
-        " WHERE event='modify' AND ts>=? AND ts<?"
-        + excl
-        + " GROUP BY to_addr ORDER BY value DESC LIMIT ?"
+    excl_mod, excl_mod_params = _exclude_clause("to_addr", system_accounts)
+    issuers = list(system_accounts) if system_accounts else [None]
+    issuer_ph = ",".join("?" * len(issuers))
+    excl_rb, excl_rb_params = _exclude_clause("t.to_addr", system_accounts)
+    rebirths = _rebirth_sql(
+        "t.to_addr AS wallet", "t.to_addr", _REBIRTH_NOT_ASSEMBLE, issuer_ph, excl_rb
     )
-    cur = hconn.execute(sql, (start_ts, end_ts, *excl_params, limit))
-    return [_row(wallet=r["to_addr"], value=r["value"]) for r in cur.fetchall()]
+    sql = f"""
+        SELECT wallet, SUM(value) AS value FROM (
+            SELECT to_addr AS wallet, COUNT(*) AS value FROM nft_events
+             WHERE event='modify' AND ts>=? AND ts<?{excl_mod} GROUP BY to_addr
+            UNION ALL
+            {rebirths}
+        ) GROUP BY wallet ORDER BY value DESC LIMIT ?
+    """
+    params = (
+        start_ts,
+        end_ts,
+        *excl_mod_params,
+        *issuers,
+        start_ts,
+        end_ts,
+        *excl_rb_params,
+        limit,
+    )
+    cur = hconn.execute(sql, params)
+    return [_row(wallet=r["wallet"], value=r["value"]) for r in cur.fetchall()]
 
 
 def _board_users_builds(
@@ -179,25 +228,13 @@ def _board_users_builds(
     system_accounts: frozenset[str],
     limit: int,
 ) -> list[Row]:
-    """Counts rebirth deliveries from any system account (issuer-side delivery).
-
-    Note: Any system account counts as a delivering issuer; broader than strictly
-    the NFT issuer, but harmless since only the NFT issuer mints/burns NFTs.
-    """
     issuers = list(system_accounts) if system_accounts else [None]
     excl, excl_params = _exclude_clause("t.to_addr", system_accounts)
-    placeholders = ",".join("?" * len(issuers))
-    sql = f"""
-        SELECT t.to_addr AS wallet, COUNT(*) AS value
-        FROM nft_events t
-        JOIN nft_events m ON m.nft_id = t.nft_id AND m.event = 'mint'
-        WHERE t.event IN ('transfer','sale') AND t.from_addr IN ({placeholders})
-          AND t.ts >= ? AND t.ts < ?
-          AND EXISTS (SELECT 1 FROM nft_events b
-                      WHERE b.event='burn' AND b.nft_number = t.nft_number
-                        AND b.nft_id != t.nft_id AND b.ts < m.ts){excl}
-        GROUP BY t.to_addr ORDER BY value DESC LIMIT ?
-    """
+    issuer_ph = ",".join("?" * len(issuers))
+    sql = (
+        _rebirth_sql("t.to_addr AS wallet", "t.to_addr", _REBIRTH_IS_ASSEMBLE, issuer_ph, excl)
+        + " ORDER BY value DESC LIMIT ?"
+    )
     params = (*issuers, start_ts, end_ts, *excl_params, limit)
     cur = hconn.execute(sql, params)
     return [_row(wallet=r["wallet"], value=r["value"]) for r in cur.fetchall()]
@@ -211,12 +248,26 @@ def _board_nft_swaps(
     system_accounts: frozenset[str],
     limit: int,
 ) -> list[Row]:
-    sql = (
-        "SELECT nft_id, nft_number, COUNT(*) AS value FROM nft_events"
-        " WHERE event='modify' AND ts>=? AND ts<?"
-        " GROUP BY nft_id ORDER BY value DESC LIMIT ?"
+    issuers = list(system_accounts) if system_accounts else [None]
+    issuer_ph = ",".join("?" * len(issuers))
+    rebirths = _rebirth_sql(
+        "t.nft_id AS nft_id, t.nft_number AS nft_number",
+        "t.nft_id",
+        _REBIRTH_NOT_ASSEMBLE,
+        issuer_ph,
+        "",
     )
-    cur = hconn.execute(sql, (start_ts, end_ts, limit))
+    # Keyed per edition (a remint swap changes the token's nft_id); rows with
+    # no known edition fall back to keying on nft_id.
+    sql = f"""
+        SELECT MAX(nft_id) AS nft_id, MAX(nft_number) AS nft_number, SUM(value) AS value FROM (
+            SELECT nft_id, nft_number, COUNT(*) AS value FROM nft_events
+             WHERE event='modify' AND ts>=? AND ts<? GROUP BY nft_id
+            UNION ALL
+            {rebirths}
+        ) GROUP BY COALESCE(nft_number, nft_id) ORDER BY value DESC LIMIT ?
+    """
+    cur = hconn.execute(sql, (start_ts, end_ts, *issuers, start_ts, end_ts, limit))
     return [
         _row(nft_id=r["nft_id"], nft_number=r["nft_number"], value=r["value"])
         for r in cur.fetchall()

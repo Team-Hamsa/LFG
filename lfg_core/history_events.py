@@ -96,6 +96,28 @@ def _is_zero_price(amount: Any) -> bool:
     return False
 
 
+def memo_action(tx: dict[str, Any]) -> str | None:
+    """The tx's provenance `action` memo value (#54), or None.
+
+    Legacy transactions predate the memo schema and third-party txs carry
+    arbitrary memos, so anything malformed (non-dict entries, bad hex,
+    non-UTF-8 data) is skipped, never raised. The leaderboard keys on this to
+    tell an economy assemble-remint from a legacy burn+remint trait swap —
+    the two are otherwise identical on-chain."""
+    for entry in tx.get("Memos") or []:
+        if not isinstance(entry, dict):
+            continue
+        memo = entry.get("Memo")
+        if not isinstance(memo, dict):
+            continue
+        try:
+            if bytes.fromhex(memo.get("MemoType") or "").decode("utf-8") == "action":
+                return bytes.fromhex(memo.get("MemoData") or "").decode("utf-8")
+        except (ValueError, UnicodeDecodeError):
+            continue
+    return None
+
+
 def derive_nft_events(tx: dict[str, Any], *, nft_issuer: str) -> list[dict[str, Any]]:
     """Derive event rows for one normalized tx.
 
@@ -110,6 +132,7 @@ def derive_nft_events(tx: dict[str, Any], *, nft_issuer: str) -> list[dict[str, 
     ts = tx_unix_time(tx)
     base = {
         "tx_hash": tx.get("hash"),
+        "memo_action": memo_action(tx),
         "nft_number": None,
         "price_drops": None,
         "price_token": None,

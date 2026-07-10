@@ -188,3 +188,26 @@ def test_signin_payload_has_no_memos(monkeypatch):
     captured = _capture_xumm(monkeypatch)
     _run(xumm_ops.create_signin_payload())
     assert "Memos" not in captured["payload"]["txjson"]
+
+
+def test_mint_threads_action(monkeypatch):
+    # Economy assembles must be distinguishable on-chain from plain mints and
+    # swap remints — the leaderboard's builds board keys on this memo.
+    captured: dict = {}
+    _patch_client(monkeypatch, captured)
+    _run(
+        xrpl_ops.mint_nft(
+            "https://x/m.json",
+            taxon=1,
+            issuer=config.SWAP_ISSUER_ADDRESS,
+            action=memos.ACTION_ASSEMBLE,
+        )
+    )
+    assert _decoded_memos(captured["tx"])["action"] == "assemble"
+
+
+def test_mint_action_defaults_to_mint(monkeypatch):
+    captured: dict = {}
+    _patch_client(monkeypatch, captured)
+    _run(xrpl_ops.mint_nft("https://x/m.json", taxon=1, issuer=config.SWAP_ISSUER_ADDRESS))
+    assert _decoded_memos(captured["tx"])["action"] == "mint"
