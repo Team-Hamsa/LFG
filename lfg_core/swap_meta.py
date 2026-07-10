@@ -242,12 +242,15 @@ async def load_wallet_nfts(
             cached = meta_cache.get_many([n["uri_hex"] for n in raw])
         except Exception as e:
             logging.warning(f"Metadata cache read failed; falling back to live fetch: {e}")
-    misses = [n for n in raw if n["uri_hex"] not in cached]
+    # Dedupe by URI before fetching: duplicate editions share a uri_hex, and
+    # one fetch must serve all of them (a repeat fetch that flakes to None
+    # would otherwise clobber the earlier success).
+    miss_uris = list(dict.fromkeys(n["uri_hex"] for n in raw if n["uri_hex"] not in cached))
     fetched: dict[str, Any] = {}
-    if misses:
+    if miss_uris:
         async with aiohttp.ClientSession() as http:
-            results = await asyncio.gather(*[fetch_metadata(n["uri_hex"], http) for n in misses])
-        fetched = dict(zip([n["uri_hex"] for n in misses], results, strict=False))
+            results = await asyncio.gather(*[fetch_metadata(u, http) for u in miss_uris])
+        fetched = dict(zip(miss_uris, results, strict=False))
         good = {k: v for k, v in fetched.items() if isinstance(v, dict)}
         if meta_cache is not None and good:
             try:

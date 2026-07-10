@@ -166,6 +166,45 @@ def test_load_wallet_nfts_fetches_misses_and_backfills_cache(monkeypatch):
     assert nft_index.meta_cache_get_many(conn, [_URI_HEX_2]) == {_URI_HEX_2: _META_2}
 
 
+def test_meta_cache_get_many_exceeds_sqlite_param_limit():
+    """A whale wallet can hold more distinct URIs than SQLite's per-statement
+    parameter limit (999 on older builds, 32766 since 3.32); get_many must
+    chunk, not raise — a raise would silently disable the cache for exactly
+    the wallets that need it most (Greptile #154 P2). 40k keys exceeds the
+    limit on every build."""
+    conn = _cache_conn()
+    keys = [f"{i:08X}" for i in range(40_000)]
+    nft_index.meta_cache_put_many(conn, {k: {"name": f"LFGO #{i}"} for i, k in enumerate(keys)})
+    got = nft_index.meta_cache_get_many(conn, keys)
+    assert len(got) == 40_000
+
+
+def test_load_wallet_nfts_fetches_duplicate_uri_once(monkeypatch):
+    """Duplicate editions share a uri_hex. The URI must be fetched once and
+    the result reused for every token carrying it — a repeat fetch whose
+    second attempt fails must not clobber the first success (Greptile #154 P1)."""
+    conn = _cache_conn()
+    cache = nft_index.UriMetadataCache(conn)
+    calls = []
+
+    async def fake_fetch(uri_hex, http=None):
+        calls.append(uri_hex)
+        if len(calls) > 1:  # a second fetch of the same URI would flake to None
+            return None
+        return _META_1
+
+    monkeypatch.setattr(swap_meta, "fetch_metadata", fake_fetch)
+
+    async def fake_account_nfts(wallet, issuer):
+        return [_raw_token(_URI_HEX_1, "A" * 64), _raw_token(_URI_HEX_1, "B" * 64)]
+
+    nfts = asyncio.get_event_loop().run_until_complete(
+        swap_meta.load_wallet_nfts("rWallet", fake_account_nfts, meta_cache=cache)
+    )
+    assert calls == [_URI_HEX_1]
+    assert [n["nft_id"] for n in nfts] == ["A" * 64, "B" * 64]
+
+
 def test_service_wallet_nfts_attaches_index_cache(monkeypatch, tmp_path):
     """Both service call sites (roster + swap-start re-verify) go through
     _wallet_nfts, which must hand load_wallet_nfts a UriMetadataCache bound to

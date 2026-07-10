@@ -118,6 +118,11 @@ def init_db(path: str) -> sqlite3.Connection:
     return conn
 
 
+# Stay under SQLite's per-statement parameter limit (999 on builds older than
+# 3.32) — a whale wallet can hold more distinct URIs than that in one lookup.
+_META_CACHE_QUERY_CHUNK = 500
+
+
 def meta_cache_get_many(
     conn: sqlite3.Connection, uri_hexes: list[str]
 ) -> dict[str, dict[str, Any]]:
@@ -125,14 +130,17 @@ def meta_cache_get_many(
     The key is the URI itself, which is content-addressed for our tokens
     (IPFS CIDs for legacy mints, unique CDN basenames for swap outputs), so
     entries never go stale — a modify changes the URI, not the content."""
-    if not uri_hexes:
-        return {}
-    placeholders = ",".join("?" * len(uri_hexes))
-    cur = conn.execute(
-        f"SELECT uri_hex, metadata_json FROM uri_metadata_cache WHERE uri_hex IN ({placeholders})",
-        uri_hexes,
-    )
-    return {row[0]: json.loads(row[1]) for row in cur.fetchall()}
+    out: dict[str, dict[str, Any]] = {}
+    for i in range(0, len(uri_hexes), _META_CACHE_QUERY_CHUNK):
+        chunk = uri_hexes[i : i + _META_CACHE_QUERY_CHUNK]
+        placeholders = ",".join("?" * len(chunk))
+        cur = conn.execute(
+            "SELECT uri_hex, metadata_json FROM uri_metadata_cache "
+            f"WHERE uri_hex IN ({placeholders})",
+            chunk,
+        )
+        out.update({row[0]: json.loads(row[1]) for row in cur.fetchall()})
+    return out
 
 
 def meta_cache_put_many(conn: sqlite3.Connection, metas: dict[str, dict[str, Any]]) -> None:
