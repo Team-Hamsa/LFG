@@ -218,14 +218,20 @@ def close_listing(
     conn.commit()
 
 
-def mark_settled(conn: sqlite3.Connection, offer_index: str) -> None:
+def mark_settled(conn: sqlite3.Connection, offer_index: str) -> bool:
     """Flip a sold trait listing's settled flag to 1 (burn-back-to-Closet
-    done) — called after `run_deposit` succeeds on behalf of the buyer."""
-    conn.execute(
-        "UPDATE market_listings SET settled = 1 WHERE offer_index = ?",
+    done) — called after `run_deposit` succeeds on behalf of the buyer.
+
+    Guarded to kind='trait': `settled` is a trait-only lifecycle (NULL for
+    characters, per the spec), so a character row is never touched. Returns
+    True when a row was actually settled, False for a nonexistent or
+    character offer_index — a safe explicit outcome, never a silent success."""
+    cur = conn.execute(
+        "UPDATE market_listings SET settled = 1 WHERE offer_index = ? AND kind = 'trait'",
         (offer_index,),
     )
     conn.commit()
+    return cur.rowcount > 0
 
 
 def unsettled_trait_sales(conn: sqlite3.Connection) -> list[dict[str, Any]]:
@@ -334,12 +340,18 @@ def browse(
     small (thousands of rows) and attribute matching needs to parse JSON, so
     there is no benefit to pushing it into SQL. Sort + limit/offset are
     applied last, after filtering, so pagination is over the final result
-    set. Raises ValueError for an unrecognized `kind` or `sort`.
+    set. Raises ValueError for an unrecognized `kind` or `sort`, or a
+    negative `limit`/`offset` (a negative value silently produces a nonsense
+    Python slice — wrap-around paging — instead of erroring).
     """
     if kind not in _VALID_KINDS:
         raise ValueError(f"unknown kind: {kind!r}")
     if sort not in _VALID_SORTS:
         raise ValueError(f"unknown sort: {sort!r}")
+    if limit < 0:
+        raise ValueError(f"limit must be >= 0, got {limit}")
+    if offset < 0:
+        raise ValueError(f"offset must be >= 0, got {offset}")
 
     rows = _browse_character_rows(conn) if kind == "character" else _browse_trait_rows(conn)
 
