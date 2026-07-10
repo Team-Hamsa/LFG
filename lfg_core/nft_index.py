@@ -79,6 +79,11 @@ CREATE TABLE IF NOT EXISTS onchain_nfts (
 );
 CREATE INDEX IF NOT EXISTS idx_onchain_number ON onchain_nfts(nft_number);
 CREATE INDEX IF NOT EXISTS idx_onchain_live   ON onchain_nfts(is_burned);
+CREATE TABLE IF NOT EXISTS uri_metadata_cache (
+    uri_hex       TEXT PRIMARY KEY,
+    metadata_json TEXT NOT NULL,
+    cached_at     TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+);
 """
 
 
@@ -111,6 +116,47 @@ def init_db(path: str) -> sqlite3.Connection:
     conn.executescript(_SCHEMA)
     conn.commit()
     return conn
+
+
+def meta_cache_get_many(
+    conn: sqlite3.Connection, uri_hexes: list[str]
+) -> dict[str, dict[str, Any]]:
+    """Cached raw metadata JSON for the given on-chain URIs (misses omitted).
+    The key is the URI itself, which is content-addressed for our tokens
+    (IPFS CIDs for legacy mints, unique CDN basenames for swap outputs), so
+    entries never go stale — a modify changes the URI, not the content."""
+    if not uri_hexes:
+        return {}
+    placeholders = ",".join("?" * len(uri_hexes))
+    cur = conn.execute(
+        f"SELECT uri_hex, metadata_json FROM uri_metadata_cache WHERE uri_hex IN ({placeholders})",
+        uri_hexes,
+    )
+    return {row[0]: json.loads(row[1]) for row in cur.fetchall()}
+
+
+def meta_cache_put_many(conn: sqlite3.Connection, metas: dict[str, dict[str, Any]]) -> None:
+    if not metas:
+        return
+    conn.executemany(
+        "INSERT OR REPLACE INTO uri_metadata_cache (uri_hex, metadata_json) VALUES (?, ?)",
+        [(uri_hex, json.dumps(meta)) for uri_hex, meta in metas.items()],
+    )
+    conn.commit()
+
+
+class UriMetadataCache:
+    """The meta_cache duck type swap_meta.load_wallet_nfts takes, bound to an
+    open index-DB connection."""
+
+    def __init__(self, conn: sqlite3.Connection):
+        self._conn = conn
+
+    def get_many(self, uri_hexes: list[str]) -> dict[str, dict[str, Any]]:
+        return meta_cache_get_many(self._conn, uri_hexes)
+
+    def put_many(self, metas: dict[str, dict[str, Any]]) -> None:
+        meta_cache_put_many(self._conn, metas)
 
 
 def _nft_to_row(rec: OnchainNft) -> tuple[Any, ...]:

@@ -121,6 +121,12 @@ BUNNY_PULL_ZONE = os.getenv("BUNNY_PULL_ZONE", "").strip().rstrip("/")
 IMG_PROXY_ALLOWED_BASES = tuple(
     {BUNNY_CDN_PUBLIC_BASE} | ({f"https://{BUNNY_PULL_ZONE}"} if BUNNY_PULL_ZONE else set())
 )
+# Host *suffixes* (https-only, matched against the parsed hostname) the image
+# proxy also accepts: legacy mainnet NFTs carry ipfs:// image URIs, which
+# swap_meta.resolve_ipfs turns into per-CID subdomains of this gateway (#153).
+# The leading dot means a subdomain label is required — the bare gateway host
+# or a look-alike containing the suffix mid-hostname cannot match.
+IMG_PROXY_ALLOWED_HOST_SUFFIXES = (".ipfs.dweb.link",)
 
 # Discord Activity (webapp only — not required by the bot)
 DISCORD_CLIENT_ID = os.getenv("DISCORD_CLIENT_ID", "")

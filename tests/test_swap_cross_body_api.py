@@ -70,7 +70,9 @@ def _make_swap_request(nft1_id: str, nft2_id: str, traits: list[str]) -> BaseReq
 
 
 def _stub_wallet_nfts(monkeypatch: pytest.MonkeyPatch, nfts: list[dict[str, Any]]) -> None:
-    async def _fake_load_wallet_nfts(wallet: str, get_account_nfts: Any) -> list[dict[str, Any]]:
+    async def _fake_load_wallet_nfts(
+        wallet: str, get_account_nfts: Any, meta_cache: Any = None
+    ) -> list[dict[str, Any]]:
         return nfts
 
     monkeypatch.setattr(server.swap_meta, "load_wallet_nfts", _fake_load_wallet_nfts)
