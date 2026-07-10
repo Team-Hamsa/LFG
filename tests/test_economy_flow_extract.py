@@ -1,10 +1,12 @@
 import asyncio
+import json
 import sqlite3
 
 from lfg_core import closet_token as ct
 from lfg_core import config
 from lfg_core import economy_flow as ef
 from lfg_core import economy_store as es
+from tests.economy_helpers import flaky_mirror_conn
 
 
 def _run(coro):
@@ -16,10 +18,12 @@ def _run(coro):
 
 
 class _F:
-    def __init__(self, *, fail_sync=False):
+    def __init__(self, *, fail_sync=False, raise_sync=False, fail_offer=False):
         self.minted, self.burns, self.uploads = [], [], 0
         self.modifies = 0
         self.fail_sync = fail_sync
+        self.raise_sync = raise_sync
+        self.fail_offer = fail_offer
 
     async def trait_compose(self, slot, value):
         return f"https://cdn/trait/{slot}-{value}.png"
@@ -41,13 +45,15 @@ class _F:
         return "https://cdn/c.json"
 
     async def closet_modify(self, nft_id, owner, url):
+        if self.raise_sync:
+            raise RuntimeError("timeout after submit")
         if self.fail_sync:
             return None
         self.modifies += 1
         return "MOD"
 
     async def closet_offer(self, nft_id, owner):
-        return "OFFER"
+        return None if self.fail_offer else "OFFER"
 
     async def closet_accept(self, offer_id):
         return {"xumm_url": "x"}
@@ -130,6 +136,69 @@ def test_extract_burns_back_on_closet_sync_failure(tmp_path):
     assert es.read_trait_tokens(conn) == []  # no token row left
     assets = {(sl, v): n for o, sl, v, n in es.read_closet_assets(conn) if o == "rUser"}
     assert assets[("Hat", "Cap")] == 2  # closet untouched
+
+
+# --- #107: phase-aware extract branches ---
+
+
+def test_extract_mirror_failure_does_not_burn_and_offers(tmp_path):
+    """Trait mint OK, Closet decrement committed on-chain, only the CLOSET DB
+    mirror fails (distinct from the trait_tokens-mirror case below): the trait
+    token must NOT be burned back — the Closet already gave up the trait.
+    Delivery continues; DONE with a complete_pending_mirror journal."""
+    conn = sqlite3.connect(":memory:")
+    _active_closet_with_trait(conn)
+    f = _F()
+    s = ef.ExtractSession(owner="rUser", slot="Hat", value="Cap")
+    _run(ef.run_extract(s, _deps(flaky_mirror_conn(conn), f, tmp_path)))
+
+    assert s.state == ef.DONE
+    assert f.burns == []  # NO destructive compensation
+    assert s.nft_id == "TRAIT0"
+    assert s.accept == {"xumm_url": "x"}  # offer/accept still ran
+    record = json.loads((tmp_path / f"extract-{s.id}.json").read_text())
+    assert record["status"] == "complete_pending_mirror"
+    assert record["sync_tx_hash"] == "MOD"
+    assert record["mirror_pending"] is True
+
+
+def test_extract_indeterminate_keeps_token_no_burn(tmp_path):
+    """closet_modify raises (decrement outcome unknown): fail-closed — FAILED,
+    the trait token is kept (id journaled), no burn-back."""
+    conn = sqlite3.connect(":memory:")
+    _active_closet_with_trait(conn)
+    f = _F(raise_sync=True)
+    s = ef.ExtractSession(owner="rUser", slot="Hat", value="Cap")
+    _run(ef.run_extract(s, _deps(conn, f, tmp_path)))
+
+    assert s.state == ef.FAILED
+    assert f.burns == []
+    assert s.nft_id == "TRAIT0"
+    record = json.loads((tmp_path / f"extract-{s.id}.json").read_text())
+    assert record["status"] == "extract_sync_indeterminate"
+    assert record["nft_id"] == "TRAIT0"
+    # closet mirror untouched
+    assets = {(sl, v): n for o, sl, v, n in es.read_closet_assets(conn) if o == "rUser"}
+    assert assets[("Hat", "Cap")] == 2
+
+
+def test_extract_mirror_fail_then_offer_fail_precedence(tmp_path):
+    """Closet mirror fails AND the later offer step fails: extract's existing
+    offer-fail semantics win (DONE with accept=None), and the record still
+    carries mirror_pending + sync_tx_hash. No burn."""
+    conn = sqlite3.connect(":memory:")
+    _active_closet_with_trait(conn)
+    f = _F(fail_offer=True)
+    s = ef.ExtractSession(owner="rUser", slot="Hat", value="Cap")
+    _run(ef.run_extract(s, _deps(flaky_mirror_conn(conn), f, tmp_path)))
+
+    assert s.state == ef.DONE  # existing offer-fail semantics: DONE, accept=None
+    assert s.accept is None
+    assert f.burns == []
+    record = json.loads((tmp_path / f"extract-{s.id}.json").read_text())
+    assert record["status"] == "complete_pending_mirror"
+    assert record["mirror_pending"] is True
+    assert record["sync_tx_hash"] == "MOD"
 
 
 def test_extract_succeeds_when_mirror_write_fails(tmp_path, monkeypatch):

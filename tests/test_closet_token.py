@@ -3,6 +3,8 @@
 import asyncio
 import sqlite3
 
+import pytest
+
 from lfg_core import closet_token as bt
 from lfg_core import economy_store as es
 
@@ -351,6 +353,91 @@ def test_sync_closet_preserves_active_status():
     assert rec is not None
     assert rec[2] == bt.ACTIVE, f"expected ACTIVE, got {rec[2]!r}"
     assert rec[3] == "OF1", f"expected offer_id OF1, got {rec[3]!r}"
+
+
+# --- #107: phase-aware sync_closet exception taxonomy ---
+
+
+class _SyncModifyRaises(_SyncFakes):
+    async def modify(self, nft_id: str, owner: str, url: str) -> str:
+        raise RuntimeError("network dropped mid-submit")
+
+
+class _SyncModifyNone(_SyncFakes):
+    async def modify(self, nft_id: str, owner: str, url: str):
+        return None
+
+
+class _RollbackSpyConn:
+    """Delegates to a real sqlite3 connection, recording rollback() calls."""
+
+    def __init__(self, real):
+        self._real = real
+        self.rollbacks = 0
+
+    def rollback(self):
+        self.rollbacks += 1
+        return self._real.rollback()
+
+    def __getattr__(self, name):
+        return getattr(self._real, name)
+
+
+def _seeded_conn(owner: str = "rB") -> sqlite3.Connection:
+    c = _conn()
+    es.set_closet_token(c, owner, "NFT_SYNC", "AABB", status=bt.ACTIVE, offer_id=None)
+    return c
+
+
+def test_sync_closet_returns_tx_hash_on_success():
+    c, f = _seeded_conn(), _SyncFakes()
+    got = _run(
+        bt.sync_closet(c, "rB", [("Hat", "Cap", 1)], [], upload_fn=f.upload, modify_fn=f.modify)
+    )
+    assert got == "SYNCHASH"
+
+
+def test_sync_closet_modify_none_raises_plain_closet_error():
+    c, f = _seeded_conn(), _SyncModifyNone()
+    with pytest.raises(bt.ClosetError) as ei:
+        _run(bt.sync_closet(c, "rB", [], [], upload_fn=f.upload, modify_fn=f.modify))
+    assert not isinstance(ei.value, bt.ClosetMirrorError)
+    assert not isinstance(ei.value, bt.ClosetIndeterminateError)
+
+
+def test_sync_closet_modify_raise_is_indeterminate():
+    c, f = _seeded_conn(), _SyncModifyRaises()
+    with pytest.raises(bt.ClosetIndeterminateError):
+        _run(bt.sync_closet(c, "rB", [], [], upload_fn=f.upload, modify_fn=f.modify))
+
+
+def test_sync_closet_set_token_failure_is_mirror_error(monkeypatch):
+    c, f = _seeded_conn(), _SyncFakes()
+    spy = _RollbackSpyConn(c)
+
+    def boom(*a, **kw):
+        raise RuntimeError("db locked")
+
+    monkeypatch.setattr(bt.economy_store, "set_closet_token", boom)
+    with pytest.raises(bt.ClosetMirrorError) as ei:
+        _run(bt.sync_closet(spy, "rB", [], [], upload_fn=f.upload, modify_fn=f.modify))
+    assert ei.value.tx_hash == "SYNCHASH"
+    # ClosetMirrorError is still a ClosetError (base stays catchable).
+    assert isinstance(ei.value, bt.ClosetError)
+    # The shared connection was rolled back so no half-applied write is left pending.
+    assert spy.rollbacks == 1
+
+
+def test_sync_closet_upload_raise_propagates_raw():
+    c = _seeded_conn()
+
+    async def bad_upload(meta):
+        raise RuntimeError("cdn down")
+
+    f = _SyncFakes()
+    with pytest.raises(RuntimeError) as ei:
+        _run(bt.sync_closet(c, "rB", [], [], upload_fn=bad_upload, modify_fn=f.modify))
+    assert not isinstance(ei.value, bt.ClosetError)
 
 
 def test_confirm_accept_returns_none_without_record():

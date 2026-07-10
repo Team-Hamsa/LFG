@@ -2,12 +2,14 @@
 # Driven through injected fakes — no network.
 
 import asyncio
+import json
 import sqlite3
 
 from lfg_core import economy_flow as ef
 from lfg_core import economy_store as es
 from lfg_core import trait_economy as te
 from lfg_core.nft_index import OnchainNft
+from tests.economy_helpers import flaky_mirror_conn
 
 NON_BODY = te.NON_BODY_SLOTS
 OLD_URL = "https://cdn/old.json"
@@ -51,8 +53,9 @@ def _conn_with_bucket() -> sqlite3.Connection:
 
 
 class _Fakes:
-    def __init__(self, *, fail_closet_modify=False) -> None:
+    def __init__(self, *, fail_closet_modify=False, raise_closet_modify=False) -> None:
         self.fail_closet_modify = fail_closet_modify
+        self.raise_closet_modify = raise_closet_modify
         self.char_modifies: list[tuple[str, str, str]] = []
 
     async def closet_upload(self, meta: dict) -> str:
@@ -68,6 +71,8 @@ class _Fakes:
         return {}
 
     async def closet_modify(self, nft_id, owner, url):
+        if self.raise_closet_modify:
+            raise RuntimeError("timeout after submit")
         return None if self.fail_closet_modify else "MODHASH"
 
     async def char_compose(self, attrs, body, edition, rev):
@@ -147,8 +152,6 @@ def test_equip_modify_then_bucket_fails_reverts(tmp_path):
 
 
 def test_equip_bucket_fails_and_uri_undecodable_reports_honestly(tmp_path):
-    import json
-
     conn, f = _conn_with_bucket(), _Fakes(fail_closet_modify=True)
     rec = _char()
     rec.uri_hex = ""  # no decodable old URI to revert to
@@ -160,3 +163,40 @@ def test_equip_bucket_fails_and_uri_undecodable_reports_honestly(tmp_path):
     assert f.char_modifies == [("NFT7", "rUser", "https://cdn/new.json")]
     record = json.loads((tmp_path / f"equip-{s.id}.json").read_text())
     assert record["status"] == "failed_revert"
+
+
+# --- #107: phase-aware equip branches ---
+
+
+def test_equip_mirror_failure_keeps_new_traits(tmp_path):
+    """Character modify OK, Closet swap committed on-chain, only the DB mirror
+    fails: reverting the character would strand the swapped Closet — the
+    character must keep its new traits, the session ends DONE, and the journal
+    records complete_pending_mirror."""
+    conn, f = _conn_with_bucket(), _Fakes()
+    s = ef.EquipSession(owner="rUser", character=_char(), slot="Head", incoming_value="Crown")
+    _run(ef.run_equip(s, _deps(flaky_mirror_conn(conn), f, tmp_path)))
+
+    assert s.state == ef.DONE
+    # exactly ONE character modify — no revert back to the old URI
+    assert f.char_modifies == [("NFT7", "rUser", "https://cdn/new.json")]
+    record = json.loads((tmp_path / f"equip-{s.id}.json").read_text())
+    assert record["status"] == "complete_pending_mirror"
+    assert record["sync_tx_hash"] == "MODHASH"
+    assert record["mirror_pending"] is True
+
+
+def test_equip_indeterminate_no_revert(tmp_path):
+    """closet_modify raises (swap outcome unknown): fail-closed — FAILED, the
+    character keeps its new URI (no revert), journal equip_sync_indeterminate."""
+    conn, f = _conn_with_bucket(), _Fakes(raise_closet_modify=True)
+    s = ef.EquipSession(owner="rUser", character=_char(), slot="Head", incoming_value="Crown")
+    _run(ef.run_equip(s, _deps(conn, f, tmp_path)))
+
+    assert s.state == ef.FAILED
+    assert f.char_modifies == [("NFT7", "rUser", "https://cdn/new.json")]  # no revert
+    record = json.loads((tmp_path / f"equip-{s.id}.json").read_text())
+    assert record["status"] == "equip_sync_indeterminate"
+    # closet mirror untouched
+    assets = {(slot, v): n for o, slot, v, n in es.read_closet_assets(conn)}
+    assert assets == {("Head", "Crown"): 1}

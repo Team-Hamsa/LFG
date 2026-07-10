@@ -6,6 +6,7 @@ from lfg_core import closet_token as ct
 from lfg_core import config
 from lfg_core import economy_flow as ef
 from lfg_core import economy_store as es
+from tests.economy_helpers import flaky_mirror_conn
 
 
 def _run(coro):
@@ -30,12 +31,14 @@ class _F:
         self,
         *,
         fail_sync: bool = False,
+        raise_sync: bool = False,
         info_none: bool = False,
         issuer_override: str | None = None,
     ) -> None:
         self.burns: list[tuple[str, str]] = []
         self.modifies = 0
         self.fail_sync = fail_sync
+        self.raise_sync = raise_sync
         self.info_none = info_none
         self.issuer_override = issuer_override
         self.owner_for: dict[str, str] = {}
@@ -63,6 +66,8 @@ class _F:
         return "https://cdn/c.json"
 
     async def closet_modify(self, nft_id: str, owner: str, url: str) -> str | None:
+        if self.raise_sync:
+            raise RuntimeError("timeout after submit")
         if self.fail_sync:
             return None
         self.modifies += 1
@@ -224,6 +229,51 @@ def test_deposit_burn_then_credit_fails_journals(tmp_path):
     assert record["status"] == "deposited_pending_closet"
     assert record["slot"] == "Hat"
     assert record["value"] == "Cap"
+
+
+# --- #107: phase-aware deposit branches ---
+
+
+def test_deposit_mirror_failure_completes_pending_mirror(tmp_path):
+    """Burn OK, Closet credit committed on-chain, only the DB mirror fails:
+    the session ends DONE with complete_pending_mirror — NOT
+    deposited_pending_closet, whose operator recipe (re-credit) would
+    double-credit an already-credited Closet."""
+    conn = sqlite3.connect(":memory:")
+    _active_closet_with_trait_token(conn)
+    f = _F()
+    f.owner_for["TRAIT9"] = "rUser"
+    session = ef.DepositSession(owner="rUser", nft_id="TRAIT9")
+    _run(ef.run_deposit(session, _deps(flaky_mirror_conn(conn), f, tmp_path)))
+
+    assert session.state == ef.DONE
+    assert f.burns == [("TRAIT9", "rUser")]
+    record = json.loads((tmp_path / f"deposit-{session.id}.json").read_text())
+    assert record["status"] == "complete_pending_mirror"
+    assert record["sync_tx_hash"] == "MOD"
+    assert record["mirror_pending"] is True
+
+
+def test_deposit_indeterminate_journals_and_fails(tmp_path):
+    """closet_modify raises (credit outcome unknown): fail-closed — FAILED,
+    journal deposit_sync_indeterminate with slot/value preserved so an admin
+    can reconcile from chain before any re-credit."""
+    conn = sqlite3.connect(":memory:")
+    _active_closet_with_trait_token(conn)
+    f = _F(raise_sync=True)
+    f.owner_for["TRAIT9"] = "rUser"
+    session = ef.DepositSession(owner="rUser", nft_id="TRAIT9")
+    _run(ef.run_deposit(session, _deps(conn, f, tmp_path)))
+
+    assert session.state == ef.FAILED
+    assert f.burns == [("TRAIT9", "rUser")]  # the irreversible burn had happened
+    record = json.loads((tmp_path / f"deposit-{session.id}.json").read_text())
+    assert record["status"] == "deposit_sync_indeterminate"
+    assert record["slot"] == "Hat"
+    assert record["value"] == "Cap"
+    # closet NOT credited locally
+    assets = {(sl, v): n for o, sl, v, n in es.read_closet_assets(conn) if o == "rUser"}
+    assert ("Hat", "Cap") not in assets
 
 
 # ---------------------------------------------------------------------------

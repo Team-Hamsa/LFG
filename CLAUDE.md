@@ -537,15 +537,29 @@ any additional ledger entry.
 
 **Extract** (`scripts/economy_extract.py`): compose+mint the trait token →
 decrement the Closet asset → send the token to the owner via XUMM accept offer.
-Fail-safe: if the Closet update fails after mint, the trait token is burned back
-(revert). If the compensating burn also fails, the session journals
-`failed_revert_mint` and requires admin intervention.
+Fail-safe: if the Closet update **definitively did not commit on-chain** after
+mint, the trait token is burned back (revert). If the compensating burn also
+fails, the session journals `failed_revert_mint` and requires admin
+intervention.
 
 **Deposit** (`scripts/economy_deposit.py`): issuer-burn the trait token →
 credit the Closet asset. **Fail-closed:** ownership is verified on-ledger before
 the burn; the burn is irreversible, so if on-ledger ownership cannot be
-confirmed, the op aborts with no state change. If the Closet credit fails after
-a successful burn, the session journals `deposited_pending_closet` for recovery.
+confirmed, the op aborts with no state change. If the Closet credit
+**definitively did not commit on-chain** after a successful burn, the session
+journals `deposited_pending_closet` for recovery (re-applying it is safe).
+
+**Phase-aware `_sync_then_persist` (#107):** every flow's Closet update
+distinguishes three failure phases via a `closet_token` exception taxonomy —
+plain `ClosetError` (ledger NOT committed → on-chain compensation, incl. the
+burn-back/modify-back paths above, is safe), `ClosetMirrorError(tx_hash)`
+(ledger committed, only the local DB mirror failed → **no on-chain
+compensation**; the session completes with journal `complete_pending_mirror`
+and the listener rebuilds the mirror from the Closet token), and
+`ClosetIndeterminateError` (modify outcome unknown → fail-closed, journal
+`<op>_sync_indeterminate`, reconcile-from-chain, never blind re-apply).
+Journal records carry sticky `sync_tx_hash` + `mirror_pending` fields; the
+full status table lives in the `lfg_core/economy_flow.py` module docstring.
 
 **CLI invocations:**
 ```bash

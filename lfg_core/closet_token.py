@@ -29,7 +29,25 @@ OwnerFn = Callable[[str], Awaitable[str | None]]  # nft_id -> current owner addr
 
 
 class ClosetError(RuntimeError):
-    """A Closet NFToken lifecycle step (mint/offer/modify) failed."""
+    """A Closet NFToken lifecycle step (mint/offer/modify) failed.
+
+    Raised plain (not a subclass below), it means the on-chain change was NOT
+    committed — compensating on-chain actions are safe."""
+
+
+class ClosetMirrorError(ClosetError):
+    """The on-chain NFTokenModify COMMITTED; only a local DB write failed.
+    Do NOT run on-chain compensation — reconcile from chain instead (the
+    listener rebuilds the mirror from the token's metadata)."""
+
+    def __init__(self, msg: str, tx_hash: str):
+        super().__init__(msg)
+        self.tx_hash = tx_hash
+
+
+class ClosetIndeterminateError(ClosetError):
+    """modify_fn raised; whether the modify committed is unknown.
+    Fail-closed: no on-chain compensation, admin/listener reconciliation."""
 
 
 @dataclass
@@ -187,16 +205,41 @@ async def sync_closet(
     *,
     upload_fn: UploadFn,
     modify_fn: ModifyFn,
-) -> None:
+) -> str:
     """Recompose the Closet NFToken's metadata from the given contents and
     NFTokenModify its URI in place (the token id is stable). Persists the new
-    URI. Raises ClosetError if the closet is unknown or the modify fails."""
+    URI and returns the modify tx hash.
+
+    Phase-aware failure taxonomy (#107):
+    - plain ClosetError — the modify definitively did NOT commit (no record,
+      or modify_fn returned falsy); on-chain compensation is safe.
+    - ClosetIndeterminateError — modify_fn raised; commit status unknown.
+    - ClosetMirrorError(tx_hash) — the modify COMMITTED but the local
+      closet_tokens write failed (rolled back first, so nothing half-applied
+      is left pending on the shared connection).
+    A raise from upload_fn happens before any ledger effect and propagates
+    RAW (callers treat it as ledger-failed)."""
     record = economy_store.get_closet_record(conn, owner)
     if record is None:
         raise ClosetError(f"no Closet NFToken on record for {owner}")
     nft_id, _uri_hex, status, offer_id = record
     url = await upload_fn(build_closet_metadata(owner, assets, bodies))
-    tx_hash = await modify_fn(nft_id, owner, url)
+    try:
+        tx_hash = await modify_fn(nft_id, owner, url)
+    except Exception as e:
+        raise ClosetIndeterminateError(
+            f"Closet NFTokenModify outcome unknown (modify raised: {e})"
+        ) from e
     if not tx_hash:
         raise ClosetError("failed to modify Closet NFToken URI")
-    economy_store.set_closet_token(conn, owner, nft_id, _hex(url), status=status, offer_id=offer_id)
+    try:
+        economy_store.set_closet_token(
+            conn, owner, nft_id, _hex(url), status=status, offer_id=offer_id
+        )
+    except Exception as e:
+        conn.rollback()
+        raise ClosetMirrorError(
+            f"Closet URI modified on-chain but the closet_tokens mirror write failed: {e}",
+            tx_hash,
+        ) from e
+    return tx_hash

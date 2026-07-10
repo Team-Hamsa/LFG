@@ -5,11 +5,14 @@ import asyncio
 import json
 import sqlite3
 
+import pytest
+
 from lfg_core import closet_token as ct
 from lfg_core import economy_flow as ef
 from lfg_core import economy_store as es
 from lfg_core import trait_economy as te
 from lfg_core.nft_index import OnchainNft
+from tests.economy_helpers import flaky_mirror_conn
 
 NON_BODY = te.NON_BODY_SLOTS
 
@@ -51,11 +54,14 @@ def _conn_with_genesis(edition: int = 7, body: str = "Straight Blue") -> sqlite3
 
 
 class _Fakes:
-    def __init__(self, *, fail_closet_modify: bool = False) -> None:
+    def __init__(
+        self, *, fail_closet_modify: bool = False, raise_closet_modify: bool = False
+    ) -> None:
         self.burns: list[tuple[str, str]] = []
         self.bucket_modifies: list[tuple[str, str, str]] = []
         self.closet_mints: list[str] = []
         self.fail_closet_modify = fail_closet_modify
+        self.raise_closet_modify = raise_closet_modify
         self.uploads = 0
         # nft_ids that exist_fn should report as on-ledger; everything else is stale.
         self.live_closet_ids: set[str] = set()
@@ -87,6 +93,8 @@ class _Fakes:
         return {"xumm_url": "x"}
 
     async def closet_modify(self, nft_id: str, owner: str, url: str):
+        if self.raise_closet_modify:
+            raise RuntimeError("timeout after submit")
         if self.fail_closet_modify:
             return None
         self.bucket_modifies.append((nft_id, owner, url))
@@ -219,6 +227,86 @@ def test_harvest_succeeds_with_active_closet(tmp_path):
     _run(ef.run_harvest(session, _deps(conn, f, tmp_path)))
     assert session.state == ef.DONE
     assert f.burns == [("NFT7", "rUser")]
+
+
+# --- #107: phase-aware harvest branches ---
+
+
+def test_harvest_mirror_failure_completes_pending_mirror(tmp_path):
+    """Burn OK, Closet modify OK, only the DB mirror write fails: the chain is
+    fully consistent — the session ends DONE (listener converges the mirror)
+    and the journal records complete_pending_mirror with the modify tx hash."""
+    conn, f = _conn_with_genesis(), _Fakes()
+    es.set_closet_token(conn, "rUser", "CLOSET0", "00", status=ct.ACTIVE, offer_id=None)
+    session = ef.HarvestSession(owner="rUser", character=_char(), burnable=True)
+    _run(ef.run_harvest(session, _deps(flaky_mirror_conn(conn), f, tmp_path)))
+
+    assert session.state == ef.DONE
+    assert f.burns == [("NFT7", "rUser")]  # exactly one burn, no compensation
+    assert len(f.bucket_modifies) == 1
+    record = json.loads((tmp_path / f"harvest-{session.id}.json").read_text())
+    assert record["status"] == "complete_pending_mirror"
+    assert record["sync_tx_hash"] == "MODHASH"
+    assert record["mirror_pending"] is True
+
+
+def test_harvest_indeterminate_sync_journals_and_fails(tmp_path):
+    """closet_modify raises (commit status unknown): fail-closed — FAILED, no
+    compensation, journal harvest_sync_indeterminate with the moved assets."""
+    conn, f = _conn_with_genesis(), _Fakes(raise_closet_modify=True)
+    es.set_closet_token(conn, "rUser", "CLOSET0", "00", status=ct.ACTIVE, offer_id=None)
+    session = ef.HarvestSession(owner="rUser", character=_char(), burnable=True)
+    _run(ef.run_harvest(session, _deps(conn, f, tmp_path)))
+
+    assert session.state == ef.FAILED
+    assert f.burns == [("NFT7", "rUser")]  # the irreversible burn had happened
+    record = json.loads((tmp_path / f"harvest-{session.id}.json").read_text())
+    assert record["status"] == "harvest_sync_indeterminate"
+    assert len(record["moved_assets"]) == len(NON_BODY)
+    assert record["sync_tx_hash"] is None
+    # DB mirror untouched (nothing was credited)
+    assert es.read_closet_bodies(conn) == []
+
+
+# --- #107: phase-aware _sync_then_persist ---
+
+
+def test_sync_then_persist_mirror_failure_is_typed(tmp_path):
+    """A DB failure AFTER the on-chain Closet modify committed must surface as
+    ClosetMirrorError carrying the modify tx hash — not a bare Exception."""
+    conn, f = _conn_with_genesis(), _Fakes()
+    es.set_closet_token(conn, "rUser", "CLOSET0", "00", status=ct.ACTIVE, offer_id=None)
+    deps = _deps(flaky_mirror_conn(conn), f, tmp_path)
+    with pytest.raises(ct.ClosetMirrorError) as ei:
+        _run(ef._sync_then_persist(deps, "rUser", {("Head", "Crown"): 1}, {7}))
+    assert ei.value.tx_hash == "MODHASH"
+    assert len(f.bucket_modifies) == 1  # on-chain modify DID happen
+
+
+def test_sync_then_persist_mirror_failure_rolls_back(tmp_path):
+    """Open-transaction hazard (spec 2.3): the injected failure lands after the
+    closet_assets DELETE executed. The mirror-failed path must roll the shared
+    connection back so the original rows survive — even a later unrelated
+    commit() must not persist the half-applied delete."""
+    conn, f = _conn_with_genesis(), _Fakes()
+    es.set_closet_token(conn, "rUser", "CLOSET0", "00", status=ct.ACTIVE, offer_id=None)
+    es.set_closet_contents(conn, "rUser", [("Head", "Crown", 2)], [3])
+    deps = _deps(flaky_mirror_conn(conn), f, tmp_path)
+    with pytest.raises(ct.ClosetMirrorError):
+        _run(ef._sync_then_persist(deps, "rUser", {("Head", "Crown"): 1}, {7}))
+    original = [("rUser", "Head", "Crown", 2)]
+    assert es.read_closet_assets(conn) == original  # delete rolled back
+    assert es.read_closet_bodies(conn) == [("rUser", 3)]
+    conn.commit()  # an unrelated later commit must not resurrect the delete
+    assert es.read_closet_assets(conn) == original
+
+
+def test_sync_then_persist_returns_tx_hash(tmp_path):
+    conn, f = _conn_with_genesis(), _Fakes()
+    es.set_closet_token(conn, "rUser", "CLOSET0", "00", status=ct.ACTIVE, offer_id=None)
+    deps = _deps(conn, f, tmp_path)
+    got = _run(ef._sync_then_persist(deps, "rUser", {("Head", "Crown"): 1}, {7}))
+    assert got == "MODHASH"
 
 
 def test_harvest_rejected_when_active_closet_gone_onledger(tmp_path):
