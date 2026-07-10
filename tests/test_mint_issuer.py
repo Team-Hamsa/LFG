@@ -78,7 +78,13 @@ def test_mint_session_mints_as_collection_issuer(monkeypatch):
     monkeypatch.setattr(mint_flow, "_upload_to_bunny", fake_upload_bunny)
 
     session = mint_flow.MintSession(discord_id="1", wallet_address="rUser")
-    asyncio.get_event_loop().run_until_complete(mint_flow.run_mint_session(session))
+    # Own loop, independent of suite order (another test may have closed the
+    # default loop) — same pattern as the economy flow tests' _run helper.
+    loop = asyncio.new_event_loop()
+    try:
+        loop.run_until_complete(mint_flow.run_mint_session(session))
+    finally:
+        loop.close()
 
     assert captured, "mint_nft was never reached"
     assert captured["issuer"] == "rCOLLECTIONISSUERxxxxxxxxxxxxxxxxx"
