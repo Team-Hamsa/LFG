@@ -101,6 +101,21 @@ export function computeRoyalty(priceXrp) {
 }
 
 /**
+ * No-throw wrapper around computeRoyalty for callers rendering
+ * server-provided amounts (#133): a malformed listing price ("1E+1", "",
+ * "abc") returns {ok:false, error} for the UI to surface via showError
+ * instead of rejecting the async click handler into a dead card.
+ * computeRoyalty itself still throws — this mirrors validatePrice.
+ */
+export function safeComputeRoyalty(priceXrp) {
+  try {
+    return { ok: true, royalty: computeRoyalty(priceXrp) };
+  } catch (e) {
+    return { ok: false, error: e.message };
+  }
+}
+
+/**
  * The "You receive X XRP (93% — 7% collection royalty)" disclosure shown on
  * every list/sell screen (spec §Q8). Always says 93%/7% — see
  * .superpowers/sdd/global-constraints.md's fee-copy rule.

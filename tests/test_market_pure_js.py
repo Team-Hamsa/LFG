@@ -295,3 +295,34 @@ def test_is_market_terminal_false(state):
 def test_closet_required_message_mentions_closet():
     msg = run_js("M.CLOSET_REQUIRED_MESSAGE")
     assert "Closet" in msg
+
+
+# --- #133: bad-price errors must be catchable, and a non-throwing seam ---
+# openBuyFlow renders server-provided amount_xrp through computeRoyalty; a
+# malformed amount ("1E+1", "abc", "") must throw (callers handle it), and
+# safeComputeRoyalty is the no-throw seam app.js uses to route the failure
+# to showError instead of a dead click.
+
+
+@pytest.mark.parametrize("bad", ["1E+1", "abc", ""])
+def test_xrp_to_drops_throws_on_unparseable_amounts(bad):
+    assert run_js_throws(f"M.xrpToDropsStr({json.dumps(bad)})") == "RangeError"
+
+
+@pytest.mark.parametrize("bad", ["1E+1", "abc", ""])
+def test_compute_royalty_throws_on_unparseable_amounts(bad):
+    assert run_js_throws(f"M.computeRoyalty({json.dumps(bad)})") == "RangeError"
+
+
+def test_safe_compute_royalty_ok_shape():
+    r = run_js("M.safeComputeRoyalty('100')")
+    assert r["ok"] is True
+    assert r["royalty"]["receiveXrp"] == "93"
+    assert r["royalty"]["feeXrp"] == "7"
+
+
+@pytest.mark.parametrize("bad", ["1E+1", "abc", ""])
+def test_safe_compute_royalty_error_shape(bad):
+    r = run_js(f"M.safeComputeRoyalty({json.dumps(bad)})")
+    assert r["ok"] is False
+    assert isinstance(r["error"], str) and r["error"]
