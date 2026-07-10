@@ -22,6 +22,7 @@ import traceback
 from collections.abc import Awaitable, Callable
 from typing import Any, TypeVar, cast
 from urllib.parse import quote as urlquote
+from urllib.parse import urlparse
 
 import aiohttp
 from aiohttp import web
@@ -1956,11 +1957,30 @@ async def handle_mint_start(request):
     return web.json_response(session.to_dict())
 
 
+async def _wallet_nfts(wallet: str) -> list[dict[str, Any]]:
+    """load_wallet_nfts with the per-network uri_hex metadata cache attached
+    (#153): legacy mainnet tokens carry ipfs:// URIs, so an uncached roster
+    load is one public-gateway fetch per NFT. A cache-open failure degrades to
+    the plain live-fetch path — it must never break the listing."""
+    conn = None
+    cache = None
+    try:
+        conn = nft_index.init_db(nft_index.index_db_path(config.XRPL_NETWORK))
+        cache = nft_index.UriMetadataCache(conn)
+    except Exception as e:
+        logging.warning(f"uri metadata cache unavailable: {e}")
+    try:
+        return await swap_meta.load_wallet_nfts(wallet, xrpl_ops.get_account_nfts, meta_cache=cache)
+    finally:
+        if conn is not None:
+            conn.close()
+
+
 @require_wallet
 async def handle_nfts(request):
     """List the user's swappable collection NFTs (normalized metadata)."""
     try:
-        nfts = await swap_meta.load_wallet_nfts(request["wallet"], xrpl_ops.get_account_nfts)
+        nfts = await _wallet_nfts(request["wallet"])
     except Exception as e:
         logging.error(f"NFT listing failed: {e}")
         return web.json_response({"error": "failed to load wallet NFTs"}, status=502)
@@ -2018,7 +2038,7 @@ async def handle_swap_start(request):
 
     # Re-verify ownership and metadata server-side (never trust client data)
     try:
-        nfts = await swap_meta.load_wallet_nfts(request["wallet"], xrpl_ops.get_account_nfts)
+        nfts = await _wallet_nfts(request["wallet"])
     except Exception as e:
         logging.error(f"NFT verification failed: {e}")
         return web.json_response({"error": "failed to verify wallet NFTs"}, status=502)
@@ -2296,13 +2316,28 @@ async def _fetch_cdn(url):
             return await resp.read(), resp.content_type
 
 
+def _img_url_allowed(url: str) -> bool:
+    """URL-prefix match against the Bunny bases, or an https hostname-suffix
+    match against IMG_PROXY_ALLOWED_HOST_SUFFIXES (the per-CID IPFS gateway
+    subdomains legacy mainnet image URIs resolve to, #153). The suffix check
+    parses the URL so the gateway string appearing in a path or mid-hostname
+    (cid.ipfs.dweb.link.evil.example) can never match."""
+    if url.startswith(tuple(base + "/" for base in config.IMG_PROXY_ALLOWED_BASES)):
+        return True
+    parsed = urlparse(url)
+    return (
+        parsed.scheme == "https"
+        and parsed.hostname is not None
+        and parsed.hostname.endswith(config.IMG_PROXY_ALLOWED_HOST_SUFFIXES)
+    )
+
+
 async def handle_img(request):
     """Same-origin proxy for CDN images: the Activity's CSP blocks cross-origin
-    <img> loads, so the client routes CDN image URLs through here (allowed
-    bases: BUNNY_CDN_PUBLIC_BASE and the BUNNY_PULL_ZONE custom domain)."""
+    <img> loads, so the client routes image URLs through here (allowed: the
+    Bunny CDN bases plus the IPFS gateway host suffixes — see _img_url_allowed)."""
     url = request.query.get("u", "")
-    allowed = tuple(base + "/" for base in config.IMG_PROXY_ALLOWED_BASES)
-    if len(url) > 2048 or not url.startswith(allowed):
+    if len(url) > 2048 or not _img_url_allowed(url):
         return web.json_response({"error": "bad image url"}, status=400)
     try:
         body, ctype = await _fetch_cdn(url)

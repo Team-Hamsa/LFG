@@ -223,14 +223,43 @@ def normalize_nft(
     }
 
 
-async def load_wallet_nfts(wallet: str, get_account_nfts: Any) -> list[dict[str, Any]]:
+async def load_wallet_nfts(
+    wallet: str, get_account_nfts: Any, meta_cache: Any = None
+) -> list[dict[str, Any]]:
     """List + normalize all swappable NFTs in a wallet. get_account_nfts is
-    injected (xrpl_ops.get_account_nfts) to keep this module network-light."""
+    injected (xrpl_ops.get_account_nfts) to keep this module network-light.
+
+    meta_cache (optional, duck-typed — nft_index.UriMetadataCache) is a
+    uri_hex-keyed raw-metadata cache consulted before hitting the gateways:
+    legacy mainnet tokens live on IPFS, so without it every roster load is one
+    public-gateway fetch per NFT (#153). The URI is content-addressed for our
+    tokens, so cached entries never go stale. Cache failures degrade to the
+    live fetch — they must never break the listing."""
     raw = await get_account_nfts(wallet, config.SWAP_ISSUER_ADDRESS)
-    async with aiohttp.ClientSession() as http:
-        metas = await asyncio.gather(*[fetch_metadata(n["uri_hex"], http) for n in raw])
+    cached: dict[str, dict[str, Any]] = {}
+    if meta_cache is not None:
+        try:
+            cached = meta_cache.get_many([n["uri_hex"] for n in raw])
+        except Exception as e:
+            logging.warning(f"Metadata cache read failed; falling back to live fetch: {e}")
+    # Dedupe by URI before fetching: duplicate editions share a uri_hex, and
+    # one fetch must serve all of them (a repeat fetch that flakes to None
+    # would otherwise clobber the earlier success).
+    miss_uris = list(dict.fromkeys(n["uri_hex"] for n in raw if n["uri_hex"] not in cached))
+    fetched: dict[str, Any] = {}
+    if miss_uris:
+        async with aiohttp.ClientSession() as http:
+            results = await asyncio.gather(*[fetch_metadata(u, http) for u in miss_uris])
+        fetched = dict(zip(miss_uris, results, strict=False))
+        good = {k: v for k, v in fetched.items() if isinstance(v, dict)}
+        if meta_cache is not None and good:
+            try:
+                meta_cache.put_many(good)
+            except Exception as e:
+                logging.warning(f"Metadata cache write failed: {e}")
     nfts = []
-    for nft, meta in zip(raw, metas, strict=False):
+    for nft in raw:
+        meta = cached.get(nft["uri_hex"], fetched.get(nft["uri_hex"]))
         if not isinstance(meta, dict):
             continue
         try:
