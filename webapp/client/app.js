@@ -91,8 +91,14 @@ function qrUrl(data) {
 
 // CDN images are cross-origin and blocked by the Activity's CSP, so they are
 // routed through the backend's same-origin proxy (like the QR codes).
-function imgUrl(url) {
-  return url ? `/api/img?u=${encodeURIComponent(url)}` : url;
+// Grid/roster tiles pass THUMB_W: the proxy then serves a pre-built ~10 KB
+// 256px WebP instead of the ~634 KB full still (falling back to the full
+// image when no thumb exists, so passing it is always safe).
+const THUMB_W = 256;
+function imgUrl(url, w) {
+  if (!url) return url;
+  const base = `/api/img?u=${encodeURIComponent(url)}`;
+  return w ? `${base}&w=${w}` : base;
 }
 
 // Guild/channel hosting the Activity; the backend turns these into a XUMM
@@ -259,7 +265,8 @@ function renderLbRow(row, isNftBoard) {
   if (isNftBoard && row.image) {
     const img = document.createElement('img');
     img.className = 'lb-thumb';
-    img.src = imgUrl(row.image);
+    img.src = imgUrl(row.image, THUMB_W);
+    img.loading = 'lazy';
     img.alt = '';
     label.appendChild(img);
   }
@@ -721,7 +728,8 @@ async function openSwapper() {
       pick.className = 'pick';
       pick.setAttribute('aria-hidden', 'true');
       const img = document.createElement('img');
-      img.src = imgUrl(nft.image);
+      img.src = imgUrl(nft.image, THUMB_W);
+      img.loading = 'lazy';
       img.alt = '';
       const name = document.createElement('span');
       name.className = 'cap';
@@ -801,8 +809,8 @@ function showTraitChooser() {
   const [a, b] = swapPick.map((p) => p.nft);
   showPanel('swap-traits-panel');
   renderSwapCost();
-  el('swap-img1').src = imgUrl(a.image);
-  el('swap-img2').src = imgUrl(b.image);
+  el('swap-img1').src = imgUrl(a.image, THUMB_W);
+  el('swap-img2').src = imgUrl(b.image, THUMB_W);
   el('swap-name1').textContent = a.name;
   el('swap-name2').textContent = b.name;
   const list = el('trait-list');
@@ -1021,10 +1029,11 @@ function renderRoster(assembleEnabled = true) {
     const tile = document.createElement('button');
     tile.className = 'roster-tile' + (char.nft_id === activeNftId ? ' active' : '');
     const img = document.createElement('img');
-    const cdn = imgUrl(char.image_url);
+    img.loading = 'lazy';
+    const imgSrc = imgUrl(char.image_url, THUMB_W);
     const bodyVal = (char.attributes.find((a) => a.trait_type === 'Body') || {}).value;
-    if (cdn) {
-      img.src = cdn;
+    if (imgSrc) {
+      img.src = imgSrc;
     } else if (layerComplete(char.body, bodyVal)) {
       img.src = layerSrc(char.body, 'Body', bodyVal);
     } else {
@@ -1494,7 +1503,7 @@ function switchMarketTab(tab) {
 // renderCloset draw between layerSrc() and imgUrl() elsewhere in this file.
 function marketRowImgSrc(vm) {
   if (!vm.image) return null;
-  return vm.kind === 'trait' ? vm.image : imgUrl(vm.image);
+  return vm.kind === 'trait' ? vm.image : imgUrl(vm.image, THUMB_W);
 }
 
 function renderMarketGrid(rows) {
@@ -1509,6 +1518,7 @@ function renderMarketGrid(rows) {
     card.className = 'nft-card';
     const img = document.createElement('img');
     img.src = marketRowImgSrc(vm) || BLANK_IMG;
+    img.loading = 'lazy';
     img.alt = '';
     const name = document.createElement('span');
     name.className = 'cap';
@@ -1579,6 +1589,7 @@ function renderChipList(containerEl, emptyEl, entries, actionLabel, onAction) {
     chip.className = 'trait-chip';
     const img = document.createElement('img');
     img.src = entry.imgSrc || BLANK_IMG;
+    img.loading = 'lazy';
     img.alt = '';
     const label = document.createElement('span');
     label.className = 'trait-chip-label';
@@ -1618,7 +1629,7 @@ function renderMineGroups(data) {
   const charEntries = data.unlisted_characters.map((c) => {
     const label = c.nft_number != null ? `#${c.nft_number}` : c.nft_id;
     return {
-      imgSrc: c.image ? imgUrl(c.image) : null,
+      imgSrc: c.image ? imgUrl(c.image, THUMB_W) : null,
       label,
       payload: { nftId: c.nft_id, label, wizard: false },
     };
