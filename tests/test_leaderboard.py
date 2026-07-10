@@ -105,14 +105,16 @@ def test_users_swaps_and_nft_swaps():
 
 
 def _rebirth(h, *, edition, old_id, new_id, wallet, memo_action=None, prefix=""):
-    """Seed a burn -> remint -> issuer delivery of one edition."""
+    """Seed a burn -> remint -> issuer delivery of one edition. The burn's
+    from_addr is the token's holder at burn time — for a legacy swap that IS
+    the swapper (the issuer burns the burnable token in the user's wallet)."""
     _ev(
         h,
         tx_hash=f"{prefix}b{edition}",
         event="burn",
         nft_id=old_id,
         nft_number=edition,
-        from_addr="rX",
+        from_addr=wallet,
         ts=10,
     )
     _ev(
@@ -184,6 +186,74 @@ def test_swap_boards_count_legacy_remint_swaps():
     # per-edition: both of rA's swaps land on edition 5 even though the
     # remint changed the token's nft_id
     assert rows[0]["nft_number"] == 5 and rows[0]["value"] == 2
+
+
+def test_swap_counted_from_burn_alone_without_delivery_transfer():
+    """The index knows 2,028 burned mainnet tokens but the history archive
+    captured only 77 issuer delivery transfers — keying swaps on the delivery
+    leg undercounted 26x. A burn followed by a remint of the same edition IS
+    the swap, attributed to the burn's holder; no delivery event needed."""
+    h, o = _dbs()
+    _ev(h, tx_hash="b1", event="burn", nft_id="OLD5", nft_number=5, from_addr="rA", ts=10)
+    _ev(h, tx_hash="m1", event="mint", nft_id="NEW5", nft_number=5, to_addr=ISSUER, ts=20)
+    rows = leaderboard.compute(
+        "users_swaps", h, o, start_ts=0, end_ts=99, network="testnet", system_accounts=SYS
+    )
+    assert rows == [{"wallet": "rA", "nft_id": None, "nft_number": None, "value": 1}]
+    rows = leaderboard.compute(
+        "nft_swaps", h, o, start_ts=0, end_ts=99, network="testnet", system_accounts=SYS
+    )
+    assert rows[0]["nft_number"] == 5 and rows[0]["value"] == 1
+
+
+def test_permanent_burn_without_remint_is_not_a_swap():
+    h, o = _dbs()
+    _ev(h, tx_hash="b1", event="burn", nft_id="OLD5", nft_number=5, from_addr="rA", ts=10)
+    for board in ("users_swaps", "nft_swaps"):
+        assert (
+            leaderboard.compute(
+                board, h, o, start_ts=0, end_ts=99, network="testnet", system_accounts=SYS
+            )
+            == []
+        )
+
+
+def test_harvest_burn_before_assemble_is_not_a_swap():
+    """An economy harvest burns a character whose edition is later reborn via
+    Assemble — that burn is not a trait swap. The NEXT mint after the burn
+    decides: assemble-memo -> not a swap, even if a real swap remint happens
+    later still."""
+    h, o = _dbs()
+    _ev(h, tx_hash="b1", event="burn", nft_id="OLD5", nft_number=5, from_addr="rA", ts=10)
+    _ev(
+        h,
+        tx_hash="m1",
+        event="mint",
+        nft_id="NEW5",
+        nft_number=5,
+        to_addr=ISSUER,
+        ts=20,
+        memo_action="assemble",
+    )
+    _ev(h, tx_hash="m2", event="mint", nft_id="NEW5B", nft_number=5, to_addr=ISSUER, ts=30)
+    rows = leaderboard.compute(
+        "users_swaps", h, o, start_ts=0, end_ts=99, network="testnet", system_accounts=SYS
+    )
+    assert rows == []
+
+
+def test_swap_windowing_keys_on_burn_time():
+    h, o = _dbs()
+    _ev(h, tx_hash="b1", event="burn", nft_id="OLD5", nft_number=5, from_addr="rA", ts=10)
+    _ev(h, tx_hash="m1", event="mint", nft_id="NEW5", nft_number=5, to_addr=ISSUER, ts=50)
+    in_window = leaderboard.compute(
+        "users_swaps", h, o, start_ts=5, end_ts=15, network="testnet", system_accounts=SYS
+    )
+    assert in_window and in_window[0]["wallet"] == "rA"
+    out_window = leaderboard.compute(
+        "users_swaps", h, o, start_ts=20, end_ts=99, network="testnet", system_accounts=SYS
+    )
+    assert out_window == []
 
 
 def test_nft_swaps_reports_live_token_id_not_lexicographic_max():
