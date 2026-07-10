@@ -2352,18 +2352,26 @@ async def handle_img(request):
     if len(url) > 2048:
         return web.json_response({"error": "bad image url"}, status=400)
     try:
-        conn = nft_index.init_db(nft_index.index_db_path(config.XRPL_NETWORK))
-        try:
-            edition = image_archive.edition_for_url(conn, url)
-        finally:
-            conn.close()
-        local = (
-            image_archive.local_image(config.XRPL_NETWORK, edition) if edition is not None else None
-        )
-        if local:
+        # SQLite lookup + disk read are synchronous — keep them off the
+        # event loop (a leaderboard page bursts ~50 concurrent requests).
+        def _archive_read() -> tuple[bytes, str] | None:
+            conn = nft_index.init_db(nft_index.index_db_path(config.XRPL_NETWORK))
+            try:
+                edition = image_archive.edition_for_url(conn, url)
+            finally:
+                conn.close()
+            if edition is None:
+                return None
+            local = image_archive.local_image(config.XRPL_NETWORK, edition)
+            if not local:
+                return None
             path, ctype = local
             with open(path, "rb") as f:
-                body = f.read()
+                return f.read(), ctype
+
+        archived = await asyncio.to_thread(_archive_read)
+        if archived:
+            body, ctype = archived
             return web.Response(
                 body=body, content_type=ctype, headers={"Cache-Control": "public, max-age=86400"}
             )

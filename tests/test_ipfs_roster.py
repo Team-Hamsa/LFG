@@ -295,6 +295,22 @@ def test_load_wallet_nfts_retries_transient_account_fetch():
     assert [n["number"] for n in nfts] == [12]
 
 
+def test_load_wallet_nfts_does_not_retry_programming_errors():
+    """The retry is for transient network failures only — a logic bug
+    (e.g. ValueError) must surface immediately, not fire twice."""
+    calls = []
+
+    async def buggy_account_nfts(wallet, issuer):
+        calls.append(1)
+        raise ValueError("not transient")
+
+    with pytest.raises(ValueError):
+        asyncio.get_event_loop().run_until_complete(
+            swap_meta.load_wallet_nfts("rWallet", buggy_account_nfts)
+        )
+    assert len(calls) == 1
+
+
 def test_load_wallet_nfts_raises_after_persistent_failure():
     calls = []
 

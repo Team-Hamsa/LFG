@@ -10,6 +10,7 @@ import re
 from typing import Any
 
 import aiohttp
+import websockets.exceptions
 
 from lfg_core import config
 
@@ -238,10 +239,19 @@ async def load_wallet_nfts(
     # One retry on the XRPL fetch: a single websocket open timeout to the
     # public mainnet node (asyncio.TimeoutError — whose str() is empty) was
     # 502ing the whole roster. Log with repr so the cause is never blank.
+    # Transient network failures only (timeout, socket-level OSError, the
+    # websockets library's own exceptions) — a programming error must
+    # surface immediately, not fire twice.
     try:
         raw = await get_account_nfts(wallet, config.SWAP_ISSUER_ADDRESS)
-    except Exception as e:
+    except (
+        asyncio.TimeoutError,  # distinct from builtins.TimeoutError on py3.10
+        TimeoutError,
+        OSError,
+        websockets.exceptions.WebSocketException,
+    ) as e:
         logging.warning(f"get_account_nfts failed ({e!r}); retrying once")
+        await asyncio.sleep(1)
         raw = await get_account_nfts(wallet, config.SWAP_ISSUER_ADDRESS)
     cached: dict[str, dict[str, Any]] = {}
     if meta_cache is not None:
