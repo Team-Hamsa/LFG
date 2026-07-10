@@ -32,8 +32,15 @@ A brainstorming-from-issue session is not complete until the issue carries links
 ### Dependencies
 Install all dependencies with:
 ```bash
-pip install -r requirements.txt
+./setup.sh   # builds .venv, installs requirements + requirements-dev, installs the pre-push hook
 ```
+(or manually: `pip install -r requirements.txt`)
+
+### Pre-push gate (BLOCKING)
+`.pre-commit-config.yaml` runs at the **pre-push** stage: ruff (--fix), ruff-format, mypy (from the
+project `.venv`, real dep types), gitleaks, pytest, validate-trait-config. CI
+(`.github/workflows/ci.yml`) runs the same gate with no `continue-on-error` — local and CI both
+block. Never bypass with `--no-verify`; fix or explicitly relax with the user's sign-off.
 
 Key dependencies:
 - **discord.py** (2.0+): Discord bot framework with slash commands and UI components
@@ -67,7 +74,7 @@ NFT_FLAGS=25
 CLOSET_TAXON=1762                                           # optional; Closet soulbound taxon (default 1762)
 TRAIT_TAXON=1763                                            # optional; tradeable trait token taxon (default 1763)
 NFT_SCHEMA_URL=ipfs://QmNpi8rcXEkohca8iXu7zysKKSJYqCvBJn3xJwga8jXqWU
-EXTERNAL_WEBSITE_URL=https://letseffinggo.com
+EXTERNAL_WEBSITE_URL=https://www.letseffinggo.com   # use www — apex TLS is broken (Squarespace cert lacks apex SAN, verified 2026-07-10)
 RETRY_MAX_ATTEMPTS=5
 RETRY_BASE_DELAY=1.0
 SESSION_TIMEOUT_TOTAL=60
@@ -93,10 +100,17 @@ BRIX_AMM_ACCOUNT=<xrpl-address>                             # optional; mainnet 
 > expose `:8176` over public HTTPS, set `TELEGRAM_MINI_APP_URL` to that host,
 > and confirm BotFather accepts the URL.
 
-### Running the Bot
-```bash
-python main.py
-```
+### Running (pm2-managed)
+
+Everything runs under pm2 (user hamsa), not nohup/manual:
+
+| pm2 process | What it runs |
+|---|---|
+| `lfg-bot` | `python main.py` (shim → `surfaces/discord_bot/`) |
+| `lfg-activity` | `.venv/bin/python -m webapp.server` (Discord Activity backend, port 8176) |
+| `lfg-telegram` | `.venv/bin/python run_telegram.py` |
+| `lfg-index-testnet` / `lfg-index-mainnet` | `scripts/onchain_listener.py --network <net> listen` |
+| `lfg-snapshot` | daily balance snapshots via pm2 cron — shows "stopped" between runs; that is normal |
 
 The Telegram surface runs as pm2 process `lfg-telegram` → `.venv/bin/python run_telegram.py`.
 Launch via the `run_telegram.py` shim, **not** `python -m surfaces.telegram_bot.bot`: running `bot.py`
@@ -108,25 +122,28 @@ the other, whose aiohttp session is never opened, so `/register` and `/mint` fai
 ## Directory Structure
 
 ```
-/LFG MINT BOT/
-├── main.py                 # Discord bot entry point; handles slash commands and UI interactions
-├── db_helpers.py           # Database helpers for NFT minting records (LFG table)
-├── user_db.py              # User registration and wallet management (Users table)
-├── ts_helpers.py           # XRPL transaction helpers and utility functions
-├── init_db.py              # Database initialization script
-├── trait_layers/           # NFT trait image layers organized by type
-│   ├── 1 background/
-│   ├── 2 body/
-│   ├── 3 clothing/
-│   ├── 4 mouth/
-│   ├── 5 eyebrows/
-│   ├── 6 eyes/
-│   ├── 7 hat:hair/
-│   └── ...
-├── requirements.txt        # Python dependencies
-├── lfg_nfts.db            # SQLite database (auto-created)
-├── users.json             # Legacy user storage (deprecated, use SQLite Users table)
-└── backup/                # Historical bot versions
+~/LFG/  (repo root — flattened standalone repo)
+├── main.py                 # 8-line launch shim → surfaces/discord_bot/ (keeps the pm2 entrypoint stable)
+├── run_telegram.py         # launch shim for the Telegram surface (see "Running", below)
+├── lfg_core/               # shared domain logic: config.py (networks, SOURCE_TAG), mint_flow, swap_*,
+│                           #   economy_*, market_*, xrpl_ops, xumm_ops, layer_store, traits/trait_config,
+│                           #   rarity, nft_index + nft_listener, history_store/events, leaderboard
+├── lfg_service/            # service layer: app.py (API), auth.py, identity.py, telegram_auth.py
+├── surfaces/
+│   ├── discord_bot/        # Discord bot: bot.py, commands.py, views.py, mint_view.py, admin.py, ...
+│   ├── telegram_bot/       # Telegram surface
+│   └── _client/, _shared/  # shared surface plumbing
+├── webapp/                 # Discord Activity backend (server.py) + no-build client/ + smoke tests
+├── scripts/                # ops tooling: onchain_listener.py, backfills, rebuild_collection_db/, ...
+├── tests/                  # pytest suite (incl. the SourceTag invariant tests)
+├── layers/                 # production trait art (gitignored; synced to BunnyCDN)
+├── db_helpers.py, user_db.py, init_db.py, rarity_admin.py   # root-level helpers / ops tools
+├── trait_config.yaml       # declarative trait-selection rules engine config (#40)
+└── lfg_nfts.db, onchain_*.db, history_*.db   # SQLite stores (gitignored; all but lfg_nfts.db regenerable)
+
+Gone — do not reference: ts_helpers.py, trait_layers/, backup/, legacy/. The pre-restructure
+monolith was retired (Spine Plan 3); legacy/ was removed from disk (backup at ~/linode-backup).
+users.json still exists but is untracked/gitignored — the SQLite Users table is authoritative.
 
 Database Tables:
 - LFG: Minted NFT records with metadata, traits, and URLs
@@ -171,21 +188,16 @@ Database Tables:
 
 ### Trait Layer System
 
-Traits are organized in numbered directories (e.g., `1 background`, `2 body`, `3 clothing`). The numeric prefix determines the layering order when compositing:
+Production trait art lives in `layers/<body>/<TraitType>/<Value>.*` (bodies: ape/female/male/skeleton;
+gitignored, fully synced to BunnyCDN — upload tool `scripts/upload_layers_cdn.py`, idempotent).
+`lfg_core/layer_store.py` reads it from local disk or CDN depending on `LAYER_SOURCE`.
 
-```
-trait_layers/
-├── 1 background/       (rendered first, at bottom)
-├── 2 body/
-├── 3 clothing/
-├── 4 mouth/
-├── 5 eyebrows/
-├── 6 eyes/
-├── 7 hat:hair/         (rendered last, at top)
-└── ...
-```
+Layer z-order and selection rules are **declarative** in `trait_config.yaml` (rules engine, #40):
+`layers` array sets z-order, per-value `z_overrides`, `exclusions`/`inclusions` constrain
+combinations. Parsing/validation/queries live in `lfg_core/trait_config.py`; random selection in
+`lfg_core/traits.py`. A `validate-trait-config` pre-push hook guards the file.
 
-The sorting logic in `get_sorted_trait_layers()` (main.py:273) automatically handles this based on numeric prefixes.
+(The old numbered `trait_layers/` directories and `get_sorted_trait_layers()` are gone.)
 
 ### Database Schema
 
@@ -230,10 +242,12 @@ CREATE TABLE burned_nfts (
 ## Common Development Tasks
 
 ### Adding a New Trait Layer
-1. Create a numbered folder in `trait_layers/` (e.g., `8 new_trait/`)
-2. Add PNG images with descriptive names
-3. The trait will automatically be detected and included in NFT generation
-4. Add corresponding column to LFG table if storing trait data
+1. Add the art under `layers/<body>/<TraitType>/<Value>.*` for each body type it applies to
+2. Sync to the CDN: `scripts/upload_layers_cdn.py` (idempotent)
+3. Declare the layer (z-order, any exclusions/inclusions) in `trait_config.yaml` — the
+   `validate-trait-config` pre-push hook will catch mistakes
+4. Add a corresponding column to the LFG table if storing trait data
+5. Run `scripts/audit_trait_files.py` to confirm every stored trait value still resolves
 
 ### Minting an NFT (Manual Testing)
 1. Run `/letsgo` command in Discord
@@ -250,33 +264,22 @@ CREATE TABLE burned_nfts (
 3. **Lookup NFT**: Search for an NFT by number to view details
 4. **Burn NFT**: Burn an NFT by number (requires reason; creates audit log)
 
-## Key Functions & Modules
+## Key Modules (module-level pointers — line numbers rot, use grep)
 
-### main.py
-- `mint_nft_for_user()`: Async wrapper for XRPL NFT minting with retry logic (main.py:315)
-- `create_payment_request()`: Creates XUMM payment QR for token payment (main.py:491)
-- `check_payment_status()`: Polls XUMM API to verify payment (main.py:557)
-- `create_nft_offer()`: Creates an offer to transfer NFT to user (main.py:414)
-- `generate_xumm_qr()`: Generates XUMM QR for NFT acceptance (main.py:452)
-- `MintView`: UI class with mint, trustline, and buy buttons (main.py:620)
-- `get_sorted_trait_layers()`: Returns trait folders sorted by numeric prefix (main.py:273)
-- `get_random_trait()`: Randomly selects a trait from a layer (main.py:263)
-
-### db_helpers.py
-- `get_next_nft_number()`: Returns next available NFT number from LFG table (db_helpers.py:6)
-- `record_nft_mint()`: Records a newly minted NFT in the database (db_helpers.py:57)
-- `get_nft_data()`: Retrieves all data for a specific NFT (db_helpers.py:129)
-
-### user_db.py
-- `create_users_table()`: Initializes Users table (user_db.py:9)
-- `register_user()`: Registers a new user with wallet address (user_db.py:32)
-- `get_all_registered_users()`: Retrieves all registered users (user_db.py:65)
-
-### ts_helpers.py
-- `mint_nft()`: Dummy NFT minting function placeholder (ts_helpers.py:743)
-- `makeNft()`: Creates composite NFT image from trait layers using FFmpeg (ts_helpers.py:160)
-- `burn_nft()`: Burns an NFT on XRPL using issuer seed (ts_helpers.py:636)
-- `create_nft_offer()`: Creates NFTokenCreateOffer transaction (ts_helpers.py:793)
+- `lfg_core/config.py` — network URLs (JSON-RPC/WS/clio per `XRPL_NETWORK`), `SOURCE_TAG`,
+  `WEBAPP_PORT`, env parsing
+- `lfg_core/xrpl_ops.py` — mint/burn/offer transactions against XRPL (`burn_nft`, offer helpers)
+- `lfg_core/xumm_ops.py` — XUMM/Xaman payload builders; `_create_xumm_payload` stamps `SourceTag`
+  and handles push `user_token`
+- `lfg_core/mint_flow.py`, `swap_flow.py`, `economy_flow.py`, `market_flow.py` — the session state
+  machines for mint / trait-swap / economy ops / marketplace
+- `surfaces/discord_bot/` — Discord bot: `bot.py` (entry), `commands.py`, `views.py` +
+  `mint_view.py` (UI), `admin.py` (admin panel, burns)
+- `surfaces/telegram_bot/` — Telegram surface (launched via `run_telegram.py` shim)
+- `webapp/server.py` — Discord Activity backend (aiohttp, port 8176)
+- `db_helpers.py` — LFG-table helpers (`get_next_nft_number`, `record_nft_mint`, `get_nft_data`)
+- `user_db.py` — Users-table helpers (`create_users_table`, `register_user`, ...)
+- `ts_helpers.py` no longer exists — its responsibilities moved into `lfg_core/`
 
 ## XRPL Integration
 
@@ -427,7 +430,8 @@ chain on every request.
   current without a separate poller.
 - **Nightly balance snapshots:** `scripts/snapshot_balances.py` records daily
   BRIX/LP balances (including the `BRIX_AMM_ACCOUNT` pool) for trend charts.
-  Suggested pm2 cron:
+  Registered as pm2 process `lfg-snapshot` (cron, `--no-autorestart` — pm2 shows it
+  "stopped" between runs; that is normal, not a failure). Original setup command:
   ```bash
   pm2 start scripts/snapshot_balances.py --name lfg-snapshot --cron "10 0 * * *" --no-autorestart --interpreter .venv/bin/python -- --network mainnet
   ```
@@ -711,13 +715,15 @@ marketplace code never sets it itself.
    `main.py` mint/swap paths (legacy `Users` store), the trait-sell wizard, and
    CLI economy extract/deposit.
 
-3. **Metadata URL Encoding**: Metadata CDN URLs are converted to hex before being stored on-chain (main.py:304).
+3. **Metadata URL Encoding**: Metadata CDN URLs are converted to hex before being stored on-chain.
 
 4. **Retry Logic**: NFT minting includes exponential backoff retry mechanism (max 5 attempts) to handle network issues.
 
-5. **Admin Channel Logging**: Burns are logged to the ADMIN_LOG_CHANNEL_ID for audit purposes (main.py:1239).
+5. **Admin Channel Logging**: Burns are logged to the ADMIN_LOG_CHANNEL_ID for audit purposes (see `surfaces/discord_bot/admin.py`).
 
 6. **Legacy User Storage**: The `users.json` file is deprecated; the SQLite Users table is the authoritative user store.
+
+7. **Discord client caching**: the Discord client can keep running a stale `app.js` despite no-store headers — fully relaunch the Activity (verify which version served via `GET /app.js` in the webapp log) before debugging "impossible" client behavior.
 
 ## Testing Checklist
 
