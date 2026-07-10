@@ -36,6 +36,7 @@ from lfg_core import (
     economy_flow,
     economy_store,
     history_store,
+    image_archive,
     layer_store,
     leaderboard,
     market_flow,
@@ -2339,10 +2340,35 @@ async def handle_img(request):
     <img> loads, so the client routes image URLs through here (allowed: the
     Bunny CDN bases plus the IPFS gateway host suffixes — see _img_url_allowed).
     Raw ipfs:// URIs (the on-chain index stores them verbatim, and the
-    leaderboard serves them as-is) are resolved to the gateway first."""
+    leaderboard serves them as-is) are resolved to the gateway first.
+
+    Local archive first (#153): if the requested URL maps back to a live
+    edition in the on-chain index and that edition's still is in the
+    images_<network>/ archive (scripts/rebuild_cdn_images.py), serve it
+    straight from disk — no CDN, no IPFS. The proxy below is the fallback
+    for editions the archive doesn't hold yet; any archive/index failure
+    degrades to that fallback, never to an error."""
     url = request.query.get("u", "")
     if len(url) > 2048:
         return web.json_response({"error": "bad image url"}, status=400)
+    try:
+        conn = nft_index.init_db(nft_index.index_db_path(config.XRPL_NETWORK))
+        try:
+            edition = image_archive.edition_for_url(conn, url)
+        finally:
+            conn.close()
+        local = (
+            image_archive.local_image(config.XRPL_NETWORK, edition) if edition is not None else None
+        )
+        if local:
+            path, ctype = local
+            with open(path, "rb") as f:
+                body = f.read()
+            return web.Response(
+                body=body, content_type=ctype, headers={"Cache-Control": "public, max-age=86400"}
+            )
+    except Exception as e:
+        logging.warning(f"image archive lookup failed for {url}: {e!r}")
     url = swap_meta.resolve_ipfs(url)
     if not _img_url_allowed(url):
         return web.json_response({"error": "bad image url"}, status=400)
