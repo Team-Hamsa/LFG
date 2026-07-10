@@ -12,6 +12,7 @@ proxy is only a fallback for editions the archive doesn't have yet."""
 from __future__ import annotations
 
 import os
+import re
 import sqlite3
 
 CONTENT_TYPES = {
@@ -57,17 +58,52 @@ def local_image(network: str, edition: int) -> tuple[str, str] | None:
     return None
 
 
+# Subdomain gateway (https://<cid>.ipfs.<host>/<path>) and path gateway
+# (https://<host>/ipfs/<cid>/<path>) URL shapes — the forms resolve_ipfs /
+# nft_index.IPFS_GATEWAYS produce from an ipfs:// URI.
+_SUBDOMAIN_GATEWAY = re.compile(r"^https://([a-zA-Z0-9]+)\.ipfs\.[a-zA-Z0-9.-]+/(.*)$")
+_PATH_GATEWAY = re.compile(r"^https://[a-zA-Z0-9.-]+/ipfs/([a-zA-Z0-9]+)/(.*)$")
+
+
+def url_forms(url: str) -> list[str]:
+    """Every equivalent shape of an image URL as the index may store it.
+
+    The index's `image` column is mixed-shape: Bithomp-imported rows keep the
+    on-chain `ipfs://` URI verbatim while listener-written rows store the
+    dweb.link-resolved form (nft_index.token_record), and surfaces serve
+    whichever shape their source row has. Returns [url, its raw ipfs:// form,
+    its dweb.link form], deduped, order-preserving; a non-IPFS URL is just
+    [url]. The dweb format string mirrors swap_meta.resolve_ipfs (kept local:
+    this module must stay importable without lfg_core.config)."""
+    if not url:
+        return []
+    forms = [url]
+    if url.startswith("ipfs://"):
+        cid, _, path = url[len("ipfs://") :].partition("/")
+        forms.append(f"https://{cid}.ipfs.dweb.link/{path}")
+    else:
+        m = _SUBDOMAIN_GATEWAY.match(url) or _PATH_GATEWAY.match(url)
+        if m:
+            raw = f"ipfs://{m.group(1)}/{m.group(2)}"
+            forms.append(raw)
+            forms.append(f"https://{m.group(1)}.ipfs.dweb.link/{m.group(2)}")
+    return list(dict.fromkeys(forms))
+
+
 def edition_for_url(conn: sqlite3.Connection, url: str) -> int | None:
-    """The live edition whose on-chain `image` is exactly `url`, or None.
+    """The live edition whose on-chain `image` matches `url` in any of its
+    equivalent shapes (see url_forms), or None.
 
     Only live rows count: a burned duplicate's URL must not shadow-serve.
     Identical URLs across editions mean identical art, so MIN is a safe,
     deterministic pick."""
-    if not url:
+    forms = url_forms(url)
+    if not forms:
         return None
+    placeholders = ",".join("?" * len(forms))
     row = conn.execute(
         "SELECT MIN(nft_number) FROM onchain_nfts"
-        " WHERE image = ? AND is_burned = 0 AND nft_number IS NOT NULL",
-        (url,),
+        f" WHERE image IN ({placeholders}) AND is_burned = 0 AND nft_number IS NOT NULL",
+        forms,
     ).fetchone()
     return int(row[0]) if row and row[0] is not None else None

@@ -103,6 +103,46 @@ def test_edition_for_url_none_on_miss_and_empty():
     assert image_archive.edition_for_url(conn, "") is None
 
 
+# ------------------------------------------------- URL-shape canonicalization
+#
+# The index stores image URLs in mixed shapes: Bithomp-imported rows keep the
+# on-chain ipfs:// URI verbatim, while listener-written rows (token_record)
+# store the dweb.link-resolved form. Surfaces serve whichever shape their row
+# has, so the archive lookup must match a URL against every equivalent form —
+# otherwise a swapper/marketplace tile silently degrades to the IPFS proxy.
+
+_DWEB_URL = "https://bafyarchived.ipfs.dweb.link/5.png"
+
+
+def test_url_forms_covers_raw_and_gateway_shapes():
+    assert image_archive.url_forms(_IPFS_URL) == [_IPFS_URL, _DWEB_URL]
+    assert image_archive.url_forms(_DWEB_URL) == [_DWEB_URL, _IPFS_URL]
+    # path-style gateway URLs (nft_index.IPFS_GATEWAYS) also map back
+    assert _IPFS_URL in image_archive.url_forms("https://ipfs.io/ipfs/bafyarchived/5.png")
+    # non-IPFS URLs pass through untouched
+    cdn = "https://nft.pullzone.example/output/5_1.png"
+    assert image_archive.url_forms(cdn) == [cdn]
+    assert image_archive.url_forms("") == []
+
+
+def test_edition_for_url_matches_dweb_request_against_raw_row():
+    conn = _index_conn()
+    _insert(conn, nft_id="A" * 64, nft_number=5, image=_IPFS_URL)
+    assert image_archive.edition_for_url(conn, _DWEB_URL) == 5
+
+
+def test_edition_for_url_matches_raw_request_against_dweb_row():
+    conn = _index_conn()
+    _insert(conn, nft_id="A" * 64, nft_number=5, image=_DWEB_URL)
+    assert image_archive.edition_for_url(conn, _IPFS_URL) == 5
+
+
+def test_edition_for_url_gateway_shapes_still_ignore_burned():
+    conn = _index_conn()
+    _insert(conn, nft_id="B" * 64, nft_number=5, image=_IPFS_URL, is_burned=1)
+    assert image_archive.edition_for_url(conn, _DWEB_URL) is None
+
+
 # --------------------------------------------- /api/img local-first serving
 
 
@@ -135,6 +175,23 @@ def test_img_serves_archived_edition_without_network(monkeypatch, tmp_path):
     assert resp.status == 200
     assert resp.body == b"\x89PNG archived bytes"
     assert resp.content_type == "image/png"
+
+
+def test_img_serves_archive_for_dweb_form_of_raw_row(monkeypatch, tmp_path):
+    """The swapper serves dweb-resolved image URLs while the index row stores
+    the raw ipfs:// URI — the archive must still hit (this exact mismatch sent
+    every swapper tile to the flaky public gateway)."""
+    _seed_env(monkeypatch, tmp_path, with_file=True)
+
+    async def boom(url):  # pragma: no cover - must never be reached
+        raise AssertionError("archived image hit the network")
+
+    monkeypatch.setattr(server, "_fetch_cdn", boom)
+    resp = asyncio.get_event_loop().run_until_complete(
+        server.handle_img(_img_request("https://bafyarchived.ipfs.dweb.link/5.png"))
+    )
+    assert resp.status == 200
+    assert resp.body == b"\x89PNG archived bytes"
 
 
 def test_img_falls_back_to_proxy_when_archive_misses(monkeypatch, tmp_path):

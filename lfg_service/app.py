@@ -1958,23 +1958,75 @@ async def handle_mint_start(request):
     return web.json_response(session.to_dict())
 
 
+def _index_wallet_tokens(conn: sqlite3.Connection, wallet: str) -> list[dict[str, Any]] | None:
+    """The wallet's live tokens from the on-chain index, in the account_nfts
+    shape load_wallet_nfts expects — or None when the index holds no rows at
+    all (never backfilled on this deployment; the caller falls back to the
+    live ledger). An empty result from a POPULATED index is trusted as "the
+    wallet holds nothing": the listener keeps ownership current."""
+    recs = nft_index.owner_live_nfts(conn, wallet)
+    if not recs:
+        total = conn.execute("SELECT COUNT(*) FROM onchain_nfts").fetchone()[0]
+        if total == 0:
+            return None
+    return [nft_index.to_token(r) for r in recs]
+
+
 async def _wallet_nfts(wallet: str) -> list[dict[str, Any]]:
-    """load_wallet_nfts with the per-network uri_hex metadata cache attached
-    (#153): legacy mainnet tokens carry ipfs:// URIs, so an uncached roster
-    load is one public-gateway fetch per NFT. A cache-open failure degrades to
-    the plain live-fetch path — it must never break the listing."""
+    """The swapper roster, from LOCAL data: token list from the listener-fresh
+    on-chain index, metadata from the uri_hex cache (#153). The live
+    account_nfts ledger call is only the fallback for an unbuilt index, and
+    the IPFS gateways are only touched for true cache misses (then cached
+    forever — the URI is content-addressed). The remote path used to be the
+    default, and a flaky gateway both blanked swapper tiles and silently
+    dropped uncached NFTs from the roster."""
     conn = None
     cache = None
+    tokens: list[dict[str, Any]] | None = None
     try:
         conn = nft_index.init_db(nft_index.index_db_path(config.XRPL_NETWORK))
         cache = nft_index.UriMetadataCache(conn)
     except Exception as e:
         logging.warning(f"uri metadata cache unavailable: {e}")
+    if conn is not None:
+        try:
+            tokens = _index_wallet_tokens(conn, wallet)
+        except Exception as e:
+            logging.warning(f"on-chain index roster failed, falling back to ledger: {e!r}")
     try:
+        if tokens is not None:
+            local_tokens = tokens
+
+            async def from_index(_wallet: str, _issuer: str) -> list[dict[str, Any]]:
+                return local_tokens
+
+            return await swap_meta.load_wallet_nfts(wallet, from_index, meta_cache=cache)
         return await swap_meta.load_wallet_nfts(wallet, xrpl_ops.get_account_nfts, meta_cache=cache)
     finally:
         if conn is not None:
             conn.close()
+
+
+# The fee quote is the roster's one remaining live-ledger touch (BRIX balance
+# and the AMM rate exist in no local store). Bound it so a hung public node
+# degrades the cost line to "unknown" instead of stalling the whole roster.
+_SWAP_FEE_QUOTE_TIMEOUT = 4.0
+
+
+async def _swap_fee_quote(wallet: str) -> dict[str, Any] | None:
+    """Advisory swap-fee quote for the roster's cost line (BRIX holders pay
+    BRIX; everyone else the AMM XRP equivalent), or None if it can't be
+    quoted in time. The swap session re-detects the path server-side when
+    the fee is actually charged."""
+    try:
+        pay_with, amount = await asyncio.wait_for(
+            swap_flow.detect_swap_payment(wallet, swap_flow.swap_fee_total(2)),
+            timeout=_SWAP_FEE_QUOTE_TIMEOUT,
+        )
+        return {"pay_with": pay_with, "amount": amount, "per_nft": swap_flow.swap_fee_total(1)}
+    except Exception as e:
+        logging.warning(f"Swap fee quote failed: {e!r}")
+        return None
 
 
 @require_wallet
@@ -1987,17 +2039,7 @@ async def handle_nfts(request):
         # log line blank during the mainnet-cutover 502s.
         logging.error(f"NFT listing failed: {e!r}")
         return web.json_response({"error": "failed to load wallet NFTs"}, status=502)
-    # Quote the swap fee for the cost line (BRIX holders pay BRIX; everyone
-    # else the AMM XRP equivalent). Advisory only — the swap session
-    # re-detects the path server-side when the fee is actually charged.
-    swap_fee = None
-    try:
-        pay_with, amount = await swap_flow.detect_swap_payment(
-            request["wallet"], swap_flow.swap_fee_total(2)
-        )
-        swap_fee = {"pay_with": pay_with, "amount": amount, "per_nft": swap_flow.swap_fee_total(1)}
-    except Exception as e:
-        logging.warning(f"Swap fee quote failed: {e}")
+    swap_fee = await _swap_fee_quote(request["wallet"])
     # Serialize the cross-body swap matrix so the client can mirror
     # swap_allowed() and only offer traits legal for the selected pair
     # (#30 Task 15) — swap_allowed() itself remains the server-side gate.

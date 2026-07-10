@@ -114,6 +114,43 @@ def test_meta_cache_roundtrip():
     nft_index.meta_cache_put_many(conn, {_URI_HEX_1: _META_1})
 
 
+def test_meta_cache_is_uri_hex_case_insensitive():
+    """Ledger account_nfts returns UPPERCASE hex URIs while onchain_nfts rows
+    store lowercase — the deployed mainnet cache joined 0/3535 live tokens
+    because of exactly this. Keys must round-trip across case, and results
+    must come back keyed by whatever form the caller asked with."""
+    conn = _cache_conn()
+    nft_index.meta_cache_put_many(conn, {_URI_HEX_1.upper(): _META_1})
+    got = nft_index.meta_cache_get_many(conn, [_URI_HEX_1.lower()])
+    assert got == {_URI_HEX_1.lower(): _META_1}
+    nft_index.meta_cache_put_many(conn, {_URI_HEX_2.lower(): _META_2})
+    assert nft_index.meta_cache_get_many(conn, [_URI_HEX_2.upper()]) == {
+        _URI_HEX_2.upper(): _META_2
+    }
+    # both cases of one URI collapse to a single stored row, not duplicates
+    nft_index.meta_cache_put_many(conn, {_URI_HEX_1.lower(): _META_1})
+    n = conn.execute(
+        "SELECT COUNT(*) FROM uri_metadata_cache WHERE UPPER(uri_hex) = ?",
+        (_URI_HEX_1.upper(),),
+    ).fetchone()[0]
+    assert n == 1
+
+
+def test_meta_cache_migrates_preexisting_mixed_case_rows():
+    """Rows written before the normalization (uppercase, from ledger URIs)
+    must be folded into the canonical form by init_db so old deployments'
+    caches keep serving."""
+    conn = nft_index.init_db(":memory:")
+    conn.execute(
+        "INSERT INTO uri_metadata_cache (uri_hex, metadata_json) VALUES (?, ?)",
+        (_URI_HEX_1.upper(), '{"name": "LFGO #12"}'),
+    )
+    conn.commit()
+    nft_index.migrate_meta_cache_case(conn)
+    got = nft_index.meta_cache_get_many(conn, [_URI_HEX_1.lower()])
+    assert got[_URI_HEX_1.lower()]["name"] == "LFGO #12"
+
+
 def _raw_token(uri_hex: str, nft_id: str) -> dict[str, Any]:
     return {"nft_id": nft_id, "uri_hex": uri_hex, "flags": 25}
 
