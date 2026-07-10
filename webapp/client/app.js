@@ -73,6 +73,7 @@ function confirmDialog({ title, text, confirmLabel = 'Confirm' }) {
 let sessionToken = null;
 let me = null;
 let pollTimer = null;
+let pollGen = 0; // bumps on every pollMint call, invalidating in-flight ticks
 let externalOpener = null; // set when the SDK is available
 
 async function api(path, opts = {}) {
@@ -445,7 +446,8 @@ function mintPayView(s) {
     link: s.payment_link,
     stage: s.state,
     regen: true,
-    cancel: cancelMint,
+    // Unscanned QR: nothing can be signed yet — cancel without the warning.
+    cancel: () => cancelMint(false),
   };
 }
 
@@ -459,15 +461,18 @@ const STAGE_TEXT = {
 // the next request or apply stale state out of order.
 function pollMint(sessionId) {
   clearTimeout(pollTimer);
+  const gen = ++pollGen;
   const tick = async () => {
+    if (gen !== pollGen) return; // superseded by a newer poll chain
     if (el('flow-panel').hidden) return; // user navigated away
     let s;
     try {
       s = await api(`/api/mint/${sessionId}`);
     } catch (e) {
-      pollTimer = setTimeout(tick, 3000); // transient; keep polling
+      if (gen === pollGen) pollTimer = setTimeout(tick, 3000); // transient; keep polling
       return;
     }
+    if (gen !== pollGen) return; // a newer chain started while we awaited
 
     if (s.state === 'offer_ready') {
       if (s.accept_signed) {

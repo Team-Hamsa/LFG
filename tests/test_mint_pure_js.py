@@ -106,3 +106,22 @@ def test_app_js_cancel_uses_outcome_and_resumes_poll():
     body = body.split("\n}\n", 1)[0]
     assert "cancelMintOutcome" in body
     assert "pollMint(" in body  # the resume path exists inside cancelMint
+
+
+def test_app_js_unscanned_cancel_passes_false_not_click_event():
+    """Greptile #148: `cancel: cancelMint` would receive the click event as
+    `maybeSigned` (truthy), showing the already-approved-in-Xaman warning on
+    the unscanned pay screen. The unscanned variant must pass false."""
+    src = open(APP_JS).read()
+    assert "cancel: () => cancelMint(false)" in src
+    assert "cancel: cancelMint," not in src
+
+
+def test_app_js_poll_generation_guard():
+    """Greptile #148: a refused cancel resumes pollMint while an old tick may
+    still be awaiting the API — a generation token must invalidate the stale
+    tick or two poll chains run for the same session."""
+    src = open(APP_JS).read()
+    assert "let pollGen = 0" in src
+    assert "const gen = ++pollGen" in src
+    assert "if (gen !== pollGen) return" in src
