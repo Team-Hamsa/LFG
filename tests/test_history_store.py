@@ -95,3 +95,47 @@ def test_db_path_override(monkeypatch):
     assert history_store.history_db_path("mainnet") == "/tmp/x.db"
     monkeypatch.delenv("HISTORY_DB_PATH")
     assert history_store.history_db_path("mainnet").endswith("history_mainnet.db")
+
+
+def test_nft_events_memo_action_self_migrates(tmp_path):
+    """A pre-upgrade history DB (no memo_action column) must gain the column
+    on init_history_db, and insert_nft_event must persist it."""
+    import sqlite3
+
+    path = str(tmp_path / "old.db")
+    old = sqlite3.connect(path)
+    old.executescript(
+        "CREATE TABLE nft_events ("
+        " tx_hash TEXT, nft_id TEXT, nft_number INTEGER, event TEXT,"
+        " from_addr TEXT, to_addr TEXT, price_drops INTEGER, price_token TEXT,"
+        " ledger_index INTEGER, ts INTEGER, PRIMARY KEY (tx_hash, nft_id))"
+    )
+    old.commit()
+    old.close()
+
+    conn = history_store.init_history_db(path)
+    history_store.insert_nft_event(
+        conn,
+        {
+            "tx_hash": "T1",
+            "nft_id": "N1",
+            "event": "mint",
+            "memo_action": "assemble",
+        },
+    )
+    row = conn.execute("SELECT memo_action FROM nft_events WHERE tx_hash='T1'").fetchone()
+    assert row["memo_action"] == "assemble"
+
+
+def test_nft_events_rebirth_index_exists(tmp_path):
+    """The rebirth EXISTS subquery seeks burns by (event, nft_number); without
+    a supporting index it degrades to O(n^2) as history grows (CodeRabbit
+    #157). CREATE INDEX IF NOT EXISTS in _SCHEMA also retrofits old DBs."""
+    conn = history_store.init_history_db(str(tmp_path / "h.db"))
+    names = {
+        r[0]
+        for r in conn.execute(
+            "SELECT name FROM sqlite_master WHERE type='index' AND tbl_name='nft_events'"
+        )
+    }
+    assert "idx_nftev_event_number" in names

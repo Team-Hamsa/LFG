@@ -182,3 +182,47 @@ def test_brix_deltas_skips_malformed_ripplestate():
         history_events.derive_brix_events(tx, brix_issuer=fx.BRIX_ISSUER, brix_hex=fx.BRIX_HEX)
         == []
     )
+
+
+def test_mint_memo_action_extracted():
+    # Provenance memos (#54): the deriver must surface the `action` memo so
+    # the leaderboard can tell an economy assemble-remint from a legacy
+    # burn+remint trait swap (mainnet has 0 modify events — every legacy swap
+    # is a rebirth, and without this they all masquerade as "builds").
+    from xrpl.utils import str_to_hex
+
+    tx = dict(fx.MINT)
+    tx["Memos"] = [
+        {"Memo": {"MemoType": str_to_hex("initiator"), "MemoData": str_to_hex("backend")}},
+        {"Memo": {"MemoType": str_to_hex("action"), "MemoData": str_to_hex("assemble")}},
+    ]
+    (ev,) = _nft(tx)
+    assert ev["memo_action"] == "assemble"
+
+
+def test_mint_without_memos_has_no_action():
+    (ev,) = _nft(fx.MINT)
+    assert ev["memo_action"] is None
+
+
+def test_action_memo_with_absent_data_is_none_not_empty_string():
+    # MemoType says "action" but MemoData is missing: the contract is None,
+    # not "" (Greptile #157) — an empty string would silently occupy the
+    # memo_action column and read as a distinct "action" downstream.
+    from xrpl.utils import str_to_hex
+
+    tx = dict(fx.MINT)
+    tx["Memos"] = [{"Memo": {"MemoType": str_to_hex("action")}}]
+    (ev,) = _nft(tx)
+    assert ev["memo_action"] is None
+
+
+def test_malformed_memos_do_not_break_derivation():
+    tx = dict(fx.MINT)
+    tx["Memos"] = [
+        "garbage",
+        {"Memo": {"MemoType": "ZZNOTHEX", "MemoData": "ALSONOTHEX"}},
+        {"Memo": {}},
+    ]
+    (ev,) = _nft(tx)
+    assert ev["event"] == "mint" and ev["memo_action"] is None

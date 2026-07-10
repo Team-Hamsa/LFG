@@ -34,10 +34,12 @@ CREATE TABLE IF NOT EXISTS nft_events (
     price_token  TEXT,   -- JSON {currency, issuer, value} for IOU sales
     ledger_index INTEGER,
     ts           INTEGER,
+    memo_action  TEXT,   -- provenance `action` memo (#54); NULL pre-schema
     PRIMARY KEY (tx_hash, nft_id)
 );
 CREATE INDEX IF NOT EXISTS idx_nftev_ts ON nft_events(ts);
 CREATE INDEX IF NOT EXISTS idx_nftev_nft ON nft_events(nft_id);
+CREATE INDEX IF NOT EXISTS idx_nftev_event_number ON nft_events(event, nft_number);
 
 CREATE TABLE IF NOT EXISTS brix_events (
     tx_hash      TEXT,
@@ -82,6 +84,10 @@ def init_history_db(path: str) -> sqlite3.Connection:
     conn.execute("PRAGMA journal_mode=WAL")
     conn.execute("PRAGMA busy_timeout=30000")
     conn.executescript(_SCHEMA)
+    # Self-migrate pre-existing DBs (CREATE TABLE IF NOT EXISTS skips them).
+    cols = {r[1] for r in conn.execute("PRAGMA table_info(nft_events)")}
+    if "memo_action" not in cols:
+        conn.execute("ALTER TABLE nft_events ADD COLUMN memo_action TEXT")
     conn.commit()
     return conn
 
@@ -134,6 +140,7 @@ _NFT_EV_COLS = (
     "price_token",
     "ledger_index",
     "ts",
+    "memo_action",
 )
 _BRIX_EV_COLS = ("tx_hash", "account", "counterparty", "delta", "kind", "ts")
 

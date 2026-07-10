@@ -15,6 +15,7 @@ from lfg_core import (
     config,
     economy_flow,
     layer_store,
+    memos,
     nft_index,
     swap_compose,
     swap_meta,
@@ -149,7 +150,11 @@ def build_economy_deps(conn: sqlite3.Connection) -> economy_flow.EconomyDeps:
         closet_owner_fn=lambda nft_id: _closet_owner(nft_id),
         char_compose_fn=_compose_char,
         char_mint_fn=lambda url: xrpl_ops.mint_nft(
-            url, config.SWAP_TAXON, config.SWAP_ISSUER_ADDRESS, flags=config.ECONOMY_NFT_FLAGS
+            url,
+            config.SWAP_TAXON,
+            config.SWAP_ISSUER_ADDRESS,
+            flags=config.ECONOMY_NFT_FLAGS,
+            action=memos.ACTION_ASSEMBLE,
         ),
         char_modify_fn=lambda nft_id, owner, url: xrpl_ops.modify_nft(nft_id, owner, url),
         char_burn_fn=lambda nft_id, owner: xrpl_ops.burn_nft(nft_id, owner or None),
@@ -158,7 +163,11 @@ def build_economy_deps(conn: sqlite3.Connection) -> economy_flow.EconomyDeps:
         trait_compose_fn=lambda slot, value: _compose_trait(slot, value),
         trait_upload_fn=_upload_closet,
         trait_mint_fn=lambda url: xrpl_ops.mint_nft(
-            url, config.TRAIT_TAXON, config.SWAP_ISSUER_ADDRESS, flags=config.TRAIT_NFT_FLAGS
+            url,
+            config.TRAIT_TAXON,
+            config.SWAP_ISSUER_ADDRESS,
+            flags=config.TRAIT_NFT_FLAGS,
+            action=memos.ACTION_EXTRACT,
         ),
         trait_burn_fn=lambda nft_id, owner: xrpl_ops.burn_nft(nft_id, owner or None),
         trait_info_fn=lambda nft_id: _trait_info(nft_id),

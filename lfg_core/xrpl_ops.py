@@ -55,10 +55,13 @@ async def mint_nft(
     flags: int | None = None,
     platform: str = memos.PLATFORM_BACKEND,
     campaign: str | None = None,
+    action: str = memos.ACTION_MINT,
 ) -> str | None:
     """Mint an NFT on XRPL; returns the NFToken ID or None. `flags` overrides
     config.NFT_FLAGS (e.g. burnable economy characters / soulbound buckets).
-    `platform` records the originating surface in the provenance memo (#54)."""
+    `platform` records the originating surface in the provenance memo (#54);
+    `action` the app operation (economy assembles/extracts pass their own so
+    the memo distinguishes them from plain mints and legacy remint swaps)."""
     try:
         wallet = Wallet.from_seed(config.SEED)
         client = JsonRpcClient(config.JSON_RPC_URL)
@@ -70,9 +73,7 @@ async def mint_nft(
             "nftoken_taxon": taxon,
             "flags": eff_flags,
             "source_tag": config.SOURCE_TAG,
-            "memos": memos.build_memo_models(
-                memos.INITIATOR_BACKEND, platform, memos.ACTION_MINT, campaign
-            ),
+            "memos": memos.build_memo_models(memos.INITIATOR_BACKEND, platform, action, campaign),
         }
         # TransferFee is only valid on transferable tokens; XRPL rejects it as
         # temMALFORMED otherwise (e.g. the soulbound Bucket, flags=16).
