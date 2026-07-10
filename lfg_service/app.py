@@ -2347,10 +2347,20 @@ async def handle_img(request):
     images_<network>/ archive (scripts/rebuild_cdn_images.py), serve it
     straight from disk — no CDN, no IPFS. The proxy below is the fallback
     for editions the archive doesn't hold yet; any archive/index failure
-    degrades to that fallback, never to an error."""
+    degrades to that fallback, never to an error.
+
+    `w=<px>` asks for a pre-built thumbnail (scripts/generate_thumbnails.py):
+    when the request fits in the thumb size, the ~10 KB WebP is served instead
+    of the ~634 KB still. Missing thumb (or any w outside (0, THUMB_SIZE]) just
+    means the full still — never an error, so the client can always pass it."""
     url = request.query.get("u", "")
     if len(url) > 2048:
         return web.json_response({"error": "bad image url"}, status=400)
+    try:
+        want_w = int(request.query.get("w", ""))
+    except ValueError:
+        want_w = 0
+    want_thumb = 0 < want_w <= image_archive.THUMB_SIZE
     try:
         # SQLite lookup + disk read are synchronous — keep them off the
         # event loop (a leaderboard page bursts ~50 concurrent requests).
@@ -2362,7 +2372,10 @@ async def handle_img(request):
                 conn.close()
             if edition is None:
                 return None
-            local = image_archive.local_image(config.XRPL_NETWORK, edition)
+            local = None
+            if want_thumb:
+                local = image_archive.local_thumb(config.XRPL_NETWORK, edition)
+            local = local or image_archive.local_image(config.XRPL_NETWORK, edition)
             if not local:
                 return None
             path, ctype = local

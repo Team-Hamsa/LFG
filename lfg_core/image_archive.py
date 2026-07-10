@@ -32,6 +32,21 @@ def archive_dir(network: str) -> str:
     return os.path.join(repo_root, f"images_{network}")
 
 
+# Roster/grid tiles render at ~120px (240px at 2x DPR); a 256px WebP is
+# visually lossless there at ~10 KB vs the ~634 KB full still. Pre-built by
+# scripts/generate_thumbnails.py into <archive>/thumbs/, served by /api/img?w=.
+THUMB_SUBDIR = "thumbs"
+THUMB_SIZE = 256
+
+
+def local_thumb(network: str, edition: int) -> tuple[str, str] | None:
+    """(path, content_type) of the pre-built thumbnail for `edition`, or None."""
+    path = os.path.join(archive_dir(network), THUMB_SUBDIR, f"{edition}.webp")
+    if os.path.exists(path):
+        return path, "image/webp"
+    return None
+
+
 def local_image(network: str, edition: int) -> tuple[str, str] | None:
     """(path, content_type) of the archived still for `edition`, or None."""
     base = archive_dir(network)
