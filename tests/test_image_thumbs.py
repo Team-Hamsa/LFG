@@ -124,6 +124,37 @@ def test_run_counts_failures_and_continues(monkeypatch, tmp_path):
     assert os.path.exists(tmp_path / "thumbs" / "9.webp")
 
 
+def test_main_exits_2_when_archive_missing(monkeypatch, tmp_path, capsys):
+    """Wrong IMAGES_DIR / archive not built yet must be a clear exit-2 error,
+    not a FileNotFoundError traceback (Greptile P2 on #161)."""
+    monkeypatch.setenv("IMAGES_DIR", str(tmp_path / "nope"))
+    monkeypatch.setattr("sys.argv", ["generate_thumbnails.py", "--network", "mainnet"])
+    assert gt.main() == 2
+    assert "archive not found" in capsys.readouterr().err
+
+
+def test_module_imports_without_service_secrets():
+    """The generator only touches the archive on disk; it must not import
+    lfg_core.config, whose service secrets an ops shell may not have loaded
+    (Greptile P1 on #161)."""
+    import subprocess
+    import sys
+
+    code = (
+        "import sys; sys.modules['lfg_core.config'] = None; "
+        "from scripts import generate_thumbnails; "
+        "assert generate_thumbnails.run is not None"
+    )
+    env = {k: v for k, v in os.environ.items() if k not in ("XUMM_API_KEY", "XUMM_API_SECRET")}
+    proc = subprocess.run(
+        [sys.executable, "-c", code],
+        capture_output=True,
+        cwd=os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
+        env=env,
+    )
+    assert proc.returncode == 0, proc.stderr.decode()
+
+
 # ------------------------------------------------------ /api/img?w= serving
 
 
@@ -159,6 +190,9 @@ def _get(monkeypatch, url, w):
         raise AssertionError("hit the network")
 
     monkeypatch.setattr(server, "_fetch_cdn", boom)
+    # get_event_loop (not asyncio.run) on purpose: asyncio.run closes + unsets
+    # the loop, breaking the ~99 suite-order tests that reuse it (matches
+    # test_image_archive.py and the rest of the suite).
     return asyncio.get_event_loop().run_until_complete(server.handle_img(_img_request(url, w)))
 
 

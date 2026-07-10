@@ -1030,10 +1030,10 @@ function renderRoster(assembleEnabled = true) {
     tile.className = 'roster-tile' + (char.nft_id === activeNftId ? ' active' : '');
     const img = document.createElement('img');
     img.loading = 'lazy';
-    const cdn = imgUrl(char.image_url, THUMB_W);
+    const imgSrc = imgUrl(char.image_url, THUMB_W);
     const bodyVal = (char.attributes.find((a) => a.trait_type === 'Body') || {}).value;
-    if (cdn) {
-      img.src = cdn;
+    if (imgSrc) {
+      img.src = imgSrc;
     } else if (layerComplete(char.body, bodyVal)) {
       img.src = layerSrc(char.body, 'Body', bodyVal);
     } else {

@@ -20,7 +20,13 @@ import sys
 REPO_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
 sys.path.insert(0, REPO_ROOT)
 
-from lfg_core import config, image_archive  # noqa: E402
+# Deliberately NOT importing lfg_core.config: it demands the full service env
+# (XUMM/Bunny secrets) at import time, which an ops shell that only holds the
+# image archive won't have. The script needs nothing from it but the default
+# network name, read straight from the same env var.
+from lfg_core import image_archive  # noqa: E402
+
+DEFAULT_NETWORK = os.getenv("XRPL_NETWORK", "mainnet").strip().lower()
 
 _STILL_EXTS = (".png", ".jpg", ".jpeg", ".webp", ".gif")
 
@@ -80,11 +86,20 @@ def run(*, network: str, size: int, quality: int, force: bool = False) -> dict[s
 def main() -> int:
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
     parser = argparse.ArgumentParser(description="Pre-render archive thumbnails.")
-    parser.add_argument("--network", default=config.XRPL_NETWORK)
+    parser.add_argument("--network", default=DEFAULT_NETWORK)
     parser.add_argument("--size", type=int, default=image_archive.THUMB_SIZE)
     parser.add_argument("--quality", type=int, default=80)
     parser.add_argument("--force", action="store_true", help="rebuild even fresh thumbs")
     args = parser.parse_args()
+    archive = image_archive.archive_dir(args.network)
+    if not os.path.isdir(archive):
+        # Exit 2 = prerequisite store missing, same convention as the audits.
+        print(
+            f"archive not found: {archive} — build it with scripts/rebuild_cdn_images.py"
+            " (or point IMAGES_DIR at the deployed archive)",
+            file=sys.stderr,
+        )
+        return 2
     stats = run(network=args.network, size=args.size, quality=args.quality, force=args.force)
     print(f"[{args.network}] thumbnails: {stats}")
     return 1 if stats["failed"] else 0
