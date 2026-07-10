@@ -124,6 +124,20 @@ def test_xrp_to_drops_rejects_garbage():
     assert run_js_throws("M.xrpToDropsStr('abc')") == "RangeError"
 
 
+def test_xrp_to_drops_rejects_absurd_magnitude():
+    # Mirrors lfg_core/market_ops.py's magnitude bound (#130): anything past
+    # XRP's 100e9 total supply (1e17 drops) can never be a real price. The
+    # regex already rejects scientific notation ('1e30'); plain-digit absurd
+    # values must be rejected too.
+    assert run_js_throws("M.xrpToDropsStr('1e30')") == "RangeError"
+    assert run_js_throws("M.xrpToDropsStr('1000000000000000000000000000000')") == "RangeError"
+    assert run_js_throws("M.xrpToDropsStr('100000000000.000001')") == "RangeError"
+
+
+def test_xrp_to_drops_max_supply_boundary_accepted():
+    assert run_js("M.xrpToDropsStr('100000000000')") == "100000000000000000"
+
+
 def test_drops_to_xrp_rejects_non_digit_string():
     assert run_js_throws("M.dropsToXrpStr('1.5')") == "TypeError"
     assert run_js_throws("M.dropsToXrpStr(5000000)") == "TypeError"

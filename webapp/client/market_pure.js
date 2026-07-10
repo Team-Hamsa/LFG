@@ -16,6 +16,10 @@
 
 export const DROPS_PER_XRP = 1000000n;
 
+// XRP's total supply is 100 billion XRP = 1e17 drops — no real price can
+// exceed it. Mirrors lfg_core/market_ops.py::MAX_XRP (#130).
+export const MAX_DROPS = 100000000000n * DROPS_PER_XRP;
+
 // The ledger's NFT_TRANSFER_FEE = 7000 (units of 1/100,000 -> 7.00%) is the
 // marketplace's only fee — see lfg_core/market_ops.py and the design spec's
 // Rev 2 correction (which fixed a long-standing units mixup elsewhere in this
@@ -28,8 +32,9 @@ const XRP_RE = /^(\d+)(?:\.(\d+))?$/;
 /**
  * Convert a decimal XRP amount string to an integer drops string. Mirrors
  * lfg_core/market_ops.py::xrp_to_drops_str: rejects non-string input
- * (TypeError), and non-numeric strings / values <= 0 / more than 6 decimal
- * places (RangeError) — drops are XRP's atomic unit, nothing finer exists.
+ * (TypeError), and non-numeric strings / values <= 0 / values beyond XRP's
+ * 100e9 total supply (MAX_DROPS) / more than 6 decimal places (RangeError)
+ * — drops are XRP's atomic unit, nothing finer exists.
  */
 export function xrpToDropsStr(xrp) {
   if (typeof xrp !== 'string') {
@@ -45,6 +50,7 @@ export function xrpToDropsStr(xrp) {
   const frac = fracRaw.padEnd(6, '0');
   const drops = BigInt(whole) * DROPS_PER_XRP + BigInt(frac || '0');
   if (drops <= 0n) throw new RangeError('XRP amount must be > 0');
+  if (drops > MAX_DROPS) throw new RangeError('XRP amount exceeds total supply (100000000000 XRP)');
   return drops.toString();
 }
 

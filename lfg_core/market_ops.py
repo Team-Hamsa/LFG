@@ -23,6 +23,11 @@ LSF_SELL_NFTOKEN = 0x00000001
 
 DROPS_PER_XRP = Decimal(1_000_000)
 
+# XRP's total supply is 100 billion XRP (1e17 drops) — no real price can
+# exceed it. Decimal accepts scientific notation, so without this bound
+# "1E+30" converted to a 36-digit drops string no ledger could honor (#130).
+MAX_XRP = Decimal(100_000_000_000)
+
 FetchOffers = Callable[[str], Awaitable[list[dict[str, Any]]]]
 
 
@@ -136,8 +141,9 @@ def xrp_to_drops_str(xrp: str) -> str:
     """Convert a decimal XRP amount string to an integer drops string.
 
     Rejects float input (TypeError), and non-numeric strings, values <= 0,
-    or amounts with more than 6 decimal places (ValueError) — drops are the
-    atomic unit of XRP, so anything finer is not representable.
+    values beyond XRP's 100e9 total supply (MAX_XRP), or amounts with more
+    than 6 decimal places (ValueError) — drops are the atomic unit of XRP,
+    so anything finer is not representable.
     """
     if not isinstance(xrp, str):
         raise TypeError(f"xrp_to_drops_str requires a str, got {type(xrp).__name__}")
@@ -147,6 +153,8 @@ def xrp_to_drops_str(xrp: str) -> str:
         raise ValueError(f"invalid XRP amount: {xrp!r}") from None
     if value <= 0:
         raise ValueError("XRP amount must be > 0")
+    if value > MAX_XRP:
+        raise ValueError(f"XRP amount exceeds total supply ({MAX_XRP} XRP)")
 
     drops = value * DROPS_PER_XRP
     if drops != drops.to_integral_value():

@@ -186,6 +186,21 @@ class TestXrpToDropsStr:
         with pytest.raises(ValueError):
             xrp_to_drops_str("not-a-number")
 
+    def test_rejects_absurd_magnitude(self) -> None:
+        # Decimal accepts scientific notation, so "1E+30" (and any plain
+        # value beyond XRP's 100e9 total supply) previously converted to a
+        # 36-digit drops string no ledger could ever honor (#130).
+        with pytest.raises(ValueError):
+            xrp_to_drops_str("1E+30")
+        with pytest.raises(ValueError):
+            xrp_to_drops_str("1000000000000000000000000000000")
+        with pytest.raises(ValueError):
+            xrp_to_drops_str("100000000000.000001")  # just over max supply
+
+    def test_max_supply_boundary_accepted(self) -> None:
+        # 100 billion XRP (the total supply) is the inclusive upper bound.
+        assert xrp_to_drops_str("100000000000") == "100000000000000000"
+
 
 class TestDropsToXrpStr:
     def test_basic_conversion(self) -> None:
