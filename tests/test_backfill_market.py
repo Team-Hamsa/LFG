@@ -455,3 +455,19 @@ def test_network_arg_defaults_to_config_like_backfill_onchain():
 def test_network_arg_explicit_choices_still_work():
     assert bm._build_parser().parse_args(["--network", "mainnet"]).network == "mainnet"
     assert bm._build_parser().parse_args(["--network", "testnet"]).network == "testnet"
+
+
+def test_network_arg_bad_env_default_fails_fast(monkeypatch):
+    """Greptile #150: argparse never validates a default against choices, so
+    an unexpected XRPL_NETWORK (e.g. 'devnet') would silently flow into
+    index_db_path and create/rebuild the wrong DB. With a bad env value the
+    flag must become required (omitting it errors), and an explicit valid
+    choice must still work."""
+    import pytest
+
+    from lfg_core import config
+
+    monkeypatch.setattr(config, "XRPL_NETWORK", "devnet")
+    with pytest.raises(SystemExit):
+        bm._build_parser().parse_args([])
+    assert bm._build_parser().parse_args(["--network", "testnet"]).network == "testnet"

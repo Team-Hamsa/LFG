@@ -114,7 +114,12 @@ async def _amain() -> int:
     from lfg_core import config
 
     parser = argparse.ArgumentParser(description="Backfill the on-chain NFT index.")
-    parser.add_argument("--network", choices=sorted(NETWORKS), default=config.XRPL_NETWORK)
+    # Same guard as scripts/backfill_market.py: an XRPL_NETWORK outside the
+    # known networks must not bypass choices validation via the default.
+    default = config.XRPL_NETWORK if config.XRPL_NETWORK in NETWORKS else None
+    parser.add_argument(
+        "--network", choices=sorted(NETWORKS), default=default, required=default is None
+    )
     parser.add_argument("--issuer")
     parser.add_argument("--taxon", type=int)
     parser.add_argument("--clio")

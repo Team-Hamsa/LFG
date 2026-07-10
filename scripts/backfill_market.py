@@ -159,7 +159,12 @@ def _build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description="Rebuild the market_listings index.")
     # Default parity with scripts/backfill_onchain.py (#130): omitting
     # --network runs against the configured network instead of erroring.
-    parser.add_argument("--network", choices=("testnet", "mainnet"), default=config.XRPL_NETWORK)
+    # argparse never validates a default against choices, so an unexpected
+    # XRPL_NETWORK (e.g. "devnet") must make the flag required, not flow
+    # through to index_db_path and create the wrong DB.
+    choices = ("testnet", "mainnet")
+    default = config.XRPL_NETWORK if config.XRPL_NETWORK in choices else None
+    parser.add_argument("--network", choices=choices, default=default, required=default is None)
     return parser
 
 
