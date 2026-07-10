@@ -1559,6 +1559,24 @@ def test_browse_trait_empty_when_economy_disabled(onchain_env, market_wallet, mo
     assert body["rows"] == []
 
 
+def test_browse_trait_bad_params_400_even_when_economy_disabled(onchain_env, monkeypatch):
+    """Param validation must run BEFORE the economy-disabled empty return
+    (#130): ?kind=trait&sort=bogus is a caller error whichever way the flag
+    is set — a 200-empty here masks broken clients while the economy is off,
+    then flips to a 400 the day it turns on."""
+    monkeypatch.setattr(server.config, "ECONOMY_ENABLED", False)
+    for qs in (
+        "kind=trait&sort=bogus",
+        "kind=trait&trait=malformed-no-colon",
+        "kind=trait&min_xrp=abc",
+        "kind=trait&limit=-1",
+        "kind=trait&offset=-1",
+    ):
+        req = _mocked_request("GET", f"/api/market/listings?{qs}")
+        resp = _run(server.handle_market_listings(req))
+        assert resp.status == 400, f"{qs} should 400, got {resp.status}"
+
+
 # ---------------------------------------------------------------------------
 # Fix #5: market 409s carry the active session dict (mint parity)
 # ---------------------------------------------------------------------------

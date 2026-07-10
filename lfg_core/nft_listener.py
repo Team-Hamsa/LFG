@@ -335,7 +335,7 @@ def _apply_offer_create(conn: sqlite3.Connection, tx: dict[str, Any]) -> None:
             nft_id=nft_id,
             kind=kind,
             seller=seller,
-            amount_drops=int(extracted["amount_drops"]),
+            amount_drops=extracted["amount_drops"],  # already an int (extract_created_sell_offer)
             destination=extracted.get("destination"),
             slot=slot,
             value=value,
@@ -350,11 +350,18 @@ def _apply_offer_cancel(conn: sqlite3.Connection, tx: dict[str, Any]) -> None:
     """NFTokenCancelOffer: every deleted NFTokenOffer ledger object closes its
     market_listings row (if any) as cancelled. A DeletedNode for an
     offer_index we never indexed is a harmless no-op -- close_listing
-    tolerates an unknown offer_index."""
+    tolerates an unknown offer_index. Per-item errors are logged, never
+    raised, so one bad deleted-offer entry can't abort the rest of the tx's
+    deletions (same isolation convention as apply_market_tx, one level
+    down)."""
     for wrapper in _deleted_nft_offer_nodes(tx):
         offer_index = wrapper.get("LedgerIndex")
-        if isinstance(offer_index, str) and offer_index:
+        if not (isinstance(offer_index, str) and offer_index):
+            continue
+        try:
             market_store.close_listing(conn, offer_index, "cancelled")
+        except Exception:
+            logging.exception(f"offer_cancel close failed (offer_index={offer_index})")
 
 
 def _owner_of(conn: sqlite3.Connection, nft_id: str) -> str | None:

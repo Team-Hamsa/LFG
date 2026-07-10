@@ -345,6 +345,32 @@ class TestMarkSettled:
         ).fetchone()[0]
         assert settled == 1
 
+    def test_returns_true_when_a_trait_row_was_settled(self, conn):
+        market_store.init_db(conn)
+        market_store.upsert_listing(conn, _trait_listing())
+        market_store.close_listing(conn, "B" * 64, "sold")
+        assert market_store.mark_settled(conn, "B" * 64) is True
+
+    def test_nonexistent_offer_index_returns_false(self, conn):
+        # Settling a row that was never indexed must be a safe, explicit
+        # no-op — False, not a silent success (#130 rowcount guard).
+        market_store.init_db(conn)
+        assert market_store.mark_settled(conn, "F" * 64) is False
+
+    def test_character_row_is_not_settled_and_returns_false(self, conn):
+        # `settled` is a trait-only lifecycle (NULL for characters, per the
+        # spec) — mark_settled must never flip a character row (#130 kind
+        # guard).
+        market_store.init_db(conn)
+        _seed_character(conn)
+        market_store.upsert_listing(conn, _character_listing())
+        market_store.close_listing(conn, "A" * 64, "sold")
+        assert market_store.mark_settled(conn, "A" * 64) is False
+        settled = conn.execute(
+            "SELECT settled FROM market_listings WHERE offer_index=?", ("A" * 64,)
+        ).fetchone()[0]
+        assert settled is None
+
 
 class TestUnsettledTraitSales:
     def test_only_sold_and_unsettled_trait_rows(self, conn):
@@ -602,3 +628,20 @@ class TestBrowseAmountAndSortAndPaging:
         market_store.init_db(conn)
         with pytest.raises(ValueError):
             market_store.browse(conn, kind="bogus")
+
+    def test_rejects_negative_limit(self, conn):
+        # A negative limit would silently return a nonsense Python-slice page
+        # (rows[offset:offset-1]) rather than error — reject it explicitly,
+        # matching the ValueError style of the kind/sort guards (#130).
+        market_store.init_db(conn)
+        self._seed_three(conn)
+        with pytest.raises(ValueError):
+            market_store.browse(conn, kind="character", limit=-1)
+
+    def test_rejects_negative_offset(self, conn):
+        # A negative offset would wrap around and page from the END of the
+        # result set — reject it explicitly (#130).
+        market_store.init_db(conn)
+        self._seed_three(conn)
+        with pytest.raises(ValueError):
+            market_store.browse(conn, kind="character", offset=-1)

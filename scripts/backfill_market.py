@@ -36,7 +36,7 @@ from typing import Any
 REPO_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
 sys.path.insert(0, REPO_ROOT)
 
-from lfg_core import market_ops, market_store, nft_index, xrpl_ops  # noqa: E402
+from lfg_core import config, market_ops, market_store, nft_index, xrpl_ops  # noqa: E402
 from lfg_core.market_ops import FetchOffers  # noqa: E402
 
 FETCH_CONCURRENCY = 16
@@ -155,10 +155,21 @@ async def backfill_market(
     }
 
 
-async def _amain() -> int:
+def _build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description="Rebuild the market_listings index.")
-    parser.add_argument("--network", choices=("testnet", "mainnet"), required=True)
-    args = parser.parse_args()
+    # Default parity with scripts/backfill_onchain.py (#130): omitting
+    # --network runs against the configured network instead of erroring.
+    # argparse never validates a default against choices, so an unexpected
+    # XRPL_NETWORK (e.g. "devnet") must make the flag required, not flow
+    # through to index_db_path and create the wrong DB.
+    choices = ("testnet", "mainnet")
+    default = config.XRPL_NETWORK if config.XRPL_NETWORK in choices else None
+    parser.add_argument("--network", choices=choices, default=default, required=default is None)
+    return parser
+
+
+async def _amain() -> int:
+    args = _build_parser().parse_args()
 
     conn = nft_index.init_db(nft_index.index_db_path(args.network))
     counts = await backfill_market(conn)

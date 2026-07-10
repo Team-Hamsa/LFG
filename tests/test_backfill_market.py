@@ -440,3 +440,37 @@ def test_settled_marked_trait_sale_left_alone(tmp_path):
         "SELECT is_live, closed_reason, settled FROM market_listings WHERE offer_index='OFF_SETTLED_TRAIT'"
     ).fetchone()
     assert tuple(row) == (0, "sold", 1)
+
+
+def test_network_arg_defaults_to_config_like_backfill_onchain(monkeypatch):
+    """--network default parity with scripts/backfill_onchain.py (#130):
+    both backfills should run against config.XRPL_NETWORK when --network is
+    omitted, instead of one requiring the flag. Pin a known-valid network so
+    the machine's env (which may carry an out-of-choices value) can't turn
+    the flag required and SystemExit this test (CodeRabbit #150)."""
+    from lfg_core import config
+
+    monkeypatch.setattr(config, "XRPL_NETWORK", "testnet")
+    args = bm._build_parser().parse_args([])
+    assert args.network == "testnet"
+
+
+def test_network_arg_explicit_choices_still_work():
+    assert bm._build_parser().parse_args(["--network", "mainnet"]).network == "mainnet"
+    assert bm._build_parser().parse_args(["--network", "testnet"]).network == "testnet"
+
+
+def test_network_arg_bad_env_default_fails_fast(monkeypatch):
+    """Greptile #150: argparse never validates a default against choices, so
+    an unexpected XRPL_NETWORK (e.g. 'devnet') would silently flow into
+    index_db_path and create/rebuild the wrong DB. With a bad env value the
+    flag must become required (omitting it errors), and an explicit valid
+    choice must still work."""
+    import pytest
+
+    from lfg_core import config
+
+    monkeypatch.setattr(config, "XRPL_NETWORK", "devnet")
+    with pytest.raises(SystemExit):
+        bm._build_parser().parse_args([])
+    assert bm._build_parser().parse_args(["--network", "testnet"]).network == "testnet"

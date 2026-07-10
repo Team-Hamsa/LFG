@@ -331,6 +331,9 @@ class TestAdvanceBuySession:
             )
         )
         assert outcome is None
+        # Restored (#130): the session must land in UNKNOWN (self-heals via
+        # the listener/backfill later), not stay pollable forever.
+        assert s.state == market_flow.UNKNOWN
 
     def test_insufficient_funds_fails_session_but_leaves_listing_live(self):
         """A buyer-side failure (tecINSUFFICIENT_FUNDS) means the OFFER is

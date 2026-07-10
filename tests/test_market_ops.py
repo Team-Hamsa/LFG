@@ -164,7 +164,10 @@ class TestXrpToDropsStr:
         assert xrp_to_drops_str("0.000001") == "1"
 
     def test_rejects_float_input(self) -> None:
-        with pytest.raises((TypeError, ValueError)):
+        # Exactly TypeError — the documented non-string rejection. A looser
+        # (TypeError, ValueError) would also pass if a float silently coerced
+        # through Decimal and failed some later value check instead (#130).
+        with pytest.raises(TypeError):
             xrp_to_drops_str(1.5)  # type: ignore[arg-type]
 
     def test_rejects_more_than_six_decimal_places(self) -> None:
@@ -182,6 +185,21 @@ class TestXrpToDropsStr:
     def test_rejects_garbage_string(self) -> None:
         with pytest.raises(ValueError):
             xrp_to_drops_str("not-a-number")
+
+    def test_rejects_absurd_magnitude(self) -> None:
+        # Decimal accepts scientific notation, so "1E+30" (and any plain
+        # value beyond XRP's 100e9 total supply) previously converted to a
+        # 36-digit drops string no ledger could ever honor (#130).
+        with pytest.raises(ValueError):
+            xrp_to_drops_str("1E+30")
+        with pytest.raises(ValueError):
+            xrp_to_drops_str("1000000000000000000000000000000")
+        with pytest.raises(ValueError):
+            xrp_to_drops_str("100000000000.000001")  # just over max supply
+
+    def test_max_supply_boundary_accepted(self) -> None:
+        # 100 billion XRP (the total supply) is the inclusive upper bound.
+        assert xrp_to_drops_str("100000000000") == "100000000000000000"
 
 
 class TestDropsToXrpStr:
@@ -207,8 +225,18 @@ class TestDropsToXrpStr:
         assert drops_to_xrp_str("1") == "0.000001"
 
     def test_rejects_float_input(self) -> None:
-        with pytest.raises((TypeError, ValueError)):
+        # Exactly TypeError — see TestXrpToDropsStr.test_rejects_float_input.
+        with pytest.raises(TypeError):
             drops_to_xrp_str(1500000.0)  # type: ignore[arg-type]
+
+    def test_zero_is_asymmetric_with_xrp_to_drops(self) -> None:
+        # drops_to_xrp_str accepts "0" (a 0-drop amount is representable and
+        # third-party 0-drop offers exist on-ledger), but the round trip is
+        # deliberately asymmetric: xrp_to_drops_str rejects the resulting "0"
+        # because WE never create a 0-price listing (#130).
+        assert drops_to_xrp_str("0") == "0"
+        with pytest.raises(ValueError):
+            xrp_to_drops_str(drops_to_xrp_str("0"))
 
     def test_rejects_garbage_string(self) -> None:
         with pytest.raises(ValueError):

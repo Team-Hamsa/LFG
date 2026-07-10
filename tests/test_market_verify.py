@@ -282,6 +282,37 @@ class TestVerifySellOffer:
                 )
             )
 
+    def test_default_fetch_offers_path_true_end_to_end(self, monkeypatch) -> None:
+        """fetch_offers=None (the production default) must route through
+        xrpl_ops.get_nft_sell_offers end-to-end — every other test here
+        injects a fetcher, so this wiring was previously uncovered (#130)."""
+        result = {
+            "offers": [
+                {"nft_offer_index": OFFER_INDEX, "amount": "5000000", "owner": "rSeller"},
+            ]
+        }
+        monkeypatch.setattr(xrpl_ops, "JsonRpcClient", _fake_json_rpc_client(result))
+        assert _run(market_ops.verify_sell_offer(NFT_ID, OFFER_INDEX, 5_000_000)) is True
+
+    def test_default_fetch_offers_path_nonstrict_rpc_failure_is_false(self, monkeypatch) -> None:
+        """Default path, non-strict: an RPC failure collapses to [] inside
+        get_nft_sell_offers (raise_on_error=False is threaded from
+        strict=False), so verify fails closed to False."""
+        monkeypatch.setattr(
+            xrpl_ops, "JsonRpcClient", _fake_json_rpc_client(exc=RuntimeError("rpc down"))
+        )
+        assert _run(market_ops.verify_sell_offer(NFT_ID, OFFER_INDEX, 5_000_000)) is False
+
+    def test_default_fetch_offers_path_strict_rpc_failure_raises(self, monkeypatch) -> None:
+        """Default path, strict: strict=True must thread
+        raise_on_error=True into get_nft_sell_offers so the RPC failure
+        propagates instead of reading as 'offer absent'."""
+        monkeypatch.setattr(
+            xrpl_ops, "JsonRpcClient", _fake_json_rpc_client(exc=RuntimeError("rpc down"))
+        )
+        with pytest.raises(RuntimeError):
+            _run(market_ops.verify_sell_offer(NFT_ID, OFFER_INDEX, 5_000_000, strict=True))
+
     def test_strict_absent_offer_still_returns_false(self) -> None:
         """A successful lookup that simply doesn't contain the offer is a
         genuine absence even in strict mode — False, not a raise."""

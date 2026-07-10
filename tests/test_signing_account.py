@@ -88,12 +88,25 @@ def test_config_strips_signing_account_whitespace(monkeypatch):
         importlib.reload(config)
 
 
-def test_config_default_is_seed_address():
+def test_config_default_is_seed_address(monkeypatch):
     # With no SIGNING_ACCOUNT env override, behavior is unchanged: the account
-    # is the one derived from SEED.
+    # is the one derived from SEED. The machine's .env may provide an override
+    # (the deployed mainnet cutover sets one, and load_dotenv() finds it from
+    # any checkout under the repo), so force the no-override case explicitly:
+    # an empty value survives the reload — load_dotenv() never overrides a
+    # variable already present in the environment — and config treats it as
+    # unset.
+    import importlib
+
     from xrpl.wallet import Wallet
 
-    assert config.SIGNING_ACCOUNT == Wallet.from_seed(config.SEED).classic_address
+    monkeypatch.setenv("SIGNING_ACCOUNT", "")
+    try:
+        cfg = importlib.reload(config)
+        assert cfg.SIGNING_ACCOUNT == Wallet.from_seed(cfg.SEED).classic_address
+    finally:
+        monkeypatch.undo()
+        importlib.reload(config)
 
 
 def test_mint_account_is_signing_account(monkeypatch):

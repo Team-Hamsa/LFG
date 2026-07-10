@@ -834,14 +834,6 @@ async def handle_market_listings(request: web.Request) -> web.Response:
     if kind not in market_store._VALID_KINDS:
         return web.json_response({"error": f"unknown kind: {kind!r}"}, status=400)
 
-    # Trait listings are only transactable when the trait economy is enabled on
-    # this chain (ECONOMY_NETWORK == XRPL_NETWORK). With it off, surfacing trait
-    # rows on this public browse would advertise listings no one can actually
-    # buy (buy would 403 economy_disabled), so serve an empty page instead of a
-    # hard 403 — the character surface is unaffected. See CLAUDE.md's seam note.
-    if kind == "trait" and not config.ECONOMY_ENABLED:
-        return web.json_response({"rows": [], "total": 0})
-
     sort = request.query.get("sort", "price_asc")
     if sort not in market_store._VALID_SORTS:
         return web.json_response({"error": f"unknown sort: {sort!r}"}, status=400)
@@ -878,6 +870,17 @@ async def handle_market_listings(request: web.Request) -> web.Response:
     offset = _parse_market_int_param(request, "offset", 0, max_value=_MARKET_MAX_OFFSET)
     if offset is None:
         return web.json_response({"error": "bad offset"}, status=400)
+
+    # Trait listings are only transactable when the trait economy is enabled on
+    # this chain (ECONOMY_NETWORK == XRPL_NETWORK). With it off, surfacing trait
+    # rows on this public browse would advertise listings no one can actually
+    # buy (buy would 403 economy_disabled), so serve an empty page instead of a
+    # hard 403 — the character surface is unaffected. See CLAUDE.md's seam note.
+    # Runs AFTER param validation (#130): a malformed query is a caller error
+    # (400) whichever way the flag is set — a 200-empty would mask broken
+    # clients while the economy is off, then flip to 400 the day it turns on.
+    if kind == "trait" and not config.ECONOMY_ENABLED:
+        return web.json_response({"rows": [], "total": 0})
 
     if _use_market_mock():
         rows = mock_market.INSTANCE.browse(

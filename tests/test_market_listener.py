@@ -290,6 +290,37 @@ def test_offer_cancel_closes_cancelled():
     assert row["closed_reason"] == "cancelled"
 
 
+def test_offer_cancel_one_bad_entry_does_not_abort_the_rest(monkeypatch):
+    """Per-item error isolation (#130): one NFTokenCancelOffer tx can delete
+    many offers; a failure closing one of them must not abort processing of
+    the remaining deleted offers (mirrors apply_market_tx's own per-tx
+    isolation, one level down)."""
+    conn = _conn()
+    nft_id = _our_nft_id(7)
+    _seed_character(conn, nft_id, owner="rSeller")
+    _run(nft_listener.apply_market_tx(conn, _sell_offer_create_tx(nft_id, offer_index="OFF_A")))
+    _run(
+        nft_listener.apply_market_tx(
+            conn, _sell_offer_create_tx(nft_id, seller="rSeller2", offer_index="OFF_B")
+        )
+    )
+
+    real_close = market_store.close_listing
+
+    def flaky_close(c, offer_index, reason, buyer=None):
+        if offer_index == "OFF_A":
+            raise RuntimeError("boom on OFF_A")
+        return real_close(c, offer_index, reason, buyer=buyer)
+
+    monkeypatch.setattr(nft_listener.market_store, "close_listing", flaky_close)
+    _run(nft_listener.apply_market_tx(conn, _offer_cancel_tx(["OFF_A", "OFF_B"])))
+
+    row = conn.execute(
+        "SELECT is_live, closed_reason FROM market_listings WHERE offer_index='OFF_B'"
+    ).fetchone()
+    assert row == (0, "cancelled")
+
+
 def test_offer_cancel_unknown_offer_index_is_harmless_noop():
     conn = _conn()
     # Never had this offer_index indexed at all.
