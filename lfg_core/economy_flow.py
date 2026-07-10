@@ -9,6 +9,38 @@
 # reversible is in place, and the Closet NFToken (the on-chain source of truth)
 # is always modified BEFORE the local DB mirror — so a crash leaves the DB
 # rebuildable from the token by the listener, never the reverse.
+#
+# Phase-aware failure classification (#107): a failure around
+# _sync_then_persist is typed by whether the on-chain Closet modify committed
+# (closet_token.ClosetError = no; ClosetMirrorError(tx_hash) = yes, DB-only;
+# ClosetIndeterminateError = unknown), and each flow picks its compensation
+# accordingly. On-chain compensation (burn-back / modify-back) is ONLY safe on
+# the ledger-failed branch. Records carry two sticky fields: `sync_tx_hash`
+# (set the moment the modify commits) and `mirror_pending` (set on the
+# mirror-failed branch, never cleared — it survives later-step statuses).
+#
+# Journal statuses and operator actions:
+#
+#   status                        meaning                          operator action
+#   ---------------------------   ------------------------------   ----------------------------
+#   <op>ing / burned / minted     progress checkpoints             none (in-flight)
+#   complete                      fully done                       none
+#   complete_pending_mirror       chain fully consistent; local    none — the listener rebuilds
+#                                 DB mirror write failed           the mirror from the Closet
+#                                                                  token (or restart/backfill)
+#   harvested_pending_closet      ledger deposit did NOT commit    re-apply the deposit from the
+#   deposited_pending_closet      (burn already happened)          journal — safe, no
+#                                                                  double-credit possible
+#   <op>_sync_indeterminate       Closet modify outcome UNKNOWN    reconcile from chain (check
+#                                 (modify raised mid-flight)       the Closet token's URI /
+#                                                                  metadata) — NEVER blind
+#                                                                  re-apply
+#   failed_burn / failed_mint /   pre-ledger or reversible step    none (nothing lost) or
+#   failed_modify / minted_no_*   failed; see the record error     re-offer per the record
+#   reverted_mint /               ledger-failed drain/swap; the    none (compensated)
+#   reverted_modify               on-chain compensation succeeded
+#   failed_revert_mint /          compensation ALSO failed         admin: locate the journaled
+#   failed_revert                                                  token and resolve manually
 
 from __future__ import annotations
 
@@ -108,13 +140,23 @@ def _assets_to_list(assets: dict[tuple[str, str], int]) -> list[bt.Asset]:
 
 async def _sync_then_persist(
     deps: EconomyDeps, owner: str, assets: dict[tuple[str, str], int], bodies: set[int]
-) -> None:
+) -> str:
     """Write the new Closet contents to the on-chain token FIRST (authoritative),
-    then mirror to the local DB. Raises bt.ClosetError if the on-chain modify
-    fails (caller decides recovery)."""
+    then mirror to the local DB. Returns the Closet modify tx hash.
+
+    Phase-aware raises (#107) — callers pick the compensation by type:
+    - bt.ClosetError (plain): the modify did NOT commit; on-chain compensation
+      (burn-back / modify-back) is safe.
+    - bt.ClosetIndeterminateError: the modify outcome is unknown; fail-closed —
+      no on-chain compensation, reconcile from chain.
+    - bt.ClosetMirrorError(tx_hash): the modify COMMITTED, only a local DB
+      write failed. The shared connection is rolled back before the raise, so
+      the mirror is left stale-but-consistent (never half-applied) until the
+      listener rebuilds it from the token's on-chain metadata. Do NOT undo
+      anything on-chain."""
     asset_list = _assets_to_list(assets)
     body_list = sorted(bodies)
-    await bt.sync_closet(
+    tx_hash = await bt.sync_closet(
         deps.conn,
         owner,
         asset_list,
@@ -122,7 +164,12 @@ async def _sync_then_persist(
         upload_fn=deps.closet_upload_fn,
         modify_fn=deps.closet_modify_fn,
     )
-    es.set_closet_contents(deps.conn, owner, asset_list, body_list)
+    try:
+        es.set_closet_contents(deps.conn, owner, asset_list, body_list)
+    except Exception as e:
+        deps.conn.rollback()
+        raise bt.ClosetMirrorError(f"closet contents mirror failed: {e}", tx_hash) from e
+    return tx_hash
 
 
 def _effective_genesis(conn: Any) -> te.Genesis:
@@ -157,6 +204,8 @@ class HarvestSession:
     error: str | None = None
     burn_hash: str | None = None
     moved_assets: list[tuple[str, str]] = field(default_factory=list)
+    sync_tx_hash: str | None = None
+    mirror_pending: bool = False
     id: str = field(default_factory=lambda: uuid.uuid4().hex)
 
     @property
@@ -172,6 +221,8 @@ class HarvestSession:
             "nft_id": self.character.nft_id,
             "moved_assets": self.moved_assets,
             "burn_hash": self.burn_hash,
+            "sync_tx_hash": self.sync_tx_hash,
+            "mirror_pending": self.mirror_pending,
             "status": status,
             "error": self.error,
         }
@@ -218,8 +269,32 @@ async def run_harvest(session: HarvestSession, deps: EconomyDeps) -> None:
             assets[(slot, value)] = assets.get((slot, value), 0) + 1
         bodies.add(session.edition)
         try:
-            await _sync_then_persist(deps, owner, assets, bodies)
+            session.sync_tx_hash = await _sync_then_persist(deps, owner, assets, bodies)
+        except bt.ClosetMirrorError as e:
+            # The Closet token IS updated on-chain; only the DB mirror lags.
+            # No compensation — the listener rebuilds the mirror from the token.
+            session.sync_tx_hash = e.tx_hash
+            session.mirror_pending = True
+            session.state = DONE
+            _write_record(
+                deps.records_dir, "harvest", session.id, session._record("complete_pending_mirror")
+            )
+            return
+        except bt.ClosetIndeterminateError as e:
+            # Unknown whether the deposit committed: fail-closed — no re-apply.
+            session.fail(
+                f"character burned but the Closet deposit outcome is unknown ({e}); "
+                f"reconcile from chain before any re-credit (journal {session.id})"
+            )
+            _write_record(
+                deps.records_dir,
+                "harvest",
+                session.id,
+                session._record("harvest_sync_indeterminate"),
+            )
+            return
         except Exception as e:
+            # Ledger-failed: the deposit definitively did not commit.
             session.fail(
                 f"character burned but Closet deposit failed ({e}); assets are recorded in "
                 f"the journal ({session.id}) for recovery"
@@ -234,6 +309,17 @@ async def run_harvest(session: HarvestSession, deps: EconomyDeps) -> None:
     except Exception as e:
         logging.error(f"Harvest {session.id} failed: {traceback.format_exc()}")
         session.fail(str(e))
+        # A raise AFTER the Closet modify committed (e.g. delivery offer/accept
+        # blowing up post-mirror-fail) must not leave the journal at an earlier
+        # checkpoint without the sticky mirror fields — recovery would treat
+        # the committed change as never-happened. Persist a terminal record
+        # (best-effort: journaling must never mask the original error).
+        try:
+            _write_record(deps.records_dir, "harvest", session.id, session._record("failed"))
+        except Exception:
+            logging.error(
+                f"Harvest {session.id} terminal record write failed: {traceback.format_exc()}"
+            )
 
 
 def _character_attributes(body_value: str, chosen: dict[str, str]) -> list[dict[str, str]]:
@@ -259,6 +345,8 @@ class AssembleSession:
     error: str | None = None
     new_nft_id: str | None = None
     results: list[dict[str, Any]] = field(default_factory=list)
+    sync_tx_hash: str | None = None
+    mirror_pending: bool = False
     id: str = field(default_factory=lambda: uuid.uuid4().hex)
 
     def _record(self, status: str) -> dict[str, Any]:
@@ -269,6 +357,8 @@ class AssembleSession:
             "edition": self.edition,
             "chosen": self.chosen,
             "new_nft_id": self.new_nft_id,
+            "sync_tx_hash": self.sync_tx_hash,
+            "mirror_pending": self.mirror_pending,
             "status": status,
             "error": self.error,
         }
@@ -325,10 +415,30 @@ async def run_assemble(session: AssembleSession, deps: EconomyDeps) -> None:
             key = (slot, session.chosen[slot])
             assets[key] = assets.get(key, 0) - 1
         try:
-            await _sync_then_persist(deps, owner, assets, bodies)
+            session.sync_tx_hash = await _sync_then_persist(deps, owner, assets, bodies)
+        except bt.ClosetMirrorError as e:
+            # The drain COMMITTED on-chain; only the DB mirror failed. Burning
+            # the mint back here would destroy it against a Closet that already
+            # gave up the body + assets — do NOT compensate; deliver instead.
+            session.sync_tx_hash = e.tx_hash
+            session.mirror_pending = True
+        except bt.ClosetIndeterminateError as e:
+            # Drain outcome unknown: fail-closed. Keep the mint (id journaled),
+            # no burn — an admin reconciles from chain.
+            session.fail(
+                f"assemble drain outcome unknown ({e}); the minted token {nft_id} is kept — "
+                f"reconcile from chain (journal {session.id})"
+            )
+            _write_record(
+                deps.records_dir,
+                "assemble",
+                session.id,
+                session._record("assemble_sync_indeterminate"),
+            )
+            return
         except Exception as e:
-            # Mint succeeded but the Closet drain failed: burn the mint back so
-            # the user's Closet is exactly as it was.
+            # Ledger-failed: the drain definitively did not commit. Burn the
+            # mint back so the user's Closet is exactly as it was.
             revert_hash = await deps.char_burn_fn(nft_id, "")
             if revert_hash:
                 session.new_nft_id = None
@@ -349,6 +459,13 @@ async def run_assemble(session: AssembleSession, deps: EconomyDeps) -> None:
                 )
             return
 
+        # Durable checkpoint BEFORE delivery: the drain is committed (with
+        # sync_tx_hash; mirror_pending if only the DB mirror failed). A
+        # process crash during the offer/accept awaits below would otherwise
+        # leave the journal at the pre-drain "minted" record, and recovery
+        # would burn the mint back against an already-drained Closet.
+        _write_record(deps.records_dir, "assemble", session.id, session._record("closet_synced"))
+
         # Deliver the new character to the user (offer + XUMM accept).
         offer_id = await deps.char_offer_fn(nft_id, owner)
         if not offer_id:
@@ -365,10 +482,22 @@ async def run_assemble(session: AssembleSession, deps: EconomyDeps) -> None:
             {"nft_id": nft_id, "image_url": image_url, "metadata_url": meta_url, "accept": accept}
         )
         session.state = DONE
-        _write_record(deps.records_dir, "assemble", session.id, session._record("complete"))
+        status = "complete_pending_mirror" if session.mirror_pending else "complete"
+        _write_record(deps.records_dir, "assemble", session.id, session._record(status))
     except Exception as e:
         logging.error(f"Assemble {session.id} failed: {traceback.format_exc()}")
         session.fail(str(e))
+        # A raise AFTER the Closet modify committed (e.g. delivery offer/accept
+        # blowing up post-mirror-fail) must not leave the journal at an earlier
+        # checkpoint without the sticky mirror fields — recovery would treat
+        # the committed change as never-happened. Persist a terminal record
+        # (best-effort: journaling must never mask the original error).
+        try:
+            _write_record(deps.records_dir, "assemble", session.id, session._record("failed"))
+        except Exception:
+            logging.error(
+                f"Assemble {session.id} terminal record write failed: {traceback.format_exc()}"
+            )
 
 
 def _raw_uri(uri_hex: str) -> str:
@@ -393,6 +522,8 @@ class EquipSession:
     error: str | None = None
     displaced_value: str = ""
     modify_hash: str | None = None
+    sync_tx_hash: str | None = None
+    mirror_pending: bool = False
     id: str = field(default_factory=lambda: uuid.uuid4().hex)
 
     def _record(self, status: str) -> dict[str, Any]:
@@ -405,6 +536,8 @@ class EquipSession:
             "incoming": self.incoming_value,
             "displaced": self.displaced_value,
             "modify_hash": self.modify_hash,
+            "sync_tx_hash": self.sync_tx_hash,
+            "mirror_pending": self.mirror_pending,
             "status": status,
             "error": self.error,
         }
@@ -453,9 +586,32 @@ async def run_equip(session: EquipSession, deps: EconomyDeps) -> None:
         assets[(slot, incoming)] = assets.get((slot, incoming), 0) - 1
         assets[(slot, session.displaced_value)] = assets.get((slot, session.displaced_value), 0) + 1
         try:
-            await _sync_then_persist(deps, owner, assets, _bodies)
+            session.sync_tx_hash = await _sync_then_persist(deps, owner, assets, _bodies)
+        except bt.ClosetMirrorError as e:
+            # The Closet swap COMMITTED on-chain; only the DB mirror failed.
+            # Reverting the character would strand the swapped Closet — keep the
+            # new traits; the listener converges the mirror.
+            session.sync_tx_hash = e.tx_hash
+            session.mirror_pending = True
+            session.state = DONE
+            _write_record(
+                deps.records_dir, "equip", session.id, session._record("complete_pending_mirror")
+            )
+            return
+        except bt.ClosetIndeterminateError as e:
+            # Swap outcome unknown: fail-closed — no revert against an unknown
+            # Closet; an admin reconciles from chain.
+            session.fail(
+                f"equip closet swap outcome unknown ({e}); the character keeps its new traits — "
+                f"reconcile from chain (journal {session.id})"
+            )
+            _write_record(
+                deps.records_dir, "equip", session.id, session._record("equip_sync_indeterminate")
+            )
+            return
         except Exception as e:
-            # Roll the character back to its old traits; the closet is untouched.
+            # Ledger-failed: the swap definitively did not commit. Roll the
+            # character back to its old traits; the closet is untouched.
             old_uri = _raw_uri(rec.uri_hex)
             if old_uri:
                 await deps.char_modify_fn(rec.nft_id, owner, old_uri)
@@ -481,6 +637,17 @@ async def run_equip(session: EquipSession, deps: EconomyDeps) -> None:
     except Exception as e:
         logging.error(f"Equip {session.id} failed: {traceback.format_exc()}")
         session.fail(str(e))
+        # A raise AFTER the Closet modify committed (e.g. delivery offer/accept
+        # blowing up post-mirror-fail) must not leave the journal at an earlier
+        # checkpoint without the sticky mirror fields — recovery would treat
+        # the committed change as never-happened. Persist a terminal record
+        # (best-effort: journaling must never mask the original error).
+        try:
+            _write_record(deps.records_dir, "equip", session.id, session._record("failed"))
+        except Exception:
+            logging.error(
+                f"Equip {session.id} terminal record write failed: {traceback.format_exc()}"
+            )
 
 
 # --- Extract: turn a loose Closet trait into a standalone tradeable NFToken ---
@@ -495,6 +662,8 @@ class ExtractSession:
     error: str | None = None
     nft_id: str | None = None
     accept: dict[str, Any] | None = None
+    sync_tx_hash: str | None = None
+    mirror_pending: bool = False
     id: str = field(default_factory=lambda: uuid.uuid4().hex)
 
     def _record(self, status: str) -> dict[str, Any]:
@@ -505,6 +674,8 @@ class ExtractSession:
             "slot": self.slot,
             "value": self.value,
             "nft_id": self.nft_id,
+            "sync_tx_hash": self.sync_tx_hash,
+            "mirror_pending": self.mirror_pending,
             "status": status,
             "error": self.error,
         }
@@ -544,8 +715,29 @@ async def run_extract(session: ExtractSession, deps: EconomyDeps) -> None:
 
         assets[(slot, value)] = assets.get((slot, value), 0) - 1
         try:
-            await _sync_then_persist(deps, owner, assets, bodies)
+            session.sync_tx_hash = await _sync_then_persist(deps, owner, assets, bodies)
+        except bt.ClosetMirrorError as e:
+            # The decrement COMMITTED on-chain; only the DB mirror failed.
+            # Burning the token back would destroy it against a Closet that
+            # already gave up the trait — no compensation; deliver instead.
+            session.sync_tx_hash = e.tx_hash
+            session.mirror_pending = True
+        except bt.ClosetIndeterminateError as e:
+            # Decrement outcome unknown: fail-closed. Keep the token (id
+            # journaled), no burn — an admin reconciles from chain.
+            session.fail(
+                f"extract Closet decrement outcome unknown ({e}); trait token {nft_id} is kept — "
+                f"reconcile from chain (journal {session.id})"
+            )
+            _write_record(
+                deps.records_dir,
+                "extract",
+                session.id,
+                session._record("extract_sync_indeterminate"),
+            )
+            return
         except Exception as e:
+            # Ledger-failed: the decrement definitively did not commit.
             revert = await deps.trait_burn_fn(nft_id, "")  # type: ignore[misc]
             if revert:
                 session.nft_id = None
@@ -562,6 +754,13 @@ async def run_extract(session: ExtractSession, deps: EconomyDeps) -> None:
                     deps.records_dir, "extract", session.id, session._record("failed_revert_mint")
                 )
             return
+
+        # Durable checkpoint BEFORE delivery (assemble twin): the decrement is
+        # committed with its sync_tx_hash — a crash in the offer/accept awaits
+        # below must not leave the journal at the pre-decrement "minted"
+        # record, or recovery burns the token back against a drained Closet.
+        _write_record(deps.records_dir, "extract", session.id, session._record("closet_synced"))
+
         # Closet decremented on-chain + DB. Mirror the trait token in the DB
         # best-effort: the listener rebuilds trait_tokens from the on-chain mint, so a
         # failure here is non-fatal — journal it for the auditor rather than reverting
@@ -578,17 +777,29 @@ async def run_extract(session: ExtractSession, deps: EconomyDeps) -> None:
             logging.error(
                 f"extract {session.id} trait_tokens mirror failed: {traceback.format_exc()}"
             )
-            _write_record(
-                deps.records_dir, "extract", session.id, session._record("complete_pending_mirror")
-            )
+            # A single pending-mirror flag covers both the Closet and the
+            # trait_tokens mirror — the terminal record reports it.
+            session.mirror_pending = True
 
         offer_id = await deps.closet_offer_fn(nft_id, owner)
         session.accept = await deps.closet_accept_fn(offer_id) if offer_id else None
         session.state = DONE
-        _write_record(deps.records_dir, "extract", session.id, session._record("complete"))
+        status = "complete_pending_mirror" if session.mirror_pending else "complete"
+        _write_record(deps.records_dir, "extract", session.id, session._record(status))
     except Exception as e:
         logging.error(f"Extract {session.id} failed: {traceback.format_exc()}")
         session.fail(str(e))
+        # A raise AFTER the Closet modify committed (e.g. delivery offer/accept
+        # blowing up post-mirror-fail) must not leave the journal at an earlier
+        # checkpoint without the sticky mirror fields — recovery would treat
+        # the committed change as never-happened. Persist a terminal record
+        # (best-effort: journaling must never mask the original error).
+        try:
+            _write_record(deps.records_dir, "extract", session.id, session._record("failed"))
+        except Exception:
+            logging.error(
+                f"Extract {session.id} terminal record write failed: {traceback.format_exc()}"
+            )
 
 
 # --- Deposit: burn a standalone trait NFToken back into the owner's Closet ---
@@ -603,6 +814,8 @@ class DepositSession:
     slot: str | None = None
     value: str | None = None
     burn_hash: str | None = None
+    sync_tx_hash: str | None = None
+    mirror_pending: bool = False
     id: str = field(default_factory=lambda: uuid.uuid4().hex)
 
     def _record(self, status: str) -> dict[str, Any]:
@@ -614,6 +827,8 @@ class DepositSession:
             "slot": self.slot,
             "value": self.value,
             "burn_hash": self.burn_hash,
+            "sync_tx_hash": self.sync_tx_hash,
+            "mirror_pending": self.mirror_pending,
             "status": status,
             "error": self.error,
         }
@@ -668,8 +883,35 @@ async def run_deposit(session: DepositSession, deps: EconomyDeps) -> None:
         assets, bodies = _owner_contents(conn, owner)
         assets[(session.slot, session.value)] = assets.get((session.slot, session.value), 0) + 1
         try:
-            await _sync_then_persist(deps, owner, assets, bodies)
+            session.sync_tx_hash = await _sync_then_persist(deps, owner, assets, bodies)
+        except bt.ClosetMirrorError as e:
+            # The credit COMMITTED on-chain; only the DB mirror lags. The
+            # operator must NOT re-credit (double-credit) — the listener
+            # rebuilds the mirror from the Closet token.
+            session.sync_tx_hash = e.tx_hash
+            session.mirror_pending = True
+            session.state = DONE
+            _write_record(
+                deps.records_dir, "deposit", session.id, session._record("complete_pending_mirror")
+            )
+            return
+        except bt.ClosetIndeterminateError as e:
+            # Credit outcome unknown: fail-closed — reconcile from chain
+            # before any re-credit (never blind re-apply).
+            session.fail(
+                f"trait burned but the Closet credit outcome is unknown ({e}); "
+                f"reconcile from chain before any re-credit (journal {session.id})"
+            )
+            _write_record(
+                deps.records_dir,
+                "deposit",
+                session.id,
+                session._record("deposit_sync_indeterminate"),
+            )
+            return
         except Exception as e:
+            # Ledger-failed: the credit definitively did not commit — the
+            # operator re-apply recipe is safe.
             session.fail(
                 f"trait burned but Closet credit failed ({e}); recorded in the journal "
                 f"({session.id}) for recovery"
@@ -687,3 +929,14 @@ async def run_deposit(session: DepositSession, deps: EconomyDeps) -> None:
     except Exception as e:
         logging.error(f"Deposit {session.id} failed: {traceback.format_exc()}")
         session.fail(str(e))
+        # A raise AFTER the Closet modify committed (e.g. delivery offer/accept
+        # blowing up post-mirror-fail) must not leave the journal at an earlier
+        # checkpoint without the sticky mirror fields — recovery would treat
+        # the committed change as never-happened. Persist a terminal record
+        # (best-effort: journaling must never mask the original error).
+        try:
+            _write_record(deps.records_dir, "deposit", session.id, session._record("failed"))
+        except Exception:
+            logging.error(
+                f"Deposit {session.id} terminal record write failed: {traceback.format_exc()}"
+            )

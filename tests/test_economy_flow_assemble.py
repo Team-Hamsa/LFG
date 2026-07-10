@@ -8,6 +8,7 @@ import sqlite3
 from lfg_core import economy_flow as ef
 from lfg_core import economy_store as es
 from lfg_core import trait_economy as te
+from tests.economy_helpers import flaky_mirror_conn
 
 NON_BODY = te.NON_BODY_SLOTS
 
@@ -36,9 +37,19 @@ def _conn_with_bucket(edition: int = 7) -> sqlite3.Connection:
 
 
 class _Fakes:
-    def __init__(self, *, fail_closet_modify=False, fail_offer=False, fail_char_burn=False) -> None:
+    def __init__(
+        self,
+        *,
+        fail_closet_modify=False,
+        raise_closet_modify=False,
+        fail_offer=False,
+        raise_offer=False,
+        fail_char_burn=False,
+    ) -> None:
         self.fail_closet_modify = fail_closet_modify
+        self.raise_closet_modify = raise_closet_modify
         self.fail_offer = fail_offer
+        self.raise_offer = raise_offer
         self.fail_char_burn = fail_char_burn
         self.mints: list[str] = []
         self.char_burns: list[tuple[str, str]] = []
@@ -62,6 +73,8 @@ class _Fakes:
         return {"xumm_url": "x"}
 
     async def closet_modify(self, nft_id, owner, url):
+        if self.raise_closet_modify:
+            raise RuntimeError("timeout after submit")
         if self.fail_closet_modify:
             return None
         self.bucket_modifies += 1
@@ -82,6 +95,8 @@ class _Fakes:
         return None if self.fail_char_burn else "BURN"
 
     async def char_offer(self, nft_id, owner):
+        if self.raise_offer:
+            raise RuntimeError("offer submit blew up")
         return None if self.fail_offer else "OFFER"
 
     async def char_accept(self, offer_id):
@@ -182,6 +197,60 @@ def test_assemble_offer_fail_parks_token(tmp_path):
     assert record["status"] == "minted_no_offer"
 
 
+# --- #107: phase-aware assemble branches ---
+
+
+def test_assemble_mirror_failure_does_not_burn_and_delivers(tmp_path):
+    """Mint OK, Closet drain committed on-chain, only the DB mirror fails:
+    the mint must NOT be burned back (the Closet is drained on-chain — burning
+    would destroy the user's body + assets). Delivery continues; the session
+    ends DONE with a complete_pending_mirror journal."""
+    conn, f = _conn_with_bucket(), _Fakes()
+    s = _session()
+    _run(ef.run_assemble(s, _deps(flaky_mirror_conn(conn), f, tmp_path)))
+
+    assert s.state == ef.DONE
+    assert f.char_burns == []  # NO destructive compensation
+    assert s.new_nft_id == "CHAR7"
+    assert s.results and s.results[0]["accept"] == {"xumm_url": "accept"}
+    record = json.loads((tmp_path / f"assemble-{s.id}.json").read_text())
+    assert record["status"] == "complete_pending_mirror"
+    assert record["sync_tx_hash"] == "MODHASH"
+    assert record["mirror_pending"] is True
+
+
+def test_assemble_indeterminate_keeps_mint_no_burn(tmp_path):
+    """closet_modify raises (drain outcome unknown): fail-closed — FAILED, the
+    mint is kept (its id journaled), no burn-back against an unknown Closet."""
+    conn, f = _conn_with_bucket(), _Fakes(raise_closet_modify=True)
+    s = _session()
+    _run(ef.run_assemble(s, _deps(conn, f, tmp_path)))
+
+    assert s.state == ef.FAILED
+    assert f.char_burns == []  # no compensation while state is unknown
+    assert s.new_nft_id == "CHAR7"
+    record = json.loads((tmp_path / f"assemble-{s.id}.json").read_text())
+    assert record["status"] == "assemble_sync_indeterminate"
+    assert record["new_nft_id"] == "CHAR7"
+
+
+def test_assemble_mirror_fail_then_offer_fail_precedence(tmp_path):
+    """Mirror fails AND the later offer step fails: the later step's status
+    (minted_no_offer) wins the status field, but the pending-mirror fact is
+    kept via mirror_pending + sync_tx_hash. No burn either way."""
+    conn, f = _conn_with_bucket(), _Fakes(fail_offer=True)
+    s = _session()
+    _run(ef.run_assemble(s, _deps(flaky_mirror_conn(conn), f, tmp_path)))
+
+    assert s.state == ef.FAILED
+    assert f.char_burns == []
+    assert s.new_nft_id == "CHAR7"  # parked for re-offer
+    record = json.loads((tmp_path / f"assemble-{s.id}.json").read_text())
+    assert record["status"] == "minted_no_offer"
+    assert record["mirror_pending"] is True
+    assert record["sync_tx_hash"] == "MODHASH"
+
+
 def test_assemble_rejected_without_active_closet(tmp_path):
     conn, f = _conn_with_bucket(), _Fakes()
     # Remove the closet token seeded by _conn_with_bucket so there is no record.
@@ -201,3 +270,71 @@ def test_assemble_succeeds_with_active_closet(tmp_path):
     _run(ef.run_assemble(s, _deps(conn, f, tmp_path)))
     assert s.state == ef.DONE
     assert s.new_nft_id == "CHAR7"
+
+
+def test_assemble_mirror_fail_then_offer_raise_keeps_mirror_journal(tmp_path):
+    """Greptile #151: the drain COMMITTED (mirror-fail sets the sticky fields in
+    memory) and then the delivery offer RAISES (not returns-falsy). The outer
+    handler must persist a terminal journal carrying mirror_pending +
+    sync_tx_hash — otherwise the on-disk record stays at the pre-drain
+    'minted' checkpoint and recovery burns the mint back against an
+    already-drained Closet."""
+    conn, f = _conn_with_bucket(), _Fakes(raise_offer=True)
+    s = _session()
+    _run(ef.run_assemble(s, _deps(flaky_mirror_conn(conn), f, tmp_path)))
+
+    assert s.state == ef.FAILED
+    assert f.char_burns == []  # still no destructive compensation
+    record = json.loads((tmp_path / f"assemble-{s.id}.json").read_text())
+    assert record["status"] == "failed"
+    assert record["mirror_pending"] is True
+    assert record["sync_tx_hash"] == "MODHASH"
+
+
+def test_assemble_journal_checkpoints_closet_synced_before_offer(tmp_path):
+    """CodeRabbit #151: the drain committed; a process CRASH during offer
+    delivery (no exception for the outer handler to catch) must not leave the
+    on-disk journal at the pre-drain 'minted' checkpoint — an admin following
+    it would burn the mint back against an already-drained Closet. A
+    'closet_synced' record carrying sync_tx_hash must be durable BEFORE the
+    offer call."""
+    import dataclasses
+
+    conn, f = _conn_with_bucket(), _Fakes()
+    s = _session()
+    deps = _deps(conn, f, tmp_path)
+    at_offer: dict = {}
+
+    async def spy_offer(nft_id, owner):
+        at_offer.update(json.loads((tmp_path / f"assemble-{s.id}.json").read_text()))
+        return await f.char_offer(nft_id, owner)
+
+    _run(ef.run_assemble(s, dataclasses.replace(deps, char_offer_fn=spy_offer)))
+
+    assert s.state == ef.DONE
+    assert at_offer["status"] == "closet_synced"
+    assert at_offer["sync_tx_hash"] == "MODHASH"
+    assert at_offer["mirror_pending"] is False
+
+
+def test_assemble_mirror_fail_checkpoint_carries_sticky_fields(tmp_path):
+    """Same checkpoint on the ClosetMirrorError path: the drain committed
+    on-chain, only the DB mirror failed — the pre-offer record must already
+    carry mirror_pending + the committed tx hash."""
+    import dataclasses
+
+    conn, f = _conn_with_bucket(), _Fakes()
+    s = _session()
+    deps = _deps(flaky_mirror_conn(conn), f, tmp_path)
+    at_offer: dict = {}
+
+    async def spy_offer(nft_id, owner):
+        at_offer.update(json.loads((tmp_path / f"assemble-{s.id}.json").read_text()))
+        return await f.char_offer(nft_id, owner)
+
+    _run(ef.run_assemble(s, dataclasses.replace(deps, char_offer_fn=spy_offer)))
+
+    assert s.state == ef.DONE
+    assert at_offer["status"] == "closet_synced"
+    assert at_offer["sync_tx_hash"] == "MODHASH"
+    assert at_offer["mirror_pending"] is True
