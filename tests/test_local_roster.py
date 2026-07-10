@@ -80,17 +80,20 @@ def _run(coro):
 
 
 def test_wallet_nfts_served_from_index_without_any_network(tmp_path, monkeypatch):
+    # realistic token ID: the leading 0019 bytes are the on-ledger flags
+    # (burnable+transferable+mutable), which to_token derives flags from
+    nft_id = "0019" + "A" * 60
     conn = _seed_index(
         tmp_path,
         monkeypatch,
-        [{"nft_id": "A" * 64, "nft_number": 12, "owner": "rWallet", "uri_hex": _URI_HEX}],
+        [{"nft_id": nft_id, "nft_number": 12, "owner": "rWallet", "uri_hex": _URI_HEX}],
     )
     nft_index.meta_cache_put_many(conn, {_URI_HEX: _META})
     conn.close()
     _no_network(monkeypatch)
     nfts = _run(server._wallet_nfts("rWallet"))
     assert [n["number"] for n in nfts] == [12]
-    assert nfts[0]["nft_id"] == "A" * 64
+    assert nfts[0]["nft_id"] == nft_id
     assert nfts[0]["mutable"] is True
     assert nfts[0]["uri_hex"] == _URI_HEX
 
@@ -149,6 +152,57 @@ def test_wallet_nfts_falls_back_to_ledger_when_index_unbuilt(tmp_path, monkeypat
     nfts = _run(server._wallet_nfts("rWallet"))
     assert called == ["rWallet"]
     assert [n["number"] for n in nfts] == [12]
+
+
+def test_to_token_derives_flags_from_nft_id_when_mutable_unknown():
+    """3487/3535 live mainnet rows carry mutable=NULL (Bithomp CSV import).
+    Guessing 0 would silently route a genuinely mutable NFT down the swap
+    burn-remint path instead of NFTokenModify. The NFTokenID's first two
+    bytes ARE the on-ledger flags (verified across the live set: 0009 ↔
+    non-mutable, 0019 ↔ mutable) — derive from there, no network needed."""
+    base = "1B58D1AE1BC312BEF9C68233FB0C8CF6A338F7C227BE2FA32A85049438CA"
+    rec = lambda nft_id, mutable: nft_index.OnchainNft(  # noqa: E731
+        nft_id=nft_id,
+        nft_number=1,
+        owner="rWallet",
+        is_burned=False,
+        mutable=mutable,
+        uri_hex=_URI_HEX,
+        body="male",
+        attributes=[],
+        image="",
+        ledger_index=None,
+    )
+    assert nft_index.to_token(rec("0019" + base, None))["flags"] == 0x0019
+    assert nft_index.to_token(rec("0009" + base, None))["flags"] == 0x0009
+    # an explicit column still wins for a malformed/unparseable ID
+    assert nft_index.to_token(rec("zzzz" + base, True))["flags"] & nft_index.NFT_FLAG_MUTABLE
+    assert nft_index.to_token(rec("zzzz" + base, None))["flags"] == 0
+
+
+def test_wallet_nfts_mutable_true_for_null_column_flag19_token(tmp_path, monkeypatch):
+    """End-to-end: a mutable-by-ID token whose index row predates the
+    listener's mutable column must reach the swap flow as mutable=True."""
+    conn = _seed_index(
+        tmp_path,
+        monkeypatch,
+        [
+            {
+                "nft_id": "0019"
+                + "1B58D1AE1BC312BEF9C68233FB0C8CF6A338F7C227BE2FA32A85"
+                + "049438E5",
+                "nft_number": 12,
+                "owner": "rWallet",
+                "uri_hex": _URI_HEX,
+                "mutable": None,
+            }
+        ],
+    )
+    nft_index.meta_cache_put_many(conn, {_URI_HEX: _META})
+    conn.close()
+    _no_network(monkeypatch)
+    nfts = _run(server._wallet_nfts("rWallet"))
+    assert nfts[0]["mutable"] is True
 
 
 def test_swap_fee_quote_is_time_bounded(monkeypatch):

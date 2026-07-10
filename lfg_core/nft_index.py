@@ -313,12 +313,25 @@ def collection_anomalies(records: list[OnchainNft], max_edition: int) -> dict[st
 
 
 def to_token(rec: OnchainNft) -> dict[str, Any]:
-    """Reconstruct the enumerated-token shape from an index row (for re-fetch)."""
+    """Reconstruct the enumerated-token shape from an index row (for re-fetch
+    and for the local-first roster).
+
+    Flags come from the NFTokenID itself: its first two bytes ARE the
+    on-ledger flags (NFTokenID layout: Flags(2) | TransferFee(2) |
+    Issuer(20) | Taxon(4) | Sequence(4)), which matters because most
+    Bithomp-imported rows carry mutable=NULL — guessing 0 for those would
+    route a genuinely mutable NFT down the swap burn-remint path instead of
+    NFTokenModify. The mutable column is only the fallback for a malformed
+    ID."""
+    try:
+        flags = int(rec.nft_id[:4], 16)
+    except ValueError:
+        flags = NFT_FLAG_MUTABLE if rec.mutable else 0
     return {
         "nft_id": rec.nft_id,
         "owner": rec.owner,
         "is_burned": rec.is_burned,
-        "flags": NFT_FLAG_MUTABLE if rec.mutable else 0,
+        "flags": flags,
         "uri_hex": rec.uri_hex,
         "ledger_index": rec.ledger_index,
     }
