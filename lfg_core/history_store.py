@@ -39,6 +39,7 @@ CREATE TABLE IF NOT EXISTS nft_events (
 );
 CREATE INDEX IF NOT EXISTS idx_nftev_ts ON nft_events(ts);
 CREATE INDEX IF NOT EXISTS idx_nftev_nft ON nft_events(nft_id);
+CREATE INDEX IF NOT EXISTS idx_nftev_event_number ON nft_events(event, nft_number);
 
 CREATE TABLE IF NOT EXISTS brix_events (
     tx_hash      TEXT,

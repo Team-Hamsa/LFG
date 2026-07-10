@@ -125,3 +125,17 @@ def test_nft_events_memo_action_self_migrates(tmp_path):
     )
     row = conn.execute("SELECT memo_action FROM nft_events WHERE tx_hash='T1'").fetchone()
     assert row["memo_action"] == "assemble"
+
+
+def test_nft_events_rebirth_index_exists(tmp_path):
+    """The rebirth EXISTS subquery seeks burns by (event, nft_number); without
+    a supporting index it degrades to O(n^2) as history grows (CodeRabbit
+    #157). CREATE INDEX IF NOT EXISTS in _SCHEMA also retrofits old DBs."""
+    conn = history_store.init_history_db(str(tmp_path / "h.db"))
+    names = {
+        r[0]
+        for r in conn.execute(
+            "SELECT name FROM sqlite_master WHERE type='index' AND tbl_name='nft_events'"
+        )
+    }
+    assert "idx_nftev_event_number" in names

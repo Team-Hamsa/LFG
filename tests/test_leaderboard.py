@@ -186,6 +186,24 @@ def test_swap_boards_count_legacy_remint_swaps():
     assert rows[0]["nft_number"] == 5 and rows[0]["value"] == 2
 
 
+def test_nft_swaps_reports_live_token_id_not_lexicographic_max():
+    """An edition with a modify on the OLD token then a remint swap has two
+    nft_ids in its swap events; MAX() would pick "OLD5" (lexicographically
+    larger) — a burned token (Greptile #157). The board must surface the
+    edition's live nft_id from the on-chain index."""
+    h, o = _dbs()
+    _ev(h, tx_hash="modold", event="modify", nft_id="OLD5", nft_number=5, to_addr="rA", ts=5)
+    _rebirth(h, edition=5, old_id="OLD5", new_id="NEW5", wallet="rA")
+    o.execute("INSERT INTO onchain_nfts (nft_id, nft_number, is_burned) VALUES ('OLD5', 5, 1)")
+    o.execute("INSERT INTO onchain_nfts (nft_id, nft_number, is_burned) VALUES ('NEW5', 5, 0)")
+    o.commit()
+    rows = leaderboard.compute(
+        "nft_swaps", h, o, start_ts=0, end_ts=99, network="testnet", system_accounts=SYS
+    )
+    assert rows[0]["nft_number"] == 5 and rows[0]["value"] == 2
+    assert rows[0]["nft_id"] == "NEW5"
+
+
 def test_compute_unknown_board_raises():
     h, o = _dbs()
     with pytest.raises(ValueError):

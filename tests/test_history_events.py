@@ -205,6 +205,18 @@ def test_mint_without_memos_has_no_action():
     assert ev["memo_action"] is None
 
 
+def test_action_memo_with_absent_data_is_none_not_empty_string():
+    # MemoType says "action" but MemoData is missing: the contract is None,
+    # not "" (Greptile #157) — an empty string would silently occupy the
+    # memo_action column and read as a distinct "action" downstream.
+    from xrpl.utils import str_to_hex
+
+    tx = dict(fx.MINT)
+    tx["Memos"] = [{"Memo": {"MemoType": str_to_hex("action")}}]
+    (ev,) = _nft(tx)
+    assert ev["memo_action"] is None
+
+
 def test_malformed_memos_do_not_break_derivation():
     tx = dict(fx.MINT)
     tx["Memos"] = [

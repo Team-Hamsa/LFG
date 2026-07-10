@@ -268,9 +268,30 @@ def _board_nft_swaps(
         ) GROUP BY COALESCE(nft_number, nft_id) ORDER BY value DESC LIMIT ?
     """
     cur = hconn.execute(sql, (start_ts, end_ts, *issuers, start_ts, end_ts, limit))
+    rows = cur.fetchall()
+    # MAX(nft_id) is arbitrary when an edition's swaps span a remint (modify
+    # on the old token + rebirth delivery of the new one) — it can name a
+    # burned token. Surface the edition's LIVE nft_id from the on-chain index
+    # instead; the aggregate id stays as fallback for unknown editions.
+    live_ids: dict[int, str] = {}
+    editions = [r["nft_number"] for r in rows if r["nft_number"] is not None]
+    if editions:
+        ph = ",".join("?" * len(editions))
+        live_ids = {
+            r["nft_number"]: r["nft_id"]
+            for r in oconn.execute(
+                f"SELECT nft_number, nft_id FROM onchain_nfts"
+                f" WHERE is_burned=0 AND nft_number IN ({ph})",
+                editions,
+            )
+        }
     return [
-        _row(nft_id=r["nft_id"], nft_number=r["nft_number"], value=r["value"])
-        for r in cur.fetchall()
+        _row(
+            nft_id=live_ids.get(r["nft_number"], r["nft_id"]),
+            nft_number=r["nft_number"],
+            value=r["value"],
+        )
+        for r in rows
     ]
 
 

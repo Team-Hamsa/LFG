@@ -112,7 +112,8 @@ def memo_action(tx: dict[str, Any]) -> str | None:
             continue
         try:
             if bytes.fromhex(memo.get("MemoType") or "").decode("utf-8") == "action":
-                return bytes.fromhex(memo.get("MemoData") or "").decode("utf-8")
+                # Absent/empty MemoData is None per contract, not ""
+                return bytes.fromhex(memo.get("MemoData") or "").decode("utf-8") or None
         except (ValueError, UnicodeDecodeError):
             continue
     return None
