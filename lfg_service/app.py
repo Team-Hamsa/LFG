@@ -1948,7 +1948,8 @@ async def handle_mint_start(request):
     except Exception as e:
         logging.warning(f"prepare_payment failed; falling back to XRP path: {e}")
     session.ensure_payment_fallback()
-    asyncio.get_event_loop().create_task(mint_flow.run_mint_session(session))
+    # Keep the task handle so /cancel can stop the payment wait (#141)
+    session.task = asyncio.get_event_loop().create_task(mint_flow.run_mint_session(session))
     return web.json_response(session.to_dict())
 
 
@@ -2107,6 +2108,29 @@ async def handle_mint_regenerate(request):
     except Exception as e:
         logging.warning(f"regenerate_payment failed: {e}")
     session.ensure_payment_fallback()
+    return web.json_response(session.to_dict())
+
+
+@require_auth
+async def handle_mint_cancel(request):
+    """Back out of the pay screen (issue #141): mark an awaiting_payment
+    session terminal so the per-user mint lock releases immediately, and stop
+    its background payment wait. Cancelling an already-terminal session is a
+    safe no-op; a session past payment (money taken) returns 409."""
+    session = mint_sessions.get(request.match_info["session_id"])
+    if (
+        not session
+        or session.discord_id != request["user"]["id"]
+        or getattr(session, "platform", "discord") != _platform(request["user"])
+    ):
+        return web.json_response({"error": "not found"}, status=404)
+    if session.state in mint_flow.TERMINAL_STATES:
+        return web.json_response(session.to_dict())  # already over — no-op
+    if not session.cancel():
+        return web.json_response({"error": "session is past payment"}, status=409)
+    # A deliberate cancel is not a mint outcome: suppress the terminal
+    # mint.completed/mint.failed publish a late status poll would fire.
+    session._published = True
     return web.json_response(session.to_dict())
 
 
@@ -2488,6 +2512,7 @@ def create_app() -> web.Application:
     app.router.add_post("/api/mint", handle_mint_start)
     app.router.add_get("/api/mint/{session_id}", handle_mint_status)
     app.router.add_post("/api/mint/{session_id}/regenerate", handle_mint_regenerate)
+    app.router.add_post("/api/mint/{session_id}/cancel", handle_mint_cancel)
     app.router.add_post("/api/signin", handle_signin_start)
     app.router.add_get("/api/signin/{payload_uuid}", handle_signin_status)
     app.router.add_get("/api/nfts", handle_nfts)

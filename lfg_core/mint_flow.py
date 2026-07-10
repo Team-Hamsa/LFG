@@ -36,11 +36,12 @@ OFFER_READY = "offer_ready"
 DONE = "done"
 FAILED = "failed"
 PAYMENT_TIMEOUT = "payment_timeout"
+CANCELLED = "cancelled"  # user backed out of the pay screen (issue #141)
 
 # offer_ready is the success end-state: the background task is finished and
 # the user has the accept QR. It must be terminal or the one-active-session
 # guard would block every subsequent mint.
-TERMINAL_STATES = {OFFER_READY, DONE, FAILED, PAYMENT_TIMEOUT}
+TERMINAL_STATES = {OFFER_READY, DONE, FAILED, PAYMENT_TIMEOUT, CANCELLED}
 
 # nft_numbers handed to in-flight sessions but not yet in the database.
 # get_next_nft_number() is MAX+1, so without this two concurrent mints would
@@ -83,6 +84,9 @@ class MintSession:
         self.accept_uuid: str | None = None
         self.accept_scanned = False
         self.accept_signed = False
+        # The run_mint_session background task, set by the service after it
+        # spawns it, so cancel() can stop the payment wait promptly (#141).
+        self.task: asyncio.Task[None] | None = None
 
     def _payment_params(self) -> dict[str, Any]:
         """Destination/amount for this session's payment path. LFGO goes to
@@ -138,6 +142,25 @@ class MintSession:
         self.qr_scanned = False
         self.payment_uuid = None
         await self.prepare_payment()
+
+    def cancel(self) -> bool:
+        """Back out of the pay screen (issue #141): mark the session terminal
+        so the one-active-session lock releases immediately, and cancel the
+        background task so its payment wait stops polling. Only legal while
+        still awaiting payment — past that the user has paid and the pipeline
+        must run to completion or failure. Returns True if cancelled.
+
+        The state check and CANCELLED assignment are synchronous (no await
+        between them), so on the single event loop this cannot race the
+        background task's own state transitions."""
+        if self.state != AWAITING_PAYMENT:
+            return False
+        self.state = CANCELLED
+        if self.task is not None:
+            # CancelledError is a BaseException, so run_mint_session's
+            # `except Exception` cannot catch it and overwrite CANCELLED.
+            self.task.cancel()
+        return True
 
     def ensure_payment_fallback(self) -> None:
         """If prepare_payment was cancelled or failed, default to the XRP

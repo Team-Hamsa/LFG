@@ -11,6 +11,7 @@ MINT_OK_STATES: frozenset[str] = frozenset({"offer_ready", "done"})
 BAD_STATE_MESSAGES: dict[str, str] = {
     "payment_timeout": "Payment request timed out. Please try again.",
     "failed": "The mint failed. Please try again or contact an admin.",
+    "cancelled": "The mint was cancelled.",
 }
 
 

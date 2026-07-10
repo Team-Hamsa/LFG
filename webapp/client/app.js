@@ -382,7 +382,7 @@ function renderSteps(stage) {
   }));
 }
 
-function showFlow({ title, text, qrData, link, image, done, stage, spinner, celebrate, pill, regen }) {
+function showFlow({ title, text, qrData, link, image, done, stage, spinner, celebrate, pill, regen, cancel }) {
   showPanel('flow-panel');
   renderSteps(stage);
   el('pay-method').hidden = !pill;
@@ -404,6 +404,10 @@ function showFlow({ title, text, qrData, link, image, done, stage, spinner, cele
   el('nft-image').classList.toggle('celebrate', !!(image && celebrate));
   if (image) el('nft-image').src = image;
   el('flow-regen-btn').hidden = !regen;
+  // Back out of an awaiting-signature screen (issue #141): callers pass a
+  // callback so each flow decides what "cancel" means for it.
+  el('flow-cancel-btn').hidden = !cancel;
+  if (cancel) el('flow-cancel-btn').onclick = cancel;
   el('flow-done-btn').hidden = !done;
 }
 
@@ -421,6 +425,7 @@ function mintPayView(s) {
       pill,
       spinner: true,
       stage: s.state,
+      cancel: cancelMint,
     };
   }
   return {
@@ -433,6 +438,7 @@ function mintPayView(s) {
     link: s.payment_link,
     stage: s.state,
     regen: true,
+    cancel: cancelMint,
   };
 }
 
@@ -492,6 +498,7 @@ function pollMint(sessionId) {
       showFlow({ title: '❌ Mint failed', text: s.error || 'Something went wrong.', done: true });
       return;
     }
+    if (s.state === 'cancelled') { showMintHome(); return; } // cancelled elsewhere (issue #141)
 
     if (s.state === 'awaiting_payment') {
       showFlow(mintPayView(s));
@@ -533,6 +540,29 @@ async function regeneratePaymentQr() {
   } finally {
     btn.disabled = false;
   }
+}
+
+// Back out of the pay screen (issue #141): tell the server to cancel the
+// session (releasing the per-user mint lock immediately), then return to the
+// mint start screen. Errors (session already past payment / gone) still go
+// home — the poll's next tick would land on the real state anyway.
+async function cancelMint() {
+  const btn = el('flow-cancel-btn');
+  btn.disabled = true;
+  try {
+    if (currentMintId) {
+      await api(`/api/mint/${currentMintId}/cancel`, {
+        method: 'POST', body: JSON.stringify(discordCtx()),
+      });
+    }
+  } catch (e) {
+    // best-effort: the lock self-releases on payment timeout regardless
+  } finally {
+    btn.disabled = false;
+  }
+  clearTimeout(pollTimer);
+  currentMintId = null;
+  showMintHome();
 }
 
 // --- Registration via Xaman Sign In (issue #24) ---
