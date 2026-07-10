@@ -122,4 +122,7 @@ def test_app_js_market_click_seams_catch_async_throws():
     # showError at the onclick seam.
     js = _read("app.js")
     assert "openBuyFlow(row).catch((e) => showError(e.message))" in js
-    assert "Promise.resolve(onAction(entry.payload)).catch((e) => showError(e.message))" in js
+    assert (
+        "Promise.resolve().then(() => onAction(entry.payload)).catch((e) => showError(e.message))"
+        in js
+    )

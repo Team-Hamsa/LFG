@@ -1525,7 +1525,7 @@ function renderChipList(containerEl, emptyEl, entries, actionLabel, onAction) {
     btn.textContent = actionLabel;
     // #133: onAction may be async (cancelListing) — same silent-rejection
     // hazard as the browse-grid cards; Promise.resolve covers sync actions.
-    btn.onclick = () => Promise.resolve(onAction(entry.payload)).catch((e) => showError(e.message));
+    btn.onclick = () => Promise.resolve().then(() => onAction(entry.payload)).catch((e) => showError(e.message));
     chip.replaceChildren(img, label, btn);
     containerEl.appendChild(chip);
   }
