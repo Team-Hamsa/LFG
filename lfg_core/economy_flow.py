@@ -309,6 +309,17 @@ async def run_harvest(session: HarvestSession, deps: EconomyDeps) -> None:
     except Exception as e:
         logging.error(f"Harvest {session.id} failed: {traceback.format_exc()}")
         session.fail(str(e))
+        # A raise AFTER the Closet modify committed (e.g. delivery offer/accept
+        # blowing up post-mirror-fail) must not leave the journal at an earlier
+        # checkpoint without the sticky mirror fields — recovery would treat
+        # the committed change as never-happened. Persist a terminal record
+        # (best-effort: journaling must never mask the original error).
+        try:
+            _write_record(deps.records_dir, "harvest", session.id, session._record("failed"))
+        except Exception:
+            logging.error(
+                f"Harvest {session.id} terminal record write failed: {traceback.format_exc()}"
+            )
 
 
 def _character_attributes(body_value: str, chosen: dict[str, str]) -> list[dict[str, str]]:
@@ -469,6 +480,17 @@ async def run_assemble(session: AssembleSession, deps: EconomyDeps) -> None:
     except Exception as e:
         logging.error(f"Assemble {session.id} failed: {traceback.format_exc()}")
         session.fail(str(e))
+        # A raise AFTER the Closet modify committed (e.g. delivery offer/accept
+        # blowing up post-mirror-fail) must not leave the journal at an earlier
+        # checkpoint without the sticky mirror fields — recovery would treat
+        # the committed change as never-happened. Persist a terminal record
+        # (best-effort: journaling must never mask the original error).
+        try:
+            _write_record(deps.records_dir, "assemble", session.id, session._record("failed"))
+        except Exception:
+            logging.error(
+                f"Assemble {session.id} terminal record write failed: {traceback.format_exc()}"
+            )
 
 
 def _raw_uri(uri_hex: str) -> str:
@@ -608,6 +630,17 @@ async def run_equip(session: EquipSession, deps: EconomyDeps) -> None:
     except Exception as e:
         logging.error(f"Equip {session.id} failed: {traceback.format_exc()}")
         session.fail(str(e))
+        # A raise AFTER the Closet modify committed (e.g. delivery offer/accept
+        # blowing up post-mirror-fail) must not leave the journal at an earlier
+        # checkpoint without the sticky mirror fields — recovery would treat
+        # the committed change as never-happened. Persist a terminal record
+        # (best-effort: journaling must never mask the original error).
+        try:
+            _write_record(deps.records_dir, "equip", session.id, session._record("failed"))
+        except Exception:
+            logging.error(
+                f"Equip {session.id} terminal record write failed: {traceback.format_exc()}"
+            )
 
 
 # --- Extract: turn a loose Closet trait into a standalone tradeable NFToken ---
@@ -742,6 +775,17 @@ async def run_extract(session: ExtractSession, deps: EconomyDeps) -> None:
     except Exception as e:
         logging.error(f"Extract {session.id} failed: {traceback.format_exc()}")
         session.fail(str(e))
+        # A raise AFTER the Closet modify committed (e.g. delivery offer/accept
+        # blowing up post-mirror-fail) must not leave the journal at an earlier
+        # checkpoint without the sticky mirror fields — recovery would treat
+        # the committed change as never-happened. Persist a terminal record
+        # (best-effort: journaling must never mask the original error).
+        try:
+            _write_record(deps.records_dir, "extract", session.id, session._record("failed"))
+        except Exception:
+            logging.error(
+                f"Extract {session.id} terminal record write failed: {traceback.format_exc()}"
+            )
 
 
 # --- Deposit: burn a standalone trait NFToken back into the owner's Closet ---
@@ -871,3 +915,14 @@ async def run_deposit(session: DepositSession, deps: EconomyDeps) -> None:
     except Exception as e:
         logging.error(f"Deposit {session.id} failed: {traceback.format_exc()}")
         session.fail(str(e))
+        # A raise AFTER the Closet modify committed (e.g. delivery offer/accept
+        # blowing up post-mirror-fail) must not leave the journal at an earlier
+        # checkpoint without the sticky mirror fields — recovery would treat
+        # the committed change as never-happened. Persist a terminal record
+        # (best-effort: journaling must never mask the original error).
+        try:
+            _write_record(deps.records_dir, "deposit", session.id, session._record("failed"))
+        except Exception:
+            logging.error(
+                f"Deposit {session.id} terminal record write failed: {traceback.format_exc()}"
+            )

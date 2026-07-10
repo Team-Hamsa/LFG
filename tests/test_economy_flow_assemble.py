@@ -43,11 +43,13 @@ class _Fakes:
         fail_closet_modify=False,
         raise_closet_modify=False,
         fail_offer=False,
+        raise_offer=False,
         fail_char_burn=False,
     ) -> None:
         self.fail_closet_modify = fail_closet_modify
         self.raise_closet_modify = raise_closet_modify
         self.fail_offer = fail_offer
+        self.raise_offer = raise_offer
         self.fail_char_burn = fail_char_burn
         self.mints: list[str] = []
         self.char_burns: list[tuple[str, str]] = []
@@ -93,6 +95,8 @@ class _Fakes:
         return None if self.fail_char_burn else "BURN"
 
     async def char_offer(self, nft_id, owner):
+        if self.raise_offer:
+            raise RuntimeError("offer submit blew up")
         return None if self.fail_offer else "OFFER"
 
     async def char_accept(self, offer_id):
@@ -266,3 +270,22 @@ def test_assemble_succeeds_with_active_closet(tmp_path):
     _run(ef.run_assemble(s, _deps(conn, f, tmp_path)))
     assert s.state == ef.DONE
     assert s.new_nft_id == "CHAR7"
+
+
+def test_assemble_mirror_fail_then_offer_raise_keeps_mirror_journal(tmp_path):
+    """Greptile #151: the drain COMMITTED (mirror-fail sets the sticky fields in
+    memory) and then the delivery offer RAISES (not returns-falsy). The outer
+    handler must persist a terminal journal carrying mirror_pending +
+    sync_tx_hash — otherwise the on-disk record stays at the pre-drain
+    'minted' checkpoint and recovery burns the mint back against an
+    already-drained Closet."""
+    conn, f = _conn_with_bucket(), _Fakes(raise_offer=True)
+    s = _session()
+    _run(ef.run_assemble(s, _deps(flaky_mirror_conn(conn), f, tmp_path)))
+
+    assert s.state == ef.FAILED
+    assert f.char_burns == []  # still no destructive compensation
+    record = json.loads((tmp_path / f"assemble-{s.id}.json").read_text())
+    assert record["status"] == "failed"
+    assert record["mirror_pending"] is True
+    assert record["sync_tx_hash"] == "MODHASH"

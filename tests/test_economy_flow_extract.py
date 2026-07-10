@@ -18,12 +18,13 @@ def _run(coro):
 
 
 class _F:
-    def __init__(self, *, fail_sync=False, raise_sync=False, fail_offer=False):
+    def __init__(self, *, fail_sync=False, raise_sync=False, fail_offer=False, raise_offer=False):
         self.minted, self.burns, self.uploads = [], [], 0
         self.modifies = 0
         self.fail_sync = fail_sync
         self.raise_sync = raise_sync
         self.fail_offer = fail_offer
+        self.raise_offer = raise_offer
 
     async def trait_compose(self, slot, value):
         return f"https://cdn/trait/{slot}-{value}.png"
@@ -53,6 +54,8 @@ class _F:
         return "MOD"
 
     async def closet_offer(self, nft_id, owner):
+        if self.raise_offer:
+            raise RuntimeError("offer submit blew up")
         return None if self.fail_offer else "OFFER"
 
     async def closet_accept(self, offer_id):
@@ -222,3 +225,23 @@ def test_extract_succeeds_when_mirror_write_fails(tmp_path, monkeypatch):
     assets = {(sl, v): n for o, sl, v, n in es.read_closet_assets(conn) if o == "rUser"}
     assert assets[("Hat", "Cap")] == 1  # Closet decremented
     assert s.nft_id == "TRAIT0"  # token kept
+
+
+def test_extract_mirror_fail_then_offer_raise_keeps_mirror_journal(tmp_path):
+    """Greptile #151: the Closet decrement COMMITTED (mirror-fail sets the
+    sticky fields in memory) and then the delivery offer RAISES. The outer
+    handler must persist a terminal journal carrying mirror_pending +
+    sync_tx_hash — otherwise the on-disk record stays at the pre-decrement
+    'minted' checkpoint and recovery treats the decrement as never-happened."""
+    conn = sqlite3.connect(":memory:")
+    _active_closet_with_trait(conn)
+    f = _F(raise_offer=True)
+    s = ef.ExtractSession(owner="rUser", slot="Hat", value="Cap")
+    _run(ef.run_extract(s, _deps(flaky_mirror_conn(conn), f, tmp_path)))
+
+    assert s.state == ef.FAILED
+    assert f.burns == []  # no revert-burn against a drained Closet
+    record = json.loads((tmp_path / f"extract-{s.id}.json").read_text())
+    assert record["status"] == "failed"
+    assert record["mirror_pending"] is True
+    assert record["sync_tx_hash"] == "MOD"
