@@ -64,7 +64,8 @@ def test_app_js_never_uses_window_confirm():
 def test_app_js_royalty_disclosure_and_closet_prompt_wired():
     js = _read("app.js")
     assert "marketPure.royaltyDisclosure(" in js
-    assert "marketPure.computeRoyalty(" in js
+    # #133: buy-flow royalty math goes through the no-throw seam.
+    assert "marketPure.safeComputeRoyalty(" in js
     assert "marketPure.CLOSET_REQUIRED_MESSAGE" in js
     assert "promptClosetRequired" in js
     assert "added to your Closet" in js
@@ -104,3 +105,21 @@ def test_mock_market_module_exists_and_wired_into_service(monkeypatch):
         app_src = f.read()
     assert "mock_market" in app_src
     assert "config.WEBAPP_DEV_MODE" in app_src
+
+
+def test_app_js_buy_flow_surfaces_bad_price_instead_of_throwing():
+    # #133: computeRoyalty throws on a malformed listing price; openBuyFlow
+    # must route that through the no-throw seam + showError, never raw
+    # computeRoyalty (whose rejection the card onclick would swallow).
+    js = _read("app.js")
+    assert "safeComputeRoyalty(" in js
+    assert "marketPure.computeRoyalty(" not in js
+
+
+def test_app_js_market_click_seams_catch_async_throws():
+    # #133: no marketplace card/chip click may fail silently — every async
+    # handler fired from a grid card or Mine chip routes rejections to
+    # showError at the onclick seam.
+    js = _read("app.js")
+    assert "openBuyFlow(row).catch((e) => showError(e.message))" in js
+    assert "Promise.resolve(onAction(entry.payload)).catch((e) => showError(e.message))" in js

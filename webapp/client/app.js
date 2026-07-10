@@ -1455,7 +1455,9 @@ function renderMarketGrid(rows) {
     price.textContent = `${vm.amountXrp} XRP`;
     name.appendChild(price);
     card.replaceChildren(img, name);
-    card.onclick = () => openBuyFlow(row);
+    // #133: openBuyFlow is async — an unhandled rejection here would leave
+    // the card looking dead. Route any buy-path throw to the toast surface.
+    card.onclick = () => openBuyFlow(row).catch((e) => showError(e.message));
     grid.appendChild(card);
   }
 }
@@ -1521,7 +1523,9 @@ function renderChipList(containerEl, emptyEl, entries, actionLabel, onAction) {
     const btn = document.createElement('button');
     btn.className = 'chip-action';
     btn.textContent = actionLabel;
-    btn.onclick = () => onAction(entry.payload);
+    // #133: onAction may be async (cancelListing) — same silent-rejection
+    // hazard as the browse-grid cards; Promise.resolve covers sync actions.
+    btn.onclick = () => Promise.resolve(onAction(entry.payload)).catch((e) => showError(e.message));
     chip.replaceChildren(img, label, btn);
     containerEl.appendChild(chip);
   }
@@ -1709,7 +1713,14 @@ function marketTraitListRender(s) {
 
 async function openBuyFlow(row) {
   const vm = marketPure.mapListingRow(row);
-  const royalty = marketPure.computeRoyalty(vm.amountXrp);
+  // #133: a malformed server-provided price would make computeRoyalty throw
+  // and the confirm dialog never open — surface it instead of a dead click.
+  const priced = marketPure.safeComputeRoyalty(vm.amountXrp);
+  if (!priced.ok) {
+    showError(`This listing has an invalid price (${priced.error}) — try refreshing.`);
+    return;
+  }
+  const royalty = priced.royalty;
   const ok = await confirmDialog({
     title: `Buy ${vm.title}?`,
     text: `${vm.amountXrp} XRP — seller nets ${royalty.receiveXrp} XRP (93% — 7% collection royalty).`,
