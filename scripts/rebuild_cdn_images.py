@@ -258,39 +258,47 @@ class Runner:
                 attrs, body, store, f"rebuild_{edition}"
             )
 
-        # Keep archive copies (upload_output deletes its inputs).
+        # Archive copies FIRST — upload_output deletes its inputs, and with
+        # --no-upload there is nothing on the CDN to re-fetch afterwards.
         entry: dict[str, Any] = {"status": "ok", "source": "rebuilt"}
+        img_dest = self._archive_path(edition, ".png")
         if is_video:
             vid_dest = self._archive_path(edition, ".mp4")
             if not self.dry_run:
                 shutil.copyfile(out_path, vid_dest)
+                await asyncio.to_thread(swap_compose.extract_first_frame, out_path, img_dest)
             entry["video_file"] = os.path.basename(vid_dest)
-        image_url, video_url = await swap_compose.upload_output(
-            out_path, is_video, self._upload, f"{edition}/{stem}"
-        )
+        elif not self.dry_run:
+            shutil.copyfile(out_path, img_dest)
+        entry["image_file"] = os.path.basename(img_dest)
+
+        async with self.net_sem:
+            image_url, video_url = await swap_compose.upload_output(
+                out_path, is_video, self._upload, f"{edition}/{stem}"
+            )
         entry["cdn_image"] = image_url
         if video_url:
             entry["cdn_video"] = video_url
 
-        # upload_output re-encoded the still (video poster) or uploaded the
-        # png verbatim; either way the CDN copy is canonical — pull it back
-        # into the archive so local == CDN byte-for-byte.
-        img_dest = self._archive_path(edition, ".png")
-        if not self.dry_run:
-            data = await fetch_cdn_file(session, f"{edition}/{stem}.png")
-            if data is None and (self.no_upload or self.dry_run):
-                data = b""
-            if data:
-                tmp = img_dest + ".tmp"
-                with open(tmp, "wb") as f:
-                    f.write(data)
-                os.replace(tmp, img_dest)
-            elif not os.path.exists(img_dest):
-                logging.error(f"edition {edition}: uploaded but could not re-fetch still")
-                return None
-        entry["image_file"] = os.path.basename(img_dest)
+        if self.dry_run or self.no_upload:
+            return entry  # nothing landed on the CDN — the local copy is it
 
-        await self._repair_metadata(session, edition, files, stem, image_url, video_url)
+        # The CDN copy is canonical (upload_output re-encodes the video
+        # poster) — pull it back so local == CDN byte-for-byte; on a fetch
+        # blip the locally-extracted copy stands in.
+        async with self.net_sem:
+            data = await fetch_cdn_file(session, f"{edition}/{stem}.png")
+        if data:
+            tmp = img_dest + ".tmp"
+            with open(tmp, "wb") as f:
+                f.write(data)
+            os.replace(tmp, img_dest)
+        elif not os.path.exists(img_dest):
+            logging.error(f"edition {edition}: uploaded but could not re-fetch still")
+            return None
+
+        async with self.net_sem:
+            await self._repair_metadata(session, edition, files, stem, image_url, video_url)
         return entry
 
     async def _repair_metadata(

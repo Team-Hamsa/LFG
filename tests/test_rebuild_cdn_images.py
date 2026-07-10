@@ -15,6 +15,7 @@ os.environ.setdefault("BUNNY_CDN_STORAGE_ZONE", "test")
 os.environ.setdefault("LAYER_SOURCE", "local")
 os.environ.setdefault("BUNNY_PULL_ZONE", "nft.pullzone.example")
 
+import sqlite3  # noqa: E402
 import sys  # noqa: E402
 
 REPO_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
@@ -111,3 +112,50 @@ def test_patched_metadata_does_not_mutate_input():
     meta = {"image": None}
     rci.patched_metadata(meta, "https://cdn/x.png", None)
     assert meta["image"] is None
+
+
+# ---------------------------------------------------- --no-upload archiving
+
+
+def _index_conn():
+    conn = sqlite3.connect(":memory:")
+    conn.row_factory = sqlite3.Row
+    conn.execute(
+        "CREATE TABLE onchain_nfts (nft_id TEXT PRIMARY KEY, nft_number INT,"
+        " is_burned INT DEFAULT 0, body TEXT, attributes_json TEXT, ledger_index INT)"
+    )
+    conn.execute(
+        "INSERT INTO onchain_nfts VALUES ('A', 7, 0, 'skeleton',"
+        ' \'[{"trait_type": "Body", "value": "White Skeleton"}]\', 1)'
+    )
+    conn.commit()
+    return conn
+
+
+def test_rebuild_no_upload_archives_still_locally(monkeypatch, tmp_path):
+    """--no-upload must keep the recomposed still in the archive: upload_output
+    deletes its input, and with uploads disabled there is nothing on the CDN
+    to re-fetch — without a pre-copy the edition is silently marked failed
+    (CodeRabbit #156)."""
+    import asyncio
+
+    async def fake_missing(attrs, body, store):
+        return []
+
+    async def fake_compose(attrs, body, store, basename):
+        p = tmp_path / f"{basename}.png"
+        p.write_bytes(b"\x89PNG rebuilt bytes")
+        return str(p), False
+
+    monkeypatch.setattr(rci.swap_compose, "missing_layers", fake_missing)
+    monkeypatch.setattr(rci.swap_compose, "compose_nft", fake_compose)
+    monkeypatch.setattr(rci.layer_store, "get_layer_store", lambda: object())
+
+    archive = tmp_path / "archive"
+    archive.mkdir()
+    runner = rci.Runner(_index_conn(), str(archive), no_upload=True)
+    entry = asyncio.new_event_loop().run_until_complete(
+        runner._rebuild(session=None, edition=7, files=[])
+    )
+    assert entry is not None and entry["status"] == "ok"
+    assert (archive / "7.png").read_bytes() == b"\x89PNG rebuilt bytes"
