@@ -440,3 +440,18 @@ def test_settled_marked_trait_sale_left_alone(tmp_path):
         "SELECT is_live, closed_reason, settled FROM market_listings WHERE offer_index='OFF_SETTLED_TRAIT'"
     ).fetchone()
     assert tuple(row) == (0, "sold", 1)
+
+
+def test_network_arg_defaults_to_config_like_backfill_onchain():
+    """--network default parity with scripts/backfill_onchain.py (#130):
+    both backfills should run against config.XRPL_NETWORK when --network is
+    omitted, instead of one requiring the flag."""
+    from lfg_core import config
+
+    args = bm._build_parser().parse_args([])
+    assert args.network == config.XRPL_NETWORK
+
+
+def test_network_arg_explicit_choices_still_work():
+    assert bm._build_parser().parse_args(["--network", "mainnet"]).network == "mainnet"
+    assert bm._build_parser().parse_args(["--network", "testnet"]).network == "testnet"
