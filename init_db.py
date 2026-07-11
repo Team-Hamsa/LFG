@@ -1,13 +1,15 @@
 import logging
 import sqlite3
 
+from lfg_core import config
+
 logging.basicConfig(level=logging.INFO)
 
 
 def init_db():
     try:
         # Connect to SQLite database (creates it if it doesn't exist)
-        conn = sqlite3.connect("lfg_nfts.db")
+        conn = sqlite3.connect(config.DB_PATH)
         cursor = conn.cursor()
 
         # Create the LFG table with capitalized column names

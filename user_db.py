@@ -4,7 +4,10 @@ import logging
 import sqlite3
 from typing import Any
 
-DATABASE = "lfg_nfts.db"
+from lfg_core import config
+
+# Patchable seam (tests override this); network-aware default from config.
+DATABASE = config.DB_PATH
 
 
 def create_users_table() -> None:

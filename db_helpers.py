@@ -3,15 +3,17 @@ import sqlite3
 import traceback
 from typing import Any
 
+from lfg_core import config
+
 
 def get_next_nft_number() -> int:
     """Get the next available NFT number"""
     try:
-        conn = sqlite3.connect("lfg_nfts.db")
+        conn = sqlite3.connect(config.DB_PATH)
         cursor = conn.cursor()
 
         logging.info("=== Getting next NFT number ===")
-        logging.info("Connected to database: lfg_nfts.db")
+        logging.info(f"Connected to database: {config.DB_PATH}")
 
         # First, check if table exists
         cursor.execute("""
@@ -66,11 +68,11 @@ def record_nft_mint(
     traits: dict[str, Any],
     network: str = "mainnet",
     body_type: str = "*",
-    db_path: str = "lfg_nfts.db",
+    db_path: str | None = None,
 ) -> bool:
     """Record a new NFT mint in the database"""
     try:
-        conn = sqlite3.connect(db_path)
+        conn = sqlite3.connect(db_path or config.DB_PATH)
         cursor = conn.cursor()
 
         # Check existing columns
@@ -152,7 +154,7 @@ def record_nft_mint(
 def get_nft_data(nft_number: int) -> dict[str, Any] | None:
     """Get data for a specific NFT number"""
     try:
-        conn = sqlite3.connect("lfg_nfts.db")
+        conn = sqlite3.connect(config.DB_PATH)
         conn.row_factory = sqlite3.Row
         cursor = conn.cursor()
 

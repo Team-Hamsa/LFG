@@ -193,8 +193,24 @@ NFT_COLLECTION_LOGO = os.getenv(
     "NFT_COLLECTION_LOGO", "https://lfgo.b-cdn.net/LFGO_square_logo.png"
 )
 
+
+def app_db_path(network: str) -> str:
+    """Per-network app DB file (LFG/Users/burned_nfts); DB_PATH overrides.
+
+    Mainnet keeps the legacy bare filename (the long-lived production data);
+    any other network gets its own suffixed file, matching the
+    onchain_<net>.db / history_<net>.db convention. A shared file once let
+    testnet mints push the mainnet edition counter from 3536 to 3572.
+    """
+    override = os.getenv("DB_PATH")
+    if override:
+        return override
+    return "lfg_nfts.db" if network == "mainnet" else f"lfg_nfts_{network}.db"
+
+
+DB_PATH = app_db_path(XRPL_NETWORK)
+
 # Variable rarity engine
-DB_PATH = os.getenv("DB_PATH", "lfg_nfts.db")
 RARITY_FLOOR = float(os.getenv("RARITY_FLOOR", "0.005"))
 RARITY_BOOST_INITIAL = float(os.getenv("RARITY_BOOST_INITIAL", "7"))
 RARITY_BOOST_STEP_HOURS = int(os.getenv("RARITY_BOOST_STEP_HOURS", "24"))
