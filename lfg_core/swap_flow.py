@@ -38,6 +38,7 @@ from lfg_core import (
     memos,
     swap_compose,
     swap_meta,
+    traits,
     xrpl_ops,
     xumm_ops,
 )
@@ -417,9 +418,17 @@ async def run_swap_session(session: SwapSession) -> None:
             nft1["attributes"], nft2["attributes"], session.traits_to_swap
         )
 
+        # Legacy ape faces (#168): fill any still-empty face slot via the
+        # rarity engine — after swap application (a real face moved in by
+        # the swap is never overwritten), before the layer pre-check (rolled
+        # art gets the same existence check as everything else). Skeletons
+        # and other bodies are a no-op inside the helper.
+        store = layer_store.get_layer_store()
+        await traits.fill_missing_face_traits(store, nft1["gender"], new_attrs1)
+        await traits.fill_missing_face_traits(store, nft2["gender"], new_attrs2)
+
         # 0. Verify every layer exists in the store BEFORE taking payment or
         #    touching anything on-chain (also pre-warms the download cache)
-        store = layer_store.get_layer_store()
         missing = await swap_compose.missing_layers(
             new_attrs1, nft1["gender"], store
         ) + await swap_compose.missing_layers(new_attrs2, nft2["gender"], store)
