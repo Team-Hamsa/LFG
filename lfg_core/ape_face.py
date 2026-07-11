@@ -120,6 +120,7 @@ async def inject_and_mask(
         return layers
 
     result = list(layers)
+    mask_path: str | None = None
     if body_value in MASKED_BODY_VALUES:
         mask_path = await store.resolve_asset(f"{body}/{MASK_ASSET}")
         if mask_path is None:
@@ -132,5 +133,8 @@ async def inject_and_mask(
     nose_path = await store.resolve_asset(f"{body}/{NOSE_ASSET}")
     if nose_path is None:
         raise FileNotFoundError(f"{body}/{NOSE_ASSET}")
+    if mask_path is not None:
+        # The injected nose is a face feature too: clip it on melt/xray bodies.
+        nose_path = apply_alpha_mask(nose_path, mask_path, out_dir)
     result.insert(_nose_index(result), ("Nose", "Nose", nose_path))
     return result
