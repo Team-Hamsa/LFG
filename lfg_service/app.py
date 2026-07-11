@@ -17,6 +17,7 @@ import mimetypes
 import os
 import sqlite3
 import sys
+import threading
 import time
 import traceback
 from collections.abc import Awaitable, Callable
@@ -691,6 +692,10 @@ def _use_market_mock() -> bool:
 
 _MarketKey = tuple[str, str]  # (network, kind)
 _MARKET_CACHE: dict[_MarketKey, tuple[float, list[dict[str, Any]]]] = {}
+# Guards all _MARKET_CACHE access: reads/puts happen on the event-loop thread
+# while _invalidate_market_cache pops from executor threads — an unlocked pop
+# during _market_cache_put's iteration could raise RuntimeError.
+_MARKET_CACHE_LOCK = threading.Lock()
 _MARKET_CACHE_TTL = 60.0
 # Cardinality is bounded by construction (network x kind only — filters never
 # key the cache, see the module docstring on Task 7's spec excerpt), so this
@@ -710,12 +715,13 @@ def _market_cache_put(key: _MarketKey, value: list[dict[str, Any]], now_mono: fl
     """Insert into the browse cache, dropping expired entries and — if still
     over _MARKET_CACHE_MAX — evicting the oldest by timestamp. Mirrors
     _lb_cache_put's shape (leaderboard cache) for the same reasons."""
-    for k in [k for k, (ts, _) in _MARKET_CACHE.items() if now_mono - ts >= _MARKET_CACHE_TTL]:
-        del _MARKET_CACHE[k]
-    _MARKET_CACHE[key] = (now_mono, value)
-    while len(_MARKET_CACHE) > _MARKET_CACHE_MAX:
-        oldest = min(_MARKET_CACHE, key=lambda k: _MARKET_CACHE[k][0])
-        del _MARKET_CACHE[oldest]
+    with _MARKET_CACHE_LOCK:
+        for k in [k for k, (ts, _) in _MARKET_CACHE.items() if now_mono - ts >= _MARKET_CACHE_TTL]:
+            del _MARKET_CACHE[k]
+        _MARKET_CACHE[key] = (now_mono, value)
+        while len(_MARKET_CACHE) > _MARKET_CACHE_MAX:
+            oldest = min(_MARKET_CACHE, key=lambda k: _MARKET_CACHE[k][0])
+            del _MARKET_CACHE[oldest]
 
 
 def _attach_character_images(conn: sqlite3.Connection, rows: list[dict[str, Any]]) -> None:
@@ -901,7 +907,8 @@ async def handle_market_listings(request: web.Request) -> web.Response:
     network = _market_network(kind)
     cache_key: _MarketKey = (network, kind)
     now_mono = time.monotonic()
-    cached = _MARKET_CACHE.get(cache_key)
+    with _MARKET_CACHE_LOCK:
+        cached = _MARKET_CACHE.get(cache_key)
     if cached is not None and now_mono - cached[0] < _MARKET_CACHE_TTL:
         rows = cached[1]
     else:
@@ -1211,8 +1218,9 @@ def _invalidate_market_cache(network: str, kind: str | None = None) -> None:
     changed, so the caller's own List/Cancel/Buy is visible immediately
     instead of after _MARKET_CACHE_TTL. kind=None drops both kinds (the
     close path doesn't know the listing's kind)."""
-    for k in ("character", "trait") if kind is None else (kind,):
-        _MARKET_CACHE.pop((network, k), None)
+    with _MARKET_CACHE_LOCK:
+        for k in ("character", "trait") if kind is None else (kind,):
+            _MARKET_CACHE.pop((network, k), None)
 
 
 def _write_listing_row(network: str, row: dict[str, Any]) -> None:
