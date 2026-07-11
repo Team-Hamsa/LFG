@@ -204,8 +204,12 @@ async def apply_economy_tx(
     mint/accept or deleted on burn. Closet/trait mirror maintenance runs regardless
     of genesis. Only the supply-growth path (a character mint of an unknown edition)
     needs `genesis`; pass the EFFECTIVE genesis (so recorded editions are recognised)
-    to enable it, or `None` when no genesis is frozen to skip growth. Per-id errors
-    are logged, never raised."""
+    to enable it, or `None` when no genesis is frozen to skip growth.
+
+    Every write path is gated on `token["issuer"] == config.SWAP_ISSUER_ADDRESS`:
+    the taxon is forgeable, so a foreign-issuer NFT reusing our economy taxons — or
+    a foreign `#N`-named mint — must never forge closet/trait rows or poison the
+    supply ledger. Per-id errors are logged, never raised."""
     kind = classify_tx(tx)
     if kind not in ("mint", "modify", "accept", "burn"):
         return
@@ -220,6 +224,14 @@ async def apply_economy_tx(
                 continue
             token = await fetch_token_fn(nft_id)
             if not token:
+                continue
+            # Trust only tokens minted by OUR issuer. The taxon is attacker-
+            # controlled, so routing on it alone lets a foreign-issuer NFT reusing
+            # CLOSET_TAXON/TRAIT_TAXON forge closet/trait rows, and a foreign #N-named
+            # mint poison the supply-growth ledger. Mirror the market membership gate
+            # (_nft_id_is_ours) — the issuer bytes are the authoritative collection
+            # signal — and drop anything not from us before any economy write.
+            if token.get("issuer") != config.SWAP_ISSUER_ADDRESS:
                 continue
             uri_hex = token.get("uri_hex") or ""
             metadata = await fetch_meta_fn(uri_hex) if uri_hex else None

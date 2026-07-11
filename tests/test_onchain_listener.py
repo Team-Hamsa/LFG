@@ -61,7 +61,13 @@ def _char_meta(edition: int, body: str = "Straight Blue") -> dict:
 
 
 def _char_token():
-    return {"nft_id": "CHAR", "owner": "rUser", "taxon": config.SWAP_TAXON, "uri_hex": "CD"}
+    return {
+        "nft_id": "CHAR",
+        "owner": "rUser",
+        "taxon": config.SWAP_TAXON,
+        "uri_hex": "CD",
+        "issuer": config.SWAP_ISSUER_ADDRESS,
+    }
 
 
 async def _fetch_char_token(nft_id):
@@ -203,7 +209,13 @@ def test_listen_path_rebuilds_bucket_from_modify():
     meta = bt.build_closet_metadata("rUser", [("Head", "None", 2), ("Eyes", "Blue", 1)], [3536])
 
     async def fetch_token(nft_id):
-        return {"nft_id": "CLOSET", "owner": "rUser", "taxon": config.CLOSET_TAXON, "uri_hex": "AB"}
+        return {
+            "nft_id": "CLOSET",
+            "owner": "rUser",
+            "taxon": config.CLOSET_TAXON,
+            "uri_hex": "AB",
+            "issuer": config.SWAP_ISSUER_ADDRESS,
+        }
 
     async def fetch_meta(uri_hex):
         return meta
@@ -237,6 +249,7 @@ def test_listen_path_accept_closet_promotes_pending_to_active():
             "owner": "rUser",
             "taxon": config.CLOSET_TAXON,
             "uri_hex": "EF",
+            "issuer": config.SWAP_ISSUER_ADDRESS,
         }
 
     async def fetch_meta(uri_hex):
