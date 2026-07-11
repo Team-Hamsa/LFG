@@ -155,6 +155,44 @@ def test_inject_and_mask_clips_face_features_on_melt_body(tmp_path):
     assert types.index("Eyes") < types.index("Nose")
 
 
+def test_inject_and_mask_clips_nose_on_melt_body(tmp_path):
+    store, ape = _ape_store_with_assets(tmp_path)
+    # Opaque nose so the clip is observable.
+    Image.new("RGBA", (4, 4), (255, 0, 0, 255)).save(ape / "Nose.png")
+    layers = [("Body", "Ape Melting XRay", "/x/body.png")]
+    out = _run(
+        ape_face.inject_and_mask(layers, "ape", "Ape Melting XRay", store, str(tmp_path / "gen"))
+    )
+    nose_path = next(p for t, _v, p in out if t == "Nose")
+    assert nose_path.endswith(".masked.png")
+    res = Image.open(nose_path).convert("RGBA")
+    assert res.getpixel((0, 0))[3] == 255  # left kept
+    assert res.getpixel((3, 0))[3] == 0  # right cleared
+
+
+def test_inject_and_mask_nose_unmasked_on_solid_body(tmp_path):
+    store, _ = _ape_store_with_assets(tmp_path)
+    layers = [("Body", "Ape Gold", "/x/body.png")]
+    out = _run(ape_face.inject_and_mask(layers, "ape", "Ape Gold", store, str(tmp_path / "gen")))
+    nose_path = next(p for t, _v, p in out if t == "Nose")
+    assert not nose_path.endswith(".masked.png")
+
+
+def test_inject_and_mask_nose_below_full_face_eyes(tmp_path):
+    store, _ = _ape_store_with_assets(tmp_path)
+    for value in sorted(ape_face.NOSE_BELOW_EYES_VALUES):
+        layers = [
+            ("Body", "Ape Gold", "/x/body.png"),
+            ("Eyes", value, "/x/eyes.png"),
+            ("Head", "Cap", "/x/head.png"),
+        ]
+        out = _run(
+            ape_face.inject_and_mask(layers, "ape", "Ape Gold", store, str(tmp_path / "gen"))
+        )
+        types = [t for t, _v, _p in out]
+        assert types == ["Body", "Nose", "Eyes", "Head"], value
+
+
 def test_inject_and_mask_nose_fallback_when_no_eyes(tmp_path):
     store, _ = _ape_store_with_assets(tmp_path)
     layers = [("Eyebrows", "Flat", "/x/brow.png"), ("Head", "Cap", "/x/head.png")]

@@ -43,6 +43,11 @@ MASKED_TRAITS = {"Eyes", "Eyebrows", "Mouth"}
 # must not be clipped. Ships empty; grown one line at a time after art review.
 NO_MASK_VALUES: list[dict[str, str]] = []
 
+# Eyes values whose art covers the nose area (full-face masks/coatings): the
+# fixed nose renders BELOW these instead of above. Art-reviewed, grown as
+# needed.
+NOSE_BELOW_EYES_VALUES = {"Sticky Face", "Mask Skull Square", "Black C3m3nt"}
+
 
 def should_mask(trait_type: str, value: str, body_value: str) -> bool:
     """True if this face feature's right side should be clipped on a melt/xray
@@ -81,7 +86,9 @@ def apply_alpha_mask(layer_path: str, mask_path: str, out_dir: str) -> str:
 
 
 def _nose_index(layers: list[tuple[str, str, str]]) -> int:
-    """Index at which to insert the nose: directly after the Eyes layer, else
+    """Index at which to insert the nose: directly after the Eyes layer
+    (before it when the Eyes value is full-face art in NOSE_BELOW_EYES_VALUES),
+    else
     the canonical Eyes slot (before the first layer that sorts after Eyes).
 
     TOP_TRAITS Eyes (Wavy / Laser…) are skipped as anchors: compose z-sorts
@@ -92,7 +99,8 @@ def _nose_index(layers: list[tuple[str, str, str]]) -> int:
     it belongs."""
     for i, (trait_type, value, _p) in enumerate(layers):
         if trait_type == "Eyes" and {"trait_type": trait_type, "value": value} not in TOP_TRAITS:
-            return i + 1
+            # Full-face Eyes art covers the nose: render the nose below it.
+            return i if value in NOSE_BELOW_EYES_VALUES else i + 1
     eyes_rank = swap_meta.TRAIT_ORDER.index("Eyes")
     for i, (trait_type, value, _p) in enumerate(layers):
         # Stop before any TOP_TRAIT to keep nose below effect layers (e.g. Laser Eyes).
@@ -114,12 +122,15 @@ async def inject_and_mask(
     out_dir: str,
 ) -> list[tuple[str, str, str]]:
     """Apply ape compose rules to a canonical-ordered (trait_type, value, path)
-    list: clip masked face features (melt/xray apes) and inject the fixed nose
-    above Eyes (all apes). Non-ape bodies are returned unchanged."""
+    list: clip masked face features (melt/xray apes, including the injected
+    nose) and inject the fixed nose above Eyes on all apes — below Eyes when
+    the Eyes value is full-face art (NOSE_BELOW_EYES_VALUES). Non-ape bodies
+    are returned unchanged."""
     if body != "ape":
         return layers
 
     result = list(layers)
+    mask_path: str | None = None
     if body_value in MASKED_BODY_VALUES:
         mask_path = await store.resolve_asset(f"{body}/{MASK_ASSET}")
         if mask_path is None:
@@ -132,5 +143,8 @@ async def inject_and_mask(
     nose_path = await store.resolve_asset(f"{body}/{NOSE_ASSET}")
     if nose_path is None:
         raise FileNotFoundError(f"{body}/{NOSE_ASSET}")
+    if mask_path is not None:
+        # The injected nose is a face feature too: clip it on melt/xray bodies.
+        nose_path = apply_alpha_mask(nose_path, mask_path, out_dir)
     result.insert(_nose_index(result), ("Nose", "Nose", nose_path))
     return result
