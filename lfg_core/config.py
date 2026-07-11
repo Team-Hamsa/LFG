@@ -6,6 +6,8 @@ import os
 
 from dotenv import load_dotenv
 
+from lfg_core.db_path import app_db_path
+
 load_dotenv()
 
 
@@ -193,8 +195,10 @@ NFT_COLLECTION_LOGO = os.getenv(
     "NFT_COLLECTION_LOGO", "https://lfgo.b-cdn.net/LFGO_square_logo.png"
 )
 
+
+DB_PATH = app_db_path(XRPL_NETWORK)
+
 # Variable rarity engine
-DB_PATH = os.getenv("DB_PATH", "lfg_nfts.db")
 RARITY_FLOOR = float(os.getenv("RARITY_FLOOR", "0.005"))
 RARITY_BOOST_INITIAL = float(os.getenv("RARITY_BOOST_INITIAL", "7"))
 RARITY_BOOST_STEP_HOURS = int(os.getenv("RARITY_BOOST_STEP_HOURS", "24"))

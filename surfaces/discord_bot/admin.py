@@ -26,7 +26,6 @@ SEED = config.SEED
 # XRPL_NETWORK / XRPL_JSON_RPC_URL) — same source lfg_core/xrpl_ops uses, so
 # admin burns hit mainnet on a mainnet deploy. (Was hardcoded to testnet;
 # Greptile P1 on #79.)
-DATABASE = "lfg_nfts.db"
 ADMIN_LOG_CHANNEL_ID = config.ADMIN_LOG_CHANNEL_ID
 
 
@@ -87,7 +86,7 @@ class BurnNFTModal(Modal, title="Burn NFT"):
             nft_num = int(self.nft_number.value)
 
             # Get NFT details from database
-            conn = sqlite3.connect(DATABASE)
+            conn = sqlite3.connect(core_config.DB_PATH)
             cursor = conn.cursor()
 
             cursor.execute(
@@ -155,7 +154,7 @@ class BurnConfirmView(View):
             success = await burn_nft(self.nft_id)
 
             if success:
-                conn = sqlite3.connect(DATABASE)
+                conn = sqlite3.connect(core_config.DB_PATH)
                 cursor = conn.cursor()
 
                 # Get all data from LFG table before deleting
@@ -394,7 +393,7 @@ class AdminView(View):
         logging.info(f"Stats button pressed by {interaction.user}")
 
         try:
-            conn = sqlite3.connect("lfg_nfts.db")
+            conn = sqlite3.connect(core_config.DB_PATH)
             cursor = conn.cursor()
 
             # Get total NFTs minted
@@ -513,7 +512,7 @@ class NFTLookupModal(Modal, title="NFT Lookup"):
 
         try:
             nft_num = int(self.nft_number.value)
-            conn = sqlite3.connect("lfg_nfts.db")
+            conn = sqlite3.connect(core_config.DB_PATH)
             cursor = conn.cursor()
 
             # Check main NFT table
