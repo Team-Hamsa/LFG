@@ -68,32 +68,41 @@ def local_image(network: str, edition: int) -> tuple[str, str] | None:
 PENDING_SUBDIR = "pending"
 
 
-def pending_still_path(network: str, edition: int) -> str:
+def pending_still_path(network: str, edition: int, token: str) -> str:
     """Staging path for `edition`'s freshly composed still (always PNG: video
-    NFTs archive their extracted poster frame). Pure path math — the caller
-    (swap_compose._stash_or_remove) creates the directory when it stages."""
-    return os.path.join(archive_dir(network), PENDING_SUBDIR, f"{edition}.png")
+    NFTs archive their extracted poster frame). `token` (the session id) keys
+    the file per-session so concurrent operations on the same edition can
+    neither promote nor discard each other's staged art. Pure path math — the
+    caller (swap_compose._stash_or_remove) creates the directory when it
+    stages."""
+    return os.path.join(archive_dir(network), PENDING_SUBDIR, f"{edition}.{token}.png")
 
 
-def promote_still(network: str, edition: int) -> bool:
+def promote_still(network: str, edition: int, token: str) -> bool:
     """Move `edition`'s staged still into the serving archive and refresh its
     thumbnail. Best-effort — returns False (never raises) on any failure, so
     an archive hiccup can never fail a confirmed swap/mint; the app then
     degrades to the CDN/IPFS proxy fallback exactly as before."""
     try:
         base = archive_dir(network)
-        staged = os.path.join(base, PENDING_SUBDIR, f"{edition}.png")
+        staged = os.path.join(base, PENDING_SUBDIR, f"{edition}.{token}.png")
         if not os.path.exists(staged):
             return False
         dest = os.path.join(base, f"{edition}.png")
         os.replace(staged, dest)  # atomic on the same filesystem
         # Drop stale other-extension stills so the new PNG is unambiguous.
+        # Each removal is best-effort: once the new still is in place the
+        # thumb refresh below must always run, or a leftover thumb would
+        # keep serving the old art.
         for ext in CONTENT_TYPES:
             if ext == ".png":
                 continue
             old = os.path.join(base, f"{edition}{ext}")
-            if os.path.exists(old):
-                os.remove(old)
+            try:
+                if os.path.exists(old):
+                    os.remove(old)
+            except OSError:
+                logging.exception(f"image_archive: removing stale {old} failed")
         _refresh_thumb(base, edition, dest)
         return True
     except Exception:
@@ -101,10 +110,10 @@ def promote_still(network: str, edition: int) -> bool:
         return False
 
 
-def discard_still(network: str, edition: int) -> None:
+def discard_still(network: str, edition: int, token: str) -> None:
     """Drop `edition`'s staged still (swap failed/reverted). Never raises."""
     try:
-        staged = os.path.join(archive_dir(network), PENDING_SUBDIR, f"{edition}.png")
+        staged = os.path.join(archive_dir(network), PENDING_SUBDIR, f"{edition}.{token}.png")
         if os.path.exists(staged):
             os.remove(staged)
     except Exception:

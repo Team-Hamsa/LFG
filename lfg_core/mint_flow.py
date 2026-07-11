@@ -316,7 +316,9 @@ async def run_mint_session(session: MintSession) -> None:
             is_video,
             _upload_to_bunny,
             f"lfg_{session.nft_number}",
-            keep_still=image_archive.pending_still_path(config.XRPL_NETWORK, session.nft_number),
+            keep_still=image_archive.pending_still_path(
+                config.XRPL_NETWORK, session.nft_number, session.id
+            ),
         )
         session.image_url = image_cdn_url
 
@@ -347,7 +349,7 @@ async def run_mint_session(session: MintSession) -> None:
             platform=memos.platform_for_surface(session.platform),
         )
         if not nft_id:
-            image_archive.discard_still(config.XRPL_NETWORK, session.nft_number)
+            image_archive.discard_still(config.XRPL_NETWORK, session.nft_number, session.id)
             _release_unused_number(session)
             session.state = FAILED
             session.error = "Failed to mint NFT on XRPL. Please contact an administrator."
@@ -355,7 +357,7 @@ async def run_mint_session(session: MintSession) -> None:
         session.nft_id = nft_id
         # Mint confirmed — publish the new edition's art to the local archive
         # so /api/img serves it immediately (best-effort, #163).
-        image_archive.promote_still(config.XRPL_NETWORK, session.nft_number)
+        image_archive.promote_still(config.XRPL_NETWORK, session.nft_number, session.id)
 
         traits_dict = {t["trait_type"]: t["value"] for t in metadata["attributes"]}
         # The LFG table's headwear column is named Hat (layer tree uses Head)
@@ -437,7 +439,7 @@ async def run_mint_session(session: MintSession) -> None:
         logging.error(f"Mint session {session.id} failed: {traceback.format_exc()}")
         if session.nft_number is not None and not session.nft_id:
             # Only if the mint never landed — a promoted still stays put.
-            image_archive.discard_still(config.XRPL_NETWORK, session.nft_number)
+            image_archive.discard_still(config.XRPL_NETWORK, session.nft_number, session.id)
         _release_unused_number(session)
         session.state = FAILED
         session.error = str(e)

@@ -199,4 +199,9 @@ def _stash_or_remove(path: str, keep_still: str | None) -> None:
             return
         except OSError:
             logging.exception(f"Staging still {path} -> {keep_still} failed")
-    os.remove(path)
+    try:
+        os.remove(path)
+    except OSError:
+        # Local cleanup must never turn a successful CDN upload into a
+        # failed mint/swap.
+        logging.exception(f"Removing composed still {path} failed")

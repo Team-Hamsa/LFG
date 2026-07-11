@@ -33,10 +33,10 @@ def test_stage_then_promote_updates_still_and_thumb(tmp_path, monkeypatch):
     _write_png(str(tmp_path / "42.gif"))
     _write_png(str(tmp_path / "thumbs" / "42.webp"))
 
-    staged = image_archive.pending_still_path("mainnet", 42)
+    staged = image_archive.pending_still_path("mainnet", 42, "tok")
     _write_png(staged, color=(0, 255, 0))
 
-    assert image_archive.promote_still("mainnet", 42) is True
+    assert image_archive.promote_still("mainnet", 42, "tok") is True
     # New still in place, staged copy consumed, stale .gif dropped.
     assert os.path.exists(tmp_path / "42.png")
     assert not os.path.exists(staged)
@@ -49,18 +49,18 @@ def test_stage_then_promote_updates_still_and_thumb(tmp_path, monkeypatch):
 
 def test_promote_without_staged_still_is_noop(tmp_path, monkeypatch):
     monkeypatch.setenv("IMAGES_DIR", str(tmp_path))
-    assert image_archive.promote_still("mainnet", 7) is False
+    assert image_archive.promote_still("mainnet", 7, "tok") is False
     assert not os.path.exists(tmp_path / "7.png")
 
 
 def test_discard_removes_staged_still(tmp_path, monkeypatch):
     monkeypatch.setenv("IMAGES_DIR", str(tmp_path))
-    staged = image_archive.pending_still_path("mainnet", 9)
+    staged = image_archive.pending_still_path("mainnet", 9, "tok")
     _write_png(staged)
-    image_archive.discard_still("mainnet", 9)
+    image_archive.discard_still("mainnet", 9, "tok")
     assert not os.path.exists(staged)
     # Never raises when nothing is staged.
-    image_archive.discard_still("mainnet", 9)
+    image_archive.discard_still("mainnet", 9, "tok")
 
 
 def test_promote_bad_image_removes_stale_thumb(tmp_path, monkeypatch):
@@ -68,11 +68,11 @@ def test_promote_bad_image_removes_stale_thumb(tmp_path, monkeypatch):
     # falls back to the fresh full still instead of serving old art.
     monkeypatch.setenv("IMAGES_DIR", str(tmp_path))
     _write_png(str(tmp_path / "thumbs" / "5.webp"))
-    staged = image_archive.pending_still_path("mainnet", 5)
+    staged = image_archive.pending_still_path("mainnet", 5, "tok")
     os.makedirs(os.path.dirname(staged), exist_ok=True)
     with open(staged, "wb") as f:
         f.write(b"not a png")
-    assert image_archive.promote_still("mainnet", 5) is True
+    assert image_archive.promote_still("mainnet", 5, "tok") is True
     assert os.path.exists(tmp_path / "5.png")
     assert not os.path.exists(tmp_path / "thumbs" / "5.webp")
 
@@ -106,3 +106,19 @@ def test_upload_output_without_keep_still_deletes(tmp_path):
         swap_compose.upload_output(str(src), False, upload, "x/y")
     )
     assert not src.exists()
+
+
+def test_pending_paths_are_per_session():
+    # Two concurrent sessions on the same edition must not share a staging
+    # file: neither can promote or discard the other's staged art.
+    a = image_archive.pending_still_path("mainnet", 42, "sessA")
+    b = image_archive.pending_still_path("mainnet", 42, "sessB")
+    assert a != b
+
+
+def test_promote_ignores_other_sessions_staged_still(tmp_path, monkeypatch):
+    monkeypatch.setenv("IMAGES_DIR", str(tmp_path))
+    _write_png(image_archive.pending_still_path("mainnet", 42, "other"))
+    assert image_archive.promote_still("mainnet", 42, "mine") is False
+    image_archive.discard_still("mainnet", 42, "mine")
+    assert os.path.exists(image_archive.pending_still_path("mainnet", 42, "other"))

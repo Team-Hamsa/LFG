@@ -163,7 +163,7 @@ def _swap_metadata(
 
 
 async def _build_and_upload(
-    nft: dict[str, Any], attributes: list[dict[str, Any]], store: Any
+    nft: dict[str, Any], attributes: list[dict[str, Any]], store: Any, token: str
 ) -> tuple[str, str | None, int]:
     """Compose the re-crafted NFT and upload image/video; returns
     (image_url, video_url, new_burn_count)."""
@@ -177,23 +177,23 @@ async def _build_and_upload(
         is_video,
         _upload_swap_file,
         f"{num}/{num}_{new_burn}",
-        keep_still=image_archive.pending_still_path(config.XRPL_NETWORK, num),
+        keep_still=image_archive.pending_still_path(config.XRPL_NETWORK, num, token),
     )
     return image_url, video_url, new_burn
 
 
-def _archive_stills(items: list[dict[str, Any]]) -> None:
+def _archive_stills(items: list[dict[str, Any]], token: str) -> None:
     """Promote each finalized item's staged still into the local image
     archive (#163) so /api/img serves the post-swap art immediately.
     Best-effort; runs after the on-chain outcome for the item is final."""
     for item in items:
-        image_archive.promote_still(config.XRPL_NETWORK, item["nft"]["number"])
+        image_archive.promote_still(config.XRPL_NETWORK, item["nft"]["number"], token)
 
 
-def _discard_stills(items: list[dict[str, Any]]) -> None:
+def _discard_stills(items: list[dict[str, Any]], token: str) -> None:
     """Drop staged stills for items whose swap did not finalize."""
     for item in items:
-        image_archive.discard_still(config.XRPL_NETWORK, item["nft"]["number"])
+        image_archive.discard_still(config.XRPL_NETWORK, item["nft"]["number"], token)
 
 
 def _write_swap_record(session: SwapSession, items: list[dict[str, Any]], status: str) -> None:
@@ -447,7 +447,7 @@ async def run_swap_session(session: SwapSession) -> None:
         session.state = COMPOSING
         for item in items:
             nft, attrs = item["nft"], item["attrs"]
-            image_url, video_url, new_burn = await _build_and_upload(nft, attrs, store)
+            image_url, video_url, new_burn = await _build_and_upload(nft, attrs, store, session.id)
             session.state = UPLOADING
             meta = _swap_metadata(nft, attrs, image_url, video_url)
             meta_url = await _upload_swap_file(
@@ -463,7 +463,7 @@ async def run_swap_session(session: SwapSession) -> None:
         #    a user has paid for a failed swap is as small as possible.
         if modify_items:
             if not await _collect_modify_fee(session, len(modify_items)):
-                _discard_stills(items)
+                _discard_stills(items, session.id)
                 session.state = PAYMENT_TIMEOUT
                 session.error = "No swap fee payment was received in time. Your NFTs are untouched."
                 return
@@ -483,7 +483,7 @@ async def run_swap_session(session: SwapSession) -> None:
                 )
                 if not nft_id:
                     await _burn_replacements(burn_items)
-                    _discard_stills(items)
+                    _discard_stills(items, session.id)
                     _write_swap_record(session, items, "failed_minting")
                     session.error = (
                         f"Reminting {item['nft']['name']} failed. "
@@ -511,7 +511,7 @@ async def run_swap_session(session: SwapSession) -> None:
                 if not modify_hash:
                     await _revert_modifies(modify_items, session.wallet_address)
                     await _burn_replacements(burn_items)
-                    _discard_stills(items)
+                    _discard_stills(items, session.id)
                     _write_swap_record(session, items, "failed_modifying")
                     session.error = (
                         f"Updating {item['nft']['name']} on-chain "
@@ -542,7 +542,7 @@ async def run_swap_session(session: SwapSession) -> None:
                     # originals exactly as they were.
                     await _revert_modifies(modify_items, session.wallet_address)
                     await _burn_replacements(burn_items)
-                    _discard_stills(items)
+                    _discard_stills(items, session.id)
                     _write_swap_record(session, items, "failed_burning")
                     session.error = (
                         f"Failed to burn {item['nft']['name']} "
@@ -559,8 +559,8 @@ async def run_swap_session(session: SwapSession) -> None:
                 await _burn_replacements([item])
                 # `other` is final (original burned, replacement live) even if
                 # its offer fails below; `item` reverted.
-                _archive_stills([other])
-                _discard_stills([item])
+                _archive_stills([other], session.id)
+                _discard_stills([item], session.id)
                 _write_swap_record(session, items, "partial_burn_failure")
                 if not await _create_offer_and_accept(session, other):
                     _write_swap_record(session, items, "partial_burn_failure_no_offer")
@@ -580,7 +580,7 @@ async def run_swap_session(session: SwapSession) -> None:
 
         # Everything is final on-chain now (a failed offer below doesn't
         # change which token/art is live) — publish the new stills locally.
-        _archive_stills(items)
+        _archive_stills(items, session.id)
 
         # The modifies are final now that the burns are through.
         for item in modify_items:
@@ -612,6 +612,6 @@ async def run_swap_session(session: SwapSession) -> None:
         logging.error(f"Swap session {session.id} failed: {traceback.format_exc()}")
         # Already-promoted stills are untouched (discard only sees pending/).
         for nft in (session.nft1, session.nft2):
-            image_archive.discard_still(config.XRPL_NETWORK, nft["number"])
+            image_archive.discard_still(config.XRPL_NETWORK, nft["number"], session.id)
         session.state = FAILED
         session.error = str(e)
