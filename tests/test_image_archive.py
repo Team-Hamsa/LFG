@@ -137,6 +137,29 @@ def test_edition_for_url_matches_raw_request_against_dweb_row():
     assert image_archive.edition_for_url(conn, _IPFS_URL) == 5
 
 
+def test_url_forms_pathless_cid_covers_slash_variants():
+    """Six live editions (e.g. #59, #258) carry PATH-LESS ipfs://<cid> image
+    URIs — the CID is the file. resolve_ipfs renders those with a trailing
+    slash (https://<cid>.ipfs.dweb.link/), so the raw and resolved shapes
+    disagree about the slash and an exact-shape lookup misses. All slash
+    variants must be equivalent."""
+    raw = "ipfs://bafkpathless"
+    for form in (raw, raw + "/", "https://bafkpathless.ipfs.dweb.link/"):
+        got = image_archive.url_forms(form)
+        assert raw in got, form
+        assert raw + "/" in got, form
+        assert "https://bafkpathless.ipfs.dweb.link/" in got, form
+
+
+def test_edition_for_url_pathless_cid_dweb_request_matches_raw_row():
+    """The exact prod failure: index stores `ipfs://<cid>` (no path), the
+    swapper serves the resolved `https://<cid>.ipfs.dweb.link/` — must match."""
+    conn = _index_conn()
+    _insert(conn, nft_id="A" * 64, nft_number=59, image="ipfs://bafkpathless")
+    assert image_archive.edition_for_url(conn, "https://bafkpathless.ipfs.dweb.link/") == 59
+    assert image_archive.edition_for_url(conn, "ipfs://bafkpathless/") == 59
+
+
 def test_edition_for_url_gateway_shapes_still_ignore_burned():
     conn = _index_conn()
     _insert(conn, nft_id="B" * 64, nft_number=5, image=_IPFS_URL, is_burned=1)
