@@ -9,7 +9,7 @@ from datetime import datetime
 from typing import Any
 
 from lfg_core import rarity, trait_config
-from lfg_core.swap_meta import TRAIT_ORDER
+from lfg_core.swap_meta import TRAIT_ORDER, get_attr
 
 
 async def select_random_attributes(
@@ -72,3 +72,68 @@ async def select_random_attributes(
     finally:
         if own_conn:
             conn.close()
+
+
+# Face slots auto-rolled for legacy apes the first time they pass through the
+# Trait Swapper (#168). Ape-only: other bodies have no face art. Order follows
+# TRAIT_ORDER so earlier rolls constrain later ones via cfg.conflicts.
+FACE_TRAITS = [t for t in TRAIT_ORDER if t in ("Mouth", "Eyebrows", "Eyes")]
+
+
+async def fill_missing_face_traits(
+    store: Any,
+    body: str | None,
+    attributes: list[dict[str, Any]],
+    *,
+    conn: sqlite3.Connection | None = None,
+    network: str | None = None,
+    now: datetime | None = None,
+    rng: Any = random,
+) -> bool:
+    """Roll a rarity-weighted value into every empty ('None'/''/missing) face
+    slot of an ape's attribute list, in place. Same candidate filtering and
+    weighted_pick as select_random_attributes, so armed boosts/floors apply
+    identically to mint. Returns True if anything was rolled. No-op for
+    non-ape bodies. Raises ValueError if rules eliminate every candidate for
+    a slot that has values (over-constrained config — fail loud, like mint)."""
+    if body != "ape":
+        return False
+    empty = [t for t in FACE_TRAITS if (get_attr(attributes, t) or "None") in ("", "None")]
+    if not empty:
+        return False
+    own_conn = conn is None
+    if own_conn:
+        conn = rarity.connect()
+    assert conn is not None
+    rolled = False
+    try:
+        cfg = trait_config.get_config()
+        for trait_type in empty:
+            raw_values = await store.list_values(body, trait_type)
+            candidates = [
+                v
+                for v in raw_values
+                if v != "None"
+                and cfg.value_allowed(body, trait_type, v)
+                and not cfg.conflicts(attributes, trait_type, v)
+            ]
+            if not candidates:
+                if [v for v in raw_values if v != "None"]:
+                    raise ValueError(
+                        f"trait rules leave no legal {trait_type} value for body '{body}'"
+                    )
+                continue  # layer genuinely absent on this body: leave None
+            value = rarity.weighted_pick(
+                conn, body, trait_type, candidates, network=network, now=now, rng=rng
+            )
+            for a in attributes:
+                if a["trait_type"] == trait_type:
+                    a["value"] = value
+                    break
+            else:
+                attributes.append({"trait_type": trait_type, "value": value})
+            rolled = True
+    finally:
+        if own_conn:
+            conn.close()
+    return rolled
