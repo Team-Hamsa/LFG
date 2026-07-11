@@ -167,7 +167,17 @@ def weighted_pick(
     if not rows:
         raise ValueError(f"All traits disabled for {body}/{category} on {network}")
 
-    total = sum(r[1] for r in rows)
+    # Denominator = the whole live population for this (body, category), not
+    # just the candidates. Values outside `available` (legacy 'None'
+    # placeholders, disabled or retired traits) still hold live NFTs; summing
+    # only candidate rows collapses the denominator when a category is
+    # cold-starting (ape Star-eyes bug: one counted mint → share 1/1 = 1.0,
+    # which then snowballs on every subsequent roll).
+    (total,) = conn.execute(
+        """SELECT COALESCE(SUM(live_count), 0) FROM trait_rarity
+           WHERE network=? AND body=? AND category=?""",
+        (network, body, category),
+    ).fetchone()
     traits = [r[0] for r in rows]
     weights = [effective_weight(r[1], total, r[2], r[3], r[4], r[5], now) for r in rows]
     return rng.choices(traits, weights=weights, k=1)[0]  # type: ignore[no-any-return]
