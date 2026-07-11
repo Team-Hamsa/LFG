@@ -17,6 +17,7 @@ z_overrides:
   - {trait_type: Mouth, value: Rainbow Puke, z: 95}
   - {trait_type: Eyes,  value: Laser Eyes,   z: 95}
   - {trait_type: Eyes,  value: Laser,        z: 95}
+  - {trait_type: Accessory, value: Retardio, z: 45}  # milady: renders below Mouth (z 50)
 swap_matrix:
   universal_layers: [Accessory, Back]
   pairs:
