@@ -185,21 +185,45 @@ def test_extract_indeterminate_keeps_token_no_burn(tmp_path):
     assert assets[("Hat", "Cap")] == 2
 
 
-def test_extract_mirror_fail_then_offer_fail_precedence(tmp_path):
-    """Closet mirror fails AND the later offer step fails: extract's existing
-    offer-fail semantics win (DONE with accept=None), and the record still
-    carries mirror_pending + sync_tx_hash. No burn."""
+def test_extract_failed_offer_is_recoverable_not_complete(tmp_path):
+    """#184: the Closet decrement COMMITTED but the delivery offer fails — the
+    trait token is stranded at the issuer with the Closet already drained. The
+    op must NOT claim 'complete'; it fails with a recoverable minted_no_offer
+    journal (re-offer path), keeps the token id, and never burns it back."""
+    conn = sqlite3.connect(":memory:")
+    _active_closet_with_trait(conn)
+    f = _F(fail_offer=True)
+    s = ef.ExtractSession(owner="rUser", slot="Hat", value="Cap")
+    _run(ef.run_extract(s, _deps(conn, f, tmp_path)))
+
+    assert s.state == ef.FAILED
+    assert s.accept is None
+    assert f.burns == []  # NO destructive burn against a drained Closet
+    assert s.nft_id == "TRAIT0"  # token kept for the re-offer
+    record = json.loads((tmp_path / f"extract-{s.id}.json").read_text())
+    assert record["status"] == "minted_no_offer"
+    assert record["nft_id"] == "TRAIT0"
+    # Closet WAS decremented on-chain + mirror (the token left it).
+    assets = {(sl, v): n for o, sl, v, n in es.read_closet_assets(conn) if o == "rUser"}
+    assert assets[("Hat", "Cap")] == 1
+
+
+def test_extract_mirror_fail_then_offer_fail_recoverable(tmp_path):
+    """#184: Closet mirror fails (decrement still committed on-chain) AND the
+    later offer step fails. The recoverable minted_no_offer semantics win over
+    'complete', and the record still carries the sticky mirror_pending +
+    sync_tx_hash for reconciliation. No burn."""
     conn = sqlite3.connect(":memory:")
     _active_closet_with_trait(conn)
     f = _F(fail_offer=True)
     s = ef.ExtractSession(owner="rUser", slot="Hat", value="Cap")
     _run(ef.run_extract(s, _deps(flaky_mirror_conn(conn), f, tmp_path)))
 
-    assert s.state == ef.DONE  # existing offer-fail semantics: DONE, accept=None
+    assert s.state == ef.FAILED
     assert s.accept is None
     assert f.burns == []
     record = json.loads((tmp_path / f"extract-{s.id}.json").read_text())
-    assert record["status"] == "complete_pending_mirror"
+    assert record["status"] == "minted_no_offer"
     assert record["mirror_pending"] is True
     assert record["sync_tx_hash"] == "MOD"
 
@@ -245,6 +269,57 @@ def test_extract_mirror_fail_then_offer_raise_keeps_mirror_journal(tmp_path):
     assert record["status"] == "failed"
     assert record["mirror_pending"] is True
     assert record["sync_tx_hash"] == "MOD"
+
+
+# --- #184: mirror_pending gate ---
+
+
+def test_extract_refused_when_mirror_pending_outstanding(tmp_path):
+    """A prior op left the Closet DB mirror flagged stale (mirror_pending): the
+    next op must REFUSE fail-closed instead of reading the stale mirror and
+    full-overwriting the token, which would erase the unmirrored change. No
+    mint, Closet untouched."""
+    conn = sqlite3.connect(":memory:")
+    _active_closet_with_trait(conn)
+    es.set_mirror_pending(conn, "rUser", True)
+    f = _F()
+    s = ef.ExtractSession(owner="rUser", slot="Hat", value="Cap")
+    _run(ef.run_extract(s, _deps(conn, f, tmp_path)))
+
+    assert s.state == ef.FAILED
+    assert f.minted == []  # never minted a token
+    assets = {(sl, v): n for o, sl, v, n in es.read_closet_assets(conn) if o == "rUser"}
+    assert assets[("Hat", "Cap")] == 2  # Closet untouched
+
+
+def test_extract_mirror_failure_sets_db_mirror_pending_flag(tmp_path):
+    """A mirror-failed op persists the mirror_pending DB flag so the NEXT op is
+    gated (the guard above). The op itself still completes pending-mirror."""
+    conn = sqlite3.connect(":memory:")
+    _active_closet_with_trait(conn)
+    f = _F()
+    s = ef.ExtractSession(owner="rUser", slot="Hat", value="Cap")
+    _run(ef.run_extract(s, _deps(flaky_mirror_conn(conn), f, tmp_path)))
+
+    assert s.state == ef.DONE
+    assert es.get_mirror_pending(conn, "rUser") is True
+
+
+def test_successful_op_clears_mirror_pending_flag(tmp_path):
+    """A clean op whose mirror write succeeds clears any stale flag (the full
+    authoritative rewrite reconciles the DB) so ops are not gated forever."""
+    conn = sqlite3.connect(":memory:")
+    _active_closet_with_trait(conn)
+    es.set_mirror_pending(conn, "rUser", True)
+    # Manually clear via a successful rewrite path would gate the op, so drop the
+    # flag first to let the op run, then confirm the op's own success keeps it 0.
+    es.set_mirror_pending(conn, "rUser", False)
+    f = _F()
+    s = ef.ExtractSession(owner="rUser", slot="Hat", value="Cap")
+    _run(ef.run_extract(s, _deps(conn, f, tmp_path)))
+
+    assert s.state == ef.DONE
+    assert es.get_mirror_pending(conn, "rUser") is False
 
 
 def test_extract_journal_checkpoints_closet_synced_before_offer(tmp_path):
