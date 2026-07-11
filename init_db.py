@@ -1,7 +1,9 @@
 import logging
 import sqlite3
 
-from lfg_core import config
+# Deliberately NOT lfg_core.config: this standalone initializer must run with
+# only DB_PATH / XRPL_NETWORK set, without the bot's runtime secrets.
+from lfg_core.db_path import app_db_path
 
 logging.basicConfig(level=logging.INFO)
 
@@ -9,7 +11,7 @@ logging.basicConfig(level=logging.INFO)
 def init_db():
     try:
         # Connect to SQLite database (creates it if it doesn't exist)
-        conn = sqlite3.connect(config.DB_PATH)
+        conn = sqlite3.connect(app_db_path())
         cursor = conn.cursor()
 
         # Create the LFG table with capitalized column names

@@ -6,6 +6,8 @@ import os
 
 from dotenv import load_dotenv
 
+from lfg_core.db_path import app_db_path
+
 load_dotenv()
 
 
@@ -192,20 +194,6 @@ EXTERNAL_WEBSITE_URL = os.getenv("EXTERNAL_WEBSITE_URL", "https://letseffinggo.c
 NFT_COLLECTION_LOGO = os.getenv(
     "NFT_COLLECTION_LOGO", "https://lfgo.b-cdn.net/LFGO_square_logo.png"
 )
-
-
-def app_db_path(network: str) -> str:
-    """Per-network app DB file (LFG/Users/burned_nfts); DB_PATH overrides.
-
-    Mainnet keeps the legacy bare filename (the long-lived production data);
-    any other network gets its own suffixed file, matching the
-    onchain_<net>.db / history_<net>.db convention. A shared file once let
-    testnet mints push the mainnet edition counter from 3536 to 3572.
-    """
-    override = os.getenv("DB_PATH")
-    if override:
-        return override
-    return "lfg_nfts.db" if network == "mainnet" else f"lfg_nfts_{network}.db"
 
 
 DB_PATH = app_db_path(XRPL_NETWORK)
