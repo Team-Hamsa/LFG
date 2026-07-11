@@ -17,6 +17,7 @@ import mimetypes
 import os
 import sqlite3
 import sys
+import threading
 import time
 import traceback
 from collections.abc import Awaitable, Callable
@@ -691,6 +692,15 @@ def _use_market_mock() -> bool:
 
 _MarketKey = tuple[str, str]  # (network, kind)
 _MARKET_CACHE: dict[_MarketKey, tuple[float, list[dict[str, Any]]]] = {}
+# Guards all _MARKET_CACHE access: reads/puts happen on the event-loop thread
+# while _invalidate_market_cache pops from executor threads — an unlocked pop
+# during _market_cache_put's iteration could raise RuntimeError.
+_MARKET_CACHE_LOCK = threading.Lock()
+# Per-key invalidation generation: a cache fill captures the key's generation
+# before computing and only inserts if it is unchanged after — an in-flight
+# fill that started before an invalidation must not repopulate the key with
+# pre-invalidation rows.
+_MARKET_CACHE_GEN: dict[_MarketKey, int] = {}
 _MARKET_CACHE_TTL = 60.0
 # Cardinality is bounded by construction (network x kind only — filters never
 # key the cache, see the module docstring on Task 7's spec excerpt), so this
@@ -706,16 +716,23 @@ _MARKET_DEFAULT_LIMIT = 24
 _MARKET_MAX_OFFSET = 100_000
 
 
-def _market_cache_put(key: _MarketKey, value: list[dict[str, Any]], now_mono: float) -> None:
+def _market_cache_put(
+    key: _MarketKey, value: list[dict[str, Any]], now_mono: float, gen: int
+) -> None:
     """Insert into the browse cache, dropping expired entries and — if still
     over _MARKET_CACHE_MAX — evicting the oldest by timestamp. Mirrors
-    _lb_cache_put's shape (leaderboard cache) for the same reasons."""
-    for k in [k for k, (ts, _) in _MARKET_CACHE.items() if now_mono - ts >= _MARKET_CACHE_TTL]:
-        del _MARKET_CACHE[k]
-    _MARKET_CACHE[key] = (now_mono, value)
-    while len(_MARKET_CACHE) > _MARKET_CACHE_MAX:
-        oldest = min(_MARKET_CACHE, key=lambda k: _MARKET_CACHE[k][0])
-        del _MARKET_CACHE[oldest]
+    _lb_cache_put's shape (leaderboard cache) for the same reasons. `gen` is
+    the key's _MARKET_CACHE_GEN captured before the rows were computed; the
+    insert is skipped if an invalidation bumped it since."""
+    with _MARKET_CACHE_LOCK:
+        if _MARKET_CACHE_GEN.get(key, 0) != gen:
+            return
+        for k in [k for k, (ts, _) in _MARKET_CACHE.items() if now_mono - ts >= _MARKET_CACHE_TTL]:
+            del _MARKET_CACHE[k]
+        _MARKET_CACHE[key] = (now_mono, value)
+        while len(_MARKET_CACHE) > _MARKET_CACHE_MAX:
+            oldest = min(_MARKET_CACHE, key=lambda k: _MARKET_CACHE[k][0])
+            del _MARKET_CACHE[oldest]
 
 
 def _attach_character_images(conn: sqlite3.Connection, rows: list[dict[str, Any]]) -> None:
@@ -901,14 +918,16 @@ async def handle_market_listings(request: web.Request) -> web.Response:
     network = _market_network(kind)
     cache_key: _MarketKey = (network, kind)
     now_mono = time.monotonic()
-    cached = _MARKET_CACHE.get(cache_key)
+    with _MARKET_CACHE_LOCK:
+        cached = _MARKET_CACHE.get(cache_key)
+        gen = _MARKET_CACHE_GEN.get(cache_key, 0)
     if cached is not None and now_mono - cached[0] < _MARKET_CACHE_TTL:
         rows = cached[1]
     else:
         rows = await asyncio.get_event_loop().run_in_executor(
             None, _compute_market_rows, network, kind
         )
-        _market_cache_put(cache_key, rows, now_mono)
+        _market_cache_put(cache_key, rows, now_mono, gen)
 
     filtered = rows
     if min_drops is not None:
@@ -1206,6 +1225,17 @@ def _closet_active(network: str, wallet: str) -> bool:
         conn.close()
 
 
+def _invalidate_market_cache(network: str, kind: str | None = None) -> None:
+    """Drop the browse cache for a (network, kind) whose listing set just
+    changed, so the caller's own List/Cancel/Buy is visible immediately
+    instead of after _MARKET_CACHE_TTL. kind=None drops both kinds (the
+    close path doesn't know the listing's kind)."""
+    with _MARKET_CACHE_LOCK:
+        for k in ("character", "trait") if kind is None else (kind,):
+            _MARKET_CACHE.pop((network, k), None)
+            _MARKET_CACHE_GEN[(network, k)] = _MARKET_CACHE_GEN.get((network, k), 0) + 1
+
+
 def _write_listing_row(network: str, row: dict[str, Any]) -> None:
     # Creation-only write (record_listing_creation, NOT upsert_listing): the
     # finalize poll carries stale creation-time data and can land after the
@@ -1218,6 +1248,7 @@ def _write_listing_row(network: str, row: dict[str, Any]) -> None:
         market_store.record_listing_creation(conn, market_store.MarketListing(**row))
     finally:
         conn.close()
+    _invalidate_market_cache(network, row.get("kind"))
 
 
 def _close_listing_sync(
@@ -1229,6 +1260,7 @@ def _close_listing_sync(
         market_store.close_listing(conn, offer_index, reason, buyer=buyer)
     finally:
         conn.close()
+    _invalidate_market_cache(network)
 
 
 @require_market
