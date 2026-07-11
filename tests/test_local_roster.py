@@ -121,16 +121,40 @@ def test_wallet_nfts_excludes_burned_and_foreign_tokens(tmp_path, monkeypatch):
     assert [n["nft_id"] for n in nfts] == ["A" * 64]
 
 
-def test_wallet_nfts_empty_wallet_trusts_populated_index(tmp_path, monkeypatch):
-    """A populated index that simply has no rows for this wallet is the
-    answer (the wallet holds nothing) — not a reason to hit the ledger."""
+def test_wallet_nfts_empty_index_result_falls_back_to_ledger(tmp_path, monkeypatch):
+    """An index with rows for other wallets but none for this one may just be
+    partially backfilled — it must not silently hide holdings (Greptile P1
+    on #162): an empty local result always re-checks the live ledger."""
+    conn = _seed_index(
+        tmp_path,
+        monkeypatch,
+        [{"nft_id": "C" * 64, "nft_number": 14, "owner": "rOther", "uri_hex": _URI_HEX}],
+    )
+    nft_index.meta_cache_put_many(conn, {_URI_HEX: _META})
+    conn.close()
+    called = []
+
+    async def fake_account_nfts(wallet, issuer):
+        called.append(wallet)
+        return [{"nft_id": "A" * 64, "uri_hex": _URI_HEX, "flags": 25}]
+
+    monkeypatch.setattr(server.xrpl_ops, "get_account_nfts", fake_account_nfts)
+    nfts = _run(server._wallet_nfts("rWallet"))
+    assert called == ["rWallet"]
+    assert [n["number"] for n in nfts] == [12]
+
+
+def test_wallet_nfts_empty_wallet_survives_dead_ledger(tmp_path, monkeypatch):
+    """When the index legitimately says "this wallet holds nothing" and the
+    fallback ledger check itself fails, the empty local answer stands — an
+    empty roster beats a 502 while the public node is down."""
     conn = _seed_index(
         tmp_path,
         monkeypatch,
         [{"nft_id": "C" * 64, "nft_number": 14, "owner": "rOther", "uri_hex": _URI_HEX}],
     )
     conn.close()
-    _no_network(monkeypatch)
+    _no_network(monkeypatch)  # the ledger call raising IS the scenario
     assert _run(server._wallet_nfts("rWallet")) == []
 
 

@@ -1958,31 +1958,31 @@ async def handle_mint_start(request):
     return web.json_response(session.to_dict())
 
 
-def _index_wallet_tokens(conn: sqlite3.Connection, wallet: str) -> list[dict[str, Any]] | None:
+def _index_wallet_tokens(conn: sqlite3.Connection, wallet: str) -> list[dict[str, Any]]:
     """The wallet's live tokens from the on-chain index, in the account_nfts
-    shape load_wallet_nfts expects — or None when the index holds no rows at
-    all (never backfilled on this deployment; the caller falls back to the
-    live ledger). An empty result from a POPULATED index is trusted as "the
-    wallet holds nothing": the listener keeps ownership current."""
-    recs = nft_index.owner_live_nfts(conn, wallet)
-    if not recs:
-        total = conn.execute("SELECT COUNT(*) FROM onchain_nfts").fetchone()[0]
-        if total == 0:
-            return None
-    return [nft_index.to_token(r) for r in recs]
+    shape load_wallet_nfts expects."""
+    return [nft_index.to_token(r) for r in nft_index.owner_live_nfts(conn, wallet)]
 
 
 async def _wallet_nfts(wallet: str) -> list[dict[str, Any]]:
     """The swapper roster, from LOCAL data: token list from the listener-fresh
-    on-chain index, metadata from the uri_hex cache (#153). The live
-    account_nfts ledger call is only the fallback for an unbuilt index, and
-    the IPFS gateways are only touched for true cache misses (then cached
-    forever — the URI is content-addressed). The remote path used to be the
-    default, and a flaky gateway both blanked swapper tiles and silently
-    dropped uncached NFTs from the roster."""
+    on-chain index, metadata from the uri_hex cache (#153). The IPFS gateways
+    are only touched for true cache misses (then cached forever — the URI is
+    content-addressed). The remote path used to be the default, and a flaky
+    gateway both blanked swapper tiles and silently dropped uncached NFTs
+    from the roster.
+
+    The live account_nfts ledger call survives as the fallback whenever the
+    index yields NOTHING for this wallet — an unbuilt or partially backfilled
+    index must not silently hide holdings (Greptile P1 on #162). Any wallet
+    with index rows is served locally; the fallback therefore only costs a
+    ledger round-trip for genuinely-empty wallets, and if that fallback
+    itself fails the empty local answer stands (an empty roster beats a 502
+    when the public node is down)."""
     conn = None
     cache = None
-    tokens: list[dict[str, Any]] | None = None
+    tokens: list[dict[str, Any]] = []
+    index_ok = False
     try:
         conn = nft_index.init_db(nft_index.index_db_path(config.XRPL_NETWORK))
         cache = nft_index.UriMetadataCache(conn)
@@ -1991,17 +1991,26 @@ async def _wallet_nfts(wallet: str) -> list[dict[str, Any]]:
     if conn is not None:
         try:
             tokens = _index_wallet_tokens(conn, wallet)
+            index_ok = True
         except Exception as e:
             logging.warning(f"on-chain index roster failed, falling back to ledger: {e!r}")
     try:
-        if tokens is not None:
+        if tokens:
             local_tokens = tokens
 
             async def from_index(_wallet: str, _issuer: str) -> list[dict[str, Any]]:
                 return local_tokens
 
             return await swap_meta.load_wallet_nfts(wallet, from_index, meta_cache=cache)
-        return await swap_meta.load_wallet_nfts(wallet, xrpl_ops.get_account_nfts, meta_cache=cache)
+        try:
+            return await swap_meta.load_wallet_nfts(
+                wallet, xrpl_ops.get_account_nfts, meta_cache=cache
+            )
+        except Exception:
+            if index_ok:
+                logging.warning(f"ledger fallback failed for {wallet}; trusting empty index result")
+                return []
+            raise
     finally:
         if conn is not None:
             conn.close()
