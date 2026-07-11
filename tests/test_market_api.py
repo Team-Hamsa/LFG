@@ -400,6 +400,37 @@ def test_close_listing_invalidates_browse_cache(onchain_env):
     assert ("testnet", "trait") not in server._MARKET_CACHE
 
 
+def test_inflight_fill_cannot_repopulate_after_invalidation(onchain_env, monkeypatch):
+    # A fill that computed its rows BEFORE an invalidation must not insert
+    # them afterward — that would re-cache pre-listing data for a full TTL.
+    import threading as _threading
+
+    compute_started = _threading.Event()
+    invalidated = _threading.Event()
+    real_compute = server._compute_market_rows
+
+    def _blocking_compute(network, kind):
+        rows = real_compute(network, kind)
+        compute_started.set()
+        assert invalidated.wait(timeout=10)
+        return rows
+
+    monkeypatch.setattr(server, "_compute_market_rows", _blocking_compute)
+
+    async def _scenario():
+        req = _mocked_request("GET", "/api/market/listings")
+        task = asyncio.ensure_future(server.handle_market_listings(req))
+        loop = asyncio.get_event_loop()
+        await loop.run_in_executor(None, compute_started.wait)
+        server._invalidate_market_cache("testnet", "character")
+        invalidated.set()
+        resp = await task
+        assert resp.status == 200
+
+    _run(_scenario())
+    assert ("testnet", "character") not in server._MARKET_CACHE
+
+
 def test_browse_cache_expires_after_ttl(onchain_env, monkeypatch):
     conn = _reopen(onchain_env)
     _seed_character(conn, CHAR1, SELLER, 1)

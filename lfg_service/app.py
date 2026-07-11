@@ -696,6 +696,11 @@ _MARKET_CACHE: dict[_MarketKey, tuple[float, list[dict[str, Any]]]] = {}
 # while _invalidate_market_cache pops from executor threads — an unlocked pop
 # during _market_cache_put's iteration could raise RuntimeError.
 _MARKET_CACHE_LOCK = threading.Lock()
+# Per-key invalidation generation: a cache fill captures the key's generation
+# before computing and only inserts if it is unchanged after — an in-flight
+# fill that started before an invalidation must not repopulate the key with
+# pre-invalidation rows.
+_MARKET_CACHE_GEN: dict[_MarketKey, int] = {}
 _MARKET_CACHE_TTL = 60.0
 # Cardinality is bounded by construction (network x kind only — filters never
 # key the cache, see the module docstring on Task 7's spec excerpt), so this
@@ -711,11 +716,17 @@ _MARKET_DEFAULT_LIMIT = 24
 _MARKET_MAX_OFFSET = 100_000
 
 
-def _market_cache_put(key: _MarketKey, value: list[dict[str, Any]], now_mono: float) -> None:
+def _market_cache_put(
+    key: _MarketKey, value: list[dict[str, Any]], now_mono: float, gen: int
+) -> None:
     """Insert into the browse cache, dropping expired entries and — if still
     over _MARKET_CACHE_MAX — evicting the oldest by timestamp. Mirrors
-    _lb_cache_put's shape (leaderboard cache) for the same reasons."""
+    _lb_cache_put's shape (leaderboard cache) for the same reasons. `gen` is
+    the key's _MARKET_CACHE_GEN captured before the rows were computed; the
+    insert is skipped if an invalidation bumped it since."""
     with _MARKET_CACHE_LOCK:
+        if _MARKET_CACHE_GEN.get(key, 0) != gen:
+            return
         for k in [k for k, (ts, _) in _MARKET_CACHE.items() if now_mono - ts >= _MARKET_CACHE_TTL]:
             del _MARKET_CACHE[k]
         _MARKET_CACHE[key] = (now_mono, value)
@@ -909,13 +920,14 @@ async def handle_market_listings(request: web.Request) -> web.Response:
     now_mono = time.monotonic()
     with _MARKET_CACHE_LOCK:
         cached = _MARKET_CACHE.get(cache_key)
+        gen = _MARKET_CACHE_GEN.get(cache_key, 0)
     if cached is not None and now_mono - cached[0] < _MARKET_CACHE_TTL:
         rows = cached[1]
     else:
         rows = await asyncio.get_event_loop().run_in_executor(
             None, _compute_market_rows, network, kind
         )
-        _market_cache_put(cache_key, rows, now_mono)
+        _market_cache_put(cache_key, rows, now_mono, gen)
 
     filtered = rows
     if min_drops is not None:
@@ -1221,6 +1233,7 @@ def _invalidate_market_cache(network: str, kind: str | None = None) -> None:
     with _MARKET_CACHE_LOCK:
         for k in ("character", "trait") if kind is None else (kind,):
             _MARKET_CACHE.pop((network, k), None)
+            _MARKET_CACHE_GEN[(network, k)] = _MARKET_CACHE_GEN.get((network, k), 0) + 1
 
 
 def _write_listing_row(network: str, row: dict[str, Any]) -> None:
