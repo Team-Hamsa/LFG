@@ -78,7 +78,9 @@ def corner_alpha_values(path: str) -> set[int]:
     """Alpha bytes of the top-left 10x10 of the first frame."""
     with tempfile.TemporaryDirectory() as tmp:
         frame = os.path.join(tmp, "probe.png")
-        run(["ffmpeg", "-y", "-v", "error", "-i", path, "-frames:v", "1", "-pix_fmt", "rgba", frame])
+        run(
+            ["ffmpeg", "-y", "-v", "error", "-i", path, "-frames:v", "1", "-pix_fmt", "rgba", frame]
+        )
         raw = subprocess.run(
             [
                 "ffmpeg",
@@ -116,9 +118,7 @@ def convert(src: str, dest: str, size: int, quality: int, fps: int | None) -> No
                 os.path.join(tmp, "f%05d.png"),
             ]
         )
-        frames = sorted(
-            os.path.join(tmp, f) for f in os.listdir(tmp) if f.endswith(".png")
-        )
+        frames = sorted(os.path.join(tmp, f) for f in os.listdir(tmp) if f.endswith(".png"))
         if not frames:
             raise RuntimeError(f"no frames decoded from {src}")
         run(
