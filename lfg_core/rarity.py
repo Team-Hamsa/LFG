@@ -155,11 +155,20 @@ def weighted_pick(
     if _is_stale(conn, network, category):
         recalculate_rarity(conn, network=network)
 
+    # Denominator = the whole live population for this (body, category), not
+    # just the candidates. Values outside `available` (legacy 'None'
+    # placeholders, disabled or retired traits) still hold live NFTs; summing
+    # only candidate rows collapses the denominator when a category is
+    # cold-starting (ape Star-eyes bug: one counted mint → share 1/1 = 1.0,
+    # which then snowballs on every subsequent roll). Fetched in the same
+    # statement as the candidate rows so both see one snapshot.
     placeholders = ",".join("?" * len(available))
     rows = conn.execute(
         f"""SELECT trait, live_count, floor_weight, boost_initial,
-                   boost_step_hours, boost_started_at
-            FROM trait_rarity
+                   boost_step_hours, boost_started_at,
+                   (SELECT COALESCE(SUM(live_count), 0) FROM trait_rarity
+                    WHERE network=t.network AND body=t.body AND category=t.category)
+            FROM trait_rarity t
             WHERE network=? AND body=? AND category=? AND enabled=1
               AND trait IN ({placeholders})""",
         (network, body, category, *available),
@@ -167,17 +176,7 @@ def weighted_pick(
     if not rows:
         raise ValueError(f"All traits disabled for {body}/{category} on {network}")
 
-    # Denominator = the whole live population for this (body, category), not
-    # just the candidates. Values outside `available` (legacy 'None'
-    # placeholders, disabled or retired traits) still hold live NFTs; summing
-    # only candidate rows collapses the denominator when a category is
-    # cold-starting (ape Star-eyes bug: one counted mint → share 1/1 = 1.0,
-    # which then snowballs on every subsequent roll).
-    (total,) = conn.execute(
-        """SELECT COALESCE(SUM(live_count), 0) FROM trait_rarity
-           WHERE network=? AND body=? AND category=?""",
-        (network, body, category),
-    ).fetchone()
+    total = rows[0][6]
     traits = [r[0] for r in rows]
     weights = [effective_weight(r[1], total, r[2], r[3], r[4], r[5], now) for r in rows]
     return rng.choices(traits, weights=weights, k=1)[0]  # type: ignore[no-any-return]
