@@ -315,7 +315,13 @@ async def run_mint_session(session: MintSession) -> None:
             output_path,
             is_video,
             _upload_to_bunny,
-            f"lfg_{session.nft_number}",
+            # Foldered CDN layout, matching the swap convention: fresh mints
+            # are <edition>/<edition>_0.* (metadata has no burnCount -> 0, so
+            # the first swap writes _1 with no collision). Pre-2026-07-11
+            # mints uploaded flat lfg_<n>.png / metadata_<n>.json — those
+            # stay (on-chain URIs point there), with foldered copies added
+            # for hygiene.
+            f"{session.nft_number}/{session.nft_number}_0",
             keep_still=image_archive.pending_still_path(
                 config.XRPL_NETWORK, session.nft_number, session.id
             ),
@@ -331,7 +337,7 @@ async def run_mint_session(session: MintSession) -> None:
         if video_cdn_url:
             metadata["video"] = video_cdn_url
         metadata_cdn_url = await _upload_to_bunny(
-            f"metadata_{session.nft_number}.json",
+            f"{session.nft_number}/{session.nft_number}_0.json",
             json.dumps(metadata, indent=2).encode(),
             "application/json",
         )
