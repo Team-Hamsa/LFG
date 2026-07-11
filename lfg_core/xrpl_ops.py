@@ -19,6 +19,7 @@ from xrpl.models.requests import (
     AccountNFTs,
     AccountTx,
     AMMInfo,
+    Ledger,
     NFTSellOffers,
     Subscribe,
     Tx,
@@ -286,10 +287,13 @@ async def get_nft_sell_offers(nft_id: str, raise_on_error: bool = False) -> list
     CLIO_WS_URL.
 
     Each returned dict is normalized to
-    `{offer_index, amount, destination, flags, owner}`. `offer_index` accepts
-    either the `nft_offer_index` or `index` field — different server versions
-    key the offer's ledger index differently (drift guard, mirrors Baysed
-    market.py:386-390).
+    `{offer_index, amount, destination, flags, owner, expiration}`.
+    `offer_index` accepts either the `nft_offer_index` or `index` field —
+    different server versions key the offer's ledger index differently (drift
+    guard, mirrors Baysed market.py:386-390). `expiration` is the offer's
+    XRPL `Expiration` (Ripple-epoch seconds) or None when the offer never
+    expires; `market_ops.verify_sell_offer` uses it to reject an already-
+    expired offer before a buyer signs a doomed accept (#183).
 
     Returns an empty list when there are no offers or the NFT is unknown to
     the server. By default an RPC/network failure ALSO returns [] — callers
@@ -331,6 +335,7 @@ async def get_nft_sell_offers(nft_id: str, raise_on_error: bool = False) -> list
                     "destination": offer.get("destination"),
                     "flags": offer.get("flags"),
                     "owner": offer.get("owner"),
+                    "expiration": offer.get("expiration"),
                 }
             )
         return normalized
@@ -359,6 +364,27 @@ async def get_tx(tx_hash: str) -> dict[str, Any]:
     client = JsonRpcClient(config.JSON_RPC_URL)
     response = await asyncio.to_thread(client.request, Tx(transaction=tx_hash))
     return response.result
+
+
+async def get_ledger_time() -> int:
+    """The most-recently-validated ledger's close time, in **Ripple-epoch
+    seconds** — the same epoch an NFTokenOffer's `Expiration` field uses, so an
+    offer's Expiration can be compared against it directly with no conversion.
+    Fetched via the plain (non-clio) `ledger` method through JSON_RPC_URL, like
+    mint/burn/offer/get_tx.
+
+    Raises on an RPC/network failure or a malformed response (like get_tx, and
+    unlike get_nft_sell_offers, this does NOT swallow) so a fail-closed caller
+    (`market_ops.verify_sell_offer`) can tell "the lookup itself broke" apart
+    from a real answer and refuse to hand the buyer a doomed payload."""
+    client = JsonRpcClient(config.JSON_RPC_URL)
+    response = await asyncio.to_thread(client.request, Ledger(ledger_index="validated"))
+    result = response.result
+    ledger = result.get("ledger") if isinstance(result, dict) else None
+    close_time = ledger.get("close_time") if isinstance(ledger, dict) else None
+    if not isinstance(close_time, int):
+        raise RuntimeError(f"ledger response missing close_time: {result!r}")
+    return close_time
 
 
 async def get_trustline_balance(address: str, currency: str, issuer: str) -> Decimal | None:

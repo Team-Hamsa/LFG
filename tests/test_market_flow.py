@@ -319,6 +319,24 @@ class TestAdvanceBuySession:
         assert d["state"] == "failed"
         assert d["reason"] == "listing_unavailable"
 
+    def test_expired_offer_failure_returns_stale_and_maps_reason(self):
+        """#183: an accept that fails tecEXPIRED means the offer's Expiration
+        lapsed before it landed — the offer is gone, so the listing must be
+        stale-closed (same posture as tecOBJECT_NOT_FOUND)."""
+        s = self._session()
+
+        async def fake_get_tx(_hash):
+            return {"validated": True, "meta": {"TransactionResult": "tecEXPIRED"}}
+
+        outcome = _run(
+            market_flow.advance_buy_session(
+                s, get_payload_status=_status(signed=True, txid="TXHASH"), get_tx=fake_get_tx
+            )
+        )
+        assert outcome == "stale"
+        assert s.state == market_flow.FAILED
+        assert s.reason == "listing_unavailable"
+
     def test_tx_lookup_raises_unknown_no_crash(self):
         s = self._session()
 
