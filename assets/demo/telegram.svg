@@ -1,0 +1,9 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="800" height="450" viewBox="0 0 800 450" role="img" aria-label="Demo placeholder — Telegram Bot: Mint &amp; swap from an inline-keyboard chat flow. Demo GIF capture pending.">
+<rect x="8" y="8" width="790" height="440" rx="18" fill="#0A0A0A"/>
+<rect x="2" y="2" width="790" height="440" rx="18" fill="#181818" stroke="#FFFFFF" stroke-width="3"/>
+<circle cx="400" cy="180" r="44" fill="#601878"/>
+<polygon points="390,156 390,204 428,180" fill="#FFFFFF"/>
+<text x="400" y="272" text-anchor="middle" font-family="-apple-system,'Segoe UI',Roboto,Helvetica,Arial,sans-serif" font-size="34" font-weight="800" fill="#F5F4F1">Telegram Bot</text>
+<text x="400" y="306" text-anchor="middle" font-family="-apple-system,'Segoe UI',Roboto,Helvetica,Arial,sans-serif" font-size="16" fill="#9C9A94">Mint &amp; swap from an inline-keyboard chat flow</text>
+<text x="400" y="410" text-anchor="middle" font-family="-apple-system,'Segoe UI',Roboto,Helvetica,Arial,sans-serif" font-size="13" letter-spacing="0.08em" fill="#9C9A94">▶  DEMO GIF · capture pending</text>
+</svg>

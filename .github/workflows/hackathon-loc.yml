@@ -25,9 +25,12 @@ jobs:
       - name: Update README LoC block
         run: python3 scripts/hackathon_loc.py
 
+      - name: Update repo-vitals dashboard
+        run: python3 scripts/readme_dashboard.py
+
       - name: Commit if changed
         run: |
-          git add README.md assets/hackathon_loc.svg
+          git add README.md assets/hackathon_loc.svg assets/dashboard.svg
           if ! git diff --quiet --cached; then
             git config user.name "github-actions[bot]"
             git config user.email "github-actions[bot]@users.noreply.github.com"
