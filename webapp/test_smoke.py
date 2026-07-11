@@ -774,7 +774,7 @@ def test_mint_session_happy_path(monkeypatch, tmp_path):
     assert burned == [(config.TOKEN_CURRENCY_HEX, config.MINT_PRICE_LFGO, config.MINT_PRICE_XRP)]
     assert session.nft_id == "NFTID123"
     assert session.accept_deeplink == "https://xumm.test/sign"
-    assert session.image_url == "https://cdn.test/lfg_9999.png"
+    assert session.image_url == "https://cdn.test/9999/9999_0.png"
     assert recorded["traits"]["Hat"] == "Crown"  # Head mapped to the Hat column
     assert "Head" not in recorded["traits"]
     assert recorded["traits"]["Back"] == "Angel Wings"  # Back persisted too
