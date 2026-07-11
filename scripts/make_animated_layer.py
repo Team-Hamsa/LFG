@@ -1,15 +1,18 @@
 #!/usr/bin/env python
 # scripts/make_animated_layer.py
-# Convert an animated GIF into a compose-ready trait layer: decompose to RGBA
-# frames with ffmpeg, lanczos-scale to the layer canvas (1080x1080), and
-# re-encode with gifski (per-frame palettes, alpha preserved). Used for the
-# animated Irridescent bodies (2026-07-11); applies to any animated trait.
+# Convert an animated GIF into a compose-ready trait layer: resample to a
+# uniform frame cadence with ffmpeg (preserving wall-clock timing, incl.
+# variable frame delays / hold frames), decompose to RGBA frames,
+# lanczos-scale to the layer canvas (1080x1080), and re-encode with gifski
+# (per-frame palettes, alpha preserved). Used for the animated Irridescent
+# bodies (2026-07-11); applies to any animated trait.
 #
 # Layer inputs MUST match the 1080x1080 canvas of the static layers (the
 # compose pipeline does no scaling — an undersized layer renders small in the
 # top-left corner) and MUST keep their alpha channel (an opaque background
 # paints over every layer below it). This script guarantees both; it verifies
-# the output's size and corner transparency before declaring success.
+# the output's size and per-frame corner transparency before declaring
+# success. Non-square sources are refused rather than stretched.
 #
 # Requires ffmpeg/ffprobe on PATH and gifski (https://gif.ski — prebuilt
 # binary lives at ~/.local/bin/gifski on the deploy box). gifski silently
@@ -27,82 +30,85 @@ import subprocess
 import sys
 import tempfile
 
+DEFAULT_FPS = 20  # fallback when ffprobe reports a degenerate frame rate
 
-def run(cmd: list[str]) -> None:
-    proc = subprocess.run(cmd, capture_output=True, text=True)
+
+def run(cmd: list[str]) -> subprocess.CompletedProcess[bytes]:
+    proc = subprocess.run(cmd, capture_output=True)
     if proc.returncode != 0:
-        raise RuntimeError(f"{cmd[0]} failed: {proc.stderr.strip()[-500:]}")
+        raise RuntimeError(f"{cmd[0]} failed: {proc.stderr.decode(errors='replace').strip()[-500:]}")
+    return proc
+
+
+def probe(path: str, entries: str) -> str:
+    return (
+        run(["ffprobe", "-v", "quiet", "-show_entries", entries, "-of", "csv=p=0", path])
+        .stdout.decode()
+        .strip()
+    )
 
 
 def probe_fps(path: str) -> int:
-    out = subprocess.run(
-        [
-            "ffprobe",
-            "-v",
-            "quiet",
-            "-show_entries",
-            "stream=r_frame_rate",
-            "-of",
-            "csv=p=0",
-            path,
-        ],
-        capture_output=True,
-        text=True,
-        check=True,
-    ).stdout.strip()
+    out = probe(path, "stream=r_frame_rate")
     num, _, den = out.partition("/")
-    return max(1, round(int(num) / int(den or "1")))
+    try:
+        num_val, den_val = int(num), int(den or "1")
+    except ValueError:
+        return DEFAULT_FPS
+    if num_val <= 0 or den_val <= 0:
+        return DEFAULT_FPS
+    return max(1, round(num_val / den_val))
 
 
 def probe_size(path: str) -> tuple[int, int]:
-    out = subprocess.run(
-        [
-            "ffprobe",
-            "-v",
-            "quiet",
-            "-show_entries",
-            "stream=width,height",
-            "-of",
-            "csv=p=0",
-            path,
-        ],
-        capture_output=True,
-        text=True,
-        check=True,
-    ).stdout.strip()
-    width, height = out.split(",")[:2]
+    width, height = probe(path, "stream=width,height").split(",")[:2]
     return int(width), int(height)
 
 
-def corner_alpha_values(path: str) -> set[int]:
-    """Alpha bytes of the top-left 10x10 of the first frame."""
-    with tempfile.TemporaryDirectory() as tmp:
-        frame = os.path.join(tmp, "probe.png")
-        run(
-            ["ffmpeg", "-y", "-v", "error", "-i", path, "-frames:v", "1", "-pix_fmt", "rgba", frame]
-        )
-        raw = subprocess.run(
-            [
-                "ffmpeg",
-                "-v",
-                "error",
-                "-i",
-                frame,
-                "-vf",
-                "format=rgba,crop=10:10:0:0",
-                "-f",
-                "rawvideo",
-                "-",
-            ],
-            capture_output=True,
-            check=True,
-        ).stdout
-    return set(raw[3::4])
+def opaque_corner_frames(path: str) -> list[int]:
+    """Indices of frames whose top-left 10x10 corner is fully opaque.
+
+    Checks EVERY frame, not just the first — a source that starts transparent
+    but flattens to an opaque background mid-animation would cover the layers
+    below it during composition."""
+    raw = run(
+        [
+            "ffmpeg",
+            "-v",
+            "error",
+            "-i",
+            path,
+            "-vf",
+            "format=rgba,crop=10:10:0:0",
+            "-f",
+            "rawvideo",
+            "-",
+        ]
+    ).stdout
+    frame_bytes = 10 * 10 * 4
+    bad = []
+    for i in range(len(raw) // frame_bytes):
+        alphas = raw[i * frame_bytes : (i + 1) * frame_bytes][3::4]
+        if set(alphas) == {255}:
+            bad.append(i)
+    return bad
 
 
 def convert(src: str, dest: str, size: int, quality: int, fps: int | None) -> None:
+    src_w, src_h = probe_size(src)
+    if src_w != src_h:
+        raise RuntimeError(
+            f"{src} is {src_w}x{src_h} — layer sources must be square; refusing to "
+            "stretch. Re-export on a square canvas."
+        )
     fps = fps or probe_fps(src)
+    dest_dir = os.path.dirname(dest)
+    if dest_dir:
+        os.makedirs(dest_dir, exist_ok=True)
     with tempfile.TemporaryDirectory() as tmp:
+        # fps filter first: resamples variable-delay/hold-frame GIFs to a
+        # uniform cadence while preserving wall-clock timing, so gifski's
+        # constant --fps reproduces the original playback speed and pauses.
         run(
             [
                 "ffmpeg",
@@ -112,7 +118,7 @@ def convert(src: str, dest: str, size: int, quality: int, fps: int | None) -> No
                 "-i",
                 src,
                 "-vf",
-                f"scale={size}:{size}:flags=lanczos",
+                f"fps={fps},scale={size}:{size}:flags=lanczos",
                 "-pix_fmt",
                 "rgba",
                 os.path.join(tmp, "f%05d.png"),
@@ -140,10 +146,12 @@ def convert(src: str, dest: str, size: int, quality: int, fps: int | None) -> No
     width, height = probe_size(dest)
     if (width, height) != (size, size):
         raise RuntimeError(f"output is {width}x{height}, expected {size}x{size}")
-    if corner_alpha_values(dest) == {255}:
+    bad_frames = opaque_corner_frames(dest)
+    if bad_frames:
         raise RuntimeError(
-            "output corner is fully opaque — the source likely lost its alpha "
-            "channel (e.g. exported via mp4). Re-export with transparency."
+            f"output frames {bad_frames[:5]}{'…' if len(bad_frames) > 5 else ''} have a "
+            "fully opaque corner — the source likely lost its alpha channel (e.g. "
+            "exported via mp4). Re-export with transparency."
         )
     print(f"{dest}: {size}x{size} @ {fps}fps, {os.path.getsize(dest) / 1e6:.1f}MB, alpha OK")
 
