@@ -366,6 +366,40 @@ def test_browse_cache_cardinality_bounded(onchain_env):
     assert len(server._MARKET_CACHE) <= 2
 
 
+def test_write_listing_row_invalidates_browse_cache(onchain_env):
+    # A finalized List must show up in browse immediately, not after the TTL.
+    server._MARKET_CACHE[("testnet", "character")] = (time.monotonic(), [])
+    server._MARKET_CACHE[("mainnet", "character")] = (time.monotonic(), [])
+    server._write_listing_row(
+        "testnet",
+        {
+            "offer_index": "B" * 64,
+            "nft_id": CHAR1,
+            "kind": "character",
+            "seller": SELLER,
+            "amount_drops": 1_000_000,
+            "created_ledger": 100,
+            "created_ts": 1000,
+        },
+    )
+    assert ("testnet", "character") not in server._MARKET_CACHE
+    # other networks' entries are untouched
+    assert ("mainnet", "character") in server._MARKET_CACHE
+
+
+def test_close_listing_invalidates_browse_cache(onchain_env):
+    # A cancelled/sold listing must drop out of browse immediately.
+    conn = _reopen(onchain_env)
+    _seed_listing(conn)
+    conn.commit()
+    conn.close()
+    server._MARKET_CACHE[("testnet", "character")] = (time.monotonic(), [{"stale": True}])
+    server._MARKET_CACHE[("testnet", "trait")] = (time.monotonic(), [])
+    server._close_listing_sync("testnet", "A" * 64, "cancelled")
+    assert ("testnet", "character") not in server._MARKET_CACHE
+    assert ("testnet", "trait") not in server._MARKET_CACHE
+
+
 def test_browse_cache_expires_after_ttl(onchain_env, monkeypatch):
     conn = _reopen(onchain_env)
     _seed_character(conn, CHAR1, SELLER, 1)

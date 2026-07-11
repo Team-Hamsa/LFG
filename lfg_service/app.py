@@ -1206,6 +1206,15 @@ def _closet_active(network: str, wallet: str) -> bool:
         conn.close()
 
 
+def _invalidate_market_cache(network: str, kind: str | None = None) -> None:
+    """Drop the browse cache for a (network, kind) whose listing set just
+    changed, so the caller's own List/Cancel/Buy is visible immediately
+    instead of after _MARKET_CACHE_TTL. kind=None drops both kinds (the
+    close path doesn't know the listing's kind)."""
+    for k in ("character", "trait") if kind is None else (kind,):
+        _MARKET_CACHE.pop((network, k), None)
+
+
 def _write_listing_row(network: str, row: dict[str, Any]) -> None:
     # Creation-only write (record_listing_creation, NOT upsert_listing): the
     # finalize poll carries stale creation-time data and can land after the
@@ -1218,6 +1227,7 @@ def _write_listing_row(network: str, row: dict[str, Any]) -> None:
         market_store.record_listing_creation(conn, market_store.MarketListing(**row))
     finally:
         conn.close()
+    _invalidate_market_cache(network, row.get("kind"))
 
 
 def _close_listing_sync(
@@ -1229,6 +1239,7 @@ def _close_listing_sync(
         market_store.close_listing(conn, offer_index, reason, buyer=buyer)
     finally:
         conn.close()
+    _invalidate_market_cache(network)
 
 
 @require_market
