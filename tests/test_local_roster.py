@@ -148,6 +148,29 @@ def test_wallet_nfts_never_fetches_inline_and_synthesizes_misses(tmp_path, monke
     assert {"trait_type": "Body", "value": "Buck Straight"} in synth["attributes"]
 
 
+def test_wallet_nfts_all_unreadable_wallet_stays_local(tmp_path, monkeypatch):
+    """A wallet whose indexed rows are ALL unreadable must return empty
+    WITHOUT touching the ledger or gateways (Greptile P1 on #165): those
+    tokens are unreachable everywhere — the multi-gateway backfill failed
+    too — so the fallback could only re-enter the slow remote path to show
+    nothing."""
+    conn = _seed_index(
+        tmp_path,
+        monkeypatch,
+        [
+            {
+                "nft_id": "0009" + "C" * 60,
+                "nft_number": None,
+                "owner": "rWallet",
+                "uri_hex": "697066733a2f2f6261666b756e7265616461626c65",
+            }
+        ],
+    )
+    conn.close()
+    _no_network(monkeypatch)
+    assert _run(server._wallet_nfts("rWallet")) == []
+
+
 def test_wallet_nfts_excludes_burned_and_foreign_tokens(tmp_path, monkeypatch):
     conn = _seed_index(
         tmp_path,
