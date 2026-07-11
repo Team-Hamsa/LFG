@@ -86,7 +86,9 @@ def apply_alpha_mask(layer_path: str, mask_path: str, out_dir: str) -> str:
 
 
 def _nose_index(layers: list[tuple[str, str, str]]) -> int:
-    """Index at which to insert the nose: directly after the Eyes layer, else
+    """Index at which to insert the nose: directly after the Eyes layer
+    (before it when the Eyes value is full-face art in NOSE_BELOW_EYES_VALUES),
+    else
     the canonical Eyes slot (before the first layer that sorts after Eyes).
 
     TOP_TRAITS Eyes (Wavy / Laser…) are skipped as anchors: compose z-sorts
@@ -120,8 +122,10 @@ async def inject_and_mask(
     out_dir: str,
 ) -> list[tuple[str, str, str]]:
     """Apply ape compose rules to a canonical-ordered (trait_type, value, path)
-    list: clip masked face features (melt/xray apes) and inject the fixed nose
-    above Eyes (all apes). Non-ape bodies are returned unchanged."""
+    list: clip masked face features (melt/xray apes, including the injected
+    nose) and inject the fixed nose above Eyes on all apes — below Eyes when
+    the Eyes value is full-face art (NOSE_BELOW_EYES_VALUES). Non-ape bodies
+    are returned unchanged."""
     if body != "ape":
         return layers
 
