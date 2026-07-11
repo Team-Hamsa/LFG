@@ -108,6 +108,12 @@ async def apply_tx(
             uri_hex = token.get("uri_hex") or ""
             metadata = await fetch_meta_fn(uri_hex) if uri_hex else None
             nft_index.upsert(conn, nft_index.token_record(token, metadata))
+            # Warm the uri metadata cache with the fetch we just paid for:
+            # the local-first roster serves cache hits with the token's REAL
+            # metadata (incl. burnCount for swap outputs) and never fetches
+            # inline, so a fresh mint/modify must be cached by browse time.
+            if isinstance(metadata, dict):
+                nft_index.meta_cache_put_many(conn, {uri_hex: metadata})
         except Exception:
             logging.exception(f"apply_tx failed for {nft_id} ({kind})")
 

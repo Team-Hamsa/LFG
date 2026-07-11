@@ -143,6 +143,14 @@ def test_apply_tx_mint_accept_burn_modify(tmp_path):
     changed_attrs = [a["value"] for a in json.loads(rows["CHANGED"]["attributes_json"])]
     assert "Wonder" in changed_attrs and "Old" not in changed_attrs
 
+    # apply_tx must also warm the uri metadata cache with what it fetched:
+    # the local-first roster serves cache hits with the token's REAL metadata
+    # (incl. burnCount for swap outputs) and only synthesizes on a miss, so a
+    # freshly minted/modified token should be cached by the time it's browsed.
+    cached = nft_index.meta_cache_get_many(conn, ["aa", "bb", "cc2"])
+    assert cached["aa"]["name"] == "#1"
+    assert cached["cc2"]["attributes"][0]["value"] == "Wonder"
+
 
 def test_apply_tx_skips_foreign_collection(tmp_path):
     # accept/burn/modify arrive for ALL NFTs on the network; is_ours scopes upserts.

@@ -1958,19 +1958,59 @@ async def handle_mint_start(request):
     return web.json_response(session.to_dict())
 
 
-def _index_wallet_tokens(conn: sqlite3.Connection, wallet: str) -> list[dict[str, Any]]:
-    """The wallet's live tokens from the on-chain index, in the account_nfts
-    shape load_wallet_nfts expects."""
-    return [nft_index.to_token(r) for r in nft_index.owner_live_nfts(conn, wallet)]
+def _index_roster(conn: sqlite3.Connection, wallet: str) -> list[dict[str, Any]] | None:
+    """Normalized roster records built ENTIRELY from local data: the wallet's
+    live index rows plus the uri metadata cache. No network, ever — an inline
+    gateway fetch for a cache miss used to stall the whole roster for the
+    full 20s fetch_metadata timeout per permanently-unreadable token (one
+    such token held a 225-NFT wallet hostage on every load).
+
+    Returns None when the index holds NO rows for this wallet — only then
+    may the caller fall back to the live ledger (the #162 partial-index
+    guarantee). A wallet whose rows all get skipped below returns [] and is
+    trusted: those tokens are unreadable everywhere (the multi-gateway
+    backfill failed too), so the ledger path could only re-enter the slow
+    remote fetch to show nothing (Greptile P1 on #165).
+
+    Cache hit → the token's real metadata (most faithful; carries burnCount
+    for swap outputs — the listener warms the cache at index time). Miss on a
+    readable row → synthesize the metadata from the row itself: the listener/
+    backfill already parsed name→edition, attributes and image into it, and
+    the collection name pattern is deterministic. Miss on an UNREADABLE row
+    (no edition number — the multi-gateway backfill couldn't fetch it either)
+    → skip: normalize_nft would reject it regardless."""
+    recs = nft_index.owner_live_nfts(conn, wallet)
+    if not recs:
+        return None
+    cached = nft_index.meta_cache_get_many(conn, [r.uri_hex for r in recs if r.uri_hex])
+    nfts = []
+    for rec in recs:
+        meta = cached.get(rec.uri_hex)
+        if meta is None:
+            if rec.nft_number is None:
+                continue
+            meta = {
+                "name": f"{config.NFT_COLLECTION_NAME} #{rec.nft_number}",
+                "image": rec.image,
+                "attributes": rec.attributes,
+            }
+        flags = nft_index.to_token(rec)["flags"]
+        try:
+            record = swap_meta.normalize_nft(rec.nft_id, meta, flags=flags, uri_hex=rec.uri_hex)
+        except Exception as e:
+            logging.warning(f"Skipping NFT {rec.nft_id}: bad metadata ({e})")
+            continue
+        if record:
+            nfts.append(record)
+    nfts.sort(key=lambda n: n["number"])
+    return nfts
 
 
 async def _wallet_nfts(wallet: str) -> list[dict[str, Any]]:
-    """The swapper roster, from LOCAL data: token list from the listener-fresh
-    on-chain index, metadata from the uri_hex cache (#153). The IPFS gateways
-    are only touched for true cache misses (then cached forever — the URI is
-    content-addressed). The remote path used to be the default, and a flaky
-    gateway both blanked swapper tiles and silently dropped uncached NFTs
-    from the roster.
+    """The swapper roster, from LOCAL data (the listener-fresh on-chain index
+    + the uri_hex metadata cache — see _index_roster). #153/#162: the remote
+    path used to be the default, and a flaky gateway blanked tiles, silently
+    dropped NFTs, and stalled loads.
 
     The live account_nfts ledger call survives as the fallback whenever the
     index yields NOTHING for this wallet — an unbuilt or partially backfilled
@@ -1978,10 +2018,11 @@ async def _wallet_nfts(wallet: str) -> list[dict[str, Any]]:
     with index rows is served locally; the fallback therefore only costs a
     ledger round-trip for genuinely-empty wallets, and if that fallback
     itself fails the empty local answer stands (an empty roster beats a 502
-    when the public node is down)."""
+    when the public node is down). Only this cold path may fetch metadata
+    remotely (misses are then cached forever — the URI is content-addressed)."""
     conn = None
     cache = None
-    tokens: list[dict[str, Any]] = []
+    roster: list[dict[str, Any]] | None = None
     index_ok = False
     try:
         conn = nft_index.init_db(nft_index.index_db_path(config.XRPL_NETWORK))
@@ -1990,18 +2031,13 @@ async def _wallet_nfts(wallet: str) -> list[dict[str, Any]]:
         logging.warning(f"uri metadata cache unavailable: {e}")
     if conn is not None:
         try:
-            tokens = _index_wallet_tokens(conn, wallet)
+            roster = _index_roster(conn, wallet)
             index_ok = True
         except Exception as e:
             logging.warning(f"on-chain index roster failed, falling back to ledger: {e!r}")
     try:
-        if tokens:
-            local_tokens = tokens
-
-            async def from_index(_wallet: str, _issuer: str) -> list[dict[str, Any]]:
-                return local_tokens
-
-            return await swap_meta.load_wallet_nfts(wallet, from_index, meta_cache=cache)
+        if roster is not None:
+            return roster
         try:
             return await swap_meta.load_wallet_nfts(
                 wallet, xrpl_ops.get_account_nfts, meta_cache=cache

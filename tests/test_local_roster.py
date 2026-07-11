@@ -98,6 +98,79 @@ def test_wallet_nfts_served_from_index_without_any_network(tmp_path, monkeypatch
     assert nfts[0]["uri_hex"] == _URI_HEX
 
 
+def test_wallet_nfts_never_fetches_inline_and_synthesizes_misses(tmp_path, monkeypatch):
+    """A cache miss must not trigger an inline gateway fetch: with the
+    gateway dead, ONE permanently-unreadable token stalled every roster load
+    the full 20s fetch_metadata timeout (prod 00:56, 225 NFTs held hostage).
+    Readable rows (the index has their edition + attributes) are synthesized
+    from the row itself; rows the heavyweight backfill couldn't read (no
+    edition number) can never pass normalize_nft and are skipped silently."""
+    uncached_hex = "697066733a2f2f62616679756e636163686564"
+    unreadable_hex = "697066733a2f2f6261666b756e7265616461626c65"
+    conn = _seed_index(
+        tmp_path,
+        monkeypatch,
+        [
+            {
+                "nft_id": "0009" + "A" * 60,
+                "nft_number": 12,
+                "owner": "rWallet",
+                "uri_hex": _URI_HEX,
+            },
+            {
+                "nft_id": "0019" + "B" * 60,
+                "nft_number": 13,
+                "owner": "rWallet",
+                "uri_hex": uncached_hex,
+                "image": "ipfs://bafyuncached/13.png",
+                "attributes": [{"trait_type": "Body", "value": "Buck Straight"}],
+            },
+            {
+                "nft_id": "0009" + "C" * 60,
+                "nft_number": None,
+                "owner": "rWallet",
+                "uri_hex": unreadable_hex,
+            },
+        ],
+    )
+    nft_index.meta_cache_put_many(conn, {_URI_HEX: _META})
+    conn.close()
+    _no_network(monkeypatch)  # any fetch_metadata call fails the test
+    nfts = _run(server._wallet_nfts("rWallet"))
+    assert [n["number"] for n in nfts] == [12, 13]
+    synth = nfts[1]
+    assert "#13" in synth["name"]
+    # normalize_nft resolves ipfs:// for every record (cache hits too);
+    # url_forms makes this shape archive-hit in /api/img regardless
+    assert synth["image"] == "https://bafyuncached.ipfs.dweb.link/13.png"
+    assert synth["mutable"] is True  # flags from the 0019 token-ID bytes
+    assert synth["uri_hex"] == uncached_hex
+    assert {"trait_type": "Body", "value": "Buck Straight"} in synth["attributes"]
+
+
+def test_wallet_nfts_all_unreadable_wallet_stays_local(tmp_path, monkeypatch):
+    """A wallet whose indexed rows are ALL unreadable must return empty
+    WITHOUT touching the ledger or gateways (Greptile P1 on #165): those
+    tokens are unreachable everywhere — the multi-gateway backfill failed
+    too — so the fallback could only re-enter the slow remote path to show
+    nothing."""
+    conn = _seed_index(
+        tmp_path,
+        monkeypatch,
+        [
+            {
+                "nft_id": "0009" + "C" * 60,
+                "nft_number": None,
+                "owner": "rWallet",
+                "uri_hex": "697066733a2f2f6261666b756e7265616461626c65",
+            }
+        ],
+    )
+    conn.close()
+    _no_network(monkeypatch)
+    assert _run(server._wallet_nfts("rWallet")) == []
+
+
 def test_wallet_nfts_excludes_burned_and_foreign_tokens(tmp_path, monkeypatch):
     conn = _seed_index(
         tmp_path,
