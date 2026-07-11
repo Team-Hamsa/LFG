@@ -12,7 +12,7 @@ from typing import Any
 
 import yaml
 
-VALID_BODIES = frozenset({"ape", "female", "male", "skeleton"})
+VALID_BODIES = frozenset({"ape", "female", "male", "milady", "skeleton"})
 
 DEFAULT_CONFIG_PATH = os.path.join(
     os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "trait_config.yaml"

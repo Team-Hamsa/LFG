@@ -238,7 +238,7 @@ def test_disable_season_ignores_other_seasons_and_networks():
 # four real bodies instead of targeting a literal body "shared"
 # ---------------------------------------------------------------------------
 
-_ALL_BODIES = ("ape", "female", "male", "skeleton")
+_ALL_BODIES = ("ape", "female", "male", "milady", "skeleton")
 
 
 def test_disable_season_expands_shared_key_to_all_real_bodies():

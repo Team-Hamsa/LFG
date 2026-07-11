@@ -53,6 +53,9 @@ def test_img_proxy_accepts_ipfs_gateway_host(monkeypatch):
         return b"\x89PNG fake", "image/png"
 
     monkeypatch.setattr(server, "_fetch_cdn", fake_fetch)
+    # a deployed box may hold this edition in the local image archive, which
+    # handle_img serves before the proxy — force the fallback path under test
+    monkeypatch.setattr(server.image_archive, "edition_for_url", lambda conn, u: None)
     # exactly the shape swap_meta.resolve_ipfs("ipfs://<cid>/2946.png") emits
     url = "https://bafybeih3g6qo7ozdpczkppnnxymo546xnbihlvizwphlt2gsse6enmsnn4.ipfs.dweb.link/2946.png"
     loop = asyncio.get_event_loop()
@@ -300,6 +303,9 @@ def test_img_proxy_resolves_raw_ipfs_uri(monkeypatch):
         return b"\x89PNG fake", "image/png"
 
     monkeypatch.setattr(server, "_fetch_cdn", fake_fetch)
+    # a deployed box may hold this edition in the local image archive, which
+    # handle_img serves before the proxy — force the fallback path under test
+    monkeypatch.setattr(server.image_archive, "edition_for_url", lambda conn, u: None)
     cid = "bafybeih3g6qo7ozdpczkppnnxymo546xnbihlvizwphlt2gsse6enmsnn4"
     resp = asyncio.get_event_loop().run_until_complete(
         server.handle_img(_img_request(f"ipfs://{cid}/2946.png"))
