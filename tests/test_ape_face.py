@@ -178,6 +178,21 @@ def test_inject_and_mask_nose_unmasked_on_solid_body(tmp_path):
     assert not nose_path.endswith(".masked.png")
 
 
+def test_inject_and_mask_nose_below_full_face_eyes(tmp_path):
+    store, _ = _ape_store_with_assets(tmp_path)
+    for value in sorted(ape_face.NOSE_BELOW_EYES_VALUES):
+        layers = [
+            ("Body", "Ape Gold", "/x/body.png"),
+            ("Eyes", value, "/x/eyes.png"),
+            ("Head", "Cap", "/x/head.png"),
+        ]
+        out = _run(
+            ape_face.inject_and_mask(layers, "ape", "Ape Gold", store, str(tmp_path / "gen"))
+        )
+        types = [t for t, _v, _p in out]
+        assert types == ["Body", "Nose", "Eyes", "Head"], value
+
+
 def test_inject_and_mask_nose_fallback_when_no_eyes(tmp_path):
     store, _ = _ape_store_with_assets(tmp_path)
     layers = [("Eyebrows", "Flat", "/x/brow.png"), ("Head", "Cap", "/x/head.png")]

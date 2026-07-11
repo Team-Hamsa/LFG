@@ -43,6 +43,11 @@ MASKED_TRAITS = {"Eyes", "Eyebrows", "Mouth"}
 # must not be clipped. Ships empty; grown one line at a time after art review.
 NO_MASK_VALUES: list[dict[str, str]] = []
 
+# Eyes values whose art covers the nose area (full-face masks/coatings): the
+# fixed nose renders BELOW these instead of above. Art-reviewed, grown as
+# needed.
+NOSE_BELOW_EYES_VALUES = {"Sticky Face", "Mask Skull Square", "Black C3m3nt"}
+
 
 def should_mask(trait_type: str, value: str, body_value: str) -> bool:
     """True if this face feature's right side should be clipped on a melt/xray
@@ -92,7 +97,8 @@ def _nose_index(layers: list[tuple[str, str, str]]) -> int:
     it belongs."""
     for i, (trait_type, value, _p) in enumerate(layers):
         if trait_type == "Eyes" and {"trait_type": trait_type, "value": value} not in TOP_TRAITS:
-            return i + 1
+            # Full-face Eyes art covers the nose: render the nose below it.
+            return i if value in NOSE_BELOW_EYES_VALUES else i + 1
     eyes_rank = swap_meta.TRAIT_ORDER.index("Eyes")
     for i, (trait_type, value, _p) in enumerate(layers):
         # Stop before any TOP_TRAIT to keep nose below effect layers (e.g. Laser Eyes).
