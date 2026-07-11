@@ -11,6 +11,7 @@ proxy is only a fallback for editions the archive doesn't have yet."""
 
 from __future__ import annotations
 
+import logging
 import os
 import re
 import sqlite3
@@ -56,6 +57,101 @@ def local_image(network: str, edition: int) -> tuple[str, str] | None:
         if os.path.exists(path):
             return path, ctype
     return None
+
+
+# --- Swap/mint archive updates (#163) -------------------------------------
+# The swap/mint flows compose each new still locally before uploading it to
+# the CDN, but the swap can still fail or revert after the upload — so the
+# still is *staged* into pending/ at upload time and only *promoted* into the
+# serving archive once the on-chain change is final (discarded otherwise).
+
+PENDING_SUBDIR = "pending"
+
+
+def pending_still_path(network: str, edition: int, token: str) -> str:
+    """Staging path for `edition`'s freshly composed still (always PNG: video
+    NFTs archive their extracted poster frame). `token` (the session id) keys
+    the file per-session so concurrent operations on the same edition can
+    neither promote nor discard each other's staged art. Pure path math — the
+    caller (swap_compose._stash_or_remove) creates the directory when it
+    stages."""
+    return os.path.join(archive_dir(network), PENDING_SUBDIR, f"{edition}.{token}.png")
+
+
+def promote_still(network: str, edition: int, token: str) -> bool:
+    """Move `edition`'s staged still into the serving archive and refresh its
+    thumbnail. Best-effort — returns False (never raises) on any failure, so
+    an archive hiccup can never fail a confirmed swap/mint; the app then
+    degrades to the CDN/IPFS proxy fallback exactly as before."""
+    try:
+        base = archive_dir(network)
+        staged = os.path.join(base, PENDING_SUBDIR, f"{edition}.{token}.png")
+        if not os.path.exists(staged):
+            return False
+        dest = os.path.join(base, f"{edition}.png")
+        # Drop the old thumb BEFORE promoting: if the process dies anywhere
+        # in this window, /api/img?w= falls back to the (new) full still
+        # rather than serving stale thumb art with no staged file to retry.
+        thumb = os.path.join(base, THUMB_SUBDIR, f"{edition}.webp")
+        try:
+            if os.path.exists(thumb):
+                os.remove(thumb)
+        except OSError:
+            logging.exception(f"image_archive: removing old thumb for {edition} failed")
+        os.replace(staged, dest)  # atomic on the same filesystem
+        # Drop stale other-extension stills so the new PNG is unambiguous.
+        # Each removal is best-effort: once the new still is in place the
+        # thumb refresh below must always run, or a leftover thumb would
+        # keep serving the old art.
+        for ext in CONTENT_TYPES:
+            if ext == ".png":
+                continue
+            old = os.path.join(base, f"{edition}{ext}")
+            try:
+                if os.path.exists(old):
+                    os.remove(old)
+            except OSError:
+                logging.exception(f"image_archive: removing stale {old} failed")
+        _refresh_thumb(base, edition, dest)
+        return True
+    except Exception:
+        logging.exception(f"image_archive: promoting edition {edition} failed")
+        return False
+
+
+def discard_still(network: str, edition: int, token: str) -> None:
+    """Drop `edition`'s staged still (swap failed/reverted). Never raises."""
+    try:
+        staged = os.path.join(archive_dir(network), PENDING_SUBDIR, f"{edition}.{token}.png")
+        if os.path.exists(staged):
+            os.remove(staged)
+    except Exception:
+        logging.exception(f"image_archive: discarding pending edition {edition} failed")
+
+
+def _refresh_thumb(base: str, edition: int, src: str) -> None:
+    """Rebuild <archive>/thumbs/<edition>.webp from the new still (same
+    256px/q80 shape scripts/generate_thumbnails.py builds). If the rebuild
+    fails, the stale thumb is REMOVED rather than left behind — /api/img?w=
+    then falls back to the fresh full still instead of serving old art."""
+    dest = os.path.join(base, THUMB_SUBDIR, f"{edition}.webp")
+    try:
+        from PIL import Image
+
+        os.makedirs(os.path.dirname(dest), exist_ok=True)
+        tmp = dest + ".tmp"
+        with Image.open(src) as src_im:
+            im = src_im.convert("RGB")
+        im.thumbnail((THUMB_SIZE, THUMB_SIZE), Image.Resampling.LANCZOS)
+        im.save(tmp, "WEBP", quality=80)
+        os.replace(tmp, dest)
+    except Exception:
+        logging.exception(f"image_archive: thumbnail rebuild for edition {edition} failed")
+        try:
+            if os.path.exists(dest):
+                os.remove(dest)
+        except OSError:
+            pass
 
 
 # Subdomain gateway (https://<cid>.ipfs.<host>/<path>) and path gateway

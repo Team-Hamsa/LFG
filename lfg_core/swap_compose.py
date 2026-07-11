@@ -154,11 +154,16 @@ def extract_first_frame(video_path: str, image_path: str) -> str:
 
 
 async def upload_output(
-    output_path: str, is_video: bool, upload: Any, cdn_basename: str
+    output_path: str, is_video: bool, upload: Any, cdn_basename: str, keep_still: str | None = None
 ) -> tuple[str, str | None]:
     """Upload a composed NFT (mp4 + png thumbnail for videos, png otherwise)
     via `upload(path_on_cdn, data, content_type) -> url`, cleaning up local
-    files. Returns (image_url, video_url)."""
+    files. Returns (image_url, video_url).
+
+    With `keep_still` set, the PNG still (the poster frame for videos) is
+    moved there instead of deleted — the swap/mint flows stage it for the
+    local image archive (#163) and promote/discard it once the on-chain
+    outcome is known."""
     video_url = None
     try:
         if is_video:
@@ -171,12 +176,32 @@ async def upload_output(
                 with open(thumb, "rb") as f:
                     image_url = await upload(f"{cdn_basename}.png", f.read(), "image/png")
             finally:
-                if os.path.exists(thumb):
-                    os.remove(thumb)
+                _stash_or_remove(thumb, keep_still)
         else:
             with open(output_path, "rb") as f:
                 image_url = await upload(f"{cdn_basename}.png", f.read(), "image/png")
     finally:
-        if os.path.exists(output_path):
-            os.remove(output_path)
+        if is_video:
+            if os.path.exists(output_path):
+                os.remove(output_path)
+        else:
+            _stash_or_remove(output_path, keep_still)
     return image_url, video_url
+
+
+def _stash_or_remove(path: str, keep_still: str | None) -> None:
+    if not os.path.exists(path):
+        return
+    if keep_still:
+        try:
+            os.makedirs(os.path.dirname(keep_still), exist_ok=True)
+            os.replace(path, keep_still)
+            return
+        except OSError:
+            logging.exception(f"Staging still {path} -> {keep_still} failed")
+    try:
+        os.remove(path)
+    except OSError:
+        # Local cleanup must never turn a successful CDN upload into a
+        # failed mint/swap.
+        logging.exception(f"Removing composed still {path} failed")
