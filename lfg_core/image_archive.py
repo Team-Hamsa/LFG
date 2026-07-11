@@ -89,6 +89,15 @@ def promote_still(network: str, edition: int, token: str) -> bool:
         if not os.path.exists(staged):
             return False
         dest = os.path.join(base, f"{edition}.png")
+        # Drop the old thumb BEFORE promoting: if the process dies anywhere
+        # in this window, /api/img?w= falls back to the (new) full still
+        # rather than serving stale thumb art with no staged file to retry.
+        thumb = os.path.join(base, THUMB_SUBDIR, f"{edition}.webp")
+        try:
+            if os.path.exists(thumb):
+                os.remove(thumb)
+        except OSError:
+            logging.exception(f"image_archive: removing old thumb for {edition} failed")
         os.replace(staged, dest)  # atomic on the same filesystem
         # Drop stale other-extension stills so the new PNG is unambiguous.
         # Each removal is best-effort: once the new still is in place the
