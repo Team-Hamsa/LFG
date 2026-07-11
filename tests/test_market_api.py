@@ -369,6 +369,7 @@ def test_browse_cache_cardinality_bounded(onchain_env):
 def test_write_listing_row_invalidates_browse_cache(onchain_env):
     # A finalized List must show up in browse immediately, not after the TTL.
     server._MARKET_CACHE[("testnet", "character")] = (time.monotonic(), [])
+    server._MARKET_CACHE[("testnet", "trait")] = (time.monotonic(), [])
     server._MARKET_CACHE[("mainnet", "character")] = (time.monotonic(), [])
     server._write_listing_row(
         "testnet",
@@ -383,7 +384,8 @@ def test_write_listing_row_invalidates_browse_cache(onchain_env):
         },
     )
     assert ("testnet", "character") not in server._MARKET_CACHE
-    # other networks' entries are untouched
+    # other kinds and other networks' entries are untouched
+    assert ("testnet", "trait") in server._MARKET_CACHE
     assert ("mainnet", "character") in server._MARKET_CACHE
 
 
@@ -395,9 +397,14 @@ def test_close_listing_invalidates_browse_cache(onchain_env):
     conn.close()
     server._MARKET_CACHE[("testnet", "character")] = (time.monotonic(), [{"stale": True}])
     server._MARKET_CACHE[("testnet", "trait")] = (time.monotonic(), [])
+    server._MARKET_CACHE[("mainnet", "character")] = (time.monotonic(), [])
+    server._MARKET_CACHE[("mainnet", "trait")] = (time.monotonic(), [])
     server._close_listing_sync("testnet", "A" * 64, "cancelled")
     assert ("testnet", "character") not in server._MARKET_CACHE
     assert ("testnet", "trait") not in server._MARKET_CACHE
+    # cross-network isolation: the kind=None closure only clears its network
+    assert ("mainnet", "character") in server._MARKET_CACHE
+    assert ("mainnet", "trait") in server._MARKET_CACHE
 
 
 def test_inflight_fill_cannot_repopulate_after_invalidation(onchain_env, monkeypatch):
