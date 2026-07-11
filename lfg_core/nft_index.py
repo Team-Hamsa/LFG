@@ -126,20 +126,35 @@ _META_CACHE_QUERY_CHUNK = 500
 def meta_cache_get_many(
     conn: sqlite3.Connection, uri_hexes: list[str]
 ) -> dict[str, dict[str, Any]]:
-    """Cached raw metadata JSON for the given on-chain URIs (misses omitted).
-    The key is the URI itself, which is content-addressed for our tokens
-    (IPFS CIDs for legacy mints, unique CDN basenames for swap outputs), so
-    entries never go stale — a modify changes the URI, not the content."""
+    """Cached raw metadata JSON for the given on-chain URIs (misses omitted),
+    keyed by the caller's own strings. The key is the URI itself, which is
+    content-addressed for our tokens (IPFS CIDs for legacy mints, unique CDN
+    basenames for swap outputs), so entries never go stale — a modify changes
+    the URI, not the content.
+
+    uri_hex is case-insensitive: the ledger (account_nfts) reports hex URIs
+    UPPERCASE while onchain_nfts rows store lowercase, and the deployed
+    mainnet cache joined 0/3535 live tokens on exactly that mismatch.
+    Lowercase is canonical in storage (matching the index); lookups fold both
+    sides so either caller wins. LOWER() defeats the PK index, but the table
+    is one row per distinct URI (≤ collection size) — a scan is negligible."""
+    by_lower: dict[str, list[str]] = {}
+    for u in uri_hexes:
+        by_lower.setdefault(u.lower(), []).append(u)
+    lowered = list(by_lower)
     out: dict[str, dict[str, Any]] = {}
-    for i in range(0, len(uri_hexes), _META_CACHE_QUERY_CHUNK):
-        chunk = uri_hexes[i : i + _META_CACHE_QUERY_CHUNK]
+    for i in range(0, len(lowered), _META_CACHE_QUERY_CHUNK):
+        chunk = lowered[i : i + _META_CACHE_QUERY_CHUNK]
         placeholders = ",".join("?" * len(chunk))
         cur = conn.execute(
             "SELECT uri_hex, metadata_json FROM uri_metadata_cache "
-            f"WHERE uri_hex IN ({placeholders})",
+            f"WHERE LOWER(uri_hex) IN ({placeholders})",
             chunk,
         )
-        out.update({row[0]: json.loads(row[1]) for row in cur.fetchall()})
+        for row in cur.fetchall():
+            meta = json.loads(row[1])
+            for original in by_lower.get(row[0].lower(), []):
+                out[original] = meta
     return out
 
 
@@ -148,9 +163,27 @@ def meta_cache_put_many(conn: sqlite3.Connection, metas: dict[str, dict[str, Any
         return
     conn.executemany(
         "INSERT OR REPLACE INTO uri_metadata_cache (uri_hex, metadata_json) VALUES (?, ?)",
-        [(uri_hex, json.dumps(meta)) for uri_hex, meta in metas.items()],
+        [(uri_hex.lower(), json.dumps(meta)) for uri_hex, meta in metas.items()],
     )
     conn.commit()
+
+
+def migrate_meta_cache_case(conn: sqlite3.Connection) -> int:
+    """Fold pre-normalization cache rows (uppercase uri_hex, written from
+    ledger-reported URIs) into the canonical lowercase form. Returns the
+    number of rows migrated. Idempotent; safe to run any time."""
+    cur = conn.execute(
+        "SELECT uri_hex, metadata_json FROM uri_metadata_cache WHERE uri_hex != LOWER(uri_hex)"
+    )
+    stale = cur.fetchall()
+    for uri_hex, metadata_json in stale:
+        conn.execute(
+            "INSERT OR IGNORE INTO uri_metadata_cache (uri_hex, metadata_json) VALUES (?, ?)",
+            (uri_hex.lower(), metadata_json),
+        )
+        conn.execute("DELETE FROM uri_metadata_cache WHERE uri_hex = ?", (uri_hex,))
+    conn.commit()
+    return len(stale)
 
 
 class UriMetadataCache:
@@ -280,12 +313,25 @@ def collection_anomalies(records: list[OnchainNft], max_edition: int) -> dict[st
 
 
 def to_token(rec: OnchainNft) -> dict[str, Any]:
-    """Reconstruct the enumerated-token shape from an index row (for re-fetch)."""
+    """Reconstruct the enumerated-token shape from an index row (for re-fetch
+    and for the local-first roster).
+
+    Flags come from the NFTokenID itself: its first two bytes ARE the
+    on-ledger flags (NFTokenID layout: Flags(2) | TransferFee(2) |
+    Issuer(20) | Taxon(4) | Sequence(4)), which matters because most
+    Bithomp-imported rows carry mutable=NULL — guessing 0 for those would
+    route a genuinely mutable NFT down the swap burn-remint path instead of
+    NFTokenModify. The mutable column is only the fallback for a malformed
+    ID."""
+    try:
+        flags = int(rec.nft_id[:4], 16)
+    except ValueError:
+        flags = NFT_FLAG_MUTABLE if rec.mutable else 0
     return {
         "nft_id": rec.nft_id,
         "owner": rec.owner,
         "is_burned": rec.is_burned,
-        "flags": NFT_FLAG_MUTABLE if rec.mutable else 0,
+        "flags": flags,
         "uri_hex": rec.uri_hex,
         "ledger_index": rec.ledger_index,
     }
