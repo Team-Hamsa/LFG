@@ -20,8 +20,8 @@ reward — cannot get the new face traits on apes they already own.
 
 **Faces are rolled automatically the first time a `None`-faced ape goes
 through the Trait Swapper.** No new op, no fee, no new UI on any surface
-("silent surprise" — the composed preview the swapper already shows before
-signing naturally displays the new face). Since a rolled ape never has `None`
+("silent surprise" — the new face first appears in the composed result the
+swapper shows; see §3.4 for exactly when per path). Since a rolled ape never has `None`
 faces again, this is effectively once per ape, and it is user-initiated by
 construction: the owner chose to swap and signs the result.
 
@@ -92,9 +92,16 @@ live characters' worn traits, so economy conservation is unaffected.
 ### 3.4 UX
 
 Silent. No toggles, notices, or copy changes on Discord / Activity / Telegram.
-The swap preview shows the composed result including the new face; signing
-accepts it, cancelling discards it. (If users read it as a bug, an
-announcement/changelog line is the remedy, not UI.)
+Reveal point (verified against the real surfaces at review): the pre-confirm
+screen shows the NFTs' *current* images, so the rolled face is first seen in
+the composed **result** — after `NFTokenModify` for mutable NFTs, or at the
+**accept-offer screen** for the burn+remint path (which is what mainnet
+legacy apes are; at that point the original is already burned, so declining
+the offer parks the re-crafted, faced replacement with the issuer rather
+than undoing the roll). Cancelling *before* signing the fee/confirm step
+rolls nothing durable. This is the accepted trade-off of the
+silent-surprise choice; an announcement/changelog line is the remedy if
+users read it as a bug, not new UI.
 
 ## 4. Testing
 
