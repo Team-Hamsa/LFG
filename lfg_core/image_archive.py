@@ -60,9 +60,26 @@ def local_image(network: str, edition: int) -> tuple[str, str] | None:
 
 # Subdomain gateway (https://<cid>.ipfs.<host>/<path>) and path gateway
 # (https://<host>/ipfs/<cid>/<path>) URL shapes — the forms resolve_ipfs /
-# nft_index.IPFS_GATEWAYS produce from an ipfs:// URI.
-_SUBDOMAIN_GATEWAY = re.compile(r"^https://([a-zA-Z0-9]+)\.ipfs\.[a-zA-Z0-9.-]+/(.*)$")
-_PATH_GATEWAY = re.compile(r"^https://[a-zA-Z0-9.-]+/ipfs/([a-zA-Z0-9]+)/(.*)$")
+# nft_index.IPFS_GATEWAYS produce from an ipfs:// URI. Path optional: a
+# path-less CID (the CID is the file itself) resolves to the bare host.
+_SUBDOMAIN_GATEWAY = re.compile(r"^https://([a-zA-Z0-9]+)\.ipfs\.[a-zA-Z0-9.-]+(?:/(.*))?$")
+_PATH_GATEWAY = re.compile(r"^https://[a-zA-Z0-9.-]+/ipfs/([a-zA-Z0-9]+)(?:/(.*))?$")
+
+
+def _cid_variants(cid: str, path: str) -> list[str]:
+    """Every stored shape one (cid, path) can take. With a path, raw and
+    resolved agree on structure; path-less URIs (the CID is the file — six
+    live mainnet editions) disagree about the trailing slash between the
+    on-chain `ipfs://<cid>` and resolve_ipfs's `https://<cid>.../`, so all
+    slash variants must be equivalent."""
+    if path:
+        return [f"ipfs://{cid}/{path}", f"https://{cid}.ipfs.dweb.link/{path}"]
+    return [
+        f"ipfs://{cid}",
+        f"ipfs://{cid}/",
+        f"https://{cid}.ipfs.dweb.link/",
+        f"https://{cid}.ipfs.dweb.link",
+    ]
 
 
 def url_forms(url: str) -> list[str]:
@@ -71,22 +88,20 @@ def url_forms(url: str) -> list[str]:
     The index's `image` column is mixed-shape: Bithomp-imported rows keep the
     on-chain `ipfs://` URI verbatim while listener-written rows store the
     dweb.link-resolved form (nft_index.token_record), and surfaces serve
-    whichever shape their source row has. Returns [url, its raw ipfs:// form,
-    its dweb.link form], deduped, order-preserving; a non-IPFS URL is just
-    [url]. The dweb format string mirrors swap_meta.resolve_ipfs (kept local:
-    this module must stay importable without lfg_core.config)."""
+    whichever shape their source row has. Returns the URL plus its raw
+    ipfs:// and dweb.link forms, deduped, order-preserving; a non-IPFS URL is
+    just [url]. The dweb format string mirrors swap_meta.resolve_ipfs (kept
+    local: this module must stay importable without lfg_core.config)."""
     if not url:
         return []
     forms = [url]
     if url.startswith("ipfs://"):
         cid, _, path = url[len("ipfs://") :].partition("/")
-        forms.append(f"https://{cid}.ipfs.dweb.link/{path}")
+        forms.extend(_cid_variants(cid, path))
     else:
         m = _SUBDOMAIN_GATEWAY.match(url) or _PATH_GATEWAY.match(url)
         if m:
-            raw = f"ipfs://{m.group(1)}/{m.group(2)}"
-            forms.append(raw)
-            forms.append(f"https://{m.group(1)}.ipfs.dweb.link/{m.group(2)}")
+            forms.extend(_cid_variants(m.group(1), m.group(2) or ""))
     return list(dict.fromkeys(forms))
 
 
