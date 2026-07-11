@@ -12,6 +12,7 @@ from typing import Any
 
 from lfg_core import (
     cdn,
+    closet_token,
     config,
     economy_flow,
     layer_store,
@@ -121,6 +122,20 @@ async def _compose_trait(slot: str, value: str) -> str:
     raise RuntimeError(f"no layer found for {slot}={value!r}")
 
 
+async def _closet_modify(nft_id: str, owner: str, url: str) -> str | None:
+    """NFTokenModify the Closet URI, mapping an INDETERMINATE on-chain outcome
+    (xrpl_ops.IndeterminateResultError — submit raised and the tx could not be
+    confirmed either way) to closet_token.ClosetIndeterminateError so
+    sync_closet's phase-aware taxonomy (#107/#179) fails closed (no on-chain
+    compensation, reconcile from chain) instead of collapsing an unknown outcome
+    to a plain ClosetError ('did NOT commit'). A definitive, validated failure
+    still returns None → plain ClosetError; a success returns the tx hash."""
+    try:
+        return await xrpl_ops.modify_nft(nft_id, owner, url)
+    except xrpl_ops.IndeterminateResultError as e:
+        raise closet_token.ClosetIndeterminateError(str(e)) from e
+
+
 async def _trait_info(nft_id: str) -> dict[str, Any] | None:
     return await xrpl_ops.nft_info(nft_id)
 
@@ -145,7 +160,7 @@ def build_economy_deps(conn: sqlite3.Connection) -> economy_flow.EconomyDeps:
         ),
         closet_offer_fn=_offer_or_skip,
         closet_accept_fn=_accept_or_skip,
-        closet_modify_fn=lambda nft_id, owner, url: xrpl_ops.modify_nft(nft_id, owner, url),
+        closet_modify_fn=_closet_modify,
         closet_exists_fn=lambda nft_id: _closet_exists(nft_id),
         closet_owner_fn=lambda nft_id: _closet_owner(nft_id),
         char_compose_fn=_compose_char,
