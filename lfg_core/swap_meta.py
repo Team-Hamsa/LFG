@@ -120,6 +120,8 @@ def none_swaps(
 def detect_body(attributes: list[dict[str, Any]]) -> str:
     """Body class determines which layer directory set is used."""
     body_val = get_attr(attributes, "Body") or ""
+    if "Milady" in body_val:
+        return "milady"
     if "Straight" in body_val:
         return "male"
     if "Curved" in body_val:
