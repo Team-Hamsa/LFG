@@ -135,12 +135,53 @@ DISCORD_CLIENT_ID = os.getenv("DISCORD_CLIENT_ID", "")
 DISCORD_CLIENT_SECRET = os.getenv("DISCORD_CLIENT_SECRET", "")
 WEBAPP_SESSION_SECRET = os.getenv("WEBAPP_SESSION_SECRET", "")
 WEBAPP_PORT = int(os.getenv("WEBAPP_PORT", "8176"))
-ECONOMY_NETWORK = os.getenv("ECONOMY_NETWORK", "testnet")  # economy DB network
+# Economy DB network. Normalized like XRPL_NETWORK so the boot-time
+# network-match assertion below compares apples to apples.
+ECONOMY_NETWORK = os.getenv("ECONOMY_NETWORK", "testnet").strip().lower()
 # Master switch for the Closet / dress-up trait economy surface. When off the
 # service answers economy routes with 403 economy_disabled, registration does
 # not auto-issue Closets, and the client hides the Dress Up UI — lets the
 # Minter + Trait Swapper launch on mainnet before the Closet ships.
-ECONOMY_ENABLED = os.getenv("ECONOMY_ENABLED", "1") not in ("0", "false", "False")
+# Defaults OFF (opt-in): the economy signs on-ledger ops against XRPL_NETWORK
+# while its DB/gates resolve on ECONOMY_NETWORK, so it must never be enabled
+# unless an operator has deliberately confirmed both point at the same chain
+# (see the assertion below and go-live review B5).
+ECONOMY_ENABLED = os.getenv("ECONOMY_ENABLED", "0") not in ("0", "false", "False")
+
+
+def validate_economy_config(
+    economy_enabled: bool,
+    economy_network: str,
+    xrpl_network: str,
+) -> None:
+    """Refuse to boot the economy against a split network.
+
+    The trait economy's DB reads/gates resolve on ECONOMY_NETWORK while its
+    on-ledger ops (mint / burn / NFTokenModify) sign against XRPL_NETWORK's
+    endpoints via the single-network xrpl_ops globals. If the two differ while
+    the economy is live, reads run against one chain's DB while irreversible
+    asset ops land on the other — the exact split-network hazard that
+    ECONOMY_ENABLED=0 was pulled to prevent at the mainnet cutover (see
+    reports/2026-07-11-trait-economy-golive-review.md, blocker B5). Enforce the
+    invariant at startup instead of trusting an operator to keep two env vars
+    in sync.
+
+    Runs at import for every surface (all of them import config); raises
+    ValueError so a misconfigured process fails fast and loudly rather than
+    silently mutating assets on the wrong ledger.
+    """
+    if economy_enabled and economy_network != xrpl_network:
+        raise ValueError(
+            "ECONOMY_ENABLED is on but ECONOMY_NETWORK "
+            f"({economy_network!r}) != XRPL_NETWORK ({xrpl_network!r}). "
+            "The trait economy signs on-ledger ops against XRPL_NETWORK while "
+            "its DB and gates resolve on ECONOMY_NETWORK; a split would land "
+            "irreversible asset ops on the wrong chain. Set both to the same "
+            "network, or ECONOMY_ENABLED=0."
+        )
+
+
+validate_economy_config(ECONOMY_ENABLED, ECONOMY_NETWORK, XRPL_NETWORK)
 # In-app marketplace (#44) feature flag (default on): when 0, every /api/market
 # route answers 403 feature-disabled and the client hides the Marketplace UI —
 # lets the Minter + Trait Swapper launch on mainnet before the money-touching

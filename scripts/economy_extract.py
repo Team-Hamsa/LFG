@@ -43,7 +43,7 @@ def main() -> int:
     parser = argparse.ArgumentParser(
         description="Extract a loose Closet trait into a standalone tradeable NFToken."
     )
-    parser.add_argument("--network", choices=["mainnet", "testnet"], default=config.XRPL_NETWORK)
+    parser.add_argument("--network", choices=["mainnet", "testnet"], default=config.ECONOMY_NETWORK)
     parser.add_argument("--owner", required=True, help="owner's XRPL address")
     parser.add_argument("--slot", required=True, help="trait slot (e.g. Hat, Eyes)")
     parser.add_argument("--value", required=True, help="trait value (e.g. 'Wizard Hat')")

@@ -46,7 +46,7 @@ async def _amain(args: argparse.Namespace) -> int:
 
 def main() -> int:
     parser = argparse.ArgumentParser(description="Equip a Closet asset onto a character.")
-    parser.add_argument("--network", choices=["mainnet", "testnet"], default=config.XRPL_NETWORK)
+    parser.add_argument("--network", choices=["mainnet", "testnet"], default=config.ECONOMY_NETWORK)
     parser.add_argument("--owner", required=True, help="owner's XRPL address")
     parser.add_argument("--nft-id", required=True, help="character NFTokenID to modify")
     parser.add_argument("--slot", required=True, help="non-body slot to change")
