@@ -36,7 +36,9 @@ DEFAULT_FPS = 20  # fallback when ffprobe reports a degenerate frame rate
 def run(cmd: list[str]) -> subprocess.CompletedProcess[bytes]:
     proc = subprocess.run(cmd, capture_output=True)
     if proc.returncode != 0:
-        raise RuntimeError(f"{cmd[0]} failed: {proc.stderr.decode(errors='replace').strip()[-500:]}")
+        raise RuntimeError(
+            f"{cmd[0]} failed: {proc.stderr.decode(errors='replace').strip()[-500:]}"
+        )
     return proc
 
 
