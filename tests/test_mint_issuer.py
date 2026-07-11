@@ -52,7 +52,7 @@ def test_mint_session_mints_as_collection_issuer(monkeypatch):
     async def fake_compose(attributes, body, store, basename):
         return "/tmp/out.png", False
 
-    async def fake_upload_output(path, is_video, upload_fn, basename):
+    async def fake_upload_output(path, is_video, upload_fn, basename, keep_still=None):
         return "https://cdn.example/x.png", None
 
     # Force the collection issuer and token issuer to visibly differ, like

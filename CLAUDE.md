@@ -188,14 +188,29 @@ Database Tables:
 
 ### Trait Layer System
 
-Production trait art lives in `layers/<body>/<TraitType>/<Value>.*` (bodies: ape/female/male/skeleton;
-gitignored, fully synced to BunnyCDN — upload tool `scripts/upload_layers_cdn.py`, idempotent).
-`lfg_core/layer_store.py` reads it from local disk or CDN depending on `LAYER_SOURCE`.
+Production trait art lives in `layers/<body>/<TraitType>/<Value>.*` (bodies:
+ape/female/male/milady/skeleton; gitignored, **served from local disk only** —
+`LAYER_SOURCE=local` since 2026-07-02, no CDN layer sync anymore).
+`lfg_core/layer_store.py` reads it; the layer tree is LIVE — a body dir or
+trait file on disk is immediately in the mint pool, there is no staging flag.
 
 Layer z-order and selection rules are **declarative** in `trait_config.yaml` (rules engine, #40):
 `layers` array sets z-order, per-value `z_overrides`, `exclusions`/`inclusions` constrain
 combinations. Parsing/validation/queries live in `lfg_core/trait_config.py`; random selection in
 `lfg_core/traits.py`. A `validate-trait-config` pre-push hook guards the file.
+
+**Animated layers** (`.gif`/`.mp4`, since 2026-07-11 the five Irridescent Body
+values are GIFs): when any layer in a composition isn't `.png`,
+`swap_compose.compose_nft` outputs an **MP4** (metadata `image` = PNG
+first-frame thumbnail, animation in the `video` field). Hard requirements —
+**1080×1080** (compose does no scaling; undersized art renders small at the
+top-left) and **alpha preserved** (an opaque GIF paints over every layer below;
+a GIF exported via an MP4 intermediate loses alpha). `layer_store.resolve()`
+checks `.png` before `.gif`, so replacing a static trait means deleting the
+PNG (same file stem = same trait value, no config/DB change). Use
+`scripts/make_animated_layer.py` (ffmpeg RGBA frames → lanczos scale → gifski;
+verifies size + per-frame alpha; needs `gifski` on PATH, installed at
+`~/.local/bin/gifski`) to prepare compliant files.
 
 (The old numbered `trait_layers/` directories and `get_sorted_trait_layers()` are gone.)
 

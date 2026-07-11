@@ -72,8 +72,8 @@ def test_compose_nft_ape_inserts_nose_and_masks(tmp_path, monkeypatch):
 
     files = captured["files"]
     names = [os.path.basename(f) for f in files]
-    assert "Nose.png" in names
-    assert names.index("Nose.png") == names.index("Creepy.masked.png") + 1  # nose above eyes
+    assert "Nose.masked.png" in names
+    assert names.index("Nose.masked.png") == names.index("Creepy.masked.png") + 1  # nose above eyes
     assert is_video is False
     assert os.path.isfile(path)
     # masked temp cleaned up after compose

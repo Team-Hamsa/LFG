@@ -21,10 +21,10 @@ from lfg_core.rarity import utcnow
 
 _DUP_SUFFIX = re.compile(r"#\d+$")
 
-# The four real bodies a "shared/<category>/<value>" manifest key (written by
+# The real bodies a "shared/<category>/<value>" manifest key (written by
 # scripts/migrate_shared_layers.py once a value is byte-identical across all
 # of them) actually applies to. There is no body literally named "shared".
-BODIES = ("ape", "female", "male", "skeleton")
+BODIES = ("ape", "female", "male", "milady", "skeleton")
 
 
 def strip_dup_suffix(value: str) -> str:

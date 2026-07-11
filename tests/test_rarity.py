@@ -239,6 +239,35 @@ def test_weighted_pick_active_boost_dominates(conn):
     assert fresh > 350
 
 
+def test_weighted_pick_denominator_spans_whole_category(conn):
+    # Regression (ape Star-eyes bug): 200 legacy apes store Eyes='None' —
+    # a value that is never in the mintable candidate list — and a single
+    # 'Star' mint exists. The live-share denominator must span the whole
+    # (body, category) population, not just the candidates, or Star's share
+    # becomes 1/1 = 1.0 and it wins ~80% of every roll, snowballing.
+    for i in range(200):
+        conn.execute(
+            "INSERT INTO LFG (nft_number, Eyes, body_type, network) VALUES (?,?,?,?)",
+            (i + 1, "None", "ape", "testnet"),
+        )
+    conn.execute(
+        "INSERT INTO LFG (nft_number, Eyes, body_type, network) VALUES (?,?,?,?)",
+        (201, "Star", "ape", "testnet"),
+    )
+    conn.commit()
+    available = ["Star", "3D", "Aviators", "Laser", "Hypno"]
+    rng = random.Random(11)
+    picks = [
+        rarity.weighted_pick(conn, "ape", "Eyes", available, network="testnet", now=NOW, rng=rng)
+        for _ in range(1000)
+    ]
+    star = picks.count("Star")
+    # Star's true live share is 1/201 ≈ 0.5% → floor-clamped like the rest,
+    # so the roll should be near-uniform (~200 each). The buggy candidate-only
+    # denominator gives Star ≈ 98% (~980).
+    assert star < 400, f"Star over-picked: {star}/1000"
+
+
 # Task 4: recalculate_rarity + staleness guard
 
 
