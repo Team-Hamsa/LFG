@@ -83,10 +83,7 @@ def test_init_db_runs_without_runtime_secrets(tmp_path):
     )
     assert result.returncode == 0, result.stderr
     conn = sqlite3.connect(db)
-    tables = {
-        row[0]
-        for row in conn.execute("SELECT name FROM sqlite_master WHERE type='table'")
-    }
+    tables = {row[0] for row in conn.execute("SELECT name FROM sqlite_master WHERE type='table'")}
     conn.close()
     assert {"LFG", "burned_nfts"} <= tables
 
