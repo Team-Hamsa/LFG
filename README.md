@@ -6,11 +6,11 @@
 
 Three front ends share one backend (`lfg_service`) and one pipeline (`lfg_core/`):
 
-- **Discord Activity webapp** (`python -m lfg_service.app`) — embedded app running inside Discord: wallet registration, LFGO trustline setup, NFT minting, the Trait Swapper, the Dressing Room, and Leaderboards. Setup: [docs/ACTIVITY_SETUP.md](docs/ACTIVITY_SETUP.md).
+- **Discord Activity webapp** (`python -m lfg_service.app`) — embedded app running inside Discord: wallet registration, LFGO trustline setup, NFT minting, the Trait Swapper, the Marketplace, Leaderboards, and the Dressing Room (economy features currently disabled — see below). Setup: [docs/ACTIVITY_SETUP.md](docs/ACTIVITY_SETUP.md).
 - **Telegram bot** (`python run_telegram.py`) — chat-style mint + trait swapper via inline keyboards, plus a feature-flagged Mini App that serves the same Activity inside Telegram.
 - **Classic Discord bot** (`python main.py`) — slash-command/button interface for the same mint flow.
 
-All surfaces run side by side against the shared `lfg_service` backend.
+All surfaces run side by side against the shared `lfg_service` backend. The collection is **live on XRPL mainnet** (cutover 2026-07-10; 3,535 editions reconciled).
 
 > **XRPL Make Waves Hackathon:** every XRPL transaction and Xaman signing payload the app builds carries `SourceTag 2606160021`.
 
@@ -33,7 +33,9 @@ All surfaces run side by side against the shared `lfg_service` backend.
 | Admin panel (stats, NFT lookup, burn with audit log) | ✅ |
 | Shared-services spine — one `lfg_service` backend, thin surface clients | ✅ |
 | Telegram surface (bot + trait swapper + Mini App) | ✅ |
-| Dress-up trait economy (Closet, harvest/assemble/equip, tradeable trait tokens) | ✅ |
+| Dress-up trait economy (Closet, harvest/assemble/equip, tradeable trait tokens) | ⏸ built, currently disabled — see note below |
+| In-app NFT marketplace (list / browse / buy via Xaman, XRP-denominated) | ✅ |
+| Xaman push delivery (sign requests pushed to the app, QR fallback) | ✅ |
 | Ledger history database + Activity leaderboards (incl. BRIX richlist) | ✅ |
 | On-chain NFT index with live listeners | ✅ |
 | Seasonal trait manifest (Season 3 mint exclusion) | ✅ |
@@ -42,6 +44,15 @@ All surfaces run side by side against the shared `lfg_service` backend.
 | Body-affinity matrix derived from full mint history (3,535 editions audited) | ✅ |
 | Cross-body trait swapping (compatibility matrix, API-enforced + UI-filtered) | ✅ |
 | Shared trait layers (`layers/shared/` with verify-then-move migration) | ✅ |
+| Fifth body type (milady) live in the mint pool | ✅ |
+| Animated trait layers (transparent GIF bodies → video NFTs, gifski pipeline) | ✅ |
+| Mainnet launch — live collection, network-aware databases, post-cutover hardening | ✅ |
+
+> **Trait economy status:** all four phases are implemented and were live on
+> testnet, but the economy is **currently disabled in production**
+> (`ECONOMY_ENABLED=0`) — an adversarial review surfaced a batch of bugs
+> (issues [#178](../../issues/178)–[#184](../../issues/184)) that are being
+> worked through. Go-live checklist: [#185](../../issues/185).
 
 ---
 
@@ -82,6 +93,31 @@ A full on-ledger trait economy in four phases:
 - **Phase 4** — **tradeable trait tokens**: Extract a Closet trait as a standalone transferable NFToken (7% royalty) and Deposit it back, creating a secondary market for individual traits [#106](https://github.com/Team-Hamsa/LFG/pull/106).
 - The per-user **Closet** is a soulbound mutable NFToken with standalone issuance [#105](https://github.com/Team-Hamsa/LFG/pull/105).
 
+> Currently **feature-flagged off** in production while review findings
+> ([#178](../../issues/178)–[#184](../../issues/184)) are fixed;
+> go-live tracked in [#185](../../issues/185).
+
+### In-app Marketplace ([#44](../../issues/44)) — #129, #132, #134, #139
+- XRP-denominated marketplace for characters and trait tokens, built entirely on
+  native `NFTokenOffer` sell offers — no escrow, no custodial holding ([#129](https://github.com/Team-Hamsa/LFG/pull/129)).
+- Derived `market_listings` index kept current three ways: the live tx listener,
+  finalize-writes from the List/Buy/Cancel session state machines, and an
+  idempotent backfill sweep.
+- Fail-closed buys: the sell offer is re-verified on-ledger immediately before
+  the Xaman payload is built, and the signer is checked against the session wallet.
+- Sold traits settle automatically back into the buyer's Closet, with a retry
+  sweep backstopping restarts.
+- **Xaman push delivery** ([#135](../../issues/135), [#139](https://github.com/Team-Hamsa/LFG/pull/139)) —
+  returning users get sign requests pushed straight to the Xaman app instead of
+  rescanning a QR (QR/deep link always returned as fallback).
+
+### Milady Body + Animated Layers — #171, #174
+- Fifth body type (**milady**) registered end-to-end: art, trait config,
+  affinity matrix, swap matrix ([#171](https://github.com/Team-Hamsa/LFG/pull/171)).
+- **Animated trait layers**: transparent-GIF body values compose into video
+  NFTs (MP4 + PNG thumbnail); `scripts/make_animated_layer.py` (ffmpeg → gifski)
+  produces compliant 1080×1080 alpha-preserving GIFs ([#174](https://github.com/Team-Hamsa/LFG/pull/174)).
+
 ### Ledger History + Leaderboards (not in original scope) — #118–#121
 - Per-network **ledger history database**: raw `account_tx` archive with derived NFT and BRIX events, resumable backfill (95k+ mainnet txs), and live dual-write from the index listeners (#118, #119).
 - Public `GET /api/leaderboard` with **8 boards** — most NFTs held, most swaps, most builds, most-swapped NFTs, **BRIX richlist**, LP richlist, BRIX earned, and NFT rarity — with rolling time windows and a "me" rank lookup.
@@ -108,6 +144,9 @@ Trait legality is no longer an accident of directory layout — a single validat
 - `ECONOMY_ENABLED` flag to launch with the trait economy off (#113).
 - Bithomp import filtered by collection issuer; census reconciled to 3,535 clean editions (#111).
 - **Mainnet BRIX/XRP AMM pool live** and quoting for the trait-swap fee path; testnet pool tooling (`scripts/testnet_amm_setup.py`) closes [#26](../../issues/26).
+- **Mainnet cutover executed 2026-07-10** — audits passing (3,535 live editions,
+  zero drift), local-first image archive, network-aware app database
+  ([#167](../../issues/167)) so testnet mints can't poison the mainnet edition counter.
 
 ---
 
@@ -115,7 +154,7 @@ Trait legality is no longer an accident of directory layout — a single validat
 
 - [ ] [#42 Web UI (standalone browser-based mint + collection viewer)](../../issues/42)
 - [ ] [#41 X (Twitter) integration (OAuth2, auto-post on mint)](../../issues/41)
-- [ ] [#44 In-app collection Marketplace (list, browse, buy via Xaman)](../../issues/44)
+- [ ] Trait economy re-enable — fix review findings [#178](../../issues/178)–[#184](../../issues/184), go-live checklist [#185](../../issues/185)
 - [ ] [#45 DEX integration — backend (OfferCreate/Cancel, order book)](../../issues/45)
 - [ ] [#47 AMM integration — backend (deposit/withdraw/swap, pool stats)](../../issues/47)
 - [ ] [#48 BRIX daily distribution (1/day per unlisted NFT, claim flow)](../../issues/48) — leaderboard/history groundwork shipped in #118
@@ -130,7 +169,8 @@ Trait legality is no longer an accident of directory layout — a single validat
 - [x] [#38 Ape bodies incorrectly assigned face traits](../../issues/38)
 - [x] [#40 Trait selection rules engine (declarative `trait_config.yaml`)](../../issues/40)
 - [x] [#43 Telegram integration](../../issues/43)
-- [x] [#46 Dress-up game](../../issues/46)
+- [x] [#44 In-app collection Marketplace (list, browse, buy via Xaman)](../../issues/44)
+- [x] [#46 Dress-up game](../../issues/46) — built; currently disabled pending bug fixes (see [#185](../../issues/185))
 - [x] [#49 Explore: AI agent integration via XRPL Payments skill](../../issues/49)
 
 ---
@@ -215,7 +255,7 @@ Full list with defaults in `lfg_core/config.py`. Defaults point at **testnet**; 
 
 ### Trait Layers
 
-Upload layers to BunnyCDN or set `LAYER_SOURCE=local` for development:
+Trait art is served from the local `layers/` tree (`LAYER_SOURCE=local`, the production setting); BunnyCDN is still used for minted image/metadata uploads:
 
 ```
 layers/
@@ -226,6 +266,7 @@ layers/
 │   ├── Body/ Clothing/ Mouth/ Eyebrows/ Eyes/ Head/ Accessory/
 ├── female/
 ├── ape/
+├── milady/
 └── skeleton/
 ```
 
