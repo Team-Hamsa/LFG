@@ -268,6 +268,49 @@ def test_weighted_pick_denominator_spans_whole_category(conn):
     assert star < 400, f"Star over-picked: {star}/1000"
 
 
+def test_weighted_pick_new_body_cold_start_does_not_snowball(conn):
+    # Regression (milady identical-mints bug): a brand-new body has no legacy
+    # rows to widen the denominator — after the first few mints of one value,
+    # its live share is count/count = 1.0 vs the 0.005 floor for every other
+    # value, so the exact same trait wins ~96% of rolls and snowballs (the
+    # first 3 mainnet miladys were identical across every category). Laplace
+    # smoothing must keep a cold category near-uniform.
+    for i in range(3):
+        conn.execute(
+            "INSERT INTO LFG (nft_number, Eyes, body_type, network) VALUES (?,?,?,?)",
+            (i + 1, "Bright Blue", "milady", "testnet"),
+        )
+    conn.commit()
+    available = [
+        "Bright Blue",
+        "Curious Blue",
+        "Curious Brown",
+        "Curious Green",
+        "Lively Brown",
+        "Lively Green",
+        "Tired Blue",
+        "Tired Brown",
+        "Tired Green",
+    ]
+    rng = random.Random(21)
+    picks = [
+        rarity.weighted_pick(conn, "milady", "Eyes", available, network="testnet", now=NOW, rng=rng)
+        for _ in range(1000)
+    ]
+    winner = picks.count("Bright Blue")
+    # Smoothed share (3+1)/(3+9) = 1/3 vs 1/12 each for the other eight →
+    # ~33% expected. The buggy proportional share (1.0 vs 8×0.005) gives ~96%.
+    assert winner < 500, f"Bright Blue over-picked: {winner}/1000"
+    assert len(set(picks)) == len(available), "cold-start roll should reach every value"
+
+
+def test_smoothed_share_negligible_on_mature_category():
+    # Smoothing must not distort established rarity: 30/100 with 10 values
+    # → (30+1)/(100+10) ≈ 0.28, still ≈ the true 0.30 share.
+    w = rarity.effective_weight(30, 100, 0.005, None, 24, None, NOW, population_size=10)
+    assert w == pytest.approx(31 / 110)
+
+
 # Task 4: recalculate_rarity + staleness guard
 
 
