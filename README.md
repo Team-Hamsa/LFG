@@ -1,8 +1,8 @@
-<img src="webapp/client/assets/mascot.png" width="90" align="right" alt="LFG mascot">
+<img src="assets/mascot.png" width="94" align="right" alt="LFG mascot">
 
 <div align="center">
 
-<img src="assets/hero.svg" alt="LFG — mint, swap & trade NFTs on the XRP Ledger" width="820">
+<img src="assets/hero.png" alt="LFG — mint, swap & trade NFTs on the XRP Ledger" width="820">
 
 <br>
 
