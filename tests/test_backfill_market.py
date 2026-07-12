@@ -20,12 +20,14 @@ import sqlite3  # noqa: E402
 import sys  # noqa: E402
 from typing import Any  # noqa: E402
 
+import pytest  # noqa: E402
+
 REPO_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, os.path.join(REPO_ROOT, "scripts"))
 
 import backfill_market as bm  # noqa: E402
 
-from lfg_core import market_store  # noqa: E402
+from lfg_core import market_store, xrpl_ops  # noqa: E402
 from lfg_core.economy_store import _ECONOMY_SCHEMA, upsert_trait_token  # noqa: E402
 from lfg_core.market_store import MarketListing  # noqa: E402
 from lfg_core.nft_index import _SCHEMA as ONCHAIN_SCHEMA  # noqa: E402
@@ -44,6 +46,21 @@ def _run(coro: Any) -> Any:
         return loop.run_until_complete(coro)
     finally:
         loop.close()
+
+
+# Default ledger time for the whole file (#183): far in the future so no
+# offer is treated as expired unless a test seeds a later one. Keeps the
+# non-expiry tests hermetic — backfill now consults get_ledger_time once per
+# run, and the real one would hit the network.
+_STUB_LEDGER_TIME = 10_000_000_000
+
+
+@pytest.fixture(autouse=True)
+def _stub_ledger_time(monkeypatch):
+    async def _fake() -> int:
+        return _STUB_LEDGER_TIME
+
+    monkeypatch.setattr(xrpl_ops, "get_ledger_time", _fake)
 
 
 def _conn(tmp_path: Any) -> sqlite3.Connection:
@@ -94,6 +111,7 @@ def _sell_offer(
     amount: str = "1000000",
     destination: str | None = None,
     flags: int = bm.market_ops.LSF_SELL_NFTOKEN,
+    expiration: int | None = None,
 ) -> dict[str, Any]:
     return {
         "offer_index": offer_index,
@@ -101,6 +119,7 @@ def _sell_offer(
         "destination": destination,
         "flags": flags,
         "owner": owner,
+        "expiration": expiration,
     }
 
 
@@ -349,6 +368,74 @@ def test_previously_live_row_absent_on_ledger_closed_stale(tmp_path):
     assert row["is_live"] == 0
     assert row["closed_reason"] == "stale"
     assert stats["closed_stale"] == 1
+
+
+def test_expired_offer_not_upserted_live(tmp_path):
+    """#183: an offer whose Expiration is at/before the current ledger time is
+    dead — the sweep must not record it as live."""
+    conn = _conn(tmp_path)
+    _seed_character(conn, CHAR_NFT, owner=SELLER)
+    fetch = _fetch_offers_map(
+        {CHAR_NFT: [_sell_offer("OFF_EXPIRED", owner=SELLER, expiration=_STUB_LEDGER_TIME - 1)]}
+    )
+
+    stats = _run(bm.backfill_market(conn, fetch_offers=fetch))
+
+    row = conn.execute("SELECT * FROM market_listings WHERE offer_index='OFF_EXPIRED'").fetchone()
+    assert row is None
+    assert stats["live_listings"] == 0
+
+
+def test_expired_previously_live_row_closed_stale(tmp_path):
+    """A row that was live but whose backing offer has since expired is retired
+    by the stale-close pass (the expired offer drops out of this sweep)."""
+    conn = _conn(tmp_path)
+    _seed_character(conn, CHAR_NFT, owner=SELLER)
+    market_store.upsert_listing(
+        conn,
+        MarketListing(
+            offer_index="OFF_EXPIRED",
+            nft_id=CHAR_NFT,
+            kind="character",
+            seller=SELLER,
+            amount_drops=1_000_000,
+            is_live=1,
+        ),
+    )
+    fetch = _fetch_offers_map(
+        {CHAR_NFT: [_sell_offer("OFF_EXPIRED", owner=SELLER, expiration=_STUB_LEDGER_TIME - 1)]}
+    )
+
+    stats = _run(bm.backfill_market(conn, fetch_offers=fetch))
+
+    conn.row_factory = sqlite3.Row
+    row = conn.execute("SELECT * FROM market_listings WHERE offer_index='OFF_EXPIRED'").fetchone()
+    assert row["is_live"] == 0
+    assert row["closed_reason"] == "stale"
+    assert stats["closed_stale"] == 1
+
+
+def test_ledger_time_failure_leaves_expiry_unjudged(tmp_path):
+    """If the ledger-time fetch fails, expiry is left unjudged: an offer that
+    LOOKS expired is still upserted live (fail-open on the filter) rather than
+    risk falsely closing every expiring listing over a transient blip."""
+    conn = _conn(tmp_path)
+    _seed_character(conn, CHAR_NFT, owner=SELLER)
+
+    async def boom() -> int:
+        raise RuntimeError("ledger rpc down")
+
+    fetch = _fetch_offers_map(
+        {CHAR_NFT: [_sell_offer("OFF_MAYBE_EXPIRED", owner=SELLER, expiration=1)]}
+    )
+
+    _run(bm.backfill_market(conn, fetch_offers=fetch, fetch_ledger_time=boom))
+
+    row = conn.execute(
+        "SELECT is_live FROM market_listings WHERE offer_index='OFF_MAYBE_EXPIRED'"
+    ).fetchone()
+    assert row is not None
+    assert row[0] == 1
 
 
 def test_still_live_offer_not_closed_stale(tmp_path):

@@ -65,13 +65,16 @@ _EXTRACT_RUNNING = "running"
 TERMINAL_STATES = {DONE, FAILED, UNKNOWN, LISTED}
 
 # On a validated-but-failed NFTokenAcceptOffer, only these tec codes mean the
-# offer itself is gone (consumed/cancelled between verify and sign — spec §Q4's
-# documented race), so the caller may stale-close the listing. Every OTHER
-# failure is buyer-side (tecINSUFFICIENT_FUNDS, tecCANT_ACCEPT_OWN_OFFER, …) or
-# unknown — the offer is still healthy, so we fail the session WITHOUT closing
-# the row (closing it would be a griefing lever: a broke/self-accepting buyer
-# could delist anyone's listing). Be conservative: unknown tec ⇒ leave live.
-_OFFER_GONE_TEC_CODES = frozenset({"tecOBJECT_NOT_FOUND"})
+# offer itself is gone, so the caller may stale-close the listing:
+# tecOBJECT_NOT_FOUND (consumed/cancelled between verify and sign — spec §Q4's
+# documented race) and tecEXPIRED (the offer carried an Expiration that lapsed
+# before the accept landed, #183). Both are seller-/offer-side terminal states,
+# not buyer error. Every OTHER failure is buyer-side (tecINSUFFICIENT_FUNDS,
+# tecCANT_ACCEPT_OWN_OFFER, …) or unknown — the offer is still healthy, so we
+# fail the session WITHOUT closing the row (closing it would be a griefing
+# lever: a broke/self-accepting buyer could delist anyone's listing). Be
+# conservative: unknown tec ⇒ leave live.
+_OFFER_GONE_TEC_CODES = frozenset({"tecOBJECT_NOT_FOUND", "tecEXPIRED"})
 
 # ~30s at typical frontend poll intervals (spec §Q4: "bounded at 10 polls (~30s)").
 MAX_FINALIZE_POLLS = 10
