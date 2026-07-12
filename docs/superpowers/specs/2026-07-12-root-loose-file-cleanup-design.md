@@ -45,8 +45,15 @@ ops CLIs and is already an importable package (`scripts/__init__.py`). So:
 |---|---|---|
 | `db_helpers.py` | `lfg_core/db_helpers.py` | `lfg_core/mint_flow.py`, `tests/test_app_db_path.py`, `tests/test_rarity.py` |
 | `user_db.py` | `lfg_core/user_db.py` | `surfaces/discord_bot/bot.py`, `surfaces/discord_bot/views.py`, `lfg_service/identity.py`, `lfg_service/app.py`, `webapp/test_smoke.py`, `tests/test_event_endpoints.py`, `tests/test_app_db_path.py` |
-| `init_db.py` | `lfg_core/init_db.py` | `tests/test_market_trait_flow.py`, `tests/test_leaderboard_api.py`, `tests/test_market_api.py` |
+| `init_db.py` | `scripts/init_db.py` | none — a `__main__`-guarded bootstrap, invoked only as a subprocess by `tests/test_app_db_path.py` |
 | `rarity_admin.py` | `scripts/rarity_admin.py` | none (standalone CLI) |
+
+> Correction to the initial design: `init_db.py` was first slated for `lfg_core/`
+> on the assumption that tests import it. The precise sweep showed the three
+> "importers" were `from lfg_core.market_store import init_db as …` (the *function*),
+> matched on the substring ` import init_db`. The root module has **zero** importers
+> and a `__main__` guard — it is a run-not-imported bootstrap, so `scripts/` (not
+> `lfg_core/`) is its correct home.
 
 Moves use `git mv` (history preserved). No back-compat shims: nothing outside the
 repo imports these by bare name — pm2 runs `main.py`/`run_telegram.py`, which stay.
@@ -63,8 +70,9 @@ Public API preserved unchanged:
 - `from db_helpers import X` → `from lfg_core.db_helpers import X`
 - `import user_db` → `from lfg_core import user_db`
 - `from user_db import DATABASE` / `get_user` / … → `from lfg_core.user_db import …`
-- `import init_db` / `from init_db import init_db` → `from lfg_core import init_db` /
-  `from lfg_core.init_db import init_db`
+- `init_db` is never imported — it is a `__main__`-guarded bootstrap invoked as a
+  subprocess. The only reference is the subprocess path arg in
+  `tests/test_app_db_path.py:78` (`"init_db.py"` → `os.path.join("scripts", "init_db.py")`).
 
 Every `.py` under the repo (excluding `.venv/`, `.claude/worktrees/`) is swept; the
 acceptance gate is **zero** remaining bare-module references.
@@ -78,20 +86,21 @@ acceptance gate is **zero** remaining bare-module references.
    `from lfg_core import config, rarity` still resolves when run as
    `python scripts/rarity_admin.py` (or `python ../rarity_admin.py` from the
    rebuild-collection subdir).
-2. **`init_db.py` mypy posture.** It is currently `ignore_errors = true`. Moving it
-   into the type-checked `lfg_core/` means it must satisfy the gate. It is ~50 lines
-   of trivial sqlite DDL — add the `-> None` annotation and drop its override rather
-   than carry an `ignore_errors` smell into a package module.
+2. **`init_db.py` sys.path bootstrap.** At root, `python init_db.py` finds `lfg_core`
+   because the repo root is `sys.path[0]`. Under `scripts/` it must add the repo root
+   itself — the same `REPO_ROOT = abspath(join(dirname(__file__), ".."))` bootstrap
+   every other `scripts/*.py` uses — before `from lfg_core.db_path import app_db_path`.
+   `db_path` is dependency-free, so the "runs with only DB_PATH/XRPL_NETWORK" property
+   is preserved. `scripts/` is in the mypy `exclude`, so no annotation is needed and
+   its `ignore_errors` override is simply removed.
 
 ### `pyproject.toml` mypy overrides
 
 - Relaxed-annotation override (line ~63): `"db_helpers", "user_db"` →
   `"lfg_core.db_helpers", "lfg_core.user_db"`.
-- Fully-ignored ops-tool override (line ~74): drop `"init_db"` (now annotated in
-  `lfg_core/`) and `"rarity_admin"` (now under `scripts/`, already covered by the
-  `scripts/` mypy `exclude`). If annotating `init_db` proves noisy, fall back to a
-  single relaxed override `module = ["lfg_core.init_db"]` — preferred outcome is a
-  clean annotation.
+- Fully-ignored ops-tool override (line ~74, `module = ["rarity_admin", "init_db"]`):
+  **remove the whole override block** — both files now live under `scripts/`, which
+  the mypy `exclude` (`"^scripts/"`) already skips.
 
 ### Doc updates (live docs only)
 
