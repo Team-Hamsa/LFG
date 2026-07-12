@@ -53,9 +53,14 @@ def _conn_with_bucket() -> sqlite3.Connection:
 
 
 class _Fakes:
-    def __init__(self, *, fail_closet_modify=False, raise_closet_modify=False) -> None:
+    def __init__(
+        self, *, fail_closet_modify=False, raise_closet_modify=False, fail_revert_modify=False
+    ) -> None:
         self.fail_closet_modify = fail_closet_modify
         self.raise_closet_modify = raise_closet_modify
+        # When set, the REVERT char_modify (the 2nd+ call) returns a falsy hash,
+        # simulating a modify-back that did not land on-ledger.
+        self.fail_revert_modify = fail_revert_modify
         self.char_modifies: list[tuple[str, str, str]] = []
 
     async def closet_upload(self, meta: dict) -> str:
@@ -82,7 +87,10 @@ class _Fakes:
         return "CHAR"
 
     async def char_modify(self, nft_id, owner, url):
+        is_revert = len(self.char_modifies) > 0
         self.char_modifies.append((nft_id, owner, url))
+        if is_revert and self.fail_revert_modify:
+            return None  # the modify-back did not land
         return "MODH"
 
     async def char_burn(self, nft_id, owner):
@@ -163,6 +171,27 @@ def test_equip_bucket_fails_and_uri_undecodable_reports_honestly(tmp_path):
     assert f.char_modifies == [("NFT7", "rUser", "https://cdn/new.json")]
     record = json.loads((tmp_path / f"equip-{s.id}.json").read_text())
     assert record["status"] == "failed_revert"
+
+
+def test_equip_revert_modify_not_landing_marks_failed_revert(tmp_path):
+    """#184: the Closet swap fails (ledger did NOT commit) so the character is
+    reverted — but the revert modify-back returns a FALSY hash (didn't land).
+    The character may still carry the new traits while the Closet was not
+    updated, so this is failed_revert (admin recovery), NOT the clean
+    reverted_modify that a landed revert produces."""
+    conn = _conn_with_bucket()
+    f = _Fakes(fail_closet_modify=True, fail_revert_modify=True)
+    s = ef.EquipSession(owner="rUser", character=_char(), slot="Head", incoming_value="Crown")
+    _run(ef.run_equip(s, _deps(conn, f, tmp_path)))
+
+    assert s.state == ef.FAILED
+    # forward modify happened, then a revert-back was ATTEMPTED (but didn't land)
+    assert f.char_modifies == [
+        ("NFT7", "rUser", "https://cdn/new.json"),
+        ("NFT7", "rUser", OLD_URL),
+    ]
+    record = json.loads((tmp_path / f"equip-{s.id}.json").read_text())
+    assert record["status"] == "failed_revert"  # NOT reverted_modify
 
 
 # --- #107: phase-aware equip branches ---

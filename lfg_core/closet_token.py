@@ -130,6 +130,10 @@ async def ensure_closet(
     as stale and re-minted. While pending, this is idempotent and regenerates the
     Xaman accept payload (from the stored offer id, or a fresh offer when that id
     is missing/unusable — offer ids are not on-chain) so the UI can re-show it."""
+    # NOTE(#180): this check-then-mint is not serialized — a double-tap / register
+    # race can mint two Closets for one owner (and a crash between mint and record
+    # orphans an issuer-held token). The per-owner lock that closes it is owned by
+    # issue #180, deliberately not added in the #184 hardening bundle.
     existing = economy_store.get_closet_record(conn, owner)
     if existing is not None:
         nft_id, uri_hex, status, offer_id = existing

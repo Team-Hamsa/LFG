@@ -50,12 +50,13 @@ CREATE TABLE IF NOT EXISTS trait_tokens (
     value  TEXT
 );
 CREATE TABLE IF NOT EXISTS closet_tokens (
-    owner      TEXT PRIMARY KEY,
-    nft_id     TEXT,
-    uri_hex    TEXT,
-    status     TEXT DEFAULT 'pending_accept',
-    offer_id   TEXT,
-    updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+    owner          TEXT PRIMARY KEY,
+    nft_id         TEXT,
+    uri_hex        TEXT,
+    status         TEXT DEFAULT 'pending_accept',
+    offer_id       TEXT,
+    mirror_pending INTEGER DEFAULT 0,
+    updated_at     TIMESTAMP DEFAULT CURRENT_TIMESTAMP
 );
 CREATE TABLE IF NOT EXISTS supply_changes (
     id                INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -86,11 +87,24 @@ def _migrate_bucket_tables(conn: sqlite3.Connection) -> None:
     conn.commit()
 
 
+def _migrate_closet_columns(conn: sqlite3.Connection) -> None:
+    """Self-migrate closet_tokens columns added after the table first shipped.
+    `mirror_pending` (#184) flags an owner whose on-chain Closet was modified
+    but whose local mirror write failed (`complete_pending_mirror`); an index DB
+    created before this column needs it added. ADD COLUMN is idempotent-guarded
+    by the PRAGMA check."""
+    cols = {r[1] for r in conn.execute("PRAGMA table_info(closet_tokens)")}
+    if "mirror_pending" not in cols:
+        conn.execute("ALTER TABLE closet_tokens ADD COLUMN mirror_pending INTEGER DEFAULT 0")
+    conn.commit()
+
+
 def init_economy_schema(conn: sqlite3.Connection) -> None:
     """Create the genesis + live-state tables if absent, and migrate legacy bucket_* tables."""
     conn.executescript(_ECONOMY_SCHEMA)
     conn.commit()
     _migrate_bucket_tables(conn)
+    _migrate_closet_columns(conn)
 
 
 def genesis_exists(conn: sqlite3.Connection) -> bool:
@@ -227,6 +241,24 @@ def set_closet_contents(
         "INSERT INTO closet_bodies (owner, edition) VALUES (?, ?)",
         [(owner, edition) for edition in bodies],
     )
+    # A full authoritative rewrite of the mirror (flow optimistic write or
+    # listener/backfill rebuild-from-token) makes the DB consistent with the
+    # on-chain Closet again, so clear any outstanding mirror_pending flag (#184)
+    # in the SAME transaction — a rollback (half-applied mirror) leaves it set.
+    conn.execute("UPDATE closet_tokens SET mirror_pending = 0 WHERE owner = ?", (owner,))
+    conn.commit()
+
+
+def delete_closet(conn: sqlite3.Connection, owner: str) -> None:
+    """Remove an owner's Closet token record and all of its loose contents.
+
+    Used to scrub bogus rows keyed under the issuer address: the issuer is never
+    a legitimate Closet owner-of-record, so a prior (pre-#178/#190) backfill that
+    recorded a pending issuer-held Closet under the issuer must be cleaned up on
+    reconcile rather than left to strand the real user's Closet."""
+    conn.execute("DELETE FROM closet_assets WHERE owner = ?", (owner,))
+    conn.execute("DELETE FROM closet_bodies WHERE owner = ?", (owner,))
+    conn.execute("DELETE FROM closet_tokens WHERE owner = ?", (owner,))
     conn.commit()
 
 
@@ -277,6 +309,26 @@ def get_closet_token(conn: sqlite3.Connection, owner: str) -> tuple[str, str] | 
     cur = conn.execute("SELECT nft_id, uri_hex FROM closet_tokens WHERE owner = ?", (owner,))
     row = cur.fetchone()
     return None if row is None else (str(row[0]), str(row[1]))
+
+
+def set_mirror_pending(conn: sqlite3.Connection, owner: str, pending: bool) -> None:
+    """Mark (or clear) an owner's Closet DB mirror as stale-but-consistent (#184):
+    set when an on-chain Closet modify committed but the local mirror write failed
+    (`complete_pending_mirror`), so the next op refuses to full-write the token off
+    the stale mirror. Cleared by `set_closet_contents` on the next authoritative
+    rewrite (flow success or listener/backfill rebuild)."""
+    conn.execute(
+        "UPDATE closet_tokens SET mirror_pending = ? WHERE owner = ?",
+        (1 if pending else 0, owner),
+    )
+    conn.commit()
+
+
+def get_mirror_pending(conn: sqlite3.Connection, owner: str) -> bool:
+    """True if the owner's Closet DB mirror is flagged stale (see set_mirror_pending)."""
+    cur = conn.execute("SELECT mirror_pending FROM closet_tokens WHERE owner = ?", (owner,))
+    row = cur.fetchone()
+    return bool(row is not None and row[0])
 
 
 def record_supply_change(

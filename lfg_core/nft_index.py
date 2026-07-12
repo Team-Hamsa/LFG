@@ -356,6 +356,12 @@ async def enumerate_tokens(
             if marker:
                 req["marker"] = marker
             r = await client.request(Request.from_dict(req))
+            # Fail closed on an error response: a mid-pagination failure must not
+            # be read as end-of-list (empty nfts + no marker), which would return
+            # a silently truncated set and let a consumer's stale-delete drop live
+            # rows (#190). Abort the whole enumeration instead.
+            if not r.is_successful():
+                raise RuntimeError(f"nfts_by_issuer failed (taxon {taxon}): {r.result}")
             for x in r.result.get("nfts", []):
                 out.append(
                     {
