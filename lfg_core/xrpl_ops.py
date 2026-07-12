@@ -33,7 +33,7 @@ from xrpl.models.transactions import (
 from xrpl.models.transactions.nftoken_create_offer import NFTokenCreateOfferFlag
 from xrpl.models.transactions.transaction import Transaction
 from xrpl.transaction import autofill_and_sign, submit_and_wait
-from xrpl.utils import xrp_to_drops
+from xrpl.utils import get_nftoken_id, xrp_to_drops
 from xrpl.wallet import Wallet
 
 from lfg_core import config, memos
@@ -119,7 +119,11 @@ async def _submit_and_confirm(
     (This also removes the duplicate-mint risk of the old blind retry loop, #179.)"""
     signed = await asyncio.to_thread(autofill_and_sign, tx, client, wallet)
     try:
-        response = await asyncio.to_thread(submit_and_wait, signed, client, wallet, autofill=False)
+        # Pass wallet=None: `signed` is already signed, so submit_and_wait must
+        # not re-sign/re-autofill it — otherwise the submitted tx could differ
+        # from signed.get_hash() and the exception path would confirm the wrong
+        # hash, marking an actually-submitted tx as indeterminate (#188).
+        response = await asyncio.to_thread(submit_and_wait, signed, client, None, autofill=False)
     except Exception as e:
         logging.warning(f"{label}: submit_and_wait raised ({e}); confirming by hash")
         confirmed = await _confirm_by_hash(client, signed.get_hash())
@@ -174,11 +178,25 @@ async def mint_nft(
             return None  # definitive, validated failure
         meta = result["meta"]
         nft_id = meta.get("nftoken_id") if isinstance(meta, dict) else None
+        if not nft_id:
+            # The convenience meta.nftoken_id field is not always present; the
+            # mint DID validate (tesSUCCESS), so the token exists on-chain.
+            # Derive the id from the affected nodes rather than returning None
+            # (which callers read as a definitive failure and would compensate
+            # against an asset that already exists, #188).
+            try:
+                nft_id = get_nftoken_id(meta)
+            except Exception:
+                nft_id = None
         if nft_id:
             logging.info(f"NFT minted: {nft_id}")
-            return nft_id  # type: ignore[no-any-return]
-        logging.warning("Mint succeeded but no NFT ID in meta")
-        return None
+            return str(nft_id)
+        # Committed but unidentifiable: fail closed as indeterminate, never as a
+        # definitive-failure None — the NFT is on-ledger and must not be treated
+        # as "mint failed".
+        raise IndeterminateResultError(
+            "NFTokenMint validated (tesSUCCESS) but its NFTokenID could not be resolved from meta"
+        )
 
     except IndeterminateResultError:
         raise  # never collapse an unknown outcome to a definitive-failure None

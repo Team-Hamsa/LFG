@@ -192,3 +192,37 @@ def test_closet_modify_definitive_failure_stays_none(monkeypatch):
     # A definitive failure must NOT masquerade as indeterminate — sync_closet
     # turns this None into a plain ClosetError (on-chain compensation safe).
     assert _run(deps._closet_modify("NFTID", "rOwner", "https://x/new.json")) is None
+
+
+# --- committed mint whose meta lacks the convenience nftoken_id (#188) ---
+
+
+def test_mint_committed_without_convenience_id_resolves_from_meta(monkeypatch):
+    # A validated NFTokenMint whose meta omits the convenience `nftoken_id`
+    # field must resolve the id from the affected nodes, not return None
+    # (None reads as a definitive failure and triggers asset compensation).
+    _stub_sign(monkeypatch)
+    meta = {"TransactionResult": "tesSUCCESS", "AffectedNodes": []}
+    monkeypatch.setattr(
+        xrpl_ops, "submit_and_wait", lambda tx, client, wallet, **k: _Resp({"meta": meta})
+    )
+    monkeypatch.setattr(xrpl_ops, "get_nftoken_id", lambda m: "DERIVEDID")
+    got = _run(xrpl_ops.mint_nft("https://x/m.json", 1763, config.SIGNING_ACCOUNT))
+    assert got == "DERIVEDID"
+
+
+def test_mint_committed_but_unidentifiable_raises_indeterminate(monkeypatch):
+    # Validated but the id cannot be resolved at all: fail closed as
+    # indeterminate, never as a definitive-failure None.
+    _stub_sign(monkeypatch)
+    meta = {"TransactionResult": "tesSUCCESS", "AffectedNodes": []}
+    monkeypatch.setattr(
+        xrpl_ops, "submit_and_wait", lambda tx, client, wallet, **k: _Resp({"meta": meta})
+    )
+
+    def _boom(m):
+        raise ValueError("no nft node")
+
+    monkeypatch.setattr(xrpl_ops, "get_nftoken_id", _boom)
+    with pytest.raises(xrpl_ops.IndeterminateResultError):
+        _run(xrpl_ops.mint_nft("https://x/m.json", 1763, config.SIGNING_ACCOUNT))
