@@ -41,10 +41,12 @@ sys.path.insert(0, REPO_ROOT)
 
 from lfg_core import config, nft_index, nft_listener  # noqa: E402
 
-# A bare 64-hex NFTokenID as embedded in the listener's reason string
-# ("new-edition mint <nft_id>"). Anchored to a hex run so a differently-shaped
-# reason simply doesn't match and the row is left untouched.
-_NFT_ID_RE = re.compile(r"\b([0-9A-Fa-f]{64})\b")
+# The listener writes exactly `new-edition mint <nft_id>` (64-hex NFTokenID).
+# Match that FULL shape only — a bare-hex search would classify any manual or
+# future reason that merely contains a 64-hex run as an NFTokenID, and --apply
+# could then delete that row as foreign, corrupting the very ledger we repair.
+# A differently-shaped reason simply doesn't match and the row is left untouched.
+_NFT_ID_RE = re.compile(r"^new-edition mint ([0-9A-Fa-f]{64})$")
 
 
 def _classify_rows(
@@ -62,7 +64,7 @@ def _classify_rows(
     unparseable: list[tuple[int, str]] = []
     for row_id, reason in conn.execute("SELECT id, reason FROM supply_changes ORDER BY id"):
         reason_str = str(reason or "")
-        match = _NFT_ID_RE.search(reason_str)
+        match = _NFT_ID_RE.match(reason_str)
         if match is None:
             unparseable.append((int(row_id), reason_str))
             continue

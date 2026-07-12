@@ -52,11 +52,14 @@ def test_classify_splits_foreign_ours_and_unparseable():
     _record(conn, f"new-edition mint {ours_id}")
     _record(conn, f"new-edition mint {foreign_id}")
     _record(conn, "genesis freeze; no nft_id here")
+    # A non-listener reason that merely CONTAINS a 64-hex run (e.g. a manual note
+    # quoting a foreign nft_id) must be left untouched, not classified foreign.
+    _record(conn, f"manual note re {foreign_id} do not delete")
 
     foreign, ours, unparseable = purge._classify_rows(conn, ours_hex)
     assert [r[1] for r in ours] == [ours_id]
     assert [r[1] for r in foreign] == [foreign_id]
-    assert len(unparseable) == 1
+    assert len(unparseable) == 2
 
 
 def test_dry_run_deletes_nothing_apply_deletes_only_foreign(tmp_path, monkeypatch):
@@ -72,6 +75,9 @@ def test_dry_run_deletes_nothing_apply_deletes_only_foreign(tmp_path, monkeypatc
     conn.close()
 
     monkeypatch.setenv("ONCHAIN_DB_PATH", db_path)
+    # Pin the ambient network so the CLI network-match guard sees testnet
+    # regardless of what froze config.XRPL_NETWORK in full-suite import order.
+    monkeypatch.setattr(purge.config, "XRPL_NETWORK", "testnet")
 
     # Dry run: no deletion.
     monkeypatch.setattr(sys, "argv", ["purge", "--network", "testnet"])
@@ -92,7 +98,8 @@ def test_dry_run_deletes_nothing_apply_deletes_only_foreign(tmp_path, monkeypatc
 
 def test_missing_db_returns_2(monkeypatch, tmp_path):
     monkeypatch.setenv("ONCHAIN_DB_PATH", str(tmp_path / "does_not_exist.db"))
-    # --network must match ambient XRPL_NETWORK (testnet here) to reach the DB check.
+    # --network must match ambient XRPL_NETWORK (pinned testnet here) to reach the DB check.
+    monkeypatch.setattr(purge.config, "XRPL_NETWORK", "testnet")
     monkeypatch.setattr(sys, "argv", ["purge", "--network", "testnet"])
     assert purge.main() == 2
 
@@ -100,6 +107,7 @@ def test_missing_db_returns_2(monkeypatch, tmp_path):
 def test_network_mismatch_refuses_before_touching_db(monkeypatch, capsys):
     # Ambient XRPL_NETWORK is testnet; asking to purge mainnet would classify with
     # the wrong issuer and wipe the whole table, so it must refuse with exit 2.
+    monkeypatch.setattr(purge.config, "XRPL_NETWORK", "testnet")
     monkeypatch.setattr(sys, "argv", ["purge", "--network", "mainnet", "--apply"])
     assert purge.main() == 2
     assert "refusing" in capsys.readouterr().err
