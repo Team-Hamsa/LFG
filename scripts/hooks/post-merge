@@ -25,7 +25,7 @@ BASE="$(git rev-parse --verify --quiet ORIG_HEAD || git rev-parse --verify --qui
 [ -n "$BASE" ] || exit 0
 
 if ! git diff --name-only "$BASE" HEAD \
-  | grep -qE '^(webapp/|lfg_service/|requirements\.txt$|[^/]+\.py$)'; then
+  | grep -qE '^(webapp/|lfg_service/|lfg_core/|requirements\.txt$|[^/]+\.py$)'; then
   exit 0
 fi
 
@@ -64,8 +64,13 @@ while :; do
     break
   fi
   if [ "$(date +%s)" -ge "$deadline" ]; then
-    echo "[post-merge] WARNING: ${n} session(s) still in flight after ${MAX_WAIT}s; restarting anyway." >&2
-    break
+    # Drain timed out with sessions still live. Restarting now would kill the
+    # exact in-flight mint/swap/economy/market work this hook exists to protect,
+    # so fail safe: refuse the auto-restart and hand it to a human who can pick a
+    # genuinely quiet moment (or force it deliberately).
+    echo "[post-merge] WARNING: ${n} session(s) still in flight after ${MAX_WAIT}s; NOT auto-restarting." >&2
+    echo "[post-merge] Restart manually when safe: pm2 restart $PROC --update-env" >&2
+    exit 0
   fi
   echo "[post-merge] $n in-flight session(s); waiting for drain before restart…"
   sleep "$POLL_EVERY"
