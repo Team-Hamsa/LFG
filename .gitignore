@@ -47,6 +47,10 @@ LFGO*.csv
 history_testnet.db*
 history_mainnet.db*
 
+# Network-aware app DB + rarity cache (regenerable; never commit)
+lfg_nfts_*.db
+rarity.db
+
 # macOS finder metadata
 .DS_Store
 ._.DS_Store
