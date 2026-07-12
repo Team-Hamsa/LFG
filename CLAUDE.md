@@ -127,17 +127,18 @@ the other, whose aiohttp session is never opened, so `/register` and `/mint` fai
 ├── run_telegram.py         # launch shim for the Telegram surface (see "Running", below)
 ├── lfg_core/               # shared domain logic: config.py (networks, SOURCE_TAG), mint_flow, swap_*,
 │                           #   economy_*, market_*, xrpl_ops, xumm_ops, layer_store, traits/trait_config,
-│                           #   rarity, nft_index + nft_listener, history_store/events, leaderboard
+│                           #   rarity, nft_index + nft_listener, history_store/events, leaderboard,
+│                           #   db_helpers (LFG table), user_db (Users table)
 ├── lfg_service/            # service layer: app.py (API), auth.py, identity.py, telegram_auth.py
 ├── surfaces/
 │   ├── discord_bot/        # Discord bot: bot.py, commands.py, views.py, mint_view.py, admin.py, ...
 │   ├── telegram_bot/       # Telegram surface
 │   └── _client/, _shared/  # shared surface plumbing
 ├── webapp/                 # Discord Activity backend (server.py) + no-build client/ + smoke tests
-├── scripts/                # ops tooling: onchain_listener.py, backfills, rebuild_collection_db/, ...
+├── scripts/                # ops tooling: onchain_listener.py, backfills, init_db.py (DB bootstrap),
+│                           #   rarity_admin.py (rarity CLI), rebuild_collection_db/, ...
 ├── tests/                  # pytest suite (incl. the SourceTag invariant tests)
 ├── layers/                 # production trait art (gitignored; synced to BunnyCDN)
-├── db_helpers.py, user_db.py, init_db.py, rarity_admin.py   # root-level helpers / ops tools
 ├── trait_config.yaml       # declarative trait-selection rules engine config (#40)
 └── lfg_nfts.db, onchain_*.db, history_*.db   # SQLite stores (gitignored; all but lfg_nfts.db regenerable)
 
@@ -292,8 +293,8 @@ CREATE TABLE burned_nfts (
   `mint_view.py` (UI), `admin.py` (admin panel, burns)
 - `surfaces/telegram_bot/` — Telegram surface (launched via `run_telegram.py` shim)
 - `webapp/server.py` — Discord Activity backend (aiohttp, port 8176)
-- `db_helpers.py` — LFG-table helpers (`get_next_nft_number`, `record_nft_mint`, `get_nft_data`)
-- `user_db.py` — Users-table helpers (`create_users_table`, `register_user`, ...)
+- `lfg_core/db_helpers.py` — LFG-table helpers (`get_next_nft_number`, `record_nft_mint`, `get_nft_data`)
+- `lfg_core/user_db.py` — Users-table helpers (`create_users_table`, `register_user`, ...)
 - `ts_helpers.py` no longer exists — its responsibilities moved into `lfg_core/`
 
 ## XRPL Integration
