@@ -75,7 +75,7 @@ def test_init_db_runs_without_runtime_secrets(tmp_path):
         "XRPL_NETWORK": "testnet",
     }
     result = subprocess.run(
-        [sys.executable, os.path.join(repo_root, "init_db.py")],
+        [sys.executable, os.path.join(repo_root, "scripts", "init_db.py")],
         env=env,
         cwd=tmp_path,
         capture_output=True,
