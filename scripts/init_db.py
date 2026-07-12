@@ -1,9 +1,16 @@
 import logging
+import os
 import sqlite3
+import sys
 
 # Deliberately NOT lfg_core.config: this standalone initializer must run with
-# only DB_PATH / XRPL_NETWORK set, without the bot's runtime secrets.
-from lfg_core.db_path import app_db_path
+# only DB_PATH / XRPL_NETWORK set, without the bot's runtime secrets. db_path is
+# dependency-free, so that stays true. Bootstrap the repo root onto sys.path so
+# `python scripts/init_db.py` resolves lfg_core (matches every other scripts/ tool).
+REPO_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
+sys.path.insert(0, REPO_ROOT)
+
+from lfg_core.db_path import app_db_path  # noqa: E402
 
 logging.basicConfig(level=logging.INFO)
 

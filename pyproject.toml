@@ -60,16 +60,11 @@ ignore_errors = true
 # surface is low-value), but KEEP real-bug detection on — arg-type, union-attr,
 # return-value, assignment, attr-defined, call-arg all still fail the gate here.
 [[tool.mypy.overrides]]
-module = ["main", "run_telegram", "lfg_service.app", "webapp.server", "db_helpers", "user_db", "surfaces.discord_bot.*", "surfaces.telegram_bot.*", "surfaces._shared.*"]
+module = ["main", "run_telegram", "lfg_service.app", "webapp.server", "lfg_core.db_helpers", "lfg_core.user_db", "surfaces.discord_bot.*", "surfaces.telegram_bot.*", "surfaces._shared.*"]
 disallow_untyped_defs = false
 disallow_untyped_calls = false
 disallow_incomplete_defs = false
 warn_return_any = false
 
-# One-off standalone ops tools (run manually, never imported by the bot or
-# webapp). Fully ignored — typing them is pure cost. Re-promote if they re-enter
-# the runtime path. (scripts/ is already skipped via the `exclude` list above;
-# ts_helpers, the old trait-swap helper, was retired to legacy/.)
-[[tool.mypy.overrides]]
-module = ["rarity_admin", "init_db"]
-ignore_errors = true
+# (The former "standalone ops tools" override for rarity_admin/init_db is gone:
+# both now live under scripts/, which the top-level `exclude` already skips.)

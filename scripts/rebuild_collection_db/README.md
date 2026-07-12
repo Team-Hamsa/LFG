@@ -52,7 +52,7 @@ pollute rarity counts.
 After populating, rebuild the rarity cache:
 
 ```bash
-python ../../rarity_admin.py --network mainnet refresh
+python ../rarity_admin.py --network mainnet refresh
 ```
 
 ## Notes

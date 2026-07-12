@@ -14,7 +14,6 @@ import uuid
 from decimal import Decimal
 from typing import Any
 
-from db_helpers import get_next_nft_number, record_nft_mint
 from lfg_core import (
     cdn,
     config,
@@ -27,6 +26,7 @@ from lfg_core import (
     xrpl_ops,
     xumm_ops,
 )
+from lfg_core.db_helpers import get_next_nft_number, record_nft_mint
 
 # Session states
 AWAITING_PAYMENT = "awaiting_payment"

@@ -6,7 +6,7 @@
 import logging
 import sqlite3
 
-from user_db import DATABASE  # single source of truth for the db path
+from lfg_core.user_db import DATABASE  # single source of truth for the db path
 
 
 def ensure_identities_table() -> None:

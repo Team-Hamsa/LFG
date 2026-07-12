@@ -214,7 +214,7 @@ issuer** (suggest ≥ 50 XRP) and watch for that error in logs.
    DEPLOYED tree (`LAYERS_DIR=/home/hamsa/LFG/layers …`) — catches dropped
    layer files, incl. the ape body-root pair that once blocked all ape swaps.
 4. `SELECT MAX(nft_number) FROM LFG` — testnet mints share the table and
-   inflate the next edition number (`db_helpers.py:7` ignores the `network`
+   inflate the next edition number (`lfg_core/db_helpers.py` ignores the `network`
    column); confirm the next mainnet number before first mint.
 5. One real mainnet mint with a team wallet: payment → mint → offer → accept;
    confirm SourceTag 2606160021 AND the provenance Memo on the tx in an

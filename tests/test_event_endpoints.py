@@ -163,7 +163,7 @@ def test_events_me_falls_back_to_legacy_users(tmp_path, monkeypatch):
     """FIX 2b: a user present in Users but NOT in identities must still get events
     (no 403) — the legacy get_user fallback must supply the wallet."""
 
-    import user_db
+    from lfg_core import user_db
 
     # Point both identity and user_db to the same fresh DB
     db_path = str(tmp_path / "t.db")

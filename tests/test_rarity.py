@@ -539,7 +539,7 @@ def test_category_for_folder():
 
 
 def test_record_nft_mint_stamps_network_and_body(tmp_path):
-    import db_helpers
+    from lfg_core import db_helpers
 
     db = str(tmp_path / "t.db")
     c = sqlite3.connect(db)

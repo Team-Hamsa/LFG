@@ -18,9 +18,7 @@ os.environ.setdefault("TOKEN_CURRENCY_HEX", "4C46474F000000000000000000000000000
 os.environ.setdefault("XRPL_NETWORK", "testnet")
 os.environ.setdefault("BUNNY_PULL_ZONE", "nft.pullzone.example")
 
-import db_helpers
-import user_db
-from lfg_core import config
+from lfg_core import config, db_helpers, user_db
 
 
 def test_default_db_path_is_network_suffixed():
@@ -75,7 +73,7 @@ def test_init_db_runs_without_runtime_secrets(tmp_path):
         "XRPL_NETWORK": "testnet",
     }
     result = subprocess.run(
-        [sys.executable, os.path.join(repo_root, "init_db.py")],
+        [sys.executable, os.path.join(repo_root, "scripts", "init_db.py")],
         env=env,
         cwd=tmp_path,
         capture_output=True,
