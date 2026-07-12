@@ -2,20 +2,20 @@
 # Admin CLI for the variable rarity engine. Operates on the network
 # selected by XRPL_NETWORK unless --network overrides it.
 #
-#   python rarity_admin.py seed [--mark-testnet 9001 9002]
-#   python rarity_admin.py refresh
-#   python rarity_admin.py odds --body '*' --category Background
-#   python rarity_admin.py boost --body '*' --category Head --trait Crown \
+#   python scripts/rarity_admin.py seed [--mark-testnet 9001 9002]
+#   python scripts/rarity_admin.py refresh
+#   python scripts/rarity_admin.py odds --body '*' --category Background
+#   python scripts/rarity_admin.py boost --body '*' --category Head --trait Crown \
 #       [--initial 7] [--step-hours 24]
-#   python rarity_admin.py set-floor 0.005 [--body B --category C --trait T]
-#   python rarity_admin.py disable|enable --body B --category C --trait T
+#   python scripts/rarity_admin.py set-floor 0.005 [--body B --category C --trait T]
+#   python scripts/rarity_admin.py disable|enable --body B --category C --trait T
 
 import argparse
 import asyncio
 import os
 import sys
 
-sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from dotenv import load_dotenv
 
