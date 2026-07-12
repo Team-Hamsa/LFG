@@ -98,16 +98,37 @@ def test_closet_reconciled_active_with_contents(tmp_path):
     assert bodies == {7}
 
 
-def test_closet_issuer_held_is_pending(tmp_path):
+def test_closet_issuer_held_pending_is_skipped_not_stored_under_issuer(tmp_path):
+    # An issuer-held (pending_accept) Closet's on-ledger owner is the issuer, not
+    # the user the offer targets. Backfill must SKIP it (leave the ensure_closet
+    # pending record intact) rather than rebuild a Closet under the issuer
+    # address, which would strand the real user's Closet (#190).
     conn = _conn(tmp_path)
     meta = ct.build_closet_metadata(ISSUER, [], [])
     enum = _enum({CLOSET_TAXON: [_tok("CLOSET2", ISSUER, "URIP")]})
     fetch = _meta({"URIP": meta})
 
-    _run(be.backfill_economy(conn, enum, fetch, issuer=ISSUER))
+    stats = _run(be.backfill_economy(conn, enum, fetch, issuer=ISSUER))
 
-    rec = es.get_closet_record(conn, ISSUER)
-    assert rec is not None and rec[2] == ct.PENDING_ACCEPT
+    assert stats["closets_applied"] == 0
+    assert stats["closets_skipped"] == 1
+    assert es.get_closet_record(conn, ISSUER) is None
+
+
+def test_closet_unreadable_metadata_does_not_wipe_existing(tmp_path):
+    # A transient/unreadable metadata read must not be treated as an empty closet
+    # — that would wipe the owner's real contents and clear mirror_pending (#190).
+    conn = _conn(tmp_path)
+    es.set_closet_contents(conn, OWNER, [("Hat", "Cap", 3)], [5])
+    enum = _enum({CLOSET_TAXON: [_tok("CLOSET3", OWNER, "URIB")]})
+    fetch = _meta({})  # URIB -> None (fetch failure)
+
+    stats = _run(be.backfill_economy(conn, enum, fetch, issuer=ISSUER))
+
+    assert stats["closets_applied"] == 0
+    assert stats["closets_skipped"] == 1
+    assets = {(s, v): n for o, s, v, n in es.read_closet_assets(conn) if o == OWNER}
+    assert assets[("Hat", "Cap")] == 3  # untouched, not wiped
 
 
 def test_legacy_bucket_taxon_reconciled(tmp_path):

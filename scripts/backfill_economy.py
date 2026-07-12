@@ -65,13 +65,25 @@ def _reconcile_closet(
     conn: sqlite3.Connection, token: dict[str, Any], metadata: Any, issuer: str
 ) -> bool:
     """Rebuild one owner's Closet contents + token record from an on-ledger
-    Closet NFToken snapshot. Returns True if applied (owner present)."""
+    Closet NFToken snapshot. Returns True if applied, False if skipped.
+
+    Skips (leaves the DB untouched) in two cases the naive rebuild would corrupt:
+      * still issuer-held (pending_accept): the on-ledger `owner` is the issuer,
+        NOT the user the offer targets — which we can't derive here. The DB
+        already holds the pending record from ensure_closet; rebuilding under the
+        issuer address would strand the real user's Closet. The listener promotes
+        it on accept (#190).
+      * unreadable metadata (transient fetch failure / missing uri): forward-only,
+        never treat a failed read as an empty closet — set_closet_contents([], [])
+        would wipe the owner's real rows and clear mirror_pending (#190)."""
     owner = token.get("owner")
     if not owner:
         return False
-    assets, bodies = closet_token.parse_closet_metadata(
-        metadata if isinstance(metadata, dict) else {}
-    )
+    if owner == issuer:
+        return False  # pending_accept; owner-of-record is not the real user
+    if not isinstance(metadata, dict):
+        return False  # unreadable read must not masquerade as an empty closet
+    assets, bodies = closet_token.parse_closet_metadata(metadata)
     economy_store.set_closet_contents(conn, owner, assets, bodies)
     status = closet_token.ACTIVE if owner != issuer else closet_token.PENDING_ACCEPT
     existing = economy_store.get_closet_record(conn, owner)
@@ -163,6 +175,7 @@ async def backfill_economy(
     return {
         "closets_seen": closets_seen,
         "closets_applied": closets_applied,
+        "closets_skipped": closets_seen - closets_applied,
         "traits_seen": len(trait_enum),
         "traits_live": len(live_traits),
         "traits_upserted": traits_upserted,
@@ -204,6 +217,7 @@ async def _amain() -> int:
     print(f"  DB: {nft_index.index_db_path(args.network)}")
     print(f"  Closets seen (live): {counts['closets_seen']}")
     print(f"  Closets applied: {counts['closets_applied']}")
+    print(f"  Closets skipped (pending/unreadable): {counts['closets_skipped']}")
     print(f"  Trait tokens seen (all): {counts['traits_seen']}")
     print(f"  Trait tokens live: {counts['traits_live']}")
     print(f"  Trait tokens upserted: {counts['traits_upserted']}")

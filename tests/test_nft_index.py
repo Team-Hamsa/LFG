@@ -143,3 +143,40 @@ def test_token_record_without_metadata_is_recorded_not_dropped():
     assert rec.body == ""
     assert rec.is_burned is True
     assert rec.mutable is False
+
+
+# --- enumerate_tokens fails closed on an error response (#190) ---
+
+
+def test_enumerate_tokens_raises_on_error_response(monkeypatch):
+    import asyncio
+
+    class _Resp:
+        def __init__(self, ok, result):
+            self._ok = ok
+            self.result = result
+
+        def is_successful(self):
+            return self._ok
+
+    class _FakeClient:
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *a):
+            return False
+
+        async def request(self, req):
+            # An error response mid-enumeration must abort, not truncate to
+            # end-of-list (empty nfts + no marker) and silently return [].
+            return _Resp(False, {"error": "backendOverloaded"})
+
+    monkeypatch.setattr(nft_index, "AsyncWebsocketClient", lambda url: _FakeClient())
+
+    async def _go():
+        return await nft_index.enumerate_tokens("wss://x", "rIssuer", 1763)
+
+    import pytest
+
+    with pytest.raises(RuntimeError, match="nfts_by_issuer failed"):
+        asyncio.new_event_loop().run_until_complete(_go())
