@@ -37,7 +37,13 @@ def test_closet_modify_rebuilds_tables():
     meta = bt.build_closet_metadata("rUser", [("Head", "None", 2), ("Eyes", "Blue", 1)], [3536])
 
     async def fetch_token(nft_id):
-        return {"nft_id": "CLOSET", "owner": "rUser", "taxon": config.CLOSET_TAXON, "uri_hex": "AB"}
+        return {
+            "nft_id": "CLOSET",
+            "owner": "rUser",
+            "taxon": config.CLOSET_TAXON,
+            "uri_hex": "AB",
+            "issuer": config.SWAP_ISSUER_ADDRESS,
+        }
 
     async def fetch_meta(uri_hex):
         return meta
@@ -62,7 +68,13 @@ def test_unknown_edition_mint_logs_growth():
     conn = _conn()
 
     async def fetch_token(nft_id):
-        return {"nft_id": "CHAR", "owner": "rUser", "taxon": config.SWAP_TAXON, "uri_hex": "CD"}
+        return {
+            "nft_id": "CHAR",
+            "owner": "rUser",
+            "taxon": config.SWAP_TAXON,
+            "uri_hex": "CD",
+            "issuer": config.SWAP_ISSUER_ADDRESS,
+        }
 
     async def fetch_meta(uri_hex):
         return _char_meta(3536)
@@ -84,7 +96,13 @@ def test_known_edition_mint_logs_nothing():
     conn = _conn()
 
     async def fetch_token(nft_id):
-        return {"nft_id": "CHAR", "owner": "rUser", "taxon": config.SWAP_TAXON, "uri_hex": "CD"}
+        return {
+            "nft_id": "CHAR",
+            "owner": "rUser",
+            "taxon": config.SWAP_TAXON,
+            "uri_hex": "CD",
+            "issuer": config.SWAP_ISSUER_ADDRESS,
+        }
 
     async def fetch_meta(uri_hex):
         return _char_meta(7)
@@ -111,6 +129,7 @@ def test_closet_accept_marks_active():
             "owner": "rUser",
             "taxon": config.CLOSET_TAXON,
             "uri_hex": "EF",
+            "issuer": config.SWAP_ISSUER_ADDRESS,
         }
 
     async def fetch_meta(uri_hex):
@@ -143,6 +162,7 @@ def test_closet_mint_marks_pending():
             "owner": config.SWAP_ISSUER_ADDRESS,
             "taxon": config.CLOSET_TAXON,
             "uri_hex": "GH",
+            "issuer": config.SWAP_ISSUER_ADDRESS,
         }
 
     async def fetch_meta(uri_hex):
@@ -180,6 +200,7 @@ def test_closet_listener_preserves_offer_id():
             "owner": "rUser",
             "taxon": config.CLOSET_TAXON,
             "uri_hex": "AB",
+            "issuer": config.SWAP_ISSUER_ADDRESS,
         }
 
     async def fetch_meta(uri_hex):
@@ -214,6 +235,7 @@ def _trait_token_dict(nft_id: str = "TRAIT1", owner: str = "rUser") -> dict:
         "owner": owner,
         "taxon": config.TRAIT_TAXON,
         "uri_hex": "AA",
+        "issuer": config.SWAP_ISSUER_ADDRESS,
     }
 
 
@@ -290,6 +312,7 @@ def test_trait_transfer_updates_owner():
             "owner": "rNew",
             "taxon": config.TRAIT_TAXON,
             "uri_hex": "AA",
+            "issuer": config.SWAP_ISSUER_ADDRESS,
         }
 
     async def fetch_meta(uri_hex):
@@ -408,3 +431,129 @@ def test_trait_burn_of_unknown_nft_id_is_idempotent():
     )
     # Table still empty — no spurious inserts.
     assert es.read_trait_tokens(conn) == []
+
+
+# --- Issuer gate (#178): only tokens minted by OUR issuer may write economy rows ---
+
+FOREIGN_ISSUER = "rForgedIssuerAcct000000000000000000"
+
+
+def test_forged_closet_from_foreign_issuer_writes_nothing():
+    """A taxon-1762 mint carrying forged lfg_closet metadata but minted by a
+    FOREIGN issuer must NOT create closet_tokens/closet_assets rows — the taxon
+    is attacker-controlled, so only the issuer identity can be trusted."""
+    conn = _conn()
+    meta = bt.build_closet_metadata("rAttacker", [("Head", "None", 2), ("Eyes", "Blue", 1)], [42])
+
+    async def fetch_token(nft_id):
+        return {
+            "nft_id": "FORGED_CLOSET",
+            "owner": "rAttacker",
+            "taxon": config.CLOSET_TAXON,
+            "uri_hex": "AB",
+            "issuer": FOREIGN_ISSUER,
+        }
+
+    async def fetch_meta(uri_hex):
+        return meta
+
+    tx = {"TransactionType": "NFTokenMint", "meta": {"nftoken_id": "FORGED_CLOSET"}}
+    _run(
+        nft_listener.apply_economy_tx(
+            conn,
+            tx,
+            fetch_token_fn=fetch_token,
+            fetch_meta_fn=fetch_meta,
+            genesis=te.Genesis(trait_counts={}, edition_bodies={}),
+        )
+    )
+    assert es.read_closet_assets(conn) == []
+    assert es.read_closet_bodies(conn) == []
+    assert es.get_closet_record(conn, "rAttacker") is None
+
+
+def test_forged_trait_token_from_foreign_issuer_writes_nothing():
+    """A taxon-1763 mint from a FOREIGN issuer must NOT create a trait_tokens row
+    (which would otherwise be listable on our marketplace for real XRP)."""
+    conn = _conn()
+    meta = _trait_meta("Hat", "Cap")
+
+    async def fetch_token(nft_id):
+        return {
+            "nft_id": "FORGED_TRAIT",
+            "owner": "rAttacker",
+            "taxon": config.TRAIT_TAXON,
+            "uri_hex": "AA",
+            "issuer": FOREIGN_ISSUER,
+        }
+
+    async def fetch_meta(uri_hex):
+        return meta
+
+    tx = {"TransactionType": "NFTokenMint", "meta": {"nftoken_id": "FORGED_TRAIT"}}
+    _run(
+        nft_listener.apply_economy_tx(
+            conn,
+            tx,
+            fetch_token_fn=fetch_token,
+            fetch_meta_fn=fetch_meta,
+            genesis=te.Genesis(trait_counts={}, edition_bodies={}),
+        )
+    )
+    assert es.read_trait_tokens(conn) == []
+
+
+def test_foreign_issuer_named_mint_logs_no_growth():
+    """A #N-named character mint from a FOREIGN issuer must NOT record a
+    supply_changes row — this is exactly what poisoned onchain_mainnet.db."""
+    conn = _conn()
+
+    async def fetch_token(nft_id):
+        return {
+            "nft_id": "FORGED_CHAR",
+            "owner": "rAttacker",
+            "taxon": config.SWAP_TAXON,
+            "uri_hex": "CD",
+            "issuer": FOREIGN_ISSUER,
+        }
+
+    async def fetch_meta(uri_hex):
+        return _char_meta(9999)
+
+    tx = {"TransactionType": "NFTokenMint", "meta": {"nftoken_id": "FORGED_CHAR"}}
+    genesis = te.Genesis(trait_counts={}, edition_bodies={})  # 9999 unknown
+    _run(
+        nft_listener.apply_economy_tx(
+            conn, tx, fetch_token_fn=fetch_token, fetch_meta_fn=fetch_meta, genesis=genesis
+        )
+    )
+    assert es.read_supply_changes(conn) == []
+
+
+def test_genuine_issuer_named_mint_still_logs_growth():
+    """Positive control: the same #N-named mint from OUR issuer still records
+    growth, so the gate scopes to issuer identity and nothing more."""
+    conn = _conn()
+
+    async def fetch_token(nft_id):
+        return {
+            "nft_id": "REAL_CHAR",
+            "owner": "rUser",
+            "taxon": config.SWAP_TAXON,
+            "uri_hex": "CD",
+            "issuer": config.SWAP_ISSUER_ADDRESS,
+        }
+
+    async def fetch_meta(uri_hex):
+        return _char_meta(9999)
+
+    tx = {"TransactionType": "NFTokenMint", "meta": {"nftoken_id": "REAL_CHAR"}}
+    genesis = te.Genesis(trait_counts={}, edition_bodies={})  # 9999 unknown
+    _run(
+        nft_listener.apply_economy_tx(
+            conn, tx, fetch_token_fn=fetch_token, fetch_meta_fn=fetch_meta, genesis=genesis
+        )
+    )
+    rows = es.read_supply_changes(conn)
+    assert len(rows) == 1
+    assert rows[0]["kind"] == "mint" and rows[0]["edition"] == 9999
