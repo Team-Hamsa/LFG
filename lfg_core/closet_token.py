@@ -10,7 +10,7 @@ from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
 from typing import Any
 
-from lfg_core import config, economy_store
+from lfg_core import config, economy_store, owner_lock
 
 PENDING_ACCEPT = "pending_accept"
 ACTIVE = "active"
@@ -129,60 +129,65 @@ async def ensure_closet(
     A recorded but on-ledger-absent Closet (verified via `exists_fn`) is treated
     as stale and re-minted. While pending, this is idempotent and regenerates the
     Xaman accept payload (from the stored offer id, or a fresh offer when that id
-    is missing/unusable — offer ids are not on-chain) so the UI can re-show it."""
-    # NOTE(#180): this check-then-mint is not serialized — a double-tap / register
-    # race can mint two Closets for one owner (and a crash between mint and record
-    # orphans an issuer-held token). The per-owner lock that closes it is owned by
-    # issue #180, deliberately not added in the #184 hardening bundle.
-    existing = economy_store.get_closet_record(conn, owner)
-    if existing is not None:
-        nft_id, uri_hex, status, offer_id = existing
-        stale = exists_fn is not None and not await exists_fn(nft_id)
-        if not stale:
-            payload = None
-            if status == PENDING_ACCEPT:
-                # Re-show the Xaman accept for a pending Closet. The offer id is NOT
-                # on-chain, so a listener-rebuilt record can have lost it (offer_id
-                # is None), and a stored offer can expire. If we can't regenerate a
-                # payload from the recorded offer, create a FRESH offer for the
-                # existing (still issuer-held) token and persist the new id so the
-                # QR works again.
-                if offer_id:
-                    payload = await accept_payload_fn(offer_id)
-                if payload is None:
-                    new_offer_id = await offer_fn(nft_id, owner)
-                    # Mirror the first-time path: a falsey id is a real offer
-                    # failure — raise so the caller surfaces it rather than
-                    # silently returning accept=None (the bug this path fixes).
-                    # (A truthy self-offer-skipped sentinel passes through and
-                    # legitimately yields no payload — the issuer needs no accept.)
-                    if not new_offer_id:
-                        raise ClosetError("failed to create a fresh Closet offer to owner")
-                    payload = await accept_payload_fn(new_offer_id)
-                    economy_store.set_closet_token(
-                        conn, owner, nft_id, uri_hex, status=status, offer_id=new_offer_id
-                    )
-            return ClosetRef(nft_id=nft_id, uri_hex=uri_hex, status=status, accept_payload=payload)
+    is missing/unusable — offer ids are not on-chain) so the UI can re-show it.
 
-    url = await upload_fn(build_closet_metadata(owner, [], []))
-    new_nft_id = await mint_fn(url)
-    if not new_nft_id:
-        raise ClosetError("failed to mint Closet NFToken")
-    nft_id = new_nft_id
-    offer_id = await offer_fn(nft_id, owner)
-    if not offer_id:
-        raise ClosetError("failed to offer Closet NFToken to owner")
-    payload = await accept_payload_fn(offer_id)  # None is non-fatal (accept later)
-    economy_store.set_closet_token(
-        conn, owner, nft_id, _hex(url), status=PENDING_ACCEPT, offer_id=offer_id
-    )
-    return ClosetRef(
-        nft_id=nft_id,
-        uri_hex=_hex(url),
-        status=PENDING_ACCEPT,
-        accept_payload=payload,
-        minted=True,
-    )
+    Serialized per owner (#180): the check-then-mint (`get_closet_record` -> mint
+    -> `set_closet_token`) is a read-modify-write with a window where a double-tap
+    or a register/start-closet race could each see "no Closet" and both mint one.
+    The per-owner lock (the same one the economy flows hold) collapses that to a
+    single winner — the second caller re-reads the now-recorded Closet."""
+    async with owner_lock.owner_lock(owner):
+        existing = economy_store.get_closet_record(conn, owner)
+        if existing is not None:
+            nft_id, uri_hex, status, offer_id = existing
+            stale = exists_fn is not None and not await exists_fn(nft_id)
+            if not stale:
+                payload = None
+                if status == PENDING_ACCEPT:
+                    # Re-show the Xaman accept for a pending Closet. The offer id is NOT
+                    # on-chain, so a listener-rebuilt record can have lost it (offer_id
+                    # is None), and a stored offer can expire. If we can't regenerate a
+                    # payload from the recorded offer, create a FRESH offer for the
+                    # existing (still issuer-held) token and persist the new id so the
+                    # QR works again.
+                    if offer_id:
+                        payload = await accept_payload_fn(offer_id)
+                    if payload is None:
+                        new_offer_id = await offer_fn(nft_id, owner)
+                        # Mirror the first-time path: a falsey id is a real offer
+                        # failure — raise so the caller surfaces it rather than
+                        # silently returning accept=None (the bug this path fixes).
+                        # (A truthy self-offer-skipped sentinel passes through and
+                        # legitimately yields no payload — the issuer needs no accept.)
+                        if not new_offer_id:
+                            raise ClosetError("failed to create a fresh Closet offer to owner")
+                        payload = await accept_payload_fn(new_offer_id)
+                        economy_store.set_closet_token(
+                            conn, owner, nft_id, uri_hex, status=status, offer_id=new_offer_id
+                        )
+                return ClosetRef(
+                    nft_id=nft_id, uri_hex=uri_hex, status=status, accept_payload=payload
+                )
+
+        url = await upload_fn(build_closet_metadata(owner, [], []))
+        new_nft_id = await mint_fn(url)
+        if not new_nft_id:
+            raise ClosetError("failed to mint Closet NFToken")
+        nft_id = new_nft_id
+        offer_id = await offer_fn(nft_id, owner)
+        if not offer_id:
+            raise ClosetError("failed to offer Closet NFToken to owner")
+        payload = await accept_payload_fn(offer_id)  # None is non-fatal (accept later)
+        economy_store.set_closet_token(
+            conn, owner, nft_id, _hex(url), status=PENDING_ACCEPT, offer_id=offer_id
+        )
+        return ClosetRef(
+            nft_id=nft_id,
+            uri_hex=_hex(url),
+            status=PENDING_ACCEPT,
+            accept_payload=payload,
+            minted=True,
+        )
 
 
 async def confirm_accept(conn: Any, owner: str, *, owner_fn: OwnerFn) -> str:

@@ -44,6 +44,7 @@
 
 from __future__ import annotations
 
+import functools
 import json
 import logging
 import os
@@ -51,14 +52,37 @@ import traceback
 import uuid
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, field
-from typing import Any
+from typing import Any, TypeVar
 
 from lfg_core import closet_token as bt
-from lfg_core import config
+from lfg_core import config, owner_lock
 from lfg_core import economy_store as es
 from lfg_core import trait_economy as te
 from lfg_core import trait_token as tt
 from lfg_core.nft_index import OnchainNft
+
+# Any session that owns a Closet read-modify-write carries `.owner`; a `.state`
+# machine driven by run_* below. Only used to type the serialization decorator.
+_S = TypeVar("_S")
+
+
+def _serialize_by_owner(
+    runner: Callable[[_S, EconomyDeps], Awaitable[None]],
+) -> Callable[[_S, EconomyDeps], Awaitable[None]]:
+    """Hold the per-owner Closet lock (#180) for the WHOLE flow. sync_closet
+    full-overwrites the Closet token, so two flows for one owner that interleave
+    read -> modify -> mirror lose an update; serializing the entire op (a
+    superset of read->sync->mirror) is the obviously-correct fix and still lets
+    different owners run concurrently. The lock is per event loop, so this adds
+    no cross-owner contention and no ordering constraint between wallets."""
+
+    @functools.wraps(runner)
+    async def wrapper(session: _S, deps: EconomyDeps) -> None:
+        async with owner_lock.owner_lock(session.owner):  # type: ignore[attr-defined]
+            await runner(session, deps)
+
+    return wrapper
+
 
 RUNNING = "running"
 DONE = "done"
@@ -251,6 +275,7 @@ class HarvestSession:
         self.error = msg
 
 
+@_serialize_by_owner
 async def run_harvest(session: HarvestSession, deps: EconomyDeps) -> None:
     """Drive a harvest to a terminal state. Order: precheck -> require ACTIVE
     Closet -> BURN (irreversible) -> deposit assets to the Closet token then DB.
@@ -392,6 +417,7 @@ class AssembleSession:
         self.error = msg
 
 
+@_serialize_by_owner
 async def run_assemble(session: AssembleSession, deps: EconomyDeps) -> None:
     """Drive an assemble (rebirth) to a terminal state. Order: precheck ->
     compose+upload -> MINT (reversible: burn back) -> drain the Closet (token
@@ -576,6 +602,7 @@ class EquipSession:
         self.error = msg
 
 
+@_serialize_by_owner
 async def run_equip(session: EquipSession, deps: EconomyDeps) -> None:
     """Drive an equip to a terminal state. Order: precheck -> compose+upload ->
     MODIFY the character in place (reversible: modify back to the old URI) ->
@@ -720,6 +747,7 @@ class ExtractSession:
         self.error = msg
 
 
+@_serialize_by_owner
 async def run_extract(session: ExtractSession, deps: EconomyDeps) -> None:
     """Extract a loose Closet trait into a standalone tradeable NFToken. Order:
     precheck (active Closet + trait present) -> compose+mint (reversible) ->
@@ -894,6 +922,7 @@ class DepositSession:
         self.error = msg
 
 
+@_serialize_by_owner
 async def run_deposit(session: DepositSession, deps: EconomyDeps) -> None:
     """Deposit a standalone trait NFToken back into the owner's Closet. Order:
     precheck (active Closet + token is ours + on-ledger owner == depositor) ->
