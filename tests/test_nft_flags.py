@@ -40,7 +40,7 @@ class _Resp:
 
 
 def _capture_mint(monkeypatch, captured):
-    def fake_submit(tx, client, wallet):
+    def fake_submit(tx, client, wallet, **kwargs):
         captured["tx"] = tx
         return _Resp(
             {"hash": "HASH", "meta": {"TransactionResult": "tesSUCCESS", "nftoken_id": "NFTID"}}
@@ -49,6 +49,9 @@ def _capture_mint(monkeypatch, captured):
     def fake_request(self, req):
         return _Resp({"meta": {"TransactionResult": "tesSUCCESS", "nftoken_id": "NFTID"}})
 
+    # mint signs once before submitting now; stub autofill_and_sign to pass the
+    # built tx model through so the captured flags are still asserted on it.
+    monkeypatch.setattr(xrpl_ops, "autofill_and_sign", lambda tx, client, wallet, **k: tx)
     monkeypatch.setattr(xrpl_ops, "submit_and_wait", fake_submit)
     monkeypatch.setattr(xrpl_ops.JsonRpcClient, "request", fake_request)
 

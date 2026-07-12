@@ -31,8 +31,9 @@ from xrpl.models.transactions import (
     Payment,
 )
 from xrpl.models.transactions.nftoken_create_offer import NFTokenCreateOfferFlag
-from xrpl.transaction import submit_and_wait
-from xrpl.utils import xrp_to_drops
+from xrpl.models.transactions.transaction import Transaction
+from xrpl.transaction import autofill_and_sign, submit_and_wait
+from xrpl.utils import get_nftoken_id, xrp_to_drops
 from xrpl.wallet import Wallet
 
 from lfg_core import config, memos
@@ -43,9 +44,95 @@ TF_TRANSFERABLE = 0x0008
 NFT_FLAG_MUTABLE = 0x0010
 
 
+class IndeterminateResultError(RuntimeError):
+    """The on-ledger outcome of a submitted transaction could not be determined.
+
+    Submission raised (timeout / network error) AND a follow-up lookup of the
+    exact transaction hash did not return a validated result, so the transaction
+    MAY or MAY NOT have committed. Callers MUST treat this as neither success nor
+    definitive failure: never run on-chain compensation and never blind-resubmit
+    — reconcile from chain / fail closed instead.
+
+    It is deliberately distinct from a None return, which means a DEFINITIVE,
+    validated failure (or that no transaction was ever forwarded). In the trait
+    economy this raise is what makes closet_token.sync_closet surface
+    ClosetIndeterminateError so the phase-aware _sync_then_persist taxonomy (#107)
+    engages instead of collapsing an unknown outcome to a plain ClosetError
+    ('did NOT commit') and running an asset-destroying compensation (#179)."""
+
+
 def convert_str_to_hex(string: str) -> str:
     """Convert string to hex for XRPL URI"""
     return string.encode("utf-8").hex().upper()
+
+
+def _validated_result(result: dict[str, Any], label: str) -> dict[str, Any] | None:
+    """Classify a VALIDATED transaction result dict: return it on tesSUCCESS,
+    else None (a definitive on-ledger failure)."""
+    meta = result.get("meta")
+    tx_result = meta.get("TransactionResult") if isinstance(meta, dict) else None
+    if tx_result == "tesSUCCESS":
+        return result
+    logging.warning(f"{label} result: {tx_result}")
+    return None
+
+
+async def _confirm_by_hash(
+    client: JsonRpcClient, tx_hash: str, attempts: int = 3
+) -> dict[str, Any] | None:
+    """Look the transaction up by hash and return its result dict IFF the ledger
+    reports it VALIDATED (any TransactionResult); else None (not found yet, not
+    validated, or the lookup itself failed). Used only after a submit raised, to
+    decide committed vs. indeterminate WITHOUT resubmitting a fresh transaction."""
+    for attempt in range(attempts):
+        try:
+            response = await asyncio.to_thread(client.request, Tx(transaction=tx_hash))
+            result = response.result
+            if (
+                isinstance(result, dict)
+                and result.get("validated")
+                and isinstance(result.get("meta"), dict)
+            ):
+                return result
+        except Exception as e:
+            logging.warning(f"tx confirm lookup failed for {tx_hash}: {e}")
+        if attempt + 1 < attempts:
+            await asyncio.sleep(0.5 * (attempt + 1))
+    return None
+
+
+async def _submit_and_confirm(
+    tx: Transaction, wallet: Wallet, client: JsonRpcClient, label: str
+) -> dict[str, Any] | None:
+    """Sign `tx` ONCE, submit it, and confirm the outcome from the ledger.
+
+    Returns the validated result dict on tesSUCCESS; None on a definitive,
+    validated failure; raises IndeterminateResultError when the outcome cannot be
+    determined.
+
+    Signing once fixes the transaction hash and LastLedgerSequence, so a
+    submission that raises is never blind-resubmitted as a fresh (duplicate)
+    transaction — submit_and_wait already polls across ledgers until
+    LastLedgerSequence, so if it raised the tx may still have landed. Instead of
+    resubmitting, the prior hash is looked up on-ledger and only its validated
+    outcome is trusted; an unconfirmable outcome fails closed as indeterminate.
+    (This also removes the duplicate-mint risk of the old blind retry loop, #179.)"""
+    signed = await asyncio.to_thread(autofill_and_sign, tx, client, wallet)
+    try:
+        # Pass wallet=None: `signed` is already signed, so submit_and_wait must
+        # not re-sign/re-autofill it — otherwise the submitted tx could differ
+        # from signed.get_hash() and the exception path would confirm the wrong
+        # hash, marking an actually-submitted tx as indeterminate (#188).
+        response = await asyncio.to_thread(submit_and_wait, signed, client, None, autofill=False)
+    except Exception as e:
+        logging.warning(f"{label}: submit_and_wait raised ({e}); confirming by hash")
+        confirmed = await _confirm_by_hash(client, signed.get_hash())
+        if confirmed is None:
+            raise IndeterminateResultError(
+                f"{label}: on-ledger outcome unknown after submit raised ({e})"
+            ) from e
+        return _validated_result(confirmed, label)
+    return _validated_result(response.result, label)
 
 
 async def mint_nft(
@@ -83,40 +170,36 @@ async def mint_nft(
             kwargs["issuer"] = issuer
         payment = NFTokenMint(**kwargs)
 
-        retries = 5
-        hash_txn = None
-        for attempt in range(1, retries + 1):
+        # submit_and_wait already returns only after the tx validates, so its
+        # response IS the on-ledger outcome — no separate (flaky) Tx re-check
+        # that could turn a committed mint into a false failure.
+        result = await _submit_and_confirm(payment, wallet, client, "NFTokenMint")
+        if result is None:
+            return None  # definitive, validated failure
+        meta = result["meta"]
+        nft_id = meta.get("nftoken_id") if isinstance(meta, dict) else None
+        if not nft_id:
+            # The convenience meta.nftoken_id field is not always present; the
+            # mint DID validate (tesSUCCESS), so the token exists on-chain.
+            # Derive the id from the affected nodes rather than returning None
+            # (which callers read as a definitive failure and would compensate
+            # against an asset that already exists, #188).
             try:
-                logging.info(f"Submitting NFTokenMint (attempt {attempt}/{retries})")
-                response = await asyncio.to_thread(submit_and_wait, payment, client, wallet)
-                hash_txn = response.result["hash"]
-                break
-            except Exception as e:
-                logging.error(f"Mint attempt {attempt} failed: {e}")
-                if attempt == retries:
-                    return None
-                await asyncio.sleep(5)
+                nft_id = get_nftoken_id(meta)
+            except Exception:
+                nft_id = None
+        if nft_id:
+            logging.info(f"NFT minted: {nft_id}")
+            return str(nft_id)
+        # Committed but unidentifiable: fail closed as indeterminate, never as a
+        # definitive-failure None — the NFT is on-ledger and must not be treated
+        # as "mint failed".
+        raise IndeterminateResultError(
+            "NFTokenMint validated (tesSUCCESS) but its NFTokenID could not be resolved from meta"
+        )
 
-        for check_attempt in range(1, retries + 1):
-            try:
-                txn = await asyncio.to_thread(client.request, Tx(transaction=hash_txn))
-                res = txn.result
-                if res["meta"]["TransactionResult"] == "tesSUCCESS":
-                    nft_id = res["meta"].get("nftoken_id")
-                    if nft_id:
-                        logging.info(f"NFT minted: {nft_id}")
-                        return nft_id  # type: ignore[no-any-return]
-                    logging.warning("Mint succeeded but no NFT ID in meta")
-                else:
-                    logging.warning(f"Mint result: {res['meta']['TransactionResult']}")
-                break
-            except Exception as e:
-                logging.error(f"Status check attempt {check_attempt} failed: {e}")
-                if check_attempt == retries:
-                    return None
-                await asyncio.sleep(5)
-        return None
-
+    except IndeterminateResultError:
+        raise  # never collapse an unknown outcome to a definitive-failure None
     except Exception:
         logging.error(f"mint_nft error: {traceback.format_exc()}")
         return None
@@ -471,34 +554,15 @@ async def burn_nft(
             kwargs["owner"] = owner
         burn = NFTokenBurn(**kwargs)
 
-        retries = 5
-        hash_txn = None
-        for attempt in range(1, retries + 1):
-            try:
-                response = await asyncio.to_thread(submit_and_wait, burn, client, wallet)
-                hash_txn = response.result["hash"]
-                break
-            except Exception as e:
-                logging.error(f"Burn attempt {attempt} failed: {e}")
-                if attempt == retries:
-                    return None
-                await asyncio.sleep(5)
+        result = await _submit_and_confirm(burn, wallet, client, "NFTokenBurn")
+        if result is None:
+            return None  # definitive, validated failure
+        tx_hash: str = result["hash"]
+        logging.info(f"NFT burned: {nft_id} ({tx_hash})")
+        return tx_hash
 
-        for check_attempt in range(1, retries + 1):
-            try:
-                txn = await asyncio.to_thread(client.request, Tx(transaction=hash_txn))
-                res = txn.result
-                if res["meta"]["TransactionResult"] == "tesSUCCESS":
-                    logging.info(f"NFT burned: {nft_id} ({hash_txn})")
-                    return hash_txn
-                logging.warning(f"Burn result: {res['meta']['TransactionResult']}")
-                return None
-            except Exception as e:
-                logging.error(f"Burn status check {check_attempt} failed: {e}")
-                if check_attempt == retries:
-                    return None
-                await asyncio.sleep(5)
-        return None
+    except IndeterminateResultError:
+        raise  # never collapse an unknown outcome to a definitive-failure None
     except Exception:
         logging.error(f"burn_nft error: {traceback.format_exc()}")
         return None
@@ -528,34 +592,15 @@ async def modify_nft(
             kwargs["owner"] = owner
         modify = NFTokenModify(**kwargs)
 
-        retries = 5
-        hash_txn = None
-        for attempt in range(1, retries + 1):
-            try:
-                response = await asyncio.to_thread(submit_and_wait, modify, client, wallet)
-                hash_txn = response.result["hash"]
-                break
-            except Exception as e:
-                logging.error(f"Modify attempt {attempt} failed: {e}")
-                if attempt == retries:
-                    return None
-                await asyncio.sleep(5)
+        result = await _submit_and_confirm(modify, wallet, client, "NFTokenModify")
+        if result is None:
+            return None  # definitive, validated failure
+        tx_hash: str = result["hash"]
+        logging.info(f"NFT modified: {nft_id} ({tx_hash})")
+        return tx_hash
 
-        for check_attempt in range(1, retries + 1):
-            try:
-                txn = await asyncio.to_thread(client.request, Tx(transaction=hash_txn))
-                res = txn.result
-                if res["meta"]["TransactionResult"] == "tesSUCCESS":
-                    logging.info(f"NFT modified: {nft_id} ({hash_txn})")
-                    return hash_txn
-                logging.warning(f"Modify result: {res['meta']['TransactionResult']}")
-                return None
-            except Exception as e:
-                logging.error(f"Modify status check {check_attempt} failed: {e}")
-                if check_attempt == retries:
-                    return None
-                await asyncio.sleep(5)
-        return None
+    except IndeterminateResultError:
+        raise  # never collapse an unknown outcome to a definitive-failure None
     except Exception:
         logging.error(f"modify_nft error: {traceback.format_exc()}")
         return None

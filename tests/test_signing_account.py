@@ -31,7 +31,7 @@ class _Resp:
 
 
 def _patch(monkeypatch, captured):
-    def fake_submit(tx, client, wallet):
+    def fake_submit(tx, client, wallet, **kwargs):
         captured["tx"] = tx
         return _Resp(
             {
@@ -55,6 +55,9 @@ def _patch(monkeypatch, captured):
             }
         )
 
+    # mint/burn/modify sign once before submitting now; stub autofill_and_sign to
+    # pass the built tx model through so the captured Account is still asserted.
+    monkeypatch.setattr(xrpl_ops, "autofill_and_sign", lambda tx, client, wallet, **k: tx)
     monkeypatch.setattr(xrpl_ops, "submit_and_wait", fake_submit)
     monkeypatch.setattr(xrpl_ops.JsonRpcClient, "request", fake_request)
     monkeypatch.setattr(config, "SIGNING_ACCOUNT", ISSUER)
