@@ -2419,6 +2419,26 @@ async def handle_config(request):
     )
 
 
+def _count_active(sessions: dict[str, Any], terminal_states: set[str]) -> int:
+    """Number of in-flight (non-terminal) sessions in one dict."""
+    return sum(1 for s in sessions.values() if getattr(s, "state", None) not in terminal_states)
+
+
+async def handle_health(request):
+    """Liveness + in-flight session counts, so a deploy/restart can DRAIN first
+    instead of killing users mid-mint (in-memory sessions are lost on restart).
+    Public + unauthenticated: exposes only integer counts, no PII."""
+    detail = {
+        "mint": _count_active(mint_sessions, mint_flow.TERMINAL_STATES),
+        "swap": _count_active(swap_sessions, swap_flow.TERMINAL_STATES),
+        "economy": _count_active(economy_sessions, economy_api.TERMINAL_STATES),
+        "market": _count_active(market_sessions, market_flow.TERMINAL_STATES),
+    }
+    return web.json_response(
+        {"ok": True, "active_sessions": sum(detail.values()), "detail": detail}
+    )
+
+
 async def handle_qr(request):
     """Server-rendered QR PNG (same-origin, satisfies the Activity CSP)."""
     data = request.query.get("d", "")
@@ -2714,6 +2734,7 @@ def create_app() -> web.Application:
     identity_store.ensure_identities_table()
     identity_store.migrate_users_to_identities()
     app.router.add_get("/api/config", handle_config)
+    app.router.add_get("/api/health", handle_health)
     app.router.add_post("/api/token", handle_token)
     app.router.add_post("/api/session", handle_session)
     app.router.add_post("/api/telegram/auth", handle_telegram_auth)

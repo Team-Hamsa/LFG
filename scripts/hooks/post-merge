@@ -1,0 +1,77 @@
+#!/usr/bin/env bash
+# post-merge: restart the lfg-activity pm2 process after a pull/merge that
+# touches code the Discord Activity serves, so the live server never lags main.
+# (Manually installed — not managed by pre-commit, which only owns pre-push.)
+#
+# DRAIN-FIRST: a restart drops the in-memory mint/swap/economy/market sessions,
+# which previously killed users mid-mint and forced refunds. So before
+# restarting we poll /api/health and wait for in-flight sessions to reach zero
+# (bounded), restarting immediately once drained. A tracked copy of this hook
+# lives at scripts/hooks/post-merge — keep the two in sync.
+set -euo pipefail
+
+# Hooks run with a minimal PATH; pm2 is an nvm-installed global needing node.
+export PATH="/home/hamsa/.nvm/versions/node/v20.20.0/bin:$PATH"
+
+PROC="lfg-activity"
+PORT="${LFG_ACTIVITY_PORT:-8176}"
+HEALTH="http://127.0.0.1:${PORT}/api/health"
+MAX_WAIT="${LFG_ACTIVITY_DRAIN_MAX_WAIT:-900}"   # give up draining after 15 min
+POLL_EVERY="${LFG_ACTIVITY_DRAIN_POLL:-10}"
+
+# Only restart when files the Activity depends on actually changed.
+# ORIG_HEAD is the pre-merge HEAD; fall back to HEAD~1 if it's unset.
+BASE="$(git rev-parse --verify --quiet ORIG_HEAD || git rev-parse --verify --quiet HEAD~1 || true)"
+[ -n "$BASE" ] || exit 0
+
+if ! git diff --name-only "$BASE" HEAD \
+  | grep -qE '^(webapp/|lfg_service/|requirements\.txt$|[^/]+\.py$)'; then
+  exit 0
+fi
+
+command -v pm2 >/dev/null 2>&1 || exit 0
+pm2 describe "$PROC" >/dev/null 2>&1 || exit 0
+
+# Report active in-flight sessions from /api/health; empty string if the
+# endpoint is unreachable or malformed (older build without it).
+active_sessions() {
+  local body
+  body="$(curl -fsS --max-time 3 "$HEALTH" 2>/dev/null)" || { echo ""; return; }
+  # Extract the integer value of "active_sessions" without needing jq.
+  echo "$body" | grep -oE '"active_sessions"[[:space:]]*:[[:space:]]*[0-9]+' \
+    | grep -oE '[0-9]+$' || echo ""
+}
+
+deadline=$(( $(date +%s) + MAX_WAIT ))
+first_probe="$(active_sessions)"
+if [ -z "$first_probe" ]; then
+  # No health endpoint yet (this deploy is the one that adds it) or it's down.
+  # We cannot confirm the session count, so DON'T blindly restart and risk
+  # cutting off users — leave it to a manual, operator-chosen restart.
+  echo "[post-merge] $PROC has no reachable /api/health; NOT auto-restarting." >&2
+  echo "[post-merge] Restart manually when safe: pm2 restart $PROC --update-env" >&2
+  exit 0
+fi
+
+while :; do
+  n="$(active_sessions)"
+  if [ -z "$n" ]; then
+    echo "[post-merge] /api/health went unreachable mid-drain; NOT restarting automatically." >&2
+    echo "[post-merge] Restart manually when safe: pm2 restart $PROC --update-env" >&2
+    exit 0
+  fi
+  if [ "$n" -eq 0 ]; then
+    break
+  fi
+  if [ "$(date +%s)" -ge "$deadline" ]; then
+    echo "[post-merge] WARNING: ${n} session(s) still in flight after ${MAX_WAIT}s; restarting anyway." >&2
+    break
+  fi
+  echo "[post-merge] $n in-flight session(s); waiting for drain before restart…"
+  sleep "$POLL_EVERY"
+done
+
+echo "[post-merge] drained; restarting $PROC"
+pm2 restart "$PROC" --update-env >/dev/null 2>&1 \
+  && echo "[post-merge] $PROC restarted" \
+  || echo "[post-merge] WARNING: $PROC restart failed; restart it manually" >&2
