@@ -249,6 +249,19 @@ def set_closet_contents(
     conn.commit()
 
 
+def delete_closet(conn: sqlite3.Connection, owner: str) -> None:
+    """Remove an owner's Closet token record and all of its loose contents.
+
+    Used to scrub bogus rows keyed under the issuer address: the issuer is never
+    a legitimate Closet owner-of-record, so a prior (pre-#178/#190) backfill that
+    recorded a pending issuer-held Closet under the issuer must be cleaned up on
+    reconcile rather than left to strand the real user's Closet."""
+    conn.execute("DELETE FROM closet_assets WHERE owner = ?", (owner,))
+    conn.execute("DELETE FROM closet_bodies WHERE owner = ?", (owner,))
+    conn.execute("DELETE FROM closet_tokens WHERE owner = ?", (owner,))
+    conn.commit()
+
+
 def set_closet_token(
     conn: sqlite3.Connection,
     owner: str,

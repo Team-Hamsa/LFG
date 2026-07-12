@@ -115,6 +115,23 @@ def test_closet_issuer_held_pending_is_skipped_not_stored_under_issuer(tmp_path)
     assert es.get_closet_record(conn, ISSUER) is None
 
 
+def test_issuer_held_scrubs_prior_bogus_issuer_row(tmp_path):
+    # A prior buggy run may have recorded a Closet under the ISSUER address. On
+    # rerun the issuer-held skip must also scrub that bogus row so the real
+    # user's pending Closet is not stranded (#190).
+    conn = _conn(tmp_path)
+    es.set_closet_token(conn, ISSUER, "OLDBOGUS", "URIX", status=ct.PENDING_ACCEPT)
+    es.set_closet_contents(conn, ISSUER, [("Hat", "Cap", 1)], [3])
+    meta = ct.build_closet_metadata(ISSUER, [], [])
+    enum = _enum({CLOSET_TAXON: [_tok("CLOSET9", ISSUER, "URIP")]})
+    fetch = _meta({"URIP": meta})
+
+    _run(be.backfill_economy(conn, enum, fetch, issuer=ISSUER))
+
+    assert es.get_closet_record(conn, ISSUER) is None
+    assert [a for a in es.read_closet_assets(conn) if a[0] == ISSUER] == []
+
+
 def test_closet_unreadable_metadata_does_not_wipe_existing(tmp_path):
     # A transient/unreadable metadata read must not be treated as an empty closet
     # — that would wipe the owner's real contents and clear mirror_pending (#190).

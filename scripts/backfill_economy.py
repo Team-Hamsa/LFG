@@ -80,7 +80,12 @@ def _reconcile_closet(
     if not owner:
         return False
     if owner == issuer:
-        return False  # pending_accept; owner-of-record is not the real user
+        # pending_accept: owner-of-record is the issuer, not the real user. Don't
+        # rebuild under the issuer, and scrub any bogus issuer-keyed Closet row a
+        # prior buggy run may have left, so a rerun repairs rather than strands
+        # the real user's pending Closet (#190).
+        economy_store.delete_closet(conn, issuer)
+        return False
     if not isinstance(metadata, dict):
         return False  # unreadable read must not masquerade as an empty closet
     assets, bodies = closet_token.parse_closet_metadata(metadata)
