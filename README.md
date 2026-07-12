@@ -35,13 +35,13 @@ Short walkthroughs of each core flow — animated captures landing soon:
 <div align="center">
 <table>
 <tr>
-<td align="center"><img src="assets/demo/mint.svg" width="380" alt="Mint an NFT — Discord Activity to Mint to sign in Xaman to reveal"><br><b>Mint an NFT</b></td>
-<td align="center"><img src="assets/demo/swap.svg" width="380" alt="Trait Swapper — swap traits between two NFTs in place via NFTokenModify"><br><b>Trait Swapper</b></td>
+<td align="center"><img src="assets/demo/mint.gif" width="380" alt="Mint an NFT — Discord Activity to Mint to sign in Xaman to reveal"><br><b>Mint an NFT</b></td>
+<td align="center"><img src="assets/demo/swap.gif" width="380" alt="Trait Swapper — swap traits between two NFTs in place via NFTokenModify"><br><b>Trait Swapper</b></td>
 <td align="center"><img src="assets/demo/marketplace.svg" width="380" alt="Marketplace — browse XRP listings, buy and settle on native NFTokenOffers"><br><b>Marketplace</b></td>
 </tr>
 <tr>
-<td align="center"><img src="assets/demo/telegram.svg" width="380" alt="Telegram Bot — mint and swap from an inline-keyboard chat flow"><br><b>Telegram Bot</b></td>
-<td align="center"><img src="assets/demo/leaderboard.svg" width="380" alt="Leaderboards — eight live boards including holders, swaps, BRIX richlist, rarity"><br><b>Leaderboards</b></td>
+<td align="center"><img src="assets/demo/telegram.gif" width="380" alt="Telegram Bot — mint and swap from an inline-keyboard chat flow"><br><b>Telegram Bot</b></td>
+<td align="center"><img src="assets/demo/leaderboard.gif" width="380" alt="Leaderboards — eight live boards including holders, swaps, BRIX richlist, rarity"><br><b>Leaderboards</b></td>
 <td align="center"><img src="assets/demo/animated.svg" width="380" alt="Animated NFTs — GIF/MP4 trait layers compose into living video NFTs"><br><b>Animated NFTs</b></td>
 </tr>
 </table>
