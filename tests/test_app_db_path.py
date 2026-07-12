@@ -19,7 +19,7 @@ os.environ.setdefault("XRPL_NETWORK", "testnet")
 os.environ.setdefault("BUNNY_PULL_ZONE", "nft.pullzone.example")
 
 from lfg_core import db_helpers
-import user_db
+from lfg_core import user_db
 from lfg_core import config
 
 

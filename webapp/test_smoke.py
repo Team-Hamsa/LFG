@@ -24,7 +24,7 @@ os.environ.setdefault("BUNNY_PULL_ZONE", "nft.pullzone.example")
 
 from aiohttp import web  # noqa: E402
 
-import user_db  # noqa: E402
+from lfg_core import user_db  # noqa: E402
 from lfg_core import (  # noqa: E402
     config,
     layer_store,

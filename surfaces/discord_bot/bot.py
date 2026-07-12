@@ -10,7 +10,7 @@ from discord.ext import commands
 
 from surfaces._client import LFGServiceClient
 from surfaces.discord_bot import config
-from user_db import create_users_table
+from lfg_core.user_db import create_users_table
 
 intents = discord.Intents.default()
 intents.message_content = True
