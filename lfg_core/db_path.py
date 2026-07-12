@@ -1,4 +1,4 @@
-# App DB path resolution, dependency-free on purpose: init_db.py (the
+# App DB path resolution, dependency-free on purpose: scripts/init_db.py (the
 # standalone schema initializer) must be runnable with only DB_PATH /
 # XRPL_NETWORK set, without loading lfg_core.config's full runtime settings
 # (XUMM/Bunny secrets etc.). Keep this module free of lfg_core imports.
