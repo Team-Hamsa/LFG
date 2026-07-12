@@ -131,27 +131,20 @@ def build_svg(base: int, app: int, tests: int) -> str:
     return "\n".join(parts) + "\n"
 
 
-def build_block(app_a: int, app_d: int, test_a: int, test_d: int, base: int) -> str:
-    total_a, total_d = app_a + test_a, app_d + test_d
+def build_block(base: int) -> str:
     date = git("log", "-1", "--format=%ad", "--date=format:%Y-%m-%d", BASELINE_SHA)
     return "\n".join(
         [
             START_MARK,
+            '<div align="center">',
             '<img src="assets/hackathon_loc.svg" alt="Hackathon code growth bar" width="728">',
+            "</div>",
             "",
-            f"*Hand-written code merged since the hackathon baseline "
-            f"(`{BASELINE_SHA[:7]}`, {date} — last commit before June 21, "
-            f"{fmt(base)} lines), measured by `git diff --numstat`. Counts "
-            f"`.py`/`.js`/`.css`/`.html` only; docs, markdown, data files "
-            f"(CSV/JSON manifests), dependency lists, and the legacy/backup "
-            f"trees are excluded. Updated automatically on every push to `main`.*",
-            "",
-            "| Category | Lines added | Lines removed | Net |",
-            "|---|---:|---:|---:|",
-            f"| Application code | +{fmt(app_a)} | −{fmt(app_d)} | {fmt(app_a - app_d)} |",
-            f"| Tests | +{fmt(test_a)} | −{fmt(test_d)} | {fmt(test_a - test_d)} |",
-            f"| **Total** | **+{fmt(total_a)}** | **−{fmt(total_d)}** "
-            f"| **{fmt(total_a - total_d)}** |",
+            f"> **Every line hand-written since the June 21 hackathon baseline** "
+            f"(`{BASELINE_SHA[:7]}`, {date}, {fmt(base)} lines) — measured by "
+            f"`git diff --numstat` over `.py`/`.js`/`.css`/`.html`, excluding docs, "
+            f"data files (CSV/JSON manifests), dependency lists, and the "
+            f"legacy/backup trees. Regenerated on every push to `main`.",
             END_MARK,
         ]
     )
@@ -178,7 +171,7 @@ def main() -> int:
         SVG_PATH.parent.mkdir(exist_ok=True)
         SVG_PATH.write_text(svg)
 
-    block = build_block(app_a, app_d, test_a, test_d, base)
+    block = build_block(base)
     new_text = re.sub(
         re.escape(START_MARK) + r".*?" + re.escape(END_MARK),
         lambda _: block,
