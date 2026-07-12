@@ -1,5 +1,3 @@
-<img src="assets/mascot.png" width="94" align="right" alt="LFG mascot">
-
 <div align="center">
 
 <img src="assets/hero.png" alt="LFG — mint, swap & trade NFTs on the XRP Ledger" width="820">
