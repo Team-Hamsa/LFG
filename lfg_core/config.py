@@ -181,6 +181,27 @@ def validate_economy_config(
         )
 
 
+def assert_cli_network_match(network: str, xrpl_network: str = XRPL_NETWORK) -> None:
+    """Fail fast when an economy CLI would read one chain's DB but sign another.
+
+    The economy CLIs default `--network` to ECONOMY_NETWORK, but their on-ledger
+    ops go through the single-network xrpl_ops globals bound to XRPL_NETWORK. The
+    startup `validate_economy_config` assert only fires when ECONOMY_ENABLED — a
+    manual CLI run (which is how ops drives harvest/assemble/equip/extract/deposit)
+    bypasses it entirely, so an operator on a split deployment could read the
+    testnet index while minting/burning on mainnet. Enforce the match at the DB
+    open so no state-changing economy CLI can straddle two chains (bot review
+    #187 / go-live review B5)."""
+    if network != xrpl_network:
+        raise ValueError(
+            f"economy CLI --network {network!r} != XRPL_NETWORK ({xrpl_network!r}); "
+            "the CLI reads the selected network's index/DB but signs on-ledger ops "
+            "against XRPL_NETWORK, so a mismatch would land irreversible asset ops "
+            "on the wrong chain. Run with matching env (ECONOMY_NETWORK == "
+            "XRPL_NETWORK) or pass --network matching XRPL_NETWORK."
+        )
+
+
 validate_economy_config(ECONOMY_ENABLED, ECONOMY_NETWORK, XRPL_NETWORK)
 # In-app marketplace (#44) feature flag (default on): when 0, every /api/market
 # route answers 403 feature-disabled and the client hides the Marketplace UI —

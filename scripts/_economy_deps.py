@@ -192,9 +192,14 @@ async def fetch_burnable(owner: str, nft_id: str) -> bool:
 
 
 def open_index(network: str) -> sqlite3.Connection:
-    """Open the per-network index DB and ensure the economy schema exists."""
+    """Open the per-network index DB and ensure the economy schema exists.
+
+    Guards against a split-network CLI run (#187): the DB we open here must be
+    the same chain xrpl_ops signs against, else reads and irreversible asset ops
+    would target different ledgers."""
     from lfg_core import economy_store
 
+    config.assert_cli_network_match(network)
     conn = nft_index.init_db(nft_index.index_db_path(network))
     economy_store.init_economy_schema(conn)
     return conn

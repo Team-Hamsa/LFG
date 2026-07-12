@@ -157,3 +157,20 @@ def test_economy_network_is_normalized(tmp_path):
     )
     assert result.returncode == 0, result.stderr
     assert result.stdout.strip() == "mainnet"
+
+
+# --- CLI network-match guard (#187): manual economy CLIs must not straddle
+#     chains even when ECONOMY_ENABLED is off (the startup assert is skipped) ---
+
+
+def test_cli_network_match_raises_on_mismatch():
+    try:
+        config.assert_cli_network_match("mainnet", "testnet")
+    except ValueError as e:
+        assert "wrong chain" in str(e)
+    else:
+        raise AssertionError("expected ValueError on split-network CLI run")
+
+
+def test_cli_network_match_passes_when_equal():
+    config.assert_cli_network_match("testnet", "testnet")  # no raise
