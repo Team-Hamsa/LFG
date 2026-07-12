@@ -1,22 +1,105 @@
-# LFG — XRPL NFT Minting Bot & Discord Activity
+<img src="assets/mascot.png" width="94" align="right" alt="LFG mascot">
 
-![Discord](https://img.shields.io/badge/Discord-Bot%20%2B%20Activity-blue) ![XRPL](https://img.shields.io/badge/XRPL-NFT-green) ![Xaman](https://img.shields.io/badge/Xaman%20(XUMM)-Integration-orange)
+<div align="center">
 
-**LFG** lets users mint NFTs on the XRP Ledger (XRPL) and swap traits between NFTs they own, paying with the `LFGO` token via the Xaman (XUMM) app. NFT images are composed dynamically from trait layers with ffmpeg, uploaded to BunnyCDN, and minted on the XRPL.
+<img src="assets/hero.png" alt="LFG — mint, swap & trade NFTs on the XRP Ledger" width="820">
 
-Three front ends share one backend (`lfg_service`) and one pipeline (`lfg_core/`):
+<br>
 
-- **Discord Activity webapp** (`python -m lfg_service.app`) — embedded app running inside Discord: wallet registration, LFGO trustline setup, NFT minting, the Trait Swapper, the Marketplace, Leaderboards, and the Dressing Room (economy features currently disabled — see below). Setup: [docs/ACTIVITY_SETUP.md](docs/ACTIVITY_SETUP.md).
-- **Telegram bot** (`python run_telegram.py`) — chat-style mint + trait swapper via inline keyboards, plus a feature-flagged Mini App that serves the same Activity inside Telegram.
-- **Classic Discord bot** (`python main.py`) — slash-command/button interface for the same mint flow.
+<img src="https://img.shields.io/badge/mainnet-live-2ea043?style=flat-square" alt="Mainnet: live">
+<img src="https://img.shields.io/badge/XRPL-NFTs-3E8DE3?style=flat-square" alt="Built on the XRP Ledger">
+<img src="https://img.shields.io/badge/Xaman-signing-F76B1C?style=flat-square" alt="Signed in Xaman">
+<img src="https://img.shields.io/badge/surfaces-Discord%20%C2%B7%20Telegram%20%C2%B7%20Web-5865F2?style=flat-square" alt="Three surfaces: Discord, Telegram, Web">
+<img src="https://img.shields.io/badge/tests-1.4k%2B-2ea043?style=flat-square" alt="1,400+ tests">
+<img src="https://img.shields.io/badge/license-MIT-blue?style=flat-square" alt="MIT license">
+<img src="https://img.shields.io/badge/SourceTag-2606160021-8957E5?style=flat-square" alt="XRPL SourceTag 2606160021">
 
-All surfaces run side by side against the shared `lfg_service` backend. The collection is **live on XRPL mainnet** (cutover 2026-07-10; 3,535 editions reconciled).
+<br><br>
 
-> **XRPL Make Waves Hackathon:** every XRPL transaction and Xaman signing payload the app builds carries `SourceTag 2606160021`.
+**Mint NFTs, swap their traits, and trade them for XRP — signed in Xaman, live on the XRP Ledger, from Discord, Telegram, or the web.**
+
+</div>
 
 ---
 
-## What's Built
+**LFG** is a multi-surface XRPL app. You mint NFTs whose art is composed on the fly from trait layers, swap individual traits between NFTs you own, and list, browse, and buy them on an in-app marketplace. You pay to mint with the `LFGO` token, cover trait-swap fees in `BRIX` (or its AMM XRP equivalent), trade on the **XRP-denominated** marketplace, and sign every transaction in the [Xaman (XUMM)](https://xaman.app/) wallet — no keys ever touch the app. The same flows run from a Discord bot, a Discord Activity, and a Telegram bot, all backed by one shared service. **The collection is live on XRPL mainnet** — cutover **2026-07-10**, **3,535 editions** reconciled with zero drift.
+
+> **XRPL Make Waves Hackathon** — every XRPL transaction and Xaman signing payload the app builds carries `SourceTag 2606160021`, so all of the volume counts toward this entry.
+
+---
+
+## Live demos
+
+Short walkthroughs of each core flow — animated captures landing soon:
+
+<div align="center">
+<table>
+<tr>
+<td align="center"><img src="assets/demo/mint.gif" width="380" alt="Mint an NFT — Discord Activity to Mint to sign in Xaman to reveal"><br><b>Mint an NFT</b></td>
+<td align="center"><img src="assets/demo/swap.gif" width="380" alt="Trait Swapper — swap traits between two NFTs in place via NFTokenModify"><br><b>Trait Swapper</b></td>
+<td align="center"><img src="assets/demo/marketplace.svg" width="380" alt="Marketplace — browse XRP listings, buy and settle on native NFTokenOffers"><br><b>Marketplace</b></td>
+</tr>
+<tr>
+<td align="center"><img src="assets/demo/telegram.gif" width="380" alt="Telegram Bot — mint and swap from an inline-keyboard chat flow"><br><b>Telegram Bot</b></td>
+<td align="center"><img src="assets/demo/leaderboard.gif" width="380" alt="Leaderboards — eight live boards including holders, swaps, BRIX richlist, rarity"><br><b>Leaderboards</b></td>
+<td align="center"><img src="assets/demo/animated.svg" width="380" alt="Animated NFTs — GIF/MP4 trait layers compose into living video NFTs"><br><b>Animated NFTs</b></td>
+</tr>
+</table>
+</div>
+
+---
+
+## Built in a sprint
+
+<!-- hackathon-loc:start -->
+<img src="assets/hackathon_loc.svg" alt="Hackathon code growth bar" width="728">
+
+*Hand-written code merged since the hackathon baseline (`e296308`, 2026-06-19 — last commit before June 21, 12,080 lines), measured by `git diff --numstat`. Counts `.py`/`.js`/`.css`/`.html` only; docs, markdown, data files (CSV/JSON manifests), dependency lists, and the legacy/backup trees are excluded. Updated automatically on every push to `main`.*
+
+| Category | Lines added | Lines removed | Net |
+|---|---:|---:|---:|
+| Application code | +26,153 | −2,643 | 23,510 |
+| Tests | +28,260 | −8 | 28,252 |
+| **Total** | **+54,413** | **−2,651** | **51,762** |
+<!-- hackathon-loc:end -->
+
+<div align="center">
+<img src="assets/dashboard.svg" alt="Repo vitals — tests, modules, commits, surfaces, mainnet status" width="728">
+</div>
+
+Both the code-growth bar and the vitals card are regenerated by CI on every push to `main`, so the numbers above are never hand-edited.
+
+**→ [Full hackathon build log](docs/HACKATHON.md)** — every feature, with the PRs and issues that landed it.
+
+---
+
+## Highlights
+
+<table>
+<tr>
+<td>🎨 <b>Dynamic NFT art</b><br>Traits selected per rules, composited with ffmpeg across 5 body types.</td>
+<td>🔀 <b>Trait Swapper</b><br>Exchange traits between two NFTs in place via <code>NFTokenModify</code>.</td>
+</tr>
+<tr>
+<td>🛒 <b>In-app Marketplace</b><br>XRP listings on native <code>NFTokenOffer</code>s — no escrow, no custody.</td>
+<td>📲 <b>Xaman push delivery</b><br>Sign requests pushed straight to the app, with QR fallback.</td>
+</tr>
+<tr>
+<td>🌐 <b>Three surfaces, one backend</b><br>Discord bot, Telegram bot, and Discord Activity on <code>lfg_service</code>.</td>
+<td>🏆 <b>8 leaderboards</b><br>Holders, swaps, builds, BRIX richlist, LP, rarity — with time windows.</td>
+</tr>
+<tr>
+<td>🎞 <b>Animated NFTs</b><br>GIF/MP4 trait layers compose into video NFTs with a PNG thumbnail.</td>
+<td>🧬 <b>Declarative trait rules</b><br><code>trait_config.yaml</code> drives z-order, body affinity, and the swap matrix.</td>
+</tr>
+<tr>
+<td>🔗 <b>On-chain index + history DB</b><br>Clio listeners keep per-network SQLite index and ledger-history stores fresh.</td>
+<td>🔐 <b>No custody</b><br>No private keys in the app — every transaction is signed in the user's Xaman wallet.</td>
+</tr>
+</table>
+
+<details>
+<summary><b>All features</b></summary>
 
 | Feature | Status |
 |---|---|
@@ -33,7 +116,7 @@ All surfaces run side by side against the shared `lfg_service` backend. The coll
 | Admin panel (stats, NFT lookup, burn with audit log) | ✅ |
 | Shared-services spine — one `lfg_service` backend, thin surface clients | ✅ |
 | Telegram surface (bot + trait swapper + Mini App) | ✅ |
-| Dress-up trait economy (Closet, harvest/assemble/equip, tradeable trait tokens) | ⏸ built, currently disabled — see note below |
+| Dress-up trait economy (Closet, harvest/assemble/equip, tradeable trait tokens) | ⏸ built, disabled in production — see note below |
 | In-app NFT marketplace (list / browse / buy via Xaman, XRP-denominated) | ✅ |
 | Xaman push delivery (sign requests pushed to the app, QR fallback) | ✅ |
 | Ledger history database + Activity leaderboards (incl. BRIX richlist) | ✅ |
@@ -48,278 +131,191 @@ All surfaces run side by side against the shared `lfg_service` backend. The coll
 | Animated trait layers (transparent GIF bodies → video NFTs, gifski pipeline) | ✅ |
 | Mainnet launch — live collection, network-aware databases, post-cutover hardening | ✅ |
 
-> **Trait economy status:** all four phases are implemented and were live on
-> testnet, but the economy is **currently disabled in production**
-> (`ECONOMY_ENABLED=0`) — an adversarial review surfaced a batch of bugs
-> (issues [#178](../../issues/178)–[#184](../../issues/184)) that are being
-> worked through. Go-live checklist: [#185](../../issues/185).
+</details>
 
 ---
 
-## Shipped During the Hackathon (since June 21)
+## Trait economy status
 
-Everything below was designed, built, and merged during the Make Waves sprint. PR numbers link the work.
-
-### Lines of Code
-
-<!-- hackathon-loc:start -->
-<img src="assets/hackathon_loc.svg" alt="Hackathon code growth bar" width="728">
-
-*Hand-written code merged since the hackathon baseline (`e296308`, 2026-06-19 — last commit before June 21, 12,080 lines), measured by `git diff --numstat`. Counts `.py`/`.js`/`.css`/`.html` only; docs, markdown, data files (CSV/JSON manifests), dependency lists, and the legacy/backup trees are excluded. Updated automatically on every push to `main`.*
-
-| Category | Lines added | Lines removed | Net |
-|---|---:|---:|---:|
-| Application code | +25,956 | −2,643 | 23,313 |
-| Tests | +28,260 | −8 | 28,252 |
-| **Total** | **+54,216** | **−2,651** | **51,565** |
-<!-- hackathon-loc:end -->
-
-### Shared-Services Spine 
-**Issues[#43](../../issues/43) / [#53](../../issues/53)**. 
-**PRs [#76](https://github.com/Team-Hamsa/LFG/pull/76#), [#78](https://github.com/Team-Hamsa/LFG/pull/76#), [#77](https://github.com/Team-Hamsa/LFG/pull/77), [#78](https://github.com/Team-Hamsa/LFG/pull/78), [#79](https://github.com/Team-Hamsa/LFG/pull/79), [#80](https://github.com/Team-Hamsa/LFG/pull/80), [#81](https://github.com/Team-Hamsa/LFG/pull/81)**.  
-One `lfg_service` backend now serves every surface through a shared Surface SDK: the REST/WS backend (Plan 1), the `LFGServiceClient` SDK (Plan 2), the Discord bot migration (Plan 3), and the new Telegram surface (Plan 4).
-
-### Telegram Integration — #81–#83, #92–#98
-- Full Telegram bot: registration, minting, and a chat-style **trait swapper via inline keyboards** (#96).
-- **Telegram Mini App** (feature-flagged) serving the Activity inside Telegram with signed-`initData` auth (#98).
-- Xaman-verified `/register` on both Discord and Telegram (#83).
-- Unified wallet-keyed **cross-surface accounts** with display handles (#94), minted-artwork announcements (#92, #95), and a cross-surface event **firehose** announcing swaps and economy actions everywhere (#97).
-
-### Dress-up Trait Economy ([#46](../../issues/46)) — #62, #67, #71, #105, #106
-A full on-ledger trait economy in four phases:
-- **Phase 1** — supply model, genesis reconciliation, conservation auditor [#62](https://github.com/Team-Hamsa/LFG/pull/62).
-- **Phase 2** — on-ledger ops: **Harvest** (burn a character → its traits drop into your Closet), **Assemble** (body + full trait set → re-mint), **Equip** (`NFTokenModify` a loose trait onto a live character) [#67](https://github.com/Team-Hamsa/LFG/pull/67).
-- **Phase 3** — **Dressing Room UI** in the Discord Activity: visual composer with canvas + roster [#71](https://github.com/Team-Hamsa/LFG/pull/71),.
-- **Phase 4** — **tradeable trait tokens**: Extract a Closet trait as a standalone transferable NFToken (7% royalty) and Deposit it back, creating a secondary market for individual traits [#106](https://github.com/Team-Hamsa/LFG/pull/106).
-- The per-user **Closet** is a soulbound mutable NFToken with standalone issuance [#105](https://github.com/Team-Hamsa/LFG/pull/105).
-
-> Currently **feature-flagged off** in production while review findings
-> ([#178](../../issues/178)–[#184](../../issues/184)) are fixed;
-> go-live tracked in [#185](../../issues/185).
-
-### In-app Marketplace ([#44](../../issues/44)) — #129, #132, #134, #139
-- XRP-denominated marketplace for characters and trait tokens, built entirely on
-  native `NFTokenOffer` sell offers — no escrow, no custodial holding ([#129](https://github.com/Team-Hamsa/LFG/pull/129)).
-- Derived `market_listings` index kept current three ways: the live tx listener,
-  finalize-writes from the List/Buy/Cancel session state machines, and an
-  idempotent backfill sweep.
-- Fail-closed buys: the sell offer is re-verified on-ledger immediately before
-  the Xaman payload is built, and the signer is checked against the session wallet.
-- Sold traits settle automatically back into the buyer's Closet, with a retry
-  sweep backstopping restarts.
-- **Xaman push delivery** ([#135](../../issues/135), [#139](https://github.com/Team-Hamsa/LFG/pull/139)) —
-  returning users get sign requests pushed straight to the Xaman app instead of
-  rescanning a QR (QR/deep link always returned as fallback).
-
-### Milady Body + Animated Layers — #171, #174
-- Fifth body type (**milady**) registered end-to-end: art, trait config,
-  affinity matrix, swap matrix ([#171](https://github.com/Team-Hamsa/LFG/pull/171)).
-- **Animated trait layers**: transparent-GIF body values compose into video
-  NFTs (MP4 + PNG thumbnail); `scripts/make_animated_layer.py` (ffmpeg → gifski)
-  produces compliant 1080×1080 alpha-preserving GIFs ([#174](https://github.com/Team-Hamsa/LFG/pull/174)).
-
-### Ledger History + Leaderboards (not in original scope) — #118–#121
-- Per-network **ledger history database**: raw `account_tx` archive with derived NFT and BRIX events, resumable backfill (95k+ mainnet txs), and live dual-write from the index listeners (#118, #119).
-- Public `GET /api/leaderboard` with **8 boards** — most NFTs held, most swaps, most builds, most-swapped NFTs, **BRIX richlist**, LP richlist, BRIX earned, and NFT rarity — with rolling time windows and a "me" rank lookup.
-- Activity **Leaderboard UI** with a two-tier category/board selector (#120, #121).
-- Nightly BRIX/LP balance snapshots for trend charts.
-
-### On-chain NFT Index (not in original scope) — #59, #60
-Per-network SQLite index of every live NFToken (the chain holds multiple tokens per edition), kept fresh by pm2 listeners on the clio tx stream, plus a layer-coverage auditor and Bithomp CSV importer.
-
-### NFT Generation & Rules
-- **Ape face compose rule** — nose injection + melt-ape masking, fixing face traits on ape bodies ([#38](../../issues/38)) (#110).
-- **Seasonal trait manifest** — sidecar `layers/seasons.json` (1,167 traits across 3 seasons) with Season 3 excluded from minting (#115–#117).
-
-### Trait Rules Engine + Body Affinity ([#40](../../issues/40), [#28](../../issues/28), [#30](../../issues/30)) — #122, #123, #126–#128
-Trait legality is no longer an accident of directory layout — a single validated `trait_config.yaml` drives mint, swap, and economy:
-- **Body-affinity audit** — derived the per-value body-compatibility matrix from the full 3,535-edition mint history (per-edition deduped, burned included), with a human-review report gate ([#122](https://github.com/Team-Hamsa/LFG/pull/122)). Closed #28 by proving the "legacy exclusion rules" never existed in code.
-- **Rules engine** — declarative `trait_config.yaml` (layer z-order, per-value z-overrides absorbing TOP_TRAITS, owner-confirmed affinity, swap matrix, exclusion machinery) with strict load-time validation and a pre-commit/CI validation CLI ([#123](https://github.com/Team-Hamsa/LFG/pull/123)).
-- **Mint + compose integration** — affinity-filtered selection that fails loud on over-constrained layers; compose ordering flows through config z-values; 200-mint property test ([#127](https://github.com/Team-Hamsa/LFG/pull/127)).
-- **Cross-body trait swapping** — Ape↔Skeleton headwear/clothing, Straight↔Curved everything-but-clothing, universal Accessory/Back; enforced per-trait at the API, mirrored in the UI, and applied identically to economy equip/assemble ([#128](https://github.com/Team-Hamsa/LFG/pull/128)). Closes #30.
-- **Shared trait layers** — byte-identical universal art (52 Backgrounds + 4 Backs) physically deduplicated into `layers/shared/` via an idempotent verify-then-move migration with atomic seasons-manifest rewrite ([#126](https://github.com/Team-Hamsa/LFG/pull/126)).
-
-### Mainnet Launch Hardening
-- Regular-key signing for the issuer (`SIGNING_ACCOUNT` override) (#112).
-- `ECONOMY_ENABLED` flag to launch with the trait economy off (#113).
-- Bithomp import filtered by collection issuer; census reconciled to 3,535 clean editions (#111).
-- **Mainnet BRIX/XRP AMM pool live** and quoting for the trait-swap fee path; testnet pool tooling (`scripts/testnet_amm_setup.py`) closes [#26](../../issues/26).
-- **Mainnet cutover executed 2026-07-10** — audits passing (3,535 live editions,
-  zero drift), local-first image archive, network-aware app database
-  ([#167](../../issues/167)) so testnet mints can't poison the mainnet edition counter.
+> **The dress-up trait economy is built but switched off in production.** All four phases — the soulbound **Closet**, **Harvest / Assemble / Equip** on-ledger ops, and **tradeable trait tokens** (Extract / Deposit) — are implemented and ran on testnet. It is currently gated off in production (`ECONOMY_ENABLED=0`) while a batch of review findings ([#178](../../issues/178)–[#184](../../issues/184)) are worked through. Re-enable is tracked in **[#185](../../issues/185)**.
 
 ---
 
-## Roadmap — Remaining
+## Architecture
 
-- [ ] [#42 Web UI (standalone browser-based mint + collection viewer)](../../issues/42)
-- [ ] [#41 X (Twitter) integration (OAuth2, auto-post on mint)](../../issues/41)
-- [ ] Trait economy re-enable — fix review findings [#178](../../issues/178)–[#184](../../issues/184), go-live checklist [#185](../../issues/185)
-- [ ] [#45 DEX integration — backend (OfferCreate/Cancel, order book)](../../issues/45)
-- [ ] [#47 AMM integration — backend (deposit/withdraw/swap, pool stats)](../../issues/47)
-- [ ] [#48 BRIX daily distribution (1/day per unlisted NFT, claim flow)](../../issues/48) — leaderboard/history groundwork shipped in #118
-- [ ] [#39 Admin UI for authoring `trait_config.yaml`](../../issues/39)
-- [ ] [#27 QR callback routing for mobile (UA-aware deep-link)](../../issues/27)
+<div align="center">
+<img src="assets/architecture.svg" alt="LFG architecture — three surfaces to lfg_service to lfg_core to XRPL, Xaman, and BunnyCDN" width="820">
+</div>
 
-### Completed
-- [x] [#26 Testnet BRIX/XRP AMM pool](../../issues/26)
-- [x] [#28 Port generation rules and exclusions from legacy scripts](../../issues/28) — reframed: body-affinity matrix derived from mint history
-- [x] [#29 NFT rarity logic (tiers, weights, metadata scoring)](../../issues/29)
-- [x] [#30 Cross-body-type trait layer swapping rules](../../issues/30)
-- [x] [#38 Ape bodies incorrectly assigned face traits](../../issues/38)
-- [x] [#40 Trait selection rules engine (declarative `trait_config.yaml`)](../../issues/40)
-- [x] [#43 Telegram integration](../../issues/43)
-- [x] [#44 In-app collection Marketplace (list, browse, buy via Xaman)](../../issues/44)
-- [x] [#46 Dress-up game](../../issues/46) — built; currently disabled pending bug fixes (see [#185](../../issues/185))
-- [x] [#49 Explore: AI agent integration via XRPL Payments skill](../../issues/49)
+Three thin surfaces — the classic **Discord bot**, the **Telegram bot**, and the **Discord Activity** webapp — all talk over REST/WS to one aiohttp backend (`lfg_service`), which runs the mint / swap / market / economy session state machines, submits every XRPL transaction, and builds every Xaman signing payload. Shared domain logic lives in `lfg_core`; a **separate listener process group** streams the clio transaction feed into the per-network SQLite index and ledger-history stores that the backend reads. **No private keys ever touch the app** — all signing happens in the user's Xaman wallet, images and metadata are hosted on BunnyCDN, and the NFT schema is pinned on IPFS.
 
----
-
-## Repository Layout
+<details>
+<summary><b>Repository layout</b></summary>
 
 ```
 LFG/
-├── main.py                  # Classic Discord bot entry point
-├── lfg_core/                # Shared pipeline (used by both front ends)
-│   ├── config.py            # All environment configuration
-│   ├── xrpl_ops.py          # Mint, burn, offers, payment watching
-│   ├── xumm_ops.py          # Xaman payloads + QR generation
-│   ├── mint_flow.py         # Mint session state machine
-│   ├── swap_flow.py         # Trait-swap state machine (modify-in-place / mint-before-burn)
-│   ├── swap_meta.py         # Wallet NFT + metadata fetching
-│   ├── swap_compose.py      # ffmpeg compositing + output upload
-│   ├── layer_store.py       # Unified CDN/local trait layer store
-│   ├── traits.py            # Random trait selection
-│   └── cdn.py               # BunnyCDN upload helper
+├── main.py                 # Classic Discord bot launch shim
+├── run_telegram.py         # Telegram surface launch shim
+├── lfg_service/            # Shared REST/WS backend (aiohttp) — the hub
+│   └── app.py              # API, Activity static host, session state machines
+├── lfg_core/               # Shared domain library (used by every process)
+│   ├── config.py           # All environment configuration
+│   ├── xrpl_ops.py         # Mint, burn, offers, payment watching
+│   ├── xumm_ops.py         # Xaman payload builders + SourceTag/Memos
+│   ├── mint_flow.py        # Mint session state machine
+│   ├── swap_flow.py        # Trait-swap state machine
+│   ├── market_flow.py      # Marketplace list/buy/cancel state machines
+│   ├── economy_flow.py     # Dress-up economy flows
+│   ├── layer_store.py      # Trait layer store (local-first)
+│   └── traits.py           # Rules-driven trait selection
+├── surfaces/
+│   ├── discord_bot/        # Discord bot (bot.py, commands, views, admin)
+│   ├── telegram_bot/       # Telegram bot + Mini App
+│   └── _client/, _shared/  # Surface SDK (LFGServiceClient) + plumbing
 ├── webapp/
-│   ├── server.py            # aiohttp backend for the Discord Activity
-│   ├── client/              # No-build frontend (index.html, app.js, style.css)
-│   └── test_smoke.py        # Smoke tests
-├── lfg_service/             # Shared REST/WS backend serving all surfaces
-├── surfaces/telegram_bot/   # Telegram surface (bot + Mini App)
-├── run_telegram.py          # Telegram launch shim
-├── db_helpers.py            # LFG (mint records) table helpers
-├── user_db.py               # Users table (wallet registration)
-├── init_db.py               # Database initialization
-├── scripts/                 # Ops tooling: backfills, listeners, audits, economy CLIs
-└── docs/ACTIVITY_SETUP.md   # Discord Activity setup guide
+│   ├── server.py           # 8-line launch shim → lfg_service.app
+│   └── client/             # No-build Activity frontend (vanilla JS)
+├── scripts/                # Ops: onchain_listener, backfills, audits, economy CLIs
+├── trait_config.yaml       # Declarative trait rules (z-order, affinity, swap matrix)
+└── docs/                   # ACTIVITY_SETUP.md, HACKATHON.md
 ```
 
----
-
-## Prerequisites
-
-- Python 3.10+
-- `ffmpeg` on the system path
-- Discord application — bot token + Client ID/Secret. Privileged gateway intents required (classic bot); Activities enabled (webapp). Full steps in [docs/ACTIVITY_SETUP.md](docs/ACTIVITY_SETUP.md).
-- [Xaman (XUMM) API credentials](https://apps.xumm.dev/)
-- BunnyCDN storage zone credentials
-- Funded XRPL account ([testnet faucet](https://xrpl.org/xrp-testnet-faucet.html) for testing)
+</details>
 
 ---
 
-## Installation
+## Quick start
+
+**Prerequisites:** Python 3.10+, `ffmpeg` on the system path, a Discord application (bot token + Client ID/Secret), [Xaman API credentials](https://apps.xumm.dev/), a BunnyCDN storage zone, and a funded XRPL account ([testnet faucet](https://xrpl.org/xrp-testnet-faucet.html) for testing).
 
 ```bash
 git clone https://github.com/Team-Hamsa/LFG.git
 cd LFG
 sudo apt-get update && sudo apt-get install -y ffmpeg
-pip install -r requirements.txt
+./setup.sh   # builds .venv, installs deps, installs the pre-push hook
 ```
 
-### Environment Variables
+Then create a `.env` in the repo root and run a surface:
 
-Create a `.env` in the repo root:
+```bash
+# Discord Activity backend (the hub — port 8176)
+python -m lfg_service.app
+
+# Classic Discord bot
+python main.py
+
+# Telegram bot
+python run_telegram.py
+
+# Tests
+python3 -m pytest
+```
+
+<details>
+<summary><b>Environment variables</b></summary>
+
+Minimum to mint from the classic bot:
 
 ```plaintext
 DISCORD_BOT_TOKEN=...        # classic bot only
 XUMM_API_KEY=...
 XUMM_API_SECRET=...
-SEED=...                     # XRPL wallet seed used for minting
+SEED=...                     # XRPL wallet seed used for minting/backend signing
 TOKEN_ISSUER_ADDRESS=...
 TOKEN_CURRENCY_HEX=...
 BUNNY_CDN_ACCESS_KEY=...
 BUNNY_CDN_STORAGE_ZONE=...
 ```
 
-Discord Activity additionally needs:
+The Discord Activity additionally needs:
 
 ```plaintext
 DISCORD_CLIENT_ID=...
 DISCORD_CLIENT_SECRET=...
 WEBAPP_SESSION_SECRET=...
-WEBAPP_PORT=8080
+WEBAPP_PORT=8176
 ```
 
-Full list with defaults in `lfg_core/config.py`. Defaults point at **testnet**; set `XRPL_JSON_RPC_URL` / `XRPL_WS_URL` for mainnet.
+Optional surfaces / features: `TELEGRAM_BOT_TOKEN`, `SERVICE_TOKEN_TELEGRAM`,
+`TELEGRAM_MINI_APP_URL` (Mini App), `ECONOMY_ENABLED` (trait economy, `0` in
+production), `XRPL_NETWORK`, `XRPL_CLIO_WS_URL`, `BRIX_DISTRIBUTOR_ADDRESS`,
+`BRIX_AMM_ACCOUNT`.
 
-### Trait Layers
+The full list with defaults lives in `lfg_core/config.py`. **Defaults target
+mainnet** (`XRPL_NETWORK=mainnet`, `s1.ripple.com`); set `XRPL_NETWORK=testnet`
+for testing. Full Discord Activity setup is documented in
+[docs/ACTIVITY_SETUP.md](docs/ACTIVITY_SETUP.md).
 
-Trait art is served from the local `layers/` tree (`LAYER_SOURCE=local`, the production setting); BunnyCDN is still used for minted image/metadata uploads:
+</details>
+
+<details>
+<summary><b>Trait layers</b></summary>
+
+Trait art is served from the local `layers/` tree (`LAYER_SOURCE=local`, the
+production setting); BunnyCDN is still used for minted image/metadata uploads.
 
 ```
 layers/
-├── shared/                  # universal art every body pulls from (Background, Back)
-│   ├── Background/<Value>.png|.gif|.mp4
-│   └── Back/
-├── male/
-│   ├── Body/ Clothing/ Mouth/ Eyebrows/ Eyes/ Head/ Accessory/
-├── female/
-├── ape/
-├── milady/
-└── skeleton/
+├── shared/     # universal art every body pulls from (Background, Back)
+├── male/  female/  ape/  milady/  skeleton/
+│   └── Body/ Clothing/ Mouth/ Eyebrows/ Eyes/ Head/ Accessory/
 ```
 
-Trait legality (layer order, per-value body affinity, cross-body swap matrix) lives in `trait_config.yaml` at the repo root, validated by `scripts/validate_trait_config.py` (runs in pre-commit and CI).
+Trait legality — layer order, per-value body affinity, and the cross-body swap
+matrix — lives in `trait_config.yaml` at the repo root, validated by
+`scripts/validate_trait_config.py` (runs in pre-commit and CI).
 
-Use `scripts/upload_layers_cdn.py` to push a local `layers/` tree.
-
----
-
-## Running
-
-```bash
-# Discord Activity
-python -m lfg_service.app
-
-# Classic bot
-python main.py
-
-# Tests
-python3 -m pytest webapp/test_smoke.py
-```
+</details>
 
 ---
 
-## Usage
+## Roadmap
 
-1. Launch the Activity from a voice channel or App Launcher (or run `/letsgo` in the classic bot).
-2. Register your XRPL wallet (first time only).
-3. Optionally set the LFGO trustline via QR / Xaman deep link.
-4. **Mint** — pay 1 LFGO, accept the NFT offer in Xaman.
-5. **Trait Swapper** — pick two of your NFTs, choose traits to exchange, confirm; pay BRIX and accept via Xaman QR.
+**Remaining**
 
----
+- [ ] [#42 — standalone browser web UI (mint + collection viewer)](../../issues/42)
+- [ ] [#41 — X (Twitter) integration (OAuth2, auto-post on mint)](../../issues/41)
+- [ ] **Trait economy re-enable** — clear review findings [#178](../../issues/178)–[#184](../../issues/184), go-live checklist [#185](../../issues/185)
+- [ ] [#45 — DEX integration backend (OfferCreate/Cancel, order book)](../../issues/45)
+- [ ] [#47 — AMM integration backend (deposit/withdraw/swap, pool stats)](../../issues/47)
+- [ ] [#48 — BRIX daily distribution (1/day per unlisted NFT, claim flow)](../../issues/48)
+- [ ] [#39 — Admin UI for authoring `trait_config.yaml`](../../issues/39)
 
-## Contributing
+<details>
+<summary><b>Completed</b></summary>
 
-1. Fork the repo.
-2. Create a branch (`git checkout -b feature/your-feature`).
-3. Commit and push.
-4. Open a pull request.
+- [x] [#26 — Testnet BRIX/XRP AMM pool](../../issues/26)
+- [x] [#27 — QR callback routing for mobile (UA-aware deep-link)](../../issues/27)
+- [x] [#28 — Generation rules and exclusions (body-affinity matrix from mint history)](../../issues/28)
+- [x] [#29 — NFT rarity logic (tiers, weights, metadata scoring)](../../issues/29)
+- [x] [#30 — Cross-body-type trait swapping rules](../../issues/30)
+- [x] [#38 — Ape bodies incorrectly assigned face traits](../../issues/38)
+- [x] [#40 — Trait selection rules engine (`trait_config.yaml`)](../../issues/40)
+- [x] [#43 — Telegram integration](../../issues/43)
+- [x] [#44 — In-app marketplace (list, browse, buy via Xaman)](../../issues/44)
+- [x] [#46 — Dress-up game](../../issues/46) — built; disabled in production pending [#185](../../issues/185)
+- [x] [#49 — AI agent integration via XRPL Payments skill (exploration)](../../issues/49)
+- [x] Shared-services spine — one backend + Surface SDK ([#43](../../issues/43)/[#53](../../issues/53); PRs [#76](../../pull/76), [#78](../../pull/78), [#79](../../pull/79), [#80](../../pull/80), [#81](../../pull/81), [#82](../../pull/82))
+- [x] Milady body + animated trait layers (PRs [#171](../../pull/171), [#174](../../pull/174))
+- [x] Network-aware app database — testnet mints no longer poison the mainnet counter (PR [#167](../../pull/167))
+- [x] Mainnet cutover — 3,535 live editions, zero drift (2026-07-10)
+
+</details>
 
 ---
 
 ## License
 
-MIT — see [LICENSE](LICENSE).
+LFG is released under the **MIT License** — see [LICENSE](LICENSE).
 
 ---
 
-## Acknowledgments
+<div align="center">
 
-- [xrpl-py](https://github.com/XRPLF/xrpl-py)
-- [Xaman (XUMM) SDK](https://github.com/XRPL-Labs/XUMM-SDK)
-- [Discord Embedded App SDK](https://github.com/discord/embedded-app-sdk)
-- [BunnyCDN](https://bunny.net/)
-- [FFmpeg](https://ffmpeg.org/)
+**[Build log](docs/HACKATHON.md)** · **[Activity setup](docs/ACTIVITY_SETUP.md)** · **[Contributing](CONTRIBUTING.md)** · **[License](#license)**
+
+</div>
+
+**Acknowledgments** — [xrpl-py](https://github.com/XRPLF/xrpl-py), the [Xaman (XUMM) SDK](https://github.com/XRPL-Labs/XUMM-SDK), the [Discord Embedded App SDK](https://github.com/discord/embedded-app-sdk), [BunnyCDN](https://bunny.net/), and [FFmpeg](https://ffmpeg.org/).
+
+*XRPL Make Waves Hackathon — every XRPL tx carries `SourceTag 2606160021`.*

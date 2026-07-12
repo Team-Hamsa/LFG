@@ -50,3 +50,5 @@ history_mainnet.db*
 # macOS finder metadata
 .DS_Store
 ._.DS_Store
+# macOS AppleDouble / resource-fork sidecars (never commit these)
+._*
