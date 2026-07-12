@@ -25,7 +25,7 @@ class _Resp:
 def _patch_client(monkeypatch, captured):
     """Capture the tx model passed to submit_and_wait; stub Tx status checks."""
 
-    def fake_submit(tx, client, wallet):
+    def fake_submit(tx, client, wallet, **kwargs):
         captured["tx"] = tx
         return _Resp(
             {
@@ -49,6 +49,11 @@ def _patch_client(monkeypatch, captured):
             }
         )
 
+    # mint/burn/modify now sign once before submitting (so a raised submit can be
+    # confirmed by hash, never blind-resubmitted). autofill_and_sign hits the
+    # network, so stub it to pass the built tx model straight through — the
+    # captured tx is still the model whose SourceTag we assert on.
+    monkeypatch.setattr(xrpl_ops, "autofill_and_sign", lambda tx, client, wallet, **k: tx)
     monkeypatch.setattr(xrpl_ops, "submit_and_wait", fake_submit)
     monkeypatch.setattr(xrpl_ops.JsonRpcClient, "request", fake_request)
 

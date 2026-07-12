@@ -80,6 +80,21 @@ class TestGetNftSellOffers:
         offers = _run(xrpl_ops.get_nft_sell_offers(NFT_ID))
         assert offers[0]["offer_index"] == OFFER_INDEX
 
+    def test_surfaces_expiration_field(self, monkeypatch) -> None:
+        """#183: the normalized offer must carry the raw XRPL `expiration`
+        (Ripple-epoch seconds) so verify can reject an already-expired offer;
+        absent Expiration surfaces as None."""
+        result = {
+            "offers": [
+                {"nft_offer_index": OFFER_INDEX, "amount": "1000000", "expiration": 800_000_000},
+                {"index": "OTHER", "amount": "2000000"},
+            ]
+        }
+        monkeypatch.setattr(xrpl_ops, "JsonRpcClient", _fake_json_rpc_client(result))
+        offers = _run(xrpl_ops.get_nft_sell_offers(NFT_ID))
+        assert offers[0]["expiration"] == 800_000_000
+        assert offers[1]["expiration"] is None
+
     def test_json_roundtrip_result_still_parses(self, monkeypatch) -> None:
         # Guard against accidental reliance on non-JSON-safe types (the RPC
         # response in production always arrives via json.loads).
@@ -187,6 +202,13 @@ def _offers_fetcher(
 ) -> Callable[[str], Awaitable[list[dict[str, Any]]]]:
     async def fetch(_nft_id: str) -> list[dict[str, Any]]:
         return offers
+
+    return fetch
+
+
+def _ledger_time(ts: int) -> Callable[[], Awaitable[int]]:
+    async def fetch() -> int:
+        return ts
 
     return fetch
 
@@ -323,3 +345,142 @@ class TestVerifySellOffer:
             )
         )
         assert result is False
+
+    def test_false_when_offer_expired(self) -> None:
+        """#183: an offer whose Expiration is strictly before the current
+        ledger time is dead (accept would tecEXPIRED) — verify must fail closed
+        so the buyer never gets a doomed payload."""
+        offers = [
+            {
+                "offer_index": OFFER_INDEX,
+                "amount": "5000000",
+                "destination": None,
+                "expiration": 1_000,
+            }
+        ]
+        result = _run(
+            market_ops.verify_sell_offer(
+                NFT_ID,
+                OFFER_INDEX,
+                5_000_000,
+                fetch_offers=_offers_fetcher(offers),
+                fetch_ledger_time=_ledger_time(2_000),
+            )
+        )
+        assert result is False
+
+    def test_false_when_offer_expiration_equals_ledger_time(self) -> None:
+        """Boundary: XRPL treats an object as expired when Expiration is <=
+        the last-closed ledger's close time, so an at-now Expiration is False."""
+        offers = [
+            {
+                "offer_index": OFFER_INDEX,
+                "amount": "5000000",
+                "destination": None,
+                "expiration": 2_000,
+            }
+        ]
+        result = _run(
+            market_ops.verify_sell_offer(
+                NFT_ID,
+                OFFER_INDEX,
+                5_000_000,
+                fetch_offers=_offers_fetcher(offers),
+                fetch_ledger_time=_ledger_time(2_000),
+            )
+        )
+        assert result is False
+
+    def test_true_when_offer_not_yet_expired(self) -> None:
+        offers = [
+            {
+                "offer_index": OFFER_INDEX,
+                "amount": "5000000",
+                "destination": None,
+                "expiration": 3_000,
+            }
+        ]
+        result = _run(
+            market_ops.verify_sell_offer(
+                NFT_ID,
+                OFFER_INDEX,
+                5_000_000,
+                fetch_offers=_offers_fetcher(offers),
+                fetch_ledger_time=_ledger_time(2_000),
+            )
+        )
+        assert result is True
+
+    def test_no_expiration_skips_ledger_lookup(self) -> None:
+        """The common non-expiring offer must NOT incur a ledger-time lookup:
+        an offer with no Expiration verifies True even if the ledger fetch
+        would raise."""
+
+        async def must_not_fetch() -> int:
+            raise AssertionError("ledger time must not be fetched for a non-expiring offer")
+
+        offers = [{"offer_index": OFFER_INDEX, "amount": "5000000", "destination": None}]
+        result = _run(
+            market_ops.verify_sell_offer(
+                NFT_ID,
+                OFFER_INDEX,
+                5_000_000,
+                fetch_offers=_offers_fetcher(offers),
+                fetch_ledger_time=must_not_fetch,
+            )
+        )
+        assert result is True
+
+    def test_ledger_time_failure_is_false_nonstrict(self) -> None:
+        """An expiring offer whose ledger-time lookup fails is fail-closed to
+        False in non-strict mode (never a false positive)."""
+
+        async def boom() -> int:
+            raise RuntimeError("ledger rpc down")
+
+        offers = [
+            {
+                "offer_index": OFFER_INDEX,
+                "amount": "5000000",
+                "destination": None,
+                "expiration": 3_000,
+            }
+        ]
+        result = _run(
+            market_ops.verify_sell_offer(
+                NFT_ID,
+                OFFER_INDEX,
+                5_000_000,
+                fetch_offers=_offers_fetcher(offers),
+                fetch_ledger_time=boom,
+            )
+        )
+        assert result is False
+
+    def test_ledger_time_failure_raises_strict(self) -> None:
+        """In strict mode a ledger-time lookup failure propagates (like a
+        fetch_offers failure) so the buy-start handler can respond 503 rather
+        than stale-close a possibly-healthy listing."""
+
+        async def boom() -> int:
+            raise RuntimeError("ledger rpc down")
+
+        offers = [
+            {
+                "offer_index": OFFER_INDEX,
+                "amount": "5000000",
+                "destination": None,
+                "expiration": 3_000,
+            }
+        ]
+        with pytest.raises(RuntimeError):
+            _run(
+                market_ops.verify_sell_offer(
+                    NFT_ID,
+                    OFFER_INDEX,
+                    5_000_000,
+                    fetch_offers=_offers_fetcher(offers),
+                    strict=True,
+                    fetch_ledger_time=boom,
+                )
+            )

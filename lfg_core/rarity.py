@@ -104,10 +104,24 @@ def effective_weight(
     boost_step_hours: int | None,
     boost_started_at: str | None,
     now: datetime,
+    population_size: int = 0,
 ) -> float:
     """weight = max(live_share, floor) × boost multiplier. Relative weight,
-    not a normalized probability."""
-    share = (live_count / category_total) if category_total else 0.0
+    not a normalized probability.
+
+    When population_size (the number of trait rows in the whole
+    (body, category) population) is given, the share is Laplace-smoothed:
+    (live_count + 1) / (category_total + population_size). On a mature
+    category the +1 pseudocount is noise, but on a cold-starting one — a
+    brand-new body like milady, where NO legacy rows widen the denominator —
+    it stops the first minted value's share from being count/count = 1.0 vs
+    the 0.005 floor for everything else, which made the exact same trait win
+    ~96% of every roll and snowball (the first mainnet miladys minted
+    identical across every category)."""
+    if population_size:
+        share = (live_count + 1) / (category_total + population_size)
+    else:
+        share = (live_count / category_total) if category_total else 0.0
     base = max(share, floor_weight)
     return base * boost_multiplier(boost_initial, boost_step_hours, boost_started_at, now)
 
@@ -160,13 +174,19 @@ def weighted_pick(
     # placeholders, disabled or retired traits) still hold live NFTs; summing
     # only candidate rows collapses the denominator when a category is
     # cold-starting (ape Star-eyes bug: one counted mint → share 1/1 = 1.0,
-    # which then snowballs on every subsequent roll). Fetched in the same
-    # statement as the candidate rows so both see one snapshot.
+    # which then snowballs on every subsequent roll). The row count of that
+    # same population feeds Laplace smoothing in effective_weight — a whole
+    # population denominator alone can't save a brand-new body (milady),
+    # whose whole population IS the handful of identical early mints.
+    # Fetched in the same statement as the candidate rows so all see one
+    # snapshot.
     placeholders = ",".join("?" * len(available))
     rows = conn.execute(
         f"""SELECT trait, live_count, floor_weight, boost_initial,
                    boost_step_hours, boost_started_at,
                    (SELECT COALESCE(SUM(live_count), 0) FROM trait_rarity
+                    WHERE network=t.network AND body=t.body AND category=t.category),
+                   (SELECT COUNT(*) FROM trait_rarity
                     WHERE network=t.network AND body=t.body AND category=t.category)
             FROM trait_rarity t
             WHERE network=? AND body=? AND category=? AND enabled=1
@@ -177,8 +197,12 @@ def weighted_pick(
         raise ValueError(f"All traits disabled for {body}/{category} on {network}")
 
     total = rows[0][6]
+    population = rows[0][7]
     traits = [r[0] for r in rows]
-    weights = [effective_weight(r[1], total, r[2], r[3], r[4], r[5], now) for r in rows]
+    weights = [
+        effective_weight(r[1], total, r[2], r[3], r[4], r[5], now, population_size=population)
+        for r in rows
+    ]
     return rng.choices(traits, weights=weights, k=1)[0]  # type: ignore[no-any-return]
 
 
@@ -456,7 +480,9 @@ def get_odds(
     out: list[tuple[str, int, float, float, str]] = []
     for trait, count, floor, bi, bs, bsa, enabled in rows:
         share = (count / total * 100) if total else 0.0
-        weight = effective_weight(count, total, floor, bi, bs, bsa, now)
+        # population_size = len(rows): same Laplace smoothing as weighted_pick
+        # so the admin view shows the weights the picker actually uses.
+        weight = effective_weight(count, total, floor, bi, bs, bsa, now, population_size=len(rows))
         status = "disabled" if not enabled else boost_status(bi, bs, bsa, now)
         out.append((trait, count, share, weight, status))
     return sorted(out, key=lambda r: -r[3])

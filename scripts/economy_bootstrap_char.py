@@ -97,7 +97,7 @@ async def _amain(args: argparse.Namespace) -> int:
 
 def main() -> int:
     p = argparse.ArgumentParser(description=__doc__)
-    p.add_argument("--network", choices=["mainnet", "testnet"], default=config.XRPL_NETWORK)
+    p.add_argument("--network", choices=["mainnet", "testnet"], default=config.ECONOMY_NETWORK)
     p.add_argument("--edition", type=int, required=True, help="new edition number to mint")
     p.add_argument(
         "--source-edition",

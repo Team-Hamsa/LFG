@@ -58,9 +58,9 @@ Short walkthroughs of each core flow — animated captures landing soon:
 
 | Category | Lines added | Lines removed | Net |
 |---|---:|---:|---:|
-| Application code | +25,006 | −2,551 | 22,455 |
+| Application code | +25,203 | −2,551 | 22,652 |
 | Tests | +26,608 | −8 | 26,600 |
-| **Total** | **+51,614** | **−2,559** | **49,055** |
+| **Total** | **+51,811** | **−2,559** | **49,252** |
 <!-- hackathon-loc:end -->
 
 <div align="center">

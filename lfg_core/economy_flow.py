@@ -44,6 +44,7 @@
 
 from __future__ import annotations
 
+import functools
 import json
 import logging
 import os
@@ -51,14 +52,37 @@ import traceback
 import uuid
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, field
-from typing import Any
+from typing import Any, TypeVar
 
 from lfg_core import closet_token as bt
-from lfg_core import config
+from lfg_core import config, owner_lock
 from lfg_core import economy_store as es
 from lfg_core import trait_economy as te
 from lfg_core import trait_token as tt
 from lfg_core.nft_index import OnchainNft
+
+# Any session that owns a Closet read-modify-write carries `.owner`; a `.state`
+# machine driven by run_* below. Only used to type the serialization decorator.
+_S = TypeVar("_S")
+
+
+def _serialize_by_owner(
+    runner: Callable[[_S, EconomyDeps], Awaitable[None]],
+) -> Callable[[_S, EconomyDeps], Awaitable[None]]:
+    """Hold the per-owner Closet lock (#180) for the WHOLE flow. sync_closet
+    full-overwrites the Closet token, so two flows for one owner that interleave
+    read -> modify -> mirror lose an update; serializing the entire op (a
+    superset of read->sync->mirror) is the obviously-correct fix and still lets
+    different owners run concurrently. The lock is per event loop, so this adds
+    no cross-owner contention and no ordering constraint between wallets."""
+
+    @functools.wraps(runner)
+    async def wrapper(session: _S, deps: EconomyDeps) -> None:
+        async with owner_lock.owner_lock(session.owner):  # type: ignore[attr-defined]
+            await runner(session, deps)
+
+    return wrapper
+
 
 RUNNING = "running"
 DONE = "done"
@@ -192,6 +216,25 @@ async def _require_active_closet(deps: EconomyDeps, owner: str) -> str | None:
     return None
 
 
+def _mirror_pending_error(deps: EconomyDeps, owner: str) -> str | None:
+    """Error string if the owner's Closet DB mirror is flagged stale (#184), else
+    None. A prior op committed an on-chain Closet change but its local mirror
+    write failed (`complete_pending_mirror`); until the listener/backfill rebuilds
+    the mirror from the token and clears the flag, `_owner_contents` here would
+    read the STALE mirror and `_sync_then_persist` would full-overwrite the token,
+    erasing the unmirrored change. Fail-closed: refuse and let the user retry once
+    the mirror catches up.
+
+    NB: this guards against a SEQUENTIAL stale read only. Serializing CONCURRENT
+    ops on one owner (a per-owner lock across read→sync→mirror) is a separate
+    concern owned by #180 — deliberately not added here."""
+    if es.get_mirror_pending(deps.conn, owner):
+        return (
+            "Your Closet is still finishing a sync from a previous action. Try again in a moment."
+        )
+    return None
+
+
 # --- Harvest: burn a live character; its 8 assets + body drop into the Closet ---
 
 
@@ -232,6 +275,7 @@ class HarvestSession:
         self.error = msg
 
 
+@_serialize_by_owner
 async def run_harvest(session: HarvestSession, deps: EconomyDeps) -> None:
     """Drive a harvest to a terminal state. Order: precheck -> require ACTIVE
     Closet -> BURN (irreversible) -> deposit assets to the Closet token then DB.
@@ -240,6 +284,10 @@ async def run_harvest(session: HarvestSession, deps: EconomyDeps) -> None:
     conn = deps.conn
     rec, owner = session.character, session.owner
     try:
+        stale = _mirror_pending_error(deps, owner)
+        if stale:
+            session.fail(stale)
+            return
         chk = te.can_harvest(rec, _effective_genesis(conn), burnable=session.burnable)
         if not chk.ok:
             session.fail(f"cannot harvest: {chk.reason}")
@@ -275,6 +323,7 @@ async def run_harvest(session: HarvestSession, deps: EconomyDeps) -> None:
             # No compensation — the listener rebuilds the mirror from the token.
             session.sync_tx_hash = e.tx_hash
             session.mirror_pending = True
+            es.set_mirror_pending(conn, owner, True)
             session.state = DONE
             _write_record(
                 deps.records_dir, "harvest", session.id, session._record("complete_pending_mirror")
@@ -368,6 +417,7 @@ class AssembleSession:
         self.error = msg
 
 
+@_serialize_by_owner
 async def run_assemble(session: AssembleSession, deps: EconomyDeps) -> None:
     """Drive an assemble (rebirth) to a terminal state. Order: precheck ->
     compose+upload -> MINT (reversible: burn back) -> drain the Closet (token
@@ -376,6 +426,10 @@ async def run_assemble(session: AssembleSession, deps: EconomyDeps) -> None:
     parked in the issuer wallet for re-offer (no asset loss)."""
     conn, owner, edition = deps.conn, session.owner, session.edition
     try:
+        stale = _mirror_pending_error(deps, owner)
+        if stale:
+            session.fail(stale)
+            return
         assets, bodies = _owner_contents(conn, owner)
         chk = te.can_assemble(
             edition,
@@ -422,6 +476,7 @@ async def run_assemble(session: AssembleSession, deps: EconomyDeps) -> None:
             # gave up the body + assets — do NOT compensate; deliver instead.
             session.sync_tx_hash = e.tx_hash
             session.mirror_pending = True
+            es.set_mirror_pending(conn, owner, True)
         except bt.ClosetIndeterminateError as e:
             # Drain outcome unknown: fail-closed. Keep the mint (id journaled),
             # no burn — an admin reconciles from chain.
@@ -547,6 +602,7 @@ class EquipSession:
         self.error = msg
 
 
+@_serialize_by_owner
 async def run_equip(session: EquipSession, deps: EconomyDeps) -> None:
     """Drive an equip to a terminal state. Order: precheck -> compose+upload ->
     MODIFY the character in place (reversible: modify back to the old URI) ->
@@ -555,6 +611,10 @@ async def run_equip(session: EquipSession, deps: EconomyDeps) -> None:
     conn, owner, rec = deps.conn, session.owner, session.character
     slot, incoming = session.slot, session.incoming_value
     try:
+        stale = _mirror_pending_error(deps, owner)
+        if stale:
+            session.fail(stale)
+            return
         assets, _bodies = _owner_contents(conn, owner)
         chk = te.can_equip(rec, slot, incoming, assets, mutable=bool(rec.mutable))
         if not chk.ok:
@@ -593,6 +653,7 @@ async def run_equip(session: EquipSession, deps: EconomyDeps) -> None:
             # new traits; the listener converges the mirror.
             session.sync_tx_hash = e.tx_hash
             session.mirror_pending = True
+            es.set_mirror_pending(conn, owner, True)
             session.state = DONE
             _write_record(
                 deps.records_dir, "equip", session.id, session._record("complete_pending_mirror")
@@ -613,19 +674,20 @@ async def run_equip(session: EquipSession, deps: EconomyDeps) -> None:
             # Ledger-failed: the swap definitively did not commit. Roll the
             # character back to its old traits; the closet is untouched.
             old_uri = _raw_uri(rec.uri_hex)
-            if old_uri:
-                await deps.char_modify_fn(rec.nft_id, owner, old_uri)
+            # Check the revert modify actually LANDED: a falsy hash (or no
+            # decodable old URI to revert to) means the character may still carry
+            # the new traits while the Closet was not updated — that is the
+            # failed_revert case (admin recovery), not a clean reverted_modify.
+            revert_hash = await deps.char_modify_fn(rec.nft_id, owner, old_uri) if old_uri else None
+            if revert_hash:
                 session.fail(f"equip failed updating the closet ({e}); your character was reverted")
                 _write_record(
                     deps.records_dir, "equip", session.id, session._record("reverted_modify")
                 )
             else:
-                # No decodable old URI to revert to: the character keeps the new
-                # traits while the Closet was not updated. Report honestly and
-                # flag for recovery rather than claiming a revert that didn't happen.
                 session.fail(
-                    f"equip failed updating the closet ({e}); the character's URI could not be "
-                    f"decoded to revert — it may retain the new traits (journal {session.id})"
+                    f"equip failed updating the closet ({e}); the character could NOT be reverted "
+                    f"to its old traits — it may retain the new traits (journal {session.id})"
                 )
                 _write_record(
                     deps.records_dir, "equip", session.id, session._record("failed_revert")
@@ -685,6 +747,7 @@ class ExtractSession:
         self.error = msg
 
 
+@_serialize_by_owner
 async def run_extract(session: ExtractSession, deps: EconomyDeps) -> None:
     """Extract a loose Closet trait into a standalone tradeable NFToken. Order:
     precheck (active Closet + trait present) -> compose+mint (reversible) ->
@@ -695,6 +758,10 @@ async def run_extract(session: ExtractSession, deps: EconomyDeps) -> None:
         err = await _require_active_closet(deps, owner)
         if err:
             session.fail(err)
+            return
+        stale = _mirror_pending_error(deps, owner)
+        if stale:
+            session.fail(stale)
             return
         assets, bodies = _owner_contents(conn, owner)
         if assets.get((slot, value), 0) < 1:
@@ -722,6 +789,7 @@ async def run_extract(session: ExtractSession, deps: EconomyDeps) -> None:
             # already gave up the trait — no compensation; deliver instead.
             session.sync_tx_hash = e.tx_hash
             session.mirror_pending = True
+            es.set_mirror_pending(conn, owner, True)
         except bt.ClosetIndeterminateError as e:
             # Decrement outcome unknown: fail-closed. Keep the token (id
             # journaled), no burn — an admin reconciles from chain.
@@ -782,7 +850,23 @@ async def run_extract(session: ExtractSession, deps: EconomyDeps) -> None:
             session.mirror_pending = True
 
         offer_id = await deps.closet_offer_fn(nft_id, owner)
-        session.accept = await deps.closet_accept_fn(offer_id) if offer_id else None
+        if not offer_id:
+            # The Closet decrement already COMMITTED on-chain but the delivery
+            # offer failed — the trait token is stranded in the issuer wallet.
+            # Mirror assemble's minted_no_offer: this is NOT "complete" (the
+            # user hasn't received the token), it's a RECOVERABLE state with a
+            # re-offer path. Do NOT burn back — the Closet already gave up the
+            # trait, so a burn would destroy it. Sticky mirror_pending/
+            # sync_tx_hash are preserved in the record for reconciliation.
+            session.fail(
+                f"trait token {nft_id} was minted and your Closet drained, but the delivery "
+                f"offer failed — contact an admin to re-offer it (journal {session.id})"
+            )
+            _write_record(
+                deps.records_dir, "extract", session.id, session._record("minted_no_offer")
+            )
+            return
+        session.accept = await deps.closet_accept_fn(offer_id)
         session.state = DONE
         status = "complete_pending_mirror" if session.mirror_pending else "complete"
         _write_record(deps.records_dir, "extract", session.id, session._record(status))
@@ -838,6 +922,7 @@ class DepositSession:
         self.error = msg
 
 
+@_serialize_by_owner
 async def run_deposit(session: DepositSession, deps: EconomyDeps) -> None:
     """Deposit a standalone trait NFToken back into the owner's Closet. Order:
     precheck (active Closet + token is ours + on-ledger owner == depositor) ->
@@ -849,6 +934,10 @@ async def run_deposit(session: DepositSession, deps: EconomyDeps) -> None:
         err = await _require_active_closet(deps, owner)
         if err:
             session.fail(err)
+            return
+        stale = _mirror_pending_error(deps, owner)
+        if stale:
+            session.fail(stale)
             return
         info = await deps.trait_info_fn(nft_id)  # type: ignore[misc]
         if not info:
@@ -890,6 +979,7 @@ async def run_deposit(session: DepositSession, deps: EconomyDeps) -> None:
             # rebuilds the mirror from the Closet token.
             session.sync_tx_hash = e.tx_hash
             session.mirror_pending = True
+            es.set_mirror_pending(conn, owner, True)
             session.state = DONE
             _write_record(
                 deps.records_dir, "deposit", session.id, session._record("complete_pending_mirror")

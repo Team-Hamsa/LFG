@@ -37,7 +37,7 @@ REPO_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
 sys.path.insert(0, REPO_ROOT)
 
 from lfg_core import config, market_ops, market_store, nft_index, xrpl_ops  # noqa: E402
-from lfg_core.market_ops import FetchOffers  # noqa: E402
+from lfg_core.market_ops import FetchLedgerTime, FetchOffers  # noqa: E402
 
 FETCH_CONCURRENCY = 16
 
@@ -49,14 +49,23 @@ async def _fetch_offers_strict(nft_id: str) -> list[dict[str, Any]]:
     return await xrpl_ops.get_nft_sell_offers(nft_id, raise_on_error=True)
 
 
-def _matching_sell_offers(offers: list[dict[str, Any]], owner: str) -> list[dict[str, Any]]:
+def _matching_sell_offers(
+    offers: list[dict[str, Any]], owner: str, ledger_time: int | None = None
+) -> list[dict[str, Any]]:
     """Sell-flagged, XRP-denominated offers from `get_nft_sell_offers` whose
     Owner equals the token's CURRENT owner-of-record. Excludes buy offers,
     IOU-denominated offers, and offers left on-ledger by a PREVIOUS owner
     (stale sellers) -- same filters the listener applies at offer_create
     time. Destination-locked offers are NOT excluded here: they are stored
     (browse hides them via `destination IS NULL`), matching how
-    nft_listener._apply_offer_create handles them."""
+    nft_listener._apply_offer_create handles them.
+
+    When `ledger_time` is provided (Ripple-epoch seconds), offers whose
+    Expiration is at/before it are also excluded (#183): they can never be
+    accepted (tecEXPIRED), so they must not be upserted as live -- omitting
+    them lets the stale-close pass retire any previously-live row. `ledger_time`
+    is None when the current ledger time couldn't be fetched; in that case
+    expiry is left unjudged so a transient blip never falsely closes a listing."""
     matches: list[dict[str, Any]] = []
     for offer in offers:
         if not isinstance(offer, dict):
@@ -72,6 +81,10 @@ def _matching_sell_offers(offers: list[dict[str, Any]], owner: str) -> list[dict
         offer_index = offer.get("offer_index")
         if not isinstance(offer_index, str) or not offer_index:
             continue
+        if ledger_time is not None:
+            expiration = offer.get("expiration")
+            if isinstance(expiration, int) and expiration <= ledger_time:
+                continue  # expired -- omit so the stale-close pass retires it
         matches.append(offer)
     return matches
 
@@ -80,6 +93,7 @@ async def backfill_market(
     conn: sqlite3.Connection,
     fetch_offers: FetchOffers = _fetch_offers_strict,
     concurrency: int = FETCH_CONCURRENCY,
+    fetch_ledger_time: FetchLedgerTime | None = None,
 ) -> dict[str, int]:
     """Rebuild market_listings from on-ledger sell-offer state. Returns
     summary counts: characters_swept, traits_swept, live_listings (distinct
@@ -93,6 +107,17 @@ async def backfill_market(
         "SELECT nft_id, owner FROM onchain_nfts WHERE is_burned = 0"
     ).fetchall()
     traits = conn.execute("SELECT nft_id, owner, slot, value FROM trait_tokens").fetchall()
+
+    # One ledger-time read for the whole sweep (#183): expired offers must not
+    # be upserted as live. If the read fails, leave expiry unjudged (None) --
+    # far safer than falsely closing every expiring listing over a blip.
+    resolve_ledger_time = fetch_ledger_time or xrpl_ops.get_ledger_time
+    ledger_time: int | None
+    try:
+        ledger_time = await resolve_ledger_time()
+    except Exception as e:
+        logging.warning(f"backfill_market: ledger-time fetch failed, skipping expiry filter: {e}")
+        ledger_time = None
 
     sem = asyncio.Semaphore(concurrency)
     failed_nft_ids: set[str] = set()
@@ -110,7 +135,7 @@ async def backfill_market(
             logging.warning(f"backfill_market: offer fetch failed for {nft_id}: {e}")
             failed_nft_ids.add(nft_id)
             return []
-        matches = _matching_sell_offers(offers, owner)
+        matches = _matching_sell_offers(offers, owner, ledger_time)
         for offer in matches:
             market_store.upsert_listing(
                 conn,

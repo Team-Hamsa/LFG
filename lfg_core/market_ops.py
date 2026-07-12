@@ -29,6 +29,11 @@ DROPS_PER_XRP = Decimal(1_000_000)
 MAX_XRP = Decimal(100_000_000_000)
 
 FetchOffers = Callable[[str], Awaitable[list[dict[str, Any]]]]
+# Returns the current validated ledger's close time in Ripple-epoch seconds
+# (the same epoch an NFTokenOffer's Expiration uses). Only consulted when a
+# matched offer actually carries an Expiration, so the common no-expiry offer
+# never incurs the extra lookup.
+FetchLedgerTime = Callable[[], Awaitable[int]]
 
 
 def extract_created_sell_offer(meta: dict[str, Any], nft_id: str) -> dict[str, Any] | None:
@@ -84,6 +89,7 @@ async def verify_sell_offer(
     expected_drops: int,
     fetch_offers: FetchOffers | None = None,
     strict: bool = False,
+    fetch_ledger_time: FetchLedgerTime | None = None,
 ) -> bool:
     """Fail-closed check that a sell offer is exactly the listing a buyer is
     about to pay for, run immediately before money moves.
@@ -91,11 +97,13 @@ async def verify_sell_offer(
     True ONLY when all of: the offer for `nft_id` at `offer_index` is present
     among the fetched offers; its Amount is an XRP drops string equal to
     `expected_drops` (a dict/IOU Amount can never match — that is a mismatch,
-    not a type error); and it carries no Destination (a destination-locked
-    offer is not a listing this buyer can accept).
+    not a type error); it carries no Destination (a destination-locked offer is
+    not a listing this buyer can accept); and it is not expired (an Expiration,
+    if present, is strictly after the current ledger's close time — an accept
+    against an expired offer fails tecEXPIRED, #183).
 
     False on every other case, including: the offer being absent, an amount
-    mismatch, or a foreign Destination.
+    mismatch, a foreign Destination, or an at/before-now Expiration.
 
     `strict` controls how a *lookup failure* is treated. In the default
     (non-strict) mode `fetch_offers` raising is swallowed to False — a
@@ -104,7 +112,11 @@ async def verify_sell_offer(
     "the lookup itself broke" (respond 503, touch nothing) apart from "the
     offer is genuinely gone" (stale-close). When `fetch_offers` is left as the
     default, strict is threaded into `get_nft_sell_offers(raise_on_error=...)`
-    so a rippled soft-error surfaces as a raise rather than an empty list."""
+    so a rippled soft-error surfaces as a raise rather than an empty list.
+    `fetch_ledger_time` (defaulting to `xrpl_ops.get_ledger_time`) is only
+    consulted when the matched offer actually carries an Expiration; its
+    failure is treated exactly like a `fetch_offers` failure (raise under
+    strict, else False)."""
     fetch: FetchOffers
     if fetch_offers is None:
 
@@ -114,6 +126,16 @@ async def verify_sell_offer(
         fetch = _default_fetch
     else:
         fetch = fetch_offers
+
+    ledger_time: FetchLedgerTime
+    if fetch_ledger_time is None:
+
+        async def _default_ledger_time() -> int:
+            return await xrpl_ops.get_ledger_time()
+
+        ledger_time = _default_ledger_time
+    else:
+        ledger_time = fetch_ledger_time
 
     try:
         offers = await fetch(nft_id)
@@ -133,6 +155,24 @@ async def verify_sell_offer(
             return False
         if offer.get("destination") is not None:
             return False
+        expiration = offer.get("expiration")
+        if expiration is not None:
+            # The offer has an XRPL Expiration (Ripple-epoch seconds). It is
+            # already dead — NFTokenAcceptOffer would fail tecEXPIRED — once
+            # that time is at/before the current ledger's close time, so
+            # reject it rather than hand the buyer a doomed XUMM payload. Only
+            # expiring offers pay for this extra ledger-time lookup.
+            try:
+                now = await ledger_time()
+            except Exception:
+                if strict:
+                    raise
+                return False
+            try:
+                if int(expiration) <= int(now):
+                    return False
+            except (TypeError, ValueError):
+                return False  # malformed Expiration — fail closed
         return True
     return False  # offer_index not present among the fetched offers
 
