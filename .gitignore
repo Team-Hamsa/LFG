@@ -56,3 +56,7 @@ rarity.db
 ._.DS_Store
 # macOS AppleDouble / resource-fork sidecars (never commit these)
 ._*
+
+# Local archive of dead root clutter (backups, logs, mockups, source CSVs) —
+# moved out of the repo root for tidiness; never committed.
+.archive/
