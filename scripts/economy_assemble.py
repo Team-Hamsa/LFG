@@ -64,7 +64,7 @@ async def _amain(args: argparse.Namespace) -> int:
 
 def main() -> int:
     parser = argparse.ArgumentParser(description="Assemble an edition from the Closet.")
-    parser.add_argument("--network", choices=["mainnet", "testnet"], default=config.XRPL_NETWORK)
+    parser.add_argument("--network", choices=["mainnet", "testnet"], default=config.ECONOMY_NETWORK)
     parser.add_argument("--owner", required=True, help="owner's XRPL address")
     parser.add_argument("--edition", required=True, type=int, help="edition number to rebirth")
     parser.add_argument(

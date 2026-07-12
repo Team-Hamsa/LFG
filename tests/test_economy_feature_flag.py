@@ -59,10 +59,6 @@ def _wallet_req(body=None):
     return req
 
 
-def test_config_default_is_enabled():
-    assert app.config.ECONOMY_ENABLED is True
-
-
 def test_api_config_reports_economy_enabled(monkeypatch):
     monkeypatch.setattr(app.config, "ECONOMY_ENABLED", False)
     resp = _run(app.handle_config(_Req()))

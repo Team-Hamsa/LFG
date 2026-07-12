@@ -1321,6 +1321,12 @@ def _reload_config(monkeypatch, network):
     monkeypatch.setattr("dotenv.load_dotenv", lambda *a, **k: False)
     for var in ("XRPL_JSON_RPC_URL", "XRPL_WS_URL", "SWAP_ISSUER_ADDRESS", "SWAP_OFFER_ISSUER"):
         monkeypatch.delenv(var, raising=False)
+    # These reloads flip XRPL_NETWORK (incl. to mainnet) to check network URL
+    # defaults, and are economy-agnostic. The suite conftest force-enables the
+    # economy on testnet, so leaving ECONOMY_ENABLED=1 while the reload moves
+    # XRPL_NETWORK to mainnet would trip validate_economy_config's network-match
+    # assertion. Clear it so the reload uses the opt-in default (off).
+    monkeypatch.delenv("ECONOMY_ENABLED", raising=False)
     monkeypatch.setenv("XRPL_NETWORK", network)
     return importlib.reload(config)
 

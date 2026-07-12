@@ -43,7 +43,7 @@ def main() -> int:
     parser = argparse.ArgumentParser(
         description="Deposit a standalone trait NFToken back into the owner's Closet."
     )
-    parser.add_argument("--network", choices=["mainnet", "testnet"], default=config.XRPL_NETWORK)
+    parser.add_argument("--network", choices=["mainnet", "testnet"], default=config.ECONOMY_NETWORK)
     parser.add_argument("--owner", required=True, help="owner's XRPL address")
     parser.add_argument("--nft-id", required=True, help="trait NFTokenID to deposit")
     return asyncio.run(_amain(parser.parse_args()))
