@@ -3,8 +3,9 @@
   <rect x="8" y="8" width="884" height="464" rx="18" fill="#0A0A0A"/>
   <rect x="2" y="2" width="884" height="464" rx="18" fill="#181818" stroke="#FFFFFF" stroke-width="3"/>
 
-  <!-- header -->
-  <text x="32" y="36" font-family="-apple-system,'Segoe UI',Roboto,Helvetica,Arial,sans-serif" font-size="22" font-weight="900"><tspan fill="#D89030">L</tspan><tspan fill="#D84830">F</tspan><tspan fill="#4890C0">G</tspan><tspan fill="#F5F4F1" dx="9">system architecture</tspan></text>
+  <!-- header (real LFG wordmark via LOGO_HREF placeholder, baked by build_architecture.py) -->
+  <image x="32" y="14" width="142" height="24" href="__LOGO_HREF__"/>
+  <text x="186" y="36" font-family="-apple-system,'Segoe UI',Roboto,Helvetica,Arial,sans-serif" font-size="22" font-weight="900" fill="#F5F4F1">system architecture</text>
   <text x="858" y="34" text-anchor="end" font-family="-apple-system,'Segoe UI',Roboto,Helvetica,Arial,sans-serif" font-size="12" fill="#9C9A94">SQLite: lfg_nfts &#183; onchain_&lt;net&gt; &#183; history_&lt;net&gt;</text>
 
   <!-- arrows: row 1 -> row 2 (three surfaces into lfg_service) -->
