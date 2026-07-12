@@ -8,12 +8,12 @@ import discord
 from discord import Embed
 from discord.ui import Button, View
 
+from lfg_core.user_db import get_user
 from surfaces.discord_bot import config, trustline
 from surfaces.discord_bot.bot import svc
 from surfaces.discord_bot.mint_view import handle_mint
 from surfaces.discord_bot.register_view import handle_register
 from surfaces.discord_bot.trustline import safe_followup
-from lfg_core.user_db import get_user
 
 
 class MintView(View):

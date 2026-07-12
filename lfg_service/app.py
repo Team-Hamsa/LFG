@@ -52,11 +52,11 @@ from lfg_core import (
     xrpl_ops,
     xumm_ops,
 )
+from lfg_core.user_db import create_users_table, get_user, register_user
 from lfg_service import identity as identity_store
 from lfg_service.auth import require_service_token, surface_for_token
 from lfg_service.events import Event, InMemoryEventBus
 from lfg_service.telegram_auth import validate_init_data
-from lfg_core.user_db import create_users_table, get_user, register_user
 from webapp import economy_api, mock_economy, mock_market
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s")

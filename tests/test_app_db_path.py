@@ -18,9 +18,7 @@ os.environ.setdefault("TOKEN_CURRENCY_HEX", "4C46474F000000000000000000000000000
 os.environ.setdefault("XRPL_NETWORK", "testnet")
 os.environ.setdefault("BUNNY_PULL_ZONE", "nft.pullzone.example")
 
-from lfg_core import db_helpers
-from lfg_core import user_db
-from lfg_core import config
+from lfg_core import config, db_helpers, user_db
 
 
 def test_default_db_path_is_network_suffixed():
