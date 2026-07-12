@@ -59,17 +59,6 @@ def _wallet_req(body=None):
     return req
 
 
-def test_config_default_is_disabled():
-    # Opt-in default (go-live review B5): the trait economy ships OFF unless
-    # ECONOMY_ENABLED is explicitly set, so a forgotten ECONOMY_NETWORK can
-    # never expose assets on a split network. In full-suite runs a sibling
-    # module may have already set the env var (e.g. test_snapshot_balances),
-    # so only assert the default when it is genuinely unset; the authoritative
-    # isolated default check lives in test_config_economy_validate.py.
-    if "ECONOMY_ENABLED" not in os.environ:
-        assert app.config.ECONOMY_ENABLED is False
-
-
 def test_api_config_reports_economy_enabled(monkeypatch):
     monkeypatch.setattr(app.config, "ECONOMY_ENABLED", False)
     resp = _run(app.handle_config(_Req()))
