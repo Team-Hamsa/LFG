@@ -639,13 +639,7 @@ def bot_wallet_address() -> str:
     return config.SIGNING_ACCOUNT
 
 
-RIPPLE_EPOCH_OFFSET = 946684800
-
-# Safety cap on credit-scan pagination (20 txs/page). The scan is bounded in
-# time by MINT_CREDIT_TTL_SECONDS (the credit floor), so this cap exists only
-# to stop a misbehaving server that returns markers forever; it is far above
-# any realistic 30-day issuer volume and is logged when hit (#197 review).
-CREDIT_SCAN_MAX_PAGES = 500  # seconds between the Unix and Ripple epochs
+RIPPLE_EPOCH_OFFSET = 946684800  # seconds between the Unix and Ripple epochs
 
 
 def _extract_tx_and_meta(message: dict[str, Any]) -> tuple[dict[str, Any] | None, Any]:
@@ -734,21 +728,28 @@ async def _recent_payment_exists(
     account: str,
     claim: Callable[[dict[str, Any], Any, dict[str, Any]], bool],
     not_before_unix: float,
-    max_pages: int = 1,
+    exhaustive: bool = False,
 ) -> bool:
-    exhausted_marker = None
     """Check already-validated transactions for a claimable payment. Covers
     payments that land between the payment link being shown to the user and
     the live subscription becoming active — and, when the caller widened
     not_before for credits (issue #196), payments from before the session
-    existed. Pagination stops at max_pages or the first entry older than
-    not_before_unix (account_tx returns newest-first)."""
+    existed.
+
+    The plain check reads a single page. An exhaustive (credit) scan pages
+    via marker until the first entry older than not_before_unix (account_tx
+    returns newest-first) or history ends — bounded in time by the caller's
+    credit floor, never by a page count, so a valid credit can't be stranded
+    behind busy issuer traffic. A progress guard aborts (loudly) if a page
+    fails to reach strictly older transactions, so a server that returns
+    markers forever cannot loop the scan."""
     marker = None
-    for _ in range(max_pages):
-        request = AccountTx(account=account, limit=20, marker=marker)
+    prev_oldest: float | None = None
+    while True:
+        request = AccountTx(account=account, limit=200 if exhaustive else 20, marker=marker)
         response = await websocket.request(request)
-        entries = response.result.get("transactions", [])
-        for entry in entries:
+        oldest: float | None = None
+        for entry in response.result.get("transactions", []):
             if not entry.get("validated", True):
                 continue
             tx, meta = _extract_tx_and_meta(entry)
@@ -759,23 +760,22 @@ async def _recent_payment_exists(
             # replayed for a free mint.
             if when is None:
                 continue
+            oldest = when if oldest is None else min(oldest, when)
             if when < not_before_unix:
                 return False  # newest-first: everything after this is older
             if claim(tx, meta, entry):
                 return True
         marker = response.result.get("marker")
-        if not marker:
-            break
-        exhausted_marker = marker
-    else:
-        # Ran out of pages with a marker left: the scan is truncated, not
-        # complete — say so instead of silently reporting "no payment".
-        logging.warning(
-            f"Credit scan for {account} hit the {max_pages}-page cap with "
-            f"history remaining (marker {exhausted_marker}); an older "
-            "unconsumed credit may exist beyond the cap"
-        )
-    return False
+        if not marker or not exhaustive:
+            return False
+        if oldest is None or (prev_oldest is not None and oldest >= prev_oldest):
+            logging.warning(
+                f"Credit scan for {account} aborted: page made no progress "
+                f"toward the credit floor (oldest {oldest}, previous "
+                f"{prev_oldest}); an unconsumed credit may exist beyond it"
+            )
+            return False
+        prev_oldest = oldest
 
 
 async def wait_for_payment(
@@ -813,7 +813,6 @@ async def wait_for_payment(
     if not_before is None:
         not_before = start_time - 10
     backfill_not_before = not_before
-    backfill_pages = 1
     if allow_credit:
         # Credits are spendable back to the credit floor: never before the
         # ledger bootstrap (pre-tracking payments were matched but never
@@ -824,7 +823,6 @@ async def wait_for_payment(
             start_time - config.MINT_CREDIT_TTL_SECONDS,
         )
         backfill_not_before = min(not_before, credit_floor)
-        backfill_pages = CREDIT_SCAN_MAX_PAGES
     context = f"{expected_amount} {currency} from {expected_sender} to {destination}"
 
     def claim(tx: dict[str, Any], meta: Any, entry: dict[str, Any]) -> bool:
@@ -859,7 +857,7 @@ async def wait_for_payment(
             async with AsyncWebsocketClient(config.WS_URL) as websocket:
                 if await asyncio.wait_for(
                     _recent_payment_exists(
-                        websocket, destination, claim, backfill_not_before, backfill_pages
+                        websocket, destination, claim, backfill_not_before, allow_credit
                     ),
                     timeout=15,
                 ):
@@ -892,7 +890,7 @@ async def wait_for_payment(
 
                 if await asyncio.wait_for(
                     _recent_payment_exists(
-                        websocket, destination, claim, backfill_not_before, backfill_pages
+                        websocket, destination, claim, backfill_not_before, allow_credit
                     ),
                     timeout=max(1, min(remaining, 15)),
                 ):

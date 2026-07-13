@@ -203,9 +203,16 @@ def test_credit_scan_pages_past_five_pages(ledger_db, monkeypatch):
     """A credit deeper than 100 issuer transactions must still be found:
     pagination follows the marker to the floor instead of a 5-page cap
     (Greptile P1 / CodeRabbit major on #197)."""
-    filler = {"validated": True, "tx_json": {"TransactionType": "AccountSet", "date": 800009000}}
     target = copy.deepcopy(STREAM_MSG)
     target["tx_json"]["date"] = 800000000
+
+    def filler_page(page):
+        # Newest-first across pages: each page is strictly older filler.
+        date = 800009000 - page * 100
+        return [
+            {"validated": True, "tx_json": {"TransactionType": "AccountSet", "date": date - i}}
+            for i in range(20)
+        ]
 
     class FakeWS:
         def __init__(self, url):
@@ -230,7 +237,7 @@ def test_credit_scan_pages_past_five_pages(ledger_db, monkeypatch):
             class R:
                 # 7 pages of unrelated traffic, the credit on page 8.
                 result = (
-                    {"transactions": [filler] * 20, "marker": {"p": page}}
+                    {"transactions": filler_page(page), "marker": {"p": page}}
                     if page < 8
                     else {"transactions": [target]}
                 )
@@ -275,6 +282,55 @@ def test_expired_credit_is_not_spendable(ledger_db, monkeypatch):
     paid = loop.run_until_complete(
         xrpl_ops.wait_for_payment(
             "rDest", "rSender", timeout_seconds=1, not_before=tx_unix + 3600, allow_credit=True
+        )
+    )
+    assert paid is False
+
+
+def test_credit_scan_aborts_when_pages_stop_progressing(ledger_db, monkeypatch):
+    """A server that keeps returning markers without reaching older history
+    must not loop the scan forever — the progress guard aborts it."""
+    filler = [
+        {"validated": True, "tx_json": {"TransactionType": "AccountSet", "date": 800009000}}
+    ] * 20
+
+    class FakeWS:
+        def __init__(self, url):
+            self.requests = 0
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *a):
+            return False
+
+        async def send(self, req):
+            pass
+
+        async def request(self, req):
+            self.requests += 1
+            assert self.requests < 10, "progress guard failed to stop the scan"
+
+            class R:
+                result = {"transactions": filler, "marker": {"p": 1}}
+
+            return R()
+
+        def __aiter__(self):
+            return self
+
+        async def __anext__(self):
+            await asyncio.Event().wait()
+
+    monkeypatch.setattr(xrpl_ops, "AsyncWebsocketClient", FakeWS)
+    monkeypatch.setattr(xrpl_ops.config, "TOKEN_CURRENCY_HEX", CUR)
+    monkeypatch.setattr(xrpl_ops.config, "TOKEN_ISSUER_ADDRESS", "rIssuer")
+    monkeypatch.setattr(payment_ledger, "bootstrap_floor", lambda: 0.0)
+    loop = asyncio.get_event_loop()
+
+    paid = loop.run_until_complete(
+        xrpl_ops.wait_for_payment(
+            "rDest", "rSender", timeout_seconds=1, not_before=2**33, allow_credit=True
         )
     )
     assert paid is False
