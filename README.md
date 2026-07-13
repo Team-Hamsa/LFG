@@ -40,7 +40,7 @@ Short walkthroughs of each core flow — animated captures landing soon:
 <tr>
 <td align="center"><img src="assets/demo/telegram.gif" width="380" alt="Telegram Bot — mint and swap from an inline-keyboard chat flow"><br><b>Telegram Bot</b></td>
 <td align="center"><img src="assets/demo/leaderboard.gif" width="380" alt="Leaderboards — eight live boards including holders, swaps, BRIX richlist, rarity"><br><b>Leaderboards</b></td>
-<td align="center"><img src="assets/demo/animated.svg" width="380" alt="Animated NFTs — GIF/MP4 trait layers compose into living video NFTs"><br><b>Animated NFTs</b></td>
+<td align="center"><img src="assets/demo/animated.gif" width="380" alt="Animated NFTs — GIF/MP4 trait layers compose into living video NFTs"><br><b>Animated NFTs</b></td>
 </tr>
 </table>
 </div>
