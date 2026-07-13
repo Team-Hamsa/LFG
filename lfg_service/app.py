@@ -2152,6 +2152,13 @@ async def handle_swap_start(request):
     if not nft1_id or not nft2_id or nft1_id == nft2_id:
         return web.json_response({"error": "select two different NFTs"}, status=400)
     if not traits_to_swap or any(t not in swap_meta.SWAPPABLE_TRAITS for t in traits_to_swap):
+        logging.info(
+            "swap rejected (invalid trait selection): user=%s nft1=%s nft2=%s traits=%r",
+            user["id"],
+            nft1_id,
+            nft2_id,
+            traits_to_swap,
+        )
         return web.json_response({"error": "invalid trait selection"}, status=400)
 
     _prune_sessions(swap_sessions, swap_flow.TERMINAL_STATES)
@@ -2171,6 +2178,15 @@ async def handle_swap_start(request):
     cfg = trait_config.get_config()
     blocked = [t for t in traits_to_swap if not cfg.swap_allowed(nft1["gender"], nft2["gender"], t)]
     if blocked:
+        logging.info(
+            "swap rejected (cross-body matrix): user=%s nft1=%s (%s) nft2=%s (%s) blocked=%r",
+            user["id"],
+            nft1_id,
+            nft1["gender"],
+            nft2_id,
+            nft2["gender"],
+            blocked,
+        )
         return web.json_response(
             {
                 "error": (
@@ -2185,6 +2201,15 @@ async def handle_swap_start(request):
     # ape (Eyes/Eyebrows/Mouth = None) degrading its swap partner.
     empty = swap_meta.none_swaps(nft1["attributes"], nft2["attributes"], traits_to_swap)
     if empty:
+        logging.info(
+            "swap rejected (empty/None slot): user=%s nft1=%s (%s) nft2=%s (%s) empty=%r",
+            user["id"],
+            nft1_id,
+            nft1["gender"],
+            nft2_id,
+            nft2["gender"],
+            empty,
+        )
         return web.json_response(
             {"error": f"trait(s) {', '.join(empty)} are empty (None) and can't be swapped"},
             status=400,
