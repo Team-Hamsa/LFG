@@ -114,8 +114,9 @@ MINT_PRICE_XRP = os.getenv("MINT_PRICE_XRP", "10")
 # Newcomer free-mint giveaway cap: the maximum number of free mints handed out
 # (per network). Counts active claims (reserved + claimed); a released reservation
 # frees a slot. Enforced atomically in free_mint.reserve_claim. 0 disables the
-# giveaway entirely.
-FREE_MINT_CAP = int(os.getenv("FREE_MINT_CAP", "500"))
+# giveaway entirely. Starting conservative at 10; raise via the FREE_MINT_CAP
+# env var (no code change / redeploy of logic needed).
+FREE_MINT_CAP = int(os.getenv("FREE_MINT_CAP", "10"))
 
 # BunnyCDN
 BUNNY_CDN_ACCESS_KEY = _require("BUNNY_CDN_ACCESS_KEY")

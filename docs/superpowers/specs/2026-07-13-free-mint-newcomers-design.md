@@ -32,7 +32,8 @@ SignIn step for authentication.
 - **Mechanism:** skip the XUMM payment payload entirely for the free path
   (auth already done at connect). Record the claim atomically at mint success.
 - **Global cap:** at most `config.FREE_MINT_CAP` free mints per network
-  (default **500**, env `FREE_MINT_CAP`; `0` disables the giveaway). The cap
+  (default **10** to start — tunable live via the `FREE_MINT_CAP` env var; `0`
+  disables the giveaway). The cap
   counts active claims (`reserved` + `claimed`); a released reservation frees a
   slot. Enforced **atomically** inside `reserve_claim` (count + insert under a
   single `BEGIN IMMEDIATE` write lock) so a stampede of concurrent reservers at
