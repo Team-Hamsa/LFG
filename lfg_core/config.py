@@ -225,6 +225,11 @@ PAYMENT_TIMEOUT_SECONDS = int(os.getenv("PAYMENT_TIMEOUT_SECONDS", "300"))
 # history once — a payment signed in time can validate seconds past the
 # deadline and must not be silently kept (issue #196).
 PAYMENT_GRACE_SECONDS = int(os.getenv("PAYMENT_GRACE_SECONDS", "15"))
+# How long an unconsumed mint payment stays spendable as a credit. This is
+# what bounds the credit backfill scan (a fixed floor would make the scan
+# depth grow with issuer history forever, #197 review); older overpayments
+# are refund territory, findable via the issue-196 reconciliation sweep.
+MINT_CREDIT_TTL_SECONDS = int(os.getenv("MINT_CREDIT_TTL_SECONDS", str(30 * 86400)))
 
 # Unified trait layer store (shared by mint + swap).
 # Canonical structure: <body>/<TraitType>/<Value>.png|.gif|.mp4

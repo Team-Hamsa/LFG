@@ -641,10 +641,11 @@ def bot_wallet_address() -> str:
 
 RIPPLE_EPOCH_OFFSET = 946684800
 
-# Safety cap on credit-scan pagination (20 txs/page). The scan normally stops
-# at the first entry older than the credit floor; this cap only bounds a
-# pathologically deep history and is logged when hit (#197 review).
-CREDIT_SCAN_MAX_PAGES = 50  # seconds between the Unix and Ripple epochs
+# Safety cap on credit-scan pagination (20 txs/page). The scan is bounded in
+# time by MINT_CREDIT_TTL_SECONDS (the credit floor), so this cap exists only
+# to stop a misbehaving server that returns markers forever; it is far above
+# any realistic 30-day issuer volume and is logged when hit (#197 review).
+CREDIT_SCAN_MAX_PAGES = 500  # seconds between the Unix and Ripple epochs
 
 
 def _extract_tx_and_meta(message: dict[str, Any]) -> tuple[dict[str, Any] | None, Any]:
@@ -814,7 +815,15 @@ async def wait_for_payment(
     backfill_not_before = not_before
     backfill_pages = 1
     if allow_credit:
-        backfill_not_before = min(not_before, payment_ledger.bootstrap_floor())
+        # Credits are spendable back to the credit floor: never before the
+        # ledger bootstrap (pre-tracking payments were matched but never
+        # recorded) and never older than the TTL (which is what keeps the
+        # scan depth bounded as issuer history grows).
+        credit_floor = max(
+            payment_ledger.bootstrap_floor(),
+            start_time - config.MINT_CREDIT_TTL_SECONDS,
+        )
+        backfill_not_before = min(not_before, credit_floor)
         backfill_pages = CREDIT_SCAN_MAX_PAGES
     context = f"{expected_amount} {currency} from {expected_sender} to {destination}"
 

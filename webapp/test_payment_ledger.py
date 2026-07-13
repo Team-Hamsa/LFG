@@ -35,6 +35,9 @@ def ledger_db(tmp_path, monkeypatch):
     monkeypatch.setattr(payment_ledger, "_db_path", lambda: path)
     # No real payment ever validates during a unit test: skip the grace sleep.
     monkeypatch.setattr(xrpl_ops.config, "PAYMENT_GRACE_SECONDS", 0)
+    # The fixture payments use a fixed 2025 ripple-epoch date; a real 30-day
+    # TTL would expire them, so tests widen it and narrow it per-case.
+    monkeypatch.setattr(xrpl_ops.config, "MINT_CREDIT_TTL_SECONDS", 10**10)
     payment_ledger.init_ledger()
     return path
 
@@ -254,3 +257,24 @@ def test_credit_scan_pages_past_five_pages(ledger_db, monkeypatch):
         )
     )
     assert paid is True
+
+
+def test_expired_credit_is_not_spendable(ledger_db, monkeypatch):
+    """A credit older than MINT_CREDIT_TTL_SECONDS is refund territory, not
+    mintable — the TTL is also what bounds the backfill scan depth."""
+    entry = copy.deepcopy(STREAM_MSG)
+    entry["tx_json"]["date"] = 800000000
+    monkeypatch.setattr(xrpl_ops, "AsyncWebsocketClient", _backfill_ws([entry]))
+    monkeypatch.setattr(xrpl_ops.config, "TOKEN_CURRENCY_HEX", CUR)
+    monkeypatch.setattr(xrpl_ops.config, "TOKEN_ISSUER_ADDRESS", "rIssuer")
+    monkeypatch.setattr(xrpl_ops.config, "MINT_CREDIT_TTL_SECONDS", 60)
+    monkeypatch.setattr(payment_ledger, "bootstrap_floor", lambda: 0.0)
+    loop = asyncio.get_event_loop()
+    tx_unix = 800000000 + xrpl_ops.RIPPLE_EPOCH_OFFSET
+
+    paid = loop.run_until_complete(
+        xrpl_ops.wait_for_payment(
+            "rDest", "rSender", timeout_seconds=1, not_before=tx_unix + 3600, allow_credit=True
+        )
+    )
+    assert paid is False
