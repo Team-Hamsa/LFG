@@ -32,8 +32,7 @@ def revoke(platform: str, uid: str, network: str) -> None:
     conn = sqlite3.connect(DATABASE)
     try:
         conn.execute(
-            "DELETE FROM free_mint_claims "
-            "WHERE platform=? AND platform_user_id=? AND network=?",
+            "DELETE FROM free_mint_claims WHERE platform=? AND platform_user_id=? AND network=?",
             (platform, uid, network),
         )
         conn.commit()

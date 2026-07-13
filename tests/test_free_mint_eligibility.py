@@ -92,10 +92,14 @@ def test_confirm_blocks_and_records(tmp_path, monkeypatch):
     free_mint.reserve_claim("discord", "u1", "testnet", "rA")
     free_mint.confirm_claim("discord", "u1", "testnet", "rA", 4242)
     assert free_mint.is_eligible("discord", "u1", "testnet") is False
-    row = sqlite3.connect(db).execute(
-        "SELECT status, nft_number FROM free_mint_claims "
-        "WHERE platform='discord' AND platform_user_id='u1'"
-    ).fetchone()
+    row = (
+        sqlite3.connect(db)
+        .execute(
+            "SELECT status, nft_number FROM free_mint_claims "
+            "WHERE platform='discord' AND platform_user_id='u1'"
+        )
+        .fetchone()
+    )
     assert row == ("claimed", 4242)
 
 

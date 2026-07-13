@@ -43,14 +43,12 @@ def wallets_for_identity(platform: str, platform_user_id: str) -> set[str]:
         wallets = {
             r[0]
             for r in conn.execute(
-                "SELECT wallet FROM wallet_links "
-                "WHERE platform = ? AND platform_user_id = ?",
+                "SELECT wallet FROM wallet_links WHERE platform = ? AND platform_user_id = ?",
                 (platform, platform_user_id),
             )
         }
         row = conn.execute(
-            "SELECT wallet FROM identities "
-            "WHERE platform = ? AND platform_user_id = ?",
+            "SELECT wallet FROM identities WHERE platform = ? AND platform_user_id = ?",
             (platform, platform_user_id),
         ).fetchone()
         if row and row[0]:
@@ -81,8 +79,7 @@ def _owns_live_character(wallets: set[str], network: str) -> bool:
     try:
         placeholders = ",".join("?" for _ in wallets)
         n = conn.execute(
-            f"SELECT COUNT(*) FROM onchain_nfts "
-            f"WHERE is_burned = 0 AND owner IN ({placeholders})",
+            f"SELECT COUNT(*) FROM onchain_nfts WHERE is_burned = 0 AND owner IN ({placeholders})",
             tuple(wallets),
         ).fetchone()[0]
         return bool(n > 0)
@@ -102,9 +99,7 @@ def is_eligible(platform: str, platform_user_id: str, network: str) -> bool:
         wallets = wallets_for_identity(platform, platform_user_id)
         return not _owns_live_character(wallets, network)
     except Exception as e:
-        logging.warning(
-            f"free_mint.is_eligible fail-closed for {platform}/{platform_user_id}: {e}"
-        )
+        logging.warning(f"free_mint.is_eligible fail-closed for {platform}/{platform_user_id}: {e}")
         return False
 
 

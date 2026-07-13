@@ -20,8 +20,5 @@ def test_ensure_tables_creates_claims(tmp_path, monkeypatch):
     monkeypatch.setattr(user_db, "DATABASE", str(db))
     monkeypatch.setattr(free_mint, "DATABASE", str(db))
     free_mint.ensure_tables()
-    cols = {
-        r[1]
-        for r in sqlite3.connect(str(db)).execute("PRAGMA table_info(free_mint_claims)")
-    }
+    cols = {r[1] for r in sqlite3.connect(str(db)).execute("PRAGMA table_info(free_mint_claims)")}
     assert {"platform", "platform_user_id", "network", "wallet", "nft_number", "status"} <= cols
