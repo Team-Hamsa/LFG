@@ -208,7 +208,7 @@ def test_swap_one_sided_none_slot_allowed(monkeypatch):
 
     resp = asyncio.get_event_loop().run_until_complete(server.handle_swap_start(req))
 
-    assert resp.status != 400
+    assert resp.status == 200
 
 
 def test_swap_both_empty_slot_rejected(monkeypatch):

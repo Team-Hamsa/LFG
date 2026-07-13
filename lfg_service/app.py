@@ -2203,6 +2203,16 @@ async def handle_swap_start(request):
     # only if nothing with real work to do remains.
     noop = swap_meta.noop_swaps(nft1["attributes"], nft2["attributes"], traits_to_swap)
     if noop:
+        logging.info(
+            "swap: dropping no-op (empty on both NFTs) trait(s) %r: "
+            "user=%s nft1=%s (%s) nft2=%s (%s)",
+            noop,
+            user["id"],
+            nft1_id,
+            nft1["gender"],
+            nft2_id,
+            nft2["gender"],
+        )
         traits_to_swap = [t for t in traits_to_swap if t not in noop]
         if not traits_to_swap:
             logging.info(
