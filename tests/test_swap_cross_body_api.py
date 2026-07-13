@@ -171,30 +171,34 @@ def test_same_body_swap_unaffected(monkeypatch, same_body_nfts):
     assert resp.status == 200
 
 
-def test_none_swaps_helper_flags_empty_slots():
-    """Pure helper: a slot is unswappable if EITHER side is empty ('None') —
-    swapping None onto the other NFT would delete a trait it has."""
+def test_noop_swaps_helper_flags_only_both_empty_slots():
+    """Pure helper: a one-sided empty slot IS swappable — 'None' is a real,
+    expected trait value (shirtless/bald/no-accessory), and moving it onto the
+    other NFT is a legitimate exchange, not a deletion. Only a slot that is
+    empty on BOTH sides is a no-op (nothing would change) and is flagged."""
     from lfg_core import swap_meta
 
     faceless = [{"trait_type": "Eyes", "value": "None"}, {"trait_type": "Head", "value": "Crown"}]
     faced = [{"trait_type": "Eyes", "value": "Creepy"}, {"trait_type": "Head", "value": "Cap"}]
-    assert swap_meta.none_swaps(faceless, faced, ["Eyes"]) == ["Eyes"]
-    assert swap_meta.none_swaps(faced, faceless, ["Eyes"]) == ["Eyes"]  # other side None
-    assert swap_meta.none_swaps(faced, faced, ["Eyes", "Head"]) == []  # both filled
-    assert swap_meta.none_swaps(faceless, faceless, ["Eyes"]) == ["Eyes"]  # both None
-    # 1217 live mainnet NFTs encode an empty Accessory as "" (the original
-    # generator's spelling), not "None" — "" must be equally unswappable.
+    # one-sided None is now allowed (the halo/None exchange the user wants)
+    assert swap_meta.noop_swaps(faceless, faced, ["Eyes"]) == []
+    assert swap_meta.noop_swaps(faced, faceless, ["Eyes"]) == []  # other side None
+    assert swap_meta.noop_swaps(faced, faced, ["Eyes", "Head"]) == []  # both filled
+    # both empty is a pure no-op
+    assert swap_meta.noop_swaps(faceless, faceless, ["Eyes"]) == ["Eyes"]
+    # "" (the original generator's empty spelling) counts as empty too
     empty = [{"trait_type": "Eyes", "value": ""}, {"trait_type": "Head", "value": "Crown"}]
-    assert swap_meta.none_swaps(empty, faced, ["Eyes"]) == ["Eyes"]
-    assert swap_meta.none_swaps(faced, empty, ["Eyes"]) == ["Eyes"]
-    # a slot absent from the attribute list entirely is empty too
+    assert swap_meta.noop_swaps(empty, faced, ["Eyes"]) == []  # one-sided, allowed
+    assert swap_meta.noop_swaps(empty, faceless, ["Eyes"]) == ["Eyes"]  # ""+None both empty
+    # a slot absent from one attribute list is empty; still one-sided → allowed
     bare = [{"trait_type": "Head", "value": "Cap"}]
-    assert swap_meta.none_swaps(bare, faced, ["Eyes"]) == ["Eyes"]
+    assert swap_meta.noop_swaps(bare, faced, ["Eyes"]) == []
 
 
-def test_swap_none_slot_rejected(monkeypatch):
-    """Same-body pair (affinity always passes) where one NFT has Eyes=None:
-    requesting an Eyes swap must 400 rather than hand None to the other NFT."""
+def test_swap_one_sided_none_slot_allowed(monkeypatch):
+    """Same-body pair where one NFT has Eyes=None: requesting an Eyes swap is
+    now allowed — the None moves onto the partner (an expected empty image),
+    the partner's real Eyes moves back. Must NOT 400 on the None guard."""
     nfts = [
         _nft("M1", "male", "LFG #10", none_slots=frozenset({"Eyes"})),
         _nft("M2", "male", "LFG #11"),
@@ -204,26 +208,23 @@ def test_swap_none_slot_rejected(monkeypatch):
 
     resp = asyncio.get_event_loop().run_until_complete(server.handle_swap_start(req))
 
-    assert resp.status == 400
-    assert "Eyes" in json.loads(resp.body)["error"]
+    assert resp.status != 400
 
 
-def test_swap_empty_string_slot_rejected(monkeypatch):
-    """~34% of the live mainnet collection carries {"trait_type": "Accessory",
-    "value": ""} — empty encoded as "", not "None". normalize_attributes
-    preserves a present-but-empty value, so the guard itself must catch it or
-    the swap silently deletes the counterparty's real Accessory."""
-    nft1 = _nft("M1", "male", "LFG #10")
-    for attr in nft1["attributes"]:
-        if attr["trait_type"] == "Accessory":
-            attr["value"] = ""
-    _stub_wallet_nfts(monkeypatch, [nft1, _nft("M2", "male", "LFG #11")])
-    req = _make_swap_request("M1", "M2", ["Accessory"])
+def test_swap_both_empty_slot_rejected(monkeypatch):
+    """A slot empty on BOTH NFTs is a pure no-op — the swap would change
+    nothing, so it 400s rather than burn a signature/fee for identity."""
+    nfts = [
+        _nft("M1", "male", "LFG #10", none_slots=frozenset({"Eyes"})),
+        _nft("M2", "male", "LFG #11", none_slots=frozenset({"Eyes"})),
+    ]
+    _stub_wallet_nfts(monkeypatch, nfts)
+    req = _make_swap_request("M1", "M2", ["Eyes"])
 
     resp = asyncio.get_event_loop().run_until_complete(server.handle_swap_start(req))
 
     assert resp.status == 400
-    assert "Accessory" in json.loads(resp.body)["error"]
+    assert "Eyes" in json.loads(resp.body)["error"]
 
 
 def test_swap_filled_slots_still_ok(monkeypatch):
