@@ -361,13 +361,286 @@ async def _error_mw(request: web.Request, handler) -> web.StreamResponse:
         # (body, category, trait) row.
         return web.json_response({"error": str(e)}, status=404)
 
-# Full self-contained UI is injected in a later task; the stub keeps the marker
-# the index test asserts on.
-INDEX_HTML = "<!doctype html><title>Trait Dashboard</title><h1>Trait Dashboard</h1>"
+# Self-contained page: inline CSS + JS, no build step, no external assets.
+# `__DEFAULT_NETWORK__` is substituted per request in handle_index.
+INDEX_HTML = """<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Trait Dashboard</title>
+<style>
+  :root { color-scheme: light dark; --bg:#fff; --fg:#1a1a1a; --mut:#777; --line:#ddd;
+          --card:#fafafa; --accent:#2d6cdf; --off:#c0392b; --chk:#e8f0fe; }
+  @media (prefers-color-scheme: dark) {
+    :root { --bg:#16181c; --fg:#e6e6e6; --mut:#8b93a1; --line:#2c313a;
+            --card:#1e2127; --accent:#5b8def; --off:#e06c5b; --chk:#233047; } }
+  * { box-sizing:border-box; }
+  body { margin:0; font:14px/1.4 system-ui,-apple-system,Segoe UI,Roboto,sans-serif;
+         background:var(--bg); color:var(--fg); }
+  header { display:flex; align-items:center; gap:14px; flex-wrap:wrap;
+           padding:12px 16px; border-bottom:1px solid var(--line); position:sticky; top:0;
+           background:var(--bg); z-index:5; }
+  header h1 { font-size:16px; margin:0; margin-right:auto; }
+  .filters { display:flex; align-items:center; gap:10px; flex-wrap:wrap; padding:10px 16px;
+             border-bottom:1px solid var(--line); }
+  select, input, button { font:inherit; color:var(--fg); background:var(--bg);
+           border:1px solid var(--line); border-radius:6px; padding:5px 9px; }
+  button { cursor:pointer; }
+  button.active { background:var(--accent); color:#fff; border-color:var(--accent); }
+  #search { min-width:200px; }
+  .chip { border-radius:14px; }
+  .chip.active { background:var(--accent); color:#fff; border-color:var(--accent); }
+  #count { color:var(--mut); font-size:12px; font-weight:400; }
+  .grid { display:grid; grid-template-columns:repeat(auto-fill,minmax(150px,1fr));
+          gap:12px; padding:16px; }
+  .card { border:1px solid var(--line); border-radius:10px; background:var(--card);
+          padding:8px; display:flex; flex-direction:column; gap:4px; }
+  .card.off { opacity:.5; }
+  .thumb { width:100%; aspect-ratio:1; object-fit:contain; border-radius:6px;
+           background:conic-gradient(#0002 25%,#0000 0 50%,#0002 0 75%,#0000 0) 0 0/16px 16px; }
+  .thumb.sm { width:34px; height:34px; }
+  .thumb.ph { display:flex; align-items:center; justify-content:center; color:var(--mut);
+              font-size:11px; border:1px dashed var(--line); }
+  .name { font-weight:600; white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }
+  .sub, .meta { color:var(--mut); font-size:12px; }
+  .badge { font-size:11px; color:var(--accent); min-height:14px; }
+  .sw { display:flex; align-items:center; gap:6px; font-size:12px; }
+  .acts { display:flex; gap:6px; margin-top:2px; }
+  .acts button { flex:1; padding:3px 0; font-size:12px; }
+  table.list { width:100%; border-collapse:collapse; }
+  table.list th, table.list td { padding:6px 8px; border-bottom:1px solid var(--line);
+           text-align:left; white-space:nowrap; }
+  table.list th[data-sort] { cursor:pointer; user-select:none; }
+  table.list tr.off { opacity:.5; }
+  td.nm, .nm { font-weight:600; }
+  .hidden { display:none; }
+</style>
+</head>
+<body>
+<header>
+  <h1>Trait Dashboard <span id="count"></span></h1>
+  <select id="network" title="network">
+    <option value="mainnet">mainnet</option>
+    <option value="testnet">testnet</option>
+  </select>
+  <span>
+    <button id="view-grid" class="active">&#9638; Grid</button>
+    <button id="view-list">&#9776; List</button>
+  </span>
+  <button id="sync" title="Insert floor rows for newly-added layer art">Sync from layers</button>
+</header>
+<div class="filters">
+  <input id="search" placeholder="Search trait…" autocomplete="off">
+  <select id="f-body"><option value="">All bodies</option></select>
+  <select id="f-category"><option value="">All categories</option></select>
+  <span id="status-chips">
+    <button class="chip active" data-status="all">All</button>
+    <button class="chip" data-status="enabled">Enabled</button>
+    <button class="chip" data-status="disabled">Disabled</button>
+    <button class="chip" data-status="boosted">Boosted</button>
+    <button class="chip" data-status="problems">Problems</button>
+  </span>
+</div>
+<div id="grid" class="grid"></div>
+<table id="list" class="list hidden">
+  <thead><tr>
+    <th></th>
+    <th data-sort="trait">Trait</th>
+    <th data-sort="body">Body</th>
+    <th data-sort="category">Category</th>
+    <th data-sort="live_count">n</th>
+    <th data-sort="share">Share</th>
+    <th data-sort="weight">Weight</th>
+    <th data-sort="boost_status">Boost</th>
+    <th>On</th>
+    <th></th>
+  </tr></thead>
+  <tbody></tbody>
+</table>
+<script>
+const DEFAULT_NETWORK = "__DEFAULT_NETWORK__";
+const $ = (id) => document.getElementById(id);
+const $net=$("network"), $search=$("search"), $fbody=$("f-body"), $fcat=$("f-category"),
+      $grid=$("grid"), $list=$("list"), $ltbody=$list.querySelector("tbody"),
+      $count=$("count"), $sync=$("sync"), $vgrid=$("view-grid"), $vlist=$("view-list");
+
+let allRows=[], view="grid", activeStatus="all", sortKey=null, sortDir=1;
+$net.value = DEFAULT_NETWORK === "testnet" ? "testnet" : "mainnet";
+let network = $net.value;
+
+function el(tag, props={}, kids=[]) {
+  const e=document.createElement(tag);
+  for (const [k,v] of Object.entries(props)) {
+    if (k==="class") e.className=v;
+    else if (k==="text") e.textContent=v;
+    else if (k.startsWith("on") && typeof v==="function") e.addEventListener(k.slice(2), v);
+    else e.setAttribute(k, v);
+  }
+  for (const kid of kids) e.append(kid);
+  return e;
+}
+const imgUrl = (r) => "/img?body="+encodeURIComponent(r.body)+"&category="+
+      encodeURIComponent(r.category)+"&value="+encodeURIComponent(r.trait);
+const badge = (r) => (r.boost_status==="—" ? "" : r.boost_status);
+
+function thumb(r, cls) {
+  const img=el("img",{class:"thumb"+(cls||""), loading:"lazy", alt:r.trait, src:imgUrl(r)});
+  img.addEventListener("error", () =>
+    img.replaceWith(el("div",{class:"thumb"+(cls||"")+" ph", text:(cls?"—":"no art")})));
+  return img;
+}
+function toggleBox(r) {
+  const chk=el("input",{type:"checkbox"});
+  chk.checked=r.enabled;
+  chk.addEventListener("change", () => doToggle(r, chk.checked));
+  return chk;
+}
+function actions(r) {
+  return [el("button",{text:"Boost", onclick:()=>doBoost(r)}),
+          el("button",{text:"Floor", onclick:()=>doFloor(r)})];
+}
+function card(r) {
+  return el("div",{class:"card"+(r.enabled?"":" off")},[
+    thumb(r,""),
+    el("div",{class:"name", title:r.trait, text:r.trait}),
+    el("div",{class:"sub", text:r.body+" · "+r.category}),
+    el("div",{class:"meta", text:"n="+r.live_count+" · "+r.share.toFixed(1)+"% · w"+r.weight.toFixed(3)}),
+    el("div",{class:"badge", text:badge(r)}),
+    el("label",{class:"sw"},[toggleBox(r), el("span",{text:r.enabled?"on":"off"})]),
+    el("div",{class:"acts"}, actions(r)),
+  ]);
+}
+function listRow(r) {
+  return el("tr",{class:r.enabled?"":"off"},[
+    el("td",{},[thumb(r," sm")]),
+    el("td",{class:"nm", text:r.trait}),
+    el("td",{text:r.body}),
+    el("td",{text:r.category}),
+    el("td",{text:String(r.live_count)}),
+    el("td",{text:r.share.toFixed(1)+"%"}),
+    el("td",{text:r.weight.toFixed(3)}),
+    el("td",{text:badge(r)||"—"}),
+    el("td",{},[toggleBox(r)]),
+    el("td",{}, actions(r)),
+  ]);
+}
+function filtered() {
+  const q=$search.value.trim().toLowerCase(), b=$fbody.value, c=$fcat.value, st=activeStatus;
+  return allRows.filter(r => {
+    if (b && r.body!==b) return false;
+    if (c && r.category!==c) return false;
+    if (q && !r.trait.toLowerCase().includes(q)) return false;
+    if (st==="enabled" && !r.enabled) return false;
+    if (st==="disabled" && r.enabled) return false;
+    if (st==="boosted" && (r.boost_status==="—"||r.boost_status==="finished")) return false;
+    if (st==="problems" && !(!r.enabled || r.live_count===0 || !r.has_image)) return false;
+    return true;
+  });
+}
+function sortRows(rows) {
+  if (!sortKey) return rows;
+  return [...rows].sort((a,b) => {
+    const x=a[sortKey], y=b[sortKey];
+    if (typeof x==="string") return x.localeCompare(y)*sortDir;
+    return ((x||0)-(y||0))*sortDir;
+  });
+}
+function render() {
+  const rows=filtered();
+  $count.textContent = "("+rows.length+")";
+  if (view==="grid") $grid.replaceChildren(...rows.map(card));
+  else $ltbody.replaceChildren(...sortRows(rows).map(listRow));
+}
+function fillSelect(sel, values, allLabel) {
+  const cur=sel.value;
+  sel.replaceChildren(el("option",{value:"", text:allLabel}));
+  for (const v of values) sel.append(el("option",{value:v, text:v}));
+  if ([...sel.options].some(o=>o.value===cur)) sel.value=cur;
+}
+async function load() {
+  try {
+    const r=await fetch("/api/traits?network="+encodeURIComponent(network));
+    const data=await r.json();
+    allRows=data.rows||[];
+    fillSelect($fbody, data.bodies||[], "All bodies");
+    fillSelect($fcat, data.categories||[], "All categories");
+    render();
+  } catch (e) { alert("Load failed: "+e); }
+}
+async function post(path, bodyObj) {
+  const r=await fetch(path,{method:"POST", headers:{"Content-Type":"application/json"},
+                            body:JSON.stringify(bodyObj)});
+  if (!r.ok) { const e=await r.json().catch(()=>({})); alert("Error: "+(e.error||r.status)); return null; }
+  return r.json();
+}
+function replaceRow(u) {
+  const i=allRows.findIndex(x=>x.body===u.body&&x.category===u.category&&x.trait===u.trait);
+  if (i>=0) allRows[i]=u;
+  render();
+}
+async function doToggle(r, enabled) {
+  if (!enabled && !confirm("Disable "+r.body+"/"+r.category+"/"+r.trait+"?")) { render(); return; }
+  const u=await post("/api/toggle",{network, body:r.body, category:r.category, trait:r.trait, enabled});
+  if (u) replaceRow(u); else render();
+}
+async function doBoost(r) {
+  const initial=parseFloat(prompt("Boost multiplier (e.g. 7):", r.boost_initial||7));
+  if (!initial) return;
+  const step=parseInt(prompt("Step hours (decays -1x per window):", r.boost_step_hours||24),10);
+  if (!step) return;
+  if (!confirm("Arm "+initial+"x boost on "+r.trait+"?")) return;
+  const u=await post("/api/boost",{network, body:r.body, category:r.category, trait:r.trait, initial, step_hours:step});
+  if (u) replaceRow(u);
+}
+async function doFloor(r) {
+  const floor=parseFloat(prompt("Floor weight (0-1):", r.floor_weight));
+  if (isNaN(floor)) return;
+  if (!confirm("Set floor "+floor+" on "+r.trait+"?")) return;
+  const u=await post("/api/floor",{network, body:r.body, category:r.category, trait:r.trait, floor});
+  if (u) replaceRow(u);
+}
+async function doSync() {
+  if (!confirm("Insert floor rows for any newly-added layer art on "+network+"?")) return;
+  const u=await post("/api/sync",{network});
+  if (u) { alert("Inserted "+u.inserted+" rows"); load(); }
+}
+function setView(v) {
+  view=v;
+  $grid.classList.toggle("hidden", v!=="grid");
+  $list.classList.toggle("hidden", v!=="list");
+  $vgrid.classList.toggle("active", v==="grid");
+  $vlist.classList.toggle("active", v==="list");
+  render();
+}
+$search.addEventListener("input", render);
+$fbody.addEventListener("change", render);
+$fcat.addEventListener("change", render);
+$net.addEventListener("change", () => { network=$net.value; load(); });
+$vgrid.addEventListener("click", () => setView("grid"));
+$vlist.addEventListener("click", () => setView("list"));
+$sync.addEventListener("click", doSync);
+document.querySelectorAll("#status-chips .chip").forEach(ch =>
+  ch.addEventListener("click", () => {
+    activeStatus=ch.dataset.status;
+    document.querySelectorAll("#status-chips .chip").forEach(x=>x.classList.toggle("active", x===ch));
+    render();
+  }));
+document.querySelectorAll("#list th[data-sort]").forEach(th =>
+  th.addEventListener("click", () => {
+    const k=th.dataset.sort;
+    if (sortKey===k) sortDir=-sortDir; else { sortKey=k; sortDir=1; }
+    render();
+  }));
+load();
+</script>
+</body>
+</html>"""
 
 
 async def handle_index(request: web.Request) -> web.Response:
-    return web.Response(text=INDEX_HTML, content_type="text/html")
+    html = INDEX_HTML.replace("__DEFAULT_NETWORK__", request.app[DEFAULT_NETWORK])
+    return web.Response(text=html, content_type="text/html")
 
 
 async def handle_traits(request: web.Request) -> web.Response:

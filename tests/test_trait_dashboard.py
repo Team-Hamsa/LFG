@@ -322,3 +322,23 @@ def test_img_serves_and_sync_inserts(tmp_path, monkeypatch):
     _run(body())
     rows = {r["trait"] for r in td.fetch_rows("mainnet", db_path=db)["rows"]}
     assert "Laser" in rows
+
+
+# --- Task 7: UI markers ----------------------------------------------------
+
+
+def test_index_has_ui_hooks():
+    from scripts import trait_dashboard as td
+
+    async def body():
+        from aiohttp.test_utils import TestClient, TestServer
+
+        async with TestClient(TestServer(td.create_app("testnet"))) as c:
+            r = await c.get("/")
+            html = await r.text()
+            for hook in ('id="grid"', 'id="list"', 'id="search"', 'id="network"', "Sync from layers"):
+                assert hook in html, hook
+            # default network injected into the page
+            assert "testnet" in html
+
+    _run(body())
