@@ -280,6 +280,33 @@ CREATE TABLE burned_nfts (
 3. **Lookup NFT**: Search for an NFT by number to view details
 4. **Burn NFT**: Burn an NFT by number (requires reason; creates audit log)
 
+### Rarity admin dashboard (`scripts/trait_dashboard.py`)
+
+A standalone, **local-only** web dashboard over the variable-rarity engine —
+grid/list of every trait's art + live odds (share / effective weight / boost /
+enabled), with click-to-toggle enable/disable, arm/re-arm boosts, and set
+floors. It is **not** wired into the Activity / Discord / `lfg_service`; it is an
+ops tool like every other `scripts/*.py`.
+
+```bash
+.venv/bin/python scripts/trait_dashboard.py [--network mainnet] [--port 8890] [--host 127.0.0.1]
+# reach it: ssh -L 8890:localhost:8890 <server>  then open http://localhost:8890
+```
+
+- **Loopback-bound by default** (`--host 127.0.0.1`); never place it behind the
+  public Funnel. It writes the live `trait_rarity` table but makes **no on-chain
+  actions** (burns stay in Discord `/admin`).
+- All reads/writes go through `lfg_core.rarity` (the same functions the CLI
+  `scripts/rarity_admin.py` and the Discord `/admin` rarity buttons use), so
+  edits take effect on the **next mint with no restart** (`weighted_pick` reads
+  the table live).
+- Network-aware: switches both the DB file (`db_path.app_db_path`) and the
+  `network` column. "Sync from layers" inserts floor rows for newly-added art.
+- Every mutation appends to `reports/trait_dashboard_audit.log` (gitignored).
+- Scope is rarity only; `trait_config.yaml` authoring (exclusions / affinity /
+  z-order) is **#39** / a possible v2 (it caches in-process and needs a restart).
+  Design: `docs/superpowers/specs/2026-07-13-rarity-admin-dashboard-design.md`.
+
 ## Key Modules (module-level pointers — line numbers rot, use grep)
 
 - `lfg_core/config.py` — network URLs (JSON-RPC/WS/clio per `XRPL_NETWORK`), `SOURCE_TAG`,

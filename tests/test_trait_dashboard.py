@@ -342,3 +342,15 @@ def test_index_has_ui_hooks():
             assert "testnet" in html
 
     _run(body())
+
+
+# --- Task 8: routes / entrypoint -------------------------------------------
+
+
+def test_all_routes_registered():
+    from scripts import trait_dashboard as td
+
+    app = td.create_app("testnet")
+    paths = {r.resource.canonical for r in app.router.routes() if r.resource is not None}
+    for p in ("/", "/api/traits", "/img", "/api/toggle", "/api/boost", "/api/floor", "/api/sync"):
+        assert p in paths, p

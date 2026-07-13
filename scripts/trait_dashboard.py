@@ -717,3 +717,23 @@ def create_app(default_network: str = "mainnet") -> web.Application:
     app.router.add_post("/api/floor", handle_floor)
     app.router.add_post("/api/sync", handle_sync)
     return app
+
+
+def main() -> None:
+    import argparse
+
+    parser = argparse.ArgumentParser(description="Standalone rarity admin dashboard (local-only)")
+    parser.add_argument(
+        "--network", default=config.XRPL_NETWORK, help="default network shown on load"
+    )
+    parser.add_argument(
+        "--host", default="127.0.0.1", help="bind host (loopback by default; reach via SSH tunnel)"
+    )
+    parser.add_argument("--port", type=int, default=8890, help="bind port (default 8890)")
+    args = parser.parse_args()
+    print(f"Trait Dashboard → http://{args.host}:{args.port}  (default network: {args.network})")
+    web.run_app(create_app(args.network), host=args.host, port=args.port)
+
+
+if __name__ == "__main__":
+    main()
