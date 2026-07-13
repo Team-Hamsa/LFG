@@ -107,10 +107,12 @@ def test_fetch_rows_filters(tmp_path):
     assert {r["trait"] for r in td.fetch_rows("mainnet", db_path=db, body="male")["rows"]} == {
         "Crown"
     }
-    assert {r["trait"] for r in td.fetch_rows("mainnet", db_path=db, status="disabled")["rows"]} == {
-        "Off"
+    assert {
+        r["trait"] for r in td.fetch_rows("mainnet", db_path=db, status="disabled")["rows"]
+    } == {"Off"}
+    assert "Off" in {
+        r["trait"] for r in td.fetch_rows("mainnet", db_path=db, status="problems")["rows"]
     }
-    assert "Off" in {r["trait"] for r in td.fetch_rows("mainnet", db_path=db, status="problems")["rows"]}
 
 
 # --- Task 2: /api/traits + index -------------------------------------------
@@ -242,7 +244,9 @@ def test_floor_per_trait_then_global(tmp_path, monkeypatch):
             )
             assert r.status == 200
             assert (await r.json())["floor_weight"] == 0.02
-            r2 = await c.post("/api/floor", json={"network": "mainnet", "trait": None, "floor": 0.01})
+            r2 = await c.post(
+                "/api/floor", json={"network": "mainnet", "trait": None, "floor": 0.01}
+            )
             assert r2.status == 200
 
     _run(body())
@@ -270,13 +274,26 @@ def test_validation_errors(tmp_path, monkeypatch):
             # floor out of range -> 400
             r = await c.post(
                 "/api/floor",
-                json={"network": "mainnet", "body": "ape", "category": "Eyes", "trait": "Laser", "floor": 5},
+                json={
+                    "network": "mainnet",
+                    "body": "ape",
+                    "category": "Eyes",
+                    "trait": "Laser",
+                    "floor": 5,
+                },
             )
             assert r.status == 400
             # boost on an unknown trait -> 404
             r = await c.post(
                 "/api/boost",
-                json={"network": "mainnet", "body": "ape", "category": "Eyes", "trait": "Nope", "initial": 5, "step_hours": 24},
+                json={
+                    "network": "mainnet",
+                    "body": "ape",
+                    "category": "Eyes",
+                    "trait": "Nope",
+                    "initial": 5,
+                    "step_hours": 24,
+                },
             )
             assert r.status == 404
             # toggle missing the trait field -> 400
@@ -294,7 +311,6 @@ def test_validation_errors(tmp_path, monkeypatch):
 
 def test_img_serves_and_sync_inserts(tmp_path, monkeypatch):
     from lfg_core import config
-
     from scripts import trait_dashboard as td
 
     layers = tmp_path / "layers"
@@ -336,7 +352,13 @@ def test_index_has_ui_hooks():
         async with TestClient(TestServer(td.create_app("testnet"))) as c:
             r = await c.get("/")
             html = await r.text()
-            for hook in ('id="grid"', 'id="list"', 'id="search"', 'id="network"', "Sync from layers"):
+            for hook in (
+                'id="grid"',
+                'id="list"',
+                'id="search"',
+                'id="network"',
+                "Sync from layers",
+            ):
                 assert hook in html, hook
             # default network injected into the page
             assert "testnet" in html

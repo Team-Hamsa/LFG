@@ -58,7 +58,11 @@ def _list_subdirs(dirname: str) -> list[str]:
     path = os.path.join(config.LAYERS_DIR, dirname)
     if not os.path.isdir(path):
         return []
-    return [d for d in os.listdir(path) if os.path.isdir(os.path.join(path, d)) and not d.startswith(".")]
+    return [
+        d
+        for d in os.listdir(path)
+        if os.path.isdir(os.path.join(path, d)) and not d.startswith(".")
+    ]
 
 
 def _list_values(dirname: str, trait_type: str) -> set[str]:
@@ -227,7 +231,14 @@ def apply_toggle(
         rarity.set_enabled(conn, body, category, trait, enabled, network=network)
     finally:
         conn.close()
-    audit(network, "toggle", body, category, trait, f"enabled: {int(before['enabled'])} -> {int(enabled)}")
+    audit(
+        network,
+        "toggle",
+        body,
+        category,
+        trait,
+        f"enabled: {int(before['enabled'])} -> {int(enabled)}",
+    )
     row = _one_row(network, body, category, trait, db_path=dbp)
     assert row is not None
     return row
@@ -249,7 +260,13 @@ def apply_boost(
     conn = sqlite3.connect(dbp)
     try:
         rarity.arm_boost(
-            conn, body, category, trait, network=network, boost_initial=initial, boost_step_hours=step_hours
+            conn,
+            body,
+            category,
+            trait,
+            network=network,
+            boost_initial=initial,
+            boost_step_hours=step_hours,
         )
     finally:
         conn.close()
@@ -360,6 +377,7 @@ async def _error_mw(request: web.Request, handler) -> web.StreamResponse:
         # rarity.set_enabled/arm_boost & apply_* raise ValueError for a missing
         # (body, category, trait) row.
         return web.json_response({"error": str(e)}, status=404)
+
 
 # Self-contained page: inline CSS + JS, no build step, no external assets.
 # `__DEFAULT_NETWORK__` is substituted per request in handle_index.
