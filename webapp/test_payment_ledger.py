@@ -206,7 +206,7 @@ def test_credit_scan_pages_past_five_pages(ledger_db, monkeypatch):
 
     class FakeWS:
         def __init__(self, url):
-            self.page = 0
+            self.last_marker = None
 
         async def __aenter__(self):
             return self
@@ -218,8 +218,11 @@ def test_credit_scan_pages_past_five_pages(ledger_db, monkeypatch):
             pass
 
         async def request(self, req):
-            self.page += 1
-            page = self.page
+            # Pagination is driven by the marker the caller sends back, so a
+            # regression that re-requests page 1 can never "reach" page 8.
+            marker = getattr(req, "marker", None)
+            assert marker == self.last_marker, "request must forward the previous marker"
+            page = 1 if marker is None else marker["p"] + 1
 
             class R:
                 # 7 pages of unrelated traffic, the credit on page 8.
@@ -229,6 +232,7 @@ def test_credit_scan_pages_past_five_pages(ledger_db, monkeypatch):
                     else {"transactions": [target]}
                 )
 
+            self.last_marker = R.result.get("marker")
             return R()
 
         def __aiter__(self):
