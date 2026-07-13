@@ -30,19 +30,25 @@ async def handle_mint(svc: LFGServiceClient, interaction: discord.Interaction) -
     session_id = session["id"]
     payment_link = session.get("payment_link", "")
 
-    # 2. payment QR (rendered locally from the deeplink — the service exposes no
-    #    hosted payment-QR url, only the link)
-    try:
-        qr_png = await svc.qr_png(payment_link)
-    except ServiceError as e:
-        logging.error(f"payment QR render failed: {e}")
-        await interaction.followup.send(embed=render.error_embed(friendly_error(e)), ephemeral=True)
-        return
-    await interaction.followup.send(
-        embed=render.payment_embed(payment_link),
-        file=render.file_from_png(qr_png, "payment_qr.png"),
-        ephemeral=True,
-    )
+    # 2. payment step. A newcomer free mint has no payment and no QR — just
+    #    confirm the freebie. Otherwise render the payment QR locally from the
+    #    deeplink (the service exposes no hosted payment-QR url, only the link).
+    if session.get("free"):
+        await interaction.followup.send(embed=render.free_mint_embed(), ephemeral=True)
+    else:
+        try:
+            qr_png = await svc.qr_png(payment_link)
+        except ServiceError as e:
+            logging.error(f"payment QR render failed: {e}")
+            await interaction.followup.send(
+                embed=render.error_embed(friendly_error(e)), ephemeral=True
+            )
+            return
+        await interaction.followup.send(
+            embed=render.payment_embed(payment_link),
+            file=render.file_from_png(qr_png, "payment_qr.png"),
+            ephemeral=True,
+        )
 
     # 3. wait for a terminal state (SDK polls /api/mint/<id> + backs off)
     try:

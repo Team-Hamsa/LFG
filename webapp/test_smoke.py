@@ -38,6 +38,15 @@ from lfg_core import (  # noqa: E402
 from lfg_service import app as server  # noqa: E402
 
 
+@pytest.fixture(autouse=True)
+def _no_free_mint(monkeypatch):
+    # These payment-path tests predate the newcomer free-mint feature and must
+    # exercise the paid flow deterministically. create_app() creates the
+    # free_mint_claims table in the shared DB, which would otherwise let the
+    # first paid-path mint session for a given identity slip into the free path.
+    monkeypatch.setattr(mint_flow.free_mint, "is_eligible", lambda *a, **k: False)
+
+
 def test_routes_registered():
     app = server.create_app()
     paths = {getattr(r.resource, "canonical", "") for r in app.router.routes()}

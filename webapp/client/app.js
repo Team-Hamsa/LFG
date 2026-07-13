@@ -428,6 +428,17 @@ function showFlow({ title, text, qrData, link, image, done, stage, spinner, cele
 // LFGO holders pay LFGO, everyone else pays XRP. Only the pill and the
 // price differ — the mechanics are never explained.
 function mintPayView(s) {
+  // Newcomer free mint: wallet control is already proven at connect, so there
+  // is no payment to make. Show a celebratory confirmation while the build
+  // runs instead of the pay pill / QR.
+  if (s.free) {
+    return {
+      title: '🎉 Free mint',
+      text: "You're a newcomer — this one's on us. No payment needed; building your avatar now…",
+      spinner: true,
+      stage: s.state,
+    };
+  }
   const xrp = s.pay_with === 'XRP';
   const pill = { kind: xrp ? 'xrp' : 'lfgo', text: `Paying with ${xrp ? 'XRP' : 'LFGO'}` };
   // QR already scanned: drop it and show a spinner while Xaman finishes (issue #22)

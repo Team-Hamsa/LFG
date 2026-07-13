@@ -30,6 +30,20 @@ def payment_embed(payment_link: str) -> Embed:
     return embed
 
 
+def free_mint_embed() -> Embed:
+    """Step-1 embed for a newcomer free mint: no payment, no QR. Wallet control
+    is already proven at connect, so we just tell the user the build is running."""
+    embed = Embed(
+        title="🎉 Free mint",
+        description=(
+            "You're a newcomer — this one's on us. No payment needed.\n\n"
+            "Building your avatar now… hang tight here."
+        ),
+        color=0x00FF00,
+    )
+    return embed
+
+
 def offer_embed(final: dict[str, Any], qr_image_url: str) -> Embed:
     """Terminal-success embed. ``qr_image_url`` is either the service-hosted
     ``accept_qr_url`` or ``attachment://offer_qr.png`` when the handler had to

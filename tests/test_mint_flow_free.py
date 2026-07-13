@@ -15,6 +15,16 @@ import lfg_core.free_mint as free_mint  # noqa: E402
 import lfg_core.mint_flow as mint_flow  # noqa: E402
 
 
+def _run(coro):
+    # A dedicated loop (not asyncio.run) so we never call set_event_loop(None),
+    # which would poison later tests that use the deprecated get_event_loop().
+    loop = asyncio.new_event_loop()
+    try:
+        return loop.run_until_complete(coro)
+    finally:
+        loop.close()
+
+
 def _session(monkeypatch, eligible, reserve=True):
     monkeypatch.setattr(free_mint, "is_eligible", lambda *a, **k: eligible)
     monkeypatch.setattr(free_mint, "reserve_claim", lambda *a, **k: reserve)
@@ -35,7 +45,7 @@ def test_eligible_session_goes_free_and_skips_payment(monkeypatch):
     # LFGO balance check must not decide the path when free
     monkeypatch.setattr(mint_flow.xrpl_ops, "get_trustline_balance", lambda *a, **k: None)
     s = _session(monkeypatch, eligible=True)
-    asyncio.run(s.prepare_payment())
+    _run(s.prepare_payment())
     assert s.free is True
     assert s.to_dict()["free"] is True
     assert called["payload"] is False  # no XUMM payment payload built
@@ -52,7 +62,7 @@ def test_ineligible_session_uses_paid_path(monkeypatch):
 
     monkeypatch.setattr(mint_flow.xumm_ops, "create_payment_payload", _payload)
     s = _session(monkeypatch, eligible=False)
-    asyncio.run(s.prepare_payment())
+    _run(s.prepare_payment())
     assert s.free is False
     assert s.pay_with == "XRP"
 
@@ -68,6 +78,6 @@ def test_lost_reserve_race_falls_back_to_paid(monkeypatch):
 
     monkeypatch.setattr(mint_flow.xumm_ops, "create_payment_payload", _payload)
     s = _session(monkeypatch, eligible=True, reserve=False)  # lost the race
-    asyncio.run(s.prepare_payment())
+    _run(s.prepare_payment())
     assert s.free is False
     assert s.pay_with == "XRP"

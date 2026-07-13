@@ -34,19 +34,23 @@ async def handle_mint(svc: LFGServiceClient, update: Any, context: Any) -> None:
     session_id = session["id"]
     payment_link = session.get("payment_link", "")
 
-    # 2. payment QR (rendered locally from the deeplink — the service exposes no
-    #    hosted payment-QR url, only the link)
-    try:
-        qr_png = await svc.qr_png(payment_link)
-    except ServiceError as e:
-        logging.error(f"payment QR render failed: {e}")
-        await bot.send_message(chat_id, render.error_caption(friendly_error(e)))
-        return
-    await bot.send_photo(
-        chat_id,
-        photo=render.photo_input(qr_png, "payment_qr.png"),
-        caption=render.payment_caption(payment_link),
-    )
+    # 2. payment step. A newcomer free mint has no payment and no QR — just
+    #    confirm the freebie. Otherwise render the payment QR locally from the
+    #    deeplink (the service exposes no hosted payment-QR url, only the link).
+    if session.get("free"):
+        await bot.send_message(chat_id, render.free_mint_caption())
+    else:
+        try:
+            qr_png = await svc.qr_png(payment_link)
+        except ServiceError as e:
+            logging.error(f"payment QR render failed: {e}")
+            await bot.send_message(chat_id, render.error_caption(friendly_error(e)))
+            return
+        await bot.send_photo(
+            chat_id,
+            photo=render.photo_input(qr_png, "payment_qr.png"),
+            caption=render.payment_caption(payment_link),
+        )
 
     # 3. wait for a terminal state (SDK polls /api/mint/<id> + backs off)
     try:
