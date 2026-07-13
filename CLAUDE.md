@@ -741,9 +741,19 @@ marketplace code never sets it itself.
    list/buy/cancel inline, mint/swap via the session's `push_user_token` — so a
    missing/stale token (`pushed:false`) simply falls back to the QR/deep link that
    are always returned too. Push is delivery-only: SourceTag and the no-custody
-   model are unchanged. **Not yet wired** (QR-only, follow-up): the Discord-native
-   `main.py` mint/swap paths (legacy `Users` store), the trait-sell wizard, and
-   CLI economy extract/deposit.
+   model are unchanged.
+
+   > **Scope of this caveat — push-token *delivery* only, NOT the tx logic.**
+   > Every surface (Discord Activity, Telegram, Discord bot) routes mint/swap/
+   > market through the **single** `lfg_service` endpoints — e.g. trait swaps all
+   > funnel through `handle_swap_start` (`svc.start_swap` → `POST /api/swap`); the
+   > Discord bot has NO native mint/swap of its own (the legacy inline `main.py`
+   > pipeline was inverted onto `lfg_service` in Spine Plan 3, and `main.py` is now
+   > an 8-line shim). So swap/mint **validation and behavior are identical across
+   > surfaces** — do not assume a per-surface swap path exists. What remains
+   > **QR-only** (no push token resolved yet, follow-up) are just these payload
+   > sites: the trait-sell wizard (`market_flow.TraitSellSession`) and the CLI
+   > economy extract/deposit scripts.
 
 3. **Metadata URL Encoding**: Metadata CDN URLs are converted to hex before being stored on-chain.
 
