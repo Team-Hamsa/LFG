@@ -33,12 +33,27 @@ from lfg_core.db_path import app_db_path  # noqa: E402
 _LAYER_EXTS = (".png", ".gif", ".mp4")
 
 
+def _safe_component(part: str) -> bool:
+    """A single path component that cannot traverse or escape."""
+    return (
+        bool(part) and part not in (".", "..") and not any(c in part for c in ("/", "\\", "\x00"))
+    )
+
+
 def resolve_image(body: str, category: str, value: str) -> str | None:
     """Local path of a trait layer file, or None. Mirrors LocalLayerStore's
     local resolution (the body dir then shared/, png→gif→mp4). Kept sync on
     purpose so the read path and the /img handler stay non-async. A body of
-    '*' (legacy/ungendered rows) scans every concrete body dir."""
-    base = config.LAYERS_DIR
+    '*' (legacy/ungendered rows) scans every concrete body dir.
+
+    Inputs arrive straight from the /img query string, so every component is
+    validated and each candidate is confirmed to stay under LAYERS_DIR — a
+    request like `category=../../etc` must never escape the layer tree, even
+    when the tool is bound to a non-loopback --host."""
+    components = (category, value) if body == "*" else (body, category, value)
+    if not all(_safe_component(p) for p in components):
+        return None
+    base = os.path.realpath(config.LAYERS_DIR)
     if body == "*":
         try:
             roots = [d for d in os.listdir(base) if os.path.isdir(os.path.join(base, d))]
@@ -48,9 +63,14 @@ def resolve_image(body: str, category: str, value: str) -> str | None:
         roots = [body]
     for root in [*roots, "shared"]:
         for ext in _LAYER_EXTS:
+            # Components are already traversal-validated, so the join can't
+            # escape; realpath-verify only on a hit to also catch a symlink
+            # inside the tree that points out.
             path = os.path.join(base, root, category, value + ext)
             if os.path.isfile(path):
-                return path
+                real = os.path.realpath(path)
+                if os.path.commonpath((base, real)) == base:
+                    return real
     return None
 
 
@@ -195,13 +215,15 @@ def fetch_rows(
 
 # --- Mutations -------------------------------------------------------------
 
-AUDIT_LOG = os.path.join("reports", "trait_dashboard_audit.log")
+# Anchored to the repo root, not CWD, so a pm2/cron invocation from any working
+# directory writes to the same reports/ (gitignored) rather than drifting.
+AUDIT_LOG = os.path.join(REPO_ROOT, "reports", "trait_dashboard_audit.log")
 
 
 def audit(network: str, action: str, body: str, category: str, trait: str, detail: str) -> None:
     """Append one tab-separated line to the local audit log (reports/ is
     gitignored). Best-effort provenance for a local single-operator tool."""
-    os.makedirs("reports", exist_ok=True)
+    os.makedirs(os.path.dirname(AUDIT_LOG), exist_ok=True)
     line = "\t".join(
         [rarity.utcnow().isoformat(), network, action, f"{body}/{category}/{trait}", detail]
     )
@@ -352,19 +374,28 @@ async def _json(request: web.Request) -> dict:
 
 
 def _require(data: dict, *keys: str) -> None:
+    """Every required field must be a non-empty string. All the endpoints'
+    required fields (network/body/category/trait) are strings, so a JSON array
+    or object here is a client error — reject it rather than letting it reach
+    SQLite as a bad bind and surface as a 500."""
     for key in keys:
-        if data.get(key) is None:
-            raise _BadInput(f"missing field: {key}")
+        val = data.get(key)
+        if not isinstance(val, str) or not val:
+            raise _BadInput(f"missing or invalid field: {key}")
 
 
-def _num(data: dict, key: str, lo: float, hi: float) -> float:
-    try:
-        val = float(data[key])
-    except (KeyError, TypeError, ValueError) as e:
-        raise _BadInput(f"invalid {key}") from e
+def _num(data: dict, key: str, lo: float, hi: float, *, integer: bool = False) -> float:
+    """Require a genuine JSON number in [lo, hi]. Rejects bools, numeric
+    strings, arrays, and objects; `integer=True` also rejects fractional values
+    (so step_hours isn't silently truncated by a later int())."""
+    val = data.get(key)
+    if isinstance(val, bool) or not isinstance(val, (int, float)):
+        raise _BadInput(f"invalid {key}")
+    if integer and not float(val).is_integer():
+        raise _BadInput(f"{key} must be a whole number")
     if not (lo <= val <= hi):
         raise _BadInput(f"{key} out of range [{lo}, {hi}]")
-    return val
+    return float(val)
 
 
 @web.middleware
@@ -483,7 +514,7 @@ const $net=$("network"), $search=$("search"), $fbody=$("f-body"), $fcat=$("f-cat
       $grid=$("grid"), $list=$("list"), $ltbody=$list.querySelector("tbody"),
       $count=$("count"), $sync=$("sync"), $vgrid=$("view-grid"), $vlist=$("view-list");
 
-let allRows=[], view="grid", activeStatus="all", sortKey=null, sortDir=1;
+let allRows=[], view="grid", activeStatus="all", sortKey=null, sortDir=1, loadGeneration=0;
 $net.value = DEFAULT_NETWORK === "testnet" ? "testnet" : "mainnet";
 let network = $net.value;
 
@@ -577,9 +608,11 @@ function fillSelect(sel, values, allLabel) {
   if ([...sel.options].some(o=>o.value===cur)) sel.value=cur;
 }
 async function load() {
+  const generation=++loadGeneration, requested=network;
   try {
-    const r=await fetch("/api/traits?network="+encodeURIComponent(network));
+    const r=await fetch("/api/traits?network="+encodeURIComponent(requested));
     const data=await r.json();
+    if (generation!==loadGeneration || requested!==network) return;  // superseded by a newer network switch
     allRows=data.rows||[];
     fillSelect($fbody, data.bodies||[], "All bodies");
     fillSelect($fcat, data.categories||[], "All categories");
@@ -604,9 +637,9 @@ async function doToggle(r, enabled) {
 }
 async function doBoost(r) {
   const initial=parseFloat(prompt("Boost multiplier (e.g. 7):", r.boost_initial||7));
-  if (!initial) return;
+  if (isNaN(initial)) return;  // cancelled/blank; 0 or out-of-range falls through to the server's 400
   const step=parseInt(prompt("Step hours (decays -1x per window):", r.boost_step_hours||24),10);
-  if (!step) return;
+  if (isNaN(step)) return;
   if (!confirm("Arm "+initial+"x boost on "+r.trait+"?")) return;
   const u=await post("/api/boost",{network, body:r.body, category:r.category, trait:r.trait, initial, step_hours:step});
   if (u) replaceRow(u);
@@ -688,7 +721,7 @@ async def handle_boost(request: web.Request) -> web.Response:
     data = await _json(request)
     _require(data, "network", "body", "category", "trait")
     initial = _num(data, "initial", 1, 100)
-    step_hours = _num(data, "step_hours", 1, 100000)
+    step_hours = _num(data, "step_hours", 1, 100000, integer=True)
     row = apply_boost(
         data["network"], data["body"], data["category"], data["trait"], initial, int(step_hours)
     )
@@ -700,8 +733,8 @@ async def handle_floor(request: web.Request) -> web.Response:
     _require(data, "network")
     floor = _num(data, "floor", 0, 1)
     trait = data.get("trait")
-    if trait is not None:  # per-trait floor needs the full key
-        _require(data, "body", "category")
+    if trait is not None:  # per-trait floor needs the full (validated) key
+        _require(data, "body", "category", "trait")
     row = apply_floor(data["network"], data.get("body"), data.get("category"), trait, floor)
     return web.json_response(row)
 

@@ -147,7 +147,9 @@ def test_toggle_flips_enabled_and_audits(tmp_path, monkeypatch):
     db = str(tmp_path / "m.db")
     _seed(db, "mainnet", [("ape", "Eyes", "Laser", 3, 1)])
     monkeypatch.setattr(td, "app_db_path", lambda net: db)
-    monkeypatch.chdir(tmp_path)  # reports/ lands under tmp
+    monkeypatch.chdir(tmp_path)  # keep layer resolution hermetic
+    audit_log = tmp_path / "reports" / "audit.log"
+    monkeypatch.setattr(td, "AUDIT_LOG", str(audit_log))
 
     async def body():
         from aiohttp.test_utils import TestClient, TestServer
@@ -168,7 +170,7 @@ def test_toggle_flips_enabled_and_audits(tmp_path, monkeypatch):
 
     _run(body())
     assert td.fetch_rows("mainnet", db_path=db)["rows"][0]["enabled"] is False
-    log = (tmp_path / "reports" / "trait_dashboard_audit.log").read_text()
+    log = audit_log.read_text()
     assert log.count("Laser") == 1
 
 
@@ -196,6 +198,7 @@ def test_boost_arms_dormant(tmp_path, monkeypatch):
     _seed(db, "mainnet", [("ape", "Eyes", "Laser", 3, 1)])
     monkeypatch.setattr(td, "app_db_path", lambda net: db)
     monkeypatch.chdir(tmp_path)
+    monkeypatch.setattr(td, "AUDIT_LOG", str(tmp_path / "reports" / "audit.log"))
 
     async def body():
         from aiohttp.test_utils import TestClient, TestServer
@@ -227,6 +230,7 @@ def test_floor_per_trait_then_global(tmp_path, monkeypatch):
     _seed(db, "mainnet", [("ape", "Eyes", "Laser", 3, 1), ("ape", "Eyes", "Star", 1, 1)])
     monkeypatch.setattr(td, "app_db_path", lambda net: db)
     monkeypatch.chdir(tmp_path)
+    monkeypatch.setattr(td, "AUDIT_LOG", str(tmp_path / "reports" / "audit.log"))
 
     async def body():
         from aiohttp.test_utils import TestClient, TestServer
@@ -266,6 +270,7 @@ def test_validation_errors(tmp_path, monkeypatch):
     _seed(db, "mainnet", [("ape", "Eyes", "Laser", 3, 1)])
     monkeypatch.setattr(td, "app_db_path", lambda net: db)
     monkeypatch.chdir(tmp_path)
+    monkeypatch.setattr(td, "AUDIT_LOG", str(tmp_path / "reports" / "audit.log"))
 
     async def body():
         from aiohttp.test_utils import TestClient, TestServer
@@ -306,6 +311,61 @@ def test_validation_errors(tmp_path, monkeypatch):
     _run(body())
 
 
+def test_rejects_malformed_json_types(tmp_path, monkeypatch):
+    """Review follow-up: type-mismatched fields must 400, not coerce into a
+    bad SQLite bind (500) or silently truncate step_hours."""
+    from scripts import trait_dashboard as td
+
+    db = str(tmp_path / "m.db")
+    _seed(db, "mainnet", [("ape", "Eyes", "Laser", 3, 1)])
+    monkeypatch.setattr(td, "app_db_path", lambda net: db)
+    monkeypatch.setattr(td, "AUDIT_LOG", str(tmp_path / "reports" / "audit.log"))
+
+    async def body():
+        from aiohttp.test_utils import TestClient, TestServer
+
+        async with TestClient(TestServer(td.create_app())) as c:
+            # array where a string field is expected
+            r = await c.post(
+                "/api/toggle",
+                json={
+                    "network": "mainnet",
+                    "body": ["ape"],
+                    "category": "Eyes",
+                    "trait": "Laser",
+                    "enabled": False,
+                },
+            )
+            assert r.status == 400
+            # fractional step_hours must not be silently truncated
+            r = await c.post(
+                "/api/boost",
+                json={
+                    "network": "mainnet",
+                    "body": "ape",
+                    "category": "Eyes",
+                    "trait": "Laser",
+                    "initial": 5,
+                    "step_hours": 1.9,
+                },
+            )
+            assert r.status == 400
+            # numeric string floor
+            r = await c.post(
+                "/api/floor",
+                json={
+                    "network": "mainnet",
+                    "body": "ape",
+                    "category": "Eyes",
+                    "trait": "Laser",
+                    "floor": "0.5",
+                },
+            )
+            assert r.status == 400
+
+    _run(body())
+
+
 # --- Task 6: /img + /api/sync ----------------------------------------------
 
 
@@ -321,6 +381,7 @@ def test_img_serves_and_sync_inserts(tmp_path, monkeypatch):
     _seed(db, "mainnet", [])  # empty rarity table
     monkeypatch.setattr(td, "app_db_path", lambda net: db)
     monkeypatch.chdir(tmp_path)
+    monkeypatch.setattr(td, "AUDIT_LOG", str(tmp_path / "reports" / "audit.log"))
 
     async def body():
         from aiohttp.test_utils import TestClient, TestServer
@@ -338,6 +399,34 @@ def test_img_serves_and_sync_inserts(tmp_path, monkeypatch):
     _run(body())
     rows = {r["trait"] for r in td.fetch_rows("mainnet", db_path=db)["rows"]}
     assert "Laser" in rows
+
+
+def test_img_rejects_path_traversal(tmp_path, monkeypatch):
+    """Review follow-up: query components must not escape LAYERS_DIR."""
+    from lfg_core import config
+    from scripts import trait_dashboard as td
+
+    layers = tmp_path / "layers"
+    (layers / "male" / "Eyes").mkdir(parents=True)
+    _png_1x1(str(layers / "male" / "Eyes" / "Laser.png"))
+    _png_1x1(str(tmp_path / "secret.png"))  # image-extension file OUTSIDE the tree
+    monkeypatch.setattr(config, "LAYERS_DIR", str(layers))
+
+    async def body():
+        from aiohttp.test_utils import TestClient, TestServer
+
+        async with TestClient(TestServer(td.create_app())) as c:
+            assert (await c.get("/img?body=male&category=Eyes&value=Laser")).status == 200
+            # traversal via category must 404, never serve ../secret
+            bad = await c.get("/img?body=male&category=..%2F..&value=secret")
+            assert bad.status == 404
+            # a bare ".." component is also refused
+            bad2 = await c.get("/img?body=..&category=Eyes&value=Laser")
+            assert bad2.status == 404
+
+    _run(body())
+    # the confinement is in resolve_image itself, so the data layer agrees
+    assert td.resolve_image("male", "../..", "secret") is None
 
 
 # --- Task 7: UI markers ----------------------------------------------------

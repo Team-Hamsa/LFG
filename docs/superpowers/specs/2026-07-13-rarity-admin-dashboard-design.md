@@ -48,7 +48,7 @@ with changes taking effect on the next mint **without a restart**.
 already a project dependency (it backs `lfg_service`); **no new dependencies**.
 The script:
 
-```
+```bash
 .venv/bin/python scripts/trait_dashboard.py [--network mainnet] [--port 8890] [--host 127.0.0.1]
 ```
 
