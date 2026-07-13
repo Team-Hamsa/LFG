@@ -275,6 +275,35 @@ async def update_scan_state(session: MintSession) -> None:
             session.accept_signed = s["signed"]
 
 
+async def _settle_free_claim(session: "MintSession") -> None:
+    """Reconcile a free mint's claim at terminal state. Confirm as soon as the
+    mint reached the chain (nft_id set) — even if a later step (offer creation,
+    accept payload) then failed, the NFT exists and the user has it (or an
+    accept offer for it), so the free mint is spent. Releasing on a post-mint
+    failure would hand back the claim while the user keeps the minted NFT → a
+    second free mint on retry. Only a session that never minted (nft_id None:
+    payment timeout, pre-mint error, cancel) releases the reserved row so the
+    identity can retry. No-op for paid sessions."""
+    if not session.free:
+        return
+    if session.nft_id is not None and session.nft_number is not None:
+        await asyncio.to_thread(
+            free_mint.confirm_claim,
+            session.platform,
+            session.discord_id,
+            session.network,
+            session.wallet_address,
+            session.nft_number,
+        )
+    else:
+        await asyncio.to_thread(
+            free_mint.release_claim,
+            session.platform,
+            session.discord_id,
+            session.network,
+        )
+
+
 async def run_mint_session(session: MintSession) -> None:
     """Drive a MintSession to a terminal state. Run as a background task."""
     try:
@@ -472,23 +501,4 @@ async def run_mint_session(session: MintSession) -> None:
         session.state = FAILED
         session.error = str(e)
     finally:
-        # Settle the free claim once the session is terminal: confirm on a
-        # successful mint (OFFER_READY with a number), otherwise release the
-        # reserved row so the identity can retry.
-        if session.free:
-            if session.state == OFFER_READY and session.nft_number is not None:
-                await asyncio.to_thread(
-                    free_mint.confirm_claim,
-                    session.platform,
-                    session.discord_id,
-                    session.network,
-                    session.wallet_address,
-                    session.nft_number,
-                )
-            else:
-                await asyncio.to_thread(
-                    free_mint.release_claim,
-                    session.platform,
-                    session.discord_id,
-                    session.network,
-                )
+        await _settle_free_claim(session)
