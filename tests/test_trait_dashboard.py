@@ -287,3 +287,38 @@ def test_validation_errors(tmp_path, monkeypatch):
             assert r.status == 400
 
     _run(body())
+
+
+# --- Task 6: /img + /api/sync ----------------------------------------------
+
+
+def test_img_serves_and_sync_inserts(tmp_path, monkeypatch):
+    from lfg_core import config
+
+    from scripts import trait_dashboard as td
+
+    layers = tmp_path / "layers"
+    (layers / "male" / "Eyes").mkdir(parents=True)
+    _png_1x1(str(layers / "male" / "Eyes" / "Laser.png"))
+    monkeypatch.setattr(config, "LAYERS_DIR", str(layers))
+    db = str(tmp_path / "m.db")
+    _seed(db, "mainnet", [])  # empty rarity table
+    monkeypatch.setattr(td, "app_db_path", lambda net: db)
+    monkeypatch.chdir(tmp_path)
+
+    async def body():
+        from aiohttp.test_utils import TestClient, TestServer
+
+        async with TestClient(TestServer(td.create_app())) as c:
+            r = await c.get("/img?body=male&category=Eyes&value=Laser")
+            assert r.status == 200
+            assert (await r.read())[:8] == b"\x89PNG\r\n\x1a\n"
+            miss = await c.get("/img?body=male&category=Eyes&value=Missing")
+            assert miss.status == 404
+            sync = await c.post("/api/sync", json={"network": "mainnet"})
+            assert sync.status == 200
+            assert (await sync.json())["inserted"] >= 1
+
+    _run(body())
+    rows = {r["trait"] for r in td.fetch_rows("mainnet", db_path=db)["rows"]}
+    assert "Laser" in rows

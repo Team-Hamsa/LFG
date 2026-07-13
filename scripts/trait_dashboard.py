@@ -54,6 +54,47 @@ def resolve_image(body: str, category: str, value: str) -> str | None:
     return None
 
 
+def _list_subdirs(dirname: str) -> list[str]:
+    path = os.path.join(config.LAYERS_DIR, dirname)
+    if not os.path.isdir(path):
+        return []
+    return [d for d in os.listdir(path) if os.path.isdir(os.path.join(path, d)) and not d.startswith(".")]
+
+
+def _list_values(dirname: str, trait_type: str) -> set[str]:
+    path = os.path.join(config.LAYERS_DIR, dirname, trait_type)
+    if not os.path.isdir(path):
+        return set()
+    out = set()
+    for name in os.listdir(path):
+        stem, ext = os.path.splitext(name)
+        if ext.lower() in _LAYER_EXTS and not name.startswith("."):
+            out.add(stem)
+    return out
+
+
+def scan_layer_tree() -> dict[str, dict[str, list[str]]]:
+    """{body: {trait_type: [values]}} over the local layer tree, mirroring
+    LocalLayerStore semantics: each body's values union in shared/ (which is
+    available to every body at mint time). Sync on purpose."""
+    base = config.LAYERS_DIR
+    out: dict[str, dict[str, list[str]]] = {}
+    if not os.path.isdir(base):
+        return out
+    for body in _list_subdirs(""):
+        if body == "shared":
+            continue
+        trait_types = set(_list_subdirs(body)) | set(_list_subdirs("shared"))
+        cats: dict[str, list[str]] = {}
+        for trait_type in trait_types:
+            values = _list_values(body, trait_type) | _list_values("shared", trait_type)
+            if values:
+                cats[trait_type] = sorted(values)
+        if cats:
+            out[body] = cats
+    return out
+
+
 def fetch_rows(
     network: str,
     *,
@@ -245,6 +286,35 @@ def apply_floor(
     return {"network": network, "scope": "global", "floor": floor}
 
 
+def sync_layers(network: str, *, db_path: str | None = None) -> int:
+    """Insert a floor-weight trait_rarity row for every (body, category, value)
+    in the local layer tree not already tracked, so newly-added art shows up
+    without waiting for a mint. Returns the number of rows inserted."""
+    dbp = db_path or app_db_path(network)
+    now = rarity.utcnow()
+    inserted = 0
+    conn = sqlite3.connect(dbp)
+    try:
+        rarity.ensure_schema(conn)
+        existing = {
+            (b, c, t)
+            for b, c, t in conn.execute(
+                "SELECT body, category, trait FROM trait_rarity WHERE network=?", (network,)
+            )
+        }
+        for body, cats in scan_layer_tree().items():
+            for category, values in cats.items():
+                fresh = [v for v in values if (body, category, v) not in existing]
+                if fresh:
+                    rarity._ensure_rows(conn, network, body, category, fresh, now)
+                    inserted += len(fresh)
+    finally:
+        conn.close()
+    if inserted:
+        audit(network, "sync", "*", "*", "*", f"inserted {inserted} floor rows")
+    return inserted
+
+
 # --- HTTP layer ------------------------------------------------------------
 
 DEFAULT_NETWORK: web.AppKey[str] = web.AppKey("default_network", str)
@@ -345,12 +415,32 @@ async def handle_floor(request: web.Request) -> web.Response:
     return web.json_response(row)
 
 
+async def handle_sync(request: web.Request) -> web.Response:
+    data = await _json(request)
+    _require(data, "network")
+    inserted = sync_layers(data["network"])
+    return web.json_response({"inserted": inserted})
+
+
+async def handle_img(request: web.Request) -> web.StreamResponse:
+    path = resolve_image(
+        request.query.get("body", ""),
+        request.query.get("category", ""),
+        request.query.get("value", ""),
+    )
+    if not path:
+        return web.json_response({"error": "not found"}, status=404)
+    return web.FileResponse(path)
+
+
 def create_app(default_network: str = "mainnet") -> web.Application:
     app = web.Application(middlewares=[_error_mw])
     app[DEFAULT_NETWORK] = default_network
     app.router.add_get("/", handle_index)
     app.router.add_get("/api/traits", handle_traits)
+    app.router.add_get("/img", handle_img)
     app.router.add_post("/api/toggle", handle_toggle)
     app.router.add_post("/api/boost", handle_boost)
     app.router.add_post("/api/floor", handle_floor)
+    app.router.add_post("/api/sync", handle_sync)
     return app
