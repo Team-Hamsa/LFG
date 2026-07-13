@@ -250,3 +250,40 @@ def test_floor_per_trait_then_global(tmp_path, monkeypatch):
     # global floor overwrote every row for the network, incl. the per-trait 0.02
     assert rows["Laser"]["floor_weight"] == 0.01
     assert rows["Star"]["floor_weight"] == 0.01
+
+
+# --- Task 5: validation ----------------------------------------------------
+
+
+def test_validation_errors(tmp_path, monkeypatch):
+    from scripts import trait_dashboard as td
+
+    db = str(tmp_path / "m.db")
+    _seed(db, "mainnet", [("ape", "Eyes", "Laser", 3, 1)])
+    monkeypatch.setattr(td, "app_db_path", lambda net: db)
+    monkeypatch.chdir(tmp_path)
+
+    async def body():
+        from aiohttp.test_utils import TestClient, TestServer
+
+        async with TestClient(TestServer(td.create_app())) as c:
+            # floor out of range -> 400
+            r = await c.post(
+                "/api/floor",
+                json={"network": "mainnet", "body": "ape", "category": "Eyes", "trait": "Laser", "floor": 5},
+            )
+            assert r.status == 400
+            # boost on an unknown trait -> 404
+            r = await c.post(
+                "/api/boost",
+                json={"network": "mainnet", "body": "ape", "category": "Eyes", "trait": "Nope", "initial": 5, "step_hours": 24},
+            )
+            assert r.status == 404
+            # toggle missing the trait field -> 400
+            r = await c.post(
+                "/api/toggle",
+                json={"network": "mainnet", "body": "ape", "category": "Eyes", "enabled": False},
+            )
+            assert r.status == 400
+
+    _run(body())

@@ -13,6 +13,7 @@
 # Reach it over an SSH tunnel:  ssh -L 8890:localhost:8890 <server>  then open
 # http://localhost:8890.  Design: docs/superpowers/specs/2026-07-13-rarity-admin-dashboard-design.md
 
+import json
 import os
 import sqlite3
 import sys
@@ -248,6 +249,48 @@ def apply_floor(
 
 DEFAULT_NETWORK: web.AppKey[str] = web.AppKey("default_network", str)
 
+
+class _BadInput(Exception):
+    """Client input error → HTTP 400."""
+
+
+async def _json(request: web.Request) -> dict:
+    try:
+        data = await request.json()
+    except (json.JSONDecodeError, ValueError) as e:
+        raise _BadInput("invalid JSON body") from e
+    if not isinstance(data, dict):
+        raise _BadInput("body must be a JSON object")
+    return data
+
+
+def _require(data: dict, *keys: str) -> None:
+    for key in keys:
+        if data.get(key) is None:
+            raise _BadInput(f"missing field: {key}")
+
+
+def _num(data: dict, key: str, lo: float, hi: float) -> float:
+    try:
+        val = float(data[key])
+    except (KeyError, TypeError, ValueError) as e:
+        raise _BadInput(f"invalid {key}") from e
+    if not (lo <= val <= hi):
+        raise _BadInput(f"{key} out of range [{lo}, {hi}]")
+    return val
+
+
+@web.middleware
+async def _error_mw(request: web.Request, handler) -> web.StreamResponse:
+    try:
+        return await handler(request)
+    except _BadInput as e:
+        return web.json_response({"error": str(e)}, status=400)
+    except ValueError as e:
+        # rarity.set_enabled/arm_boost & apply_* raise ValueError for a missing
+        # (body, category, trait) row.
+        return web.json_response({"error": str(e)}, status=404)
+
 # Full self-contained UI is injected in a later task; the stub keeps the marker
 # the index test asserts on.
 INDEX_HTML = "<!doctype html><title>Trait Dashboard</title><h1>Trait Dashboard</h1>"
@@ -270,40 +313,40 @@ async def handle_traits(request: web.Request) -> web.Response:
 
 
 async def handle_toggle(request: web.Request) -> web.Response:
-    data = await request.json()
+    data = await _json(request)
+    _require(data, "network", "body", "category", "trait")
+    if not isinstance(data.get("enabled"), bool):
+        raise _BadInput("enabled must be a boolean")
     row = apply_toggle(
-        data["network"], data["body"], data["category"], data["trait"], bool(data["enabled"])
+        data["network"], data["body"], data["category"], data["trait"], data["enabled"]
     )
     return web.json_response(row)
 
 
 async def handle_boost(request: web.Request) -> web.Response:
-    data = await request.json()
+    data = await _json(request)
+    _require(data, "network", "body", "category", "trait")
+    initial = _num(data, "initial", 1, 100)
+    step_hours = _num(data, "step_hours", 1, 100000)
     row = apply_boost(
-        data["network"],
-        data["body"],
-        data["category"],
-        data["trait"],
-        float(data["initial"]),
-        int(data["step_hours"]),
+        data["network"], data["body"], data["category"], data["trait"], initial, int(step_hours)
     )
     return web.json_response(row)
 
 
 async def handle_floor(request: web.Request) -> web.Response:
-    data = await request.json()
-    row = apply_floor(
-        data["network"],
-        data.get("body"),
-        data.get("category"),
-        data.get("trait"),
-        float(data["floor"]),
-    )
+    data = await _json(request)
+    _require(data, "network")
+    floor = _num(data, "floor", 0, 1)
+    trait = data.get("trait")
+    if trait is not None:  # per-trait floor needs the full key
+        _require(data, "body", "category")
+    row = apply_floor(data["network"], data.get("body"), data.get("category"), trait, floor)
     return web.json_response(row)
 
 
 def create_app(default_network: str = "mainnet") -> web.Application:
-    app = web.Application()
+    app = web.Application(middlewares=[_error_mw])
     app[DEFAULT_NETWORK] = default_network
     app.router.add_get("/", handle_index)
     app.router.add_get("/api/traits", handle_traits)
