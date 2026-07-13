@@ -92,29 +92,34 @@ def get_attr(attributes: list[dict[str, Any]], trait_type: str) -> str | None:
     return None
 
 
-def none_swaps(
+def _is_empty(value: str | None) -> bool:
+    """A slot is empty when it's falsy or the literal 'None'. Mirrors
+    swap_compose._canonical's predicate: ~34% of the live mainnet collection
+    encodes an empty Accessory as '' rather than 'None'. 'None' is a real,
+    renderable trait value (an intentionally empty image — shirtless, bald,
+    no accessory), not missing data."""
+    return not value or value == "None"
+
+
+def noop_swaps(
     attrs1: list[dict[str, Any]],
     attrs2: list[dict[str, Any]],
     traits_to_swap: list[str],
 ) -> list[str]:
-    """Of the requested slots, those that can't be swapped because ONE side is
-    empty ('None'/''/missing). The Trait Swapper is a peer exchange, so swapping
-    an empty slot would hand emptiness to the other NFT — deleting a trait it
-    has. You can't trade a slot you don't fill. Returns the offending trait
-    types (order preserved) so the caller can reject them; empty list = all
-    swappable.
+    """Of the requested slots, those whose swap would do NOTHING because the
+    slot is empty ('None'/''/missing) on BOTH NFTs. Swapping empty↔empty is a
+    pure identity — it changes neither token, so it only wastes a signature/fee.
 
-    Emptiness must mirror swap_compose._canonical's predicate (falsy or the
-    literal 'None'): ~34% of the live mainnet collection encodes an empty
-    Accessory as '' rather than 'None', and _canonical silently drops falsy
-    values, so nothing downstream would catch what this guard lets through."""
-    blocked = []
-    for trait in traits_to_swap:
-        v1 = get_attr(attrs1, trait)
-        v2 = get_attr(attrs2, trait)
-        if not v1 or v1 == "None" or not v2 or v2 == "None":
-            blocked.append(trait)
-    return blocked
+    A *one-sided* empty slot is intentionally NOT flagged: 'None' is a real,
+    expected trait value, so moving it onto the partner (which sends the
+    partner's value back the other way) is a legitimate exchange, not a
+    deletion. Returns the no-op trait types (order preserved); empty list = the
+    selection has real work to do."""
+    return [
+        trait
+        for trait in traits_to_swap
+        if _is_empty(get_attr(attrs1, trait)) and _is_empty(get_attr(attrs2, trait))
+    ]
 
 
 def detect_body(attributes: list[dict[str, Any]]) -> str:

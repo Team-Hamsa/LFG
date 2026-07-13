@@ -2196,24 +2196,39 @@ async def handle_swap_start(request):
             },
             status=400,
         )
-    # An empty ('None') slot can't be swapped: the exchange would hand None to
-    # the other NFT, deleting a trait it has. Guards against e.g. a faceless
-    # ape (Eyes/Eyebrows/Mouth = None) degrading its swap partner.
-    empty = swap_meta.none_swaps(nft1["attributes"], nft2["attributes"], traits_to_swap)
-    if empty:
+    # 'None' is a real, expected trait value (shirtless/bald/no-accessory), so a
+    # one-sided empty slot IS swappable — moving it onto the partner sends the
+    # partner's value back the other way (a legitimate exchange, not a deletion).
+    # Only a slot empty on BOTH NFTs is a no-op: drop those, and reject the swap
+    # only if nothing with real work to do remains.
+    noop = swap_meta.noop_swaps(nft1["attributes"], nft2["attributes"], traits_to_swap)
+    if noop:
         logging.info(
-            "swap rejected (empty/None slot): user=%s nft1=%s (%s) nft2=%s (%s) empty=%r",
+            "swap: dropping no-op (empty on both NFTs) trait(s) %r: "
+            "user=%s nft1=%s (%s) nft2=%s (%s)",
+            noop,
             user["id"],
             nft1_id,
             nft1["gender"],
             nft2_id,
             nft2["gender"],
-            empty,
         )
-        return web.json_response(
-            {"error": f"trait(s) {', '.join(empty)} are empty (None) and can't be swapped"},
-            status=400,
-        )
+        traits_to_swap = [t for t in traits_to_swap if t not in noop]
+        if not traits_to_swap:
+            logging.info(
+                "swap rejected (all slots empty on both NFTs): "
+                "user=%s nft1=%s (%s) nft2=%s (%s) noop=%r",
+                user["id"],
+                nft1_id,
+                nft1["gender"],
+                nft2_id,
+                nft2["gender"],
+                noop,
+            )
+            return web.json_response(
+                {"error": (f"trait(s) {', '.join(noop)} are empty on both NFTs — nothing to swap")},
+                status=400,
+            )
 
     # Resolve the push token before the re-check so no await sits between the
     # guard and the insert below (would reopen the race the re-check closes).
