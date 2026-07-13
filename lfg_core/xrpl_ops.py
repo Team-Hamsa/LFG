@@ -639,7 +639,12 @@ def bot_wallet_address() -> str:
     return config.SIGNING_ACCOUNT
 
 
-RIPPLE_EPOCH_OFFSET = 946684800  # seconds between the Unix and Ripple epochs
+RIPPLE_EPOCH_OFFSET = 946684800
+
+# Safety cap on credit-scan pagination (20 txs/page). The scan normally stops
+# at the first entry older than the credit floor; this cap only bounds a
+# pathologically deep history and is logged when hit (#197 review).
+CREDIT_SCAN_MAX_PAGES = 50  # seconds between the Unix and Ripple epochs
 
 
 def _extract_tx_and_meta(message: dict[str, Any]) -> tuple[dict[str, Any] | None, Any]:
@@ -670,6 +675,13 @@ def _payment_matches(
         return False
     if tx.get("Destination") != destination:
         return False
+    # A validated tec... payment moved no funds and has no delivered_amount,
+    # so the DeliverMax fallback below would happily match it — refuse any
+    # explicit non-success result before looking at amounts (#197 review).
+    if isinstance(meta, dict):
+        tx_result = meta.get("TransactionResult")
+        if tx_result is not None and tx_result != "tesSUCCESS":
+            return False
     # Prefer the validated delivered amount (also guards against partial
     # payments); fall back to Amount (API v1) / DeliverMax (API v2).
     amount = None
@@ -723,6 +735,7 @@ async def _recent_payment_exists(
     not_before_unix: float,
     max_pages: int = 1,
 ) -> bool:
+    exhausted_marker = None
     """Check already-validated transactions for a claimable payment. Covers
     payments that land between the payment link being shown to the user and
     the live subscription becoming active — and, when the caller widened
@@ -752,6 +765,15 @@ async def _recent_payment_exists(
         marker = response.result.get("marker")
         if not marker:
             break
+        exhausted_marker = marker
+    else:
+        # Ran out of pages with a marker left: the scan is truncated, not
+        # complete — say so instead of silently reporting "no payment".
+        logging.warning(
+            f"Credit scan for {account} hit the {max_pages}-page cap with "
+            f"history remaining (marker {exhausted_marker}); an older "
+            "unconsumed credit may exist beyond the cap"
+        )
     return False
 
 
@@ -793,7 +815,7 @@ async def wait_for_payment(
     backfill_pages = 1
     if allow_credit:
         backfill_not_before = min(not_before, payment_ledger.bootstrap_floor())
-        backfill_pages = 5
+        backfill_pages = CREDIT_SCAN_MAX_PAGES
     context = f"{expected_amount} {currency} from {expected_sender} to {destination}"
 
     def claim(tx: dict[str, Any], meta: Any, entry: dict[str, Any]) -> bool:

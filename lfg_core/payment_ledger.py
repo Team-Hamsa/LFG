@@ -71,8 +71,9 @@ def bootstrap_floor() -> float:
 def try_consume(tx_hash: str, sender: str, destination: str) -> bool:
     """Atomically claim a payment by tx hash. Returns True if this call
     consumed it, False if it was already consumed."""
-    conn = _connect()
+    conn = None
     try:
+        conn = _connect()
         cur = conn.execute(
             "INSERT OR IGNORE INTO consumed_payments"
             " (tx_hash, sender, destination, consumed_at) VALUES (?, ?, ?, ?)",
@@ -88,4 +89,5 @@ def try_consume(tx_hash: str, sender: str, destination: str) -> bool:
         logging.exception(f"payment_ledger.try_consume failed for {tx_hash}")
         return False
     finally:
-        conn.close()
+        if conn is not None:
+            conn.close()

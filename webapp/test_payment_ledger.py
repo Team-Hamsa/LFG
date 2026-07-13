@@ -170,3 +170,83 @@ def test_bootstrap_floor_blocks_predeploy_credits(ledger_db, monkeypatch):
         )
     )
     assert paid is False
+
+
+def test_failed_tec_payment_never_matches(ledger_db, monkeypatch):
+    """A validated tec... payment has no delivered_amount; the DeliverMax
+    fallback must not let it satisfy a wait (CodeRabbit critical on #197 —
+    a tecPATH_DRY 'payment' would otherwise buy a mint with no funds moved)."""
+    entry = copy.deepcopy(STREAM_MSG)
+    entry["tx_json"]["date"] = 800000000
+    entry["meta"] = {"TransactionResult": "tecPATH_DRY"}  # no delivered_amount
+    monkeypatch.setattr(xrpl_ops, "AsyncWebsocketClient", _backfill_ws([entry]))
+    monkeypatch.setattr(xrpl_ops.config, "TOKEN_CURRENCY_HEX", CUR)
+    monkeypatch.setattr(xrpl_ops.config, "TOKEN_ISSUER_ADDRESS", "rIssuer")
+    loop = asyncio.get_event_loop()
+    tx_unix = 800000000 + xrpl_ops.RIPPLE_EPOCH_OFFSET
+
+    paid = loop.run_until_complete(
+        xrpl_ops.wait_for_payment("rDest", "rSender", timeout_seconds=1, not_before=tx_unix - 60)
+    )
+    assert paid is False
+
+
+def test_try_consume_fails_closed_on_unopenable_db(monkeypatch):
+    monkeypatch.setattr(payment_ledger, "_db_path", lambda: "/nonexistent-dir/ledger.db")
+    assert payment_ledger.try_consume("HZ", "rSender", "rDest") is False
+
+
+def test_credit_scan_pages_past_five_pages(ledger_db, monkeypatch):
+    """A credit deeper than 100 issuer transactions must still be found:
+    pagination follows the marker to the floor instead of a 5-page cap
+    (Greptile P1 / CodeRabbit major on #197)."""
+    filler = {"validated": True, "tx_json": {"TransactionType": "AccountSet", "date": 800009000}}
+    target = copy.deepcopy(STREAM_MSG)
+    target["tx_json"]["date"] = 800000000
+
+    class FakeWS:
+        def __init__(self, url):
+            self.page = 0
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *a):
+            return False
+
+        async def send(self, req):
+            pass
+
+        async def request(self, req):
+            self.page += 1
+            page = self.page
+
+            class R:
+                # 7 pages of unrelated traffic, the credit on page 8.
+                result = (
+                    {"transactions": [filler] * 20, "marker": {"p": page}}
+                    if page < 8
+                    else {"transactions": [target]}
+                )
+
+            return R()
+
+        def __aiter__(self):
+            return self
+
+        async def __anext__(self):
+            await asyncio.Event().wait()
+
+    monkeypatch.setattr(xrpl_ops, "AsyncWebsocketClient", FakeWS)
+    monkeypatch.setattr(xrpl_ops.config, "TOKEN_CURRENCY_HEX", CUR)
+    monkeypatch.setattr(xrpl_ops.config, "TOKEN_ISSUER_ADDRESS", "rIssuer")
+    monkeypatch.setattr(payment_ledger, "bootstrap_floor", lambda: 800000000 - 3600)
+    loop = asyncio.get_event_loop()
+    tx_unix = 800000000 + xrpl_ops.RIPPLE_EPOCH_OFFSET
+
+    paid = loop.run_until_complete(
+        xrpl_ops.wait_for_payment(
+            "rDest", "rSender", timeout_seconds=1, not_before=tx_unix + 3600, allow_credit=True
+        )
+    )
+    assert paid is True
