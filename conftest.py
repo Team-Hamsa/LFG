@@ -20,11 +20,14 @@ os.environ.setdefault("XRPL_NETWORK", "testnet")
 os.environ.setdefault("ECONOMY_NETWORK", "testnet")
 
 
+from pathlib import Path
+
 import pytest
+from _pytest.monkeypatch import MonkeyPatch
 
 
 @pytest.fixture(autouse=True)
-def _isolated_payment_ledger(tmp_path, monkeypatch):
+def _isolated_payment_ledger(tmp_path: Path, monkeypatch: MonkeyPatch) -> None:
     # wait_for_payment now records consumed payments (issue #196); point the
     # ledger at a per-test file so tests never write the real app DB and a
     # tx hash consumed by one test can't fail the next.

@@ -44,6 +44,7 @@ ignore_missing_imports = true
 module = [
     "tests.*",
     "webapp.test_smoke",
+    "webapp.test_payment_ledger",
     "webapp.test_mock_economy",
     "webapp.test_economy_api",
     "webapp.test_mock_market",
