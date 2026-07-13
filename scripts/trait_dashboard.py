@@ -191,6 +191,59 @@ def apply_toggle(
     return row
 
 
+def apply_boost(
+    network: str,
+    body: str,
+    category: str,
+    trait: str,
+    initial: float,
+    step_hours: int,
+    *,
+    db_path: str | None = None,
+) -> dict:
+    """Arm (or re-arm) a dormant boost via rarity.arm_boost; audit and return
+    the re-read row. arm_boost raises ValueError on a missing row."""
+    dbp = db_path or app_db_path(network)
+    conn = sqlite3.connect(dbp)
+    try:
+        rarity.arm_boost(
+            conn, body, category, trait, network=network, boost_initial=initial, boost_step_hours=step_hours
+        )
+    finally:
+        conn.close()
+    audit(network, "boost", body, category, trait, f"boost -> {initial}x / {step_hours}h")
+    row = _one_row(network, body, category, trait, db_path=dbp)
+    assert row is not None
+    return row
+
+
+def apply_floor(
+    network: str,
+    body: str | None,
+    category: str | None,
+    trait: str | None,
+    floor: float,
+    *,
+    db_path: str | None = None,
+) -> dict:
+    """Set floor_weight for one trait (body+category+trait given) or globally
+    for the network (trait None). Audits; returns the re-read row for a
+    per-trait set, or a scope summary for a global set."""
+    dbp = db_path or app_db_path(network)
+    conn = sqlite3.connect(dbp)
+    try:
+        rarity.set_floor(conn, floor, network=network, body=body, category=category, trait=trait)
+    finally:
+        conn.close()
+    audit(network, "floor", body or "*", category or "*", trait or "*", f"floor -> {floor}")
+    if trait is not None:
+        row = _one_row(network, body or "", category or "", trait, db_path=dbp)
+        if row is None:
+            raise ValueError(f"No trait_rarity row for {network}/{body}/{category}/{trait}")
+        return row
+    return {"network": network, "scope": "global", "floor": floor}
+
+
 # --- HTTP layer ------------------------------------------------------------
 
 DEFAULT_NETWORK: web.AppKey[str] = web.AppKey("default_network", str)
@@ -224,10 +277,37 @@ async def handle_toggle(request: web.Request) -> web.Response:
     return web.json_response(row)
 
 
+async def handle_boost(request: web.Request) -> web.Response:
+    data = await request.json()
+    row = apply_boost(
+        data["network"],
+        data["body"],
+        data["category"],
+        data["trait"],
+        float(data["initial"]),
+        int(data["step_hours"]),
+    )
+    return web.json_response(row)
+
+
+async def handle_floor(request: web.Request) -> web.Response:
+    data = await request.json()
+    row = apply_floor(
+        data["network"],
+        data.get("body"),
+        data.get("category"),
+        data.get("trait"),
+        float(data["floor"]),
+    )
+    return web.json_response(row)
+
+
 def create_app(default_network: str = "mainnet") -> web.Application:
     app = web.Application()
     app[DEFAULT_NETWORK] = default_network
     app.router.add_get("/", handle_index)
     app.router.add_get("/api/traits", handle_traits)
     app.router.add_post("/api/toggle", handle_toggle)
+    app.router.add_post("/api/boost", handle_boost)
+    app.router.add_post("/api/floor", handle_floor)
     return app

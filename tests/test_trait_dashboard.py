@@ -182,3 +182,71 @@ def test_index_serves_html():
             assert "Trait Dashboard" in await r.text()
 
     _run(body())
+
+
+# --- Task 4: boost + floor -------------------------------------------------
+
+
+def test_boost_arms_dormant(tmp_path, monkeypatch):
+    from scripts import trait_dashboard as td
+
+    db = str(tmp_path / "m.db")
+    _seed(db, "mainnet", [("ape", "Eyes", "Laser", 3, 1)])
+    monkeypatch.setattr(td, "app_db_path", lambda net: db)
+    monkeypatch.chdir(tmp_path)
+
+    async def body():
+        from aiohttp.test_utils import TestClient, TestServer
+
+        async with TestClient(TestServer(td.create_app())) as c:
+            r = await c.post(
+                "/api/boost",
+                json={
+                    "network": "mainnet",
+                    "body": "ape",
+                    "category": "Eyes",
+                    "trait": "Laser",
+                    "initial": 5,
+                    "step_hours": 24,
+                },
+            )
+            assert r.status == 200
+            data = await r.json()
+            assert data["boost_status"] == "dormant"
+            assert data["boost_initial"] == 5
+
+    _run(body())
+
+
+def test_floor_per_trait_then_global(tmp_path, monkeypatch):
+    from scripts import trait_dashboard as td
+
+    db = str(tmp_path / "m.db")
+    _seed(db, "mainnet", [("ape", "Eyes", "Laser", 3, 1), ("ape", "Eyes", "Star", 1, 1)])
+    monkeypatch.setattr(td, "app_db_path", lambda net: db)
+    monkeypatch.chdir(tmp_path)
+
+    async def body():
+        from aiohttp.test_utils import TestClient, TestServer
+
+        async with TestClient(TestServer(td.create_app())) as c:
+            r = await c.post(
+                "/api/floor",
+                json={
+                    "network": "mainnet",
+                    "body": "ape",
+                    "category": "Eyes",
+                    "trait": "Laser",
+                    "floor": 0.02,
+                },
+            )
+            assert r.status == 200
+            assert (await r.json())["floor_weight"] == 0.02
+            r2 = await c.post("/api/floor", json={"network": "mainnet", "trait": None, "floor": 0.01})
+            assert r2.status == 200
+
+    _run(body())
+    rows = {r["trait"]: r for r in td.fetch_rows("mainnet", db_path=db)["rows"]}
+    # global floor overwrote every row for the network, incl. the per-trait 0.02
+    assert rows["Laser"]["floor_weight"] == 0.01
+    assert rows["Star"]["floor_weight"] == 0.01
