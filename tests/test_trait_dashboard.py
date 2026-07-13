@@ -136,6 +136,40 @@ def test_api_traits_returns_rows(tmp_path, monkeypatch):
     _run(body())
 
 
+# --- Task 3: toggle + audit ------------------------------------------------
+
+
+def test_toggle_flips_enabled_and_audits(tmp_path, monkeypatch):
+    from scripts import trait_dashboard as td
+
+    db = str(tmp_path / "m.db")
+    _seed(db, "mainnet", [("ape", "Eyes", "Laser", 3, 1)])
+    monkeypatch.setattr(td, "app_db_path", lambda net: db)
+    monkeypatch.chdir(tmp_path)  # reports/ lands under tmp
+
+    async def body():
+        from aiohttp.test_utils import TestClient, TestServer
+
+        async with TestClient(TestServer(td.create_app())) as c:
+            r = await c.post(
+                "/api/toggle",
+                json={
+                    "network": "mainnet",
+                    "body": "ape",
+                    "category": "Eyes",
+                    "trait": "Laser",
+                    "enabled": False,
+                },
+            )
+            assert r.status == 200
+            assert (await r.json())["enabled"] is False
+
+    _run(body())
+    assert td.fetch_rows("mainnet", db_path=db)["rows"][0]["enabled"] is False
+    log = (tmp_path / "reports" / "trait_dashboard_audit.log").read_text()
+    assert log.count("Laser") == 1
+
+
 def test_index_serves_html():
     from scripts import trait_dashboard as td
 

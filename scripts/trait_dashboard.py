@@ -147,6 +147,50 @@ def fetch_rows(
     }
 
 
+# --- Mutations -------------------------------------------------------------
+
+AUDIT_LOG = os.path.join("reports", "trait_dashboard_audit.log")
+
+
+def audit(network: str, action: str, body: str, category: str, trait: str, detail: str) -> None:
+    """Append one tab-separated line to the local audit log (reports/ is
+    gitignored). Best-effort provenance for a local single-operator tool."""
+    os.makedirs("reports", exist_ok=True)
+    line = "\t".join(
+        [rarity.utcnow().isoformat(), network, action, f"{body}/{category}/{trait}", detail]
+    )
+    with open(AUDIT_LOG, "a", encoding="utf-8") as fh:
+        fh.write(line + "\n")
+
+
+def _one_row(network: str, body: str, category: str, trait: str, *, db_path: str) -> dict | None:
+    for row in fetch_rows(network, db_path=db_path, body=body, category=category)["rows"]:
+        if row["trait"] == trait:
+            return row
+    return None
+
+
+def apply_toggle(
+    network: str, body: str, category: str, trait: str, enabled: bool, *, db_path: str | None = None
+) -> dict:
+    """Enable/disable a trait via rarity.set_enabled; audit and return the
+    re-read row. Raises ValueError if the (body, category, trait) row is
+    absent (set_enabled would silently no-op otherwise)."""
+    dbp = db_path or app_db_path(network)
+    before = _one_row(network, body, category, trait, db_path=dbp)
+    if before is None:
+        raise ValueError(f"No trait_rarity row for {network}/{body}/{category}/{trait}")
+    conn = sqlite3.connect(dbp)
+    try:
+        rarity.set_enabled(conn, body, category, trait, enabled, network=network)
+    finally:
+        conn.close()
+    audit(network, "toggle", body, category, trait, f"enabled: {int(before['enabled'])} -> {int(enabled)}")
+    row = _one_row(network, body, category, trait, db_path=dbp)
+    assert row is not None
+    return row
+
+
 # --- HTTP layer ------------------------------------------------------------
 
 DEFAULT_NETWORK: web.AppKey[str] = web.AppKey("default_network", str)
@@ -172,9 +216,18 @@ async def handle_traits(request: web.Request) -> web.Response:
     return web.json_response(data)
 
 
+async def handle_toggle(request: web.Request) -> web.Response:
+    data = await request.json()
+    row = apply_toggle(
+        data["network"], data["body"], data["category"], data["trait"], bool(data["enabled"])
+    )
+    return web.json_response(row)
+
+
 def create_app(default_network: str = "mainnet") -> web.Application:
     app = web.Application()
     app[DEFAULT_NETWORK] = default_network
     app.router.add_get("/", handle_index)
     app.router.add_get("/api/traits", handle_traits)
+    app.router.add_post("/api/toggle", handle_toggle)
     return app
