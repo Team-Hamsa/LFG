@@ -272,6 +272,10 @@ async def run_mint_session(session: MintSession) -> None:
             expected_amount=p["value"],
             not_before=session.created_at - 10,
             currency=p["currency"],
+            # LFGO mints pay the issuer, which receives nothing else, so an
+            # unconsumed earlier payment is always a mint credit (#196). The
+            # XRP path pays the busier bot wallet - no credit window there.
+            allow_credit=session.pay_with != "XRP",
         )
         if not paid:
             session.state = PAYMENT_TIMEOUT

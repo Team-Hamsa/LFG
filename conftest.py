@@ -18,3 +18,16 @@ import os
 os.environ.setdefault("ECONOMY_ENABLED", "1")
 os.environ.setdefault("XRPL_NETWORK", "testnet")
 os.environ.setdefault("ECONOMY_NETWORK", "testnet")
+
+
+import pytest
+
+
+@pytest.fixture(autouse=True)
+def _isolated_payment_ledger(tmp_path, monkeypatch):
+    # wait_for_payment now records consumed payments (issue #196); point the
+    # ledger at a per-test file so tests never write the real app DB and a
+    # tx hash consumed by one test can't fail the next.
+    from lfg_core import payment_ledger
+
+    monkeypatch.setattr(payment_ledger, "_db_path", lambda: str(tmp_path / "payment_ledger.db"))

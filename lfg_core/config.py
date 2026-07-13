@@ -221,6 +221,10 @@ if TELEGRAM_INITDATA_MAX_AGE <= 0:
 
 # Misc
 PAYMENT_TIMEOUT_SECONDS = int(os.getenv("PAYMENT_TIMEOUT_SECONDS", "300"))
+# After a credit-eligible payment wait times out, wait this long and re-check
+# history once — a payment signed in time can validate seconds past the
+# deadline and must not be silently kept (issue #196).
+PAYMENT_GRACE_SECONDS = int(os.getenv("PAYMENT_GRACE_SECONDS", "15"))
 
 # Unified trait layer store (shared by mint + swap).
 # Canonical structure: <body>/<TraitType>/<Value>.png|.gif|.mp4
