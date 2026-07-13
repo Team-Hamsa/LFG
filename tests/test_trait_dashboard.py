@@ -111,3 +111,40 @@ def test_fetch_rows_filters(tmp_path):
         "Off"
     }
     assert "Off" in {r["trait"] for r in td.fetch_rows("mainnet", db_path=db, status="problems")["rows"]}
+
+
+# --- Task 2: /api/traits + index -------------------------------------------
+
+
+def test_api_traits_returns_rows(tmp_path, monkeypatch):
+    from scripts import trait_dashboard as td
+
+    db = str(tmp_path / "m.db")
+    _seed(db, "mainnet", [("ape", "Eyes", "Laser", 3, 1)])
+    monkeypatch.setattr(td, "app_db_path", lambda net: db)
+
+    async def body():
+        from aiohttp.test_utils import TestClient, TestServer
+
+        async with TestClient(TestServer(td.create_app())) as c:
+            r = await c.get("/api/traits?network=mainnet")
+            assert r.status == 200
+            data = await r.json()
+            assert data["rows"][0]["trait"] == "Laser"
+            assert data["bodies"] == ["ape"]
+
+    _run(body())
+
+
+def test_index_serves_html():
+    from scripts import trait_dashboard as td
+
+    async def body():
+        from aiohttp.test_utils import TestClient, TestServer
+
+        async with TestClient(TestServer(td.create_app())) as c:
+            r = await c.get("/")
+            assert r.status == 200
+            assert "Trait Dashboard" in await r.text()
+
+    _run(body())

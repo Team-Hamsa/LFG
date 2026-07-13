@@ -17,6 +17,8 @@ import os
 import sqlite3
 import sys
 
+from aiohttp import web
+
 REPO_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
 sys.path.insert(0, REPO_ROOT)
 
@@ -143,3 +145,36 @@ def fetch_rows(
         "bodies": sorted(bodies),
         "categories": sorted(categories),
     }
+
+
+# --- HTTP layer ------------------------------------------------------------
+
+DEFAULT_NETWORK: web.AppKey[str] = web.AppKey("default_network", str)
+
+# Full self-contained UI is injected in a later task; the stub keeps the marker
+# the index test asserts on.
+INDEX_HTML = "<!doctype html><title>Trait Dashboard</title><h1>Trait Dashboard</h1>"
+
+
+async def handle_index(request: web.Request) -> web.Response:
+    return web.Response(text=INDEX_HTML, content_type="text/html")
+
+
+async def handle_traits(request: web.Request) -> web.Response:
+    net = request.query.get("network") or request.app[DEFAULT_NETWORK]
+    data = fetch_rows(
+        net,
+        body=request.query.get("body") or None,
+        category=request.query.get("category") or None,
+        q=request.query.get("q") or None,
+        status=request.query.get("status") or "all",
+    )
+    return web.json_response(data)
+
+
+def create_app(default_network: str = "mainnet") -> web.Application:
+    app = web.Application()
+    app[DEFAULT_NETWORK] = default_network
+    app.router.add_get("/", handle_index)
+    app.router.add_get("/api/traits", handle_traits)
+    return app
