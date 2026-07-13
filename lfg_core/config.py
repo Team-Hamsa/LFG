@@ -111,6 +111,12 @@ NFT_COLLECTION_NAME = os.getenv("NFT_COLLECTION_NAME", "Let's Effing Go!")
 MINT_PRICE_LFGO = os.getenv("MINT_PRICE_LFGO", "1")
 MINT_PRICE_XRP = os.getenv("MINT_PRICE_XRP", "10")
 
+# Newcomer free-mint giveaway cap: the maximum number of free mints handed out
+# (per network). Counts active claims (reserved + claimed); a released reservation
+# frees a slot. Enforced atomically in free_mint.reserve_claim. 0 disables the
+# giveaway entirely.
+FREE_MINT_CAP = int(os.getenv("FREE_MINT_CAP", "500"))
+
 # BunnyCDN
 BUNNY_CDN_ACCESS_KEY = _require("BUNNY_CDN_ACCESS_KEY")
 BUNNY_CDN_STORAGE_ZONE = _require("BUNNY_CDN_STORAGE_ZONE")

@@ -31,6 +31,13 @@ SignIn step for authentication.
   testnet-staging deployment works unchanged.
 - **Mechanism:** skip the XUMM payment payload entirely for the free path
   (auth already done at connect). Record the claim atomically at mint success.
+- **Global cap:** at most `config.FREE_MINT_CAP` free mints per network
+  (default **500**, env `FREE_MINT_CAP`; `0` disables the giveaway). The cap
+  counts active claims (`reserved` + `claimed`); a released reservation frees a
+  slot. Enforced **atomically** inside `reserve_claim` (count + insert under a
+  single `BEGIN IMMEDIATE` write lock) so a stampede of concurrent reservers at
+  the boundary can never overshoot; `is_eligible` also checks it so a
+  capped-out user sees the paid path up front.
 
 ## Architecture
 

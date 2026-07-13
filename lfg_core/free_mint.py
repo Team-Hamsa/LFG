@@ -9,7 +9,7 @@ import logging
 import os
 import sqlite3
 
-from lfg_core import nft_index
+from lfg_core import config, nft_index
 from lfg_core.user_db import DATABASE
 
 _ACTIVE = ("reserved", "claimed")
@@ -58,6 +58,37 @@ def wallets_for_identity(platform: str, platform_user_id: str) -> set[str]:
         conn.close()
 
 
+def _active_claim_count(conn: sqlite3.Connection, network: str) -> int:
+    """Number of free mints already handed out (reserved + claimed) on this
+    network. A released reservation is deleted, so it frees a slot."""
+    placeholders = ",".join("?" for _ in _ACTIVE)
+    return int(
+        conn.execute(
+            f"SELECT COUNT(*) FROM free_mint_claims "
+            f"WHERE network = ? AND status IN ({placeholders})",
+            (network, *_ACTIVE),
+        ).fetchone()[0]
+    )
+
+
+def active_claim_count(network: str) -> int:
+    conn = sqlite3.connect(DATABASE)
+    try:
+        return _active_claim_count(conn, network)
+    finally:
+        conn.close()
+
+
+def cap_reached(network: str) -> bool:
+    """True once the giveaway cap (config.FREE_MINT_CAP) is exhausted for this
+    network. Fail closed: a DB error reads as 'cap reached' (no free mint)."""
+    try:
+        return active_claim_count(network) >= config.FREE_MINT_CAP
+    except Exception as e:
+        logging.warning(f"free_mint.cap_reached fail-closed: {e}")
+        return True
+
+
 def _has_active_claim(conn: sqlite3.Connection, platform: str, uid: str, network: str) -> bool:
     row = conn.execute(
         "SELECT status FROM free_mint_claims "
@@ -94,6 +125,11 @@ def is_eligible(platform: str, platform_user_id: str, network: str) -> bool:
         try:
             if _has_active_claim(conn, platform, platform_user_id, network):
                 return False
+            # Giveaway cap: no free mints left on this network. Authoritative
+            # enforcement is atomic in reserve_claim; this is the UX-facing
+            # gate so a capped-out user is shown the paid path up front.
+            if _active_claim_count(conn, network) >= config.FREE_MINT_CAP:
+                return False
         finally:
             conn.close()
         wallets = wallets_for_identity(platform, platform_user_id)
@@ -104,17 +140,34 @@ def is_eligible(platform: str, platform_user_id: str, network: str) -> bool:
 
 
 def reserve_claim(platform: str, platform_user_id: str, network: str, wallet: str) -> bool:
-    """Atomically reserve the single claim row. True iff this call created it."""
+    """Atomically reserve the single claim row, enforcing the giveaway cap.
+    True iff this call created the reservation.
+
+    The count-then-insert runs inside a single BEGIN IMMEDIATE transaction so
+    the write lock serializes concurrent reservers: two identities racing at
+    cap-1 cannot both read "under cap" and both insert (which would overshoot
+    config.FREE_MINT_CAP). Returns False when the identity already has a claim
+    (PK conflict) OR the cap is full."""
     conn = sqlite3.connect(DATABASE)
     try:
-        cur = conn.execute(
-            "INSERT OR IGNORE INTO free_mint_claims "
-            "(platform, platform_user_id, network, wallet, status) "
-            "VALUES (?, ?, ?, ?, 'reserved')",
-            (platform, platform_user_id, network, wallet),
-        )
-        conn.commit()
-        return cur.rowcount == 1
+        conn.isolation_level = None  # manage the transaction explicitly
+        conn.execute("BEGIN IMMEDIATE")
+        try:
+            if _active_claim_count(conn, network) >= config.FREE_MINT_CAP:
+                conn.execute("ROLLBACK")
+                return False
+            cur = conn.execute(
+                "INSERT OR IGNORE INTO free_mint_claims "
+                "(platform, platform_user_id, network, wallet, status) "
+                "VALUES (?, ?, ?, ?, 'reserved')",
+                (platform, platform_user_id, network, wallet),
+            )
+            won = cur.rowcount == 1
+            conn.execute("COMMIT")
+            return won
+        except Exception:
+            conn.execute("ROLLBACK")
+            raise
     finally:
         conn.close()
 

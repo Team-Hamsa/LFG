@@ -6,7 +6,7 @@ import argparse
 import sqlite3
 from typing import Any
 
-from lfg_core import free_mint
+from lfg_core import config, free_mint
 from lfg_core.user_db import DATABASE
 
 
@@ -72,8 +72,13 @@ def main() -> None:
     g.add_argument("wallet")
     args = ap.parse_args()
     if args.cmd == "list":
-        for row in list_claims(args.network):
+        rows = list_claims(args.network)
+        for row in rows:
             print(row)
+        print(
+            f"\n{free_mint.active_claim_count(args.network)}/{config.FREE_MINT_CAP} "
+            f"free mints used on {args.network}"
+        )
     elif args.cmd == "revoke":
         revoke(args.platform, args.uid, args.network)
         print(f"revoked {args.platform}/{args.uid} on {args.network}")

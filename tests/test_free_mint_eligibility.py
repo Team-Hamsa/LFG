@@ -108,3 +108,74 @@ def test_missing_index_fails_closed(tmp_path, monkeypatch):
     identity.link("discord", "u1", "alice", "rA")
     monkeypatch.setattr(nft_index, "index_db_path", lambda network: str(tmp_path / "nope.db"))
     assert free_mint.is_eligible("discord", "u1", "testnet") is False
+
+
+def test_cap_blocks_new_reservations(tmp_path, monkeypatch):
+    _db, _idx = _setup(tmp_path, monkeypatch)
+    monkeypatch.setattr(free_mint.config, "FREE_MINT_CAP", 2)
+    # two identities claim the whole giveaway
+    assert free_mint.reserve_claim("discord", "a", "testnet", "rA") is True
+    assert free_mint.reserve_claim("discord", "b", "testnet", "rB") is True
+    # third is refused by the atomic cap, even though it's a fresh identity
+    identity.link("discord", "c", "carol", "rC")
+    assert free_mint.reserve_claim("discord", "c", "testnet", "rC") is False
+    # and is_eligible reflects the exhausted cap up front
+    assert free_mint.is_eligible("discord", "c", "testnet") is False
+    assert free_mint.active_claim_count("testnet") == 2
+
+
+def test_release_frees_a_cap_slot(tmp_path, monkeypatch):
+    _db, _idx = _setup(tmp_path, monkeypatch)
+    monkeypatch.setattr(free_mint.config, "FREE_MINT_CAP", 1)
+    assert free_mint.reserve_claim("discord", "a", "testnet", "rA") is True
+    assert free_mint.reserve_claim("discord", "b", "testnet", "rB") is False  # full
+    free_mint.release_claim("discord", "a", "testnet")  # a backs out
+    assert free_mint.active_claim_count("testnet") == 0
+    assert free_mint.reserve_claim("discord", "b", "testnet", "rB") is True  # slot freed
+
+
+def test_confirmed_claim_still_counts_toward_cap(tmp_path, monkeypatch):
+    _db, _idx = _setup(tmp_path, monkeypatch)
+    monkeypatch.setattr(free_mint.config, "FREE_MINT_CAP", 1)
+    free_mint.reserve_claim("discord", "a", "testnet", "rA")
+    free_mint.confirm_claim("discord", "a", "testnet", "rA", 7)
+    assert free_mint.active_claim_count("testnet") == 1
+    assert free_mint.reserve_claim("discord", "b", "testnet", "rB") is False
+
+
+def test_cap_is_per_network(tmp_path, monkeypatch):
+    _db, _idx = _setup(tmp_path, monkeypatch)
+    monkeypatch.setattr(free_mint.config, "FREE_MINT_CAP", 1)
+    assert free_mint.reserve_claim("discord", "a", "testnet", "rA") is True
+    # mainnet has its own budget
+    assert free_mint.reserve_claim("discord", "a2", "mainnet", "rA2") is True
+    assert free_mint.active_claim_count("testnet") == 1
+    assert free_mint.active_claim_count("mainnet") == 1
+
+
+def test_cap_zero_disables_giveaway(tmp_path, monkeypatch):
+    _db, _idx = _setup(tmp_path, monkeypatch)
+    monkeypatch.setattr(free_mint.config, "FREE_MINT_CAP", 0)
+    identity.link("discord", "a", "alice", "rA")
+    assert free_mint.is_eligible("discord", "a", "testnet") is False
+    assert free_mint.reserve_claim("discord", "a", "testnet", "rA") is False
+
+
+def test_concurrent_reservations_never_exceed_cap(tmp_path, monkeypatch):
+    # The money invariant: under a stampede of concurrent reservers at the
+    # boundary, EXACTLY FREE_MINT_CAP win — never more. Proves the
+    # BEGIN IMMEDIATE count-then-insert is atomic across threads.
+    import concurrent.futures
+
+    _db, _idx = _setup(tmp_path, monkeypatch)
+    cap = 5
+    monkeypatch.setattr(free_mint.config, "FREE_MINT_CAP", cap)
+
+    def _try(i):
+        return free_mint.reserve_claim("discord", f"u{i}", "testnet", f"r{i}")
+
+    with concurrent.futures.ThreadPoolExecutor(max_workers=24) as ex:
+        results = list(ex.map(_try, range(24)))
+
+    assert sum(1 for r in results if r) == cap
+    assert free_mint.active_claim_count("testnet") == cap
