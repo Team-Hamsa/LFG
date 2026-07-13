@@ -362,6 +362,24 @@ def test_rejects_malformed_json_types(tmp_path, monkeypatch):
                 },
             )
             assert r.status == 400
+            # booleans must not sneak through numeric validation (bool is an int
+            # subclass) — global floor=true and boost initial=false both 400
+            r = await c.post(
+                "/api/floor", json={"network": "mainnet", "trait": None, "floor": True}
+            )
+            assert r.status == 400
+            r = await c.post(
+                "/api/boost",
+                json={
+                    "network": "mainnet",
+                    "body": "ape",
+                    "category": "Eyes",
+                    "trait": "Laser",
+                    "initial": False,
+                    "step_hours": 24,
+                },
+            )
+            assert r.status == 400
 
     _run(body())
 
@@ -427,6 +445,30 @@ def test_img_rejects_path_traversal(tmp_path, monkeypatch):
     _run(body())
     # the confinement is in resolve_image itself, so the data layer agrees
     assert td.resolve_image("male", "../..", "secret") is None
+
+
+def test_img_rejects_symlink_escape(tmp_path, monkeypatch):
+    """Review follow-up: a symlink INSIDE the tree pointing OUT must be refused
+    (guards the realpath containment check against silent removal)."""
+    from lfg_core import config
+    from scripts import trait_dashboard as td
+
+    layers = tmp_path / "layers"
+    (layers / "male" / "Eyes").mkdir(parents=True)
+    secret = tmp_path / "secret.png"
+    _png_1x1(str(secret))
+    (layers / "male" / "Eyes" / "Linked.png").symlink_to(secret)  # escapes the tree
+    monkeypatch.setattr(config, "LAYERS_DIR", str(layers))
+
+    assert td.resolve_image("male", "Eyes", "Linked") is None
+
+    async def body():
+        from aiohttp.test_utils import TestClient, TestServer
+
+        async with TestClient(TestServer(td.create_app())) as c:
+            assert (await c.get("/img?body=male&category=Eyes&value=Linked")).status == 404
+
+    _run(body())
 
 
 # --- Task 7: UI markers ----------------------------------------------------
