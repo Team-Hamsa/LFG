@@ -36,6 +36,7 @@ from lfg_core import (
     config,
     economy_flow,
     economy_store,
+    free_mint,
     history_store,
     image_archive,
     layer_store,
@@ -2772,6 +2773,7 @@ async def no_cache_mw(request, handler):
 def create_app() -> web.Application:
     app = web.Application(middlewares=[no_cache_mw])
     identity_store.ensure_identities_table()
+    free_mint.ensure_tables()
     identity_store.migrate_users_to_identities()
     app.router.add_get("/api/config", handle_config)
     app.router.add_get("/api/health", handle_health)
