@@ -193,12 +193,21 @@ async def _create_xumm_payload(
     sent_token = bool(user_token)
     try:
         result = await _post_xumm_payload(payload)
+    except requests.Timeout as e:
+        # Ambiguous transport failure: XUMM may have ALREADY created (and
+        # pushed) the payload before the response was lost — retrying would
+        # mint a duplicate the user could sign while the flow polls the other
+        # uuid. Fail instead; the caller's own retry/regenerate paths handle it.
+        logging.error(f"XUMM payload create timed out (no retry — outcome unknown): {e}")
+        return None
     except Exception as e:
         if not sent_token:
             logging.error(f"Error creating XUMM payload: {e}")
             return None
-        # Never let a bad stored token block the sign: retry once as a plain
-        # QR/deep-link payload (#212).
+        # A definitive create failure with a token attached (an HTTP error
+        # response or a rejected/garbled body — e.g. XUMM refusing a token
+        # from a rotated app key): never let a bad stored token block the
+        # sign; retry once as a plain QR/deep-link payload (#212).
         logging.warning(f"XUMM payload create failed with user_token, retrying without: {e}")
         payload.pop("user_token", None)
         sent_token = False

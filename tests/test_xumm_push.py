@@ -219,6 +219,21 @@ def test_create_returns_none_when_tokenless_create_fails(monkeypatch):
     assert len(attempts) == 1
 
 
+def test_create_does_not_retry_on_timeout(monkeypatch):
+    # A timeout is AMBIGUOUS — XUMM may have already created (and pushed) the
+    # payload. Retrying would mint a duplicate the user could sign while the
+    # flow polls the other uuid, so a timeout fails outright.
+    attempts = []
+
+    def fake_post(url, json, headers, timeout):
+        attempts.append(dict(json))
+        raise xumm_ops.requests.Timeout("read timed out")
+
+    monkeypatch.setattr(xumm_ops.requests, "post", fake_post)
+    assert _run(xumm_ops.create_accept_offer_payload("OFFER1", user_token="tok")) is None
+    assert len(attempts) == 1
+
+
 # --- #212: flows capture the rotated token off signed payloads ---
 
 
@@ -279,6 +294,42 @@ def test_mint_accept_poll_captures_issued_token(monkeypatch):
     _run(mint_flow.update_scan_state(session))
     assert session.accept_signed is True
     assert session.issued_user_token == "fresh-tok"
+    # The session's own token is refreshed too, so the LATER accept payload of
+    # the same session is already built with the rotated token.
+    assert session.push_user_token == "fresh-tok"
+
+
+def test_mint_payment_poll_continues_past_opened(monkeypatch):
+    """The payment payload must keep being polled after `opened` — the
+    signature (and the rotated token it carries) lands later. Polling stops
+    only once signed (or the session leaves AWAITING_PAYMENT)."""
+    from lfg_core import mint_flow
+
+    session = mint_flow.MintSession(discord_id="u1", wallet_address="rWALLET")
+    session.payment_uuid = _UUID
+    statuses = [
+        {
+            "opened": True,
+            "signed": False,
+            "expired": False,
+            "account": None,
+            "txid": None,
+            "user_token": None,
+        },
+        _signed_status(),
+    ]
+
+    async def fake_status(uuid):
+        return statuses.pop(0)
+
+    monkeypatch.setattr(mint_flow.xumm_ops, "get_payload_status", fake_status)
+    _run(mint_flow.update_scan_state(session))  # opened only
+    assert session.qr_scanned is True and session.payment_signed is False
+    assert session.issued_user_token is None
+    _run(mint_flow.update_scan_state(session))  # signed → capture
+    assert session.payment_signed is True
+    assert session.issued_user_token == "fresh-tok"
+    assert not statuses  # both polls actually hit the (fake) API
 
 
 def test_trait_sell_list_payload_gets_push_token(monkeypatch):
@@ -323,7 +374,10 @@ def test_trait_sell_list_payload_gets_push_token(monkeypatch):
         )
     )
     assert session.state == market_flow.LIST_PENDING
-    assert captured["user_token"] == "stored-tok"
+    # Signature 1's signed status rotated the token; signature 2's payload must
+    # already use the FRESH one, not the stale stored one.
+    assert captured["user_token"] == "fresh-tok"
+    assert session.push_user_token == "fresh-tok"
     assert session.list_push == "sent"
-    # Signature 1's signed status also refreshed the token for the service.
+    # ...and the rotated token is staged for the service to persist.
     assert session.issued_user_token == "fresh-tok"

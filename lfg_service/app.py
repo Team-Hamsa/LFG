@@ -1578,51 +1578,61 @@ def _make_market_status_handler(prefix: str):
             return web.json_response({"error": "not found"}, status=404)
 
         loop = asyncio.get_event_loop()
-        if prefix == "list":
-            row = await market_flow.advance_list_session(session)
-            if row is not None:
-                network = _market_network(session.listing_kind)
-                await loop.run_in_executor(None, _write_listing_row, network, row)
-        elif prefix == "cancel":
-            if await market_flow.advance_cancel_session(session):
-                await loop.run_in_executor(
-                    None, _close_listing_sync, session.network, session.offer_index, "cancelled"
-                )
-        elif prefix == "buy":
-            outcome = await market_flow.advance_buy_session(session)
-            if outcome == "sold":
-                # Persist the buyer on the sold row so settlement stays
-                # recoverable even if run_deposit deletes the trait_tokens
-                # ownership row before Closet credit (CodeRabbit #129).
-                await loop.run_in_executor(
-                    None,
-                    _close_listing_sync,
-                    session.network,
-                    session.offer_index,
-                    "sold",
-                    session.wallet_address,
-                )
-                if session.listing_kind == "trait":
-                    # Primary settlement trigger (spec §Q7): burn the sold
-                    # trait token back into the buyer's Closet right away.
-                    # Awaited (not fire-and-forget) — run_deposit's own
-                    # fail-closed/journaling guarantees mean there is nothing
-                    # to gain from detaching it, and awaiting keeps the
-                    # outcome deterministic for both callers and tests. A
-                    # failure here leaves settled=0 (already set by
-                    # close_listing above) for the settlement sweep to retry.
-                    await _settle_trait_sale(
-                        session.wallet_address, session.nft_id, session.offer_index, session.network
-                    )
-            elif outcome == "stale":
-                await loop.run_in_executor(
-                    None, _close_listing_sync, session.network, session.offer_index, "stale"
-                )
-
-        await _persist_issued_user_token(request["user"], session)
+        try:
+            await _advance_market_session(prefix, session, loop)
+        finally:
+            # Persist a token the advance captured even when a downstream
+            # DB write/settlement raised — the capture is already real.
+            await _persist_issued_user_token(request["user"], session)
         return web.json_response(session.to_dict())
 
     return require_market(handler)
+
+
+async def _advance_market_session(prefix: str, session: Any, loop: Any) -> None:
+    """One poll step for a list/cancel/buy session: advance the state machine
+    and apply its DB effects (split out of the status handler so the handler
+    can persist a captured push token in a finally regardless of outcome)."""
+    if prefix == "list":
+        row = await market_flow.advance_list_session(session)
+        if row is not None:
+            network = _market_network(session.listing_kind)
+            await loop.run_in_executor(None, _write_listing_row, network, row)
+    elif prefix == "cancel":
+        if await market_flow.advance_cancel_session(session):
+            await loop.run_in_executor(
+                None, _close_listing_sync, session.network, session.offer_index, "cancelled"
+            )
+    elif prefix == "buy":
+        outcome = await market_flow.advance_buy_session(session)
+        if outcome == "sold":
+            # Persist the buyer on the sold row so settlement stays
+            # recoverable even if run_deposit deletes the trait_tokens
+            # ownership row before Closet credit (CodeRabbit #129).
+            await loop.run_in_executor(
+                None,
+                _close_listing_sync,
+                session.network,
+                session.offer_index,
+                "sold",
+                session.wallet_address,
+            )
+            if session.listing_kind == "trait":
+                # Primary settlement trigger (spec §Q7): burn the sold
+                # trait token back into the buyer's Closet right away.
+                # Awaited (not fire-and-forget) — run_deposit's own
+                # fail-closed/journaling guarantees mean there is nothing
+                # to gain from detaching it, and awaiting keeps the
+                # outcome deterministic for both callers and tests. A
+                # failure here leaves settled=0 (already set by
+                # close_listing above) for the settlement sweep to retry.
+                await _settle_trait_sale(
+                    session.wallet_address, session.nft_id, session.offer_index, session.network
+                )
+        elif outcome == "stale":
+            await loop.run_in_executor(
+                None, _close_listing_sync, session.network, session.offer_index, "stale"
+            )
 
 
 handle_market_list_status = _make_market_status_handler("list")
@@ -2407,11 +2417,15 @@ async def handle_market_trait_list_status(request):
     ):
         return web.json_response({"error": "not found"}, status=404)
 
-    row = await market_flow.advance_trait_sell_session(session)
-    if row is not None:
-        network = _market_network("trait")
-        await asyncio.get_event_loop().run_in_executor(None, _write_listing_row, network, row)
-    await _persist_issued_user_token(request["user"], session)
+    try:
+        row = await market_flow.advance_trait_sell_session(session)
+        if row is not None:
+            network = _market_network("trait")
+            await asyncio.get_event_loop().run_in_executor(None, _write_listing_row, network, row)
+    finally:
+        # Persist a token the advance captured even when the listing write
+        # raised — the capture is already real.
+        await _persist_issued_user_token(request["user"], session)
     return web.json_response(session.to_dict())
 
 

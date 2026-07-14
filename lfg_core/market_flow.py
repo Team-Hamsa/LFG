@@ -85,9 +85,13 @@ def _capture_issued_token(session: Any, s: dict[str, Any]) -> None:
     service can persist it (tokens rotate; capturing on every signed payload —
     not just sign-in — keeps them fresh and self-heals an app-key swap). Only
     when the signer IS the session's wallet: a shared QR signed by a different
-    account must never overwrite this user's stored token."""
+    account must never overwrite this user's stored token. Sessions that build
+    a LATER payload from their own stored token (the trait-sell wizard) get
+    that token refreshed too, so signature 2 already uses the rotated one."""
     if s.get("signed") and s.get("user_token") and s.get("account") == session.wallet_address:
         session.issued_user_token = s["user_token"]
+        if hasattr(session, "push_user_token"):
+            session.push_user_token = s["user_token"]
 
 
 @dataclass

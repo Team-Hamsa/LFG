@@ -1007,11 +1007,14 @@ async function cancelSwap(sessionId, btn) {
 }
 
 function renderSwapResults(s) {
-  const needsAccept = s.results.some((r) => !r.modified);
-  const anyPushed = s.results.some((r) => !r.modified && r.accept_push === 'sent');
+  const pendingAccepts = s.results.filter((r) => !r.modified);
+  const needsAccept = pendingAccepts.length > 0;
+  // Only claim "sent to your Xaman app" when EVERY pending accept was pushed —
+  // a partial batch would tell users to approve in-app and miss the QR-only ones.
+  const allPushed = needsAccept && pendingAccepts.every((r) => r.accept_push === 'sent');
   el('swap-result-title').textContent = '🎉 Traits swapped!';
   el('swap-result-text').textContent = needsAccept
-    ? signText(anyPushed ? 'sent' : null, 'Scan each QR (or open in Xaman) to accept your re-crafted NFTs.')
+    ? signText(allPushed ? 'sent' : null, 'Scan each QR (or open in Xaman) to accept your re-crafted NFTs.')
     : 'Your NFTs were updated in place — the new traits are already in your wallet.';
   const box = el('swap-results');
   box.innerHTML = '';

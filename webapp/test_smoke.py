@@ -401,18 +401,24 @@ def test_update_scan_state_marks_payment_scanned(monkeypatch):
     session = mint_flow.MintSession(discord_id="1", wallet_address="rTest")
     session.payment_uuid = "PAYUUID"
     calls = []
+    signed = False
 
     async def fake_status(uuid):
         calls.append(uuid)
-        return {"opened": True, "signed": False, "expired": False, "account": None}
+        return {"opened": True, "signed": signed, "expired": False, "account": None}
 
     monkeypatch.setattr(mint_flow.xumm_ops, "get_payload_status", fake_status)
     loop = asyncio.get_event_loop()
     loop.run_until_complete(mint_flow.update_scan_state(session))
     assert session.to_dict()["qr_scanned"] is True
-    # once scanned, no further XUMM queries are made
+    # opened is not enough to stop polling (#212: the signature — and the
+    # rotated push token it carries — lands after the open)...
+    signed = True
     loop.run_until_complete(mint_flow.update_scan_state(session))
-    assert calls == ["PAYUUID"]
+    assert calls == ["PAYUUID", "PAYUUID"]
+    # ...but once SIGNED, no further XUMM queries are made.
+    loop.run_until_complete(mint_flow.update_scan_state(session))
+    assert calls == ["PAYUUID", "PAYUUID"]
 
 
 def test_update_scan_state_checks_accept_payload(monkeypatch):
