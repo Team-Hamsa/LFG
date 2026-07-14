@@ -739,7 +739,5 @@ def test_reschedule_boost_rejects_finished_boost(conn):
     )
     with pytest.raises(ValueError, match="finished"):
         rarity.reschedule_boost(conn, "*", "Background", "Done", 100000, network="testnet", now=NOW)
-    row = conn.execute(
-        "SELECT boost_step_hours FROM trait_rarity WHERE trait='Done'"
-    ).fetchone()
+    row = conn.execute("SELECT boost_step_hours FROM trait_rarity WHERE trait='Done'").fetchone()
     assert row == (24,)  # untouched
