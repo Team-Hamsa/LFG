@@ -505,5 +505,135 @@ def test_all_routes_registered():
 
     app = td.create_app("testnet")
     paths = {r.resource.canonical for r in app.router.routes() if r.resource is not None}
-    for p in ("/", "/api/traits", "/img", "/api/toggle", "/api/boost", "/api/floor", "/api/sync"):
+    for p in (
+        "/",
+        "/api/traits",
+        "/img",
+        "/api/toggle",
+        "/api/boost",
+        "/api/boost/cancel",
+        "/api/boost/reschedule",
+        "/api/floor",
+        "/api/sync",
+    ):
         assert p in paths, p
+
+
+# --- #205: cancel + reschedule boosts ---------------------------------------
+
+
+def _arm(db, network, body, cat, trait, initial, step, started_at=None):
+    conn = sqlite3.connect(db)
+    conn.execute(
+        """UPDATE trait_rarity SET boost_initial=?, boost_step_hours=?, boost_started_at=?
+           WHERE network=? AND body=? AND category=? AND trait=?""",
+        (initial, step, started_at, network, body, cat, trait),
+    )
+    conn.commit()
+    conn.close()
+
+
+def test_cancel_boost_clears_and_audits(tmp_path, monkeypatch):
+    from scripts import trait_dashboard as td
+
+    db = str(tmp_path / "m.db")
+    _seed(db, "mainnet", [("ape", "Eyes", "Laser", 3, 1), ("ape", "Eyes", "Star", 1, 1)])
+    _arm(db, "mainnet", "ape", "Eyes", "Laser", 7.0, 72, "2026-07-11T00:00:00+00:00")
+    monkeypatch.setattr(td, "app_db_path", lambda net: db)
+    monkeypatch.chdir(tmp_path)
+    audit_log = tmp_path / "reports" / "audit.log"
+    monkeypatch.setattr(td, "AUDIT_LOG", str(audit_log))
+
+    async def body():
+        from aiohttp.test_utils import TestClient, TestServer
+
+        async with TestClient(TestServer(td.create_app())) as c:
+            key = {"network": "mainnet", "body": "ape", "category": "Eyes", "trait": "Laser"}
+            r = await c.post("/api/boost/cancel", json=key)
+            assert r.status == 200
+            data = await r.json()
+            assert data["boost_status"] == "—"
+            assert data["boost_initial"] is None
+            # cancel on a row with no boost is a no-op success (and not audited)
+            r = await c.post("/api/boost/cancel", json={**key, "trait": "Star"})
+            assert r.status == 200
+            # missing row -> 404
+            r = await c.post("/api/boost/cancel", json={**key, "trait": "Nope"})
+            assert r.status == 404
+
+    _run(body())
+    log = audit_log.read_text()
+    assert "boost-cancel" in log
+    assert "Star" not in log  # the no-op cancel wrote no audit line
+
+
+def test_reschedule_preserves_clock(tmp_path, monkeypatch):
+    from scripts import trait_dashboard as td
+
+    db = str(tmp_path / "m.db")
+    started = "2026-07-11T00:00:00+00:00"
+    _seed(db, "mainnet", [("ape", "Eyes", "Laser", 3, 1), ("ape", "Eyes", "Star", 1, 1)])
+    _arm(db, "mainnet", "ape", "Eyes", "Laser", 7.0, 72, started)
+    monkeypatch.setattr(td, "app_db_path", lambda net: db)
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setattr(td, "AUDIT_LOG", str(tmp_path / "reports" / "audit.log"))
+
+    async def body():
+        from aiohttp.test_utils import TestClient, TestServer
+
+        async with TestClient(TestServer(td.create_app())) as c:
+            key = {"network": "mainnet", "body": "ape", "category": "Eyes", "trait": "Laser"}
+            r = await c.post("/api/boost/reschedule", json={**key, "step_hours": 24})
+            assert r.status == 200
+            data = await r.json()
+            assert data["boost_step_hours"] == 24
+            assert data["boost_started_at"] == started  # clock NOT reset
+            # no armed boost -> 404
+            r = await c.post(
+                "/api/boost/reschedule",
+                json={**key, "trait": "Star", "step_hours": 24},
+            )
+            assert r.status == 404
+            # bad step_hours -> 400
+            r = await c.post("/api/boost/reschedule", json={**key, "step_hours": 0})
+            assert r.status == 400
+
+    _run(body())
+
+
+def test_index_has_boost_edit_hooks():
+    from scripts import trait_dashboard as td
+
+    for marker in ("/api/boost/cancel", "/api/boost/reschedule", "doCancelBoost", "doReschedule"):
+        assert marker in td.INDEX_HTML, marker
+
+
+def test_reschedule_rejects_finished_boost(tmp_path, monkeypatch):
+    from scripts import trait_dashboard as td
+
+    db = str(tmp_path / "m.db")
+    _seed(db, "mainnet", [("ape", "Eyes", "Laser", 3, 1)])
+    # 7x/24h started long ago = finished; must not be resurrectable
+    _arm(db, "mainnet", "ape", "Eyes", "Laser", 7.0, 24, "2026-01-01T00:00:00+00:00")
+    monkeypatch.setattr(td, "app_db_path", lambda net: db)
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setattr(td, "AUDIT_LOG", str(tmp_path / "reports" / "audit.log"))
+
+    async def body():
+        from aiohttp.test_utils import TestClient, TestServer
+
+        async with TestClient(TestServer(td.create_app())) as c:
+            r = await c.post(
+                "/api/boost/reschedule",
+                json={
+                    "network": "mainnet",
+                    "body": "ape",
+                    "category": "Eyes",
+                    "trait": "Laser",
+                    "step_hours": 100000,
+                },
+            )
+            assert r.status == 404
+            assert "finished" in (await r.json())["error"]
+
+    _run(body())

@@ -313,6 +313,67 @@ def arm_boost(
         raise ValueError(f"No trait_rarity row for {network}/{body}/{category}/{trait}")
 
 
+def cancel_boost(
+    conn: sqlite3.Connection,
+    body: str,
+    category: str,
+    trait: str,
+    *,
+    network: str | None = None,
+) -> None:
+    """Admin: clear a boost (armed, active, or finished) back to no-boost.
+    boost_step_hours is left in place — it's a harmless default for a future
+    re-arm; boost_multiplier/boost_status key off boost_initial."""
+    network = network or config.XRPL_NETWORK
+    cur = conn.execute(
+        """UPDATE trait_rarity SET boost_initial=NULL, boost_started_at=NULL
+           WHERE network=? AND body=? AND category=? AND trait=?""",
+        (network, body, category, trait),
+    )
+    conn.commit()
+    if cur.rowcount == 0:
+        raise ValueError(f"No trait_rarity row for {network}/{body}/{category}/{trait}")
+
+
+def reschedule_boost(
+    conn: sqlite3.Connection,
+    body: str,
+    category: str,
+    trait: str,
+    boost_step_hours: int,
+    *,
+    network: str | None = None,
+    now: datetime | None = None,
+) -> None:
+    """Admin: change an armed (dormant or active) boost's step window WITHOUT
+    resetting its decay clock (unlike arm_boost) — shortens or lengthens the
+    remaining runway in place. Raises ValueError when the row is missing, no
+    boost is armed, or the boost has already finished decaying (a longer step
+    must not resurrect it — re-arm instead)."""
+    network = network or config.XRPL_NETWORK
+    now = now or utcnow()
+    row = conn.execute(
+        """SELECT boost_initial, boost_step_hours, boost_started_at FROM trait_rarity
+           WHERE network=? AND body=? AND category=? AND trait=?""",
+        (network, body, category, trait),
+    ).fetchone()
+    if row is None:
+        raise ValueError(f"No trait_rarity row for {network}/{body}/{category}/{trait}")
+    initial, old_step, started_at = row
+    if initial is None:
+        raise ValueError(f"No armed boost on {network}/{body}/{category}/{trait}")
+    if started_at and boost_multiplier(initial, old_step, started_at, now) <= 1.0:
+        raise ValueError(
+            f"Boost on {network}/{body}/{category}/{trait} already finished — re-arm instead"
+        )
+    conn.execute(
+        """UPDATE trait_rarity SET boost_step_hours=?
+           WHERE network=? AND body=? AND category=? AND trait=?""",
+        (boost_step_hours, network, body, category, trait),
+    )
+    conn.commit()
+
+
 def start_boost_clock(
     conn: sqlite3.Connection,
     body: str,
