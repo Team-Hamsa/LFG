@@ -2252,6 +2252,18 @@ async def handle_swap_start(request):
 
 
 @require_auth
+async def handle_mint_active(request):
+    """The caller's live (non-terminal) mint session, or null. Discord mobile
+    kills/reloads the Activity webview when the user app-switches to Xaman to
+    sign the payment; the relaunched client has lost its in-memory session id,
+    so it calls this on boot to re-attach to the mint still running here
+    instead of dumping the user back to the home screen mid-mint."""
+    user = request["user"]
+    session = _active_session(mint_sessions, mint_flow.TERMINAL_STATES, user["id"], _platform(user))
+    return web.json_response({"session": session.to_dict() if session else None})
+
+
+@require_auth
 async def handle_mint_status(request):
     session = mint_sessions.get(request.match_info["session_id"])
     if (
@@ -2782,6 +2794,9 @@ def create_app() -> web.Application:
     app.router.add_get("/api/account", handle_account)
     app.router.add_post("/api/register", handle_register)
     app.router.add_post("/api/mint", handle_mint_start)
+    # /active must register BEFORE /{session_id}: aiohttp dispatches in
+    # registration order, and the dynamic route would swallow it as an id.
+    app.router.add_get("/api/mint/active", handle_mint_active)
     app.router.add_get("/api/mint/{session_id}", handle_mint_status)
     app.router.add_post("/api/mint/{session_id}/regenerate", handle_mint_regenerate)
     app.router.add_post("/api/mint/{session_id}/cancel", handle_mint_cancel)

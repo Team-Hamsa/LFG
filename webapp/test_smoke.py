@@ -47,6 +47,7 @@ def test_routes_registered():
         "/api/me",
         "/api/register",
         "/api/mint",
+        "/api/mint/active",
         "/api/mint/{session_id}",
         "/api/nfts",
         "/api/swap",

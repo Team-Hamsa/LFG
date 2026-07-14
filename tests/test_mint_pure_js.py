@@ -125,3 +125,52 @@ def test_app_js_poll_generation_guard():
     assert "let pollGen = 0" in src
     assert "const gen = ++pollGen" in src
     assert "if (gen !== pollGen) return" in src
+
+
+# ---------------------------------------------------------------------------
+# activeMintSessionId(activeResult) -> session id | null
+#   activeResult: the GET /api/mint/active response body ({"session": ...}),
+#   or null when the call failed. Resume only a LIVE session — the server
+#   filters terminal states already, but the client stays defensive.
+#   (Mint session resume: Discord mobile reloads the Activity when the user
+#   app-switches to Xaman; the relaunched client re-attaches via this call.)
+# ---------------------------------------------------------------------------
+
+
+def test_active_none_response_goes_home():
+    assert run_js("M.activeMintSessionId(null)") is None
+
+
+def test_active_no_session_goes_home():
+    assert run_js("M.activeMintSessionId({session: null})") is None
+
+
+def test_active_live_session_resumes():
+    assert (
+        run_js("M.activeMintSessionId({session: {id: 'abc', state: 'awaiting_payment'}})") == "abc"
+    )
+
+
+def test_active_mid_pipeline_session_resumes():
+    assert run_js("M.activeMintSessionId({session: {id: 'abc', state: 'minting'}})") == "abc"
+
+
+def test_active_terminal_session_goes_home():
+    for state in ["offer_ready", "done", "failed", "payment_timeout", "cancelled"]:
+        assert (
+            run_js(f"M.activeMintSessionId({{session: {{id: 'abc', state: '{state}'}}}})") is None
+        )
+
+
+def test_active_session_without_id_goes_home():
+    assert run_js("M.activeMintSessionId({session: {state: 'awaiting_payment'}})") is None
+
+
+# --- app.js wiring: boot must re-attach to a live mint session -------------
+
+
+def test_app_js_boot_resumes_active_mint():
+    src = open(APP_JS).read()
+    assert "/api/mint/active" in src
+    assert "activeMintSessionId" in src
+    assert "function resumeMint" in src

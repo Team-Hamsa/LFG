@@ -543,6 +543,31 @@ async function startMint() {
   }
 }
 
+// Mint session resume: Discord mobile kills/reloads the Activity webview when
+// the user app-switches to Xaman to sign the payment, losing currentMintId
+// while the server-side session keeps running — the user lands back on the
+// home screen mid-mint. Called on boot: re-attach to any live session and
+// let the poll render its real state. Returns true when a session resumed.
+async function resumeMint() {
+  let active = null;
+  try {
+    active = await api('/api/mint/active');
+  } catch (_) { /* endpoint unreachable: boot the home screen as before */ }
+  const id = mintPure.activeMintSessionId(active);
+  if (!id) return false;
+  currentMintId = id;
+  showFlow({
+    title: '🔄 Reconnecting…',
+    text: 'You have a mint in progress — picking it back up where you left off.',
+    spinner: true,
+    stage: active.session.state,
+    // The payload may already be signed in Xaman: warn before backing out.
+    cancel: () => cancelMint(true),
+  });
+  pollMint(id);
+  return true;
+}
+
 // Missed the QR before it expired? Mint a fresh payment payload without
 // restarting the whole session (issue #22).
 async function regeneratePaymentQr() {
@@ -1932,7 +1957,10 @@ async function main() {
     if (insideTelegram) await setupTelegram();
     else await setupDiscord();
     me = await api('/api/me');
-    if (me.wallet) showMintHome();
+    if (me.wallet) {
+      // Re-attach to a mint the webview reload orphaned before going home.
+      if (!(await resumeMint())) showMintHome();
+    }
     else {
       status(`Hey ${me.username} — sign in with Xaman to start building.`);
       await startSignin();
