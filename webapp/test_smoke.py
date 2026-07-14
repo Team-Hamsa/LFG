@@ -52,6 +52,8 @@ def test_routes_registered():
         "/api/nfts",
         "/api/swap",
         "/api/swap/{session_id}",
+        "/api/swap/{session_id}/regenerate",
+        "/api/swap/{session_id}/cancel",
         "/api/qr.png",
         "/",
         "/api/mint/{session_id}/regenerate",

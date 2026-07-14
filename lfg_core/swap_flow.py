@@ -18,6 +18,7 @@
 # on-chain step is journaled to SWAP_RECORDS_DIR so an administrator can
 # recover a partial swap.
 
+import asyncio
 import json
 import logging
 import os
@@ -54,8 +55,9 @@ OFFERS_READY = "offers_ready"
 DONE = "done"
 FAILED = "failed"
 PAYMENT_TIMEOUT = "payment_timeout"
+CANCELLED = "cancelled"  # user backed out of the fee-pay screen (mirror of mint #141)
 
-TERMINAL_STATES = {DONE, FAILED, OFFERS_READY, PAYMENT_TIMEOUT}
+TERMINAL_STATES = {DONE, FAILED, OFFERS_READY, PAYMENT_TIMEOUT, CANCELLED}
 
 
 def swap_fee_total(modify_count: int) -> str:
@@ -117,6 +119,63 @@ class SwapSession:
         self.pay_with: str | None = None  # "BRIX" or "XRP", set at session start
         self.fee_per_nft: Decimal | None = None  # in pay_with units
         self.fee_amount: str | None = None
+        # Fee-payload parameters, kept so regenerate_payment can rebuild the
+        # sign request after the XUMM payload expires (mirror of mint #22).
+        self.fee_destination: str | None = None
+        self.fee_currency: str | None = None
+        self.fee_issuer: str | None = None
+        # Background run_swap_session task handle, so cancel() can stop the
+        # payment wait (mirror of mint #141).
+        self.task: asyncio.Task[Any] | None = None
+
+    async def regenerate_payment(self) -> None:
+        """Replace an expired/missed fee QR with a fresh XUMM payload without
+        restarting the swap (mirror of mint issue #22). Keeps the old link if
+        XUMM is down — the on-ledger payment wait doesn't care which payload
+        (or the static detect link) actually delivers the fee."""
+        if self.fee_destination is None or self.fee_amount is None or self.fee_currency is None:
+            return  # fee not priced yet — nothing to rebuild
+        payload = await xumm_ops.create_payment_payload(
+            self.fee_destination,
+            value=self.fee_amount,
+            currency=self.fee_currency,
+            issuer=self.fee_issuer,
+            return_url=self.return_url,
+            user_token=self.push_user_token,
+            platform=memos.platform_for_surface(self.platform),
+            action=memos.ACTION_TRAIT_SWAP_FEE,
+        )
+        if payload:
+            self.payment_link = payload["xumm_url"]
+
+    def cancel(self) -> bool:
+        """Back out of the fee-pay screen (mirror of mint issue #141): mark
+        the session terminal so the one-active-session lock releases, and
+        cancel the background task so its payment wait stops. Only legal
+        while still awaiting payment — past that the user has paid and the
+        pipeline must run to completion or failure. Returns True if
+        cancelled.
+
+        The state check and CANCELLED assignment are synchronous (no await
+        between them), so on the single event loop this cannot race the
+        background task's own transitions — _collect_modify_fee leaves
+        AWAITING_PAYMENT in the same synchronous step in which
+        wait_for_payment reports the fee confirmed, so a confirmed (paid)
+        session can never be cancelled."""
+        if self.state != AWAITING_PAYMENT:
+            return False
+        self.state = CANCELLED
+        if self.task is not None:
+            # CancelledError is a BaseException, so run_swap_session's
+            # `except Exception` cannot catch it and overwrite CANCELLED.
+            self.task.cancel()
+        return True
+
+    def mark_published(self) -> None:
+        """Mark the terminal firehose event as already published (or, for a
+        deliberate user cancel, as suppressed) — kept as a method so callers
+        never reach into the private guard attribute directly."""
+        self._published = True
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -367,24 +426,17 @@ async def _collect_modify_fee(session: SwapSession, modify_count: int) -> bool:
         currency, issuer = config.SWAP_OFFER_CURRENCY_HEX, config.SWAP_OFFER_ISSUER
     destination = xrpl_ops.bot_wallet_address()
     session.fee_amount = fee
-    payload = await xumm_ops.create_payment_payload(
-        destination,
-        value=fee,
-        currency=currency,
-        issuer=issuer,
-        return_url=session.return_url,
-        user_token=session.push_user_token,
-        platform=memos.platform_for_surface(session.platform),
-        action=memos.ACTION_TRAIT_SWAP_FEE,
-    )
-    # Sign-request payload normally; raw detect link only if XUMM is down
-    session.payment_link = (
-        payload["xumm_url"]
-        if payload
-        else xumm_ops.generate_static_payment_link(
+    # Keep the payload parameters on the session so regenerate_payment can
+    # rebuild an expired QR without restarting the swap (mirror of mint #22).
+    session.fee_destination = destination
+    session.fee_currency = currency
+    session.fee_issuer = issuer
+    await session.regenerate_payment()
+    if session.payment_link is None:
+        # Sign-request payload normally; raw detect link only if XUMM is down
+        session.payment_link = xumm_ops.generate_static_payment_link(
             destination, value=fee, currency=currency, issuer=issuer
         )
-    )
     session.state = AWAITING_PAYMENT
     paid = await xrpl_ops.wait_for_payment(
         destination=destination,
@@ -395,6 +447,11 @@ async def _collect_modify_fee(session: SwapSession, modify_count: int) -> bool:
         issuer=issuer,
     )
     if paid:
+        # Leave AWAITING_PAYMENT in the SAME synchronous step the payment is
+        # confirmed: buy_and_burn awaits below, and cancel() only guards on
+        # state — a cancel landing in that window must not kill a PAID swap.
+        # run_swap_session re-stamps the real next stage right after.
+        session.state = COMPOSING
         # Burn the fee's BRIX: holders' BRIX is forwarded straight to the
         # issuer; XRP fees fund an AMM buy first (capped at the XRP just
         # collected). Best-effort — a failed burn must not block the swap.
@@ -617,6 +674,14 @@ async def run_swap_session(session: SwapSession) -> None:
         _write_swap_record(session, items, "complete")
         session.state = OFFERS_READY
 
+    except asyncio.CancelledError:
+        # User backed out at the fee screen (cancel() already set CANCELLED
+        # and this task was cancelled before any chain mutation). Compose ran
+        # before the fee screen, so clean up the pending stills like any
+        # other unfinished swap, then let the cancellation propagate.
+        for nft in (session.nft1, session.nft2):
+            image_archive.discard_still(config.XRPL_NETWORK, nft["number"], session.id)
+        raise
     except Exception as e:
         logging.error(f"Swap session {session.id} failed: {traceback.format_exc()}")
         # Already-promoted stills are untouched (discard only sees pending/).

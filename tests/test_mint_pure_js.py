@@ -174,3 +174,42 @@ def test_app_js_boot_resumes_active_mint():
     assert "/api/mint/active" in src
     assert "activeMintSessionId" in src
     assert "function resumeMint" in src
+
+
+# --- app.js wiring: the swap fee-QR screen must offer a way out ------------
+# (User report: a stale fee QR left the Trait Swapper with no regenerate and
+# no back button — closing and reopening the whole Activity was the only
+# escape. Mirror the mint pay screen's regen + cancel affordances.)
+
+
+def test_app_js_swap_payment_screen_has_regen_and_cancel():
+    src = open(APP_JS).read()
+    body = src.split("function renderSwapPayment", 1)[1].split("\nfunction ", 1)[0]
+    assert "regenerate" in body
+    assert "cancelSwap" in body
+
+
+def test_app_js_swap_regenerated_qr_rerenders():
+    """renderSwapPayment skips re-rendering for the same session id; after a
+    regenerate the payment_link changes but the id doesn't, so the guard must
+    key on the link too or the fresh QR never appears."""
+    src = open(APP_JS).read()
+    body = src.split("function renderSwapPayment", 1)[1].split("\nfunction ", 1)[0]
+    assert "payment_link" in body.split("return;", 1)[0]
+
+
+def test_app_js_swap_poll_handles_cancelled():
+    src = open(APP_JS).read()
+    body = src.split("function pollSwap", 1)[1].split("\nfunction ", 1)[0]
+    assert "'cancelled'" in body
+
+
+def test_app_js_swap_cancel_reuses_cancel_outcome():
+    """cancelSwap must reuse the shared cancel decision (mint issue #141):
+    a refused cancel (fee already paid) resumes polling, never strands or
+    dumps the user."""
+    src = open(APP_JS).read()
+    assert "async function cancelSwap" in src
+    body = src.split("async function cancelSwap", 1)[1].split("\n}\n", 1)[0]
+    assert "cancelMintOutcome" in body
+    assert "pollSwap(" in body

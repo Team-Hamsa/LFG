@@ -695,6 +695,10 @@ let swapNfts = [];
 let swapPick = [];
 let swapCards = []; // {nft, card} for every grid tile, for re-rendering picks
 let swapPollTimer = null;
+// Poll-chain generation token (same guard as pollMint): a refused cancel
+// resumes pollSwap while an old tick may still be awaiting the API — the
+// stale tick must not schedule a second chain for the same session.
+let swapPollGen = 0;
 let swappableTraits = [];
 let swapFee = null; // {pay_with, amount, per_nft} quote from /api/nfts
 let swapMatrix = null; // {universal_layers, pairs} quote from /api/nfts
@@ -898,10 +902,13 @@ function renderSwapProgress(state) {
 }
 
 // In-place (NFTokenModify) swaps are paid upfront: show the BRIX payment QR.
-let swapPaymentShown = null; // session id the QR is rendered for
+// Keyed on session id AND payment_link: a regenerated QR keeps the id but
+// swaps the link, and must re-render or the fresh QR never appears.
+let swapPaymentShown = null;
 function renderSwapPayment(s) {
-  if (swapPaymentShown === s.id) return; // already on screen; don't rebuild
-  swapPaymentShown = s.id;
+  const key = `${s.id}:${s.payment_link}`;
+  if (swapPaymentShown === key) return; // already on screen; don't rebuild
+  swapPaymentShown = key;
   el('swap-result-title').textContent = '💰 Swap fee required';
   el('swap-result-text').textContent =
     `Pay ${s.fee_amount} ${s.pay_with || 'BRIX'} to swap your NFT(s) in place. ` +
@@ -915,7 +922,63 @@ function renderSwapPayment(s) {
   btn.className = 'link';
   btn.textContent = 'Open in Xaman';
   btn.onclick = () => openExternal(s.payment_link);
-  box.replaceChildren(qrImg, btn);
+  // A XUMM payload expires after a few minutes: offer a fresh QR and a way
+  // out (mirror of the mint pay screen's regen + cancel — previously a stale
+  // fee QR left no exit but closing the whole Activity).
+  const regenBtn = document.createElement('button');
+  regenBtn.className = 'link';
+  regenBtn.textContent = '🔄 QR expired? Get a new one';
+  regenBtn.onclick = () => regenerateSwapQr(s.id, regenBtn);
+  const cancelBtn = document.createElement('button');
+  cancelBtn.className = 'link';
+  cancelBtn.textContent = 'Cancel swap';
+  cancelBtn.onclick = () => cancelSwap(s.id, cancelBtn);
+  box.replaceChildren(qrImg, btn, regenBtn, cancelBtn);
+}
+
+async function regenerateSwapQr(sessionId, btn) {
+  btn.disabled = true;
+  try {
+    const s = await api(`/api/swap/${sessionId}/regenerate`, {
+      method: 'POST', body: JSON.stringify(discordCtx()),
+    });
+    if (s.payment_link) renderSwapPayment(s);
+  } catch (e) {
+    showError(e.message);
+  } finally {
+    btn.disabled = false;
+  }
+}
+
+// Back out of the swap fee screen. If the server refuses — above all 409
+// 'session is past payment', meaning the fee is already taken — the user
+// must NOT be dumped out: keep polling so the panel follows the real
+// pipeline through to the results (same decision logic as the mint cancel).
+async function cancelSwap(sessionId, btn) {
+  const ok = await confirmDialog({
+    title: 'Cancel this swap?',
+    text: 'If you already approved the fee in Xaman, it may still go through. Cancel anyway?',
+    confirmLabel: 'Cancel swap',
+  });
+  if (!ok) return;
+  btn.disabled = true;
+  let cancelResult = null;
+  let refetchResult = null;
+  try {
+    cancelResult = await api(`/api/swap/${sessionId}/cancel`, {
+      method: 'POST', body: JSON.stringify(discordCtx()),
+    });
+  } catch (e) {
+    try { refetchResult = await api(`/api/swap/${sessionId}`); } catch (e2) { /* gone */ }
+  } finally {
+    btn.disabled = false;
+  }
+  if (mintPure.cancelMintOutcome(cancelResult, refetchResult) === 'resume') {
+    pollSwap(sessionId);
+    return;
+  }
+  clearTimeout(swapPollTimer);
+  openSwapper();
 }
 
 function renderSwapResults(s) {
@@ -961,14 +1024,18 @@ function renderSwapResults(s) {
 
 function pollSwap(sessionId) {
   clearTimeout(swapPollTimer);
+  const gen = ++swapPollGen;
   const tick = async () => {
+    if (gen !== swapPollGen) return; // superseded by a newer poll chain
     let s;
     try {
       s = await api(`/api/swap/${sessionId}`);
     } catch (e) {
-      swapPollTimer = setTimeout(tick, 3000); // transient; keep polling
+      if (gen === swapPollGen) swapPollTimer = setTimeout(tick, 3000); // transient; keep polling
       return;
     }
+    if (gen !== swapPollGen) return; // a newer chain started while we awaited
+    if (s.state === 'cancelled') { openSwapper(); return; } // cancelled elsewhere
     if (s.state === 'offers_ready') {
       renderSwapResults(s);
       return;
