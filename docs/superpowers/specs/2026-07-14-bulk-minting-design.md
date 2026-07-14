@@ -261,8 +261,9 @@ bulk `NFTokenMint` + `NFTokenCreateOffer`.
 
 ## Open items deferred to follow-up issues
 
-1. In-app "pending offers" tray (Phase B UX; also fixes single-mint QR-loss
-   recovery).
-2. XLS-56 Batch single-signature accept (once Xaman support confirmed).
-3. Burn-to-mint full implementation (fills the `source: "burn"` seam; pairs
-   with Batch).
+1. [#218](https://github.com/Team-Hamsa/LFG/issues/218) — In-app "pending
+   offers" tray (Phase B UX; also fixes single-mint QR-loss recovery).
+2. [#219](https://github.com/Team-Hamsa/LFG/issues/219) — XLS-56 Batch
+   single-signature accept (once Xaman support confirmed).
+3. [#220](https://github.com/Team-Hamsa/LFG/issues/220) — Burn-to-mint full
+   implementation (fills the `source: "burn"` seam; pairs with Batch).
