@@ -61,6 +61,15 @@ def test_routes_registered():
         "/api/signin/{payload_uuid}",
     ]:
         assert expected in paths, f"missing route {expected}"
+    # New session-recovery routes: pin the HTTP method too, so a wrong-verb
+    # registration can't pass on path presence alone.
+    method_paths = {(r.method, getattr(r.resource, "canonical", "")) for r in app.router.routes()}
+    for expected_pair in [
+        ("GET", "/api/mint/active"),
+        ("POST", "/api/swap/{session_id}/regenerate"),
+        ("POST", "/api/swap/{session_id}/cancel"),
+    ]:
+        assert expected_pair in method_paths, f"missing route {expected_pair}"
     # Trustline endpoints were removed in v2: never user-facing again
     assert "/api/trustline" not in paths
     assert "/api/brix-trustline" not in paths

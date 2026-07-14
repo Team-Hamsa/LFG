@@ -252,3 +252,48 @@ def test_run_swap_session_discards_stills_on_cancel():
     cancel_block = src.split("except asyncio.CancelledError", 1)[1].split("except ", 1)[0]
     assert "discard_still" in cancel_block
     assert "raise" in cancel_block
+
+
+def test_swap_regenerate_failure_returns_502(dev_auth, monkeypatch):
+    """A swallowed regenerate failure used to answer 200 with the OLD link —
+    the client showed no error and the button appeared dead (CodeRabbit #216).
+    XUMM down (payload build returns None) must surface as 502."""
+    s = _session()
+    s.fee_amount = "6"
+    s.fee_destination = "rBotWallet"
+    s.fee_currency = "XRP"
+    s.fee_issuer = None
+    s.payment_link = "https://xumm.app/sign/OLD"
+
+    async def fail(destination, **kw):
+        return None
+
+    monkeypatch.setattr(xumm_ops, "create_payment_payload", fail)
+    dev_auth[s.id] = s
+    resp = _run(server.handle_swap_regenerate(_request("POST", s.id)))
+    assert resp.status == 502
+
+
+def test_swap_regenerate_exception_returns_502(dev_auth, monkeypatch):
+    s = _session()
+    s.fee_amount = "6"
+    s.fee_destination = "rBotWallet"
+    s.fee_currency = "XRP"
+    s.fee_issuer = None
+
+    async def boom(destination, **kw):
+        raise RuntimeError("xumm down")
+
+    monkeypatch.setattr(xumm_ops, "create_payment_payload", boom)
+    dev_auth[s.id] = s
+    resp = _run(server.handle_swap_regenerate(_request("POST", s.id)))
+    assert resp.status == 502
+
+
+def test_regenerate_payment_reports_success():
+    """regenerate_payment must tell its caller whether a fresh payload was
+    actually built, so the service can answer 502 instead of a silent 200."""
+    import inspect
+
+    sig = inspect.signature(swap_flow.SwapSession.regenerate_payment)
+    assert sig.return_annotation in ("bool", bool)

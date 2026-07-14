@@ -128,13 +128,15 @@ class SwapSession:
         # payment wait (mirror of mint #141).
         self.task: asyncio.Task[Any] | None = None
 
-    async def regenerate_payment(self) -> None:
+    async def regenerate_payment(self) -> bool:
         """Replace an expired/missed fee QR with a fresh XUMM payload without
         restarting the swap (mirror of mint issue #22). Keeps the old link if
         XUMM is down — the on-ledger payment wait doesn't care which payload
-        (or the static detect link) actually delivers the fee."""
+        (or the static detect link) actually delivers the fee. Returns True
+        only when a fresh payload was actually built, so the service can
+        surface a failure instead of silently echoing the stale link."""
         if self.fee_destination is None or self.fee_amount is None or self.fee_currency is None:
-            return  # fee not priced yet — nothing to rebuild
+            return False  # fee not priced yet — nothing to rebuild
         payload = await xumm_ops.create_payment_payload(
             self.fee_destination,
             value=self.fee_amount,
@@ -147,6 +149,8 @@ class SwapSession:
         )
         if payload:
             self.payment_link = payload["xumm_url"]
+            return True
+        return False
 
     def cancel(self) -> bool:
         """Back out of the fee-pay screen (mirror of mint issue #141): mark

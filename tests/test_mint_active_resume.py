@@ -69,6 +69,9 @@ def test_active_route_resolves_to_active_handler(dev_auth):
     app = server.create_app()
     match = _run(app.router.resolve(_request()))
     assert getattr(match, "http_exception", None) is None
+    # Assert the actual dispatch target: a registration-order regression would
+    # route here through handle_mint_status with session_id='active'.
+    assert match.handler is server.handle_mint_active
     resp = _run(server.handle_mint_active(_request()))
     assert resp.status == 200
     assert _run(_read_json(resp)) == {"session": None}

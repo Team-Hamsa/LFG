@@ -561,8 +561,10 @@ async function resumeMint() {
     text: 'You have a mint in progress — picking it back up where you left off.',
     spinner: true,
     stage: active.session.state,
-    // The payload may already be signed in Xaman: warn before backing out.
-    cancel: () => cancelMint(true),
+    // Warn before backing out only if the QR was already opened in Xaman
+    // (same distinction mintPayView draws) — an unscanned payload provably
+    // has nothing signed.
+    cancel: () => cancelMint(!!active.session.qr_scanned),
   });
   pollMint(id);
   return true;
@@ -978,6 +980,9 @@ async function cancelSwap(sessionId, btn) {
     return;
   }
   clearTimeout(swapPollTimer);
+  // A tick already awaiting the status API survives clearTimeout — bump the
+  // generation so it can't repaint the fee screen after we leave.
+  ++swapPollGen;
   openSwapper();
 }
 

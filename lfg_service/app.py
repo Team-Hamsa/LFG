@@ -2386,10 +2386,18 @@ async def handle_swap_regenerate(request):
         return web.json_response({"error": "not found"}, status=404)
     if session.state != swap_flow.AWAITING_PAYMENT:
         return web.json_response({"error": "session is past payment"}, status=409)
+    # Unlike the mint pay screen (whose static-link fallback keeps its 200
+    # honest), a swallowed failure here would echo the STALE link with a 200
+    # and the button would appear dead — surface it instead.
     try:
-        await asyncio.wait_for(session.regenerate_payment(), timeout=8)
+        ok = await asyncio.wait_for(session.regenerate_payment(), timeout=8)
+    except asyncio.TimeoutError:
+        return web.json_response({"error": "payment QR regeneration timed out"}, status=504)
     except Exception as e:
         logging.warning(f"swap regenerate_payment failed: {e}")
+        ok = False
+    if not ok:
+        return web.json_response({"error": "could not build a new payment QR"}, status=502)
     return web.json_response(session.to_dict())
 
 

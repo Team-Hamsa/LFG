@@ -213,3 +213,31 @@ def test_app_js_swap_cancel_reuses_cancel_outcome():
     body = src.split("async function cancelSwap", 1)[1].split("\n}\n", 1)[0]
     assert "cancelMintOutcome" in body
     assert "pollSwap(" in body
+
+
+def test_app_js_main_wallet_branch_awaits_resume_before_home():
+    """CodeRabbit #216: global substring checks pass even if resumeMint goes
+    dead — assert the exact boot wiring: the wallet branch awaits resumeMint
+    and only falls back to showMintHome when nothing resumed."""
+    src = open(APP_JS).read()
+    main_body = src.split("async function main", 1)[1]
+    assert "if (!(await resumeMint())) showMintHome();" in main_body
+
+
+def test_app_js_resume_cancel_warns_only_when_scanned():
+    """Greptile #216 P2: a resumed unscanned awaiting_payment session provably
+    has nothing signed in Xaman — the cancel warning must key on the session's
+    qr_scanned flag, not fire unconditionally."""
+    src = open(APP_JS).read()
+    body = src.split("async function resumeMint", 1)[1].split("\n}\n", 1)[0]
+    assert "cancelMint(true)" not in body
+    assert "qr_scanned" in body
+
+
+def test_app_js_swap_cancel_invalidates_inflight_poll():
+    """CodeRabbit #216: clearTimeout can't stop a tick already awaiting the
+    status API — it could repaint the fee screen after openSwapper(). The
+    generation token must be bumped on the way out."""
+    src = open(APP_JS).read()
+    body = src.split("async function cancelSwap", 1)[1].split("\n}\n", 1)[0]
+    assert "++swapPollGen" in body
