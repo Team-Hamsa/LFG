@@ -313,6 +313,52 @@ def arm_boost(
         raise ValueError(f"No trait_rarity row for {network}/{body}/{category}/{trait}")
 
 
+def cancel_boost(
+    conn: sqlite3.Connection,
+    body: str,
+    category: str,
+    trait: str,
+    *,
+    network: str | None = None,
+) -> None:
+    """Admin: clear a boost (armed, active, or finished) back to no-boost.
+    boost_step_hours is left in place — it's a harmless default for a future
+    re-arm; boost_multiplier/boost_status key off boost_initial."""
+    network = network or config.XRPL_NETWORK
+    cur = conn.execute(
+        """UPDATE trait_rarity SET boost_initial=NULL, boost_started_at=NULL
+           WHERE network=? AND body=? AND category=? AND trait=?""",
+        (network, body, category, trait),
+    )
+    conn.commit()
+    if cur.rowcount == 0:
+        raise ValueError(f"No trait_rarity row for {network}/{body}/{category}/{trait}")
+
+
+def reschedule_boost(
+    conn: sqlite3.Connection,
+    body: str,
+    category: str,
+    trait: str,
+    boost_step_hours: int,
+    *,
+    network: str | None = None,
+) -> None:
+    """Admin: change an armed boost's step window WITHOUT resetting its decay
+    clock (unlike arm_boost) — shortens or lengthens the remaining runway in
+    place. Requires a boost to be armed; raises ValueError otherwise."""
+    network = network or config.XRPL_NETWORK
+    cur = conn.execute(
+        """UPDATE trait_rarity SET boost_step_hours=?
+           WHERE network=? AND body=? AND category=? AND trait=?
+             AND boost_initial IS NOT NULL""",
+        (boost_step_hours, network, body, category, trait),
+    )
+    conn.commit()
+    if cur.rowcount == 0:
+        raise ValueError(f"No armed boost on {network}/{body}/{category}/{trait}")
+
+
 def start_boost_clock(
     conn: sqlite3.Connection,
     body: str,

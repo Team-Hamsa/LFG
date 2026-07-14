@@ -662,3 +662,49 @@ def test_distribution_matches_weights(conn):
     for trait, expected in (("A", 0.60), ("B", 0.30), ("C", 0.10)):
         observed = picks.count(trait) / 10000
         assert abs(observed - expected) < 0.03, (trait, observed)
+
+
+# Task #205: cancel + reschedule boosts
+
+
+def test_cancel_boost_clears_columns(conn):
+    seed_row(conn, "Hot", 5, boost_initial=7.0, boost_started_at=iso(NOW - timedelta(hours=2)))
+    rarity.cancel_boost(conn, "*", "Background", "Hot", network="testnet")
+    row = conn.execute(
+        "SELECT boost_initial, boost_started_at FROM trait_rarity WHERE trait='Hot'"
+    ).fetchone()
+    assert row == (None, None)
+    assert rarity.boost_status(None, 24, None, NOW) == "—"
+
+
+def test_cancel_boost_missing_row_raises(conn):
+    with pytest.raises(ValueError):
+        rarity.cancel_boost(conn, "*", "Background", "Nope", network="testnet")
+
+
+def test_reschedule_boost_preserves_clock(conn):
+    started = iso(NOW - timedelta(hours=2))
+    seed_row(conn, "Hot", 5, boost_initial=7.0, boost_step_hours=72, boost_started_at=started)
+    rarity.reschedule_boost(conn, "*", "Background", "Hot", 24, network="testnet")
+    row = conn.execute(
+        """SELECT boost_initial, boost_step_hours, boost_started_at
+           FROM trait_rarity WHERE trait='Hot'"""
+    ).fetchone()
+    assert row == (7.0, 24, started)  # clock untouched
+
+
+def test_reschedule_boost_dormant_ok(conn):
+    seed_row(conn, "Fresh", 0, boost_initial=5.0, boost_step_hours=48)
+    rarity.reschedule_boost(conn, "*", "Background", "Fresh", 24, network="testnet")
+    row = conn.execute(
+        "SELECT boost_step_hours, boost_started_at FROM trait_rarity WHERE trait='Fresh'"
+    ).fetchone()
+    assert row == (24, None)
+
+
+def test_reschedule_boost_requires_armed_boost(conn):
+    seed_row(conn, "Plain", 0)
+    with pytest.raises(ValueError):
+        rarity.reschedule_boost(conn, "*", "Background", "Plain", 24, network="testnet")
+    with pytest.raises(ValueError):
+        rarity.reschedule_boost(conn, "*", "Background", "Nope", 24, network="testnet")

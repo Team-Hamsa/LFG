@@ -298,6 +298,47 @@ def apply_boost(
     return row
 
 
+def apply_cancel_boost(
+    network: str, body: str, category: str, trait: str, *, db_path: str | None = None
+) -> dict:
+    """Clear a boost via rarity.cancel_boost (raises ValueError on a missing
+    row; a row with no boost is a no-op success); audit and return the row."""
+    dbp = db_path or app_db_path(network)
+    conn = sqlite3.connect(dbp)
+    try:
+        rarity.cancel_boost(conn, body, category, trait, network=network)
+    finally:
+        conn.close()
+    audit(network, "boost-cancel", body, category, trait, "boost -> none")
+    row = _one_row(network, body, category, trait, db_path=dbp)
+    assert row is not None
+    return row
+
+
+def apply_reschedule(
+    network: str,
+    body: str,
+    category: str,
+    trait: str,
+    step_hours: int,
+    *,
+    db_path: str | None = None,
+) -> dict:
+    """Change an armed boost's step window without resetting its decay clock,
+    via rarity.reschedule_boost (raises ValueError when no boost is armed);
+    audit and return the re-read row."""
+    dbp = db_path or app_db_path(network)
+    conn = sqlite3.connect(dbp)
+    try:
+        rarity.reschedule_boost(conn, body, category, trait, step_hours, network=network)
+    finally:
+        conn.close()
+    audit(network, "boost-reschedule", body, category, trait, f"step_hours -> {step_hours}")
+    row = _one_row(network, body, category, trait, db_path=dbp)
+    assert row is not None
+    return row
+
+
 def apply_floor(
     network: str,
     body: str | None,
@@ -546,8 +587,15 @@ function toggleBox(r) {
   return chk;
 }
 function actions(r) {
-  return [el("button",{text:"Boost", onclick:()=>doBoost(r)}),
-          el("button",{text:"Floor", onclick:()=>doFloor(r)})];
+  const btns=[el("button",{text:"Boost", onclick:()=>doBoost(r)}),
+              el("button",{text:"Floor", onclick:()=>doFloor(r)})];
+  if (r.boost_initial) {
+    if (r.boost_started_at)
+      btns.push(el("button",{text:"⏱", title:"Change step-hours without resetting the decay clock",
+                             onclick:()=>doReschedule(r)}));
+    btns.push(el("button",{text:"✕", title:"Cancel boost", onclick:()=>doCancelBoost(r)}));
+  }
+  return btns;
 }
 function card(r) {
   return el("div",{class:"card"+(r.enabled?"":" off")},[
@@ -640,8 +688,22 @@ async function doBoost(r) {
   if (isNaN(initial)) return;  // cancelled/blank; 0 or out-of-range falls through to the server's 400
   const step=parseInt(prompt("Step hours (decays -1x per window):", r.boost_step_hours||24),10);
   if (isNaN(step)) return;
-  if (!confirm("Arm "+initial+"x boost on "+r.trait+"?")) return;
+  const note = r.boost_started_at ? " (replaces the running boost and RESTARTS the decay clock)"
+             : r.boost_initial ? " (replaces the dormant boost)" : "";
+  if (!confirm("Arm "+initial+"x boost on "+r.trait+"?"+note)) return;
   const u=await post("/api/boost",{network, body:r.body, category:r.category, trait:r.trait, initial, step_hours:step});
+  if (u) replaceRow(u);
+}
+async function doCancelBoost(r) {
+  if (!confirm("Cancel the "+(r.boost_initial||"")+"x boost on "+r.trait+"?")) return;
+  const u=await post("/api/boost/cancel",{network, body:r.body, category:r.category, trait:r.trait});
+  if (u) replaceRow(u);
+}
+async function doReschedule(r) {
+  const step=parseInt(prompt("New step hours (decay clock keeps running from "+r.boost_started_at+"):", r.boost_step_hours||24),10);
+  if (isNaN(step)) return;
+  if (!confirm("Reschedule "+r.trait+" boost to -1x per "+step+"h without resetting the clock?")) return;
+  const u=await post("/api/boost/reschedule",{network, body:r.body, category:r.category, trait:r.trait, step_hours:step});
   if (u) replaceRow(u);
 }
 async function doFloor(r) {
@@ -728,6 +790,23 @@ async def handle_boost(request: web.Request) -> web.Response:
     return web.json_response(row)
 
 
+async def handle_boost_cancel(request: web.Request) -> web.Response:
+    data = await _json(request)
+    _require(data, "network", "body", "category", "trait")
+    row = apply_cancel_boost(data["network"], data["body"], data["category"], data["trait"])
+    return web.json_response(row)
+
+
+async def handle_boost_reschedule(request: web.Request) -> web.Response:
+    data = await _json(request)
+    _require(data, "network", "body", "category", "trait")
+    step_hours = _num(data, "step_hours", 1, 100000, integer=True)
+    row = apply_reschedule(
+        data["network"], data["body"], data["category"], data["trait"], int(step_hours)
+    )
+    return web.json_response(row)
+
+
 async def handle_floor(request: web.Request) -> web.Response:
     data = await _json(request)
     _require(data, "network")
@@ -765,6 +844,8 @@ def create_app(default_network: str = "mainnet") -> web.Application:
     app.router.add_get("/img", handle_img)
     app.router.add_post("/api/toggle", handle_toggle)
     app.router.add_post("/api/boost", handle_boost)
+    app.router.add_post("/api/boost/cancel", handle_boost_cancel)
+    app.router.add_post("/api/boost/reschedule", handle_boost_reschedule)
     app.router.add_post("/api/floor", handle_floor)
     app.router.add_post("/api/sync", handle_sync)
     return app
