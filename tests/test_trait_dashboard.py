@@ -505,7 +505,17 @@ def test_all_routes_registered():
 
     app = td.create_app("testnet")
     paths = {r.resource.canonical for r in app.router.routes() if r.resource is not None}
-    for p in ("/", "/api/traits", "/img", "/api/toggle", "/api/boost", "/api/floor", "/api/sync"):
+    for p in (
+        "/",
+        "/api/traits",
+        "/img",
+        "/api/toggle",
+        "/api/boost",
+        "/api/boost/cancel",
+        "/api/boost/reschedule",
+        "/api/floor",
+        "/api/sync",
+    ):
         assert p in paths, p
 
 
@@ -544,15 +554,17 @@ def test_cancel_boost_clears_and_audits(tmp_path, monkeypatch):
             data = await r.json()
             assert data["boost_status"] == "—"
             assert data["boost_initial"] is None
-            # no armed boost on Star -> 404 (ValueError from the engine)
+            # cancel on a row with no boost is a no-op success (and not audited)
             r = await c.post("/api/boost/cancel", json={**key, "trait": "Star"})
-            assert r.status == 200  # cancel on unboosted row is a no-op success
+            assert r.status == 200
             # missing row -> 404
             r = await c.post("/api/boost/cancel", json={**key, "trait": "Nope"})
             assert r.status == 404
 
     _run(body())
-    assert "boost-cancel" in audit_log.read_text()
+    log = audit_log.read_text()
+    assert "boost-cancel" in log
+    assert "Star" not in log  # the no-op cancel wrote no audit line
 
 
 def test_reschedule_preserves_clock(tmp_path, monkeypatch):

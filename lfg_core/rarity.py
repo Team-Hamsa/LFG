@@ -356,7 +356,14 @@ def reschedule_boost(
     )
     conn.commit()
     if cur.rowcount == 0:
-        raise ValueError(f"No armed boost on {network}/{body}/{category}/{trait}")
+        exists = conn.execute(
+            """SELECT 1 FROM trait_rarity
+               WHERE network=? AND body=? AND category=? AND trait=?""",
+            (network, body, category, trait),
+        ).fetchone()
+        if exists:
+            raise ValueError(f"No armed boost on {network}/{body}/{category}/{trait}")
+        raise ValueError(f"No trait_rarity row for {network}/{body}/{category}/{trait}")
 
 
 def start_boost_clock(

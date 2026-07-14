@@ -708,3 +708,11 @@ def test_reschedule_boost_requires_armed_boost(conn):
         rarity.reschedule_boost(conn, "*", "Background", "Plain", 24, network="testnet")
     with pytest.raises(ValueError):
         rarity.reschedule_boost(conn, "*", "Background", "Nope", 24, network="testnet")
+
+
+def test_reschedule_boost_error_messages_distinguish(conn):
+    seed_row(conn, "Plain", 0)
+    with pytest.raises(ValueError, match="No armed boost"):
+        rarity.reschedule_boost(conn, "*", "Background", "Plain", 24, network="testnet")
+    with pytest.raises(ValueError, match="No trait_rarity row"):
+        rarity.reschedule_boost(conn, "*", "Background", "Nope", 24, network="testnet")

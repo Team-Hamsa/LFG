@@ -302,14 +302,26 @@ def apply_cancel_boost(
     network: str, body: str, category: str, trait: str, *, db_path: str | None = None
 ) -> dict:
     """Clear a boost via rarity.cancel_boost (raises ValueError on a missing
-    row; a row with no boost is a no-op success); audit and return the row."""
+    row; a row with no boost is a no-op success and writes no audit line);
+    audit and return the row."""
     dbp = db_path or app_db_path(network)
+    before = _one_row(network, body, category, trait, db_path=dbp)
+    if before is None:
+        raise ValueError(f"No trait_rarity row for {network}/{body}/{category}/{trait}")
     conn = sqlite3.connect(dbp)
     try:
         rarity.cancel_boost(conn, body, category, trait, network=network)
     finally:
         conn.close()
-    audit(network, "boost-cancel", body, category, trait, "boost -> none")
+    if before["boost_initial"] is not None:
+        audit(
+            network,
+            "boost-cancel",
+            body,
+            category,
+            trait,
+            f"boost {before['boost_initial']:g}x -> none",
+        )
     row = _one_row(network, body, category, trait, db_path=dbp)
     assert row is not None
     return row
