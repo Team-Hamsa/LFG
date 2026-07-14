@@ -1388,6 +1388,7 @@ def test_buy_status_ledger_race_failure_maps_reason(onchain_env, market_wallet, 
         "reason": "listing_unavailable",
         "qr_url": None,
         "xumm_url": None,
+        "push": None,
         "instruction": None,
         "offer_index": "A" * 64,
     }

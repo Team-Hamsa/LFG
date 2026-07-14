@@ -895,10 +895,26 @@ the single-mint machinery per unit.
    > Discord bot has NO native mint/swap of its own (the legacy inline `main.py`
    > pipeline was inverted onto `lfg_service` in Spine Plan 3, and `main.py` is now
    > an 8-line shim). So swap/mint **validation and behavior are identical across
-   > surfaces** — do not assume a per-surface swap path exists. What remains
-   > **QR-only** (no push token resolved yet, follow-up) are just these payload
-   > sites: the trait-sell wizard (`market_flow.TraitSellSession`) and the CLI
-   > economy extract/deposit scripts.
+   > surfaces** — do not assume a per-surface swap path exists. Since #212 the
+   > trait-sell wizard (`market_flow.TraitSellSession`) and every service-driven
+   > economy accept (Closet claim, assemble/extract delivery, via
+   > `build_economy_deps(conn, user_token=…)`) push too; the only QR-only
+   > payload sites left are the CLI economy scripts (deliberate — no identity
+   > context) and the Discord bot's trustline button.
+   >
+   > **#212 push hardening:** tokens are now (re)captured from EVERY signed
+   > payload a flow polls (`_capture_issued_token` in mint/market flows,
+   > guarded on signer == session wallet, persisted via
+   > `_persist_issued_user_token` in the status handlers) — not just sign-in —
+   > so an app-key swap self-heals as users sign. `_create_xumm_payload` logs
+   > `push=sent|failed|no-token` per payload (grep the service logs to measure
+   > push health), retries payload creation once WITHOUT the token if creating
+   > with it fails, and returns a `push` state ("sent" | "failed" | None) that
+   > every surface renders honestly ("sent to your Xaman app" / "also under
+   > Events in Xaman" / plain QR). Known ops issue: the current "LFG!" XUMM
+   > app's push grant is wedged server-side at XUMM (`pushed:false` with
+   > verified-active tokens) — see issue #212 for the support-ticket /
+   > new-app paths.
 
 3. **Metadata URL Encoding**: Metadata CDN URLs are converted to hex before being stored on-chain.
 

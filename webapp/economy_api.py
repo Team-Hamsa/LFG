@@ -68,12 +68,15 @@ def read_economy_state(conn: sqlite3.Connection, owner: str) -> dict[str, Any]:
     }
 
 
-async def start_closet(discord_id: str, owner: str) -> dict[str, Any]:
+async def start_closet(
+    discord_id: str, owner: str, user_token: str | None = None
+) -> dict[str, Any]:
     """Ensure the owner has a Closet NFToken, minting on first use. Returns a
-    status dict with {status, nft_id, accept} (accept is the Xaman URL or None)."""
+    status dict with {status, nft_id, accept, accept_push} (accept is the
+    Xaman URL or None). ``user_token`` (#212) push-delivers the claim offer."""
     conn = open_conn()
     try:
-        deps = _economy_deps.build_economy_deps(conn)
+        deps = _economy_deps.build_economy_deps(conn, user_token=user_token)
         ref = await ct.ensure_closet(
             conn,
             owner,
@@ -83,8 +86,13 @@ async def start_closet(discord_id: str, owner: str) -> dict[str, Any]:
             accept_payload_fn=deps.closet_accept_fn,
             exists_fn=deps.closet_exists_fn,
         )
-        accept_url = (ref.accept_payload or {}).get("xumm_url") if ref.accept_payload else None
-        return {"status": ref.status, "nft_id": ref.nft_id, "accept": accept_url}
+        accept = ref.accept_payload or {}
+        return {
+            "status": ref.status,
+            "nft_id": ref.nft_id,
+            "accept": accept.get("xumm_url"),
+            "accept_push": accept.get("push"),
+        }
     finally:
         conn.close()
 
@@ -99,10 +107,12 @@ def economy_session_dict(kind: str, s: Any) -> dict[str, Any]:
     elif kind == "assemble":
         r = s.results[0] if s.results else None
         base["accept"] = ((r["accept"] or {}).get("xumm_url")) if r else None
+        base["accept_push"] = ((r["accept"] or {}).get("push")) if r else None
         base["image_url"] = r["image_url"] if r else None
         base["nft_id"] = r["nft_id"] if r else None
     elif kind == "extract":
         base["accept"] = (s.accept or {}).get("xumm_url")
+        base["accept_push"] = (s.accept or {}).get("push")
         base["nft_id"] = s.nft_id
     elif kind == "deposit":
         base["slot"] = s.slot
@@ -175,9 +185,14 @@ async def _run_and_close(runner: Any, session: Any, deps: Any, conn: sqlite3.Con
 
 
 def _schedule(
-    kind: str, discord_id: str, session: Any, conn: sqlite3.Connection, runner: Any
+    kind: str,
+    discord_id: str,
+    session: Any,
+    conn: sqlite3.Connection,
+    runner: Any,
+    user_token: str | None = None,
 ) -> EconomyWebSession:
-    deps = _economy_deps.build_economy_deps(conn)
+    deps = _economy_deps.build_economy_deps(conn, user_token=user_token)
     asyncio.get_running_loop().create_task(_run_and_close(runner, session, deps, conn))
     return EconomyWebSession(discord_id=discord_id, kind=kind, inner=session)
 
@@ -201,7 +216,12 @@ async def _require_body_affinity(char_body: str, slot: str, value: str) -> None:
 
 
 async def start_equip(
-    discord_id: str, owner: str, nft_id: str, slot: str, value: str
+    discord_id: str,
+    owner: str,
+    nft_id: str,
+    slot: str,
+    value: str,
+    user_token: str | None = None,
 ) -> EconomyWebSession:
     conn = open_conn()
     try:
@@ -217,10 +237,12 @@ async def start_equip(
         conn.close()
         raise
     session = economy_flow.EquipSession(owner=owner, character=rec, slot=slot, incoming_value=value)
-    return _schedule("equip", discord_id, session, conn, economy_flow.run_equip)
+    return _schedule("equip", discord_id, session, conn, economy_flow.run_equip, user_token)
 
 
-async def start_harvest(discord_id: str, owner: str, nft_id: str) -> EconomyWebSession:
+async def start_harvest(
+    discord_id: str, owner: str, nft_id: str, user_token: str | None = None
+) -> EconomyWebSession:
     conn = open_conn()
     closet_rec = economy_store.get_closet_record(conn, owner)
     if closet_rec is None or closet_rec[2] != ct.ACTIVE:
@@ -236,11 +258,15 @@ async def start_harvest(discord_id: str, owner: str, nft_id: str) -> EconomyWebS
         conn.close()
         raise EconomyError(f"cannot harvest: {chk.reason}")
     session = economy_flow.HarvestSession(owner=owner, character=rec, burnable=burnable)
-    return _schedule("harvest", discord_id, session, conn, economy_flow.run_harvest)
+    return _schedule("harvest", discord_id, session, conn, economy_flow.run_harvest, user_token)
 
 
 async def start_assemble(
-    discord_id: str, owner: str, edition: int, chosen: dict[str, str]
+    discord_id: str,
+    owner: str,
+    edition: int,
+    chosen: dict[str, str],
+    user_token: str | None = None,
 ) -> EconomyWebSession:
     conn = open_conn()
     try:
@@ -276,10 +302,12 @@ async def start_assemble(
         body_class=body[1],
         live_editions=live_editions,
     )
-    return _schedule("assemble", discord_id, session, conn, economy_flow.run_assemble)
+    return _schedule("assemble", discord_id, session, conn, economy_flow.run_assemble, user_token)
 
 
-async def start_extract(discord_id: str, owner: str, body: dict[str, Any]) -> EconomyWebSession:
+async def start_extract(
+    discord_id: str, owner: str, body: dict[str, Any], user_token: str | None = None
+) -> EconomyWebSession:
     """Extract a loose Closet trait into a standalone tradeable trait NFToken.
     Gates on an active Closet; raises EconomyError otherwise."""
     slot = body["slot"]  # KeyError here -> 400, no open connection
@@ -290,10 +318,12 @@ async def start_extract(discord_id: str, owner: str, body: dict[str, Any]) -> Ec
         conn.close()
         raise EconomyError("Create and claim your Closet first.")
     session = economy_flow.ExtractSession(owner=owner, slot=slot, value=value)
-    return _schedule("extract", discord_id, session, conn, economy_flow.run_extract)
+    return _schedule("extract", discord_id, session, conn, economy_flow.run_extract, user_token)
 
 
-async def start_deposit(discord_id: str, owner: str, body: dict[str, Any]) -> EconomyWebSession:
+async def start_deposit(
+    discord_id: str, owner: str, body: dict[str, Any], user_token: str | None = None
+) -> EconomyWebSession:
     """Deposit a standalone trait NFToken back into the owner's Closet.
     Gates on an active Closet; raises EconomyError otherwise."""
     nft_id = body["nft_id"]  # KeyError here -> 400, no open connection
@@ -303,4 +333,4 @@ async def start_deposit(discord_id: str, owner: str, body: dict[str, Any]) -> Ec
         conn.close()
         raise EconomyError("Create and claim your Closet first.")
     session = economy_flow.DepositSession(owner=owner, nft_id=nft_id)
-    return _schedule("deposit", discord_id, session, conn, economy_flow.run_deposit)
+    return _schedule("deposit", discord_id, session, conn, economy_flow.run_deposit, user_token)

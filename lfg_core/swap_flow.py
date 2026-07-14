@@ -116,6 +116,9 @@ class SwapSession:
         self.error: str | None = None
         self.results: list[dict[str, Any]] = []  # one dict per re-crafted NFT
         self.payment_link: str | None = None  # set when an upfront modify fee is due
+        # #212: push delivery state of the fee payment payload
+        # ("sent" | "failed" | None) for honest client messaging.
+        self.payment_push: str | None = None
         self.pay_with: str | None = None  # "BRIX" or "XRP", set at session start
         self.fee_per_nft: Decimal | None = None  # in pay_with units
         self.fee_amount: str | None = None
@@ -149,6 +152,7 @@ class SwapSession:
         )
         if payload:
             self.payment_link = payload["xumm_url"]
+            self.payment_push = payload.get("push")
             return True
         return False
 
@@ -192,6 +196,7 @@ class SwapSession:
             "traits": self.traits_to_swap,
             "results": self.results,
             "payment_link": self.payment_link,
+            "payment_push": self.payment_push,
             "pay_with": self.pay_with,
             "fee_amount": self.fee_amount,
         }
@@ -413,6 +418,7 @@ async def _create_offer_and_accept(session: SwapSession, item: dict[str, Any]) -
             "modified": False,
             "accept_qr_url": accept["qr_url"],
             "accept_deeplink": accept["xumm_url"],
+            "accept_push": accept.get("push"),
         }
     )
     return True

@@ -9,7 +9,19 @@ from typing import Any
 from telegram import InputFile
 
 
-def payment_caption(payment_link: str) -> str:
+def _push_hint(push: Any) -> str:
+    """#212: one-line delivery hint. 'sent' = the sign request was pushed to
+    the user's Xaman app; 'failed' = a push was attempted but not delivered
+    (the request still shows under Xaman's Events list); anything else = plain
+    QR sign, no hint."""
+    if push == "sent":
+        return "📲 Also sent straight to your Xaman app — you can just approve it there.\n"
+    if push == "failed":
+        return "(You can also find this request under Events in Xaman.)\n"
+    return ""
+
+
+def payment_caption(payment_link: str, push: Any = None) -> str:
     return (
         "💰 Token Payment Required\n\n"
         "Pay 1 token to mint your NFT:\n"
@@ -17,6 +29,7 @@ def payment_caption(payment_link: str) -> str:
         "2. Approve the payment\n"
         "3. Wait for confirmation\n\n"
         f"Open payment link: {payment_link}\n"
+        f"{_push_hint(push)}"
         "(expires in 5 minutes)"
     )
 
@@ -36,6 +49,7 @@ def offer_caption(final: dict[str, Any], *, with_qr: bool = True) -> str:
         "2. Review and accept the offer\n"
         "3. Your NFT appears in your wallet\n\n"
         f"Open in XUMM: {accept_link}\n"
+        f"{_push_hint(final.get('accept_push'))}"
         "(offer expires in 24 hours)"
     )
 

@@ -383,7 +383,7 @@ def test_trait_list_start_bad_price_400_no_extract_started(
 def test_trait_list_start_success_returns_extract_pending_session(
     onchain_env, market_wallet, monkeypatch
 ):
-    async def fake_start_extract(discord_id, owner, body):
+    async def fake_start_extract(discord_id, owner, body, user_token=None):
         assert body == {"slot": "Hat", "value": "Wizard Hat"}
         return _FakeEconomyWebSession(inner=_FakeExtract(state="running"))
 
@@ -401,7 +401,7 @@ def test_trait_list_start_success_returns_extract_pending_session(
 def test_trait_list_start_economy_error_400_no_session(onchain_env, market_wallet, monkeypatch):
     from webapp import economy_api
 
-    async def fake_start_extract(discord_id, owner, body):
+    async def fake_start_extract(discord_id, owner, body, user_token=None):
         raise economy_api.EconomyError("Create and claim your Closet first.")
 
     monkeypatch.setattr(server.economy_api, "start_extract", fake_start_extract)

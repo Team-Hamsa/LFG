@@ -39,7 +39,7 @@ async def handle_mint(svc: LFGServiceClient, interaction: discord.Interaction) -
         await interaction.followup.send(embed=render.error_embed(friendly_error(e)), ephemeral=True)
         return
     await interaction.followup.send(
-        embed=render.payment_embed(payment_link),
+        embed=render.payment_embed(payment_link, push=session.get("payment_push")),
         file=render.file_from_png(qr_png, "payment_qr.png"),
         ephemeral=True,
     )
