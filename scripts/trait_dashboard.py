@@ -602,7 +602,7 @@ function actions(r) {
   const btns=[el("button",{text:"Boost", onclick:()=>doBoost(r)}),
               el("button",{text:"Floor", onclick:()=>doFloor(r)})];
   if (r.boost_initial) {
-    if (r.boost_started_at)
+    if (r.boost_status.startsWith("active"))  // finished boosts can't be rescheduled, only re-armed
       btns.push(el("button",{text:"⏱", title:"Change step-hours without resetting the decay clock",
                              onclick:()=>doReschedule(r)}));
     btns.push(el("button",{text:"✕", title:"Cancel boost", onclick:()=>doCancelBoost(r)}));
@@ -698,13 +698,20 @@ async function doToggle(r, enabled) {
 async function doBoost(r) {
   const initial=parseFloat(prompt("Boost multiplier (e.g. 7):", r.boost_initial||7));
   if (isNaN(initial)) return;  // cancelled/blank; 0 or out-of-range falls through to the server's 400
-  const step=parseInt(prompt("Step hours (decays -1x per window):", r.boost_step_hours||24),10);
-  if (isNaN(step)) return;
+  const step=promptStepHours("Step hours (decays -1x per window):", r.boost_step_hours||24);
+  if (step===null) return;
   const note = r.boost_started_at ? " (replaces the running boost and RESTARTS the decay clock)"
              : r.boost_initial ? " (replaces the dormant boost)" : "";
   if (!confirm("Arm "+initial+"x boost on "+r.trait+"?"+note)) return;
   const u=await post("/api/boost",{network, body:r.body, category:r.category, trait:r.trait, initial, step_hours:step});
   if (u) replaceRow(u);
+}
+function promptStepHours(label, dflt) {
+  const raw=prompt(label, dflt);
+  if (raw===null || raw.trim()==="") return null;
+  const step=Number(raw);
+  if (!Number.isInteger(step) || step<1) { alert("Step hours must be a whole number >= 1"); return null; }
+  return step;
 }
 async function doCancelBoost(r) {
   if (!confirm("Cancel the "+(r.boost_initial||"")+"x boost on "+r.trait+"?")) return;
@@ -712,8 +719,8 @@ async function doCancelBoost(r) {
   if (u) replaceRow(u);
 }
 async function doReschedule(r) {
-  const step=parseInt(prompt("New step hours (decay clock keeps running from "+r.boost_started_at+"):", r.boost_step_hours||24),10);
-  if (isNaN(step)) return;
+  const step=promptStepHours("New step hours (decay clock keeps running from "+r.boost_started_at+"):", r.boost_step_hours||24);
+  if (step===null) return;
   if (!confirm("Reschedule "+r.trait+" boost to -1x per "+step+"h without resetting the clock?")) return;
   const u=await post("/api/boost/reschedule",{network, body:r.body, category:r.category, trait:r.trait, step_hours:step});
   if (u) replaceRow(u);

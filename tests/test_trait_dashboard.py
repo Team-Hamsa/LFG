@@ -606,3 +606,34 @@ def test_index_has_boost_edit_hooks():
 
     for marker in ("/api/boost/cancel", "/api/boost/reschedule", "doCancelBoost", "doReschedule"):
         assert marker in td.INDEX_HTML, marker
+
+
+def test_reschedule_rejects_finished_boost(tmp_path, monkeypatch):
+    from scripts import trait_dashboard as td
+
+    db = str(tmp_path / "m.db")
+    _seed(db, "mainnet", [("ape", "Eyes", "Laser", 3, 1)])
+    # 7x/24h started long ago = finished; must not be resurrectable
+    _arm(db, "mainnet", "ape", "Eyes", "Laser", 7.0, 24, "2026-01-01T00:00:00+00:00")
+    monkeypatch.setattr(td, "app_db_path", lambda net: db)
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setattr(td, "AUDIT_LOG", str(tmp_path / "reports" / "audit.log"))
+
+    async def body():
+        from aiohttp.test_utils import TestClient, TestServer
+
+        async with TestClient(TestServer(td.create_app())) as c:
+            r = await c.post(
+                "/api/boost/reschedule",
+                json={
+                    "network": "mainnet",
+                    "body": "ape",
+                    "category": "Eyes",
+                    "trait": "Laser",
+                    "step_hours": 100000,
+                },
+            )
+            assert r.status == 404
+            assert "finished" in (await r.json())["error"]
+
+    _run(body())

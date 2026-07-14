@@ -685,7 +685,7 @@ def test_cancel_boost_missing_row_raises(conn):
 def test_reschedule_boost_preserves_clock(conn):
     started = iso(NOW - timedelta(hours=2))
     seed_row(conn, "Hot", 5, boost_initial=7.0, boost_step_hours=72, boost_started_at=started)
-    rarity.reschedule_boost(conn, "*", "Background", "Hot", 24, network="testnet")
+    rarity.reschedule_boost(conn, "*", "Background", "Hot", 24, network="testnet", now=NOW)
     row = conn.execute(
         """SELECT boost_initial, boost_step_hours, boost_started_at
            FROM trait_rarity WHERE trait='Hot'"""
@@ -716,3 +716,30 @@ def test_reschedule_boost_error_messages_distinguish(conn):
         rarity.reschedule_boost(conn, "*", "Background", "Plain", 24, network="testnet")
     with pytest.raises(ValueError, match="No trait_rarity row"):
         rarity.reschedule_boost(conn, "*", "Background", "Nope", 24, network="testnet")
+
+
+def test_cancel_boost_retains_step_hours(conn):
+    seed_row(conn, "Warm", 3, boost_initial=5.0, boost_step_hours=48)
+    rarity.cancel_boost(conn, "*", "Background", "Warm", network="testnet")
+    row = conn.execute(
+        "SELECT boost_initial, boost_step_hours, boost_started_at FROM trait_rarity WHERE trait='Warm'"
+    ).fetchone()
+    assert row == (None, 48, None)  # step_hours kept as the next re-arm default
+
+
+def test_reschedule_boost_rejects_finished_boost(conn):
+    # 7x/24h started 30 days ago = long finished; a longer step must not resurrect it
+    seed_row(
+        conn,
+        "Done",
+        5,
+        boost_initial=7.0,
+        boost_step_hours=24,
+        boost_started_at=iso(NOW - timedelta(days=30)),
+    )
+    with pytest.raises(ValueError, match="finished"):
+        rarity.reschedule_boost(conn, "*", "Background", "Done", 100000, network="testnet", now=NOW)
+    row = conn.execute(
+        "SELECT boost_step_hours FROM trait_rarity WHERE trait='Done'"
+    ).fetchone()
+    assert row == (24,)  # untouched

@@ -343,27 +343,35 @@ def reschedule_boost(
     boost_step_hours: int,
     *,
     network: str | None = None,
+    now: datetime | None = None,
 ) -> None:
-    """Admin: change an armed boost's step window WITHOUT resetting its decay
-    clock (unlike arm_boost) — shortens or lengthens the remaining runway in
-    place. Requires a boost to be armed; raises ValueError otherwise."""
+    """Admin: change an armed (dormant or active) boost's step window WITHOUT
+    resetting its decay clock (unlike arm_boost) — shortens or lengthens the
+    remaining runway in place. Raises ValueError when the row is missing, no
+    boost is armed, or the boost has already finished decaying (a longer step
+    must not resurrect it — re-arm instead)."""
     network = network or config.XRPL_NETWORK
-    cur = conn.execute(
+    now = now or utcnow()
+    row = conn.execute(
+        """SELECT boost_initial, boost_step_hours, boost_started_at FROM trait_rarity
+           WHERE network=? AND body=? AND category=? AND trait=?""",
+        (network, body, category, trait),
+    ).fetchone()
+    if row is None:
+        raise ValueError(f"No trait_rarity row for {network}/{body}/{category}/{trait}")
+    initial, old_step, started_at = row
+    if initial is None:
+        raise ValueError(f"No armed boost on {network}/{body}/{category}/{trait}")
+    if started_at and boost_multiplier(initial, old_step, started_at, now) <= 1.0:
+        raise ValueError(
+            f"Boost on {network}/{body}/{category}/{trait} already finished — re-arm instead"
+        )
+    conn.execute(
         """UPDATE trait_rarity SET boost_step_hours=?
-           WHERE network=? AND body=? AND category=? AND trait=?
-             AND boost_initial IS NOT NULL""",
+           WHERE network=? AND body=? AND category=? AND trait=?""",
         (boost_step_hours, network, body, category, trait),
     )
     conn.commit()
-    if cur.rowcount == 0:
-        exists = conn.execute(
-            """SELECT 1 FROM trait_rarity
-               WHERE network=? AND body=? AND category=? AND trait=?""",
-            (network, body, category, trait),
-        ).fetchone()
-        if exists:
-            raise ValueError(f"No armed boost on {network}/{body}/{category}/{trait}")
-        raise ValueError(f"No trait_rarity row for {network}/{body}/{category}/{trait}")
 
 
 def start_boost_clock(
