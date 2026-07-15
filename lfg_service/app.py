@@ -329,6 +329,19 @@ async def _push_token(user: dict[str, Any]) -> str | None:
     return await asyncio.to_thread(identity_store.user_token_for, _platform(user), user["id"])
 
 
+async def _persist_issued_user_token(user: dict[str, Any], session: Any) -> None:
+    """#212: persist a push token a flow captured off a signed payload (see
+    the flows' `_capture_issued_token`). Sign-in used to be the only capture
+    point — refreshing here keeps tokens current as XUMM rotates them and
+    self-heals after an app-key swap invalidates every stored token.
+    Best-effort; cleared on the session so each capture writes once."""
+    token = getattr(session, "issued_user_token", None)
+    if not token:
+        return
+    session.issued_user_token = None
+    await asyncio.to_thread(identity_store.set_user_token, _platform(user), user["id"], token)
+
+
 def require_auth(handler):
     async def wrapper(request):
         if config.WEBAPP_DEV_MODE:
@@ -1368,6 +1381,7 @@ async def handle_market_list_start(request):
     session.qr_url = payload["qr_url"]
     session.xumm_url = payload["xumm_url"]
     session.payload_uuid = payload.get("uuid")
+    session.push = payload.get("push")
     market_sessions[session.id] = session
     return web.json_response(session.to_dict())
 
@@ -1430,6 +1444,7 @@ async def handle_market_cancel_start(request):
     session.qr_url = payload["qr_url"]
     session.xumm_url = payload["xumm_url"]
     session.payload_uuid = payload.get("uuid")
+    session.push = payload.get("push")
     market_sessions[session.id] = session
     return web.json_response(session.to_dict())
 
@@ -1536,6 +1551,7 @@ async def handle_market_buy_start(request):
     session.qr_url = payload["qr_url"]
     session.xumm_url = payload["xumm_url"]
     session.payload_uuid = payload.get("uuid")
+    session.push = payload.get("push")
     session.instruction = f"Confirm purchase for {amount_xrp} XRP"
     market_sessions[session.id] = session
     return web.json_response(session.to_dict())
@@ -1562,50 +1578,61 @@ def _make_market_status_handler(prefix: str):
             return web.json_response({"error": "not found"}, status=404)
 
         loop = asyncio.get_event_loop()
-        if prefix == "list":
-            row = await market_flow.advance_list_session(session)
-            if row is not None:
-                network = _market_network(session.listing_kind)
-                await loop.run_in_executor(None, _write_listing_row, network, row)
-        elif prefix == "cancel":
-            if await market_flow.advance_cancel_session(session):
-                await loop.run_in_executor(
-                    None, _close_listing_sync, session.network, session.offer_index, "cancelled"
-                )
-        elif prefix == "buy":
-            outcome = await market_flow.advance_buy_session(session)
-            if outcome == "sold":
-                # Persist the buyer on the sold row so settlement stays
-                # recoverable even if run_deposit deletes the trait_tokens
-                # ownership row before Closet credit (CodeRabbit #129).
-                await loop.run_in_executor(
-                    None,
-                    _close_listing_sync,
-                    session.network,
-                    session.offer_index,
-                    "sold",
-                    session.wallet_address,
-                )
-                if session.listing_kind == "trait":
-                    # Primary settlement trigger (spec §Q7): burn the sold
-                    # trait token back into the buyer's Closet right away.
-                    # Awaited (not fire-and-forget) — run_deposit's own
-                    # fail-closed/journaling guarantees mean there is nothing
-                    # to gain from detaching it, and awaiting keeps the
-                    # outcome deterministic for both callers and tests. A
-                    # failure here leaves settled=0 (already set by
-                    # close_listing above) for the settlement sweep to retry.
-                    await _settle_trait_sale(
-                        session.wallet_address, session.nft_id, session.offer_index, session.network
-                    )
-            elif outcome == "stale":
-                await loop.run_in_executor(
-                    None, _close_listing_sync, session.network, session.offer_index, "stale"
-                )
-
+        try:
+            await _advance_market_session(prefix, session, loop)
+        finally:
+            # Persist a token the advance captured even when a downstream
+            # DB write/settlement raised — the capture is already real.
+            await _persist_issued_user_token(request["user"], session)
         return web.json_response(session.to_dict())
 
     return require_market(handler)
+
+
+async def _advance_market_session(prefix: str, session: Any, loop: Any) -> None:
+    """One poll step for a list/cancel/buy session: advance the state machine
+    and apply its DB effects (split out of the status handler so the handler
+    can persist a captured push token in a finally regardless of outcome)."""
+    if prefix == "list":
+        row = await market_flow.advance_list_session(session)
+        if row is not None:
+            network = _market_network(session.listing_kind)
+            await loop.run_in_executor(None, _write_listing_row, network, row)
+    elif prefix == "cancel":
+        if await market_flow.advance_cancel_session(session):
+            await loop.run_in_executor(
+                None, _close_listing_sync, session.network, session.offer_index, "cancelled"
+            )
+    elif prefix == "buy":
+        outcome = await market_flow.advance_buy_session(session)
+        if outcome == "sold":
+            # Persist the buyer on the sold row so settlement stays
+            # recoverable even if run_deposit deletes the trait_tokens
+            # ownership row before Closet credit (CodeRabbit #129).
+            await loop.run_in_executor(
+                None,
+                _close_listing_sync,
+                session.network,
+                session.offer_index,
+                "sold",
+                session.wallet_address,
+            )
+            if session.listing_kind == "trait":
+                # Primary settlement trigger (spec §Q7): burn the sold
+                # trait token back into the buyer's Closet right away.
+                # Awaited (not fire-and-forget) — run_deposit's own
+                # fail-closed/journaling guarantees mean there is nothing
+                # to gain from detaching it, and awaiting keeps the
+                # outcome deterministic for both callers and tests. A
+                # failure here leaves settled=0 (already set by
+                # close_listing above) for the settlement sweep to retry.
+                await _settle_trait_sale(
+                    session.wallet_address, session.nft_id, session.offer_index, session.network
+                )
+        elif outcome == "stale":
+            await loop.run_in_executor(
+                None, _close_listing_sync, session.network, session.offer_index, "stale"
+            )
 
 
 handle_market_list_status = _make_market_status_handler("list")
@@ -2341,9 +2368,10 @@ async def handle_market_trait_list_start(request):
             status=409,
         )
 
+    push_user_token = await _push_token(user)
     try:
         extract_ws = await economy_api.start_extract(
-            user["id"], wallet, {"slot": slot, "value": value}
+            user["id"], wallet, {"slot": slot, "value": value}, user_token=push_user_token
         )
     except economy_api.EconomyError as e:
         return web.json_response({"error": str(e)}, status=400)
@@ -2361,6 +2389,7 @@ async def handle_market_trait_list_start(request):
         amount_drops=amount_drops,
         extract_session=extract_ws.inner,
         platform=_platform(user),
+        push_user_token=push_user_token,
     )
     market_sessions[session.id] = session
     return web.json_response(session.to_dict())
@@ -2388,10 +2417,15 @@ async def handle_market_trait_list_status(request):
     ):
         return web.json_response({"error": "not found"}, status=404)
 
-    row = await market_flow.advance_trait_sell_session(session)
-    if row is not None:
-        network = _market_network("trait")
-        await asyncio.get_event_loop().run_in_executor(None, _write_listing_row, network, row)
+    try:
+        row = await market_flow.advance_trait_sell_session(session)
+        if row is not None:
+            network = _market_network("trait")
+            await asyncio.get_event_loop().run_in_executor(None, _write_listing_row, network, row)
+    finally:
+        # Persist a token the advance captured even when the listing write
+        # raised — the capture is already real.
+        await _persist_issued_user_token(request["user"], session)
     return web.json_response(session.to_dict())
 
 
@@ -2404,7 +2438,9 @@ async def handle_closet(request):
         return web.json_response(mock_economy.INSTANCE.create_closet(request["wallet"]))
     user = request["user"]
     try:
-        result = await economy_api.start_closet(user["id"], request["wallet"])
+        result = await economy_api.start_closet(
+            user["id"], request["wallet"], user_token=await _push_token(user)
+        )
     except Exception as e:
         logging.error(f"start_closet failed for {user['id']}: {e}")
         return web.json_response({"error": "could not create or retrieve Closet"}, status=502)
@@ -2445,12 +2481,15 @@ async def handle_register(request):
     closet_result: dict[str, Any] | None = None
     if config.ECONOMY_ENABLED and not config.WEBAPP_DEV_MODE:
         try:
-            closet_result = await economy_api.start_closet(user["id"], wallet)
+            closet_result = await economy_api.start_closet(
+                user["id"], wallet, user_token=await _push_token(user)
+            )
         except Exception as e:
             logging.warning(f"post-register ensure_closet failed for {wallet}: {e}")
     resp: dict[str, Any] = {"ok": True, "wallet": wallet}
     if closet_result is not None:
         resp["closet_accept"] = closet_result.get("accept")
+        resp["closet_accept_push"] = closet_result.get("accept_push")
     return web.json_response(resp)
 
 
@@ -2940,6 +2979,7 @@ async def handle_mint_status(request):
     # Refresh the QR-scanned flags so the client can swap the QR for a
     # spinner the moment Xaman opens the payload (issue #22).
     await mint_flow.update_scan_state(session)
+    await _persist_issued_user_token(request["user"], session)
     if session.state in mint_flow.TERMINAL_STATES and not getattr(session, "_published", False):
         session._published = True
         ok = session.state not in (mint_flow.FAILED, mint_flow.PAYMENT_TIMEOUT)
@@ -3378,7 +3418,7 @@ def _economy_post(kind, start_coro, mock_call):
                 {"error": "an economy action is already in progress"}, status=409
             )
         try:
-            ws = await start_coro(user["id"], request["wallet"], body)
+            ws = await start_coro(user["id"], request["wallet"], body, await _push_token(user))
         except economy_api.EconomyError as e:
             return web.json_response({"error": str(e)}, status=400)
         except (KeyError, ValueError) as e:
@@ -3395,27 +3435,31 @@ def _economy_post(kind, start_coro, mock_call):
 
 handle_equip_start = _economy_post(
     "equip",
-    lambda uid, w, b: economy_api.start_equip(uid, w, b["nft_id"], b["slot"], b["value"]),
+    lambda uid, w, b, tok: economy_api.start_equip(
+        uid, w, b["nft_id"], b["slot"], b["value"], user_token=tok
+    ),
     lambda w, b: mock_economy.INSTANCE.equip(w, b["nft_id"], b["slot"], b["value"]),
 )
 handle_harvest_start = _economy_post(
     "harvest",
-    lambda uid, w, b: economy_api.start_harvest(uid, w, b["nft_id"]),
+    lambda uid, w, b, tok: economy_api.start_harvest(uid, w, b["nft_id"], user_token=tok),
     lambda w, b: mock_economy.INSTANCE.harvest(w, b["nft_id"]),
 )
 handle_assemble_start = _economy_post(
     "assemble",
-    lambda uid, w, b: economy_api.start_assemble(uid, w, int(b["edition"]), b["chosen"]),
+    lambda uid, w, b, tok: economy_api.start_assemble(
+        uid, w, int(b["edition"]), b["chosen"], user_token=tok
+    ),
     lambda w, b: mock_economy.INSTANCE.assemble(w, int(b["edition"]), b["chosen"]),
 )
 handle_extract_start = _economy_post(
     "extract",
-    lambda uid, w, b: economy_api.start_extract(uid, w, b),
+    lambda uid, w, b, tok: economy_api.start_extract(uid, w, b, user_token=tok),
     lambda w, b: mock_economy.INSTANCE.extract(w, b),
 )
 handle_deposit_start = _economy_post(
     "deposit",
-    lambda uid, w, b: economy_api.start_deposit(uid, w, b),
+    lambda uid, w, b, tok: economy_api.start_deposit(uid, w, b, user_token=tok),
     lambda w, b: mock_economy.INSTANCE.deposit(w, b),
 )
 

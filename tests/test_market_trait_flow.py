@@ -380,11 +380,20 @@ def test_trait_list_start_bad_price_400_no_extract_started(
     assert len(server.market_sessions) == 0
 
 
+async def _fake_push_token(user):
+    return "stored-tok"
+
+
 def test_trait_list_start_success_returns_extract_pending_session(
     onchain_env, market_wallet, monkeypatch
 ):
-    async def fake_start_extract(discord_id, owner, body):
+    monkeypatch.setattr(server, "_push_token", _fake_push_token)
+
+    async def fake_start_extract(discord_id, owner, body, user_token=None):
         assert body == {"slot": "Hat", "value": "Wizard Hat"}
+        # #212: the caller's stored push token must reach the extract flow so
+        # the accept-offer payload (signature 1) can be push-delivered.
+        assert user_token == "stored-tok"
         return _FakeEconomyWebSession(inner=_FakeExtract(state="running"))
 
     monkeypatch.setattr(server.economy_api, "start_extract", fake_start_extract)
@@ -401,7 +410,10 @@ def test_trait_list_start_success_returns_extract_pending_session(
 def test_trait_list_start_economy_error_400_no_session(onchain_env, market_wallet, monkeypatch):
     from webapp import economy_api
 
-    async def fake_start_extract(discord_id, owner, body):
+    monkeypatch.setattr(server, "_push_token", _fake_push_token)
+
+    async def fake_start_extract(discord_id, owner, body, user_token=None):
+        assert user_token == "stored-tok"
         raise economy_api.EconomyError("Create and claim your Closet first.")
 
     monkeypatch.setattr(server.economy_api, "start_extract", fake_start_extract)

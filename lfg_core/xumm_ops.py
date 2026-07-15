@@ -139,6 +139,24 @@ def discord_return_url(guild_id: Any, channel_id: Any) -> dict[str, str] | None:
     }
 
 
+async def _post_xumm_payload(payload: dict[str, Any]) -> dict[str, Any]:
+    """POST one payload to the XUMM platform API and normalize the response.
+    Raises on transport errors or an unexpected response shape (a rejected
+    payload comes back without refs/next) — callers decide the fallback."""
+    response = await asyncio.to_thread(
+        requests.post, config.XUMM_API_URL, json=payload, headers=_XUMM_HEADERS, timeout=10
+    )
+    data = response.json()
+    return {
+        "qr_url": data["refs"]["qr_png"],
+        "xumm_url": data["next"]["always"],
+        "uuid": data["uuid"],
+        # Whether XUMM push-delivered this payload to the user's Xaman app.
+        # False (or absent → False) means fall back to the QR/deep link.
+        "pushed": bool(data.get("pushed")),
+    }
+
+
 async def _create_xumm_payload(
     txjson: dict[str, Any],
     options: dict[str, Any] | None = None,
@@ -150,13 +168,17 @@ async def _create_xumm_payload(
     When ``user_token`` is a stored per-user push token (issue #135), XUMM
     delivers the sign request straight to that user's Xaman app as a push
     notification. The returned dict's ``pushed`` flag reports whether the push
-    actually went out — a stale/expired token yields ``pushed: False`` and the
-    caller falls back to the QR / deep link that are always returned too. A
-    missing token simply omits the field, never blocking the sign."""
+    actually went out; ``push`` refines it for the UI (#212): "sent" (push
+    delivered), "failed" (a token was sent but XUMM could not push — the
+    payload still appears in Xaman's Events tab), or None (no token; plain
+    QR/deep-link sign). If payload creation itself fails WITH a token (e.g. a
+    token XUMM rejects outright after an app-key rotation), it is retried once
+    without the token so a bad stored token can never block signing."""
     # Make Waves hackathon: every signed transaction must carry the source tag,
     # and provenance memos (#54). SignIn is a pseudo-transaction (no ledger
     # effect), so it is exempt from both.
-    if txjson.get("TransactionType") != "SignIn":
+    txtype = txjson.get("TransactionType")
+    if txtype != "SignIn":
         txjson.setdefault("SourceTag", config.SOURCE_TAG)
         if memos_json:
             txjson.setdefault("Memos", memos_json)
@@ -168,22 +190,49 @@ async def _create_xumm_payload(
     # be misread as a token.
     if user_token:
         payload["user_token"] = user_token
+    sent_token = bool(user_token)
     try:
-        response = await asyncio.to_thread(
-            requests.post, config.XUMM_API_URL, json=payload, headers=_XUMM_HEADERS, timeout=10
-        )
-        data = response.json()
-        return {
-            "qr_url": data["refs"]["qr_png"],
-            "xumm_url": data["next"]["always"],
-            "uuid": data["uuid"],
-            # Whether XUMM push-delivered this payload to the user's Xaman app.
-            # False (or absent → False) means fall back to the QR/deep link.
-            "pushed": bool(data.get("pushed")),
-        }
-    except Exception as e:
-        logging.error(f"Error creating XUMM payload: {e}")
+        result = await _post_xumm_payload(payload)
+    except requests.Timeout as e:
+        # Ambiguous transport failure: XUMM may have ALREADY created (and
+        # pushed) the payload before the response was lost — retrying would
+        # mint a duplicate the user could sign while the flow polls the other
+        # uuid. Fail instead; the caller's own retry/regenerate paths handle it.
+        logging.error(f"XUMM payload create timed out (no retry — outcome unknown): {e}")
         return None
+    except Exception as e:
+        if not sent_token:
+            logging.error(f"Error creating XUMM payload: {e}")
+            return None
+        # A definitive create failure with a token attached (an HTTP error
+        # response or a rejected/garbled body — e.g. XUMM refusing a token
+        # from a rotated app key): never let a bad stored token block the
+        # sign; retry once as a plain QR/deep-link payload (#212).
+        logging.warning(f"XUMM payload create failed with user_token, retrying without: {e}")
+        payload.pop("user_token", None)
+        sent_token = False
+        try:
+            result = await _post_xumm_payload(payload)
+        except Exception as e2:
+            logging.error(f"Error creating XUMM payload: {e2}")
+            return None
+    # UI-facing push state; the raw `pushed` bool is kept alongside it.
+    if result["pushed"]:
+        result["push"] = "sent"
+    elif sent_token:
+        result["push"] = "failed"
+    else:
+        result["push"] = None
+    # #212 observability: one line per payload so the push failure rate is
+    # measurable from the service logs. A token that fails to push is the
+    # anomaly worth flagging; the other two states log at info.
+    if result["push"] == "failed":
+        logging.warning(f"XUMM payload {result['uuid']} ({txtype}): push FAILED (token sent)")
+    else:
+        logging.info(
+            f"XUMM payload {result['uuid']} ({txtype}): push={result['push'] or 'no-token'}"
+        )
+    return result
 
 
 async def create_payment_payload(

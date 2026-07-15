@@ -80,6 +80,20 @@ _OFFER_GONE_TEC_CODES = frozenset({"tecOBJECT_NOT_FOUND", "tecEXPIRED"})
 MAX_FINALIZE_POLLS = 10
 
 
+def _capture_issued_token(session: Any, s: dict[str, Any]) -> None:
+    """#212: stamp the push token XUMM issued on a signed payload so the
+    service can persist it (tokens rotate; capturing on every signed payload —
+    not just sign-in — keeps them fresh and self-heals an app-key swap). Only
+    when the signer IS the session's wallet: a shared QR signed by a different
+    account must never overwrite this user's stored token. Sessions that build
+    a LATER payload from their own stored token (the trait-sell wizard) get
+    that token refreshed too, so signature 2 already uses the rotated one."""
+    if s.get("signed") and s.get("user_token") and s.get("account") == session.wallet_address:
+        session.issued_user_token = s["user_token"]
+        if hasattr(session, "push_user_token"):
+            session.push_user_token = s["user_token"]
+
+
 @dataclass
 class ListSession:
     discord_id: str
@@ -100,6 +114,11 @@ class ListSession:
     txid: str | None = None
     poll_count: int = 0
     offer_index: str | None = None
+    # #212: push delivery state of this op's sign request ("sent" | "failed" |
+    # None) and the fresh push token observed once it is signed (cleared by
+    # the service after persisting). Shared shape across List/Cancel/Buy.
+    push: str | None = None
+    issued_user_token: str | None = field(default=None, repr=False)
     kind: str = "list"  # the OP kind, for the shared session-dict status router
 
     def to_dict(self) -> dict[str, Any]:
@@ -110,6 +129,7 @@ class ListSession:
             "error": self.error,
             "qr_url": self.qr_url,
             "xumm_url": self.xumm_url,
+            "push": self.push,
             "offer_index": self.offer_index,
         }
 
@@ -128,6 +148,8 @@ class CancelSession:
     payload_uuid: str | None = None
     qr_url: str | None = None
     xumm_url: str | None = None
+    push: str | None = None  # see ListSession
+    issued_user_token: str | None = field(default=None, repr=False)
     kind: str = "cancel"
 
     def to_dict(self) -> dict[str, Any]:
@@ -138,6 +160,7 @@ class CancelSession:
             "error": self.error,
             "qr_url": self.qr_url,
             "xumm_url": self.xumm_url,
+            "push": self.push,
             "offer_index": self.offer_index,
         }
 
@@ -163,6 +186,8 @@ class BuySession:
     instruction: str | None = None
     txid: str | None = None
     poll_count: int = 0
+    push: str | None = None  # see ListSession
+    issued_user_token: str | None = field(default=None, repr=False)
     kind: str = "buy"
 
     def to_dict(self) -> dict[str, Any]:
@@ -174,6 +199,7 @@ class BuySession:
             "reason": self.reason,
             "qr_url": self.qr_url,
             "xumm_url": self.xumm_url,
+            "push": self.push,
             "instruction": self.instruction,
             "offer_index": self.offer_index,
         }
@@ -214,6 +240,7 @@ async def advance_list_session(
             return None
         if not s.get("signed"):
             return None  # still awaiting_signature
+        _capture_issued_token(session, s)
         txid = s.get("txid")
         if not txid:
             return None  # signed, but XUMM hasn't surfaced the txid yet
@@ -285,6 +312,7 @@ async def advance_cancel_session(
         return False
     if not s.get("signed"):
         return False
+    _capture_issued_token(session, s)
     session.state = DONE
     return True
 
@@ -335,6 +363,7 @@ async def advance_buy_session(
             session.error = "buy offer signed by a different account than the buyer"
             session.reason = "signer_mismatch"
             return None
+        _capture_issued_token(session, s)
         txid = s.get("txid")
         if not txid:
             return None
@@ -403,6 +432,13 @@ class TraitSellSession:
     extract_xumm_url: str | None = None
     list_qr_url: str | None = None
     list_xumm_url: str | None = None
+    # #135/#212: stored push token for this user (threaded into the wizard's
+    # own List payload), per-signature push states for the UI, and the fresh
+    # token observed once a signature lands (cleared by the service).
+    push_user_token: str | None = field(default=None, repr=False)
+    extract_push: str | None = None
+    list_push: str | None = None
+    issued_user_token: str | None = field(default=None, repr=False)
     _extract_payload_uuid: str | None = field(default=None, repr=False)
     _list_session: Any = field(default=None, repr=False)
     kind: str = "trait_list"
@@ -417,8 +453,10 @@ class TraitSellSession:
             "offer_index": self.offer_index,
             "extract_qr_url": self.extract_qr_url,
             "extract_xumm_url": self.extract_xumm_url,
+            "extract_push": self.extract_push,
             "list_qr_url": self.list_qr_url,
             "list_xumm_url": self.list_xumm_url,
+            "list_push": self.list_push,
         }
 
 
@@ -453,6 +491,7 @@ async def advance_trait_sell_session(
         accept = extract.accept or {}
         session.extract_qr_url = accept.get("qr_url")
         session.extract_xumm_url = accept.get("xumm_url")
+        session.extract_push = accept.get("push")
         session._extract_payload_uuid = accept.get("uuid")
         session.state = EXTRACT_DONE
         return None
@@ -477,11 +516,13 @@ async def advance_trait_sell_session(
                 return None
             if not s.get("signed"):
                 return None  # still waiting on signature 1
+            _capture_issued_token(session, s)
 
         payload = await create_sell_offer_payload(
             session.wallet_address,
             session.nft_id,
             str(session.amount_drops),
+            user_token=session.push_user_token,
             platform=memos.platform_for_surface(session.platform),
         )
         if not payload:
@@ -490,6 +531,7 @@ async def advance_trait_sell_session(
             return None
         session.list_qr_url = payload["qr_url"]
         session.list_xumm_url = payload["xumm_url"]
+        session.list_push = payload.get("push")
         inner = ListSession(
             discord_id=session.discord_id,
             wallet_address=session.wallet_address,
@@ -503,6 +545,7 @@ async def advance_trait_sell_session(
         inner.qr_url = payload["qr_url"]
         inner.xumm_url = payload["xumm_url"]
         inner.payload_uuid = payload.get("uuid")
+        inner.push = payload.get("push")
         session._list_session = inner
         session.state = LIST_PENDING
         return None
@@ -512,6 +555,11 @@ async def advance_trait_sell_session(
         row = await advance_list_session(
             inner, get_payload_status=get_payload_status, get_tx=get_tx
         )
+        # Bubble a token the inner List capture observed up to the wizard
+        # session the service actually polls.
+        if inner.issued_user_token:
+            session.issued_user_token = inner.issued_user_token
+            inner.issued_user_token = None
         if inner.state in (FAILED, UNKNOWN):
             session.state = FAILED
             session.error = inner.error

@@ -45,7 +45,7 @@ async def handle_mint(svc: LFGServiceClient, update: Any, context: Any) -> None:
     await bot.send_photo(
         chat_id,
         photo=render.photo_input(qr_png, "payment_qr.png"),
-        caption=render.payment_caption(payment_link),
+        caption=render.payment_caption(payment_link, push=session.get("payment_push")),
     )
 
     # 3. wait for a terminal state (SDK polls /api/mint/<id> + backs off)

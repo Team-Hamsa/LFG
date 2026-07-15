@@ -402,6 +402,17 @@ function renderSteps(stage) {
   }));
 }
 
+// #212: honest sign-request delivery text. `push` comes from the backend per
+// payload: 'sent' = the request was push-delivered to the user's Xaman app,
+// 'failed' = a push was attempted but XUMM couldn't deliver it (the request
+// still appears under Xaman's Events list), null/undefined = plain QR sign
+// (no stored push token). The QR/deep link always remain as the fallback.
+function signText(push, base) {
+  if (push === 'sent') return `${base} We also sent it straight to your Xaman app — just approve it there.`;
+  if (push === 'failed') return `${base} (It's also waiting under Events in Xaman.)`;
+  return base;
+}
+
 function showFlow({ title, text, qrData, link, image, done, stage, spinner, celebrate, pill, regen, cancel }) {
   showPanel('flow-panel');
   renderSteps(stage);
@@ -454,9 +465,9 @@ function mintPayView(s) {
   }
   return {
     title: '💰 Pay to build',
-    text: xrp
+    text: signText(s.payment_push, xrp
       ? `Pay ${s.pay_amount} XRP to mint your avatar — no trustline needed. Scan with Xaman, approve, and hang tight here.`
-      : `Pay ${s.pay_amount || 1} LFGO — burned on mint. Scan with Xaman, approve, and hang tight here.`,
+      : `Pay ${s.pay_amount || 1} LFGO — burned on mint. Scan with Xaman, approve, and hang tight here.`),
     pill,
     qrData: s.payment_link,
     link: s.payment_link,
@@ -506,7 +517,7 @@ function pollMint(sessionId) {
         title: `🎉 Minted! #${s.nft_number} is yours`,
         text: s.accept_scanned
           ? 'Approve the transfer in Xaman to claim it to your wallet…'
-          : 'Scan to accept the transfer and claim it to your wallet. Welcome to the job site.',
+          : signText(s.accept_push, 'Scan to accept the transfer and claim it to your wallet. Welcome to the job site.'),
         qrData: s.accept_scanned ? null : s.accept_deeplink,
         spinner: s.accept_scanned,
         link: s.accept_deeplink,
@@ -921,9 +932,9 @@ function renderSwapPayment(s) {
   if (swapPaymentShown === key) return; // already on screen; don't rebuild
   swapPaymentShown = key;
   el('swap-result-title').textContent = '💰 Swap fee required';
-  el('swap-result-text').textContent =
+  el('swap-result-text').textContent = signText(s.payment_push,
     `Pay ${s.fee_amount} ${s.pay_with || 'BRIX'} to swap your NFT(s) in place. ` +
-    'Scan the QR with Xaman/XUMM or open the link, approve, then wait here.';
+    'Scan the QR with Xaman/XUMM or open the link, approve, then wait here.');
   const box = el('swap-results');
   const qrImg = document.createElement('img');
   qrImg.className = 'result-qr';
@@ -996,10 +1007,14 @@ async function cancelSwap(sessionId, btn) {
 }
 
 function renderSwapResults(s) {
-  const needsAccept = s.results.some((r) => !r.modified);
+  const pendingAccepts = s.results.filter((r) => !r.modified);
+  const needsAccept = pendingAccepts.length > 0;
+  // Only claim "sent to your Xaman app" when EVERY pending accept was pushed —
+  // a partial batch would tell users to approve in-app and miss the QR-only ones.
+  const allPushed = needsAccept && pendingAccepts.every((r) => r.accept_push === 'sent');
   el('swap-result-title').textContent = '🎉 Traits swapped!';
   el('swap-result-text').textContent = needsAccept
-    ? 'Scan each QR (or open in Xaman) to accept your re-crafted NFTs.'
+    ? signText(allPushed ? 'sent' : null, 'Scan each QR (or open in Xaman) to accept your re-crafted NFTs.')
     : 'Your NFTs were updated in place — the new traits are already in your wallet.';
   const box = el('swap-results');
   box.innerHTML = '';
@@ -1212,7 +1227,7 @@ async function openDressup() {
             const r = await api('/api/closet', { method: 'POST' });
             if (r.accept) {
               showFlow({ title: '👜 Create your Closet',
-                text: 'Scan to accept your Closet in Xaman.',
+                text: signText(r.accept_push, 'Scan to accept your Closet in Xaman.'),
                 qrData: r.accept, link: r.accept, done: true });
             }
             economyState = await api('/api/economy');
@@ -1234,7 +1249,7 @@ async function openDressup() {
             const r = await api('/api/closet', { method: 'POST' });
             if (r.accept) {
               showFlow({ title: '👜 Finish claiming your Closet',
-                text: 'Scan to accept your Closet in Xaman.',
+                text: signText(r.accept_push, 'Scan to accept your Closet in Xaman.'),
                 qrData: r.accept, link: r.accept, done: true });
             }
             economyState = await api('/api/economy');
@@ -1385,7 +1400,7 @@ async function extractTrait(slot, value, btnEl) {
     if (final.accept) {
       showFlow({
         title: '🎟️ Extract trait',
-        text: 'Scan to accept your tradeable trait in Xaman.',
+        text: signText(final.accept_push, 'Scan to accept your tradeable trait in Xaman.'),
         qrData: final.accept,
         link: final.accept,
         done: true,
@@ -1545,7 +1560,7 @@ async function commitAssemble(edition, chosen) {
     status('');
     if (final.state === 'failed') throw new Error(final.error || 'assemble failed');
     showFlow({ title: `🎉 #${edition} assembled!`,
-      text: final.accept ? 'Scan to accept your new character in Xaman.'
+      text: final.accept ? signText(final.accept_push, 'Scan to accept your new character in Xaman.')
                          : 'Your new character is on its way.',
       qrData: final.accept || null, link: final.accept || null,
       image: imgUrl(final.image_url), done: true, celebrate: true });
@@ -1835,7 +1850,7 @@ function marketListRender(s) {
     return { title: '🎉 Listed!', text: 'Your listing is live on the Marketplace.', done: true };
   }
   if (s.state === 'awaiting_signature') {
-    return { title: '📋 List for sale', text: 'Scan to sign the sell offer in Xaman.', qrData: s.xumm_url, link: s.xumm_url };
+    return { title: '📋 List for sale', text: signText(s.push, 'Scan to sign the sell offer in Xaman.'), qrData: s.xumm_url, link: s.xumm_url };
   }
   if (s.state === 'unknown') {
     // The finalize poller gave up before confirming, but the listener/backfill
@@ -1850,7 +1865,7 @@ function marketCancelRender(s) {
     return { title: '✅ Listing cancelled', text: 'It is no longer for sale.', done: true };
   }
   if (s.state === 'awaiting_signature') {
-    return { title: '🗑️ Cancel listing', text: 'Scan to sign the cancellation in Xaman.', qrData: s.xumm_url, link: s.xumm_url };
+    return { title: '🗑️ Cancel listing', text: signText(s.push, 'Scan to sign the cancellation in Xaman.'), qrData: s.xumm_url, link: s.xumm_url };
   }
   return { title: '❌ Cancel failed', text: s.error || 'Something went wrong.', done: true };
 }
@@ -1868,7 +1883,7 @@ function marketBuyRender(listingKind) {
       };
     }
     if (s.state === 'awaiting_signature') {
-      return { title: '💳 Confirm purchase', text: s.instruction || 'Scan to sign the purchase in Xaman.', qrData: s.xumm_url, link: s.xumm_url };
+      return { title: '💳 Confirm purchase', text: signText(s.push, s.instruction || 'Scan to sign the purchase in Xaman.'), qrData: s.xumm_url, link: s.xumm_url };
     }
     if (s.reason === 'listing_unavailable') {
       return { title: '⚠️ No longer available', text: 'That listing was just sold or cancelled.', done: true };
@@ -1883,10 +1898,10 @@ function marketTraitListRender(s) {
     return { title: `🎟️ ${step}`, text: 'Preparing your trait token…', spinner: true };
   }
   if (s.state === 'extract_done') {
-    return { title: `🎟️ ${step}`, text: 'Scan to accept your trait token in Xaman.', qrData: s.extract_xumm_url, link: s.extract_xumm_url };
+    return { title: `🎟️ ${step}`, text: signText(s.extract_push, 'Scan to accept your trait token in Xaman.'), qrData: s.extract_xumm_url, link: s.extract_xumm_url };
   }
   if (s.state === 'list_pending') {
-    return { title: `📤 ${step}`, text: 'Scan to sign the sell offer in Xaman.', qrData: s.list_xumm_url, link: s.list_xumm_url };
+    return { title: `📤 ${step}`, text: signText(s.list_push, 'Scan to sign the sell offer in Xaman.'), qrData: s.list_xumm_url, link: s.list_xumm_url };
   }
   if (s.state === 'listed') {
     return { title: '🎉 Listed!', text: 'Your trait is live on the Marketplace.', done: true };

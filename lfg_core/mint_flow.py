@@ -78,6 +78,19 @@ class MintSession:
         self.pay_amount: str | None = None
         self.payment_link: str | None = None
         self.payment_uuid: str | None = None  # XUMM payload uuid for scan tracking
+        # Whether the payment payload itself was signed in Xaman. Polling of
+        # the payment payload stops here (NOT at qr_scanned — the signature,
+        # and the rotated push token it carries, lands after the open).
+        self.payment_signed = False
+        # #212: per-payload push delivery state ("sent" | "failed" | None) so
+        # the UI can say "check your Xaman app" instead of implying a QR scan
+        # is the only path.
+        self.payment_push: str | None = None
+        self.accept_push: str | None = None
+        # #212: a fresh push token observed on a signed payload of this
+        # session, for the service to persist (tokens rotate; sign-in isn't
+        # the only chance to capture one). Cleared by the service on persist.
+        self.issued_user_token: str | None = None
         self.qr_scanned = False  # payment QR opened in Xaman (issue #22)
         self.nft_number: int | None = None
         self.nft_id: str | None = None
@@ -141,12 +154,15 @@ class MintSession:
         if payload:
             self.payment_link = payload["xumm_url"]
             self.payment_uuid = payload.get("uuid")
+            self.payment_push = payload.get("push")
 
     async def regenerate_payment(self) -> None:
         """Replace an expired/missed payment QR with a fresh XUMM payload
         without restarting the whole session (issue #22)."""
         self.qr_scanned = False
         self.payment_uuid = None
+        self.payment_push = None
+        self.payment_signed = False
         await self.prepare_payment()
 
     def cancel(self) -> bool:
@@ -198,6 +214,7 @@ class MintSession:
             "pay_with": self.pay_with,
             "pay_amount": self.pay_amount,
             "payment_link": self.payment_link,
+            "payment_push": self.payment_push,
             "qr_scanned": self.qr_scanned,
             "accept_scanned": self.accept_scanned,
             "accept_signed": self.accept_signed,
@@ -206,6 +223,7 @@ class MintSession:
             "image_url": self.image_url,
             "accept_qr_url": self.accept_qr_url,
             "accept_deeplink": self.accept_deeplink,
+            "accept_push": self.accept_push,
         }
 
 
@@ -479,17 +497,36 @@ async def mint_one_unit(
 async def update_scan_state(session: MintSession) -> None:
     """Refresh the session's QR-scan flags from the XUMM payload status so
     the frontend can swap a scanned QR for a spinner (issue #22). Queries
-    stop once a payload is seen opened/signed; API errors leave the flags
-    untouched."""
-    if session.state == AWAITING_PAYMENT and session.payment_uuid and not session.qr_scanned:
+    stop only once the relevant payload is seen SIGNED (not merely opened);
+    API errors leave the flags untouched."""
+    # Poll the payment payload until it is SIGNED (not merely opened): the
+    # rotated push token only rides on the signature. Bounded by the session
+    # leaving AWAITING_PAYMENT once the payment confirms on-ledger.
+    if session.state == AWAITING_PAYMENT and session.payment_uuid and not session.payment_signed:
         s = await xumm_ops.get_payload_status(session.payment_uuid)
         if s:
             session.qr_scanned = s["opened"] or s["signed"]
+            session.payment_signed = bool(s["signed"])
+            _capture_issued_token(session, s)
     elif session.state == OFFER_READY and session.accept_uuid and not session.accept_signed:
         s = await xumm_ops.get_payload_status(session.accept_uuid)
         if s:
             session.accept_scanned = s["opened"] or s["signed"]
             session.accept_signed = s["signed"]
+            _capture_issued_token(session, s)
+
+
+def _capture_issued_token(session: MintSession, s: dict[str, Any]) -> None:
+    """#212: stamp the push token XUMM issued on a signed payload so the
+    service can persist it (tokens rotate; capturing on every signed payload
+    — not just sign-in — keeps them fresh and self-heals an app-key swap).
+    Only when the signer IS the session's wallet: a shared QR signed by a
+    different account must never overwrite this user's stored token. The
+    session's own push token is refreshed too, so a later payload in the SAME
+    session (the accept offer) already uses the rotated token."""
+    if s.get("signed") and s.get("user_token") and s.get("account") == session.wallet_address:
+        session.issued_user_token = s["user_token"]
+        session.push_user_token = s["user_token"]
 
 
 async def run_mint_session(session: MintSession) -> None:
@@ -563,6 +600,7 @@ async def run_mint_session(session: MintSession) -> None:
         session.accept_qr_url = res.accept["qr_url"]
         session.accept_deeplink = res.accept["xumm_url"]
         session.accept_uuid = res.accept.get("uuid")
+        session.accept_push = res.accept.get("push")
         session.state = OFFER_READY
 
     except Exception as e:

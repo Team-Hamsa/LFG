@@ -10,7 +10,19 @@ import discord
 from discord import Embed
 
 
-def payment_embed(payment_link: str) -> Embed:
+def _push_hint(push: Any) -> str:
+    """#212: one-line delivery hint. 'sent' = the sign request was pushed to
+    the user's Xaman app; 'failed' = a push was attempted but not delivered
+    (the request still shows under Xaman's Events list); anything else = plain
+    QR sign, no hint."""
+    if push == "sent":
+        return "\n📲 Also sent straight to your Xaman app — you can just approve it there.\n"
+    if push == "failed":
+        return "\n(You can also find this request under Events in Xaman.)\n"
+    return ""
+
+
+def payment_embed(payment_link: str, push: Any = None) -> Embed:
     """Step-1 embed. The payment QR is always rendered locally from the
     deeplink and attached, so the image points at the attachment."""
     embed = Embed(
@@ -22,6 +34,7 @@ def payment_embed(payment_link: str) -> Embed:
             "2. Approve the payment\n"
             "3. Wait for confirmation\n\n"
             f"[Open Payment Link]({payment_link})"
+            f"{_push_hint(push)}"
         ),
         color=0x00FF00,
     )
@@ -46,6 +59,7 @@ def offer_embed(final: dict[str, Any], qr_image_url: str) -> Embed:
             "2. Review and accept the offer\n"
             "3. Your NFT will appear in your wallet!\n\n"
             f"[Open in XUMM]({accept_link})"
+            f"{_push_hint(final.get('accept_push'))}"
         ),
         color=0x00FF00,
     )
