@@ -2247,8 +2247,22 @@ async def handle_swap_start(request):
         push_user_token=push_user_token,
     )
     swap_sessions[session.id] = session
-    asyncio.get_event_loop().create_task(swap_flow.run_swap_session(session))
+    # Keep the task handle so /cancel can stop the fee-payment wait
+    # (mirror of mint #141).
+    session.task = asyncio.get_event_loop().create_task(swap_flow.run_swap_session(session))
     return web.json_response(session.to_dict())
+
+
+@require_auth
+async def handle_mint_active(request):
+    """The caller's live (non-terminal) mint session, or null. Discord mobile
+    kills/reloads the Activity webview when the user app-switches to Xaman to
+    sign the payment; the relaunched client has lost its in-memory session id,
+    so it calls this on boot to re-attach to the mint still running here
+    instead of dumping the user back to the home screen mid-mint."""
+    user = request["user"]
+    session = _active_session(mint_sessions, mint_flow.TERMINAL_STATES, user["id"], _platform(user))
+    return web.json_response({"session": session.to_dict() if session else None})
 
 
 @require_auth
@@ -2346,6 +2360,69 @@ async def handle_swap_status(request):
         success_states={swap_flow.OFFERS_READY, swap_flow.DONE},
         fail_states={swap_flow.FAILED, swap_flow.PAYMENT_TIMEOUT},
     )
+    return web.json_response(session.to_dict())
+
+
+# Bound on the XUMM payload rebuild in handle_swap_regenerate (same 8s the
+# mint start/regenerate paths use); module-level so tests can shrink it.
+SWAP_REGEN_TIMEOUT = 8.0
+
+
+def _swap_session_for(request):
+    """The caller's swap session for the path's session_id, or None on any
+    ownership/platform mismatch (identical guard to handle_swap_status)."""
+    session = swap_sessions.get(request.match_info["session_id"])
+    if (
+        not session
+        or session.discord_id != request["user"]["id"]
+        or getattr(session, "platform", "discord") != _platform(request["user"])
+    ):
+        return None
+    return session
+
+
+@require_auth
+async def handle_swap_regenerate(request):
+    """Issue a fresh fee-payment QR for a swap whose XUMM payload expired
+    before the user could scan it (mirror of mint issue #22 — the swap fee
+    screen previously offered no way to refresh a stale QR)."""
+    session = _swap_session_for(request)
+    if not session:
+        return web.json_response({"error": "not found"}, status=404)
+    if session.state != swap_flow.AWAITING_PAYMENT:
+        return web.json_response({"error": "session is past payment"}, status=409)
+    # Unlike the mint pay screen (whose static-link fallback keeps its 200
+    # honest), a swallowed failure here would echo the STALE link with a 200
+    # and the button would appear dead — surface it instead.
+    try:
+        ok = await asyncio.wait_for(session.regenerate_payment(), timeout=SWAP_REGEN_TIMEOUT)
+    except asyncio.TimeoutError:
+        return web.json_response({"error": "payment QR regeneration timed out"}, status=504)
+    except Exception as e:
+        logging.warning(f"swap regenerate_payment failed: {e}")
+        ok = False
+    if not ok:
+        return web.json_response({"error": "could not build a new payment QR"}, status=502)
+    return web.json_response(session.to_dict())
+
+
+@require_auth
+async def handle_swap_cancel(request):
+    """Back out of the swap fee screen (mirror of mint issue #141): mark an
+    awaiting_payment session terminal so the per-user swap lock releases
+    immediately, and stop its background payment wait. Cancelling an
+    already-terminal session is a safe no-op; a session past payment (fee
+    taken) returns 409."""
+    session = _swap_session_for(request)
+    if not session:
+        return web.json_response({"error": "not found"}, status=404)
+    if session.state in swap_flow.TERMINAL_STATES:
+        return web.json_response(session.to_dict())  # already over — no-op
+    if not session.cancel():
+        return web.json_response({"error": "session is past payment"}, status=409)
+    # A deliberate cancel is not a swap outcome: suppress the terminal
+    # swap.completed/swap.failed publish a late status poll would fire.
+    session.mark_published()
     return web.json_response(session.to_dict())
 
 
@@ -2782,6 +2859,9 @@ def create_app() -> web.Application:
     app.router.add_get("/api/account", handle_account)
     app.router.add_post("/api/register", handle_register)
     app.router.add_post("/api/mint", handle_mint_start)
+    # /active must register BEFORE /{session_id}: aiohttp dispatches in
+    # registration order, and the dynamic route would swallow it as an id.
+    app.router.add_get("/api/mint/active", handle_mint_active)
     app.router.add_get("/api/mint/{session_id}", handle_mint_status)
     app.router.add_post("/api/mint/{session_id}/regenerate", handle_mint_regenerate)
     app.router.add_post("/api/mint/{session_id}/cancel", handle_mint_cancel)
@@ -2802,6 +2882,8 @@ def create_app() -> web.Application:
     app.router.add_get("/api/market/trait/list/{session_id}", handle_market_trait_list_status)
     app.router.add_post("/api/swap", handle_swap_start)
     app.router.add_get("/api/swap/{session_id}", handle_swap_status)
+    app.router.add_post("/api/swap/{session_id}/regenerate", handle_swap_regenerate)
+    app.router.add_post("/api/swap/{session_id}/cancel", handle_swap_cancel)
     app.router.add_get("/api/qr.png", handle_qr)
     app.router.add_get("/api/img", handle_img)
     app.router.add_get("/api/layer", handle_layer)

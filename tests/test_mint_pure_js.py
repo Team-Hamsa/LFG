@@ -125,3 +125,126 @@ def test_app_js_poll_generation_guard():
     assert "let pollGen = 0" in src
     assert "const gen = ++pollGen" in src
     assert "if (gen !== pollGen) return" in src
+
+
+# ---------------------------------------------------------------------------
+# activeMintSessionId(activeResult) -> session id | null
+#   activeResult: the GET /api/mint/active response body ({"session": ...}),
+#   or null when the call failed. Resume only a LIVE session — the server
+#   filters terminal states already, but the client stays defensive.
+#   (Mint session resume: Discord mobile reloads the Activity when the user
+#   app-switches to Xaman; the relaunched client re-attaches via this call.)
+# ---------------------------------------------------------------------------
+
+
+def test_active_none_response_goes_home():
+    assert run_js("M.activeMintSessionId(null)") is None
+
+
+def test_active_no_session_goes_home():
+    assert run_js("M.activeMintSessionId({session: null})") is None
+
+
+def test_active_live_session_resumes():
+    assert (
+        run_js("M.activeMintSessionId({session: {id: 'abc', state: 'awaiting_payment'}})") == "abc"
+    )
+
+
+def test_active_mid_pipeline_session_resumes():
+    assert run_js("M.activeMintSessionId({session: {id: 'abc', state: 'minting'}})") == "abc"
+
+
+def test_active_terminal_session_goes_home():
+    for state in ["offer_ready", "done", "failed", "payment_timeout", "cancelled"]:
+        assert (
+            run_js(f"M.activeMintSessionId({{session: {{id: 'abc', state: '{state}'}}}})") is None
+        )
+
+
+def test_active_session_without_id_goes_home():
+    assert run_js("M.activeMintSessionId({session: {state: 'awaiting_payment'}})") is None
+
+
+# --- app.js wiring: boot must re-attach to a live mint session -------------
+
+
+def test_app_js_boot_resumes_active_mint():
+    src = open(APP_JS).read()
+    assert "/api/mint/active" in src
+    assert "activeMintSessionId" in src
+    assert "function resumeMint" in src
+
+
+# --- app.js wiring: the swap fee-QR screen must offer a way out ------------
+# (User report: a stale fee QR left the Trait Swapper with no regenerate and
+# no back button — closing and reopening the whole Activity was the only
+# escape. Mirror the mint pay screen's regen + cancel affordances.)
+
+
+def test_app_js_swap_payment_screen_has_regen_and_cancel():
+    src = open(APP_JS).read()
+    body = src.split("function renderSwapPayment", 1)[1].split("\nfunction ", 1)[0]
+    assert "regenerate" in body
+    assert "cancelSwap" in body
+
+
+def test_app_js_swap_regenerated_qr_rerenders():
+    """renderSwapPayment skips re-rendering for the same session id; after a
+    regenerate the payment_link changes but the id doesn't, so the guard must
+    key on the link too or the fresh QR never appears."""
+    src = open(APP_JS).read()
+    body = src.split("function renderSwapPayment", 1)[1].split("\nfunction ", 1)[0]
+    assert "payment_link" in body.split("return;", 1)[0]
+
+
+def test_app_js_swap_poll_handles_cancelled():
+    src = open(APP_JS).read()
+    body = src.split("function pollSwap", 1)[1].split("\nfunction ", 1)[0]
+    assert "'cancelled'" in body
+
+
+def test_app_js_swap_cancel_reuses_cancel_outcome():
+    """cancelSwap must reuse the shared cancel decision (mint issue #141):
+    a refused cancel (fee already paid) resumes polling, never strands or
+    dumps the user."""
+    src = open(APP_JS).read()
+    assert "async function cancelSwap" in src
+    body = src.split("async function cancelSwap", 1)[1].split("\n}\n", 1)[0]
+    assert "cancelMintOutcome" in body
+    assert "pollSwap(" in body
+
+
+def test_app_js_main_wallet_branch_awaits_resume_before_home():
+    """CodeRabbit #216: global substring checks pass even if resumeMint goes
+    dead — assert the exact boot wiring: the wallet branch awaits resumeMint
+    and only falls back to showMintHome when nothing resumed."""
+    src = open(APP_JS).read()
+    main_body = src.split("async function main", 1)[1]
+    assert "if (!(await resumeMint())) showMintHome();" in main_body
+
+
+def test_app_js_resume_cancel_warns_only_when_scanned():
+    """Greptile #216 P2: a resumed unscanned awaiting_payment session provably
+    has nothing signed in Xaman — the cancel warning must key on the session's
+    qr_scanned flag, not fire unconditionally."""
+    src = open(APP_JS).read()
+    body = src.split("async function resumeMint", 1)[1].split("\n}\n", 1)[0]
+    assert "cancelMint(true)" not in body
+    # The exact conditional wiring, not mere symbol presence: the warning flag
+    # IS the session's scan state.
+    assert "cancelMint(!!active.session.qr_scanned)" in body
+
+
+def test_app_js_swap_cancel_invalidates_inflight_poll():
+    """CodeRabbit #216: clearTimeout can't stop a tick already awaiting the
+    status API — it could repaint the fee screen after openSwapper(). The
+    generation token must be bumped on the way out."""
+    src = open(APP_JS).read()
+    body = src.split("async function cancelSwap", 1)[1].split("\n}\n", 1)[0]
+    # On the exit path specifically: after the go-home decision, before the
+    # panel switch — not merely somewhere in the function.
+    outcome_idx = body.index("cancelMintOutcome")
+    bump_idx = body.index("++swapPollGen")
+    open_idx = body.index("openSwapper()", outcome_idx)
+    assert outcome_idx < bump_idx < open_idx
