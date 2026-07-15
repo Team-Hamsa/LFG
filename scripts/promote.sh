@@ -8,6 +8,10 @@ set -euo pipefail
 
 REMOTE="${PROMOTE_REMOTE:-origin}"
 YES=0
+if [ "$#" -gt 1 ]; then
+  echo "Usage: $0 [--yes]" >&2
+  exit 2
+fi
 case "${1:-}" in
   "") ;;
   --yes) YES=1 ;;
@@ -54,5 +58,11 @@ if [ "$YES" -ne 1 ]; then
   esac
 fi
 
-git push "$REMOTE" "$MAIN:refs/heads/deploy"
+# Push the MAIN sha captured above (not a possibly-newer origin/main) — you
+# promote what you reviewed in the range printed above, not whatever landed
+# on main in the interim. --force-with-lease guards against deploy having
+# moved (force-push or direct commit) between the snapshot and this push;
+# it is NOT a --force — the push still fails unless it is a fast-forward
+# (or origin/deploy still matches DEPLOY, when a lease is honored).
+git push --force-with-lease="refs/heads/deploy:$DEPLOY" "$REMOTE" "$MAIN:refs/heads/deploy"
 echo "Promoted. lfg-deployer will deploy prod within ~60s (watch: pm2 logs lfg-deployer)."

@@ -18,6 +18,9 @@ def _scrubbed_env():
         "GIT_AUTHOR_EMAIL": "t@t",
         "GIT_COMMITTER_NAME": "t",
         "GIT_COMMITTER_EMAIL": "t@t",
+        # Pin explicitly: an inherited PROMOTE_REMOTE could redirect these
+        # tests at a different remote than the "origin" they set up.
+        "PROMOTE_REMOTE": "origin",
     }
 
 
@@ -83,6 +86,40 @@ def test_promote_rejects_unknown_arg(tmp_path):
     assert "usage" in (r.stdout + r.stderr).lower()
     _git(work, "fetch", "origin")
     assert _git(work, "rev-parse", "origin/deploy") != _git(work, "rev-parse", "origin/main")
+
+
+def test_promote_rejects_extra_positional_args(tmp_path):
+    origin, work = _setup(tmp_path)
+    r = _run(work, "--yes", "extra")
+    assert r.returncode == 2
+    assert "usage" in (r.stdout + r.stderr).lower()
+    _git(work, "fetch", "origin")
+    assert _git(work, "rev-parse", "origin/deploy") != _git(work, "rev-parse", "origin/main")
+
+
+def test_promote_rejects_non_fast_forward(tmp_path):
+    origin, work = _setup(tmp_path)
+    # Simulate someone committing directly to deploy: rewind a second clone
+    # to origin/deploy and add a commit only deploy has, so deploy is no
+    # longer an ancestor of main.
+    second = tmp_path / "second"
+    _git(tmp_path, "clone", str(origin), str(second))
+    _git(second, "checkout", "-B", "deploy", "origin/deploy")
+    (second / "diverged.py").write_text("z = 1\n")
+    _git(second, "add", ".")
+    _git(second, "commit", "-m", "direct commit to deploy")
+    _git(second, "push", "origin", "deploy")
+
+    r = _run(work, "--yes")
+    assert r.returncode == 1
+    assert "not a fast-forward" in (r.stdout + r.stderr).lower() or "NOT an ancestor" in (
+        r.stdout + r.stderr
+    )
+    _git(work, "fetch", "origin")
+    deploy_after = _git(work, "rev-parse", "origin/deploy")
+    _git(second, "fetch", "origin")
+    deploy_expected = _git(second, "rev-parse", "origin/deploy")
+    assert deploy_after == deploy_expected  # no push happened
 
 
 def test_promote_noop_when_already_promoted(tmp_path):
