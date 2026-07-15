@@ -12,12 +12,12 @@ broken by app code. Do not import lfg_core or any third-party package.
 from __future__ import annotations
 
 import argparse  # noqa: F401
-import json  # noqa: F401
+import json
 import re
 import subprocess
 import sys  # noqa: F401
-import time  # noqa: F401
-import urllib.request  # noqa: F401
+import time
+import urllib.request
 from dataclasses import dataclass
 
 HOME = "/home/hamsa"
@@ -115,3 +115,75 @@ def needs_restart(files: list[str]) -> bool:
 
 def needs_pip(files: list[str]) -> bool:
     return any(_PIP_RE.match(f) for f in files)
+
+
+def _default_fetcher(url: str) -> bytes:
+    with urllib.request.urlopen(url, timeout=3) as resp:
+        return resp.read()
+
+
+def active_sessions(url, fetcher=None):
+    # -> int | None ; None means unreachable or malformed (fail-unknown).
+    fetcher = fetcher or _default_fetcher
+    try:
+        body = json.loads(fetcher(url))
+        n = body["active_sessions"]
+        return n if isinstance(n, int) else None
+    except Exception:
+        return None
+
+
+def drain(cfg: StackConfig, fetcher=None, sleeper=time.sleep, clock=time.monotonic) -> str:
+    deadline = clock() + cfg.drain_max_wait
+    first = True
+    while True:
+        n = active_sessions(cfg.health_url, fetcher=fetcher)
+        if n is None:
+            # Unreachable (first probe or mid-drain): we cannot confirm the
+            # session count — report it and let posture decide.
+            log(
+                f"{cfg.name}: /api/health unreachable"
+                + (" on first probe" if first else " mid-drain")
+            )
+            return "unreachable"
+        first = False
+        if n == 0:
+            return "drained"
+        if clock() >= deadline:
+            log(f"{cfg.name}: {n} session(s) still in flight after {cfg.drain_max_wait}s")
+            return "timeout"
+        log(f"{cfg.name}: {n} in-flight session(s); waiting for drain…")
+        sleeper(cfg.drain_poll)
+
+
+def _default_runner(cmd: list[str]) -> int:
+    return subprocess.call(cmd)
+
+
+def restart_stack(cfg: StackConfig, runner=None) -> bool:
+    runner = runner or _default_runner
+    ok = True
+    for name in cfg.restart_processes:
+        rc = runner(["pm2", "restart", name, "--update-env"])
+        if rc != 0:
+            log(f"{cfg.name}: WARNING pm2 restart {name} failed (rc={rc})")
+            ok = False
+    return ok
+
+
+def drain_and_restart(
+    cfg: StackConfig, fetcher=None, runner=None, sleeper=time.sleep, clock=time.monotonic
+) -> str:
+    outcome = drain(cfg, fetcher=fetcher, sleeper=sleeper, clock=clock)
+    if outcome != "drained" and cfg.refuse_on_drain_failure:
+        # Prod posture (verbatim from the retired post-merge hook): never
+        # cut off in-flight mint/swap/market work; hand it to a human.
+        log(
+            f"{cfg.name}: drain outcome={outcome}; REFUSING auto-restart. "
+            f"Restart manually when safe: pm2 restart "
+            f"{' '.join(cfg.restart_processes)} --update-env"
+        )
+        return "refused"
+    if outcome != "drained":
+        log(f"{cfg.name}: drain outcome={outcome}; restarting anyway (staging posture)")
+    return "restarted" if restart_stack(cfg, runner=runner) else "restart_failed"
