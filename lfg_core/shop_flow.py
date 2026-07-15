@@ -216,6 +216,7 @@ async def start_shop_buy(session: ShopBuySession, deps: ShopDeps) -> None:
                 session.buyer,
                 amount=brix_amount(session.price_brix),
                 expiration=expiration,
+                platform=memos.platform_for_surface(session.platform),
                 action=memos.ACTION_SHOP_BUY,
             )
         except Exception:
@@ -285,5 +286,8 @@ async def advance_shop_buy(session: ShopBuySession, deps: ShopDeps) -> None:
 
     shop_store.update_order(deps.conn, session.id, now_ts=deps.now_ts_fn(), status="settled")
     app_conn = deps.app_conn_factory()
-    rarity.increment_shop_count(app_conn, deps.network, session.slot, session.value)
+    try:
+        rarity.increment_shop_count(app_conn, deps.network, session.slot, session.value)
+    finally:
+        app_conn.close()
     session.state = DONE

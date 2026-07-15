@@ -60,7 +60,7 @@ class _F:
         self.offer_fails = offer_fails
         self.deposit_fails = deposit_fails
         self.mints: list[tuple[str, int, int, str, str]] = []
-        self.offers: list[tuple[str, str, dict, int, str]] = []
+        self.offers: list[tuple[str, str, dict, int, str, str]] = []
         self.burns: list[tuple[str, str]] = []
         self.accepts: list[str] = []
         self.deposits: list[tuple[str, str]] = []
@@ -83,9 +83,16 @@ class _F:
         return self.minted_nft_id
 
     async def offer(
-        self, nft_id: str, destination: str, *, amount: dict, expiration: int, action: str
+        self,
+        nft_id: str,
+        destination: str,
+        *,
+        amount: dict,
+        expiration: int,
+        platform: str,
+        action: str,
     ) -> str | None:
-        self.offers.append((nft_id, destination, amount, expiration, action))
+        self.offers.append((nft_id, destination, amount, expiration, platform, action))
         if self.offer_fails:
             return None
         return "OFFER_INDEX_ABC"
@@ -163,9 +170,14 @@ def _economy_deps(f: _F, tmp) -> ef.EconomyDeps:
 
 def _deps(conn, f: _F, tmp, *, now_ts: int = 1_752_000_000, network: str = "testnet"):
     f.conn = conn
+    db_path = conn.execute("PRAGMA database_list").fetchone()[2]
     return shop_flow.ShopDeps(
         conn=conn,
-        app_conn_factory=lambda: conn,
+        # Fresh connection per call, mirroring production's
+        # sqlite3.connect(db_path.app_db_path(network)) — shop_flow now
+        # closes this connection after use, so it must not be the shared
+        # `conn` the rest of the test still reads from.
+        app_conn_factory=lambda: sqlite3.connect(db_path),
         economy_deps=_economy_deps(f, tmp),
         mint_fn=f.mint,
         offer_fn=f.offer,
@@ -191,7 +203,7 @@ def _signed_status(*, account: str):
 
 
 def test_happy_path_start_then_settle(tmp_path):
-    conn = sqlite3.connect(":memory:")
+    conn = sqlite3.connect(str(tmp_path / "economy.db"))
     _active_closet(conn)
     f = _F()
     deps = _deps(conn, f, tmp_path)
@@ -203,6 +215,8 @@ def test_happy_path_start_then_settle(tmp_path):
     assert session.nft_id == f.minted_nft_id
     assert session.offer_index == "OFFER_INDEX_ABC"
     assert session.accept is not None and session.accept["uuid"] == "PAYLOAD-UUID"
+    assert len(f.offers) == 1
+    assert f.offers[0][4] == "discord-activity"  # platform threaded into the offer memo
 
     order = shop_store.get_order(conn, session.id)
     assert order is not None
@@ -229,7 +243,7 @@ def test_happy_path_start_then_settle(tmp_path):
 
 
 def test_mint_failure_no_supply_row(tmp_path):
-    conn = sqlite3.connect(":memory:")
+    conn = sqlite3.connect(str(tmp_path / "economy.db"))
     _active_closet(conn)
     f = _F(mint_fails=True)
     deps = _deps(conn, f, tmp_path)
@@ -247,7 +261,7 @@ def test_mint_failure_no_supply_row(tmp_path):
 
 
 def test_offer_failure_after_mint_reverts_with_burn_and_two_supply_rows(tmp_path):
-    conn = sqlite3.connect(":memory:")
+    conn = sqlite3.connect(str(tmp_path / "economy.db"))
     _active_closet(conn)
     f = _F(offer_fails=True)
     deps = _deps(conn, f, tmp_path)
@@ -272,7 +286,7 @@ def test_offer_failure_after_mint_reverts_with_burn_and_two_supply_rows(tmp_path
 
 
 def test_signer_mismatch_leaves_order_pending_accept(tmp_path):
-    conn = sqlite3.connect(":memory:")
+    conn = sqlite3.connect(str(tmp_path / "economy.db"))
     _active_closet(conn)
     f = _F()
     deps = _deps(conn, f, tmp_path)
@@ -292,7 +306,7 @@ def test_signer_mismatch_leaves_order_pending_accept(tmp_path):
 
 
 def test_settle_failure_leaves_order_accepted_and_session_settling(tmp_path):
-    conn = sqlite3.connect(":memory:")
+    conn = sqlite3.connect(str(tmp_path / "economy.db"))
     _active_closet(conn)
     f = _F(deposit_fails=True)
     deps = _deps(conn, f, tmp_path)
@@ -318,7 +332,7 @@ def test_settle_failure_leaves_order_accepted_and_session_settling(tmp_path):
 
 
 def test_advance_noop_on_none_status(tmp_path):
-    conn = sqlite3.connect(":memory:")
+    conn = sqlite3.connect(str(tmp_path / "economy.db"))
     _active_closet(conn)
     f = _F()
     deps = _deps(conn, f, tmp_path)
@@ -340,7 +354,7 @@ def test_advance_noop_on_none_status(tmp_path):
 
 
 def test_advance_idempotent_after_done(tmp_path):
-    conn = sqlite3.connect(":memory:")
+    conn = sqlite3.connect(str(tmp_path / "economy.db"))
     _active_closet(conn)
     f = _F()
     deps = _deps(conn, f, tmp_path)
@@ -364,7 +378,7 @@ def test_advance_idempotent_after_done(tmp_path):
 
 
 def test_offer_fn_raises_reverts_with_burn_and_two_supply_rows(tmp_path):
-    conn = sqlite3.connect(":memory:")
+    conn = sqlite3.connect(str(tmp_path / "economy.db"))
     _active_closet(conn)
     f = _F()
 
@@ -394,7 +408,7 @@ def test_offer_fn_raises_reverts_with_burn_and_two_supply_rows(tmp_path):
 
 
 def test_offer_fn_and_burn_fn_both_raise_leaves_admin_intervention(tmp_path):
-    conn = sqlite3.connect(":memory:")
+    conn = sqlite3.connect(str(tmp_path / "economy.db"))
     _active_closet(conn)
     f = _F()
 

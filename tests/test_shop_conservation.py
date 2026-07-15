@@ -100,7 +100,7 @@ class _F:
         self.owner_of[self.minted_nft_id] = config.SWAP_ISSUER_ADDRESS
         return self.minted_nft_id
 
-    async def offer(self, nft_id, destination, *, amount, expiration, action):
+    async def offer(self, nft_id, destination, *, amount, expiration, platform, action):
         return "OFFER_INDEX_ABC"
 
     async def burn(self, nft_id, owner):
@@ -165,9 +165,11 @@ def _economy_deps(f: _F, tmp) -> ef.EconomyDeps:
 
 def _shop_deps(conn, f: _F, tmp) -> shop_flow.ShopDeps:
     f.conn = conn
+    db_path = conn.execute("PRAGMA database_list").fetchone()[2]
     return shop_flow.ShopDeps(
         conn=conn,
-        app_conn_factory=lambda: conn,
+        # Fresh connection per call (shop_flow closes it after use).
+        app_conn_factory=lambda: sqlite3.connect(db_path),
         economy_deps=_economy_deps(f, tmp),
         mint_fn=f.mint,
         offer_fn=f.offer,
@@ -180,7 +182,7 @@ def _shop_deps(conn, f: _F, tmp) -> shop_flow.ShopDeps:
 
 
 def test_happy_path_purchase_has_zero_conservation_drift(tmp_path):
-    conn = sqlite3.connect(":memory:")
+    conn = sqlite3.connect(str(tmp_path / "economy.db"))
     _active_closet(conn)
     f = _F()
     deps = _shop_deps(conn, f, tmp_path)
