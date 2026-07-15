@@ -11,7 +11,7 @@ import os
 import time
 import traceback
 import uuid
-from collections.abc import Callable
+from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
 from decimal import Decimal
 from typing import Any
@@ -269,6 +269,7 @@ async def mint_one_unit(
     nft_number: int,
     session_tag: str,
     on_state: Callable[[str], None] | None = None,
+    on_mint: Callable[[int, str, str | None], Awaitable[None]] | None = None,
 ) -> UnitResult:
     """Compose -> upload -> mint -> record (+ rarity) -> offer -> XUMM accept
     payload for a single edition, on a pre-allocated `nft_number`. Extracted
@@ -282,6 +283,11 @@ async def mint_one_unit(
     run_mint_session used to set session.state, so a single-mint caller can
     keep reporting its finer-grained MINTING/CREATING_OFFER UI states while
     bulk callers can ignore it entirely.
+
+    `on_mint` is an optional async callback fired the instant the mint is
+    confirmed on-chain (nft_number, nft_id, image_url), before the offer/XUMM
+    steps run. A bulk caller uses it to durably persist MINTED immediately so
+    a crash in the offer step can never trigger a re-mint on resume.
     """
     nft_id: str | None = None
     try:
@@ -353,6 +359,15 @@ async def mint_one_unit(
         # Mint confirmed — publish the new edition's art to the local archive
         # so /api/img serves it immediately (best-effort, #163).
         image_archive.promote_still(config.XRPL_NETWORK, nft_number, session_tag)
+
+        # Fire on_mint the instant the mint is confirmed on-chain, before any
+        # further awaits (offer creation / XUMM accept payload). A bulk caller
+        # uses this to persist the unit as MINTED immediately, so a crash in
+        # the offer step can never cause a resume to re-mint a second edition
+        # for the same unit (#215 double-mint window). Single mint passes
+        # nothing -> no behavior change.
+        if on_mint:
+            await on_mint(nft_number, nft_id, image_cdn_url)
 
         traits_dict = {t["trait_type"]: t["value"] for t in metadata["attributes"]}
         # The LFG table's headwear column is named Hat (layer tree uses Head)

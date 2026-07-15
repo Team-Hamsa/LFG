@@ -50,6 +50,7 @@ def test_routes_registered():
         "/api/mint/active",
         "/api/mint/bulk",
         "/api/mint/bulk/active",
+        "/api/mint/bulk/{session_id}/cancel",
         "/api/mint/{session_id}",
         "/api/nfts",
         "/api/swap",
@@ -69,6 +70,7 @@ def test_routes_registered():
     for expected_pair in [
         ("GET", "/api/mint/active"),
         ("GET", "/api/mint/bulk/active"),
+        ("POST", "/api/mint/bulk/{session_id}/cancel"),
         ("POST", "/api/swap/{session_id}/regenerate"),
         ("POST", "/api/swap/{session_id}/cancel"),
     ]:

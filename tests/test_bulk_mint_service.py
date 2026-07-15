@@ -202,3 +202,53 @@ def test_bulk_start_second_concurrent_request_is_rejected(dev_auth, monkeypatch)
     )
     # Only one job for this user should have been registered.
     assert len(dev_auth) == 1
+
+
+def test_bulk_start_prepare_payment_failure_frees_slot(dev_auth, monkeypatch):
+    """If prepare_payment raises, the job must not wedge the user's bulk slot
+    forever: it must end up terminal (or evicted) so a follow-up start does
+    NOT 409."""
+
+    async def _boom(self):
+        raise RuntimeError("xumm is down")
+
+    monkeypatch.setattr(bulk_mint_flow.BulkMintJob, "prepare_payment", _boom)
+
+    req = _post_request("/api/mint/bulk", {"quantity": 1})
+    resp = _run(server.handle_bulk_mint_start(req))
+    assert resp.status >= 500
+
+    # The user's slot must be free: a follow-up start must not 409.
+    monkeypatch.setattr(bulk_mint_flow.BulkMintJob, "prepare_payment", lambda self: _noop())
+    req2 = _post_request("/api/mint/bulk", {"quantity": 1})
+    resp2 = _run(server.handle_bulk_mint_start(req2))
+    assert resp2.status == 200
+
+
+async def _noop():
+    return None
+
+
+def test_bulk_cancel_route_registered():
+    app = server.create_app()
+    method_paths = {(r.method, getattr(r.resource, "canonical", "")) for r in app.router.routes()}
+    assert ("POST", "/api/mint/bulk/{session_id}/cancel") in method_paths
+
+
+def test_bulk_cancel_awaiting_payment_job(dev_auth):
+    job = bulk_mint_flow.BulkMintJob(
+        discord_id="dev", wallet_address="rTest", requested_qty=1, platform="discord"
+    )
+    dev_auth[job.id] = job
+    resp = _run(server.handle_bulk_mint_cancel(_StatusReq(job.id)))
+    assert resp.status == 200
+    import json as _json
+
+    body = _json.loads(resp.body.decode())
+    assert body["state"] == bulk_mint_flow.CANCELLED
+    assert job.state == bulk_mint_flow.CANCELLED
+
+
+def test_bulk_cancel_not_found(dev_auth):
+    resp = _run(server.handle_bulk_mint_cancel(_StatusReq("nope")))
+    assert resp.status == 404

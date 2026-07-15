@@ -264,11 +264,50 @@ def delete_record(job_id: str) -> None:
 _UNIT_MAX_ATTEMPTS = 3
 
 
+async def _ensure_offer(job: BulkMintJob, unit: Unit) -> None:
+    """Re-offer-only path for a unit that already minted (unit.nft_id set)
+    but never reached OFFERED — the crash window between the on-chain mint
+    and the offer/XUMM steps landing. NEVER mints; only (re-)creates the sell
+    offer for the existing nft_id. On success -> OFFERED. On failure, leave
+    the unit MINTED with .error set so a later resume/backfill can retry the
+    offer again without ever re-minting."""
+    assert unit.nft_id is not None, "_ensure_offer requires an already-minted unit"
+    try:
+        offer_id = await xrpl_ops.create_nft_offer(
+            unit.nft_id,
+            job.wallet_address,
+            platform=memos.platform_for_surface(job.platform),
+        )
+    except Exception as e:
+        unit.state = MINTED
+        unit.error = str(e)
+        return
+    if not offer_id:
+        unit.state = MINTED
+        unit.error = "offer creation failed"
+        return
+    unit.offer_id = offer_id
+    unit.state = OFFERED
+
+
 async def _fulfill_unit(job: BulkMintJob, unit: Unit) -> None:
     """Mint+offer one unit. Cap re-check first (a concurrent job may have
     consumed the tail); a cap-hit or exhausted unit becomes a mint credit
-    rather than a loss. Cap-exempt (burn) entitlements skip the re-check."""
+    rather than a loss. Cap-exempt (burn) entitlements skip the re-check.
+
+    `on_mint` fires the instant mint_one_unit confirms the mint on-chain, so
+    the unit is persisted as MINTED before the offer/XUMM steps run — closing
+    the resume double-mint window (#215): a crash between mint and offer now
+    resumes via _ensure_offer (re-offer only), never a re-mint."""
     cap_exempt = job.entitlement is not None and getattr(job.entitlement, "cap_exempt", False)
+
+    async def _on_mint(nft_number: int, nft_id: str, image_url: str | None) -> None:
+        unit.nft_number = nft_number
+        unit.nft_id = nft_id
+        unit.image_url = image_url
+        unit.state = MINTED
+        persist(job)
+
     for _ in range(_UNIT_MAX_ATTEMPTS):
         if not cap_exempt and supply.current_supply(job.network) >= config.MAX_COLLECTION_SIZE:
             break  # cap hit -> credit below
@@ -281,6 +320,7 @@ async def _fulfill_unit(job: BulkMintJob, unit: Unit) -> None:
             return_url=job.return_url,
             nft_number=nft_number,
             session_tag=f"{job.id}:{unit.index}",
+            on_mint=_on_mint,
         )
         if res.nft_id:
             unit.nft_id = res.nft_id
@@ -290,9 +330,10 @@ async def _fulfill_unit(job: BulkMintJob, unit: Unit) -> None:
                 unit.offer_id = res.offer_id
                 unit.state = OFFERED
             else:
-                # minted but offer failed: NFT exists, do NOT re-mint. Mark
-                # failed (delivered-pending-offer); admin/backfill re-offers.
-                unit.state = UNIT_FAILED
+                # minted but offer failed: NFT exists, do NOT re-mint. Leave
+                # MINTED (not UNIT_FAILED) so a resume re-offers instead of
+                # treating this as a dead/credited unit.
+                unit.state = MINTED
                 unit.error = res.error or "offer creation failed"
             return
         unit.error = res.error  # transient mint failure: retry
@@ -328,7 +369,12 @@ async def run_bulk_mint_job(job: BulkMintJob) -> None:
         for unit in job.units:
             if unit.state in (OFFERED, UNIT_FAILED):
                 continue  # resume: skip already-processed units
-            await _fulfill_unit(job, unit)
+            if unit.state == MINTED:
+                # Already minted (possibly in a prior process) — re-offer
+                # only, never re-mint.
+                await _ensure_offer(job, unit)
+            else:
+                await _fulfill_unit(job, unit)
             persist(job)
 
         job.state = DONE

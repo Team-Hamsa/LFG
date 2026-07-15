@@ -2559,7 +2559,18 @@ async def handle_bulk_mint_start(request):
         )
     bulk_sessions[job.id] = job
 
-    await job.prepare_payment()
+    try:
+        await job.prepare_payment()
+    except Exception as e:
+        # Never leave a non-terminal job with no task in bulk_sessions — that
+        # would permanently wedge this user's bulk slot (every future POST
+        # would 409 "already in progress" until a service restart). Mark it
+        # terminal so _prune_sessions evicts it and _active_session skips it.
+        logging.error(f"bulk job {job.id} prepare_payment failed: {e}")
+        job.state = bulk_mint_flow.FAILED
+        job.error = str(e)
+        return web.json_response({"error": "payment_setup_failed"}, status=500)
+
     job.task = asyncio.create_task(bulk_mint_flow.run_bulk_mint_job(job))
     return web.json_response(job.to_dict())
 
@@ -2587,6 +2598,26 @@ async def handle_bulk_mint_active(request):
         bulk_sessions, bulk_mint_flow.TERMINAL_STATES, user["id"], _platform(user)
     )
     return web.json_response({"session": job.to_dict() if job else None})
+
+
+@require_auth
+async def handle_bulk_mint_cancel(request):
+    """Back out of the bulk pay screen (mirrors handle_mint_cancel/#141): only
+    legal while AWAITING_PAYMENT — once paid, fulfillment must run to
+    completion. Cancelling frees the per-user bulk slot immediately."""
+    job = bulk_sessions.get(request.match_info["session_id"])
+    if (
+        not job
+        or job.discord_id != request["user"]["id"]
+        or getattr(job, "platform", "discord") != _platform(request["user"])
+    ):
+        return web.json_response({"error": "not found"}, status=404)
+    if job.state in bulk_mint_flow.TERMINAL_STATES:
+        return web.json_response(job.to_dict())  # already over — no-op
+    if not job.cancel():
+        return web.json_response({"error": "job is past payment"}, status=409)
+    job.mark_published()
+    return web.json_response(job.to_dict())
 
 
 async def resume_bulk_jobs() -> None:
@@ -3492,6 +3523,7 @@ def create_app() -> web.Application:
     # same reason — "bulk" would otherwise be swallowed as a session id.
     app.router.add_post("/api/mint/bulk", handle_bulk_mint_start)
     app.router.add_get("/api/mint/bulk/active", handle_bulk_mint_active)
+    app.router.add_post("/api/mint/bulk/{session_id}/cancel", handle_bulk_mint_cancel)
     app.router.add_get("/api/mint/bulk/{session_id}", handle_bulk_mint_status)
     app.router.add_get("/api/mint/{session_id}", handle_mint_status)
     app.router.add_post("/api/mint/{session_id}/regenerate", handle_mint_regenerate)
