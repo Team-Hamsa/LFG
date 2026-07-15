@@ -34,6 +34,7 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from lfg_core import (
     closet_token,
     config,
+    db_path,
     economy_flow,
     economy_store,
     history_store,
@@ -46,6 +47,10 @@ from lfg_core import (
     memos,
     mint_flow,
     nft_index,
+    rarity,
+    shop,
+    shop_flow,
+    shop_store,
     swap_flow,
     swap_meta,
     trait_config,
@@ -74,6 +79,12 @@ economy_sessions: dict[str, Any] = {}
 # Shared by List/Cancel/Buy (market_flow.ListSession/CancelSession/BuySession),
 # same "one dict, `.kind` routes the status handler" shape as economy_sessions.
 market_sessions: dict[str, Any] = {}
+# Trait Shop (#217) buy sessions: shop_flow.ShopBuySession keyed by .id, same
+# "one dict, poll via GET status" shape as market_sessions. ShopBuySession has
+# no created_at (unlike the other session dataclasses), so pruning tracks
+# creation time in a parallel dict rather than reusing _prune_sessions.
+shop_sessions: dict[str, Any] = {}
+_shop_session_created: dict[str, float] = {}
 SESSION_RETENTION = 3600  # keep terminal sessions briefly for late polls
 
 BUS = InMemoryEventBus()
@@ -1596,6 +1607,248 @@ handle_market_cancel_status = _make_market_status_handler("cancel")
 handle_market_buy_status = _make_market_status_handler("buy")
 
 
+# --- Trait Shop (#217) Task 8: catalog + buy service endpoints ---
+# GET /api/shop/catalog is a public, cached, derived-price browse (lfg_core.shop
+# .catalog). POST/GET /api/shop/buy drive lfg_core.shop_flow's ShopBuySession
+# state machine (mint -> BRIX sell offer -> XUMM accept -> settle-to-Closet),
+# mirroring the market buy session shape above but keyed by wallet (`.buyer`)
+# rather than discord_id, since ShopBuySession has no platform-user identity.
+
+_SHOP_CACHE: dict[str, tuple[float, list[dict[str, Any]]]] = {}
+_SHOP_CACHE_LOCK = threading.Lock()
+_SHOP_CACHE_GEN: dict[str, int] = {}
+_SHOP_CACHE_TTL = 60.0
+
+
+def _shop_cache_put(network: str, value: list[dict[str, Any]], now_mono: float, gen: int) -> None:
+    """Mirrors _market_cache_put's insert-if-generation-unchanged discipline,
+    keyed on network only (the catalog has no `kind` dimension)."""
+    with _SHOP_CACHE_LOCK:
+        if _SHOP_CACHE_GEN.get(network, 0) != gen:
+            return
+        for k in [k for k, (ts, _) in _SHOP_CACHE.items() if now_mono - ts >= _SHOP_CACHE_TTL]:
+            del _SHOP_CACHE[k]
+        _SHOP_CACHE[network] = (now_mono, value)
+
+
+def _invalidate_shop_cache(network: str) -> None:
+    with _SHOP_CACHE_LOCK:
+        _SHOP_CACHE.pop(network, None)
+        _SHOP_CACHE_GEN[network] = _SHOP_CACHE_GEN.get(network, 0) + 1
+
+
+def _compute_shop_catalog(network: str) -> list[dict[str, Any]]:
+    """Sync work for GET /api/shop/catalog, run on an executor thread (same
+    posture as _compute_market_rows): the derived catalog from the app DB
+    (trait_rarity + shop_overrides), each row annotated with a representative
+    trait-art URL via the same helper the marketplace trait listings use."""
+    conn = sqlite3.connect(db_path.app_db_path(network))
+    try:
+        rarity.ensure_schema(conn)
+        rows = shop.catalog(conn, network)
+    finally:
+        conn.close()
+    cfg = trait_config.get_config()
+    for row in rows:
+        row["image_url"] = _trait_image_url(cfg, row["slot"], row["value"])
+    return rows
+
+
+async def handle_shop_catalog(request: web.Request) -> web.Response:
+    """Public: GET /api/shop/catalog. Empty list when the trait economy is
+    disabled (mirrors handle_market_listings' empty-page-not-403 posture for
+    a browse-only, non-transacting surface)."""
+    if not config.ECONOMY_ENABLED:
+        return web.json_response({"items": []})
+
+    network = config.ECONOMY_NETWORK
+    now_mono = time.monotonic()
+    with _SHOP_CACHE_LOCK:
+        cached = _SHOP_CACHE.get(network)
+        gen = _SHOP_CACHE_GEN.get(network, 0)
+    if cached is not None and now_mono - cached[0] < _SHOP_CACHE_TTL:
+        rows = cached[1]
+    else:
+        rows = await asyncio.get_event_loop().run_in_executor(None, _compute_shop_catalog, network)
+        _shop_cache_put(network, rows, now_mono, gen)
+    return web.json_response({"items": rows})
+
+
+def _quote_shop_trait(network: str, slot: str, value: str) -> tuple[int | None, bool]:
+    """(price, exists) for one (slot, value): price is shop.quote's result
+    (None if unknown / rarity-disabled / excluded / a price_override of None);
+    exists distinguishes "no trait_rarity rows at all" (404 unknown_trait)
+    from "rows exist but this value isn't currently purchasable" (403
+    not_purchasable) for the caller."""
+    conn = sqlite3.connect(db_path.app_db_path(network))
+    try:
+        rarity.ensure_schema(conn)
+        exists = (
+            conn.execute(
+                "SELECT 1 FROM trait_rarity WHERE network=? AND category=? AND trait=? LIMIT 1",
+                (network, slot, value),
+            ).fetchone()
+            is not None
+        )
+        price = shop.quote(conn, network, slot, value)
+        return price, exists
+    finally:
+        conn.close()
+
+
+def _build_shop_deps(network: str, platform: str) -> tuple[shop_flow.ShopDeps, sqlite3.Connection]:
+    """The real ShopDeps for a service-triggered buy: mint/offer/burn against
+    the live issuer wallet, XUMM payload builders, and an EconomyDeps built
+    the same way `economy_api.build_settlement_deps` wires settlement (shop
+    buys settle into the buyer's Closet via the same `run_deposit`). Callers
+    own the returned connection's lifetime (close it when done)."""
+    conn = nft_index.init_db(nft_index.index_db_path(network))
+    economy_store.init_economy_schema(conn)
+    shop_store.ensure_schema(conn)
+    economy_deps = economy_api.build_settlement_deps(conn)
+
+    def _app_conn_factory() -> sqlite3.Connection:
+        return sqlite3.connect(db_path.app_db_path(network))
+
+    async def _accept_payload_fn(offer_index: str, user_token: str | None = None) -> dict[str, Any]:
+        # ShopDeps.accept_payload_fn is typed non-Optional (shop_flow assigns
+        # its result straight to session.accept with no None-check); a Xaman
+        # API failure here raises into start_shop_buy's own outer try/except,
+        # which fails the session/order the same way an offer-build failure
+        # does — never a silent None assignment.
+        payload = await xumm_ops.create_accept_offer_payload(
+            offer_index,
+            user_token=user_token,
+            platform=memos.platform_for_surface(platform),
+            action=memos.ACTION_SHOP_BUY,
+        )
+        if payload is None:
+            raise RuntimeError("could not reach Xaman")
+        return payload
+
+    deps = shop_flow.ShopDeps(
+        conn=conn,
+        app_conn_factory=_app_conn_factory,
+        economy_deps=economy_deps,
+        mint_fn=lambda url, taxon, **kw: xrpl_ops.mint_nft(
+            url, taxon, config.SWAP_ISSUER_ADDRESS, **kw
+        ),
+        offer_fn=xrpl_ops.create_nft_offer,
+        burn_fn=lambda nft_id, owner: xrpl_ops.burn_nft(nft_id, owner or None),
+        payload_status_fn=xumm_ops.get_payload_status,
+        accept_payload_fn=_accept_payload_fn,
+        network=network,
+    )
+    return deps, conn
+
+
+def _prune_shop_sessions() -> None:
+    cutoff = time.time() - SESSION_RETENTION
+    terminal = {shop_flow.DONE, shop_flow.FAILED}
+    for sid, s in list(shop_sessions.items()):
+        if s.state in terminal and _shop_session_created.get(sid, 0) < cutoff:
+            del shop_sessions[sid]
+            _shop_session_created.pop(sid, None)
+
+
+@require_wallet
+async def handle_shop_buy_start(request):
+    """POST /api/shop/buy {slot, value}. Fail-closed order: 403
+    economy_disabled -> 400 malformed -> 404 unknown_trait / 403
+    not_purchasable -> 403 closet_required -> launch. The price is frozen
+    from shop.quote at this moment and carried on the session; the mint +
+    BRIX sell-offer + XUMM payload build (shop_flow.start_shop_buy) runs as a
+    background task (mirrors webapp.economy_api._schedule) so the request
+    returns immediately with a `running` session for the client to poll via
+    GET /api/shop/buy/{session_id} — the same shape returned once the
+    background task fills in `accept`."""
+    if not config.ECONOMY_ENABLED:
+        return _economy_disabled_response()
+
+    user = request["user"]
+    wallet = request["wallet"]
+    body = await request.json()
+    slot = body.get("slot")
+    value = body.get("value")
+    if not isinstance(slot, str) or not slot or not isinstance(value, str) or not value:
+        return web.json_response({"error": "slot and value are required"}, status=400)
+
+    network = config.ECONOMY_NETWORK
+    loop = asyncio.get_event_loop()
+    price, exists = await loop.run_in_executor(None, _quote_shop_trait, network, slot, value)
+    if price is None:
+        if not exists:
+            return web.json_response({"error": "unknown_trait"}, status=404)
+        return web.json_response({"error": "not_purchasable"}, status=403)
+
+    active = await loop.run_in_executor(None, _closet_active, network, wallet)
+    if not active:
+        return web.json_response({"error": "closet_required"}, status=403)
+
+    _prune_shop_sessions()
+    for s in shop_sessions.values():
+        if s.buyer == wallet and s.state not in shop_flow.TERMINAL_STATES:
+            return web.json_response(
+                {
+                    "error": "a shop purchase is already in progress",
+                    "code": "session_active",
+                    "session_id": s.id,
+                    "session": s.to_dict(),
+                },
+                status=409,
+            )
+
+    session = shop_flow.ShopBuySession(
+        buyer=wallet,
+        slot=slot,
+        value=value,
+        price_brix=price,
+        platform=_platform(user),
+        push_user_token=await _push_token(user),
+    )
+    shop_sessions[session.id] = session
+    _shop_session_created[session.id] = time.time()
+
+    deps, conn = _build_shop_deps(network, _platform(user))
+
+    async def _run_and_close() -> None:
+        try:
+            await shop_flow.start_shop_buy(session, deps)
+        except Exception as e:  # unexpected crash: ensure the session reaches a terminal state
+            if session.state != shop_flow.FAILED:
+                session.fail(f"internal error: {e}")
+        finally:
+            conn.close()
+
+    asyncio.get_event_loop().create_task(_run_and_close())
+    return web.json_response(session.to_dict())
+
+
+@require_wallet
+async def handle_shop_buy_status(request):
+    """GET /api/shop/buy/{session_id}: 404 if unknown or the session belongs
+    to a different wallet (ShopBuySession has no platform-user identity to
+    compare, so ownership is checked by `.buyer` wallet — the same identity
+    require_wallet resolved for the POST that created it). Drives
+    shop_flow.advance_shop_buy while awaiting the buyer's XUMM signature or
+    mid-settlement; a session that hasn't reached AWAITING_ACCEPT yet (the
+    background mint/offer build from the POST is still running) is returned
+    as-is with nothing to advance."""
+    session = shop_sessions.get(request.match_info["session_id"])
+    if session is None or session.buyer != request["wallet"]:
+        return web.json_response({"error": "not found"}, status=404)
+
+    if session.state in (shop_flow.AWAITING_ACCEPT, shop_flow.SETTLING):
+        network = config.ECONOMY_NETWORK
+        deps, conn = _build_shop_deps(network, session.platform)
+        try:
+            await shop_flow.advance_shop_buy(session, deps)
+        finally:
+            conn.close()
+
+    return web.json_response(session.to_dict())
+
+
 # --- Task 9 (spec §Q7): trait-sale settlement (burn sold trait -> buyer's Closet) ---
 
 
@@ -1721,12 +1974,271 @@ async def settle_pending_trait_sales() -> None:
             _write_sweep_giveup_record(offer_index, row["nft_id"], buyer)
 
 
+# Trait Shop sweep (#217): backstop for the buy flow in shop_flow.py, mirrors
+# the trait-sale settlement sweep above (same giveup-journal convention).
+_SHOP_SWEEP_MAX_ATTEMPTS = 5
+# session_id -> consecutive failed settlement sweep attempts. In-memory only,
+# same rationale as _sweep_attempts: a restart just costs a stuck order a few
+# retries rather than falsely reading as "already exhausted".
+_shop_settle_attempts: dict[str, int] = {}
+
+
+def _write_shop_sweep_giveup_record(session_id: str, nft_id: str, buyer: str) -> None:
+    """Journal (ECONOMY_RECORDS_DIR) that the shop settlement sweep is no
+    longer retrying this order. The trait token is NOT lost: in the normal
+    case it is an ordinary trait token sitting in `buyer`'s wallet and they
+    can Deposit it into their Closet manually later; if settlement has been
+    failing because a prior expiry attempt hit a transient burn error, the
+    token may instead still be issuer-held (never delivered) — either way it
+    requires manual reconciliation, not a re-burn."""
+    try:
+        os.makedirs(config.ECONOMY_RECORDS_DIR, exist_ok=True)
+        path = os.path.join(config.ECONOMY_RECORDS_DIR, f"shop-settlement-giveup-{session_id}.json")
+        with open(path, "w") as f:
+            json.dump(
+                {
+                    "session_id": session_id,
+                    "nft_id": nft_id,
+                    "buyer": buyer,
+                    "attempts": _SHOP_SWEEP_MAX_ATTEMPTS,
+                    "status": "abandoned",
+                },
+                f,
+                indent=2,
+            )
+    except Exception:
+        logging.error(
+            f"failed to write shop sweep giveup record for {session_id}: {traceback.format_exc()}"
+        )
+
+
+def _write_shop_expiry_reversal_giveup_record(
+    session_id: str, slot: str, value: str, delta: int, reason: str
+) -> None:
+    """Journal (ECONOMY_RECORDS_DIR) an intended `supply_changes` reversal row
+    that failed to write after a successful expiry burn. The burn is real and
+    irreversible — the order is still closed `expired` so the sweep never
+    re-touches it — but the -1 supply row itself never landed, so an admin
+    must re-apply it manually from this record to keep the conservation
+    ledger accurate."""
+    try:
+        os.makedirs(config.ECONOMY_RECORDS_DIR, exist_ok=True)
+        path = os.path.join(
+            config.ECONOMY_RECORDS_DIR, f"shop-expiry-reversal-giveup-{session_id}.json"
+        )
+        with open(path, "w") as f:
+            json.dump(
+                {
+                    "session_id": session_id,
+                    "kind": "burn",
+                    "slot": slot,
+                    "value": value,
+                    "delta": delta,
+                    "reason": reason,
+                    "status": "needs_admin_reapply",
+                },
+                f,
+                indent=2,
+            )
+    except Exception:
+        logging.error(
+            f"failed to write shop expiry reversal giveup record for {session_id}: "
+            f"{traceback.format_exc()}"
+        )
+
+
+async def _expire_shop_order(order: dict[str, Any], network: str) -> None:
+    """Expire one stale `pending_accept` Trait Shop order: cancel the orphaned
+    sell offer (best-effort — an already-gone offer is not an error, the
+    expiration alone already made it unacceptable), then issuer-burn the
+    unclaimed trait token and record the matching `supply_changes` reversal.
+
+    Fail-closed rescue: if the burn does not definitively succeed — most
+    likely because the buyer's accept actually landed moments before the
+    sweep ran, moving the token out of the issuer wallet — the order is
+    marked `accepted` instead of `expired` so the settlement pass picks it up
+    next. A token the buyer paid for must never be burned."""
+    session_id = order["session_id"]
+    offer_index = order.get("offer_index")
+    nft_id = order.get("nft_id")
+    now_ts = int(time.time())
+
+    if offer_index:
+        try:
+            await xrpl_ops.cancel_nft_offer(offer_index)
+        except Exception:
+            logging.warning(
+                f"shop expiry: offer cancel failed for {session_id}: {traceback.format_exc()}"
+            )
+
+    conn = nft_index.init_db(nft_index.index_db_path(network))
+    try:
+        economy_store.init_economy_schema(conn)
+        if not nft_id:
+            # Nothing was ever minted for this order (e.g. it stalled before
+            # the mint completed) — nothing to burn, just close it out.
+            shop_store.update_order(conn, session_id, now_ts=now_ts, status="expired")
+            return
+
+        try:
+            burn_hash = await xrpl_ops.burn_nft(nft_id)
+        except Exception:
+            logging.error(f"shop expiry burn crashed for {session_id}: {traceback.format_exc()}")
+            burn_hash = None
+
+        if not burn_hash:
+            # Could not confirm the issuer still holds the token (most likely
+            # a landed accept) — rescue rather than risk burning a sold
+            # token. The settlement sweep retries it as an accepted order.
+            shop_store.update_order(conn, session_id, now_ts=now_ts, status="accepted")
+            return
+
+        reason = f"shop expiry {session_id}"
+        try:
+            economy_store.record_supply_change(
+                conn,
+                kind="burn",
+                edition=None,
+                body_value="",
+                body_class="",
+                trait_deltas={f"{order['slot']}|{order['value']}": -1},
+                actor="shop",
+                reason=reason,
+            )
+        except Exception:
+            logging.exception(
+                f"shop expiry {session_id}: burn succeeded (nft_id={nft_id}) but the "
+                f"supply reversal row failed to write for slot={order.get('slot')} "
+                f"value={order.get('value')} — ledger and supply mirror are now out of "
+                "sync; journaling for admin re-apply"
+            )
+            _write_shop_expiry_reversal_giveup_record(
+                session_id, order.get("slot", ""), order.get("value", ""), -1, reason
+            )
+        # The token is burned regardless of whether the reversal row landed —
+        # the order must never be re-swept (a second burn attempt would find
+        # nothing and the rescue rule would misroute it to `accepted`).
+        shop_store.update_order(conn, session_id, now_ts=now_ts, status="expired")
+    finally:
+        conn.close()
+
+
+async def _settle_shop_order(order: dict[str, Any], network: str) -> None:
+    """Retry settlement (run_deposit into the buyer's Closet + the shop_count
+    pricing bump) for one `accepted` Trait Shop order. Mirrors
+    `_settle_trait_sale`: on success -> `settled`; after
+    `_SHOP_SWEEP_MAX_ATTEMPTS` consecutive failures -> journal + `failed`
+    (the token is never lost — it stays wherever it last landed, in the
+    buyer's wallet for a manual Deposit or issuer-held if a prior expiry
+    attempt hit a transient burn error)."""
+    session_id = order["session_id"]
+    if _shop_settle_attempts.get(session_id, 0) >= _SHOP_SWEEP_MAX_ATTEMPTS:
+        return  # already given up + journaled on a previous pass
+    nft_id = order.get("nft_id")
+    buyer = order["buyer"]
+    now_ts = int(time.time())
+    if not nft_id:
+        return  # nothing minted; not a settleable order
+
+    conn = nft_index.init_db(nft_index.index_db_path(network))
+    try:
+        economy_store.init_economy_schema(conn)
+        deps = economy_api.build_settlement_deps(conn)
+        dep_session = economy_flow.DepositSession(owner=buyer, nft_id=nft_id)
+        try:
+            await economy_flow.run_deposit(dep_session, deps)
+            settled = dep_session.state == economy_flow.DONE
+        except Exception:
+            logging.error(
+                f"shop settlement sweep crashed for {session_id}: {traceback.format_exc()}"
+            )
+            settled = False
+    finally:
+        conn.close()
+
+    if settled:
+        conn = nft_index.init_db(nft_index.index_db_path(network))
+        try:
+            shop_store.update_order(conn, session_id, now_ts=now_ts, status="settled")
+        finally:
+            conn.close()
+        try:
+            app_conn = sqlite3.connect(db_path.app_db_path(network))
+            try:
+                rarity.increment_shop_count(app_conn, network, order["slot"], order["value"])
+            finally:
+                app_conn.close()
+        except Exception:
+            logging.warning(
+                f"shop settlement sweep: shop_count increment failed for {session_id} "
+                f"(order settled; pricing feedback skipped): {traceback.format_exc()}"
+            )
+        _shop_settle_attempts.pop(session_id, None)
+        return
+
+    _shop_settle_attempts[session_id] = _shop_settle_attempts.get(session_id, 0) + 1
+    if _shop_settle_attempts[session_id] >= _SHOP_SWEEP_MAX_ATTEMPTS:
+        logging.warning(
+            f"shop settlement sweep giving up on {session_id} (nft {nft_id}, buyer "
+            f"{buyer}) after {_SHOP_SWEEP_MAX_ATTEMPTS} attempts"
+        )
+        _write_shop_sweep_giveup_record(session_id, nft_id, buyer)
+        conn = nft_index.init_db(nft_index.index_db_path(network))
+        try:
+            shop_store.update_order(conn, session_id, now_ts=now_ts, status="failed")
+        finally:
+            conn.close()
+
+
+async def sweep_shop_orders() -> None:
+    """Backstop for the Trait Shop buy flow (shop_flow.py): expire stale
+    unaccepted offers (burn back + supply reversal) and retry settlement for
+    accepted orders that stalled after the buyer signed. Runs on the trait
+    economy network (config.ECONOMY_NETWORK), same as the trait-sale
+    settlement sweep."""
+    network = config.ECONOMY_NETWORK
+    conn = nft_index.init_db(nft_index.index_db_path(network))
+    try:
+        shop_store.ensure_schema(conn)
+        cutoff = int(time.time()) - config.SHOP_OFFER_TTL_SECONDS
+        expiring = shop_store.orders_pending_expiry(conn, cutoff)
+    finally:
+        conn.close()
+
+    for order in expiring:
+        try:
+            await _expire_shop_order(order, network)
+        except Exception:
+            logging.error(
+                f"shop expiry sweep crashed for {order['session_id']}: {traceback.format_exc()}"
+            )
+
+    conn = nft_index.init_db(nft_index.index_db_path(network))
+    try:
+        shop_store.ensure_schema(conn)
+        unsettled = shop_store.orders_unsettled(conn)
+    finally:
+        conn.close()
+
+    for order in unsettled:
+        try:
+            await _settle_shop_order(order, network)
+        except Exception:
+            logging.error(
+                f"shop settlement sweep crashed for {order['session_id']}: {traceback.format_exc()}"
+            )
+
+
 async def _settlement_sweep_loop() -> None:
     while True:
         try:
             await settle_pending_trait_sales()
         except Exception:
             logging.error(f"settlement sweep loop crashed: {traceback.format_exc()}")
+        try:
+            await sweep_shop_orders()
+        except Exception:
+            logging.error(f"shop sweep loop crashed: {traceback.format_exc()}")
         await asyncio.sleep(_SWEEP_PERIOD_SECONDS)
 
 
@@ -2880,6 +3392,9 @@ def create_app() -> web.Application:
     app.router.add_get("/api/market/buy/{session_id}", handle_market_buy_status)
     app.router.add_post("/api/market/trait/list", handle_market_trait_list_start)
     app.router.add_get("/api/market/trait/list/{session_id}", handle_market_trait_list_status)
+    app.router.add_get("/api/shop/catalog", handle_shop_catalog)
+    app.router.add_post("/api/shop/buy", handle_shop_buy_start)
+    app.router.add_get("/api/shop/buy/{session_id}", handle_shop_buy_status)
     app.router.add_post("/api/swap", handle_swap_start)
     app.router.add_get("/api/swap/{session_id}", handle_swap_status)
     app.router.add_post("/api/swap/{session_id}/regenerate", handle_swap_regenerate)

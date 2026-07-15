@@ -166,7 +166,12 @@ def build_economy_deps(conn: sqlite3.Connection) -> economy_flow.EconomyDeps:
         char_compose_fn=_compose_char,
         char_mint_fn=lambda url: xrpl_ops.mint_nft(
             url,
-            config.SWAP_TAXON,
+            # Assemble-minted rebirths get their own taxon (#217) — pinned to
+            # ASSEMBLE_TAXON, not SWAP_TAXON, even though the two currently
+            # share the same default value (1760): the constants mean different
+            # things (SWAP_TAXON is the legacy Trait-Swapper remint taxon) and
+            # must not silently diverge if either is retuned independently.
+            config.ASSEMBLE_TAXON,
             config.SWAP_ISSUER_ADDRESS,
             flags=config.ECONOMY_NFT_FLAGS,
             action=memos.ACTION_ASSEMBLE,

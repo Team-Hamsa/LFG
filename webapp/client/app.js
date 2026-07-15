@@ -81,7 +81,16 @@ async function api(path, opts = {}) {
   if (sessionToken) headers['Authorization'] = `Bearer ${sessionToken}`;
   const res = await fetch(path, { ...opts, headers });
   const data = await res.json().catch(() => ({}));
-  if (!res.ok) throw new Error(data.error || `HTTP ${res.status}`);
+  if (!res.ok) {
+    const err = new Error(data.error || `HTTP ${res.status}`);
+    // Some endpoints (e.g. 409 shop/market session_active) carry extra
+    // fields (code, session_id) callers need to resume rather than just
+    // display — attach the full body without changing .message so every
+    // existing `e.message === '...'` check keeps working unmodified.
+    err.status = res.status;
+    err.body = data;
+    throw err;
+  }
   return data;
 }
 
@@ -1580,6 +1589,7 @@ async function openMarket() {
   marketState.tab = 'browse';
   el('market-browse').hidden = false;
   el('market-mine').hidden = true;
+  el('market-shop').hidden = true;
   highlightTabs('market-tabs', 'tab', 'browse');
   highlightTabs('market-kind', 'kind', marketState.kind);
   await loadMarketBrowse();
@@ -1590,8 +1600,10 @@ function switchMarketTab(tab) {
   highlightTabs('market-tabs', 'tab', tab);
   el('market-browse').hidden = tab !== 'browse';
   el('market-mine').hidden = tab !== 'mine';
+  el('market-shop').hidden = tab !== 'shop';
   if (tab === 'browse') loadMarketBrowse();
-  else loadMarketMine();
+  else if (tab === 'mine') loadMarketMine();
+  else loadShopCatalog();
 }
 
 // A trait-image URL from the backend (/api/layer?...) is already same-origin
@@ -1880,6 +1892,140 @@ function marketTraitListRender(s) {
     return { title: '🎉 Listed!', text: 'Your trait is live on the Marketplace.', done: true };
   }
   return { title: '❌ Sell failed', text: s.error || 'Something went wrong.', done: true };
+}
+
+// --- Trait Shop (#217): catalog grid + reuses marketFlow's overlay pieces
+// (showPanel/showFlow/promptClosetRequired) but drives its own POST/GET pair
+// since ShopBuySession's shape (accept is a nested payload dict, not a flat
+// xumm_url) differs from the market sessions' MARKET_STATUS_PATH table.
+
+let shopFlowTimer = null;
+
+function shopImgSrc(item) {
+  return item.image_url || null;
+}
+
+function renderShopGrid(items) {
+  const grid = el('shop-grid');
+  const empty = el('shop-empty');
+  grid.replaceChildren();
+  if (!items.length) { empty.hidden = false; return; }
+  empty.hidden = true;
+  for (const item of items) {
+    const card = document.createElement('button');
+    card.className = 'nft-card';
+    const img = document.createElement('img');
+    img.src = shopImgSrc(item) || BLANK_IMG;
+    img.loading = 'lazy';
+    img.alt = '';
+    const name = document.createElement('span');
+    name.className = 'cap';
+    name.textContent = `${item.slot}: ${item.value}`;
+    const price = document.createElement('span');
+    price.className = 'market-card-price';
+    price.textContent = `${item.price_brix} BRIX`;
+    name.appendChild(price);
+    card.replaceChildren(img, name);
+    card.onclick = () => openShopBuyFlow(item).catch((e) => showError(e.message));
+    grid.appendChild(card);
+  }
+}
+
+async function loadShopCatalog() {
+  const grid = el('shop-grid');
+  showGridSkeletons(grid);
+  el('shop-empty').hidden = true;
+  try {
+    const data = await api('/api/shop/catalog');
+    renderShopGrid(data.items || []);
+  } catch (e) {
+    grid.replaceChildren();
+    showError(e.message);
+  }
+}
+
+function shopBuyRender(s) {
+  if (s.state === 'settling') {
+    return { title: '⏳ Settling', text: 'Adding your trait to the Closet…', spinner: true };
+  }
+  if (s.state === 'done') {
+    return { title: '🎉 Purchase complete!', text: 'Added to your Closet.', done: true };
+  }
+  if (s.state === 'awaiting_accept') {
+    const url = s.accept ? s.accept.xumm_url : null;
+    return { title: '💳 Confirm purchase', text: 'Scan to accept the trait offer in Xaman.', qrData: url, link: url };
+  }
+  if (s.state === 'failed') {
+    return { title: '❌ Purchase failed', text: s.error || 'Something went wrong.', done: true };
+  }
+  return { title: '⏳ Preparing…', text: 'Minting your trait…', spinner: true };
+}
+
+function pollShopFlow(sessionId) {
+  clearTimeout(shopFlowTimer);
+  const path = `/api/shop/buy/${sessionId}`;
+  const tick = async () => {
+    if (el('flow-panel').hidden) return; // user navigated away
+    let s;
+    try {
+      s = await api(path);
+    } catch (e) {
+      shopFlowTimer = setTimeout(tick, 3000); // transient; keep polling
+      return;
+    }
+    showFlow(shopBuyRender(s));
+    if (!marketPure.isMarketTerminal(s.state)) shopFlowTimer = setTimeout(tick, 3000);
+  };
+  shopFlowTimer = setTimeout(tick, 3000);
+}
+
+async function resumeShopBuy(sessionId) {
+  showPanel('flow-panel');
+  showFlow({ title: 'Resuming…', spinner: true });
+  let s;
+  try {
+    s = await api(`/api/shop/buy/${sessionId}`);
+  } catch (e) {
+    showFlow({ title: '❌ Could not resume', text: e.message, done: true });
+    return;
+  }
+  showFlow(shopBuyRender(s));
+  if (!marketPure.isMarketTerminal(s.state)) pollShopFlow(sessionId);
+}
+
+async function openShopBuyFlow(item) {
+  const ok = await confirmDialog({
+    title: `Buy ${item.slot}: ${item.value}?`,
+    text: `${item.price_brix} BRIX will be spent.`,
+    confirmLabel: 'Buy now',
+  });
+  if (!ok) return;
+  clearTimeout(shopFlowTimer);
+  showPanel('flow-panel');
+  showFlow({ title: 'Starting…', spinner: true });
+  let s;
+  try {
+    s = await api('/api/shop/buy', {
+      method: 'POST',
+      body: JSON.stringify({ slot: item.slot, value: item.value }),
+    });
+  } catch (e) {
+    if (e.message === 'closet_required') {
+      showPanel('market-panel');
+      promptClosetRequired();
+      return;
+    }
+    // 409 session_active: resume the caller's already-running purchase
+    // rather than erroring opaquely — the endpoint returns session_id.
+    if (e.body && e.body.code === 'session_active' && e.body.session_id) {
+      await resumeShopBuy(e.body.session_id);
+      return;
+    }
+    showFlow({ title: '❌ Could not start', text: e.message, done: true });
+    return;
+  }
+  showFlow(shopBuyRender(s));
+  if (!marketPure.isMarketTerminal(s.state)) pollShopFlow(s.id);
 }
 
 async function openBuyFlow(row) {

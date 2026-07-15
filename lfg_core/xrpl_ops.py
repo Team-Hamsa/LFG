@@ -26,6 +26,7 @@ from xrpl.models.requests import (
 )
 from xrpl.models.transactions import (
     NFTokenBurn,
+    NFTokenCancelOffer,
     NFTokenCreateOffer,
     NFTokenMint,
     NFTokenModify,
@@ -212,9 +213,14 @@ async def create_nft_offer(
     amount: Any = "0",
     platform: str = memos.PLATFORM_BACKEND,
     campaign: str | None = None,
+    expiration: int | None = None,
+    action: str = memos.ACTION_CREATE_OFFER,
 ) -> str | None:
     """Create a sell offer transferring the NFT to destination; returns offer ID
-    or None. amount may be an XRP-drops string or an IssuedCurrencyAmount."""
+    or None. amount may be an XRP-drops string or an IssuedCurrencyAmount.
+    expiration is a ripple-epoch timestamp; omitted from serialization when
+    None. action lets callers (e.g. the trait shop) stamp non-default memo
+    provenance."""
     try:
         client = JsonRpcClient(config.JSON_RPC_URL)
         wallet = Wallet.from_seed(config.SEED)
@@ -225,10 +231,9 @@ async def create_nft_offer(
             amount=amount,
             nftoken_id=nft_id,
             flags=NFTokenCreateOfferFlag.TF_SELL_NFTOKEN,
+            expiration=expiration,
             source_tag=config.SOURCE_TAG,
-            memos=memos.build_memo_models(
-                memos.INITIATOR_BACKEND, platform, memos.ACTION_CREATE_OFFER, campaign
-            ),
+            memos=memos.build_memo_models(memos.INITIATOR_BACKEND, platform, action, campaign),
         )
 
         response = await asyncio.to_thread(submit_and_wait, offer, client, wallet)
@@ -250,6 +255,38 @@ async def create_nft_offer(
 
     except Exception as e:
         logging.error(f"create_nft_offer error: {e}")
+        return None
+
+
+async def cancel_nft_offer(offer_index: str, platform: str = memos.PLATFORM_BACKEND) -> str | None:
+    """Cancel an issuer-created NFTokenOffer (e.g. an expired/orphaned Trait
+    Shop sell offer) using the issuer wallet's own signing authority. Returns
+    the transaction hash, or None on a definitive failure — including the
+    benign case where the ledger object is already gone (accepted or
+    previously cancelled): callers that only want the offer purged before an
+    idempotent follow-up (e.g. the shop expiry sweep) should treat any None
+    here as safe to ignore and proceed."""
+    try:
+        wallet = Wallet.from_seed(config.SEED)
+        client = JsonRpcClient(config.JSON_RPC_URL)
+        cancel = NFTokenCancelOffer(
+            account=config.SIGNING_ACCOUNT,
+            nftoken_offers=[offer_index],
+            source_tag=config.SOURCE_TAG,
+            memos=memos.build_memo_models(
+                memos.INITIATOR_BACKEND, platform, memos.ACTION_CANCEL_OFFER
+            ),
+        )
+        result = await _submit_and_confirm(cancel, wallet, client, "NFTokenCancelOffer")
+        if result is None:
+            return None  # definitive failure (incl. offer already gone)
+        tx_hash: str = result["hash"]
+        logging.info(f"NFT offer cancelled: {offer_index} ({tx_hash})")
+        return tx_hash
+    except IndeterminateResultError:
+        raise  # never collapse an unknown outcome to a definitive-failure None
+    except Exception:
+        logging.error(f"cancel_nft_offer error: {traceback.format_exc()}")
         return None
 
 

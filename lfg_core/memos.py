@@ -76,6 +76,7 @@ ACTION_ASSEMBLE = "assemble"
 ACTION_EQUIP = "equip"
 ACTION_EXTRACT = "extract"
 ACTION_DEPOSIT = "deposit"
+ACTION_SHOP_BUY = "shop-buy"
 _ACTIONS = frozenset(
     {
         ACTION_MINT,
@@ -95,6 +96,7 @@ _ACTIONS = frozenset(
         ACTION_EQUIP,
         ACTION_EXTRACT,
         ACTION_DEPOSIT,
+        ACTION_SHOP_BUY,
     }
 )
 

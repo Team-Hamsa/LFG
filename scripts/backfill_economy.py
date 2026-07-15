@@ -17,7 +17,7 @@ reconciles the per-network economy tables in onchain_<network>.db:
     deposited, or transferred out of the taxon) is deleted as stale.
 
 ISSUER-GATED BY CONSTRUCTION: enumeration is `nfts_by_issuer` for
-config.SWAP_ISSUER_ADDRESS, so no foreign taxon-1762/1763 token a third party
+config.SWAP_ISSUER_ADDRESS, so no foreign taxon-1762/176 token a third party
 minted can ever enter the reconcile (the forged-Closet/trait attack surface #178
 closes for the live listener). Consistent with #178's gating intent; this script
 deliberately does NOT reuse nft_listener._apply_closet/_apply_trait_token (which
@@ -155,7 +155,8 @@ async def backfill_economy(
             if _reconcile_closet(conn, token, meta, issuer):
                 closets_applied += 1
 
-    # --- Trait tokens: taxon 1763. Upsert live tokens, then stale-delete any DB
+    # --- Trait tokens: taxon 176 (config.TRAIT_TAXON, flipped from 1763 per
+    #     #217). Upsert live tokens, then stale-delete any DB
     #     row NOT backed by a live on-ledger token (burned/deposited/gone). A
     #     live-but-unreadable-metadata token stays in live_ids (membership is by
     #     the enumeration's is_burned flag, not metadata) so it is never

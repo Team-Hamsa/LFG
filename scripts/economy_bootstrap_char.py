@@ -85,7 +85,12 @@ async def _amain(args: argparse.Namespace) -> int:
     print(f"metadata: {meta_url}")
 
     nft_id = await xrpl_ops.mint_nft(
-        meta_url, config.SWAP_TAXON, config.SWAP_ISSUER_ADDRESS, flags=config.ECONOMY_NFT_FLAGS
+        # Same rebirth taxon as run_assemble's char_mint_fn (#217) — this
+        # bootstrap script mints the same class of economy character.
+        meta_url,
+        config.ASSEMBLE_TAXON,
+        config.SWAP_ISSUER_ADDRESS,
+        flags=config.ECONOMY_NFT_FLAGS,
     )
     if not nft_id:
         print("MINT FAILED")

@@ -36,6 +36,7 @@ CREATE TABLE IF NOT EXISTS trait_rarity (
     trait            TEXT NOT NULL,
     live_count       INTEGER NOT NULL DEFAULT 0,
     floor_weight     REAL NOT NULL DEFAULT 0.005,
+    shop_count       INTEGER NOT NULL DEFAULT 0,
     boost_initial    REAL,
     boost_step_hours INTEGER DEFAULT 24,
     boost_started_at TIMESTAMP,
@@ -75,6 +76,9 @@ def ensure_schema(conn: sqlite3.Connection) -> None:
             conn.execute("ALTER TABLE LFG ADD COLUMN network TEXT NOT NULL DEFAULT 'mainnet'")
         if "body_type" not in lfg_cols:
             conn.execute("ALTER TABLE LFG ADD COLUMN body_type TEXT NOT NULL DEFAULT '*'")
+    rarity_cols = {r[1] for r in conn.execute("PRAGMA table_info(trait_rarity)")}
+    if "shop_count" not in rarity_cols:
+        conn.execute("ALTER TABLE trait_rarity ADD COLUMN shop_count INTEGER NOT NULL DEFAULT 0")
     conn.commit()
 
 
@@ -393,6 +397,26 @@ def start_boost_clock(
              AND boost_initial IS NOT NULL AND boost_started_at IS NULL""",
         (now.isoformat(), network, body, category, trait),
     )
+    conn.commit()
+
+
+def increment_shop_count(conn: sqlite3.Connection, network: str, slot: str, value: str) -> None:
+    """Count one settled shop purchase for (slot, value). Trait tokens are
+    body-agnostic, so bump every body row for the trait; if the trait has no
+    rows yet, insert one under BODY_SENTINEL so the count is never lost.
+    Feeds shop pricing only — mint odds never read shop_count."""
+    ensure_schema(conn)
+    cur = conn.execute(
+        "UPDATE trait_rarity SET shop_count = shop_count + 1"
+        " WHERE network=? AND category=? AND trait=?",
+        (network, slot, value),
+    )
+    if cur.rowcount == 0:
+        conn.execute(
+            "INSERT INTO trait_rarity (network, body, category, trait, live_count,"
+            " floor_weight, shop_count) VALUES (?, ?, ?, ?, 0, ?, 1)",
+            (network, BODY_SENTINEL, slot, value, config.RARITY_FLOOR),
+        )
     conn.commit()
 
 
