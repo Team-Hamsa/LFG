@@ -284,6 +284,16 @@ ECONOMY_CDN_FOLDER = os.getenv("ECONOMY_CDN_FOLDER", SWAP_CDN_FOLDER)
 # Standalone tradeable trait NFTokens (Phase 4). Burnable + transferable (NOT
 # soulbound, NOT mutable); xrpl_ops.mint_nft applies NFT_TRANSFER_FEE to any
 # transferable token, so the trait royalty is inherited (no separate constant).
-TRAIT_TAXON = int(os.getenv("TRAIT_TAXON", "1763"))
+TRAIT_TAXON = int(os.getenv("TRAIT_TAXON", "176"))  # flipped from 1763 (#217)
+# Assemble-minted rebirth characters get their own taxon; regular /letsgo
+# mints stay NFT_TAXON (0) so the main collection is never split (#217).
+ASSEMBLE_TAXON = int(os.getenv("ASSEMBLE_TAXON", "1760"))
+
+# Trait Shop (#217): price = clamp(SHOP_BASE_BRIX / smoothed_share, MIN, MAX)
+SHOP_BASE_BRIX = float(os.getenv("SHOP_BASE_BRIX", "1.0"))
+SHOP_MIN_BRIX = int(os.getenv("SHOP_MIN_BRIX", "5"))
+SHOP_MAX_BRIX = int(os.getenv("SHOP_MAX_BRIX", "5000"))
+SHOP_OFFER_TTL_SECONDS = int(os.getenv("SHOP_OFFER_TTL_SECONDS", "900"))
+
 TRAIT_NFT_FLAGS = int(os.getenv("TRAIT_NFT_FLAGS", "9"))  # burnable(1)+transferable(8)
 TRAIT_CDN_SUBDIR = os.getenv("TRAIT_CDN_SUBDIR", "traits")
