@@ -1,0 +1,174 @@
+# Task 5 (#215): mint_one_unit extracts the compose→upload→mint→record→offer
+# body of run_mint_session into a standalone reusable unit so the upcoming
+# bulk-mint loop and the existing single mint share one code path.
+#
+# Env-guard preamble (verbatim pattern from tests/test_mint_issuer.py /
+# tests/test_mint_cancel.py): importing lfg_core.config freezes its constants
+# at import time; set the same defaults test_smoke.py uses so collection
+# order can't strand them.
+import os
+
+os.environ.setdefault("XUMM_API_KEY", "test")
+os.environ.setdefault("XUMM_API_SECRET", "test")
+os.environ.setdefault("SEED", "sEdTM1uX8pu2do5XvTnutH6HsouMaM2")
+os.environ.setdefault("TOKEN_ISSUER_ADDRESS", "rrrrrrrrrrrrrrrrrrrrrhoLvTp")
+os.environ.setdefault("TOKEN_CURRENCY_HEX", "4C46474F00000000000000000000000000000000")
+os.environ.setdefault("BUNNY_CDN_ACCESS_KEY", "test")
+os.environ.setdefault("BUNNY_CDN_STORAGE_ZONE", "test")
+os.environ.setdefault("LAYER_SOURCE", "local")
+os.environ.setdefault("BUNNY_PULL_ZONE", "nft.pullzone.example")
+
+import asyncio  # noqa: E402
+from typing import Any  # noqa: E402
+
+import pytest  # noqa: E402
+
+from lfg_core import mint_flow  # noqa: E402
+
+
+def _async_return(value):
+    async def _f(*args, **kwargs):
+        return value
+
+    return _f
+
+
+@pytest.fixture
+def _mint_mocks(monkeypatch):
+    """Model on the mocking approach used by tests/test_mint_cdn_paths.py and
+    tests/test_mint_issuer.py: stub every network/CDN/XRPL boundary so the
+    pipeline runs entirely in-process."""
+    captured: dict[str, Any] = {}
+
+    async def fake_select(store):
+        return "male", [{"trait_type": "Body", "value": "Straight"}]
+
+    async def fake_compose(attributes, body, store, basename):
+        return "/tmp/out.png", False
+
+    async def fake_upload_output(path, is_video, upload_fn, basename, keep_still=None):
+        return f"https://cdn.example/{basename}.png", None
+
+    async def fake_upload_bunny(name, data, ctype):
+        return f"https://cdn.example/{name}"
+
+    async def fake_mint_nft(**kwargs):
+        captured["mint_nft_kwargs"] = kwargs
+        return "NFTID1"
+
+    async def fake_create_nft_offer(*args, **kwargs):
+        return "OFFER1"
+
+    async def fake_create_accept_offer_payload(*args, **kwargs):
+        return {"qr_url": "q", "xumm_url": "x", "uuid": "u"}
+
+    def fake_record_nft_mint(**kwargs):
+        return True
+
+    monkeypatch.setattr(mint_flow.layer_store, "get_layer_store", lambda: object())
+    monkeypatch.setattr(mint_flow.traits, "select_random_attributes", fake_select)
+    monkeypatch.setattr(mint_flow.swap_compose, "compose_nft", fake_compose)
+    monkeypatch.setattr(mint_flow.swap_compose, "upload_output", fake_upload_output)
+    monkeypatch.setattr(mint_flow, "_upload_to_bunny", fake_upload_bunny)
+    monkeypatch.setattr(mint_flow.xrpl_ops, "mint_nft", fake_mint_nft)
+    monkeypatch.setattr(mint_flow.xrpl_ops, "create_nft_offer", fake_create_nft_offer)
+    monkeypatch.setattr(
+        mint_flow.xumm_ops, "create_accept_offer_payload", fake_create_accept_offer_payload
+    )
+    monkeypatch.setattr(mint_flow, "record_nft_mint", fake_record_nft_mint)
+
+    # image_archive.promote_still/discard_still touch the filesystem; no-op
+    # them so the test doesn't depend on a real archive directory.
+    monkeypatch.setattr(mint_flow.image_archive, "promote_still", lambda *a, **k: None)
+    monkeypatch.setattr(mint_flow.image_archive, "discard_still", lambda *a, **k: None)
+    monkeypatch.setattr(
+        mint_flow.image_archive, "pending_still_path", lambda *a, **k: "/tmp/pending.png"
+    )
+
+    return captured
+
+
+def _run(coro):
+    loop = asyncio.new_event_loop()
+    try:
+        return loop.run_until_complete(coro)
+    finally:
+        loop.close()
+
+
+def test_mint_one_unit_happy_path(monkeypatch, _mint_mocks):
+    res = _run(
+        mint_flow.mint_one_unit(
+            discord_id="u1",
+            wallet_address="rUSER",
+            platform="discord",
+            push_user_token=None,
+            return_url=None,
+            nft_number=4000,
+            session_tag="job1:0",
+        )
+    )
+    assert res.nft_id == "NFTID1"
+    assert res.offer_id == "OFFER1"
+    assert res.accept is not None
+    assert res.accept["uuid"] == "u"
+    assert res.error is None
+    assert res.nft_number == 4000
+    assert res.image_url is not None
+
+
+def test_mint_one_unit_offer_fail_reports_nft_id(monkeypatch, _mint_mocks):
+    monkeypatch.setattr(mint_flow.xrpl_ops, "create_nft_offer", _async_return(None))
+    res = _run(
+        mint_flow.mint_one_unit(
+            discord_id="u1",
+            wallet_address="rUSER",
+            platform="discord",
+            push_user_token=None,
+            return_url=None,
+            nft_number=4001,
+            session_tag="job1:1",
+        )
+    )
+    assert res.nft_id == "NFTID1"  # minted
+    assert res.offer_id is None  # offer failed
+    assert res.error is not None
+
+
+def test_mint_one_unit_mint_fail_reports_no_nft_id(monkeypatch, _mint_mocks):
+    async def fake_mint_nft(**kwargs):
+        return None
+
+    monkeypatch.setattr(mint_flow.xrpl_ops, "mint_nft", fake_mint_nft)
+    res = _run(
+        mint_flow.mint_one_unit(
+            discord_id="u1",
+            wallet_address="rUSER",
+            platform="discord",
+            push_user_token=None,
+            return_url=None,
+            nft_number=4002,
+            session_tag="job1:2",
+        )
+    )
+    assert res.nft_id is None
+    assert res.offer_id is None
+    assert res.error is not None
+
+
+def test_mint_one_unit_calls_on_state_in_order(monkeypatch, _mint_mocks):
+    states: list[str] = []
+    res = _run(
+        mint_flow.mint_one_unit(
+            discord_id="u1",
+            wallet_address="rUSER",
+            platform="discord",
+            push_user_token=None,
+            return_url=None,
+            nft_number=4003,
+            session_tag="job1:3",
+            on_state=states.append,
+        )
+    )
+    assert res.error is None
+    assert states == [mint_flow.MINTING, mint_flow.CREATING_OFFER]
