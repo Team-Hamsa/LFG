@@ -133,6 +133,11 @@ switching `~/LFG` back to `main` (the deployer would halt on divergence).
 Rollback: `git push origin <sha>:deploy --force-with-lease`, then on the box
 `scripts/deployer.py prod --once --force-reset`.
 
+The deployers never restart themselves (`lfg-deployer`/`stg-deployer` are
+excluded from their own `restart_processes`) — after changing
+`scripts/deployer.py`, restart them by hand: `pm2 restart lfg-deployer
+stg-deployer`.
+
 The Telegram surface runs as pm2 process `lfg-telegram` → `.venv/bin/python run_telegram.py`.
 Launch via the `run_telegram.py` shim, **not** `python -m surfaces.telegram_bot.bot`: running `bot.py`
 as `__main__` makes it load a second time under its canonical name when `commands.py` imports `svc`,

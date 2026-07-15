@@ -34,9 +34,11 @@ to run while prod serves traffic; only step 8 restarts prod processes.
     pm2 start ~/LFG/ecosystem.prod.config.js --only lfg-deployer
     pm2 save
 
-## 8. Adopt the prod ecosystem file (first drain-restart of prod)
+## 8. Adopt the prod ecosystem file (hard cutover — prod restarts here)
 Existing lfg-* processes keep their old ad-hoc definitions until restarted
-via the file. At a quiet moment:
+via the file. This step actually bounces live prod processes — check
+`curl -s localhost:8176/api/health` shows `active_sessions: 0` first, then
+at that quiet moment:
     pm2 delete lfg-bot lfg-activity lfg-telegram lfg-index-mainnet lfg-snapshot
     pm2 start ~/LFG/ecosystem.prod.config.js
     pm2 save
