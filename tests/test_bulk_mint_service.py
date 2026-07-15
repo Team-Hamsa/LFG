@@ -139,3 +139,66 @@ def test_bulk_active_returns_live_job(dev_auth):
 
     body = _json.loads(resp.body.decode())
     assert body["session"]["id"] == job.id
+
+
+def test_bulk_start_inserts_before_awaiting_prepare_payment(dev_auth, monkeypatch):
+    """Regression for the active-job race: the job must land in bulk_sessions
+    BEFORE prepare_payment() is awaited, so a concurrent request racing in
+    right after the insert sees this job as active. If the insert happened
+    only after prepare_payment (the bug), a second request that starts while
+    the first is still awaiting prepare_payment would see an empty
+    bulk_sessions dict and slip past the active-job guard."""
+    seen_in_sessions_during_prepare = {}
+
+    original_prepare_payment = bulk_mint_flow.BulkMintJob.prepare_payment
+
+    async def spy_prepare_payment(self):
+        # At the moment prepare_payment runs, the job must already be
+        # registered under its own id in bulk_sessions.
+        seen_in_sessions_during_prepare["present"] = dev_auth.get(self.id) is self
+        return await original_prepare_payment(self)
+
+    monkeypatch.setattr(bulk_mint_flow.BulkMintJob, "prepare_payment", spy_prepare_payment)
+
+    req = _post_request("/api/mint/bulk", {"quantity": 1})
+    resp = _run(server.handle_bulk_mint_start(req))
+
+    assert seen_in_sessions_during_prepare.get("present") is True
+    assert resp.status == 200
+    import json as _json
+
+    body = _json.loads(resp.body.decode())
+    assert body["id"] in dev_auth
+
+
+def test_bulk_start_second_concurrent_request_is_rejected(dev_auth, monkeypatch):
+    """End-to-end race simulation: while the first request's prepare_payment
+    is still in flight (i.e. after the insert but before it returns), a
+    second start request for the same user must be rejected 409 rather than
+    creating a second concurrent bulk job."""
+    second_response = {}
+
+    original_prepare_payment = bulk_mint_flow.BulkMintJob.prepare_payment
+
+    async def interleaving_prepare_payment(self):
+        # Simulate a concurrent second request arriving while the first is
+        # suspended awaiting prepare_payment — at this point the first job
+        # must already be visible in bulk_sessions for the guard to work.
+        second_req = _post_request("/api/mint/bulk", {"quantity": 1})
+        second_response["resp"] = await server.handle_bulk_mint_start(second_req)
+        return await original_prepare_payment(self)
+
+    monkeypatch.setattr(bulk_mint_flow.BulkMintJob, "prepare_payment", interleaving_prepare_payment)
+
+    req = _post_request("/api/mint/bulk", {"quantity": 1})
+    resp = _run(server.handle_bulk_mint_start(req))
+
+    assert resp.status == 200
+    assert second_response["resp"].status == 409
+    import json as _json
+
+    assert _json.loads(second_response["resp"].body.decode())["error"] == (
+        "bulk mint already in progress"
+    )
+    # Only one job for this user should have been registered.
+    assert len(dev_auth) == 1

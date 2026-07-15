@@ -49,6 +49,7 @@ def test_routes_registered():
         "/api/mint",
         "/api/mint/active",
         "/api/mint/bulk",
+        "/api/mint/bulk/active",
         "/api/mint/{session_id}",
         "/api/nfts",
         "/api/swap",
@@ -67,6 +68,7 @@ def test_routes_registered():
     method_paths = {(r.method, getattr(r.resource, "canonical", "")) for r in app.router.routes()}
     for expected_pair in [
         ("GET", "/api/mint/active"),
+        ("GET", "/api/mint/bulk/active"),
         ("POST", "/api/swap/{session_id}/regenerate"),
         ("POST", "/api/swap/{session_id}/cancel"),
     ]:

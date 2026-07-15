@@ -2512,22 +2512,13 @@ async def handle_mint_start(request):
 async def handle_bulk_mint_start(request):
     """Start a bulk mint job (#215): one K x payment, then a background task
     mints K units in sequence. Mirrors handle_mint_start's ordering — every
-    suspending value is resolved BEFORE the one-active-job check so no await
-    sits between the check and the insert below (the guard is only race-free
-    while that window stays await-free)."""
+    suspending value (request body parse, push token, return URL) is resolved
+    BEFORE the one-active-job check so no await sits between the check and
+    the insert below (the guard is only race-free while that window stays
+    await-free). prepare_payment() is deliberately awaited AFTER the insert —
+    a concurrent request already sees this job as active by then."""
     user = request["user"]
     _prune_sessions(bulk_sessions, bulk_mint_flow.TERMINAL_STATES)
-
-    return_url = await _request_return_url(request)
-    push_user_token = await _push_token(user)
-
-    active = _active_session(
-        bulk_sessions, bulk_mint_flow.TERMINAL_STATES, user["id"], _platform(user)
-    )
-    if active:
-        return web.json_response(
-            {"error": "bulk mint already in progress", "session": active.to_dict()}, status=409
-        )
 
     try:
         body = await request.json()
@@ -2537,6 +2528,10 @@ async def handle_bulk_mint_start(request):
         qty = int(body.get("quantity", 0))
     except (TypeError, ValueError):
         qty = 0
+
+    return_url = await _request_return_url(request)
+    push_user_token = await _push_token(user)
+
     if qty < 1:
         return web.json_response({"error": "invalid_quantity"}, status=400)
 
@@ -2552,8 +2547,19 @@ async def handle_bulk_mint_start(request):
         job.clamp_to_headroom()
     except bulk_mint_flow.CollectionFull:
         return web.json_response({"error": "collection_full"}, status=409)
-    await job.prepare_payment()
+
+    # One active job per user (no awaits between this check and the insert
+    # below, so it cannot race)
+    active = _active_session(
+        bulk_sessions, bulk_mint_flow.TERMINAL_STATES, user["id"], _platform(user)
+    )
+    if active:
+        return web.json_response(
+            {"error": "bulk mint already in progress", "session": active.to_dict()}, status=409
+        )
     bulk_sessions[job.id] = job
+
+    await job.prepare_payment()
     job.task = asyncio.create_task(bulk_mint_flow.run_bulk_mint_job(job))
     return web.json_response(job.to_dict())
 
@@ -2595,6 +2601,19 @@ async def _start_bulk_resume(app: web.Application) -> None:
     """aiohttp on_startup hook: schedule resume_bulk_jobs as a background task
     (mirrors _start_settlement_sweep) so app startup doesn't block on it."""
     app["bulk_resume_task"] = asyncio.get_event_loop().create_task(resume_bulk_jobs())
+
+
+async def _stop_bulk_resume(app: web.Application) -> None:
+    """aiohttp on_cleanup hook: cancel the startup bulk-resume task on
+    shutdown (mirrors _stop_settlement_sweep)."""
+    task = app.get("bulk_resume_task")
+    if task is None:
+        return
+    task.cancel()
+    try:
+        await task
+    except asyncio.CancelledError:
+        pass
 
 
 def _index_roster(conn: sqlite3.Connection, wallet: str) -> list[dict[str, Any]] | None:
@@ -3522,6 +3541,7 @@ def create_app() -> web.Application:
     app.on_startup.append(_start_settlement_sweep)
     app.on_cleanup.append(_stop_settlement_sweep)
     app.on_startup.append(_start_bulk_resume)
+    app.on_cleanup.append(_stop_bulk_resume)
     return app
 
 
