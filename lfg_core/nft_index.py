@@ -21,30 +21,23 @@ from lfg_core import swap_meta
 # lsfMutable bit on the on-ledger NFToken (Dynamic NFTs amendment).
 NFT_FLAG_MUTABLE = 0x0010
 
-# Mainnet metadata is on IPFS; one gateway is flaky at collection scale. The
-# index (not the live swap) tries several gateways over a few passes so
-# transient timeouts don't permanently shrink coverage. {cid}/{path} style.
-IPFS_GATEWAYS = [
-    "https://{cid}.ipfs.dweb.link/{path}",
-    "https://ipfs.io/ipfs/{cid}/{path}",
-    "https://cloudflare-ipfs.com/ipfs/{cid}/{path}",
-    "https://{cid}.ipfs.w3s.link/{path}",
-]
 FETCH_ATTEMPTS = 3
 FETCH_TIMEOUT_SECONDS = 15
 
 
 def _metadata_urls(uri_hex: str) -> list[str]:
-    """Candidate URLs for a token's metadata: ipfs:// -> same CID across several
-    gateways; otherwise the http(s) URL as-is."""
+    """Candidate URLs for a token's metadata. ipfs:// URIs yield NOTHING:
+    gateway flakiness at collection scale fed the []-clobber cycle that
+    eroded mainnet coverage (unreadable-live 1 -> 483), so IPFS is never
+    fetched — the Bithomp CSV import is the metadata source for those
+    tokens. Only http(s) URIs (BunnyCDN) are fetchable."""
     try:
         uri = bytes.fromhex(uri_hex).decode("ascii")
     except ValueError:
         return []
-    if not uri.startswith("ipfs://"):
-        return [uri]
-    cid, _, path = uri[len("ipfs://") :].partition("/")
-    return [g.format(cid=cid, path=path) for g in IPFS_GATEWAYS]
+    if uri.startswith("ipfs://"):
+        return []
+    return [uri]
 
 
 async def fetch_metadata_multi(http: aiohttp.ClientSession, uri_hex: str) -> dict[str, Any] | None:
@@ -244,9 +237,16 @@ def upsert(conn: sqlite3.Connection, rec: OnchainNft) -> None:
             is_burned=excluded.is_burned,
             mutable=excluded.mutable,
             uri_hex=excluded.uri_hex,
-            body=excluded.body,
-            attributes_json=excluded.attributes_json,
-            image=excluded.image,
+            -- Empty attributes mean "metadata fetch failed", never "token has
+            -- no traits" — a re-scan must not clobber previously-good metadata
+            -- (CSV-imported or fetched) with []. body/image ride along since
+            -- they are derived from the same fetch.
+            body=CASE WHEN excluded.attributes_json='[]'
+                 THEN body ELSE excluded.body END,
+            attributes_json=CASE WHEN excluded.attributes_json='[]'
+                 THEN attributes_json ELSE excluded.attributes_json END,
+            image=CASE WHEN excluded.attributes_json='[]'
+                 THEN image ELSE excluded.image END,
             ledger_index=excluded.ledger_index,
             last_synced_at=CURRENT_TIMESTAMP
         """,

@@ -77,12 +77,48 @@ def test_live_nfts_excludes_burned_and_roundtrips_attributes(tmp_path):
     assert live[0].attributes == attrs
 
 
-def test_metadata_urls_expands_ipfs_across_gateways():
+def test_metadata_urls_skips_ipfs_entirely():
+    # IPFS fetches are banned: gateway flakiness fed the []-clobber cycle
+    # (unreadable-live 1 -> 483 over a month of re-runs). Bithomp CSV import
+    # is the mainnet metadata source for ipfs:// tokens.
     uri_hex = b"ipfs://bafyCID/meta.json".hex()
-    urls = nft_index._metadata_urls(uri_hex)
-    assert len(urls) == len(nft_index.IPFS_GATEWAYS)
-    assert "https://bafyCID.ipfs.dweb.link/meta.json" in urls
-    assert "https://ipfs.io/ipfs/bafyCID/meta.json" in urls
+    assert nft_index._metadata_urls(uri_hex) == []
+
+
+def test_upsert_empty_attributes_never_clobber_nonempty(tmp_path):
+    conn = nft_index.init_db(str(tmp_path / "x.db"))
+    attrs = [{"trait_type": "Clothing", "value": "Wonder"}]
+    nft_index.upsert(conn, _nft("AAA", owner="rOld", attrs=attrs))
+    # A re-scan whose metadata fetch failed: empty attributes, no body/image.
+    failed = _nft("AAA", owner="rNew", attrs=[], body="")
+    failed.image = ""
+    nft_index.upsert(conn, failed)
+    row = conn.execute(
+        "SELECT owner, attributes_json, body, image FROM onchain_nfts WHERE nft_id='AAA'"
+    ).fetchone()
+    assert row[0] == "rNew"  # ledger facts still update
+    assert row[1] != "[]"  # metadata survives the failed fetch
+    assert row[2] == "male"
+    assert row[3] == "https://img/x.png"
+
+
+def test_upsert_nonempty_attributes_still_overwrite(tmp_path):
+    conn = nft_index.init_db(str(tmp_path / "x.db"))
+    nft_index.upsert(conn, _nft("AAA", attrs=[{"trait_type": "Head", "value": "Old"}]))
+    new_attrs = [{"trait_type": "Head", "value": "New"}]
+    nft_index.upsert(conn, _nft("AAA", attrs=new_attrs))
+    live = nft_index.live_nfts(conn)
+    assert live[0].attributes == new_attrs
+
+
+def test_upsert_empty_attributes_fill_empty_row(tmp_path):
+    conn = nft_index.init_db(str(tmp_path / "x.db"))
+    nft_index.upsert(conn, _nft("AAA", attrs=[], body=""))
+    attrs = [{"trait_type": "Head", "value": "New"}]
+    nft_index.upsert(conn, _nft("AAA", attrs=attrs))
+    live = nft_index.live_nfts(conn)
+    assert live[0].attributes == attrs
+    assert live[0].body == "male"
 
 
 def test_metadata_urls_passes_through_http():
