@@ -156,6 +156,44 @@ def test_mint_one_unit_mint_fail_reports_no_nft_id(monkeypatch, _mint_mocks):
     assert res.error is not None
 
 
+def test_bulk_unit_offer_has_no_expiration(monkeypatch, _mint_mocks):
+    # Task 11 (#215): bulk minting drives mint_one_unit exactly like the
+    # single-mint path, which routes through the already-SourceTag-stamped
+    # xrpl_ops builders (see tests/test_xrpl_source_tag.py). Pin two
+    # hackathon/provenance invariants at this boundary: offers never carry an
+    # Expiration, and mint/offer both receive a provenance `platform` kwarg
+    # (memos.platform_for_surface(...)) so the on-chain memo is never omitted.
+    seen: dict[str, Any] = {}
+
+    async def _spy_offer(nft_id, destination, **kw):
+        seen.update(kw)
+        seen["nft_id"] = nft_id
+        return "OFFER1"
+
+    monkeypatch.setattr(mint_flow.xrpl_ops, "create_nft_offer", _spy_offer)
+
+    res = _run(
+        mint_flow.mint_one_unit(
+            discord_id="u1",
+            wallet_address="rUSER",
+            platform="discord",
+            push_user_token=None,
+            return_url=None,
+            nft_number=4200,
+            session_tag="job1:bulk0",
+        )
+    )
+    assert res.error is None
+    assert "expiration" not in seen and "Expiration" not in seen
+    assert seen.get("platform") == mint_flow.memos.platform_for_surface("discord")
+
+    # mint_nft (captured by the _mint_mocks fixture) must also carry the
+    # provenance platform kwarg, never omitted.
+    assert _mint_mocks["mint_nft_kwargs"]["platform"] == mint_flow.memos.platform_for_surface(
+        "discord"
+    )
+
+
 def test_mint_one_unit_calls_on_state_in_order(monkeypatch, _mint_mocks):
     states: list[str] = []
     res = _run(
