@@ -42,7 +42,7 @@ FAILED = "failed"
 MintFn = Callable[..., Awaitable[str | None]]
 OfferFn = Callable[..., Awaitable[str | None]]
 BurnFn = Callable[..., Awaitable[str | None]]
-PayloadStatusFn = Callable[[str], Awaitable[dict[str, Any]]]
+PayloadStatusFn = Callable[[str], Awaitable[dict[str, Any] | None]]
 AcceptPayloadFn = Callable[..., Awaitable[dict[str, Any]]]
 
 
@@ -105,7 +105,7 @@ class ShopDeps:
     burn_fn: BurnFn
     payload_status_fn: PayloadStatusFn
     accept_payload_fn: AcceptPayloadFn
-    now_ts_fn: Callable[[], int] = time.time  # type: ignore[assignment]
+    now_ts_fn: Callable[[], int] = lambda: int(time.time())
     network: str = "testnet"
 
 
@@ -124,6 +124,32 @@ def _record_supply_change(
         actor="shop",
         reason=reason,
     )
+
+
+async def _revert_mint(deps: ShopDeps, session: ShopBuySession, nft_id: str) -> None:
+    """Compensate a successful mint that could not be listed/logged: burn the
+    token back and record a matching supply reversal row. If the burn itself
+    fails (raises or returns falsy), leave the token minted and route to the
+    admin-intervention message instead of silently losing the +1 supply row."""
+    try:
+        revert_hash = await deps.burn_fn(nft_id, "")
+    except Exception:
+        revert_hash = None
+    if revert_hash:
+        _record_supply_change(
+            deps,
+            kind="burn",
+            delta=-1,
+            session=session,
+            reason=f"shop revert {session.id}",
+        )
+        session.nft_id = None
+        session.fail("failed to list your trait token for sale; the mint was reverted")
+    else:
+        session.fail(
+            f"failed to list trait token {nft_id} for sale and the compensating burn "
+            "failed too — an admin must burn it"
+        )
 
 
 async def start_shop_buy(session: ShopBuySession, deps: ShopDeps) -> None:
@@ -163,39 +189,34 @@ async def start_shop_buy(session: ShopBuySession, deps: ShopDeps) -> None:
             return
         session.nft_id = nft_id
 
-        _record_supply_change(
-            deps,
-            kind="mint",
-            delta=1,
-            session=session,
-            reason=f"shop purchase {session.id}",
-        )
+        try:
+            _record_supply_change(
+                deps,
+                kind="mint",
+                delta=1,
+                session=session,
+                reason=f"shop purchase {session.id}",
+            )
+        except Exception:
+            # The mint growth row didn't land — attempt to burn the token
+            # back before failing so we don't strand a minted-but-unlogged
+            # token, then re-raise into the outer handler.
+            await _revert_mint(deps, session, nft_id)
+            raise
 
         expiration = ripple_expiration(deps.now_ts_fn(), config.SHOP_OFFER_TTL_SECONDS)
-        offer_index = await deps.offer_fn(
-            nft_id,
-            session.buyer,
-            amount=brix_amount(session.price_brix),
-            expiration=expiration,
-            action=memos.ACTION_SHOP_BUY,
-        )
+        try:
+            offer_index = await deps.offer_fn(
+                nft_id,
+                session.buyer,
+                amount=brix_amount(session.price_brix),
+                expiration=expiration,
+                action=memos.ACTION_SHOP_BUY,
+            )
+        except Exception:
+            offer_index = None
         if not offer_index:
-            revert_hash = await deps.burn_fn(nft_id, "")
-            if revert_hash:
-                _record_supply_change(
-                    deps,
-                    kind="burn",
-                    delta=-1,
-                    session=session,
-                    reason=f"shop revert {session.id}",
-                )
-                session.nft_id = None
-                session.fail("failed to list your trait token for sale; the mint was reverted")
-            else:
-                session.fail(
-                    f"failed to list trait token {nft_id} for sale and the compensating burn "
-                    "failed too — an admin must burn it"
-                )
+            await _revert_mint(deps, session, nft_id)
             shop_store.update_order(deps.conn, session.id, now_ts=deps.now_ts_fn(), status="failed")
             return
         session.offer_index = offer_index
@@ -214,7 +235,8 @@ async def start_shop_buy(session: ShopBuySession, deps: ShopDeps) -> None:
         session.state = AWAITING_ACCEPT
     except Exception as e:
         logging.error(f"Shop buy {session.id} failed: {traceback.format_exc()}")
-        session.fail(str(e))
+        if session.state != FAILED:
+            session.fail(str(e))
         try:
             shop_store.update_order(deps.conn, session.id, now_ts=deps.now_ts_fn(), status="failed")
         except Exception:
@@ -229,10 +251,12 @@ async def advance_shop_buy(session: ShopBuySession, deps: ShopDeps) -> None:
     for the expiry sweep) and settle the sale by depositing the token back
     into the buyer's Closet. Settlement failure leaves the order accepted
     (state 'settling') for the sweep to retry — it is NOT a session failure."""
+    if session.state not in (AWAITING_ACCEPT, SETTLING):
+        return
     if session.accept is None or session.nft_id is None:
         return
     status = await deps.payload_status_fn(session.accept["uuid"])
-    if not status.get("signed"):
+    if status is None or not status.get("signed"):
         return
 
     signer = status.get("account")

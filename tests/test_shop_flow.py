@@ -317,6 +317,114 @@ def test_settle_failure_leaves_order_accepted_and_session_settling(tmp_path):
     assert row is None or row[0] == 0
 
 
+def test_advance_noop_on_none_status(tmp_path):
+    conn = sqlite3.connect(":memory:")
+    _active_closet(conn)
+    f = _F()
+    deps = _deps(conn, f, tmp_path)
+    session = _session()
+
+    _run(shop_flow.start_shop_buy(session, deps))
+    assert session.state == "awaiting_accept"
+
+    async def fake_none(_uuid):
+        return None
+
+    f.payload_status = fake_none
+    _run(shop_flow.advance_shop_buy(session, deps))
+
+    assert session.state == "awaiting_accept"
+    assert f.deposits == []
+    order = shop_store.get_order(conn, session.id)
+    assert order is not None and order["status"] == "pending_accept"
+
+
+def test_advance_idempotent_after_done(tmp_path):
+    conn = sqlite3.connect(":memory:")
+    _active_closet(conn)
+    f = _F()
+    deps = _deps(conn, f, tmp_path)
+    session = _session()
+
+    _run(shop_flow.start_shop_buy(session, deps))
+    f.owner_of[f.minted_nft_id] = BUYER
+    f.payload_status = _signed_status(account=BUYER)
+    _run(shop_flow.advance_shop_buy(session, deps))
+
+    assert session.state == "done"
+    assert f.deposits == [(f.minted_nft_id, BUYER)]
+
+    # Re-advancing a terminal session must be a no-op.
+    _run(shop_flow.advance_shop_buy(session, deps))
+
+    assert session.state == "done"
+    assert f.deposits == [(f.minted_nft_id, BUYER)]
+    order = shop_store.get_order(conn, session.id)
+    assert order is not None and order["status"] == "settled"
+
+
+def test_offer_fn_raises_reverts_with_burn_and_two_supply_rows(tmp_path):
+    conn = sqlite3.connect(":memory:")
+    _active_closet(conn)
+    f = _F()
+
+    async def raising_offer(*a, **kw):
+        f.offers.append((a, kw))
+        raise RuntimeError("offer boom")
+
+    f.offer = raising_offer
+    deps = _deps(conn, f, tmp_path)
+    session = _session()
+
+    _run(shop_flow.start_shop_buy(session, deps))
+
+    assert session.state == "failed"
+    assert f.burns and f.burns[0][0] == f.minted_nft_id
+
+    order = shop_store.get_order(conn, session.id)
+    assert order is not None and order["status"] == "failed"
+
+    from lfg_core import economy_store as es_mod
+
+    changes = es_mod.read_supply_changes(conn)
+    assert len(changes) == 2
+    assert changes[0]["kind"] == "mint"
+    assert changes[1]["kind"] == "burn"
+    assert changes[1]["trait_deltas"] == {"Hat|Wizard Hat": -1}
+
+
+def test_offer_fn_and_burn_fn_both_raise_leaves_admin_intervention(tmp_path):
+    conn = sqlite3.connect(":memory:")
+    _active_closet(conn)
+    f = _F()
+
+    async def raising_offer(*a, **kw):
+        raise RuntimeError("offer boom")
+
+    async def raising_burn(*a, **kw):
+        f.burns.append(a)
+        raise RuntimeError("burn boom")
+
+    f.offer = raising_offer
+    f.burn = raising_burn
+    deps = _deps(conn, f, tmp_path)
+    session = _session()
+
+    _run(shop_flow.start_shop_buy(session, deps))
+
+    assert session.state == "failed"
+    assert session.error is not None and "admin" in session.error.lower()
+
+    order = shop_store.get_order(conn, session.id)
+    assert order is not None and order["status"] == "failed"
+
+    from lfg_core import economy_store as es_mod
+
+    changes = es_mod.read_supply_changes(conn)
+    assert len(changes) == 1
+    assert changes[0]["kind"] == "mint"
+
+
 def test_ripple_expiration():
     assert shop_flow.ripple_expiration(1_752_000_000, 900) == 1_752_000_900 - 946_684_800
 
