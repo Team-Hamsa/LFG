@@ -84,9 +84,7 @@ def run_git(args: list[str], cwd: str) -> str:
     # git hook environment) so git always operates on `cwd`, never the repo
     # that happened to spawn us.
     env = {k: v for k, v in os.environ.items() if not k.startswith("GIT_")}
-    return subprocess.check_output(
-        ["git", *args], cwd=cwd, text=True, timeout=120, env=env
-    ).strip()
+    return subprocess.check_output(["git", *args], cwd=cwd, text=True, timeout=120, env=env).strip()
 
 
 def fetch(cfg: StackConfig) -> None:
