@@ -48,6 +48,8 @@ from lfg_core import (
     mint_flow,
     nft_index,
     rarity,
+    shop,
+    shop_flow,
     shop_store,
     swap_flow,
     swap_meta,
@@ -77,6 +79,12 @@ economy_sessions: dict[str, Any] = {}
 # Shared by List/Cancel/Buy (market_flow.ListSession/CancelSession/BuySession),
 # same "one dict, `.kind` routes the status handler" shape as economy_sessions.
 market_sessions: dict[str, Any] = {}
+# Trait Shop (#217) buy sessions: shop_flow.ShopBuySession keyed by .id, same
+# "one dict, poll via GET status" shape as market_sessions. ShopBuySession has
+# no created_at (unlike the other session dataclasses), so pruning tracks
+# creation time in a parallel dict rather than reusing _prune_sessions.
+shop_sessions: dict[str, Any] = {}
+_shop_session_created: dict[str, float] = {}
 SESSION_RETENTION = 3600  # keep terminal sessions briefly for late polls
 
 BUS = InMemoryEventBus()
@@ -1599,6 +1607,236 @@ handle_market_cancel_status = _make_market_status_handler("cancel")
 handle_market_buy_status = _make_market_status_handler("buy")
 
 
+# --- Trait Shop (#217) Task 8: catalog + buy service endpoints ---
+# GET /api/shop/catalog is a public, cached, derived-price browse (lfg_core.shop
+# .catalog). POST/GET /api/shop/buy drive lfg_core.shop_flow's ShopBuySession
+# state machine (mint -> BRIX sell offer -> XUMM accept -> settle-to-Closet),
+# mirroring the market buy session shape above but keyed by wallet (`.buyer`)
+# rather than discord_id, since ShopBuySession has no platform-user identity.
+
+_SHOP_CACHE: dict[str, tuple[float, list[dict[str, Any]]]] = {}
+_SHOP_CACHE_LOCK = threading.Lock()
+_SHOP_CACHE_GEN: dict[str, int] = {}
+_SHOP_CACHE_TTL = 60.0
+
+
+def _shop_cache_put(network: str, value: list[dict[str, Any]], now_mono: float, gen: int) -> None:
+    """Mirrors _market_cache_put's insert-if-generation-unchanged discipline,
+    keyed on network only (the catalog has no `kind` dimension)."""
+    with _SHOP_CACHE_LOCK:
+        if _SHOP_CACHE_GEN.get(network, 0) != gen:
+            return
+        for k in [k for k, (ts, _) in _SHOP_CACHE.items() if now_mono - ts >= _SHOP_CACHE_TTL]:
+            del _SHOP_CACHE[k]
+        _SHOP_CACHE[network] = (now_mono, value)
+
+
+def _invalidate_shop_cache(network: str) -> None:
+    with _SHOP_CACHE_LOCK:
+        _SHOP_CACHE.pop(network, None)
+        _SHOP_CACHE_GEN[network] = _SHOP_CACHE_GEN.get(network, 0) + 1
+
+
+def _compute_shop_catalog(network: str) -> list[dict[str, Any]]:
+    """Sync work for GET /api/shop/catalog, run on an executor thread (same
+    posture as _compute_market_rows): the derived catalog from the app DB
+    (trait_rarity + shop_overrides), each row annotated with a representative
+    trait-art URL via the same helper the marketplace trait listings use."""
+    conn = sqlite3.connect(db_path.app_db_path(network))
+    try:
+        rarity.ensure_schema(conn)
+        rows = shop.catalog(conn, network)
+    finally:
+        conn.close()
+    cfg = trait_config.get_config()
+    for row in rows:
+        row["image_url"] = _trait_image_url(cfg, row["slot"], row["value"])
+    return rows
+
+
+async def handle_shop_catalog(request: web.Request) -> web.Response:
+    """Public: GET /api/shop/catalog. Empty list when the trait economy is
+    disabled (mirrors handle_market_listings' empty-page-not-403 posture for
+    a browse-only, non-transacting surface)."""
+    if not config.ECONOMY_ENABLED:
+        return web.json_response({"items": []})
+
+    network = config.ECONOMY_NETWORK
+    now_mono = time.monotonic()
+    with _SHOP_CACHE_LOCK:
+        cached = _SHOP_CACHE.get(network)
+        gen = _SHOP_CACHE_GEN.get(network, 0)
+    if cached is not None and now_mono - cached[0] < _SHOP_CACHE_TTL:
+        rows = cached[1]
+    else:
+        rows = await asyncio.get_event_loop().run_in_executor(None, _compute_shop_catalog, network)
+        _shop_cache_put(network, rows, now_mono, gen)
+    return web.json_response({"items": rows})
+
+
+def _quote_shop_trait(network: str, slot: str, value: str) -> tuple[int | None, bool]:
+    """(price, exists) for one (slot, value): price is shop.quote's result
+    (None if unknown / rarity-disabled / excluded / a price_override of None);
+    exists distinguishes "no trait_rarity rows at all" (404 unknown_trait)
+    from "rows exist but this value isn't currently purchasable" (403
+    not_purchasable) for the caller."""
+    conn = sqlite3.connect(db_path.app_db_path(network))
+    try:
+        rarity.ensure_schema(conn)
+        exists = (
+            conn.execute(
+                "SELECT 1 FROM trait_rarity WHERE network=? AND category=? AND trait=? LIMIT 1",
+                (network, slot, value),
+            ).fetchone()
+            is not None
+        )
+        price = shop.quote(conn, network, slot, value)
+        return price, exists
+    finally:
+        conn.close()
+
+
+def _build_shop_deps(network: str, platform: str) -> tuple[shop_flow.ShopDeps, sqlite3.Connection]:
+    """The real ShopDeps for a service-triggered buy: mint/offer/burn against
+    the live issuer wallet, XUMM payload builders, and an EconomyDeps built
+    the same way `economy_api.build_settlement_deps` wires settlement (shop
+    buys settle into the buyer's Closet via the same `run_deposit`). Callers
+    own the returned connection's lifetime (close it when done)."""
+    conn = nft_index.init_db(nft_index.index_db_path(network))
+    economy_store.init_economy_schema(conn)
+    shop_store.ensure_schema(conn)
+    economy_deps = economy_api.build_settlement_deps(conn)
+
+    def _app_conn_factory() -> sqlite3.Connection:
+        return sqlite3.connect(db_path.app_db_path(network))
+
+    async def _accept_payload_fn(offer_index: str, user_token: str | None = None) -> dict[str, Any]:
+        # ShopDeps.accept_payload_fn is typed non-Optional (shop_flow assigns
+        # its result straight to session.accept with no None-check); a Xaman
+        # API failure here raises into start_shop_buy's own outer try/except,
+        # which fails the session/order the same way an offer-build failure
+        # does — never a silent None assignment.
+        payload = await xumm_ops.create_accept_offer_payload(
+            offer_index,
+            user_token=user_token,
+            platform=memos.platform_for_surface(platform),
+            action=memos.ACTION_SHOP_BUY,
+        )
+        if payload is None:
+            raise RuntimeError("could not reach Xaman")
+        return payload
+
+    deps = shop_flow.ShopDeps(
+        conn=conn,
+        app_conn_factory=_app_conn_factory,
+        economy_deps=economy_deps,
+        mint_fn=lambda url, taxon, **kw: xrpl_ops.mint_nft(
+            url, taxon, config.SWAP_ISSUER_ADDRESS, **kw
+        ),
+        offer_fn=xrpl_ops.create_nft_offer,
+        burn_fn=lambda nft_id, owner: xrpl_ops.burn_nft(nft_id, owner or None),
+        payload_status_fn=xumm_ops.get_payload_status,
+        accept_payload_fn=_accept_payload_fn,
+        network=network,
+    )
+    return deps, conn
+
+
+def _prune_shop_sessions() -> None:
+    cutoff = time.time() - SESSION_RETENTION
+    terminal = {shop_flow.DONE, shop_flow.FAILED}
+    for sid, s in list(shop_sessions.items()):
+        if s.state in terminal and _shop_session_created.get(sid, 0) < cutoff:
+            del shop_sessions[sid]
+            _shop_session_created.pop(sid, None)
+
+
+@require_wallet
+async def handle_shop_buy_start(request):
+    """POST /api/shop/buy {slot, value}. Fail-closed order: 403
+    economy_disabled -> 400 malformed -> 404 unknown_trait / 403
+    not_purchasable -> 403 closet_required -> launch. The price is frozen
+    from shop.quote at this moment and carried on the session; the mint +
+    BRIX sell-offer + XUMM payload build (shop_flow.start_shop_buy) runs as a
+    background task (mirrors webapp.economy_api._schedule) so the request
+    returns immediately with a `running` session for the client to poll via
+    GET /api/shop/buy/{session_id} — the same shape returned once the
+    background task fills in `accept`."""
+    if not config.ECONOMY_ENABLED:
+        return _economy_disabled_response()
+
+    user = request["user"]
+    wallet = request["wallet"]
+    body = await request.json()
+    slot = body.get("slot")
+    value = body.get("value")
+    if not isinstance(slot, str) or not slot or not isinstance(value, str) or not value:
+        return web.json_response({"error": "slot and value are required"}, status=400)
+
+    network = config.ECONOMY_NETWORK
+    loop = asyncio.get_event_loop()
+    price, exists = await loop.run_in_executor(None, _quote_shop_trait, network, slot, value)
+    if price is None:
+        if not exists:
+            return web.json_response({"error": "unknown_trait"}, status=404)
+        return web.json_response({"error": "not_purchasable"}, status=403)
+
+    active = await loop.run_in_executor(None, _closet_active, network, wallet)
+    if not active:
+        return web.json_response({"error": "closet_required"}, status=403)
+
+    _prune_shop_sessions()
+    session = shop_flow.ShopBuySession(
+        buyer=wallet,
+        slot=slot,
+        value=value,
+        price_brix=price,
+        platform=_platform(user),
+        push_user_token=await _push_token(user),
+    )
+    shop_sessions[session.id] = session
+    _shop_session_created[session.id] = time.time()
+
+    deps, conn = _build_shop_deps(network, _platform(user))
+
+    async def _run_and_close() -> None:
+        try:
+            await shop_flow.start_shop_buy(session, deps)
+        except Exception as e:  # unexpected crash: ensure the session reaches a terminal state
+            if session.state != shop_flow.FAILED:
+                session.fail(f"internal error: {e}")
+        finally:
+            conn.close()
+
+    asyncio.get_event_loop().create_task(_run_and_close())
+    return web.json_response(session.to_dict())
+
+
+@require_wallet
+async def handle_shop_buy_status(request):
+    """GET /api/shop/buy/{session_id}: 404 if unknown or the session belongs
+    to a different wallet (ShopBuySession has no platform-user identity to
+    compare, so ownership is checked by `.buyer` wallet — the same identity
+    require_wallet resolved for the POST that created it). Drives
+    shop_flow.advance_shop_buy while awaiting the buyer's XUMM signature or
+    mid-settlement; a session that hasn't reached AWAITING_ACCEPT yet (the
+    background mint/offer build from the POST is still running) is returned
+    as-is with nothing to advance."""
+    session = shop_sessions.get(request.match_info["session_id"])
+    if session is None or session.buyer != request["wallet"]:
+        return web.json_response({"error": "not found"}, status=404)
+
+    if session.state in (shop_flow.AWAITING_ACCEPT, shop_flow.SETTLING):
+        network = config.ECONOMY_NETWORK
+        deps, conn = _build_shop_deps(network, session.platform)
+        try:
+            await shop_flow.advance_shop_buy(session, deps)
+        finally:
+            conn.close()
+
+    return web.json_response(session.to_dict())
+
+
 # --- Task 9 (spec §Q7): trait-sale settlement (burn sold trait -> buyer's Closet) ---
 
 
@@ -3081,6 +3319,9 @@ def create_app() -> web.Application:
     app.router.add_get("/api/market/buy/{session_id}", handle_market_buy_status)
     app.router.add_post("/api/market/trait/list", handle_market_trait_list_start)
     app.router.add_get("/api/market/trait/list/{session_id}", handle_market_trait_list_status)
+    app.router.add_get("/api/shop/catalog", handle_shop_catalog)
+    app.router.add_post("/api/shop/buy", handle_shop_buy_start)
+    app.router.add_get("/api/shop/buy/{session_id}", handle_shop_buy_status)
     app.router.add_post("/api/swap", handle_swap_start)
     app.router.add_get("/api/swap/{session_id}", handle_swap_status)
     app.router.add_post("/api/swap/{session_id}/regenerate", handle_swap_regenerate)
