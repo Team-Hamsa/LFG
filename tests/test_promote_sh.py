@@ -65,6 +65,15 @@ def test_promote_shows_range_and_aborts_on_no(tmp_path):
     assert _git(work, "rev-parse", "origin/deploy") != _git(work, "rev-parse", "origin/main")
 
 
+def test_promote_rejects_unknown_arg(tmp_path):
+    origin, work = _setup(tmp_path)
+    r = _run(work, "--bogus")
+    assert r.returncode == 2
+    assert "usage" in (r.stdout + r.stderr).lower()
+    _git(work, "fetch", "origin")
+    assert _git(work, "rev-parse", "origin/deploy") != _git(work, "rev-parse", "origin/main")
+
+
 def test_promote_noop_when_already_promoted(tmp_path):
     origin, work = _setup(tmp_path)
     assert _run(work, "--yes").returncode == 0

@@ -8,7 +8,14 @@ set -euo pipefail
 
 REMOTE="${PROMOTE_REMOTE:-origin}"
 YES=0
-[ "${1:-}" = "--yes" ] && YES=1
+case "${1:-}" in
+  "") ;;
+  --yes) YES=1 ;;
+  *)
+    echo "Usage: $0 [--yes]" >&2
+    exit 2
+    ;;
+esac
 
 git fetch "$REMOTE" --prune
 
