@@ -1,0 +1,431 @@
+# Bulk mint (#215): a durable batch job. After one K x payment, a background
+# task loops mint_flow.mint_one_unit K times, persisting after each unit so a
+# restart resumes the remainder. Offers never expire, so acceptance is fully
+# decoupled (Phase B / #218).
+from __future__ import annotations
+
+import asyncio
+import json
+import logging
+import os
+import tempfile
+import time
+import uuid
+from dataclasses import asdict, dataclass
+from decimal import Decimal
+from typing import Any
+
+from lfg_core import (
+    config,
+    db_path,
+    entitlement,
+    memos,
+    mint_credits,
+    mint_flow,
+    supply,
+    xrpl_ops,
+    xumm_ops,
+)
+
+JOBS_DIR = os.getenv("BULK_MINT_JOBS_DIR", "bulk_mint_jobs")
+
+AWAITING_PAYMENT = "awaiting_payment"
+PAID = "paid"
+FULFILLING = "fulfilling"
+DONE = "done"
+FAILED = "failed"
+PAYMENT_TIMEOUT = "payment_timeout"
+CANCELLED = "cancelled"
+# FULFILLING is deliberately NOT terminal: the job must stay live in
+# /api/mint/active so the client can re-attach, and so the restart sweep
+# resumes it.
+TERMINAL_STATES = {DONE, FAILED, PAYMENT_TIMEOUT, CANCELLED}
+
+PENDING = "pending"
+MINTED = "minted"
+OFFERED = "offered"
+UNIT_FAILED = "failed"
+
+
+class CollectionFull(Exception):
+    """No headroom under MAX_COLLECTION_SIZE."""
+
+
+@dataclass
+class Unit:
+    index: int
+    state: str = PENDING
+    nft_number: int | None = None
+    nft_id: str | None = None
+    image_url: str | None = None
+    offer_id: str | None = None
+    error: str | None = None
+
+
+class BulkMintJob:
+    def __init__(
+        self,
+        discord_id: str,
+        wallet_address: str,
+        requested_qty: int,
+        platform: str = "discord",
+        push_user_token: str | None = None,
+        return_url: dict[str, str] | None = None,
+    ) -> None:
+        self.id = uuid.uuid4().hex
+        self.discord_id = discord_id
+        self.wallet_address = wallet_address
+        self.platform = platform
+        self.push_user_token = push_user_token
+        self.return_url = return_url
+        self.requested_qty = requested_qty
+        self.quantity = requested_qty
+        self.network = config.XRPL_NETWORK
+        self.created_at = time.time()
+        self.paid_at: float | None = None
+        self.state = AWAITING_PAYMENT
+        self.error: str | None = None
+        self.pay_with: str | None = None
+        self.pay_amount: str | None = None
+        self.unit_price: str | None = None
+        self.payment_link: str | None = None
+        self.payment_uuid: str | None = None
+        self.entitlement: Any = None
+        self.units: list[Unit] = []
+        self.task: asyncio.Task[None] | None = None
+        self._published = False
+
+    def clamp_to_headroom(self) -> None:
+        """Clamp quantity to min(requested, BULK_MINT_MAX, headroom). Raise
+        CollectionFull if no headroom. Cap-exempt entitlements (burn) skip the
+        headroom clamp (#220). Must run BEFORE prepare_payment so we never take
+        payment for undeliverable mints."""
+        cap_exempt = self.entitlement is not None and getattr(self.entitlement, "cap_exempt", False)
+        q = min(self.requested_qty, config.BULK_MINT_MAX)
+        if not cap_exempt:
+            headroom = supply.remaining_headroom(self.network)
+            if headroom <= 0:
+                raise CollectionFull()
+            q = min(q, headroom)
+        self.quantity = q
+        self.units = [Unit(index=i) for i in range(q)]
+        if self.entitlement is None:
+            self.entitlement = entitlement.PaymentEntitlement(quantity=q)
+
+    def _payment_params(self) -> dict[str, Any]:
+        if self.pay_with == "XRP":
+            return {
+                "destination": xrpl_ops.bot_wallet_address(),
+                "value": self.pay_amount,
+                "currency": "XRP",
+                "issuer": None,
+            }
+        return {
+            "destination": config.TOKEN_ISSUER_ADDRESS,
+            "value": self.pay_amount,
+            "currency": config.TOKEN_CURRENCY_HEX,
+            "issuer": config.TOKEN_ISSUER_ADDRESS,
+        }
+
+    async def prepare_payment(self) -> None:
+        """Detect LFGO vs XRP path (same rule as single mint) at K x price and
+        build the XUMM payment payload."""
+        balance = await xrpl_ops.get_trustline_balance(
+            self.wallet_address, config.TOKEN_CURRENCY_HEX, config.TOKEN_ISSUER_ADDRESS
+        )
+        total_lfgo = Decimal(config.MINT_PRICE_LFGO) * self.quantity
+        if balance is not None and balance >= total_lfgo:
+            self.pay_with, self.unit_price = "LFGO", config.MINT_PRICE_LFGO
+            self.pay_amount = str(total_lfgo)
+        else:
+            self.pay_with, self.unit_price = "XRP", config.MINT_PRICE_XRP
+            self.pay_amount = str(Decimal(config.MINT_PRICE_XRP) * self.quantity)
+        p = self._payment_params()
+        payload = await xumm_ops.create_payment_payload(
+            p["destination"],
+            value=p["value"],
+            currency=p["currency"],
+            issuer=p["issuer"],
+            return_url=self.return_url,
+            user_token=self.push_user_token,
+            platform=memos.platform_for_surface(self.platform),
+        )
+        if payload:
+            self.payment_link = payload["xumm_url"]
+            self.payment_uuid = payload.get("uuid")
+
+    def cancel(self) -> bool:
+        """Legal only while awaiting payment (once paid, fulfillment must
+        complete). Synchronous state guard, same discipline as MintSession."""
+        if self.state != AWAITING_PAYMENT:
+            return False
+        self.state = CANCELLED
+        if self.task is not None:
+            self.task.cancel()
+        return True
+
+    def mark_published(self) -> None:
+        self._published = True
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "id": self.id,
+            "platform": self.platform,
+            "state": self.state,
+            "error": self.error,
+            "requested_qty": self.requested_qty,
+            "quantity": self.quantity,
+            "pay_with": self.pay_with,
+            "pay_amount": self.pay_amount,
+            "payment_link": self.payment_link,
+            "network": self.network,
+            "units": [asdict(u) for u in self.units],
+            "minted": sum(1 for u in self.units if u.state in (MINTED, OFFERED)),
+            "offered": sum(1 for u in self.units if u.state == OFFERED),
+        }
+
+    def serialize(self) -> dict[str, Any]:
+        return {
+            "id": self.id,
+            "discord_id": self.discord_id,
+            "wallet_address": self.wallet_address,
+            "platform": self.platform,
+            "push_user_token": self.push_user_token,
+            "return_url": self.return_url,
+            "requested_qty": self.requested_qty,
+            "quantity": self.quantity,
+            "network": self.network,
+            "created_at": self.created_at,
+            "paid_at": self.paid_at,
+            "state": self.state,
+            "error": self.error,
+            "pay_with": self.pay_with,
+            "pay_amount": self.pay_amount,
+            "unit_price": self.unit_price,
+            "payment_uuid": self.payment_uuid,
+            "payment_link": self.payment_link,
+            "entitlement": self.entitlement.to_dict() if self.entitlement else None,
+            "units": [asdict(u) for u in self.units],
+        }
+
+    @classmethod
+    def from_serialized(cls, d: dict[str, Any]) -> BulkMintJob:
+        j = cls(
+            d["discord_id"],
+            d["wallet_address"],
+            d["requested_qty"],
+            platform=d["platform"],
+            push_user_token=d.get("push_user_token"),
+            return_url=d.get("return_url"),
+        )
+        j.id = d["id"]
+        j.quantity = d["quantity"]
+        j.network = d["network"]
+        j.created_at = d["created_at"]
+        j.paid_at = d.get("paid_at")
+        j.state = d["state"]
+        j.error = d.get("error")
+        j.pay_with = d.get("pay_with")
+        j.pay_amount = d.get("pay_amount")
+        j.unit_price = d.get("unit_price")
+        j.payment_uuid = d.get("payment_uuid")
+        j.payment_link = d.get("payment_link")
+        j.entitlement = entitlement.from_dict(d["entitlement"]) if d.get("entitlement") else None
+        j.units = [Unit(**u) for u in d["units"]]
+        return j
+
+
+def _record_path(job_id: str) -> str:
+    return os.path.join(JOBS_DIR, f"{job_id}.json")
+
+
+def persist(job: BulkMintJob) -> None:
+    """Atomically write the job's full reconstruction record."""
+    os.makedirs(JOBS_DIR, exist_ok=True)
+    data = job.serialize()
+    fd, tmp = tempfile.mkstemp(dir=JOBS_DIR, suffix=".tmp")
+    try:
+        with os.fdopen(fd, "w") as f:
+            json.dump(data, f, indent=2)
+        os.replace(tmp, _record_path(job.id))
+    except Exception:
+        logging.error("failed to persist bulk job %s", job.id)
+        if os.path.exists(tmp):
+            os.remove(tmp)
+
+
+def delete_record(job_id: str) -> None:
+    try:
+        os.remove(_record_path(job_id))
+    except FileNotFoundError:
+        pass
+
+
+_UNIT_MAX_ATTEMPTS = 3
+
+
+async def _ensure_offer(job: BulkMintJob, unit: Unit) -> None:
+    """Re-offer-only path for a unit that already minted (unit.nft_id set)
+    but never reached OFFERED — the crash window between the on-chain mint
+    and the offer/XUMM steps landing. NEVER mints; only (re-)creates the sell
+    offer for the existing nft_id. On success -> OFFERED. On failure, leave
+    the unit MINTED with .error set so a later resume/backfill can retry the
+    offer again without ever re-minting."""
+    assert unit.nft_id is not None, "_ensure_offer requires an already-minted unit"
+    try:
+        offer_id = await xrpl_ops.create_nft_offer(
+            unit.nft_id,
+            job.wallet_address,
+            platform=memos.platform_for_surface(job.platform),
+        )
+    except Exception as e:
+        unit.state = MINTED
+        unit.error = str(e)
+        return
+    if not offer_id:
+        unit.state = MINTED
+        unit.error = "offer creation failed"
+        return
+    unit.offer_id = offer_id
+    unit.state = OFFERED
+
+
+async def _fulfill_unit(job: BulkMintJob, unit: Unit) -> None:
+    """Mint+offer one unit. Cap re-check first (a concurrent job may have
+    consumed the tail); a cap-hit or exhausted unit becomes a mint credit
+    rather than a loss. Cap-exempt (burn) entitlements skip the re-check.
+
+    `on_mint` fires the instant mint_one_unit confirms the mint on-chain, so
+    the unit is persisted as MINTED before the offer/XUMM steps run — closing
+    the resume double-mint window (#215): a crash between mint and offer now
+    resumes via _ensure_offer (re-offer only), never a re-mint."""
+    cap_exempt = job.entitlement is not None and getattr(job.entitlement, "cap_exempt", False)
+
+    async def _on_mint(nft_number: int, nft_id: str, image_url: str | None) -> None:
+        unit.nft_number = nft_number
+        unit.nft_id = nft_id
+        unit.image_url = image_url
+        unit.state = MINTED
+        persist(job)
+
+    for _ in range(_UNIT_MAX_ATTEMPTS):
+        if not cap_exempt and supply.current_supply(job.network) >= config.MAX_COLLECTION_SIZE:
+            break  # cap hit -> credit below
+        nft_number = await mint_flow._allocate_nft_number()
+        res = await mint_flow.mint_one_unit(
+            discord_id=job.discord_id,
+            wallet_address=job.wallet_address,
+            platform=job.platform,
+            push_user_token=job.push_user_token,
+            return_url=job.return_url,
+            nft_number=nft_number,
+            session_tag=f"{job.id}:{unit.index}",
+            on_mint=_on_mint,
+        )
+        if res.nft_id:
+            unit.nft_id = res.nft_id
+            unit.nft_number = res.nft_number
+            unit.image_url = res.image_url
+            if res.offer_id:
+                unit.offer_id = res.offer_id
+                unit.state = OFFERED
+            else:
+                # minted but offer failed: NFT exists, do NOT re-mint. Leave
+                # MINTED (not UNIT_FAILED) so a resume re-offers instead of
+                # treating this as a dead/credited unit.
+                unit.state = MINTED
+                unit.error = res.error or "offer creation failed"
+            return
+        unit.error = res.error  # transient mint failure: retry
+    # Never minted after retries (or cap-hit): durable credit, no money lost.
+    unit.state = UNIT_FAILED
+    mint_credits.add_credit(db_path.app_db_path(job.network), job.discord_id, job.network, 1)
+
+
+async def run_bulk_mint_job(job: BulkMintJob) -> None:
+    """Drive a bulk job to terminal state. Background task / resume entrypoint."""
+    try:
+        if job.state == AWAITING_PAYMENT:
+            p = job._payment_params()
+            assert job.pay_amount is not None, "prepare_payment must run before waiting"
+            paid = await xrpl_ops.wait_for_payment(
+                destination=p["destination"],
+                expected_sender=job.wallet_address,
+                expected_amount=job.pay_amount,
+                not_before=job.created_at - 10,
+                currency=p["currency"],
+                issuer=p["issuer"],
+            )
+            if not paid:
+                job.state = PAYMENT_TIMEOUT
+                persist(job)
+                return
+            job.paid_at = time.time()
+            job.state = PAID
+            persist(job)
+
+        job.state = FULFILLING
+        persist(job)
+        for unit in job.units:
+            if unit.state in (OFFERED, UNIT_FAILED):
+                continue  # resume: skip already-processed units
+            if unit.state == MINTED:
+                # Already minted (possibly in a prior process) — re-offer
+                # only, never re-mint.
+                await _ensure_offer(job, unit)
+            else:
+                await _fulfill_unit(job, unit)
+            persist(job)
+
+        # Bounded final re-offer pass: a unit that minted but never reached
+        # OFFERED (transient offer failure during the loop above) gets a
+        # last chance to self-heal within this same run before we decide the
+        # job's terminal state.
+        for unit in job.units:
+            if unit.state != MINTED:
+                continue
+            for _ in range(_UNIT_MAX_ATTEMPTS):
+                await _ensure_offer(job, unit)
+                persist(job)
+                if unit.state == OFFERED:
+                    break
+
+        # Completion is conditional on every unit having reached a resolved
+        # state (OFFERED or UNIT_FAILED). A unit stuck at MINTED means the
+        # NFT exists on-chain but was never offered to the user -- DONE is
+        # terminal and load_all_resumable only resumes PAID/FULFILLING, so
+        # marking DONE here would strand that NFT forever. Instead stay
+        # FULFILLING (non-terminal, resumable): the next restart's startup
+        # sweep retries _ensure_offer on the still-MINTED unit, never
+        # re-minting. Tradeoff: the active-job lock holds until it clears --
+        # rare (offer failure right after a successful mint is uncommon), and
+        # the NFT itself is safe (minted + journaled), just pending an offer.
+        if all(u.state in (OFFERED, UNIT_FAILED) for u in job.units):
+            job.state = DONE
+        else:
+            job.state = FULFILLING
+        persist(job)
+    except asyncio.CancelledError:
+        raise
+    except Exception as e:
+        logging.error("bulk job %s failed: %s", job.id, e)
+        job.state = FAILED
+        job.error = str(e)
+        persist(job)
+
+
+def load_all_resumable() -> list[BulkMintJob]:
+    out: list[BulkMintJob] = []
+    if not os.path.isdir(JOBS_DIR):
+        return out
+    for name in os.listdir(JOBS_DIR):
+        if not name.endswith(".json"):
+            continue
+        try:
+            with open(os.path.join(JOBS_DIR, name)) as f:
+                data = json.load(f)
+            if data.get("state") in (PAID, FULFILLING):
+                out.append(BulkMintJob.from_serialized(data))
+        except Exception:
+            logging.error("skipping unreadable bulk job record %s", name)
+    return out

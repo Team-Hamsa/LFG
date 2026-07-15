@@ -32,6 +32,7 @@ from xrpl.core.addresscodec import is_valid_classic_address
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from lfg_core import (
+    bulk_mint_flow,
     closet_token,
     config,
     db_path,
@@ -85,6 +86,11 @@ market_sessions: dict[str, Any] = {}
 # creation time in a parallel dict rather than reusing _prune_sessions.
 shop_sessions: dict[str, Any] = {}
 _shop_session_created: dict[str, float] = {}
+# Bulk mint (#215) jobs: bulk_mint_flow.BulkMintJob keyed by .id, same
+# "one dict, poll via GET status" shape as mint_sessions, but FULFILLING is
+# deliberately non-terminal (see bulk_mint_flow.TERMINAL_STATES) so a live job
+# stays visible to /api/mint/bulk/active and the startup resume sweep.
+bulk_sessions: dict[str, Any] = {}
 SESSION_RETENTION = 3600  # keep terminal sessions briefly for late polls
 
 BUS = InMemoryEventBus()
@@ -2502,6 +2508,151 @@ async def handle_mint_start(request):
     return web.json_response(session.to_dict())
 
 
+@require_wallet
+async def handle_bulk_mint_start(request):
+    """Start a bulk mint job (#215): one K x payment, then a background task
+    mints K units in sequence. Mirrors handle_mint_start's ordering — every
+    suspending value (request body parse, push token, return URL) is resolved
+    BEFORE the one-active-job check so no await sits between the check and
+    the insert below (the guard is only race-free while that window stays
+    await-free). prepare_payment() is deliberately awaited AFTER the insert —
+    a concurrent request already sees this job as active by then."""
+    user = request["user"]
+    _prune_sessions(bulk_sessions, bulk_mint_flow.TERMINAL_STATES)
+
+    try:
+        body = await request.json()
+    except Exception:
+        body = {}
+    raw_qty = body.get("quantity")
+    # Reject bool/float/string quantities: int(True) == 1, int(1.5) == 1, and
+    # int("3") == 3 would all silently coerce into a "valid" request. Only a
+    # real (non-bool) int is accepted.
+    if not isinstance(raw_qty, int) or isinstance(raw_qty, bool):
+        return web.json_response({"error": "invalid_quantity"}, status=400)
+    qty = raw_qty
+
+    return_url = await _request_return_url(request)
+    push_user_token = await _push_token(user)
+
+    if qty < 1:
+        return web.json_response({"error": "invalid_quantity"}, status=400)
+
+    job = bulk_mint_flow.BulkMintJob(
+        discord_id=user["id"],
+        wallet_address=request["wallet"],
+        requested_qty=qty,
+        platform=_platform(user),
+        push_user_token=push_user_token,
+        return_url=return_url,
+    )
+    try:
+        job.clamp_to_headroom()
+    except bulk_mint_flow.CollectionFull:
+        return web.json_response({"error": "collection_full"}, status=409)
+
+    # One active job per user (no awaits between this check and the insert
+    # below, so it cannot race)
+    active = _active_session(
+        bulk_sessions, bulk_mint_flow.TERMINAL_STATES, user["id"], _platform(user)
+    )
+    if active:
+        return web.json_response(
+            {"error": "bulk mint already in progress", "session": active.to_dict()}, status=409
+        )
+    bulk_sessions[job.id] = job
+
+    try:
+        await asyncio.wait_for(job.prepare_payment(), timeout=8)
+    except Exception as e:
+        # Never leave a non-terminal job with no task in bulk_sessions — that
+        # would permanently wedge this user's bulk slot (every future POST
+        # would 409 "already in progress" until a service restart). Mark it
+        # terminal so _prune_sessions evicts it and _active_session skips it.
+        # Covers both a hung XUMM call (asyncio.TimeoutError) and any other
+        # failure -- bulk has no ensure_payment_fallback like single-mint, so
+        # marking FAILED and letting the user retry is the correct behavior.
+        logging.error(f"bulk job {job.id} prepare_payment failed: {e}")
+        job.state = bulk_mint_flow.FAILED
+        job.error = str(e)
+        return web.json_response({"error": "payment_setup_failed"}, status=500)
+
+    job.task = asyncio.create_task(bulk_mint_flow.run_bulk_mint_job(job))
+    return web.json_response(job.to_dict())
+
+
+@require_auth
+async def handle_bulk_mint_status(request):
+    job = bulk_sessions.get(request.match_info["session_id"])
+    if (
+        not job
+        or job.discord_id != request["user"]["id"]
+        or getattr(job, "platform", "discord") != _platform(request["user"])
+    ):
+        return web.json_response({"error": "not found"}, status=404)
+    return web.json_response(job.to_dict())
+
+
+@require_auth
+async def handle_bulk_mint_active(request):
+    """The caller's live (non-terminal) bulk job, or null. Kept SEPARATE from
+    /api/mint/active: that endpoint serves the existing single-mint
+    resumeMint() client, which has no knowledge of the bulk job shape
+    (units[] etc.) — returning a bulk job there would break it."""
+    user = request["user"]
+    job = _active_session(
+        bulk_sessions, bulk_mint_flow.TERMINAL_STATES, user["id"], _platform(user)
+    )
+    return web.json_response({"session": job.to_dict() if job else None})
+
+
+@require_auth
+async def handle_bulk_mint_cancel(request):
+    """Back out of the bulk pay screen (mirrors handle_mint_cancel/#141): only
+    legal while AWAITING_PAYMENT — once paid, fulfillment must run to
+    completion. Cancelling frees the per-user bulk slot immediately."""
+    job = bulk_sessions.get(request.match_info["session_id"])
+    if (
+        not job
+        or job.discord_id != request["user"]["id"]
+        or getattr(job, "platform", "discord") != _platform(request["user"])
+    ):
+        return web.json_response({"error": "not found"}, status=404)
+    if job.state in bulk_mint_flow.TERMINAL_STATES:
+        return web.json_response(job.to_dict())  # already over — no-op
+    if not job.cancel():
+        return web.json_response({"error": "job is past payment"}, status=409)
+    job.mark_published()
+    return web.json_response(job.to_dict())
+
+
+async def resume_bulk_jobs() -> None:
+    """On startup, re-attach and resume any paid/fulfilling bulk jobs so a
+    service restart mid-fulfillment doesn't strand paid units."""
+    for job in bulk_mint_flow.load_all_resumable():
+        bulk_sessions[job.id] = job
+        job.task = asyncio.create_task(bulk_mint_flow.run_bulk_mint_job(job))
+
+
+async def _start_bulk_resume(app: web.Application) -> None:
+    """aiohttp on_startup hook: schedule resume_bulk_jobs as a background task
+    (mirrors _start_settlement_sweep) so app startup doesn't block on it."""
+    app["bulk_resume_task"] = asyncio.get_event_loop().create_task(resume_bulk_jobs())
+
+
+async def _stop_bulk_resume(app: web.Application) -> None:
+    """aiohttp on_cleanup hook: cancel the startup bulk-resume task on
+    shutdown (mirrors _stop_settlement_sweep)."""
+    task = app.get("bulk_resume_task")
+    if task is None:
+        return
+    task.cancel()
+    try:
+        await task
+    except asyncio.CancelledError:
+        pass
+
+
 def _index_roster(conn: sqlite3.Connection, wallet: str) -> list[dict[str, Any]] | None:
     """Normalized roster records built ENTIRELY from local data: the wallet's
     live index rows plus the uri metadata cache. No network, ever — an inline
@@ -3374,6 +3525,12 @@ def create_app() -> web.Application:
     # /active must register BEFORE /{session_id}: aiohttp dispatches in
     # registration order, and the dynamic route would swallow it as an id.
     app.router.add_get("/api/mint/active", handle_mint_active)
+    # Bulk mint (#215) routes must also register BEFORE /{session_id} for the
+    # same reason — "bulk" would otherwise be swallowed as a session id.
+    app.router.add_post("/api/mint/bulk", handle_bulk_mint_start)
+    app.router.add_get("/api/mint/bulk/active", handle_bulk_mint_active)
+    app.router.add_post("/api/mint/bulk/{session_id}/cancel", handle_bulk_mint_cancel)
+    app.router.add_get("/api/mint/bulk/{session_id}", handle_bulk_mint_status)
     app.router.add_get("/api/mint/{session_id}", handle_mint_status)
     app.router.add_post("/api/mint/{session_id}/regenerate", handle_mint_regenerate)
     app.router.add_post("/api/mint/{session_id}/cancel", handle_mint_cancel)
@@ -3421,6 +3578,8 @@ def create_app() -> web.Application:
     app.router.add_static("/", CLIENT_DIR)
     app.on_startup.append(_start_settlement_sweep)
     app.on_cleanup.append(_stop_settlement_sweep)
+    app.on_startup.append(_start_bulk_resume)
+    app.on_cleanup.append(_stop_bulk_resume)
     return app
 
 

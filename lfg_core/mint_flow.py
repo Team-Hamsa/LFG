@@ -11,6 +11,8 @@ import os
 import time
 import traceback
 import uuid
+from collections.abc import Awaitable, Callable
+from dataclasses import dataclass
 from decimal import Decimal
 from typing import Any
 
@@ -242,6 +244,238 @@ def _save_recovery_record(record: dict[str, Any]) -> None:
         logging.error(f"Failed to write recovery record: {traceback.format_exc()}")
 
 
+@dataclass
+class UnitResult:
+    """Result of minting one edition via mint_one_unit. On any failure
+    `error` is set and the fields up to the point of failure are populated
+    (e.g. `nft_id` set but `offer_id`/`accept` None = minted-but-offer-failed)
+    so a bulk caller can record partial progress instead of losing it."""
+
+    nft_number: int | None
+    nft_id: str | None
+    image_url: str | None
+    offer_id: str | None
+    accept: dict[str, Any] | None
+    error: str | None
+
+
+async def mint_one_unit(
+    *,
+    discord_id: str,
+    wallet_address: str,
+    platform: str,
+    push_user_token: str | None,
+    return_url: dict[str, str] | None,
+    nft_number: int,
+    session_tag: str,
+    on_state: Callable[[str], None] | None = None,
+    on_mint: Callable[[int, str, str | None], Awaitable[None]] | None = None,
+) -> UnitResult:
+    """Compose -> upload -> mint -> record (+ rarity) -> offer -> XUMM accept
+    payload for a single edition, on a pre-allocated `nft_number`. Extracted
+    from run_mint_session (#215) so single mint and bulk mint share one code
+    path. Caller is responsible for `_allocate_nft_number()` beforehand.
+
+    `session_tag` is a unique tag for image-archive staging (the single-mint
+    caller uses its session id; bulk uses e.g. `job_id:index`).
+
+    `on_state` is an optional callback invoked at the same points
+    run_mint_session used to set session.state, so a single-mint caller can
+    keep reporting its finer-grained MINTING/CREATING_OFFER UI states while
+    bulk callers can ignore it entirely.
+
+    `on_mint` is an optional async callback fired the instant the mint is
+    confirmed on-chain (nft_number, nft_id, image_url), before the offer/XUMM
+    steps run. A bulk caller uses it to durably persist MINTED immediately so
+    a crash in the offer step can never trigger a re-mint on resume.
+    """
+    nft_id: str | None = None
+    try:
+        # 1. Compose a random NFT from the unified layer store (same tree
+        #    the Trait Swapper uses: <gender>/<TraitType>/<Value>.ext)
+        store = layer_store.get_layer_store()
+        body, attributes = await traits.select_random_attributes(store)
+        output_path, is_video = await swap_compose.compose_nft(
+            attributes, body, store, f"lfg_{nft_number}"
+        )
+
+        # 2. Upload image (+ video) and metadata to BunnyCDN. The still is
+        #    staged for the local image archive (#163) and promoted below
+        #    only once the mint is confirmed on-chain.
+        image_cdn_url, video_cdn_url = await swap_compose.upload_output(
+            output_path,
+            is_video,
+            _upload_to_bunny,
+            # Foldered CDN layout, matching the swap convention: fresh mints
+            # are <edition>/<edition>_0.* (metadata has no burnCount -> 0, so
+            # the first swap writes _1 with no collision). Pre-2026-07-11
+            # mints uploaded flat lfg_<n>.png / metadata_<n>.json — those
+            # stay (on-chain URIs point there), with foldered copies added
+            # for hygiene.
+            f"{nft_number}/{nft_number}_0",
+            keep_still=image_archive.pending_still_path(
+                config.XRPL_NETWORK, nft_number, session_tag
+            ),
+        )
+
+        metadata: dict[str, Any] = {
+            "name": f"{config.NFT_COLLECTION_NAME} #{nft_number}",
+            "image": image_cdn_url,
+            "edition": nft_number,
+            "attributes": attributes,
+        }
+        if video_cdn_url:
+            metadata["video"] = video_cdn_url
+        metadata_cdn_url = await _upload_to_bunny(
+            f"{nft_number}/{nft_number}_0.json",
+            json.dumps(metadata, indent=2).encode(),
+            "application/json",
+        )
+
+        # 3. Mint on XRPL
+        if on_state:
+            on_state(MINTING)
+        # Issuer is the NFT collection issuer (same account every other mint
+        # path uses) — NOT the LFGO token issuer. On mainnet those differ, and
+        # passing the token issuer makes mint_nft add an Issuer field = an
+        # unauthorized mint-on-behalf, tecNO_PERMISSION on every attempt.
+        nft_id = await xrpl_ops.mint_nft(
+            metadata_cdn_url=metadata_cdn_url,
+            taxon=config.NFT_TAXON,
+            issuer=config.SWAP_ISSUER_ADDRESS,
+            platform=memos.platform_for_surface(platform),
+        )
+        if not nft_id:
+            image_archive.discard_still(config.XRPL_NETWORK, nft_number, session_tag)
+            _reserved_numbers.discard(nft_number)
+            return UnitResult(
+                nft_number=nft_number,
+                nft_id=None,
+                image_url=image_cdn_url,
+                offer_id=None,
+                accept=None,
+                error="Failed to mint NFT on XRPL. Please contact an administrator.",
+            )
+        # Mint confirmed — publish the new edition's art to the local archive
+        # so /api/img serves it immediately (best-effort, #163).
+        image_archive.promote_still(config.XRPL_NETWORK, nft_number, session_tag)
+
+        # Fire on_mint the instant the mint is confirmed on-chain, before any
+        # further awaits (offer creation / XUMM accept payload). A bulk caller
+        # uses this to persist the unit as MINTED immediately, so a crash in
+        # the offer step can never cause a resume to re-mint a second edition
+        # for the same unit (#215 double-mint window). Single mint passes
+        # nothing -> no behavior change.
+        if on_mint:
+            await on_mint(nft_number, nft_id, image_cdn_url)
+
+        traits_dict = {t["trait_type"]: t["value"] for t in metadata["attributes"]}
+        # The LFG table's headwear column is named Hat (layer tree uses Head)
+        if "Head" in traits_dict:
+            traits_dict["Hat"] = traits_dict.pop("Head")
+        record: dict[str, Any] = {
+            "nft_number": nft_number,
+            "nft_id": nft_id,
+            "discord_id": discord_id,
+            "owner_address": wallet_address,
+            "metadata_url": metadata_cdn_url,
+            "image_url": image_cdn_url,
+            "traits": traits_dict,
+            "network": config.XRPL_NETWORK,
+            "body_type": body,
+        }
+        # The mint is on-chain at this point; a DB failure must not stop the
+        # transfer offer from reaching the user.
+        try:
+            saved = await asyncio.to_thread(lambda: record_nft_mint(**record))
+        except Exception:
+            logging.error(f"record_nft_mint raised: {traceback.format_exc()}")
+            saved = False
+        if saved:
+            _reserved_numbers.discard(nft_number)
+
+            def _update_rarity() -> None:
+                conn = rarity.connect()
+                try:
+                    for attr in metadata["attributes"]:
+                        rarity.start_boost_clock(conn, body, attr["trait_type"], attr["value"])
+                    rarity.start_boost_clock(conn, rarity.BODY_SENTINEL, rarity.BODY_CATEGORY, body)
+                    rarity.recalculate_rarity(conn)
+                finally:
+                    conn.close()
+
+            try:
+                await asyncio.to_thread(_update_rarity)
+            except Exception:
+                logging.error(f"rarity update failed: {traceback.format_exc()}")
+        else:
+            # Keep the number reserved so it can't be reused this process,
+            # and persist the record for manual recovery.
+            _save_recovery_record(record)
+
+        # 4. Create the transfer offer and the XUMM accept payload
+        if on_state:
+            on_state(CREATING_OFFER)
+        offer_id = await xrpl_ops.create_nft_offer(
+            nft_id, wallet_address, platform=memos.platform_for_surface(platform)
+        )
+        if not offer_id:
+            return UnitResult(
+                nft_number=nft_number,
+                nft_id=nft_id,
+                image_url=image_cdn_url,
+                offer_id=None,
+                accept=None,
+                error=(
+                    f"NFT minted (ID: {nft_id}) but offer creation failed. "
+                    "Please contact an administrator."
+                ),
+            )
+
+        accept = await xumm_ops.create_accept_offer_payload(
+            offer_id,
+            return_url=return_url,
+            user_token=push_user_token,
+            platform=memos.platform_for_surface(platform),
+        )
+        if not accept:
+            return UnitResult(
+                nft_number=nft_number,
+                nft_id=nft_id,
+                image_url=image_cdn_url,
+                offer_id=offer_id,
+                accept=None,
+                error=(
+                    f"NFT minted and offer created ({offer_id}) but the XUMM "
+                    "request failed. Please accept the offer manually."
+                ),
+            )
+
+        return UnitResult(
+            nft_number=nft_number,
+            nft_id=nft_id,
+            image_url=image_cdn_url,
+            offer_id=offer_id,
+            accept=accept,
+            error=None,
+        )
+
+    except Exception as e:
+        logging.error(f"mint_one_unit({nft_number}) failed: {traceback.format_exc()}")
+        if nft_id is None:
+            # Only if the mint never landed — a promoted still stays put.
+            image_archive.discard_still(config.XRPL_NETWORK, nft_number, session_tag)
+            _reserved_numbers.discard(nft_number)
+        return UnitResult(
+            nft_number=nft_number,
+            nft_id=nft_id,
+            image_url=None,
+            offer_id=None,
+            accept=None,
+            error=str(e),
+        )
+
+
 async def update_scan_state(session: MintSession) -> None:
     """Refresh the session's QR-scan flags from the XUMM payload status so
     the frontend can swap a scanned QR for a spinner (issue #22). Queries
@@ -299,146 +533,36 @@ async def run_mint_session(session: MintSession) -> None:
                     f"{session.id}; XRP stays in the bot wallet"
                 )
 
-        # 2. Compose a random NFT from the unified layer store (same tree
-        #    the Trait Swapper uses: <gender>/<TraitType>/<Value>.ext)
+        # 2-5. Compose -> upload -> mint -> record -> offer -> accept payload,
+        # extracted into mint_one_unit (#215) so bulk mint can share the same
+        # path. on_state keeps the single-mint session's finer-grained
+        # MINTING/CREATING_OFFER states for the UI.
         session.nft_number = await _allocate_nft_number()
-        store = layer_store.get_layer_store()
-        body, attributes = await traits.select_random_attributes(store)
-        output_path, is_video = await swap_compose.compose_nft(
-            attributes, body, store, f"lfg_{session.nft_number}"
-        )
 
-        # 3. Upload image (+ video) and metadata to BunnyCDN. The still is
-        #    staged for the local image archive (#163) and promoted below
-        #    only once the mint is confirmed on-chain.
-        image_cdn_url, video_cdn_url = await swap_compose.upload_output(
-            output_path,
-            is_video,
-            _upload_to_bunny,
-            # Foldered CDN layout, matching the swap convention: fresh mints
-            # are <edition>/<edition>_0.* (metadata has no burnCount -> 0, so
-            # the first swap writes _1 with no collision). Pre-2026-07-11
-            # mints uploaded flat lfg_<n>.png / metadata_<n>.json — those
-            # stay (on-chain URIs point there), with foldered copies added
-            # for hygiene.
-            f"{session.nft_number}/{session.nft_number}_0",
-            keep_still=image_archive.pending_still_path(
-                config.XRPL_NETWORK, session.nft_number, session.id
-            ),
-        )
-        session.image_url = image_cdn_url
+        def _on_state(state: str) -> None:
+            session.state = state
 
-        metadata: dict[str, Any] = {
-            "name": f"{config.NFT_COLLECTION_NAME} #{session.nft_number}",
-            "image": image_cdn_url,
-            "edition": session.nft_number,
-            "attributes": attributes,
-        }
-        if video_cdn_url:
-            metadata["video"] = video_cdn_url
-        metadata_cdn_url = await _upload_to_bunny(
-            f"{session.nft_number}/{session.nft_number}_0.json",
-            json.dumps(metadata, indent=2).encode(),
-            "application/json",
+        res = await mint_one_unit(
+            discord_id=session.discord_id,
+            wallet_address=session.wallet_address,
+            platform=session.platform,
+            push_user_token=session.push_user_token,
+            return_url=session.return_url,
+            nft_number=session.nft_number,
+            session_tag=session.id,
+            on_state=_on_state,
         )
-
-        # 4. Mint on XRPL
-        session.state = MINTING
-        # Issuer is the NFT collection issuer (same account every other mint
-        # path uses) — NOT the LFGO token issuer. On mainnet those differ, and
-        # passing the token issuer makes mint_nft add an Issuer field = an
-        # unauthorized mint-on-behalf, tecNO_PERMISSION on every attempt.
-        nft_id = await xrpl_ops.mint_nft(
-            metadata_cdn_url=metadata_cdn_url,
-            taxon=config.NFT_TAXON,
-            issuer=config.SWAP_ISSUER_ADDRESS,
-            platform=memos.platform_for_surface(session.platform),
-        )
-        if not nft_id:
-            image_archive.discard_still(config.XRPL_NETWORK, session.nft_number, session.id)
+        session.nft_id = res.nft_id
+        session.image_url = res.image_url
+        if res.error or not res.offer_id or not res.accept:
             _release_unused_number(session)
             session.state = FAILED
-            session.error = "Failed to mint NFT on XRPL. Please contact an administrator."
-            return
-        session.nft_id = nft_id
-        # Mint confirmed — publish the new edition's art to the local archive
-        # so /api/img serves it immediately (best-effort, #163).
-        image_archive.promote_still(config.XRPL_NETWORK, session.nft_number, session.id)
-
-        traits_dict = {t["trait_type"]: t["value"] for t in metadata["attributes"]}
-        # The LFG table's headwear column is named Hat (layer tree uses Head)
-        if "Head" in traits_dict:
-            traits_dict["Hat"] = traits_dict.pop("Head")
-        record: dict[str, Any] = {
-            "nft_number": session.nft_number,
-            "nft_id": nft_id,
-            "discord_id": session.discord_id,
-            "owner_address": session.wallet_address,
-            "metadata_url": metadata_cdn_url,
-            "image_url": image_cdn_url,
-            "traits": traits_dict,
-            "network": config.XRPL_NETWORK,
-            "body_type": body,
-        }
-        # The mint is on-chain at this point; a DB failure must not stop the
-        # transfer offer from reaching the user.
-        try:
-            saved = await asyncio.to_thread(lambda: record_nft_mint(**record))
-        except Exception:
-            logging.error(f"record_nft_mint raised: {traceback.format_exc()}")
-            saved = False
-        if saved:
-            _reserved_numbers.discard(session.nft_number)
-
-            def _update_rarity() -> None:
-                conn = rarity.connect()
-                try:
-                    for attr in metadata["attributes"]:
-                        rarity.start_boost_clock(conn, body, attr["trait_type"], attr["value"])
-                    rarity.start_boost_clock(conn, rarity.BODY_SENTINEL, rarity.BODY_CATEGORY, body)
-                    rarity.recalculate_rarity(conn)
-                finally:
-                    conn.close()
-
-            try:
-                await asyncio.to_thread(_update_rarity)
-            except Exception:
-                logging.error(f"rarity update failed: {traceback.format_exc()}")
-        else:
-            # Keep the number reserved so it can't be reused this process,
-            # and persist the record for manual recovery.
-            _save_recovery_record(record)
-
-        # 5. Create the transfer offer and the XUMM accept payload
-        session.state = CREATING_OFFER
-        offer_id = await xrpl_ops.create_nft_offer(
-            nft_id, session.wallet_address, platform=memos.platform_for_surface(session.platform)
-        )
-        if not offer_id:
-            session.state = FAILED
-            session.error = (
-                f"NFT minted (ID: {nft_id}) but offer creation failed. "
-                "Please contact an administrator."
-            )
+            session.error = res.error or "mint failed"
             return
 
-        accept = await xumm_ops.create_accept_offer_payload(
-            offer_id,
-            return_url=session.return_url,
-            user_token=session.push_user_token,
-            platform=memos.platform_for_surface(session.platform),
-        )
-        if not accept:
-            session.state = FAILED
-            session.error = (
-                f"NFT minted and offer created ({offer_id}) but the XUMM "
-                "request failed. Please accept the offer manually."
-            )
-            return
-
-        session.accept_qr_url = accept["qr_url"]
-        session.accept_deeplink = accept["xumm_url"]
-        session.accept_uuid = accept.get("uuid")
+        session.accept_qr_url = res.accept["qr_url"]
+        session.accept_deeplink = res.accept["xumm_url"]
+        session.accept_uuid = res.accept.get("uuid")
         session.state = OFFER_READY
 
     except Exception as e:
