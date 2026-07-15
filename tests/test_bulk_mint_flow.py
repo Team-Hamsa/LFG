@@ -19,7 +19,7 @@ import asyncio  # noqa: E402
 
 import pytest  # noqa: E402
 
-from lfg_core import bulk_mint_flow, config, mint_flow  # noqa: E402
+from lfg_core import bulk_mint_flow, config, mint_credits, mint_flow  # noqa: E402
 
 
 def test_config_defaults():
@@ -135,6 +135,7 @@ def test_offer_fail_marks_unit_failed_but_job_completes(monkeypatch, tmp_path):
     )
     # mint ok but offer None -> minted-but-offer-failed
     monkeypatch.setattr(bulk_mint_flow.mint_flow, "mint_one_unit", _fake_mint_offer_fail())
+    monkeypatch.setattr(bulk_mint_flow.db_path, "app_db_path", lambda net: str(tmp_path / "app.db"))
     j = _job(2)
     monkeypatch.setattr(bulk_mint_flow.supply, "remaining_headroom", lambda net: 100)
     j.clamp_to_headroom()
@@ -142,6 +143,8 @@ def test_offer_fail_marks_unit_failed_but_job_completes(monkeypatch, tmp_path):
     asyncio.run(bulk_mint_flow.run_bulk_mint_job(j))
     assert j.state == bulk_mint_flow.DONE  # job still reaches DONE
     assert all(u.nft_id is not None for u in j.units)
+    # NFT was delivered (minted) even though offer failed -> no credit should be created
+    assert mint_credits.get_credits(str(tmp_path / "app.db"), "u1", j.network) == 0
 
 
 def test_prepare_payment_multiplies_price_xrp(monkeypatch):

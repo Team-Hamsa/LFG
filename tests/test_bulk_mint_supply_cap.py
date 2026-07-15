@@ -28,6 +28,15 @@ def test_cap_hit_mid_fulfillment_becomes_credit(monkeypatch, tmp_path):
     monkeypatch.setattr(bulk_mint_flow.supply, "remaining_headroom", lambda net: 100)
     # ... but the cap is fully consumed by the time fulfillment runs:
     monkeypatch.setattr(bulk_mint_flow.supply, "current_supply", lambda net: 10000)
+
+    calls = {"mint": 0}
+
+    async def _count_mint(**kw):
+        calls["mint"] += 1
+        raise AssertionError("mint_one_unit must not be called when the cap is hit")
+
+    monkeypatch.setattr(bulk_mint_flow.mint_flow, "mint_one_unit", _count_mint)
+
     j = bulk_mint_flow.BulkMintJob("u1", "rUSER", 2, platform="discord")
     j.clamp_to_headroom()
     j.state = bulk_mint_flow.PAID
@@ -35,3 +44,6 @@ def test_cap_hit_mid_fulfillment_becomes_credit(monkeypatch, tmp_path):
     # no unit could mint; both converted to credit, none lost
     assert mint_credits.get_credits(str(tmp_path / "app.db"), "u1", j.network) == 2
     assert all(u.state == bulk_mint_flow.UNIT_FAILED for u in j.units)
+    # the cap re-check prevents any mint attempt, rather than relying on
+    # unmocked network code to incidentally fail
+    assert calls["mint"] == 0

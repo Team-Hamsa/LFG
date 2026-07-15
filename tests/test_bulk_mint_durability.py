@@ -15,7 +15,20 @@ os.environ.setdefault("BUNNY_PULL_ZONE", "nft.pullzone.example")
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
+import asyncio  # noqa: E402
+
 from lfg_core import bulk_mint_flow  # noqa: E402
+
+
+def _async_counter(start=0):
+    counter = {"n": start}
+
+    async def _inner(*args, **kwargs):
+        n = counter["n"]
+        counter["n"] += 1
+        return n
+
+    return _inner
 
 
 def _paid_job(tmp_path, monkeypatch, state):
@@ -55,3 +68,50 @@ def test_delete_record(tmp_path, monkeypatch):
     bulk_mint_flow.persist(j)
     bulk_mint_flow.delete_record(j.id)
     assert bulk_mint_flow.load_all_resumable() == []
+
+
+def test_resume_skips_done_units_no_double_mint(tmp_path, monkeypatch):
+    monkeypatch.setattr(bulk_mint_flow, "JOBS_DIR", str(tmp_path))
+    monkeypatch.setattr(bulk_mint_flow.supply, "current_supply", lambda net: 0)
+    monkeypatch.setattr(bulk_mint_flow.supply, "remaining_headroom", lambda net: 100)
+
+    calls = {"mint": 0, "wait": 0}
+
+    async def _count_mint(**kw):
+        calls["mint"] += 1
+        from lfg_core.mint_flow import UnitResult
+
+        return UnitResult(
+            nft_number=kw["nft_number"],
+            nft_id=f"N{kw['nft_number']}",
+            image_url="i",
+            offer_id="O",
+            accept={"qr_url": "q", "xumm_url": "x", "uuid": "u"},
+            error=None,
+        )
+
+    async def _count_wait(**kw):
+        calls["wait"] += 1
+        return True
+
+    monkeypatch.setattr(bulk_mint_flow.mint_flow, "mint_one_unit", _count_mint)
+    monkeypatch.setattr(
+        bulk_mint_flow.mint_flow, "_allocate_nft_number", _async_counter(start=5000)
+    )
+    monkeypatch.setattr(bulk_mint_flow.xrpl_ops, "wait_for_payment", _count_wait)
+
+    # A job already fulfilling with 2 of 3 done, persisted to disk.
+    j = bulk_mint_flow.BulkMintJob("u1", "rUSER", 3, platform="discord")
+    j.clamp_to_headroom()
+    j.pay_amount = "30"
+    j.state = bulk_mint_flow.FULFILLING
+    j.units[0].state = bulk_mint_flow.OFFERED
+    j.units[1].state = bulk_mint_flow.OFFERED
+    bulk_mint_flow.persist(j)
+
+    resumed = bulk_mint_flow.load_all_resumable()[0]
+    asyncio.run(bulk_mint_flow.run_bulk_mint_job(resumed))
+
+    assert resumed.state == bulk_mint_flow.DONE
+    assert calls["mint"] == 1  # only the 1 remaining pending unit minted
+    assert calls["wait"] == 0  # payment never re-waited on resume
