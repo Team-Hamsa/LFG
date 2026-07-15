@@ -8,7 +8,16 @@ from lfg_core import config, nft_index
 
 
 def current_supply(network: str) -> int:
-    """Number of live (un-burned) editions currently on-chain for `network`."""
+    """Number of live (un-burned) editions currently on-chain for `network`.
+
+    NOTE (#215 follow-up): this reads the on-chain index, which is populated by
+    the listener process from the tx stream and therefore LAGS real-time mints
+    (`record_nft_mint` writes the LFG app table, not `onchain_nfts`). The
+    request-time headroom clamp still bounds any single bulk job, but the
+    per-unit cap re-check cannot observe another concurrent job's in-flight
+    mints — so two jobs near the cap could collectively overshoot
+    MAX_COLLECTION_SIZE. Enforcement is advisory until an authoritative,
+    synchronous headroom reservation lands (tracked as a follow-up issue)."""
     path = nft_index.index_db_path(network)
     conn = sqlite3.connect(path)
     try:
