@@ -572,6 +572,13 @@ INDEX_HTML = """<!doctype html>
   .sw { display:flex; align-items:center; gap:6px; font-size:12px; }
   .acts { display:flex; gap:6px; margin-top:2px; }
   .acts button { flex:1; padding:3px 0; font-size:12px; }
+  .shop { display:flex; align-items:center; gap:6px; font-size:12px; flex-wrap:wrap; }
+  .shop .price { color:var(--mut); }
+  .shop .price.overridden { color:var(--accent); font-weight:600; }
+  .shop .excl-chip { border-radius:10px; padding:1px 6px; cursor:pointer; border:1px solid var(--line);
+                      background:transparent; font-size:11px; }
+  .shop .excl-chip.active { background:#c0392b; color:#fff; border-color:#c0392b; }
+  .shop input.price-ov { width:64px; font-size:12px; padding:2px 4px; }
   table.list { width:100%; border-collapse:collapse; }
   table.list th, table.list td { padding:6px 8px; border-bottom:1px solid var(--line);
            text-align:left; white-space:nowrap; }
@@ -618,6 +625,7 @@ INDEX_HTML = """<!doctype html>
     <th data-sort="weight">Weight</th>
     <th data-sort="boost_status">Boost</th>
     <th>On</th>
+    <th>Shop</th>
     <th></th>
   </tr></thead>
   <tbody></tbody>
@@ -671,6 +679,27 @@ function actions(r) {
   }
   return btns;
 }
+function shopPriceLabel(r) {
+  if (r.shop_price==null) return "no price";
+  return String(r.shop_price)+" BRIX";
+}
+function shopControls(r) {
+  const priceEl = el("span",{class:"price"+(r.shop_price_override!=null?" overridden":""),
+                             title:r.shop_price_override!=null ? "overridden ("+shopPriceLabel(r)+")" : "",
+                             text:shopPriceLabel(r)});
+  const exclBtn = el("button",{class:"excl-chip"+(r.shop_excluded?" active":""),
+                               title:"Toggle shop exclusion",
+                               text:r.shop_excluded?"excluded":"listed",
+                               onclick:()=>doShopExclude(r)});
+  const priceInput = el("input",{class:"price-ov", type:"number", min:"0", step:"1",
+                                 placeholder:"override",
+                                 value:r.shop_price_override!=null?String(r.shop_price_override):""});
+  priceInput.addEventListener("keydown", (ev) => {
+    if (ev.key==="Enter") { ev.preventDefault(); doShopPriceOverride(r, priceInput.value); }
+  });
+  priceInput.addEventListener("blur", () => doShopPriceOverride(r, priceInput.value));
+  return el("div",{class:"shop"},[priceEl, exclBtn, priceInput]);
+}
 function card(r) {
   return el("div",{class:"card"+(r.enabled?"":" off")},[
     thumb(r,""),
@@ -680,6 +709,7 @@ function card(r) {
     el("div",{class:"badge", text:badge(r)}),
     el("label",{class:"sw"},[toggleBox(r), el("span",{text:r.enabled?"on":"off"})]),
     el("div",{class:"acts"}, actions(r)),
+    shopControls(r),
   ]);
 }
 function listRow(r) {
@@ -693,6 +723,7 @@ function listRow(r) {
     el("td",{text:r.weight.toFixed(3)}),
     el("td",{text:badge(r)||"—"}),
     el("td",{},[toggleBox(r)]),
+    el("td",{},[shopControls(r)]),
     el("td",{}, actions(r)),
   ]);
 }
@@ -793,6 +824,37 @@ async function doFloor(r) {
   if (!confirm("Set floor "+floor+" on "+r.trait+"?")) return;
   const u=await post("/api/floor",{network, body:r.body, category:r.category, trait:r.trait, floor});
   if (u) replaceRow(u);
+}
+function applyShopResult(u) {
+  // Shop overrides are aggregated per (slot, value) — body-agnostic — so one
+  // override can affect multiple per-body cards/rows; update them all.
+  for (const r of allRows) {
+    if (r.category===u.slot && r.trait===u.value) {
+      r.shop_excluded = u.shop_excluded;
+      r.shop_price_override = u.shop_price_override;
+      r.shop_price = u.shop_price;
+    }
+  }
+  render();
+}
+async function doShopExclude(r) {
+  const excluded = !r.shop_excluded;
+  const u = await post("/api/shop/override",
+    {network, slot:r.category, value:r.trait, excluded});
+  if (u) applyShopResult(u);
+}
+async function doShopPriceOverride(r, raw) {
+  const trimmed = (raw||"").trim();
+  let price_override = null;
+  if (trimmed !== "") {
+    const n = Number(trimmed);
+    if (!Number.isInteger(n) || n < 0) { alert("Price override must be a whole number >= 0"); render(); return; }
+    price_override = n;
+  }
+  if (price_override === r.shop_price_override) return;  // no-op, avoid spurious posts
+  const u = await post("/api/shop/override",
+    {network, slot:r.category, value:r.trait, price_override});
+  if (u) applyShopResult(u);
 }
 async function doSync() {
   if (!confirm("Insert floor rows for any newly-added layer art on "+network+"?")) return;
