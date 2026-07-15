@@ -1,6 +1,7 @@
 """Drain/restart posture (#223): prod refuses on drain failure, staging
 restarts anyway. No lfg_core imports."""
 
+import json
 import os
 import sys
 
@@ -89,6 +90,12 @@ def test_drain_unreachable_first_probe():
     assert deployer.drain(_cfg(True), fetcher=f, sleeper=clock.sleep, clock=clock) == "unreachable"
 
 
+def _jlist(names_status):
+    return json.dumps(
+        [{"name": n, "pm2_env": {"status": s}} for n, s in names_status.items()]
+    )
+
+
 def test_restart_stack_runs_pm2_per_process():
     calls = []
 
@@ -96,7 +103,8 @@ def test_restart_stack_runs_pm2_per_process():
         calls.append(cmd)
         return 0
 
-    assert deployer.restart_stack(_cfg(True), runner=runner) is True
+    lister = lambda: _jlist({"p1": "online", "p2": "online"})  # noqa: E731
+    assert deployer.restart_stack(_cfg(True), runner=runner, lister=lister) is True
     assert calls == [
         ["pm2", "restart", "p1", "--update-env"],
         ["pm2", "restart", "p2", "--update-env"],
@@ -104,7 +112,35 @@ def test_restart_stack_runs_pm2_per_process():
 
 
 def test_restart_stack_reports_failure():
-    assert deployer.restart_stack(_cfg(True), runner=lambda c: 1) is False
+    lister = lambda: _jlist({"p1": "online", "p2": "online"})  # noqa: E731
+    assert deployer.restart_stack(_cfg(True), runner=lambda c: 1, lister=lister) is False
+
+
+def test_pm2_online_parses_status():
+    data = _jlist({"p1": "online", "p2": "stopped"})
+    assert deployer.pm2_online(data) == {"p1"}
+
+
+def test_restart_stack_skips_stopped_processes(caplog=None):
+    calls = []
+    lister = lambda: _jlist({"p1": "online", "p2": "stopped"})  # noqa: E731
+    ok = deployer.restart_stack(_cfg(True), runner=lambda c: calls.append(c) or 0, lister=lister)
+    assert ok is True
+    assert calls == [["pm2", "restart", "p1", "--update-env"]]
+
+
+def test_restart_stack_falls_back_to_full_list_on_jlist_failure():
+    calls = []
+
+    def boom():
+        raise OSError("no pm2")
+
+    ok = deployer.restart_stack(_cfg(True), runner=lambda c: calls.append(c) or 0, lister=boom)
+    assert ok is True
+    assert calls == [
+        ["pm2", "restart", "p1", "--update-env"],
+        ["pm2", "restart", "p2", "--update-env"],
+    ]
 
 
 def test_prod_refuses_on_timeout_and_unreachable():
@@ -133,11 +169,16 @@ def test_staging_restarts_anyway_on_timeout():
     clock = FakeClock()
     f = _fetcher_seq([b'{"active_sessions": 1}'] * 100)
     calls = []
+
+    def boom():
+        raise OSError("no pm2")
+
     out = deployer.drain_and_restart(
         _cfg(False, max_wait=25),
         fetcher=f,
         runner=lambda c: calls.append(c) or 0,
         sleeper=clock.sleep,
         clock=clock,
+        lister=boom,
     )
     assert out == "restarted" and len(calls) == 2

@@ -79,7 +79,7 @@ def log(msg: str) -> None:
 
 
 def run_git(args: list[str], cwd: str) -> str:
-    return subprocess.check_output(["git", *args], cwd=cwd, text=True).strip()
+    return subprocess.check_output(["git", *args], cwd=cwd, text=True, timeout=120).strip()
 
 
 def fetch(cfg: StackConfig) -> None:
@@ -166,16 +166,41 @@ def drain(
 
 
 def _default_runner(cmd: list[str]) -> int:
-    return subprocess.call(cmd)
+    return subprocess.call(cmd, timeout=300)
+
+
+def _default_lister() -> str:
+    return subprocess.check_output(["pm2", "jlist"], text=True, timeout=300)
+
+
+def pm2_online(jlist_json: str) -> set[str]:
+    """Names of pm2-managed processes currently in the `online` state."""
+    data = json.loads(jlist_json)
+    return {
+        proc["name"]
+        for proc in data
+        if isinstance(proc, dict) and proc.get("pm2_env", {}).get("status") == "online"
+    }
 
 
 def restart_stack(
     cfg: StackConfig,
     runner: Callable[[list[str]], int] | None = None,
+    lister: Callable[[], str] | None = None,
 ) -> bool:
     runner = runner or _default_runner
+    lister = lister or _default_lister
+    try:
+        online = pm2_online(lister())
+        targets = [p for p in cfg.restart_processes if p in online]
+        for name in cfg.restart_processes:
+            if name not in online:
+                log(f"{cfg.name}: skipping restart of {name} (not online)")
+    except Exception as exc:  # pm2 unreachable/unparsable: fall back to old behavior
+        log(f"{cfg.name}: WARNING pm2 jlist failed ({exc!r}); restarting full configured list")
+        targets = list(cfg.restart_processes)
     ok = True
-    for name in cfg.restart_processes:
+    for name in targets:
         rc = runner(["pm2", "restart", name, "--update-env"])
         if rc != 0:
             log(f"{cfg.name}: WARNING pm2 restart {name} failed (rc={rc})")
@@ -189,6 +214,7 @@ def drain_and_restart(
     runner: Callable[[list[str]], int] | None = None,
     sleeper: Callable[[float], None] = time.sleep,
     clock: Callable[[], float] = time.monotonic,
+    lister: Callable[[], str] | None = None,
 ) -> str:
     outcome = drain(cfg, fetcher=fetcher, sleeper=sleeper, clock=clock)
     if outcome != "drained" and cfg.refuse_on_drain_failure:
@@ -202,7 +228,7 @@ def drain_and_restart(
         return "refused"
     if outcome != "drained":
         log(f"{cfg.name}: drain outcome={outcome}; restarting anyway (staging posture)")
-    return "restarted" if restart_stack(cfg, runner=runner) else "restart_failed"
+    return "restarted" if restart_stack(cfg, runner=runner, lister=lister) else "restart_failed"
 
 
 def run_once(
@@ -212,6 +238,7 @@ def run_once(
     runner: Callable[[list[str]], int] | None = None,
     sleeper: Callable[[float], None] = time.sleep,
     clock: Callable[[], float] = time.monotonic,
+    lister: Callable[[], str] | None = None,
 ) -> str:
     runner = runner or _default_runner
     fetch(cfg)
@@ -252,7 +279,9 @@ def run_once(
     if not needs_restart(files):
         log(f"{cfg.name}: advanced to {new[:12]}; no restart-worthy changes")
         return "advanced_no_restart"
-    return drain_and_restart(cfg, fetcher=fetcher, runner=runner, sleeper=sleeper, clock=clock)
+    return drain_and_restart(
+        cfg, fetcher=fetcher, runner=runner, sleeper=sleeper, clock=clock, lister=lister
+    )
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -274,11 +303,22 @@ def main(argv: list[str] | None = None) -> int:
         log(f"{cfg.name}: {out}")
         return 0 if out not in ("halted_not_ff", "pip_failed", "restart_failed") else 1
     log(f"{cfg.name}: polling origin/{cfg.branch} every {args.interval}s")
+    last_refused = False
     while True:
         try:
             out = run_once(cfg)
             if out != "up_to_date":
                 log(f"{cfg.name}: cycle result: {out}")
+            elif last_refused:
+                # HEAD == origin/<branch> again, but that can just mean the
+                # refused restart from a prior cycle was never actually
+                # applied — remind the human until a cycle resolves it.
+                log(
+                    f"{cfg.name}: REMINDER — a prior drain-and-restart was "
+                    f"refused; restart manually if not already done: pm2 "
+                    f"restart {' '.join(cfg.restart_processes)} --update-env"
+                )
+            last_refused = out == "refused"
         except Exception as exc:  # never die on a transient git/network error
             log(f"{cfg.name}: cycle error: {exc!r}")
         time.sleep(args.interval)

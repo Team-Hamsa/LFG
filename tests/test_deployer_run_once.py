@@ -73,7 +73,13 @@ def test_code_change_advances_and_restarts(tmp_path):
     seed, clone = _make_repos(tmp_path)
     _push(seed, "lfg_core/new.py")
     calls = []
-    out = deployer.run_once(_cfg(clone), fetcher=DRAINED, runner=lambda c: calls.append(c) or 0)
+
+    def boom():
+        raise OSError("no pm2")
+
+    out = deployer.run_once(
+        _cfg(clone), fetcher=DRAINED, runner=lambda c: calls.append(c) or 0, lister=boom
+    )
     assert out == "restarted"
     assert (clone / "lfg_core" / "new.py").exists()
     assert ["pm2", "restart", "p1", "--update-env"] in calls
