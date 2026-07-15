@@ -1735,9 +1735,12 @@ _shop_settle_attempts: dict[str, int] = {}
 
 def _write_shop_sweep_giveup_record(session_id: str, nft_id: str, buyer: str) -> None:
     """Journal (ECONOMY_RECORDS_DIR) that the shop settlement sweep is no
-    longer retrying this order. The trait token is NOT lost — it is an
-    ordinary trait token sitting in `buyer`'s wallet; they can Deposit it
-    into their Closet manually later."""
+    longer retrying this order. The trait token is NOT lost: in the normal
+    case it is an ordinary trait token sitting in `buyer`'s wallet and they
+    can Deposit it into their Closet manually later; if settlement has been
+    failing because a prior expiry attempt hit a transient burn error, the
+    token may instead still be issuer-held (never delivered) — either way it
+    requires manual reconciliation, not a re-burn."""
     try:
         os.makedirs(config.ECONOMY_RECORDS_DIR, exist_ok=True)
         path = os.path.join(config.ECONOMY_RECORDS_DIR, f"shop-settlement-giveup-{session_id}.json")
@@ -1785,6 +1788,7 @@ async def _expire_shop_order(order: dict[str, Any], network: str) -> None:
 
     conn = nft_index.init_db(nft_index.index_db_path(network))
     try:
+        economy_store.init_economy_schema(conn)
         if not nft_id:
             # Nothing was ever minted for this order (e.g. it stalled before
             # the mint completed) — nothing to burn, just close it out.
@@ -1824,8 +1828,9 @@ async def _settle_shop_order(order: dict[str, Any], network: str) -> None:
     pricing bump) for one `accepted` Trait Shop order. Mirrors
     `_settle_trait_sale`: on success -> `settled`; after
     `_SHOP_SWEEP_MAX_ATTEMPTS` consecutive failures -> journal + `failed`
-    (the token stays in the buyer's wallet for a manual Deposit, never
-    lost)."""
+    (the token is never lost — it stays wherever it last landed, in the
+    buyer's wallet for a manual Deposit or issuer-held if a prior expiry
+    attempt hit a transient burn error)."""
     session_id = order["session_id"]
     if _shop_settle_attempts.get(session_id, 0) >= _SHOP_SWEEP_MAX_ATTEMPTS:
         return  # already given up + journaled on a previous pass

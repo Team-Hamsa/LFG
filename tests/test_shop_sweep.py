@@ -240,6 +240,47 @@ def test_expiry_rescues_landed_accept_instead_of_burning(onchain_env, monkeypatc
     assert rows == []
 
 
+def test_expiry_ensures_economy_schema_before_recording_supply_change(tmp_path, monkeypatch):
+    # Regression: _expire_shop_order must call init_economy_schema itself
+    # (parity with _settle_shop_order), not rely on the caller/fixture having
+    # already created supply_changes. Build the onchain DB with only the
+    # nft_index + shop_store schema present -- no economy_store init -- to
+    # prove the expiry path is self-sufficient.
+    onchain_path = str(tmp_path / "onchain_testnet.db")
+    conn = init_onchain_db(onchain_path)
+    shop_store.ensure_schema(conn)
+    conn.commit()
+    conn.close()
+    app_db = str(tmp_path / "lfg_nfts_testnet.db")
+    monkeypatch.setenv("ONCHAIN_DB_PATH", onchain_path)
+    monkeypatch.setattr(server.config, "XRPL_NETWORK", "testnet")
+    monkeypatch.setattr(server.config, "ECONOMY_NETWORK", "testnet")
+    monkeypatch.setattr(server.db_path, "app_db_path", lambda net=None: app_db)
+    server._shop_settle_attempts.clear()
+
+    conn = _reopen(onchain_path)
+    old_ts = int(time.time()) - config.SHOP_OFFER_TTL_SECONDS - 60
+    _seed_order(conn, "S0", status="pending_accept", created_ts=old_ts)
+    conn.close()
+
+    async def fake_cancel(offer_index, **kw):
+        return "CANCELHASH"
+
+    async def fake_burn(nft_id, *a, **kw):
+        return "BURNHASH"
+
+    monkeypatch.setattr(server.xrpl_ops, "cancel_nft_offer", fake_cancel)
+    monkeypatch.setattr(server.xrpl_ops, "burn_nft", fake_burn)
+
+    _run(server.sweep_shop_orders())
+
+    conn = _reopen(onchain_path)
+    order = shop_store.get_order(conn, "S0")
+    assert order["status"] == "expired"
+    rows = conn.execute("SELECT kind FROM supply_changes").fetchall()
+    assert len(rows) == 1
+
+
 def test_expiry_leaves_non_expired_and_settled_orders_untouched(onchain_env, monkeypatch):
     conn = _reopen(onchain_env)
     recent_ts = int(time.time())
@@ -322,3 +363,66 @@ def test_settlement_giveup_after_max_attempts_journals_and_fails(
     assert record["session_id"] == "S6"
     assert record["nft_id"] == TRAIT1
     assert record["buyer"] == BUYER
+
+
+def test_orphan_after_transient_expiry_burn_error_then_settlement_failure(
+    onchain_env, monkeypatch, tmp_path
+):
+    """Adjudicated trajectory: a transient error burning the token during
+    expiry rescues the order to `accepted` (fail-closed -- never burn on
+    uncertainty). If settlement then keeps failing (e.g. the buyer never
+    activated a Closet), the order eventually gives up as `failed` -- but the
+    token must never actually be burned along the way: xrpl_ops.burn_nft
+    (the expiry burn) is called exactly once, and run_deposit's issuer burn
+    is never reached because the Closet precondition fails first."""
+    conn = _reopen(onchain_env)
+    old_ts = int(time.time()) - config.SHOP_OFFER_TTL_SECONDS - 60
+    _seed_order(conn, "S7", status="pending_accept", created_ts=old_ts)
+    conn.close()
+
+    expiry_burn_calls = []
+
+    async def fake_cancel(offer_index, **kw):
+        return "CANCELHASH"
+
+    async def flaky_burn(nft_id, *a, **kw):
+        expiry_burn_calls.append(nft_id)
+        raise RuntimeError("transient RPC timeout")
+
+    monkeypatch.setattr(server.xrpl_ops, "cancel_nft_offer", fake_cancel)
+    monkeypatch.setattr(server.xrpl_ops, "burn_nft", flaky_burn)
+
+    _run(server.sweep_shop_orders())
+
+    assert expiry_burn_calls == [TRAIT1]  # attempted once, crashed -> rescued
+
+    conn = _reopen(onchain_env)
+    order = shop_store.get_order(conn, "S7")
+    assert order["status"] == "accepted"
+    assert conn.execute("SELECT * FROM supply_changes").fetchall() == []
+    conn.close()
+
+    # No active Closet for the buyer -> run_deposit's precondition always
+    # fails, so the settlement sweep never even reaches the deposit burn.
+    f = _FakeSettleDeps()
+    monkeypatch.setattr(
+        server.economy_api, "build_settlement_deps", lambda c: _settle_deps(c, f, tmp_path)
+    )
+    monkeypatch.setattr(server.config, "ECONOMY_RECORDS_DIR", str(tmp_path))
+
+    for _ in range(server._SHOP_SWEEP_MAX_ATTEMPTS):
+        _run(server.sweep_shop_orders())
+
+    # burn_nft must not have been retried by later expiry-sweep passes (the
+    # order is no longer `pending_accept`), and run_deposit's own issuer
+    # burn must never have fired either.
+    assert expiry_burn_calls == [TRAIT1]
+    assert f.burns == []
+
+    conn = _reopen(onchain_env)
+    order = shop_store.get_order(conn, "S7")
+    assert order["status"] == "failed"
+    conn.close()
+
+    records = list(tmp_path.glob("shop-settlement-giveup-S7.json"))
+    assert len(records) == 1
