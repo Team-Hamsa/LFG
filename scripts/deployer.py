@@ -199,6 +199,14 @@ def restart_stack(
     except Exception as exc:  # pm2 unreachable/unparsable: fall back to old behavior
         log(f"{cfg.name}: WARNING pm2 jlist failed ({exc!r}); restarting full configured list")
         targets = list(cfg.restart_processes)
+    if not targets and cfg.restart_processes:
+        # Legitimate no-op: offline processes load the new code from disk
+        # when next started — but say so instead of implying restarts ran.
+        log(
+            f"{cfg.name}: no configured processes online; nothing restarted "
+            "(new code takes effect when they start)"
+        )
+        return True
     ok = True
     for name in targets:
         rc = runner(["pm2", "restart", name, "--update-env"])
@@ -303,22 +311,27 @@ def main(argv: list[str] | None = None) -> int:
         log(f"{cfg.name}: {out}")
         return 0 if out not in ("halted_not_ff", "pip_failed", "restart_failed") else 1
     log(f"{cfg.name}: polling origin/{cfg.branch} every {args.interval}s")
-    last_refused = False
+    pending_restart = False  # sticky: a refused restart was never applied
     while True:
         try:
             out = run_once(cfg)
             if out != "up_to_date":
                 log(f"{cfg.name}: cycle result: {out}")
-            elif last_refused:
-                # HEAD == origin/<branch> again, but that can just mean the
-                # refused restart from a prior cycle was never actually
-                # applied — remind the human until a cycle resolves it.
+            if out == "refused":
+                pending_restart = True
+            elif out != "up_to_date":
+                # Any other real outcome (restarted, advanced, halted, ...)
+                # supersedes the stale refusal.
+                pending_restart = False
+            elif pending_restart:
+                # HEAD == origin/<branch>, but the refused restart from a
+                # prior cycle was never applied — remind every cycle until
+                # some cycle resolves it.
                 log(
                     f"{cfg.name}: REMINDER — a prior drain-and-restart was "
                     f"refused; restart manually if not already done: pm2 "
                     f"restart {' '.join(cfg.restart_processes)} --update-env"
                 )
-            last_refused = out == "refused"
         except Exception as exc:  # never die on a transient git/network error
             log(f"{cfg.name}: cycle error: {exc!r}")
         time.sleep(args.interval)

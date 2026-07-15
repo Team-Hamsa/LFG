@@ -129,6 +129,17 @@ def test_restart_stack_skips_stopped_processes(caplog=None):
     assert calls == [["pm2", "restart", "p1", "--update-env"]]
 
 
+def test_restart_stack_all_offline_is_honest_noop(capsys):
+    calls = []
+    lister = lambda: _jlist({"p1": "stopped", "p2": "stopped"})  # noqa: E731
+    ok = deployer.restart_stack(_cfg(True), runner=lambda c: calls.append(c) or 0, lister=lister)
+    assert ok is True
+    assert calls == []
+    out = capsys.readouterr().out
+    assert "no configured processes online" in out
+    assert "nothing restarted" in out
+
+
 def test_restart_stack_falls_back_to_full_list_on_jlist_failure():
     calls = []
 
