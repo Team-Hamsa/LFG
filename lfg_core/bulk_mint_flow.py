@@ -5,6 +5,10 @@
 from __future__ import annotations
 
 import asyncio
+import json
+import logging
+import os
+import tempfile
 import time
 import uuid
 from dataclasses import asdict, dataclass
@@ -12,6 +16,8 @@ from decimal import Decimal
 from typing import Any
 
 from lfg_core import config, entitlement, memos, supply, xrpl_ops, xumm_ops
+
+JOBS_DIR = os.getenv("BULK_MINT_JOBS_DIR", "bulk_mint_jobs")
 
 AWAITING_PAYMENT = "awaiting_payment"
 PAID = "paid"
@@ -167,3 +173,96 @@ class BulkMintJob:
             "minted": sum(1 for u in self.units if u.state in (MINTED, OFFERED)),
             "offered": sum(1 for u in self.units if u.state == OFFERED),
         }
+
+    def serialize(self) -> dict[str, Any]:
+        return {
+            "id": self.id,
+            "discord_id": self.discord_id,
+            "wallet_address": self.wallet_address,
+            "platform": self.platform,
+            "push_user_token": self.push_user_token,
+            "return_url": self.return_url,
+            "requested_qty": self.requested_qty,
+            "quantity": self.quantity,
+            "network": self.network,
+            "created_at": self.created_at,
+            "paid_at": self.paid_at,
+            "state": self.state,
+            "error": self.error,
+            "pay_with": self.pay_with,
+            "pay_amount": self.pay_amount,
+            "unit_price": self.unit_price,
+            "payment_uuid": self.payment_uuid,
+            "payment_link": self.payment_link,
+            "entitlement": self.entitlement.to_dict() if self.entitlement else None,
+            "units": [asdict(u) for u in self.units],
+        }
+
+    @classmethod
+    def from_serialized(cls, d: dict[str, Any]) -> BulkMintJob:
+        j = cls(
+            d["discord_id"],
+            d["wallet_address"],
+            d["requested_qty"],
+            platform=d["platform"],
+            push_user_token=d.get("push_user_token"),
+            return_url=d.get("return_url"),
+        )
+        j.id = d["id"]
+        j.quantity = d["quantity"]
+        j.network = d["network"]
+        j.created_at = d["created_at"]
+        j.paid_at = d.get("paid_at")
+        j.state = d["state"]
+        j.error = d.get("error")
+        j.pay_with = d.get("pay_with")
+        j.pay_amount = d.get("pay_amount")
+        j.unit_price = d.get("unit_price")
+        j.payment_uuid = d.get("payment_uuid")
+        j.payment_link = d.get("payment_link")
+        j.entitlement = entitlement.from_dict(d["entitlement"]) if d.get("entitlement") else None
+        j.units = [Unit(**u) for u in d["units"]]
+        return j
+
+
+def _record_path(job_id: str) -> str:
+    return os.path.join(JOBS_DIR, f"{job_id}.json")
+
+
+def persist(job: BulkMintJob) -> None:
+    """Atomically write the job's full reconstruction record."""
+    os.makedirs(JOBS_DIR, exist_ok=True)
+    data = job.serialize()
+    fd, tmp = tempfile.mkstemp(dir=JOBS_DIR, suffix=".tmp")
+    try:
+        with os.fdopen(fd, "w") as f:
+            json.dump(data, f, indent=2)
+        os.replace(tmp, _record_path(job.id))
+    except Exception:
+        logging.error("failed to persist bulk job %s", job.id)
+        if os.path.exists(tmp):
+            os.remove(tmp)
+
+
+def delete_record(job_id: str) -> None:
+    try:
+        os.remove(_record_path(job_id))
+    except FileNotFoundError:
+        pass
+
+
+def load_all_resumable() -> list[BulkMintJob]:
+    out: list[BulkMintJob] = []
+    if not os.path.isdir(JOBS_DIR):
+        return out
+    for name in os.listdir(JOBS_DIR):
+        if not name.endswith(".json"):
+            continue
+        try:
+            with open(os.path.join(JOBS_DIR, name)) as f:
+                data = json.load(f)
+            if data.get("state") in (PAID, FULFILLING):
+                out.append(BulkMintJob.from_serialized(data))
+        except Exception:
+            logging.error("skipping unreadable bulk job record %s", name)
+    return out
