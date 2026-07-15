@@ -231,7 +231,9 @@ def test_app_js_resume_cancel_warns_only_when_scanned():
     src = open(APP_JS).read()
     body = src.split("async function resumeMint", 1)[1].split("\n}\n", 1)[0]
     assert "cancelMint(true)" not in body
-    assert "qr_scanned" in body
+    # The exact conditional wiring, not mere symbol presence: the warning flag
+    # IS the session's scan state.
+    assert "cancelMint(!!active.session.qr_scanned)" in body
 
 
 def test_app_js_swap_cancel_invalidates_inflight_poll():
@@ -240,4 +242,9 @@ def test_app_js_swap_cancel_invalidates_inflight_poll():
     generation token must be bumped on the way out."""
     src = open(APP_JS).read()
     body = src.split("async function cancelSwap", 1)[1].split("\n}\n", 1)[0]
-    assert "++swapPollGen" in body
+    # On the exit path specifically: after the go-home decision, before the
+    # panel switch — not merely somewhere in the function.
+    outcome_idx = body.index("cancelMintOutcome")
+    bump_idx = body.index("++swapPollGen")
+    open_idx = body.index("openSwapper()", outcome_idx)
+    assert outcome_idx < bump_idx < open_idx

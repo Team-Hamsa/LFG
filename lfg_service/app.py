@@ -2363,6 +2363,11 @@ async def handle_swap_status(request):
     return web.json_response(session.to_dict())
 
 
+# Bound on the XUMM payload rebuild in handle_swap_regenerate (same 8s the
+# mint start/regenerate paths use); module-level so tests can shrink it.
+SWAP_REGEN_TIMEOUT = 8.0
+
+
 def _swap_session_for(request):
     """The caller's swap session for the path's session_id, or None on any
     ownership/platform mismatch (identical guard to handle_swap_status)."""
@@ -2390,7 +2395,7 @@ async def handle_swap_regenerate(request):
     # honest), a swallowed failure here would echo the STALE link with a 200
     # and the button would appear dead — surface it instead.
     try:
-        ok = await asyncio.wait_for(session.regenerate_payment(), timeout=8)
+        ok = await asyncio.wait_for(session.regenerate_payment(), timeout=SWAP_REGEN_TIMEOUT)
     except asyncio.TimeoutError:
         return web.json_response({"error": "payment QR regeneration timed out"}, status=504)
     except Exception as e:

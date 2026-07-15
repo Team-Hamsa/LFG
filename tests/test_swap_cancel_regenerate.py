@@ -27,7 +27,7 @@ import pytest  # noqa: E402
 from aiohttp import web  # noqa: E402
 from aiohttp.test_utils import make_mocked_request  # noqa: E402
 
-from lfg_core import swap_flow, xumm_ops  # noqa: E402
+from lfg_core import memos, swap_flow, xumm_ops  # noqa: E402
 from lfg_service import app as server  # noqa: E402
 
 NFT = {"name": "LFG #1", "image": "https://cdn.example/1.png"}
@@ -118,6 +118,12 @@ def test_regenerate_payment_builds_fresh_payload(monkeypatch):
     assert captured["destination"] == "rBotWallet"
     assert captured["value"] == "6"
     assert captured["currency"] == "XRP"
+    # Provenance invariants at this boundary (the SourceTag itself is stamped
+    # below it, inside _create_xumm_payload, covered by the sourcetag tests):
+    # the rebuilt payload must carry the same closed-schema action and the
+    # session's real originating surface.
+    assert captured["action"] == memos.ACTION_TRAIT_SWAP_FEE
+    assert captured["platform"] == memos.platform_for_surface("discord")
 
 
 def test_regenerate_payment_keeps_old_link_on_failure(monkeypatch):
@@ -223,7 +229,7 @@ def test_swap_start_stores_task_handle():
     # auth wrapper — slice the module source instead.
     src = inspect.getsource(server).split("async def handle_swap_start", 1)[1]
     src = src.split("\nasync def ", 1)[0]
-    assert "session.task = " in src
+    assert "session.task = asyncio.get_event_loop().create_task(" in src
 
 
 def test_collect_fee_leaves_awaiting_payment_synchronously():
@@ -236,7 +242,7 @@ def test_collect_fee_leaves_awaiting_payment_synchronously():
     src = inspect.getsource(swap_flow._collect_modify_fee)
     paid_idx = src.index("xrpl_ops.wait_for_payment")
     burn_idx = src.index("xrpl_ops.buy_and_burn")
-    state_idx = src.index("session.state", paid_idx)
+    state_idx = src.index("session.state = COMPOSING", paid_idx)
     assert paid_idx < state_idx < burn_idx
 
 
@@ -250,8 +256,8 @@ def test_run_swap_session_discards_stills_on_cancel():
     src = inspect.getsource(swap_flow.run_swap_session)
     assert "except asyncio.CancelledError" in src
     cancel_block = src.split("except asyncio.CancelledError", 1)[1].split("except ", 1)[0]
-    assert "discard_still" in cancel_block
-    assert "raise" in cancel_block
+    assert "image_archive.discard_still(" in cancel_block
+    assert cancel_block.rstrip().endswith("raise")
 
 
 def test_swap_regenerate_failure_returns_502(dev_auth, monkeypatch):
@@ -297,3 +303,20 @@ def test_regenerate_payment_reports_success():
 
     sig = inspect.signature(swap_flow.SwapSession.regenerate_payment)
     assert sig.return_annotation in ("bool", bool)
+
+
+def test_swap_regenerate_timeout_returns_504(dev_auth, monkeypatch):
+    s = _session()
+    s.fee_amount = "6"
+    s.fee_destination = "rBotWallet"
+    s.fee_currency = "XRP"
+    s.fee_issuer = None
+
+    async def hang(destination, **kw):
+        await asyncio.sleep(30)
+
+    monkeypatch.setattr(xumm_ops, "create_payment_payload", hang)
+    monkeypatch.setattr(server, "SWAP_REGEN_TIMEOUT", 0.01)
+    dev_auth[s.id] = s
+    resp = _run(server.handle_swap_regenerate(_request("POST", s.id)))
+    assert resp.status == 504
