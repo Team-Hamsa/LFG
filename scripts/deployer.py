@@ -11,13 +11,14 @@ broken by app code. Do not import lfg_core or any third-party package.
 
 from __future__ import annotations
 
-import argparse  # noqa: F401
+import argparse
 import json
 import re
 import subprocess
-import sys  # noqa: F401
+import sys
 import time
 import urllib.request
+from collections.abc import Callable
 from dataclasses import dataclass
 
 HOME = "/home/hamsa"
@@ -119,10 +120,13 @@ def needs_pip(files: list[str]) -> bool:
 
 def _default_fetcher(url: str) -> bytes:
     with urllib.request.urlopen(url, timeout=3) as resp:
-        return resp.read()
+        return resp.read()  # type: ignore[no-any-return]
 
 
-def active_sessions(url, fetcher=None):
+def active_sessions(
+    url: str,
+    fetcher: Callable[[str], bytes] | None = None,
+) -> int | None:
     # -> int | None ; None means unreachable or malformed (fail-unknown).
     fetcher = fetcher or _default_fetcher
     try:
@@ -133,7 +137,12 @@ def active_sessions(url, fetcher=None):
         return None
 
 
-def drain(cfg: StackConfig, fetcher=None, sleeper=time.sleep, clock=time.monotonic) -> str:
+def drain(
+    cfg: StackConfig,
+    fetcher: Callable[[str], bytes] | None = None,
+    sleeper: Callable[[float], None] = time.sleep,
+    clock: Callable[[], float] = time.monotonic,
+) -> str:
     deadline = clock() + cfg.drain_max_wait
     first = True
     while True:
@@ -160,7 +169,10 @@ def _default_runner(cmd: list[str]) -> int:
     return subprocess.call(cmd)
 
 
-def restart_stack(cfg: StackConfig, runner=None) -> bool:
+def restart_stack(
+    cfg: StackConfig,
+    runner: Callable[[list[str]], int] | None = None,
+) -> bool:
     runner = runner or _default_runner
     ok = True
     for name in cfg.restart_processes:
@@ -172,7 +184,11 @@ def restart_stack(cfg: StackConfig, runner=None) -> bool:
 
 
 def drain_and_restart(
-    cfg: StackConfig, fetcher=None, runner=None, sleeper=time.sleep, clock=time.monotonic
+    cfg: StackConfig,
+    fetcher: Callable[[str], bytes] | None = None,
+    runner: Callable[[list[str]], int] | None = None,
+    sleeper: Callable[[float], None] = time.sleep,
+    clock: Callable[[], float] = time.monotonic,
 ) -> str:
     outcome = drain(cfg, fetcher=fetcher, sleeper=sleeper, clock=clock)
     if outcome != "drained" and cfg.refuse_on_drain_failure:
@@ -187,3 +203,86 @@ def drain_and_restart(
     if outcome != "drained":
         log(f"{cfg.name}: drain outcome={outcome}; restarting anyway (staging posture)")
     return "restarted" if restart_stack(cfg, runner=runner) else "restart_failed"
+
+
+def run_once(
+    cfg: StackConfig,
+    force_reset: bool = False,
+    fetcher: Callable[[str], bytes] | None = None,
+    runner: Callable[[list[str]], int] | None = None,
+    sleeper: Callable[[float], None] = time.sleep,
+    clock: Callable[[], float] = time.monotonic,
+) -> str:
+    runner = runner or _default_runner
+    fetch(cfg)
+    new = remote_head(cfg)
+    if new is None:
+        log(f"{cfg.name}: origin/{cfg.branch} does not exist; nothing to do")
+        return "no_remote_branch"
+    old = local_head(cfg)
+    if new == old:
+        return "up_to_date"
+
+    if force_reset:
+        log(f"{cfg.name}: FORCE RESET {old[:12]} -> {new[:12]}")
+        run_git(["reset", "--hard", new], cfg.checkout)
+    elif is_fast_forward(cfg, old, new):
+        log(f"{cfg.name}: fast-forwarding {old[:12]} -> {new[:12]}")
+        run_git(["merge", "--ff-only", new], cfg.checkout)
+    else:
+        log(
+            f"{cfg.name}: HALTED — origin/{cfg.branch} ({new[:12]}) is not a "
+            f"fast-forward of local HEAD ({old[:12]}). A force-push or local "
+            f"commit diverged the checkout. Fix manually, or run: "
+            f"scripts/deployer.py {cfg.name} --once --force-reset"
+        )
+        return "halted_not_ff"
+
+    files = changed_files(cfg, old, new)
+    if needs_pip(files):
+        log(f"{cfg.name}: requirements changed; running pip install")
+        for req in ("requirements.txt", "requirements-dev.txt"):
+            if req in files:
+                if runner([cfg.pip, "install", "-r", req]) != 0:
+                    log(
+                        f"{cfg.name}: pip install -r {req} FAILED; "
+                        "NOT restarting (old code keeps running)"
+                    )
+                    return "pip_failed"
+    if not needs_restart(files):
+        log(f"{cfg.name}: advanced to {new[:12]}; no restart-worthy changes")
+        return "advanced_no_restart"
+    return drain_and_restart(cfg, fetcher=fetcher, runner=runner, sleeper=sleeper, clock=clock)
+
+
+def main(argv: list[str] | None = None) -> int:
+    ap = argparse.ArgumentParser(description="LFG per-stack polling deployer")
+    ap.add_argument("stack", choices=sorted(STACKS))
+    ap.add_argument("--once", action="store_true", help="one cycle, then exit")
+    ap.add_argument(
+        "--force-reset",
+        action="store_true",
+        help="reset --hard to origin/<branch>; requires --once",
+    )
+    ap.add_argument("--interval", type=int, default=60)
+    args = ap.parse_args(argv)
+    if args.force_reset and not args.once:
+        ap.error("--force-reset requires --once (deliberate one-shot recovery)")
+    cfg = STACKS[args.stack]
+    if args.once:
+        out = run_once(cfg, force_reset=args.force_reset)
+        log(f"{cfg.name}: {out}")
+        return 0 if out not in ("halted_not_ff", "pip_failed", "restart_failed") else 1
+    log(f"{cfg.name}: polling origin/{cfg.branch} every {args.interval}s")
+    while True:
+        try:
+            out = run_once(cfg)
+            if out != "up_to_date":
+                log(f"{cfg.name}: cycle result: {out}")
+        except Exception as exc:  # never die on a transient git/network error
+            log(f"{cfg.name}: cycle error: {exc!r}")
+        time.sleep(args.interval)
+
+
+if __name__ == "__main__":
+    sys.exit(main())
