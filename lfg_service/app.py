@@ -1786,6 +1786,18 @@ async def handle_shop_buy_start(request):
         return web.json_response({"error": "closet_required"}, status=403)
 
     _prune_shop_sessions()
+    for s in shop_sessions.values():
+        if s.buyer == wallet and s.state not in shop_flow.TERMINAL_STATES:
+            return web.json_response(
+                {
+                    "error": "a shop purchase is already in progress",
+                    "code": "session_active",
+                    "session_id": s.id,
+                    "session": s.to_dict(),
+                },
+                status=409,
+            )
+
     session = shop_flow.ShopBuySession(
         buyer=wallet,
         slot=slot,

@@ -22,6 +22,7 @@ os.environ.setdefault("BUNNY_PULL_ZONE", "nft.pullzone.example")
 import asyncio  # noqa: E402
 import json  # noqa: E402
 import sqlite3  # noqa: E402
+import time  # noqa: E402
 from dataclasses import dataclass  # noqa: E402
 
 import pytest  # noqa: E402
@@ -255,6 +256,95 @@ def test_buy_closet_required_403(onchain_env, shop_wallet):
     assert resp.status == 403
     body = _run(_read_json(resp))
     assert body["error"] == "closet_required"
+
+
+def test_buy_concurrent_session_409(onchain_env, shop_wallet, monkeypatch):
+    """Two racing POST /api/shop/buy from the same wallet must not both start
+    a session (duplicate-mint race, review fix #217): once the first has
+    reached awaiting_accept, a second concurrent buy is rejected 409 with
+    session_active and the existing session_id, mirroring the market buy
+    endpoint's concurrent-session guard."""
+    onchain_path, app_db = onchain_env
+    _seed_rarity(app_db, "testnet", "Head", "Wizard Hat", live=4)
+    _activate_closet(onchain_path, BUYER)
+
+    async def fake_start_shop_buy(session, deps):
+        session.state = shop_flow.AWAITING_ACCEPT
+        session.accept = {"qr_url": "q", "xumm_url": "x", "uuid": "U1"}
+
+    monkeypatch.setattr(server.shop_flow, "start_shop_buy", fake_start_shop_buy)
+
+    async def scenario():
+        req1 = _post_request("/api/shop/buy", {"slot": "Head", "value": "Wizard Hat"})
+        resp1 = await server.handle_shop_buy_start(req1)
+        assert resp1.status == 200
+        # Let the background task (asyncio.create_task in the handler) run to
+        # completion so the first session is frozen in awaiting_accept before
+        # the second request races in.
+        current = asyncio.current_task()
+        pending = [t for t in asyncio.all_tasks() if t is not current and not t.done()]
+        if pending:
+            await asyncio.gather(*pending)
+
+        body1 = json.loads(resp1.body.decode())
+        session = server.shop_sessions[body1["id"]]
+        assert session.state == shop_flow.AWAITING_ACCEPT
+
+        req2 = _post_request("/api/shop/buy", {"slot": "Head", "value": "Wizard Hat"})
+        resp2 = await server.handle_shop_buy_start(req2)
+        return body1["id"], resp2
+
+    existing_id, resp2 = _run(scenario())
+    assert resp2.status == 409
+    body2 = _run(_read_json(resp2))
+    assert body2["code"] == "session_active"
+    assert body2["session_id"] == existing_id
+    # No duplicate session was created.
+    assert len(server.shop_sessions) == 1
+
+
+def test_buy_new_session_after_terminal_not_blocked(onchain_env, shop_wallet, monkeypatch):
+    """A prior session that already reached a terminal state (done/failed)
+    must not block a fresh buy from the same wallet."""
+    onchain_path, app_db = onchain_env
+    _seed_rarity(app_db, "testnet", "Head", "Wizard Hat", live=4)
+    _activate_closet(onchain_path, BUYER)
+
+    prior = _make_session(state=shop_flow.FAILED)
+    server.shop_sessions[prior.id] = prior
+    # Recent creation timestamp so _prune_shop_sessions doesn't sweep it away
+    # before the guard gets a chance to look at it (it wasn't created via the
+    # real POST path, so it has no entry by default).
+    server._shop_session_created[prior.id] = time.time()
+
+    async def fake_start_shop_buy(session, deps):
+        session.state = shop_flow.AWAITING_ACCEPT
+        session.accept = {"qr_url": "q", "xumm_url": "x", "uuid": "U1"}
+
+    monkeypatch.setattr(server.shop_flow, "start_shop_buy", fake_start_shop_buy)
+
+    req = _post_request("/api/shop/buy", {"slot": "Head", "value": "Wizard Hat"})
+    resp = _run(server.handle_shop_buy_start(req))
+    assert resp.status == 200
+    body = _run(_read_json(resp))
+    assert body["id"] != prior.id
+    assert len(server.shop_sessions) == 2
+
+
+def test_buy_malformed_and_disabled_economy_disabled_takes_precedence(onchain_env, shop_wallet):
+    """Regression lock (#217 review): when the body is malformed AND the
+    economy is disabled, the economy_disabled check must fire first — 403,
+    not 400 — since the fail-closed order in the handler checks
+    ECONOMY_ENABLED before parsing/validating the request body."""
+    server.config.ECONOMY_ENABLED = False
+    try:
+        req = _post_request("/api/shop/buy", {})  # malformed: missing slot/value
+        resp = _run(server.handle_shop_buy_start(req))
+        assert resp.status == 403
+        body = _run(_read_json(resp))
+        assert body["code"] == "economy_disabled"
+    finally:
+        server.config.ECONOMY_ENABLED = True
 
 
 def test_buy_happy_path_returns_session(onchain_env, shop_wallet, monkeypatch):

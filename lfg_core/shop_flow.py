@@ -36,6 +36,11 @@ SETTLING = "settling"
 DONE = "done"
 FAILED = "failed"
 
+# Mirrors mint_flow/swap_flow/market_flow/economy_api's TERMINAL_STATES: a
+# session in one of these states is finished and no longer blocks a new buy
+# from the same wallet (lfg_service.app's concurrent-session guard, #217).
+TERMINAL_STATES = {DONE, FAILED}
+
 # Callable shapes injected via ShopDeps — kept loose (Callable[..., Awaitable])
 # because keyword args differ per call site (mirrors xrpl_ops.mint_nft /
 # create_nft_offer / burn_nft's real signatures).
