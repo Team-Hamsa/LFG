@@ -328,7 +328,11 @@ def main(argv: list[str] | None = None) -> int:
             out = run_once(cfg)
             if out != "up_to_date":
                 log(f"{cfg.name}: cycle result: {out}")
-            if out == "refused":
+            if out in ("refused", "restart_failed"):
+                # refused: drain failed and prod policy blocked the restart.
+                # restart_failed: drain succeeded but a pm2 restart returned
+                # non-zero — new code is on disk with old processes running.
+                # Both need a human, so both arm the reminder.
                 pending_restart = True
             elif out == "restarted":
                 # Only a real, completed restart clears the reminder — a
@@ -340,8 +344,8 @@ def main(argv: list[str] | None = None) -> int:
                 # prior cycle was never applied — remind every cycle until
                 # some cycle resolves it.
                 log(
-                    f"{cfg.name}: REMINDER — a prior drain-and-restart was "
-                    f"refused; restart manually if not already done: pm2 "
+                    f"{cfg.name}: REMINDER — a prior restart was refused or "
+                    f"failed; restart manually if not already done: pm2 "
                     f"restart {' '.join(cfg.restart_processes)} --update-env"
                 )
         except Exception as exc:  # never die on a transient git/network error
