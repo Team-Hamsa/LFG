@@ -497,8 +497,8 @@ async def mint_one_unit(
 async def update_scan_state(session: MintSession) -> None:
     """Refresh the session's QR-scan flags from the XUMM payload status so
     the frontend can swap a scanned QR for a spinner (issue #22). Queries
-    stop once a payload is seen opened/signed; API errors leave the flags
-    untouched."""
+    stop only once the relevant payload is seen SIGNED (not merely opened);
+    API errors leave the flags untouched."""
     # Poll the payment payload until it is SIGNED (not merely opened): the
     # rotated push token only rides on the signature. Bounded by the session
     # leaving AWAITING_PAYMENT once the payment confirms on-ledger.
