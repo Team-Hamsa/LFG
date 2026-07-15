@@ -28,18 +28,22 @@ import aiohttp
 REPO_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
 sys.path.insert(0, REPO_ROOT)
 
-from lfg_core import nft_index  # noqa: E402
+from lfg_core import config, nft_index  # noqa: E402
 
-# Per-network enumeration defaults (mirrors the auditor).
+# Per-network enumeration defaults (mirrors the auditor). The character index
+# enumerates config.ASSEMBLE_TAXON (currently 1760, same value historically
+# used by SWAP_TAXON/the original Trait-Swapper bot for the whole collection;
+# regular /letsgo mints under NFT_TAXON (0) are a separate, never-split taxon
+# per #217 and are not enumerated by this default).
 NETWORKS: dict[str, dict[str, Any]] = {
     "mainnet": {
         "issuer": "rLfgoMintj3KBcs4s2XKtquvDwEte2kYfJ",
-        "taxon": 1760,
+        "taxon": config.ASSEMBLE_TAXON,
         "clio": "wss://s2-clio.ripple.com",
     },
     "testnet": {
         "issuer": None,  # from config.SWAP_ISSUER_ADDRESS
-        "taxon": 1760,
+        "taxon": config.ASSEMBLE_TAXON,
         "clio": "wss://clio.altnet.rippletest.net:51233",
     },
 }
@@ -111,8 +115,6 @@ async def retry_unreadable(
 
 
 async def _amain() -> int:
-    from lfg_core import config
-
     parser = argparse.ArgumentParser(description="Backfill the on-chain NFT index.")
     # Same guard as scripts/backfill_market.py: an XRPL_NETWORK outside the
     # known networks must not bypass choices validation via the default.
