@@ -16,7 +16,9 @@ def _git(cwd, *args):
         cwd=cwd,
         text=True,
         env={
-            **os.environ,
+            # Scrub GIT_* (a pre-push hook exports GIT_DIR etc., which would
+            # point these subprocesses at the OUTER repo, not tmp_path).
+            **{k: v for k, v in os.environ.items() if not k.startswith("GIT_")},
             "GIT_AUTHOR_NAME": "t",
             "GIT_AUTHOR_EMAIL": "t@t",
             "GIT_COMMITTER_NAME": "t",

@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import re
 import subprocess
 import sys
@@ -79,7 +80,13 @@ def log(msg: str) -> None:
 
 
 def run_git(args: list[str], cwd: str) -> str:
-    return subprocess.check_output(["git", *args], cwd=cwd, text=True, timeout=120).strip()
+    # Scrub inherited GIT_* vars (e.g. GIT_DIR/GIT_INDEX_FILE exported by a
+    # git hook environment) so git always operates on `cwd`, never the repo
+    # that happened to spawn us.
+    env = {k: v for k, v in os.environ.items() if not k.startswith("GIT_")}
+    return subprocess.check_output(
+        ["git", *args], cwd=cwd, text=True, timeout=120, env=env
+    ).strip()
 
 
 def fetch(cfg: StackConfig) -> None:

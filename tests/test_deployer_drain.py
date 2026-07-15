@@ -91,9 +91,7 @@ def test_drain_unreachable_first_probe():
 
 
 def _jlist(names_status):
-    return json.dumps(
-        [{"name": n, "pm2_env": {"status": s}} for n, s in names_status.items()]
-    )
+    return json.dumps([{"name": n, "pm2_env": {"status": s}} for n, s in names_status.items()])
 
 
 def test_restart_stack_runs_pm2_per_process():

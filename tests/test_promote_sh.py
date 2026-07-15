@@ -9,18 +9,24 @@ sys.path.insert(0, REPO_ROOT)
 PROMOTE = os.path.join(REPO_ROOT, "scripts", "promote.sh")
 
 
+def _scrubbed_env():
+    # Scrub GIT_* (a pre-push hook exports GIT_DIR etc., which would point
+    # these subprocesses at the OUTER repo, not tmp_path).
+    return {
+        **{k: v for k, v in os.environ.items() if not k.startswith("GIT_")},
+        "GIT_AUTHOR_NAME": "t",
+        "GIT_AUTHOR_EMAIL": "t@t",
+        "GIT_COMMITTER_NAME": "t",
+        "GIT_COMMITTER_EMAIL": "t@t",
+    }
+
+
 def _git(cwd, *args):
     return subprocess.check_output(
         ["git", *args],
         cwd=cwd,
         text=True,
-        env={
-            **os.environ,
-            "GIT_AUTHOR_NAME": "t",
-            "GIT_AUTHOR_EMAIL": "t@t",
-            "GIT_COMMITTER_NAME": "t",
-            "GIT_COMMITTER_EMAIL": "t@t",
-        },
+        env=_scrubbed_env(),
     ).strip()
 
 
@@ -43,7 +49,12 @@ def _setup(tmp_path):
 
 def _run(work, *args, stdin=""):
     return subprocess.run(
-        ["bash", PROMOTE, *args], cwd=work, text=True, input=stdin, capture_output=True
+        ["bash", PROMOTE, *args],
+        cwd=work,
+        text=True,
+        input=stdin,
+        capture_output=True,
+        env=_scrubbed_env(),
     )
 
 
