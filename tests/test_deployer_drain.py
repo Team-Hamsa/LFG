@@ -90,6 +90,18 @@ def test_drain_unreachable_first_probe():
     assert deployer.drain(_cfg(True), fetcher=f, sleeper=clock.sleep, clock=clock) == "unreachable"
 
 
+def test_drain_mid_drain_blip_retried_then_drains():
+    clock = FakeClock()
+    f = _fetcher_seq([b'{"active_sessions": 2}', OSError("blip"), b'{"active_sessions": 0}'])
+    assert deployer.drain(_cfg(True), fetcher=f, sleeper=clock.sleep, clock=clock) == "drained"
+
+
+def test_drain_mid_drain_blip_retried_then_gives_up():
+    clock = FakeClock()
+    f = _fetcher_seq([b'{"active_sessions": 2}', OSError("blip"), OSError("still down")])
+    assert deployer.drain(_cfg(True), fetcher=f, sleeper=clock.sleep, clock=clock) == "unreachable"
+
+
 def _jlist(names_status):
     return json.dumps([{"name": n, "pm2_env": {"status": s}} for n, s in names_status.items()])
 

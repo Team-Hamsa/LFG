@@ -103,7 +103,12 @@ def test_requirements_change_runs_pip_before_restart(tmp_path):
     calls = []
     out = deployer.run_once(_cfg(clone), fetcher=DRAINED, runner=lambda c: calls.append(c) or 0)
     assert out == "restarted"
-    assert calls[0] == ["/definitely/missing/pip", "install", "-r", "requirements.txt"]
+    assert calls[0] == [
+        "/definitely/missing/pip",
+        "install",
+        "-r",
+        f"{clone}/requirements.txt",
+    ]
 
 
 def test_pip_failure_blocks_restart(tmp_path):
@@ -113,6 +118,36 @@ def test_pip_failure_blocks_restart(tmp_path):
         _cfg(clone), fetcher=DRAINED, runner=lambda c: 1 if c[1] == "install" else 0
     )
     assert out == "pip_failed"
+
+
+def test_pip_failure_rolls_back_checkout(tmp_path):
+    seed, clone = _make_repos(tmp_path)
+    old = _git(clone, "rev-parse", "HEAD")
+    _push(seed, "requirements.txt", "aiohttp\n")
+    out = deployer.run_once(
+        _cfg(clone), fetcher=DRAINED, runner=lambda c: 1 if c[1] == "install" else 0
+    )
+    assert out == "pip_failed"
+    assert _git(clone, "rev-parse", "HEAD") == old
+
+
+def test_pip_failure_then_retry_succeeds(tmp_path):
+    seed, clone = _make_repos(tmp_path)
+    _push(seed, "requirements.txt", "aiohttp\n")
+    out = deployer.run_once(
+        _cfg(clone), fetcher=DRAINED, runner=lambda c: 1 if c[1] == "install" else 0
+    )
+    assert out == "pip_failed"
+    calls = []
+    out = deployer.run_once(_cfg(clone), fetcher=DRAINED, runner=lambda c: calls.append(c) or 0)
+    assert out == "restarted"
+    assert calls[0] == [
+        "/definitely/missing/pip",
+        "install",
+        "-r",
+        f"{clone}/requirements.txt",
+    ]
+    assert _git(clone, "rev-parse", "HEAD") == _git(seed, "rev-parse", "HEAD")
 
 
 def test_diverged_halts_without_touching_checkout(tmp_path):

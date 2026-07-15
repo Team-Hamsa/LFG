@@ -153,13 +153,17 @@ def drain(
     while True:
         n = active_sessions(cfg.health_url, fetcher=fetcher)
         if n is None:
-            # Unreachable (first probe or mid-drain): we cannot confirm the
-            # session count — report it and let posture decide.
-            log(
-                f"{cfg.name}: /api/health unreachable"
-                + (" on first probe" if first else " mid-drain")
-            )
-            return "unreachable"
+            if first:
+                # No prior successful probe to fall back on: fail fast.
+                log(f"{cfg.name}: /api/health unreachable on first probe")
+                return "unreachable"
+            # Mid-drain: a single transient blip shouldn't abort a prod
+            # deploy — retry once immediately before giving up.
+            log(f"{cfg.name}: /api/health unreachable mid-drain; retrying once")
+            n = active_sessions(cfg.health_url, fetcher=fetcher)
+            if n is None:
+                log(f"{cfg.name}: /api/health still unreachable after retry")
+                return "unreachable"
         first = False
         if n == 0:
             return "drained"
@@ -283,11 +287,13 @@ def run_once(
         log(f"{cfg.name}: requirements changed; running pip install")
         for req in ("requirements.txt", "requirements-dev.txt"):
             if req in files:
-                if runner([cfg.pip, "install", "-r", req]) != 0:
+                if runner([cfg.pip, "install", "-r", f"{cfg.checkout}/{req}"]) != 0:
                     log(
-                        f"{cfg.name}: pip install -r {req} FAILED; "
-                        "NOT restarting (old code keeps running)"
+                        f"{cfg.name}: pip install -r {req} FAILED; rolling back "
+                        f"checkout to {old[:12]} (so the next cycle retries the "
+                        "whole ff+pip instead of seeing up_to_date)"
                     )
+                    run_git(["reset", "--hard", old], cfg.checkout)
                     return "pip_failed"
     if not needs_restart(files):
         log(f"{cfg.name}: advanced to {new[:12]}; no restart-worthy changes")
@@ -324,9 +330,10 @@ def main(argv: list[str] | None = None) -> int:
                 log(f"{cfg.name}: cycle result: {out}")
             if out == "refused":
                 pending_restart = True
-            elif out != "up_to_date":
-                # Any other real outcome (restarted, advanced, halted, ...)
-                # supersedes the stale refusal.
+            elif out == "restarted":
+                # Only a real, completed restart clears the reminder — a
+                # doc-only push (advanced_no_restart) or a pip_failed cycle
+                # must not silence it.
                 pending_restart = False
             elif pending_restart:
                 # HEAD == origin/<branch>, but the refused restart from a
