@@ -35,7 +35,9 @@ def ensure_schema(conn: sqlite3.Connection) -> None:
     conn.commit()
 
 
-def derived_price(live_total: int, category_total: int, shop_count: int, population_size: int) -> int:
+def derived_price(
+    live_total: int, category_total: int, shop_count: int, population_size: int
+) -> int:
     """Apply the Laplace-smoothed price formula.
 
     share = (live_total + shop_count + 1) / (category_total + population_size)

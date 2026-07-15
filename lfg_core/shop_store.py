@@ -24,8 +24,16 @@ _SCHEMA = """CREATE TABLE IF NOT EXISTS shop_orders (
 )"""
 
 _COLS = (
-    "session_id", "buyer", "slot", "value", "price_brix",
-    "nft_id", "offer_index", "status", "created_ts", "updated_ts",
+    "session_id",
+    "buyer",
+    "slot",
+    "value",
+    "price_brix",
+    "nft_id",
+    "offer_index",
+    "status",
+    "created_ts",
+    "updated_ts",
 )
 
 VALID_STATUSES = frozenset(
@@ -39,8 +47,13 @@ def ensure_schema(conn: sqlite3.Connection) -> None:
 
 
 def create_order(
-    conn: sqlite3.Connection, session_id: str, buyer: str, slot: str,
-    value: str, price_brix: int, now_ts: int,
+    conn: sqlite3.Connection,
+    session_id: str,
+    buyer: str,
+    slot: str,
+    value: str,
+    price_brix: int,
+    now_ts: int,
 ) -> None:
     ensure_schema(conn)
     conn.execute(
@@ -52,8 +65,13 @@ def create_order(
 
 
 def update_order(
-    conn: sqlite3.Connection, session_id: str, *, now_ts: int,
-    status: str | None = None, nft_id: str | None = None, offer_index: str | None = None,
+    conn: sqlite3.Connection,
+    session_id: str,
+    *,
+    now_ts: int,
+    status: str | None = None,
+    nft_id: str | None = None,
+    offer_index: str | None = None,
 ) -> None:
     if status is not None and status not in VALID_STATUSES:
         raise ValueError(f"unknown shop order status: {status}")
@@ -63,8 +81,9 @@ def update_order(
         if val is not None:
             sets.append(f"{col}=?")
             params.append(val)
-    conn.execute(f"UPDATE shop_orders SET {', '.join(sets)} WHERE session_id=?",
-                 (*params, session_id))
+    conn.execute(
+        f"UPDATE shop_orders SET {', '.join(sets)} WHERE session_id=?", (*params, session_id)
+    )
     conn.commit()
 
 
@@ -74,21 +93,30 @@ def _rows(cur: sqlite3.Cursor) -> list[dict[str, Any]]:
 
 def get_order(conn: sqlite3.Connection, session_id: str) -> dict[str, Any] | None:
     ensure_schema(conn)
-    rows = _rows(conn.execute(
-        f"SELECT {', '.join(_COLS)} FROM shop_orders WHERE session_id=?", (session_id,)))
+    rows = _rows(
+        conn.execute(
+            f"SELECT {', '.join(_COLS)} FROM shop_orders WHERE session_id=?", (session_id,)
+        )
+    )
     return rows[0] if rows else None
 
 
 def orders_pending_expiry(conn: sqlite3.Connection, older_than_ts: int) -> list[dict[str, Any]]:
     ensure_schema(conn)
-    return _rows(conn.execute(
-        f"SELECT {', '.join(_COLS)} FROM shop_orders"
-        " WHERE status='pending_accept' AND created_ts < ? ORDER BY created_ts",
-        (older_than_ts,)))
+    return _rows(
+        conn.execute(
+            f"SELECT {', '.join(_COLS)} FROM shop_orders"
+            " WHERE status='pending_accept' AND created_ts < ? ORDER BY created_ts",
+            (older_than_ts,),
+        )
+    )
 
 
 def orders_unsettled(conn: sqlite3.Connection) -> list[dict[str, Any]]:
     ensure_schema(conn)
-    return _rows(conn.execute(
-        f"SELECT {', '.join(_COLS)} FROM shop_orders"
-        " WHERE status='accepted' ORDER BY created_ts"))
+    return _rows(
+        conn.execute(
+            f"SELECT {', '.join(_COLS)} FROM shop_orders"
+            " WHERE status='accepted' ORDER BY created_ts"
+        )
+    )

@@ -4,6 +4,7 @@ Env-guard preamble (copy from test_shop_config.py): importing lfg_core.config
 freezes its constants at import time; set the same defaults test_smoke.py uses
 so collection order can't strand them.
 """
+
 import os
 
 os.environ.setdefault("XUMM_API_KEY", "test")
@@ -43,7 +44,7 @@ def test_derived_price_formula():
 
 def test_derived_price_clamps():
     assert shop.derived_price(0, 10_000, 0, 2) == config.SHOP_MAX_BRIX  # ultra-rare capped
-    assert shop.derived_price(99, 100, 0, 1) == config.SHOP_MIN_BRIX   # ultra-common floored
+    assert shop.derived_price(99, 100, 0, 1) == config.SHOP_MIN_BRIX  # ultra-common floored
 
 
 def test_quote_aggregates_bodies_and_counts_shop():

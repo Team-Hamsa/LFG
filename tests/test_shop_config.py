@@ -4,6 +4,7 @@ Env-guard preamble (copy from test_market_flow.py): importing lfg_core.config
 freezes its constants at import time; set the same defaults test_smoke.py uses
 so collection order can't strand them.
 """
+
 import os
 
 os.environ.setdefault("XUMM_API_KEY", "test")

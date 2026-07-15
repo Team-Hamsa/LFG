@@ -4,6 +4,7 @@ Env-guard preamble (copy from test_shop_config.py): importing lfg_core.config
 freezes its constants at import time; set the same defaults test_smoke.py uses
 so collection order can't strand them.
 """
+
 import os
 
 os.environ.setdefault("XUMM_API_KEY", "test")
@@ -40,14 +41,10 @@ def test_increment_and_recalc_preserves() -> None:
         " VALUES ('testnet', 'male', 'Head', 'Wizard Hat', 3, 0.005)"
     )
     rarity.increment_shop_count(conn, "testnet", "Head", "Wizard Hat")
-    (n,) = conn.execute(
-        "SELECT shop_count FROM trait_rarity WHERE trait='Wizard Hat'"
-    ).fetchone()
+    (n,) = conn.execute("SELECT shop_count FROM trait_rarity WHERE trait='Wizard Hat'").fetchone()
     assert n == 1
     rarity.recalculate_rarity(conn, "testnet")  # zeroes+recounts live_count only
-    (n,) = conn.execute(
-        "SELECT shop_count FROM trait_rarity WHERE trait='Wizard Hat'"
-    ).fetchone()
+    (n,) = conn.execute("SELECT shop_count FROM trait_rarity WHERE trait='Wizard Hat'").fetchone()
     assert n == 1
 
 

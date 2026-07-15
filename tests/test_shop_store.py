@@ -4,6 +4,7 @@ Env-guard preamble (copy from test_shop_config.py): importing lfg_core at module
 top freezes its constants; set the same defaults test_smoke.py uses so collection
 order can't strand them.
 """
+
 import os
 
 os.environ.setdefault("XUMM_API_KEY", "test")
@@ -33,8 +34,9 @@ def test_order_lifecycle() -> None:
     o = shop_store.get_order(conn, "s1")
     assert o is not None
     assert o["status"] == "pending_mint" and o["price_brix"] == 42
-    shop_store.update_order(conn, "s1", status="pending_accept", nft_id="ABC",
-                            offer_index="OFF1", now_ts=1001)
+    shop_store.update_order(
+        conn, "s1", status="pending_accept", nft_id="ABC", offer_index="OFF1", now_ts=1001
+    )
     o = shop_store.get_order(conn, "s1")
     assert o is not None
     assert (o["status"], o["nft_id"], o["offer_index"]) == ("pending_accept", "ABC", "OFF1")
@@ -48,5 +50,7 @@ def test_expiry_and_unsettled_queries() -> None:
     shop_store.update_order(conn, "new", status="pending_accept", now_ts=5000)
     shop_store.create_order(conn, "done", "rC", "Eyes", "Laser", 10, now_ts=100)
     shop_store.update_order(conn, "done", status="accepted", now_ts=200)
-    assert [o["session_id"] for o in shop_store.orders_pending_expiry(conn, older_than_ts=1000)] == ["old"]
+    assert [
+        o["session_id"] for o in shop_store.orders_pending_expiry(conn, older_than_ts=1000)
+    ] == ["old"]
     assert [o["session_id"] for o in shop_store.orders_unsettled(conn)] == ["done"]

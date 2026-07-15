@@ -400,9 +400,7 @@ def start_boost_clock(
     conn.commit()
 
 
-def increment_shop_count(
-    conn: sqlite3.Connection, network: str, slot: str, value: str
-) -> None:
+def increment_shop_count(conn: sqlite3.Connection, network: str, slot: str, value: str) -> None:
     """Count one settled shop purchase for (slot, value). Trait tokens are
     body-agnostic, so bump every body row for the trait; if the trait has no
     rows yet, insert one under BODY_SENTINEL so the count is never lost.

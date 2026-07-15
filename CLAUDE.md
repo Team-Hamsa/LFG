@@ -72,7 +72,12 @@ NFT_DESCRIPTION=Test
 NFT_TRANSFER_FEE=7000
 NFT_FLAGS=25
 CLOSET_TAXON=1762                                           # optional; Closet soulbound taxon (default 1762)
-TRAIT_TAXON=1763                                            # optional; tradeable trait token taxon (default 1763)
+TRAIT_TAXON=176                                             # optional; tradeable trait token taxon (default 176, flipped from 1763 for #217)
+ASSEMBLE_TAXON=1760                                         # optional; taxon for Assemble-minted rebirth characters, distinct from NFT_TAXON=0 (default 1760)
+SHOP_BASE_BRIX=1.0                                          # optional; Trait Shop price numerator, BRIX (default 1.0, #217)
+SHOP_MIN_BRIX=5                                             # optional; Trait Shop price floor, BRIX (default 5, #217)
+SHOP_MAX_BRIX=5000                                          # optional; Trait Shop price ceiling, BRIX (default 5000, #217)
+SHOP_OFFER_TTL_SECONDS=900                                  # optional; Trait Shop sell-offer expiry window in seconds (default 900, #217)
 NFT_SCHEMA_URL=ipfs://QmNpi8rcXEkohca8iXu7zysKKSJYqCvBJn3xJwga8jXqWU
 EXTERNAL_WEBSITE_URL=https://www.letseffinggo.com   # use www — apex TLS is broken (Squarespace cert lacks apex SAN, verified 2026-07-10)
 RETRY_MAX_ATTEMPTS=5
@@ -565,7 +570,9 @@ burned back into the Closet. This creates a secondary market for individual
 traits without changing the character supply.
 
 **Trait token model:**
-- **`TRAIT_TAXON = 1763`** (env var `TRAIT_TAXON`, default 1763).
+- **`TRAIT_TAXON = 176`** (env var `TRAIT_TAXON`, default 176 — flipped from
+  1763 by #217; existing testnet 1763 tokens are abandoned by design, see
+  "Trait Shop (#217)" below).
 - **`TRAIT_NFT_FLAGS = 9`** (burnable + transferable, NOT mutable). The 7%
   royalty (TransferFee 7000, units of 1/100,000) is inherited automatically
   from `NFT_TRANSFER_FEE` because `mint_nft`
@@ -745,6 +752,52 @@ sale price.
 `lfg_core/xumm_ops.py`) go through the shared `_create_xumm_payload`, which
 `setdefault`s `SourceTag = config.SOURCE_TAG` on every non-`SignIn` txjson —
 marketplace code never sets it itself.
+
+### Trait Shop (#217)
+
+A BRIX-denominated on-demand mint shop: pick any (slot, value) and buy a
+freshly minted trait token straight into your Closet, without needing a
+matching Extract/List seller first. Design:
+`docs/superpowers/specs/2026-07-14-trait-shop-design.md`.
+
+- **Not supply-neutral, unlike Extract/Deposit:** every shop purchase mints a
+  brand-new trait token, so `lfg_core/shop_flow.py` writes a `supply_changes`
+  growth row (`kind="mint"`, `+1` on the (slot, value) key) alongside the mint,
+  and a matching `-1` row on any revert/expiry burn — the conservation
+  invariant (`census == genesis + Σ supply_changes`) is maintained the same
+  way new-edition Assemble mints are, not the supply-neutral way Extract/
+  Deposit are.
+- **Pricing:** `price = clamp(SHOP_BASE_BRIX / smoothed_share, SHOP_MIN_BRIX,
+  SHOP_MAX_BRIX)` — scarcer traits (lower rarity share, including a live
+  `shop_count` feedback term) cost more BRIX. Tunable via `SHOP_BASE_BRIX` /
+  `SHOP_MIN_BRIX` / `SHOP_MAX_BRIX`.
+- **BRIX is burned by construction:** payment is a destination-locked
+  BRIX-denominated `NFTokenOffer` sell offer straight from the issuer-minted
+  trait token to the buyer (mirrors the marketplace's native-offer model, no
+  escrow) — there's no separate burn step; the BRIX simply moves buyer→app
+  wallet as the cost of the trait, same as any other BRIX spend.
+- **Stores** (same per-network `onchain_<net>.db` as `trait_tokens`/
+  `market_listings`): `shop_orders` (`lfg_core/shop_store.py`) tracks each
+  purchase session — `pending_accept` → `accepted` → `settled` (or
+  `expired`/`failed`) — and `trait_rarity.shop_count` (in the app DB, via
+  `lfg_core/rarity.py`) feeds the pricing formula back from realized sales.
+- **Flow** (`lfg_core/shop_flow.py`, `ShopBuySession`/`ShopDeps`, mirrors
+  `economy_flow`'s fail-safe ordering): mint the trait token → record the
+  `supply_changes` growth row → BRIX sell offer with on-ledger `Expiration`
+  (`SHOP_OFFER_TTL_SECONDS`, default 900s) → XUMM accept (signer must match
+  buyer) → settle via the existing Phase-4 `run_deposit` (burn back into the
+  Closet). A failed offer/list after a successful mint reverts (issuer burn +
+  compensating `-1` supply row); settlement failure leaves the order
+  `accepted` for the sweep to retry, not a session failure.
+- **Sweep** (`lfg_service.app.sweep_shop_orders`, periodic like the
+  marketplace's trait-settlement sweep): expires stale `pending_accept` orders
+  past `SHOP_OFFER_TTL_SECONDS` (cancel the offer, burn the token, `-1`
+  supply row — unless the accept actually landed on-ledger despite the local
+  timeout, in which case it's rescued into `accepted` instead of burned) and
+  retries stuck `accepted` settlements.
+- **Taxon:** trait tokens minted by the shop share `TRAIT_TAXON` with Extract
+  — see the flip to 176 noted above; `ASSEMBLE_TAXON = 1760` is unrelated
+  (Assemble-minted rebirth characters, not shop trait tokens).
 
 ## Important Notes
 
