@@ -15,7 +15,17 @@ from dataclasses import asdict, dataclass
 from decimal import Decimal
 from typing import Any
 
-from lfg_core import config, entitlement, memos, supply, xrpl_ops, xumm_ops
+from lfg_core import (
+    config,
+    db_path,
+    entitlement,
+    memos,
+    mint_credits,
+    mint_flow,
+    supply,
+    xrpl_ops,
+    xumm_ops,
+)
 
 JOBS_DIR = os.getenv("BULK_MINT_JOBS_DIR", "bulk_mint_jobs")
 
@@ -249,6 +259,87 @@ def delete_record(job_id: str) -> None:
         os.remove(_record_path(job_id))
     except FileNotFoundError:
         pass
+
+
+_UNIT_MAX_ATTEMPTS = 3
+
+
+async def _fulfill_unit(job: BulkMintJob, unit: Unit) -> None:
+    """Mint+offer one unit. Cap re-check first (a concurrent job may have
+    consumed the tail); a cap-hit or exhausted unit becomes a mint credit
+    rather than a loss. Cap-exempt (burn) entitlements skip the re-check."""
+    cap_exempt = job.entitlement is not None and getattr(job.entitlement, "cap_exempt", False)
+    for _ in range(_UNIT_MAX_ATTEMPTS):
+        if not cap_exempt and supply.current_supply(job.network) >= config.MAX_COLLECTION_SIZE:
+            break  # cap hit -> credit below
+        nft_number = await mint_flow._allocate_nft_number()
+        res = await mint_flow.mint_one_unit(
+            discord_id=job.discord_id,
+            wallet_address=job.wallet_address,
+            platform=job.platform,
+            push_user_token=job.push_user_token,
+            return_url=job.return_url,
+            nft_number=nft_number,
+            session_tag=f"{job.id}:{unit.index}",
+        )
+        if res.nft_id:
+            unit.nft_id = res.nft_id
+            unit.nft_number = res.nft_number
+            unit.image_url = res.image_url
+            if res.offer_id:
+                unit.offer_id = res.offer_id
+                unit.state = OFFERED
+            else:
+                # minted but offer failed: NFT exists, do NOT re-mint. Mark
+                # failed (delivered-pending-offer); admin/backfill re-offers.
+                unit.state = UNIT_FAILED
+                unit.error = res.error or "offer creation failed"
+            return
+        unit.error = res.error  # transient mint failure: retry
+    # Never minted after retries (or cap-hit): durable credit, no money lost.
+    unit.state = UNIT_FAILED
+    mint_credits.add_credit(db_path.app_db_path(job.network), job.discord_id, job.network, 1)
+
+
+async def run_bulk_mint_job(job: BulkMintJob) -> None:
+    """Drive a bulk job to terminal state. Background task / resume entrypoint."""
+    try:
+        if job.state == AWAITING_PAYMENT:
+            p = job._payment_params()
+            assert job.pay_amount is not None, "prepare_payment must run before waiting"
+            paid = await xrpl_ops.wait_for_payment(
+                destination=p["destination"],
+                expected_sender=job.wallet_address,
+                expected_amount=job.pay_amount,
+                not_before=job.created_at - 10,
+                currency=p["currency"],
+                issuer=p["issuer"],
+            )
+            if not paid:
+                job.state = PAYMENT_TIMEOUT
+                persist(job)
+                return
+            job.paid_at = time.time()
+            job.state = PAID
+            persist(job)
+
+        job.state = FULFILLING
+        persist(job)
+        for unit in job.units:
+            if unit.state in (OFFERED, UNIT_FAILED):
+                continue  # resume: skip already-processed units
+            await _fulfill_unit(job, unit)
+            persist(job)
+
+        job.state = DONE
+        persist(job)
+    except asyncio.CancelledError:
+        raise
+    except Exception as e:
+        logging.error("bulk job %s failed: %s", job.id, e)
+        job.state = FAILED
+        job.error = str(e)
+        persist(job)
 
 
 def load_all_resumable() -> list[BulkMintJob]:

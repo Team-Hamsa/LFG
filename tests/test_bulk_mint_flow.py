@@ -15,9 +15,11 @@ os.environ.setdefault("BUNNY_PULL_ZONE", "nft.pullzone.example")
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
+import asyncio  # noqa: E402
+
 import pytest  # noqa: E402
 
-from lfg_core import bulk_mint_flow, config  # noqa: E402
+from lfg_core import bulk_mint_flow, config, mint_flow  # noqa: E402
 
 
 def test_config_defaults():
@@ -68,6 +70,78 @@ def test_clamp_collection_full_raises(monkeypatch):
     j = _job(5)
     with pytest.raises(bulk_mint_flow.CollectionFull):
         j.clamp_to_headroom()
+
+
+def _async_counter(start=0):
+    counter = {"n": start}
+
+    async def _inner(*args, **kwargs):
+        n = counter["n"]
+        counter["n"] += 1
+        return n
+
+    return _inner
+
+
+def _fake_mint_ok():
+    async def _inner(*, nft_number, **kwargs):
+        return mint_flow.UnitResult(
+            nft_number=nft_number,
+            nft_id=f"nft-{nft_number}",
+            image_url="https://cdn.example/img.png",
+            offer_id=f"offer-{nft_number}",
+            accept={"xumm_url": "x"},
+            error=None,
+        )
+
+    return _inner
+
+
+def _fake_mint_offer_fail():
+    async def _inner(*, nft_number, **kwargs):
+        return mint_flow.UnitResult(
+            nft_number=nft_number,
+            nft_id=f"nft-{nft_number}",
+            image_url="https://cdn.example/img.png",
+            offer_id=None,
+            accept=None,
+            error="offer creation failed",
+        )
+
+    return _inner
+
+
+def test_fulfillment_all_units_offered(monkeypatch, tmp_path):
+    monkeypatch.setattr(bulk_mint_flow, "JOBS_DIR", str(tmp_path))
+    monkeypatch.setattr(bulk_mint_flow.supply, "current_supply", lambda net: 0)
+    monkeypatch.setattr(
+        bulk_mint_flow.mint_flow, "_allocate_nft_number", _async_counter(start=4000)
+    )
+    monkeypatch.setattr(bulk_mint_flow.mint_flow, "mint_one_unit", _fake_mint_ok())
+    j = _job(3)
+    monkeypatch.setattr(bulk_mint_flow.supply, "remaining_headroom", lambda net: 100)
+    j.clamp_to_headroom()
+    j.state = bulk_mint_flow.PAID
+    asyncio.run(bulk_mint_flow.run_bulk_mint_job(j))
+    assert j.state == bulk_mint_flow.DONE
+    assert all(u.state == bulk_mint_flow.OFFERED for u in j.units)
+
+
+def test_offer_fail_marks_unit_failed_but_job_completes(monkeypatch, tmp_path):
+    monkeypatch.setattr(bulk_mint_flow, "JOBS_DIR", str(tmp_path))
+    monkeypatch.setattr(bulk_mint_flow.supply, "current_supply", lambda net: 0)
+    monkeypatch.setattr(
+        bulk_mint_flow.mint_flow, "_allocate_nft_number", _async_counter(start=4000)
+    )
+    # mint ok but offer None -> minted-but-offer-failed
+    monkeypatch.setattr(bulk_mint_flow.mint_flow, "mint_one_unit", _fake_mint_offer_fail())
+    j = _job(2)
+    monkeypatch.setattr(bulk_mint_flow.supply, "remaining_headroom", lambda net: 100)
+    j.clamp_to_headroom()
+    j.state = bulk_mint_flow.PAID
+    asyncio.run(bulk_mint_flow.run_bulk_mint_job(j))
+    assert j.state == bulk_mint_flow.DONE  # job still reaches DONE
+    assert all(u.nft_id is not None for u in j.units)
 
 
 def test_prepare_payment_multiplies_price_xrp(monkeypatch):
