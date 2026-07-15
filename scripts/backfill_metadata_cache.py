@@ -103,8 +103,8 @@ def apply_csv(conn: sqlite3.Connection, path: str, missing: set[str]) -> int:
 
 
 async def fetch_missing(conn: sqlite3.Connection, missing: list[str]) -> int:
-    """Fetch metadata for the leftover URIs (multi-gateway ipfs / direct CDN),
-    committing as batches land. Returns the number cached."""
+    """Fetch metadata for the leftover URIs (CDN http(s) only; ipfs:// URIs
+    are never fetched), committing as batches land. Returns the number cached."""
     fetched = 0
     async with aiohttp.ClientSession() as http:
         for i in range(0, len(missing), _FETCH_COMMIT_EVERY):

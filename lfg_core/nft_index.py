@@ -41,8 +41,9 @@ def _metadata_urls(uri_hex: str) -> list[str]:
 
 
 async def fetch_metadata_multi(http: aiohttp.ClientSession, uri_hex: str) -> dict[str, Any] | None:
-    """Fetch metadata JSON, trying multiple IPFS gateways over a few passes.
-    Returns the parsed dict or None if every attempt fails."""
+    """Fetch metadata JSON from the token's http(s) URI, retrying over a few
+    passes. ipfs:// URIs yield no candidate URLs (see _metadata_urls) and
+    return None immediately. Returns the parsed dict or None."""
     urls = _metadata_urls(uri_hex)
     timeout = aiohttp.ClientTimeout(total=FETCH_TIMEOUT_SECONDS)
     for _ in range(FETCH_ATTEMPTS):
