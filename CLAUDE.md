@@ -799,6 +799,60 @@ matching Extract/List seller first. Design:
   — see the flip to 176 noted above; `ASSEMBLE_TAXON = 1760` is unrelated
   (Assemble-minted rebirth characters, not shop trait tokens).
 
+### Bulk minting (#215)
+
+Mint N editions behind one payment instead of N separate mint flows —
+`lfg_core/bulk_mint_flow.py` (`BulkMintJob`), a durable batch job that reuses
+the single-mint machinery per unit.
+
+- **Endpoints** (`lfg_service/app.py`): `POST /api/mint/bulk` (body
+  `{"quantity": N}`) starts a job; `GET /api/mint/bulk/{session_id}` polls
+  one; `GET /api/mint/bulk/active` returns the caller's live (non-terminal)
+  bulk job. Kept **separate** from single-mint `/api/mint/active` on purpose —
+  the bulk job shape (`units[]`, `minted`/`offered` counts) differs from a
+  `MintSession` and would break the existing `resumeMint()` client if merged.
+- **Flow:** one K× payment (LFGO-vs-XRP detection identical to single mint,
+  at `unit_price * quantity`) via `BulkMintJob.prepare_payment`, then
+  `run_bulk_mint_job` loops `mint_flow.mint_one_unit` (extracted from the
+  single-mint path, #215 refactor) `quantity` times, persisting the whole job
+  to `bulk_mint_jobs/<id>.json` after every unit
+  (`bulk_mint_flow.persist`/`_record_path`, atomic tmp-file + `os.replace`).
+  A unit that mints but whose offer creation fails is marked `failed`
+  (delivered-pending-offer) rather than re-minted.
+- **Startup resume:** `lfg_service.app.resume_bulk_jobs`, wired via
+  `app.on_startup`, calls `bulk_mint_flow.load_all_resumable()` to re-attach
+  every job left in `paid`/`fulfilling` state and re-launches
+  `run_bulk_mint_job` for each — a crash/restart mid-job resumes from the
+  last-persisted unit with no double-charge (payment already confirmed) or
+  double-mint (`OFFERED`/`failed` units are skipped on resume).
+- **Quantity clamping:** `BulkMintJob.clamp_to_headroom()` sets
+  `quantity = min(requested_qty, BULK_MINT_MAX, headroom)`, where headroom =
+  `MAX_COLLECTION_SIZE − current_supply` (`lfg_core/supply.py`, reading live
+  `onchain_nfts` where `is_burned=0`, same store the economy conservation
+  audit uses). Zero headroom raises `CollectionFull` → the service returns
+  409 `collection_full`. This clamp runs **before** `prepare_payment` so a
+  request is never charged for mints the collection has no room for.
+  `_fulfill_unit` re-checks `current_supply` per-unit at fulfillment time (a
+  concurrent job can consume the tail between clamp and fulfillment); a
+  cap-race loss (or exhausted mint retries) converts into a durable
+  `mint_credits` row (`lfg_core/mint_credits.py`) rather than a lost payment —
+  the user keeps a redeemable credit, never loses money.
+- **No offer `Expiration`:** bulk-minted offers carry no expiry, so
+  acceptance is fully decoupled from fulfillment (Phase B / follow-up #218
+  — a claim-later UX is out of scope for this phase).
+- **Entitlement seam** (`lfg_core/entitlement.py`): `quantity`-bearing
+  dataclasses the fulfillment loop reads without caring why a job is
+  entitled to N mints. `PaymentEntitlement` (`cap_exempt=False`) is what
+  bulk mint uses today; `BurnEntitlement` (`cap_exempt=True` — burning M live
+  NFTs to mint M fresh ones is supply-neutral) is a documented stub
+  (`build_burn_entitlement` raises `NotImplementedError`, #220) for a future
+  burn-to-mint path that would skip the headroom clamp.
+- **New env vars:** `MAX_COLLECTION_SIZE` (default 10000, total live-edition
+  cap), `BULK_MINT_MAX` (default 10, per-request quantity cap),
+  `BULK_MINT_JOBS_DIR` (default `bulk_mint_jobs`, the job-record directory —
+  gitignored, regenerable only in the sense that in-flight jobs resume from
+  it; deleting it mid-flight loses resume state for any live job).
+
 ## Important Notes
 
 1. **Token Trustline Required**: Users must set up a trustline for LFGO tokens before receiving payment instructions. The `/letsgo` command provides a "Set LFGO Trustline" button.

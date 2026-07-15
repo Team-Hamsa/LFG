@@ -36,6 +36,9 @@ reports/
 # Economy flow journals (runtime recovery records)
 economy_records/
 
+# Bulk mint job records (runtime recovery records, #215)
+bulk_mint_jobs/
+
 # On-chain NFT index DBs (regenerable via backfill)
 onchain_*.db
 onchain_*.db-*
