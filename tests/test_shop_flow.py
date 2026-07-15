@@ -242,6 +242,32 @@ def test_happy_path_start_then_settle(tmp_path):
     assert row is not None and row[0] == 1
 
 
+def test_settle_order_marked_settled_even_if_shop_count_increment_raises(tmp_path, monkeypatch):
+    """Bot review finding (#217): the order status write must land before the
+    best-effort shop_count increment, so an increment failure never leaves a
+    completed purchase as a ghost 'accepted'/'failed' order."""
+    conn = sqlite3.connect(str(tmp_path / "economy.db"))
+    _active_closet(conn)
+    f = _F()
+    deps = _deps(conn, f, tmp_path)
+    session = _session()
+
+    _run(shop_flow.start_shop_buy(session, deps))
+    f.owner_of[f.minted_nft_id] = BUYER
+    f.payload_status = _signed_status(account=BUYER)
+
+    def raising_increment(*a, **kw):
+        raise RuntimeError("increment boom")
+
+    monkeypatch.setattr(shop_flow.rarity, "increment_shop_count", raising_increment)
+
+    _run(shop_flow.advance_shop_buy(session, deps))
+
+    assert session.state == "done"
+    order = shop_store.get_order(conn, session.id)
+    assert order is not None and order["status"] == "settled"
+
+
 def test_mint_failure_no_supply_row(tmp_path):
     conn = sqlite3.connect(str(tmp_path / "economy.db"))
     _active_closet(conn)

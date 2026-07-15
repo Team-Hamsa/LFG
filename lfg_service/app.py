@@ -2107,16 +2107,22 @@ async def _settle_shop_order(order: dict[str, Any], network: str) -> None:
         conn.close()
 
     if settled:
-        app_conn = sqlite3.connect(db_path.app_db_path(network))
-        try:
-            rarity.increment_shop_count(app_conn, network, order["slot"], order["value"])
-        finally:
-            app_conn.close()
         conn = nft_index.init_db(nft_index.index_db_path(network))
         try:
             shop_store.update_order(conn, session_id, now_ts=now_ts, status="settled")
         finally:
             conn.close()
+        try:
+            app_conn = sqlite3.connect(db_path.app_db_path(network))
+            try:
+                rarity.increment_shop_count(app_conn, network, order["slot"], order["value"])
+            finally:
+                app_conn.close()
+        except Exception:
+            logging.warning(
+                f"shop settlement sweep: shop_count increment failed for {session_id} "
+                f"(order settled; pricing feedback skipped): {traceback.format_exc()}"
+            )
         _shop_settle_attempts.pop(session_id, None)
         return
 
@@ -2165,7 +2171,12 @@ async def sweep_shop_orders() -> None:
         conn.close()
 
     for order in unsettled:
-        await _settle_shop_order(order, network)
+        try:
+            await _settle_shop_order(order, network)
+        except Exception:
+            logging.error(
+                f"shop settlement sweep crashed for {order['session_id']}: {traceback.format_exc()}"
+            )
 
 
 async def _settlement_sweep_loop() -> None:

@@ -137,17 +137,49 @@ def catalog(conn: sqlite3.Connection, network: str) -> list[dict[str, Any]]:
 
     Aggregated across bodies (trait tokens are body-agnostic).
     Body Type is excluded from the catalog.
+
+    Restructured (#217 bot review) to a constant number of queries instead of
+    one `quote()` round-trip per (slot, value): one aggregate GROUP BY over
+    trait_rarity per trait, one per-category totals GROUP BY, and one
+    overrides read, with prices computed in Python via `derived_price`.
+    Semantics are pinned to match the old per-row `quote()` loop exactly.
     """
     ensure_schema(conn)
-    out: list[dict[str, Any]] = []
-    pairs = conn.execute(
-        "SELECT DISTINCT category, trait FROM trait_rarity"
-        " WHERE network=? AND enabled=1 AND category != ?"
-        " ORDER BY category, trait",
+
+    # Per-(category, trait) aggregates, across bodies.
+    trait_rows = conn.execute(
+        "SELECT category, trait, SUM(live_count), MAX(shop_count), MAX(enabled)"
+        " FROM trait_rarity WHERE network=? AND category != ?"
+        " GROUP BY category, trait",
         (network, BODY_CATEGORY),
     ).fetchall()
-    for slot, value in pairs:
-        price = quote(conn, network, slot, value)
-        if price is not None:
-            out.append({"slot": slot, "value": value, "price_brix": price})
+
+    # Per-category totals (live_count sum + row count), used as the
+    # population/category_total denominator inputs to derived_price.
+    cat_totals: dict[str, tuple[int, int]] = {
+        row[0]: (row[1] or 0, row[2])
+        for row in conn.execute(
+            "SELECT category, SUM(live_count), COUNT(*) FROM trait_rarity"
+            " WHERE network=? AND category != ? GROUP BY category",
+            (network, BODY_CATEGORY),
+        ).fetchall()
+    }
+
+    overrides = get_overrides(conn, network)
+
+    out: list[dict[str, Any]] = []
+    for category, trait, live_sum, shop_count_max, enabled_max in trait_rows:
+        if not enabled_max:
+            continue
+        ov = overrides.get((category, trait))
+        if ov and ov["excluded"]:
+            continue
+        if ov and ov["price_override"] is not None:
+            price = int(ov["price_override"])
+        else:
+            category_total, population = cat_totals.get(category, (0, 0))
+            price = derived_price(live_sum or 0, category_total, shop_count_max or 0, population)
+        out.append({"slot": category, "value": trait, "price_brix": price})
+
+    out.sort(key=lambda r: (r["slot"], r["value"]))
     return out

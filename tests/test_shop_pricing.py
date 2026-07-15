@@ -80,3 +80,16 @@ def test_catalog_lists_enabled_non_excluded():
     rows = shop.catalog(conn, "testnet")
     assert [r["value"] for r in rows] == ["Wizard Hat"]
     assert rows[0]["slot"] == "Head" and rows[0]["price_brix"] > 0
+
+
+def test_catalog_respects_override_and_exclusion_together():
+    conn = _conn()
+    _seed(conn, "male", "Head", "Wizard Hat", 4)
+    _seed(conn, "male", "Head", "Cap", 90)
+    _seed(conn, "male", "Head", "Halo", 1)
+    shop.set_override(conn, "testnet", "Head", "Wizard Hat", price_override=777)
+    shop.set_override(conn, "testnet", "Head", "Cap", excluded=True)
+    rows = {r["value"]: r for r in shop.catalog(conn, "testnet")}
+    assert set(rows) == {"Wizard Hat", "Halo"}
+    assert rows["Wizard Hat"]["price_brix"] == 777
+    assert rows["Halo"]["price_brix"] > 0

@@ -335,6 +335,66 @@ def test_settlement_retry_settles_and_increments_shop_count(onchain_env, monkeyp
     assert row[0] == 1
 
 
+def test_settlement_marks_order_settled_even_if_shop_count_increment_raises(
+    onchain_env, monkeypatch, tmp_path
+):
+    """Bot review finding (#217): the settled status write must happen before
+    the best-effort shop_count increment, so a raising increment never leaves
+    a completed purchase as a ghost order."""
+    conn = _reopen(onchain_env)
+    _active_buyer_closet(conn)
+    _seed_order(conn, "S5B", status="accepted", created_ts=int(time.time()))
+    conn.close()
+
+    f = _FakeSettleDeps()
+    monkeypatch.setattr(
+        server.economy_api, "build_settlement_deps", lambda c: _settle_deps(c, f, tmp_path)
+    )
+
+    def raising_increment(*a, **kw):
+        raise RuntimeError("increment boom")
+
+    monkeypatch.setattr(server.rarity, "increment_shop_count", raising_increment)
+
+    _run(server.sweep_shop_orders())
+
+    conn = _reopen(onchain_env)
+    order = shop_store.get_order(conn, "S5B")
+    assert order["status"] == "settled"
+
+
+def test_settlement_pass_isolates_per_order_failures(onchain_env, monkeypatch, tmp_path):
+    """Bot review finding (#217): one order's settle call raising must not
+    prevent the next order in the same sweep pass from being processed,
+    mirroring the adjacent expiry loop's per-order isolation."""
+    conn = _reopen(onchain_env)
+    _active_buyer_closet(conn)
+    _seed_order(conn, "S5C", status="accepted", created_ts=int(time.time()), offer_index="OFFERC")
+    _seed_order(conn, "S5D", status="accepted", created_ts=int(time.time()), offer_index="OFFERD")
+    conn.close()
+
+    calls = []
+    real_settle = server._settle_shop_order
+
+    async def flaky_settle(order, network):
+        calls.append(order["session_id"])
+        if order["session_id"] == "S5C":
+            raise RuntimeError("boom")
+        return await real_settle(order, network)
+
+    f = _FakeSettleDeps()
+    monkeypatch.setattr(
+        server.economy_api, "build_settlement_deps", lambda c: _settle_deps(c, f, tmp_path)
+    )
+    monkeypatch.setattr(server, "_settle_shop_order", flaky_settle)
+
+    _run(server.sweep_shop_orders())
+
+    assert calls == ["S5C", "S5D"]
+    conn = _reopen(onchain_env)
+    assert shop_store.get_order(conn, "S5D")["status"] == "settled"
+
+
 def test_settlement_giveup_after_max_attempts_journals_and_fails(
     onchain_env, monkeypatch, tmp_path
 ):

@@ -28,6 +28,8 @@ from lfg_core import config, memos, rarity, shop_store
 from lfg_core import trait_token as tt
 from lfg_core.economy_flow import DepositSession, EconomyDeps, run_deposit
 
+log = logging.getLogger(__name__)
+
 RIPPLE_EPOCH_OFFSET = 946_684_800
 
 RUNNING = "running"
@@ -139,15 +141,23 @@ async def _revert_mint(deps: ShopDeps, session: ShopBuySession, nft_id: str) -> 
     try:
         revert_hash = await deps.burn_fn(nft_id, "")
     except Exception:
+        log.exception(f"Shop buy {session.id} revert burn crashed for nft_id={nft_id}")
         revert_hash = None
     if revert_hash:
-        _record_supply_change(
-            deps,
-            kind="burn",
-            delta=-1,
-            session=session,
-            reason=f"shop revert {session.id}",
-        )
+        try:
+            _record_supply_change(
+                deps,
+                kind="burn",
+                delta=-1,
+                session=session,
+                reason=f"shop revert {session.id}",
+            )
+        except Exception:
+            log.exception(
+                f"Shop buy {session.id} revert burn succeeded (nft_id={nft_id}) but the "
+                "supply reversal row failed to write — ledger and supply mirror are now "
+                "out of sync; needs an admin audit note"
+            )
         session.nft_id = None
         session.fail("failed to list your trait token for sale; the mint was reverted")
     else:
@@ -285,9 +295,15 @@ async def advance_shop_buy(session: ShopBuySession, deps: ShopDeps) -> None:
         return
 
     shop_store.update_order(deps.conn, session.id, now_ts=deps.now_ts_fn(), status="settled")
-    app_conn = deps.app_conn_factory()
     try:
-        rarity.increment_shop_count(app_conn, deps.network, session.slot, session.value)
-    finally:
-        app_conn.close()
+        app_conn = deps.app_conn_factory()
+        try:
+            rarity.increment_shop_count(app_conn, deps.network, session.slot, session.value)
+        finally:
+            app_conn.close()
+    except Exception:
+        log.warning(
+            f"Shop buy {session.id} shop_count increment failed (order settled; "
+            f"pricing feedback skipped): {traceback.format_exc()}"
+        )
     session.state = DONE
