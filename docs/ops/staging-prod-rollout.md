@@ -16,8 +16,23 @@ to run while prod serves traffic; only step 8 restarts prod processes.
 ## 4. Build the staging checkout
     git clone git@github.com:Team-Hamsa/LFG.git ~/LFG-staging
     cd ~/LFG-staging && ./setup.sh
-    cp ~/LFG/.env ~/LFG-staging/.env
-    # then apply every override in docs/ops/env.staging.example
+    cp docs/ops/env.staging.example ~/LFG-staging/.env
+Start from the staging example, NOT `~/LFG/.env` — copying the prod `.env`
+wholesale drags every prod secret into a lower-trust checkout, and if any
+staging override is missed, staging quietly points at prod (prod DB rows,
+prod BunnyCDN folder, prod Discord guild). Instead, copy over **only** the
+credentials staging legitimately reuses:
+    - XUMM_API_KEY / XUMM_API_SECRET (shared XUMM app)
+    - BUNNY_CDN_ACCESS_KEY / BUNNY_CDN_STORAGE_ZONE / BUNNY_CDN_BASE_URL
+    - SEED (already the testnet seed — safe to share; not a prod secret)
+    - TOKEN_ISSUER_ADDRESS / TOKEN_CURRENCY_HEX
+Then set every remaining value from `docs/ops/env.staging.example` (ports,
+DB paths, taxons, `BUNNY_CDN_FOLDER`, etc.) — do NOT leave any commented
+placeholder from the example unfilled.
+**Never copy `DISCORD_BOT_TOKEN`, `TELEGRAM_BOT_TOKEN`, or `SERVICE_TOKEN_*`
+from prod** — those identify prod's live bot/service credentials; staging
+gets its own once the staging Discord app / BotFather bot exist (see
+"Later" below), and until then `stg-bot`/`stg-telegram` stay stopped.
     $EDITOR ~/LFG-staging/.env
 
 ## 5. Move the testnet listener + start staging
@@ -36,9 +51,15 @@ to run while prod serves traffic; only step 8 restarts prod processes.
 
 ## 8. Adopt the prod ecosystem file (hard cutover — prod restarts here)
 Existing lfg-* processes keep their old ad-hoc definitions until restarted
-via the file. This step actually bounces live prod processes — check
-`curl -s localhost:8176/api/health` shows `active_sessions: 0` first, then
-at that quiet moment:
+via the file. This step actually bounces live prod processes.
+
+A one-time `curl -s localhost:8176/api/health` showing `active_sessions: 0`
+is NOT a drain barrier — a new session can start in the gap between that
+check and the actual `pm2 delete`/`pm2 start` below. Instead:
+    pm2 stop lfg-activity     # stops the webapp from accepting new sessions
+    curl -s localhost:8176/api/health   # re-check active_sessions == 0
+Repeat the re-check (or just pick an off-hours window) until it's actually
+quiet, THEN:
     pm2 delete lfg-bot lfg-activity lfg-telegram lfg-index-mainnet lfg-snapshot
     pm2 start ~/LFG/ecosystem.prod.config.js
     pm2 save
