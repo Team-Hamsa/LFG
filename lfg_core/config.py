@@ -111,6 +111,12 @@ NFT_COLLECTION_NAME = os.getenv("NFT_COLLECTION_NAME", "Let's Effing Go!")
 MINT_PRICE_LFGO = os.getenv("MINT_PRICE_LFGO", "1")
 MINT_PRICE_XRP = os.getenv("MINT_PRICE_XRP", "10")
 
+# Bulk minting (#215). MAX_COLLECTION_SIZE caps total live editions; a bulk
+# request is clamped to the remaining headroom before payment. BULK_MINT_MAX
+# caps how many a single bulk job may request.
+MAX_COLLECTION_SIZE = int(os.getenv("MAX_COLLECTION_SIZE", "10000"))
+BULK_MINT_MAX = int(os.getenv("BULK_MINT_MAX", "10"))
+
 # BunnyCDN
 BUNNY_CDN_ACCESS_KEY = _require("BUNNY_CDN_ACCESS_KEY")
 BUNNY_CDN_STORAGE_ZONE = _require("BUNNY_CDN_STORAGE_ZONE")
