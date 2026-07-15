@@ -34,6 +34,7 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from lfg_core import (
     closet_token,
     config,
+    db_path,
     economy_flow,
     economy_store,
     history_store,
@@ -46,6 +47,8 @@ from lfg_core import (
     memos,
     mint_flow,
     nft_index,
+    rarity,
+    shop_store,
     swap_flow,
     swap_meta,
     trait_config,
@@ -1721,12 +1724,205 @@ async def settle_pending_trait_sales() -> None:
             _write_sweep_giveup_record(offer_index, row["nft_id"], buyer)
 
 
+# Trait Shop sweep (#217): backstop for the buy flow in shop_flow.py, mirrors
+# the trait-sale settlement sweep above (same giveup-journal convention).
+_SHOP_SWEEP_MAX_ATTEMPTS = 5
+# session_id -> consecutive failed settlement sweep attempts. In-memory only,
+# same rationale as _sweep_attempts: a restart just costs a stuck order a few
+# retries rather than falsely reading as "already exhausted".
+_shop_settle_attempts: dict[str, int] = {}
+
+
+def _write_shop_sweep_giveup_record(session_id: str, nft_id: str, buyer: str) -> None:
+    """Journal (ECONOMY_RECORDS_DIR) that the shop settlement sweep is no
+    longer retrying this order. The trait token is NOT lost — it is an
+    ordinary trait token sitting in `buyer`'s wallet; they can Deposit it
+    into their Closet manually later."""
+    try:
+        os.makedirs(config.ECONOMY_RECORDS_DIR, exist_ok=True)
+        path = os.path.join(config.ECONOMY_RECORDS_DIR, f"shop-settlement-giveup-{session_id}.json")
+        with open(path, "w") as f:
+            json.dump(
+                {
+                    "session_id": session_id,
+                    "nft_id": nft_id,
+                    "buyer": buyer,
+                    "attempts": _SHOP_SWEEP_MAX_ATTEMPTS,
+                    "status": "abandoned",
+                },
+                f,
+                indent=2,
+            )
+    except Exception:
+        logging.error(
+            f"failed to write shop sweep giveup record for {session_id}: {traceback.format_exc()}"
+        )
+
+
+async def _expire_shop_order(order: dict[str, Any], network: str) -> None:
+    """Expire one stale `pending_accept` Trait Shop order: cancel the orphaned
+    sell offer (best-effort — an already-gone offer is not an error, the
+    expiration alone already made it unacceptable), then issuer-burn the
+    unclaimed trait token and record the matching `supply_changes` reversal.
+
+    Fail-closed rescue: if the burn does not definitively succeed — most
+    likely because the buyer's accept actually landed moments before the
+    sweep ran, moving the token out of the issuer wallet — the order is
+    marked `accepted` instead of `expired` so the settlement pass picks it up
+    next. A token the buyer paid for must never be burned."""
+    session_id = order["session_id"]
+    offer_index = order.get("offer_index")
+    nft_id = order.get("nft_id")
+    now_ts = int(time.time())
+
+    if offer_index:
+        try:
+            await xrpl_ops.cancel_nft_offer(offer_index)
+        except Exception:
+            logging.warning(
+                f"shop expiry: offer cancel failed for {session_id}: {traceback.format_exc()}"
+            )
+
+    conn = nft_index.init_db(nft_index.index_db_path(network))
+    try:
+        if not nft_id:
+            # Nothing was ever minted for this order (e.g. it stalled before
+            # the mint completed) — nothing to burn, just close it out.
+            shop_store.update_order(conn, session_id, now_ts=now_ts, status="expired")
+            return
+
+        try:
+            burn_hash = await xrpl_ops.burn_nft(nft_id)
+        except Exception:
+            logging.error(f"shop expiry burn crashed for {session_id}: {traceback.format_exc()}")
+            burn_hash = None
+
+        if not burn_hash:
+            # Could not confirm the issuer still holds the token (most likely
+            # a landed accept) — rescue rather than risk burning a sold
+            # token. The settlement sweep retries it as an accepted order.
+            shop_store.update_order(conn, session_id, now_ts=now_ts, status="accepted")
+            return
+
+        economy_store.record_supply_change(
+            conn,
+            kind="burn",
+            edition=None,
+            body_value="",
+            body_class="",
+            trait_deltas={f"{order['slot']}|{order['value']}": -1},
+            actor="shop",
+            reason=f"shop expiry {session_id}",
+        )
+        shop_store.update_order(conn, session_id, now_ts=now_ts, status="expired")
+    finally:
+        conn.close()
+
+
+async def _settle_shop_order(order: dict[str, Any], network: str) -> None:
+    """Retry settlement (run_deposit into the buyer's Closet + the shop_count
+    pricing bump) for one `accepted` Trait Shop order. Mirrors
+    `_settle_trait_sale`: on success -> `settled`; after
+    `_SHOP_SWEEP_MAX_ATTEMPTS` consecutive failures -> journal + `failed`
+    (the token stays in the buyer's wallet for a manual Deposit, never
+    lost)."""
+    session_id = order["session_id"]
+    if _shop_settle_attempts.get(session_id, 0) >= _SHOP_SWEEP_MAX_ATTEMPTS:
+        return  # already given up + journaled on a previous pass
+    nft_id = order.get("nft_id")
+    buyer = order["buyer"]
+    now_ts = int(time.time())
+    if not nft_id:
+        return  # nothing minted; not a settleable order
+
+    conn = nft_index.init_db(nft_index.index_db_path(network))
+    try:
+        economy_store.init_economy_schema(conn)
+        deps = economy_api.build_settlement_deps(conn)
+        dep_session = economy_flow.DepositSession(owner=buyer, nft_id=nft_id)
+        try:
+            await economy_flow.run_deposit(dep_session, deps)
+            settled = dep_session.state == economy_flow.DONE
+        except Exception:
+            logging.error(
+                f"shop settlement sweep crashed for {session_id}: {traceback.format_exc()}"
+            )
+            settled = False
+    finally:
+        conn.close()
+
+    if settled:
+        app_conn = sqlite3.connect(db_path.app_db_path(network))
+        try:
+            rarity.increment_shop_count(app_conn, network, order["slot"], order["value"])
+        finally:
+            app_conn.close()
+        conn = nft_index.init_db(nft_index.index_db_path(network))
+        try:
+            shop_store.update_order(conn, session_id, now_ts=now_ts, status="settled")
+        finally:
+            conn.close()
+        _shop_settle_attempts.pop(session_id, None)
+        return
+
+    _shop_settle_attempts[session_id] = _shop_settle_attempts.get(session_id, 0) + 1
+    if _shop_settle_attempts[session_id] >= _SHOP_SWEEP_MAX_ATTEMPTS:
+        logging.warning(
+            f"shop settlement sweep giving up on {session_id} (nft {nft_id}, buyer "
+            f"{buyer}) after {_SHOP_SWEEP_MAX_ATTEMPTS} attempts"
+        )
+        _write_shop_sweep_giveup_record(session_id, nft_id, buyer)
+        conn = nft_index.init_db(nft_index.index_db_path(network))
+        try:
+            shop_store.update_order(conn, session_id, now_ts=now_ts, status="failed")
+        finally:
+            conn.close()
+
+
+async def sweep_shop_orders() -> None:
+    """Backstop for the Trait Shop buy flow (shop_flow.py): expire stale
+    unaccepted offers (burn back + supply reversal) and retry settlement for
+    accepted orders that stalled after the buyer signed. Runs on the trait
+    economy network (config.ECONOMY_NETWORK), same as the trait-sale
+    settlement sweep."""
+    network = config.ECONOMY_NETWORK
+    conn = nft_index.init_db(nft_index.index_db_path(network))
+    try:
+        shop_store.ensure_schema(conn)
+        cutoff = int(time.time()) - config.SHOP_OFFER_TTL_SECONDS
+        expiring = shop_store.orders_pending_expiry(conn, cutoff)
+    finally:
+        conn.close()
+
+    for order in expiring:
+        try:
+            await _expire_shop_order(order, network)
+        except Exception:
+            logging.error(
+                f"shop expiry sweep crashed for {order['session_id']}: {traceback.format_exc()}"
+            )
+
+    conn = nft_index.init_db(nft_index.index_db_path(network))
+    try:
+        shop_store.ensure_schema(conn)
+        unsettled = shop_store.orders_unsettled(conn)
+    finally:
+        conn.close()
+
+    for order in unsettled:
+        await _settle_shop_order(order, network)
+
+
 async def _settlement_sweep_loop() -> None:
     while True:
         try:
             await settle_pending_trait_sales()
         except Exception:
             logging.error(f"settlement sweep loop crashed: {traceback.format_exc()}")
+        try:
+            await sweep_shop_orders()
+        except Exception:
+            logging.error(f"shop sweep loop crashed: {traceback.format_exc()}")
         await asyncio.sleep(_SWEEP_PERIOD_SECONDS)
 
 
