@@ -27,7 +27,7 @@ from dotenv import load_dotenv  # noqa: E402
 
 load_dotenv()
 
-from lfg_core import config, rarity  # noqa: E402
+from lfg_core import config, rarity, shop  # noqa: E402
 from lfg_core.db_path import app_db_path  # noqa: E402
 
 _LAYER_EXTS = (".png", ".gif", ".mp4")
@@ -143,6 +143,10 @@ def fetch_rows(
                FROM trait_rarity WHERE network=?""",
             (network,),
         ).fetchall()
+        overrides = shop.get_overrides(conn, network)
+        shop_prices = {
+            (cat, trait): shop.quote(conn, network, cat, trait) for _, cat, trait, *_ in raw
+        }
     finally:
         conn.close()
 
@@ -163,6 +167,7 @@ def fetch_rows(
         categories.add(cat)
         key = (b, cat)
         total = totals[key]
+        ov = overrides.get((cat, trait), {})
         rows.append(
             {
                 "body": b,
@@ -180,6 +185,9 @@ def fetch_rows(
                 "boost_step_hours": bs,
                 "boost_started_at": bsa,
                 "has_image": resolve_image(b, cat, trait) is not None,
+                "shop_price": shop_prices.get((cat, trait)),
+                "shop_excluded": bool(ov.get("excluded", False)),
+                "shop_price_override": ov.get("price_override"),
             }
         )
 
@@ -376,6 +384,60 @@ def apply_floor(
             raise ValueError(f"No trait_rarity row for {network}/{body}/{category}/{trait}")
         return row
     return {"network": network, "scope": "global", "floor": floor}
+
+
+_NOT_GIVEN: object = object()
+_MAX_PRICE_OVERRIDE = 1_000_000  # absurd-price guard; well above SHOP_MAX_BRIX
+
+
+def apply_shop_override(
+    network: str,
+    slot: str,
+    value: str,
+    *,
+    excluded: bool | None = None,
+    price_override: int | None = _NOT_GIVEN,  # type: ignore[assignment]
+    db_path: str | None = None,
+) -> dict:
+    """Write through shop.set_override; audit and return the derived shop
+    state for this (slot, value). Raises ValueError if no trait_rarity row
+    exists for (network, slot, value) — mirrors the rarity mutations' 404."""
+    dbp = db_path or app_db_path(network)
+    conn = sqlite3.connect(dbp)
+    try:
+        rarity.ensure_schema(conn)
+        exists = conn.execute(
+            "SELECT 1 FROM trait_rarity WHERE network=? AND category=? AND trait=? LIMIT 1",
+            (network, slot, value),
+        ).fetchone()
+        if exists is None:
+            raise ValueError(f"No trait_rarity row for {network}/{slot}/{value}")
+        empty = {"excluded": False, "price_override": None}
+        before = shop.get_overrides(conn, network).get((slot, value), empty)
+        kwargs: dict = {}
+        if price_override is not _NOT_GIVEN:
+            kwargs["price_override"] = price_override
+        shop.set_override(conn, network, slot, value, excluded=excluded, **kwargs)
+        after = shop.get_overrides(conn, network).get((slot, value), empty)
+        price = shop.quote(conn, network, slot, value)
+    finally:
+        conn.close()
+    audit(
+        network,
+        "shop-override",
+        "*",
+        slot,
+        value,
+        f"excluded: {before['excluded']} -> {after['excluded']}; "
+        f"price_override: {before['price_override']} -> {after['price_override']}",
+    )
+    return {
+        "slot": slot,
+        "value": value,
+        "shop_excluded": after["excluded"],
+        "shop_price_override": after["price_override"],
+        "shop_price": price,
+    }
 
 
 def sync_layers(network: str, *, db_path: str | None = None) -> int:
@@ -837,6 +899,49 @@ async def handle_floor(request: web.Request) -> web.Response:
     return web.json_response(row)
 
 
+async def handle_shop_override(request: web.Request) -> web.Response:
+    data = await _json(request)
+    _require(data, "network", "slot", "value")
+    excluded = data.get("excluded")
+    if excluded is not None and not isinstance(excluded, bool):
+        raise _BadInput("excluded must be a boolean")
+    kwargs: dict = {}
+    if "price_override" in data:
+        val = data["price_override"]
+        if val is None:
+            kwargs["price_override"] = None
+        else:
+            if isinstance(val, bool) or not isinstance(val, (int, float)):
+                raise _BadInput("invalid price_override")
+            if not float(val).is_integer():
+                raise _BadInput("price_override must be a whole number")
+            if not (0 <= val <= _MAX_PRICE_OVERRIDE):
+                raise _BadInput(f"price_override out of range [0, {_MAX_PRICE_OVERRIDE}]")
+            kwargs["price_override"] = int(val)
+    result = apply_shop_override(
+        data["network"], data["slot"], data["value"], excluded=excluded, **kwargs
+    )
+    return web.json_response(result)
+
+
+async def handle_shop_overrides(request: web.Request) -> web.Response:
+    net = request.query.get("network") or request.app[DEFAULT_NETWORK]
+    conn = sqlite3.connect(app_db_path(net))
+    try:
+        overrides = shop.get_overrides(conn, net)
+    finally:
+        conn.close()
+    return web.json_response(
+        {
+            "network": net,
+            "overrides": [
+                {"slot": slot, "value": value, **fields}
+                for (slot, value), fields in sorted(overrides.items())
+            ],
+        }
+    )
+
+
 async def handle_sync(request: web.Request) -> web.Response:
     data = await _json(request)
     _require(data, "network")
@@ -867,6 +972,8 @@ def create_app(default_network: str = "mainnet") -> web.Application:
     app.router.add_post("/api/boost/reschedule", handle_boost_reschedule)
     app.router.add_post("/api/floor", handle_floor)
     app.router.add_post("/api/sync", handle_sync)
+    app.router.add_post("/api/shop/override", handle_shop_override)
+    app.router.add_get("/api/shop/overrides", handle_shop_overrides)
     return app
 
 

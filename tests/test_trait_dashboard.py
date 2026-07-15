@@ -515,6 +515,8 @@ def test_all_routes_registered():
         "/api/boost/reschedule",
         "/api/floor",
         "/api/sync",
+        "/api/shop/override",
+        "/api/shop/overrides",
     ):
         assert p in paths, p
 
@@ -635,5 +637,149 @@ def test_reschedule_rejects_finished_boost(tmp_path, monkeypatch):
             )
             assert r.status == 404
             assert "finished" in (await r.json())["error"]
+
+    _run(body())
+
+
+# --- #217: shop panel -------------------------------------------------------
+
+
+def test_traits_payload_includes_shop_fields(tmp_path, monkeypatch):
+    from scripts import trait_dashboard as td
+
+    db = str(tmp_path / "m.db")
+    _seed(db, "mainnet", [("ape", "Eyes", "Laser", 3, 1)])
+    monkeypatch.setattr(td, "app_db_path", lambda net: db)
+
+    row = td.fetch_rows("mainnet", db_path=db)["rows"][0]
+    assert "shop_price" in row
+    assert "shop_excluded" in row
+    assert "shop_price_override" in row
+    assert row["shop_excluded"] is False
+    assert row["shop_price_override"] is None
+    assert isinstance(row["shop_price"], int)
+
+
+def test_shop_override_excludes_and_audits(tmp_path, monkeypatch):
+    from scripts import trait_dashboard as td
+
+    db = str(tmp_path / "m.db")
+    _seed(db, "mainnet", [("ape", "Eyes", "Laser", 3, 1)])
+    monkeypatch.setattr(td, "app_db_path", lambda net: db)
+    monkeypatch.chdir(tmp_path)
+    audit_log = tmp_path / "reports" / "audit.log"
+    monkeypatch.setattr(td, "AUDIT_LOG", str(audit_log))
+
+    async def body():
+        from aiohttp.test_utils import TestClient, TestServer
+
+        async with TestClient(TestServer(td.create_app())) as c:
+            r = await c.post(
+                "/api/shop/override",
+                json={
+                    "network": "mainnet",
+                    "slot": "Eyes",
+                    "value": "Laser",
+                    "excluded": True,
+                },
+            )
+            assert r.status == 200
+            data = await r.json()
+            assert data["shop_excluded"] is True
+            assert data["shop_price"] is None
+
+            r2 = await c.get("/api/shop/overrides?network=mainnet")
+            assert r2.status == 200
+            data2 = await r2.json()
+            assert data2["overrides"][0]["slot"] == "Eyes"
+            assert data2["overrides"][0]["value"] == "Laser"
+            assert data2["overrides"][0]["excluded"] is True
+
+    _run(body())
+    log = audit_log.read_text()
+    assert "Laser" in log
+    assert "shop" in log.lower()
+
+
+def test_shop_override_price_roundtrip_and_clear(tmp_path, monkeypatch):
+    from scripts import trait_dashboard as td
+
+    db = str(tmp_path / "m.db")
+    _seed(db, "mainnet", [("ape", "Eyes", "Laser", 3, 1)])
+    monkeypatch.setattr(td, "app_db_path", lambda net: db)
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setattr(td, "AUDIT_LOG", str(tmp_path / "reports" / "audit.log"))
+
+    async def body():
+        from aiohttp.test_utils import TestClient, TestServer
+
+        async with TestClient(TestServer(td.create_app())) as c:
+            r = await c.post(
+                "/api/shop/override",
+                json={
+                    "network": "mainnet",
+                    "slot": "Eyes",
+                    "value": "Laser",
+                    "price_override": 250,
+                },
+            )
+            assert r.status == 200
+            data = await r.json()
+            assert data["shop_price_override"] == 250
+            assert data["shop_price"] == 250
+
+            # clear with null
+            r2 = await c.post(
+                "/api/shop/override",
+                json={
+                    "network": "mainnet",
+                    "slot": "Eyes",
+                    "value": "Laser",
+                    "price_override": None,
+                },
+            )
+            assert r2.status == 200
+            data2 = await r2.json()
+            assert data2["shop_price_override"] is None
+
+    _run(body())
+
+
+def test_shop_override_validation(tmp_path, monkeypatch):
+    from scripts import trait_dashboard as td
+
+    db = str(tmp_path / "m.db")
+    _seed(db, "mainnet", [("ape", "Eyes", "Laser", 3, 1)])
+    monkeypatch.setattr(td, "app_db_path", lambda net: db)
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setattr(td, "AUDIT_LOG", str(tmp_path / "reports" / "audit.log"))
+
+    async def body():
+        from aiohttp.test_utils import TestClient, TestServer
+
+        async with TestClient(TestServer(td.create_app())) as c:
+            # negative price -> 400
+            r = await c.post(
+                "/api/shop/override",
+                json={"network": "mainnet", "slot": "Eyes", "value": "Laser", "price_override": -5},
+            )
+            assert r.status == 400
+            # absurdly large price -> 400
+            r2 = await c.post(
+                "/api/shop/override",
+                json={
+                    "network": "mainnet",
+                    "slot": "Eyes",
+                    "value": "Laser",
+                    "price_override": 10_000_000,
+                },
+            )
+            assert r2.status == 400
+            # unknown trait -> 404
+            r3 = await c.post(
+                "/api/shop/override",
+                json={"network": "mainnet", "slot": "Eyes", "value": "Nope", "excluded": True},
+            )
+            assert r3.status == 404
 
     _run(body())
