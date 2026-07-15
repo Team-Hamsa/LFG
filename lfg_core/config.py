@@ -116,6 +116,10 @@ MINT_PRICE_XRP = os.getenv("MINT_PRICE_XRP", "10")
 # caps how many a single bulk job may request.
 MAX_COLLECTION_SIZE = int(os.getenv("MAX_COLLECTION_SIZE", "10000"))
 BULK_MINT_MAX = int(os.getenv("BULK_MINT_MAX", "10"))
+if MAX_COLLECTION_SIZE < 1:
+    raise ValueError(f"MAX_COLLECTION_SIZE must be >= 1, got {MAX_COLLECTION_SIZE}")
+if BULK_MINT_MAX < 1:
+    raise ValueError(f"BULK_MINT_MAX must be >= 1, got {BULK_MINT_MAX}")
 
 # BunnyCDN
 BUNNY_CDN_ACCESS_KEY = _require("BUNNY_CDN_ACCESS_KEY")

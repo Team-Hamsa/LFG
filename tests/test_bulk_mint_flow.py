@@ -127,24 +127,78 @@ def test_fulfillment_all_units_offered(monkeypatch, tmp_path):
     assert all(u.state == bulk_mint_flow.OFFERED for u in j.units)
 
 
-def test_offer_fail_marks_unit_failed_but_job_completes(monkeypatch, tmp_path):
+def test_offer_permanently_failing_leaves_job_fulfilling_not_done(monkeypatch, tmp_path):
+    """A unit that mints but whose offer permanently fails (including the
+    final re-offer pass in run_bulk_mint_job) must NOT let the job reach the
+    terminal DONE state -- that would strand a minted-but-never-offered NFT
+    forever (DONE is not resumed by load_all_resumable). The job must stay
+    FULFILLING (resumable) with the unit still MINTED, and mint_one_unit must
+    never be called again for that unit (no re-mint)."""
     monkeypatch.setattr(bulk_mint_flow, "JOBS_DIR", str(tmp_path))
     monkeypatch.setattr(bulk_mint_flow.supply, "current_supply", lambda net: 0)
     monkeypatch.setattr(
         bulk_mint_flow.mint_flow, "_allocate_nft_number", _async_counter(start=4000)
     )
-    # mint ok but offer None -> minted-but-offer-failed
-    monkeypatch.setattr(bulk_mint_flow.mint_flow, "mint_one_unit", _fake_mint_offer_fail())
+    mint_spy = _fake_mint_offer_fail()
+    mint_calls = {"n": 0}
+
+    async def _spy(*a, **kw):
+        mint_calls["n"] += 1
+        return await mint_spy(*a, **kw)
+
+    monkeypatch.setattr(bulk_mint_flow.mint_flow, "mint_one_unit", _spy)
     monkeypatch.setattr(bulk_mint_flow.db_path, "app_db_path", lambda net: str(tmp_path / "app.db"))
+
+    async def _always_fail_offer(*a, **kw):
+        return None
+
+    monkeypatch.setattr(bulk_mint_flow.xrpl_ops, "create_nft_offer", _always_fail_offer)
+
     j = _job(2)
     monkeypatch.setattr(bulk_mint_flow.supply, "remaining_headroom", lambda net: 100)
     j.clamp_to_headroom()
     j.state = bulk_mint_flow.PAID
     asyncio.run(bulk_mint_flow.run_bulk_mint_job(j))
-    assert j.state == bulk_mint_flow.DONE  # job still reaches DONE
+
+    assert j.state == bulk_mint_flow.FULFILLING  # NOT DONE -- resumable
     assert all(u.nft_id is not None for u in j.units)
+    assert all(u.state == bulk_mint_flow.MINTED for u in j.units)
+    # Each unit minted exactly once -- never re-minted while offer-retrying.
+    assert mint_calls["n"] == len(j.units)
     # NFT was delivered (minted) even though offer failed -> no credit should be created
     assert mint_credits.get_credits(str(tmp_path / "app.db"), "u1", j.network) == 0
+
+
+def test_offer_fail_then_succeed_ends_done_with_unit_offered(monkeypatch, tmp_path):
+    """A unit whose offer fails during the main loop but succeeds on the
+    final re-offer pass ends the job DONE with the unit OFFERED."""
+    monkeypatch.setattr(bulk_mint_flow, "JOBS_DIR", str(tmp_path))
+    monkeypatch.setattr(bulk_mint_flow.supply, "current_supply", lambda net: 0)
+    monkeypatch.setattr(
+        bulk_mint_flow.mint_flow, "_allocate_nft_number", _async_counter(start=4000)
+    )
+    monkeypatch.setattr(bulk_mint_flow.mint_flow, "mint_one_unit", _fake_mint_offer_fail())
+    monkeypatch.setattr(bulk_mint_flow.db_path, "app_db_path", lambda net: str(tmp_path / "app.db"))
+
+    offer_calls = {"n": 0}
+
+    async def _fail_once_then_succeed(*a, **kw):
+        offer_calls["n"] += 1
+        if offer_calls["n"] <= 1:
+            return None
+        return "OFFER-RETRY"
+
+    monkeypatch.setattr(bulk_mint_flow.xrpl_ops, "create_nft_offer", _fail_once_then_succeed)
+
+    j = _job(1)
+    monkeypatch.setattr(bulk_mint_flow.supply, "remaining_headroom", lambda net: 100)
+    j.clamp_to_headroom()
+    j.state = bulk_mint_flow.PAID
+    asyncio.run(bulk_mint_flow.run_bulk_mint_job(j))
+
+    assert j.state == bulk_mint_flow.DONE
+    assert j.units[0].state == bulk_mint_flow.OFFERED
+    assert j.units[0].offer_id == "OFFER-RETRY"
 
 
 def test_prepare_payment_multiplies_price_xrp(monkeypatch):

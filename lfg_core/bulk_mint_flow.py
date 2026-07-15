@@ -377,7 +377,33 @@ async def run_bulk_mint_job(job: BulkMintJob) -> None:
                 await _fulfill_unit(job, unit)
             persist(job)
 
-        job.state = DONE
+        # Bounded final re-offer pass: a unit that minted but never reached
+        # OFFERED (transient offer failure during the loop above) gets a
+        # last chance to self-heal within this same run before we decide the
+        # job's terminal state.
+        for unit in job.units:
+            if unit.state != MINTED:
+                continue
+            for _ in range(_UNIT_MAX_ATTEMPTS):
+                await _ensure_offer(job, unit)
+                persist(job)
+                if unit.state == OFFERED:
+                    break
+
+        # Completion is conditional on every unit having reached a resolved
+        # state (OFFERED or UNIT_FAILED). A unit stuck at MINTED means the
+        # NFT exists on-chain but was never offered to the user -- DONE is
+        # terminal and load_all_resumable only resumes PAID/FULFILLING, so
+        # marking DONE here would strand that NFT forever. Instead stay
+        # FULFILLING (non-terminal, resumable): the next restart's startup
+        # sweep retries _ensure_offer on the still-MINTED unit, never
+        # re-minting. Tradeoff: the active-job lock holds until it clears --
+        # rare (offer failure right after a successful mint is uncommon), and
+        # the NFT itself is safe (minted + journaled), just pending an offer.
+        if all(u.state in (OFFERED, UNIT_FAILED) for u in job.units):
+            job.state = DONE
+        else:
+            job.state = FULFILLING
         persist(job)
     except asyncio.CancelledError:
         raise

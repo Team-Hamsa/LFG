@@ -21,7 +21,13 @@ def current_supply(network: str) -> int:
     path = nft_index.index_db_path(network)
     conn = sqlite3.connect(path)
     try:
-        row = conn.execute("SELECT COUNT(*) FROM onchain_nfts WHERE is_burned=0").fetchone()
+        try:
+            row = conn.execute("SELECT COUNT(*) FROM onchain_nfts WHERE is_burned=0").fetchone()
+        except sqlite3.OperationalError:
+            # Unbuilt index (fresh checkout / pre-backfill deploy): no
+            # onchain_nfts table yet. Treat as zero recorded supply -> full
+            # headroom; the request-time clamp still bounds any single job.
+            return 0
         return int(row[0]) if row else 0
     finally:
         conn.close()

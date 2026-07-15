@@ -210,3 +210,38 @@ def test_mint_one_unit_calls_on_state_in_order(monkeypatch, _mint_mocks):
     )
     assert res.error is None
     assert states == [mint_flow.MINTING, mint_flow.CREATING_OFFER]
+
+
+def test_mint_one_unit_calls_on_mint_before_creating_offer_state(monkeypatch, _mint_mocks):
+    calls: list[tuple[int, str, str | None]] = []
+    order: list[str] = []
+
+    async def _on_mint(nft_number, nft_id, image_url):
+        calls.append((nft_number, nft_id, image_url))
+        order.append("on_mint")
+
+    def _on_state(state):
+        order.append(state)
+
+    res = _run(
+        mint_flow.mint_one_unit(
+            discord_id="u1",
+            wallet_address="rUSER",
+            platform="discord",
+            push_user_token=None,
+            return_url=None,
+            nft_number=4004,
+            session_tag="job1:4",
+            on_state=_on_state,
+            on_mint=_on_mint,
+        )
+    )
+    assert res.error is None
+    assert len(calls) == 1
+    nft_number, nft_id, image_url = calls[0]
+    assert nft_number == 4004
+    assert nft_id == res.nft_id == "NFTID1"
+    assert image_url == res.image_url
+    # on_mint must fire before the CREATING_OFFER state -- i.e. the unit is
+    # persisted as MINTED before any offer/XUMM steps run.
+    assert order == [mint_flow.MINTING, "on_mint", mint_flow.CREATING_OFFER]

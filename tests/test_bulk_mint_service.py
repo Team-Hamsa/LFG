@@ -106,6 +106,25 @@ def test_bulk_start_rejects_invalid_quantity(dev_auth):
     assert _json.loads(resp.body.decode())["error"] == "invalid_quantity"
 
 
+@pytest.mark.parametrize(
+    "bad_body",
+    [
+        {"quantity": True},
+        {"quantity": 1.5},
+        {"quantity": "3"},
+        {},
+    ],
+    ids=["bool-true", "float", "string", "missing"],
+)
+def test_bulk_start_rejects_non_int_quantity(dev_auth, bad_body):
+    req = _post_request("/api/mint/bulk", bad_body)
+    resp = _run(server.handle_bulk_mint_start(req))
+    assert resp.status == 400
+    import json as _json
+
+    assert _json.loads(resp.body.decode())["error"] == "invalid_quantity"
+
+
 def test_bulk_start_rejects_when_collection_full(dev_auth, monkeypatch):
     monkeypatch.setattr(bulk_mint_flow.supply, "remaining_headroom", lambda net: 0)
     req = _post_request("/api/mint/bulk", {"quantity": 5})
@@ -227,6 +246,31 @@ def test_bulk_start_prepare_payment_failure_frees_slot(dev_auth, monkeypatch):
 
 async def _noop():
     return None
+
+
+def test_bulk_start_prepare_payment_timeout_frees_slot(dev_auth, monkeypatch):
+    """A hung XUMM call must not hang the request forever: prepare_payment is
+    bounded (mirrors the single-mint path's asyncio.wait_for(..., timeout=8)).
+    On timeout the job is marked FAILED (frees the slot) and the request
+    returns payment_setup_failed, same as any other prepare_payment error."""
+
+    async def _hang(self):
+        raise asyncio.TimeoutError()
+
+    monkeypatch.setattr(bulk_mint_flow.BulkMintJob, "prepare_payment", _hang)
+
+    req = _post_request("/api/mint/bulk", {"quantity": 1})
+    resp = _run(server.handle_bulk_mint_start(req))
+    assert resp.status == 500
+    import json as _json
+
+    assert _json.loads(resp.body.decode())["error"] == "payment_setup_failed"
+
+    # Slot must be free: a follow-up start must not 409.
+    monkeypatch.setattr(bulk_mint_flow.BulkMintJob, "prepare_payment", lambda self: _noop())
+    req2 = _post_request("/api/mint/bulk", {"quantity": 1})
+    resp2 = _run(server.handle_bulk_mint_start(req2))
+    assert resp2.status == 200
 
 
 def test_bulk_cancel_route_registered():

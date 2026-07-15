@@ -2524,10 +2524,13 @@ async def handle_bulk_mint_start(request):
         body = await request.json()
     except Exception:
         body = {}
-    try:
-        qty = int(body.get("quantity", 0))
-    except (TypeError, ValueError):
-        qty = 0
+    raw_qty = body.get("quantity")
+    # Reject bool/float/string quantities: int(True) == 1, int(1.5) == 1, and
+    # int("3") == 3 would all silently coerce into a "valid" request. Only a
+    # real (non-bool) int is accepted.
+    if not isinstance(raw_qty, int) or isinstance(raw_qty, bool):
+        return web.json_response({"error": "invalid_quantity"}, status=400)
+    qty = raw_qty
 
     return_url = await _request_return_url(request)
     push_user_token = await _push_token(user)
@@ -2560,12 +2563,15 @@ async def handle_bulk_mint_start(request):
     bulk_sessions[job.id] = job
 
     try:
-        await job.prepare_payment()
+        await asyncio.wait_for(job.prepare_payment(), timeout=8)
     except Exception as e:
         # Never leave a non-terminal job with no task in bulk_sessions — that
         # would permanently wedge this user's bulk slot (every future POST
         # would 409 "already in progress" until a service restart). Mark it
         # terminal so _prune_sessions evicts it and _active_session skips it.
+        # Covers both a hung XUMM call (asyncio.TimeoutError) and any other
+        # failure -- bulk has no ensure_payment_fallback like single-mint, so
+        # marking FAILED and letting the user retry is the correct behavior.
         logging.error(f"bulk job {job.id} prepare_payment failed: {e}")
         job.state = bulk_mint_flow.FAILED
         job.error = str(e)

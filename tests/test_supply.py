@@ -55,3 +55,14 @@ def test_headroom_never_negative(tmp_path, monkeypatch):
     monkeypatch.setattr(supply.nft_index, "index_db_path", lambda net: str(db))
     monkeypatch.setattr(config, "MAX_COLLECTION_SIZE", 10000)
     assert supply.remaining_headroom("testnet") == 0
+
+
+def test_current_supply_missing_table_returns_zero(tmp_path, monkeypatch):
+    # Fresh checkout (CI) or a fresh deploy before the listener/backfill
+    # builds the index: the db file exists (or not) but has no onchain_nfts
+    # table yet. Must NOT raise -- treat as zero recorded supply.
+    db = tmp_path / "onchain_testnet.db"
+    conn = sqlite3.connect(str(db))
+    conn.close()  # empty db file, no tables at all
+    monkeypatch.setattr(supply.nft_index, "index_db_path", lambda net: str(db))
+    assert supply.current_supply("testnet") == 0

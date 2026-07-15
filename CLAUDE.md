@@ -817,14 +817,25 @@ the single-mint machinery per unit.
   single-mint path, #215 refactor) `quantity` times, persisting the whole job
   to `bulk_mint_jobs/<id>.json` after every unit
   (`bulk_mint_flow.persist`/`_record_path`, atomic tmp-file + `os.replace`).
-  A unit that mints but whose offer creation fails is marked `failed`
-  (delivered-pending-offer) rather than re-minted.
+  A unit that mints but whose offer creation fails stays `minted`
+  (delivered-pending-offer, NEVER re-minted) and is re-offered
+  (`_ensure_offer`, re-offer-only, mint-free) on the next pass — either the
+  bounded final re-offer pass at the end of the same run, or on resume after
+  a restart.
 - **Startup resume:** `lfg_service.app.resume_bulk_jobs`, wired via
   `app.on_startup`, calls `bulk_mint_flow.load_all_resumable()` to re-attach
   every job left in `paid`/`fulfilling` state and re-launches
   `run_bulk_mint_job` for each — a crash/restart mid-job resumes from the
   last-persisted unit with no double-charge (payment already confirmed) or
-  double-mint (`OFFERED`/`failed` units are skipped on resume).
+  double-mint: `OFFERED`/`failed` units are skipped, and a `minted` unit is
+  re-offered (never re-minted).
+- **Completion is conditional, not unconditional:** a job only reaches the
+  terminal `done` state once every unit is `offered` or `failed`. If a unit
+  is still `minted` after the bounded final re-offer pass (offer creation
+  keeps failing), the job stays `fulfilling` — non-terminal and resumable —
+  rather than `done`, so the startup sweep keeps retrying `_ensure_offer` on
+  restart instead of stranding a minted-but-never-offered NFT (`done` is
+  terminal and is never picked up by `load_all_resumable`).
 - **Quantity clamping:** `BulkMintJob.clamp_to_headroom()` sets
   `quantity = min(requested_qty, BULK_MINT_MAX, headroom)`, where headroom =
   `MAX_COLLECTION_SIZE − current_supply` (`lfg_core/supply.py`, reading live
