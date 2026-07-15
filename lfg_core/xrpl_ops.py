@@ -212,9 +212,14 @@ async def create_nft_offer(
     amount: Any = "0",
     platform: str = memos.PLATFORM_BACKEND,
     campaign: str | None = None,
+    expiration: int | None = None,
+    action: str = memos.ACTION_CREATE_OFFER,
 ) -> str | None:
     """Create a sell offer transferring the NFT to destination; returns offer ID
-    or None. amount may be an XRP-drops string or an IssuedCurrencyAmount."""
+    or None. amount may be an XRP-drops string or an IssuedCurrencyAmount.
+    expiration is a ripple-epoch timestamp; omitted from serialization when
+    None. action lets callers (e.g. the trait shop) stamp non-default memo
+    provenance."""
     try:
         client = JsonRpcClient(config.JSON_RPC_URL)
         wallet = Wallet.from_seed(config.SEED)
@@ -225,10 +230,9 @@ async def create_nft_offer(
             amount=amount,
             nftoken_id=nft_id,
             flags=NFTokenCreateOfferFlag.TF_SELL_NFTOKEN,
+            expiration=expiration,
             source_tag=config.SOURCE_TAG,
-            memos=memos.build_memo_models(
-                memos.INITIATOR_BACKEND, platform, memos.ACTION_CREATE_OFFER, campaign
-            ),
+            memos=memos.build_memo_models(memos.INITIATOR_BACKEND, platform, action, campaign),
         )
 
         response = await asyncio.to_thread(submit_and_wait, offer, client, wallet)
