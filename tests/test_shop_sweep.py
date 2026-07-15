@@ -215,6 +215,62 @@ def test_expiry_closes_cancels_burns_and_writes_reversal(onchain_env, monkeypatc
     assert reason == "shop expiry S1"
 
 
+def test_expiry_contains_reversal_failure_journals_and_closes_expired(
+    onchain_env, monkeypatch, tmp_path
+):
+    conn = _reopen(onchain_env)
+    old_ts = int(time.time()) - config.SHOP_OFFER_TTL_SECONDS - 60
+    _seed_order(conn, "S1B", status="pending_accept", created_ts=old_ts)
+    conn.close()
+
+    burns = []
+
+    async def fake_cancel(offer_index, **kw):
+        return "CANCELHASH"
+
+    async def fake_burn(nft_id, *a, **kw):
+        burns.append(nft_id)
+        return "BURNHASH"
+
+    def fake_record_supply_change(*a, **kw):
+        raise sqlite3.OperationalError("database is locked")
+
+    records_dir = str(tmp_path / "econ_records")
+    monkeypatch.setattr(server.xrpl_ops, "cancel_nft_offer", fake_cancel)
+    monkeypatch.setattr(server.xrpl_ops, "burn_nft", fake_burn)
+    monkeypatch.setattr(server.economy_store, "record_supply_change", fake_record_supply_change)
+    monkeypatch.setattr(server.config, "ECONOMY_RECORDS_DIR", records_dir)
+
+    _run(server.sweep_shop_orders())
+
+    assert burns == [TRAIT1]
+
+    conn = _reopen(onchain_env)
+    order = shop_store.get_order(conn, "S1B")
+    assert order["status"] == "expired"
+    rows = conn.execute("SELECT * FROM supply_changes").fetchall()
+    assert rows == []
+    conn.close()
+
+    journal_path = os.path.join(records_dir, "shop-expiry-reversal-giveup-S1B.json")
+    assert os.path.exists(journal_path)
+    with open(journal_path) as f:
+        record = json.load(f)
+    assert record["slot"] == "Hat"
+    assert record["value"] == "Wizard Hat"
+    assert record["delta"] == -1
+    assert record["session_id"] == "S1B"
+
+    # A second sweep pass must not re-burn or re-touch the now-`expired` order.
+    burns.clear()
+    _run(server.sweep_shop_orders())
+    assert burns == []
+    conn = _reopen(onchain_env)
+    order = shop_store.get_order(conn, "S1B")
+    assert order["status"] == "expired"
+    conn.close()
+
+
 def test_expiry_rescues_landed_accept_instead_of_burning(onchain_env, monkeypatch):
     conn = _reopen(onchain_env)
     old_ts = int(time.time()) - config.SHOP_OFFER_TTL_SECONDS - 60

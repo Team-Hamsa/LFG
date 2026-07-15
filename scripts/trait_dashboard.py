@@ -577,7 +577,7 @@ INDEX_HTML = """<!doctype html>
   .shop .price.overridden { color:var(--accent); font-weight:600; }
   .shop .excl-chip { border-radius:10px; padding:1px 6px; cursor:pointer; border:1px solid var(--line);
                       background:transparent; font-size:11px; }
-  .shop .excl-chip.active { background:#c0392b; color:#fff; border-color:#c0392b; }
+  .shop .excl-chip.active { background:var(--off); color:#fff; border-color:var(--off); }
   .shop input.price-ov { width:64px; font-size:12px; padding:2px 4px; }
   table.list { width:100%; border-collapse:collapse; }
   table.list th, table.list td { padding:6px 8px; border-bottom:1px solid var(--line);

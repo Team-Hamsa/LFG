@@ -2012,6 +2012,41 @@ def _write_shop_sweep_giveup_record(session_id: str, nft_id: str, buyer: str) ->
         )
 
 
+def _write_shop_expiry_reversal_giveup_record(
+    session_id: str, slot: str, value: str, delta: int, reason: str
+) -> None:
+    """Journal (ECONOMY_RECORDS_DIR) an intended `supply_changes` reversal row
+    that failed to write after a successful expiry burn. The burn is real and
+    irreversible — the order is still closed `expired` so the sweep never
+    re-touches it — but the -1 supply row itself never landed, so an admin
+    must re-apply it manually from this record to keep the conservation
+    ledger accurate."""
+    try:
+        os.makedirs(config.ECONOMY_RECORDS_DIR, exist_ok=True)
+        path = os.path.join(
+            config.ECONOMY_RECORDS_DIR, f"shop-expiry-reversal-giveup-{session_id}.json"
+        )
+        with open(path, "w") as f:
+            json.dump(
+                {
+                    "session_id": session_id,
+                    "kind": "burn",
+                    "slot": slot,
+                    "value": value,
+                    "delta": delta,
+                    "reason": reason,
+                    "status": "needs_admin_reapply",
+                },
+                f,
+                indent=2,
+            )
+    except Exception:
+        logging.error(
+            f"failed to write shop expiry reversal giveup record for {session_id}: "
+            f"{traceback.format_exc()}"
+        )
+
+
 async def _expire_shop_order(order: dict[str, Any], network: str) -> None:
     """Expire one stale `pending_accept` Trait Shop order: cancel the orphaned
     sell offer (best-effort — an already-gone offer is not an error, the
@@ -2058,16 +2093,31 @@ async def _expire_shop_order(order: dict[str, Any], network: str) -> None:
             shop_store.update_order(conn, session_id, now_ts=now_ts, status="accepted")
             return
 
-        economy_store.record_supply_change(
-            conn,
-            kind="burn",
-            edition=None,
-            body_value="",
-            body_class="",
-            trait_deltas={f"{order['slot']}|{order['value']}": -1},
-            actor="shop",
-            reason=f"shop expiry {session_id}",
-        )
+        reason = f"shop expiry {session_id}"
+        try:
+            economy_store.record_supply_change(
+                conn,
+                kind="burn",
+                edition=None,
+                body_value="",
+                body_class="",
+                trait_deltas={f"{order['slot']}|{order['value']}": -1},
+                actor="shop",
+                reason=reason,
+            )
+        except Exception:
+            logging.exception(
+                f"shop expiry {session_id}: burn succeeded (nft_id={nft_id}) but the "
+                f"supply reversal row failed to write for slot={order.get('slot')} "
+                f"value={order.get('value')} — ledger and supply mirror are now out of "
+                "sync; journaling for admin re-apply"
+            )
+            _write_shop_expiry_reversal_giveup_record(
+                session_id, order.get("slot", ""), order.get("value", ""), -1, reason
+            )
+        # The token is burned regardless of whether the reversal row landed —
+        # the order must never be re-swept (a second burn attempt would find
+        # nothing and the rescue rule would misroute it to `accepted`).
         shop_store.update_order(conn, session_id, now_ts=now_ts, status="expired")
     finally:
         conn.close()
