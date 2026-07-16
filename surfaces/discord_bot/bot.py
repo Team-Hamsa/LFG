@@ -82,13 +82,49 @@ async def setup_hook() -> None:
     _events_task = asyncio.create_task(run_event_loop(svc, _announce, _dm))
 
 
+# Discord rejects a bulk command overwrite that drops an app's Entry Point
+# command (apps with an Activity have one). discord.py <=2.7 doesn't model
+# type-4 (PRIMARY_ENTRY_POINT) commands, so tree.sync() always omits it (#236).
+_ENTRY_POINT_ERROR_CODE = 50240
+_ENTRY_POINT_COMMAND_TYPE = 4
+
+
+async def _sync_global_including_entry_point(
+    command_tree: "discord.app_commands.CommandTree[Any]",
+) -> None:
+    """Re-run the global bulk upsert with the app's existing Entry Point
+    command(s) appended, since tree.sync() can't include them itself."""
+    client = command_tree.client
+    app_id = client.application_id
+    if app_id is None:
+        raise discord.app_commands.MissingApplicationID
+    registered = await client.http.get_global_commands(app_id)
+    entry_points = [dict(cmd) for cmd in registered if cmd.get("type") == _ENTRY_POINT_COMMAND_TYPE]
+    # _get_all_commands is private, but it is exactly how tree.sync() builds its
+    # own bulk-upsert payload — there is no public equivalent that includes
+    # context menus. Revisit if a discord.py upgrade grows Entry Point support.
+    payload = [cmd.to_dict(command_tree) for cmd in command_tree._get_all_commands(guild=None)]  # noqa: SLF001
+    payload.extend(entry_points)  # keep by id — Discord preserves matched ids
+    await client.http.bulk_upsert_global_commands(app_id, payload=payload)
+
+
 async def _sync_commands(
     command_tree: "discord.app_commands.CommandTree[Any]", guild_id: int
 ) -> None:
     """Sync slash commands. Always does the global sync (eventual, propagates
     to all guilds in ~1h). When guild_id is non-zero, ALSO does an instant
     guild-scoped sync so commands appear immediately in that test/home guild."""
-    await command_tree.sync()  # global (eventual, for all guilds)
+    try:
+        await command_tree.sync()  # global (eventual, for all guilds)
+    except discord.HTTPException as exc:
+        if exc.code != _ENTRY_POINT_ERROR_CODE:
+            raise
+        logging.warning(
+            "Global command sync rejected (50240: Entry Point command); "
+            "retrying with the Entry Point command included",
+            exc_info=exc,
+        )
+        await _sync_global_including_entry_point(command_tree)
     if guild_id:
         guild = discord.Object(id=guild_id)
         command_tree.copy_global_to(guild=guild)
