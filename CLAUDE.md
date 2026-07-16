@@ -105,17 +105,38 @@ BRIX_AMM_ACCOUNT=<xrpl-address>                             # optional; mainnet 
 > expose `:8176` over public HTTPS, set `TELEGRAM_MINI_APP_URL` to that host,
 > and confirm BotFather accepts the URL.
 
-### Running (pm2-managed)
+### Running (two pm2 stacks, branch-driven — #223)
 
-Everything runs under pm2 (user hamsa), not nohup/manual:
+Two stacks on one box. **`main` = staging** (testnet, economy enabled,
+`~/LFG-staging`); **`deploy` = prod** (mainnet, `~/LFG`). Each stack runs a
+polling deployer (`scripts/deployer.py`, 60s) that fast-forwards its checkout
+when its branch moves, pip-installs on requirements changes, and
+drain-restarts the stack (prod refuses to restart if sessions won't drain —
+manual `pm2 restart ... --update-env` then). Merging a PR to `main`
+auto-deploys STAGING ONLY. Promote to prod with `scripts/promote.sh`
+(confirmed fast-forward of `deploy` to `main`). The old post-merge
+auto-restart hook is retired.
 
-| pm2 process | What it runs |
+| prod (`~/LFG`, deploy, mainnet) | staging (`~/LFG-staging`, main, testnet) |
 |---|---|
-| `lfg-bot` | `python main.py` (shim → `surfaces/discord_bot/`) |
-| `lfg-activity` | `.venv/bin/python -m webapp.server` (Discord Activity backend, port 8176) |
-| `lfg-telegram` | `.venv/bin/python run_telegram.py` |
-| `lfg-index-testnet` / `lfg-index-mainnet` | `scripts/onchain_listener.py --network <net> listen` |
-| `lfg-snapshot` | daily balance snapshots via pm2 cron — shows "stopped" between runs; that is normal |
+| `lfg-bot` | `stg-bot` (stopped until staging Discord token) |
+| `lfg-activity` :8176 | `stg-activity` :8177 |
+| `lfg-telegram` | `stg-telegram` (stopped until staging TG token) |
+| `lfg-index-mainnet` | `stg-index-testnet` (moved out of prod) |
+| `lfg-snapshot` (cron 00:10) | `stg-snapshot` (cron 00:10, testnet) |
+| `lfg-deployer` | `stg-deployer` |
+
+Ecosystem files: `ecosystem.prod.config.js` / `ecosystem.staging.config.js`.
+Staging env deltas: `docs/ops/env.staging.example`. The `~/LFG` working copy
+sits on `deploy` — do day-to-day dev in worktrees/feature branches, not by
+switching `~/LFG` back to `main` (the deployer would halt on divergence).
+Rollback: `git push origin <sha>:deploy --force-with-lease`, then on the box
+`scripts/deployer.py prod --once --force-reset`.
+
+The deployers never restart themselves (`lfg-deployer`/`stg-deployer` are
+excluded from their own `restart_processes`) — after changing
+`scripts/deployer.py`, restart them by hand: `pm2 restart lfg-deployer
+stg-deployer`.
 
 The Telegram surface runs as pm2 process `lfg-telegram` → `.venv/bin/python run_telegram.py`.
 Launch via the `run_telegram.py` shim, **not** `python -m surfaces.telegram_bot.bot`: running `bot.py`
