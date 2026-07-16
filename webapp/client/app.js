@@ -13,6 +13,9 @@ import * as marketPure from './market_pure.js';
 // Mint-flow pure helpers (issue #141): the cancel-outcome decision lives in
 // its own module so it's Node-testable too (tests/test_mint_pure_js.py).
 import * as mintPure from './mint_pure.js';
+// Build-panel decision logic lives in its own pure module so it's
+// Node-testable too (tests/test_build_pure_js.py).
+import * as buildPure from './build_pure.js';
 
 const params = new URLSearchParams(window.location.search);
 const insideDiscord = params.has('frame_id');
@@ -1274,7 +1277,7 @@ async function openDressup() {
     harvestBtn.hidden = false;
     harvestBtn.onclick = () => harvestActive();
 
-    activeNftId = economyState.characters[0] ? economyState.characters[0].nft_id : null;
+    activeNftId = buildPure.pickDefaultCharacter(economyState.characters);
     renderRoster(/* assembleEnabled= */ true);
     if (activeNftId) selectCharacter(activeNftId);
     else { el('dressup-canvas').replaceChildren(); renderCloset(); }
@@ -1517,7 +1520,7 @@ async function harvestActive() {
     status('');
     if (final.state === 'failed') throw new Error(final.error || 'harvest failed');
     economyState = await api('/api/economy');
-    activeNftId = economyState.characters[0] ? economyState.characters[0].nft_id : null;
+    activeNftId = buildPure.pickDefaultCharacter(economyState.characters);
     showPanel('dressup-panel');
     if (activeNftId) selectCharacter(activeNftId);
     else { renderRoster(); renderCloset(); el('dressup-canvas').replaceChildren(); }
