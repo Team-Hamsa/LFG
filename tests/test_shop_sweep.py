@@ -542,3 +542,155 @@ def test_orphan_after_transient_expiry_burn_error_then_settlement_failure(
 
     records = list(tmp_path.glob("shop-settlement-giveup-S7.json"))
     assert len(records) == 1
+
+
+# ---------------------------------------------------------------------------
+# #238 XRP payment fallback: expiry parity + sweep-path buyback
+# ---------------------------------------------------------------------------
+
+
+def _seed_xrp_order(conn, session_id, *, status, created_ts, **kw):
+    _seed_order(conn, session_id, status=status, created_ts=created_ts, **kw)
+    shop_store.update_order(
+        conn, session_id, now_ts=created_ts, pay_with="XRP", price_xrp="0.105000"
+    )
+
+
+def test_expiry_xrp_order_identical_and_no_buyback(onchain_env, monkeypatch):
+    """An expired XRP-path pending_accept order is cancelled/burned/supply-
+    reversed exactly like BRIX — and fires NO buyback (no XRP was ever
+    collected)."""
+    conn = _reopen(onchain_env)
+    old_ts = int(time.time()) - config.SHOP_OFFER_TTL_SECONDS - 60
+    _seed_xrp_order(conn, "X1", status="pending_accept", created_ts=old_ts)
+    conn.close()
+
+    cancels, burns, buybacks = [], [], []
+
+    async def fake_cancel(offer_index, **kw):
+        cancels.append(offer_index)
+        return "CANCELHASH"
+
+    async def fake_burn(nft_id, *a, **kw):
+        burns.append(nft_id)
+        return "BURNHASH"
+
+    async def fake_buy_and_burn(*a, **kw):
+        buybacks.append((a, kw))
+        return "HASH"
+
+    monkeypatch.setattr(server.xrpl_ops, "cancel_nft_offer", fake_cancel)
+    monkeypatch.setattr(server.xrpl_ops, "burn_nft", fake_burn)
+    monkeypatch.setattr(server.xrpl_ops, "buy_and_burn", fake_buy_and_burn)
+
+    _run(server.sweep_shop_orders())
+
+    assert cancels == ["OFFER1"]
+    assert burns == [TRAIT1]
+    assert buybacks == []
+
+    conn = _reopen(onchain_env)
+    order = shop_store.get_order(conn, "X1")
+    assert order["status"] == "expired"
+    assert order["buyback_done"] == 0
+    rows = conn.execute("SELECT kind, trait_deltas_json FROM supply_changes").fetchall()
+    assert len(rows) == 1 and rows[0][0] == "burn"
+    assert json.loads(rows[0][1]) == {"Hat|Wizard Hat": -1}
+
+
+def test_expiry_rescue_then_settlement_fires_buyback_once(onchain_env, monkeypatch, tmp_path):
+    """Rescue branch (accept landed despite the local timeout): the order is
+    re-routed to `accepted`, the settlement pass settles it, and the buyback
+    fires exactly once with the order's BRIX price capped at price_xrp."""
+    conn = _reopen(onchain_env)
+    _active_buyer_closet(conn)
+    old_ts = int(time.time()) - config.SHOP_OFFER_TTL_SECONDS - 60
+    _seed_xrp_order(conn, "X2", status="pending_accept", created_ts=old_ts)
+    conn.close()
+
+    buybacks = []
+
+    async def fake_cancel(offer_index, **kw):
+        return "CANCELHASH"
+
+    async def fake_burn(nft_id, *a, **kw):
+        return None  # issuer no longer holds the token -> rescue to accepted
+
+    async def fake_buy_and_burn(currency, issuer, value, max_xrp=None):
+        buybacks.append((currency, issuer, value, max_xrp))
+        return "HASH"
+
+    monkeypatch.setattr(server.xrpl_ops, "cancel_nft_offer", fake_cancel)
+    monkeypatch.setattr(server.xrpl_ops, "burn_nft", fake_burn)
+    monkeypatch.setattr(server.xrpl_ops, "buy_and_burn", fake_buy_and_burn)
+
+    f = _FakeSettleDeps()
+    monkeypatch.setattr(
+        server.economy_api, "build_settlement_deps", lambda c: _settle_deps(c, f, tmp_path)
+    )
+
+    _run(server.sweep_shop_orders())  # expiry pass rescues -> settlement pass settles
+
+    conn = _reopen(onchain_env)
+    order = shop_store.get_order(conn, "X2")
+    assert order["status"] == "settled"
+    assert order["buyback_done"] == 1
+    assert buybacks == [
+        (config.SWAP_OFFER_CURRENCY_HEX, config.SWAP_OFFER_ISSUER, "100", "0.105000")
+    ]
+    conn.close()
+
+    # A second sweep pass must not re-fire the buyback.
+    _run(server.sweep_shop_orders())
+    assert len(buybacks) == 1
+
+
+def test_sweep_settlement_brix_order_no_buyback(onchain_env, monkeypatch, tmp_path):
+    conn = _reopen(onchain_env)
+    _active_buyer_closet(conn)
+    _seed_order(conn, "X3", status="accepted", created_ts=int(time.time()))
+    conn.close()
+
+    async def boom_buyback(*a, **kw):
+        raise AssertionError("buy_and_burn must not fire for a BRIX-path order")
+
+    monkeypatch.setattr(server.xrpl_ops, "buy_and_burn", boom_buyback)
+    f = _FakeSettleDeps()
+    monkeypatch.setattr(
+        server.economy_api, "build_settlement_deps", lambda c: _settle_deps(c, f, tmp_path)
+    )
+
+    _run(server.sweep_shop_orders())
+
+    conn = _reopen(onchain_env)
+    order = shop_store.get_order(conn, "X3")
+    assert order["status"] == "settled" and order["buyback_done"] == 0
+
+
+def test_sweep_settlement_buyback_failure_still_settles_single_attempt(
+    onchain_env, monkeypatch, tmp_path
+):
+    conn = _reopen(onchain_env)
+    _active_buyer_closet(conn)
+    _seed_xrp_order(conn, "X4", status="accepted", created_ts=int(time.time()))
+    conn.close()
+
+    calls = []
+
+    async def failing_buyback(*a, **kw):
+        calls.append(1)
+        raise RuntimeError("amm boom")
+
+    monkeypatch.setattr(server.xrpl_ops, "buy_and_burn", failing_buyback)
+    f = _FakeSettleDeps()
+    monkeypatch.setattr(
+        server.economy_api, "build_settlement_deps", lambda c: _settle_deps(c, f, tmp_path)
+    )
+
+    _run(server.sweep_shop_orders())
+    _run(server.sweep_shop_orders())  # second pass: settled order, no retry
+
+    assert calls == [1]
+    conn = _reopen(onchain_env)
+    order = shop_store.get_order(conn, "X4")
+    assert order["status"] == "settled" and order["buyback_done"] == 1

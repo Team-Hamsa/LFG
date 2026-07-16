@@ -131,6 +131,13 @@ def onchain_env(tmp_path, monkeypatch):
 def shop_wallet(monkeypatch):
     monkeypatch.setattr(server.config, "WEBAPP_DEV_MODE", True)
     monkeypatch.setattr(mock_economy, "DEV_OWNER", BUYER)
+
+    # #238: payment-path detection runs inside handle_shop_buy_start — stub it
+    # to the BRIX path by default so endpoint tests never touch the network.
+    async def _fake_detect(wallet, amount, **kw):
+        return ("BRIX", amount)
+
+    monkeypatch.setattr(server.brix_payment, "detect_payment_path", _fake_detect)
     server.shop_sessions.clear()
     yield
     server.shop_sessions.clear()
@@ -437,3 +444,81 @@ def test_status_running_session_not_advanced(onchain_env, shop_wallet, monkeypat
     assert resp.status == 200
     body = _run(_read_json(resp))
     assert body["state"] == shop_flow.RUNNING
+
+
+# ---------------------------------------------------------------------------
+# #238 XRP payment fallback: detection + surfaced fields
+# ---------------------------------------------------------------------------
+
+
+def test_buy_response_includes_payment_path_fields(onchain_env, shop_wallet, monkeypatch):
+    onchain_path, app_db = onchain_env
+    _seed_rarity(app_db, "testnet", "Head", "Wizard Hat", live=4)
+    _activate_closet(onchain_path, BUYER)
+
+    async def fake_detect(wallet, amount, **kw):
+        assert wallet == BUYER
+        return ("XRP", "0.123456")
+
+    monkeypatch.setattr(server.brix_payment, "detect_payment_path", fake_detect)
+
+    async def fake_start_shop_buy(session, deps):
+        session.state = shop_flow.AWAITING_ACCEPT
+        session.accept = {"qr_url": "q", "xumm_url": "x", "uuid": "U1"}
+
+    monkeypatch.setattr(server.shop_flow, "start_shop_buy", fake_start_shop_buy)
+
+    req = _post_request("/api/shop/buy", {"slot": "Head", "value": "Wizard Hat"})
+    resp = _run(server.handle_shop_buy_start(req))
+    assert resp.status == 200
+    body = _run(_read_json(resp))
+    assert body["pay_with"] == "XRP"
+    assert body["price_xrp"] == "0.123456"
+
+    # And the status poll surfaces the same fields (via to_dict).
+    resp2 = _run(server.handle_shop_buy_status(_StatusReq(body["id"])))
+    body2 = _run(_read_json(resp2))
+    assert body2["pay_with"] == "XRP" and body2["price_xrp"] == "0.123456"
+
+
+def test_buy_brix_path_fields(onchain_env, shop_wallet, monkeypatch):
+    onchain_path, app_db = onchain_env
+    _seed_rarity(app_db, "testnet", "Head", "Wizard Hat", live=4)
+    _activate_closet(onchain_path, BUYER)
+
+    async def fake_start_shop_buy(session, deps):
+        session.state = shop_flow.AWAITING_ACCEPT
+        session.accept = {"qr_url": "q", "xumm_url": "x", "uuid": "U1"}
+
+    monkeypatch.setattr(server.shop_flow, "start_shop_buy", fake_start_shop_buy)
+
+    req = _post_request("/api/shop/buy", {"slot": "Head", "value": "Wizard Hat"})
+    resp = _run(server.handle_shop_buy_start(req))
+    body = _run(_read_json(resp))
+    assert body["pay_with"] == "BRIX"
+    assert body["price_xrp"] is None
+
+
+def test_buy_pricing_unavailable_503_before_any_session(onchain_env, shop_wallet, monkeypatch):
+    """AMM can't quote and the wallet holds no BRIX: fail cleanly BEFORE a
+    session/order/mint exists."""
+    onchain_path, app_db = onchain_env
+    _seed_rarity(app_db, "testnet", "Head", "Wizard Hat", live=4)
+    _activate_closet(onchain_path, BUYER)
+
+    async def fake_detect(wallet, amount, **kw):
+        raise RuntimeError("no quote")
+
+    monkeypatch.setattr(server.brix_payment, "detect_payment_path", fake_detect)
+
+    async def boom(session, deps):
+        raise AssertionError("start_shop_buy must not run when pricing is unavailable")
+
+    monkeypatch.setattr(server.shop_flow, "start_shop_buy", boom)
+
+    req = _post_request("/api/shop/buy", {"slot": "Head", "value": "Wizard Hat"})
+    resp = _run(server.handle_shop_buy_start(req))
+    assert resp.status == 503
+    body = _run(_read_json(resp))
+    assert body["code"] == "pricing_unavailable"
+    assert server.shop_sessions == {}
