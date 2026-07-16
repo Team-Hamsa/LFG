@@ -16,7 +16,9 @@ how transaction volume is credited to this entry.
 - [Shared-Services Spine](#shared-services-spine)
 - [Telegram Integration](#telegram-integration)
 - [Dress-up Trait Economy](#dress-up-trait-economy)
+- [Trait Shop](#trait-shop)
 - [In-app Marketplace](#in-app-marketplace)
+- [Bulk Minting](#bulk-minting)
 - [Milady Body + Animated Layers](#milady-body--animated-layers)
 - [Ledger History + Leaderboards](#ledger-history--leaderboards)
 - [On-chain NFT Index](#on-chain-nft-index)
@@ -60,6 +62,24 @@ A full on-ledger trait economy in four phases:
 > review findings ([#178](https://github.com/Team-Hamsa/LFG/issues/178)–[#184](https://github.com/Team-Hamsa/LFG/issues/184)) are fixed;
 > go-live tracked in [#185](https://github.com/Team-Hamsa/LFG/issues/185).
 
+## Trait Shop
+
+**Issue [#217](https://github.com/Team-Hamsa/LFG/issues/217).**
+
+A BRIX-denominated, on-demand trait mint. Pick any (slot, value) and buy a freshly
+minted trait token straight into your Closet — no matching Extract/List seller needed.
+
+- **Rarity-based pricing**: `price = clamp(SHOP_BASE_BRIX / smoothed_share, min, max)` —
+  scarcer traits (lower rarity share, plus a realized-sales feedback term) cost more BRIX.
+- **BRIX burned by construction**: payment is a destination-locked, `Expiration`-bounded
+  BRIX `NFTokenOffer` sell offer straight from the issuer-minted token to the buyer —
+  same native-offer model as the marketplace, no escrow.
+- **Not supply-neutral** (unlike Extract/Deposit): each purchase mints a new trait token
+  and writes a `supply_changes` growth row, with a matching decrement on any revert/expiry,
+  so the conservation invariant still holds. A periodic sweep expires stale offers and
+  retries stuck settlements.
+- Feature-flagged off in production alongside the rest of the trait economy (`ECONOMY_ENABLED=0`).
+
 ## In-app Marketplace
 
 **Issue [#44](https://github.com/Team-Hamsa/LFG/issues/44) — PRs #129, #132, #134, #139.**
@@ -76,6 +96,23 @@ A full on-ledger trait economy in four phases:
 - **Xaman push delivery** ([#135](https://github.com/Team-Hamsa/LFG/issues/135), [#139](https://github.com/Team-Hamsa/LFG/pull/139)) —
   returning users get sign requests pushed straight to the Xaman app instead of
   rescanning a QR (QR/deep link always returned as fallback).
+
+## Bulk Minting
+
+**Issue [#215](https://github.com/Team-Hamsa/LFG/issues/215).**
+
+Mint N editions behind a single payment instead of running the mint flow N times —
+a durable batch job (`BulkMintJob`) that reuses the single-mint machinery per unit.
+
+- **One K× payment** (LFGO-vs-XRP detection identical to single mint, at
+  `unit_price × quantity`), then a loop mints each unit and offers it back.
+- **Crash-resumable**: the whole job is persisted (atomic tmp-file + `os.replace`) after
+  every unit; on restart, `paid`/`fulfilling` jobs re-attach and resume from the last unit —
+  no double-charge and no double-mint (a minted-but-unoffered unit is re-offered, never re-minted).
+- **Supply-capped**: quantity is clamped to `min(requested, BULK_MINT_MAX, headroom)` against
+  `MAX_COLLECTION_SIZE` before payment; a cap-race loss converts to a redeemable `mint_credits`
+  row rather than a lost payment.
+- Endpoints `POST /api/mint/bulk` + status/active/cancel; API-wired (no Activity UI yet).
 
 ## Milady Body + Animated Layers
 
