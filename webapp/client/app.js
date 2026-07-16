@@ -13,6 +13,9 @@ import * as marketPure from './market_pure.js';
 // Mint-flow pure helpers (issue #141): the cancel-outcome decision lives in
 // its own module so it's Node-testable too (tests/test_mint_pure_js.py).
 import * as mintPure from './mint_pure.js';
+// Build-panel decision logic lives in its own pure module so it's
+// Node-testable too (tests/test_build_pure_js.py).
+import * as buildPure from './build_pure.js';
 
 const params = new URLSearchParams(window.location.search);
 const insideDiscord = params.has('frame_id');
@@ -1229,12 +1232,20 @@ function renderCanvas(char) {
   el('dressup-id').textContent = `#${char.edition} · ${char.body} · live`;
 }
 
-function renderRoster(assembleEnabled = true) {
-  const strip = el('roster-strip');
-  strip.replaceChildren();
+// --- GO picker (overlay) ---
+// Replaces the old unlabeled bottom roster strip: a full-panel overlay grid
+// of labeled tiles (#edition · body), opened from the Switch GO button.
+let goAssembleEnabled = true;
+
+function renderGoPicker() {
+  const grid = el('go-picker-grid');
+  grid.replaceChildren();
   for (const char of economyState.characters) {
+    const t = buildPure.goTileState(char, activeNftId);
     const tile = document.createElement('button');
-    tile.className = 'roster-tile' + (char.nft_id === activeNftId ? ' active' : '');
+    tile.className = 'go-tile'
+      + (t.state === 'active' ? ' active' : '')
+      + (t.state === 'indexing' ? ' indexing' : '');
     const img = document.createElement('img');
     img.loading = 'lazy';
     const imgSrc = imgUrl(char.image_url, THUMB_W);
@@ -1244,34 +1255,58 @@ function renderRoster(assembleEnabled = true) {
     } else if (layerComplete(char.body, bodyVal)) {
       img.src = layerSrc(char.body, 'Body', bodyVal);
     } else {
-      // No CDN image and incomplete metadata: a layer fetch would 400. Render a
-      // placeholder tile (transparent img) rather than a broken one.
-      tile.classList.add('incomplete');
+      // No CDN image and incomplete metadata: a layer fetch would 400.
       img.src = BLANK_IMG;
     }
-    img.alt = `#${char.edition}`;
-    tile.appendChild(img);
-    tile.onclick = () => selectCharacter(char.nft_id);
-    strip.appendChild(tile);
+    img.alt = t.label;
+    const cap = document.createElement('span');
+    cap.className = 'go-tile-label';
+    cap.textContent = t.state === 'active' ? `✓ ${t.label}` : t.label;
+    const sub = document.createElement('span');
+    sub.className = 'go-tile-sub';
+    sub.textContent = t.sub;
+    tile.replaceChildren(img, cap, sub);
+    if (t.state === 'indexing') {
+      tile.disabled = true; // no body -> every layer fetch would 400
+    } else {
+      tile.onclick = () => { closeGoPicker(); selectCharacter(char.nft_id); };
+    }
+    grid.appendChild(tile);
   }
   const add = document.createElement('button');
-  add.className = 'roster-tile assemble';
+  add.className = 'go-tile assemble';
   add.textContent = '＋';
-  add.title = 'Assemble new';
-  if (assembleEnabled) {
-    add.onclick = () => openAssemble();
-  } else {
-    add.disabled = true;
-    add.title = 'Create your Closet first';
+  add.title = goAssembleEnabled ? 'Assemble new' : 'Create your Closet first';
+  if (goAssembleEnabled) add.onclick = () => { closeGoPicker(); openAssemble(); };
+  else add.disabled = true;
+  grid.appendChild(add);
+}
+
+function openGoPicker() {
+  renderGoPicker();
+  const overlay = el('go-picker-overlay');
+  overlay.hidden = false;
+  const onKey = (e) => { if (e.key === 'Escape') closeGoPicker(); };
+  overlay._onKey = onKey; // stashed so closeGoPicker can remove it
+  document.addEventListener('keydown', onKey);
+  el('go-picker-close').onclick = () => closeGoPicker();
+  overlay.onclick = (e) => { if (e.target === overlay) closeGoPicker(); }; // backdrop = close
+}
+
+function closeGoPicker() {
+  const overlay = el('go-picker-overlay');
+  overlay.hidden = true;
+  overlay.onclick = null;
+  if (overlay._onKey) {
+    document.removeEventListener('keydown', overlay._onKey);
+    overlay._onKey = null;
   }
-  strip.appendChild(add);
 }
 
 function selectCharacter(nftId) {
   activeNftId = nftId;
   const char = economyState.characters.find((c) => c.nft_id === nftId);
   if (char) renderCanvas(char);
-  renderRoster();
   renderCloset();
 }
 
@@ -1348,8 +1383,7 @@ async function openDressup() {
         };
       }
 
-      // Render roster (no-op visually) but don't wire assemble tile
-      renderRoster(/* assembleEnabled= */ false);
+      goAssembleEnabled = false;
       el('dressup-canvas').replaceChildren();
       return;
     }
@@ -1360,8 +1394,8 @@ async function openDressup() {
     harvestBtn.hidden = false;
     harvestBtn.onclick = () => harvestActive();
 
-    activeNftId = economyState.characters[0] ? economyState.characters[0].nft_id : null;
-    renderRoster(/* assembleEnabled= */ true);
+    goAssembleEnabled = true;
+    activeNftId = buildPure.pickDefaultCharacter(economyState.characters);
     if (activeNftId) selectCharacter(activeNftId);
     else { el('dressup-canvas').replaceChildren(); renderCloset(); }
   } catch (e) {
@@ -1408,11 +1442,19 @@ function renderCloset() {
     // Client mirrors the server precheck (server re-verifies on commit).
     const compatible = char && economyState.slots.includes(asset.slot);
     if (!compatible) item.classList.add('incompatible');
+    // With a GO selected, a trait that can't render on its body is hidden
+    // entirely (it reappears on a GO whose body has the art). With no GO
+    // selected, keep a blank placeholder so the Closet contents stay visible.
+    if (char && !layerComplete(char.body, asset.value)) continue;
     const img = document.createElement('img');
-    // Guard: a missing active body or empty asset value would 400 the layer fetch.
-    img.src = (char && layerComplete(char.body, asset.value))
-      ? layerSrc(char.body, asset.slot, asset.value)
-      : BLANK_IMG;
+    if (char) {
+      img.src = layerSrc(char.body, asset.slot, asset.value);
+      // Art missing for this body (layer fetch 404s): drop the whole tile
+      // instead of rendering a broken image.
+      img.onerror = () => item.remove();
+    } else {
+      img.src = BLANK_IMG;
+    }
     img.alt = `${asset.slot}: ${asset.value}`;
     const count = document.createElement('span');
     count.className = 'count';
@@ -1449,12 +1491,16 @@ function renderTraitStrip() {
   }
   const char = activeChar();
   for (const t of tokens) {
+    if (char && !layerComplete(char.body, t.value)) continue;
     const chip = document.createElement('div');
     chip.className = 'trait-chip';
     const img = document.createElement('img');
-    img.src = (char && layerComplete(char.body, t.value))
-      ? layerSrc(char.body, t.slot, t.value)
-      : BLANK_IMG;
+    if (char) {
+      img.src = layerSrc(char.body, t.slot, t.value);
+      img.onerror = () => chip.remove();
+    } else {
+      img.src = BLANK_IMG;
+    }
     img.alt = `${t.slot}: ${t.value}`;
     const label = document.createElement('span');
     label.className = 'trait-chip-label';
@@ -1603,10 +1649,10 @@ async function harvestActive() {
     status('');
     if (final.state === 'failed') throw new Error(final.error || 'harvest failed');
     economyState = await api('/api/economy');
-    activeNftId = economyState.characters[0] ? economyState.characters[0].nft_id : null;
+    activeNftId = buildPure.pickDefaultCharacter(economyState.characters);
     showPanel('dressup-panel');
     if (activeNftId) selectCharacter(activeNftId);
-    else { renderRoster(); renderCloset(); el('dressup-canvas').replaceChildren(); }
+    else { renderCloset(); el('dressup-canvas').replaceChildren(); }
   } catch (e) {
     showError(e.message);
   }
@@ -2223,6 +2269,8 @@ async function main() {
   el('mint-btn').onclick = startMint;
   el('flow-regen-btn').onclick = regeneratePaymentQr;
   el('swap-btn').onclick = () => openDressup();
+  el('dressup-back-btn').onclick = () => showMintHome();
+  el('go-switch-btn').onclick = () => openGoPicker();
   el('swapper-btn').onclick = () => openSwapper();
   el('swap-back-btn').onclick = () => showMintHome();
   el('pick-traits-btn').onclick = showTraitChooser;
@@ -2256,7 +2304,7 @@ async function main() {
   try {
     const cfg = await api('/api/config');
     // Closet / trait economy ships after the mainnet MVP: with the feature
-    // off, hide the Dress Up entry point (the API answers 403 regardless).
+    // off, hide the Build entry point (the API answers 403 regardless).
     if (cfg.economy_enabled === false) el('swap-btn').hidden = true;
     // In-app marketplace (#44) ships after the mainnet MVP: with the feature
     // off, hide the Marketplace entry point (the API answers 403 regardless).
