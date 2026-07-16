@@ -1968,7 +1968,11 @@ function shopBuyRender(s) {
   }
   if (s.state === 'awaiting_accept') {
     const url = s.accept ? s.accept.xumm_url : null;
-    return { title: '💳 Confirm purchase', text: 'Scan to accept the trait offer in Xaman.', qrData: url, link: url };
+    // #238: silent payment-path fallback — no BRIX? The offer is priced in XRP.
+    const price = s.pay_with === 'XRP' && s.price_xrp
+      ? `~${s.price_xrp} XRP`
+      : `${s.price_brix} BRIX`;
+    return { title: '💳 Confirm purchase', text: `Scan to accept the trait offer in Xaman (${price}).`, qrData: url, link: url };
   }
   if (s.state === 'failed') {
     return { title: '❌ Purchase failed', text: s.error || 'Something went wrong.', done: true };
