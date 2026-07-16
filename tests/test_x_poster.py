@@ -27,8 +27,8 @@ from urllib.parse import unquote  # noqa: E402
 import aiohttp  # noqa: E402
 import pytest  # noqa: E402
 
-from lfg_core import config  # noqa: E402
-from surfaces.x_bot import poster, state, x_api  # noqa: E402
+from lfg_core import config, rarity  # noqa: E402
+from surfaces.x_bot import bot, poster, state, x_api  # noqa: E402
 from surfaces.x_bot.x_api import XApi, XApiError  # noqa: E402
 
 
@@ -606,3 +606,229 @@ def test_table_creation_idempotent_on_first_use(tmp_path):
     assert state.already_posted(db, "mint:1") is False
     state.record(db, "mint:1", "posted")
     assert state.already_posted(db, "mint:1") is True
+
+
+# ---------------------------------------------------------------------------
+# T5 — bot.py: handle_event() pipeline (dedup -> backoff -> pause -> budget ->
+# download -> upload -> post -> record) and rank_traits_by_rarity()
+# ---------------------------------------------------------------------------
+
+
+class _FakeXApi:
+    """Stand-in for XApi in bot.py pipeline tests: call counters + a queue of
+    canned results (return values, or exceptions to raise) per method."""
+
+    def __init__(self, *, post_tweet=None, upload_media=None):
+        self.post_tweet_calls: list[tuple[str, str | None]] = []
+        self.upload_media_calls: list[bytes] = []
+        self._post_tweet_queue = list(post_tweet or [])
+        self._upload_media_queue = list(upload_media or [])
+
+    async def post_tweet(self, text, media_id=None):
+        self.post_tweet_calls.append((text, media_id))
+        result = self._post_tweet_queue.pop(0)
+        if isinstance(result, Exception):
+            raise result
+        return result
+
+    async def upload_media(self, image_bytes, mime="image/png"):
+        self.upload_media_calls.append(image_bytes)
+        result = self._upload_media_queue.pop(0)
+        if isinstance(result, Exception):
+            raise result
+        return result
+
+    async def verify_credentials(self):
+        return "TestHandle"
+
+
+class _FakeImageResponse:
+    def __init__(self, status=200, body=b"\x89PNGbytes"):
+        self.status = status
+        self._body = body
+
+    async def read(self):
+        return self._body
+
+    async def __aenter__(self):
+        return self
+
+    async def __aexit__(self, *exc):
+        return False
+
+
+class _FakeHttp:
+    def __init__(self, *responses):
+        self._responses = list(responses)
+        self.get_calls: list[str] = []
+
+    def get(self, url, **kwargs):
+        self.get_calls.append(url)
+        return self._responses.pop(0)
+
+
+_FIXED_NOW = datetime(2026, 7, 15, 12, 0, tzinfo=timezone.utc)
+
+
+def _make_deps(tmp_path, x_api, *, http=None, budget=100, now=_FIXED_NOW, rank_traits=None):
+    epoch = now.timestamp()
+    sleeps: list[float] = []
+
+    async def _sleep(delay):
+        sleeps.append(delay)
+
+    deps = bot.Deps(
+        x_api=x_api,
+        http=http or _FakeHttp(),
+        db_path=str(tmp_path / "x_state.db"),
+        budget=budget,
+        rank_traits=rank_traits,
+        now=lambda: epoch,
+        sleep=_sleep,
+    )
+    return deps, sleeps
+
+
+def test_handle_event_5xx_retries_exactly_three_times_then_failed(tmp_path):
+    x_api = _FakeXApi(
+        post_tweet=[
+            XApiError(500, "server error"),
+            XApiError(500, "server error"),
+            XApiError(500, "server error"),
+        ]
+    )
+    deps, sleeps = _make_deps(tmp_path, x_api)
+    event = _mint_event()
+    status = _run(bot.handle_event(event, deps))
+    assert status == "failed"
+    assert len(x_api.post_tweet_calls) == 3
+    assert sleeps == [1.0, 4.0]
+    assert state.already_posted(deps.db_path, poster.should_post(event)) is False
+
+
+def test_handle_event_4xx_no_retry_records_failed_after_one_attempt(tmp_path):
+    x_api = _FakeXApi(post_tweet=[XApiError(400, "bad request")])
+    deps, sleeps = _make_deps(tmp_path, x_api)
+    event = _mint_event()
+    status = _run(bot.handle_event(event, deps))
+    assert status == "failed"
+    assert len(x_api.post_tweet_calls) == 1
+    assert sleeps == []
+
+
+def test_handle_event_429_backs_off_and_short_circuits_next_event(tmp_path):
+    reset_at = _FIXED_NOW.timestamp() + 900.0
+    x_api = _FakeXApi(post_tweet=[XApiError(429, "slow down", reset_at=reset_at)])
+    deps, sleeps = _make_deps(tmp_path, x_api)
+
+    event1 = _mint_event(nft_id="nft-1")
+    status1 = _run(bot.handle_event(event1, deps))
+    assert status1 == "failed"
+    assert deps.backoff_until == reset_at
+    assert len(x_api.post_tweet_calls) == 1
+    assert sleeps == []  # 429 is never retried in-process
+
+    event2 = _mint_event(nft_id="nft-2")
+    status2 = _run(bot.handle_event(event2, deps))
+    assert status2 == "failed"
+    assert len(x_api.post_tweet_calls) == 1  # short-circuited: no new API call
+
+
+def test_handle_event_paused_records_skipped_paused_no_api_call(tmp_path):
+    x_api = _FakeXApi()
+    deps, _ = _make_deps(tmp_path, x_api)
+    state.set_posting_paused(deps.db_path, True)
+    event = _mint_event()
+    status = _run(bot.handle_event(event, deps))
+    assert status == "skipped_paused"
+    assert x_api.post_tweet_calls == []
+
+
+def test_handle_event_budget_exhausted_records_skipped_budget_no_api_call(tmp_path):
+    x_api = _FakeXApi()
+    deps, _ = _make_deps(tmp_path, x_api, budget=1)
+    state.record(deps.db_path, "mint:already-counted", "posted", tweet_id="1", now=_FIXED_NOW)
+    event = _mint_event()
+    status = _run(bot.handle_event(event, deps))
+    assert status == "skipped_budget"
+    assert x_api.post_tweet_calls == []
+
+
+def test_handle_event_dedup_already_posted_zero_api_calls(tmp_path):
+    x_api = _FakeXApi()
+    deps, _ = _make_deps(tmp_path, x_api)
+    event = _mint_event()
+    event_key = poster.should_post(event)
+    state.record(deps.db_path, event_key, "posted", tweet_id="999")
+    status = _run(bot.handle_event(event, deps))
+    assert status is None
+    assert x_api.post_tweet_calls == []
+
+
+def test_handle_event_media_upload_failure_degrades_to_text_only_post(tmp_path):
+    x_api = _FakeXApi(
+        upload_media=[
+            XApiError(500, "err"),
+            XApiError(500, "err"),
+            XApiError(500, "err"),
+        ],
+        post_tweet=["tweet-id-1"],
+    )
+    http = _FakeHttp(_FakeImageResponse(200, b"pngbytes"))
+    event = _mint_event(image_url="https://cdn.example.com/nft.png")
+    deps, sleeps = _make_deps(tmp_path, x_api, http=http)
+    status = _run(bot.handle_event(event, deps))
+    assert status == "posted"
+    assert len(x_api.upload_media_calls) == 3  # retried fully before degrading
+    assert x_api.post_tweet_calls == [(poster.compose(event, rank_traits=None), None)]
+    assert sleeps == [1.0, 4.0]
+
+
+def test_handle_event_posts_successfully_with_image_and_media(tmp_path):
+    x_api = _FakeXApi(upload_media=["media-42"], post_tweet=["tweet-99"])
+    http = _FakeHttp(_FakeImageResponse(200, b"pngbytes"))
+    event = _mint_event(image_url="https://cdn.example.com/nft.png")
+    deps, sleeps = _make_deps(tmp_path, x_api, http=http)
+    status = _run(bot.handle_event(event, deps))
+    assert status == "posted"
+    assert x_api.upload_media_calls == [b"pngbytes"]
+    assert x_api.post_tweet_calls[0][1] == "media-42"
+    assert state.already_posted(deps.db_path, poster.should_post(event)) is True
+    assert sleeps == []
+
+
+def test_rank_traits_by_rarity_orders_rarest_first_with_hat_head_mapping(tmp_path, monkeypatch):
+    monkeypatch.setattr(config, "DB_PATH", str(tmp_path / "rarity_test.db"))
+    conn = rarity.connect()
+    try:
+        rarity.ensure_schema(conn)
+        for category, trait, count in [
+            ("Head", "Common Hat", 90),
+            ("Head", "Rare Hat", 1),
+            ("Eyes", "Round", 90),
+            ("Eyes", "Laser", 1),
+        ]:
+            conn.execute(
+                "INSERT INTO trait_rarity (network, body, category, trait, live_count, floor_weight) "
+                "VALUES (?, ?, ?, ?, ?, 0.005)",
+                (config.XRPL_NETWORK, "male", category, trait, count),
+            )
+        conn.commit()
+    finally:
+        conn.close()
+
+    # "Hat" (LFG naming) must resolve to the "Head" rarity category; "Mouth"
+    # has no trait_rarity row at all and must fall back to the end, not be
+    # dropped or crash the whole ranking.
+    ranked = bot.rank_traits_by_rarity(
+        {"Hat": "Rare Hat", "Eyes": "Round", "Mouth": "Smile"}, "male"
+    )
+    assert ranked[0] == ("Hat", "Rare Hat")
+    assert ranked[1] == ("Eyes", "Round")
+    assert ranked[2] == ("Mouth", "Smile")
+
+
+def test_rank_traits_by_rarity_no_body_type_returns_insertion_order(tmp_path, monkeypatch):
+    monkeypatch.setattr(config, "DB_PATH", str(tmp_path / "rarity_test2.db"))
+    traits = {"Hat": "Wizard Hat", "Eyes": "Laser"}
+    assert bot.rank_traits_by_rarity(traits, None) == list(traits.items())
