@@ -5,7 +5,7 @@
 import asyncio
 import os
 
-os.environ.setdefault("BUNNY_PULL_ZONE", "test.b-cdn.net")
+os.environ.setdefault("BUNNY_PULL_ZONE", "nft.pullzone.example")
 os.environ.setdefault("LAYER_SOURCE", "local")
 
 from aiohttp import web

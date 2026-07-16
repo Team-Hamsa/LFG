@@ -3242,10 +3242,12 @@ _web_signin_hits: dict[str, list[float]] = {}
 
 def _client_ip(request) -> str:
     # The funnel / tailscale serve fronts the service, so the TCP peer is
-    # localhost; X-Forwarded-For carries the real client (first hop).
+    # localhost and the proxy APPENDS the real client to X-Forwarded-For.
+    # Only the RIGHTMOST entry is trustworthy — leftmost values are caller-
+    # controlled and would let a spoofer rotate fake IPs past the rate limit.
     fwd = request.headers.get("X-Forwarded-For", "")
     if fwd:
-        return fwd.split(",")[0].strip()
+        return fwd.split(",")[-1].strip()
     return request.remote or "?"
 
 

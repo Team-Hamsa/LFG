@@ -3,7 +3,7 @@
 # and the memos surface→platform mapping for platform="web".
 import os
 
-os.environ.setdefault("BUNNY_PULL_ZONE", "test.b-cdn.net")
+os.environ.setdefault("BUNNY_PULL_ZONE", "nft.pullzone.example")
 os.environ.setdefault("LAYER_SOURCE", "local")
 
 from lfg_core import memos

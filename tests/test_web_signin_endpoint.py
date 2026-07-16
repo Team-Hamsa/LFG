@@ -7,7 +7,7 @@ import asyncio
 import json
 import os
 
-os.environ.setdefault("BUNNY_PULL_ZONE", "test.b-cdn.net")
+os.environ.setdefault("BUNNY_PULL_ZONE", "nft.pullzone.example")
 os.environ.setdefault("LAYER_SOURCE", "local")
 
 import lfg_service.app as app
@@ -95,14 +95,16 @@ def test_start_rate_limited_per_ip(monkeypatch):
     assert _run(app.handle_web_signin_start(other)).status == 200
 
 
-def test_start_rate_limit_keys_on_forwarded_for(monkeypatch):
-    # Behind the funnel every peer addr is localhost; X-Forwarded-For is the
-    # real client. Same forwarded IP through different peers shares one bucket.
+def test_start_rate_limit_keys_on_rightmost_forwarded_for(monkeypatch):
+    # Behind the funnel every peer addr is localhost and tailscaled APPENDS the
+    # real client to X-Forwarded-For — so only the RIGHTMOST entry is trusted.
+    # A caller-supplied leftmost value must not shard the bucket: rotating
+    # spoofed prefixes with the same trusted tail still trips the limit.
     monkeypatch.setattr(app.xumm_ops, "create_signin_payload", _fake_create())
-    for _ in range(app.WEB_SIGNIN_RATE_MAX):
-        req = _Req(headers={"X-Forwarded-For": "9.9.9.9, 127.0.0.1"}, remote="127.0.0.1")
+    for i in range(app.WEB_SIGNIN_RATE_MAX):
+        req = _Req(headers={"X-Forwarded-For": f"spoof-{i}, 9.9.9.9"}, remote="127.0.0.1")
         assert _run(app.handle_web_signin_start(req)).status == 200
-    req = _Req(headers={"X-Forwarded-For": "9.9.9.9"}, remote="127.0.0.1")
+    req = _Req(headers={"X-Forwarded-For": "spoof-x, 9.9.9.9"}, remote="127.0.0.1")
     assert _run(app.handle_web_signin_start(req)).status == 429
 
 

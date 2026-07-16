@@ -785,8 +785,12 @@ async function setupWeb() {
     sessionToken = stored;
     try {
       return await api('/api/me'); // still valid → straight in
-    } catch (_) {
-      sessionToken = null; // expired/invalid (api() already dropped the key)
+    } catch (e) {
+      // Only a 401 means the token is dead (api() already dropped the key).
+      // Transient network/5xx errors keep the good token and surface as a
+      // connect failure instead of forcing a spurious re-sign-in.
+      if (e.status !== 401) throw e;
+      sessionToken = null;
     }
   }
   await startWebSignin();
