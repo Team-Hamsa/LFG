@@ -5,9 +5,10 @@
 <br>
 
 <img src="https://img.shields.io/badge/mainnet-live-2ea043?style=flat-square" alt="Mainnet: live">
+<a href="https://build.letseffinggo.com"><img src="https://img.shields.io/badge/web_app-live-D89030?style=flat-square" alt="Web app live at build.letseffinggo.com"></a>
 <img src="https://img.shields.io/badge/XRPL-NFTs-3E8DE3?style=flat-square" alt="Built on the XRP Ledger">
 <img src="https://img.shields.io/badge/Xaman-signing-F76B1C?style=flat-square" alt="Signed in Xaman">
-<img src="https://img.shields.io/badge/surfaces-Discord%20%C2%B7%20Telegram%20%C2%B7%20Web-5865F2?style=flat-square" alt="Three surfaces: Discord, Telegram, Web">
+<img src="https://img.shields.io/badge/surfaces-Discord%20%C2%B7%20Telegram%20%C2%B7%20Web-5865F2?style=flat-square" alt="Surfaces: Discord, Telegram, Web">
 <img src="https://img.shields.io/badge/tests-1.7k%2B-2ea043?style=flat-square" alt="1,700+ tests">
 <img src="https://img.shields.io/badge/license-MIT-blue?style=flat-square" alt="MIT license">
 <img src="https://img.shields.io/badge/SourceTag-2606160021-8957E5?style=flat-square" alt="XRPL SourceTag 2606160021">
@@ -16,11 +17,13 @@
 
 **Mint NFTs, swap their traits, and trade them for XRP — signed in Xaman, live on the XRP Ledger, from Discord, Telegram, or the web.**
 
+**🌐 Try it right now in your browser → [build.letseffinggo.com](https://build.letseffinggo.com)**
+
 </div>
 
 ---
 
-**LFG** is a multi-surface XRPL app. You mint NFTs — one at a time or many behind a single payment — whose art is composed on the fly from trait layers, swap individual traits between NFTs you own, and list, browse, and buy them on an in-app marketplace. You pay to mint with the `LFGO` token, cover trait-swap fees in `BRIX` (or its AMM XRP equivalent), trade on the **XRP-denominated** marketplace, and sign every transaction in the [Xaman (XUMM)](https://xaman.app/) wallet — no keys ever touch the app. Every transaction also carries on-chain **provenance memos** recording who signed, from which surface, and what action it was. The same flows run from a Discord bot, a Discord Activity, and a Telegram bot, all backed by one shared service. **The collection is live on XRPL mainnet** — cut over **2026-07-10** (3,535 editions reconciled with zero drift) and grown to **~4,000 live editions** since.
+**LFG** is a multi-surface XRPL app. You mint NFTs — one at a time or many behind a single payment — whose art is composed on the fly from trait layers, swap individual traits between NFTs you own, and list, browse, and buy them on an in-app marketplace. You pay to mint with the `LFGO` token, cover trait-swap fees in `BRIX` (or its AMM XRP equivalent), trade on the **XRP-denominated** marketplace, and sign every transaction in the [Xaman (XUMM)](https://xaman.app/) wallet — no keys ever touch the app. Every transaction also carries on-chain **provenance memos** recording who signed, from which surface, and what action it was. The same flows run from a Discord bot, a Discord Activity, a Telegram bot, and a standalone web app at [build.letseffinggo.com](https://build.letseffinggo.com), all backed by one shared service. **The collection is live on XRPL mainnet** — cut over **2026-07-10** (3,535 editions reconciled with zero drift) and grown to **~4,000 live editions** since.
 
 > **XRPL Make Waves Hackathon** — every XRPL transaction and Xaman signing payload the app builds carries `SourceTag 2606160021`, so all of the volume counts toward this entry.
 
@@ -56,7 +59,7 @@ Short walkthroughs of each core flow:
 <img src="assets/hackathon_loc.svg" alt="Hackathon code growth bar" width="728">
 </div>
 
-> **Every line hand-written since the June 21 hackathon baseline** (`e296308`, 2026-06-19, 12,080 lines) — measured by `git diff --numstat` over `.py`/`.js`/`.css`/`.html`, excluding docs, data files (CSV/JSON manifests), dependency lists, and the legacy/backup trees. Regenerated on every push to `main`.
+> **Every line since the June 21 hackathon baseline was written by [Claude Code](https://claude.com/claude-code) — none of it by hand.** Measured from baseline `e296308` (2026-06-19, 12,080 lines) by `git diff --numstat` over `.py`/`.js`/`.css`/`.html`, excluding docs, data files (CSV/JSON manifests), dependency lists, and the legacy/backup trees. Regenerated on every push to `main`.
 <!-- hackathon-loc:end -->
 
 <div align="center">
@@ -79,7 +82,7 @@ Short walkthroughs of each core flow:
 <td>📲 <b>Xaman push delivery</b><br>Sign requests pushed straight to the app, with QR fallback.</td>
 </tr>
 <tr>
-<td>🌐 <b>Three surfaces, one backend</b><br>Discord bot, Telegram bot, and Discord Activity on <code>lfg_service</code>.</td>
+<td>🌐 <b>Four surfaces, one backend</b><br>Discord bot, Telegram bot, Discord Activity, and <a href="https://build.letseffinggo.com">the web app</a> on <code>lfg_service</code>.</td>
 <td>🏆 <b>8 leaderboards</b><br>Holders, swaps, builds, BRIX richlist, LP, rarity — with time windows.</td>
 </tr>
 <tr>
@@ -109,6 +112,7 @@ Short walkthroughs of each core flow:
 | Replay-safe payment watching over XRPL websocket | ✅ |
 | BunnyCDN image + metadata hosting | ✅ |
 | Discord Activity (embedded webapp) | ✅ |
+| Standalone web app — the same Activity in any browser at [build.letseffinggo.com](https://build.letseffinggo.com) (GitHub Pages front-end + wallet sign-in) | ✅ |
 | Variable rarity engine (mainnet-seeded weights, network-scoped) | ✅ |
 | BRIX trustline setup button | ✅ |
 | Admin panel (stats, NFT lookup, burn with audit log) | ✅ |
@@ -145,10 +149,10 @@ Short walkthroughs of each core flow:
 ## Architecture
 
 <div align="center">
-<img src="assets/architecture.png" alt="LFG architecture — three surfaces to lfg_service to lfg_core to XRPL, Xaman, and BunnyCDN" width="820">
+<img src="assets/architecture.png" alt="LFG architecture — four surfaces to lfg_service to lfg_core to XRPL, Xaman, and BunnyCDN" width="820">
 </div>
 
-Three thin surfaces — the classic **Discord bot**, the **Telegram bot**, and the **Discord Activity** webapp — all talk over REST/WS to one aiohttp backend (`lfg_service`), which runs the mint / swap / market / economy session state machines, submits every XRPL transaction, and builds every Xaman signing payload. Shared domain logic lives in `lfg_core`; a **separate listener process group** streams the clio transaction feed into the per-network SQLite index and ledger-history stores that the backend reads. **No private keys ever touch the app** — all signing happens in the user's Xaman wallet, images and metadata are hosted on BunnyCDN, and the NFT schema is pinned on IPFS.
+Four thin surfaces — the classic **Discord bot**, the **Telegram bot**, the **Discord Activity** webapp, and the **standalone web app** (the same no-build client, served by GitHub Pages at [build.letseffinggo.com](https://build.letseffinggo.com)) — all talk over REST/WS to one aiohttp backend (`lfg_service`), which runs the mint / swap / market / economy session state machines, submits every XRPL transaction, and builds every Xaman signing payload. Shared domain logic lives in `lfg_core`; a **separate listener process group** streams the clio transaction feed into the per-network SQLite index and ledger-history stores that the backend reads. **No private keys ever touch the app** — all signing happens in the user's Xaman wallet, images and metadata are hosted on BunnyCDN, and the NFT schema is pinned on IPFS.
 
 <details>
 <summary><b>Repository layout</b></summary>
@@ -177,7 +181,7 @@ LFG/
 │   └── _client/, _shared/  # Surface SDK (LFGServiceClient) + plumbing
 ├── webapp/
 │   ├── server.py           # 8-line launch shim → lfg_service.app
-│   └── client/             # No-build Activity frontend (vanilla JS)
+│   └── client/             # No-build frontend (vanilla JS) — Activity + the live web app
 ├── scripts/                # Ops: onchain_listener, backfills, audits, economy CLIs
 ├── trait_config.yaml       # Declarative trait rules (z-order, affinity, swap matrix)
 └── docs/                   # ACTIVITY_SETUP.md, HACKATHON.md
@@ -195,6 +199,11 @@ balance-snapshot cron, and a polling **deployer** that fast-forwards its checkou
 branch moves, reinstalls on dependency changes, and drain-restarts the processes. Merging to
 `main` auto-deploys staging only; promoting to prod is an explicit fast-forward
 (`scripts/promote.sh`). Ecosystem files: `ecosystem.prod.config.js` / `ecosystem.staging.config.js`.
+
+The standalone web app is the same `webapp/client/` bundle, published to GitHub Pages
+at [build.letseffinggo.com](https://build.letseffinggo.com) by `.github/workflows/pages.yml`
+on every push to `deploy`; the prod API answers it cross-origin, gated by the
+`WEB_ALLOWED_ORIGINS` allowlist.
 
 </details>
 
@@ -256,7 +265,8 @@ Optional surfaces / features: `TELEGRAM_BOT_TOKEN`, `SERVICE_TOKEN_TELEGRAM`,
 `TELEGRAM_MINI_APP_URL` (Mini App), `MARKET_ENABLED` (character marketplace, `1`
 by default), `ECONOMY_ENABLED` (trait economy + Trait Shop, `0` in production),
 `MAX_COLLECTION_SIZE` / `BULK_MINT_MAX` (bulk-mint caps), `SHOP_BASE_BRIX` /
-`SHOP_MIN_BRIX` / `SHOP_MAX_BRIX` (Trait Shop pricing), `XRPL_NETWORK`,
+`SHOP_MIN_BRIX` / `SHOP_MAX_BRIX` (Trait Shop pricing), `WEB_ALLOWED_ORIGINS`
+(standalone web app CORS allowlist; empty = off), `XRPL_NETWORK`,
 `XRPL_CLIO_WS_URL`, `BRIX_DISTRIBUTOR_ADDRESS`, `BRIX_AMM_ACCOUNT`.
 
 The full list with defaults lives in `lfg_core/config.py`. **Defaults target
@@ -291,7 +301,7 @@ matrix — lives in `trait_config.yaml` at the repo root, validated by
 
 **Remaining**
 
-- [ ] [#42 — standalone browser web UI (mint + collection viewer)](../../issues/42)
+- [ ] [#42 — Web UI: remaining scope (profile + admin pages)](../../issues/42) — core mint/browse shipped live via [#240](../../issues/240)
 - [ ] [#41 — X (Twitter) integration (OAuth2, auto-post on mint)](../../issues/41)
 - [ ] **Trait economy re-enable** — clear review findings [#178](../../issues/178)–[#184](../../issues/184), go-live checklist [#185](../../issues/185)
 - [ ] [#45 — DEX integration backend (OfferCreate/Cancel, order book)](../../issues/45)
@@ -315,6 +325,7 @@ matrix — lives in `trait_config.yaml` at the repo root, validated by
 - [x] [#49 — AI agent integration via XRPL Payments skill (exploration)](../../issues/49)
 - [x] [#215 — Bulk minting (pay once, mint N editions in one durable batch job)](../../issues/215)
 - [x] [#217 — Trait Shop (BRIX-priced on-demand trait minting)](../../issues/217) — built; economy-gated pending [#185](../../issues/185)
+- [x] [#240 — Standalone web surface — the Activity live in any browser at build.letseffinggo.com](../../issues/240)
 - [x] Shared-services spine — one backend + Surface SDK ([#43](../../issues/43)/[#53](../../issues/53); PRs [#76](../../pull/76), [#78](../../pull/78), [#79](../../pull/79), [#80](../../pull/80), [#81](../../pull/81), [#82](../../pull/82))
 - [x] Milady body + animated trait layers (PRs [#171](../../pull/171), [#174](../../pull/174))
 - [x] Network-aware app database — testnet mints no longer poison the mainnet counter (PR [#167](../../pull/167))
@@ -332,7 +343,7 @@ LFG is released under the **MIT License** — see [LICENSE](LICENSE).
 
 <div align="center">
 
-**[Build log](docs/HACKATHON.md)** · **[Activity setup](docs/ACTIVITY_SETUP.md)** · **[Contributing](CONTRIBUTING.md)** · **[License](#license)**
+**[Live app](https://build.letseffinggo.com)** · **[Build log](docs/HACKATHON.md)** · **[Activity setup](docs/ACTIVITY_SETUP.md)** · **[Contributing](CONTRIBUTING.md)** · **[License](#license)**
 
 </div>
 
