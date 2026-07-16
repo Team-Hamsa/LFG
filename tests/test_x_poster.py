@@ -784,6 +784,84 @@ def test_handle_event_media_upload_failure_degrades_to_text_only_post(tmp_path):
     assert sleeps == [1.0, 4.0]
 
 
+def test_handle_event_network_error_on_upload_degrades_to_text_only(tmp_path):
+    """Raw aiohttp.ClientError (x_api._send only wraps HTTP >= 400 into
+    XApiError; network errors propagate unwrapped) exhausted on upload_media
+    must degrade to a text-only post, not drop the post entirely."""
+    x_api = _FakeXApi(
+        upload_media=[
+            aiohttp.ClientError("conn reset"),
+            aiohttp.ClientError("conn reset"),
+            aiohttp.ClientError("conn reset"),
+        ],
+        post_tweet=["tweet-id-2"],
+    )
+    http = _FakeHttp(_FakeImageResponse(200, b"pngbytes"))
+    event = _mint_event(image_url="https://cdn.example.com/nft.png")
+    deps, sleeps = _make_deps(tmp_path, x_api, http=http)
+    status = _run(bot.handle_event(event, deps))
+    assert status == "posted"
+    assert len(x_api.upload_media_calls) == 3  # retried fully before degrading
+    assert x_api.post_tweet_calls == [(poster.compose(event, rank_traits=None), None)]
+    assert sleeps == [1.0, 4.0]
+    assert state.already_posted(deps.db_path, poster.should_post(event)) is True
+
+
+def test_handle_event_network_error_on_post_records_failed_without_raising(tmp_path):
+    """Exhausted network error on post_tweet must record `failed` (spec §5.5:
+    retry then `failed` for '5xx/network'), never escape handle_event."""
+    x_api = _FakeXApi(
+        post_tweet=[
+            aiohttp.ClientError("timeout-ish"),
+            aiohttp.ClientError("timeout-ish"),
+            aiohttp.ClientError("timeout-ish"),
+        ]
+    )
+    deps, sleeps = _make_deps(tmp_path, x_api)
+    event = _mint_event()
+    status = _run(bot.handle_event(event, deps))
+    assert status == "failed"
+    assert len(x_api.post_tweet_calls) == 3
+    assert sleeps == [1.0, 4.0]
+    assert state.already_posted(deps.db_path, poster.should_post(event)) is False
+
+
+def test_handle_event_429_on_upload_sets_backoff_and_records_failed(tmp_path):
+    """A 429 during media upload must NOT degrade to a text-only post — it
+    propagates out of the upload seam so the global backoff engages and the
+    event records `failed` with zero post_tweet calls."""
+    reset_at = _FIXED_NOW.timestamp() + 600.0
+    x_api = _FakeXApi(upload_media=[XApiError(429, "limit", reset_at=reset_at)])
+    http = _FakeHttp(_FakeImageResponse(200, b"pngbytes"))
+    event = _mint_event(image_url="https://cdn.example.com/nft.png")
+    deps, sleeps = _make_deps(tmp_path, x_api, http=http)
+    status = _run(bot.handle_event(event, deps))
+    assert status == "failed"
+    assert deps.backoff_until == reset_at
+    assert len(x_api.upload_media_calls) == 1  # 429 is never retried in-process
+    assert x_api.post_tweet_calls == []
+    assert sleeps == []
+
+
+def test_handle_event_image_download_failure_degrades_to_text_only(tmp_path):
+    """Image download 5xx (after retries) degrades to a text-only tweet —
+    upload_media is never reached, the post still happens."""
+    x_api = _FakeXApi(post_tweet=["tweet-id-3"])
+    http = _FakeHttp(
+        _FakeImageResponse(500, b""),
+        _FakeImageResponse(500, b""),
+        _FakeImageResponse(500, b""),
+    )
+    event = _mint_event(image_url="https://cdn.example.com/nft.png")
+    deps, sleeps = _make_deps(tmp_path, x_api, http=http)
+    status = _run(bot.handle_event(event, deps))
+    assert status == "posted"
+    assert len(http.get_calls) == 3  # download retried fully before degrading
+    assert x_api.upload_media_calls == []
+    assert x_api.post_tweet_calls == [(poster.compose(event, rank_traits=None), None)]
+    assert sleeps == [1.0, 4.0]
+
+
 def test_handle_event_posts_successfully_with_image_and_media(tmp_path):
     x_api = _FakeXApi(upload_media=["media-42"], post_tweet=["tweet-99"])
     http = _FakeHttp(_FakeImageResponse(200, b"pngbytes"))

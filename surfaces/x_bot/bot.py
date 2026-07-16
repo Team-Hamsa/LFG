@@ -151,7 +151,13 @@ async def _upload_media(image_bytes: bytes, deps: Deps) -> str | None:
     """Uploads the mint image; returns the media_id, or None to degrade to a
     text-only tweet on any non-429 failure. A 429 is NOT swallowed here — it
     propagates so the caller applies the global backoff and fails the whole
-    post (posting anyway after a 429 would keep burning API quota)."""
+    post (posting anyway after a 429 would keep burning API quota).
+
+    Both failure families the retry loop can exhaust are caught: XApiError
+    (HTTP >= 400 — x_api._send only wraps those) AND raw network errors
+    (aiohttp.ClientError / asyncio.TimeoutError propagate from x_api
+    unwrapped), so an exhausted network flake degrades to text-only instead
+    of escaping handle_event and dropping the post entirely."""
     try:
         return await _retry(
             lambda: deps.x_api.upload_media(image_bytes),
@@ -162,6 +168,9 @@ async def _upload_media(image_bytes: bytes, deps: Deps) -> str | None:
         if exc.status == 429:
             raise
         logging.warning(f"x_bot: media upload failed ({exc}); degrading to text-only tweet")
+        return None
+    except (aiohttp.ClientError, asyncio.TimeoutError) as exc:
+        logging.warning(f"x_bot: media upload network error ({exc}); degrading to text-only tweet")
         return None
 
 
@@ -279,8 +288,11 @@ async def handle_event(event: Mapping[str, Any], deps: Deps) -> str | None:
             should_retry=_is_retryable_x_error,
             sleep=deps.sleep,
         )
-    except XApiError as exc:
-        if exc.status == 429:
+    except (XApiError, aiohttp.ClientError, asyncio.TimeoutError) as exc:
+        # Raw network errors reach here unwrapped (x_api._send only wraps
+        # HTTP >= 400 into XApiError); spec §5.5 requires "5xx/network" to
+        # retry then record `failed` — so both families record, never escape.
+        if isinstance(exc, XApiError) and exc.status == 429:
             _apply_429_backoff(exc, deps)
         logging.error(f"x_bot: post_tweet failed for {event_key} ({exc})")
         state.record(deps.db_path, event_key, "failed")
@@ -297,6 +309,14 @@ async def run_event_loop(http: aiohttp.ClientSession, deps: Deps) -> None:
     improvement: `AuthError` from a rejected `/events` handshake is allowed to
     propagate (after `aclose()`) so `main()` can fail loudly, rather than
     dying silently the way the Telegram template does (recon-events.md #7)."""
+    # Raw stream_events, not the house svc.events() (LFGServiceClient): this
+    # surface consumes ONLY the /events firehose — it never makes REST calls
+    # to the service, so the client's whole value-add (session-token cache,
+    # REST retry) is dead weight, and its internal ClientSession would be a
+    # second connection pool next to the one `http` already shared with XApi
+    # and the image downloads. If x_bot ever needs a REST endpoint, switch to
+    # LFGServiceClient(..., surface="x") then.
+    #
     # stream_events() is implemented as an async generator (it aclose()s fine
     # at runtime) but is annotated to return the narrower AsyncIterator[Event]
     # — cast so the aclose() call below type-checks under strict mypy.
