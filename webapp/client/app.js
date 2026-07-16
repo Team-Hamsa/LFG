@@ -1356,11 +1356,19 @@ function renderCloset() {
     // Client mirrors the server precheck (server re-verifies on commit).
     const compatible = char && economyState.slots.includes(asset.slot);
     if (!compatible) item.classList.add('incompatible');
+    // With a GO selected, a trait that can't render on its body is hidden
+    // entirely (it reappears on a GO whose body has the art). With no GO
+    // selected, keep a blank placeholder so the Closet contents stay visible.
+    if (char && !layerComplete(char.body, asset.value)) continue;
     const img = document.createElement('img');
-    // Guard: a missing active body or empty asset value would 400 the layer fetch.
-    img.src = (char && layerComplete(char.body, asset.value))
-      ? layerSrc(char.body, asset.slot, asset.value)
-      : BLANK_IMG;
+    if (char) {
+      img.src = layerSrc(char.body, asset.slot, asset.value);
+      // Art missing for this body (layer fetch 404s): drop the whole tile
+      // instead of rendering a broken image.
+      img.onerror = () => item.remove();
+    } else {
+      img.src = BLANK_IMG;
+    }
     img.alt = `${asset.slot}: ${asset.value}`;
     const count = document.createElement('span');
     count.className = 'count';
@@ -1397,12 +1405,16 @@ function renderTraitStrip() {
   }
   const char = activeChar();
   for (const t of tokens) {
+    if (char && !layerComplete(char.body, t.value)) continue;
     const chip = document.createElement('div');
     chip.className = 'trait-chip';
     const img = document.createElement('img');
-    img.src = (char && layerComplete(char.body, t.value))
-      ? layerSrc(char.body, t.slot, t.value)
-      : BLANK_IMG;
+    if (char) {
+      img.src = layerSrc(char.body, t.slot, t.value);
+      img.onerror = () => chip.remove();
+    } else {
+      img.src = BLANK_IMG;
+    }
     img.alt = `${t.slot}: ${t.value}`;
     const label = document.createElement('span');
     label.className = 'trait-chip-label';
