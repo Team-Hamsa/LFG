@@ -216,3 +216,15 @@ def test_enumerate_tokens_raises_on_error_response(monkeypatch):
 
     with pytest.raises(RuntimeError, match="nfts_by_issuer failed"):
         asyncio.new_event_loop().run_until_complete(_go())
+
+
+def test_upsert_never_resurrects_burned_token(tmp_path):
+    # XRPL burns are irreversible. A stale source (e.g. a Bithomp CSV exported
+    # before the burn) re-upserting the token as live must not flip is_burned
+    # back to 0 — that resurrected 18 burned mainnet tokens on 2026-07-15 and
+    # made every burn-reminted edition show as a duplicate.
+    conn = nft_index.init_db(str(tmp_path / "x.db"))
+    nft_index.upsert(conn, _nft("AAA", burned=True))
+    nft_index.upsert(conn, _nft("AAA", burned=False))  # stale re-import
+    row = conn.execute("SELECT is_burned FROM onchain_nfts WHERE nft_id='AAA'").fetchone()
+    assert row[0] == 1

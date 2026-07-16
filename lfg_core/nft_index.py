@@ -235,7 +235,10 @@ def upsert(conn: sqlite3.Connection, rec: OnchainNft) -> None:
         ON CONFLICT(nft_id) DO UPDATE SET
             nft_number=excluded.nft_number,
             owner=excluded.owner,
-            is_burned=excluded.is_burned,
+            -- Burns are irreversible on XRPL: a stale source (e.g. a Bithomp
+            -- CSV exported before the burn) must never resurrect a burned
+            -- token to live.
+            is_burned=MAX(is_burned, excluded.is_burned),
             mutable=excluded.mutable,
             uri_hex=excluded.uri_hex,
             -- Empty attributes mean "metadata fetch failed", never "token has
