@@ -32,8 +32,8 @@ from xrpl.core.addresscodec import is_valid_classic_address
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from lfg_core import (
-    bulk_mint_flow,
     brix_payment,
+    bulk_mint_flow,
     closet_token,
     config,
     db_path,

@@ -87,9 +87,7 @@ def test_xrp_path_applies_buffer_and_rounds_up(monkeypatch, balance):
 
 def test_xrp_path_rounds_up_not_half_even(monkeypatch):
     monkeypatch.setattr(brix_payment.xrpl_ops, "get_trustline_balance", _fake_balance(None))
-    monkeypatch.setattr(
-        brix_payment.xrpl_ops, "get_amm_xrp_cost", _fake_amm(Decimal("0.0000001"))
-    )
+    monkeypatch.setattr(brix_payment.xrpl_ops, "get_amm_xrp_cost", _fake_amm(Decimal("0.0000001")))
     pay_with, amount = _run(brix_payment.detect_payment_path(WALLET, "1", buffer="1.0"))
     assert pay_with == "XRP"
     assert amount == "0.000001"  # ROUND_UP: never quantizes a nonzero cost to zero

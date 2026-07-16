@@ -211,9 +211,7 @@ async def run_buyback_if_due(
     try:
         shop_store.update_order(deps.conn, session_id, now_ts=deps.now_ts_fn(), buyback_done=1)
     except Exception:
-        log.error(
-            f"Shop buy {session_id} buyback_done flag write failed: {traceback.format_exc()}"
-        )
+        log.error(f"Shop buy {session_id} buyback_done flag write failed: {traceback.format_exc()}")
 
 
 async def start_shop_buy(session: ShopBuySession, deps: ShopDeps) -> None:
