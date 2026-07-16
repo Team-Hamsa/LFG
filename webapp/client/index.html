@@ -102,6 +102,7 @@
           <div id="dressup-canvas" class="dressup-canvas" role="img"
                aria-label="Character preview"></div>
           <p id="dressup-id" class="cap"></p>
+          <button id="go-switch-btn" class="secondary">🔄 Switch GO</button>
           <button id="dressup-harvest-btn" class="secondary">🔥 Harvest</button>
         </div>
         <div class="dressup-closet">
@@ -112,7 +113,6 @@
           <div id="closet-grid" class="closet-grid"></div>
         </div>
       </div>
-      <div id="roster-strip" class="roster-strip"></div>
       <div class="trait-strip-section">
         <h4 class="trait-strip-heading">Your tradeable traits</h4>
         <div id="trait-strip" class="trait-strip"></div>
@@ -216,6 +216,17 @@
   <div id="toasts" class="toasts" aria-live="assertive"></div>
 
   <!-- In-app confirm: Discord's sandboxed iframe makes native window.confirm a no-op. -->
+  <div id="go-picker-overlay" class="confirm-overlay" role="dialog" aria-modal="true"
+       aria-labelledby="go-picker-title" hidden>
+    <div class="confirm-box card go-picker-box">
+      <div class="go-picker-head">
+        <h2 id="go-picker-title">Your GOs</h2>
+        <button id="go-picker-close" class="secondary" aria-label="Close">✕</button>
+      </div>
+      <div id="go-picker-grid" class="go-picker-grid"></div>
+    </div>
+  </div>
+
   <div id="confirm-overlay" class="confirm-overlay" role="dialog" aria-modal="true"
        aria-labelledby="confirm-title" hidden>
     <div class="confirm-box card">

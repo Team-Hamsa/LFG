@@ -1146,12 +1146,20 @@ function renderCanvas(char) {
   el('dressup-id').textContent = `#${char.edition} · ${char.body} · live`;
 }
 
-function renderRoster(assembleEnabled = true) {
-  const strip = el('roster-strip');
-  strip.replaceChildren();
+// --- GO picker (overlay) ---
+// Replaces the old unlabeled bottom roster strip: a full-panel overlay grid
+// of labeled tiles (#edition · body), opened from the Switch GO button.
+let goAssembleEnabled = true;
+
+function renderGoPicker() {
+  const grid = el('go-picker-grid');
+  grid.replaceChildren();
   for (const char of economyState.characters) {
+    const t = buildPure.goTileState(char, activeNftId);
     const tile = document.createElement('button');
-    tile.className = 'roster-tile' + (char.nft_id === activeNftId ? ' active' : '');
+    tile.className = 'go-tile'
+      + (t.state === 'active' ? ' active' : '')
+      + (t.state === 'indexing' ? ' indexing' : '');
     const img = document.createElement('img');
     img.loading = 'lazy';
     const imgSrc = imgUrl(char.image_url, THUMB_W);
@@ -1161,34 +1169,58 @@ function renderRoster(assembleEnabled = true) {
     } else if (layerComplete(char.body, bodyVal)) {
       img.src = layerSrc(char.body, 'Body', bodyVal);
     } else {
-      // No CDN image and incomplete metadata: a layer fetch would 400. Render a
-      // placeholder tile (transparent img) rather than a broken one.
-      tile.classList.add('incomplete');
+      // No CDN image and incomplete metadata: a layer fetch would 400.
       img.src = BLANK_IMG;
     }
-    img.alt = `#${char.edition}`;
-    tile.appendChild(img);
-    tile.onclick = () => selectCharacter(char.nft_id);
-    strip.appendChild(tile);
+    img.alt = t.label;
+    const cap = document.createElement('span');
+    cap.className = 'go-tile-label';
+    cap.textContent = t.state === 'active' ? `✓ ${t.label}` : t.label;
+    const sub = document.createElement('span');
+    sub.className = 'go-tile-sub';
+    sub.textContent = t.sub;
+    tile.replaceChildren(img, cap, sub);
+    if (t.state === 'indexing') {
+      tile.disabled = true; // no body -> every layer fetch would 400
+    } else {
+      tile.onclick = () => { closeGoPicker(); selectCharacter(char.nft_id); };
+    }
+    grid.appendChild(tile);
   }
   const add = document.createElement('button');
-  add.className = 'roster-tile assemble';
+  add.className = 'go-tile assemble';
   add.textContent = '＋';
-  add.title = 'Assemble new';
-  if (assembleEnabled) {
-    add.onclick = () => openAssemble();
-  } else {
-    add.disabled = true;
-    add.title = 'Create your Closet first';
+  add.title = goAssembleEnabled ? 'Assemble new' : 'Create your Closet first';
+  if (goAssembleEnabled) add.onclick = () => { closeGoPicker(); openAssemble(); };
+  else add.disabled = true;
+  grid.appendChild(add);
+}
+
+function openGoPicker() {
+  renderGoPicker();
+  const overlay = el('go-picker-overlay');
+  overlay.hidden = false;
+  const onKey = (e) => { if (e.key === 'Escape') closeGoPicker(); };
+  overlay._onKey = onKey; // stashed so closeGoPicker can remove it
+  document.addEventListener('keydown', onKey);
+  el('go-picker-close').onclick = () => closeGoPicker();
+  overlay.onclick = (e) => { if (e.target === overlay) closeGoPicker(); }; // backdrop = close
+}
+
+function closeGoPicker() {
+  const overlay = el('go-picker-overlay');
+  overlay.hidden = true;
+  overlay.onclick = null;
+  if (overlay._onKey) {
+    document.removeEventListener('keydown', overlay._onKey);
+    overlay._onKey = null;
   }
-  strip.appendChild(add);
 }
 
 function selectCharacter(nftId) {
   activeNftId = nftId;
   const char = economyState.characters.find((c) => c.nft_id === nftId);
   if (char) renderCanvas(char);
-  renderRoster();
   renderCloset();
 }
 
@@ -1265,8 +1297,7 @@ async function openDressup() {
         };
       }
 
-      // Render roster (no-op visually) but don't wire assemble tile
-      renderRoster(/* assembleEnabled= */ false);
+      goAssembleEnabled = false;
       el('dressup-canvas').replaceChildren();
       return;
     }
@@ -1277,8 +1308,8 @@ async function openDressup() {
     harvestBtn.hidden = false;
     harvestBtn.onclick = () => harvestActive();
 
+    goAssembleEnabled = true;
     activeNftId = buildPure.pickDefaultCharacter(economyState.characters);
-    renderRoster(/* assembleEnabled= */ true);
     if (activeNftId) selectCharacter(activeNftId);
     else { el('dressup-canvas').replaceChildren(); renderCloset(); }
   } catch (e) {
@@ -1523,7 +1554,7 @@ async function harvestActive() {
     activeNftId = buildPure.pickDefaultCharacter(economyState.characters);
     showPanel('dressup-panel');
     if (activeNftId) selectCharacter(activeNftId);
-    else { renderRoster(); renderCloset(); el('dressup-canvas').replaceChildren(); }
+    else { renderCloset(); el('dressup-canvas').replaceChildren(); }
   } catch (e) {
     showError(e.message);
   }
@@ -2141,6 +2172,7 @@ async function main() {
   el('flow-regen-btn').onclick = regeneratePaymentQr;
   el('swap-btn').onclick = () => openDressup();
   el('dressup-back-btn').onclick = () => showMintHome();
+  el('go-switch-btn').onclick = () => openGoPicker();
   el('swapper-btn').onclick = () => openSwapper();
   el('swap-back-btn').onclick = () => showMintHome();
   el('pick-traits-btn').onclick = showTraitChooser;
