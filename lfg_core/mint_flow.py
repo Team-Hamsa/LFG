@@ -95,6 +95,13 @@ class MintSession:
         self.nft_number: int | None = None
         self.nft_id: str | None = None
         self.image_url: str | None = None
+        # #41: the minted edition's traits (LFG-naming, e.g. Head -> Hat) and
+        # body_type, set once mint_one_unit confirms the mint on-chain. None
+        # pre-fulfillment, same None-handling style as image_url/nft_id --
+        # lets the X poster compose tweet copy (and rank the rarest slot,
+        # which is body-scoped) straight from the firehose event.
+        self.traits: dict[str, str] | None = None
+        self.body_type: str | None = None
         self.accept_qr_url: str | None = None
         self.accept_deeplink: str | None = None
         self.accept_uuid: str | None = None
@@ -221,6 +228,8 @@ class MintSession:
             "nft_number": self.nft_number,
             "nft_id": self.nft_id,
             "image_url": self.image_url,
+            "traits": self.traits,
+            "body_type": self.body_type,
             "accept_qr_url": self.accept_qr_url,
             "accept_deeplink": self.accept_deeplink,
             "accept_push": self.accept_push,
@@ -275,6 +284,12 @@ class UnitResult:
     offer_id: str | None
     accept: dict[str, Any] | None
     error: str | None
+    # #41: LFG-naming traits dict + body_type, known only once the mint lands
+    # on-chain (None on the earlier "mint never landed" failure paths).
+    # Defaulted so every existing UnitResult(...) call site (this module's
+    # earlier return statements, tests) stays valid unchanged.
+    traits: dict[str, str] | None = None
+    body_type: str | None = None
 
 
 async def mint_one_unit(
@@ -448,6 +463,8 @@ async def mint_one_unit(
                     f"NFT minted (ID: {nft_id}) but offer creation failed. "
                     "Please contact an administrator."
                 ),
+                traits=traits_dict,
+                body_type=body,
             )
 
         accept = await xumm_ops.create_accept_offer_payload(
@@ -467,6 +484,8 @@ async def mint_one_unit(
                     f"NFT minted and offer created ({offer_id}) but the XUMM "
                     "request failed. Please accept the offer manually."
                 ),
+                traits=traits_dict,
+                body_type=body,
             )
 
         return UnitResult(
@@ -476,6 +495,8 @@ async def mint_one_unit(
             offer_id=offer_id,
             accept=accept,
             error=None,
+            traits=traits_dict,
+            body_type=body,
         )
 
     except Exception as e:
@@ -595,6 +616,8 @@ async def run_mint_session(session: MintSession) -> None:
         )
         session.nft_id = res.nft_id
         session.image_url = res.image_url
+        session.traits = res.traits
+        session.body_type = res.body_type
         if res.error or not res.offer_id or not res.accept:
             _release_unused_number(session)
             session.state = FAILED
