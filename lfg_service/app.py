@@ -3543,6 +3543,29 @@ async def handle_index(request):
 
 
 @web.middleware
+async def cors_mw(request, handler):
+    # Standalone web surface (spec 2026-07-16): the GitHub-Pages-hosted client
+    # calls this API cross-origin. Dark by default — with WEB_ALLOWED_ORIGINS
+    # unset (or the Origin not allowlisted) responses are byte-identical to
+    # today, so Discord/Telegram/dev surfaces are untouched. Auth rides the
+    # Authorization header, never cookies, so no Allow-Credentials.
+    origin = request.headers.get("Origin", "")
+    allowed = bool(origin) and origin in config.WEB_ALLOWED_ORIGINS
+    if allowed and request.method == "OPTIONS":
+        # Preflight: answer here — no handler owns OPTIONS routes.
+        resp = web.Response(status=204)
+        resp.headers["Access-Control-Allow-Methods"] = "GET, POST, DELETE, OPTIONS"
+        resp.headers["Access-Control-Allow-Headers"] = "Authorization, Content-Type"
+        resp.headers["Access-Control-Max-Age"] = "3600"
+    else:
+        resp = await handler(request)
+    if allowed:
+        resp.headers["Access-Control-Allow-Origin"] = origin
+        resp.headers.add("Vary", "Origin")
+    return resp
+
+
+@web.middleware
 async def no_cache_mw(request, handler):
     # The Activity is served behind Discord's caching proxy; without this an
     # updated frontend (index.html / app.js / vendored SDK) keeps serving stale
@@ -3554,7 +3577,7 @@ async def no_cache_mw(request, handler):
 
 
 def create_app() -> web.Application:
-    app = web.Application(middlewares=[no_cache_mw])
+    app = web.Application(middlewares=[cors_mw, no_cache_mw])
     identity_store.ensure_identities_table()
     identity_store.migrate_users_to_identities()
     app.router.add_get("/api/config", handle_config)
