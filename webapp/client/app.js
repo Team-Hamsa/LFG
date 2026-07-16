@@ -2137,6 +2137,7 @@ async function main() {
   el('mint-btn').onclick = startMint;
   el('flow-regen-btn').onclick = regeneratePaymentQr;
   el('swap-btn').onclick = () => openDressup();
+  el('dressup-back-btn').onclick = () => showMintHome();
   el('swapper-btn').onclick = () => openSwapper();
   el('swap-back-btn').onclick = () => showMintHome();
   el('pick-traits-btn').onclick = showTraitChooser;
@@ -2170,7 +2171,7 @@ async function main() {
   try {
     const cfg = await api('/api/config');
     // Closet / trait economy ships after the mainnet MVP: with the feature
-    // off, hide the Dress Up entry point (the API answers 403 regardless).
+    // off, hide the Build entry point (the API answers 403 regardless).
     if (cfg.economy_enabled === false) el('swap-btn').hidden = true;
     // In-app marketplace (#44) ships after the mainnet MVP: with the feature
     // off, hide the Marketplace entry point (the API answers 403 regardless).
