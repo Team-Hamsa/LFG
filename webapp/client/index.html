@@ -227,10 +227,15 @@
     </div>
   </div>
 
+  <!-- Deploy-time surface config (standalone web surface, spec 2026-07-16).
+       The repo default sets window.LFG_WEB = null; the GitHub Pages deploy
+       overwrites it with the cross-origin API base. Loaded BEFORE app.js so
+       boot can detect the web-surface context. -->
+  <script src="config.js?v=1"></script>
   <!-- Telegram Mini App bridge (#89), vendored same-origin. A no-op outside
        Telegram (window.Telegram stays undefined); loaded BEFORE app.js so the
        dual-mode boot can detect the Telegram context. -->
   <script src="telegram-web-app.js"></script>
-  <script type="module" src="app.js?v=15"></script>
+  <script type="module" src="app.js?v=16"></script>
 </body>
 </html>

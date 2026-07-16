@@ -22,6 +22,16 @@ const insideDiscord = params.has('frame_id');
 const tg = window.Telegram && window.Telegram.WebApp;
 const insideTelegram = !!(tg && tg.initData);
 
+// Standalone web surface (spec 2026-07-16): config.js sets window.LFG_WEB when
+// this client is served from GitHub Pages (build.letseffinggo.com); the API
+// then lives on another origin (the funnel) and auth is a Xaman wallet
+// sign-in instead of Discord/Telegram. The repo-default config.js keeps
+// LFG_WEB null, so nothing changes for the other surfaces.
+const webCfg = window.LFG_WEB || null;
+const insideWeb = !!webCfg && !insideDiscord && !insideTelegram;
+const API_BASE = (webCfg && webCfg.apiBase) || '';
+const WEB_SESSION_KEY = 'lfg_web_session';
+
 const el = (id) => document.getElementById(id);
 const status = (msg) => { el('status').textContent = msg; };
 
@@ -79,9 +89,14 @@ let externalOpener = null; // set when the SDK is available
 async function api(path, opts = {}) {
   const headers = { 'Content-Type': 'application/json', ...(opts.headers || {}) };
   if (sessionToken) headers['Authorization'] = `Bearer ${sessionToken}`;
-  const res = await fetch(path, { ...opts, headers });
+  const res = await fetch(API_BASE + path, { ...opts, headers });
   const data = await res.json().catch(() => ({}));
   if (!res.ok) {
+    // Web surface: an expired/invalid stored session must not survive a
+    // reload — drop it so the next boot re-offers the Xaman sign-in.
+    if (insideWeb && res.status === 401) {
+      try { localStorage.removeItem(WEB_SESSION_KEY); } catch (_) { /* private mode */ }
+    }
     const err = new Error(data.error || `HTTP ${res.status}`);
     // Some endpoints (e.g. 409 shop/market session_active) carry extra
     // fields (code, session_id) callers need to resume rather than just
@@ -95,7 +110,7 @@ async function api(path, opts = {}) {
 }
 
 function qrUrl(data) {
-  return `/api/qr.png?d=${encodeURIComponent(data)}`;
+  return `${API_BASE}/api/qr.png?d=${encodeURIComponent(data)}`;
 }
 
 // CDN images are cross-origin and blocked by the Activity's CSP, so they are
@@ -106,7 +121,7 @@ function qrUrl(data) {
 const THUMB_W = 256;
 function imgUrl(url, w) {
   if (!url) return url;
-  const base = `/api/img?u=${encodeURIComponent(url)}`;
+  const base = `${API_BASE}/api/img?u=${encodeURIComponent(url)}`;
   return w ? `${base}&w=${w}` : base;
 }
 
@@ -709,6 +724,73 @@ function pollSignin(uuid) {
     signinPollTimer = setTimeout(tick, 3000);
   };
   signinPollTimer = setTimeout(tick, 3000);
+}
+
+// --- Standalone web surface sign-in (spec 2026-07-16) ---
+// Same register-panel QR UI, but the sign-in IS the auth: on approval the
+// service returns a platform="web" session token (wallet = identity), which
+// persists in localStorage so a reload within the token TTL skips the QR.
+
+async function startWebSignin() {
+  clearTimeout(signinPollTimer);
+  showPanel('register-panel');
+  renderSignin({ sub: 'Setting up your Xaman sign-in…', spinner: true });
+  try {
+    const s = await api('/api/web/signin', { method: 'POST', body: '{}' });
+    renderSignin({
+      sub: 'Scan with Xaman and approve the sign-in — your wallet is your login.',
+      qrLink: s.signin_link,
+    });
+    pollWebSignin(s.uuid);
+  } catch (e) {
+    showError(e.message);
+    renderSignin({ sub: 'Could not start the Xaman sign-in.', retry: true });
+  }
+}
+
+function pollWebSignin(uuid) {
+  clearTimeout(signinPollTimer);
+  const tick = async () => {
+    if (el('register-panel').hidden) return; // user navigated away
+    let s;
+    try {
+      s = await api(`/api/web/signin/${uuid}`);
+    } catch (e) {
+      signinPollTimer = setTimeout(tick, 3000); // transient; keep polling
+      return;
+    }
+    if (s.state === 'signed') {
+      sessionToken = s.session_token;
+      try { localStorage.setItem(WEB_SESSION_KEY, s.session_token); } catch (_) { /* private mode */ }
+      me = { ...s.user, wallet: s.wallet };
+      showMintHome();
+      return;
+    }
+    if (s.state === 'expired') {
+      renderSignin({ sub: 'The sign-in request expired.', retry: true });
+      return;
+    }
+    if (s.state === 'opened') {
+      renderSignin({ sub: 'QR scanned — approve the sign-in in Xaman…', spinner: true });
+    }
+    signinPollTimer = setTimeout(tick, 3000);
+  };
+  signinPollTimer = setTimeout(tick, 3000);
+}
+
+async function setupWeb() {
+  let stored = null;
+  try { stored = localStorage.getItem(WEB_SESSION_KEY); } catch (_) { /* private mode */ }
+  if (stored) {
+    sessionToken = stored;
+    try {
+      return await api('/api/me'); // still valid → straight in
+    } catch (_) {
+      sessionToken = null; // expired/invalid (api() already dropped the key)
+    }
+  }
+  await startWebSignin();
+  return null; // the sign-in flow drives the UI from here
 }
 
 // --- Trait Swapper ---
@@ -2133,7 +2215,7 @@ function setupLogo() {
 async function main() {
   setupLogo();
   setupLeaderboard();
-  el('register-retry-btn').onclick = startSignin;
+  el('register-retry-btn').onclick = () => (insideWeb ? startWebSignin() : startSignin());
   el('mint-btn').onclick = startMint;
   el('flow-regen-btn').onclick = regeneratePaymentQr;
   el('swap-btn').onclick = () => openDressup();
@@ -2143,7 +2225,7 @@ async function main() {
   el('swap-cancel-btn').onclick = () => openSwapper();
   el('swap-confirm-btn').onclick = confirmSwap;
   el('swap-done-btn').onclick = () => showMintHome();
-  el('change-wallet-btn').onclick = () => startSignin();
+  el('change-wallet-btn').onclick = () => (insideWeb ? startWebSignin() : startSignin());
   el('flow-done-btn').onclick = () => { showMintHome(); };
 
   // --- Marketplace (#44 Task 10) ---
@@ -2175,10 +2257,28 @@ async function main() {
     // In-app marketplace (#44) ships after the mainnet MVP: with the feature
     // off, hide the Marketplace entry point (the API answers 403 regardless).
     if (cfg.market_enabled === false) el('market-btn').hidden = true;
-    if (cfg.dev_mode && 'EventSource' in window) {
+    // Dev reload is same-origin only — never against a cross-origin API base.
+    if (cfg.dev_mode && !API_BASE && 'EventSource' in window) {
       new EventSource('/__dev/reload').onmessage = () => location.reload();
     }
   } catch (_) { /* non-dev or offline: ignore */ }
+
+  // Standalone web surface: the Xaman sign-in IS the auth handshake.
+  if (insideWeb) {
+    try {
+      const user = await setupWeb();
+      if (user) {
+        me = user;
+        // Re-attach to a mint an earlier tab/reload orphaned before going home.
+        if (!(await resumeMint())) showMintHome();
+      }
+      // else: startWebSignin() is already driving the register panel.
+    } catch (e) {
+      console.error(e);
+      status(`Failed to connect: ${e.message}`);
+    }
+    return;
+  }
 
   if (!insideTelegram && !insideDiscord) {
     status('Open this inside Telegram or Discord. (Dev mode: API calls will be unauthorized.)');
