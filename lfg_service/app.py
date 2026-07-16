@@ -3227,6 +3227,99 @@ async def handle_signin_status(request):
     return web.json_response({"state": "opened" if s["opened"] else "pending"})
 
 
+# --- Standalone web surface signin (spec 2026-07-16) -------------------------
+# Client-callable (same trust posture as /api/telegram/auth): bootstraps a
+# session where the wallet IS the identity — platform="web",
+# platform_user_id=<classic address>. The payload uuid (128-bit, single-use,
+# short-TTL) is the bearer secret; no pre-auth ownership check is possible,
+# which is the same trust model as the XUMM deep link itself.
+
+web_signin_payloads: dict[str, Any] = {}
+WEB_SIGNIN_RATE_MAX = 5  # payload creations…
+WEB_SIGNIN_RATE_WINDOW = 60.0  # …per IP per window (protects the XUMM API)
+_web_signin_hits: dict[str, list[float]] = {}
+
+
+def _client_ip(request) -> str:
+    # The funnel / tailscale serve fronts the service, so the TCP peer is
+    # localhost; X-Forwarded-For carries the real client (first hop).
+    fwd = request.headers.get("X-Forwarded-For", "")
+    if fwd:
+        return fwd.split(",")[0].strip()
+    return request.remote or "?"
+
+
+def _web_rate_limited(ip: str) -> bool:
+    now = time.time()
+    hits = [t for t in _web_signin_hits.get(ip, []) if now - t < WEB_SIGNIN_RATE_WINDOW]
+    if len(hits) >= WEB_SIGNIN_RATE_MAX:
+        _web_signin_hits[ip] = hits
+        return True
+    hits.append(now)
+    _web_signin_hits[ip] = hits
+    return False
+
+
+def _prune_web_signin_payloads():
+    cutoff = time.time() - SIGNIN_TTL
+    for uuid, rec in list(web_signin_payloads.items()):
+        if rec["created_at"] < cutoff:
+            del web_signin_payloads[uuid]
+
+
+async def handle_web_signin_start(request):
+    """Create a XUMM SignIn payload for the standalone web surface — no session
+    required (this IS how a web session begins)."""
+    if _web_rate_limited(_client_ip(request)):
+        return web.json_response(
+            {"error": "too many sign-in attempts", "code": "rate_limited"}, status=429
+        )
+    _prune_web_signin_payloads()
+    # Only an allowlisted Origin becomes the Xaman post-sign bounce target —
+    # never a caller-supplied URL.
+    origin = request.headers.get("Origin", "")
+    return_url = {"app": origin, "web": origin} if origin in config.WEB_ALLOWED_ORIGINS else None
+    payload = await xumm_ops.create_signin_payload(return_url=return_url)
+    if not payload:
+        return web.json_response({"error": "could not reach Xaman"}, status=502)
+    web_signin_payloads[payload["uuid"]] = {"created_at": time.time()}
+    return web.json_response({"uuid": payload["uuid"], "signin_link": payload["xumm_url"]})
+
+
+async def handle_web_signin_status(request):
+    uuid = request.match_info["payload_uuid"]
+    if uuid not in web_signin_payloads:
+        return web.json_response({"error": "not found"}, status=404)
+    s = await xumm_ops.get_payload_status(uuid)
+    if not s:
+        return web.json_response({"error": "could not reach Xaman"}, status=502)
+    if s["signed"] and s["account"] and is_valid_classic_address(s["account"]):
+        wallet = s["account"]
+        # A wallet already known from another surface keeps its display handle;
+        # a brand-new one gets a readable shortened address.
+        handle = await asyncio.to_thread(identity_store.handle_for_wallet, wallet)
+        name = handle or f"{wallet[:6]}…{wallet[-4:]}"
+        if not await asyncio.to_thread(identity_store.link, "web", wallet, name, wallet):
+            return web.json_response({"error": "identity link failed"}, status=500)
+        # #135: capture the push token so later sign requests push to Xaman.
+        if s.get("user_token"):
+            await asyncio.to_thread(identity_store.set_user_token, "web", wallet, s["user_token"])
+        del web_signin_payloads[uuid]
+        token = make_session_token({"id": wallet, "name": name, "platform": "web"})
+        return web.json_response(
+            {
+                "state": "signed",
+                "wallet": wallet,
+                "session_token": token,
+                "user": {"id": wallet, "username": name},
+            }
+        )
+    if s["expired"]:
+        del web_signin_payloads[uuid]
+        return web.json_response({"state": "expired"})
+    return web.json_response({"state": "opened" if s["opened"] else "pending"})
+
+
 async def handle_config(request):
     """Public config the frontend needs before auth (client_id, dev flag)."""
     return web.json_response(
@@ -3603,6 +3696,9 @@ def create_app() -> web.Application:
     app.router.add_post("/api/mint/{session_id}/cancel", handle_mint_cancel)
     app.router.add_post("/api/signin", handle_signin_start)
     app.router.add_get("/api/signin/{payload_uuid}", handle_signin_status)
+    # Standalone web surface (spec 2026-07-16): client-callable wallet signin.
+    app.router.add_post("/api/web/signin", handle_web_signin_start)
+    app.router.add_get("/api/web/signin/{payload_uuid}", handle_web_signin_status)
     app.router.add_get("/api/nfts", handle_nfts)
     app.router.add_get("/api/leaderboard", handle_leaderboard)
     app.router.add_get("/api/market/listings", handle_market_listings)
