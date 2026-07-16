@@ -694,3 +694,43 @@ def test_sweep_settlement_buyback_failure_still_settles_single_attempt(
     conn = _reopen(onchain_env)
     order = shop_store.get_order(conn, "X4")
     assert order["status"] == "settled" and order["buyback_done"] == 1
+
+
+def test_sweep_settlement_flag_write_failure_does_not_propagate(onchain_env, monkeypatch, tmp_path):
+    """Greptile #243: the buyback_done flag write in the sweep path must be
+    exception-swallowing (it goes through shop_flow.run_buyback_if_due, same
+    as the poll path) — a failed write after the burn must neither propagate
+    out of _settle_shop_order nor mark the order un-settled."""
+    conn = _reopen(onchain_env)
+    _active_buyer_closet(conn)
+    _seed_xrp_order(conn, "X5", status="accepted", created_ts=int(time.time()))
+    conn.close()
+
+    buybacks = []
+
+    async def fake_buy_and_burn(*a, **kw):
+        buybacks.append(1)
+        return "hash"
+
+    monkeypatch.setattr(server.xrpl_ops, "buy_and_burn", fake_buy_and_burn)
+
+    real_update = shop_store.update_order
+
+    def flaky_update(conn, session_id, **kw):
+        if kw.get("buyback_done") == 1:
+            raise sqlite3.OperationalError("disk I/O error")
+        return real_update(conn, session_id, **kw)
+
+    monkeypatch.setattr(server.shop_flow.shop_store, "update_order", flaky_update)
+
+    f = _FakeSettleDeps()
+    monkeypatch.setattr(
+        server.economy_api, "build_settlement_deps", lambda c: _settle_deps(c, f, tmp_path)
+    )
+
+    _run(server.sweep_shop_orders())  # must not raise
+
+    conn = _reopen(onchain_env)
+    order = shop_store.get_order(conn, "X5")
+    assert order["status"] == "settled"
+    assert buybacks == [1]

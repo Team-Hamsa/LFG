@@ -2214,24 +2214,26 @@ async def _settle_shop_order(order: dict[str, Any], network: str) -> None:
         try:
             shop_store.update_order(conn, session_id, now_ts=now_ts, status="settled")
             # #238: the sweep's settlement-retry path owes the same one-shot
-            # post-settlement AMM buyback the poll path fires — best-effort,
-            # guarded by the durable buyback_done flag so poll + sweep can
-            # never double-fire it.
-            if order.get("pay_with") == "XRP" and not order.get("buyback_done"):
-                try:
-                    await xrpl_ops.buy_and_burn(
-                        config.SWAP_OFFER_CURRENCY_HEX,
-                        config.SWAP_OFFER_ISSUER,
-                        str(order["price_brix"]),
-                        max_xrp=order.get("price_xrp"),
-                    )
-                except Exception:
-                    logging.error(
-                        f"shop settlement sweep: buyback failed for {session_id} (order "
-                        f"settled; collected XRP stays in the app wallet): "
-                        f"{traceback.format_exc()}"
-                    )
-                shop_store.update_order(conn, session_id, now_ts=now_ts, buyback_done=1)
+            # post-settlement AMM buyback the poll path fires — the shared
+            # run_buyback_if_due is best-effort, exception-swallowing (incl.
+            # the buyback_done flag write, so a failed write can never
+            # propagate and leave the burn re-armed), and guarded by the
+            # durable buyback_done flag so poll + sweep can never double-fire.
+            await shop_flow.run_buyback_if_due(
+                conn,
+                session_id=session_id,
+                pay_with=order.get("pay_with"),
+                price_brix=order["price_brix"],
+                price_xrp=order.get("price_xrp"),
+                buyback_done=order.get("buyback_done"),
+                buy_and_burn_fn=lambda value, max_xrp=None: xrpl_ops.buy_and_burn(
+                    config.SWAP_OFFER_CURRENCY_HEX,
+                    config.SWAP_OFFER_ISSUER,
+                    value,
+                    max_xrp=max_xrp,
+                ),
+                now_ts_fn=lambda: now_ts,
+            )
         finally:
             conn.close()
         try:

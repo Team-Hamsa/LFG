@@ -183,33 +183,38 @@ async def _revert_mint(deps: ShopDeps, session: ShopBuySession, nft_id: str) -> 
 
 
 async def run_buyback_if_due(
-    deps: ShopDeps,
+    conn: sqlite3.Connection,
     *,
     session_id: str,
     pay_with: str | None,
     price_brix: int,
     price_xrp: str | None,
     buyback_done: int | None,
+    buy_and_burn_fn: Callable[..., Awaitable[str | None]] | None,
+    now_ts_fn: Callable[[], int] = lambda: int(time.time()),
 ) -> None:
     """#238: after an XRP-path order settles, convert the collected XRP into
     BRIX through the AMM and burn it (`buy_and_burn_fn(price_brix,
     max_xrp=price_xrp)`), best-effort and silent — a failed buyback only logs
     (the XRP stays in the app wallet). `buyback_done` is flipped to 1 after
     the single attempt regardless of outcome, so the poll path and the sweep
-    can both call this without double-firing. No-op on the BRIX path or when
-    the flag is already set."""
+    can both call this without double-firing; both writes are exception-
+    swallowing so neither caller can crash between the burn and the flag
+    (which would leave buyback_done=0 and re-arm a second burn). Takes a raw
+    conn (not ShopDeps) so the service sweep shares this exact implementation.
+    No-op on the BRIX path or when the flag is already set."""
     if pay_with != "XRP" or buyback_done:
         return
-    if deps.buy_and_burn_fn is not None:
+    if buy_and_burn_fn is not None:
         try:
-            await deps.buy_and_burn_fn(str(price_brix), max_xrp=price_xrp)
+            await buy_and_burn_fn(str(price_brix), max_xrp=price_xrp)
         except Exception:
             log.error(
                 f"Shop buy {session_id} post-settlement buyback failed (order settled; "
                 f"collected XRP stays in the app wallet): {traceback.format_exc()}"
             )
     try:
-        shop_store.update_order(deps.conn, session_id, now_ts=deps.now_ts_fn(), buyback_done=1)
+        shop_store.update_order(conn, session_id, now_ts=now_ts_fn(), buyback_done=1)
     except Exception:
         log.error(f"Shop buy {session_id} buyback_done flag write failed: {traceback.format_exc()}")
 
@@ -354,12 +359,14 @@ async def advance_shop_buy(session: ShopBuySession, deps: ShopDeps) -> None:
     shop_store.update_order(deps.conn, session.id, now_ts=deps.now_ts_fn(), status="settled")
     order = shop_store.get_order(deps.conn, session.id)
     await run_buyback_if_due(
-        deps,
+        deps.conn,
         session_id=session.id,
         pay_with=session.pay_with,
         price_brix=session.price_brix,
         price_xrp=session.price_xrp,
         buyback_done=order.get("buyback_done") if order else 1,
+        buy_and_burn_fn=deps.buy_and_burn_fn,
+        now_ts_fn=deps.now_ts_fn,
     )
     try:
         app_conn = deps.app_conn_factory()
