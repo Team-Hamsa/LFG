@@ -32,6 +32,7 @@ from xrpl.models import IssuedCurrencyAmount
 from xrpl.utils import xrp_to_drops
 
 from lfg_core import (
+    brix_payment,
     cdn,
     config,
     image_archive,
@@ -70,21 +71,9 @@ async def detect_swap_payment(wallet_address: str, brix_amount: str) -> tuple[st
     """Silent fee-path detection: wallets holding >= brix_amount BRIX pay in
     BRIX (burned); everyone else pays the live AMM XRP equivalent — the
     buyback is never surfaced to the user. Returns ("BRIX"|"XRP", amount);
-    raises if the wallet holds no BRIX and the AMM can't quote a price."""
-    balance = await xrpl_ops.get_trustline_balance(
-        wallet_address, config.SWAP_OFFER_CURRENCY_HEX, config.SWAP_OFFER_ISSUER
-    )
-    if balance is not None and balance >= Decimal(brix_amount):
-        return "BRIX", brix_amount
-    cost = await xrpl_ops.get_amm_xrp_cost(
-        config.SWAP_OFFER_CURRENCY_HEX, config.SWAP_OFFER_ISSUER, Decimal(brix_amount)
-    )
-    if cost is None:
-        raise RuntimeError(
-            "Swap fee pricing is unavailable right now — please try again in a moment."
-        )
-    xrp = cost * Decimal(config.SWAP_XRP_FEE_BUFFER)
-    return "XRP", str(xrp.quantize(Decimal("0.000001"), rounding=ROUND_UP))
+    raises if the wallet holds no BRIX and the AMM can't quote a price.
+    Thin wrapper over the shared brix_payment.detect_payment_path (#238)."""
+    return await brix_payment.detect_payment_path(wallet_address, brix_amount)
 
 
 class SwapSession:
