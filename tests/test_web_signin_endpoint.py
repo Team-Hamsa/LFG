@@ -106,6 +106,15 @@ def test_start_rate_limit_keys_on_forwarded_for(monkeypatch):
     assert _run(app.handle_web_signin_start(req)).status == 429
 
 
+def test_stale_rate_limit_ips_are_pruned(monkeypatch):
+    # The hits dict must not grow forever across distinct client IPs: a fresh
+    # request's prune pass drops IPs whose window has fully expired.
+    monkeypatch.setattr(app.xumm_ops, "create_signin_payload", _fake_create())
+    app._web_signin_hits["203.0.113.7"] = [0.0]  # far in the past
+    _run(app.handle_web_signin_start(_Req()))
+    assert "203.0.113.7" not in app._web_signin_hits
+
+
 def test_start_xumm_unreachable_502(monkeypatch):
     async def fake(return_url=None):
         return None

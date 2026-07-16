@@ -3261,10 +3261,15 @@ def _web_rate_limited(ip: str) -> bool:
 
 
 def _prune_web_signin_payloads():
-    cutoff = time.time() - SIGNIN_TTL
+    now = time.time()
+    cutoff = now - SIGNIN_TTL
     for uuid, rec in list(web_signin_payloads.items()):
         if rec["created_at"] < cutoff:
             del web_signin_payloads[uuid]
+    # Rate-limit bookkeeping must not grow forever across distinct IPs.
+    for ip, hits in list(_web_signin_hits.items()):
+        if all(now - t >= WEB_SIGNIN_RATE_WINDOW for t in hits):
+            del _web_signin_hits[ip]
 
 
 async def handle_web_signin_start(request):
