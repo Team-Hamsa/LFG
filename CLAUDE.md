@@ -92,9 +92,23 @@ SERVICE_TOKEN_TELEGRAM=<telegram-surface-token>
 TELEGRAM_ANNOUNCE_CHAT_ID=<telegram-channel-id>
 TELEGRAM_MINI_APP_URL=<public-https-url-of-the-mini-app>   # optional (#89); unset = launch button omitted
 TELEGRAM_INITDATA_MAX_AGE=3600                              # optional (#89); initData replay window in seconds
+WEB_ALLOWED_ORIGINS=https://build.letseffinggo.com,https://team-hamsa.github.io   # optional (#240); standalone web surface CORS allowlist (empty = off)
 BRIX_DISTRIBUTOR_ADDRESS=<xrpl-address>                     # optional; airdrop distributor wallet, excluded from BRIX leaderboards/derivation as a counterparty
 BRIX_AMM_ACCOUNT=<xrpl-address>                             # optional; mainnet BRIX/XRP AMM pool account, used by snapshot_balances.py
 ```
+
+> **Standalone web surface (#240):** the same vanilla-JS Activity runs as a
+> plain website at `build.letseffinggo.com` — GitHub Pages serves
+> `webapp/client/` (published by `.github/workflows/pages.yml` on every push
+> to `deploy`, with `config.js` rewritten to the funnel API base), and the
+> prod API answers cross-origin via the `cors_mw` middleware, gated on
+> `WEB_ALLOWED_ORIGINS` (empty = feature off, zero behavior change). Auth is
+> a 4th arm: client-callable `POST /api/web/signin` + `GET
+> /api/web/signin/{uuid}` bootstrap a `platform="web"` session from a XUMM
+> SignIn — the wallet IS the `platform_user_id`, so `identity.resolve("web",
+> wallet)` returns the wallet and every `@require_wallet` flow works
+> unchanged. The client persists the session in `localStorage` for the 6 h
+> token TTL. Design: `docs/superpowers/specs/2026-07-16-web-surface-design.md`.
 
 > **Telegram Mini App (#89):** the Mini App serves the same vanilla-JS Activity
 > inside Telegram. It is feature-flagged OFF by default: with
