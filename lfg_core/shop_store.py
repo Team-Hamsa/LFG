@@ -23,6 +23,15 @@ _SCHEMA = """CREATE TABLE IF NOT EXISTS shop_orders (
     updated_ts   INTEGER NOT NULL
 )"""
 
+# #238 XRP fallback: self-migrating ALTERs (pattern from identities.user_token)
+# so a DB created with the pre-#238 schema gains the new columns on open.
+# pay_with is NULL on legacy rows — callers treat NULL as "BRIX".
+_MIGRATIONS = (
+    "ALTER TABLE shop_orders ADD COLUMN pay_with TEXT",
+    "ALTER TABLE shop_orders ADD COLUMN price_xrp TEXT",
+    "ALTER TABLE shop_orders ADD COLUMN buyback_done INTEGER DEFAULT 0",
+)
+
 _COLS = (
     "session_id",
     "buyer",
@@ -34,6 +43,9 @@ _COLS = (
     "status",
     "created_ts",
     "updated_ts",
+    "pay_with",
+    "price_xrp",
+    "buyback_done",
 )
 
 VALID_STATUSES = frozenset(
@@ -43,6 +55,12 @@ VALID_STATUSES = frozenset(
 
 def ensure_schema(conn: sqlite3.Connection) -> None:
     conn.execute(_SCHEMA)
+    for stmt in _MIGRATIONS:
+        try:
+            conn.execute(stmt)
+        except sqlite3.OperationalError as e:
+            if "duplicate column" not in str(e).lower():
+                raise
     conn.commit()
 
 
@@ -54,12 +72,15 @@ def create_order(
     value: str,
     price_brix: int,
     now_ts: int,
+    pay_with: str = "BRIX",
+    price_xrp: str | None = None,
 ) -> None:
     ensure_schema(conn)
     conn.execute(
         "INSERT INTO shop_orders (session_id, buyer, slot, value, price_brix,"
-        " status, created_ts, updated_ts) VALUES (?,?,?,?,?,'pending_mint',?,?)",
-        (session_id, buyer, slot, value, price_brix, now_ts, now_ts),
+        " status, created_ts, updated_ts, pay_with, price_xrp)"
+        " VALUES (?,?,?,?,?,'pending_mint',?,?,?,?)",
+        (session_id, buyer, slot, value, price_brix, now_ts, now_ts, pay_with, price_xrp),
     )
     conn.commit()
 
@@ -72,12 +93,22 @@ def update_order(
     status: str | None = None,
     nft_id: str | None = None,
     offer_index: str | None = None,
+    pay_with: str | None = None,
+    price_xrp: str | None = None,
+    buyback_done: int | None = None,
 ) -> None:
     if status is not None and status not in VALID_STATUSES:
         raise ValueError(f"unknown shop order status: {status}")
     sets: list[str] = ["updated_ts=?"]
     params: list[int | str] = [now_ts]
-    for col, val in (("status", status), ("nft_id", nft_id), ("offer_index", offer_index)):
+    for col, val in (
+        ("status", status),
+        ("nft_id", nft_id),
+        ("offer_index", offer_index),
+        ("pay_with", pay_with),
+        ("price_xrp", price_xrp),
+        ("buyback_done", buyback_done),
+    ):
         if val is not None:
             sets.append(f"{col}=?")
             params.append(val)
