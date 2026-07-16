@@ -100,7 +100,10 @@ async def _sync_global_including_entry_point(
         raise discord.app_commands.MissingApplicationID
     registered = await client.http.get_global_commands(app_id)
     entry_points = [dict(cmd) for cmd in registered if cmd.get("type") == _ENTRY_POINT_COMMAND_TYPE]
-    payload = [cmd.to_dict(command_tree) for cmd in command_tree._get_all_commands(guild=None)]
+    # _get_all_commands is private, but it is exactly how tree.sync() builds its
+    # own bulk-upsert payload — there is no public equivalent that includes
+    # context menus. Revisit if a discord.py upgrade grows Entry Point support.
+    payload = [cmd.to_dict(command_tree) for cmd in command_tree._get_all_commands(guild=None)]  # noqa: SLF001
     payload.extend(entry_points)  # keep by id — Discord preserves matched ids
     await client.http.bulk_upsert_global_commands(app_id, payload=payload)
 
@@ -118,7 +121,8 @@ async def _sync_commands(
             raise
         logging.warning(
             "Global command sync rejected (50240: Entry Point command); "
-            "retrying with the Entry Point command included"
+            "retrying with the Entry Point command included",
+            exc_info=exc,
         )
         await _sync_global_including_entry_point(command_tree)
     if guild_id:
