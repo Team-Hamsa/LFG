@@ -54,6 +54,10 @@ history_mainnet.db*
 lfg_nfts_*.db
 rarity.db
 
+# X (Twitter) bot posting state — pause/resume + dedup/budget (runtime, #41)
+x_state.db
+x_state.db-*
+
 # macOS finder metadata
 .DS_Store
 ._.DS_Store
