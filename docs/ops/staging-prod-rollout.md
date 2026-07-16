@@ -73,3 +73,5 @@ quiet, THEN:
 ## Later (non-blocking ops)
 - Create the staging Discord app (install to a test guild) and BotFather
   bot; fill tokens in ~/LFG-staging/.env; `pm2 restart stg-bot stg-telegram`.
+
+> **Executed 2026-07-16.** Both stacks live. Note: on this box use `tailscale funnel --bg --set-path …` (not `serve` — a serve command silently downgrades port 443 to tailnet-only and takes prod ingress offline).
