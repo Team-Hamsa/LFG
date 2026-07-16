@@ -229,6 +229,16 @@ TELEGRAM_INITDATA_MAX_AGE = int(os.getenv("TELEGRAM_INITDATA_MAX_AGE", "3600"))
 if TELEGRAM_INITDATA_MAX_AGE <= 0:
     raise ValueError("TELEGRAM_INITDATA_MAX_AGE must be greater than 0")
 
+
+def _parse_allowed_origins(raw: str) -> tuple[str, ...]:
+    return tuple(o.strip() for o in raw.split(",") if o.strip())
+
+
+# Standalone web surface (spec 2026-07-16): exact Origin values allowed to call
+# the API cross-origin (the GitHub Pages front-end at build.letseffinggo.com).
+# Empty (the default) keeps the CORS middleware inert — feature OFF.
+WEB_ALLOWED_ORIGINS = _parse_allowed_origins(os.getenv("WEB_ALLOWED_ORIGINS", ""))
+
 # Misc
 PAYMENT_TIMEOUT_SECONDS = int(os.getenv("PAYMENT_TIMEOUT_SECONDS", "300"))
 # After a credit-eligible payment wait times out, wait this long and re-check
