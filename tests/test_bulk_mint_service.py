@@ -21,6 +21,7 @@ os.environ.setdefault("BUNNY_PULL_ZONE", "nft.pullzone.example")
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 import asyncio  # noqa: E402
+import json  # noqa: E402
 
 import pytest  # noqa: E402
 from aiohttp.test_utils import make_mocked_request  # noqa: E402
@@ -442,3 +443,89 @@ def test_bulk_start_fails_closed_without_payment_link_or_persist(dev_auth, monke
     req = _post_request("/api/mint/bulk", {"quantity": 1})
     resp = _run(server.handle_bulk_mint_start(req))
     assert resp.status == 500
+
+
+class _AcceptReq(_StatusReq):
+    def __init__(self, session_id, index):
+        super().__init__(session_id)
+        self.match_info = {"session_id": session_id, "index": index}
+
+    async def json(self):
+        return {}
+
+
+def _offered_job(sessions):
+    job = bulk_mint_flow.BulkMintJob(
+        discord_id="dev", wallet_address="rDEV", requested_qty=2, platform="discord"
+    )
+    job.quantity = 2
+    job.units = [bulk_mint_flow.Unit(index=0), bulk_mint_flow.Unit(index=1)]
+    job.units[0].state = bulk_mint_flow.OFFERED
+    job.units[0].offer_id = "OFFERIDX0"
+    job.state = bulk_mint_flow.FULFILLING
+    sessions[job.id] = job
+    return job
+
+
+def test_bulk_unit_accept_route_registered():
+    routes = {
+        (r.method, r.resource.canonical)
+        for r in server.create_app().router.routes()
+        if r.resource is not None
+    }
+    assert ("POST", "/api/mint/bulk/{session_id}/units/{index}/accept") in routes
+
+
+def test_bulk_unit_accept_happy_path(dev_auth, monkeypatch):
+    job = _offered_job(dev_auth)
+    seen = {}
+
+    async def fake_payload(offer_id, return_url=None, user_token=None, platform=None, **kw):
+        seen.update(offer_id=offer_id, user_token=user_token, platform=platform)
+        return {"qr_url": "QR", "xumm_url": "LINK", "uuid": "U", "pushed": False, "push": None}
+
+    monkeypatch.setattr(server.xumm_ops, "create_accept_offer_payload", fake_payload)
+    resp = _run(server.handle_bulk_mint_unit_accept(_AcceptReq(job.id, "0")))
+    assert resp.status == 200
+    body = json.loads(resp.body)
+    assert body["link"] == "LINK" and body["qr"] == "QR"
+    assert seen["offer_id"] == "OFFERIDX0"
+    assert seen["platform"] == server.memos.platform_for_surface("discord")
+
+
+def test_bulk_unit_accept_rejects_non_offered_unit(dev_auth):
+    job = _offered_job(dev_auth)
+    resp = _run(server.handle_bulk_mint_unit_accept(_AcceptReq(job.id, "1")))  # unit 1 is PENDING
+    assert resp.status == 409
+
+
+def test_bulk_unit_accept_rejects_bad_index(dev_auth):
+    job = _offered_job(dev_auth)
+    for bad in ("7", "-1", "zero"):
+        resp = _run(server.handle_bulk_mint_unit_accept(_AcceptReq(job.id, bad)))
+        assert resp.status == 400, bad
+
+
+def test_bulk_unit_accept_unknown_job_404(dev_auth):
+    resp = _run(server.handle_bulk_mint_unit_accept(_AcceptReq("nope", "0")))
+    assert resp.status == 404
+
+
+def test_bulk_unit_accept_already_claimed_unit_409(dev_auth):
+    # offered with offer_id None = gift offer already accepted while the
+    # service was down (see BulkMintJob.to_dict contract) — nothing to sign.
+    job = _offered_job(dev_auth)
+    job.units[0].offer_id = None
+    resp = _run(server.handle_bulk_mint_unit_accept(_AcceptReq(job.id, "0")))
+    assert resp.status == 409
+
+
+def test_bulk_unit_accept_payload_failure_502(dev_auth, monkeypatch):
+    job = _offered_job(dev_auth)
+
+    async def none_payload(*a, **kw):
+        return None
+
+    monkeypatch.setattr(server.xumm_ops, "create_accept_offer_payload", none_payload)
+    resp = _run(server.handle_bulk_mint_unit_accept(_AcceptReq(job.id, "0")))
+    assert resp.status == 502
