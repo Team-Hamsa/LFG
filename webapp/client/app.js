@@ -377,7 +377,7 @@ async function setupTelegram() {
   return tokenData.user;
 }
 
-const ALL_PANELS = ['register-panel', 'mint-panel', 'flow-panel',
+const ALL_PANELS = ['register-panel', 'mint-panel', 'flow-panel', 'bulk-panel',
                     'swap-panel', 'swap-traits-panel', 'swap-result-panel',
                     'dressup-panel', 'market-panel', 'market-list-form-panel'];
 
@@ -792,10 +792,209 @@ function setupBulkStepper(cfg) {
   renderQty();
 }
 
+// ---- Bulk mint flow (#215 UI) ----
+let currentBulkId = null;
+let bulkPollTimer = null;
+let bulkPollGen = 0;
+
+function bulkPayView(j) {
+  const xrp = j.pay_with === 'XRP';
+  return {
+    title: `💰 Pay for ${j.quantity} builds`,
+    text: j.payment_link
+      ? (xrp
+        ? `Pay ${j.pay_amount} XRP to mint ${j.quantity} avatars — no trustline needed. Scan with Xaman, approve, and hang tight here.`
+        : `Pay ${j.pay_amount} LFGO — burned on mint. One payment covers all ${j.quantity}. Scan with Xaman, approve, and hang tight here.`)
+      : 'Preparing your payment request…',
+    pill: j.pay_with ? { kind: xrp ? 'xrp' : 'lfgo', text: `Paying with ${xrp ? 'XRP' : 'LFGO'}` } : null,
+    qrData: j.payment_link,
+    link: j.payment_link,
+    spinner: !j.payment_link, // payment_link may be null = still preparing (see to_dict contract)
+    cancel: () => cancelBulkMint(),
+  };
+}
+
 async function startBulkMint(quantity) {
-  // Replaced by the real bulk flow in the next task, which POSTs to
-  // '/api/mint/bulk' (Task 2's endpoint) and polls its session.
-  showError(`Bulk mint (${quantity}) coming right up — not wired yet.`);
+  try {
+    const j = await api('/api/mint/bulk', {
+      method: 'POST',
+      body: JSON.stringify({ ...discordCtx(), quantity }),
+    });
+    currentBulkId = j.id;
+    showFlow(bulkPayView(j));
+    pollBulk(j.id);
+  } catch (e) {
+    showError(e.message === 'collection_full'
+      ? 'The collection is full — no room left to mint.' : e.message);
+  }
+}
+
+async function cancelBulkMint() {
+  if (!currentBulkId) { showMintHome(); return; }
+  const btn = el('flow-cancel-btn');
+  btn.disabled = true;
+  try {
+    await api(`/api/mint/bulk/${currentBulkId}/cancel`, {
+      method: 'POST', body: JSON.stringify(discordCtx()),
+    });
+    clearTimeout(bulkPollTimer);
+    bulkPollGen++;
+    currentBulkId = null;
+    showMintHome();
+  } catch (e) {
+    // 409 = already paid: fulfillment must run — keep polling, don't dump home.
+  } finally {
+    btn.disabled = false;
+  }
+}
+
+function unitRow(j, u) {
+  const row = document.createElement('div');
+  row.className = `bulk-unit ${u.state}`;
+  const label = document.createElement('span');
+  label.className = 'u-label';
+  if (u.state === 'pending') label.textContent = `#${u.index + 1} — waiting…`;
+  else if (u.state === 'minted') label.textContent = `#${u.nft_number ?? u.index + 1} — creating offer…`;
+  else if (u.state === 'failed') {
+    label.innerHTML = '';
+    label.textContent = `#${u.index + 1} — didn't mint. `;
+    const err = document.createElement('span');
+    err.className = 'u-error';
+    err.textContent = 'Your payment is saved as a mint credit — nothing is lost.';
+    label.appendChild(err);
+  } else label.textContent = `#${u.nft_number}`;
+  if (u.image_url) {
+    const img = document.createElement('img');
+    img.className = 'thumb';
+    img.src = u.image_url;
+    img.alt = `NFT #${u.nft_number}`;
+    row.appendChild(img);
+  }
+  row.appendChild(label);
+  if (u.state === 'offered' && u.offer_id) {
+    const btn = document.createElement('button');
+    btn.className = 'secondary';
+    btn.textContent = 'Accept';
+    btn.onclick = () => bulkAccept(j.id, u.index, row, btn);
+    row.appendChild(btn);
+  } else if (u.state === 'offered' && !u.offer_id) {
+    const done = document.createElement('span');
+    done.textContent = '✅ claimed';
+    row.appendChild(done);
+  }
+  return row;
+}
+
+// Accept payloads are built ON CLICK only (XUMM open-payload cap, #260) —
+// never pre-created for the whole list.
+async function bulkAccept(jobId, index, row, btn) {
+  btn.disabled = true;
+  try {
+    const r = await api(`/api/mint/bulk/${jobId}/units/${index}/accept`, {
+      method: 'POST', body: JSON.stringify(discordCtx()),
+    });
+    let qrWrap = row.querySelector('.u-accept');
+    if (!qrWrap) {
+      qrWrap = document.createElement('div');
+      qrWrap.className = 'u-accept';
+      row.appendChild(qrWrap);
+    }
+    qrWrap.replaceChildren();
+    const note = document.createElement('p');
+    note.className = 'card-sub';
+    note.textContent = signText(r.push, 'Scan to claim this one to your wallet.');
+    qrWrap.appendChild(note);
+    const img = document.createElement('img');
+    img.className = 'u-qr';
+    img.src = qrUrl(r.link);
+    img.alt = 'Accept QR — scan with Xaman';
+    qrWrap.appendChild(img);
+    const open = document.createElement('button');
+    open.className = 'link';
+    open.textContent = 'Open in Xaman ↗';
+    open.onclick = () => openExternal(r.link);
+    qrWrap.appendChild(open);
+  } catch (e) {
+    showError(e.message);
+  } finally {
+    btn.disabled = false; // repeat click = fresh payload (old one expires in 15 min)
+  }
+}
+
+function renderBulkJob(j) {
+  showPanel('bulk-panel');
+  const total = j.quantity;
+  if (j.state === 'done') {
+    el('bulk-progress').textContent = j.offered === total
+      ? `All ${total} minted — accept your NFTs below. Offers never expire.`
+      : `Finished: ${j.offered}/${total} ready to accept below.`;
+  } else if (j.state === 'failed') {
+    el('bulk-progress').textContent = j.error || 'Something went wrong.';
+  } else {
+    el('bulk-progress').textContent = `Minting ${Math.min(j.minted + 1, total)} / ${total}…`;
+  }
+  el('bulk-spinner').hidden = j.state === 'done' || j.state === 'failed';
+  el('bulk-done-btn').hidden = !(j.state === 'done' || j.state === 'failed');
+  const list = el('bulk-units');
+  // Preserve any open accept QR across re-renders: only rebuild rows whose
+  // state changed. Keyed by unit index on the row element.
+  const prev = new Map([...list.children].map((n) => [n.dataset.idx, n]));
+  list.replaceChildren(...j.units.map((u) => {
+    const old = prev.get(String(u.index));
+    if (old && old.dataset.state === u.state) return old;
+    const row = unitRow(j, u);
+    row.dataset.idx = String(u.index);
+    row.dataset.state = u.state;
+    return row;
+  }));
+}
+
+function pollBulk(jobId) {
+  clearTimeout(bulkPollTimer);
+  const gen = ++bulkPollGen;
+  const tick = async () => {
+    if (gen !== bulkPollGen) return;
+    let j;
+    try {
+      j = await api(`/api/mint/bulk/${jobId}`);
+    } catch (e) {
+      if (gen === bulkPollGen) bulkPollTimer = setTimeout(tick, 3000);
+      return;
+    }
+    if (gen !== bulkPollGen) return;
+    if (j.state === 'awaiting_payment') {
+      showFlow(bulkPayView(j));
+    } else if (j.state === 'payment_timeout') {
+      showFlow({ title: '⏰ Payment timed out', text: 'No payment came through in time. Give it another go.', done: true });
+      return;
+    } else if (j.state === 'cancelled') {
+      showMintHome();
+      return;
+    } else {
+      renderBulkJob(j); // paid / fulfilling / done / failed
+      if (j.state === 'done' || j.state === 'failed') return; // final render, stop polling
+    }
+    bulkPollTimer = setTimeout(tick, 3000);
+  };
+  bulkPollTimer = setTimeout(tick, 1000);
+}
+
+// Boot resume (#216 pattern): a live bulk job survives the Activity webview
+// being killed while the user app-switches to Xaman. Checked BEFORE the
+// single-mint resume — a user can't have both, and bulk is the costlier
+// flow to strand. Returns true when a job resumed.
+async function resumeBulkMint() {
+  let active = null;
+  try {
+    active = await api('/api/mint/bulk/active');
+  } catch (_) { return false; }
+  const j = active && active.session;
+  if (!j) return false;
+  currentBulkId = j.id;
+  if (j.state === 'awaiting_payment') showFlow(bulkPayView(j));
+  else renderBulkJob(j);
+  pollBulk(j.id);
+  return true;
 }
 
 async function startMint() {
@@ -2564,6 +2763,7 @@ async function main() {
   el('swap-done-btn').onclick = () => showMintHome();
   el('change-wallet-btn').onclick = () => (insideWeb ? startWebSignin() : startSignin());
   el('flow-done-btn').onclick = () => { showMintHome(); };
+  el('bulk-done-btn').onclick = () => { clearTimeout(bulkPollTimer); bulkPollGen++; currentBulkId = null; showMintHome(); };
 
   // --- Marketplace (#44 Task 10) ---
   el('market-btn').onclick = () => { ensureMarketTraitSlotOptions(); openMarket(); };
@@ -2609,7 +2809,7 @@ async function main() {
       if (user) {
         me = user;
         // Re-attach to a mint an earlier tab/reload orphaned before going home.
-        if (!(await resumeMint())) showMintHome();
+        if (!(await resumeBulkMint()) && !(await resumeMint())) showMintHome();
       }
       // else: startWebSignin() is already driving the register panel.
     } catch (e) {
@@ -2631,7 +2831,7 @@ async function main() {
     me = await api('/api/me');
     if (me.wallet) {
       // Re-attach to a mint the webview reload orphaned before going home.
-      if (!(await resumeMint())) showMintHome();
+      if (!(await resumeBulkMint()) && !(await resumeMint())) showMintHome();
     }
     else {
       status(`Hey ${me.username} — sign in with Xaman to start building.`);

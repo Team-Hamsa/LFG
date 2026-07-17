@@ -239,6 +239,14 @@
         </div>
       </div>
     </section>
+
+    <section id="bulk-panel" class="card sticker" hidden>
+      <h2 id="bulk-title">🏗️ Bulk mint</h2>
+      <p id="bulk-progress" class="card-sub"></p>
+      <div id="bulk-spinner" class="spinner" role="img" aria-label="Working…" hidden></div>
+      <div id="bulk-units"></div>
+      <p><button id="bulk-done-btn" class="primary" hidden>Done</button></p>
+    </section>
   </main>
 
   <div id="toasts" class="toasts" aria-live="assertive"></div>
@@ -276,6 +284,6 @@
        Telegram (window.Telegram stays undefined); loaded BEFORE app.js so the
        dual-mode boot can detect the Telegram context. -->
   <script src="telegram-web-app.js"></script>
-  <script type="module" src="app.js?v=17"></script>
+  <script type="module" src="app.js?v=18"></script>
 </body>
 </html>

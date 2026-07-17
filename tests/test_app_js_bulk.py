@@ -35,3 +35,32 @@ def test_app_js_routes_qty_to_bulk_and_preserves_single_mint():
     # single-mint path untouched: startMint still POSTs /api/mint
     assert "api('/api/mint', { method: 'POST'" in src
     assert "'/api/mint/bulk'" in src
+
+
+def test_index_has_bulk_panel():
+    html = _read("index.html")
+    assert 'id="bulk-panel"' in html
+    assert 'id="bulk-progress"' in html
+    assert 'id="bulk-units"' in html
+    assert 'id="bulk-done-btn"' in html
+
+
+def test_app_js_bulk_flow_wiring():
+    src = _read("app.js")
+    assert "function pollBulk(" in src
+    assert "function renderBulkJob(" in src
+    assert "async function bulkAccept(" in src
+    assert "async function resumeBulkMint(" in src
+    assert "'/api/mint/bulk/active'" in src
+    assert "/units/" in src and "/accept" in src
+    # accept payloads are lazy: exactly the one endpoint call site, no
+    # eager loop over units[]
+    assert src.count("/accept`") == 1
+
+
+def test_app_js_bulk_resume_runs_before_single_resume():
+    src = _read("app.js")
+    # every boot path that resumes single mint checks bulk first: the two
+    # call sites use the combined guard, so the counts must match
+    assert src.count("await resumeBulkMint()") == src.count("await resumeMint()")
+    assert "await resumeBulkMint()) && !(await resumeMint()" in src
