@@ -64,6 +64,14 @@ from lfg_service import identity as identity_store
 from lfg_service.auth import require_service_token, surface_for_token
 from lfg_service.events import Event, InMemoryEventBus
 from lfg_service.telegram_auth import validate_init_data
+
+# X poster state (x_state.db, #41 PR-2) — single-writer discipline (spec §5.6):
+# the service writes ONLY the `settings` table (the posting_paused kill switch
+# flipped by the /api/admin/x/* handlers below); the poster process
+# (surfaces/x_bot/bot.py) writes ONLY `x_posts` and merely reads `settings`.
+# The sqlite logic lives in surfaces.x_bot.state (imported here across the
+# usual service→surface layering, per the #41 plan) — never duplicated here.
+from surfaces.x_bot import state as x_state
 from webapp import economy_api, mock_economy, mock_market
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s")
@@ -472,6 +480,48 @@ async def handle_session(request):
         )
     token = make_session_token({"id": pid, "name": pname, "platform": request["surface"]})
     return web.json_response({"session_token": token, "user": {"id": pid, "username": pname}})
+
+
+# --- X (Twitter) posting admin endpoints (#41 PR-2, spec §5.6) --------------
+# Service-token-authed AND restricted to the Discord surface: the human
+# authorization gate is the Discord bot's administrator-permission check in
+# front of its /admin button, so any other valid surface token (telegram, the
+# x poster's own, ...) gets 403 — otherwise any surface process could pause
+# posting. These work with X_ENABLED false too (admin can inspect/flip state
+# while the feature is dark); nothing here touches X creds.
+# config.X_STATE_DB_PATH is read lazily at call time (never bound at import)
+# so tests can point it at a tmp file via monkeypatch.
+
+
+@require_service_token
+async def handle_x_pause(request):
+    if request["surface"] != "discord":
+        return web.json_response({"error": "forbidden", "code": "wrong_surface"}, status=403)
+    x_state.set_posting_paused(config.X_STATE_DB_PATH, True)
+    return web.json_response({"paused": True})
+
+
+@require_service_token
+async def handle_x_resume(request):
+    if request["surface"] != "discord":
+        return web.json_response({"error": "forbidden", "code": "wrong_surface"}, status=403)
+    x_state.set_posting_paused(config.X_STATE_DB_PATH, False)
+    return web.json_response({"paused": False})
+
+
+@require_service_token
+async def handle_x_status(request):
+    if request["surface"] != "discord":
+        return web.json_response({"error": "forbidden", "code": "wrong_surface"}, status=403)
+    db = config.X_STATE_DB_PATH
+    return web.json_response(
+        {
+            "paused": x_state.posting_paused(db),
+            "month_posts": x_state.month_count(db),
+            "budget": config.X_MONTHLY_POST_BUDGET,
+            "enabled": config.X_ENABLED,
+        }
+    )
 
 
 async def handle_telegram_auth(request):
@@ -3782,6 +3832,9 @@ def create_app() -> web.Application:
     app.router.add_get("/api/extract/{session_id}", handle_extract_status)
     app.router.add_post("/api/deposit", require_wallet(handle_deposit_start))
     app.router.add_get("/api/deposit/{session_id}", handle_deposit_status)
+    app.router.add_post("/api/admin/x/pause", handle_x_pause)
+    app.router.add_post("/api/admin/x/resume", handle_x_resume)
+    app.router.add_get("/api/admin/x/status", handle_x_status)
     app.router.add_get("/events", handle_events)
     app.router.add_get("/events/me", handle_events_me)
     app.router.add_get("/__dev/reload", handle_dev_reload)
