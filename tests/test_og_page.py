@@ -106,7 +106,9 @@ def test_nft_card_known_edition_renders_meta_tags(tmp_path, monkeypatch):
     # og:description carries the trait summary (fixed slot order, no rarity dep)
     assert "Background: Nebula" in body
     assert "Body: Ape" in body
-    # Visible link out to bithomp (mainnet host per config.IS_TESTNET default)
+    # Visible link out to bithomp — substring is host-agnostic (mainnet vs.
+    # testnet's "test." prefix both contain it) so this doesn't pin
+    # config.IS_TESTNET, which conftest.py may default either way.
     assert "bithomp.com/en/nft/AAA" in body
 
 
