@@ -23,11 +23,11 @@ from lfg_core import (
     config,
     db_path,
     entitlement,
+    headroom,
     memos,
     mint_credits,
     mint_flow,
     payment_ledger,
-    supply,
     xrpl_ops,
     xumm_ops,
 )
@@ -105,17 +105,26 @@ class BulkMintJob:
         self._published = False
 
     def clamp_to_headroom(self) -> None:
-        """Clamp quantity to min(requested, BULK_MINT_MAX, headroom). Raise
-        CollectionFull if no headroom. Cap-exempt entitlements (burn) skip the
-        headroom clamp (#220). Must run BEFORE prepare_payment so we never take
-        payment for undeliverable mints."""
+        """Clamp quantity to min(requested, BULK_MINT_MAX, headroom) by taking
+        an atomic, durable headroom RESERVATION (#226) — not a racy supply
+        read: headroom.try_reserve serializes concurrent clamps so two jobs at
+        the tail can never collectively reserve past MAX_COLLECTION_SIZE. A
+        partial grant clamps quantity (same semantics the old headroom min
+        had); zero (including a store error — fail closed for new grants)
+        raises CollectionFull. Cap-exempt entitlements (burn, #220) skip the
+        reservation entirely — no row is ever written for them. Must run
+        BEFORE prepare_payment so we never take payment for undeliverable
+        mints; every terminal path releases the reservation
+        (release_job_headroom / per-unit retire+release in _fulfill_unit)."""
         cap_exempt = self.entitlement is not None and getattr(self.entitlement, "cap_exempt", False)
         q = min(self.requested_qty, config.BULK_MINT_MAX)
         if not cap_exempt:
-            headroom = supply.remaining_headroom(self.network)
-            if headroom <= 0:
+            granted = headroom.try_reserve(
+                db_path.app_db_path(self.network), f"bulk:{self.id}", q, self.network
+            )
+            if granted <= 0:
                 raise CollectionFull()
-            q = min(q, headroom)
+            q = granted
         self.quantity = q
         self.units = [Unit(index=i) for i in range(q)]
         if self.entitlement is None:
@@ -186,6 +195,8 @@ class BulkMintJob:
         if payment_ledger.find_claimed(self.payment_claimant) is not False:
             return False
         self.state = CANCELLED
+        # Terminal: give the whole headroom reservation back (#226).
+        release_job_headroom(self)
         # In-memory teardown first: delete_record never raises but CAN fail
         # on a degraded disk, and the payment watch must die regardless.
         if self.task is not None:
@@ -340,7 +351,41 @@ def delete_record(job_id: str) -> bool:
     return True
 
 
+def _cap_exempt(job: BulkMintJob) -> bool:
+    return job.entitlement is not None and getattr(job.entitlement, "cap_exempt", False)
+
+
+def release_job_headroom(job: BulkMintJob) -> None:
+    """Release whatever headroom reservation the job still holds (#226).
+    Called on every terminal transition (done/failed/payment_timeout/
+    cancelled) and on the service's pre-launch failure paths. Idempotent and
+    never raises (headroom.release contract); cap-exempt jobs never reserved,
+    so this is a no-op for them."""
+    if _cap_exempt(job):
+        return
+    headroom.release(db_path.app_db_path(job.network), f"bulk:{job.id}")
+
+
+def headroom_snapshot(job: BulkMintJob) -> tuple[str, int, list[str]] | None:
+    """(claimant, still-reserved units, minted nft_ids) for headroom.rebuild
+    at startup (#226): PENDING units still need their reservation; units with
+    an nft_id (MINTED/OFFERED) are on-chain and re-asserted as pending rows
+    until the index catches up; OFFERED-without-nft_id / UNIT_FAILED units
+    are fully settled. None for cap-exempt jobs — they never reserve."""
+    if _cap_exempt(job):
+        return None
+    reserved = sum(1 for u in job.units if u.state == PENDING)
+    minted = [u.nft_id for u in job.units if u.nft_id]
+    return (f"bulk:{job.id}", reserved, minted)
+
+
 _UNIT_MAX_ATTEMPTS = 3
+
+# Backoff before re-checking an UNREADABLE (tri-state None) reservation in
+# _fulfill_unit (#226 review): a transient app-DB lock must not convert a
+# paid, still-valid grant into a mint credit — but we never mint under an
+# unprovable grant either, so each re-check consumes a unit attempt.
+_RESERVATION_RETRY_DELAY_SECONDS = 2.0
 
 # Retry budget for a failed persist before fulfillment pauses (#228): once
 # the on-disk record goes stale, every NEW unit started would be re-minted by
@@ -440,21 +485,40 @@ async def _ensure_offer(job: BulkMintJob, unit: Unit) -> None:
 
 
 async def _fulfill_unit(job: BulkMintJob, unit: Unit) -> None:
-    """Mint+offer one unit. Cap re-check first (a concurrent job may have
-    consumed the tail); a cap-hit or exhausted unit becomes a mint credit
-    rather than a loss. Cap-exempt (burn) entitlements skip the re-check.
+    """Mint+offer one unit. Reservation re-check first (#226): the global
+    cap race is already excluded at clamp time by headroom.try_reserve, so
+    the per-unit gate is simply "does this job still hold a reservation for
+    this unit". The read is tri-state: a successful 0 means the row is
+    provably gone (crash-rebuild dropped an orphan) and the unit becomes a
+    mint credit rather than a loss or an overshoot; None means the store
+    read itself failed (e.g. transient app-DB lock) — the grant is
+    unprovable, so we never mint under it, but we retry with a short backoff
+    instead of crediting a paid, still-valid grant away on a blip. Only a
+    provable 0 or persistent unreadability across every attempt converts to
+    a credit. Cap-exempt (burn) entitlements skip the reservation entirely.
 
     `on_mint` fires the instant mint_one_unit confirms the mint on-chain, so
     the unit is persisted as MINTED before the offer/XUMM steps run — closing
     the resume double-mint window (#215): a crash between mint and offer now
-    resumes via _ensure_offer (re-offer only), never a re-mint."""
-    cap_exempt = job.entitlement is not None and getattr(job.entitlement, "cap_exempt", False)
+    resumes via _ensure_offer (re-offer only), never a re-mint. The same
+    callback retires the unit's reservation to the durable pending set
+    (headroom.retire_to_pending): the mint is on-chain but invisible to
+    current_supply until the listener indexes it, so it keeps counting
+    against headroom as a pending row until then — never released outright at
+    MINTED, which would under-count during the index lag window."""
+    cap_exempt = _cap_exempt(job)
+    app_db = db_path.app_db_path(job.network)
+    claimant = f"bulk:{job.id}"
 
     async def _on_mint(nft_number: int, nft_id: str, image_url: str | None) -> None:
         unit.nft_number = nft_number
         unit.nft_id = nft_id
         unit.image_url = image_url
         unit.state = MINTED
+        if not cap_exempt:
+            # Reservation -> pending handoff (#226), durable before the job
+            # record write below; never raises.
+            headroom.retire_to_pending(app_db, claimant, nft_id)
         if not persist(job):
             # This is THE write the anti-double-mint invariant depends on: a
             # restart from the stale record re-mints this unit. Escalate
@@ -470,8 +534,18 @@ async def _fulfill_unit(job: BulkMintJob, unit: Unit) -> None:
             )
 
     for _ in range(_UNIT_MAX_ATTEMPTS):
-        if not cap_exempt and supply.current_supply(job.network) >= config.MAX_COLLECTION_SIZE:
-            break  # cap hit -> credit below
+        if not cap_exempt:
+            held = headroom.reserved_for(app_db, claimant)
+            if held is None:
+                # Store read failed: the grant is unprovable, not provably
+                # gone. Never mint under it (fail closed), but never credit
+                # a paid unit away on a transient lock either — burn an
+                # attempt on a short backoff and re-check.
+                unit.error = "headroom store unreadable"
+                await asyncio.sleep(_RESERVATION_RETRY_DELAY_SECONDS)
+                continue
+            if held < 1:
+                break  # provably gone (orphan-rebuild) -> credit below
         nft_number = await mint_flow._allocate_nft_number()
         res = await mint_flow.mint_one_unit(
             discord_id=job.discord_id,
@@ -498,9 +572,28 @@ async def _fulfill_unit(job: BulkMintJob, unit: Unit) -> None:
                 unit.error = res.error or "offer creation failed"
             return
         unit.error = res.error  # transient mint failure: retry
-    # Never minted after retries (or cap-hit): durable credit, no money lost.
+    # Never minted after retries (or reservation lost): durable credit, no
+    # money lost. The unit's reservation slot is released (no-op if the row
+    # is already gone) — it will never mint.
     unit.state = UNIT_FAILED
-    mint_credits.add_credit(db_path.app_db_path(job.network), job.discord_id, job.network, 1)
+    if not cap_exempt:
+        headroom.release(app_db, claimant, 1)
+    try:
+        mint_credits.add_credit(app_db, job.discord_id, job.network, 1)
+    except Exception:
+        # A still-locked app DB must not bubble out of here: run_bulk_mint_job's
+        # outer except would terminalize the WHOLE job FAILED with this unit's
+        # credit unrecorded — actual money loss, and every later unit dies too.
+        # Swallow, scream, and let fulfillment continue; an operator reconciles
+        # the missing credit from this log line (#226 review).
+        logging.critical(
+            "bulk job %s unit %d: mint-credit write FAILED for %s on %s — "
+            "credit not recorded, reconcile manually",
+            job.id,
+            unit.index,
+            job.discord_id,
+            job.network,
+        )
 
 
 async def run_bulk_mint_job(job: BulkMintJob) -> None:
@@ -564,6 +657,7 @@ async def run_bulk_mint_job(job: BulkMintJob) -> None:
                     return
             if not paid:
                 job.state = PAYMENT_TIMEOUT
+                release_job_headroom(job)
                 persist(job)
                 return
             job.paid_at = time.time()
@@ -626,6 +720,11 @@ async def run_bulk_mint_job(job: BulkMintJob) -> None:
         # the NFT itself is safe (minted + journaled), just pending an offer.
         if all(u.state in (OFFERED, UNIT_FAILED) for u in job.units):
             job.state = DONE
+            # Every unit already retired (to pending) or released its slot
+            # individually, so the reservation row is empty by now — this is
+            # terminal-state belt-and-braces cleanup, safe even if the
+            # persist below flips the state back to FULFILLING (#226).
+            release_job_headroom(job)
         else:
             job.state = FULFILLING
         if not persist(job) and job.state == DONE:
@@ -643,6 +742,9 @@ async def run_bulk_mint_job(job: BulkMintJob) -> None:
         logging.error("bulk job %s failed: %s", job.id, e)
         job.state = FAILED
         job.error = str(e)
+        # Terminal: unfulfilled units will never mint — free their headroom.
+        # Minted units already sit in the durable pending set, untouched.
+        release_job_headroom(job)
         persist(job)
 
 

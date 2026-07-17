@@ -943,17 +943,22 @@ the single-mint machinery per unit.
   restart instead of stranding a minted-but-never-offered NFT (`done` is
   terminal and is never picked up by `load_all_resumable`).
 - **Quantity clamping:** `BulkMintJob.clamp_to_headroom()` sets
-  `quantity = min(requested_qty, BULK_MINT_MAX, headroom)`, where headroom =
-  `MAX_COLLECTION_SIZE − current_supply` (`lfg_core/supply.py`, reading live
-  `onchain_nfts` where `is_burned=0`, same store the economy conservation
-  audit uses). Zero headroom raises `CollectionFull` → the service returns
-  409 `collection_full`. This clamp runs **before** `prepare_payment` so a
-  request is never charged for mints the collection has no room for.
-  `_fulfill_unit` re-checks `current_supply` per-unit at fulfillment time (a
-  concurrent job can consume the tail between clamp and fulfillment); a
-  cap-race loss (or exhausted mint retries) converts into a durable
-  `mint_credits` row (`lfg_core/mint_credits.py`) rather than a lost payment —
-  the user keeps a redeemable credit, never loses money.
+  `quantity = min(requested_qty, BULK_MINT_MAX, granted)`, where `granted`
+  comes from an **atomic, durable headroom reservation**
+  (`lfg_core/headroom.py`, #226 — now authoritative for cap enforcement):
+  `try_reserve` grants against `MAX_COLLECTION_SIZE − current_supply −
+  outstanding reservations/pending mints` in one serialized sqlite
+  transaction, so concurrent jobs (and single mints, which reserve 1 via
+  `handle_mint_start` / `mint:*` claimants) can never collectively overshoot
+  the cap during the listener's index lag. Zero grant raises `CollectionFull`
+  → the service returns 409 `collection_full`. This clamp runs **before**
+  `prepare_payment` so a request is never charged for mints the collection
+  has no room for. `_fulfill_unit` re-checks the job's own reservation
+  per-unit; a lost reservation (or exhausted mint retries) converts into a
+  durable `mint_credits` row (`lfg_core/mint_credits.py`) rather than a lost
+  payment — the user keeps a redeemable credit, never loses money. Startup
+  (`resume_bulk_jobs`) rebuilds the reservation table from live resumable
+  job records so crash orphans never leak.
 - **No offer `Expiration`:** bulk-minted offers carry no expiry, so
   acceptance is fully decoupled from fulfillment (Phase B / follow-up #218
   — a claim-later UX is out of scope for this phase).

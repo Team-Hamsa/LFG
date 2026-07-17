@@ -19,6 +19,8 @@ from typing import Any
 from lfg_core import (
     cdn,
     config,
+    db_path,
+    headroom,
     image_archive,
     layer_store,
     memos,
@@ -113,6 +115,11 @@ class MintSession:
         # The run_mint_session background task, set by the service after it
         # spawns it, so cancel() can stop the payment wait promptly (#141).
         self.task: asyncio.Task[None] | None = None
+        # #226: True once the service took this session's 1-unit headroom
+        # reservation (claimant "mint:<id>"). settle_headroom is a strict
+        # no-op while False, so sessions created outside the service (tests,
+        # tooling) never touch the reservation store.
+        self.headroom_reserved = False
         # Terminal-event publish guard, read/set by lfg_service.app when it
         # publishes mint.completed/mint.failed to the event firehose.
         self._published = False
@@ -198,6 +205,11 @@ class MintSession:
             # CancelledError is a BaseException, so run_mint_session's
             # `except Exception` cannot catch it and overwrite CANCELLED.
             self.task.cancel()
+        # #226: give the headroom reservation back right here — a task
+        # cancelled before it ever started running skips run_mint_session's
+        # finally, so the cancel path must settle directly. Idempotent: the
+        # dying task's own finally sees headroom_reserved already False.
+        settle_headroom(self)
         return True
 
     def mark_published(self) -> None:
@@ -263,6 +275,27 @@ def _release_unused_number(session: MintSession) -> None:
     until the DB record lands (or forever, if it never does)."""
     if session.nft_number is not None and session.nft_id is None:
         _reserved_numbers.discard(session.nft_number)
+
+
+def settle_headroom(session: MintSession) -> None:
+    """Settle the 1-unit headroom reservation the service took for this
+    session (#226). If the session minted (nft_id set), the reservation is
+    retired to the durable pending set — the mint is on-chain but invisible
+    to supply.current_supply until the listener indexes it, so it must keep
+    counting against headroom until then. Otherwise the unit will never mint
+    and the reservation is released outright. Strict no-op unless the service
+    reserved (headroom_reserved); idempotent — the flag drops before the
+    store call, so the cancel-path and the task-finally can both call this.
+    Never raises (headroom store contract)."""
+    if not getattr(session, "headroom_reserved", False):
+        return
+    session.headroom_reserved = False
+    db = db_path.app_db_path(config.XRPL_NETWORK)
+    claimant = f"mint:{session.id}"
+    if session.nft_id:
+        headroom.retire_to_pending(db, claimant, session.nft_id)
+    else:
+        headroom.release(db, claimant)
 
 
 def _save_recovery_record(record: dict[str, Any]) -> None:
@@ -652,6 +685,21 @@ async def run_mint_session(session: MintSession) -> None:
         def _on_state(state: str) -> None:
             session.state = state
 
+        async def _on_mint(nft_number: int, nft_id: str, image_url: str | None) -> None:
+            # #226 (review): settle the headroom reservation the INSTANT the
+            # mint lands, symmetric with bulk's _on_mint — waiting for the
+            # session-end finally leaves a window (offer creation + XUMM
+            # payload, seconds to tens of seconds) where a hard crash
+            # uncounts an on-chain mint: the restart rebuild drops mint:*
+            # rows and no pending row exists yet, so a cap-tail reserver
+            # could over-admit while the listener lags. settle_headroom sees
+            # nft_id set and retires the reservation to the durable pending
+            # set; the finally below remains the release-only path for
+            # sessions that never minted (idempotent — the flag drops before
+            # the store write).
+            session.nft_id = nft_id
+            settle_headroom(session)
+
         res = await mint_one_unit(
             discord_id=session.discord_id,
             wallet_address=session.wallet_address,
@@ -661,6 +709,7 @@ async def run_mint_session(session: MintSession) -> None:
             nft_number=session.nft_number,
             session_tag=session.id,
             on_state=_on_state,
+            on_mint=_on_mint,
         )
         session.nft_id = res.nft_id
         session.image_url = res.image_url
@@ -687,3 +736,11 @@ async def run_mint_session(session: MintSession) -> None:
         _release_unused_number(session)
         session.state = FAILED
         session.error = str(e)
+    finally:
+        # #226: every exit — OFFER_READY, FAILED, PAYMENT_TIMEOUT, and the
+        # CancelledError a cancel() delivers (BaseException, uncatchable
+        # above) — settles the session's headroom reservation: retire to
+        # pending if the mint landed, release otherwise. For sessions whose
+        # mint landed this is a no-op (idempotent): _on_mint already settled
+        # at mint-land so a crash mid-offer can't uncount the mint.
+        settle_headroom(session)
