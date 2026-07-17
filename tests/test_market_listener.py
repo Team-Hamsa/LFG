@@ -634,3 +634,48 @@ def test_tec_cancel_closes_no_listing():
         "SELECT is_live, closed_reason FROM market_listings WHERE offer_index='OFF_TEC_CX'"
     ).fetchone()
     assert row == (1, None)
+
+
+def test_missing_result_accept_with_deleted_nodes_fails_closed():
+    """An accept whose meta carries DeletedNodes but NO TransactionResult is
+    not provably anything — the failure path's stale-close only trusts an
+    explicit tec* result, so a result-less payload must mutate nothing."""
+    conn = _conn()
+    nft_id = _our_nft_id(34)
+    _seed_trait(conn, nft_id, owner="rSeller", slot="Hat", value="Cap")
+    _run(
+        nft_listener.apply_market_tx(
+            conn, _sell_offer_create_tx(nft_id, seller="rSeller", offer_index="OFF_NORES")
+        )
+    )
+
+    tx = _accept_tx(nft_id=nft_id, offer_index="OFF_NORES", seller="rSeller", result="tecEXPIRED")
+    del tx["meta"]["TransactionResult"]
+    _run(nft_listener.apply_market_tx(conn, tx))
+
+    conn.row_factory = sqlite3.Row
+    row = conn.execute("SELECT * FROM market_listings WHERE offer_index='OFF_NORES'").fetchone()
+    assert row["is_live"] == 1
+    assert row["closed_reason"] is None
+
+
+def test_malformed_meta_fails_gate_without_crashing():
+    """A truthy non-dict meta (malformed stream data) must fail the gate, not
+    crash it — the guard runs before the appliers' own try/except boundaries."""
+    conn = _conn()
+    nft_id = _our_nft_id(35)
+    _seed_trait(conn, nft_id, owner="rSeller", slot="Hat", value="Cap")
+    _run(
+        nft_listener.apply_market_tx(
+            conn, _sell_offer_create_tx(nft_id, seller="rSeller", offer_index="OFF_MAL")
+        )
+    )
+
+    tx = _accept_tx(nft_id=nft_id, offer_index="OFF_MAL", seller="rSeller", result="tecEXPIRED")
+    tx["meta"] = "garbage"
+    assert nft_listener.tx_succeeded(tx) is False
+    _run(nft_listener.apply_market_tx(conn, tx))
+
+    conn.row_factory = sqlite3.Row
+    row = conn.execute("SELECT * FROM market_listings WHERE offer_index='OFF_MAL'").fetchone()
+    assert row["is_live"] == 1

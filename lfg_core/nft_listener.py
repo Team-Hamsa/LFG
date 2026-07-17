@@ -47,18 +47,26 @@ def classify_tx(tx: dict[str, Any]) -> str | None:
     return _TYPE_TO_KIND.get(str(tx.get("TransactionType", "")))
 
 
+def _tx_result(tx: dict[str, Any]) -> Any:
+    """meta.TransactionResult, or None when meta is missing or not a dict
+    (malformed stream data must fail the gate, never crash it)."""
+    meta = tx.get("meta")
+    return meta.get("TransactionResult") if isinstance(meta, dict) else None
+
+
 def tx_succeeded(tx: dict[str, Any], *, log_skip_as: str | None = None) -> bool:
     """True iff a normalized tx actually executed: meta.TransactionResult is
     exactly "tesSUCCESS". tec-class transactions are validated into the ledger
     but only claim a fee — the operation did NOT happen — so every derive/apply
     entry point gates on this before mutating anything (#210/#235). Strict: a
-    missing meta or result code is not provably successful and fails the gate
-    (real ledger records always carry it). Raw ARCHIVING stays result-agnostic
+    missing meta or result code — or a malformed non-dict meta — is not
+    provably successful and fails the gate (real ledger records always carry
+    it). Raw ARCHIVING stays result-agnostic
     (backfill_history stores tec txs for audit) — only event derivation and
     index/economy/market mutation are gated. With `log_skip_as` set, a failing
     tx logs one concise debug line; the listener consumes the network-wide
     firehose where tec traffic is routine, so never warn per tx."""
-    result = (tx.get("meta") or {}).get("TransactionResult")
+    result = _tx_result(tx)
     if result == "tesSUCCESS":
         return True
     if log_skip_as is not None:
@@ -524,11 +532,14 @@ async def apply_market_tx(conn: sqlite3.Connection, tx: dict[str, Any]) -> None:
     if kind not in ("offer_create", "offer_cancel", "accept"):
         return
     if not tx_succeeded(tx, log_skip_as="apply_market_tx"):
-        if kind == "accept":
+        result = _tx_result(tx)
+        if kind == "accept" and isinstance(result, str) and result.startswith("tec"):
             # Close as stale, never sold: there is no buyer, and a trait row
             # must not enter the settled=0 settlement lifecycle. Keyed on the
-            # DeletedNodes themselves (ledger truth regardless of result code)
-            # rather than tecEXPIRED specifically; a failed create/cancel
+            # DeletedNodes themselves (ledger truth for any validated tec
+            # code) rather than tecEXPIRED specifically — but ONLY for an
+            # explicit tec result: a missing/malformed result proves nothing,
+            # so it fails closed with no mutation. A failed create/cancel
             # deletes no offers, so no other kind needs this.
             _close_deleted_offers(conn, tx, "stale")
         return
