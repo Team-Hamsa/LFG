@@ -1423,6 +1423,8 @@ def test_buy_status_ledger_race_failure_maps_reason(onchain_env, market_wallet, 
         "push": None,
         "instruction": None,
         "offer_index": "A" * 64,
+        "pay_with": None,
+        "price_xrp_quote": None,
     }
 
     conn = _reopen(onchain_env)
@@ -1841,3 +1843,339 @@ def test_trait_list_finalize_rejects_xrp_denominated_offer(
 
     conn = _reopen(onchain_env)
     assert market_get_listing(conn, "G" * 64) is None
+
+
+# --- #239: BRIX trait buy — holder path + XRP on-ramp path ---
+
+from decimal import Decimal  # noqa: E402
+
+
+def _seed_brix_trait_listing(conn, offer_index="B" * 64, amount_brix="10"):
+    upsert_trait_token(conn, TRAIT1, SELLER, "Hat", "Wizard Hat")
+    _seed_listing(
+        conn,
+        offer_index=offer_index,
+        nft_id=TRAIT1,
+        kind="trait",
+        seller=SELLER,
+        slot="Hat",
+        value="Wizard Hat",
+        amount_drops=None,
+        amount_brix=amount_brix,
+    )
+
+
+def _activate_buyer_closet(conn, owner=BUYER):
+    set_closet_token(conn, owner, "CLOSET", "AB", status="active", offer_id=None)
+    set_closet_contents(conn, owner, [], [])
+
+
+def _fake_trustline(balance):
+    async def fake(_wallet, _currency, _issuer):
+        return balance
+
+    return fake
+
+
+def _fake_detect(pay_with, amount):
+    calls = []
+
+    async def fake(wallet, brix_amount, **kwargs):
+        calls.append((wallet, brix_amount, kwargs))
+        return pay_with, amount
+
+    fake.calls = calls
+    return fake
+
+
+def test_buy_start_trait_holder_path_brix_accept(onchain_env, market_wallet, monkeypatch):
+    monkeypatch.setattr(server.config, "ECONOMY_ENABLED", True)
+    monkeypatch.setattr(mock_economy, "DEV_OWNER", BUYER)
+    conn = _reopen(onchain_env)
+    _seed_brix_trait_listing(conn)
+    _activate_buyer_closet(conn)
+    conn.commit()
+    conn.close()
+
+    verify_calls = []
+
+    async def fake_verify(nft_id, offer_index, expected_drops, **kwargs):
+        verify_calls.append((nft_id, offer_index, expected_drops, kwargs))
+        return True
+
+    monkeypatch.setattr(server.market_ops, "verify_sell_offer", fake_verify)
+    monkeypatch.setattr(server.xrpl_ops, "get_trustline_balance", _fake_trustline(Decimal("50")))
+    detect = _fake_detect("BRIX", "10")
+    monkeypatch.setattr(server.brix_payment, "detect_payment_path", detect)
+    monkeypatch.setattr(server.xumm_ops, "create_accept_offer_payload", _fake_payload())
+
+    req = _post_request("/api/market/buy", {"offer_index": "B" * 64})
+    resp = _run(server.handle_market_buy_start(req))
+    assert resp.status == 200
+    body = _run(_read_json(resp))
+    assert body["state"] == "awaiting_signature"
+    assert body["pay_with"] == "BRIX"
+    assert body["price_xrp_quote"] is None
+    assert "10 BRIX" in body["instruction"]
+    # BRIX-aware verify wiring
+    assert verify_calls[0][3]["expect"] == "brix"
+    assert verify_calls[0][3]["expected_brix"] == "10"
+    # detection ran against the listing's BRIX denomination
+    assert detect.calls[0][1] == "10"
+    assert detect.calls[0][2]["currency"] == server.config.TOKEN_CURRENCY_HEX
+    assert detect.calls[0][2]["issuer"] == server.config.TOKEN_ISSUER_ADDRESS
+
+
+def test_buy_start_trait_no_trustline_409_before_any_payload(
+    onchain_env, market_wallet, monkeypatch
+):
+    monkeypatch.setattr(server.config, "ECONOMY_ENABLED", True)
+    monkeypatch.setattr(mock_economy, "DEV_OWNER", BUYER)
+    conn = _reopen(onchain_env)
+    _seed_brix_trait_listing(conn)
+    _activate_buyer_closet(conn)
+    conn.commit()
+    conn.close()
+
+    async def fake_verify(*a, **k):
+        return True
+
+    async def no_payload(*a, **k):
+        raise AssertionError("no payload may be built without a trustline")
+
+    monkeypatch.setattr(server.market_ops, "verify_sell_offer", fake_verify)
+    monkeypatch.setattr(server.xrpl_ops, "get_trustline_balance", _fake_trustline(None))
+    monkeypatch.setattr(server.xumm_ops, "create_accept_offer_payload", no_payload)
+    monkeypatch.setattr(server.xumm_ops, "create_onramp_payment_payload", no_payload)
+
+    req = _post_request("/api/market/buy", {"offer_index": "B" * 64})
+    resp = _run(server.handle_market_buy_start(req))
+    assert resp.status == 409
+    body = _run(_read_json(resp))
+    assert body["code"] == "trustline_required"
+    # listing untouched
+    conn = _reopen(onchain_env)
+    assert market_get_listing(conn, "B" * 64)["is_live"] == 1
+
+
+def test_buy_start_trait_quote_unavailable_503_before_any_payload(
+    onchain_env, market_wallet, monkeypatch
+):
+    monkeypatch.setattr(server.config, "ECONOMY_ENABLED", True)
+    monkeypatch.setattr(mock_economy, "DEV_OWNER", BUYER)
+    conn = _reopen(onchain_env)
+    _seed_brix_trait_listing(conn)
+    _activate_buyer_closet(conn)
+    conn.commit()
+    conn.close()
+
+    async def fake_verify(*a, **k):
+        return True
+
+    async def broke_detect(*a, **k):
+        raise RuntimeError("no AMM quote")
+
+    async def no_payload(*a, **k):
+        raise AssertionError("no payload may be built without a quote")
+
+    monkeypatch.setattr(server.market_ops, "verify_sell_offer", fake_verify)
+    monkeypatch.setattr(server.xrpl_ops, "get_trustline_balance", _fake_trustline(Decimal("0")))
+    monkeypatch.setattr(server.brix_payment, "detect_payment_path", broke_detect)
+    monkeypatch.setattr(server.xumm_ops, "create_accept_offer_payload", no_payload)
+    monkeypatch.setattr(server.xumm_ops, "create_onramp_payment_payload", no_payload)
+
+    req = _post_request("/api/market/buy", {"offer_index": "B" * 64})
+    resp = _run(server.handle_market_buy_start(req))
+    assert resp.status == 503
+    body = _run(_read_json(resp))
+    assert body["code"] == "pricing_unavailable"
+
+
+def test_buy_start_trait_onramp_path_builds_self_payment(onchain_env, market_wallet, monkeypatch):
+    monkeypatch.setattr(server.config, "ECONOMY_ENABLED", True)
+    monkeypatch.setattr(mock_economy, "DEV_OWNER", BUYER)
+    conn = _reopen(onchain_env)
+    _seed_brix_trait_listing(conn)
+    _activate_buyer_closet(conn)
+    conn.commit()
+    conn.close()
+
+    async def fake_verify(*a, **k):
+        return True
+
+    captured = {}
+
+    async def fake_onramp(wallet, brix_amount, send_max_drops, **kwargs):
+        captured["wallet"] = wallet
+        captured["brix_amount"] = brix_amount
+        captured["send_max_drops"] = send_max_drops
+        return {"qr_url": "q", "xumm_url": "x", "uuid": "ONRAMP1"}
+
+    monkeypatch.setattr(server.market_ops, "verify_sell_offer", fake_verify)
+    monkeypatch.setattr(server.xrpl_ops, "get_trustline_balance", _fake_trustline(Decimal("0")))
+    monkeypatch.setattr(server.brix_payment, "detect_payment_path", _fake_detect("XRP", "2.5"))
+    monkeypatch.setattr(server.xumm_ops, "create_onramp_payment_payload", fake_onramp)
+
+    req = _post_request("/api/market/buy", {"offer_index": "B" * 64})
+    resp = _run(server.handle_market_buy_start(req))
+    assert resp.status == 200
+    body = _run(_read_json(resp))
+    assert body["state"] == "awaiting_onramp"
+    assert body["pay_with"] == "XRP"
+    assert body["price_xrp_quote"] == "2.5"
+    assert captured["wallet"] == BUYER
+    assert captured["brix_amount"]["value"] == "10"
+    assert captured["send_max_drops"] == "2500000"
+
+
+def _make_onramp_buy_session(**overrides):
+    base = {
+        "discord_id": "dev",
+        "wallet_address": BUYER,
+        "offer_index": "B" * 64,
+        "nft_id": TRAIT1,
+        "listing_kind": "trait",
+        "network": "testnet",
+        "amount_brix": "10",
+    }
+    base.update(overrides)
+    s = server.market_flow.BuySession(**base)
+    s.state = server.market_flow.AWAITING_ONRAMP
+    s.onramp_payload_uuid = "ONRAMP1"
+    s.pay_with = "XRP"
+    s.price_xrp_quote = "2.5"
+    server.market_sessions[s.id] = s
+    return s
+
+
+def test_buy_status_onramp_confirmed_reverifies_and_builds_accept(
+    onchain_env, market_wallet, monkeypatch
+):
+    monkeypatch.setattr(server.config, "ECONOMY_ENABLED", True)
+    conn = _reopen(onchain_env)
+    _seed_brix_trait_listing(conn)
+    conn.commit()
+    conn.close()
+
+    s = _make_onramp_buy_session()
+    monkeypatch.setattr(
+        server.xumm_ops, "get_payload_status", _fake_status(signed=True, txid="ONRAMPTX")
+    )
+
+    async def fake_get_tx(_hash):
+        return {"validated": True, "meta": {"TransactionResult": "tesSUCCESS"}}
+
+    monkeypatch.setattr(server.xrpl_ops, "get_tx", fake_get_tx)
+
+    async def fake_verify(*a, **k):
+        return True
+
+    monkeypatch.setattr(server.market_ops, "verify_sell_offer", fake_verify)
+    monkeypatch.setattr(
+        server.xumm_ops,
+        "create_accept_offer_payload",
+        _fake_payload(url="https://xumm.app/sign/ACC", pl_uuid="ACC1"),
+    )
+
+    resp = _run(server.handle_market_buy_status(_StatusReq(s.id)))
+    body = _run(_read_json(resp))
+    assert body["state"] == "awaiting_signature"
+    assert "10 BRIX" in body["instruction"]
+    assert s.payload_uuid == "ACC1"
+    # listing still live — the buyer hasn't accepted yet
+    conn = _reopen(onchain_env)
+    assert market_get_listing(conn, "B" * 64)["is_live"] == 1
+
+
+def test_buy_status_onramp_gone_listing_stale_fails_session(
+    onchain_env, market_wallet, monkeypatch
+):
+    monkeypatch.setattr(server.config, "ECONOMY_ENABLED", True)
+    conn = _reopen(onchain_env)
+    _seed_brix_trait_listing(conn)
+    conn.commit()
+    conn.close()
+
+    s = _make_onramp_buy_session()
+    monkeypatch.setattr(
+        server.xumm_ops, "get_payload_status", _fake_status(signed=True, txid="ONRAMPTX")
+    )
+
+    async def fake_get_tx(_hash):
+        return {"validated": True, "meta": {"TransactionResult": "tesSUCCESS"}}
+
+    monkeypatch.setattr(server.xrpl_ops, "get_tx", fake_get_tx)
+
+    async def fake_verify(*a, **k):
+        return False
+
+    monkeypatch.setattr(server.market_ops, "verify_sell_offer", fake_verify)
+
+    resp = _run(server.handle_market_buy_status(_StatusReq(s.id)))
+    body = _run(_read_json(resp))
+    assert body["state"] == "failed"
+    assert body["reason"] == "listing_unavailable"
+    conn = _reopen(onchain_env)
+    assert market_get_listing(conn, "B" * 64)["closed_reason"] == "stale"
+
+
+def test_buy_status_onramp_abandoned_expires_listing_untouched(
+    onchain_env, market_wallet, monkeypatch
+):
+    monkeypatch.setattr(server.config, "ECONOMY_ENABLED", True)
+    conn = _reopen(onchain_env)
+    _seed_brix_trait_listing(conn)
+    conn.commit()
+    conn.close()
+
+    s = _make_onramp_buy_session()
+    monkeypatch.setattr(
+        server.xumm_ops, "get_payload_status", _fake_status(signed=False, expired=True)
+    )
+    resp = _run(server.handle_market_buy_status(_StatusReq(s.id)))
+    body = _run(_read_json(resp))
+    assert body["state"] == "failed"
+    conn = _reopen(onchain_env)
+    assert market_get_listing(conn, "B" * 64)["is_live"] == 1
+
+
+def test_buy_status_onramp_signer_mismatch_fails_closed(onchain_env, market_wallet, monkeypatch):
+    monkeypatch.setattr(server.config, "ECONOMY_ENABLED", True)
+    conn = _reopen(onchain_env)
+    _seed_brix_trait_listing(conn)
+    conn.commit()
+    conn.close()
+
+    s = _make_onramp_buy_session()
+    monkeypatch.setattr(
+        server.xumm_ops,
+        "get_payload_status",
+        _fake_status(signed=True, txid="ONRAMPTX", account="rSomeoneElse"),
+    )
+    resp = _run(server.handle_market_buy_status(_StatusReq(s.id)))
+    body = _run(_read_json(resp))
+    assert body["state"] == "failed"
+    assert body["reason"] == "signer_mismatch"
+    conn = _reopen(onchain_env)
+    assert market_get_listing(conn, "B" * 64)["is_live"] == 1
+
+
+def test_buy_start_legacy_xrp_trait_listing_410_stale(onchain_env, market_wallet, monkeypatch):
+    # A pre-#239 XRP-denominated trait listing is no longer purchasable.
+    monkeypatch.setattr(server.config, "ECONOMY_ENABLED", True)
+    monkeypatch.setattr(mock_economy, "DEV_OWNER", BUYER)
+    conn = _reopen(onchain_env)
+    upsert_trait_token(conn, TRAIT1, SELLER, "Hat", "Wizard Hat")
+    _seed_listing(
+        conn, offer_index="L" * 64, nft_id=TRAIT1, kind="trait", seller=SELLER,
+        slot="Hat", value="Wizard Hat", amount_drops=500_000,
+    )
+    _activate_buyer_closet(conn)
+    conn.commit()
+    conn.close()
+
+    req = _post_request("/api/market/buy", {"offer_index": "L" * 64})
+    resp = _run(server.handle_market_buy_start(req))
+    assert resp.status == 410
+    conn = _reopen(onchain_env)
+    assert market_get_listing(conn, "L" * 64)["closed_reason"] == "stale"

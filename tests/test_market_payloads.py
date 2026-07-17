@@ -87,3 +87,62 @@ def test_cancel_offer_payload_has_source_tag(monkeypatch):
     captured = _capture(monkeypatch)
     _run(xumm_ops.create_cancel_offer_payload("rSeller", "OFFERINDEX1"))
     assert captured["payload"]["txjson"]["SourceTag"] == config.SOURCE_TAG
+
+
+# --- #239: BRIX sell offers + XRP→BRIX on-ramp self-Payment ---
+
+
+def _brix_dict(value="10"):
+    return {
+        "currency": config.TOKEN_CURRENCY_HEX,
+        "issuer": config.TOKEN_ISSUER_ADDRESS,
+        "value": value,
+    }
+
+
+def test_sell_offer_payload_brix_dict_amount(monkeypatch):
+    captured = _capture(monkeypatch)
+    _run(xumm_ops.create_sell_offer_payload("rSeller", "NFT123", _brix_dict("10.5")))
+    txjson = captured["payload"]["txjson"]
+    assert txjson["Amount"] == _brix_dict("10.5")
+    assert txjson["Flags"] == 1
+    assert txjson["SourceTag"] == config.SOURCE_TAG
+
+
+def test_onramp_payment_payload_shape(monkeypatch):
+    captured = _capture(monkeypatch)
+    _run(xumm_ops.create_onramp_payment_payload("rBuyer", _brix_dict(), "2500000"))
+    txjson = captured["payload"]["txjson"]
+    assert txjson["TransactionType"] == "Payment"
+    # Self-payment: the buyer buys BRIX out of the AMM into their own wallet.
+    assert txjson["Account"] == "rBuyer"
+    assert txjson["Destination"] == "rBuyer"
+    assert txjson["Amount"] == _brix_dict()
+    assert txjson["SendMax"] == "2500000"
+    assert txjson["SourceTag"] == config.SOURCE_TAG
+
+
+def test_onramp_payment_payload_memo_action_payment(monkeypatch):
+    import json as _json
+
+    captured = _capture(monkeypatch)
+    _run(xumm_ops.create_onramp_payment_payload("rBuyer", _brix_dict(), "2500000"))
+    memos_field = captured["payload"]["txjson"]["Memos"]
+    decoded = {
+        bytes.fromhex(m["Memo"]["MemoType"]).decode(): bytes.fromhex(
+            m["Memo"]["MemoData"]
+        ).decode()
+        for m in memos_field
+    }
+    assert decoded["action"] == "payment"
+    assert decoded["initiator"] == "user"
+
+
+def test_onramp_payment_payload_sends_user_token(monkeypatch):
+    captured = _capture(monkeypatch)
+    _run(
+        xumm_ops.create_onramp_payment_payload(
+            "rBuyer", _brix_dict(), "2500000", user_token="tok-1"
+        )
+    )
+    assert captured["payload"]["user_token"] == "tok-1"

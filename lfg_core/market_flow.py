@@ -42,6 +42,15 @@ from lfg_core import market_ops, memos, xrpl_ops, xumm_ops
 # Shared session states across List/Cancel/Buy.
 AWAITING_SIGNATURE = "awaiting_signature"
 PENDING = "pending"  # signed; tx not yet validated (List/Buy only)
+# #239 trait-buy on-ramp (Buy only): the buyer holds too little BRIX, so a
+# self-Payment that buys the listing's BRIX out of the AMM precedes the
+# normal accept. AWAITING_ONRAMP = waiting for that Payment to sign/validate;
+# ONRAMP_CONFIRMED = it validated tesSUCCESS and the service must now
+# re-verify the sell offer and build the accept payload (idempotent trigger —
+# the state only advances to AWAITING_SIGNATURE once the payload exists, so a
+# transient Xaman failure retries on the next poll).
+AWAITING_ONRAMP = "awaiting_onramp"
+ONRAMP_CONFIRMED = "onramp_confirmed"
 DONE = "done"
 FAILED = "failed"
 UNKNOWN = "unknown"  # tx lookup gave up/failed (List/Buy only) — self-heals later
@@ -177,7 +186,9 @@ class BuySession:
     nft_id: str
     listing_kind: str
     network: str
-    amount_drops: int
+    # #239 per-kind denomination (see ListSession).
+    amount_drops: int | None = None
+    amount_brix: str | None = None
     platform: str = "discord"
     id: str = field(default_factory=lambda: uuid.uuid4().hex)
     created_at: float = field(default_factory=time.time)
@@ -190,6 +201,17 @@ class BuySession:
     instruction: str | None = None
     txid: str | None = None
     poll_count: int = 0
+    # #239 trait-buy on-ramp: how this buyer pays ("BRIX" holder path /
+    # "XRP" on-ramp path; None for characters), the buffered AMM XRP quote
+    # shown to the UI, the stored push token (for the SECOND payload the
+    # service builds mid-session), and the on-ramp Payment's own
+    # payload/tx/poll state, kept separate from the accept's txid.
+    pay_with: str | None = None
+    price_xrp_quote: str | None = None
+    push_user_token: str | None = field(default=None, repr=False)
+    onramp_payload_uuid: str | None = None
+    onramp_txid: str | None = None
+    onramp_poll_count: int = 0
     push: str | None = None  # see ListSession
     issued_user_token: str | None = field(default=None, repr=False)
     kind: str = "buy"
@@ -206,6 +228,8 @@ class BuySession:
             "push": self.push,
             "instruction": self.instruction,
             "offer_index": self.offer_index,
+            "pay_with": self.pay_with,
+            "price_xrp_quote": self.price_xrp_quote,
         }
 
 
@@ -336,14 +360,75 @@ async def advance_buy_session(
     listing reason='sold' and — for a trait listing — triggers settlement,
     see `trigger_trait_settlement`); "stale" the poll an on-ledger failure
     surfaces post-sign (the documented verify/sign race: the offer was
-    filled/cancelled first — caller closes reason='stale'); None every other
-    poll.
+    filled/cancelled first — caller closes reason='stale'); "onramp_confirmed"
+    (#239) once the on-ramp self-Payment validates tesSUCCESS — the caller
+    must then re-verify the sell offer, build the accept payload, and move
+    the session to AWAITING_SIGNATURE (this return is idempotent: the session
+    parks in ONRAMP_CONFIRMED and re-signals every poll until the caller
+    advances it, so a transient Xaman failure just retries); None every other
+    poll. An abandoned/expired on-ramp fails the session only — the listing
+    is never touched (the buyer keeps any BRIX they bought).
 
     See advance_list_session's docstring for why `get_payload_status`/
     `get_tx` are resolved at call time rather than bound as default
     argument values."""
     get_payload_status = get_payload_status or xumm_ops.get_payload_status
     get_tx = get_tx or xrpl_ops.get_tx
+
+    if session.state == ONRAMP_CONFIRMED:
+        return "onramp_confirmed"
+
+    if session.state == AWAITING_ONRAMP:
+        if session.onramp_txid is None:
+            s = await get_payload_status(session.onramp_payload_uuid)
+            if s is None:
+                return None
+            if s.get("expired"):
+                session.state = FAILED
+                session.error = "signing request expired"
+                session.reason = "onramp_expired"
+                return None
+            if not s.get("signed"):
+                return None
+            # Same fail-closed signer==buyer rule as the accept payload below:
+            # a shared QR signed by another wallet would buy BRIX for that
+            # wallet while this session proceeded to an accept the real buyer
+            # can't fund. Listing untouched.
+            if s.get("account") != session.wallet_address:
+                session.state = FAILED
+                session.error = "on-ramp payment signed by a different account than the buyer"
+                session.reason = "signer_mismatch"
+                return None
+            _capture_issued_token(session, s)
+            txid = s.get("txid")
+            if not txid:
+                return None
+            session.onramp_txid = txid
+
+        try:
+            tx = await get_tx(session.onramp_txid)
+        except Exception as e:
+            session.state = UNKNOWN
+            session.error = f"tx lookup failed: {e}"
+            return None
+        if not tx.get("validated"):
+            session.onramp_poll_count += 1
+            if session.onramp_poll_count >= MAX_FINALIZE_POLLS:
+                session.state = UNKNOWN
+                session.error = "gave up waiting for on-ramp validation"
+            return None
+        meta = tx.get("meta") or {}
+        result = meta.get("TransactionResult")
+        if result != "tesSUCCESS":
+            # The AMM buy failed on-ledger (pool moved past SendMax, etc.).
+            # Buyer-side failure: fail the session, leave the listing live.
+            session.state = FAILED
+            session.error = f"on-ramp payment failed: {result}"
+            session.reason = "onramp_failed"
+            return None
+        session.state = ONRAMP_CONFIRMED
+        return "onramp_confirmed"
+
     if session.state not in (AWAITING_SIGNATURE, PENDING):
         return None
 
