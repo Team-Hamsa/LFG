@@ -105,16 +105,28 @@ def test_empty_initdata_returns_none():
     assert validate_init_data("", DUMMY_TOKEN, max_age=3600, now=int(time.time())) is None
 
 
-def test_signature_field_ignored():
-    # A junk Ed25519 `signature` field alongside a valid HMAC `hash` must be
-    # dropped from the data-check-string (it is not part of the HMAC scheme).
+def test_signature_field_signed_and_stripped():
+    # Current Telegram clients include the Ed25519 `signature` field IN the
+    # HMAC data-check-string (verified against a live iOS launch, 2026-07-17).
+    # A payload signed WITH signature in the dcs must validate, and the opaque
+    # signature must be stripped from the returned fields.
     now = int(time.time())
-    fields = _valid_fields(now)
+    fields = _valid_fields(now, signature="opaque-ed25519-sig")
     init_data = _sign(fields, DUMMY_TOKEN)
-    with_sig = init_data + "&" + urlencode({"signature": "junk-ed25519-sig"})
-    result = validate_init_data(with_sig, DUMMY_TOKEN, max_age=3600, now=now)
+    result = validate_init_data(init_data, DUMMY_TOKEN, max_age=3600, now=now)
     assert result is not None
     assert result["user"]["id"] == 55
+    assert "signature" not in result
+
+
+def test_signature_appended_outside_dcs_rejected():
+    # A `signature` bolted on AFTER signing (i.e. not covered by the hash) must
+    # be rejected — anything in the payload that the hash does not cover would
+    # otherwise be attacker-controlled.
+    now = int(time.time())
+    init_data = _sign(_valid_fields(now), DUMMY_TOKEN)
+    with_sig = init_data + "&" + urlencode({"signature": "junk-ed25519-sig"})
+    assert validate_init_data(with_sig, DUMMY_TOKEN, max_age=3600, now=now) is None
 
 
 def test_near_miss_hash_rejected():

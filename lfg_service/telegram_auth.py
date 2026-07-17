@@ -30,8 +30,8 @@ def validate_init_data(
 
     Algorithm (per Telegram docs):
       1. parse the query string into key/value pairs (URL-decoded);
-      2. pull out `hash` (and drop `signature`, the newer Ed25519 scheme — it is
-         not part of the HMAC data-check-string);
+      2. pull out `hash`; keep `signature` (the newer Ed25519 field) — it IS
+         part of the HMAC data-check-string on current clients;
       3. data-check-string = remaining `key=value` pairs sorted by key, joined
          by `\\n`;
       4. secret_key = HMAC_SHA256(key=b"WebAppData", msg=bot_token)
@@ -57,14 +57,16 @@ def validate_init_data(
     received_hash = fields.pop("hash", None)
     if not received_hash:
         return None
-    # `signature` (Ed25519 scheme) is not part of the HMAC data-check-string.
-    fields.pop("signature", None)
 
+    # `signature` (the newer Ed25519 field) IS part of the HMAC data-check-string:
+    # verified against a live iOS launch 2026-07-17 — excluding it (as older
+    # third-party docs suggest) makes every modern-client launch fail.
     data_check_string = "\n".join(f"{k}={fields[k]}" for k in sorted(fields))
     secret_key = hmac.new(b"WebAppData", bot_token.encode(), hashlib.sha256).digest()
     computed = hmac.new(secret_key, data_check_string.encode(), hashlib.sha256).hexdigest()
     if not hmac.compare_digest(computed, received_hash):
         return None
+    fields.pop("signature", None)
 
     # Staleness: reject if auth_date is older than max_age.
     auth_date_raw = fields.get("auth_date")
