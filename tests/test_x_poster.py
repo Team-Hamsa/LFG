@@ -412,36 +412,16 @@ def _rarest_first(traits, body_type):
     return [(slot, traits[slot]) for slot in order if slot in traits]
 
 
-def test_compose_exact_format_nominal_event(monkeypatch):
-    monkeypatch.setattr(config, "XRPL_NETWORK", "mainnet")
+def test_compose_exact_format_nominal_event():
     event = _mint_event()
     result = poster.compose(event, rank_traits=_rarest_first)
-    nft_id = event["data"]["nft_id"]
     expected = (
         "🎨 LFGO #1234 just minted!\n"
         "Hat: Wizard Hat · Eyes: Laser · Body: Ape (+5 more)\n"
-        f"🔗 https://bithomp.com/en/nft/{nft_id}\n"
         "#XRPL #NFT"
     )
     assert result == expected
     assert poster.weighted_tweet_length(result) <= poster.MAX_WEIGHTED_CHARS
-
-
-def test_compose_testnet_url(monkeypatch):
-    monkeypatch.setattr(config, "XRPL_NETWORK", "testnet")
-    event = _mint_event()
-    result = poster.compose(event, rank_traits=_rarest_first)
-    nft_id = event["data"]["nft_id"]
-    assert f"🔗 https://test.bithomp.com/en/nft/{nft_id}" in result
-
-
-def test_compose_mainnet_url(monkeypatch):
-    monkeypatch.setattr(config, "XRPL_NETWORK", "mainnet")
-    event = _mint_event()
-    result = poster.compose(event, rank_traits=_rarest_first)
-    nft_id = event["data"]["nft_id"]
-    assert f"🔗 https://bithomp.com/en/nft/{nft_id}" in result
-    assert "test.bithomp.com" not in result
 
 
 def test_compose_falls_back_to_insertion_order_when_rank_traits_none():
@@ -473,11 +453,10 @@ def test_compose_missing_traits_event_falls_back_gracefully():
     event = _mint_event(traits={})
     result = poster.compose(event, rank_traits=None)
     lines = result.split("\n")
-    # No traits line at all — just header, URL, hashtags.
-    assert len(lines) == 3
+    # No traits line at all — just header and hashtags.
+    assert len(lines) == 2
     assert lines[0] == "🎨 LFGO #1234 just minted!"
-    assert lines[1].startswith("🔗 ")
-    assert lines[2] == "#XRPL #NFT"
+    assert lines[1] == "#XRPL #NFT"
 
     event_none = _mint_event(traits=None)
     result_none = poster.compose(event_none, rank_traits=None)
@@ -488,15 +467,14 @@ def test_compose_truncates_absurdly_long_trait_values():
     event = _mint_event(traits={"Hat": "X" * 500})
     result = poster.compose(event, rank_traits=None)
     lines = result.split("\n")
-    assert len(lines) == 4
+    assert len(lines) == 3
     traits_line = lines[1]
     assert traits_line.endswith("…")
     assert len(traits_line) < len("Hat: " + "X" * 500)
     assert poster.weighted_tweet_length(result) <= poster.MAX_WEIGHTED_CHARS
-    # URL and hashtags must never be truncated.
-    nft_id = event["data"]["nft_id"]
-    assert lines[2].endswith(f"/nft/{nft_id}")
-    assert lines[3] == "#XRPL #NFT"
+    # Header and hashtags must never be truncated.
+    assert lines[0] == "🎨 LFGO #1234 just minted!"
+    assert lines[2] == "#XRPL #NFT"
 
 
 # ---------------------------------------------------------------------------

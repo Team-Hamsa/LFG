@@ -23,8 +23,6 @@ import re
 from collections.abc import Callable, Mapping
 from typing import Any
 
-from lfg_core import config
-
 MAX_WEIGHTED_CHARS = 280
 _URL_WEIGHT = 23  # every URL is wrapped by t.co and counts as 23 regardless of length (A5/A6)
 _TRAITS_SHOWN = 3
@@ -68,13 +66,17 @@ def should_post(event: Mapping[str, Any]) -> str | None:
 def compose(event: Mapping[str, Any], rank_traits: RankTraits | None = None) -> str:
     """Compose tweet text for a `mint.completed` event.
 
-    Always 3-4 lines: header, an optional traits summary, the bithomp link,
-    and the hashtags. The traits line is the only part ever truncated to fit
-    280 weighted characters — the URL and hashtags are never cut.
+    Always 2-3 lines: header, an optional traits summary, and the hashtags.
+    The traits line is the only part ever truncated to fit 280 weighted
+    characters — the header and hashtags are never cut.
+
+    2026-07-17 user directive (overrides spec §5.3): the bithomp link is
+    intentionally omitted from the auto-posted tweet — X bills $0.20 per post
+    containing a URL vs $0.015 without, and the brand account doesn't need
+    the outbound click.
     """
     data = event.get("data") or {}
     nft_number = data.get("nft_number")
-    nft_id = data.get("nft_id") or ""
     traits: dict[str, str] = data.get("traits") or {}
     body_type: str | None = data.get("body_type")
 
@@ -83,18 +85,9 @@ def compose(event: Mapping[str, Any], rank_traits: RankTraits | None = None) -> 
 
     number_str = str(nft_number) if nft_number is not None else "?"
     header = f"🎨 LFGO #{number_str} just minted!"
-    url = _bithomp_url(nft_id)
-    url_line = f"🔗 {url}"
     hashtags = "#XRPL #NFT"
 
-    fixed_weighted = (
-        _weighted_len(header)
-        + _weighted_len("\n")
-        + _weighted_len("🔗 ")
-        + _URL_WEIGHT
-        + _weighted_len("\n")
-        + _weighted_len(hashtags)
-    )
+    fixed_weighted = _weighted_len(header) + _weighted_len("\n") + _weighted_len(hashtags)
     if traits_line:
         fixed_weighted += _weighted_len("\n")
     budget_for_traits = MAX_WEIGHTED_CHARS - fixed_weighted
@@ -103,7 +96,6 @@ def compose(event: Mapping[str, Any], rank_traits: RankTraits | None = None) -> 
     lines = [header]
     if traits_line:
         lines.append(traits_line)
-    lines.append(url_line)
     lines.append(hashtags)
     return "\n".join(lines)
 
@@ -133,11 +125,6 @@ def _traits_line(ranked: list[tuple[str, str]]) -> str:
     if remainder > 0:
         line += f" (+{remainder} more)"
     return line
-
-
-def _bithomp_url(nft_id: str) -> str:
-    base = "https://test.bithomp.com" if config.XRPL_NETWORK == "testnet" else "https://bithomp.com"
-    return f"{base}/en/nft/{nft_id}"
 
 
 def _char_weight(ch: str) -> int:
