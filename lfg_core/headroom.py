@@ -101,8 +101,13 @@ def _prune_pending(conn: sqlite3.Connection, network: str) -> None:
                 hit = idx.execute(
                     "SELECT 1 FROM onchain_nfts WHERE nft_id = ?", (nft_id,)
                 ).fetchone()
-            except sqlite3.OperationalError:
-                return  # unbuilt index: nothing is provably indexed
+            except sqlite3.OperationalError as e:
+                # Missing table (unbuilt index) or a transient lock — either
+                # way nothing is provably indexed, so skipping the prune is
+                # the safe (over-counting) direction. Log which it was so a
+                # lock isn't silently misattributed to an unbuilt index.
+                logging.debug(f"headroom prune skipped ({e}); pending rows retained")
+                return
             if hit:
                 indexed.append((nft_id,))
     finally:
@@ -246,11 +251,14 @@ def outstanding(db: str) -> int | None:
     conn = None
     try:
         conn = _connect(db)
-        reserved = conn.execute(
-            "SELECT COALESCE(SUM(reserved), 0) FROM headroom_reservations"
-        ).fetchone()[0]
-        pending = conn.execute("SELECT COUNT(*) FROM headroom_pending").fetchone()[0]
-        return int(reserved) + int(pending)
+        # One statement = one consistent snapshot: a concurrent
+        # retire_to_pending (decrement + insert) between two separate reads
+        # could double-count its unit.
+        row = conn.execute(
+            "SELECT (SELECT COALESCE(SUM(reserved), 0) FROM headroom_reservations)"
+            " + (SELECT COUNT(*) FROM headroom_pending)"
+        ).fetchone()
+        return int(row[0])
     except Exception:
         logging.exception("headroom.outstanding failed")
         return None
