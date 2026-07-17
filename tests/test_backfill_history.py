@@ -241,6 +241,40 @@ def test_audit_history_drift(capsys):
     assert "FAIL" in out
 
 
+def test_rederive_skips_tec_txs_in_archive(tmp_path):
+    """#235 verbatim: the raw archive stores failed (tec-class) burn attempts
+    result-agnostically for audit — nft_history archived 5 tec burns for one
+    token — but rederive must derive NO events from them: only the tesSUCCESS
+    mint survives."""
+    import importlib
+    import sqlite3
+
+    dh = importlib.import_module("scripts.derive_history_events")
+    from lfg_core import history_events
+
+    conn = history_store.init_history_db(str(tmp_path / "h.db"))
+    bh.store_raw_tx(conn, history_events.normalize_entry(_entry(fx.MINT, "01" * 32)))
+    for i in range(5):  # 5 failed attempts on the same token, distinct tx hashes
+        tec = dict(fx.BURN_TEC)
+        tec["hash"] = f"{0xB0 + i:02X}" * 32
+        bh.store_raw_tx(conn, history_events.normalize_entry(_entry(tec, tec["hash"])))
+    assert conn.execute("SELECT COUNT(*) FROM xrpl_txs").fetchone()[0] == 6  # archive keeps them
+
+    oconn = sqlite3.connect(":memory:")
+    oconn.execute("CREATE TABLE onchain_nfts (nft_id TEXT PRIMARY KEY, nft_number INTEGER)")
+
+    counts = dh.rederive(
+        conn,
+        "testnet",
+        oconn=oconn,
+        nft_issuer=fx.ISSUER,
+        brix_issuer=fx.BRIX_ISSUER,
+    )
+    assert counts == {"nft_events": 1, "brix_events": 0}
+    rows = conn.execute("SELECT event FROM nft_events").fetchall()
+    assert [r["event"] for r in rows] == ["mint"]
+
+
 def test_rederive_filters_foreign_collection(tmp_path):
     """Raw archive may hold foreign txs that touched our accounts; rederive
     must drop nft events whose nft_id embeds another issuer."""
