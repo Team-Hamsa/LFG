@@ -70,6 +70,25 @@ def test_app_js_has_extract_deposit():
     assert "renderTraitStrip" in src
 
 
+def test_app_js_renders_animated_nfts_as_video():
+    # #250: animated NFTs ship an .mp4 next to the PNG still — result/chooser
+    # artwork must render as <video>, not the frozen poster frame.
+    src = _read("app.js")
+    # The single media helper (and its fixed-id-slot wrapper) exist.
+    assert "function mediaEl(" in src
+    assert "function setMedia(" in src
+    # Inline-autoplay attributes (webview autoplay policies gate on them).
+    for attr in ("'muted'", "'autoplay'", "'loop'", "'playsinline'"):
+        assert f"setAttribute({attr}" in src
+    # Wired in: swap results, mint hero (defensive until #249 lands), assemble.
+    assert "r.video_url" in src
+    assert "s.video_url" in src
+    assert "final.video_url" in src
+    # Roster grid stays stills but flags animated cards.
+    assert "anim-badge" in src
+    assert ".anim-badge" in _read("style.css")
+
+
 def test_leaderboard_card_present():
     html = _read("index.html")
     assert 'id="leaderboard"' in html and 'data-cat="brix"' in html

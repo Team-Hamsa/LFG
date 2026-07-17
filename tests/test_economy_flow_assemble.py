@@ -81,7 +81,7 @@ class _Fakes:
         return "MODHASH"
 
     async def char_compose(self, attrs, body, edition, rev):
-        return ("img", None, "meta")
+        return ("img", "vid.mp4", "meta")
 
     async def char_mint(self, url: str):
         self.mints.append(url)
@@ -145,6 +145,10 @@ def test_assemble_happy_path(tmp_path):
     assert es.read_closet_bodies(conn) == []
     assert es.read_closet_assets(conn) == []
     assert s.results[0]["accept"] == {"xumm_url": "accept"}
+    # #250: compose's outputs thread into the result — an animated assemble's
+    # hero plays from video_url, so dropping/renaming the key must fail here.
+    assert s.results[0]["image_url"] == "img"
+    assert s.results[0]["video_url"] == "vid.mp4"
 
 
 def test_assemble_rejects_incomplete_set(tmp_path):
