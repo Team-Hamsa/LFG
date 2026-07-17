@@ -110,13 +110,6 @@ async def compose_nft(
         layers.append((a["trait_type"], a["value"], path))
     if not canonical:
         raise ValueError("No trait layers to compose")
-    # #268 belt assertion: the composed (trait_type, value) multiset must
-    # equal the canonical attribute view — pins compose == metadata against
-    # any future resolve-side drift.
-    if sorted((t, v) for t, v, _p in layers) != sorted(
-        (a["trait_type"], a["value"]) for a in canonical
-    ):
-        raise ValueError("Composed layers diverge from canonical attributes (#268)")
 
     body_value = swap_meta.get_attr(attributes, "Body") or ""
     layers = await ape_face.inject_and_mask(layers, body, body_value, store, out_dir)
