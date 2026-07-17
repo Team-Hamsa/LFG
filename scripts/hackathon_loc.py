@@ -102,7 +102,7 @@ def build_svg(base: int, app: int, tests: int) -> str:
         f'font-weight="700" fill="{TEXT}">Code written during the hackathon</text>',
         f'<text x="{pad}" y="58" font-family="{FONT}" font-size="13" fill="{MUTED}">'
         f"since June 21 · +{fmt(app + tests)} net lines · "
-        f"codebase now {fmt(total)} lines · all written by Claude Code</text>",
+        f"codebase now {fmt(total)} lines</text>",
         # bar, clipped to rounded pill
         f'<clipPath id="pill"><rect x="{bar_x}" y="{bar_y}" width="{bar_w}" '
         f'height="{bar_h}" rx="{bar_h / 2}"/></clipPath>',
@@ -140,9 +140,8 @@ def build_block(base: int) -> str:
             '<img src="assets/hackathon_loc.svg" alt="Hackathon code growth bar" width="728">',
             "</div>",
             "",
-            f"> **Every line since the June 21 hackathon baseline was written by "
-            f"[Claude Code](https://claude.com/claude-code) — none of it by hand.** "
-            f"Measured from baseline `{BASELINE_SHA[:7]}` ({date}, {fmt(base)} lines) "
+            f"> **Baseline: Code written before the June 21 Make Waves hackathon began** "
+            f"measured from `{BASELINE_SHA[:7]}` ({date}, {fmt(base)} lines) "
             f"by `git diff --numstat` over `.py`/`.js`/`.css`/`.html`, excluding docs, "
             f"data files (CSV/JSON manifests), dependency lists, and the "
             f"legacy/backup trees. Regenerated on every push to `main`.",
