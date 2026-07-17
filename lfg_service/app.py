@@ -2906,11 +2906,13 @@ async def handle_mint_start(request):
     # XUMM recovers — delay-only, since MINT_CREDIT_TTL_SECONDS (30d) far
     # outlasts any outage and the next successful mint start redeems it.
     if session.payment_uuid is None:
-        logging.error(
-            f"mint session {session.id}: payment payload never created (XUMM unavailable)"
-        )
         if session.state == mint_flow.AWAITING_PAYMENT:
-            # (a concurrent cancel during prepare_payment is already terminal)
+            # The error log lives inside this branch: a concurrent cancel
+            # during prepare_payment is already terminal and user-initiated —
+            # not a XUMM failure worth an error-level line.
+            logging.error(
+                f"mint session {session.id}: payment payload never created (XUMM unavailable)"
+            )
             session.state = mint_flow.FAILED
             session.error = "signing service is busy — please try again shortly"
         # Publish mint.failed so the admin-log channel still sees blocked
