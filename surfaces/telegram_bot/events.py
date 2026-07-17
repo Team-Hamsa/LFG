@@ -74,10 +74,13 @@ def make_announcement(ev: Event) -> str:
 
 def announcement_image(ev: Event) -> str | None:
     """The artwork URL to attach to a completed announcement, or None for
-    failures / events that carry no image. The service normalizes the image
-    onto a uniform top-level data.image_url across interactions."""
+    failures / events that carry no image. The service normalizes the artwork
+    onto uniform top-level data.image_url / data.video_url across
+    interactions; prefer the MP4 so animated NFTs play instead of showing
+    the static poster frame."""
     if ev.type.endswith(".completed"):
-        return (ev.data or {}).get("image_url")
+        data = ev.data or {}
+        return data.get("video_url") or data.get("image_url")
     return None
 
 

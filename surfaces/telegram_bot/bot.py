@@ -10,7 +10,7 @@ import logging
 from telegram.ext import Application, CallbackQueryHandler, CommandHandler
 
 from surfaces._client import LFGServiceClient
-from surfaces.telegram_bot import config
+from surfaces.telegram_bot import config, render
 from surfaces.telegram_bot.events import run_event_loop
 
 svc = LFGServiceClient(config.LFG_SERVICE_URL, config.SERVICE_TOKEN_TELEGRAM, "telegram")
@@ -38,20 +38,21 @@ async def _post_init(application: Application) -> None:  # type: ignore[type-arg
         except Exception as e:
             logging.warning(f"set_chat_menu_button failed: {e}")
 
-    async def _announce(message: str, image_url: str | None) -> None:
-        if image_url:
-            await application.bot.send_photo(
-                chat_id=config.TELEGRAM_ANNOUNCE_CHAT_ID, photo=image_url, caption=message
+    async def _announce(message: str, media_url: str | None) -> None:
+        if media_url:
+            # MP4 artwork (animated NFTs) must go out as a video, not a photo.
+            await render.send_media(
+                application.bot, config.TELEGRAM_ANNOUNCE_CHAT_ID, media_url, message
             )
         else:
             await application.bot.send_message(
                 chat_id=config.TELEGRAM_ANNOUNCE_CHAT_ID, text=message
             )
 
-    async def _dm(uid: str, message: str, image_url: str | None) -> None:
+    async def _dm(uid: str, message: str, media_url: str | None) -> None:
         try:
-            if image_url:
-                await application.bot.send_photo(chat_id=int(uid), photo=image_url, caption=message)
+            if media_url:
+                await render.send_media(application.bot, int(uid), media_url, message)
             else:
                 await application.bot.send_message(chat_id=int(uid), text=message)
         except Exception as e:
