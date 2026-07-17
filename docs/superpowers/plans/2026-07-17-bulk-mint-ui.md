@@ -763,13 +763,13 @@ git commit -m "feat: bulk mint payment + fulfillment UI with lazy per-unit accep
 
 - [ ] **Step 1: Edit `docs/ops/env.staging.example`** — next to `ECONOMY_ENABLED=1`:
 
-```
+```dotenv
 BULK_MINT_UI_ENABLED=1                # bulk mint UI (#215) — staging-first; prod stays unset until promoted
 ```
 
 - [ ] **Step 2: Edit `CLAUDE.md`** — in the Environment Variables block, after the `BULK_MINT_MAX`-related lines (search for `BULK_MINT_JOBS_DIR` mentions; the env example block is the big fenced list — add near `TELEGRAM_MINI_APP_URL`-style optional entries):
 
-```
+```dotenv
 BULK_MINT_UI_ENABLED=0                                      # optional (#215); Activity bulk-mint stepper — off = today's UI, server endpoints stay live
 ```
 

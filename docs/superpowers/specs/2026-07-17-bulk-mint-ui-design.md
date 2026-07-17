@@ -87,7 +87,7 @@ same cadence as the single-mint poll) and renders one screen:
   makes eager creation a denial-of-service on ourselves. Repeat clicks create
   a fresh payload (the previous one expires in 15 min; acceptable v1
   behavior).
-- Response: `{ qr, link, pushed }` (same shape the other accept flows
+- Response: `{ qr, link, push }` (same shape the other accept flows
   return); the client shows the existing accept modal (QR + deep link +
   honest push messaging per #212).
 - The endpoint does **not** poll for acceptance; the on-chain listener already

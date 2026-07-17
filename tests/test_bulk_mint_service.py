@@ -511,6 +511,33 @@ def test_bulk_unit_accept_unknown_job_404(dev_auth):
     assert resp.status == 404
 
 
+def _fail_if_called(monkeypatch):
+    async def _boom(*a, **kw):  # pragma: no cover - reaching this IS the failure
+        raise AssertionError("create_accept_offer_payload must not be called")
+
+    monkeypatch.setattr(server.xumm_ops, "create_accept_offer_payload", _boom)
+
+
+def test_bulk_unit_accept_foreign_owner_404_no_payload(dev_auth, monkeypatch):
+    # The endpoint authorizes transfer-signing payloads for offered NFTs —
+    # a foreign caller must get 404 with the payload builder never invoked.
+    _fail_if_called(monkeypatch)
+    job = _offered_job(dev_auth)
+    job.discord_id = "someone_else"
+    resp = _run(server.handle_bulk_mint_unit_accept(_AcceptReq(job.id, "0")))
+    assert resp.status == 404
+
+
+def test_bulk_unit_accept_platform_mismatch_404_no_payload(dev_auth, monkeypatch):
+    # Same guard, surface axis: a job started on another platform is invisible
+    # to this caller (dev auth resolves platform "discord").
+    _fail_if_called(monkeypatch)
+    job = _offered_job(dev_auth)
+    job.platform = "telegram"
+    resp = _run(server.handle_bulk_mint_unit_accept(_AcceptReq(job.id, "0")))
+    assert resp.status == 404
+
+
 def test_bulk_unit_accept_already_claimed_unit_409(dev_auth):
     # offered with offer_id None = gift offer already accepted while the
     # service was down (see BulkMintJob.to_dict contract) — nothing to sign.
