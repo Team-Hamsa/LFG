@@ -3209,6 +3209,15 @@ def _signin_create_limited(platform: str, user_id: str) -> bool:
     return False
 
 
+def _signin_create_refund(platform: str, user_id: str) -> None:
+    """Give back the slot consumed for a create that never yielded a payload
+    (e.g. a plain XUMM outage) — otherwise a few failed attempts lock the
+    user out for the rest of the window without any quota actually spent."""
+    hits = _signin_create_hits.get((platform, user_id))
+    if hits:
+        hits.pop()
+
+
 def _pending_signin_for(platform: str, user_id: str, link_intent: bool) -> tuple[str, Any] | None:
     """A still-fresh unsigned SignIn payload already issued to this user, so a
     re-tap of /register (or a surface retry) re-serves it instead of minting
@@ -3222,6 +3231,12 @@ def _pending_signin_for(platform: str, user_id: str, link_intent: bool) -> tuple
             and rec.get("signin_link")
             and now - rec["created_at"] < SIGNIN_REUSE_SECONDS
         ):
+            # Never re-serve a payload already known signed/expired (the ws
+            # watcher keeps the cache fresh): a signed one would fast-re-login
+            # the previous wallet instead of offering a fresh sign-in.
+            s = xumm_ops.cached_status(uuid)
+            if s and (s.get("signed") or s.get("expired")):
+                continue
             return uuid, rec
     return None
 
@@ -3267,6 +3282,7 @@ async def handle_signin_start(request):
         )
     payload = await xumm_ops.create_signin_payload(return_url=await _request_return_url(request))
     if not payload:
+        _signin_create_refund(platform, user["id"])
         return _xumm_unavailable_response()
     signin_payloads[payload["uuid"]] = {
         "platform": platform,

@@ -469,6 +469,14 @@ def _terminal(s: dict[str, Any]) -> bool:
     return bool(s.get("signed") or s.get("expired"))
 
 
+def cached_status(uuid: str) -> dict[str, Any] | None:
+    """The cached status for a payload, if any — no XUMM call ever. Lets the
+    service cheaply skip e.g. already-signed payloads when deciding whether a
+    pending sign-in can be re-served."""
+    cached = _STATUS_CACHE.get(uuid)
+    return cached[1] if cached else None
+
+
 def watch_payload(uuid: str) -> None:
     """Start (once) a websocket watcher that keeps this payload's cached
     status fresh from XUMM's push channel. Best-effort: no running loop, a
@@ -511,8 +519,15 @@ async def _watch_payload_inner(uuid: str) -> None:
             if s and _terminal(s):
                 return
             async for msg in ws:
-                if msg.type != aiohttp.WSMsgType.TEXT:
+                if msg.type in (
+                    aiohttp.WSMsgType.CLOSE,
+                    aiohttp.WSMsgType.CLOSING,
+                    aiohttp.WSMsgType.CLOSED,
+                    aiohttp.WSMsgType.ERROR,
+                ):
                     break
+                if msg.type != aiohttp.WSMsgType.TEXT:
+                    continue  # ignore stray binary/ping frames, don't kill the feed
                 try:
                     event = json.loads(msg.data)
                 except ValueError:

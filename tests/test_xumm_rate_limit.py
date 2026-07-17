@@ -218,6 +218,39 @@ def test_signin_maps_xumm_rate_limit_to_503(monkeypatch):
 # --- shared client: no retry on deliberate back-pressure ----------------------
 
 
+def test_signin_reuse_skips_signed_payload(monkeypatch):
+    # A pending payload the ws watcher already saw signed must NOT be
+    # re-served — that would fast-re-login the previous wallet.
+    created = _signin_env(monkeypatch, ["r1", "r2"])
+    token = make_session_token({"id": "904", "name": "u", "platform": "telegram"})
+    r1 = _run(app.handle_signin_start(_Req(token)))
+    assert r1.status == 200
+    xumm_ops._STATUS_CACHE["r1"] = (
+        time.monotonic(),
+        {"opened": True, "signed": True, "expired": False},
+    )
+    r2 = _run(app.handle_signin_start(_Req(token)))
+    assert r2.status == 200
+    assert created == ["r1", "r2"]  # fresh payload, no reuse of the signed one
+    app.signin_payloads.pop("r1", None)
+    app.signin_payloads.pop("r2", None)
+
+
+def test_signin_failed_create_refunds_quota(monkeypatch):
+    monkeypatch.setattr(app.config, "WEBAPP_DEV_MODE", False)
+
+    async def fake_create(return_url=None):
+        return None  # plain outage, not rate limited
+
+    monkeypatch.setattr(app.xumm_ops, "create_signin_payload", fake_create)
+    token = make_session_token({"id": "905", "name": "u", "platform": "telegram"})
+    # Way past SIGNIN_CREATE_MAX failing attempts: each refunds its slot, so
+    # the user is never locked out by an outage they didn't cause.
+    for _ in range(app.SIGNIN_CREATE_MAX * 3):
+        resp = _run(app.handle_signin_start(_Req(token)))
+        assert resp.status == 502
+
+
 def test_client_does_not_retry_rate_limiting():
     assert not LFGServiceClient._retryable(ServiceError("x", status=429))
     assert not LFGServiceClient._retryable(ServiceError("x", status=503, code="rate_limited"))
