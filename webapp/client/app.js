@@ -241,7 +241,11 @@ function shareUrlFor(nftNumber, nftId) {
 }
 
 function mintShareText(nftNumber) {
-  return `I just minted LFGO #${nftNumber}! 🎨 #XRPL`;
+  // nft_number can be null/undefined in edge cases (mirrors swapShareText below)
+  // — don't render a literal "#null"/"#undefined" in the tweet text.
+  return nftNumber != null
+    ? `I just minted LFGO #${nftNumber}! 🎨 #XRPL`
+    : 'I just minted an LFGO! 🎨 #XRPL';
 }
 
 function swapShareText(nftNumber) {

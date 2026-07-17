@@ -285,7 +285,12 @@ def nft_by_number(conn: sqlite3.Connection, nft_number: int) -> OnchainNft | Non
     Multiple NFTokens can share an edition number (trait-swap/reminting
     duplicates); when more than one is live at once (a data anomaly, see
     collection_anomalies()'s multi_live), the highest ledger_index (the most
-    recently synced) wins."""
+    recently synced) wins.
+
+    Side effect: sets `conn.row_factory = sqlite3.Row` on the caller's
+    connection (module-wide convention here, not a bug) — don't pass a
+    shared/reused connection whose row_factory matters after this call
+    returns."""
     conn.row_factory = sqlite3.Row
     cur = conn.execute(
         "SELECT * FROM onchain_nfts WHERE nft_number=? AND is_burned=0 "
