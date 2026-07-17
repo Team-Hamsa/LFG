@@ -76,3 +76,47 @@ def test_copy_link_fallback_present_without_native_dialogs():
     assert "navigator.clipboard" in src
     assert "window.confirm(" not in src
     assert "window.alert(" not in src
+
+
+def _function_body(src: str, header: str) -> str:
+    """Slice from a function's header to the next top-level declaration —
+    same windowed-substring style as the openExternal dispatch test above."""
+    start = src.index(header)
+    end = src.find("\nasync function ", start + 1)
+    end2 = src.find("\nfunction ", start + 1)
+    candidates = [i for i in (end, end2) if i != -1]
+    return src[start : min(candidates)] if candidates else src[start:]
+
+
+def test_both_api_config_fetch_sites_populate_share_bases():
+    # #41 fix wave: main()'s /api/config fetch swallows failures, and until
+    # this fix it was the ONLY site populating shareBase/bithompBase —
+    # setupDiscord()'s separate /api/config fetch never repopulated them, so
+    # one transient failure left shareUrlFor() emitting dead relative URLs
+    # for the whole session. Both fetch sites must feed the shared applier.
+    src = _read_app_js()
+    assert "function applyShareConfig(" in src
+    # definition + (at least) the two fetch-site calls
+    assert src.count("applyShareConfig(") >= 3
+    assert "applyShareConfig(" in _function_body(src, "async function setupDiscord(")
+
+
+def test_share_url_for_returns_empty_when_no_base_is_known():
+    # Degrade safely: with BOTH bases unpopulated (every /api/config fetch
+    # failed) shareUrlFor must return '' — never a dead relative
+    # `/en/nft/...` link built on an empty bithompBase.
+    src = _read_app_js()
+    body = _function_body(src, "function shareUrlFor(")
+    assert "bithompBase && nftId" in body
+    assert "return '';" in body
+
+
+def test_share_controls_are_skipped_without_a_share_url():
+    # Both share-control render sites (mint flow panel + per-result swap
+    # cards) must hide/skip the control rather than render a dead link.
+    src = _read_app_js()
+    assert "share && share.url" in src  # showFlow's mint share row guard
+    # swap results: URL computed first, control only appended when truthy
+    swap_idx = src.index("swapShareText(r.nft_number)")
+    window = src[max(0, swap_idx - 400) : swap_idx + 400]
+    assert "if (" in window and "shareUrlFor(r.nft_number, r.nft_id)" in window

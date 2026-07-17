@@ -71,7 +71,11 @@ def test_nft_card_route_registered():
 
 def test_nft_card_known_edition_renders_meta_tags(tmp_path, monkeypatch):
     monkeypatch.setattr(server.config, "PUBLIC_SHARE_BASE_URL", "")
-    _seed_onchain(tmp_path, monkeypatch, [_onchain("AAA", 42, image="https://cdn.example/42.png")])
+    # attrs=[] so the trait summary exercises the LFG-row FALLBACK (the index
+    # is preferred when it has attributes — see the stale-LFG-row test below).
+    _seed_onchain(
+        tmp_path, monkeypatch, [_onchain("AAA", 42, image="https://cdn.example/42.png", attrs=[])]
+    )
     monkeypatch.setattr(
         server,
         "get_nft_data",
@@ -110,6 +114,76 @@ def test_nft_card_known_edition_renders_meta_tags(tmp_path, monkeypatch):
     # testnet's "test." prefix both contain it) so this doesn't pin
     # config.IS_TESTNET, which conftest.py may default either way.
     assert "bithomp.com/en/nft/AAA" in body
+
+
+def test_nft_card_prefers_onchain_index_over_stale_lfg_row(tmp_path, monkeypatch):
+    """#41 fix wave: swaps NEVER update the LFG table, while the listener
+    keeps the on-chain index fresh (NFTokenModify + burn-remint). A post-swap
+    share card built LFG-row-first showed pre-swap art/traits and a bithomp
+    link to the BURNED old token — the index must win for image_url, nft_id,
+    AND traits; the LFG row is only the fallback."""
+    monkeypatch.setattr(server.config, "PUBLIC_SHARE_BASE_URL", "")
+    _seed_onchain(
+        tmp_path,
+        monkeypatch,
+        [
+            _onchain(
+                "NEWID",
+                42,
+                image="https://cdn.example/42-postswap.png",
+                attrs=[{"trait_type": "Eyes", "value": "Laser"}],
+            )
+        ],
+    )
+    monkeypatch.setattr(
+        server,
+        "get_nft_data",
+        lambda n: {
+            "nft_number": 42,
+            "nft_id": "OLDID",  # the burned pre-swap token
+            "image_url": "https://cdn.example/42-preswap.png",
+            "traits": {"eyes": "Round"},
+        },
+    )
+
+    resp = _run(server.handle_nft_card(_req(42)))
+
+    assert resp.status == 200
+    body = resp.text
+    # Image: on-chain index wins over the stale LFG row.
+    assert 'name="twitter:image" content="https://cdn.example/42-postswap.png"' in body
+    assert "42-preswap.png" not in body
+    # Traits: on-chain attributes win.
+    assert "Eyes: Laser" in body
+    assert "Round" not in body
+    # bithomp link: must target the LIVE token, never the burned one.
+    assert "bithomp.com/en/nft/NEWID" in body
+    assert "OLDID" not in body
+
+
+def test_nft_card_lfg_row_fallback_when_index_lacks_image_and_traits(tmp_path, monkeypatch):
+    """Editions whose index record carries no image / attributes (e.g. an
+    unreadable-metadata backfill row) still render from the LFG row."""
+    monkeypatch.setattr(server.config, "PUBLIC_SHARE_BASE_URL", "")
+    _seed_onchain(tmp_path, monkeypatch, [_onchain("FFF", 43, image="", attrs=[])])
+    monkeypatch.setattr(
+        server,
+        "get_nft_data",
+        lambda n: {
+            "nft_number": 43,
+            "nft_id": "FFF",
+            "image_url": "https://cdn.example/43.png",
+            "traits": {"background": "Nebula"},
+        },
+    )
+
+    resp = _run(server.handle_nft_card(_req(43)))
+
+    assert resp.status == 200
+    body = resp.text
+    assert 'name="twitter:image" content="https://cdn.example/43.png"' in body
+    assert "Background: Nebula" in body
+    assert "bithomp.com/en/nft/FFF" in body
 
 
 def test_nft_card_escapes_image_url(tmp_path, monkeypatch):

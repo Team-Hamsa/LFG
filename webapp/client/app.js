@@ -88,13 +88,22 @@ let me = null;
 let pollTimer = null;
 let pollGen = 0; // bumps on every pollMint call, invalidating in-flight ticks
 let externalOpener = null; // set when the SDK is available
-// "Share on X" (#41 T9): populated from /api/config in main()'s init flow.
-// NEVER derive these from the page's own browser-reported address — inside
-// the Activity the page is served from Discord's *.discordsays.com sandbox
+// "Share on X" (#41 T9): populated from /api/config by BOTH fetch sites —
+// main()'s init probe (whose failure is deliberately swallowed) AND
+// setupDiscord()'s client_id fetch — so one transient config failure can't
+// leave shareUrlFor() emitting dead links for the whole session. NEVER
+// derive these from the page's own browser-reported address — inside the
+// Activity the page is served from Discord's *.discordsays.com sandbox
 // proxy, not our public host, so a link built from that would be dead for
 // X's crawler.
 let shareBase = '';
 let bithompBase = '';
+
+function applyShareConfig(cfg) {
+  // Keep an already-populated base if a later fetch omits the field.
+  shareBase = (cfg && cfg.public_share_base_url) || shareBase;
+  bithompBase = (cfg && cfg.bithomp_base_url) || bithompBase;
+}
 
 async function api(path, opts = {}) {
   const headers = { 'Content-Type': 'application/json', ...(opts.headers || {}) };
@@ -224,7 +233,11 @@ function bithompNftUrl(nftId) {
 
 function shareUrlFor(nftNumber, nftId) {
   if (shareBase && nftNumber != null) return `${shareBase}/nft/${nftNumber}`;
-  return bithompNftUrl(nftId);
+  if (bithompBase && nftId) return bithompNftUrl(nftId);
+  // No base is known (every /api/config fetch failed) — return '' so the
+  // callers skip/hide the share control instead of rendering a dead
+  // relative link.
+  return '';
 }
 
 function mintShareText(nftNumber) {
@@ -303,7 +316,12 @@ async function setupDiscord() {
   // SDK is vendored same-origin (webapp/client/vendor/) to avoid esm.sh's
   // root-absolute re-exports, which break under the Activity's /.proxy sub-path.
   const { DiscordSDK, Common } = await import('./vendor/embedded-app-sdk.js');
-  const { client_id: clientId } = await api('/api/config');
+  const cfg = await api('/api/config');
+  // Second chance for the share bases: main()'s own /api/config fetch
+  // swallows failures, and without this repopulation a transient failure
+  // there would leave every share link dead for the session.
+  applyShareConfig(cfg);
+  const clientId = cfg.client_id;
   const sdk = new DiscordSDK(clientId);
   await sdk.ready();
 
@@ -625,11 +643,14 @@ function showFlow({ title, text, qrData, link, image, video, done, stage, spinne
   el('flow-done-btn').hidden = !done;
   // Mint-success terminal state only (#41 T9) — callers pass `share` only
   // from the two showFlow() call sites inside pollMint()'s offer_ready
-  // branch, never from a failure/timeout/other-flow call site.
+  // branch, never from a failure/timeout/other-flow call site. A missing
+  // share.url (shareUrlFor degraded: no base known) hides the row rather
+  // than rendering a dead link.
   const shareRow = el('flow-share-row');
   shareRow.replaceChildren();
-  shareRow.hidden = !share;
-  if (share) shareRow.appendChild(buildShareControl(share.text, share.url));
+  const showShare = !!(share && share.url);
+  shareRow.hidden = !showShare;
+  if (showShare) shareRow.appendChild(buildShareControl(share.text, share.url));
 }
 
 // The pay screen adapts to the backend's silently-detected payment path:
@@ -1320,8 +1341,12 @@ function renderSwapResults(s) {
     // The traits are already final on-chain at this point regardless of
     // `modified` (see run_swap_session: results are only appended once
     // everything is settled) — share per result, not once for the whole
-    // panel, since a swap can touch up to two NFTs (#41 T9).
-    div.appendChild(buildShareControl(swapShareText(r.nft_number), shareUrlFor(r.nft_number, r.nft_id)));
+    // panel, since a swap can touch up to two NFTs (#41 T9). Skipped when
+    // shareUrlFor degrades to '' (no base known — dead link otherwise).
+    const swapShareUrl = shareUrlFor(r.nft_number, r.nft_id);
+    if (swapShareUrl) {
+      div.appendChild(buildShareControl(swapShareText(r.nft_number), swapShareUrl));
+    }
     box.appendChild(div);
   }
   el('swap-done-btn').hidden = false;
@@ -2500,8 +2525,7 @@ async function main() {
     // In-app marketplace (#44) ships after the mainnet MVP: with the feature
     // off, hide the Marketplace entry point (the API answers 403 regardless).
     if (cfg.market_enabled === false) el('market-btn').hidden = true;
-    shareBase = cfg.public_share_base_url || '';
-    bithompBase = cfg.bithomp_base_url || '';
+    applyShareConfig(cfg);
     // Dev reload is same-origin only — never against a cross-origin API base.
     if (cfg.dev_mode && !API_BASE && 'EventSource' in window) {
       new EventSource('/__dev/reload').onmessage = () => location.reload();

@@ -3637,24 +3637,27 @@ def _og_is_placeholder(value: Any) -> bool:
 def _og_traits_summary(
     lfg_row: dict[str, Any] | None, onchain: "nft_index.OnchainNft | None"
 ) -> str:
-    """2-3 'Label: Value' trait pairs for og:description. LFG-row traits
-    (fixed slot order) are preferred; the on-chain index's raw metadata
-    attributes (insertion order) are the fallback when there's no LFG row.
-    Deliberately no rarity dependency, unlike the x_bot poster's
-    rarest-first ranking (#41 §6.2: "keep it simple")."""
+    """2-3 'Label: Value' trait pairs for og:description. The on-chain
+    index's raw metadata attributes (insertion order) are preferred — swaps
+    NEVER update the LFG table while the listener keeps the index fresh
+    (NFTokenModify + burn-remint), so the LFG row can describe pre-swap
+    traits. LFG-row traits (fixed slot order) are the fallback when the
+    index record carries no usable attributes (e.g. unreadable-metadata
+    backfill rows). Deliberately no rarity dependency, unlike the x_bot
+    poster's rarest-first ranking (#41 §6.2: "keep it simple")."""
     pairs: list[tuple[str, str]] = []
-    lfg_traits = (lfg_row or {}).get("traits") or {}
-    if lfg_traits:
-        for slot in _OG_TRAIT_SLOT_ORDER:
-            value = lfg_traits.get(slot)
-            if not _og_is_placeholder(value):
-                pairs.append((_OG_TRAIT_LABELS[slot], str(value)))
-    elif onchain is not None:
+    if onchain is not None:
         for attr in onchain.attributes:
             trait_type = attr.get("trait_type")
             value = attr.get("value")
             if trait_type and not _og_is_placeholder(value):
                 pairs.append((str(trait_type), str(value)))
+    if not pairs:
+        lfg_traits = (lfg_row or {}).get("traits") or {}
+        for slot in _OG_TRAIT_SLOT_ORDER:
+            value = lfg_traits.get(slot)
+            if not _og_is_placeholder(value):
+                pairs.append((_OG_TRAIT_LABELS[slot], str(value)))
     shown = pairs[:_OG_TRAITS_SHOWN]
     return " · ".join(f"{label}: {value}" for label, value in shown)
 
@@ -3706,8 +3709,12 @@ async def handle_nft_card(request: Any) -> Any:
     if onchain is None:
         return web.HTTPNotFound(text=_OG_NOT_FOUND_HTML, content_type="text/html")
 
-    image_url = (lfg_row or {}).get("image_url") or onchain.image or ""
-    nft_id = (lfg_row or {}).get("nft_id") or onchain.nft_id or ""
+    # On-chain index FIRST, stale-able LFG row as fallback: swaps never
+    # update the LFG table (the listener keeps the index fresh via modify +
+    # burn-remint), so an LFG-row-first card would show pre-swap art and a
+    # bithomp link to the BURNED pre-swap token.
+    image_url = onchain.image or (lfg_row or {}).get("image_url") or ""
+    nft_id = onchain.nft_id or (lfg_row or {}).get("nft_id") or ""
     title = f"LFGO #{number}"
     traits_summary = _og_traits_summary(lfg_row, onchain)
     description = traits_summary or f"{config.NFT_COLLECTION_NAME} #{number} on the XRPL."
