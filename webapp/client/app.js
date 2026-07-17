@@ -941,10 +941,15 @@ function renderBulkJob(j) {
   const prev = new Map([...list.children].map((n) => [n.dataset.idx, n]));
   list.replaceChildren(...j.units.map((u) => {
     const old = prev.get(String(u.index));
-    if (old && old.dataset.state === u.state) return old;
+    // offer_id is part of the reuse key: an offered→claimed transition keeps
+    // state 'offered' but nulls offer_id — the row must rebuild to swap the
+    // Accept button for the claimed marker.
+    if (old && old.dataset.state === u.state
+        && old.dataset.offerId === String(u.offer_id)) return old;
     const row = unitRow(j, u);
     row.dataset.idx = String(u.index);
     row.dataset.state = u.state;
+    row.dataset.offerId = String(u.offer_id);
     return row;
   }));
 }
