@@ -422,7 +422,11 @@ async def _create_offer_and_accept(session: SwapSession, item: dict[str, Any]) -
 async def _collect_modify_fee(session: SwapSession, modify_count: int) -> bool:
     """Charge the upfront fee for in-place swaps via XUMM (in BRIX or its
     AMM XRP equivalent, per the session's detected path) and wait for the
-    verified payment. Returns False on timeout/failure."""
+    verified payment. Returns False on failure. On a payload-creation
+    failure (#262 fail-fast) the session is already FAILED with
+    session.error set — callers must not overwrite it; on a payment-wait
+    timeout the session is left non-terminal and the caller stamps
+    PAYMENT_TIMEOUT."""
     if session.pay_with == "XRP":
         fee = str((session.fee_per_nft or Decimal(0)) * modify_count)
         currency, issuer = "XRP", None
@@ -438,10 +442,17 @@ async def _collect_modify_fee(session: SwapSession, modify_count: int) -> bool:
     session.fee_issuer = issuer
     await session.regenerate_payment()
     if session.payment_link is None:
-        # Sign-request payload normally; raw detect link only if XUMM is down
-        session.payment_link = xumm_ops.generate_static_payment_link(
-            destination, value=fee, currency=currency, issuer=issuer
+        # #262 fail-fast: the XUMM sign-request payload was never created
+        # (429 backoff / outage). The static detect link is NOT parseable by
+        # Xaman as a sign request, so entering the payment wait with only it
+        # would strand the user on a dead fee screen for the full timeout.
+        # Nothing has touched the chain yet — fee collection precedes every
+        # burn/mint/modify — so failing here is free.
+        session.state = FAILED
+        session.error = (
+            "The signing service is busy — please try again shortly. Your NFTs are untouched."
         )
+        return False
     session.state = AWAITING_PAYMENT
     paid = await xrpl_ops.wait_for_payment(
         destination=destination,
@@ -535,8 +546,14 @@ async def run_swap_session(session: SwapSession) -> None:
         if modify_items:
             if not await _collect_modify_fee(session, len(modify_items)):
                 _discard_stills(items, session.id)
-                session.state = PAYMENT_TIMEOUT
-                session.error = "No swap fee payment was received in time. Your NFTs are untouched."
+                if session.state != FAILED:
+                    # #262: the fee gate fails the session itself when the
+                    # sign request could never be created; only a genuine
+                    # payment-wait timeout lands here.
+                    session.state = PAYMENT_TIMEOUT
+                    session.error = (
+                        "No swap fee payment was received in time. Your NFTs are untouched."
+                    )
                 return
             _write_swap_record(session, items, "fee_paid")
 

@@ -120,6 +120,7 @@ def test_cancel_refused_once_payment_confirmed_mid_buy_and_burn(monkeypatch):
 
         session = mint_flow.MintSession("55", "rA")
         session.pay_with, session.pay_amount = "XRP", 1
+        session.payment_uuid = "PAYUUID"  # #262: a real XUMM payload exists
         session.task = asyncio.get_event_loop().create_task(mint_flow.run_mint_session(session))
         await asyncio.wait_for(entered_buy_and_burn.wait(), timeout=5)
 

@@ -208,6 +208,7 @@ def test_handle_mint_start_wires_the_publishing_wrapper(monkeypatch):
     monkeypatch.setattr(identity_store, "user_token_for", lambda _p, _u: None)
 
     async def noop_prepare(self):
+        self.payment_uuid = "PAYUUID"  # #262: a real XUMM payload exists
         return None
 
     monkeypatch.setattr(mint_flow.MintSession, "prepare_payment", noop_prepare)

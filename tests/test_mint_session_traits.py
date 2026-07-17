@@ -107,6 +107,7 @@ def test_run_mint_session_populates_traits_and_body_type(monkeypatch):
     )
 
     session = mint_flow.MintSession(discord_id="1", wallet_address="rUser")
+    session.payment_uuid = "PAYUUID"  # #262: a real XUMM payload exists
     loop = asyncio.new_event_loop()
     try:
         loop.run_until_complete(mint_flow.run_mint_session(session))
@@ -123,3 +124,31 @@ def test_run_mint_session_populates_traits_and_body_type(monkeypatch):
     assert d["nft_id"] == "NFTID100"
     assert d["image_url"] == "https://cdn.example/4100/4100_0.png"
     assert d["platform"] == "discord"
+
+
+def test_run_mint_session_fails_fast_without_payment_uuid(monkeypatch):
+    """#262 defense-in-depth: a session whose XUMM payment payload was never
+    created (429 backoff / outage — payment_uuid None, only the static detect
+    link set) must fail immediately instead of entering the 300s payment wait
+    the user cannot possibly satisfy (Xaman cannot parse the detect link as a
+    sign request — the prod incident's 5-minute dead screen)."""
+
+    async def must_not_wait(**kwargs):
+        raise AssertionError("wait_for_payment must not be entered without a sign request")
+
+    monkeypatch.setattr(mint_flow.xrpl_ops, "wait_for_payment", must_not_wait)
+
+    session = mint_flow.MintSession(discord_id="1", wallet_address="rUser")
+    assert session.payment_uuid is None
+    loop = asyncio.new_event_loop()
+    try:
+        loop.run_until_complete(mint_flow.run_mint_session(session))
+    finally:
+        loop.close()
+
+    assert session.state == mint_flow.FAILED
+    assert session.error == "signing service is busy — please try again shortly"
+    # ensure_payment_fallback still ran first: the pay_with defaulting is
+    # required by _payment_params for any path that legitimately has a payload.
+    assert session.pay_with == "XRP"
+    assert session.payment_link  # static link kept for the error screen

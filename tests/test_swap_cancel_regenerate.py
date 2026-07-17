@@ -328,6 +328,45 @@ def test_regenerate_payment_reports_success():
     assert sig.return_annotation in ("bool", bool)
 
 
+def test_collect_modify_fee_fails_fast_when_payload_never_created(monkeypatch):
+    """#262 (mirror of the mint prod incident): when the initial fee payload
+    build fails (429 backoff / outage), _collect_modify_fee used to fall back
+    to the static detect link — which Xaman cannot parse as a sign request —
+    and still enter the full payment wait, a dead fee screen. It must fail
+    the session immediately instead: no wait, nothing on-chain yet."""
+    s = _session(state=swap_flow.COMPOSING)
+
+    async def no_payload(destination, **kw):
+        return None
+
+    async def must_not_wait(**kw):
+        raise AssertionError("wait_for_payment must not be entered without a sign request")
+
+    async def must_not_burn(*a, **kw):
+        raise AssertionError("no fee was collected — buy_and_burn must not run")
+
+    monkeypatch.setattr(xumm_ops, "create_payment_payload", no_payload)
+    monkeypatch.setattr(swap_flow.xrpl_ops, "wait_for_payment", must_not_wait)
+    monkeypatch.setattr(swap_flow.xrpl_ops, "buy_and_burn", must_not_burn)
+
+    assert _run(swap_flow._collect_modify_fee(s, 2)) is False
+    assert s.state == swap_flow.FAILED
+    assert s.error
+    # The fee gate precedes every burn/mint/modify in run_swap_session, so
+    # nothing on-chain has happened for this session at this point.
+
+
+def test_run_swap_session_preserves_fee_gate_failure():
+    """#262 source guard (file's established style for hard-to-integration-
+    test invariants): the _collect_modify_fee caller must not overwrite the
+    fee gate's FAILED + error with the generic PAYMENT_TIMEOUT message."""
+    import inspect
+
+    src = inspect.getsource(swap_flow.run_swap_session)
+    block = src.split("_collect_modify_fee", 1)[1].split("fee_paid", 1)[0]
+    assert "if session.state != FAILED" in block
+
+
 def test_swap_regenerate_timeout_returns_504(dev_auth, monkeypatch):
     s = _session()
     s.fee_amount = "6"

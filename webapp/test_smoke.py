@@ -717,6 +717,7 @@ def test_mint_session_payment_timeout(monkeypatch):
     monkeypatch.setattr(mint_flow.xrpl_ops, "wait_for_payment", no_payment)
 
     session = mint_flow.MintSession(discord_id="1", wallet_address="rTest")
+    session.payment_uuid = "PAYUUID"  # #262: a real XUMM payload exists
     asyncio.get_event_loop().run_until_complete(mint_flow.run_mint_session(session))
     assert session.state == mint_flow.PAYMENT_TIMEOUT
     assert session.payment_link.startswith("https://xaman.app/detect/")
@@ -784,6 +785,7 @@ def test_mint_session_happy_path(monkeypatch, tmp_path):
     monkeypatch.chdir(tmp_path)
 
     session = mint_flow.MintSession(discord_id="1", wallet_address="rTest")
+    session.payment_uuid = "PAYUUID"  # #262: a real XUMM payload exists
     asyncio.get_event_loop().run_until_complete(mint_flow.run_mint_session(session))
 
     assert session.state == mint_flow.OFFER_READY
