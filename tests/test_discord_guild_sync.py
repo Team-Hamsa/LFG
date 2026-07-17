@@ -550,3 +550,19 @@ def test_normalization_matches_real_discordpy_to_dict_shapes():
         },
     ]
     assert _global_payloads_match([real_cmd, real_menu], registered)
+
+
+def test_50240_fallback_reuses_the_gates_registered_fetch():
+    # The unchanged-gate fetches GET /commands moments before the sync; the
+    # changed->50240 fallback must reuse that result rather than fetching a
+    # second time (one GET per boot, not two).
+    from surfaces.discord_bot.bot import _sync_commands
+
+    tree = _fake_tree_with_client([{"id": "111", "name": "launch", "type": 4}])
+    tree.sync = AsyncMock(side_effect=_http_exc(50240))
+    _run(_sync_commands(tree, guild_id=0))
+    assert tree.client.http.get_global_commands.await_count == 1
+    upsert = tree.client.http.bulk_upsert_global_commands
+    upsert.assert_awaited_once()
+    # The reused fetch still supplies the Entry Point entry for the upsert.
+    assert {"id": "111", "name": "launch", "type": 4} in upsert.await_args.kwargs["payload"]

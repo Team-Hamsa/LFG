@@ -91,14 +91,18 @@ _ENTRY_POINT_COMMAND_TYPE = 4
 
 async def _sync_global_including_entry_point(
     command_tree: "discord.app_commands.CommandTree[Any]",
+    registered: "list[dict[str, Any]] | None" = None,
 ) -> None:
     """Re-run the global bulk upsert with the app's existing Entry Point
-    command(s) appended, since tree.sync() can't include them itself."""
+    command(s) appended, since tree.sync() can't include them itself.
+    `registered` lets the caller reuse a moments-old GET /commands result
+    (the unchanged-gate fetches one right before syncing); None fetches."""
     client = command_tree.client
     app_id = client.application_id
     if app_id is None:
         raise discord.app_commands.MissingApplicationID
-    registered = await client.http.get_global_commands(app_id)
+    if registered is None:
+        registered = await client.http.get_global_commands(app_id)
     entry_points = [dict(cmd) for cmd in registered if cmd.get("type") == _ENTRY_POINT_COMMAND_TYPE]
     # _get_all_commands is private, but it is exactly how tree.sync() builds its
     # own bulk-upsert payload — there is no public equivalent that includes
@@ -197,23 +201,25 @@ def _global_payloads_match(payload: list[dict[str, Any]], registered: list[dict[
     if len(ours) != len(theirs):
         return False
     for mine, remote in zip(ours, theirs, strict=True):
-        for key in _SERVER_RESOLVED_DEFAULT_KEYS:
-            # Tree-side None means "let the server resolve the default" —
-            # the resolved value is unknowable client-side, so it matches any.
-            if mine.get(key) is None:
-                mine.pop(key, None)
-                remote.pop(key, None)
-        if mine != remote:
+        # Tree-side None means "let the server resolve the default" — the
+        # resolved value is unknowable client-side, so it matches any. Compare
+        # filtered views instead of mutating the normalized dicts in place.
+        wildcards = {k for k in _SERVER_RESOLVED_DEFAULT_KEYS if mine.get(k) is None}
+        mine_view = {k: v for k, v in mine.items() if k not in wildcards}
+        remote_view = {k: v for k, v in remote.items() if k not in wildcards}
+        if mine_view != remote_view:
             return False
     return True
 
 
 async def _global_commands_unchanged(
     command_tree: "discord.app_commands.CommandTree[Any]",
-) -> bool:
-    """True only when the registered global commands provably match what a
-    sync would upsert. Fail-open by design: on any doubt (no application id,
-    fetch failure, unexpected payload shapes) return False so the normal
+) -> "tuple[bool, list[dict[str, Any]] | None]":
+    """(unchanged, registered): unchanged is True only when the registered
+    global commands provably match what a sync would upsert; registered is
+    the fetched command list for the 50240 fallback to reuse (None when the
+    fetch itself failed). Fail-open by design: on any doubt (no application
+    id, fetch failure, unexpected payload shapes) return False so the normal
     sync + fallback path runs — the worst case must always be today's
     behavior, never a silently skipped genuine change."""
     try:
@@ -221,16 +227,16 @@ async def _global_commands_unchanged(
         app_id = client.application_id
         if app_id is None:
             logging.info("No application_id available; cannot diff global commands, syncing")
-            return False
-        registered = await client.http.get_global_commands(app_id)
+            return False, None
+        registered = list(await client.http.get_global_commands(app_id))
         # Same payload construction as _sync_global_including_entry_point.
         payload = [cmd.to_dict(command_tree) for cmd in command_tree._get_all_commands(guild=None)]  # noqa: SLF001
-        return _global_payloads_match(payload, list(registered))
+        return _global_payloads_match(payload, registered), registered
     except Exception:
         logging.warning(
             "Global command diff check failed; falling back to a normal sync", exc_info=True
         )
-        return False
+        return False, None
 
 
 async def _sync_commands(
@@ -242,7 +248,8 @@ async def _sync_commands(
     fallback and breaks cached Activity launches (#241). When guild_id is
     non-zero, ALSO does an instant guild-scoped sync so commands appear
     immediately in that test/home guild."""
-    if await _global_commands_unchanged(command_tree):
+    unchanged, registered = await _global_commands_unchanged(command_tree)
+    if unchanged:
         logging.info(
             "Global commands unchanged; skipping global sync (Entry Point version preserved)"
         )
@@ -257,7 +264,7 @@ async def _sync_commands(
                 "retrying with the Entry Point command included",
                 exc_info=exc,
             )
-            await _sync_global_including_entry_point(command_tree)
+            await _sync_global_including_entry_point(command_tree, registered=registered)
     if guild_id:
         guild = discord.Object(id=guild_id)
         command_tree.copy_global_to(guild=guild)
