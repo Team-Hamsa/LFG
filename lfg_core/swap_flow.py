@@ -544,7 +544,11 @@ async def run_swap_session(session: SwapSession) -> None:
         if modify_items:
             if not await _collect_modify_fee(session, len(modify_items)):
                 _discard_stills(items, session.id)
-                session.state = PAYMENT_TIMEOUT
+                # A pre-set error means the collection failed before the
+                # payment wait ever started (#262 rate-limit fail-fast) —
+                # FAILED, not PAYMENT_TIMEOUT, so wait-exhaustion telemetry
+                # stays honest. Both are fail_states to every consumer.
+                session.state = FAILED if session.error else PAYMENT_TIMEOUT
                 session.error = (
                     session.error
                     or "No swap fee payment was received in time. Your NFTs are untouched."
