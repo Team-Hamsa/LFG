@@ -15,6 +15,7 @@ def create_users_table() -> None:
     Create the Users table if it doesn't already exist.
     The table will have columns for an auto-incremented ID, Discord ID, Discord name, and wallet.
     """
+    conn = None
     try:
         conn = sqlite3.connect(DATABASE)
         cursor = conn.cursor()
@@ -31,7 +32,8 @@ def create_users_table() -> None:
     except Exception as e:
         logging.error(f"Error creating users table: {e}")
     finally:
-        conn.close()
+        if conn is not None:
+            conn.close()
 
 
 def register_user(discord_id: str, discord_name: str, wallet: str) -> bool:
@@ -47,6 +49,7 @@ def register_user(discord_id: str, discord_name: str, wallet: str) -> bool:
     Returns:
         bool: True if the row was inserted or updated; False on error.
     """
+    conn = None
     try:
         conn = sqlite3.connect(DATABASE)
         cursor = conn.cursor()
@@ -67,7 +70,8 @@ def register_user(discord_id: str, discord_name: str, wallet: str) -> bool:
         logging.error(f"Error registering user: {e}")
         return False
     finally:
-        conn.close()
+        if conn is not None:
+            conn.close()
 
 
 def get_user(discord_id: str) -> dict[str, Any] | None:
@@ -80,6 +84,7 @@ def get_user(discord_id: str) -> dict[str, Any] | None:
     Returns:
         Dict: A dictionary with keys 'id', 'address' (wallet), and 'name' (discord_name), or None if not found.
     """
+    conn = None
     try:
         conn = sqlite3.connect(DATABASE)
         cursor = conn.cursor()
@@ -98,7 +103,8 @@ def get_user(discord_id: str) -> dict[str, Any] | None:
         logging.error(f"Error retrieving user: {e}")
         return None
     finally:
-        conn.close()
+        if conn is not None:
+            conn.close()
 
 
 def get_all_registered_users() -> list[dict[str, Any]]:
@@ -108,6 +114,7 @@ def get_all_registered_users() -> list[dict[str, Any]]:
     Returns:
         List[Dict]: A list where each item is a dictionary with keys: 'discord_id', 'discord_name', and 'wallet'.
     """
+    conn = None
     try:
         conn = sqlite3.connect(DATABASE)
         cursor = conn.cursor()
@@ -119,4 +126,5 @@ def get_all_registered_users() -> list[dict[str, Any]]:
         logging.error(f"Error retrieving registered users: {e}")
         return []
     finally:
-        conn.close()
+        if conn is not None:
+            conn.close()
