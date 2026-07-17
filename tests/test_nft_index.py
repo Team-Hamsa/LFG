@@ -77,6 +77,45 @@ def test_live_nfts_excludes_burned_and_roundtrips_attributes(tmp_path):
     assert live[0].attributes == attrs
 
 
+def test_nft_by_number_returns_live_token(tmp_path):
+    conn = nft_index.init_db(str(tmp_path / "x.db"))
+    nft_index.upsert(conn, _nft("LIVE", number=42))
+    rec = nft_index.nft_by_number(conn, 42)
+    assert rec is not None
+    assert rec.nft_id == "LIVE"
+
+
+def test_nft_by_number_returns_none_for_unknown_number(tmp_path):
+    conn = nft_index.init_db(str(tmp_path / "x.db"))
+    nft_index.upsert(conn, _nft("LIVE", number=42))
+    assert nft_index.nft_by_number(conn, 9999) is None
+
+
+def test_nft_by_number_excludes_burned(tmp_path):
+    # A Harvest burn (dress-up economy) or any other burn leaves the token
+    # is_burned=1 in the index; nft_by_number must treat that as "not live"
+    # even though the row still exists (#41 OG-card liveness check).
+    conn = nft_index.init_db(str(tmp_path / "x.db"))
+    nft_index.upsert(conn, _nft("DEAD", number=7, burned=True))
+    assert nft_index.nft_by_number(conn, 7) is None
+
+
+def test_nft_by_number_multi_live_picks_highest_ledger_index(tmp_path):
+    # Trait-swap/reminting duplicates can leave >1 live token at one edition
+    # number (a data anomaly, see collection_anomalies()'s multi_live) —
+    # nft_by_number must deterministically pick the most-recently-synced one.
+    conn = nft_index.init_db(str(tmp_path / "x.db"))
+    older = _nft("OLDER", number=5)
+    older.ledger_index = 100
+    newer = _nft("NEWER", number=5)
+    newer.ledger_index = 200
+    nft_index.upsert(conn, older)
+    nft_index.upsert(conn, newer)
+    rec = nft_index.nft_by_number(conn, 5)
+    assert rec is not None
+    assert rec.nft_id == "NEWER"
+
+
 def test_metadata_urls_skips_ipfs_entirely():
     # IPFS fetches are banned: gateway flakiness fed the []-clobber cycle
     # (unreadable-live 1 -> 483 over a month of re-runs). Bithomp CSV import

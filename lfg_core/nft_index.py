@@ -276,6 +276,26 @@ def owner_live_nfts(conn: sqlite3.Connection, owner: str) -> list[OnchainNft]:
     return [_row_to_nft(row) for row in cur.fetchall()]
 
 
+def nft_by_number(conn: sqlite3.Connection, nft_number: int) -> OnchainNft | None:
+    """The single LIVE token at this edition number, or None if none is live
+    (unknown edition, or every token at this number is burned — including a
+    dress-up Harvest burn, which never touches the LFG app table, so this is
+    the only reliable liveness check for a given nft_number).
+
+    Multiple NFTokens can share an edition number (trait-swap/reminting
+    duplicates); when more than one is live at once (a data anomaly, see
+    collection_anomalies()'s multi_live), the highest ledger_index (the most
+    recently synced) wins."""
+    conn.row_factory = sqlite3.Row
+    cur = conn.execute(
+        "SELECT * FROM onchain_nfts WHERE nft_number=? AND is_burned=0 "
+        "ORDER BY ledger_index DESC LIMIT 1",
+        (nft_number,),
+    )
+    row = cur.fetchone()
+    return _row_to_nft(row) if row else None
+
+
 def retryable_unreadable(conn: sqlite3.Connection) -> list[OnchainNft]:
     """Non-burned tokens whose metadata never resolved (empty attributes) but
     that still carry a URI — candidates for a re-fetch pass."""

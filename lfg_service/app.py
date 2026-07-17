@@ -22,6 +22,7 @@ import threading
 import time
 import traceback
 from collections.abc import Awaitable, Callable
+from html import escape
 from typing import Any, TypeVar, cast
 from urllib.parse import quote as urlquote
 from urllib.parse import urlparse
@@ -60,6 +61,7 @@ from lfg_core import (
     xrpl_ops,
     xumm_ops,
 )
+from lfg_core.db_helpers import get_nft_data
 from lfg_core.user_db import create_users_table, get_user, register_user
 from lfg_service import identity as identity_store
 from lfg_service.auth import require_service_token, surface_for_token
@@ -3585,6 +3587,154 @@ async def handle_health(request):
     )
 
 
+_OG_NOT_FOUND_HTML = (
+    '<!doctype html><meta charset="utf-8"><title>Not found</title><p>NFT not found.</p>'
+)
+
+# LFG-table trait dict (lowercase keys, get_nft_data()'s shape) in a fixed
+# display order; on-chain-index attribute lists (fallback when there's no LFG
+# row, e.g. an Assemble-minted rebirth edition) have no equivalent renaming —
+# see lfg_core/nft_index.py's OnchainNft.attributes vs get_nft_data()'s
+# "traits" dict shape mismatch (#41 §6.2 recon).
+_OG_TRAIT_SLOT_ORDER = (
+    "background",
+    "back",
+    "body",
+    "clothing",
+    "eyes",
+    "eyebrows",
+    "mouth",
+    "hat",
+    "accessory",
+)
+_OG_TRAIT_LABELS = {
+    "background": "Background",
+    "back": "Back",
+    "body": "Body",
+    "clothing": "Clothing",
+    "eyes": "Eyes",
+    "eyebrows": "Eyebrows",
+    "mouth": "Mouth",
+    "hat": "Hat",
+    "accessory": "Accessory",
+}
+_OG_TRAITS_SHOWN = 3
+
+
+def _og_is_placeholder(value: Any) -> bool:
+    return value is None or str(value).strip().lower() in ("", "none")
+
+
+def _og_traits_summary(
+    lfg_row: dict[str, Any] | None, onchain: "nft_index.OnchainNft | None"
+) -> str:
+    """2-3 'Label: Value' trait pairs for og:description. LFG-row traits
+    (fixed slot order) are preferred; the on-chain index's raw metadata
+    attributes (insertion order) are the fallback when there's no LFG row.
+    Deliberately no rarity dependency, unlike the x_bot poster's
+    rarest-first ranking (#41 §6.2: "keep it simple")."""
+    pairs: list[tuple[str, str]] = []
+    lfg_traits = (lfg_row or {}).get("traits") or {}
+    if lfg_traits:
+        for slot in _OG_TRAIT_SLOT_ORDER:
+            value = lfg_traits.get(slot)
+            if not _og_is_placeholder(value):
+                pairs.append((_OG_TRAIT_LABELS[slot], str(value)))
+    elif onchain is not None:
+        for attr in onchain.attributes:
+            trait_type = attr.get("trait_type")
+            value = attr.get("value")
+            if trait_type and not _og_is_placeholder(value):
+                pairs.append((str(trait_type), str(value)))
+    shown = pairs[:_OG_TRAITS_SHOWN]
+    return " · ".join(f"{label}: {value}" for label, value in shown)
+
+
+def _og_bithomp_url(nft_id: str) -> str:
+    base = "https://test.bithomp.com" if config.IS_TESTNET else "https://bithomp.com"
+    return f"{base}/en/nft/{nft_id}"
+
+
+async def handle_nft_card(request: Any) -> Any:
+    """Public, unauthenticated GET /nft/{number} — a server-rendered
+    OG/Twitter share card (twitter:card=summary_large_image, twitter:image,
+    og:title/description, a visible bithomp link). Exists for X's crawler
+    and for humans clicking a share link, not for the Activity iframe.
+
+    Liveness is decided by the on-chain index, never by LFG-row presence
+    alone: the dress-up economy's Harvest burn never touches the LFG table
+    (only the legacy Discord admin burn deletes rows), so a stale LFG row can
+    outlive the token it describes. Unknown edition, no live on-chain token
+    (burned, or never actually minted) -> a clean 404, no stack trace.
+
+    Any absolute self-URL (og:url, canonical) is built ONLY from
+    config.PUBLIC_SHARE_BASE_URL, never from the request's Host header (which
+    is unstable across ingress paths — Discord's *.discordsays.com proxy vs.
+    the direct Tailscale Funnel .ts.net/lfg path); when unset, og:url/
+    canonical are omitted entirely rather than guessing.
+    """
+    raw_number = request.match_info.get("number", "")
+    try:
+        number = int(raw_number)
+    except (TypeError, ValueError):
+        return web.HTTPNotFound(text=_OG_NOT_FOUND_HTML, content_type="text/html")
+
+    lfg_row = get_nft_data(number)
+
+    conn = nft_index.init_db(nft_index.index_db_path(config.XRPL_NETWORK))
+    try:
+        onchain = nft_index.nft_by_number(conn, number)
+    finally:
+        conn.close()
+
+    if onchain is None:
+        return web.HTTPNotFound(text=_OG_NOT_FOUND_HTML, content_type="text/html")
+
+    image_url = (lfg_row or {}).get("image_url") or onchain.image or ""
+    nft_id = (lfg_row or {}).get("nft_id") or onchain.nft_id or ""
+    title = f"LFGO #{number}"
+    traits_summary = _og_traits_summary(lfg_row, onchain)
+    description = traits_summary or f"{config.NFT_COLLECTION_NAME} #{number} on the XRPL."
+    bithomp_url = _og_bithomp_url(nft_id)
+
+    esc_title = escape(title, quote=True)
+    esc_description = escape(description, quote=True)
+    esc_image = escape(image_url, quote=True)
+    esc_bithomp = escape(bithomp_url, quote=True)
+
+    meta_tags = [
+        '<meta charset="utf-8">',
+        f"<title>{esc_title}</title>",
+        '<meta name="twitter:card" content="summary_large_image">',
+        f'<meta name="twitter:title" content="{esc_title}">',
+        f'<meta name="twitter:description" content="{esc_description}">',
+        f'<meta property="og:title" content="{esc_title}">',
+        f'<meta property="og:description" content="{esc_description}">',
+    ]
+    if image_url:
+        meta_tags.append(f'<meta name="twitter:image" content="{esc_image}">')
+        meta_tags.append(f'<meta property="og:image" content="{esc_image}">')
+    if config.PUBLIC_SHARE_BASE_URL:
+        page_url = escape(f"{config.PUBLIC_SHARE_BASE_URL}/nft/{number}", quote=True)
+        meta_tags.append(f'<meta property="og:url" content="{page_url}">')
+        meta_tags.append(f'<link rel="canonical" href="{page_url}">')
+
+    body_image = (
+        f'<img src="{esc_image}" alt="{esc_title}" style="max-width:100%;">' if image_url else ""
+    )
+    html_doc = (
+        "<!doctype html><html><head>"
+        + "".join(meta_tags)
+        + "</head><body>"
+        + f"<h1>{esc_title}</h1>"
+        + body_image
+        + f"<p>{esc_description}</p>"
+        + f'<p><a href="{esc_bithomp}">View on Bithomp</a></p>'
+        + "</body></html>"
+    )
+    return web.Response(text=html_doc, content_type="text/html")
+
+
 async def handle_qr(request):
     """Server-rendered QR PNG (same-origin, satisfies the Activity CSP)."""
     data = request.query.get("d", "")
@@ -3932,6 +4082,12 @@ def create_app() -> web.Application:
     identity_store.migrate_users_to_identities()
     app.router.add_get("/api/config", handle_config)
     app.router.add_get("/api/health", handle_health)
+    # Public OG/Twitter share card (#41 PR-3) — no /api prefix (it's a share
+    # link, not an API call). Registered before add_static("/", CLIENT_DIR)
+    # below: aiohttp dispatches routes in registration order, and a static
+    # mount at the root could otherwise intercept a path segment that also
+    # exists as a file.
+    app.router.add_get("/nft/{number}", handle_nft_card)
     app.router.add_post("/api/token", handle_token)
     app.router.add_post("/api/session", handle_session)
     app.router.add_post("/api/telegram/auth", handle_telegram_auth)
