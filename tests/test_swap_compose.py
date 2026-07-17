@@ -17,6 +17,7 @@ os.environ.setdefault("BUNNY_PULL_ZONE", "nft.pullzone.example")
 
 import asyncio  # noqa: E402
 
+import pytest  # noqa: E402
 from PIL import Image  # noqa: E402
 
 from lfg_core import layer_store, swap_compose  # noqa: E402
@@ -98,6 +99,26 @@ def test_compose_nft_non_ape_has_no_nose(tmp_path, monkeypatch):
     _run(swap_compose.compose_nft(attrs, "male", store, "out", out_dir=str(tmp_path / "gen")))
     names = [os.path.basename(f) for f in captured["files"]]
     assert "Nose.png" not in names
+
+
+def test_compose_nft_refuses_unnormalized_back_value_under_accessory(tmp_path):
+    # #268 (NFT #4039): a Back-class value still sitting under Accessory means
+    # normalize_attributes was never run — compose must refuse, not silently
+    # z-sort the duplicate over Clothing.
+    store = layer_store.LocalLayerStore(str(tmp_path / "layers"))
+    attrs = [
+        {"trait_type": "Back", "value": "Angel Wings Open"},
+        {"trait_type": "Accessory", "value": "Angel Wings Open"},
+    ]
+    with pytest.raises(ValueError, match="#268"):
+        _run(swap_compose.compose_nft(attrs, "male", store, "out", out_dir=str(tmp_path / "gen")))
+
+
+def test_compose_nft_refuses_accessory_only_back_value(tmp_path):
+    store = layer_store.LocalLayerStore(str(tmp_path / "layers"))
+    attrs = _attrs(Body="Straight Dark", Accessory="Angel Wings")
+    with pytest.raises(ValueError, match="#268"):
+        _run(swap_compose.compose_nft(attrs, "male", store, "out", out_dir=str(tmp_path / "gen")))
 
 
 def test_missing_layers_flags_ape_assets(tmp_path):
