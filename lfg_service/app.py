@@ -42,6 +42,7 @@ from lfg_core import (
     db_path,
     economy_flow,
     economy_store,
+    headroom,
     history_store,
     image_archive,
     layer_store,
@@ -2879,6 +2880,35 @@ async def handle_mint_start(request):
         push_user_token=push_user_token,
     )
     mint_sessions[session.id] = session
+    # #226: single mints previously checked no collection cap at all. Take a
+    # durable 1-unit headroom reservation (atomic with every concurrent bulk
+    # clamp and single mint) before any payment UX; zero grant — including a
+    # store error, which fails closed for new grants — answers the same 409
+    # collection_full the bulk endpoint returns. Placed after the insert
+    # above so the one-active-session guard window stays await-free; the
+    # FAILED mark frees the slot for _prune_sessions.
+    granted = await asyncio.to_thread(
+        headroom.try_reserve,
+        db_path.app_db_path(config.XRPL_NETWORK),
+        f"mint:{session.id}",
+        1,
+        config.XRPL_NETWORK,
+    )
+    if granted < 1:
+        if session.state == mint_flow.AWAITING_PAYMENT:
+            # Guard like #262: a concurrent cancel during the reserve await is
+            # already terminal — don't overwrite CANCELLED with FAILED.
+            session.state = mint_flow.FAILED
+            session.error = "collection_full"
+        session.mark_published()  # deliberate refusal, not a pipeline failure
+        return web.json_response({"error": "collection_full"}, status=409)
+    session.headroom_reserved = True
+    if session.state != mint_flow.AWAITING_PAYMENT:
+        # A concurrent cancel won the reserve race: settle the reservation
+        # just taken and stop before pushing a payable Xaman request for a
+        # cancelled session (#226 review).
+        mint_flow.settle_headroom(session)
+        return web.json_response(session.to_dict())
     # Detect the payment path (LFGO holder vs XRP newcomer) and create the
     # XUMM sign request before the first QR is rendered (after the insert
     # above, so the one-active-session guard stays race-free). Bounded so a
@@ -2906,6 +2936,9 @@ async def handle_mint_start(request):
     # XUMM recovers — delay-only, since MINT_CREDIT_TTL_SECONDS (30d) far
     # outlasts any outage and the next successful mint start redeems it.
     if session.payment_uuid is None:
+        # #226: no task will ever run for this session — settle (release) its
+        # headroom reservation here. No-op if a concurrent cancel already did.
+        mint_flow.settle_headroom(session)
         if session.state == mint_flow.AWAITING_PAYMENT:
             # The error log lives inside this branch: a concurrent cancel
             # during prepare_payment is already terminal and user-initiated —
@@ -2930,7 +2963,10 @@ async def handle_mint_start(request):
         # prepare_payment — even with a successfully-created payload,
         # launching the watch would resurrect a session the user backed out
         # of (run_mint_session's terminal entry guard is the second line of
-        # defense; same pattern as bulk).
+        # defense; same pattern as bulk). settle_headroom covers the window
+        # where cancel() ran before headroom_reserved was set (its own
+        # settle was a no-op then); idempotent otherwise (#226).
+        mint_flow.settle_headroom(session)
         return web.json_response(session.to_dict())
     # Keep the task handle so /cancel can stop the payment wait (#141).
     # The wrapper publishes the terminal firehose event server-side, so a
@@ -2944,11 +2980,12 @@ async def handle_mint_start(request):
 async def handle_bulk_mint_start(request):
     """Start a bulk mint job (#215): one K x payment, then a background task
     mints K units in sequence. Mirrors handle_mint_start's ordering — every
-    suspending value (request body parse, push token, return URL) is resolved
-    BEFORE the one-active-job check so no await sits between the check and
-    the insert below (the guard is only race-free while that window stays
-    await-free). prepare_payment() is deliberately awaited AFTER the insert —
-    a concurrent request already sees this job as active by then."""
+    suspending value (request body parse, push token, return URL, and the
+    threaded headroom clamp) is resolved BEFORE the one-active-job check so
+    no await sits between the check and the insert below (the guard is only
+    race-free while that window stays await-free). prepare_payment() is
+    deliberately awaited AFTER the insert — a concurrent request already
+    sees this job as active by then."""
     user = request["user"]
     _prune_sessions(bulk_sessions, bulk_mint_flow.TERMINAL_STATES)
 
@@ -2980,7 +3017,16 @@ async def handle_bulk_mint_start(request):
         return_url=return_url,
     )
     try:
-        job.clamp_to_headroom()
+        # to_thread like the single-mint reserve at handle_mint_start (#226
+        # review): try_reserve is a write transaction with a 5s busy timeout
+        # plus a cross-DB prune scan — far heavier than the loop-called
+        # mint_credits.add_credit precedent; run on the loop it would freeze
+        # every request for the whole busy wait under app-DB contention.
+        # Safe here: the await lands BEFORE the one-active-job check, so the
+        # check->insert window below stays await-free; a same-user duplicate
+        # that also clamps loses the active check and releases its grant in
+        # the 409 branch below (no leak).
+        await asyncio.to_thread(job.clamp_to_headroom)
     except bulk_mint_flow.CollectionFull:
         return web.json_response({"error": "collection_full"}, status=409)
 
@@ -2988,6 +3034,9 @@ async def handle_bulk_mint_start(request):
     # below, so it cannot race)
     active = _active_session(bulk_sessions, bulk_mint_flow.TERMINAL_STATES, user["id"], platform)
     if active:
+        # clamp_to_headroom already reserved for the rejected job (#226) —
+        # give it back, it will never run.
+        bulk_mint_flow.release_job_headroom(job)
         return web.json_response(
             {"error": "bulk mint already in progress", "session": active.to_dict()}, status=409
         )
@@ -3006,6 +3055,7 @@ async def handle_bulk_mint_start(request):
         logging.error(f"bulk job {job.id} prepare_payment failed: {e}")
         job.state = bulk_mint_flow.FAILED
         job.error = str(e)
+        bulk_mint_flow.release_job_headroom(job)  # terminal before launch (#226)
         # Defensive: the AWAITING_PAYMENT persist below only runs on success,
         # so there should be no record — but a failed start must never leave
         # a zombie file for the startup sweep to resurrect (#228).
@@ -3036,6 +3086,7 @@ async def handle_bulk_mint_start(request):
         )
         job.state = bulk_mint_flow.FAILED
         job.error = "payment_setup_failed"
+        bulk_mint_flow.release_job_headroom(job)  # terminal before launch (#226)
         bulk_mint_flow.delete_record(job.id)
         return web.json_response({"error": "payment_setup_failed"}, status=500)
     job.task = asyncio.create_task(bulk_mint_flow.run_bulk_mint_job(job))
@@ -3097,28 +3148,63 @@ async def resume_bulk_jobs() -> None:
     bulk jobs so a service restart mid-fulfillment doesn't strand paid units
     (or, for awaiting-payment records, a payment signed just before the
     crash)."""
-    for job in bulk_mint_flow.load_all_resumable():
+    jobs = bulk_mint_flow.load_all_resumable()
+    # #226: reconstruct the headroom-reservation overlay BEFORE relaunching.
+    # Reservations from a dead process are rebuilt from the durable job
+    # records — a job that crashed between clamp and its first persist left
+    # no record, so its orphan rows are dropped, as are all mint:* rows
+    # (single-mint sessions are in-memory only).
+    #
+    # INVARIANT (#226 review — do not weaken): rebuild's orphan DELETE must
+    # never race a fresh reservation. Two things guarantee that today:
+    #   1. _start_bulk_resume awaits this coroutine to completion inside
+    #      aiohttp's on_startup, which finishes BEFORE the site binds — no
+    #      request (and therefore no try_reserve, loop-side or threaded) can
+    #      exist while the rebuild runs.
+    #   2. There is NO await between load_all_resumable(), the `keep`
+    #      snapshot, and the rebuild calls, and rebuild runs synchronously on
+    #      the loop — never via asyncio.to_thread (a past variant did that
+    #      and reservations granted mid-rebuild were silently wiped: bulk
+    #      jobs converted every paid unit to credits, single mints ran
+    #      uncounted).
+    # The `keep` list is belt-and-braces for any future non-startup caller;
+    # note it CANNOT protect a bulk clamp in flight (the job only enters
+    # bulk_sessions after its threaded clamp returns), so ordering — not
+    # keep — is the load-bearing guarantee.
+    keep = [
+        f"mint:{s.id}" for s in mint_sessions.values() if s.state not in mint_flow.TERMINAL_STATES
+    ] + [
+        f"bulk:{j.id}"
+        for j in bulk_sessions.values()
+        if j.state not in bulk_mint_flow.TERMINAL_STATES
+    ]
+    by_net: dict[str, list[tuple[str, int, list[str]]]] = {config.XRPL_NETWORK: []}
+    for job in jobs:
+        specs = by_net.setdefault(job.network, [])
+        snap = bulk_mint_flow.headroom_snapshot(job)
+        if snap is not None:
+            specs.append(snap)
+    for net, specs in by_net.items():
+        headroom.rebuild(db_path.app_db_path(net), specs, keep=keep)
+    for job in jobs:
         bulk_sessions[job.id] = job
         job.task = asyncio.create_task(bulk_mint_flow.run_bulk_mint_job(job))
 
 
 async def _start_bulk_resume(app: web.Application) -> None:
-    """aiohttp on_startup hook: schedule resume_bulk_jobs as a background task
-    (mirrors _start_settlement_sweep) so app startup doesn't block on it."""
-    app["bulk_resume_task"] = asyncio.get_event_loop().create_task(resume_bulk_jobs())
-
-
-async def _stop_bulk_resume(app: web.Application) -> None:
-    """aiohttp on_cleanup hook: cancel the startup bulk-resume task on
-    shutdown (mirrors _stop_settlement_sweep)."""
-    task = app.get("bulk_resume_task")
-    if task is None:
-        return
-    task.cancel()
+    """aiohttp on_startup hook: run the resume sweep TO COMPLETION before the
+    site starts serving (#226 review) — aiohttp only binds the listener after
+    on_startup finishes, so no request can take a fresh headroom reservation
+    while resume_bulk_jobs' rebuild deletes orphans (the keep-set alone cannot
+    see claimants created mid-rebuild; see the invariant note there). The
+    sweep itself is fast local work (a job-dir scan + one sqlite transaction);
+    per-job fulfillment still runs as background tasks created inside
+    resume_bulk_jobs. Never fails startup: a broken resume must not down the
+    whole API."""
     try:
-        await task
-    except asyncio.CancelledError:
-        pass
+        await resume_bulk_jobs()
+    except Exception:
+        logging.exception("bulk resume sweep failed at startup")
 
 
 def _index_roster(conn: sqlite3.Connection, wallet: str) -> list[dict[str, Any]] | None:
@@ -4498,7 +4584,6 @@ def create_app() -> web.Application:
     app.on_startup.append(_start_settlement_sweep)
     app.on_cleanup.append(_stop_settlement_sweep)
     app.on_startup.append(_start_bulk_resume)
-    app.on_cleanup.append(_stop_bulk_resume)
     return app
 
 
