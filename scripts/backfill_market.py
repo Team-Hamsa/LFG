@@ -4,8 +4,13 @@
 Sweeps BOTH populations known to the per-network on-chain index --
 live `onchain_nfts` characters (is_burned=0) and every `trait_tokens` row --
 fetching each token's current sell offers (`xrpl_ops.get_nft_sell_offers`)
-and upserting a live `market_listings` row for every sell-flagged,
-XRP-denominated offer whose Owner matches the token's CURRENT owner-of-record.
+and upserting a live `market_listings` row for every sell-flagged offer in
+the kind's denomination (#239: XRP drops for characters, our BRIX
+IssuedCurrencyAmount for trait tokens) whose Owner matches the token's
+CURRENT owner-of-record. Because an XRP-denominated trait offer no longer
+matches, any legacy live XRP trait listing is closed 'stale' by the standard
+stale-close pass — run this backfill once after deploying #239 to retire
+them (sellers re-list in BRIX).
 A previously-live row whose offer_index doesn't turn up as a currently-valid
 offer anywhere in this sweep (cancelled, accepted, or left dangling by a prior
 owner) is closed with reason 'stale'. Rows already closed (is_live=0) --
@@ -50,11 +55,19 @@ async def _fetch_offers_strict(nft_id: str) -> list[dict[str, Any]]:
 
 
 def _matching_sell_offers(
-    offers: list[dict[str, Any]], owner: str, ledger_time: int | None = None
+    offers: list[dict[str, Any]],
+    owner: str,
+    ledger_time: int | None = None,
+    expect: str = "xrp",
 ) -> list[dict[str, Any]]:
-    """Sell-flagged, XRP-denominated offers from `get_nft_sell_offers` whose
+    """Sell-flagged offers from `get_nft_sell_offers`, denominated per kind
+    (#239: `expect="xrp"` requires a drops-string Amount — characters;
+    `expect="brix"` requires our BRIX IssuedCurrencyAmount — trait tokens;
+    each match gains a normalized `amount_brix` key), whose
     Owner equals the token's CURRENT owner-of-record. Excludes buy offers,
-    IOU-denominated offers, and offers left on-ledger by a PREVIOUS owner
+    wrong-denomination offers (so a legacy XRP-denominated trait listing no
+    longer matches and is retired by the stale-close pass on the first
+    post-deploy run), and offers left on-ledger by a PREVIOUS owner
     (stale sellers) -- same filters the listener applies at offer_create
     time. Destination-locked offers are NOT excluded here: they are stored
     (browse hides them via `destination IS NULL`), matching how
@@ -74,7 +87,12 @@ def _matching_sell_offers(
         if not isinstance(flags, int) or not (flags & market_ops.LSF_SELL_NFTOKEN):
             continue
         amount = offer.get("amount")
-        if not isinstance(amount, str) or not amount.isdigit():
+        if expect == "brix":
+            brix_value = market_ops.brix_offer_value(amount)
+            if brix_value is None:
+                continue  # drops string or foreign/invalid IOU
+            offer = dict(offer, amount_brix=brix_value)
+        elif not isinstance(amount, str) or not amount.isdigit():
             continue
         if offer.get("owner") != owner:
             continue
@@ -135,7 +153,8 @@ async def backfill_market(
             logging.warning(f"backfill_market: offer fetch failed for {nft_id}: {e}")
             failed_nft_ids.add(nft_id)
             return []
-        matches = _matching_sell_offers(offers, owner, ledger_time)
+        expect = "brix" if kind == "trait" else "xrp"
+        matches = _matching_sell_offers(offers, owner, ledger_time, expect=expect)
         for offer in matches:
             market_store.upsert_listing(
                 conn,
@@ -144,7 +163,8 @@ async def backfill_market(
                     nft_id=nft_id,
                     kind=kind,
                     seller=owner,
-                    amount_drops=int(offer["amount"]),
+                    amount_drops=int(offer["amount"]) if kind == "character" else None,
+                    amount_brix=offer.get("amount_brix"),
                     destination=offer.get("destination"),
                     slot=slot,
                     value=value,

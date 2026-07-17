@@ -123,6 +123,17 @@ def _sell_offer(
     }
 
 
+def _brix_amount(value="10"):
+    # #239: trait listings are BRIX-denominated on the token currency/issuer.
+    from lfg_core import config
+
+    return {
+        "currency": config.TOKEN_CURRENCY_HEX,
+        "issuer": config.TOKEN_ISSUER_ADDRESS,
+        "value": value,
+    }
+
+
 def _fetch_offers_map(mapping: dict[str, list[dict[str, Any]]]) -> Any:
     """Build a fetch_offers(nft_id) stand-in from a {nft_id: [offer, ...]} map;
     unmapped nft_ids return []  (mirrors get_nft_sell_offers' no-offers case)."""
@@ -158,7 +169,9 @@ def test_sweep_character_upserts_live_row(tmp_path):
 def test_sweep_trait_copies_slot_value(tmp_path):
     conn = _conn(tmp_path)
     _seed_trait(conn, TRAIT_NFT, owner=SELLER, slot="Hat", value="Wizard Hat")
-    fetch = _fetch_offers_map({TRAIT_NFT: [_sell_offer("OFF_TRAIT", owner=SELLER)]})
+    fetch = _fetch_offers_map(
+        {TRAIT_NFT: [_sell_offer("OFF_TRAIT", owner=SELLER, amount=_brix_amount("10.5"))]}
+    )
 
     _run(bm.backfill_market(conn, fetch_offers=fetch))
 
@@ -168,6 +181,8 @@ def test_sweep_trait_copies_slot_value(tmp_path):
     assert row["kind"] == "trait"
     assert row["slot"] == "Hat"
     assert row["value"] == "Wizard Hat"
+    assert row["amount_brix"] == "10.5"
+    assert row["amount_drops"] is None
 
 
 def test_sweep_covers_both_populations_in_stats(tmp_path):
@@ -561,3 +576,91 @@ def test_network_arg_bad_env_default_fails_fast(monkeypatch):
     with pytest.raises(SystemExit):
         bm._build_parser().parse_args([])
     assert bm._build_parser().parse_args(["--network", "testnet"]).network == "testnet"
+
+
+# --- #239: per-kind denomination in the sweep --------------------------------
+
+
+def test_xrp_trait_offer_not_upserted_and_legacy_row_closed_stale(tmp_path):
+    """An XRP-denominated trait offer no longer matches (#239) — AND a legacy
+    live XRP trait listing row is retired by the standard stale-close pass on
+    the first post-deploy run."""
+    conn = _conn(tmp_path)
+    _seed_trait(conn, TRAIT_NFT, owner=SELLER)
+    market_store.upsert_listing(
+        conn,
+        MarketListing(
+            offer_index="OFF_LEGACY_XRP_TRAIT",
+            nft_id=TRAIT_NFT,
+            kind="trait",
+            seller=SELLER,
+            amount_drops=500_000,
+            slot="Hat",
+            value="Wizard Hat",
+            is_live=1,
+        ),
+    )
+    # The on-ledger offer still exists — but it is XRP-denominated.
+    fetch = _fetch_offers_map(
+        {TRAIT_NFT: [_sell_offer("OFF_LEGACY_XRP_TRAIT", owner=SELLER, amount="500000")]}
+    )
+
+    stats = _run(bm.backfill_market(conn, fetch_offers=fetch))
+
+    conn.row_factory = sqlite3.Row
+    row = conn.execute(
+        "SELECT * FROM market_listings WHERE offer_index='OFF_LEGACY_XRP_TRAIT'"
+    ).fetchone()
+    assert row["is_live"] == 0
+    assert row["closed_reason"] == "stale"
+    assert stats["live_listings"] == 0
+
+
+def test_brix_character_offer_not_upserted(tmp_path):
+    conn = _conn(tmp_path)
+    _seed_character(conn, CHAR_NFT, owner=SELLER)
+    fetch = _fetch_offers_map(
+        {CHAR_NFT: [_sell_offer("OFF_BRIX_CHAR", owner=SELLER, amount=_brix_amount())]}
+    )
+
+    _run(bm.backfill_market(conn, fetch_offers=fetch))
+
+    assert conn.execute("SELECT COUNT(*) FROM market_listings").fetchone()[0] == 0
+
+
+def test_rerun_idempotent_with_brix_rows_preserves_listener_timestamps(tmp_path):
+    conn = _conn(tmp_path)
+    _seed_trait(conn, TRAIT_NFT, owner=SELLER)
+    market_store.upsert_listing(
+        conn,
+        MarketListing(
+            offer_index="OFF_BRIX_LISTENER",
+            nft_id=TRAIT_NFT,
+            kind="trait",
+            seller=SELLER,
+            amount_brix="10",
+            slot="Hat",
+            value="Wizard Hat",
+            created_ledger=777,
+            created_ts=1_700_000_777,
+            is_live=1,
+        ),
+    )
+    fetch = _fetch_offers_map(
+        {TRAIT_NFT: [_sell_offer("OFF_BRIX_LISTENER", owner=SELLER, amount=_brix_amount("10"))]}
+    )
+
+    _run(bm.backfill_market(conn, fetch_offers=fetch))
+    after_first = _all_rows(conn)
+    _run(bm.backfill_market(conn, fetch_offers=fetch))
+    after_second = _all_rows(conn)
+
+    assert after_first == after_second
+    conn.row_factory = sqlite3.Row
+    row = conn.execute(
+        "SELECT * FROM market_listings WHERE offer_index='OFF_BRIX_LISTENER'"
+    ).fetchone()
+    assert row["created_ledger"] == 777
+    assert row["created_ts"] == 1_700_000_777
+    assert row["amount_brix"] == "10"
+    assert row["is_live"] == 1
