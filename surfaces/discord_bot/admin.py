@@ -18,8 +18,9 @@ from xrpl.wallet import Wallet
 from lfg_core import config as core_config
 from lfg_core import rarity as _rarity
 from lfg_core.config import JSON_RPC_URL, SOURCE_TAG
+from surfaces._client.errors import ServiceError
 from surfaces.discord_bot import config
-from surfaces.discord_bot.bot import tree
+from surfaces.discord_bot.bot import svc, tree
 
 SEED = config.SEED
 # JSON_RPC_URL is the network-aware endpoint from lfg_core.config (resolves via
@@ -381,6 +382,25 @@ class RarityDisableModal(Modal, title="Toggle Trait"):
         )
 
 
+def _x_toggle_label(paused: bool) -> str:
+    """Button label mirrors the *next* action, not the current state name."""
+    return "▶️ Resume X posting" if paused else "⏸️ Pause X posting"
+
+
+def _x_status_embed(status: dict[str, Any]) -> Embed:
+    embed = Embed(title="📡 X Posting Status", color=0x9C84EF)
+    embed.add_field(
+        name="Posting", value="⏸️ Paused" if status["paused"] else "▶️ Running", inline=True
+    )
+    embed.add_field(
+        name="This Month", value=f"{status['month_posts']} / {status['budget']}", inline=True
+    )
+    embed.add_field(
+        name="Enabled", value="✅ Yes" if status["enabled"] else "❌ No (dark)", inline=True
+    )
+    return embed
+
+
 # Add burn button to AdminView
 class AdminView(View):
     def __init__(self):
@@ -467,6 +487,31 @@ class AdminView(View):
     async def toggle_trait(self, interaction: discord.Interaction, button: Button[Any]):
         await interaction.response.send_modal(RarityDisableModal())
 
+    @discord.ui.button(label="⏸️ Pause X posting", style=discord.ButtonStyle.secondary, row=2)
+    async def x_toggle_button(self, interaction: discord.Interaction, button: Button[Any]):
+        await interaction.response.defer(ephemeral=True)
+        logging.info(f"X posting toggle pressed by {interaction.user}")
+
+        try:
+            status = await svc.x_status()
+            if status["paused"]:
+                result = await svc.x_resume()
+            else:
+                result = await svc.x_pause()
+            status["paused"] = result["paused"]
+        except ServiceError as e:
+            logging.error(f"X posting toggle failed: {e}")
+            await interaction.followup.send(
+                f"❌ Failed to toggle X posting: {e.message}", ephemeral=True
+            )
+            return
+
+        button.label = _x_toggle_label(status["paused"])
+        await interaction.followup.send(embed=_x_status_embed(status), ephemeral=True)
+
+        action = "paused" if status["paused"] else "resumed"
+        await log_admin_action(interaction.client, f"📡 X posting {action} by {interaction.user}")
+
 
 @tree.command(name="admin", description="Admin control panel for NFT management")
 @app_commands.checks.has_permissions(administrator=True)  # Add explicit permission check
@@ -492,6 +537,15 @@ async def admin_command(interaction: discord.Interaction):
 
     # Create view with admin buttons
     view = AdminView()
+    # Best-effort: reflect the current pause/resume state on the button label
+    # when the panel opens. A failed/dark lfg_service must not block the
+    # whole admin panel — fall back to the view's default label.
+    try:
+        status = await svc.x_status()
+        view.x_toggle_button.label = _x_toggle_label(status["paused"])
+    except ServiceError as e:
+        logging.warning(f"x_status failed while building admin panel: {e}")
+
     await interaction.response.send_message(embed=embed, view=view, ephemeral=True)
 
 
