@@ -4483,7 +4483,9 @@ def create_app() -> web.Application:
     app.router.add_post("/api/mint/bulk", handle_bulk_mint_start)
     app.router.add_get("/api/mint/bulk/active", handle_bulk_mint_active)
     app.router.add_post("/api/mint/bulk/{session_id}/cancel", handle_bulk_mint_cancel)
-    app.router.add_post("/api/mint/bulk/{session_id}/units/{index}/accept", handle_bulk_mint_unit_accept)
+    app.router.add_post(
+        "/api/mint/bulk/{session_id}/units/{index}/accept", handle_bulk_mint_unit_accept
+    )
     app.router.add_get("/api/mint/bulk/{session_id}", handle_bulk_mint_status)
     app.router.add_get("/api/mint/{session_id}", handle_mint_status)
     app.router.add_post("/api/mint/{session_id}/regenerate", handle_mint_regenerate)
