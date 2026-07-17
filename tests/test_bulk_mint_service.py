@@ -501,7 +501,7 @@ def test_bulk_unit_accept_rejects_non_offered_unit(dev_auth):
 
 def test_bulk_unit_accept_rejects_bad_index(dev_auth):
     job = _offered_job(dev_auth)
-    for bad in ("7", "-1", "zero"):
+    for bad in ("7", "-1", "zero", "²"):  # "²": Unicode digit passes isdigit() but not int()
         resp = _run(server.handle_bulk_mint_unit_accept(_AcceptReq(job.id, bad)))
         assert resp.status == 400, bad
 

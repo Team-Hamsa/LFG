@@ -3106,7 +3106,9 @@ async def handle_bulk_mint_unit_accept(request):
     ):
         return web.json_response({"error": "not found"}, status=404)
     raw_index = request.match_info["index"]
-    if not raw_index.isdigit():  # rejects "-1", "zero"; only plain non-negative ints
+    # isascii() guard: isdigit() alone accepts Unicode digits like "²" that
+    # int() then rejects with ValueError — an unhandled 500 (Greptile P1).
+    if not (raw_index.isascii() and raw_index.isdigit()):  # only plain non-negative ints
         return web.json_response({"error": "invalid_unit"}, status=400)
     index = int(raw_index)
     if index >= len(job.units):
