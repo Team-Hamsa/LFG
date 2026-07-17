@@ -104,6 +104,7 @@ PUBLIC_SHARE_BASE_URL=<public-https-base>                   # optional (#41); un
 WEB_ALLOWED_ORIGINS=https://build.letseffinggo.com,https://team-hamsa.github.io   # optional (#240); standalone web surface CORS allowlist (empty = off)
 BRIX_DISTRIBUTOR_ADDRESS=<xrpl-address>                     # optional; airdrop distributor wallet, excluded from BRIX leaderboards/derivation as a counterparty
 BRIX_AMM_ACCOUNT=<xrpl-address>                             # optional; mainnet BRIX/XRP AMM pool account, used by snapshot_balances.py
+BULK_MINT_UI_ENABLED=0                                      # optional (#215); Activity bulk-mint stepper — off = today's UI, server endpoints stay live
 ```
 
 > **Standalone web surface (#240):** the same vanilla-JS Activity runs as a
