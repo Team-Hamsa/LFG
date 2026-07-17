@@ -330,3 +330,34 @@ def test_single_mint_settles_at_mint_land_not_session_end(db, monkeypatch, tmp_p
     # stays counted via its pending row.
     headroom.rebuild(db, [])
     assert headroom.outstanding(db) == 1
+
+
+def test_retry_same_claimant_never_shrinks_grant(db, monkeypatch):
+    """#226 review (Critical): availability already counts the claimant's own
+    row, so a retried reserve must top up toward qty, never overwrite with a
+    smaller fresh grant — that would un-count an admitted unit."""
+    monkeypatch.setattr(config, "MAX_COLLECTION_SIZE", 10000)
+    monkeypatch.setattr(supply, "current_supply", lambda net: 9995)
+    assert headroom.try_reserve(db, "bulk:j1", 3, NET) == 3
+    # Another claimant consumes the rest of the tail.
+    assert headroom.try_reserve(db, "bulk:j2", 5, NET) == 2
+    # Retrying j1 with zero availability left must return its EXISTING grant
+    # unchanged — not shrink it to the newly-available 0.
+    assert headroom.try_reserve(db, "bulk:j1", 3, NET) == 3
+    assert headroom.outstanding(db) == 5
+
+
+def test_settle_headroom_retains_flag_on_store_failure(db, monkeypatch, tmp_path):
+    """#226 review (Major): the reservation flag clears only after the store
+    write commits, so a transient failure stays retryable — otherwise a later
+    rebuild drops the mint:* row with no pending record and over-admits."""
+    monkeypatch.setattr(mint_flow.db_path, "app_db_path", lambda net: db)
+    s = mint_flow.MintSession("u1", "rUSER", platform="discord")
+    s.headroom_reserved = True
+    s.nft_id = "NFTX"
+    monkeypatch.setattr(mint_flow.headroom, "retire_to_pending", lambda *a, **k: False)
+    mint_flow.settle_headroom(s)
+    assert s.headroom_reserved is True  # retry stays possible
+    monkeypatch.setattr(mint_flow.headroom, "retire_to_pending", lambda *a, **k: True)
+    mint_flow.settle_headroom(s)
+    assert s.headroom_reserved is False

@@ -16,6 +16,7 @@ os.environ.setdefault("BUNNY_PULL_ZONE", "nft.pullzone.example")
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 import asyncio  # noqa: E402
+import sqlite3  # noqa: E402
 
 import pytest  # noqa: E402
 
@@ -251,3 +252,50 @@ def test_done_job_holds_only_pending_rows(monkeypatch, tmp_path):
     assert j.state == bulk_mint_flow.DONE
     assert headroom.reserved_for(_db(tmp_path), f"bulk:{j.id}") == 0
     assert headroom.outstanding(_db(tmp_path)) == 3  # pending until indexed
+
+
+def test_credit_failure_leaves_unit_retryable(tmp_path, monkeypatch):
+    """#226 review (Critical): a unit is terminalized UNIT_FAILED only after
+    its mint credit durably commits — a failed credit write leaves the unit
+    PENDING (job stays fulfilling/resumable) instead of eating the payment."""
+    monkeypatch.setattr(bulk_mint_flow, "JOBS_DIR", str(tmp_path))
+    monkeypatch.setattr(config, "MAX_COLLECTION_SIZE", 10000)
+    monkeypatch.setattr(bulk_mint_flow.db_path, "app_db_path", lambda net: str(tmp_path / "a.db"))
+    # Reservation provably gone -> the credit tail runs immediately.
+    monkeypatch.setattr(bulk_mint_flow.headroom, "reserved_for", lambda db, c: 0)
+
+    def _boom(*a, **k):
+        raise sqlite3.OperationalError("database is locked")
+
+    monkeypatch.setattr(bulk_mint_flow.mint_credits, "add_credit", _boom)
+
+    job = bulk_mint_flow.BulkMintJob("u1", "rUSER", 1)
+    job.quantity = 1
+    job.units = [bulk_mint_flow.Unit(index=0)]
+    job.entitlement = bulk_mint_flow.entitlement.PaymentEntitlement(quantity=1)
+    asyncio.run(bulk_mint_flow._fulfill_unit(job, job.units[0]))
+
+    assert job.units[0].state == bulk_mint_flow.PENDING  # never terminalized
+    assert "credit" in (job.units[0].error or "")
+
+
+def test_paid_job_exception_stays_resumable(tmp_path, monkeypatch):
+    """#226 review (Critical): an unexpected exception after payment must not
+    terminalize the job FAILED (pruned, unresumable, paid units stranded) —
+    it stays FULFILLING for the startup sweep."""
+    monkeypatch.setattr(bulk_mint_flow, "JOBS_DIR", str(tmp_path))
+    monkeypatch.setattr(bulk_mint_flow.db_path, "app_db_path", lambda net: str(tmp_path / "a.db"))
+
+    async def _explode(job, unit):
+        raise RuntimeError("boom")
+
+    monkeypatch.setattr(bulk_mint_flow, "_fulfill_unit", _explode)
+    job = bulk_mint_flow.BulkMintJob("u1", "rUSER", 1)
+    job.quantity = 1
+    job.units = [bulk_mint_flow.Unit(index=0)]
+    job.state = bulk_mint_flow.PAID
+    job.paid_at = 12345.0
+    asyncio.run(bulk_mint_flow.run_bulk_mint_job(job))
+
+    assert job.state == bulk_mint_flow.FULFILLING  # resumable, not FAILED
+    assert len(bulk_mint_flow.load_all_resumable()) == 1

@@ -515,11 +515,25 @@ async def _fulfill_unit(job: BulkMintJob, unit: Unit) -> None:
         unit.nft_id = nft_id
         unit.image_url = image_url
         unit.state = MINTED
+        # Persist MINTED FIRST: the anti-double-mint record must be durable
+        # before anything that can block or fail (the pending handoff below
+        # takes a write transaction with a busy timeout) — a crash mid-handoff
+        # must find MINTED on disk, never PENDING (#226 review).
+        persisted = persist(job)
         if not cap_exempt:
-            # Reservation -> pending handoff (#226), durable before the job
-            # record write below; never raises.
-            headroom.retire_to_pending(app_db, claimant, nft_id)
-        if not persist(job):
+            # Reservation -> pending handoff (#226). Observable: a failed
+            # handoff leaves the reservation row in place (over-counting,
+            # safe) and the startup rebuild converts it from the job record.
+            if not headroom.retire_to_pending(app_db, claimant, nft_id):
+                logging.critical(
+                    "bulk job %s unit %d: reservation->pending handoff FAILED "
+                    "for %s — reservation retained; rebuild reconciles on "
+                    "restart",
+                    job.id,
+                    unit.index,
+                    nft_id,
+                )
+        if not persisted:
             # This is THE write the anti-double-mint invariant depends on: a
             # restart from the stale record re-mints this unit. Escalate
             # loudly with the nft_id so an operator can reconcile manually
@@ -575,25 +589,27 @@ async def _fulfill_unit(job: BulkMintJob, unit: Unit) -> None:
     # Never minted after retries (or reservation lost): durable credit, no
     # money lost. The unit's reservation slot is released (no-op if the row
     # is already gone) — it will never mint.
-    unit.state = UNIT_FAILED
-    if not cap_exempt:
-        headroom.release(app_db, claimant, 1)
     try:
         mint_credits.add_credit(app_db, job.discord_id, job.network, 1)
     except Exception:
-        # A still-locked app DB must not bubble out of here: run_bulk_mint_job's
-        # outer except would terminalize the WHOLE job FAILED with this unit's
-        # credit unrecorded — actual money loss, and every later unit dies too.
-        # Swallow, scream, and let fulfillment continue; an operator reconciles
-        # the missing credit from this log line (#226 review).
+        # Credit did NOT commit: never terminalize the unit on top of an
+        # unrecorded credit (money loss). Leave it PENDING with the error —
+        # the job stays FULFILLING (non-terminal) and the startup sweep
+        # re-enters this tail to retry the credit (#226 review). The
+        # reservation is also retained so a retried mint stays admissible.
+        unit.error = "mint-credit write failed — unit retried on resume"
         logging.critical(
             "bulk job %s unit %d: mint-credit write FAILED for %s on %s — "
-            "credit not recorded, reconcile manually",
+            "unit left retryable; credit retried on resume",
             job.id,
             unit.index,
             job.discord_id,
             job.network,
         )
+        return
+    unit.state = UNIT_FAILED
+    if not cap_exempt:
+        headroom.release(app_db, claimant, 1)
 
 
 async def run_bulk_mint_job(job: BulkMintJob) -> None:
@@ -740,12 +756,25 @@ async def run_bulk_mint_job(job: BulkMintJob) -> None:
         raise
     except Exception as e:
         logging.error("bulk job %s failed: %s", job.id, e)
-        job.state = FAILED
         job.error = str(e)
-        # Terminal: unfulfilled units will never mint — free their headroom.
-        # Minted units already sit in the durable pending set, untouched.
-        release_job_headroom(job)
-        persist(job)
+        if job.paid_at is not None:
+            # Money was taken: never terminalize with unresolved units — a
+            # FAILED job is pruned and unresumable, stranding paid units with
+            # neither an NFT nor a durable credit. Stay FULFILLING so the
+            # startup sweep retries; headroom is retained for those retries
+            # (#226 review).
+            logging.critical(
+                "bulk job %s: post-payment failure left non-terminal for resume — %s",
+                job.id,
+                e,
+            )
+            job.state = FULFILLING
+            persist(job)
+        else:
+            # Pre-payment: terminal is safe (nothing owed).
+            job.state = FAILED
+            release_job_headroom(job)
+            persist(job)
 
 
 def load_all_resumable() -> list[BulkMintJob]:

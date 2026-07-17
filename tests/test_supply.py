@@ -59,15 +59,19 @@ def test_headroom_never_negative(tmp_path, monkeypatch):
     assert supply.remaining_headroom("testnet") == 0
 
 
-def test_current_supply_missing_table_returns_zero(tmp_path, monkeypatch):
-    # Fresh checkout (CI) or a fresh deploy before the listener/backfill
-    # builds the index: the db file exists (or not) but has no onchain_nfts
-    # table yet. Must NOT raise -- treat as zero recorded supply.
+def test_current_supply_missing_table_fails_closed(tmp_path, monkeypatch):
+    # #226 review: a missing onchain_nfts table (mispathed/unbuilt index on a
+    # DEPLOYED collection) must not read as supply 0 — that would admit up to
+    # MAX_COLLECTION_SIZE extra mints. Propagate; headroom.try_reserve turns
+    # any raise into a 0 grant (fail closed).
+    import pytest
+
     db = tmp_path / "onchain_testnet.db"
     conn = sqlite3.connect(str(db))
     conn.close()  # empty db file, no tables at all
     monkeypatch.setattr(supply.nft_index, "index_db_path", lambda net: str(db))
-    assert supply.current_supply("testnet") == 0
+    with pytest.raises(sqlite3.OperationalError):
+        supply.current_supply("testnet")
 
 
 def test_current_supply_locked_index_raises(tmp_path, monkeypatch):

@@ -119,11 +119,14 @@ def _prune_pending(conn: sqlite3.Connection, network: str) -> None:
 def try_reserve(db: str, claimant: str, qty: int, network: str) -> int:
     """Atomically reserve up to `qty` units of headroom for `claimant`.
 
-    Returns the granted amount (0..qty), computed as
-    min(qty, MAX_COLLECTION_SIZE - current_supply - outstanding) inside one
+    Returns the claimant's TOTAL granted amount (0..qty), computed inside one
     BEGIN IMMEDIATE transaction — one writer wins, so two concurrent calls can
-    never collectively grant past MAX. A claimant reserves at most once (the
-    row is claimant-keyed). Store error -> 0: fail closed for new grants."""
+    never collectively grant past MAX. Idempotent per claimant: a retry tops
+    the existing grant up toward `qty` from whatever is available but NEVER
+    shrinks it — availability already counts the claimant's own row, so
+    overwriting it with a smaller fresh grant would silently un-count an
+    already-admitted unit and let the cap be exceeded (#226 review). Store
+    error -> 0: fail closed for new grants."""
     if qty <= 0:
         return 0
     conn = None
@@ -136,9 +139,13 @@ def try_reserve(db: str, claimant: str, qty: int, network: str) -> int:
             "SELECT COALESCE(SUM(reserved), 0) FROM headroom_reservations"
         ).fetchone()[0]
         pending = conn.execute("SELECT COUNT(*) FROM headroom_pending").fetchone()[0]
+        own_row = conn.execute(
+            "SELECT reserved FROM headroom_reservations WHERE claimant = ?", (claimant,)
+        ).fetchone()
+        own = int(own_row[0]) if own_row else 0
         available = config.MAX_COLLECTION_SIZE - current - int(reserved) - int(pending)
-        granted = max(0, min(qty, available))
-        if granted > 0:
+        granted = own + max(0, min(qty - own, available))
+        if granted > own:
             conn.execute(
                 "INSERT INTO headroom_reservations (claimant, reserved, created_at) "
                 "VALUES (?, ?, ?) "
@@ -156,10 +163,11 @@ def try_reserve(db: str, claimant: str, qty: int, network: str) -> int:
             conn.close()
 
 
-def release(db: str, claimant: str, qty: int | None = None) -> None:
+def release(db: str, claimant: str, qty: int | None = None) -> bool:
     """Give back reservation: `qty` units, or the claimant's whole row when
     None. Idempotent (missing row / already-zero is a no-op); never raises —
-    a failed release only under-admits until the next restart's rebuild."""
+    a failed release (False) only under-admits until the next restart's
+    rebuild. True = the delete/decrement committed."""
     conn = None
     try:
         conn = _connect(db)
@@ -176,20 +184,24 @@ def release(db: str, claimant: str, qty: int | None = None) -> None:
                 (claimant,),
             )
         conn.execute("COMMIT")
+        return True
     except Exception:
         logging.exception(f"headroom.release failed for {claimant}")
         _rollback(conn)
+        return False
     finally:
         if conn is not None:
             conn.close()
 
 
-def retire_to_pending(db: str, claimant: str, nft_id: str) -> None:
+def retire_to_pending(db: str, claimant: str, nft_id: str) -> bool:
     """Move one reserved unit to the pending set the instant its mint lands
     on-chain: the reservation's job is done, but the mint is invisible to
     current_supply until the listener indexes it, so it must keep counting
     against headroom (as a pending row) until prune sees it indexed. One
-    transaction; idempotent on nft_id; never raises."""
+    transaction; idempotent on nft_id; never raises. Returns True iff the
+    handoff committed — a False leaves the reservation row in place, which
+    the startup rebuild converts from the job record (safe, over-counting)."""
     conn = None
     try:
         conn = _connect(db)
@@ -211,9 +223,11 @@ def retire_to_pending(db: str, claimant: str, nft_id: str) -> None:
                 (claimant,),
             )
         conn.execute("COMMIT")
+        return True
     except Exception:
         logging.exception(f"headroom.retire_to_pending failed for {claimant} / {nft_id}")
         _rollback(conn)
+        return False
     finally:
         if conn is not None:
             conn.close()

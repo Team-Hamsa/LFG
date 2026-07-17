@@ -2903,6 +2903,12 @@ async def handle_mint_start(request):
         session.mark_published()  # deliberate refusal, not a pipeline failure
         return web.json_response({"error": "collection_full"}, status=409)
     session.headroom_reserved = True
+    if session.state != mint_flow.AWAITING_PAYMENT:
+        # A concurrent cancel won the reserve race: settle the reservation
+        # just taken and stop before pushing a payable Xaman request for a
+        # cancelled session (#226 review).
+        mint_flow.settle_headroom(session)
+        return web.json_response(session.to_dict())
     # Detect the payment path (LFGO holder vs XRP newcomer) and create the
     # XUMM sign request before the first QR is rendered (after the insert
     # above, so the one-active-session guard stays race-free). Bounded so a

@@ -284,18 +284,27 @@ def settle_headroom(session: MintSession) -> None:
     to supply.current_supply until the listener indexes it, so it must keep
     counting against headroom until then. Otherwise the unit will never mint
     and the reservation is released outright. Strict no-op unless the service
-    reserved (headroom_reserved); idempotent — the flag drops before the
-    store call, so the cancel-path and the task-finally can both call this.
-    Never raises (headroom store contract)."""
+    reserved (headroom_reserved); idempotent — the flag drops only AFTER the
+    store write commits (#226 review: clearing it first would permanently
+    disable retries on a transient store failure, letting a later rebuild
+    drop the mint:* reservation with no pending row and over-admit). Both
+    store ops are idempotent, so repeated calls from the cancel-path and the
+    task-finally are safe. Never raises (headroom store contract)."""
     if not getattr(session, "headroom_reserved", False):
         return
-    session.headroom_reserved = False
     db = db_path.app_db_path(config.XRPL_NETWORK)
     claimant = f"mint:{session.id}"
     if session.nft_id:
-        headroom.retire_to_pending(db, claimant, session.nft_id)
+        ok = headroom.retire_to_pending(db, claimant, session.nft_id)
     else:
-        headroom.release(db, claimant)
+        ok = headroom.release(db, claimant)
+    if ok:
+        session.headroom_reserved = False
+    else:
+        logging.critical(
+            f"mint session {session.id}: headroom settle FAILED "
+            f"(nft_id={session.nft_id}) — flag retained for retry"
+        )
 
 
 def _save_recovery_record(record: dict[str, Any]) -> None:

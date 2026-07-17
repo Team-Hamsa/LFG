@@ -24,10 +24,13 @@ def current_supply(network: str) -> int:
             row = conn.execute("SELECT COUNT(*) FROM onchain_nfts WHERE is_burned=0").fetchone()
         except sqlite3.OperationalError as e:
             if "no such table" in str(e).lower():
-                # Unbuilt index (fresh checkout / pre-backfill deploy): no
-                # onchain_nfts table yet. Treat as zero recorded supply -> full
-                # headroom; the request-time clamp still bounds any single job.
-                return 0
+                # Unbuilt index: FAIL CLOSED (#226 review). A deployed
+                # collection with a missing/mispathed index would otherwise
+                # read as supply 0 and admit up to MAX more mints. Minting
+                # legitimately requires the index to exist — the backfill
+                # (scripts/backfill_onchain.py) or listener creates it before
+                # any deploy serves mints.
+                raise
             # Any OTHER OperationalError — most importantly "database is
             # locked" (the index DB is written by the separate listener
             # process and by long-running backfill scripts) — must NOT read
