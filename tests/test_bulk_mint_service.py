@@ -67,11 +67,17 @@ class _StatusReq:
 
 
 @pytest.fixture
-def dev_auth(monkeypatch):
+def dev_auth(monkeypatch, tmp_path):
     """require_auth/require_wallet in dev mode inject user {'id': 'dev'} and a
-    fixed dev wallet address; isolate the module-level bulk_sessions dict."""
+    fixed dev wallet address; isolate the module-level bulk_sessions dict and
+    the durable job-record directory (the start handler now persists an
+    AWAITING_PAYMENT record, #228)."""
     monkeypatch.setattr(server.config, "WEBAPP_DEV_MODE", True)
     monkeypatch.setattr(server, "bulk_sessions", {})
+    monkeypatch.setattr(bulk_mint_flow, "JOBS_DIR", str(tmp_path))
+    # Hermetic consumed-payment ledger (#228): cancel()'s claimed-payment
+    # guard reads sqlite via config.DB_PATH.
+    monkeypatch.setattr(bulk_mint_flow.config, "DB_PATH", str(tmp_path / "app.db"))
     return server.bulk_sessions
 
 
@@ -169,13 +175,14 @@ def test_bulk_start_inserts_before_awaiting_prepare_payment(dev_auth, monkeypatc
     bulk_sessions dict and slip past the active-job guard."""
     seen_in_sessions_during_prepare = {}
 
-    original_prepare_payment = bulk_mint_flow.BulkMintJob.prepare_payment
-
     async def spy_prepare_payment(self):
         # At the moment prepare_payment runs, the job must already be
         # registered under its own id in bulk_sessions.
         seen_in_sessions_during_prepare["present"] = dev_auth.get(self.id) is self
-        return await original_prepare_payment(self)
+        # Fake a successful prepare: the real one has no XUMM in tests and
+        # would produce a link-less job, which the handler now fails closed.
+        self.pay_amount = "10"
+        self.payment_link = "https://xumm/pay"
 
     monkeypatch.setattr(bulk_mint_flow.BulkMintJob, "prepare_payment", spy_prepare_payment)
 
@@ -197,15 +204,14 @@ def test_bulk_start_second_concurrent_request_is_rejected(dev_auth, monkeypatch)
     creating a second concurrent bulk job."""
     second_response = {}
 
-    original_prepare_payment = bulk_mint_flow.BulkMintJob.prepare_payment
-
     async def interleaving_prepare_payment(self):
         # Simulate a concurrent second request arriving while the first is
         # suspended awaiting prepare_payment — at this point the first job
         # must already be visible in bulk_sessions for the guard to work.
         second_req = _post_request("/api/mint/bulk", {"quantity": 1})
         second_response["resp"] = await server.handle_bulk_mint_start(second_req)
-        return await original_prepare_payment(self)
+        self.pay_amount = "10"
+        self.payment_link = "https://xumm/pay"
 
     monkeypatch.setattr(bulk_mint_flow.BulkMintJob, "prepare_payment", interleaving_prepare_payment)
 
@@ -238,7 +244,7 @@ def test_bulk_start_prepare_payment_failure_frees_slot(dev_auth, monkeypatch):
     assert resp.status >= 500
 
     # The user's slot must be free: a follow-up start must not 409.
-    monkeypatch.setattr(bulk_mint_flow.BulkMintJob, "prepare_payment", lambda self: _noop())
+    monkeypatch.setattr(bulk_mint_flow.BulkMintJob, "prepare_payment", _fake_prepare_ok())
     req2 = _post_request("/api/mint/bulk", {"quantity": 1})
     resp2 = _run(server.handle_bulk_mint_start(req2))
     assert resp2.status == 200
@@ -267,10 +273,75 @@ def test_bulk_start_prepare_payment_timeout_frees_slot(dev_auth, monkeypatch):
     assert _json.loads(resp.body.decode())["error"] == "payment_setup_failed"
 
     # Slot must be free: a follow-up start must not 409.
-    monkeypatch.setattr(bulk_mint_flow.BulkMintJob, "prepare_payment", lambda self: _noop())
+    monkeypatch.setattr(bulk_mint_flow.BulkMintJob, "prepare_payment", _fake_prepare_ok())
     req2 = _post_request("/api/mint/bulk", {"quantity": 1})
     resp2 = _run(server.handle_bulk_mint_start(req2))
     assert resp2.status == 200
+
+
+def _fake_prepare_ok():
+    async def _prep(self):
+        self.pay_with, self.unit_price = "XRP", "10"
+        self.pay_amount = "10"
+        self.payment_link, self.payment_uuid = "https://xumm.app/sign/u1", "u1"
+
+    return _prep
+
+
+def test_bulk_start_persists_awaiting_payment_record(dev_auth, monkeypatch):
+    """#228: once prepare_payment succeeds the job must be durable — a crash
+    after the user was shown (and maybe signed) the payment request resumes
+    the ledger watch instead of taking money with no record."""
+    monkeypatch.setattr(bulk_mint_flow.BulkMintJob, "prepare_payment", _fake_prepare_ok())
+
+    req = _post_request("/api/mint/bulk", {"quantity": 1})
+    resp = _run(server.handle_bulk_mint_start(req))
+    assert resp.status == 200
+    import json as _json
+
+    body = _json.loads(resp.body.decode())
+    resumable = bulk_mint_flow.load_all_resumable()
+    assert [r.id for r in resumable] == [body["id"]]
+    assert resumable[0].state == bulk_mint_flow.AWAITING_PAYMENT
+    assert resumable[0].payment_uuid == "u1"
+    assert resumable[0].payment_link == "https://xumm.app/sign/u1"
+
+
+def test_bulk_start_prepare_failure_leaves_no_record(dev_auth, monkeypatch, tmp_path):
+    """A failed start frees the slot AND leaves no zombie job file for the
+    startup sweep to resurrect (#228). The stub persists BEFORE raising so
+    the handler's delete_record is load-bearing (mutation-detectable), not
+    vacuously green because no record ever existed on the failure path."""
+
+    async def _boom(self):
+        bulk_mint_flow.persist(self)  # simulate a flow that persisted, then died
+        raise RuntimeError("xumm is down")
+
+    monkeypatch.setattr(bulk_mint_flow.BulkMintJob, "prepare_payment", _boom)
+
+    req = _post_request("/api/mint/bulk", {"quantity": 1})
+    resp = _run(server.handle_bulk_mint_start(req))
+    assert resp.status == 500
+    assert bulk_mint_flow.load_all_resumable() == []
+    assert list(tmp_path.glob("*.json")) == []
+
+
+def test_bulk_active_payment_link_null_while_preparing(dev_auth):
+    """Contract (#228 / BulkMintJob.to_dict): the job is registered in
+    bulk_sessions BEFORE prepare_payment finishes (race-free active-guard
+    ordering), so /active may return an AWAITING_PAYMENT session whose
+    payment_link is null — meaning "still preparing, keep polling", not an
+    error."""
+    job = bulk_mint_flow.BulkMintJob(
+        discord_id="dev", wallet_address="rTest", requested_qty=1, platform="discord"
+    )
+    dev_auth[job.id] = job  # as inserted pre-prepare_payment
+    resp = _run(server.handle_bulk_mint_active(_StatusReq(None)))
+    import json as _json
+
+    body = _json.loads(resp.body.decode())
+    assert body["session"]["state"] == bulk_mint_flow.AWAITING_PAYMENT
+    assert body["session"]["payment_link"] is None
 
 
 def test_bulk_cancel_route_registered():
@@ -296,3 +367,78 @@ def test_bulk_cancel_awaiting_payment_job(dev_auth):
 def test_bulk_cancel_not_found(dev_auth):
     resp = _run(server.handle_bulk_mint_cancel(_StatusReq("nope")))
     assert resp.status == 404
+
+
+def test_bulk_cancel_during_prepare_never_fulfills(dev_auth, monkeypatch, tmp_path):
+    """Cancel racing the start handler's prepare_payment await (the job id is
+    reachable via /active in that window, task still None) must never let the
+    job fall through to fulfillment with zero payment confirmed: the handler
+    re-checks state post-prepare and run_bulk_mint_job refuses terminal
+    states, so no record is persisted, no watch is launched, nothing mints."""
+    calls = {"wait": 0, "mint": 0}
+
+    async def _wait(**kw):
+        calls["wait"] += 1
+        return True
+
+    async def _mint(**kw):
+        calls["mint"] += 1
+        raise AssertionError("must never mint")
+
+    monkeypatch.setattr(bulk_mint_flow.xrpl_ops, "wait_for_payment", _wait)
+    monkeypatch.setattr(bulk_mint_flow.mint_flow, "mint_one_unit", _mint)
+
+    cancel_result = {}
+
+    async def _prepare_with_concurrent_cancel(self):
+        # Concurrent POST /api/mint/bulk/{id}/cancel lands while the start
+        # handler is suspended awaiting prepare_payment.
+        cancel_result["resp"] = await server.handle_bulk_mint_cancel(_StatusReq(self.id))
+        self.pay_with, self.unit_price = "XRP", "10"
+        self.pay_amount = "20"
+        self.payment_link, self.payment_uuid = "https://xumm.app/sign/u1", "u1"
+
+    monkeypatch.setattr(
+        bulk_mint_flow.BulkMintJob, "prepare_payment", _prepare_with_concurrent_cancel
+    )
+
+    req = _post_request("/api/mint/bulk", {"quantity": 2})
+    resp = _run(server.handle_bulk_mint_start(req))
+    assert resp.status == 200
+    import json as _json
+
+    body = _json.loads(resp.body.decode())
+    assert cancel_result["resp"].status == 200
+    assert body["state"] == bulk_mint_flow.CANCELLED
+
+    job = dev_auth[body["id"]]
+    assert job.task is None  # fulfillment task never launched
+    assert calls == {"wait": 0, "mint": 0}
+    assert bulk_mint_flow.load_all_resumable() == []  # no resurrectable record
+    assert list(tmp_path.glob("*.json")) == []
+
+
+def test_bulk_start_fails_closed_without_payment_link_or_persist(dev_auth, monkeypatch, tmp_path):
+    """Before money moves, fail-closed is free: a start whose prepare finished
+    without a usable payment_link — or whose durable record could not be
+    written — must 500 and clean up, never show an orphanable payment
+    request or launch the watch."""
+
+    async def _prepare_no_link(self):
+        self.pay_amount = "10"  # ran "successfully" but produced no link
+
+    monkeypatch.setattr(bulk_mint_flow.BulkMintJob, "prepare_payment", _prepare_no_link)
+    req = _post_request("/api/mint/bulk", {"quantity": 1})
+    resp = _run(server.handle_bulk_mint_start(req))
+    assert resp.status == 500
+    assert bulk_mint_flow.load_all_resumable() == []
+
+    async def _prepare_ok(self):
+        self.pay_amount = "10"
+        self.payment_link = "https://xumm/pay"
+
+    monkeypatch.setattr(bulk_mint_flow.BulkMintJob, "prepare_payment", _prepare_ok)
+    monkeypatch.setattr(bulk_mint_flow, "persist", lambda job: False)
+    req = _post_request("/api/mint/bulk", {"quantity": 1})
+    resp = _run(server.handle_bulk_mint_start(req))
+    assert resp.status == 500
