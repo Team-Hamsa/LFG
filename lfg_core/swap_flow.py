@@ -438,6 +438,15 @@ async def _collect_modify_fee(session: SwapSession, modify_count: int) -> bool:
     session.fee_issuer = issuer
     await session.regenerate_payment()
     if session.payment_link is None:
+        # #262 fail-fast: no signable payload AND the rate-limit cooldown is
+        # armed means the next create is known-rejected too — entering the
+        # payment wait would strand the user on a dead fee screen. Other
+        # payload-less failures fall back to the static detect link below.
+        if xumm_ops.rate_limited():
+            session.error = (
+                "Xaman is rate limiting us — try the swap again shortly. Your NFTs are untouched."
+            )
+            return False
         # Sign-request payload normally; raw detect link only if XUMM is down
         session.payment_link = xumm_ops.generate_static_payment_link(
             destination, value=fee, currency=currency, issuer=issuer
@@ -536,7 +545,10 @@ async def run_swap_session(session: SwapSession) -> None:
             if not await _collect_modify_fee(session, len(modify_items)):
                 _discard_stills(items, session.id)
                 session.state = PAYMENT_TIMEOUT
-                session.error = "No swap fee payment was received in time. Your NFTs are untouched."
+                session.error = (
+                    session.error
+                    or "No swap fee payment was received in time. Your NFTs are untouched."
+                )
                 return
             _write_swap_record(session, items, "fee_paid")
 

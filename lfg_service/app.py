@@ -2890,6 +2890,18 @@ async def handle_mint_start(request):
         logging.warning("prepare_payment timed out; falling back to XRP path")
     except Exception as e:
         logging.warning(f"prepare_payment failed; falling back to XRP path: {e}")
+    # #262 fail-fast: no signable payload AND the rate-limit cooldown is armed
+    # means the next create is known-rejected too — starting the 300s payment
+    # wait would strand the user on a dead pay screen (2026-07-17 incident).
+    # Other payload-less failures (XUMM outage/timeout) keep the static-link
+    # fallback below, where a fresh QR regenerate may still succeed.
+    if session.payment_uuid is None and xumm_ops.rate_limited():
+        mint_sessions.pop(session.id, None)
+        return web.json_response(
+            {"error": "Xaman is rate limiting us — try again shortly", "code": "rate_limited"},
+            status=503,
+            headers={"Retry-After": "30"},
+        )
     session.ensure_payment_fallback()
     # Keep the task handle so /cancel can stop the payment wait (#141).
     # The wrapper publishes the terminal firehose event server-side, so a
