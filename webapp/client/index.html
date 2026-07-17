@@ -49,7 +49,14 @@
       <p class="wallet-line"><span class="wallet-lbl">Wallet</span> <code id="wallet-display"></code>
         <button id="change-wallet-btn" class="link">change</button></p>
       <div class="actions">
-        <button id="mint-btn" class="primary big">⛏️ Mint NFT</button>
+        <div class="mint-row">
+          <div id="mint-qty" class="qty-stepper" hidden>
+            <button id="qty-minus" class="qty-btn" aria-label="Fewer">−</button>
+            <span id="qty-value" aria-live="polite">1</span>
+            <button id="qty-plus" class="qty-btn" aria-label="More">+</button>
+          </div>
+          <button id="mint-btn" class="primary big">⛏️ Mint NFT</button>
+        </div>
         <button id="swap-btn" class="secondary">🏗️ Build</button>
         <button id="swapper-btn" class="secondary">🔁 Trait Swapper</button>
         <button id="market-btn" class="secondary">🛒 Marketplace</button>
@@ -269,6 +276,6 @@
        Telegram (window.Telegram stays undefined); loaded BEFORE app.js so the
        dual-mode boot can detect the Telegram context. -->
   <script src="telegram-web-app.js"></script>
-  <script type="module" src="app.js?v=16"></script>
+  <script type="module" src="app.js?v=17"></script>
 </body>
 </html>

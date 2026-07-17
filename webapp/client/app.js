@@ -772,6 +772,32 @@ function pollMint(sessionId) {
 
 let currentMintId = null;
 
+// Bulk mint UI (#215): server-flagged via /api/config so staging can test
+// before prod. Qty 1 = the untouched single-mint path.
+let bulkCfg = { enabled: false, max: 1 };
+let mintQty = 1;
+
+function renderQty() {
+  el('qty-value').textContent = String(mintQty);
+  el('qty-minus').disabled = mintQty <= 1;
+  el('qty-plus').disabled = mintQty >= bulkCfg.max;
+}
+
+function setupBulkStepper(cfg) {
+  bulkCfg = { enabled: !!cfg.bulk_mint_ui, max: Math.max(1, cfg.bulk_mint_max || 1) };
+  if (!bulkCfg.enabled) return; // flag off: stepper stays hidden, today's UI
+  el('mint-qty').hidden = false;
+  el('qty-minus').onclick = () => { mintQty = Math.max(1, mintQty - 1); renderQty(); };
+  el('qty-plus').onclick = () => { mintQty = Math.min(bulkCfg.max, mintQty + 1); renderQty(); };
+  renderQty();
+}
+
+async function startBulkMint(quantity) {
+  // Replaced by the real bulk flow in the next task, which POSTs to
+  // '/api/mint/bulk' (Task 2's endpoint) and polls its session.
+  showError(`Bulk mint (${quantity}) coming right up — not wired yet.`);
+}
+
 async function startMint() {
   try {
     const s = await api('/api/mint', { method: 'POST', body: JSON.stringify(discordCtx()) });
@@ -2525,7 +2551,7 @@ async function main() {
   setupLogo();
   setupLeaderboard();
   el('register-retry-btn').onclick = () => (insideWeb ? startWebSignin() : startSignin());
-  el('mint-btn').onclick = startMint;
+  el('mint-btn').onclick = () => (mintQty > 1 ? startBulkMint(mintQty) : startMint());
   el('flow-regen-btn').onclick = regeneratePaymentQr;
   el('swap-btn').onclick = () => openDressup();
   el('dressup-back-btn').onclick = () => showMintHome();
@@ -2568,6 +2594,7 @@ async function main() {
     // In-app marketplace (#44) ships after the mainnet MVP: with the feature
     // off, hide the Marketplace entry point (the API answers 403 regardless).
     if (cfg.market_enabled === false) el('market-btn').hidden = true;
+    setupBulkStepper(cfg);
     applyShareConfig(cfg);
     // Dev reload is same-origin only — never against a cross-origin API base.
     if (cfg.dev_mode && !API_BASE && 'EventSource' in window) {
