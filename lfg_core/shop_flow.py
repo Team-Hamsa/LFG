@@ -22,7 +22,10 @@ import traceback
 import uuid
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, field
+from decimal import Decimal
 from typing import Any
+
+from xrpl.utils import xrp_to_drops
 
 from lfg_core import config, memos, rarity, shop_store
 from lfg_core import trait_token as tt
@@ -74,6 +77,11 @@ class ShopBuySession:
     slot: str
     value: str
     price_brix: int
+    # #238 XRP fallback: detected by the service (brix_payment.detect_payment_path)
+    # before the session is created. On the XRP path price_xrp carries the
+    # buffered AMM quote the offer is denominated in.
+    pay_with: str = "BRIX"
+    price_xrp: str | None = None
     platform: str = "discord"
     push_user_token: str | None = None
     id: str = field(default_factory=lambda: uuid.uuid4().hex)
@@ -94,6 +102,8 @@ class ShopBuySession:
             "slot": self.slot,
             "value": self.value,
             "price_brix": self.price_brix,
+            "pay_with": self.pay_with,
+            "price_xrp": self.price_xrp,
             "state": self.state,
             "error": self.error,
             "nft_id": self.nft_id,
@@ -114,6 +124,11 @@ class ShopDeps:
     accept_payload_fn: AcceptPayloadFn
     now_ts_fn: Callable[[], int] = lambda: int(time.time())
     network: str = "testnet"
+    # #238: best-effort post-settlement AMM buyback on the XRP path, called as
+    # buy_and_burn_fn(brix_value, max_xrp=price_xrp) — the service wires
+    # xrpl_ops.buy_and_burn with the BRIX currency/issuer baked in. None = skip
+    # the call (the buyback_done flag is still set: single attempt).
+    buy_and_burn_fn: Callable[..., Awaitable[str | None]] | None = None
 
 
 def _record_supply_change(
@@ -167,6 +182,43 @@ async def _revert_mint(deps: ShopDeps, session: ShopBuySession, nft_id: str) -> 
         )
 
 
+async def run_buyback_if_due(
+    conn: sqlite3.Connection,
+    *,
+    session_id: str,
+    pay_with: str | None,
+    price_brix: int,
+    price_xrp: str | None,
+    buyback_done: int | None,
+    buy_and_burn_fn: Callable[..., Awaitable[str | None]] | None,
+    now_ts_fn: Callable[[], int] = lambda: int(time.time()),
+) -> None:
+    """#238: after an XRP-path order settles, convert the collected XRP into
+    BRIX through the AMM and burn it (`buy_and_burn_fn(price_brix,
+    max_xrp=price_xrp)`), best-effort and silent — a failed buyback only logs
+    (the XRP stays in the app wallet). `buyback_done` is flipped to 1 after
+    the single attempt regardless of outcome, so the poll path and the sweep
+    can both call this without double-firing; both writes are exception-
+    swallowing so neither caller can crash between the burn and the flag
+    (which would leave buyback_done=0 and re-arm a second burn). Takes a raw
+    conn (not ShopDeps) so the service sweep shares this exact implementation.
+    No-op on the BRIX path or when the flag is already set."""
+    if pay_with != "XRP" or buyback_done:
+        return
+    if buy_and_burn_fn is not None:
+        try:
+            await buy_and_burn_fn(str(price_brix), max_xrp=price_xrp)
+        except Exception:
+            log.error(
+                f"Shop buy {session_id} post-settlement buyback failed (order settled; "
+                f"collected XRP stays in the app wallet): {traceback.format_exc()}"
+            )
+    try:
+        shop_store.update_order(conn, session_id, now_ts=now_ts_fn(), buyback_done=1)
+    except Exception:
+        log.error(f"Shop buy {session_id} buyback_done flag write failed: {traceback.format_exc()}")
+
+
 async def start_shop_buy(session: ShopBuySession, deps: ShopDeps) -> None:
     """Mint the trait token, record supply growth, create the BRIX
     destination-locked sell offer, and build the XUMM accept payload. On
@@ -182,6 +234,8 @@ async def start_shop_buy(session: ShopBuySession, deps: ShopDeps) -> None:
         session.value,
         session.price_brix,
         now_ts,
+        pay_with=session.pay_with,
+        price_xrp=session.price_xrp,
     )
     try:
         econ = deps.economy_deps
@@ -220,11 +274,19 @@ async def start_shop_buy(session: ShopBuySession, deps: ShopDeps) -> None:
             raise
 
         expiration = ripple_expiration(deps.now_ts_fn(), config.SHOP_OFFER_TTL_SECONDS)
+        # #238: on the XRP fallback path the destination-locked offer is
+        # denominated in XRP drops instead of the BRIX IssuedCurrencyAmount;
+        # everything else about the offer is identical.
+        if session.pay_with == "XRP":
+            assert session.price_xrp is not None
+            offer_amount: dict[str, str] | str = xrp_to_drops(Decimal(session.price_xrp))
+        else:
+            offer_amount = brix_amount(session.price_brix)
         try:
             offer_index = await deps.offer_fn(
                 nft_id,
                 session.buyer,
-                amount=brix_amount(session.price_brix),
+                amount=offer_amount,
                 expiration=expiration,
                 platform=memos.platform_for_surface(session.platform),
                 action=memos.ACTION_SHOP_BUY,
@@ -295,6 +357,17 @@ async def advance_shop_buy(session: ShopBuySession, deps: ShopDeps) -> None:
         return
 
     shop_store.update_order(deps.conn, session.id, now_ts=deps.now_ts_fn(), status="settled")
+    order = shop_store.get_order(deps.conn, session.id)
+    await run_buyback_if_due(
+        deps.conn,
+        session_id=session.id,
+        pay_with=session.pay_with,
+        price_brix=session.price_brix,
+        price_xrp=session.price_xrp,
+        buyback_done=order.get("buyback_done") if order else 1,
+        buy_and_burn_fn=deps.buy_and_burn_fn,
+        now_ts_fn=deps.now_ts_fn,
+    )
     try:
         app_conn = deps.app_conn_factory()
         try:

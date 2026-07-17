@@ -830,6 +830,20 @@ matching Extract/List seller first. Design:
   supply row — unless the accept actually landed on-ledger despite the local
   timeout, in which case it's rescued into `accepted` instead of burned) and
   retries stuck `accepted` settlements.
+- **XRP payment fallback (#238):** buyers holding less BRIX than the price
+  silently pay XRP instead — `POST /api/shop/buy` runs
+  `lfg_core/brix_payment.detect_payment_path` (the same balance-check +
+  buffered-AMM-quote logic `swap_flow.detect_swap_payment` now delegates to)
+  before any session/mint (unquotable AMM → 503 `pricing_unavailable`). On
+  the XRP path the destination-locked offer is denominated in XRP **drops**
+  at the buffered quote; after settlement a best-effort, single-attempt
+  `xrpl_ops.buy_and_burn(price_brix, max_xrp=price_xrp)` converts the
+  collected XRP to BRIX and burns it (silent; failure only logs), fired from
+  both the poll path and the sweep's settlement retry and deduped by the
+  durable `buyback_done` flag. New self-migrating `shop_orders` columns:
+  `pay_with` (`NULL`/`"BRIX"`/`"XRP"`), `price_xrp`, `buyback_done`. The
+  session/API surface carries `pay_with`/`price_xrp`; supply accounting and
+  the BRIX path are unchanged.
 - **Taxon:** trait tokens minted by the shop share `TRAIT_TAXON` with Extract
   — see the flip to 176 noted above; `ASSEMBLE_TAXON = 1760` is unrelated
   (Assemble-minted rebirth characters, not shop trait tokens).

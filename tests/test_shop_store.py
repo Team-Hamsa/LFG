@@ -54,3 +54,83 @@ def test_expiry_and_unsettled_queries() -> None:
         o["session_id"] for o in shop_store.orders_pending_expiry(conn, older_than_ts=1000)
     ] == ["old"]
     assert [o["session_id"] for o in shop_store.orders_unsettled(conn)] == ["done"]
+
+
+# ---------------------------------------------------------------------------
+# #238 XRP fallback: pay_with / price_xrp / buyback_done columns
+# ---------------------------------------------------------------------------
+
+_OLD_SCHEMA = """CREATE TABLE shop_orders (
+    session_id   TEXT PRIMARY KEY,
+    buyer        TEXT NOT NULL,
+    slot         TEXT NOT NULL,
+    value        TEXT NOT NULL,
+    price_brix   INTEGER NOT NULL,
+    nft_id       TEXT,
+    offer_index  TEXT,
+    status       TEXT NOT NULL,
+    created_ts   INTEGER NOT NULL,
+    updated_ts   INTEGER NOT NULL
+)"""
+
+
+def test_migration_adds_columns_to_old_schema_db() -> None:
+    """A DB created with the pre-#238 schema self-migrates on ensure_schema:
+    existing rows read back with pay_with NULL (treated as BRIX by callers),
+    price_xrp NULL, buyback_done 0."""
+    conn = sqlite3.connect(":memory:")
+    conn.execute(_OLD_SCHEMA)
+    conn.execute(
+        "INSERT INTO shop_orders (session_id, buyer, slot, value, price_brix,"
+        " status, created_ts, updated_ts) VALUES ('legacy','rA','Head','Hat',10,"
+        "'settled',100,100)"
+    )
+    conn.commit()
+
+    shop_store.ensure_schema(conn)
+    shop_store.ensure_schema(conn)  # idempotent — second call must not raise
+
+    o = shop_store.get_order(conn, "legacy")
+    assert o is not None
+    assert o["pay_with"] is None
+    assert o["price_xrp"] is None
+    assert o["buyback_done"] == 0
+
+
+def test_create_order_defaults_and_xrp_round_trip() -> None:
+    conn = _conn()
+    shop_store.create_order(conn, "b1", "rA", "Head", "Hat", 10, now_ts=100)
+    o = shop_store.get_order(conn, "b1")
+    assert o is not None
+    assert (o["pay_with"], o["price_xrp"], o["buyback_done"]) == ("BRIX", None, 0)
+
+    shop_store.create_order(
+        conn, "x1", "rB", "Head", "Hat", 10, now_ts=100, pay_with="XRP", price_xrp="0.105000"
+    )
+    o = shop_store.get_order(conn, "x1")
+    assert o is not None
+    assert (o["pay_with"], o["price_xrp"], o["buyback_done"]) == ("XRP", "0.105000", 0)
+
+
+def test_update_order_new_fields() -> None:
+    conn = _conn()
+    shop_store.create_order(conn, "u1", "rA", "Head", "Hat", 10, now_ts=100)
+    shop_store.update_order(
+        conn, "u1", now_ts=200, pay_with="XRP", price_xrp="1.500000", buyback_done=1
+    )
+    o = shop_store.get_order(conn, "u1")
+    assert o is not None
+    assert (o["pay_with"], o["price_xrp"], o["buyback_done"]) == ("XRP", "1.500000", 1)
+
+
+def test_query_helpers_return_new_fields() -> None:
+    conn = _conn()
+    shop_store.create_order(
+        conn, "q1", "rA", "Eyes", "Laser", 10, now_ts=100, pay_with="XRP", price_xrp="2.000000"
+    )
+    shop_store.update_order(conn, "q1", status="pending_accept", now_ts=100)
+    (row,) = shop_store.orders_pending_expiry(conn, older_than_ts=1000)
+    assert row["pay_with"] == "XRP" and row["price_xrp"] == "2.000000"
+    shop_store.update_order(conn, "q1", status="accepted", now_ts=200)
+    (row,) = shop_store.orders_unsettled(conn)
+    assert row["pay_with"] == "XRP" and row["buyback_done"] == 0

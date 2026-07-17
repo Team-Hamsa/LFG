@@ -32,6 +32,7 @@ from xrpl.core.addresscodec import is_valid_classic_address
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from lfg_core import (
+    brix_payment,
     bulk_mint_flow,
     closet_token,
     config,
@@ -1771,6 +1772,11 @@ def _build_shop_deps(network: str, platform: str) -> tuple[shop_flow.ShopDeps, s
         payload_status_fn=xumm_ops.get_payload_status,
         accept_payload_fn=_accept_payload_fn,
         network=network,
+        # #238: post-settlement AMM buyback on the XRP path — BRIX
+        # currency/issuer baked in; shop_flow calls it as (value, max_xrp=...).
+        buy_and_burn_fn=lambda value, max_xrp=None: xrpl_ops.buy_and_burn(
+            config.SWAP_OFFER_CURRENCY_HEX, config.SWAP_OFFER_ISSUER, value, max_xrp=max_xrp
+        ),
     )
     return deps, conn
 
@@ -1831,11 +1837,25 @@ async def handle_shop_buy_start(request):
                 status=409,
             )
 
+    # #238 XRP fallback: silent payment-path detection against the frozen BRIX
+    # price, BEFORE the session exists (nothing is minted for an unquotable
+    # price). BRIX holders keep today's flow byte-identically; everyone else
+    # gets an XRP-denominated offer at the buffered AMM quote.
+    try:
+        pay_with, pay_amount = await brix_payment.detect_payment_path(wallet, str(price))
+    except RuntimeError:
+        return web.json_response(
+            {"error": "pricing unavailable", "code": "pricing_unavailable"}, status=503
+        )
+    price_xrp = pay_amount if pay_with == "XRP" else None
+
     session = shop_flow.ShopBuySession(
         buyer=wallet,
         slot=slot,
         value=value,
         price_brix=price,
+        pay_with=pay_with,
+        price_xrp=price_xrp,
         platform=_platform(user),
         push_user_token=await _push_token(user),
     )
@@ -2193,6 +2213,27 @@ async def _settle_shop_order(order: dict[str, Any], network: str) -> None:
         conn = nft_index.init_db(nft_index.index_db_path(network))
         try:
             shop_store.update_order(conn, session_id, now_ts=now_ts, status="settled")
+            # #238: the sweep's settlement-retry path owes the same one-shot
+            # post-settlement AMM buyback the poll path fires — the shared
+            # run_buyback_if_due is best-effort, exception-swallowing (incl.
+            # the buyback_done flag write, so a failed write can never
+            # propagate and leave the burn re-armed), and guarded by the
+            # durable buyback_done flag so poll + sweep can never double-fire.
+            await shop_flow.run_buyback_if_due(
+                conn,
+                session_id=session_id,
+                pay_with=order.get("pay_with"),
+                price_brix=order["price_brix"],
+                price_xrp=order.get("price_xrp"),
+                buyback_done=order.get("buyback_done"),
+                buy_and_burn_fn=lambda value, max_xrp=None: xrpl_ops.buy_and_burn(
+                    config.SWAP_OFFER_CURRENCY_HEX,
+                    config.SWAP_OFFER_ISSUER,
+                    value,
+                    max_xrp=max_xrp,
+                ),
+                now_ts_fn=lambda: now_ts,
+            )
         finally:
             conn.close()
         try:

@@ -476,3 +476,137 @@ def test_brix_amount_shape():
         "issuer": config.TOKEN_ISSUER_ADDRESS,
         "value": "25",
     }
+
+
+# ---------------------------------------------------------------------------
+# #238 XRP payment fallback
+# ---------------------------------------------------------------------------
+
+
+def test_session_to_dict_includes_payment_path_fields():
+    session = _session()
+    d = session.to_dict()
+    assert d["pay_with"] == "BRIX"
+    assert d["price_xrp"] is None
+
+
+def test_xrp_path_offer_denominated_in_drops(tmp_path):
+    conn = sqlite3.connect(str(tmp_path / "economy.db"))
+    _active_closet(conn)
+    f = _F()
+    deps = _deps(conn, f, tmp_path)
+    session = _session(pay_with="XRP", price_xrp="0.105000")
+
+    _run(shop_flow.start_shop_buy(session, deps))
+
+    assert session.state == "awaiting_accept"
+    assert len(f.offers) == 1
+    amount = f.offers[0][2]
+    assert amount == "105000"  # XRP drops string, not an IssuedCurrencyAmount
+
+    order = shop_store.get_order(conn, session.id)
+    assert order is not None
+    assert order["pay_with"] == "XRP"
+    assert order["price_xrp"] == "0.105000"
+    assert order["buyback_done"] == 0
+
+
+def test_brix_path_offer_and_order_unchanged(tmp_path):
+    conn = sqlite3.connect(str(tmp_path / "economy.db"))
+    _active_closet(conn)
+    f = _F()
+    deps = _deps(conn, f, tmp_path)
+    session = _session()
+
+    _run(shop_flow.start_shop_buy(session, deps))
+
+    amount = f.offers[0][2]
+    assert amount == shop_flow.brix_amount(session.price_brix)
+    order = shop_store.get_order(conn, session.id)
+    assert order is not None and order["pay_with"] == "BRIX" and order["price_xrp"] is None
+
+
+class _BuybackRecorder:
+    def __init__(self, fails: bool = False):
+        self.calls: list[tuple[str, str | None]] = []
+        self.fails = fails
+
+    async def __call__(self, value, max_xrp=None):
+        self.calls.append((value, max_xrp))
+        if self.fails:
+            raise RuntimeError("buyback boom")
+        return "BUYBACK_HASH"
+
+
+def _settled_xrp_session(conn, f, tmp_path, buyback):
+    deps = _deps(conn, f, tmp_path)
+    deps.buy_and_burn_fn = buyback
+    session = _session(pay_with="XRP", price_xrp="0.105000")
+    _run(shop_flow.start_shop_buy(session, deps))
+    f.owner_of[f.minted_nft_id] = BUYER
+    f.payload_status = _signed_status(account=BUYER)
+    _run(shop_flow.advance_shop_buy(session, deps))
+    return session, deps
+
+
+def test_xrp_settlement_fires_buyback_once(tmp_path):
+    conn = sqlite3.connect(str(tmp_path / "economy.db"))
+    _active_closet(conn)
+    f = _F()
+    buyback = _BuybackRecorder()
+    session, deps = _settled_xrp_session(conn, f, tmp_path, buyback)
+
+    assert session.state == "done"
+    assert buyback.calls == [("25", "0.105000")]
+    order = shop_store.get_order(conn, session.id)
+    assert order is not None
+    assert order["status"] == "settled" and order["buyback_done"] == 1
+
+    # Re-advancing (poll after done) must not double-fire.
+    _run(shop_flow.advance_shop_buy(session, deps))
+    assert buyback.calls == [("25", "0.105000")]
+
+
+def test_xrp_buyback_failure_is_best_effort_single_attempt(tmp_path):
+    conn = sqlite3.connect(str(tmp_path / "economy.db"))
+    _active_closet(conn)
+    f = _F()
+    buyback = _BuybackRecorder(fails=True)
+    session, _deps_ = _settled_xrp_session(conn, f, tmp_path, buyback)
+
+    assert session.state == "done"  # never a user-visible failure
+    order = shop_store.get_order(conn, session.id)
+    assert order is not None
+    assert order["status"] == "settled"
+    assert order["buyback_done"] == 1  # single attempt even on failure
+
+
+def test_brix_settlement_fires_no_buyback(tmp_path):
+    conn = sqlite3.connect(str(tmp_path / "economy.db"))
+    _active_closet(conn)
+    f = _F()
+    buyback = _BuybackRecorder()
+    deps = _deps(conn, f, tmp_path)
+    deps.buy_and_burn_fn = buyback
+    session = _session()
+    _run(shop_flow.start_shop_buy(session, deps))
+    f.owner_of[f.minted_nft_id] = BUYER
+    f.payload_status = _signed_status(account=BUYER)
+    _run(shop_flow.advance_shop_buy(session, deps))
+
+    assert session.state == "done"
+    assert buyback.calls == []
+    order = shop_store.get_order(conn, session.id)
+    assert order is not None and order["buyback_done"] == 0
+
+
+def test_xrp_buyback_skipped_when_fn_unwired_but_marked_done(tmp_path):
+    """buy_and_burn_fn=None (e.g. tests / partial wiring): skip the call but
+    still flip buyback_done so nothing retries forever."""
+    conn = sqlite3.connect(str(tmp_path / "economy.db"))
+    _active_closet(conn)
+    f = _F()
+    session, _deps_ = _settled_xrp_session(conn, f, tmp_path, None)
+    assert session.state == "done"
+    order = shop_store.get_order(conn, session.id)
+    assert order is not None and order["buyback_done"] == 1
