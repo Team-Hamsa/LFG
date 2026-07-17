@@ -123,15 +123,12 @@ def test_onramp_payment_payload_shape(monkeypatch):
 
 
 def test_onramp_payment_payload_memo_action_payment(monkeypatch):
-    import json as _json
 
     captured = _capture(monkeypatch)
     _run(xumm_ops.create_onramp_payment_payload("rBuyer", _brix_dict(), "2500000"))
     memos_field = captured["payload"]["txjson"]["Memos"]
     decoded = {
-        bytes.fromhex(m["Memo"]["MemoType"]).decode(): bytes.fromhex(
-            m["Memo"]["MemoData"]
-        ).decode()
+        bytes.fromhex(m["Memo"]["MemoType"]).decode(): bytes.fromhex(m["Memo"]["MemoData"]).decode()
         for m in memos_field
     }
     assert decoded["action"] == "payment"

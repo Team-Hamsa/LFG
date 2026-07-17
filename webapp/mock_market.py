@@ -180,9 +180,17 @@ class MockMarket:
     ) -> list[dict[str, Any]]:
         rows = [r for r in self._live() if r["kind"] == kind]
         if min_drops is not None:
-            rows = [r for r in rows if r.get("amount_drops") is not None and r["amount_drops"] >= min_drops]
+            rows = [
+                r
+                for r in rows
+                if r.get("amount_drops") is not None and r["amount_drops"] >= min_drops
+            ]
         if max_drops is not None:
-            rows = [r for r in rows if r.get("amount_drops") is not None and r["amount_drops"] <= max_drops]
+            rows = [
+                r
+                for r in rows
+                if r.get("amount_drops") is not None and r["amount_drops"] <= max_drops
+            ]
         if trait_filters:
             rows = [
                 r

@@ -1781,7 +1781,7 @@ function renderMarketGrid(rows) {
     name.textContent = vm.title;
     const price = document.createElement('span');
     price.className = 'market-card-price';
-    price.textContent = `${vm.amountXrp} XRP`;
+    price.textContent = vm.priceLabel;
     name.appendChild(price);
     card.replaceChildren(img, name);
     // #133: openBuyFlow is async — an unhandled rejection here would leave
@@ -1799,11 +1799,18 @@ async function loadMarketBrowse() {
   const slot = el('market-trait-slot').value.trim();
   const value = el('market-trait-value').value.trim();
   const traits = slot && value ? [marketPure.traitFilterToken(slot, value)] : [];
+  // #239 per-kind denomination: the same min/max inputs filter XRP for
+  // characters and BRIX for traits (min_brix/max_brix server params).
+  const minPrice = el('market-min-xrp').value.trim();
+  const maxPrice = el('market-max-xrp').value.trim();
+  const isTrait = marketState.kind === 'trait';
   const pairs = marketPure.buildListingsParams({
     kind: marketState.kind,
     traits,
-    minXrp: el('market-min-xrp').value.trim(),
-    maxXrp: el('market-max-xrp').value.trim(),
+    minXrp: isTrait ? '' : minPrice,
+    maxXrp: isTrait ? '' : maxPrice,
+    minBrix: isTrait ? minPrice : '',
+    maxBrix: isTrait ? maxPrice : '',
     sort: el('market-sort').value,
     limit: 24,
     offset: 0,
@@ -1876,7 +1883,7 @@ function renderMineGroups(data) {
     const vm = marketPure.mapListingRow(row);
     return {
       imgSrc: marketRowImgSrc(vm),
-      label: `${vm.title} — ${vm.amountXrp} XRP`,
+      label: `${vm.title} — ${vm.priceLabel}`,
       payload: row,
     };
   });
@@ -2016,6 +2023,14 @@ function marketBuyRender(listingKind) {
     }
     if (s.state === 'awaiting_signature') {
       return { title: '💳 Confirm purchase', text: signText(s.push, s.instruction || 'Scan to sign the purchase in Xaman.'), qrData: s.xumm_url, link: s.xumm_url };
+    }
+    // #239 two-step on-ramp: sign the XRP→BRIX top-up first, then the accept.
+    if (s.state === 'awaiting_onramp') {
+      const quote = s.price_xrp_quote ? ` (~${s.price_xrp_quote} XRP)` : '';
+      return { title: `💱 Get BRIX${quote}`, text: signText(s.push, s.instruction || 'Scan to buy the BRIX for this purchase in Xaman.'), qrData: s.xumm_url, link: s.xumm_url };
+    }
+    if (s.state === 'onramp_confirmed') {
+      return { title: '⏳ BRIX acquired', text: 'Preparing your purchase…', spinner: true };
     }
     if (s.reason === 'listing_unavailable') {
       return { title: '⚠️ No longer available', text: 'That listing was just sold or cancelled.', done: true };
@@ -2181,17 +2196,24 @@ async function openShopBuyFlow(item) {
 
 async function openBuyFlow(row) {
   const vm = marketPure.mapListingRow(row);
-  // #133: a malformed server-provided price would make computeRoyalty throw
-  // and the confirm dialog never open — surface it instead of a dead click.
-  const priced = marketPure.safeComputeRoyalty(vm.amountXrp);
-  if (!priced.ok) {
-    showError(`This listing has an invalid price (${priced.error}) — try refreshing.`);
-    return;
+  let text;
+  if (vm.amountBrix != null) {
+    // #239: trait listings are BRIX-denominated; the on-ramp (if needed) is
+    // quoted by the server once the buy starts.
+    text = `${vm.amountBrix} BRIX — seller nets 93% (7% collection royalty). No BRIX? You'll get a one-tap XRP top-up first.`;
+  } else {
+    // #133: a malformed server-provided price would make computeRoyalty throw
+    // and the confirm dialog never open — surface it instead of a dead click.
+    const priced = marketPure.safeComputeRoyalty(vm.amountXrp);
+    if (!priced.ok) {
+      showError(`This listing has an invalid price (${priced.error}) — try refreshing.`);
+      return;
+    }
+    text = `${vm.amountXrp} XRP — seller nets ${priced.royalty.receiveXrp} XRP (93% — 7% collection royalty).`;
   }
-  const royalty = priced.royalty;
   const ok = await confirmDialog({
     title: `Buy ${vm.title}?`,
-    text: `${vm.amountXrp} XRP — seller nets ${royalty.receiveXrp} XRP (93% — 7% collection royalty).`,
+    text,
     confirmLabel: 'Buy now',
   });
   if (!ok) return;
@@ -2202,11 +2224,17 @@ async function cancelListing(row) {
   const vm = marketPure.mapListingRow(row);
   const ok = await confirmDialog({
     title: 'Cancel this listing?',
-    text: `${vm.title} — ${vm.amountXrp} XRP will no longer be for sale.`,
+    text: `${vm.title} — ${vm.priceLabel} will no longer be for sale.`,
     confirmLabel: 'Cancel listing',
   });
   if (!ok) return;
   await marketFlow('cancel', '/api/market/cancel', { offer_index: row.offer_index }, marketCancelRender);
+}
+
+// #239: a wizard (Closet) item or a loose trait token lists in BRIX;
+// characters list in XRP.
+function listFormIsTrait(item) {
+  return Boolean(item && (item.wizard || item.slot));
 }
 
 function openListForm(item) {
@@ -2215,15 +2243,20 @@ function openListForm(item) {
   el('market-list-form-title').textContent = item.wizard ? 'Sell a trait' : 'List for sale';
   el('market-list-form-sub').textContent = item.label;
   el('market-list-price').value = '';
+  el('market-list-price').placeholder = listFormIsTrait(item) ? 'Price in BRIX' : 'Price in XRP';
   el('market-list-royalty').hidden = true;
 }
 
 function updateListFormRoyaltyPreview() {
   const out = el('market-list-royalty');
-  const check = marketPure.validatePrice(el('market-list-price').value.trim());
+  const raw = el('market-list-price').value.trim();
+  const isTrait = listFormIsTrait(marketPendingItem);
+  const check = isTrait ? marketPure.validateBrixPrice(raw) : marketPure.validatePrice(raw);
   if (check.ok) {
     out.hidden = false;
-    out.textContent = marketPure.royaltyDisclosure(el('market-list-price').value.trim());
+    out.textContent = isTrait
+      ? marketPure.brixRoyaltyDisclosure(raw)
+      : marketPure.royaltyDisclosure(raw);
   } else {
     out.hidden = true;
   }
@@ -2233,20 +2266,23 @@ async function submitListForm() {
   const item = marketPendingItem;
   if (!item) return;
   const price = el('market-list-price').value.trim();
-  const check = marketPure.validatePrice(price);
+  const isTrait = listFormIsTrait(item);
+  const check = isTrait ? marketPure.validateBrixPrice(price) : marketPure.validatePrice(price);
   if (!check.ok) { showError(check.error); return; }
   const ok = await confirmDialog({
     title: item.wizard ? 'Post this trait for sale?' : 'List for sale?',
-    text: marketPure.royaltyDisclosure(price),
+    text: isTrait ? marketPure.brixRoyaltyDisclosure(price) : marketPure.royaltyDisclosure(price),
     confirmLabel: item.wizard ? 'Post listing' : 'List it',
   });
   if (!ok) return;
   if (item.wizard) {
     await marketFlow(
       'trait_list', '/api/market/trait/list',
-      { slot: item.slot, value: item.value, price_xrp: price },
+      { slot: item.slot, value: item.value, price_brix: price },
       marketTraitListRender,
     );
+  } else if (isTrait) {
+    await marketFlow('list', '/api/market/list', { nft_id: item.nftId, price_brix: price }, marketListRender);
   } else {
     await marketFlow('list', '/api/market/list', { nft_id: item.nftId, price_xrp: price }, marketListRender);
   }

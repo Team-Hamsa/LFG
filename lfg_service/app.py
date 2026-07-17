@@ -1019,9 +1019,7 @@ async def handle_market_listings(request: web.Request) -> web.Response:
         ]
 
     if sort == "price_asc":
-        filtered = sorted(
-            filtered, key=lambda r: (market_store.listing_price(r), r["offer_index"])
-        )
+        filtered = sorted(filtered, key=lambda r: (market_store.listing_price(r), r["offer_index"]))
     elif sort == "price_desc":
         filtered = sorted(
             filtered, key=lambda r: (-market_store.listing_price(r), r["offer_index"])
@@ -1817,9 +1815,7 @@ async def _continue_buy_after_onramp(session: Any, loop: Any) -> None:
             expected_brix=session.amount_brix,
         )
     except Exception as e:
-        logging.warning(
-            f"post-onramp verify lookup failed for offer {session.offer_index}: {e}"
-        )
+        logging.warning(f"post-onramp verify lookup failed for offer {session.offer_index}: {e}")
         return  # retry on the next poll; state stays ONRAMP_CONFIRMED
     if not verified:
         await loop.run_in_executor(

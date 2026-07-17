@@ -71,7 +71,9 @@ def validate_brix_value(value: str) -> str:
         raise ValueError(f"BRIX amount exceeds cap ({MAX_BRIX})")
     scaled = amount * (Decimal(10) ** BRIX_DECIMAL_PLACES)
     if scaled != scaled.to_integral_value():
-        raise ValueError(f"BRIX amount must not have more than {BRIX_DECIMAL_PLACES} decimal places")
+        raise ValueError(
+            f"BRIX amount must not have more than {BRIX_DECIMAL_PLACES} decimal places"
+        )
     # Fixed-point formatting, never scientific — same rationale as
     # drops_to_xrp_str ("1E+1" broke both display and the JS BigInt path).
     text = format(amount, "f")

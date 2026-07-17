@@ -43,11 +43,11 @@ def test_browse_sort_price_asc_and_desc(market):
     asc = market.browse(
         kind="trait", trait_filters={}, min_drops=None, max_drops=None, sort="price_asc"
     )
-    assert asc == sorted(asc, key=lambda r: r["amount_drops"])
+    assert asc == sorted(asc, key=lambda r: float(r.get("amount_brix") or r["amount_drops"]))
     desc = market.browse(
         kind="trait", trait_filters={}, min_drops=None, max_drops=None, sort="price_desc"
     )
-    assert desc == sorted(desc, key=lambda r: -r["amount_drops"])
+    assert desc == sorted(desc, key=lambda r: -float(r.get("amount_brix") or r["amount_drops"]))
 
 
 def test_browse_trait_filter_matches_slot_value(market):

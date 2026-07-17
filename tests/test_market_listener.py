@@ -189,8 +189,6 @@ def test_classify_tx_regression_existing_kinds_unchanged():
     assert nft_listener.classify_tx(payment) is None
 
 
-
-
 def _brix_amount(value="10"):
     # #239: trait listings are BRIX-denominated on the token currency/issuer.
     from lfg_core import config
@@ -200,6 +198,7 @@ def _brix_amount(value="10"):
         "issuer": config.TOKEN_ISSUER_ADDRESS,
         "value": value,
     }
+
 
 # --- offer_create: membership + filtering -----------------------------------
 
@@ -380,9 +379,10 @@ def test_accept_trait_closes_sold_with_settled_zero():
     _seed_trait(conn, nft_id, owner="rSeller", slot="Hat", value="Cap")
     _run(
         nft_listener.apply_market_tx(
-            conn, _sell_offer_create_tx(
+            conn,
+            _sell_offer_create_tx(
                 nft_id, seller="rSeller", offer_index="OFF_SOLD_TRAIT", amount=_brix_amount()
-            )
+            ),
         )
     )
     economy_store.upsert_trait_token(conn, nft_id, "rBuyer", "Hat", "Cap")  # ownership moved
@@ -417,9 +417,10 @@ def test_accept_persists_buyer_from_tx_even_when_owner_refresh_stale():
     _seed_trait(conn, nft_id, owner="rSeller", slot="Hat", value="Cap")
     _run(
         nft_listener.apply_market_tx(
-            conn, _sell_offer_create_tx(
+            conn,
+            _sell_offer_create_tx(
                 nft_id, seller="rSeller", offer_index="OFF_STALE_BUYER", amount=_brix_amount()
-            )
+            ),
         )
     )
     # NOTE: no ownership move — trait_tokens.owner still == seller (refresh stale)
@@ -450,9 +451,10 @@ def test_accept_brokered_persists_buy_offer_owner_not_broker():
     _seed_trait(conn, nft_id, owner="rSeller", slot="Hat", value="Cap")
     _run(
         nft_listener.apply_market_tx(
-            conn, _sell_offer_create_tx(
+            conn,
+            _sell_offer_create_tx(
                 nft_id, seller="rSeller", offer_index="OFF_BROKERED", amount=_brix_amount()
-            )
+            ),
         )
     )
     buy_offer = {

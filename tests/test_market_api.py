@@ -1808,9 +1808,7 @@ def test_trait_list_status_validated_success_writes_brix_row(
     assert row["amount_drops"] is None
 
 
-def test_trait_list_finalize_rejects_xrp_denominated_offer(
-    onchain_env, market_wallet, monkeypatch
-):
+def test_trait_list_finalize_rejects_xrp_denominated_offer(onchain_env, market_wallet, monkeypatch):
     # A trait ListSession whose signed offer somehow came back XRP-denominated
     # must FAIL (expect="brix"), never write a drops row for a trait.
     conn = _reopen(onchain_env)
@@ -2167,8 +2165,14 @@ def test_buy_start_legacy_xrp_trait_listing_410_stale(onchain_env, market_wallet
     conn = _reopen(onchain_env)
     upsert_trait_token(conn, TRAIT1, SELLER, "Hat", "Wizard Hat")
     _seed_listing(
-        conn, offer_index="L" * 64, nft_id=TRAIT1, kind="trait", seller=SELLER,
-        slot="Hat", value="Wizard Hat", amount_drops=500_000,
+        conn,
+        offer_index="L" * 64,
+        nft_id=TRAIT1,
+        kind="trait",
+        seller=SELLER,
+        slot="Hat",
+        value="Wizard Hat",
+        amount_drops=500_000,
     )
     _activate_buyer_closet(conn)
     conn.commit()

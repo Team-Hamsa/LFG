@@ -761,9 +761,7 @@ class TestBrowseBrix:
 
     def test_min_max_amount_brix(self, conn):
         self._seed(conn)
-        rows = market_store.browse(
-            conn, kind="trait", min_amount_brix="6", max_amount_brix="50"
-        )
+        rows = market_store.browse(conn, kind="trait", min_amount_brix="6", max_amount_brix="50")
         assert [r["amount_brix"] for r in rows] == ["10.5"]
 
     def test_sort_price_asc_decimal_not_lexicographic(self, conn):

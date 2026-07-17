@@ -420,11 +420,15 @@ def browse(
     # stale-close) is excluded by that filter rather than crashing on None.
     if min_amount_drops is not None:
         rows = [
-            r for r in rows if r["amount_drops"] is not None and r["amount_drops"] >= min_amount_drops
+            r
+            for r in rows
+            if r["amount_drops"] is not None and r["amount_drops"] >= min_amount_drops
         ]
     if max_amount_drops is not None:
         rows = [
-            r for r in rows if r["amount_drops"] is not None and r["amount_drops"] <= max_amount_drops
+            r
+            for r in rows
+            if r["amount_drops"] is not None and r["amount_drops"] <= max_amount_drops
         ]
     if min_amount_brix is not None:
         floor = Decimal(min_amount_brix)
