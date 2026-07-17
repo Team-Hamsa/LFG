@@ -238,7 +238,7 @@ button.link:hover, a.link:hover { text-decoration: underline; color: var(--blue)
 
 /* "Share on X" control (#41 T9): the anchor + copy button sit inline, with
    the copy-fallback input only appearing once revealed by app.js. */
-.share-row { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; }
+.share-row { display: flex; align-items: center; justify-content: center; gap: 10px; flex-wrap: wrap; }
 .copy-input {
   width: 100%;
   margin-top: 6px;
