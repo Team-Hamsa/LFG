@@ -28,7 +28,9 @@ def _reload_config(monkeypatch, url):
     }.items():
         monkeypatch.setenv(k, v)
     if url is None:
-        monkeypatch.delenv("TELEGRAM_MINI_APP_URL", raising=False)
+        # "" not delenv: load_dotenv() on reload would repopulate a deleted
+        # var from a populated .env ("" is the same feature-off sentinel).
+        monkeypatch.setenv("TELEGRAM_MINI_APP_URL", "")
     else:
         monkeypatch.setenv("TELEGRAM_MINI_APP_URL", url)
     import surfaces.telegram_bot.config as cfg
