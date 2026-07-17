@@ -29,9 +29,16 @@ class _FakeUser:
         return "admin#1"
 
 
-def _button_interaction():
-    """Fake interaction for a component (button) click."""
+def _button_interaction(edit_raises=None):
+    """Fake interaction for a component (button) click.
+
+    `edits` records every interaction.edit_original_response(**kwargs) call —
+    the deferred-update re-render path that makes the mutated button label
+    actually show on the ephemeral panel message. `edit_raises` makes that
+    call fail (simulates an expired interaction token / Discord API error).
+    """
     sent: list[tuple[str | None, object | None]] = []
+    edits: list[dict] = []
 
     async def defer(ephemeral=True):
         return None
@@ -39,13 +46,19 @@ def _button_interaction():
     async def followup_send(content=None, embed=None, ephemeral=True):
         sent.append((content, embed))
 
+    async def edit_original_response(**kwargs):
+        if edit_raises is not None:
+            raise edit_raises
+        edits.append(kwargs)
+
     inter = SimpleNamespace(
         user=_FakeUser(),
         client=MagicMock(),
         response=SimpleNamespace(defer=defer),
         followup=SimpleNamespace(send=followup_send),
+        edit_original_response=edit_original_response,
     )
-    return inter, sent
+    return inter, sent, edits
 
 
 def _command_interaction(order: list[str] | None = None):
@@ -181,11 +194,15 @@ def test_toggle_button_pauses_when_running(admin_mod, monkeypatch):
     monkeypatch.setattr(admin_mod, "log_admin_action", log_mock)
 
     view = admin_mod.AdminView()
-    ix, sent = _button_interaction()
+    ix, sent, edits = _button_interaction()
     _run(view.x_toggle_button.callback(ix))
 
     assert fake_svc.calls == ["status", "pause"]
     assert view.x_toggle_button.label == "▶️ Resume X posting"
+    # The label mutation alone is a dead write — the panel message must be
+    # re-rendered (deferred-update edit of the component's own ephemeral
+    # message) so the new label actually shows on screen.
+    assert edits == [{"view": view}]
     assert len(sent) == 1
     content, embed = sent[0]
     assert embed is not None
@@ -201,11 +218,12 @@ def test_toggle_button_resumes_when_paused(admin_mod, monkeypatch):
     monkeypatch.setattr(admin_mod, "log_admin_action", AsyncMock())
 
     view = admin_mod.AdminView()
-    ix, sent = _button_interaction()
+    ix, sent, edits = _button_interaction()
     _run(view.x_toggle_button.callback(ix))
 
     assert fake_svc.calls == ["status", "resume"]
     assert view.x_toggle_button.label == "⏸️ Pause X posting"
+    assert edits == [{"view": view}]  # panel re-rendered with the new label
     content, embed = sent[0]
     fields = {f.name: f.value for f in embed.fields}
     assert fields["Posting"] == "▶️ Running"
@@ -218,16 +236,40 @@ def test_toggle_button_degrades_ephemerally_on_service_error(admin_mod, monkeypa
 
     view = admin_mod.AdminView()
     original_label = view.x_toggle_button.label
-    ix, sent = _button_interaction()
+    ix, sent, edits = _button_interaction()
     _run(view.x_toggle_button.callback(ix))
 
     assert len(sent) == 1
     content, embed = sent[0]
     assert embed is None
     assert content is not None and "❌" in content
-    # No mutation happened, so the label/audit log must be untouched.
+    # No mutation happened, so the label/panel/audit log must be untouched.
     assert view.x_toggle_button.label == original_label
+    assert edits == []
     log_mock.assert_not_awaited()
+
+
+def test_toggle_button_survives_a_failed_panel_rerender(admin_mod, monkeypatch):
+    """The re-render edit is best-effort: if Discord rejects it (expired
+    interaction token, API hiccup) the toggle itself already succeeded — the
+    status embed followup and the audit log must still go out."""
+    import discord
+
+    fake_svc = _FakeSvc(paused=False)
+    monkeypatch.setattr(admin_mod, "svc", fake_svc)
+    log_mock = AsyncMock()
+    monkeypatch.setattr(admin_mod, "log_admin_action", log_mock)
+
+    view = admin_mod.AdminView()
+    err = discord.HTTPException(MagicMock(status=401, reason="Unauthorized"), "expired token")
+    ix, sent, _edits = _button_interaction(edit_raises=err)
+    _run(view.x_toggle_button.callback(ix))  # must not raise
+
+    assert fake_svc.calls == ["status", "pause"]
+    assert len(sent) == 1
+    _content, embed = sent[0]
+    assert embed is not None  # status embed still delivered
+    log_mock.assert_awaited_once()
 
 
 # ---- /admin command wiring: admin_command.callback(ix), same unwrap idiom ----

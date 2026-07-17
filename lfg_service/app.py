@@ -221,6 +221,50 @@ async def publish_terminal(
     session._published = True
 
 
+async def _publish_mint_terminal(session: Any) -> None:
+    """Publish the terminal mint.completed/mint.failed firehose event for a
+    single-mint session. Shared by the server-side session task (see
+    _run_mint_session_and_publish) and handle_mint_status's poll path.
+
+    Idempotent via the session's `_published` guard, set only AFTER
+    publish_event awaits successfully (publish_terminal's ordering): if the
+    publisher is cancelled mid-await the session stays unpublished so the
+    other path retries; consumers dedup the accepted sub-tick double-publish
+    window (the x_bot poster keys on nft_id)."""
+    if getattr(session, "_published", False):
+        return
+    if session.state not in mint_flow.TERMINAL_STATES:
+        return
+    ok = session.state not in (mint_flow.FAILED, mint_flow.PAYMENT_TIMEOUT)
+    await publish_event(
+        "mint.completed" if ok else "mint.failed",
+        enrich_minter_identity(session.platform, session.discord_id, session.wallet_address),
+        session.wallet_address,
+        session.to_dict(),
+    )
+    session._published = True
+
+
+async def _run_mint_session_and_publish(session: Any) -> None:
+    """Drive run_mint_session to terminal, then publish the terminal event
+    server-side. Until #41 the client status poll was the ONLY publish site —
+    a mobile user whose Activity is killed after signing in Xaman (the #216
+    scenario; push delivery lets them finish entirely in Xaman) mints
+    successfully but never polls again, so the event was never published and
+    the X poster / Telegram announce silently missed it.
+
+    Publish failure is logged and never breaks the mint task; a user cancel
+    (#141) cancels this task before the publish runs (and mark_published
+    suppresses any late poll), so a deliberate cancel still announces
+    nothing. handle_mint_status calls the same idempotent helper, covering
+    poll-first ordering."""
+    await mint_flow.run_mint_session(session)
+    try:
+        await _publish_mint_terminal(session)
+    except Exception as e:
+        logging.error(f"server-side mint terminal publish failed for session {session.id}: {e}")
+
+
 async def _ws_stream(request: Any, predicate: Any) -> Any:
     ws = web.WebSocketResponse()
     await ws.prepare(request)
@@ -2633,8 +2677,11 @@ async def handle_mint_start(request):
     except Exception as e:
         logging.warning(f"prepare_payment failed; falling back to XRP path: {e}")
     session.ensure_payment_fallback()
-    # Keep the task handle so /cancel can stop the payment wait (#141)
-    session.task = asyncio.create_task(mint_flow.run_mint_session(session))
+    # Keep the task handle so /cancel can stop the payment wait (#141).
+    # The wrapper publishes the terminal firehose event server-side, so a
+    # client that never polls again (webview killed mid-sign, #216) still
+    # announces to the X poster / Telegram consumers.
+    session.task = asyncio.create_task(_run_mint_session_and_publish(session))
     return web.json_response(session.to_dict())
 
 
@@ -3071,15 +3118,10 @@ async def handle_mint_status(request):
     # spinner the moment Xaman opens the payload (issue #22).
     await mint_flow.update_scan_state(session)
     await _persist_issued_user_token(request["user"], session)
-    if session.state in mint_flow.TERMINAL_STATES and not getattr(session, "_published", False):
-        session._published = True
-        ok = session.state not in (mint_flow.FAILED, mint_flow.PAYMENT_TIMEOUT)
-        await publish_event(
-            "mint.completed" if ok else "mint.failed",
-            enrich_minter_identity(session.platform, session.discord_id, session.wallet_address),
-            session.wallet_address,
-            session.to_dict(),
-        )
+    # Terminal publish is primarily the session task's job now (#216 — see
+    # _run_mint_session_and_publish); this idempotent call covers poll-first
+    # ordering and retries a publish the task path failed.
+    await _publish_mint_terminal(session)
     return web.json_response(session.to_dict())
 
 

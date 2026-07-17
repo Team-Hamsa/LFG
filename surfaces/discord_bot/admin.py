@@ -507,6 +507,20 @@ class AdminView(View):
             return
 
         button.label = _x_toggle_label(status["paused"])
+        # Re-render the panel so the new label actually shows: mutating
+        # button.label alone is a dead write — Discord only repaints on an
+        # edit of the message carrying the view. The defer() above was a
+        # deferred *update* of the component's own message (discord.py sends
+        # DEFERRED_MESSAGE_UPDATE for component interactions; `ephemeral` is
+        # ignored without thinking=True), so edit_original_response targets
+        # the ephemeral panel itself — the only edit path Discord allows for
+        # ephemeral messages. Best-effort: the toggle already succeeded, so
+        # a failed repaint (expired token, API hiccup) must not eat the
+        # status embed or the audit log below.
+        try:
+            await interaction.edit_original_response(view=self)
+        except discord.HTTPException as e:
+            logging.warning(f"X posting toggle: panel re-render failed: {e}")
         await interaction.followup.send(embed=_x_status_embed(status), ephemeral=True)
 
         action = "paused" if status["paused"] else "resumed"
