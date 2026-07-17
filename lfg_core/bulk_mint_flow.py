@@ -192,8 +192,16 @@ class BulkMintJob:
         # the disk refuses the delete, rewrite the record as a cancelled
         # tombstone instead (terminal states are skipped by
         # load_all_resumable); persist never raises, so this is best-effort.
-        if not delete_record(self.id):
-            persist(self)
+        if not delete_record(self.id) and not persist(self):
+            # Disk can neither unlink nor write: the stale awaiting_payment
+            # record survives and a restart will resurrect its payment watch.
+            # Safe direction — the watch re-expires via the created_at TTL,
+            # and a payment that actually landed is honoured, not lost — but
+            # scream so the degraded disk gets fixed.
+            logging.critical(
+                f"bulk job {self.id}: cancel could neither delete nor tombstone "
+                "its record; a restart will resurrect the payment watch"
+            )
         return True
 
     def mark_published(self) -> None:
@@ -208,6 +216,9 @@ class BulkMintJob:
         preparing, keep polling", not an error. `persist_failed` flags
         degraded durability: the in-memory job is authoritative and keeps
         running; the flag clears on the next successful full-record persist.
+        A unit MAY be `offered` with a null `offer_id`: its gift offer was
+        already accepted (delivered while the service was down), so there is
+        no offer left to accept — clients should treat it as claimed.
         """
         return {
             "id": self.id,
@@ -395,7 +406,9 @@ async def _ensure_offer(job: BulkMintJob, unit: Unit) -> None:
             return
     info = await xrpl_ops.nft_info(unit.nft_id)
     if info is not None and info.get("owner") == job.wallet_address:
-        # Gift offer already accepted (see docstring): delivered.
+        # Gift offer already accepted (see docstring): delivered. offer_id
+        # stays None — the accept consumed the offer object, so there is
+        # nothing left to accept (to_dict documents offered+null offer_id).
         unit.state = OFFERED
         unit.error = None
         return
