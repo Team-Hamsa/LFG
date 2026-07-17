@@ -8,6 +8,7 @@ import json
 import logging
 import os
 import re
+import time
 from decimal import Decimal
 from typing import Any
 
@@ -24,6 +25,44 @@ _XUMM_HEADERS = {
     "X-API-Key": config.XUMM_API_KEY,
     "X-API-Secret": config.XUMM_API_SECRET,
 }
+
+
+class XummRateLimited(Exception):
+    """XUMM answered 429 — the app is over its per-minute API quota."""
+
+
+# After any 429, stop calling out for a cooldown window: XUMM's limit is a
+# sliding per-minute average, so hammering through it only extends the outage
+# (and did, in the 2026-07-17 incident — 39 rejected creates in 25 minutes).
+_RATE_LIMIT_COOLDOWN = float(os.getenv("XUMM_RATE_LIMIT_COOLDOWN", "30.0"))
+_rate_limited_until = 0.0
+
+
+def _note_rate_limited(context: str) -> None:
+    global _rate_limited_until
+    _rate_limited_until = time.monotonic() + _RATE_LIMIT_COOLDOWN
+    logging.warning(
+        f"XUMM rate limited (429) during {context}; backing off {_RATE_LIMIT_COOLDOWN}s"
+    )
+
+
+def rate_limited() -> bool:
+    """True while the post-429 cooldown is active. The service uses this to
+    return 503 + Retry-After (which surfaces do NOT retry) instead of a
+    retryable 502 that amplifies the overload."""
+    return time.monotonic() < _rate_limited_until
+
+
+def _check_rate_headers(response: Any, context: str) -> None:
+    """Log when XUMM says we're close to the limit, so quota pressure is
+    visible in the logs BEFORE the 429s start."""
+    remaining = getattr(response, "headers", {}).get("X-RateLimit-Remaining")
+    try:
+        if remaining is not None and int(remaining) <= 5:
+            limit = response.headers.get("X-RateLimit-Limit")
+            logging.warning(f"XUMM quota low during {context}: {remaining}/{limit} remaining")
+    except (TypeError, ValueError):
+        pass
 
 
 def _payment_amount(value: str, currency: str | None, issuer: str | None) -> str | dict[str, str]:
@@ -146,7 +185,17 @@ async def _post_xumm_payload(payload: dict[str, Any]) -> dict[str, Any]:
     response = await asyncio.to_thread(
         requests.post, config.XUMM_API_URL, json=payload, headers=_XUMM_HEADERS, timeout=10
     )
+    # Fakes in tests carry no status_code; treat absence as success.
+    status = getattr(response, "status_code", 200)
+    if status == 429:
+        _note_rate_limited("payload create")
+        raise XummRateLimited("XUMM payload create rejected (429)")
+    _check_rate_headers(response, "payload create")
     data = response.json()
+    if status >= 400 or "refs" not in data:
+        # A rejected payload comes back without refs/next — surface the real
+        # HTTP status instead of the KeyError('refs') this used to raise.
+        raise RuntimeError(f"XUMM payload create failed: HTTP {status} {str(data)[:200]}")
     return {
         "qr_url": data["refs"]["qr_png"],
         "xumm_url": data["next"]["always"],
@@ -191,8 +240,20 @@ async def _create_xumm_payload(
     if user_token:
         payload["user_token"] = user_token
     sent_token = bool(user_token)
+    if rate_limited():
+        # Post-429 cooldown: don't spend another call we know will be
+        # rejected. Callers already handle None (the service maps it to
+        # 503 + Retry-After when rate_limited() is set).
+        logging.warning(f"XUMM payload create skipped ({txtype}): rate-limit cooldown active")
+        return None
     try:
         result = await _post_xumm_payload(payload)
+    except XummRateLimited:
+        # NOT the token-less-retry path: a 429 rejects the call, not the
+        # token — retrying immediately (with or without the token) just
+        # burns more quota. 2026-07-17 incident: each 429'd create was
+        # retried without the token, doubling the pressure.
+        return None
     except requests.Timeout as e:
         # Ambiguous transport failure: XUMM may have ALREADY created (and
         # pushed) the payload before the response was lost — retrying would
@@ -232,6 +293,9 @@ async def _create_xumm_payload(
         logging.info(
             f"XUMM payload {result['uuid']} ({txtype}): push={result['push'] or 'no-token'}"
         )
+    # Event-driven status (no REST polling): keep this payload's cached
+    # status fresh from XUMM's websocket instead.
+    watch_payload(result["uuid"])
     return result
 
 
@@ -370,22 +434,141 @@ _UUID_RE = re.compile(
 )
 
 
-async def get_payload_status(uuid: str) -> dict[str, Any] | None:
-    """Poll a XUMM payload: whether it was opened (QR scanned) / signed /
-    expired, and the signing account once signed. None on API errors or a
-    malformed uuid (which is interpolated into the API URL)."""
+# --- payload status: cached + event-driven (no polling of the XUMM REST API) --
+#
+# Every surface polls OUR status endpoints every ~3s; those used to translate
+# 1:1 into XUMM REST GETs (the main quota drain behind the 2026-07-17 429s,
+# and explicitly what XUMM says disqualifies an app from raised limits). Now:
+#   - results are cached per uuid; terminal states (signed/expired) forever,
+#     non-terminal ones for XUMM_STATUS_CACHE_SECONDS;
+#   - every created payload gets a websocket watcher (wss://xumm.app/sign/<uuid>,
+#     XUMM's sanctioned push channel) that refreshes the cache when the payload
+#     is opened/signed/expired — while a watcher is live, cached non-terminal
+#     status is served regardless of age, so XUMM sees ~2 REST calls per payload
+#     instead of one per client tick;
+#   - a 429 sets the shared cooldown and serves stale cache instead of retrying.
+_STATUS_CACHE: dict[str, tuple[float, dict[str, Any]]] = {}
+_STATUS_CACHE_SECONDS = float(os.getenv("XUMM_STATUS_CACHE_SECONDS", "4.0"))
+_STATUS_CACHE_MAX = 512
+_WS_BASE = os.getenv("XUMM_WS_BASE", "wss://xumm.app/sign")
+_WS_WATCH_ENABLED = os.getenv("XUMM_WS_WATCH", "1") == "1"
+_WATCH_LIFETIME = 900.0  # give up after the standard payload TTL
+_watch_tasks: dict[str, "asyncio.Task[None]"] = {}
+_watched: set[str] = set()  # uuids with a LIVE ws feed (cache is event-fresh)
+
+
+def _cache_status(uuid: str, s: dict[str, Any]) -> None:
+    if len(_STATUS_CACHE) >= _STATUS_CACHE_MAX:
+        # Evict oldest entries; payloads expire in 900s so anything old is dead.
+        for old, _ in sorted(_STATUS_CACHE.items(), key=lambda kv: kv[1][0])[:64]:
+            del _STATUS_CACHE[old]
+    _STATUS_CACHE[uuid] = (time.monotonic(), s)
+
+
+def _terminal(s: dict[str, Any]) -> bool:
+    return bool(s.get("signed") or s.get("expired"))
+
+
+def cached_status(uuid: str) -> dict[str, Any] | None:
+    """The cached status for a payload, if any — no XUMM call ever. Lets the
+    service cheaply skip e.g. already-signed payloads when deciding whether a
+    pending sign-in can be re-served."""
+    cached = _STATUS_CACHE.get(uuid)
+    return cached[1] if cached else None
+
+
+def watch_payload(uuid: str) -> None:
+    """Start (once) a websocket watcher that keeps this payload's cached
+    status fresh from XUMM's push channel. Best-effort: no running loop, a
+    failed connect, or the env kill-switch just leaves the throttled REST
+    fallback in charge."""
+    if not _WS_WATCH_ENABLED or uuid in _watch_tasks:
+        return
+    try:
+        loop = asyncio.get_running_loop()
+    except RuntimeError:
+        return
+    task = loop.create_task(_watch_payload(uuid))
+    _watch_tasks[uuid] = task
+
+    def _done(_t: "asyncio.Task[None]") -> None:
+        _watch_tasks.pop(uuid, None)
+        _watched.discard(uuid)
+
+    task.add_done_callback(_done)
+
+
+async def _watch_payload(uuid: str) -> None:
+    try:
+        # wait_for, not asyncio.timeout: the deployed venvs run Python 3.10.
+        await asyncio.wait_for(_watch_payload_inner(uuid), timeout=_WATCH_LIFETIME)
+    except asyncio.TimeoutError:
+        pass
+    except Exception as e:
+        logging.debug(f"XUMM ws watcher for {uuid} ended: {e}")
+
+
+async def _watch_payload_inner(uuid: str) -> None:
+    import aiohttp
+
+    async with aiohttp.ClientSession() as session:
+        async with session.ws_connect(f"{_WS_BASE}/{uuid}", heartbeat=30) as ws:
+            _watched.add(uuid)
+            # Seed the cache so pollers are served without a fetch each.
+            s = await get_payload_status(uuid, force=True)
+            if s and _terminal(s):
+                return
+            async for msg in ws:
+                if msg.type in (
+                    aiohttp.WSMsgType.CLOSE,
+                    aiohttp.WSMsgType.CLOSING,
+                    aiohttp.WSMsgType.CLOSED,
+                    aiohttp.WSMsgType.ERROR,
+                ):
+                    break
+                if msg.type != aiohttp.WSMsgType.TEXT:
+                    continue  # ignore stray binary/ping frames, don't kill the feed
+                try:
+                    event = json.loads(msg.data)
+                except ValueError:
+                    continue
+                if not any(k in event for k in ("opened", "signed", "expired")):
+                    continue
+                s = await get_payload_status(uuid, force=True)
+                if s and _terminal(s):
+                    return
+
+
+async def get_payload_status(uuid: str, *, force: bool = False) -> dict[str, Any] | None:
+    """Status of a XUMM payload: whether it was opened (QR scanned) / signed /
+    expired, and the signing account once signed. Served from the event-fed
+    cache when possible (see above); force=True bypasses the cache and the
+    freshness throttle (the ws watcher uses it on events). None on API errors
+    or a malformed uuid (which is interpolated into the API URL)."""
     if not (isinstance(uuid, str) and _UUID_RE.match(uuid)):
         logging.error(f"Invalid XUMM payload uuid: {uuid!r}")
         return None
+    cached = _STATUS_CACHE.get(uuid)
+    if cached and not force:
+        age = time.monotonic() - cached[0]
+        if _terminal(cached[1]) or uuid in _watched or age < _STATUS_CACHE_SECONDS:
+            return cached[1]
+    if rate_limited() and not force:
+        # Cooldown: a stale answer beats another 429.
+        return cached[1] if cached else None
     try:
         response = await asyncio.to_thread(
             requests.get, f"{config.XUMM_API_URL}/{uuid}", headers=_XUMM_HEADERS, timeout=10
         )
+        if getattr(response, "status_code", 200) == 429:
+            _note_rate_limited("payload status")
+            return cached[1] if cached else None
+        _check_rate_headers(response, "payload status")
         data = response.json()
         meta = data.get("meta") or {}
         response_block = data.get("response") or {}
         application = data.get("application") or {}
-        return {
+        s = {
             "opened": bool(meta.get("opened")),
             "signed": bool(meta.get("signed")),
             "expired": bool(meta.get("expired")),
@@ -402,6 +585,8 @@ async def get_payload_status(uuid: str) -> dict[str, Any] | None:
             # token.
             "user_token": application.get("issued_user_token"),
         }
+        _cache_status(uuid, s)
+        return s
     except Exception as e:
         logging.error(f"Error fetching XUMM payload status: {e}")
         return None
