@@ -452,6 +452,9 @@ async def cancel_xumm_payload(uuid: str) -> bool:
     only when XUMM confirms it cancelled; False for already-resolved/expired/
     opened payloads and for transport errors (safe to call blindly during a
     backlog cleanup — see scripts/cancel_xumm_payloads.py)."""
+    if rate_limited():
+        logging.warning(f"XUMM payload cancel {uuid} skipped: rate-limit cooldown active")
+        return False
     try:
         response = await asyncio.to_thread(
             requests.delete,
@@ -459,6 +462,10 @@ async def cancel_xumm_payload(uuid: str) -> bool:
             headers=_XUMM_HEADERS,
             timeout=10,
         )
+        if getattr(response, "status_code", 200) == 429:
+            _note_rate_limited("payload cancel")
+            return False
+        _check_rate_headers(response, "payload cancel")
         data = response.json()
     except Exception as e:
         logging.warning(f"XUMM payload cancel {uuid} failed: {e}")

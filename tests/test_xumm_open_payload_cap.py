@@ -163,6 +163,28 @@ def test_cancel_xumm_payload_already_resolved(monkeypatch):
     assert _run(xumm_ops.cancel_xumm_payload("uuid-2")) is False
 
 
+def test_cancel_xumm_payload_respects_cooldown(monkeypatch):
+    # Greptile P2 on #260: a bulk cleanup must not hammer an app that is
+    # already rate-limit-cooling, and a 429 on the DELETE must arm the
+    # cooldown like any other XUMM 429.
+    import time
+
+    calls = []
+    monkeypatch.setattr(xumm_ops.requests, "delete", lambda *a, **k: calls.append(1))
+    monkeypatch.setattr(xumm_ops, "_rate_limited_until", time.monotonic() + 30)
+    assert _run(xumm_ops.cancel_xumm_payload("uuid-cd")) is False
+    assert calls == []
+
+
+def test_cancel_xumm_payload_429_arms_cooldown(monkeypatch):
+    _reset_cooldown(monkeypatch)
+    monkeypatch.setattr(
+        xumm_ops.requests, "delete", lambda *a, **k: _Resp(status=429, body={"error": True})
+    )
+    assert _run(xumm_ops.cancel_xumm_payload("uuid-429")) is False
+    assert xumm_ops.rate_limited()
+
+
 def test_cancel_xumm_payload_transport_error(monkeypatch):
     def boom(*a, **k):
         raise xumm_ops.requests.ConnectionError("down")
