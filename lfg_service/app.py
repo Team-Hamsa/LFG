@@ -2713,6 +2713,7 @@ async def handle_bulk_mint_start(request):
         return web.json_response({"error": "invalid_quantity"}, status=400)
     qty = raw_qty
 
+    platform = _platform(user)
     return_url = await _request_return_url(request)
     push_user_token = await _push_token(user)
 
@@ -2723,7 +2724,7 @@ async def handle_bulk_mint_start(request):
         discord_id=user["id"],
         wallet_address=request["wallet"],
         requested_qty=qty,
-        platform=_platform(user),
+        platform=platform,
         push_user_token=push_user_token,
         return_url=return_url,
     )
@@ -2734,9 +2735,7 @@ async def handle_bulk_mint_start(request):
 
     # One active job per user (no awaits between this check and the insert
     # below, so it cannot race)
-    active = _active_session(
-        bulk_sessions, bulk_mint_flow.TERMINAL_STATES, user["id"], _platform(user)
-    )
+    active = _active_session(bulk_sessions, bulk_mint_flow.TERMINAL_STATES, user["id"], platform)
     if active:
         return web.json_response(
             {"error": "bulk mint already in progress", "session": active.to_dict()}, status=409
@@ -2756,8 +2755,27 @@ async def handle_bulk_mint_start(request):
         logging.error(f"bulk job {job.id} prepare_payment failed: {e}")
         job.state = bulk_mint_flow.FAILED
         job.error = str(e)
+        # Defensive: the AWAITING_PAYMENT persist below only runs on success,
+        # so there should be no record — but a failed start must never leave
+        # a zombie file for the startup sweep to resurrect (#228).
+        bulk_mint_flow.delete_record(job.id)
         return web.json_response({"error": "payment_setup_failed"}, status=500)
 
+    if job.state != bulk_mint_flow.AWAITING_PAYMENT:
+        # Cancelled (or otherwise terminalized) while this handler awaited
+        # prepare_payment — the id is visible via /active during that window,
+        # so a concurrent cancel is legal. cancel() already dropped any
+        # record; persisting or launching the watch here would resurrect a
+        # job the user backed out of (run_bulk_mint_job's terminal entry
+        # guard is the second line of defense).
+        return web.json_response(job.to_dict())
+
+    # Durable AWAITING_PAYMENT (#228): persisted only now, with payment_uuid/
+    # link/created_at captured, so a crash after the user was shown the
+    # payment request resumes the ledger watch (load_all_resumable) instead
+    # of taking money with no record. Persist BEFORE launching the watch so
+    # the record exists for the whole window it covers.
+    bulk_mint_flow.persist(job)
     job.task = asyncio.create_task(bulk_mint_flow.run_bulk_mint_job(job))
     return web.json_response(job.to_dict())
 
@@ -2779,7 +2797,12 @@ async def handle_bulk_mint_active(request):
     """The caller's live (non-terminal) bulk job, or null. Kept SEPARATE from
     /api/mint/active: that endpoint serves the existing single-mint
     resumeMint() client, which has no knowledge of the bulk job shape
-    (units[] etc.) — returning a bulk job there would break it."""
+    (units[] etc.) — returning a bulk job there would break it.
+
+    An AWAITING_PAYMENT job may carry payment_link: null — the job is
+    registered before prepare_payment finishes (the race-free active-guard
+    ordering), meaning "still preparing, keep polling" (see
+    BulkMintJob.to_dict), not an error."""
     user = request["user"]
     job = _active_session(
         bulk_sessions, bulk_mint_flow.TERMINAL_STATES, user["id"], _platform(user)
@@ -2808,8 +2831,10 @@ async def handle_bulk_mint_cancel(request):
 
 
 async def resume_bulk_jobs() -> None:
-    """On startup, re-attach and resume any paid/fulfilling bulk jobs so a
-    service restart mid-fulfillment doesn't strand paid units."""
+    """On startup, re-attach and resume any awaiting-payment/paid/fulfilling
+    bulk jobs so a service restart mid-fulfillment doesn't strand paid units
+    (or, for awaiting-payment records, a payment signed just before the
+    crash)."""
     for job in bulk_mint_flow.load_all_resumable():
         bulk_sessions[job.id] = job
         job.task = asyncio.create_task(bulk_mint_flow.run_bulk_mint_job(job))

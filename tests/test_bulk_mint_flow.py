@@ -152,7 +152,15 @@ def test_offer_permanently_failing_leaves_job_fulfilling_not_done(monkeypatch, t
     async def _always_fail_offer(*a, **kw):
         return None
 
+    async def _no_offers(*a, **kw):
+        return []  # nothing to adopt (#227)
+
+    async def _owner_unknown(*a, **kw):
+        return None  # indeterminate owner -> fail closed, keep retrying create
+
     monkeypatch.setattr(bulk_mint_flow.xrpl_ops, "create_nft_offer", _always_fail_offer)
+    monkeypatch.setattr(bulk_mint_flow.xrpl_ops, "get_nft_sell_offers", _no_offers)
+    monkeypatch.setattr(bulk_mint_flow.xrpl_ops, "nft_info", _owner_unknown)
 
     j = _job(2)
     monkeypatch.setattr(bulk_mint_flow.supply, "remaining_headroom", lambda net: 100)
@@ -188,7 +196,15 @@ def test_offer_fail_then_succeed_ends_done_with_unit_offered(monkeypatch, tmp_pa
             return None
         return "OFFER-RETRY"
 
+    async def _no_offers(*a, **kw):
+        return []  # nothing to adopt (#227)
+
+    async def _owner_unknown(*a, **kw):
+        return None  # indeterminate owner -> fail closed, fall through to create
+
     monkeypatch.setattr(bulk_mint_flow.xrpl_ops, "create_nft_offer", _fail_once_then_succeed)
+    monkeypatch.setattr(bulk_mint_flow.xrpl_ops, "get_nft_sell_offers", _no_offers)
+    monkeypatch.setattr(bulk_mint_flow.xrpl_ops, "nft_info", _owner_unknown)
 
     j = _job(1)
     monkeypatch.setattr(bulk_mint_flow.supply, "remaining_headroom", lambda net: 100)

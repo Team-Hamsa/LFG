@@ -884,11 +884,18 @@ the single-mint machinery per unit.
   a restart.
 - **Startup resume:** `lfg_service.app.resume_bulk_jobs`, wired via
   `app.on_startup`, calls `bulk_mint_flow.load_all_resumable()` to re-attach
-  every job left in `paid`/`fulfilling` state and re-launches
-  `run_bulk_mint_job` for each — a crash/restart mid-job resumes from the
-  last-persisted unit with no double-charge (payment already confirmed) or
-  double-mint: `OFFERED`/`failed` units are skipped, and a `minted` unit is
-  re-offered (never re-minted).
+  every job left in `awaiting_payment`/`paid`/`fulfilling` state and
+  re-launches `run_bulk_mint_job` for each. `awaiting_payment` records are
+  durable from the moment `prepare_payment` succeeds (#228) and resume as a
+  ledger re-watch ONLY — no new payment request, the original
+  created_at-anchored window is honoured (short grace floor for expired
+  records; a payment the pre-crash process already claimed is reconciled
+  from the consumed-payment ledger by claimant tag), and the job may still
+  end `payment_timeout`. `paid`/`fulfilling` resumes keep the existing
+  guarantees — no double-charge (payment already confirmed) or double-mint:
+  `OFFERED`/`failed` units are skipped, and a `minted` unit is re-offered
+  (never re-minted). Cancelling an `awaiting_payment` job deletes its record
+  so a restart never resurrects it.
 - **Completion is conditional, not unconditional:** a job only reaches the
   terminal `done` state once every unit is `offered` or `failed`. If a unit
   is still `minted` after the bounded final re-offer pass (offer creation
