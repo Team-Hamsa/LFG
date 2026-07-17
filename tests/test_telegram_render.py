@@ -44,3 +44,24 @@ def test_error_caption_passthrough():
 def test_photo_input_builds_inputfile():
     f = render.photo_input(b"\x89PNG", "x.png")
     assert f.filename == "x.png"
+
+
+def test_send_media_picks_video_for_mp4():
+    import asyncio
+
+    calls = []
+
+    class _B:
+        async def send_photo(self, chat_id, photo, caption=None):
+            calls.append(("photo", chat_id, photo, caption))
+
+        async def send_video(self, chat_id, video, caption=None):
+            calls.append(("video", chat_id, video, caption))
+
+    async def go():
+        await render.send_media(_B(), 1, "https://cdn/a.mp4", "cap")
+        await render.send_media(_B(), 1, "https://cdn/a.png", "cap")
+        await render.send_media(_B(), 1, "https://cdn/a.MP4?v=2", "cap")
+
+    asyncio.new_event_loop().run_until_complete(go())
+    assert [c[0] for c in calls] == ["video", "photo", "video"]

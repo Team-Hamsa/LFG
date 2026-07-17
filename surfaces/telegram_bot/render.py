@@ -80,3 +80,21 @@ def linked_caption(summary: str) -> str:
 
 def photo_input(data: bytes, filename: str) -> InputFile:
     return InputFile(io.BytesIO(data), filename=filename)
+
+
+def is_video_url(url: Any) -> bool:
+    """True when the media URL points at an MP4 (animated NFTs upload a
+    `<basename>.mp4` next to the PNG poster frame)."""
+    if not url:
+        return False
+    return str(url).split("?", 1)[0].lower().endswith(".mp4")
+
+
+async def send_media(bot: Any, chat_id: Any, media_url: str, caption: str | None = None) -> None:
+    """Send artwork by URL, as a playing video when it's an MP4 and as a
+    photo otherwise — a static send_photo of an MP4 URL is what made animated
+    mints show up frozen on Telegram."""
+    if is_video_url(media_url):
+        await bot.send_video(chat_id, video=media_url, caption=caption)
+    else:
+        await bot.send_photo(chat_id, photo=media_url, caption=caption)

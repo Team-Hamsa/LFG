@@ -176,6 +176,7 @@ async def publish_terminal(
     user_id: str,
     platform: str,
     image_url: str | None,
+    video_url: str | None = None,
     success_states: set[str],
     fail_states: set[str],
 ) -> None:
@@ -200,6 +201,8 @@ async def publish_terminal(
     data = session.to_dict()
     if image_url and not data.get("image_url"):
         data["image_url"] = image_url
+    if video_url and not data.get("video_url"):
+        data["video_url"] = video_url
     await publish_event(
         f"{prefix}.completed" if ok else f"{prefix}.failed",
         enrich_minter_identity(platform, user_id, wallet),
@@ -3085,6 +3088,14 @@ def _first_result_image(session: Any) -> str | None:
     return None
 
 
+def _first_result_video(session: Any) -> str | None:
+    for r in getattr(session, "results", None) or []:
+        vid = r.get("video_url")
+        if vid:
+            return str(vid)
+    return None
+
+
 @require_auth
 async def handle_swap_status(request):
     session = swap_sessions.get(request.match_info["session_id"])
@@ -3101,6 +3112,7 @@ async def handle_swap_status(request):
         user_id=session.discord_id,
         platform=session.platform,
         image_url=_first_result_image(session),
+        video_url=_first_result_video(session),
         success_states={swap_flow.OFFERS_READY, swap_flow.DONE},
         fail_states={swap_flow.FAILED, swap_flow.PAYMENT_TIMEOUT},
     )

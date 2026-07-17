@@ -245,3 +245,56 @@ def test_mint_one_unit_calls_on_mint_before_creating_offer_state(monkeypatch, _m
     # on_mint must fire before the CREATING_OFFER state -- i.e. the unit is
     # persisted as MINTED before any offer/XUMM steps run.
     assert order == [mint_flow.MINTING, "on_mint", mint_flow.CREATING_OFFER]
+
+
+def test_mint_one_unit_video_carries_video_url(monkeypatch, _mint_mocks):
+    # Animated composition: compose returns an mp4, upload returns both the
+    # PNG poster and the MP4 — the UnitResult must carry the video URL so
+    # surfaces can show the animation instead of the still (Telegram bug).
+    async def fake_compose(attributes, body, store, basename):
+        return "/tmp/out.mp4", True
+
+    async def fake_upload_output(path, is_video, upload_fn, basename, keep_still=None):
+        return (
+            f"https://cdn.example/{basename}.png",
+            f"https://cdn.example/{basename}.mp4",
+        )
+
+    monkeypatch.setattr(mint_flow.swap_compose, "compose_nft", fake_compose)
+    monkeypatch.setattr(mint_flow.swap_compose, "upload_output", fake_upload_output)
+    res = _run(
+        mint_flow.mint_one_unit(
+            discord_id="u1",
+            wallet_address="rUSER",
+            platform="discord",
+            push_user_token=None,
+            return_url=None,
+            nft_number=4010,
+            session_tag="job1:9",
+        )
+    )
+    assert res.error is None
+    assert res.image_url == "https://cdn.example/4010/4010_0.png"
+    assert res.video_url == "https://cdn.example/4010/4010_0.mp4"
+
+
+def test_mint_one_unit_still_has_no_video_url(monkeypatch, _mint_mocks):
+    res = _run(
+        mint_flow.mint_one_unit(
+            discord_id="u1",
+            wallet_address="rUSER",
+            platform="discord",
+            push_user_token=None,
+            return_url=None,
+            nft_number=4011,
+            session_tag="job1:10",
+        )
+    )
+    assert res.error is None
+    assert res.video_url is None
+
+
+def test_mint_session_to_dict_carries_video_url():
+    session = mint_flow.MintSession("u1", "rUSER")
+    session.video_url = "https://cdn.example/1/1_0.mp4"
+    assert session.to_dict()["video_url"] == "https://cdn.example/1/1_0.mp4"

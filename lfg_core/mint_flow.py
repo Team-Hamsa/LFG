@@ -95,6 +95,9 @@ class MintSession:
         self.nft_number: int | None = None
         self.nft_id: str | None = None
         self.image_url: str | None = None
+        # MP4 URL for animated compositions (image_url is the PNG poster
+        # frame); None for still NFTs.
+        self.video_url: str | None = None
         self.accept_qr_url: str | None = None
         self.accept_deeplink: str | None = None
         self.accept_uuid: str | None = None
@@ -221,6 +224,7 @@ class MintSession:
             "nft_number": self.nft_number,
             "nft_id": self.nft_id,
             "image_url": self.image_url,
+            "video_url": self.video_url,
             "accept_qr_url": self.accept_qr_url,
             "accept_deeplink": self.accept_deeplink,
             "accept_push": self.accept_push,
@@ -275,6 +279,9 @@ class UnitResult:
     offer_id: str | None
     accept: dict[str, Any] | None
     error: str | None
+    # MP4 URL for animated compositions (image_url is the PNG poster frame);
+    # defaulted so callers constructing results for still NFTs need not pass it.
+    video_url: str | None = None
 
 
 async def mint_one_unit(
@@ -370,6 +377,7 @@ async def mint_one_unit(
                 nft_number=nft_number,
                 nft_id=None,
                 image_url=image_cdn_url,
+                video_url=video_cdn_url,
                 offer_id=None,
                 accept=None,
                 error="Failed to mint NFT on XRPL. Please contact an administrator.",
@@ -442,6 +450,7 @@ async def mint_one_unit(
                 nft_number=nft_number,
                 nft_id=nft_id,
                 image_url=image_cdn_url,
+                video_url=video_cdn_url,
                 offer_id=None,
                 accept=None,
                 error=(
@@ -461,6 +470,7 @@ async def mint_one_unit(
                 nft_number=nft_number,
                 nft_id=nft_id,
                 image_url=image_cdn_url,
+                video_url=video_cdn_url,
                 offer_id=offer_id,
                 accept=None,
                 error=(
@@ -473,6 +483,7 @@ async def mint_one_unit(
             nft_number=nft_number,
             nft_id=nft_id,
             image_url=image_cdn_url,
+            video_url=video_cdn_url,
             offer_id=offer_id,
             accept=accept,
             error=None,
@@ -488,6 +499,7 @@ async def mint_one_unit(
             nft_number=nft_number,
             nft_id=nft_id,
             image_url=None,
+            video_url=None,
             offer_id=None,
             accept=None,
             error=str(e),
@@ -595,6 +607,7 @@ async def run_mint_session(session: MintSession) -> None:
         )
         session.nft_id = res.nft_id
         session.image_url = res.image_url
+        session.video_url = res.video_url
         if res.error or not res.offer_id or not res.accept:
             _release_unused_number(session)
             session.state = FAILED
