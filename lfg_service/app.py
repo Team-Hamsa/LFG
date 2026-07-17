@@ -3977,6 +3977,17 @@ def _og_bithomp_url(nft_id: str) -> str:
     return f"{_bithomp_base_url()}/en/nft/{nft_id}"
 
 
+def _og_fetchable_image_url(url: str | None) -> str:
+    """A twitter:image/og:image value must be crawlable over plain HTTP(S) —
+    legacy mainnet editions carry ipfs:// (or other non-http scheme) URIs in
+    their on-chain metadata, which X's crawler cannot fetch. Returns url
+    unchanged if it's http(s), else "" so the caller can fall back or omit
+    the image tags entirely."""
+    if url and url.startswith(("http://", "https://")):
+        return url
+    return ""
+
+
 async def handle_nft_card(request: Any) -> Any:
     """Public, unauthenticated GET /nft/{number} — a server-rendered
     OG/Twitter share card (twitter:card=summary_large_image, twitter:image,
@@ -4017,7 +4028,9 @@ async def handle_nft_card(request: Any) -> Any:
     # of no return since #211; the listener keeps it fresh otherwise — modify
     # + burn-remint), so an LFG-row-first card would show pre-swap art and a
     # bithomp link to the BURNED pre-swap token.
-    image_url = onchain.image or (lfg_row or {}).get("image_url") or ""
+    image_url = _og_fetchable_image_url(onchain.image) or _og_fetchable_image_url(
+        (lfg_row or {}).get("image_url")
+    )
     nft_id = onchain.nft_id or (lfg_row or {}).get("nft_id") or ""
     title = f"LFGO #{number}"
     traits_summary = _og_traits_summary(lfg_row, onchain)
