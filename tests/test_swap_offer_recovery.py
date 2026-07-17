@@ -181,8 +181,9 @@ def test_offer_creation_failure_surfaces_admin_error(monkeypatch):
     ok = _run(swap_flow._create_offer_and_accept(s, item))
 
     assert ok is False
-    # The recheck ran every bounded pass, each raising on RPC error, not []
-    # (raise_on_error=True is the indeterminate-lookups-must-raise contract).
+    # The recheck ran every bounded pass and each attempt requested
+    # raise_on_error=True (the indeterminate-lookups-must-raise contract) —
+    # this stub returns foreign offers, so nothing here raised.
     assert looked_up == [(_NEW_NFT_ID, True)] * swap_flow._LANDED_OFFER_ATTEMPTS
     assert "offer failed" in (s.error or "")
     assert s.results == []

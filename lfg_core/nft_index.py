@@ -251,7 +251,11 @@ def upsert(conn: sqlite3.Connection, rec: OnchainNft) -> None:
                  THEN attributes_json ELSE excluded.attributes_json END,
             image=CASE WHEN excluded.attributes_json='[]'
                  THEN image ELSE excluded.image END,
-            ledger_index=excluded.ledger_index,
+            -- COALESCE: a writer that doesn't know the ledger height (the
+            -- swap flow's burn-point stamp passes None) must never erase one
+            -- the listener already recorded — nft_by_number orders duplicate
+            -- live editions by this field (#211 review).
+            ledger_index=COALESCE(excluded.ledger_index, onchain_nfts.ledger_index),
             last_synced_at=CURRENT_TIMESTAMP
         """,
         _nft_to_row(rec),

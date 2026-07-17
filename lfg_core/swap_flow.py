@@ -695,15 +695,21 @@ async def run_swap_session(session: SwapSession) -> None:
         # it; None (transient blip) assumes present. The burn-time guard
         # below remains the final arbiter for a token that vanishes
         # mid-session.
+        stale_nfts = []
         for item in burn_items:
             if await xrpl_ops.nft_exists(item["nft"]["nft_id"]) is False:
+                # Heal every stale row (both items can be stale after one
+                # missed-listener window), then fail once.
                 _heal_stale_index_pointer(item["nft"])
-                session.error = (
-                    f"{item['nft']['name']} was already swapped or "
-                    "replaced — refresh and try again."
-                )
-                session.state = FAILED
-                return
+                stale_nfts.append(item["nft"]["name"])
+        if stale_nfts:
+            verb = "was" if len(stale_nfts) == 1 else "were"
+            session.error = (
+                f"{' and '.join(stale_nfts)} {verb} already swapped or "
+                "replaced — refresh and try again."
+            )
+            session.state = FAILED
+            return
 
         # 1. Compose and upload both new NFTs (images + metadata)
         session.state = COMPOSING
@@ -891,6 +897,9 @@ async def run_swap_session(session: SwapSession) -> None:
                         "re-crafted — accept it below, then contact an "
                         "administrator."
                     )
+                # For stale this repeats the pre-offer status string, but the
+                # write is not redundant: it refreshes the (overwritten)
+                # record with the offer_id the accept step just set.
                 _write_swap_record(session, items, "stale_pointer_partial" if stale else "partial")
                 session.state = FAILED
                 return
