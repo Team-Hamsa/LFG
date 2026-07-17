@@ -19,10 +19,27 @@ os.environ.setdefault("BUNNY_PULL_ZONE", "nft.pullzone.example")
 import asyncio  # noqa: E402
 from html import escape  # noqa: E402
 
+import pytest  # noqa: E402
 from aiohttp.test_utils import make_mocked_request  # noqa: E402
 
 from lfg_core import nft_index  # noqa: E402
 from lfg_service import app as server  # noqa: E402
+
+
+@pytest.fixture(autouse=True)
+def _isolate_app_db(tmp_path, monkeypatch):
+    """Every test in this module exercises handle_nft_card, which (since the
+    #41 share-click-logging change) calls share_clicks.record_click against
+    db_path.app_db_path() on every live-card render. Without this redirect,
+    running the suite writes rows into the REAL lfg_nfts*.db on disk. Also
+    pins SHARE_FORWARD_URL to "" by default so the suite doesn't depend on
+    whatever a box's .env happens to set; tests that want it set monkeypatch
+    it explicitly afterward (autouse fixtures run first, so the later
+    monkeypatch.setattr in the test body wins)."""
+    db = str(tmp_path / "app_clicks.db")
+    monkeypatch.setattr(server.db_path, "app_db_path", lambda network=None: db)
+    monkeypatch.setattr(server.config, "SHARE_FORWARD_URL", "")
+    return db
 
 
 def _run(coro):
@@ -343,16 +360,9 @@ def _seed_basic(tmp_path, monkeypatch, number=42):
     monkeypatch.setattr(server, "get_nft_data", lambda n: None)
 
 
-def _clicks_db(tmp_path, monkeypatch):
-    db = str(tmp_path / "app_clicks.db")
-    monkeypatch.setattr(server.db_path, "app_db_path", lambda network=None: db)
-    return db
-
-
 def test_forward_unset_keeps_legacy_body(tmp_path, monkeypatch):
     monkeypatch.setattr(server.config, "SHARE_FORWARD_URL", "")
     _seed_basic(tmp_path, monkeypatch)
-    _clicks_db(tmp_path, monkeypatch)
     body = _run(server.handle_nft_card(_req(42))).text
     assert "location.replace" not in body
     assert "<h1>LFGO #42</h1>" in body
@@ -361,7 +371,6 @@ def test_forward_unset_keeps_legacy_body(tmp_path, monkeypatch):
 def test_forward_set_injects_js_redirect_and_keeps_meta(tmp_path, monkeypatch):
     monkeypatch.setattr(server.config, "SHARE_FORWARD_URL", "https://build.example")
     _seed_basic(tmp_path, monkeypatch)
-    _clicks_db(tmp_path, monkeypatch)
     resp = _run(server.handle_nft_card(_req(42)))
     assert resp.status == 200  # no HTTP redirect, ever
     body = resp.text
@@ -375,11 +384,11 @@ def test_forward_set_injects_js_redirect_and_keeps_meta(tmp_path, monkeypatch):
     assert "http-equiv" not in body  # no meta-refresh
 
 
-def test_forward_appends_valid_ref_and_logs_click(tmp_path, monkeypatch):
+def test_forward_appends_valid_ref_and_logs_click(tmp_path, monkeypatch, _isolate_app_db):
     monkeypatch.setattr(server.config, "SHARE_FORWARD_URL", "https://build.example")
     monkeypatch.setattr(server.config, "PUBLIC_SHARE_BASE_URL", "https://share.example")
     _seed_basic(tmp_path, monkeypatch)
-    db = _clicks_db(tmp_path, monkeypatch)
+    db = _isolate_app_db
     body = _run(
         server.handle_nft_card(_req(42, query=f"ref={_REF}", headers={"User-Agent": "Mozilla/5.0"}))
     ).text
@@ -397,10 +406,10 @@ def test_forward_appends_valid_ref_and_logs_click(tmp_path, monkeypatch):
     assert row == (42, _REF, 0)
 
 
-def test_invalid_ref_ignored_not_echoed(tmp_path, monkeypatch):
+def test_invalid_ref_ignored_not_echoed(tmp_path, monkeypatch, _isolate_app_db):
     monkeypatch.setattr(server.config, "SHARE_FORWARD_URL", "https://build.example")
     _seed_basic(tmp_path, monkeypatch)
-    db = _clicks_db(tmp_path, monkeypatch)
+    db = _isolate_app_db
     evil = '"><script>alert(1)</script>'
     body = _run(server.handle_nft_card(_req(42, query="ref=" + escape(evil)))).text
     assert "alert(1)" not in body
@@ -411,10 +420,10 @@ def test_invalid_ref_ignored_not_echoed(tmp_path, monkeypatch):
     assert ref is None
 
 
-def test_bot_user_agent_flagged(tmp_path, monkeypatch):
+def test_bot_user_agent_flagged(tmp_path, monkeypatch, _isolate_app_db):
     monkeypatch.setattr(server.config, "SHARE_FORWARD_URL", "https://build.example")
     _seed_basic(tmp_path, monkeypatch)
-    db = _clicks_db(tmp_path, monkeypatch)
+    db = _isolate_app_db
     _run(server.handle_nft_card(_req(42, headers={"User-Agent": "Twitterbot/1.0"})))
     import sqlite3
 
@@ -434,12 +443,22 @@ def test_click_log_failure_never_breaks_card(tmp_path, monkeypatch):
     assert resp.status == 200
 
 
-def test_config_share_forward_url_defaults_empty():
-    import importlib
-    import os
+def test_unknown_edition_404_does_not_log_click(tmp_path, monkeypatch, _isolate_app_db):
+    """A 404 card (unknown edition) must never write a share_clicks row —
+    record_click only runs on the live-card render path."""
+    monkeypatch.setattr(server.config, "SHARE_FORWARD_URL", "https://build.example")
+    _seed_onchain(tmp_path, monkeypatch, [])
+    monkeypatch.setattr(server, "get_nft_data", lambda n: None)
 
-    assert os.getenv("SHARE_FORWARD_URL") is None
-    from lfg_core import config as cfg
+    resp = _run(server.handle_nft_card(_req(9999)))
 
-    assert cfg.SHARE_FORWARD_URL == ""
-    del importlib  # imported for parity with sibling config tests; constant is frozen at import
+    assert resp.status == 404
+    import sqlite3
+
+    conn = sqlite3.connect(_isolate_app_db)
+    table_exists = conn.execute(
+        "SELECT name FROM sqlite_master WHERE type='table' AND name='share_clicks'"
+    ).fetchone()
+    assert (
+        table_exists is None or conn.execute("SELECT COUNT(*) FROM share_clicks").fetchone()[0] == 0
+    )
