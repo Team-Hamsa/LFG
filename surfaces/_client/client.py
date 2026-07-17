@@ -397,3 +397,17 @@ class LFGServiceClient:
             session, self._base, self._service_token, types, base_delay=self._base_delay
         ):
             yield event
+
+    # ---- admin: X (Twitter) posting pause/resume (Task 7, #41) ----
+    # Process-level admin actions, no end-user identity involved — same
+    # direct _request(token=self._service_token, ...) shape as create_session,
+    # not the per-user _user_request path.
+
+    async def x_status(self) -> dict[str, Any]:
+        return await self._request("GET", "/api/admin/x/status", token=self._service_token)
+
+    async def x_pause(self) -> dict[str, Any]:
+        return await self._request("POST", "/api/admin/x/pause", token=self._service_token)
+
+    async def x_resume(self) -> dict[str, Any]:
+        return await self._request("POST", "/api/admin/x/resume", token=self._service_token)

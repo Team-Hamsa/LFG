@@ -65,6 +65,14 @@ from lfg_service import identity as identity_store
 from lfg_service.auth import require_service_token, surface_for_token
 from lfg_service.events import Event, InMemoryEventBus
 from lfg_service.telegram_auth import validate_init_data
+
+# X poster state (x_state.db, #41 PR-2) — single-writer discipline (spec §5.6):
+# the service writes ONLY the `settings` table (the posting_paused kill switch
+# flipped by the /api/admin/x/* handlers below); the poster process
+# (surfaces/x_bot/bot.py) writes ONLY `x_posts` and merely reads `settings`.
+# The sqlite logic lives in surfaces.x_bot.state (imported here across the
+# usual service→surface layering, per the #41 plan) — never duplicated here.
+from surfaces.x_bot import state as x_state
 from webapp import economy_api, mock_economy, mock_market
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s")
@@ -212,6 +220,50 @@ async def publish_terminal(
     # retries. The resulting sub-tick double-publish window under concurrent
     # polls is acceptable.
     session._published = True
+
+
+async def _publish_mint_terminal(session: Any) -> None:
+    """Publish the terminal mint.completed/mint.failed firehose event for a
+    single-mint session. Shared by the server-side session task (see
+    _run_mint_session_and_publish) and handle_mint_status's poll path.
+
+    Idempotent via the session's `_published` guard, set only AFTER
+    publish_event awaits successfully (publish_terminal's ordering): if the
+    publisher is cancelled mid-await the session stays unpublished so the
+    other path retries; consumers dedup the accepted sub-tick double-publish
+    window (the x_bot poster keys on nft_id)."""
+    if getattr(session, "_published", False):
+        return
+    if session.state not in mint_flow.TERMINAL_STATES:
+        return
+    ok = session.state not in (mint_flow.FAILED, mint_flow.PAYMENT_TIMEOUT)
+    await publish_event(
+        "mint.completed" if ok else "mint.failed",
+        enrich_minter_identity(session.platform, session.discord_id, session.wallet_address),
+        session.wallet_address,
+        session.to_dict(),
+    )
+    session._published = True
+
+
+async def _run_mint_session_and_publish(session: Any) -> None:
+    """Drive run_mint_session to terminal, then publish the terminal event
+    server-side. Until #41 the client status poll was the ONLY publish site —
+    a mobile user whose Activity is killed after signing in Xaman (the #216
+    scenario; push delivery lets them finish entirely in Xaman) mints
+    successfully but never polls again, so the event was never published and
+    the X poster / Telegram announce silently missed it.
+
+    Publish failure is logged and never breaks the mint task; a user cancel
+    (#141) cancels this task before the publish runs (and mark_published
+    suppresses any late poll), so a deliberate cancel still announces
+    nothing. handle_mint_status calls the same idempotent helper, covering
+    poll-first ordering."""
+    await mint_flow.run_mint_session(session)
+    try:
+        await _publish_mint_terminal(session)
+    except Exception as e:
+        logging.error(f"server-side mint terminal publish failed for session {session.id}: {e}")
 
 
 async def _ws_stream(request: Any, predicate: Any) -> Any:
@@ -473,6 +525,48 @@ async def handle_session(request):
         )
     token = make_session_token({"id": pid, "name": pname, "platform": request["surface"]})
     return web.json_response({"session_token": token, "user": {"id": pid, "username": pname}})
+
+
+# --- X (Twitter) posting admin endpoints (#41 PR-2, spec §5.6) --------------
+# Service-token-authed AND restricted to the Discord surface: the human
+# authorization gate is the Discord bot's administrator-permission check in
+# front of its /admin button, so any other valid surface token (telegram, the
+# x poster's own, ...) gets 403 — otherwise any surface process could pause
+# posting. These work with X_ENABLED false too (admin can inspect/flip state
+# while the feature is dark); nothing here touches X creds.
+# config.X_STATE_DB_PATH is read lazily at call time (never bound at import)
+# so tests can point it at a tmp file via monkeypatch.
+
+
+@require_service_token
+async def handle_x_pause(request):
+    if request["surface"] != "discord":
+        return web.json_response({"error": "forbidden", "code": "wrong_surface"}, status=403)
+    x_state.set_posting_paused(config.X_STATE_DB_PATH, True)
+    return web.json_response({"paused": True})
+
+
+@require_service_token
+async def handle_x_resume(request):
+    if request["surface"] != "discord":
+        return web.json_response({"error": "forbidden", "code": "wrong_surface"}, status=403)
+    x_state.set_posting_paused(config.X_STATE_DB_PATH, False)
+    return web.json_response({"paused": False})
+
+
+@require_service_token
+async def handle_x_status(request):
+    if request["surface"] != "discord":
+        return web.json_response({"error": "forbidden", "code": "wrong_surface"}, status=403)
+    db = config.X_STATE_DB_PATH
+    return web.json_response(
+        {
+            "paused": x_state.posting_paused(db),
+            "month_posts": x_state.month_count(db),
+            "budget": config.X_MONTHLY_POST_BUDGET,
+            "enabled": config.X_ENABLED,
+        }
+    )
 
 
 async def handle_telegram_auth(request):
@@ -2584,8 +2678,11 @@ async def handle_mint_start(request):
     except Exception as e:
         logging.warning(f"prepare_payment failed; falling back to XRP path: {e}")
     session.ensure_payment_fallback()
-    # Keep the task handle so /cancel can stop the payment wait (#141)
-    session.task = asyncio.create_task(mint_flow.run_mint_session(session))
+    # Keep the task handle so /cancel can stop the payment wait (#141).
+    # The wrapper publishes the terminal firehose event server-side, so a
+    # client that never polls again (webview killed mid-sign, #216) still
+    # announces to the X poster / Telegram consumers.
+    session.task = asyncio.create_task(_run_mint_session_and_publish(session))
     return web.json_response(session.to_dict())
 
 
@@ -3022,15 +3119,18 @@ async def handle_mint_status(request):
     # spinner the moment Xaman opens the payload (issue #22).
     await mint_flow.update_scan_state(session)
     await _persist_issued_user_token(request["user"], session)
-    if session.state in mint_flow.TERMINAL_STATES and not getattr(session, "_published", False):
-        session._published = True
-        ok = session.state not in (mint_flow.FAILED, mint_flow.PAYMENT_TIMEOUT)
-        await publish_event(
-            "mint.completed" if ok else "mint.failed",
-            enrich_minter_identity(session.platform, session.discord_id, session.wallet_address),
-            session.wallet_address,
-            session.to_dict(),
-        )
+    # Terminal publish is primarily the session task's job now (#216 — see
+    # _run_mint_session_and_publish); this idempotent call covers poll-first
+    # ordering and retries a publish the task path failed. Guarded the same
+    # way as that task path: _publish_mint_terminal only marks the session
+    # published AFTER a successful publish_event, so a bus failure here must
+    # not raise out of the request handler — the client still needs their
+    # terminal status back, and the session stays unpublished for a later
+    # poll (or the task path) to retry.
+    try:
+        await _publish_mint_terminal(session)
+    except Exception as e:
+        logging.error(f"status-poll mint terminal publish failed for session {session.id}: {e}")
     return web.json_response(session.to_dict())
 
 
@@ -3891,6 +3991,9 @@ def create_app() -> web.Application:
     app.router.add_get("/api/extract/{session_id}", handle_extract_status)
     app.router.add_post("/api/deposit", require_wallet(handle_deposit_start))
     app.router.add_get("/api/deposit/{session_id}", handle_deposit_status)
+    app.router.add_post("/api/admin/x/pause", handle_x_pause)
+    app.router.add_post("/api/admin/x/resume", handle_x_resume)
+    app.router.add_get("/api/admin/x/status", handle_x_status)
     app.router.add_get("/events", handle_events)
     app.router.add_get("/events/me", handle_events_me)
     app.router.add_get("/__dev/reload", handle_dev_reload)
