@@ -1,0 +1,143 @@
+# tests/test_share_on_x_client.py
+# #41 T9: "Share on X" buttons in the no-build vanilla-JS Activity client
+# (webapp/client/app.js). There is no JS execution harness in this repo for
+# app.js (mirrors tests/test_economy_feature_flag.py's
+# test_client_hides_dressup_when_economy_disabled: source-string assertions
+# against the file are the established convention for this file, not a real
+# browser/JS runtime) — these are source-string guards, not behavioral tests.
+#
+# No lfg_core/lfg_service import here, so the test-env-guard preamble
+# (tests/test_seasons.py lines 1-18) doesn't apply — this file only reads a
+# static asset off disk.
+import os
+
+_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+_APP_JS = os.path.join(_ROOT, "webapp", "client", "app.js")
+
+
+def _read_app_js() -> str:
+    with open(_APP_JS, encoding="utf-8") as f:
+        return f.read()
+
+
+def test_share_url_never_uses_location_origin():
+    # Spec x-integration §6.1, verbatim: "location.origin must NOT be used
+    # for the share URL" — inside the Activity the page is served from
+    # Discord's *.discordsays.com sandbox proxy, not our public host; X's
+    # crawler can't reach it and the intent would share a dead link.
+    src = _read_app_js()
+    assert "location.origin" not in src
+
+
+def test_client_reads_public_share_base_url_from_config():
+    src = _read_app_js()
+    assert "public_share_base_url" in src
+
+
+def test_client_reads_bithomp_base_url_from_config():
+    src = _read_app_js()
+    assert "bithomp_base_url" in src
+
+
+def test_intent_url_uses_documented_x_domain():
+    # recon-xapi.md A5: docs.x.com's canonical documented form is
+    # https://x.com/intent/tweet (twitter.com 301s to it; x.com/intent/post
+    # works but is undocumented) — emit the documented form.
+    src = _read_app_js()
+    assert "https://x.com/intent/tweet" in src
+    assert "twitter.com/intent" not in src
+
+
+def test_share_button_routes_through_openexternal_not_raw_window_open():
+    # The SDK-aware openExternal() helper (already used for every other
+    # outbound link in the sandboxed Activity iframe) must be what fires the
+    # intent link — not a bare `window.open` call written fresh for this
+    # feature. openExternal() itself still contains the one legitimate
+    # `window.open` as its own non-SDK fallback (dev-mode / outside Discord).
+    src = _read_app_js()
+    intent_idx = src.index("https://x.com/intent/tweet")
+    # Search a window around the intent-URL construction for the dispatch
+    # call, rather than assuming exact adjacency.
+    window = src[max(0, intent_idx - 400) : intent_idx + 800]
+    assert "openExternal(" in window
+
+
+def test_mint_and_swap_share_text_present():
+    src = _read_app_js()
+    assert "I just minted LFGO #" in src
+    assert "I just swapped traits on" in src
+
+
+def test_copy_link_fallback_present_without_native_dialogs():
+    # navigator.clipboard with a visible readonly-input fallback; never
+    # window.confirm/alert — both are silent no-ops inside the Discord
+    # Activity iframe (repo memory: lfg-services-pm2.md).
+    src = _read_app_js()
+    assert "navigator.clipboard" in src
+    assert "window.confirm(" not in src
+    assert "window.alert(" not in src
+
+
+def _function_body(src: str, header: str) -> str:
+    """Slice from a function's header to the next top-level declaration —
+    same windowed-substring style as the openExternal dispatch test above."""
+    start = src.index(header)
+    end = src.find("\nasync function ", start + 1)
+    end2 = src.find("\nfunction ", start + 1)
+    candidates = [i for i in (end, end2) if i != -1]
+    return src[start : min(candidates)] if candidates else src[start:]
+
+
+def test_both_api_config_fetch_sites_populate_share_bases():
+    # #41 fix wave: main()'s /api/config fetch swallows failures, and until
+    # this fix it was the ONLY site populating shareBase/bithompBase —
+    # setupDiscord()'s separate /api/config fetch never repopulated them, so
+    # one transient failure left shareUrlFor() emitting dead relative URLs
+    # for the whole session. Both fetch sites must feed the shared applier.
+    #
+    # A global src.count("applyShareConfig(") >= 3 only proves the call
+    # appears *somewhere* three times — it can't tell the two fetch sites
+    # apart from each other, or from the definition, so it would stay green
+    # even if one call moved outside its function or both calls landed in
+    # the same function. Assert per-function instead, same
+    # _function_body-windowed style as the other tests in this file.
+    src = _read_app_js()
+    assert "function applyShareConfig(" in src
+    assert "applyShareConfig(" in _function_body(src, "async function main(")
+    assert "applyShareConfig(" in _function_body(src, "async function setupDiscord(")
+
+
+def test_share_url_for_returns_empty_when_no_base_is_known():
+    # Degrade safely: with BOTH bases unpopulated (every /api/config fetch
+    # failed) shareUrlFor must return '' — never a dead relative
+    # `/en/nft/...` link built on an empty bithompBase.
+    src = _read_app_js()
+    body = _function_body(src, "function shareUrlFor(")
+    assert "bithompBase && nftId" in body
+    assert "return '';" in body
+
+
+def test_copy_link_copies_the_shared_page_url_not_the_x_intent():
+    # #41 review fix: "Copy link" must hand over the pasteable NFT link (the
+    # /nft/N or bithomp `url` passed into buildShareControl) so it renders a
+    # card wherever it's pasted — not `intentUrl`, the X composer deep-link,
+    # which is exclusive to the "Share on X" button/openExternal call.
+    src = _read_app_js()
+    body = _function_body(src, "function buildShareControl(")
+    assert "copyInput.value = url;" in body
+    assert "navigator.clipboard.writeText(url)" in body
+    assert "copyInput.value = intentUrl" not in body
+    assert "navigator.clipboard.writeText(intentUrl)" not in body
+    # The main share button's openExternal(intentUrl) dispatch is unchanged.
+    assert "openExternal(intentUrl)" in body
+
+
+def test_share_controls_are_skipped_without_a_share_url():
+    # Both share-control render sites (mint flow panel + per-result swap
+    # cards) must hide/skip the control rather than render a dead link.
+    src = _read_app_js()
+    assert "share && share.url" in src  # showFlow's mint share row guard
+    # swap results: URL computed first, control only appended when truthy
+    swap_idx = src.index("swapShareText(r.nft_number)")
+    window = src[max(0, swap_idx - 400) : swap_idx + 400]
+    assert "if (" in window and "shareUrlFor(r.nft_number, r.nft_id)" in window

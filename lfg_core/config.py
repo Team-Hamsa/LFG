@@ -352,3 +352,11 @@ X_ENABLED = os.getenv("X_ENABLED", "0") not in ("0", "false", "False") and all(
 # sqlite state file for the poster process (dedup/budget/pause bookkeeping);
 # read by both the poster (surfaces/x_bot/) and the service admin endpoints.
 X_STATE_DB_PATH = os.getenv("X_STATE_DB_PATH", "x_state.db")
+
+# Public base URL the OG card page (GET /nft/{number}, lfg_service/app.py) uses
+# to build its OWN absolute self-links (og:url, canonical) — NEVER derived from
+# the request Host header, which is unstable across ingress paths (Discord's
+# *.discordsays.com proxy vs the direct Tailscale Funnel .ts.net/lfg path).
+# Unset (default) means the feature is off: the page renders normally but
+# omits og:url/canonical rather than guessing a wrong/unstable URL (#41 §6.2).
+PUBLIC_SHARE_BASE_URL = os.getenv("PUBLIC_SHARE_BASE_URL", "").strip().rstrip("/")
