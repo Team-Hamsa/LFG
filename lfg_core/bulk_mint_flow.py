@@ -180,7 +180,10 @@ class BulkMintJob:
         # landing on this object (#228): state still reads AWAITING_PAYMENT
         # but the money is taken. Refuse the cancel — the in-flight watch
         # will surface PAID and fulfillment must run.
-        if payment_ledger.find_claimed(self.payment_claimant):
+        # is not False: True means the money is taken (fulfillment must
+        # run); None means the ledger read failed, so "unpaid" is unprovable
+        # — refuse rather than risk deleting a paid job (user can retry).
+        if payment_ledger.find_claimed(self.payment_claimant) is not False:
             return False
         self.state = CANCELLED
         # In-memory teardown first: delete_record never raises but CAN fail
@@ -378,9 +381,9 @@ async def _ensure_offer(job: BulkMintJob, unit: Unit) -> None:
     buyer as Destination, amount "0", no Expiration); anything looser risks
     adopting a foreign offer, and market_ops.verify_sell_offer is NOT
     reusable here because it rejects any Destination-carrying offer — which
-    the gift offer always is. A lookup RPC failure returns [] and falls
-    through to create: worst case is the old duplicate-offer behavior, never
-    a lost unit.
+    the gift offer always is. A lookup RPC failure is INDETERMINATE — a live
+    offer may be hiding behind the blip, so creating blind could duplicate
+    it; the unit stays MINTED and a later resume retries.
 
     The other half of the #227 window is the offer landing AND the buyer
     accepting it while we were down: the accept consumed the offer object, so
@@ -392,7 +395,13 @@ async def _ensure_offer(job: BulkMintJob, unit: Unit) -> None:
     returns None) — fall through to create, never mark an undelivered unit
     delivered on a transient clio blip."""
     assert unit.nft_id is not None, "_ensure_offer requires an already-minted unit"
-    for offer in await xrpl_ops.get_nft_sell_offers(unit.nft_id):
+    try:
+        offers = await xrpl_ops.get_nft_sell_offers(unit.nft_id, raise_on_error=True)
+    except Exception as e:
+        unit.state = MINTED
+        unit.error = f"offer lookup failed: {e}"
+        return
+    for offer in offers:
         if (
             offer.get("owner") == xrpl_ops.bot_wallet_address()
             and offer.get("destination") == job.wallet_address
@@ -532,13 +541,27 @@ async def run_bulk_mint_job(job: BulkMintJob) -> None:
                 issuer=p["issuer"],
                 claimant=job.payment_claimant,
             )
-            if not paid and payment_ledger.find_claimed(job.payment_claimant):
-                logging.info(
-                    "bulk job %s: payment already claimed by a pre-crash "
-                    "process — honouring it instead of timing out",
-                    job.id,
-                )
-                paid = True
+            if not paid:
+                claimed = payment_ledger.find_claimed(job.payment_claimant)
+                if claimed:
+                    logging.info(
+                        "bulk job %s: payment already claimed by a pre-crash "
+                        "process — honouring it instead of timing out",
+                        job.id,
+                    )
+                    paid = True
+                elif claimed is None:
+                    # Ledger read failed: neither "paid" nor "unpaid" is
+                    # provable. Never terminalize on an indeterminate
+                    # reconciliation — leave the record awaiting_payment so
+                    # the next restart retries it.
+                    logging.warning(
+                        "bulk job %s: claim reconciliation indeterminate "
+                        "(ledger read failed); leaving job resumable",
+                        job.id,
+                    )
+                    persist(job)
+                    return
             if not paid:
                 job.state = PAYMENT_TIMEOUT
                 persist(job)

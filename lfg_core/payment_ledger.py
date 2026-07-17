@@ -103,7 +103,7 @@ def try_consume(tx_hash: str, sender: str, destination: str, claimant: str | Non
             conn.close()
 
 
-def find_claimed(claimant: str) -> bool:
+def find_claimed(claimant: str) -> bool | None:
     """True if any consumed-payment row carries this claimant tag (#228).
 
     try_consume commits durably before the claiming flow can persist its own
@@ -111,7 +111,9 @@ def find_claimed(claimant: str) -> bool:
     here — the resumed flow's re-watch then misses the payment (dedup) and
     must reconcile against this before terminalizing as unpaid. The tag is
     exact (one flow instance), so a match can never be another session's
-    claim. Returns False — no proof of payment — on DB error."""
+    claim. Tri-state: True = claimed, False = provably no claim, None = the
+    ledger read itself failed (indeterminate — callers must fail toward
+    safety: a cancel refuses, a resume never terminalizes)."""
     conn = None
     try:
         conn = _connect()
@@ -121,7 +123,7 @@ def find_claimed(claimant: str) -> bool:
         return row is not None
     except sqlite3.Error:
         logging.exception(f"payment_ledger.find_claimed failed for {claimant}")
-        return False
+        return None
     finally:
         if conn is not None:
             conn.close()

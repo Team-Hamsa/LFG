@@ -2776,8 +2776,19 @@ async def handle_bulk_mint_start(request):
     # link/created_at captured, so a crash after the user was shown the
     # payment request resumes the ledger watch (load_all_resumable) instead
     # of taking money with no record. Persist BEFORE launching the watch so
-    # the record exists for the whole window it covers.
-    bulk_mint_flow.persist(job)
+    # the record exists for the whole window it covers. Fail-closed before
+    # money moves: with no usable payment link or no durable record, refuse
+    # the request instead of showing a payment request a crash would orphan
+    # — nothing has been charged yet, so failing here costs nothing.
+    if not job.payment_link or not bulk_mint_flow.persist(job):
+        logging.error(
+            f"bulk job {job.id}: unusable payment setup "
+            f"(link={'set' if job.payment_link else 'missing'}, persist failed otherwise)"
+        )
+        job.state = bulk_mint_flow.FAILED
+        job.error = "payment_setup_failed"
+        bulk_mint_flow.delete_record(job.id)
+        return web.json_response({"error": "payment_setup_failed"}, status=500)
     job.task = asyncio.create_task(bulk_mint_flow.run_bulk_mint_job(job))
     return web.json_response(job.to_dict())
 

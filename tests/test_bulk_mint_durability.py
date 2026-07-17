@@ -689,3 +689,66 @@ def test_persist_failure_pauses_before_next_unit(tmp_path, monkeypatch):
     assert j.state == bulk_mint_flow.FULFILLING  # parked, resumable
     assert j.error == "durability degraded: fulfillment paused"
     assert j.persist_failed is True
+
+
+def test_cancel_refuses_on_indeterminate_claim_check(tmp_path, monkeypatch):
+    """find_claimed is tri-state: None (ledger read failed) means "unpaid" is
+    unprovable, so cancel must refuse rather than risk deleting a paid job."""
+    monkeypatch.setattr(bulk_mint_flow, "JOBS_DIR", str(tmp_path))
+    monkeypatch.setattr(bulk_mint_flow.payment_ledger, "find_claimed", lambda c: None)
+    j = bulk_mint_flow.BulkMintJob("u1", "rUSER", 1, platform="discord")
+    j.clamp_to_headroom()
+    assert j.cancel() is False
+    assert j.state == bulk_mint_flow.AWAITING_PAYMENT
+
+
+def test_indeterminate_reconciliation_never_terminalizes(tmp_path, monkeypatch):
+    """A failed claim-ledger read during resume reconciliation proves nothing:
+    the job must stay awaiting_payment (resumable) — never payment_timeout."""
+    monkeypatch.setattr(bulk_mint_flow, "JOBS_DIR", str(tmp_path))
+    monkeypatch.setattr(bulk_mint_flow.supply, "current_supply", lambda net: 0)
+
+    async def _wait(**kw):
+        return False  # re-watch misses (dedup or nothing landed)
+
+    monkeypatch.setattr(bulk_mint_flow.xrpl_ops, "wait_for_payment", _wait)
+    monkeypatch.setattr(bulk_mint_flow.payment_ledger, "find_claimed", lambda c: None)
+
+    j = _paid_job(tmp_path, monkeypatch, bulk_mint_flow.AWAITING_PAYMENT)
+    bulk_mint_flow.persist(j)
+    resumed = bulk_mint_flow.load_all_resumable()[0]
+    asyncio.run(bulk_mint_flow.run_bulk_mint_job(resumed))
+
+    assert resumed.state == bulk_mint_flow.AWAITING_PAYMENT
+    # Still on disk and resumable for the next restart's retry.
+    assert len(bulk_mint_flow.load_all_resumable()) == 1
+
+
+def test_ensure_offer_lookup_failure_leaves_unit_minted(tmp_path, monkeypatch):
+    """An adopt-scan RPC failure is indeterminate — a live offer may be hiding
+    behind the blip, so creating blind could duplicate it. The unit stays
+    MINTED for a later resume; create_nft_offer is never called."""
+    monkeypatch.setattr(bulk_mint_flow, "JOBS_DIR", str(tmp_path))
+
+    calls = {"offer": 0}
+
+    async def _count_offer(nft_id, destination, **kw):
+        calls["offer"] += 1
+        return "OFFER123"
+
+    async def _lookup_boom(nft_id, **kw):
+        raise RuntimeError("rpc down")
+
+    monkeypatch.setattr(bulk_mint_flow.xrpl_ops, "create_nft_offer", _count_offer)
+    monkeypatch.setattr(bulk_mint_flow.xrpl_ops, "get_nft_sell_offers", _lookup_boom)
+
+    j = bulk_mint_flow.BulkMintJob("u1", "rUSER", 1, platform="discord")
+    j.clamp_to_headroom()
+    unit = j.units[0]
+    unit.state = bulk_mint_flow.MINTED
+    unit.nft_id = "EXISTING_NFT"
+    asyncio.run(bulk_mint_flow._ensure_offer(j, unit))
+
+    assert unit.state == bulk_mint_flow.MINTED
+    assert "offer lookup failed" in (unit.error or "")
+    assert calls["offer"] == 0

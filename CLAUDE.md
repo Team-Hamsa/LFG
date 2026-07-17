@@ -895,7 +895,10 @@ the single-mint machinery per unit.
   guarantees — no double-charge (payment already confirmed) or double-mint:
   `OFFERED`/`failed` units are skipped, and a `minted` unit is re-offered
   (never re-minted). Cancelling an `awaiting_payment` job deletes its record
-  so a restart never resurrects it.
+  (tombstoning it `cancelled` if the delete fails) so a restart normally
+  cannot resurrect it; if the disk can neither unlink nor write, the stale
+  record survives (logged CRITICAL) and the resurrected watch simply
+  re-expires via its original created_at TTL.
 - **Completion is conditional, not unconditional:** a job only reaches the
   terminal `done` state once every unit is `offered` or `failed`. If a unit
   is still `minted` after the bounded final re-offer pass (offer creation
