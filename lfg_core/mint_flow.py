@@ -95,6 +95,16 @@ class MintSession:
         self.nft_number: int | None = None
         self.nft_id: str | None = None
         self.image_url: str | None = None
+        # MP4 URL for animated compositions (image_url is the PNG poster
+        # frame); None for still NFTs.
+        self.video_url: str | None = None
+        # #41: the minted edition's traits (LFG-naming, e.g. Head -> Hat) and
+        # body_type, set once mint_one_unit confirms the mint on-chain. None
+        # pre-fulfillment, same None-handling style as image_url/nft_id --
+        # lets the X poster compose tweet copy (and rank the rarest slot,
+        # which is body-scoped) straight from the firehose event.
+        self.traits: dict[str, str] | None = None
+        self.body_type: str | None = None
         self.accept_qr_url: str | None = None
         self.accept_deeplink: str | None = None
         self.accept_uuid: str | None = None
@@ -221,6 +231,9 @@ class MintSession:
             "nft_number": self.nft_number,
             "nft_id": self.nft_id,
             "image_url": self.image_url,
+            "video_url": self.video_url,
+            "traits": self.traits,
+            "body_type": self.body_type,
             "accept_qr_url": self.accept_qr_url,
             "accept_deeplink": self.accept_deeplink,
             "accept_push": self.accept_push,
@@ -275,6 +288,15 @@ class UnitResult:
     offer_id: str | None
     accept: dict[str, Any] | None
     error: str | None
+    # MP4 URL for animated compositions (image_url is the PNG poster frame);
+    # defaulted so callers constructing results for still NFTs need not pass it.
+    video_url: str | None = None
+    # #41: LFG-naming traits dict + body_type, known only once the mint lands
+    # on-chain (None on the earlier "mint never landed" failure paths).
+    # Defaulted so every existing UnitResult(...) call site (this module's
+    # earlier return statements, tests) stays valid unchanged.
+    traits: dict[str, str] | None = None
+    body_type: str | None = None
 
 
 async def mint_one_unit(
@@ -308,6 +330,13 @@ async def mint_one_unit(
     a crash in the offer step can never trigger a re-mint on resume.
     """
     nft_id: str | None = None
+    # Hoisted with None defaults so the catch-all below can return whatever
+    # was already computed at the point of failure (#41 fix-wave, CodeRabbit
+    # PR #245): an exception from on_mint/offer-creation/payload-creation
+    # after a confirmed mint must not blank out traits/body_type that are
+    # already known.
+    traits_dict: dict[str, str] | None = None
+    body: str | None = None
     try:
         # 1. Compose a random NFT from the unified layer store (same tree
         #    the Trait Swapper uses: <gender>/<TraitType>/<Value>.ext)
@@ -370,6 +399,7 @@ async def mint_one_unit(
                 nft_number=nft_number,
                 nft_id=None,
                 image_url=image_cdn_url,
+                video_url=video_cdn_url,
                 offer_id=None,
                 accept=None,
                 error="Failed to mint NFT on XRPL. Please contact an administrator.",
@@ -377,6 +407,16 @@ async def mint_one_unit(
         # Mint confirmed — publish the new edition's art to the local archive
         # so /api/img serves it immediately (best-effort, #163).
         image_archive.promote_still(config.XRPL_NETWORK, nft_number, session_tag)
+
+        # Computed here (synchronous, no await) rather than after on_mint below
+        # so it's captured into the hoisted `traits_dict`/`body` locals before
+        # any further awaits — an exception from on_mint or a later step must
+        # still leave the catch-all able to return this already-known data
+        # (#41 fix-wave, CodeRabbit PR #245).
+        traits_dict = {t["trait_type"]: t["value"] for t in metadata["attributes"]}
+        # The LFG table's headwear column is named Hat (layer tree uses Head)
+        if "Head" in traits_dict:
+            traits_dict["Hat"] = traits_dict.pop("Head")
 
         # Fire on_mint the instant the mint is confirmed on-chain, before any
         # further awaits (offer creation / XUMM accept payload). A bulk caller
@@ -387,10 +427,6 @@ async def mint_one_unit(
         if on_mint:
             await on_mint(nft_number, nft_id, image_cdn_url)
 
-        traits_dict = {t["trait_type"]: t["value"] for t in metadata["attributes"]}
-        # The LFG table's headwear column is named Hat (layer tree uses Head)
-        if "Head" in traits_dict:
-            traits_dict["Hat"] = traits_dict.pop("Head")
         record: dict[str, Any] = {
             "nft_number": nft_number,
             "nft_id": nft_id,
@@ -442,12 +478,15 @@ async def mint_one_unit(
                 nft_number=nft_number,
                 nft_id=nft_id,
                 image_url=image_cdn_url,
+                video_url=video_cdn_url,
                 offer_id=None,
                 accept=None,
                 error=(
                     f"NFT minted (ID: {nft_id}) but offer creation failed. "
                     "Please contact an administrator."
                 ),
+                traits=traits_dict,
+                body_type=body,
             )
 
         accept = await xumm_ops.create_accept_offer_payload(
@@ -461,21 +500,27 @@ async def mint_one_unit(
                 nft_number=nft_number,
                 nft_id=nft_id,
                 image_url=image_cdn_url,
+                video_url=video_cdn_url,
                 offer_id=offer_id,
                 accept=None,
                 error=(
                     f"NFT minted and offer created ({offer_id}) but the XUMM "
                     "request failed. Please accept the offer manually."
                 ),
+                traits=traits_dict,
+                body_type=body,
             )
 
         return UnitResult(
             nft_number=nft_number,
             nft_id=nft_id,
             image_url=image_cdn_url,
+            video_url=video_cdn_url,
             offer_id=offer_id,
             accept=accept,
             error=None,
+            traits=traits_dict,
+            body_type=body,
         )
 
     except Exception as e:
@@ -488,9 +533,12 @@ async def mint_one_unit(
             nft_number=nft_number,
             nft_id=nft_id,
             image_url=None,
+            video_url=None,
             offer_id=None,
             accept=None,
             error=str(e),
+            traits=traits_dict,
+            body_type=body,
         )
 
 
@@ -595,6 +643,9 @@ async def run_mint_session(session: MintSession) -> None:
         )
         session.nft_id = res.nft_id
         session.image_url = res.image_url
+        session.video_url = res.video_url
+        session.traits = res.traits
+        session.body_type = res.body_type
         if res.error or not res.offer_id or not res.accept:
             _release_unused_number(session)
             session.state = FAILED

@@ -77,6 +77,7 @@ def _sell_offer_create_tx(
     amount: str | dict = "1000000",
     destination: str | None = None,
     sell: bool = True,
+    result: str = "tesSUCCESS",
 ) -> dict:
     flags = 1 if sell else 0
     new_fields: dict = {
@@ -93,6 +94,7 @@ def _sell_offer_create_tx(
         "ledger_index": 555,
         "date": 800000000,
         "meta": {
+            "TransactionResult": result,
             "AffectedNodes": [
                 {
                     "CreatedNode": {
@@ -101,16 +103,17 @@ def _sell_offer_create_tx(
                         "NewFields": new_fields,
                     }
                 }
-            ]
+            ],
         },
     }
 
 
-def _offer_cancel_tx(offer_indexes: list[str]) -> dict:
+def _offer_cancel_tx(offer_indexes: list[str], *, result: str = "tesSUCCESS") -> dict:
     return {
         "TransactionType": "NFTokenCancelOffer",
         "Account": "rSeller",
         "meta": {
+            "TransactionResult": result,
             "AffectedNodes": [
                 {
                     "DeletedNode": {
@@ -120,7 +123,7 @@ def _offer_cancel_tx(offer_indexes: list[str]) -> dict:
                     }
                 }
                 for idx in offer_indexes
-            ]
+            ],
         },
     }
 
@@ -132,6 +135,7 @@ def _accept_tx(
     seller: str,
     sell_flags: int = 1,
     buyer_offer: dict | None = None,
+    result: str = "tesSUCCESS",
 ) -> dict:
     nodes = [
         {
@@ -152,7 +156,7 @@ def _accept_tx(
     return {
         "TransactionType": "NFTokenAcceptOffer",
         "Account": "rBuyer",
-        "meta": {"nftoken_id": nft_id, "AffectedNodes": nodes},
+        "meta": {"TransactionResult": result, "nftoken_id": nft_id, "AffectedNodes": nodes},
     }
 
 
@@ -554,7 +558,7 @@ def test_accept_does_not_delist_rows_still_matching_new_owner():
 
 def test_apply_market_tx_ignores_non_market_kinds():
     conn = _conn()
-    tx = {"TransactionType": "Payment", "meta": {}}
+    tx = {"TransactionType": "Payment", "meta": {"TransactionResult": "tesSUCCESS"}}
     _run(nft_listener.apply_market_tx(conn, tx))  # must not raise
     assert conn.execute("SELECT COUNT(*) FROM market_listings").fetchone()[0] == 0
 
@@ -602,3 +606,153 @@ def test_offer_create_foreign_iou_trait_offer_ignored():
     _run(nft_listener.apply_market_tx(conn, tx))
 
     assert conn.execute("SELECT COUNT(*) FROM market_listings").fetchone()[0] == 0
+
+
+# --- tec-class txs perform nothing (#210/#235) --------------------------------
+
+
+def test_tec_offer_create_writes_no_listing():
+    """A failed NFTokenCreateOffer created no ledger object — no listing row.
+    (A real tec meta would carry no CreatedNode either; the fixture keeps it so
+    the explicit result gate, not the node shape, is what's under test.)"""
+    conn = _conn()
+    nft_id = _our_nft_id(30)
+    _seed_character(conn, nft_id, owner="rSeller")
+    tx = _sell_offer_create_tx(
+        nft_id, seller="rSeller", offer_index="OFF_TEC", result="tecINSUFFICIENT_RESERVE"
+    )
+
+    _run(nft_listener.apply_market_tx(conn, tx))
+
+    assert conn.execute("SELECT COUNT(*) FROM market_listings").fetchone()[0] == 0
+
+
+def test_tec_accept_closes_no_listing():
+    """A failed NFTokenAcceptOffer sold nothing: the live listing must stay
+    live, unclosed and buyer-less. (A real tecNO_ENTRY meta deletes no ledger
+    objects, so the fixture carries no DeletedNode; the tecEXPIRED case, which
+    DOES delete the offer on-ledger, is covered separately below.)"""
+    conn = _conn()
+    nft_id = _our_nft_id(31)
+    # Characters stay XRP-denominated under #239; the result gate under test
+    # is kind-agnostic, so a character listing keeps the setup indexable.
+    _seed_character(conn, nft_id, owner="rSeller")
+    _run(
+        nft_listener.apply_market_tx(
+            conn, _sell_offer_create_tx(nft_id, seller="rSeller", offer_index="OFF_TEC_ACC")
+        )
+    )
+
+    tx = _accept_tx(
+        nft_id=nft_id, offer_index="OFF_TEC_ACC", seller="rSeller", result="tecNO_ENTRY"
+    )
+    tx["meta"]["AffectedNodes"] = []
+    _run(nft_listener.apply_market_tx(conn, tx))
+
+    conn.row_factory = sqlite3.Row
+    row = conn.execute("SELECT * FROM market_listings WHERE offer_index='OFF_TEC_ACC'").fetchone()
+    assert row["is_live"] == 1
+    assert row["closed_reason"] is None and row["buyer"] is None
+
+
+def test_tec_expired_accept_stale_closes_deleted_offer():
+    """tecEXPIRED is the one failed accept that still mutates the ledger: since
+    fixExpiredNFTokenOfferRemoval (fixCleanup3_1_3, mainnet 2026-05) accepting
+    an expired NFTokenOffer fails yet DELETES the expired offer — a real
+    DeletedNode in the failed tx's meta. The backing row must close as stale,
+    never sold: no buyer, and a trait row must not enter the settled=0
+    settlement lifecycle (settled stays NULL)."""
+    conn = _conn()
+    nft_id = _our_nft_id(33)
+    # Characters stay XRP-denominated under #239; the result gate under test
+    # is kind-agnostic, so a character listing keeps the setup indexable.
+    _seed_character(conn, nft_id, owner="rSeller")
+    _run(
+        nft_listener.apply_market_tx(
+            conn, _sell_offer_create_tx(nft_id, seller="rSeller", offer_index="OFF_EXPIRED")
+        )
+    )
+
+    _run(
+        nft_listener.apply_market_tx(
+            conn,
+            _accept_tx(
+                nft_id=nft_id, offer_index="OFF_EXPIRED", seller="rSeller", result="tecEXPIRED"
+            ),
+        )
+    )
+
+    conn.row_factory = sqlite3.Row
+    row = conn.execute("SELECT * FROM market_listings WHERE offer_index='OFF_EXPIRED'").fetchone()
+    assert row["is_live"] == 0
+    assert row["closed_reason"] == "stale"
+    assert row["buyer"] is None
+    assert row["settled"] is None
+
+
+def test_tec_cancel_closes_no_listing():
+    """A failed NFTokenCancelOffer deleted no offers: the listing stays live."""
+    conn = _conn()
+    nft_id = _our_nft_id(32)
+    _seed_character(conn, nft_id, owner="rSeller")
+    _run(
+        nft_listener.apply_market_tx(
+            conn, _sell_offer_create_tx(nft_id, seller="rSeller", offer_index="OFF_TEC_CX")
+        )
+    )
+
+    _run(nft_listener.apply_market_tx(conn, _offer_cancel_tx(["OFF_TEC_CX"], result="tecNO_ENTRY")))
+
+    row = conn.execute(
+        "SELECT is_live, closed_reason FROM market_listings WHERE offer_index='OFF_TEC_CX'"
+    ).fetchone()
+    assert row == (1, None)
+
+
+def test_missing_result_accept_with_deleted_nodes_fails_closed():
+    """An accept whose meta carries DeletedNodes but NO TransactionResult is
+    not provably anything — the failure path's stale-close only trusts an
+    explicit tec* result, so a result-less payload must mutate nothing."""
+    conn = _conn()
+    nft_id = _our_nft_id(34)
+    # Characters stay XRP-denominated under #239; the result gate under test
+    # is kind-agnostic, so a character listing keeps the setup indexable.
+    _seed_character(conn, nft_id, owner="rSeller")
+    _run(
+        nft_listener.apply_market_tx(
+            conn, _sell_offer_create_tx(nft_id, seller="rSeller", offer_index="OFF_NORES")
+        )
+    )
+
+    tx = _accept_tx(nft_id=nft_id, offer_index="OFF_NORES", seller="rSeller", result="tecEXPIRED")
+    del tx["meta"]["TransactionResult"]
+    _run(nft_listener.apply_market_tx(conn, tx))
+
+    conn.row_factory = sqlite3.Row
+    row = conn.execute("SELECT * FROM market_listings WHERE offer_index='OFF_NORES'").fetchone()
+    assert row["is_live"] == 1
+    assert row["closed_reason"] is None
+
+
+def test_malformed_meta_fails_gate_without_crashing():
+    """A truthy non-dict meta (malformed stream data) must fail the gate, not
+    crash it — the guard runs before the appliers' own try/except boundaries."""
+    conn = _conn()
+    nft_id = _our_nft_id(35)
+    # Characters stay XRP-denominated under #239; the result gate under test
+    # is kind-agnostic, so a character listing keeps the setup indexable.
+    _seed_character(conn, nft_id, owner="rSeller")
+    _run(
+        nft_listener.apply_market_tx(
+            conn, _sell_offer_create_tx(nft_id, seller="rSeller", offer_index="OFF_MAL")
+        )
+    )
+
+    tx = _accept_tx(nft_id=nft_id, offer_index="OFF_MAL", seller="rSeller", result="tecEXPIRED")
+    tx["meta"] = "garbage"
+    assert nft_listener.tx_succeeded(tx) is False
+    _run(nft_listener.apply_market_tx(conn, tx))
+
+    conn.row_factory = sqlite3.Row
+    row = conn.execute("SELECT * FROM market_listings WHERE offer_index='OFF_MAL'").fetchone()
+    assert row["is_live"] == 1

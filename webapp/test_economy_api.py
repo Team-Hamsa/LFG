@@ -118,12 +118,18 @@ def test_assemble_session_dict_surfaces_accept_link():
         {
             "nft_id": "N",
             "image_url": "img",
+            "video_url": "vid.mp4",
             "metadata_url": "m",
             "accept": {"xumm_url": "https://xaman/abc"},
         }
     ]
     d = economy_api.economy_session_dict("assemble", s)
     assert d["accept"] == "https://xaman/abc" and d["nft_id"] == "N"
+    # Animated assembles (#250) surface the .mp4 alongside the still.
+    assert d["image_url"] == "img" and d["video_url"] == "vid.mp4"
+    # Records that predate the field (or static art) degrade to None.
+    del s.results[0]["video_url"]
+    assert economy_api.economy_session_dict("assemble", s)["video_url"] is None
 
 
 def test_web_session_delegates():

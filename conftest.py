@@ -18,12 +18,36 @@ import os
 os.environ.setdefault("ECONOMY_ENABLED", "1")
 os.environ.setdefault("XRPL_NETWORK", "testnet")
 os.environ.setdefault("ECONOMY_NETWORK", "testnet")
+# Payload creates spawn a XUMM websocket watcher task; tests must never open
+# real sockets (and short-lived loops would leak pending tasks). The status
+# cache's freshness window would likewise make repeated same-uuid polls in a
+# test serve stale state, so disable the throttle (terminal-state caching
+# remains; the fixture below clears it between tests).
+os.environ.setdefault("XUMM_WS_WATCH", "0")
+os.environ.setdefault("XUMM_STATUS_CACHE_SECONDS", "0")
 
 
 from pathlib import Path
 
 import pytest
 from _pytest.monkeypatch import MonkeyPatch
+
+
+@pytest.fixture(autouse=True)
+def _reset_xumm_status_cache() -> None:
+    # get_payload_status caches per-uuid results (terminal ones forever) and
+    # 429s arm a global cooldown — both module-level, so scrub between tests.
+    from lfg_core import xumm_ops
+
+    xumm_ops._STATUS_CACHE.clear()
+    xumm_ops._watched.clear()
+    xumm_ops._rate_limited_until = 0.0
+    # The service's per-user sign-in creation limiter is module state too.
+    import sys
+
+    app_mod = sys.modules.get("lfg_service.app")
+    if app_mod is not None:
+        app_mod._signin_create_hits.clear()
 
 
 @pytest.fixture(autouse=True)

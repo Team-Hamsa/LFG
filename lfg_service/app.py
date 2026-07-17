@@ -15,6 +15,7 @@ import json
 import logging
 import mimetypes
 import os
+import re
 import sqlite3
 import sys
 import threading
@@ -22,6 +23,7 @@ import time
 import traceback
 from collections.abc import Awaitable, Callable
 from decimal import Decimal
+from html import escape
 from typing import Any, TypeVar, cast
 from urllib.parse import quote as urlquote
 from urllib.parse import urlparse
@@ -60,11 +62,20 @@ from lfg_core import (
     xrpl_ops,
     xumm_ops,
 )
+from lfg_core.db_helpers import get_nft_data
 from lfg_core.user_db import create_users_table, get_user, register_user
 from lfg_service import identity as identity_store
 from lfg_service.auth import require_service_token, surface_for_token
 from lfg_service.events import Event, InMemoryEventBus
 from lfg_service.telegram_auth import validate_init_data
+
+# X poster state (x_state.db, #41 PR-2) — single-writer discipline (spec §5.6):
+# the service writes ONLY the `settings` table (the posting_paused kill switch
+# flipped by the /api/admin/x/* handlers below); the poster process
+# (surfaces/x_bot/bot.py) writes ONLY `x_posts` and merely reads `settings`.
+# The sqlite logic lives in surfaces.x_bot.state (imported here across the
+# usual service→surface layering, per the #41 plan) — never duplicated here.
+from surfaces.x_bot import state as x_state
 from webapp import economy_api, mock_economy, mock_market
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s")
@@ -177,6 +188,7 @@ async def publish_terminal(
     user_id: str,
     platform: str,
     image_url: str | None,
+    video_url: str | None = None,
     success_states: set[str],
     fail_states: set[str],
 ) -> None:
@@ -201,6 +213,8 @@ async def publish_terminal(
     data = session.to_dict()
     if image_url and not data.get("image_url"):
         data["image_url"] = image_url
+    if video_url and not data.get("video_url"):
+        data["video_url"] = video_url
     await publish_event(
         f"{prefix}.completed" if ok else f"{prefix}.failed",
         enrich_minter_identity(platform, user_id, wallet),
@@ -212,6 +226,50 @@ async def publish_terminal(
     # retries. The resulting sub-tick double-publish window under concurrent
     # polls is acceptable.
     session._published = True
+
+
+async def _publish_mint_terminal(session: Any) -> None:
+    """Publish the terminal mint.completed/mint.failed firehose event for a
+    single-mint session. Shared by the server-side session task (see
+    _run_mint_session_and_publish) and handle_mint_status's poll path.
+
+    Idempotent via the session's `_published` guard, set only AFTER
+    publish_event awaits successfully (publish_terminal's ordering): if the
+    publisher is cancelled mid-await the session stays unpublished so the
+    other path retries; consumers dedup the accepted sub-tick double-publish
+    window (the x_bot poster keys on nft_id)."""
+    if getattr(session, "_published", False):
+        return
+    if session.state not in mint_flow.TERMINAL_STATES:
+        return
+    ok = session.state not in (mint_flow.FAILED, mint_flow.PAYMENT_TIMEOUT)
+    await publish_event(
+        "mint.completed" if ok else "mint.failed",
+        enrich_minter_identity(session.platform, session.discord_id, session.wallet_address),
+        session.wallet_address,
+        session.to_dict(),
+    )
+    session._published = True
+
+
+async def _run_mint_session_and_publish(session: Any) -> None:
+    """Drive run_mint_session to terminal, then publish the terminal event
+    server-side. Until #41 the client status poll was the ONLY publish site —
+    a mobile user whose Activity is killed after signing in Xaman (the #216
+    scenario; push delivery lets them finish entirely in Xaman) mints
+    successfully but never polls again, so the event was never published and
+    the X poster / Telegram announce silently missed it.
+
+    Publish failure is logged and never breaks the mint task; a user cancel
+    (#141) cancels this task before the publish runs (and mark_published
+    suppresses any late poll), so a deliberate cancel still announces
+    nothing. handle_mint_status calls the same idempotent helper, covering
+    poll-first ordering."""
+    await mint_flow.run_mint_session(session)
+    try:
+        await _publish_mint_terminal(session)
+    except Exception as e:
+        logging.error(f"server-side mint terminal publish failed for session {session.id}: {e}")
 
 
 async def _ws_stream(request: Any, predicate: Any) -> Any:
@@ -473,6 +531,48 @@ async def handle_session(request):
         )
     token = make_session_token({"id": pid, "name": pname, "platform": request["surface"]})
     return web.json_response({"session_token": token, "user": {"id": pid, "username": pname}})
+
+
+# --- X (Twitter) posting admin endpoints (#41 PR-2, spec §5.6) --------------
+# Service-token-authed AND restricted to the Discord surface: the human
+# authorization gate is the Discord bot's administrator-permission check in
+# front of its /admin button, so any other valid surface token (telegram, the
+# x poster's own, ...) gets 403 — otherwise any surface process could pause
+# posting. These work with X_ENABLED false too (admin can inspect/flip state
+# while the feature is dark); nothing here touches X creds.
+# config.X_STATE_DB_PATH is read lazily at call time (never bound at import)
+# so tests can point it at a tmp file via monkeypatch.
+
+
+@require_service_token
+async def handle_x_pause(request):
+    if request["surface"] != "discord":
+        return web.json_response({"error": "forbidden", "code": "wrong_surface"}, status=403)
+    x_state.set_posting_paused(config.X_STATE_DB_PATH, True)
+    return web.json_response({"paused": True})
+
+
+@require_service_token
+async def handle_x_resume(request):
+    if request["surface"] != "discord":
+        return web.json_response({"error": "forbidden", "code": "wrong_surface"}, status=403)
+    x_state.set_posting_paused(config.X_STATE_DB_PATH, False)
+    return web.json_response({"paused": False})
+
+
+@require_service_token
+async def handle_x_status(request):
+    if request["surface"] != "discord":
+        return web.json_response({"error": "forbidden", "code": "wrong_surface"}, status=403)
+    db = config.X_STATE_DB_PATH
+    return web.json_response(
+        {
+            "paused": x_state.posting_paused(db),
+            "month_posts": x_state.month_count(db),
+            "budget": config.X_MONTHLY_POST_BUDGET,
+            "enabled": config.X_ENABLED,
+        }
+    )
 
 
 async def handle_telegram_auth(request):
@@ -2791,8 +2891,11 @@ async def handle_mint_start(request):
     except Exception as e:
         logging.warning(f"prepare_payment failed; falling back to XRP path: {e}")
     session.ensure_payment_fallback()
-    # Keep the task handle so /cancel can stop the payment wait (#141)
-    session.task = asyncio.create_task(mint_flow.run_mint_session(session))
+    # Keep the task handle so /cancel can stop the payment wait (#141).
+    # The wrapper publishes the terminal firehose event server-side, so a
+    # client that never polls again (webview killed mid-sign, #216) still
+    # announces to the X poster / Telegram consumers.
+    session.task = asyncio.create_task(_run_mint_session_and_publish(session))
     return web.json_response(session.to_dict())
 
 
@@ -3229,15 +3332,18 @@ async def handle_mint_status(request):
     # spinner the moment Xaman opens the payload (issue #22).
     await mint_flow.update_scan_state(session)
     await _persist_issued_user_token(request["user"], session)
-    if session.state in mint_flow.TERMINAL_STATES and not getattr(session, "_published", False):
-        session._published = True
-        ok = session.state not in (mint_flow.FAILED, mint_flow.PAYMENT_TIMEOUT)
-        await publish_event(
-            "mint.completed" if ok else "mint.failed",
-            enrich_minter_identity(session.platform, session.discord_id, session.wallet_address),
-            session.wallet_address,
-            session.to_dict(),
-        )
+    # Terminal publish is primarily the session task's job now (#216 — see
+    # _run_mint_session_and_publish); this idempotent call covers poll-first
+    # ordering and retries a publish the task path failed. Guarded the same
+    # way as that task path: _publish_mint_terminal only marks the session
+    # published AFTER a successful publish_event, so a bus failure here must
+    # not raise out of the request handler — the client still needs their
+    # terminal status back, and the session stays unpublished for a later
+    # poll (or the task path) to retry.
+    try:
+        await _publish_mint_terminal(session)
+    except Exception as e:
+        logging.error(f"status-poll mint terminal publish failed for session {session.id}: {e}")
     return web.json_response(session.to_dict())
 
 
@@ -3293,6 +3399,14 @@ def _first_result_image(session: Any) -> str | None:
     return None
 
 
+def _first_result_video(session: Any) -> str | None:
+    for r in getattr(session, "results", None) or []:
+        vid = r.get("video_url")
+        if vid:
+            return str(vid)
+    return None
+
+
 @require_auth
 async def handle_swap_status(request):
     session = swap_sessions.get(request.match_info["session_id"])
@@ -3309,6 +3423,7 @@ async def handle_swap_status(request):
         user_id=session.discord_id,
         platform=session.platform,
         image_url=_first_result_image(session),
+        video_url=_first_result_video(session),
         success_states={swap_flow.OFFERS_READY, swap_flow.DONE},
         fail_states={swap_flow.FAILED, swap_flow.PAYMENT_TIMEOUT},
     )
@@ -3392,6 +3507,75 @@ def _prune_signin_payloads():
             del signin_payloads[uuid]
 
 
+# Per-user cap on SignIn payload CREATION (XUMM caps payload creates at ~30/min
+# app-wide). In the 2026-07-17 429 incident a handful of /register attempts
+# fanned out into 20+ creates via client-side retries; nothing here said no.
+SIGNIN_CREATE_MAX = 3  # payload creations…
+SIGNIN_CREATE_WINDOW = 60.0  # …per user per window
+SIGNIN_REUSE_SECONDS = 120.0  # serve an existing pending payload this long
+_signin_create_hits: dict[tuple[str, str], list[float]] = {}
+
+
+def _signin_create_limited(platform: str, user_id: str) -> bool:
+    now = time.time()
+    key = (platform, user_id)
+    hits = [t for t in _signin_create_hits.get(key, []) if now - t < SIGNIN_CREATE_WINDOW]
+    if len(hits) >= SIGNIN_CREATE_MAX:
+        _signin_create_hits[key] = hits
+        return True
+    hits.append(now)
+    _signin_create_hits[key] = hits
+    # Bookkeeping must not grow forever across distinct users.
+    if len(_signin_create_hits) > 1000:
+        for k in [k for k, v in _signin_create_hits.items() if not v or now - v[-1] > 300]:
+            del _signin_create_hits[k]
+    return False
+
+
+def _signin_create_refund(platform: str, user_id: str) -> None:
+    """Give back the slot consumed for a create that never yielded a payload
+    (e.g. a plain XUMM outage) — otherwise a few failed attempts lock the
+    user out for the rest of the window without any quota actually spent."""
+    hits = _signin_create_hits.get((platform, user_id))
+    if hits:
+        hits.pop()
+
+
+def _pending_signin_for(platform: str, user_id: str, link_intent: bool) -> tuple[str, Any] | None:
+    """A still-fresh unsigned SignIn payload already issued to this user, so a
+    re-tap of /register (or a surface retry) re-serves it instead of minting
+    another XUMM payload."""
+    now = time.time()
+    for uuid, rec in signin_payloads.items():
+        if (
+            rec["platform"] == platform
+            and rec["user_id"] == user_id
+            and bool(rec.get("link")) == link_intent
+            and rec.get("signin_link")
+            and now - rec["created_at"] < SIGNIN_REUSE_SECONDS
+        ):
+            # Never re-serve a payload already known signed/expired (the ws
+            # watcher keeps the cache fresh): a signed one would fast-re-login
+            # the previous wallet instead of offering a fresh sign-in.
+            s = xumm_ops.cached_status(uuid)
+            if s and (s.get("signed") or s.get("expired")):
+                continue
+            return uuid, rec
+    return None
+
+
+def _xumm_unavailable_response():
+    """502 for a plain XUMM outage; 503 + Retry-After while XUMM is rate
+    limiting us — surfaces treat 503/429 as terminal (no retry storm)."""
+    if xumm_ops.rate_limited():
+        return web.json_response(
+            {"error": "Xaman is rate limiting us — try again shortly", "code": "rate_limited"},
+            status=503,
+            headers={"Retry-After": "30"},
+        )
+    return web.json_response({"error": "could not reach Xaman"}, status=502)
+
+
 @require_auth
 async def handle_signin_start(request):
     """Create a XUMM SignIn payload; the user scans it in Xaman and their
@@ -3406,15 +3590,30 @@ async def handle_signin_start(request):
     except Exception:
         body = {}
     link_intent = bool(body.get("link"))
+    platform = _platform(user)
+    # Same sign-in already pending? Re-serve it — a fresh payload would only
+    # burn XUMM create quota and orphan the QR the user may be looking at.
+    pending = _pending_signin_for(platform, user["id"], link_intent)
+    if pending:
+        uuid, rec = pending
+        return web.json_response({"uuid": uuid, "signin_link": rec["signin_link"]})
+    if _signin_create_limited(platform, user["id"]):
+        return web.json_response(
+            {"error": "too many sign-in attempts", "code": "rate_limited"},
+            status=429,
+            headers={"Retry-After": str(int(SIGNIN_CREATE_WINDOW))},
+        )
     payload = await xumm_ops.create_signin_payload(return_url=await _request_return_url(request))
     if not payload:
-        return web.json_response({"error": "could not reach Xaman"}, status=502)
+        _signin_create_refund(platform, user["id"])
+        return _xumm_unavailable_response()
     signin_payloads[payload["uuid"]] = {
-        "platform": _platform(user),
+        "platform": platform,
         "user_id": user["id"],
         "name": user["name"],
         "link": link_intent,
         "created_at": time.time(),
+        "signin_link": payload["xumm_url"],
     }
     return web.json_response({"uuid": payload["uuid"], "signin_link": payload["xumm_url"]})
 
@@ -3537,7 +3736,7 @@ async def handle_web_signin_start(request):
     return_url = {"app": origin, "web": origin} if origin in config.WEB_ALLOWED_ORIGINS else None
     payload = await xumm_ops.create_signin_payload(return_url=return_url)
     if not payload:
-        return web.json_response({"error": "could not reach Xaman"}, status=502)
+        return _xumm_unavailable_response()
     web_signin_payloads[payload["uuid"]] = {"created_at": time.time()}
     return web.json_response({"uuid": payload["uuid"], "signin_link": payload["xumm_url"]})
 
@@ -3577,13 +3776,22 @@ async def handle_web_signin_status(request):
 
 
 async def handle_config(request):
-    """Public config the frontend needs before auth (client_id, dev flag)."""
+    """Public config the frontend needs before auth (client_id, dev flag).
+
+    `public_share_base_url` / `bithomp_base_url` (#41 T9) are how the "Share
+    on X" buttons learn the base for the shared `url=` param — NEVER from
+    `location.origin` (inside the Activity the page is served from Discord's
+    *.discordsays.com sandbox proxy, not our public host; see
+    handle_nft_card's docstring for the same rule applied server-side).
+    """
     return web.json_response(
         {
             "client_id": config.DISCORD_CLIENT_ID,
             "dev_mode": config.WEBAPP_DEV_MODE,
             "economy_enabled": config.ECONOMY_ENABLED,
             "market_enabled": config.MARKET_ENABLED,
+            "public_share_base_url": config.PUBLIC_SHARE_BASE_URL,
+            "bithomp_base_url": _bithomp_base_url(),
         }
     )
 
@@ -3606,6 +3814,173 @@ async def handle_health(request):
     return web.json_response(
         {"ok": True, "active_sessions": sum(detail.values()), "detail": detail}
     )
+
+
+_OG_NOT_FOUND_HTML = (
+    '<!doctype html><meta charset="utf-8"><title>Not found</title><p>NFT not found.</p>'
+)
+
+# LFG-table trait dict (lowercase keys, get_nft_data()'s shape) in a fixed
+# display order; on-chain-index attribute lists (fallback when there's no LFG
+# row, e.g. an Assemble-minted rebirth edition) have no equivalent renaming —
+# see lfg_core/nft_index.py's OnchainNft.attributes vs get_nft_data()'s
+# "traits" dict shape mismatch (#41 §6.2 recon).
+_OG_TRAIT_SLOT_ORDER = (
+    "background",
+    "back",
+    "body",
+    "clothing",
+    "eyes",
+    "eyebrows",
+    "mouth",
+    "hat",
+    "accessory",
+)
+_OG_TRAIT_LABELS = {
+    "background": "Background",
+    "back": "Back",
+    "body": "Body",
+    "clothing": "Clothing",
+    "eyes": "Eyes",
+    "eyebrows": "Eyebrows",
+    "mouth": "Mouth",
+    "hat": "Hat",
+    "accessory": "Accessory",
+}
+_OG_TRAITS_SHOWN = 3
+
+
+def _og_is_placeholder(value: Any) -> bool:
+    return value is None or str(value).strip().lower() in ("", "none")
+
+
+def _og_traits_summary(
+    lfg_row: dict[str, Any] | None, onchain: "nft_index.OnchainNft | None"
+) -> str:
+    """2-3 'Label: Value' trait pairs for og:description. The on-chain
+    index's raw metadata attributes (insertion order) are preferred — swaps
+    NEVER update the LFG table while the listener keeps the index fresh
+    (NFTokenModify + burn-remint), so the LFG row can describe pre-swap
+    traits. LFG-row traits (fixed slot order) are the fallback when the
+    index record carries no usable attributes (e.g. unreadable-metadata
+    backfill rows). Deliberately no rarity dependency, unlike the x_bot
+    poster's rarest-first ranking (#41 §6.2: "keep it simple"). `onchain`'s
+    `attributes_json` is externally-sourced NFT metadata (IPFS/CDN) — a
+    non-dict element (string/null/list) must be skipped, not crash this
+    PUBLIC endpoint."""
+    pairs: list[tuple[str, str]] = []
+    if onchain is not None:
+        for attr in onchain.attributes:
+            if not isinstance(attr, dict):
+                continue
+            trait_type = attr.get("trait_type")
+            value = attr.get("value")
+            if trait_type and not _og_is_placeholder(value):
+                pairs.append((str(trait_type), str(value)))
+    if not pairs:
+        lfg_traits = (lfg_row or {}).get("traits") or {}
+        for slot in _OG_TRAIT_SLOT_ORDER:
+            value = lfg_traits.get(slot)
+            if not _og_is_placeholder(value):
+                pairs.append((_OG_TRAIT_LABELS[slot], str(value)))
+    shown = pairs[:_OG_TRAITS_SHOWN]
+    return " · ".join(f"{label}: {value}" for label, value in shown)
+
+
+def _bithomp_base_url() -> str:
+    """Network-resolved bithomp host, with no `nft_id` — also handed to the
+    client via /api/config (#41 T9) as the fallback share target when
+    PUBLIC_SHARE_BASE_URL is unset, so the client never has to know
+    XRPL_NETWORK itself."""
+    return "https://test.bithomp.com" if config.IS_TESTNET else "https://bithomp.com"
+
+
+def _og_bithomp_url(nft_id: str) -> str:
+    return f"{_bithomp_base_url()}/en/nft/{nft_id}"
+
+
+async def handle_nft_card(request: Any) -> Any:
+    """Public, unauthenticated GET /nft/{number} — a server-rendered
+    OG/Twitter share card (twitter:card=summary_large_image, twitter:image,
+    og:title/description, a visible bithomp link). Exists for X's crawler
+    and for humans clicking a share link, not for the Activity iframe.
+
+    Liveness is decided by the on-chain index, never by LFG-row presence
+    alone: the dress-up economy's Harvest burn never touches the LFG table
+    (only the legacy Discord admin burn deletes rows), so a stale LFG row can
+    outlive the token it describes. Unknown edition, no live on-chain token
+    (burned, or never actually minted) -> a clean 404, no stack trace.
+
+    Any absolute self-URL (og:url, canonical) is built ONLY from
+    config.PUBLIC_SHARE_BASE_URL, never from the request's Host header (which
+    is unstable across ingress paths — Discord's *.discordsays.com proxy vs.
+    the direct Tailscale Funnel .ts.net/lfg path); when unset, og:url/
+    canonical are omitted entirely rather than guessing.
+    """
+    raw_number = request.match_info.get("number", "")
+    try:
+        number = int(raw_number)
+    except (TypeError, ValueError):
+        return web.HTTPNotFound(text=_OG_NOT_FOUND_HTML, content_type="text/html")
+
+    lfg_row = get_nft_data(number)
+
+    conn = nft_index.init_db(nft_index.index_db_path(config.XRPL_NETWORK))
+    try:
+        onchain = nft_index.nft_by_number(conn, number)
+    finally:
+        conn.close()
+
+    if onchain is None:
+        return web.HTTPNotFound(text=_OG_NOT_FOUND_HTML, content_type="text/html")
+
+    # On-chain index FIRST, stale-able LFG row as fallback: swaps never
+    # update the LFG table (the listener keeps the index fresh via modify +
+    # burn-remint), so an LFG-row-first card would show pre-swap art and a
+    # bithomp link to the BURNED pre-swap token.
+    image_url = onchain.image or (lfg_row or {}).get("image_url") or ""
+    nft_id = onchain.nft_id or (lfg_row or {}).get("nft_id") or ""
+    title = f"LFGO #{number}"
+    traits_summary = _og_traits_summary(lfg_row, onchain)
+    description = traits_summary or f"{config.NFT_COLLECTION_NAME} #{number} on the XRPL."
+    bithomp_url = _og_bithomp_url(nft_id)
+
+    esc_title = escape(title, quote=True)
+    esc_description = escape(description, quote=True)
+    esc_image = escape(image_url, quote=True)
+    esc_bithomp = escape(bithomp_url, quote=True)
+
+    meta_tags = [
+        '<meta charset="utf-8">',
+        f"<title>{esc_title}</title>",
+        '<meta name="twitter:card" content="summary_large_image">',
+        f'<meta name="twitter:title" content="{esc_title}">',
+        f'<meta name="twitter:description" content="{esc_description}">',
+        f'<meta property="og:title" content="{esc_title}">',
+        f'<meta property="og:description" content="{esc_description}">',
+    ]
+    if image_url:
+        meta_tags.append(f'<meta name="twitter:image" content="{esc_image}">')
+        meta_tags.append(f'<meta property="og:image" content="{esc_image}">')
+    if config.PUBLIC_SHARE_BASE_URL:
+        page_url = escape(f"{config.PUBLIC_SHARE_BASE_URL}/nft/{number}", quote=True)
+        meta_tags.append(f'<meta property="og:url" content="{page_url}">')
+        meta_tags.append(f'<link rel="canonical" href="{page_url}">')
+
+    body_image = (
+        f'<img src="{esc_image}" alt="{esc_title}" style="max-width:100%;">' if image_url else ""
+    )
+    html_doc = (
+        "<!doctype html><html><head>"
+        + "".join(meta_tags)
+        + "</head><body>"
+        + f"<h1>{esc_title}</h1>"
+        + body_image
+        + f"<p>{esc_description}</p>"
+        + f'<p><a href="{esc_bithomp}">View on Bithomp</a></p>'
+        + "</body></html>"
+    )
+    return web.Response(text=html_doc, content_type="text/html")
 
 
 async def handle_qr(request):
@@ -3641,6 +4016,34 @@ def _img_url_allowed(url: str) -> bool:
         and parsed.hostname is not None
         and parsed.hostname.endswith(config.IMG_PROXY_ALLOWED_HOST_SUFFIXES)
     )
+
+
+def _range_response(request: web.Request, body: bytes, ctype: str) -> web.Response:
+    """Byte-range-aware response for /api/img bodies (already fully buffered).
+
+    iOS WebKit's media loader probes with `Range: bytes=0-1` and refuses to
+    play progressive mp4 unless the server answers 206 with a Content-Range —
+    a 200-full-body answer leaves an animated NFT's <video> frozen on its
+    poster (#250). Only the single-range `bytes=` forms browsers actually send
+    are honored; a malformed Range header is ignored (200, per RFC 9110)."""
+    headers = {"Cache-Control": "public, max-age=86400", "Accept-Ranges": "bytes"}
+    total = len(body)
+    m = re.fullmatch(r"bytes=(\d*)-(\d*)", request.headers.get("Range", "").strip())
+    if m and (m.group(1) or m.group(2)):
+        if m.group(1):
+            start = int(m.group(1))
+            end = min(int(m.group(2)), total - 1) if m.group(2) else total - 1
+        else:  # suffix form (bytes=-N): the last N bytes
+            start = max(total - int(m.group(2)), 0)
+            end = total - 1
+        if start >= total or start > end:
+            headers["Content-Range"] = f"bytes */{total}"
+            return web.Response(status=416, headers=headers)
+        headers["Content-Range"] = f"bytes {start}-{end}/{total}"
+        return web.Response(
+            status=206, body=body[start : end + 1], content_type=ctype, headers=headers
+        )
+    return web.Response(body=body, content_type=ctype, headers=headers)
 
 
 async def handle_img(request):
@@ -3693,9 +4096,7 @@ async def handle_img(request):
         archived = await asyncio.to_thread(_archive_read)
         if archived:
             body, ctype = archived
-            return web.Response(
-                body=body, content_type=ctype, headers={"Cache-Control": "public, max-age=86400"}
-            )
+            return _range_response(request, body, ctype)
     except Exception as e:
         logging.warning(f"image archive lookup failed for {url}: {e!r}")
     url = swap_meta.resolve_ipfs(url)
@@ -3707,9 +4108,7 @@ async def handle_img(request):
         logging.error(f"Image proxy fetch failed for {url}: {e}")
         return web.json_response({"error": "image fetch failed"}, status=502)
     # Mint/swap outputs get unique CDN basenames, so they are safe to cache.
-    return web.Response(
-        body=body, content_type=ctype, headers={"Cache-Control": "public, max-age=86400"}
-    )
+    return _range_response(request, body, ctype)
 
 
 async def handle_layer(request):
@@ -3931,6 +4330,12 @@ def create_app() -> web.Application:
     identity_store.migrate_users_to_identities()
     app.router.add_get("/api/config", handle_config)
     app.router.add_get("/api/health", handle_health)
+    # Public OG/Twitter share card (#41 PR-3) — no /api prefix (it's a share
+    # link, not an API call). Registered before add_static("/", CLIENT_DIR)
+    # below: aiohttp dispatches routes in registration order, and a static
+    # mount at the root could otherwise intercept a path segment that also
+    # exists as a file.
+    app.router.add_get("/nft/{number}", handle_nft_card)
     app.router.add_post("/api/token", handle_token)
     app.router.add_post("/api/session", handle_session)
     app.router.add_post("/api/telegram/auth", handle_telegram_auth)
@@ -3990,6 +4395,9 @@ def create_app() -> web.Application:
     app.router.add_get("/api/extract/{session_id}", handle_extract_status)
     app.router.add_post("/api/deposit", require_wallet(handle_deposit_start))
     app.router.add_get("/api/deposit/{session_id}", handle_deposit_status)
+    app.router.add_post("/api/admin/x/pause", handle_x_pause)
+    app.router.add_post("/api/admin/x/resume", handle_x_resume)
+    app.router.add_get("/api/admin/x/status", handle_x_status)
     app.router.add_get("/events", handle_events)
     app.router.add_get("/events/me", handle_events_me)
     app.router.add_get("/__dev/reload", handle_dev_reload)

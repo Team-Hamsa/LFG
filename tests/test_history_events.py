@@ -98,6 +98,39 @@ def test_non_nft_tx_yields_nothing():
     assert _nft(fx.AIRDROP) == []
 
 
+def test_tec_burn_derives_no_events():
+    """#235: a tec-class NFTokenBurn is ledger-included but burned nothing —
+    it must not become a burn event (5 'burns' were once recorded for one
+    token from failed attempts)."""
+    assert _nft(fx.BURN_TEC) == []
+
+
+def test_tec_tx_derives_no_events_for_any_type():
+    """The strict tesSUCCESS gate covers every event type, not just burn."""
+    for tx in (
+        fx.MINT,
+        fx.BURN,
+        fx.MODIFY,
+        fx.SALE_XRP,
+        fx.SALE_BROKERED,
+        fx.OFFER_CREATE,
+        fx.OFFER_CANCEL,
+    ):
+        assert _nft(tx), "fixture must derive when tesSUCCESS"
+        assert _nft(fx.failed(tx)) == []
+        assert _nft(fx.failed(tx, "tecINSUFFICIENT_RESERVE")) == []
+
+
+def test_missing_result_derives_no_events():
+    """Strict gate: a record with no TransactionResult (or no meta at all) is
+    not provably successful — skipped. Real ledger records always carry it."""
+    no_result = dict(fx.BURN)
+    no_result["meta"] = {"AffectedNodes": []}
+    assert _nft(no_result) == []
+    no_meta = {k: v for k, v in fx.BURN.items() if k != "meta"}
+    assert _nft(no_meta) == []
+
+
 def test_normalize_entry_account_tx_shape():
     entry = {
         "tx": {"TransactionType": "Payment", "Account": "rX", "date": 1},
@@ -145,6 +178,13 @@ def test_non_brix_tx_no_events():
     assert _brix(fx.SALE_XRP) == []
 
 
+def test_tec_payment_derives_no_brix_events():
+    """A failed Payment moved no balances — no BRIX events, even if the fixture
+    meta still carries RippleState diffs (the result code is the gate)."""
+    assert _brix(fx.failed(fx.AIRDROP), distributor=fx.DISTRIBUTOR) == []
+    assert _brix(fx.failed(fx.AMM_DEPOSIT)) == []
+
+
 def test_issuer_account_hex_roundtrip():
     hexid = history_events.issuer_account_hex(fx.ISSUER)
     assert len(hexid) == 40 and hexid == hexid.upper()
@@ -163,6 +203,7 @@ def test_nft_id_issuer_matches():
 def test_brix_deltas_skips_malformed_ripplestate():
     # RippleState node with a non-string holder issuer must be skipped, not crash.
     meta = {
+        "TransactionResult": "tesSUCCESS",
         "AffectedNodes": [
             {
                 "ModifiedNode": {
@@ -175,7 +216,7 @@ def test_brix_deltas_skips_malformed_ripplestate():
                     "PreviousFields": {"Balance": {"currency": fx.BRIX_HEX, "value": "2"}},
                 }
             }
-        ]
+        ],
     }
     tx = {"TransactionType": "Payment", "Account": fx.ALICE, "hash": "AB" * 32, "meta": meta}
     assert (

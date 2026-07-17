@@ -449,7 +449,7 @@ async def run_assemble(session: AssembleSession, deps: EconomyDeps) -> None:
             return
 
         attrs = _character_attributes(session.body_value, session.chosen)
-        image_url, _video_url, meta_url = await deps.char_compose_fn(
+        image_url, video_url, meta_url = await deps.char_compose_fn(
             attrs, session.body_class, edition, 0
         )
         _write_record(deps.records_dir, "assemble", session.id, session._record("assembling"))
@@ -534,7 +534,14 @@ async def run_assemble(session: AssembleSession, deps: EconomyDeps) -> None:
             return
         accept = await deps.char_accept_fn(offer_id)
         session.results.append(
-            {"nft_id": nft_id, "image_url": image_url, "metadata_url": meta_url, "accept": accept}
+            {
+                "nft_id": nft_id,
+                "image_url": image_url,
+                # Animated assembles (#250): the .mp4 next to the PNG still.
+                "video_url": video_url,
+                "metadata_url": meta_url,
+                "accept": accept,
+            }
         )
         session.state = DONE
         status = "complete_pending_mirror" if session.mirror_pending else "complete"

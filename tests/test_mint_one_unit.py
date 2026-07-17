@@ -115,6 +115,10 @@ def test_mint_one_unit_happy_path(monkeypatch, _mint_mocks):
     assert res.error is None
     assert res.nft_number == 4000
     assert res.image_url is not None
+    # #41: traits (LFG-naming) + body_type are threaded through so a caller
+    # can store them on the session / bulk unit for downstream consumers.
+    assert res.traits == {"Body": "Straight"}
+    assert res.body_type == "male"
 
 
 def test_mint_one_unit_offer_fail_reports_nft_id(monkeypatch, _mint_mocks):
@@ -133,6 +137,38 @@ def test_mint_one_unit_offer_fail_reports_nft_id(monkeypatch, _mint_mocks):
     assert res.nft_id == "NFTID1"  # minted
     assert res.offer_id is None  # offer failed
     assert res.error is not None
+    # traits/body_type are known as soon as the mint lands, even if the
+    # subsequent offer step fails.
+    assert res.traits == {"Body": "Straight"}
+    assert res.body_type == "male"
+
+
+def test_mint_one_unit_post_mint_exception_preserves_traits_and_body_type(monkeypatch, _mint_mocks):
+    """PR #245 review (CodeRabbit, outside-diff): an exception from on_mint,
+    offer creation, or payload creation after a confirmed mint used to reach
+    the catch-all with traits/body_type reset to None, even though they were
+    already computed. This drives that path via a raising `on_mint` callback
+    and asserts the exception UnitResult retains both."""
+
+    async def _boom(nft_number, nft_id, image_url):
+        raise RuntimeError("on_mint boom")
+
+    res = _run(
+        mint_flow.mint_one_unit(
+            discord_id="u1",
+            wallet_address="rUSER",
+            platform="discord",
+            push_user_token=None,
+            return_url=None,
+            nft_number=4006,
+            session_tag="job1:6",
+            on_mint=_boom,
+        )
+    )
+    assert res.nft_id == "NFTID1"  # mint landed before on_mint raised
+    assert res.error is not None
+    assert res.traits == {"Body": "Straight"}
+    assert res.body_type == "male"
 
 
 def test_mint_one_unit_mint_fail_reports_no_nft_id(monkeypatch, _mint_mocks):
@@ -154,6 +190,10 @@ def test_mint_one_unit_mint_fail_reports_no_nft_id(monkeypatch, _mint_mocks):
     assert res.nft_id is None
     assert res.offer_id is None
     assert res.error is not None
+    # The mint never landed, so traits/body_type were never computed --
+    # None-safe defaults, not stale/partial data.
+    assert res.traits is None
+    assert res.body_type is None
 
 
 def test_bulk_unit_offer_has_no_expiration(monkeypatch, _mint_mocks):
@@ -245,3 +285,56 @@ def test_mint_one_unit_calls_on_mint_before_creating_offer_state(monkeypatch, _m
     # on_mint must fire before the CREATING_OFFER state -- i.e. the unit is
     # persisted as MINTED before any offer/XUMM steps run.
     assert order == [mint_flow.MINTING, "on_mint", mint_flow.CREATING_OFFER]
+
+
+def test_mint_one_unit_video_carries_video_url(monkeypatch, _mint_mocks):
+    # Animated composition: compose returns an mp4, upload returns both the
+    # PNG poster and the MP4 — the UnitResult must carry the video URL so
+    # surfaces can show the animation instead of the still (Telegram bug).
+    async def fake_compose(attributes, body, store, basename):
+        return "/tmp/out.mp4", True
+
+    async def fake_upload_output(path, is_video, upload_fn, basename, keep_still=None):
+        return (
+            f"https://cdn.example/{basename}.png",
+            f"https://cdn.example/{basename}.mp4",
+        )
+
+    monkeypatch.setattr(mint_flow.swap_compose, "compose_nft", fake_compose)
+    monkeypatch.setattr(mint_flow.swap_compose, "upload_output", fake_upload_output)
+    res = _run(
+        mint_flow.mint_one_unit(
+            discord_id="u1",
+            wallet_address="rUSER",
+            platform="discord",
+            push_user_token=None,
+            return_url=None,
+            nft_number=4010,
+            session_tag="job1:9",
+        )
+    )
+    assert res.error is None
+    assert res.image_url == "https://cdn.example/4010/4010_0.png"
+    assert res.video_url == "https://cdn.example/4010/4010_0.mp4"
+
+
+def test_mint_one_unit_still_has_no_video_url(monkeypatch, _mint_mocks):
+    res = _run(
+        mint_flow.mint_one_unit(
+            discord_id="u1",
+            wallet_address="rUSER",
+            platform="discord",
+            push_user_token=None,
+            return_url=None,
+            nft_number=4011,
+            session_tag="job1:10",
+        )
+    )
+    assert res.error is None
+    assert res.video_url is None
+
+
+def test_mint_session_to_dict_carries_video_url():
+    session = mint_flow.MintSession("u1", "rUSER")
+    session.video_url = "https://cdn.example/1/1_0.mp4"
+    assert session.to_dict()["video_url"] == "https://cdn.example/1/1_0.mp4"

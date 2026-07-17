@@ -15,3 +15,8 @@ ruff>=0.8,<1
 # Type stubs for PyYAML (lfg_core/trait_config.py does `import yaml`); mypy
 # needs these installed or it fails CI with "Library stubs not installed".
 types-PyYAML
+
+# Type stubs for oauthlib (surfaces/x_bot/x_api.py signs requests with
+# oauthlib.oauth1.Client); mypy needs these installed or it fails with
+# "Library stubs not installed".
+types-oauthlib
