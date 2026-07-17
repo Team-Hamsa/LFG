@@ -360,6 +360,11 @@ async def _create_offer_and_accept(session: SwapSession, item: dict[str, Any]) -
             {
                 "name": item["nft"]["name"],
                 "nft_id": item["new_nft_id"],
+                # #41 T9: the webapp share button needs an edition number to
+                # build PUBLIC_SHARE_BASE_URL + /nft/<n> without regexing the
+                # display name client-side; None when the name carries no
+                # "#<digits>" (client falls back to the bithomp URL).
+                "nft_number": swap_meta.extract_nft_number(item["nft"]["name"]),
                 "image_url": item["image_url"],
                 "video_url": item["video_url"],
                 "metadata_url": item["metadata_url"],
@@ -401,6 +406,7 @@ async def _create_offer_and_accept(session: SwapSession, item: dict[str, Any]) -
         {
             "name": item["nft"]["name"],
             "nft_id": item["new_nft_id"],
+            "nft_number": swap_meta.extract_nft_number(item["nft"]["name"]),  # #41 T9
             "image_url": item["image_url"],
             "video_url": item["video_url"],
             "metadata_url": item["metadata_url"],
@@ -653,6 +659,7 @@ async def run_swap_session(session: SwapSession) -> None:
                 {
                     "name": item["nft"]["name"],
                     "nft_id": item["nft"]["nft_id"],  # unchanged by NFTokenModify
+                    "nft_number": swap_meta.extract_nft_number(item["nft"]["name"]),  # #41 T9
                     "image_url": item["image_url"],
                     "video_url": item["video_url"],
                     "metadata_url": item["metadata_url"],

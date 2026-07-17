@@ -15,7 +15,7 @@ os.environ.setdefault("TOKEN_CURRENCY_HEX", "4C46474F000000000000000000000000000
 os.environ.setdefault("XRPL_NETWORK", "testnet")
 os.environ.setdefault("BUNNY_PULL_ZONE", "nft.pullzone.example")
 
-from lfg_core import nft_index, nft_listener, xrpl_ops  # noqa: E402
+from lfg_core import economy_store, nft_index, nft_listener, xrpl_ops  # noqa: E402
 
 
 def test_parse_nft_info():
@@ -40,11 +40,18 @@ def test_parse_nft_info():
     }
 
 
-MINT = {"TransactionType": "NFTokenMint", "meta": {"nftoken_id": "MINTED"}}
-ACCEPT = {"TransactionType": "NFTokenAcceptOffer", "meta": {"nftoken_id": "MOVED"}}
-BURN = {"TransactionType": "NFTokenBurn", "NFTokenID": "GONE", "meta": {}}
-MODIFY = {"TransactionType": "NFTokenModify", "NFTokenID": "CHANGED", "meta": {}}
-PAYMENT = {"TransactionType": "Payment", "meta": {}}
+_TES = {"TransactionResult": "tesSUCCESS"}
+MINT = {"TransactionType": "NFTokenMint", "meta": {"nftoken_id": "MINTED", **_TES}}
+ACCEPT = {"TransactionType": "NFTokenAcceptOffer", "meta": {"nftoken_id": "MOVED", **_TES}}
+BURN = {"TransactionType": "NFTokenBurn", "NFTokenID": "GONE", "meta": {**_TES}}
+MODIFY = {"TransactionType": "NFTokenModify", "NFTokenID": "CHANGED", "meta": {**_TES}}
+PAYMENT = {"TransactionType": "Payment", "meta": {**_TES}}
+# tec-class: ledger-included but the burn did NOT happen (#210).
+BURN_TEC = {
+    "TransactionType": "NFTokenBurn",
+    "NFTokenID": "GONE",
+    "meta": {"TransactionResult": "tecNO_ENTRY"},
+}
 
 
 def test_classify_tx():
@@ -162,7 +169,10 @@ def test_apply_tx_skips_foreign_collection(tmp_path):
     async def fetch_meta(uri_hex):
         return None
 
-    foreign = {"TransactionType": "NFTokenAcceptOffer", "meta": {"nftoken_id": "FOREIGN"}}
+    foreign = {
+        "TransactionType": "NFTokenAcceptOffer",
+        "meta": {"nftoken_id": "FOREIGN", "TransactionResult": "tesSUCCESS"},
+    }
     _run(
         nft_listener.apply_tx(
             conn, foreign, fetch_token, fetch_meta, is_ours=lambda t: t.get("issuer") == "rMINE"
@@ -183,3 +193,63 @@ def test_burn_ignores_unknown_token(tmp_path):
     _run(nft_listener.apply_tx(conn, BURN, fetch_token, fetch_meta))
     # GONE was never in the index -> burn adds nothing
     assert conn.execute("SELECT COUNT(*) FROM onchain_nfts").fetchone()[0] == 0
+
+
+def test_tec_burn_does_not_flip_is_burned(tmp_path):
+    """#210: a tec-class NFTokenBurn is ledger-included but performed nothing —
+    apply_tx must not mark the (still-live) token burned."""
+    conn = nft_index.init_db(str(tmp_path / "idx.db"))
+    nft_index.upsert(
+        conn,
+        nft_index.token_record(
+            {"nft_id": "GONE", "flags": 0, "uri_hex": "z", "is_burned": False}, {"name": "#9"}
+        ),
+    )
+
+    async def fetch_token(nft_id):
+        raise AssertionError("a failed tx must not be resolved at all")
+
+    _run(nft_listener.apply_tx(conn, BURN_TEC, fetch_token, fetch_token))
+    row = conn.execute("SELECT is_burned FROM onchain_nfts WHERE nft_id='GONE'").fetchone()
+    assert row[0] == 0
+
+
+def test_tec_missing_result_is_not_success(tmp_path):
+    """Strict gate: no meta / no TransactionResult is not provably successful."""
+    assert not nft_listener.tx_succeeded({"TransactionType": "NFTokenBurn", "meta": {}})
+    assert not nft_listener.tx_succeeded({"TransactionType": "NFTokenBurn"})
+    assert nft_listener.tx_succeeded(BURN)
+
+    conn = nft_index.init_db(str(tmp_path / "idx.db"))
+    nft_index.upsert(
+        conn,
+        nft_index.token_record(
+            {"nft_id": "GONE", "flags": 0, "uri_hex": "z", "is_burned": False}, {"name": "#9"}
+        ),
+    )
+    no_result = {"TransactionType": "NFTokenBurn", "NFTokenID": "GONE", "meta": {}}
+
+    async def fetch_none(_):
+        return None
+
+    _run(nft_listener.apply_tx(conn, no_result, fetch_none, fetch_none))
+    row = conn.execute("SELECT is_burned FROM onchain_nfts WHERE nft_id='GONE'").fetchone()
+    assert row[0] == 0
+
+
+def test_tec_burn_does_not_delete_trait_token(tmp_path):
+    """A tec burn of a trait token must leave its trait_tokens row alone —
+    the token is still live on-ledger."""
+    conn = nft_index.init_db(str(tmp_path / "idx.db"))
+    economy_store.init_economy_schema(conn)
+    economy_store.upsert_trait_token(conn, "GONE", "rUser", "Hat", "Cap")
+
+    async def fetch_none(_):
+        return None
+
+    _run(
+        nft_listener.apply_economy_tx(
+            conn, BURN_TEC, fetch_token_fn=fetch_none, fetch_meta_fn=fetch_none
+        )
+    )
+    assert economy_store.read_trait_tokens(conn) == [("GONE", "rUser", "Hat", "Cap")]

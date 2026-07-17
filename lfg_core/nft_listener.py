@@ -47,6 +47,33 @@ def classify_tx(tx: dict[str, Any]) -> str | None:
     return _TYPE_TO_KIND.get(str(tx.get("TransactionType", "")))
 
 
+def _tx_result(tx: dict[str, Any]) -> Any:
+    """meta.TransactionResult, or None when meta is missing or not a dict
+    (malformed stream data must fail the gate, never crash it)."""
+    meta = tx.get("meta")
+    return meta.get("TransactionResult") if isinstance(meta, dict) else None
+
+
+def tx_succeeded(tx: dict[str, Any], *, log_skip_as: str | None = None) -> bool:
+    """True iff a normalized tx actually executed: meta.TransactionResult is
+    exactly "tesSUCCESS". tec-class transactions are validated into the ledger
+    but only claim a fee — the operation did NOT happen — so every derive/apply
+    entry point gates on this before mutating anything (#210/#235). Strict: a
+    missing meta or result code — or a malformed non-dict meta — is not
+    provably successful and fails the gate (real ledger records always carry
+    it). Raw ARCHIVING stays result-agnostic
+    (backfill_history stores tec txs for audit) — only event derivation and
+    index/economy/market mutation are gated. With `log_skip_as` set, a failing
+    tx logs one concise debug line; the listener consumes the network-wide
+    firehose where tec traffic is routine, so never warn per tx."""
+    result = _tx_result(tx)
+    if result == "tesSUCCESS":
+        return True
+    if log_skip_as is not None:
+        logging.debug(f"{log_skip_as}: skipping non-tesSUCCESS tx {tx.get('hash')} ({result})")
+    return False
+
+
 def affected_nft_ids(tx: dict[str, Any]) -> list[str]:
     """The NFToken id(s) a transaction touches. Reads the explicit `NFTokenID`
     field (Burn/Modify), the `meta.nftoken_id` clio adds (Mint/AcceptOffer), and
@@ -90,9 +117,13 @@ async def apply_tx(
     owner/flags/uri (nft_info — the Kinesis pattern) and its metadata, then upsert.
     `is_ours(token)` scopes upserts to the collection (skips foreign NFTs the
     network-wide stream carries). Per-id errors are logged, never raised, so a bad
-    tx can't kill the stream."""
+    tx can't kill the stream. A non-tesSUCCESS tx performed nothing on-ledger
+    and must not touch the index (#210: a tecNO_ENTRY burn once flipped
+    is_burned on a live token)."""
     kind = classify_tx(tx)
     if kind is None:
+        return
+    if not tx_succeeded(tx, log_skip_as="apply_tx"):
         return
     for nft_id in affected_nft_ids(tx):
         try:
@@ -209,9 +240,14 @@ async def apply_economy_tx(
     Every write path is gated on `token["issuer"] == config.SWAP_ISSUER_ADDRESS`:
     the taxon is forgeable, so a foreign-issuer NFT reusing our economy taxons — or
     a foreign `#N`-named mint — must never forge closet/trait rows or poison the
-    supply ledger. Per-id errors are logged, never raised."""
+    supply ledger. Per-id errors are logged, never raised. A non-tesSUCCESS tx
+    performed nothing on-ledger and must not touch the economy tables (a tec
+    burn would delete a live trait_tokens row; a tec mint could log spurious
+    supply growth)."""
     kind = classify_tx(tx)
     if kind not in ("mint", "modify", "accept", "burn"):
+        return
+    if not tx_succeeded(tx, log_skip_as="apply_economy_tx"):
         return
     for nft_id in affected_nft_ids(tx):
         try:
@@ -364,22 +400,29 @@ def _apply_offer_create(conn: sqlite3.Connection, tx: dict[str, Any]) -> None:
     )
 
 
-def _apply_offer_cancel(conn: sqlite3.Connection, tx: dict[str, Any]) -> None:
-    """NFTokenCancelOffer: every deleted NFTokenOffer ledger object closes its
-    market_listings row (if any) as cancelled. A DeletedNode for an
-    offer_index we never indexed is a harmless no-op -- close_listing
-    tolerates an unknown offer_index. Per-item errors are logged, never
-    raised, so one bad deleted-offer entry can't abort the rest of the tx's
-    deletions (same isolation convention as apply_market_tx, one level
-    down)."""
+def _close_deleted_offers(conn: sqlite3.Connection, tx: dict[str, Any], reason: str) -> None:
+    """Close the market_listings row (if any) behind every NFTokenOffer ledger
+    object this tx deleted. A DeletedNode for an offer_index we never indexed
+    is a harmless no-op -- close_listing tolerates an unknown offer_index.
+    Per-item errors are logged, never raised, so one bad deleted-offer entry
+    can't abort the rest of the tx's deletions (same isolation convention as
+    apply_market_tx, one level down)."""
     for wrapper in _deleted_nft_offer_nodes(tx):
         offer_index = wrapper.get("LedgerIndex")
         if not (isinstance(offer_index, str) and offer_index):
             continue
         try:
-            market_store.close_listing(conn, offer_index, "cancelled")
+            market_store.close_listing(conn, offer_index, reason)
         except Exception:
-            logging.exception(f"offer_cancel close failed (offer_index={offer_index})")
+            logging.exception(
+                f"deleted-offer close failed (offer_index={offer_index}, reason={reason})"
+            )
+
+
+def _apply_offer_cancel(conn: sqlite3.Connection, tx: dict[str, Any]) -> None:
+    """NFTokenCancelOffer: every deleted NFTokenOffer ledger object closes its
+    market_listings row (if any) as cancelled."""
+    _close_deleted_offers(conn, tx, "cancelled")
 
 
 def _owner_of(conn: sqlite3.Connection, nft_id: str) -> str | None:
@@ -478,9 +521,27 @@ async def apply_market_tx(conn: sqlite3.Connection, tx: dict[str, Any]) -> None:
     apply_economy_tx (same conn/tx call-site convention in
     scripts/onchain_listener.py) even though this function itself performs no
     I/O. Per-tx errors are logged, never raised, so one bad tx can't kill the
-    stream (same convention as apply_tx / apply_economy_tx)."""
+    stream (same convention as apply_tx / apply_economy_tx). A non-tesSUCCESS
+    tx must never upsert a listing or close one as sold, but it is NOT always
+    zero-side-effect: since fixExpiredNFTokenOfferRemoval (fixCleanup3_1_3,
+    mainnet 2026-05) an accept of an expired NFTokenOffer fails tecEXPIRED yet
+    still DELETES the expired offer(s) — real DeletedNode entries in the failed
+    tx's validated meta. The gate's failure path honours that ledger truth by
+    stale-closing the rows behind any deleted offers before returning."""
     kind = classify_tx(tx)
     if kind not in ("offer_create", "offer_cancel", "accept"):
+        return
+    if not tx_succeeded(tx, log_skip_as="apply_market_tx"):
+        result = _tx_result(tx)
+        if kind == "accept" and isinstance(result, str) and result.startswith("tec"):
+            # Close as stale, never sold: there is no buyer, and a trait row
+            # must not enter the settled=0 settlement lifecycle. Keyed on the
+            # DeletedNodes themselves (ledger truth for any validated tec
+            # code) rather than tecEXPIRED specifically — but ONLY for an
+            # explicit tec result: a missing/malformed result proves nothing,
+            # so it fails closed with no mutation. A failed create/cancel
+            # deletes no offers, so no other kind needs this.
+            _close_deleted_offers(conn, tx, "stale")
         return
     try:
         if kind == "offer_create":

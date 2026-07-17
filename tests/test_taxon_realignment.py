@@ -77,7 +77,10 @@ def test_taxon_176_mint_upserts_trait_token():
     async def fetch_meta(uri_hex):
         return meta
 
-    tx = {"TransactionType": "NFTokenMint", "meta": {"nftoken_id": "TRAIT176"}}
+    tx = {
+        "TransactionType": "NFTokenMint",
+        "meta": {"TransactionResult": "tesSUCCESS", "nftoken_id": "TRAIT176"},
+    }
     _run(
         nft_listener.apply_economy_tx(
             conn,
@@ -118,7 +121,10 @@ def test_taxon_1760_mint_is_not_classified_as_trait_or_closet():
             "attributes": [{"trait_type": "Body", "value": "Straight Blue"}],
         }
 
-    tx = {"TransactionType": "NFTokenMint", "meta": {"nftoken_id": "CHAR1760"}}
+    tx = {
+        "TransactionType": "NFTokenMint",
+        "meta": {"TransactionResult": "tesSUCCESS", "nftoken_id": "CHAR1760"},
+    }
     genesis = te.Genesis(trait_counts={}, edition_bodies={7: ("Straight Blue", "male")})
     _run(
         nft_listener.apply_economy_tx(
@@ -156,7 +162,10 @@ def test_taxon_1760_mint_flows_into_character_index():
             and int(token.get("taxon") or -1) == config.ASSEMBLE_TAXON
         )
 
-    tx = {"TransactionType": "NFTokenMint", "meta": {"nftoken_id": "CHAR1760B"}}
+    tx = {
+        "TransactionType": "NFTokenMint",
+        "meta": {"TransactionResult": "tesSUCCESS", "nftoken_id": "CHAR1760B"},
+    }
     _run(nft_listener.apply_tx(conn, tx, fetch_token, fetch_meta, is_ours=is_ours))
 
     row = conn.execute(

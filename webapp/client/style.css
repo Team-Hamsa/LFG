@@ -224,15 +224,32 @@ button.big { padding: 14px 20px; }
 
 /* .secondary is the default button style above — no extra rules needed */
 
-button.link {
+button.link, a.link {
   background: none;
   border: none;
   color: var(--blue);
   padding: 2px 4px;
   font-weight: 600;
   font-size: .9rem;
+  text-decoration: none;
+  cursor: pointer;
 }
-button.link:hover { text-decoration: underline; color: var(--blue); }
+button.link:hover, a.link:hover { text-decoration: underline; color: var(--blue); }
+
+/* "Share on X" control (#41 T9): the anchor + copy button sit inline, with
+   the copy-fallback input only appearing once revealed by app.js. */
+.share-row { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; }
+.copy-input {
+  width: 100%;
+  margin-top: 6px;
+  font-size: .8rem;
+  font-family: 'JetBrains Mono', monospace;
+  padding: 6px 8px;
+  border-radius: 8px;
+  border: 2px solid var(--ink);
+  background: var(--paper);
+  color: var(--text);
+}
 
 button.back {
   background: none;

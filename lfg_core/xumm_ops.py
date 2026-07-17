@@ -153,9 +153,19 @@ def generate_qr_png(data: str) -> bytes:
     return buf.getvalue()
 
 
+# Default payload lifetime. XUMM's own default is 24 hours, so abandoned
+# sign requests (closed Activity, regenerated QR, bot-probed signins) pile
+# up as open payloads until the app hits the platform's open-payload cap
+# and every create is rejected with an embedded 429 ("Max payloads of N
+# exceeded", 2026-07-17 incident). Every builder must set an expire; 15
+# minutes comfortably outlives any real signing session.
+DEFAULT_EXPIRE_MINUTES = 15
+
+
 def _with_return_url(
     options: dict[str, Any], return_url: dict[str, str] | None
 ) -> dict[str, Any] | None:
+    options.setdefault("expire", DEFAULT_EXPIRE_MINUTES)
     if return_url:
         options["return_url"] = return_url
     return options or None
@@ -192,6 +202,14 @@ async def _post_xumm_payload(payload: dict[str, Any]) -> dict[str, Any]:
         raise XummRateLimited("XUMM payload create rejected (429)")
     _check_rate_headers(response, "payload create")
     data = response.json()
+    # XUMM also signals rate limiting inside an HTTP 400 body — the open-
+    # payload cap comes back as {"error": {"code": 429, "message": "Max
+    # payloads of N exceeded"}} (2026-07-17 incident). Treat it exactly like
+    # a transport-level 429: cool off, and never token-less-retry into it.
+    error = data.get("error") if isinstance(data, dict) else None
+    if isinstance(error, dict) and error.get("code") == 429:
+        _note_rate_limited(f"payload create ({error.get('message', 'embedded 429')})")
+        raise XummRateLimited(f"XUMM payload create rejected: {error.get('message')}")
     if status >= 400 or "refs" not in data:
         # A rejected payload comes back without refs/next — surface the real
         # HTTP status instead of the KeyError('refs') this used to raise.
@@ -427,6 +445,35 @@ async def create_signin_payload(return_url: dict[str, str] | None = None) -> dic
         },
         options=_with_return_url({}, return_url),
     )
+
+
+async def cancel_xumm_payload(uuid: str) -> bool:
+    """Cancel one open XUMM payload (DELETE /payload/{uuid}). Returns True
+    only when XUMM confirms it cancelled; False for already-resolved/expired/
+    opened payloads and for transport errors (safe to call blindly during a
+    backlog cleanup — see scripts/cancel_xumm_payloads.py)."""
+    if rate_limited():
+        logging.warning(f"XUMM payload cancel {uuid} skipped: rate-limit cooldown active")
+        return False
+    try:
+        response = await asyncio.to_thread(
+            requests.delete,
+            f"{config.XUMM_API_URL}/{uuid}",
+            headers=_XUMM_HEADERS,
+            timeout=10,
+        )
+        if getattr(response, "status_code", 200) == 429:
+            _note_rate_limited("payload cancel")
+            return False
+        _check_rate_headers(response, "payload cancel")
+        data = response.json()
+    except Exception as e:
+        logging.warning(f"XUMM payload cancel {uuid} failed: {e}")
+        return False
+    result = data.get("result", {}) if isinstance(data, dict) else {}
+    cancelled = bool(result.get("cancelled"))
+    logging.info(f"XUMM payload cancel {uuid}: cancelled={cancelled} reason={result.get('reason')}")
+    return cancelled
 
 
 _UUID_RE = re.compile(

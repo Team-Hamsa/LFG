@@ -88,6 +88,11 @@ def test_self_issuer_recipient_skips_offer_and_marks_delivered(monkeypatch):
     assert r["modified"] is True  # drives every surface's "no action needed"
     assert r["nft_id"] == _NEW_NFT_ID
     assert "accept_deeplink" not in r
+    # #41 T9: the share button needs an edition number without the client
+    # regexing the display name — extracted server-side via the existing
+    # swap_meta.extract_nft_number, same helper the '#3536' in _item()'s name
+    # would be parsed by.
+    assert r["nft_number"] == 3536
 
 
 def test_non_issuer_recipient_creates_priced_offer(monkeypatch):
@@ -114,6 +119,23 @@ def test_non_issuer_recipient_creates_priced_offer(monkeypatch):
     assert len(s.results) == 1
     assert s.results[0]["accept_deeplink"] == "x"
     assert s.results[0]["modified"] is False
+    assert s.results[0]["nft_number"] == 3536  # #41 T9, see comment above
+
+
+def test_result_omits_nft_number_when_name_has_no_number(monkeypatch):
+    """extract_nft_number returns None for a name without '#<digits>' — the
+    result must still carry an explicit nft_number: None (not a missing key)
+    so the client's bithomp-URL fallback triggers deliberately, never a
+    client-side regex over the display name (#41 T9)."""
+    monkeypatch.setattr(config, "SIGNING_ACCOUNT", "rISSUERxxxxxxxxxxxxxxxxxxxxxxxx")
+
+    s = _make_session("rISSUERxxxxxxxxxxxxxxxxxxxxxxxx")
+    item = _item()
+    item["nft"] = {"name": "Let's Effing Go! (no number)"}
+    ok = _run(swap_flow._create_offer_and_accept(s, item))
+
+    assert ok is True
+    assert s.results[0]["nft_number"] is None
 
 
 def test_offer_creation_failure_surfaces_admin_error(monkeypatch):
