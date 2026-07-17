@@ -3867,6 +3867,8 @@ async def handle_config(request):
             "dev_mode": config.WEBAPP_DEV_MODE,
             "economy_enabled": config.ECONOMY_ENABLED,
             "market_enabled": config.MARKET_ENABLED,
+            "bulk_mint_ui": config.BULK_MINT_UI_ENABLED,
+            "bulk_mint_max": config.BULK_MINT_MAX,
             "public_share_base_url": config.PUBLIC_SHARE_BASE_URL,
             "bithomp_base_url": _bithomp_base_url(),
         }
