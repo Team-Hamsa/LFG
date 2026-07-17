@@ -1297,32 +1297,49 @@ def _close_listing_sync(
 @require_market
 @require_wallet
 async def handle_market_list_start(request):
-    """POST /api/market/list {nft_id, price_xrp}: 409 if the caller doesn't
-    own nft_id (checked across onchain_nfts + trait_tokens) or a live listing
-    already exists for it; otherwise builds the NFTokenCreateOffer XUMM
-    payload and returns a session (mirrors mint/swap's QR/deeplink shape)."""
+    """POST /api/market/list {nft_id, price_xrp | price_brix}: 409 if the
+    caller doesn't own nft_id (checked across onchain_nfts + trait_tokens) or
+    a live listing already exists for it; otherwise builds the
+    NFTokenCreateOffer XUMM payload and returns a session (mirrors mint/swap's
+    QR/deeplink shape). Denomination is per-kind (#239): a character listing
+    requires price_xrp; a trait listing requires price_brix."""
     user = request["user"]
     wallet = request["wallet"]
     body = await request.json()
     nft_id = body.get("nft_id")
     price_xrp = body.get("price_xrp")
-    if not nft_id or not isinstance(price_xrp, str):
+    price_brix = body.get("price_brix")
+    if not nft_id or not (isinstance(price_xrp, str) or isinstance(price_brix, str)):
         return web.json_response(
-            {"error": "nft_id and price_xrp (string) are required"}, status=400
+            {"error": "nft_id and price_xrp or price_brix (string) are required"}, status=400
         )
-    try:
-        amount_drops = int(market_ops.xrp_to_drops_str(price_xrp))
-    except Exception as e:
-        # Broad on purpose: xrp_to_drops_str raises TypeError/ValueError for
-        # the documented cases, but Decimal("Infinity")/("nan") slip past its
-        # `<= 0` guard and raise decimal.InvalidOperation/OverflowError
-        # instead — this edge (where a user-controlled price_xrp is parsed)
-        # must 400 cleanly on all of them, not just the two it advertises.
-        return web.json_response({"error": f"bad price_xrp: {e}"}, status=400)
+    amount_drops: int | None = None
+    amount_brix: str | None = None
+    if isinstance(price_xrp, str):
+        try:
+            amount_drops = int(market_ops.xrp_to_drops_str(price_xrp))
+        except Exception as e:
+            # Broad on purpose: xrp_to_drops_str raises TypeError/ValueError
+            # for the documented cases, but Decimal("Infinity")/("nan") slip
+            # past its `<= 0` guard and raise decimal.InvalidOperation/
+            # OverflowError instead — this edge (where a user-controlled
+            # price_xrp is parsed) must 400 cleanly on all of them, not just
+            # the two it advertises.
+            return web.json_response({"error": f"bad price_xrp: {e}"}, status=400)
+    if isinstance(price_brix, str):
+        try:
+            amount_brix = market_ops.validate_brix_value(price_brix)
+        except Exception as e:
+            # Same broad guard as price_xrp above.
+            return web.json_response({"error": f"bad price_brix: {e}"}, status=400)
 
     if _use_market_mock():
         try:
-            return web.json_response(mock_market.INSTANCE.start_list(wallet, nft_id, amount_drops))
+            return web.json_response(
+                mock_market.INSTANCE.start_list(
+                    wallet, nft_id, amount_drops, amount_brix=amount_brix
+                )
+            )
         except mock_market.MockMarketError as e:
             return web.json_response({"error": str(e)}, status=409)
 
@@ -1343,6 +1360,18 @@ async def handle_market_list_start(request):
     if membership["kind"] == "trait" and not config.ECONOMY_ENABLED:
         return _economy_disabled_response()
 
+    # #239 per-kind denomination: trait listings are BRIX-only, character
+    # listings XRP-only — reject the wrong (or missing) price field for the
+    # resolved kind before any payload is built.
+    if membership["kind"] == "trait" and amount_brix is None:
+        return web.json_response(
+            {"error": "trait listings are priced in BRIX — send price_brix"}, status=400
+        )
+    if membership["kind"] == "character" and amount_drops is None:
+        return web.json_response(
+            {"error": "character listings are priced in XRP — send price_xrp"}, status=400
+        )
+
     network = _market_network(membership["kind"])
     already_listed = await loop.run_in_executor(None, _has_live_listing, network, nft_id)
     if already_listed:
@@ -1358,10 +1387,16 @@ async def handle_market_list_start(request):
             status=409,
         )
 
+    offer_amount: str | dict[str, str]
+    if membership["kind"] == "trait":
+        assert amount_brix is not None  # guarded above
+        offer_amount = market_ops.brix_amount_dict(amount_brix)
+    else:
+        offer_amount = str(amount_drops)
     payload = await xumm_ops.create_sell_offer_payload(
         wallet,
         nft_id,
-        str(amount_drops),
+        offer_amount,
         return_url=xumm_ops.discord_return_url(body.get("guild_id"), body.get("channel_id")),
         user_token=await _push_token(user),
         platform=memos.platform_for_surface(_platform(user)),
@@ -1374,7 +1409,8 @@ async def handle_market_list_start(request):
         wallet_address=wallet,
         nft_id=nft_id,
         listing_kind=membership["kind"],
-        amount_drops=amount_drops,
+        amount_drops=amount_drops if membership["kind"] == "character" else None,
+        amount_brix=amount_brix if membership["kind"] == "trait" else None,
         slot=membership["slot"],
         value=membership["value"],
         platform=_platform(user),
@@ -2362,13 +2398,14 @@ def require_economy(handler):
 @require_economy
 @require_wallet
 async def handle_market_trait_list_start(request):
-    """POST /api/market/trait/list {slot, value, price_xrp}: the composite
+    """POST /api/market/trait/list {slot, value, price_brix}: the composite
     "sell a trait out of my Closet" wizard — the existing Phase-4 Extract flow
     (Xaman signature 1) followed by the plain Q4 List flow on the
     freshly-owned token (Xaman signature 2), driven together as one polled
     TraitSellSession (see market_flow.advance_trait_sell_session).
 
-    price_xrp is validated FIRST (same guard as handle_market_list_start) so a
+    price_brix (#239: trait listings are BRIX-denominated) is validated FIRST
+    (same guard as handle_market_list_start) so a
     bad price never starts an extract. Extract's own preconditions (active
     Closet, the (slot, value) trait actually loose in it) surface as
     economy_api.EconomyError -> 400 with no session started; a failure inside
@@ -2380,21 +2417,21 @@ async def handle_market_trait_list_start(request):
     body = await request.json()
     slot = body.get("slot")
     value = body.get("value")
-    price_xrp = body.get("price_xrp")
-    if not slot or not value or not isinstance(price_xrp, str):
+    price_brix = body.get("price_brix")
+    if not slot or not value or not isinstance(price_brix, str):
         return web.json_response(
-            {"error": "slot, value, and price_xrp (string) are required"}, status=400
+            {"error": "slot, value, and price_brix (string) are required"}, status=400
         )
     try:
-        amount_drops = int(market_ops.xrp_to_drops_str(price_xrp))
+        amount_brix = market_ops.validate_brix_value(price_brix)
     except Exception as e:
         # Broad on purpose: see handle_market_list_start's identical guard.
-        return web.json_response({"error": f"bad price_xrp: {e}"}, status=400)
+        return web.json_response({"error": f"bad price_brix: {e}"}, status=400)
 
     if _use_market_mock():
         try:
             return web.json_response(
-                mock_market.INSTANCE.start_trait_list(wallet, slot, value, amount_drops)
+                mock_market.INSTANCE.start_trait_list(wallet, slot, value, amount_brix)
             )
         except mock_market.MockMarketError as e:
             return web.json_response({"error": str(e)}, status=400)
@@ -2427,7 +2464,7 @@ async def handle_market_trait_list_start(request):
         wallet_address=wallet,
         slot=slot,
         value=value,
-        amount_drops=amount_drops,
+        amount_brix=amount_brix,
         extract_session=extract_ws.inner,
         platform=_platform(user),
         push_user_token=push_user_token,

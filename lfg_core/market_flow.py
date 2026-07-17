@@ -100,7 +100,11 @@ class ListSession:
     wallet_address: str
     nft_id: str
     listing_kind: str  # 'character' | 'trait' — the LISTING's kind
-    amount_drops: int
+    # #239 per-kind denomination: characters carry amount_drops, trait
+    # listings carry amount_brix (a validated value string). Exactly one is
+    # set, mirroring market_store's row invariant.
+    amount_drops: int | None = None
+    amount_brix: str | None = None
     slot: str | None = None
     value: str | None = None
     platform: str = "discord"
@@ -267,7 +271,10 @@ async def advance_list_session(
         session.error = f"transaction failed: {meta.get('TransactionResult')}"
         return None
 
-    extracted = market_ops.extract_created_sell_offer(meta, session.nft_id)
+    # #239 per-kind denomination: a trait listing's created offer must be
+    # BRIX, a character's must be XRP drops — the extract branch enforces it.
+    expect = "brix" if session.listing_kind == "trait" else "xrp"
+    extracted = market_ops.extract_created_sell_offer(meta, session.nft_id, expect=expect)
     if extracted is None:
         session.state = FAILED
         session.error = "could not find the created sell offer in transaction metadata"
@@ -280,9 +287,10 @@ async def advance_list_session(
         "nft_id": session.nft_id,
         "kind": session.listing_kind,
         "seller": session.wallet_address,
-        # On-ledger truth from the CreatedNode, not session.amount_drops — the
+        # On-ledger truth from the CreatedNode, not the session's amount — the
         # signed sell offer's Amount is what a buyer will actually pay.
-        "amount_drops": extracted["amount_drops"],
+        "amount_drops": extracted.get("amount_drops"),
+        "amount_brix": extracted.get("amount_brix"),
         "slot": session.slot,
         "value": session.value,
     }
@@ -419,7 +427,7 @@ class TraitSellSession:
     wallet_address: str
     slot: str
     value: str
-    amount_drops: int
+    amount_brix: str  # #239: trait listings are BRIX-denominated
     extract_session: Any
     platform: str = "discord"
     id: str = field(default_factory=lambda: uuid.uuid4().hex)
@@ -521,7 +529,7 @@ async def advance_trait_sell_session(
         payload = await create_sell_offer_payload(
             session.wallet_address,
             session.nft_id,
-            str(session.amount_drops),
+            market_ops.brix_amount_dict(session.amount_brix),
             user_token=session.push_user_token,
             platform=memos.platform_for_surface(session.platform),
         )
@@ -537,7 +545,7 @@ async def advance_trait_sell_session(
             wallet_address=session.wallet_address,
             nft_id=session.nft_id,
             listing_kind="trait",
-            amount_drops=session.amount_drops,
+            amount_brix=session.amount_brix,
             slot=session.slot,
             value=session.value,
             platform=session.platform,

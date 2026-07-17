@@ -899,9 +899,41 @@ def test_list_start_trait_owner_ok(onchain_env, market_wallet, monkeypatch):
     conn.close()
 
     monkeypatch.setattr(server.xumm_ops, "create_sell_offer_payload", _fake_payload())
-    req = _post_request("/api/market/list", {"nft_id": TRAIT1, "price_xrp": "0.5"})
+    req = _post_request("/api/market/list", {"nft_id": TRAIT1, "price_brix": "5"})
     resp = _run(server.handle_market_list_start(req))
     assert resp.status == 200
+
+
+def test_list_start_trait_with_xrp_price_400(onchain_env, market_wallet, monkeypatch):
+    # #239: trait listings are BRIX-only — an XRP price for a trait is a 400.
+    conn = _reopen(onchain_env)
+    upsert_trait_token(conn, TRAIT1, SELLER, "Hat", "Wizard Hat")
+    conn.commit()
+    conn.close()
+
+    monkeypatch.setattr(server.xumm_ops, "create_sell_offer_payload", _fake_payload())
+    req = _post_request("/api/market/list", {"nft_id": TRAIT1, "price_xrp": "0.5"})
+    resp = _run(server.handle_market_list_start(req))
+    assert resp.status == 400
+
+
+def test_list_start_character_with_brix_price_400(onchain_env, market_wallet, monkeypatch):
+    conn = _reopen(onchain_env)
+    _seed_character(conn, CHAR1, SELLER, 1)
+    conn.commit()
+    conn.close()
+
+    monkeypatch.setattr(server.xumm_ops, "create_sell_offer_payload", _fake_payload())
+    req = _post_request("/api/market/list", {"nft_id": CHAR1, "price_brix": "5"})
+    resp = _run(server.handle_market_list_start(req))
+    assert resp.status == 400
+
+
+@pytest.mark.parametrize("bad_price", ["abc", "0", "-1", "1.1234567", "Infinity", "nan"])
+def test_list_start_bad_price_brix_400(onchain_env, market_wallet, bad_price):
+    req = _post_request("/api/market/list", {"nft_id": TRAIT1, "price_brix": bad_price})
+    resp = _run(server.handle_market_list_start(req))
+    assert resp.status == 400
 
 
 @pytest.mark.parametrize("bad_price", ["abc", "0", "-1", "1.1234567", "Infinity", "nan", "-nan"])
@@ -1682,3 +1714,130 @@ def test_closet_active_helper_checks_status(onchain_env, market_wallet):
     conn.close()
     assert server._closet_active("testnet", BUYER) is True
     assert server._closet_active("testnet", "rNoCloset000000000000000000000000") is False
+
+
+# --- #239: BRIX-denominated trait List flow ---
+
+
+def _brix_sell_offer_meta(nft_id, offer_index, value):
+    return {
+        "TransactionResult": "tesSUCCESS",
+        "AffectedNodes": [
+            {
+                "CreatedNode": {
+                    "LedgerEntryType": "NFTokenOffer",
+                    "LedgerIndex": offer_index,
+                    "NewFields": {
+                        "NFTokenID": nft_id,
+                        "Amount": {
+                            "currency": server.config.TOKEN_CURRENCY_HEX,
+                            "issuer": server.config.TOKEN_ISSUER_ADDRESS,
+                            "value": value,
+                        },
+                        "Flags": 1,
+                    },
+                }
+            }
+        ],
+    }
+
+
+def test_list_start_trait_sends_brix_amount_dict(onchain_env, market_wallet, monkeypatch):
+    conn = _reopen(onchain_env)
+    upsert_trait_token(conn, TRAIT1, SELLER, "Hat", "Wizard Hat")
+    conn.commit()
+    conn.close()
+
+    captured = {}
+
+    async def capture(wallet, nft_id, amount, **kwargs):
+        captured["amount"] = amount
+        return {"qr_url": "q", "xumm_url": "x", "uuid": "U1"}
+
+    monkeypatch.setattr(server.xumm_ops, "create_sell_offer_payload", capture)
+    req = _post_request("/api/market/list", {"nft_id": TRAIT1, "price_brix": "10.50"})
+    resp = _run(server.handle_market_list_start(req))
+    assert resp.status == 200
+    assert captured["amount"] == {
+        "currency": server.config.TOKEN_CURRENCY_HEX,
+        "issuer": server.config.TOKEN_ISSUER_ADDRESS,
+        "value": "10.5",
+    }
+
+
+def test_trait_list_status_validated_success_writes_brix_row(
+    onchain_env, market_wallet, monkeypatch
+):
+    conn = _reopen(onchain_env)
+    upsert_trait_token(conn, TRAIT1, SELLER, "Hat", "Wizard Hat")
+    conn.commit()
+    conn.close()
+
+    s = server.market_flow.ListSession(
+        discord_id="dev",
+        wallet_address=SELLER,
+        nft_id=TRAIT1,
+        listing_kind="trait",
+        amount_brix="10.5",
+        slot="Hat",
+        value="Wizard Hat",
+        platform="discord",
+    )
+    s.payload_uuid = "U1"
+    server.market_sessions[s.id] = s
+    monkeypatch.setattr(
+        server.xumm_ops, "get_payload_status", _fake_status(signed=True, txid="TXHASH")
+    )
+    meta = _brix_sell_offer_meta(TRAIT1, "F" * 64, "10.5")
+
+    async def fake_get_tx(_hash):
+        return {"validated": True, "meta": meta}
+
+    monkeypatch.setattr(server.xrpl_ops, "get_tx", fake_get_tx)
+    resp = _run(server.handle_market_list_status(_StatusReq(s.id)))
+    body = _run(_read_json(resp))
+    assert body["state"] == "done"
+
+    conn = _reopen(onchain_env)
+    row = market_get_listing(conn, "F" * 64)
+    assert row is not None
+    assert row["kind"] == "trait"
+    assert row["amount_brix"] == "10.5"
+    assert row["amount_drops"] is None
+
+
+def test_trait_list_finalize_rejects_xrp_denominated_offer(
+    onchain_env, market_wallet, monkeypatch
+):
+    # A trait ListSession whose signed offer somehow came back XRP-denominated
+    # must FAIL (expect="brix"), never write a drops row for a trait.
+    conn = _reopen(onchain_env)
+    upsert_trait_token(conn, TRAIT1, SELLER, "Hat", "Wizard Hat")
+    conn.commit()
+    conn.close()
+
+    s = server.market_flow.ListSession(
+        discord_id="dev",
+        wallet_address=SELLER,
+        nft_id=TRAIT1,
+        listing_kind="trait",
+        amount_brix="10",
+        platform="discord",
+    )
+    s.payload_uuid = "U1"
+    server.market_sessions[s.id] = s
+    monkeypatch.setattr(
+        server.xumm_ops, "get_payload_status", _fake_status(signed=True, txid="TXHASH")
+    )
+    meta = _sell_offer_meta(TRAIT1, "G" * 64, 1_000_000)
+
+    async def fake_get_tx(_hash):
+        return {"validated": True, "meta": meta}
+
+    monkeypatch.setattr(server.xrpl_ops, "get_tx", fake_get_tx)
+    resp = _run(server.handle_market_list_status(_StatusReq(s.id)))
+    body = _run(_read_json(resp))
+    assert body["state"] == "failed"
+
+    conn = _reopen(onchain_env)
+    assert market_get_listing(conn, "G" * 64) is None
