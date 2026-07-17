@@ -2183,3 +2183,46 @@ def test_buy_start_legacy_xrp_trait_listing_410_stale(onchain_env, market_wallet
     assert resp.status == 410
     conn = _reopen(onchain_env)
     assert market_get_listing(conn, "L" * 64)["closed_reason"] == "stale"
+
+
+def test_buy_status_onramp_accept_payload_carries_return_url(
+    onchain_env, market_wallet, monkeypatch
+):
+    """Greptile #248: the SECOND payload (the accept built after the on-ramp)
+    must carry the buy-start request's return_url so Xaman redirects back
+    into the Activity, same as the first payload."""
+    monkeypatch.setattr(server.config, "ECONOMY_ENABLED", True)
+    conn = _reopen(onchain_env)
+    _seed_brix_trait_listing(conn)
+    conn.commit()
+    conn.close()
+
+    ret = {"app": "https://discord.com/x", "web": "https://discord.com/x"}
+    s = _make_onramp_buy_session()
+    s.return_url = ret
+    monkeypatch.setattr(
+        server.xumm_ops, "get_payload_status", _fake_status(signed=True, txid="ONRAMPTX")
+    )
+
+    async def fake_get_tx(_hash):
+        return {"validated": True, "meta": {"TransactionResult": "tesSUCCESS"}}
+
+    monkeypatch.setattr(server.xrpl_ops, "get_tx", fake_get_tx)
+
+    async def fake_verify(*a, **k):
+        return True
+
+    monkeypatch.setattr(server.market_ops, "verify_sell_offer", fake_verify)
+
+    seen_kwargs = {}
+
+    async def capture_accept(offer_index, **kw):
+        seen_kwargs.update(kw)
+        return {"uuid": "ACC1", "qr_url": "q", "xumm_url": "x", "push": None}
+
+    monkeypatch.setattr(server.xumm_ops, "create_accept_offer_payload", capture_accept)
+
+    resp = _run(server.handle_market_buy_status(_StatusReq(s.id)))
+    body = _run(_read_json(resp))
+    assert body["state"] == "awaiting_signature"
+    assert seen_kwargs["return_url"] == ret

@@ -209,6 +209,10 @@ class BuySession:
     pay_with: str | None = None
     price_xrp_quote: str | None = None
     push_user_token: str | None = field(default=None, repr=False)
+    # #239: the buy-start request's XUMM return_url, kept so the SECOND
+    # payload (the accept built after the on-ramp) redirects back into the
+    # Activity exactly like the first (Greptile #248).
+    return_url: dict[str, str] | None = None
     onramp_payload_uuid: str | None = None
     onramp_txid: str | None = None
     onramp_poll_count: int = 0

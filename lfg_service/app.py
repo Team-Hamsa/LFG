@@ -1694,6 +1694,7 @@ async def handle_market_buy_start(request):
     session.pay_with = pay_with
     session.price_xrp_quote = price_xrp_quote
     session.push_user_token = push_user_token
+    session.return_url = return_url  # threaded into the post-onramp accept payload too
     session.qr_url = payload["qr_url"]
     session.xumm_url = payload["xumm_url"]
     session.push = payload.get("push")
@@ -1827,6 +1828,7 @@ async def _continue_buy_after_onramp(session: Any, loop: Any) -> None:
         return
     payload = await xumm_ops.create_accept_offer_payload(
         session.offer_index,
+        return_url=session.return_url,
         user_token=session.push_user_token,
         platform=memos.platform_for_surface(session.platform),
         action=memos.ACTION_BUY,
