@@ -215,6 +215,55 @@ async def _require_body_affinity(char_body: str, slot: str, value: str) -> None:
         raise EconomyError(f"'{value}' does not fit a {char_body} body")
 
 
+async def assemble_prefill(conn: sqlite3.Connection, owner: str) -> dict[str, Any]:
+    """Server-side auto-fill for the Build panel's Assemble tile. The client
+    has no body-affinity knowledge (that lives in trait_config +
+    swap_compose.resolve_layer), so it must not pick assets itself — a naive
+    first-asset pick proposes sets the commit gate rejects ("'X' does not fit
+    a Y body"). For each dead Closet body edition (in Closet order), fill each
+    non-body slot with the first Closet asset that passes the SAME
+    resolve_layer gate start_assemble enforces; return the first edition that
+    fills completely, else the candidate with the fewest missing slots
+    (missing listed so the UI can explain). Raises EconomyError when the
+    Closet holds no assemblable body."""
+    genesis = trait_economy.effective_genesis(
+        economy_store.read_genesis(conn), economy_store.read_supply_changes(conn)
+    )
+    bodies = [ed for (o, ed) in economy_store.read_closet_bodies(conn) if o == owner]
+    if not bodies:
+        raise EconomyError("No bodies in your Closet to assemble.")
+    live_editions = {r.nft_number for r in nft_index.live_nfts(conn) if r.nft_number is not None}
+    assets = [
+        (s, v) for (o, s, v, c) in economy_store.read_closet_assets(conn) if o == owner and c > 0
+    ]
+    cfg = trait_config.get_config()
+    store = layer_store.get_layer_store()
+    best: dict[str, Any] | None = None
+    for edition in bodies:
+        body = genesis.edition_bodies.get(edition)
+        if body is None or edition in live_editions:
+            continue
+        chosen: dict[str, str] = {}
+        missing: list[str] = []
+        for slot in trait_economy.NON_BODY_SLOTS:
+            for s, v in assets:
+                if s != slot:
+                    continue
+                if v == "None" or await swap_compose.resolve_layer(store, cfg, body[1], slot, v):
+                    chosen[slot] = v
+                    break
+            else:
+                missing.append(slot)
+        candidate = {"edition": edition, "body": body[1], "chosen": chosen, "missing": missing}
+        if not missing:
+            return candidate
+        if best is None or len(missing) < len(best["missing"]):
+            best = candidate
+    if best is None:
+        raise EconomyError("No bodies in your Closet can be assembled right now.")
+    return best
+
+
 async def start_equip(
     discord_id: str,
     owner: str,

@@ -164,6 +164,24 @@ class MockEconomy:
         self.characters = [c for c in self.characters if c["nft_id"] != nft_id]
         return {"id": "mock", "state": "done", "error": None, "accept": None, "moved_assets": moved}
 
+    def assemble_prefill(self, owner: str) -> dict[str, Any]:
+        """Dev-mode stand-in for economy_api.assemble_prefill: no affinity
+        knowledge here, so just propose the first body + first held asset per
+        slot (the mock's assemble accepts anything)."""
+        if not self._closet_active(owner):
+            raise MockEconomyError("Create and claim your Closet first.")
+        if not self.bodies:
+            raise MockEconomyError("No bodies in your Closet to assemble.")
+        chosen: dict[str, str] = {}
+        missing: list[str] = []
+        for slot in trait_economy.NON_BODY_SLOTS:
+            value = next((v for (s, v), c in self.assets.items() if s == slot and c > 0), None)
+            if value is None:
+                missing.append(slot)
+            else:
+                chosen[slot] = value
+        return {"edition": self.bodies[0], "body": "male", "chosen": chosen, "missing": missing}
+
     def assemble(self, owner: str, edition: int, chosen: dict[str, str]) -> dict[str, Any]:
         if not self._closet_active(owner):
             raise MockEconomyError("Create and claim your Closet first.")

@@ -1189,7 +1189,15 @@ function renderGoPicker() {
   }
   const add = document.createElement('button');
   add.className = 'go-tile assemble';
-  add.textContent = '＋';
+  // A bare ＋ with only a hover title reads as "add a GO" on touch devices —
+  // label it in-tile like the character tiles.
+  const plus = document.createElement('span');
+  plus.textContent = '＋';
+  plus.className = 'go-tile-plus';
+  const cap = document.createElement('span');
+  cap.className = 'go-tile-label';
+  cap.textContent = goAssembleEnabled ? 'Assemble new' : 'Needs a Closet';
+  add.replaceChildren(plus, cap);
   add.title = goAssembleEnabled ? 'Assemble new' : 'Create your Closet first';
   if (goAssembleEnabled) add.onclick = () => { closeGoPicker(); openAssemble(); };
   else add.disabled = true;
@@ -1573,27 +1581,26 @@ async function harvestActive() {
 }
 
 async function openAssemble() {
-  const bodies = economyState.closet.bodies;
-  if (!bodies.length) { showError('No bodies in your Closet to assemble.'); return; }
-  // MVP: assemble the first available body edition, auto-filling each slot with the
-  // first compatible Closet asset; the user reviews the preview before committing.
-  const edition = bodies[0];
-  const chosen = {};
-  for (const slot of economyState.slots) {
-    const asset = economyState.closet.assets.find((a) => a.slot === slot && a.count > 0);
-    if (asset) chosen[slot] = asset.value;
+  // The server picks the edition + asset set: only it knows body affinity
+  // (a client-side "first asset per slot" pick proposed sets the commit
+  // gate rejected, e.g. a female-only beard on a skeleton body).
+  let pre;
+  try {
+    pre = await api('/api/assemble/prefill');
+  } catch (e) {
+    showError(e.message);
+    return;
   }
-  const missing = economyState.slots.filter((s) => !(s in chosen));
-  if (missing.length) {
-    showError(`Closet is missing assets for: ${missing.join(', ')}`);
+  if (pre.missing.length) {
+    showError(`Closet is missing ${pre.body}-compatible assets for: ${pre.missing.join(', ')}`);
     return;
   }
   if (!(await confirmDialog({
     title: 'Assemble new character?',
-    text: `Assemble a new character for edition #${edition}?`,
+    text: `Assemble a new ${pre.body} character for edition #${pre.edition}?`,
     confirmLabel: 'Assemble',
   }))) return;
-  commitAssemble(edition, chosen);
+  commitAssemble(pre.edition, pre.chosen);
 }
 
 async function commitAssemble(edition, chosen) {
