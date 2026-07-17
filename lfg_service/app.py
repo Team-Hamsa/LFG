@@ -3120,8 +3120,16 @@ async def handle_mint_status(request):
     await _persist_issued_user_token(request["user"], session)
     # Terminal publish is primarily the session task's job now (#216 — see
     # _run_mint_session_and_publish); this idempotent call covers poll-first
-    # ordering and retries a publish the task path failed.
-    await _publish_mint_terminal(session)
+    # ordering and retries a publish the task path failed. Guarded the same
+    # way as that task path: _publish_mint_terminal only marks the session
+    # published AFTER a successful publish_event, so a bus failure here must
+    # not raise out of the request handler — the client still needs their
+    # terminal status back, and the session stays unpublished for a later
+    # poll (or the task path) to retry.
+    try:
+        await _publish_mint_terminal(session)
+    except Exception as e:
+        logging.error(f"status-poll mint terminal publish failed for session {session.id}: {e}")
     return web.json_response(session.to_dict())
 
 

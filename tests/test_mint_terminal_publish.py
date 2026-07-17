@@ -24,6 +24,7 @@ os.environ.setdefault("LAYER_SOURCE", "local")
 os.environ.setdefault("BUNNY_PULL_ZONE", "nft.pullzone.example")
 
 import asyncio  # noqa: E402
+import json  # noqa: E402
 
 import pytest  # noqa: E402
 
@@ -223,3 +224,36 @@ def test_handle_mint_start_wires_the_publishing_wrapper(monkeypatch):
 
     _run(scenario())
     assert [e["type"] for e in events] == ["mint.completed"]
+
+
+def test_status_poll_publish_failure_still_returns_terminal_status(monkeypatch):
+    """Poll-path guard (the #41 review fix): handle_mint_status's call to
+    _publish_mint_terminal must be wrapped like _run_mint_session_and_publish's
+    — if publish_event raises during a status poll, the client still gets
+    their terminal status back (200, not a 500), _published stays False
+    (publish_terminal ordering) so a later poll can retry, and a subsequent
+    poll with a healthy bus publishes exactly once."""
+
+    async def boom(*_args, **_kwargs):
+        raise RuntimeError("bus down")
+
+    monkeypatch.setattr(server, "publish_event", boom)
+
+    session = mint_flow.MintSession(discord_id="dev", wallet_address="rWALLET")
+    session.state = mint_flow.DONE
+    server.mint_sessions[session.id] = session
+    try:
+        resp = _poll(monkeypatch, session)
+        assert resp.status == 200
+        body = json.loads(resp.body)
+        assert body["state"] == mint_flow.DONE
+        assert session._published is False
+
+        # A later poll with a healthy bus retries and publishes exactly once.
+        events = _record_publishes(monkeypatch)
+        resp2 = _poll(monkeypatch, session)
+        assert resp2.status == 200
+        assert [e["type"] for e in events] == ["mint.completed"]
+        assert session._published is True
+    finally:
+        server.mint_sessions.pop(session.id, None)
