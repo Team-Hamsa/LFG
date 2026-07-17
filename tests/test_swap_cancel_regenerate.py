@@ -260,6 +260,29 @@ def test_run_swap_session_discards_stills_on_cancel():
     assert cancel_block.rstrip().endswith("raise")
 
 
+def test_modify_results_include_nft_number():
+    """The in-place (NFTokenModify) results.append site must also carry
+    nft_number via swap_meta.extract_nft_number, same as the two
+    _create_offer_and_accept sites covered behaviorally in
+    tests/test_swap_offer_recovery.py — so the swap-result share button
+    (#41 T9) never needs to regex item['nft']['name'] client-side. Full
+    run_swap_session integration coverage of this block would require
+    mocking the entire XRPL burn/modify pipeline (no existing test in the
+    repo does that — see test_swap_face_roll.py's early-fail-before-results
+    pattern); a source guard, matching this file's existing style for
+    hard-to-integration-test invariants (test_run_swap_session_discards_
+    stills_on_cancel above), is the pragmatic check here."""
+    import inspect
+
+    src = inspect.getsource(swap_flow.run_swap_session)
+    # There are two "for item in modify_items:" loops (the modify-execution
+    # loop, then this results-append loop) — anchor on the comment
+    # immediately preceding the second one so the split isolates it.
+    after_modifies = src.split("# The modifies are final now that the burns are through.", 1)[1]
+    modify_block = after_modifies.split("if burn_items:", 1)[0]
+    assert 'swap_meta.extract_nft_number(item["nft"]["name"])' in modify_block
+
+
 def test_swap_regenerate_failure_returns_502(dev_auth, monkeypatch):
     """A swallowed regenerate failure used to answer 200 with the OLD link —
     the client showed no error and the button appeared dead (CodeRabbit #216).

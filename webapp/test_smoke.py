@@ -1597,6 +1597,57 @@ def test_config_reports_dev_mode(monkeypatch):
     assert json.loads(resp.body)["dev_mode"] is True
 
 
+def test_config_reports_public_share_base_url_when_set(monkeypatch):
+    # #41 T9: the client must learn PUBLIC_SHARE_BASE_URL through this same
+    # existing /api/config delivery path — never from location.origin, which
+    # inside the Activity is Discord's *.discordsays.com sandbox proxy, not
+    # our public host.
+    from aiohttp.test_utils import make_mocked_request
+
+    monkeypatch.setattr(server.config, "PUBLIC_SHARE_BASE_URL", "https://share.example/lfg")
+    req = make_mocked_request("GET", "/api/config")
+    resp = asyncio.get_event_loop().run_until_complete(server.handle_config(req))
+    import json
+
+    assert json.loads(resp.body)["public_share_base_url"] == "https://share.example/lfg"
+
+
+def test_config_reports_empty_public_share_base_url_when_unset(monkeypatch):
+    from aiohttp.test_utils import make_mocked_request
+
+    monkeypatch.setattr(server.config, "PUBLIC_SHARE_BASE_URL", "")
+    req = make_mocked_request("GET", "/api/config")
+    resp = asyncio.get_event_loop().run_until_complete(server.handle_config(req))
+    import json
+
+    assert json.loads(resp.body)["public_share_base_url"] == ""
+
+
+def test_config_reports_bithomp_base_url_mainnet(monkeypatch):
+    # Client-side fallback (no PUBLIC_SHARE_BASE_URL configured) needs a
+    # bithomp NFT-page base without the client having to know XRPL_NETWORK
+    # itself — the server hands over the already-network-resolved base.
+    from aiohttp.test_utils import make_mocked_request
+
+    monkeypatch.setattr(server.config, "IS_TESTNET", False)
+    req = make_mocked_request("GET", "/api/config")
+    resp = asyncio.get_event_loop().run_until_complete(server.handle_config(req))
+    import json
+
+    assert json.loads(resp.body)["bithomp_base_url"] == "https://bithomp.com"
+
+
+def test_config_reports_bithomp_base_url_testnet(monkeypatch):
+    from aiohttp.test_utils import make_mocked_request
+
+    monkeypatch.setattr(server.config, "IS_TESTNET", True)
+    req = make_mocked_request("GET", "/api/config")
+    resp = asyncio.get_event_loop().run_until_complete(server.handle_config(req))
+    import json
+
+    assert json.loads(resp.body)["bithomp_base_url"] == "https://test.bithomp.com"
+
+
 def test_dev_reload_route_404_when_off(monkeypatch):
     from aiohttp.test_utils import make_mocked_request
 

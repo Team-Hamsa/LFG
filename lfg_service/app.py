@@ -3556,13 +3556,22 @@ async def handle_web_signin_status(request):
 
 
 async def handle_config(request):
-    """Public config the frontend needs before auth (client_id, dev flag)."""
+    """Public config the frontend needs before auth (client_id, dev flag).
+
+    `public_share_base_url` / `bithomp_base_url` (#41 T9) are how the "Share
+    on X" buttons learn the base for the shared `url=` param — NEVER from
+    `location.origin` (inside the Activity the page is served from Discord's
+    *.discordsays.com sandbox proxy, not our public host; see
+    handle_nft_card's docstring for the same rule applied server-side).
+    """
     return web.json_response(
         {
             "client_id": config.DISCORD_CLIENT_ID,
             "dev_mode": config.WEBAPP_DEV_MODE,
             "economy_enabled": config.ECONOMY_ENABLED,
             "market_enabled": config.MARKET_ENABLED,
+            "public_share_base_url": config.PUBLIC_SHARE_BASE_URL,
+            "bithomp_base_url": _bithomp_base_url(),
         }
     )
 
@@ -3650,9 +3659,16 @@ def _og_traits_summary(
     return " · ".join(f"{label}: {value}" for label, value in shown)
 
 
+def _bithomp_base_url() -> str:
+    """Network-resolved bithomp host, with no `nft_id` — also handed to the
+    client via /api/config (#41 T9) as the fallback share target when
+    PUBLIC_SHARE_BASE_URL is unset, so the client never has to know
+    XRPL_NETWORK itself."""
+    return "https://test.bithomp.com" if config.IS_TESTNET else "https://bithomp.com"
+
+
 def _og_bithomp_url(nft_id: str) -> str:
-    base = "https://test.bithomp.com" if config.IS_TESTNET else "https://bithomp.com"
-    return f"{base}/en/nft/{nft_id}"
+    return f"{_bithomp_base_url()}/en/nft/{nft_id}"
 
 
 async def handle_nft_card(request: Any) -> Any:

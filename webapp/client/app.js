@@ -88,6 +88,13 @@ let me = null;
 let pollTimer = null;
 let pollGen = 0; // bumps on every pollMint call, invalidating in-flight ticks
 let externalOpener = null; // set when the SDK is available
+// "Share on X" (#41 T9): populated from /api/config in main()'s init flow.
+// NEVER derive these from the page's own browser-reported address — inside
+// the Activity the page is served from Discord's *.discordsays.com sandbox
+// proxy, not our public host, so a link built from that would be dead for
+// X's crawler.
+let shareBase = '';
+let bithompBase = '';
 
 async function api(path, opts = {}) {
   const headers = { 'Content-Type': 'application/json', ...(opts.headers || {}) };
@@ -201,6 +208,95 @@ function discordCtx() {
 function openExternal(url) {
   if (externalOpener) externalOpener(url);
   else window.open(url, '_blank');
+}
+
+// --- "Share on X" (#41 T9) ---------------------------------------------
+//
+// Spec x-integration §6.1: the shared `url=` is PUBLIC_SHARE_BASE_URL's own
+// OG card page when the operator has configured one, else bithomp's NFT
+// page (bithomp already serves its own OG tags, so links still render a
+// card either way). Both bases come from /api/config — never derived from
+// the page's own browser-reported address (see the shareBase declaration above).
+
+function bithompNftUrl(nftId) {
+  return `${bithompBase}/en/nft/${nftId}`;
+}
+
+function shareUrlFor(nftNumber, nftId) {
+  if (shareBase && nftNumber != null) return `${shareBase}/nft/${nftNumber}`;
+  return bithompNftUrl(nftId);
+}
+
+function mintShareText(nftNumber) {
+  return `I just minted LFGO #${nftNumber}! 🎨 #XRPL`;
+}
+
+function swapShareText(nftNumber) {
+  // nft_number can be null (extract_nft_number found no "#<digits>" in the
+  // display name) — the URL still falls back to bithomp via shareUrlFor, but
+  // the tweet text can't reference a number that doesn't exist.
+  return nftNumber != null
+    ? `I just swapped traits on LFGO #${nftNumber}! 🎨 #XRPL`
+    : 'I just swapped traits on my LFGO! 🎨 #XRPL';
+}
+
+// Build a "Share on X" control: a real <a target=_blank> anchor (Task 0's
+// iframe verification of window.open/openExternal inside the sandboxed
+// Activity is tracked separately — a genuine anchor href is the fail-safe
+// either way, not just a JS-only click handler) plus a "Copy link"
+// affordance. Never window.confirm/alert for feedback — both are silent
+// no-ops inside the Discord Activity iframe.
+function buildShareControl(text, url) {
+  const intentUrl = `https://x.com/intent/tweet?text=${encodeURIComponent(text)}&url=${encodeURIComponent(url)}`;
+
+  const wrap = document.createElement('p');
+  wrap.className = 'share-row';
+
+  const link = document.createElement('a');
+  link.className = 'link';
+  link.textContent = '🐦 Share on X';
+  link.href = intentUrl;
+  link.target = '_blank';
+  link.rel = 'noopener noreferrer';
+  link.onclick = (e) => {
+    // Route through the SDK-aware helper first (best chance of breaking out
+    // of the sandboxed iframe cleanly); the anchor's real href/target=_blank
+    // stays as the fallback for a middle-click, long-press, or a right-click
+    // "open in new tab" if the handler doesn't fire.
+    e.preventDefault();
+    openExternal(intentUrl);
+  };
+
+  const copyBtn = document.createElement('button');
+  copyBtn.type = 'button';
+  copyBtn.className = 'link';
+  copyBtn.textContent = 'Copy link';
+
+  const copyInput = document.createElement('input');
+  copyInput.type = 'text';
+  copyInput.className = 'copy-input';
+  copyInput.readOnly = true;
+  copyInput.hidden = true;
+  copyInput.setAttribute('aria-label', 'Share link');
+  copyInput.value = intentUrl;
+
+  copyBtn.onclick = async () => {
+    try {
+      await navigator.clipboard.writeText(intentUrl);
+      const original = copyBtn.textContent;
+      copyBtn.textContent = 'Copied!';
+      setTimeout(() => { copyBtn.textContent = original; }, 2000);
+    } catch (_) {
+      // Clipboard API unavailable/denied: reveal the readonly input so the
+      // user can select-all and copy by hand.
+      copyInput.hidden = false;
+      copyInput.focus();
+      copyInput.select();
+    }
+  };
+
+  wrap.append(link, copyBtn, copyInput);
+  return wrap;
 }
 
 async function setupDiscord() {
@@ -496,7 +592,7 @@ function signText(push, base) {
   return base;
 }
 
-function showFlow({ title, text, qrData, link, image, video, done, stage, spinner, celebrate, pill, regen, cancel }) {
+function showFlow({ title, text, qrData, link, image, video, done, stage, spinner, celebrate, pill, regen, cancel, share }) {
   showPanel('flow-panel');
   renderSteps(stage);
   el('pay-method').hidden = !pill;
@@ -527,6 +623,13 @@ function showFlow({ title, text, qrData, link, image, video, done, stage, spinne
   el('flow-cancel-btn').hidden = !cancel;
   el('flow-cancel-btn').onclick = cancel || null;
   el('flow-done-btn').hidden = !done;
+  // Mint-success terminal state only (#41 T9) — callers pass `share` only
+  // from the two showFlow() call sites inside pollMint()'s offer_ready
+  // branch, never from a failure/timeout/other-flow call site.
+  const shareRow = el('flow-share-row');
+  shareRow.replaceChildren();
+  shareRow.hidden = !share;
+  if (share) shareRow.appendChild(buildShareControl(share.text, share.url));
 }
 
 // The pay screen adapts to the backend's silently-detected payment path:
@@ -596,6 +699,7 @@ function pollMint(sessionId) {
           done: true,
           stage: s.state,
           celebrate: true,
+          share: { text: mintShareText(s.nft_number), url: shareUrlFor(s.nft_number, s.nft_id) },
         });
         return;
       }
@@ -612,6 +716,7 @@ function pollMint(sessionId) {
         done: true,
         stage: s.state,
         celebrate: true,
+        share: { text: mintShareText(s.nft_number), url: shareUrlFor(s.nft_number, s.nft_id) },
       });
       pollTimer = setTimeout(tick, 3000); // keep watching for the accept signature
       return;
@@ -1212,6 +1317,11 @@ function renderSwapResults(s) {
       btn.onclick = () => openExternal(r.accept_deeplink);
       div.appendChild(btn);
     }
+    // The traits are already final on-chain at this point regardless of
+    // `modified` (see run_swap_session: results are only appended once
+    // everything is settled) — share per result, not once for the whole
+    // panel, since a swap can touch up to two NFTs (#41 T9).
+    div.appendChild(buildShareControl(swapShareText(r.nft_number), shareUrlFor(r.nft_number, r.nft_id)));
     box.appendChild(div);
   }
   el('swap-done-btn').hidden = false;
@@ -2390,6 +2500,8 @@ async function main() {
     // In-app marketplace (#44) ships after the mainnet MVP: with the feature
     // off, hide the Marketplace entry point (the API answers 403 regardless).
     if (cfg.market_enabled === false) el('market-btn').hidden = true;
+    shareBase = cfg.public_share_base_url || '';
+    bithompBase = cfg.bithomp_base_url || '';
     // Dev reload is same-origin only — never against a cross-origin API base.
     if (cfg.dev_mode && !API_BASE && 'EventSource' in window) {
       new EventSource('/__dev/reload').onmessage = () => location.reload();
