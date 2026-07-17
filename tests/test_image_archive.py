@@ -231,6 +231,91 @@ def test_img_falls_back_to_proxy_when_archive_misses(monkeypatch, tmp_path):
     assert fetched == ["https://bafyarchived.ipfs.dweb.link/5.png"]
 
 
+# ------------------------------------------------- /api/img byte ranges (#250)
+#
+# Animated NFTs route their .mp4 through /api/img; iOS WebKit's media loader
+# probes with `Range: bytes=0-1` and refuses progressive mp4 playback unless
+# the server answers 206 with a Content-Range — so both the archive-hit and
+# CDN-fallback responses must honor single byte ranges.
+
+
+def _range_request(url: str, range_header: str | None):
+    from aiohttp.test_utils import make_mocked_request
+
+    headers = {"Range": range_header} if range_header else {}
+    return make_mocked_request("GET", "/api/img?u=" + quote(url, safe=""), headers=headers)
+
+
+def _proxy_fetch(monkeypatch, body: bytes, ctype: str) -> None:
+    async def fake_fetch(url):
+        return body, ctype
+
+    monkeypatch.setattr(server, "_fetch_cdn", fake_fetch)
+
+
+def test_img_proxy_range_returns_206_slice(monkeypatch, tmp_path):
+    """The exact WebKit probe: bytes=0-1 against a CDN-proxied mp4."""
+    _seed_env(monkeypatch, tmp_path, with_file=False)
+    _proxy_fetch(monkeypatch, b"mp4 body bytes", "video/mp4")
+    resp = asyncio.get_event_loop().run_until_complete(
+        server.handle_img(_range_request(_IPFS_URL, "bytes=0-1"))
+    )
+    assert resp.status == 206
+    assert resp.body == b"mp"
+    assert resp.headers["Content-Range"] == "bytes 0-1/14"
+    assert resp.headers["Accept-Ranges"] == "bytes"
+
+
+def test_img_proxy_range_open_ended_and_suffix(monkeypatch, tmp_path):
+    _seed_env(monkeypatch, tmp_path, with_file=False)
+    _proxy_fetch(monkeypatch, b"0123456789", "video/mp4")
+    run = asyncio.get_event_loop().run_until_complete
+    resp = run(server.handle_img(_range_request(_IPFS_URL, "bytes=4-")))
+    assert (resp.status, resp.body) == (206, b"456789")
+    assert resp.headers["Content-Range"] == "bytes 4-9/10"
+    resp = run(server.handle_img(_range_request(_IPFS_URL, "bytes=-3")))
+    assert (resp.status, resp.body) == (206, b"789")
+    assert resp.headers["Content-Range"] == "bytes 7-9/10"
+
+
+def test_img_proxy_range_unsatisfiable_is_416(monkeypatch, tmp_path):
+    _seed_env(monkeypatch, tmp_path, with_file=False)
+    _proxy_fetch(monkeypatch, b"0123456789", "video/mp4")
+    resp = asyncio.get_event_loop().run_until_complete(
+        server.handle_img(_range_request(_IPFS_URL, "bytes=100-"))
+    )
+    assert resp.status == 416
+    assert resp.headers["Content-Range"] == "bytes */10"
+
+
+def test_img_proxy_no_range_advertises_accept_ranges(monkeypatch, tmp_path):
+    """Plain 200s now advertise Accept-Ranges so media loaders know to probe;
+    a malformed Range header is ignored per RFC 9110 (200, not an error)."""
+    _seed_env(monkeypatch, tmp_path, with_file=False)
+    _proxy_fetch(monkeypatch, b"0123456789", "video/mp4")
+    run = asyncio.get_event_loop().run_until_complete
+    for header in (None, "bytes=", "items=0-1", "bytes=2-1-0"):
+        resp = run(server.handle_img(_range_request(_IPFS_URL, header)))
+        assert (resp.status, resp.body) == (200, b"0123456789"), header
+        assert resp.headers["Accept-Ranges"] == "bytes"
+
+
+def test_img_archive_hit_honors_range(monkeypatch, tmp_path):
+    """Archive-served bodies must be range-capable too (same media loader)."""
+    _seed_env(monkeypatch, tmp_path, with_file=True)
+
+    async def boom(url):  # pragma: no cover - must never be reached
+        raise AssertionError("archived image hit the network")
+
+    monkeypatch.setattr(server, "_fetch_cdn", boom)
+    resp = asyncio.get_event_loop().run_until_complete(
+        server.handle_img(_range_request(_IPFS_URL, "bytes=0-3"))
+    )
+    assert resp.status == 206
+    assert resp.body == b"\x89PNG"
+    assert resp.headers["Content-Range"].startswith("bytes 0-3/")
+
+
 def test_img_survives_broken_archive_lookup(monkeypatch, tmp_path):
     """An archive/index failure must degrade to the proxy, never 500."""
     _seed_env(monkeypatch, tmp_path, with_file=True)

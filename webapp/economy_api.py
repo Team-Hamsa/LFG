@@ -109,6 +109,8 @@ def economy_session_dict(kind: str, s: Any) -> dict[str, Any]:
         base["accept"] = ((r["accept"] or {}).get("xumm_url")) if r else None
         base["accept_push"] = ((r["accept"] or {}).get("push")) if r else None
         base["image_url"] = r["image_url"] if r else None
+        # .get(): older journals / fakes predate the animated-NFT field (#250).
+        base["video_url"] = r.get("video_url") if r else None
         base["nft_id"] = r["nft_id"] if r else None
     elif kind == "extract":
         base["accept"] = (s.accept or {}).get("xumm_url")
