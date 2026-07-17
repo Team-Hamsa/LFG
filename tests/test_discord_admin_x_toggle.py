@@ -48,27 +48,49 @@ def _button_interaction():
     return inter, sent
 
 
-def _command_interaction():
-    """Fake interaction for the top-level /admin slash command."""
-    sent: dict[str, object] = {}
+def _command_interaction(order: list[str] | None = None):
+    """Fake interaction for the top-level /admin slash command.
 
-    async def send_message(embed=None, view=None, ephemeral=True):
+    The command must ACK (defer) BEFORE any service call — Discord's ~3s
+    initial-response window is far shorter than the SDK's retry/backoff —
+    so the fake records call order into `order` for the ordering assert.
+    """
+    sent: dict[str, object] = {}
+    order = order if order is not None else []
+
+    async def defer(ephemeral=True):
+        order.append("defer")
+
+    async def followup_send(embed=None, view=None, ephemeral=True):
+        order.append("followup")
         sent["embed"] = embed
         sent["view"] = view
+        sent["ephemeral"] = ephemeral
 
-    inter = SimpleNamespace(user=_FakeUser(), response=SimpleNamespace(send_message=send_message))
-    return inter, sent
+    inter = SimpleNamespace(
+        user=_FakeUser(),
+        response=SimpleNamespace(defer=defer),
+        followup=SimpleNamespace(send=followup_send),
+    )
+    return inter, sent, order
 
 
 class _FakeSvc:
-    """Stands in for the shared LFGServiceClient's x_status/x_pause/x_resume."""
+    """Stands in for the shared LFGServiceClient's x_status/x_pause/x_resume.
 
-    def __init__(self, paused: bool):
+    `order` (optional) is the same list a fake interaction records into, so
+    tests can assert the ACK/service-call interleaving, not just call counts.
+    """
+
+    def __init__(self, paused: bool, order: list[str] | None = None):
         self.paused = paused
         self.calls: list[str] = []
+        self._order = order
 
     async def x_status(self):
         self.calls.append("status")
+        if self._order is not None:
+            self._order.append("x_status")
         return {"paused": self.paused, "month_posts": 5, "budget": 100, "enabled": True}
 
     async def x_pause(self):
@@ -211,25 +233,42 @@ def test_toggle_button_degrades_ephemerally_on_service_error(admin_mod, monkeypa
 # ---- /admin command wiring: admin_command.callback(ix), same unwrap idiom ----
 
 
+def test_admin_command_acks_before_status_fetch(admin_mod, monkeypatch):
+    # CRITICAL ordering: Discord's initial-response window is ~3s; the SDK's
+    # retry/backoff on a down service sleeps far longer. The defer (ACK) must
+    # happen BEFORE svc.x_status() is awaited, and the panel goes out on the
+    # followup — never response.send_message after a potentially-slow call.
+    order: list[str] = []
+    monkeypatch.setattr(admin_mod, "svc", _FakeSvc(paused=False, order=order))
+    ix, sent, order = _command_interaction(order)
+    _run(admin_mod.admin_command.callback(ix))
+    assert "defer" in order and "x_status" in order
+    assert order.index("defer") < order.index("x_status")
+    assert order[-1] == "followup"
+
+
 def test_admin_command_reflects_paused_state_in_button_label(admin_mod, monkeypatch):
     monkeypatch.setattr(admin_mod, "svc", _FakeSvc(paused=True))
-    ix, sent = _command_interaction()
+    ix, sent, _order = _command_interaction()
     _run(admin_mod.admin_command.callback(ix))
     assert sent["view"].x_toggle_button.label == "▶️ Resume X posting"
+    assert sent["ephemeral"] is True
 
 
 def test_admin_command_reflects_running_state_in_button_label(admin_mod, monkeypatch):
     monkeypatch.setattr(admin_mod, "svc", _FakeSvc(paused=False))
-    ix, sent = _command_interaction()
+    ix, sent, _order = _command_interaction()
     _run(admin_mod.admin_command.callback(ix))
     assert sent["view"].x_toggle_button.label == "⏸️ Pause X posting"
 
 
 def test_admin_command_degrades_when_status_unavailable(admin_mod, monkeypatch):
     monkeypatch.setattr(admin_mod, "svc", _FailingSvc())
-    ix, sent = _command_interaction()
-    # Must not raise — the whole panel must still be sent.
+    ix, sent, order = _command_interaction()
+    # Must not raise — the whole panel must still be sent via the followup
+    # (the deferred ACK already went out, so followup is the only valid path).
     _run(admin_mod.admin_command.callback(ix))
+    assert order[0] == "defer" and order[-1] == "followup"
     assert sent["view"] is not None
     # Falls back to the view's default (class-defined) label.
     assert sent["view"].x_toggle_button.label == "⏸️ Pause X posting"

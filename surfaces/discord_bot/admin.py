@@ -520,6 +520,12 @@ async def admin_command(interaction: discord.Interaction):
 
     logging.info(f"Admin command triggered by {interaction.user}")
 
+    # ACK first: Discord requires the initial response within ~3s, and the
+    # best-effort svc.x_status() below can sleep through the SDK's full
+    # retry/backoff schedule when lfg_service is down — deferring up front
+    # keeps the interaction token alive for the followup regardless.
+    await interaction.response.defer(ephemeral=True)
+
     # Create the admin panel embed
     embed = Embed(
         title="🔧 Admin Control Panel",
@@ -546,7 +552,7 @@ async def admin_command(interaction: discord.Interaction):
     except ServiceError as e:
         logging.warning(f"x_status failed while building admin panel: {e}")
 
-    await interaction.response.send_message(embed=embed, view=view, ephemeral=True)
+    await interaction.followup.send(embed=embed, view=view, ephemeral=True)
 
 
 class NFTLookupModal(Modal, title="NFT Lookup"):
