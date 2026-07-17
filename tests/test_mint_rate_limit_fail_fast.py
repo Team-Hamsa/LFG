@@ -56,10 +56,22 @@ class _FakeStartRequest:
 
 
 def _start(monkeypatch):
+    """Drive handle_mint_start and settle any spawned session task inside the
+    same loop, so loop.close() never destroys a pending task (test leakage)."""
     monkeypatch.setattr(config, "WEBAPP_DEV_MODE", True)
     monkeypatch.setattr(identity_store, "user_token_for", lambda _p, _u: None)
     server.mint_sessions.clear()
-    return _run(server.handle_mint_start(_FakeStartRequest()))
+
+    async def scenario():
+        resp = await server.handle_mint_start(_FakeStartRequest())
+        # Let any created task start, then await it to completion.
+        await asyncio.sleep(0)
+        for session in list(server.mint_sessions.values()):
+            if session.task is not None:
+                await session.task
+        return resp
+
+    return _run(scenario())
 
 
 def _prepare_without_payload(monkeypatch):
@@ -76,8 +88,19 @@ def _prepare_without_payload(monkeypatch):
 def test_mint_start_503s_when_payload_create_fails_rate_limited(monkeypatch):
     _prepare_without_payload(monkeypatch)
     monkeypatch.setattr(xumm_ops, "_rate_limited_until", time.monotonic() + 30)
+    # Record any spawned payment-wait: the fail-fast contract is that NO
+    # session task ever starts, not just that the session dict is cleaned.
+    started = []
+
+    async def record(session):
+        started.append(session)
+        session.state = mint_flow.CANCELLED
+
+    monkeypatch.setattr(mint_flow, "run_mint_session", record)
 
     resp = _start(monkeypatch)
+
+    assert started == []  # the payment wait was never entered
 
     assert resp.status == 503
     body = json.loads(resp.body.decode())
