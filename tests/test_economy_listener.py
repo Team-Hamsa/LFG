@@ -48,7 +48,11 @@ def test_closet_modify_rebuilds_tables():
     async def fetch_meta(uri_hex):
         return meta
 
-    tx = {"TransactionType": "NFTokenModify", "NFTokenID": "CLOSET"}
+    tx = {
+        "TransactionType": "NFTokenModify",
+        "NFTokenID": "CLOSET",
+        "meta": {"TransactionResult": "tesSUCCESS"},
+    }
     _run(
         nft_listener.apply_economy_tx(
             conn,
@@ -79,7 +83,10 @@ def test_unknown_edition_mint_logs_growth():
     async def fetch_meta(uri_hex):
         return _char_meta(3536)
 
-    tx = {"TransactionType": "NFTokenMint", "meta": {"nftoken_id": "CHAR"}}
+    tx = {
+        "TransactionType": "NFTokenMint",
+        "meta": {"TransactionResult": "tesSUCCESS", "nftoken_id": "CHAR"},
+    }
     genesis = te.Genesis(trait_counts={}, edition_bodies={})  # 3536 unknown
     _run(
         nft_listener.apply_economy_tx(
@@ -107,7 +114,10 @@ def test_known_edition_mint_logs_nothing():
     async def fetch_meta(uri_hex):
         return _char_meta(7)
 
-    tx = {"TransactionType": "NFTokenMint", "meta": {"nftoken_id": "CHAR"}}
+    tx = {
+        "TransactionType": "NFTokenMint",
+        "meta": {"TransactionResult": "tesSUCCESS", "nftoken_id": "CHAR"},
+    }
     genesis = te.Genesis(trait_counts={}, edition_bodies={7: ("Straight Blue", "male")})
     _run(
         nft_listener.apply_economy_tx(
@@ -135,7 +145,10 @@ def test_closet_accept_marks_active():
     async def fetch_meta(uri_hex):
         return meta
 
-    tx = {"TransactionType": "NFTokenAcceptOffer", "meta": {"nftoken_id": "CLOSET_ACC"}}
+    tx = {
+        "TransactionType": "NFTokenAcceptOffer",
+        "meta": {"TransactionResult": "tesSUCCESS", "nftoken_id": "CLOSET_ACC"},
+    }
     _run(
         nft_listener.apply_economy_tx(
             conn,
@@ -168,7 +181,10 @@ def test_closet_mint_marks_pending():
     async def fetch_meta(uri_hex):
         return meta
 
-    tx = {"TransactionType": "NFTokenMint", "meta": {"nftoken_id": "CLOSET_MINT"}}
+    tx = {
+        "TransactionType": "NFTokenMint",
+        "meta": {"TransactionResult": "tesSUCCESS", "nftoken_id": "CLOSET_MINT"},
+    }
     _run(
         nft_listener.apply_economy_tx(
             conn,
@@ -207,7 +223,11 @@ def test_closet_listener_preserves_offer_id():
         return meta
 
     # Drive a modify through the listener (simulates an NFTokenModify event on the Closet).
-    tx = {"TransactionType": "NFTokenModify", "NFTokenID": "CLOSET1"}
+    tx = {
+        "TransactionType": "NFTokenModify",
+        "NFTokenID": "CLOSET1",
+        "meta": {"TransactionResult": "tesSUCCESS"},
+    }
     _run(
         nft_listener.apply_economy_tx(
             conn,
@@ -250,7 +270,10 @@ def test_trait_mint_inserts_row():
     async def fetch_meta(uri_hex):
         return meta
 
-    tx = {"TransactionType": "NFTokenMint", "meta": {"nftoken_id": "TRAIT1"}}
+    tx = {
+        "TransactionType": "NFTokenMint",
+        "meta": {"TransactionResult": "tesSUCCESS", "nftoken_id": "TRAIT1"},
+    }
     _run(
         nft_listener.apply_economy_tx(
             conn,
@@ -282,7 +305,10 @@ def test_trait_mint_applies_without_frozen_genesis():
     async def fetch_meta(uri_hex):
         return meta
 
-    tx = {"TransactionType": "NFTokenMint", "meta": {"nftoken_id": "TRAITNG"}}
+    tx = {
+        "TransactionType": "NFTokenMint",
+        "meta": {"TransactionResult": "tesSUCCESS", "nftoken_id": "TRAITNG"},
+    }
     _run(
         nft_listener.apply_economy_tx(
             conn,
@@ -318,7 +344,10 @@ def test_trait_transfer_updates_owner():
     async def fetch_meta(uri_hex):
         return meta
 
-    tx = {"TransactionType": "NFTokenAcceptOffer", "meta": {"nftoken_id": "TRAIT1"}}
+    tx = {
+        "TransactionType": "NFTokenAcceptOffer",
+        "meta": {"TransactionResult": "tesSUCCESS", "nftoken_id": "TRAIT1"},
+    }
     _run(
         nft_listener.apply_economy_tx(
             conn,
@@ -344,7 +373,11 @@ def test_trait_burn_deletes_row():
     es.upsert_trait_token(conn, "TRAIT1", "rUser", "Hat", "Cap")
     assert len(es.read_trait_tokens(conn)) == 1
 
-    tx = {"TransactionType": "NFTokenBurn", "NFTokenID": "TRAIT1"}
+    tx = {
+        "TransactionType": "NFTokenBurn",
+        "NFTokenID": "TRAIT1",
+        "meta": {"TransactionResult": "tesSUCCESS"},
+    }
 
     # For a burn, apply_economy_tx must not call fetch_token (it short-circuits on kind).
     # We do provide fetchers that return TRAIT_TAXON data so if the code incorrectly
@@ -383,7 +416,11 @@ def test_trait_burn_deletes_row_even_when_token_fetch_returns_none():
     es.upsert_trait_token(conn, "TRAIT_GONE", "rUser", "Hat", "Cap")
     assert len(es.read_trait_tokens(conn)) == 1
 
-    tx = {"TransactionType": "NFTokenBurn", "NFTokenID": "TRAIT_GONE"}
+    tx = {
+        "TransactionType": "NFTokenBurn",
+        "NFTokenID": "TRAIT_GONE",
+        "meta": {"TransactionResult": "tesSUCCESS"},
+    }
 
     async def fetch_token(nft_id):
         # Simulate nft_info returning None for a token already purged from the ledger.
@@ -411,7 +448,11 @@ def test_trait_burn_of_unknown_nft_id_is_idempotent():
     # No rows seeded: table is empty.
     assert es.read_trait_tokens(conn) == []
 
-    tx = {"TransactionType": "NFTokenBurn", "NFTokenID": "UNKNOWN_NFT"}
+    tx = {
+        "TransactionType": "NFTokenBurn",
+        "NFTokenID": "UNKNOWN_NFT",
+        "meta": {"TransactionResult": "tesSUCCESS"},
+    }
 
     async def fetch_token(nft_id):
         return None  # gone from ledger
@@ -457,7 +498,10 @@ def test_forged_closet_from_foreign_issuer_writes_nothing():
     async def fetch_meta(uri_hex):
         return meta
 
-    tx = {"TransactionType": "NFTokenMint", "meta": {"nftoken_id": "FORGED_CLOSET"}}
+    tx = {
+        "TransactionType": "NFTokenMint",
+        "meta": {"TransactionResult": "tesSUCCESS", "nftoken_id": "FORGED_CLOSET"},
+    }
     _run(
         nft_listener.apply_economy_tx(
             conn,
@@ -490,7 +534,10 @@ def test_forged_trait_token_from_foreign_issuer_writes_nothing():
     async def fetch_meta(uri_hex):
         return meta
 
-    tx = {"TransactionType": "NFTokenMint", "meta": {"nftoken_id": "FORGED_TRAIT"}}
+    tx = {
+        "TransactionType": "NFTokenMint",
+        "meta": {"TransactionResult": "tesSUCCESS", "nftoken_id": "FORGED_TRAIT"},
+    }
     _run(
         nft_listener.apply_economy_tx(
             conn,
@@ -520,7 +567,10 @@ def test_foreign_issuer_named_mint_logs_no_growth():
     async def fetch_meta(uri_hex):
         return _char_meta(9999)
 
-    tx = {"TransactionType": "NFTokenMint", "meta": {"nftoken_id": "FORGED_CHAR"}}
+    tx = {
+        "TransactionType": "NFTokenMint",
+        "meta": {"TransactionResult": "tesSUCCESS", "nftoken_id": "FORGED_CHAR"},
+    }
     genesis = te.Genesis(trait_counts={}, edition_bodies={})  # 9999 unknown
     _run(
         nft_listener.apply_economy_tx(
@@ -547,7 +597,10 @@ def test_genuine_issuer_named_mint_still_logs_growth():
     async def fetch_meta(uri_hex):
         return _char_meta(9999)
 
-    tx = {"TransactionType": "NFTokenMint", "meta": {"nftoken_id": "REAL_CHAR"}}
+    tx = {
+        "TransactionType": "NFTokenMint",
+        "meta": {"TransactionResult": "tesSUCCESS", "nftoken_id": "REAL_CHAR"},
+    }
     genesis = te.Genesis(trait_counts={}, edition_bodies={})  # 9999 unknown
     _run(
         nft_listener.apply_economy_tx(

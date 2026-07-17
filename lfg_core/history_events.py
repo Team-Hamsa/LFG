@@ -127,7 +127,12 @@ def derive_nft_events(tx: dict[str, Any], *, nft_issuer: str) -> list[dict[str, 
     with `nft_id_issuer_matches(ev["nft_id"], issuer_account_hex(nft_issuer))`
     — every NFTokenID embeds its issuer's AccountID at hex chars 8..48.
     `nft_issuer` is accepted for signature stability but is unused in-function.
+
+    A non-tesSUCCESS tx is ledger-included but performed nothing, so it derives
+    no events (#235: tec NFTokenBurn attempts once counted as real burns).
     """
+    if not nft_listener.tx_succeeded(tx, log_skip_as="derive_nft_events"):
+        return []
     ttype = str(tx.get("TransactionType", ""))
     meta = tx.get("meta") or {}
     ts = tx_unix_time(tx)
@@ -304,7 +309,10 @@ def derive_brix_events(
     """Derive BRIX balance-event rows for one normalized tx.
 
     Per-holder BRIX trustline balance changes, shaped for history_store.insert_brix_event.
+    A non-tesSUCCESS tx moved no balances, so it derives no events (#235).
     """
+    if not nft_listener.tx_succeeded(tx, log_skip_as="derive_brix_events"):
+        return []
     ttype = str(tx.get("TransactionType", ""))
     account = tx.get("Account")
     deltas = _brix_deltas(tx.get("meta") or {}, brix_issuer, brix_hex)

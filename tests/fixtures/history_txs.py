@@ -34,7 +34,7 @@ MINT = {
     "hash": "01" * 32,
     "ledger_index": 100,
     "date": 800000000,
-    "meta": {"nftoken_id": NFT_A, "AffectedNodes": []},
+    "meta": {"TransactionResult": "tesSUCCESS", "nftoken_id": NFT_A, "AffectedNodes": []},
 }
 
 BURN = {
@@ -45,7 +45,7 @@ BURN = {
     "hash": "02" * 32,
     "ledger_index": 101,
     "date": 800000100,
-    "meta": {"AffectedNodes": []},
+    "meta": {"TransactionResult": "tesSUCCESS", "AffectedNodes": []},
 }
 
 # Foreign-collection txs (nft_id embeds FOREIGN_ISSUER): the listener firehose
@@ -58,7 +58,7 @@ FOREIGN_BURN = {
     "hash": "F1" * 32,
     "ledger_index": 201,
     "date": 800009100,
-    "meta": {"AffectedNodes": []},
+    "meta": {"TransactionResult": "tesSUCCESS", "AffectedNodes": []},
 }
 
 FOREIGN_MODIFY = {
@@ -69,7 +69,7 @@ FOREIGN_MODIFY = {
     "hash": "F2" * 32,
     "ledger_index": 202,
     "date": 800009200,
-    "meta": {"AffectedNodes": []},
+    "meta": {"TransactionResult": "tesSUCCESS", "AffectedNodes": []},
 }
 
 MODIFY = {
@@ -80,7 +80,7 @@ MODIFY = {
     "hash": "03" * 32,
     "ledger_index": 102,
     "date": 800000200,
-    "meta": {"AffectedNodes": []},
+    "meta": {"TransactionResult": "tesSUCCESS", "AffectedNodes": []},
 }
 
 
@@ -100,7 +100,11 @@ SALE_XRP = {
     "hash": "04" * 32,
     "ledger_index": 103,
     "date": 800000300,
-    "meta": {"nftoken_id": NFT_A, "AffectedNodes": [_deleted_offer(ALICE, "5000000", 1)]},
+    "meta": {
+        "TransactionResult": "tesSUCCESS",
+        "nftoken_id": NFT_A,
+        "AffectedNodes": [_deleted_offer(ALICE, "5000000", 1)],
+    },
 }
 
 # Issuer transfers to Alice for 0 (zero-price sell offer)
@@ -110,7 +114,11 @@ TRANSFER_FREE = {
     "hash": "05" * 32,
     "ledger_index": 104,
     "date": 800000400,
-    "meta": {"nftoken_id": NFT_A, "AffectedNodes": [_deleted_offer(ISSUER, "0", 1)]},
+    "meta": {
+        "TransactionResult": "tesSUCCESS",
+        "nftoken_id": NFT_A,
+        "AffectedNodes": [_deleted_offer(ISSUER, "0", 1)],
+    },
 }
 
 # Bob buys from Alice with a BUY offer (flag 0): offer.Owner = buyer, accepter = seller
@@ -121,6 +129,7 @@ SALE_IOU = {
     "ledger_index": 105,
     "date": 800000500,
     "meta": {
+        "TransactionResult": "tesSUCCESS",
         "nftoken_id": NFT_A,
         "AffectedNodes": [
             _deleted_offer(BOB, {"currency": BRIX_HEX, "issuer": BRIX_ISSUER, "value": "10"}, 0)
@@ -139,6 +148,7 @@ SALE_BROKERED = {
     "ledger_index": 111,
     "date": 800001100,
     "meta": {
+        "TransactionResult": "tesSUCCESS",
         "nftoken_id": NFT_A,
         "AffectedNodes": [
             _deleted_offer(ALICE, "5000000", 1),
@@ -155,6 +165,7 @@ TRANSFER_ZERO_IOU = {
     "ledger_index": 112,
     "date": 800001200,
     "meta": {
+        "TransactionResult": "tesSUCCESS",
         "nftoken_id": NFT_A,
         "AffectedNodes": [
             _deleted_offer(ALICE, {"currency": BRIX_HEX, "issuer": BRIX_ISSUER, "value": "0"}, 1)
@@ -193,10 +204,11 @@ SALE_XRP_PAGE_DIFF_MISMATCH = {
     "ledger_index": 114,
     "date": 800001400,
     "meta": {
+        "TransactionResult": "tesSUCCESS",
         "AffectedNodes": [
             _deleted_offer(ALICE, "5000000", 1),
             _nftoken_page_node(NFT_B),
-        ]
+        ],
     },
 }
 
@@ -208,6 +220,7 @@ TRANSFER_NO_AMOUNT = {
     "ledger_index": 113,
     "date": 800001300,
     "meta": {
+        "TransactionResult": "tesSUCCESS",
         "nftoken_id": NFT_A,
         "AffectedNodes": [_deleted_offer_no_amount(ALICE, 1)],
     },
@@ -222,7 +235,7 @@ OFFER_CREATE = {
     "hash": "07" * 32,
     "ledger_index": 106,
     "date": 800000600,
-    "meta": {"AffectedNodes": []},
+    "meta": {"TransactionResult": "tesSUCCESS", "AffectedNodes": []},
 }
 
 OFFER_CANCEL = {
@@ -231,7 +244,10 @@ OFFER_CANCEL = {
     "hash": "08" * 32,
     "ledger_index": 107,
     "date": 800000700,
-    "meta": {"AffectedNodes": [_deleted_offer(ALICE, "9000000", 1)]},
+    "meta": {
+        "TransactionResult": "tesSUCCESS",
+        "AffectedNodes": [_deleted_offer(ALICE, "9000000", 1)],
+    },
 }
 
 
@@ -267,10 +283,11 @@ AIRDROP = {
     "ledger_index": 108,
     "date": 800000800,
     "meta": {
+        "TransactionResult": "tesSUCCESS",
         "AffectedNodes": [
             _ripplestate(ALICE, BRIX_ISSUER, 10, 13),
             _ripplestate(DISTRIBUTOR, BRIX_ISSUER, 50, 47),
-        ]
+        ],
     },
 }
 
@@ -281,7 +298,7 @@ TRUSTSET = {
     "hash": "0A" * 32,
     "ledger_index": 109,
     "date": 800000900,
-    "meta": {"AffectedNodes": []},
+    "meta": {"TransactionResult": "tesSUCCESS", "AffectedNodes": []},
 }
 
 AMM_DEPOSIT = {
@@ -290,5 +307,22 @@ AMM_DEPOSIT = {
     "hash": "0B" * 32,
     "ledger_index": 110,
     "date": 800001000,
-    "meta": {"AffectedNodes": [_ripplestate(ALICE, BRIX_ISSUER, 13, 3)]},
+    "meta": {
+        "TransactionResult": "tesSUCCESS",
+        "AffectedNodes": [_ripplestate(ALICE, BRIX_ISSUER, 13, 3)],
+    },
 }
+
+
+def failed(tx: dict, result: str = "tecNO_ENTRY") -> dict:
+    """Copy of a fixture tx whose meta carries a failed TransactionResult:
+    ledger-included (tec-class claims a fee) but the operation did NOT happen,
+    so no events/index mutations may be derived from it (#210/#235)."""
+    out = dict(tx)
+    out["meta"] = {**tx["meta"], "TransactionResult": result}
+    return out
+
+
+# The #235 shape verbatim: a failed NFTokenBurn attempt (e.g. tecNO_ENTRY on an
+# already-moved token) that the derivers/appliers once consumed as a real burn.
+BURN_TEC = failed(BURN)
