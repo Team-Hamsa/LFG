@@ -9,19 +9,41 @@
 #
 # Ordering is fail-safe for the user — reversible steps first, the
 # irreversible one last:
+#   pre-fee stale-pointer check (nft_exists on the burnable originals; a
+#     definitively-absent token fails free and self-heals the index — #211) →
 #   compose/upload → collect modify fee (if any) →
 #   mint replacements (revertible: burn them) →
 #   modify mutables (revertible: modify back to the old URI) →
-#   burn originals (IRREVERSIBLE) → offers.
+#   pre-burn stale-pointer guard (final arbiter of the same #211 check) →
+#   burn originals (IRREVERSIBLE) →
+#   persist ledger truth to the on-chain index (onchain_<net>.db: old token
+#     burned, replacement live — best-effort but LOUD on failure; the flow's
+#     second durable output besides the journal) →
+#   offers (with a bounded on-ledger landed-offer recheck before declaring
+#     failure).
 # If anything fails before the original burns, replacements are burned back
 # and modifies reverted, so the user keeps their originals untouched. Every
 # on-chain step is journaled to SWAP_RECORDS_DIR so an administrator can
-# recover a partial swap.
+# recover a partial swap. Journal statuses distinguish outcomes one-to-one:
+# "stale_pointer" always means a full unwind (nothing delivered), while
+# "stale_pointer_partial"/"partial" mean the first edition's replacement WAS
+# delivered (offer live/pending accept) — with "_no_offer" suffixes when the
+# surviving offer itself failed.
+#
+# The #211 incident (2026-07-10) shapes the guards above: the listener was
+# down while a replacement offer reported failure (it had actually landed and
+# was accepted minutes later), so the on-chain index kept serving the burned
+# old_nft_id; every later swap on that edition minted a replacement, hit
+# tecNO_ENTRY on the burn, and reverted. Hence the existence checks (stale
+# rows fail free and are healed), the post-burn index persist (the roster
+# sees ledger truth even with the listener down), and the landed-offer
+# recheck (a delivered offer is adopted, never stranded).
 
 import asyncio
 import json
 import logging
 import os
+import sqlite3
 import time
 import traceback
 import uuid
@@ -38,6 +60,7 @@ from lfg_core import (
     image_archive,
     layer_store,
     memos,
+    nft_index,
     swap_compose,
     swap_meta,
     traits,
@@ -292,6 +315,93 @@ def _write_swap_record(session: SwapSession, items: list[dict[str, Any]], status
         logging.error(f"Failed to write swap record: {traceback.format_exc()}")
 
 
+def _open_index_db() -> sqlite3.Connection:
+    return nft_index.init_db(nft_index.index_db_path(config.XRPL_NETWORK))
+
+
+def _persist_remint_to_index(item: dict[str, Any]) -> None:
+    """Write the post-burn ledger truth for one remint straight into the
+    on-chain index (#211 — see the module docstring). The burn is the point
+    of no return, and both stores are normally repointed only by the listener
+    observing the txs — mirror what the listener would do, immediately: flip
+    is_burned on the old token and upsert the replacement as live (owner =
+    the issuer wallet until the offer is accepted — truthful; the listener
+    updates it on accept, and later listener/backfill upserts fill in
+    ledger_index).
+
+    Failures are LOUD (both ids in one CRITICAL line, mirroring bulk's
+    _on_mint) but never fail the session: the chain is truth and the
+    listener/backfill self-heals the index."""
+    old_id = item["nft"]["nft_id"]
+    new_id = item["new_nft_id"]
+    try:
+        conn = _open_index_db()
+        try:
+            nft_index.mark_burned(conn, old_id)
+            try:
+                # The NFTokenID's first two bytes ARE the on-ledger flags
+                # (same derivation as nft_index.to_token).
+                flags = int(new_id[:4], 16)
+            except ValueError:
+                flags = 0
+            nft_index.upsert(
+                conn,
+                nft_index.OnchainNft(
+                    nft_id=new_id,
+                    nft_number=item["nft"]["number"],
+                    owner=config.SIGNING_ACCOUNT,
+                    is_burned=False,
+                    mutable=bool(flags & nft_index.NFT_FLAG_MUTABLE),
+                    # .hex() is lowercase — the index's canonical case.
+                    uri_hex=item["metadata_url"].encode("utf-8").hex(),
+                    body=swap_meta.detect_body(item["attrs"]),
+                    attributes=item["attrs"],
+                    image=item["image_url"],
+                    ledger_index=None,
+                ),
+            )
+        finally:
+            conn.close()
+    except Exception:
+        logging.critical(
+            f"post-burn index persist FAILED for swap edition {item['nft']['number']} "
+            f"(old={old_id} burned on-chain, new={new_id} live): the roster will serve "
+            f"the stale old token until the listener/backfill catches up. "
+            f"{traceback.format_exc()}"
+        )
+
+
+def _heal_stale_index_pointer(nft: dict[str, Any]) -> None:
+    """The pre-burn existence check proved this session was built on a stale
+    index row — the ledger definitively no longer has the token (#211: a
+    prior remint the listener never observed). Mark it burned so the roster
+    stops offering it. Best-effort: a failure here only delays the heal until
+    the next listener/backfill pass."""
+    try:
+        conn = _open_index_db()
+        try:
+            nft_index.mark_burned(conn, nft["nft_id"])
+            newer = nft_index.nft_by_number(conn, nft["number"])
+            if newer is not None:
+                logging.info(
+                    f"stale swap pointer healed: edition {nft['number']} token "
+                    f"{nft['nft_id']} marked burned; live token is {newer.nft_id} — "
+                    "the next session picks it up from the roster"
+                )
+            else:
+                logging.warning(
+                    f"stale swap pointer healed: edition {nft['number']} token "
+                    f"{nft['nft_id']} marked burned; no live token known at this "
+                    "edition yet (listener/backfill will restore it)"
+                )
+        finally:
+            conn.close()
+    except Exception:
+        logging.error(
+            f"stale-pointer index heal failed for {nft['nft_id']}: {traceback.format_exc()}"
+        )
+
+
 async def _burn_replacements(items: list[dict[str, Any]]) -> None:
     """Best-effort cleanup: burn re-minted replacements that will never be
     offered (they sit in the issuer wallet, so failure harms no user)."""
@@ -331,6 +441,52 @@ async def _revert_modifies(items: list[dict[str, Any]], owner: str) -> None:
             item["reverted"] = True
         else:
             logging.error(f"Revert modify failed for {item['nft']['nft_id']}; it keeps the new URI")
+
+
+# Bounded cadence for the landed-offer recheck: a tx forwarded just before a
+# network blip can still validate 1-2 ledgers (~4-8s) after create_nft_offer
+# gives up, so a single instant look would miss it. 3 passes 5s apart mirrors
+# create_nft_offer's own inline confirm cadence (spans the LastLedgerSequence
+# window). Tests shrink the delay to 0.
+_LANDED_OFFER_ATTEMPTS = 3
+_LANDED_OFFER_DELAY_SECONDS = 5.0
+
+
+async def _find_landed_offer(nft_id: str, destination: str) -> str | None:
+    """Look for a live sell offer of `nft_id` from the issuer wallet to
+    `destination` and return its offer index, or None.
+
+    #211 — see the module docstring: create_nft_offer collapses "landed but
+    the short inline confirm loop gave up / submit raised after forwarding"
+    into the same None as a genuine failure (it never confirms by hash the
+    way _submit_and_confirm does), so a falsy create result is rechecked
+    on-ledger — with the bounded retry above, since the offer may validate
+    seconds after the create call gave up — before the session declares
+    failed_offers. The match is owner (the issuer wallet) + destination (the
+    swapper) only: unlike bulk mint's amount-0 gift offers, swap offers carry
+    the fee price (_offer_amount) which can vary with the AMM quote, so
+    amount is not part of the identity. A lookup failure is indeterminate —
+    retry through it, then return None and let the caller fail as before."""
+    for attempt in range(_LANDED_OFFER_ATTEMPTS):
+        if attempt:
+            await asyncio.sleep(_LANDED_OFFER_DELAY_SECONDS)
+        try:
+            offers = await xrpl_ops.get_nft_sell_offers(nft_id, raise_on_error=True)
+        except Exception as e:
+            logging.warning(f"landed-offer recheck failed for {nft_id}: {e}")
+            continue
+        for offer in offers:
+            if (
+                offer.get("owner") == xrpl_ops.bot_wallet_address()
+                and offer.get("destination") == destination
+                and offer.get("offer_index")
+            ):
+                logging.warning(
+                    f"create_nft_offer reported failure but offer {offer['offer_index']} "
+                    f"for {nft_id} is live on-ledger — adopting it (#211)"
+                )
+                return str(offer["offer_index"])
+    return None
 
 
 def _offer_amount(session: SwapSession) -> str | IssuedCurrencyAmount:
@@ -382,6 +538,10 @@ async def _create_offer_and_accept(session: SwapSession, item: dict[str, Any]) -
         amount=_offer_amount(session),
         platform=memos.platform_for_surface(session.platform),
     )
+    if not offer_id:
+        # #211: the offer may have landed despite the falsy return — adopt it
+        # instead of stranding a delivered-but-unconfirmed replacement.
+        offer_id = await _find_landed_offer(item["new_nft_id"], session.wallet_address)
     if not offer_id:
         session.error = (
             f"{item['nft']['name']} was reminted "
@@ -525,6 +685,26 @@ async def run_swap_session(session: SwapSession) -> None:
         modify_items = [it for it in items if it["nft"].get("mutable")]
         burn_items = [it for it in items if not it["nft"].get("mutable")]
 
+        # #211 stale-pointer pre-check (see module docstring): the roster that
+        # built this session reads the on-chain index, and a stale row feeds
+        # an already-burned old_nft_id into a fresh session. The answer is
+        # knowable before any payment or on-chain work — check now, while
+        # failing is free (no fee charged, nothing composed), instead of
+        # discovering it at burn time after a mixed swap's modify fee was
+        # consumed. Tri-state: only a DEFINITIVE clio absence (False) trips
+        # it; None (transient blip) assumes present. The burn-time guard
+        # below remains the final arbiter for a token that vanishes
+        # mid-session.
+        for item in burn_items:
+            if await xrpl_ops.nft_exists(item["nft"]["nft_id"]) is False:
+                _heal_stale_index_pointer(item["nft"])
+                session.error = (
+                    f"{item['nft']['name']} was already swapped or "
+                    "replaced — refresh and try again."
+                )
+                session.state = FAILED
+                return
+
         # 1. Compose and upload both new NFTs (images + metadata)
         session.state = COMPOSING
         for item in items:
@@ -615,28 +795,65 @@ async def run_swap_session(session: SwapSession) -> None:
         if burn_items:
             session.state = BURNING
             for i, item in enumerate(burn_items):
-                burn_hash = await xrpl_ops.burn_nft(
-                    item["nft"]["nft_id"],
-                    session.wallet_address,
-                    platform=memos.platform_for_surface(session.platform),
-                )
+                # #211 stale-pointer guard (see module docstring) — the final
+                # arbiter after the pre-fee check: the token can still vanish
+                # mid-session. Tri-state: only a DEFINITIVE clio absence
+                # (False) trips it; None (transient blip) assumes present and
+                # proceeds to the burn, which is its own final arbiter —
+                # never unwind on a blip.
+                stale = await xrpl_ops.nft_exists(item["nft"]["nft_id"]) is False
+                if stale:
+                    _heal_stale_index_pointer(item["nft"])
+                    burn_hash = None
+                else:
+                    burn_hash = await xrpl_ops.burn_nft(
+                        item["nft"]["nft_id"],
+                        session.wallet_address,
+                        platform=memos.platform_for_surface(session.platform),
+                    )
                 if burn_hash:
                     item["burn_hash"] = burn_hash
+                    # #211: the burn is the point of no return — persist the
+                    # ledger truth (old burned, replacement live) into the
+                    # on-chain index NOW, before the fallible offer/XUMM
+                    # steps, so readers see the new token even if everything
+                    # after this fails and the listener is down.
+                    _persist_remint_to_index(item)
                     continue
 
                 if i == 0:
                     # Nothing burned yet: unwind everything (replacements
                     # burned, modifies reverted); the user keeps both
-                    # originals exactly as they were.
+                    # originals exactly as they were (on a stale pointer this
+                    # first original was already gone before the session
+                    # started — nothing of theirs was touched either way).
                     await _revert_modifies(modify_items, session.wallet_address)
                     await _burn_replacements(burn_items)
                     _discard_stills(items, session.id)
-                    _write_swap_record(session, items, "failed_burning")
-                    session.error = (
-                        f"Failed to burn {item['nft']['name']} "
-                        f"({item['nft']['nft_id']}). No NFTs were "
-                        "lost — contact an administrator."
+                    _write_swap_record(
+                        session, items, "stale_pointer" if stale else "failed_burning"
                     )
+                    if stale and session.fee_amount is not None:
+                        # A mixed swap already collected (and consumed) the
+                        # upfront modify fee, and the modify was reverted —
+                        # inviting a plain retry would charge the fee again
+                        # for one effective swap. Route to an admin instead.
+                        session.error = (
+                            f"{item['nft']['name']} was already swapped or "
+                            "replaced. Your NFTs are untouched, but the swap "
+                            "fee was charged — contact an administrator."
+                        )
+                    elif stale:
+                        session.error = (
+                            f"{item['nft']['name']} was already swapped or "
+                            "replaced — refresh and try again."
+                        )
+                    else:
+                        session.error = (
+                            f"Failed to burn {item['nft']['name']} "
+                            f"({item['nft']['nft_id']}). No NFTs were "
+                            "lost — contact an administrator."
+                        )
                     session.state = FAILED
                     return
 
@@ -649,19 +866,32 @@ async def run_swap_session(session: SwapSession) -> None:
                 # its offer fails below; `item` reverted.
                 _archive_stills([other], session.id)
                 _discard_stills([item], session.id)
-                _write_swap_record(session, items, "partial_burn_failure")
+                # "stale_pointer" is reserved for the i==0 full unwind
+                # (nothing delivered); the partial shape gets its own status
+                # so a journal triager never mistakes a delivered-pending-
+                # offer replacement for a no-action unwind.
+                partial_status = "stale_pointer_partial" if stale else "partial_burn_failure"
+                _write_swap_record(session, items, partial_status)
                 if not await _create_offer_and_accept(session, other):
-                    _write_swap_record(session, items, "partial_burn_failure_no_offer")
+                    _write_swap_record(session, items, f"{partial_status}_no_offer")
                     session.state = FAILED
                     return
-                session.error = (
-                    f"{item['nft']['name']} could not be burned, so "
-                    "its traits were not swapped (it is still in "
-                    f"your wallet). {other['nft']['name']} was "
-                    "re-crafted — accept it below, then contact an "
-                    "administrator."
-                )
-                _write_swap_record(session, items, "partial")
+                if stale:
+                    session.error = (
+                        f"{item['nft']['name']} was already swapped or "
+                        "replaced, so its traits were not swapped — refresh "
+                        f"and try again. {other['nft']['name']} was "
+                        "re-crafted — accept it below."
+                    )
+                else:
+                    session.error = (
+                        f"{item['nft']['name']} could not be burned, so "
+                        "its traits were not swapped (it is still in "
+                        f"your wallet). {other['nft']['name']} was "
+                        "re-crafted — accept it below, then contact an "
+                        "administrator."
+                    )
+                _write_swap_record(session, items, "stale_pointer_partial" if stale else "partial")
                 session.state = FAILED
                 return
             _write_swap_record(session, items, "burned")

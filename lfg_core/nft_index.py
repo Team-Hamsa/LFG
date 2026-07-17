@@ -259,6 +259,16 @@ def upsert(conn: sqlite3.Connection, rec: OnchainNft) -> None:
     conn.commit()
 
 
+def mark_burned(conn: sqlite3.Connection, nft_id: str) -> None:
+    """Flip is_burned on a known token. Unknown tokens are ignored — a burn of
+    an NFT outside our collection must not add a stub row to the index. The
+    single implementation shared by the listener (burn txs) and swap_flow's
+    #211 post-burn persist / stale-pointer heal, so a change to burn-flip
+    semantics can never miss a writer."""
+    conn.execute("UPDATE onchain_nfts SET is_burned=1 WHERE nft_id=?", (nft_id,))
+    conn.commit()
+
+
 def live_nfts(conn: sqlite3.Connection) -> list[OnchainNft]:
     """Every non-burned token in the index."""
     conn.row_factory = sqlite3.Row

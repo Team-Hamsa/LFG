@@ -99,10 +99,9 @@ def affected_nft_ids(tx: dict[str, Any]) -> list[str]:
 
 
 def _set_burned(conn: sqlite3.Connection, nft_id: str) -> None:
-    """Flip is_burned on a known token. Unknown tokens are ignored — a burn of an
-    NFT outside our collection must not add a stub row to the index."""
-    conn.execute("UPDATE onchain_nfts SET is_burned=1 WHERE nft_id=?", (nft_id,))
-    conn.commit()
+    """Flip is_burned on a known token — thin alias for the shared
+    nft_index.mark_burned (also used by swap_flow's #211 writes)."""
+    nft_index.mark_burned(conn, nft_id)
 
 
 async def apply_tx(

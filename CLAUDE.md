@@ -450,7 +450,9 @@ dedicated per-`nft_id` index instead.
 
 - **Store:** per-network SQLite files `onchain_testnet.db` / `onchain_mainnet.db`
   (gitignored, regenerable), one `onchain_nfts` table keyed by `nft_id`. Built by
-  `lfg_core/nft_index.py`; kept fresh by `lfg_core/nft_listener.py`.
+  `lfg_core/nft_index.py`; kept fresh by `lfg_core/nft_listener.py` (and, since
+  #211, stamped directly by `lfg_core/swap_flow.py` at the burn-remint point of
+  no return — the listener remains the backstop/refiner).
 - **Backfill (one-time / after a reset):**
   `.venv/bin/python scripts/backfill_onchain.py --network testnet|mainnet`
   (or `onchain_listener.py … snapshot`). Idempotent. Mainnet metadata is on IPFS
