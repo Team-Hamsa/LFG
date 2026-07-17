@@ -37,8 +37,9 @@ def test_telegram_surface_config_rejects_non_https_miniapp_url(monkeypatch):
     monkeypatch.setenv("TELEGRAM_MINI_APP_URL", "https://x")
     importlib.reload(cfg)
     assert cfg.TELEGRAM_MINI_APP_URL == "https://x"
-    # Unset is fine (feature dormant).
-    monkeypatch.delenv("TELEGRAM_MINI_APP_URL", raising=False)
+    # Unset is fine (feature dormant). Set "" explicitly (not delenv): a
+    # populated .env would otherwise repopulate it via load_dotenv() on reload.
+    monkeypatch.setenv("TELEGRAM_MINI_APP_URL", "")
     importlib.reload(cfg)
     assert cfg.TELEGRAM_MINI_APP_URL == ""
 
@@ -78,7 +79,9 @@ def test_telegram_surface_config_miniapp_url_default(monkeypatch):
         "TELEGRAM_ANNOUNCE_CHAT_ID": "1",
     }.items():
         monkeypatch.setenv(k, v)
-    monkeypatch.delenv("TELEGRAM_MINI_APP_URL", raising=False)
+    # "" not delenv: load_dotenv() on reload would repopulate a deleted var
+    # from a populated .env ("" is the same feature-off sentinel as unset).
+    monkeypatch.setenv("TELEGRAM_MINI_APP_URL", "")
     import surfaces.telegram_bot.config as cfg
 
     importlib.reload(cfg)
