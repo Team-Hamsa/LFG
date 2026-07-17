@@ -26,6 +26,7 @@ from lfg_core import (
     memos,
     rarity,
     swap_compose,
+    swap_meta,
     traits,
     xrpl_ops,
     xumm_ops,
@@ -387,6 +388,12 @@ async def mint_one_unit(
         #    the Trait Swapper uses: <gender>/<TraitType>/<Value>.ext)
         store = layer_store.get_layer_store()
         body, attributes = await traits.select_random_attributes(store)
+        # #268 (NFT #4039): canonicalize the roll ONCE, before anything reads
+        # it — a legacy Accessory duplicate of a Back value (e.g. "Angel Wings
+        # Open") must be relocated to Back so the composed PNG and the
+        # metadata JSON see the same canonical view that every reader
+        # (swap_meta.normalize_attributes) does.
+        attributes = swap_meta.normalize_attributes(attributes)
         output_path, is_video = await swap_compose.compose_nft(
             attributes, body, store, f"lfg_{nft_number}"
         )

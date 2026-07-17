@@ -23,7 +23,7 @@ os.environ.setdefault("BUNNY_PULL_ZONE", "nft.pullzone.example")
 
 import asyncio  # noqa: E402
 
-from lfg_core import mint_flow  # noqa: E402
+from lfg_core import mint_flow, swap_meta  # noqa: E402
 
 
 def test_to_dict_traits_and_body_type_none_before_fulfillment():
@@ -118,7 +118,10 @@ def test_run_mint_session_populates_traits_and_body_type(monkeypatch):
     d = session.to_dict()
     # Head -> Hat: the LFG table's headwear column is named Hat even though
     # the layer tree / metadata attributes use Head (lfg_core/rarity.py).
-    assert d["traits"] == {"Hat": "Wizard Hat", "Body": "Blue"}
+    # #268: the normalize step 'None'-fills every remaining canonical slot.
+    expected = {t: "None" for t in swap_meta.TRAIT_ORDER if t != "Head"}
+    expected.update({"Hat": "Wizard Hat", "Body": "Blue"})
+    assert d["traits"] == expected
     assert d["body_type"] == "milady"
     # Existing keys still correct -- additive change, no regressions.
     assert d["nft_id"] == "NFTID100"

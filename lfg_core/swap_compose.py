@@ -18,7 +18,18 @@ def _canonical(attributes: list[dict[str, Any]]) -> list[dict[str, Any]]:
     """Canonical layer order (z-order from trait_config: layer z, or a
     per-value z_override — this is what floats effect traits like Wavy Eyes
     to render on top of everything else); 'None'/empty values skipped (no
-    layer file)."""
+    layer file).
+
+    Refuses un-normalized relocation-class input (#268, NFT #4039): an
+    Accessory value that swap_meta.normalize_attributes would relocate to
+    Back must never be silently z-sorted here — the composed image would
+    diverge from what every metadata reader sees."""
+    for a in attributes:
+        if a.get("trait_type") == "Accessory" and a.get("value") in swap_meta.BACK_VALUES:
+            raise ValueError(
+                f"Un-normalized attributes: Accessory value {a['value']!r} belongs on "
+                "Back (#268) — run swap_meta.normalize_attributes before composing"
+            )
     non_empty = [a for a in attributes if a.get("value") and a["value"] != "None"]
     return trait_config.get_config().sort_attributes(non_empty)
 
@@ -99,6 +110,13 @@ async def compose_nft(
         layers.append((a["trait_type"], a["value"], path))
     if not canonical:
         raise ValueError("No trait layers to compose")
+    # #268 belt assertion: the composed (trait_type, value) multiset must
+    # equal the canonical attribute view — pins compose == metadata against
+    # any future resolve-side drift.
+    if sorted((t, v) for t, v, _p in layers) != sorted(
+        (a["trait_type"], a["value"]) for a in canonical
+    ):
+        raise ValueError("Composed layers diverge from canonical attributes (#268)")
 
     body_value = swap_meta.get_attr(attributes, "Body") or ""
     layers = await ape_face.inject_and_mask(layers, body, body_value, store, out_dir)
