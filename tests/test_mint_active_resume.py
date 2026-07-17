@@ -207,3 +207,41 @@ def test_mint_start_fail_fast_preserves_concurrent_cancel(dev_auth, monkeypatch)
     assert not session.error
     assert session.task is None
     assert events == []  # deliberate cancels announce nothing (#141)
+
+
+def test_mint_start_cancel_during_prepare_with_payload_never_launches(dev_auth, monkeypatch):
+    """CodeRabbit major on #262: when a cancel lands during prepare_payment
+    but the payload WAS created (payment_uuid set), the handler must still
+    not launch run_mint_session for the terminal session — launching would
+    resurrect a mint the user backed out of."""
+
+    async def cancelled_after_payload(self):
+        self.pay_with, self.pay_amount = "XRP", "10"
+        self.payment_link = "https://xumm.app/sign/u1"
+        self.payment_uuid = "u1"
+        assert self.cancel()
+        self.mark_published()
+
+    monkeypatch.setattr(mint_flow.MintSession, "prepare_payment", cancelled_after_payload)
+    events = _record_publishes(monkeypatch)
+
+    resp = _run(server.handle_mint_start(_post_start_request()))
+    assert resp.status == 200  # payload existed; the response reports state
+    (session,) = dev_auth.values()
+    assert session.state == mint_flow.CANCELLED
+    assert session.task is None  # the watch was never launched
+    assert events == []
+
+
+def test_run_mint_session_refuses_terminal_entry(monkeypatch):
+    """Defense-in-depth twin of the handler guard: a terminal session handed
+    to run_mint_session must return immediately without entering the wait."""
+
+    async def _wait_must_not_run(**kw):
+        raise AssertionError("wait_for_payment must not be called")
+
+    monkeypatch.setattr(mint_flow.xrpl_ops, "wait_for_payment", _wait_must_not_run)
+    session = mint_flow.MintSession("u1", "rUSER", platform="discord")
+    session.state = mint_flow.CANCELLED
+    _run(mint_flow.run_mint_session(session))
+    assert session.state == mint_flow.CANCELLED

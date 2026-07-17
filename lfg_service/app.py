@@ -2925,6 +2925,13 @@ async def handle_mint_start(request):
         except Exception as e:
             logging.error(f"fail-fast mint terminal publish failed for session {session.id}: {e}")
         return _xumm_unavailable_response()
+    if session.state != mint_flow.AWAITING_PAYMENT:
+        # Cancelled (or otherwise terminalized) while this handler awaited
+        # prepare_payment — even with a successfully-created payload,
+        # launching the watch would resurrect a session the user backed out
+        # of (run_mint_session's terminal entry guard is the second line of
+        # defense; same pattern as bulk).
+        return web.json_response(session.to_dict())
     # Keep the task handle so /cancel can stop the payment wait (#141).
     # The wrapper publishes the terminal firehose event server-side, so a
     # client that never polls again (webview killed mid-sign, #216) still

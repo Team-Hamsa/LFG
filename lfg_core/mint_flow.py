@@ -582,6 +582,11 @@ def _capture_issued_token(session: MintSession, s: dict[str, Any]) -> None:
 
 async def run_mint_session(session: MintSession) -> None:
     """Drive a MintSession to a terminal state. Run as a background task."""
+    if session.state in TERMINAL_STATES:
+        # A cancel can land while handle_mint_start awaits prepare_payment;
+        # running a terminal session would resurrect it (waiting for a
+        # payment the user backed out of). Same guard bulk mint has.
+        return
     try:
         # 1. Wait for the sender-verified payment on whichever path
         #    prepare_payment detected. not_before bounds the missed-payment
