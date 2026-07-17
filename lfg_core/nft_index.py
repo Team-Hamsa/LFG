@@ -251,11 +251,25 @@ def upsert(conn: sqlite3.Connection, rec: OnchainNft) -> None:
                  THEN attributes_json ELSE excluded.attributes_json END,
             image=CASE WHEN excluded.attributes_json='[]'
                  THEN image ELSE excluded.image END,
-            ledger_index=excluded.ledger_index,
+            -- COALESCE: a writer that doesn't know the ledger height (the
+            -- swap flow's burn-point stamp passes None) must never erase one
+            -- the listener already recorded — nft_by_number orders duplicate
+            -- live editions by this field (#211 review).
+            ledger_index=COALESCE(excluded.ledger_index, onchain_nfts.ledger_index),
             last_synced_at=CURRENT_TIMESTAMP
         """,
         _nft_to_row(rec),
     )
+    conn.commit()
+
+
+def mark_burned(conn: sqlite3.Connection, nft_id: str) -> None:
+    """Flip is_burned on a known token. Unknown tokens are ignored — a burn of
+    an NFT outside our collection must not add a stub row to the index. The
+    single implementation shared by the listener (burn txs) and swap_flow's
+    #211 post-burn persist / stale-pointer heal, so a change to burn-flip
+    semantics can never miss a writer."""
+    conn.execute("UPDATE onchain_nfts SET is_burned=1 WHERE nft_id=?", (nft_id,))
     conn.commit()
 
 

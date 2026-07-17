@@ -3936,9 +3936,10 @@ def _og_traits_summary(
 ) -> str:
     """2-3 'Label: Value' trait pairs for og:description. The on-chain
     index's raw metadata attributes (insertion order) are preferred — swaps
-    NEVER update the LFG table while the listener keeps the index fresh
-    (NFTokenModify + burn-remint), so the LFG row can describe pre-swap
-    traits. LFG-row traits (fixed slot order) are the fallback when the
+    NEVER update the LFG table while the index stays fresh (the swap flow
+    stamps it at the burn point of no return since #211; the listener keeps
+    it fresh otherwise — NFTokenModify + burn-remint), so the LFG row can
+    describe pre-swap traits. LFG-row traits (fixed slot order) are the fallback when the
     index record carries no usable attributes (e.g. unreadable-metadata
     backfill rows). Deliberately no rarity dependency, unlike the x_bot
     poster's rarest-first ranking (#41 §6.2: "keep it simple"). `onchain`'s
@@ -4012,8 +4013,9 @@ async def handle_nft_card(request: Any) -> Any:
         return web.HTTPNotFound(text=_OG_NOT_FOUND_HTML, content_type="text/html")
 
     # On-chain index FIRST, stale-able LFG row as fallback: swaps never
-    # update the LFG table (the listener keeps the index fresh via modify +
-    # burn-remint), so an LFG-row-first card would show pre-swap art and a
+    # update the LFG table (the swap flow stamps the index at the burn point
+    # of no return since #211; the listener keeps it fresh otherwise — modify
+    # + burn-remint), so an LFG-row-first card would show pre-swap art and a
     # bithomp link to the BURNED pre-swap token.
     image_url = onchain.image or (lfg_row or {}).get("image_url") or ""
     nft_id = onchain.nft_id or (lfg_row or {}).get("nft_id") or ""

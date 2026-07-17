@@ -4,7 +4,9 @@
 # account itself — mint_nft always mints Account=SIGNING_ACCOUNT, so the token
 # is already in that wallet and a self-directed sell offer is invalid
 # (temREDUNDANT). A genuine offer-creation failure still surfaces the admin
-# error with no partial result.
+# error with no partial result — but only after the #211 on-ledger recheck
+# (create_nft_offer collapses indeterminate outcomes into None; a landed
+# issuer→swapper offer is adopted instead of failing the session).
 #
 # Env-guard preamble: importing lfg_core.config freezes its constants at import
 # time; set the same defaults test_smoke.py uses so collection order can't
@@ -139,18 +141,163 @@ def test_result_omits_nft_number_when_name_has_no_number(monkeypatch):
 
 
 def test_offer_creation_failure_surfaces_admin_error(monkeypatch):
-    """create_nft_offer returning None fails with the admin message, no result."""
+    """create_nft_offer returning None + no landed offer on-ledger (#211): the
+    on-ledger recheck ran (all bounded retry passes), found nothing matching
+    (foreign offers are never adopted), and the admin error surfaces with no
+    partial result. The raise_on_error kwarg is recorded in the stub and
+    asserted in the test body — an in-stub assert would be swallowed by
+    _find_landed_offer's broad except and could never fail the test."""
+    looked_up = []
 
     async def fake_offer(*a, **k):
         return None
 
+    async def fake_sell_offers(nft_id, raise_on_error=False):
+        looked_up.append((nft_id, raise_on_error))
+        return [
+            # Same token, wrong destination — someone else's offer, not ours.
+            {
+                "offer_index": "FOREIGN1",
+                "owner": "rISSUERxxxxxxxxxxxxxxxxxxxxxxxx",
+                "destination": "rSOMEONEELSEzzzzzzzzzzzzzzzzzzz",
+                "amount": "6562500",
+            },
+            # Right destination, wrong owner — not the issuer's offer.
+            {
+                "offer_index": "FOREIGN2",
+                "owner": "rNOTISSUERwwwwwwwwwwwwwwwwwwwww",
+                "destination": "rUSERyyyyyyyyyyyyyyyyyyyyyyyyyy",
+                "amount": "6562500",
+            },
+        ]
+
     monkeypatch.setattr(xrpl_ops, "create_nft_offer", fake_offer)
+    monkeypatch.setattr(xrpl_ops, "get_nft_sell_offers", fake_sell_offers)
     monkeypatch.setattr(config, "SIGNING_ACCOUNT", "rISSUERxxxxxxxxxxxxxxxxxxxxxxxx")
+    monkeypatch.setattr(swap_flow, "_LANDED_OFFER_DELAY_SECONDS", 0)
 
     s = _make_session("rUSERyyyyyyyyyyyyyyyyyyyyyyyyyy")
     item = _item()
     ok = _run(swap_flow._create_offer_and_accept(s, item))
 
     assert ok is False
+    # The recheck ran every bounded pass and each attempt requested
+    # raise_on_error=True (the indeterminate-lookups-must-raise contract) —
+    # this stub returns foreign offers, so nothing here raised.
+    assert looked_up == [(_NEW_NFT_ID, True)] * swap_flow._LANDED_OFFER_ATTEMPTS
     assert "offer failed" in (s.error or "")
     assert s.results == []
+
+
+def test_offer_failure_adopts_landed_offer(monkeypatch):
+    """#211 core recovery: create_nft_offer collapses an indeterminate outcome
+    (raised submit / slow confirm loop) into None even when the offer LANDED —
+    the on-ledger recheck finds the issuer→swapper offer and adopts it, so the
+    session proceeds to the accept payload instead of failed_offers. Amount is
+    deliberately NOT matched: swap offers are fee-priced (non-zero, AMM-quote
+    dependent), unlike bulk's amount-0 gift offers."""
+
+    async def fake_offer(*a, **k):
+        return None
+
+    async def fake_sell_offers(nft_id, raise_on_error=False):
+        assert nft_id == _NEW_NFT_ID
+        return [
+            {
+                "offer_index": "LANDED123",
+                "owner": "rISSUERxxxxxxxxxxxxxxxxxxxxxxxx",
+                "destination": "rUSERyyyyyyyyyyyyyyyyyyyyyyyyyy",
+                "amount": "6562500",  # non-zero: fee-priced, still adopted
+            }
+        ]
+
+    async def fake_accept(offer_id, return_url=None, user_token=None, **kwargs):
+        assert offer_id == "LANDED123"
+        return {"qr_url": "q", "xumm_url": "x"}
+
+    monkeypatch.setattr(xrpl_ops, "create_nft_offer", fake_offer)
+    monkeypatch.setattr(xrpl_ops, "get_nft_sell_offers", fake_sell_offers)
+    monkeypatch.setattr(xumm_ops, "create_accept_offer_payload", fake_accept)
+    monkeypatch.setattr(config, "SIGNING_ACCOUNT", "rISSUERxxxxxxxxxxxxxxxxxxxxxxxx")
+
+    s = _make_session("rUSERyyyyyyyyyyyyyyyyyyyyyyyyyy")
+    item = _item()
+    ok = _run(swap_flow._create_offer_and_accept(s, item))
+
+    assert ok is True
+    assert item["offer_id"] == "LANDED123"
+    assert s.error is None
+    assert len(s.results) == 1
+    assert s.results[0]["accept_deeplink"] == "x"
+
+
+def test_offer_failure_lookup_error_fails_closed(monkeypatch):
+    """Recheck lookup raising (RPC blip) is indeterminate: never adopt, retry
+    through the blip, then fail exactly as before — the post-burn index write
+    (run_swap_session) already persisted the new token, so failed_offers no
+    longer strands the edition."""
+    attempts = []
+
+    async def fake_offer(*a, **k):
+        return None
+
+    async def fake_sell_offers(nft_id, raise_on_error=False):
+        attempts.append(nft_id)
+        raise RuntimeError("tooBusy")
+
+    monkeypatch.setattr(xrpl_ops, "create_nft_offer", fake_offer)
+    monkeypatch.setattr(xrpl_ops, "get_nft_sell_offers", fake_sell_offers)
+    monkeypatch.setattr(config, "SIGNING_ACCOUNT", "rISSUERxxxxxxxxxxxxxxxxxxxxxxxx")
+    monkeypatch.setattr(swap_flow, "_LANDED_OFFER_DELAY_SECONDS", 0)
+
+    s = _make_session("rUSERyyyyyyyyyyyyyyyyyyyyyyyyyy")
+    item = _item()
+    ok = _run(swap_flow._create_offer_and_accept(s, item))
+
+    assert ok is False
+    assert len(attempts) == swap_flow._LANDED_OFFER_ATTEMPTS  # retried through the blip
+    assert "offer failed" in (s.error or "")
+    assert s.results == []
+
+
+def test_offer_failure_adopts_offer_landing_on_retry(monkeypatch):
+    """#211 recheck window: submit_and_wait can raise after the tx was
+    forwarded, and the offer validates 1-2 ledgers later — the first recheck
+    pass sees nothing, but a bounded later pass finds and adopts it instead
+    of failing the session while a live, unclaimed offer lands."""
+    calls = []
+
+    async def fake_offer(*a, **k):
+        return None
+
+    async def fake_sell_offers(nft_id, raise_on_error=False):
+        calls.append(nft_id)
+        if len(calls) < 2:
+            return []  # not validated yet on the first pass
+        return [
+            {
+                "offer_index": "LATE123",
+                "owner": "rISSUERxxxxxxxxxxxxxxxxxxxxxxxx",
+                "destination": "rUSERyyyyyyyyyyyyyyyyyyyyyyyyyy",
+                "amount": "6562500",
+            }
+        ]
+
+    async def fake_accept(offer_id, return_url=None, user_token=None, **kwargs):
+        assert offer_id == "LATE123"
+        return {"qr_url": "q", "xumm_url": "x"}
+
+    monkeypatch.setattr(xrpl_ops, "create_nft_offer", fake_offer)
+    monkeypatch.setattr(xrpl_ops, "get_nft_sell_offers", fake_sell_offers)
+    monkeypatch.setattr(xumm_ops, "create_accept_offer_payload", fake_accept)
+    monkeypatch.setattr(config, "SIGNING_ACCOUNT", "rISSUERxxxxxxxxxxxxxxxxxxxxxxxx")
+    monkeypatch.setattr(swap_flow, "_LANDED_OFFER_DELAY_SECONDS", 0)
+
+    s = _make_session("rUSERyyyyyyyyyyyyyyyyyyyyyyyyyy")
+    item = _item()
+    ok = _run(swap_flow._create_offer_and_accept(s, item))
+
+    assert ok is True
+    assert item["offer_id"] == "LATE123"
+    assert len(calls) == 2  # adopted on the second pass, no third look
+    assert s.error is None
