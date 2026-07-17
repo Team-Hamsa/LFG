@@ -73,8 +73,16 @@ class LFGServiceClient:
 
     @staticmethod
     def _retryable(exc: Exception) -> bool:
+        # Rate limiting (HTTP 429, or any response coded "rate_limited" — the
+        # service says that with 503 + Retry-After when XUMM itself is limiting
+        # us) is deliberate back-pressure: retrying multiplies the very
+        # overload it signals. The 2026-07-17 XUMM 429 incident was a handful
+        # of sign-ins amplified 5x by this retry loop. Plain 5xx stays
+        # retryable — those are genuinely transient.
         if isinstance(exc, ServiceError):
-            return exc.status is not None and (exc.status >= 500 or exc.status == 429)
+            if exc.code == "rate_limited":
+                return False
+            return exc.status is not None and exc.status >= 500
         return isinstance(exc, (aiohttp.ClientError, asyncio.TimeoutError))
 
     @overload

@@ -3184,6 +3184,60 @@ def _prune_signin_payloads():
             del signin_payloads[uuid]
 
 
+# Per-user cap on SignIn payload CREATION (XUMM caps payload creates at ~30/min
+# app-wide). In the 2026-07-17 429 incident a handful of /register attempts
+# fanned out into 20+ creates via client-side retries; nothing here said no.
+SIGNIN_CREATE_MAX = 3  # payload creations…
+SIGNIN_CREATE_WINDOW = 60.0  # …per user per window
+SIGNIN_REUSE_SECONDS = 120.0  # serve an existing pending payload this long
+_signin_create_hits: dict[tuple[str, str], list[float]] = {}
+
+
+def _signin_create_limited(platform: str, user_id: str) -> bool:
+    now = time.time()
+    key = (platform, user_id)
+    hits = [t for t in _signin_create_hits.get(key, []) if now - t < SIGNIN_CREATE_WINDOW]
+    if len(hits) >= SIGNIN_CREATE_MAX:
+        _signin_create_hits[key] = hits
+        return True
+    hits.append(now)
+    _signin_create_hits[key] = hits
+    # Bookkeeping must not grow forever across distinct users.
+    if len(_signin_create_hits) > 1000:
+        for k in [k for k, v in _signin_create_hits.items() if not v or now - v[-1] > 300]:
+            del _signin_create_hits[k]
+    return False
+
+
+def _pending_signin_for(platform: str, user_id: str, link_intent: bool) -> tuple[str, Any] | None:
+    """A still-fresh unsigned SignIn payload already issued to this user, so a
+    re-tap of /register (or a surface retry) re-serves it instead of minting
+    another XUMM payload."""
+    now = time.time()
+    for uuid, rec in signin_payloads.items():
+        if (
+            rec["platform"] == platform
+            and rec["user_id"] == user_id
+            and bool(rec.get("link")) == link_intent
+            and rec.get("signin_link")
+            and now - rec["created_at"] < SIGNIN_REUSE_SECONDS
+        ):
+            return uuid, rec
+    return None
+
+
+def _xumm_unavailable_response():
+    """502 for a plain XUMM outage; 503 + Retry-After while XUMM is rate
+    limiting us — surfaces treat 503/429 as terminal (no retry storm)."""
+    if xumm_ops.rate_limited():
+        return web.json_response(
+            {"error": "Xaman is rate limiting us — try again shortly", "code": "rate_limited"},
+            status=503,
+            headers={"Retry-After": "30"},
+        )
+    return web.json_response({"error": "could not reach Xaman"}, status=502)
+
+
 @require_auth
 async def handle_signin_start(request):
     """Create a XUMM SignIn payload; the user scans it in Xaman and their
@@ -3198,15 +3252,29 @@ async def handle_signin_start(request):
     except Exception:
         body = {}
     link_intent = bool(body.get("link"))
+    platform = _platform(user)
+    # Same sign-in already pending? Re-serve it — a fresh payload would only
+    # burn XUMM create quota and orphan the QR the user may be looking at.
+    pending = _pending_signin_for(platform, user["id"], link_intent)
+    if pending:
+        uuid, rec = pending
+        return web.json_response({"uuid": uuid, "signin_link": rec["signin_link"]})
+    if _signin_create_limited(platform, user["id"]):
+        return web.json_response(
+            {"error": "too many sign-in attempts", "code": "rate_limited"},
+            status=429,
+            headers={"Retry-After": str(int(SIGNIN_CREATE_WINDOW))},
+        )
     payload = await xumm_ops.create_signin_payload(return_url=await _request_return_url(request))
     if not payload:
-        return web.json_response({"error": "could not reach Xaman"}, status=502)
+        return _xumm_unavailable_response()
     signin_payloads[payload["uuid"]] = {
-        "platform": _platform(user),
+        "platform": platform,
         "user_id": user["id"],
         "name": user["name"],
         "link": link_intent,
         "created_at": time.time(),
+        "signin_link": payload["xumm_url"],
     }
     return web.json_response({"uuid": payload["uuid"], "signin_link": payload["xumm_url"]})
 
@@ -3329,7 +3397,7 @@ async def handle_web_signin_start(request):
     return_url = {"app": origin, "web": origin} if origin in config.WEB_ALLOWED_ORIGINS else None
     payload = await xumm_ops.create_signin_payload(return_url=return_url)
     if not payload:
-        return web.json_response({"error": "could not reach Xaman"}, status=502)
+        return _xumm_unavailable_response()
     web_signin_payloads[payload["uuid"]] = {"created_at": time.time()}
     return web.json_response({"uuid": payload["uuid"], "signin_link": payload["xumm_url"]})
 
