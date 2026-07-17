@@ -182,6 +182,9 @@ function setMedia(id, { image, video, thumbW }) {
   });
   fresh.id = id;
   fresh.hidden = old.hidden;
+  // Stop decoding before detaching — avoids Chrome's "play() request was
+  // interrupted" warning when an in-flight play() promise is still pending.
+  if (old.tagName === 'VIDEO') old.pause();
   old.replaceWith(fresh);
   return fresh;
 }
@@ -1187,7 +1190,9 @@ function renderSwapResults(s) {
     div.className = 'swap-result';
     const h3 = document.createElement('h3');
     h3.textContent = r.name;
-    const art = mediaEl({ image: r.image_url, video: r.video_url, className: 'result-img' });
+    const art = mediaEl({
+      image: r.image_url, video: r.video_url, className: 'result-img', alt: r.name,
+    });
     div.replaceChildren(h3, art);
     if (r.modified) {
       // Updated via NFTokenModify — nothing to accept.
