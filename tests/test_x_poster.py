@@ -361,6 +361,27 @@ def test_429_prefers_latest_reset_of_the_actually_exhausted_pool():
     assert ei.value.reset_at == 1700003600.0  # the exhausted 24h pool's reset wins
 
 
+def test_429_both_pools_exhausted_picks_the_later_reset():
+    """PR #245 review round 2 (CodeRabbit): when BOTH pools read
+    `*-remaining: 0`, the caller must wait for the LATER reset — waking at
+    the earlier pool's reset would still find the other pool exhausted."""
+    api, _ = _api(
+        _FakeResponse(
+            429,
+            json.dumps({"title": "Too Many Requests"}),
+            headers={
+                "x-rate-limit-reset": "1700000100",
+                "x-rate-limit-remaining": "0",  # 15-min pool exhausted (earlier reset)
+                "x-app-limit-24hour-reset": "1700003600",
+                "x-app-limit-24hour-remaining": "0",  # 24h pool ALSO exhausted (later reset)
+            },
+        )
+    )
+    with pytest.raises(XApiError) as ei:
+        _run(api.post_tweet("gm"))
+    assert ei.value.reset_at == 1700003600.0  # the LATER of the two exhausted resets
+
+
 def test_429_without_reset_headers_has_none_reset_at():
     api, _ = _api(_FakeResponse(429, "slow down", headers={"x-rate-limit-reset": "not-a-number"}))
     with pytest.raises(XApiError) as ei:
@@ -502,6 +523,16 @@ def test_compose_truncates_absurdly_long_trait_values():
     # Header and hashtags must never be truncated.
     assert lines[0] == "🎨 LFGO #1234 just minted!"
     assert lines[2] == "#XRPL #NFT"
+
+
+def test_weighted_tweet_length_is_plain_per_char_sum_no_url_special_case():
+    """The URL≡23 special case was removed together with the 2026-07-17
+    link-free directive (no composed tweet can contain a URL anymore): any
+    URL text is counted at its literal per-char weight like everything else,
+    and CJK/emoji still count double."""
+    url = "https://example.com/some/very/long/path/xyz"
+    assert poster.weighted_tweet_length(url) == len(url)
+    assert poster.weighted_tweet_length("🎨") == 2  # emoji still double-weight
 
 
 # ---------------------------------------------------------------------------

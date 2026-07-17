@@ -328,9 +328,10 @@ X_CONSUMER_SECRET = os.getenv("X_CONSUMER_SECRET", "")
 X_ACCESS_TOKEN = os.getenv("X_ACCESS_TOKEN", "")
 X_ACCESS_SECRET = os.getenv("X_ACCESS_SECRET", "")
 # Self-imposed cap below the X API's pay-per-post tier cap: the Free tier no
-# longer exists (~2026-02), pricing is $0.015/post + $0.20/post-with-a-URL
-# (every post here carries a bithomp link) — 100/month bounds worst-case spend
-# at roughly $20/mo. A cost knob, not a rate-limit knob.
+# longer exists (~2026-02), pricing is $0.015/post + $0.20/post-with-a-URL.
+# Posts here are deliberately link-free (2026-07-17 directive — the URL
+# surcharge is exactly why), so at $0.015/post the default 100/month bounds
+# worst-case spend at roughly $1.50/mo. A cost knob, not a rate-limit knob.
 X_MONTHLY_POST_BUDGET = int(os.getenv("X_MONTHLY_POST_BUDGET", "100"))
 # Master switch, true only when the flag is set AND all four OAuth 1.0a
 # credentials are non-empty (mirrors the ECONOMY_ENABLED/MARKET_ENABLED

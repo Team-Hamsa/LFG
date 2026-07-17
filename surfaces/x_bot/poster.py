@@ -19,12 +19,10 @@ rather than failing the whole tweet.
 
 from __future__ import annotations
 
-import re
 from collections.abc import Callable, Mapping
 from typing import Any
 
 MAX_WEIGHTED_CHARS = 280
-_URL_WEIGHT = 23  # every URL is wrapped by t.co and counts as 23 regardless of length (A5/A6)
 _TRAITS_SHOWN = 3
 _ELLIPSIS = "…"
 
@@ -139,24 +137,15 @@ def _weighted_len(text: str) -> int:
     return sum(_char_weight(c) for c in text)
 
 
-_URL_RE = re.compile(r"https?://\S+")
-
-
 def weighted_tweet_length(text: str) -> int:
-    """Twitter's actual weighted length of an assembled tweet: any
-    `http(s)://` URL substring counts as exactly `_URL_WEIGHT` regardless of
-    its literal length (A6); everything else uses `_char_weight`. Exposed
-    (not underscored) because it's the correct way to assert a composed
-    tweet fits the budget — the URL is real text in the string, but Twitter
-    never counts it at its literal length."""
-    total = 0
-    pos = 0
-    for match in _URL_RE.finditer(text):
-        total += _weighted_len(text[pos : match.start()])
-        total += _URL_WEIGHT
-        pos = match.end()
-    total += _weighted_len(text[pos:])
-    return total
+    """X's weighted length of an assembled tweet: the plain per-char weighted
+    sum (`_char_weight` — CJK/emoji count 2, everything else 1). Exposed (not
+    underscored) because it's the correct way to assert a composed tweet fits
+    the budget. The URL special case (X counts any t.co-wrapped URL as exactly
+    23 regardless of literal length, A5/A6) was removed together with the
+    2026-07-17 link-free directive — no composed tweet can contain a URL
+    today; reinstate URL≡23 handling here if links are ever reintroduced."""
+    return _weighted_len(text)
 
 
 def _truncate_to_weight(text: str, budget: int) -> str:
