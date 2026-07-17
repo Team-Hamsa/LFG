@@ -360,3 +360,10 @@ X_STATE_DB_PATH = os.getenv("X_STATE_DB_PATH", "x_state.db")
 # Unset (default) means the feature is off: the page renders normally but
 # omits og:url/canonical rather than guessing a wrong/unstable URL (#41 §6.2).
 PUBLIC_SHARE_BASE_URL = os.getenv("PUBLIC_SHARE_BASE_URL", "").strip().rstrip("/")
+
+# Where a HUMAN clicking a share link is forwarded (JS location.replace on
+# the OG card page, GET /nft/{number}) — e.g. https://build.letseffinggo.com.
+# Never an HTTP redirect: X's crawler follows those and would render the
+# destination's generic card instead of the per-NFT image. Unset (default)
+# = feature off, the card page body renders exactly as before.
+SHARE_FORWARD_URL = os.getenv("SHARE_FORWARD_URL", "").strip().rstrip("/")

@@ -53,6 +53,7 @@ from lfg_core import (
     mint_flow,
     nft_index,
     rarity,
+    share_clicks,
     shop,
     shop_flow,
     shop_store,
@@ -3976,6 +3977,20 @@ def _og_bithomp_url(nft_id: str) -> str:
     return f"{_bithomp_base_url()}/en/nft/{nft_id}"
 
 
+_BOT_UA_MARKERS = ("twitterbot", "facebookexternalhit", "slackbot", "discordbot", "telegrambot")
+
+
+def _share_ref(request: Any) -> str | None:
+    """?ref=<sharer wallet> — shape-validated, never trusted further."""
+    ref = (request.query.get("ref") or "").strip()
+    return ref if ref and is_valid_classic_address(ref) else None
+
+
+def _is_share_bot(user_agent: str) -> bool:
+    ua = user_agent.lower()
+    return any(m in ua for m in _BOT_UA_MARKERS)
+
+
 async def handle_nft_card(request: Any) -> Any:
     """Public, unauthenticated GET /nft/{number} — a server-rendered
     OG/Twitter share card (twitter:card=summary_large_image, twitter:image,
@@ -4010,6 +4025,19 @@ async def handle_nft_card(request: Any) -> Any:
 
     if onchain is None:
         return web.HTTPNotFound(text=_OG_NOT_FOUND_HTML, content_type="text/html")
+
+    ref_wallet = _share_ref(request)
+    user_agent = request.headers.get("User-Agent", "")
+    try:
+        share_clicks.record_click(
+            db_path.app_db_path(),
+            number,
+            ref_wallet,
+            _is_share_bot(user_agent),
+            user_agent,
+        )
+    except Exception:  # noqa: BLE001 — logging must never break the card
+        logging.getLogger(__name__).warning("share click log failed", exc_info=True)
 
     # On-chain index FIRST, stale-able LFG row as fallback: swaps never
     # update the LFG table (the listener keeps the index fresh via modify +
@@ -4047,14 +4075,37 @@ async def handle_nft_card(request: Any) -> Any:
     body_image = (
         f'<img src="{esc_image}" alt="{esc_title}" style="max-width:100%;">' if image_url else ""
     )
+    if config.SHARE_FORWARD_URL:
+        # Human click-through: JS-only forward into the webapp. The crawler
+        # doesn't execute JS, so the per-NFT card tags above still render;
+        # an HTTP redirect here would card the destination instead. The
+        # validated ref rides along so the webapp can stash it (#41 follow-on).
+        forward_url = config.SHARE_FORWARD_URL + (f"?ref={ref_wallet}" if ref_wallet else "")
+        esc_forward = escape(forward_url, quote=True)
+        js_forward = json.dumps(forward_url).replace("/", "\\/")
+        body_html = (
+            '<div style="min-height:100vh;display:flex;flex-direction:column;'
+            "align-items:center;justify-content:center;background:#0b0b12;"
+            'color:#fff;font-family:sans-serif;text-align:center;margin:0;">'
+            + f"<h1>{esc_title}</h1>"
+            + f'<p><a href="{esc_forward}" style="color:#9ecbff;">'
+            + "Open Let&#x27;s Effing Go &#x2192;</a></p>"
+            + f'<p><a href="{esc_bithomp}" style="color:#666;">View on Bithomp</a></p>'
+            + "</div>"
+            + f"<script>location.replace({js_forward});</script>"
+        )
+    else:
+        body_html = (
+            f"<h1>{esc_title}</h1>"
+            + body_image
+            + f"<p>{esc_description}</p>"
+            + f'<p><a href="{esc_bithomp}">View on Bithomp</a></p>'
+        )
     html_doc = (
         "<!doctype html><html><head>"
         + "".join(meta_tags)
         + "</head><body>"
-        + f"<h1>{esc_title}</h1>"
-        + body_image
-        + f"<p>{esc_description}</p>"
-        + f'<p><a href="{esc_bithomp}">View on Bithomp</a></p>'
+        + body_html
         + "</body></html>"
     )
     return web.Response(text=html_doc, content_type="text/html")

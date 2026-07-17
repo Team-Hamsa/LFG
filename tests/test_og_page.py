@@ -57,8 +57,10 @@ def _seed_onchain(tmp_path, monkeypatch, records):
     conn.close()
 
 
-def _req(number):
-    request = make_mocked_request("GET", f"/nft/{number}")
+def _req(number, query="", headers=None):
+    request = make_mocked_request(
+        "GET", f"/nft/{number}{('?' + query) if query else ''}", headers=headers or {}
+    )
     request.match_info["number"] = str(number)
     return request
 
@@ -331,3 +333,113 @@ def test_nft_card_includes_og_url_when_base_set(tmp_path, monkeypatch):
     body = resp.text
     assert 'property="og:url" content="https://share.example/lfg/nft/55"' in body
     assert 'rel="canonical" href="https://share.example/lfg/nft/55"' in body
+
+
+_REF = "rrrrrrrrrrrrrrrrrrrrrhoLvTp"  # valid classic address (ACCOUNT_ZERO)
+
+
+def _seed_basic(tmp_path, monkeypatch, number=42):
+    _seed_onchain(tmp_path, monkeypatch, [_onchain("AAA", number)])
+    monkeypatch.setattr(server, "get_nft_data", lambda n: None)
+
+
+def _clicks_db(tmp_path, monkeypatch):
+    db = str(tmp_path / "app_clicks.db")
+    monkeypatch.setattr(server.db_path, "app_db_path", lambda network=None: db)
+    return db
+
+
+def test_forward_unset_keeps_legacy_body(tmp_path, monkeypatch):
+    monkeypatch.setattr(server.config, "SHARE_FORWARD_URL", "")
+    _seed_basic(tmp_path, monkeypatch)
+    _clicks_db(tmp_path, monkeypatch)
+    body = _run(server.handle_nft_card(_req(42))).text
+    assert "location.replace" not in body
+    assert "<h1>LFGO #42</h1>" in body
+
+
+def test_forward_set_injects_js_redirect_and_keeps_meta(tmp_path, monkeypatch):
+    monkeypatch.setattr(server.config, "SHARE_FORWARD_URL", "https://build.example")
+    _seed_basic(tmp_path, monkeypatch)
+    _clicks_db(tmp_path, monkeypatch)
+    resp = _run(server.handle_nft_card(_req(42)))
+    assert resp.status == 200  # no HTTP redirect, ever
+    body = resp.text
+    # Meta tags untouched — the crawler contract.
+    assert 'name="twitter:card" content="summary_large_image"' in body
+    assert 'name="twitter:image" content="https://cdn.example/img.png"' in body
+    # JS-only forward + visible fallback link, Bithomp retained.
+    assert 'location.replace("https:\\/\\/build.example")' in body
+    assert 'href="https://build.example"' in body
+    assert "View on Bithomp" in body
+    assert "http-equiv" not in body  # no meta-refresh
+
+
+def test_forward_appends_valid_ref_and_logs_click(tmp_path, monkeypatch):
+    monkeypatch.setattr(server.config, "SHARE_FORWARD_URL", "https://build.example")
+    monkeypatch.setattr(server.config, "PUBLIC_SHARE_BASE_URL", "https://share.example")
+    _seed_basic(tmp_path, monkeypatch)
+    db = _clicks_db(tmp_path, monkeypatch)
+    body = _run(
+        server.handle_nft_card(_req(42, query=f"ref={_REF}", headers={"User-Agent": "Mozilla/5.0"}))
+    ).text
+    assert f'location.replace("https:\\/\\/build.example?ref={_REF}")' in body
+    # og:url / canonical stay ref-less so X dedupes card variants.
+    assert 'property="og:url" content="https://share.example/nft/42"' in body
+    assert 'rel="canonical" href="https://share.example/nft/42"' in body
+    import sqlite3
+
+    row = (
+        sqlite3.connect(db)
+        .execute("SELECT nft_number, ref_wallet, is_bot FROM share_clicks")
+        .fetchone()
+    )
+    assert row == (42, _REF, 0)
+
+
+def test_invalid_ref_ignored_not_echoed(tmp_path, monkeypatch):
+    monkeypatch.setattr(server.config, "SHARE_FORWARD_URL", "https://build.example")
+    _seed_basic(tmp_path, monkeypatch)
+    db = _clicks_db(tmp_path, monkeypatch)
+    evil = '"><script>alert(1)</script>'
+    body = _run(server.handle_nft_card(_req(42, query="ref=" + escape(evil)))).text
+    assert "alert(1)" not in body
+    assert 'location.replace("https:\\/\\/build.example")' in body  # no ref appended
+    import sqlite3
+
+    (ref,) = sqlite3.connect(db).execute("SELECT ref_wallet FROM share_clicks").fetchone()
+    assert ref is None
+
+
+def test_bot_user_agent_flagged(tmp_path, monkeypatch):
+    monkeypatch.setattr(server.config, "SHARE_FORWARD_URL", "https://build.example")
+    _seed_basic(tmp_path, monkeypatch)
+    db = _clicks_db(tmp_path, monkeypatch)
+    _run(server.handle_nft_card(_req(42, headers={"User-Agent": "Twitterbot/1.0"})))
+    import sqlite3
+
+    (is_bot,) = sqlite3.connect(db).execute("SELECT is_bot FROM share_clicks").fetchone()
+    assert is_bot == 1
+
+
+def test_click_log_failure_never_breaks_card(tmp_path, monkeypatch):
+    monkeypatch.setattr(server.config, "SHARE_FORWARD_URL", "https://build.example")
+    _seed_basic(tmp_path, monkeypatch)
+
+    def boom(*a, **k):
+        raise RuntimeError("db down")
+
+    monkeypatch.setattr(server.share_clicks, "record_click", boom)
+    resp = _run(server.handle_nft_card(_req(42)))
+    assert resp.status == 200
+
+
+def test_config_share_forward_url_defaults_empty():
+    import importlib
+    import os
+
+    assert os.getenv("SHARE_FORWARD_URL") is None
+    from lfg_core import config as cfg
+
+    assert cfg.SHARE_FORWARD_URL == ""
+    del importlib  # imported for parity with sibling config tests; constant is frozen at import
