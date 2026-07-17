@@ -101,6 +101,7 @@ SERVICE_TOKEN_X=<x-surface-token>                           # firehose token; au
 X_MONTHLY_POST_BUDGET=100                                   # optional; UTC-month post cap — COST knob (pay-per-use: $0.015/post link-free), default 100
 X_STATE_DB_PATH=x_state.db                                  # optional; poster dedup/budget/pause sqlite (gitignored)
 PUBLIC_SHARE_BASE_URL=<public-https-base>                   # optional (#41); unset ⇒ share buttons use bithomp URLs; needs public HTTPS (same dep as #89 Part B)
+SHARE_FORWARD_URL=https://build.letseffinggo.com              # optional (#41); humans clicking a share card are JS-forwarded here (never HTTP-redirect — the X crawler must stay on the per-NFT card page); unset = legacy card body
 WEB_ALLOWED_ORIGINS=https://build.letseffinggo.com,https://team-hamsa.github.io   # optional (#240); standalone web surface CORS allowlist (empty = off)
 BRIX_DISTRIBUTOR_ADDRESS=<xrpl-address>                     # optional; airdrop distributor wallet, excluded from BRIX leaderboards/derivation as a counterparty
 BRIX_AMM_ACCOUNT=<xrpl-address>                             # optional; mainnet BRIX/XRP AMM pool account, used by snapshot_balances.py
