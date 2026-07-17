@@ -533,6 +533,13 @@ async def run_assemble(session: AssembleSession, deps: EconomyDeps) -> None:
             )
             return
         accept = await deps.char_accept_fn(offer_id)
+        if not accept:
+            # #262: only the XUMM delivery payload failed — the offer is
+            # on-chain and claimable via Xaman Events, so warn, don't fail.
+            logging.warning(
+                f"Assemble {session.id}: accept payload creation failed for offer "
+                f"{offer_id}; offer is on-chain, claimable via Xaman Events"
+            )
         session.results.append(
             {
                 "nft_id": nft_id,
@@ -874,6 +881,13 @@ async def run_extract(session: ExtractSession, deps: EconomyDeps) -> None:
             )
             return
         session.accept = await deps.closet_accept_fn(offer_id)
+        if not session.accept:
+            # #262: only the XUMM delivery payload failed — the offer is
+            # on-chain and claimable via Xaman Events, so warn, don't fail.
+            logging.warning(
+                f"Extract {session.id}: accept payload creation failed for offer "
+                f"{offer_id}; offer is on-chain, claimable via Xaman Events"
+            )
         session.state = DONE
         status = "complete_pending_mirror" if session.mirror_pending else "complete"
         _write_record(deps.records_dir, "extract", session.id, session._record(status))

@@ -2891,6 +2891,38 @@ async def handle_mint_start(request):
     except Exception as e:
         logging.warning(f"prepare_payment failed; falling back to XRP path: {e}")
     session.ensure_payment_fallback()
+    # #262 fail-fast: XUMM never created the payment sign request (429
+    # backoff / outage) — payment_uuid is None and the only link is the
+    # static xaman.app/detect fallback, which Xaman cannot parse as a sign
+    # request. Launching run_mint_session would strand the user on a dead
+    # pay screen for the full 300s payment wait (prod incident 2026-07-17).
+    # Mark the session terminal (FAILED is in TERMINAL_STATES, so the
+    # one-active-session slot frees and _prune_sessions evicts it), spawn
+    # no task, and answer 503/502 like the market handlers do. Push-delivered
+    # payloads always carry a uuid, so the push path is never blocked.
+    # Known tradeoff: this also defers #196 mint-credit redemption (an LFGO
+    # holder's unconsumed prior payment, normally consumed by
+    # wait_for_payment's allow_credit backfill with no new signature) until
+    # XUMM recovers — delay-only, since MINT_CREDIT_TTL_SECONDS (30d) far
+    # outlasts any outage and the next successful mint start redeems it.
+    if session.payment_uuid is None:
+        logging.error(
+            f"mint session {session.id}: payment payload never created (XUMM unavailable)"
+        )
+        if session.state == mint_flow.AWAITING_PAYMENT:
+            # (a concurrent cancel during prepare_payment is already terminal)
+            session.state = mint_flow.FAILED
+            session.error = "signing service is busy — please try again shortly"
+        # Publish mint.failed so the admin-log channel still sees blocked
+        # attempts during a XUMM outage (pre-#262 the 300s PAYMENT_TIMEOUT
+        # published one; the 503'd client never polls, so this is the only
+        # publish site). Idempotent — a concurrent cancel's mark_published
+        # keeps a deliberate cancel silent, as everywhere else.
+        try:
+            await _publish_mint_terminal(session)
+        except Exception as e:
+            logging.error(f"fail-fast mint terminal publish failed for session {session.id}: {e}")
+        return _xumm_unavailable_response()
     # Keep the task handle so /cancel can stop the payment wait (#141).
     # The wrapper publishes the terminal firehose event server-side, so a
     # client that never polls again (webview killed mid-sign, #216) still

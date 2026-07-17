@@ -140,7 +140,10 @@ class MintSession:
         pays XRP — never explained to the user beyond the pay pill) and
         create the XUMM sign-request payload. Xaman cannot parse the
         raw-JSON detect link, so the payload URL is the one that must end
-        up in the payment QR (issue #8)."""
+        up in the payment QR (issue #8). On payload failure payment_uuid
+        stays None — both callers (handle_mint_start and run_mint_session)
+        gate on it and fail the session terminally rather than entering the
+        payment wait with only the unparseable static detect link (#262)."""
         balance = await xrpl_ops.get_trustline_balance(
             self.wallet_address, config.TOKEN_CURRENCY_HEX, config.TOKEN_ISSUER_ADDRESS
         )
@@ -584,6 +587,19 @@ async def run_mint_session(session: MintSession) -> None:
         #    prepare_payment detected. not_before bounds the missed-payment
         #    backfill to this session's lifetime.
         session.ensure_payment_fallback()
+        # #262 defense-in-depth (handle_mint_start already fails fast): with
+        # no XUMM payload the session holds only the static detect link,
+        # which Xaman cannot parse as a sign request — entering the payment
+        # wait would show a dead pay screen for the full 300s. The
+        # pay_with/pay_amount defaulting above must still run first. Known
+        # tradeoff: this also defers #196 mint-credit redemption (normally
+        # consumed by wait_for_payment's allow_credit backfill with no new
+        # signature) until XUMM recovers — delay-only, the 30d credit TTL
+        # far outlasts any outage.
+        if session.payment_uuid is None:
+            session.state = FAILED
+            session.error = "signing service is busy — please try again shortly"
+            return
         p = session._payment_params()
         paid = await xrpl_ops.wait_for_payment(
             destination=p["destination"],
