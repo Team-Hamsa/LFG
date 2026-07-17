@@ -3644,10 +3644,15 @@ def _og_traits_summary(
     traits. LFG-row traits (fixed slot order) are the fallback when the
     index record carries no usable attributes (e.g. unreadable-metadata
     backfill rows). Deliberately no rarity dependency, unlike the x_bot
-    poster's rarest-first ranking (#41 §6.2: "keep it simple")."""
+    poster's rarest-first ranking (#41 §6.2: "keep it simple"). `onchain`'s
+    `attributes_json` is externally-sourced NFT metadata (IPFS/CDN) — a
+    non-dict element (string/null/list) must be skipped, not crash this
+    PUBLIC endpoint."""
     pairs: list[tuple[str, str]] = []
     if onchain is not None:
         for attr in onchain.attributes:
+            if not isinstance(attr, dict):
+                continue
             trait_type = attr.get("trait_type")
             value = attr.get("value")
             if trait_type and not _og_is_placeholder(value):

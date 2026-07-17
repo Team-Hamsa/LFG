@@ -94,10 +94,16 @@ def test_both_api_config_fetch_sites_populate_share_bases():
     # setupDiscord()'s separate /api/config fetch never repopulated them, so
     # one transient failure left shareUrlFor() emitting dead relative URLs
     # for the whole session. Both fetch sites must feed the shared applier.
+    #
+    # A global src.count("applyShareConfig(") >= 3 only proves the call
+    # appears *somewhere* three times — it can't tell the two fetch sites
+    # apart from each other, or from the definition, so it would stay green
+    # even if one call moved outside its function or both calls landed in
+    # the same function. Assert per-function instead, same
+    # _function_body-windowed style as the other tests in this file.
     src = _read_app_js()
     assert "function applyShareConfig(" in src
-    # definition + (at least) the two fetch-site calls
-    assert src.count("applyShareConfig(") >= 3
+    assert "applyShareConfig(" in _function_body(src, "async function main(")
     assert "applyShareConfig(" in _function_body(src, "async function setupDiscord(")
 
 
@@ -109,6 +115,21 @@ def test_share_url_for_returns_empty_when_no_base_is_known():
     body = _function_body(src, "function shareUrlFor(")
     assert "bithompBase && nftId" in body
     assert "return '';" in body
+
+
+def test_copy_link_copies_the_shared_page_url_not_the_x_intent():
+    # #41 review fix: "Copy link" must hand over the pasteable NFT link (the
+    # /nft/N or bithomp `url` passed into buildShareControl) so it renders a
+    # card wherever it's pasted — not `intentUrl`, the X composer deep-link,
+    # which is exclusive to the "Share on X" button/openExternal call.
+    src = _read_app_js()
+    body = _function_body(src, "function buildShareControl(")
+    assert "copyInput.value = url;" in body
+    assert "navigator.clipboard.writeText(url)" in body
+    assert "copyInput.value = intentUrl" not in body
+    assert "navigator.clipboard.writeText(intentUrl)" not in body
+    # The main share button's openExternal(intentUrl) dispatch is unchanged.
+    assert "openExternal(intentUrl)" in body
 
 
 def test_share_controls_are_skipped_without_a_share_url():

@@ -116,6 +116,41 @@ def test_nft_card_known_edition_renders_meta_tags(tmp_path, monkeypatch):
     assert "bithomp.com/en/nft/AAA" in body
 
 
+def test_nft_card_skips_non_dict_attribute_entries(tmp_path, monkeypatch):
+    """attributes_json is externally-sourced NFT metadata (IPFS/CDN) — a
+    non-dict element (string/null/...) must be skipped, not crash the
+    PUBLIC card endpoint with a 500 (#41 review fix)."""
+    monkeypatch.setattr(server.config, "PUBLIC_SHARE_BASE_URL", "")
+    _seed_onchain(
+        tmp_path,
+        monkeypatch,
+        [
+            _onchain(
+                "MALFORMED",
+                61,
+                image="https://cdn.example/61.png",
+                attrs=["not-a-dict", None, {"trait_type": "Body", "value": "Ape"}],
+            )
+        ],
+    )
+    monkeypatch.setattr(
+        server,
+        "get_nft_data",
+        lambda n: {
+            "nft_number": 61,
+            "nft_id": "MALFORMED",
+            "image_url": "https://cdn.example/61.png",
+            "traits": {},
+        },
+    )
+
+    resp = _run(server.handle_nft_card(_req(61)))
+
+    assert resp.status == 200
+    body = resp.text
+    assert "Body: Ape" in body
+
+
 def test_nft_card_prefers_onchain_index_over_stale_lfg_row(tmp_path, monkeypatch):
     """#41 fix wave: swaps NEVER update the LFG table, while the listener
     keeps the on-chain index fresh (NFTokenModify + burn-remint). A post-swap

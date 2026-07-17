@@ -295,11 +295,14 @@ function buildShareControl(text, url) {
   copyInput.readOnly = true;
   copyInput.hidden = true;
   copyInput.setAttribute('aria-label', 'Share link');
-  copyInput.value = intentUrl;
+  // "Copy link" hands over the pasteable NFT page/bithomp link (renders a
+  // card anywhere it's pasted), NOT the X intent/composer deep-link — that
+  // stays exclusive to the "Share on X" anchor/openExternal above.
+  copyInput.value = url;
 
   copyBtn.onclick = async () => {
     try {
-      await navigator.clipboard.writeText(intentUrl);
+      await navigator.clipboard.writeText(url);
       const original = copyBtn.textContent;
       copyBtn.textContent = 'Copied!';
       setTimeout(() => { copyBtn.textContent = original; }, 2000);
