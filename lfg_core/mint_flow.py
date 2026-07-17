@@ -323,6 +323,13 @@ async def mint_one_unit(
     a crash in the offer step can never trigger a re-mint on resume.
     """
     nft_id: str | None = None
+    # Hoisted with None defaults so the catch-all below can return whatever
+    # was already computed at the point of failure (#41 fix-wave, CodeRabbit
+    # PR #245): an exception from on_mint/offer-creation/payload-creation
+    # after a confirmed mint must not blank out traits/body_type that are
+    # already known.
+    traits_dict: dict[str, str] | None = None
+    body: str | None = None
     try:
         # 1. Compose a random NFT from the unified layer store (same tree
         #    the Trait Swapper uses: <gender>/<TraitType>/<Value>.ext)
@@ -393,6 +400,16 @@ async def mint_one_unit(
         # so /api/img serves it immediately (best-effort, #163).
         image_archive.promote_still(config.XRPL_NETWORK, nft_number, session_tag)
 
+        # Computed here (synchronous, no await) rather than after on_mint below
+        # so it's captured into the hoisted `traits_dict`/`body` locals before
+        # any further awaits — an exception from on_mint or a later step must
+        # still leave the catch-all able to return this already-known data
+        # (#41 fix-wave, CodeRabbit PR #245).
+        traits_dict = {t["trait_type"]: t["value"] for t in metadata["attributes"]}
+        # The LFG table's headwear column is named Hat (layer tree uses Head)
+        if "Head" in traits_dict:
+            traits_dict["Hat"] = traits_dict.pop("Head")
+
         # Fire on_mint the instant the mint is confirmed on-chain, before any
         # further awaits (offer creation / XUMM accept payload). A bulk caller
         # uses this to persist the unit as MINTED immediately, so a crash in
@@ -402,10 +419,6 @@ async def mint_one_unit(
         if on_mint:
             await on_mint(nft_number, nft_id, image_cdn_url)
 
-        traits_dict = {t["trait_type"]: t["value"] for t in metadata["attributes"]}
-        # The LFG table's headwear column is named Hat (layer tree uses Head)
-        if "Head" in traits_dict:
-            traits_dict["Hat"] = traits_dict.pop("Head")
         record: dict[str, Any] = {
             "nft_number": nft_number,
             "nft_id": nft_id,
@@ -512,6 +525,8 @@ async def mint_one_unit(
             offer_id=None,
             accept=None,
             error=str(e),
+            traits=traits_dict,
+            body_type=body,
         )
 
 

@@ -40,14 +40,20 @@ MEDIA_UPLOAD_URL = "https://api.x.com/2/media/upload"
 # pages are not worth carrying whole).
 _BODY_LIMIT = 1000
 
-# Rate-limit reset header families (epoch seconds). The 15-minute-window set
-# is documented on docs.x.com/x-api/fundamentals/rate-limits; the 24-hour
-# app/user pools are observed on write endpoints. All optional — read
-# defensively, use the earliest applicable reset.
+# Rate-limit reset header families (epoch seconds), each paired with the
+# `*-remaining` header that says whether that specific pool is exhausted.
+# The 15-minute-window set is documented on
+# docs.x.com/x-api/fundamentals/rate-limits; the 24-hour app/user pools are
+# observed on write endpoints. All optional — read defensively.
 _RESET_HEADERS = (
     "x-rate-limit-reset",
     "x-app-limit-24hour-reset",
     "x-user-limit-24hour-reset",
+)
+_REMAINING_HEADERS = (
+    "x-rate-limit-remaining",
+    "x-app-limit-24hour-remaining",
+    "x-user-limit-24hour-remaining",
 )
 
 
@@ -123,16 +129,33 @@ def _media_upload_request(image_bytes: bytes, mime: str) -> tuple[str, aiohttp.F
 
 
 def _earliest_reset(headers: Mapping[str, str]) -> float | None:
-    """Earliest epoch-seconds reset across the rate-limit header families."""
+    """Best epoch-seconds reset to wait for across the three rate-limit pools.
+
+    The 15-minute window's `x-rate-limit-remaining` header is present on
+    almost every response, so a naive earliest-of-all-present pick nearly
+    always returns that reset even when it's actually one of the 24-hour
+    pools that's exhausted — understating how long the caller should wait.
+    Prefer the LATEST reset among pools we can positively identify as
+    exhausted (their matching `*-remaining` header reads "0"); only when no
+    pool is identifiably exhausted (no `*-remaining` header present, or none
+    read "0") fall back to the earliest of whatever reset headers are
+    present.
+    """
     resets: list[float] = []
-    for name in _RESET_HEADERS:
-        raw = headers.get(name)
+    exhausted_resets: list[float] = []
+    for reset_name, remaining_name in zip(_RESET_HEADERS, _REMAINING_HEADERS, strict=True):
+        raw = headers.get(reset_name)
         if raw is None:
             continue
         try:
-            resets.append(float(raw))
+            reset_val = float(raw)
         except ValueError:
             continue
+        resets.append(reset_val)
+        if headers.get(remaining_name) == "0":
+            exhausted_resets.append(reset_val)
+    if exhausted_resets:
+        return max(exhausted_resets)
     return min(resets) if resets else None
 
 

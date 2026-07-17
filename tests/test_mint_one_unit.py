@@ -143,6 +143,34 @@ def test_mint_one_unit_offer_fail_reports_nft_id(monkeypatch, _mint_mocks):
     assert res.body_type == "male"
 
 
+def test_mint_one_unit_post_mint_exception_preserves_traits_and_body_type(monkeypatch, _mint_mocks):
+    """PR #245 review (CodeRabbit, outside-diff): an exception from on_mint,
+    offer creation, or payload creation after a confirmed mint used to reach
+    the catch-all with traits/body_type reset to None, even though they were
+    already computed. This drives that path via a raising `on_mint` callback
+    and asserts the exception UnitResult retains both."""
+
+    async def _boom(nft_number, nft_id, image_url):
+        raise RuntimeError("on_mint boom")
+
+    res = _run(
+        mint_flow.mint_one_unit(
+            discord_id="u1",
+            wallet_address="rUSER",
+            platform="discord",
+            push_user_token=None,
+            return_url=None,
+            nft_number=4006,
+            session_tag="job1:6",
+            on_mint=_boom,
+        )
+    )
+    assert res.nft_id == "NFTID1"  # mint landed before on_mint raised
+    assert res.error is not None
+    assert res.traits == {"Body": "Straight"}
+    assert res.body_type == "male"
+
+
 def test_mint_one_unit_mint_fail_reports_no_nft_id(monkeypatch, _mint_mocks):
     async def fake_mint_nft(**kwargs):
         return None

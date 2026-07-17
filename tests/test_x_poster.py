@@ -21,6 +21,7 @@ import hashlib  # noqa: E402
 import hmac  # noqa: E402
 import json  # noqa: E402
 import re  # noqa: E402
+import sqlite3  # noqa: E402
 from datetime import datetime, timedelta, timezone  # noqa: E402
 from urllib.parse import unquote  # noqa: E402
 
@@ -315,6 +316,8 @@ def test_verify_credentials_returns_handle():
 
 
 def test_429_maps_status_and_earliest_reset():
+    # No `*-remaining` headers present ⇒ no pool is identifiably exhausted,
+    # so this falls back to the earliest-of-present reset.
     api, _ = _api(
         _FakeResponse(
             429,
@@ -332,6 +335,30 @@ def test_429_maps_status_and_earliest_reset():
     assert err.status == 429
     assert err.reset_at == 1700000100.0  # earliest applicable reset wins
     assert "Too Many Requests" in err.body
+
+
+def test_429_prefers_latest_reset_of_the_actually_exhausted_pool():
+    """PR #245 review (CodeRabbit): the 15-minute window's `remaining` header
+    is present on nearly every response, so a naive earliest-of-all-present
+    pick almost always returns the 15-min reset even when it's actually the
+    24h pool that's exhausted — understating how long to wait. When a
+    `*-remaining` header reads "0", that pool is exhausted and its (later)
+    reset must win over an earlier, non-exhausted pool's reset."""
+    api, _ = _api(
+        _FakeResponse(
+            429,
+            json.dumps({"title": "Too Many Requests"}),
+            headers={
+                "x-rate-limit-reset": "1700000100",
+                "x-rate-limit-remaining": "5",  # 15-min pool NOT exhausted
+                "x-app-limit-24hour-reset": "1700003600",
+                "x-app-limit-24hour-remaining": "0",  # 24h pool IS exhausted
+            },
+        )
+    )
+    with pytest.raises(XApiError) as ei:
+        _run(api.post_tweet("gm"))
+    assert ei.value.reset_at == 1700003600.0  # the exhausted 24h pool's reset wins
 
 
 def test_429_without_reset_headers_has_none_reset_at():
@@ -584,6 +611,47 @@ def test_table_creation_idempotent_on_first_use(tmp_path):
     assert state.already_posted(db, "mint:1") is False
     state.record(db, "mint:1", "posted")
     assert state.already_posted(db, "mint:1") is True
+
+
+def test_record_never_downgrades_a_posted_row(tmp_path):
+    """PR #245 review (Greptile): the ON CONFLICT upsert must never let a
+    later non-posted call overwrite an already-`posted` row — a stray retry
+    or admin/recovery call for an event that already posted must be a
+    no-op, not a silent downgrade that drops the month budget count and
+    flips already_posted() back to False."""
+    db = _db(tmp_path)
+    now = datetime(2026, 7, 15, tzinfo=timezone.utc)
+    state.record(db, "mint:abc", "posted", tweet_id="42", now=now)
+    state.record(db, "mint:abc", "failed", now=now)
+    assert state.already_posted(db, "mint:abc") is True
+    assert state.month_count(db, now=now) == 1
+    conn = sqlite3.connect(db)
+    try:
+        row = conn.execute(
+            "SELECT tweet_id, status FROM x_posts WHERE event_key = ?", ("mint:abc",)
+        ).fetchone()
+    finally:
+        conn.close()
+    assert row == ("42", "posted")
+
+
+def test_connect_passes_explicit_busy_timeout(tmp_path, monkeypatch):
+    """PR #245 review (Greptile): the PR-2 service writes `settings` while the
+    poster writes `x_posts` from a separate process; an explicit busy-timeout
+    (rather than sqlite3's 5s default) avoids `OperationalError: database is
+    locked` under that concurrent access."""
+    db = _db(tmp_path)
+    real_connect = sqlite3.connect
+    calls: list[dict] = []
+
+    def spy_connect(path, **kwargs):
+        calls.append(kwargs)
+        return real_connect(path, **kwargs)
+
+    monkeypatch.setattr(state.sqlite3, "connect", spy_connect)
+    state.already_posted(db, "mint:1")
+    assert calls
+    assert calls[0].get("timeout") == state._SQLITE_TIMEOUT
 
 
 # ---------------------------------------------------------------------------

@@ -48,9 +48,14 @@ CREATE TABLE IF NOT EXISTS settings (
 
 _POSTING_PAUSED_KEY = "posting_paused"
 
+# The PR-2 service (writing `settings`) and the poster (writing `x_posts`)
+# are separate processes sharing this file; sqlite3's 5s default busy-timeout
+# is too tight for that, so every connection opens with this explicit one.
+_SQLITE_TIMEOUT = 10.0
+
 
 def _connect(path: str) -> sqlite3.Connection:
-    conn = sqlite3.connect(path)
+    conn = sqlite3.connect(path, timeout=_SQLITE_TIMEOUT)
     conn.execute(_CREATE_X_POSTS)
     conn.execute(_CREATE_SETTINGS)
     return conn
@@ -90,7 +95,10 @@ def record(
     always in UTC. A later call for the same `event_key` overwrites the
     earlier row (e.g. a retry that ultimately succeeds replaces an earlier
     `failed` row) — callers (bot.py, T5) own retry sequencing; this function
-    just records whatever outcome it's told.
+    just records whatever outcome it's told. The one exception: a row already
+    `posted` is never overwritten — a stray later call (e.g. a retry racing
+    behind a success, or a future recovery/admin caller) for an event that
+    already posted is a no-op, never a downgrade.
     """
     utc_now = _to_utc(now)
     conn = _connect(path)
@@ -104,6 +112,7 @@ def record(
                 posted_at = excluded.posted_at,
                 month = excluded.month,
                 status = excluded.status
+            WHERE x_posts.status != 'posted'
             """,
             (event_key, tweet_id, utc_now.isoformat(), utc_now.strftime("%Y-%m"), status),
         )
