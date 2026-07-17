@@ -108,23 +108,156 @@ async def _sync_global_including_entry_point(
     await client.http.bulk_upsert_global_commands(app_id, payload=payload)
 
 
+# The fallback above bulk-PUTs every global command, and Discord rewrites each
+# command's server-assigned `version` snowflake on every PUT — including the
+# Entry Point's — even when nothing changed. Running Discord clients cache
+# command versions, so an Entry Point version bump breaks every Activity
+# launch ("Failed to Launch Activity") until the client fully relaunches, and
+# the #223 deployer restarts this bot on every deploy (#241). So before
+# syncing, diff the registered global commands against the tree's would-be
+# payload and skip the whole global sync when nothing actually changed.
+
+# Server-assigned keys that GET /commands returns but to_dict() never emits.
+_SERVER_ASSIGNED_KEYS = frozenset({"id", "application_id", "version", "guild_id"})
+# For these two fields the server echoes resolved defaults (e.g. contexts
+# [0, 1, 2]) that are unknowable client-side, while to_dict() emits None when
+# unset (this codebase never sets them). A tree-side None therefore matches
+# ANY registered value; explicit tree-side values must match exactly.
+_SERVER_RESOLVED_DEFAULT_KEYS = ("contexts", "integration_types")
+
+
+def _normalized_option(option: dict[str, Any]) -> dict[str, Any]:
+    """Canonicalize one option/choice dict (recursively) for comparison."""
+    out = dict(option)
+    out["description"] = out.get("description") or ""
+    out["required"] = bool(out.get("required"))  # NotRequired on the wire; missing means False
+    # Keys either side emits only when set/truthy; drop the empty/false/null
+    # variants so absence compares equal to them.
+    for key in (
+        "options",
+        "choices",
+        "channel_types",
+        "autocomplete",
+        "name_localizations",
+        "description_localizations",
+    ):
+        if not out.get(key):
+            out.pop(key, None)
+    if "options" in out:
+        out["options"] = [_normalized_option(o) for o in out["options"]]
+    if "choices" in out:
+        out["choices"] = [_normalized_option(c) for c in out["choices"]]
+    return out
+
+
+def _normalized_command(cmd: dict[str, Any]) -> dict[str, Any]:
+    """Canonicalize a command dict — from either the GET /commands wire shape
+    or the tree's to_dict() shape — so the two sides compare equal exactly
+    when they describe the same command."""
+    out = {k: v for k, v in cmd.items() if k not in _SERVER_ASSIGNED_KEYS}
+    out["type"] = int(out.get("type", 1))
+    # GET omits nsfw when false; to_dict() always emits it.
+    out["nsfw"] = bool(out.get("nsfw"))
+    # GET may omit dm_permission OR send explicit null — both mean True.
+    dm_permission = out.get("dm_permission")
+    out["dm_permission"] = True if dm_permission is None else bool(dm_permission)
+    # GET returns the permissions bitfield as a string; to_dict() emits an int.
+    permissions = out.get("default_member_permissions")
+    out["default_member_permissions"] = None if permissions is None else int(permissions)
+    # ContextMenu.to_dict() emits neither description nor options; GET returns
+    # description "" (and may return options) for the same command.
+    out["description"] = out.get("description") or ""
+    out["options"] = [_normalized_option(o) for o in (out.get("options") or [])]
+    # No translator is configured in this codebase, so localizations are never
+    # ours; GET may echo them as null or {} — treat missing/null/{} alike.
+    for key in ("name_localizations", "description_localizations"):
+        if not out.get(key):
+            out.pop(key, None)
+    # Sorted int lists (order-insensitive), or None (wildcard — see compare).
+    for key in _SERVER_RESOLVED_DEFAULT_KEYS:
+        value = out.get(key)
+        out[key] = None if value is None else sorted(int(v) for v in value)
+    return out
+
+
+def _command_sort_key(cmd: dict[str, Any]) -> tuple[int, str]:
+    return (int(cmd.get("type", 1)), str(cmd.get("name", "")))
+
+
+def _global_payloads_match(payload: list[dict[str, Any]], registered: list[dict[str, Any]]) -> bool:
+    """Whether the tree's would-be global payload already matches the
+    registered global commands. Entry Point (type-4) entries are excluded
+    from the registered side — the tree can never contain them, and leaving
+    them untouched is the whole point of skipping."""
+    ours = sorted((_normalized_command(c) for c in payload), key=_command_sort_key)
+    theirs = sorted(
+        (_normalized_command(c) for c in registered if c.get("type") != _ENTRY_POINT_COMMAND_TYPE),
+        key=_command_sort_key,
+    )
+    if len(ours) != len(theirs):
+        return False
+    for mine, remote in zip(ours, theirs, strict=True):
+        for key in _SERVER_RESOLVED_DEFAULT_KEYS:
+            # Tree-side None means "let the server resolve the default" —
+            # the resolved value is unknowable client-side, so it matches any.
+            if mine.get(key) is None:
+                mine.pop(key, None)
+                remote.pop(key, None)
+        if mine != remote:
+            return False
+    return True
+
+
+async def _global_commands_unchanged(
+    command_tree: "discord.app_commands.CommandTree[Any]",
+) -> bool:
+    """True only when the registered global commands provably match what a
+    sync would upsert. Fail-open by design: on any doubt (no application id,
+    fetch failure, unexpected payload shapes) return False so the normal
+    sync + fallback path runs — the worst case must always be today's
+    behavior, never a silently skipped genuine change."""
+    try:
+        client = command_tree.client
+        app_id = client.application_id
+        if app_id is None:
+            logging.info("No application_id available; cannot diff global commands, syncing")
+            return False
+        registered = await client.http.get_global_commands(app_id)
+        # Same payload construction as _sync_global_including_entry_point.
+        payload = [cmd.to_dict(command_tree) for cmd in command_tree._get_all_commands(guild=None)]  # noqa: SLF001
+        return _global_payloads_match(payload, list(registered))
+    except Exception:
+        logging.warning(
+            "Global command diff check failed; falling back to a normal sync", exc_info=True
+        )
+        return False
+
+
 async def _sync_commands(
     command_tree: "discord.app_commands.CommandTree[Any]", guild_id: int
 ) -> None:
-    """Sync slash commands. Always does the global sync (eventual, propagates
-    to all guilds in ~1h). When guild_id is non-zero, ALSO does an instant
-    guild-scoped sync so commands appear immediately in that test/home guild."""
-    try:
-        await command_tree.sync()  # global (eventual, for all guilds)
-    except discord.HTTPException as exc:
-        if exc.code != _ENTRY_POINT_ERROR_CODE:
-            raise
-        logging.warning(
-            "Global command sync rejected (50240: Entry Point command); "
-            "retrying with the Entry Point command included",
-            exc_info=exc,
+    """Sync slash commands. Does the global sync (eventual, propagates to all
+    guilds in ~1h) unless the registered commands already match — a no-op sync
+    is not free, it rewrites the Entry Point's version snowflake via the 50240
+    fallback and breaks cached Activity launches (#241). When guild_id is
+    non-zero, ALSO does an instant guild-scoped sync so commands appear
+    immediately in that test/home guild."""
+    if await _global_commands_unchanged(command_tree):
+        logging.info(
+            "Global commands unchanged; skipping global sync (Entry Point version preserved)"
         )
-        await _sync_global_including_entry_point(command_tree)
+    else:
+        try:
+            await command_tree.sync()  # global (eventual, for all guilds)
+        except discord.HTTPException as exc:
+            if exc.code != _ENTRY_POINT_ERROR_CODE:
+                raise
+            logging.warning(
+                "Global command sync rejected (50240: Entry Point command); "
+                "retrying with the Entry Point command included",
+                exc_info=exc,
+            )
+            await _sync_global_including_entry_point(command_tree)
     if guild_id:
         guild = discord.Object(id=guild_id)
         command_tree.copy_global_to(guild=guild)
