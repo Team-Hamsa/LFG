@@ -15,6 +15,7 @@ from __future__ import annotations
 import json
 import sqlite3
 from dataclasses import dataclass
+from decimal import Decimal
 from typing import Any
 
 _VALID_KINDS = {"character", "trait"}
@@ -29,7 +30,7 @@ CREATE TABLE IF NOT EXISTS market_listings (
     nft_id        TEXT NOT NULL,
     kind          TEXT NOT NULL,      -- 'character' | 'trait'
     seller        TEXT NOT NULL,      -- offer Owner
-    amount_drops  INTEGER NOT NULL,   -- XRP-denominated only in MVP
+    amount_drops  INTEGER,            -- XRP price (kind='character'); NULL for BRIX rows (#239)
     destination   TEXT,               -- non-NULL ⇒ hidden from browse
     slot          TEXT,               -- trait kind only (denormalized)
     value         TEXT,               -- trait kind only (denormalized)
@@ -38,7 +39,8 @@ CREATE TABLE IF NOT EXISTS market_listings (
     is_live       INTEGER NOT NULL DEFAULT 1,
     closed_reason TEXT,               -- sold | cancelled | stale
     settled       INTEGER,            -- trait kind: 0=burn-back pending, 1=done; NULL for characters
-    buyer         TEXT                 -- sold kind: durable buyer-of-record for settlement recovery; NULL otherwise
+    buyer         TEXT,                -- sold kind: durable buyer-of-record for settlement recovery; NULL otherwise
+    amount_brix   TEXT                 -- BRIX price (kind='trait', #239); exactly one of amount_drops/amount_brix is non-NULL
 );
 CREATE INDEX IF NOT EXISTS idx_market_live ON market_listings(is_live, kind, nft_id);
 """
@@ -56,7 +58,8 @@ class MarketListing:
     nft_id: str
     kind: str
     seller: str
-    amount_drops: int
+    amount_drops: int | None = None
+    amount_brix: str | None = None  # #239: BRIX price for trait listings
     destination: str | None = None
     slot: str | None = None
     value: str | None = None
@@ -67,17 +70,53 @@ class MarketListing:
     settled: int | None = None
 
 
+def _check_exactly_one_amount(listing: MarketListing) -> None:
+    """#239 invariant: every row carries exactly one denomination — XRP drops
+    (characters) or a BRIX value string (trait listings), never both/neither."""
+    if (listing.amount_drops is None) == (listing.amount_brix is None):
+        raise ValueError(
+            "exactly one of amount_drops/amount_brix must be set "
+            f"(got drops={listing.amount_drops!r}, brix={listing.amount_brix!r})"
+        )
+
+
 def init_db(conn: sqlite3.Connection) -> None:
     """Create the market_listings table + index if absent. Idempotent —
     calling this twice on the same connection is a no-op the second time.
 
-    Also runs a forward-only migration: `buyer` was added after the initial
-    schema shipped, and `CREATE TABLE IF NOT EXISTS` will not add a column to
-    an already-created table, so ADD it when a pre-existing DB lacks it."""
+    Also runs forward-only migrations: `buyer` and `amount_brix` (#239) were
+    added after the initial schema shipped, and `CREATE TABLE IF NOT EXISTS`
+    will not add a column to an already-created table, so ADD them when a
+    pre-existing DB lacks them. #239 additionally relaxed amount_drops from
+    NOT NULL (a BRIX trait row carries no drops); SQLite cannot drop a NOT
+    NULL constraint in place, so a pre-#239 table is rebuilt once
+    (rename -> copy -> drop), preserving every row verbatim."""
     conn.executescript(_SCHEMA)
     cols = {row[1] for row in conn.execute("PRAGMA table_info(market_listings)")}
     if "buyer" not in cols:
         conn.execute("ALTER TABLE market_listings ADD COLUMN buyer TEXT")
+    if "amount_brix" not in cols:
+        conn.execute("ALTER TABLE market_listings ADD COLUMN amount_brix TEXT")
+    drops_not_null = any(
+        row[1] == "amount_drops" and row[3]
+        for row in conn.execute("PRAGMA table_info(market_listings)")
+    )
+    if drops_not_null:
+        column_list = (
+            "offer_index, nft_id, kind, seller, amount_drops, destination, slot, value, "
+            "created_ledger, created_ts, is_live, closed_reason, settled, buyer, amount_brix"
+        )
+        conn.execute("ALTER TABLE market_listings RENAME TO _market_listings_migrate")
+        # The rename carried idx_market_live along with the old table, so the
+        # fresh CREATE INDEX IF NOT EXISTS is skipped until the old table (and
+        # its index) is dropped — recreate via a second _SCHEMA pass below.
+        conn.executescript(_SCHEMA)
+        conn.execute(
+            f"INSERT INTO market_listings ({column_list}) "
+            f"SELECT {column_list} FROM _market_listings_migrate"
+        )
+        conn.execute("DROP TABLE _market_listings_migrate")
+        conn.executescript(_SCHEMA)
     conn.commit()
 
 
@@ -98,17 +137,19 @@ def upsert_listing(conn: sqlite3.Connection, listing: MarketListing) -> None:
     the offer on-ledger."""
     if listing.kind not in _VALID_KINDS:
         raise ValueError(f"unknown kind: {listing.kind!r}")
+    _check_exactly_one_amount(listing)
     conn.execute(
         """
         INSERT INTO market_listings
-            (offer_index, nft_id, kind, seller, amount_drops, destination,
+            (offer_index, nft_id, kind, seller, amount_drops, amount_brix, destination,
              slot, value, created_ledger, created_ts, is_live, closed_reason, settled)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         ON CONFLICT(offer_index) DO UPDATE SET
             nft_id=excluded.nft_id,
             kind=excluded.kind,
             seller=excluded.seller,
             amount_drops=excluded.amount_drops,
+            amount_brix=excluded.amount_brix,
             destination=excluded.destination,
             slot=excluded.slot,
             value=excluded.value,
@@ -124,6 +165,7 @@ def upsert_listing(conn: sqlite3.Connection, listing: MarketListing) -> None:
             listing.kind,
             listing.seller,
             listing.amount_drops,
+            listing.amount_brix,
             listing.destination,
             listing.slot,
             listing.value,
@@ -161,12 +203,13 @@ def record_listing_creation(conn: sqlite3.Connection, listing: MarketListing) ->
     on-ledger truth as before."""
     if listing.kind not in _VALID_KINDS:
         raise ValueError(f"unknown kind: {listing.kind!r}")
+    _check_exactly_one_amount(listing)
     conn.execute(
         """
         INSERT INTO market_listings
-            (offer_index, nft_id, kind, seller, amount_drops, destination,
+            (offer_index, nft_id, kind, seller, amount_drops, amount_brix, destination,
              slot, value, created_ledger, created_ts, is_live, closed_reason, settled)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         ON CONFLICT(offer_index) DO NOTHING
         """,
         (
@@ -175,6 +218,7 @@ def record_listing_creation(conn: sqlite3.Connection, listing: MarketListing) ->
             listing.kind,
             listing.seller,
             listing.amount_drops,
+            listing.amount_brix,
             listing.destination,
             listing.slot,
             listing.value,
@@ -268,6 +312,19 @@ def get_listing(conn: sqlite3.Connection, offer_index: str) -> dict[str, Any] | 
     return dict(row) if row is not None else None
 
 
+def listing_price(row: Any) -> Decimal:
+    """A row's price in its own denomination, as a Decimal, for within-kind
+    sorting (#239): BRIX value when present, else drops. Browse is per-kind so
+    rows are denomination-homogeneous apart from the legacy transition case
+    (a live XRP trait row awaiting the backfill's stale-close) — sorting a
+    Decimal BRIX against a Decimal drops count is well-defined, just not
+    meaningful, and beats crashing on None."""
+    brix = row["amount_brix"] if "amount_brix" in row.keys() else None
+    if brix is not None:
+        return Decimal(brix)
+    return Decimal(row["amount_drops"] or 0)
+
+
 def _attributes_match(attrs: list[dict[str, str]], filters: dict[str, list[str]]) -> bool:
     """AND across slots in `filters`, OR within a slot's value list. `attrs`
     is a list of {"trait_type": ..., "value": ...} entries (the normalized
@@ -325,6 +382,8 @@ def browse(
     trait_filters: dict[str, list[str]] | None = None,
     min_amount_drops: int | None = None,
     max_amount_drops: int | None = None,
+    min_amount_brix: str | None = None,
+    max_amount_brix: str | None = None,
     sort: str = "price_asc",
     limit: int = 24,
     offset: int = 0,
@@ -355,18 +414,36 @@ def browse(
 
     rows = _browse_character_rows(conn) if kind == "character" else _browse_trait_rows(conn)
 
+    # Per-kind price filters (#239): drops bounds apply to XRP-denominated
+    # rows, BRIX bounds to BRIX-denominated ones. A row lacking the filtered
+    # denomination (e.g. a legacy live XRP trait row awaiting the backfill's
+    # stale-close) is excluded by that filter rather than crashing on None.
     if min_amount_drops is not None:
-        rows = [r for r in rows if r["amount_drops"] >= min_amount_drops]
+        rows = [
+            r for r in rows if r["amount_drops"] is not None and r["amount_drops"] >= min_amount_drops
+        ]
     if max_amount_drops is not None:
-        rows = [r for r in rows if r["amount_drops"] <= max_amount_drops]
+        rows = [
+            r for r in rows if r["amount_drops"] is not None and r["amount_drops"] <= max_amount_drops
+        ]
+    if min_amount_brix is not None:
+        floor = Decimal(min_amount_brix)
+        rows = [
+            r for r in rows if r["amount_brix"] is not None and Decimal(r["amount_brix"]) >= floor
+        ]
+    if max_amount_brix is not None:
+        ceiling = Decimal(max_amount_brix)
+        rows = [
+            r for r in rows if r["amount_brix"] is not None and Decimal(r["amount_brix"]) <= ceiling
+        ]
 
     if trait_filters:
         rows = [r for r in rows if _attributes_match(_row_attrs(r, kind), trait_filters)]
 
     if sort == "price_asc":
-        rows.sort(key=lambda r: (r["amount_drops"], r["offer_index"]))
+        rows.sort(key=lambda r: (listing_price(r), r["offer_index"]))
     elif sort == "price_desc":
-        rows.sort(key=lambda r: (-r["amount_drops"], r["offer_index"]))
+        rows.sort(key=lambda r: (-listing_price(r), r["offer_index"]))
     else:  # newest
         rows.sort(key=lambda r: (-(r["created_ts"] or 0), r["offer_index"]))
 
