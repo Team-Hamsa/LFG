@@ -95,6 +95,8 @@ async def send_media(bot: Any, chat_id: Any, media_url: str, caption: str | None
     photo otherwise — a static send_photo of an MP4 URL is what made animated
     mints show up frozen on Telegram."""
     if is_video_url(media_url):
-        await bot.send_video(chat_id, video=media_url, caption=caption)
+        # supports_streaming: without it Telegram mobile buffers the whole
+        # file (download spinner) instead of playing the MP4 inline.
+        await bot.send_video(chat_id, video=media_url, caption=caption, supports_streaming=True)
     else:
         await bot.send_photo(chat_id, photo=media_url, caption=caption)

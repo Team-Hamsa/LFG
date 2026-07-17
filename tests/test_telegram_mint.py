@@ -145,7 +145,7 @@ def test_animated_mint_sends_video_not_photo():
     bot = _Bot()
     bot.videos = []
 
-    async def send_video(chat_id, video, caption=None):
+    async def send_video(chat_id, video, caption=None, supports_streaming=False):
         bot.videos.append((chat_id, video, caption))
 
     bot.send_video = send_video
