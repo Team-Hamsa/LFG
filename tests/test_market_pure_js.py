@@ -340,3 +340,84 @@ def test_safe_compute_royalty_error_shape(bad):
     r = run_js(f"M.safeComputeRoyalty({json.dumps(bad)})")
     assert r["ok"] is False
     assert isinstance(r["error"], str) and r["error"]
+
+
+# --- #239: BRIX price helpers ---
+
+
+@pytest.mark.parametrize(
+    "brix,micro",
+    [("5", "5000000"), ("10.5", "10500000"), ("0.000001", "1")],
+)
+def test_brix_to_micro(brix, micro):
+    assert run_js(f"M.brixToMicroStr({json.dumps(brix)})") == micro
+
+
+@pytest.mark.parametrize(
+    "micro,brix",
+    [("5000000", "5"), ("10500000", "10.5"), ("1", "0.000001")],
+)
+def test_micro_to_brix(micro, brix):
+    assert run_js(f"M.microToBrixStr({json.dumps(micro)})") == brix
+
+
+def test_brix_to_micro_rejects_bad_values():
+    assert run_js_throws("M.brixToMicroStr('0')") == "RangeError"
+    assert run_js_throws("M.brixToMicroStr('-1')") == "RangeError"
+    assert run_js_throws("M.brixToMicroStr('1.1234567')") == "RangeError"
+    assert run_js_throws("M.brixToMicroStr('1000000000000001')") == "RangeError"
+    assert run_js_throws("M.brixToMicroStr(5)") == "TypeError"
+
+
+def test_validate_brix_price_shapes():
+    ok = run_js("M.validateBrixPrice('10.500000')")
+    assert ok == {"ok": True, "value": "10.5"}
+    bad = run_js("M.validateBrixPrice('abc')")
+    assert bad["ok"] is False and bad["error"]
+
+
+def test_brix_royalty_disclosure_says_93_and_7():
+    text = run_js("M.brixRoyaltyDisclosure('100')")
+    assert "93 BRIX" in text
+    assert "93%" in text and "7%" in text
+
+
+def test_price_label_per_kind():
+    assert run_js("M.priceLabel({amount_brix: '10.5'})") == "10.5 BRIX"
+    assert run_js("M.priceLabel({amount_xrp: '2'})") == "2 XRP"
+    assert run_js("M.priceLabel({})") == ""
+
+
+def test_map_listing_row_trait_carries_brix_price():
+    row = {
+        "kind": "trait",
+        "nft_id": "T1",
+        "slot": "Hat",
+        "value": "Wizard Hat",
+        "amount_brix": "10.5",
+        "seller": "rS",
+        "offer_index": "OFF1",
+    }
+    vm = run_js(f"M.mapListingRow({json.dumps(row)})")
+    assert vm["amountBrix"] == "10.5"
+    assert vm["priceLabel"] == "10.5 BRIX"
+    assert vm["amountXrp"] is None
+
+
+def test_build_listings_params_brix_bounds():
+    pairs = run_js(
+        "M.buildListingsParams({kind: 'trait', minBrix: '1', maxBrix: '50', sort: 'price_asc'})"
+    )
+    assert ["min_brix", "1"] in pairs
+    assert ["max_brix", "50"] in pairs
+    assert not any(k in ("min_xrp", "max_xrp") for k, _ in pairs)
+
+
+def test_sort_rows_brix_decimal_not_lexicographic():
+    rows = [
+        {"amount_brix": "100", "kind": "trait"},
+        {"amount_brix": "5", "kind": "trait"},
+        {"amount_brix": "10.5", "kind": "trait"},
+    ]
+    out = run_js(f"M.sortRows({json.dumps(rows)}, 'price_asc')")
+    assert [r["amount_brix"] for r in out] == ["5", "10.5", "100"]

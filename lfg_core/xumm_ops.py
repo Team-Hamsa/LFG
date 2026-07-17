@@ -381,15 +381,17 @@ async def create_accept_offer_payload(
 async def create_sell_offer_payload(
     account: str,
     nft_id: str,
-    drops: str,
+    amount: str | dict[str, str],
     return_url: dict[str, str] | None = None,
     user_token: str | None = None,
     platform: str = memos.PLATFORM_BACKEND,
     campaign: str | None = None,
 ) -> dict[str, Any] | None:
     """XUMM payload for NFTokenCreateOffer listing an NFT for sale on the
-    in-app marketplace. `drops` must already be an integer-drops string (see
-    `market_ops.xrp_to_drops_str`) — no float/Decimal handling here. Flags=1
+    in-app marketplace. `amount` must already be wire-shaped: an integer-drops
+    string for a character listing (see `market_ops.xrp_to_drops_str`) or a
+    validated BRIX IssuedCurrencyAmount dict for a trait listing (#239, see
+    `market_ops.brix_amount_dict`) — no float/Decimal handling here. Flags=1
     marks a sell offer; Owner is omitted (only meaningful when someone other
     than the token owner creates the offer) and Destination is omitted so the
     listing is open to any buyer rather than locked to one counterparty.
@@ -400,7 +402,7 @@ async def create_sell_offer_payload(
             "TransactionType": "NFTokenCreateOffer",
             "Account": account,
             "NFTokenID": nft_id,
-            "Amount": drops,
+            "Amount": amount,
             "Flags": 1,
         },
         options=_with_return_url({}, return_url),
@@ -432,6 +434,42 @@ async def create_cancel_offer_payload(
         user_token=user_token,
         memos_json=memos.build_memos_json(
             memos.INITIATOR_USER, platform, memos.ACTION_CANCEL_OFFER, campaign
+        ),
+    )
+
+
+async def create_onramp_payment_payload(
+    account: str,
+    brix_amount: dict[str, str],
+    send_max_drops: str,
+    return_url: dict[str, str] | None = None,
+    user_token: str | None = None,
+    platform: str = memos.PLATFORM_BACKEND,
+    campaign: str | None = None,
+) -> dict[str, Any] | None:
+    """XUMM payload for the trait-buy XRP→BRIX on-ramp (#239): a
+    cross-currency Payment the buyer signs to THEMSELVES — Account and
+    Destination are both `account`, `Amount` is the listing's BRIX
+    IssuedCurrencyAmount (`market_ops.brix_amount_dict` shape), and `SendMax`
+    is the buffered AMM XRP quote in drops — which buys the BRIX out of the
+    AMM into their own wallet. No custody: if the buyer abandons after
+    signing, they simply keep the BRIX.
+
+    SourceTag + provenance memos (`action=payment`, user-initiated) are
+    stamped by `_create_xumm_payload` like every other payload; ``user_token``
+    (issue #135) push-delivers the request to a known user."""
+    return await _create_xumm_payload(
+        {
+            "TransactionType": "Payment",
+            "Account": account,
+            "Destination": account,
+            "Amount": brix_amount,
+            "SendMax": send_max_drops,
+        },
+        options=_with_return_url({}, return_url),
+        user_token=user_token,
+        memos_json=memos.build_memos_json(
+            memos.INITIATOR_USER, platform, memos.ACTION_PAYMENT, campaign
         ),
     )
 

@@ -362,8 +362,11 @@ def _deleted_nft_offer_nodes(tx: dict[str, Any]) -> list[dict[str, Any]]:
 
 def _apply_offer_create(conn: sqlite3.Connection, tx: dict[str, Any]) -> None:
     """NFTokenCreateOffer: upsert a live market_listings row iff the created
-    offer is sell-flagged, XRP-denominated (market_ops.extract_created_sell_offer
-    already enforces both), and `nft_id` is ours by membership."""
+    offer is sell-flagged, denominated per kind (#239: XRP drops for a
+    character, our BRIX IssuedCurrencyAmount for a trait token —
+    market_ops.extract_created_sell_offer's `expect` branch enforces it, so
+    an XRP-denominated trait offer or a BRIX character offer is ignored),
+    and `nft_id` is ours by membership."""
     nft_id = tx.get("NFTokenID")
     if not isinstance(nft_id, str) or not nft_id:
         return
@@ -376,9 +379,10 @@ def _apply_offer_create(conn: sqlite3.Connection, tx: dict[str, Any]) -> None:
         return
     meta_raw = tx.get("meta")
     meta: dict[str, Any] = meta_raw if isinstance(meta_raw, dict) else {}
-    extracted = market_ops.extract_created_sell_offer(meta, nft_id)
+    expect = "brix" if kind == "trait" else "xrp"
+    extracted = market_ops.extract_created_sell_offer(meta, nft_id, expect=expect)
     if extracted is None:
-        return  # buy offer, IOU amount, or no matching CreatedNode
+        return  # buy offer, wrong-denomination amount, or no matching CreatedNode
     offer_index = extracted.get("offer_index")
     if not isinstance(offer_index, str) or not offer_index:
         return
@@ -389,7 +393,8 @@ def _apply_offer_create(conn: sqlite3.Connection, tx: dict[str, Any]) -> None:
             nft_id=nft_id,
             kind=kind,
             seller=seller,
-            amount_drops=extracted["amount_drops"],  # already an int (extract_created_sell_offer)
+            amount_drops=extracted.get("amount_drops"),  # int for characters (xrp branch)
+            amount_brix=extracted.get("amount_brix"),  # normalized str for traits (#239)
             destination=extracted.get("destination"),
             slot=slot,
             value=value,

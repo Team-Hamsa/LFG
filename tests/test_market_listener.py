@@ -193,6 +193,17 @@ def test_classify_tx_regression_existing_kinds_unchanged():
     assert nft_listener.classify_tx(payment) is None
 
 
+def _brix_amount(value="10"):
+    # #239: trait listings are BRIX-denominated on the token currency/issuer.
+    from lfg_core import config
+
+    return {
+        "currency": config.TOKEN_CURRENCY_HEX,
+        "issuer": config.TOKEN_ISSUER_ADDRESS,
+        "value": value,
+    }
+
+
 # --- offer_create: membership + filtering -----------------------------------
 
 
@@ -220,7 +231,9 @@ def test_offer_create_trait_copies_slot_value():
     conn = _conn()
     nft_id = _our_nft_id(2)
     _seed_trait(conn, nft_id, owner="rSeller", slot="Hat", value="Wizard Hat")
-    tx = _sell_offer_create_tx(nft_id, seller="rSeller", offer_index="OFF_TRAIT")
+    tx = _sell_offer_create_tx(
+        nft_id, seller="rSeller", offer_index="OFF_TRAIT", amount=_brix_amount("10.5")
+    )
 
     _run(nft_listener.apply_market_tx(conn, tx))
 
@@ -230,6 +243,8 @@ def test_offer_create_trait_copies_slot_value():
     assert row["kind"] == "trait"
     assert row["slot"] == "Hat"
     assert row["value"] == "Wizard Hat"
+    assert row["amount_brix"] == "10.5"
+    assert row["amount_drops"] is None
 
 
 def test_offer_create_foreign_issuer_produces_zero_rows():
@@ -368,7 +383,10 @@ def test_accept_trait_closes_sold_with_settled_zero():
     _seed_trait(conn, nft_id, owner="rSeller", slot="Hat", value="Cap")
     _run(
         nft_listener.apply_market_tx(
-            conn, _sell_offer_create_tx(nft_id, seller="rSeller", offer_index="OFF_SOLD_TRAIT")
+            conn,
+            _sell_offer_create_tx(
+                nft_id, seller="rSeller", offer_index="OFF_SOLD_TRAIT", amount=_brix_amount()
+            ),
         )
     )
     economy_store.upsert_trait_token(conn, nft_id, "rBuyer", "Hat", "Cap")  # ownership moved
@@ -403,7 +421,10 @@ def test_accept_persists_buyer_from_tx_even_when_owner_refresh_stale():
     _seed_trait(conn, nft_id, owner="rSeller", slot="Hat", value="Cap")
     _run(
         nft_listener.apply_market_tx(
-            conn, _sell_offer_create_tx(nft_id, seller="rSeller", offer_index="OFF_STALE_BUYER")
+            conn,
+            _sell_offer_create_tx(
+                nft_id, seller="rSeller", offer_index="OFF_STALE_BUYER", amount=_brix_amount()
+            ),
         )
     )
     # NOTE: no ownership move — trait_tokens.owner still == seller (refresh stale)
@@ -434,7 +455,10 @@ def test_accept_brokered_persists_buy_offer_owner_not_broker():
     _seed_trait(conn, nft_id, owner="rSeller", slot="Hat", value="Cap")
     _run(
         nft_listener.apply_market_tx(
-            conn, _sell_offer_create_tx(nft_id, seller="rSeller", offer_index="OFF_BROKERED")
+            conn,
+            _sell_offer_create_tx(
+                nft_id, seller="rSeller", offer_index="OFF_BROKERED", amount=_brix_amount()
+            ),
         )
     )
     buy_offer = {
@@ -539,6 +563,51 @@ def test_apply_market_tx_ignores_non_market_kinds():
     assert conn.execute("SELECT COUNT(*) FROM market_listings").fetchone()[0] == 0
 
 
+# --- #239: per-kind denomination in offer_create ------------------------------
+
+
+def test_offer_create_xrp_trait_offer_ignored():
+    # An XRP-denominated sell offer on a TRAIT token is the wrong
+    # denomination under #239 — the listener must not index it.
+    conn = _conn()
+    nft_id = _our_nft_id(30)
+    _seed_trait(conn, nft_id, owner="rSeller", slot="Hat", value="Cap")
+    tx = _sell_offer_create_tx(nft_id, seller="rSeller", offer_index="OFF_XRP_TRAIT")
+
+    _run(nft_listener.apply_market_tx(conn, tx))
+
+    assert conn.execute("SELECT COUNT(*) FROM market_listings").fetchone()[0] == 0
+
+
+def test_offer_create_brix_character_offer_ignored():
+    conn = _conn()
+    nft_id = _our_nft_id(31)
+    _seed_character(conn, nft_id, owner="rSeller")
+    tx = _sell_offer_create_tx(
+        nft_id, seller="rSeller", offer_index="OFF_BRIX_CHAR", amount=_brix_amount()
+    )
+
+    _run(nft_listener.apply_market_tx(conn, tx))
+
+    assert conn.execute("SELECT COUNT(*) FROM market_listings").fetchone()[0] == 0
+
+
+def test_offer_create_foreign_iou_trait_offer_ignored():
+    conn = _conn()
+    nft_id = _our_nft_id(32)
+    _seed_trait(conn, nft_id, owner="rSeller", slot="Hat", value="Cap")
+    tx = _sell_offer_create_tx(
+        nft_id,
+        seller="rSeller",
+        offer_index="OFF_FOREIGN_IOU",
+        amount={"currency": "USD", "issuer": "rIssuer", "value": "10"},
+    )
+
+    _run(nft_listener.apply_market_tx(conn, tx))
+
+    assert conn.execute("SELECT COUNT(*) FROM market_listings").fetchone()[0] == 0
+
+
 # --- tec-class txs perform nothing (#210/#235) --------------------------------
 
 
@@ -565,7 +634,9 @@ def test_tec_accept_closes_no_listing():
     DOES delete the offer on-ledger, is covered separately below.)"""
     conn = _conn()
     nft_id = _our_nft_id(31)
-    _seed_trait(conn, nft_id, owner="rSeller", slot="Hat", value="Cap")
+    # Characters stay XRP-denominated under #239; the result gate under test
+    # is kind-agnostic, so a character listing keeps the setup indexable.
+    _seed_character(conn, nft_id, owner="rSeller")
     _run(
         nft_listener.apply_market_tx(
             conn, _sell_offer_create_tx(nft_id, seller="rSeller", offer_index="OFF_TEC_ACC")
@@ -593,7 +664,9 @@ def test_tec_expired_accept_stale_closes_deleted_offer():
     settlement lifecycle (settled stays NULL)."""
     conn = _conn()
     nft_id = _our_nft_id(33)
-    _seed_trait(conn, nft_id, owner="rSeller", slot="Hat", value="Cap")
+    # Characters stay XRP-denominated under #239; the result gate under test
+    # is kind-agnostic, so a character listing keeps the setup indexable.
+    _seed_character(conn, nft_id, owner="rSeller")
     _run(
         nft_listener.apply_market_tx(
             conn, _sell_offer_create_tx(nft_id, seller="rSeller", offer_index="OFF_EXPIRED")
@@ -642,7 +715,9 @@ def test_missing_result_accept_with_deleted_nodes_fails_closed():
     explicit tec* result, so a result-less payload must mutate nothing."""
     conn = _conn()
     nft_id = _our_nft_id(34)
-    _seed_trait(conn, nft_id, owner="rSeller", slot="Hat", value="Cap")
+    # Characters stay XRP-denominated under #239; the result gate under test
+    # is kind-agnostic, so a character listing keeps the setup indexable.
+    _seed_character(conn, nft_id, owner="rSeller")
     _run(
         nft_listener.apply_market_tx(
             conn, _sell_offer_create_tx(nft_id, seller="rSeller", offer_index="OFF_NORES")
@@ -664,7 +739,9 @@ def test_malformed_meta_fails_gate_without_crashing():
     crash it — the guard runs before the appliers' own try/except boundaries."""
     conn = _conn()
     nft_id = _our_nft_id(35)
-    _seed_trait(conn, nft_id, owner="rSeller", slot="Hat", value="Cap")
+    # Characters stay XRP-denominated under #239; the result gate under test
+    # is kind-agnostic, so a character listing keeps the setup indexable.
+    _seed_character(conn, nft_id, owner="rSeller")
     _run(
         nft_listener.apply_market_tx(
             conn, _sell_offer_create_tx(nft_id, seller="rSeller", offer_index="OFF_MAL")

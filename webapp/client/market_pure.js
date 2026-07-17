@@ -131,6 +131,80 @@ export function royaltyDisclosure(priceXrp) {
   return `You receive ${receiveXrp} XRP (93% — 7% collection royalty)`;
 }
 
+// --- #239: BRIX price helpers (trait listings are BRIX-denominated) ---
+// Mirrors lfg_core/market_ops.py's validate_brix_value bounds: > 0, at most
+// 6 decimal places, capped at 1e15. Micro-BRIX (1e-6) BigInt math throughout
+// — same money discipline as the drops helpers above.
+
+export const MICRO_PER_BRIX = 1000000n;
+export const MAX_MICRO_BRIX = 1000000000000000n * MICRO_PER_BRIX; // 1e15 BRIX
+
+/** Convert a decimal BRIX string to integer micro-BRIX (1e-6) string. */
+export function brixToMicroStr(brix) {
+  if (typeof brix !== 'string') {
+    throw new TypeError(`brixToMicroStr requires a string, got ${typeof brix}`);
+  }
+  const m = XRP_RE.exec(brix.trim());
+  if (!m) throw new RangeError(`invalid BRIX amount: ${JSON.stringify(brix)}`);
+  const fracRaw = m[2] || '';
+  if (fracRaw.length > 6) {
+    throw new RangeError('BRIX amount must not have more than 6 decimal places');
+  }
+  const micro = BigInt(m[1]) * MICRO_PER_BRIX + BigInt(fracRaw.padEnd(6, '0') || '0');
+  if (micro <= 0n) throw new RangeError('BRIX amount must be > 0');
+  if (micro > MAX_MICRO_BRIX) throw new RangeError('BRIX amount exceeds cap (1e15 BRIX)');
+  return micro.toString();
+}
+
+/** Inverse of brixToMicroStr: micro-BRIX string -> decimal BRIX string. */
+export function microToBrixStr(micro) {
+  if (typeof micro !== 'string' || !/^\d+$/.test(micro)) {
+    throw new TypeError(`microToBrixStr requires a digit string, got ${JSON.stringify(micro)}`);
+  }
+  const value = BigInt(micro);
+  const whole = value / MICRO_PER_BRIX;
+  const frac = value % MICRO_PER_BRIX;
+  if (frac === 0n) return whole.toString();
+  const fracStr = frac.toString().padStart(6, '0').replace(/0+$/, '');
+  return `${whole.toString()}.${fracStr}`;
+}
+
+/**
+ * No-throw BRIX price validation for the list/sell forms — the BRIX twin of
+ * validatePrice. Returns {ok:true, value} (normalized decimal string) or
+ * {ok:false, error}.
+ */
+export function validateBrixPrice(brixStr) {
+  try {
+    return { ok: true, value: microToBrixStr(brixToMicroStr(brixStr)) };
+  } catch (e) {
+    return { ok: false, error: e.message };
+  }
+}
+
+/**
+ * The "You receive X BRIX (93% — 7% collection royalty)" disclosure for a
+ * BRIX-priced trait listing — integer micro-BRIX math, same 93/7 rule as
+ * royaltyDisclosure.
+ */
+export function brixRoyaltyDisclosure(brixStr) {
+  const total = BigInt(brixToMicroStr(brixStr));
+  const fee = (total * ROYALTY_FEE_BPS) / ROYALTY_BPS_DENOM;
+  const receive = microToBrixStr((total - fee).toString());
+  return `You receive ${receive} BRIX (93% — 7% collection royalty)`;
+}
+
+/**
+ * A listing row's display price in its own denomination (#239): trait rows
+ * render BRIX, character rows XRP. Falls back to the drops fields for a
+ * legacy (pre-BRIX) trait row so the grid never renders "undefined".
+ */
+export function priceLabel(row) {
+  if (row.amount_brix != null) return `${row.amount_brix} BRIX`;
+  if (row.amount_xrp != null) return `${row.amount_xrp} XRP`;
+  return '';
+}
+
 /** 'Character' | 'Trait' badge for a browse/mine listing row. */
 export function badgeLabel(row) {
   return row.kind === 'trait' ? 'Trait' : 'Character';
@@ -154,7 +228,9 @@ export function mapListingRow(row) {
     badge: badgeLabel(row),
     title,
     image: row.image || null,
-    amountXrp: row.amount_xrp,
+    amountXrp: row.amount_xrp ?? null,
+    amountBrix: row.amount_brix ?? null, // #239: BRIX price for trait rows
+    priceLabel: priceLabel(row),
     seller: row.seller,
     offerIndex: row.offer_index,
     slot: row.slot ?? null,
@@ -176,9 +252,13 @@ export function sortRows(rows, sort) {
   // BigInt compare: amount_drops can exceed Number.MAX_SAFE_INTEGER for large
   // XRP prices, where Number() subtraction would misorder rows (money
   // discipline — integer drops end to end).
+  // #239: compare within a row's own denomination — micro-BRIX for trait
+  // rows, drops for character rows (browse/Mine groups are per-kind, so a
+  // mixed compare only happens for legacy transition rows and stays sane).
+  const key = (r) => (r.amount_brix != null ? BigInt(brixToMicroStr(r.amount_brix)) : BigInt(r.amount_drops ?? 0));
   const cmp = (a, b) => {
-    const x = BigInt(a.amount_drops);
-    const y = BigInt(b.amount_drops);
+    const x = key(a);
+    const y = key(b);
     return x < y ? -1 : x > y ? 1 : 0;
   };
   if (sort === 'price_asc') {
@@ -201,12 +281,15 @@ export function traitFilterToken(slot, value) {
  * of "Slot:Value" tokens) becomes one repeated `trait` param per entry,
  * matching request.query.getall('trait') server-side.
  */
-export function buildListingsParams({ kind, traits, minXrp, maxXrp, sort, limit, offset } = {}) {
+export function buildListingsParams({ kind, traits, minXrp, maxXrp, minBrix, maxBrix, sort, limit, offset } = {}) {
   const pairs = [];
   if (kind) pairs.push(['kind', kind]);
   for (const t of traits || []) pairs.push(['trait', t]);
   if (minXrp !== undefined && minXrp !== null && minXrp !== '') pairs.push(['min_xrp', String(minXrp)]);
   if (maxXrp !== undefined && maxXrp !== null && maxXrp !== '') pairs.push(['max_xrp', String(maxXrp)]);
+  // #239: BRIX bounds for trait browse (min_brix/max_brix server params).
+  if (minBrix !== undefined && minBrix !== null && minBrix !== '') pairs.push(['min_brix', String(minBrix)]);
+  if (maxBrix !== undefined && maxBrix !== null && maxBrix !== '') pairs.push(['max_brix', String(maxBrix)]);
   if (sort) pairs.push(['sort', sort]);
   if (limit !== undefined && limit !== null) pairs.push(['limit', String(limit)]);
   if (offset !== undefined && offset !== null) pairs.push(['offset', String(offset)]);

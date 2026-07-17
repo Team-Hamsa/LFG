@@ -676,9 +676,43 @@ on-chain offer is ready for the owner to sign.
 
 ### In-app marketplace (#44)
 
-An XRP-denominated marketplace for both live characters and tradeable trait
-tokens, built entirely on native `NFTokenOffer` sell offers — no escrow
-contract, no custodial holding.
+A marketplace for both live characters and tradeable trait tokens, built
+entirely on native `NFTokenOffer` sell offers — no escrow contract, no
+custodial holding.
+
+**Per-kind denomination (#239):** character listings are XRP-denominated
+(drops, as originally shipped); **trait listings are BRIX-denominated**
+(`IssuedCurrencyAmount` on `TOKEN_CURRENCY_HEX`/`TOKEN_ISSUER_ADDRESS`, the
+same pair `shop_flow.brix_amount` uses). One code path parameterized on
+expected currency enforces the rule everywhere: `market_ops.
+extract_created_sell_offer`/`verify_sell_offer` take `expect="xrp"|"brix"`
+(BRIX values validated >0, ≤6dp, cap 1e15 via `validate_brix_value`), the
+`market_listings` row carries exactly one of `amount_drops`/`amount_brix`
+(self-migrating column + upsert invariant), and the listener/backfill ignore
+wrong-denomination offers — an XRP-denominated trait offer or a BRIX
+character offer is never indexed. Legacy live XRP trait listings are closed
+`stale` by the first post-deploy `backfill_market.py` run (sellers re-list
+in BRIX). Browse gains `min_brix`/`max_brix` trait filters (post-cache, like
+the XRP ones); list/trait-list POSTs take `price_brix` for traits.
+
+**XRP→BRIX on-ramp (trait buys, #239):** `POST /api/market/buy` on a trait
+listing first requires a BRIX trustline (none → 409 `trustline_required`,
+same signal the mint flow uses), then runs `brix_payment.detect_payment_path`
+(shared #238 helper) against the listing price. BRIX holders keep the
+one-signature accept. Everyone else gets a two-signature flow: `BuySession`
+starts in `awaiting_onramp` with a **self-Payment** payload
+(`xumm_ops.create_onramp_payment_payload`: Account=Destination=buyer,
+Amount=the listing's BRIX dict, SendMax=buffered AMM quote in drops,
+SourceTag+memos `action=payment`) that buys the BRIX out of the AMM into the
+buyer's own wallet; once it validates `tesSUCCESS` the service re-verifies
+the (unchanged) sell offer on-ledger and builds the normal accept payload
+(`onramp_confirmed` → `awaiting_signature`). Signer==buyer is enforced on
+BOTH payloads; abandoning after the on-ramp leaves the listing live and the
+buyer simply keeps their BRIX (no custody). Quote unavailable → 503
+`pricing_unavailable` before any payload. Buy-status responses expose
+`pay_with` + `price_xrp_quote` for the UI's two-step rendering. The on-ramp
+is trait-only and lives behind the same `ECONOMY_ENABLED` gate as every
+other trait on-ledger op.
 
 **`market_listings` store** (`lfg_core/market_store.py`): a derived,
 droppable, rebuildable index in the same per-network `onchain_<net>.db` as

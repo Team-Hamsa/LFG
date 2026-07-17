@@ -16,12 +16,27 @@ from collections.abc import Awaitable, Callable
 from decimal import Decimal, InvalidOperation
 from typing import Any
 
-from lfg_core import xrpl_ops
+from lfg_core import config, xrpl_ops
 
 # lsfSellNFToken bit on an NFTokenOffer ledger object's Flags field.
 LSF_SELL_NFTOKEN = 0x00000001
 
 DROPS_PER_XRP = Decimal(1_000_000)
+
+# #239: per-kind denomination. Character listings are XRP drops; trait
+# listings are BRIX IssuedCurrencyAmounts on TOKEN_CURRENCY_HEX /
+# TOKEN_ISSUER_ADDRESS (the same pair shop_flow.brix_amount uses). The
+# expected-currency parameter below selects the branch; every character
+# caller passes (or defaults to) "xrp".
+VALID_EXPECTS = ("xrp", "brix")
+
+# Listing-value bounds for BRIX prices, mirroring the XRP ones: positive,
+# capped at a generous 1e15 (NOT the Trait Shop's SHOP_MIN/MAX_BRIX pricing
+# knobs — those bound shop quotes, not P2P listings), and at most 6 decimal
+# places (BRIX finer than that is not a price anyone quotes; it also keeps
+# the value round-trippable through the UI's fixed-point math).
+MAX_BRIX = Decimal(1_000_000_000_000_000)
+BRIX_DECIMAL_PLACES = 6
 
 # XRP's total supply is 100 billion XRP (1e17 drops) — no real price can
 # exceed it. Decimal accepts scientific notation, so without this bound
@@ -36,18 +51,89 @@ FetchOffers = Callable[[str], Awaitable[list[dict[str, Any]]]]
 FetchLedgerTime = Callable[[], Awaitable[int]]
 
 
-def extract_created_sell_offer(meta: dict[str, Any], nft_id: str) -> dict[str, Any] | None:
+def validate_brix_value(value: str) -> str:
+    """Validate + normalize a BRIX listing value string. Rejects float input
+    (TypeError), and non-numeric/non-finite strings, values <= 0, values over
+    MAX_BRIX, or more than BRIX_DECIMAL_PLACES decimal places (ValueError).
+    Returns the fixed-point normalized string (never scientific notation,
+    trailing fractional zeros trimmed) — the exact form stored/sent on-wire."""
+    if not isinstance(value, str):
+        raise TypeError(f"validate_brix_value requires a str, got {type(value).__name__}")
+    try:
+        amount = Decimal(value)
+    except InvalidOperation:
+        raise ValueError(f"invalid BRIX amount: {value!r}") from None
+    if not amount.is_finite():
+        raise ValueError(f"invalid BRIX amount: {value!r}")
+    if amount <= 0:
+        raise ValueError("BRIX amount must be > 0")
+    if amount > MAX_BRIX:
+        raise ValueError(f"BRIX amount exceeds cap ({MAX_BRIX})")
+    scaled = amount * (Decimal(10) ** BRIX_DECIMAL_PLACES)
+    if scaled != scaled.to_integral_value():
+        raise ValueError(
+            f"BRIX amount must not have more than {BRIX_DECIMAL_PLACES} decimal places"
+        )
+    # Fixed-point formatting, never scientific — same rationale as
+    # drops_to_xrp_str ("1E+1" broke both display and the JS BigInt path).
+    text = format(amount, "f")
+    if "." in text:
+        text = text.rstrip("0").rstrip(".")
+    return text
+
+
+def brix_amount_dict(value: str) -> dict[str, str]:
+    """The XRPL IssuedCurrencyAmount dict for a BRIX listing price — the
+    Amount an NFTokenCreateOffer txjson carries for a trait listing. Uses
+    TOKEN_CURRENCY_HEX/TOKEN_ISSUER_ADDRESS (the pair shop_flow.brix_amount
+    uses). Validates + normalizes `value` (see validate_brix_value)."""
+    return {
+        "currency": config.TOKEN_CURRENCY_HEX,
+        "issuer": config.TOKEN_ISSUER_ADDRESS,
+        "value": validate_brix_value(value),
+    }
+
+
+def brix_offer_value(amount: Any) -> str | None:
+    """The normalized BRIX value of an on-ledger offer Amount, or None when
+    the Amount is not OUR BRIX (not a dict, wrong currency/issuer, or an
+    invalid value). The shared per-kind acceptance test for the listener,
+    backfill, and the extract/verify branches below."""
+    if not isinstance(amount, dict):
+        return None
+    if str(amount.get("currency") or "").upper() != config.TOKEN_CURRENCY_HEX.upper():
+        return None
+    if amount.get("issuer") != config.TOKEN_ISSUER_ADDRESS:
+        return None
+    value = amount.get("value")
+    if not isinstance(value, str):
+        return None
+    try:
+        return validate_brix_value(value)
+    except ValueError:
+        return None
+
+
+def extract_created_sell_offer(
+    meta: dict[str, Any], nft_id: str, expect: str = "xrp"
+) -> dict[str, Any] | None:
     """Find the CreatedNode NFTokenOffer for `nft_id` in a validated
     NFTokenCreateOffer transaction's `meta["AffectedNodes"]`, and return it
-    only if it is a *sell* offer (lsfSellNFToken set) priced in XRP (a
-    string-drops Amount).
+    only if it is a *sell* offer (lsfSellNFToken set) priced in the expected
+    currency: `expect="xrp"` requires a string-drops Amount (characters),
+    `expect="brix"` requires an IssuedCurrencyAmount dict on our BRIX
+    currency+issuer with a valid value (trait listings, #239).
 
-    Returns `{offer_index, amount_drops, destination, flags}` on a match, or
+    Returns `{offer_index, amount_drops, destination, flags}` (xrp) or
+    `{offer_index, amount_brix, destination, flags}` (brix) on a match, or
     None when: meta/AffectedNodes is missing or malformed; no CreatedNode of
     LedgerEntryType "NFTokenOffer" matches `nft_id`; the matching offer is a
-    buy offer (lsfSellNFToken not set); or the offer's Amount is a dict
-    (an IOU amount, not a valid XRP sell offer for our purposes).
+    buy offer (lsfSellNFToken not set); or the offer's Amount is the wrong
+    denomination for `expect` (a dict/IOU for xrp; a drops string or a
+    foreign/invalid IOU for brix).
     """
+    if expect not in VALID_EXPECTS:
+        raise ValueError(f"unknown expected currency: {expect!r}")
     nodes = meta.get("AffectedNodes") if isinstance(meta, dict) else None
     if not isinstance(nodes, list):
         return None
@@ -71,6 +157,16 @@ def extract_created_sell_offer(meta: dict[str, Any], nft_id: str) -> dict[str, A
             return None  # buy-side offer for this nft_id
 
         amount = new_fields.get("Amount")
+        if expect == "brix":
+            brix_value = brix_offer_value(amount)
+            if brix_value is None:
+                return None  # XRP drops string, or a foreign/invalid IOU
+            return {
+                "offer_index": created.get("LedgerIndex"),
+                "amount_brix": brix_value,
+                "destination": new_fields.get("Destination"),
+                "flags": flags,
+            }
         if not isinstance(amount, str) or not amount.isdigit():
             return None  # IOU (dict) Amount, or malformed drops string
 
@@ -86,18 +182,24 @@ def extract_created_sell_offer(meta: dict[str, Any], nft_id: str) -> dict[str, A
 async def verify_sell_offer(
     nft_id: str,
     offer_index: str,
-    expected_drops: int,
+    expected_drops: int | None,
     fetch_offers: FetchOffers | None = None,
     strict: bool = False,
     fetch_ledger_time: FetchLedgerTime | None = None,
+    *,
+    expect: str = "xrp",
+    expected_brix: str | None = None,
 ) -> bool:
     """Fail-closed check that a sell offer is exactly the listing a buyer is
     about to pay for, run immediately before money moves.
 
     True ONLY when all of: the offer for `nft_id` at `offer_index` is present
-    among the fetched offers; its Amount is an XRP drops string equal to
-    `expected_drops` (a dict/IOU Amount can never match — that is a mismatch,
-    not a type error); it carries no Destination (a destination-locked offer is
+    among the fetched offers; its Amount matches the expected denomination —
+    for `expect="xrp"` an XRP drops string equal to `expected_drops`, for
+    `expect="brix"` (#239, trait listings) an IssuedCurrencyAmount dict on our
+    BRIX currency+issuer whose value Decimal-equals `expected_brix` (any other
+    Amount shape can never match — that is a mismatch, not a type error);
+    it carries no Destination (a destination-locked offer is
     not a listing this buyer can accept); and it is not expired (an Expiration,
     if present, is strictly after the current ledger's close time — an accept
     against an expired offer fails tecEXPIRED, #183).
@@ -117,6 +219,12 @@ async def verify_sell_offer(
     consulted when the matched offer actually carries an Expiration; its
     failure is treated exactly like a `fetch_offers` failure (raise under
     strict, else False)."""
+    if expect not in VALID_EXPECTS:
+        raise ValueError(f"unknown expected currency: {expect!r}")
+    if expect == "brix" and expected_brix is None:
+        raise ValueError("expected_brix is required when expect='brix'")
+    if expect == "xrp" and expected_drops is None:
+        raise ValueError("expected_drops is required when expect='xrp'")
     fetch: FetchOffers
     if fetch_offers is None:
 
@@ -149,10 +257,19 @@ async def verify_sell_offer(
         if str(offer.get("offer_index")) != str(offer_index):
             continue
         amount = offer.get("amount")
-        if not isinstance(amount, str) or not amount.isdigit():
-            return False  # dict/IOU Amount (or malformed drops string)
-        if int(amount) != int(expected_drops):
-            return False
+        if expect == "brix":
+            brix_value = brix_offer_value(amount)
+            if brix_value is None:
+                return False  # drops string, or a foreign/invalid IOU
+            assert expected_brix is not None  # guarded above
+            if Decimal(brix_value) != Decimal(expected_brix):
+                return False
+        else:
+            if not isinstance(amount, str) or not amount.isdigit():
+                return False  # dict/IOU Amount (or malformed drops string)
+            assert expected_drops is not None  # guarded above
+            if int(amount) != int(expected_drops):
+                return False
         if offer.get("destination") is not None:
             return False
         expiration = offer.get("expiration")
