@@ -26,6 +26,11 @@ python-dotenv
 # Async HTTP client
 aiohttp
 
+# OAuth 1.0a request signing (X/Twitter API — surfaces/x_bot/x_api.py).
+# Already present transitively via xumm-sdk-py → requests-oauthlib, but we
+# import it directly, so declare it directly.
+oauthlib
+
 # Voice support for Discord (optional)
 PyNaCl
 

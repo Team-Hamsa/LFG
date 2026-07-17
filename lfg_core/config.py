@@ -326,3 +326,29 @@ SHOP_OFFER_TTL_SECONDS = int(os.getenv("SHOP_OFFER_TTL_SECONDS", "900"))
 
 TRAIT_NFT_FLAGS = int(os.getenv("TRAIT_NFT_FLAGS", "9"))  # burnable(1)+transferable(8)
 TRAIT_CDN_SUBDIR = os.getenv("TRAIT_CDN_SUBDIR", "traits")
+
+# X (Twitter) integration (#41): a separate out-of-process poster surface
+# (surfaces/x_bot/) tweets successful mints off the shared event firehose.
+# All vars optional; SERVICE_TOKEN_X is intentionally NOT declared here — it
+# follows the house pattern of living in the surface's own config module
+# (surfaces/discord_bot/config.py, surfaces/telegram_bot/config.py precedent),
+# not lfg_core/config.py.
+X_CONSUMER_KEY = os.getenv("X_CONSUMER_KEY", "")
+X_CONSUMER_SECRET = os.getenv("X_CONSUMER_SECRET", "")
+X_ACCESS_TOKEN = os.getenv("X_ACCESS_TOKEN", "")
+X_ACCESS_SECRET = os.getenv("X_ACCESS_SECRET", "")
+# Self-imposed cap below the X API's pay-per-post tier cap: the Free tier no
+# longer exists (~2026-02), pricing is $0.015/post + $0.20/post-with-a-URL.
+# Posts here are deliberately link-free (2026-07-17 directive — the URL
+# surcharge is exactly why), so at $0.015/post the default 100/month bounds
+# worst-case spend at roughly $1.50/mo. A cost knob, not a rate-limit knob.
+X_MONTHLY_POST_BUDGET = int(os.getenv("X_MONTHLY_POST_BUDGET", "100"))
+# Master switch, true only when the flag is set AND all four OAuth 1.0a
+# credentials are non-empty (mirrors the ECONOMY_ENABLED/MARKET_ENABLED
+# boolean-flag idiom above: falsy denylist "0"/"false"/"False").
+X_ENABLED = os.getenv("X_ENABLED", "0") not in ("0", "false", "False") and all(
+    (X_CONSUMER_KEY, X_CONSUMER_SECRET, X_ACCESS_TOKEN, X_ACCESS_SECRET)
+)
+# sqlite state file for the poster process (dedup/budget/pause bookkeeping);
+# read by both the poster (surfaces/x_bot/) and the service admin endpoints.
+X_STATE_DB_PATH = os.getenv("X_STATE_DB_PATH", "x_state.db")

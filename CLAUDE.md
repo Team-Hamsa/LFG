@@ -92,6 +92,15 @@ SERVICE_TOKEN_TELEGRAM=<telegram-surface-token>
 TELEGRAM_ANNOUNCE_CHAT_ID=<telegram-channel-id>
 TELEGRAM_MINI_APP_URL=<public-https-url-of-the-mini-app>   # optional (#89); unset = launch button omitted
 TELEGRAM_INITDATA_MAX_AGE=3600                              # optional (#89); initData replay window in seconds
+X_ENABLED=1                                                 # optional; X auto-poster master flag (#41) — off unless set AND all four creds present
+X_CONSUMER_KEY=<x-app-consumer-key>                         # OAuth 1.0a app creds for the brand X account (#41)
+X_CONSUMER_SECRET=<x-app-consumer-secret>
+X_ACCESS_TOKEN=<brand-account-access-token>
+X_ACCESS_SECRET=<brand-account-access-secret>
+SERVICE_TOKEN_X=<x-surface-token>                           # firehose token; auth.py auto-registers surface "x"
+X_MONTHLY_POST_BUDGET=100                                   # optional; UTC-month post cap — COST knob (pay-per-use: $0.015/post link-free), default 100
+X_STATE_DB_PATH=x_state.db                                  # optional; poster dedup/budget/pause sqlite (gitignored)
+PUBLIC_SHARE_BASE_URL=<public-https-base>                   # optional (#41); unset ⇒ share buttons use bithomp URLs; needs public HTTPS (same dep as #89 Part B)
 WEB_ALLOWED_ORIGINS=https://build.letseffinggo.com,https://team-hamsa.github.io   # optional (#240); standalone web surface CORS allowlist (empty = off)
 BRIX_DISTRIBUTOR_ADDRESS=<xrpl-address>                     # optional; airdrop distributor wallet, excluded from BRIX leaderboards/derivation as a counterparty
 BRIX_AMM_ACCOUNT=<xrpl-address>                             # optional; mainnet BRIX/XRP AMM pool account, used by snapshot_balances.py
@@ -139,6 +148,8 @@ auto-restart hook is retired.
 | `lfg-index-mainnet` | `stg-index-testnet` (moved out of prod) |
 | `lfg-snapshot` (cron 00:10) | `stg-snapshot` (cron 00:10, testnet) |
 | `lfg-deployer` | `stg-deployer` |
+
+The X auto-poster (#41, `run_x.py`) is not yet in the pm2 tables — it goes live via the ops checklist on #41 (`lfg-x`, with `stop_exit_codes: [0]` so the X_ENABLED-off exit(0) parks instead of thrashing).
 
 Ecosystem files: `ecosystem.prod.config.js` / `ecosystem.staging.config.js`.
 Staging env deltas: `docs/ops/env.staging.example`. The `~/LFG` working copy

@@ -15,6 +15,7 @@ import json
 import logging
 import mimetypes
 import os
+import re
 import sqlite3
 import sys
 import threading
@@ -3447,6 +3448,34 @@ def _img_url_allowed(url: str) -> bool:
     )
 
 
+def _range_response(request: web.Request, body: bytes, ctype: str) -> web.Response:
+    """Byte-range-aware response for /api/img bodies (already fully buffered).
+
+    iOS WebKit's media loader probes with `Range: bytes=0-1` and refuses to
+    play progressive mp4 unless the server answers 206 with a Content-Range —
+    a 200-full-body answer leaves an animated NFT's <video> frozen on its
+    poster (#250). Only the single-range `bytes=` forms browsers actually send
+    are honored; a malformed Range header is ignored (200, per RFC 9110)."""
+    headers = {"Cache-Control": "public, max-age=86400", "Accept-Ranges": "bytes"}
+    total = len(body)
+    m = re.fullmatch(r"bytes=(\d*)-(\d*)", request.headers.get("Range", "").strip())
+    if m and (m.group(1) or m.group(2)):
+        if m.group(1):
+            start = int(m.group(1))
+            end = min(int(m.group(2)), total - 1) if m.group(2) else total - 1
+        else:  # suffix form (bytes=-N): the last N bytes
+            start = max(total - int(m.group(2)), 0)
+            end = total - 1
+        if start >= total or start > end:
+            headers["Content-Range"] = f"bytes */{total}"
+            return web.Response(status=416, headers=headers)
+        headers["Content-Range"] = f"bytes {start}-{end}/{total}"
+        return web.Response(
+            status=206, body=body[start : end + 1], content_type=ctype, headers=headers
+        )
+    return web.Response(body=body, content_type=ctype, headers=headers)
+
+
 async def handle_img(request):
     """Same-origin proxy for CDN images: the Activity's CSP blocks cross-origin
     <img> loads, so the client routes image URLs through here (allowed: the
@@ -3497,9 +3526,7 @@ async def handle_img(request):
         archived = await asyncio.to_thread(_archive_read)
         if archived:
             body, ctype = archived
-            return web.Response(
-                body=body, content_type=ctype, headers={"Cache-Control": "public, max-age=86400"}
-            )
+            return _range_response(request, body, ctype)
     except Exception as e:
         logging.warning(f"image archive lookup failed for {url}: {e!r}")
     url = swap_meta.resolve_ipfs(url)
@@ -3511,9 +3538,7 @@ async def handle_img(request):
         logging.error(f"Image proxy fetch failed for {url}: {e}")
         return web.json_response({"error": "image fetch failed"}, status=502)
     # Mint/swap outputs get unique CDN basenames, so they are safe to cache.
-    return web.Response(
-        body=body, content_type=ctype, headers={"Cache-Control": "public, max-age=86400"}
-    )
+    return _range_response(request, body, ctype)
 
 
 async def handle_layer(request):

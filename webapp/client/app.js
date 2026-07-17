@@ -128,6 +128,67 @@ function imgUrl(url, w) {
   return w ? `${base}&w=${w}` : base;
 }
 
+// Animated NFTs (#250) ship an .mp4 next to the PNG poster frame. Where a
+// video URL is present, full-size artwork renders as <video autoplay loop
+// muted playsinline> with the still as poster; otherwise the usual <img>.
+// The video src goes through the same /api/img proxy as the stills (CSP:
+// the CDN is cross-origin) — the proxy passes .mp4 through untouched, and
+// its w= resize only applies to archived stills, so it is never sent for
+// the video itself.
+function mediaEl({ image, video, thumbW, className, alt }) {
+  const m = document.createElement(video ? 'video' : 'img');
+  if (className) m.className = className;
+  if (video) {
+    m.muted = true;
+    // Attributes, not just properties: webview autoplay policies check them.
+    m.setAttribute('muted', '');
+    m.setAttribute('autoplay', '');
+    m.setAttribute('loop', '');
+    m.setAttribute('playsinline', ''); // iOS: play inline, not fullscreen
+    // <video> has no alt: carry the label as the accessible name so a later
+    // video->img rebuild in setMedia can round-trip it losslessly.
+    if (alt) m.setAttribute('aria-label', alt);
+    if (image) m.poster = imgUrl(image, thumbW);
+    m.src = imgUrl(video);
+  } else {
+    m.src = imgUrl(image, thumbW);
+    m.alt = alt || '';
+  }
+  return m;
+}
+
+// Point a fixed-id artwork slot (mint/assemble hero, swap chooser sides) at a
+// piece, swapping the element between <img> and <video> as needed while
+// keeping id/class/hidden so the rest of the code can keep addressing it.
+function setMedia(id, { image, video, thumbW }) {
+  const old = el(id);
+  if ((old.tagName === 'VIDEO') === !!video) {
+    // Same tag: update in place, and only on change — the mint poller repaints
+    // every few seconds and resetting src would restart video playback.
+    const src = video ? imgUrl(video) : imgUrl(image, thumbW);
+    if (old.getAttribute('src') !== src) {
+      if (video && image) old.poster = imgUrl(image, thumbW);
+      old.src = src;
+    }
+    // Re-arm playback: autoplay only fires on load, and showFlow pauses the
+    // hero while it's hidden — an unchanged src would otherwise stay frozen.
+    if (video && old.paused) old.play().catch(() => {});
+    return old;
+  }
+  const fresh = mediaEl({
+    image, video, thumbW,
+    className: old.className,
+    alt: old.getAttribute('alt') || old.getAttribute('aria-label') || '',
+  });
+  fresh.id = id;
+  fresh.hidden = old.hidden;
+  // Stop decoding before detaching — avoids Chrome's "play() request was
+  // interrupted" warning when an in-flight play() promise is still pending.
+  if (old.tagName === 'VIDEO') old.pause();
+  old.replaceWith(fresh);
+  return fresh;
+}
+
 // Guild/channel hosting the Activity; the backend turns these into a XUMM
 // return_url so Xaman's post-sign button bounces back into Discord.
 function discordCtx() {
@@ -201,7 +262,11 @@ const ALL_PANELS = ['register-panel', 'mint-panel', 'flow-panel',
 
 function showPanel(id) {
   for (const panel of ALL_PANELS) {
-    el(panel).hidden = panel !== id;
+    const hide = panel !== id;
+    el(panel).hidden = hide;
+    // A display:none <video> keeps playing (and decoding) — pause any in the
+    // panels being hidden. setMedia re-arms playback on re-entry.
+    if (hide) el(panel).querySelectorAll('video').forEach((v) => v.pause());
   }
 }
 
@@ -431,7 +496,7 @@ function signText(push, base) {
   return base;
 }
 
-function showFlow({ title, text, qrData, link, image, done, stage, spinner, celebrate, pill, regen, cancel }) {
+function showFlow({ title, text, qrData, link, image, video, done, stage, spinner, celebrate, pill, regen, cancel }) {
   showPanel('flow-panel');
   renderSteps(stage);
   el('pay-method').hidden = !pill;
@@ -446,12 +511,14 @@ function showFlow({ title, text, qrData, link, image, done, stage, spinner, cele
   if (qrData) el('flow-qr').src = qrUrl(qrData);
   el('flow-link-btn').hidden = !link;
   if (link) el('flow-link-btn').onclick = () => openExternal(link);
-  el('nft-image').hidden = !image;
   // The minted NFT is the hero: with an image on screen the QR drops to a
-  // compact companion size (issue #22).
+  // compact companion size (issue #22). Animated results play as <video>.
+  let hero = el('nft-image');
+  if (image) hero = setMedia('nft-image', { image, video });
+  else if (hero.tagName === 'VIDEO') hero.pause(); // don't loop while hidden
+  hero.hidden = !image;
   el('flow-panel').classList.toggle('with-image', !!image);
-  el('nft-image').classList.toggle('celebrate', !!(image && celebrate));
-  if (image) el('nft-image').src = image;
+  hero.classList.toggle('celebrate', !!(image && celebrate));
   el('flow-regen-btn').hidden = !regen;
   // Back out of an awaiting-signature screen (issue #141): callers pass a
   // callback so each flow decides what "cancel" means for it. Always assign
@@ -524,7 +591,8 @@ function pollMint(sessionId) {
         showFlow({
           title: `🎉 #${s.nft_number} claimed!`,
           text: 'The transfer is signed — your new avatar is heading to your wallet. Welcome to the job site.',
-          image: imgUrl(s.image_url),
+          image: s.image_url,
+          video: s.video_url, // set by the service once #249 lands; undefined today
           done: true,
           stage: s.state,
           celebrate: true,
@@ -539,7 +607,8 @@ function pollMint(sessionId) {
         qrData: s.accept_scanned ? null : s.accept_deeplink,
         spinner: s.accept_scanned,
         link: s.accept_deeplink,
-        image: imgUrl(s.image_url),
+        image: s.image_url,
+        video: s.video_url,
         done: true,
         stage: s.state,
         celebrate: true,
@@ -879,6 +948,15 @@ async function openSwapper() {
       body.textContent = nft.gender; // male / female / skeleton / ape
       name.appendChild(body);
       card.replaceChildren(pick, img, name);
+      if (nft.video) {
+        // Grid tiles stay lightweight stills; the badge flags art that plays
+        // as video on the chooser/result screens (#250).
+        const anim = document.createElement('span');
+        anim.className = 'anim-badge';
+        anim.textContent = '▶';
+        anim.setAttribute('aria-hidden', 'true');
+        card.appendChild(anim);
+      }
       card.onclick = () => toggleNftPick(nft, card);
       el('nft-grid').appendChild(card);
       swapCards.push({ nft, card });
@@ -949,8 +1027,8 @@ function showTraitChooser() {
   const [a, b] = swapPick.map((p) => p.nft);
   showPanel('swap-traits-panel');
   renderSwapCost();
-  el('swap-img1').src = imgUrl(a.image, THUMB_W);
-  el('swap-img2').src = imgUrl(b.image, THUMB_W);
+  setMedia('swap-img1', { image: a.image, video: a.video, thumbW: THUMB_W });
+  setMedia('swap-img2', { image: b.image, video: b.video, thumbW: THUMB_W });
   el('swap-name1').textContent = a.name;
   el('swap-name2').textContent = b.name;
   const list = el('trait-list');
@@ -1112,11 +1190,10 @@ function renderSwapResults(s) {
     div.className = 'swap-result';
     const h3 = document.createElement('h3');
     h3.textContent = r.name;
-    const resultImg = document.createElement('img');
-    resultImg.className = 'result-img';
-    resultImg.src = imgUrl(r.image_url);
-    resultImg.alt = '';
-    div.replaceChildren(h3, resultImg);
+    const art = mediaEl({
+      image: r.image_url, video: r.video_url, className: 'result-img', alt: r.name,
+    });
+    div.replaceChildren(h3, art);
     if (r.modified) {
       // Updated via NFTokenModify — nothing to accept.
       const note = document.createElement('span');
@@ -1695,7 +1772,7 @@ async function commitAssemble(edition, chosen) {
       text: final.accept ? signText(final.accept_push, 'Scan to accept your new character in Xaman.')
                          : 'Your new character is on its way.',
       qrData: final.accept || null, link: final.accept || null,
-      image: imgUrl(final.image_url), done: true, celebrate: true });
+      image: final.image_url, video: final.video_url, done: true, celebrate: true });
     economyState = await api('/api/economy');
   } catch (e) {
     showError(e.message);

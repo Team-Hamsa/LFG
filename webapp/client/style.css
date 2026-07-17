@@ -459,6 +459,23 @@ button.back:hover { color: var(--text); border: none; }
 }
 .nft-card.sel-1 .pick { display: grid; background: var(--blue); }
 .nft-card.sel-2 .pick { display: grid; background: var(--green); }
+/* Animated-NFT marker (#250): grid tiles stay stills, the badge flags cards
+   whose art plays as video on the chooser/result screens. */
+.nft-card .anim-badge {
+  position: absolute;
+  top: 7px;
+  right: 7px;
+  width: 22px;
+  height: 22px;
+  border-radius: 99px;
+  display: grid;
+  place-items: center;
+  font-size: .6rem;
+  color: #fff;
+  background: rgba(0, 0, 0, .55);
+  border: 2px solid var(--ink);
+  pointer-events: none;
+}
 
 /* Skeleton loaders while the wallet's NFTs are fetched */
 .nft-card.skeleton {
@@ -495,7 +512,8 @@ button.back:hover { color: var(--text); border: none; }
   font-size: .7rem;
   color: var(--muted);
 }
-.swap-pair img {
+.swap-pair img,
+.swap-pair video {
   width: 96px;
   border-radius: 12px;
   border: 3px solid var(--ink);
@@ -627,7 +645,8 @@ button.back:hover { color: var(--text); border: none; }
 @media (max-width: 380px) {
   .wordmark { font-size: 2.1rem; }
   .wordmark-img { height: 46px; max-width: 180px; }
-  .swap-pair img { width: 80px; }
+  .swap-pair img,
+  .swap-pair video { width: 80px; }
   .qr, #flow-qr { width: 180px; height: 180px; }
 }
 

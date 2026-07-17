@@ -39,33 +39,47 @@ knowledge (cutoff Jan 2026), not verified against live X docs** — the repo has
 no X integration to learn from. Each carries a verification step; **Task 0 of
 the plan is to verify all of them before writing code.**
 
-- **A1 (high confidence):** `POST /2/tweets` requires *user context* — OAuth
-  1.0a user tokens or OAuth 2.0 user tokens (Authorization Code + PKCE).
-  App-only bearer tokens cannot post. *Verify:* X docs "manage tweets".
-- **A2 (medium):** Free tier allows ~500 posts/month at the app level
-  (originally 1,500/mo write-only at launch of the paid tiers in 2023; later
-  reduced) and a very low per-user daily cap (on the order of ~17
-  requests/24h for `POST /2/tweets` was reported). Basic ($100–200/mo) allows
-  ~3,000 posts/mo/user. **Numbers uncertain — X changed these repeatedly.**
-  *Verify:* developer.x.com products page + the rate-limit headers returned
-  by a live test post.
-- **A3 (medium):** Media upload historically lives on v1.1
-  (`upload.twitter.com/1.1/media/upload.json`, works with OAuth 1.0a user
-  context, available on the free tier); a v2 media upload endpoint
-  (`POST /2/media/upload`) was rolled out ~2024–2025 with v1.1 deprecation
-  announced. *Verify:* attempt both against the brand account in Task 0;
-  build behind an internal `upload_media()` seam so switching endpoints is a
-  one-function change.
-- **A4 (high):** OAuth 2.0 user access tokens expire in ~2 hours; refresh
-  requires the `offline.access` scope; refresh tokens rotate on use (each
-  refresh returns a new refresh token that must be persisted atomically).
-- **A5 (high):** Tweet text limit 280 chars (weighted); URLs count as 23 via
-  t.co wrapping.
-- **A6 (high):** The Web Intent URL
-  `https://twitter.com/intent/tweet?text=…&url=…` requires **no API access,
-  no OAuth, no tier** — it opens X's composer pre-filled, user posts as
-  themselves. Link previews on X render only if the shared URL serves
-  `twitter:card` meta tags.
+**Update 2026-07-16 (docs research):** all rows below except A4 are now
+VERIFIED against current X developer docs. This was a documentation pass, not
+a live-post smoke test — a real signed tweet from the brand account is still
+pending brand credentials and is tracked on the ops checklist on issue #41.
+
+- **A1 VERIFIED (2026-07-16):** `POST /2/tweets` accepts *user context* —
+  either OAuth 2.0 user context (Authorization Code + PKCE) or OAuth 1.0a user
+  context. App-only bearer tokens cannot post. OAuth 1.0a is still fully
+  supported in 2026 (not deprecated), which is what unblocks the brand-account
+  MVP without building the PKCE flow first.
+- **A2 SUPERSEDED BY PRICING CHANGE (2026-07-16):** the Free tier no longer
+  exists (retired ~2026-02). X API access is now **pay-per-use**: $0.015 per
+  post created, $0.20 per post that contains a URL, and $0.005 per read.
+  Separately, `POST /2/tweets` still carries app/user rate limits —
+  10,000 posts/24h per app and 100 posts/15min per user — but those are
+  throughput ceilings, not the binding constraint; cost is. Consequently
+  `X_MONTHLY_POST_BUDGET` is a **cost knob, not a rate-limit knob** — default
+  set to **100** (≈$1.50/mo at link-free pricing per §5.3 below).
+- **A3 VERIFIED (2026-07-16):** the v1.1 media upload endpoint
+  (`upload.twitter.com/1.1/media/upload.json`) was retired 2025-06-09 and is
+  gone. Current path is the **single-request** `POST
+  https://api.x.com/2/media/upload` with `media_category=tweet_image`, which
+  is sufficient for a PNG ≤5MB (our case) — no chunked INIT/APPEND/FINALIZE
+  dance needed. OAuth 1.0a user-context signing works on this endpoint;
+  community-reported OAuth 1.0a problems are specific to the **chunked** v2
+  endpoints, not this single-request path. Attach the returned `media_id` via
+  `POST /2/tweets` `media.media_ids`.
+- **A4 unchanged (still an assumption):** OAuth 2.0 user access tokens expire
+  in ~2 hours; refresh requires the `offline.access` scope; refresh tokens
+  rotate on use. This only matters for phase 3 (per-user OAuth2 PKCE), which
+  is deferred and now tracked as its own follow-up, issue #252 — no need to
+  verify further until that phase is picked up.
+- **A5 VERIFIED (2026-07-16):** tweet text limit is 280 weighted characters;
+  URLs count as 23 via t.co wrapping regardless of actual length; emoji and
+  CJK characters weight 2 each toward the 280 cap.
+- **A6 VERIFIED (2026-07-16):** the canonical Web Intent URL is
+  `https://x.com/intent/tweet?text=…&url=…`; the legacy
+  `twitter.com/intent/tweet` host 301-redirects to it. It requires **no API
+  access, no OAuth, no tier, no credentials** — it opens X's composer
+  pre-filled and the user posts as themselves. Link previews on X render only
+  if the shared URL serves `twitter:card` meta tags.
 
 ## 4. Key decision — who posts?
 
@@ -140,6 +154,15 @@ Hat: Wizard Hat · Eyes: Laser · Body: Ape (+5 more)
 #XRPL #NFT
 ```
 
+**Owner directive 2026-07-17 — production tweets are LINK-FREE.** The 🔗
+bithomp line shown above was removed before launch (commit 494a3ea): X bills
+$0.20/post for a post containing a URL vs $0.015/post without one (§3, A2),
+and the edition number + native attached image already identify the NFT
+without a link. The shipped format is header line + rarest-traits line +
+hashtags — no URL. (The OG card page and Web-Intent share URLs in §6 are
+unaffected by this — those are user-side share links, not brand-account
+posts, and don't hit the X API cost meter.)
+
 - Traits: the mint event `data` (session.to_dict) does **not** carry traits
   today — only `nft_number`/`nft_id`/`image_url` (`mint_flow.py:137-154`).
   Add a `traits` dict to `MintSession.to_dict()` (already computed at
@@ -172,6 +195,10 @@ CREATE TABLE x_posts (
   status      TEXT                -- posted | skipped_budget | failed
 );
 ```
+
+**Implementation note:** a fourth status, `skipped_paused`, was added at
+implementation time for pause-gated events (§5.6's runtime kill switch).
+Only `posted` is dedup-terminal.
 
 - **Dedup:** skip if `event_key` exists with status `posted`. Protects against
   the documented sub-tick double-publish window (`app.py:175-179`) and process
