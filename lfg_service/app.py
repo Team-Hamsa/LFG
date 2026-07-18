@@ -3143,6 +3143,46 @@ async def handle_bulk_mint_cancel(request):
     return web.json_response(job.to_dict())
 
 
+@require_auth
+async def handle_bulk_mint_unit_accept(request):
+    """Build a XUMM accept payload for ONE offered bulk unit (#215 UI), on
+    click only — a 10-unit job must never open 10 XUMM payloads up front
+    (open-payload cap, #260). Repeat clicks mint a fresh payload; the previous
+    one expires via _create_xumm_payload's standard 15-min expire."""
+    job = bulk_sessions.get(request.match_info["session_id"])
+    if (
+        not job
+        or job.discord_id != request["user"]["id"]
+        or getattr(job, "platform", "discord") != _platform(request["user"])
+    ):
+        return web.json_response({"error": "not found"}, status=404)
+    raw_index = request.match_info["index"]
+    # isascii() guard: isdigit() alone accepts Unicode digits like "²" that
+    # int() then rejects with ValueError — an unhandled 500 (Greptile P1).
+    if not (raw_index.isascii() and raw_index.isdigit()):  # only plain non-negative ints
+        return web.json_response({"error": "invalid_unit"}, status=400)
+    index = int(raw_index)
+    if index >= len(job.units):
+        return web.json_response({"error": "invalid_unit"}, status=400)
+    unit = job.units[index]
+    # offer_id None while OFFERED = the gift offer was already accepted
+    # (delivered while the service was down) — treat as claimed, nothing to sign.
+    if unit.state != bulk_mint_flow.OFFERED or not unit.offer_id:
+        return web.json_response({"error": "unit_not_offered"}, status=409)
+    return_url = await _request_return_url(request)
+    payload = await xumm_ops.create_accept_offer_payload(
+        unit.offer_id,
+        return_url=return_url,
+        user_token=job.push_user_token,
+        platform=memos.platform_for_surface(job.platform),
+    )
+    if not payload:
+        return web.json_response({"error": "payload_failed"}, status=502)
+    return web.json_response(
+        {"qr": payload["qr_url"], "link": payload["xumm_url"], "push": payload.get("push")}
+    )
+
+
 async def resume_bulk_jobs() -> None:
     """On startup, re-attach and resume any awaiting-payment/paid/fulfilling
     bulk jobs so a service restart mid-fulfillment doesn't strand paid units
@@ -3953,6 +3993,8 @@ async def handle_config(request):
             "dev_mode": config.WEBAPP_DEV_MODE,
             "economy_enabled": config.ECONOMY_ENABLED,
             "market_enabled": config.MARKET_ENABLED,
+            "bulk_mint_ui": config.BULK_MINT_UI_ENABLED,
+            "bulk_mint_max": config.BULK_MINT_MAX,
             "public_share_base_url": config.PUBLIC_SHARE_BASE_URL,
             "bithomp_base_url": _bithomp_base_url(),
         }
@@ -4529,6 +4571,9 @@ def create_app() -> web.Application:
     app.router.add_post("/api/mint/bulk", handle_bulk_mint_start)
     app.router.add_get("/api/mint/bulk/active", handle_bulk_mint_active)
     app.router.add_post("/api/mint/bulk/{session_id}/cancel", handle_bulk_mint_cancel)
+    app.router.add_post(
+        "/api/mint/bulk/{session_id}/units/{index}/accept", handle_bulk_mint_unit_accept
+    )
     app.router.add_get("/api/mint/bulk/{session_id}", handle_bulk_mint_status)
     app.router.add_get("/api/mint/{session_id}", handle_mint_status)
     app.router.add_post("/api/mint/{session_id}/regenerate", handle_mint_regenerate)

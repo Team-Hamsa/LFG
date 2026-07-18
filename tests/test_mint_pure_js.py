@@ -221,7 +221,7 @@ def test_app_js_main_wallet_branch_awaits_resume_before_home():
     and only falls back to showMintHome when nothing resumed."""
     src = open(APP_JS).read()
     main_body = src.split("async function main", 1)[1]
-    assert "if (!(await resumeMint())) showMintHome();" in main_body
+    assert "if (!(await resumeBulkMint()) && !(await resumeMint())) showMintHome();" in main_body
 
 
 def test_app_js_resume_cancel_warns_only_when_scanned():

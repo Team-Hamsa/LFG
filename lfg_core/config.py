@@ -121,6 +121,12 @@ if MAX_COLLECTION_SIZE < 1:
 if BULK_MINT_MAX < 1:
     raise ValueError(f"BULK_MINT_MAX must be >= 1, got {BULK_MINT_MAX}")
 
+# Bulk mint UI flag (#215 follow-up): gates the Activity's quantity stepper /
+# bulk flow client-side via /api/config. Server bulk endpoints stay live
+# regardless (they're quantity-capped and auth'd on their own). Off by
+# default; staging sets it first (docs/ops/env.staging.example).
+BULK_MINT_UI_ENABLED = os.getenv("BULK_MINT_UI_ENABLED", "0") not in ("0", "false", "False")
+
 # BunnyCDN
 BUNNY_CDN_ACCESS_KEY = _require("BUNNY_CDN_ACCESS_KEY")
 BUNNY_CDN_STORAGE_ZONE = _require("BUNNY_CDN_STORAGE_ZONE")

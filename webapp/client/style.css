@@ -850,3 +850,22 @@ button.back:hover { color: var(--text); border: none; }
 .lb-thumb { width: 2rem; height: 2rem; border-radius: 99px; object-fit: cover; background: var(--surface); flex-shrink: 0; }
 .lb-value { flex: 0 0 auto; font-weight: 700; color: var(--text); font-size: .85rem; }
 .lb-me { margin: 8px 0 0; font-size: .82rem; color: var(--muted); }
+
+/* Bulk mint quantity stepper (#215 UI) */
+.mint-row { display: flex; align-items: center; gap: 8px; justify-content: center; }
+.qty-stepper { display: flex; align-items: center; gap: 4px; }
+.qty-stepper .qty-btn {
+  width: 32px; height: 32px; border-radius: 8px; font-size: 1rem; line-height: 1;
+  border: 1px solid var(--line); background: var(--surface); color: var(--text); cursor: pointer;
+}
+.qty-stepper .qty-btn:disabled { opacity: 0.4; cursor: default; }
+#qty-value { min-width: 24px; text-align: center; font-weight: 700; color: var(--text); }
+
+/* Bulk fulfillment unit list (#215 UI) */
+#bulk-units { display: flex; flex-direction: column; gap: 8px; margin: 12px 0; }
+.bulk-unit { display: flex; align-items: center; gap: 10px; padding: 8px; border: 1px solid var(--line); border-radius: 10px; }
+.bulk-unit img.thumb { width: 56px; height: 56px; border-radius: 8px; object-fit: cover; }
+.bulk-unit .u-label { flex: 1; text-align: left; }
+.bulk-unit.pending { opacity: 0.55; }
+.bulk-unit .u-error { color: var(--red); font-size: 0.85em; }
+.bulk-unit img.u-qr { width: 120px; height: 120px; }
