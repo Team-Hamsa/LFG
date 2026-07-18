@@ -332,3 +332,31 @@ def test_loop_survives_handler_error():
     _run(ev_mod.run_event_loop(_FakeSvc(agen), announce, None))
     assert calls["n"] == 2
     assert agen.closed is True
+
+
+def test_announcement_image_prefers_video_url():
+    # Animated mints carry a video_url (MP4) next to the PNG poster; the
+    # announcement should attach the animation, not the still.
+    e = Event(
+        type="mint.completed",
+        ts=0,
+        identity=_tg_identity("55"),
+        wallet=None,
+        data={
+            "nft_number": 7,
+            "image_url": "https://cdn/a.png",
+            "video_url": "https://cdn/a.mp4",
+        },
+    )
+    assert ev_mod.announcement_image(e) == "https://cdn/a.mp4"
+
+
+def test_announcement_image_falls_back_to_image_url():
+    e = Event(
+        type="mint.completed",
+        ts=0,
+        identity=_tg_identity("55"),
+        wallet=None,
+        data={"nft_number": 7, "image_url": "https://cdn/a.png"},
+    )
+    assert ev_mod.announcement_image(e) == "https://cdn/a.png"

@@ -39,10 +39,10 @@ async def _offer_or_skip(nft_id: str, owner: str) -> str | None:
     return await xrpl_ops.create_nft_offer(nft_id, owner, amount="0")
 
 
-async def _accept_or_skip(offer_id: str) -> Any:
+async def _accept_or_skip(offer_id: str, user_token: str | None = None) -> Any:
     if offer_id == _SELF_OFFER_SKIPPED:
         return None
-    return await xumm_ops.create_accept_offer_payload(offer_id)
+    return await xumm_ops.create_accept_offer_payload(offer_id, user_token=user_token)
 
 
 async def _closet_exists(nft_id: str) -> bool:
@@ -150,8 +150,15 @@ async def _trait_meta(nft_id: str) -> dict[str, Any] | None:
     return await swap_meta.fetch_metadata(uri_hex)
 
 
-def build_economy_deps(conn: sqlite3.Connection) -> economy_flow.EconomyDeps:
-    """An EconomyDeps backed by the real testnet/mainnet operations."""
+def build_economy_deps(
+    conn: sqlite3.Connection, user_token: str | None = None
+) -> economy_flow.EconomyDeps:
+    """An EconomyDeps backed by the real testnet/mainnet operations.
+
+    ``user_token`` (#135/#212) is the owner's stored XUMM push token, if any:
+    every accept-offer payload these deps build (Closet claim, assemble/extract
+    delivery) is then push-delivered to their Xaman app instead of QR-only.
+    The CLI drivers pass none and keep their QR behavior."""
     return economy_flow.EconomyDeps(
         conn=conn,
         closet_upload_fn=_upload_closet,
@@ -159,14 +166,19 @@ def build_economy_deps(conn: sqlite3.Connection) -> economy_flow.EconomyDeps:
             url, config.CLOSET_TAXON, config.SWAP_ISSUER_ADDRESS, flags=config.CLOSET_NFT_FLAGS
         ),
         closet_offer_fn=_offer_or_skip,
-        closet_accept_fn=_accept_or_skip,
+        closet_accept_fn=lambda offer_id: _accept_or_skip(offer_id, user_token),
         closet_modify_fn=_closet_modify,
         closet_exists_fn=lambda nft_id: _closet_exists(nft_id),
         closet_owner_fn=lambda nft_id: _closet_owner(nft_id),
         char_compose_fn=_compose_char,
         char_mint_fn=lambda url: xrpl_ops.mint_nft(
             url,
-            config.SWAP_TAXON,
+            # Assemble-minted rebirths get their own taxon (#217) — pinned to
+            # ASSEMBLE_TAXON, not SWAP_TAXON, even though the two currently
+            # share the same default value (1760): the constants mean different
+            # things (SWAP_TAXON is the legacy Trait-Swapper remint taxon) and
+            # must not silently diverge if either is retuned independently.
+            config.ASSEMBLE_TAXON,
             config.SWAP_ISSUER_ADDRESS,
             flags=config.ECONOMY_NFT_FLAGS,
             action=memos.ACTION_ASSEMBLE,
@@ -174,7 +186,7 @@ def build_economy_deps(conn: sqlite3.Connection) -> economy_flow.EconomyDeps:
         char_modify_fn=lambda nft_id, owner, url: xrpl_ops.modify_nft(nft_id, owner, url),
         char_burn_fn=lambda nft_id, owner: xrpl_ops.burn_nft(nft_id, owner or None),
         char_offer_fn=_offer_or_skip,
-        char_accept_fn=_accept_or_skip,
+        char_accept_fn=lambda offer_id: _accept_or_skip(offer_id, user_token),
         trait_compose_fn=lambda slot, value: _compose_trait(slot, value),
         trait_upload_fn=_upload_closet,
         trait_mint_fn=lambda url: xrpl_ops.mint_nft(

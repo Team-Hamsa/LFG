@@ -36,6 +36,9 @@ reports/
 # Economy flow journals (runtime recovery records)
 economy_records/
 
+# Bulk mint job records (runtime recovery records, #215)
+bulk_mint_jobs/
+
 # On-chain NFT index DBs (regenerable via backfill)
 onchain_*.db
 onchain_*.db-*
@@ -51,6 +54,10 @@ history_mainnet.db*
 lfg_nfts_*.db
 rarity.db
 
+# X (Twitter) bot posting state — pause/resume + dedup/budget (runtime, #41)
+x_state.db
+x_state.db-*
+
 # macOS finder metadata
 .DS_Store
 ._.DS_Store
@@ -60,3 +67,7 @@ rarity.db
 # Local archive of dead root clutter (backups, logs, mockups, source CSVs) —
 # moved out of the repo root for tidiness; never committed.
 .archive/
+
+# Share card renderer (playwright + fonts install, #41 addendum)
+scripts/share_card/node_modules/
+share_cards/

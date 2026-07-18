@@ -21,35 +21,29 @@ from lfg_core import swap_meta
 # lsfMutable bit on the on-ledger NFToken (Dynamic NFTs amendment).
 NFT_FLAG_MUTABLE = 0x0010
 
-# Mainnet metadata is on IPFS; one gateway is flaky at collection scale. The
-# index (not the live swap) tries several gateways over a few passes so
-# transient timeouts don't permanently shrink coverage. {cid}/{path} style.
-IPFS_GATEWAYS = [
-    "https://{cid}.ipfs.dweb.link/{path}",
-    "https://ipfs.io/ipfs/{cid}/{path}",
-    "https://cloudflare-ipfs.com/ipfs/{cid}/{path}",
-    "https://{cid}.ipfs.w3s.link/{path}",
-]
 FETCH_ATTEMPTS = 3
 FETCH_TIMEOUT_SECONDS = 15
 
 
 def _metadata_urls(uri_hex: str) -> list[str]:
-    """Candidate URLs for a token's metadata: ipfs:// -> same CID across several
-    gateways; otherwise the http(s) URL as-is."""
+    """Candidate URLs for a token's metadata. ipfs:// URIs yield NOTHING:
+    gateway flakiness at collection scale fed the []-clobber cycle that
+    eroded mainnet coverage (unreadable-live 1 -> 483), so IPFS is never
+    fetched — the Bithomp CSV import is the metadata source for those
+    tokens. Only http(s) URIs (BunnyCDN) are fetchable."""
     try:
         uri = bytes.fromhex(uri_hex).decode("ascii")
     except ValueError:
         return []
-    if not uri.startswith("ipfs://"):
-        return [uri]
-    cid, _, path = uri[len("ipfs://") :].partition("/")
-    return [g.format(cid=cid, path=path) for g in IPFS_GATEWAYS]
+    if uri.startswith("ipfs://"):
+        return []
+    return [uri]
 
 
 async def fetch_metadata_multi(http: aiohttp.ClientSession, uri_hex: str) -> dict[str, Any] | None:
-    """Fetch metadata JSON, trying multiple IPFS gateways over a few passes.
-    Returns the parsed dict or None if every attempt fails."""
+    """Fetch metadata JSON from the token's http(s) URI, retrying over a few
+    passes. ipfs:// URIs yield no candidate URLs (see _metadata_urls) and
+    return None immediately. Returns the parsed dict or None."""
     urls = _metadata_urls(uri_hex)
     timeout = aiohttp.ClientTimeout(total=FETCH_TIMEOUT_SECONDS)
     for _ in range(FETCH_ATTEMPTS):
@@ -241,17 +235,41 @@ def upsert(conn: sqlite3.Connection, rec: OnchainNft) -> None:
         ON CONFLICT(nft_id) DO UPDATE SET
             nft_number=excluded.nft_number,
             owner=excluded.owner,
-            is_burned=excluded.is_burned,
+            -- Burns are irreversible on XRPL: a stale source (e.g. a Bithomp
+            -- CSV exported before the burn) must never resurrect a burned
+            -- token to live.
+            is_burned=MAX(is_burned, excluded.is_burned),
             mutable=excluded.mutable,
             uri_hex=excluded.uri_hex,
-            body=excluded.body,
-            attributes_json=excluded.attributes_json,
-            image=excluded.image,
-            ledger_index=excluded.ledger_index,
+            -- Empty attributes mean "metadata fetch failed", never "token has
+            -- no traits" — a re-scan must not clobber previously-good metadata
+            -- (CSV-imported or fetched) with []. body/image ride along since
+            -- they are derived from the same fetch.
+            body=CASE WHEN excluded.attributes_json='[]'
+                 THEN body ELSE excluded.body END,
+            attributes_json=CASE WHEN excluded.attributes_json='[]'
+                 THEN attributes_json ELSE excluded.attributes_json END,
+            image=CASE WHEN excluded.attributes_json='[]'
+                 THEN image ELSE excluded.image END,
+            -- COALESCE: a writer that doesn't know the ledger height (the
+            -- swap flow's burn-point stamp passes None) must never erase one
+            -- the listener already recorded — nft_by_number orders duplicate
+            -- live editions by this field (#211 review).
+            ledger_index=COALESCE(excluded.ledger_index, onchain_nfts.ledger_index),
             last_synced_at=CURRENT_TIMESTAMP
         """,
         _nft_to_row(rec),
     )
+    conn.commit()
+
+
+def mark_burned(conn: sqlite3.Connection, nft_id: str) -> None:
+    """Flip is_burned on a known token. Unknown tokens are ignored — a burn of
+    an NFT outside our collection must not add a stub row to the index. The
+    single implementation shared by the listener (burn txs) and swap_flow's
+    #211 post-burn persist / stale-pointer heal, so a change to burn-flip
+    semantics can never miss a writer."""
+    conn.execute("UPDATE onchain_nfts SET is_burned=1 WHERE nft_id=?", (nft_id,))
     conn.commit()
 
 
@@ -270,6 +288,31 @@ def owner_live_nfts(conn: sqlite3.Connection, owner: str) -> list[OnchainNft]:
         (owner,),
     )
     return [_row_to_nft(row) for row in cur.fetchall()]
+
+
+def nft_by_number(conn: sqlite3.Connection, nft_number: int) -> OnchainNft | None:
+    """The single LIVE token at this edition number, or None if none is live
+    (unknown edition, or every token at this number is burned — including a
+    dress-up Harvest burn, which never touches the LFG app table, so this is
+    the only reliable liveness check for a given nft_number).
+
+    Multiple NFTokens can share an edition number (trait-swap/reminting
+    duplicates); when more than one is live at once (a data anomaly, see
+    collection_anomalies()'s multi_live), the highest ledger_index (the most
+    recently synced) wins.
+
+    Side effect: sets `conn.row_factory = sqlite3.Row` on the caller's
+    connection (module-wide convention here, not a bug) — don't pass a
+    shared/reused connection whose row_factory matters after this call
+    returns."""
+    conn.row_factory = sqlite3.Row
+    cur = conn.execute(
+        "SELECT * FROM onchain_nfts WHERE nft_number=? AND is_burned=0 "
+        "ORDER BY ledger_index DESC LIMIT 1",
+        (nft_number,),
+    )
+    row = cur.fetchone()
+    return _row_to_nft(row) if row else None
 
 
 def retryable_unreadable(conn: sqlite3.Connection) -> list[OnchainNft]:

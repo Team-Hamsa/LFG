@@ -152,3 +152,31 @@ def test_offer_qr_render_failure_falls_back_to_message():
     for t in fallback_texts:
         assert "scan" not in t.lower()
         assert "qr" not in t.lower()
+
+
+def test_animated_mint_sends_video_not_photo():
+    # An animated (MP4) mint must arrive as a Telegram video so it plays,
+    # not as a static send_photo of the PNG poster frame.
+    bot = _Bot()
+    bot.videos = []
+
+    async def send_video(chat_id, video, caption=None, supports_streaming=False):
+        bot.videos.append((chat_id, video, caption))
+
+    bot.send_video = send_video
+    update, ctx = _update_ctx(bot)
+    svc = _Svc(
+        start={"id": "sid", "payment_link": "https://pay"},
+        final={
+            "state": "offer_ready",
+            "nft_number": 3601,
+            "image_url": "https://cdn/art.png",
+            "video_url": "https://cdn/art.mp4",
+            "accept_deeplink": "https://accept",
+        },
+    )
+    _run(mint_view.handle_mint(svc, update, ctx))
+    assert bot.videos == [(999, "https://cdn/art.mp4", bot.videos[0][2])]
+    assert "3601" in bot.videos[0][2]
+    # payment QR + offer QR remain photos; the artwork is the video
+    assert len(bot.photos) == 2

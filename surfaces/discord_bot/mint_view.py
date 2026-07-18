@@ -40,12 +40,18 @@ async def handle_mint(svc: LFGServiceClient, interaction: discord.Interaction) -
             qr_png = await svc.qr_png(payment_link)
         except ServiceError as e:
             logging.error(f"payment QR render failed: {e}")
+            # Cancel the in-flight session so it doesn't hold open until timeout
+            # and block a retry (CodeRabbit #209).
+            try:
+                await svc.cancel_mint(user_id, session_id)
+            except ServiceError:
+                logging.warning("mint cancel after QR-render failure failed", exc_info=True)
             await interaction.followup.send(
                 embed=render.error_embed(friendly_error(e)), ephemeral=True
             )
             return
         await interaction.followup.send(
-            embed=render.payment_embed(payment_link),
+            embed=render.payment_embed(payment_link, push=session.get("payment_push")),
             file=render.file_from_png(qr_png, "payment_qr.png"),
             ephemeral=True,
         )

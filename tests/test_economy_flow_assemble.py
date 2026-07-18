@@ -3,6 +3,7 @@
 
 import asyncio
 import json
+import logging
 import sqlite3
 
 from lfg_core import economy_flow as ef
@@ -45,12 +46,14 @@ class _Fakes:
         fail_offer=False,
         raise_offer=False,
         fail_char_burn=False,
+        fail_accept=False,
     ) -> None:
         self.fail_closet_modify = fail_closet_modify
         self.raise_closet_modify = raise_closet_modify
         self.fail_offer = fail_offer
         self.raise_offer = raise_offer
         self.fail_char_burn = fail_char_burn
+        self.fail_accept = fail_accept
         self.mints: list[str] = []
         self.char_burns: list[tuple[str, str]] = []
         self.bucket_modifies = 0
@@ -81,7 +84,7 @@ class _Fakes:
         return "MODHASH"
 
     async def char_compose(self, attrs, body, edition, rev):
-        return ("img", None, "meta")
+        return ("img", "vid.mp4", "meta")
 
     async def char_mint(self, url: str):
         self.mints.append(url)
@@ -100,7 +103,7 @@ class _Fakes:
         return None if self.fail_offer else "OFFER"
 
     async def char_accept(self, offer_id):
-        return {"xumm_url": "accept"}
+        return None if self.fail_accept else {"xumm_url": "accept"}
 
 
 def _deps(conn, f, records_dir):
@@ -145,6 +148,10 @@ def test_assemble_happy_path(tmp_path):
     assert es.read_closet_bodies(conn) == []
     assert es.read_closet_assets(conn) == []
     assert s.results[0]["accept"] == {"xumm_url": "accept"}
+    # #250: compose's outputs thread into the result — an animated assemble's
+    # hero plays from video_url, so dropping/renaming the key must fail here.
+    assert s.results[0]["image_url"] == "img"
+    assert s.results[0]["video_url"] == "vid.mp4"
 
 
 def test_assemble_rejects_incomplete_set(tmp_path):
@@ -195,6 +202,23 @@ def test_assemble_offer_fail_parks_token(tmp_path):
     assert es.read_closet_bodies(conn) == []  # drained
     record = json.loads((tmp_path / f"assemble-{s.id}.json").read_text())
     assert record["status"] == "minted_no_offer"
+
+
+def test_assemble_accept_payload_failure_warns_but_completes(tmp_path, caplog):
+    """#262 'warn, don't fail': only the XUMM accept-payload build failed
+    (429 backoff / outage) — the delivery offer is already on-chain and
+    claimable via Xaman Events, so the session must complete DONE with a
+    warning breadcrumb in the ops log, never FAILED."""
+    conn, f = _conn_with_bucket(), _Fakes(fail_accept=True)
+    s = _session()
+    with caplog.at_level(logging.WARNING):
+        _run(ef.run_assemble(s, _deps(conn, f, tmp_path)))
+
+    assert s.state == ef.DONE
+    assert s.results[0]["accept"] is None
+    record = json.loads((tmp_path / f"assemble-{s.id}.json").read_text())
+    assert record["status"] == "complete"
+    assert any("accept payload creation failed" in r.message for r in caplog.records)
 
 
 # --- #107: phase-aware assemble branches ---

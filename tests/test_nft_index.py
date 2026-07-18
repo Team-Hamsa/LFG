@@ -77,12 +77,87 @@ def test_live_nfts_excludes_burned_and_roundtrips_attributes(tmp_path):
     assert live[0].attributes == attrs
 
 
-def test_metadata_urls_expands_ipfs_across_gateways():
+def test_nft_by_number_returns_live_token(tmp_path):
+    conn = nft_index.init_db(str(tmp_path / "x.db"))
+    nft_index.upsert(conn, _nft("LIVE", number=42))
+    rec = nft_index.nft_by_number(conn, 42)
+    assert rec is not None
+    assert rec.nft_id == "LIVE"
+
+
+def test_nft_by_number_returns_none_for_unknown_number(tmp_path):
+    conn = nft_index.init_db(str(tmp_path / "x.db"))
+    nft_index.upsert(conn, _nft("LIVE", number=42))
+    assert nft_index.nft_by_number(conn, 9999) is None
+
+
+def test_nft_by_number_excludes_burned(tmp_path):
+    # A Harvest burn (dress-up economy) or any other burn leaves the token
+    # is_burned=1 in the index; nft_by_number must treat that as "not live"
+    # even though the row still exists (#41 OG-card liveness check).
+    conn = nft_index.init_db(str(tmp_path / "x.db"))
+    nft_index.upsert(conn, _nft("DEAD", number=7, burned=True))
+    assert nft_index.nft_by_number(conn, 7) is None
+
+
+def test_nft_by_number_multi_live_picks_highest_ledger_index(tmp_path):
+    # Trait-swap/reminting duplicates can leave >1 live token at one edition
+    # number (a data anomaly, see collection_anomalies()'s multi_live) —
+    # nft_by_number must deterministically pick the most-recently-synced one.
+    conn = nft_index.init_db(str(tmp_path / "x.db"))
+    older = _nft("OLDER", number=5)
+    older.ledger_index = 100
+    newer = _nft("NEWER", number=5)
+    newer.ledger_index = 200
+    nft_index.upsert(conn, older)
+    nft_index.upsert(conn, newer)
+    rec = nft_index.nft_by_number(conn, 5)
+    assert rec is not None
+    assert rec.nft_id == "NEWER"
+
+
+def test_metadata_urls_skips_ipfs_entirely():
+    # IPFS fetches are banned: gateway flakiness fed the []-clobber cycle
+    # (unreadable-live 1 -> 483 over a month of re-runs). Bithomp CSV import
+    # is the mainnet metadata source for ipfs:// tokens.
     uri_hex = b"ipfs://bafyCID/meta.json".hex()
-    urls = nft_index._metadata_urls(uri_hex)
-    assert len(urls) == len(nft_index.IPFS_GATEWAYS)
-    assert "https://bafyCID.ipfs.dweb.link/meta.json" in urls
-    assert "https://ipfs.io/ipfs/bafyCID/meta.json" in urls
+    assert nft_index._metadata_urls(uri_hex) == []
+
+
+def test_upsert_empty_attributes_never_clobber_nonempty(tmp_path):
+    conn = nft_index.init_db(str(tmp_path / "x.db"))
+    attrs = [{"trait_type": "Clothing", "value": "Wonder"}]
+    nft_index.upsert(conn, _nft("AAA", owner="rOld", attrs=attrs))
+    # A re-scan whose metadata fetch failed: empty attributes, no body/image.
+    failed = _nft("AAA", owner="rNew", attrs=[], body="")
+    failed.image = ""
+    nft_index.upsert(conn, failed)
+    row = conn.execute(
+        "SELECT owner, attributes_json, body, image FROM onchain_nfts WHERE nft_id='AAA'"
+    ).fetchone()
+    assert row[0] == "rNew"  # ledger facts still update
+    assert row[1] != "[]"  # metadata survives the failed fetch
+    assert row[2] == "male"
+    assert row[3] == "https://img/x.png"
+
+
+def test_upsert_nonempty_attributes_still_overwrite(tmp_path):
+    conn = nft_index.init_db(str(tmp_path / "x.db"))
+    nft_index.upsert(conn, _nft("AAA", attrs=[{"trait_type": "Head", "value": "Old"}]))
+    new_attrs = [{"trait_type": "Head", "value": "New"}]
+    nft_index.upsert(conn, _nft("AAA", attrs=new_attrs))
+    live = nft_index.live_nfts(conn)
+    assert live[0].attributes == new_attrs
+
+
+def test_upsert_empty_attributes_fill_empty_row(tmp_path):
+    conn = nft_index.init_db(str(tmp_path / "x.db"))
+    nft_index.upsert(conn, _nft("AAA", attrs=[], body=""))
+    attrs = [{"trait_type": "Head", "value": "New"}]
+    nft_index.upsert(conn, _nft("AAA", attrs=attrs))
+    live = nft_index.live_nfts(conn)
+    assert live[0].attributes == attrs
+    assert live[0].body == "male"
 
 
 def test_metadata_urls_passes_through_http():
@@ -180,3 +255,15 @@ def test_enumerate_tokens_raises_on_error_response(monkeypatch):
 
     with pytest.raises(RuntimeError, match="nfts_by_issuer failed"):
         asyncio.new_event_loop().run_until_complete(_go())
+
+
+def test_upsert_never_resurrects_burned_token(tmp_path):
+    # XRPL burns are irreversible. A stale source (e.g. a Bithomp CSV exported
+    # before the burn) re-upserting the token as live must not flip is_burned
+    # back to 0 — that resurrected 18 burned mainnet tokens on 2026-07-15 and
+    # made every burn-reminted edition show as a duplicate.
+    conn = nft_index.init_db(str(tmp_path / "x.db"))
+    nft_index.upsert(conn, _nft("AAA", burned=True))
+    nft_index.upsert(conn, _nft("AAA", burned=False))  # stale re-import
+    row = conn.execute("SELECT is_burned FROM onchain_nfts WHERE nft_id='AAA'").fetchone()
+    assert row[0] == 1

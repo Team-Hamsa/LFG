@@ -78,7 +78,7 @@ def _mint_tx():
     return {
         "TransactionType": "NFTokenMint",
         "Issuer": config.SWAP_ISSUER_ADDRESS,
-        "meta": {"nftoken_id": "CHAR"},
+        "meta": {"TransactionResult": "tesSUCCESS", "nftoken_id": "CHAR"},
     }
 
 
@@ -140,7 +140,7 @@ def test_listen_path_known_edition_logs_nothing():
     tx = {
         "TransactionType": "NFTokenMint",
         "Issuer": config.SWAP_ISSUER_ADDRESS,
-        "meta": {"nftoken_id": "CHAR"},
+        "meta": {"TransactionResult": "tesSUCCESS", "nftoken_id": "CHAR"},
     }
     _run(
         oln.process_stream_tx(
@@ -220,7 +220,11 @@ def test_listen_path_rebuilds_bucket_from_modify():
     async def fetch_meta(uri_hex):
         return meta
 
-    tx = {"TransactionType": "NFTokenModify", "NFTokenID": "CLOSET"}
+    tx = {
+        "TransactionType": "NFTokenModify",
+        "NFTokenID": "CLOSET",
+        "meta": {"TransactionResult": "tesSUCCESS"},
+    }
     _run(
         oln.process_stream_tx(
             conn,
@@ -255,7 +259,10 @@ def test_listen_path_accept_closet_promotes_pending_to_active():
     async def fetch_meta(uri_hex):
         return meta
 
-    tx = {"TransactionType": "NFTokenAcceptOffer", "meta": {"nftoken_id": "CLOSET_ACC"}}
+    tx = {
+        "TransactionType": "NFTokenAcceptOffer",
+        "meta": {"TransactionResult": "tesSUCCESS", "nftoken_id": "CLOSET_ACC"},
+    }
     _run(
         oln.process_stream_tx(
             conn,
@@ -297,6 +304,7 @@ def test_listen_path_offer_create_reaches_market_listener():
         "NFTokenID": nft_id,
         "ledger_index": 42,
         "meta": {
+            "TransactionResult": "tesSUCCESS",
             "AffectedNodes": [
                 {
                     "CreatedNode": {
@@ -309,7 +317,7 @@ def test_listen_path_offer_create_reaches_market_listener():
                         },
                     }
                 }
-            ]
+            ],
         },
     }
     _run(
@@ -352,7 +360,11 @@ def test_listen_path_burn_deletes_trait_token():
         return trait_token.build_trait_metadata("Hat", "Cap", "https://example.com/img.png")
 
     # NFTokenBurn carries NFTokenID directly (not in meta.nftoken_id).
-    tx = {"TransactionType": "NFTokenBurn", "NFTokenID": "TRAIT_BURN"}
+    tx = {
+        "TransactionType": "NFTokenBurn",
+        "NFTokenID": "TRAIT_BURN",
+        "meta": {"TransactionResult": "tesSUCCESS"},
+    }
     _run(
         oln.process_stream_tx(
             conn,
@@ -484,4 +496,74 @@ def test_stream_tx_history_filters_foreign_collection(tmp_path):
         )
     )
     assert hconn.execute("SELECT COUNT(*) FROM xrpl_txs").fetchone()[0] == 1
+    assert hconn.execute("SELECT COUNT(*) FROM nft_events").fetchone()[0] == 1
+
+
+def test_stream_tx_tec_burn_mutates_nothing(tmp_path):
+    """#210/#235 end-to-end: a tec-class NFTokenBurn through the production
+    per-message seam must leave the index untouched (is_burned stays 0) and
+    derive zero history events. The live-path archive is event-gated by design
+    (the network-wide firehose can't archive every failed tx), so the raw tx is
+    not stored here either; result-agnostic raw archiving lives in
+    scripts/backfill_history.py, which stores tec txs verbatim for audit."""
+    from lfg_core import history_events, history_store
+    from tests.fixtures import history_txs as fx
+
+    hconn = history_store.init_history_db(str(tmp_path / "h.db"))
+    conn = _conn()
+    conn.execute(
+        "INSERT INTO onchain_nfts (nft_id, nft_number, owner, is_burned, mutable, uri_hex, body) "
+        "VALUES (?, 7, 'rOwner', 0, 0, '', NULL)",
+        (fx.NFT_A,),
+    )
+    conn.commit()
+    ctx = {
+        "nft_issuer": fx.ISSUER,
+        "issuer_hex": history_events.issuer_account_hex(fx.ISSUER),
+        "brix_issuer": fx.BRIX_ISSUER,
+        "brix_hex": fx.BRIX_HEX,
+        "distributor": None,
+        "numbers": {},
+    }
+
+    async def fetch_never(_):
+        raise AssertionError("a failed tx must not be resolved at all")
+
+    _run(
+        oln.process_stream_tx(
+            conn,
+            dict(fx.BURN_TEC),
+            fetch_token=fetch_never,
+            fetch_meta=fetch_never,
+            is_ours=lambda t: True,
+            history_conn=hconn,
+            history_ctx=ctx,
+        )
+    )
+    assert conn.execute(
+        "SELECT is_burned FROM onchain_nfts WHERE nft_id=?", (fx.NFT_A,)
+    ).fetchone() == (0,)
+    assert hconn.execute("SELECT COUNT(*) FROM nft_events").fetchone()[0] == 0
+    assert hconn.execute("SELECT COUNT(*) FROM brix_events").fetchone()[0] == 0
+    assert hconn.execute("SELECT COUNT(*) FROM xrpl_txs").fetchone()[0] == 0
+
+    # The SAME burn with tesSUCCESS is applied + recorded — the gate is the
+    # result code, nothing else about the tx shape.
+    async def fetch_none(_):
+        return None
+
+    _run(
+        oln.process_stream_tx(
+            conn,
+            dict(fx.BURN),
+            fetch_token=fetch_none,
+            fetch_meta=fetch_none,
+            is_ours=lambda t: True,
+            history_conn=hconn,
+            history_ctx=ctx,
+        )
+    )
+    assert conn.execute(
+        "SELECT is_burned FROM onchain_nfts WHERE nft_id=?", (fx.NFT_A,)
+    ).fetchone() == (1,)
     assert hconn.execute("SELECT COUNT(*) FROM nft_events").fetchone()[0] == 1

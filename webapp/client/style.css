@@ -224,15 +224,32 @@ button.big { padding: 14px 20px; }
 
 /* .secondary is the default button style above — no extra rules needed */
 
-button.link {
+button.link, a.link {
   background: none;
   border: none;
   color: var(--blue);
   padding: 2px 4px;
   font-weight: 600;
   font-size: .9rem;
+  text-decoration: none;
+  cursor: pointer;
 }
-button.link:hover { text-decoration: underline; color: var(--blue); }
+button.link:hover, a.link:hover { text-decoration: underline; color: var(--blue); }
+
+/* "Share on X" control (#41 T9): the anchor + copy button sit inline, with
+   the copy-fallback input only appearing once revealed by app.js. */
+.share-row { display: flex; align-items: center; justify-content: center; gap: 10px; flex-wrap: wrap; }
+.copy-input {
+  width: 100%;
+  margin-top: 6px;
+  font-size: .8rem;
+  font-family: 'JetBrains Mono', monospace;
+  padding: 6px 8px;
+  border-radius: 8px;
+  border: 2px solid var(--ink);
+  background: var(--paper);
+  color: var(--text);
+}
 
 button.back {
   background: none;
@@ -459,6 +476,23 @@ button.back:hover { color: var(--text); border: none; }
 }
 .nft-card.sel-1 .pick { display: grid; background: var(--blue); }
 .nft-card.sel-2 .pick { display: grid; background: var(--green); }
+/* Animated-NFT marker (#250): grid tiles stay stills, the badge flags cards
+   whose art plays as video on the chooser/result screens. */
+.nft-card .anim-badge {
+  position: absolute;
+  top: 7px;
+  right: 7px;
+  width: 22px;
+  height: 22px;
+  border-radius: 99px;
+  display: grid;
+  place-items: center;
+  font-size: .6rem;
+  color: #fff;
+  background: rgba(0, 0, 0, .55);
+  border: 2px solid var(--ink);
+  pointer-events: none;
+}
 
 /* Skeleton loaders while the wallet's NFTs are fetched */
 .nft-card.skeleton {
@@ -495,7 +529,8 @@ button.back:hover { color: var(--text); border: none; }
   font-size: .7rem;
   color: var(--muted);
 }
-.swap-pair img {
+.swap-pair img,
+.swap-pair video {
   width: 96px;
   border-radius: 12px;
   border: 3px solid var(--ink);
@@ -627,7 +662,8 @@ button.back:hover { color: var(--text); border: none; }
 @media (max-width: 380px) {
   .wordmark { font-size: 2.1rem; }
   .wordmark-img { height: 46px; max-width: 180px; }
-  .swap-pair img { width: 80px; }
+  .swap-pair img,
+  .swap-pair video { width: 80px; }
   .qr, #flow-qr { width: 180px; height: 180px; }
 }
 
@@ -701,20 +737,32 @@ button.back:hover { color: var(--text); border: none; }
   position: absolute; bottom: 2px; right: 4px; font-size: .7rem; font-weight: 700;
 }
 .closet-item.busy { opacity: .5; }
-.roster-strip {
-  display: flex; gap: 8px; overflow-x: auto; margin-top: 16px; padding-bottom: 4px;
+/* --- GO picker overlay (replaces the old roster strip) --- */
+.go-picker-box { width: min(520px, 100%); text-align: left; }
+.go-picker-head { display: flex; justify-content: space-between; align-items: center; }
+.go-picker-head h2 { margin: 0; }
+.go-picker-grid {
+  display: grid; grid-template-columns: repeat(auto-fill, minmax(96px, 1fr));
+  gap: 10px; margin-top: 12px; max-height: 60vh; overflow-y: auto;
 }
-.roster-tile {
-  flex: 0 0 auto; width: 64px; height: 64px; border: 2px solid var(--ink);
-  border-radius: 10px; overflow: hidden; background: var(--surface-2); cursor: pointer;
+.go-tile {
+  display: flex; flex-direction: column; align-items: center; gap: 2px;
+  padding: 8px 4px; border: 2px solid var(--ink); border-radius: 10px;
+  background: var(--surface-2); cursor: pointer;
 }
-.roster-tile.active { box-shadow: 0 0 0 4px var(--blue); }
-.roster-tile img { width: 100%; height: 100%; object-fit: contain; }
-.roster-tile.assemble { display: grid; place-items: center; font-size: 1.6rem; }
+.go-tile img { width: 72px; height: 72px; object-fit: contain; }
+.go-tile.active { box-shadow: 0 0 0 3px var(--blue); }
 /* NFT with empty/missing on-chain metadata (freshly minted, not yet indexed):
-   show a calm placeholder instead of a wall of broken layer images. */
-.roster-tile.incomplete { background: repeating-linear-gradient(
-    45deg, var(--surface-2), var(--surface-2) 6px, var(--surface) 6px, var(--surface) 12px); }
+   a calm striped placeholder, disabled until the indexer catches up. */
+.go-tile.indexing {
+  opacity: .55; cursor: default;
+  background: repeating-linear-gradient(
+    45deg, var(--surface-2), var(--surface-2) 6px, var(--surface) 6px, var(--surface) 12px);
+}
+.go-tile-label { font-weight: 700; font-size: .8rem; }
+.go-tile-sub { font-size: .7rem; color: var(--muted); }
+.go-tile.assemble { justify-content: center; min-height: 96px; }
+.go-tile-plus { font-size: 1.6rem; line-height: 1; }
 .dressup-canvas.incomplete {
   display: grid; place-items: center; color: var(--muted, #888); font-weight: 700;
 }
@@ -803,3 +851,22 @@ button.back:hover { color: var(--text); border: none; }
 .lb-thumb { width: 2rem; height: 2rem; border-radius: 99px; object-fit: cover; background: var(--surface); flex-shrink: 0; }
 .lb-value { flex: 0 0 auto; font-weight: 700; color: var(--text); font-size: .85rem; }
 .lb-me { margin: 8px 0 0; font-size: .82rem; color: var(--muted); }
+
+/* Bulk mint quantity stepper (#215 UI) */
+.mint-row { display: flex; align-items: center; gap: 8px; justify-content: center; }
+.qty-stepper { display: flex; align-items: center; gap: 4px; }
+.qty-stepper .qty-btn {
+  width: 32px; height: 32px; border-radius: 8px; font-size: 1rem; line-height: 1;
+  border: 1px solid var(--line); background: var(--surface); color: var(--text); cursor: pointer;
+}
+.qty-stepper .qty-btn:disabled { opacity: 0.4; cursor: default; }
+#qty-value { min-width: 24px; text-align: center; font-weight: 700; color: var(--text); }
+
+/* Bulk fulfillment unit list (#215 UI) */
+#bulk-units { display: flex; flex-direction: column; gap: 8px; margin: 12px 0; }
+.bulk-unit { display: flex; align-items: center; gap: 10px; padding: 8px; border: 1px solid var(--line); border-radius: 10px; }
+.bulk-unit img.thumb { width: 56px; height: 56px; border-radius: 8px; object-fit: cover; }
+.bulk-unit .u-label { flex: 1; text-align: left; }
+.bulk-unit.pending { opacity: 0.55; }
+.bulk-unit .u-error { color: var(--red); font-size: 0.85em; }
+.bulk-unit img.u-qr { width: 120px; height: 120px; }

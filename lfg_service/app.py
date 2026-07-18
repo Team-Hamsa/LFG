@@ -15,12 +15,17 @@ import json
 import logging
 import mimetypes
 import os
+import pathlib
+import re
 import sqlite3
 import sys
+import tempfile
 import threading
 import time
 import traceback
 from collections.abc import Awaitable, Callable
+from decimal import Decimal
+from html import escape
 from typing import Any, TypeVar, cast
 from urllib.parse import quote as urlquote
 from urllib.parse import urlparse
@@ -32,11 +37,15 @@ from xrpl.core.addresscodec import is_valid_classic_address
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from lfg_core import (
+    brix_payment,
+    bulk_mint_flow,
     closet_token,
     config,
+    db_path,
     economy_flow,
     economy_store,
     free_mint,
+    headroom,
     history_store,
     image_archive,
     layer_store,
@@ -47,17 +56,31 @@ from lfg_core import (
     memos,
     mint_flow,
     nft_index,
+    rarity,
+    share_clicks,
+    shop,
+    shop_flow,
+    shop_store,
     swap_flow,
     swap_meta,
     trait_config,
     xrpl_ops,
     xumm_ops,
 )
+from lfg_core.db_helpers import get_nft_data
 from lfg_core.user_db import create_users_table, get_user, register_user
 from lfg_service import identity as identity_store
 from lfg_service.auth import require_service_token, surface_for_token
 from lfg_service.events import Event, InMemoryEventBus
 from lfg_service.telegram_auth import validate_init_data
+
+# X poster state (x_state.db, #41 PR-2) — single-writer discipline (spec §5.6):
+# the service writes ONLY the `settings` table (the posting_paused kill switch
+# flipped by the /api/admin/x/* handlers below); the poster process
+# (surfaces/x_bot/bot.py) writes ONLY `x_posts` and merely reads `settings`.
+# The sqlite logic lives in surfaces.x_bot.state (imported here across the
+# usual service→surface layering, per the #41 plan) — never duplicated here.
+from surfaces.x_bot import state as x_state
 from webapp import economy_api, mock_economy, mock_market
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s")
@@ -75,6 +98,17 @@ economy_sessions: dict[str, Any] = {}
 # Shared by List/Cancel/Buy (market_flow.ListSession/CancelSession/BuySession),
 # same "one dict, `.kind` routes the status handler" shape as economy_sessions.
 market_sessions: dict[str, Any] = {}
+# Trait Shop (#217) buy sessions: shop_flow.ShopBuySession keyed by .id, same
+# "one dict, poll via GET status" shape as market_sessions. ShopBuySession has
+# no created_at (unlike the other session dataclasses), so pruning tracks
+# creation time in a parallel dict rather than reusing _prune_sessions.
+shop_sessions: dict[str, Any] = {}
+_shop_session_created: dict[str, float] = {}
+# Bulk mint (#215) jobs: bulk_mint_flow.BulkMintJob keyed by .id, same
+# "one dict, poll via GET status" shape as mint_sessions, but FULFILLING is
+# deliberately non-terminal (see bulk_mint_flow.TERMINAL_STATES) so a live job
+# stays visible to /api/mint/bulk/active and the startup resume sweep.
+bulk_sessions: dict[str, Any] = {}
 SESSION_RETENTION = 3600  # keep terminal sessions briefly for late polls
 
 BUS = InMemoryEventBus()
@@ -159,6 +193,7 @@ async def publish_terminal(
     user_id: str,
     platform: str,
     image_url: str | None,
+    video_url: str | None = None,
     success_states: set[str],
     fail_states: set[str],
 ) -> None:
@@ -183,6 +218,8 @@ async def publish_terminal(
     data = session.to_dict()
     if image_url and not data.get("image_url"):
         data["image_url"] = image_url
+    if video_url and not data.get("video_url"):
+        data["video_url"] = video_url
     await publish_event(
         f"{prefix}.completed" if ok else f"{prefix}.failed",
         enrich_minter_identity(platform, user_id, wallet),
@@ -194,6 +231,50 @@ async def publish_terminal(
     # retries. The resulting sub-tick double-publish window under concurrent
     # polls is acceptable.
     session._published = True
+
+
+async def _publish_mint_terminal(session: Any) -> None:
+    """Publish the terminal mint.completed/mint.failed firehose event for a
+    single-mint session. Shared by the server-side session task (see
+    _run_mint_session_and_publish) and handle_mint_status's poll path.
+
+    Idempotent via the session's `_published` guard, set only AFTER
+    publish_event awaits successfully (publish_terminal's ordering): if the
+    publisher is cancelled mid-await the session stays unpublished so the
+    other path retries; consumers dedup the accepted sub-tick double-publish
+    window (the x_bot poster keys on nft_id)."""
+    if getattr(session, "_published", False):
+        return
+    if session.state not in mint_flow.TERMINAL_STATES:
+        return
+    ok = session.state not in (mint_flow.FAILED, mint_flow.PAYMENT_TIMEOUT)
+    await publish_event(
+        "mint.completed" if ok else "mint.failed",
+        enrich_minter_identity(session.platform, session.discord_id, session.wallet_address),
+        session.wallet_address,
+        session.to_dict(),
+    )
+    session._published = True
+
+
+async def _run_mint_session_and_publish(session: Any) -> None:
+    """Drive run_mint_session to terminal, then publish the terminal event
+    server-side. Until #41 the client status poll was the ONLY publish site —
+    a mobile user whose Activity is killed after signing in Xaman (the #216
+    scenario; push delivery lets them finish entirely in Xaman) mints
+    successfully but never polls again, so the event was never published and
+    the X poster / Telegram announce silently missed it.
+
+    Publish failure is logged and never breaks the mint task; a user cancel
+    (#141) cancels this task before the publish runs (and mark_published
+    suppresses any late poll), so a deliberate cancel still announces
+    nothing. handle_mint_status calls the same idempotent helper, covering
+    poll-first ordering."""
+    await mint_flow.run_mint_session(session)
+    try:
+        await _publish_mint_terminal(session)
+    except Exception as e:
+        logging.error(f"server-side mint terminal publish failed for session {session.id}: {e}")
 
 
 async def _ws_stream(request: Any, predicate: Any) -> Any:
@@ -311,6 +392,19 @@ async def _push_token(user: dict[str, Any]) -> str | None:
     sign request delivered to Xaman instead of a QR. None simply falls back to
     the QR/deep link — never blocks the flow."""
     return await asyncio.to_thread(identity_store.user_token_for, _platform(user), user["id"])
+
+
+async def _persist_issued_user_token(user: dict[str, Any], session: Any) -> None:
+    """#212: persist a push token a flow captured off a signed payload (see
+    the flows' `_capture_issued_token`). Sign-in used to be the only capture
+    point — refreshing here keeps tokens current as XUMM rotates them and
+    self-heals after an app-key swap invalidates every stored token.
+    Best-effort; cleared on the session so each capture writes once."""
+    token = getattr(session, "issued_user_token", None)
+    if not token:
+        return
+    session.issued_user_token = None
+    await asyncio.to_thread(identity_store.set_user_token, _platform(user), user["id"], token)
 
 
 def require_auth(handler):
@@ -442,6 +536,48 @@ async def handle_session(request):
         )
     token = make_session_token({"id": pid, "name": pname, "platform": request["surface"]})
     return web.json_response({"session_token": token, "user": {"id": pid, "username": pname}})
+
+
+# --- X (Twitter) posting admin endpoints (#41 PR-2, spec §5.6) --------------
+# Service-token-authed AND restricted to the Discord surface: the human
+# authorization gate is the Discord bot's administrator-permission check in
+# front of its /admin button, so any other valid surface token (telegram, the
+# x poster's own, ...) gets 403 — otherwise any surface process could pause
+# posting. These work with X_ENABLED false too (admin can inspect/flip state
+# while the feature is dark); nothing here touches X creds.
+# config.X_STATE_DB_PATH is read lazily at call time (never bound at import)
+# so tests can point it at a tmp file via monkeypatch.
+
+
+@require_service_token
+async def handle_x_pause(request):
+    if request["surface"] != "discord":
+        return web.json_response({"error": "forbidden", "code": "wrong_surface"}, status=403)
+    x_state.set_posting_paused(config.X_STATE_DB_PATH, True)
+    return web.json_response({"paused": True})
+
+
+@require_service_token
+async def handle_x_resume(request):
+    if request["surface"] != "discord":
+        return web.json_response({"error": "forbidden", "code": "wrong_surface"}, status=403)
+    x_state.set_posting_paused(config.X_STATE_DB_PATH, False)
+    return web.json_response({"paused": False})
+
+
+@require_service_token
+async def handle_x_status(request):
+    if request["surface"] != "discord":
+        return web.json_response({"error": "forbidden", "code": "wrong_surface"}, status=403)
+    db = config.X_STATE_DB_PATH
+    return web.json_response(
+        {
+            "paused": x_state.posting_paused(db),
+            "month_posts": x_state.month_count(db),
+            "budget": config.X_MONTHLY_POST_BUDGET,
+            "enabled": config.X_ENABLED,
+        }
+    )
 
 
 async def handle_telegram_auth(request):
@@ -808,11 +944,18 @@ def _serialize_listing_row(
         "nft_id": r["nft_id"],
         "kind": kind,
         "image": r.get("image"),
-        "amount_drops": r["amount_drops"],
-        "amount_xrp": market_ops.drops_to_xrp_str(str(r["amount_drops"])),
         "seller": r["seller"],
         "offer_index": r["offer_index"],
     }
+    # #239 per-kind denomination: characters carry amount_drops/amount_xrp,
+    # trait listings amount_brix. Emitted by presence rather than kind so a
+    # legacy live XRP trait row (awaiting the backfill's stale-close) still
+    # serializes without crashing on a None amount.
+    if r.get("amount_drops") is not None:
+        out["amount_drops"] = r["amount_drops"]
+        out["amount_xrp"] = market_ops.drops_to_xrp_str(str(r["amount_drops"]))
+    if r.get("amount_brix") is not None:
+        out["amount_brix"] = r["amount_brix"]
     if kind == "character":
         out["nft_number"] = r.get("nft_number")
         raw_attrs = r.get("attributes_json")
@@ -882,6 +1025,20 @@ async def handle_market_listings(request: web.Request) -> web.Response:
         # public unauthenticated endpoint those were an uncaught 500.
         return web.json_response({"error": f"bad XRP amount: {e}"}, status=400)
 
+    # #239: BRIX price bounds for trait browse — post-cache like the XRP ones.
+    min_brix: str | None = None
+    max_brix: str | None = None
+    try:
+        raw_min_brix = request.query.get("min_brix")
+        raw_max_brix = request.query.get("max_brix")
+        if raw_min_brix is not None:
+            min_brix = market_ops.validate_brix_value(raw_min_brix)
+        if raw_max_brix is not None:
+            max_brix = market_ops.validate_brix_value(raw_max_brix)
+    except Exception as e:
+        # Same broad guard as the XRP bounds above.
+        return web.json_response({"error": f"bad BRIX amount: {e}"}, status=400)
+
     limit = _parse_market_int_param(
         request, "limit", _MARKET_DEFAULT_LIMIT, max_value=_MARKET_MAX_LIMIT
     )
@@ -932,9 +1089,27 @@ async def handle_market_listings(request: web.Request) -> web.Response:
 
     filtered = rows
     if min_drops is not None:
-        filtered = [r for r in filtered if r["amount_drops"] >= min_drops]
+        filtered = [
+            r for r in filtered if r["amount_drops"] is not None and r["amount_drops"] >= min_drops
+        ]
     if max_drops is not None:
-        filtered = [r for r in filtered if r["amount_drops"] <= max_drops]
+        filtered = [
+            r for r in filtered if r["amount_drops"] is not None and r["amount_drops"] <= max_drops
+        ]
+    if min_brix is not None:
+        floor = Decimal(min_brix)
+        filtered = [
+            r
+            for r in filtered
+            if r.get("amount_brix") is not None and Decimal(r["amount_brix"]) >= floor
+        ]
+    if max_brix is not None:
+        ceiling = Decimal(max_brix)
+        filtered = [
+            r
+            for r in filtered
+            if r.get("amount_brix") is not None and Decimal(r["amount_brix"]) <= ceiling
+        ]
     if trait_filters:
         # market_store._row_attrs is typed against sqlite3.Row (the shape it
         # sees internally, pre-dict-conversion, inside browse()); our cached
@@ -949,9 +1124,11 @@ async def handle_market_listings(request: web.Request) -> web.Response:
         ]
 
     if sort == "price_asc":
-        filtered = sorted(filtered, key=lambda r: (r["amount_drops"], r["offer_index"]))
+        filtered = sorted(filtered, key=lambda r: (market_store.listing_price(r), r["offer_index"]))
     elif sort == "price_desc":
-        filtered = sorted(filtered, key=lambda r: (-r["amount_drops"], r["offer_index"]))
+        filtered = sorted(
+            filtered, key=lambda r: (-market_store.listing_price(r), r["offer_index"])
+        )
     else:  # newest
         filtered = sorted(filtered, key=lambda r: (-(r["created_ts"] or 0), r["offer_index"]))
 
@@ -1141,16 +1318,21 @@ async def handle_market_history(request: web.Request) -> web.Response:
         rows = await asyncio.get_event_loop().run_in_executor(
             None, _compute_trait_sales, _market_network("trait"), slot, value
         )
-        sales = [
-            {
+        # #239: sold trait rows expose the BRIX price; legacy pre-BRIX sales
+        # keep their XRP fields (emit by presence, same rule as browse).
+        sales = []
+        for r in rows:
+            sale: dict[str, Any] = {
                 "nft_id": r["nft_id"],
                 "seller": r["seller"],
-                "amount_drops": r["amount_drops"],
-                "amount_xrp": market_ops.drops_to_xrp_str(str(r["amount_drops"])),
                 "offer_index": r["offer_index"],
             }
-            for r in rows
-        ]
+            if r["amount_drops"] is not None:
+                sale["amount_drops"] = r["amount_drops"]
+                sale["amount_xrp"] = market_ops.drops_to_xrp_str(str(r["amount_drops"]))
+            if r["amount_brix"] is not None:
+                sale["amount_brix"] = r["amount_brix"]
+            sales.append(sale)
         return web.json_response({"slot": slot, "value": value, "sales": sales})
 
     return web.json_response({"error": "nft_id or slot+value required"}, status=400)
@@ -1267,32 +1449,49 @@ def _close_listing_sync(
 @require_market
 @require_wallet
 async def handle_market_list_start(request):
-    """POST /api/market/list {nft_id, price_xrp}: 409 if the caller doesn't
-    own nft_id (checked across onchain_nfts + trait_tokens) or a live listing
-    already exists for it; otherwise builds the NFTokenCreateOffer XUMM
-    payload and returns a session (mirrors mint/swap's QR/deeplink shape)."""
+    """POST /api/market/list {nft_id, price_xrp | price_brix}: 409 if the
+    caller doesn't own nft_id (checked across onchain_nfts + trait_tokens) or
+    a live listing already exists for it; otherwise builds the
+    NFTokenCreateOffer XUMM payload and returns a session (mirrors mint/swap's
+    QR/deeplink shape). Denomination is per-kind (#239): a character listing
+    requires price_xrp; a trait listing requires price_brix."""
     user = request["user"]
     wallet = request["wallet"]
     body = await request.json()
     nft_id = body.get("nft_id")
     price_xrp = body.get("price_xrp")
-    if not nft_id or not isinstance(price_xrp, str):
+    price_brix = body.get("price_brix")
+    if not nft_id or not (isinstance(price_xrp, str) or isinstance(price_brix, str)):
         return web.json_response(
-            {"error": "nft_id and price_xrp (string) are required"}, status=400
+            {"error": "nft_id and price_xrp or price_brix (string) are required"}, status=400
         )
-    try:
-        amount_drops = int(market_ops.xrp_to_drops_str(price_xrp))
-    except Exception as e:
-        # Broad on purpose: xrp_to_drops_str raises TypeError/ValueError for
-        # the documented cases, but Decimal("Infinity")/("nan") slip past its
-        # `<= 0` guard and raise decimal.InvalidOperation/OverflowError
-        # instead — this edge (where a user-controlled price_xrp is parsed)
-        # must 400 cleanly on all of them, not just the two it advertises.
-        return web.json_response({"error": f"bad price_xrp: {e}"}, status=400)
+    amount_drops: int | None = None
+    amount_brix: str | None = None
+    if isinstance(price_xrp, str):
+        try:
+            amount_drops = int(market_ops.xrp_to_drops_str(price_xrp))
+        except Exception as e:
+            # Broad on purpose: xrp_to_drops_str raises TypeError/ValueError
+            # for the documented cases, but Decimal("Infinity")/("nan") slip
+            # past its `<= 0` guard and raise decimal.InvalidOperation/
+            # OverflowError instead — this edge (where a user-controlled
+            # price_xrp is parsed) must 400 cleanly on all of them, not just
+            # the two it advertises.
+            return web.json_response({"error": f"bad price_xrp: {e}"}, status=400)
+    if isinstance(price_brix, str):
+        try:
+            amount_brix = market_ops.validate_brix_value(price_brix)
+        except Exception as e:
+            # Same broad guard as price_xrp above.
+            return web.json_response({"error": f"bad price_brix: {e}"}, status=400)
 
     if _use_market_mock():
         try:
-            return web.json_response(mock_market.INSTANCE.start_list(wallet, nft_id, amount_drops))
+            return web.json_response(
+                mock_market.INSTANCE.start_list(
+                    wallet, nft_id, amount_drops, amount_brix=amount_brix
+                )
+            )
         except mock_market.MockMarketError as e:
             return web.json_response({"error": str(e)}, status=409)
 
@@ -1313,6 +1512,18 @@ async def handle_market_list_start(request):
     if membership["kind"] == "trait" and not config.ECONOMY_ENABLED:
         return _economy_disabled_response()
 
+    # #239 per-kind denomination: trait listings are BRIX-only, character
+    # listings XRP-only — reject the wrong (or missing) price field for the
+    # resolved kind before any payload is built.
+    if membership["kind"] == "trait" and amount_brix is None:
+        return web.json_response(
+            {"error": "trait listings are priced in BRIX — send price_brix"}, status=400
+        )
+    if membership["kind"] == "character" and amount_drops is None:
+        return web.json_response(
+            {"error": "character listings are priced in XRP — send price_xrp"}, status=400
+        )
+
     network = _market_network(membership["kind"])
     already_listed = await loop.run_in_executor(None, _has_live_listing, network, nft_id)
     if already_listed:
@@ -1328,10 +1539,16 @@ async def handle_market_list_start(request):
             status=409,
         )
 
+    offer_amount: str | dict[str, str]
+    if membership["kind"] == "trait":
+        assert amount_brix is not None  # guarded above
+        offer_amount = market_ops.brix_amount_dict(amount_brix)
+    else:
+        offer_amount = str(amount_drops)
     payload = await xumm_ops.create_sell_offer_payload(
         wallet,
         nft_id,
-        str(amount_drops),
+        offer_amount,
         return_url=xumm_ops.discord_return_url(body.get("guild_id"), body.get("channel_id")),
         user_token=await _push_token(user),
         platform=memos.platform_for_surface(_platform(user)),
@@ -1344,7 +1561,8 @@ async def handle_market_list_start(request):
         wallet_address=wallet,
         nft_id=nft_id,
         listing_kind=membership["kind"],
-        amount_drops=amount_drops,
+        amount_drops=amount_drops if membership["kind"] == "character" else None,
+        amount_brix=amount_brix if membership["kind"] == "trait" else None,
         slot=membership["slot"],
         value=membership["value"],
         platform=_platform(user),
@@ -1352,6 +1570,7 @@ async def handle_market_list_start(request):
     session.qr_url = payload["qr_url"]
     session.xumm_url = payload["xumm_url"]
     session.payload_uuid = payload.get("uuid")
+    session.push = payload.get("push")
     market_sessions[session.id] = session
     return web.json_response(session.to_dict())
 
@@ -1414,6 +1633,7 @@ async def handle_market_cancel_start(request):
     session.qr_url = payload["qr_url"]
     session.xumm_url = payload["xumm_url"]
     session.payload_uuid = payload.get("uuid")
+    session.push = payload.get("push")
     market_sessions[session.id] = session
     return web.json_response(session.to_dict())
 
@@ -1468,10 +1688,27 @@ async def handle_market_buy_start(request):
         if not active:
             return web.json_response({"error": "closet_required"}, status=403)
 
+    # #239: a legacy XRP-denominated trait listing (pre-BRIX transition, not
+    # yet stale-closed by the backfill) is no longer purchasable — the buy
+    # path verifies/pays in BRIX only. Stale-close it like any dead offer.
+    if row["kind"] == "trait" and row.get("amount_brix") is None:
+        await loop.run_in_executor(None, _close_listing_sync, network, offer_index, "stale")
+        return web.json_response({"error": "listing_unavailable"}, status=410)
+
     try:
-        verified = await market_ops.verify_sell_offer(
-            row["nft_id"], offer_index, row["amount_drops"], strict=True
-        )
+        if row["kind"] == "trait":
+            verified = await market_ops.verify_sell_offer(
+                row["nft_id"],
+                offer_index,
+                None,
+                strict=True,
+                expect="brix",
+                expected_brix=row["amount_brix"],
+            )
+        else:
+            verified = await market_ops.verify_sell_offer(
+                row["nft_id"], offer_index, row["amount_drops"], strict=True
+            )
     except Exception as e:
         # A lookup FAILURE (RPC down / rippled soft-error), NOT a verified
         # absence — do not stale-close a possibly-healthy listing; ask the
@@ -1496,17 +1733,58 @@ async def handle_market_buy_start(request):
             status=409,
         )
 
-    payload = await xumm_ops.create_accept_offer_payload(
-        offer_index,
-        return_url=xumm_ops.discord_return_url(body.get("guild_id"), body.get("channel_id")),
-        user_token=await _push_token(user),
-        platform=memos.platform_for_surface(_platform(user)),
-        action=memos.ACTION_BUY,
-    )
+    # #239 trait buys: BRIX holders sign the accept directly; everyone else
+    # first signs an XRP→BRIX on-ramp self-Payment (AWAITING_ONRAMP). Both
+    # branches are decided BEFORE any payload is built: no trustline → 409
+    # trustline_required (the Activity drives the TrustSet flow first, same
+    # signal as the mint flow), no AMM quote → 503 pricing_unavailable.
+    pay_with: str | None = None
+    price_xrp_quote: str | None = None
+    push_user_token = await _push_token(user)
+    return_url = xumm_ops.discord_return_url(body.get("guild_id"), body.get("channel_id"))
+    if row["kind"] == "trait":
+        balance = await xrpl_ops.get_trustline_balance(
+            wallet, config.TOKEN_CURRENCY_HEX, config.TOKEN_ISSUER_ADDRESS
+        )
+        if balance is None:
+            return web.json_response(
+                {"error": "a BRIX trustline is required", "code": "trustline_required"},
+                status=409,
+            )
+        try:
+            pay_with, pay_amount = await brix_payment.detect_payment_path(
+                wallet,
+                row["amount_brix"],
+                currency=config.TOKEN_CURRENCY_HEX,
+                issuer=config.TOKEN_ISSUER_ADDRESS,
+            )
+        except RuntimeError:
+            return web.json_response(
+                {"error": "pricing unavailable", "code": "pricing_unavailable"}, status=503
+            )
+        if pay_with == "XRP":
+            price_xrp_quote = pay_amount
+
+    if price_xrp_quote is not None:
+        payload = await xumm_ops.create_onramp_payment_payload(
+            wallet,
+            market_ops.brix_amount_dict(row["amount_brix"]),
+            market_ops.xrp_to_drops_str(price_xrp_quote),
+            return_url=return_url,
+            user_token=push_user_token,
+            platform=memos.platform_for_surface(_platform(user)),
+        )
+    else:
+        payload = await xumm_ops.create_accept_offer_payload(
+            offer_index,
+            return_url=return_url,
+            user_token=push_user_token,
+            platform=memos.platform_for_surface(_platform(user)),
+            action=memos.ACTION_BUY,
+        )
     if not payload:
         return web.json_response({"error": "could not reach Xaman"}, status=502)
 
-    amount_xrp = market_ops.drops_to_xrp_str(str(row["amount_drops"]))
     session = market_flow.BuySession(
         discord_id=user["id"],
         wallet_address=wallet,
@@ -1515,12 +1793,29 @@ async def handle_market_buy_start(request):
         listing_kind=row["kind"],
         network=network,
         amount_drops=row["amount_drops"],
+        amount_brix=row.get("amount_brix"),
         platform=_platform(user),
     )
+    session.pay_with = pay_with
+    session.price_xrp_quote = price_xrp_quote
+    session.push_user_token = push_user_token
+    session.return_url = return_url  # threaded into the post-onramp accept payload too
     session.qr_url = payload["qr_url"]
     session.xumm_url = payload["xumm_url"]
-    session.payload_uuid = payload.get("uuid")
-    session.instruction = f"Confirm purchase for {amount_xrp} XRP"
+    session.push = payload.get("push")
+    if price_xrp_quote is not None:
+        session.state = market_flow.AWAITING_ONRAMP
+        session.onramp_payload_uuid = payload.get("uuid")
+        session.instruction = (
+            f"Get {row['amount_brix']} BRIX (~{price_xrp_quote} XRP) to complete this purchase"
+        )
+    else:
+        session.payload_uuid = payload.get("uuid")
+        if row["kind"] == "trait":
+            session.instruction = f"Confirm purchase for {row['amount_brix']} BRIX"
+        else:
+            amount_xrp = market_ops.drops_to_xrp_str(str(row["amount_drops"]))
+            session.instruction = f"Confirm purchase for {amount_xrp} XRP"
     market_sessions[session.id] = session
     return web.json_response(session.to_dict())
 
@@ -1546,55 +1841,377 @@ def _make_market_status_handler(prefix: str):
             return web.json_response({"error": "not found"}, status=404)
 
         loop = asyncio.get_event_loop()
-        if prefix == "list":
-            row = await market_flow.advance_list_session(session)
-            if row is not None:
-                network = _market_network(session.listing_kind)
-                await loop.run_in_executor(None, _write_listing_row, network, row)
-        elif prefix == "cancel":
-            if await market_flow.advance_cancel_session(session):
-                await loop.run_in_executor(
-                    None, _close_listing_sync, session.network, session.offer_index, "cancelled"
-                )
-        elif prefix == "buy":
-            outcome = await market_flow.advance_buy_session(session)
-            if outcome == "sold":
-                # Persist the buyer on the sold row so settlement stays
-                # recoverable even if run_deposit deletes the trait_tokens
-                # ownership row before Closet credit (CodeRabbit #129).
-                await loop.run_in_executor(
-                    None,
-                    _close_listing_sync,
-                    session.network,
-                    session.offer_index,
-                    "sold",
-                    session.wallet_address,
-                )
-                if session.listing_kind == "trait":
-                    # Primary settlement trigger (spec §Q7): burn the sold
-                    # trait token back into the buyer's Closet right away.
-                    # Awaited (not fire-and-forget) — run_deposit's own
-                    # fail-closed/journaling guarantees mean there is nothing
-                    # to gain from detaching it, and awaiting keeps the
-                    # outcome deterministic for both callers and tests. A
-                    # failure here leaves settled=0 (already set by
-                    # close_listing above) for the settlement sweep to retry.
-                    await _settle_trait_sale(
-                        session.wallet_address, session.nft_id, session.offer_index, session.network
-                    )
-            elif outcome == "stale":
-                await loop.run_in_executor(
-                    None, _close_listing_sync, session.network, session.offer_index, "stale"
-                )
-
+        try:
+            await _advance_market_session(prefix, session, loop)
+        finally:
+            # Persist a token the advance captured even when a downstream
+            # DB write/settlement raised — the capture is already real.
+            await _persist_issued_user_token(request["user"], session)
         return web.json_response(session.to_dict())
 
     return require_market(handler)
 
 
+async def _advance_market_session(prefix: str, session: Any, loop: Any) -> None:
+    """One poll step for a list/cancel/buy session: advance the state machine
+    and apply its DB effects (split out of the status handler so the handler
+    can persist a captured push token in a finally regardless of outcome)."""
+    if prefix == "list":
+        row = await market_flow.advance_list_session(session)
+        if row is not None:
+            network = _market_network(session.listing_kind)
+            await loop.run_in_executor(None, _write_listing_row, network, row)
+    elif prefix == "cancel":
+        if await market_flow.advance_cancel_session(session):
+            await loop.run_in_executor(
+                None, _close_listing_sync, session.network, session.offer_index, "cancelled"
+            )
+    elif prefix == "buy":
+        outcome = await market_flow.advance_buy_session(session)
+        if outcome == "sold":
+            # Persist the buyer on the sold row so settlement stays
+            # recoverable even if run_deposit deletes the trait_tokens
+            # ownership row before Closet credit (CodeRabbit #129).
+            await loop.run_in_executor(
+                None,
+                _close_listing_sync,
+                session.network,
+                session.offer_index,
+                "sold",
+                session.wallet_address,
+            )
+            if session.listing_kind == "trait":
+                # Primary settlement trigger (spec §Q7): burn the sold
+                # trait token back into the buyer's Closet right away.
+                # Awaited (not fire-and-forget) — run_deposit's own
+                # fail-closed/journaling guarantees mean there is nothing
+                # to gain from detaching it, and awaiting keeps the
+                # outcome deterministic for both callers and tests. A
+                # failure here leaves settled=0 (already set by
+                # close_listing above) for the settlement sweep to retry.
+                await _settle_trait_sale(
+                    session.wallet_address, session.nft_id, session.offer_index, session.network
+                )
+        elif outcome == "stale":
+            await loop.run_in_executor(
+                None, _close_listing_sync, session.network, session.offer_index, "stale"
+            )
+        elif outcome == "onramp_confirmed":
+            # #239: the on-ramp Payment validated — the buyer now holds the
+            # BRIX. Re-verify the (unchanged) sell offer on-ledger, then build
+            # the normal accept payload and resume the standard buy flow.
+            await _continue_buy_after_onramp(session, loop)
+
+
+async def _continue_buy_after_onramp(session: Any, loop: Any) -> None:
+    """The service half of the on-ramp handshake (see market_flow's
+    ONRAMP_CONFIRMED): strict re-verify → accept payload → AWAITING_SIGNATURE.
+    A verify LOOKUP failure or an unreachable Xaman leaves the session parked
+    in ONRAMP_CONFIRMED to retry next poll (the buyer's BRIX is already in
+    their wallet; nothing is lost by waiting). A verified absence closes the
+    listing stale and fails the session listing_unavailable — the buyer keeps
+    the BRIX (no custody, no stranded funds)."""
+    try:
+        verified = await market_ops.verify_sell_offer(
+            session.nft_id,
+            session.offer_index,
+            None,
+            strict=True,
+            expect="brix",
+            expected_brix=session.amount_brix,
+        )
+    except Exception as e:
+        logging.warning(f"post-onramp verify lookup failed for offer {session.offer_index}: {e}")
+        return  # retry on the next poll; state stays ONRAMP_CONFIRMED
+    if not verified:
+        await loop.run_in_executor(
+            None, _close_listing_sync, session.network, session.offer_index, "stale"
+        )
+        session.state = market_flow.FAILED
+        session.error = "the listing was sold or cancelled while you were getting BRIX"
+        session.reason = "listing_unavailable"
+        return
+    payload = await xumm_ops.create_accept_offer_payload(
+        session.offer_index,
+        return_url=session.return_url,
+        user_token=session.push_user_token,
+        platform=memos.platform_for_surface(session.platform),
+        action=memos.ACTION_BUY,
+    )
+    if not payload:
+        return  # transient Xaman failure; retry on the next poll
+    session.payload_uuid = payload.get("uuid")
+    session.qr_url = payload["qr_url"]
+    session.xumm_url = payload["xumm_url"]
+    session.push = payload.get("push")
+    session.instruction = f"Confirm purchase for {session.amount_brix} BRIX"
+    session.state = market_flow.AWAITING_SIGNATURE
+
+
 handle_market_list_status = _make_market_status_handler("list")
 handle_market_cancel_status = _make_market_status_handler("cancel")
 handle_market_buy_status = _make_market_status_handler("buy")
+
+
+# --- Trait Shop (#217) Task 8: catalog + buy service endpoints ---
+# GET /api/shop/catalog is a public, cached, derived-price browse (lfg_core.shop
+# .catalog). POST/GET /api/shop/buy drive lfg_core.shop_flow's ShopBuySession
+# state machine (mint -> BRIX sell offer -> XUMM accept -> settle-to-Closet),
+# mirroring the market buy session shape above but keyed by wallet (`.buyer`)
+# rather than discord_id, since ShopBuySession has no platform-user identity.
+
+_SHOP_CACHE: dict[str, tuple[float, list[dict[str, Any]]]] = {}
+_SHOP_CACHE_LOCK = threading.Lock()
+_SHOP_CACHE_GEN: dict[str, int] = {}
+_SHOP_CACHE_TTL = 60.0
+
+
+def _shop_cache_put(network: str, value: list[dict[str, Any]], now_mono: float, gen: int) -> None:
+    """Mirrors _market_cache_put's insert-if-generation-unchanged discipline,
+    keyed on network only (the catalog has no `kind` dimension)."""
+    with _SHOP_CACHE_LOCK:
+        if _SHOP_CACHE_GEN.get(network, 0) != gen:
+            return
+        for k in [k for k, (ts, _) in _SHOP_CACHE.items() if now_mono - ts >= _SHOP_CACHE_TTL]:
+            del _SHOP_CACHE[k]
+        _SHOP_CACHE[network] = (now_mono, value)
+
+
+def _invalidate_shop_cache(network: str) -> None:
+    with _SHOP_CACHE_LOCK:
+        _SHOP_CACHE.pop(network, None)
+        _SHOP_CACHE_GEN[network] = _SHOP_CACHE_GEN.get(network, 0) + 1
+
+
+def _compute_shop_catalog(network: str) -> list[dict[str, Any]]:
+    """Sync work for GET /api/shop/catalog, run on an executor thread (same
+    posture as _compute_market_rows): the derived catalog from the app DB
+    (trait_rarity + shop_overrides), each row annotated with a representative
+    trait-art URL via the same helper the marketplace trait listings use."""
+    conn = sqlite3.connect(db_path.app_db_path(network))
+    try:
+        rarity.ensure_schema(conn)
+        rows = shop.catalog(conn, network)
+    finally:
+        conn.close()
+    cfg = trait_config.get_config()
+    for row in rows:
+        row["image_url"] = _trait_image_url(cfg, row["slot"], row["value"])
+    return rows
+
+
+async def handle_shop_catalog(request: web.Request) -> web.Response:
+    """Public: GET /api/shop/catalog. Empty list when the trait economy is
+    disabled (mirrors handle_market_listings' empty-page-not-403 posture for
+    a browse-only, non-transacting surface)."""
+    if not config.ECONOMY_ENABLED:
+        return web.json_response({"items": []})
+
+    network = config.ECONOMY_NETWORK
+    now_mono = time.monotonic()
+    with _SHOP_CACHE_LOCK:
+        cached = _SHOP_CACHE.get(network)
+        gen = _SHOP_CACHE_GEN.get(network, 0)
+    if cached is not None and now_mono - cached[0] < _SHOP_CACHE_TTL:
+        rows = cached[1]
+    else:
+        rows = await asyncio.get_event_loop().run_in_executor(None, _compute_shop_catalog, network)
+        _shop_cache_put(network, rows, now_mono, gen)
+    return web.json_response({"items": rows})
+
+
+def _quote_shop_trait(network: str, slot: str, value: str) -> tuple[int | None, bool]:
+    """(price, exists) for one (slot, value): price is shop.quote's result
+    (None if unknown / rarity-disabled / excluded / a price_override of None);
+    exists distinguishes "no trait_rarity rows at all" (404 unknown_trait)
+    from "rows exist but this value isn't currently purchasable" (403
+    not_purchasable) for the caller."""
+    conn = sqlite3.connect(db_path.app_db_path(network))
+    try:
+        rarity.ensure_schema(conn)
+        exists = (
+            conn.execute(
+                "SELECT 1 FROM trait_rarity WHERE network=? AND category=? AND trait=? LIMIT 1",
+                (network, slot, value),
+            ).fetchone()
+            is not None
+        )
+        price = shop.quote(conn, network, slot, value)
+        return price, exists
+    finally:
+        conn.close()
+
+
+def _build_shop_deps(network: str, platform: str) -> tuple[shop_flow.ShopDeps, sqlite3.Connection]:
+    """The real ShopDeps for a service-triggered buy: mint/offer/burn against
+    the live issuer wallet, XUMM payload builders, and an EconomyDeps built
+    the same way `economy_api.build_settlement_deps` wires settlement (shop
+    buys settle into the buyer's Closet via the same `run_deposit`). Callers
+    own the returned connection's lifetime (close it when done)."""
+    conn = nft_index.init_db(nft_index.index_db_path(network))
+    economy_store.init_economy_schema(conn)
+    shop_store.ensure_schema(conn)
+    economy_deps = economy_api.build_settlement_deps(conn)
+
+    def _app_conn_factory() -> sqlite3.Connection:
+        return sqlite3.connect(db_path.app_db_path(network))
+
+    async def _accept_payload_fn(offer_index: str, user_token: str | None = None) -> dict[str, Any]:
+        # ShopDeps.accept_payload_fn is typed non-Optional (shop_flow assigns
+        # its result straight to session.accept with no None-check); a Xaman
+        # API failure here raises into start_shop_buy's own outer try/except,
+        # which fails the session/order the same way an offer-build failure
+        # does — never a silent None assignment.
+        payload = await xumm_ops.create_accept_offer_payload(
+            offer_index,
+            user_token=user_token,
+            platform=memos.platform_for_surface(platform),
+            action=memos.ACTION_SHOP_BUY,
+        )
+        if payload is None:
+            raise RuntimeError("could not reach Xaman")
+        return payload
+
+    deps = shop_flow.ShopDeps(
+        conn=conn,
+        app_conn_factory=_app_conn_factory,
+        economy_deps=economy_deps,
+        mint_fn=lambda url, taxon, **kw: xrpl_ops.mint_nft(
+            url, taxon, config.SWAP_ISSUER_ADDRESS, **kw
+        ),
+        offer_fn=xrpl_ops.create_nft_offer,
+        burn_fn=lambda nft_id, owner: xrpl_ops.burn_nft(nft_id, owner or None),
+        payload_status_fn=xumm_ops.get_payload_status,
+        accept_payload_fn=_accept_payload_fn,
+        network=network,
+        # #238: post-settlement AMM buyback on the XRP path — BRIX
+        # currency/issuer baked in; shop_flow calls it as (value, max_xrp=...).
+        buy_and_burn_fn=lambda value, max_xrp=None: xrpl_ops.buy_and_burn(
+            config.SWAP_OFFER_CURRENCY_HEX, config.SWAP_OFFER_ISSUER, value, max_xrp=max_xrp
+        ),
+    )
+    return deps, conn
+
+
+def _prune_shop_sessions() -> None:
+    cutoff = time.time() - SESSION_RETENTION
+    terminal = {shop_flow.DONE, shop_flow.FAILED}
+    for sid, s in list(shop_sessions.items()):
+        if s.state in terminal and _shop_session_created.get(sid, 0) < cutoff:
+            del shop_sessions[sid]
+            _shop_session_created.pop(sid, None)
+
+
+@require_wallet
+async def handle_shop_buy_start(request):
+    """POST /api/shop/buy {slot, value}. Fail-closed order: 403
+    economy_disabled -> 400 malformed -> 404 unknown_trait / 403
+    not_purchasable -> 403 closet_required -> launch. The price is frozen
+    from shop.quote at this moment and carried on the session; the mint +
+    BRIX sell-offer + XUMM payload build (shop_flow.start_shop_buy) runs as a
+    background task (mirrors webapp.economy_api._schedule) so the request
+    returns immediately with a `running` session for the client to poll via
+    GET /api/shop/buy/{session_id} — the same shape returned once the
+    background task fills in `accept`."""
+    if not config.ECONOMY_ENABLED:
+        return _economy_disabled_response()
+
+    user = request["user"]
+    wallet = request["wallet"]
+    body = await request.json()
+    slot = body.get("slot")
+    value = body.get("value")
+    if not isinstance(slot, str) or not slot or not isinstance(value, str) or not value:
+        return web.json_response({"error": "slot and value are required"}, status=400)
+
+    network = config.ECONOMY_NETWORK
+    loop = asyncio.get_event_loop()
+    price, exists = await loop.run_in_executor(None, _quote_shop_trait, network, slot, value)
+    if price is None:
+        if not exists:
+            return web.json_response({"error": "unknown_trait"}, status=404)
+        return web.json_response({"error": "not_purchasable"}, status=403)
+
+    active = await loop.run_in_executor(None, _closet_active, network, wallet)
+    if not active:
+        return web.json_response({"error": "closet_required"}, status=403)
+
+    _prune_shop_sessions()
+    for s in shop_sessions.values():
+        if s.buyer == wallet and s.state not in shop_flow.TERMINAL_STATES:
+            return web.json_response(
+                {
+                    "error": "a shop purchase is already in progress",
+                    "code": "session_active",
+                    "session_id": s.id,
+                    "session": s.to_dict(),
+                },
+                status=409,
+            )
+
+    # #238 XRP fallback: silent payment-path detection against the frozen BRIX
+    # price, BEFORE the session exists (nothing is minted for an unquotable
+    # price). BRIX holders keep today's flow byte-identically; everyone else
+    # gets an XRP-denominated offer at the buffered AMM quote.
+    try:
+        pay_with, pay_amount = await brix_payment.detect_payment_path(wallet, str(price))
+    except RuntimeError:
+        return web.json_response(
+            {"error": "pricing unavailable", "code": "pricing_unavailable"}, status=503
+        )
+    price_xrp = pay_amount if pay_with == "XRP" else None
+
+    session = shop_flow.ShopBuySession(
+        buyer=wallet,
+        slot=slot,
+        value=value,
+        price_brix=price,
+        pay_with=pay_with,
+        price_xrp=price_xrp,
+        platform=_platform(user),
+        push_user_token=await _push_token(user),
+    )
+    shop_sessions[session.id] = session
+    _shop_session_created[session.id] = time.time()
+
+    deps, conn = _build_shop_deps(network, _platform(user))
+
+    async def _run_and_close() -> None:
+        try:
+            await shop_flow.start_shop_buy(session, deps)
+        except Exception as e:  # unexpected crash: ensure the session reaches a terminal state
+            if session.state != shop_flow.FAILED:
+                session.fail(f"internal error: {e}")
+        finally:
+            conn.close()
+
+    asyncio.get_event_loop().create_task(_run_and_close())
+    return web.json_response(session.to_dict())
+
+
+@require_wallet
+async def handle_shop_buy_status(request):
+    """GET /api/shop/buy/{session_id}: 404 if unknown or the session belongs
+    to a different wallet (ShopBuySession has no platform-user identity to
+    compare, so ownership is checked by `.buyer` wallet — the same identity
+    require_wallet resolved for the POST that created it). Drives
+    shop_flow.advance_shop_buy while awaiting the buyer's XUMM signature or
+    mid-settlement; a session that hasn't reached AWAITING_ACCEPT yet (the
+    background mint/offer build from the POST is still running) is returned
+    as-is with nothing to advance."""
+    session = shop_sessions.get(request.match_info["session_id"])
+    if session is None or session.buyer != request["wallet"]:
+        return web.json_response({"error": "not found"}, status=404)
+
+    if session.state in (shop_flow.AWAITING_ACCEPT, shop_flow.SETTLING):
+        network = config.ECONOMY_NETWORK
+        deps, conn = _build_shop_deps(network, session.platform)
+        try:
+            await shop_flow.advance_shop_buy(session, deps)
+        finally:
+            conn.close()
+
+    return web.json_response(session.to_dict())
 
 
 # --- Task 9 (spec §Q7): trait-sale settlement (burn sold trait -> buyer's Closet) ---
@@ -1722,12 +2339,292 @@ async def settle_pending_trait_sales() -> None:
             _write_sweep_giveup_record(offer_index, row["nft_id"], buyer)
 
 
+# Trait Shop sweep (#217): backstop for the buy flow in shop_flow.py, mirrors
+# the trait-sale settlement sweep above (same giveup-journal convention).
+_SHOP_SWEEP_MAX_ATTEMPTS = 5
+# session_id -> consecutive failed settlement sweep attempts. In-memory only,
+# same rationale as _sweep_attempts: a restart just costs a stuck order a few
+# retries rather than falsely reading as "already exhausted".
+_shop_settle_attempts: dict[str, int] = {}
+
+
+def _write_shop_sweep_giveup_record(session_id: str, nft_id: str, buyer: str) -> None:
+    """Journal (ECONOMY_RECORDS_DIR) that the shop settlement sweep is no
+    longer retrying this order. The trait token is NOT lost: in the normal
+    case it is an ordinary trait token sitting in `buyer`'s wallet and they
+    can Deposit it into their Closet manually later; if settlement has been
+    failing because a prior expiry attempt hit a transient burn error, the
+    token may instead still be issuer-held (never delivered) — either way it
+    requires manual reconciliation, not a re-burn."""
+    try:
+        os.makedirs(config.ECONOMY_RECORDS_DIR, exist_ok=True)
+        path = os.path.join(config.ECONOMY_RECORDS_DIR, f"shop-settlement-giveup-{session_id}.json")
+        with open(path, "w") as f:
+            json.dump(
+                {
+                    "session_id": session_id,
+                    "nft_id": nft_id,
+                    "buyer": buyer,
+                    "attempts": _SHOP_SWEEP_MAX_ATTEMPTS,
+                    "status": "abandoned",
+                },
+                f,
+                indent=2,
+            )
+    except Exception:
+        logging.error(
+            f"failed to write shop sweep giveup record for {session_id}: {traceback.format_exc()}"
+        )
+
+
+def _write_shop_expiry_reversal_giveup_record(
+    session_id: str, slot: str, value: str, delta: int, reason: str
+) -> None:
+    """Journal (ECONOMY_RECORDS_DIR) an intended `supply_changes` reversal row
+    that failed to write after a successful expiry burn. The burn is real and
+    irreversible — the order is still closed `expired` so the sweep never
+    re-touches it — but the -1 supply row itself never landed, so an admin
+    must re-apply it manually from this record to keep the conservation
+    ledger accurate."""
+    try:
+        os.makedirs(config.ECONOMY_RECORDS_DIR, exist_ok=True)
+        path = os.path.join(
+            config.ECONOMY_RECORDS_DIR, f"shop-expiry-reversal-giveup-{session_id}.json"
+        )
+        with open(path, "w") as f:
+            json.dump(
+                {
+                    "session_id": session_id,
+                    "kind": "burn",
+                    "slot": slot,
+                    "value": value,
+                    "delta": delta,
+                    "reason": reason,
+                    "status": "needs_admin_reapply",
+                },
+                f,
+                indent=2,
+            )
+    except Exception:
+        logging.error(
+            f"failed to write shop expiry reversal giveup record for {session_id}: "
+            f"{traceback.format_exc()}"
+        )
+
+
+async def _expire_shop_order(order: dict[str, Any], network: str) -> None:
+    """Expire one stale `pending_accept` Trait Shop order: cancel the orphaned
+    sell offer (best-effort — an already-gone offer is not an error, the
+    expiration alone already made it unacceptable), then issuer-burn the
+    unclaimed trait token and record the matching `supply_changes` reversal.
+
+    Fail-closed rescue: if the burn does not definitively succeed — most
+    likely because the buyer's accept actually landed moments before the
+    sweep ran, moving the token out of the issuer wallet — the order is
+    marked `accepted` instead of `expired` so the settlement pass picks it up
+    next. A token the buyer paid for must never be burned."""
+    session_id = order["session_id"]
+    offer_index = order.get("offer_index")
+    nft_id = order.get("nft_id")
+    now_ts = int(time.time())
+
+    if offer_index:
+        try:
+            await xrpl_ops.cancel_nft_offer(offer_index)
+        except Exception:
+            logging.warning(
+                f"shop expiry: offer cancel failed for {session_id}: {traceback.format_exc()}"
+            )
+
+    conn = nft_index.init_db(nft_index.index_db_path(network))
+    try:
+        economy_store.init_economy_schema(conn)
+        if not nft_id:
+            # Nothing was ever minted for this order (e.g. it stalled before
+            # the mint completed) — nothing to burn, just close it out.
+            shop_store.update_order(conn, session_id, now_ts=now_ts, status="expired")
+            return
+
+        try:
+            burn_hash = await xrpl_ops.burn_nft(nft_id)
+        except Exception:
+            logging.error(f"shop expiry burn crashed for {session_id}: {traceback.format_exc()}")
+            burn_hash = None
+
+        if not burn_hash:
+            # Could not confirm the issuer still holds the token (most likely
+            # a landed accept) — rescue rather than risk burning a sold
+            # token. The settlement sweep retries it as an accepted order.
+            shop_store.update_order(conn, session_id, now_ts=now_ts, status="accepted")
+            return
+
+        reason = f"shop expiry {session_id}"
+        try:
+            economy_store.record_supply_change(
+                conn,
+                kind="burn",
+                edition=None,
+                body_value="",
+                body_class="",
+                trait_deltas={f"{order['slot']}|{order['value']}": -1},
+                actor="shop",
+                reason=reason,
+            )
+        except Exception:
+            logging.exception(
+                f"shop expiry {session_id}: burn succeeded (nft_id={nft_id}) but the "
+                f"supply reversal row failed to write for slot={order.get('slot')} "
+                f"value={order.get('value')} — ledger and supply mirror are now out of "
+                "sync; journaling for admin re-apply"
+            )
+            _write_shop_expiry_reversal_giveup_record(
+                session_id, order.get("slot", ""), order.get("value", ""), -1, reason
+            )
+        # The token is burned regardless of whether the reversal row landed —
+        # the order must never be re-swept (a second burn attempt would find
+        # nothing and the rescue rule would misroute it to `accepted`).
+        shop_store.update_order(conn, session_id, now_ts=now_ts, status="expired")
+    finally:
+        conn.close()
+
+
+async def _settle_shop_order(order: dict[str, Any], network: str) -> None:
+    """Retry settlement (run_deposit into the buyer's Closet + the shop_count
+    pricing bump) for one `accepted` Trait Shop order. Mirrors
+    `_settle_trait_sale`: on success -> `settled`; after
+    `_SHOP_SWEEP_MAX_ATTEMPTS` consecutive failures -> journal + `failed`
+    (the token is never lost — it stays wherever it last landed, in the
+    buyer's wallet for a manual Deposit or issuer-held if a prior expiry
+    attempt hit a transient burn error)."""
+    session_id = order["session_id"]
+    if _shop_settle_attempts.get(session_id, 0) >= _SHOP_SWEEP_MAX_ATTEMPTS:
+        return  # already given up + journaled on a previous pass
+    nft_id = order.get("nft_id")
+    buyer = order["buyer"]
+    now_ts = int(time.time())
+    if not nft_id:
+        return  # nothing minted; not a settleable order
+
+    conn = nft_index.init_db(nft_index.index_db_path(network))
+    try:
+        economy_store.init_economy_schema(conn)
+        deps = economy_api.build_settlement_deps(conn)
+        dep_session = economy_flow.DepositSession(owner=buyer, nft_id=nft_id)
+        try:
+            await economy_flow.run_deposit(dep_session, deps)
+            settled = dep_session.state == economy_flow.DONE
+        except Exception:
+            logging.error(
+                f"shop settlement sweep crashed for {session_id}: {traceback.format_exc()}"
+            )
+            settled = False
+    finally:
+        conn.close()
+
+    if settled:
+        conn = nft_index.init_db(nft_index.index_db_path(network))
+        try:
+            shop_store.update_order(conn, session_id, now_ts=now_ts, status="settled")
+            # #238: the sweep's settlement-retry path owes the same one-shot
+            # post-settlement AMM buyback the poll path fires — the shared
+            # run_buyback_if_due is best-effort, exception-swallowing (incl.
+            # the buyback_done flag write, so a failed write can never
+            # propagate and leave the burn re-armed), and guarded by the
+            # durable buyback_done flag so poll + sweep can never double-fire.
+            await shop_flow.run_buyback_if_due(
+                conn,
+                session_id=session_id,
+                pay_with=order.get("pay_with"),
+                price_brix=order["price_brix"],
+                price_xrp=order.get("price_xrp"),
+                buyback_done=order.get("buyback_done"),
+                buy_and_burn_fn=lambda value, max_xrp=None: xrpl_ops.buy_and_burn(
+                    config.SWAP_OFFER_CURRENCY_HEX,
+                    config.SWAP_OFFER_ISSUER,
+                    value,
+                    max_xrp=max_xrp,
+                ),
+                now_ts_fn=lambda: now_ts,
+            )
+        finally:
+            conn.close()
+        try:
+            app_conn = sqlite3.connect(db_path.app_db_path(network))
+            try:
+                rarity.increment_shop_count(app_conn, network, order["slot"], order["value"])
+            finally:
+                app_conn.close()
+        except Exception:
+            logging.warning(
+                f"shop settlement sweep: shop_count increment failed for {session_id} "
+                f"(order settled; pricing feedback skipped): {traceback.format_exc()}"
+            )
+        _shop_settle_attempts.pop(session_id, None)
+        return
+
+    _shop_settle_attempts[session_id] = _shop_settle_attempts.get(session_id, 0) + 1
+    if _shop_settle_attempts[session_id] >= _SHOP_SWEEP_MAX_ATTEMPTS:
+        logging.warning(
+            f"shop settlement sweep giving up on {session_id} (nft {nft_id}, buyer "
+            f"{buyer}) after {_SHOP_SWEEP_MAX_ATTEMPTS} attempts"
+        )
+        _write_shop_sweep_giveup_record(session_id, nft_id, buyer)
+        conn = nft_index.init_db(nft_index.index_db_path(network))
+        try:
+            shop_store.update_order(conn, session_id, now_ts=now_ts, status="failed")
+        finally:
+            conn.close()
+
+
+async def sweep_shop_orders() -> None:
+    """Backstop for the Trait Shop buy flow (shop_flow.py): expire stale
+    unaccepted offers (burn back + supply reversal) and retry settlement for
+    accepted orders that stalled after the buyer signed. Runs on the trait
+    economy network (config.ECONOMY_NETWORK), same as the trait-sale
+    settlement sweep."""
+    network = config.ECONOMY_NETWORK
+    conn = nft_index.init_db(nft_index.index_db_path(network))
+    try:
+        shop_store.ensure_schema(conn)
+        cutoff = int(time.time()) - config.SHOP_OFFER_TTL_SECONDS
+        expiring = shop_store.orders_pending_expiry(conn, cutoff)
+    finally:
+        conn.close()
+
+    for order in expiring:
+        try:
+            await _expire_shop_order(order, network)
+        except Exception:
+            logging.error(
+                f"shop expiry sweep crashed for {order['session_id']}: {traceback.format_exc()}"
+            )
+
+    conn = nft_index.init_db(nft_index.index_db_path(network))
+    try:
+        shop_store.ensure_schema(conn)
+        unsettled = shop_store.orders_unsettled(conn)
+    finally:
+        conn.close()
+
+    for order in unsettled:
+        try:
+            await _settle_shop_order(order, network)
+        except Exception:
+            logging.error(
+                f"shop settlement sweep crashed for {order['session_id']}: {traceback.format_exc()}"
+            )
+
+
 async def _settlement_sweep_loop() -> None:
     while True:
         try:
             await settle_pending_trait_sales()
         except Exception:
             logging.error(f"settlement sweep loop crashed: {traceback.format_exc()}")
+        try:
+            await sweep_shop_orders()
+        except Exception:
+            logging.error(f"shop sweep loop crashed: {traceback.format_exc()}")
         await asyncio.sleep(_SWEEP_PERIOD_SECONDS)
 
 
@@ -1777,13 +2674,14 @@ def require_economy(handler):
 @require_economy
 @require_wallet
 async def handle_market_trait_list_start(request):
-    """POST /api/market/trait/list {slot, value, price_xrp}: the composite
+    """POST /api/market/trait/list {slot, value, price_brix}: the composite
     "sell a trait out of my Closet" wizard — the existing Phase-4 Extract flow
     (Xaman signature 1) followed by the plain Q4 List flow on the
     freshly-owned token (Xaman signature 2), driven together as one polled
     TraitSellSession (see market_flow.advance_trait_sell_session).
 
-    price_xrp is validated FIRST (same guard as handle_market_list_start) so a
+    price_brix (#239: trait listings are BRIX-denominated) is validated FIRST
+    (same guard as handle_market_list_start) so a
     bad price never starts an extract. Extract's own preconditions (active
     Closet, the (slot, value) trait actually loose in it) surface as
     economy_api.EconomyError -> 400 with no session started; a failure inside
@@ -1795,21 +2693,21 @@ async def handle_market_trait_list_start(request):
     body = await request.json()
     slot = body.get("slot")
     value = body.get("value")
-    price_xrp = body.get("price_xrp")
-    if not slot or not value or not isinstance(price_xrp, str):
+    price_brix = body.get("price_brix")
+    if not slot or not value or not isinstance(price_brix, str):
         return web.json_response(
-            {"error": "slot, value, and price_xrp (string) are required"}, status=400
+            {"error": "slot, value, and price_brix (string) are required"}, status=400
         )
     try:
-        amount_drops = int(market_ops.xrp_to_drops_str(price_xrp))
+        amount_brix = market_ops.validate_brix_value(price_brix)
     except Exception as e:
         # Broad on purpose: see handle_market_list_start's identical guard.
-        return web.json_response({"error": f"bad price_xrp: {e}"}, status=400)
+        return web.json_response({"error": f"bad price_brix: {e}"}, status=400)
 
     if _use_market_mock():
         try:
             return web.json_response(
-                mock_market.INSTANCE.start_trait_list(wallet, slot, value, amount_drops)
+                mock_market.INSTANCE.start_trait_list(wallet, slot, value, amount_brix)
             )
         except mock_market.MockMarketError as e:
             return web.json_response({"error": str(e)}, status=400)
@@ -1824,9 +2722,10 @@ async def handle_market_trait_list_start(request):
             status=409,
         )
 
+    push_user_token = await _push_token(user)
     try:
         extract_ws = await economy_api.start_extract(
-            user["id"], wallet, {"slot": slot, "value": value}
+            user["id"], wallet, {"slot": slot, "value": value}, user_token=push_user_token
         )
     except economy_api.EconomyError as e:
         return web.json_response({"error": str(e)}, status=400)
@@ -1841,9 +2740,10 @@ async def handle_market_trait_list_start(request):
         wallet_address=wallet,
         slot=slot,
         value=value,
-        amount_drops=amount_drops,
+        amount_brix=amount_brix,
         extract_session=extract_ws.inner,
         platform=_platform(user),
+        push_user_token=push_user_token,
     )
     market_sessions[session.id] = session
     return web.json_response(session.to_dict())
@@ -1871,10 +2771,15 @@ async def handle_market_trait_list_status(request):
     ):
         return web.json_response({"error": "not found"}, status=404)
 
-    row = await market_flow.advance_trait_sell_session(session)
-    if row is not None:
-        network = _market_network("trait")
-        await asyncio.get_event_loop().run_in_executor(None, _write_listing_row, network, row)
+    try:
+        row = await market_flow.advance_trait_sell_session(session)
+        if row is not None:
+            network = _market_network("trait")
+            await asyncio.get_event_loop().run_in_executor(None, _write_listing_row, network, row)
+    finally:
+        # Persist a token the advance captured even when the listing write
+        # raised — the capture is already real.
+        await _persist_issued_user_token(request["user"], session)
     return web.json_response(session.to_dict())
 
 
@@ -1887,7 +2792,9 @@ async def handle_closet(request):
         return web.json_response(mock_economy.INSTANCE.create_closet(request["wallet"]))
     user = request["user"]
     try:
-        result = await economy_api.start_closet(user["id"], request["wallet"])
+        result = await economy_api.start_closet(
+            user["id"], request["wallet"], user_token=await _push_token(user)
+        )
     except Exception as e:
         logging.error(f"start_closet failed for {user['id']}: {e}")
         return web.json_response({"error": "could not create or retrieve Closet"}, status=502)
@@ -1928,12 +2835,15 @@ async def handle_register(request):
     closet_result: dict[str, Any] | None = None
     if config.ECONOMY_ENABLED and not config.WEBAPP_DEV_MODE:
         try:
-            closet_result = await economy_api.start_closet(user["id"], wallet)
+            closet_result = await economy_api.start_closet(
+                user["id"], wallet, user_token=await _push_token(user)
+            )
         except Exception as e:
             logging.warning(f"post-register ensure_closet failed for {wallet}: {e}")
     resp: dict[str, Any] = {"ok": True, "wallet": wallet}
     if closet_result is not None:
         resp["closet_accept"] = closet_result.get("accept")
+        resp["closet_accept_push"] = closet_result.get("accept_push")
     return web.json_response(resp)
 
 
@@ -1974,6 +2884,35 @@ async def handle_mint_start(request):
         push_user_token=push_user_token,
     )
     mint_sessions[session.id] = session
+    # #226: single mints previously checked no collection cap at all. Take a
+    # durable 1-unit headroom reservation (atomic with every concurrent bulk
+    # clamp and single mint) before any payment UX; zero grant — including a
+    # store error, which fails closed for new grants — answers the same 409
+    # collection_full the bulk endpoint returns. Placed after the insert
+    # above so the one-active-session guard window stays await-free; the
+    # FAILED mark frees the slot for _prune_sessions.
+    granted = await asyncio.to_thread(
+        headroom.try_reserve,
+        db_path.app_db_path(config.XRPL_NETWORK),
+        f"mint:{session.id}",
+        1,
+        config.XRPL_NETWORK,
+    )
+    if granted < 1:
+        if session.state == mint_flow.AWAITING_PAYMENT:
+            # Guard like #262: a concurrent cancel during the reserve await is
+            # already terminal — don't overwrite CANCELLED with FAILED.
+            session.state = mint_flow.FAILED
+            session.error = "collection_full"
+        session.mark_published()  # deliberate refusal, not a pipeline failure
+        return web.json_response({"error": "collection_full"}, status=409)
+    session.headroom_reserved = True
+    if session.state != mint_flow.AWAITING_PAYMENT:
+        # A concurrent cancel won the reserve race: settle the reservation
+        # just taken and stop before pushing a payable Xaman request for a
+        # cancelled session (#226 review).
+        mint_flow.settle_headroom(session)
+        return web.json_response(session.to_dict())
     # Detect the payment path (LFGO holder vs XRP newcomer) and create the
     # XUMM sign request before the first QR is rendered (after the insert
     # above, so the one-active-session guard stays race-free). Bounded so a
@@ -1986,9 +2925,330 @@ async def handle_mint_start(request):
     except Exception as e:
         logging.warning(f"prepare_payment failed; falling back to XRP path: {e}")
     session.ensure_payment_fallback()
-    # Keep the task handle so /cancel can stop the payment wait (#141)
-    session.task = asyncio.create_task(mint_flow.run_mint_session(session))
+    # #262 fail-fast: XUMM never created the payment sign request (429
+    # backoff / outage) — payment_uuid is None and the only link is the
+    # static xaman.app/detect fallback, which Xaman cannot parse as a sign
+    # request. Launching run_mint_session would strand the user on a dead
+    # pay screen for the full 300s payment wait (prod incident 2026-07-17).
+    # Mark the session terminal (FAILED is in TERMINAL_STATES, so the
+    # one-active-session slot frees and _prune_sessions evicts it), spawn
+    # no task, and answer 503/502 like the market handlers do. Push-delivered
+    # payloads always carry a uuid, so the push path is never blocked.
+    # Known tradeoff: this also defers #196 mint-credit redemption (an LFGO
+    # holder's unconsumed prior payment, normally consumed by
+    # wait_for_payment's allow_credit backfill with no new signature) until
+    # XUMM recovers — delay-only, since MINT_CREDIT_TTL_SECONDS (30d) far
+    # outlasts any outage and the next successful mint start redeems it.
+    if session.payment_uuid is None:
+        # #226: no task will ever run for this session — settle (release) its
+        # headroom reservation here. No-op if a concurrent cancel already did.
+        mint_flow.settle_headroom(session)
+        if session.state == mint_flow.AWAITING_PAYMENT:
+            # The error log lives inside this branch: a concurrent cancel
+            # during prepare_payment is already terminal and user-initiated —
+            # not a XUMM failure worth an error-level line.
+            logging.error(
+                f"mint session {session.id}: payment payload never created (XUMM unavailable)"
+            )
+            session.state = mint_flow.FAILED
+            session.error = "signing service is busy — please try again shortly"
+        # Publish mint.failed so the admin-log channel still sees blocked
+        # attempts during a XUMM outage (pre-#262 the 300s PAYMENT_TIMEOUT
+        # published one; the 503'd client never polls, so this is the only
+        # publish site). Idempotent — a concurrent cancel's mark_published
+        # keeps a deliberate cancel silent, as everywhere else.
+        try:
+            await _publish_mint_terminal(session)
+        except Exception as e:
+            logging.error(f"fail-fast mint terminal publish failed for session {session.id}: {e}")
+        return _xumm_unavailable_response()
+    if session.state != mint_flow.AWAITING_PAYMENT:
+        # Cancelled (or otherwise terminalized) while this handler awaited
+        # prepare_payment — even with a successfully-created payload,
+        # launching the watch would resurrect a session the user backed out
+        # of (run_mint_session's terminal entry guard is the second line of
+        # defense; same pattern as bulk). settle_headroom covers the window
+        # where cancel() ran before headroom_reserved was set (its own
+        # settle was a no-op then); idempotent otherwise (#226).
+        mint_flow.settle_headroom(session)
+        return web.json_response(session.to_dict())
+    # Keep the task handle so /cancel can stop the payment wait (#141).
+    # The wrapper publishes the terminal firehose event server-side, so a
+    # client that never polls again (webview killed mid-sign, #216) still
+    # announces to the X poster / Telegram consumers.
+    session.task = asyncio.create_task(_run_mint_session_and_publish(session))
     return web.json_response(session.to_dict())
+
+
+@require_wallet
+async def handle_bulk_mint_start(request):
+    """Start a bulk mint job (#215): one K x payment, then a background task
+    mints K units in sequence. Mirrors handle_mint_start's ordering — every
+    suspending value (request body parse, push token, return URL, and the
+    threaded headroom clamp) is resolved BEFORE the one-active-job check so
+    no await sits between the check and the insert below (the guard is only
+    race-free while that window stays await-free). prepare_payment() is
+    deliberately awaited AFTER the insert — a concurrent request already
+    sees this job as active by then."""
+    user = request["user"]
+    _prune_sessions(bulk_sessions, bulk_mint_flow.TERMINAL_STATES)
+
+    try:
+        body = await request.json()
+    except Exception:
+        body = {}
+    raw_qty = body.get("quantity")
+    # Reject bool/float/string quantities: int(True) == 1, int(1.5) == 1, and
+    # int("3") == 3 would all silently coerce into a "valid" request. Only a
+    # real (non-bool) int is accepted.
+    if not isinstance(raw_qty, int) or isinstance(raw_qty, bool):
+        return web.json_response({"error": "invalid_quantity"}, status=400)
+    qty = raw_qty
+
+    platform = _platform(user)
+    return_url = await _request_return_url(request)
+    push_user_token = await _push_token(user)
+
+    if qty < 1:
+        return web.json_response({"error": "invalid_quantity"}, status=400)
+
+    job = bulk_mint_flow.BulkMintJob(
+        discord_id=user["id"],
+        wallet_address=request["wallet"],
+        requested_qty=qty,
+        platform=platform,
+        push_user_token=push_user_token,
+        return_url=return_url,
+    )
+    try:
+        # to_thread like the single-mint reserve at handle_mint_start (#226
+        # review): try_reserve is a write transaction with a 5s busy timeout
+        # plus a cross-DB prune scan — far heavier than the loop-called
+        # mint_credits.add_credit precedent; run on the loop it would freeze
+        # every request for the whole busy wait under app-DB contention.
+        # Safe here: the await lands BEFORE the one-active-job check, so the
+        # check->insert window below stays await-free; a same-user duplicate
+        # that also clamps loses the active check and releases its grant in
+        # the 409 branch below (no leak).
+        await asyncio.to_thread(job.clamp_to_headroom)
+    except bulk_mint_flow.CollectionFull:
+        return web.json_response({"error": "collection_full"}, status=409)
+
+    # One active job per user (no awaits between this check and the insert
+    # below, so it cannot race)
+    active = _active_session(bulk_sessions, bulk_mint_flow.TERMINAL_STATES, user["id"], platform)
+    if active:
+        # clamp_to_headroom already reserved for the rejected job (#226) —
+        # give it back, it will never run.
+        bulk_mint_flow.release_job_headroom(job)
+        return web.json_response(
+            {"error": "bulk mint already in progress", "session": active.to_dict()}, status=409
+        )
+    bulk_sessions[job.id] = job
+
+    try:
+        await asyncio.wait_for(job.prepare_payment(), timeout=8)
+    except Exception as e:
+        # Never leave a non-terminal job with no task in bulk_sessions — that
+        # would permanently wedge this user's bulk slot (every future POST
+        # would 409 "already in progress" until a service restart). Mark it
+        # terminal so _prune_sessions evicts it and _active_session skips it.
+        # Covers both a hung XUMM call (asyncio.TimeoutError) and any other
+        # failure -- bulk has no ensure_payment_fallback like single-mint, so
+        # marking FAILED and letting the user retry is the correct behavior.
+        logging.error(f"bulk job {job.id} prepare_payment failed: {e}")
+        job.state = bulk_mint_flow.FAILED
+        job.error = str(e)
+        bulk_mint_flow.release_job_headroom(job)  # terminal before launch (#226)
+        # Defensive: the AWAITING_PAYMENT persist below only runs on success,
+        # so there should be no record — but a failed start must never leave
+        # a zombie file for the startup sweep to resurrect (#228).
+        bulk_mint_flow.delete_record(job.id)
+        return web.json_response({"error": "payment_setup_failed"}, status=500)
+
+    if job.state != bulk_mint_flow.AWAITING_PAYMENT:
+        # Cancelled (or otherwise terminalized) while this handler awaited
+        # prepare_payment — the id is visible via /active during that window,
+        # so a concurrent cancel is legal. cancel() already dropped any
+        # record; persisting or launching the watch here would resurrect a
+        # job the user backed out of (run_bulk_mint_job's terminal entry
+        # guard is the second line of defense).
+        return web.json_response(job.to_dict())
+
+    # Durable AWAITING_PAYMENT (#228): persisted only now, with payment_uuid/
+    # link/created_at captured, so a crash after the user was shown the
+    # payment request resumes the ledger watch (load_all_resumable) instead
+    # of taking money with no record. Persist BEFORE launching the watch so
+    # the record exists for the whole window it covers. Fail-closed before
+    # money moves: with no usable payment link or no durable record, refuse
+    # the request instead of showing a payment request a crash would orphan
+    # — nothing has been charged yet, so failing here costs nothing.
+    if not job.payment_link or not bulk_mint_flow.persist(job):
+        logging.error(
+            f"bulk job {job.id}: unusable payment setup "
+            f"(link={'set' if job.payment_link else 'missing'}, persist failed otherwise)"
+        )
+        job.state = bulk_mint_flow.FAILED
+        job.error = "payment_setup_failed"
+        bulk_mint_flow.release_job_headroom(job)  # terminal before launch (#226)
+        bulk_mint_flow.delete_record(job.id)
+        return web.json_response({"error": "payment_setup_failed"}, status=500)
+    job.task = asyncio.create_task(bulk_mint_flow.run_bulk_mint_job(job))
+    return web.json_response(job.to_dict())
+
+
+@require_auth
+async def handle_bulk_mint_status(request):
+    job = bulk_sessions.get(request.match_info["session_id"])
+    if (
+        not job
+        or job.discord_id != request["user"]["id"]
+        or getattr(job, "platform", "discord") != _platform(request["user"])
+    ):
+        return web.json_response({"error": "not found"}, status=404)
+    return web.json_response(job.to_dict())
+
+
+@require_auth
+async def handle_bulk_mint_active(request):
+    """The caller's live (non-terminal) bulk job, or null. Kept SEPARATE from
+    /api/mint/active: that endpoint serves the existing single-mint
+    resumeMint() client, which has no knowledge of the bulk job shape
+    (units[] etc.) — returning a bulk job there would break it.
+
+    An AWAITING_PAYMENT job may carry payment_link: null — the job is
+    registered before prepare_payment finishes (the race-free active-guard
+    ordering), meaning "still preparing, keep polling" (see
+    BulkMintJob.to_dict), not an error."""
+    user = request["user"]
+    job = _active_session(
+        bulk_sessions, bulk_mint_flow.TERMINAL_STATES, user["id"], _platform(user)
+    )
+    return web.json_response({"session": job.to_dict() if job else None})
+
+
+@require_auth
+async def handle_bulk_mint_cancel(request):
+    """Back out of the bulk pay screen (mirrors handle_mint_cancel/#141): only
+    legal while AWAITING_PAYMENT — once paid, fulfillment must run to
+    completion. Cancelling frees the per-user bulk slot immediately."""
+    job = bulk_sessions.get(request.match_info["session_id"])
+    if (
+        not job
+        or job.discord_id != request["user"]["id"]
+        or getattr(job, "platform", "discord") != _platform(request["user"])
+    ):
+        return web.json_response({"error": "not found"}, status=404)
+    if job.state in bulk_mint_flow.TERMINAL_STATES:
+        return web.json_response(job.to_dict())  # already over — no-op
+    if not job.cancel():
+        return web.json_response({"error": "job is past payment"}, status=409)
+    job.mark_published()
+    return web.json_response(job.to_dict())
+
+
+@require_auth
+async def handle_bulk_mint_unit_accept(request):
+    """Build a XUMM accept payload for ONE offered bulk unit (#215 UI), on
+    click only — a 10-unit job must never open 10 XUMM payloads up front
+    (open-payload cap, #260). Repeat clicks mint a fresh payload; the previous
+    one expires via _create_xumm_payload's standard 15-min expire."""
+    job = bulk_sessions.get(request.match_info["session_id"])
+    if (
+        not job
+        or job.discord_id != request["user"]["id"]
+        or getattr(job, "platform", "discord") != _platform(request["user"])
+    ):
+        return web.json_response({"error": "not found"}, status=404)
+    raw_index = request.match_info["index"]
+    # isascii() guard: isdigit() alone accepts Unicode digits like "²" that
+    # int() then rejects with ValueError — an unhandled 500 (Greptile P1).
+    if not (raw_index.isascii() and raw_index.isdigit()):  # only plain non-negative ints
+        return web.json_response({"error": "invalid_unit"}, status=400)
+    index = int(raw_index)
+    if index >= len(job.units):
+        return web.json_response({"error": "invalid_unit"}, status=400)
+    unit = job.units[index]
+    # offer_id None while OFFERED = the gift offer was already accepted
+    # (delivered while the service was down) — treat as claimed, nothing to sign.
+    if unit.state != bulk_mint_flow.OFFERED or not unit.offer_id:
+        return web.json_response({"error": "unit_not_offered"}, status=409)
+    return_url = await _request_return_url(request)
+    payload = await xumm_ops.create_accept_offer_payload(
+        unit.offer_id,
+        return_url=return_url,
+        user_token=job.push_user_token,
+        platform=memos.platform_for_surface(job.platform),
+    )
+    if not payload:
+        return web.json_response({"error": "payload_failed"}, status=502)
+    return web.json_response(
+        {"qr": payload["qr_url"], "link": payload["xumm_url"], "push": payload.get("push")}
+    )
+
+
+async def resume_bulk_jobs() -> None:
+    """On startup, re-attach and resume any awaiting-payment/paid/fulfilling
+    bulk jobs so a service restart mid-fulfillment doesn't strand paid units
+    (or, for awaiting-payment records, a payment signed just before the
+    crash)."""
+    jobs = bulk_mint_flow.load_all_resumable()
+    # #226: reconstruct the headroom-reservation overlay BEFORE relaunching.
+    # Reservations from a dead process are rebuilt from the durable job
+    # records — a job that crashed between clamp and its first persist left
+    # no record, so its orphan rows are dropped, as are all mint:* rows
+    # (single-mint sessions are in-memory only).
+    #
+    # INVARIANT (#226 review — do not weaken): rebuild's orphan DELETE must
+    # never race a fresh reservation. Two things guarantee that today:
+    #   1. _start_bulk_resume awaits this coroutine to completion inside
+    #      aiohttp's on_startup, which finishes BEFORE the site binds — no
+    #      request (and therefore no try_reserve, loop-side or threaded) can
+    #      exist while the rebuild runs.
+    #   2. There is NO await between load_all_resumable(), the `keep`
+    #      snapshot, and the rebuild calls, and rebuild runs synchronously on
+    #      the loop — never via asyncio.to_thread (a past variant did that
+    #      and reservations granted mid-rebuild were silently wiped: bulk
+    #      jobs converted every paid unit to credits, single mints ran
+    #      uncounted).
+    # The `keep` list is belt-and-braces for any future non-startup caller;
+    # note it CANNOT protect a bulk clamp in flight (the job only enters
+    # bulk_sessions after its threaded clamp returns), so ordering — not
+    # keep — is the load-bearing guarantee.
+    keep = [
+        f"mint:{s.id}" for s in mint_sessions.values() if s.state not in mint_flow.TERMINAL_STATES
+    ] + [
+        f"bulk:{j.id}"
+        for j in bulk_sessions.values()
+        if j.state not in bulk_mint_flow.TERMINAL_STATES
+    ]
+    by_net: dict[str, list[tuple[str, int, list[str]]]] = {config.XRPL_NETWORK: []}
+    for job in jobs:
+        specs = by_net.setdefault(job.network, [])
+        snap = bulk_mint_flow.headroom_snapshot(job)
+        if snap is not None:
+            specs.append(snap)
+    for net, specs in by_net.items():
+        headroom.rebuild(db_path.app_db_path(net), specs, keep=keep)
+    for job in jobs:
+        bulk_sessions[job.id] = job
+        job.task = asyncio.create_task(bulk_mint_flow.run_bulk_mint_job(job))
+
+
+async def _start_bulk_resume(app: web.Application) -> None:
+    """aiohttp on_startup hook: run the resume sweep TO COMPLETION before the
+    site starts serving (#226 review) — aiohttp only binds the listener after
+    on_startup finishes, so no request can take a fresh headroom reservation
+    while resume_bulk_jobs' rebuild deletes orphans (the keep-set alone cannot
+    see claimants created mid-rebuild; see the invariant note there). The
+    sweep itself is fast local work (a job-dir scan + one sqlite transaction);
+    per-job fulfillment still runs as background tasks created inside
+    resume_bulk_jobs. Never fails startup: a broken resume must not down the
+    whole API."""
+    try:
+        await resume_bulk_jobs()
+    except Exception:
+        logging.exception("bulk resume sweep failed at startup")
 
 
 def _index_roster(conn: sqlite3.Connection, wallet: str) -> list[dict[str, Any]] | None:
@@ -2248,8 +3508,22 @@ async def handle_swap_start(request):
         push_user_token=push_user_token,
     )
     swap_sessions[session.id] = session
-    asyncio.get_event_loop().create_task(swap_flow.run_swap_session(session))
+    # Keep the task handle so /cancel can stop the fee-payment wait
+    # (mirror of mint #141).
+    session.task = asyncio.get_event_loop().create_task(swap_flow.run_swap_session(session))
     return web.json_response(session.to_dict())
+
+
+@require_auth
+async def handle_mint_active(request):
+    """The caller's live (non-terminal) mint session, or null. Discord mobile
+    kills/reloads the Activity webview when the user app-switches to Xaman to
+    sign the payment; the relaunched client has lost its in-memory session id,
+    so it calls this on boot to re-attach to the mint still running here
+    instead of dumping the user back to the home screen mid-mint."""
+    user = request["user"]
+    session = _active_session(mint_sessions, mint_flow.TERMINAL_STATES, user["id"], _platform(user))
+    return web.json_response({"session": session.to_dict() if session else None})
 
 
 @require_auth
@@ -2264,15 +3538,19 @@ async def handle_mint_status(request):
     # Refresh the QR-scanned flags so the client can swap the QR for a
     # spinner the moment Xaman opens the payload (issue #22).
     await mint_flow.update_scan_state(session)
-    if session.state in mint_flow.TERMINAL_STATES and not getattr(session, "_published", False):
-        session._published = True
-        ok = session.state not in (mint_flow.FAILED, mint_flow.PAYMENT_TIMEOUT)
-        await publish_event(
-            "mint.completed" if ok else "mint.failed",
-            enrich_minter_identity(session.platform, session.discord_id, session.wallet_address),
-            session.wallet_address,
-            session.to_dict(),
-        )
+    await _persist_issued_user_token(request["user"], session)
+    # Terminal publish is primarily the session task's job now (#216 — see
+    # _run_mint_session_and_publish); this idempotent call covers poll-first
+    # ordering and retries a publish the task path failed. Guarded the same
+    # way as that task path: _publish_mint_terminal only marks the session
+    # published AFTER a successful publish_event, so a bus failure here must
+    # not raise out of the request handler — the client still needs their
+    # terminal status back, and the session stays unpublished for a later
+    # poll (or the task path) to retry.
+    try:
+        await _publish_mint_terminal(session)
+    except Exception as e:
+        logging.error(f"status-poll mint terminal publish failed for session {session.id}: {e}")
     return web.json_response(session.to_dict())
 
 
@@ -2328,6 +3606,14 @@ def _first_result_image(session: Any) -> str | None:
     return None
 
 
+def _first_result_video(session: Any) -> str | None:
+    for r in getattr(session, "results", None) or []:
+        vid = r.get("video_url")
+        if vid:
+            return str(vid)
+    return None
+
+
 @require_auth
 async def handle_swap_status(request):
     session = swap_sessions.get(request.match_info["session_id"])
@@ -2344,9 +3630,73 @@ async def handle_swap_status(request):
         user_id=session.discord_id,
         platform=session.platform,
         image_url=_first_result_image(session),
+        video_url=_first_result_video(session),
         success_states={swap_flow.OFFERS_READY, swap_flow.DONE},
         fail_states={swap_flow.FAILED, swap_flow.PAYMENT_TIMEOUT},
     )
+    return web.json_response(session.to_dict())
+
+
+# Bound on the XUMM payload rebuild in handle_swap_regenerate (same 8s the
+# mint start/regenerate paths use); module-level so tests can shrink it.
+SWAP_REGEN_TIMEOUT = 8.0
+
+
+def _swap_session_for(request):
+    """The caller's swap session for the path's session_id, or None on any
+    ownership/platform mismatch (identical guard to handle_swap_status)."""
+    session = swap_sessions.get(request.match_info["session_id"])
+    if (
+        not session
+        or session.discord_id != request["user"]["id"]
+        or getattr(session, "platform", "discord") != _platform(request["user"])
+    ):
+        return None
+    return session
+
+
+@require_auth
+async def handle_swap_regenerate(request):
+    """Issue a fresh fee-payment QR for a swap whose XUMM payload expired
+    before the user could scan it (mirror of mint issue #22 — the swap fee
+    screen previously offered no way to refresh a stale QR)."""
+    session = _swap_session_for(request)
+    if not session:
+        return web.json_response({"error": "not found"}, status=404)
+    if session.state != swap_flow.AWAITING_PAYMENT:
+        return web.json_response({"error": "session is past payment"}, status=409)
+    # Unlike the mint pay screen (whose static-link fallback keeps its 200
+    # honest), a swallowed failure here would echo the STALE link with a 200
+    # and the button would appear dead — surface it instead.
+    try:
+        ok = await asyncio.wait_for(session.regenerate_payment(), timeout=SWAP_REGEN_TIMEOUT)
+    except asyncio.TimeoutError:
+        return web.json_response({"error": "payment QR regeneration timed out"}, status=504)
+    except Exception as e:
+        logging.warning(f"swap regenerate_payment failed: {e}")
+        ok = False
+    if not ok:
+        return web.json_response({"error": "could not build a new payment QR"}, status=502)
+    return web.json_response(session.to_dict())
+
+
+@require_auth
+async def handle_swap_cancel(request):
+    """Back out of the swap fee screen (mirror of mint issue #141): mark an
+    awaiting_payment session terminal so the per-user swap lock releases
+    immediately, and stop its background payment wait. Cancelling an
+    already-terminal session is a safe no-op; a session past payment (fee
+    taken) returns 409."""
+    session = _swap_session_for(request)
+    if not session:
+        return web.json_response({"error": "not found"}, status=404)
+    if session.state in swap_flow.TERMINAL_STATES:
+        return web.json_response(session.to_dict())  # already over — no-op
+    if not session.cancel():
+        return web.json_response({"error": "session is past payment"}, status=409)
+    # A deliberate cancel is not a swap outcome: suppress the terminal
+    # swap.completed/swap.failed publish a late status poll would fire.
+    session.mark_published()
     return web.json_response(session.to_dict())
 
 
@@ -2364,6 +3714,75 @@ def _prune_signin_payloads():
             del signin_payloads[uuid]
 
 
+# Per-user cap on SignIn payload CREATION (XUMM caps payload creates at ~30/min
+# app-wide). In the 2026-07-17 429 incident a handful of /register attempts
+# fanned out into 20+ creates via client-side retries; nothing here said no.
+SIGNIN_CREATE_MAX = 3  # payload creations…
+SIGNIN_CREATE_WINDOW = 60.0  # …per user per window
+SIGNIN_REUSE_SECONDS = 120.0  # serve an existing pending payload this long
+_signin_create_hits: dict[tuple[str, str], list[float]] = {}
+
+
+def _signin_create_limited(platform: str, user_id: str) -> bool:
+    now = time.time()
+    key = (platform, user_id)
+    hits = [t for t in _signin_create_hits.get(key, []) if now - t < SIGNIN_CREATE_WINDOW]
+    if len(hits) >= SIGNIN_CREATE_MAX:
+        _signin_create_hits[key] = hits
+        return True
+    hits.append(now)
+    _signin_create_hits[key] = hits
+    # Bookkeeping must not grow forever across distinct users.
+    if len(_signin_create_hits) > 1000:
+        for k in [k for k, v in _signin_create_hits.items() if not v or now - v[-1] > 300]:
+            del _signin_create_hits[k]
+    return False
+
+
+def _signin_create_refund(platform: str, user_id: str) -> None:
+    """Give back the slot consumed for a create that never yielded a payload
+    (e.g. a plain XUMM outage) — otherwise a few failed attempts lock the
+    user out for the rest of the window without any quota actually spent."""
+    hits = _signin_create_hits.get((platform, user_id))
+    if hits:
+        hits.pop()
+
+
+def _pending_signin_for(platform: str, user_id: str, link_intent: bool) -> tuple[str, Any] | None:
+    """A still-fresh unsigned SignIn payload already issued to this user, so a
+    re-tap of /register (or a surface retry) re-serves it instead of minting
+    another XUMM payload."""
+    now = time.time()
+    for uuid, rec in signin_payloads.items():
+        if (
+            rec["platform"] == platform
+            and rec["user_id"] == user_id
+            and bool(rec.get("link")) == link_intent
+            and rec.get("signin_link")
+            and now - rec["created_at"] < SIGNIN_REUSE_SECONDS
+        ):
+            # Never re-serve a payload already known signed/expired (the ws
+            # watcher keeps the cache fresh): a signed one would fast-re-login
+            # the previous wallet instead of offering a fresh sign-in.
+            s = xumm_ops.cached_status(uuid)
+            if s and (s.get("signed") or s.get("expired")):
+                continue
+            return uuid, rec
+    return None
+
+
+def _xumm_unavailable_response():
+    """502 for a plain XUMM outage; 503 + Retry-After while XUMM is rate
+    limiting us — surfaces treat 503/429 as terminal (no retry storm)."""
+    if xumm_ops.rate_limited():
+        return web.json_response(
+            {"error": "Xaman is rate limiting us — try again shortly", "code": "rate_limited"},
+            status=503,
+            headers={"Retry-After": "30"},
+        )
+    return web.json_response({"error": "could not reach Xaman"}, status=502)
+
+
 @require_auth
 async def handle_signin_start(request):
     """Create a XUMM SignIn payload; the user scans it in Xaman and their
@@ -2378,15 +3797,30 @@ async def handle_signin_start(request):
     except Exception:
         body = {}
     link_intent = bool(body.get("link"))
+    platform = _platform(user)
+    # Same sign-in already pending? Re-serve it — a fresh payload would only
+    # burn XUMM create quota and orphan the QR the user may be looking at.
+    pending = _pending_signin_for(platform, user["id"], link_intent)
+    if pending:
+        uuid, rec = pending
+        return web.json_response({"uuid": uuid, "signin_link": rec["signin_link"]})
+    if _signin_create_limited(platform, user["id"]):
+        return web.json_response(
+            {"error": "too many sign-in attempts", "code": "rate_limited"},
+            status=429,
+            headers={"Retry-After": str(int(SIGNIN_CREATE_WINDOW))},
+        )
     payload = await xumm_ops.create_signin_payload(return_url=await _request_return_url(request))
     if not payload:
-        return web.json_response({"error": "could not reach Xaman"}, status=502)
+        _signin_create_refund(platform, user["id"])
+        return _xumm_unavailable_response()
     signin_payloads[payload["uuid"]] = {
-        "platform": _platform(user),
+        "platform": platform,
         "user_id": user["id"],
         "name": user["name"],
         "link": link_intent,
         "created_at": time.time(),
+        "signin_link": payload["xumm_url"],
     }
     return web.json_response({"uuid": payload["uuid"], "signin_link": payload["xumm_url"]})
 
@@ -2448,14 +3882,125 @@ async def handle_signin_status(request):
     return web.json_response({"state": "opened" if s["opened"] else "pending"})
 
 
+# --- Standalone web surface signin (spec 2026-07-16) -------------------------
+# Client-callable (same trust posture as /api/telegram/auth): bootstraps a
+# session where the wallet IS the identity — platform="web",
+# platform_user_id=<classic address>. The payload uuid (128-bit, single-use,
+# short-TTL) is the bearer secret; no pre-auth ownership check is possible,
+# which is the same trust model as the XUMM deep link itself.
+
+web_signin_payloads: dict[str, Any] = {}
+WEB_SIGNIN_RATE_MAX = 5  # payload creations…
+WEB_SIGNIN_RATE_WINDOW = 60.0  # …per IP per window (protects the XUMM API)
+_web_signin_hits: dict[str, list[float]] = {}
+
+
+def _client_ip(request) -> str:
+    # The funnel / tailscale serve fronts the service, so the TCP peer is
+    # localhost and the proxy APPENDS the real client to X-Forwarded-For.
+    # Only the RIGHTMOST entry is trustworthy — leftmost values are caller-
+    # controlled and would let a spoofer rotate fake IPs past the rate limit.
+    fwd = request.headers.get("X-Forwarded-For", "")
+    if fwd:
+        return fwd.split(",")[-1].strip()
+    return request.remote or "?"
+
+
+def _web_rate_limited(ip: str) -> bool:
+    now = time.time()
+    hits = [t for t in _web_signin_hits.get(ip, []) if now - t < WEB_SIGNIN_RATE_WINDOW]
+    if len(hits) >= WEB_SIGNIN_RATE_MAX:
+        _web_signin_hits[ip] = hits
+        return True
+    hits.append(now)
+    _web_signin_hits[ip] = hits
+    return False
+
+
+def _prune_web_signin_payloads():
+    now = time.time()
+    cutoff = now - SIGNIN_TTL
+    for uuid, rec in list(web_signin_payloads.items()):
+        if rec["created_at"] < cutoff:
+            del web_signin_payloads[uuid]
+    # Rate-limit bookkeeping must not grow forever across distinct IPs.
+    for ip, hits in list(_web_signin_hits.items()):
+        if all(now - t >= WEB_SIGNIN_RATE_WINDOW for t in hits):
+            del _web_signin_hits[ip]
+
+
+async def handle_web_signin_start(request):
+    """Create a XUMM SignIn payload for the standalone web surface — no session
+    required (this IS how a web session begins)."""
+    if _web_rate_limited(_client_ip(request)):
+        return web.json_response(
+            {"error": "too many sign-in attempts", "code": "rate_limited"}, status=429
+        )
+    _prune_web_signin_payloads()
+    # Only an allowlisted Origin becomes the Xaman post-sign bounce target —
+    # never a caller-supplied URL.
+    origin = request.headers.get("Origin", "")
+    return_url = {"app": origin, "web": origin} if origin in config.WEB_ALLOWED_ORIGINS else None
+    payload = await xumm_ops.create_signin_payload(return_url=return_url)
+    if not payload:
+        return _xumm_unavailable_response()
+    web_signin_payloads[payload["uuid"]] = {"created_at": time.time()}
+    return web.json_response({"uuid": payload["uuid"], "signin_link": payload["xumm_url"]})
+
+
+async def handle_web_signin_status(request):
+    uuid = request.match_info["payload_uuid"]
+    if uuid not in web_signin_payloads:
+        return web.json_response({"error": "not found"}, status=404)
+    s = await xumm_ops.get_payload_status(uuid)
+    if not s:
+        return web.json_response({"error": "could not reach Xaman"}, status=502)
+    if s["signed"] and s["account"] and is_valid_classic_address(s["account"]):
+        wallet = s["account"]
+        # A wallet already known from another surface keeps its display handle;
+        # a brand-new one gets a readable shortened address.
+        handle = await asyncio.to_thread(identity_store.handle_for_wallet, wallet)
+        name = handle or f"{wallet[:6]}…{wallet[-4:]}"
+        if not await asyncio.to_thread(identity_store.link, "web", wallet, name, wallet):
+            return web.json_response({"error": "identity link failed"}, status=500)
+        # #135: capture the push token so later sign requests push to Xaman.
+        if s.get("user_token"):
+            await asyncio.to_thread(identity_store.set_user_token, "web", wallet, s["user_token"])
+        del web_signin_payloads[uuid]
+        token = make_session_token({"id": wallet, "name": name, "platform": "web"})
+        return web.json_response(
+            {
+                "state": "signed",
+                "wallet": wallet,
+                "session_token": token,
+                "user": {"id": wallet, "username": name},
+            }
+        )
+    if s["expired"]:
+        del web_signin_payloads[uuid]
+        return web.json_response({"state": "expired"})
+    return web.json_response({"state": "opened" if s["opened"] else "pending"})
+
+
 async def handle_config(request):
-    """Public config the frontend needs before auth (client_id, dev flag)."""
+    """Public config the frontend needs before auth (client_id, dev flag).
+
+    `public_share_base_url` / `bithomp_base_url` (#41 T9) are how the "Share
+    on X" buttons learn the base for the shared `url=` param — NEVER from
+    `location.origin` (inside the Activity the page is served from Discord's
+    *.discordsays.com sandbox proxy, not our public host; see
+    handle_nft_card's docstring for the same rule applied server-side).
+    """
     return web.json_response(
         {
             "client_id": config.DISCORD_CLIENT_ID,
             "dev_mode": config.WEBAPP_DEV_MODE,
             "economy_enabled": config.ECONOMY_ENABLED,
             "market_enabled": config.MARKET_ENABLED,
+            "bulk_mint_ui": config.BULK_MINT_UI_ENABLED,
+            "bulk_mint_max": config.BULK_MINT_MAX,
+            "public_share_base_url": config.PUBLIC_SHARE_BASE_URL,
+            "bithomp_base_url": _bithomp_base_url(),
         }
     )
 
@@ -2478,6 +4023,344 @@ async def handle_health(request):
     return web.json_response(
         {"ok": True, "active_sessions": sum(detail.values()), "detail": detail}
     )
+
+
+_OG_NOT_FOUND_HTML = (
+    '<!doctype html><meta charset="utf-8"><title>Not found</title><p>NFT not found.</p>'
+)
+
+# LFG-table trait dict (lowercase keys, get_nft_data()'s shape) in a fixed
+# display order; on-chain-index attribute lists (fallback when there's no LFG
+# row, e.g. an Assemble-minted rebirth edition) have no equivalent renaming —
+# see lfg_core/nft_index.py's OnchainNft.attributes vs get_nft_data()'s
+# "traits" dict shape mismatch (#41 §6.2 recon).
+_OG_TRAIT_SLOT_ORDER = (
+    "background",
+    "back",
+    "body",
+    "clothing",
+    "eyes",
+    "eyebrows",
+    "mouth",
+    "hat",
+    "accessory",
+)
+_OG_TRAIT_LABELS = {
+    "background": "Background",
+    "back": "Back",
+    "body": "Body",
+    "clothing": "Clothing",
+    "eyes": "Eyes",
+    "eyebrows": "Eyebrows",
+    "mouth": "Mouth",
+    "hat": "Hat",
+    "accessory": "Accessory",
+}
+_OG_TRAITS_SHOWN = 3
+
+
+def _og_is_placeholder(value: Any) -> bool:
+    return value is None or str(value).strip().lower() in ("", "none")
+
+
+def _og_traits_summary(
+    lfg_row: dict[str, Any] | None, onchain: "nft_index.OnchainNft | None"
+) -> str:
+    """2-3 'Label: Value' trait pairs for og:description. The on-chain
+    index's raw metadata attributes (insertion order) are preferred — swaps
+    NEVER update the LFG table while the index stays fresh (the swap flow
+    stamps it at the burn point of no return since #211; the listener keeps
+    it fresh otherwise — NFTokenModify + burn-remint), so the LFG row can
+    describe pre-swap traits. LFG-row traits (fixed slot order) are the fallback when the
+    index record carries no usable attributes (e.g. unreadable-metadata
+    backfill rows). Deliberately no rarity dependency, unlike the x_bot
+    poster's rarest-first ranking (#41 §6.2: "keep it simple"). `onchain`'s
+    `attributes_json` is externally-sourced NFT metadata (IPFS/CDN) — a
+    non-dict element (string/null/list) must be skipped, not crash this
+    PUBLIC endpoint."""
+    pairs: list[tuple[str, str]] = []
+    if onchain is not None:
+        for attr in onchain.attributes:
+            if not isinstance(attr, dict):
+                continue
+            trait_type = attr.get("trait_type")
+            value = attr.get("value")
+            if trait_type and not _og_is_placeholder(value):
+                pairs.append((str(trait_type), str(value)))
+    if not pairs:
+        lfg_traits = (lfg_row or {}).get("traits") or {}
+        for slot in _OG_TRAIT_SLOT_ORDER:
+            value = lfg_traits.get(slot)
+            if not _og_is_placeholder(value):
+                pairs.append((_OG_TRAIT_LABELS[slot], str(value)))
+    shown = pairs[:_OG_TRAITS_SHOWN]
+    return " · ".join(f"{label}: {value}" for label, value in shown)
+
+
+def _bithomp_base_url() -> str:
+    """Network-resolved bithomp host, with no `nft_id` — also handed to the
+    client via /api/config (#41 T9) as the fallback share target when
+    PUBLIC_SHARE_BASE_URL is unset, so the client never has to know
+    XRPL_NETWORK itself."""
+    return "https://test.bithomp.com" if config.IS_TESTNET else "https://bithomp.com"
+
+
+def _og_bithomp_url(nft_id: str) -> str:
+    return f"{_bithomp_base_url()}/en/nft/{nft_id}"
+
+
+_BOT_UA_MARKERS = ("twitterbot", "facebookexternalhit", "slackbot", "discordbot", "telegrambot")
+
+
+def _share_ref(request: Any) -> str | None:
+    """?ref=<sharer wallet> — shape-validated, never trusted further."""
+    ref = (request.query.get("ref") or "").strip()
+    return ref if ref and is_valid_classic_address(ref) else None
+
+
+def _is_share_bot(user_agent: str) -> bool:
+    ua = user_agent.lower()
+    return any(m in ua for m in _BOT_UA_MARKERS)
+
+
+_SHARE_CARD_DIR = "share_cards"
+_RENDER_TIMEOUT_S = 60
+_RENDER_SCRIPT = str(
+    pathlib.Path(__file__).resolve().parent.parent / "scripts/share_card/render.mjs"
+)
+_share_card_locks: dict[int, asyncio.Lock] = {}
+
+
+def _share_card_path(number: int, image_url: str) -> pathlib.Path:
+    key = hashlib.sha1(image_url.encode("utf-8")).hexdigest()[:12]
+    return pathlib.Path(_SHARE_CARD_DIR) / f"{number}-{key}.png"
+
+
+def _share_card_url(number: int) -> str:
+    """Absolute card-PNG URL, or '' when it can't be built/served."""
+    if not (config.SHARE_CARD_RENDER_ENABLED and config.PUBLIC_SHARE_BASE_URL):
+        return ""
+    return f"{config.PUBLIC_SHARE_BASE_URL}/nft/{number}/card.png"
+
+
+async def _render_share_card(number: int, art_path: pathlib.Path, out_path: pathlib.Path) -> None:
+    """Run the node renderer; raises on any failure (caller falls back)."""
+    proc = await asyncio.create_subprocess_exec(
+        "node",
+        _RENDER_SCRIPT,
+        "--token",
+        str(number),
+        "--avatar",
+        str(art_path),
+        "--out",
+        str(out_path),
+        stdout=asyncio.subprocess.DEVNULL,
+        stderr=asyncio.subprocess.PIPE,
+    )
+    try:
+        _, stderr = await asyncio.wait_for(proc.communicate(), timeout=_RENDER_TIMEOUT_S)
+    except asyncio.TimeoutError:
+        proc.kill()
+        raise RuntimeError(f"share-card render timed out for #{number}") from None
+    if proc.returncode != 0 or not out_path.exists():
+        raise RuntimeError(
+            f"share-card render failed for #{number}: {stderr.decode(errors='replace')[:300]}"
+        )
+
+
+async def handle_nft_card_png(request: Any) -> Any:
+    """Branded 1200x630 share-card PNG for twitter:image. Cache-on-disk keyed
+    by (number, art URL) so swaps/remints self-invalidate; ANY failure falls
+    back to a 302 at the raw art (X's crawler follows image redirects), so
+    this endpoint can never make sharing worse than the pre-card behavior."""
+    raw_number = request.match_info.get("number", "")
+    try:
+        number = int(raw_number)
+    except (TypeError, ValueError):
+        return web.HTTPNotFound()
+
+    lfg_row = get_nft_data(number)
+    conn = nft_index.init_db(nft_index.index_db_path(config.XRPL_NETWORK))
+    try:
+        onchain = nft_index.nft_by_number(conn, number)
+    finally:
+        conn.close()
+    if onchain is None:
+        return web.HTTPNotFound()
+    image_url = _og_fetchable_image_url(onchain.image) or _og_fetchable_image_url(
+        (lfg_row or {}).get("image_url")
+    )
+    if not image_url:
+        return web.HTTPNotFound()
+
+    cached = _share_card_path(number, image_url)
+    if cached.exists():
+        return web.Response(body=cached.read_bytes(), content_type="image/png")
+
+    if not _img_url_allowed(image_url):
+        return web.HTTPFound(image_url)
+
+    lock = _share_card_locks.setdefault(number, asyncio.Lock())
+    async with lock:
+        if cached.exists():  # rendered while we waited
+            return web.Response(body=cached.read_bytes(), content_type="image/png")
+        try:
+            art_body, _ctype = await _fetch_cdn(image_url)
+            cached.parent.mkdir(parents=True, exist_ok=True)
+            with tempfile.NamedTemporaryFile(suffix=".png", delete=False) as art_f:
+                art_f.write(art_body)
+                art_path = pathlib.Path(art_f.name)
+            tmp_out = cached.with_suffix(".tmp.png")
+            try:
+                await _render_share_card(number, art_path, tmp_out)
+                os.replace(tmp_out, cached)
+            finally:
+                art_path.unlink(missing_ok=True)
+                tmp_out.unlink(missing_ok=True)
+        except Exception:
+            logging.getLogger(__name__).warning(
+                "share-card render fell back to raw art for #%s", number, exc_info=True
+            )
+            return web.HTTPFound(image_url)
+    return web.Response(body=cached.read_bytes(), content_type="image/png")
+
+
+def _og_fetchable_image_url(url: str | None) -> str:
+    """A twitter:image/og:image value must be crawlable over plain HTTP(S) —
+    legacy mainnet editions carry ipfs:// (or other non-http scheme) URIs in
+    their on-chain metadata, which X's crawler cannot fetch. Returns url
+    unchanged if it's http(s), else "" so the caller can fall back or omit
+    the image tags entirely."""
+    if url and url.startswith(("http://", "https://")):
+        return url
+    return ""
+
+
+async def handle_nft_card(request: Any) -> Any:
+    """Public, unauthenticated GET /nft/{number} — a server-rendered
+    OG/Twitter share card (twitter:card=summary_large_image, twitter:image,
+    og:title/description, a visible bithomp link). Exists for X's crawler
+    and for humans clicking a share link, not for the Activity iframe.
+
+    Liveness is decided by the on-chain index, never by LFG-row presence
+    alone: the dress-up economy's Harvest burn never touches the LFG table
+    (only the legacy Discord admin burn deletes rows), so a stale LFG row can
+    outlive the token it describes. Unknown edition, no live on-chain token
+    (burned, or never actually minted) -> a clean 404, no stack trace.
+
+    Any absolute self-URL (og:url, canonical) is built ONLY from
+    config.PUBLIC_SHARE_BASE_URL, never from the request's Host header (which
+    is unstable across ingress paths — Discord's *.discordsays.com proxy vs.
+    the direct Tailscale Funnel .ts.net/lfg path); when unset, og:url/
+    canonical are omitted entirely rather than guessing.
+    """
+    raw_number = request.match_info.get("number", "")
+    try:
+        number = int(raw_number)
+    except (TypeError, ValueError):
+        return web.HTTPNotFound(text=_OG_NOT_FOUND_HTML, content_type="text/html")
+
+    lfg_row = get_nft_data(number)
+
+    conn = nft_index.init_db(nft_index.index_db_path(config.XRPL_NETWORK))
+    try:
+        onchain = nft_index.nft_by_number(conn, number)
+    finally:
+        conn.close()
+
+    if onchain is None:
+        return web.HTTPNotFound(text=_OG_NOT_FOUND_HTML, content_type="text/html")
+
+    ref_wallet = _share_ref(request)
+    user_agent = request.headers.get("User-Agent", "")
+    try:
+        share_clicks.record_click(
+            db_path.app_db_path(),
+            number,
+            ref_wallet,
+            _is_share_bot(user_agent),
+            user_agent,
+        )
+    except Exception:  # noqa: BLE001 — logging must never break the card
+        logging.getLogger(__name__).warning("share click log failed", exc_info=True)
+
+    # On-chain index FIRST, stale-able LFG row as fallback: swaps never
+    # update the LFG table (the swap flow stamps the index at the burn point
+    # of no return since #211; the listener keeps it fresh otherwise — modify
+    # + burn-remint), so an LFG-row-first card would show pre-swap art and a
+    # bithomp link to the BURNED pre-swap token.
+    image_url = _og_fetchable_image_url(onchain.image) or _og_fetchable_image_url(
+        (lfg_row or {}).get("image_url")
+    )
+    nft_id = onchain.nft_id or (lfg_row or {}).get("nft_id") or ""
+    title = f"LFGO #{number}"
+    traits_summary = _og_traits_summary(lfg_row, onchain)
+    description = traits_summary or f"{config.NFT_COLLECTION_NAME} #{number} on the XRPL."
+    bithomp_url = _og_bithomp_url(nft_id)
+
+    esc_title = escape(title, quote=True)
+    esc_description = escape(description, quote=True)
+    esc_image = escape(image_url, quote=True)
+    esc_bithomp = escape(bithomp_url, quote=True)
+    card_png_url = _share_card_url(number)
+    tag_image = (card_png_url if image_url else "") or image_url
+    esc_tag_image = escape(tag_image, quote=True)
+
+    meta_tags = [
+        '<meta charset="utf-8">',
+        f"<title>{esc_title}</title>",
+        '<meta name="twitter:card" content="summary_large_image">',
+        f'<meta name="twitter:title" content="{esc_title}">',
+        f'<meta name="twitter:description" content="{esc_description}">',
+        f'<meta property="og:title" content="{esc_title}">',
+        f'<meta property="og:description" content="{esc_description}">',
+    ]
+    if tag_image:
+        meta_tags.append(f'<meta name="twitter:image" content="{esc_tag_image}">')
+        meta_tags.append(f'<meta property="og:image" content="{esc_tag_image}">')
+    if config.PUBLIC_SHARE_BASE_URL:
+        page_url = escape(f"{config.PUBLIC_SHARE_BASE_URL}/nft/{number}", quote=True)
+        meta_tags.append(f'<meta property="og:url" content="{page_url}">')
+        meta_tags.append(f'<link rel="canonical" href="{page_url}">')
+
+    body_image = (
+        f'<img src="{esc_image}" alt="{esc_title}" style="max-width:100%;">' if image_url else ""
+    )
+    if config.SHARE_FORWARD_URL:
+        # Human click-through: JS-only forward into the webapp. The crawler
+        # doesn't execute JS, so the per-NFT card tags above still render;
+        # an HTTP redirect here would card the destination instead. The
+        # validated ref rides along so the webapp can stash it (#41 follow-on).
+        _sep = "&" if "?" in config.SHARE_FORWARD_URL else "?"
+        forward_url = config.SHARE_FORWARD_URL + (f"{_sep}ref={ref_wallet}" if ref_wallet else "")
+        esc_forward = escape(forward_url, quote=True)
+        js_forward = json.dumps(forward_url).replace("/", "\\/")
+        body_html = (
+            '<div style="min-height:100vh;display:flex;flex-direction:column;'
+            "align-items:center;justify-content:center;background:#0b0b12;"
+            'color:#fff;font-family:sans-serif;text-align:center;margin:0;">'
+            + f"<h1>{esc_title}</h1>"
+            + f'<p><a href="{esc_forward}" style="color:#9ecbff;">'
+            + "Open Let&#x27;s Effing Go &#x2192;</a></p>"
+            + f'<p><a href="{esc_bithomp}" style="color:#666;">View on Bithomp</a></p>'
+            + "</div>"
+            + f"<script>location.replace({js_forward});</script>"
+        )
+    else:
+        body_html = (
+            f"<h1>{esc_title}</h1>"
+            + body_image
+            + f"<p>{esc_description}</p>"
+            + f'<p><a href="{esc_bithomp}">View on Bithomp</a></p>'
+        )
+    html_doc = (
+        "<!doctype html><html><head>"
+        + "".join(meta_tags)
+        + "</head><body>"
+        + body_html
+        + "</body></html>"
+    )
+    return web.Response(text=html_doc, content_type="text/html")
 
 
 async def handle_qr(request):
@@ -2513,6 +4396,34 @@ def _img_url_allowed(url: str) -> bool:
         and parsed.hostname is not None
         and parsed.hostname.endswith(config.IMG_PROXY_ALLOWED_HOST_SUFFIXES)
     )
+
+
+def _range_response(request: web.Request, body: bytes, ctype: str) -> web.Response:
+    """Byte-range-aware response for /api/img bodies (already fully buffered).
+
+    iOS WebKit's media loader probes with `Range: bytes=0-1` and refuses to
+    play progressive mp4 unless the server answers 206 with a Content-Range —
+    a 200-full-body answer leaves an animated NFT's <video> frozen on its
+    poster (#250). Only the single-range `bytes=` forms browsers actually send
+    are honored; a malformed Range header is ignored (200, per RFC 9110)."""
+    headers = {"Cache-Control": "public, max-age=86400", "Accept-Ranges": "bytes"}
+    total = len(body)
+    m = re.fullmatch(r"bytes=(\d*)-(\d*)", request.headers.get("Range", "").strip())
+    if m and (m.group(1) or m.group(2)):
+        if m.group(1):
+            start = int(m.group(1))
+            end = min(int(m.group(2)), total - 1) if m.group(2) else total - 1
+        else:  # suffix form (bytes=-N): the last N bytes
+            start = max(total - int(m.group(2)), 0)
+            end = total - 1
+        if start >= total or start > end:
+            headers["Content-Range"] = f"bytes */{total}"
+            return web.Response(status=416, headers=headers)
+        headers["Content-Range"] = f"bytes {start}-{end}/{total}"
+        return web.Response(
+            status=206, body=body[start : end + 1], content_type=ctype, headers=headers
+        )
+    return web.Response(body=body, content_type=ctype, headers=headers)
 
 
 async def handle_img(request):
@@ -2565,9 +4476,7 @@ async def handle_img(request):
         archived = await asyncio.to_thread(_archive_read)
         if archived:
             body, ctype = archived
-            return web.Response(
-                body=body, content_type=ctype, headers={"Cache-Control": "public, max-age=86400"}
-            )
+            return _range_response(request, body, ctype)
     except Exception as e:
         logging.warning(f"image archive lookup failed for {url}: {e!r}")
     url = swap_meta.resolve_ipfs(url)
@@ -2579,9 +4488,7 @@ async def handle_img(request):
         logging.error(f"Image proxy fetch failed for {url}: {e}")
         return web.json_response({"error": "image fetch failed"}, status=502)
     # Mint/swap outputs get unique CDN basenames, so they are safe to cache.
-    return web.Response(
-        body=body, content_type=ctype, headers={"Cache-Control": "public, max-age=86400"}
-    )
+    return _range_response(request, body, ctype)
 
 
 async def handle_layer(request):
@@ -2639,7 +4546,7 @@ def _economy_post(kind, start_coro, mock_call):
                 {"error": "an economy action is already in progress"}, status=409
             )
         try:
-            ws = await start_coro(user["id"], request["wallet"], body)
+            ws = await start_coro(user["id"], request["wallet"], body, await _push_token(user))
         except economy_api.EconomyError as e:
             return web.json_response({"error": str(e)}, status=400)
         except (KeyError, ValueError) as e:
@@ -2656,29 +4563,52 @@ def _economy_post(kind, start_coro, mock_call):
 
 handle_equip_start = _economy_post(
     "equip",
-    lambda uid, w, b: economy_api.start_equip(uid, w, b["nft_id"], b["slot"], b["value"]),
+    lambda uid, w, b, tok: economy_api.start_equip(
+        uid, w, b["nft_id"], b["slot"], b["value"], user_token=tok
+    ),
     lambda w, b: mock_economy.INSTANCE.equip(w, b["nft_id"], b["slot"], b["value"]),
 )
 handle_harvest_start = _economy_post(
     "harvest",
-    lambda uid, w, b: economy_api.start_harvest(uid, w, b["nft_id"]),
+    lambda uid, w, b, tok: economy_api.start_harvest(uid, w, b["nft_id"], user_token=tok),
     lambda w, b: mock_economy.INSTANCE.harvest(w, b["nft_id"]),
 )
 handle_assemble_start = _economy_post(
     "assemble",
-    lambda uid, w, b: economy_api.start_assemble(uid, w, int(b["edition"]), b["chosen"]),
+    lambda uid, w, b, tok: economy_api.start_assemble(
+        uid, w, int(b["edition"]), b["chosen"], user_token=tok
+    ),
     lambda w, b: mock_economy.INSTANCE.assemble(w, int(b["edition"]), b["chosen"]),
 )
 handle_extract_start = _economy_post(
     "extract",
-    lambda uid, w, b: economy_api.start_extract(uid, w, b),
+    lambda uid, w, b, tok: economy_api.start_extract(uid, w, b, user_token=tok),
     lambda w, b: mock_economy.INSTANCE.extract(w, b),
 )
 handle_deposit_start = _economy_post(
     "deposit",
-    lambda uid, w, b: economy_api.start_deposit(uid, w, b),
+    lambda uid, w, b, tok: economy_api.start_deposit(uid, w, b, user_token=tok),
     lambda w, b: mock_economy.INSTANCE.deposit(w, b),
 )
+
+
+async def handle_assemble_prefill(request):
+    """Server-picked assemble proposal for the Build panel's + tile — the
+    client can't judge body affinity, so it must not auto-fill the set itself."""
+    if not config.ECONOMY_ENABLED:
+        return _economy_disabled_response()
+    if config.WEBAPP_DEV_MODE:
+        try:
+            return web.json_response(mock_economy.INSTANCE.assemble_prefill(request["wallet"]))
+        except Exception as e:
+            return web.json_response({"error": str(e)}, status=400)
+    conn = economy_api.open_conn()
+    try:
+        return web.json_response(await economy_api.assemble_prefill(conn, request["wallet"]))
+    except economy_api.EconomyError as e:
+        return web.json_response({"error": str(e)}, status=400)
+    finally:
+        conn.close()
 
 
 def _make_economy_status_handler(prefix: str):
@@ -2760,6 +4690,29 @@ async def handle_index(request):
 
 
 @web.middleware
+async def cors_mw(request, handler):
+    # Standalone web surface (spec 2026-07-16): the GitHub-Pages-hosted client
+    # calls this API cross-origin. Dark by default — with WEB_ALLOWED_ORIGINS
+    # unset (or the Origin not allowlisted) responses are byte-identical to
+    # today, so Discord/Telegram/dev surfaces are untouched. Auth rides the
+    # Authorization header, never cookies, so no Allow-Credentials.
+    origin = request.headers.get("Origin", "")
+    allowed = bool(origin) and origin in config.WEB_ALLOWED_ORIGINS
+    if allowed and request.method == "OPTIONS":
+        # Preflight: answer here — no handler owns OPTIONS routes.
+        resp = web.Response(status=204)
+        resp.headers["Access-Control-Allow-Methods"] = "GET, POST, DELETE, OPTIONS"
+        resp.headers["Access-Control-Allow-Headers"] = "Authorization, Content-Type"
+        resp.headers["Access-Control-Max-Age"] = "3600"
+    else:
+        resp = await handler(request)
+    if allowed:
+        resp.headers["Access-Control-Allow-Origin"] = origin
+        resp.headers.add("Vary", "Origin")
+    return resp
+
+
+@web.middleware
 async def no_cache_mw(request, handler):
     # The Activity is served behind Discord's caching proxy; without this an
     # updated frontend (index.html / app.js / vendored SDK) keeps serving stale
@@ -2771,12 +4724,19 @@ async def no_cache_mw(request, handler):
 
 
 def create_app() -> web.Application:
-    app = web.Application(middlewares=[no_cache_mw])
+    app = web.Application(middlewares=[cors_mw, no_cache_mw])
     identity_store.ensure_identities_table()
     free_mint.ensure_tables()
     identity_store.migrate_users_to_identities()
     app.router.add_get("/api/config", handle_config)
     app.router.add_get("/api/health", handle_health)
+    # Public OG/Twitter share card (#41 PR-3) — no /api prefix (it's a share
+    # link, not an API call). Registered before add_static("/", CLIENT_DIR)
+    # below: aiohttp dispatches routes in registration order, and a static
+    # mount at the root could otherwise intercept a path segment that also
+    # exists as a file.
+    app.router.add_get("/nft/{number}/card.png", handle_nft_card_png)
+    app.router.add_get("/nft/{number}", handle_nft_card)
     app.router.add_post("/api/token", handle_token)
     app.router.add_post("/api/session", handle_session)
     app.router.add_post("/api/telegram/auth", handle_telegram_auth)
@@ -2784,11 +4744,26 @@ def create_app() -> web.Application:
     app.router.add_get("/api/account", handle_account)
     app.router.add_post("/api/register", handle_register)
     app.router.add_post("/api/mint", handle_mint_start)
+    # /active must register BEFORE /{session_id}: aiohttp dispatches in
+    # registration order, and the dynamic route would swallow it as an id.
+    app.router.add_get("/api/mint/active", handle_mint_active)
+    # Bulk mint (#215) routes must also register BEFORE /{session_id} for the
+    # same reason — "bulk" would otherwise be swallowed as a session id.
+    app.router.add_post("/api/mint/bulk", handle_bulk_mint_start)
+    app.router.add_get("/api/mint/bulk/active", handle_bulk_mint_active)
+    app.router.add_post("/api/mint/bulk/{session_id}/cancel", handle_bulk_mint_cancel)
+    app.router.add_post(
+        "/api/mint/bulk/{session_id}/units/{index}/accept", handle_bulk_mint_unit_accept
+    )
+    app.router.add_get("/api/mint/bulk/{session_id}", handle_bulk_mint_status)
     app.router.add_get("/api/mint/{session_id}", handle_mint_status)
     app.router.add_post("/api/mint/{session_id}/regenerate", handle_mint_regenerate)
     app.router.add_post("/api/mint/{session_id}/cancel", handle_mint_cancel)
     app.router.add_post("/api/signin", handle_signin_start)
     app.router.add_get("/api/signin/{payload_uuid}", handle_signin_status)
+    # Standalone web surface (spec 2026-07-16): client-callable wallet signin.
+    app.router.add_post("/api/web/signin", handle_web_signin_start)
+    app.router.add_get("/api/web/signin/{payload_uuid}", handle_web_signin_status)
     app.router.add_get("/api/nfts", handle_nfts)
     app.router.add_get("/api/leaderboard", handle_leaderboard)
     app.router.add_get("/api/market/listings", handle_market_listings)
@@ -2802,8 +4777,13 @@ def create_app() -> web.Application:
     app.router.add_get("/api/market/buy/{session_id}", handle_market_buy_status)
     app.router.add_post("/api/market/trait/list", handle_market_trait_list_start)
     app.router.add_get("/api/market/trait/list/{session_id}", handle_market_trait_list_status)
+    app.router.add_get("/api/shop/catalog", handle_shop_catalog)
+    app.router.add_post("/api/shop/buy", handle_shop_buy_start)
+    app.router.add_get("/api/shop/buy/{session_id}", handle_shop_buy_status)
     app.router.add_post("/api/swap", handle_swap_start)
     app.router.add_get("/api/swap/{session_id}", handle_swap_status)
+    app.router.add_post("/api/swap/{session_id}/regenerate", handle_swap_regenerate)
+    app.router.add_post("/api/swap/{session_id}/cancel", handle_swap_cancel)
     app.router.add_get("/api/qr.png", handle_qr)
     app.router.add_get("/api/img", handle_img)
     app.router.add_get("/api/layer", handle_layer)
@@ -2814,11 +4794,16 @@ def create_app() -> web.Application:
     app.router.add_post("/api/harvest", require_wallet(handle_harvest_start))
     app.router.add_get("/api/harvest/{session_id}", handle_harvest_status)
     app.router.add_post("/api/assemble", require_wallet(handle_assemble_start))
+    # Must precede the {session_id} route or "prefill" is read as a session id.
+    app.router.add_get("/api/assemble/prefill", require_wallet(handle_assemble_prefill))
     app.router.add_get("/api/assemble/{session_id}", handle_assemble_status)
     app.router.add_post("/api/extract", require_wallet(handle_extract_start))
     app.router.add_get("/api/extract/{session_id}", handle_extract_status)
     app.router.add_post("/api/deposit", require_wallet(handle_deposit_start))
     app.router.add_get("/api/deposit/{session_id}", handle_deposit_status)
+    app.router.add_post("/api/admin/x/pause", handle_x_pause)
+    app.router.add_post("/api/admin/x/resume", handle_x_resume)
+    app.router.add_get("/api/admin/x/status", handle_x_status)
     app.router.add_get("/events", handle_events)
     app.router.add_get("/events/me", handle_events_me)
     app.router.add_get("/__dev/reload", handle_dev_reload)
@@ -2826,6 +4811,7 @@ def create_app() -> web.Application:
     app.router.add_static("/", CLIENT_DIR)
     app.on_startup.append(_start_settlement_sweep)
     app.on_cleanup.append(_stop_settlement_sweep)
+    app.on_startup.append(_start_bulk_resume)
     return app
 
 

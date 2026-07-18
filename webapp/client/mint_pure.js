@@ -26,3 +26,22 @@ export function cancelMintOutcome(cancelResult, refetchResult) {
   if (!s) return 'home'; // session unknown to the server on both calls
   return s.state === 'cancelled' ? 'home' : 'resume';
 }
+
+// Mint session resume: Discord mobile kills/reloads the Activity webview when
+// the user app-switches to Xaman to sign, so the relaunched client has lost
+// its in-memory currentMintId while the server-side mint session is still
+// running. On boot the client asks GET /api/mint/active and re-attaches.
+//
+//   activeResult — the response body ({session: <dict>|null}), or null when
+//                  the call itself failed.
+//
+// Returns the session id to resume polling, or null to show the normal home
+// screen. The server only returns non-terminal sessions, but stay defensive:
+// resuming a terminal session would strand the user on a dead flow panel.
+const TERMINAL_MINT_STATES = new Set(['offer_ready', 'done', 'failed', 'payment_timeout', 'cancelled']);
+
+export function activeMintSessionId(activeResult) {
+  const s = activeResult && activeResult.session;
+  if (!s || !s.id || TERMINAL_MINT_STATES.has(s.state)) return null;
+  return s.id;
+}

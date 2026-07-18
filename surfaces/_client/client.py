@@ -73,8 +73,16 @@ class LFGServiceClient:
 
     @staticmethod
     def _retryable(exc: Exception) -> bool:
+        # Rate limiting (HTTP 429, or any response coded "rate_limited" — the
+        # service says that with 503 + Retry-After when XUMM itself is limiting
+        # us) is deliberate back-pressure: retrying multiplies the very
+        # overload it signals. The 2026-07-17 XUMM 429 incident was a handful
+        # of sign-ins amplified 5x by this retry loop. Plain 5xx stays
+        # retryable — those are genuinely transient.
         if isinstance(exc, ServiceError):
-            return exc.status is not None and (exc.status >= 500 or exc.status == 429)
+            if exc.code == "rate_limited":
+                return False
+            return exc.status is not None and exc.status >= 500
         return isinstance(exc, (aiohttp.ClientError, asyncio.TimeoutError))
 
     @overload
@@ -228,6 +236,12 @@ class LFGServiceClient:
 
     async def regenerate(self, user_id: str, session_id: str) -> dict[str, Any]:
         return await self._user_request("POST", f"/api/mint/{session_id}/regenerate", user_id)
+
+    async def cancel_mint(self, user_id: str, session_id: str) -> dict[str, Any]:
+        """Cancel an in-flight mint session (e.g. after a client-side payment-QR
+        render failure) so it doesn't hold the session open until timeout and
+        block a retry."""
+        return await self._user_request("POST", f"/api/mint/{session_id}/cancel", user_id)
 
     async def wait_for_mint(
         self,
@@ -389,3 +403,17 @@ class LFGServiceClient:
             session, self._base, self._service_token, types, base_delay=self._base_delay
         ):
             yield event
+
+    # ---- admin: X (Twitter) posting pause/resume (Task 7, #41) ----
+    # Process-level admin actions, no end-user identity involved — same
+    # direct _request(token=self._service_token, ...) shape as create_session,
+    # not the per-user _user_request path.
+
+    async def x_status(self) -> dict[str, Any]:
+        return await self._request("GET", "/api/admin/x/status", token=self._service_token)
+
+    async def x_pause(self) -> dict[str, Any]:
+        return await self._request("POST", "/api/admin/x/pause", token=self._service_token)
+
+    async def x_resume(self) -> dict[str, Any]:
+        return await self._request("POST", "/api/admin/x/resume", token=self._service_token)

@@ -1,7 +1,7 @@
 """Update the hackathon lines-of-code stats in README.md.
 
 Compares the pinned pre-hackathon baseline commit against HEAD, counting
-only hand-written code — Python, JS, CSS, HTML — and excluding docs, data
+only code — Python, JS, CSS, HTML — and excluding docs, data
 files (CSV/JSON manifests), dependency/config files, and the legacy/backup
 trees. Writes a brand-kit SVG bar (assets/hackathon_loc.svg) plus a stats
 table between the README markers. Run by
@@ -140,9 +140,9 @@ def build_block(base: int) -> str:
             '<img src="assets/hackathon_loc.svg" alt="Hackathon code growth bar" width="728">',
             "</div>",
             "",
-            f"> **Every line hand-written since the June 21 hackathon baseline** "
-            f"(`{BASELINE_SHA[:7]}`, {date}, {fmt(base)} lines) — measured by "
-            f"`git diff --numstat` over `.py`/`.js`/`.css`/`.html`, excluding docs, "
+            f"> **Baseline: Code written before the June 21 Make Waves hackathon began** "
+            f"measured from `{BASELINE_SHA[:7]}` ({date}, {fmt(base)} lines) "
+            f"by `git diff --numstat` over `.py`/`.js`/`.css`/`.html`, excluding docs, "
             f"data files (CSV/JSON manifests), dependency lists, and the "
             f"legacy/backup trees. Regenerated on every push to `main`.",
             END_MARK,

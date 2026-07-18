@@ -248,3 +248,232 @@ class TestDropsToXrpStr:
     )
     def test_round_trip(self, xrp: str) -> None:
         assert drops_to_xrp_str(xrp_to_drops_str(xrp)) == xrp
+
+
+# --- #239: BRIX-denominated trait listings — per-kind amount layer ---
+
+from decimal import Decimal  # noqa: E402
+
+from lfg_core import config, market_ops  # noqa: E402
+
+BRIX_AMOUNT = {
+    "currency": config.TOKEN_CURRENCY_HEX,
+    "issuer": config.TOKEN_ISSUER_ADDRESS,
+    "value": "10",
+}
+
+
+def _brix(value="10", currency=None, issuer=None):
+    return {
+        "currency": currency or config.TOKEN_CURRENCY_HEX,
+        "issuer": issuer or config.TOKEN_ISSUER_ADDRESS,
+        "value": value,
+    }
+
+
+class TestValidateBrixValue:
+    def test_normalizes_trailing_zeros(self) -> None:
+        assert market_ops.validate_brix_value("10.500000") == "10.5"
+
+    def test_whole_number_passthrough(self) -> None:
+        assert market_ops.validate_brix_value("10") == "10"
+
+    def test_never_scientific_notation(self) -> None:
+        assert market_ops.validate_brix_value("1E+3") == "1000"
+
+    def test_rejects_float_input(self) -> None:
+        with pytest.raises(TypeError):
+            market_ops.validate_brix_value(1.5)  # type: ignore[arg-type]
+
+    def test_rejects_zero_negative_garbage(self) -> None:
+        for bad in ("0", "-1", "abc", "", "NaN", "Infinity"):
+            with pytest.raises(ValueError):
+                market_ops.validate_brix_value(bad)
+
+    def test_rejects_more_than_six_decimals(self) -> None:
+        with pytest.raises(ValueError):
+            market_ops.validate_brix_value("1.1234567")
+
+    def test_rejects_over_cap(self) -> None:
+        with pytest.raises(ValueError):
+            market_ops.validate_brix_value("1000000000000001")  # > 1e15
+
+    def test_cap_boundary_accepted(self) -> None:
+        assert market_ops.validate_brix_value("1000000000000000") == "1000000000000000"
+
+
+class TestBrixAmountDict:
+    def test_shape_uses_token_currency_and_issuer(self) -> None:
+        assert market_ops.brix_amount_dict("10.50") == {
+            "currency": config.TOKEN_CURRENCY_HEX,
+            "issuer": config.TOKEN_ISSUER_ADDRESS,
+            "value": "10.5",
+        }
+
+
+class TestExtractCreatedSellOfferBrix:
+    def test_brix_dict_accepted_and_normalized(self) -> None:
+        meta = _created_offer_meta(amount=_brix("10.500000"), flags=1)
+        result = extract_created_sell_offer(meta, NFT_ID, expect="brix")
+        assert result is not None
+        assert result["amount_brix"] == "10.5"
+        assert "amount_drops" not in result
+
+    def test_xrp_string_amount_rejected_for_brix(self) -> None:
+        meta = _created_offer_meta(amount="1500000", flags=1)
+        assert extract_created_sell_offer(meta, NFT_ID, expect="brix") is None
+
+    def test_wrong_issuer_rejected(self) -> None:
+        meta = _created_offer_meta(
+            amount=_brix(issuer="rWrongIssuerXXXXXXXXXXXXXXXXXXXXXX"), flags=1
+        )
+        assert extract_created_sell_offer(meta, NFT_ID, expect="brix") is None
+
+    def test_wrong_currency_rejected(self) -> None:
+        meta = _created_offer_meta(amount=_brix(currency="USD"), flags=1)
+        assert extract_created_sell_offer(meta, NFT_ID, expect="brix") is None
+
+    def test_bad_value_rejected(self) -> None:
+        for bad in ("0", "-5", "abc", "1.1234567", "1000000000000001"):
+            meta = _created_offer_meta(amount=_brix(bad), flags=1)
+            assert extract_created_sell_offer(meta, NFT_ID, expect="brix") is None
+
+    def test_buy_side_brix_offer_rejected(self) -> None:
+        meta = _created_offer_meta(amount=_brix(), flags=0)
+        assert extract_created_sell_offer(meta, NFT_ID, expect="brix") is None
+
+    def test_brix_dict_rejected_for_default_xrp(self) -> None:
+        meta = _created_offer_meta(amount=_brix(), flags=1)
+        assert extract_created_sell_offer(meta, NFT_ID) is None
+
+    def test_unknown_expect_raises(self) -> None:
+        with pytest.raises(ValueError):
+            extract_created_sell_offer(_created_offer_meta(), NFT_ID, expect="usd")
+
+
+def _run_verify(coro):
+    import asyncio
+
+    loop = asyncio.new_event_loop()
+    try:
+        return loop.run_until_complete(coro)
+    finally:
+        loop.close()
+
+
+def _offers(amount, destination=None, expiration=None, offer_index=None):
+    async def fetch(_nft_id):
+        return [
+            {
+                "offer_index": offer_index
+                or "9F1C2D3E4A5B6C7D8E9F0A1B2C3D4E5F60718293A4B5C6D7E8F901234567890",
+                "amount": amount,
+                "destination": destination,
+                "flags": 1,
+                "expiration": expiration,
+            }
+        ]
+
+    return fetch
+
+
+OFFER_INDEX = "9F1C2D3E4A5B6C7D8E9F0A1B2C3D4E5F60718293A4B5C6D7E8F901234567890"
+
+
+class TestVerifySellOfferBrix:
+    def test_matching_brix_offer_verifies(self) -> None:
+        ok = _run_verify(
+            market_ops.verify_sell_offer(
+                NFT_ID,
+                OFFER_INDEX,
+                None,
+                fetch_offers=_offers(_brix("10")),
+                expect="brix",
+                expected_brix="10",
+            )
+        )
+        assert ok is True
+
+    def test_decimal_equivalent_value_matches(self) -> None:
+        ok = _run_verify(
+            market_ops.verify_sell_offer(
+                NFT_ID,
+                OFFER_INDEX,
+                None,
+                fetch_offers=_offers(_brix("10.0")),
+                expect="brix",
+                expected_brix="10",
+            )
+        )
+        assert ok is True
+
+    def test_value_mismatch_fails(self) -> None:
+        ok = _run_verify(
+            market_ops.verify_sell_offer(
+                NFT_ID,
+                OFFER_INDEX,
+                None,
+                fetch_offers=_offers(_brix("11")),
+                expect="brix",
+                expected_brix="10",
+            )
+        )
+        assert ok is False
+
+    def test_xrp_amount_is_mismatch_for_brix(self) -> None:
+        ok = _run_verify(
+            market_ops.verify_sell_offer(
+                NFT_ID,
+                OFFER_INDEX,
+                None,
+                fetch_offers=_offers("10000000"),
+                expect="brix",
+                expected_brix="10",
+            )
+        )
+        assert ok is False
+
+    def test_wrong_issuer_is_mismatch(self) -> None:
+        ok = _run_verify(
+            market_ops.verify_sell_offer(
+                NFT_ID,
+                OFFER_INDEX,
+                None,
+                fetch_offers=_offers(_brix(issuer="rWrongIssuerXXXXXXXXXXXXXXXXXXXXXX")),
+                expect="brix",
+                expected_brix="10",
+            )
+        )
+        assert ok is False
+
+    def test_foreign_destination_still_rejected(self) -> None:
+        ok = _run_verify(
+            market_ops.verify_sell_offer(
+                NFT_ID,
+                OFFER_INDEX,
+                None,
+                fetch_offers=_offers(_brix("10"), destination="rSomeoneElseXXXXXXXXXXXXXXXXXXXXXX"),
+                expect="brix",
+                expected_brix="10",
+            )
+        )
+        assert ok is False
+
+    def test_brix_dict_is_mismatch_for_default_xrp(self) -> None:
+        ok = _run_verify(
+            market_ops.verify_sell_offer(
+                NFT_ID, OFFER_INDEX, 10_000_000, fetch_offers=_offers(_brix("10"))
+            )
+        )
+        assert ok is False
+
+    def test_missing_expected_brix_raises(self) -> None:
+        with pytest.raises(ValueError):
+            _run_verify(
+                market_ops.verify_sell_offer(
+                    NFT_ID, OFFER_INDEX, None, fetch_offers=_offers(_brix()), expect="brix"
+                )
+            )
+
+    def test_decimal_normalized_equality(self) -> None:
+        assert Decimal("10.0") == Decimal("10")

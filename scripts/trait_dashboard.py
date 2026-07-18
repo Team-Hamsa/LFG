@@ -27,7 +27,7 @@ from dotenv import load_dotenv  # noqa: E402
 
 load_dotenv()
 
-from lfg_core import config, rarity  # noqa: E402
+from lfg_core import config, rarity, shop  # noqa: E402
 from lfg_core.db_path import app_db_path  # noqa: E402
 
 _LAYER_EXTS = (".png", ".gif", ".mp4")
@@ -143,6 +143,10 @@ def fetch_rows(
                FROM trait_rarity WHERE network=?""",
             (network,),
         ).fetchall()
+        overrides = shop.get_overrides(conn, network)
+        shop_prices = {
+            (cat, trait): shop.quote(conn, network, cat, trait) for _, cat, trait, *_ in raw
+        }
     finally:
         conn.close()
 
@@ -163,6 +167,7 @@ def fetch_rows(
         categories.add(cat)
         key = (b, cat)
         total = totals[key]
+        ov = overrides.get((cat, trait), {})
         rows.append(
             {
                 "body": b,
@@ -180,6 +185,9 @@ def fetch_rows(
                 "boost_step_hours": bs,
                 "boost_started_at": bsa,
                 "has_image": resolve_image(b, cat, trait) is not None,
+                "shop_price": shop_prices.get((cat, trait)),
+                "shop_excluded": bool(ov.get("excluded", False)),
+                "shop_price_override": ov.get("price_override"),
             }
         )
 
@@ -298,6 +306,59 @@ def apply_boost(
     return row
 
 
+def apply_cancel_boost(
+    network: str, body: str, category: str, trait: str, *, db_path: str | None = None
+) -> dict:
+    """Clear a boost via rarity.cancel_boost (raises ValueError on a missing
+    row; a row with no boost is a no-op success and writes no audit line);
+    audit and return the row."""
+    dbp = db_path or app_db_path(network)
+    before = _one_row(network, body, category, trait, db_path=dbp)
+    if before is None:
+        raise ValueError(f"No trait_rarity row for {network}/{body}/{category}/{trait}")
+    conn = sqlite3.connect(dbp)
+    try:
+        rarity.cancel_boost(conn, body, category, trait, network=network)
+    finally:
+        conn.close()
+    if before["boost_initial"] is not None:
+        audit(
+            network,
+            "boost-cancel",
+            body,
+            category,
+            trait,
+            f"boost {before['boost_initial']:g}x -> none",
+        )
+    row = _one_row(network, body, category, trait, db_path=dbp)
+    assert row is not None
+    return row
+
+
+def apply_reschedule(
+    network: str,
+    body: str,
+    category: str,
+    trait: str,
+    step_hours: int,
+    *,
+    db_path: str | None = None,
+) -> dict:
+    """Change an armed boost's step window without resetting its decay clock,
+    via rarity.reschedule_boost (raises ValueError when no boost is armed);
+    audit and return the re-read row."""
+    dbp = db_path or app_db_path(network)
+    conn = sqlite3.connect(dbp)
+    try:
+        rarity.reschedule_boost(conn, body, category, trait, step_hours, network=network)
+    finally:
+        conn.close()
+    audit(network, "boost-reschedule", body, category, trait, f"step_hours -> {step_hours}")
+    row = _one_row(network, body, category, trait, db_path=dbp)
+    assert row is not None
+    return row
+
+
 def apply_floor(
     network: str,
     body: str | None,
@@ -323,6 +384,60 @@ def apply_floor(
             raise ValueError(f"No trait_rarity row for {network}/{body}/{category}/{trait}")
         return row
     return {"network": network, "scope": "global", "floor": floor}
+
+
+_NOT_GIVEN: object = object()
+_MAX_PRICE_OVERRIDE = 1_000_000  # absurd-price guard; well above SHOP_MAX_BRIX
+
+
+def apply_shop_override(
+    network: str,
+    slot: str,
+    value: str,
+    *,
+    excluded: bool | None = None,
+    price_override: int | None = _NOT_GIVEN,  # type: ignore[assignment]
+    db_path: str | None = None,
+) -> dict:
+    """Write through shop.set_override; audit and return the derived shop
+    state for this (slot, value). Raises ValueError if no trait_rarity row
+    exists for (network, slot, value) — mirrors the rarity mutations' 404."""
+    dbp = db_path or app_db_path(network)
+    conn = sqlite3.connect(dbp)
+    try:
+        rarity.ensure_schema(conn)
+        exists = conn.execute(
+            "SELECT 1 FROM trait_rarity WHERE network=? AND category=? AND trait=? LIMIT 1",
+            (network, slot, value),
+        ).fetchone()
+        if exists is None:
+            raise ValueError(f"No trait_rarity row for {network}/{slot}/{value}")
+        empty = {"excluded": False, "price_override": None}
+        before = shop.get_overrides(conn, network).get((slot, value), empty)
+        kwargs: dict = {}
+        if price_override is not _NOT_GIVEN:
+            kwargs["price_override"] = price_override
+        shop.set_override(conn, network, slot, value, excluded=excluded, **kwargs)
+        after = shop.get_overrides(conn, network).get((slot, value), empty)
+        price = shop.quote(conn, network, slot, value)
+    finally:
+        conn.close()
+    audit(
+        network,
+        "shop-override",
+        "*",
+        slot,
+        value,
+        f"excluded: {before['excluded']} -> {after['excluded']}; "
+        f"price_override: {before['price_override']} -> {after['price_override']}",
+    )
+    return {
+        "slot": slot,
+        "value": value,
+        "shop_excluded": after["excluded"],
+        "shop_price_override": after["price_override"],
+        "shop_price": price,
+    }
 
 
 def sync_layers(network: str, *, db_path: str | None = None) -> int:
@@ -457,6 +572,13 @@ INDEX_HTML = """<!doctype html>
   .sw { display:flex; align-items:center; gap:6px; font-size:12px; }
   .acts { display:flex; gap:6px; margin-top:2px; }
   .acts button { flex:1; padding:3px 0; font-size:12px; }
+  .shop { display:flex; align-items:center; gap:6px; font-size:12px; flex-wrap:wrap; }
+  .shop .price { color:var(--mut); }
+  .shop .price.overridden { color:var(--accent); font-weight:600; }
+  .shop .excl-chip { border-radius:10px; padding:1px 6px; cursor:pointer; border:1px solid var(--line);
+                      background:transparent; font-size:11px; }
+  .shop .excl-chip.active { background:var(--off); color:#fff; border-color:var(--off); }
+  .shop input.price-ov { width:64px; font-size:12px; padding:2px 4px; }
   table.list { width:100%; border-collapse:collapse; }
   table.list th, table.list td { padding:6px 8px; border-bottom:1px solid var(--line);
            text-align:left; white-space:nowrap; }
@@ -503,6 +625,7 @@ INDEX_HTML = """<!doctype html>
     <th data-sort="weight">Weight</th>
     <th data-sort="boost_status">Boost</th>
     <th>On</th>
+    <th>Shop</th>
     <th></th>
   </tr></thead>
   <tbody></tbody>
@@ -546,8 +669,36 @@ function toggleBox(r) {
   return chk;
 }
 function actions(r) {
-  return [el("button",{text:"Boost", onclick:()=>doBoost(r)}),
-          el("button",{text:"Floor", onclick:()=>doFloor(r)})];
+  const btns=[el("button",{text:"Boost", onclick:()=>doBoost(r)}),
+              el("button",{text:"Floor", onclick:()=>doFloor(r)})];
+  if (r.boost_initial) {
+    if (r.boost_status.startsWith("active"))  // finished boosts can't be rescheduled, only re-armed
+      btns.push(el("button",{text:"⏱", title:"Change step-hours without resetting the decay clock",
+                             onclick:()=>doReschedule(r)}));
+    btns.push(el("button",{text:"✕", title:"Cancel boost", onclick:()=>doCancelBoost(r)}));
+  }
+  return btns;
+}
+function shopPriceLabel(r) {
+  if (r.shop_price==null) return "no price";
+  return String(r.shop_price)+" BRIX";
+}
+function shopControls(r) {
+  const priceEl = el("span",{class:"price"+(r.shop_price_override!=null?" overridden":""),
+                             title:r.shop_price_override!=null ? "overridden ("+shopPriceLabel(r)+")" : "",
+                             text:shopPriceLabel(r)});
+  const exclBtn = el("button",{class:"excl-chip"+(r.shop_excluded?" active":""),
+                               title:"Toggle shop exclusion",
+                               text:r.shop_excluded?"excluded":"listed",
+                               onclick:()=>doShopExclude(r)});
+  const priceInput = el("input",{class:"price-ov", type:"number", min:"0", step:"1",
+                                 placeholder:"override",
+                                 value:r.shop_price_override!=null?String(r.shop_price_override):""});
+  priceInput.addEventListener("keydown", (ev) => {
+    if (ev.key==="Enter") { ev.preventDefault(); doShopPriceOverride(r, priceInput.value); }
+  });
+  priceInput.addEventListener("blur", () => doShopPriceOverride(r, priceInput.value));
+  return el("div",{class:"shop"},[priceEl, exclBtn, priceInput]);
 }
 function card(r) {
   return el("div",{class:"card"+(r.enabled?"":" off")},[
@@ -558,6 +709,7 @@ function card(r) {
     el("div",{class:"badge", text:badge(r)}),
     el("label",{class:"sw"},[toggleBox(r), el("span",{text:r.enabled?"on":"off"})]),
     el("div",{class:"acts"}, actions(r)),
+    shopControls(r),
   ]);
 }
 function listRow(r) {
@@ -571,6 +723,7 @@ function listRow(r) {
     el("td",{text:r.weight.toFixed(3)}),
     el("td",{text:badge(r)||"—"}),
     el("td",{},[toggleBox(r)]),
+    el("td",{},[shopControls(r)]),
     el("td",{}, actions(r)),
   ]);
 }
@@ -638,10 +791,31 @@ async function doToggle(r, enabled) {
 async function doBoost(r) {
   const initial=parseFloat(prompt("Boost multiplier (e.g. 7):", r.boost_initial||7));
   if (isNaN(initial)) return;  // cancelled/blank; 0 or out-of-range falls through to the server's 400
-  const step=parseInt(prompt("Step hours (decays -1x per window):", r.boost_step_hours||24),10);
-  if (isNaN(step)) return;
-  if (!confirm("Arm "+initial+"x boost on "+r.trait+"?")) return;
+  const step=promptStepHours("Step hours (decays -1x per window):", r.boost_step_hours||24);
+  if (step===null) return;
+  const note = r.boost_started_at ? " (replaces the running boost and RESTARTS the decay clock)"
+             : r.boost_initial ? " (replaces the dormant boost)" : "";
+  if (!confirm("Arm "+initial+"x boost on "+r.trait+"?"+note)) return;
   const u=await post("/api/boost",{network, body:r.body, category:r.category, trait:r.trait, initial, step_hours:step});
+  if (u) replaceRow(u);
+}
+function promptStepHours(label, dflt) {
+  const raw=prompt(label, dflt);
+  if (raw===null || raw.trim()==="") return null;
+  const step=Number(raw);
+  if (!Number.isInteger(step) || step<1) { alert("Step hours must be a whole number >= 1"); return null; }
+  return step;
+}
+async function doCancelBoost(r) {
+  if (!confirm("Cancel the "+(r.boost_initial||"")+"x boost on "+r.trait+"?")) return;
+  const u=await post("/api/boost/cancel",{network, body:r.body, category:r.category, trait:r.trait});
+  if (u) replaceRow(u);
+}
+async function doReschedule(r) {
+  const step=promptStepHours("New step hours (decay clock keeps running from "+r.boost_started_at+"):", r.boost_step_hours||24);
+  if (step===null) return;
+  if (!confirm("Reschedule "+r.trait+" boost to -1x per "+step+"h without resetting the clock?")) return;
+  const u=await post("/api/boost/reschedule",{network, body:r.body, category:r.category, trait:r.trait, step_hours:step});
   if (u) replaceRow(u);
 }
 async function doFloor(r) {
@@ -650,6 +824,37 @@ async function doFloor(r) {
   if (!confirm("Set floor "+floor+" on "+r.trait+"?")) return;
   const u=await post("/api/floor",{network, body:r.body, category:r.category, trait:r.trait, floor});
   if (u) replaceRow(u);
+}
+function applyShopResult(u) {
+  // Shop overrides are aggregated per (slot, value) — body-agnostic — so one
+  // override can affect multiple per-body cards/rows; update them all.
+  for (const r of allRows) {
+    if (r.category===u.slot && r.trait===u.value) {
+      r.shop_excluded = u.shop_excluded;
+      r.shop_price_override = u.shop_price_override;
+      r.shop_price = u.shop_price;
+    }
+  }
+  render();
+}
+async function doShopExclude(r) {
+  const excluded = !r.shop_excluded;
+  const u = await post("/api/shop/override",
+    {network, slot:r.category, value:r.trait, excluded});
+  if (u) applyShopResult(u);
+}
+async function doShopPriceOverride(r, raw) {
+  const trimmed = (raw||"").trim();
+  let price_override = null;
+  if (trimmed !== "") {
+    const n = Number(trimmed);
+    if (!Number.isInteger(n) || n < 0) { alert("Price override must be a whole number >= 0"); render(); return; }
+    price_override = n;
+  }
+  if (price_override === r.shop_price_override) return;  // no-op, avoid spurious posts
+  const u = await post("/api/shop/override",
+    {network, slot:r.category, value:r.trait, price_override});
+  if (u) applyShopResult(u);
 }
 async function doSync() {
   if (!confirm("Insert floor rows for any newly-added layer art on "+network+"?")) return;
@@ -728,6 +933,23 @@ async def handle_boost(request: web.Request) -> web.Response:
     return web.json_response(row)
 
 
+async def handle_boost_cancel(request: web.Request) -> web.Response:
+    data = await _json(request)
+    _require(data, "network", "body", "category", "trait")
+    row = apply_cancel_boost(data["network"], data["body"], data["category"], data["trait"])
+    return web.json_response(row)
+
+
+async def handle_boost_reschedule(request: web.Request) -> web.Response:
+    data = await _json(request)
+    _require(data, "network", "body", "category", "trait")
+    step_hours = _num(data, "step_hours", 1, 100000, integer=True)
+    row = apply_reschedule(
+        data["network"], data["body"], data["category"], data["trait"], int(step_hours)
+    )
+    return web.json_response(row)
+
+
 async def handle_floor(request: web.Request) -> web.Response:
     data = await _json(request)
     _require(data, "network")
@@ -737,6 +959,49 @@ async def handle_floor(request: web.Request) -> web.Response:
         _require(data, "body", "category", "trait")
     row = apply_floor(data["network"], data.get("body"), data.get("category"), trait, floor)
     return web.json_response(row)
+
+
+async def handle_shop_override(request: web.Request) -> web.Response:
+    data = await _json(request)
+    _require(data, "network", "slot", "value")
+    excluded = data.get("excluded")
+    if excluded is not None and not isinstance(excluded, bool):
+        raise _BadInput("excluded must be a boolean")
+    kwargs: dict = {}
+    if "price_override" in data:
+        val = data["price_override"]
+        if val is None:
+            kwargs["price_override"] = None
+        else:
+            if isinstance(val, bool) or not isinstance(val, (int, float)):
+                raise _BadInput("invalid price_override")
+            if not float(val).is_integer():
+                raise _BadInput("price_override must be a whole number")
+            if not (0 <= val <= _MAX_PRICE_OVERRIDE):
+                raise _BadInput(f"price_override out of range [0, {_MAX_PRICE_OVERRIDE}]")
+            kwargs["price_override"] = int(val)
+    result = apply_shop_override(
+        data["network"], data["slot"], data["value"], excluded=excluded, **kwargs
+    )
+    return web.json_response(result)
+
+
+async def handle_shop_overrides(request: web.Request) -> web.Response:
+    net = request.query.get("network") or request.app[DEFAULT_NETWORK]
+    conn = sqlite3.connect(app_db_path(net))
+    try:
+        overrides = shop.get_overrides(conn, net)
+    finally:
+        conn.close()
+    return web.json_response(
+        {
+            "network": net,
+            "overrides": [
+                {"slot": slot, "value": value, **fields}
+                for (slot, value), fields in sorted(overrides.items())
+            ],
+        }
+    )
 
 
 async def handle_sync(request: web.Request) -> web.Response:
@@ -765,8 +1030,12 @@ def create_app(default_network: str = "mainnet") -> web.Application:
     app.router.add_get("/img", handle_img)
     app.router.add_post("/api/toggle", handle_toggle)
     app.router.add_post("/api/boost", handle_boost)
+    app.router.add_post("/api/boost/cancel", handle_boost_cancel)
+    app.router.add_post("/api/boost/reschedule", handle_boost_reschedule)
     app.router.add_post("/api/floor", handle_floor)
     app.router.add_post("/api/sync", handle_sync)
+    app.router.add_post("/api/shop/override", handle_shop_override)
+    app.router.add_get("/api/shop/overrides", handle_shop_overrides)
     return app
 
 

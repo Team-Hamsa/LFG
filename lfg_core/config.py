@@ -123,6 +123,22 @@ except ValueError:
     logging.warning("Invalid FREE_MINT_CAP env var; defaulting to 10")
     FREE_MINT_CAP = 10
 
+# Bulk minting (#215). MAX_COLLECTION_SIZE caps total live editions; a bulk
+# request is clamped to the remaining headroom before payment. BULK_MINT_MAX
+# caps how many a single bulk job may request.
+MAX_COLLECTION_SIZE = int(os.getenv("MAX_COLLECTION_SIZE", "10000"))
+BULK_MINT_MAX = int(os.getenv("BULK_MINT_MAX", "10"))
+if MAX_COLLECTION_SIZE < 1:
+    raise ValueError(f"MAX_COLLECTION_SIZE must be >= 1, got {MAX_COLLECTION_SIZE}")
+if BULK_MINT_MAX < 1:
+    raise ValueError(f"BULK_MINT_MAX must be >= 1, got {BULK_MINT_MAX}")
+
+# Bulk mint UI flag (#215 follow-up): gates the Activity's quantity stepper /
+# bulk flow client-side via /api/config. Server bulk endpoints stay live
+# regardless (they're quantity-capped and auth'd on their own). Off by
+# default; staging sets it first (docs/ops/env.staging.example).
+BULK_MINT_UI_ENABLED = os.getenv("BULK_MINT_UI_ENABLED", "0") not in ("0", "false", "False")
+
 # BunnyCDN
 BUNNY_CDN_ACCESS_KEY = _require("BUNNY_CDN_ACCESS_KEY")
 BUNNY_CDN_STORAGE_ZONE = _require("BUNNY_CDN_STORAGE_ZONE")
@@ -231,8 +247,27 @@ TELEGRAM_INITDATA_MAX_AGE = int(os.getenv("TELEGRAM_INITDATA_MAX_AGE", "3600"))
 if TELEGRAM_INITDATA_MAX_AGE <= 0:
     raise ValueError("TELEGRAM_INITDATA_MAX_AGE must be greater than 0")
 
+
+def _parse_allowed_origins(raw: str) -> tuple[str, ...]:
+    return tuple(o.strip() for o in raw.split(",") if o.strip())
+
+
+# Standalone web surface (spec 2026-07-16): exact Origin values allowed to call
+# the API cross-origin (the GitHub Pages front-end at build.letseffinggo.com).
+# Empty (the default) keeps the CORS middleware inert — feature OFF.
+WEB_ALLOWED_ORIGINS = _parse_allowed_origins(os.getenv("WEB_ALLOWED_ORIGINS", ""))
+
 # Misc
 PAYMENT_TIMEOUT_SECONDS = int(os.getenv("PAYMENT_TIMEOUT_SECONDS", "300"))
+# After a credit-eligible payment wait times out, wait this long and re-check
+# history once — a payment signed in time can validate seconds past the
+# deadline and must not be silently kept (issue #196).
+PAYMENT_GRACE_SECONDS = int(os.getenv("PAYMENT_GRACE_SECONDS", "15"))
+# How long an unconsumed mint payment stays spendable as a credit. This is
+# what bounds the credit backfill scan (a fixed floor would make the scan
+# depth grow with issuer history forever, #197 review); older overpayments
+# are refund territory, findable via the issue-196 reconciliation sweep.
+MINT_CREDIT_TTL_SECONDS = int(os.getenv("MINT_CREDIT_TTL_SECONDS", str(30 * 86400)))
 
 # Unified trait layer store (shared by mint + swap).
 # Canonical structure: <body>/<TraitType>/<Value>.png|.gif|.mp4
@@ -296,6 +331,62 @@ ECONOMY_CDN_FOLDER = os.getenv("ECONOMY_CDN_FOLDER", SWAP_CDN_FOLDER)
 # Standalone tradeable trait NFTokens (Phase 4). Burnable + transferable (NOT
 # soulbound, NOT mutable); xrpl_ops.mint_nft applies NFT_TRANSFER_FEE to any
 # transferable token, so the trait royalty is inherited (no separate constant).
-TRAIT_TAXON = int(os.getenv("TRAIT_TAXON", "1763"))
+TRAIT_TAXON = int(os.getenv("TRAIT_TAXON", "176"))  # flipped from 1763 (#217)
+# Assemble-minted rebirth characters get their own taxon; regular /letsgo
+# mints stay NFT_TAXON (0) so the main collection is never split (#217).
+ASSEMBLE_TAXON = int(os.getenv("ASSEMBLE_TAXON", "1760"))
+
+# Trait Shop (#217): price = clamp(SHOP_BASE_BRIX / smoothed_share, MIN, MAX)
+SHOP_BASE_BRIX = float(os.getenv("SHOP_BASE_BRIX", "1.0"))
+SHOP_MIN_BRIX = int(os.getenv("SHOP_MIN_BRIX", "5"))
+SHOP_MAX_BRIX = int(os.getenv("SHOP_MAX_BRIX", "5000"))
+SHOP_OFFER_TTL_SECONDS = int(os.getenv("SHOP_OFFER_TTL_SECONDS", "900"))
+
 TRAIT_NFT_FLAGS = int(os.getenv("TRAIT_NFT_FLAGS", "9"))  # burnable(1)+transferable(8)
 TRAIT_CDN_SUBDIR = os.getenv("TRAIT_CDN_SUBDIR", "traits")
+
+# X (Twitter) integration (#41): a separate out-of-process poster surface
+# (surfaces/x_bot/) tweets successful mints off the shared event firehose.
+# All vars optional; SERVICE_TOKEN_X is intentionally NOT declared here — it
+# follows the house pattern of living in the surface's own config module
+# (surfaces/discord_bot/config.py, surfaces/telegram_bot/config.py precedent),
+# not lfg_core/config.py.
+X_CONSUMER_KEY = os.getenv("X_CONSUMER_KEY", "")
+X_CONSUMER_SECRET = os.getenv("X_CONSUMER_SECRET", "")
+X_ACCESS_TOKEN = os.getenv("X_ACCESS_TOKEN", "")
+X_ACCESS_SECRET = os.getenv("X_ACCESS_SECRET", "")
+# Self-imposed cap below the X API's pay-per-post tier cap: the Free tier no
+# longer exists (~2026-02), pricing is $0.015/post + $0.20/post-with-a-URL.
+# Posts here are deliberately link-free (2026-07-17 directive — the URL
+# surcharge is exactly why), so at $0.015/post the default 100/month bounds
+# worst-case spend at roughly $1.50/mo. A cost knob, not a rate-limit knob.
+X_MONTHLY_POST_BUDGET = int(os.getenv("X_MONTHLY_POST_BUDGET", "100"))
+# Master switch, true only when the flag is set AND all four OAuth 1.0a
+# credentials are non-empty (mirrors the ECONOMY_ENABLED/MARKET_ENABLED
+# boolean-flag idiom above: falsy denylist "0"/"false"/"False").
+X_ENABLED = os.getenv("X_ENABLED", "0") not in ("0", "false", "False") and all(
+    (X_CONSUMER_KEY, X_CONSUMER_SECRET, X_ACCESS_TOKEN, X_ACCESS_SECRET)
+)
+# sqlite state file for the poster process (dedup/budget/pause bookkeeping);
+# read by both the poster (surfaces/x_bot/) and the service admin endpoints.
+X_STATE_DB_PATH = os.getenv("X_STATE_DB_PATH", "x_state.db")
+
+# Public base URL the OG card page (GET /nft/{number}, lfg_service/app.py) uses
+# to build its OWN absolute self-links (og:url, canonical) — NEVER derived from
+# the request Host header, which is unstable across ingress paths (Discord's
+# *.discordsays.com proxy vs the direct Tailscale Funnel .ts.net/lfg path).
+# Unset (default) means the feature is off: the page renders normally but
+# omits og:url/canonical rather than guessing a wrong/unstable URL (#41 §6.2).
+PUBLIC_SHARE_BASE_URL = os.getenv("PUBLIC_SHARE_BASE_URL", "").strip().rstrip("/")
+
+# Where a HUMAN clicking a share link is forwarded (JS location.replace on
+# the OG card page, GET /nft/{number}) — e.g. https://build.letseffinggo.com.
+# Never an HTTP redirect: X's crawler follows those and would render the
+# destination's generic card instead of the per-NFT image. Unset (default)
+# = feature off, the card page body renders exactly as before.
+SHARE_FORWARD_URL = os.getenv("SHARE_FORWARD_URL", "").strip().rstrip("/")
+
+# Branded share-card PNG rendering (GET /nft/{number}/card.png). Requires
+# node + playwright chromium on the box (scripts/share_card/ — see the spec
+# addendum). Off (default) = twitter:image keeps pointing at the raw art.
+SHARE_CARD_RENDER_ENABLED = os.getenv("SHARE_CARD_RENDER_ENABLED", "0").strip() == "1"

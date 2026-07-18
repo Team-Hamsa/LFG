@@ -42,6 +42,15 @@ from lfg_core import market_ops, memos, xrpl_ops, xumm_ops
 # Shared session states across List/Cancel/Buy.
 AWAITING_SIGNATURE = "awaiting_signature"
 PENDING = "pending"  # signed; tx not yet validated (List/Buy only)
+# #239 trait-buy on-ramp (Buy only): the buyer holds too little BRIX, so a
+# self-Payment that buys the listing's BRIX out of the AMM precedes the
+# normal accept. AWAITING_ONRAMP = waiting for that Payment to sign/validate;
+# ONRAMP_CONFIRMED = it validated tesSUCCESS and the service must now
+# re-verify the sell offer and build the accept payload (idempotent trigger —
+# the state only advances to AWAITING_SIGNATURE once the payload exists, so a
+# transient Xaman failure retries on the next poll).
+AWAITING_ONRAMP = "awaiting_onramp"
+ONRAMP_CONFIRMED = "onramp_confirmed"
 DONE = "done"
 FAILED = "failed"
 UNKNOWN = "unknown"  # tx lookup gave up/failed (List/Buy only) — self-heals later
@@ -80,13 +89,31 @@ _OFFER_GONE_TEC_CODES = frozenset({"tecOBJECT_NOT_FOUND", "tecEXPIRED"})
 MAX_FINALIZE_POLLS = 10
 
 
+def _capture_issued_token(session: Any, s: dict[str, Any]) -> None:
+    """#212: stamp the push token XUMM issued on a signed payload so the
+    service can persist it (tokens rotate; capturing on every signed payload —
+    not just sign-in — keeps them fresh and self-heals an app-key swap). Only
+    when the signer IS the session's wallet: a shared QR signed by a different
+    account must never overwrite this user's stored token. Sessions that build
+    a LATER payload from their own stored token (the trait-sell wizard) get
+    that token refreshed too, so signature 2 already uses the rotated one."""
+    if s.get("signed") and s.get("user_token") and s.get("account") == session.wallet_address:
+        session.issued_user_token = s["user_token"]
+        if hasattr(session, "push_user_token"):
+            session.push_user_token = s["user_token"]
+
+
 @dataclass
 class ListSession:
     discord_id: str
     wallet_address: str
     nft_id: str
     listing_kind: str  # 'character' | 'trait' — the LISTING's kind
-    amount_drops: int
+    # #239 per-kind denomination: characters carry amount_drops, trait
+    # listings carry amount_brix (a validated value string). Exactly one is
+    # set, mirroring market_store's row invariant.
+    amount_drops: int | None = None
+    amount_brix: str | None = None
     slot: str | None = None
     value: str | None = None
     platform: str = "discord"
@@ -100,6 +127,11 @@ class ListSession:
     txid: str | None = None
     poll_count: int = 0
     offer_index: str | None = None
+    # #212: push delivery state of this op's sign request ("sent" | "failed" |
+    # None) and the fresh push token observed once it is signed (cleared by
+    # the service after persisting). Shared shape across List/Cancel/Buy.
+    push: str | None = None
+    issued_user_token: str | None = field(default=None, repr=False)
     kind: str = "list"  # the OP kind, for the shared session-dict status router
 
     def to_dict(self) -> dict[str, Any]:
@@ -110,6 +142,7 @@ class ListSession:
             "error": self.error,
             "qr_url": self.qr_url,
             "xumm_url": self.xumm_url,
+            "push": self.push,
             "offer_index": self.offer_index,
         }
 
@@ -128,6 +161,8 @@ class CancelSession:
     payload_uuid: str | None = None
     qr_url: str | None = None
     xumm_url: str | None = None
+    push: str | None = None  # see ListSession
+    issued_user_token: str | None = field(default=None, repr=False)
     kind: str = "cancel"
 
     def to_dict(self) -> dict[str, Any]:
@@ -138,6 +173,7 @@ class CancelSession:
             "error": self.error,
             "qr_url": self.qr_url,
             "xumm_url": self.xumm_url,
+            "push": self.push,
             "offer_index": self.offer_index,
         }
 
@@ -150,7 +186,9 @@ class BuySession:
     nft_id: str
     listing_kind: str
     network: str
-    amount_drops: int
+    # #239 per-kind denomination (see ListSession).
+    amount_drops: int | None = None
+    amount_brix: str | None = None
     platform: str = "discord"
     id: str = field(default_factory=lambda: uuid.uuid4().hex)
     created_at: float = field(default_factory=time.time)
@@ -163,6 +201,23 @@ class BuySession:
     instruction: str | None = None
     txid: str | None = None
     poll_count: int = 0
+    # #239 trait-buy on-ramp: how this buyer pays ("BRIX" holder path /
+    # "XRP" on-ramp path; None for characters), the buffered AMM XRP quote
+    # shown to the UI, the stored push token (for the SECOND payload the
+    # service builds mid-session), and the on-ramp Payment's own
+    # payload/tx/poll state, kept separate from the accept's txid.
+    pay_with: str | None = None
+    price_xrp_quote: str | None = None
+    push_user_token: str | None = field(default=None, repr=False)
+    # #239: the buy-start request's XUMM return_url, kept so the SECOND
+    # payload (the accept built after the on-ramp) redirects back into the
+    # Activity exactly like the first (Greptile #248).
+    return_url: dict[str, str] | None = None
+    onramp_payload_uuid: str | None = None
+    onramp_txid: str | None = None
+    onramp_poll_count: int = 0
+    push: str | None = None  # see ListSession
+    issued_user_token: str | None = field(default=None, repr=False)
     kind: str = "buy"
 
     def to_dict(self) -> dict[str, Any]:
@@ -174,8 +229,11 @@ class BuySession:
             "reason": self.reason,
             "qr_url": self.qr_url,
             "xumm_url": self.xumm_url,
+            "push": self.push,
             "instruction": self.instruction,
             "offer_index": self.offer_index,
+            "pay_with": self.pay_with,
+            "price_xrp_quote": self.price_xrp_quote,
         }
 
 
@@ -214,6 +272,7 @@ async def advance_list_session(
             return None
         if not s.get("signed"):
             return None  # still awaiting_signature
+        _capture_issued_token(session, s)
         txid = s.get("txid")
         if not txid:
             return None  # signed, but XUMM hasn't surfaced the txid yet
@@ -240,7 +299,10 @@ async def advance_list_session(
         session.error = f"transaction failed: {meta.get('TransactionResult')}"
         return None
 
-    extracted = market_ops.extract_created_sell_offer(meta, session.nft_id)
+    # #239 per-kind denomination: a trait listing's created offer must be
+    # BRIX, a character's must be XRP drops — the extract branch enforces it.
+    expect = "brix" if session.listing_kind == "trait" else "xrp"
+    extracted = market_ops.extract_created_sell_offer(meta, session.nft_id, expect=expect)
     if extracted is None:
         session.state = FAILED
         session.error = "could not find the created sell offer in transaction metadata"
@@ -253,9 +315,10 @@ async def advance_list_session(
         "nft_id": session.nft_id,
         "kind": session.listing_kind,
         "seller": session.wallet_address,
-        # On-ledger truth from the CreatedNode, not session.amount_drops — the
+        # On-ledger truth from the CreatedNode, not the session's amount — the
         # signed sell offer's Amount is what a buyer will actually pay.
-        "amount_drops": extracted["amount_drops"],
+        "amount_drops": extracted.get("amount_drops"),
+        "amount_brix": extracted.get("amount_brix"),
         "slot": session.slot,
         "value": session.value,
     }
@@ -285,6 +348,7 @@ async def advance_cancel_session(
         return False
     if not s.get("signed"):
         return False
+    _capture_issued_token(session, s)
     session.state = DONE
     return True
 
@@ -300,14 +364,75 @@ async def advance_buy_session(
     listing reason='sold' and — for a trait listing — triggers settlement,
     see `trigger_trait_settlement`); "stale" the poll an on-ledger failure
     surfaces post-sign (the documented verify/sign race: the offer was
-    filled/cancelled first — caller closes reason='stale'); None every other
-    poll.
+    filled/cancelled first — caller closes reason='stale'); "onramp_confirmed"
+    (#239) once the on-ramp self-Payment validates tesSUCCESS — the caller
+    must then re-verify the sell offer, build the accept payload, and move
+    the session to AWAITING_SIGNATURE (this return is idempotent: the session
+    parks in ONRAMP_CONFIRMED and re-signals every poll until the caller
+    advances it, so a transient Xaman failure just retries); None every other
+    poll. An abandoned/expired on-ramp fails the session only — the listing
+    is never touched (the buyer keeps any BRIX they bought).
 
     See advance_list_session's docstring for why `get_payload_status`/
     `get_tx` are resolved at call time rather than bound as default
     argument values."""
     get_payload_status = get_payload_status or xumm_ops.get_payload_status
     get_tx = get_tx or xrpl_ops.get_tx
+
+    if session.state == ONRAMP_CONFIRMED:
+        return "onramp_confirmed"
+
+    if session.state == AWAITING_ONRAMP:
+        if session.onramp_txid is None:
+            s = await get_payload_status(session.onramp_payload_uuid)
+            if s is None:
+                return None
+            if s.get("expired"):
+                session.state = FAILED
+                session.error = "signing request expired"
+                session.reason = "onramp_expired"
+                return None
+            if not s.get("signed"):
+                return None
+            # Same fail-closed signer==buyer rule as the accept payload below:
+            # a shared QR signed by another wallet would buy BRIX for that
+            # wallet while this session proceeded to an accept the real buyer
+            # can't fund. Listing untouched.
+            if s.get("account") != session.wallet_address:
+                session.state = FAILED
+                session.error = "on-ramp payment signed by a different account than the buyer"
+                session.reason = "signer_mismatch"
+                return None
+            _capture_issued_token(session, s)
+            txid = s.get("txid")
+            if not txid:
+                return None
+            session.onramp_txid = txid
+
+        try:
+            tx = await get_tx(session.onramp_txid)
+        except Exception as e:
+            session.state = UNKNOWN
+            session.error = f"tx lookup failed: {e}"
+            return None
+        if not tx.get("validated"):
+            session.onramp_poll_count += 1
+            if session.onramp_poll_count >= MAX_FINALIZE_POLLS:
+                session.state = UNKNOWN
+                session.error = "gave up waiting for on-ramp validation"
+            return None
+        meta = tx.get("meta") or {}
+        result = meta.get("TransactionResult")
+        if result != "tesSUCCESS":
+            # The AMM buy failed on-ledger (pool moved past SendMax, etc.).
+            # Buyer-side failure: fail the session, leave the listing live.
+            session.state = FAILED
+            session.error = f"on-ramp payment failed: {result}"
+            session.reason = "onramp_failed"
+            return None
+        session.state = ONRAMP_CONFIRMED
+        return "onramp_confirmed"
+
     if session.state not in (AWAITING_SIGNATURE, PENDING):
         return None
 
@@ -335,6 +460,7 @@ async def advance_buy_session(
             session.error = "buy offer signed by a different account than the buyer"
             session.reason = "signer_mismatch"
             return None
+        _capture_issued_token(session, s)
         txid = s.get("txid")
         if not txid:
             return None
@@ -390,7 +516,7 @@ class TraitSellSession:
     wallet_address: str
     slot: str
     value: str
-    amount_drops: int
+    amount_brix: str  # #239: trait listings are BRIX-denominated
     extract_session: Any
     platform: str = "discord"
     id: str = field(default_factory=lambda: uuid.uuid4().hex)
@@ -403,6 +529,13 @@ class TraitSellSession:
     extract_xumm_url: str | None = None
     list_qr_url: str | None = None
     list_xumm_url: str | None = None
+    # #135/#212: stored push token for this user (threaded into the wizard's
+    # own List payload), per-signature push states for the UI, and the fresh
+    # token observed once a signature lands (cleared by the service).
+    push_user_token: str | None = field(default=None, repr=False)
+    extract_push: str | None = None
+    list_push: str | None = None
+    issued_user_token: str | None = field(default=None, repr=False)
     _extract_payload_uuid: str | None = field(default=None, repr=False)
     _list_session: Any = field(default=None, repr=False)
     kind: str = "trait_list"
@@ -417,8 +550,10 @@ class TraitSellSession:
             "offer_index": self.offer_index,
             "extract_qr_url": self.extract_qr_url,
             "extract_xumm_url": self.extract_xumm_url,
+            "extract_push": self.extract_push,
             "list_qr_url": self.list_qr_url,
             "list_xumm_url": self.list_xumm_url,
+            "list_push": self.list_push,
         }
 
 
@@ -453,6 +588,7 @@ async def advance_trait_sell_session(
         accept = extract.accept or {}
         session.extract_qr_url = accept.get("qr_url")
         session.extract_xumm_url = accept.get("xumm_url")
+        session.extract_push = accept.get("push")
         session._extract_payload_uuid = accept.get("uuid")
         session.state = EXTRACT_DONE
         return None
@@ -477,11 +613,13 @@ async def advance_trait_sell_session(
                 return None
             if not s.get("signed"):
                 return None  # still waiting on signature 1
+            _capture_issued_token(session, s)
 
         payload = await create_sell_offer_payload(
             session.wallet_address,
             session.nft_id,
-            str(session.amount_drops),
+            market_ops.brix_amount_dict(session.amount_brix),
+            user_token=session.push_user_token,
             platform=memos.platform_for_surface(session.platform),
         )
         if not payload:
@@ -490,12 +628,13 @@ async def advance_trait_sell_session(
             return None
         session.list_qr_url = payload["qr_url"]
         session.list_xumm_url = payload["xumm_url"]
+        session.list_push = payload.get("push")
         inner = ListSession(
             discord_id=session.discord_id,
             wallet_address=session.wallet_address,
             nft_id=session.nft_id,
             listing_kind="trait",
-            amount_drops=session.amount_drops,
+            amount_brix=session.amount_brix,
             slot=session.slot,
             value=session.value,
             platform=session.platform,
@@ -503,6 +642,7 @@ async def advance_trait_sell_session(
         inner.qr_url = payload["qr_url"]
         inner.xumm_url = payload["xumm_url"]
         inner.payload_uuid = payload.get("uuid")
+        inner.push = payload.get("push")
         session._list_session = inner
         session.state = LIST_PENDING
         return None
@@ -512,6 +652,11 @@ async def advance_trait_sell_session(
         row = await advance_list_session(
             inner, get_payload_status=get_payload_status, get_tx=get_tx
         )
+        # Bubble a token the inner List capture observed up to the wizard
+        # session the service actually polls.
+        if inner.issued_user_token:
+            session.issued_user_token = inner.issued_user_token
+            inner.issued_user_token = None
         if inner.state in (FAILED, UNKNOWN):
             session.state = FAILED
             session.error = inner.error

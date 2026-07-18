@@ -26,6 +26,7 @@ from xrpl.models.requests import (
 )
 from xrpl.models.transactions import (
     NFTokenBurn,
+    NFTokenCancelOffer,
     NFTokenCreateOffer,
     NFTokenMint,
     NFTokenModify,
@@ -37,7 +38,7 @@ from xrpl.transaction import autofill_and_sign, submit_and_wait
 from xrpl.utils import get_nftoken_id, xrp_to_drops
 from xrpl.wallet import Wallet
 
-from lfg_core import config, memos
+from lfg_core import config, memos, payment_ledger
 
 # On-ledger NFToken flag bits (mirror the tf* mint flags)
 NFT_FLAG_BURNABLE = 0x0001
@@ -212,9 +213,14 @@ async def create_nft_offer(
     amount: Any = "0",
     platform: str = memos.PLATFORM_BACKEND,
     campaign: str | None = None,
+    expiration: int | None = None,
+    action: str = memos.ACTION_CREATE_OFFER,
 ) -> str | None:
     """Create a sell offer transferring the NFT to destination; returns offer ID
-    or None. amount may be an XRP-drops string or an IssuedCurrencyAmount."""
+    or None. amount may be an XRP-drops string or an IssuedCurrencyAmount.
+    expiration is a ripple-epoch timestamp; omitted from serialization when
+    None. action lets callers (e.g. the trait shop) stamp non-default memo
+    provenance."""
     try:
         client = JsonRpcClient(config.JSON_RPC_URL)
         wallet = Wallet.from_seed(config.SEED)
@@ -225,10 +231,9 @@ async def create_nft_offer(
             amount=amount,
             nftoken_id=nft_id,
             flags=NFTokenCreateOfferFlag.TF_SELL_NFTOKEN,
+            expiration=expiration,
             source_tag=config.SOURCE_TAG,
-            memos=memos.build_memo_models(
-                memos.INITIATOR_BACKEND, platform, memos.ACTION_CREATE_OFFER, campaign
-            ),
+            memos=memos.build_memo_models(memos.INITIATOR_BACKEND, platform, action, campaign),
         )
 
         response = await asyncio.to_thread(submit_and_wait, offer, client, wallet)
@@ -250,6 +255,38 @@ async def create_nft_offer(
 
     except Exception as e:
         logging.error(f"create_nft_offer error: {e}")
+        return None
+
+
+async def cancel_nft_offer(offer_index: str, platform: str = memos.PLATFORM_BACKEND) -> str | None:
+    """Cancel an issuer-created NFTokenOffer (e.g. an expired/orphaned Trait
+    Shop sell offer) using the issuer wallet's own signing authority. Returns
+    the transaction hash, or None on a definitive failure — including the
+    benign case where the ledger object is already gone (accepted or
+    previously cancelled): callers that only want the offer purged before an
+    idempotent follow-up (e.g. the shop expiry sweep) should treat any None
+    here as safe to ignore and proceed."""
+    try:
+        wallet = Wallet.from_seed(config.SEED)
+        client = JsonRpcClient(config.JSON_RPC_URL)
+        cancel = NFTokenCancelOffer(
+            account=config.SIGNING_ACCOUNT,
+            nftoken_offers=[offer_index],
+            source_tag=config.SOURCE_TAG,
+            memos=memos.build_memo_models(
+                memos.INITIATOR_BACKEND, platform, memos.ACTION_CANCEL_OFFER
+            ),
+        )
+        result = await _submit_and_confirm(cancel, wallet, client, "NFTokenCancelOffer")
+        if result is None:
+            return None  # definitive failure (incl. offer already gone)
+        tx_hash: str = result["hash"]
+        logging.info(f"NFT offer cancelled: {offer_index} ({tx_hash})")
+        return tx_hash
+    except IndeterminateResultError:
+        raise  # never collapse an unknown outcome to a definitive-failure None
+    except Exception:
+        logging.error(f"cancel_nft_offer error: {traceback.format_exc()}")
         return None
 
 
@@ -670,6 +707,13 @@ def _payment_matches(
         return False
     if tx.get("Destination") != destination:
         return False
+    # A validated tec... payment moved no funds and has no delivered_amount,
+    # so the DeliverMax fallback below would happily match it — refuse any
+    # explicit non-success result before looking at amounts (#197 review).
+    if isinstance(meta, dict):
+        tx_result = meta.get("TransactionResult")
+        if tx_result is not None and tx_result != "tesSUCCESS":
+            return False
     # Prefer the validated delivered amount (also guards against partial
     # payments); fall back to Amount (API v1) / DeliverMax (API v2).
     amount = None
@@ -709,27 +753,67 @@ def _tx_unix_time(entry: dict[str, Any], tx: dict[str, Any]) -> float | None:
     return None
 
 
+def _tx_hash(entry: dict[str, Any], tx: dict[str, Any]) -> str | None:
+    """Tx hash of a stream message or account_tx entry across API versions:
+    v2 puts it on the entry/message, v1 inside the transaction object."""
+    h = entry.get("hash") or tx.get("hash")
+    return h if isinstance(h, str) else None
+
+
 async def _recent_payment_exists(
-    websocket: Any, account: str, matches: Callable[..., bool], not_before_unix: float
+    websocket: Any,
+    account: str,
+    claim: Callable[[dict[str, Any], Any, dict[str, Any]], bool],
+    not_before_unix: float,
 ) -> bool:
-    """Check already-validated transactions for a matching payment. Covers
+    """Check already-validated transactions for a claimable payment. Covers
     payments that land between the payment link being shown to the user and
-    the live subscription becoming active."""
-    response = await websocket.request(AccountTx(account=account, limit=20))
-    for entry in response.result.get("transactions", []):
-        if not entry.get("validated", True):
-            continue
-        tx, meta = _extract_tx_and_meta(entry)
-        if tx is None:
-            continue
-        when = _tx_unix_time(entry, tx)
-        # Unknown-age transactions are skipped so an old payment can't be
-        # replayed for a free mint.
-        if when is None or when < not_before_unix:
-            continue
-        if matches(tx, meta):
-            return True
-    return False
+    the live subscription becoming active — and, when the caller widened
+    not_before for credits (issue #196) or resumed a durable bulk record
+    (#228), payments from before this process was listening.
+
+    The scan is time-bounded, never page-bounded: it pages via marker until
+    the first entry older than not_before_unix (account_tx returns
+    newest-first) or history ends, so a valid payment can't be stranded
+    behind busy issuer traffic that accumulated while the service was down.
+    For a live session not_before is ~start-10s, so this is a single page in
+    practice. A progress guard aborts (loudly) if a page fails to reach
+    strictly older transactions, so a server that returns markers forever
+    cannot loop the scan."""
+    marker = None
+    prev_oldest: float | None = None
+    while True:
+        request = AccountTx(account=account, limit=200, marker=marker)
+        response = await websocket.request(request)
+        oldest: float | None = None
+        for entry in response.result.get("transactions", []):
+            if not entry.get("validated", True):
+                continue
+            tx, meta = _extract_tx_and_meta(entry)
+            if tx is None:
+                continue
+            when = _tx_unix_time(entry, tx)
+            # Unknown-age transactions are skipped so an old payment can't be
+            # replayed for a free mint.
+            if when is None:
+                continue
+            oldest = when if oldest is None else min(oldest, when)
+            if when < not_before_unix:
+                return False  # newest-first: everything after this is older
+            if claim(tx, meta, entry):
+                return True
+        marker = response.result.get("marker")
+        if not marker:
+            return False
+        if oldest is None or (prev_oldest is not None and oldest >= prev_oldest):
+            logging.warning(
+                f"Payment history scan for {account} aborted: page made no "
+                f"progress toward the not_before floor (oldest {oldest}, "
+                f"previous {prev_oldest}); an unconsumed payment may exist "
+                f"beyond it"
+            )
+            return False
+        prev_oldest = oldest
 
 
 async def wait_for_payment(
@@ -740,6 +824,8 @@ async def wait_for_payment(
     not_before: float | None = None,
     currency: str | None = None,
     issuer: str | None = None,
+    allow_credit: bool = False,
+    claimant: str | None = None,
 ) -> bool:
     """
     Subscribe to the destination account and wait for a token payment from
@@ -748,6 +834,21 @@ async def wait_for_payment(
     bounds the backfill check for payments that landed before the
     subscription was active. currency/issuer default to the LFGO mint token;
     pass others (e.g. BRIX) for swap fees.
+
+    Every matched payment is claimed by tx hash in the consumed-payment
+    ledger, so one on-ledger payment can never satisfy two waits (#196).
+    allow_credit additionally widens the backfill window to the ledger's
+    bootstrap floor: an unconsumed payment the sender made while no session
+    was listening (duplicate sign, post-timeout landing) is honoured instead
+    of silently kept. Only safe for destinations that receive nothing but
+    this payment type (the LFGO issuer) — an unrelated older payment to a
+    busier account could otherwise be claimed.
+
+    `claimant` (#228) tags the ledger claim with the calling flow's exact
+    identity (e.g. "bulk:<job_id>") so that, after a crash between the claim
+    committing and the caller persisting its paid state, the resumed flow can
+    reconcile via payment_ledger.find_claimed instead of reading the dedup
+    miss as "never paid".
     """
     timeout_seconds = timeout_seconds or config.PAYMENT_TIMEOUT_SECONDS
     currency = currency or config.TOKEN_CURRENCY_HEX
@@ -756,20 +857,58 @@ async def wait_for_payment(
     deadline = start_time + timeout_seconds
     if not_before is None:
         not_before = start_time - 10
+    backfill_not_before = not_before
+    if allow_credit:
+        # Credits are spendable back to the credit floor: never before the
+        # ledger bootstrap (pre-tracking payments were matched but never
+        # recorded) and never older than the TTL (which is what keeps the
+        # scan depth bounded as issuer history grows).
+        credit_floor = max(
+            payment_ledger.bootstrap_floor(),
+            start_time - config.MINT_CREDIT_TTL_SECONDS,
+        )
+        backfill_not_before = min(not_before, credit_floor)
     context = f"{expected_amount} {currency} from {expected_sender} to {destination}"
 
-    def matches(tx: dict[str, Any], meta: Any) -> bool:
-        return _payment_matches(
+    def claim(tx: dict[str, Any], meta: Any, entry: dict[str, Any]) -> bool:
+        if not _payment_matches(
             tx, meta, destination, expected_sender, expected_amount, currency, issuer
-        )
+        ):
+            return False
+        tx_hash = _tx_hash(entry, tx)
+        if tx_hash is None:
+            # No hash means no way to mark it consumed; refuse rather than
+            # let the same payment satisfy this and a later wait.
+            logging.warning(f"Matching payment without a tx hash ignored ({context})")
+            return False
+        return payment_ledger.try_consume(tx_hash, expected_sender, destination, claimant=claimant)
 
     async def watch(websocket: Any) -> bool:
         async for message in websocket:
             tx, meta = _extract_tx_and_meta(message)
-            if tx and matches(tx, meta):
-                logging.info(f"✅ Payment received from {expected_sender}: {tx.get('hash')}")
+            if tx and claim(tx, meta, message):
+                logging.info(f"✅ Payment received from {expected_sender}: {_tx_hash(message, tx)}")
                 return True
         return False  # stream closed without a matching payment
+
+    async def final_grace_check() -> bool:
+        # A payment signed in time can validate seconds after the deadline
+        # (issue #196: one landed 11s late and was silently kept). Wait out
+        # the grace period, then re-check history once before giving up.
+        if not allow_credit:
+            return False
+        await asyncio.sleep(config.PAYMENT_GRACE_SECONDS)
+        try:
+            async with AsyncWebsocketClient(config.WS_URL) as websocket:
+                if await asyncio.wait_for(
+                    _recent_payment_exists(websocket, destination, claim, backfill_not_before),
+                    timeout=15,
+                ):
+                    logging.info(f"✅ Payment found in post-timeout grace check ({context})")
+                    return True
+        except Exception as e:
+            logging.error(f"Post-timeout grace check failed ({context}): {e}")
+        return False
 
     # A dropped websocket must not look like "payment never arrived": keep
     # reconnecting until the deadline, re-checking recent history each time
@@ -778,6 +917,8 @@ async def wait_for_payment(
     while True:
         remaining = deadline - time.time()
         if remaining <= 0:
+            if await final_grace_check():
+                return True
             logging.warning(
                 f"Payment wait timed out after {timeout_seconds}s "
                 f"({context}; {reconnects} reconnects)"
@@ -791,7 +932,7 @@ async def wait_for_payment(
                 )
 
                 if await asyncio.wait_for(
-                    _recent_payment_exists(websocket, destination, matches, not_before),
+                    _recent_payment_exists(websocket, destination, claim, backfill_not_before),
                     timeout=max(1, min(remaining, 15)),
                 ):
                     logging.info(f"✅ Payment found in recent history ({context})")
@@ -804,6 +945,8 @@ async def wait_for_payment(
             # Only terminal once the overall deadline is spent — a stalled
             # history check times out well before that and just reconnects.
             if time.time() >= deadline:
+                if await final_grace_check():
+                    return True
                 logging.warning(
                     f"Payment wait timed out after {timeout_seconds}s "
                     f"({context}; {reconnects} reconnects)"

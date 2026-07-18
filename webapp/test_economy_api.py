@@ -118,12 +118,18 @@ def test_assemble_session_dict_surfaces_accept_link():
         {
             "nft_id": "N",
             "image_url": "img",
+            "video_url": "vid.mp4",
             "metadata_url": "m",
             "accept": {"xumm_url": "https://xaman/abc"},
         }
     ]
     d = economy_api.economy_session_dict("assemble", s)
     assert d["accept"] == "https://xaman/abc" and d["nft_id"] == "N"
+    # Animated assembles (#250) surface the .mp4 alongside the still.
+    assert d["image_url"] == "img" and d["video_url"] == "vid.mp4"
+    # Records that predate the field (or static art) degrade to None.
+    del s.results[0]["video_url"]
+    assert economy_api.economy_session_dict("assemble", s)["video_url"] is None
 
 
 def test_web_session_delegates():
@@ -165,7 +171,7 @@ def test_start_equip_happy_returns_session(monkeypatch):
     # Stub the real deps builder so no XRPL/CDN is touched.
     from scripts import _economy_deps
 
-    monkeypatch.setattr(_economy_deps, "build_economy_deps", lambda c: object())
+    monkeypatch.setattr(_economy_deps, "build_economy_deps", lambda c, user_token=None: object())
 
     async def go():
         ws = await economy_api.start_equip("123", "rOwner", "A", "Head", "Halo")
@@ -241,7 +247,7 @@ def test_start_equip_closes_conn_after_task(monkeypatch):
     monkeypatch.setattr(economy_flow, "run_equip", fake_run_equip)
     from scripts import _economy_deps
 
-    monkeypatch.setattr(_economy_deps, "build_economy_deps", lambda c: object())
+    monkeypatch.setattr(_economy_deps, "build_economy_deps", lambda c, user_token=None: object())
 
     async def go():
         await economy_api.start_equip("123", "rOwner", "A", "Head", "Halo")
@@ -317,7 +323,7 @@ def test_run_and_close_marks_session_failed_on_runner_crash(monkeypatch):
     monkeypatch.setattr(economy_flow, "run_equip", crashing_runner)
     from scripts import _economy_deps
 
-    monkeypatch.setattr(_economy_deps, "build_economy_deps", lambda c: object())
+    monkeypatch.setattr(_economy_deps, "build_economy_deps", lambda c, user_token=None: object())
 
     async def go():
         ws = await economy_api.start_equip("123", "rOwner", "A", "Head", "Halo")
@@ -400,6 +406,30 @@ def test_start_assemble_rejects_without_active_closet(monkeypatch):
     async def go():
         with pytest.raises(economy_api.EconomyError, match="Closet"):
             await economy_api.start_assemble("123", "rOwner", 3537, {"Head": "Crown"})
+
+    asyncio.get_event_loop().run_until_complete(go())
+
+
+def test_assemble_prefill_rejects_without_active_closet():
+    """assemble_prefill gates on an active Closet up front, like start_assemble
+    (the commit path) — even when a body is present, no active Closet means the
+    prefill must raise rather than propose a set start_assemble would reject."""
+    conn = _seed_conn()  # no closet_tokens row -> no active closet
+    from lfg_core import trait_economy
+
+    economy_store.freeze_genesis(
+        conn,
+        trait_economy.Genesis(
+            trait_counts={("Head", "Crown"): 1},
+            edition_bodies={3537: ("male", "male")},
+        ),
+        {},
+    )
+    economy_store.set_closet_contents(conn, "rOwner", [("Head", "Crown", 1)], [3537])
+
+    async def go():
+        with pytest.raises(economy_api.EconomyError, match="Closet"):
+            await economy_api.assemble_prefill(conn, "rOwner")
 
     asyncio.get_event_loop().run_until_complete(go())
 
@@ -661,7 +691,7 @@ def test_start_equip_compatible_value_still_starts(monkeypatch, body_gate_store)
     monkeypatch.setattr(economy_flow, "run_equip", fake_run_equip)
     from scripts import _economy_deps
 
-    monkeypatch.setattr(_economy_deps, "build_economy_deps", lambda c: object())
+    monkeypatch.setattr(_economy_deps, "build_economy_deps", lambda c, user_token=None: object())
 
     async def go():
         ws = await economy_api.start_equip("123", "rOwner", "A", "Clothing", "Hoodie")
@@ -710,7 +740,7 @@ def test_start_equip_accepts_matrix_permitted_foreign_value(monkeypatch, body_ga
     monkeypatch.setattr(economy_flow, "run_equip", fake_run_equip)
     from scripts import _economy_deps
 
-    monkeypatch.setattr(_economy_deps, "build_economy_deps", lambda c: object())
+    monkeypatch.setattr(_economy_deps, "build_economy_deps", lambda c, user_token=None: object())
 
     async def go():
         ws = await economy_api.start_equip("123", "rOwner", "APE1", "Head", "Spikey Black")
@@ -859,3 +889,96 @@ def test_start_assemble_closes_conn_on_body_affinity_reject(monkeypatch, body_ga
     assert tracked.close_count == 1, (
         f"expected conn.close() called exactly once on reject, got {tracked.close_count}"
     )
+
+
+# --- Assemble prefill (server-side auto-fill for the Build panel's + tile) ---
+# The client cannot know body affinity (that lives in trait_config +
+# swap_compose.resolve_layer), so it asks the server which edition/asset set
+# to propose instead of blindly picking the first asset per slot.
+
+
+def _prefill_conn(edition_bodies, assets, bodies):
+    from lfg_core import trait_economy
+
+    conn = nft_index.init_db(":memory:")
+    economy_store.init_economy_schema(conn)
+    economy_store.freeze_genesis(
+        conn,
+        trait_economy.Genesis(trait_counts={}, edition_bodies=edition_bodies),
+        {},
+    )
+    economy_store.set_closet_token(conn, "rOwner", "NFT_CLOSET", "deadbeef", status="active")
+    economy_store.set_closet_contents(conn, "rOwner", assets, bodies)
+    return conn
+
+
+def test_assemble_prefill_skips_incompatible_asset(monkeypatch, body_gate_store):
+    """Prefill must skip a female-only Clothing asset when filling a
+    male-bodied edition and fall through to the next compatible asset --
+    the exact bug behind 'Davy Jones Beard does not fit a skeleton body'."""
+    from lfg_core import trait_economy
+
+    edition = 99
+    assets = [(s, "None", 1) for s in trait_economy.NON_BODY_SLOTS if s != "Clothing"]
+    # Incompatible asset first: the naive "first asset with count>0" pick fails.
+    assets += [("Clothing", "Summer Dress", 1), ("Clothing", "Hoodie", 1)]
+    conn = _prefill_conn({edition: ("male", "male")}, assets, [edition])
+    monkeypatch.setattr(economy_api.layer_store, "get_layer_store", lambda: body_gate_store)
+
+    pre = asyncio.get_event_loop().run_until_complete(economy_api.assemble_prefill(conn, "rOwner"))
+    assert pre["edition"] == edition
+    assert pre["body"] == "male"
+    assert pre["chosen"]["Clothing"] == "Hoodie"
+    assert pre["missing"] == []
+    # The proposed set must actually pass the commit-path gate.
+    from lfg_core.trait_economy import can_assemble, effective_genesis
+
+    genesis = effective_genesis(
+        economy_store.read_genesis(conn), economy_store.read_supply_changes(conn)
+    )
+    owned = {(s, v): c for (o, s, v, c) in economy_store.read_closet_assets(conn) if o == "rOwner"}
+    assert can_assemble(edition, pre["chosen"], {edition}, owned, set(), genesis).ok
+
+
+def test_assemble_prefill_reports_missing_slot(monkeypatch, body_gate_store):
+    """When no compatible asset exists for a slot, prefill reports the slot
+    as missing instead of proposing a set the server would reject."""
+    from lfg_core import trait_economy
+
+    edition = 99
+    assets = [(s, "None", 1) for s in trait_economy.NON_BODY_SLOTS if s != "Clothing"]
+    assets += [("Clothing", "Summer Dress", 1)]  # female-only; male body can't use it
+    conn = _prefill_conn({edition: ("male", "male")}, assets, [edition])
+    monkeypatch.setattr(economy_api.layer_store, "get_layer_store", lambda: body_gate_store)
+
+    pre = asyncio.get_event_loop().run_until_complete(economy_api.assemble_prefill(conn, "rOwner"))
+    assert pre["missing"] == ["Clothing"]
+    assert pre["body"] == "male"
+
+
+def test_assemble_prefill_prefers_fully_fillable_body(monkeypatch, body_gate_store):
+    """With two closet bodies, prefill returns the first edition whose set
+    fills completely -- here the female body, whose dir holds Summer Dress --
+    rather than stopping at the male body with a missing Clothing slot."""
+    from lfg_core import trait_economy
+
+    assets = [(s, "None", 1) for s in trait_economy.NON_BODY_SLOTS if s != "Clothing"]
+    assets += [("Clothing", "Summer Dress", 1)]
+    conn = _prefill_conn({99: ("male", "male"), 100: ("female", "female")}, assets, [99, 100])
+    monkeypatch.setattr(economy_api.layer_store, "get_layer_store", lambda: body_gate_store)
+
+    pre = asyncio.get_event_loop().run_until_complete(economy_api.assemble_prefill(conn, "rOwner"))
+    assert pre["edition"] == 100
+    assert pre["chosen"]["Clothing"] == "Summer Dress"
+    assert pre["missing"] == []
+
+
+def test_assemble_prefill_no_bodies_raises(monkeypatch, body_gate_store):
+    conn = _prefill_conn({}, [("Head", "Halo", 1)], [])
+    monkeypatch.setattr(economy_api.layer_store, "get_layer_store", lambda: body_gate_store)
+
+    async def go():
+        with pytest.raises(economy_api.EconomyError, match="[Nn]o bodies"):
+            await economy_api.assemble_prefill(conn, "rOwner")
+
+    asyncio.get_event_loop().run_until_complete(go())

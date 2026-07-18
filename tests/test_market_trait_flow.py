@@ -140,7 +140,9 @@ def _fake_status(*, signed, expired=False, txid=None):
     return fake
 
 
-def _sell_offer_meta(nft_id, offer_index, amount_drops):
+def _sell_offer_meta(nft_id, offer_index, amount_brix):
+    # #239: trait listings are BRIX-denominated — the created offer's Amount
+    # is an IssuedCurrencyAmount on our token currency/issuer.
     return {
         "TransactionResult": "tesSUCCESS",
         "AffectedNodes": [
@@ -150,7 +152,11 @@ def _sell_offer_meta(nft_id, offer_index, amount_drops):
                     "LedgerIndex": offer_index,
                     "NewFields": {
                         "NFTokenID": nft_id,
-                        "Amount": str(amount_drops),
+                        "Amount": {
+                            "currency": config.TOKEN_CURRENCY_HEX,
+                            "issuer": config.TOKEN_ISSUER_ADDRESS,
+                            "value": str(amount_brix),
+                        },
                         "Flags": 1,
                     },
                 }
@@ -181,7 +187,7 @@ def _wizard_session(extract, **overrides):
         "wallet_address": SELLER,
         "slot": "Hat",
         "value": "Wizard Hat",
-        "amount_drops": 500_000,
+        "amount_brix": "10",
         "extract_session": extract,
     }
     base.update(overrides)
@@ -258,8 +264,8 @@ class TestAdvanceTraitSellSession:
 
         calls = []
 
-        async def fake_create_sell(account, nft_id, drops, **kwargs):
-            calls.append((account, nft_id, drops))
+        async def fake_create_sell(account, nft_id, amount, **kwargs):
+            calls.append((account, nft_id, amount))
             return {
                 "qr_url": "https://list-qr",
                 "xumm_url": "https://xumm.app/sign/L1",
@@ -277,7 +283,17 @@ class TestAdvanceTraitSellSession:
         assert s.state == market_flow.LIST_PENDING
         assert s.list_qr_url == "https://list-qr"
         assert s.list_xumm_url == "https://xumm.app/sign/L1"
-        assert calls == [(SELLER, TRAIT1, "500000")]
+        assert calls == [
+            (
+                SELLER,
+                TRAIT1,
+                {
+                    "currency": config.TOKEN_CURRENCY_HEX,
+                    "issuer": config.TOKEN_ISSUER_ADDRESS,
+                    "value": "10",
+                },
+            )
+        ]
 
     def test_list_step_delegates_to_advance_list_session_and_writes_row_on_success(self):
         extract = _FakeExtract(
@@ -294,7 +310,7 @@ class TestAdvanceTraitSellSession:
         )
         assert s.state == market_flow.LIST_PENDING
 
-        meta = _sell_offer_meta(TRAIT1, "B" * 64, 500_000)
+        meta = _sell_offer_meta(TRAIT1, "B" * 64, "10")
 
         async def fake_get_tx(_hash):
             return {"validated": True, "meta": meta}
@@ -373,23 +389,32 @@ def test_trait_list_start_bad_price_400_no_extract_started(
 
     monkeypatch.setattr(server.economy_api, "start_extract", boom)
     req = _post_request(
-        "/api/market/trait/list", {"slot": "Hat", "value": "Wizard Hat", "price_xrp": bad_price}
+        "/api/market/trait/list", {"slot": "Hat", "value": "Wizard Hat", "price_brix": bad_price}
     )
     resp = _run(server.handle_market_trait_list_start(req))
     assert resp.status == 400
     assert len(server.market_sessions) == 0
 
 
+async def _fake_push_token(user):
+    return "stored-tok"
+
+
 def test_trait_list_start_success_returns_extract_pending_session(
     onchain_env, market_wallet, monkeypatch
 ):
-    async def fake_start_extract(discord_id, owner, body):
+    monkeypatch.setattr(server, "_push_token", _fake_push_token)
+
+    async def fake_start_extract(discord_id, owner, body, user_token=None):
         assert body == {"slot": "Hat", "value": "Wizard Hat"}
+        # #212: the caller's stored push token must reach the extract flow so
+        # the accept-offer payload (signature 1) can be push-delivered.
+        assert user_token == "stored-tok"
         return _FakeEconomyWebSession(inner=_FakeExtract(state="running"))
 
     monkeypatch.setattr(server.economy_api, "start_extract", fake_start_extract)
     req = _post_request(
-        "/api/market/trait/list", {"slot": "Hat", "value": "Wizard Hat", "price_xrp": "5"}
+        "/api/market/trait/list", {"slot": "Hat", "value": "Wizard Hat", "price_brix": "5"}
     )
     resp = _run(server.handle_market_trait_list_start(req))
     assert resp.status == 200
@@ -401,12 +426,15 @@ def test_trait_list_start_success_returns_extract_pending_session(
 def test_trait_list_start_economy_error_400_no_session(onchain_env, market_wallet, monkeypatch):
     from webapp import economy_api
 
-    async def fake_start_extract(discord_id, owner, body):
+    monkeypatch.setattr(server, "_push_token", _fake_push_token)
+
+    async def fake_start_extract(discord_id, owner, body, user_token=None):
+        assert user_token == "stored-tok"
         raise economy_api.EconomyError("Create and claim your Closet first.")
 
     monkeypatch.setattr(server.economy_api, "start_extract", fake_start_extract)
     req = _post_request(
-        "/api/market/trait/list", {"slot": "Hat", "value": "Wizard Hat", "price_xrp": "5"}
+        "/api/market/trait/list", {"slot": "Hat", "value": "Wizard Hat", "price_brix": "5"}
     )
     resp = _run(server.handle_market_trait_list_start(req))
     assert resp.status == 400
@@ -416,7 +444,7 @@ def test_trait_list_start_economy_error_400_no_session(onchain_env, market_walle
 def test_trait_list_start_disabled_economy_403(onchain_env, market_wallet, monkeypatch):
     monkeypatch.setattr(server.config, "ECONOMY_ENABLED", False)
     req = _post_request(
-        "/api/market/trait/list", {"slot": "Hat", "value": "Wizard Hat", "price_xrp": "5"}
+        "/api/market/trait/list", {"slot": "Hat", "value": "Wizard Hat", "price_brix": "5"}
     )
     resp = _run(server.handle_market_trait_list_start(req))
     assert resp.status == 403
@@ -447,7 +475,7 @@ def _make_wizard_session(extract, **overrides):
         "wallet_address": SELLER,
         "slot": "Hat",
         "value": "Wizard Hat",
-        "amount_drops": 500_000,
+        "amount_brix": "10",
         "extract_session": extract,
         "platform": "discord",
     }

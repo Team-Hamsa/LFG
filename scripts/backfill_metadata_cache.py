@@ -20,8 +20,8 @@ Sources, in order:
      burnCount the CSV lacks, and a wrong burnCount would collide upload
      basenames on the next swap.
   3. Live fetch (optional, --no-fetch to skip): whatever is still missing is
-     fetched via nft_index.fetch_metadata_multi (multi-gateway for ipfs://,
-     direct for CDN URLs).
+     fetched via nft_index.fetch_metadata_multi (CDN URLs only — ipfs://
+     URIs are never fetched; the Bithomp CSV is their source).
 
 Idempotent and resumable: already-cached URIs are never re-fetched; each
 fetched batch commits as it lands, so Ctrl-C and re-run is safe.
@@ -103,8 +103,8 @@ def apply_csv(conn: sqlite3.Connection, path: str, missing: set[str]) -> int:
 
 
 async def fetch_missing(conn: sqlite3.Connection, missing: list[str]) -> int:
-    """Fetch metadata for the leftover URIs (multi-gateway ipfs / direct CDN),
-    committing as batches land. Returns the number cached."""
+    """Fetch metadata for the leftover URIs (CDN http(s) only; ipfs:// URIs
+    are never fetched), committing as batches land. Returns the number cached."""
     fetched = 0
     async with aiohttp.ClientSession() as http:
         for i in range(0, len(missing), _FETCH_COMMIT_EVERY):

@@ -44,12 +44,18 @@ async def handle_mint(svc: LFGServiceClient, update: Any, context: Any) -> None:
             qr_png = await svc.qr_png(payment_link)
         except ServiceError as e:
             logging.error(f"payment QR render failed: {e}")
+            # Cancel the in-flight session so it doesn't hold open until timeout
+            # and block a retry (CodeRabbit #209).
+            try:
+                await svc.cancel_mint(user_id, session_id)
+            except ServiceError:
+                logging.warning("mint cancel after QR-render failure failed", exc_info=True)
             await bot.send_message(chat_id, render.error_caption(friendly_error(e)))
             return
         await bot.send_photo(
             chat_id,
             photo=render.photo_input(qr_png, "payment_qr.png"),
-            caption=render.payment_caption(payment_link),
+            caption=render.payment_caption(payment_link, push=session.get("payment_push")),
         )
 
     # 3. wait for a terminal state (SDK polls /api/mint/<id> + backs off)
@@ -66,9 +72,11 @@ async def handle_mint(svc: LFGServiceClient, update: Any, context: Any) -> None:
         return
 
     # 3b. show the minter their artwork first (large), then the claim QR.
-    image_url = final.get("image_url")
-    if image_url:
-        await bot.send_photo(chat_id, photo=image_url, caption=render.artwork_caption(final))
+    # Animated mints carry a video_url (MP4) next to the PNG poster frame —
+    # prefer it so the animation actually plays.
+    artwork_url = final.get("video_url") or final.get("image_url")
+    if artwork_url:
+        await render.send_media(bot, chat_id, artwork_url, render.artwork_caption(final))
 
     # 4. offer-accept QR. Prefer the service-hosted accept_qr_url (no extra
     #    round-trip); otherwise render the accept deeplink ourselves.

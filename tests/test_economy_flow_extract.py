@@ -1,5 +1,6 @@
 import asyncio
 import json
+import logging
 import sqlite3
 
 from lfg_core import closet_token as ct
@@ -18,13 +19,22 @@ def _run(coro):
 
 
 class _F:
-    def __init__(self, *, fail_sync=False, raise_sync=False, fail_offer=False, raise_offer=False):
+    def __init__(
+        self,
+        *,
+        fail_sync=False,
+        raise_sync=False,
+        fail_offer=False,
+        raise_offer=False,
+        fail_accept=False,
+    ):
         self.minted, self.burns, self.uploads = [], [], 0
         self.modifies = 0
         self.fail_sync = fail_sync
         self.raise_sync = raise_sync
         self.fail_offer = fail_offer
         self.raise_offer = raise_offer
+        self.fail_accept = fail_accept
 
     async def trait_compose(self, slot, value):
         return f"https://cdn/trait/{slot}-{value}.png"
@@ -59,7 +69,7 @@ class _F:
         return None if self.fail_offer else "OFFER"
 
     async def closet_accept(self, offer_id):
-        return {"xumm_url": "x"}
+        return None if self.fail_accept else {"xumm_url": "x"}
 
     async def closet_owner(self, nft_id):
         return "rUser"
@@ -139,6 +149,26 @@ def test_extract_burns_back_on_closet_sync_failure(tmp_path):
     assert es.read_trait_tokens(conn) == []  # no token row left
     assets = {(sl, v): n for o, sl, v, n in es.read_closet_assets(conn) if o == "rUser"}
     assert assets[("Hat", "Cap")] == 2  # closet untouched
+
+
+def test_extract_accept_payload_failure_warns_but_completes(tmp_path, caplog):
+    """#262 'warn, don't fail': only the XUMM accept-payload build failed
+    (429 backoff / outage) — the delivery offer is already on-chain and
+    claimable via Xaman Events, so the session must complete DONE (no
+    burn-back) with a warning breadcrumb in the ops log, never FAILED."""
+    conn = sqlite3.connect(":memory:")
+    _active_closet_with_trait(conn)
+    f = _F(fail_accept=True)
+    s = ef.ExtractSession(owner="rUser", slot="Hat", value="Cap")
+    with caplog.at_level(logging.WARNING):
+        _run(ef.run_extract(s, _deps(conn, f, tmp_path)))
+
+    assert s.state == ef.DONE
+    assert s.accept is None
+    assert f.burns == []  # the offer is on-chain — no compensation
+    record = json.loads((tmp_path / f"extract-{s.id}.json").read_text())
+    assert record["status"] == "complete"
+    assert any("accept payload creation failed" in r.message for r in caplog.records)
 
 
 # --- #107: phase-aware extract branches ---

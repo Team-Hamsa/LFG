@@ -9,7 +9,19 @@ from typing import Any
 from telegram import InputFile
 
 
-def payment_caption(payment_link: str) -> str:
+def _push_hint(push: Any) -> str:
+    """#212: one-line delivery hint. 'sent' = the sign request was pushed to
+    the user's Xaman app; 'failed' = a push was attempted but not delivered
+    (the request still shows under Xaman's Events list); anything else = plain
+    QR sign, no hint."""
+    if push == "sent":
+        return "📲 Also sent straight to your Xaman app — you can just approve it there.\n"
+    if push == "failed":
+        return "(You can also find this request under Events in Xaman.)\n"
+    return ""
+
+
+def payment_caption(payment_link: str, push: Any = None) -> str:
     return (
         "💰 Token Payment Required\n\n"
         "Pay 1 token to mint your NFT:\n"
@@ -17,6 +29,7 @@ def payment_caption(payment_link: str) -> str:
         "2. Approve the payment\n"
         "3. Wait for confirmation\n\n"
         f"Open payment link: {payment_link}\n"
+        f"{_push_hint(push)}"
         "(expires in 5 minutes)"
     )
 
@@ -44,6 +57,7 @@ def offer_caption(final: dict[str, Any], *, with_qr: bool = True) -> str:
         "2. Review and accept the offer\n"
         "3. Your NFT appears in your wallet\n\n"
         f"Open in XUMM: {accept_link}\n"
+        f"{_push_hint(final.get('accept_push'))}"
         "(offer expires in 24 hours)"
     )
 
@@ -74,3 +88,23 @@ def linked_caption(summary: str) -> str:
 
 def photo_input(data: bytes, filename: str) -> InputFile:
     return InputFile(io.BytesIO(data), filename=filename)
+
+
+def is_video_url(url: Any) -> bool:
+    """True when the media URL points at an MP4 (animated NFTs upload a
+    `<basename>.mp4` next to the PNG poster frame)."""
+    if not url:
+        return False
+    return str(url).split("?", 1)[0].lower().endswith(".mp4")
+
+
+async def send_media(bot: Any, chat_id: Any, media_url: str, caption: str | None = None) -> None:
+    """Send artwork by URL, as a playing video when it's an MP4 and as a
+    photo otherwise — a static send_photo of an MP4 URL is what made animated
+    mints show up frozen on Telegram."""
+    if is_video_url(media_url):
+        # supports_streaming: without it Telegram mobile buffers the whole
+        # file (download spinner) instead of playing the MP4 inline.
+        await bot.send_video(chat_id, video=media_url, caption=caption, supports_streaming=True)
+    else:
+        await bot.send_photo(chat_id, photo=media_url, caption=caption)

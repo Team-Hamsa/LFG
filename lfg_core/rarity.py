@@ -36,6 +36,7 @@ CREATE TABLE IF NOT EXISTS trait_rarity (
     trait            TEXT NOT NULL,
     live_count       INTEGER NOT NULL DEFAULT 0,
     floor_weight     REAL NOT NULL DEFAULT 0.005,
+    shop_count       INTEGER NOT NULL DEFAULT 0,
     boost_initial    REAL,
     boost_step_hours INTEGER DEFAULT 24,
     boost_started_at TIMESTAMP,
@@ -75,6 +76,9 @@ def ensure_schema(conn: sqlite3.Connection) -> None:
             conn.execute("ALTER TABLE LFG ADD COLUMN network TEXT NOT NULL DEFAULT 'mainnet'")
         if "body_type" not in lfg_cols:
             conn.execute("ALTER TABLE LFG ADD COLUMN body_type TEXT NOT NULL DEFAULT '*'")
+    rarity_cols = {r[1] for r in conn.execute("PRAGMA table_info(trait_rarity)")}
+    if "shop_count" not in rarity_cols:
+        conn.execute("ALTER TABLE trait_rarity ADD COLUMN shop_count INTEGER NOT NULL DEFAULT 0")
     conn.commit()
 
 
@@ -313,6 +317,67 @@ def arm_boost(
         raise ValueError(f"No trait_rarity row for {network}/{body}/{category}/{trait}")
 
 
+def cancel_boost(
+    conn: sqlite3.Connection,
+    body: str,
+    category: str,
+    trait: str,
+    *,
+    network: str | None = None,
+) -> None:
+    """Admin: clear a boost (armed, active, or finished) back to no-boost.
+    boost_step_hours is left in place — it's a harmless default for a future
+    re-arm; boost_multiplier/boost_status key off boost_initial."""
+    network = network or config.XRPL_NETWORK
+    cur = conn.execute(
+        """UPDATE trait_rarity SET boost_initial=NULL, boost_started_at=NULL
+           WHERE network=? AND body=? AND category=? AND trait=?""",
+        (network, body, category, trait),
+    )
+    conn.commit()
+    if cur.rowcount == 0:
+        raise ValueError(f"No trait_rarity row for {network}/{body}/{category}/{trait}")
+
+
+def reschedule_boost(
+    conn: sqlite3.Connection,
+    body: str,
+    category: str,
+    trait: str,
+    boost_step_hours: int,
+    *,
+    network: str | None = None,
+    now: datetime | None = None,
+) -> None:
+    """Admin: change an armed (dormant or active) boost's step window WITHOUT
+    resetting its decay clock (unlike arm_boost) — shortens or lengthens the
+    remaining runway in place. Raises ValueError when the row is missing, no
+    boost is armed, or the boost has already finished decaying (a longer step
+    must not resurrect it — re-arm instead)."""
+    network = network or config.XRPL_NETWORK
+    now = now or utcnow()
+    row = conn.execute(
+        """SELECT boost_initial, boost_step_hours, boost_started_at FROM trait_rarity
+           WHERE network=? AND body=? AND category=? AND trait=?""",
+        (network, body, category, trait),
+    ).fetchone()
+    if row is None:
+        raise ValueError(f"No trait_rarity row for {network}/{body}/{category}/{trait}")
+    initial, old_step, started_at = row
+    if initial is None:
+        raise ValueError(f"No armed boost on {network}/{body}/{category}/{trait}")
+    if started_at and boost_multiplier(initial, old_step, started_at, now) <= 1.0:
+        raise ValueError(
+            f"Boost on {network}/{body}/{category}/{trait} already finished — re-arm instead"
+        )
+    conn.execute(
+        """UPDATE trait_rarity SET boost_step_hours=?
+           WHERE network=? AND body=? AND category=? AND trait=?""",
+        (boost_step_hours, network, body, category, trait),
+    )
+    conn.commit()
+
+
 def start_boost_clock(
     conn: sqlite3.Connection,
     body: str,
@@ -332,6 +397,26 @@ def start_boost_clock(
              AND boost_initial IS NOT NULL AND boost_started_at IS NULL""",
         (now.isoformat(), network, body, category, trait),
     )
+    conn.commit()
+
+
+def increment_shop_count(conn: sqlite3.Connection, network: str, slot: str, value: str) -> None:
+    """Count one settled shop purchase for (slot, value). Trait tokens are
+    body-agnostic, so bump every body row for the trait; if the trait has no
+    rows yet, insert one under BODY_SENTINEL so the count is never lost.
+    Feeds shop pricing only — mint odds never read shop_count."""
+    ensure_schema(conn)
+    cur = conn.execute(
+        "UPDATE trait_rarity SET shop_count = shop_count + 1"
+        " WHERE network=? AND category=? AND trait=?",
+        (network, slot, value),
+    )
+    if cur.rowcount == 0:
+        conn.execute(
+            "INSERT INTO trait_rarity (network, body, category, trait, live_count,"
+            " floor_weight, shop_count) VALUES (?, ?, ?, ?, 0, ?, 1)",
+            (network, BODY_SENTINEL, slot, value, config.RARITY_FLOOR),
+        )
     conn.commit()
 
 

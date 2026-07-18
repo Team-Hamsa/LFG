@@ -4,6 +4,25 @@
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
   <title>Let's Effing Go! — Mint</title>
+  <meta name="description" content="Mint, dress up, and trade LFG NFTs on the XRP Ledger.">
+  <link rel="icon" href="assets/favicon.ico" sizes="16x16 32x32 48x48">
+  <link rel="icon" type="image/png" sizes="32x32" href="assets/favicon-32.png">
+  <link rel="apple-touch-icon" href="assets/apple-touch-icon.png">
+  <link rel="manifest" href="site.webmanifest">
+  <meta name="theme-color" content="#0A0A0A">
+  <!-- Social share cards (Open Graph / Twitter) — absolute URLs required by scrapers -->
+  <meta property="og:type" content="website">
+  <meta property="og:site_name" content="Let's Effing Go!">
+  <meta property="og:title" content="Let's Effing Go! — Mint">
+  <meta property="og:description" content="Mint, dress up, and trade LFG NFTs on the XRP Ledger.">
+  <meta property="og:url" content="https://build.letseffinggo.com/">
+  <meta property="og:image" content="https://build.letseffinggo.com/assets/og-card.png">
+  <meta property="og:image:width" content="1200">
+  <meta property="og:image:height" content="630">
+  <meta name="twitter:card" content="summary_large_image">
+  <meta name="twitter:title" content="Let's Effing Go! — Mint">
+  <meta name="twitter:description" content="Mint, dress up, and trade LFG NFTs on the XRP Ledger.">
+  <meta name="twitter:image" content="https://build.letseffinggo.com/assets/og-card.png">
   <link rel="stylesheet" href="fonts/fonts.css">
   <link rel="stylesheet" href="style.css?v=13">
 </head>
@@ -30,8 +49,15 @@
       <p class="wallet-line"><span class="wallet-lbl">Wallet</span> <code id="wallet-display"></code>
         <button id="change-wallet-btn" class="link">change</button></p>
       <div class="actions">
-        <button id="mint-btn" class="primary big">⛏️ Mint NFT</button>
-        <button id="swap-btn" class="secondary">👗 Dress Up</button>
+        <div class="mint-row">
+          <div id="mint-qty" class="qty-stepper" hidden>
+            <button id="qty-minus" class="qty-btn" aria-label="Fewer">−</button>
+            <span id="qty-value" aria-live="polite">1</span>
+            <button id="qty-plus" class="qty-btn" aria-label="More">+</button>
+          </div>
+          <button id="mint-btn" class="primary big">⛏️ Mint NFT</button>
+        </div>
+        <button id="swap-btn" class="secondary">🏗️ Build</button>
         <button id="swapper-btn" class="secondary">🔁 Trait Swapper</button>
         <button id="market-btn" class="secondary">🛒 Marketplace</button>
       </div>
@@ -92,6 +118,7 @@
     </section>
 
     <section id="dressup-panel" class="card" hidden>
+      <p><button id="dressup-back-btn" class="back">← Back to the job site</button></p>
       <div id="closet-gate" class="closet-gate" hidden>
         <p id="closet-gate-msg" class="closet-gate-msg"></p>
         <button id="closet-gate-btn" class="primary">Create your Closet</button>
@@ -101,6 +128,7 @@
           <div id="dressup-canvas" class="dressup-canvas" role="img"
                aria-label="Character preview"></div>
           <p id="dressup-id" class="cap"></p>
+          <button id="go-switch-btn" class="secondary">🔄 Switch GO</button>
           <button id="dressup-harvest-btn" class="secondary">🔥 Harvest</button>
         </div>
         <div class="dressup-closet">
@@ -111,7 +139,6 @@
           <div id="closet-grid" class="closet-grid"></div>
         </div>
       </div>
-      <div id="roster-strip" class="roster-strip"></div>
       <div class="trait-strip-section">
         <h4 class="trait-strip-heading">Your tradeable traits</h4>
         <div id="trait-strip" class="trait-strip"></div>
@@ -123,6 +150,12 @@
       <div id="market-tabs" class="lb-chips" role="tablist" aria-label="Marketplace section">
         <button class="lb-chip active" role="tab" aria-selected="true" data-tab="browse">Browse</button>
         <button class="lb-chip" role="tab" aria-selected="false" data-tab="mine">Mine</button>
+        <button class="lb-chip" role="tab" aria-selected="false" data-tab="shop">Shop</button>
+      </div>
+
+      <div id="market-shop" class="market-section" hidden>
+        <div id="shop-grid" class="nft-grid" role="group" aria-label="Trait Shop catalog"></div>
+        <p id="shop-empty" class="card-sub" hidden>The Shop is empty right now.</p>
       </div>
 
       <div id="market-browse" class="market-section">
@@ -195,6 +228,8 @@
           <p><button id="flow-link-btn" class="link" hidden>Open in Xaman ↗</button></p>
           <p><button id="flow-regen-btn" class="link" hidden>↻ Regenerate QR</button></p>
           <p><button id="flow-cancel-btn" class="back" hidden>← Cancel</button></p>
+          <!-- Mint-success only (#41 T9); built/wired by buildShareControl() in app.js. -->
+          <div id="flow-share-row" hidden></div>
           <p><button id="flow-done-btn" class="back" hidden>← Back to the job site</button></p>
         </div>
         <div class="flow-visual">
@@ -204,11 +239,30 @@
         </div>
       </div>
     </section>
+
+    <section id="bulk-panel" class="card sticker" hidden>
+      <h2 id="bulk-title">🏗️ Bulk mint</h2>
+      <p id="bulk-progress" class="card-sub"></p>
+      <div id="bulk-spinner" class="spinner" role="img" aria-label="Working…" hidden></div>
+      <div id="bulk-units"></div>
+      <p><button id="bulk-done-btn" class="primary" hidden>Done</button></p>
+    </section>
   </main>
 
   <div id="toasts" class="toasts" aria-live="assertive"></div>
 
   <!-- In-app confirm: Discord's sandboxed iframe makes native window.confirm a no-op. -->
+  <div id="go-picker-overlay" class="confirm-overlay" role="dialog" aria-modal="true"
+       aria-labelledby="go-picker-title" hidden>
+    <div class="confirm-box card go-picker-box">
+      <div class="go-picker-head">
+        <h2 id="go-picker-title">Your GOs</h2>
+        <button id="go-picker-close" class="secondary" aria-label="Close">✕</button>
+      </div>
+      <div id="go-picker-grid" class="go-picker-grid"></div>
+    </div>
+  </div>
+
   <div id="confirm-overlay" class="confirm-overlay" role="dialog" aria-modal="true"
        aria-labelledby="confirm-title" hidden>
     <div class="confirm-box card">
@@ -221,10 +275,15 @@
     </div>
   </div>
 
+  <!-- Deploy-time surface config (standalone web surface, spec 2026-07-16).
+       The repo default sets window.LFG_WEB = null; the GitHub Pages deploy
+       overwrites it with the cross-origin API base. Loaded BEFORE app.js so
+       boot can detect the web-surface context. -->
+  <script src="config.js?v=1"></script>
   <!-- Telegram Mini App bridge (#89), vendored same-origin. A no-op outside
        Telegram (window.Telegram stays undefined); loaded BEFORE app.js so the
        dual-mode boot can detect the Telegram context. -->
   <script src="telegram-web-app.js"></script>
-  <script type="module" src="app.js?v=15"></script>
+  <script type="module" src="app.js?v=18"></script>
 </body>
 </html>

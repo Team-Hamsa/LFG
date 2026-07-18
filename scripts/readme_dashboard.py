@@ -20,8 +20,9 @@ from pathlib import Path
 # Last commit before the hackathon started (2026-06-21), pinned so the
 # commit-count and velocity series can't drift if history is ever touched.
 BASELINE_SHA = "e296308a57296a8d2f04497f7fc8872112e8ed49"
-# Discord bot, Telegram bot, and the Discord Activity webapp.
-SURFACES = 3
+# Discord bot, Telegram bot, the Discord Activity webapp, and the standalone
+# web app at build.letseffinggo.com.
+SURFACES = 4
 TEST_DEF_RE = r"^\s*def test_"
 SVG_PATH = Path("assets/dashboard.svg")
 
