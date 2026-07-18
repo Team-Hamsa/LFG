@@ -9,11 +9,7 @@ from xrpl.core.keypairs import is_valid_message
 from xrpl.models import IssuedCurrencyAmount
 from xrpl.models.requests import AccountObjects, Feature
 from xrpl.models.transactions import (
-    Batch,
     BatchFlag,
-    NFTokenAcceptOffer,
-    NFTokenMint,
-    Payment,
     TransactionFlag,
 )
 from xrpl.wallet import Wallet
@@ -371,3 +367,118 @@ async def test_prepare_autofills_validates_and_adds_one_issuer_signer(monkeypatc
     assert [signer.account for signer in prepared.transaction.batch_signers] == [
         ISSUER_ACCOUNT
     ]
+
+
+def _validated_batch_rows(**overrides):
+    rows = {
+        "OUTER": {
+            "validated": True,
+            "ledger_index": 100,
+            "tx_json": {"TransactionType": "Batch"},
+            "meta": {"TransactionResult": "tesSUCCESS"},
+        },
+        "PAY": {
+            "validated": True,
+            "ledger_index": 100,
+            "tx_json": {"TransactionType": "Payment"},
+            "meta": {
+                "TransactionResult": "tesSUCCESS",
+                "ParentBatchID": "OUTER",
+            },
+        },
+        "MINT": {
+            "validated": True,
+            "ledger_index": 100,
+            "tx_json": {"TransactionType": "NFTokenMint"},
+            "meta": {
+                "TransactionResult": "tesSUCCESS",
+                "ParentBatchID": "OUTER",
+                "nftoken_id": "NFT1",
+            },
+        },
+        "ACCEPT": {
+            "validated": True,
+            "ledger_index": 100,
+            "tx_json": {
+                "TransactionType": "NFTokenAcceptOffer",
+                "NFTokenSellOffer": "OFFER",
+            },
+            "meta": {
+                "TransactionResult": "tesSUCCESS",
+                "ParentBatchID": "OUTER",
+                "nftoken_id": "NFT1",
+                "AffectedNodes": [
+                    {
+                        "DeletedNode": {
+                            "LedgerEntryType": "NFTokenOffer",
+                            "LedgerIndex": "OFFER",
+                        }
+                    }
+                ],
+            },
+        },
+    }
+    rows.update(overrides)
+    return rows
+
+
+async def _verify_rows(rows):
+    async def fake_fetch(tx_hash):
+        return rows.get(tx_hash)
+
+    return await xrpl_actions.verify_atomic_batch_result(
+        outer_hash="OUTER",
+        inner_hashes=("PAY", "MINT", "ACCEPT"),
+        expected_offer_id="OFFER",
+        fetch_tx=fake_fetch,
+    )
+
+
+@pytest.mark.asyncio
+async def test_verify_atomic_batch_requires_same_ledger_inner_success():
+    result = await _verify_rows(_validated_batch_rows())
+    assert result == xrpl_actions.VerifiedAtomicMint("NFT1", 100)
+
+
+@pytest.mark.asyncio
+async def test_verify_atomic_batch_waits_for_missing_inner():
+    rows = _validated_batch_rows()
+    rows.pop("ACCEPT")
+    assert await _verify_rows(rows) is None
+
+
+@pytest.mark.asyncio
+async def test_verify_atomic_batch_rejects_missing_parent_batch_id():
+    rows = _validated_batch_rows()
+    rows["PAY"]["meta"].pop("ParentBatchID")
+    with pytest.raises(xrpl_actions.AtomicMintInvariantError):
+        await _verify_rows(rows)
+
+
+@pytest.mark.asyncio
+async def test_verify_atomic_batch_rejects_inner_failure():
+    rows = _validated_batch_rows()
+    rows["PAY"]["meta"]["TransactionResult"] = "tecNO_PERMISSION"
+    with pytest.raises(xrpl_actions.AtomicMintInvariantError):
+        await _verify_rows(rows)
+
+
+@pytest.mark.asyncio
+async def test_verify_atomic_batch_rejects_different_ledger():
+    rows = _validated_batch_rows()
+    rows["ACCEPT"]["ledger_index"] = 101
+    with pytest.raises(xrpl_actions.AtomicMintInvariantError):
+        await _verify_rows(rows)
+
+
+@pytest.mark.asyncio
+async def test_verify_atomic_batch_rejects_offer_or_nft_mismatch():
+    rows = _validated_batch_rows()
+    rows["ACCEPT"]["tx_json"]["NFTokenSellOffer"] = "OTHER"
+    with pytest.raises(xrpl_actions.AtomicMintInvariantError):
+        await _verify_rows(rows)
+
+    rows = _validated_batch_rows()
+    rows["ACCEPT"]["meta"]["nftoken_id"] = "NFT2"
+    with pytest.raises(xrpl_actions.AtomicMintInvariantError):
+        await _verify_rows(rows)

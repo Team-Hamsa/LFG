@@ -4,7 +4,8 @@ from __future__ import annotations
 
 import json
 import sqlite3
-from typing import Any, Sequence
+from collections.abc import Sequence
+from typing import Any
 
 SESSION_STATES = frozenset(
     {
@@ -53,6 +54,8 @@ CREATE TABLE IF NOT EXISTS xrpl_action_sessions (
   ledger_index INTEGER,
   nft_id TEXT,
   error_code TEXT,
+  headroom_reserved INTEGER NOT NULL DEFAULT 0,
+  assets_prepared INTEGER NOT NULL DEFAULT 0,
   created_ts INTEGER NOT NULL,
   updated_ts INTEGER NOT NULL
 );
@@ -94,6 +97,8 @@ _SESSION_COLUMNS = frozenset(
         "ledger_index",
         "nft_id",
         "error_code",
+        "headroom_reserved",
+        "assets_prepared",
     }
 )
 
@@ -146,7 +151,7 @@ def update_session(
     if "state" in changes and changes["state"] not in SESSION_STATES:
         raise ValueError(f"unknown action state: {changes['state']}")
     sets = ["updated_ts=?"] + [f"{key}=?" for key in changes]
-    values = [now_ts]
+    values: list[Any] = [now_ts]
     for key, value in changes.items():
         values.append(json.dumps(value) if key in _JSON_FIELDS and value is not None else value)
     cursor = conn.execute(
@@ -159,7 +164,10 @@ def update_session(
 
 
 def _row_dict(cursor: sqlite3.Cursor, row: tuple[Any, ...]) -> dict[str, Any]:
-    result = {column[0]: value for column, value in zip(cursor.description, row)}
+    result = {
+        column[0]: value
+        for column, value in zip(cursor.description, row, strict=True)
+    }
     for key in _JSON_FIELDS:
         value = result.get(key)
         if value is not None:
@@ -184,7 +192,9 @@ def list_reconcilable_sessions(conn: sqlite3.Connection) -> list[dict[str, Any]]
     ensure_schema(conn)
     cursor = conn.execute(
         "SELECT * FROM xrpl_action_sessions"
-        " WHERE ticket_sequence IS NOT NULL AND state != 'done'"
+        " WHERE state != 'done' AND ("
+        " state='preparing' OR ticket_sequence IS NOT NULL"
+        " OR headroom_reserved=1 OR assets_prepared=1)"
         " ORDER BY created_ts"
     )
     return [_row_dict(cursor, row) for row in cursor.fetchall()]
@@ -223,6 +233,14 @@ def lease_ticket(
                 " (network,account,ticket_sequence,session_id,state,leased_at)"
                 " VALUES (?,?,?,?, 'leased', ?)",
                 (network, account, ticket, session_id, now_ts),
+            )
+            # When the durable session row already exists (the production
+            # path), bind it to the lease in the same IMMEDIATE transaction so
+            # a process crash cannot leave a lease invisible to reconciliation.
+            conn.execute(
+                "UPDATE xrpl_action_sessions"
+                " SET ticket_sequence=?, updated_ts=? WHERE session_id=?",
+                (ticket, now_ts, session_id),
             )
         conn.commit()
         return ticket

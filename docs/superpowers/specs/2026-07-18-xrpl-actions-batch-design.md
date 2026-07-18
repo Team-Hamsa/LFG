@@ -395,10 +395,11 @@ Tickets are managed as follows:
 - rejection/expiry releases it only after the Batch `LastLedgerSequence` is
   closed and a final outer-hash lookup confirms no validated transaction;
 - an indeterminate submission quarantines the ticket until reconciliation;
-- startup reconciliation reloads every non-complete session that bears a
-  Ticket—including rejected, expired, failed, and interrupted preparation
-  states—and compares leases with ledger Ticket objects and stored transaction
-  hashes before making any ticket available.
+- startup reconciliation reloads every non-complete session, cleaning up
+  interrupted pre-Ticket preparation resources and comparing all later leases
+  (including rejected, expired, failed, and indeterminate states) with ledger
+  Ticket objects and stored transaction hashes before making any ticket
+  available.
 
 This prevents an old signed Batch and a new Batch from racing for the same
 ticket. The user sequences can still become stale if the user submits another

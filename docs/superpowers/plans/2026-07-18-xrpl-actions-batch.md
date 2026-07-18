@@ -924,16 +924,19 @@ def release_ticket(conn: sqlite3.Connection, network: str, account: str, ticket:
     return cur.rowcount == 1
 ```
 
-Add the restart query and tests asserting `done` and Ticket-less rows are
-excluded while Ticket-bearing `preparing`, rejected, expired, failed, and
-indeterminate rows remain recoverable:
+Add the restart query and tests asserting only `done` is excluded: interrupted
+Ticket-less preparation rows need their headroom, number, and staged art
+cleaned up, while Ticket-bearing rejected, expired, failed, and indeterminate
+rows need ledger reconciliation.
 
 ```python
 def list_reconcilable_sessions(conn: sqlite3.Connection) -> list[dict[str, Any]]:
     ensure_schema(conn)
     cursor = conn.execute(
         "SELECT * FROM xrpl_action_sessions"
-        " WHERE ticket_sequence IS NOT NULL AND state != 'done'"
+        " WHERE state != 'done' AND ("
+        " state='preparing' OR ticket_sequence IS NOT NULL"
+        " OR headroom_reserved=1 OR assets_prepared=1)"
         " ORDER BY created_ts"
     )
     return [_row_dict(cursor, row) for row in cursor.fetchall()]

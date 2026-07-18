@@ -30,6 +30,8 @@ def test_session_round_trip_decodes_json_fields(tmp_path):
         ticket_sequence=7,
         payment_json={"pay_with": "XRP", "amount": "10000000"},
         inner_hashes_json=["PAY", "MINT", "ACCEPT"],
+        headroom_reserved=1,
+        assets_prepared=1,
     )
     row = action_store.get_session(conn, "s1")
     assert row["state"] == "awaiting_signature"
@@ -37,6 +39,8 @@ def test_session_round_trip_decodes_json_fields(tmp_path):
     assert row["campaign"] == "x-mint-link"
     assert row["payment_json"] == {"pay_with": "XRP", "amount": "10000000"}
     assert row["inner_hashes_json"] == ["PAY", "MINT", "ACCEPT"]
+    assert row["headroom_reserved"] == 1
+    assert row["assets_prepared"] == 1
 
 
 def test_update_missing_session_fails_loudly(tmp_path):
@@ -110,7 +114,7 @@ def test_restart_query_includes_every_non_done_ticket_state(tmp_path, state):
     ]
 
 
-def test_restart_query_excludes_done_and_ticketless_rows(tmp_path):
+def test_restart_query_excludes_done_but_includes_interrupted_ticketless_prep(tmp_path):
     conn = _conn(tmp_path)
     action_store.create_session(
         conn,
@@ -132,5 +136,22 @@ def test_restart_query_excludes_done_and_ticketless_rows(tmp_path):
         network="testnet",
         state="preparing",
         created_ts=12,
+    )
+    assert [
+        row["session_id"] for row in action_store.list_reconcilable_sessions(conn)
+    ] == ["preparing"]
+
+
+def test_restart_query_excludes_inert_terminal_failure_without_resources(tmp_path):
+    conn = _conn(tmp_path)
+    action_store.create_session(
+        conn,
+        session_id="disabled",
+        account="rBuyer",
+        user_id="u1",
+        platform="web",
+        network="testnet",
+        state="failed",
+        created_ts=10,
     )
     assert action_store.list_reconcilable_sessions(conn) == []

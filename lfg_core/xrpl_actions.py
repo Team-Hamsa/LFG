@@ -10,8 +10,9 @@ from __future__ import annotations
 
 import asyncio
 import hashlib
+from collections.abc import Awaitable, Callable, Mapping
 from dataclasses import dataclass, replace
-from typing import Any, Literal, Mapping
+from typing import Any, Literal
 
 from xrpl.asyncio.transaction import autofill
 from xrpl.clients import JsonRpcClient
@@ -29,6 +30,7 @@ from xrpl.models.transactions import (
     TransactionFlag,
 )
 from xrpl.models.transactions.batch import BatchSigner
+from xrpl.utils import get_nftoken_id
 from xrpl.wallet import Wallet
 
 from lfg_core import memos
@@ -65,8 +67,22 @@ class PreparedBatch:
     last_ledger_sequence: int
 
 
+@dataclass(frozen=True)
+class VerifiedAtomicMint:
+    nft_id: str
+    ledger_index: int
+
+
 class AtomicMintInvariantError(ValueError):
     """Raised when a prepared Batch differs from the approved mint contract."""
+
+
+def _flags_value(flags: Any) -> int:
+    if flags is None:
+        return 0
+    if isinstance(flags, int) and not isinstance(flags, bool):
+        return flags
+    raise AtomicMintInvariantError("transaction flags must be a canonical integer")
 
 
 def nft_offer_id(account: str, sequence_or_ticket: int) -> str:
@@ -270,7 +286,7 @@ def validate_atomic_mint_batch(
     expected_accept_memos = memos.build_memo_models(
         memos.INITIATOR_USER, platform, memos.ACTION_ACCEPT_OFFER, campaign
     )
-    if int(batch.flags or 0) != int(BatchFlag.TF_ALL_OR_NOTHING):
+    if _flags_value(batch.flags) != int(BatchFlag.TF_ALL_OR_NOTHING):
         raise AtomicMintInvariantError("Batch must be ALLORNOTHING")
     if (
         batch.account != buyer
@@ -291,7 +307,7 @@ def validate_atomic_mint_batch(
         pay.account != buyer
         or pay.destination != payment.destination
         or pay.amount != payment.amount
-        or int(pay.flags or 0) != inner_flag
+        or _flags_value(pay.flags) != inner_flag
         or pay.source_tag != source_tag
         or pay.memos != expected_payment_memos
         or pay.ticket_sequence is not None
@@ -302,7 +318,7 @@ def validate_atomic_mint_batch(
         mint.account != issuer_account
         or mint.sequence != 0
         or mint.ticket_sequence != issuer_ticket
-        or int(mint.flags or 0) != (nft_flags | inner_flag)
+        or _flags_value(mint.flags) != (nft_flags | inner_flag)
         or mint.nftoken_taxon != nft_taxon
         or mint.issuer != expected_issuer
         or mint.source_tag != source_tag
@@ -321,7 +337,7 @@ def validate_atomic_mint_batch(
     if (
         accept.account != buyer
         or accept.nftoken_sell_offer != nft_offer_id(issuer_account, issuer_ticket)
-        or int(accept.flags or 0) != inner_flag
+        or _flags_value(accept.flags) != inner_flag
         or accept.source_tag != source_tag
         or accept.memos != expected_accept_memos
         or accept.ticket_sequence is not None
@@ -350,8 +366,8 @@ def sign_issuer_batch(
 
     if issuer_account not in {tx.account for tx in batch.raw_transactions}:
         raise AtomicMintInvariantError("issuer is not an inner account")
-    fields = {
-        "flags": int(batch.flags or 0),
+    fields: Any = {
+        "flags": _flags_value(batch.flags),
         "transaction_ids": [tx.get_hash() for tx in batch.raw_transactions],
     }
     signature = keypairs.sign(encode_for_signing_batch(fields), wallet.private_key)
@@ -426,3 +442,92 @@ async def prepare_atomic_mint_batch(
         inner_hashes=(inner_hashes[0], inner_hashes[1], inner_hashes[2]),
         last_ledger_sequence=signed.last_ledger_sequence,
     )
+
+
+def _transaction_json(result: Mapping[str, Any]) -> Mapping[str, Any]:
+    transaction = result.get("tx_json")
+    return transaction if isinstance(transaction, dict) else result
+
+
+def _minted_nft_id(meta: Mapping[str, Any]) -> str | None:
+    direct = meta.get("nftoken_id") or meta.get("NFTokenID")
+    if direct:
+        return str(direct)
+    try:
+        derived = get_nftoken_id(dict(meta))  # type: ignore[arg-type]
+    except (IndexError, KeyError, TypeError):
+        return None
+    return str(derived) if derived else None
+
+
+async def verify_atomic_batch_result(
+    *,
+    outer_hash: str,
+    inner_hashes: tuple[str, str, str],
+    expected_offer_id: str,
+    fetch_tx: Callable[[str], Awaitable[Mapping[str, Any] | None]],
+) -> VerifiedAtomicMint | None:
+    """Verify the outer and all fixed inner hashes as one successful ledger unit.
+
+    Missing or not-yet-validated transactions are pending (`None`).  A
+    validated contradiction is definitive and raises rather than being retried
+    as if it could later become the approved action.
+    """
+
+    hashes = (outer_hash, *inner_hashes)
+    results = [await fetch_tx(tx_hash) for tx_hash in hashes]
+    if any(result is None or not result.get("validated") for result in results):
+        return None
+    validated = [result for result in results if result is not None]
+    if len(validated) != 4:
+        return None
+    ledger_indexes = {result.get("ledger_index") for result in validated}
+    ledger_index = next(iter(ledger_indexes)) if len(ledger_indexes) == 1 else None
+    if not isinstance(ledger_index, int):
+        raise AtomicMintInvariantError("Batch transactions did not validate together")
+    outer, payment, mint, accept = validated
+    outer_meta = outer.get("meta")
+    if (
+        not isinstance(outer_meta, dict)
+        or outer_meta.get("TransactionResult") != "tesSUCCESS"
+        or _transaction_json(outer).get("TransactionType") != "Batch"
+    ):
+        raise AtomicMintInvariantError("outer Batch failed or mismatched")
+    expected_types = ("Payment", "NFTokenMint", "NFTokenAcceptOffer")
+    for result, expected_type in zip(
+        (payment, mint, accept), expected_types, strict=True
+    ):
+        meta = result.get("meta")
+        transaction = _transaction_json(result)
+        if (
+            not isinstance(meta, dict)
+            or meta.get("TransactionResult") != "tesSUCCESS"
+            or meta.get("ParentBatchID") != outer_hash
+            or transaction.get("TransactionType") != expected_type
+        ):
+            raise AtomicMintInvariantError(
+                f"{expected_type} inner result failed or mismatched"
+            )
+    accept_transaction = _transaction_json(accept)
+    if accept_transaction.get("NFTokenSellOffer") != expected_offer_id:
+        raise AtomicMintInvariantError("accepted NFT offer does not match prepared offer")
+    mint_meta = mint["meta"]
+    accept_meta = accept["meta"]
+    nft_id = _minted_nft_id(mint_meta)
+    if not nft_id:
+        raise AtomicMintInvariantError("mint result did not identify an NFToken")
+    accepted_nft_id = accept_meta.get("nftoken_id") or accept_meta.get("NFTokenID")
+    if accepted_nft_id is not None and str(accepted_nft_id) != nft_id:
+        raise AtomicMintInvariantError("accepted NFToken differs from minted NFToken")
+    affected = accept_meta.get("AffectedNodes")
+    if isinstance(affected, list):
+        deleted_offer = any(
+            isinstance(node, dict)
+            and isinstance(node.get("DeletedNode"), dict)
+            and node["DeletedNode"].get("LedgerEntryType") == "NFTokenOffer"
+            and node["DeletedNode"].get("LedgerIndex") == expected_offer_id
+            for node in affected
+        )
+        if not deleted_offer:
+            raise AtomicMintInvariantError("accept result did not consume prepared offer")
+    return VerifiedAtomicMint(nft_id=nft_id, ledger_index=ledger_index)

@@ -355,6 +355,26 @@ async def create_payment_payload(
     )
 
 
+async def create_batch_payload(
+    txjson: dict[str, Any],
+    *,
+    signer: str,
+    return_url: dict[str, str] | None = None,
+    user_token: str | None = None,
+) -> dict[str, Any] | None:
+    """Create one enforced-buyer Xaman request that signs and submits Batch."""
+
+    if txjson.get("TransactionType") != "Batch" or txjson.get("Account") != signer:
+        raise ValueError("Batch Account must equal enforced signer")
+    return await _create_xumm_payload(
+        txjson,
+        options=_with_return_url(
+            {"submit": True, "signer": signer}, return_url
+        ),
+        user_token=user_token,
+    )
+
+
 async def create_accept_offer_payload(
     offer_id: str,
     return_url: dict[str, str] | None = None,
@@ -551,7 +571,7 @@ def _cache_status(uuid: str, s: dict[str, Any]) -> None:
 
 
 def _terminal(s: dict[str, Any]) -> bool:
-    return bool(s.get("signed") or s.get("expired"))
+    return bool(s.get("signed") or s.get("expired") or s.get("cancelled"))
 
 
 def cached_status(uuid: str) -> dict[str, Any] | None:
@@ -617,7 +637,10 @@ async def _watch_payload_inner(uuid: str) -> None:
                     event = json.loads(msg.data)
                 except ValueError:
                     continue
-                if not any(k in event for k in ("opened", "signed", "expired")):
+                if not any(
+                    k in event
+                    for k in ("opened", "signed", "expired", "cancelled", "resolved")
+                ):
                     continue
                 s = await get_payload_status(uuid, force=True)
                 if s and _terminal(s):
@@ -657,6 +680,8 @@ async def get_payload_status(uuid: str, *, force: bool = False) -> dict[str, Any
             "opened": bool(meta.get("opened")),
             "signed": bool(meta.get("signed")),
             "expired": bool(meta.get("expired")),
+            "cancelled": bool(meta.get("cancelled")),
+            "resolved": bool(meta.get("resolved")),
             "account": response_block.get("account"),
             # The signed transaction's hash (XUMM's payload status carries no
             # meta of its own — the marketplace list/buy finalize flow fetches
