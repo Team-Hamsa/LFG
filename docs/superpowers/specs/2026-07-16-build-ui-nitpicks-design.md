@@ -34,7 +34,7 @@ Add a `← Back to the job site` button to `dressup-panel`, same class/pattern a
 - Selecting a GO closes the overlay and re-renders canvas/closet (existing `selectCharacter`).
 - The old `roster-strip` element and its render path are removed.
 
-```
+```text
 Build view:            Overlay:
 ┌───────────┐          ┌─ Your GOs ─────── ✕ ┐
 │  canvas   │   tap →  │ ┌─────┐ ┌─────┐     │

@@ -118,12 +118,18 @@ def test_assemble_session_dict_surfaces_accept_link():
         {
             "nft_id": "N",
             "image_url": "img",
+            "video_url": "vid.mp4",
             "metadata_url": "m",
             "accept": {"xumm_url": "https://xaman/abc"},
         }
     ]
     d = economy_api.economy_session_dict("assemble", s)
     assert d["accept"] == "https://xaman/abc" and d["nft_id"] == "N"
+    # Animated assembles (#250) surface the .mp4 alongside the still.
+    assert d["image_url"] == "img" and d["video_url"] == "vid.mp4"
+    # Records that predate the field (or static art) degrade to None.
+    del s.results[0]["video_url"]
+    assert economy_api.economy_session_dict("assemble", s)["video_url"] is None
 
 
 def test_web_session_delegates():
@@ -400,6 +406,30 @@ def test_start_assemble_rejects_without_active_closet(monkeypatch):
     async def go():
         with pytest.raises(economy_api.EconomyError, match="Closet"):
             await economy_api.start_assemble("123", "rOwner", 3537, {"Head": "Crown"})
+
+    asyncio.get_event_loop().run_until_complete(go())
+
+
+def test_assemble_prefill_rejects_without_active_closet():
+    """assemble_prefill gates on an active Closet up front, like start_assemble
+    (the commit path) — even when a body is present, no active Closet means the
+    prefill must raise rather than propose a set start_assemble would reject."""
+    conn = _seed_conn()  # no closet_tokens row -> no active closet
+    from lfg_core import trait_economy
+
+    economy_store.freeze_genesis(
+        conn,
+        trait_economy.Genesis(
+            trait_counts={("Head", "Crown"): 1},
+            edition_bodies={3537: ("male", "male")},
+        ),
+        {},
+    )
+    economy_store.set_closet_contents(conn, "rOwner", [("Head", "Crown", 1)], [3537])
+
+    async def go():
+        with pytest.raises(economy_api.EconomyError, match="Closet"):
+            await economy_api.assemble_prefill(conn, "rOwner")
 
     asyncio.get_event_loop().run_until_complete(go())
 

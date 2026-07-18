@@ -19,11 +19,14 @@ from typing import Any
 from lfg_core import (
     cdn,
     config,
+    db_path,
+    headroom,
     image_archive,
     layer_store,
     memos,
     rarity,
     swap_compose,
+    swap_meta,
     traits,
     xrpl_ops,
     xumm_ops,
@@ -95,6 +98,16 @@ class MintSession:
         self.nft_number: int | None = None
         self.nft_id: str | None = None
         self.image_url: str | None = None
+        # MP4 URL for animated compositions (image_url is the PNG poster
+        # frame); None for still NFTs.
+        self.video_url: str | None = None
+        # #41: the minted edition's traits (LFG-naming, e.g. Head -> Hat) and
+        # body_type, set once mint_one_unit confirms the mint on-chain. None
+        # pre-fulfillment, same None-handling style as image_url/nft_id --
+        # lets the X poster compose tweet copy (and rank the rarest slot,
+        # which is body-scoped) straight from the firehose event.
+        self.traits: dict[str, str] | None = None
+        self.body_type: str | None = None
         self.accept_qr_url: str | None = None
         self.accept_deeplink: str | None = None
         self.accept_uuid: str | None = None
@@ -103,6 +116,11 @@ class MintSession:
         # The run_mint_session background task, set by the service after it
         # spawns it, so cancel() can stop the payment wait promptly (#141).
         self.task: asyncio.Task[None] | None = None
+        # #226: True once the service took this session's 1-unit headroom
+        # reservation (claimant "mint:<id>"). settle_headroom is a strict
+        # no-op while False, so sessions created outside the service (tests,
+        # tooling) never touch the reservation store.
+        self.headroom_reserved = False
         # Terminal-event publish guard, read/set by lfg_service.app when it
         # publishes mint.completed/mint.failed to the event firehose.
         self._published = False
@@ -130,7 +148,10 @@ class MintSession:
         pays XRP — never explained to the user beyond the pay pill) and
         create the XUMM sign-request payload. Xaman cannot parse the
         raw-JSON detect link, so the payload URL is the one that must end
-        up in the payment QR (issue #8)."""
+        up in the payment QR (issue #8). On payload failure payment_uuid
+        stays None — both callers (handle_mint_start and run_mint_session)
+        gate on it and fail the session terminally rather than entering the
+        payment wait with only the unparseable static detect link (#262)."""
         balance = await xrpl_ops.get_trustline_balance(
             self.wallet_address, config.TOKEN_CURRENCY_HEX, config.TOKEN_ISSUER_ADDRESS
         )
@@ -185,6 +206,11 @@ class MintSession:
             # CancelledError is a BaseException, so run_mint_session's
             # `except Exception` cannot catch it and overwrite CANCELLED.
             self.task.cancel()
+        # #226: give the headroom reservation back right here — a task
+        # cancelled before it ever started running skips run_mint_session's
+        # finally, so the cancel path must settle directly. Idempotent: the
+        # dying task's own finally sees headroom_reserved already False.
+        settle_headroom(self)
         return True
 
     def mark_published(self) -> None:
@@ -221,6 +247,9 @@ class MintSession:
             "nft_number": self.nft_number,
             "nft_id": self.nft_id,
             "image_url": self.image_url,
+            "video_url": self.video_url,
+            "traits": self.traits,
+            "body_type": self.body_type,
             "accept_qr_url": self.accept_qr_url,
             "accept_deeplink": self.accept_deeplink,
             "accept_push": self.accept_push,
@@ -249,6 +278,36 @@ def _release_unused_number(session: MintSession) -> None:
         _reserved_numbers.discard(session.nft_number)
 
 
+def settle_headroom(session: MintSession) -> None:
+    """Settle the 1-unit headroom reservation the service took for this
+    session (#226). If the session minted (nft_id set), the reservation is
+    retired to the durable pending set — the mint is on-chain but invisible
+    to supply.current_supply until the listener indexes it, so it must keep
+    counting against headroom until then. Otherwise the unit will never mint
+    and the reservation is released outright. Strict no-op unless the service
+    reserved (headroom_reserved); idempotent — the flag drops only AFTER the
+    store write commits (#226 review: clearing it first would permanently
+    disable retries on a transient store failure, letting a later rebuild
+    drop the mint:* reservation with no pending row and over-admit). Both
+    store ops are idempotent, so repeated calls from the cancel-path and the
+    task-finally are safe. Never raises (headroom store contract)."""
+    if not getattr(session, "headroom_reserved", False):
+        return
+    db = db_path.app_db_path(config.XRPL_NETWORK)
+    claimant = f"mint:{session.id}"
+    if session.nft_id:
+        ok = headroom.retire_to_pending(db, claimant, session.nft_id)
+    else:
+        ok = headroom.release(db, claimant)
+    if ok:
+        session.headroom_reserved = False
+    else:
+        logging.critical(
+            f"mint session {session.id}: headroom settle FAILED "
+            f"(nft_id={session.nft_id}) — flag retained for retry"
+        )
+
+
 def _save_recovery_record(record: dict[str, Any]) -> None:
     """If the DB insert fails after an on-chain mint, persist the record to
     disk so an administrator can backfill the LFG table."""
@@ -275,6 +334,15 @@ class UnitResult:
     offer_id: str | None
     accept: dict[str, Any] | None
     error: str | None
+    # MP4 URL for animated compositions (image_url is the PNG poster frame);
+    # defaulted so callers constructing results for still NFTs need not pass it.
+    video_url: str | None = None
+    # #41: LFG-naming traits dict + body_type, known only once the mint lands
+    # on-chain (None on the earlier "mint never landed" failure paths).
+    # Defaulted so every existing UnitResult(...) call site (this module's
+    # earlier return statements, tests) stays valid unchanged.
+    traits: dict[str, str] | None = None
+    body_type: str | None = None
 
 
 async def mint_one_unit(
@@ -308,11 +376,24 @@ async def mint_one_unit(
     a crash in the offer step can never trigger a re-mint on resume.
     """
     nft_id: str | None = None
+    # Hoisted with None defaults so the catch-all below can return whatever
+    # was already computed at the point of failure (#41 fix-wave, CodeRabbit
+    # PR #245): an exception from on_mint/offer-creation/payload-creation
+    # after a confirmed mint must not blank out traits/body_type that are
+    # already known.
+    traits_dict: dict[str, str] | None = None
+    body: str | None = None
     try:
         # 1. Compose a random NFT from the unified layer store (same tree
         #    the Trait Swapper uses: <gender>/<TraitType>/<Value>.ext)
         store = layer_store.get_layer_store()
         body, attributes = await traits.select_random_attributes(store)
+        # #268 (NFT #4039): canonicalize the roll ONCE, before anything reads
+        # it — a legacy Accessory duplicate of a Back value (e.g. "Angel Wings
+        # Open") must be relocated to Back so the composed PNG and the
+        # metadata JSON see the same canonical view that every reader
+        # (swap_meta.normalize_attributes) does.
+        attributes = swap_meta.normalize_attributes(attributes)
         output_path, is_video = await swap_compose.compose_nft(
             attributes, body, store, f"lfg_{nft_number}"
         )
@@ -370,6 +451,7 @@ async def mint_one_unit(
                 nft_number=nft_number,
                 nft_id=None,
                 image_url=image_cdn_url,
+                video_url=video_cdn_url,
                 offer_id=None,
                 accept=None,
                 error="Failed to mint NFT on XRPL. Please contact an administrator.",
@@ -377,6 +459,16 @@ async def mint_one_unit(
         # Mint confirmed — publish the new edition's art to the local archive
         # so /api/img serves it immediately (best-effort, #163).
         image_archive.promote_still(config.XRPL_NETWORK, nft_number, session_tag)
+
+        # Computed here (synchronous, no await) rather than after on_mint below
+        # so it's captured into the hoisted `traits_dict`/`body` locals before
+        # any further awaits — an exception from on_mint or a later step must
+        # still leave the catch-all able to return this already-known data
+        # (#41 fix-wave, CodeRabbit PR #245).
+        traits_dict = {t["trait_type"]: t["value"] for t in metadata["attributes"]}
+        # The LFG table's headwear column is named Hat (layer tree uses Head)
+        if "Head" in traits_dict:
+            traits_dict["Hat"] = traits_dict.pop("Head")
 
         # Fire on_mint the instant the mint is confirmed on-chain, before any
         # further awaits (offer creation / XUMM accept payload). A bulk caller
@@ -387,10 +479,6 @@ async def mint_one_unit(
         if on_mint:
             await on_mint(nft_number, nft_id, image_cdn_url)
 
-        traits_dict = {t["trait_type"]: t["value"] for t in metadata["attributes"]}
-        # The LFG table's headwear column is named Hat (layer tree uses Head)
-        if "Head" in traits_dict:
-            traits_dict["Hat"] = traits_dict.pop("Head")
         record: dict[str, Any] = {
             "nft_number": nft_number,
             "nft_id": nft_id,
@@ -442,12 +530,15 @@ async def mint_one_unit(
                 nft_number=nft_number,
                 nft_id=nft_id,
                 image_url=image_cdn_url,
+                video_url=video_cdn_url,
                 offer_id=None,
                 accept=None,
                 error=(
                     f"NFT minted (ID: {nft_id}) but offer creation failed. "
                     "Please contact an administrator."
                 ),
+                traits=traits_dict,
+                body_type=body,
             )
 
         accept = await xumm_ops.create_accept_offer_payload(
@@ -461,21 +552,27 @@ async def mint_one_unit(
                 nft_number=nft_number,
                 nft_id=nft_id,
                 image_url=image_cdn_url,
+                video_url=video_cdn_url,
                 offer_id=offer_id,
                 accept=None,
                 error=(
                     f"NFT minted and offer created ({offer_id}) but the XUMM "
                     "request failed. Please accept the offer manually."
                 ),
+                traits=traits_dict,
+                body_type=body,
             )
 
         return UnitResult(
             nft_number=nft_number,
             nft_id=nft_id,
             image_url=image_cdn_url,
+            video_url=video_cdn_url,
             offer_id=offer_id,
             accept=accept,
             error=None,
+            traits=traits_dict,
+            body_type=body,
         )
 
     except Exception as e:
@@ -488,9 +585,12 @@ async def mint_one_unit(
             nft_number=nft_number,
             nft_id=nft_id,
             image_url=None,
+            video_url=None,
             offer_id=None,
             accept=None,
             error=str(e),
+            traits=traits_dict,
+            body_type=body,
         )
 
 
@@ -531,11 +631,29 @@ def _capture_issued_token(session: MintSession, s: dict[str, Any]) -> None:
 
 async def run_mint_session(session: MintSession) -> None:
     """Drive a MintSession to a terminal state. Run as a background task."""
+    if session.state in TERMINAL_STATES:
+        # A cancel can land while handle_mint_start awaits prepare_payment;
+        # running a terminal session would resurrect it (waiting for a
+        # payment the user backed out of). Same guard bulk mint has.
+        return
     try:
         # 1. Wait for the sender-verified payment on whichever path
         #    prepare_payment detected. not_before bounds the missed-payment
         #    backfill to this session's lifetime.
         session.ensure_payment_fallback()
+        # #262 defense-in-depth (handle_mint_start already fails fast): with
+        # no XUMM payload the session holds only the static detect link,
+        # which Xaman cannot parse as a sign request — entering the payment
+        # wait would show a dead pay screen for the full 300s. The
+        # pay_with/pay_amount defaulting above must still run first. Known
+        # tradeoff: this also defers #196 mint-credit redemption (normally
+        # consumed by wait_for_payment's allow_credit backfill with no new
+        # signature) until XUMM recovers — delay-only, the 30d credit TTL
+        # far outlasts any outage.
+        if session.payment_uuid is None:
+            session.state = FAILED
+            session.error = "signing service is busy — please try again shortly"
+            return
         p = session._payment_params()
         paid = await xrpl_ops.wait_for_payment(
             destination=p["destination"],
@@ -583,6 +701,21 @@ async def run_mint_session(session: MintSession) -> None:
         def _on_state(state: str) -> None:
             session.state = state
 
+        async def _on_mint(nft_number: int, nft_id: str, image_url: str | None) -> None:
+            # #226 (review): settle the headroom reservation the INSTANT the
+            # mint lands, symmetric with bulk's _on_mint — waiting for the
+            # session-end finally leaves a window (offer creation + XUMM
+            # payload, seconds to tens of seconds) where a hard crash
+            # uncounts an on-chain mint: the restart rebuild drops mint:*
+            # rows and no pending row exists yet, so a cap-tail reserver
+            # could over-admit while the listener lags. settle_headroom sees
+            # nft_id set and retires the reservation to the durable pending
+            # set; the finally below remains the release-only path for
+            # sessions that never minted (idempotent — the flag drops before
+            # the store write).
+            session.nft_id = nft_id
+            settle_headroom(session)
+
         res = await mint_one_unit(
             discord_id=session.discord_id,
             wallet_address=session.wallet_address,
@@ -592,9 +725,13 @@ async def run_mint_session(session: MintSession) -> None:
             nft_number=session.nft_number,
             session_tag=session.id,
             on_state=_on_state,
+            on_mint=_on_mint,
         )
         session.nft_id = res.nft_id
         session.image_url = res.image_url
+        session.video_url = res.video_url
+        session.traits = res.traits
+        session.body_type = res.body_type
         if res.error or not res.offer_id or not res.accept:
             _release_unused_number(session)
             session.state = FAILED
@@ -615,3 +752,11 @@ async def run_mint_session(session: MintSession) -> None:
         _release_unused_number(session)
         session.state = FAILED
         session.error = str(e)
+    finally:
+        # #226: every exit — OFFER_READY, FAILED, PAYMENT_TIMEOUT, and the
+        # CancelledError a cancel() delivers (BaseException, uncatchable
+        # above) — settles the session's headroom reservation: retire to
+        # pending if the mint landed, release otherwise. For sessions whose
+        # mint landed this is a no-op (idempotent): _on_mint already settled
+        # at mint-land so a crash mid-offer can't uncount the mint.
+        settle_headroom(session)

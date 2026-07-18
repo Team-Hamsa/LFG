@@ -51,6 +51,7 @@ _SURFACE_TO_PLATFORM = {
     "discord-activity": PLATFORM_DISCORD_ACTIVITY,
     "telegram": PLATFORM_TELEGRAM,
     "twitter": PLATFORM_TWITTER,
+    "web": PLATFORM_WEBAPP,  # standalone web surface (build.letseffinggo.com)
     "webapp": PLATFORM_WEBAPP,
     "backend": PLATFORM_BACKEND,
 }

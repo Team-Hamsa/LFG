@@ -158,7 +158,7 @@ def test_trait_list_start_dev_mode_requires_closet_400():
     req["wallet"] = mock_economy.DEV_OWNER
 
     async def body_json():
-        return {"slot": "Head", "value": "Halo", "price_xrp": "5"}
+        return {"slot": "Head", "value": "Halo", "price_brix": "5"}
 
     req.json = body_json  # type: ignore[method-assign]
 
@@ -178,7 +178,7 @@ def test_trait_list_wizard_dev_mode_progresses_to_listed():
     req["wallet"] = mock_economy.DEV_OWNER
 
     async def body_json():
-        return {"slot": "Head", "value": "Halo", "price_xrp": "5"}
+        return {"slot": "Head", "value": "Halo", "price_brix": "5"}
 
     req.json = body_json  # type: ignore[method-assign]
 

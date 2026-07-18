@@ -4,6 +4,25 @@
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
   <title>Let's Effing Go! — Mint</title>
+  <meta name="description" content="Mint, dress up, and trade LFG NFTs on the XRP Ledger.">
+  <link rel="icon" href="assets/favicon.ico" sizes="16x16 32x32 48x48">
+  <link rel="icon" type="image/png" sizes="32x32" href="assets/favicon-32.png">
+  <link rel="apple-touch-icon" href="assets/apple-touch-icon.png">
+  <link rel="manifest" href="site.webmanifest">
+  <meta name="theme-color" content="#0A0A0A">
+  <!-- Social share cards (Open Graph / Twitter) — absolute URLs required by scrapers -->
+  <meta property="og:type" content="website">
+  <meta property="og:site_name" content="Let's Effing Go!">
+  <meta property="og:title" content="Let's Effing Go! — Mint">
+  <meta property="og:description" content="Mint, dress up, and trade LFG NFTs on the XRP Ledger.">
+  <meta property="og:url" content="https://build.letseffinggo.com/">
+  <meta property="og:image" content="https://build.letseffinggo.com/assets/og-card.png">
+  <meta property="og:image:width" content="1200">
+  <meta property="og:image:height" content="630">
+  <meta name="twitter:card" content="summary_large_image">
+  <meta name="twitter:title" content="Let's Effing Go! — Mint">
+  <meta name="twitter:description" content="Mint, dress up, and trade LFG NFTs on the XRP Ledger.">
+  <meta name="twitter:image" content="https://build.letseffinggo.com/assets/og-card.png">
   <link rel="stylesheet" href="fonts/fonts.css">
   <link rel="stylesheet" href="style.css?v=13">
 </head>
@@ -202,6 +221,8 @@
           <p><button id="flow-link-btn" class="link" hidden>Open in Xaman ↗</button></p>
           <p><button id="flow-regen-btn" class="link" hidden>↻ Regenerate QR</button></p>
           <p><button id="flow-cancel-btn" class="back" hidden>← Cancel</button></p>
+          <!-- Mint-success only (#41 T9); built/wired by buildShareControl() in app.js. -->
+          <div id="flow-share-row" hidden></div>
           <p><button id="flow-done-btn" class="back" hidden>← Back to the job site</button></p>
         </div>
         <div class="flow-visual">
@@ -239,10 +260,15 @@
     </div>
   </div>
 
+  <!-- Deploy-time surface config (standalone web surface, spec 2026-07-16).
+       The repo default sets window.LFG_WEB = null; the GitHub Pages deploy
+       overwrites it with the cross-origin API base. Loaded BEFORE app.js so
+       boot can detect the web-surface context. -->
+  <script src="config.js?v=1"></script>
   <!-- Telegram Mini App bridge (#89), vendored same-origin. A no-op outside
        Telegram (window.Telegram stays undefined); loaded BEFORE app.js so the
        dual-mode boot can detect the Telegram context. -->
   <script src="telegram-web-app.js"></script>
-  <script type="module" src="app.js?v=15"></script>
+  <script type="module" src="app.js?v=16"></script>
 </body>
 </html>

@@ -92,9 +92,32 @@ SERVICE_TOKEN_TELEGRAM=<telegram-surface-token>
 TELEGRAM_ANNOUNCE_CHAT_ID=<telegram-channel-id>
 TELEGRAM_MINI_APP_URL=<public-https-url-of-the-mini-app>   # optional (#89); unset = launch button omitted
 TELEGRAM_INITDATA_MAX_AGE=3600                              # optional (#89); initData replay window in seconds
+X_ENABLED=1                                                 # optional; X auto-poster master flag (#41) — off unless set AND all four creds present
+X_CONSUMER_KEY=<x-app-consumer-key>                         # OAuth 1.0a app creds for the brand X account (#41)
+X_CONSUMER_SECRET=<x-app-consumer-secret>
+X_ACCESS_TOKEN=<brand-account-access-token>
+X_ACCESS_SECRET=<brand-account-access-secret>
+SERVICE_TOKEN_X=<x-surface-token>                           # firehose token; auth.py auto-registers surface "x"
+X_MONTHLY_POST_BUDGET=100                                   # optional; UTC-month post cap — COST knob (pay-per-use: $0.015/post link-free), default 100
+X_STATE_DB_PATH=x_state.db                                  # optional; poster dedup/budget/pause sqlite (gitignored)
+PUBLIC_SHARE_BASE_URL=<public-https-base>                   # optional (#41); unset ⇒ share buttons use bithomp URLs; needs public HTTPS (same dep as #89 Part B)
+WEB_ALLOWED_ORIGINS=https://build.letseffinggo.com,https://team-hamsa.github.io   # optional (#240); standalone web surface CORS allowlist (empty = off)
 BRIX_DISTRIBUTOR_ADDRESS=<xrpl-address>                     # optional; airdrop distributor wallet, excluded from BRIX leaderboards/derivation as a counterparty
 BRIX_AMM_ACCOUNT=<xrpl-address>                             # optional; mainnet BRIX/XRP AMM pool account, used by snapshot_balances.py
 ```
+
+> **Standalone web surface (#240):** the same vanilla-JS Activity runs as a
+> plain website at `build.letseffinggo.com` — GitHub Pages serves
+> `webapp/client/` (published by `.github/workflows/pages.yml` on every push
+> to `deploy`, with `config.js` rewritten to the funnel API base), and the
+> prod API answers cross-origin via the `cors_mw` middleware, gated on
+> `WEB_ALLOWED_ORIGINS` (empty = feature off, zero behavior change). Auth is
+> a 4th arm: client-callable `POST /api/web/signin` + `GET
+> /api/web/signin/{uuid}` bootstrap a `platform="web"` session from a XUMM
+> SignIn — the wallet IS the `platform_user_id`, so `identity.resolve("web",
+> wallet)` returns the wallet and every `@require_wallet` flow works
+> unchanged. The client persists the session in `localStorage` for the 6 h
+> token TTL. Design: `docs/superpowers/specs/2026-07-16-web-surface-design.md`.
 
 > **Telegram Mini App (#89):** the Mini App serves the same vanilla-JS Activity
 > inside Telegram. It is feature-flagged OFF by default: with
@@ -125,6 +148,8 @@ auto-restart hook is retired.
 | `lfg-index-mainnet` | `stg-index-testnet` (moved out of prod) |
 | `lfg-snapshot` (cron 00:10) | `stg-snapshot` (cron 00:10, testnet) |
 | `lfg-deployer` | `stg-deployer` |
+
+The X auto-poster (#41, `run_x.py`) is not yet in the pm2 tables — it goes live via the ops checklist on #41 (`lfg-x`, with `stop_exit_codes: [0]` so the X_ENABLED-off exit(0) parks instead of thrashing).
 
 Ecosystem files: `ecosystem.prod.config.js` / `ecosystem.staging.config.js`.
 Staging env deltas: `docs/ops/env.staging.example`. The `~/LFG` working copy
@@ -425,7 +450,9 @@ dedicated per-`nft_id` index instead.
 
 - **Store:** per-network SQLite files `onchain_testnet.db` / `onchain_mainnet.db`
   (gitignored, regenerable), one `onchain_nfts` table keyed by `nft_id`. Built by
-  `lfg_core/nft_index.py`; kept fresh by `lfg_core/nft_listener.py`.
+  `lfg_core/nft_index.py`; kept fresh by `lfg_core/nft_listener.py` (and, since
+  #211, stamped directly by `lfg_core/swap_flow.py` at the burn-remint point of
+  no return — the listener remains the backstop/refiner).
 - **Backfill (one-time / after a reset):**
   `.venv/bin/python scripts/backfill_onchain.py --network testnet|mainnet`
   (or `onchain_listener.py … snapshot`). Idempotent. Mainnet metadata is on IPFS
@@ -651,9 +678,43 @@ on-chain offer is ready for the owner to sign.
 
 ### In-app marketplace (#44)
 
-An XRP-denominated marketplace for both live characters and tradeable trait
-tokens, built entirely on native `NFTokenOffer` sell offers — no escrow
-contract, no custodial holding.
+A marketplace for both live characters and tradeable trait tokens, built
+entirely on native `NFTokenOffer` sell offers — no escrow contract, no
+custodial holding.
+
+**Per-kind denomination (#239):** character listings are XRP-denominated
+(drops, as originally shipped); **trait listings are BRIX-denominated**
+(`IssuedCurrencyAmount` on `TOKEN_CURRENCY_HEX`/`TOKEN_ISSUER_ADDRESS`, the
+same pair `shop_flow.brix_amount` uses). One code path parameterized on
+expected currency enforces the rule everywhere: `market_ops.
+extract_created_sell_offer`/`verify_sell_offer` take `expect="xrp"|"brix"`
+(BRIX values validated >0, ≤6dp, cap 1e15 via `validate_brix_value`), the
+`market_listings` row carries exactly one of `amount_drops`/`amount_brix`
+(self-migrating column + upsert invariant), and the listener/backfill ignore
+wrong-denomination offers — an XRP-denominated trait offer or a BRIX
+character offer is never indexed. Legacy live XRP trait listings are closed
+`stale` by the first post-deploy `backfill_market.py` run (sellers re-list
+in BRIX). Browse gains `min_brix`/`max_brix` trait filters (post-cache, like
+the XRP ones); list/trait-list POSTs take `price_brix` for traits.
+
+**XRP→BRIX on-ramp (trait buys, #239):** `POST /api/market/buy` on a trait
+listing first requires a BRIX trustline (none → 409 `trustline_required`,
+same signal the mint flow uses), then runs `brix_payment.detect_payment_path`
+(shared #238 helper) against the listing price. BRIX holders keep the
+one-signature accept. Everyone else gets a two-signature flow: `BuySession`
+starts in `awaiting_onramp` with a **self-Payment** payload
+(`xumm_ops.create_onramp_payment_payload`: Account=Destination=buyer,
+Amount=the listing's BRIX dict, SendMax=buffered AMM quote in drops,
+SourceTag+memos `action=payment`) that buys the BRIX out of the AMM into the
+buyer's own wallet; once it validates `tesSUCCESS` the service re-verifies
+the (unchanged) sell offer on-ledger and builds the normal accept payload
+(`onramp_confirmed` → `awaiting_signature`). Signer==buyer is enforced on
+BOTH payloads; abandoning after the on-ramp leaves the listing live and the
+buyer simply keeps their BRIX (no custody). Quote unavailable → 503
+`pricing_unavailable` before any payload. Buy-status responses expose
+`pay_with` + `price_xrp_quote` for the UI's two-step rendering. The on-ramp
+is trait-only and lives behind the same `ECONOMY_ENABLED` gate as every
+other trait on-ledger op.
 
 **`market_listings` store** (`lfg_core/market_store.py`): a derived,
 droppable, rebuildable index in the same per-network `onchain_<net>.db` as
@@ -816,6 +877,20 @@ matching Extract/List seller first. Design:
   supply row — unless the accept actually landed on-ledger despite the local
   timeout, in which case it's rescued into `accepted` instead of burned) and
   retries stuck `accepted` settlements.
+- **XRP payment fallback (#238):** buyers holding less BRIX than the price
+  silently pay XRP instead — `POST /api/shop/buy` runs
+  `lfg_core/brix_payment.detect_payment_path` (the same balance-check +
+  buffered-AMM-quote logic `swap_flow.detect_swap_payment` now delegates to)
+  before any session/mint (unquotable AMM → 503 `pricing_unavailable`). On
+  the XRP path the destination-locked offer is denominated in XRP **drops**
+  at the buffered quote; after settlement a best-effort, single-attempt
+  `xrpl_ops.buy_and_burn(price_brix, max_xrp=price_xrp)` converts the
+  collected XRP to BRIX and burns it (silent; failure only logs), fired from
+  both the poll path and the sweep's settlement retry and deduped by the
+  durable `buyback_done` flag. New self-migrating `shop_orders` columns:
+  `pay_with` (`NULL`/`"BRIX"`/`"XRP"`), `price_xrp`, `buyback_done`. The
+  session/API surface carries `pay_with`/`price_xrp`; supply accounting and
+  the BRIX path are unchanged.
 - **Taxon:** trait tokens minted by the shop share `TRAIT_TAXON` with Extract
   — see the flip to 176 noted above; `ASSEMBLE_TAXON = 1760` is unrelated
   (Assemble-minted rebirth characters, not shop trait tokens).
@@ -845,11 +920,21 @@ the single-mint machinery per unit.
   a restart.
 - **Startup resume:** `lfg_service.app.resume_bulk_jobs`, wired via
   `app.on_startup`, calls `bulk_mint_flow.load_all_resumable()` to re-attach
-  every job left in `paid`/`fulfilling` state and re-launches
-  `run_bulk_mint_job` for each — a crash/restart mid-job resumes from the
-  last-persisted unit with no double-charge (payment already confirmed) or
-  double-mint: `OFFERED`/`failed` units are skipped, and a `minted` unit is
-  re-offered (never re-minted).
+  every job left in `awaiting_payment`/`paid`/`fulfilling` state and
+  re-launches `run_bulk_mint_job` for each. `awaiting_payment` records are
+  durable from the moment `prepare_payment` succeeds (#228) and resume as a
+  ledger re-watch ONLY — no new payment request, the original
+  created_at-anchored window is honoured (short grace floor for expired
+  records; a payment the pre-crash process already claimed is reconciled
+  from the consumed-payment ledger by claimant tag), and the job may still
+  end `payment_timeout`. `paid`/`fulfilling` resumes keep the existing
+  guarantees — no double-charge (payment already confirmed) or double-mint:
+  `OFFERED`/`failed` units are skipped, and a `minted` unit is re-offered
+  (never re-minted). Cancelling an `awaiting_payment` job deletes its record
+  (tombstoning it `cancelled` if the delete fails) so a restart normally
+  cannot resurrect it; if the disk can neither unlink nor write, the stale
+  record survives (logged CRITICAL) and the resurrected watch simply
+  re-expires via its original created_at TTL.
 - **Completion is conditional, not unconditional:** a job only reaches the
   terminal `done` state once every unit is `offered` or `failed`. If a unit
   is still `minted` after the bounded final re-offer pass (offer creation
@@ -858,17 +943,22 @@ the single-mint machinery per unit.
   restart instead of stranding a minted-but-never-offered NFT (`done` is
   terminal and is never picked up by `load_all_resumable`).
 - **Quantity clamping:** `BulkMintJob.clamp_to_headroom()` sets
-  `quantity = min(requested_qty, BULK_MINT_MAX, headroom)`, where headroom =
-  `MAX_COLLECTION_SIZE − current_supply` (`lfg_core/supply.py`, reading live
-  `onchain_nfts` where `is_burned=0`, same store the economy conservation
-  audit uses). Zero headroom raises `CollectionFull` → the service returns
-  409 `collection_full`. This clamp runs **before** `prepare_payment` so a
-  request is never charged for mints the collection has no room for.
-  `_fulfill_unit` re-checks `current_supply` per-unit at fulfillment time (a
-  concurrent job can consume the tail between clamp and fulfillment); a
-  cap-race loss (or exhausted mint retries) converts into a durable
-  `mint_credits` row (`lfg_core/mint_credits.py`) rather than a lost payment —
-  the user keeps a redeemable credit, never loses money.
+  `quantity = min(requested_qty, BULK_MINT_MAX, granted)`, where `granted`
+  comes from an **atomic, durable headroom reservation**
+  (`lfg_core/headroom.py`, #226 — now authoritative for cap enforcement):
+  `try_reserve` grants against `MAX_COLLECTION_SIZE − current_supply −
+  outstanding reservations/pending mints` in one serialized sqlite
+  transaction, so concurrent jobs (and single mints, which reserve 1 via
+  `handle_mint_start` / `mint:*` claimants) can never collectively overshoot
+  the cap during the listener's index lag. Zero grant raises `CollectionFull`
+  → the service returns 409 `collection_full`. This clamp runs **before**
+  `prepare_payment` so a request is never charged for mints the collection
+  has no room for. `_fulfill_unit` re-checks the job's own reservation
+  per-unit; a lost reservation (or exhausted mint retries) converts into a
+  durable `mint_credits` row (`lfg_core/mint_credits.py`) rather than a lost
+  payment — the user keeps a redeemable credit, never loses money. Startup
+  (`resume_bulk_jobs`) rebuilds the reservation table from live resumable
+  job records so crash orphans never leak.
 - **No offer `Expiration`:** bulk-minted offers carry no expiry, so
   acceptance is fully decoupled from fulfillment (Phase B / follow-up #218
   — a claim-later UX is out of scope for this phase).

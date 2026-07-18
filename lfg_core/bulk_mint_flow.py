@@ -1,7 +1,11 @@
 # Bulk mint (#215): a durable batch job. After one K x payment, a background
 # task loops mint_flow.mint_one_unit K times, persisting after each unit so a
-# restart resumes the remainder. Offers never expire, so acceptance is fully
-# decoupled (Phase B / #218).
+# restart resumes the remainder. The record is durable from the moment
+# prepare_payment succeeds (#228): awaiting_payment/paid/fulfilling records
+# all resume on restart, and an awaiting_payment resume only re-enters the
+# ledger watch — the payment window stays anchored to created_at (never a
+# fresh window) and the payload is never re-requested. Offers never expire,
+# so acceptance is fully decoupled (Phase B / #218).
 from __future__ import annotations
 
 import asyncio
@@ -19,10 +23,11 @@ from lfg_core import (
     config,
     db_path,
     entitlement,
+    headroom,
     memos,
     mint_credits,
     mint_flow,
-    supply,
+    payment_ledger,
     xrpl_ops,
     xumm_ops,
 )
@@ -85,6 +90,10 @@ class BulkMintJob:
         self.paid_at: float | None = None
         self.state = AWAITING_PAYMENT
         self.error: str | None = None
+        # Runtime durability health (#228), never serialized: a record on disk
+        # is by definition a successful write, so this is meaningful only for
+        # the live in-memory job. True while the most recent persist() failed.
+        self.persist_failed = False
         self.pay_with: str | None = None
         self.pay_amount: str | None = None
         self.unit_price: str | None = None
@@ -96,17 +105,26 @@ class BulkMintJob:
         self._published = False
 
     def clamp_to_headroom(self) -> None:
-        """Clamp quantity to min(requested, BULK_MINT_MAX, headroom). Raise
-        CollectionFull if no headroom. Cap-exempt entitlements (burn) skip the
-        headroom clamp (#220). Must run BEFORE prepare_payment so we never take
-        payment for undeliverable mints."""
+        """Clamp quantity to min(requested, BULK_MINT_MAX, headroom) by taking
+        an atomic, durable headroom RESERVATION (#226) — not a racy supply
+        read: headroom.try_reserve serializes concurrent clamps so two jobs at
+        the tail can never collectively reserve past MAX_COLLECTION_SIZE. A
+        partial grant clamps quantity (same semantics the old headroom min
+        had); zero (including a store error — fail closed for new grants)
+        raises CollectionFull. Cap-exempt entitlements (burn, #220) skip the
+        reservation entirely — no row is ever written for them. Must run
+        BEFORE prepare_payment so we never take payment for undeliverable
+        mints; every terminal path releases the reservation
+        (release_job_headroom / per-unit retire+release in _fulfill_unit)."""
         cap_exempt = self.entitlement is not None and getattr(self.entitlement, "cap_exempt", False)
         q = min(self.requested_qty, config.BULK_MINT_MAX)
         if not cap_exempt:
-            headroom = supply.remaining_headroom(self.network)
-            if headroom <= 0:
+            granted = headroom.try_reserve(
+                db_path.app_db_path(self.network), f"bulk:{self.id}", q, self.network
+            )
+            if granted <= 0:
                 raise CollectionFull()
-            q = min(q, headroom)
+            q = granted
         self.quantity = q
         self.units = [Unit(index=i) for i in range(q)]
         if self.entitlement is None:
@@ -154,20 +172,68 @@ class BulkMintJob:
             self.payment_link = payload["xumm_url"]
             self.payment_uuid = payload.get("uuid")
 
+    @property
+    def payment_claimant(self) -> str:
+        """Exact claimant tag stamped on this job's consumed-payment ledger
+        row (#228) — lets a resumed job recognise a payment its pre-crash
+        process already claimed, and cancel() refuse to drop a claimed one."""
+        return f"bulk:{self.id}"
+
     def cancel(self) -> bool:
         """Legal only while awaiting payment (once paid, fulfillment must
         complete). Synchronous state guard, same discipline as MintSession."""
         if self.state != AWAITING_PAYMENT:
             return False
+        # The payment can already be durably claimed while run_bulk_mint_job
+        # is suspended between payment_ledger.try_consume committing and PAID
+        # landing on this object (#228): state still reads AWAITING_PAYMENT
+        # but the money is taken. Refuse the cancel — the in-flight watch
+        # will surface PAID and fulfillment must run.
+        # is not False: True means the money is taken (fulfillment must
+        # run); None means the ledger read failed, so "unpaid" is unprovable
+        # — refuse rather than risk deleting a paid job (user can retry).
+        if payment_ledger.find_claimed(self.payment_claimant) is not False:
+            return False
         self.state = CANCELLED
+        # Terminal: give the whole headroom reservation back (#226).
+        release_job_headroom(self)
+        # In-memory teardown first: delete_record never raises but CAN fail
+        # on a degraded disk, and the payment watch must die regardless.
         if self.task is not None:
             self.task.cancel()
+        # AWAITING_PAYMENT records are durable (#228) and resumable — drop the
+        # file so a restart can't resurrect a job the user backed out of. If
+        # the disk refuses the delete, rewrite the record as a cancelled
+        # tombstone instead (terminal states are skipped by
+        # load_all_resumable); persist never raises, so this is best-effort.
+        if not delete_record(self.id) and not persist(self):
+            # Disk can neither unlink nor write: the stale awaiting_payment
+            # record survives and a restart will resurrect its payment watch.
+            # Safe direction — the watch re-expires via the created_at TTL,
+            # and a payment that actually landed is honoured, not lost — but
+            # scream so the degraded disk gets fixed.
+            logging.critical(
+                f"bulk job {self.id}: cancel could neither delete nor tombstone "
+                "its record; a restart will resurrect the payment watch"
+            )
         return True
 
     def mark_published(self) -> None:
         self._published = True
 
     def to_dict(self) -> dict[str, Any]:
+        """Client-facing shape (/api/mint/bulk, status poll, /active).
+
+        Contract: `payment_link` MAY be null while state == AWAITING_PAYMENT —
+        the start handler registers the job (making it visible to /active)
+        BEFORE the XUMM payload build finishes, so null means "still
+        preparing, keep polling", not an error. `persist_failed` flags
+        degraded durability: the in-memory job is authoritative and keeps
+        running; the flag clears on the next successful full-record persist.
+        A unit MAY be `offered` with a null `offer_id`: its gift offer was
+        already accepted (delivered while the service was down), so there is
+        no offer left to accept — clients should treat it as claimed.
+        """
         return {
             "id": self.id,
             "platform": self.platform,
@@ -179,6 +245,7 @@ class BulkMintJob:
             "pay_amount": self.pay_amount,
             "payment_link": self.payment_link,
             "network": self.network,
+            "persist_failed": self.persist_failed,
             "units": [asdict(u) for u in self.units],
             "minted": sum(1 for u in self.units if u.state in (MINTED, OFFERED)),
             "offered": sum(1 for u in self.units if u.state == OFFERED),
@@ -239,29 +306,109 @@ def _record_path(job_id: str) -> str:
     return os.path.join(JOBS_DIR, f"{job_id}.json")
 
 
-def persist(job: BulkMintJob) -> None:
-    """Atomically write the job's full reconstruction record."""
-    os.makedirs(JOBS_DIR, exist_ok=True)
-    data = job.serialize()
-    fd, tmp = tempfile.mkstemp(dir=JOBS_DIR, suffix=".tmp")
+def persist(job: BulkMintJob) -> bool:
+    """Atomically write the job's full reconstruction record. Returns False —
+    NEVER raises — on failure (#228): a persist failure bubbling out of
+    _on_mint would land inside the mint retry loop (re-mint risk), and one on
+    the PAID write would abort fulfillment of a payment already taken. The
+    job continues on in-memory state, flagged `persist_failed` (surfaced by
+    to_dict) until a later persist succeeds and clears it — each write is a
+    full-record rewrite, so any success restores complete durability."""
+    tmp: str | None = None
     try:
+        os.makedirs(JOBS_DIR, exist_ok=True)
+        data = job.serialize()
+        fd, tmp = tempfile.mkstemp(dir=JOBS_DIR, suffix=".tmp")
         with os.fdopen(fd, "w") as f:
             json.dump(data, f, indent=2)
         os.replace(tmp, _record_path(job.id))
-    except Exception:
-        logging.error("failed to persist bulk job %s", job.id)
-        if os.path.exists(tmp):
-            os.remove(tmp)
+    except Exception as e:
+        logging.error("failed to persist bulk job %s (state=%s): %s", job.id, job.state, e)
+        job.persist_failed = True
+        if tmp is not None and os.path.exists(tmp):
+            try:
+                os.remove(tmp)
+            except OSError:
+                pass
+        return False
+    job.persist_failed = False
+    return True
 
 
-def delete_record(job_id: str) -> None:
+def delete_record(job_id: str) -> bool:
+    """Remove a job's durable record. Same never-raise contract as persist()
+    (#228): on the degraded-disk class persist_failed exists for, a raise
+    mid-cancel would leave a CANCELLED job with a live payment watch and a
+    resurrectable record. Returns False on a real deletion failure (missing
+    file is success — nothing to resurrect)."""
     try:
         os.remove(_record_path(job_id))
     except FileNotFoundError:
         pass
+    except OSError as e:
+        logging.error("failed to delete bulk job record %s: %s", job_id, e)
+        return False
+    return True
+
+
+def _cap_exempt(job: BulkMintJob) -> bool:
+    return job.entitlement is not None and getattr(job.entitlement, "cap_exempt", False)
+
+
+def release_job_headroom(job: BulkMintJob) -> None:
+    """Release whatever headroom reservation the job still holds (#226).
+    Called on every terminal transition (done/failed/payment_timeout/
+    cancelled) and on the service's pre-launch failure paths. Idempotent and
+    never raises (headroom.release contract); cap-exempt jobs never reserved,
+    so this is a no-op for them."""
+    if _cap_exempt(job):
+        return
+    headroom.release(db_path.app_db_path(job.network), f"bulk:{job.id}")
+
+
+def headroom_snapshot(job: BulkMintJob) -> tuple[str, int, list[str]] | None:
+    """(claimant, still-reserved units, minted nft_ids) for headroom.rebuild
+    at startup (#226): PENDING units still need their reservation; units with
+    an nft_id (MINTED/OFFERED) are on-chain and re-asserted as pending rows
+    until the index catches up; OFFERED-without-nft_id / UNIT_FAILED units
+    are fully settled. None for cap-exempt jobs — they never reserve."""
+    if _cap_exempt(job):
+        return None
+    reserved = sum(1 for u in job.units if u.state == PENDING)
+    minted = [u.nft_id for u in job.units if u.nft_id]
+    return (f"bulk:{job.id}", reserved, minted)
 
 
 _UNIT_MAX_ATTEMPTS = 3
+
+# Backoff before re-checking an UNREADABLE (tri-state None) reservation in
+# _fulfill_unit (#226 review): a transient app-DB lock must not convert a
+# paid, still-valid grant into a mint credit — but we never mint under an
+# unprovable grant either, so each re-check consumes a unit attempt.
+_RESERVATION_RETRY_DELAY_SECONDS = 2.0
+
+# Retry budget for a failed persist before fulfillment pauses (#228): once
+# the on-disk record goes stale, every NEW unit started would be re-minted by
+# a crash+restart resume, so we stop widening the exposure instead.
+_PERSIST_RETRY_ATTEMPTS = 3
+_PERSIST_RETRY_DELAY_SECONDS = 0.5
+
+
+async def _retry_persist(job: BulkMintJob) -> bool:
+    """Re-attempt a failed persist with a short backoff. True once a write
+    lands (any success is a full-record rewrite, restoring durability)."""
+    for _ in range(_PERSIST_RETRY_ATTEMPTS):
+        await asyncio.sleep(_PERSIST_RETRY_DELAY_SECONDS)
+        if persist(job):
+            return True
+    return False
+
+
+# Wait budget for resuming an AWAITING_PAYMENT record whose payment window
+# (created_at + PAYMENT_TIMEOUT_SECONDS) already elapsed: long enough for
+# wait_for_payment's not_before-bounded backfill check to honour a payment
+# that landed before the crash, never a fresh multi-minute wait.
+_EXPIRED_PAYMENT_GRACE_SECONDS = 30
 
 
 async def _ensure_offer(job: BulkMintJob, unit: Unit) -> None:
@@ -270,8 +417,55 @@ async def _ensure_offer(job: BulkMintJob, unit: Unit) -> None:
     and the offer/XUMM steps landing. NEVER mints; only (re-)creates the sell
     offer for the existing nft_id. On success -> OFFERED. On failure, leave
     the unit MINTED with .error set so a later resume/backfill can retry the
-    offer again without ever re-minting."""
+    offer again without ever re-minting.
+
+    Idempotent (#227): in the crash window where the original offer DID land
+    on-chain but OFFERED was never persisted, creating again would leave two
+    live offers for one unit — so an existing offer is adopted first. The
+    match is exactly what create_nft_offer emits (our wallet as owner, the
+    buyer as Destination, amount "0", no Expiration); anything looser risks
+    adopting a foreign offer, and market_ops.verify_sell_offer is NOT
+    reusable here because it rejects any Destination-carrying offer — which
+    the gift offer always is. A lookup RPC failure is INDETERMINATE — a live
+    offer may be hiding behind the blip, so creating blind could duplicate
+    it; the unit stays MINTED and a later resume retries.
+
+    The other half of the #227 window is the offer landing AND the buyer
+    accepting it while we were down: the accept consumed the offer object, so
+    there is nothing to adopt, and creating again can only tec-fail forever
+    (we no longer own the token) — wedging the job FULFILLING and the user's
+    bulk slot. A destination-locked amount-0 offer can only be taken by the
+    destination, so current owner == buyer is proof of delivery: mark the
+    unit OFFERED. Fail closed on an indeterminate owner lookup (nft_info
+    returns None) — fall through to create, never mark an undelivered unit
+    delivered on a transient clio blip."""
     assert unit.nft_id is not None, "_ensure_offer requires an already-minted unit"
+    try:
+        offers = await xrpl_ops.get_nft_sell_offers(unit.nft_id, raise_on_error=True)
+    except Exception as e:
+        unit.state = MINTED
+        unit.error = f"offer lookup failed: {e}"
+        return
+    for offer in offers:
+        if (
+            offer.get("owner") == xrpl_ops.bot_wallet_address()
+            and offer.get("destination") == job.wallet_address
+            and offer.get("amount") == "0"
+            and offer.get("expiration") is None
+            and offer.get("offer_index")
+        ):
+            unit.offer_id = offer["offer_index"]
+            unit.state = OFFERED
+            unit.error = None
+            return
+    info = await xrpl_ops.nft_info(unit.nft_id)
+    if info is not None and info.get("owner") == job.wallet_address:
+        # Gift offer already accepted (see docstring): delivered. offer_id
+        # stays None — the accept consumed the offer object, so there is
+        # nothing left to accept (to_dict documents offered+null offer_id).
+        unit.state = OFFERED
+        unit.error = None
+        return
     try:
         offer_id = await xrpl_ops.create_nft_offer(
             unit.nft_id,
@@ -291,26 +485,81 @@ async def _ensure_offer(job: BulkMintJob, unit: Unit) -> None:
 
 
 async def _fulfill_unit(job: BulkMintJob, unit: Unit) -> None:
-    """Mint+offer one unit. Cap re-check first (a concurrent job may have
-    consumed the tail); a cap-hit or exhausted unit becomes a mint credit
-    rather than a loss. Cap-exempt (burn) entitlements skip the re-check.
+    """Mint+offer one unit. Reservation re-check first (#226): the global
+    cap race is already excluded at clamp time by headroom.try_reserve, so
+    the per-unit gate is simply "does this job still hold a reservation for
+    this unit". The read is tri-state: a successful 0 means the row is
+    provably gone (crash-rebuild dropped an orphan) and the unit becomes a
+    mint credit rather than a loss or an overshoot; None means the store
+    read itself failed (e.g. transient app-DB lock) — the grant is
+    unprovable, so we never mint under it, but we retry with a short backoff
+    instead of crediting a paid, still-valid grant away on a blip. Only a
+    provable 0 or persistent unreadability across every attempt converts to
+    a credit. Cap-exempt (burn) entitlements skip the reservation entirely.
 
     `on_mint` fires the instant mint_one_unit confirms the mint on-chain, so
     the unit is persisted as MINTED before the offer/XUMM steps run — closing
     the resume double-mint window (#215): a crash between mint and offer now
-    resumes via _ensure_offer (re-offer only), never a re-mint."""
-    cap_exempt = job.entitlement is not None and getattr(job.entitlement, "cap_exempt", False)
+    resumes via _ensure_offer (re-offer only), never a re-mint. The same
+    callback retires the unit's reservation to the durable pending set
+    (headroom.retire_to_pending): the mint is on-chain but invisible to
+    current_supply until the listener indexes it, so it keeps counting
+    against headroom as a pending row until then — never released outright at
+    MINTED, which would under-count during the index lag window."""
+    cap_exempt = _cap_exempt(job)
+    app_db = db_path.app_db_path(job.network)
+    claimant = f"bulk:{job.id}"
 
     async def _on_mint(nft_number: int, nft_id: str, image_url: str | None) -> None:
         unit.nft_number = nft_number
         unit.nft_id = nft_id
         unit.image_url = image_url
         unit.state = MINTED
-        persist(job)
+        # Persist MINTED FIRST: the anti-double-mint record must be durable
+        # before anything that can block or fail (the pending handoff below
+        # takes a write transaction with a busy timeout) — a crash mid-handoff
+        # must find MINTED on disk, never PENDING (#226 review).
+        persisted = persist(job)
+        if not cap_exempt:
+            # Reservation -> pending handoff (#226). Observable: a failed
+            # handoff leaves the reservation row in place (over-counting,
+            # safe) and the startup rebuild converts it from the job record.
+            if not headroom.retire_to_pending(app_db, claimant, nft_id):
+                logging.critical(
+                    "bulk job %s unit %d: reservation->pending handoff FAILED "
+                    "for %s — reservation retained; rebuild reconciles on "
+                    "restart",
+                    job.id,
+                    unit.index,
+                    nft_id,
+                )
+        if not persisted:
+            # This is THE write the anti-double-mint invariant depends on: a
+            # restart from the stale record re-mints this unit. Escalate
+            # loudly with the nft_id so an operator can reconcile manually
+            # even if the disk record never recovers (#228).
+            logging.critical(
+                "MINTED persist failed for bulk job %s unit %d nft_id %s — "
+                "on-disk record is stale; double-mint risk if the process "
+                "restarts before a later persist succeeds",
+                job.id,
+                unit.index,
+                nft_id,
+            )
 
     for _ in range(_UNIT_MAX_ATTEMPTS):
-        if not cap_exempt and supply.current_supply(job.network) >= config.MAX_COLLECTION_SIZE:
-            break  # cap hit -> credit below
+        if not cap_exempt:
+            held = headroom.reserved_for(app_db, claimant)
+            if held is None:
+                # Store read failed: the grant is unprovable, not provably
+                # gone. Never mint under it (fail closed), but never credit
+                # a paid unit away on a transient lock either — burn an
+                # attempt on a short backoff and re-check.
+                unit.error = "headroom store unreadable"
+                await asyncio.sleep(_RESERVATION_RETRY_DELAY_SECONDS)
+                continue
+            if held < 1:
+                break  # provably gone (orphan-rebuild) -> credit below
         nft_number = await mint_flow._allocate_nft_number()
         res = await mint_flow.mint_one_unit(
             discord_id=job.discord_id,
@@ -337,27 +586,94 @@ async def _fulfill_unit(job: BulkMintJob, unit: Unit) -> None:
                 unit.error = res.error or "offer creation failed"
             return
         unit.error = res.error  # transient mint failure: retry
-    # Never minted after retries (or cap-hit): durable credit, no money lost.
+    # Never minted after retries (or reservation lost): durable credit, no
+    # money lost. The unit's reservation slot is released (no-op if the row
+    # is already gone) — it will never mint.
+    try:
+        mint_credits.add_credit(app_db, job.discord_id, job.network, 1)
+    except Exception:
+        # Credit did NOT commit: never terminalize the unit on top of an
+        # unrecorded credit (money loss). Leave it PENDING with the error —
+        # the job stays FULFILLING (non-terminal) and the startup sweep
+        # re-enters this tail to retry the credit (#226 review). The
+        # reservation is also retained so a retried mint stays admissible.
+        unit.error = "mint-credit write failed — unit retried on resume"
+        logging.critical(
+            "bulk job %s unit %d: mint-credit write FAILED for %s on %s — "
+            "unit left retryable; credit retried on resume",
+            job.id,
+            unit.index,
+            job.discord_id,
+            job.network,
+        )
+        return
     unit.state = UNIT_FAILED
-    mint_credits.add_credit(db_path.app_db_path(job.network), job.discord_id, job.network, 1)
+    if not cap_exempt:
+        headroom.release(app_db, claimant, 1)
 
 
 async def run_bulk_mint_job(job: BulkMintJob) -> None:
     """Drive a bulk job to terminal state. Background task / resume entrypoint."""
     try:
+        # Entry guard: a terminal job must never fulfill. Closes the
+        # cancel-during-prepare race (cancel() succeeds while the start
+        # handler awaits prepare_payment because task is still None; without
+        # this guard the CANCELLED job would fall past the AWAITING_PAYMENT
+        # gate below and mint every unit with no payment ever confirmed) and
+        # defends the startup sweep against any terminal record.
+        if job.state in TERMINAL_STATES:
+            return
         if job.state == AWAITING_PAYMENT:
             p = job._payment_params()
             assert job.pay_amount is not None, "prepare_payment must run before waiting"
+            # The payment window is anchored to created_at, NOT to this call
+            # (#228): AWAITING_PAYMENT records are durable and resumed on
+            # restart, and a resume must neither grant a fresh full window
+            # nor — for an already-expired record — sit in a multi-minute
+            # wait. It must also never re-request payment: the payload was
+            # built once in prepare_payment; this only re-watches the ledger,
+            # and the grace floor keeps the backfill check (bounded by the
+            # preserved not_before) so an UNCLAIMED payment that landed
+            # before the crash is still honoured. A payment the pre-crash
+            # process already claimed is invisible to the re-watch
+            # (payment_ledger dedups by tx hash — the claim commits before
+            # PAID can reach disk), so a miss is reconciled against the
+            # ledger by this job's exact claimant tag before terminalizing.
+            remaining = int(job.created_at + config.PAYMENT_TIMEOUT_SECONDS - time.time())
             paid = await xrpl_ops.wait_for_payment(
                 destination=p["destination"],
                 expected_sender=job.wallet_address,
                 expected_amount=job.pay_amount,
+                timeout_seconds=max(remaining, _EXPIRED_PAYMENT_GRACE_SECONDS),
                 not_before=job.created_at - 10,
                 currency=p["currency"],
                 issuer=p["issuer"],
+                claimant=job.payment_claimant,
             )
             if not paid:
+                claimed = payment_ledger.find_claimed(job.payment_claimant)
+                if claimed:
+                    logging.info(
+                        "bulk job %s: payment already claimed by a pre-crash "
+                        "process — honouring it instead of timing out",
+                        job.id,
+                    )
+                    paid = True
+                elif claimed is None:
+                    # Ledger read failed: neither "paid" nor "unpaid" is
+                    # provable. Never terminalize on an indeterminate
+                    # reconciliation — leave the record awaiting_payment so
+                    # the next restart retries it.
+                    logging.warning(
+                        "bulk job %s: claim reconciliation indeterminate "
+                        "(ledger read failed); leaving job resumable",
+                        job.id,
+                    )
+                    persist(job)
+                    return
+            if not paid:
                 job.state = PAYMENT_TIMEOUT
+                release_job_headroom(job)
                 persist(job)
                 return
             job.paid_at = time.time()
@@ -366,15 +682,33 @@ async def run_bulk_mint_job(job: BulkMintJob) -> None:
 
         job.state = FULFILLING
         persist(job)
+        processed_any = False
         for unit in job.units:
             if unit.state in (OFFERED, UNIT_FAILED):
                 continue  # resume: skip already-processed units
+            if processed_any and job.persist_failed and not await _retry_persist(job):
+                # Durability degraded (#228): the on-disk record no longer
+                # reflects the units just delivered, so every FURTHER unit
+                # started now would also be re-minted by a crash+restart
+                # resume. Park the job FULFILLING (non-terminal, resumable —
+                # a restart or the next sweep picks it back up) instead of
+                # widening the double-mint exposure past the unit already at
+                # risk.
+                job.error = "durability degraded: fulfillment paused"
+                logging.critical(
+                    "bulk job %s: persist still failing — pausing fulfillment "
+                    "before unit %d to cap double-mint exposure",
+                    job.id,
+                    unit.index,
+                )
+                return
             if unit.state == MINTED:
                 # Already minted (possibly in a prior process) — re-offer
                 # only, never re-mint.
                 await _ensure_offer(job, unit)
             else:
                 await _fulfill_unit(job, unit)
+            processed_any = True
             persist(job)
 
         # Bounded final re-offer pass: a unit that minted but never reached
@@ -402,19 +736,56 @@ async def run_bulk_mint_job(job: BulkMintJob) -> None:
         # the NFT itself is safe (minted + journaled), just pending an offer.
         if all(u.state in (OFFERED, UNIT_FAILED) for u in job.units):
             job.state = DONE
+            # Every unit already retired (to pending) or released its slot
+            # individually, so the reservation row is empty by now — this is
+            # terminal-state belt-and-braces cleanup, safe even if the
+            # persist below flips the state back to FULFILLING (#226).
+            release_job_headroom(job)
         else:
             job.state = FULFILLING
-        persist(job)
+        if not persist(job) and job.state == DONE:
+            # DONE is terminal: it gets pruned from the live registry and is
+            # never resumed. If the DONE record couldn't reach disk, the
+            # stale on-disk state would already resume the job after a
+            # restart — but only if the in-memory job doesn't terminalize
+            # first. Stay FULFILLING (non-terminal, resumable, flagged
+            # persist_failed): the resumed run finds every unit already
+            # resolved and just retries this final persist.
+            job.state = FULFILLING
     except asyncio.CancelledError:
         raise
     except Exception as e:
         logging.error("bulk job %s failed: %s", job.id, e)
-        job.state = FAILED
         job.error = str(e)
-        persist(job)
+        if job.paid_at is not None:
+            # Money was taken: never terminalize with unresolved units — a
+            # FAILED job is pruned and unresumable, stranding paid units with
+            # neither an NFT nor a durable credit. Stay FULFILLING so the
+            # startup sweep retries; headroom is retained for those retries
+            # (#226 review).
+            logging.critical(
+                "bulk job %s: post-payment failure left non-terminal for resume — %s",
+                job.id,
+                e,
+            )
+            job.state = FULFILLING
+            persist(job)
+        else:
+            # Pre-payment: terminal is safe (nothing owed).
+            job.state = FAILED
+            release_job_headroom(job)
+            persist(job)
 
 
 def load_all_resumable() -> list[BulkMintJob]:
+    """Load every resumable job record: AWAITING_PAYMENT, PAID, FULFILLING.
+
+    AWAITING_PAYMENT is resumable (#228): the start handler persists the job
+    once the payment payload exists, so a crash after the user was shown (and
+    possibly signed) the payment request re-enters the ledger watch —
+    bounded by the original created_at-anchored window, never re-requesting
+    payment — instead of dropping the job. Terminal records (done/failed/
+    payment_timeout/cancelled) are never resumed."""
     out: list[BulkMintJob] = []
     if not os.path.isdir(JOBS_DIR):
         return out
@@ -424,7 +795,7 @@ def load_all_resumable() -> list[BulkMintJob]:
         try:
             with open(os.path.join(JOBS_DIR, name)) as f:
                 data = json.load(f)
-            if data.get("state") in (PAID, FULFILLING):
+            if data.get("state") in (AWAITING_PAYMENT, PAID, FULFILLING):
                 out.append(BulkMintJob.from_serialized(data))
         except Exception:
             logging.error("skipping unreadable bulk job record %s", name)

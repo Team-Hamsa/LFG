@@ -18,7 +18,18 @@ def _canonical(attributes: list[dict[str, Any]]) -> list[dict[str, Any]]:
     """Canonical layer order (z-order from trait_config: layer z, or a
     per-value z_override — this is what floats effect traits like Wavy Eyes
     to render on top of everything else); 'None'/empty values skipped (no
-    layer file)."""
+    layer file).
+
+    Refuses un-normalized relocation-class input (#268, NFT #4039): an
+    Accessory value that swap_meta.normalize_attributes would relocate to
+    Back must never be silently z-sorted here — the composed image would
+    diverge from what every metadata reader sees."""
+    for a in attributes:
+        if a.get("trait_type") == "Accessory" and a.get("value") in swap_meta.BACK_VALUES:
+            raise ValueError(
+                f"Un-normalized attributes: Accessory value {a['value']!r} belongs on "
+                "Back (#268) — run swap_meta.normalize_attributes before composing"
+            )
     non_empty = [a for a in attributes if a.get("value") and a["value"] != "None"]
     return trait_config.get_config().sort_attributes(non_empty)
 

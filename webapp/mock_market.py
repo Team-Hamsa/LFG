@@ -93,7 +93,8 @@ class MockMarket:
                 "nft_number": None,
                 "image": _trait_image_url("Head", "Tophat"),
                 "attributes": None,
-                "amount_drops": 4_000_000,
+                "amount_drops": None,
+                "amount_brix": "4",
                 "seller": OTHER_SELLER_1,
                 "offer_index": "MOCKOFFER-9101",
                 "is_live": True,
@@ -106,7 +107,8 @@ class MockMarket:
                 "nft_number": None,
                 "image": _trait_image_url("Eyes", "Shades"),
                 "attributes": None,
-                "amount_drops": 15_000_000,
+                "amount_drops": None,
+                "amount_brix": "15",
                 "seller": OTHER_SELLER_2,
                 "offer_index": "MOCKOFFER-9102",
                 "is_live": True,
@@ -119,7 +121,8 @@ class MockMarket:
                 "nft_number": None,
                 "image": _trait_image_url("Mouth", "Grin"),
                 "attributes": None,
-                "amount_drops": 2_000_000,
+                "amount_drops": None,
+                "amount_brix": "2",
                 "seller": OTHER_SELLER_1,
                 "offer_index": "MOCKOFFER-9199",
                 "is_live": False,  # already sold/cancelled -> buy/cancel 410/404
@@ -147,11 +150,15 @@ class MockMarket:
             "nft_id": row["nft_id"],
             "kind": row["kind"],
             "image": row["image"],
-            "amount_drops": row["amount_drops"],
-            "amount_xrp": market_ops.drops_to_xrp_str(str(row["amount_drops"])),
             "seller": row["seller"],
             "offer_index": row["offer_index"],
         }
+        # #239 per-kind denomination, mirroring app._serialize_listing_row.
+        if row.get("amount_drops") is not None:
+            out["amount_drops"] = row["amount_drops"]
+            out["amount_xrp"] = market_ops.drops_to_xrp_str(str(row["amount_drops"]))
+        if row.get("amount_brix") is not None:
+            out["amount_brix"] = row["amount_brix"]
         if row["kind"] == "character":
             out["nft_number"] = row["nft_number"]
             out["attributes"] = row["attributes"] or []
@@ -173,9 +180,17 @@ class MockMarket:
     ) -> list[dict[str, Any]]:
         rows = [r for r in self._live() if r["kind"] == kind]
         if min_drops is not None:
-            rows = [r for r in rows if r["amount_drops"] >= min_drops]
+            rows = [
+                r
+                for r in rows
+                if r.get("amount_drops") is not None and r["amount_drops"] >= min_drops
+            ]
         if max_drops is not None:
-            rows = [r for r in rows if r["amount_drops"] <= max_drops]
+            rows = [
+                r
+                for r in rows
+                if r.get("amount_drops") is not None and r["amount_drops"] <= max_drops
+            ]
         if trait_filters:
             rows = [
                 r
@@ -188,9 +203,9 @@ class MockMarket:
                 )
             ]
         if sort == "price_asc":
-            rows = sorted(rows, key=lambda r: (r["amount_drops"], r["offer_index"]))
+            rows = sorted(rows, key=lambda r: (market_store.listing_price(r), r["offer_index"]))
         elif sort == "price_desc":
-            rows = sorted(rows, key=lambda r: (-r["amount_drops"], r["offer_index"]))
+            rows = sorted(rows, key=lambda r: (-market_store.listing_price(r), r["offer_index"]))
         else:  # newest: the mock carries no created_ts, so this is stable input order
             rows = list(rows)
         return [self._serialize(r) for r in rows]
@@ -246,7 +261,13 @@ class MockMarket:
 
     # --- ops: list ---
 
-    def start_list(self, owner: str, nft_id: str, amount_drops: int) -> dict[str, Any]:
+    def start_list(
+        self,
+        owner: str,
+        nft_id: str,
+        amount_drops: int | None,
+        amount_brix: str | None = None,
+    ) -> dict[str, Any]:
         # Ownership resolution mirrors the real handler's shape closely
         # enough for manual testing: an unlisted character/trait token the
         # dev owner actually holds (per mock_economy), or already-listed ->
@@ -266,7 +287,8 @@ class MockMarket:
             "state": "awaiting_signature",
             "nft_id": nft_id,
             "listing_kind": "character" if char is not None else "trait",
-            "amount_drops": amount_drops,
+            "amount_drops": amount_drops if char is not None else None,
+            "amount_brix": amount_brix if char is None else None,
             "slot": trait["slot"] if trait else None,
             "value": trait["value"] if trait else None,
             "seller": owner,
@@ -304,12 +326,16 @@ class MockMarket:
             "state": "awaiting_signature",
             "offer_index": offer_index,
             "buyer": owner,
-            "instruction": f"Confirm purchase for {market_ops.drops_to_xrp_str(str(row['amount_drops']))} XRP",
+            "instruction": (
+                f"Confirm purchase for {row['amount_brix']} BRIX"
+                if row.get("amount_brix") is not None
+                else f"Confirm purchase for {market_ops.drops_to_xrp_str(str(row['amount_drops']))} XRP"
+            ),
         }
         return self._session_dict(sid)
 
     def start_trait_list(
-        self, owner: str, slot: str, value: str, amount_drops: int
+        self, owner: str, slot: str, value: str, amount_brix: str
     ) -> dict[str, Any]:
         if not mock_economy.INSTANCE._closet_active(owner):
             raise MockMarketError("Create and claim your Closet first.")
@@ -323,7 +349,7 @@ class MockMarket:
             "owner": owner,
             "slot": slot,
             "value": value,
-            "amount_drops": amount_drops,
+            "amount_brix": amount_brix,
             "nft_id": None,
             "offer_index": None,
         }
@@ -367,7 +393,8 @@ class MockMarket:
                         else ""
                     ),
                     "attributes": [],
-                    "amount_drops": session["amount_drops"],
+                    "amount_drops": session.get("amount_drops"),
+                    "amount_brix": session.get("amount_brix"),
                     "seller": session["seller"],
                     "offer_index": offer_index,
                     "is_live": True,
@@ -451,7 +478,8 @@ class MockMarket:
                         "nft_number": None,
                         "image": _trait_image_url(session["slot"], session["value"]),
                         "attributes": [],
-                        "amount_drops": session["amount_drops"],
+                        "amount_drops": None,
+                        "amount_brix": session["amount_brix"],
                         "seller": session["owner"],
                         "offer_index": offer_index,
                         "is_live": True,

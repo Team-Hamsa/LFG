@@ -47,6 +47,14 @@ def _connect() -> sqlite3.Connection:
         "INSERT OR IGNORE INTO payment_ledger_meta (key, value) VALUES ('bootstrap_ts', ?)",
         (str(int(time.time())),),
     )
+    # Self-migrating claimant tag (#228): try_consume durably commits BEFORE
+    # the claiming flow can persist its own paid state, so a crash in that gap
+    # leaves the claim recorded only here. Tagging the row with an exact
+    # claimant id (e.g. "bulk:<job_id>") lets the resumed flow recognise its
+    # own pre-crash claim instead of reading the dedup miss as "never paid".
+    cols = {row[1] for row in conn.execute("PRAGMA table_info(consumed_payments)")}
+    if "claimant" not in cols:
+        conn.execute("ALTER TABLE consumed_payments ADD COLUMN claimant TEXT")
     conn.commit()
     return conn
 
@@ -68,16 +76,18 @@ def bootstrap_floor() -> float:
         conn.close()
 
 
-def try_consume(tx_hash: str, sender: str, destination: str) -> bool:
+def try_consume(tx_hash: str, sender: str, destination: str, claimant: str | None = None) -> bool:
     """Atomically claim a payment by tx hash. Returns True if this call
-    consumed it, False if it was already consumed."""
+    consumed it, False if it was already consumed. `claimant` (optional, #228)
+    tags the row with the exact flow that claimed it so a crash-resumed flow
+    can find its own claim via find_claimed."""
     conn = None
     try:
         conn = _connect()
         cur = conn.execute(
             "INSERT OR IGNORE INTO consumed_payments"
-            " (tx_hash, sender, destination, consumed_at) VALUES (?, ?, ?, ?)",
-            (tx_hash, sender, destination, int(time.time())),
+            " (tx_hash, sender, destination, consumed_at, claimant) VALUES (?, ?, ?, ?, ?)",
+            (tx_hash, sender, destination, int(time.time()), claimant),
         )
         conn.commit()
         consumed = cur.rowcount == 1
@@ -88,6 +98,32 @@ def try_consume(tx_hash: str, sender: str, destination: str) -> bool:
         # Fail closed: if we cannot prove the claim, do not mint against it.
         logging.exception(f"payment_ledger.try_consume failed for {tx_hash}")
         return False
+    finally:
+        if conn is not None:
+            conn.close()
+
+
+def find_claimed(claimant: str) -> bool | None:
+    """True if any consumed-payment row carries this claimant tag (#228).
+
+    try_consume commits durably before the claiming flow can persist its own
+    paid state, so a crash/cancel in that gap leaves the claim visible only
+    here — the resumed flow's re-watch then misses the payment (dedup) and
+    must reconcile against this before terminalizing as unpaid. The tag is
+    exact (one flow instance), so a match can never be another session's
+    claim. Tri-state: True = claimed, False = provably no claim, None = the
+    ledger read itself failed (indeterminate — callers must fail toward
+    safety: a cancel refuses, a resume never terminalizes)."""
+    conn = None
+    try:
+        conn = _connect()
+        row = conn.execute(
+            "SELECT 1 FROM consumed_payments WHERE claimant = ? LIMIT 1", (claimant,)
+        ).fetchone()
+        return row is not None
+    except sqlite3.Error:
+        logging.exception(f"payment_ledger.find_claimed failed for {claimant}")
+        return None
     finally:
         if conn is not None:
             conn.close()

@@ -28,6 +28,7 @@ from lfg_core import (  # noqa: E402
     config,
     layer_store,
     mint_flow,
+    nft_index,
     swap_flow,
     swap_meta,
     traits,
@@ -717,6 +718,7 @@ def test_mint_session_payment_timeout(monkeypatch):
     monkeypatch.setattr(mint_flow.xrpl_ops, "wait_for_payment", no_payment)
 
     session = mint_flow.MintSession(discord_id="1", wallet_address="rTest")
+    session.payment_uuid = "PAYUUID"  # #262: a real XUMM payload exists
     asyncio.get_event_loop().run_until_complete(mint_flow.run_mint_session(session))
     assert session.state == mint_flow.PAYMENT_TIMEOUT
     assert session.payment_link.startswith("https://xaman.app/detect/")
@@ -784,6 +786,7 @@ def test_mint_session_happy_path(monkeypatch, tmp_path):
     monkeypatch.chdir(tmp_path)
 
     session = mint_flow.MintSession(discord_id="1", wallet_address="rTest")
+    session.payment_uuid = "PAYUUID"  # #262: a real XUMM payload exists
     asyncio.get_event_loop().run_until_complete(mint_flow.run_mint_session(session))
 
     assert session.state == mint_flow.OFFER_READY
@@ -931,11 +934,36 @@ def _patch_swap_stubs(
     burn_fails=(),
     mint_fails=(),
     modify_fails=(),
+    offer_fails=(),
+    exists_results=None,
     fee_paid=True,
     brix_balance=Decimal("100"),
     amm_cost=Decimal("12.5"),
 ):
-    """Stub the swap flow's externals; `events` records on-chain call order."""
+    """Stub the swap flow's externals; `events` records on-chain call order.
+    `exists_results` maps nft_id -> the tri-state nft_exists answer for the
+    #211 guards (default True: present). A scalar answers every call the
+    same; a list is consumed one element per call (last element repeats) so
+    a test can pass the pre-fee check and trip the burn-time guard — e.g.
+    [True, False] = present at session start, vanished by burn time. The
+    on-chain index is routed to a temp DB so the post-burn persistence
+    (#211) never touches the repo's real onchain_<net>.db."""
+    monkeypatch.setenv("ONCHAIN_DB_PATH", str(tmp_path / "onchain_index.db"))
+    exists_results = exists_results or {}
+
+    async def fake_exists(nft_id, **kwargs):
+        val = exists_results.get(nft_id, True)
+        if isinstance(val, list):
+            return val.pop(0) if len(val) > 1 else val[0]
+        return val
+
+    async def fake_sell_offers(nft_id, raise_on_error=False):
+        return []  # #211 landed-offer recheck: nothing landed unless a test overrides
+
+    monkeypatch.setattr(swap_flow.xrpl_ops, "nft_exists", fake_exists)
+    monkeypatch.setattr(swap_flow.xrpl_ops, "get_nft_sell_offers", fake_sell_offers)
+    # The landed-offer recheck's bounded retry must not slow the suite down.
+    monkeypatch.setattr(swap_flow, "_LANDED_OFFER_DELAY_SECONDS", 0)
 
     async def fake_balance(address, currency, issuer):
         return brix_balance
@@ -984,6 +1012,9 @@ def _patch_swap_stubs(
 
     async def fake_offer(nft_id, destination, amount=None, **kwargs):
         assert amount is not None  # swap offers are fee-priced, never free
+        if nft_id in offer_fails:
+            events.append(f"offer_failed {nft_id}")
+            return None
         offers.append(amount)
         events.append(f"offer {nft_id}")
         return f"OFFER_{nft_id}"
@@ -1092,6 +1123,218 @@ def test_swap_session_partial_burn_failure_delivers_first_replacement(monkeypatc
     assert len(session.results) == 1
     assert session.results[0]["nft_id"] == "NEW1"
     assert "still in your wallet" in session.error
+
+
+# --- #211: post-burn index persistence + stale-pointer guard ---
+
+
+def _seed_swap_index(tmp_path):
+    """Pre-seed the temp on-chain index with the two live originals the
+    _swap_session roster rows would have come from."""
+    conn = nft_index.init_db(str(tmp_path / "onchain_index.db"))
+    try:
+        for number in (10, 20):
+            nft_index.upsert(
+                conn,
+                nft_index.OnchainNft(
+                    nft_id=f"OLD{number}",
+                    nft_number=number,
+                    owner="rTest",
+                    is_burned=False,
+                    mutable=False,
+                    uri_hex="",
+                    body="male",
+                    attributes=[{"trait_type": "Body", "value": "Straight Light"}],
+                    image="",
+                    ledger_index=100,
+                ),
+            )
+    finally:
+        conn.close()
+
+
+def test_swap_session_offer_failure_still_persists_index(monkeypatch, tmp_path):
+    """#211 incident shape: burns land, offer creation reports failure, and
+    the landed-offer recheck finds nothing — the session still fails with
+    failed_offers, but the index already carries the ledger truth (old
+    burned, replacement live at the edition), so the roster can never feed
+    the burned old_nft_id into a later session again."""
+    events = []
+    _patch_swap_stubs(monkeypatch, tmp_path, events, offer_fails={"NEW1"})
+    _seed_swap_index(tmp_path)
+
+    session = _swap_session()
+    asyncio.get_event_loop().run_until_complete(swap_flow.run_swap_session(session))
+
+    assert session.state == swap_flow.FAILED
+    assert "offer failed" in session.error
+    conn = nft_index.init_db(str(tmp_path / "onchain_index.db"))
+    try:
+        # The burn was the point of no return: both editions repointed even
+        # though the first offer failed and the second was never attempted.
+        assert nft_index.nft_by_number(conn, 10).nft_id == "NEW1"
+        assert nft_index.nft_by_number(conn, 20).nft_id == "NEW2"
+        burned = {
+            row[0] for row in conn.execute("SELECT nft_id FROM onchain_nfts WHERE is_burned=1")
+        }
+    finally:
+        conn.close()
+    assert burned == {"OLD10", "OLD20"}
+    import json as _json
+
+    record = _json.loads(next((tmp_path / "swap_records").glob("*.json")).read_text())
+    assert record["status"] == "failed_offers"
+
+
+def test_swap_session_stale_pointer_precheck_fails_free(monkeypatch, tmp_path):
+    """#211 pre-fee check: a stale pointer known at session start fails the
+    session BEFORE any payment, compose, or on-chain work — nothing minted,
+    nothing journaled — and heals the index so the next session's roster is
+    truthful. This is what makes the refresh-and-retry error honest: no fee
+    was consumed, so retrying really is free."""
+    events = []
+    _patch_swap_stubs(monkeypatch, tmp_path, events, exists_results={"OLD10": False})
+    _seed_swap_index(tmp_path)
+
+    session = _swap_session()
+    asyncio.get_event_loop().run_until_complete(swap_flow.run_swap_session(session))
+
+    assert session.state == swap_flow.FAILED
+    assert "already swapped or replaced" in session.error
+    assert events == []  # nothing reached the chain, no fee requested
+    conn = nft_index.init_db(str(tmp_path / "onchain_index.db"))
+    try:
+        stale = conn.execute("SELECT is_burned FROM onchain_nfts WHERE nft_id='OLD10'").fetchone()
+        live20 = nft_index.nft_by_number(conn, 20)
+    finally:
+        conn.close()
+    assert stale[0] == 1  # self-healed: the roster stops serving OLD10
+    assert live20 is not None and live20.nft_id == "OLD20"  # untouched
+    # Nothing on-chain happened, so no journal record was written.
+    assert not (tmp_path / "swap_records").exists()
+
+
+def test_swap_session_stale_pointer_unwinds_and_heals_index(monkeypatch, tmp_path):
+    """#211 burn-time guard (the final arbiter): the first original exists at
+    the pre-fee check but clio definitively reports it absent by burn time
+    (raced by a concurrent swap/burn) — the session unwinds its replacements
+    without burning anything of the user's, surfaces the refresh-and-retry
+    error, journals stale_pointer, and marks the stale token burned in the
+    index so the roster stops offering it."""
+    events = []
+    _patch_swap_stubs(monkeypatch, tmp_path, events, exists_results={"OLD10": [True, False]})
+    _seed_swap_index(tmp_path)
+
+    session = _swap_session()
+    asyncio.get_event_loop().run_until_complete(swap_flow.run_swap_session(session))
+
+    assert session.state == swap_flow.FAILED
+    assert "already swapped or replaced" in session.error
+    # No fee was collected (burn-only swap), so no admin routing — retrying
+    # is genuinely free.
+    assert "administrator" not in session.error
+    # Replacements minted then unwound; the stale original was never
+    # burn-attempted (no "burn OLD10" event).
+    assert events == ["mint NEW1", "mint NEW2", "burn NEW1", "burn NEW2"]
+    conn = nft_index.init_db(str(tmp_path / "onchain_index.db"))
+    try:
+        stale = conn.execute("SELECT is_burned FROM onchain_nfts WHERE nft_id='OLD10'").fetchone()
+        live20 = nft_index.nft_by_number(conn, 20)
+    finally:
+        conn.close()
+    assert stale[0] == 1  # self-healed: the roster stops serving OLD10
+    assert live20 is not None and live20.nft_id == "OLD20"  # untouched
+    import json as _json
+
+    record = _json.loads(next((tmp_path / "swap_records").glob("*.json")).read_text())
+    assert record["status"] == "stale_pointer"
+
+
+def test_swap_session_stale_second_item_delivers_first(monkeypatch, tmp_path):
+    """#211 i!=0 stale-partial branch: the SECOND burn item goes stale
+    mid-session after the first original already burned — its replacement
+    MUST still reach the user (delivered-pending-offer), the second half
+    unwinds, the stale token heals, and the journal gets the distinct
+    "stale_pointer_partial" status (never plain "stale_pointer", which is
+    reserved for the nothing-delivered full unwind)."""
+    events = []
+    _patch_swap_stubs(monkeypatch, tmp_path, events, exists_results={"OLD20": [True, False]})
+    _seed_swap_index(tmp_path)
+
+    session = _swap_session()
+    asyncio.get_event_loop().run_until_complete(swap_flow.run_swap_session(session))
+
+    assert session.state == swap_flow.FAILED
+    assert "already swapped or replaced" in session.error
+    assert "accept it below" in session.error  # edition 1 IS delivered
+    # OLD20 was never burn-attempted; OLD10's swap is final and offered.
+    assert events == ["mint NEW1", "mint NEW2", "burn OLD10", "burn NEW2", "offer NEW1"]
+    assert len(session.results) == 1
+    assert session.results[0]["nft_id"] == "NEW1"
+    conn = nft_index.init_db(str(tmp_path / "onchain_index.db"))
+    try:
+        # Edition 10 repointed by the post-burn persist; OLD20 healed to
+        # burned with no live token at the edition (the listener/backfill
+        # restores whatever really lives there).
+        assert nft_index.nft_by_number(conn, 10).nft_id == "NEW1"
+        stale = conn.execute("SELECT is_burned FROM onchain_nfts WHERE nft_id='OLD20'").fetchone()
+        assert stale[0] == 1
+        assert nft_index.nft_by_number(conn, 20) is None
+    finally:
+        conn.close()
+    import json as _json
+
+    record = _json.loads(next((tmp_path / "swap_records").glob("*.json")).read_text())
+    assert record["status"] == "stale_pointer_partial"
+    by_number = {n["number"]: n for n in record["nfts"]}
+    assert by_number[10]["burn_hash"] == "HASH"  # delivered half, offer live
+    assert by_number[10]["offer_id"] == "OFFER_NEW1"
+    assert by_number[20]["burn_hash"] is None  # stale half, nothing burned
+
+
+def test_swap_session_stale_after_fee_routes_to_admin(monkeypatch, tmp_path):
+    """#211 + fee fairness: in a mixed swap the modify fee is consumed before
+    the burn stage, so a burn-time stale (raced past the pre-fee check) must
+    NOT invite a plain retry — that would charge the fee twice for one
+    effective swap. The error acknowledges the charged fee and routes to an
+    administrator instead."""
+    events = []
+    _patch_swap_stubs(monkeypatch, tmp_path, events, exists_results={"OLD20": [True, False]})
+    _seed_swap_index(tmp_path)
+
+    session = _swap_session(mutable=(True, False))
+    asyncio.get_event_loop().run_until_complete(swap_flow.run_swap_session(session))
+
+    assert session.state == swap_flow.FAILED
+    assert "already swapped or replaced" in session.error
+    assert "fee was charged" in session.error
+    assert "administrator" in session.error
+    # Fee collected, replacement minted+unwound, modify reverted, no burn.
+    assert events == [
+        "fee_requested 10",
+        "burn_fee 10",
+        "mint NEW1",
+        "modify OLD10",
+        "revert OLD10",
+        "burn NEW1",
+    ]
+    import json as _json
+
+    record = _json.loads(next((tmp_path / "swap_records").glob("*.json")).read_text())
+    assert record["status"] == "stale_pointer"  # i==0 full unwind, nothing delivered
+
+
+def test_swap_session_exists_indeterminate_proceeds(monkeypatch, tmp_path):
+    """nft_exists returning None (transient clio blip) must assume-present:
+    the burn proceeds exactly as today — a blip never unwinds a session."""
+    events = []
+    _patch_swap_stubs(monkeypatch, tmp_path, events, exists_results={"OLD10": None, "OLD20": None})
+
+    session = _swap_session()
+    asyncio.get_event_loop().run_until_complete(swap_flow.run_swap_session(session))
+
+    assert session.state == swap_flow.OFFERS_READY
+    assert events[:4] == ["mint NEW1", "mint NEW2", "burn OLD10", "burn OLD20"]
 
 
 # --- Dynamic NFTs (NFTokenModify path) ---
@@ -1600,6 +1843,57 @@ def test_config_reports_dev_mode(monkeypatch):
     import json
 
     assert json.loads(resp.body)["dev_mode"] is True
+
+
+def test_config_reports_public_share_base_url_when_set(monkeypatch):
+    # #41 T9: the client must learn PUBLIC_SHARE_BASE_URL through this same
+    # existing /api/config delivery path — never from location.origin, which
+    # inside the Activity is Discord's *.discordsays.com sandbox proxy, not
+    # our public host.
+    from aiohttp.test_utils import make_mocked_request
+
+    monkeypatch.setattr(server.config, "PUBLIC_SHARE_BASE_URL", "https://share.example/lfg")
+    req = make_mocked_request("GET", "/api/config")
+    resp = asyncio.get_event_loop().run_until_complete(server.handle_config(req))
+    import json
+
+    assert json.loads(resp.body)["public_share_base_url"] == "https://share.example/lfg"
+
+
+def test_config_reports_empty_public_share_base_url_when_unset(monkeypatch):
+    from aiohttp.test_utils import make_mocked_request
+
+    monkeypatch.setattr(server.config, "PUBLIC_SHARE_BASE_URL", "")
+    req = make_mocked_request("GET", "/api/config")
+    resp = asyncio.get_event_loop().run_until_complete(server.handle_config(req))
+    import json
+
+    assert json.loads(resp.body)["public_share_base_url"] == ""
+
+
+def test_config_reports_bithomp_base_url_mainnet(monkeypatch):
+    # Client-side fallback (no PUBLIC_SHARE_BASE_URL configured) needs a
+    # bithomp NFT-page base without the client having to know XRPL_NETWORK
+    # itself — the server hands over the already-network-resolved base.
+    from aiohttp.test_utils import make_mocked_request
+
+    monkeypatch.setattr(server.config, "IS_TESTNET", False)
+    req = make_mocked_request("GET", "/api/config")
+    resp = asyncio.get_event_loop().run_until_complete(server.handle_config(req))
+    import json
+
+    assert json.loads(resp.body)["bithomp_base_url"] == "https://bithomp.com"
+
+
+def test_config_reports_bithomp_base_url_testnet(monkeypatch):
+    from aiohttp.test_utils import make_mocked_request
+
+    monkeypatch.setattr(server.config, "IS_TESTNET", True)
+    req = make_mocked_request("GET", "/api/config")
+    resp = asyncio.get_event_loop().run_until_complete(server.handle_config(req))
+    import json
+
+    assert json.loads(resp.body)["bithomp_base_url"] == "https://test.bithomp.com"
 
 
 def test_dev_reload_route_404_when_off(monkeypatch):

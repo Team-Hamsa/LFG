@@ -63,6 +63,7 @@ def test_mint_uploads_use_foldered_cdn_paths(monkeypatch):
     monkeypatch.setattr(mint_flow, "_upload_to_bunny", fake_upload_bunny)
 
     session = mint_flow.MintSession(discord_id="1", wallet_address="rUser")
+    session.payment_uuid = "PAYUUID"  # #262: a real XUMM payload exists
     loop = asyncio.new_event_loop()
     try:
         loop.run_until_complete(mint_flow.run_mint_session(session))

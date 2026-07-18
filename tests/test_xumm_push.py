@@ -348,7 +348,7 @@ def test_trait_sell_list_payload_gets_push_token(monkeypatch):
         wallet_address="rWALLET",
         slot="Hat",
         value="Wizard Hat",
-        amount_drops=1_000_000,
+        amount_brix="10",
         extract_session=_ExtractDone(),
         push_user_token="stored-tok",
     )
@@ -362,7 +362,7 @@ def test_trait_sell_list_payload_gets_push_token(monkeypatch):
     async def fake_status(uuid):
         return _signed_status()
 
-    async def fake_sell_payload(wallet, nft_id, drops, user_token=None, platform=None):
+    async def fake_sell_payload(wallet, nft_id, amount, user_token=None, platform=None):
         captured["user_token"] = user_token
         return {"qr_url": "q2", "xumm_url": "x2", "uuid": _UUID, "push": "sent"}
 

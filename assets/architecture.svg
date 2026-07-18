@@ -1,4 +1,4 @@
-<svg xmlns="http://www.w3.org/2000/svg" width="900" height="480" viewBox="0 0 900 480" role="img" aria-label="LFG system architecture: three client surfaces (Discord Activity, Telegram, and the classic Discord bot) call the shared lfg_service backend, which calls lfg_core (mint, trait-swap, marketplace, economy, on-chain index, history), which talks to the XRP Ledger, Xaman (XUMM), and BunnyCDN plus IPFS.">
+<svg xmlns="http://www.w3.org/2000/svg" width="900" height="480" viewBox="0 0 900 480" role="img" aria-label="LFG system architecture: four client surfaces (Discord Activity, the web app at build.letseffinggo.com, Telegram, and the classic Discord bot) call the shared lfg_service backend, which calls lfg_core (mint, trait-swap, marketplace, economy, on-chain index, history), which talks to the XRP Ledger, Xaman (XUMM), and BunnyCDN plus IPFS.">
   <!-- sticker shadow + card -->
   <rect x="8" y="8" width="884" height="464" rx="18" fill="#0A0A0A"/>
   <rect x="2" y="2" width="884" height="464" rx="18" fill="#181818" stroke="#FFFFFF" stroke-width="3"/>
@@ -8,13 +8,15 @@
   <text x="186" y="36" font-family="-apple-system,'Segoe UI',Roboto,Helvetica,Arial,sans-serif" font-size="22" font-weight="900" fill="#F5F4F1">system architecture</text>
   <text x="858" y="34" text-anchor="end" font-family="-apple-system,'Segoe UI',Roboto,Helvetica,Arial,sans-serif" font-size="12" fill="#9C9A94">SQLite: lfg_nfts &#183; onchain_&lt;net&gt; &#183; history_&lt;net&gt;</text>
 
-  <!-- arrows: row 1 -> row 2 (three surfaces into lfg_service) -->
-  <path d="M161,122 L161,152 L300,152 L300,180" fill="none" stroke="#9C9A94" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/>
-  <polygon points="295,172 305,172 300,180" fill="#9C9A94"/>
-  <path d="M450,122 L450,180" fill="none" stroke="#9C9A94" stroke-width="2" stroke-linecap="round"/>
-  <polygon points="445,172 455,172 450,180" fill="#9C9A94"/>
-  <path d="M739,122 L739,152 L600,152 L600,180" fill="none" stroke="#9C9A94" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/>
-  <polygon points="595,172 605,172 600,180" fill="#9C9A94"/>
+  <!-- arrows: row 1 -> row 2 (four surfaces into lfg_service) -->
+  <path d="M133,122 L133,152 L310,152 L310,180" fill="none" stroke="#9C9A94" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/>
+  <polygon points="305,172 315,172 310,180" fill="#9C9A94"/>
+  <path d="M344,122 L344,152 L405,152 L405,180" fill="none" stroke="#9C9A94" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/>
+  <polygon points="400,172 410,172 405,180" fill="#9C9A94"/>
+  <path d="M555,122 L555,152 L495,152 L495,180" fill="none" stroke="#9C9A94" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/>
+  <polygon points="490,172 500,172 495,180" fill="#9C9A94"/>
+  <path d="M766,122 L766,152 L590,152 L590,180" fill="none" stroke="#9C9A94" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/>
+  <polygon points="585,172 595,172 590,180" fill="#9C9A94"/>
 
   <!-- arrow: row 2 -> row 3 (lfg_service into lfg_core) -->
   <path d="M450,242 L450,284" fill="none" stroke="#9C9A94" stroke-width="2" stroke-linecap="round"/>
@@ -29,20 +31,25 @@
   <polygon points="734,382 744,382 739,390" fill="#9C9A94"/>
 
   <!-- ROW 1: client surfaces -->
-  <rect x="36" y="56" width="250" height="66" rx="12" fill="#181818" stroke="#FFFFFF" stroke-width="2"/>
+  <rect x="36" y="56" width="195" height="66" rx="12" fill="#181818" stroke="#FFFFFF" stroke-width="2"/>
   <rect x="50" y="71" width="6" height="36" rx="3" fill="#601878"/>
-  <text x="66" y="90" font-family="-apple-system,'Segoe UI',Roboto,Helvetica,Arial,sans-serif" font-size="17" font-weight="800" fill="#F5F4F1">Discord Activity</text>
-  <text x="66" y="108" font-family="-apple-system,'Segoe UI',Roboto,Helvetica,Arial,sans-serif" font-size="12" fill="#9C9A94">embedded webapp</text>
+  <text x="66" y="90" font-family="-apple-system,'Segoe UI',Roboto,Helvetica,Arial,sans-serif" font-size="16" font-weight="800" fill="#F5F4F1">Discord Activity</text>
+  <text x="66" y="108" font-family="-apple-system,'Segoe UI',Roboto,Helvetica,Arial,sans-serif" font-size="11" fill="#9C9A94">embedded webapp</text>
 
-  <rect x="325" y="56" width="250" height="66" rx="12" fill="#181818" stroke="#FFFFFF" stroke-width="2"/>
-  <rect x="339" y="71" width="6" height="36" rx="3" fill="#F0D848"/>
-  <text x="355" y="90" font-family="-apple-system,'Segoe UI',Roboto,Helvetica,Arial,sans-serif" font-size="17" font-weight="800" fill="#F5F4F1">Telegram</text>
-  <text x="355" y="108" font-family="-apple-system,'Segoe UI',Roboto,Helvetica,Arial,sans-serif" font-size="12" fill="#9C9A94">bot + Mini App</text>
+  <rect x="247" y="56" width="195" height="66" rx="12" fill="#181818" stroke="#FFFFFF" stroke-width="2"/>
+  <rect x="261" y="71" width="6" height="36" rx="3" fill="#D89030"/>
+  <text x="277" y="90" font-family="-apple-system,'Segoe UI',Roboto,Helvetica,Arial,sans-serif" font-size="16" font-weight="800" fill="#F5F4F1">Web App</text>
+  <text x="277" y="108" font-family="-apple-system,'Segoe UI',Roboto,Helvetica,Arial,sans-serif" font-size="11" fill="#9C9A94">build.letseffinggo.com</text>
 
-  <rect x="614" y="56" width="250" height="66" rx="12" fill="#181818" stroke="#FFFFFF" stroke-width="2"/>
-  <rect x="628" y="71" width="6" height="36" rx="3" fill="#3DA35D"/>
-  <text x="644" y="90" font-family="-apple-system,'Segoe UI',Roboto,Helvetica,Arial,sans-serif" font-size="17" font-weight="800" fill="#F5F4F1">Classic Discord Bot</text>
-  <text x="644" y="108" font-family="-apple-system,'Segoe UI',Roboto,Helvetica,Arial,sans-serif" font-size="12" fill="#9C9A94">main.py slash commands</text>
+  <rect x="458" y="56" width="195" height="66" rx="12" fill="#181818" stroke="#FFFFFF" stroke-width="2"/>
+  <rect x="472" y="71" width="6" height="36" rx="3" fill="#F0D848"/>
+  <text x="488" y="90" font-family="-apple-system,'Segoe UI',Roboto,Helvetica,Arial,sans-serif" font-size="16" font-weight="800" fill="#F5F4F1">Telegram</text>
+  <text x="488" y="108" font-family="-apple-system,'Segoe UI',Roboto,Helvetica,Arial,sans-serif" font-size="11" fill="#9C9A94">bot + Mini App</text>
+
+  <rect x="669" y="56" width="195" height="66" rx="12" fill="#181818" stroke="#FFFFFF" stroke-width="2"/>
+  <rect x="683" y="71" width="6" height="36" rx="3" fill="#3DA35D"/>
+  <text x="699" y="90" font-family="-apple-system,'Segoe UI',Roboto,Helvetica,Arial,sans-serif" font-size="16" font-weight="800" fill="#F5F4F1">Discord Bot</text>
+  <text x="699" y="108" font-family="-apple-system,'Segoe UI',Roboto,Helvetica,Arial,sans-serif" font-size="11" fill="#9C9A94">classic slash commands</text>
 
   <!-- ROW 2: service backend -->
   <rect x="250" y="182" width="400" height="60" rx="12" fill="#181818" stroke="#FFFFFF" stroke-width="2"/>

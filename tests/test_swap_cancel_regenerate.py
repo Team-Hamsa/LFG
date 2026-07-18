@@ -260,6 +260,29 @@ def test_run_swap_session_discards_stills_on_cancel():
     assert cancel_block.rstrip().endswith("raise")
 
 
+def test_modify_results_include_nft_number():
+    """The in-place (NFTokenModify) results.append site must also carry
+    nft_number via swap_meta.extract_nft_number, same as the two
+    _create_offer_and_accept sites covered behaviorally in
+    tests/test_swap_offer_recovery.py — so the swap-result share button
+    (#41 T9) never needs to regex item['nft']['name'] client-side. Full
+    run_swap_session integration coverage of this block would require
+    mocking the entire XRPL burn/modify pipeline (no existing test in the
+    repo does that — see test_swap_face_roll.py's early-fail-before-results
+    pattern); a source guard, matching this file's existing style for
+    hard-to-integration-test invariants (test_run_swap_session_discards_
+    stills_on_cancel above), is the pragmatic check here."""
+    import inspect
+
+    src = inspect.getsource(swap_flow.run_swap_session)
+    # There are two "for item in modify_items:" loops (the modify-execution
+    # loop, then this results-append loop) — anchor on the comment
+    # immediately preceding the second one so the split isolates it.
+    after_modifies = src.split("# The modifies are final now that the burns are through.", 1)[1]
+    modify_block = after_modifies.split("if burn_items:", 1)[0]
+    assert 'swap_meta.extract_nft_number(item["nft"]["name"])' in modify_block
+
+
 def test_swap_regenerate_failure_returns_502(dev_auth, monkeypatch):
     """A swallowed regenerate failure used to answer 200 with the OLD link —
     the client showed no error and the button appeared dead (CodeRabbit #216).
@@ -303,6 +326,45 @@ def test_regenerate_payment_reports_success():
 
     sig = inspect.signature(swap_flow.SwapSession.regenerate_payment)
     assert sig.return_annotation in ("bool", bool)
+
+
+def test_collect_modify_fee_fails_fast_when_payload_never_created(monkeypatch):
+    """#262 (mirror of the mint prod incident): when the initial fee payload
+    build fails (429 backoff / outage), _collect_modify_fee used to fall back
+    to the static detect link — which Xaman cannot parse as a sign request —
+    and still enter the full payment wait, a dead fee screen. It must fail
+    the session immediately instead: no wait, nothing on-chain yet."""
+    s = _session(state=swap_flow.COMPOSING)
+
+    async def no_payload(destination, **kw):
+        return None
+
+    async def must_not_wait(**kw):
+        raise AssertionError("wait_for_payment must not be entered without a sign request")
+
+    async def must_not_burn(*a, **kw):
+        raise AssertionError("no fee was collected — buy_and_burn must not run")
+
+    monkeypatch.setattr(xumm_ops, "create_payment_payload", no_payload)
+    monkeypatch.setattr(swap_flow.xrpl_ops, "wait_for_payment", must_not_wait)
+    monkeypatch.setattr(swap_flow.xrpl_ops, "buy_and_burn", must_not_burn)
+
+    assert _run(swap_flow._collect_modify_fee(s, 2)) is False
+    assert s.state == swap_flow.FAILED
+    assert s.error
+    # The fee gate precedes every burn/mint/modify in run_swap_session, so
+    # nothing on-chain has happened for this session at this point.
+
+
+def test_run_swap_session_preserves_fee_gate_failure():
+    """#262 source guard (file's established style for hard-to-integration-
+    test invariants): the _collect_modify_fee caller must not overwrite the
+    fee gate's FAILED + error with the generic PAYMENT_TIMEOUT message."""
+    import inspect
+
+    src = inspect.getsource(swap_flow.run_swap_session)
+    block = src.split("_collect_modify_fee", 1)[1].split("fee_paid", 1)[0]
+    assert "if session.state != FAILED" in block
 
 
 def test_swap_regenerate_timeout_returns_504(dev_auth, monkeypatch):

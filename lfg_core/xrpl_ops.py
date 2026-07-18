@@ -765,25 +765,25 @@ async def _recent_payment_exists(
     account: str,
     claim: Callable[[dict[str, Any], Any, dict[str, Any]], bool],
     not_before_unix: float,
-    exhaustive: bool = False,
 ) -> bool:
     """Check already-validated transactions for a claimable payment. Covers
     payments that land between the payment link being shown to the user and
     the live subscription becoming active — and, when the caller widened
-    not_before for credits (issue #196), payments from before the session
-    existed.
+    not_before for credits (issue #196) or resumed a durable bulk record
+    (#228), payments from before this process was listening.
 
-    The plain check reads a single page. An exhaustive (credit) scan pages
-    via marker until the first entry older than not_before_unix (account_tx
-    returns newest-first) or history ends — bounded in time by the caller's
-    credit floor, never by a page count, so a valid credit can't be stranded
-    behind busy issuer traffic. A progress guard aborts (loudly) if a page
-    fails to reach strictly older transactions, so a server that returns
-    markers forever cannot loop the scan."""
+    The scan is time-bounded, never page-bounded: it pages via marker until
+    the first entry older than not_before_unix (account_tx returns
+    newest-first) or history ends, so a valid payment can't be stranded
+    behind busy issuer traffic that accumulated while the service was down.
+    For a live session not_before is ~start-10s, so this is a single page in
+    practice. A progress guard aborts (loudly) if a page fails to reach
+    strictly older transactions, so a server that returns markers forever
+    cannot loop the scan."""
     marker = None
     prev_oldest: float | None = None
     while True:
-        request = AccountTx(account=account, limit=200 if exhaustive else 20, marker=marker)
+        request = AccountTx(account=account, limit=200, marker=marker)
         response = await websocket.request(request)
         oldest: float | None = None
         for entry in response.result.get("transactions", []):
@@ -803,13 +803,14 @@ async def _recent_payment_exists(
             if claim(tx, meta, entry):
                 return True
         marker = response.result.get("marker")
-        if not marker or not exhaustive:
+        if not marker:
             return False
         if oldest is None or (prev_oldest is not None and oldest >= prev_oldest):
             logging.warning(
-                f"Credit scan for {account} aborted: page made no progress "
-                f"toward the credit floor (oldest {oldest}, previous "
-                f"{prev_oldest}); an unconsumed credit may exist beyond it"
+                f"Payment history scan for {account} aborted: page made no "
+                f"progress toward the not_before floor (oldest {oldest}, "
+                f"previous {prev_oldest}); an unconsumed payment may exist "
+                f"beyond it"
             )
             return False
         prev_oldest = oldest
@@ -824,6 +825,7 @@ async def wait_for_payment(
     currency: str | None = None,
     issuer: str | None = None,
     allow_credit: bool = False,
+    claimant: str | None = None,
 ) -> bool:
     """
     Subscribe to the destination account and wait for a token payment from
@@ -841,6 +843,12 @@ async def wait_for_payment(
     of silently kept. Only safe for destinations that receive nothing but
     this payment type (the LFGO issuer) — an unrelated older payment to a
     busier account could otherwise be claimed.
+
+    `claimant` (#228) tags the ledger claim with the calling flow's exact
+    identity (e.g. "bulk:<job_id>") so that, after a crash between the claim
+    committing and the caller persisting its paid state, the resumed flow can
+    reconcile via payment_ledger.find_claimed instead of reading the dedup
+    miss as "never paid".
     """
     timeout_seconds = timeout_seconds or config.PAYMENT_TIMEOUT_SECONDS
     currency = currency or config.TOKEN_CURRENCY_HEX
@@ -873,7 +881,7 @@ async def wait_for_payment(
             # let the same payment satisfy this and a later wait.
             logging.warning(f"Matching payment without a tx hash ignored ({context})")
             return False
-        return payment_ledger.try_consume(tx_hash, expected_sender, destination)
+        return payment_ledger.try_consume(tx_hash, expected_sender, destination, claimant=claimant)
 
     async def watch(websocket: Any) -> bool:
         async for message in websocket:
@@ -893,9 +901,7 @@ async def wait_for_payment(
         try:
             async with AsyncWebsocketClient(config.WS_URL) as websocket:
                 if await asyncio.wait_for(
-                    _recent_payment_exists(
-                        websocket, destination, claim, backfill_not_before, allow_credit
-                    ),
+                    _recent_payment_exists(websocket, destination, claim, backfill_not_before),
                     timeout=15,
                 ):
                     logging.info(f"✅ Payment found in post-timeout grace check ({context})")
@@ -926,9 +932,7 @@ async def wait_for_payment(
                 )
 
                 if await asyncio.wait_for(
-                    _recent_payment_exists(
-                        websocket, destination, claim, backfill_not_before, allow_credit
-                    ),
+                    _recent_payment_exists(websocket, destination, claim, backfill_not_before),
                     timeout=max(1, min(remaining, 15)),
                 ):
                     logging.info(f"✅ Payment found in recent history ({context})")

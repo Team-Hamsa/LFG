@@ -132,6 +132,7 @@ class TestInitDb:
             "closed_reason",
             "settled",
             "buyer",
+            "amount_brix",
         }
 
     def test_index_created(self, conn):
@@ -645,3 +646,155 @@ class TestBrowseAmountAndSortAndPaging:
         self._seed_three(conn)
         with pytest.raises(ValueError):
             market_store.browse(conn, kind="character", offset=-1)
+
+
+# --- #239: BRIX-denominated trait listings — amount_brix column ---
+
+
+def _brix_trait_listing(**overrides):
+    base = {
+        "offer_index": "C" * 64,
+        "nft_id": TRAIT_NFT,
+        "kind": "trait",
+        "seller": SELLER,
+        "amount_brix": "10.5",
+        "slot": "Hat",
+        "value": "Wizard Hat",
+        "created_ledger": 102,
+        "created_ts": 1002,
+    }
+    base.update(overrides)
+    return MarketListing(**base)
+
+
+class TestAmountBrixMigration:
+    def test_migrates_pre_brix_db_and_relaxes_not_null(self, tmp_path):
+        # A DB created with the ORIGINAL DDL (amount_drops NOT NULL, no
+        # amount_brix / buyer columns) must self-migrate on init_db: gain
+        # both columns AND accept a BRIX row with amount_drops NULL.
+        path = str(tmp_path / "old.db")
+        c = sqlite3.connect(path)
+        c.executescript(
+            """
+            CREATE TABLE market_listings (
+                offer_index   TEXT PRIMARY KEY,
+                nft_id        TEXT NOT NULL,
+                kind          TEXT NOT NULL,
+                seller        TEXT NOT NULL,
+                amount_drops  INTEGER NOT NULL,
+                destination   TEXT,
+                slot          TEXT,
+                value         TEXT,
+                created_ledger INTEGER,
+                created_ts    INTEGER,
+                is_live       INTEGER NOT NULL DEFAULT 1,
+                closed_reason TEXT,
+                settled       INTEGER
+            );
+            CREATE INDEX IF NOT EXISTS idx_market_live
+                ON market_listings(is_live, kind, nft_id);
+            """
+        )
+        c.execute(
+            "INSERT INTO market_listings (offer_index, nft_id, kind, seller, amount_drops)"
+            " VALUES (?, ?, ?, ?, ?)",
+            ("D" * 64, CHAR_NFT, "character", SELLER, 1_000_000),
+        )
+        c.commit()
+        market_store.init_db(c)
+        cols = {row[1] for row in c.execute("PRAGMA table_info(market_listings)")}
+        assert "amount_brix" in cols and "buyer" in cols
+        # pre-existing row survives the rebuild
+        row = market_store.get_listing(c, "D" * 64)
+        assert row is not None and row["amount_drops"] == 1_000_000
+        # a BRIX row (amount_drops NULL) now inserts cleanly
+        market_store.upsert_listing(c, _brix_trait_listing())
+        row = market_store.get_listing(c, "C" * 64)
+        assert row["amount_brix"] == "10.5" and row["amount_drops"] is None
+        market_store.init_db(c)  # idempotent second run
+        c.close()
+
+
+class TestExactlyOneAmount:
+    def test_upsert_rejects_both_amounts(self, conn):
+        market_store.init_db(conn)
+        with pytest.raises(ValueError):
+            market_store.upsert_listing(
+                conn, _trait_listing(amount_drops=500_000, amount_brix="10")
+            )
+
+    def test_upsert_rejects_neither_amount(self, conn):
+        market_store.init_db(conn)
+        with pytest.raises(ValueError):
+            market_store.upsert_listing(conn, _trait_listing(amount_drops=None))
+
+    def test_record_listing_creation_enforces_same_invariant(self, conn):
+        market_store.init_db(conn)
+        with pytest.raises(ValueError):
+            market_store.record_listing_creation(
+                conn, _trait_listing(amount_drops=500_000, amount_brix="10")
+            )
+
+    def test_brix_row_roundtrips(self, conn):
+        market_store.init_db(conn)
+        market_store.upsert_listing(conn, _brix_trait_listing())
+        row = market_store.get_listing(conn, "C" * 64)
+        assert row["amount_brix"] == "10.5"
+        assert row["amount_drops"] is None
+
+
+class TestBrowseBrix:
+    def _seed(self, conn):
+        market_store.init_db(conn)
+        for i, price in enumerate(("5", "10.5", "100")):
+            nft_id = TRAIT_NFT[:-1] + str(i)
+            _seed_trait_token(conn, nft_id=nft_id)
+            market_store.upsert_listing(
+                conn,
+                _brix_trait_listing(
+                    offer_index=chr(ord("E") + i) * 64,
+                    nft_id=nft_id,
+                    amount_brix=price,
+                    created_ts=1000 + i,
+                ),
+            )
+
+    def test_min_max_amount_brix(self, conn):
+        self._seed(conn)
+        rows = market_store.browse(conn, kind="trait", min_amount_brix="6", max_amount_brix="50")
+        assert [r["amount_brix"] for r in rows] == ["10.5"]
+
+    def test_sort_price_asc_decimal_not_lexicographic(self, conn):
+        self._seed(conn)
+        rows = market_store.browse(conn, kind="trait", sort="price_asc")
+        assert [r["amount_brix"] for r in rows] == ["5", "10.5", "100"]
+
+    def test_sort_price_desc(self, conn):
+        self._seed(conn)
+        rows = market_store.browse(conn, kind="trait", sort="price_desc")
+        assert [r["amount_brix"] for r in rows] == ["100", "10.5", "5"]
+
+    def test_mixed_legacy_drops_row_does_not_crash_sort(self, conn):
+        # Transition state: a legacy live XRP-denominated trait row coexists
+        # with BRIX rows until the backfill stale-closes it. Sorting must not
+        # raise; legacy rows sort by their drops value.
+        self._seed(conn)
+        legacy_id = TRAIT_NFT[:-1] + "9"
+        _seed_trait_token(conn, nft_id=legacy_id)
+        market_store.upsert_listing(
+            conn,
+            _trait_listing(offer_index="Z" * 64, nft_id=legacy_id, amount_drops=500_000),
+        )
+        rows = market_store.browse(conn, kind="trait", sort="price_asc")
+        assert len(rows) == 4
+
+    def test_brix_filters_exclude_legacy_drops_rows(self, conn):
+        self._seed(conn)
+        legacy_id = TRAIT_NFT[:-1] + "9"
+        _seed_trait_token(conn, nft_id=legacy_id)
+        market_store.upsert_listing(
+            conn,
+            _trait_listing(offer_index="Z" * 64, nft_id=legacy_id, amount_drops=500_000),
+        )
+        rows = market_store.browse(conn, kind="trait", min_amount_brix="1")
+        assert all(r["amount_brix"] is not None for r in rows)

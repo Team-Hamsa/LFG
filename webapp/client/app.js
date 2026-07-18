@@ -25,6 +25,16 @@ const insideDiscord = params.has('frame_id');
 const tg = window.Telegram && window.Telegram.WebApp;
 const insideTelegram = !!(tg && tg.initData);
 
+// Standalone web surface (spec 2026-07-16): config.js sets window.LFG_WEB when
+// this client is served from GitHub Pages (build.letseffinggo.com); the API
+// then lives on another origin (the funnel) and auth is a Xaman wallet
+// sign-in instead of Discord/Telegram. The repo-default config.js keeps
+// LFG_WEB null, so nothing changes for the other surfaces.
+const webCfg = window.LFG_WEB || null;
+const insideWeb = !!webCfg && !insideDiscord && !insideTelegram;
+const API_BASE = (webCfg && webCfg.apiBase) || '';
+const WEB_SESSION_KEY = 'lfg_web_session';
+
 const el = (id) => document.getElementById(id);
 const status = (msg) => { el('status').textContent = msg; };
 
@@ -78,13 +88,34 @@ let me = null;
 let pollTimer = null;
 let pollGen = 0; // bumps on every pollMint call, invalidating in-flight ticks
 let externalOpener = null; // set when the SDK is available
+// "Share on X" (#41 T9): populated from /api/config by BOTH fetch sites —
+// main()'s init probe (whose failure is deliberately swallowed) AND
+// setupDiscord()'s client_id fetch — so one transient config failure can't
+// leave shareUrlFor() emitting dead links for the whole session. NEVER
+// derive these from the page's own browser-reported address — inside the
+// Activity the page is served from Discord's *.discordsays.com sandbox
+// proxy, not our public host, so a link built from that would be dead for
+// X's crawler.
+let shareBase = '';
+let bithompBase = '';
+
+function applyShareConfig(cfg) {
+  // Keep an already-populated base if a later fetch omits the field.
+  shareBase = (cfg && cfg.public_share_base_url) || shareBase;
+  bithompBase = (cfg && cfg.bithomp_base_url) || bithompBase;
+}
 
 async function api(path, opts = {}) {
   const headers = { 'Content-Type': 'application/json', ...(opts.headers || {}) };
   if (sessionToken) headers['Authorization'] = `Bearer ${sessionToken}`;
-  const res = await fetch(path, { ...opts, headers });
+  const res = await fetch(API_BASE + path, { ...opts, headers });
   const data = await res.json().catch(() => ({}));
   if (!res.ok) {
+    // Web surface: an expired/invalid stored session must not survive a
+    // reload — drop it so the next boot re-offers the Xaman sign-in.
+    if (insideWeb && res.status === 401) {
+      try { localStorage.removeItem(WEB_SESSION_KEY); } catch (_) { /* private mode */ }
+    }
     const err = new Error(data.error || `HTTP ${res.status}`);
     // Some endpoints (e.g. 409 shop/market session_active) carry extra
     // fields (code, session_id) callers need to resume rather than just
@@ -98,7 +129,7 @@ async function api(path, opts = {}) {
 }
 
 function qrUrl(data) {
-  return `/api/qr.png?d=${encodeURIComponent(data)}`;
+  return `${API_BASE}/api/qr.png?d=${encodeURIComponent(data)}`;
 }
 
 // CDN images are cross-origin and blocked by the Activity's CSP, so they are
@@ -109,8 +140,69 @@ function qrUrl(data) {
 const THUMB_W = 256;
 function imgUrl(url, w) {
   if (!url) return url;
-  const base = `/api/img?u=${encodeURIComponent(url)}`;
+  const base = `${API_BASE}/api/img?u=${encodeURIComponent(url)}`;
   return w ? `${base}&w=${w}` : base;
+}
+
+// Animated NFTs (#250) ship an .mp4 next to the PNG poster frame. Where a
+// video URL is present, full-size artwork renders as <video autoplay loop
+// muted playsinline> with the still as poster; otherwise the usual <img>.
+// The video src goes through the same /api/img proxy as the stills (CSP:
+// the CDN is cross-origin) — the proxy passes .mp4 through untouched, and
+// its w= resize only applies to archived stills, so it is never sent for
+// the video itself.
+function mediaEl({ image, video, thumbW, className, alt }) {
+  const m = document.createElement(video ? 'video' : 'img');
+  if (className) m.className = className;
+  if (video) {
+    m.muted = true;
+    // Attributes, not just properties: webview autoplay policies check them.
+    m.setAttribute('muted', '');
+    m.setAttribute('autoplay', '');
+    m.setAttribute('loop', '');
+    m.setAttribute('playsinline', ''); // iOS: play inline, not fullscreen
+    // <video> has no alt: carry the label as the accessible name so a later
+    // video->img rebuild in setMedia can round-trip it losslessly.
+    if (alt) m.setAttribute('aria-label', alt);
+    if (image) m.poster = imgUrl(image, thumbW);
+    m.src = imgUrl(video);
+  } else {
+    m.src = imgUrl(image, thumbW);
+    m.alt = alt || '';
+  }
+  return m;
+}
+
+// Point a fixed-id artwork slot (mint/assemble hero, swap chooser sides) at a
+// piece, swapping the element between <img> and <video> as needed while
+// keeping id/class/hidden so the rest of the code can keep addressing it.
+function setMedia(id, { image, video, thumbW }) {
+  const old = el(id);
+  if ((old.tagName === 'VIDEO') === !!video) {
+    // Same tag: update in place, and only on change — the mint poller repaints
+    // every few seconds and resetting src would restart video playback.
+    const src = video ? imgUrl(video) : imgUrl(image, thumbW);
+    if (old.getAttribute('src') !== src) {
+      if (video && image) old.poster = imgUrl(image, thumbW);
+      old.src = src;
+    }
+    // Re-arm playback: autoplay only fires on load, and showFlow pauses the
+    // hero while it's hidden — an unchanged src would otherwise stay frozen.
+    if (video && old.paused) old.play().catch(() => {});
+    return old;
+  }
+  const fresh = mediaEl({
+    image, video, thumbW,
+    className: old.className,
+    alt: old.getAttribute('alt') || old.getAttribute('aria-label') || '',
+  });
+  fresh.id = id;
+  fresh.hidden = old.hidden;
+  // Stop decoding before detaching — avoids Chrome's "play() request was
+  // interrupted" warning when an in-flight play() promise is still pending.
+  if (old.tagName === 'VIDEO') old.pause();
+  old.replaceWith(fresh);
+  return fresh;
 }
 
 // Guild/channel hosting the Activity; the backend turns these into a XUMM
@@ -127,11 +219,116 @@ function openExternal(url) {
   else window.open(url, '_blank');
 }
 
+// --- "Share on X" (#41 T9) ---------------------------------------------
+//
+// Spec x-integration §6.1: the shared `url=` is PUBLIC_SHARE_BASE_URL's own
+// OG card page when the operator has configured one, else bithomp's NFT
+// page (bithomp already serves its own OG tags, so links still render a
+// card either way). Both bases come from /api/config — never derived from
+// the page's own browser-reported address (see the shareBase declaration above).
+
+function bithompNftUrl(nftId) {
+  return `${bithompBase}/en/nft/${nftId}`;
+}
+
+function shareUrlFor(nftNumber, nftId) {
+  if (shareBase && nftNumber != null) return `${shareBase}/nft/${nftNumber}`;
+  if (bithompBase && nftId) return bithompNftUrl(nftId);
+  // No base is known (every /api/config fetch failed) — return '' so the
+  // callers skip/hide the share control instead of rendering a dead
+  // relative link.
+  return '';
+}
+
+function mintShareText(nftNumber) {
+  // nft_number can be null/undefined in edge cases (mirrors swapShareText below)
+  // — don't render a literal "#null"/"#undefined" in the tweet text.
+  return nftNumber != null
+    ? `I just minted LFGO #${nftNumber}! 🎨 #XRPL`
+    : 'I just minted an LFGO! 🎨 #XRPL';
+}
+
+function swapShareText(nftNumber) {
+  // nft_number can be null (extract_nft_number found no "#<digits>" in the
+  // display name) — the URL still falls back to bithomp via shareUrlFor, but
+  // the tweet text can't reference a number that doesn't exist.
+  return nftNumber != null
+    ? `I just swapped traits on LFGO #${nftNumber}! 🎨 #XRPL`
+    : 'I just swapped traits on my LFGO! 🎨 #XRPL';
+}
+
+// Build a "Share on X" control: a real <a target=_blank> anchor (Task 0's
+// iframe verification of window.open/openExternal inside the sandboxed
+// Activity is tracked separately — a genuine anchor href is the fail-safe
+// either way, not just a JS-only click handler) plus a "Copy link"
+// affordance. Never window.confirm/alert for feedback — both are silent
+// no-ops inside the Discord Activity iframe.
+function buildShareControl(text, url) {
+  const intentUrl = `https://x.com/intent/tweet?text=${encodeURIComponent(text)}&url=${encodeURIComponent(url)}`;
+
+  const wrap = document.createElement('p');
+  wrap.className = 'share-row';
+
+  const link = document.createElement('a');
+  link.className = 'link';
+  link.textContent = '🐦 Share on X';
+  link.href = intentUrl;
+  link.target = '_blank';
+  link.rel = 'noopener noreferrer';
+  link.onclick = (e) => {
+    // Route through the SDK-aware helper first (best chance of breaking out
+    // of the sandboxed iframe cleanly); the anchor's real href/target=_blank
+    // stays as the fallback for a middle-click, long-press, or a right-click
+    // "open in new tab" if the handler doesn't fire.
+    e.preventDefault();
+    openExternal(intentUrl);
+  };
+
+  const copyBtn = document.createElement('button');
+  copyBtn.type = 'button';
+  copyBtn.className = 'link';
+  copyBtn.textContent = 'Copy link';
+
+  const copyInput = document.createElement('input');
+  copyInput.type = 'text';
+  copyInput.className = 'copy-input';
+  copyInput.readOnly = true;
+  copyInput.hidden = true;
+  copyInput.setAttribute('aria-label', 'Share link');
+  // "Copy link" hands over the pasteable NFT page/bithomp link (renders a
+  // card anywhere it's pasted), NOT the X intent/composer deep-link — that
+  // stays exclusive to the "Share on X" anchor/openExternal above.
+  copyInput.value = url;
+
+  copyBtn.onclick = async () => {
+    try {
+      await navigator.clipboard.writeText(url);
+      const original = copyBtn.textContent;
+      copyBtn.textContent = 'Copied!';
+      setTimeout(() => { copyBtn.textContent = original; }, 2000);
+    } catch (_) {
+      // Clipboard API unavailable/denied: reveal the readonly input so the
+      // user can select-all and copy by hand.
+      copyInput.hidden = false;
+      copyInput.focus();
+      copyInput.select();
+    }
+  };
+
+  wrap.append(link, copyBtn, copyInput);
+  return wrap;
+}
+
 async function setupDiscord() {
   // SDK is vendored same-origin (webapp/client/vendor/) to avoid esm.sh's
   // root-absolute re-exports, which break under the Activity's /.proxy sub-path.
   const { DiscordSDK, Common } = await import('./vendor/embedded-app-sdk.js');
-  const { client_id: clientId } = await api('/api/config');
+  const cfg = await api('/api/config');
+  // Second chance for the share bases: main()'s own /api/config fetch
+  // swallows failures, and without this repopulation a transient failure
+  // there would leave every share link dead for the session.
+  applyShareConfig(cfg);
+  const clientId = cfg.client_id;
   const sdk = new DiscordSDK(clientId);
   await sdk.ready();
 
@@ -186,7 +383,11 @@ const ALL_PANELS = ['register-panel', 'mint-panel', 'flow-panel',
 
 function showPanel(id) {
   for (const panel of ALL_PANELS) {
-    el(panel).hidden = panel !== id;
+    const hide = panel !== id;
+    el(panel).hidden = hide;
+    // A display:none <video> keeps playing (and decoding) — pause any in the
+    // panels being hidden. setMedia re-arms playback on re-entry.
+    if (hide) el(panel).querySelectorAll('video').forEach((v) => v.pause());
   }
 }
 
@@ -416,7 +617,7 @@ function signText(push, base) {
   return base;
 }
 
-function showFlow({ title, text, qrData, link, image, done, stage, spinner, celebrate, pill, regen, cancel }) {
+function showFlow({ title, text, qrData, link, image, video, done, stage, spinner, celebrate, pill, regen, cancel, share }) {
   showPanel('flow-panel');
   renderSteps(stage);
   el('pay-method').hidden = !pill;
@@ -431,12 +632,14 @@ function showFlow({ title, text, qrData, link, image, done, stage, spinner, cele
   if (qrData) el('flow-qr').src = qrUrl(qrData);
   el('flow-link-btn').hidden = !link;
   if (link) el('flow-link-btn').onclick = () => openExternal(link);
-  el('nft-image').hidden = !image;
   // The minted NFT is the hero: with an image on screen the QR drops to a
-  // compact companion size (issue #22).
+  // compact companion size (issue #22). Animated results play as <video>.
+  let hero = el('nft-image');
+  if (image) hero = setMedia('nft-image', { image, video });
+  else if (hero.tagName === 'VIDEO') hero.pause(); // don't loop while hidden
+  hero.hidden = !image;
   el('flow-panel').classList.toggle('with-image', !!image);
-  el('nft-image').classList.toggle('celebrate', !!(image && celebrate));
-  if (image) el('nft-image').src = image;
+  hero.classList.toggle('celebrate', !!(image && celebrate));
   el('flow-regen-btn').hidden = !regen;
   // Back out of an awaiting-signature screen (issue #141): callers pass a
   // callback so each flow decides what "cancel" means for it. Always assign
@@ -445,6 +648,16 @@ function showFlow({ title, text, qrData, link, image, done, stage, spinner, cele
   el('flow-cancel-btn').hidden = !cancel;
   el('flow-cancel-btn').onclick = cancel || null;
   el('flow-done-btn').hidden = !done;
+  // Mint-success terminal state only (#41 T9) — callers pass `share` only
+  // from the two showFlow() call sites inside pollMint()'s offer_ready
+  // branch, never from a failure/timeout/other-flow call site. A missing
+  // share.url (shareUrlFor degraded: no base known) hides the row rather
+  // than rendering a dead link.
+  const shareRow = el('flow-share-row');
+  shareRow.replaceChildren();
+  const showShare = !!(share && share.url);
+  shareRow.hidden = !showShare;
+  if (showShare) shareRow.appendChild(buildShareControl(share.text, share.url));
 }
 
 // The pay screen adapts to the backend's silently-detected payment path:
@@ -509,10 +722,12 @@ function pollMint(sessionId) {
         showFlow({
           title: `🎉 #${s.nft_number} claimed!`,
           text: 'The transfer is signed — your new avatar is heading to your wallet. Welcome to the job site.',
-          image: imgUrl(s.image_url),
+          image: s.image_url,
+          video: s.video_url, // set by the service once #249 lands; undefined today
           done: true,
           stage: s.state,
           celebrate: true,
+          share: { text: mintShareText(s.nft_number), url: shareUrlFor(s.nft_number, s.nft_id) },
         });
         return;
       }
@@ -524,10 +739,12 @@ function pollMint(sessionId) {
         qrData: s.accept_scanned ? null : s.accept_deeplink,
         spinner: s.accept_scanned,
         link: s.accept_deeplink,
-        image: imgUrl(s.image_url),
+        image: s.image_url,
+        video: s.video_url,
         done: true,
         stage: s.state,
         celebrate: true,
+        share: { text: mintShareText(s.nft_number), url: shareUrlFor(s.nft_number, s.nft_id) },
       });
       pollTimer = setTimeout(tick, 3000); // keep watching for the accept signature
       return;
@@ -714,6 +931,77 @@ function pollSignin(uuid) {
   signinPollTimer = setTimeout(tick, 3000);
 }
 
+// --- Standalone web surface sign-in (spec 2026-07-16) ---
+// Same register-panel QR UI, but the sign-in IS the auth: on approval the
+// service returns a platform="web" session token (wallet = identity), which
+// persists in localStorage so a reload within the token TTL skips the QR.
+
+async function startWebSignin() {
+  clearTimeout(signinPollTimer);
+  showPanel('register-panel');
+  renderSignin({ sub: 'Setting up your Xaman sign-in…', spinner: true });
+  try {
+    const s = await api('/api/web/signin', { method: 'POST', body: '{}' });
+    renderSignin({
+      sub: 'Scan with Xaman and approve the sign-in — your wallet is your login.',
+      qrLink: s.signin_link,
+    });
+    pollWebSignin(s.uuid);
+  } catch (e) {
+    showError(e.message);
+    renderSignin({ sub: 'Could not start the Xaman sign-in.', retry: true });
+  }
+}
+
+function pollWebSignin(uuid) {
+  clearTimeout(signinPollTimer);
+  const tick = async () => {
+    if (el('register-panel').hidden) return; // user navigated away
+    let s;
+    try {
+      s = await api(`/api/web/signin/${uuid}`);
+    } catch (e) {
+      signinPollTimer = setTimeout(tick, 3000); // transient; keep polling
+      return;
+    }
+    if (s.state === 'signed') {
+      sessionToken = s.session_token;
+      try { localStorage.setItem(WEB_SESSION_KEY, s.session_token); } catch (_) { /* private mode */ }
+      me = { ...s.user, wallet: s.wallet };
+      showMintHome();
+      return;
+    }
+    if (s.state === 'expired') {
+      renderSignin({ sub: 'The sign-in request expired.', retry: true });
+      return;
+    }
+    if (s.state === 'opened') {
+      renderSignin({ sub: 'QR scanned — approve the sign-in in Xaman…', spinner: true });
+    }
+    signinPollTimer = setTimeout(tick, 3000);
+  };
+  signinPollTimer = setTimeout(tick, 3000);
+}
+
+async function setupWeb() {
+  let stored = null;
+  try { stored = localStorage.getItem(WEB_SESSION_KEY); } catch (_) { /* private mode */ }
+  if (stored) {
+    sessionToken = stored;
+    try {
+      return await api('/api/me'); // still valid → straight in
+    } catch (e) {
+      // Only a 401 means the token is dead (api() already dropped the key).
+      // Transient network/5xx errors keep the good token and surface as a
+      // connect failure instead of forcing a spurious re-sign-in.
+      if (e.status !== 401) throw e;
+      sessionToken = null;
+    }
+  }
+  await startWebSignin();
+  return null; // the sign-in flow drives the UI from here
+}
+
 // --- Trait Swapper ---
 
 let swapNfts = [];
@@ -793,6 +1081,15 @@ async function openSwapper() {
       body.textContent = nft.gender; // male / female / skeleton / ape
       name.appendChild(body);
       card.replaceChildren(pick, img, name);
+      if (nft.video) {
+        // Grid tiles stay lightweight stills; the badge flags art that plays
+        // as video on the chooser/result screens (#250).
+        const anim = document.createElement('span');
+        anim.className = 'anim-badge';
+        anim.textContent = '▶';
+        anim.setAttribute('aria-hidden', 'true');
+        card.appendChild(anim);
+      }
       card.onclick = () => toggleNftPick(nft, card);
       el('nft-grid').appendChild(card);
       swapCards.push({ nft, card });
@@ -863,8 +1160,8 @@ function showTraitChooser() {
   const [a, b] = swapPick.map((p) => p.nft);
   showPanel('swap-traits-panel');
   renderSwapCost();
-  el('swap-img1').src = imgUrl(a.image, THUMB_W);
-  el('swap-img2').src = imgUrl(b.image, THUMB_W);
+  setMedia('swap-img1', { image: a.image, video: a.video, thumbW: THUMB_W });
+  setMedia('swap-img2', { image: b.image, video: b.video, thumbW: THUMB_W });
   el('swap-name1').textContent = a.name;
   el('swap-name2').textContent = b.name;
   const list = el('trait-list');
@@ -1026,11 +1323,10 @@ function renderSwapResults(s) {
     div.className = 'swap-result';
     const h3 = document.createElement('h3');
     h3.textContent = r.name;
-    const resultImg = document.createElement('img');
-    resultImg.className = 'result-img';
-    resultImg.src = imgUrl(r.image_url);
-    resultImg.alt = '';
-    div.replaceChildren(h3, resultImg);
+    const art = mediaEl({
+      image: r.image_url, video: r.video_url, className: 'result-img', alt: r.name,
+    });
+    div.replaceChildren(h3, art);
     if (r.modified) {
       // Updated via NFTokenModify — nothing to accept.
       const note = document.createElement('span');
@@ -1048,6 +1344,15 @@ function renderSwapResults(s) {
       btn.textContent = 'Open in Xaman';
       btn.onclick = () => openExternal(r.accept_deeplink);
       div.appendChild(btn);
+    }
+    // The traits are already final on-chain at this point regardless of
+    // `modified` (see run_swap_session: results are only appended once
+    // everything is settled) — share per result, not once for the whole
+    // panel, since a swap can touch up to two NFTs (#41 T9). Skipped when
+    // shareUrlFor degrades to '' (no base known — dead link otherwise).
+    const swapShareUrl = shareUrlFor(r.nft_number, r.nft_id);
+    if (swapShareUrl) {
+      div.appendChild(buildShareControl(swapShareText(r.nft_number), swapShareUrl));
     }
     box.appendChild(div);
   }
@@ -1205,8 +1510,9 @@ function renderGoPicker() {
 }
 
 function openGoPicker() {
-  renderGoPicker();
   const overlay = el('go-picker-overlay');
+  if (!overlay.hidden) return; // already open — don't stack a 2nd keydown listener
+  renderGoPicker();
   overlay.hidden = false;
   const onKey = (e) => { if (e.key === 'Escape') closeGoPicker(); };
   overlay._onKey = onKey; // stashed so closeGoPicker can remove it
@@ -1616,7 +1922,7 @@ async function commitAssemble(edition, chosen) {
       text: final.accept ? signText(final.accept_push, 'Scan to accept your new character in Xaman.')
                          : 'Your new character is on its way.',
       qrData: final.accept || null, link: final.accept || null,
-      image: imgUrl(final.image_url), done: true, celebrate: true });
+      image: final.image_url, video: final.video_url, done: true, celebrate: true });
     economyState = await api('/api/economy');
   } catch (e) {
     showError(e.message);
@@ -1702,7 +2008,7 @@ function renderMarketGrid(rows) {
     name.textContent = vm.title;
     const price = document.createElement('span');
     price.className = 'market-card-price';
-    price.textContent = `${vm.amountXrp} XRP`;
+    price.textContent = vm.priceLabel;
     name.appendChild(price);
     card.replaceChildren(img, name);
     // #133: openBuyFlow is async — an unhandled rejection here would leave
@@ -1720,11 +2026,18 @@ async function loadMarketBrowse() {
   const slot = el('market-trait-slot').value.trim();
   const value = el('market-trait-value').value.trim();
   const traits = slot && value ? [marketPure.traitFilterToken(slot, value)] : [];
+  // #239 per-kind denomination: the same min/max inputs filter XRP for
+  // characters and BRIX for traits (min_brix/max_brix server params).
+  const minPrice = el('market-min-xrp').value.trim();
+  const maxPrice = el('market-max-xrp').value.trim();
+  const isTrait = marketState.kind === 'trait';
   const pairs = marketPure.buildListingsParams({
     kind: marketState.kind,
     traits,
-    minXrp: el('market-min-xrp').value.trim(),
-    maxXrp: el('market-max-xrp').value.trim(),
+    minXrp: isTrait ? '' : minPrice,
+    maxXrp: isTrait ? '' : maxPrice,
+    minBrix: isTrait ? minPrice : '',
+    maxBrix: isTrait ? maxPrice : '',
     sort: el('market-sort').value,
     limit: 24,
     offset: 0,
@@ -1797,7 +2110,7 @@ function renderMineGroups(data) {
     const vm = marketPure.mapListingRow(row);
     return {
       imgSrc: marketRowImgSrc(vm),
-      label: `${vm.title} — ${vm.amountXrp} XRP`,
+      label: `${vm.title} — ${vm.priceLabel}`,
       payload: row,
     };
   });
@@ -1938,6 +2251,14 @@ function marketBuyRender(listingKind) {
     if (s.state === 'awaiting_signature') {
       return { title: '💳 Confirm purchase', text: signText(s.push, s.instruction || 'Scan to sign the purchase in Xaman.'), qrData: s.xumm_url, link: s.xumm_url };
     }
+    // #239 two-step on-ramp: sign the XRP→BRIX top-up first, then the accept.
+    if (s.state === 'awaiting_onramp') {
+      const quote = s.price_xrp_quote ? ` (~${s.price_xrp_quote} XRP)` : '';
+      return { title: `💱 Get BRIX${quote}`, text: signText(s.push, s.instruction || 'Scan to buy the BRIX for this purchase in Xaman.'), qrData: s.xumm_url, link: s.xumm_url };
+    }
+    if (s.state === 'onramp_confirmed') {
+      return { title: '⏳ BRIX acquired', text: 'Preparing your purchase…', spinner: true };
+    }
     if (s.reason === 'listing_unavailable') {
       return { title: '⚠️ No longer available', text: 'That listing was just sold or cancelled.', done: true };
     }
@@ -2021,7 +2342,11 @@ function shopBuyRender(s) {
   }
   if (s.state === 'awaiting_accept') {
     const url = s.accept ? s.accept.xumm_url : null;
-    return { title: '💳 Confirm purchase', text: 'Scan to accept the trait offer in Xaman.', qrData: url, link: url };
+    // #238: silent payment-path fallback — no BRIX? The offer is priced in XRP.
+    const price = s.pay_with === 'XRP' && s.price_xrp
+      ? `~${s.price_xrp} XRP`
+      : `${s.price_brix} BRIX`;
+    return { title: '💳 Confirm purchase', text: `Scan to accept the trait offer in Xaman (${price}).`, qrData: url, link: url };
   }
   if (s.state === 'failed') {
     return { title: '❌ Purchase failed', text: s.error || 'Something went wrong.', done: true };
@@ -2098,17 +2423,24 @@ async function openShopBuyFlow(item) {
 
 async function openBuyFlow(row) {
   const vm = marketPure.mapListingRow(row);
-  // #133: a malformed server-provided price would make computeRoyalty throw
-  // and the confirm dialog never open — surface it instead of a dead click.
-  const priced = marketPure.safeComputeRoyalty(vm.amountXrp);
-  if (!priced.ok) {
-    showError(`This listing has an invalid price (${priced.error}) — try refreshing.`);
-    return;
+  let text;
+  if (vm.amountBrix != null) {
+    // #239: trait listings are BRIX-denominated; the on-ramp (if needed) is
+    // quoted by the server once the buy starts.
+    text = `${vm.amountBrix} BRIX — seller nets 93% (7% collection royalty). No BRIX? You'll get a one-tap XRP top-up first.`;
+  } else {
+    // #133: a malformed server-provided price would make computeRoyalty throw
+    // and the confirm dialog never open — surface it instead of a dead click.
+    const priced = marketPure.safeComputeRoyalty(vm.amountXrp);
+    if (!priced.ok) {
+      showError(`This listing has an invalid price (${priced.error}) — try refreshing.`);
+      return;
+    }
+    text = `${vm.amountXrp} XRP — seller nets ${priced.royalty.receiveXrp} XRP (93% — 7% collection royalty).`;
   }
-  const royalty = priced.royalty;
   const ok = await confirmDialog({
     title: `Buy ${vm.title}?`,
-    text: `${vm.amountXrp} XRP — seller nets ${royalty.receiveXrp} XRP (93% — 7% collection royalty).`,
+    text,
     confirmLabel: 'Buy now',
   });
   if (!ok) return;
@@ -2119,11 +2451,17 @@ async function cancelListing(row) {
   const vm = marketPure.mapListingRow(row);
   const ok = await confirmDialog({
     title: 'Cancel this listing?',
-    text: `${vm.title} — ${vm.amountXrp} XRP will no longer be for sale.`,
+    text: `${vm.title} — ${vm.priceLabel} will no longer be for sale.`,
     confirmLabel: 'Cancel listing',
   });
   if (!ok) return;
   await marketFlow('cancel', '/api/market/cancel', { offer_index: row.offer_index }, marketCancelRender);
+}
+
+// #239: a wizard (Closet) item or a loose trait token lists in BRIX;
+// characters list in XRP.
+function listFormIsTrait(item) {
+  return Boolean(item && (item.wizard || item.slot));
 }
 
 function openListForm(item) {
@@ -2132,15 +2470,20 @@ function openListForm(item) {
   el('market-list-form-title').textContent = item.wizard ? 'Sell a trait' : 'List for sale';
   el('market-list-form-sub').textContent = item.label;
   el('market-list-price').value = '';
+  el('market-list-price').placeholder = listFormIsTrait(item) ? 'Price in BRIX' : 'Price in XRP';
   el('market-list-royalty').hidden = true;
 }
 
 function updateListFormRoyaltyPreview() {
   const out = el('market-list-royalty');
-  const check = marketPure.validatePrice(el('market-list-price').value.trim());
+  const raw = el('market-list-price').value.trim();
+  const isTrait = listFormIsTrait(marketPendingItem);
+  const check = isTrait ? marketPure.validateBrixPrice(raw) : marketPure.validatePrice(raw);
   if (check.ok) {
     out.hidden = false;
-    out.textContent = marketPure.royaltyDisclosure(el('market-list-price').value.trim());
+    out.textContent = isTrait
+      ? marketPure.brixRoyaltyDisclosure(raw)
+      : marketPure.royaltyDisclosure(raw);
   } else {
     out.hidden = true;
   }
@@ -2150,20 +2493,23 @@ async function submitListForm() {
   const item = marketPendingItem;
   if (!item) return;
   const price = el('market-list-price').value.trim();
-  const check = marketPure.validatePrice(price);
+  const isTrait = listFormIsTrait(item);
+  const check = isTrait ? marketPure.validateBrixPrice(price) : marketPure.validatePrice(price);
   if (!check.ok) { showError(check.error); return; }
   const ok = await confirmDialog({
     title: item.wizard ? 'Post this trait for sale?' : 'List for sale?',
-    text: marketPure.royaltyDisclosure(price),
+    text: isTrait ? marketPure.brixRoyaltyDisclosure(price) : marketPure.royaltyDisclosure(price),
     confirmLabel: item.wizard ? 'Post listing' : 'List it',
   });
   if (!ok) return;
   if (item.wizard) {
     await marketFlow(
       'trait_list', '/api/market/trait/list',
-      { slot: item.slot, value: item.value, price_xrp: price },
+      { slot: item.slot, value: item.value, price_brix: price },
       marketTraitListRender,
     );
+  } else if (isTrait) {
+    await marketFlow('list', '/api/market/list', { nft_id: item.nftId, price_brix: price }, marketListRender);
   } else {
     await marketFlow('list', '/api/market/list', { nft_id: item.nftId, price_xrp: price }, marketListRender);
   }
@@ -2186,7 +2532,7 @@ function setupLogo() {
 async function main() {
   setupLogo();
   setupLeaderboard();
-  el('register-retry-btn').onclick = startSignin;
+  el('register-retry-btn').onclick = () => (insideWeb ? startWebSignin() : startSignin());
   el('mint-btn').onclick = startMint;
   el('flow-regen-btn').onclick = regeneratePaymentQr;
   el('swap-btn').onclick = () => openDressup();
@@ -2198,7 +2544,7 @@ async function main() {
   el('swap-cancel-btn').onclick = () => openSwapper();
   el('swap-confirm-btn').onclick = confirmSwap;
   el('swap-done-btn').onclick = () => showMintHome();
-  el('change-wallet-btn').onclick = () => startSignin();
+  el('change-wallet-btn').onclick = () => (insideWeb ? startWebSignin() : startSignin());
   el('flow-done-btn').onclick = () => { showMintHome(); };
 
   // --- Marketplace (#44 Task 10) ---
@@ -2230,10 +2576,29 @@ async function main() {
     // In-app marketplace (#44) ships after the mainnet MVP: with the feature
     // off, hide the Marketplace entry point (the API answers 403 regardless).
     if (cfg.market_enabled === false) el('market-btn').hidden = true;
-    if (cfg.dev_mode && 'EventSource' in window) {
+    applyShareConfig(cfg);
+    // Dev reload is same-origin only — never against a cross-origin API base.
+    if (cfg.dev_mode && !API_BASE && 'EventSource' in window) {
       new EventSource('/__dev/reload').onmessage = () => location.reload();
     }
   } catch (_) { /* non-dev or offline: ignore */ }
+
+  // Standalone web surface: the Xaman sign-in IS the auth handshake.
+  if (insideWeb) {
+    try {
+      const user = await setupWeb();
+      if (user) {
+        me = user;
+        // Re-attach to a mint an earlier tab/reload orphaned before going home.
+        if (!(await resumeMint())) showMintHome();
+      }
+      // else: startWebSignin() is already driving the register panel.
+    } catch (e) {
+      console.error(e);
+      status(`Failed to connect: ${e.message}`);
+    }
+    return;
+  }
 
   if (!insideTelegram && !insideDiscord) {
     status('Open this inside Telegram or Discord. (Dev mode: API calls will be unauthorized.)');

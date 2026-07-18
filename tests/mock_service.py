@@ -188,6 +188,41 @@ def build_mock_service(
             return bad
         return web.json_response({"session_id": "x1", "state": "started"})
 
+    async def handle_x_status(request: web.Request) -> web.StreamResponse:
+        # Service-token-authed, process-level (no per-user session) — mirrors
+        # handle_session's auth shape, not _require_session.
+        _count("/api/admin/x/status")
+        if _bearer(request) != SERVICE_TOKEN:
+            return web.json_response(
+                {"error": "unauthorized", "code": "bad_service_token"}, status=401
+            )
+        return web.json_response(
+            {
+                "paused": state.get("x_paused", False),
+                "month_posts": 3,
+                "budget": 100,
+                "enabled": True,
+            }
+        )
+
+    async def handle_x_pause(request: web.Request) -> web.StreamResponse:
+        _count("/api/admin/x/pause")
+        if _bearer(request) != SERVICE_TOKEN:
+            return web.json_response(
+                {"error": "unauthorized", "code": "bad_service_token"}, status=401
+            )
+        state["x_paused"] = True
+        return web.json_response({"paused": True})
+
+    async def handle_x_resume(request: web.Request) -> web.StreamResponse:
+        _count("/api/admin/x/resume")
+        if _bearer(request) != SERVICE_TOKEN:
+            return web.json_response(
+                {"error": "unauthorized", "code": "bad_service_token"}, status=401
+            )
+        state["x_paused"] = False
+        return web.json_response({"paused": False})
+
     async def handle_events(request: web.Request) -> web.WebSocketResponse:
         # FIX 2: accept token via ?token= (legacy) OR Authorization: Bearer header
         token = request.query.get("token") or request.headers.get("Authorization", "").removeprefix(
@@ -226,5 +261,8 @@ def build_mock_service(
     app.router.add_get("/api/harvest/{session_id}", handle_generic_session_get)
     app.router.add_post("/api/assemble", handle_generic_session_post)
     app.router.add_get("/api/assemble/{session_id}", handle_generic_session_get)
+    app.router.add_get("/api/admin/x/status", handle_x_status)
+    app.router.add_post("/api/admin/x/pause", handle_x_pause)
+    app.router.add_post("/api/admin/x/resume", handle_x_resume)
     app.router.add_get("/events", handle_events)
     return app
