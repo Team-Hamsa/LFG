@@ -206,6 +206,10 @@ def test_handle_mint_start_wires_the_publishing_wrapper(monkeypatch):
     events = _record_publishes(monkeypatch)
     monkeypatch.setattr(config, "WEBAPP_DEV_MODE", True)
     monkeypatch.setattr(identity_store, "user_token_for", lambda _p, _u: None)
+    # #226: the start handler takes a headroom reservation; stub the grant so
+    # this wiring test never touches the repo's app/index DBs (run_mint_session
+    # is stubbed below, so nothing would settle it either).
+    monkeypatch.setattr(server.headroom, "try_reserve", lambda *a, **k: 1)
 
     async def noop_prepare(self):
         self.payment_uuid = "PAYUUID"  # #262: a real XUMM payload exists

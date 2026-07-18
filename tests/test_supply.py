@@ -17,6 +17,8 @@ os.environ.setdefault("BUNNY_PULL_ZONE", "nft.pullzone.example")
 
 import sqlite3  # noqa: E402
 
+import pytest  # noqa: E402
+
 from lfg_core import config, supply  # noqa: E402
 
 
@@ -57,12 +59,45 @@ def test_headroom_never_negative(tmp_path, monkeypatch):
     assert supply.remaining_headroom("testnet") == 0
 
 
-def test_current_supply_missing_table_returns_zero(tmp_path, monkeypatch):
-    # Fresh checkout (CI) or a fresh deploy before the listener/backfill
-    # builds the index: the db file exists (or not) but has no onchain_nfts
-    # table yet. Must NOT raise -- treat as zero recorded supply.
+def test_current_supply_missing_table_fails_closed(tmp_path, monkeypatch):
+    # #226 review: a missing onchain_nfts table (mispathed/unbuilt index on a
+    # DEPLOYED collection) must not read as supply 0 — that would admit up to
+    # MAX_COLLECTION_SIZE extra mints. Propagate; headroom.try_reserve turns
+    # any raise into a 0 grant (fail closed).
+    import pytest
+
     db = tmp_path / "onchain_testnet.db"
     conn = sqlite3.connect(str(db))
     conn.close()  # empty db file, no tables at all
     monkeypatch.setattr(supply.nft_index, "index_db_path", lambda net: str(db))
-    assert supply.current_supply("testnet") == 0
+    with pytest.raises(sqlite3.OperationalError):
+        supply.current_supply("testnet")
+
+
+def test_current_supply_locked_index_raises(tmp_path, monkeypatch):
+    """Review on #226: only the missing-table bootstrap case may read as 0.
+    Any OTHER OperationalError — 'database is locked' from the listener /
+    backfill writers — must PROPAGATE so headroom.try_reserve fails closed
+    (grant 0) instead of seeing supply 0 and over-granting past the cap."""
+    db = tmp_path / "onchain_testnet.db"
+    _seed(str(db), n_live=5)
+    monkeypatch.setattr(supply.nft_index, "index_db_path", lambda net: str(db))
+
+    class _LockedConn:
+        def execute(self, *a, **kw):
+            raise sqlite3.OperationalError("database is locked")
+
+        def close(self):
+            pass
+
+    class _FakeSqlite:
+        OperationalError = sqlite3.OperationalError
+
+        @staticmethod
+        def connect(path):
+            return _LockedConn()
+
+    # Scoped to the supply module (not the global stdlib sqlite3).
+    monkeypatch.setattr(supply, "sqlite3", _FakeSqlite)
+    with pytest.raises(sqlite3.OperationalError):
+        supply.current_supply("testnet")

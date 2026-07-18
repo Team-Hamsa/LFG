@@ -19,7 +19,21 @@ import asyncio  # noqa: E402
 
 import pytest  # noqa: E402
 
-from lfg_core import bulk_mint_flow, config, mint_credits, mint_flow  # noqa: E402
+from lfg_core import bulk_mint_flow, config, headroom, mint_credits, mint_flow, supply  # noqa: E402
+
+
+@pytest.fixture(autouse=True)
+def _headroom_env(tmp_path, monkeypatch):
+    """#226: clamp_to_headroom now takes a real reservation in the per-network
+    app DB — isolate it (and mint_credits/job records) to tmp and pin the
+    index-backed supply at 0 so grant math never touches repo DBs. Tests
+    override current_supply where the scenario needs a fuller collection."""
+    monkeypatch.setattr(bulk_mint_flow, "JOBS_DIR", str(tmp_path / "jobs"))
+    monkeypatch.setattr(
+        bulk_mint_flow.db_path, "app_db_path", lambda net=None: str(tmp_path / "app.db")
+    )
+    monkeypatch.setattr(supply, "current_supply", lambda net: 0)
+    monkeypatch.setattr(headroom.nft_index, "index_db_path", lambda net: str(tmp_path / "idx.db"))
 
 
 def test_config_defaults():
@@ -41,7 +55,6 @@ def _job(qty):
 
 
 def test_clamp_within_headroom_keeps_quantity(monkeypatch):
-    monkeypatch.setattr(bulk_mint_flow.supply, "remaining_headroom", lambda net: 100)
     monkeypatch.setattr(config, "BULK_MINT_MAX", 10)
     j = _job(5)
     j.clamp_to_headroom()
@@ -50,7 +63,6 @@ def test_clamp_within_headroom_keeps_quantity(monkeypatch):
 
 
 def test_clamp_respects_bulk_max(monkeypatch):
-    monkeypatch.setattr(bulk_mint_flow.supply, "remaining_headroom", lambda net: 100)
     monkeypatch.setattr(config, "BULK_MINT_MAX", 10)
     j = _job(50)
     j.clamp_to_headroom()
@@ -58,15 +70,15 @@ def test_clamp_respects_bulk_max(monkeypatch):
 
 
 def test_clamp_to_headroom_when_low(monkeypatch):
-    monkeypatch.setattr(bulk_mint_flow.supply, "remaining_headroom", lambda net: 3)
     monkeypatch.setattr(config, "BULK_MINT_MAX", 10)
+    monkeypatch.setattr(supply, "current_supply", lambda net: config.MAX_COLLECTION_SIZE - 3)
     j = _job(8)
     j.clamp_to_headroom()
     assert j.quantity == 3
 
 
 def test_clamp_collection_full_raises(monkeypatch):
-    monkeypatch.setattr(bulk_mint_flow.supply, "remaining_headroom", lambda net: 0)
+    monkeypatch.setattr(supply, "current_supply", lambda net: config.MAX_COLLECTION_SIZE)
     j = _job(5)
     with pytest.raises(bulk_mint_flow.CollectionFull):
         j.clamp_to_headroom()
@@ -113,13 +125,11 @@ def _fake_mint_offer_fail():
 
 def test_fulfillment_all_units_offered(monkeypatch, tmp_path):
     monkeypatch.setattr(bulk_mint_flow, "JOBS_DIR", str(tmp_path))
-    monkeypatch.setattr(bulk_mint_flow.supply, "current_supply", lambda net: 0)
     monkeypatch.setattr(
         bulk_mint_flow.mint_flow, "_allocate_nft_number", _async_counter(start=4000)
     )
     monkeypatch.setattr(bulk_mint_flow.mint_flow, "mint_one_unit", _fake_mint_ok())
     j = _job(3)
-    monkeypatch.setattr(bulk_mint_flow.supply, "remaining_headroom", lambda net: 100)
     j.clamp_to_headroom()
     j.state = bulk_mint_flow.PAID
     asyncio.run(bulk_mint_flow.run_bulk_mint_job(j))
@@ -135,7 +145,6 @@ def test_offer_permanently_failing_leaves_job_fulfilling_not_done(monkeypatch, t
     FULFILLING (resumable) with the unit still MINTED, and mint_one_unit must
     never be called again for that unit (no re-mint)."""
     monkeypatch.setattr(bulk_mint_flow, "JOBS_DIR", str(tmp_path))
-    monkeypatch.setattr(bulk_mint_flow.supply, "current_supply", lambda net: 0)
     monkeypatch.setattr(
         bulk_mint_flow.mint_flow, "_allocate_nft_number", _async_counter(start=4000)
     )
@@ -163,7 +172,6 @@ def test_offer_permanently_failing_leaves_job_fulfilling_not_done(monkeypatch, t
     monkeypatch.setattr(bulk_mint_flow.xrpl_ops, "nft_info", _owner_unknown)
 
     j = _job(2)
-    monkeypatch.setattr(bulk_mint_flow.supply, "remaining_headroom", lambda net: 100)
     j.clamp_to_headroom()
     j.state = bulk_mint_flow.PAID
     asyncio.run(bulk_mint_flow.run_bulk_mint_job(j))
@@ -181,7 +189,6 @@ def test_offer_fail_then_succeed_ends_done_with_unit_offered(monkeypatch, tmp_pa
     """A unit whose offer fails during the main loop but succeeds on the
     final re-offer pass ends the job DONE with the unit OFFERED."""
     monkeypatch.setattr(bulk_mint_flow, "JOBS_DIR", str(tmp_path))
-    monkeypatch.setattr(bulk_mint_flow.supply, "current_supply", lambda net: 0)
     monkeypatch.setattr(
         bulk_mint_flow.mint_flow, "_allocate_nft_number", _async_counter(start=4000)
     )
@@ -207,7 +214,6 @@ def test_offer_fail_then_succeed_ends_done_with_unit_offered(monkeypatch, tmp_pa
     monkeypatch.setattr(bulk_mint_flow.xrpl_ops, "nft_info", _owner_unknown)
 
     j = _job(1)
-    monkeypatch.setattr(bulk_mint_flow.supply, "remaining_headroom", lambda net: 100)
     j.clamp_to_headroom()
     j.state = bulk_mint_flow.PAID
     asyncio.run(bulk_mint_flow.run_bulk_mint_job(j))
@@ -220,7 +226,6 @@ def test_offer_fail_then_succeed_ends_done_with_unit_offered(monkeypatch, tmp_pa
 def test_prepare_payment_multiplies_price_xrp(monkeypatch):
     import asyncio
 
-    monkeypatch.setattr(bulk_mint_flow.supply, "remaining_headroom", lambda net: 100)
     monkeypatch.setattr(config, "BULK_MINT_MAX", 10)
     monkeypatch.setattr(config, "MINT_PRICE_XRP", "10")
     monkeypatch.setattr(
