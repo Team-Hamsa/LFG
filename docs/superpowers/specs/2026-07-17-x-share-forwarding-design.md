@@ -94,3 +94,36 @@ Extend `webapp/test_smoke.py`:
 
 Set `SHARE_FORWARD_URL=https://build.letseffinggo.com` in prod `.env`,
 restart `lfg-activity`. Staging may point at its own host or stay unset.
+
+---
+
+## Addendum (2026-07-18): Branded share-card PNGs, on-demand + cached
+
+The raw NFT art as `twitter:image` is replaced by a branded 1200x630 card
+(avatar in a sticker frame + LFG logo + "#<n>" + tagline + domain), rendered
+by a Playwright/Chromium script authored in Claude Cowork.
+
+- **Renderer** `scripts/share_card/`: `share-card.mjs` (Cowork's
+  `renderShareCard`, verbatim) + `render.mjs` CLI wrapper
+  (`node render.mjs --token N --avatar <path|url> --out <path>`; logo
+  defaults to repo `assets/logo.png`) + a local `package.json`
+  (`playwright`, `@fontsource/fredoka`, `@fontsource/jetbrains-mono`) so the
+  repo root stays no-build. `node_modules` gitignored.
+- **Endpoint** `GET /nft/{number}/card.png` (`lfg_service/app.py`): resolves
+  the NFT's current art like `handle_nft_card` (index first, LFG-row
+  fallback); disk cache `share_cards/` (gitignored), filename
+  `{number}-{sha1(image_url)[:12]}.png` — swaps/remints change the art URL
+  so invalidation is automatic. On miss: run the node CLI as a subprocess
+  (timeout 60s) under a per-number asyncio lock. **Any failure ⇒ 302 to the
+  raw art URL** (X's crawler follows image redirects — degrades to today's
+  behavior, never breaks). Unknown/burned edition ⇒ 404.
+- **Card page**: behind new env flag `SHARE_CARD_RENDER_ENABLED` (default
+  off — needs node + playwright on the box), `twitter:image`/`og:image`
+  switch to `PUBLIC_SHARE_BASE_URL/nft/<n>/card.png` (requires
+  PUBLIC_SHARE_BASE_URL; unset ⇒ raw art as before). Flag off ⇒ zero change.
+- **Testing**: Python tests with the subprocess stubbed (cache hit/miss +
+  key invalidation, 302 fallback, flag-off inertness, image-tag switch,
+  404). The `.mjs` gets a manual render smoke (no JS harness).
+- **Ops (one-time)**: `cd scripts/share_card && npm i && npx playwright
+  install --with-deps chromium` (~300 MB); set `SHARE_CARD_RENDER_ENABLED=1`
+  + restart `lfg-activity`.
