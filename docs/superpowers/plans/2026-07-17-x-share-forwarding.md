@@ -538,3 +538,433 @@ Remaining: the client sends the stashed ref when starting a mint; the service va
 ```
 
 **Ops note (not a code step):** after merge + promote, set `SHARE_FORWARD_URL=https://build.letseffinggo.com` in prod `.env` and restart `lfg-activity` (staging: its own host or unset).
+
+---
+
+# Addendum tasks (2026-07-18): Branded share-card PNGs
+
+Spec: the 2026-07-18 addendum in `docs/superpowers/specs/2026-07-17-x-share-forwarding-design.md`.
+
+Additional global constraints:
+- `SHARE_CARD_RENDER_ENABLED` unset/0 ⇒ zero behavior change anywhere.
+- The card endpoint NEVER 500s for a live NFT: any render/dep failure ⇒ 302 to the raw art URL.
+- Only art URLs passing the existing `_img_url_allowed` check may be fetched/rendered.
+- The Cowork renderer source is at `.superpowers/sdd/cowork-share-card.mjs` — copy it VERBATIM to `scripts/share_card/share-card.mjs` (do not reformat or "improve" it).
+
+### Task 5: Renderer package (`scripts/share_card/`)
+
+**Files:**
+- Create: `scripts/share_card/share-card.mjs` (verbatim copy of `.superpowers/sdd/cowork-share-card.mjs`)
+- Create: `scripts/share_card/render.mjs`
+- Create: `scripts/share_card/package.json`
+- Modify: `.gitignore` (add `scripts/share_card/node_modules/` and `share_cards/`)
+
+**Interfaces:**
+- Produces the CLI Task 6's subprocess calls: `node scripts/share_card/render.mjs --token <N> --avatar <path-or-url> --out <path>` → exit 0 and PNG written on success, exit 1 + stderr message on failure. Optional `--logo <path>` (default: `../../assets/logo.png` relative to the script).
+
+- [ ] **Step 1: Copy the renderer verbatim**
+
+```bash
+mkdir -p scripts/share_card
+cp .superpowers/sdd/cowork-share-card.mjs scripts/share_card/share-card.mjs
+```
+
+- [ ] **Step 2: Write `scripts/share_card/render.mjs`**
+
+```javascript
+#!/usr/bin/env node
+/**
+ * render.mjs — CLI wrapper around share-card.mjs for the lfg_service
+ * subprocess call:
+ *   node render.mjs --token 4035 --avatar <path-or-url> --out out.png [--logo path]
+ * Exit 0 = PNG written to --out. Exit 1 = failure (message on stderr).
+ */
+import { fileURLToPath } from 'node:url';
+import path from 'node:path';
+import { parseArgs } from 'node:util';
+import renderShareCard from './share-card.mjs';
+
+const HERE = path.dirname(fileURLToPath(import.meta.url));
+const DEFAULT_LOGO = path.resolve(HERE, '../../assets/logo.png');
+
+const { values } = parseArgs({
+  options: {
+    token: { type: 'string' },
+    avatar: { type: 'string' },
+    out: { type: 'string' },
+    logo: { type: 'string', default: DEFAULT_LOGO },
+  },
+});
+
+if (!values.token || !values.avatar || !values.out) {
+  console.error('usage: render.mjs --token N --avatar <path|url> --out <path> [--logo <path>]');
+  process.exit(1);
+}
+
+try {
+  await renderShareCard({
+    tokenId: values.token,
+    avatarSrc: values.avatar,
+    logoSrc: values.logo,
+    outPath: values.out,
+  });
+} catch (err) {
+  console.error(`render failed: ${err && err.message ? err.message : err}`);
+  process.exit(1);
+}
+```
+
+- [ ] **Step 3: Write `scripts/share_card/package.json`**
+
+```json
+{
+  "name": "lfg-share-card",
+  "private": true,
+  "type": "module",
+  "description": "Renders branded X share-card PNGs (see docs/superpowers/specs/2026-07-17-x-share-forwarding-design.md addendum)",
+  "dependencies": {
+    "@fontsource/fredoka": "^5.0.0",
+    "@fontsource/jetbrains-mono": "^5.0.0",
+    "playwright": "^1.45.0"
+  }
+}
+```
+
+- [ ] **Step 4: Gitignore the artifacts**
+
+Append to `.gitignore`:
+
+```
+scripts/share_card/node_modules/
+share_cards/
+```
+
+- [ ] **Step 5: Verify syntax + missing-args behavior**
+
+Run: `node --check scripts/share_card/render.mjs && node --check scripts/share_card/share-card.mjs`
+Expected: exit 0, no output.
+Run: `node scripts/share_card/render.mjs 2>&1; echo "exit=$?"`
+Expected: fails BEFORE importing playwright? It does NOT — the import of share-card.mjs pulls playwright. So expected output is either the usage line (if deps installed) or a module-not-found error mentioning `playwright` with exit != 0. Either is acceptable at this task; the real render smoke happens at ops time. Record which you saw in the report.
+
+- [ ] **Step 6: Commit**
+
+```bash
+git add scripts/share_card .gitignore
+git commit -m "feat(share): playwright share-card renderer package (Cowork design)
+
+Co-Authored-By: Claude Fable 5 <noreply@anthropic.com>"
+```
+
+---
+
+### Task 6: `GET /nft/{number}/card.png` endpoint + `SHARE_CARD_RENDER_ENABLED` tag switch
+
+**Files:**
+- Modify: `lfg_core/config.py` (below `SHARE_FORWARD_URL`)
+- Modify: `lfg_service/app.py` (new handler + route; `handle_nft_card` image-tag switch)
+- Test: `tests/test_og_page.py` (append)
+
+**Interfaces:**
+- Consumes: Task 5's CLI contract; existing `_fetch_cdn`, `_img_url_allowed`, `nft_index`, `get_nft_data`; the `_isolate_app_db` autouse fixture already in `tests/test_og_page.py`.
+- Produces: route `GET /nft/{number}/card.png`; module constants `_SHARE_CARD_DIR = "share_cards"`, `_RENDER_TIMEOUT_S = 60`; helper `_share_card_path(number, image_url) -> pathlib.Path`.
+
+- [ ] **Step 1: Config flag**
+
+In `lfg_core/config.py`, directly below `SHARE_FORWARD_URL`:
+
+```python
+# Branded share-card PNG rendering (GET /nft/{number}/card.png). Requires
+# node + playwright chromium on the box (scripts/share_card/ — see the spec
+# addendum). Off (default) = twitter:image keeps pointing at the raw art.
+SHARE_CARD_RENDER_ENABLED = os.getenv("SHARE_CARD_RENDER_ENABLED", "0").strip() == "1"
+```
+
+- [ ] **Step 2: Write the failing tests**
+
+Append to `tests/test_og_page.py`:
+
+```python
+def test_card_png_route_registered():
+    app = server.create_app()
+    method_paths = {(r.method, getattr(r.resource, "canonical", "")) for r in app.router.routes()}
+    assert ("GET", "/nft/{number}/card.png") in method_paths
+
+
+def _card_req(number):
+    request = make_mocked_request("GET", f"/nft/{number}/card.png")
+    request.match_info["number"] = str(number)
+    return request
+
+
+def test_card_png_unknown_edition_404(tmp_path, monkeypatch):
+    _seed_onchain(tmp_path, monkeypatch, [])
+    monkeypatch.setattr(server, "get_nft_data", lambda n: None)
+    resp = _run(server.handle_nft_card_png(_card_req(9999)))
+    assert resp.status == 404
+
+
+def test_card_png_cache_hit_serves_without_render(tmp_path, monkeypatch):
+    _seed_basic(tmp_path, monkeypatch)
+    card_dir = tmp_path / "cards"
+    monkeypatch.setattr(server, "_SHARE_CARD_DIR", str(card_dir))
+    cached = server._share_card_path(42, "https://cdn.example/img.png")
+    cached.parent.mkdir(parents=True, exist_ok=True)
+    cached.write_bytes(b"\x89PNG-cached")
+
+    def no_render(*a, **k):
+        raise AssertionError("render must not run on cache hit")
+
+    monkeypatch.setattr(server, "_render_share_card", no_render)
+    resp = _run(server.handle_nft_card_png(_card_req(42)))
+    assert resp.status == 200
+    assert resp.body == b"\x89PNG-cached"
+    assert resp.content_type == "image/png"
+
+
+def test_card_png_cache_key_changes_with_art(tmp_path, monkeypatch):
+    a = server._share_card_path(42, "https://cdn.example/img.png")
+    b = server._share_card_path(42, "https://cdn.example/img-v2.png")
+    assert a != b
+    assert a.name.startswith("42-") and b.name.startswith("42-")
+
+
+def test_card_png_miss_renders_and_caches(tmp_path, monkeypatch):
+    _seed_basic(tmp_path, monkeypatch)
+    card_dir = tmp_path / "cards"
+    monkeypatch.setattr(server, "_SHARE_CARD_DIR", str(card_dir))
+
+    async def fake_fetch(url):
+        assert url == "https://cdn.example/img.png"
+        return b"rawart", "image/png"
+
+    async def fake_render(number, art_path, out_path):
+        out_path.write_bytes(b"\x89PNG-rendered")
+
+    monkeypatch.setattr(server, "_fetch_cdn", fake_fetch)
+    monkeypatch.setattr(server, "_render_share_card", fake_render)
+    resp = _run(server.handle_nft_card_png(_card_req(42)))
+    assert resp.status == 200
+    assert resp.body == b"\x89PNG-rendered"
+    assert server._share_card_path(42, "https://cdn.example/img.png").exists()
+
+
+def test_card_png_render_failure_302_to_raw_art(tmp_path, monkeypatch):
+    _seed_basic(tmp_path, monkeypatch)
+    card_dir = tmp_path / "cards"
+    monkeypatch.setattr(server, "_SHARE_CARD_DIR", str(card_dir))
+
+    async def fake_fetch(url):
+        return b"rawart", "image/png"
+
+    async def broken_render(number, art_path, out_path):
+        raise RuntimeError("chromium missing")
+
+    monkeypatch.setattr(server, "_fetch_cdn", fake_fetch)
+    monkeypatch.setattr(server, "_render_share_card", broken_render)
+    resp = _run(server.handle_nft_card_png(_card_req(42)))
+    assert resp.status == 302
+    assert resp.headers["Location"] == "https://cdn.example/img.png"
+
+
+def test_card_png_disallowed_art_url_302(tmp_path, monkeypatch):
+    _seed_onchain(
+        tmp_path, monkeypatch, [_onchain("AAA", 42, image="https://evil.example/x.png")]
+    )
+    monkeypatch.setattr(server, "get_nft_data", lambda n: None)
+    resp = _run(server.handle_nft_card_png(_card_req(42)))
+    assert resp.status == 302
+    assert resp.headers["Location"] == "https://evil.example/x.png"
+
+
+def test_card_page_image_tags_switch_when_enabled(tmp_path, monkeypatch):
+    monkeypatch.setattr(server.config, "SHARE_CARD_RENDER_ENABLED", True)
+    monkeypatch.setattr(server.config, "PUBLIC_SHARE_BASE_URL", "https://share.example")
+    _seed_basic(tmp_path, monkeypatch)
+    body = _run(server.handle_nft_card(_req(42))).text
+    assert 'name="twitter:image" content="https://share.example/nft/42/card.png"' in body
+    assert 'property="og:image" content="https://share.example/nft/42/card.png"' in body
+    assert "cdn.example/img.png" not in body.split("</head>")[0]
+
+
+def test_card_page_image_tags_raw_when_disabled_or_no_base(tmp_path, monkeypatch):
+    monkeypatch.setattr(server.config, "SHARE_CARD_RENDER_ENABLED", False)
+    monkeypatch.setattr(server.config, "PUBLIC_SHARE_BASE_URL", "https://share.example")
+    _seed_basic(tmp_path, monkeypatch)
+    body = _run(server.handle_nft_card(_req(42))).text
+    assert 'name="twitter:image" content="https://cdn.example/img.png"' in body
+    # enabled but no public base -> still raw art (can't build an absolute card URL)
+    monkeypatch.setattr(server.config, "SHARE_CARD_RENDER_ENABLED", True)
+    monkeypatch.setattr(server.config, "PUBLIC_SHARE_BASE_URL", "")
+    body = _run(server.handle_nft_card(_req(42))).text
+    assert 'name="twitter:image" content="https://cdn.example/img.png"' in body
+```
+
+- [ ] **Step 3: Run tests to verify they fail**
+
+Run: `.venv/bin/python -m pytest tests/test_og_page.py -v -k card_png or card_page_image`
+Expected: FAIL — `handle_nft_card_png` missing.
+
+- [ ] **Step 4: Implement in `lfg_service/app.py`**
+
+Module-level (near `handle_nft_card`; add `import hashlib`, `import pathlib`, `import tempfile` if absent — check first):
+
+```python
+_SHARE_CARD_DIR = "share_cards"
+_RENDER_TIMEOUT_S = 60
+_RENDER_SCRIPT = str(pathlib.Path(__file__).resolve().parent.parent / "scripts/share_card/render.mjs")
+_share_card_locks: dict[int, asyncio.Lock] = {}
+
+
+def _share_card_path(number: int, image_url: str) -> pathlib.Path:
+    key = hashlib.sha1(image_url.encode("utf-8")).hexdigest()[:12]
+    return pathlib.Path(_SHARE_CARD_DIR) / f"{number}-{key}.png"
+
+
+def _share_card_url(number: int) -> str:
+    """Absolute card-PNG URL, or '' when it can't be built/served."""
+    if not (config.SHARE_CARD_RENDER_ENABLED and config.PUBLIC_SHARE_BASE_URL):
+        return ""
+    return f"{config.PUBLIC_SHARE_BASE_URL}/nft/{number}/card.png"
+
+
+async def _render_share_card(number: int, art_path: pathlib.Path, out_path: pathlib.Path) -> None:
+    """Run the node renderer; raises on any failure (caller falls back)."""
+    proc = await asyncio.create_subprocess_exec(
+        "node",
+        _RENDER_SCRIPT,
+        "--token",
+        str(number),
+        "--avatar",
+        str(art_path),
+        "--out",
+        str(out_path),
+        stdout=asyncio.subprocess.DEVNULL,
+        stderr=asyncio.subprocess.PIPE,
+    )
+    try:
+        _, stderr = await asyncio.wait_for(proc.communicate(), timeout=_RENDER_TIMEOUT_S)
+    except asyncio.TimeoutError:
+        proc.kill()
+        raise RuntimeError(f"share-card render timed out for #{number}") from None
+    if proc.returncode != 0 or not out_path.exists():
+        raise RuntimeError(
+            f"share-card render failed for #{number}: {stderr.decode(errors='replace')[:300]}"
+        )
+
+
+async def handle_nft_card_png(request: Any) -> Any:
+    """Branded 1200x630 share-card PNG for twitter:image. Cache-on-disk keyed
+    by (number, art URL) so swaps/remints self-invalidate; ANY failure falls
+    back to a 302 at the raw art (X's crawler follows image redirects), so
+    this endpoint can never make sharing worse than the pre-card behavior."""
+    raw_number = request.match_info.get("number", "")
+    try:
+        number = int(raw_number)
+    except (TypeError, ValueError):
+        return web.HTTPNotFound()
+
+    lfg_row = get_nft_data(number)
+    conn = nft_index.init_db(nft_index.index_db_path(config.XRPL_NETWORK))
+    try:
+        onchain = nft_index.nft_by_number(conn, number)
+    finally:
+        conn.close()
+    if onchain is None:
+        return web.HTTPNotFound()
+    image_url = onchain.image or (lfg_row or {}).get("image_url") or ""
+    if not image_url:
+        return web.HTTPNotFound()
+
+    cached = _share_card_path(number, image_url)
+    if cached.exists():
+        return web.Response(body=cached.read_bytes(), content_type="image/png")
+
+    if not _img_url_allowed(image_url):
+        return web.HTTPFound(image_url)
+
+    lock = _share_card_locks.setdefault(number, asyncio.Lock())
+    async with lock:
+        if cached.exists():  # rendered while we waited
+            return web.Response(body=cached.read_bytes(), content_type="image/png")
+        try:
+            art_body, _ctype = await _fetch_cdn(image_url)
+            cached.parent.mkdir(parents=True, exist_ok=True)
+            with tempfile.NamedTemporaryFile(suffix=".png", delete=False) as art_f:
+                art_f.write(art_body)
+                art_path = pathlib.Path(art_f.name)
+            tmp_out = cached.with_suffix(".tmp.png")
+            try:
+                await _render_share_card(number, art_path, tmp_out)
+                os.replace(tmp_out, cached)
+            finally:
+                art_path.unlink(missing_ok=True)
+                tmp_out.unlink(missing_ok=True)
+        except Exception:
+            logging.getLogger(__name__).warning(
+                "share-card render fell back to raw art for #%s", number, exc_info=True
+            )
+            return web.HTTPFound(image_url)
+    return web.Response(body=cached.read_bytes(), content_type="image/png")
+```
+
+In `handle_nft_card`, where the image meta tags are built, switch the tag URL (raw art stays the fallback):
+
+```python
+    card_png_url = _share_card_url(number)
+    tag_image = card_png_url or image_url
+    esc_tag_image = escape(tag_image, quote=True)
+```
+
+and use `esc_tag_image` in the `twitter:image` / `og:image` meta tags (the body `<img>` keeps using `esc_image` — humans see the real art, only the crawler tags switch).
+
+Register the route in `create_app`, BEFORE the existing `/nft/{number}` line (aiohttp matches most-specific first regardless, but keep them adjacent):
+
+```python
+    app.router.add_get("/nft/{number}/card.png", handle_nft_card_png)
+```
+
+- [ ] **Step 5: Run tests + gate checks**
+
+Run: `.venv/bin/python -m pytest tests/test_og_page.py tests/test_share_clicks.py -v`
+Expected: all PASS (legacy card tests unaffected — flag defaults off; the autouse fixture must also pin `SHARE_CARD_RENDER_ENABLED=False`, add that to `_isolate_app_db`).
+Run: `.venv/bin/ruff check lfg_service/app.py lfg_core/config.py tests/test_og_page.py && .venv/bin/ruff format lfg_service/app.py lfg_core/config.py tests/test_og_page.py && .venv/bin/mypy lfg_service/app.py`
+Expected: clean.
+
+- [ ] **Step 6: Commit**
+
+```bash
+git add lfg_core/config.py lfg_service/app.py tests/test_og_page.py
+git commit -m "feat(share): on-demand branded share-card PNG endpoint behind SHARE_CARD_RENDER_ENABLED
+
+Co-Authored-By: Claude Fable 5 <noreply@anthropic.com>"
+```
+
+---
+
+### Task 7: Docs + full gate + push
+
+**Files:**
+- Modify: `CLAUDE.md` (env block, below `SHARE_FORWARD_URL`)
+
+- [ ] **Step 1: Document the env var**
+
+Add below the `SHARE_FORWARD_URL` line in the worktree `CLAUDE.md`:
+
+```
+SHARE_CARD_RENDER_ENABLED=0                                   # optional (#41); 1 = twitter:image serves branded PNG from /nft/{n}/card.png (needs node + `cd scripts/share_card && npm i && npx playwright install --with-deps chromium`); render failures 302 to raw art
+```
+
+- [ ] **Step 2: Full suite**
+
+Run: `.venv/bin/python -m pytest -q`
+Expected: green (compare any failures against clean main before blaming the branch).
+
+- [ ] **Step 3: Commit and push**
+
+```bash
+git add CLAUDE.md
+git commit -m "docs: SHARE_CARD_RENDER_ENABLED env var + share-card ops note
+
+Co-Authored-By: Claude Fable 5 <noreply@anthropic.com>"
+git push
+```
