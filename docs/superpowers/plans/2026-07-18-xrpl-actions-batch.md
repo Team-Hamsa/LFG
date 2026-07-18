@@ -924,18 +924,19 @@ def release_ticket(conn: sqlite3.Connection, network: str, account: str, ticket:
     return cur.rowcount == 1
 ```
 
-Add the restart query and a test asserting terminal `done` rows are excluded:
+Add the restart query and tests asserting `done` and Ticket-less rows are
+excluded while Ticket-bearing `preparing`, rejected, expired, failed, and
+indeterminate rows remain recoverable:
 
 ```python
 def list_reconcilable_sessions(conn: sqlite3.Connection) -> list[dict[str, Any]]:
     ensure_schema(conn)
-    conn.row_factory = sqlite3.Row
-    rows = conn.execute(
+    cursor = conn.execute(
         "SELECT * FROM xrpl_action_sessions"
-        " WHERE state IN ('awaiting_signature','confirming','indeterminate')"
+        " WHERE ticket_sequence IS NOT NULL AND state != 'done'"
         " ORDER BY created_ts"
-    ).fetchall()
-    return [dict(row) for row in rows]
+    )
+    return [_row_dict(cursor, row) for row in cursor.fetchall()]
 ```
 
 - [ ] **Step 4: Run focused store tests**

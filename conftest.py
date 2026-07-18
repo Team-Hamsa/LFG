@@ -15,6 +15,18 @@
 # posture. (setdefault, so explicit shell exports still win.)
 import os
 
+# Hermetic throwaway values for modules that import the shared config during
+# fixture setup. Individual config tests can still override them explicitly;
+# setdefault guarantees a developer/deployment environment always wins.
+os.environ.setdefault("XUMM_API_KEY", "test")
+os.environ.setdefault("XUMM_API_SECRET", "test")
+os.environ.setdefault("SEED", "sEdTM1uX8pu2do5XvTnutH6HsouMaM2")
+os.environ.setdefault("TOKEN_ISSUER_ADDRESS", "rrrrrrrrrrrrrrrrrrrrrhoLvTp")
+os.environ.setdefault(
+    "TOKEN_CURRENCY_HEX", "4C46474F00000000000000000000000000000000"
+)
+os.environ.setdefault("BUNNY_CDN_ACCESS_KEY", "test")
+os.environ.setdefault("BUNNY_CDN_STORAGE_ZONE", "test")
 os.environ.setdefault("ECONOMY_ENABLED", "1")
 os.environ.setdefault("XRPL_NETWORK", "testnet")
 os.environ.setdefault("ECONOMY_NETWORK", "testnet")
