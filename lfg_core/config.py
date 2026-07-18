@@ -367,3 +367,8 @@ PUBLIC_SHARE_BASE_URL = os.getenv("PUBLIC_SHARE_BASE_URL", "").strip().rstrip("/
 # destination's generic card instead of the per-NFT image. Unset (default)
 # = feature off, the card page body renders exactly as before.
 SHARE_FORWARD_URL = os.getenv("SHARE_FORWARD_URL", "").strip().rstrip("/")
+
+# Branded share-card PNG rendering (GET /nft/{number}/card.png). Requires
+# node + playwright chromium on the box (scripts/share_card/ — see the spec
+# addendum). Off (default) = twitter:image keeps pointing at the raw art.
+SHARE_CARD_RENDER_ENABLED = os.getenv("SHARE_CARD_RENDER_ENABLED", "0").strip() == "1"

@@ -39,6 +39,7 @@ def _isolate_app_db(tmp_path, monkeypatch):
     db = str(tmp_path / "app_clicks.db")
     monkeypatch.setattr(server.db_path, "app_db_path", lambda network=None: db)
     monkeypatch.setattr(server.config, "SHARE_FORWARD_URL", "")
+    monkeypatch.setattr(server.config, "SHARE_CARD_RENDER_ENABLED", False)
     return db
 
 
@@ -462,3 +463,118 @@ def test_unknown_edition_404_does_not_log_click(tmp_path, monkeypatch, _isolate_
     assert (
         table_exists is None or conn.execute("SELECT COUNT(*) FROM share_clicks").fetchone()[0] == 0
     )
+
+
+def test_card_png_route_registered():
+    app = server.create_app()
+    method_paths = {(r.method, getattr(r.resource, "canonical", "")) for r in app.router.routes()}
+    assert ("GET", "/nft/{number}/card.png") in method_paths
+
+
+def _card_req(number):
+    request = make_mocked_request("GET", f"/nft/{number}/card.png")
+    request.match_info["number"] = str(number)
+    return request
+
+
+def test_card_png_unknown_edition_404(tmp_path, monkeypatch):
+    _seed_onchain(tmp_path, monkeypatch, [])
+    monkeypatch.setattr(server, "get_nft_data", lambda n: None)
+    resp = _run(server.handle_nft_card_png(_card_req(9999)))
+    assert resp.status == 404
+
+
+def test_card_png_cache_hit_serves_without_render(tmp_path, monkeypatch):
+    _seed_basic(tmp_path, monkeypatch)
+    card_dir = tmp_path / "cards"
+    monkeypatch.setattr(server, "_SHARE_CARD_DIR", str(card_dir))
+    cached = server._share_card_path(42, "https://cdn.example/img.png")
+    cached.parent.mkdir(parents=True, exist_ok=True)
+    cached.write_bytes(b"\x89PNG-cached")
+
+    def no_render(*a, **k):
+        raise AssertionError("render must not run on cache hit")
+
+    monkeypatch.setattr(server, "_render_share_card", no_render)
+    resp = _run(server.handle_nft_card_png(_card_req(42)))
+    assert resp.status == 200
+    assert resp.body == b"\x89PNG-cached"
+    assert resp.content_type == "image/png"
+
+
+def test_card_png_cache_key_changes_with_art(tmp_path, monkeypatch):
+    a = server._share_card_path(42, "https://cdn.example/img.png")
+    b = server._share_card_path(42, "https://cdn.example/img-v2.png")
+    assert a != b
+    assert a.name.startswith("42-") and b.name.startswith("42-")
+
+
+def test_card_png_miss_renders_and_caches(tmp_path, monkeypatch):
+    _seed_basic(tmp_path, monkeypatch)
+    card_dir = tmp_path / "cards"
+    monkeypatch.setattr(server, "_SHARE_CARD_DIR", str(card_dir))
+    monkeypatch.setattr(server.config, "IMG_PROXY_ALLOWED_BASES", ("https://cdn.example",))
+
+    async def fake_fetch(url):
+        assert url == "https://cdn.example/img.png"
+        return b"rawart", "image/png"
+
+    async def fake_render(number, art_path, out_path):
+        out_path.write_bytes(b"\x89PNG-rendered")
+
+    monkeypatch.setattr(server, "_fetch_cdn", fake_fetch)
+    monkeypatch.setattr(server, "_render_share_card", fake_render)
+    resp = _run(server.handle_nft_card_png(_card_req(42)))
+    assert resp.status == 200
+    assert resp.body == b"\x89PNG-rendered"
+    assert server._share_card_path(42, "https://cdn.example/img.png").exists()
+
+
+def test_card_png_render_failure_302_to_raw_art(tmp_path, monkeypatch):
+    _seed_basic(tmp_path, monkeypatch)
+    card_dir = tmp_path / "cards"
+    monkeypatch.setattr(server, "_SHARE_CARD_DIR", str(card_dir))
+    monkeypatch.setattr(server.config, "IMG_PROXY_ALLOWED_BASES", ("https://cdn.example",))
+
+    async def fake_fetch(url):
+        return b"rawart", "image/png"
+
+    async def broken_render(number, art_path, out_path):
+        raise RuntimeError("chromium missing")
+
+    monkeypatch.setattr(server, "_fetch_cdn", fake_fetch)
+    monkeypatch.setattr(server, "_render_share_card", broken_render)
+    resp = _run(server.handle_nft_card_png(_card_req(42)))
+    assert resp.status == 302
+    assert resp.headers["Location"] == "https://cdn.example/img.png"
+
+
+def test_card_png_disallowed_art_url_302(tmp_path, monkeypatch):
+    _seed_onchain(tmp_path, monkeypatch, [_onchain("AAA", 42, image="https://evil.example/x.png")])
+    monkeypatch.setattr(server, "get_nft_data", lambda n: None)
+    resp = _run(server.handle_nft_card_png(_card_req(42)))
+    assert resp.status == 302
+    assert resp.headers["Location"] == "https://evil.example/x.png"
+
+
+def test_card_page_image_tags_switch_when_enabled(tmp_path, monkeypatch):
+    monkeypatch.setattr(server.config, "SHARE_CARD_RENDER_ENABLED", True)
+    monkeypatch.setattr(server.config, "PUBLIC_SHARE_BASE_URL", "https://share.example")
+    _seed_basic(tmp_path, monkeypatch)
+    body = _run(server.handle_nft_card(_req(42))).text
+    assert 'name="twitter:image" content="https://share.example/nft/42/card.png"' in body
+    assert 'property="og:image" content="https://share.example/nft/42/card.png"' in body
+    assert "cdn.example/img.png" not in body.split("</head>")[0]
+
+
+def test_card_page_image_tags_raw_when_disabled_or_no_base(tmp_path, monkeypatch):
+    monkeypatch.setattr(server.config, "SHARE_CARD_RENDER_ENABLED", False)
+    monkeypatch.setattr(server.config, "PUBLIC_SHARE_BASE_URL", "https://share.example")
+    _seed_basic(tmp_path, monkeypatch)
+    body = _run(server.handle_nft_card(_req(42))).text
+    assert 'name="twitter:image" content="https://cdn.example/img.png"' in body
+    # enabled but no public base -> still raw art (can't build an absolute card URL)
+    monkeypatch.setattr(server.config, "SHARE_CARD_RENDER_ENABLED", True)
+    monkeypatch.setattr(server.config, "PUBLIC_SHARE_BASE_URL", "")
+    body = _run(server.handle_nft_card(_req(42))).text
+    assert 'name="twitter:image" content="https://cdn.example/img.png"' in body
