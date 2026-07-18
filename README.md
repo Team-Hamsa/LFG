@@ -295,6 +295,55 @@ matrix — lives in `trait_config.yaml` at the repo root, validated by
 
 </details>
 
+<details>
+<summary><b>XRPL Actions / one-approval atomic mint (dark launch)</b></summary>
+
+LFG includes the reference implementation for the draft
+[XRPL Actions application standard](docs/xls/xrpl-actions.md). A shared
+`https://build.letseffinggo.com/?action=mint` link prepares one payment-first
+`ALLORNOTHING` Batch:
+
+```text
+Payment -> NFTokenMint + buyer-locked zero-price offer -> NFTokenAcceptOffer
+```
+
+The buyer signs once in Xaman. LFG reports success only after the outer Batch
+and all three fixed inner hashes validate together. The existing mint path is
+unchanged on ordinary URLs and whenever the action gate is closed.
+
+This path requires the exact corrected `BatchV1_1` amendment
+`9F287AED3CDB50A7BD1ACEC24296A30C9B5230CCD136219317AC790E3B884377`
+plus `NFTokenMintOffer`. The obsolete Batch amendment
+`894646DD5284E97DECFE6674A6D6152686791C4A95F8C132CCA9BAF9E5812FB6`
+is hard-denied. The environment flag cannot override the connected ledger's
+feature state.
+
+Configuration defaults:
+
+```dotenv
+XRPL_ACTIONS_BATCH_ENABLED=0
+XRPL_ACTIONS_LAST_LEDGER_OFFSET=90
+XRPL_ACTIONS_TICKET_TARGET=16
+XRPL_ACTIONS_CREATE_LIMIT=3
+```
+
+Keep the flag off until the target network has enabled both required
+amendments and the complete flow has passed testnet verification. Inspect and
+provision the issuer's Ticket pool explicitly:
+
+```bash
+.venv/bin/python -m scripts.provision_batch_tickets status --network testnet
+.venv/bin/python -m scripts.provision_batch_tickets provision --network testnet --target 16
+```
+
+For mainnet, use `--network mainnet` only with `XRPL_NETWORK=mainnet`. The CLI
+refuses a network mismatch. `TicketCreate` increases the issuer account's owner
+count and reserve requirement; provisioning is never performed automatically
+on import, startup, or deploy. Start with a small testnet pool, observe
+consumption/reconciliation, and size production deliberately.
+
+</details>
+
 ---
 
 ## Roadmap

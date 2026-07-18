@@ -422,6 +422,56 @@ surface via `memos.platform_for_surface(session.platform)` for accurate
 attribution. When adding a new tx path, pass a `platform`/`action` (or accept
 the backend default) — the memo, like the SourceTag, must never be omitted.
 
+### XRPL Actions / corrected BatchV1_1 atomic mint
+
+The `?action=mint` PWA entry point uses a separate, dark-launched atomic path;
+legacy `/api/mint` remains unchanged. The ordered ledger contract is exactly:
+
+```text
+Payment -> NFTokenMint(Amount=0, Destination=buyer) -> NFTokenAcceptOffer
+                       outer tfAllOrNothing Batch
+```
+
+Key modules:
+
+- `lfg_core/xrpl_actions.py` — exact amendment gate, Ticket discovery,
+  deterministic offer key, canonical Batch builder/validator, issuer
+  `BatchSigner`, and strict outer/inner result verification.
+- `lfg_core/action_store.py` — durable action sessions and issuer Ticket
+  leases. Never release a Ticket before fixed-hash/LastLedgerSequence
+  reconciliation proves it unused; unknown outcomes are quarantined.
+- `lfg_core/atomic_mint.py` — prepare, sign-request, confirmation, settlement,
+  and restart reconciliation state machine.
+- `lfg_service/app.py` — discovery and authenticated `/api/actions/mint`
+  endpoints plus live background monitoring.
+- `webapp/client/action_pure.js` / `app.js` — action-link boot and one Xaman
+  approval UI.
+- `docs/xls/xrpl-actions.md` — implementation-independent draft application
+  standard.
+
+`XRPL_ACTIONS_BATCH_ENABLED=1` is necessary but never sufficient. The service
+requires enabled `NFTokenMintOffer` and exact `BatchV1_1` ID
+`9F287AED3CDB50A7BD1ACEC24296A30C9B5230CCD136219317AC790E3B884377`,
+hard-denies obsolete Batch ID
+`894646DD5284E97DECFE6674A6D6152686791C4A95F8C132CCA9BAF9E5812FB6`,
+and requires an unleased issuer Ticket. Do not add a config bypass.
+
+The issuer mint always uses `Sequence: 0` plus a durably leased Ticket. The
+buyer is the outer Batch account and signs once; `config.SIGNING_ACCOUNT` is
+the sole `BatchSigner`. Every outer/inner transaction retains SourceTag and
+bounded provenance memos. Never infer completion from Xaman `signed` or outer
+`tesSUCCESS`: all three fixed inner hashes must validate in one ledger with the
+expected `ParentBatchID` and action invariants.
+
+Ticket operations are explicit and network-checked:
+
+```bash
+.venv/bin/python -m scripts.provision_batch_tickets status --network testnet
+.venv/bin/python -m scripts.provision_batch_tickets provision --network testnet --target 16
+```
+
+Ticket objects consume owner reserve. Never provision on startup or deploy.
+
 - **Testnet URL**: `https://s.altnet.rippletest.net:51234/` (main.py:198)
 - **Mainnet URL**: `https://s1.ripple.com:51234/` (ts_helpers.py:40)
 - Wallet is initialized from SEED environment variable

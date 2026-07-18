@@ -137,6 +137,18 @@ async def _submit_and_confirm(
     return _validated_result(response.result, label)
 
 
+async def submit_backend_transaction(
+    tx: Transaction, wallet: Wallet, *, label: str
+) -> dict[str, Any]:
+    """Submit one backend-signed transaction with fixed-hash reconciliation."""
+
+    client = JsonRpcClient(config.JSON_RPC_URL)
+    result = await _submit_and_confirm(tx, wallet, client, label)
+    if result is None:
+        raise RuntimeError(f"{label} failed with a validated ledger result")
+    return result
+
+
 async def mint_nft(
     metadata_cdn_url: str,
     taxon: int,

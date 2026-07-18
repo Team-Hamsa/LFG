@@ -78,6 +78,7 @@ ACTION_EQUIP = "equip"
 ACTION_EXTRACT = "extract"
 ACTION_DEPOSIT = "deposit"
 ACTION_SHOP_BUY = "shop-buy"
+ACTION_BATCH_TICKET_CREATE = "batch-ticket-create"
 _ACTIONS = frozenset(
     {
         ACTION_MINT,
@@ -98,6 +99,7 @@ _ACTIONS = frozenset(
         ACTION_EXTRACT,
         ACTION_DEPOSIT,
         ACTION_SHOP_BUY,
+        ACTION_BATCH_TICKET_CREATE,
     }
 )
 
