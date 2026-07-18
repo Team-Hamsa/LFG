@@ -67,3 +67,7 @@ x_state.db-*
 # Local archive of dead root clutter (backups, logs, mockups, source CSVs) —
 # moved out of the repo root for tidiness; never committed.
 .archive/
+
+# Share card renderer (playwright + fonts install, #41 addendum)
+scripts/share_card/node_modules/
+share_cards/

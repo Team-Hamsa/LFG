@@ -1,0 +1,11 @@
+{
+  "name": "lfg-share-card",
+  "private": true,
+  "type": "module",
+  "description": "Renders branded X share-card PNGs (see docs/superpowers/specs/2026-07-17-x-share-forwarding-design.md addendum)",
+  "dependencies": {
+    "@fontsource/fredoka": "^5.0.0",
+    "@fontsource/jetbrains-mono": "^5.0.0",
+    "playwright": "^1.45.0"
+  }
+}
