@@ -2,6 +2,7 @@
 # Centralized environment configuration for the webapp/core modules.
 # main.py keeps its own loading for backwards compatibility.
 
+import logging
 import os
 
 from dotenv import load_dotenv
@@ -116,7 +117,11 @@ MINT_PRICE_XRP = os.getenv("MINT_PRICE_XRP", "10")
 # frees a slot. Enforced atomically in free_mint.reserve_claim. 0 disables the
 # giveaway entirely. Starting conservative at 10; raise via the FREE_MINT_CAP
 # env var (no code change / redeploy of logic needed).
-FREE_MINT_CAP = int(os.getenv("FREE_MINT_CAP", "10"))
+try:
+    FREE_MINT_CAP = int(os.getenv("FREE_MINT_CAP", "10"))
+except ValueError:
+    logging.warning("Invalid FREE_MINT_CAP env var; defaulting to 10")
+    FREE_MINT_CAP = 10
 
 # BunnyCDN
 BUNNY_CDN_ACCESS_KEY = _require("BUNNY_CDN_ACCESS_KEY")

@@ -41,7 +41,11 @@ def revoke(platform: str, uid: str, network: str) -> None:
 
 
 def grant(platform: str, uid: str, network: str, wallet: str) -> None:
-    """Pre-authorize a claim, bypassing the eligibility scan. Idempotent."""
+    """Record that this identity's one free mint has been consumed (manual
+    grant): inserts a 'claimed' row, so the automated path treats them as
+    already-claimed and `is_eligible()` returns False. This does NOT
+    pre-authorize an otherwise-ineligible user to mint for free — use `revoke`
+    to reopen eligibility. Idempotent."""
     conn = sqlite3.connect(DATABASE)
     try:
         conn.execute(

@@ -135,7 +135,9 @@ def is_eligible(platform: str, platform_user_id: str, network: str) -> bool:
         wallets = wallets_for_identity(platform, platform_user_id)
         return not _owns_live_character(wallets, network)
     except Exception as e:
-        logging.warning(f"free_mint.is_eligible fail-closed for {platform}/{platform_user_id}: {e}")
+        # Don't log the per-user identifiers on the fail-closed path (matches
+        # identity.link's error log, which also omits them).
+        logging.warning(f"free_mint.is_eligible fail-closed for platform={platform}: {e}")
         return False
 
 
@@ -177,13 +179,24 @@ def confirm_claim(
 ) -> None:
     conn = sqlite3.connect(DATABASE)
     try:
-        conn.execute(
+        cur = conn.execute(
             "UPDATE free_mint_claims SET status='claimed', wallet=?, nft_number=?, "
             "claimed_at=CURRENT_TIMESTAMP "
             "WHERE platform=? AND platform_user_id=? AND network=?",
             (wallet, nft_number, platform, platform_user_id, network),
         )
         conn.commit()
+        if cur.rowcount == 0:
+            # The reserved row vanished before we could confirm it (e.g. an
+            # admin revoke raced this in-flight mint). The free NFT was minted
+            # but is now unrecorded, silently reopening eligibility — surface it
+            # loudly rather than let the "one free mint" guarantee break quietly.
+            logging.warning(
+                "free_mint.confirm_claim recorded no row (network=%s, nft=%s) — "
+                "reserved claim gone, eligibility may reopen",
+                network,
+                nft_number,
+            )
     finally:
         conn.close()
 
