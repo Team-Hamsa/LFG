@@ -241,6 +241,24 @@ WEB_ALLOWED_ORIGINS = _parse_allowed_origins(os.getenv("WEB_ALLOWED_ORIGINS", ""
 
 # Misc
 PAYMENT_TIMEOUT_SECONDS = int(os.getenv("PAYMENT_TIMEOUT_SECONDS", "300"))
+# XRPL Actions / corrected BatchV1_1 path. Dark until both this switch and
+# the connected ledger's exact amendment checks pass.
+XRPL_ACTIONS_BATCH_ENABLED = os.getenv("XRPL_ACTIONS_BATCH_ENABLED", "0") not in (
+    "",
+    "0",
+    "false",
+    "False",
+)
+XRPL_ACTIONS_LAST_LEDGER_OFFSET = int(os.getenv("XRPL_ACTIONS_LAST_LEDGER_OFFSET", "90"))
+XRPL_ACTIONS_TICKET_TARGET = int(os.getenv("XRPL_ACTIONS_TICKET_TARGET", "16"))
+XRPL_ACTIONS_CREATE_LIMIT = int(os.getenv("XRPL_ACTIONS_CREATE_LIMIT", "3"))
+for _name in (
+    "XRPL_ACTIONS_LAST_LEDGER_OFFSET",
+    "XRPL_ACTIONS_TICKET_TARGET",
+    "XRPL_ACTIONS_CREATE_LIMIT",
+):
+    if globals()[_name] <= 0:
+        raise ValueError(f"{_name} must be greater than 0")
 # After a credit-eligible payment wait times out, wait this long and re-check
 # history once — a payment signed in time can validate seconds past the
 # deadline and must not be silently kept (issue #196).

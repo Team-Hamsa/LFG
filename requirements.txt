@@ -5,7 +5,7 @@ discord.py>=2.0.0
 xumm-sdk-py
 
 # XRP Ledger client libraries
-xrpl-py
+xrpl-py>=5.0.0
 
 # BunnyCDN storage client library for file uploads
 bunnycdn-storage
@@ -36,6 +36,8 @@ PyNaCl
 
 # Testing (webapp smoke tests)
 pytest
+pytest-asyncio>=0.23
+pytest-aiohttp>=1.0
 
 # Telegram bot framework
 python-telegram-bot>=21

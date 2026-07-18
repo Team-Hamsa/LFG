@@ -25,6 +25,7 @@ os.environ.setdefault("ECONOMY_NETWORK", "testnet")
 # remains; the fixture below clears it between tests).
 os.environ.setdefault("XUMM_WS_WATCH", "0")
 os.environ.setdefault("XUMM_STATUS_CACHE_SECONDS", "0")
+os.environ.setdefault("XRPL_ACTIONS_BATCH_ENABLED", "0")
 
 
 from pathlib import Path
