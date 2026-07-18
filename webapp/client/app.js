@@ -16,8 +16,11 @@ import * as mintPure from './mint_pure.js';
 // Build-panel decision logic lives in its own pure module so it's
 // Node-testable too (tests/test_build_pure_js.py).
 import * as buildPure from './build_pure.js';
+// XRPL Action query/state decisions are pure and wallet-neutral.
+import * as actionPure from './action_pure.js';
 
 const params = new URLSearchParams(window.location.search);
+const launchAction = actionPure.requestedAction(window.location.search);
 const insideDiscord = params.has('frame_id');
 // Telegram injects a signed launch payload as Telegram.WebApp.initData; the
 // vendored telegram-web-app.js (loaded before this module) defines window.Telegram
@@ -87,6 +90,9 @@ let sessionToken = null;
 let me = null;
 let pollTimer = null;
 let pollGen = 0; // bumps on every pollMint call, invalidating in-flight ticks
+let currentAtomicMintId = null;
+let atomicTimer = null;
+let atomicPollGen = 0;
 let externalOpener = null; // set when the SDK is available
 // "Share on X" (#41 T9): populated from /api/config by BOTH fetch sites —
 // main()'s init probe (whose failure is deliberately swallowed) AND
@@ -807,6 +813,148 @@ async function resumeMint() {
     cancel: () => cancelMint(!!active.session.qr_scanned),
   });
   pollMint(id);
+  return true;
+}
+
+function renderAtomicMint(s) {
+  const xrp = s.pay_with === 'XRP';
+  const pill = s.pay_with
+    ? { kind: xrp ? 'xrp' : 'lfgo', text: `Paying with ${xrp ? 'XRP' : 'LFGO'}` }
+    : null;
+  if (s.state === 'preparing') {
+    showFlow({
+      title: '🎨 Preparing your atomic mint',
+      text: 'Composing your NFT and securing a one-use issuer ledger slot…',
+      image: s.image_url,
+      video: s.video_url,
+      spinner: true,
+      pill,
+    });
+    return;
+  }
+  if (s.state === 'awaiting_signature') {
+    const xaman = s.wallets && s.wallets.xaman;
+    const link = xaman && xaman.deeplink;
+    showFlow({
+      title: 'Approve your atomic mint',
+      text: signText(xaman && xaman.push,
+        'One Xaman approval covers payment, mint, and delivery — all or nothing.'),
+      // Generate the QR same-origin from the actual Xaman deep link. Xaman's
+      // qr_png host is cross-origin and blocked inside the Activity CSP.
+      qrData: link,
+      link,
+      image: s.image_url,
+      video: s.video_url,
+      spinner: false,
+      pill,
+    });
+    return;
+  }
+  if (s.state === 'confirming') {
+    showFlow({
+      title: '⛓️ Confirming on XRPL',
+      text: 'Checking the payment, mint, and transfer results together…',
+      image: s.image_url,
+      video: s.video_url,
+      spinner: true,
+      pill,
+    });
+    return;
+  }
+  if (s.state === 'done') {
+    showFlow({
+      title: `🎉 LFG #${s.nft_number} is yours`,
+      text: 'Payment, mint, and delivery validated atomically in one Batch.',
+      image: s.image_url,
+      video: s.video_url,
+      done: true,
+      celebrate: true,
+      pill,
+      share: {
+        text: mintShareText(s.nft_number),
+        url: shareUrlFor(s.nft_number, s.nft_id),
+      },
+    });
+    return;
+  }
+  if (actionPure.actionIsTerminal(s.state)) {
+    showFlow({
+      title: 'Mint not completed',
+      text: actionPure.actionErrorCopy(s.error_code),
+      image: s.image_url,
+      video: s.video_url,
+      done: true,
+      pill,
+    });
+  }
+}
+
+function pollAtomicMint(sessionId) {
+  clearTimeout(atomicTimer);
+  const gen = ++atomicPollGen;
+  const tick = async () => {
+    if (gen !== atomicPollGen || el('flow-panel').hidden) return;
+    let s;
+    try {
+      s = await api(`/api/actions/mint/${sessionId}`);
+    } catch (_) {
+      if (gen === atomicPollGen) atomicTimer = setTimeout(tick, 2000);
+      return;
+    }
+    if (gen !== atomicPollGen) return;
+    renderAtomicMint(s);
+    if (!actionPure.actionIsTerminal(s.state)) {
+      atomicTimer = setTimeout(tick, 2000);
+    }
+  };
+  tick();
+}
+
+async function startAtomicMint() {
+  showFlow({
+    title: '🎨 Preparing your atomic mint',
+    text: 'Starting a payment-first, all-or-nothing XRPL mint…',
+    spinner: true,
+  });
+  try {
+    const s = await api('/api/actions/mint', {
+      method: 'POST',
+      body: JSON.stringify({
+        ...discordCtx(),
+        account: me.wallet,
+        campaign: 'x-mint-link',
+      }),
+    });
+    currentAtomicMintId = s.sessionId;
+    pollAtomicMint(s.sessionId);
+    return true;
+  } catch (e) {
+    const existing = e.body && e.body.session;
+    if (e.status === 409 && existing && existing.sessionId) {
+      currentAtomicMintId = existing.sessionId;
+      renderAtomicMint(existing);
+      pollAtomicMint(existing.sessionId);
+      return true;
+    }
+    showFlow({
+      title: 'Atomic mint unavailable',
+      text: actionPure.actionErrorCopy(e.body && e.body.code),
+      done: true,
+    });
+    return false;
+  }
+}
+
+async function resumeAtomicMint() {
+  let active = null;
+  try {
+    active = await api('/api/actions/mint/active');
+  } catch (_) { /* unavailable: let the action create path show the reason */ }
+  const id = actionPure.activeActionSessionId(active);
+  if (!id) return false;
+  currentAtomicMintId = id;
+  renderAtomicMint(active.session);
+  pollAtomicMint(id);
   return true;
 }
 
@@ -2525,7 +2673,7 @@ async function main() {
   setupLogo();
   setupLeaderboard();
   el('register-retry-btn').onclick = () => (insideWeb ? startWebSignin() : startSignin());
-  el('mint-btn').onclick = startMint;
+  el('mint-btn').onclick = launchAction === 'mint' ? startAtomicMint : startMint;
   el('flow-regen-btn').onclick = regeneratePaymentQr;
   el('swap-btn').onclick = () => openDressup();
   el('dressup-back-btn').onclick = () => showMintHome();
@@ -2581,8 +2729,11 @@ async function main() {
       const user = await setupWeb();
       if (user) {
         me = user;
-        // Re-attach to a mint an earlier tab/reload orphaned before going home.
-        if (!(await resumeMint())) showMintHome();
+        if (launchAction === 'mint') {
+          // A shared action link resumes its own fixed Batch, or prepares one
+          // immediately after authentication. It never enters legacy mint.
+          if (!(await resumeAtomicMint())) await startAtomicMint();
+        } else if (!(await resumeMint())) showMintHome();
       }
       // else: startWebSignin() is already driving the register panel.
     } catch (e) {
@@ -2603,8 +2754,9 @@ async function main() {
     else await setupDiscord();
     me = await api('/api/me');
     if (me.wallet) {
-      // Re-attach to a mint the webview reload orphaned before going home.
-      if (!(await resumeMint())) showMintHome();
+      if (launchAction === 'mint') {
+        if (!(await resumeAtomicMint())) await startAtomicMint();
+      } else if (!(await resumeMint())) showMintHome();
     }
     else {
       status(`Hey ${me.username} — sign in with Xaman to start building.`);

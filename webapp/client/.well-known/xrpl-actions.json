@@ -1,0 +1,9 @@
+{
+  "version": "1",
+  "rules": [
+    {
+      "pathPattern": "/actions/**",
+      "apiPath": "/api/actions/**"
+    }
+  ]
+}
