@@ -84,3 +84,12 @@ def test_tile_selectable():
 def test_tile_unindexed_is_disabled_and_labeled():
     out = run_js("M.goTileState({nft_id: 'C', edition: null, body: ''}, 'A')")
     assert out == {"label": "#?", "sub": "indexing…", "state": "indexing"}
+
+
+def test_tile_unindexed_active_stays_indexing():
+    # An unindexed GO that also happens to be the active character must render
+    # 'indexing' (disabled), not 'active' — the picker only disables 'indexing'
+    # tiles, so an 'active' unindexed tile would be selectable and 400 on every
+    # layer fetch (missing body metadata takes precedence over active state).
+    out = run_js("M.goTileState({nft_id: 'A', edition: 3521, body: ''}, 'A')")
+    assert out["state"] == "indexing"

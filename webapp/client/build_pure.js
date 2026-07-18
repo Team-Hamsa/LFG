@@ -22,6 +22,9 @@ export function goTileState(char, activeNftId) {
   return {
     label: `#${char.edition == null ? '?' : char.edition}`,
     sub: indexed ? char.body : 'indexing…',
-    state: char.nft_id === activeNftId ? 'active' : indexed ? 'selectable' : 'indexing',
+    // Missing body metadata wins: the picker disables only 'indexing' tiles,
+    // so an unindexed GO must never be labeled 'active' (it would be
+    // selectable but every layer fetch would 400).
+    state: !indexed ? 'indexing' : char.nft_id === activeNftId ? 'active' : 'selectable',
   };
 }

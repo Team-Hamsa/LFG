@@ -761,7 +761,8 @@ button.back:hover { color: var(--text); border: none; }
 }
 .go-tile-label { font-weight: 700; font-size: .8rem; }
 .go-tile-sub { font-size: .7rem; color: var(--muted); }
-.go-tile.assemble { justify-content: center; font-size: 1.6rem; min-height: 96px; }
+.go-tile.assemble { justify-content: center; min-height: 96px; }
+.go-tile-plus { font-size: 1.6rem; line-height: 1; }
 .dressup-canvas.incomplete {
   display: grid; place-items: center; color: var(--muted, #888); font-weight: 700;
 }
