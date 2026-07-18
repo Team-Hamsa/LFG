@@ -39,7 +39,7 @@ SWAPPABLE_TRAITS = [
     "Accessory",
 ]
 # Values that belong on the Back layer even when stored under Accessory.
-BACK_VALUES = ["Angel Wings", "Angel Wings Open"]
+BACK_VALUES = ["Angel Wings", "Angel Wings Open", "Infernal Wings"]
 
 
 def decode_uri(uri_hex: str) -> str:
