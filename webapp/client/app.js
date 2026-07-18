@@ -231,8 +231,19 @@ function bithompNftUrl(nftId) {
   return `${bithompBase}/en/nft/${nftId}`;
 }
 
+// XRPL classic-address shape (client-side gate only; the service re-validates).
+const XRPL_ADDR_RE = /^r[1-9A-HJ-NP-Za-km-z]{24,34}$/;
+
 function shareUrlFor(nftNumber, nftId) {
-  if (shareBase && nftNumber != null) return `${shareBase}/nft/${nftNumber}`;
+  if (shareBase && nftNumber != null) {
+    // Attribution (#41 follow-on): tag the link with the sharer's wallet so
+    // the card page can log whose shares get clicked. Wallets are public
+    // on-chain — nothing new is leaked.
+    const ref = me && me.wallet && XRPL_ADDR_RE.test(me.wallet)
+      ? `?ref=${encodeURIComponent(me.wallet)}`
+      : '';
+    return `${shareBase}/nft/${nftNumber}${ref}`;
+  }
   if (bithompBase && nftId) return bithompNftUrl(nftId);
   // No base is known (every /api/config fetch failed) — return '' so the
   // callers skip/hide the share control instead of rendering a dead
@@ -2760,6 +2771,14 @@ function setupLogo() {
 }
 
 async function main() {
+  // Referral stash (#41 follow-on): a share click-through arrives as
+  // ?ref=<wallet>. Persist it for the future mint-attribution flow; shape-
+  // check so arbitrary query junk never lands in storage.
+  try {
+    const refParam = new URLSearchParams(location.search).get('ref');
+    if (refParam && XRPL_ADDR_RE.test(refParam)) localStorage.setItem('lfg_ref', refParam);
+  } catch (_) { /* private mode / no storage */ }
+
   setupLogo();
   setupLeaderboard();
   el('register-retry-btn').onclick = () => (insideWeb ? startWebSignin() : startSignin());

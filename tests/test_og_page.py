@@ -19,10 +19,28 @@ os.environ.setdefault("BUNNY_PULL_ZONE", "nft.pullzone.example")
 import asyncio  # noqa: E402
 from html import escape  # noqa: E402
 
+import pytest  # noqa: E402
 from aiohttp.test_utils import make_mocked_request  # noqa: E402
 
 from lfg_core import nft_index  # noqa: E402
 from lfg_service import app as server  # noqa: E402
+
+
+@pytest.fixture(autouse=True)
+def _isolate_app_db(tmp_path, monkeypatch):
+    """Every test in this module exercises handle_nft_card, which (since the
+    #41 share-click-logging change) calls share_clicks.record_click against
+    db_path.app_db_path() on every live-card render. Without this redirect,
+    running the suite writes rows into the REAL lfg_nfts*.db on disk. Also
+    pins SHARE_FORWARD_URL to "" by default so the suite doesn't depend on
+    whatever a box's .env happens to set; tests that want it set monkeypatch
+    it explicitly afterward (autouse fixtures run first, so the later
+    monkeypatch.setattr in the test body wins)."""
+    db = str(tmp_path / "app_clicks.db")
+    monkeypatch.setattr(server.db_path, "app_db_path", lambda network=None: db)
+    monkeypatch.setattr(server.config, "SHARE_FORWARD_URL", "")
+    monkeypatch.setattr(server.config, "SHARE_CARD_RENDER_ENABLED", False)
+    return db
 
 
 def _run(coro):
@@ -57,8 +75,10 @@ def _seed_onchain(tmp_path, monkeypatch, records):
     conn.close()
 
 
-def _req(number):
-    request = make_mocked_request("GET", f"/nft/{number}")
+def _req(number, query="", headers=None):
+    request = make_mocked_request(
+        "GET", f"/nft/{number}{('?' + query) if query else ''}", headers=headers or {}
+    )
     request.match_info["number"] = str(number)
     return request
 
@@ -419,3 +439,319 @@ def test_nft_card_includes_og_url_when_base_set(tmp_path, monkeypatch):
     body = resp.text
     assert 'property="og:url" content="https://share.example/lfg/nft/55"' in body
     assert 'rel="canonical" href="https://share.example/lfg/nft/55"' in body
+
+
+_REF = "rrrrrrrrrrrrrrrrrrrrrhoLvTp"  # valid classic address (ACCOUNT_ZERO)
+
+
+def _seed_basic(tmp_path, monkeypatch, number=42):
+    _seed_onchain(tmp_path, monkeypatch, [_onchain("AAA", number)])
+    monkeypatch.setattr(server, "get_nft_data", lambda n: None)
+
+
+def test_forward_unset_keeps_legacy_body(tmp_path, monkeypatch):
+    monkeypatch.setattr(server.config, "SHARE_FORWARD_URL", "")
+    _seed_basic(tmp_path, monkeypatch)
+    body = _run(server.handle_nft_card(_req(42))).text
+    assert "location.replace" not in body
+    assert "<h1>LFGO #42</h1>" in body
+
+
+def test_forward_set_injects_js_redirect_and_keeps_meta(tmp_path, monkeypatch):
+    monkeypatch.setattr(server.config, "SHARE_FORWARD_URL", "https://build.example")
+    _seed_basic(tmp_path, monkeypatch)
+    resp = _run(server.handle_nft_card(_req(42)))
+    assert resp.status == 200  # no HTTP redirect, ever
+    body = resp.text
+    # Meta tags untouched — the crawler contract.
+    assert 'name="twitter:card" content="summary_large_image"' in body
+    assert 'name="twitter:image" content="https://cdn.example/img.png"' in body
+    # JS-only forward + visible fallback link, Bithomp retained.
+    assert 'location.replace("https:\\/\\/build.example")' in body
+    assert 'href="https://build.example"' in body
+    assert "View on Bithomp" in body
+    assert "http-equiv" not in body  # no meta-refresh
+
+
+def test_forward_appends_valid_ref_and_logs_click(tmp_path, monkeypatch, _isolate_app_db):
+    monkeypatch.setattr(server.config, "SHARE_FORWARD_URL", "https://build.example")
+    monkeypatch.setattr(server.config, "PUBLIC_SHARE_BASE_URL", "https://share.example")
+    _seed_basic(tmp_path, monkeypatch)
+    db = _isolate_app_db
+    body = _run(
+        server.handle_nft_card(_req(42, query=f"ref={_REF}", headers={"User-Agent": "Mozilla/5.0"}))
+    ).text
+    assert f'location.replace("https:\\/\\/build.example?ref={_REF}")' in body
+    # og:url / canonical stay ref-less so X dedupes card variants.
+    assert 'property="og:url" content="https://share.example/nft/42"' in body
+    assert 'rel="canonical" href="https://share.example/nft/42"' in body
+    import sqlite3
+
+    row = (
+        sqlite3.connect(db)
+        .execute("SELECT nft_number, ref_wallet, is_bot FROM share_clicks")
+        .fetchone()
+    )
+    assert row == (42, _REF, 0)
+
+
+def test_forward_url_with_query_uses_ampersand(tmp_path, monkeypatch, _isolate_app_db):
+    # A SHARE_FORWARD_URL that already carries a query string must get ref
+    # joined with & (not a second ?), or the URL is malformed for most parsers.
+    monkeypatch.setattr(server.config, "SHARE_FORWARD_URL", "https://build.example?utm_source=x")
+    _seed_basic(tmp_path, monkeypatch)
+    body = _run(
+        server.handle_nft_card(_req(42, query=f"ref={_REF}", headers={"User-Agent": "Mozilla/5.0"}))
+    ).text
+    assert f'location.replace("https:\\/\\/build.example?utm_source=x&ref={_REF}")' in body
+
+
+def test_invalid_ref_ignored_not_echoed(tmp_path, monkeypatch, _isolate_app_db):
+    monkeypatch.setattr(server.config, "SHARE_FORWARD_URL", "https://build.example")
+    _seed_basic(tmp_path, monkeypatch)
+    db = _isolate_app_db
+    evil = '"><script>alert(1)</script>'
+    body = _run(server.handle_nft_card(_req(42, query="ref=" + escape(evil)))).text
+    assert "alert(1)" not in body
+    assert 'location.replace("https:\\/\\/build.example")' in body  # no ref appended
+    import sqlite3
+
+    (ref,) = sqlite3.connect(db).execute("SELECT ref_wallet FROM share_clicks").fetchone()
+    assert ref is None
+
+
+def test_bot_user_agent_flagged(tmp_path, monkeypatch, _isolate_app_db):
+    monkeypatch.setattr(server.config, "SHARE_FORWARD_URL", "https://build.example")
+    _seed_basic(tmp_path, monkeypatch)
+    db = _isolate_app_db
+    _run(server.handle_nft_card(_req(42, headers={"User-Agent": "Twitterbot/1.0"})))
+    import sqlite3
+
+    (is_bot,) = sqlite3.connect(db).execute("SELECT is_bot FROM share_clicks").fetchone()
+    assert is_bot == 1
+
+
+def test_click_log_failure_never_breaks_card(tmp_path, monkeypatch):
+    monkeypatch.setattr(server.config, "SHARE_FORWARD_URL", "https://build.example")
+    _seed_basic(tmp_path, monkeypatch)
+
+    def boom(*a, **k):
+        raise RuntimeError("db down")
+
+    monkeypatch.setattr(server.share_clicks, "record_click", boom)
+    resp = _run(server.handle_nft_card(_req(42)))
+    assert resp.status == 200
+
+
+def test_unknown_edition_404_does_not_log_click(tmp_path, monkeypatch, _isolate_app_db):
+    """A 404 card (unknown edition) must never write a share_clicks row —
+    record_click only runs on the live-card render path."""
+    monkeypatch.setattr(server.config, "SHARE_FORWARD_URL", "https://build.example")
+    _seed_onchain(tmp_path, monkeypatch, [])
+    monkeypatch.setattr(server, "get_nft_data", lambda n: None)
+
+    resp = _run(server.handle_nft_card(_req(9999)))
+
+    assert resp.status == 404
+    import sqlite3
+
+    conn = sqlite3.connect(_isolate_app_db)
+    table_exists = conn.execute(
+        "SELECT name FROM sqlite_master WHERE type='table' AND name='share_clicks'"
+    ).fetchone()
+    assert (
+        table_exists is None or conn.execute("SELECT COUNT(*) FROM share_clicks").fetchone()[0] == 0
+    )
+
+
+def test_card_png_route_registered():
+    app = server.create_app()
+    method_paths = {(r.method, getattr(r.resource, "canonical", "")) for r in app.router.routes()}
+    assert ("GET", "/nft/{number}/card.png") in method_paths
+
+
+def _card_req(number):
+    request = make_mocked_request("GET", f"/nft/{number}/card.png")
+    request.match_info["number"] = str(number)
+    return request
+
+
+def test_card_png_unknown_edition_404(tmp_path, monkeypatch):
+    _seed_onchain(tmp_path, monkeypatch, [])
+    monkeypatch.setattr(server, "get_nft_data", lambda n: None)
+    resp = _run(server.handle_nft_card_png(_card_req(9999)))
+    assert resp.status == 404
+
+
+def test_card_png_cache_hit_serves_without_render(tmp_path, monkeypatch):
+    _seed_basic(tmp_path, monkeypatch)
+    card_dir = tmp_path / "cards"
+    monkeypatch.setattr(server, "_SHARE_CARD_DIR", str(card_dir))
+    cached = server._share_card_path(42, "https://cdn.example/img.png")
+    cached.parent.mkdir(parents=True, exist_ok=True)
+    cached.write_bytes(b"\x89PNG-cached")
+
+    def no_render(*a, **k):
+        raise AssertionError("render must not run on cache hit")
+
+    monkeypatch.setattr(server, "_render_share_card", no_render)
+    resp = _run(server.handle_nft_card_png(_card_req(42)))
+    assert resp.status == 200
+    assert resp.body == b"\x89PNG-cached"
+    assert resp.content_type == "image/png"
+
+
+def test_card_png_cache_key_changes_with_art(tmp_path, monkeypatch):
+    a = server._share_card_path(42, "https://cdn.example/img.png")
+    b = server._share_card_path(42, "https://cdn.example/img-v2.png")
+    assert a != b
+    assert a.name.startswith("42-") and b.name.startswith("42-")
+
+
+def test_card_png_miss_renders_and_caches(tmp_path, monkeypatch):
+    _seed_basic(tmp_path, monkeypatch)
+    card_dir = tmp_path / "cards"
+    monkeypatch.setattr(server, "_SHARE_CARD_DIR", str(card_dir))
+    monkeypatch.setattr(server.config, "IMG_PROXY_ALLOWED_BASES", ("https://cdn.example",))
+
+    async def fake_fetch(url):
+        assert url == "https://cdn.example/img.png"
+        return b"rawart", "image/png"
+
+    async def fake_render(number, art_path, out_path):
+        out_path.write_bytes(b"\x89PNG-rendered")
+
+    monkeypatch.setattr(server, "_fetch_cdn", fake_fetch)
+    monkeypatch.setattr(server, "_render_share_card", fake_render)
+    resp = _run(server.handle_nft_card_png(_card_req(42)))
+    assert resp.status == 200
+    assert resp.body == b"\x89PNG-rendered"
+    assert server._share_card_path(42, "https://cdn.example/img.png").exists()
+
+
+def test_card_png_render_failure_302_to_raw_art(tmp_path, monkeypatch):
+    _seed_basic(tmp_path, monkeypatch)
+    card_dir = tmp_path / "cards"
+    monkeypatch.setattr(server, "_SHARE_CARD_DIR", str(card_dir))
+    monkeypatch.setattr(server.config, "IMG_PROXY_ALLOWED_BASES", ("https://cdn.example",))
+
+    async def fake_fetch(url):
+        return b"rawart", "image/png"
+
+    async def broken_render(number, art_path, out_path):
+        raise RuntimeError("chromium missing")
+
+    monkeypatch.setattr(server, "_fetch_cdn", fake_fetch)
+    monkeypatch.setattr(server, "_render_share_card", broken_render)
+    resp = _run(server.handle_nft_card_png(_card_req(42)))
+    assert resp.status == 302
+    assert resp.headers["Location"] == "https://cdn.example/img.png"
+
+
+def test_card_png_disallowed_art_url_302(tmp_path, monkeypatch):
+    _seed_onchain(tmp_path, monkeypatch, [_onchain("AAA", 42, image="https://evil.example/x.png")])
+    monkeypatch.setattr(server, "get_nft_data", lambda n: None)
+    resp = _run(server.handle_nft_card_png(_card_req(42)))
+    assert resp.status == 302
+    assert resp.headers["Location"] == "https://evil.example/x.png"
+
+
+def test_card_png_falls_back_to_http_lfg_image_when_onchain_is_ipfs(tmp_path, monkeypatch):
+    """06ffa0b fix mirrored into the PNG endpoint: an ipfs:// on-chain image
+    must not be used as the redirect/cache-key target when a fetchable
+    http(s) LFG-row image_url is available."""
+    card_dir = tmp_path / "cards"
+    monkeypatch.setattr(server, "_SHARE_CARD_DIR", str(card_dir))
+    monkeypatch.setattr(server.config, "IMG_PROXY_ALLOWED_BASES", ("https://cdn.example",))
+    _seed_onchain(
+        tmp_path,
+        monkeypatch,
+        [_onchain("AAA", 42, image="ipfs://bafybeigdyrzt/42.png", attrs=[])],
+    )
+    monkeypatch.setattr(
+        server,
+        "get_nft_data",
+        lambda n: {
+            "nft_number": 42,
+            "nft_id": "AAA",
+            "image_url": "https://cdn.example/img.png",
+            "traits": {},
+        },
+    )
+    cached = server._share_card_path(42, "https://cdn.example/img.png")
+    cached.parent.mkdir(parents=True, exist_ok=True)
+    cached.write_bytes(b"\x89PNG-cached")
+
+    resp = _run(server.handle_nft_card_png(_card_req(42)))
+
+    assert resp.status == 200
+    assert resp.body == b"\x89PNG-cached"
+
+
+def test_card_png_ipfs_only_edition_404s(tmp_path, monkeypatch):
+    """Neither the on-chain image nor the LFG-row fallback is fetchable ->
+    404, never a 302 Location pointing at an ipfs:// URI."""
+    _seed_onchain(
+        tmp_path,
+        monkeypatch,
+        [_onchain("AAA", 42, image="ipfs://bafybeigdyrzt/42.png", attrs=[])],
+    )
+    monkeypatch.setattr(
+        server,
+        "get_nft_data",
+        lambda n: {"nft_number": 42, "nft_id": "AAA", "image_url": None, "traits": {}},
+    )
+
+    resp = _run(server.handle_nft_card_png(_card_req(42)))
+
+    assert resp.status == 404
+
+
+def test_card_page_omits_image_tags_when_enabled_and_ipfs_only(tmp_path, monkeypatch):
+    """06ffa0b + card-switch interaction: with rendering enabled and a public
+    base configured, an ipfs-only edition (no fetchable art at all) must
+    still omit the image tags entirely rather than advertising a card.png
+    URL that would 404 -- the card-URL switch must not override the
+    no-fetchable-image omission."""
+    monkeypatch.setattr(server.config, "SHARE_CARD_RENDER_ENABLED", True)
+    monkeypatch.setattr(server.config, "PUBLIC_SHARE_BASE_URL", "https://share.example")
+    _seed_onchain(
+        tmp_path,
+        monkeypatch,
+        [_onchain("AAA", 46, image="ipfs://bafybeigdyrzt/46.png", attrs=[])],
+    )
+    monkeypatch.setattr(
+        server,
+        "get_nft_data",
+        lambda n: {"nft_number": 46, "nft_id": "AAA", "image_url": None, "traits": {}},
+    )
+
+    body = _run(server.handle_nft_card(_req(46))).text
+
+    assert "twitter:image" not in body
+    assert "og:image" not in body
+    assert "card.png" not in body
+    assert "ipfs://" not in body
+
+
+def test_card_page_image_tags_switch_when_enabled(tmp_path, monkeypatch):
+    monkeypatch.setattr(server.config, "SHARE_CARD_RENDER_ENABLED", True)
+    monkeypatch.setattr(server.config, "PUBLIC_SHARE_BASE_URL", "https://share.example")
+    _seed_basic(tmp_path, monkeypatch)
+    body = _run(server.handle_nft_card(_req(42))).text
+    assert 'name="twitter:image" content="https://share.example/nft/42/card.png"' in body
+    assert 'property="og:image" content="https://share.example/nft/42/card.png"' in body
+    assert "cdn.example/img.png" not in body.split("</head>")[0]
+
+
+def test_card_page_image_tags_raw_when_disabled_or_no_base(tmp_path, monkeypatch):
+    monkeypatch.setattr(server.config, "SHARE_CARD_RENDER_ENABLED", False)
+    monkeypatch.setattr(server.config, "PUBLIC_SHARE_BASE_URL", "https://share.example")
+    _seed_basic(tmp_path, monkeypatch)
+    body = _run(server.handle_nft_card(_req(42))).text
+    assert 'name="twitter:image" content="https://cdn.example/img.png"' in body
+    # enabled but no public base -> still raw art (can't build an absolute card URL)
+    monkeypatch.setattr(server.config, "SHARE_CARD_RENDER_ENABLED", True)
+    monkeypatch.setattr(server.config, "PUBLIC_SHARE_BASE_URL", "")
+    body = _run(server.handle_nft_card(_req(42))).text
+    assert 'name="twitter:image" content="https://cdn.example/img.png"' in body

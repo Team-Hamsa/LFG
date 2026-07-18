@@ -15,9 +15,11 @@ import json
 import logging
 import mimetypes
 import os
+import pathlib
 import re
 import sqlite3
 import sys
+import tempfile
 import threading
 import time
 import traceback
@@ -54,6 +56,7 @@ from lfg_core import (
     mint_flow,
     nft_index,
     rarity,
+    share_clicks,
     shop,
     shop_flow,
     shop_store,
@@ -4105,6 +4108,122 @@ def _og_bithomp_url(nft_id: str) -> str:
     return f"{_bithomp_base_url()}/en/nft/{nft_id}"
 
 
+_BOT_UA_MARKERS = ("twitterbot", "facebookexternalhit", "slackbot", "discordbot", "telegrambot")
+
+
+def _share_ref(request: Any) -> str | None:
+    """?ref=<sharer wallet> — shape-validated, never trusted further."""
+    ref = (request.query.get("ref") or "").strip()
+    return ref if ref and is_valid_classic_address(ref) else None
+
+
+def _is_share_bot(user_agent: str) -> bool:
+    ua = user_agent.lower()
+    return any(m in ua for m in _BOT_UA_MARKERS)
+
+
+_SHARE_CARD_DIR = "share_cards"
+_RENDER_TIMEOUT_S = 60
+_RENDER_SCRIPT = str(
+    pathlib.Path(__file__).resolve().parent.parent / "scripts/share_card/render.mjs"
+)
+_share_card_locks: dict[int, asyncio.Lock] = {}
+
+
+def _share_card_path(number: int, image_url: str) -> pathlib.Path:
+    key = hashlib.sha1(image_url.encode("utf-8")).hexdigest()[:12]
+    return pathlib.Path(_SHARE_CARD_DIR) / f"{number}-{key}.png"
+
+
+def _share_card_url(number: int) -> str:
+    """Absolute card-PNG URL, or '' when it can't be built/served."""
+    if not (config.SHARE_CARD_RENDER_ENABLED and config.PUBLIC_SHARE_BASE_URL):
+        return ""
+    return f"{config.PUBLIC_SHARE_BASE_URL}/nft/{number}/card.png"
+
+
+async def _render_share_card(number: int, art_path: pathlib.Path, out_path: pathlib.Path) -> None:
+    """Run the node renderer; raises on any failure (caller falls back)."""
+    proc = await asyncio.create_subprocess_exec(
+        "node",
+        _RENDER_SCRIPT,
+        "--token",
+        str(number),
+        "--avatar",
+        str(art_path),
+        "--out",
+        str(out_path),
+        stdout=asyncio.subprocess.DEVNULL,
+        stderr=asyncio.subprocess.PIPE,
+    )
+    try:
+        _, stderr = await asyncio.wait_for(proc.communicate(), timeout=_RENDER_TIMEOUT_S)
+    except asyncio.TimeoutError:
+        proc.kill()
+        raise RuntimeError(f"share-card render timed out for #{number}") from None
+    if proc.returncode != 0 or not out_path.exists():
+        raise RuntimeError(
+            f"share-card render failed for #{number}: {stderr.decode(errors='replace')[:300]}"
+        )
+
+
+async def handle_nft_card_png(request: Any) -> Any:
+    """Branded 1200x630 share-card PNG for twitter:image. Cache-on-disk keyed
+    by (number, art URL) so swaps/remints self-invalidate; ANY failure falls
+    back to a 302 at the raw art (X's crawler follows image redirects), so
+    this endpoint can never make sharing worse than the pre-card behavior."""
+    raw_number = request.match_info.get("number", "")
+    try:
+        number = int(raw_number)
+    except (TypeError, ValueError):
+        return web.HTTPNotFound()
+
+    lfg_row = get_nft_data(number)
+    conn = nft_index.init_db(nft_index.index_db_path(config.XRPL_NETWORK))
+    try:
+        onchain = nft_index.nft_by_number(conn, number)
+    finally:
+        conn.close()
+    if onchain is None:
+        return web.HTTPNotFound()
+    image_url = _og_fetchable_image_url(onchain.image) or _og_fetchable_image_url(
+        (lfg_row or {}).get("image_url")
+    )
+    if not image_url:
+        return web.HTTPNotFound()
+
+    cached = _share_card_path(number, image_url)
+    if cached.exists():
+        return web.Response(body=cached.read_bytes(), content_type="image/png")
+
+    if not _img_url_allowed(image_url):
+        return web.HTTPFound(image_url)
+
+    lock = _share_card_locks.setdefault(number, asyncio.Lock())
+    async with lock:
+        if cached.exists():  # rendered while we waited
+            return web.Response(body=cached.read_bytes(), content_type="image/png")
+        try:
+            art_body, _ctype = await _fetch_cdn(image_url)
+            cached.parent.mkdir(parents=True, exist_ok=True)
+            with tempfile.NamedTemporaryFile(suffix=".png", delete=False) as art_f:
+                art_f.write(art_body)
+                art_path = pathlib.Path(art_f.name)
+            tmp_out = cached.with_suffix(".tmp.png")
+            try:
+                await _render_share_card(number, art_path, tmp_out)
+                os.replace(tmp_out, cached)
+            finally:
+                art_path.unlink(missing_ok=True)
+                tmp_out.unlink(missing_ok=True)
+        except Exception:
+            logging.getLogger(__name__).warning(
+                "share-card render fell back to raw art for #%s", number, exc_info=True
+            )
+            return web.HTTPFound(image_url)
+    return web.Response(body=cached.read_bytes(), content_type="image/png")
+
+
 def _og_fetchable_image_url(url: str | None) -> str:
     """A twitter:image/og:image value must be crawlable over plain HTTP(S) —
     legacy mainnet editions carry ipfs:// (or other non-http scheme) URIs in
@@ -4151,6 +4270,19 @@ async def handle_nft_card(request: Any) -> Any:
     if onchain is None:
         return web.HTTPNotFound(text=_OG_NOT_FOUND_HTML, content_type="text/html")
 
+    ref_wallet = _share_ref(request)
+    user_agent = request.headers.get("User-Agent", "")
+    try:
+        share_clicks.record_click(
+            db_path.app_db_path(),
+            number,
+            ref_wallet,
+            _is_share_bot(user_agent),
+            user_agent,
+        )
+    except Exception:  # noqa: BLE001 — logging must never break the card
+        logging.getLogger(__name__).warning("share click log failed", exc_info=True)
+
     # On-chain index FIRST, stale-able LFG row as fallback: swaps never
     # update the LFG table (the swap flow stamps the index at the burn point
     # of no return since #211; the listener keeps it fresh otherwise — modify
@@ -4169,6 +4301,9 @@ async def handle_nft_card(request: Any) -> Any:
     esc_description = escape(description, quote=True)
     esc_image = escape(image_url, quote=True)
     esc_bithomp = escape(bithomp_url, quote=True)
+    card_png_url = _share_card_url(number)
+    tag_image = (card_png_url if image_url else "") or image_url
+    esc_tag_image = escape(tag_image, quote=True)
 
     meta_tags = [
         '<meta charset="utf-8">',
@@ -4179,9 +4314,9 @@ async def handle_nft_card(request: Any) -> Any:
         f'<meta property="og:title" content="{esc_title}">',
         f'<meta property="og:description" content="{esc_description}">',
     ]
-    if image_url:
-        meta_tags.append(f'<meta name="twitter:image" content="{esc_image}">')
-        meta_tags.append(f'<meta property="og:image" content="{esc_image}">')
+    if tag_image:
+        meta_tags.append(f'<meta name="twitter:image" content="{esc_tag_image}">')
+        meta_tags.append(f'<meta property="og:image" content="{esc_tag_image}">')
     if config.PUBLIC_SHARE_BASE_URL:
         page_url = escape(f"{config.PUBLIC_SHARE_BASE_URL}/nft/{number}", quote=True)
         meta_tags.append(f'<meta property="og:url" content="{page_url}">')
@@ -4190,14 +4325,38 @@ async def handle_nft_card(request: Any) -> Any:
     body_image = (
         f'<img src="{esc_image}" alt="{esc_title}" style="max-width:100%;">' if image_url else ""
     )
+    if config.SHARE_FORWARD_URL:
+        # Human click-through: JS-only forward into the webapp. The crawler
+        # doesn't execute JS, so the per-NFT card tags above still render;
+        # an HTTP redirect here would card the destination instead. The
+        # validated ref rides along so the webapp can stash it (#41 follow-on).
+        _sep = "&" if "?" in config.SHARE_FORWARD_URL else "?"
+        forward_url = config.SHARE_FORWARD_URL + (f"{_sep}ref={ref_wallet}" if ref_wallet else "")
+        esc_forward = escape(forward_url, quote=True)
+        js_forward = json.dumps(forward_url).replace("/", "\\/")
+        body_html = (
+            '<div style="min-height:100vh;display:flex;flex-direction:column;'
+            "align-items:center;justify-content:center;background:#0b0b12;"
+            'color:#fff;font-family:sans-serif;text-align:center;margin:0;">'
+            + f"<h1>{esc_title}</h1>"
+            + f'<p><a href="{esc_forward}" style="color:#9ecbff;">'
+            + "Open Let&#x27;s Effing Go &#x2192;</a></p>"
+            + f'<p><a href="{esc_bithomp}" style="color:#666;">View on Bithomp</a></p>'
+            + "</div>"
+            + f"<script>location.replace({js_forward});</script>"
+        )
+    else:
+        body_html = (
+            f"<h1>{esc_title}</h1>"
+            + body_image
+            + f"<p>{esc_description}</p>"
+            + f'<p><a href="{esc_bithomp}">View on Bithomp</a></p>'
+        )
     html_doc = (
         "<!doctype html><html><head>"
         + "".join(meta_tags)
         + "</head><body>"
-        + f"<h1>{esc_title}</h1>"
-        + body_image
-        + f"<p>{esc_description}</p>"
-        + f'<p><a href="{esc_bithomp}">View on Bithomp</a></p>'
+        + body_html
         + "</body></html>"
     )
     return web.Response(text=html_doc, content_type="text/html")
@@ -4574,6 +4733,7 @@ def create_app() -> web.Application:
     # below: aiohttp dispatches routes in registration order, and a static
     # mount at the root could otherwise intercept a path segment that also
     # exists as a file.
+    app.router.add_get("/nft/{number}/card.png", handle_nft_card_png)
     app.router.add_get("/nft/{number}", handle_nft_card)
     app.router.add_post("/api/token", handle_token)
     app.router.add_post("/api/session", handle_session)
