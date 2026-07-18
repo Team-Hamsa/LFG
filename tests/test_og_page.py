@@ -498,9 +498,7 @@ def test_forward_appends_valid_ref_and_logs_click(tmp_path, monkeypatch, _isolat
 def test_forward_url_with_query_uses_ampersand(tmp_path, monkeypatch, _isolate_app_db):
     # A SHARE_FORWARD_URL that already carries a query string must get ref
     # joined with & (not a second ?), or the URL is malformed for most parsers.
-    monkeypatch.setattr(
-        server.config, "SHARE_FORWARD_URL", "https://build.example?utm_source=x"
-    )
+    monkeypatch.setattr(server.config, "SHARE_FORWARD_URL", "https://build.example?utm_source=x")
     _seed_basic(tmp_path, monkeypatch)
     body = _run(
         server.handle_nft_card(_req(42, query=f"ref={_REF}", headers={"User-Agent": "Mozilla/5.0"}))
