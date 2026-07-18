@@ -18,7 +18,21 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 import asyncio  # noqa: E402
 import time  # noqa: E402
 
-from lfg_core import bulk_mint_flow  # noqa: E402
+import pytest  # noqa: E402
+
+from lfg_core import bulk_mint_flow, headroom, supply  # noqa: E402
+
+
+@pytest.fixture(autouse=True)
+def _headroom_env(tmp_path, monkeypatch):
+    """#226: clamp_to_headroom now takes a real reservation in the per-network
+    app DB (and _fulfill_unit reads/retires it) — isolate the store to tmp
+    and pin the index-backed supply at 0 so no test touches repo DBs."""
+    monkeypatch.setattr(
+        bulk_mint_flow.db_path, "app_db_path", lambda net=None: str(tmp_path / "app.db")
+    )
+    monkeypatch.setattr(supply, "current_supply", lambda net: 0)
+    monkeypatch.setattr(headroom.nft_index, "index_db_path", lambda net: str(tmp_path / "idx.db"))
 
 
 def _async_counter(start=0):
@@ -43,6 +57,11 @@ def _paid_job(tmp_path, monkeypatch, state):
     j.units = [bulk_mint_flow.Unit(index=i) for i in range(3)]
     j.pay_with, j.pay_amount, j.unit_price = "XRP", "30", "10"
     j.state = state
+    # #226: a live job holds a headroom reservation for its pending units —
+    # in production either clamp_to_headroom (fresh job) or the startup
+    # rebuild (resumed job) provides it; hand-built jobs must too, or the
+    # reservation-aware per-unit gate converts every unit to a credit.
+    headroom.try_reserve(str(tmp_path / "app.db"), f"bulk:{j.id}", 3, j.network)
     return j
 
 
@@ -76,8 +95,6 @@ def test_delete_record(tmp_path, monkeypatch):
 
 def test_resume_skips_done_units_no_double_mint(tmp_path, monkeypatch):
     monkeypatch.setattr(bulk_mint_flow, "JOBS_DIR", str(tmp_path))
-    monkeypatch.setattr(bulk_mint_flow.supply, "current_supply", lambda net: 0)
-    monkeypatch.setattr(bulk_mint_flow.supply, "remaining_headroom", lambda net: 100)
 
     calls = {"mint": 0, "wait": 0}
 
@@ -126,8 +143,6 @@ def test_resume_minted_unit_is_reoffered_not_reminted(tmp_path, monkeypatch):
     window between the on-chain mint and offer creation) must NEVER be
     re-minted on resume. Resume should only re-attempt the offer."""
     monkeypatch.setattr(bulk_mint_flow, "JOBS_DIR", str(tmp_path))
-    monkeypatch.setattr(bulk_mint_flow.supply, "current_supply", lambda net: 0)
-    monkeypatch.setattr(bulk_mint_flow.supply, "remaining_headroom", lambda net: 100)
 
     calls = {"mint": 0, "offer": 0}
 
@@ -187,8 +202,6 @@ def test_on_mint_callback_persists_minted_before_offer_step(tmp_path, monkeypatc
     persisted record must already show MINTED with the real nft_id — never
     PENDING — so a crash-restart can't re-mint a second edition."""
     monkeypatch.setattr(bulk_mint_flow, "JOBS_DIR", str(tmp_path))
-    monkeypatch.setattr(bulk_mint_flow.supply, "current_supply", lambda net: 0)
-    monkeypatch.setattr(bulk_mint_flow.supply, "remaining_headroom", lambda net: 100)
 
     persisted_states = []
 
@@ -419,8 +432,6 @@ def test_persist_failure_during_fulfillment_never_remints_or_aborts(tmp_path, mo
     job keeps delivering on in-memory state — exactly one mint per pending
     unit, no exception, no terminal DONE while the record can't be written."""
     monkeypatch.setattr(bulk_mint_flow, "JOBS_DIR", str(tmp_path))
-    monkeypatch.setattr(bulk_mint_flow.supply, "current_supply", lambda net: 0)
-    monkeypatch.setattr(bulk_mint_flow.supply, "remaining_headroom", lambda net: 100)
 
     calls = {"mint": 0}
 
@@ -543,7 +554,6 @@ def test_resumed_awaiting_payment_honours_preclaimed_payment(tmp_path, monkeypat
     payment (tx-hash dedup). Resume must reconcile via the job's exact
     claimant tag and fulfill — never terminalize PAYMENT_TIMEOUT and keep
     the money."""
-    monkeypatch.setattr(bulk_mint_flow.supply, "current_supply", lambda net: 0)
 
     captured = {}
 
@@ -652,7 +662,6 @@ def test_persist_failure_pauses_before_next_unit(tmp_path, monkeypatch):
     (non-terminal, resumable) before starting the NEXT unit instead of
     delivering every remaining unit off a stale disk record."""
     j = _paid_job(tmp_path, monkeypatch, bulk_mint_flow.FULFILLING)  # 3 units
-    monkeypatch.setattr(bulk_mint_flow.supply, "current_supply", lambda net: 0)
     monkeypatch.setattr(bulk_mint_flow, "_PERSIST_RETRY_DELAY_SECONDS", 0)
 
     calls = {"mint": 0}
@@ -706,7 +715,6 @@ def test_indeterminate_reconciliation_never_terminalizes(tmp_path, monkeypatch):
     """A failed claim-ledger read during resume reconciliation proves nothing:
     the job must stay awaiting_payment (resumable) — never payment_timeout."""
     monkeypatch.setattr(bulk_mint_flow, "JOBS_DIR", str(tmp_path))
-    monkeypatch.setattr(bulk_mint_flow.supply, "current_supply", lambda net: 0)
 
     async def _wait(**kw):
         return False  # re-watch misses (dedup or nothing landed)

@@ -24,11 +24,25 @@ CREATE TABLE IF NOT EXISTS share_clicks (
 )
 """
 
+# The two most likely future analytics read patterns: by edition ("which NFTs
+# get the most shares?") and by sharer ("which wallets drive clicks?"). Declared
+# up front so those queries never full-scan once the log grows.
+_INDEXES = (
+    "CREATE INDEX IF NOT EXISTS sc_nft ON share_clicks(nft_number)",
+    "CREATE INDEX IF NOT EXISTS sc_ref ON share_clicks(ref_wallet)",
+)
+
+
+def _ensure_schema(conn: sqlite3.Connection) -> None:
+    conn.execute(_SCHEMA)
+    for idx in _INDEXES:
+        conn.execute(idx)
+
 
 def init_db(db_file: str) -> None:
     conn = sqlite3.connect(db_file)
     try:
-        conn.execute(_SCHEMA)
+        _ensure_schema(conn)
         conn.commit()
     finally:
         conn.close()
@@ -37,10 +51,12 @@ def init_db(db_file: str) -> None:
 def record_click(
     db_file: str, nft_number: int, ref_wallet: str | None, is_bot: bool, user_agent: str
 ) -> bool:
+    # One connection does both the (idempotent) schema ensure and the INSERT —
+    # halves the per-click open cost and closes the window between two opens.
     try:
-        init_db(db_file)
         conn = sqlite3.connect(db_file)
         try:
+            _ensure_schema(conn)
             conn.execute(
                 "INSERT INTO share_clicks (nft_number, ref_wallet, is_bot, user_agent)"
                 " VALUES (?, ?, ?, ?)",

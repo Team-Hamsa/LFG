@@ -241,6 +241,94 @@ def test_nft_card_lfg_row_fallback_when_index_lacks_image_and_traits(tmp_path, m
     assert "bithomp.com/en/nft/FFF" in body
 
 
+def test_nft_card_falls_back_to_http_lfg_image_when_onchain_is_ipfs(tmp_path, monkeypatch):
+    """#41 fix: legacy mainnet editions carry ipfs:// URIs in their on-chain
+    metadata. X's crawler can't fetch ipfs://, so an onchain-image-first card
+    must skip the unfetchable ipfs:// value and fall back to the LFG row's
+    http(s) image_url rather than emitting a dead twitter:image."""
+    monkeypatch.setattr(server.config, "PUBLIC_SHARE_BASE_URL", "")
+    _seed_onchain(
+        tmp_path,
+        monkeypatch,
+        [_onchain("GGG", 44, image="ipfs://bafybeigdyrzt/44.png", attrs=[])],
+    )
+    monkeypatch.setattr(
+        server,
+        "get_nft_data",
+        lambda n: {
+            "nft_number": 44,
+            "nft_id": "GGG",
+            "image_url": "https://cdn.example/44.png",
+            "traits": {},
+        },
+    )
+
+    resp = _run(server.handle_nft_card(_req(44)))
+
+    assert resp.status == 200
+    body = resp.text
+    assert 'name="twitter:image" content="https://cdn.example/44.png"' in body
+    assert "ipfs://" not in body
+
+
+def test_nft_card_prefers_onchain_http_image_over_lfg_row(tmp_path, monkeypatch):
+    """Pins existing behavior: when the on-chain image IS a fetchable
+    http(s) URL, it still wins over the LFG row (stale-swap correctness)."""
+    monkeypatch.setattr(server.config, "PUBLIC_SHARE_BASE_URL", "")
+    _seed_onchain(
+        tmp_path,
+        monkeypatch,
+        [_onchain("HHH", 45, image="https://cdn.example/45-postswap.png", attrs=[])],
+    )
+    monkeypatch.setattr(
+        server,
+        "get_nft_data",
+        lambda n: {
+            "nft_number": 45,
+            "nft_id": "HHH",
+            "image_url": "https://cdn.example/45-preswap.png",
+            "traits": {},
+        },
+    )
+
+    resp = _run(server.handle_nft_card(_req(45)))
+
+    assert resp.status == 200
+    body = resp.text
+    assert 'name="twitter:image" content="https://cdn.example/45-postswap.png"' in body
+    assert "45-preswap.png" not in body
+
+
+def test_nft_card_omits_image_tags_when_neither_source_is_http(tmp_path, monkeypatch):
+    """Both onchain and LFG-row images non-http(s) (or absent) -> the image
+    tags are omitted entirely (the existing no-image code path), and the
+    page still renders 200 rather than emitting an unfetchable URL."""
+    monkeypatch.setattr(server.config, "PUBLIC_SHARE_BASE_URL", "")
+    _seed_onchain(
+        tmp_path,
+        monkeypatch,
+        [_onchain("III", 46, image="ipfs://bafybeigdyrzt/46.png", attrs=[])],
+    )
+    monkeypatch.setattr(
+        server,
+        "get_nft_data",
+        lambda n: {
+            "nft_number": 46,
+            "nft_id": "III",
+            "image_url": None,
+            "traits": {},
+        },
+    )
+
+    resp = _run(server.handle_nft_card(_req(46)))
+
+    assert resp.status == 200
+    body = resp.text
+    assert "twitter:image" not in body
+    assert "og:image" not in body
+    assert "ipfs://" not in body
+
+
 def test_nft_card_escapes_image_url(tmp_path, monkeypatch):
     monkeypatch.setattr(server.config, "PUBLIC_SHARE_BASE_URL", "")
     dirty_url = 'https://cdn.example/42.png?x="quote"&y=amp'
@@ -405,6 +493,19 @@ def test_forward_appends_valid_ref_and_logs_click(tmp_path, monkeypatch, _isolat
         .fetchone()
     )
     assert row == (42, _REF, 0)
+
+
+def test_forward_url_with_query_uses_ampersand(tmp_path, monkeypatch, _isolate_app_db):
+    # A SHARE_FORWARD_URL that already carries a query string must get ref
+    # joined with & (not a second ?), or the URL is malformed for most parsers.
+    monkeypatch.setattr(
+        server.config, "SHARE_FORWARD_URL", "https://build.example?utm_source=x"
+    )
+    _seed_basic(tmp_path, monkeypatch)
+    body = _run(
+        server.handle_nft_card(_req(42, query=f"ref={_REF}", headers={"User-Agent": "Mozilla/5.0"}))
+    ).text
+    assert f'location.replace("https:\\/\\/build.example?utm_source=x&ref={_REF}")' in body
 
 
 def test_invalid_ref_ignored_not_echoed(tmp_path, monkeypatch, _isolate_app_db):

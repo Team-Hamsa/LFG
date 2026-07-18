@@ -28,8 +28,18 @@ import pytest  # noqa: E402
 from aiohttp import web  # noqa: E402
 from aiohttp.test_utils import make_mocked_request  # noqa: E402
 
-from lfg_core import mint_flow  # noqa: E402
+from lfg_core import headroom, mint_flow, supply  # noqa: E402
 from lfg_service import app as server  # noqa: E402
+
+
+@pytest.fixture(autouse=True)
+def _headroom_env(tmp_path, monkeypatch):
+    """#226: handle_mint_start now takes a 1-unit headroom reservation in the
+    per-network app DB — isolate the store to tmp and pin the index-backed
+    supply at 0 so no test touches repo DBs."""
+    monkeypatch.setattr(server.db_path, "app_db_path", lambda net=None: str(tmp_path / "app.db"))
+    monkeypatch.setattr(supply, "current_supply", lambda net: 0)
+    monkeypatch.setattr(headroom.nft_index, "index_db_path", lambda net: str(tmp_path / "idx.db"))
 
 
 def _run(coro):
@@ -231,6 +241,83 @@ def test_mint_start_cancel_during_prepare_with_payload_never_launches(dev_auth, 
     assert session.state == mint_flow.CANCELLED
     assert session.task is None  # the watch was never launched
     assert events == []
+
+
+# --- #226: single mints reserve headroom (previously checked no cap at all) --
+
+
+def test_mint_start_collection_full_409(dev_auth, monkeypatch, tmp_path):
+    """A full collection (try_reserve grants 0 — including the fail-closed
+    store-error path) must 409 collection_full like bulk, mark the session
+    terminal (frees the one-active-session slot), and launch no task."""
+    monkeypatch.setattr(supply, "current_supply", lambda net: server.config.MAX_COLLECTION_SIZE)
+
+    resp = _run(server.handle_mint_start(_post_start_request()))
+    assert resp.status == 409
+    body = _run(_read_json(resp))
+    assert body["error"] == "collection_full"
+    (session,) = dev_auth.values()
+    assert session.state == mint_flow.FAILED
+    assert session.task is None
+    assert server._active_session(dev_auth, mint_flow.TERMINAL_STATES, "dev", "discord") is None
+    # Nothing was reserved for the refused session.
+    assert headroom.outstanding(str(tmp_path / "app.db")) == 0
+
+
+def test_mint_start_fail_fast_releases_reservation(dev_auth, monkeypatch, tmp_path):
+    """The #262 fail-fast path (payload never created, no task spawned) must
+    settle the 1-unit reservation the handler took — otherwise every XUMM
+    outage would leak a unit of headroom until the next restart."""
+    monkeypatch.setattr(mint_flow.MintSession, "prepare_payment", _prepare_static_link_only)
+    monkeypatch.setattr(server.xumm_ops, "rate_limited", lambda: True)
+    _record_publishes(monkeypatch)
+
+    resp = _run(server.handle_mint_start(_post_start_request()))
+    assert resp.status == 503
+    (session,) = dev_auth.values()
+    assert session.headroom_reserved is False
+    assert headroom.outstanding(str(tmp_path / "app.db")) == 0
+
+
+def test_mint_start_cancel_during_reserve_releases_headroom(dev_auth, monkeypatch, tmp_path):
+    """#226 review: a cancel landing during the handler's awaited try_reserve
+    (BEFORE headroom_reserved=True is set) makes cancel()'s own settle a
+    pre-flag no-op — the pre-launch terminal-branch settle in
+    handle_mint_start is then the ONLY release for the reservation. Without
+    it, this interleaving leaks exactly one headroom unit until the next
+    restart's rebuild. (Extending the cancel-during-prepare test would NOT
+    pin this: there cancel fires after the flag is set, so cancel's own
+    settle covers it.)"""
+    real_try_reserve = headroom.try_reserve
+
+    def cancelling_try_reserve(db, claimant, qty, network):
+        granted = real_try_reserve(db, claimant, qty, network)
+        # Simulate handle_mint_cancel landing during the to_thread await,
+        # i.e. before the handler sets headroom_reserved = True.
+        (session,) = dev_auth.values()
+        assert session.headroom_reserved is False
+        assert session.cancel()  # its settle_headroom is a pre-flag no-op
+        session.mark_published()
+        return granted
+
+    monkeypatch.setattr(server.headroom, "try_reserve", cancelling_try_reserve)
+
+    async def payload_created(self):
+        # XUMM created the payload fine -> skips the payment_uuid-None settle;
+        # only the state-terminal pre-launch branch remains to release.
+        self.pay_with, self.pay_amount = "XRP", "10"
+        self.payment_link = "https://xumm.app/sign/u1"
+        self.payment_uuid = "u1"
+
+    monkeypatch.setattr(mint_flow.MintSession, "prepare_payment", payload_created)
+
+    resp = _run(server.handle_mint_start(_post_start_request()))
+    assert resp.status == 200  # terminal session reported, no error shape
+    (session,) = dev_auth.values()
+    assert session.state == mint_flow.CANCELLED
+    assert session.task is None  # the watch was never launched
+    assert session.headroom_reserved is False
+    assert headroom.outstanding(str(tmp_path / "app.db")) == 0
 
 
 def test_run_mint_session_refuses_terminal_entry(monkeypatch):
