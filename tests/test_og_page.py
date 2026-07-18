@@ -656,6 +656,84 @@ def test_card_png_disallowed_art_url_302(tmp_path, monkeypatch):
     assert resp.headers["Location"] == "https://evil.example/x.png"
 
 
+def test_card_png_falls_back_to_http_lfg_image_when_onchain_is_ipfs(tmp_path, monkeypatch):
+    """06ffa0b fix mirrored into the PNG endpoint: an ipfs:// on-chain image
+    must not be used as the redirect/cache-key target when a fetchable
+    http(s) LFG-row image_url is available."""
+    card_dir = tmp_path / "cards"
+    monkeypatch.setattr(server, "_SHARE_CARD_DIR", str(card_dir))
+    monkeypatch.setattr(server.config, "IMG_PROXY_ALLOWED_BASES", ("https://cdn.example",))
+    _seed_onchain(
+        tmp_path,
+        monkeypatch,
+        [_onchain("AAA", 42, image="ipfs://bafybeigdyrzt/42.png", attrs=[])],
+    )
+    monkeypatch.setattr(
+        server,
+        "get_nft_data",
+        lambda n: {
+            "nft_number": 42,
+            "nft_id": "AAA",
+            "image_url": "https://cdn.example/img.png",
+            "traits": {},
+        },
+    )
+    cached = server._share_card_path(42, "https://cdn.example/img.png")
+    cached.parent.mkdir(parents=True, exist_ok=True)
+    cached.write_bytes(b"\x89PNG-cached")
+
+    resp = _run(server.handle_nft_card_png(_card_req(42)))
+
+    assert resp.status == 200
+    assert resp.body == b"\x89PNG-cached"
+
+
+def test_card_png_ipfs_only_edition_404s(tmp_path, monkeypatch):
+    """Neither the on-chain image nor the LFG-row fallback is fetchable ->
+    404, never a 302 Location pointing at an ipfs:// URI."""
+    _seed_onchain(
+        tmp_path,
+        monkeypatch,
+        [_onchain("AAA", 42, image="ipfs://bafybeigdyrzt/42.png", attrs=[])],
+    )
+    monkeypatch.setattr(
+        server,
+        "get_nft_data",
+        lambda n: {"nft_number": 42, "nft_id": "AAA", "image_url": None, "traits": {}},
+    )
+
+    resp = _run(server.handle_nft_card_png(_card_req(42)))
+
+    assert resp.status == 404
+
+
+def test_card_page_omits_image_tags_when_enabled_and_ipfs_only(tmp_path, monkeypatch):
+    """06ffa0b + card-switch interaction: with rendering enabled and a public
+    base configured, an ipfs-only edition (no fetchable art at all) must
+    still omit the image tags entirely rather than advertising a card.png
+    URL that would 404 -- the card-URL switch must not override the
+    no-fetchable-image omission."""
+    monkeypatch.setattr(server.config, "SHARE_CARD_RENDER_ENABLED", True)
+    monkeypatch.setattr(server.config, "PUBLIC_SHARE_BASE_URL", "https://share.example")
+    _seed_onchain(
+        tmp_path,
+        monkeypatch,
+        [_onchain("AAA", 46, image="ipfs://bafybeigdyrzt/46.png", attrs=[])],
+    )
+    monkeypatch.setattr(
+        server,
+        "get_nft_data",
+        lambda n: {"nft_number": 46, "nft_id": "AAA", "image_url": None, "traits": {}},
+    )
+
+    body = _run(server.handle_nft_card(_req(46))).text
+
+    assert "twitter:image" not in body
+    assert "og:image" not in body
+    assert "card.png" not in body
+    assert "ipfs://" not in body
+
+
 def test_card_page_image_tags_switch_when_enabled(tmp_path, monkeypatch):
     monkeypatch.setattr(server.config, "SHARE_CARD_RENDER_ENABLED", True)
     monkeypatch.setattr(server.config, "PUBLIC_SHARE_BASE_URL", "https://share.example")

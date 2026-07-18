@@ -4144,7 +4144,9 @@ async def handle_nft_card_png(request: Any) -> Any:
         conn.close()
     if onchain is None:
         return web.HTTPNotFound()
-    image_url = onchain.image or (lfg_row or {}).get("image_url") or ""
+    image_url = _og_fetchable_image_url(onchain.image) or _og_fetchable_image_url(
+        (lfg_row or {}).get("image_url")
+    )
     if not image_url:
         return web.HTTPNotFound()
 
@@ -4258,7 +4260,7 @@ async def handle_nft_card(request: Any) -> Any:
     esc_image = escape(image_url, quote=True)
     esc_bithomp = escape(bithomp_url, quote=True)
     card_png_url = _share_card_url(number)
-    tag_image = card_png_url or image_url
+    tag_image = (card_png_url if image_url else "") or image_url
     esc_tag_image = escape(tag_image, quote=True)
 
     meta_tags = [
