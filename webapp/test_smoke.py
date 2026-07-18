@@ -326,6 +326,8 @@ def test_get_payload_status(monkeypatch):
         "opened": True,
         "signed": True,
         "expired": False,
+        "cancelled": False,
+        "resolved": False,
         "account": "rSigner",
         "txid": None,
         # #135: the push token XUMM issues on a signed payload; None here since

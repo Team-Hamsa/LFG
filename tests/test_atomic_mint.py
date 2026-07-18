@@ -47,6 +47,7 @@ class FakeAtomicDeps:
         }
         self.status = None
         self.verified = None
+        self.verify_error = None
         self.current = 90
         self.ledger_ticket_values = [7]
         self.released_tickets = []
@@ -105,6 +106,8 @@ class FakeAtomicDeps:
 
     async def verify_batch(self, session):
         self.events.append("verify-batch")
+        if self.verify_error is not None:
+            raise self.verify_error
         return self.verified
 
     async def current_ledger(self):
@@ -285,6 +288,7 @@ async def test_reconcile_releases_ticket_only_after_lls_and_ledger_presence(acti
     action_deps.current = 101
     await atomic_mint.reconcile_session(session, action_deps.deps())
     assert action_deps.released_tickets == [7]
+    assert session.ticket_sequence is None
     assert "settle-headroom-False" in action_deps.events
 
 
@@ -299,3 +303,31 @@ async def test_reconcile_quarantines_consumed_ticket_without_verified_batch(acti
     await atomic_mint.reconcile_session(session, action_deps.deps())
     assert session.state == atomic_mint.INDETERMINATE
     assert action_deps.quarantined_tickets == [7]
+
+
+@pytest.mark.asyncio
+async def test_reconcile_quarantines_after_outer_lookup_failure(action_deps):
+    session = _session()
+    await atomic_mint.prepare_session(session, action_deps.deps())
+    session.state = atomic_mint.CONFIRMING
+    session.outer_hash = "OUTER"
+    action_deps.current = 101
+    action_deps.verify_error = RuntimeError("RPC unavailable")
+    await atomic_mint.reconcile_session(session, action_deps.deps())
+    assert session.state == atomic_mint.INDETERMINATE
+    assert session.error_code == "outcome_indeterminate"
+    assert action_deps.quarantined_tickets == [7]
+
+
+@pytest.mark.asyncio
+async def test_reconcile_validated_batch_resumes_settlement(action_deps):
+    session = _session()
+    await atomic_mint.prepare_session(session, action_deps.deps())
+    session.state = atomic_mint.CONFIRMING
+    session.outer_hash = "OUTER"
+    action_deps.verified = xrpl_actions.VerifiedAtomicMint("NFT1", 500)
+    await atomic_mint.reconcile_session(session, action_deps.deps())
+    assert session.state == atomic_mint.DONE
+    assert session.nft_id == "NFT1"
+    assert "record-mint" in action_deps.events
+    assert "consume-ticket" in action_deps.events

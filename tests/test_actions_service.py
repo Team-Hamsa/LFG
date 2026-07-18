@@ -4,6 +4,7 @@ from unittest.mock import AsyncMock
 import pytest
 from aiohttp import web
 from aiohttp.test_utils import make_mocked_request
+from xrpl.models import IssuedCurrencyAmount
 
 from lfg_core import atomic_mint, xrpl_actions
 from lfg_service import app as server
@@ -238,3 +239,69 @@ async def test_status_hides_foreign_session_as_not_found():
     response = await server.handle_action_status(request)
     assert response.status == 404
 
+
+def test_persisted_action_round_trip_restores_fixed_transaction():
+    session = atomic_mint.AtomicMintSession.new(
+        user_id="dev",
+        wallet=server.mock_economy.DEV_OWNER,
+        platform="discord",
+        network="testnet",
+        campaign="x-mint-link",
+    )
+    session.state = atomic_mint.AWAITING_SIGNATURE
+    session.payment = xrpl_actions.MintPayment(
+        "LFGO",
+        "1",
+        "rrrrrrrrrrrrrrrrrrrrrhoLvTp",
+        IssuedCurrencyAmount(
+            currency="4C46474F00000000000000000000000000000000",
+            issuer="rrrrrrrrrrrrrrrrrrrrrhoLvTp",
+            value="1",
+        ),
+    )
+    session.pay_with = "LFGO"
+    session.pay_amount = "1"
+    session.ticket_sequence = 77
+    session.offer_id = "OFFER"
+    session.batch_json = {
+        "TransactionType": "Batch",
+        "Account": session.wallet,
+    }
+    session.inner_hashes = ("PAY", "MINT", "ACCEPT")
+    session.last_ledger_sequence = 500
+    session.xumm_uuid = "u1"
+    session.xumm_url = "https://xumm.app/sign/u1"
+    session.headroom_reserved = True
+    session.assets_prepared = True
+    server._write_atomic_session(session)
+
+    (restored,) = server._load_atomic_sessions()
+    assert restored.id == session.id
+    assert restored.batch_json == session.batch_json
+    assert restored.inner_hashes == session.inner_hashes
+    assert restored.ticket_sequence == 77
+    assert isinstance(restored.payment.amount, IssuedCurrencyAmount)
+    assert restored.payment.amount.value == "1"
+    assert restored.xumm_url == session.xumm_url
+    assert restored.headroom_reserved is True
+    assert restored.assets_prepared is True
+
+
+@pytest.mark.asyncio
+async def test_startup_loads_and_schedules_reconciliation(monkeypatch):
+    session = atomic_mint.AtomicMintSession.new(
+        user_id="dev",
+        wallet=server.mock_economy.DEV_OWNER,
+        platform="discord",
+        network="testnet",
+    )
+    scheduled = []
+    monkeypatch.setattr(server, "_load_atomic_sessions", lambda: [session])
+    monkeypatch.setattr(
+        server,
+        "_schedule_atomic_reconciliation",
+        lambda value: scheduled.append(value.id),
+    )
+    await server._start_atomic_resume(web.Application())
+    assert server.atomic_mint_sessions[session.id] is session
+    assert scheduled == [session.id]

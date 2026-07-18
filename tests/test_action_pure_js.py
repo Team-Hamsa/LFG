@@ -95,4 +95,3 @@ def test_pages_workflow_publishes_and_rewrites_action_discovery():
     assert "cp -r webapp/client/. _site/" in workflow
     assert "_site/.well-known/xrpl-actions.json" in workflow
     assert "WEB_API_BASE" in workflow
-

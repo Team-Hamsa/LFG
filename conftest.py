@@ -13,7 +13,9 @@
 # testnet ECONOMY_NETWORK would be exactly that illegal split — so pin both
 # networks to testnet here too, giving the suite a coherent enabled+matching
 # posture. (setdefault, so explicit shell exports still win.)
+import asyncio
 import os
+import warnings
 
 # Hermetic throwaway values for modules that import the shared config during
 # fixture setup. Individual config tests can still override them explicitly;
@@ -44,6 +46,39 @@ from pathlib import Path
 
 import pytest
 from _pytest.monkeypatch import MonkeyPatch
+
+_LEGACY_TEST_LOOPS: list[asyncio.AbstractEventLoop] = []
+
+
+@pytest.fixture(autouse=True)
+def _legacy_sync_test_event_loop(request: pytest.FixtureRequest) -> None:
+    """Keep pre-asyncio.run sync tests working after pytest async tests.
+
+    Python 3.13 raises from get_event_loop() once an isolated pytest-asyncio
+    loop has been closed. A number of older synchronous tests intentionally
+    drive one coroutine with get_event_loop().run_until_complete(). Give only
+    those unmarked sync tests a current loop; pytest-asyncio continues to own
+    every @pytest.mark.asyncio test loop.
+    """
+
+    if request.node.get_closest_marker("asyncio") is not None:
+        return
+    try:
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore", DeprecationWarning)
+            asyncio.get_event_loop()
+    except RuntimeError:
+        loop = asyncio.new_event_loop()
+        asyncio.set_event_loop(loop)
+        _LEGACY_TEST_LOOPS.append(loop)
+
+
+@pytest.fixture(scope="session", autouse=True)
+def _close_legacy_sync_test_event_loops() -> None:
+    yield
+    for loop in _LEGACY_TEST_LOOPS:
+        if not loop.is_closed():
+            loop.close()
 
 
 @pytest.fixture(autouse=True)
