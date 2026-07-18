@@ -369,6 +369,42 @@ async def test_prepare_autofills_validates_and_adds_one_issuer_signer(monkeypatc
     ]
 
 
+@pytest.mark.asyncio
+async def test_prepare_uses_configured_last_ledger_offset(monkeypatch):
+    captured = {}
+    filled = _filled_test_batch()
+
+    async def fake_latest(client):
+        return 410
+
+    async def fake_autofill(batch, client, signers_count):
+        captured["last_ledger_sequence"] = batch.last_ledger_sequence
+        return filled
+
+    monkeypatch.setattr(
+        xrpl_actions, "get_latest_validated_ledger_sequence", fake_latest
+    )
+    monkeypatch.setattr(xrpl_actions, "autofill", fake_autofill)
+    await xrpl_actions.prepare_atomic_mint_batch(
+        client=object(),
+        wallet=Wallet.from_seed("sEdTM1uX8pu2do5XvTnutH6HsouMaM2"),
+        buyer=ACCOUNT,
+        issuer_account=ISSUER_ACCOUNT,
+        nft_issuer=NFT_ISSUER,
+        issuer_ticket=9001,
+        metadata_url=METADATA_URL,
+        payment=_payment(),
+        platform="webapp",
+        campaign="x-mint-link",
+        nft_flags=9,
+        nft_taxon=0,
+        transfer_fee=7000,
+        source_tag=SOURCE_TAG,
+        last_ledger_offset=90,
+    )
+    assert captured["last_ledger_sequence"] == 500
+
+
 def _validated_batch_rows(**overrides):
     rows = {
         "OUTER": {

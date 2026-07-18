@@ -270,6 +270,18 @@ async def _allocate_nft_number() -> int:
         return number
 
 
+async def allocate_nft_number() -> int:
+    """Reserve the next edition number for a non-legacy mint orchestrator."""
+
+    return await _allocate_nft_number()
+
+
+def release_reserved_nft_number(number: int) -> None:
+    """Release an edition reservation that provably never reached XRPL."""
+
+    _reserved_numbers.discard(number)
+
+
 def _release_unused_number(session: MintSession) -> None:
     """Release a reserved number when the session fails before anything was
     minted on-chain with it. Numbers that reached the chain stay reserved

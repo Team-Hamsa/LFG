@@ -30,11 +30,19 @@ from urllib.parse import urlparse
 
 import aiohttp
 from aiohttp import web
+from xrpl.asyncio.clients import AsyncJsonRpcClient
+from xrpl.clients import JsonRpcClient
 from xrpl.core.addresscodec import is_valid_classic_address
+from xrpl.models import IssuedCurrencyAmount
+from xrpl.models.requests import Ledger
+from xrpl.utils import xrp_to_drops
+from xrpl.wallet import Wallet
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from lfg_core import (
+    action_store,
+    atomic_mint,
     brix_payment,
     bulk_mint_flow,
     closet_token,
@@ -60,6 +68,7 @@ from lfg_core import (
     swap_flow,
     swap_meta,
     trait_config,
+    xrpl_actions,
     xrpl_ops,
     xumm_ops,
 )
@@ -105,6 +114,13 @@ _shop_session_created: dict[str, float] = {}
 # deliberately non-terminal (see bulk_mint_flow.TERMINAL_STATES) so a live job
 # stays visible to /api/mint/bulk/active and the startup resume sweep.
 bulk_sessions: dict[str, Any] = {}
+# Payment-first XRPL Action sessions. Unlike legacy mint sessions these rows
+# are mirrored in SQLite because an issuer Ticket and a fixed Batch can outlive
+# this process and must be reconciled before either is reused.
+atomic_mint_sessions: dict[str, atomic_mint.AtomicMintSession] = {}
+_atomic_mint_tasks: dict[str, asyncio.Task[None]] = {}
+_atomic_mint_locks: dict[str, asyncio.Lock] = {}
+_action_create_hits: dict[str, list[float]] = {}
 SESSION_RETENTION = 3600  # keep terminal sessions briefly for late polls
 
 BUS = InMemoryEventBus()
@@ -2843,6 +2859,769 @@ async def handle_register(request):
     return web.json_response(resp)
 
 
+def _atomic_payment_json(
+    payment: xrpl_actions.MintPayment | None,
+) -> dict[str, Any] | None:
+    if payment is None:
+        return None
+    amount: str | dict[str, Any]
+    if isinstance(payment.amount, IssuedCurrencyAmount):
+        amount = payment.amount.to_dict()
+    else:
+        amount = payment.amount
+    return {
+        "pay_with": payment.pay_with,
+        "display_amount": payment.display_amount,
+        "destination": payment.destination,
+        "amount": amount,
+    }
+
+
+def _write_atomic_session(session: atomic_mint.AtomicMintSession) -> None:
+    conn = sqlite3.connect(db_path.app_db_path(session.network))
+    try:
+        row = action_store.get_session(conn, session.id)
+        if row is None:
+            action_store.create_session(
+                conn,
+                session_id=session.id,
+                account=session.wallet,
+                user_id=session.user_id,
+                platform=session.platform,
+                network=session.network,
+                state=session.state,
+                campaign=session.campaign,
+                created_ts=session.created_at,
+            )
+        action_store.update_session(
+            conn,
+            session.id,
+            now_ts=int(time.time()),
+            state=session.state,
+            campaign=session.campaign,
+            pay_with=session.pay_with,
+            pay_amount=session.pay_amount,
+            payment_json=_atomic_payment_json(session.payment),
+            nft_number=session.nft_number,
+            metadata_url=session.metadata_url,
+            image_url=session.image_url,
+            video_url=session.video_url,
+            traits_json=session.traits,
+            body_type=session.body_type,
+            ticket_sequence=session.ticket_sequence,
+            offer_id=session.offer_id,
+            batch_json=session.batch_json,
+            outer_hash=session.outer_hash,
+            inner_hashes_json=list(session.inner_hashes)
+            if session.inner_hashes
+            else None,
+            xumm_uuid=session.xumm_uuid,
+            xumm_url=session.xumm_url,
+            qr_url=session.qr_url,
+            last_ledger_sequence=session.last_ledger_sequence,
+            ledger_index=session.ledger_index,
+            nft_id=session.nft_id,
+            error_code=session.error_code,
+            headroom_reserved=int(session.headroom_reserved),
+            assets_prepared=int(session.assets_prepared),
+        )
+    finally:
+        conn.close()
+
+
+async def _persist_atomic_session(
+    session: atomic_mint.AtomicMintSession,
+) -> None:
+    await asyncio.to_thread(_write_atomic_session, session)
+
+
+def _atomic_session_from_row(row: dict[str, Any]) -> atomic_mint.AtomicMintSession:
+    session = atomic_mint.AtomicMintSession(
+        id=row["session_id"],
+        user_id=row["user_id"],
+        wallet=row["account"],
+        platform=row["platform"],
+        network=row["network"],
+        campaign=row.get("campaign"),
+        state=row["state"],
+        created_at=row["created_ts"],
+    )
+    for attr, column in (
+        ("pay_with", "pay_with"),
+        ("pay_amount", "pay_amount"),
+        ("nft_number", "nft_number"),
+        ("metadata_url", "metadata_url"),
+        ("image_url", "image_url"),
+        ("video_url", "video_url"),
+        ("traits", "traits_json"),
+        ("body_type", "body_type"),
+        ("ticket_sequence", "ticket_sequence"),
+        ("offer_id", "offer_id"),
+        ("batch_json", "batch_json"),
+        ("outer_hash", "outer_hash"),
+        ("xumm_uuid", "xumm_uuid"),
+        ("xumm_url", "xumm_url"),
+        ("qr_url", "qr_url"),
+        ("last_ledger_sequence", "last_ledger_sequence"),
+        ("ledger_index", "ledger_index"),
+        ("nft_id", "nft_id"),
+        ("error_code", "error_code"),
+    ):
+        setattr(session, attr, row.get(column))
+    hashes = row.get("inner_hashes_json")
+    if isinstance(hashes, list) and len(hashes) == 3:
+        session.inner_hashes = (str(hashes[0]), str(hashes[1]), str(hashes[2]))
+    payment = row.get("payment_json")
+    if isinstance(payment, dict):
+        amount_data = payment.get("amount")
+        amount = (
+            IssuedCurrencyAmount.from_dict(amount_data)
+            if isinstance(amount_data, dict)
+            else str(amount_data)
+        )
+        session.payment = xrpl_actions.MintPayment(
+            payment["pay_with"],
+            str(payment["display_amount"]),
+            str(payment["destination"]),
+            amount,
+        )
+    session.headroom_reserved = bool(row.get("headroom_reserved"))
+    session.assets_prepared = bool(row.get("assets_prepared"))
+    return session
+
+
+def _load_atomic_sessions() -> list[atomic_mint.AtomicMintSession]:
+    conn = sqlite3.connect(db_path.app_db_path(config.XRPL_NETWORK))
+    try:
+        exists = conn.execute(
+            "SELECT 1 FROM sqlite_master WHERE type='table'"
+            " AND name='xrpl_action_sessions'"
+        ).fetchone()
+        if not exists:
+            return []
+        return [
+            _atomic_session_from_row(row)
+            for row in action_store.list_reconcilable_sessions(conn)
+        ]
+    finally:
+        conn.close()
+
+
+async def _action_readiness() -> xrpl_actions.BatchCapability:
+    client = JsonRpcClient(config.JSON_RPC_URL)
+    try:
+        capability = await xrpl_actions.fetch_batch_capability(
+            client, configured=config.XRPL_ACTIONS_BATCH_ENABLED
+        )
+    except Exception:
+        logging.warning("XRPL Action capability lookup failed", exc_info=True)
+        return xrpl_actions.BatchCapability(False, "batch_unavailable")
+    if not capability.enabled:
+        return capability
+    try:
+        tickets = await xrpl_actions.list_ticket_sequences(
+            client, config.SIGNING_ACCOUNT
+        )
+    except Exception:
+        logging.warning("XRPL Action Ticket lookup failed", exc_info=True)
+        return xrpl_actions.BatchCapability(False, "ticket_unavailable")
+    conn = sqlite3.connect(db_path.app_db_path(config.XRPL_NETWORK))
+    try:
+        leased = action_store.leased_ticket_sequences(
+            conn, config.XRPL_NETWORK, config.SIGNING_ACCOUNT
+        )
+    except Exception:
+        logging.warning("XRPL Action Ticket lease lookup failed", exc_info=True)
+        return xrpl_actions.BatchCapability(False, "ticket_unavailable")
+    finally:
+        conn.close()
+    if not set(tickets).difference(leased):
+        return xrpl_actions.BatchCapability(False, "ticket_unavailable")
+    return capability
+
+
+def _active_atomic_session(
+    user: dict[str, Any], wallet: str
+) -> atomic_mint.AtomicMintSession | None:
+    return next(
+        (
+            session
+            for session in atomic_mint_sessions.values()
+            if session.user_id == user["id"]
+            and session.platform == _platform(user)
+            and session.wallet == wallet
+            and session.state not in atomic_mint.TERMINAL_STATES
+        ),
+        None,
+    )
+
+
+def _owns_atomic_session(
+    session: atomic_mint.AtomicMintSession,
+    user: dict[str, Any],
+    wallet: str,
+) -> bool:
+    return (
+        session.user_id == user["id"]
+        and session.platform == _platform(user)
+        and session.wallet == wallet
+    )
+
+
+def _allow_action_create(wallet: str) -> bool:
+    now = time.monotonic()
+    hits = [value for value in _action_create_hits.get(wallet, []) if now - value < 60]
+    if len(hits) >= config.XRPL_ACTIONS_CREATE_LIMIT:
+        _action_create_hits[wallet] = hits
+        return False
+    hits.append(now)
+    _action_create_hits[wallet] = hits
+    return True
+
+
+async def _choose_atomic_payment(wallet: str) -> xrpl_actions.MintPayment:
+    balance = await xrpl_ops.get_trustline_balance(
+        wallet, config.TOKEN_CURRENCY_HEX, config.TOKEN_ISSUER_ADDRESS
+    )
+    if balance is not None and balance >= Decimal(config.MINT_PRICE_LFGO):
+        return xrpl_actions.MintPayment(
+            "LFGO",
+            config.MINT_PRICE_LFGO,
+            config.TOKEN_ISSUER_ADDRESS,
+            IssuedCurrencyAmount(
+                currency=config.TOKEN_CURRENCY_HEX,
+                issuer=config.TOKEN_ISSUER_ADDRESS,
+                value=config.MINT_PRICE_LFGO,
+            ),
+        )
+    return xrpl_actions.MintPayment(
+        "XRP",
+        config.MINT_PRICE_XRP,
+        xrpl_ops.bot_wallet_address(),
+        str(xrp_to_drops(Decimal(config.MINT_PRICE_XRP))),
+    )
+
+
+async def _current_validated_ledger() -> int:
+    client = JsonRpcClient(config.JSON_RPC_URL)
+    response = await asyncio.to_thread(
+        client.request, Ledger(ledger_index="validated")
+    )
+    result = response.result if isinstance(response.result, dict) else {}
+    ledger = result.get("ledger")
+    value = (
+        ledger.get("ledger_index")
+        if isinstance(ledger, dict)
+        else result.get("ledger_index")
+    )
+    if isinstance(value, str) and value.isdigit():
+        value = int(value)
+    if not isinstance(value, int) or isinstance(value, bool):
+        raise RuntimeError("validated ledger response missing ledger_index")
+    return value
+
+
+def _atomic_dependencies() -> atomic_mint.AtomicMintDeps:
+    async def reserve_headroom(session: atomic_mint.AtomicMintSession) -> bool:
+        granted = await asyncio.to_thread(
+            headroom.try_reserve,
+            db_path.app_db_path(session.network),
+            f"action:{session.id}",
+            1,
+            session.network,
+        )
+        return granted == 1
+
+    async def prepare_assets(number: int, tag: str) -> mint_flow.PreparedMintAssets:
+        return await mint_flow.prepare_mint_assets(
+            nft_number=number, session_tag=tag
+        )
+
+    async def list_tickets() -> list[int]:
+        return await xrpl_actions.list_ticket_sequences(
+            JsonRpcClient(config.JSON_RPC_URL), config.SIGNING_ACCOUNT
+        )
+
+    async def lease_ticket(
+        session: atomic_mint.AtomicMintSession, tickets: list[int]
+    ) -> int | None:
+        def lease() -> int | None:
+            conn = sqlite3.connect(db_path.app_db_path(session.network))
+            try:
+                return action_store.lease_ticket(
+                    conn,
+                    session.network,
+                    config.SIGNING_ACCOUNT,
+                    tickets,
+                    session.id,
+                    int(time.time()),
+                )
+            finally:
+                conn.close()
+
+        return await asyncio.to_thread(lease)
+
+    async def prepare_batch(
+        session: atomic_mint.AtomicMintSession,
+        assets: mint_flow.PreparedMintAssets,
+        payment: xrpl_actions.MintPayment,
+    ) -> xrpl_actions.PreparedBatch:
+        if session.ticket_sequence is None:
+            raise RuntimeError("atomic mint has no leased issuer Ticket")
+        return await xrpl_actions.prepare_atomic_mint_batch(
+            client=AsyncJsonRpcClient(config.JSON_RPC_URL),
+            wallet=Wallet.from_seed(config.SEED),
+            buyer=session.wallet,
+            issuer_account=config.SIGNING_ACCOUNT,
+            nft_issuer=config.SWAP_ISSUER_ADDRESS,
+            issuer_ticket=session.ticket_sequence,
+            metadata_url=assets.metadata_url,
+            payment=payment,
+            platform=memos.platform_for_surface(session.platform),
+            campaign=session.campaign,
+            nft_flags=config.NFT_FLAGS,
+            nft_taxon=config.NFT_TAXON,
+            transfer_fee=config.NFT_TRANSFER_FEE,
+            source_tag=config.SOURCE_TAG,
+            last_ledger_offset=config.XRPL_ACTIONS_LAST_LEDGER_OFFSET,
+        )
+
+    async def create_payload(
+        session: atomic_mint.AtomicMintSession,
+    ) -> dict[str, Any] | None:
+        if session.batch_json is None:
+            raise RuntimeError("atomic mint Batch was not persisted")
+        return await xumm_ops.create_batch_payload(
+            session.batch_json,
+            signer=session.wallet,
+            return_url=session.return_url,
+            user_token=session.push_user_token,
+        )
+
+    async def verify_batch(
+        session: atomic_mint.AtomicMintSession,
+    ) -> xrpl_actions.VerifiedAtomicMint | None:
+        if (
+            not session.outer_hash
+            or not session.inner_hashes
+            or not session.offer_id
+        ):
+            return None
+        return await xrpl_actions.verify_atomic_batch_result(
+            outer_hash=session.outer_hash,
+            inner_hashes=session.inner_hashes,
+            expected_offer_id=session.offer_id,
+            fetch_tx=xrpl_ops.get_tx,
+        )
+
+    async def record_mint(
+        session: atomic_mint.AtomicMintSession, nft_id: str
+    ) -> bool:
+        if (
+            session.nft_number is None
+            or not session.metadata_url
+            or not session.image_url
+            or session.traits is None
+            or not session.body_type
+        ):
+            raise RuntimeError("persisted atomic mint assets are incomplete")
+        attributes = [
+            {
+                "trait_type": "Head" if key == "Hat" else key,
+                "value": value,
+            }
+            for key, value in session.traits.items()
+        ]
+        metadata: dict[str, Any] = {
+            "name": f"{config.NFT_COLLECTION_NAME} #{session.nft_number}",
+            "image": session.image_url,
+            "edition": session.nft_number,
+            "attributes": attributes,
+        }
+        if session.video_url:
+            metadata["video"] = session.video_url
+        prepared = mint_flow.PreparedMintAssets(
+            nft_number=session.nft_number,
+            session_tag=f"action:{session.id}",
+            metadata_url=session.metadata_url,
+            image_url=session.image_url,
+            video_url=session.video_url,
+            metadata=metadata,
+            traits=session.traits,
+            body_type=session.body_type,
+        )
+        saved = await mint_flow.record_validated_mint(
+            prepared,
+            nft_id=nft_id,
+            wallet_address=session.wallet,
+            user_id=session.user_id,
+            network=session.network,
+        )
+        session.assets_prepared = False
+        return saved
+
+    async def buy_and_burn(session: atomic_mint.AtomicMintSession) -> None:
+        await xrpl_ops.buy_and_burn(
+            config.TOKEN_CURRENCY_HEX,
+            config.TOKEN_ISSUER_ADDRESS,
+            config.MINT_PRICE_LFGO,
+            max_xrp=session.pay_amount or config.MINT_PRICE_XRP,
+        )
+
+    async def settle_headroom(
+        session: atomic_mint.AtomicMintSession, minted: bool
+    ) -> None:
+        claimant = f"action:{session.id}"
+        database = db_path.app_db_path(session.network)
+        if minted:
+            if not session.nft_id:
+                raise RuntimeError("cannot retire headroom without an NFTokenID")
+            ok = await asyncio.to_thread(
+                headroom.retire_to_pending, database, claimant, session.nft_id
+            )
+        else:
+            ok = await asyncio.to_thread(headroom.release, database, claimant)
+        if not ok:
+            raise RuntimeError("atomic mint headroom settlement failed")
+
+    async def discard_assets(session: atomic_mint.AtomicMintSession) -> None:
+        if session.nft_number is not None:
+            await asyncio.to_thread(
+                image_archive.discard_still,
+                session.network,
+                session.nft_number,
+                f"action:{session.id}",
+            )
+
+    async def release_number(session: atomic_mint.AtomicMintSession) -> None:
+        if session.nft_number is not None and session.nft_id is None:
+            mint_flow.release_reserved_nft_number(session.nft_number)
+
+    async def update_ticket(
+        session: atomic_mint.AtomicMintSession, state: str
+    ) -> None:
+        ticket = session.ticket_sequence
+        if ticket is None:
+            return
+
+        def mark() -> None:
+            conn = sqlite3.connect(db_path.app_db_path(session.network))
+            try:
+                action_store.mark_ticket(
+                    conn,
+                    session.network,
+                    config.SIGNING_ACCOUNT,
+                    ticket,
+                    state=state,
+                    last_ledger_sequence=session.last_ledger_sequence,
+                    outer_hash=session.outer_hash,
+                )
+            finally:
+                conn.close()
+
+        await asyncio.to_thread(mark)
+
+    async def release_ticket(session: atomic_mint.AtomicMintSession) -> bool:
+        ticket = session.ticket_sequence
+        if ticket is None:
+            return False
+
+        def release() -> bool:
+            conn = sqlite3.connect(db_path.app_db_path(session.network))
+            try:
+                return action_store.release_ticket(
+                    conn,
+                    session.network,
+                    config.SIGNING_ACCOUNT,
+                    ticket,
+                )
+            finally:
+                conn.close()
+
+        return await asyncio.to_thread(release)
+
+    return atomic_mint.AtomicMintDeps(
+        capability=_action_readiness,
+        choose_payment=_choose_atomic_payment,
+        reserve_headroom=reserve_headroom,
+        allocate_number=mint_flow.allocate_nft_number,
+        prepare_assets=prepare_assets,
+        list_tickets=list_tickets,
+        lease_ticket=lease_ticket,
+        prepare_batch=prepare_batch,
+        persist=_persist_atomic_session,
+        create_payload=create_payload,
+        payload_status=xumm_ops.get_payload_status,
+        verify_batch=verify_batch,
+        current_ledger=_current_validated_ledger,
+        ledger_tickets=list_tickets,
+        record_mint=record_mint,
+        buy_and_burn=buy_and_burn,
+        settle_headroom=settle_headroom,
+        discard_assets=discard_assets,
+        release_number=release_number,
+        release_ticket=release_ticket,
+        consume_ticket=lambda session: update_ticket(session, "consumed"),
+        quarantine_ticket=lambda session: update_ticket(session, "quarantined"),
+    )
+
+
+async def _publish_atomic_terminal(
+    session: atomic_mint.AtomicMintSession,
+) -> None:
+    try:
+        await publish_terminal(
+            session,
+            "mint",
+            wallet=session.wallet,
+            user_id=session.user_id,
+            platform=session.platform,
+            image_url=session.image_url,
+            video_url=session.video_url,
+            success_states={atomic_mint.DONE},
+            fail_states=atomic_mint.TERMINAL_STATES - {atomic_mint.DONE},
+        )
+    except Exception:
+        logging.exception(
+            "atomic mint terminal publish failed for session %s", session.id
+        )
+
+
+async def _persist_atomic_issued_token(
+    session: atomic_mint.AtomicMintSession,
+) -> None:
+    if not session.issued_user_token:
+        return
+    token = session.issued_user_token
+    session.issued_user_token = None
+    try:
+        await asyncio.to_thread(
+            identity_store.set_user_token,
+            session.platform,
+            session.user_id,
+            token,
+        )
+    except Exception:
+        session.issued_user_token = token
+        logging.exception("atomic mint push-token persistence failed")
+
+
+async def _refresh_atomic_mint(
+    session: atomic_mint.AtomicMintSession,
+) -> None:
+    lock = _atomic_mint_locks.setdefault(session.id, asyncio.Lock())
+    async with lock:
+        await atomic_mint.refresh_session(session, _atomic_dependencies())
+    await _persist_atomic_issued_token(session)
+    await _publish_atomic_terminal(session)
+
+
+async def _monitor_atomic_mint(
+    session: atomic_mint.AtomicMintSession, *, prepare: bool
+) -> None:
+    deps = _atomic_dependencies()
+    try:
+        if prepare:
+            await atomic_mint.prepare_session(session, deps)
+        while True:
+            lock = _atomic_mint_locks.setdefault(session.id, asyncio.Lock())
+            async with lock:
+                if session.state in (
+                    atomic_mint.AWAITING_SIGNATURE,
+                    atomic_mint.CONFIRMING,
+                ):
+                    await atomic_mint.refresh_session(session, deps)
+                if session.state == atomic_mint.PREPARING and not prepare:
+                    await atomic_mint.reconcile_session(session, deps)
+                elif (
+                    session.state != atomic_mint.DONE
+                    and session.ticket_sequence is not None
+                ):
+                    # Also reconcile apparently-live Xaman states against the
+                    # fixed LastLedgerSequence. A dead client or unavailable
+                    # payload-status API must not hold an issuer Ticket forever.
+                    await atomic_mint.reconcile_session(session, deps)
+            await _persist_atomic_issued_token(session)
+            await _publish_atomic_terminal(session)
+            if session.state in (atomic_mint.DONE, atomic_mint.INDETERMINATE):
+                return
+            if (
+                session.state in atomic_mint.TERMINAL_STATES
+                and session.ticket_sequence is None
+            ):
+                return
+            await asyncio.sleep(2)
+    except asyncio.CancelledError:
+        raise
+    except Exception:
+        logging.exception("atomic mint monitor failed for session %s", session.id)
+
+
+def _remember_atomic_task(
+    session: atomic_mint.AtomicMintSession, task: asyncio.Task[None]
+) -> None:
+    _atomic_mint_tasks[session.id] = task
+
+    def forget(done: asyncio.Task[None]) -> None:
+        if _atomic_mint_tasks.get(session.id) is done:
+            _atomic_mint_tasks.pop(session.id, None)
+
+    task.add_done_callback(forget)
+
+
+def _schedule_atomic_mint(session: atomic_mint.AtomicMintSession) -> None:
+    task = asyncio.create_task(_monitor_atomic_mint(session, prepare=True))
+    _remember_atomic_task(session, task)
+
+
+def _schedule_atomic_reconciliation(
+    session: atomic_mint.AtomicMintSession,
+) -> None:
+    task = asyncio.create_task(_monitor_atomic_mint(session, prepare=False))
+    _remember_atomic_task(session, task)
+
+
+async def _start_atomic_resume(app: web.Application) -> None:
+    try:
+        sessions = await asyncio.to_thread(_load_atomic_sessions)
+        for session in sessions:
+            atomic_mint_sessions[session.id] = session
+            _schedule_atomic_reconciliation(session)
+    except Exception:
+        logging.exception("atomic mint resume sweep failed at startup")
+
+
+async def _stop_atomic_tasks(app: web.Application) -> None:
+    tasks = list(_atomic_mint_tasks.values())
+    for task in tasks:
+        task.cancel()
+    if tasks:
+        await asyncio.gather(*tasks, return_exceptions=True)
+    _atomic_mint_tasks.clear()
+    _atomic_mint_locks.clear()
+
+
+async def handle_actions_discovery(request: web.Request) -> web.Response:
+    return web.json_response(
+        {
+            "version": "1",
+            "rules": [
+                {
+                    "pathPattern": "/actions/**",
+                    "apiPath": "/api/actions/**",
+                }
+            ],
+        }
+    )
+
+
+async def handle_action_metadata(request: web.Request) -> web.Response:
+    capability = await _action_readiness()
+    body: dict[str, Any] = {
+        "type": "xrpl-action",
+        "version": "1",
+        "chain": f"xrpl:{config.XRPL_NETWORK}",
+        "icon": f"{config.EXTERNAL_WEBSITE_URL.rstrip('/')}/assets/mascot.png",
+        "title": "Mint an LFG",
+        "description": "Pay, mint, and receive your NFT atomically.",
+        "label": "Mint",
+        "transactionTypes": [
+            "Payment",
+            "NFTokenMint",
+            "NFTokenAcceptOffer",
+        ],
+        "requirements": {
+            "amendments": ["NFTokenMintOffer", "BatchV1_1"],
+            "wallet": "xaman",
+        },
+        "enabled": capability.enabled,
+        "links": {
+            "actions": [{"label": "Mint", "href": "/api/actions/mint"}]
+        },
+    }
+    if capability.reason:
+        body["unavailableReason"] = capability.reason
+    return web.json_response(body)
+
+
+@require_wallet  # type: ignore[untyped-decorator]
+async def handle_action_create(request: web.Request) -> web.Response:
+    try:
+        body = await request.json()
+    except Exception:
+        return web.json_response({"code": "invalid_request"}, status=400)
+    if not isinstance(body, dict):
+        return web.json_response({"code": "invalid_request"}, status=400)
+    if body.get("account") != request["wallet"]:
+        return web.json_response({"code": "wallet_mismatch"}, status=403)
+    campaign = body.get("campaign")
+    if campaign not in (None, "x-mint-link"):
+        return web.json_response({"code": "invalid_campaign"}, status=400)
+    capability = await _action_readiness()
+    if not capability.enabled:
+        return web.json_response(
+            {"code": capability.reason or "action_unavailable"}, status=503
+        )
+    return_url = xumm_ops.discord_return_url(
+        body.get("guild_id"), body.get("channel_id")
+    )
+    push_user_token = await _push_token(request["user"])
+    active = _active_atomic_session(request["user"], request["wallet"])
+    if active:
+        return web.json_response(
+            {"code": "mint_in_progress", "session": active.to_dict()},
+            status=409,
+        )
+    if not _allow_action_create(request["wallet"]):
+        return web.json_response({"code": "rate_limited"}, status=429)
+    session = atomic_mint.AtomicMintSession.new(
+        user_id=request["user"]["id"],
+        wallet=request["wallet"],
+        platform=_platform(request["user"]),
+        network=config.XRPL_NETWORK,
+        campaign=campaign,
+    )
+    session.return_url = return_url
+    session.push_user_token = push_user_token
+    atomic_mint_sessions[session.id] = session
+    try:
+        await _persist_atomic_session(session)
+    except Exception:
+        atomic_mint_sessions.pop(session.id, None)
+        logging.exception("could not durably create atomic mint session")
+        return web.json_response({"code": "storage_unavailable"}, status=503)
+    _schedule_atomic_mint(session)
+    return web.json_response(
+        {
+            "type": "xrpl-action-session",
+            "version": "1",
+            "sessionId": session.id,
+            "state": session.state,
+            "status": f"/api/actions/mint/{session.id}",
+        },
+        status=202,
+    )
+
+
+@require_wallet  # type: ignore[untyped-decorator]
+async def handle_action_active(request: web.Request) -> web.Response:
+    session = _active_atomic_session(request["user"], request["wallet"])
+    return web.json_response(
+        {"session": session.to_dict() if session is not None else None}
+    )
+
+
+@require_wallet  # type: ignore[untyped-decorator]
+async def handle_action_status(request: web.Request) -> web.Response:
+    session = atomic_mint_sessions.get(request.match_info["session_id"])
+    if session is None or not _owns_atomic_session(
+        session, request["user"], request["wallet"]
+    ):
+        return web.json_response({"code": "not_found"}, status=404)
+    await _refresh_atomic_mint(session)
+    return web.json_response(session.to_dict())
+
+
 async def _request_return_url(request):
     """Optional XUMM return_url from the client's guild/channel context;
     bad/missing IDs simply mean no return button in Xaman (issue #14)."""
@@ -4508,6 +5287,16 @@ def create_app() -> web.Application:
     identity_store.migrate_users_to_identities()
     app.router.add_get("/api/config", handle_config)
     app.router.add_get("/api/health", handle_health)
+    app.router.add_get(
+        "/.well-known/xrpl-actions.json", handle_actions_discovery
+    )
+    app.router.add_get("/api/actions/mint", handle_action_metadata)
+    app.router.add_post("/api/actions/mint", handle_action_create)
+    # Static action paths must precede the session wildcard.
+    app.router.add_get("/api/actions/mint/active", handle_action_active)
+    app.router.add_get(
+        "/api/actions/mint/{session_id}", handle_action_status
+    )
     # Public OG/Twitter share card (#41 PR-3) — no /api prefix (it's a share
     # link, not an API call). Registered before add_static("/", CLIENT_DIR)
     # below: aiohttp dispatches routes in registration order, and a static
@@ -4584,6 +5373,8 @@ def create_app() -> web.Application:
     app.on_startup.append(_start_settlement_sweep)
     app.on_cleanup.append(_stop_settlement_sweep)
     app.on_startup.append(_start_bulk_resume)
+    app.on_startup.append(_start_atomic_resume)
+    app.on_cleanup.append(_stop_atomic_tasks)
     return app
 
 

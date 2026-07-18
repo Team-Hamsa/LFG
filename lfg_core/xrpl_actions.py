@@ -14,6 +14,7 @@ from collections.abc import Awaitable, Callable, Mapping
 from dataclasses import dataclass, replace
 from typing import Any, Literal
 
+from xrpl.asyncio.ledger import get_latest_validated_ledger_sequence
 from xrpl.asyncio.transaction import autofill
 from xrpl.clients import JsonRpcClient
 from xrpl.core import keypairs
@@ -395,6 +396,7 @@ async def prepare_atomic_mint_batch(
     nft_taxon: int,
     transfer_fee: int,
     source_tag: int,
+    last_ledger_offset: int | None = None,
 ) -> PreparedBatch:
     """Autofill, validate, and issuer-sign one fixed atomic mint Batch."""
 
@@ -412,6 +414,14 @@ async def prepare_atomic_mint_batch(
         transfer_fee=transfer_fee,
         source_tag=source_tag,
     )
+    if last_ledger_offset is not None:
+        if last_ledger_offset <= 0:
+            raise ValueError("last_ledger_offset must be greater than zero")
+        validated_ledger = await get_latest_validated_ledger_sequence(client)
+        draft = replace(
+            draft,
+            last_ledger_sequence=validated_ledger + last_ledger_offset,
+        )
     filled = await autofill(draft, client, signers_count=1)
     if not isinstance(filled, Batch):
         raise AtomicMintInvariantError("autofill returned a non-Batch transaction")

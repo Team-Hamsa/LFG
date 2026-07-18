@@ -57,6 +57,9 @@ class AtomicMintSession:
     error_code: str | None = None
     headroom_reserved: bool = False
     assets_prepared: bool = False
+    return_url: dict[str, str] | None = field(default=None, repr=False)
+    push_user_token: str | None = field(default=None, repr=False)
+    _published: bool = field(default=False, repr=False)
 
     @classmethod
     def new(
@@ -374,7 +377,9 @@ async def reconcile_session(
         await deps.persist(session)
         return
     if session.ticket_sequence in ledger_tickets:
-        await deps.release_ticket(session)
+        released = await deps.release_ticket(session)
+        if released:
+            session.ticket_sequence = None
         await _cleanup_unpublished(session, deps)
         if session.state not in (REJECTED, EXPIRED, FAILED):
             session.state = EXPIRED
