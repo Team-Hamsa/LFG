@@ -22,7 +22,7 @@
  */
 
 import { createRequire } from 'node:module';
-import { pathToFileURL, fileURLToPath } from 'node:url';
+import { fileURLToPath } from 'node:url';
 import { readFile } from 'node:fs/promises';
 import path from 'node:path';
 import { chromium } from 'playwright';
@@ -48,12 +48,19 @@ const FONT_FILES = {
   mono500: '@fontsource/jetbrains-mono/files/jetbrains-mono-latin-500-normal.woff2', // domain
 };
 
-function fontFaceCss() {
-  const url = (pkgPath) => pathToFileURL(require.resolve(pkgPath)).href;
+async function fontFaceCss() {
+  // Inline the woff2 files as base64 data URIs. file:// src URLs are blocked
+  // by Chromium for pages loaded via setContent (about:blank origin is not a
+  // file: origin), so the fonts silently never load and the card falls back
+  // to system fonts.
+  const url = async (pkgPath) => {
+    const b64 = (await readFile(require.resolve(pkgPath))).toString('base64');
+    return `data:font/woff2;base64,${b64}`;
+  };
   return `
-    @font-face{font-family:'Fredoka';font-weight:500;src:url('${url(FONT_FILES.fredoka500)}') format('woff2');font-display:block}
-    @font-face{font-family:'Fredoka';font-weight:700;src:url('${url(FONT_FILES.fredoka700)}') format('woff2');font-display:block}
-    @font-face{font-family:'JetBrains Mono';font-weight:500;src:url('${url(FONT_FILES.mono500)}') format('woff2');font-display:block}`;
+    @font-face{font-family:'Fredoka';font-weight:500;src:url('${await url(FONT_FILES.fredoka500)}') format('woff2');font-display:block}
+    @font-face{font-family:'Fredoka';font-weight:700;src:url('${await url(FONT_FILES.fredoka700)}') format('woff2');font-display:block}
+    @font-face{font-family:'JetBrains Mono';font-weight:500;src:url('${await url(FONT_FILES.mono500)}') format('woff2');font-display:block}`;
 }
 
 // ---- helpers ---------------------------------------------------------------
@@ -89,14 +96,14 @@ function escapeHtml(s) {
  * per-render inputs are the token id, the avatar, the logo, the domain, and
  * the tagline markup.
  */
-function buildHtml({ tokenId, avatarSrc, logoSrc, domain, taglineHtml, blue }) {
+async function buildHtml({ tokenId, avatarSrc, logoSrc, domain, taglineHtml, blue }) {
   const id = `#${escapeHtml(tokenId)}`;
   return `<!doctype html><html lang="en"><head><meta charset="utf-8"><style>
   :root{
     --yellow:#F0D848; --ink:#0A0A0A; --paper:#FFFFFF; --bg:#0A0A0A;
     --text:#F5F4F1; --muted:#9C9A94; --blue:${blue};
   }
-  ${fontFaceCss()}
+  ${await fontFaceCss()}
   *{box-sizing:border-box;margin:0;padding:0}
   html,body{width:${CARD_W}px;height:${CARD_H}px}
   .stage{width:${CARD_W}px;height:${CARD_H}px;overflow:hidden;position:relative;
@@ -183,7 +190,7 @@ export async function renderShareCard(opts) {
   if (!avatarSrc) throw new Error('renderShareCard: avatarSrc is required');
   if (!logoSrc) throw new Error('renderShareCard: logoSrc is required');
 
-  const html = buildHtml({
+  const html = await buildHtml({
     tokenId,
     avatarSrc: await toSrc(avatarSrc),
     logoSrc: await toSrc(logoSrc),
@@ -199,9 +206,16 @@ export async function renderShareCard(opts) {
       viewport: { width: CARD_W, height: CARD_H },
       deviceScaleFactor: SCALE,
     });
-    // `load` waits for the logo + avatar images; then wait for web fonts.
+    // `load` waits for the logo + avatar images; then force every @font-face
+    // to load. `document.fonts.ready` alone races: font loads start lazily at
+    // first paint, and with a heavy avatar data-URI the ready promise can
+    // resolve before any font request begins — the screenshot then captures
+    // fallback fonts (deterministically, per input size).
     await page.setContent(html, { waitUntil: 'load' });
-    await page.evaluate(() => document.fonts.ready);
+    await page.evaluate(async () => {
+      await Promise.all([...document.fonts].map((f) => f.load()));
+      await document.fonts.ready;
+    });
     await page.evaluate(() => window.__fit());
     const buf = await page.screenshot(outPath ? { path: outPath } : undefined);
     await page.close();
