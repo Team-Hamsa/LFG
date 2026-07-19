@@ -4142,6 +4142,15 @@ def _share_card_url(number: int) -> str:
     return f"{config.PUBLIC_SHARE_BASE_URL}/nft/{number}/card.png"
 
 
+def _render_env() -> dict[str, str]:
+    """Subprocess env for the node renderer. pm2 launches this service with
+    node-IPC vars (NODE_CHANNEL_FD + friends) in its environment; a child
+    `node` inheriting them tries to attach the nonexistent IPC channel and
+    dies at bootstrap, so every in-service render fails while the same
+    command works from any shell. Strip them."""
+    return {k: v for k, v in os.environ.items() if not k.startswith("NODE_CHANNEL")}
+
+
 async def _render_share_card(number: int, art_path: pathlib.Path, out_path: pathlib.Path) -> None:
     """Run the node renderer; raises on any failure (caller falls back)."""
     proc = await asyncio.create_subprocess_exec(
@@ -4155,6 +4164,7 @@ async def _render_share_card(number: int, art_path: pathlib.Path, out_path: path
         str(out_path),
         stdout=asyncio.subprocess.DEVNULL,
         stderr=asyncio.subprocess.PIPE,
+        env=_render_env(),
     )
     try:
         _, stderr = await asyncio.wait_for(proc.communicate(), timeout=_RENDER_TIMEOUT_S)

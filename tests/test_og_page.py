@@ -755,3 +755,13 @@ def test_card_page_image_tags_raw_when_disabled_or_no_base(tmp_path, monkeypatch
     monkeypatch.setattr(server.config, "PUBLIC_SHARE_BASE_URL", "")
     body = _run(server.handle_nft_card(_req(42))).text
     assert 'name="twitter:image" content="https://cdn.example/img.png"' in body
+
+
+def test_render_env_strips_pm2_node_ipc_vars(monkeypatch):
+    monkeypatch.setenv("NODE_CHANNEL_FD", "3")
+    monkeypatch.setenv("NODE_CHANNEL_SERIALIZATION_MODE", "json")
+    monkeypatch.setenv("PATH", "/usr/bin")
+    env = server._render_env()
+    assert "NODE_CHANNEL_FD" not in env
+    assert "NODE_CHANNEL_SERIALIZATION_MODE" not in env
+    assert env["PATH"] == "/usr/bin"
