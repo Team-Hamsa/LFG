@@ -146,14 +146,15 @@ async function buildHtml({ tokenId, avatarSrc, logoSrc, domain, taglineHtml, blu
   </div>
   <script>
     // Size the "#id" and the tagline to the column width so the logo, number,
-    // and tagline share one width + left edge. The id only ever SHRINKS (long
-    // ids like #10000 fit; short ids stay at the design size for consistency).
+    // and tagline share one width + left edge. Both scale in BOTH directions
+    // — a short id grows to fill the column flush with the logo, a long one
+    // (#10000) shrinks to fit.
     window.__fit = function(){
       var colW = ${COL_W};
       var id = document.querySelector('.id');
       id.style.fontSize=''; var ib=parseFloat(getComputedStyle(id).fontSize);
       var iw=id.getBoundingClientRect().width;
-      if(iw>colW) id.style.fontSize=(ib*colW/iw)+'px';
+      if(iw>0) id.style.fontSize=(ib*colW/iw)+'px';
       var tag = document.querySelector('.tag');
       tag.style.fontSize=''; var tb=parseFloat(getComputedStyle(tag).fontSize);
       var tw=tag.getBoundingClientRect().width;
