@@ -64,7 +64,7 @@ def test_share_button_routes_through_openexternal_not_raw_window_open():
 
 def test_mint_and_swap_share_text_present():
     src = _read_app_js()
-    assert "I just minted LFGO #" in src
+    assert "I just minted LFG #" in src
     assert "I just swapped traits on" in src
 
 

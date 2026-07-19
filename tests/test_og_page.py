@@ -125,8 +125,8 @@ def test_nft_card_known_edition_renders_meta_tags(tmp_path, monkeypatch):
     assert 'name="twitter:card" content="summary_large_image"' in body
     assert 'name="twitter:image" content="https://cdn.example/42.png"' in body
     assert 'property="og:image" content="https://cdn.example/42.png"' in body
-    assert 'property="og:title" content="LFGO #42"' in body
-    assert "<title>LFGO #42</title>" in body
+    assert 'property="og:title" content="LFG #42 · Tap to start building"' in body
+    assert "<title>LFG #42 · Tap to start building</title>" in body
     # og:description carries the trait summary (fixed slot order, no rarity dep)
     assert "Background: Nebula" in body
     assert "Body: Ape" in body
@@ -454,7 +454,7 @@ def test_forward_unset_keeps_legacy_body(tmp_path, monkeypatch):
     _seed_basic(tmp_path, monkeypatch)
     body = _run(server.handle_nft_card(_req(42))).text
     assert "location.replace" not in body
-    assert "<h1>LFGO #42</h1>" in body
+    assert "<h1>LFG #42 · Tap to start building</h1>" in body
 
 
 def test_forward_set_injects_js_redirect_and_keeps_meta(tmp_path, monkeypatch):
