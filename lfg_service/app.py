@@ -4302,7 +4302,9 @@ async def handle_nft_card(request: Any) -> Any:
         (lfg_row or {}).get("image_url")
     )
     nft_id = onchain.nft_id or (lfg_row or {}).get("nft_id") or ""
-    title = f"LFGO #{number}"
+    # X overlays this title as the white label on the bottom-left of the
+    # large-image card — it doubles as the click-through CTA.
+    title = f"LFG #{number} · Tap to start building"
     traits_summary = _og_traits_summary(lfg_row, onchain)
     description = traits_summary or f"{config.NFT_COLLECTION_NAME} #{number} on the XRPL."
     bithomp_url = _og_bithomp_url(nft_id)
