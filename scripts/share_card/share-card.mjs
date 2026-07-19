@@ -48,19 +48,24 @@ const FONT_FILES = {
   mono500: '@fontsource/jetbrains-mono/files/jetbrains-mono-latin-500-normal.woff2', // domain
 };
 
+let _fontFaceCss; // memo — the woff2 bytes never change within a process
+
 async function fontFaceCss() {
   // Inline the woff2 files as base64 data URIs. file:// src URLs are blocked
   // by Chromium for pages loaded via setContent (about:blank origin is not a
   // file: origin), so the fonts silently never load and the card falls back
-  // to system fonts.
+  // to system fonts. Memoised: batch renders reuse one browser AND one CSS.
+  if (_fontFaceCss) return _fontFaceCss;
   const url = async (pkgPath) => {
     const b64 = (await readFile(require.resolve(pkgPath))).toString('base64');
     return `data:font/woff2;base64,${b64}`;
   };
-  return `
+  const css = `
     @font-face{font-family:'Fredoka';font-weight:500;src:url('${await url(FONT_FILES.fredoka500)}') format('woff2');font-display:block}
     @font-face{font-family:'Fredoka';font-weight:700;src:url('${await url(FONT_FILES.fredoka700)}') format('woff2');font-display:block}
     @font-face{font-family:'JetBrains Mono';font-weight:500;src:url('${await url(FONT_FILES.mono500)}') format('woff2');font-display:block}`;
+  _fontFaceCss = css;
+  return css;
 }
 
 // ---- helpers ---------------------------------------------------------------
@@ -201,8 +206,9 @@ export async function renderShareCard(opts) {
 
   const ownBrowser = !browser;
   const b = browser || (await chromium.launch());
+  let page;
   try {
-    const page = await b.newPage({
+    page = await b.newPage({
       viewport: { width: CARD_W, height: CARD_H },
       deviceScaleFactor: SCALE,
     });
@@ -217,10 +223,11 @@ export async function renderShareCard(opts) {
       await document.fonts.ready;
     });
     await page.evaluate(() => window.__fit());
-    const buf = await page.screenshot(outPath ? { path: outPath } : undefined);
-    await page.close();
-    return buf;
+    return await page.screenshot(outPath ? { path: outPath } : undefined);
   } finally {
+    // Close the page even when a step above throws — with a caller-owned
+    // browser a leaked page would otherwise accumulate across renders.
+    if (page) await page.close().catch(() => {});
     if (ownBrowser) await b.close();
   }
 }
