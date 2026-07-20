@@ -397,3 +397,14 @@ def test_app_js_start_paths_set_live_qty():
     bulk = src.split("async function startBulkMint", 1)[1].split("\n}\n", 1)[0]
     assert "liveQty = 1" in single
     assert "liveQty = quantity" in bulk
+
+
+def test_setup_bulk_stepper_noops_when_flag_off():
+    """Flag off: setupBulkStepper returns before wiring any stepper handler, so
+    the pay page is exactly today's single-mint page."""
+    src = open(APP_JS).read()
+    body = src.split("function setupBulkStepper", 1)[1].split("\n}\n", 1)[0]
+    # The early return guards all stepper wiring.
+    ret_idx = body.index("if (!bulkCfg.enabled) return;")
+    wire_idx = body.index("flow-qty-minus")
+    assert ret_idx < wire_idx
