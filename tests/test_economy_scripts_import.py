@@ -30,6 +30,7 @@ sys.path.insert(0, os.path.join(REPO, "scripts"))
         "migrate_bucket_to_closet",
         "economy_extract",
         "economy_deposit",
+        "reconcile_supply_growth",
     ],
 )
 def test_cli_driver_exposes_main(mod_name):
