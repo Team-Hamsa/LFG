@@ -359,7 +359,7 @@ def test_app_js_qty_change_cancels_live_payload():
     body = src.split("function onQtyChange", 1)[1].split("\n}\n", 1)[0]
     assert "cancelLiveMintSilently" in body
     assert "needs-regen" in body  # highlights regenerate
-    assert "qr-stale" in body     # dims the QR
+    assert "qr-stale" in body  # dims the QR
 
 
 def test_app_js_cancel_silent_hits_both_endpoints_and_stops_polls():
@@ -367,8 +367,8 @@ def test_app_js_cancel_silent_hits_both_endpoints_and_stops_polls():
     body = src.split("async function cancelLiveMintSilently", 1)[1].split("\n}\n", 1)[0]
     assert "/api/mint/" in body and "/cancel" in body
     assert "/api/mint/bulk/" in body
-    assert "++pollGen" in body        # stop the single-mint poll chain
-    assert "++bulkPollGen" in body    # stop the bulk poll chain
+    assert "++pollGen" in body  # stop the single-mint poll chain
+    assert "++bulkPollGen" in body  # stop the bulk poll chain
     assert "liveQty = null" in body
 
 
