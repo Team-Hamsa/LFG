@@ -2417,10 +2417,12 @@ async function loadMarketBrowse({ append = false } = {}) {
     sort: el('market-sort').value,
     limit: MARKET_PAGE_SIZE,
     offset: append ? marketState.offset : 0,
-    // #131: known-broker external listings — read-only price discovery.
-    includeExternal: el('market-include-external').checked,
-    // #203: "listed by me" — server-side seller filter on my wallet.
-    seller: el('market-mine-only').checked && me && me.wallet ? me.wallet : '',
+    // #131/#203: read these controls defensively — a stale cached
+    // index.html paired with fresh app.js (Discord webview / browser cache
+    // skew) would otherwise throw here, before the try below, and blank the
+    // whole grid. Missing element -> the old default behavior.
+    includeExternal: Boolean(el('market-include-external')?.checked ?? true),
+    seller: el('market-mine-only')?.checked && me && me.wallet ? me.wallet : '',
   });
   const qs = new URLSearchParams();
   for (const [k, v] of pairs) qs.append(k, v);

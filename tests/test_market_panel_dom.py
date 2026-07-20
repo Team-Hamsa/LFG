@@ -134,7 +134,7 @@ def test_external_listing_wiring():
     html = _read("index.html")
     assert 'id="market-include-external"' in html
     js = _read("app.js")
-    assert "includeExternal: el('market-include-external').checked" in js
+    assert "el('market-include-external')?.checked" in js
     assert "market-card-external" in js
     assert "marketPure.externalLabel(vm)" in js
     # External cards never enter openBuyFlow; they link out (or explain).
@@ -163,7 +163,7 @@ def test_browse_ux_wiring():
     js = _read("app.js")
     assert "openListingDetail(row)" in js
     assert "loadMarketBrowse({ append: true })" in js
-    assert "el('market-mine-only').checked" in js
+    assert "el('market-mine-only')?.checked" in js
     assert "marketPure.rarityLabel(vm)" in js
     assert "/api/market/history?" in js
     css = _read("style.css")
