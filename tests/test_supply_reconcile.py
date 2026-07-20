@@ -125,16 +125,27 @@ def test_dry_run_reports_but_writes_nothing():
     assert es.read_supply_changes(conn) == []
 
 
-def test_duplicate_tokens_same_edition_write_one_row():
+def test_duplicate_tokens_same_edition_write_one_row_from_canonical_token():
+    # Canonical rule (mirrors dedupe_editions/nft_by_number): prefer the
+    # mutable token, tie-break on highest ledger_index — regardless of the
+    # nft_id sort order live_nfts happens to return.
     conn = _db()
     _freeze(conn, [1])
-    nft_index.upsert(conn, _token(9, nft_id="IDDUP1", mutable=False, ledger_index=10))
-    nft_index.upsert(conn, _token(9, nft_id="IDDUP2", mutable=True, ledger_index=20))
+    nft_index.upsert(
+        conn,
+        _token(9, nft_id="IDDUP1", mutable=False, ledger_index=99, attrs=_attrs(Head="Stale")),
+    )
+    nft_index.upsert(
+        conn,
+        _token(9, nft_id="IDDUP2", mutable=True, ledger_index=20, attrs=_attrs(Head="Canonical")),
+    )
 
     report = supply_reconcile.reconcile_growth(conn)
 
     assert report["written"] == [9]
-    assert len([r for r in es.read_supply_changes(conn) if r["edition"] == 9]) == 1
+    (row,) = [r for r in es.read_supply_changes(conn) if r["edition"] == 9]
+    assert row["trait_deltas"].get("Head|Canonical") == 1
+    assert "Head|Stale" not in row["trait_deltas"]
 
 
 def test_malformed_attribute_entries_are_skipped_not_raised():

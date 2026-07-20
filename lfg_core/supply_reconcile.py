@@ -29,17 +29,28 @@ def reconcile_growth(conn: sqlite3.Connection, *, dry_run: bool = False) -> dict
     written: list[int] = []
     skipped_unreadable: list[int] = []
     covered = set(genesis.edition_bodies)
+    # One canonical token per uncovered edition, by the same rule as
+    # dedupe_editions/nft_by_number: prefer mutable, tie-break on highest
+    # ledger_index — so duplicate tokens can't pick the deltas arbitrarily.
+    canonical: dict[int, nft_index.OnchainNft] = {}
     for rec in nft_index.live_nfts(conn):
         edition = rec.nft_number
         if edition is None or edition in covered:
             continue
+        prev = canonical.get(edition)
+        if prev is None or (
+            (1 if rec.mutable else 0, rec.ledger_index or 0)
+            > (1 if prev.mutable else 0, prev.ledger_index or 0)
+        ):
+            canonical[edition] = rec
+    for edition, rec in sorted(canonical.items()):
         try:
             body_value = swap_meta.get_attr(rec.attributes, "Body")
             deltas = {
                 f"{slot}|{trait_economy.slot_value(rec, slot)}": 1
                 for slot in trait_economy.NON_BODY_SLOTS
             }
-            body_class = swap_meta.detect_body(rec.attributes) or rec.body
+            body_class = swap_meta.detect_body(rec.attributes)
         except Exception:
             # Malformed stored attribute entries (e.g. missing keys) read as
             # unreadable — report, never guess, never abort the sweep.
