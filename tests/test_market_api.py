@@ -2400,7 +2400,9 @@ def test_browse_rows_carry_rarity_fields(onchain_env):
     common_row = by_offer["A" * 64]
     assert rare_row["rarity_rank"] == 1  # unique trait -> rarest collection-wide
     assert rare_row["rarity_score"] > common_row["rarity_score"]
-    assert common_row["rarity_rank"] in (2, 3)
+    # CHAR1 and CHAR3_UNLISTED carry identical trait sets (tied score); the
+    # nft_id tie-breaker makes CHAR1 (…001 < …003) deterministically rank 2.
+    assert common_row["rarity_rank"] == 2
 
 
 def test_browse_sort_rarity_desc(onchain_env):

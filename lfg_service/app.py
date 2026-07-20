@@ -911,6 +911,10 @@ def _attach_character_rarity(conn: sqlite3.Connection, rows: list[dict[str, Any]
     if not rows:
         return
     scored = leaderboard._nft_rarity(conn, conn, 0, 0, frozenset(), 10**9)
+    # Deterministic ranks: _nft_rarity sorts by score only, leaving tied
+    # scores in unordered SQLite result order — re-sort with nft_id as the
+    # tie-breaker so a cache rebuild can never shuffle equal-score ranks.
+    scored.sort(key=lambda s: (-s["value"], s["nft_id"]))
     by_id = {s["nft_id"]: (i + 1, s["value"]) for i, s in enumerate(scored)}
     for r in rows:
         rank_score = by_id.get(r["nft_id"])

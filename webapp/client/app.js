@@ -2280,9 +2280,17 @@ function renderMarketGrid(rows, { append = false } = {}) {
 
 // --- #203: per-listing detail overlay ---
 
+// a11y (#284 review): the element that opened the overlay, to restore focus
+// on close; and the listing the overlay is currently showing, so a slow
+// history fetch for an earlier listing can never paint into a newer one.
+let lastListingTrigger = null;
+let activeListingId = null;
+
 function closeListingDetail() {
   el('listing-overlay').hidden = true;
   el('listing-detail-action').onclick = null;
+  activeListingId = null;
+  if (lastListingTrigger) { lastListingTrigger.focus(); lastListingTrigger = null; }
 }
 
 function renderListingHistory(items) {
@@ -2303,6 +2311,9 @@ function renderListingHistory(items) {
 
 async function openListingDetail(row) {
   const vm = marketPure.mapListingRow(row);
+  const requestId = vm.offerIndex || vm.nftId;
+  activeListingId = requestId;
+  lastListingTrigger = document.activeElement;
   el('listing-detail-img').src = marketRowImgSrc(vm) || BLANK_IMG;
   el('listing-detail-title').textContent = vm.title;
   el('listing-detail-price').textContent = vm.priceLabel;
@@ -2335,13 +2346,16 @@ async function openListingDetail(row) {
   }
   renderListingHistory([]);
   el('listing-overlay').hidden = false;
+  el('listing-detail-close').focus();
   // History loads after the overlay opens — non-blocking, best-effort.
   try {
     const qs = vm.kind === 'trait'
       ? `slot=${encodeURIComponent(vm.slot)}&value=${encodeURIComponent(vm.value)}`
       : `nft_id=${encodeURIComponent(vm.nftId)}`;
     const data = await api(`/api/market/history?${qs}`);
-    if (!el('listing-overlay').hidden) renderListingHistory(data.events || data.sales || []);
+    if (!el('listing-overlay').hidden && activeListingId === requestId) {
+      renderListingHistory(data.events || data.sales || []);
+    }
   } catch (e) { /* history is decorative; the overlay stays useful without it */ }
 }
 
@@ -2919,6 +2933,9 @@ async function main() {
   el('market-load-more').onclick = () => loadMarketBrowse({ append: true });
   el('listing-detail-close').onclick = closeListingDetail;
   el('listing-overlay').onclick = (e) => { if (e.target === el('listing-overlay')) closeListingDetail(); };
+  document.addEventListener('keydown', (e) => {
+    if (e.key === 'Escape' && !el('listing-overlay').hidden) closeListingDetail();
+  });
   el('market-list-price').addEventListener('input', updateListFormRoyaltyPreview);
   el('market-list-confirm-btn').onclick = submitListForm;
   el('market-list-cancel-btn').onclick = () => showPanel('market-panel');
