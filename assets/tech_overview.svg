@@ -1,0 +1,98 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="900" height="480" viewBox="0 0 900 480" role="img" aria-label="LFG under the hood: five client surfaces on one aiohttp hub, ~4,100 live editions grown from 3,535, live on XRPL mainnet since July 10, every transaction signed in Xaman. Every mint burns LFGO via a dual path (holders pay 1 LFGO; everyone else pays XRP and the backend buys LFGO off the AMM and burns it). A declarative engine composites avatars with FFmpeg, Pillow and OpenCV. Trait swaps use NFTokenModify (XLS-46), the marketplace runs on native NFTokenOffers, and per-network SQLite databases index the ledger. Every mint gets a Share-on-X card that opens the PWA inside X's own browser.">
+  <!-- sticker shadow + card -->
+  <rect x="8" y="8" width="884" height="464" rx="18" fill="#0A0A0A"/>
+  <rect x="2" y="2" width="884" height="464" rx="18" fill="#181818" stroke="#FFFFFF" stroke-width="3"/>
+
+  <!-- header -->
+  <text x="29" y="38" font-family="-apple-system,'Segoe UI',Roboto,Helvetica,Arial,sans-serif" font-size="22" font-weight="900"><tspan fill="#F0D848">LFG</tspan><tspan fill="#F5F4F1"> under the hood</tspan></text>
+  <text x="871" y="36" text-anchor="end" font-family="-apple-system,'Segoe UI',Roboto,Helvetica,Arial,sans-serif" font-size="12" fill="#9C9A94">Python 3.10+ &#183; aiohttp &#183; discord.py &#183; xrpl-py &#183; XUMM SDK</text>
+
+  <!-- stat tiles -->
+  <rect x="29" y="56" width="200" height="66" rx="12" fill="#202020" stroke="#2C2C2C" stroke-width="1"/>
+  <rect x="45" y="68" width="30" height="5" rx="2.5" fill="#3DA35D"/>
+  <text x="45" y="98" font-family="-apple-system,'Segoe UI',Roboto,Helvetica,Arial,sans-serif" font-size="26" font-weight="800" fill="#3DA35D">5</text>
+  <text x="45" y="112" font-family="-apple-system,'Segoe UI',Roboto,Helvetica,Arial,sans-serif" font-size="11" fill="#9C9A94">surfaces &#183; one aiohttp hub</text>
+
+  <rect x="243" y="56" width="200" height="66" rx="12" fill="#202020" stroke="#2C2C2C" stroke-width="1"/>
+  <rect x="259" y="68" width="30" height="5" rx="2.5" fill="#F0D848"/>
+  <text x="259" y="98" font-family="-apple-system,'Segoe UI',Roboto,Helvetica,Arial,sans-serif" font-size="26" font-weight="800" fill="#F0D848">~4,100</text>
+  <text x="259" y="112" font-family="-apple-system,'Segoe UI',Roboto,Helvetica,Arial,sans-serif" font-size="11" fill="#9C9A94">live editions &#183; from 3,535</text>
+
+  <rect x="457" y="56" width="200" height="66" rx="12" fill="#202020" stroke="#2C2C2C" stroke-width="1"/>
+  <rect x="473" y="68" width="30" height="5" rx="2.5" fill="#D84830"/>
+  <text x="473" y="98" font-family="-apple-system,'Segoe UI',Roboto,Helvetica,Arial,sans-serif" font-size="26" font-weight="800" fill="#D84830">Jul 10</text>
+  <text x="473" y="112" font-family="-apple-system,'Segoe UI',Roboto,Helvetica,Arial,sans-serif" font-size="11" fill="#9C9A94">on mainnet &#183; traded daily</text>
+
+  <rect x="671" y="56" width="200" height="66" rx="12" fill="#202020" stroke="#2C2C2C" stroke-width="1"/>
+  <rect x="687" y="68" width="30" height="5" rx="2.5" fill="#D89030"/>
+  <text x="687" y="98" font-family="-apple-system,'Segoe UI',Roboto,Helvetica,Arial,sans-serif" font-size="26" font-weight="800" fill="#D89030">100%</text>
+  <text x="687" y="112" font-family="-apple-system,'Segoe UI',Roboto,Helvetica,Arial,sans-serif" font-size="11" fill="#9C9A94">of txs signed in Xaman</text>
+
+  <!-- STRIP 1: burn loop -->
+  <rect x="29" y="134" width="842" height="64" rx="12" fill="#202020" stroke="#2C2C2C" stroke-width="1"/>
+  <rect x="45" y="148" width="6" height="36" rx="3" fill="#D84830"/>
+  <text x="61" y="161" font-family="-apple-system,'Segoe UI',Roboto,Helvetica,Arial,sans-serif" font-size="15" font-weight="800" fill="#F5F4F1">Every mint burns LFGO</text>
+  <text x="61" y="179" font-family="-apple-system,'Segoe UI',Roboto,Helvetica,Arial,sans-serif" font-size="11" fill="#9C9A94">no trustline needed to join</text>
+  <rect x="310" y="142" width="130" height="22" rx="11" fill="#181818" stroke="#FFFFFF" stroke-width="1.5"/>
+  <text x="375" y="157" text-anchor="middle" font-family="-apple-system,'Segoe UI',Roboto,Helvetica,Arial,sans-serif" font-size="11" fill="#F5F4F1">holders pay 1 LFGO</text>
+  <rect x="310" y="168" width="266" height="22" rx="11" fill="#181818" stroke="#FFFFFF" stroke-width="1.5"/>
+  <text x="443" y="183" text-anchor="middle" font-family="-apple-system,'Segoe UI',Roboto,Helvetica,Arial,sans-serif" font-size="11" fill="#F5F4F1">XRP path &#8594; backend buys LFGO off the AMM</text>
+  <path d="M440,153 L700,153 L700,166 L728,166" fill="none" stroke="#9C9A94" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/>
+  <path d="M576,179 L700,179 L700,166" fill="none" stroke="#9C9A94" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/>
+  <polygon points="730,161 730,171 738,166" fill="#9C9A94"/>
+  <rect x="740" y="152" width="104" height="28" rx="14" fill="none" stroke="#D84830" stroke-width="2"/>
+  <text x="792" y="171" text-anchor="middle" font-family="-apple-system,'Segoe UI',Roboto,Helvetica,Arial,sans-serif" font-size="13" font-weight="900" fill="#D84830">BURNED</text>
+
+  <!-- STRIP 2: avatar engine -->
+  <rect x="29" y="210" width="842" height="64" rx="12" fill="#202020" stroke="#2C2C2C" stroke-width="1"/>
+  <rect x="45" y="224" width="6" height="36" rx="3" fill="#601878"/>
+  <text x="61" y="237" font-family="-apple-system,'Segoe UI',Roboto,Helvetica,Arial,sans-serif" font-size="15" font-weight="800" fill="#F5F4F1">Declarative avatar engine</text>
+  <text x="61" y="255" font-family="-apple-system,'Segoe UI',Roboto,Helvetica,Arial,sans-serif" font-size="11" fill="#9C9A94">z-order + body-affinity rules</text>
+  <rect x="310" y="229" width="161" height="26" rx="13" fill="#181818" stroke="#FFFFFF" stroke-width="1.5"/>
+  <text x="390" y="246" text-anchor="middle" font-family="-apple-system,'Segoe UI',Roboto,Helvetica,Arial,sans-serif" font-size="11" fill="#F5F4F1">trait_config.yaml rules</text>
+  <path d="M475,242 L491,242" fill="none" stroke="#9C9A94" stroke-width="2" stroke-linecap="round"/>
+  <polygon points="491,237 491,247 499,242" fill="#9C9A94"/>
+  <rect x="501" y="229" width="167" height="26" rx="13" fill="#181818" stroke="#FFFFFF" stroke-width="1.5"/>
+  <text x="584" y="246" text-anchor="middle" font-family="-apple-system,'Segoe UI',Roboto,Helvetica,Arial,sans-serif" font-size="11" fill="#F5F4F1">FFmpeg &#183; Pillow &#183; OpenCV</text>
+  <path d="M672,242 L688,242" fill="none" stroke="#9C9A94" stroke-width="2" stroke-linecap="round"/>
+  <polygon points="688,237 688,247 696,242" fill="#9C9A94"/>
+  <rect x="698" y="229" width="154" height="26" rx="13" fill="#181818" stroke="#FFFFFF" stroke-width="1.5"/>
+  <text x="775" y="246" text-anchor="middle" font-family="-apple-system,'Segoe UI',Roboto,Helvetica,Arial,sans-serif" font-size="11" fill="#F5F4F1">fully-animated avatars</text>
+
+  <!-- STRIP 3: ledger-native -->
+  <rect x="29" y="286" width="842" height="64" rx="12" fill="#202020" stroke="#2C2C2C" stroke-width="1"/>
+  <rect x="45" y="300" width="6" height="36" rx="3" fill="#4890C0"/>
+  <text x="61" y="313" font-family="-apple-system,'Segoe UI',Roboto,Helvetica,Arial,sans-serif" font-size="15" font-weight="800" fill="#F5F4F1">Ledger-native by design</text>
+  <text x="61" y="331" font-family="-apple-system,'Segoe UI',Roboto,Helvetica,Arial,sans-serif" font-size="11" fill="#9C9A94">indexes the ledger directly</text>
+  <rect x="300" y="305" width="181" height="26" rx="13" fill="#181818" stroke="#FFFFFF" stroke-width="1.5"/>
+  <text x="390" y="322" text-anchor="middle" font-family="-apple-system,'Segoe UI',Roboto,Helvetica,Arial,sans-serif" font-size="11" fill="#F5F4F1">NFTokenModify (XLS-46) swaps</text>
+  <text x="493" y="323" text-anchor="middle" font-family="-apple-system,'Segoe UI',Roboto,Helvetica,Arial,sans-serif" font-size="14" fill="#9C9A94">&#183;</text>
+  <rect x="505" y="305" width="158" height="26" rx="13" fill="#181818" stroke="#FFFFFF" stroke-width="1.5"/>
+  <text x="584" y="322" text-anchor="middle" font-family="-apple-system,'Segoe UI',Roboto,Helvetica,Arial,sans-serif" font-size="11" fill="#F5F4F1">NFTokenOffer marketplace</text>
+  <text x="675" y="323" text-anchor="middle" font-family="-apple-system,'Segoe UI',Roboto,Helvetica,Arial,sans-serif" font-size="14" fill="#9C9A94">&#183;</text>
+  <rect x="687" y="305" width="158" height="26" rx="13" fill="#181818" stroke="#FFFFFF" stroke-width="1.5"/>
+  <text x="766" y="322" text-anchor="middle" font-family="-apple-system,'Segoe UI',Roboto,Helvetica,Arial,sans-serif" font-size="11" fill="#F5F4F1">per-network SQLite index</text>
+
+  <!-- STRIP 4: growth loop -->
+  <rect x="29" y="362" width="842" height="64" rx="12" fill="#202020" stroke="#2C2C2C" stroke-width="1"/>
+  <rect x="45" y="376" width="6" height="36" rx="3" fill="#F0D848"/>
+  <text x="61" y="389" font-family="-apple-system,'Segoe UI',Roboto,Helvetica,Arial,sans-serif" font-size="15" font-weight="800" fill="#F5F4F1">Growth loop on X</text>
+  <text x="61" y="407" font-family="-apple-system,'Segoe UI',Roboto,Helvetica,Arial,sans-serif" font-size="11" fill="#9C9A94">mints from inside X</text>
+  <rect x="310" y="381" width="52" height="26" rx="13" fill="#181818" stroke="#FFFFFF" stroke-width="1.5"/>
+  <text x="336" y="398" text-anchor="middle" font-family="-apple-system,'Segoe UI',Roboto,Helvetica,Arial,sans-serif" font-size="11" fill="#F5F4F1">mint</text>
+  <path d="M366,394 L382,394" fill="none" stroke="#9C9A94" stroke-width="2" stroke-linecap="round"/>
+  <polygon points="382,389 382,399 390,394" fill="#9C9A94"/>
+  <rect x="392" y="381" width="112" height="26" rx="13" fill="#181818" stroke="#FFFFFF" stroke-width="1.5"/>
+  <text x="448" y="398" text-anchor="middle" font-family="-apple-system,'Segoe UI',Roboto,Helvetica,Arial,sans-serif" font-size="11" fill="#F5F4F1">Share-on-X card</text>
+  <path d="M508,394 L524,394" fill="none" stroke="#9C9A94" stroke-width="2" stroke-linecap="round"/>
+  <polygon points="524,389 524,399 532,394" fill="#9C9A94"/>
+  <rect x="534" y="381" width="182" height="26" rx="13" fill="#181818" stroke="#FFFFFF" stroke-width="1.5"/>
+  <text x="625" y="398" text-anchor="middle" font-family="-apple-system,'Segoe UI',Roboto,Helvetica,Arial,sans-serif" font-size="11" fill="#F5F4F1">opens the PWA inside X itself</text>
+  <path d="M720,394 L736,394" fill="none" stroke="#9C9A94" stroke-width="2" stroke-linecap="round"/>
+  <polygon points="736,389 736,399 744,394" fill="#9C9A94"/>
+  <rect x="746" y="381" width="80" height="26" rx="13" fill="#181818" stroke="#FFFFFF" stroke-width="1.5"/>
+  <text x="786" y="398" text-anchor="middle" font-family="-apple-system,'Segoe UI',Roboto,Helvetica,Arial,sans-serif" font-size="11" fill="#F5F4F1">next mint</text>
+
+  <!-- footer -->
+  <text x="450" y="450" text-anchor="middle" font-family="-apple-system,'Segoe UI',Roboto,Helvetica,Arial,sans-serif" font-size="11.5" fill="#9C9A94">five surfaces &#8212; Discord bot + Activity &#183; Telegram bot + Mini App &#183; installable PWA &#8212; one headless REST/WS hub, push-signed via Xaman</text>
+</svg>
