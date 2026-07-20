@@ -3702,6 +3702,15 @@ def _index_roster(conn: sqlite3.Connection, wallet: str) -> list[dict[str, Any]]
                 "image": rec.image,
                 "attributes": rec.attributes,
             }
+        elif rec.image:
+            # #286 repointed the index's image column ipfs://→CDN, but the
+            # uri metadata cache still holds the on-chain ipfs:// URI. The
+            # /api/img proxy maps archive hits by matching the (repointed)
+            # index image, so a cache-served ipfs URL misses the archive and
+            # falls through to the flaky IPFS gateway — blank roster tiles.
+            # Serve the index row's URL; keep the rest of the cached meta
+            # (attributes, video, burnCount) which stays authoritative.
+            meta = {**meta, "image": rec.image}
         flags = nft_index.to_token(rec)["flags"]
         try:
             record = swap_meta.normalize_nft(rec.nft_id, meta, flags=flags, uri_hex=rec.uri_hex)
