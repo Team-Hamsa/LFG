@@ -38,11 +38,15 @@ from lfg_core.economy_store import (  # noqa: E402
     upsert_trait_token,
 )
 from lfg_core.history_store import init_history_db, insert_nft_event  # noqa: E402
-from lfg_core.market_store import (
+from lfg_core.market_store import (  # noqa: E402
+    BuyOffer,  # noqa: E402
     MarketListing,  # noqa: E402
+    init_bid_schema,
+    upsert_bid,
     upsert_listing,  # noqa: E402
 )
 from lfg_core.market_store import browse as market_store_browse  # noqa: E402
+from lfg_core.market_store import get_bid as market_get_bid  # noqa: E402
 from lfg_core.market_store import get_listing as market_get_listing  # noqa: E402
 from lfg_core.market_store import init_db as init_market_db  # noqa: E402
 from lfg_core.nft_index import OnchainNft  # noqa: E402
@@ -2444,3 +2448,153 @@ def test_browse_seller_filter(onchain_env):
     body = _run(_read_json(resp))
     assert [r["offer_index"] for r in body["rows"]] == ["A" * 64]
     assert body["total"] == 1
+
+
+# ---------------------------------------------------------------------------
+# #283: native buy offers (bids)
+# ---------------------------------------------------------------------------
+
+
+def _seed_bid(onchain_path, offer_index="D" * 64, nft_id=CHAR1, bidder=BUYER, amount=2_000_000):
+    conn = _reopen(onchain_path)
+    init_bid_schema(conn)
+    upsert_bid(
+        conn,
+        BuyOffer(offer_index=offer_index, nft_id=nft_id, bidder=bidder, amount_drops=amount),
+    )
+    conn.commit()
+    conn.close()
+
+
+def test_bid_start_unknown_nft_404(onchain_env, market_wallet, monkeypatch):
+    monkeypatch.setattr(server.xumm_ops, "create_buy_offer_payload", _fake_payload())
+    req = _post_request("/api/market/bid", {"nft_id": "Z" * 64, "price_xrp": "2"})
+    resp = _run(server.handle_market_bid_start(req))
+    assert resp.status == 404
+
+
+def test_bid_start_self_bid_400(onchain_env, market_wallet, monkeypatch):
+    conn = _reopen(onchain_env)
+    _seed_character(conn, CHAR1, SELLER, 1)  # market_wallet injects SELLER as caller
+    conn.commit()
+    conn.close()
+    monkeypatch.setattr(server.xumm_ops, "create_buy_offer_payload", _fake_payload())
+    req = _post_request("/api/market/bid", {"nft_id": CHAR1, "price_xrp": "2"})
+    resp = _run(server.handle_market_bid_start(req))
+    assert resp.status == 400
+    body = _run(_read_json(resp))
+    assert "own" in body["error"]
+
+
+def test_bid_start_bad_price_400(onchain_env, market_wallet):
+    req = _post_request("/api/market/bid", {"nft_id": CHAR1, "price_xrp": "nope"})
+    resp = _run(server.handle_market_bid_start(req))
+    assert resp.status == 400
+
+
+def test_bid_start_happy_builds_expiring_payload(onchain_env, market_wallet, monkeypatch):
+    conn = _reopen(onchain_env)
+    _seed_character(conn, CHAR1, BUYER, 1)  # owned by someone else than SELLER
+    conn.commit()
+    conn.close()
+
+    seen = {}
+
+    async def capture(account, nft_id, owner, amount_drops, expiration, **kwargs):
+        seen.update(
+            account=account,
+            nft_id=nft_id,
+            owner=owner,
+            amount_drops=amount_drops,
+            expiration=expiration,
+        )
+        return {"qr_url": "https://qr", "xumm_url": "https://xumm.app/sign/U1", "uuid": "U1"}
+
+    monkeypatch.setattr(server.xumm_ops, "create_buy_offer_payload", capture)
+    req = _post_request("/api/market/bid", {"nft_id": CHAR1, "price_xrp": "2"})
+    resp = _run(server.handle_market_bid_start(req))
+    assert resp.status == 200
+    body = _run(_read_json(resp))
+    assert body["state"] == "awaiting_signature"
+    assert seen["account"] == SELLER  # the caller bids
+    assert seen["owner"] == BUYER  # the NFT holder
+    assert seen["amount_drops"] == "2000000"
+    assert isinstance(seen["expiration"], int) and seen["expiration"] > 0
+
+
+def test_bid_accept_start_guards(onchain_env, market_wallet, monkeypatch):
+    # 404 unknown; 403 not the owner; 410 + stale-close on failed verify.
+    req = _post_request("/api/market/bid/accept", {"offer_index": "Z" * 64})
+    assert _run(server.handle_market_bid_accept_start(req)).status == 404
+
+    conn = _reopen(onchain_env)
+    _seed_character(conn, CHAR1, BUYER, 1)  # caller (SELLER) does NOT own it
+    conn.commit()
+    conn.close()
+    _seed_bid(onchain_env)
+    req = _post_request("/api/market/bid/accept", {"offer_index": "D" * 64})
+    assert _run(server.handle_market_bid_accept_start(req)).status == 403
+
+    conn = _reopen(onchain_env)
+    conn.execute("UPDATE onchain_nfts SET owner = ? WHERE nft_id = ?", (SELLER, CHAR1))
+    conn.commit()
+    conn.close()
+
+    async def not_there(*a, **k):
+        return False
+
+    monkeypatch.setattr(server.market_ops, "verify_buy_offer", not_there)
+    req = _post_request("/api/market/bid/accept", {"offer_index": "D" * 64})
+    resp = _run(server.handle_market_bid_accept_start(req))
+    assert resp.status == 410
+    conn = _reopen(onchain_env)
+    row = market_get_bid(conn, "D" * 64)
+    conn.close()
+    assert row["is_live"] == 0 and row["closed_reason"] == "stale"
+
+
+def test_bid_accept_start_happy(onchain_env, market_wallet, monkeypatch):
+    conn = _reopen(onchain_env)
+    _seed_character(conn, CHAR1, SELLER, 1)  # caller owns it
+    conn.commit()
+    conn.close()
+    _seed_bid(onchain_env)
+
+    async def verified(*a, **k):
+        return True
+
+    monkeypatch.setattr(server.market_ops, "verify_buy_offer", verified)
+    monkeypatch.setattr(server.xumm_ops, "create_accept_buy_offer_payload", _fake_payload())
+    req = _post_request("/api/market/bid/accept", {"offer_index": "D" * 64})
+    resp = _run(server.handle_market_bid_accept_start(req))
+    assert resp.status == 200
+    body = _run(_read_json(resp))
+    assert body["state"] == "awaiting_signature"
+
+
+def test_bids_browse_public(onchain_env):
+    _seed_bid(onchain_env, offer_index="D" * 64, amount=1_000_000)
+    _seed_bid(onchain_env, offer_index="E" * 64, amount=3_000_000)
+    req = _mocked_request("GET", f"/api/market/bids?nft_id={CHAR1}")
+    resp = _run(server.handle_market_bids(req))
+    assert resp.status == 200
+    body = _run(_read_json(resp))
+    assert [b["offer_index"] for b in body["bids"]] == ["E" * 64, "D" * 64]
+    assert body["bids"][0]["amount_xrp"] == "3"
+
+
+def test_bids_mine(onchain_env, market_wallet):
+    conn = _reopen(onchain_env)
+    _seed_character(conn, CHAR1, SELLER, 1)  # caller owns CHAR1
+    conn.commit()
+    conn.close()
+    _seed_bid(onchain_env, offer_index="D" * 64, bidder=BUYER)  # incoming
+    _seed_bid(onchain_env, offer_index="E" * 64, nft_id=CHAR2, bidder=SELLER)  # outgoing
+    req = _mocked_request("GET", "/api/market/bids/mine")
+    req["user"] = {"id": "u1", "platform": "discord"}
+    req["wallet"] = SELLER
+    resp = _run(server.handle_market_bids_mine(req))
+    assert resp.status == 200
+    body = _run(_read_json(resp))
+    assert [b["offer_index"] for b in body["my_bids"]] == ["E" * 64]
+    assert [b["offer_index"] for b in body["bids_on_my_nfts"]] == ["D" * 64]

@@ -1976,6 +1976,19 @@ async def _advance_market_session(prefix: str, session: Any, loop: Any) -> None:
         if row is not None:
             network = _market_network(session.listing_kind)
             await loop.run_in_executor(None, _write_listing_row, network, row)
+    elif prefix == "bid":
+        bid_row = await market_flow.advance_bid_session(session)
+        if bid_row is not None:
+            await loop.run_in_executor(None, _write_bid_row, _market_network("character"), bid_row)
+    elif prefix == "bid_accept":
+        accepted = await market_flow.advance_bid_accept_session(session)
+        if accepted is not None:
+            await loop.run_in_executor(None, _close_bid_sync, session.network, accepted, "accepted")
+        elif session.state == market_flow.FAILED and session.reason == "bid_unavailable":
+            # tec failure: the bid is dead on-ledger (expired/unfunded/moved).
+            await loop.run_in_executor(
+                None, _close_bid_sync, session.network, session.offer_index, "stale"
+            )
     elif prefix == "cancel":
         if await market_flow.advance_cancel_session(session):
             await loop.run_in_executor(
@@ -2063,9 +2076,286 @@ async def _continue_buy_after_onramp(session: Any, loop: Any) -> None:
     session.state = market_flow.AWAITING_SIGNATURE
 
 
+# --- #283: native buy offers (bids) — place / accept / browse ---
+# Characters-only MVP: permissionless on-ledger bids that let users act on
+# any of our NFTs (including externally-listed ones, #131) without leaving
+# the app. The buy_offers index rides the same listener/backfill lifecycle
+# as market_listings.
+
+
+def _write_bid_row(network: str, row: dict[str, Any]) -> None:
+    conn = nft_index.init_db(nft_index.index_db_path(network))
+    try:
+        market_store.init_bid_schema(conn)
+        market_store.upsert_bid(conn, market_store.BuyOffer(**row))
+    finally:
+        conn.close()
+
+
+def _close_bid_sync(network: str, offer_index: str, reason: str) -> None:
+    conn = nft_index.init_db(nft_index.index_db_path(network))
+    try:
+        market_store.init_bid_schema(conn)
+        market_store.close_bid(conn, offer_index, reason)
+    finally:
+        conn.close()
+
+
+def _get_bid_sync(network: str, offer_index: str) -> dict[str, Any] | None:
+    conn = nft_index.init_db(nft_index.index_db_path(network))
+    conn.row_factory = sqlite3.Row
+    try:
+        market_store.init_bid_schema(conn)
+        return market_store.get_bid(conn, offer_index)
+    finally:
+        conn.close()
+
+
+def _serialize_bid(row: dict[str, Any]) -> dict[str, Any]:
+    out = {
+        "offer_index": row["offer_index"],
+        "nft_id": row["nft_id"],
+        "bidder": row["bidder"],
+        "amount_drops": row["amount_drops"],
+        "amount_xrp": market_ops.drops_to_xrp_str(str(row["amount_drops"])),
+        "expiration": row.get("expiration"),
+    }
+    if row.get("nft_number") is not None:
+        out["nft_number"] = row["nft_number"]
+    if row.get("image") is not None:
+        out["image"] = row["image"]
+    return out
+
+
+@require_market
+async def handle_market_bids(request: web.Request) -> web.Response:
+    """Public: GET /api/market/bids?nft_id= — live bids on one NFT, highest
+    first (#283)."""
+    nft_id = request.query.get("nft_id")
+    if not nft_id:
+        return web.json_response({"error": "nft_id is required"}, status=400)
+
+    def _compute() -> list[dict[str, Any]]:
+        conn = nft_index.init_db(nft_index.index_db_path(_market_network("character")))
+        conn.row_factory = sqlite3.Row
+        try:
+            market_store.init_bid_schema(conn)
+            return market_store.live_bids_for_nft(conn, nft_id)
+        finally:
+            conn.close()
+
+    rows = await asyncio.get_event_loop().run_in_executor(None, _compute)
+    return web.json_response({"nft_id": nft_id, "bids": [_serialize_bid(r) for r in rows]})
+
+
+@require_market
+@require_wallet
+async def handle_market_bids_mine(request):
+    """Authed: GET /api/market/bids/mine — the caller's live outgoing bids
+    plus live incoming bids on characters they currently own (#283)."""
+    wallet = request["wallet"]
+
+    def _compute() -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
+        conn = nft_index.init_db(nft_index.index_db_path(_market_network("character")))
+        conn.row_factory = sqlite3.Row
+        try:
+            market_store.init_bid_schema(conn)
+            return (
+                market_store.live_bids_by(conn, wallet),
+                market_store.live_bids_on_owner_nfts(conn, wallet),
+            )
+        finally:
+            conn.close()
+
+    mine, incoming = await asyncio.get_event_loop().run_in_executor(None, _compute)
+    return web.json_response(
+        {
+            "my_bids": [_serialize_bid(r) for r in mine],
+            "bids_on_my_nfts": [_serialize_bid(r) for r in incoming],
+        }
+    )
+
+
+@require_market
+@require_wallet
+async def handle_market_bid_start(request):
+    """POST /api/market/bid {nft_id, price_xrp}: place a native buy offer on
+    a character NFT (#283). 400 on a bad price / trait target / self-bid; 404
+    when the NFT is unknown. The offer always carries an on-ledger Expiration
+    (MARKET_BID_TTL_SECONDS) — bids escrow nothing, so they must age out."""
+    user = request["user"]
+    wallet = request["wallet"]
+    body = await request.json()
+    nft_id = body.get("nft_id")
+    price_xrp = body.get("price_xrp")
+    if not nft_id or not isinstance(price_xrp, str):
+        return web.json_response(
+            {"error": "nft_id and price_xrp (string) are required"}, status=400
+        )
+    try:
+        amount_drops = int(market_ops.xrp_to_drops_str(price_xrp))
+    except Exception as e:
+        # Same broad guard as handle_market_list_start's price parse.
+        return web.json_response({"error": f"bad price_xrp: {e}"}, status=400)
+
+    if _use_market_mock():
+        # Dev-mode mock harness parity is a follow-up; the real handlers are
+        # fully testable with _use_market_mock monkeypatched off.
+        return web.json_response({"error": "bids are not available in dev mode"}, status=501)
+
+    loop = asyncio.get_event_loop()
+    membership = await loop.run_in_executor(
+        None,
+        _resolve_ownable,
+        _market_network("character"),
+        _market_network("trait"),
+        nft_id,
+    )
+    if membership is None:
+        return web.json_response({"error": "unknown NFT"}, status=404)
+    if membership["kind"] != "character":
+        return web.json_response({"error": "bids are supported on characters only"}, status=400)
+    owner = membership["owner"]
+    if owner == wallet:
+        # tecCANT_ACCEPT_OWN_OFFER's placement-side twin: bidding on your own
+        # NFT creates an offer you could never accept — reject up front.
+        return web.json_response({"error": "you already own that NFT"}, status=400)
+
+    _prune_sessions(market_sessions, market_flow.TERMINAL_STATES)
+    active = _active_session(
+        market_sessions, market_flow.TERMINAL_STATES, user["id"], _platform(user)
+    )
+    if active:
+        return web.json_response(
+            {"error": "a market action is already in progress", "session": active.to_dict()},
+            status=409,
+        )
+
+    expiration = int(time.time()) + config.MARKET_BID_TTL_SECONDS - xrpl_ops.RIPPLE_EPOCH_OFFSET
+    payload = await xumm_ops.create_buy_offer_payload(
+        wallet,
+        nft_id,
+        owner,
+        str(amount_drops),
+        expiration,
+        return_url=xumm_ops.discord_return_url(body.get("guild_id"), body.get("channel_id")),
+        user_token=await _push_token(user),
+        platform=memos.platform_for_surface(_platform(user)),
+    )
+    if not payload:
+        return web.json_response({"error": "could not reach Xaman"}, status=502)
+
+    session = market_flow.BidSession(
+        discord_id=user["id"],
+        wallet_address=wallet,
+        nft_id=nft_id,
+        owner=owner,
+        amount_drops=amount_drops,
+        platform=_platform(user),
+    )
+    session.qr_url = payload["qr_url"]
+    session.xumm_url = payload["xumm_url"]
+    session.payload_uuid = payload.get("uuid")
+    session.push = payload.get("push")
+    market_sessions[session.id] = session
+    return web.json_response(session.to_dict())
+
+
+@require_market
+@require_wallet
+async def handle_market_bid_accept_start(request):
+    """POST /api/market/bid/accept {offer_index}: the OWNER accepts a bid on
+    their character (#283). 404 unknown bid, 410 dead bid, 403 not the owner;
+    fail-closed on-ledger re-verify (verify_buy_offer, strict) immediately
+    before the accept payload — 503 on a lookup failure (bid untouched), 410
+    + stale-close on a verified absence/mismatch/expiry."""
+    user = request["user"]
+    wallet = request["wallet"]
+    body = await request.json()
+    offer_index = body.get("offer_index")
+    if not offer_index:
+        return web.json_response({"error": "offer_index is required"}, status=400)
+
+    if _use_market_mock():
+        return web.json_response({"error": "bids are not available in dev mode"}, status=501)
+
+    loop = asyncio.get_event_loop()
+    network = _market_network("character")
+    row = await loop.run_in_executor(None, _get_bid_sync, network, offer_index)
+    if row is None:
+        return web.json_response({"error": "not found"}, status=404)
+    if not row["is_live"]:
+        return web.json_response({"error": "bid_unavailable"}, status=410)
+
+    membership = await loop.run_in_executor(
+        None,
+        _resolve_ownable,
+        network,
+        _market_network("trait"),
+        row["nft_id"],
+    )
+    if membership is None or membership["owner"] != wallet:
+        return web.json_response({"error": "you do not own that NFT"}, status=403)
+
+    try:
+        verified = await market_ops.verify_buy_offer(
+            row["nft_id"],
+            offer_index,
+            row["amount_drops"],
+            expected_bidder=row["bidder"],
+            strict=True,
+        )
+    except Exception as e:
+        # Lookup FAILURE, not a verified absence — touch nothing, retry.
+        logging.warning(f"verify_buy_offer lookup failed for bid {offer_index}: {e}")
+        return web.json_response(
+            {"error": "could not verify the bid right now, please retry"}, status=503
+        )
+    if not verified:
+        await loop.run_in_executor(None, _close_bid_sync, network, offer_index, "stale")
+        return web.json_response({"error": "bid_unavailable"}, status=410)
+
+    _prune_sessions(market_sessions, market_flow.TERMINAL_STATES)
+    active = _active_session(
+        market_sessions, market_flow.TERMINAL_STATES, user["id"], _platform(user)
+    )
+    if active:
+        return web.json_response(
+            {"error": "a market action is already in progress", "session": active.to_dict()},
+            status=409,
+        )
+
+    payload = await xumm_ops.create_accept_buy_offer_payload(
+        offer_index,
+        return_url=xumm_ops.discord_return_url(body.get("guild_id"), body.get("channel_id")),
+        user_token=await _push_token(user),
+        platform=memos.platform_for_surface(_platform(user)),
+    )
+    if not payload:
+        return web.json_response({"error": "could not reach Xaman"}, status=502)
+
+    session = market_flow.BidAcceptSession(
+        discord_id=user["id"],
+        wallet_address=wallet,
+        offer_index=offer_index,
+        nft_id=row["nft_id"],
+        network=network,
+        amount_drops=row["amount_drops"],
+        platform=_platform(user),
+    )
+    session.qr_url = payload["qr_url"]
+    session.xumm_url = payload["xumm_url"]
+    session.payload_uuid = payload.get("uuid")
+    session.push = payload.get("push")
+    market_sessions[session.id] = session
+    return web.json_response(session.to_dict())
+
+
 handle_market_list_status = _make_market_status_handler("list")
 handle_market_cancel_status = _make_market_status_handler("cancel")
 handle_market_buy_status = _make_market_status_handler("buy")
+handle_market_bid_status = _make_market_status_handler("bid")
+handle_market_bid_accept_status = _make_market_status_handler("bid_accept")
 
 
 # --- Trait Shop (#217) Task 8: catalog + buy service endpoints ---
@@ -4896,6 +5186,12 @@ def create_app() -> web.Application:
     app.router.add_get("/api/market/mine", handle_market_mine)
     app.router.add_get("/api/market/history", handle_market_history)
     app.router.add_post("/api/market/list", handle_market_list_start)
+    app.router.add_get("/api/market/bids", handle_market_bids)
+    app.router.add_get("/api/market/bids/mine", handle_market_bids_mine)
+    app.router.add_post("/api/market/bid", handle_market_bid_start)
+    app.router.add_post("/api/market/bid/accept", handle_market_bid_accept_start)
+    app.router.add_get("/api/market/bid/accept/{session_id}", handle_market_bid_accept_status)
+    app.router.add_get("/api/market/bid/{session_id}", handle_market_bid_status)
     app.router.add_get("/api/market/list/{session_id}", handle_market_list_status)
     app.router.add_post("/api/market/cancel", handle_market_cancel_start)
     app.router.add_get("/api/market/cancel/{session_id}", handle_market_cancel_status)

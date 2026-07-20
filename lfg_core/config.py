@@ -330,6 +330,10 @@ SHOP_MIN_BRIX = int(os.getenv("SHOP_MIN_BRIX", "5"))
 SHOP_MAX_BRIX = int(os.getenv("SHOP_MAX_BRIX", "5000"))
 SHOP_OFFER_TTL_SECONDS = int(os.getenv("SHOP_OFFER_TTL_SECONDS", "900"))
 
+# #283: on-ledger Expiration for native buy offers (bids) placed in-app.
+# Bids escrow nothing, so they must always age out; default 7 days.
+MARKET_BID_TTL_SECONDS = int(os.getenv("MARKET_BID_TTL_SECONDS", "604800"))
+
 TRAIT_NFT_FLAGS = int(os.getenv("TRAIT_NFT_FLAGS", "9"))  # burnable(1)+transferable(8)
 TRAIT_CDN_SUBDIR = os.getenv("TRAIT_CDN_SUBDIR", "traits")
 

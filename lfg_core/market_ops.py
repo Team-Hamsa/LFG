@@ -294,6 +294,127 @@ async def verify_sell_offer(
     return False  # offer_index not present among the fetched offers
 
 
+def extract_created_buy_offer(meta: dict[str, Any], nft_id: str) -> dict[str, Any] | None:
+    """#283: the buy-side twin of extract_created_sell_offer. Find the
+    CreatedNode NFTokenOffer for `nft_id` in a validated NFTokenCreateOffer's
+    meta and return it only if it is a *buy* offer (lsfSellNFToken NOT set)
+    priced in XRP drops — bids are characters-only for now, so an IOU Amount
+    is rejected.
+
+    Returns `{offer_index, amount_drops, owner, destination, expiration,
+    flags}` — `owner` is the NFTokenOffer object's Owner (the bidder), and
+    `expiration` is the offer's Ripple-epoch Expiration or None — or None on
+    the mirrored no-match cases (missing/malformed meta, no matching
+    CreatedNode, a sell offer, a non-drops Amount)."""
+    nodes = meta.get("AffectedNodes") if isinstance(meta, dict) else None
+    if not isinstance(nodes, list):
+        return None
+    for node in nodes:
+        if not isinstance(node, dict):
+            continue
+        created = node.get("CreatedNode")
+        if not isinstance(created, dict):
+            continue
+        if created.get("LedgerEntryType") != "NFTokenOffer":
+            continue
+        new_fields = created.get("NewFields")
+        if not isinstance(new_fields, dict):
+            continue
+        if str(new_fields.get("NFTokenID") or "") != str(nft_id):
+            continue
+        flags = int(new_fields.get("Flags") or 0)
+        if flags & LSF_SELL_NFTOKEN:
+            return None  # sell-side offer for this nft_id
+        amount = new_fields.get("Amount")
+        if not isinstance(amount, str) or not amount.isdigit():
+            return None  # IOU (dict) Amount, or malformed drops string
+        return {
+            "offer_index": created.get("LedgerIndex"),
+            "amount_drops": int(amount),
+            "owner": new_fields.get("Owner"),
+            "destination": new_fields.get("Destination"),
+            "expiration": new_fields.get("Expiration"),
+            "flags": flags,
+        }
+    return None
+
+
+async def verify_buy_offer(
+    nft_id: str,
+    offer_index: str,
+    expected_drops: int,
+    expected_bidder: str | None = None,
+    fetch_offers: FetchOffers | None = None,
+    strict: bool = False,
+    fetch_ledger_time: FetchLedgerTime | None = None,
+) -> bool:
+    """#283: fail-closed check that a buy offer (bid) is exactly the one an
+    owner is about to accept, run immediately before the accept payload is
+    built — the buy-side twin of verify_sell_offer (see its docstring for the
+    strict-mode lookup-failure semantics, which are identical).
+
+    True ONLY when: the bid for `nft_id` at `offer_index` is present among
+    the fetched buy offers; its Amount is an XRP drops string equal to
+    `expected_drops`; its owner (the bidder) matches `expected_bidder` when
+    one is given; it carries no Destination; and any Expiration is strictly
+    after the current ledger close time."""
+    fetch: FetchOffers
+    if fetch_offers is None:
+
+        async def _default_fetch(nid: str) -> list[dict[str, Any]]:
+            return await xrpl_ops.get_nft_buy_offers(nid, raise_on_error=strict)
+
+        fetch = _default_fetch
+    else:
+        fetch = fetch_offers
+
+    ledger_time: FetchLedgerTime
+    if fetch_ledger_time is None:
+
+        async def _default_ledger_time() -> int:
+            return await xrpl_ops.get_ledger_time()
+
+        ledger_time = _default_ledger_time
+    else:
+        ledger_time = fetch_ledger_time
+
+    try:
+        offers = await fetch(nft_id)
+    except Exception:
+        if strict:
+            raise
+        return False
+    for offer in offers:
+        if not isinstance(offer, dict):
+            continue
+        if str(offer.get("offer_index")) != str(offer_index):
+            continue
+        amount = offer.get("amount")
+        if not isinstance(amount, str) or not amount.isdigit():
+            return False
+        if int(amount) != int(expected_drops):
+            return False
+        if expected_bidder is not None and offer.get("owner") != expected_bidder:
+            return False
+        if offer.get("destination") is not None:
+            return False
+        expiration = offer.get("expiration")
+        if expiration is not None:
+            try:
+                now = await ledger_time()
+            except Exception:
+                if strict:
+                    raise
+                return False
+            try:
+                if int(expiration) <= int(now):
+                    return False
+            except (TypeError, ValueError):
+                return False  # malformed Expiration — fail closed
+        return True
+    return False  # offer_index not present among the fetched buy offers
+
+
 def xrp_to_drops_str(xrp: str) -> str:
     """Convert a decimal XRP amount string to an integer drops string.
 

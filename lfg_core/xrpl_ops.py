@@ -20,6 +20,7 @@ from xrpl.models.requests import (
     AccountTx,
     AMMInfo,
     Ledger,
+    NFTBuyOffers,
     NFTSellOffers,
     Subscribe,
     Tx,
@@ -463,6 +464,47 @@ async def get_nft_sell_offers(nft_id: str, raise_on_error: bool = False) -> list
         if raise_on_error:
             raise
         logging.warning(f"get_nft_sell_offers failed for {nft_id}: {e}")
+        return []
+
+
+async def get_nft_buy_offers(nft_id: str, raise_on_error: bool = False) -> list[dict[str, Any]]:
+    """List BUY offers (bids, #283) for `nft_id` via the standard rippled
+    `nft_buy_offers` method — the buy-side twin of get_nft_sell_offers, with
+    identical normalization, objectNotFound whitelisting, and strict-mode
+    raise semantics (see that function's docstring)."""
+    try:
+        client = JsonRpcClient(config.JSON_RPC_URL)
+        response = await asyncio.to_thread(client.request, NFTBuyOffers(nft_id=nft_id))
+        result = response.result
+        if isinstance(result, dict) and result.get("error"):
+            if str(result.get("error")) == "objectNotFound":
+                return []
+            if raise_on_error:
+                raise RuntimeError(f"nft_buy_offers error: {result.get('error')}")
+            logging.warning(f"get_nft_buy_offers error for {nft_id}: {result.get('error')}")
+            return []
+        offers = result.get("offers") if isinstance(result, dict) else None
+        if not isinstance(offers, list):
+            return []
+        normalized: list[dict[str, Any]] = []
+        for offer in offers:
+            if not isinstance(offer, dict):
+                continue
+            normalized.append(
+                {
+                    "offer_index": offer.get("nft_offer_index", offer.get("index")),
+                    "amount": offer.get("amount"),
+                    "destination": offer.get("destination"),
+                    "flags": offer.get("flags"),
+                    "owner": offer.get("owner"),
+                    "expiration": offer.get("expiration"),
+                }
+            )
+        return normalized
+    except Exception as e:
+        if raise_on_error:
+            raise
+        logging.warning(f"get_nft_buy_offers failed for {nft_id}: {e}")
         return []
 
 
