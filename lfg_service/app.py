@@ -871,21 +871,30 @@ def _market_cache_put(
             del _MARKET_CACHE[oldest]
 
 
-def _attach_character_images(conn: sqlite3.Connection, rows: list[dict[str, Any]]) -> None:
-    """Mutate `rows` in place, adding an `image` key sourced from
-    onchain_nfts.image (market_store.browse's character join carries
-    nft_number/attributes_json but not image — same 2-query pattern
-    handle_leaderboard uses for the same column)."""
+def _attach_character_meta(conn: sqlite3.Connection, rows: list[dict[str, Any]]) -> None:
+    """Mutate `rows` in place, adding `image` (and filling `nft_number` when the
+    caller didn't already supply it) from onchain_nfts.
+
+    Browse's market_store.browse join already carries nft_number but not image,
+    so this backfills image there. The Mine path (_compute_mine_data) selects
+    market_listings alone — no onchain_nfts join — so its rows arrive with
+    neither; without this, a listed character would render with a NULL
+    nft_number and the client falls back to the raw hex nft_id. Filling only
+    when nft_number is missing/None keeps browse's join value authoritative."""
     nft_ids = [r["nft_id"] for r in rows]
     if not nft_ids:
         return
     placeholders = ",".join("?" * len(nft_ids))
     cur = conn.execute(
-        f"SELECT nft_id, image FROM onchain_nfts WHERE nft_id IN ({placeholders})", nft_ids
+        f"SELECT nft_id, nft_number, image FROM onchain_nfts WHERE nft_id IN ({placeholders})",
+        nft_ids,
     )
-    images = {r["nft_id"]: r["image"] for r in cur.fetchall()}
+    meta = {r["nft_id"]: r for r in cur.fetchall()}
     for r in rows:
-        r["image"] = images.get(r["nft_id"]) or None
+        m = meta.get(r["nft_id"])
+        r["image"] = (m["image"] if m else None) or None
+        if r.get("nft_number") is None:
+            r["nft_number"] = m["nft_number"] if m else None
 
 
 def _compute_market_rows(network: str, kind: str) -> list[dict[str, Any]]:
@@ -900,7 +909,7 @@ def _compute_market_rows(network: str, kind: str) -> list[dict[str, Any]]:
         economy_store.init_economy_schema(conn)
         rows = market_store.browse(conn, kind=kind, limit=_MARKET_ROW_CAP, offset=0)
         if kind == "character":
-            _attach_character_images(conn, rows)
+            _attach_character_meta(conn, rows)
         return rows
     finally:
         conn.close()
@@ -1156,7 +1165,7 @@ def _compute_mine_data(char_network: str, econ_network: str, wallet: str) -> dic
             (wallet,),
         )
         char_listing_rows = [dict(row) for row in cur.fetchall()]
-        _attach_character_images(conn, char_listing_rows)
+        _attach_character_meta(conn, char_listing_rows)
         listed_char_ids = {r["nft_id"] for r in char_listing_rows}
 
         unlisted_characters = [

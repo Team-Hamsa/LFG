@@ -233,7 +233,13 @@ def upsert(conn: sqlite3.Connection, rec: OnchainNft) -> None:
              attributes_json, image, ledger_index, last_synced_at)
         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
         ON CONFLICT(nft_id) DO UPDATE SET
-            nft_number=excluded.nft_number,
+            -- COALESCE: an nft_id's edition is fixed for life, but some tokens'
+            -- on-chain metadata `name` carries no parseable number, so a re-scan
+            -- (or a swap's burn-point stamp) can arrive with nft_number=None. It
+            -- must never clobber a number a prior write (metadata parse, app-DB
+            -- reconcile, or CSV import) already resolved. Same posture as
+            -- ledger_index below.
+            nft_number=COALESCE(excluded.nft_number, onchain_nfts.nft_number),
             owner=excluded.owner,
             -- Burns are irreversible on XRPL: a stale source (e.g. a Bithomp
             -- CSV exported before the burn) must never resurrect a burned
@@ -261,6 +267,42 @@ def upsert(conn: sqlite3.Connection, rec: OnchainNft) -> None:
         _nft_to_row(rec),
     )
     conn.commit()
+
+
+def reconcile_numbers_from_app_db(conn: sqlite3.Connection, app_db_path: str) -> int:
+    """Fill NULL nft_number on index rows from the authoritative app LFG table
+    (nft_id -> nft_number), returning the count updated.
+
+    Some tokens' on-chain metadata `name` field carries no parseable edition,
+    so token_record leaves nft_number None (nft_index.py:token_record). That
+    single NULL breaks the marketplace (browse falls back to the raw hex nft_id)
+    and image serving (image_archive.edition_for_url requires nft_number NOT
+    NULL, so no local-archive hit). The app LFG table minted every edition and
+    is the source of truth for the nft_id -> nft_number mapping, so it can heal
+    what the chain metadata can't describe. Idempotent; a no-op when the app DB
+    is absent (e.g. the auditor pointed at a bare index)."""
+    if not os.path.exists(app_db_path):
+        return 0
+    conn.execute("ATTACH DATABASE ? AS appdb", (app_db_path,))
+    try:
+        cur = conn.execute(
+            """
+            UPDATE onchain_nfts
+            SET nft_number = (
+                SELECT l.nft_number FROM appdb.LFG l
+                WHERE l.nft_id = onchain_nfts.nft_id
+            )
+            WHERE nft_number IS NULL
+              AND EXISTS (
+                SELECT 1 FROM appdb.LFG l
+                WHERE l.nft_id = onchain_nfts.nft_id AND l.nft_number IS NOT NULL
+              )
+            """
+        )
+        conn.commit()
+        return cur.rowcount
+    finally:
+        conn.execute("DETACH DATABASE appdb")
 
 
 def mark_burned(conn: sqlite3.Connection, nft_id: str) -> None:

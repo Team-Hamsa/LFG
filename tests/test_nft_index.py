@@ -267,3 +267,44 @@ def test_upsert_never_resurrects_burned_token(tmp_path):
     nft_index.upsert(conn, _nft("AAA", burned=False))  # stale re-import
     row = conn.execute("SELECT is_burned FROM onchain_nfts WHERE nft_id='AAA'").fetchone()
     assert row[0] == 1
+
+
+def test_upsert_does_not_clobber_number_with_none(tmp_path):
+    # An nft_id's edition is fixed for life, but a re-scan whose metadata `name`
+    # has no parseable number arrives with nft_number=None. It must not erase a
+    # number a prior write already resolved (breaks marketplace + image serving).
+    import sqlite3  # noqa: F401 -- kept local; module top doesn't import it
+
+    conn = nft_index.init_db(str(tmp_path / "x.db"))
+    nft_index.upsert(conn, _nft("BBB", number=42))
+    nft_index.upsert(conn, _nft("BBB", number=None))  # unparseable re-scan
+    row = conn.execute("SELECT nft_number FROM onchain_nfts WHERE nft_id='BBB'").fetchone()
+    assert row[0] == 42
+
+
+def test_reconcile_numbers_from_app_db_fills_nulls(tmp_path):
+    import sqlite3
+
+    idx = nft_index.init_db(str(tmp_path / "onchain.db"))
+    nft_index.upsert(idx, _nft("CCC", number=None))  # edition unknown on-chain
+    nft_index.upsert(idx, _nft("DDD", number=99))  # already known
+
+    app_path = str(tmp_path / "lfg.db")
+    app = sqlite3.connect(app_path)
+    app.execute("CREATE TABLE LFG (nft_number INTEGER PRIMARY KEY, nft_id TEXT)")
+    app.execute("INSERT INTO LFG (nft_number, nft_id) VALUES (7, 'CCC')")
+    app.commit()
+    app.close()
+
+    healed = nft_index.reconcile_numbers_from_app_db(idx, app_path)
+    assert healed == 1
+    assert idx.execute("SELECT nft_number FROM onchain_nfts WHERE nft_id='CCC'").fetchone()[0] == 7
+    # a known number is left untouched, and a second run is a no-op (idempotent).
+    assert idx.execute("SELECT nft_number FROM onchain_nfts WHERE nft_id='DDD'").fetchone()[0] == 99
+    assert nft_index.reconcile_numbers_from_app_db(idx, app_path) == 0
+
+
+def test_reconcile_numbers_missing_app_db_is_noop(tmp_path):
+    idx = nft_index.init_db(str(tmp_path / "onchain.db"))
+    nft_index.upsert(idx, _nft("EEE", number=None))
+    assert nft_index.reconcile_numbers_from_app_db(idx, str(tmp_path / "nope.db")) == 0
