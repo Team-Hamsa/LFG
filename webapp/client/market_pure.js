@@ -242,7 +242,19 @@ export function mapListingRow(row) {
     external: row.source === 'external',
     marketplace: row.marketplace ?? null,
     externalUrl: row.external_url ?? null,
+    // #203: collection-wide statistical rarity (characters only; null for
+    // traits and for Mine rows, which never pass through the browse cache).
+    rarityRank: row.rarity_rank ?? null,
+    rarityScore: row.rarity_score ?? null,
   };
+}
+
+/**
+ * "Rarity #N" chip text for a listing card/detail view (#203); empty string
+ * when the row carries no rarity (traits, Mine rows, unscored tokens).
+ */
+export function rarityLabel(vm) {
+  return vm.rarityRank != null ? `Rarity #${vm.rarityRank}` : '';
 }
 
 /**
@@ -296,11 +308,13 @@ export function traitFilterToken(slot, value) {
  * of "Slot:Value" tokens) becomes one repeated `trait` param per entry,
  * matching request.query.getall('trait') server-side.
  */
-export function buildListingsParams({ kind, traits, minXrp, maxXrp, minBrix, maxBrix, sort, limit, offset, includeExternal } = {}) {
+export function buildListingsParams({ kind, traits, minXrp, maxXrp, minBrix, maxBrix, sort, limit, offset, includeExternal, seller } = {}) {
   const pairs = [];
   if (kind) pairs.push(['kind', kind]);
   // #131: opt-in known-broker external (read-only) rows.
   if (includeExternal) pairs.push(['include_external', '1']);
+  // #203: "listed by me" — server-side exact-match seller filter.
+  if (seller) pairs.push(['seller', seller]);
   for (const t of traits || []) pairs.push(['trait', t]);
   if (minXrp !== undefined && minXrp !== null && minXrp !== '') pairs.push(['min_xrp', String(minXrp)]);
   if (maxXrp !== undefined && maxXrp !== null && maxXrp !== '') pairs.push(['max_xrp', String(maxXrp)]);

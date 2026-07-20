@@ -42,6 +42,7 @@ from lfg_core.market_store import (
     MarketListing,  # noqa: E402
     upsert_listing,  # noqa: E402
 )
+from lfg_core.market_store import browse as market_store_browse  # noqa: E402
 from lfg_core.market_store import get_listing as market_get_listing  # noqa: E402
 from lfg_core.market_store import init_db as init_market_db  # noqa: E402
 from lfg_core.nft_index import OnchainNft  # noqa: E402
@@ -2367,3 +2368,79 @@ def test_browse_include_external_revalidates_against_fresh_allowlist(onchain_env
         )
     )
     assert _run(_read_json(resp))["rows"] == []
+
+
+# ---------------------------------------------------------------------------
+# #203: browse UX build-out — rarity sort, seller filter
+# ---------------------------------------------------------------------------
+
+
+def _seed_two_characters_with_rarity(onchain_path):
+    """CHAR1 has a common trait set, CHAR2 a rare one (unique value), plus a
+    third unlisted token so collection-wide frequencies differ from the
+    listed set."""
+    conn = _reopen(onchain_path)
+    common = [{"trait_type": "Hat", "value": "Cap"}]
+    rare = [{"trait_type": "Hat", "value": "Unique Crown"}]
+    _seed_character(conn, CHAR1, SELLER, 1, attrs=common)
+    _seed_character(conn, CHAR2, SELLER, 2, attrs=rare)
+    _seed_character(conn, CHAR3_UNLISTED, BUYER, 3, attrs=common)  # unlisted, dilutes Cap
+    _seed_listing(conn, offer_index="A" * 64, nft_id=CHAR1, amount_drops=1_000_000)
+    _seed_listing(conn, offer_index="B" * 64, nft_id=CHAR2, amount_drops=2_000_000)
+    conn.commit()
+    conn.close()
+
+
+def test_browse_rows_carry_rarity_fields(onchain_env):
+    _seed_two_characters_with_rarity(onchain_env)
+    resp = _run(server.handle_market_listings(_mocked_request("GET", "/api/market/listings")))
+    body = _run(_read_json(resp))
+    by_offer = {r["offer_index"]: r for r in body["rows"]}
+    rare_row = by_offer["B" * 64]
+    common_row = by_offer["A" * 64]
+    assert rare_row["rarity_rank"] == 1  # unique trait -> rarest collection-wide
+    assert rare_row["rarity_score"] > common_row["rarity_score"]
+    # CHAR1 and CHAR3_UNLISTED carry identical trait sets (tied score); the
+    # nft_id tie-breaker makes CHAR1 (…001 < …003) deterministically rank 2.
+    assert common_row["rarity_rank"] == 2
+
+
+def test_browse_sort_rarity_desc(onchain_env):
+    _seed_two_characters_with_rarity(onchain_env)
+    resp = _run(
+        server.handle_market_listings(
+            _mocked_request("GET", "/api/market/listings?sort=rarity_desc")
+        )
+    )
+    body = _run(_read_json(resp))
+    assert [r["offer_index"] for r in body["rows"]] == ["B" * 64, "A" * 64]
+
+
+def test_browse_rarity_desc_not_valid_for_store_browse(onchain_env):
+    # Guard the seam: the handler accepts rarity_desc but market_store.browse
+    # (whose rows never carry rarity) must keep rejecting it.
+    import pytest as _pytest
+
+    conn = _reopen(onchain_env)
+    with _pytest.raises(ValueError):
+        market_store_browse(conn, kind="character", sort="rarity_desc")
+    conn.close()
+
+
+def test_browse_seller_filter(onchain_env):
+    conn = _reopen(onchain_env)
+    _seed_character(conn, CHAR1, SELLER, 1)
+    _seed_character(conn, CHAR2, BUYER, 2)
+    _seed_listing(conn, offer_index="A" * 64, nft_id=CHAR1, seller=SELLER)
+    _seed_listing(conn, offer_index="B" * 64, nft_id=CHAR2, seller=BUYER, amount_drops=2_000_000)
+    conn.commit()
+    conn.close()
+
+    resp = _run(
+        server.handle_market_listings(
+            _mocked_request("GET", f"/api/market/listings?seller={SELLER}")
+        )
+    )
+    body = _run(_read_json(resp))
+    assert [r["offer_index"] for r in body["rows"]] == ["A" * 64]
+    assert body["total"] == 1

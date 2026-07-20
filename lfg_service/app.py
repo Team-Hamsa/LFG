@@ -898,6 +898,30 @@ def _attach_character_meta(conn: sqlite3.Connection, rows: list[dict[str, Any]])
             r["nft_number"] = m["nft_number"] if m else None
 
 
+def _attach_character_rarity(conn: sqlite3.Connection, rows: list[dict[str, Any]]) -> None:
+    """#203: mutate character listing rows in place, adding `rarity_score` /
+    `rarity_rank` from the same statistical-rarity scoring the `nft_rarity`
+    leaderboard board uses (sum of n_live/freq over trait pairs, scored over
+    ALL live tokens so the rank is collection-wide, not listings-wide).
+    Reuses leaderboard._nft_rarity directly — its hconn/window/system-accounts
+    params are unused by that board, so dummies are safe; a second scoring
+    implementation here would inevitably drift from the leaderboard's. Runs
+    inside the 60s-cached _compute_market_rows fill, so the full-collection
+    scan costs once per TTL, not per request."""
+    if not rows:
+        return
+    scored = leaderboard._nft_rarity(conn, conn, 0, 0, frozenset(), 10**9)
+    # Deterministic ranks: _nft_rarity sorts by score only, leaving tied
+    # scores in unordered SQLite result order — re-sort with nft_id as the
+    # tie-breaker so a cache rebuild can never shuffle equal-score ranks.
+    scored.sort(key=lambda s: (-s["value"], s["nft_id"]))
+    by_id = {s["nft_id"]: (i + 1, s["value"]) for i, s in enumerate(scored)}
+    for r in rows:
+        rank_score = by_id.get(r["nft_id"])
+        r["rarity_rank"] = rank_score[0] if rank_score else None
+        r["rarity_score"] = rank_score[1] if rank_score else None
+
+
 def _compute_market_rows(network: str, kind: str) -> list[dict[str, Any]]:
     """The canonical UNFILTERED live join for one (network, kind) — cached
     for _MARKET_CACHE_TTL. Runs on an executor thread (sqlite3 threadsafety=1,
@@ -921,6 +945,7 @@ def _compute_market_rows(network: str, kind: str) -> list[dict[str, Any]]:
         )
         if kind == "character":
             _attach_character_meta(conn, rows)
+            _attach_character_rarity(conn, rows)
         return rows
     finally:
         conn.close()
@@ -993,6 +1018,11 @@ def _serialize_listing_row(
         out["nft_number"] = r.get("nft_number")
         raw_attrs = r.get("attributes_json")
         out["attributes"] = json.loads(raw_attrs) if raw_attrs else []
+        # #203: collection-wide statistical rarity, attached at cache fill
+        # (_attach_character_rarity); absent on Mine rows, which never pass
+        # through the browse cache — hence .get.
+        out["rarity_rank"] = r.get("rarity_rank")
+        out["rarity_score"] = r.get("rarity_score")
     else:
         out["slot"] = r.get("slot")
         out["value"] = r.get("value")
@@ -1021,7 +1051,10 @@ def _parse_market_int_param(
 @require_market
 async def handle_market_listings(request: web.Request) -> web.Response:
     """Public: GET /api/market/listings?kind=&trait=&min_xrp=&max_xrp=&sort=&limit=&offset=
-    &include_external= (#131: opt-in known-broker external rows, buyable:false).
+    &include_external= (#131: opt-in known-broker external rows, buyable:false)
+    &seller= (#203: only listings by one wallet) — sort additionally accepts
+    rarity_desc (#203: collection-wide statistical rarity, characters only;
+    trait rows carry no rarity and sort as ties).
 
     Cache holds only the canonical unfiltered live join per (network, kind),
     TTL 60s; trait/price filter + sort + pagination run in-process on the
@@ -1032,8 +1065,15 @@ async def handle_market_listings(request: web.Request) -> web.Response:
         return web.json_response({"error": f"unknown kind: {kind!r}"}, status=400)
 
     sort = request.query.get("sort", "price_asc")
-    if sort not in market_store._VALID_SORTS:
+    # rarity_desc is handler-only (#203): it sorts on the rarity fields this
+    # module attaches at cache fill, which market_store's own browse() rows
+    # never carry — so it is deliberately NOT in market_store._VALID_SORTS.
+    if sort not in market_store._VALID_SORTS and sort != "rarity_desc":
         return web.json_response({"error": f"unknown sort: {sort!r}"}, status=400)
+
+    # #203: optional exact-match seller filter ("listed by me"), post-cache
+    # like every other filter param.
+    seller_filter = request.query.get("seller")
 
     # #131: opt-in to known-broker external (destination-locked) listings —
     # read-only price-discovery rows, tagged buyable:false in the response.
@@ -1107,6 +1147,8 @@ async def handle_market_listings(request: web.Request) -> web.Response:
             sort=sort,
             include_external=include_external,
         )
+        if seller_filter:  # #203 parity with the real path's post-cache filter
+            rows = [r for r in rows if r["seller"] == seller_filter]
         page = rows[offset : offset + limit]
         return web.json_response({"rows": page, "total": len(rows)})
 
@@ -1159,6 +1201,8 @@ async def handle_market_listings(request: web.Request) -> web.Response:
             for r in filtered
             if r.get("amount_brix") is not None and Decimal(r["amount_brix"]) <= ceiling
         ]
+    if seller_filter:
+        filtered = [r for r in filtered if r["seller"] == seller_filter]
     if trait_filters:
         # market_store._row_attrs is typed against sqlite3.Row (the shape it
         # sees internally, pre-dict-conversion, inside browse()); our cached
@@ -1178,6 +1222,8 @@ async def handle_market_listings(request: web.Request) -> web.Response:
         filtered = sorted(
             filtered, key=lambda r: (-market_store.listing_price(r), r["offer_index"])
         )
+    elif sort == "rarity_desc":  # #203: rarest first; rows without a score last
+        filtered = sorted(filtered, key=lambda r: (-(r.get("rarity_score") or 0), r["offer_index"]))
     else:  # newest
         filtered = sorted(filtered, key=lambda r: (-(r["created_ts"] or 0), r["offer_index"]))
 

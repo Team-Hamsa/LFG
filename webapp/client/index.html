@@ -24,7 +24,7 @@
   <meta name="twitter:description" content="Mint, dress up, and trade LFG NFTs on the XRP Ledger.">
   <meta name="twitter:image" content="https://build.letseffinggo.com/assets/og-card.png">
   <link rel="stylesheet" href="fonts/fonts.css">
-  <link rel="stylesheet" href="style.css?v=13">
+  <link rel="stylesheet" href="style.css?v=14">
 </head>
 <body>
   <main id="app">
@@ -174,12 +174,15 @@
             <option value="price_asc">Price: low → high</option>
             <option value="price_desc">Price: high → low</option>
             <option value="newest">Newest</option>
+            <option value="rarity_desc">Rarity</option>
           </select>
           <label class="market-external-toggle"><input id="market-include-external" type="checkbox" checked> Show external listings</label>
+          <label class="market-external-toggle"><input id="market-mine-only" type="checkbox"> My listings only</label>
           <button id="market-filter-apply" class="secondary">Apply</button>
         </div>
         <div id="market-grid" class="nft-grid" role="group" aria-label="Marketplace listings"></div>
         <p id="market-empty" class="card-sub" hidden>Nothing listed yet.</p>
+        <button id="market-load-more" class="secondary" hidden>Load more</button>
       </div>
 
       <div id="market-mine" class="market-section" hidden>
@@ -261,6 +264,25 @@
         <button id="go-picker-close" class="secondary" aria-label="Close">✕</button>
       </div>
       <div id="go-picker-grid" class="go-picker-grid"></div>
+    </div>
+  </div>
+
+  <div id="listing-overlay" class="confirm-overlay" role="dialog" aria-modal="true"
+       aria-labelledby="listing-detail-title" hidden>
+    <div class="confirm-box card listing-detail">
+      <img id="listing-detail-img" class="listing-detail-img" alt="">
+      <h3 id="listing-detail-title"></h3>
+      <p id="listing-detail-price" class="market-card-price"></p>
+      <p id="listing-detail-sub" class="card-sub"></p>
+      <div id="listing-detail-attrs" class="listing-attrs"></div>
+      <div class="listing-history-wrap">
+        <p id="listing-history-title" class="card-sub" hidden>Sale history</p>
+        <ul id="listing-detail-history" class="listing-history"></ul>
+      </div>
+      <div class="confirm-actions">
+        <button id="listing-detail-action" class="primary"></button>
+        <button id="listing-detail-close" class="secondary">Close</button>
+      </div>
     </div>
   </div>
 
