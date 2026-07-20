@@ -1692,11 +1692,21 @@ async def handle_market_cancel_start(request):
 
     loop = asyncio.get_event_loop()
     found = await loop.run_in_executor(None, _find_listing_any_network, offer_index)
-    if found is None or not found[1]["is_live"]:
-        return web.json_response({"error": "not found"}, status=404)
-    network, row = found
-    if row["seller"] != wallet:
-        return web.json_response({"error": "not your listing"}, status=403)
+    target = "listing"
+    if found is not None and found[1]["is_live"]:
+        network, row = found
+        if row["seller"] != wallet:
+            return web.json_response({"error": "not your listing"}, status=403)
+    else:
+        # #283: not a live sell listing — maybe the caller's own bid. The
+        # NFTokenCancelOffer payload is identical; only the DB close differs.
+        network = _market_network("character")
+        bid = await loop.run_in_executor(None, _get_bid_sync, network, offer_index)
+        if bid is None or not bid["is_live"]:
+            return web.json_response({"error": "not found"}, status=404)
+        if bid["bidder"] != wallet:
+            return web.json_response({"error": "not your bid"}, status=403)
+        target = "bid"
 
     _prune_sessions(market_sessions, market_flow.TERMINAL_STATES)
     active = _active_session(
@@ -1723,6 +1733,7 @@ async def handle_market_cancel_start(request):
         wallet_address=wallet,
         offer_index=offer_index,
         network=network,
+        target=target,
         platform=_platform(user),
     )
     session.qr_url = payload["qr_url"]
@@ -1991,9 +2002,14 @@ async def _advance_market_session(prefix: str, session: Any, loop: Any) -> None:
             )
     elif prefix == "cancel":
         if await market_flow.advance_cancel_session(session):
-            await loop.run_in_executor(
-                None, _close_listing_sync, session.network, session.offer_index, "cancelled"
-            )
+            if getattr(session, "target", "listing") == "bid":  # #283
+                await loop.run_in_executor(
+                    None, _close_bid_sync, session.network, session.offer_index, "cancelled"
+                )
+            else:
+                await loop.run_in_executor(
+                    None, _close_listing_sync, session.network, session.offer_index, "cancelled"
+                )
     elif prefix == "buy":
         outcome = await market_flow.advance_buy_session(session)
         if outcome == "sold":
@@ -2135,6 +2151,9 @@ async def handle_market_bids(request: web.Request) -> web.Response:
     if not nft_id:
         return web.json_response({"error": "nft_id is required"}, status=400)
 
+    if _use_market_mock():
+        return web.json_response({"nft_id": nft_id, "bids": mock_market.INSTANCE.bids(nft_id)})
+
     def _compute() -> list[dict[str, Any]]:
         conn = nft_index.init_db(nft_index.index_db_path(_market_network("character")))
         conn.row_factory = sqlite3.Row
@@ -2154,6 +2173,9 @@ async def handle_market_bids_mine(request):
     """Authed: GET /api/market/bids/mine — the caller's live outgoing bids
     plus live incoming bids on characters they currently own (#283)."""
     wallet = request["wallet"]
+
+    if _use_market_mock():
+        return web.json_response(mock_market.INSTANCE.bids_mine(wallet))
 
     def _compute() -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
         conn = nft_index.init_db(nft_index.index_db_path(_market_network("character")))
@@ -2199,9 +2221,10 @@ async def handle_market_bid_start(request):
         return web.json_response({"error": f"bad price_xrp: {e}"}, status=400)
 
     if _use_market_mock():
-        # Dev-mode mock harness parity is a follow-up; the real handlers are
-        # fully testable with _use_market_mock monkeypatched off.
-        return web.json_response({"error": "bids are not available in dev mode"}, status=501)
+        try:
+            return web.json_response(mock_market.INSTANCE.start_bid(wallet, nft_id, amount_drops))
+        except mock_market.MockMarketError as e:
+            return web.json_response({"error": str(e)}, status=400)
 
     loop = asyncio.get_event_loop()
     membership = await loop.run_in_executor(
@@ -2277,7 +2300,11 @@ async def handle_market_bid_accept_start(request):
         return web.json_response({"error": "offer_index is required"}, status=400)
 
     if _use_market_mock():
-        return web.json_response({"error": "bids are not available in dev mode"}, status=501)
+        try:
+            return web.json_response(mock_market.INSTANCE.start_bid_accept(wallet, offer_index))
+        except mock_market.MockMarketError as e:
+            status = {"not found": 404, "bid_unavailable": 410}.get(str(e), 400)
+            return web.json_response({"error": str(e)}, status=status)
 
     loop = asyncio.get_event_loop()
     network = _market_network("character")

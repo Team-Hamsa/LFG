@@ -843,6 +843,11 @@ button.back:hover { color: var(--text); border: none; }
 .listing-history { list-style: none; margin: 4px 0 0; padding: 0; }
 .listing-history li { font-size: .72rem; color: var(--muted); padding: 2px 0; }
 
+/* #283: place-bid inline form in the listing detail overlay */
+.listing-bid-form { display: flex; gap: 8px; margin: 8px 0 0; }
+.listing-bid-form input { flex: 1 1 auto; margin: 0; }
+.listing-bid-form button { flex: 0 0 auto; margin: 0; }
+
 /* #131: external (brokered) listings — read-only price discovery */
 .market-external-toggle {
   flex: 0 0 auto; display: inline-flex; align-items: center; gap: 6px;

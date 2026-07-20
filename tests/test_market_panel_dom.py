@@ -169,3 +169,28 @@ def test_browse_ux_wiring():
     css = _read("style.css")
     assert ".listing-detail" in css
     assert ".market-card-rarity" in css
+
+
+def test_bids_wiring():
+    # #283: bids UI — Place-bid in the detail overlay, My bids / incoming
+    # bids groups in Mine, bid + bid_accept flow routing.
+    html = _read("index.html")
+    for el_id in (
+        "mine-bids",
+        "mine-incoming-bids",
+        "listing-detail-bids",
+        "listing-bid-form",
+        "listing-bid-price",
+        "listing-bid-confirm",
+        "listing-detail-bid",
+    ):
+        assert f'id="{el_id}"' in html
+    js = _read("app.js")
+    assert "bid: (id) => `/api/market/bid/${id}`" in js
+    assert "bid_accept: (id) => `/api/market/bid/accept/${id}`" in js
+    assert "function marketBidRender" in js
+    assert "function marketBidAcceptRender" in js
+    assert "'/api/market/bids/mine'" in js
+    assert "renderChipList(el('mine-incoming-bids')" in js
+    # Bids are character-only and never offered on the viewer's own listing.
+    assert "vm.kind === 'character' && (!me || !me.wallet || me.wallet !== vm.seller)" in js

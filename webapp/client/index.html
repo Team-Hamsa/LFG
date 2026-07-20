@@ -24,7 +24,7 @@
   <meta name="twitter:description" content="Mint, dress up, and trade LFG NFTs on the XRP Ledger.">
   <meta name="twitter:image" content="https://build.letseffinggo.com/assets/og-card.png">
   <link rel="stylesheet" href="fonts/fonts.css">
-  <link rel="stylesheet" href="style.css?v=14">
+  <link rel="stylesheet" href="style.css?v=15">
 </head>
 <body>
   <main id="app">
@@ -202,6 +202,16 @@
           <p id="mine-traits-empty" class="trait-strip-empty" hidden>Nothing here.</p>
         </div>
         <div class="trait-strip-section">
+          <h4 class="trait-strip-heading">My bids</h4>
+          <div id="mine-bids" class="trait-strip"></div>
+          <p id="mine-bids-empty" class="trait-strip-empty" hidden>No open bids.</p>
+        </div>
+        <div class="trait-strip-section">
+          <h4 class="trait-strip-heading">Bids on my NFTs</h4>
+          <div id="mine-incoming-bids" class="trait-strip"></div>
+          <p id="mine-incoming-bids-empty" class="trait-strip-empty" hidden>No incoming bids.</p>
+        </div>
+        <div class="trait-strip-section">
           <h4 class="trait-strip-heading">Loose Closet traits</h4>
           <div id="mine-closet" class="trait-strip"></div>
           <p id="mine-closet-empty" class="trait-strip-empty" hidden>Your Closet has no loose traits.</p>
@@ -275,11 +285,17 @@
       <p id="listing-detail-price" class="market-card-price"></p>
       <p id="listing-detail-sub" class="card-sub"></p>
       <div id="listing-detail-attrs" class="listing-attrs"></div>
+      <p id="listing-detail-bids" class="card-sub" hidden></p>
+      <div id="listing-bid-form" class="listing-bid-form" hidden>
+        <input id="listing-bid-price" type="text" inputmode="decimal" placeholder="Bid in XRP">
+        <button id="listing-bid-confirm" class="secondary">Confirm bid</button>
+      </div>
       <div class="listing-history-wrap">
         <p id="listing-history-title" class="card-sub" hidden>Sale history</p>
         <ul id="listing-detail-history" class="listing-history"></ul>
       </div>
       <div class="confirm-actions">
+        <button id="listing-detail-bid" class="secondary" hidden>Place bid</button>
         <button id="listing-detail-action" class="primary"></button>
         <button id="listing-detail-close" class="secondary">Close</button>
       </div>

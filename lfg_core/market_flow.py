@@ -153,6 +153,10 @@ class CancelSession:
     wallet_address: str
     offer_index: str
     network: str  # the listing's onchain db network, resolved at start time
+    # #283: what this cancel targets — "listing" (sell offer, the original
+    # behavior) or "bid" (the caller's own buy offer). The NFTokenCancelOffer
+    # payload is identical; only the DB close differs.
+    target: str = "listing"
     platform: str = "discord"
     id: str = field(default_factory=lambda: uuid.uuid4().hex)
     created_at: float = field(default_factory=time.time)
