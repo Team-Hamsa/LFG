@@ -931,7 +931,7 @@ button.back:hover { color: var(--text); border: none; }
 }
 @keyframes regen-pulse {
   0%, 100% { opacity: 1; text-shadow: 0 0 0 transparent; }
-  50%      { opacity: 0.65; text-shadow: 0 0 8px currentColor; }
+  50%      { opacity: 0.65; text-shadow: 0 0 8px currentcolor; }
 }
 @media (prefers-reduced-motion: reduce) {
   #flow-regen-btn.needs-regen { animation: none; text-decoration: underline; }

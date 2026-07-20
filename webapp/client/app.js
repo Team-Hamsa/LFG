@@ -861,13 +861,21 @@ async function cancelLiveMintSilently() {
 // quantity targets.
 async function onFlowRegen() {
   if (!mintPure.qtyStale(mintQty, liveQty) && liveQty === 1 && currentMintId) {
-    return regeneratePaymentQr(); // classic same-session expired-QR refresh
+    return regeneratePaymentQr(); // classic same-session expired-QR refresh, has its own disable guard
   }
-  // Any other regenerate builds a fresh session; cancel whatever is live first
-  // so we never orphan a bulk job's XUMM payload + headroom reservation (#226).
-  await cancelLiveMintSilently();
-  if (mintPure.qtyMintTarget(mintQty) === 'bulk') return startBulkMint(mintQty);
-  return startMint();
+  // Any other regenerate builds a fresh session; disable the button for the
+  // whole cancel+start round trip so a double-tap can never race a second
+  // await cancelLiveMintSilently() and launch a second concurrent bulk job,
+  // orphaning its XUMM payload + headroom reservation (#226).
+  const btn = el('flow-regen-btn');
+  btn.disabled = true;
+  try {
+    await cancelLiveMintSilently();
+    if (mintPure.qtyMintTarget(mintQty) === 'bulk') return await startBulkMint(mintQty);
+    return await startMint();
+  } finally {
+    btn.disabled = false;
+  }
 }
 
 // ---- Bulk mint flow (#215 UI) ----
@@ -887,7 +895,9 @@ function bulkPayView(j) {
     pill: j.pay_with ? { kind: xrp ? 'xrp' : 'lfgo', text: `Paying with ${xrp ? 'XRP' : 'LFGO'}` } : null,
     qrData: j.payment_link,
     link: j.payment_link,
-    regen: true,
+    // No same-session refresh for a fresh bulk job (onFlowRegen always cancels
+    // + restarts it) — hide Regenerate; onQtyChange reveals it when a qty
+    // change actually invalidates the shown QR.
     qtyStepper: true,
     spinner: !j.payment_link, // payment_link may be null = still preparing (see to_dict contract)
     cancel: () => cancelBulkMint(),

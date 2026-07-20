@@ -422,3 +422,27 @@ def test_app_js_regen_cancels_live_before_fresh_start():
     cancel_idx = body.index("cancelLiveMintSilently")
     start_idx = body.index("startBulkMint")
     assert cancel_idx < start_idx  # cancel the old payload before starting fresh
+
+
+def test_app_js_regen_has_single_flight_guard():
+    """A double-tap on Regenerate must not be able to race a second
+    await cancelLiveMintSilently() into launching a second concurrent bulk
+    job (PR #290 review): the button must be disabled for the whole
+    cancel+start round trip and re-enabled in a finally block."""
+    src = open(APP_JS).read()
+    body = src.split("async function onFlowRegen", 1)[1].split("\n}\n", 1)[0]
+    assert "regeneratePaymentQr()" in body  # same-session early-return preserved
+    assert "btn.disabled = true" in body
+    assert "finally" in body
+    finally_body = body.split("finally", 1)[1]
+    assert "btn.disabled = false" in finally_body
+
+
+def test_app_js_bulk_payview_hides_regen():
+    """A fresh bulk job has no same-session QR refresh, so bulkPayView must
+    not opt into the Regenerate button (onQtyChange reveals it when a qty
+    change actually invalidates the shown QR)."""
+    src = open(APP_JS).read()
+    body = src.split("function bulkPayView", 1)[1].split("\n}\n", 1)[0]
+    assert "qtyStepper: true" in body
+    assert "regen: true" not in body
