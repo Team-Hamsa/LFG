@@ -2251,6 +2251,24 @@ function renderMarketGrid(rows) {
     price.className = 'market-card-price';
     price.textContent = vm.priceLabel;
     name.appendChild(price);
+    // #131: an external (brokered) listing renders as a visually distinct,
+    // non-buyable card — "Listed on <marketplace>" badge, and a click opens
+    // the external marketplace page (or explains why it can't be bought here)
+    // instead of the in-app buy flow.
+    if (vm.external) {
+      card.classList.add('market-card-external');
+      const badge = document.createElement('span');
+      badge.className = 'market-card-external-badge';
+      badge.textContent = marketPure.externalLabel(vm);
+      name.appendChild(badge);
+      card.replaceChildren(img, name);
+      card.onclick = () => {
+        if (vm.externalUrl) window.open(vm.externalUrl, '_blank', 'noopener');
+        else showError('This listing lives on an external marketplace and can only be bought there.');
+      };
+      grid.appendChild(card);
+      continue;
+    }
     card.replaceChildren(img, name);
     // #133: openBuyFlow is async — an unhandled rejection here would leave
     // the card looking dead. Route any buy-path throw to the toast surface.
@@ -2282,6 +2300,8 @@ async function loadMarketBrowse() {
     sort: el('market-sort').value,
     limit: 24,
     offset: 0,
+    // #131: known-broker external listings — read-only price discovery.
+    includeExternal: el('market-include-external').checked,
   });
   const qs = new URLSearchParams();
   for (const [k, v] of pairs) qs.append(k, v);
@@ -2813,6 +2833,7 @@ async function main() {
     loadMarketBrowse();
   });
   el('market-filter-apply').onclick = () => loadMarketBrowse();
+  el('market-include-external').onchange = () => loadMarketBrowse();
   el('market-list-price').addEventListener('input', updateListFormRoyaltyPreview);
   el('market-list-confirm-btn').onclick = submitListForm;
   el('market-list-cancel-btn').onclick = () => showPanel('market-panel');

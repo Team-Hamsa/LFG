@@ -107,6 +107,7 @@ WEB_ALLOWED_ORIGINS=https://build.letseffinggo.com,https://team-hamsa.github.io 
 BRIX_DISTRIBUTOR_ADDRESS=<xrpl-address>                     # optional; airdrop distributor wallet, excluded from BRIX leaderboards/derivation as a counterparty
 BRIX_AMM_ACCOUNT=<xrpl-address>                             # optional; mainnet BRIX/XRP AMM pool account, used by snapshot_balances.py
 BULK_MINT_UI_ENABLED=0                                      # optional (#215); Activity bulk-mint stepper — off = today's UI, server endpoints stay live
+BROKER_ALLOWLIST_PATH=<path-to-json>                        # optional (#131); external-marketplace broker allowlist overlay ({addr: {name, url_template}}); unset = built-ins in lfg_core/brokers.py; edits are picked up live (mtime-keyed cache)
 ```
 
 > **Standalone web surface (#240):** the same vanilla-JS Activity runs as a
@@ -792,6 +793,17 @@ the wrong chain.
   `max_xrp`/`sort`/`limit`/`offset`. The unfiltered per-`(network, kind)` join
   is cached 60s (`_MARKET_CACHE`); trait/amount filters apply to the cached
   rows in Python, so passing a filter never invalidates the cache.
+  `include_external=1` (#131) opts in **known-broker external listings** —
+  destination-locked offers created on other marketplaces (xrp.cafe, bidds, …)
+  — as read-only rows tagged `buyable:false, source:"external"` with a
+  resolved `marketplace` name + `external_url` deep link. The allowlist lives
+  in `lfg_core/brokers.py` (built-ins + optional `BROKER_ALLOWLIST_PATH` JSON
+  overlay); unknown destinations (directed peer-to-peer offers) are NEVER
+  surfaced. The cached canonical set is the superset incl. external rows; the
+  opt-in filters post-cache. Buy on an external row is refused early with 409
+  `external_listing` — deliberately BEFORE `verify_sell_offer`, whose
+  fail-closed foreign-Destination rejection would otherwise stale-close the
+  live external row.
 - `GET /api/market/mine` — authed; four groups: the caller's own live
   `listings` (both kinds), `unlisted_characters`, `unlisted_trait_tokens`, and
   loose `closet_assets`.

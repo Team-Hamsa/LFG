@@ -2226,3 +2226,120 @@ def test_buy_status_onramp_accept_payload_carries_return_url(
     body = _run(_read_json(resp))
     assert body["state"] == "awaiting_signature"
     assert seen_kwargs["return_url"] == ret
+
+
+# ---------------------------------------------------------------------------
+# #131: external (known-broker, destination-locked) listings
+# ---------------------------------------------------------------------------
+
+XRPCAFE_BROKER = "rpx9JThQ2y37FaGeeJP7PXDUVEXY3PHZSC"  # built-in allowlist entry
+
+
+def _seed_external_listing(onchain_path, destination=XRPCAFE_BROKER, offer_index="E" * 64):
+    conn = _reopen(onchain_path)
+    _seed_character(conn, CHAR2, SELLER, 2)
+    _seed_listing(
+        conn,
+        offer_index=offer_index,
+        nft_id=CHAR2,
+        amount_drops=42_000_000,
+        destination=destination,
+    )
+    conn.commit()
+    conn.close()
+
+
+def test_browse_default_excludes_external_rows(onchain_env):
+    conn = _reopen(onchain_env)
+    _seed_character(conn, CHAR1, SELLER, 1)
+    _seed_listing(conn)
+    conn.commit()
+    conn.close()
+    _seed_external_listing(onchain_env)
+
+    resp = _run(server.handle_market_listings(_mocked_request("GET", "/api/market/listings")))
+    body = _run(_read_json(resp))
+    assert [r["offer_index"] for r in body["rows"]] == ["A" * 64]
+    assert body["rows"][0]["buyable"] is True
+
+
+def test_browse_include_external_tags_broker_rows(onchain_env):
+    conn = _reopen(onchain_env)
+    _seed_character(conn, CHAR1, SELLER, 1)
+    _seed_listing(conn)
+    conn.commit()
+    conn.close()
+    _seed_external_listing(onchain_env)
+
+    resp = _run(
+        server.handle_market_listings(
+            _mocked_request("GET", "/api/market/listings?include_external=1")
+        )
+    )
+    body = _run(_read_json(resp))
+    assert len(body["rows"]) == 2
+    ext = next(r for r in body["rows"] if r["offer_index"] == "E" * 64)
+    assert ext["buyable"] is False
+    assert ext["source"] == "external"
+    assert ext["destination"] == XRPCAFE_BROKER
+    assert ext["marketplace"] == "xrp.cafe"
+    assert ext["external_url"] == f"https://xrp.cafe/nft/{CHAR2}"
+    internal = next(r for r in body["rows"] if r["offer_index"] == "A" * 64)
+    assert internal["buyable"] is True
+    assert "source" not in internal
+
+
+def test_browse_include_external_never_shows_unknown_destinations(onchain_env):
+    # A directed peer-to-peer offer (destination not on the broker allowlist)
+    # stays hidden even with the opt-in — it may be a private offer.
+    _seed_external_listing(onchain_env, destination="rPrivatePeerDest111111111111111111")
+    resp = _run(
+        server.handle_market_listings(
+            _mocked_request("GET", "/api/market/listings?include_external=1")
+        )
+    )
+    body = _run(_read_json(resp))
+    assert body["rows"] == []
+
+
+def test_buy_start_external_listing_409_row_stays_live(onchain_env, market_wallet, monkeypatch):
+    # The refusal must fire BEFORE verify_sell_offer: a verify run would
+    # fail-closed on the foreign Destination and stale-close a live external
+    # row, deleting it from browse.
+    _seed_external_listing(onchain_env)
+
+    async def _boom(*a, **k):  # pragma: no cover - must not be reached
+        raise AssertionError("verify_sell_offer must not run for external listings")
+
+    monkeypatch.setattr(server.market_ops, "verify_sell_offer", _boom)
+    req = _post_request("/api/market/buy", {"offer_index": "E" * 64})
+    resp = _run(server.handle_market_buy_start(req))
+    assert resp.status == 409
+    body = _run(_read_json(resp))
+    assert body["code"] == "external_listing"
+
+    conn = _reopen(onchain_env)
+    row = market_get_listing(conn, "E" * 64)
+    conn.close()
+    assert row["is_live"] == 1
+    assert row["closed_reason"] is None
+
+
+def test_browse_include_external_revalidates_against_fresh_allowlist(onchain_env, monkeypatch):
+    # A broker removed from the allowlist mid-cache-TTL must stop being
+    # surfaced immediately, even though the cached superset still holds it.
+    _seed_external_listing(onchain_env)
+    resp = _run(
+        server.handle_market_listings(
+            _mocked_request("GET", "/api/market/listings?include_external=1")
+        )
+    )
+    assert len(_run(_read_json(resp))["rows"]) == 1  # cache now filled
+
+    monkeypatch.setattr(server.brokers, "known_destinations", lambda: frozenset())
+    resp = _run(
+        server.handle_market_listings(
+            _mocked_request("GET", "/api/market/listings?include_external=1")
+        )
+    )
+    assert _run(_read_json(resp))["rows"] == []

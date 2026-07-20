@@ -38,6 +38,7 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from lfg_core import (
     brix_payment,
+    brokers,
     bulk_mint_flow,
     closet_token,
     config,
@@ -898,7 +899,17 @@ def _compute_market_rows(network: str, kind: str) -> list[dict[str, Any]]:
     try:
         market_store.init_db(conn)
         economy_store.init_economy_schema(conn)
-        rows = market_store.browse(conn, kind=kind, limit=_MARKET_ROW_CAP, offset=0)
+        # #131: the cached canonical set is a SUPERSET that includes known-
+        # broker external (destination-locked) rows; the handler filters them
+        # out post-cache unless ?include_external=1, so the opt-in param never
+        # keys (or fans out) the cache.
+        rows = market_store.browse(
+            conn,
+            kind=kind,
+            limit=_MARKET_ROW_CAP,
+            offset=0,
+            external_destinations=brokers.known_destinations(),
+        )
         if kind == "character":
             _attach_character_images(conn, rows)
         return rows
@@ -945,7 +956,21 @@ def _serialize_listing_row(
         "image": r.get("image"),
         "seller": r["seller"],
         "offer_index": r["offer_index"],
+        "buyable": True,
     }
+    # #131: a destination-locked row is an external (brokered) listing —
+    # price-discovery only, never buyable in-app. Only known-broker
+    # destinations reach here (browse's allowlist gate), but resolve() can
+    # still miss if the allowlist changed between cache fill and serialize;
+    # the generic fallback keeps the row honest either way.
+    destination = r.get("destination")
+    if destination:
+        out["buyable"] = False
+        out["source"] = "external"
+        out["destination"] = destination
+        resolved = brokers.resolve(destination, r["nft_id"])
+        out["marketplace"] = resolved["name"] if resolved else f"external ({destination[:8]}…)"
+        out["external_url"] = resolved["url"] if resolved else None
     # #239 per-kind denomination: characters carry amount_drops/amount_xrp,
     # trait listings amount_brix. Emitted by presence rather than kind so a
     # legacy live XRP trait row (awaiting the backfill's stale-close) still
@@ -986,7 +1011,8 @@ def _parse_market_int_param(
 
 @require_market
 async def handle_market_listings(request: web.Request) -> web.Response:
-    """Public: GET /api/market/listings?kind=&trait=&min_xrp=&max_xrp=&sort=&limit=&offset=.
+    """Public: GET /api/market/listings?kind=&trait=&min_xrp=&max_xrp=&sort=&limit=&offset=
+    &include_external= (#131: opt-in known-broker external rows, buyable:false).
 
     Cache holds only the canonical unfiltered live join per (network, kind),
     TTL 60s; trait/price filter + sort + pagination run in-process on the
@@ -999,6 +1025,11 @@ async def handle_market_listings(request: web.Request) -> web.Response:
     sort = request.query.get("sort", "price_asc")
     if sort not in market_store._VALID_SORTS:
         return web.json_response({"error": f"unknown sort: {sort!r}"}, status=400)
+
+    # #131: opt-in to known-broker external (destination-locked) listings —
+    # read-only price-discovery rows, tagged buyable:false in the response.
+    # Default output stays destination-free, exactly as before.
+    include_external = request.query.get("include_external", "0") in ("1", "true")
 
     trait_filters: dict[str, list[str]] = {}
     for raw in request.query.getall("trait", []):
@@ -1065,6 +1096,7 @@ async def handle_market_listings(request: web.Request) -> web.Response:
             min_drops=min_drops,
             max_drops=max_drops,
             sort=sort,
+            include_external=include_external,
         )
         page = rows[offset : offset + limit]
         return web.json_response({"rows": page, "total": len(rows)})
@@ -1086,7 +1118,16 @@ async def handle_market_listings(request: web.Request) -> web.Response:
         )
         _market_cache_put(cache_key, rows, now_mono, gen)
 
-    filtered = rows
+    # #131: the cache holds the superset (buyable + known-broker external);
+    # without the opt-in, drop the external rows here, post-cache. With it,
+    # re-check destination rows against a FRESH allowlist — a broker removed
+    # from the allowlist (overlay file edit) mid-cache-TTL must stop being
+    # surfaced immediately, not after the cache expires.
+    if include_external:
+        allowed = brokers.known_destinations()
+        filtered = [r for r in rows if not r.get("destination") or r["destination"] in allowed]
+    else:
+        filtered = [r for r in rows if not r.get("destination")]
     if min_drops is not None:
         filtered = [
             r for r in filtered if r["amount_drops"] is not None and r["amount_drops"] >= min_drops
@@ -1657,10 +1698,16 @@ async def handle_market_buy_start(request):
         try:
             return web.json_response(mock_market.INSTANCE.start_buy(wallet, offer_index))
         except mock_market.MockMarketError as e:
-            status = {"not found": 404, "listing_unavailable": 410, "closet_required": 403}.get(
-                str(e), 400
-            )
-            return web.json_response({"error": str(e)}, status=status)
+            status = {
+                "not found": 404,
+                "listing_unavailable": 410,
+                "closet_required": 403,
+                "external_listing": 409,
+            }.get(str(e), 400)
+            err_body = {"error": str(e)}
+            if str(e) == "external_listing":
+                err_body["code"] = "external_listing"  # match the real path's contract
+            return web.json_response(err_body, status=status)
 
     loop = asyncio.get_event_loop()
     found = await loop.run_in_executor(None, _find_listing_any_network, offer_index)
@@ -1669,6 +1716,20 @@ async def handle_market_buy_start(request):
     network, row = found
     if not row["is_live"]:
         return web.json_response({"error": "listing_unavailable"}, status=410)
+
+    # #131: a destination-locked (external/brokered) listing is display-only —
+    # verify_sell_offer would fail-closed on the foreign Destination anyway,
+    # but letting it run would stale-close a perfectly-live external row via
+    # the `not verified` branch below, deleting it from browse. Refuse early,
+    # with no DB write.
+    if row.get("destination"):
+        return web.json_response(
+            {
+                "error": "this listing is on an external marketplace and can't be bought here",
+                "code": "external_listing",
+            },
+            status=409,
+        )
 
     # Buying your own listing is a no-op that would fail on-ledger
     # (tecCANT_ACCEPT_OWN_OFFER) — reject up front instead of spending a sign.

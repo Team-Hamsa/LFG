@@ -421,3 +421,60 @@ def test_sort_rows_brix_decimal_not_lexicographic():
     ]
     out = run_js(f"M.sortRows({json.dumps(rows)}, 'price_asc')")
     assert [r["amount_brix"] for r in out] == ["5", "10.5", "100"]
+
+
+# --- #131: external (brokered) listing view-model fields ---
+
+
+def test_map_listing_row_external_fields():
+    row = {
+        "nft_id": "N1",
+        "kind": "character",
+        "nft_number": 7,
+        "image": "https://cdn/x.png",
+        "amount_drops": 42000000,
+        "amount_xrp": "42",
+        "seller": "rS",
+        "offer_index": "OFF1",
+        "buyable": False,
+        "source": "external",
+        "destination": "rBroker",
+        "marketplace": "xrp.cafe",
+        "external_url": "https://xrp.cafe/nft/N1",
+    }
+    vm = run_js(f"M.mapListingRow({json.dumps(row)})")
+    assert vm["buyable"] is False
+    assert vm["external"] is True
+    assert vm["marketplace"] == "xrp.cafe"
+    assert vm["externalUrl"] == "https://xrp.cafe/nft/N1"
+
+
+def test_map_listing_row_defaults_to_buyable():
+    row = {
+        "nft_id": "N1",
+        "kind": "character",
+        "nft_number": 7,
+        "image": None,
+        "amount_drops": 1000000,
+        "amount_xrp": "1",
+        "seller": "rS",
+        "offer_index": "OFF1",
+    }
+    vm = run_js(f"M.mapListingRow({json.dumps(row)})")
+    assert vm["buyable"] is True
+    assert vm["external"] is False
+    assert vm["marketplace"] is None
+    assert vm["externalUrl"] is None
+
+
+def test_external_label():
+    assert run_js('M.externalLabel({external: true, marketplace: "bidds"})') == "Listed on bidds"
+    assert run_js("M.externalLabel({external: true, marketplace: null})") == "External listing"
+    assert run_js('M.externalLabel({external: false, marketplace: "bidds"})') == ""
+
+
+def test_build_listings_params_include_external():
+    pairs = run_js('M.buildListingsParams({kind: "character", includeExternal: true})')
+    assert ["include_external", "1"] in pairs
+    pairs = run_js('M.buildListingsParams({kind: "character", includeExternal: false})')
+    assert not any(k == "include_external" for k, _ in pairs)
