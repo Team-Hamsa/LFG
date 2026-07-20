@@ -2814,13 +2814,43 @@ function renderShopGrid(items) {
   }
 }
 
+// #217 follow-up: Shop filter state — the catalog arrives whole from the
+// single cached endpoint, so slot/search/sort are pure client-side re-renders.
+const shopState = { items: [], slot: 'all', query: '', sort: 'price_asc' };
+
+function renderShopChips() {
+  const bar = el('shop-slot-chips');
+  bar.replaceChildren();
+  for (const { slot, count } of marketPure.shopSlotCounts(shopState.items)) {
+    const chip = document.createElement('button');
+    chip.className = 'lb-chip';
+    chip.dataset.slot = slot;
+    chip.setAttribute('role', 'tab');
+    chip.textContent = slot === 'all' ? `All · ${count}` : `${slot} · ${count}`;
+    chip.classList.toggle('active', shopState.slot === slot);
+    chip.setAttribute('aria-selected', String(shopState.slot === slot));
+    chip.onclick = () => {
+      shopState.slot = slot;
+      highlightTabs('shop-slot-chips', 'slot', slot);
+      applyShopFilters();
+    };
+    bar.appendChild(chip);
+  }
+}
+
+function applyShopFilters() {
+  renderShopGrid(marketPure.filterShopItems(shopState.items, shopState));
+}
+
 async function loadShopCatalog() {
   const grid = el('shop-grid');
   showGridSkeletons(grid);
   el('shop-empty').hidden = true;
   try {
     const data = await api('/api/shop/catalog');
-    renderShopGrid(data.items || []);
+    shopState.items = data.items || [];
+    renderShopChips();
+    applyShopFilters();
   } catch (e) {
     grid.replaceChildren();
     showError(e.message);
@@ -3134,6 +3164,8 @@ async function main() {
   el('market-filter-apply').onclick = () => loadMarketBrowse();
   el('market-include-external').onchange = () => loadMarketBrowse();
   el('market-mine-only').onchange = () => loadMarketBrowse();
+  el('shop-search').oninput = () => { shopState.query = el('shop-search').value; applyShopFilters(); };
+  el('shop-sort').onchange = () => { shopState.sort = el('shop-sort').value; applyShopFilters(); };
   el('market-load-more').onclick = () => loadMarketBrowse({ append: true });
   el('listing-detail-close').onclick = closeListingDetail;
   el('listing-overlay').onclick = (e) => { if (e.target === el('listing-overlay')) closeListingDetail(); };

@@ -511,3 +511,50 @@ def test_build_listings_params_seller():
     assert ["seller", "rMe"] in pairs
     pairs = run_js('M.buildListingsParams({kind: "character", seller: ""})')
     assert not any(k == "seller" for k, _ in pairs)
+
+
+# --- Trait Shop filtering (#217 follow-up) ---
+
+SHOP_ITEMS = [
+    {"slot": "Head", "value": "Wizard Hat", "price_brix": 40},
+    {"slot": "Head", "value": "Halo", "price_brix": 90},
+    {"slot": "Eyes", "value": "Shades", "price_brix": 12},
+    {"slot": "Eyes", "value": "Laser Halo", "price_brix": 12},
+]
+
+
+def _filter(opts):
+    return run_js(f"M.filterShopItems({json.dumps(SHOP_ITEMS)}, {json.dumps(opts)})")
+
+
+def test_shop_filter_slot():
+    rows = _filter({"slot": "Head"})
+    assert [r["value"] for r in rows] == ["Wizard Hat", "Halo"]  # price asc
+
+
+def test_shop_filter_all_passes_everything():
+    assert len(_filter({"slot": "all"})) == 4
+    assert len(run_js(f"M.filterShopItems({json.dumps(SHOP_ITEMS)})")) == 4
+
+
+def test_shop_filter_query_case_insensitive():
+    rows = _filter({"query": "  hAlO "})
+    assert {r["value"] for r in rows} == {"Halo", "Laser Halo"}
+
+
+def test_shop_filter_combined_and_sorts():
+    rows = _filter({"slot": "Eyes", "sort": "price_desc"})
+    # Equal prices tie-break A->Z.
+    assert [r["value"] for r in rows] == ["Laser Halo", "Shades"]
+    rows = _filter({"sort": "name"})
+    assert [r["value"] for r in rows] == ["Halo", "Laser Halo", "Shades", "Wizard Hat"]
+
+
+def test_shop_filter_empty_result():
+    assert _filter({"query": "nonexistent"}) == []
+
+
+def test_shop_slot_counts():
+    counts = run_js(f"M.shopSlotCounts({json.dumps(SHOP_ITEMS)})")
+    assert counts[0] == {"slot": "all", "count": 4}
+    assert {"slot": "Eyes", "count": 2} in counts and {"slot": "Head", "count": 2} in counts

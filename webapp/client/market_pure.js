@@ -356,3 +356,37 @@ export function isMarketTerminal(state) {
 // your traits.").
 export const CLOSET_REQUIRED_MESSAGE =
   'You need a Closet to buy traits — claim one first, then come back to complete this purchase.';
+
+// --- Trait Shop filtering (#217 follow-up) ---
+
+/**
+ * Filter + sort the Shop catalog client-side. `items` are /api/shop/catalog
+ * entries ({slot, value, price_brix, image_url}); `slot` of 'all' (or empty)
+ * passes every slot; `query` is a trimmed, case-insensitive substring match
+ * on the trait value; `sort` is 'price_asc' | 'price_desc' | 'name'.
+ * Sorts are deterministic: value (A→Z) breaks price ties.
+ */
+export function filterShopItems(items, { slot = 'all', query = '', sort = 'price_asc' } = {}) {
+  let rows = (items || []).slice();
+  if (slot && slot !== 'all') rows = rows.filter((i) => i.slot === slot);
+  const q = (query || '').trim().toLowerCase();
+  if (q) rows = rows.filter((i) => String(i.value).toLowerCase().includes(q));
+  const byName = (a, b) => String(a.value).localeCompare(String(b.value));
+  if (sort === 'price_desc') rows.sort((a, b) => (b.price_brix - a.price_brix) || byName(a, b));
+  else if (sort === 'name') rows.sort(byName);
+  else rows.sort((a, b) => (a.price_brix - b.price_brix) || byName(a, b));
+  return rows;
+}
+
+/**
+ * ['all', ...slots] with counts for the Shop's chip row, ordered by count
+ * descending then name: [{slot: 'all', count: N}, {slot: 'Head', count: 121}, …].
+ */
+export function shopSlotCounts(items) {
+  const counts = new Map();
+  for (const i of items || []) counts.set(i.slot, (counts.get(i.slot) || 0) + 1);
+  const slots = [...counts.entries()]
+    .sort((a, b) => (b[1] - a[1]) || String(a[0]).localeCompare(String(b[0])))
+    .map(([slot, count]) => ({ slot, count }));
+  return [{ slot: 'all', count: (items || []).length }, ...slots];
+}

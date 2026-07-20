@@ -24,7 +24,7 @@
   <meta name="twitter:description" content="Mint, dress up, and trade LFG NFTs on the XRP Ledger.">
   <meta name="twitter:image" content="https://build.letseffinggo.com/assets/og-card.png">
   <link rel="stylesheet" href="fonts/fonts.css">
-  <link rel="stylesheet" href="style.css?v=15">
+  <link rel="stylesheet" href="style.css?v=16">
 </head>
 <body>
   <main id="app">
@@ -149,6 +149,15 @@
       </div>
 
       <div id="market-shop" class="market-section" hidden>
+        <div id="shop-slot-chips" class="lb-chips" role="tablist" aria-label="Filter by trait slot"></div>
+        <div class="market-filters">
+          <input id="shop-search" type="text" placeholder="Search traits (e.g. Halo)" aria-label="Search traits">
+          <select id="shop-sort" aria-label="Sort catalog">
+            <option value="price_asc">Price: low → high</option>
+            <option value="price_desc">Price: high → low</option>
+            <option value="name">A → Z</option>
+          </select>
+        </div>
         <div id="shop-grid" class="nft-grid" role="group" aria-label="Trait Shop catalog"></div>
         <p id="shop-empty" class="card-sub" hidden>The Shop is empty right now.</p>
       </div>
