@@ -2598,3 +2598,49 @@ def test_bids_mine(onchain_env, market_wallet):
     body = _run(_read_json(resp))
     assert [b["offer_index"] for b in body["my_bids"]] == ["E" * 64]
     assert [b["offer_index"] for b in body["bids_on_my_nfts"]] == ["D" * 64]
+
+
+def test_cancel_start_falls_through_to_own_bid(onchain_env, market_wallet, monkeypatch):
+    # #283: /api/market/cancel now also cancels the caller's own bid when the
+    # offer_index isn't a live sell listing.
+    _seed_bid(onchain_env, bidder=SELLER)
+    monkeypatch.setattr(server.xumm_ops, "create_cancel_offer_payload", _fake_payload())
+    req = _post_request("/api/market/cancel", {"offer_index": "D" * 64})
+    resp = _run(server.handle_market_cancel_start(req))
+    assert resp.status == 200
+    session = next(s for s in server.market_sessions.values() if s.kind == "cancel")
+    assert session.target == "bid"
+
+
+def test_cancel_start_foreign_bid_403(onchain_env, market_wallet, monkeypatch):
+    _seed_bid(onchain_env, bidder=BUYER)  # not the caller's bid
+    monkeypatch.setattr(server.xumm_ops, "create_cancel_offer_payload", _fake_payload())
+    req = _post_request("/api/market/cancel", {"offer_index": "D" * 64})
+    resp = _run(server.handle_market_cancel_start(req))
+    assert resp.status == 403
+
+
+def test_cancel_status_bid_target_closes_bid(onchain_env, market_wallet, monkeypatch):
+    _seed_bid(onchain_env, bidder=SELLER)
+    session = server.market_flow.CancelSession(
+        discord_id="u1",
+        wallet_address=SELLER,
+        offer_index="D" * 64,
+        network="testnet",
+        target="bid",
+        platform="discord",
+    )
+    session.payload_uuid = "U1"
+    server.market_sessions[session.id] = session
+
+    async def advanced(_s, **_kw):
+        _s.state = server.market_flow.DONE
+        return True
+
+    monkeypatch.setattr(server.market_flow, "advance_cancel_session", advanced)
+    _run(server._advance_market_session("cancel", session, __import__("asyncio").get_event_loop()))
+    conn = _reopen(onchain_env)
+    row = market_get_bid(conn, "D" * 64)
+    conn.close()
+    assert row["is_live"] == 0
+    assert row["closed_reason"] == "cancelled"

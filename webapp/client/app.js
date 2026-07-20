@@ -2184,6 +2184,8 @@ const MARKET_STATUS_PATH = {
   list: (id) => `/api/market/list/${id}`,
   cancel: (id) => `/api/market/cancel/${id}`,
   buy: (id) => `/api/market/buy/${id}`,
+  bid: (id) => `/api/market/bid/${id}`,
+  bid_accept: (id) => `/api/market/bid/accept/${id}`,
   trait_list: (id) => `/api/market/trait/list/${id}`,
 };
 
@@ -2345,6 +2347,23 @@ async function openListingDetail(row) {
     action.onclick = () => { closeListingDetail(); openBuyFlow(row).catch((e) => showError(e.message)); };
   }
   renderListingHistory([]);
+  // #283: bids apply to characters only, and only when the viewer isn't the
+  // seller (external listings included — that's the point: act on them here).
+  const bidsLine = el('listing-detail-bids');
+  const bidBtn = el('listing-detail-bid');
+  const bidForm = el('listing-bid-form');
+  bidsLine.hidden = true;
+  bidForm.hidden = true;
+  el('listing-bid-price').value = ''; // never carry a price across listings
+  const canBid = vm.kind === 'character' && (!me || !me.wallet || me.wallet !== vm.seller);
+  bidBtn.hidden = !canBid;
+  bidBtn.onclick = () => { bidForm.hidden = !bidForm.hidden; if (!bidForm.hidden) el('listing-bid-price').focus(); };
+  el('listing-bid-confirm').onclick = () => {
+    const price = el('listing-bid-price').value.trim();
+    const checked = marketPure.validatePrice(price);
+    if (!checked.ok) { showError(checked.error); return; }
+    placeBid(row, price).catch((e) => showError(e.message));
+  };
   el('listing-overlay').hidden = false;
   el('listing-detail-close').focus();
   // History loads after the overlay opens — non-blocking, best-effort.
@@ -2355,6 +2374,15 @@ async function openListingDetail(row) {
     const data = await api(`/api/market/history?${qs}`);
     if (!el('listing-overlay').hidden && activeListingId === requestId) {
       renderListingHistory(data.events || data.sales || []);
+    }
+    if (vm.kind === 'character') {
+      const bd = await api(`/api/market/bids?nft_id=${encodeURIComponent(vm.nftId)}`);
+      if (!el('listing-overlay').hidden && activeListingId === requestId && (bd.bids || []).length) {
+        const top = bd.bids[0];
+        const bidsLine2 = el('listing-detail-bids');
+        bidsLine2.textContent = `Top bid: ${top.amount_xrp} XRP (${bd.bids.length} bid${bd.bids.length > 1 ? 's' : ''})`;
+        bidsLine2.hidden = false;
+      }
     }
   } catch (e) { /* history is decorative; the overlay stays useful without it */ }
 }
@@ -2389,10 +2417,12 @@ async function loadMarketBrowse({ append = false } = {}) {
     sort: el('market-sort').value,
     limit: MARKET_PAGE_SIZE,
     offset: append ? marketState.offset : 0,
-    // #131: known-broker external listings — read-only price discovery.
-    includeExternal: el('market-include-external').checked,
-    // #203: "listed by me" — server-side seller filter on my wallet.
-    seller: el('market-mine-only').checked && me && me.wallet ? me.wallet : '',
+    // #131/#203: read these controls defensively — a stale cached
+    // index.html paired with fresh app.js (Discord webview / browser cache
+    // skew) would otherwise throw here, before the try below, and blank the
+    // whole grid. Missing element -> the old default behavior.
+    includeExternal: Boolean(el('market-include-external')?.checked ?? true),
+    seller: el('market-mine-only')?.checked && me && me.wallet ? me.wallet : '',
   });
   const qs = new URLSearchParams();
   for (const [k, v] of pairs) qs.append(k, v);
@@ -2497,12 +2527,33 @@ function renderMineGroups(data) {
   renderChipList(el('mine-closet'), el('mine-closet-empty'), closetEntries, 'Sell', openListForm);
 }
 
+function renderBidGroups(data) {
+  const myEntries = (data.my_bids || []).map((b) => ({
+    imgSrc: b.image ? imgUrl(b.image, THUMB_W) : null,
+    label: `${b.nft_number != null ? `#${b.nft_number}` : b.nft_id} — ${b.amount_xrp} XRP`,
+    payload: b,
+  }));
+  renderChipList(el('mine-bids'), el('mine-bids-empty'), myEntries, 'Cancel', cancelBid);
+  const inEntries = (data.bids_on_my_nfts || []).map((b) => ({
+    imgSrc: b.image ? imgUrl(b.image, THUMB_W) : null,
+    label: `${b.nft_number != null ? `#${b.nft_number}` : b.nft_id} — ${b.amount_xrp} XRP`,
+    payload: b,
+  }));
+  renderChipList(el('mine-incoming-bids'), el('mine-incoming-bids-empty'), inEntries, 'Accept', acceptBid);
+}
+
 async function loadMarketMine() {
   try {
     const data = await api('/api/market/mine');
     renderMineGroups(data);
   } catch (e) {
     showError(e.message);
+  }
+  // #283: bids load separately — a bids failure must not blank the listings.
+  try {
+    renderBidGroups(await api('/api/market/bids/mine'));
+  } catch (e) {
+    renderBidGroups({});
   }
 }
 
@@ -2775,6 +2826,72 @@ async function openShopBuyFlow(item) {
   }
   showFlow(shopBuyRender(s));
   if (!marketPure.isMarketTerminal(s.state)) pollShopFlow(s.id);
+}
+
+// --- #283: native bids ---
+
+function marketBidRender(s) {
+  if (s.state === 'pending') {
+    return { title: '⏳ Confirming', text: 'Signature received — waiting for the ledger to confirm…', spinner: true };
+  }
+  if (s.state === 'done') {
+    return { title: '🎉 Bid placed!', text: 'Your bid is live on-ledger. The owner can accept it any time before it expires (7 days).', done: true };
+  }
+  if (s.state === 'awaiting_signature') {
+    return { title: '🏷️ Place bid', text: signText(s.push, 'Scan to sign your bid in Xaman.'), qrData: s.xumm_url, link: s.xumm_url };
+  }
+  if (s.state === 'unknown') {
+    return { title: "⏳ Couldn't confirm", text: "We couldn't confirm the bid in time — check My bids shortly; it may still have gone through.", done: true };
+  }
+  return { title: '❌ Bid failed', text: s.error || 'Something went wrong.', done: true };
+}
+
+function marketBidAcceptRender(s) {
+  if (s.state === 'pending') {
+    return { title: '⏳ Confirming', text: 'Signature received — waiting for the ledger to confirm…', spinner: true };
+  }
+  if (s.state === 'done') {
+    return { title: '🎉 Sold!', text: 'You accepted the bid — the XRP is in your wallet and the NFT is on its way to the bidder.', done: true };
+  }
+  if (s.state === 'awaiting_signature') {
+    return { title: '🤝 Accept bid', text: signText(s.push, 'Scan to accept the bid in Xaman.'), qrData: s.xumm_url, link: s.xumm_url };
+  }
+  if (s.state === 'unknown') {
+    return { title: "⏳ Couldn't confirm", text: "We couldn't confirm the accept in time — it may still have gone through.", done: true };
+  }
+  const why = s.reason === 'bid_unavailable' ? 'The bid expired, was cancelled, or the bidder no longer has the funds.' : (s.error || 'Something went wrong.');
+  return { title: '❌ Accept failed', text: why, done: true };
+}
+
+async function placeBid(row, priceXrp) {
+  closeListingDetail();
+  await marketFlow('bid', '/api/market/bid', { nft_id: row.nft_id, price_xrp: priceXrp }, marketBidRender);
+}
+
+async function cancelBid(bid) {
+  const ok = await confirmDialog({
+    title: 'Cancel this bid?',
+    text: `Your ${bid.amount_xrp} XRP bid will be withdrawn.`,
+    confirmLabel: 'Cancel bid',
+  });
+  if (!ok) return;
+  await marketFlow('cancel', '/api/market/cancel', { offer_index: bid.offer_index }, marketCancelRender);
+}
+
+async function acceptBid(bid) {
+  // Net amount computed from marketPure's fee constants (single source of
+  // truth for the 93/7 split) rather than a hand-written figure.
+  const priced = marketPure.safeComputeRoyalty(bid.amount_xrp);
+  const netText = priced.ok
+    ? `you net ${priced.royalty.receiveXrp} XRP (93% — 7% collection royalty)`
+    : 'you net 93% (7% collection royalty)';
+  const ok = await confirmDialog({
+    title: 'Accept this bid?',
+    text: `Sell for ${bid.amount_xrp} XRP — ${netText}.`,
+    confirmLabel: 'Accept bid',
+  });
+  if (!ok) return;
+  await marketFlow('bid_accept', '/api/market/bid/accept', { offer_index: bid.offer_index }, marketBidAcceptRender);
 }
 
 async function openBuyFlow(row) {

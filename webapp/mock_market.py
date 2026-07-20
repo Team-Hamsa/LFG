@@ -146,6 +146,18 @@ class MockMarket:
                 "value": "Grin",
             },
         ]
+        # #283: seed one live incoming bid on a DEV_OWNER character so the
+        # Accept-bid flow is exercisable through the dev-mode mock.
+        self._bids: list[dict[str, Any]] = [
+            {
+                "offer_index": "MOCKBID-9001",
+                "nft_id": "MOCK-3537",  # a DEV_OWNER character -> shows in bids_on_my_nfts
+                "bidder": OTHER_SELLER_2,
+                "amount_drops": 12_000_000,
+                "expiration": None,
+                "is_live": True,
+            },
+        ]
         self._sessions: dict[str, dict[str, Any]] = {}
         self._session_counter = 0
 
@@ -328,7 +340,21 @@ class MockMarket:
     def start_cancel(self, owner: str, offer_index: str) -> dict[str, Any]:
         row = self._find(offer_index)
         if row is None or not row["is_live"]:
-            raise MockMarketError("not found")
+            # #283: fall through to the caller's own bids.
+            bid = self._find_bid(offer_index)
+            if bid is None or not bid["is_live"]:
+                raise MockMarketError("not found")
+            if bid["bidder"] != owner:
+                raise MockMarketError("not your bid")
+            sid = self._next_session_id("cancel")
+            self._sessions[sid] = {
+                "kind": "cancel",
+                "polls": 0,
+                "state": "awaiting_signature",
+                "offer_index": offer_index,
+                "bid": True,
+            }
+            return self._session_dict(sid)
         if row["seller"] != owner:
             raise MockMarketError("not your listing")
         sid = self._next_session_id("cancel")
@@ -388,6 +414,120 @@ class MockMarket:
 
     # --- status / advance (scripted progression) ---
 
+    # --- #283: bids ---
+
+    def _bid_nft_meta(self, nft_id: str) -> dict[str, Any]:
+        """image/nft_number for a bid chip, resolved from whichever mock store
+        knows the token — mirrors the real _serialize_bid's optional fields."""
+        listing = next((r for r in self._listings if r["nft_id"] == nft_id), None)
+        if listing is not None:
+            return {"image": listing["image"] or None, "nft_number": listing.get("nft_number")}
+        char = next((c for c in mock_economy.INSTANCE.characters if c["nft_id"] == nft_id), None)
+        if char is not None:
+            return {"image": char.get("image_url") or None, "nft_number": char.get("edition")}
+        return {"image": None, "nft_number": None}
+
+    def _serialize_bid(self, b: dict[str, Any]) -> dict[str, Any]:
+        meta = self._bid_nft_meta(b["nft_id"])
+        return {
+            "offer_index": b["offer_index"],
+            "nft_id": b["nft_id"],
+            "bidder": b["bidder"],
+            "amount_drops": b["amount_drops"],
+            "amount_xrp": market_ops.drops_to_xrp_str(str(b["amount_drops"])),
+            "expiration": b.get("expiration"),
+            "nft_number": meta["nft_number"],
+            "image": meta["image"],
+        }
+
+    def bids(self, nft_id: str) -> list[dict[str, Any]]:
+        rows = [b for b in self._bids if b["is_live"] and b["nft_id"] == nft_id]
+        rows.sort(key=lambda b: -b["amount_drops"])
+        return [self._serialize_bid(b) for b in rows]
+
+    def bids_mine(self, owner: str) -> dict[str, Any]:
+        mine = [b for b in self._bids if b["is_live"] and b["bidder"] == owner]
+        owned_ids = {c["nft_id"] for c in mock_economy.INSTANCE.characters}
+        incoming = [
+            b
+            for b in self._bids
+            if b["is_live"] and b["nft_id"] in owned_ids and b["bidder"] != owner
+        ]
+        return {
+            "my_bids": [self._serialize_bid(b) for b in mine],
+            "bids_on_my_nfts": [self._serialize_bid(b) for b in incoming],
+        }
+
+    def _find_bid(self, offer_index: str) -> dict[str, Any] | None:
+        return next((b for b in self._bids if b["offer_index"] == offer_index), None)
+
+    def start_bid(self, owner: str, nft_id: str, amount_drops: int) -> dict[str, Any]:
+        # Bids target NFTs, not listings; the only mock-enforced guard is the
+        # self-bid check (mirrors the real handler's 400).
+        listing = next((r for r in self._listings if r["nft_id"] == nft_id), None)
+        if listing is not None and listing["seller"] == owner:
+            raise MockMarketError("you already own that NFT")
+        sid = self._next_session_id("bid")
+        self._sessions[sid] = {
+            "kind": "bid",
+            "polls": 0,
+            "state": "awaiting_signature",
+            "offer_index": None,
+            "nft_id": nft_id,
+            "bidder": owner,
+            "amount_drops": amount_drops,
+        }
+        return self._session_dict(sid)
+
+    def start_bid_accept(self, owner: str, offer_index: str) -> dict[str, Any]:
+        bid = self._find_bid(offer_index)
+        if bid is None:
+            raise MockMarketError("not found")
+        if not bid["is_live"]:
+            raise MockMarketError("bid_unavailable")
+        sid = self._next_session_id("bidaccept")
+        self._sessions[sid] = {
+            "kind": "bid_accept",
+            "polls": 0,
+            "state": "awaiting_signature",
+            "offer_index": offer_index,
+            "owner": owner,
+        }
+        return self._session_dict(sid)
+
+    def _advance_bid(self, session: dict[str, Any]) -> None:
+        if session["state"] not in ("awaiting_signature", "pending"):
+            return
+        session["polls"] += 1
+        if session["state"] == "awaiting_signature" and session["polls"] >= _BUY_POLLS_TO_PENDING:
+            session["state"] = "pending"
+        if session["polls"] >= _BUY_POLLS_TO_DONE:
+            offer_index = f"MOCKBID-{self._next_session_id('placed')}"
+            session["offer_index"] = offer_index
+            session["state"] = "done"
+            self._bids.append(
+                {
+                    "offer_index": offer_index,
+                    "nft_id": session["nft_id"],
+                    "bidder": session["bidder"],
+                    "amount_drops": session["amount_drops"],
+                    "expiration": None,
+                    "is_live": True,
+                }
+            )
+
+    def _advance_bid_accept(self, session: dict[str, Any]) -> None:
+        if session["state"] not in ("awaiting_signature", "pending"):
+            return
+        session["polls"] += 1
+        if session["state"] == "awaiting_signature" and session["polls"] >= _BUY_POLLS_TO_PENDING:
+            session["state"] = "pending"
+        if session["polls"] >= _BUY_POLLS_TO_DONE:
+            session["state"] = "done"
+            bid = self._find_bid(session["offer_index"])
+            if bid is not None:
+                bid["is_live"] = False
+
     def status(self, session_id: str) -> dict[str, Any]:
         session = self._sessions.get(session_id)
         if session is None:
@@ -399,6 +539,10 @@ class MockMarket:
             self._advance_cancel(session)
         elif kind == "buy":
             self._advance_buy(session)
+        elif kind == "bid":
+            self._advance_bid(session)
+        elif kind == "bid_accept":
+            self._advance_bid_accept(session)
         elif kind == "trait_list":
             self._advance_trait_list(session)
         return self._session_dict(session_id)
@@ -449,6 +593,11 @@ class MockMarket:
         session["polls"] += 1
         if session["polls"] >= _CANCEL_POLLS_TO_DONE:
             session["state"] = "done"
+            if session.get("bid"):  # #283: cancelling the caller's own bid
+                bid = self._find_bid(session["offer_index"])
+                if bid is not None:
+                    bid["is_live"] = False
+                return
             row = self._find(session["offer_index"])
             if row is not None:
                 row["is_live"] = False
@@ -534,6 +683,14 @@ class MockMarket:
         if kind == "list":
             return {
                 **base,
+                "qr_url": "https://dev/mock-qr",
+                "xumm_url": "https://dev/mock-xumm",
+                "offer_index": session["offer_index"],
+            }
+        if kind in ("bid", "bid_accept"):
+            return {
+                **base,
+                "reason": None,
                 "qr_url": "https://dev/mock-qr",
                 "xumm_url": "https://dev/mock-xumm",
                 "offer_index": session["offer_index"],
