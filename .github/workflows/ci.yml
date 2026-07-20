@@ -3,6 +3,15 @@ name: CI
 on:
   push:
     branches: [main]
+    # Doc-only commits (e.g. the hackathon-loc bot's README/SVG refresh) don't
+    # need the CI gate. We deliberately do NOT use `[skip ci]` for that: a
+    # `[skip ci]` HEAD commit skips the ENTIRE push's workflows, and since
+    # promote.sh fast-forwards `deploy` to `main` (whose HEAD is almost always
+    # a LoC-bot commit), that silently killed the Pages deploy on every promote.
+    # paths-ignore scopes the skip to CI only, leaving pages.yml free to fire.
+    paths-ignore:
+      - 'README.md'
+      - 'assets/**'
   pull_request:
     branches: [main]
 

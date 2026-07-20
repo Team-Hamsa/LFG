@@ -34,6 +34,13 @@ jobs:
           if ! git diff --quiet --cached; then
             git config user.name "github-actions[bot]"
             git config user.email "github-actions[bot]@users.noreply.github.com"
-            git commit -m "docs(README): refresh hackathon LoC stats [skip ci]"
+            # NOTE: no `[skip ci]` here. A `[skip ci]` HEAD commit skips the
+            # entire push's workflows, and because promote.sh fast-forwards
+            # `deploy` to `main` (whose HEAD is nearly always this bot commit),
+            # it silently no-op'd the Pages deploy on every promote. CI is kept
+            # off doc commits via ci.yml's paths-ignore instead; this workflow
+            # won't re-trigger itself (guarded by the github-actions[bot] actor
+            # check above).
+            git commit -m "docs(README): refresh hackathon LoC stats"
             git push
           fi
