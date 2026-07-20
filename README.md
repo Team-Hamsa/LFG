@@ -68,10 +68,6 @@ Short walkthroughs of each core flow:
 <img src="assets/dashboard.svg" alt="Repo vitals — tests, modules, commits, surfaces, mainnet status" width="728">
 </div>
 
-<div align="center">
-<img src="assets/tech_overview.svg" alt="LFG under the hood" width="820">
-</div>
-
 **→ [Full hackathon build log](docs/HACKATHON.md)** — every feature, with the PRs and issues that landed it.
 
 ---
@@ -166,8 +162,10 @@ Short walkthroughs of each core flow:
 <img src="assets/architecture.png" alt="LFG architecture — four surfaces to lfg_service to lfg_core to XRPL, Xaman, and BunnyCDN" width="820">
 </div>
 
-Four thin surfaces — the classic **Discord bot**, the **Telegram bot**, the **Discord Activity** webapp, and the **standalone web app** (the same no-build client, served by GitHub Pages at [build.letseffinggo.com](https://build.letseffinggo.com)) — all talk over REST/WS to one aiohttp backend (`lfg_service`), which runs the mint / swap / market / economy session state machines, submits every XRPL transaction, and builds every Xaman signing payload. Shared domain logic lives in `lfg_core`; a **separate listener process group** streams the clio transaction feed into the per-network SQLite index and ledger-history stores that the backend reads. **No private keys ever touch the app** — all signing happens in the user's Xaman wallet, images and metadata are hosted on BunnyCDN, and the NFT schema is pinned on IPFS. A fifth path in is the **X funnel**: `lfg_service` also serves per-NFT share-card pages whose Twitter/OG tags render a branded card on X and whose body forwards humans into the web app — which, as an installable PWA, mints happily from X's in-app browser. The brand-account auto-poster (`run_x.py`) is built and flag-gated behind `X_ENABLED`.
-
+Five thin surfaces — the classic in-chat **Discord bot** - completely refactored for the new architecture - along with a new **Discord Activity**, a new **Telegram bot** that can alternatively serve a Mini-App, and the **standalone web app** (the same no-build client, served by GitHub Pages at [build.letseffinggo.com](https://build.letseffinggo.com)) — all talk over REST/WS to one aiohttp backend (`lfg_service`), which runs the mint / swap / market / economy session state machines, submits every XRPL transaction, and builds every Xaman signing payload. Shared domain logic lives in `lfg_core`; a **separate listener process group** streams the clio transaction feed into the per-network SQLite index and ledger-history stores that the backend reads. **No private keys ever touch the app** — all signing happens in the user's Xaman wallet, images and metadata are hosted on BunnyCDN, and the NFT schema is pinned on IPFS. A fifth path in is the **X funnel**: `lfg_service` also serves per-NFT share-card pages whose Twitter/OG tags render a branded card on X and whose body forwards humans into the web app — which, as an installable PWA, mints happily from X's in-app browser. The brand-account auto-poster (`run_x.py`) is built and flag-gated behind `X_ENABLED`.
+<div align="center">
+<img src="assets/tech_overview.svg" alt="LFG under the hood" width="820">
+</div>
 <details>
 <summary><b>Repository layout</b></summary>
 
