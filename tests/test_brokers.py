@@ -3,6 +3,7 @@
 # malformed-file fallback. brokers has no lfg_core.config dependency, so no
 # env-guard preamble is needed.
 import json
+import os
 
 import pytest
 
@@ -94,3 +95,17 @@ class TestOverlayFile:
             brokers._cache = None
             brokers._cache_key = None
             assert brokers.known_destinations() == frozenset(brokers._BUILTIN), bad
+
+    def test_file_edit_picked_up_without_restart(self, tmp_path, monkeypatch):
+        # Greptile P2 on PR #281: the cache is (path, mtime)-keyed so an
+        # operator edit (e.g. pulling a compromised broker) takes effect on
+        # the next call, no restart.
+        path = tmp_path / "allow.json"
+        path.write_text(json.dumps({"rLive111": {"name": "livemkt"}}))
+        monkeypatch.setenv("BROKER_ALLOWLIST_PATH", str(path))
+        assert "rLive111" in brokers.known_destinations()
+        path.write_text(json.dumps({"rOther222": {"name": "othermkt"}}))
+        os.utime(path, (1, 2_000_000_000))  # force a distinct mtime
+        dests = brokers.known_destinations()
+        assert "rLive111" not in dests
+        assert "rOther222" in dests

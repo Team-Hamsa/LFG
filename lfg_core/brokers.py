@@ -44,18 +44,30 @@ _BUILTIN: dict[str, dict[str, str | None]] = {
 }
 
 _cache: dict[str, dict[str, str | None]] | None = None
-_cache_key: str | None = None
+_cache_key: tuple[str | None, float | None] | None = None
+
+
+def _overlay_mtime(path: str | None) -> float | None:
+    if not path:
+        return None
+    try:
+        return os.stat(path).st_mtime
+    except OSError:
+        return None
 
 
 def _load() -> dict[str, dict[str, str | None]]:
     """The effective allowlist: built-ins merged with the optional
-    BROKER_ALLOWLIST_PATH JSON overlay (file entries win). Cached per path so
-    repeated browse requests don't re-read the file; a malformed/unreadable
-    file logs a warning and falls back to the built-ins alone (never crashes
-    the public browse endpoint)."""
+    BROKER_ALLOWLIST_PATH JSON overlay (file entries win). Cached per
+    (path, file mtime) so repeated browse requests don't re-parse the file
+    while an operator edit (add a broker / pull a compromised one) is picked
+    up on the next call — no restart needed. A malformed/unreadable file logs
+    a warning and falls back to the built-ins alone (never crashes the public
+    browse endpoint)."""
     global _cache, _cache_key
     path = os.getenv("BROKER_ALLOWLIST_PATH") or None
-    if _cache is not None and _cache_key == path:
+    key = (path, _overlay_mtime(path))
+    if _cache is not None and _cache_key == key:
         return _cache
     merged = dict(_BUILTIN)
     if path:
@@ -83,7 +95,7 @@ def _load() -> dict[str, dict[str, str | None]]:
         except Exception as e:
             logging.warning(f"broker allowlist {path!r} unusable ({e}); using built-ins")
             merged = dict(_BUILTIN)
-    _cache, _cache_key = merged, path
+    _cache, _cache_key = merged, key
     return merged
 
 

@@ -107,6 +107,7 @@ WEB_ALLOWED_ORIGINS=https://build.letseffinggo.com,https://team-hamsa.github.io 
 BRIX_DISTRIBUTOR_ADDRESS=<xrpl-address>                     # optional; airdrop distributor wallet, excluded from BRIX leaderboards/derivation as a counterparty
 BRIX_AMM_ACCOUNT=<xrpl-address>                             # optional; mainnet BRIX/XRP AMM pool account, used by snapshot_balances.py
 BULK_MINT_UI_ENABLED=0                                      # optional (#215); Activity bulk-mint stepper — off = today's UI, server endpoints stay live
+BROKER_ALLOWLIST_PATH=<path-to-json>                        # optional (#131); external-marketplace broker allowlist overlay ({addr: {name, url_template}}); unset = built-ins in lfg_core/brokers.py; edits are picked up live (mtime-keyed cache)
 ```
 
 > **Standalone web surface (#240):** the same vanilla-JS Activity runs as a
