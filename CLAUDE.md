@@ -38,7 +38,11 @@ Install all dependencies with:
 
 ### Pre-push gate (BLOCKING)
 `.pre-commit-config.yaml` runs at the **pre-push** stage: ruff (--fix), ruff-format, mypy (from the
-project `.venv`, real dep types), gitleaks, pytest, validate-trait-config. CI
+project `.venv`, real dep types), gitleaks, pytest, validate-trait-config,
+audit-layer-dimensions (`scripts/audit_layer_dimensions.py` — every file under
+the gitignored `layers/` working tree must be exactly 1080×1080; the compose
+pipeline does no scaling, so an undersized layer renders as a tiny top-left
+sprite — the 600px Diamond-GIF incident of 2026-07-11→20). CI
 (`.github/workflows/ci.yml`) runs the same gate with no `continue-on-error` — local and CI both
 block. Never bypass with `--no-verify`; fix or explicitly relax with the user's sign-off.
 
