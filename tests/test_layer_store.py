@@ -67,3 +67,44 @@ def test_cdn_resolve_asset_absent_returns_none(monkeypatch):
 
     monkeypatch.setattr(store, "_list_dir", fake_list)
     assert _run(store.resolve_asset("ape/Nose.png")) is None
+
+
+def _mk_layer(tmp_path, dirname, trait, value, ext=".png"):
+    d = tmp_path / dirname / trait
+    d.mkdir(parents=True, exist_ok=True)
+    (d / f"{value}{ext}").write_bytes(b"x")
+
+
+def test_find_display_body_prefers_allowed_body(tmp_path):
+    _mk_layer(tmp_path, "male", "Hat", "Cap")
+    _mk_layer(tmp_path, "female", "Hat", "Cap")
+    store = layer_store.LocalLayerStore(str(tmp_path))
+    assert store.find_display_body("Hat", "Cap", ["female", "male"]) == "female"
+
+
+def test_find_display_body_skips_artless_preferred(tmp_path):
+    # First preferred body has no art; the probe must move on, not 404.
+    _mk_layer(tmp_path, "male", "Hat", "Cap")
+    store = layer_store.LocalLayerStore(str(tmp_path))
+    assert store.find_display_body("Hat", "Cap", ["ape", "male"]) == "male"
+
+
+def test_find_display_body_unrestricted_finds_per_body_art(tmp_path):
+    # The 120-broken-thumbnails bug: unrestricted values usually live in
+    # per-body dirs, not shared/ — the probe must find them anyway.
+    _mk_layer(tmp_path, "skeleton", "Accessory", "Double Swords", ".gif")
+    store = layer_store.LocalLayerStore(str(tmp_path))
+    assert store.find_display_body("Accessory", "Double Swords", []) == "skeleton"
+
+
+def test_find_display_body_shared_beats_foreign_bodies(tmp_path):
+    _mk_layer(tmp_path, "shared", "Accessory", "Halo")
+    _mk_layer(tmp_path, "ape", "Accessory", "Halo")
+    store = layer_store.LocalLayerStore(str(tmp_path))
+    assert store.find_display_body("Accessory", "Halo", []) == "shared"
+
+
+def test_find_display_body_missing_everywhere(tmp_path):
+    (tmp_path / "male").mkdir()
+    store = layer_store.LocalLayerStore(str(tmp_path))
+    assert store.find_display_body("Hat", "Ghost", ["male"]) is None

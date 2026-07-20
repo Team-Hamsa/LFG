@@ -313,3 +313,33 @@ def test_swap_fee_quote_is_time_bounded(monkeypatch):
     monkeypatch.setattr(server.swap_flow, "detect_swap_payment", hangs)
     monkeypatch.setattr(server, "_SWAP_FEE_QUOTE_TIMEOUT", 0.05)
     assert _run(server._swap_fee_quote("rWallet")) is None
+
+
+def test_wallet_nfts_cache_hit_serves_repointed_index_image(tmp_path, monkeypatch):
+    """#286 repointed onchain_nfts.image ipfs://->CDN, but the uri metadata
+    cache keeps the on-chain ipfs:// URI. The roster must serve the index
+    row's (archive-mappable) URL over the cache's, or /api/img misses the
+    local archive and falls through to the dead IPFS gateway — blank tiles
+    for every swapped edition (258/266/281/284 on mainnet, 2026-07-20)."""
+    nft_id = "0019" + "B" * 60
+    cdn_url = "https://lfgo.b-cdn.net/LFGO/12/12_2.png"
+    conn = _seed_index(
+        tmp_path,
+        monkeypatch,
+        [
+            {
+                "nft_id": nft_id,
+                "nft_number": 12,
+                "owner": "rWallet",
+                "uri_hex": _URI_HEX,
+                "image": cdn_url,
+            }
+        ],
+    )
+    nft_index.meta_cache_put_many(conn, {_URI_HEX: _META})
+    conn.close()
+    _no_network(monkeypatch)
+    nfts = _run(server._wallet_nfts("rWallet"))
+    assert nfts[0]["image"] == cdn_url
+    # cached attributes stay authoritative — only the image is overridden
+    assert {"trait_type": "Body", "value": "Buck Straight"} in nfts[0]["attributes"]
