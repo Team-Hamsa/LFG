@@ -2876,9 +2876,15 @@ async function cancelBid(bid) {
 }
 
 async function acceptBid(bid) {
+  // Net amount computed from marketPure's fee constants (single source of
+  // truth for the 93/7 split) rather than a hand-written figure.
+  const priced = marketPure.safeComputeRoyalty(bid.amount_xrp);
+  const netText = priced.ok
+    ? `you net ${priced.royalty.receiveXrp} XRP (93% — 7% collection royalty)`
+    : 'you net 93% (7% collection royalty)';
   const ok = await confirmDialog({
     title: 'Accept this bid?',
-    text: `Sell for ${bid.amount_xrp} XRP — you net 93% (7% collection royalty).`,
+    text: `Sell for ${bid.amount_xrp} XRP — ${netText}.`,
     confirmLabel: 'Accept bid',
   });
   if (!ok) return;

@@ -146,13 +146,12 @@ class MockMarket:
                 "value": "Grin",
             },
         ]
-        # #283: seed one live incoming bid on MOCK-9001 (a third-party
-        # character) and one outgoing bid shape for the dev owner to exercise
-        # both Mine groups + the detail overlay's bid list.
+        # #283: seed one live incoming bid on a DEV_OWNER character so the
+        # Accept-bid flow is exercisable through the dev-mode mock.
         self._bids: list[dict[str, Any]] = [
             {
                 "offer_index": "MOCKBID-9001",
-                "nft_id": "MOCK-9001",
+                "nft_id": "MOCK-3537",  # a DEV_OWNER character -> shows in bids_on_my_nfts
                 "bidder": OTHER_SELLER_2,
                 "amount_drops": 12_000_000,
                 "expiration": None,
@@ -346,7 +345,7 @@ class MockMarket:
             if bid is None or not bid["is_live"]:
                 raise MockMarketError("not found")
             if bid["bidder"] != owner:
-                raise MockMarketError("not your listing")
+                raise MockMarketError("not your bid")
             sid = self._next_session_id("cancel")
             self._sessions[sid] = {
                 "kind": "cancel",
