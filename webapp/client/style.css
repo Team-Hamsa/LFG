@@ -902,3 +902,38 @@ button.back:hover { color: var(--text); border: none; }
 .bulk-unit.pending { opacity: 0.55; }
 .bulk-unit .u-error { color: var(--red); font-size: 0.85em; }
 .bulk-unit img.u-qr { width: 120px; height: 120px; }
+
+/* #215 UX revision: pay-page quantity stepper + stale-QR affordance.
+   Changing quantity cancels the live payload; the shown QR dims and the
+   Regenerate button pulses until the user rebuilds it. */
+#flow-qty {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  margin: 0.25rem 0 0.5rem;
+}
+#flow-qty .qty-lbl {
+  font-size: 0.85rem;
+  opacity: 0.8;
+}
+
+/* Stale QR: the shown code no longer matches the selected quantity. */
+#flow-qr.qr-stale {
+  opacity: 0.35;
+  filter: blur(2px) grayscale(0.4);
+  transition: opacity 0.15s ease, filter 0.15s ease;
+}
+
+/* Regenerate needs attention while the QR is stale. */
+#flow-regen-btn.needs-regen {
+  animation: regen-pulse 1.1s ease-in-out infinite;
+  font-weight: 700;
+}
+@keyframes regen-pulse {
+  0%, 100% { opacity: 1; text-shadow: 0 0 0 transparent; }
+  50%      { opacity: 0.65; text-shadow: 0 0 8px currentColor; }
+}
+@media (prefers-reduced-motion: reduce) {
+  #flow-regen-btn.needs-regen { animation: none; text-decoration: underline; }
+  #flow-qr.qr-stale { transition: none; }
+}
