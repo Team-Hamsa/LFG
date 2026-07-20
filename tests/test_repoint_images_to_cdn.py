@@ -52,7 +52,7 @@ def _prober_for(resolving):
 
 
 def _run(coro):
-    return asyncio.new_event_loop().run_until_complete(coro)
+    return asyncio.run(coro)  # creates and closes its own loop per call
 
 
 def test_repoints_first_resolving_candidate(tmp_path):

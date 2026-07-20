@@ -108,7 +108,9 @@ async def repoint_images(
     repointed_rows = 0
     repointed_editions = 0
     nohit: list[int] = []
-    for edition, winner in sorted(results):
+    # sort by edition only: results are (int, str | None) and str vs None is
+    # uncomparable, so a plain sorted() would TypeError on any edition tie.
+    for edition, winner in sorted(results, key=lambda t: t[0]):
         if winner is None:
             nohit.append(edition)
             continue
