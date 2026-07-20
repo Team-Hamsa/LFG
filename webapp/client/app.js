@@ -808,8 +808,13 @@ function renderFlowQty() {
 function setupBulkStepper(cfg) {
   bulkCfg = { enabled: !!cfg.bulk_mint_ui, max: Math.max(1, cfg.bulk_mint_max || 1) };
   if (!bulkCfg.enabled) return; // flag off: stepper never renders, today's UI
-  el('flow-qty-minus').onclick = () => onQtyChange(-1);
-  el('flow-qty-plus').onclick = () => onQtyChange(1);
+  // TEMP DEBUG (stepper dead-clicks in the Discord client): surface any
+  // swallowed handler exception as a toast so a broken tap is visible.
+  const tap = (delta) => {
+    try { onQtyChange(delta); } catch (e) { showError(`qty: ${e.message}`); }
+  };
+  el('flow-qty-minus').onclick = () => tap(-1);
+  el('flow-qty-plus').onclick = () => tap(1);
 }
 
 // Pay-page stepper press. Changing quantity invalidates the shown QR: cancel
