@@ -292,3 +292,34 @@ def test_qty_mint_target():
     assert run_js("M.qtyMintTarget(1)") == "single"
     assert run_js("M.qtyMintTarget(2)") == "bulk"
     assert run_js("M.qtyMintTarget(10)") == "bulk"
+
+
+# ---------------------------------------------------------------------------
+# #215 UX revision: home stepper removed + buttons relabelled; the quantity
+# stepper markup now lives in the flow (pay) panel.
+# ---------------------------------------------------------------------------
+
+INDEX_HTML = os.path.join(ROOT, "webapp", "client", "index.html")
+
+
+def test_home_has_no_qty_stepper():
+    html = open(INDEX_HTML).read()
+    mint_panel = html.split('id="mint-panel"', 1)[1].split("</section>", 1)[0]
+    assert 'id="mint-qty"' not in mint_panel  # stepper moved off the home screen
+
+
+def test_home_buttons_relabelled():
+    html = open(INDEX_HTML).read()
+    assert 'id="mint-btn" class="primary big">⛏️ Mint<' in html
+    assert 'id="swap-btn" class="secondary">🏗️ Build<' in html
+    assert 'id="swapper-btn" class="secondary">🔁 Swap<' in html
+    assert 'id="market-btn" class="secondary">🛒 Trade<' in html
+
+
+def test_flow_panel_has_qty_stepper():
+    html = open(INDEX_HTML).read()
+    flow_panel = html.split('id="flow-panel"', 1)[1].split("</section>", 1)[0]
+    assert 'id="flow-qty"' in flow_panel
+    assert 'id="flow-qty-minus"' in flow_panel
+    assert 'id="flow-qty-value"' in flow_panel
+    assert 'id="flow-qty-plus"' in flow_panel
