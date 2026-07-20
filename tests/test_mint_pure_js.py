@@ -323,3 +323,77 @@ def test_flow_panel_has_qty_stepper():
     assert 'id="flow-qty-minus"' in flow_panel
     assert 'id="flow-qty-value"' in flow_panel
     assert 'id="flow-qty-plus"' in flow_panel
+
+
+# ---------------------------------------------------------------------------
+# #215 UX revision: app.js wiring for the pay-page quantity stepper.
+# Source-assertion style (same as the boot/cancel wiring tests above).
+# ---------------------------------------------------------------------------
+
+
+def test_app_js_mint_btn_always_single():
+    """Home Mint button no longer branches on qty — it always starts a single
+    mint; quantity is chosen on the pay page now."""
+    src = open(APP_JS).read()
+    assert "mintQty > 1 ? startBulkMint" not in src
+    assert "el('mint-btn').onclick = () => startMint();" in src
+
+
+def test_app_js_regen_uses_qty_aware_handler():
+    src = open(APP_JS).read()
+    assert "el('flow-regen-btn').onclick = onFlowRegen;" in src
+
+
+def test_app_js_regen_routes_by_qty_target():
+    """onFlowRegen commits the selected quantity to the right endpoint."""
+    src = open(APP_JS).read()
+    body = src.split("async function onFlowRegen", 1)[1].split("\n}\n", 1)[0]
+    assert "qtyMintTarget" in body
+    assert "startBulkMint" in body
+    assert "regeneratePaymentQr" in body  # same-qty expired refresh keeps the session
+
+
+def test_app_js_qty_change_cancels_live_payload():
+    """Changing quantity must cancel the live session server-side immediately."""
+    src = open(APP_JS).read()
+    body = src.split("function onQtyChange", 1)[1].split("\n}\n", 1)[0]
+    assert "cancelLiveMintSilently" in body
+    assert "needs-regen" in body  # highlights regenerate
+    assert "qr-stale" in body     # dims the QR
+
+
+def test_app_js_cancel_silent_hits_both_endpoints_and_stops_polls():
+    src = open(APP_JS).read()
+    body = src.split("async function cancelLiveMintSilently", 1)[1].split("\n}\n", 1)[0]
+    assert "/api/mint/" in body and "/cancel" in body
+    assert "/api/mint/bulk/" in body
+    assert "++pollGen" in body        # stop the single-mint poll chain
+    assert "++bulkPollGen" in body    # stop the bulk poll chain
+    assert "liveQty = null" in body
+
+
+def test_app_js_showflow_renders_qty_stepper_flag():
+    src = open(APP_JS).read()
+    body = src.split("function showFlow(", 1)[1].split("\n}\n", 1)[0]
+    assert "qtyStepper" in body
+    assert "el('flow-qty').hidden" in body
+    # a fresh render clears any leftover stale visuals
+    assert "classList.remove('qr-stale')" in body
+    assert "classList.remove('needs-regen')" in body
+
+
+def test_app_js_pay_views_request_stepper():
+    """Both the single and bulk pay views opt into the stepper."""
+    src = open(APP_JS).read()
+    mint_body = src.split("function mintPayView", 1)[1].split("\n}\n", 1)[0]
+    bulk_body = src.split("function bulkPayView", 1)[1].split("\n}\n", 1)[0]
+    assert "qtyStepper: true" in mint_body
+    assert "qtyStepper: true" in bulk_body
+
+
+def test_app_js_start_paths_set_live_qty():
+    src = open(APP_JS).read()
+    single = src.split("async function startMint", 1)[1].split("\n}\n", 1)[0]
+    bulk = src.split("async function startBulkMint", 1)[1].split("\n}\n", 1)[0]
+    assert "liveQty = 1" in single
+    assert "liveQty = quantity" in bulk
