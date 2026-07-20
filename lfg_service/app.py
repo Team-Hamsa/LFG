@@ -1119,8 +1119,15 @@ async def handle_market_listings(request: web.Request) -> web.Response:
         _market_cache_put(cache_key, rows, now_mono, gen)
 
     # #131: the cache holds the superset (buyable + known-broker external);
-    # without the opt-in, drop the external rows here, post-cache.
-    filtered = rows if include_external else [r for r in rows if not r.get("destination")]
+    # without the opt-in, drop the external rows here, post-cache. With it,
+    # re-check destination rows against a FRESH allowlist — a broker removed
+    # from the allowlist (overlay file edit) mid-cache-TTL must stop being
+    # surfaced immediately, not after the cache expires.
+    if include_external:
+        allowed = brokers.known_destinations()
+        filtered = [r for r in rows if not r.get("destination") or r["destination"] in allowed]
+    else:
+        filtered = [r for r in rows if not r.get("destination")]
     if min_drops is not None:
         filtered = [
             r for r in filtered if r["amount_drops"] is not None and r["amount_drops"] >= min_drops
@@ -1697,7 +1704,10 @@ async def handle_market_buy_start(request):
                 "closet_required": 403,
                 "external_listing": 409,
             }.get(str(e), 400)
-            return web.json_response({"error": str(e)}, status=status)
+            err_body = {"error": str(e)}
+            if str(e) == "external_listing":
+                err_body["code"] = "external_listing"  # match the real path's contract
+            return web.json_response(err_body, status=status)
 
     loop = asyncio.get_event_loop()
     found = await loop.run_in_executor(None, _find_listing_any_network, offer_index)

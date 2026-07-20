@@ -67,10 +67,19 @@ def _load() -> dict[str, dict[str, str | None]]:
             for addr, entry in overlay.items():
                 if not isinstance(entry, dict) or not entry.get("name"):
                     raise ValueError(f"bad entry for {addr!r}: need a 'name'")
-                merged[str(addr)] = {
-                    "name": str(entry["name"]),
-                    "url_template": entry.get("url_template") or None,
-                }
+                template = entry.get("url_template") or None
+                if template is not None:
+                    if not isinstance(template, str):
+                        raise ValueError(f"bad url_template for {addr!r}: not a string")
+                    # A template with an unknown placeholder ({nftid}, {0}, a
+                    # stray brace) would raise inside resolve() at serve time
+                    # and crash browse serialization — validate it here so a
+                    # bad file falls back to built-ins instead.
+                    try:
+                        template.format(nft_id="x")
+                    except (KeyError, IndexError, ValueError) as fmt_err:
+                        raise ValueError(f"bad url_template for {addr!r}: {fmt_err}") from fmt_err
+                merged[str(addr)] = {"name": str(entry["name"]), "url_template": template}
         except Exception as e:
             logging.warning(f"broker allowlist {path!r} unusable ({e}); using built-ins")
             merged = dict(_BUILTIN)

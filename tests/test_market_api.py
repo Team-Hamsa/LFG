@@ -2323,3 +2323,23 @@ def test_buy_start_external_listing_409_row_stays_live(onchain_env, market_walle
     conn.close()
     assert row["is_live"] == 1
     assert row["closed_reason"] is None
+
+
+def test_browse_include_external_revalidates_against_fresh_allowlist(onchain_env, monkeypatch):
+    # A broker removed from the allowlist mid-cache-TTL must stop being
+    # surfaced immediately, even though the cached superset still holds it.
+    _seed_external_listing(onchain_env)
+    resp = _run(
+        server.handle_market_listings(
+            _mocked_request("GET", "/api/market/listings?include_external=1")
+        )
+    )
+    assert len(_run(_read_json(resp))["rows"]) == 1  # cache now filled
+
+    monkeypatch.setattr(server.brokers, "known_destinations", lambda: frozenset())
+    resp = _run(
+        server.handle_market_listings(
+            _mocked_request("GET", "/api/market/listings?include_external=1")
+        )
+    )
+    assert _run(_read_json(resp))["rows"] == []

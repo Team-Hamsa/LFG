@@ -77,3 +77,20 @@ class TestOverlayFile:
         path.write_text(json.dumps({"rX": {"url_template": "https://x/{nft_id}"}}))
         monkeypatch.setenv("BROKER_ALLOWLIST_PATH", str(path))
         assert brokers.known_destinations() == frozenset(brokers._BUILTIN)
+
+    def test_non_string_template_rejected_whole_file(self, tmp_path, monkeypatch):
+        path = tmp_path / "badtype.json"
+        path.write_text(json.dumps({"rX": {"name": "x", "url_template": 7}}))
+        monkeypatch.setenv("BROKER_ALLOWLIST_PATH", str(path))
+        assert brokers.known_destinations() == frozenset(brokers._BUILTIN)
+
+    def test_bad_placeholder_template_rejected_whole_file(self, tmp_path, monkeypatch):
+        # {nftid} (typo), positional {0}, and a stray brace would each raise
+        # inside resolve() at serve time — must be rejected at load instead.
+        for bad in ("https://x/{nftid}", "https://x/{0}", "https://x/{nft_id"):
+            path = tmp_path / "badtpl.json"
+            path.write_text(json.dumps({"rX": {"name": "x", "url_template": bad}}))
+            monkeypatch.setenv("BROKER_ALLOWLIST_PATH", str(path))
+            brokers._cache = None
+            brokers._cache_key = None
+            assert brokers.known_destinations() == frozenset(brokers._BUILTIN), bad
