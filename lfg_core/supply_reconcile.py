@@ -33,22 +33,28 @@ def reconcile_growth(conn: sqlite3.Connection, *, dry_run: bool = False) -> dict
         edition = rec.nft_number
         if edition is None or edition in covered:
             continue
-        body_value = swap_meta.get_attr(rec.attributes, "Body")
+        try:
+            body_value = swap_meta.get_attr(rec.attributes, "Body")
+            deltas = {
+                f"{slot}|{trait_economy.slot_value(rec, slot)}": 1
+                for slot in trait_economy.NON_BODY_SLOTS
+            }
+            body_class = swap_meta.detect_body(rec.attributes) or rec.body
+        except Exception:
+            # Malformed stored attribute entries (e.g. missing keys) read as
+            # unreadable — report, never guess, never abort the sweep.
+            body_value = None
         if not rec.attributes or not body_value:
             skipped_unreadable.append(edition)
             continue
         covered.add(edition)
         if not dry_run:
-            deltas = {
-                f"{slot}|{trait_economy.slot_value(rec, slot)}": 1
-                for slot in trait_economy.NON_BODY_SLOTS
-            }
             economy_store.record_supply_change(
                 conn,
                 "mint",
                 edition,
                 body_value,
-                swap_meta.detect_body(rec.attributes) or rec.body,
+                body_class,
                 deltas,
                 ACTOR,
                 f"growth reconcile {rec.nft_id}",

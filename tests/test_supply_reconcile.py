@@ -135,3 +135,15 @@ def test_duplicate_tokens_same_edition_write_one_row():
 
     assert report["written"] == [9]
     assert len([r for r in es.read_supply_changes(conn) if r["edition"] == 9]) == 1
+
+
+def test_malformed_attribute_entries_are_skipped_not_raised():
+    conn = _db()
+    _freeze(conn, [1])
+    nft_index.upsert(conn, _token(11, attrs=[{"value": "orphan"}, {"trait_type": "Eyes"}]))
+    nft_index.upsert(conn, _token(12))  # healthy token after the malformed one
+
+    report = supply_reconcile.reconcile_growth(conn)
+
+    assert report["skipped_unreadable"] == [11]
+    assert report["written"] == [12]

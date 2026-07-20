@@ -28,6 +28,7 @@ from __future__ import annotations
 
 import argparse
 import os
+import sqlite3
 import sys
 
 REPO_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
@@ -46,9 +47,18 @@ def main() -> int:
     if not os.path.exists(db_path):
         print(f"index DB not found: {db_path}", file=sys.stderr)
         return 2
-    conn = nft_index.init_db(db_path)
-    economy_store.init_economy_schema(conn)
-    if not economy_store.genesis_exists(conn):
+    if args.apply:
+        conn = nft_index.init_db(db_path)
+        economy_store.init_economy_schema(conn)
+    else:
+        # Dry-run must not write AT ALL — init_db/init_economy_schema commit
+        # DDL/migrations, so open the file read-only instead.
+        conn = sqlite3.connect(f"file:{db_path}?mode=ro", uri=True)
+    try:
+        genesis_ok = economy_store.genesis_exists(conn)
+    except sqlite3.OperationalError:
+        genesis_ok = False
+    if not genesis_ok:
         print(f"no complete genesis in {db_path}; freeze one first", file=sys.stderr)
         return 2
 
