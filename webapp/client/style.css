@@ -822,6 +822,27 @@ button.back:hover { color: var(--text); border: none; }
   display: block; color: var(--yellow); font-size: .72rem; font-weight: 700;
   margin-top: 2px;
 }
+/* #203: browse UX — rarity chip, load-more, listing detail overlay */
+.market-card-rarity {
+  display: block; color: var(--muted); font-size: .62rem; font-weight: 700;
+  margin-top: 1px;
+}
+#market-load-more { margin: 14px auto 0; display: block; }
+.listing-detail { text-align: center; max-height: 86vh; overflow-y: auto; }
+.listing-detail-img {
+  width: min(220px, 60vw); border-radius: 12px; margin: 0 auto 8px;
+}
+.listing-attrs {
+  display: flex; flex-wrap: wrap; gap: 6px; justify-content: center;
+  margin: 10px 0 4px;
+}
+.listing-attr-chip {
+  font-size: .68rem; padding: 3px 8px; border-radius: 99px;
+  border: 1px solid var(--line); color: var(--muted); background: var(--surface);
+}
+.listing-history { list-style: none; margin: 4px 0 0; padding: 0; }
+.listing-history li { font-size: .72rem; color: var(--muted); padding: 2px 0; }
+
 /* #131: external (brokered) listings — read-only price discovery */
 .market-external-toggle {
   flex: 0 0 auto; display: inline-flex; align-items: center; gap: 6px;

@@ -141,3 +141,31 @@ def test_external_listing_wiring():
     assert "vm.externalUrl" in js
     css = _read("style.css")
     assert ".nft-card.market-card-external" in css
+
+
+def test_browse_ux_wiring():
+    # #203: pagination, rarity sort, "listed by me", and the listing detail
+    # overlay replacing card-click-straight-to-buy.
+    html = _read("index.html")
+    assert 'value="rarity_desc"' in html
+    assert 'id="market-mine-only"' in html
+    assert 'id="market-load-more"' in html
+    for el_id in (
+        "listing-overlay",
+        "listing-detail-img",
+        "listing-detail-title",
+        "listing-detail-attrs",
+        "listing-detail-history",
+        "listing-detail-action",
+        "listing-detail-close",
+    ):
+        assert f'id="{el_id}"' in html
+    js = _read("app.js")
+    assert "openListingDetail(row)" in js
+    assert "loadMarketBrowse({ append: true })" in js
+    assert "el('market-mine-only').checked" in js
+    assert "marketPure.rarityLabel(vm)" in js
+    assert "/api/market/history?" in js
+    css = _read("style.css")
+    assert ".listing-detail" in css
+    assert ".market-card-rarity" in css

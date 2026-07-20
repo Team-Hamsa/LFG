@@ -2187,7 +2187,7 @@ const MARKET_STATUS_PATH = {
   trait_list: (id) => `/api/market/trait/list/${id}`,
 };
 
-const marketState = { tab: 'browse', kind: 'character' };
+const marketState = { tab: 'browse', kind: 'character', offset: 0 };
 let marketPendingItem = null; // the character/trait/closet-asset the list-form panel is acting on
 let marketFlowTimer = null;
 
@@ -2230,11 +2230,14 @@ function marketRowImgSrc(vm) {
   return vm.kind === 'trait' ? vm.image : imgUrl(vm.image, THUMB_W);
 }
 
-function renderMarketGrid(rows) {
+// #203: append=true keeps existing cards ("Load more" pagination); every
+// card click now opens the listing detail overlay (art, traits, rarity,
+// price, seller, sale history) — Buy / link-out live inside the overlay.
+function renderMarketGrid(rows, { append = false } = {}) {
   const grid = el('market-grid');
   const empty = el('market-empty');
-  grid.replaceChildren();
-  if (!rows.length) { empty.hidden = false; return; }
+  if (!append) grid.replaceChildren();
+  if (!rows.length && !grid.childElementCount) { empty.hidden = false; return; }
   empty.hidden = true;
   for (const row of rows) {
     const vm = marketPure.mapListingRow(row);
@@ -2251,36 +2254,108 @@ function renderMarketGrid(rows) {
     price.className = 'market-card-price';
     price.textContent = vm.priceLabel;
     name.appendChild(price);
+    const rarity = marketPure.rarityLabel(vm);
+    if (rarity) {
+      const chip = document.createElement('span');
+      chip.className = 'market-card-rarity';
+      chip.textContent = rarity;
+      name.appendChild(chip);
+    }
     // #131: an external (brokered) listing renders as a visually distinct,
-    // non-buyable card — "Listed on <marketplace>" badge, and a click opens
-    // the external marketplace page (or explains why it can't be bought here)
-    // instead of the in-app buy flow.
+    // non-buyable card — "Listed on <marketplace>" badge; the detail overlay
+    // links out instead of offering an in-app Buy.
     if (vm.external) {
       card.classList.add('market-card-external');
       const badge = document.createElement('span');
       badge.className = 'market-card-external-badge';
       badge.textContent = marketPure.externalLabel(vm);
       name.appendChild(badge);
-      card.replaceChildren(img, name);
-      card.onclick = () => {
-        if (vm.externalUrl) window.open(vm.externalUrl, '_blank', 'noopener');
-        else showError('This listing lives on an external marketplace and can only be bought there.');
-      };
-      grid.appendChild(card);
-      continue;
     }
     card.replaceChildren(img, name);
-    // #133: openBuyFlow is async — an unhandled rejection here would leave
-    // the card looking dead. Route any buy-path throw to the toast surface.
-    card.onclick = () => openBuyFlow(row).catch((e) => showError(e.message));
+    // #133: async handler — route any throw to the toast surface.
+    card.onclick = () => openListingDetail(row).catch((e) => showError(e.message));
     grid.appendChild(card);
   }
 }
 
-async function loadMarketBrowse() {
+// --- #203: per-listing detail overlay ---
+
+function closeListingDetail() {
+  el('listing-overlay').hidden = true;
+  el('listing-detail-action').onclick = null;
+}
+
+function renderListingHistory(items) {
+  const list = el('listing-detail-history');
+  list.replaceChildren();
+  el('listing-history-title').hidden = !items.length;
+  for (const it of items.slice(0, 8)) {
+    const li = document.createElement('li');
+    const when = it.ts ? new Date(it.ts * 1000).toLocaleDateString() : '';
+    const price = it.price_drops != null
+      ? `${marketPure.dropsToXrpStr(String(it.price_drops))} XRP`
+      : (it.amount_brix != null ? `${it.amount_brix} BRIX` : '');
+    const label = it.event ? it.event.replace('_', ' ') : 'sold';
+    li.textContent = [label, price, when].filter(Boolean).join(' · ');
+    list.appendChild(li);
+  }
+}
+
+async function openListingDetail(row) {
+  const vm = marketPure.mapListingRow(row);
+  el('listing-detail-img').src = marketRowImgSrc(vm) || BLANK_IMG;
+  el('listing-detail-title').textContent = vm.title;
+  el('listing-detail-price').textContent = vm.priceLabel;
+  const sellerShort = vm.seller ? `${vm.seller.slice(0, 8)}…${vm.seller.slice(-4)}` : '';
+  const rarity = marketPure.rarityLabel(vm);
+  el('listing-detail-sub').textContent = [
+    vm.badge,
+    rarity,
+    vm.external ? marketPure.externalLabel(vm) : '',
+    sellerShort ? `Seller ${sellerShort}` : '',
+  ].filter(Boolean).join(' · ');
+  const attrs = el('listing-detail-attrs');
+  attrs.replaceChildren();
+  for (const a of row.attributes || []) {
+    if (!a || !a.value || a.value === 'None') continue;
+    const chip = document.createElement('span');
+    chip.className = 'listing-attr-chip';
+    chip.textContent = `${a.trait_type}: ${a.value}`;
+    attrs.appendChild(chip);
+  }
+  const action = el('listing-detail-action');
+  if (vm.external) {
+    action.textContent = vm.marketplace ? `Buy on ${vm.marketplace} ↗` : 'External listing';
+    action.disabled = !vm.externalUrl;
+    action.onclick = () => { if (vm.externalUrl) window.open(vm.externalUrl, '_blank', 'noopener'); };
+  } else {
+    action.textContent = `Buy — ${vm.priceLabel}`;
+    action.disabled = false;
+    action.onclick = () => { closeListingDetail(); openBuyFlow(row).catch((e) => showError(e.message)); };
+  }
+  renderListingHistory([]);
+  el('listing-overlay').hidden = false;
+  // History loads after the overlay opens — non-blocking, best-effort.
+  try {
+    const qs = vm.kind === 'trait'
+      ? `slot=${encodeURIComponent(vm.slot)}&value=${encodeURIComponent(vm.value)}`
+      : `nft_id=${encodeURIComponent(vm.nftId)}`;
+    const data = await api(`/api/market/history?${qs}`);
+    if (!el('listing-overlay').hidden) renderListingHistory(data.events || data.sales || []);
+  } catch (e) { /* history is decorative; the overlay stays useful without it */ }
+}
+
+const MARKET_PAGE_SIZE = 24;
+
+// #203: append=true fetches the next page ("Load more") and appends; a fresh
+// load resets offset. `market-load-more` shows while loaded < total.
+async function loadMarketBrowse({ append = false } = {}) {
   highlightTabs('market-kind', 'kind', marketState.kind);
   const grid = el('market-grid');
-  showGridSkeletons(grid);
+  if (!append) {
+    marketState.offset = 0;
+    showGridSkeletons(grid);
+  }
   el('market-empty').hidden = true;
   const slot = el('market-trait-slot').value.trim();
   const value = el('market-trait-value').value.trim();
@@ -2298,18 +2373,24 @@ async function loadMarketBrowse() {
     minBrix: isTrait ? minPrice : '',
     maxBrix: isTrait ? maxPrice : '',
     sort: el('market-sort').value,
-    limit: 24,
-    offset: 0,
+    limit: MARKET_PAGE_SIZE,
+    offset: append ? marketState.offset : 0,
     // #131: known-broker external listings — read-only price discovery.
     includeExternal: el('market-include-external').checked,
+    // #203: "listed by me" — server-side seller filter on my wallet.
+    seller: el('market-mine-only').checked && me && me.wallet ? me.wallet : '',
   });
   const qs = new URLSearchParams();
   for (const [k, v] of pairs) qs.append(k, v);
   try {
     const data = await api(`/api/market/listings?${qs.toString()}`);
-    renderMarketGrid(data.rows || []);
+    const rows = data.rows || [];
+    renderMarketGrid(rows, { append });
+    marketState.offset = (append ? marketState.offset : 0) + rows.length;
+    const total = data.total ?? marketState.offset;
+    el('market-load-more').hidden = marketState.offset >= total;
   } catch (e) {
-    grid.replaceChildren();
+    if (!append) grid.replaceChildren();
     showError(e.message);
   }
 }
@@ -2834,6 +2915,10 @@ async function main() {
   });
   el('market-filter-apply').onclick = () => loadMarketBrowse();
   el('market-include-external').onchange = () => loadMarketBrowse();
+  el('market-mine-only').onchange = () => loadMarketBrowse();
+  el('market-load-more').onclick = () => loadMarketBrowse({ append: true });
+  el('listing-detail-close').onclick = closeListingDetail;
+  el('listing-overlay').onclick = (e) => { if (e.target === el('listing-overlay')) closeListingDetail(); };
   el('market-list-price').addEventListener('input', updateListFormRoyaltyPreview);
   el('market-list-confirm-btn').onclick = submitListForm;
   el('market-list-cancel-btn').onclick = () => showPanel('market-panel');

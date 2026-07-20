@@ -478,3 +478,36 @@ def test_build_listings_params_include_external():
     assert ["include_external", "1"] in pairs
     pairs = run_js('M.buildListingsParams({kind: "character", includeExternal: false})')
     assert not any(k == "include_external" for k, _ in pairs)
+
+
+# --- #203: rarity fields, rarity label, seller param ---
+
+
+def test_map_listing_row_rarity_fields():
+    row = {
+        "nft_id": "N1",
+        "kind": "character",
+        "nft_number": 7,
+        "image": None,
+        "amount_drops": 1000000,
+        "amount_xrp": "1",
+        "seller": "rS",
+        "offer_index": "OFF1",
+        "rarity_rank": 3,
+        "rarity_score": 812.5,
+    }
+    vm = run_js(f"M.mapListingRow({json.dumps(row)})")
+    assert vm["rarityRank"] == 3
+    assert vm["rarityScore"] == 812.5
+    assert run_js(f"M.rarityLabel(M.mapListingRow({json.dumps(row)}))") == "Rarity #3"
+
+
+def test_rarity_label_empty_without_rank():
+    assert run_js("M.rarityLabel({rarityRank: null})") == ""
+
+
+def test_build_listings_params_seller():
+    pairs = run_js('M.buildListingsParams({kind: "character", seller: "rMe"})')
+    assert ["seller", "rMe"] in pairs
+    pairs = run_js('M.buildListingsParams({kind: "character", seller: ""})')
+    assert not any(k == "seller" for k, _ in pairs)
