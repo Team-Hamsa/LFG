@@ -901,7 +901,8 @@ button.back:hover { color: var(--text); border: none; }
 .mint-row { display: flex; align-items: center; gap: 8px; justify-content: center; }
 .qty-stepper { display: flex; align-items: center; gap: 4px; }
 .qty-stepper .qty-btn {
-  width: 32px; height: 32px; border-radius: 8px; font-size: 1rem; line-height: 1;
+  width: 32px; height: 32px; border-radius: 8px; font-size: 1.4rem; line-height: 1;
+  display: inline-flex; align-items: center; justify-content: center; padding: 0;
   border: 1px solid var(--line); background: var(--surface); color: var(--text); cursor: pointer;
 }
 .qty-stepper .qty-btn:disabled { opacity: 0.4; cursor: default; }
@@ -922,6 +923,7 @@ button.back:hover { color: var(--text); border: none; }
 #flow-qty {
   display: flex;
   align-items: center;
+  justify-content: center;
   gap: 0.5rem;
   margin: 0.25rem 0 0.5rem;
 }
