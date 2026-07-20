@@ -248,3 +248,47 @@ def test_app_js_swap_cancel_invalidates_inflight_poll():
     bump_idx = body.index("++swapPollGen")
     open_idx = body.index("openSwapper()", outcome_idx)
     assert outcome_idx < bump_idx < open_idx
+
+
+# ---------------------------------------------------------------------------
+# Bulk-mint pay-page quantity helpers (#215 UX revision)
+#   clampQty(q, max)                 -> int in [1, max]
+#   qtyStale(selectedQty, liveQty)   -> bool (shown QR no longer matches qty)
+#   qtyMintTarget(selectedQty)       -> 'single' | 'bulk'
+# ---------------------------------------------------------------------------
+
+
+def test_clamp_qty_bounds():
+    assert run_js("M.clampQty(1, 10)") == 1
+    assert run_js("M.clampQty(0, 10)") == 1
+    assert run_js("M.clampQty(-5, 10)") == 1
+    assert run_js("M.clampQty(10, 10)") == 10
+    assert run_js("M.clampQty(11, 10)") == 10
+    assert run_js("M.clampQty(3, 10)") == 3
+
+
+def test_clamp_qty_non_finite_is_one():
+    assert run_js("M.clampQty(NaN, 10)") == 1
+    assert run_js("M.clampQty(undefined, 10)") == 1
+
+
+def test_qty_stale_no_live_session_is_stale():
+    # liveQty null == no live payload backs the shown QR
+    assert run_js("M.qtyStale(1, null)") is True
+    assert run_js("M.qtyStale(3, null)") is True
+
+
+def test_qty_stale_matching_qty_is_fresh():
+    assert run_js("M.qtyStale(1, 1)") is False
+    assert run_js("M.qtyStale(3, 3)") is False
+
+
+def test_qty_stale_changed_qty_is_stale():
+    assert run_js("M.qtyStale(3, 1)") is True
+    assert run_js("M.qtyStale(1, 3)") is True
+
+
+def test_qty_mint_target():
+    assert run_js("M.qtyMintTarget(1)") == "single"
+    assert run_js("M.qtyMintTarget(2)") == "bulk"
+    assert run_js("M.qtyMintTarget(10)") == "bulk"

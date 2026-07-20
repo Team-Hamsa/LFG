@@ -45,3 +45,30 @@ export function activeMintSessionId(activeResult) {
   if (!s || !s.id || TERMINAL_MINT_STATES.has(s.state)) return null;
   return s.id;
 }
+
+// --- Bulk-mint pay-page quantity helpers (#215 UX revision) ---------------
+// The quantity stepper lives on the pay page. Two questions drive the UI and
+// keep the DOM wiring dumb: does the currently-shown QR still match the
+// selected quantity, and which endpoint does that quantity target?
+
+// Clamp a stepper value to the allowed range. Non-finite -> 1 (defensive:
+// never let a bad value unhide/enable a control out of range).
+export function clampQty(q, max) {
+  const n = Math.trunc(Number(q));
+  if (!Number.isFinite(n)) return 1;
+  return Math.min(Math.max(n, 1), Math.max(1, Math.trunc(Number(max)) || 1));
+}
+
+// Is the shown QR stale relative to the selected quantity? liveQty is the
+// quantity the live session/job was created for, or null when no live payload
+// backs the screen (e.g. just after a qty change cancelled it). A stale QR is
+// dimmed and Regenerate is highlighted.
+export function qtyStale(selectedQty, liveQty) {
+  return liveQty === null || selectedQty !== liveQty;
+}
+
+// Which mint endpoint does the selected quantity commit to? 1 = single-mint
+// session; >1 = bulk job (deliberately separate paths, #215).
+export function qtyMintTarget(selectedQty) {
+  return selectedQty > 1 ? 'bulk' : 'single';
+}
