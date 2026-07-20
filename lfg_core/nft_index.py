@@ -296,11 +296,18 @@ def reconcile_numbers_from_app_db(conn: sqlite3.Connection, app_db_path: str) ->
     NULL, so no local-archive hit). The app LFG table minted every edition and
     is the source of truth for the nft_id -> nft_number mapping, so it can heal
     what the chain metadata can't describe. Idempotent; a no-op when the app DB
-    is absent (e.g. the auditor pointed at a bare index)."""
+    is absent (e.g. the auditor pointed at a bare index) or exists without the
+    LFG table (a fresh/partially-initialized per-network app DB would otherwise
+    crash-loop the listener at startup with "no such table: appdb.LFG")."""
     if not os.path.exists(app_db_path):
         return 0
     conn.execute("ATTACH DATABASE ? AS appdb", (app_db_path,))
     try:
+        has_lfg = conn.execute(
+            "SELECT 1 FROM appdb.sqlite_master WHERE type = 'table' AND name = 'LFG'"
+        ).fetchone()
+        if has_lfg is None:
+            return 0
         cur = conn.execute(
             """
             UPDATE onchain_nfts

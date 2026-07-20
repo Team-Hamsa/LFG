@@ -310,6 +310,27 @@ def test_reconcile_numbers_missing_app_db_is_noop(tmp_path):
     assert nft_index.reconcile_numbers_from_app_db(idx, str(tmp_path / "nope.db")) == 0
 
 
+def test_reconcile_numbers_app_db_without_lfg_table_is_noop(tmp_path):
+    # A fresh/partially-initialized per-network app DB can exist on disk without
+    # the LFG table yet; that must be the same no-op as a missing file, not an
+    # OperationalError ("no such table: appdb.LFG") that crash-loops the
+    # listener at startup (stg-index-testnet, 2026-07-20).
+    import sqlite3
+
+    idx = nft_index.init_db(str(tmp_path / "onchain.db"))
+    nft_index.upsert(idx, _nft("EFE", number=None))
+
+    app_path = str(tmp_path / "lfg.db")
+    app = sqlite3.connect(app_path)
+    app.execute("CREATE TABLE Users (id INTEGER PRIMARY KEY)")  # no LFG table
+    app.commit()
+    app.close()
+
+    assert nft_index.reconcile_numbers_from_app_db(idx, app_path) == 0
+    # the appdb attach must not leak — a subsequent run still works
+    assert nft_index.reconcile_numbers_from_app_db(idx, app_path) == 0
+
+
 def test_reconcile_numbers_tolerates_duplicate_nft_id(tmp_path):
     # LFG's PK is nft_number, not nft_id, so nothing enforces nft_id uniqueness.
     # A duplicate must not make the scalar subquery raise "sub-select returns 2
