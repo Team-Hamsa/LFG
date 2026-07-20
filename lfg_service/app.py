@@ -1687,7 +1687,9 @@ async def handle_market_cancel_start(request):
         try:
             return web.json_response(mock_market.INSTANCE.start_cancel(wallet, offer_index))
         except mock_market.MockMarketError as e:
-            status = {"not found": 404, "not your listing": 403}.get(str(e), 400)
+            status = {"not found": 404, "not your listing": 403, "not your bid": 403}.get(
+                str(e), 400
+            )
             return web.json_response({"error": str(e)}, status=status)
 
     loop = asyncio.get_event_loop()

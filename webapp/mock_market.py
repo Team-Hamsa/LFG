@@ -416,7 +416,19 @@ class MockMarket:
 
     # --- #283: bids ---
 
+    def _bid_nft_meta(self, nft_id: str) -> dict[str, Any]:
+        """image/nft_number for a bid chip, resolved from whichever mock store
+        knows the token — mirrors the real _serialize_bid's optional fields."""
+        listing = next((r for r in self._listings if r["nft_id"] == nft_id), None)
+        if listing is not None:
+            return {"image": listing["image"] or None, "nft_number": listing.get("nft_number")}
+        char = next((c for c in mock_economy.INSTANCE.characters if c["nft_id"] == nft_id), None)
+        if char is not None:
+            return {"image": char.get("image_url") or None, "nft_number": char.get("edition")}
+        return {"image": None, "nft_number": None}
+
     def _serialize_bid(self, b: dict[str, Any]) -> dict[str, Any]:
+        meta = self._bid_nft_meta(b["nft_id"])
         return {
             "offer_index": b["offer_index"],
             "nft_id": b["nft_id"],
@@ -424,6 +436,8 @@ class MockMarket:
             "amount_drops": b["amount_drops"],
             "amount_xrp": market_ops.drops_to_xrp_str(str(b["amount_drops"])),
             "expiration": b.get("expiration"),
+            "nft_number": meta["nft_number"],
+            "image": meta["image"],
         }
 
     def bids(self, nft_id: str) -> list[dict[str, Any]]:

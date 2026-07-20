@@ -2354,6 +2354,7 @@ async function openListingDetail(row) {
   const bidForm = el('listing-bid-form');
   bidsLine.hidden = true;
   bidForm.hidden = true;
+  el('listing-bid-price').value = ''; // never carry a price across listings
   const canBid = vm.kind === 'character' && (!me || !me.wallet || me.wallet !== vm.seller);
   bidBtn.hidden = !canBid;
   bidBtn.onclick = () => { bidForm.hidden = !bidForm.hidden; if (!bidForm.hidden) el('listing-bid-price').focus(); };
