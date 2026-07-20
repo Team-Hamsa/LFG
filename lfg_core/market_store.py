@@ -118,6 +118,10 @@ def init_db(conn: sqlite3.Connection) -> None:
         )
         conn.execute("DROP TABLE _market_listings_migrate")
         conn.executescript(_SCHEMA)
+    # #283: the bid index shares this db and every market_listings opener may
+    # touch it — create it here so hot paths (the listener's per-tx handlers)
+    # never re-run schema DDL per transaction.
+    conn.executescript(_BID_SCHEMA)
     conn.commit()
 
 
@@ -335,6 +339,143 @@ def _attributes_match(attrs: list[dict[str, str]], filters: dict[str, list[str]]
         if not any(a.get("trait_type") == slot and a.get("value") in wanted for a in attrs):
             return False
     return True
+
+
+# --- #283: buy offers (bids) ---
+# Same derived/droppable/rebuildable posture as market_listings: a row exists
+# only because a live buy-side NFTokenOffer ledger object backs it; the
+# listener (and the backfill sweep) are the writers. Characters-only for now
+# (XRP drops); trait bids wait for the economy's mainnet flip.
+
+_BID_SCHEMA = """
+CREATE TABLE IF NOT EXISTS buy_offers (
+    offer_index   TEXT PRIMARY KEY,   -- NFTokenOffer LedgerIndex (64-hex)
+    nft_id        TEXT NOT NULL,
+    bidder        TEXT NOT NULL,      -- offer Owner (the account bidding)
+    amount_drops  INTEGER NOT NULL,
+    expiration    INTEGER,            -- Ripple-epoch seconds; NULL = never
+    created_ledger INTEGER,
+    created_ts    INTEGER,
+    is_live       INTEGER NOT NULL DEFAULT 1,
+    closed_reason TEXT                -- accepted | cancelled | stale
+);
+CREATE INDEX IF NOT EXISTS idx_buy_offers_live ON buy_offers(is_live, nft_id);
+"""
+
+_VALID_BID_CLOSE_REASONS = {"accepted", "cancelled", "stale"}
+
+
+@dataclass
+class BuyOffer:
+    offer_index: str
+    nft_id: str
+    bidder: str
+    amount_drops: int
+    expiration: int | None = None
+    created_ledger: int | None = None
+    created_ts: int | None = None
+    is_live: int = 1
+    closed_reason: str | None = None
+
+
+def init_bid_schema(conn: sqlite3.Connection) -> None:
+    """Create the buy_offers table + index if absent. Idempotent."""
+    conn.executescript(_BID_SCHEMA)
+    conn.commit()
+
+
+def upsert_bid(conn: sqlite3.Connection, bid: BuyOffer) -> None:
+    """Insert or overwrite a bid row (keyed on offer_index) — listener and
+    backfill writer, mirroring upsert_listing's semantics: created_* COALESCE
+    on conflict (only the listener knows them), everything else overwrites."""
+    conn.execute(
+        """
+        INSERT INTO buy_offers
+            (offer_index, nft_id, bidder, amount_drops, expiration,
+             created_ledger, created_ts, is_live, closed_reason)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+        ON CONFLICT(offer_index) DO UPDATE SET
+            nft_id=excluded.nft_id,
+            bidder=excluded.bidder,
+            amount_drops=excluded.amount_drops,
+            expiration=excluded.expiration,
+            created_ledger=COALESCE(excluded.created_ledger, buy_offers.created_ledger),
+            created_ts=COALESCE(excluded.created_ts, buy_offers.created_ts),
+            is_live=excluded.is_live,
+            closed_reason=excluded.closed_reason
+        """,
+        (
+            bid.offer_index,
+            bid.nft_id,
+            bid.bidder,
+            bid.amount_drops,
+            bid.expiration,
+            bid.created_ledger,
+            bid.created_ts,
+            bid.is_live,
+            bid.closed_reason,
+        ),
+    )
+    conn.commit()
+
+
+def close_bid(conn: sqlite3.Connection, offer_index: str, reason: str) -> None:
+    """Mark a bid no-longer-live: accepted|cancelled|stale. Unknown
+    offer_index is a harmless no-op (mirrors close_listing)."""
+    if reason not in _VALID_BID_CLOSE_REASONS:
+        raise ValueError(f"unknown bid close reason: {reason!r}")
+    conn.execute(
+        "UPDATE buy_offers SET is_live = 0, closed_reason = ? WHERE offer_index = ?",
+        (reason, offer_index),
+    )
+    conn.commit()
+
+
+def get_bid(conn: sqlite3.Connection, offer_index: str) -> dict[str, Any] | None:
+    conn.row_factory = sqlite3.Row
+    row = conn.execute("SELECT * FROM buy_offers WHERE offer_index = ?", (offer_index,)).fetchone()
+    return dict(row) if row is not None else None
+
+
+def live_bids_for_nft(conn: sqlite3.Connection, nft_id: str) -> list[dict[str, Any]]:
+    """Live bids on one NFT, highest first — the public per-listing bid list."""
+    conn.row_factory = sqlite3.Row
+    cur = conn.execute(
+        "SELECT * FROM buy_offers WHERE nft_id = ? AND is_live = 1"
+        " ORDER BY amount_drops DESC, offer_index",
+        (nft_id,),
+    )
+    return [dict(row) for row in cur.fetchall()]
+
+
+def live_bids_by(conn: sqlite3.Connection, bidder: str) -> list[dict[str, Any]]:
+    """One wallet's live outgoing bids ("My bids")."""
+    conn.row_factory = sqlite3.Row
+    cur = conn.execute(
+        "SELECT * FROM buy_offers WHERE bidder = ? AND is_live = 1"
+        " ORDER BY created_ts DESC, offer_index",
+        (bidder,),
+    )
+    return [dict(row) for row in cur.fetchall()]
+
+
+def live_bids_on_owner_nfts(conn: sqlite3.Connection, owner: str) -> list[dict[str, Any]]:
+    """Live incoming bids on every character the wallet currently owns
+    ("Bids on my NFTs"), joined against the owner-of-record index so a bid on
+    a token the wallet no longer holds is not shown. Excludes the owner's own
+    bids (a self-bid is unacceptable on-ledger anyway)."""
+    conn.row_factory = sqlite3.Row
+    cur = conn.execute(
+        """
+        SELECT b.*, o.nft_number AS nft_number, o.image AS image
+        FROM buy_offers b
+        JOIN onchain_nfts o ON b.nft_id = o.nft_id
+        WHERE o.owner = ? AND o.is_burned = 0 AND b.is_live = 1 AND b.bidder != ?
+        ORDER BY b.amount_drops DESC, b.offer_index
+        """,
+        (owner, owner),
+    )
+    return [dict(row) for row in cur.fetchall()]
 
 
 def _destination_clause(external_destinations: Collection[str] | None) -> tuple[str, list[str]]:

@@ -237,6 +237,237 @@ class BuySession:
         }
 
 
+@dataclass
+class BidSession:
+    """#283: place a native buy offer (bid) on a character NFT. Mirrors
+    ListSession's start -> QR/push -> poll -> validated-tx shape; the
+    validated NFTokenCreateOffer's created BUY offer is extracted and the
+    caller records a buy_offers row."""
+
+    discord_id: str
+    wallet_address: str
+    nft_id: str
+    owner: str  # NFT owner at bid time (the ledger requires Owner on buy offers)
+    amount_drops: int
+    platform: str = "discord"
+    id: str = field(default_factory=lambda: uuid.uuid4().hex)
+    created_at: float = field(default_factory=time.time)
+    state: str = AWAITING_SIGNATURE
+    error: str | None = None
+    payload_uuid: str | None = None
+    qr_url: str | None = None
+    xumm_url: str | None = None
+    txid: str | None = None
+    poll_count: int = 0
+    offer_index: str | None = None
+    reason: str | None = None  # "signer_mismatch" on a foreign-signed payload
+    push: str | None = None
+    issued_user_token: str | None = field(default=None, repr=False)
+    kind: str = "bid"
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "id": self.id,
+            "platform": self.platform,
+            "state": self.state,
+            "error": self.error,
+            "qr_url": self.qr_url,
+            "xumm_url": self.xumm_url,
+            "push": self.push,
+            "offer_index": self.offer_index,
+            "reason": self.reason,
+        }
+
+
+@dataclass
+class BidAcceptSession:
+    """#283: the OWNER accepting a bid (NFTokenAcceptOffer via
+    NFTokenBuyOffer). CancelSession-shaped: the accept either lands or it
+    doesn't — the listener attributes ownership/close from on-ledger truth."""
+
+    discord_id: str
+    wallet_address: str
+    offer_index: str
+    nft_id: str
+    network: str
+    amount_drops: int
+    platform: str = "discord"
+    id: str = field(default_factory=lambda: uuid.uuid4().hex)
+    created_at: float = field(default_factory=time.time)
+    state: str = AWAITING_SIGNATURE
+    error: str | None = None
+    reason: str | None = None  # "bid_unavailable" on the post-sign race
+    payload_uuid: str | None = None
+    qr_url: str | None = None
+    xumm_url: str | None = None
+    txid: str | None = None
+    poll_count: int = 0
+    push: str | None = None
+    issued_user_token: str | None = field(default=None, repr=False)
+    kind: str = "bid_accept"
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "id": self.id,
+            "platform": self.platform,
+            "state": self.state,
+            "error": self.error,
+            "reason": self.reason,
+            "qr_url": self.qr_url,
+            "xumm_url": self.xumm_url,
+            "push": self.push,
+            "offer_index": self.offer_index,
+        }
+
+
+async def advance_bid_session(
+    session: BidSession,
+    *,
+    get_payload_status: Any = None,
+    get_tx: Any = None,
+) -> dict[str, Any] | None:
+    """#283: advance a BidSession — advance_list_session's buy-side twin.
+    Returns `{offer_index, nft_id, bidder, amount_drops, expiration}` (ready
+    for market_store.upsert_bid via BuyOffer(**dict, ...)) on the poll a
+    tesSUCCESS NFTokenCreateOffer is confirmed and its created BUY offer
+    extracted; None every other poll. Same late-bound xumm/xrpl defaults as
+    the other advancers (monkeypatch-friendly)."""
+    get_payload_status = get_payload_status or xumm_ops.get_payload_status
+    get_tx = get_tx or xrpl_ops.get_tx
+    if session.state not in (AWAITING_SIGNATURE, PENDING):
+        return None
+
+    if session.txid is None:
+        s = await get_payload_status(session.payload_uuid)
+        if s is None:
+            return None
+        if s.get("expired"):
+            session.state = FAILED
+            session.error = "signing request expired"
+            return None
+        if not s.get("signed"):
+            return None
+        # Fail-closed signer check (same rationale as advance_buy_session's):
+        # a shared QR signed by a different wallet must not drive this
+        # session's DB writes; the listener attributes on-ledger truth.
+        if s.get("account") != session.wallet_address:
+            session.state = FAILED
+            session.error = "bid signed by a different account than the bidder"
+            session.reason = "signer_mismatch"
+            return None
+        _capture_issued_token(session, s)
+        txid = s.get("txid")
+        if not txid:
+            return None
+        session.txid = txid
+        session.state = PENDING
+
+    try:
+        tx = await get_tx(session.txid)
+    except Exception as e:
+        session.state = UNKNOWN
+        session.error = f"tx lookup failed: {e}"
+        return None
+
+    if not tx.get("validated"):
+        session.poll_count += 1
+        if session.poll_count >= MAX_FINALIZE_POLLS:
+            session.state = UNKNOWN
+            session.error = "gave up waiting for validation"
+        return None
+
+    meta = tx.get("meta") or {}
+    if meta.get("TransactionResult") != "tesSUCCESS":
+        session.state = FAILED
+        session.error = f"transaction failed: {meta.get('TransactionResult')}"
+        return None
+
+    extracted = market_ops.extract_created_buy_offer(meta, session.nft_id)
+    if extracted is None:
+        session.state = FAILED
+        session.error = "could not find the created buy offer in transaction metadata"
+        return None
+
+    session.offer_index = extracted["offer_index"]
+    session.state = DONE
+    return {
+        "offer_index": extracted["offer_index"],
+        "nft_id": session.nft_id,
+        "bidder": session.wallet_address,
+        # On-ledger truth from the CreatedNode, not the session's amount.
+        "amount_drops": extracted["amount_drops"],
+        "expiration": extracted.get("expiration"),
+    }
+
+
+async def advance_bid_accept_session(
+    session: BidAcceptSession,
+    *,
+    get_payload_status: Any = None,
+    get_tx: Any = None,
+) -> str | None:
+    """#283: advance a BidAcceptSession. Returns the accepted bid's
+    offer_index (the caller closes its buy_offers row 'accepted') on the poll
+    a tesSUCCESS NFTokenAcceptOffer is confirmed; None otherwise. A tec
+    failure (bid expired / bidder unfunded / token moved) fails the session
+    with reason='bid_unavailable' so the UI can say why."""
+    get_payload_status = get_payload_status or xumm_ops.get_payload_status
+    get_tx = get_tx or xrpl_ops.get_tx
+    if session.state not in (AWAITING_SIGNATURE, PENDING):
+        return None
+
+    if session.txid is None:
+        s = await get_payload_status(session.payload_uuid)
+        if s is None:
+            return None
+        if s.get("expired"):
+            session.state = FAILED
+            session.error = "signing request expired"
+            return None
+        if not s.get("signed"):
+            return None
+        # Fail-closed signer check (same rationale as advance_buy_session's):
+        # a shared QR signed by a different wallet must not drive this
+        # session's DB writes; the listener attributes on-ledger truth.
+        if s.get("account") != session.wallet_address:
+            session.state = FAILED
+            session.error = "accept signed by a different account than the owner"
+            session.reason = "signer_mismatch"
+            return None
+        _capture_issued_token(session, s)
+        txid = s.get("txid")
+        if not txid:
+            return None
+        session.txid = txid
+        session.state = PENDING
+
+    try:
+        tx = await get_tx(session.txid)
+    except Exception as e:
+        session.state = UNKNOWN
+        session.error = f"tx lookup failed: {e}"
+        return None
+
+    if not tx.get("validated"):
+        session.poll_count += 1
+        if session.poll_count >= MAX_FINALIZE_POLLS:
+            session.state = UNKNOWN
+            session.error = "gave up waiting for validation"
+        return None
+
+    meta = tx.get("meta") or {}
+    result = meta.get("TransactionResult")
+    if result != "tesSUCCESS":
+        session.state = FAILED
+        session.error = f"transaction failed: {result}"
+        if isinstance(result, str) and result.startswith("tec"):
+            session.reason = "bid_unavailable"
+        return None
+
+    session.state = DONE
+    return session.offer_index
+
+
 async def advance_list_session(
     session: ListSession,
     *,

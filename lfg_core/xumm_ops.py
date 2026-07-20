@@ -413,6 +413,66 @@ async def create_sell_offer_payload(
     )
 
 
+async def create_buy_offer_payload(
+    account: str,
+    nft_id: str,
+    owner: str,
+    amount_drops: str,
+    expiration: int,
+    return_url: dict[str, str] | None = None,
+    user_token: str | None = None,
+    platform: str = memos.PLATFORM_BACKEND,
+    campaign: str | None = None,
+) -> dict[str, Any] | None:
+    """#283: XUMM payload for a native BUY offer (bid) on a character NFT.
+    Flags=0 (no lsfSellNFToken) marks the buy side; `owner` is REQUIRED by
+    the ledger for buy offers (the current NFT holder); `amount_drops` is a
+    wire-shaped integer-drops string; `expiration` is a Ripple-epoch seconds
+    timestamp and is ALWAYS set — bids escrow nothing (funds are checked only
+    at accept), so an unexpiring stale bid would linger as ledger junk and a
+    misleading UI row. No Destination: the bid is acceptable by whoever owns
+    the token when it is accepted."""
+    return await _create_xumm_payload(
+        {
+            "TransactionType": "NFTokenCreateOffer",
+            "Account": account,
+            "NFTokenID": nft_id,
+            "Owner": owner,
+            "Amount": amount_drops,
+            "Flags": 0,
+            "Expiration": expiration,
+        },
+        options=_with_return_url({}, return_url),
+        user_token=user_token,
+        memos_json=memos.build_memos_json(
+            memos.INITIATOR_USER, platform, memos.ACTION_BID, campaign
+        ),
+    )
+
+
+async def create_accept_buy_offer_payload(
+    offer_id: str,
+    return_url: dict[str, str] | None = None,
+    user_token: str | None = None,
+    platform: str = memos.PLATFORM_BACKEND,
+    campaign: str | None = None,
+) -> dict[str, Any] | None:
+    """#283: XUMM payload for the OWNER accepting a buy offer (bid) —
+    NFTokenAcceptOffer keyed by NFTokenBuyOffer instead of NFTokenSellOffer
+    (create_accept_offer_payload's sell-side twin)."""
+    return await _create_xumm_payload(
+        {
+            "TransactionType": "NFTokenAcceptOffer",
+            "NFTokenBuyOffer": offer_id,
+        },
+        options=_with_return_url({}, return_url),
+        user_token=user_token,
+        memos_json=memos.build_memos_json(
+            memos.INITIATOR_USER, platform, memos.ACTION_BID_ACCEPT, campaign
+        ),
+    )
+
+
 async def create_cancel_offer_payload(
     account: str,
     offer_index: str,

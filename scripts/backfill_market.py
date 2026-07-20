@@ -107,11 +107,18 @@ def _matching_sell_offers(
     return matches
 
 
+async def _fetch_buy_offers_strict(nft_id: str) -> list[dict[str, Any]]:
+    """#283: strict buy-offer fetch — same raise-on-error contract as
+    _fetch_offers_strict, buy side."""
+    return await xrpl_ops.get_nft_buy_offers(nft_id, raise_on_error=True)
+
+
 async def backfill_market(
     conn: sqlite3.Connection,
     fetch_offers: FetchOffers = _fetch_offers_strict,
     concurrency: int = FETCH_CONCURRENCY,
     fetch_ledger_time: FetchLedgerTime | None = None,
+    fetch_buy_offers: FetchOffers = _fetch_buy_offers_strict,
 ) -> dict[str, int]:
     """Rebuild market_listings from on-ledger sell-offer state. Returns
     summary counts: characters_swept, traits_swept, live_listings (distinct
@@ -191,12 +198,75 @@ async def backfill_market(
             market_store.close_listing(conn, row["offer_index"], "stale")
             closed += 1
 
+    # --- #283: buy-offer (bid) sweep — same posture, buy side, characters
+    # only. A fetch failure exempts the token's bid rows from stale-closing.
+    market_store.init_bid_schema(conn)
+    bid_failed_nft_ids: set[str] = set()
+
+    async def sweep_bids(nft_id: str) -> list[str]:
+        try:
+            async with sem:
+                offers = await fetch_buy_offers(nft_id)
+        except Exception as e:
+            logging.warning(f"backfill_market: bid fetch failed for {nft_id}: {e}")
+            bid_failed_nft_ids.add(nft_id)
+            return []
+        confirmed: list[str] = []
+        for offer in offers:
+            if not isinstance(offer, dict):
+                continue
+            offer_index = offer.get("offer_index")
+            amount = offer.get("amount")
+            bidder = offer.get("owner")
+            if not (isinstance(offer_index, str) and offer_index and isinstance(bidder, str)):
+                continue
+            if not isinstance(amount, str) or not amount.isdigit():
+                continue  # IOU-denominated bid — not indexed
+            if offer.get("destination") is not None:
+                continue
+            expiration = offer.get("expiration")
+            if expiration is not None and ledger_time is not None:
+                try:
+                    if int(expiration) <= int(ledger_time):
+                        continue  # expired — the stale-close pass retires it
+                except (TypeError, ValueError):
+                    continue
+            market_store.upsert_bid(
+                conn,
+                market_store.BuyOffer(
+                    offer_index=offer_index,
+                    nft_id=nft_id,
+                    bidder=bidder,
+                    amount_drops=int(amount),
+                    expiration=expiration,
+                    is_live=1,
+                ),
+            )
+            confirmed.append(offer_index)
+        return confirmed
+
+    bid_results = await asyncio.gather(*[sweep_bids(row["nft_id"]) for row in characters])
+    valid_bid_indexes = {idx for group in bid_results for idx in group}
+    previously_live_bids = conn.execute(
+        "SELECT offer_index, nft_id FROM buy_offers WHERE is_live = 1"
+    ).fetchall()
+    bids_closed = 0
+    for row in previously_live_bids:
+        if row["nft_id"] in bid_failed_nft_ids:
+            continue
+        if row["offer_index"] not in valid_bid_indexes:
+            market_store.close_bid(conn, row["offer_index"], "stale")
+            bids_closed += 1
+
     return {
         "characters_swept": len(characters),
         "traits_swept": len(traits),
         "live_listings": len(valid_offer_indexes),
         "closed_stale": closed,
         "fetch_failures": len(failed_nft_ids),
+        "live_bids": len(valid_bid_indexes),
+        "bids_closed_stale": bids_closed,
+        "bid_fetch_failures": len(bid_failed_nft_ids),
     }
 
 
@@ -224,6 +294,10 @@ async def _amain() -> int:
     print(f"  Traits swept: {counts['traits_swept']}")
     print(f"  Live listings: {counts['live_listings']}")
     print(f"  Closed stale: {counts['closed_stale']}")
+    print(
+        f"  Live bids: {counts['live_bids']} (closed stale: {counts['bids_closed_stale']}, "
+        f"fetch failures: {counts['bid_fetch_failures']})"
+    )
     print(f"  Fetch failures (stale-close exempt): {counts['fetch_failures']}")
     return 0
 

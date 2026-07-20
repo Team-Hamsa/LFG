@@ -381,7 +381,32 @@ def _apply_offer_create(conn: sqlite3.Connection, tx: dict[str, Any]) -> None:
     expect = "brix" if kind == "trait" else "xrp"
     extracted = market_ops.extract_created_sell_offer(meta, nft_id, expect=expect)
     if extracted is None:
-        return  # buy offer, wrong-denomination amount, or no matching CreatedNode
+        # #283: not a matching sell offer — maybe a native BUY offer (bid).
+        # Characters-only for now; the extract is XRP-drops-only by design.
+        if kind == "character":
+            bid = market_ops.extract_created_buy_offer(meta, nft_id)
+            # Destination-locked buy offers are skipped (mirrors the backfill
+            # sweep): they're directed at one counterparty, verify_buy_offer
+            # would fail-close them at accept, and indexing them would show a
+            # "public" bid the owner can never take.
+            if bid is not None and bid.get("destination") is not None:
+                bid = None
+            bid_index = bid.get("offer_index") if bid else None
+            if bid is not None and isinstance(bid_index, str) and bid_index:
+                market_store.upsert_bid(
+                    conn,
+                    market_store.BuyOffer(
+                        offer_index=bid_index,
+                        nft_id=nft_id,
+                        bidder=seller,  # tx.Account — the bid's creator
+                        amount_drops=int(bid["amount_drops"]),
+                        expiration=bid.get("expiration"),
+                        created_ledger=tx.get("ledger_index"),
+                        created_ts=_tx_unix_time(tx),
+                        is_live=1,
+                    ),
+                )
+        return  # wrong-denomination amount, or no matching sell CreatedNode
     offer_index = extracted.get("offer_index")
     if not isinstance(offer_index, str) or not offer_index:
         return
@@ -417,6 +442,10 @@ def _close_deleted_offers(conn: sqlite3.Connection, tx: dict[str, Any], reason: 
             continue
         try:
             market_store.close_listing(conn, offer_index, reason)
+            # #283: the deleted object may equally be a buy offer (bid) we
+            # indexed — close its row with the bid vocabulary ('sold' maps to
+            # 'accepted'). Unknown offer_index is a no-op in both stores.
+            market_store.close_bid(conn, offer_index, "accepted" if reason == "sold" else reason)
         except Exception:
             logging.exception(
                 f"deleted-offer close failed (offer_index={offer_index}, reason={reason})"
@@ -482,8 +511,25 @@ def _apply_offer_accept(conn: sqlite3.Connection, tx: dict[str, Any]) -> None:
         ),
         None,
     )
+    # #283: whatever else this accept did, every deleted BUY offer of ours is
+    # now consumed — close its bid row as accepted. (Direct sell-offer accepts
+    # delete no buy offers; brokered + bid accepts delete exactly the ones
+    # consumed.)
+    for wrapper in deleted:
+        w_flags = int((wrapper.get("FinalFields") or {}).get("Flags") or 0)
+        if not (w_flags & market_ops.LSF_SELL_NFTOKEN):
+            bid_index = wrapper.get("LedgerIndex")
+            if isinstance(bid_index, str) and bid_index:
+                # Per-item isolation (same convention as _close_deleted_offers):
+                # one bad entry must not abort the sell-close/stale-delist work
+                # below for a tx that genuinely succeeded on-ledger.
+                try:
+                    market_store.close_bid(conn, bid_index, "accepted")
+                except Exception:
+                    logging.exception(f"bid close failed on accept (offer_index={bid_index})")
+
     if sell_wrapper is None:
-        return  # a buy-offer-only accept; no sell listing of ours to close
+        return  # a bid-only accept; no sell listing of ours to close
     offer_index = sell_wrapper.get("LedgerIndex")
     final = sell_wrapper.get("FinalFields") or {}
     nft_id = final.get("NFTokenID")

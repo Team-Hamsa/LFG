@@ -108,6 +108,7 @@ BRIX_DISTRIBUTOR_ADDRESS=<xrpl-address>                     # optional; airdrop 
 BRIX_AMM_ACCOUNT=<xrpl-address>                             # optional; mainnet BRIX/XRP AMM pool account, used by snapshot_balances.py
 BULK_MINT_UI_ENABLED=0                                      # optional (#215); Activity bulk-mint stepper — off = today's UI, server endpoints stay live
 BROKER_ALLOWLIST_PATH=<path-to-json>                        # optional (#131); external-marketplace broker allowlist overlay ({addr: {name, url_template}}); unset = built-ins in lfg_core/brokers.py; edits are picked up live (mtime-keyed cache)
+MARKET_BID_TTL_SECONDS=604800                               # optional (#283); on-ledger Expiration for in-app bids (native buy offers), default 7 days
 ```
 
 > **Standalone web surface (#240):** the same vanilla-JS Activity runs as a
@@ -824,6 +825,21 @@ the wrong chain.
   stranding the paid trait); a mismatched (or missing) signer fails the
   session `signer_mismatch` without closing the listing (the listener's
   accept path attributes the row to the real signer from on-ledger truth).
+- **Native buy offers / bids (#283, characters-only MVP):** `GET
+  /api/market/bids?nft_id=` (public, live bids highest-first), `GET
+  /api/market/bids/mine` (authed: `my_bids` + `bids_on_my_nfts`), `POST
+  /api/market/bid` `{nft_id, price_xrp}` (permissionless bid on any of our
+  characters — incl. externally-listed ones; always carries an on-ledger
+  `Expiration` of `MARKET_BID_TTL_SECONDS` since bids escrow nothing; self-bid
+  400), `POST /api/market/bid/accept` `{offer_index}` (owner-only; fail-closed
+  `verify_buy_offer` re-check — 503 on lookup failure, 410+stale on verified
+  absence), each with `GET .../{session_id}` status polls
+  (`BidSession`/`BidAcceptSession` in `lfg_core/market_flow.py`). The
+  `buy_offers` table (same per-network db, `market_store.init_bid_schema`) is
+  derived/droppable/rebuildable: the listener indexes buy-flagged
+  offer_create/cancel/accept for our character NFTs, and `backfill_market.py`
+  sweeps `nft_buy_offers` per token. XRP-drops-only; trait bids wait for the
+  economy's mainnet flip.
 - `POST /api/market/trait/list` — the two-signature "sell a trait out of my
   Closet" wizard (`market_flow.TraitSellSession`): Extract (existing Phase-4
   flow, signature 1) then the plain List flow on the freshly-owned token
