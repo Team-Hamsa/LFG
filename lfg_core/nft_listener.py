@@ -385,6 +385,12 @@ def _apply_offer_create(conn: sqlite3.Connection, tx: dict[str, Any]) -> None:
         # Characters-only for now; the extract is XRP-drops-only by design.
         if kind == "character":
             bid = market_ops.extract_created_buy_offer(meta, nft_id)
+            # Destination-locked buy offers are skipped (mirrors the backfill
+            # sweep): they're directed at one counterparty, verify_buy_offer
+            # would fail-close them at accept, and indexing them would show a
+            # "public" bid the owner can never take.
+            if bid is not None and bid.get("destination") is not None:
+                bid = None
             bid_index = bid.get("offer_index") if bid else None
             if bid is not None and isinstance(bid_index, str) and bid_index:
                 market_store.init_bid_schema(conn)

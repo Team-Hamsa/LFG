@@ -484,3 +484,16 @@ class TestBidAcceptSession:
         assert out is None
         assert s.state == market_flow.FAILED
         assert s.reason == "bid_unavailable"
+
+
+class TestListenerDestinationLockedBid:
+    def test_destination_locked_bid_not_indexed(self):
+        # Mirrors the backfill sweep's filter: a directed buy offer is not a
+        # public bid — indexing it would 410-mislead the owner at accept.
+        conn = _conn()
+        nft = _our_nft_id(1)
+        _seed_character(conn, nft)
+        tx = _bid_create_tx(nft)
+        tx["meta"]["AffectedNodes"][0]["CreatedNode"]["NewFields"]["Destination"] = "rDest"
+        _run(nft_listener.apply_market_tx(conn, tx))
+        assert market_store.get_bid(conn, "BID1") is None

@@ -294,7 +294,10 @@ async def _amain() -> int:
     print(f"  Traits swept: {counts['traits_swept']}")
     print(f"  Live listings: {counts['live_listings']}")
     print(f"  Closed stale: {counts['closed_stale']}")
-    print(f"  Live bids: {counts['live_bids']} (closed stale: {counts['bids_closed_stale']})")
+    print(
+        f"  Live bids: {counts['live_bids']} (closed stale: {counts['bids_closed_stale']}, "
+        f"fetch failures: {counts['bid_fetch_failures']})"
+    )
     print(f"  Fetch failures (stale-close exempt): {counts['fetch_failures']}")
     return 0
 
