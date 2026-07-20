@@ -91,6 +91,32 @@ class LocalLayerStore:
         path = os.path.join(self.base_dir, rel_path)
         return path if os.path.isfile(path) else None
 
+    def find_display_body(
+        self, trait_type: str, value: str, preferred: list[str] | None = None
+    ) -> str | None:
+        """Sync: first directory that actually holds art for (trait_type,
+        value) — preferred bodies first, then shared/, then any other body —
+        or None if the value has no art anywhere. Display-only: a
+        non-preferred body may be affinity-illegal for minting, but its art
+        is still the right thumbnail for a body-agnostic catalog card."""
+        candidates = list(preferred or []) + [SHARED_DIR]
+        try:
+            others = sorted(
+                d
+                for d in os.listdir(self.base_dir)
+                if os.path.isdir(os.path.join(self.base_dir, d))
+                and not d.startswith(".")
+                and d not in candidates
+            )
+        except OSError:
+            others = []
+        for dirname in candidates + others:
+            base = os.path.join(self.base_dir, dirname, trait_type, value)
+            for ext in LAYER_EXTENSIONS:
+                if os.path.isfile(base + ext):
+                    return dirname
+        return None
+
 
 class CdnListingNotFound(Exception):
     """Raised by _list_dir when the CDN reports 404 for a listed path. This

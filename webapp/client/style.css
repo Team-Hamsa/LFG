@@ -408,7 +408,11 @@ button.back:hover { color: var(--text); border: none; }
   display: grid;
   grid-template-columns: repeat(auto-fill, minmax(120px, 1fr));
   gap: 14px;
-  max-height: 360px;
+  /* Fill the viewport instead of a fixed strip: leave ~380px for the
+     header/tabs/back chrome, never dropping below the old 360px strip.
+     dvh (where supported) tracks mobile browser-chrome collapse. */
+  max-height: max(360px, calc(100vh - 380px));
+  max-height: max(360px, calc(100dvh - 380px));
   overflow-y: auto;
   padding: 4px;
   scrollbar-width: thin;
@@ -680,12 +684,16 @@ button.back:hover { color: var(--text); border: none; }
    desktop/tablet widens the shell and puts the mint flow's copy and visual
    (QR / NFT art) side by side. */
 
-@media (min-width: 760px) and (orientation: landscape) {
+@media (min-width: 760px) {
   #app { max-width: 880px; }
   .card { padding: 26px 30px; }
   .actions { flex-direction: row; justify-content: center; }
   .actions button { width: auto; flex: 1; max-width: 280px; }
-  .nft-grid { max-height: 420px; }
+}
+
+/* Side-by-side flow copy/visual needs the horizontal room, so it stays
+   landscape-only; the width bump above applies in any orientation. */
+@media (min-width: 760px) and (orientation: landscape) {
   .flow-body {
     display: flex;
     align-items: center;

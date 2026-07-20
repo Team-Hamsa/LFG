@@ -974,7 +974,17 @@ def _trait_image_url(cfg: trait_config.TraitConfig, slot: str, value: str) -> st
     without the network/download cost, since affinity already tells us which
     bodies are legal without touching the layer store."""
     allowed = cfg.allowed_bodies(slot, value)
-    body = sorted(allowed)[0] if allowed else layer_store.SHARED_DIR
+    preferred = sorted(allowed) if allowed else []
+    body: str | None = None
+    store = layer_store.get_layer_store()
+    if isinstance(store, layer_store.LocalLayerStore):
+        # Affinity alone can't pick a servable dir: an unrestricted value
+        # usually lives in per-body dirs (not shared/), and a restricted
+        # value's first allowed body may lack the file. Probe the disk so
+        # the URL points at art that actually resolves.
+        body = store.find_display_body(slot, value, preferred)
+    if body is None:
+        body = preferred[0] if preferred else layer_store.SHARED_DIR
     return (
         f"/api/layer?body={urlquote(body, safe='')}"
         f"&trait={urlquote(slot, safe='')}&value={urlquote(value, safe='')}"
