@@ -408,3 +408,17 @@ def test_setup_bulk_stepper_noops_when_flag_off():
     ret_idx = body.index("if (!bulkCfg.enabled) return;")
     wire_idx = body.index("flow-qty-minus")
     assert ret_idx < wire_idx
+
+
+def test_app_js_regen_cancels_live_before_fresh_start():
+    """A regenerate that isn't the same-session expired-QR refresh must cancel
+    whatever payload/job is live before starting a fresh one, or a repeated
+    bulk Regenerate tap orphans the old bulk job's XUMM payload + headroom
+    reservation (#226)."""
+    src = open(APP_JS).read()
+    assert "async function onFlowRegen" in src
+    body = src.split("async function onFlowRegen", 1)[1].split("\n}\n", 1)[0]
+    assert "regeneratePaymentQr()" in body  # same-session refresh path preserved
+    cancel_idx = body.index("cancelLiveMintSilently")
+    start_idx = body.index("startBulkMint")
+    assert cancel_idx < start_idx  # cancel the old payload before starting fresh

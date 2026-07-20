@@ -863,6 +863,9 @@ async function onFlowRegen() {
   if (!mintPure.qtyStale(mintQty, liveQty) && liveQty === 1 && currentMintId) {
     return regeneratePaymentQr(); // classic same-session expired-QR refresh
   }
+  // Any other regenerate builds a fresh session; cancel whatever is live first
+  // so we never orphan a bulk job's XUMM payload + headroom reservation (#226).
+  await cancelLiveMintSilently();
   if (mintPure.qtyMintTarget(mintQty) === 'bulk') return startBulkMint(mintQty);
   return startMint();
 }
