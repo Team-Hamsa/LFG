@@ -822,6 +822,17 @@ button.back:hover { color: var(--text); border: none; }
   display: block; color: var(--yellow); font-size: .72rem; font-weight: 700;
   margin-top: 2px;
 }
+/* #131: external (brokered) listings — read-only price discovery */
+.market-external-toggle {
+  flex: 0 0 auto; display: inline-flex; align-items: center; gap: 6px;
+  font-size: .8rem; color: var(--muted); cursor: pointer;
+}
+.market-external-toggle input { margin: 0; }
+.nft-card.market-card-external { opacity: .65; border-style: dashed; }
+.market-card-external-badge {
+  display: block; color: var(--muted); font-size: .62rem; font-weight: 700;
+  margin-top: 2px; text-transform: uppercase; letter-spacing: .03em;
+}
 
 /* Home-screen leaderboard card */
 .leaderboard { margin-top: 20px; text-align: left; }

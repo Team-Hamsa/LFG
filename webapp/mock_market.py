@@ -19,7 +19,7 @@ from __future__ import annotations
 
 from typing import Any
 
-from lfg_core import market_ops, market_store
+from lfg_core import brokers, market_ops, market_store
 from webapp import mock_economy
 
 DEV_OWNER = mock_economy.DEV_OWNER
@@ -116,6 +116,22 @@ class MockMarket:
                 "value": "Shades",
             },
             {
+                # #131: an external (brokered) listing — destination-locked to
+                # a known broker, read-only in browse, buy refused.
+                "nft_id": "MOCK-9003",
+                "kind": "character",
+                "nft_number": 9003,
+                "image": "",
+                "attributes": [{"trait_type": "Body", "value": "ape"}],
+                "amount_drops": 42_000_000,
+                "seller": OTHER_SELLER_2,
+                "offer_index": "MOCKOFFER-9003",
+                "is_live": True,
+                "slot": None,
+                "value": None,
+                "destination": "rpx9JThQ2y37FaGeeJP7PXDUVEXY3PHZSC",  # xrp.cafe
+            },
+            {
                 "nft_id": "MOCKTRAIT-9199",
                 "kind": "trait",
                 "nft_number": None,
@@ -152,7 +168,17 @@ class MockMarket:
             "image": row["image"],
             "seller": row["seller"],
             "offer_index": row["offer_index"],
+            "buyable": True,
         }
+        # #131 external tagging, mirroring app._serialize_listing_row.
+        destination = row.get("destination")
+        if destination:
+            resolved = brokers.resolve(destination, row["nft_id"])
+            out["buyable"] = False
+            out["source"] = "external"
+            out["destination"] = destination
+            out["marketplace"] = resolved["name"] if resolved else f"external ({destination[:8]}…)"
+            out["external_url"] = resolved["url"] if resolved else None
         # #239 per-kind denomination, mirroring app._serialize_listing_row.
         if row.get("amount_drops") is not None:
             out["amount_drops"] = row["amount_drops"]
@@ -177,8 +203,11 @@ class MockMarket:
         min_drops: int | None,
         max_drops: int | None,
         sort: str,
+        include_external: bool = False,
     ) -> list[dict[str, Any]]:
         rows = [r for r in self._live() if r["kind"] == kind]
+        if not include_external:
+            rows = [r for r in rows if not r.get("destination")]
         if min_drops is not None:
             rows = [
                 r
@@ -317,6 +346,8 @@ class MockMarket:
             raise MockMarketError("not found")
         if not row["is_live"]:
             raise MockMarketError("listing_unavailable")
+        if row.get("destination"):  # #131: external listings are display-only
+            raise MockMarketError("external_listing")
         if row["kind"] == "trait" and not mock_economy.INSTANCE._closet_active(owner):
             raise MockMarketError("closet_required")
         sid = self._next_session_id("buy")

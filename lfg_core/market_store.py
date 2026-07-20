@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import json
 import sqlite3
+from collections.abc import Collection
 from dataclasses import dataclass
 from decimal import Decimal
 from typing import Any
@@ -31,7 +32,7 @@ CREATE TABLE IF NOT EXISTS market_listings (
     kind          TEXT NOT NULL,      -- 'character' | 'trait'
     seller        TEXT NOT NULL,      -- offer Owner
     amount_drops  INTEGER,            -- XRP price (kind='character'); NULL for BRIX rows (#239)
-    destination   TEXT,               -- non-NULL ⇒ hidden from browse
+    destination   TEXT,               -- non-NULL ⇒ hidden from browse (unless a known broker, #131)
     slot          TEXT,               -- trait kind only (denormalized)
     value         TEXT,               -- trait kind only (denormalized)
     created_ledger INTEGER,
@@ -336,35 +337,55 @@ def _attributes_match(attrs: list[dict[str, str]], filters: dict[str, list[str]]
     return True
 
 
-def _browse_character_rows(conn: sqlite3.Connection) -> list[sqlite3.Row]:
+def _destination_clause(external_destinations: Collection[str] | None) -> tuple[str, list[str]]:
+    """#131: the browse destination filter. Default (None/empty) keeps the
+    original destination-free behavior; a non-empty allowlist additionally
+    admits rows whose destination is a known broker account — never arbitrary
+    destinations, which would expose private directed peer-to-peer offers."""
+    allowed = sorted(external_destinations or ())
+    if not allowed:
+        return "ml.destination IS NULL", []
+    placeholders = ",".join("?" * len(allowed))
+    return f"(ml.destination IS NULL OR ml.destination IN ({placeholders}))", allowed
+
+
+def _browse_character_rows(
+    conn: sqlite3.Connection, external_destinations: Collection[str] | None = None
+) -> list[sqlite3.Row]:
     conn.row_factory = sqlite3.Row
+    clause, params = _destination_clause(external_destinations)
     cur = conn.execute(
-        """
+        f"""
         SELECT ml.*, o.nft_number AS nft_number, o.attributes_json AS attributes_json
         FROM market_listings ml
         JOIN onchain_nfts o ON ml.nft_id = o.nft_id
         WHERE ml.kind = 'character'
           AND ml.is_live = 1
-          AND ml.destination IS NULL
+          AND {clause}
           AND ml.seller = o.owner
           AND o.is_burned = 0
-        """
+        """,
+        params,
     )
     return cur.fetchall()
 
 
-def _browse_trait_rows(conn: sqlite3.Connection) -> list[sqlite3.Row]:
+def _browse_trait_rows(
+    conn: sqlite3.Connection, external_destinations: Collection[str] | None = None
+) -> list[sqlite3.Row]:
     conn.row_factory = sqlite3.Row
+    clause, params = _destination_clause(external_destinations)
     cur = conn.execute(
-        """
+        f"""
         SELECT ml.*
         FROM market_listings ml
         JOIN trait_tokens t ON ml.nft_id = t.nft_id
         WHERE ml.kind = 'trait'
           AND ml.is_live = 1
-          AND ml.destination IS NULL
+          AND {clause}
           AND ml.seller = t.owner
-        """
+        """,
+        params,
     )
     return cur.fetchall()
 
@@ -387,6 +408,7 @@ def browse(
     sort: str = "price_asc",
     limit: int = 24,
     offset: int = 0,
+    external_destinations: Collection[str] | None = None,
 ) -> list[dict[str, Any]]:
     """Live, browsable listings of one `kind`, joined against the owner-of-
     record table so a listing whose seller no longer holds the token is
@@ -402,6 +424,11 @@ def browse(
     set. Raises ValueError for an unrecognized `kind` or `sort`, or a
     negative `limit`/`offset` (a negative value silently produces a nonsense
     Python slice — wrap-around paging — instead of erroring).
+
+    #131: `external_destinations` (a set of known-broker account addresses)
+    opts destination-locked rows INTO the result when their destination is in
+    the set; the default (None) keeps the original destination-free output.
+    Callers distinguish external rows by their non-NULL `destination` column.
     """
     if kind not in _VALID_KINDS:
         raise ValueError(f"unknown kind: {kind!r}")
@@ -412,7 +439,11 @@ def browse(
     if offset < 0:
         raise ValueError(f"offset must be >= 0, got {offset}")
 
-    rows = _browse_character_rows(conn) if kind == "character" else _browse_trait_rows(conn)
+    rows = (
+        _browse_character_rows(conn, external_destinations)
+        if kind == "character"
+        else _browse_trait_rows(conn, external_destinations)
+    )
 
     # Per-kind price filters (#239): drops bounds apply to XRP-denominated
     # rows, BRIX bounds to BRIX-denominated ones. A row lacking the filtered

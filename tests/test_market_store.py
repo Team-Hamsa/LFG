@@ -798,3 +798,64 @@ class TestBrowseBrix:
         )
         rows = market_store.browse(conn, kind="trait", min_amount_brix="1")
         assert all(r["amount_brix"] is not None for r in rows)
+
+
+class TestBrowseExternal:
+    """#131: destination-locked rows opt in via `external_destinations` — a
+    known-broker allowlist set. Default browse stays destination-free."""
+
+    BROKER = "rBrokerAddress0000000000000000000"
+
+    def test_default_still_excludes_destination_rows(self, conn):
+        market_store.init_db(conn)
+        _seed_character(conn)
+        market_store.upsert_listing(conn, _character_listing(destination=self.BROKER))
+        assert market_store.browse(conn, kind="character") == []
+
+    def test_allowlisted_destination_included(self, conn):
+        market_store.init_db(conn)
+        _seed_character(conn)
+        market_store.upsert_listing(conn, _character_listing(destination=self.BROKER))
+        rows = market_store.browse(conn, kind="character", external_destinations={self.BROKER})
+        assert len(rows) == 1
+        assert rows[0]["destination"] == self.BROKER
+
+    def test_unknown_destination_stays_hidden_even_with_allowlist(self, conn):
+        # A directed peer-to-peer offer (destination not in the allowlist)
+        # must never surface — it could expose a private offer publicly.
+        market_store.init_db(conn)
+        _seed_character(conn)
+        market_store.upsert_listing(conn, _character_listing(destination=OTHER))
+        rows = market_store.browse(conn, kind="character", external_destinations={self.BROKER})
+        assert rows == []
+
+    def test_allowlist_includes_buyable_rows_too(self, conn):
+        market_store.init_db(conn)
+        _seed_character(conn)
+        second_id = CHAR_NFT[:-1] + "8"
+        _seed_character(conn, nft_id=second_id, nft_number=2)
+        market_store.upsert_listing(conn, _character_listing())
+        market_store.upsert_listing(
+            conn,
+            _character_listing(offer_index="B" * 64, nft_id=second_id, destination=self.BROKER),
+        )
+        rows = market_store.browse(conn, kind="character", external_destinations={self.BROKER})
+        assert len(rows) == 2
+        assert {r["destination"] for r in rows} == {None, self.BROKER}
+
+    def test_trait_kind_allowlist_included(self, conn):
+        market_store.init_db(conn)
+        _seed_trait_token(conn)
+        market_store.upsert_listing(conn, _trait_listing(destination=self.BROKER))
+        assert market_store.browse(conn, kind="trait") == []
+        rows = market_store.browse(conn, kind="trait", external_destinations={self.BROKER})
+        assert len(rows) == 1
+
+    def test_external_row_still_hidden_when_stale_or_dead(self, conn):
+        # The ownership join + is_live gates apply to external rows too.
+        market_store.init_db(conn)
+        _seed_character(conn)
+        market_store.upsert_listing(conn, _character_listing(destination=self.BROKER))
+        market_store.close_listing(conn, "A" * 64, "cancelled")
+        rows = market_store.browse(conn, kind="character", external_destinations={self.BROKER})
+        assert rows == []

@@ -126,3 +126,18 @@ def test_app_js_market_click_seams_catch_async_throws():
         "Promise.resolve().then(() => onAction(entry.payload)).catch((e) => showError(e.message))"
         in js
     )
+
+
+def test_external_listing_wiring():
+    # #131: external (brokered) listings — toggle in the filter bar, distinct
+    # disabled card treatment, no in-app buy path for external rows.
+    html = _read("index.html")
+    assert 'id="market-include-external"' in html
+    js = _read("app.js")
+    assert "includeExternal: el('market-include-external').checked" in js
+    assert "market-card-external" in js
+    assert "marketPure.externalLabel(vm)" in js
+    # External cards never enter openBuyFlow; they link out (or explain).
+    assert "vm.externalUrl" in js
+    css = _read("style.css")
+    assert ".nft-card.market-card-external" in css

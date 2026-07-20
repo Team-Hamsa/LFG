@@ -236,7 +236,22 @@ export function mapListingRow(row) {
     slot: row.slot ?? null,
     value: row.value ?? null,
     nftNumber: row.nft_number ?? null,
+    // #131: external (brokered) listings are read-only price discovery.
+    // Absent `buyable` (older server / mine rows) defaults to buyable.
+    buyable: row.buyable !== false,
+    external: row.source === 'external',
+    marketplace: row.marketplace ?? null,
+    externalUrl: row.external_url ?? null,
   };
+}
+
+/**
+ * The "Listed on <marketplace>" label for an external listing card (#131);
+ * empty string for a normal buyable row.
+ */
+export function externalLabel(vm) {
+  if (!vm.external) return '';
+  return vm.marketplace ? `Listed on ${vm.marketplace}` : 'External listing';
 }
 
 /**
@@ -281,9 +296,11 @@ export function traitFilterToken(slot, value) {
  * of "Slot:Value" tokens) becomes one repeated `trait` param per entry,
  * matching request.query.getall('trait') server-side.
  */
-export function buildListingsParams({ kind, traits, minXrp, maxXrp, minBrix, maxBrix, sort, limit, offset } = {}) {
+export function buildListingsParams({ kind, traits, minXrp, maxXrp, minBrix, maxBrix, sort, limit, offset, includeExternal } = {}) {
   const pairs = [];
   if (kind) pairs.push(['kind', kind]);
+  // #131: opt-in known-broker external (read-only) rows.
+  if (includeExternal) pairs.push(['include_external', '1']);
   for (const t of traits || []) pairs.push(['trait', t]);
   if (minXrp !== undefined && minXrp !== null && minXrp !== '') pairs.push(['min_xrp', String(minXrp)]);
   if (maxXrp !== undefined && maxXrp !== null && maxXrp !== '') pairs.push(['max_xrp', String(maxXrp)]);
