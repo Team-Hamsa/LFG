@@ -334,3 +334,66 @@ def test_reconcile_numbers_tolerates_duplicate_nft_id(tmp_path):
         11,
         12,
     )
+
+
+# --- image clobber-guard: never overwrite a resolvable (CDN) URL with ipfs ---
+
+
+def _nft_img(nft_id, image, attrs=None, number=1):
+    return nft_index.OnchainNft(
+        nft_id=nft_id,
+        nft_number=number,
+        owner="rOwner",
+        is_burned=False,
+        mutable=True,
+        uri_hex="6868",
+        body="male",
+        attributes=attrs if attrs is not None else [{"trait_type": "Body", "value": "Straight"}],
+        image=image,
+        ledger_index=100,
+    )
+
+
+CDN = "https://lfgo.b-cdn.net/LFGO/1/1_0.png"
+
+
+def test_image_guard_keeps_cdn_over_incoming_ipfs():
+    conn = nft_index.init_db(":memory:")
+    nft_index.upsert(conn, _nft_img("A", CDN))
+    nft_index.upsert(conn, _nft_img("A", "ipfs://bafyRAW/1.png"))  # listener re-derive
+    assert conn.execute("SELECT image FROM onchain_nfts WHERE nft_id='A'").fetchone()[0] == CDN
+
+
+def test_image_guard_keeps_cdn_over_incoming_gateway_forms():
+    conn = nft_index.init_db(":memory:")
+    for incoming in ("https://dweb.link/ipfs/bafyGW/1.png", "https://bafyGW.ipfs.dweb.link/1.png"):
+        nft_index.upsert(conn, _nft_img("A", CDN))
+        nft_index.upsert(conn, _nft_img("A", incoming))
+        assert conn.execute("SELECT image FROM onchain_nfts WHERE nft_id='A'").fetchone()[0] == CDN
+
+
+def test_image_guard_swap_cdn_replaces_ipfs():
+    # A swap writes a fresh CDN image over an old ipfs one — must take incoming.
+    conn = nft_index.init_db(":memory:")
+    nft_index.upsert(conn, _nft_img("A", "ipfs://bafyOLD/1.png"))
+    new_cdn = "https://lfgo.b-cdn.net/LFGO/1/1_1.png"
+    nft_index.upsert(conn, _nft_img("A", new_cdn))
+    assert conn.execute("SELECT image FROM onchain_nfts WHERE nft_id='A'").fetchone()[0] == new_cdn
+
+
+def test_image_guard_ipfs_over_ipfs_takes_incoming():
+    conn = nft_index.init_db(":memory:")
+    nft_index.upsert(conn, _nft_img("A", "ipfs://bafyOLD/1.png"))
+    nft_index.upsert(conn, _nft_img("A", "ipfs://bafyNEW/1.png"))
+    assert (
+        conn.execute("SELECT image FROM onchain_nfts WHERE nft_id='A'").fetchone()[0]
+        == "ipfs://bafyNEW/1.png"
+    )
+
+
+def test_image_guard_empty_fetch_still_keeps_stored():
+    # Regression on the existing empty-fetch guard (attributes_json='[]').
+    conn = nft_index.init_db(":memory:")
+    nft_index.upsert(conn, _nft_img("A", CDN))
+    nft_index.upsert(conn, _nft_img("A", "ipfs://whatever", attrs=[]))  # failed fetch
+    assert conn.execute("SELECT image FROM onchain_nfts WHERE nft_id='A'").fetchone()[0] == CDN

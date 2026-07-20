@@ -255,8 +255,24 @@ def upsert(conn: sqlite3.Connection, rec: OnchainNft) -> None:
                  THEN body ELSE excluded.body END,
             attributes_json=CASE WHEN excluded.attributes_json='[]'
                  THEN attributes_json ELSE excluded.attributes_json END,
-            image=CASE WHEN excluded.attributes_json='[]'
-                 THEN image ELSE excluded.image END,
+            -- image clobber-guard: a stored resolvable (CDN) URL must survive an
+            -- incoming ipfs one. The original collection's on-chain metadata
+            -- `image` is an unpinned ipfs:// CID; when the listener re-derives it
+            -- on a later tx (e.g. a transfer) it would overwrite a CDN URL that
+            -- repoint_images_to_cdn.py wrote. Host-agnostic: prefer ANY non-ipfs
+            -- URL over an ipfs one (raw ipfs://, `/ipfs/` path gateways, and
+            -- `.ipfs.` subdomain gateways). A swap writes a CDN image, so its
+            -- incoming value is non-ipfs and falls through to ELSE (taken).
+            image=CASE
+                 WHEN excluded.attributes_json='[]' THEN image
+                 WHEN (excluded.image LIKE 'ipfs://%' OR excluded.image LIKE '%/ipfs/%'
+                       OR excluded.image LIKE '%.ipfs.%')
+                      AND onchain_nfts.image <> ''
+                      AND NOT (onchain_nfts.image LIKE 'ipfs://%'
+                               OR onchain_nfts.image LIKE '%/ipfs/%'
+                               OR onchain_nfts.image LIKE '%.ipfs.%')
+                   THEN image
+                 ELSE excluded.image END,
             -- COALESCE: a writer that doesn't know the ledger height (the
             -- swap flow's burn-point stamp passes None) must never erase one
             -- the listener already recorded — nft_by_number orders duplicate
