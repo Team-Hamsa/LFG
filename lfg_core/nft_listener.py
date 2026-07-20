@@ -393,7 +393,6 @@ def _apply_offer_create(conn: sqlite3.Connection, tx: dict[str, Any]) -> None:
                 bid = None
             bid_index = bid.get("offer_index") if bid else None
             if bid is not None and isinstance(bid_index, str) and bid_index:
-                market_store.init_bid_schema(conn)
                 market_store.upsert_bid(
                     conn,
                     market_store.BuyOffer(
@@ -446,7 +445,6 @@ def _close_deleted_offers(conn: sqlite3.Connection, tx: dict[str, Any], reason: 
             # #283: the deleted object may equally be a buy offer (bid) we
             # indexed — close its row with the bid vocabulary ('sold' maps to
             # 'accepted'). Unknown offer_index is a no-op in both stores.
-            market_store.init_bid_schema(conn)
             market_store.close_bid(conn, offer_index, "accepted" if reason == "sold" else reason)
         except Exception:
             logging.exception(
@@ -522,8 +520,13 @@ def _apply_offer_accept(conn: sqlite3.Connection, tx: dict[str, Any]) -> None:
         if not (w_flags & market_ops.LSF_SELL_NFTOKEN):
             bid_index = wrapper.get("LedgerIndex")
             if isinstance(bid_index, str) and bid_index:
-                market_store.init_bid_schema(conn)
-                market_store.close_bid(conn, bid_index, "accepted")
+                # Per-item isolation (same convention as _close_deleted_offers):
+                # one bad entry must not abort the sell-close/stale-delist work
+                # below for a tx that genuinely succeeded on-ledger.
+                try:
+                    market_store.close_bid(conn, bid_index, "accepted")
+                except Exception:
+                    logging.exception(f"bid close failed on accept (offer_index={bid_index})")
 
     if sell_wrapper is None:
         return  # a bid-only accept; no sell listing of ours to close

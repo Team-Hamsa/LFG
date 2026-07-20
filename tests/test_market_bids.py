@@ -364,9 +364,14 @@ class TestListenerBids:
 # --- market_flow sessions ---
 
 
-def _status(signed, txid="TX1", expired=False):
+def _status(signed, txid="TX1", expired=False, account=None):
     async def f(_uuid):
-        return {"signed": signed, "txid": txid if signed else None, "expired": expired}
+        return {
+            "signed": signed,
+            "txid": txid if signed else None,
+            "expired": expired,
+            "account": account,
+        }
 
     return f
 
@@ -402,7 +407,7 @@ class TestBidSession:
         row = _run(
             market_flow.advance_bid_session(
                 s,
-                get_payload_status=_status(signed=True),
+                get_payload_status=_status(signed=True, account=BIDDER),
                 get_tx=_tx(meta_extra={"AffectedNodes": meta["AffectedNodes"]}),
             )
         )
@@ -426,7 +431,7 @@ class TestBidSession:
         row = _run(
             market_flow.advance_bid_session(
                 s,
-                get_payload_status=_status(signed=True),
+                get_payload_status=_status(signed=True, account=BIDDER),
                 get_tx=_tx(result="tecUNFUNDED_OFFER"),
             )
         )
@@ -438,7 +443,7 @@ class TestBidSession:
         row = _run(
             market_flow.advance_bid_session(
                 s,
-                get_payload_status=_status(signed=True),
+                get_payload_status=_status(signed=True, account=BIDDER),
                 get_tx=_tx(meta_extra={"AffectedNodes": []}),
             )
         )
@@ -466,7 +471,7 @@ class TestBidAcceptSession:
         s = _accept_session()
         out = _run(
             market_flow.advance_bid_accept_session(
-                s, get_payload_status=_status(signed=True), get_tx=_tx()
+                s, get_payload_status=_status(signed=True, account=OWNER), get_tx=_tx()
             )
         )
         assert out == "BID1"
@@ -477,7 +482,7 @@ class TestBidAcceptSession:
         out = _run(
             market_flow.advance_bid_accept_session(
                 s,
-                get_payload_status=_status(signed=True),
+                get_payload_status=_status(signed=True, account=OWNER),
                 get_tx=_tx(result="tecOBJECT_NOT_FOUND"),
             )
         )
@@ -497,3 +502,27 @@ class TestListenerDestinationLockedBid:
         tx["meta"]["AffectedNodes"][0]["CreatedNode"]["NewFields"]["Destination"] = "rDest"
         _run(nft_listener.apply_market_tx(conn, tx))
         assert market_store.get_bid(conn, "BID1") is None
+
+
+class TestBidSignerMismatch:
+    def test_bid_foreign_signer_fails_without_write(self):
+        s = _bid_session()
+        row = _run(
+            market_flow.advance_bid_session(
+                s, get_payload_status=_status(signed=True, account="rSomeoneElse"), get_tx=_tx()
+            )
+        )
+        assert row is None
+        assert s.state == market_flow.FAILED
+        assert s.reason == "signer_mismatch"
+
+    def test_bid_accept_foreign_signer_fails_without_close(self):
+        s = _accept_session()
+        out = _run(
+            market_flow.advance_bid_accept_session(
+                s, get_payload_status=_status(signed=True, account=BIDDER), get_tx=_tx()
+            )
+        )
+        assert out is None
+        assert s.state == market_flow.FAILED
+        assert s.reason == "signer_mismatch"

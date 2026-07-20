@@ -260,6 +260,7 @@ class BidSession:
     txid: str | None = None
     poll_count: int = 0
     offer_index: str | None = None
+    reason: str | None = None  # "signer_mismatch" on a foreign-signed payload
     push: str | None = None
     issued_user_token: str | None = field(default=None, repr=False)
     kind: str = "bid"
@@ -274,6 +275,7 @@ class BidSession:
             "xumm_url": self.xumm_url,
             "push": self.push,
             "offer_index": self.offer_index,
+            "reason": self.reason,
         }
 
 
@@ -345,6 +347,14 @@ async def advance_bid_session(
             return None
         if not s.get("signed"):
             return None
+        # Fail-closed signer check (same rationale as advance_buy_session's):
+        # a shared QR signed by a different wallet must not drive this
+        # session's DB writes; the listener attributes on-ledger truth.
+        if s.get("account") != session.wallet_address:
+            session.state = FAILED
+            session.error = "bid signed by a different account than the bidder"
+            session.reason = "signer_mismatch"
+            return None
         _capture_issued_token(session, s)
         txid = s.get("txid")
         if not txid:
@@ -415,6 +425,14 @@ async def advance_bid_accept_session(
             session.error = "signing request expired"
             return None
         if not s.get("signed"):
+            return None
+        # Fail-closed signer check (same rationale as advance_buy_session's):
+        # a shared QR signed by a different wallet must not drive this
+        # session's DB writes; the listener attributes on-ledger truth.
+        if s.get("account") != session.wallet_address:
+            session.state = FAILED
+            session.error = "accept signed by a different account than the owner"
+            session.reason = "signer_mismatch"
             return None
         _capture_issued_token(session, s)
         txid = s.get("txid")

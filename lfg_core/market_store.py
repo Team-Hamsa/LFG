@@ -118,6 +118,10 @@ def init_db(conn: sqlite3.Connection) -> None:
         )
         conn.execute("DROP TABLE _market_listings_migrate")
         conn.executescript(_SCHEMA)
+    # #283: the bid index shares this db and every market_listings opener may
+    # touch it — create it here so hot paths (the listener's per-tx handlers)
+    # never re-run schema DDL per transaction.
+    conn.executescript(_BID_SCHEMA)
     conn.commit()
 
 
