@@ -194,3 +194,16 @@ def test_bids_wiring():
     assert "renderChipList(el('mine-incoming-bids')" in js
     # Bids are character-only and never offered on the viewer's own listing.
     assert "vm.kind === 'character' && (!me || !me.wallet || me.wallet !== vm.seller)" in js
+
+
+def test_shop_filter_wiring():
+    # #217 follow-up: Shop slot chips + live search + sort, all client-side.
+    html = _read("index.html")
+    assert 'id="shop-slot-chips"' in html
+    assert 'id="shop-search"' in html
+    assert 'id="shop-sort"' in html
+    js = _read("app.js")
+    assert "marketPure.filterShopItems(shopState.items, shopState)" in js
+    assert "marketPure.shopSlotCounts(shopState.items)" in js
+    assert "el('shop-search').oninput" in js
+    assert "el('shop-sort').onchange" in js
