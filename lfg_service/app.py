@@ -968,11 +968,12 @@ def _market_network(kind: str) -> str:
 
 def _trait_image_url(cfg: trait_config.TraitConfig, slot: str, value: str) -> str:
     """A same-origin /api/layer URL for a trait value, picking a representative
-    body: the first body allowed by trait_config's affinity engine, or the
-    shared/ dir for a universal (unrestricted) value — mirrors
-    scripts/_economy_deps.py's _compose_trait ("first body that has it")
-    without the network/download cost, since affinity already tells us which
-    bodies are legal without touching the layer store."""
+    body. With a local layer store the pick is disk-verified
+    (LocalLayerStore.find_display_body: affinity-allowed bodies, then
+    shared/, then any body with the art — display-only, so an
+    affinity-illegal body's art is fine). With a CDN store (no cheap
+    existence probe) it falls back to the affinity-only guess: first allowed
+    body, or shared/ for an unrestricted value."""
     allowed = cfg.allowed_bodies(slot, value)
     preferred = sorted(allowed) if allowed else []
     body: str | None = None

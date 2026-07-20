@@ -99,7 +99,18 @@ class LocalLayerStore:
         or None if the value has no art anywhere. Display-only: a
         non-preferred body may be affinity-illegal for minting, but its art
         is still the right thumbnail for a body-agnostic catalog card."""
-        candidates = list(preferred or []) + [SHARED_DIR]
+
+        def has_art(dirname: str) -> bool:
+            base = os.path.join(self.base_dir, dirname, trait_type, value)
+            return any(os.path.isfile(base + ext) for ext in LAYER_EXTENSIONS)
+
+        candidates = list(dict.fromkeys(list(preferred or []) + [SHARED_DIR]))
+        for dirname in candidates:
+            if has_art(dirname):
+                return dirname
+        # Only scan the layer root when the cheap candidates all miss — the
+        # catalog calls this once per value, so the common (found) case must
+        # not pay a base-dir listing.
         try:
             others = sorted(
                 d
@@ -109,12 +120,10 @@ class LocalLayerStore:
                 and d not in candidates
             )
         except OSError:
-            others = []
-        for dirname in candidates + others:
-            base = os.path.join(self.base_dir, dirname, trait_type, value)
-            for ext in LAYER_EXTENSIONS:
-                if os.path.isfile(base + ext):
-                    return dirname
+            return None
+        for dirname in others:
+            if has_art(dirname):
+                return dirname
         return None
 
 
