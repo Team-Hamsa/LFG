@@ -55,7 +55,6 @@ SELLER = "rSellerAddress0000000000000000000"
 BUYER = "rBuyerAddress000000000000000000000"
 CHAR1 = "000800001E43B0783E006F30078A64A8628F4B1B22879C8EB1CAF8C700000001"
 CHAR2 = "000800001E43B0783E006F30078A64A8628F4B1B22879C8EB1CAF8C700000002"
-CHAR3 = "000800001E43B0783E006F30078A64A8628F4B1B22879C8EB1CAF8C700000003"
 CHAR3_UNLISTED = "000800001E43B0783E006F30078A64A8628F4B1B22879C8EB1CAF8C700000003"
 TRAIT1 = "000900001E43B0783E006F30078A64A8628F4B1B22879C8EB1CAF8C7000000a1"
 TRAIT2_UNLISTED = "000900001E43B0783E006F30078A64A8628F4B1B22879C8EB1CAF8C7000000a2"
@@ -2385,7 +2384,7 @@ def _seed_two_characters_with_rarity(onchain_path):
     rare = [{"trait_type": "Hat", "value": "Unique Crown"}]
     _seed_character(conn, CHAR1, SELLER, 1, attrs=common)
     _seed_character(conn, CHAR2, SELLER, 2, attrs=rare)
-    _seed_character(conn, CHAR3, BUYER, 3, attrs=common)  # unlisted, dilutes Cap
+    _seed_character(conn, CHAR3_UNLISTED, BUYER, 3, attrs=common)  # unlisted, dilutes Cap
     _seed_listing(conn, offer_index="A" * 64, nft_id=CHAR1, amount_drops=1_000_000)
     _seed_listing(conn, offer_index="B" * 64, nft_id=CHAR2, amount_drops=2_000_000)
     conn.commit()

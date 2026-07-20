@@ -2295,7 +2295,7 @@ function renderListingHistory(items) {
     const price = it.price_drops != null
       ? `${marketPure.dropsToXrpStr(String(it.price_drops))} XRP`
       : (it.amount_brix != null ? `${it.amount_brix} BRIX` : '');
-    const label = it.event ? it.event.replace('_', ' ') : 'sold';
+    const label = it.event ? it.event.replace(/_/g, ' ') : 'sold';
     li.textContent = [label, price, when].filter(Boolean).join(' · ');
     list.appendChild(li);
   }
