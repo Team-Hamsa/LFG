@@ -526,6 +526,30 @@ def test_mine_returns_four_groups(onchain_env, monkeypatch):
     assert body["closet_assets"] == [{"slot": "Mouth", "value": "Grin", "count": 2}]
 
 
+def test_mine_character_listing_carries_nft_number(onchain_env, monkeypatch):
+    # Regression: /api/market/mine selected market_listings without joining
+    # onchain_nfts, so a listed character came back with nft_number=None and the
+    # client fell back to rendering the raw hex nft_id instead of "#<edition>".
+    monkeypatch.setattr(server.config, "WEBAPP_DEV_MODE", True)
+    monkeypatch.setattr(server, "_use_market_mock", lambda: False)
+    from webapp import mock_economy
+
+    monkeypatch.setattr(mock_economy, "DEV_OWNER", SELLER)
+
+    conn = _reopen(onchain_env)
+    _seed_character(conn, CHAR1, SELLER, 4242)
+    _seed_listing(conn, offer_index="A" * 64, nft_id=CHAR1, kind="character")
+    conn.commit()
+    conn.close()
+
+    req = _mocked_request("GET", "/api/market/mine")
+    resp = _run(server.handle_market_mine(req))
+    assert resp.status == 200
+    body = _run(_read_json(resp))
+    char = next(r for r in body["listings"] if r["nft_id"] == CHAR1)
+    assert char["nft_number"] == 4242
+
+
 # ---------------------------------------------------------------------------
 # GET /api/market/history
 # ---------------------------------------------------------------------------

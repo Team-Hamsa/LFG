@@ -31,6 +31,7 @@ sys.path.insert(0, REPO_ROOT)
 import backfill_onchain as bf  # noqa: E402
 
 from lfg_core import (  # noqa: E402
+    db_path,
     economy_store,
     history_events,
     history_store,
@@ -200,6 +201,14 @@ async def _listen(network: str, issuer: str, taxon: int, clio: str) -> None:
     conn = nft_index.init_db(nft_index.index_db_path(network))
     economy_store.init_economy_schema(conn)
     market_store.init_db(conn)
+    # Self-heal editions the chain metadata couldn't describe (NULL nft_number)
+    # from the authoritative app LFG table on every restart — the deployer
+    # restarts this listener on each deploy, so a fresh gap never lingers past
+    # one release. Runs before the numbers snapshot below so it picks up the
+    # healed values too.
+    healed = nft_index.reconcile_numbers_from_app_db(conn, db_path.app_db_path(network))
+    if healed:
+        logging.info(f"[{network}] reconciled {healed} nft_number(s) from app DB")
     hconn = history_store.init_history_db(history_store.history_db_path(network))
     # Numbers map is read once at startup, not refreshed per-tx: a mint of a
     # brand-new edition within this process's lifetime won't have its number

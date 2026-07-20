@@ -28,7 +28,7 @@ import aiohttp
 REPO_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
 sys.path.insert(0, REPO_ROOT)
 
-from lfg_core import config, nft_index  # noqa: E402
+from lfg_core import config, db_path, nft_index  # noqa: E402
 
 # Per-network enumeration defaults (mirrors the auditor). The character index
 # enumerates config.ASSEMBLE_TAXON (currently 1760, same value historically
@@ -149,18 +149,29 @@ async def _amain() -> int:
 
         if args.retry_unreadable:
             counts = await retry_unreadable(conn, fetch)
+            # Retry-only mode heals metadata gaps too, so reconcile editions here
+            # as well (this branch early-returns before the normal path's call).
+            healed = nft_index.reconcile_numbers_from_app_db(
+                conn, db_path.app_db_path(args.network)
+            )
             print(f"Network: {args.network}  DB: {nft_index.index_db_path(args.network)}")
             print(f"  Recovered: {counts['recovered']} (over {counts['passes']} pass(es))")
             print(f"  Still unreadable: {counts['remaining']}")
+            print(f"  nft_number reconciled from app DB: {healed}")
             return 0
 
         counts = await run_backfill(conn, enum, fetch)
+
+    # Heal editions whose on-chain metadata `name` carried no parseable number
+    # from the authoritative app LFG table (see nft_index.reconcile...).
+    healed = nft_index.reconcile_numbers_from_app_db(conn, db_path.app_db_path(args.network))
 
     print(f"Network: {args.network}  issuer: {issuer}  taxon: {taxon}")
     print(f"  DB: {nft_index.index_db_path(args.network)}")
     print(f"  Tokens indexed: {counts['total']}")
     print(f"  With metadata: {counts['with_metadata']}")
     print(f"  Unreadable metadata: {counts['unreadable']}")
+    print(f"  nft_number reconciled from app DB: {healed}")
     return 0
 
 
