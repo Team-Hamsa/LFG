@@ -16,10 +16,10 @@ def _read(name: str) -> str:
 
 def test_index_has_qty_stepper_hidden_by_default():
     html = _read("index.html")
-    assert 'id="mint-qty"' in html and "hidden" in html.split('id="mint-qty"')[1][:120]
-    assert 'id="qty-minus"' in html
-    assert 'id="qty-plus"' in html
-    assert 'id="qty-value"' in html
+    assert 'id="flow-qty"' in html and "hidden" in html.split('id="flow-qty"')[1][:120]
+    assert 'id="flow-qty-minus"' in html
+    assert 'id="flow-qty-plus"' in html
+    assert 'id="flow-qty-value"' in html
 
 
 def test_app_js_gates_stepper_on_config_flag():

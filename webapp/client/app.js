@@ -628,7 +628,7 @@ function signText(push, base) {
   return base;
 }
 
-function showFlow({ title, text, qrData, link, image, video, done, stage, spinner, celebrate, pill, regen, cancel, share }) {
+function showFlow({ title, text, qrData, link, image, video, done, stage, spinner, celebrate, pill, regen, cancel, share, qtyStepper }) {
   showPanel('flow-panel');
   renderSteps(stage);
   el('pay-method').hidden = !pill;
@@ -652,6 +652,14 @@ function showFlow({ title, text, qrData, link, image, video, done, stage, spinne
   el('flow-panel').classList.toggle('with-image', !!image);
   hero.classList.toggle('celebrate', !!(image && celebrate));
   el('flow-regen-btn').hidden = !regen;
+  // #215: pay-page quantity stepper. Only mint pay views pass qtyStepper, and
+  // only when the server flag is on. A fresh render is never stale — clear the
+  // dim/pulse a prior qty change may have left on the reused elements.
+  const showQty = !!qtyStepper && bulkCfg.enabled;
+  el('flow-qty').hidden = !showQty;
+  if (showQty) renderFlowQty();
+  el('flow-qr').classList.remove('qr-stale');
+  el('flow-regen-btn').classList.remove('needs-regen');
   // Back out of an awaiting-signature screen (issue #141): callers pass a
   // callback so each flow decides what "cancel" means for it. Always assign
   // (null when absent) so a later showFlow can't leave a stale handler on
@@ -700,6 +708,7 @@ function mintPayView(s) {
     link: s.payment_link,
     stage: s.state,
     regen: true,
+    qtyStepper: true,
     // Unscanned QR: nothing can be signed yet — cancel without the warning.
     cancel: () => cancelMint(false),
   };
@@ -783,24 +792,90 @@ function pollMint(sessionId) {
 
 let currentMintId = null;
 
-// Bulk mint UI (#215): server-flagged via /api/config so staging can test
-// before prod. Qty 1 = the untouched single-mint path.
+// Bulk mint UI (#215, pay-page revision): server-flagged via /api/config so
+// staging can test before prod. Quantity is chosen on the PAY page now, not
+// the home screen. Qty 1 = the untouched single-mint path.
 let bulkCfg = { enabled: false, max: 1 };
-let mintQty = 1;
+let mintQty = 1;              // selected quantity on the pay-page stepper
+let liveQty = null;           // quantity the live session/job was built for; null = none
 
-function renderQty() {
-  el('qty-value').textContent = String(mintQty);
-  el('qty-minus').disabled = mintQty <= 1;
-  el('qty-plus').disabled = mintQty >= bulkCfg.max;
+function renderFlowQty() {
+  el('flow-qty-value').textContent = String(mintQty);
+  el('flow-qty-minus').disabled = mintQty <= 1;
+  el('flow-qty-plus').disabled = mintQty >= bulkCfg.max;
 }
 
 function setupBulkStepper(cfg) {
   bulkCfg = { enabled: !!cfg.bulk_mint_ui, max: Math.max(1, cfg.bulk_mint_max || 1) };
-  if (!bulkCfg.enabled) return; // flag off: stepper stays hidden, today's UI
-  el('mint-qty').hidden = false;
-  el('qty-minus').onclick = () => { mintQty = Math.max(1, mintQty - 1); renderQty(); };
-  el('qty-plus').onclick = () => { mintQty = Math.min(bulkCfg.max, mintQty + 1); renderQty(); };
-  renderQty();
+  if (!bulkCfg.enabled) return; // flag off: stepper never renders, today's UI
+  el('flow-qty-minus').onclick = () => onQtyChange(-1);
+  el('flow-qty-plus').onclick = () => onQtyChange(1);
+}
+
+// Pay-page stepper press. Changing quantity invalidates the shown QR: cancel
+// the live payload immediately (frees the XUMM slot), dim the QR, and pulse
+// Regenerate — a new QR is built only when the user taps it.
+function onQtyChange(delta) {
+  const next = mintPure.clampQty(mintQty + delta, bulkCfg.max);
+  if (next === mintQty) return;
+  mintQty = next;
+  renderFlowQty();
+  if (mintPure.qtyStale(mintQty, liveQty)) {
+    cancelLiveMintSilently(); // fire-and-forget: cancel whatever is live
+    el('flow-qr').classList.add('qr-stale');
+    el('flow-link-btn').hidden = true;               // no accept while stale
+    el('flow-regen-btn').hidden = false;
+    el('flow-regen-btn').classList.add('needs-regen');
+  }
+}
+
+// Cancel whichever mint payload is live without navigating home (used when a
+// qty change supersedes it). Stops both poll chains and clears liveQty.
+async function cancelLiveMintSilently() {
+  const singleId = currentMintId;
+  const bulkId = currentBulkId;
+  currentMintId = null;
+  currentBulkId = null;
+  liveQty = null;
+  clearTimeout(pollTimer); ++pollGen;             // stop single-mint poll
+  clearTimeout(bulkPollTimer); ++bulkPollGen;     // stop bulk poll
+  if (singleId) {
+    try {
+      await api(`/api/mint/${singleId}/cancel`, {
+        method: 'POST', body: JSON.stringify(discordCtx()),
+      });
+    } catch (_) { /* 409 already-paid etc.: superseded anyway, ignore */ }
+  }
+  if (bulkId) {
+    try {
+      await api(`/api/mint/bulk/${bulkId}/cancel`, {
+        method: 'POST', body: JSON.stringify(discordCtx()),
+      });
+    } catch (_) { /* ignore */ }
+  }
+}
+
+// Regenerate = the commit gate. Same quantity + a live single session that
+// merely expired -> refresh that session's payload (keeps its state). Any qty
+// change (liveQty null) -> build a fresh session on the endpoint the selected
+// quantity targets.
+async function onFlowRegen() {
+  if (!mintPure.qtyStale(mintQty, liveQty) && liveQty === 1 && currentMintId) {
+    return regeneratePaymentQr(); // classic same-session expired-QR refresh, has its own disable guard
+  }
+  // Any other regenerate builds a fresh session; disable the button for the
+  // whole cancel+start round trip so a double-tap can never race a second
+  // await cancelLiveMintSilently() and launch a second concurrent bulk job,
+  // orphaning its XUMM payload + headroom reservation (#226).
+  const btn = el('flow-regen-btn');
+  btn.disabled = true;
+  try {
+    await cancelLiveMintSilently();
+    if (mintPure.qtyMintTarget(mintQty) === 'bulk') return await startBulkMint(mintQty);
+    return await startMint();
+  } finally {
+    btn.disabled = false;
+  }
 }
 
 // ---- Bulk mint flow (#215 UI) ----
@@ -820,6 +895,10 @@ function bulkPayView(j) {
     pill: j.pay_with ? { kind: xrp ? 'xrp' : 'lfgo', text: `Paying with ${xrp ? 'XRP' : 'LFGO'}` } : null,
     qrData: j.payment_link,
     link: j.payment_link,
+    // No same-session refresh for a fresh bulk job (onFlowRegen always cancels
+    // + restarts it) — hide Regenerate; onQtyChange reveals it when a qty
+    // change actually invalidates the shown QR.
+    qtyStepper: true,
     spinner: !j.payment_link, // payment_link may be null = still preparing (see to_dict contract)
     cancel: () => cancelBulkMint(),
   };
@@ -832,6 +911,8 @@ async function startBulkMint(quantity) {
       body: JSON.stringify({ ...discordCtx(), quantity }),
     });
     currentBulkId = j.id;
+    mintQty = quantity;
+    liveQty = quantity;
     showFlow(bulkPayView(j));
     pollBulk(j.id);
   } catch (e) {
@@ -1007,6 +1088,8 @@ async function resumeBulkMint() {
   const j = active && active.session;
   if (!j) return false;
   currentBulkId = j.id;
+  mintQty = j.quantity;
+  liveQty = j.quantity;
   if (j.state === 'awaiting_payment') showFlow(bulkPayView(j));
   else renderBulkJob(j);
   pollBulk(j.id);
@@ -1017,6 +1100,8 @@ async function startMint() {
   try {
     const s = await api('/api/mint', { method: 'POST', body: JSON.stringify(discordCtx()) });
     currentMintId = s.id;
+    mintQty = 1;
+    liveQty = 1;
     showFlow(mintPayView(s));
     pollMint(s.id);
   } catch (e) {
@@ -1037,6 +1122,8 @@ async function resumeMint() {
   const id = mintPure.activeMintSessionId(active);
   if (!id) return false;
   currentMintId = id;
+  mintQty = 1;
+  liveQty = 1;
   showFlow({
     title: '🔄 Reconnecting…',
     text: 'You have a mint in progress — picking it back up where you left off.',
@@ -3014,8 +3101,8 @@ async function main() {
   setupLogo();
   setupLeaderboard();
   el('register-retry-btn').onclick = () => (insideWeb ? startWebSignin() : startSignin());
-  el('mint-btn').onclick = () => (mintQty > 1 ? startBulkMint(mintQty) : startMint());
-  el('flow-regen-btn').onclick = regeneratePaymentQr;
+  el('mint-btn').onclick = () => startMint();
+  el('flow-regen-btn').onclick = onFlowRegen;
   el('swap-btn').onclick = () => openDressup();
   el('dressup-back-btn').onclick = () => showMintHome();
   el('go-switch-btn').onclick = () => openGoPicker();

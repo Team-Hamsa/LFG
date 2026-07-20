@@ -50,16 +50,11 @@
         <button id="change-wallet-btn" class="link">change</button></p>
       <div class="actions">
         <div class="mint-row">
-          <div id="mint-qty" class="qty-stepper" hidden>
-            <button id="qty-minus" class="qty-btn" aria-label="Fewer">−</button>
-            <span id="qty-value" aria-live="polite">1</span>
-            <button id="qty-plus" class="qty-btn" aria-label="More">+</button>
-          </div>
-          <button id="mint-btn" class="primary big">⛏️ Mint NFT</button>
+          <button id="mint-btn" class="primary big">⛏️ Mint</button>
         </div>
         <button id="swap-btn" class="secondary">🏗️ Build</button>
-        <button id="swapper-btn" class="secondary">🔁 Trait Swapper</button>
-        <button id="market-btn" class="secondary">🛒 Marketplace</button>
+        <button id="swapper-btn" class="secondary">🔁 Swap</button>
+        <button id="market-btn" class="secondary">🛒 Trade</button>
       </div>
       <div id="leaderboard" class="leaderboard">
         <h3 class="lb-title">🏆 Leaderboard</h3>
@@ -240,6 +235,12 @@
           <h2 id="flow-title"></h2>
           <p id="flow-text" class="card-sub"></p>
           <p><button id="flow-link-btn" class="link" hidden>Open in Xaman ↗</button></p>
+          <div id="flow-qty" class="qty-stepper" hidden>
+            <span class="qty-lbl">Quantity</span>
+            <button id="flow-qty-minus" class="qty-btn" aria-label="Fewer">−</button>
+            <span id="flow-qty-value" aria-live="polite">1</span>
+            <button id="flow-qty-plus" class="qty-btn" aria-label="More">+</button>
+          </div>
           <p><button id="flow-regen-btn" class="link" hidden>↻ Regenerate QR</button></p>
           <p><button id="flow-cancel-btn" class="back" hidden>← Cancel</button></p>
           <!-- Mint-success only (#41 T9); built/wired by buildShareControl() in app.js. -->
