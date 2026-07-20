@@ -291,6 +291,12 @@ def reconcile_numbers_from_app_db(conn: sqlite3.Connection, app_db_path: str) ->
             SET nft_number = (
                 SELECT l.nft_number FROM appdb.LFG l
                 WHERE l.nft_id = onchain_nfts.nft_id
+                -- LFG's PK is nft_number, not nft_id, so nft_id isn't unique-
+                -- enforced; a duplicate would make this scalar subquery raise
+                -- "sub-select returns 2 rows" and crash reconcile (and, from the
+                -- listener startup, block the listener). LIMIT 1 is a no-op on
+                -- correct one-row-per-nft_id data.
+                LIMIT 1
             )
             WHERE nft_number IS NULL
               AND EXISTS (

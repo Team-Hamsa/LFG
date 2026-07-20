@@ -308,3 +308,29 @@ def test_reconcile_numbers_missing_app_db_is_noop(tmp_path):
     idx = nft_index.init_db(str(tmp_path / "onchain.db"))
     nft_index.upsert(idx, _nft("EEE", number=None))
     assert nft_index.reconcile_numbers_from_app_db(idx, str(tmp_path / "nope.db")) == 0
+
+
+def test_reconcile_numbers_tolerates_duplicate_nft_id(tmp_path):
+    # LFG's PK is nft_number, not nft_id, so nothing enforces nft_id uniqueness.
+    # A duplicate must not make the scalar subquery raise "sub-select returns 2
+    # rows" and crash reconcile (which runs at listener startup).
+    import sqlite3
+
+    idx = nft_index.init_db(str(tmp_path / "onchain.db"))
+    nft_index.upsert(idx, _nft("FFF", number=None))
+
+    app_path = str(tmp_path / "lfg.db")
+    app = sqlite3.connect(app_path)
+    app.execute("CREATE TABLE LFG (nft_number INTEGER PRIMARY KEY, nft_id TEXT)")
+    app.executemany(
+        "INSERT INTO LFG (nft_number, nft_id) VALUES (?, ?)", [(11, "FFF"), (12, "FFF")]
+    )
+    app.commit()
+    app.close()
+
+    healed = nft_index.reconcile_numbers_from_app_db(idx, app_path)  # must not raise
+    assert healed == 1
+    assert idx.execute("SELECT nft_number FROM onchain_nfts WHERE nft_id='FFF'").fetchone()[0] in (
+        11,
+        12,
+    )

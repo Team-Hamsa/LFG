@@ -149,9 +149,15 @@ async def _amain() -> int:
 
         if args.retry_unreadable:
             counts = await retry_unreadable(conn, fetch)
+            # Retry-only mode heals metadata gaps too, so reconcile editions here
+            # as well (this branch early-returns before the normal path's call).
+            healed = nft_index.reconcile_numbers_from_app_db(
+                conn, db_path.app_db_path(args.network)
+            )
             print(f"Network: {args.network}  DB: {nft_index.index_db_path(args.network)}")
             print(f"  Recovered: {counts['recovered']} (over {counts['passes']} pass(es))")
             print(f"  Still unreadable: {counts['remaining']}")
+            print(f"  nft_number reconciled from app DB: {healed}")
             return 0
 
         counts = await run_backfill(conn, enum, fetch)
