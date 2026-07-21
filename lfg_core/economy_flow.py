@@ -665,6 +665,24 @@ def _persist_equip_to_index(
             f"committed on-chain): the roster will serve stale traits until the "
             f"listener/backfill catches up. {traceback.format_exc()}"
         )
+        # Unlike swap_flow._persist_remint_to_index (which opens and owns a
+        # private connection that a failure here simply leaves for the caller
+        # to close/discard), deps.conn is SHARED with the rest of the economy
+        # flow — nft_index.upsert commits internally, but if it blows up
+        # partway through its own commit() rather than its execute(), a
+        # half-applied transaction can be left open on deps.conn, which the
+        # caller goes on to reuse. Roll it back explicitly so a failed index
+        # stamp can never leak an implicit transaction onto shared state. This
+        # itself must never raise — a rollback on an already-closed or
+        # otherwise broken connection must not turn a logged warning into a
+        # thrown exception.
+        try:
+            deps.conn.rollback()
+        except Exception:
+            logging.critical(
+                f"post-equip index persist rollback ALSO failed for {rec.nft_id}: "
+                f"{traceback.format_exc()}"
+            )
 
 
 # --- Equip: move a loose asset onto a live character; displaced -> Closet ---

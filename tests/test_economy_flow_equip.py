@@ -381,14 +381,60 @@ def test_equip_success_stamps_index_with_new_attributes(tmp_path):
 
 def test_equip_reverted_path_does_not_stamp_index(tmp_path):
     """The ledger-failed revert branch restores the character's OLD traits —
-    the index must NOT be stamped with the (discarded) new attributes."""
+    the index must NOT be stamped with the (discarded) new attributes. Seed
+    the pre-equip index row so this can actually distinguish "correctly not
+    stamped" from "stamped with stale data": the old trait value must still
+    be what a client sees after the revert."""
     conn, f = _conn_with_bucket(), _Fakes(fail_closet_modify=True)
-    s = ef.EquipSession(owner="rUser", character=_char(), changes=[("Head", "Crown")])
+    rec = _char()
+    nft_index.upsert(
+        conn,
+        OnchainNft(
+            nft_id=rec.nft_id,
+            nft_number=rec.nft_number,
+            owner=rec.owner,
+            is_burned=False,
+            mutable=rec.mutable,
+            uri_hex=rec.uri_hex,
+            body=rec.body,
+            attributes=rec.attributes,
+            image="https://cdn/old-image.png",
+            ledger_index=1,
+        ),
+    )
+    s = ef.EquipSession(owner="rUser", character=rec, changes=[("Head", "Crown")])
     _run(ef.run_equip(s, _deps(conn, f, tmp_path)))
 
     assert s.state == ef.FAILED
+    conn.row_factory = sqlite3.Row
     row = conn.execute("SELECT * FROM onchain_nfts WHERE nft_id=?", ("NFT7",)).fetchone()
-    assert row is None
+    assert row is not None  # the pre-equip row is untouched, not stamped
+    attrs = json.loads(row["attributes_json"])
+    by_type = {a["trait_type"]: a["value"] for a in attrs}
+    assert by_type["Head"] == "None"  # the OLD trait value still survives
+    assert row["image"] == "https://cdn/old-image.png"  # not overwritten with the new one
+
+
+def test_equip_mirror_failure_still_stamps_index_with_new_attributes(tmp_path):
+    """The complete_pending_mirror branch (Closet swap COMMITTED on-chain,
+    only the local DB mirror failed) still ends the session DONE with the
+    character's new traits — the index stamp must fire on THIS success path
+    too, not just the plain DONE completion."""
+    conn, f = _conn_with_bucket(), _Fakes()
+    s = ef.EquipSession(owner="rUser", character=_char(), changes=[("Head", "Crown")])
+    _run(ef.run_equip(s, _deps(flaky_mirror_conn(conn), f, tmp_path)))
+
+    assert s.state == ef.DONE
+    record = json.loads((tmp_path / f"equip-{s.id}.json").read_text())
+    assert record["status"] == "complete_pending_mirror"
+
+    conn.row_factory = sqlite3.Row
+    row = conn.execute("SELECT * FROM onchain_nfts WHERE nft_id=?", ("NFT7",)).fetchone()
+    assert row is not None
+    attrs = json.loads(row["attributes_json"])
+    by_type = {a["trait_type"]: a["value"] for a in attrs}
+    assert by_type["Head"] == "Crown"
+    assert row["uri_hex"] == b"https://cdn/new.json".hex()
 
 
 def test_equip_index_stamp_failure_does_not_fail_session(tmp_path, monkeypatch):
