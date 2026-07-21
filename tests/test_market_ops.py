@@ -257,16 +257,16 @@ from decimal import Decimal  # noqa: E402
 from lfg_core import config, market_ops  # noqa: E402
 
 BRIX_AMOUNT = {
-    "currency": config.TOKEN_CURRENCY_HEX,
-    "issuer": config.TOKEN_ISSUER_ADDRESS,
+    "currency": config.BRIX_CURRENCY_HEX,
+    "issuer": config.BRIX_ISSUER,
     "value": "10",
 }
 
 
 def _brix(value="10", currency=None, issuer=None):
     return {
-        "currency": currency or config.TOKEN_CURRENCY_HEX,
-        "issuer": issuer or config.TOKEN_ISSUER_ADDRESS,
+        "currency": currency or config.BRIX_CURRENCY_HEX,
+        "issuer": issuer or config.BRIX_ISSUER,
         "value": value,
     }
 
@@ -303,12 +303,28 @@ class TestValidateBrixValue:
 
 
 class TestBrixAmountDict:
-    def test_shape_uses_token_currency_and_issuer(self) -> None:
+    def test_shape_uses_brix_currency_and_issuer(self) -> None:
         assert market_ops.brix_amount_dict("10.50") == {
-            "currency": config.TOKEN_CURRENCY_HEX,
-            "issuer": config.TOKEN_ISSUER_ADDRESS,
+            "currency": config.BRIX_CURRENCY_HEX,
+            "issuer": config.BRIX_ISSUER,
             "value": "10.5",
         }
+
+    def test_never_uses_the_lfgo_mint_payment_pair(self, monkeypatch) -> None:
+        """Regression for the mainnet tecNO_LINE trait-listing failure: with
+        TOKEN_* (LFGO, the mint-payment token) diverging from the BRIX pair —
+        the deployed mainnet reality — the offer Amount must be BRIX. An
+        LFGO-denominated offer dies tecNO_LINE because the NFT issuer only
+        holds a BRIX trustline for royalties."""
+        monkeypatch.setattr(
+            config, "TOKEN_CURRENCY_HEX", "4C46474F00000000000000000000000000000000"
+        )
+        monkeypatch.setattr(config, "TOKEN_ISSUER_ADDRESS", "rLFGOIssuerNotBrix")
+        monkeypatch.setattr(config, "BRIX_CURRENCY_HEX", "4252495800000000000000000000000000000000")
+        monkeypatch.setattr(config, "BRIX_ISSUER", "rBrixIssuer")
+        amount = market_ops.brix_amount_dict("50")
+        assert amount["currency"] == "4252495800000000000000000000000000000000"
+        assert amount["issuer"] == "rBrixIssuer"
 
 
 class TestExtractCreatedSellOfferBrix:

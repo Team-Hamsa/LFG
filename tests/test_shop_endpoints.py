@@ -382,7 +382,7 @@ def test_buy_happy_path_returns_session(onchain_env, shop_wallet, monkeypatch):
 
 def test_buy_detect_uses_shop_offer_currency_pair(onchain_env, shop_wallet, monkeypatch):
     """The balance check must run against the same currency pair the shop
-    offer is denominated in (TOKEN_CURRENCY_HEX/TOKEN_ISSUER_ADDRESS, per
+    offer is denominated in (BRIX_CURRENCY_HEX/BRIX_ISSUER, per
     shop_flow.brix_amount) — not detect_payment_path's SWAP_OFFER_* defaults,
     or a buyer holding the swap-fee currency passes detection and then fails
     the accept on-ledger."""
@@ -406,8 +406,8 @@ def test_buy_detect_uses_shop_offer_currency_pair(onchain_env, shop_wallet, monk
     req = _post_request("/api/shop/buy", {"slot": "Head", "value": "Wizard Hat"})
     resp = _run(server.handle_shop_buy_start(req))
     assert resp.status == 200
-    assert seen.get("currency") == server.config.TOKEN_CURRENCY_HEX
-    assert seen.get("issuer") == server.config.TOKEN_ISSUER_ADDRESS
+    assert seen.get("currency") == server.config.BRIX_CURRENCY_HEX
+    assert seen.get("issuer") == server.config.BRIX_ISSUER
 
 
 # ---------------------------------------------------------------------------

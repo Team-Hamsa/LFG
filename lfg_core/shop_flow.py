@@ -65,8 +65,8 @@ def ripple_expiration(now_unix: int, ttl: int) -> int:
 def brix_amount(value: int) -> dict[str, str]:
     """IssuedCurrencyAmount for a BRIX-denominated offer."""
     return {
-        "currency": config.TOKEN_CURRENCY_HEX,
-        "issuer": config.TOKEN_ISSUER_ADDRESS,
+        "currency": config.BRIX_CURRENCY_HEX,
+        "issuer": config.BRIX_ISSUER,
         "value": str(value),
     }
 

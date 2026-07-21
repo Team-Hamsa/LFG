@@ -1887,7 +1887,7 @@ async def handle_market_buy_start(request):
     return_url = xumm_ops.discord_return_url(body.get("guild_id"), body.get("channel_id"))
     if row["kind"] == "trait":
         balance = await xrpl_ops.get_trustline_balance(
-            wallet, config.TOKEN_CURRENCY_HEX, config.TOKEN_ISSUER_ADDRESS
+            wallet, config.BRIX_CURRENCY_HEX, config.BRIX_ISSUER
         )
         if balance is None:
             return web.json_response(
@@ -1898,8 +1898,8 @@ async def handle_market_buy_start(request):
             pay_with, pay_amount = await brix_payment.detect_payment_path(
                 wallet,
                 row["amount_brix"],
-                currency=config.TOKEN_CURRENCY_HEX,
-                issuer=config.TOKEN_ISSUER_ADDRESS,
+                currency=config.BRIX_CURRENCY_HEX,
+                issuer=config.BRIX_ISSUER,
             )
         except RuntimeError:
             return web.json_response(
@@ -2604,14 +2604,14 @@ async def handle_shop_buy_start(request):
     # gets an XRP-denominated offer at the buffered AMM quote.
     try:
         # Must check the same currency pair the shop offer is denominated in
-        # (shop_flow.brix_amount → TOKEN_CURRENCY_HEX/TOKEN_ISSUER_ADDRESS);
-        # the SWAP_OFFER_* defaults can be a different pair, in which case the
-        # buyer passes the balance check but the accept fails on-ledger.
+        # (shop_flow.brix_amount → BRIX_CURRENCY_HEX/BRIX_ISSUER); a
+        # different pair here would let the buyer pass the balance check and
+        # then fail the accept on-ledger.
         pay_with, pay_amount = await brix_payment.detect_payment_path(
             wallet,
             str(price),
-            currency=config.TOKEN_CURRENCY_HEX,
-            issuer=config.TOKEN_ISSUER_ADDRESS,
+            currency=config.BRIX_CURRENCY_HEX,
+            issuer=config.BRIX_ISSUER,
         )
     except RuntimeError:
         return web.json_response(

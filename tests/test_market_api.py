@@ -1761,8 +1761,8 @@ def _brix_sell_offer_meta(nft_id, offer_index, value):
                     "NewFields": {
                         "NFTokenID": nft_id,
                         "Amount": {
-                            "currency": server.config.TOKEN_CURRENCY_HEX,
-                            "issuer": server.config.TOKEN_ISSUER_ADDRESS,
+                            "currency": server.config.BRIX_CURRENCY_HEX,
+                            "issuer": server.config.BRIX_ISSUER,
                             "value": value,
                         },
                         "Flags": 1,
@@ -1790,8 +1790,8 @@ def test_list_start_trait_sends_brix_amount_dict(onchain_env, market_wallet, mon
     resp = _run(server.handle_market_list_start(req))
     assert resp.status == 200
     assert captured["amount"] == {
-        "currency": server.config.TOKEN_CURRENCY_HEX,
-        "issuer": server.config.TOKEN_ISSUER_ADDRESS,
+        "currency": server.config.BRIX_CURRENCY_HEX,
+        "issuer": server.config.BRIX_ISSUER,
         "value": "10.5",
     }
 
@@ -1949,8 +1949,8 @@ def test_buy_start_trait_holder_path_brix_accept(onchain_env, market_wallet, mon
     assert verify_calls[0][3]["expected_brix"] == "10"
     # detection ran against the listing's BRIX denomination
     assert detect.calls[0][1] == "10"
-    assert detect.calls[0][2]["currency"] == server.config.TOKEN_CURRENCY_HEX
-    assert detect.calls[0][2]["issuer"] == server.config.TOKEN_ISSUER_ADDRESS
+    assert detect.calls[0][2]["currency"] == server.config.BRIX_CURRENCY_HEX
+    assert detect.calls[0][2]["issuer"] == server.config.BRIX_ISSUER
 
 
 def test_buy_start_trait_no_trustline_409_before_any_payload(

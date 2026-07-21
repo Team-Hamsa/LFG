@@ -274,6 +274,13 @@ SWAP_OFFER_CURRENCY_HEX = os.getenv(
 )  # BRIX
 SWAP_OFFER_ISSUER = os.getenv("SWAP_OFFER_ISSUER", _default_brix_issuer)
 SWAP_OFFER_AMOUNT = os.getenv("SWAP_OFFER_AMOUNT", "10")
+# The BRIX pair the trait economy is denominated in (shop prices, trait
+# listings, the XRP→BRIX on-ramp). Defaults to the swap-fee pair above — the
+# actual BRIX token per network — NOT TOKEN_* (the LFGO mint-payment token):
+# on mainnet the two pairs differ, and an offer denominated in LFGO fails
+# tecNO_LINE because the NFT issuer only holds a BRIX trustline for royalties.
+BRIX_CURRENCY_HEX = os.getenv("BRIX_CURRENCY_HEX", SWAP_OFFER_CURRENCY_HEX)
+BRIX_ISSUER = os.getenv("BRIX_ISSUER", SWAP_OFFER_ISSUER)
 # Multiplier over the AMM spot quote when a swap fee is charged in XRP, so
 # the follow-up BRIX buy-and-burn still clears if the pool moves slightly.
 SWAP_XRP_FEE_BUFFER = os.getenv("SWAP_XRP_FEE_BUFFER", "1.05")
