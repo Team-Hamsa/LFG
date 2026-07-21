@@ -37,8 +37,14 @@ CANVAS = 1080
 DEFAULT_FPS = 20  # fallback when ffprobe reports a degenerate frame rate
 
 
+SUBPROCESS_TIMEOUT = 600  # seconds; a 1080p VP9 layer encode finishes well inside this
+
+
 def run(cmd: list[str]) -> subprocess.CompletedProcess[bytes]:
-    proc = subprocess.run(cmd, capture_output=True)
+    try:
+        proc = subprocess.run(cmd, capture_output=True, timeout=SUBPROCESS_TIMEOUT)
+    except subprocess.TimeoutExpired as exc:
+        raise RuntimeError(f"{cmd[0]} timed out after {SUBPROCESS_TIMEOUT}s") from exc
     if proc.returncode != 0:
         raise RuntimeError(
             f"{cmd[0]} failed: {proc.stderr.decode(errors='replace').strip()[-500:]}"
@@ -232,7 +238,7 @@ def main() -> int:
             continue
         try:
             detail = convert_one(src, dest, args.crf, args.fps)
-        except RuntimeError as exc:
+        except (RuntimeError, OSError) as exc:
             print(f"FAIL  {rel}: {exc}")
             failed += 1
             continue
