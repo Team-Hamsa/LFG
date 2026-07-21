@@ -254,43 +254,35 @@ class Precheck:
 _OK = Precheck(True, "")
 
 
-def can_harvest(rec: OnchainNft, genesis: Genesis, burnable: bool) -> Precheck:
-    """A character can be harvested iff it is a live, burnable token of a known
-    edition whose on-chain body matches the (effective) body ledger. `genesis`
-    is the EFFECTIVE genesis so harvested new editions are recognised too."""
+def can_harvest(rec: OnchainNft, *, mutable: bool, burnable: bool) -> Precheck:
+    """A character can be harvested iff it is live, not already blank, and
+    either mutable (modify-in-place strip) or burnable (legacy one-time
+    burn+remint-as-blank upgrade)."""
     if rec.is_burned:
         return Precheck(False, "character is already burned")
-    edition = rec.nft_number
-    if edition is None or edition not in genesis.edition_bodies:
-        return Precheck(False, "character has no known genesis edition")
-    if not burnable:
-        return Precheck(
-            False, "character is not burnable (mutable-only); equip-only until re-minted"
-        )
-    expected = genesis.edition_bodies[edition][0]
-    found = swap_meta.get_attr(rec.attributes, "Body") or ""
-    if found != expected:
-        return Precheck(False, f"body mismatch: on-chain {found!r} != ledger {expected!r}")
+    if is_blank(rec):
+        return Precheck(False, "character is already blank")
+    if not (mutable or burnable):
+        return Precheck(False, "character is neither mutable nor burnable")
     return _OK
 
 
 def can_assemble(
-    edition: int,
+    rec: OnchainNft,
+    body_value: str,
     chosen: dict[str, str],
-    owner_bodies: set[int],
     owner_assets: dict[tuple[str, str], int],
-    live_editions: set[int],
-    genesis: Genesis,
+    *,
+    mutable: bool,
 ) -> Precheck:
-    """An edition can be (re)assembled iff it is currently dead, its body is in
-    the owner's Closet, and the owner's Closet covers a full, valid asset set
-    (exactly one chosen value per non-body slot). `genesis` is effective."""
-    if edition in live_editions:
-        return Precheck(False, f"edition {edition} is already live")
-    if edition not in genesis.edition_bodies:
-        return Precheck(False, f"edition {edition} has no known body")
-    if edition not in owner_bodies:
-        return Precheck(False, f"Closet does not hold edition {edition}'s body")
+    """A blank the caller owns can be dressed iff it is live+mutable+blank and
+    the Closet covers the body plus a full valid non-body set."""
+    if rec.is_burned:
+        return Precheck(False, "character is burned")
+    if not mutable:
+        return Precheck(False, "character is not mutable")
+    if not is_blank(rec):
+        return Precheck(False, "character is not blank — harvest it first")
     missing = [s for s in NON_BODY_SLOTS if s not in chosen]
     if missing:
         return Precheck(False, f"incomplete set, missing slots: {', '.join(missing)}")
@@ -298,6 +290,7 @@ def can_assemble(
     if extra:
         return Precheck(False, f"unknown slots in set: {', '.join(extra)}")
     need = Counter((s, chosen[s]) for s in NON_BODY_SLOTS)
+    need[("Body", body_value)] += 1
     for (slot, value), qty in need.items():
         if owner_assets.get((slot, value), 0) < qty:
             return Precheck(False, f"Closet lacks asset {slot}={value}")

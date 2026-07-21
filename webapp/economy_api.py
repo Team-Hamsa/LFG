@@ -355,11 +355,8 @@ async def start_harvest(
         conn.close()
         raise EconomyError("Create and claim your Closet first.")
     rec = _load_owned_character(conn, owner, nft_id)
-    genesis = trait_economy.effective_genesis(
-        economy_store.read_genesis(conn), economy_store.read_supply_changes(conn)
-    )
     burnable = await _economy_deps.fetch_burnable(owner, nft_id)
-    chk = trait_economy.can_harvest(rec, genesis, burnable)
+    chk = trait_economy.can_harvest(rec, mutable=bool(rec.mutable), burnable=burnable)
     if not chk.ok:
         conn.close()
         raise EconomyError(f"cannot harvest: {chk.reason}")
@@ -392,7 +389,13 @@ async def start_assemble(
         live_editions = {
             r.nft_number for r in nft_index.live_nfts(conn) if r.nft_number is not None
         }
-        chk = trait_economy.can_assemble(edition, chosen, bodies, assets, live_editions, genesis)
+        # Task 8 reworks this call — assemble still targets an about-to-be-
+        # minted edition here; trait_economy.can_assemble now expects a live
+        # owned blank NFT. Replicate the old edition-based precheck inline
+        # until Task 8 rebuilds this endpoint around a blank target.
+        chk = economy_flow._legacy_can_assemble_by_edition(
+            edition, chosen, bodies, assets, live_editions, genesis
+        )
         if not chk.ok:
             raise EconomyError(f"cannot assemble: {chk.reason}")
         for slot, value in chosen.items():

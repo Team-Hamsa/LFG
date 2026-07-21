@@ -69,7 +69,7 @@ def test_writes_growth_row_for_uncovered_live_edition():
     eff = _effective(conn)
     assert eff.edition_bodies[3] == ("Bones", "skeleton")
     rec = nft_index.nft_by_number(conn, 3)
-    chk = trait_economy.can_harvest(rec, eff, burnable=True)
+    chk = trait_economy.can_harvest(rec, mutable=bool(rec.mutable), burnable=True)
     assert chk.ok, chk.reason
     (row,) = [r for r in es.read_supply_changes(conn) if r["edition"] == 3]
     assert row["kind"] == "mint"

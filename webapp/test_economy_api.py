@@ -1011,14 +1011,17 @@ def test_assemble_prefill_skips_incompatible_asset(monkeypatch, body_gate_store)
     assert pre["body"] == "male"
     assert pre["chosen"]["Clothing"] == "Hoodie"
     assert pre["missing"] == []
-    # The proposed set must actually pass the commit-path gate.
-    from lfg_core.trait_economy import can_assemble, effective_genesis
+    # The proposed set must actually pass the commit-path gate (still the
+    # Task 5/6/8 legacy edition-based shim pending the blank-model rework).
+    from lfg_core.trait_economy import effective_genesis
 
     genesis = effective_genesis(
         economy_store.read_genesis(conn), economy_store.read_supply_changes(conn)
     )
     owned = {(s, v): c for (o, s, v, c) in economy_store.read_closet_assets(conn) if o == "rOwner"}
-    assert can_assemble(edition, pre["chosen"], {edition}, owned, set(), genesis).ok
+    assert economy_api.economy_flow._legacy_can_assemble_by_edition(
+        edition, pre["chosen"], {edition}, owned, set(), genesis
+    ).ok
 
 
 def test_assemble_prefill_reports_missing_slot(monkeypatch, body_gate_store):

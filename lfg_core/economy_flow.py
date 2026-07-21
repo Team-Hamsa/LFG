@@ -50,6 +50,7 @@ import logging
 import os
 import traceback
 import uuid
+from collections import Counter
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, field
 from typing import Any, TypeVar
@@ -224,6 +225,40 @@ def _effective_genesis(conn: Any) -> te.Genesis:
     return te.effective_genesis(es.read_genesis(conn), es.read_supply_changes(conn))
 
 
+# Task 5/6 reworks this call: `AssembleSession` still targets an about-to-be-
+# minted edition (the pre-blank-model "rebirth" flow), which no longer maps
+# onto `trait_economy.can_assemble`'s new "dress a caller-owned blank in
+# place" signature (it needs a live `OnchainNft` record, not a bare edition
+# number). This is a deliberate, temporary shim that reproduces the OLD
+# edition-based precondition so `run_assemble` keeps compiling/behaving
+# unchanged until Task 5/6 rebuilds the flow around a blank target.
+def _legacy_can_assemble_by_edition(
+    edition: int,
+    chosen: dict[str, str],
+    owner_bodies: set[int],
+    owner_assets: dict[tuple[str, str], int],
+    live_editions: set[int],
+    genesis: te.Genesis,
+) -> te.Precheck:
+    if edition in live_editions:
+        return te.Precheck(False, f"edition {edition} is already live")
+    if edition not in genesis.edition_bodies:
+        return te.Precheck(False, f"edition {edition} has no known body")
+    if edition not in owner_bodies:
+        return te.Precheck(False, f"Closet does not hold edition {edition}'s body")
+    missing = [s for s in te.NON_BODY_SLOTS if s not in chosen]
+    if missing:
+        return te.Precheck(False, f"incomplete set, missing slots: {', '.join(missing)}")
+    extra = [s for s in chosen if s not in te.NON_BODY_SLOTS]
+    if extra:
+        return te.Precheck(False, f"unknown slots in set: {', '.join(extra)}")
+    need = Counter((s, chosen[s]) for s in te.NON_BODY_SLOTS)
+    for (slot, value), qty in need.items():
+        if owner_assets.get((slot, value), 0) < qty:
+            return te.Precheck(False, f"Closet lacks asset {slot}={value}")
+    return te.Precheck(True, "")
+
+
 async def _require_active_closet(deps: EconomyDeps, owner: str) -> str | None:
     """Error string if the owner has no usable ACTIVE Closet, else None. Runs an
     on-demand accept confirmation first (pending->active), then — before any
@@ -312,7 +347,7 @@ async def run_harvest(session: HarvestSession, deps: EconomyDeps) -> None:
         if stale:
             session.fail(stale)
             return
-        chk = te.can_harvest(rec, _effective_genesis(conn), burnable=session.burnable)
+        chk = te.can_harvest(rec, mutable=bool(rec.mutable), burnable=session.burnable)
         if not chk.ok:
             session.fail(f"cannot harvest: {chk.reason}")
             return
@@ -462,7 +497,8 @@ async def run_assemble(session: AssembleSession, deps: EconomyDeps) -> None:
             session.fail(stale)
             return
         assets, bodies = _owner_contents(conn, owner)
-        chk = te.can_assemble(
+        # Task 5/6 reworks this call — see _legacy_can_assemble_by_edition.
+        chk = _legacy_can_assemble_by_edition(
             edition,
             session.chosen,
             bodies,

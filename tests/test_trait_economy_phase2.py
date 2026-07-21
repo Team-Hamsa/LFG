@@ -7,7 +7,9 @@ from lfg_core.nft_index import OnchainNft
 NON_BODY = te.NON_BODY_SLOTS
 
 
-def _char(edition: int, body: str = "Straight Blue", *, burned: bool = False) -> OnchainNft:
+def _char(
+    edition: int, body: str = "Straight Blue", *, burned: bool = False, mutable: bool = True
+) -> OnchainNft:
     attrs = [{"trait_type": "Body", "value": body}]
     attrs += [{"trait_type": s, "value": "None"} for s in NON_BODY]
     return OnchainNft(
@@ -15,10 +17,25 @@ def _char(edition: int, body: str = "Straight Blue", *, burned: bool = False) ->
         nft_number=edition,
         owner="rOwner",
         is_burned=burned,
-        mutable=True,
+        mutable=mutable,
         uri_hex="",
         body="male",
         attributes=attrs,
+        image="",
+        ledger_index=1,
+    )
+
+
+def _blank(edition: int, *, burned: bool = False, mutable: bool = True) -> OnchainNft:
+    return OnchainNft(
+        nft_id=f"NFT{edition}",
+        nft_number=edition,
+        owner="rOwner",
+        is_burned=burned,
+        mutable=mutable,
+        uri_hex="",
+        body="male",
+        attributes=te.blank_attributes(),
         image="",
         ledger_index=1,
     )
@@ -113,44 +130,98 @@ def test_conservation_backcompat_no_ledger_arg():
     assert te.verify_conservation(g, census).ok  # 2-arg call still works
 
 
-# --- harvest preconditions ---
+# --- harvest preconditions (blank model, #Task 3) ---
 
 
-def test_can_harvest_ok():
-    g = te.Genesis(trait_counts={}, edition_bodies={7: ("Straight Blue", "male")})
-    assert te.can_harvest(_char(7), g, burnable=True).ok
+def test_can_harvest_ok_mutable_non_burnable():
+    # The old "equip-only" refusal for mutable-but-non-burnable is GONE.
+    r = te.can_harvest(_char(7), mutable=True, burnable=False)
+    assert r.ok, r.reason
 
 
-def test_can_harvest_rejects_non_burnable():
-    g = te.Genesis(trait_counts={}, edition_bodies={7: ("Straight Blue", "male")})
-    r = te.can_harvest(_char(7), g, burnable=False)
-    assert not r.ok and "burnable" in r.reason
+def test_can_harvest_ok_burnable_non_mutable():
+    r = te.can_harvest(_char(7, mutable=False), mutable=False, burnable=True)
+    assert r.ok, r.reason
 
 
-def test_can_harvest_rejects_burned_unknown_and_wrong_body():
-    g = te.Genesis(trait_counts={}, edition_bodies={7: ("Straight Blue", "male")})
-    assert not te.can_harvest(_char(7, burned=True), g, burnable=True).ok
-    assert not te.can_harvest(_char(99), g, burnable=True).ok  # unknown edition
-    assert not te.can_harvest(_char(7, body="Curved Pink"), g, burnable=True).ok  # wrong body
+def test_can_harvest_rejects_burned():
+    assert not te.can_harvest(_char(7, burned=True), mutable=True, burnable=True).ok
 
 
-# --- assemble preconditions ---
+def test_can_harvest_rejects_blank():
+    assert not te.can_harvest(_blank(7), mutable=True, burnable=True).ok
+
+
+def test_can_harvest_rejects_neither_mutable_nor_burnable():
+    r = te.can_harvest(_char(7, mutable=False), mutable=False, burnable=False)
+    assert not r.ok and "neither" in r.reason
+
+
+# --- assemble preconditions (blank model, #Task 3) ---
 
 
 def test_can_assemble_ok():
-    g = te.Genesis(trait_counts={}, edition_bodies={7: ("Straight Blue", "male")})
     assets = {(s, "None"): 1 for s in NON_BODY}
-    assert te.can_assemble(7, _full_set(), {7}, assets, set(), g).ok
+    assets[("Body", "Straight Blue")] = 1
+    r = te.can_assemble(_blank(7), "Straight Blue", _full_set(), assets, mutable=True)
+    assert r.ok, r.reason
 
 
-def test_can_assemble_rejects_live_missing_body_incomplete_and_lacking():
-    g = te.Genesis(trait_counts={}, edition_bodies={7: ("Straight Blue", "male")})
+def test_can_assemble_rejects_non_blank_target():
     assets = {(s, "None"): 1 for s in NON_BODY}
-    assert not te.can_assemble(7, _full_set(), {7}, assets, {7}, g).ok  # already live
-    assert not te.can_assemble(7, _full_set(), set(), assets, set(), g).ok  # body not owned
+    assets[("Body", "Straight Blue")] = 1
+    assert not te.can_assemble(_char(7), "Straight Blue", _full_set(), assets, mutable=True).ok
+
+
+def test_can_assemble_rejects_non_mutable_target():
+    assets = {(s, "None"): 1 for s in NON_BODY}
+    assets[("Body", "Straight Blue")] = 1
+    r = te.can_assemble(
+        _blank(7, mutable=False), "Straight Blue", _full_set(), assets, mutable=False
+    )
+    assert not r.ok
+
+
+def test_can_assemble_rejects_missing_body_asset():
+    assets = {(s, "None"): 1 for s in NON_BODY}
+    r = te.can_assemble(_blank(7), "Straight Blue", _full_set(), assets, mutable=True)
+    assert not r.ok and "Body" in r.reason
+
+
+def test_can_assemble_rejects_missing_slot():
+    assets = {(s, "None"): 1 for s in NON_BODY}
+    assets[("Body", "Straight Blue")] = 1
     incomplete = dict.fromkeys(NON_BODY[:-1], "None")
-    assert not te.can_assemble(7, incomplete, {7}, assets, set(), g).ok  # missing slot
-    assert not te.can_assemble(7, _full_set(), {7}, {}, set(), g).ok  # bucket empty
+    r = te.can_assemble(_blank(7), "Straight Blue", incomplete, assets, mutable=True)
+    assert not r.ok and "missing" in r.reason
+
+
+def test_can_assemble_rejects_unknown_slot():
+    assets = {(s, "None"): 1 for s in NON_BODY}
+    assets[("Body", "Straight Blue")] = 1
+    chosen = dict(_full_set())
+    chosen["NotASlot"] = "Whatever"
+    r = te.can_assemble(_blank(7), "Straight Blue", chosen, assets, mutable=True)
+    assert not r.ok and "unknown" in r.reason
+
+
+def test_can_assemble_rejects_short_multiplicity():
+    # body_value doubles as the value for a non-body slot too, so the needed
+    # multiplicity for that (slot, value) pool key is 2 -- but the Closet
+    # only holds 1. Distinct (slot, value) keys never collide across slots,
+    # so this is the only way a single-value shortfall can be "short by 2".
+    chosen = dict(_full_set())
+    assets = {(s, "None"): 1 for s in NON_BODY}
+    assets[("Body", "Straight Blue")] = 1
+    # Reuse "Straight Blue" as a Head asset too, but only stock one unit
+    # total between the Body demand and this Head demand.
+    chosen["Head"] = "Straight Blue"
+    assets[("Head", "Straight Blue")] = 1  # have 1, need 1 -- fine on its own
+    assets[("Body", "Straight Blue")] = 1  # have 1, need 1 -- fine on its own
+    # Now starve the Head slot specifically to hit the shortfall path.
+    assets[("Head", "Straight Blue")] = 0
+    r = te.can_assemble(_blank(7), "Straight Blue", chosen, assets, mutable=True)
+    assert not r.ok and "Closet lacks asset" in r.reason and "Head" in r.reason
 
 
 # --- equip preconditions ---
