@@ -35,7 +35,7 @@ def test_index_has_mine_groups():
 
 def test_app_js_imports_market_pure():
     js = _read("app.js")
-    assert "from './market_pure.js'" in js
+    assert "from './market_pure.js" in js  # ?v= cache-buster suffix allowed
 
 
 def test_app_js_has_single_market_flow_driver():

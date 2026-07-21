@@ -9,13 +9,13 @@
 // money math, and wizard-step labels. Kept in a separate module so they're
 // unit-testable under Node (tests/test_market_pure_js.py) without a browser
 // — see webapp/client/market_pure.js's own header for the full rationale.
-import * as marketPure from './market_pure.js';
+import * as marketPure from './market_pure.js?v=21';
 // Mint-flow pure helpers (issue #141): the cancel-outcome decision lives in
 // its own module so it's Node-testable too (tests/test_mint_pure_js.py).
-import * as mintPure from './mint_pure.js';
+import * as mintPure from './mint_pure.js?v=21';
 // Build-panel decision logic lives in its own pure module so it's
 // Node-testable too (tests/test_build_pure_js.py).
-import * as buildPure from './build_pure.js';
+import * as buildPure from './build_pure.js?v=21';
 
 const params = new URLSearchParams(window.location.search);
 const insideDiscord = params.has('frame_id');
@@ -808,8 +808,8 @@ function renderFlowQty() {
 function setupBulkStepper(cfg) {
   bulkCfg = { enabled: !!cfg.bulk_mint_ui, max: Math.max(1, cfg.bulk_mint_max || 1) };
   if (!bulkCfg.enabled) return; // flag off: stepper never renders, today's UI
-  // TEMP DEBUG (stepper dead-clicks in the Discord client): surface any
-  // swallowed handler exception as a toast so a broken tap is visible.
+  // Surface any swallowed handler exception as a toast: a stale-cached
+  // module (the 2026-07-21 dead-stepper bug) otherwise fails silently.
   const tap = (delta) => {
     try { onQtyChange(delta); } catch (e) { showError(`qty: ${e.message}`); }
   };
