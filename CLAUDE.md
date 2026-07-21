@@ -575,10 +575,28 @@ Phase 2 (#64) makes the three trait-economy ops real on-chain, mirroring
 
 Harvest, Assemble, and Equip all require an **active Closet** (see below).
 
-- **Harvest** (`scripts/economy_harvest.py`): burn a live character → its 8
-  assets + body drop into the owner's Closet (collection size ↓).
-- **Assemble** (`scripts/economy_assemble.py`): a body + a full asset set from
-  the Closet → mint that edition + offer it back (collection size ↑, rebirth).
+**Blank-harvest model (supersedes the original burn/remint pair, Phase A):**
+Harvest is `NFTokenModify` in place, not a burn — a live character strips to a
+canonical BLANK (every slot, including Body, set to `"None"`) and its 9 former
+slot values (8 traits + body) credit to the owner's Closet as `("<Slot>",
+value)` assets; **collection size is unchanged**, and the op is reversible via
+Assemble. The one-time exception is a legacy flag-24 (non-mutable) character,
+which can't be `NFTokenModify`'d: it takes a one-time burn + remint-as-blank
+upgrade path (journaled -1/+1 for audit clarity) to bring it onto the mutable
+blank model. Bodies are themselves ordinary `("Body", value)` Closet assets
+(no separate body-editions list) — `closet_bodies` is a retired legacy table;
+`scripts/migrate_closet_bodies_to_values.py` converts any remaining legacy
+rows and **MUST run once before the new listener/flows serve traffic**, or a
+pre-migration Closet's bodies are invisible to Assemble. Blank character art
+is uploaded via `scripts/upload_blank_art.py` and served from
+`BLANK_IMAGE_URL`.
+
+- **Harvest** (`scripts/economy_harvest.py`): strip a live character to blank
+  in place (see above); its 8 non-body assets + body land in the owner's
+  Closet.
+- **Assemble** (`scripts/economy_assemble.py`): `NFTokenModify` dresses the
+  caller's OWN blank edition in place from a body + full asset set drawn from
+  the Closet — no mint, no offer, no accept (collection size unchanged).
 - **Equip** (`scripts/economy_equip.py`): `NFTokenModify` a loose Closet asset
   onto a live character; the displaced asset returns to the Closet (size =).
 
@@ -615,7 +633,8 @@ Model:
 - Core modules: `lfg_core/economy_flow.py` (flows + `EconomyDeps`),
   `lfg_core/closet_token.py` (Closet metadata + lifecycle — `ensure_closet`,
   `confirm_accept`, `sync_closet`, `ClosetRef`),
-  `lfg_core/economy_store.py` (`closet_tokens`/`closet_assets`/`closet_bodies`/`supply_changes`);
+  `lfg_core/economy_store.py` (`closet_tokens`/`closet_assets`/`supply_changes`; `closet_bodies`
+  is retired — see the blank-harvest model note above);
   the listener applies closet/supply events via `nft_listener.apply_economy_tx`.
 - **Migration** (legacy Bucket → Closet):
   `.venv/bin/python scripts/migrate_bucket_to_closet.py --network testnet|mainnet [--owner rXXX]`

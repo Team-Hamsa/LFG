@@ -45,7 +45,14 @@ sys.path.insert(0, REPO_ROOT)
 
 import aiohttp  # noqa: E402
 
-from lfg_core import closet_token, config, economy_store, nft_index, trait_token  # noqa: E402
+from lfg_core import (  # noqa: E402
+    closet_token,
+    config,
+    economy_store,
+    nft_index,
+    trait_economy,
+    trait_token,
+)
 
 FETCH_CONCURRENCY = 16
 
@@ -62,7 +69,11 @@ FetchMetaFn = Callable[[str], Awaitable[dict[str, Any] | None]]
 
 
 def _reconcile_closet(
-    conn: sqlite3.Connection, token: dict[str, Any], metadata: Any, issuer: str
+    conn: sqlite3.Connection,
+    token: dict[str, Any],
+    metadata: Any,
+    issuer: str,
+    genesis: trait_economy.Genesis | None = None,
 ) -> bool:
     """Rebuild one owner's Closet contents + token record from an on-ledger
     Closet NFToken snapshot. Returns True if applied, False if skipped.
@@ -88,7 +99,7 @@ def _reconcile_closet(
         return False
     if not isinstance(metadata, dict):
         return False  # unreadable read must not masquerade as an empty closet
-    assets, bodies = closet_token.parse_closet_metadata(metadata)
+    assets, bodies = closet_token.parse_closet_metadata(metadata, genesis)
     economy_store.set_closet_contents(conn, owner, assets, bodies)
     status = closet_token.ACTIVE if owner != issuer else closet_token.PENDING_ACCEPT
     existing = economy_store.get_closet_record(conn, owner)
@@ -126,8 +137,19 @@ async def backfill_economy(
     """Reconcile the economy tables from on-ledger state. `enumerate_fn(taxon)`
     returns every token (live + burned) for that taxon under our issuer;
     `fetch_meta_fn(uri_hex)` resolves metadata. Both injected so this is
-    unit-testable without a network. Returns summary counts."""
+    unit-testable without a network. Returns summary counts.
+
+    Resolves the EFFECTIVE genesis (frozen genesis + supply_changes) up front
+    and forwards it into every Closet reconcile so a legacy-schema token's
+    integer `bodies` list converts to `("Body", value)` asset rows on rebuild,
+    same as the live listener. No frozen genesis (`genesis_exists` false) ->
+    `None`, leaving that conversion off and behavior unchanged."""
     economy_store.init_economy_schema(conn)
+    genesis: trait_economy.Genesis | None = None
+    if economy_store.genesis_exists(conn):
+        genesis = trait_economy.effective_genesis(
+            economy_store.read_genesis(conn), economy_store.read_supply_changes(conn)
+        )
     sem = asyncio.Semaphore(concurrency)
 
     async def _meta(uri_hex: str) -> dict[str, Any] | None:
@@ -152,7 +174,7 @@ async def backfill_economy(
         closets_seen += len(live)
         metas = await asyncio.gather(*(_meta(t.get("uri_hex") or "") for t in live))
         for token, meta in zip(live, metas, strict=True):
-            if _reconcile_closet(conn, token, meta, issuer):
+            if _reconcile_closet(conn, token, meta, issuer, genesis):
                 closets_applied += 1
 
     # --- Trait tokens: taxon 176 (config.TRAIT_TAXON, flipped from 1763 per
