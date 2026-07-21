@@ -309,6 +309,49 @@ def test_sync_then_persist_returns_tx_hash(tmp_path):
     assert got == "MODHASH"
 
 
+def _two_character_setup(tmp_path):
+    """Two live characters owned by the same user, distinct editions/bodies,
+    with a genesis + active Closet already in place."""
+    conn = sqlite3.connect(":memory:")
+    es.init_economy_schema(conn)
+    genesis = te.Genesis(
+        trait_counts={(s, "None"): 2 for s in NON_BODY},
+        edition_bodies={7: ("Straight Blue", "male"), 8: ("Straight Red", "male")},
+    )
+    es.freeze_genesis(conn, genesis, {})
+    es.set_closet_token(conn, "rUser", "CLOSET0", "00", status=ct.ACTIVE, offer_id=None)
+    f = _Fakes()
+    deps = _deps(conn, f, tmp_path)
+    char_a = _char(edition=7, body="Straight Blue")
+    char_b = _char(edition=8, body="Straight Red")
+    return conn, deps, "rUser", char_a, char_b
+
+
+def test_two_concurrent_harvests_both_land(tmp_path):
+    """#180's per-owner lock must make stacked harvests (fire-and-forget spec
+    2026-07-21) serialize: run two run_harvest coroutines concurrently for one
+    owner and assert BOTH characters' assets are in the closet afterwards and
+    both sessions end DONE."""
+    conn, deps, owner, char_a, char_b = _two_character_setup(tmp_path)
+    sa = ef.HarvestSession(owner=owner, character=char_a, burnable=True)
+    sb = ef.HarvestSession(owner=owner, character=char_b, burnable=True)
+
+    async def go():
+        await asyncio.gather(ef.run_harvest(sa, deps), ef.run_harvest(sb, deps))
+
+    _run(go())
+    assert sa.state == ef.DONE and sb.state == ef.DONE
+    assets = {(s, v): n for o, s, v, n in es.read_closet_assets(conn) if o == owner}
+    for char in (char_a, char_b):
+        for attr in char.attributes:
+            if attr["trait_type"] != "Body" and attr["value"] != "None":
+                assert assets.get((attr["trait_type"], attr["value"]), 0) >= 1
+    # Both harvests' None-slot assets landed (no lost update from the race):
+    # each character contributes 1 to every NON_BODY slot's "None" count.
+    assert all(assets[(s, "None")] == 2 for s in NON_BODY)
+    assert sorted(es.read_closet_bodies(conn)) == [("rUser", 7), ("rUser", 8)]
+
+
 def test_harvest_rejected_when_active_closet_gone_onledger(tmp_path):
     """ACTIVE in the DB but owner-check returns None (token gone on-ledger) → the
     gate fires before the irreversible burn, so no character is lost (#101)."""
