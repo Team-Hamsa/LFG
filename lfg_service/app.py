@@ -5095,6 +5095,43 @@ async def handle_economy(request):
         conn.close()
 
 
+def _economy_conflict(
+    sessions: dict[str, Any],
+    terminal: set[str],
+    kind: str,
+    user_id: str,
+    platform: str,
+    body: dict[str, Any],
+) -> str | None:
+    """Per-kind concurrency policy for the economy POSTs (fire-and-forget
+    harvests, spec 2026-07-21). Harvests stack per user — the only harvest
+    conflict is the SAME nft_id already in flight. Every other op keeps the
+    old per-user exclusivity among themselves AND is mutually exclusive with
+    in-flight harvests (both share the owner's Closet; the per-owner lock in
+    economy_flow makes interleaving safe but the queueing UX would be
+    confusing for signature-bearing ops). Returns the 409 message or None."""
+    active = [
+        s
+        for s in sessions.values()
+        if s.discord_id == user_id
+        and s.state not in terminal
+        and getattr(s, "platform", "discord") == platform
+    ]
+    harvests = [s for s in active if getattr(s, "kind", None) == "harvest"]
+    others = [s for s in active if getattr(s, "kind", None) != "harvest"]
+    if others:
+        return "an economy action is already in progress"
+    if kind == "harvest":
+        nft_id = body.get("nft_id")
+        for s in harvests:
+            if getattr(getattr(s.inner, "character", None), "nft_id", None) == nft_id:
+                return "that character is already being harvested"
+        return None
+    if harvests:
+        return "wait for your running harvests to finish first"
+    return None
+
+
 def _economy_post(kind, start_coro, mock_call):
     async def handler(request):
         if not config.ECONOMY_ENABLED:
@@ -5107,12 +5144,11 @@ def _economy_post(kind, start_coro, mock_call):
             except Exception as e:
                 return web.json_response({"error": str(e)}, status=400)
         _prune_sessions(economy_sessions, economy_api.TERMINAL_STATES)
-        if _active_session(
-            economy_sessions, economy_api.TERMINAL_STATES, user["id"], _platform(user)
-        ):
-            return web.json_response(
-                {"error": "an economy action is already in progress"}, status=409
-            )
+        conflict = _economy_conflict(
+            economy_sessions, economy_api.TERMINAL_STATES, kind, user["id"], _platform(user), body
+        )
+        if conflict:
+            return web.json_response({"error": conflict}, status=409)
         try:
             ws = await start_coro(user["id"], request["wallet"], body, await _push_token(user))
         except economy_api.EconomyError as e:
