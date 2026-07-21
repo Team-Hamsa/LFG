@@ -128,8 +128,8 @@ def _brix_amount(value="10"):
     from lfg_core import config
 
     return {
-        "currency": config.TOKEN_CURRENCY_HEX,
-        "issuer": config.TOKEN_ISSUER_ADDRESS,
+        "currency": config.BRIX_CURRENCY_HEX,
+        "issuer": config.BRIX_ISSUER,
         "value": value,
     }
 

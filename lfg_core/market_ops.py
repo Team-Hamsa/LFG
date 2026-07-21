@@ -24,8 +24,8 @@ LSF_SELL_NFTOKEN = 0x00000001
 DROPS_PER_XRP = Decimal(1_000_000)
 
 # #239: per-kind denomination. Character listings are XRP drops; trait
-# listings are BRIX IssuedCurrencyAmounts on TOKEN_CURRENCY_HEX /
-# TOKEN_ISSUER_ADDRESS (the same pair shop_flow.brix_amount uses). The
+# listings are BRIX IssuedCurrencyAmounts on BRIX_CURRENCY_HEX /
+# BRIX_ISSUER (the same pair shop_flow.brix_amount uses). The
 # expected-currency parameter below selects the branch; every character
 # caller passes (or defaults to) "xrp".
 VALID_EXPECTS = ("xrp", "brix")
@@ -85,11 +85,11 @@ def validate_brix_value(value: str) -> str:
 def brix_amount_dict(value: str) -> dict[str, str]:
     """The XRPL IssuedCurrencyAmount dict for a BRIX listing price — the
     Amount an NFTokenCreateOffer txjson carries for a trait listing. Uses
-    TOKEN_CURRENCY_HEX/TOKEN_ISSUER_ADDRESS (the pair shop_flow.brix_amount
+    BRIX_CURRENCY_HEX/BRIX_ISSUER (the pair shop_flow.brix_amount
     uses). Validates + normalizes `value` (see validate_brix_value)."""
     return {
-        "currency": config.TOKEN_CURRENCY_HEX,
-        "issuer": config.TOKEN_ISSUER_ADDRESS,
+        "currency": config.BRIX_CURRENCY_HEX,
+        "issuer": config.BRIX_ISSUER,
         "value": validate_brix_value(value),
     }
 
@@ -101,9 +101,9 @@ def brix_offer_value(amount: Any) -> str | None:
     backfill, and the extract/verify branches below."""
     if not isinstance(amount, dict):
         return None
-    if str(amount.get("currency") or "").upper() != config.TOKEN_CURRENCY_HEX.upper():
+    if str(amount.get("currency") or "").upper() != config.BRIX_CURRENCY_HEX.upper():
         return None
-    if amount.get("issuer") != config.TOKEN_ISSUER_ADDRESS:
+    if amount.get("issuer") != config.BRIX_ISSUER:
         return None
     value = amount.get("value")
     if not isinstance(value, str):

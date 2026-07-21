@@ -153,8 +153,8 @@ def _sell_offer_meta(nft_id, offer_index, amount_brix):
                     "NewFields": {
                         "NFTokenID": nft_id,
                         "Amount": {
-                            "currency": config.TOKEN_CURRENCY_HEX,
-                            "issuer": config.TOKEN_ISSUER_ADDRESS,
+                            "currency": config.BRIX_CURRENCY_HEX,
+                            "issuer": config.BRIX_ISSUER,
                             "value": str(amount_brix),
                         },
                         "Flags": 1,
@@ -288,8 +288,8 @@ class TestAdvanceTraitSellSession:
                 SELLER,
                 TRAIT1,
                 {
-                    "currency": config.TOKEN_CURRENCY_HEX,
-                    "issuer": config.TOKEN_ISSUER_ADDRESS,
+                    "currency": config.BRIX_CURRENCY_HEX,
+                    "issuer": config.BRIX_ISSUER,
                     "value": "10",
                 },
             )

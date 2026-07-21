@@ -472,8 +472,8 @@ def test_ripple_expiration():
 def test_brix_amount_shape():
     amt = shop_flow.brix_amount(25)
     assert amt == {
-        "currency": config.TOKEN_CURRENCY_HEX,
-        "issuer": config.TOKEN_ISSUER_ADDRESS,
+        "currency": config.BRIX_CURRENCY_HEX,
+        "issuer": config.BRIX_ISSUER,
         "value": "25",
     }
 

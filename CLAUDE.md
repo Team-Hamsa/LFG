@@ -108,6 +108,8 @@ BRIX_DISTRIBUTOR_ADDRESS=<xrpl-address>                     # optional; airdrop 
 BRIX_AMM_ACCOUNT=<xrpl-address>                             # optional; mainnet BRIX/XRP AMM pool account, used by snapshot_balances.py
 BULK_MINT_UI_ENABLED=0                                      # optional (#215); Activity bulk-mint stepper — off = today's UI, server endpoints stay live
 BROKER_ALLOWLIST_PATH=<path-to-json>                        # optional (#131); external-marketplace broker allowlist overlay ({addr: {name, url_template}}); unset = built-ins in lfg_core/brokers.py; edits are picked up live (mtime-keyed cache)
+BRIX_CURRENCY_HEX=<hex-currency-code>                       # optional; trait-economy BRIX pair (shop/trait listings/on-ramp), defaults to SWAP_OFFER_CURRENCY_HEX — never TOKEN_* (LFGO)
+BRIX_ISSUER=<xrpl-address>                                  # optional; trait-economy BRIX issuer, defaults to SWAP_OFFER_ISSUER
 MARKET_BID_TTL_SECONDS=604800                               # optional (#283); on-ledger Expiration for in-app bids (native buy offers), default 7 days
 ```
 
@@ -698,8 +700,9 @@ custodial holding.
 
 **Per-kind denomination (#239):** character listings are XRP-denominated
 (drops, as originally shipped); **trait listings are BRIX-denominated**
-(`IssuedCurrencyAmount` on `TOKEN_CURRENCY_HEX`/`TOKEN_ISSUER_ADDRESS`, the
-same pair `shop_flow.brix_amount` uses). One code path parameterized on
+(`IssuedCurrencyAmount` on `BRIX_CURRENCY_HEX`/`BRIX_ISSUER` — the actual
+BRIX pair, defaulting to `SWAP_OFFER_*`; NOT `TOKEN_*`, which is LFGO on
+mainnet — the same pair `shop_flow.brix_amount` uses). One code path parameterized on
 expected currency enforces the rule everywhere: `market_ops.
 extract_created_sell_offer`/`verify_sell_offer` take `expect="xrp"|"brix"`
 (BRIX values validated >0, ≤6dp, cap 1e15 via `validate_brix_value`), the
