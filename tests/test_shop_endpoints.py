@@ -380,6 +380,36 @@ def test_buy_happy_path_returns_session(onchain_env, shop_wallet, monkeypatch):
     # assert on the *response* shape, matching the brief.
 
 
+def test_buy_detect_uses_shop_offer_currency_pair(onchain_env, shop_wallet, monkeypatch):
+    """The balance check must run against the same currency pair the shop
+    offer is denominated in (TOKEN_CURRENCY_HEX/TOKEN_ISSUER_ADDRESS, per
+    shop_flow.brix_amount) — not detect_payment_path's SWAP_OFFER_* defaults,
+    or a buyer holding the swap-fee currency passes detection and then fails
+    the accept on-ledger."""
+    onchain_path, app_db = onchain_env
+    _seed_rarity(app_db, "testnet", "Head", "Wizard Hat", live=4)
+    _activate_closet(onchain_path, BUYER)
+
+    seen = {}
+
+    async def spy_detect(wallet, amount, **kw):
+        seen.update(kw)
+        return ("BRIX", amount)
+
+    monkeypatch.setattr(server.brix_payment, "detect_payment_path", spy_detect)
+
+    async def fake_start_shop_buy(session, deps):
+        session.state = shop_flow.AWAITING_ACCEPT
+
+    monkeypatch.setattr(server.shop_flow, "start_shop_buy", fake_start_shop_buy)
+
+    req = _post_request("/api/shop/buy", {"slot": "Head", "value": "Wizard Hat"})
+    resp = _run(server.handle_shop_buy_start(req))
+    assert resp.status == 200
+    assert seen.get("currency") == server.config.TOKEN_CURRENCY_HEX
+    assert seen.get("issuer") == server.config.TOKEN_ISSUER_ADDRESS
+
+
 # ---------------------------------------------------------------------------
 # GET /api/shop/buy/{session_id}
 # ---------------------------------------------------------------------------
