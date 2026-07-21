@@ -1929,8 +1929,12 @@ async function openDressup() {
     // Hide the Dressing Room (canvas, Closet grid, trait strip) while gated —
     // otherwise the empty canvas and unpopulated closet-filter <select> render
     // beneath the gate.
-    el('dressup-main').hidden = cStatus !== 'active';
-    el('trait-strip-section').hidden = cStatus !== 'active';
+    // Tolerate a stale cached index.html that predates these ids (Discord
+    // clients are known to serve mixed asset versions).
+    for (const id of ['dressup-main', 'trait-strip-section']) {
+      const node = el(id);
+      if (node) node.hidden = cStatus !== 'active';
+    }
 
     if (cStatus !== 'active') {
       // Show gate; hide/disable Harvest. Reset the gate button: it gets disabled
