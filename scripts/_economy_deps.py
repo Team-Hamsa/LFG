@@ -14,6 +14,7 @@ from lfg_core import (
     cdn,
     closet_token,
     config,
+    db_path,
     economy_flow,
     layer_store,
     memos,
@@ -199,6 +200,9 @@ def build_economy_deps(
         trait_burn_fn=lambda nft_id, owner: xrpl_ops.burn_nft(nft_id, owner or None),
         trait_info_fn=lambda nft_id: _trait_info(nft_id),
         trait_meta_fn=lambda nft_id: _trait_meta(nft_id),
+        # Rarity bookkeeping (#305): harvest/assemble adjust the app-DB
+        # live-count the Trait Shop price formula reads.
+        app_conn_factory=lambda: sqlite3.connect(db_path.app_db_path(config.ECONOMY_NETWORK)),
     )
 
 

@@ -9,7 +9,7 @@ import sqlite3
 from datetime import datetime, timezone
 from typing import Any
 
-from lfg_core import config
+from lfg_core import config, db_helpers
 
 BODY_SENTINEL = "*"  # legacy/ungendered rows and Body Type rows
 BODY_CATEGORY = "Body Type"  # reserved category weighting the body pick
@@ -211,10 +211,15 @@ def weighted_pick(
 
 
 def _live_where(network: str) -> tuple[str, tuple[str, ...]]:
-    """WHERE fragment selecting live (unburned) LFG rows for a network."""
+    """WHERE fragment selecting live (unburned) LFG rows for a network.
+
+    A revived burn row (#305: harvest burn later reversed by an assemble
+    rebirth) no longer excludes its edition — only un-revived burns do.
+    Callers must run db_helpers.ensure_burned_nfts_schema first so the
+    revived_at column exists."""
     return (
         """network=? AND nft_number NOT IN
-               (SELECT nft_number FROM burned_nfts)""",
+               (SELECT nft_number FROM burned_nfts WHERE revived_at IS NULL)""",
         (network,),
     )
 
@@ -233,6 +238,7 @@ def recalculate_rarity(conn: sqlite3.Connection, network: str | None = None) -> 
     ensure_schema(conn)
     if not conn.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name='LFG'").fetchone():
         return  # LFG table not yet created; nothing to recount
+    db_helpers.ensure_burned_nfts_schema(conn)
     where, params = _live_where(network)
 
     conn.execute("UPDATE trait_rarity SET live_count=0 WHERE network=?", (network,))
@@ -450,6 +456,7 @@ def _is_stale(conn: sqlite3.Connection, network: str, category: str) -> bool:
         return False  # Body Type and unknown categories: recalc handles them
     if not conn.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name='LFG'").fetchone():
         return False  # LFG table not yet created; nothing to be stale about
+    db_helpers.ensure_burned_nfts_schema(conn)
     (cached,) = conn.execute(
         """SELECT COALESCE(SUM(live_count), 0) FROM trait_rarity
            WHERE network=? AND category=?""",

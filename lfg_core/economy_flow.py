@@ -55,7 +55,7 @@ from dataclasses import dataclass, field
 from typing import Any, TypeVar
 
 from lfg_core import closet_token as bt
-from lfg_core import config, owner_lock
+from lfg_core import config, db_helpers, owner_lock
 from lfg_core import economy_store as es
 from lfg_core import trait_economy as te
 from lfg_core import trait_token as tt
@@ -134,6 +134,11 @@ class EconomyDeps:
     # ownership/issuer checks before the irreversible burn).
     trait_info_fn: TraitInfoFn | None = None
     trait_meta_fn: TraitMetaFn | None = None
+    # App-DB connection factory for rarity bookkeeping (#305): harvest burns
+    # and assemble rebirths move characters in/out of the live population the
+    # Trait Shop price formula reads. Optional so test/CLI constructions that
+    # omit it simply skip the bookkeeping.
+    app_conn_factory: Callable[[], Any] | None = None
     records_dir: str = config.ECONOMY_RECORDS_DIR
 
 
@@ -148,6 +153,25 @@ def _write_record(records_dir: str, op: str, session_id: str, record: dict[str, 
             json.dump(record, f, indent=2)
     except Exception:
         logging.error(f"Failed to write economy record: {traceback.format_exc()}")
+
+
+def _apply_rarity_change(deps: EconomyDeps, op: str, apply: Callable[[Any], Any]) -> None:
+    """Best-effort rarity bookkeeping in the app DB (#305): record the burn /
+    revival and recount so the Trait Shop price reflects it immediately. Must
+    never fail the economy session — the on-chain op already committed."""
+    if deps.app_conn_factory is None:
+        return
+    try:
+        from lfg_core import rarity  # local import: rarity pulls in db_helpers
+
+        conn = deps.app_conn_factory()
+        try:
+            apply(conn)
+            rarity.recalculate_rarity(conn, network=config.ECONOMY_NETWORK)
+        finally:
+            conn.close()
+    except Exception:
+        logging.error(f"{op}: rarity bookkeeping failed (non-fatal): {traceback.format_exc()}")
 
 
 def _owner_contents(conn: Any, owner: str) -> tuple[dict[tuple[str, str], int], set[int]]:
@@ -310,6 +334,13 @@ async def run_harvest(session: HarvestSession, deps: EconomyDeps) -> None:
             return
         session.burn_hash = burn_hash
         _write_record(deps.records_dir, "harvest", session.id, session._record("burned"))
+        # The character is dead on-chain from this point regardless of how the
+        # Closet deposit below goes — take it out of the rarity live-count now.
+        _apply_rarity_change(
+            deps,
+            "harvest",
+            lambda c: db_helpers.record_harvest_burn(c, session.edition, rec.nft_id, owner),
+        )
 
         # Deposit: closet token first (authoritative), then DB mirror.
         assets, bodies = _owner_contents(conn, owner)
@@ -520,6 +551,13 @@ async def run_assemble(session: AssembleSession, deps: EconomyDeps) -> None:
         # leave the journal at the pre-drain "minted" record, and recovery
         # would burn the mint back against an already-drained Closet.
         _write_record(deps.records_dir, "assemble", session.id, session._record("closet_synced"))
+        # Point of no return: the mint stays even if delivery below fails —
+        # the edition is alive again, so put it back in the rarity live-count.
+        _apply_rarity_change(
+            deps,
+            "assemble",
+            lambda c: db_helpers.revive_harvested_edition(c, edition),
+        )
 
         # Deliver the new character to the user (offer + XUMM accept).
         offer_id = await deps.char_offer_fn(nft_id, owner)
