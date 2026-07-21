@@ -1763,6 +1763,15 @@ function layerMediaEl(src, alt, onMissing) {
   img.alt = alt;
   img.onerror = () => {
     const v = document.createElement('video');
+    // A browser/webview without VP9-in-WebM decode would fire the video's
+    // onerror for a perfectly valid layer and (via onMissing) prune legit
+    // tiles. When the codec is unsupported, show a blank placeholder instead —
+    // never prune on a client-side capability gap.
+    if (!v.canPlayType('video/webm; codecs="vp9"')) {
+      img.onerror = null;
+      img.src = BLANK_IMG;
+      return;
+    }
     v.autoplay = true;
     v.muted = true;
     v.loop = true;

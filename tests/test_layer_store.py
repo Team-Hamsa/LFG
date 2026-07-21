@@ -136,3 +136,6 @@ def test_local_resolve_static_shadows_animated(tmp_path):
     (base / "Straight Diamond.gif").unlink()
     path = _run(store.resolve("male", "Body", "Straight Diamond"))
     assert path is not None and path.endswith(".webm")
+    (base / "Straight Diamond.webm").unlink()
+    path = _run(store.resolve("male", "Body", "Straight Diamond"))
+    assert path is not None and path.endswith(".mp4")

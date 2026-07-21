@@ -154,16 +154,22 @@ def test_missing_layers_non_ape_ignores_ape_assets(tmp_path):
     assert _run(swap_compose.missing_layers(attrs, "male", store)) == []
 
 
-def _have_libvpx_encoder() -> bool:
+def _have_libvpx() -> bool:
+    """True only when ffmpeg has libvpx-vp9 both ways: the test fixture needs
+    the encoder, and _run_ffmpeg forces the decoder — a partially featured
+    build must skip, not fail mid-test."""
     import subprocess
 
     try:
-        out = subprocess.run(
+        enc = subprocess.run(
             ["ffmpeg", "-hide_banner", "-encoders"], capture_output=True, text=True
+        ).stdout
+        dec = subprocess.run(
+            ["ffmpeg", "-hide_banner", "-decoders"], capture_output=True, text=True
         ).stdout
     except OSError:
         return False
-    return "libvpx-vp9" in out
+    return "libvpx-vp9" in enc and "libvpx-vp9" in dec
 
 
 def _webm_vp9_alpha(path, size=(8, 8)):
@@ -199,7 +205,7 @@ def _webm_vp9_alpha(path, size=(8, 8)):
     os.remove(frame)
 
 
-@pytest.mark.skipif(not _have_libvpx_encoder(), reason="ffmpeg lacks libvpx-vp9")
+@pytest.mark.skipif(not _have_libvpx(), reason="ffmpeg lacks libvpx-vp9")
 def test_compose_nft_webm_layer_preserves_alpha(tmp_path):
     # A VP9-alpha WebM body over a red background: the transparent top half
     # must show the background through. Regression: ffmpeg's native VP9

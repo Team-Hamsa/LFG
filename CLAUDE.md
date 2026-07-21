@@ -259,7 +259,9 @@ combinations. Parsing/validation/queries live in `lfg_core/trait_config.py`; ran
 **Animated layers** (`.gif`/`.webm`/`.mp4`, since 2026-07-11 the five Irridescent
 Body values are GIFs; VP9-alpha `.webm` supported since 2026-07-21 — far smaller
 than GIF at 1080, `_run_ffmpeg` forces the libvpx-vp9 decoder on `.webm` inputs
-because ffmpeg's native VP9 decoder silently drops the alpha side-channel; the
+because ffmpeg's native VP9 decoder silently drops the alpha side-channel — so
+the deploy box's ffmpeg MUST be built with libvpx (`ffmpeg -decoders | grep
+libvpx-vp9`; verified present on the prod/staging box 2026-07-21); the
 Activity's client-side layer stacking falls back `<img>`→`<video>` per layer):
 when any layer in a composition isn't `.png`,
 `swap_compose.compose_nft` outputs an **MP4** (metadata `image` = PNG
