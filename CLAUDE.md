@@ -642,8 +642,9 @@ Model:
   Bucket (flags 16, non-burnable) is abandoned in place — it cannot be
   issuer-burned, so tracking is simply stopped. **Crash-recovery caveat:** if
   the process dies between the `closet_tokens` delete and the new mint, re-run
-  with `--owner <addr>` for the affected address; contents in `closet_assets` /
-  `closet_bodies` are safe — only the token pointer is transiently lost.
+  with `--owner <addr>` for the affected address; contents in `closet_assets`
+  (incl. the `("Body", value)` rows that replaced the retired `closet_bodies`
+  table) are safe — only the token pointer is transiently lost.
 
 ### Dress-up trait economy — Phase 4 (tradeable trait tokens)
 
