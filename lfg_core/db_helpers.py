@@ -201,3 +201,71 @@ def get_nft_data(nft_number: int) -> dict[str, Any] | None:
     except Exception as e:
         logging.error(f"Error getting NFT data: {e}")
         return None
+
+
+# ---------------------------------------------------------------------------
+# Harvest/assemble rarity bookkeeping (#305)
+#
+# The rarity live-count (rarity.recalculate_rarity) counts LFG minus
+# non-revived burned_nfts rows. Economy harvests burn characters on-ledger,
+# so they must land here too or the Trait Shop price never sees them; an
+# assemble revives the edition, which stamps the harvest row instead of
+# deleting it (burned_nfts stays an append-only audit log).
+# ---------------------------------------------------------------------------
+
+HARVEST_BURN_REASON = "harvest"
+
+
+def ensure_burned_nfts_schema(conn: sqlite3.Connection) -> None:
+    """Create burned_nfts if missing (surrogate key: the same nft_number can
+    burn more than once over time) and self-migrate the revived_at column."""
+    conn.execute(
+        """CREATE TABLE IF NOT EXISTS burned_nfts (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            nft_number INTEGER,
+            nft_id TEXT,
+            discord_id TEXT,
+            burned_by TEXT,
+            reason TEXT,
+            burned_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+            original_mint_time TIMESTAMP
+        )"""
+    )
+    cols = {r[1] for r in conn.execute("PRAGMA table_info(burned_nfts)")}
+    if "revived_at" not in cols:
+        conn.execute("ALTER TABLE burned_nfts ADD COLUMN revived_at TIMESTAMP")
+    conn.commit()
+
+
+def record_harvest_burn(
+    conn: sqlite3.Connection, nft_number: int, nft_id: str | None, owner: str
+) -> None:
+    """Audit a harvest burn so the edition leaves the rarity live-count."""
+    ensure_burned_nfts_schema(conn)
+    row = conn.execute(
+        "SELECT discord_id, created_at FROM LFG WHERE nft_number=?", (nft_number,)
+    ).fetchone()
+    discord_id, minted_at = (row[0], row[1]) if row else (None, None)
+    conn.execute(
+        """INSERT INTO burned_nfts
+           (nft_number, nft_id, discord_id, burned_by, reason, original_mint_time)
+           VALUES (?, ?, ?, ?, ?, ?)""",
+        (nft_number, nft_id, discord_id, owner, HARVEST_BURN_REASON, minted_at),
+    )
+    conn.commit()
+
+
+def revive_harvested_edition(conn: sqlite3.Connection, nft_number: int) -> bool:
+    """Stamp the most recent un-revived harvest burn of this edition as
+    revived (an assemble reminted it). Returns False when no such row exists
+    (e.g. the edition was harvested before #305 started recording burns)."""
+    ensure_burned_nfts_schema(conn)
+    cur = conn.execute(
+        """UPDATE burned_nfts SET revived_at=CURRENT_TIMESTAMP
+           WHERE id = (SELECT id FROM burned_nfts
+                       WHERE nft_number=? AND reason=? AND revived_at IS NULL
+                       ORDER BY id DESC LIMIT 1)""",
+        (nft_number, HARVEST_BURN_REASON),
+    )
+    conn.commit()
+    return cur.rowcount > 0
