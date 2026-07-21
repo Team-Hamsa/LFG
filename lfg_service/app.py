@@ -1924,6 +1924,11 @@ async def handle_market_buy_start(request):
             user_token=push_user_token,
             platform=memos.platform_for_surface(_platform(user)),
             action=memos.ACTION_BUY,
+            # A marketplace sell offer has no Destination, so any account
+            # could otherwise sign this and buy the NFT into itself. The
+            # session already rejects a mismatched signer after the fact
+            # (signer_mismatch); pinning stops it before the ledger write.
+            account=wallet,
         )
     if not payload:
         return web.json_response({"error": "could not reach Xaman"}, status=502)
@@ -2098,6 +2103,7 @@ async def _continue_buy_after_onramp(session: Any, loop: Any) -> None:
         user_token=session.push_user_token,
         platform=memos.platform_for_surface(session.platform),
         action=memos.ACTION_BUY,
+        account=session.wallet_address,
     )
     if not payload:
         return  # transient Xaman failure; retry on the next poll
@@ -2491,7 +2497,9 @@ def _quote_shop_trait(network: str, slot: str, value: str) -> tuple[int | None, 
         conn.close()
 
 
-def _build_shop_deps(network: str, platform: str) -> tuple[shop_flow.ShopDeps, sqlite3.Connection]:
+def _build_shop_deps(
+    network: str, platform: str, buyer: str
+) -> tuple[shop_flow.ShopDeps, sqlite3.Connection]:
     """The real ShopDeps for a service-triggered buy: mint/offer/burn against
     the live issuer wallet, XUMM payload builders, and an EconomyDeps built
     the same way `economy_api.build_settlement_deps` wires settlement (shop
@@ -2516,6 +2524,9 @@ def _build_shop_deps(network: str, platform: str) -> tuple[shop_flow.ShopDeps, s
             user_token=user_token,
             platform=memos.platform_for_surface(platform),
             action=memos.ACTION_SHOP_BUY,
+            # The shop offer is Destination-locked to the buyer and priced in
+            # their BRIX/XRP — pin the payload so only they can sign it.
+            account=buyer,
         )
         if payload is None:
             raise RuntimeError("could not reach Xaman")
@@ -2632,7 +2643,7 @@ async def handle_shop_buy_start(request):
     shop_sessions[session.id] = session
     _shop_session_created[session.id] = time.time()
 
-    deps, conn = _build_shop_deps(network, _platform(user))
+    deps, conn = _build_shop_deps(network, _platform(user), session.buyer)
 
     async def _run_and_close() -> None:
         try:
@@ -2663,7 +2674,7 @@ async def handle_shop_buy_status(request):
 
     if session.state in (shop_flow.AWAITING_ACCEPT, shop_flow.SETTLING):
         network = config.ECONOMY_NETWORK
-        deps, conn = _build_shop_deps(network, session.platform)
+        deps, conn = _build_shop_deps(network, session.platform, session.buyer)
         try:
             await shop_flow.advance_shop_buy(session, deps)
         finally:
@@ -3637,6 +3648,7 @@ async def handle_bulk_mint_unit_accept(request):
         return_url=return_url,
         user_token=job.push_user_token,
         platform=memos.platform_for_surface(job.platform),
+        account=job.wallet_address,
     )
     if not payload:
         return web.json_response({"error": "payload_failed"}, status=502)
@@ -3730,6 +3742,7 @@ async def handle_pending_offer_accept(request):
         return_url=return_url,
         user_token=await _push_token(request["user"]),
         platform=memos.platform_for_surface(_platform(request["user"])),
+        account=wallet,
     )
     if not payload:
         return web.json_response({"error": "payload_failed"}, status=502)

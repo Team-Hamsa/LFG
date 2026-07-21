@@ -210,6 +210,25 @@ def test_payment_payload_omits_account_when_unknown(monkeypatch):
     assert "Account" not in captured["txjson"]
 
 
+def test_accept_offer_payload_pins_signing_account(monkeypatch):
+    """Same trap as the payment payload: an account-less accept lets a second
+    Xaman account sign. A delivery offer is Destination-locked so the ledger
+    refuses it, but a marketplace buy would succeed — into the wrong wallet."""
+    captured = {}
+    _fake_xumm_api(monkeypatch, captured)
+    asyncio.get_event_loop().run_until_complete(
+        xumm_ops.create_accept_offer_payload("OFFER", account="rBuyer")
+    )
+    assert captured["txjson"]["Account"] == "rBuyer"
+
+
+def test_accept_offer_payload_omits_account_when_unknown(monkeypatch):
+    captured = {}
+    _fake_xumm_api(monkeypatch, captured)
+    asyncio.get_event_loop().run_until_complete(xumm_ops.create_accept_offer_payload("OFFER"))
+    assert "Account" not in captured["txjson"]
+
+
 def _stub_balance(monkeypatch, balance):
     async def fake_balance(address, currency, issuer):
         return balance

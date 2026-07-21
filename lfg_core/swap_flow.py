@@ -557,6 +557,8 @@ async def _create_offer_and_accept(session: SwapSession, item: dict[str, Any]) -
         return_url=session.return_url,
         user_token=session.push_user_token,
         platform=memos.platform_for_surface(session.platform),
+        # Offer is Destination-locked to this wallet — pin the payload to it.
+        account=session.wallet_address,
     )
     if not accept:
         session.error = (

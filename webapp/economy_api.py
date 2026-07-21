@@ -76,7 +76,7 @@ async def start_closet(
     Xaman URL or None). ``user_token`` (#212) push-delivers the claim offer."""
     conn = open_conn()
     try:
-        deps = _economy_deps.build_economy_deps(conn, user_token=user_token)
+        deps = _economy_deps.build_economy_deps(conn, user_token=user_token, owner=owner)
         ref = await ct.ensure_closet(
             conn,
             owner,
@@ -194,7 +194,11 @@ def _schedule(
     runner: Any,
     user_token: str | None = None,
 ) -> EconomyWebSession:
-    deps = _economy_deps.build_economy_deps(conn, user_token=user_token)
+    # Every session that builds an accept payload carries the wallet it is
+    # for (`.owner`); pinning it means only that wallet can sign the delivery.
+    deps = _economy_deps.build_economy_deps(
+        conn, user_token=user_token, owner=getattr(session, "owner", None)
+    )
     asyncio.get_running_loop().create_task(_run_and_close(runner, session, deps, conn))
     return EconomyWebSession(discord_id=discord_id, kind=kind, inner=session)
 

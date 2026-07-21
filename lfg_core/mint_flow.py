@@ -550,6 +550,10 @@ async def mint_one_unit(
             return_url=return_url,
             user_token=push_user_token,
             platform=memos.platform_for_surface(platform),
+            # The offer is Destination-locked to this wallet; pin the payload
+            # too so a wrong-account signature is refused in Xaman rather than
+            # burning a fee on a tecNO_PERMISSION.
+            account=wallet_address,
         )
         if not accept:
             return UnitResult(
