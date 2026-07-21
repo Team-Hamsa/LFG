@@ -952,3 +952,11 @@ button.back:hover { color: var(--text); border: none; }
   #flow-regen-btn.needs-regen { animation: none; text-decoration: underline; }
   #flow-qr.qr-stale { transition: none; }
 }
+.build-save-bar {
+  display: flex;
+  gap: .5rem;
+  justify-content: center;
+  margin-top: .5rem;
+}
+.build-save-bar button { flex: 0 1 auto; }
+.closet-item.staged { outline: 2px solid var(--blue); }

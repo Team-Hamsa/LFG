@@ -24,7 +24,7 @@
   <meta name="twitter:description" content="Mint, dress up, and trade LFG NFTs on the XRP Ledger.">
   <meta name="twitter:image" content="https://build.letseffinggo.com/assets/og-card.png">
   <link rel="stylesheet" href="fonts/fonts.css">
-  <link rel="stylesheet" href="style.css?v=18">
+  <link rel="stylesheet" href="style.css?v=19">
 </head>
 <body>
   <main id="app">
@@ -126,6 +126,10 @@
           <p id="dressup-id" class="cap"></p>
           <button id="go-switch-btn" class="secondary">🔄 Switch GO</button>
           <button id="dressup-harvest-btn" class="secondary">🔥 Harvest</button>
+          <div id="build-save-bar" class="build-save-bar" hidden>
+            <button id="build-save-btn" class="primary">💾 Save changes</button>
+            <button id="build-discard-btn" class="secondary">Discard</button>
+          </div>
         </div>
         <div class="dressup-closet">
           <div class="closet-head">
@@ -342,6 +346,6 @@
        Telegram (window.Telegram stays undefined); loaded BEFORE app.js so the
        dual-mode boot can detect the Telegram context. -->
   <script src="telegram-web-app.js"></script>
-  <script type="module" src="app.js?v=25"></script>
+  <script type="module" src="app.js?v=26"></script>
 </body>
 </html>
