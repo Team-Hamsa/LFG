@@ -9,13 +9,13 @@
 // money math, and wizard-step labels. Kept in a separate module so they're
 // unit-testable under Node (tests/test_market_pure_js.py) without a browser
 // — see webapp/client/market_pure.js's own header for the full rationale.
-import * as marketPure from './market_pure.js?v=21';
+import * as marketPure from './market_pure.js?v=22';
 // Mint-flow pure helpers (issue #141): the cancel-outcome decision lives in
 // its own module so it's Node-testable too (tests/test_mint_pure_js.py).
-import * as mintPure from './mint_pure.js?v=21';
+import * as mintPure from './mint_pure.js?v=22';
 // Build-panel decision logic lives in its own pure module so it's
 // Node-testable too (tests/test_build_pure_js.py).
-import * as buildPure from './build_pure.js?v=21';
+import * as buildPure from './build_pure.js?v=22';
 
 const params = new URLSearchParams(window.location.search);
 const insideDiscord = params.has('frame_id');
@@ -963,7 +963,9 @@ function unitRow(j, u) {
   if (u.image_url) {
     const img = document.createElement('img');
     img.className = 'thumb';
-    img.src = u.image_url;
+    // Through the same-origin proxy like every other CDN image — the raw
+    // CDN URL is CSP-blocked inside the Discord Activity.
+    img.src = imgUrl(u.image_url, THUMB_W);
     img.alt = `NFT #${u.nft_number}`;
     row.appendChild(img);
   }
