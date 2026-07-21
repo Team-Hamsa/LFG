@@ -4,6 +4,7 @@
 
 import asyncio
 import os
+import re
 import sys
 from decimal import Decimal
 
@@ -1076,8 +1077,12 @@ def test_swap_session_happy_path(monkeypatch, tmp_path):
     assert len(session.results) == 2
     r = session.results[0]
     assert r["nft_id"] == "NEW1"
-    assert r["image_url"] == "https://cdn.test/LFGO/10/10_1.png"
-    assert r["metadata_url"].endswith("10/10_1.json")
+    # <edition>_<revision>_<random>: the random suffix keeps every swap on a
+    # URL no cache has seen before (see swap_flow._build_and_upload), and the
+    # metadata JSON rides the same stem as its image.
+    image_url = r["image_url"]
+    assert re.fullmatch(r"https://cdn\.test/LFGO/10/10_1_[0-9a-f]{8}\.png", image_url), image_url
+    assert r["metadata_url"] == image_url[: -len(".png")] + ".json"
     assert r["accept_deeplink"].startswith("https://xumm.test/OFFER_")
     # The on-chain journal is persisted for recovery
     records = list((tmp_path / "swap_records").glob("*.json"))
