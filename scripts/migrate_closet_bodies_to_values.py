@@ -168,8 +168,17 @@ async def _amain(args: argparse.Namespace) -> int:
         return 0
 
     exit_code = 0
+    failed_owners: list[str] = []
     for owner in owners:
-        result = await migrate_owner(conn, owner, sync_fn)
+        try:
+            result = await migrate_owner(conn, owner, sync_fn)
+        except Exception:
+            logger.exception("owner %s: migration failed, continuing to next owner", owner)
+            print(f"ERROR {owner}: migration failed (see log)")
+            failed_owners.append(owner)
+            exit_code = 1
+            continue
+
         if result.get("skipped"):
             print(f"SKIP  {owner}: {result.get('reason', '')}")
             unknown = result.get("unknown_editions") or []
@@ -184,6 +193,9 @@ async def _amain(args: argparse.Namespace) -> int:
             )
             if unknown:
                 exit_code = 1
+
+    if failed_owners:
+        print(f"FAILED owners ({len(failed_owners)}): {failed_owners}")
 
     return exit_code
 

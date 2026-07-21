@@ -124,3 +124,62 @@ def test_migrate_owner_unknown_edition_left_in_place():
     assert result["unknown_editions"] == [999]
     # No known bodies were migrated, so sync_fn is never called.
     assert sync.calls == []
+
+
+def test_migrate_owner_mixed_known_and_unknown_editions():
+    conn = _mem_conn()
+    _freeze_simple_genesis(conn)
+
+    owner = "rMixed"
+    es.set_closet_contents(conn, owner, [], [3, 999])
+
+    sync = _SyncRecorder()
+    result = _run(migration.migrate_owner(conn, owner, sync))
+
+    assert result["skipped"] is False
+    assert result["converted_count"] == 1
+    assert result["unknown_editions"] == [999]
+
+    assets = sorted(
+        (slot, value, count) for o, slot, value, count in es.read_closet_assets(conn) if o == owner
+    )
+    assert assets == [("Body", "Milady", 1)]
+
+    bodies = [ed for o, ed in es.read_closet_bodies(conn) if o == owner]
+    assert bodies == [999]
+
+    assert len(sync.calls) == 1
+    called_assets, called_bodies = sync.calls[0]
+    assert called_assets == [("Body", "Milady", 1)]
+    assert called_bodies == []
+
+
+def test_migrate_owner_two_known_editions_same_body_merge_count():
+    conn = _mem_conn()
+    genesis = trait_economy.Genesis(
+        trait_counts={},
+        edition_bodies={3: ("Milady", "milady"), 4: ("Milady", "milady")},
+    )
+    es.freeze_genesis(conn, genesis, meta={})
+
+    owner = "rDouble"
+    es.set_closet_contents(conn, owner, [], [3, 4])
+
+    sync = _SyncRecorder()
+    result = _run(migration.migrate_owner(conn, owner, sync))
+
+    assert result["skipped"] is False
+    assert result["converted_count"] == 2
+
+    assets = sorted(
+        (slot, value, count) for o, slot, value, count in es.read_closet_assets(conn) if o == owner
+    )
+    assert assets == [("Body", "Milady", 2)]
+
+    bodies = [ed for o, ed in es.read_closet_bodies(conn) if o == owner]
+    assert bodies == []
+
+    assert len(sync.calls) == 1
+    called_assets, called_bodies = sync.calls[0]
+    assert called_assets == [("Body", "Milady", 2)]
+    assert called_bodies == []
