@@ -2412,14 +2412,26 @@ async function confirmDiscardIfDirty() {
   return ok;
 }
 
+// Fold a just-committed batch into the in-memory state, reusing the same pure
+// helpers the staged preview uses. Only ever called after the ledger accepted
+// the batch, so this is truth, not optimism.
+function applySavedLocally(char, saved) {
+  const assets = economyState.closet && economyState.closet.assets;
+  // Closet first: effectiveAssets needs the character's PRE-change values.
+  if (assets) economyState.closet.assets = buildPure.effectiveAssets(assets, char, saved);
+  char.attributes = buildPure.applyPending(char.attributes, saved);
+}
+
 async function saveBuild() {
   const char = activeChar();
   if (!char || saveBusy) return;
-  const changes = buildPure.netChanges(char, pending());
+  const staged = { ...pending() };
+  const changes = buildPure.netChanges(char, staged);
   if (!changes.length) return;
   saveBusy = true;
   renderSaveBar();
   status('Saving your build…');
+  let committed = false;
   try {
     const res = await api('/api/equip', {
       method: 'POST',
@@ -2427,6 +2439,7 @@ async function saveBuild() {
     });
     const final = await pollEconomyOp('equip', res);
     if (final.state === 'failed') throw new Error(final.error || 'save failed');
+    committed = true;
     status('');
   } catch (e) {
     showError(e.message);
@@ -2437,6 +2450,11 @@ async function saveBuild() {
     // changed, so silently re-offering the same batch could double-apply it.
     saveBusy = false;
     clearPending();
+    // The batch is on-ledger: fold it into local state BEFORE the refetch, so a
+    // refetch that FAILS still shows the new look instead of silently redrawing
+    // the pre-save character and reading as a lost save. A refetch that
+    // succeeds overwrites this with authoritative truth anyway.
+    if (committed) applySavedLocally(char, staged);
     try {
       economyState = await api('/api/economy');
     } catch (e) {
