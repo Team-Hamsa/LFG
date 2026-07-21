@@ -65,8 +65,14 @@ Rejected alternatives:
 ```
 
 The legacy `{"nft_id": ..., "slot": ..., "value": ...}` shape is normalized to a
-one-element list, keeping `scripts/economy_equip.py`, the `_client` SDK method,
-and existing tests working.
+one-element list by the handler, so the `_client` SDK's `equip_start(user_id,
+body)` and any in-flight client keep working across the deploy.
+
+Compatibility is **wire-level only**. In Python there is exactly one shape:
+`EquipSession(changes=[...])` and `start_equip(..., changes)`. Callers inside the
+repo (`scripts/economy_equip.py` and the existing tests) are migrated to it
+rather than carrying a dual-signature shim, so no second code path exists to
+drift.
 
 Rejected with 400:
 
@@ -100,12 +106,16 @@ continues to apply verbatim.
 
 The ordering is unchanged. Three steps simply loop:
 
-1. **Precheck** against a working copy of the owner's assets. For each change:
-   `trait_economy.can_equip(rec, slot, value, working, mutable=...)`, then apply
-   `−incoming / +displaced` to `working` before evaluating the next change. A
-   batch that spends two Hats from a `×1` stack therefore fails server-side, not
-   only in the client. A change whose incoming value is an earlier change's
-   displaced value resolves correctly.
+1. **Precheck** every change against one accumulating copy of the owner's
+   assets: `trait_economy.can_equip(rec, slot, value, working, mutable=...)`,
+   then apply `−incoming / +displaced` to `working` before the next change. Any
+   change failing its precheck aborts the whole batch before the character is
+   touched.
+
+   Closet assets are keyed `(slot, value)` and a slot may appear at most once
+   per batch (duplicates are rejected), so the changes are independent — the
+   accumulation exists to build the single asset dict handed to the one Closet
+   sync in step 4, not to catch cross-change interference.
 2. **`new_attrs`** applies every change at once → **one** `char_compose_fn` call,
    one metadata URL.
 3. **One `NFTokenModify`** via `char_modify_fn` — still the single reversible
@@ -202,9 +212,8 @@ Server (`tests/test_economy_flow_equip.py`, which already fakes `EconomyDeps`):
 - multi-change happy path asserts **exactly one** `char_compose_fn`, **one**
   `char_modify_fn`, and **one** `_sync_then_persist` call, and that the synced
   asset dict carries every delta
-- a batch spending two of a `×1` stack fails precheck with nothing written
-- a change whose incoming value is an earlier change's displaced value resolves
-  against the running working copy
+- a batch whose second change is not in the Closet fails precheck with the
+  character untouched and the Closet unchanged
 - duplicate slot / empty list / oversized list are rejected
 - the existing single-change failure-path tests pass unmodified via the legacy
   shape — the regression net for the fail-safe ordering
