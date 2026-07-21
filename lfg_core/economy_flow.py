@@ -623,11 +623,10 @@ def _raw_uri(uri_hex: str) -> str:
 class EquipSession:
     owner: str
     character: OnchainNft
-    slot: str
-    incoming_value: str
+    changes: list[tuple[str, str]]  # ordered (slot, incoming_value) pairs
     state: str = RUNNING
     error: str | None = None
-    displaced_value: str = ""
+    displaced: dict[str, str] = field(default_factory=dict)  # slot -> value pushed out
     modify_hash: str | None = None
     sync_tx_hash: str | None = None
     mirror_pending: bool = False
@@ -639,9 +638,10 @@ class EquipSession:
             "id": self.id,
             "owner": self.owner,
             "nft_id": self.character.nft_id,
-            "slot": self.slot,
-            "incoming": self.incoming_value,
-            "displaced": self.displaced_value,
+            "changes": [
+                {"slot": slot, "incoming": value, "displaced": self.displaced.get(slot, "")}
+                for slot, value in self.changes
+            ],
             "modify_hash": self.modify_hash,
             "sync_tx_hash": self.sync_tx_hash,
             "mirror_pending": self.mirror_pending,
@@ -656,28 +656,47 @@ class EquipSession:
 
 @_serialize_by_owner
 async def run_equip(session: EquipSession, deps: EconomyDeps) -> None:
-    """Drive an equip to a terminal state. Order: precheck -> compose+upload ->
-    MODIFY the character in place (reversible: modify back to the old URI) ->
-    swap the Closet (-incoming, +displaced; token then DB). If the closet swap
-    fails after the modify, the character is reverted and the Closet untouched."""
+    """Drive a batch equip to a terminal state. Order: precheck every change ->
+    compose+upload ONCE -> ONE MODIFY of the character in place (reversible:
+    modify back to the old URI) -> ONE Closet swap carrying every
+    (-incoming, +displaced) delta. If the closet swap fails after the modify,
+    the character is reverted (a whole-URI revert restores all slots at once)
+    and the Closet untouched."""
     conn, owner, rec = deps.conn, session.owner, session.character
-    slot, incoming = session.slot, session.incoming_value
     try:
         stale = _mirror_pending_error(deps, owner)
         if stale:
             session.fail(stale)
             return
-        assets, _bodies = _owner_contents(conn, owner)
-        chk = te.can_equip(rec, slot, incoming, assets, mutable=bool(rec.mutable))
-        if not chk.ok:
-            session.fail(f"cannot equip: {chk.reason}")
+        if not session.changes:
+            session.fail("cannot equip: no changes to apply")
             return
-        session.displaced_value = te.slot_value(rec, slot)
+        assets, _bodies = _owner_contents(conn, owner)
+        # Precheck every change, accumulating each (-incoming, +displaced) delta
+        # into ONE asset dict for the single Closet sync below. Assets are keyed
+        # (slot, value) and a slot may appear at most once, so the changes are
+        # independent; any failing precheck aborts the batch before the ledger
+        # is touched.
+        seen: set[str] = set()
+        for slot, incoming in session.changes:
+            if slot in seen:
+                session.fail(f"cannot equip: duplicate slot in one batch ({slot})")
+                return
+            seen.add(slot)
+            chk = te.can_equip(rec, slot, incoming, assets, mutable=bool(rec.mutable))
+            if not chk.ok:
+                session.fail(f"cannot equip: {chk.reason}")
+                return
+            displaced = te.slot_value(rec, slot)
+            session.displaced[slot] = displaced
+            assets[(slot, incoming)] = assets.get((slot, incoming), 0) - 1
+            assets[(slot, displaced)] = assets.get((slot, displaced), 0) + 1
 
+        incoming_by_slot = dict(session.changes)
         new_attrs = [
             {
                 "trait_type": a["trait_type"],
-                "value": incoming if a["trait_type"] == slot else a["value"],
+                "value": incoming_by_slot.get(a["trait_type"], a["value"]),
             }
             for a in rec.attributes
         ]
@@ -694,9 +713,7 @@ async def run_equip(session: EquipSession, deps: EconomyDeps) -> None:
             return
         session.modify_hash = modify_hash
 
-        # Swap the closet: -incoming, +displaced. Token first, then DB.
-        assets[(slot, incoming)] = assets.get((slot, incoming), 0) - 1
-        assets[(slot, session.displaced_value)] = assets.get((slot, session.displaced_value), 0) + 1
+        # Swap the closet with every delta at once. Token first, then DB.
         try:
             session.sync_tx_hash = await _sync_then_persist(deps, owner, assets, _bodies)
         except bt.ClosetMirrorError as e:
