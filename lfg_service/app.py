@@ -5210,6 +5210,29 @@ def _reserve_economy_slot(
     return placeholder_id, None
 
 
+@require_wallet
+async def handle_assemble_options(request):
+    """GET /api/assemble/options: the Builder's data source for assembling a
+    blank -- caller-owned blank characters + every legal (body, slot, value)
+    combination the caller's Closet currently supports. Gates on an active
+    Closet; economy_api.EconomyError -> 400 (mirrors the other economy-op
+    preconditions, e.g. handle_extract_start)."""
+    if not config.ECONOMY_ENABLED:
+        return _economy_disabled_response()
+    if config.WEBAPP_DEV_MODE:
+        try:
+            return web.json_response(mock_economy.INSTANCE.assemble_options(request["wallet"]))
+        except mock_economy.MockEconomyError as e:
+            return web.json_response({"error": str(e)}, status=400)
+    conn = economy_api.open_conn()
+    try:
+        return web.json_response(await economy_api.assemble_options(conn, request["wallet"]))
+    except economy_api.EconomyError as e:
+        return web.json_response({"error": str(e)}, status=400)
+    finally:
+        conn.close()
+
+
 def _economy_post(kind, start_coro, mock_call):
     async def handler(request):
         if not config.ECONOMY_ENABLED:
@@ -5469,6 +5492,7 @@ def create_app() -> web.Application:
     app.router.add_get("/api/equip/{session_id}", handle_equip_status)
     app.router.add_post("/api/harvest", require_wallet(handle_harvest_start))
     app.router.add_get("/api/harvest/{session_id}", handle_harvest_status)
+    app.router.add_get("/api/assemble/options", handle_assemble_options)
     app.router.add_post("/api/assemble", require_wallet(handle_assemble_start))
     app.router.add_get("/api/assemble/{session_id}", handle_assemble_status)
     app.router.add_post("/api/extract", require_wallet(handle_extract_start))
