@@ -371,47 +371,12 @@ async def start_assemble(
     chosen: dict[str, str],
     user_token: str | None = None,
 ) -> EconomyWebSession:
-    conn = open_conn()
-    try:
-        closet_rec = economy_store.get_closet_record(conn, owner)
-        if closet_rec is None or closet_rec[2] != ct.ACTIVE:
-            raise EconomyError("Create and claim your Closet first.")
-        genesis = trait_economy.effective_genesis(
-            economy_store.read_genesis(conn), economy_store.read_supply_changes(conn)
-        )
-        body = genesis.edition_bodies.get(edition)
-        if body is None:
-            raise EconomyError(f"edition {edition} has no known body")
-        assets = {
-            (s, v): c for (o, s, v, c) in economy_store.read_closet_assets(conn) if o == owner
-        }
-        bodies = {ed for (o, ed) in economy_store.read_closet_bodies(conn) if o == owner}
-        live_editions = {
-            r.nft_number for r in nft_index.live_nfts(conn) if r.nft_number is not None
-        }
-        # Task 8 reworks this call — assemble still targets an about-to-be-
-        # minted edition here; trait_economy.can_assemble now expects a live
-        # owned blank NFT. Replicate the old edition-based precheck inline
-        # until Task 8 rebuilds this endpoint around a blank target.
-        chk = economy_flow._legacy_can_assemble_by_edition(
-            edition, chosen, bodies, assets, live_editions, genesis
-        )
-        if not chk.ok:
-            raise EconomyError(f"cannot assemble: {chk.reason}")
-        for slot, value in chosen.items():
-            await _require_body_affinity(body[1], slot, value)
-    except Exception:
-        conn.close()
-        raise
-    session = economy_flow.AssembleSession(
-        owner=owner,
-        edition=edition,
-        chosen=chosen,
-        body_value=body[0],
-        body_class=body[1],
-        live_editions=live_editions,
-    )
-    return _schedule("assemble", discord_id, session, conn, economy_flow.run_assemble, user_token)
+    # Task 8 reworks this endpoint: assemble now dresses a caller-owned BLANK
+    # character in place (economy_flow.AssembleSession takes a live OnchainNft,
+    # not a bare edition), so this old edition-based entrypoint can no longer
+    # build a valid session. Left as a clear, deliberate stop-gap rather than a
+    # silently-wrong precheck.
+    raise EconomyError("assemble is being upgraded — use the new builder")
 
 
 async def start_extract(

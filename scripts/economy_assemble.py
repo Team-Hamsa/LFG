@@ -43,14 +43,19 @@ async def _amain(args: argparse.Namespace) -> int:
     if body is None:
         print(f"Edition {args.edition} has no known body in genesis.")
         return 2
-    live_editions = {r.nft_number for r in nft_index.live_nfts(conn) if r.nft_number is not None}
+    character = nft_index.nft_by_number(conn, args.edition)
+    if character is None:
+        print(f"Edition {args.edition} not found in the on-chain index.")
+        return 2
+    if character.owner != args.owner:
+        print(f"Edition {args.edition} is not owned by {args.owner}.")
+        return 2
     session = economy_flow.AssembleSession(
         owner=args.owner,
-        edition=args.edition,
+        character=character,
         chosen=_parse_set(args.set),
         body_value=body[0],
         body_class=body[1],
-        live_editions=live_editions,
     )
     await economy_flow.run_assemble(session, deps.build_economy_deps(conn))
     print(f"State: {session.state}")

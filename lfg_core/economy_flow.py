@@ -62,6 +62,25 @@
 #   harvested_pending_closet       burn/blank committed, Closet    re-apply the deposit from the
 #                                 deposit definitively did NOT     journal (moved_assets) — safe
 #                                 commit
+#
+# Assemble-specific statuses (dress-a-blank-in-place, Task 6): assemble no
+# longer mints/offers/accepts — it modifies a caller-owned BLANK in place.
+#
+#   assembling                    precheck passed, compose done,   none (in-flight)
+#                                 no chain effect yet
+#   modified                      NFTokenModify to the dressed     none (in-flight)
+#                                 metadata committed
+#   complete                      modify + Closet debit both       none
+#                                 committed
+#   complete_pending_mirror       modify + Closet debit committed  none — the listener rebuilds
+#                                 on-chain; local DB mirror failed  the mirror from the token
+#   reverted_modify                Closet debit definitively did   none (compensated — character
+#                                 NOT commit; modify-back to the    modified back to its blank URI)
+#                                 pre-assemble (blank) URI OK
+#   failed_revert                 Closet debit failed AND the      admin: character may retain the
+#                                 modify-back ALSO failed           new traits — reconcile manually
+#   assemble_sync_indeterminate   Closet debit outcome UNKNOWN      reconcile from chain — NEVER
+#                                 (modify raised mid-flight)        blind re-apply
 
 from __future__ import annotations
 
@@ -71,7 +90,6 @@ import logging
 import os
 import traceback
 import uuid
-from collections import Counter
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, field
 from typing import Any, TypeVar
@@ -251,40 +269,6 @@ async def _sync_then_persist(
 
 def _effective_genesis(conn: Any) -> te.Genesis:
     return te.effective_genesis(es.read_genesis(conn), es.read_supply_changes(conn))
-
-
-# Task 5/6 reworks this call: `AssembleSession` still targets an about-to-be-
-# minted edition (the pre-blank-model "rebirth" flow), which no longer maps
-# onto `trait_economy.can_assemble`'s new "dress a caller-owned blank in
-# place" signature (it needs a live `OnchainNft` record, not a bare edition
-# number). This is a deliberate, temporary shim that reproduces the OLD
-# edition-based precondition so `run_assemble` keeps compiling/behaving
-# unchanged until Task 5/6 rebuilds the flow around a blank target.
-def _legacy_can_assemble_by_edition(
-    edition: int,
-    chosen: dict[str, str],
-    owner_bodies: set[int],
-    owner_assets: dict[tuple[str, str], int],
-    live_editions: set[int],
-    genesis: te.Genesis,
-) -> te.Precheck:
-    if edition in live_editions:
-        return te.Precheck(False, f"edition {edition} is already live")
-    if edition not in genesis.edition_bodies:
-        return te.Precheck(False, f"edition {edition} has no known body")
-    if edition not in owner_bodies:
-        return te.Precheck(False, f"Closet does not hold edition {edition}'s body")
-    missing = [s for s in te.NON_BODY_SLOTS if s not in chosen]
-    if missing:
-        return te.Precheck(False, f"incomplete set, missing slots: {', '.join(missing)}")
-    extra = [s for s in chosen if s not in te.NON_BODY_SLOTS]
-    if extra:
-        return te.Precheck(False, f"unknown slots in set: {', '.join(extra)}")
-    need = Counter((s, chosen[s]) for s in te.NON_BODY_SLOTS)
-    for (slot, value), qty in need.items():
-        if owner_assets.get((slot, value), 0) < qty:
-            return te.Precheck(False, f"Closet lacks asset {slot}={value}")
-    return te.Precheck(True, "")
 
 
 async def _require_active_closet(deps: EconomyDeps, owner: str) -> str | None:
@@ -565,18 +549,21 @@ def _character_attributes(body_value: str, chosen: dict[str, str]) -> list[dict[
 @dataclass
 class AssembleSession:
     owner: str
-    edition: int
-    chosen: dict[str, str]  # slot -> value for each non-body slot
+    character: OnchainNft  # the caller-owned BLANK being dressed in place
     body_value: str
     body_class: str
-    live_editions: set[int] = field(default_factory=set)
+    chosen: dict[str, str]  # slot -> value for each non-body slot
     state: str = RUNNING
     error: str | None = None
-    new_nft_id: str | None = None
+    modify_hash: str | None = None
     results: list[dict[str, Any]] = field(default_factory=list)
     sync_tx_hash: str | None = None
     mirror_pending: bool = False
     id: str = field(default_factory=lambda: uuid.uuid4().hex)
+
+    @property
+    def edition(self) -> int:
+        return self.character.nft_number or 0
 
     def _record(self, status: str) -> dict[str, Any]:
         return {
@@ -584,8 +571,9 @@ class AssembleSession:
             "id": self.id,
             "owner": self.owner,
             "edition": self.edition,
+            "nft_id": self.character.nft_id,
             "chosen": self.chosen,
-            "new_nft_id": self.new_nft_id,
+            "modify_hash": self.modify_hash,
             "sync_tx_hash": self.sync_tx_hash,
             "mirror_pending": self.mirror_pending,
             "status": status,
@@ -599,32 +587,20 @@ class AssembleSession:
 
 @_serialize_by_owner
 async def run_assemble(session: AssembleSession, deps: EconomyDeps) -> None:
-    """Drive an assemble (rebirth) to a terminal state. Order: precheck ->
-    compose+upload -> MINT (reversible: burn back) -> drain the Closet (token
-    then DB) -> offer+accept. If the drain fails the mint is burned back and the
-    Closet is untouched; if the offer fails after the drain the minted token is
-    parked in the issuer wallet for re-offer (no asset loss)."""
-    conn, owner, edition = deps.conn, session.owner, session.edition
+    """Drive an assemble (dress-a-blank) to a terminal state. Order: precheck ->
+    compose+upload -> MODIFY the caller-owned blank in place (reversible: modify
+    back to the old blank URI) -> debit the Closet (body + the chosen set; token
+    then DB). No mint, no offer, no accept — the character keeps its existing
+    nft_id throughout."""
+    conn, rec, owner = deps.conn, session.character, session.owner
     try:
         stale = _mirror_pending_error(deps, owner)
         if stale:
             session.fail(stale)
             return
         assets = _owner_contents(conn, owner)
-        # Task 5/6 reworks this call — see _legacy_can_assemble_by_edition.
-        # `bodies` here is read directly from the legacy closet_bodies table
-        # (no longer surfaced by _owner_contents, which is assets-only per
-        # Task 5); `_sync_then_persist` unconditionally syncs an empty body
-        # list now, so the drain of `edition` below happens as a side effect
-        # of any successful sync, not from this local set mutation.
-        bodies = {e for o, e in es.read_closet_bodies(conn) if o == owner}
-        chk = _legacy_can_assemble_by_edition(
-            edition,
-            session.chosen,
-            bodies,
-            assets,
-            session.live_editions,
-            _effective_genesis(conn),
+        chk = te.can_assemble(
+            rec, session.body_value, session.chosen, assets, mutable=bool(rec.mutable)
         )
         if not chk.ok:
             session.fail(f"cannot assemble: {chk.reason}")
@@ -637,38 +613,56 @@ async def run_assemble(session: AssembleSession, deps: EconomyDeps) -> None:
 
         attrs = _character_attributes(session.body_value, session.chosen)
         image_url, video_url, meta_url = await deps.char_compose_fn(
-            attrs, session.body_class, edition, 0
+            attrs, session.body_class, session.edition, 0
         )
         _write_record(deps.records_dir, "assemble", session.id, session._record("assembling"))
 
-        # Reversible: a freshly minted character can be burned back.
-        nft_id = await deps.char_mint_fn(meta_url)
-        if not nft_id:
-            session.fail(f"failed to mint edition {edition}; your Closet is untouched")
-            _write_record(deps.records_dir, "assemble", session.id, session._record("failed_mint"))
+        # Reversible: NFTokenModify keeps the nft_id; we can modify back.
+        modify_hash = await deps.char_modify_fn(rec.nft_id, owner, meta_url)
+        if not modify_hash:
+            session.fail(f"failed to dress character {rec.nft_id}; your Closet is untouched")
+            _write_record(
+                deps.records_dir, "assemble", session.id, session._record("failed_modify")
+            )
             return
-        session.new_nft_id = nft_id
-        _write_record(deps.records_dir, "assemble", session.id, session._record("minted"))
+        session.modify_hash = modify_hash
+        _write_record(deps.records_dir, "assemble", session.id, session._record("modified"))
 
-        # Drain the Closet: token first (authoritative), then DB mirror.
+        # Debit the Closet: the body plus each chosen slot value (incl.
+        # "None" values — they debit too). Token first, then DB mirror.
+        assets[("Body", session.body_value)] = assets.get(("Body", session.body_value), 0) - 1
         for slot in te.NON_BODY_SLOTS:
             key = (slot, session.chosen[slot])
             assets[key] = assets.get(key, 0) - 1
         try:
             session.sync_tx_hash = await _sync_then_persist(deps, owner, assets)
         except bt.ClosetMirrorError as e:
-            # The drain COMMITTED on-chain; only the DB mirror failed. Burning
-            # the mint back here would destroy it against a Closet that already
-            # gave up the body + assets — do NOT compensate; deliver instead.
+            # The debit COMMITTED on-chain; only the DB mirror failed. The
+            # character already carries its new traits — do NOT revert it;
+            # the listener rebuilds the mirror from the Closet token.
             session.sync_tx_hash = e.tx_hash
             session.mirror_pending = True
             es.set_mirror_pending(conn, owner, True)
+            session.state = DONE
+            session.results.append(
+                {
+                    "nft_id": rec.nft_id,
+                    "image_url": image_url,
+                    "video_url": video_url,
+                    "metadata_url": meta_url,
+                    "accept": None,
+                }
+            )
+            _write_record(
+                deps.records_dir, "assemble", session.id, session._record("complete_pending_mirror")
+            )
+            return
         except bt.ClosetIndeterminateError as e:
-            # Drain outcome unknown: fail-closed. Keep the mint (id journaled),
-            # no burn — an admin reconciles from chain.
+            # Debit outcome unknown: fail-closed — no revert against an
+            # unknown Closet; an admin reconciles from chain.
             session.fail(
-                f"assemble drain outcome unknown ({e}); the minted token {nft_id} is kept — "
-                f"reconcile from chain (journal {session.id})"
+                f"assemble closet debit outcome unknown ({e}); the character keeps its new "
+                f"traits — reconcile from chain (journal {session.id})"
             )
             _write_record(
                 deps.records_dir,
@@ -678,82 +672,56 @@ async def run_assemble(session: AssembleSession, deps: EconomyDeps) -> None:
             )
             return
         except Exception as e:
-            # Ledger-failed: the drain definitively did not commit. Burn the
-            # mint back so the user's Closet is exactly as it was.
-            revert_hash = await deps.char_burn_fn(nft_id, "")
+            # Ledger-failed: the debit definitively did not commit. Modify the
+            # character back to its pre-assemble (blank) URI; the Closet is
+            # untouched.
+            old_uri = _raw_uri(rec.uri_hex)
+            revert_hash = await deps.char_modify_fn(rec.nft_id, owner, old_uri) if old_uri else None
             if revert_hash:
-                session.new_nft_id = None
-                session.fail(f"assemble failed draining the Closet ({e}); your Closet is untouched")
+                session.fail(
+                    f"assemble failed updating the closet ({e}); your character was reverted"
+                )
                 _write_record(
-                    deps.records_dir, "assemble", session.id, session._record("reverted_mint")
+                    deps.records_dir, "assemble", session.id, session._record("reverted_modify")
                 )
             else:
-                # The compensating burn ALSO failed: the minted token is stranded
-                # in the issuer wallet. Keep its nft_id in the journal so an admin
-                # can locate and burn it — do NOT wipe it.
                 session.fail(
-                    f"assemble failed draining the Closet ({e}) and the compensating burn of "
-                    f"{nft_id} failed — admin must burn it manually (journal {session.id})"
+                    f"assemble failed updating the closet ({e}); the character could NOT be "
+                    f"reverted to blank — it may retain the new traits (journal {session.id})"
                 )
                 _write_record(
-                    deps.records_dir, "assemble", session.id, session._record("failed_revert_mint")
+                    deps.records_dir, "assemble", session.id, session._record("failed_revert")
                 )
             return
 
-        # Durable checkpoint BEFORE delivery: the drain is committed (with
-        # sync_tx_hash; mirror_pending if only the DB mirror failed). A
-        # process crash during the offer/accept awaits below would otherwise
-        # leave the journal at the pre-drain "minted" record, and recovery
-        # would burn the mint back against an already-drained Closet.
-        _write_record(deps.records_dir, "assemble", session.id, session._record("closet_synced"))
-        # Point of no return: the mint stays even if delivery below fails —
-        # the edition is alive again, so put it back in the rarity live-count.
+        # The character is dressed and the Closet drained — the edition is
+        # back in the live population, so return it to the rarity live-count
+        # (#305; balances the record_harvest_burn in run_harvest).
         _apply_rarity_change(
             deps,
             "assemble",
-            lambda c: db_helpers.revive_harvested_edition(c, edition),
+            lambda c: db_helpers.revive_harvested_edition(c, session.edition),
         )
-
-        # Deliver the new character to the user (offer + XUMM accept).
-        offer_id = await deps.char_offer_fn(nft_id, owner)
-        if not offer_id:
-            session.fail(
-                f"edition {edition} was minted ({nft_id}) and your Closet drained, but the offer "
-                f"failed — contact an admin to re-offer it (journal {session.id})"
-            )
-            _write_record(
-                deps.records_dir, "assemble", session.id, session._record("minted_no_offer")
-            )
-            return
-        accept = await deps.char_accept_fn(offer_id)
-        if not accept:
-            # #262: only the XUMM delivery payload failed — the offer is
-            # on-chain and claimable via Xaman Events, so warn, don't fail.
-            logging.warning(
-                f"Assemble {session.id}: accept payload creation failed for offer "
-                f"{offer_id}; offer is on-chain, claimable via Xaman Events"
-            )
+        session.state = DONE
         session.results.append(
             {
-                "nft_id": nft_id,
+                "nft_id": rec.nft_id,
                 "image_url": image_url,
                 # Animated assembles (#250): the .mp4 next to the PNG still.
                 "video_url": video_url,
                 "metadata_url": meta_url,
-                "accept": accept,
+                "accept": None,
             }
         )
-        session.state = DONE
-        status = "complete_pending_mirror" if session.mirror_pending else "complete"
-        _write_record(deps.records_dir, "assemble", session.id, session._record(status))
+        _write_record(deps.records_dir, "assemble", session.id, session._record("complete"))
     except Exception as e:
         logging.error(f"Assemble {session.id} failed: {traceback.format_exc()}")
         session.fail(str(e))
-        # A raise AFTER the Closet modify committed (e.g. delivery offer/accept
-        # blowing up post-mirror-fail) must not leave the journal at an earlier
-        # checkpoint without the sticky mirror fields — recovery would treat
-        # the committed change as never-happened. Persist a terminal record
-        # (best-effort: journaling must never mask the original error).
+        # A raise after the Closet modify committed must not leave the journal
+        # at an earlier checkpoint without the sticky mirror fields — recovery
+        # would treat the committed change as never-happened. Persist a
+        # terminal record (best-effort: journaling must never mask the
+        # original error).
         try:
             _write_record(deps.records_dir, "assemble", session.id, session._record("failed"))
         except Exception:
