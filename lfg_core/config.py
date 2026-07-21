@@ -18,6 +18,18 @@ def _require(name: str) -> str:
     return value
 
 
+def env_flag(name: str, default: str = "0") -> bool:
+    """Parse a boolean-ish env var (falsy denylist: "0"/"false"/"False").
+
+    The shared idiom behind every feature flag below. It stays a callable so a
+    test can exercise a flag's *shipped default* without depending on the
+    ambient `.env`: the module constants are frozen at import time, and
+    `load_dotenv()` walks up from CWD, so a developer box (or any git worktree
+    under it) inherits whatever the deployed `.env` sets.
+    """
+    return os.getenv(name, default) not in ("0", "false", "False")
+
+
 # XUMM
 XUMM_API_KEY = _require("XUMM_API_KEY")
 XUMM_API_SECRET = _require("XUMM_API_SECRET")
@@ -114,8 +126,12 @@ MINT_PRICE_XRP = os.getenv("MINT_PRICE_XRP", "10")
 # Bulk minting (#215). MAX_COLLECTION_SIZE caps total live editions; a bulk
 # request is clamped to the remaining headroom before payment. BULK_MINT_MAX
 # caps how many a single bulk job may request.
-MAX_COLLECTION_SIZE = int(os.getenv("MAX_COLLECTION_SIZE", "10000"))
-BULK_MINT_MAX = int(os.getenv("BULK_MINT_MAX", "10"))
+# The *_DEFAULT constants are named so tests can assert the shipped default
+# without reading the frozen constant, which any ambient .env can override.
+MAX_COLLECTION_SIZE_DEFAULT = 10000
+BULK_MINT_MAX_DEFAULT = 10
+MAX_COLLECTION_SIZE = int(os.getenv("MAX_COLLECTION_SIZE", str(MAX_COLLECTION_SIZE_DEFAULT)))
+BULK_MINT_MAX = int(os.getenv("BULK_MINT_MAX", str(BULK_MINT_MAX_DEFAULT)))
 if MAX_COLLECTION_SIZE < 1:
     raise ValueError(f"MAX_COLLECTION_SIZE must be >= 1, got {MAX_COLLECTION_SIZE}")
 if BULK_MINT_MAX < 1:
@@ -125,7 +141,8 @@ if BULK_MINT_MAX < 1:
 # bulk flow client-side via /api/config. Server bulk endpoints stay live
 # regardless (they're quantity-capped and auth'd on their own). Off by
 # default; staging sets it first (docs/ops/env.staging.example).
-BULK_MINT_UI_ENABLED = os.getenv("BULK_MINT_UI_ENABLED", "0") not in ("0", "false", "False")
+BULK_MINT_UI_ENABLED_DEFAULT = "0"  # named so a test can lock the shipped default
+BULK_MINT_UI_ENABLED = env_flag("BULK_MINT_UI_ENABLED", BULK_MINT_UI_ENABLED_DEFAULT)
 
 # BunnyCDN
 BUNNY_CDN_ACCESS_KEY = _require("BUNNY_CDN_ACCESS_KEY")
@@ -162,7 +179,7 @@ ECONOMY_NETWORK = os.getenv("ECONOMY_NETWORK", "testnet").strip().lower()
 # while its DB/gates resolve on ECONOMY_NETWORK, so it must never be enabled
 # unless an operator has deliberately confirmed both point at the same chain
 # (see the assertion below and go-live review B5).
-ECONOMY_ENABLED = os.getenv("ECONOMY_ENABLED", "0") not in ("0", "false", "False")
+ECONOMY_ENABLED = env_flag("ECONOMY_ENABLED", "0")
 
 
 def validate_economy_config(
@@ -223,7 +240,8 @@ validate_economy_config(ECONOMY_ENABLED, ECONOMY_NETWORK, XRPL_NETWORK)
 # route answers 403 feature-disabled and the client hides the Marketplace UI —
 # lets the Minter + Trait Swapper launch on mainnet before the money-touching
 # marketplace (native NFTokenOffer list/buy/cancel) ships.
-MARKET_ENABLED = os.getenv("MARKET_ENABLED", "1") not in ("0", "false", "False")
+MARKET_ENABLED_DEFAULT = "1"
+MARKET_ENABLED = env_flag("MARKET_ENABLED", MARKET_ENABLED_DEFAULT)
 WEBAPP_DEV_MODE = os.getenv("WEBAPP_DEV_MODE", "") not in ("", "0", "false", "False")
 
 # Telegram Mini App (#89). All optional — the feature is OFF when unset:
@@ -326,10 +344,12 @@ ECONOMY_CDN_FOLDER = os.getenv("ECONOMY_CDN_FOLDER", SWAP_CDN_FOLDER)
 # Standalone tradeable trait NFTokens (Phase 4). Burnable + transferable (NOT
 # soulbound, NOT mutable); xrpl_ops.mint_nft applies NFT_TRANSFER_FEE to any
 # transferable token, so the trait royalty is inherited (no separate constant).
-TRAIT_TAXON = int(os.getenv("TRAIT_TAXON", "176"))  # flipped from 1763 (#217)
+TRAIT_TAXON_DEFAULT = 176  # flipped from 1763 (#217)
+TRAIT_TAXON = int(os.getenv("TRAIT_TAXON", str(TRAIT_TAXON_DEFAULT)))
 # Assemble-minted rebirth characters get their own taxon; regular /letsgo
 # mints stay NFT_TAXON (0) so the main collection is never split (#217).
-ASSEMBLE_TAXON = int(os.getenv("ASSEMBLE_TAXON", "1760"))
+ASSEMBLE_TAXON_DEFAULT = 1760
+ASSEMBLE_TAXON = int(os.getenv("ASSEMBLE_TAXON", str(ASSEMBLE_TAXON_DEFAULT)))
 
 # Trait Shop (#217): price = clamp(SHOP_BASE_BRIX / smoothed_share, MIN, MAX)
 SHOP_BASE_BRIX = float(os.getenv("SHOP_BASE_BRIX", "1.0"))
@@ -363,7 +383,7 @@ X_MONTHLY_POST_BUDGET = int(os.getenv("X_MONTHLY_POST_BUDGET", "100"))
 # Master switch, true only when the flag is set AND all four OAuth 1.0a
 # credentials are non-empty (mirrors the ECONOMY_ENABLED/MARKET_ENABLED
 # boolean-flag idiom above: falsy denylist "0"/"false"/"False").
-X_ENABLED = os.getenv("X_ENABLED", "0") not in ("0", "false", "False") and all(
+X_ENABLED = env_flag("X_ENABLED", "0") and all(
     (X_CONSUMER_KEY, X_CONSUMER_SECRET, X_ACCESS_TOKEN, X_ACCESS_SECRET)
 )
 # sqlite state file for the poster process (dedup/budget/pause bookkeeping);

@@ -37,8 +37,11 @@ def _headroom_env(tmp_path, monkeypatch):
 
 
 def test_config_defaults():
-    assert config.MAX_COLLECTION_SIZE == 10000
-    assert config.BULK_MINT_MAX == 10
+    # Assert the *shipped* defaults, not the frozen constants: config's bare
+    # load_dotenv() walks up from CWD, so an ambient .env (or a worktree under
+    # a checkout that has one) can override either knob on a developer box.
+    assert config.MAX_COLLECTION_SIZE_DEFAULT == 10000
+    assert config.BULK_MINT_MAX_DEFAULT == 10
 
 
 def _async_return(value):

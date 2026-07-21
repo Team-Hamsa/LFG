@@ -37,8 +37,15 @@ def _run(coro):
         loop.close()
 
 
-def test_flag_defaults_off():
-    assert config.BULK_MINT_UI_ENABLED is False
+def test_flag_defaults_off(monkeypatch):
+    # NOT `assert config.BULK_MINT_UI_ENABLED is False`: config's constants are
+    # frozen at import time and bare `load_dotenv()` walks up from CWD, so a
+    # box (or worktree) under a checkout whose .env sets BULK_MINT_UI_ENABLED=1
+    # — prod does since 2026-07-21 — would fail here. Pinning the env var in
+    # the preamble doesn't help either: config is usually already imported by
+    # an alphabetically earlier test module. Exercise the default rule itself.
+    monkeypatch.delenv("BULK_MINT_UI_ENABLED", raising=False)
+    assert config.env_flag("BULK_MINT_UI_ENABLED", config.BULK_MINT_UI_ENABLED_DEFAULT) is False
 
 
 def test_config_endpoint_carries_bulk_fields(monkeypatch):
@@ -49,7 +56,9 @@ def test_config_endpoint_carries_bulk_fields(monkeypatch):
     assert body["bulk_mint_max"] == server.config.BULK_MINT_MAX
 
 
-def test_config_endpoint_bulk_ui_off_by_default():
+def test_config_endpoint_bulk_ui_off_when_flag_off(monkeypatch):
+    # Pinned, not read from the ambient env — see test_flag_defaults_off.
+    monkeypatch.setattr(server.config, "BULK_MINT_UI_ENABLED", False)
     resp = _run(server.handle_config(make_mocked_request("GET", "/api/config")))
     body = json.loads(resp.body)
     assert body["bulk_mint_ui"] is False
