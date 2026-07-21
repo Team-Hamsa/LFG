@@ -75,8 +75,13 @@ def probe_fps(path: str) -> int:
 
 def probe_size(path: str) -> tuple[int, int]:
     out = probe(path, "stream=width,height", ["-select_streams", "v:0"])
-    width, height = out.split(",")[:2]
-    return int(width), int(height)
+    try:
+        width, height = out.split(",")[:2]
+        return int(width), int(height)
+    except ValueError as exc:
+        # A corrupt/streamless file probes empty — surface it as the per-file
+        # RuntimeError the batch loop catches, not a batch-aborting ValueError.
+        raise RuntimeError(f"no readable video stream (ffprobe returned {out!r})") from exc
 
 
 def has_audio(path: str) -> bool:
