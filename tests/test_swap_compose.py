@@ -152,3 +152,62 @@ def test_missing_layers_non_ape_ignores_ape_assets(tmp_path):
     store = layer_store.LocalLayerStore(str(tmp_path / "layers"))
     attrs = _attrs(Body="Straight Dark")
     assert _run(swap_compose.missing_layers(attrs, "male", store)) == []
+
+
+def _have_libvpx_encoder() -> bool:
+    import subprocess
+
+    try:
+        out = subprocess.run(
+            ["ffmpeg", "-hide_banner", "-encoders"], capture_output=True, text=True
+        ).stdout
+    except OSError:
+        return False
+    return "libvpx-vp9" in out
+
+
+def _webm_vp9_alpha(path, size=(8, 8)):
+    """Encode a 1-frame VP9-alpha WebM: top half transparent, bottom half blue."""
+    import subprocess
+
+    frame = os.path.join(os.path.dirname(path), "_frame.png")
+    img = Image.new("RGBA", size, (0, 0, 0, 0))
+    for y in range(size[1] // 2, size[1]):
+        for x in range(size[0]):
+            img.putpixel((x, y), (0, 0, 255, 255))
+    img.save(frame)
+    subprocess.run(
+        [
+            "ffmpeg", "-v", "error", "-y",
+            "-loop", "1", "-i", frame, "-frames:v", "2",
+            "-c:v", "libvpx-vp9", "-pix_fmt", "yuva420p", path,
+        ],
+        check=True,
+    )
+    os.remove(frame)
+
+
+@pytest.mark.skipif(not _have_libvpx_encoder(), reason="ffmpeg lacks libvpx-vp9")
+def test_compose_nft_webm_layer_preserves_alpha(tmp_path):
+    # A VP9-alpha WebM body over a red background: the transparent top half
+    # must show the background through. Regression: ffmpeg's native VP9
+    # decoder drops WebM alpha — _run_ffmpeg must force libvpx-vp9 on .webm
+    # inputs or this composes opaque (black top half).
+    base = tmp_path / "layers" / "male"
+    _png(str(base / "Background" / "Red.png"), color=(255, 0, 0, 255), size=(8, 8))
+    os.makedirs(base / "Body", exist_ok=True)
+    _webm_vp9_alpha(str(base / "Body" / "Straight Diamond.webm"))
+    store = layer_store.LocalLayerStore(str(tmp_path / "layers"))
+
+    attrs = _attrs(Background="Red", Body="Straight Diamond")
+    out_dir = str(tmp_path / "gen")
+    path, is_video = _run(swap_compose.compose_nft(attrs, "male", store, "out", out_dir=out_dir))
+    assert is_video is True and path.endswith(".mp4")
+
+    still = os.path.join(out_dir, "still.png")
+    swap_compose.extract_first_frame(path, still)
+    img = Image.open(still).convert("RGB")
+    top = img.getpixel((4, 1))
+    bottom = img.getpixel((4, 6))
+    assert top[0] > 180 and top[2] < 80, f"transparent region lost alpha: {top}"
+    assert bottom[2] > 180 and bottom[0] < 80, f"opaque region wrong: {bottom}"

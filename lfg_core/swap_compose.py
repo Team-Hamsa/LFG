@@ -131,7 +131,12 @@ async def compose_nft(
 
 
 def _run_ffmpeg(files: list[str], output_path: str, is_video: bool) -> None:
-    inputs = [ffmpeg.input(f) for f in files]
+    inputs = [
+        # ffmpeg's native VP9 decoder silently drops WebM's alpha side-channel;
+        # the libvpx decoder must be forced or a VP9-alpha layer composes opaque.
+        ffmpeg.input(f, vcodec="libvpx-vp9") if f.endswith(".webm") else ffmpeg.input(f)
+        for f in files
+    ]
     stream = inputs[0]
     for inp in inputs[1:]:
         stream = stream.overlay(inp)
@@ -140,7 +145,7 @@ def _run_ffmpeg(files: list[str], output_path: str, is_video: bool) -> None:
     if is_video:
         # Carry audio over from the first video trait that has it.
         for f, inp in zip(files, inputs, strict=False):
-            if f.endswith(".mp4") and _has_audio(f):
+            if f.endswith((".mp4", ".webm")) and _has_audio(f):
                 audio = inp.audio
                 break
     kwargs = {} if is_video else {"vframes": 1, "update": 1}

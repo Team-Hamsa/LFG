@@ -256,14 +256,18 @@ Layer z-order and selection rules are **declarative** in `trait_config.yaml` (ru
 combinations. Parsing/validation/queries live in `lfg_core/trait_config.py`; random selection in
 `lfg_core/traits.py`. A `validate-trait-config` pre-push hook guards the file.
 
-**Animated layers** (`.gif`/`.mp4`, since 2026-07-11 the five Irridescent Body
-values are GIFs): when any layer in a composition isn't `.png`,
+**Animated layers** (`.gif`/`.webm`/`.mp4`, since 2026-07-11 the five Irridescent
+Body values are GIFs; VP9-alpha `.webm` supported since 2026-07-21 — far smaller
+than GIF at 1080, `_run_ffmpeg` forces the libvpx-vp9 decoder on `.webm` inputs
+because ffmpeg's native VP9 decoder silently drops the alpha side-channel; the
+Activity's client-side layer stacking falls back `<img>`→`<video>` per layer):
+when any layer in a composition isn't `.png`,
 `swap_compose.compose_nft` outputs an **MP4** (metadata `image` = PNG
 first-frame thumbnail, animation in the `video` field). Hard requirements —
 **1080×1080** (compose does no scaling; undersized art renders small at the
 top-left) and **alpha preserved** (an opaque GIF paints over every layer below;
 a GIF exported via an MP4 intermediate loses alpha). `layer_store.resolve()`
-checks `.png` before `.gif`, so replacing a static trait means deleting the
+checks `.png` → `.gif` → `.webm` → `.mp4`, so replacing a static trait means deleting the
 PNG (same file stem = same trait value, no config/DB change). Use
 `scripts/make_animated_layer.py` (ffmpeg RGBA frames → lanczos scale → gifski;
 verifies size + per-frame alpha; needs `gifski` on PATH, installed at

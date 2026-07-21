@@ -1750,6 +1750,31 @@ function layerSrc(body, trait, value) {
          `&trait=${encodeURIComponent(trait)}&value=${encodeURIComponent(value)}`;
 }
 
+// WebM layers (VP9-alpha bodies) don't render in <img> — browsers only decode
+// video containers in <video>. The client can't know a layer's format ahead of
+// the fetch (/api/layer resolves the extension server-side), so build an <img>
+// and, on error, retry once as a muted looping <video> in place. Only when the
+// video ALSO errors is the layer genuinely missing — then onMissing fires (the
+// closet/trait tiles use it to prune themselves, exactly like their old
+// img.onerror did).
+function layerMediaEl(src, alt, onMissing) {
+  const img = document.createElement('img');
+  img.src = src;
+  img.alt = alt;
+  img.onerror = () => {
+    const v = document.createElement('video');
+    v.autoplay = true;
+    v.muted = true;
+    v.loop = true;
+    v.playsInline = true;
+    v.setAttribute('aria-label', alt);
+    if (onMissing) v.onerror = onMissing;
+    v.src = src;
+    img.replaceWith(v);
+  };
+  return img;
+}
+
 // A layer request only renders when both body and value are present and the
 // value isn't the literal "None". Freshly-minted / not-yet-indexed tokens have
 // an empty body and/or missing attributes; issuing a layer fetch for those 400s
@@ -1778,10 +1803,7 @@ function renderCanvas(char) {
   for (const slot of order) {
     const value = byType[slot];
     if (!layerComplete(char.body, value)) continue;
-    const img = document.createElement('img');
-    img.src = layerSrc(char.body, slot, value);
-    img.alt = '';
-    canvas.appendChild(img);
+    canvas.appendChild(layerMediaEl(layerSrc(char.body, slot, value), ''));
   }
   el('dressup-id').textContent = `#${char.edition} · ${char.body} · live`;
 }
@@ -1800,26 +1822,29 @@ function renderGoPicker() {
     tile.className = 'go-tile'
       + (t.state === 'active' ? ' active' : '')
       + (t.state === 'indexing' ? ' indexing' : '');
-    const img = document.createElement('img');
-    img.loading = 'lazy';
     const imgSrc = imgUrl(char.image_url, THUMB_W);
     const bodyVal = (char.attributes.find((a) => a.trait_type === 'Body') || {}).value;
+    let media;
     if (imgSrc) {
-      img.src = imgSrc;
+      media = document.createElement('img');
+      media.src = imgSrc;
+      media.alt = t.label;
     } else if (layerComplete(char.body, bodyVal)) {
-      img.src = layerSrc(char.body, 'Body', bodyVal);
+      media = layerMediaEl(layerSrc(char.body, 'Body', bodyVal), t.label);
     } else {
       // No CDN image and incomplete metadata: a layer fetch would 400.
-      img.src = BLANK_IMG;
+      media = document.createElement('img');
+      media.src = BLANK_IMG;
+      media.alt = t.label;
     }
-    img.alt = t.label;
+    media.loading = 'lazy';
     const cap = document.createElement('span');
     cap.className = 'go-tile-label';
     cap.textContent = t.state === 'active' ? `✓ ${t.label}` : t.label;
     const sub = document.createElement('span');
     sub.className = 'go-tile-sub';
     sub.textContent = t.sub;
-    tile.replaceChildren(img, cap, sub);
+    tile.replaceChildren(media, cap, sub);
     if (t.state === 'indexing') {
       tile.disabled = true; // no body -> every layer fetch would 400
     } else {
@@ -2009,16 +2034,20 @@ function renderCloset() {
     // entirely (it reappears on a GO whose body has the art). With no GO
     // selected, keep a blank placeholder so the Closet contents stay visible.
     if (char && !layerComplete(char.body, asset.value)) continue;
-    const img = document.createElement('img');
+    let img;
     if (char) {
-      img.src = layerSrc(char.body, asset.slot, asset.value);
-      // Art missing for this body (layer fetch 404s): drop the whole tile
-      // instead of rendering a broken image.
-      img.onerror = () => item.remove();
+      // Art missing for this body (layer fetch 404s even as video): drop the
+      // whole tile instead of rendering a broken image.
+      img = layerMediaEl(
+        layerSrc(char.body, asset.slot, asset.value),
+        `${asset.slot}: ${asset.value}`,
+        () => item.remove(),
+      );
     } else {
+      img = document.createElement('img');
       img.src = BLANK_IMG;
+      img.alt = `${asset.slot}: ${asset.value}`;
     }
-    img.alt = `${asset.slot}: ${asset.value}`;
     const count = document.createElement('span');
     count.className = 'count';
     count.textContent = `×${asset.count}`;
@@ -2057,14 +2086,18 @@ function renderTraitStrip() {
     if (char && !layerComplete(char.body, t.value)) continue;
     const chip = document.createElement('div');
     chip.className = 'trait-chip';
-    const img = document.createElement('img');
+    let img;
     if (char) {
-      img.src = layerSrc(char.body, t.slot, t.value);
-      img.onerror = () => chip.remove();
+      img = layerMediaEl(
+        layerSrc(char.body, t.slot, t.value),
+        `${t.slot}: ${t.value}`,
+        () => chip.remove(),
+      );
     } else {
+      img = document.createElement('img');
       img.src = BLANK_IMG;
+      img.alt = `${t.slot}: ${t.value}`;
     }
-    img.alt = `${t.slot}: ${t.value}`;
     const label = document.createElement('span');
     label.className = 'trait-chip-label';
     label.textContent = `${t.slot}: ${t.value}`;
