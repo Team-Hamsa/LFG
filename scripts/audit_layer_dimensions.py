@@ -12,22 +12,51 @@
 # diff). It runs as a pre-push hook and is a no-op when layers/ is absent
 # (CI checkouts have no art).
 #
-# GIF/PNG dimensions come from Pillow (header-only read, cheap); MP4 from
-# ffprobe. A file whose dimensions cannot be read at all is reported as a
-# failure too — corrupt art should not slip through as "unscanned".
+# GIF/PNG dimensions come from Pillow with a full per-frame decode (a
+# truncated file can still report header dimensions); MP4 from ffprobe.
+# Unreadable/corrupt files are reported as failures too. Results are cached
+# per (size, mtime) so unchanged art is never re-decoded.
 #
 # Usage:
 #   .venv/bin/python scripts/audit_layer_dimensions.py [--layers-dir DIR] [--skip-png]
 # Exit codes: 0 = clean (or no layers dir), 1 = offenders found.
 
 import argparse
+import json
 import os
 import subprocess
 import sys
+from typing import Any
 
 CANVAS = (1080, 1080)
 ANIMATED_EXTS = {".gif", ".mp4"}
 STATIC_EXTS = {".png"}
+
+# Full-decode validation of the whole tree takes ~2 minutes, so results are
+# cached per file keyed on (size, mtime_ns) — only new/changed art is probed.
+CACHE_VERSION = 1
+
+
+def _load_cache(path: str) -> dict[str, Any]:
+    try:
+        with open(path) as fh:
+            cache = json.load(fh)
+        if cache.get("version") == CACHE_VERSION:
+            files: dict[str, Any] = cache.get("files", {})
+            return files
+    except (OSError, ValueError):
+        pass
+    return {}
+
+
+def _save_cache(path: str, files: dict[str, Any]) -> None:
+    try:
+        tmp = path + ".tmp"
+        with open(tmp, "w") as fh:
+            json.dump({"version": CACHE_VERSION, "files": files}, fh)
+        os.replace(tmp, path)
+    except OSError:
+        pass  # cache is an optimization only — never fail the audit over it
 
 
 def _probe_mp4(path: str) -> tuple[int, int] | None:
@@ -60,11 +89,16 @@ def _probe_mp4(path: str) -> tuple[int, int] | None:
 
 
 def _probe_image(path: str) -> tuple[int, int] | None:
-    from PIL import Image, UnidentifiedImageError
+    from PIL import Image, ImageSequence, UnidentifiedImageError
 
     try:
         with Image.open(path) as im:
-            return im.size
+            size = im.size
+            # Image.open only parses the header — a truncated file can still
+            # report dimensions. Decode every frame so corrupt payloads fail.
+            for frame in ImageSequence.Iterator(im):
+                frame.load()
+            return size
     except (UnidentifiedImageError, OSError):
         return None
 
@@ -76,9 +110,13 @@ def read_dimensions(path: str) -> tuple[int, int] | None:
     return _probe_image(path)
 
 
-def scan(layers_dir: str, include_png: bool = True) -> list[tuple[str, str]]:
+def scan(
+    layers_dir: str, include_png: bool = True, cache_path: str | None = None
+) -> list[tuple[str, str]]:
     """Scan layers_dir; return [(relpath, problem)] for every offender."""
     exts = ANIMATED_EXTS | (STATIC_EXTS if include_png else set())
+    cache = _load_cache(cache_path) if cache_path else {}
+    fresh: dict[str, Any] = {}
     offenders: list[tuple[str, str]] = []
     for root, _dirs, files in os.walk(layers_dir):
         for name in sorted(files):
@@ -87,11 +125,20 @@ def scan(layers_dir: str, include_png: bool = True) -> list[tuple[str, str]]:
                 continue
             path = os.path.join(root, name)
             rel = os.path.relpath(path, layers_dir)
-            dims = read_dimensions(path)
+            st = os.stat(path)
+            stamp = [st.st_size, st.st_mtime_ns]
+            cached = cache.get(rel)
+            if cached and cached.get("stamp") == stamp:
+                dims = tuple(cached["dims"]) if cached["dims"] else None
+            else:
+                dims = read_dimensions(path)
+            fresh[rel] = {"stamp": stamp, "dims": list(dims) if dims else None}
             if dims is None:
                 offenders.append((rel, "unreadable (corrupt or ffprobe/Pillow failure)"))
             elif dims != CANVAS:
                 offenders.append((rel, f"{dims[0]}x{dims[1]} (expected 1080x1080)"))
+    if cache_path:
+        _save_cache(cache_path, fresh)
     return offenders
 
 
@@ -101,6 +148,11 @@ def main() -> int:
         "--layers-dir",
         default=os.environ.get("LAYERS_DIR", "layers"),
         help="layer tree root (default: $LAYERS_DIR or ./layers)",
+    )
+    parser.add_argument(
+        "--cache",
+        default=os.environ.get("LAYER_DIM_CACHE", ".layer_dimensions_cache.json"),
+        help="result cache path (default: .layer_dimensions_cache.json; '' disables)",
     )
     parser.add_argument(
         "--skip-png",
@@ -113,7 +165,7 @@ def main() -> int:
         print(f"audit_layer_dimensions: no layers dir at {args.layers_dir!r} — nothing to scan")
         return 0
 
-    offenders = scan(args.layers_dir, include_png=not args.skip_png)
+    offenders = scan(args.layers_dir, include_png=not args.skip_png, cache_path=args.cache or None)
     if not offenders:
         print(f"audit_layer_dimensions: OK — every layer under {args.layers_dir!r} is 1080x1080")
         return 0

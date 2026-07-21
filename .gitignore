@@ -71,3 +71,6 @@ x_state.db-*
 # Share card renderer (playwright + fonts install, #41 addendum)
 scripts/share_card/node_modules/
 share_cards/
+
+# layer-dimension audit result cache (scripts/audit_layer_dimensions.py)
+.layer_dimensions_cache.json

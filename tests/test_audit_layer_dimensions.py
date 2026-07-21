@@ -57,6 +57,42 @@ def test_corrupt_file_is_flagged(tmp_path):
     assert "unreadable" in offenders[0][1]
 
 
+def test_truncated_but_identifiable_png_is_flagged(tmp_path):
+    layers = tmp_path / "layers"
+    good = layers / "male" / "Body" / "Whole.png"
+    _write_png(str(good), (1080, 1080))
+    data = good.read_bytes()
+    good.unlink()
+    # Keep the header (so Image.open succeeds and reports 1080x1080) but cut
+    # the payload — only a full decode catches this.
+    (layers / "male" / "Body" / "Truncated.png").write_bytes(data[: len(data) // 2])
+    offenders = ald.scan(str(layers))
+    assert len(offenders) == 1
+    assert "unreadable" in offenders[0][1]
+
+
+def test_cache_skips_unchanged_and_detects_changes(tmp_path, monkeypatch):
+    layers = tmp_path / "layers"
+    png = layers / "male" / "Body" / "Straight.png"
+    _write_png(str(png), (1080, 1080))
+    cache = str(tmp_path / "cache.json")
+    assert ald.scan(str(layers), cache_path=cache) == []
+
+    # A cached-clean file must not be re-probed...
+    def boom(_path):
+        raise AssertionError("probed a cached file")
+
+    monkeypatch.setattr(ald, "read_dimensions", boom)
+    assert ald.scan(str(layers), cache_path=cache) == []
+
+    # ...but a modified file must be, and a cached FAILURE must persist.
+    monkeypatch.undo()
+    _write_png(str(png), (600, 600))
+    os.utime(png, ns=(1, 1))  # force a distinct stamp either way
+    assert len(ald.scan(str(layers), cache_path=cache)) == 1
+    assert len(ald.scan(str(layers), cache_path=cache)) == 1
+
+
 def test_non_layer_extensions_ignored(tmp_path):
     layers = tmp_path / "layers"
     os.makedirs(layers)
