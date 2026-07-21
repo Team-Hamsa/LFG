@@ -2119,6 +2119,7 @@ async function openDressup() {
     harvestBtn.hidden = false;
     harvestBtn.onclick = () => harvestActive();
 
+    economyState.characters = economyState.characters.filter((c) => !harvestingIds.has(c.nft_id));
     goAssembleEnabled = true;
     activeNftId = buildPure.pickDefaultCharacter(economyState.characters);
     if (activeNftId) selectCharacter(activeNftId);
@@ -2365,6 +2366,10 @@ function pollEconomyOp(kind, startResp) {
   });
 }
 
+// nft_ids with a harvest in flight (fire-and-forget, spec 2026-07-21). Used to
+// keep a burned-in-progress character out of the selectable set on re-render.
+const harvestingIds = new Set();
+
 async function harvestActive() {
   const char = activeChar();
   if (!char) return;
@@ -2373,22 +2378,53 @@ async function harvestActive() {
     text: `This permanently burns #${char.edition}. Its parts go to your Closet.`,
     confirmLabel: '🔥 Harvest',
   }))) return;
-  status('Harvesting…');
+  let res;
   try {
-    const res = await api('/api/harvest', {
+    res = await api('/api/harvest', {
       method: 'POST', body: JSON.stringify({ nft_id: char.nft_id }),
     });
-    const final = await pollEconomyOp('harvest', res);
-    status('');
-    if (final.state === 'failed') throw new Error(final.error || 'harvest failed');
-    economyState = await api('/api/economy');
-    activeNftId = buildPure.pickDefaultCharacter(economyState.characters);
-    showPanel('dressup-panel');
-    if (activeNftId) selectCharacter(activeNftId);
-    else { renderCloset(); el('dressup-canvas').replaceChildren(); }
   } catch (e) {
     showError(e.message);
+    return;
   }
+  // Fire-and-forget: drop the character from the local roster immediately so
+  // the user can select + harvest the next one; the tracker below reconciles
+  // real state when the op lands. Never navigate the user anywhere.
+  harvestingIds.add(char.nft_id);
+  economyState.characters = economyState.characters.filter((c) => c.nft_id !== char.nft_id);
+  toast(`🔥 Harvesting #${char.edition} — keep playing, this takes a moment.`);
+  if (activeNftId === char.nft_id) {
+    activeNftId = buildPure.pickDefaultCharacter(economyState.characters);
+    if (!el('dressup-panel').hidden) {
+      if (activeNftId) selectCharacter(activeNftId);
+      else { el('dressup-canvas').replaceChildren(); renderCloset(); }
+    }
+  }
+  trackHarvest(char, res);
+}
+
+async function trackHarvest(char, startResp) {
+  const final = await pollEconomyOp('harvest', startResp);
+  harvestingIds.delete(char.nft_id);
+  if (final.state === 'failed') {
+    showError(`Harvest of #${char.edition} failed: ${final.error || 'unknown error'}`);
+  } else {
+    toast(`✅ #${char.edition} harvested — parts added to your Closet.`);
+  }
+  // Reconcile real state silently; re-render ONLY if the Dressing Room is the
+  // visible panel — never yank the user out of another flow (e.g. a mint).
+  try {
+    economyState = await api('/api/economy');
+  } catch (e) {
+    return; // transient; next openDressup() refetches anyway
+  }
+  economyState.characters = economyState.characters.filter((c) => !harvestingIds.has(c.nft_id));
+  if (el('dressup-panel').hidden) return;
+  if (!economyState.characters.find((c) => c.nft_id === activeNftId)) {
+    activeNftId = buildPure.pickDefaultCharacter(economyState.characters);
+  }
+  if (activeNftId) selectCharacter(activeNftId);
+  else { el('dressup-canvas').replaceChildren(); renderCloset(); }
 }
 
 async function openAssemble() {
