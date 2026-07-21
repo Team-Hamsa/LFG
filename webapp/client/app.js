@@ -1852,9 +1852,12 @@ function pollSwap(sessionId) {
 let economyState = null;
 let activeNftId = null;
 
+// thumb=1 serves the pre-generated 512px preview tier (animated layers as
+// GIF, so they render in a plain <img> — Discord's webview can't play
+// WebM/MP4 there). Missing thumbs fall back server-side to the full asset.
 function layerSrc(body, trait, value) {
   return `${API_BASE}/api/layer?body=${encodeURIComponent(body)}` +
-         `&trait=${encodeURIComponent(trait)}&value=${encodeURIComponent(value)}`;
+         `&trait=${encodeURIComponent(trait)}&value=${encodeURIComponent(value)}&thumb=1`;
 }
 
 // A backend trait-layer URL (/api/layer?...) is same-origin art that must NOT

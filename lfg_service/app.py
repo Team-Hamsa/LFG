@@ -49,6 +49,7 @@ from lfg_core import (
     history_store,
     image_archive,
     layer_store,
+    layer_thumbs,
     leaderboard,
     market_flow,
     market_ops,
@@ -989,6 +990,7 @@ def _trait_image_url(cfg: trait_config.TraitConfig, slot: str, value: str) -> st
     return (
         f"/api/layer?body={urlquote(body, safe='')}"
         f"&trait={urlquote(slot, safe='')}&value={urlquote(value, safe='')}"
+        "&thumb=1"
     )
 
 
@@ -5077,6 +5079,15 @@ async def handle_layer(request):
     path = await store.resolve(body, trait, value)
     if not path or not os.path.exists(path):
         return web.json_response({"error": "layer not found"}, status=404)
+    # thumb=1 asks for the pre-generated preview tier (layers/.thumbs/): same
+    # art at 512px, with animated formats re-encoded as GIF so they render in
+    # a plain <img> (WebM/MP4 don't — broken tiles in the shop/Activity). A
+    # missing thumb falls back to the full asset, i.e. exactly today's
+    # behavior, so the param can never introduce a new 404.
+    if request.query.get("thumb") == "1" and isinstance(store, layer_store.LocalLayerStore):
+        thumb = layer_thumbs.thumb_path_for(path, store.base_dir)
+        if thumb and os.path.exists(thumb):
+            path = thumb
     ctype = mimetypes.guess_type(path)[0] or "application/octet-stream"
     return web.FileResponse(
         path, headers={"Content-Type": ctype, "Cache-Control": "public, max-age=86400"}
