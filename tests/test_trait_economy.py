@@ -104,12 +104,13 @@ def test_asset_census_sums_chars_buckets_and_tokens():
     assert census.trait_counts[("Body", "Straight")] == 1
 
 
-def test_asset_census_blank_character_contributes_no_body():
+def test_asset_census_blank_character_contributes_nothing():
     blank = _nft("c", 1, attrs=trait_economy.blank_attributes())
     census = trait_economy.asset_census(characters={1: blank}, closet_assets=[], trait_tokens=[])
-    assert not any(slot == "Body" for slot, _ in census.trait_counts)
-    # But its non-body slots (all "None") ARE counted.
-    assert census.trait_counts[("Background", "None")] == 1
+    # A blank character is not a separate asset holder at all — not for Body,
+    # and not for its (all-"None") non-body slots either. Its 9 slot values
+    # are presumed already relocated to the owner's Closet.
+    assert census.trait_counts == {}
 
 
 def test_verify_conservation_ok_when_census_matches_genesis():

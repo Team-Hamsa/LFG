@@ -291,18 +291,16 @@ def test_extract_then_deposit_conserves_census():
 
 
 def test_harvest_invariance_body_moves_into_closet_census_unchanged():
-    """Harvesting a character (char -> blank, its ("Body", v) moves into the
-    owner's Closet as a loose asset) must leave the total census exactly
-    equal to genesis — Body is supply-neutral just like every other slot.
+    """Harvesting a character (char -> blank, ALL 8 non-body values (incl.
+    any "None") + its ("Body", v) move into the owner's Closet as loose
+    assets) must leave the total census exactly equal to genesis.
 
-    `_char()` builds a character with a real Body value and every non-body
-    slot already "None" (a fresh dress-up character before any traits are
-    equipped). Only the Body slot actually holds a relocatable asset, so
-    harvest only produces one Closet row: the 8 non-body slots stay "None"
-    on the now-blank character exactly as they were before — moving a
-    non-body "None" to the Closet too would double-count it, since "None"
-    is itself the conserved asset the (still-live) blank character already
-    holds for that slot."""
+    A blank character contributes NOTHING to the census (see
+    `asset_census`'s docstring) — it is not a separate asset holder, since
+    harvest is defined as relocating every one of its 9 slot values into the
+    Closet. `_char()` builds a dressed character with a real Body value and
+    every non-body slot "None"; harvest produces 9 Closet rows (8 non-body +
+    Body), and the blank character contributes 0 — so the total is unchanged."""
     dressed = _char(7, body="Straight Blue")
     genesis = te.build_genesis({7: dressed})
 
@@ -311,10 +309,11 @@ def test_harvest_invariance_body_moves_into_closet_census_unchanged():
     assert before.trait_counts == te.genesis_trait_counts_with_bodies(genesis)
     assert te.verify_conservation(genesis, before).ok
 
-    # Harvest: character goes blank; its ("Body", "Straight Blue") moves into
-    # the owner's Closet as a loose asset.
+    # Harvest: character goes blank; ALL 8 non-body values (here, all "None")
+    # plus ("Body", "Straight Blue") move into the owner's Closet.
     blank = _blank(7)
-    closet_assets = [("rOwner", "Body", "Straight Blue", 1)]
+    closet_assets = [("rOwner", s, "None", 1) for s in NON_BODY]
+    closet_assets.append(("rOwner", "Body", "Straight Blue", 1))
     after = te.asset_census(characters={7: blank}, closet_assets=closet_assets, trait_tokens=[])
     assert after.trait_counts == before.trait_counts
     assert te.verify_conservation(genesis, after).ok

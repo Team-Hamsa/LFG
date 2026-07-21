@@ -1,12 +1,14 @@
 # lfg_core/trait_economy.py
 # Pure accounting core for the NFT dress-up trait economy. No I/O.
-# An "asset" is a (slot, value) pair over the 9 TRAIT_ORDER slots. All 9 slots,
-# including Body, are pooled and counted by (slot, value) in the census — a
-# dressed (non-blank) character contributes its ("Body", value); a blank
-# character contributes nothing for Body (its body has moved to a Closet
-# ("Body", value) asset). For the 8 non-body slots, "None" is itself a real,
-# conserved asset; the Body slot is the one exception — ("Body", "None") is
-# never counted, since no genesis edition was ever bodyless.
+# An "asset" is a (slot, value) pair over the 9 TRAIT_ORDER slots, including
+# Body. In the census, a dressed (non-blank) character contributes all 9 of
+# its own slot values (8 non-body incl. "None", plus Body); a BLANK character
+# contributes nothing at all — harvest is defined as moving every one of its
+# 9 slot values into the owner's Closet as loose assets, so the blank
+# character is not itself a separate asset holder. For non-body slots, "None"
+# is itself a real, conserved asset; Body has no "None" state to conserve
+# (no genesis edition was ever bodyless), which is why a blank character's
+# Body contributes nothing rather than ("Body", "None").
 
 from __future__ import annotations
 
@@ -130,17 +132,20 @@ def asset_census(
     trait_tokens: list[tuple[str, str, str, str]],
 ) -> Census:
     """Tally every asset across live characters, Closets and standalone trait
-    tokens. Body is a first-class (slot, value) asset like any other: a
-    dressed (non-blank) character contributes its ("Body", value); a blank
-    character contributes NOTHING for Body (its Body slot reads "None", but
-    ("Body", "None") is never a real asset — the Body slot is excluded from
-    the "None is conserved" rule that applies to every other slot)."""
+    tokens. A dressed (non-blank) character contributes all 9 slots — its 8
+    non-body (slot, value) pairs (including any "None") plus its
+    ("Body", value). A BLANK character contributes NOTHING AT ALL: harvest
+    moves every one of its 9 slot values (all 8 non-body values, whatever
+    they were, plus the body) into the owner's Closet as loose assets, so the
+    blank character itself is not a separate asset holder — counting it too
+    would double-count exactly what the Closet now holds."""
     trait_counts: Counter[tuple[str, str]] = Counter()
     for _edition, rec in characters.items():
+        if is_blank(rec):
+            continue
         for slot in NON_BODY_SLOTS:
             trait_counts[(slot, slot_value(rec, slot))] += 1
-        if not is_blank(rec):
-            trait_counts[("Body", slot_value(rec, "Body"))] += 1
+        trait_counts[("Body", slot_value(rec, "Body"))] += 1
     for _owner, slot, value, count in closet_assets:
         trait_counts[(slot, value)] += count
     for _nft_id, _owner, slot, value in trait_tokens:
