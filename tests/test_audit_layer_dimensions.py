@@ -65,8 +65,9 @@ def test_non_layer_extensions_ignored(tmp_path):
 
 
 @pytest.mark.skipif(
-    subprocess.run(["which", "ffprobe"], capture_output=True).returncode != 0,
-    reason="ffprobe not on PATH",
+    subprocess.run(["which", "ffprobe"], capture_output=True).returncode != 0
+    or subprocess.run(["which", "ffmpeg"], capture_output=True).returncode != 0,
+    reason="ffprobe or ffmpeg not on PATH",
 )
 def test_undersized_mp4_is_flagged(tmp_path):
     layers = tmp_path / "layers"
