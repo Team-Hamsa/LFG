@@ -48,6 +48,24 @@ def slot_value(rec: OnchainNft, slot: str) -> str:
     return swap_meta.get_attr(rec.attributes, slot) or "None"
 
 
+def blank_attributes() -> list[dict[str, str]]:
+    """The canonical attribute list of a BLANK character: every TRAIT_ORDER
+    slot (including Body) explicitly "None"."""
+    return [{"trait_type": s, "value": "None"} for s in swap_meta.TRAIT_ORDER]
+
+
+def is_blank(rec: OnchainNft) -> bool:
+    """A character is blank iff every slot (including Body) reads "None"."""
+    return all(
+        (swap_meta.get_attr(rec.attributes, s) or "None") == "None" for s in swap_meta.TRAIT_ORDER
+    )
+
+
+def body_class_map(genesis: Genesis) -> dict[str, str]:
+    """body value -> layer-dir class, derived from the frozen genesis."""
+    return dict(genesis.edition_bodies.values())
+
+
 def dedupe_editions(
     records: list[OnchainNft], max_edition: int
 ) -> tuple[dict[int, OnchainNft], dict[str, Any]]:
