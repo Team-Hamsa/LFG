@@ -151,7 +151,9 @@ def test_migrate_owner_mixed_known_and_unknown_editions():
     assert len(sync.calls) == 1
     called_assets, called_bodies = sync.calls[0]
     assert called_assets == [("Body", "Milady", 1)]
-    assert called_bodies == []
+    # Unknown editions must ride onto the token's bodies list so they stay
+    # on-chain until they can be resolved (not silently dropped).
+    assert called_bodies == [999]
 
 
 def test_migrate_owner_two_known_editions_same_body_merge_count():

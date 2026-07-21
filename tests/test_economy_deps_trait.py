@@ -157,3 +157,19 @@ def test_build_economy_deps_without_owner_leaves_account_unset():
     d = deps.build_economy_deps(conn)
     assert callable(d.closet_accept_fn)
     assert callable(d.char_accept_fn)
+
+
+def test_blank_meta_returns_none_when_image_url_unset(monkeypatch):
+    """_blank_meta must fail safe (return None) rather than upload metadata with
+    an empty image when BLANK_IMAGE_URL is unset."""
+    import _economy_deps as deps
+
+    from lfg_core import config
+
+    monkeypatch.setattr(config, "BLANK_IMAGE_URL", "")
+
+    async def _fail_upload(*a, **k):
+        raise AssertionError("upload must not be called when BLANK_IMAGE_URL is unset")
+
+    monkeypatch.setattr(deps, "_upload", _fail_upload)
+    assert _run(deps._blank_meta(2297)) is None

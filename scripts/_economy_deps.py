@@ -5,6 +5,7 @@ and remain unit-testable with fakes. (scripts/ is excluded from mypy --strict.)"
 from __future__ import annotations
 
 import json
+import logging
 import os
 import sqlite3
 import uuid
@@ -118,8 +119,14 @@ async def _blank_meta(edition: int) -> str | None:
     """Build + upload BLANK-character metadata for `edition` and return its URL.
     Same envelope as `_compose_char` but with the fixed silhouette image and
     trait_economy.blank_attributes() (every slot "None") — no layer compose.
-    Returns None on upload failure so the harvest flow fails safe."""
+    Returns None on upload failure — or if BLANK_IMAGE_URL is unset (uploading
+    metadata with an empty image would strand the character) — so the harvest
+    flow fails safe."""
     from lfg_core import trait_economy as te
+
+    if not config.BLANK_IMAGE_URL:
+        logging.warning("BLANK_IMAGE_URL unset — upload blank art first")
+        return None
 
     season = swap_meta.season_for_number(edition)
     meta: dict[str, Any] = {

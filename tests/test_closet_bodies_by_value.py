@@ -55,9 +55,31 @@ def test_parse_closet_metadata_without_genesis_returns_legacy_editions_unconvert
     assert legacy_editions == [3]
 
 
-def test_parse_closet_metadata_unknown_edition_dropped_not_crashed():
+def test_parse_closet_metadata_unknown_edition_retained_not_dropped():
+    # An edition not in the genesis must survive in legacy_editions — the token
+    # is authoritative, so dropping it would lose the body on a listener rebuild.
     legacy_meta = {"lfg_closet": {"assets": [], "bodies": [999]}}
     genesis = te.Genesis(trait_counts={}, edition_bodies={})
     assets, legacy_editions = bt.parse_closet_metadata(legacy_meta, genesis=genesis)
     assert assets == []
-    assert legacy_editions == []
+    assert legacy_editions == [999]
+
+
+def test_parse_closet_metadata_mixed_known_and_unknown_editions():
+    legacy_meta = {"lfg_closet": {"assets": [], "bodies": [3, 999, 7]}}
+    genesis = te.Genesis(
+        trait_counts={},
+        edition_bodies={3: ("Milady", "milady"), 7: ("Skeleton", "skeleton")},
+    )
+    assets, legacy_editions = bt.parse_closet_metadata(legacy_meta, genesis=genesis)
+    assert ("Body", "Milady", 1) in assets
+    assert ("Body", "Skeleton", 1) in assets
+    # Only the unknown edition remains unresolved.
+    assert legacy_editions == [999]
+
+
+def test_build_closet_metadata_carries_unresolved_legacy_editions():
+    # When unknown editions are passed as bodies, they must be written to the
+    # token so they stay on the authoritative on-chain record.
+    meta = bt.build_closet_metadata("rUser", [("Head", "None", 1)], [999, 42])
+    assert meta["lfg_closet"]["bodies"] == [42, 999]

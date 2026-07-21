@@ -21,7 +21,7 @@ Two user-reported problems with the current Harvest/Assemble economy:
 
 ## Decisions (user-confirmed)
 
-- **Fully blank:** Harvest strips **all 8 slots including Body** into the
+- **Fully blank:** Harvest strips **all 9 slots: 8 non-body traits plus Body** into the
   Closet. The harvested NFT stays in the wallet as a *blank* — a shared
   silhouette image, metadata attributes all `None`. Bodies become loose
   Closet assets; consequently **any body can be assembled onto any blank**
@@ -35,7 +35,7 @@ Two user-reported problems with the current Harvest/Assemble economy:
   with the same edition number** and offered back (one accept). After that
   the NFT is modify-in-place forever. No character is excluded.
 - **Assemble = dress one of YOUR blanks.** The user picks a blank NFT they
-  own, a body from their Closet, and a full 7-slot trait set; one
+  own, a body from their Closet, and a full 8-slot trait set; one
   `NFTokenModify` dresses it in place. No mint, no offer, no accept. This
   also resolves problem 1: the "which one" choice is literally "which of my
   blanks", plus a full trait builder (Phase B).
@@ -82,14 +82,14 @@ apply unchanged.
 ### Assemble
 
 - Inputs: `nft_id` (a blank the caller owns), `body` (a Closet body asset),
-  `chosen` (all 7 non-body slots from Closet assets).
+  `chosen` (all 8 non-body slots from Closet assets).
 - Validation (`can_assemble` rework): caller owns `nft_id`; the NFT is
   mutable and blank; Closet holds the body and every chosen asset
   (count ≥ need); every value passes the same `resolve_layer` body-affinity
   gate `start_assemble` uses today. Edition-death and `edition_bodies`
   checks are removed.
 - Execution: compose image (existing `swap_compose`) → upload image +
-  metadata → `NFTokenModify` URI → debit Closet (body + 7 assets) →
+  metadata → `NFTokenModify` URI → debit Closet (body + 8 assets) →
   DB mirror. Supply-neutral, no `supply_changes` rows.
 
 ### Closet / bodies accounting

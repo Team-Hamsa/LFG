@@ -17,10 +17,12 @@ For each owner with rows in `closet_bodies`:
      existing `closet_assets`.
   3. Unknown editions (not present in the effective genesis — should not
      normally happen) are logged as a warning and LEFT IN `closet_bodies`
-     untouched; they are never silently dropped.
-  4. Chain-first: the Closet NFToken is synced (new merged assets, bodies=[])
-     via `sync_fn` BEFORE the DB rows are rewritten. Only after a successful
-     sync does `economy_store.set_closet_contents` persist the new mirror.
+     untouched AND kept on the Closet token's `bodies` list; they are never
+     silently dropped from either the DB or the authoritative on-chain record.
+  4. Chain-first: the Closet NFToken is synced (new merged assets + the unknown
+     editions as `bodies`) via `sync_fn` BEFORE the DB rows are rewritten. Only
+     after a successful sync does `economy_store.set_closet_contents` persist
+     the new mirror.
 
 Usage:
   python scripts/migrate_closet_bodies_to_values.py --network testnet [--owner rXXX]
@@ -115,12 +117,16 @@ async def migrate_owner(
 
     new_assets: list[ct.Asset] = [(slot, value, count) for (slot, value), count in merged.items()]
 
-    # Chain-first: sync the token with the merged contents (bodies=[]) BEFORE
-    # rewriting the DB rows.
-    await sync_fn(conn, owner, new_assets, [])
+    # Chain-first: sync the token with the merged contents BEFORE rewriting the
+    # DB rows. Any UNKNOWN editions (not resolvable via genesis) stay on the
+    # token's `bodies` list so they remain on-chain until they can be resolved —
+    # writing bodies=[] here would drop them from the authoritative record and a
+    # later listener rebuild would lose them permanently.
+    unknown_sorted = sorted(unknown_editions)
+    await sync_fn(conn, owner, new_assets, unknown_sorted)
 
     # Now persist the mirror: new merged assets, remaining (unknown) bodies only.
-    es.set_closet_contents(conn, owner, new_assets, unknown_editions)
+    es.set_closet_contents(conn, owner, new_assets, unknown_sorted)
 
     return {
         "owner": owner,

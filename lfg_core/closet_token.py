@@ -74,9 +74,11 @@ def build_closet_metadata(owner: str, assets: list[Asset], bodies: list[int]) ->
     state always produces byte-identical metadata.
 
     Schema v2: bodies are ordinary `slot="Body"` rows inside `assets` (keyed by
-    body VALUE, e.g. "Milady", not by edition number) — `"bodies"` is always
-    written empty. The `bodies` parameter is kept for signature stability
-    (every caller passes `[]`) but its contents are never written."""
+    body VALUE, e.g. "Milady", not by edition number), so `"bodies"` is normally
+    written empty. It carries integer editions only when a caller explicitly
+    passes UNRESOLVED legacy editions (ones not yet convertible via the frozen
+    genesis) — those must stay on the authoritative token until resolvable
+    rather than be dropped."""
     return {
         "schema": config.NFT_SCHEMA_URL,
         "name": f"LFG Closet — {owner}",
@@ -88,7 +90,7 @@ def build_closet_metadata(owner: str, assets: list[Asset], bodies: list[int]) ->
                 {"slot": slot, "value": value, "count": count}
                 for slot, value, count in sorted(assets)
             ],
-            "bodies": [],
+            "bodies": sorted(b for b in bodies if isinstance(b, int)),
         },
     }
 
@@ -103,11 +105,13 @@ def parse_closet_metadata(
     to lfg_bucket.
 
     Schema v2: `"bodies"` may still hold legacy integer editions from a
-    pre-migration token. When `genesis` is given, each legacy edition is
-    resolved via `genesis.edition_bodies` (unknown editions are dropped, not
-    raised) into a `("Body", value, count)` asset row and the returned
-    `legacy_editions` list is empty. Without a genesis, legacy editions are
-    returned unconverted so a caller can decide how to handle them."""
+    pre-migration token. When `genesis` is given, each KNOWN legacy edition is
+    resolved via `genesis.edition_bodies` into a `("Body", value, count)` asset
+    row; editions NOT in the genesis are UNRESOLVED and returned in
+    `legacy_editions` (never dropped — the token is authoritative, so a
+    listener rebuild that discarded them would permanently lose those bodies).
+    Without a genesis, all legacy editions are returned unconverted so a caller
+    can decide how to handle them."""
     block = meta.get("lfg_closet")
     if not isinstance(block, dict):
         block = meta.get("lfg_bucket")  # backward compat: old Bucket tokens
@@ -130,12 +134,16 @@ def parse_closet_metadata(
         from collections import Counter
 
         body_counts: Counter[str] = Counter()
+        unresolved: list[int] = []
         for edition in legacy_editions:
             pair = genesis.edition_bodies.get(edition)
             if pair:
                 body_counts[pair[0]] += 1
+            else:
+                unresolved.append(edition)
         assets += [("Body", value, count) for value, count in sorted(body_counts.items())]
-        legacy_editions = []
+        # Keep UNKNOWN editions on-record so a listener rebuild doesn't lose them.
+        legacy_editions = sorted(unresolved)
     return assets, legacy_editions
 
 

@@ -68,6 +68,7 @@ class _Fakes:
         fail_char_modify: bool = False,
         fail_char_burn: bool = False,
         fail_char_mint: bool = False,
+        fail_char_offer: bool = False,
         fail_blank_meta: bool = False,
     ) -> None:
         self.burns: list[tuple[str, str]] = []
@@ -81,6 +82,7 @@ class _Fakes:
         self.fail_char_modify = fail_char_modify
         self.fail_char_burn = fail_char_burn
         self.fail_char_mint = fail_char_mint
+        self.fail_char_offer = fail_char_offer
         self.fail_blank_meta = fail_blank_meta
         self.uploads = 0
         # nft_ids that exist_fn should report as on-ledger; everything else is stale.
@@ -139,7 +141,7 @@ class _Fakes:
 
     async def char_offer(self, nft_id, owner):
         self.offers.append((nft_id, owner))
-        return "O"
+        return None if self.fail_char_offer else "O"
 
     async def char_accept(self, offer_id):
         return {"xumm_url": "x"}
@@ -255,6 +257,29 @@ def test_harvest_legacy_burns_reminits_and_credits_closet(tmp_path):
     # net zero across the pair, per key
     for key, delta in changes[0]["trait_deltas"].items():
         assert changes[1]["trait_deltas"][key] == -delta
+
+
+def test_harvest_legacy_offer_fails_credits_closet_pending_offer(tmp_path):
+    # Remint succeeds but the delivery offer creation fails: the Closet is still
+    # credited (parts belong to the owner), the session stays DONE, but the
+    # journal is complete_pending_offer and carries new_nft_id so an admin can
+    # locate and re-offer the stranded blank.
+    conn, f = _conn_with_genesis(), _Fakes(fail_char_offer=True)
+    es.set_closet_token(conn, "rUser", "CLOSET0", "00", status=ct.ACTIVE, offer_id=None)
+    session = ef.HarvestSession(owner="rUser", character=_char(mutable=False), burnable=True)
+    _run(ef.run_harvest(session, _deps(conn, f, tmp_path)))
+
+    assert session.state == ef.DONE
+    assert session.new_nft_id == "NEWCHAR"
+    assert session.accept is None
+    # Closet was still credited with all the harvested parts.
+    assets = _all_slot_assets(conn)
+    assert all(assets[(s, "None")] == 1 for s in NON_BODY)
+    assert assets[("Body", "Straight Blue")] == 1
+
+    record = json.loads((tmp_path / f"harvest-{session.id}.json").read_text())
+    assert record["status"] == "complete_pending_offer"
+    assert record["new_nft_id"] == "NEWCHAR"
 
 
 def test_harvest_legacy_remint_fails_after_burn(tmp_path):

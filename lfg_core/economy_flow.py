@@ -50,7 +50,14 @@
 #                                 -1 supply_changes row written     nets zero once reminted
 #   reminted                      legacy path: blank remint +      none (in-flight) — offer/
 #                                 +1 supply_changes row written,    accept surfaced to the user
-#                                 delivery offer attempted
+#                                 delivery offer created
+#   reminted_no_offer             legacy path: remint OK but the   admin: re-offer the blank
+#                                 delivery offer FAILED; Closet     (record has new_nft_id);
+#                                 still credited (parts are the     the harvested assets are
+#                                 owner's)                          already safe in the Closet
+#   complete_pending_offer        harvest done + Closet credited,  admin: re-offer the reminted
+#                                 but the legacy blank was never    blank so the owner can claim it
+#                                 delivered (see reminted_no_offer)
 #   burned_no_remint               legacy path: burn committed,    admin: remint the edition as a
 #                                 remint failed                    blank (journal has the -1 row)
 #   failed_modify                 mutable path: NFTokenModify to   none (nothing changed)
@@ -372,6 +379,7 @@ async def run_harvest(session: HarvestSession, deps: EconomyDeps) -> None:
     then credit the Closet. Supply-neutral; the legacy pair is journaled as
     -1/+1 for audit clarity."""
     conn, rec, owner = deps.conn, session.character, session.owner
+    legacy_offer_failed = False
     try:
         stale = _mirror_pending_error(deps, owner)
         if stale:
@@ -449,8 +457,32 @@ async def run_harvest(session: HarvestSession, deps: EconomyDeps) -> None:
                 reason=f"legacy harvest upgrade {session.id}",
             )
             offer_id = await deps.char_offer_fn(new_id, owner)
-            session.accept = await deps.char_accept_fn(offer_id) if offer_id else None
-            _write_record(deps.records_dir, "harvest", session.id, session._record("reminted"))
+            if offer_id:
+                session.accept = await deps.char_accept_fn(offer_id)
+                _write_record(deps.records_dir, "harvest", session.id, session._record("reminted"))
+            else:
+                # Remint succeeded but the delivery offer could not be created:
+                # the blank is stranded in the issuer wallet with nothing
+                # claimable. The harvested parts still belong to the owner, so
+                # we credit the Closet, but journal a DISTINCT checkpoint (with
+                # new_nft_id) BEFORE the credit and finish `complete_pending_offer`
+                # so an admin can locate and re-offer the blank.
+                session.accept = None
+                legacy_offer_failed = True
+                logging.warning(
+                    "Harvest %s: blank remint %s succeeded but offer creation "
+                    "failed — the reminted blank for edition %s is stranded in the "
+                    "issuer wallet; admin must re-offer it",
+                    session.id,
+                    new_id,
+                    session.edition,
+                )
+                _write_record(
+                    deps.records_dir,
+                    "harvest",
+                    session.id,
+                    session._record("reminted_no_offer"),
+                )
 
         # The character is blank on-chain from this point regardless of how the
         # Closet deposit below goes — take its traits out of the rarity
@@ -518,7 +550,8 @@ async def run_harvest(session: HarvestSession, deps: EconomyDeps) -> None:
             return
 
         session.state = DONE
-        _write_record(deps.records_dir, "harvest", session.id, session._record("complete"))
+        final_status = "complete_pending_offer" if legacy_offer_failed else "complete"
+        _write_record(deps.records_dir, "harvest", session.id, session._record(final_status))
     except Exception as e:
         logging.error(f"Harvest {session.id} failed: {traceback.format_exc()}")
         session.fail(str(e))

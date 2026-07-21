@@ -39,9 +39,17 @@ def test_is_blank_false_when_any_slot_set():
     assert not te.is_blank(_rec(attrs))
 
 
-def test_is_blank_true_for_missing_attrs():
-    # Absent slots read as "None" (slot_value semantics).
-    assert te.is_blank(_rec([]))
+def test_is_blank_false_for_missing_attrs():
+    # Empty/unparsed attributes are NOT blank: is_blank requires every slot to
+    # be EXPLICITLY present with "None" so a metadata-parse failure can't be
+    # mistaken for a dressable blank (which Assemble would overwrite).
+    assert not te.is_blank(_rec([]))
+
+
+def test_is_blank_false_when_one_slot_missing():
+    # A blank set with a single slot dropped is not blank.
+    attrs = [a for a in te.blank_attributes() if a["trait_type"] != "Accessory"]
+    assert not te.is_blank(_rec(attrs))
 
 
 def test_body_class_map_from_genesis():

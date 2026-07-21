@@ -58,10 +58,15 @@ def blank_attributes() -> list[dict[str, str]]:
 
 
 def is_blank(rec: OnchainNft) -> bool:
-    """A character is blank iff every slot (including Body) reads "None"."""
-    return all(
-        (swap_meta.get_attr(rec.attributes, s) or "None") == "None" for s in swap_meta.TRAIT_ORDER
-    )
+    """A character is blank iff EVERY TRAIT_ORDER slot (including Body) is
+    EXPLICITLY present with value "None". Our blank metadata always writes all 9
+    slots (`blank_attributes()`), so a genuine blank satisfies this. A record
+    with a missing slot, or with empty/unparsed `attributes` (e.g. metadata that
+    failed to parse), is NOT treated as blank — otherwise Assemble could
+    overwrite a real (but unreadable) character's traits. Note the census
+    consequence: an unreadable char now counts as dressed with all-None slots,
+    which matches pre-blank-model census behavior for unreadable tokens."""
+    return all(swap_meta.get_attr(rec.attributes, s) == "None" for s in swap_meta.TRAIT_ORDER)
 
 
 def body_class_map(genesis: Genesis) -> dict[str, str]:
