@@ -167,6 +167,9 @@ class BulkMintJob:
             return_url=self.return_url,
             user_token=self.push_user_token,
             platform=memos.platform_for_surface(self.platform),
+            # Sender-verified on-ledger (see MintSession.prepare_payment):
+            # only this wallet may sign, or the payment is unclaimable.
+            account=self.wallet_address,
         )
         if payload:
             self.payment_link = payload["xumm_url"]

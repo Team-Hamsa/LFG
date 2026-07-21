@@ -124,6 +124,9 @@ def test_regenerate_payment_builds_fresh_payload(monkeypatch):
     # session's real originating surface.
     assert captured["action"] == memos.ACTION_TRAIT_SWAP_FEE
     assert captured["platform"] == memos.platform_for_surface("discord")
+    # Only the session's own wallet may sign the fee — the on-ledger wait is
+    # sender-verified, so a payment from any other account is money lost.
+    assert captured["account"] == "rTest"
 
 
 def test_regenerate_payment_keeps_old_link_on_failure(monkeypatch):

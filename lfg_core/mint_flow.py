@@ -171,6 +171,10 @@ class MintSession:
             return_url=self.return_url,
             user_token=self.push_user_token,
             platform=memos.platform_for_surface(self.platform),
+            # The payment wait below is sender-verified against this wallet;
+            # pin the payload to it so Xaman cannot sign from another account
+            # (whose payment would land, unmatched, and be lost).
+            account=self.wallet_address,
         )
         if payload:
             self.payment_link = payload["xumm_url"]

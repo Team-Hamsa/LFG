@@ -328,6 +328,7 @@ async def create_payment_payload(
     platform: str = memos.PLATFORM_BACKEND,
     action: str = memos.ACTION_PAYMENT,
     campaign: str | None = None,
+    account: str | None = None,
 ) -> dict[str, Any] | None:
     """XUMM sign-request payload for a token Payment. This is what payment
     QRs must encode: Xaman only understands its own payload links
@@ -338,17 +339,28 @@ async def create_payment_payload(
     ``user_token`` (issue #135) push-delivers the request to a known user.
     ``platform``/``action`` populate the provenance memo (#54); this payload is
     user-signed, so the initiator is always ``user``. Pass a specific ``action``
-    (e.g. the mint fee vs. ``trait-swap-fee``) to distinguish payment flows."""
+    (e.g. the mint fee vs. ``trait-swap-fee``) to distinguish payment flows.
+
+    ``account`` pins the payer. Every flow that builds a payment then waits for
+    it on-ledger verifies the SENDER (`xrpl_ops.wait_for_payment`), so a payload
+    Xaman lets any selected account sign is a money trap: the wrong wallet's
+    funds move, no wait ever matches them, and the user gets nothing (mainnet
+    2026-07-21 — 2 LFGO paid from a second Xaman account). With Account set,
+    Xaman refuses to sign from anything else. Optional only for callers that
+    genuinely have no expected payer."""
     if expire_minutes is None:
         # Match the on-ledger payment wait so the sign request and the
         # subscription expire together.
         expire_minutes = max(1, -(-config.PAYMENT_TIMEOUT_SECONDS // 60))
+    txjson: dict[str, Any] = {
+        "TransactionType": "Payment",
+        "Destination": destination,
+        "Amount": _payment_amount(value, currency, issuer),
+    }
+    if account:
+        txjson["Account"] = account
     return await _create_xumm_payload(
-        {
-            "TransactionType": "Payment",
-            "Destination": destination,
-            "Amount": _payment_amount(value, currency, issuer),
-        },
+        txjson,
         options=_with_return_url({"expire": expire_minutes}, return_url),
         user_token=user_token,
         memos_json=memos.build_memos_json(memos.INITIATOR_USER, platform, action, campaign),

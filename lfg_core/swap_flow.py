@@ -161,6 +161,8 @@ class SwapSession:
             user_token=self.push_user_token,
             platform=memos.platform_for_surface(self.platform),
             action=memos.ACTION_TRAIT_SWAP_FEE,
+            # Sender-verified on-ledger: only this wallet may sign the fee.
+            account=self.wallet_address,
         )
         if payload:
             self.payment_link = payload["xumm_url"]
