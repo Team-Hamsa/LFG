@@ -132,21 +132,28 @@ class MockEconomy:
         # Already active — idempotent.
         return {"status": _CLOSET_ACTIVE, "nft_id": rec["nft_id"], "accept": None}
 
-    def equip(self, owner: str, nft_id: str, slot: str, value: str) -> dict[str, Any]:
+    def equip(self, owner: str, nft_id: str, changes: list[tuple[str, str]]) -> dict[str, Any]:
         char = self._char(nft_id)
-        attr = next(a for a in char["attributes"] if a["trait_type"] == slot)
-        displaced = attr["value"]
-        if self.assets.get((slot, value), 0) <= 0:
-            return {
-                "id": "mock",
-                "state": "failed",
-                "error": "asset not in closet",
-                "displaced": None,
-            }
-        attr["value"] = value
-        self.assets[(slot, value)] -= 1
-        if displaced != "None":
-            self.assets[(slot, displaced)] = self.assets.get((slot, displaced), 0) + 1
+        # Validate the whole batch against a working copy before mutating, so a
+        # partial apply is impossible (mirrors run_equip's precheck).
+        working = dict(self.assets)
+        displaced: list[dict[str, str]] = []
+        for slot, value in changes:
+            if working.get((slot, value), 0) <= 0:
+                return {
+                    "id": "mock",
+                    "state": "failed",
+                    "error": "asset not in closet",
+                    "displaced": [],
+                }
+            was = next(a["value"] for a in char["attributes"] if a["trait_type"] == slot)
+            displaced.append({"slot": slot, "value": was})
+            working[(slot, value)] = working.get((slot, value), 0) - 1
+            if was != "None":
+                working[(slot, was)] = working.get((slot, was), 0) + 1
+        for slot, value in changes:
+            next(a for a in char["attributes"] if a["trait_type"] == slot)["value"] = value
+        self.assets = working
         return {"id": "mock", "state": "done", "error": None, "displaced": displaced}
 
     def harvest(self, owner: str, nft_id: str) -> dict[str, Any]:

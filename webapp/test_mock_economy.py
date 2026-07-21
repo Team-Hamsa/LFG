@@ -21,8 +21,9 @@ def test_equip_swaps_and_returns_displaced():
     char = m.read_state(owner)["characters"][0]
     asset = m.read_state(owner)["closet"]["assets"][0]
     old = next(a["value"] for a in char["attributes"] if a["trait_type"] == asset["slot"])
-    res = m.equip(owner, char["nft_id"], asset["slot"], asset["value"])
-    assert res["state"] == "done" and res["displaced"] == old
+    res = m.equip(owner, char["nft_id"], [(asset["slot"], asset["value"])])
+    assert res["state"] == "done"
+    assert res["displaced"] == [{"slot": asset["slot"], "value": old}]
     # incoming now on the character; displaced now in the bucket
     char2 = m.read_state(owner)["characters"][0]
     assert any(

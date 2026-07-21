@@ -1927,9 +1927,10 @@ def test_equip_missing_body_field_returns_400(monkeypatch):
     # Force non-dev mode so the real start_coro path is exercised.
     monkeypatch.setattr(server.config, "WEBAPP_DEV_MODE", False)
 
-    # The lambda for handle_equip_start accesses b["nft_id"], b["slot"], b["value"].
-    # Sending an empty body dict will raise KeyError on b["nft_id"] before any
-    # DB/network call, so no other stubs are needed.
+    # The lambda for handle_equip_start accesses b["nft_id"] then normalizes
+    # b["changes"]/b["slot"]/b["value"] via normalize_equip_changes. Sending an
+    # empty body dict raises KeyError on b["nft_id"] before any DB/network
+    # call, so no other stubs are needed.
     req = make_mocked_request("POST", "/api/equip")
     req["user"] = {"id": "u1", "name": "test"}
     req["wallet"] = "rOwner"
@@ -1946,3 +1947,42 @@ def test_equip_missing_body_field_returns_400(monkeypatch):
 
     body = json.loads(resp.body)
     assert "missing or invalid field" in body.get("error", "")
+
+
+@pytest.mark.filterwarnings("ignore::aiohttp.web_exceptions.NotAppKeyWarning")
+def test_equip_accepts_batch_and_legacy_shapes(monkeypatch):
+    """Both the new {changes:[...]} body and the legacy {slot, value} body reach
+    start_equip as a normalized list of (slot, value) pairs."""
+    from aiohttp.test_utils import make_mocked_request
+
+    monkeypatch.setattr(server.config, "WEBAPP_DEV_MODE", False)
+    seen = []
+
+    async def fake_start_equip(uid, wallet, nft_id, changes, user_token=None):
+        seen.append(changes)
+        raise server.economy_api.EconomyError("stop here")
+
+    monkeypatch.setattr(server.economy_api, "start_equip", fake_start_equip)
+
+    def call(body):
+        req = make_mocked_request("POST", "/api/equip")
+        req["user"] = {"id": "u1", "name": "test"}
+        req["wallet"] = "rOwner"
+
+        async def _json():
+            return body
+
+        req.json = _json  # type: ignore[method-assign]
+        return asyncio.get_event_loop().run_until_complete(server.handle_equip_start(req))
+
+    assert call({"nft_id": "N", "slot": "Head", "value": "Crown"}).status == 400
+    assert (
+        call(
+            {
+                "nft_id": "N",
+                "changes": [{"slot": "Head", "value": "Crown"}, {"slot": "Eyes", "value": "Laser"}],
+            }
+        ).status
+        == 400
+    )
+    assert seen == [[("Head", "Crown")], [("Head", "Crown"), ("Eyes", "Laser")]]

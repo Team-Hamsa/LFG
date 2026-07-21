@@ -101,13 +101,12 @@ def test_read_economy_state_excludes_other_owners():
 
 
 def test_equip_session_dict():
-    s = economy_flow.EquipSession(
-        owner="rOwner", character=_char(), slot="Head", incoming_value="Halo"
-    )
+    s = economy_flow.EquipSession(owner="rOwner", character=_char(), changes=[("Head", "Halo")])
     s.state = economy_flow.DONE
-    s.displaced_value = "Crown"
+    s.displaced = {"Head": "Crown"}
     d = economy_api.economy_session_dict("equip", s)
-    assert d["state"] == "done" and d["displaced"] == "Crown" and d["error"] is None
+    assert d["state"] == "done" and d["error"] is None
+    assert d["displaced"] == [{"slot": "Head", "value": "Crown"}]
 
 
 def test_assemble_session_dict_surfaces_accept_link():
@@ -133,14 +132,51 @@ def test_assemble_session_dict_surfaces_accept_link():
 
 
 def test_web_session_delegates():
-    s = economy_flow.EquipSession(
-        owner="rOwner", character=_char(), slot="Head", incoming_value="Halo"
-    )
+    s = economy_flow.EquipSession(owner="rOwner", character=_char(), changes=[("Head", "Halo")])
     ws = economy_api.EconomyWebSession(discord_id="123", kind="equip", inner=s)
     assert ws.state == economy_flow.RUNNING
     assert ws.id == s.id
     assert ws.to_dict()["state"] == economy_flow.RUNNING
     assert isinstance(ws.created_at, float)
+
+
+def test_normalize_equip_changes_accepts_legacy_shape():
+    body = {"nft_id": "A", "slot": "Head", "value": "Halo"}
+    assert economy_api.normalize_equip_changes(body) == [("Head", "Halo")]
+
+
+def test_normalize_equip_changes_accepts_list():
+    body = {
+        "nft_id": "A",
+        "changes": [{"slot": "Head", "value": "Halo"}, {"slot": "Eyes", "value": "Laser"}],
+    }
+    assert economy_api.normalize_equip_changes(body) == [("Head", "Halo"), ("Eyes", "Laser")]
+
+
+@pytest.mark.parametrize(
+    "body",
+    [
+        {"nft_id": "A"},  # neither shape
+        {"nft_id": "A", "changes": []},  # empty
+        {
+            "nft_id": "A",
+            "changes": [{"slot": "Head", "value": "X"}, {"slot": "Head", "value": "Y"}],
+        },  # duplicate slot
+        {"nft_id": "A", "changes": [{"slot": "Head"}]},  # missing value
+        {"nft_id": "A", "changes": "Head=Halo"},  # not a list
+    ],
+)
+def test_normalize_equip_changes_rejects_bad_input(body):
+    with pytest.raises(economy_api.EconomyError):
+        economy_api.normalize_equip_changes(body)
+
+
+def test_normalize_equip_changes_rejects_oversized_batch():
+    from lfg_core import trait_economy as te
+
+    changes = [{"slot": f"S{i}", "value": "X"} for i in range(len(te.NON_BODY_SLOTS) + 1)]
+    with pytest.raises(economy_api.EconomyError):
+        economy_api.normalize_equip_changes({"nft_id": "A", "changes": changes})
 
 
 def test_start_equip_precheck_rejects_unowned(monkeypatch):
@@ -150,7 +186,7 @@ def test_start_equip_precheck_rejects_unowned(monkeypatch):
     async def go():
         with pytest.raises(economy_api.EconomyError):
             # nft_id "A" is owned by rOwner, not rNobody -> precheck fails
-            await economy_api.start_equip("123", "rNobody", "A", "Head", "Halo")
+            await economy_api.start_equip("123", "rNobody", "A", [("Head", "Halo")])
 
     asyncio.get_event_loop().run_until_complete(go())
 
@@ -164,8 +200,8 @@ def test_start_equip_happy_returns_session(monkeypatch):
 
     async def fake_run_equip(session, deps):
         captured["ran"] = True
+        captured["changes"] = list(session.changes)
         session.state = economy_flow.DONE
-        session.displaced_value = "Crown"
 
     monkeypatch.setattr(economy_flow, "run_equip", fake_run_equip)
     # Stub the real deps builder so no XRPL/CDN is touched.
@@ -174,7 +210,7 @@ def test_start_equip_happy_returns_session(monkeypatch):
     monkeypatch.setattr(_economy_deps, "build_economy_deps", lambda c, user_token=None: object())
 
     async def go():
-        ws = await economy_api.start_equip("123", "rOwner", "A", "Head", "Halo")
+        ws = await economy_api.start_equip("123", "rOwner", "A", [("Head", "Halo")])
         # give the scheduled task a tick to run
         await asyncio.sleep(0)
         return ws
@@ -182,6 +218,24 @@ def test_start_equip_happy_returns_session(monkeypatch):
     ws = asyncio.get_event_loop().run_until_complete(go())
     assert ws.kind == "equip" and ws.discord_id == "123"
     assert captured.get("ran") is True
+    assert captured["changes"] == [("Head", "Halo")]
+
+
+def test_start_equip_batch_rejects_a_bad_change(monkeypatch):
+    """Every change is prechecked up front: the seeded Closet holds only
+    Head=Halo, so a batch whose second change is Eyes=Laser is rejected before
+    any session is scheduled."""
+    conn = _seed_conn()
+    monkeypatch.setattr(economy_api, "open_conn", lambda: conn)
+    _stub_permissive_layer_store(monkeypatch)
+
+    async def go():
+        with pytest.raises(economy_api.EconomyError):
+            await economy_api.start_equip(
+                "123", "rOwner", "A", [("Head", "Halo"), ("Eyes", "Laser")]
+            )
+
+    asyncio.get_event_loop().run_until_complete(go())
 
 
 def test_start_equip_closes_conn_after_task(monkeypatch):
@@ -242,7 +296,7 @@ def test_start_equip_closes_conn_after_task(monkeypatch):
 
     async def fake_run_equip(session, deps):
         session.state = economy_flow.DONE
-        session.displaced_value = "Crown"
+        session.displaced = {"Head": "Crown"}
 
     monkeypatch.setattr(economy_flow, "run_equip", fake_run_equip)
     from scripts import _economy_deps
@@ -250,7 +304,7 @@ def test_start_equip_closes_conn_after_task(monkeypatch):
     monkeypatch.setattr(_economy_deps, "build_economy_deps", lambda c, user_token=None: object())
 
     async def go():
-        await economy_api.start_equip("123", "rOwner", "A", "Head", "Halo")
+        await economy_api.start_equip("123", "rOwner", "A", [("Head", "Halo")])
         # One sleep(0) tick lets the create_task coroutine begin; a second tick
         # ensures the finally-block runs before we assert.
         await asyncio.sleep(0)
@@ -326,7 +380,7 @@ def test_run_and_close_marks_session_failed_on_runner_crash(monkeypatch):
     monkeypatch.setattr(_economy_deps, "build_economy_deps", lambda c, user_token=None: object())
 
     async def go():
-        ws = await economy_api.start_equip("123", "rOwner", "A", "Head", "Halo")
+        ws = await economy_api.start_equip("123", "rOwner", "A", [("Head", "Halo")])
         # Two ticks: first starts the task body, second runs the except/finally
         await asyncio.sleep(0)
         await asyncio.sleep(0)
@@ -667,7 +721,7 @@ def test_start_equip_rejects_incompatible_body_value(monkeypatch, body_gate_stor
 
     async def go():
         with pytest.raises(economy_api.EconomyError, match="does not fit"):
-            await economy_api.start_equip("123", "rOwner", "A", "Clothing", "Summer Dress")
+            await economy_api.start_equip("123", "rOwner", "A", [("Clothing", "Summer Dress")])
 
     asyncio.get_event_loop().run_until_complete(go())
 
@@ -694,7 +748,7 @@ def test_start_equip_compatible_value_still_starts(monkeypatch, body_gate_store)
     monkeypatch.setattr(_economy_deps, "build_economy_deps", lambda c, user_token=None: object())
 
     async def go():
-        ws = await economy_api.start_equip("123", "rOwner", "A", "Clothing", "Hoodie")
+        ws = await economy_api.start_equip("123", "rOwner", "A", [("Clothing", "Hoodie")])
         await asyncio.sleep(0)
         return ws
 
@@ -743,7 +797,7 @@ def test_start_equip_accepts_matrix_permitted_foreign_value(monkeypatch, body_ga
     monkeypatch.setattr(_economy_deps, "build_economy_deps", lambda c, user_token=None: object())
 
     async def go():
-        ws = await economy_api.start_equip("123", "rOwner", "APE1", "Head", "Spikey Black")
+        ws = await economy_api.start_equip("123", "rOwner", "APE1", [("Head", "Spikey Black")])
         await asyncio.sleep(0)
         return ws
 
@@ -850,7 +904,7 @@ def test_start_equip_closes_conn_on_body_affinity_reject(monkeypatch, body_gate_
 
     async def go():
         with pytest.raises(economy_api.EconomyError, match="does not fit"):
-            await economy_api.start_equip("123", "rOwner", "A", "Clothing", "Summer Dress")
+            await economy_api.start_equip("123", "rOwner", "A", [("Clothing", "Summer Dress")])
 
     asyncio.get_event_loop().run_until_complete(go())
     assert tracked.close_count == 1, (

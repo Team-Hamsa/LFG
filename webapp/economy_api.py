@@ -101,7 +101,7 @@ def economy_session_dict(kind: str, s: Any) -> dict[str, Any]:
     """JSON-safe per-op session status for the client poller."""
     base: dict[str, Any] = {"id": s.id, "state": s.state, "error": s.error}
     if kind == "equip":
-        base["displaced"] = s.displaced_value
+        base["displaced"] = [{"slot": k, "value": v} for k, v in s.displaced.items()]
     elif kind == "harvest":
         base["moved_assets"] = s.moved_assets
     elif kind == "assemble":
@@ -274,12 +274,41 @@ async def assemble_prefill(conn: sqlite3.Connection, owner: str) -> dict[str, An
     return best
 
 
+def normalize_equip_changes(body: dict[str, Any]) -> list[tuple[str, str]]:
+    """Wire-level compatibility seam: accept either the batch shape
+    {"changes": [{"slot", "value"}, ...]} or the legacy single
+    {"slot", "value"}, and return the canonical list of (slot, value) pairs.
+    Raises EconomyError (-> HTTP 400) on anything malformed."""
+    raw = body.get("changes")
+    if raw is None:
+        slot, value = body.get("slot"), body.get("value")
+        if not slot or not value:
+            raise EconomyError("no changes to apply")
+        raw = [{"slot": slot, "value": value}]
+    if not isinstance(raw, list) or not raw:
+        raise EconomyError("no changes to apply")
+    if len(raw) > len(trait_economy.NON_BODY_SLOTS):
+        raise EconomyError("too many changes in one batch")
+    changes: list[tuple[str, str]] = []
+    seen: set[str] = set()
+    for item in raw:
+        if not isinstance(item, dict):
+            raise EconomyError("each change must be {slot, value}")
+        slot, value = item.get("slot"), item.get("value")
+        if not isinstance(slot, str) or not isinstance(value, str) or not slot or not value:
+            raise EconomyError("each change must be {slot, value}")
+        if slot in seen:
+            raise EconomyError(f"duplicate slot in one batch ({slot})")
+        seen.add(slot)
+        changes.append((slot, value))
+    return changes
+
+
 async def start_equip(
     discord_id: str,
     owner: str,
     nft_id: str,
-    slot: str,
-    value: str,
+    changes: list[tuple[str, str]],
     user_token: str | None = None,
 ) -> EconomyWebSession:
     conn = open_conn()
@@ -288,14 +317,20 @@ async def start_equip(
         assets = {
             (s, v): c for (o, s, v, c) in economy_store.read_closet_assets(conn) if o == owner
         }
-        chk = trait_economy.can_equip(rec, slot, value, assets, mutable=bool(rec.mutable))
-        if not chk.ok:
-            raise EconomyError(f"cannot equip: {chk.reason}")
-        await _require_body_affinity(rec.body, slot, value)
+        # Mirror run_equip's running working copy so an over-spending batch is
+        # rejected up front, with the same message the flow would produce.
+        for slot, value in changes:
+            chk = trait_economy.can_equip(rec, slot, value, assets, mutable=bool(rec.mutable))
+            if not chk.ok:
+                raise EconomyError(f"cannot equip: {chk.reason}")
+            await _require_body_affinity(rec.body, slot, value)
+            displaced = trait_economy.slot_value(rec, slot)
+            assets[(slot, value)] = assets.get((slot, value), 0) - 1
+            assets[(slot, displaced)] = assets.get((slot, displaced), 0) + 1
     except Exception:
         conn.close()
         raise
-    session = economy_flow.EquipSession(owner=owner, character=rec, slot=slot, incoming_value=value)
+    session = economy_flow.EquipSession(owner=owner, character=rec, changes=changes)
     return _schedule("equip", discord_id, session, conn, economy_flow.run_equip, user_token)
 
 
