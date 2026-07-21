@@ -178,9 +178,21 @@ def _webm_vp9_alpha(path, size=(8, 8)):
     img.save(frame)
     subprocess.run(
         [
-            "ffmpeg", "-v", "error", "-y",
-            "-loop", "1", "-i", frame, "-frames:v", "2",
-            "-c:v", "libvpx-vp9", "-pix_fmt", "yuva420p", path,
+            "ffmpeg",
+            "-v",
+            "error",
+            "-y",
+            "-loop",
+            "1",
+            "-i",
+            frame,
+            "-frames:v",
+            "2",
+            "-c:v",
+            "libvpx-vp9",
+            "-pix_fmt",
+            "yuva420p",
+            path,
         ],
         check=True,
     )
