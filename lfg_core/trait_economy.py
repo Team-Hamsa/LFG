@@ -1,8 +1,12 @@
 # lfg_core/trait_economy.py
 # Pure accounting core for the NFT dress-up trait economy. No I/O.
-# An "asset" is a (slot, value) pair over the 9 TRAIT_ORDER slots. The Body slot
-# is identity-bound (one body == one edition); the 8 non-body slots are pooled
-# and counted by (slot, value), where "None" is itself a real, conserved asset.
+# An "asset" is a (slot, value) pair over the 9 TRAIT_ORDER slots. All 9 slots,
+# including Body, are pooled and counted by (slot, value) in the census — a
+# dressed (non-blank) character contributes its ("Body", value); a blank
+# character contributes nothing for Body (its body has moved to a Closet
+# ("Body", value) asset). For the 8 non-body slots, "None" is itself a real,
+# conserved asset; the Body slot is the one exception — ("Body", "None") is
+# never counted, since no genesis edition was ever bodyless.
 
 from __future__ import annotations
 
@@ -25,13 +29,11 @@ class Genesis:
 @dataclass
 class Census:
     trait_counts: dict[tuple[str, str], int]
-    body_presence: dict[int, int]
 
 
 @dataclass
 class ConservationReport:
     trait_drift: dict[tuple[str, str], int]
-    body_drift: dict[int, int]
     ok: bool
 
 
@@ -125,25 +127,34 @@ def build_genesis(canonical: dict[int, OnchainNft]) -> Genesis:
 def asset_census(
     characters: dict[int, OnchainNft],
     closet_assets: list[tuple[str, str, str, int]],
-    closet_bodies: list[tuple[str, int]],
     trait_tokens: list[tuple[str, str, str, str]],
 ) -> Census:
     """Tally every asset across live characters, Closets and standalone trait
-    tokens. trait_counts are non-body (slot, value); body_presence counts how
-    many places each edition's body currently exists (should be exactly 1)."""
+    tokens. Body is a first-class (slot, value) asset like any other: a
+    dressed (non-blank) character contributes its ("Body", value); a blank
+    character contributes NOTHING for Body (its Body slot reads "None", but
+    ("Body", "None") is never a real asset — the Body slot is excluded from
+    the "None is conserved" rule that applies to every other slot)."""
     trait_counts: Counter[tuple[str, str]] = Counter()
-    body_presence: Counter[int] = Counter()
-    for edition, rec in characters.items():
-        body_presence[edition] += 1
+    for _edition, rec in characters.items():
         for slot in NON_BODY_SLOTS:
             trait_counts[(slot, slot_value(rec, slot))] += 1
+        if not is_blank(rec):
+            trait_counts[("Body", slot_value(rec, "Body"))] += 1
     for _owner, slot, value, count in closet_assets:
         trait_counts[(slot, value)] += count
     for _nft_id, _owner, slot, value in trait_tokens:
         trait_counts[(slot, value)] += 1
-    for _owner, edition in closet_bodies:
-        body_presence[edition] += 1
-    return Census(trait_counts=dict(trait_counts), body_presence=dict(body_presence))
+    return Census(trait_counts=dict(trait_counts))
+
+
+def genesis_trait_counts_with_bodies(genesis: Genesis) -> dict[tuple[str, str], int]:
+    """Genesis trait_counts (non-body) plus per-edition body values folded in
+    under ("Body", value) keys — the conservation baseline that covers Body
+    as a first-class asset."""
+    counts: Counter[tuple[str, str]] = Counter(genesis.trait_counts)
+    counts.update(("Body", value) for value, _cls in genesis.edition_bodies.values())
+    return dict(counts)
 
 
 def effective_genesis(genesis: Genesis, supply_changes: list[dict[str, Any]]) -> Genesis:
@@ -186,28 +197,22 @@ def verify_conservation(
     genesis: Genesis, census: Census, supply_changes: list[dict[str, Any]] | None = None
 ) -> ConservationReport:
     """Conservation: census must equal the EFFECTIVE genesis (genesis + the
-    intentional supply-change ledger) for every (slot, value), and each
-    effective edition's body must exist in exactly one place. A delta NOT
-    explained by the ledger is reported as drift. Back-compatible: an empty/
-    omitted ledger reduces to the original census-vs-genesis check."""
+    intentional supply-change ledger), for every (slot, value) INCLUDING
+    Body — folded into the baseline via `genesis_trait_counts_with_bodies` so
+    a dressed character's body, a Closet ("Body", v) asset, and a genesis
+    body all count the same asset. A delta NOT explained by the ledger is
+    reported as drift. Back-compatible: an empty/omitted ledger reduces to
+    the original census-vs-genesis check."""
     eff = effective_genesis(genesis, supply_changes or [])
+    eff_counts = genesis_trait_counts_with_bodies(eff)
     trait_drift: dict[tuple[str, str], int] = {}
-    for key in set(eff.trait_counts) | set(census.trait_counts):
-        delta = census.trait_counts.get(key, 0) - eff.trait_counts.get(key, 0)
+    for key in set(eff_counts) | set(census.trait_counts):
+        delta = census.trait_counts.get(key, 0) - eff_counts.get(key, 0)
         if delta != 0:
             trait_drift[key] = delta
 
-    body_drift: dict[int, int] = {}
-    for edition in eff.edition_bodies:
-        presence = census.body_presence.get(edition, 0)
-        if presence != 1:
-            body_drift[edition] = presence
-    for edition, presence in census.body_presence.items():
-        if edition not in eff.edition_bodies:
-            body_drift[edition] = presence
-
-    ok = not trait_drift and not body_drift
-    return ConservationReport(trait_drift=trait_drift, body_drift=body_drift, ok=ok)
+    ok = not trait_drift
+    return ConservationReport(trait_drift=trait_drift, ok=ok)
 
 
 def verify_completeness(characters: dict[int, OnchainNft], genesis: Genesis) -> CompletenessReport:

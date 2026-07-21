@@ -23,7 +23,7 @@ from lfg_core import trait_economy  # noqa: E402
 
 
 def test_economy_report_clean():
-    cons = trait_economy.ConservationReport(trait_drift={}, body_drift={}, ok=True)
+    cons = trait_economy.ConservationReport(trait_drift={}, ok=True)
     comp = trait_economy.CompletenessReport(
         wrong_body={}, orphan_bodies=[], slot_anomalies={}, ok=True
     )
@@ -35,8 +35,7 @@ def test_economy_report_clean():
 
 def test_economy_report_flags_drift():
     cons = trait_economy.ConservationReport(
-        trait_drift={("Background", "Sky"): 1, ("Head", "Crown"): -1},
-        body_drift={2: 0},
+        trait_drift={("Background", "Sky"): 1, ("Head", "Crown"): -1, ("Body", "S"): 1},
         ok=False,
     )
     comp = trait_economy.CompletenessReport(

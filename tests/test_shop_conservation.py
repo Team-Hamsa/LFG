@@ -69,11 +69,10 @@ def _assert_zero_drift(conn) -> None:
     census = trait_economy.asset_census(
         {},  # no live characters
         es.read_closet_assets(conn),
-        es.read_closet_bodies(conn),
         es.read_trait_tokens(conn),
     )
     report = trait_economy.verify_conservation(genesis, census, supply_changes)
-    assert report.ok, f"conservation drift: trait={report.trait_drift} body={report.body_drift}"
+    assert report.ok, f"conservation drift: trait={report.trait_drift}"
 
 
 # ---------------------------------------------------------------------------

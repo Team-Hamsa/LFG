@@ -111,22 +111,22 @@ def test_conservation_with_ledger_ok():
             "trait_deltas": {"Head|None": 1},
         }
     ]
-    census = te.Census(trait_counts={("Head", "None"): 1}, body_presence={5: 1})
+    census = te.Census(trait_counts={("Head", "None"): 1, ("Body", "B"): 1})
     assert te.verify_conservation(g, census, sc).ok
 
 
 def test_unlogged_growth_is_drift():
     g = te.Genesis(trait_counts={("Head", "None"): 0}, edition_bodies={})
-    census = te.Census(trait_counts={("Head", "None"): 1}, body_presence={5: 1})
+    census = te.Census(trait_counts={("Head", "None"): 1, ("Body", "B"): 1})
     report = te.verify_conservation(g, census, [])  # no ledger row -> drift
     assert not report.ok
     assert report.trait_drift[("Head", "None")] == 1
-    assert report.body_drift[5] == 1
+    assert report.trait_drift[("Body", "B")] == 1
 
 
 def test_conservation_backcompat_no_ledger_arg():
     g = te.Genesis(trait_counts={("Head", "None"): 1}, edition_bodies={1: ("B", "male")})
-    census = te.Census(trait_counts={("Head", "None"): 1}, body_presence={1: 1})
+    census = te.Census(trait_counts={("Head", "None"): 1, ("Body", "B"): 1})
     assert te.verify_conservation(g, census).ok  # 2-arg call still works
 
 
@@ -261,7 +261,6 @@ def test_extract_then_deposit_conserves_census():
     base = te.asset_census(
         characters={},
         closet_assets=es.read_closet_assets(c),
-        closet_bodies=es.read_closet_bodies(c),
         trait_tokens=es.read_trait_tokens(c),
     )
     assert base.trait_counts[("Hat", "Cap")] == 1
@@ -272,7 +271,6 @@ def test_extract_then_deposit_conserves_census():
     after_extract = te.asset_census(
         characters={},
         closet_assets=es.read_closet_assets(c),
-        closet_bodies=es.read_closet_bodies(c),
         trait_tokens=es.read_trait_tokens(c),
     )
     assert after_extract == base
@@ -283,7 +281,6 @@ def test_extract_then_deposit_conserves_census():
     after_deposit = te.asset_census(
         characters={},
         closet_assets=es.read_closet_assets(c),
-        closet_bodies=es.read_closet_bodies(c),
         trait_tokens=es.read_trait_tokens(c),
     )
     assert after_deposit == base
@@ -291,3 +288,33 @@ def test_extract_then_deposit_conserves_census():
     # No supply_changes needed: conservation is clean at every step.
     report = te.verify_conservation(te.effective_genesis(genesis, []), after_deposit, [])
     assert report.ok
+
+
+def test_harvest_invariance_body_moves_into_closet_census_unchanged():
+    """Harvesting a character (char -> blank, its ("Body", v) moves into the
+    owner's Closet as a loose asset) must leave the total census exactly
+    equal to genesis — Body is supply-neutral just like every other slot.
+
+    `_char()` builds a character with a real Body value and every non-body
+    slot already "None" (a fresh dress-up character before any traits are
+    equipped). Only the Body slot actually holds a relocatable asset, so
+    harvest only produces one Closet row: the 8 non-body slots stay "None"
+    on the now-blank character exactly as they were before — moving a
+    non-body "None" to the Closet too would double-count it, since "None"
+    is itself the conserved asset the (still-live) blank character already
+    holds for that slot."""
+    dressed = _char(7, body="Straight Blue")
+    genesis = te.build_genesis({7: dressed})
+
+    # Before harvest: dressed character live, empty Closet -> matches genesis.
+    before = te.asset_census(characters={7: dressed}, closet_assets=[], trait_tokens=[])
+    assert before.trait_counts == te.genesis_trait_counts_with_bodies(genesis)
+    assert te.verify_conservation(genesis, before).ok
+
+    # Harvest: character goes blank; its ("Body", "Straight Blue") moves into
+    # the owner's Closet as a loose asset.
+    blank = _blank(7)
+    closet_assets = [("rOwner", "Body", "Straight Blue", 1)]
+    after = te.asset_census(characters={7: blank}, closet_assets=closet_assets, trait_tokens=[])
+    assert after.trait_counts == before.trait_counts
+    assert te.verify_conservation(genesis, after).ok

@@ -58,24 +58,13 @@ def format_economy_report(
         lines.append("_None._")
     lines.append("")
 
-    lines.append("## Trait conservation drift (census − genesis)")
+    lines.append("## Trait conservation drift (census − genesis, incl. Body)")
     lines.append("")
     if conservation.trait_drift:
         lines.append("| Slot | Value | Drift |")
         lines.append("| --- | --- | --- |")
         for (slot, value), delta in sorted(conservation.trait_drift.items()):
             lines.append(f"| {slot} | {value} | {delta:+d} |")
-    else:
-        lines.append("_None._")
-    lines.append("")
-
-    lines.append("## Body conservation drift (edition presence ≠ 1)")
-    lines.append("")
-    if conservation.body_drift:
-        lines.append("| Edition | Places |")
-        lines.append("| --- | --- |")
-        for ed, presence in sorted(conservation.body_drift.items()):
-            lines.append(f"| {ed} | {presence} |")
     else:
         lines.append("_None._")
     lines.append("")
@@ -142,7 +131,6 @@ def main() -> int:
     census = trait_economy.asset_census(
         canonical,
         economy_store.read_closet_assets(conn),
-        economy_store.read_closet_bodies(conn),
         economy_store.read_trait_tokens(conn),
     )
     conservation = trait_economy.verify_conservation(genesis, census, supply_changes)
