@@ -55,6 +55,7 @@
         <button id="swap-btn" class="secondary">🏗️ Build</button>
         <button id="swapper-btn" class="secondary">🔁 Swap</button>
         <button id="market-btn" class="secondary">🛒 Trade</button>
+        <button id="offers-btn" class="secondary" hidden>🎁 Pending offers</button>
       </div>
       <div id="leaderboard" class="leaderboard">
         <h3 class="lb-title">🏆 Leaderboard</h3>
@@ -270,6 +271,14 @@
       <div id="bulk-spinner" class="spinner" role="img" aria-label="Working…" hidden></div>
       <div id="bulk-units"></div>
       <p><button id="bulk-done-btn" class="primary" hidden>Done</button></p>
+    </section>
+
+    <!-- Pending-offers tray (#218): claim any outstanding gift offer anytime. -->
+    <section id="offers-panel" class="card sticker" hidden>
+      <h2>🎁 Pending offers</h2>
+      <p class="card-sub">NFTs waiting on your signature — offers never expire, claim whenever.</p>
+      <div id="offers-list"></div>
+      <p><button id="offers-back-btn" class="back">← Back to the job site</button></p>
     </section>
   </main>
 

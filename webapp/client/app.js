@@ -9,13 +9,13 @@
 // money math, and wizard-step labels. Kept in a separate module so they're
 // unit-testable under Node (tests/test_market_pure_js.py) without a browser
 // — see webapp/client/market_pure.js's own header for the full rationale.
-import * as marketPure from './market_pure.js?v=22';
+import * as marketPure from './market_pure.js?v=23';
 // Mint-flow pure helpers (issue #141): the cancel-outcome decision lives in
 // its own module so it's Node-testable too (tests/test_mint_pure_js.py).
-import * as mintPure from './mint_pure.js?v=22';
+import * as mintPure from './mint_pure.js?v=23';
 // Build-panel decision logic lives in its own pure module so it's
 // Node-testable too (tests/test_build_pure_js.py).
-import * as buildPure from './build_pure.js?v=22';
+import * as buildPure from './build_pure.js?v=23';
 
 const params = new URLSearchParams(window.location.search);
 const insideDiscord = params.has('frame_id');
@@ -390,7 +390,8 @@ async function setupTelegram() {
 
 const ALL_PANELS = ['register-panel', 'mint-panel', 'flow-panel', 'bulk-panel',
                     'swap-panel', 'swap-traits-panel', 'swap-result-panel',
-                    'dressup-panel', 'market-panel', 'market-list-form-panel'];
+                    'dressup-panel', 'market-panel', 'market-list-form-panel',
+                    'offers-panel'];
 
 function showPanel(id) {
   for (const panel of ALL_PANELS) {
@@ -407,6 +408,7 @@ function showMintHome() {
   showPanel('mint-panel');
   status(`Hey ${me.username} — welcome to the job site.`);
   loadLeaderboard();
+  refreshOffersBadge();
 }
 
 // --- Leaderboard (home-screen card) ---
@@ -1017,6 +1019,111 @@ async function bulkAccept(jobId, index, row, btn) {
     showError(e.message);
   } finally {
     btn.disabled = false; // repeat click = fresh payload (old one expires in 15 min)
+  }
+}
+
+// ---- Pending-offers tray (#218) ----
+// Ledger-driven claim-later surface: every outstanding gift offer locked to
+// the caller's wallet, durable across relaunches/restarts (unlike the #215
+// bulk accept list, which dies with its in-memory job). Offers never expire.
+
+let offersFetchedAt = 0; // throttle the home-screen badge refresh
+const OFFERS_BADGE_TTL_MS = 30000;
+
+async function fetchPendingOffers() {
+  const r = await api('/api/offers/pending');
+  return r.offers || [];
+}
+
+// Badge on the home screen: silent on any failure (the tray is additive —
+// a flaky lookup must never toast over the mint home).
+async function refreshOffersBadge(force) {
+  if (!force && Date.now() - offersFetchedAt < OFFERS_BADGE_TTL_MS) return;
+  offersFetchedAt = Date.now();
+  let offers = [];
+  try { offers = await fetchPendingOffers(); } catch (_) { return; }
+  const btn = el('offers-btn');
+  btn.hidden = offers.length === 0;
+  if (offers.length) btn.textContent = `🎁 Pending offers (${offers.length})`;
+}
+
+function offerRow(o) {
+  const row = document.createElement('div');
+  row.className = 'bulk-unit offered'; // same row styling as the bulk list
+  if (o.image) {
+    const img = document.createElement('img');
+    img.className = 'thumb';
+    img.src = imgUrl(o.image, THUMB_W);
+    img.alt = o.nft_number != null ? `NFT #${o.nft_number}` : 'NFT';
+    row.appendChild(img);
+  }
+  const label = document.createElement('span');
+  label.className = 'u-label';
+  label.textContent = o.nft_number != null ? `#${o.nft_number}` : `${o.nft_id.slice(0, 8)}…`;
+  row.appendChild(label);
+  const btn = document.createElement('button');
+  btn.className = 'secondary';
+  btn.textContent = 'Accept';
+  btn.onclick = () => offerAccept(o, row, btn);
+  row.appendChild(btn);
+  return row;
+}
+
+async function openOffers() {
+  showPanel('offers-panel');
+  const list = el('offers-list');
+  list.replaceChildren();
+  let offers = [];
+  try {
+    offers = await fetchPendingOffers();
+  } catch (e) {
+    showError(e.message);
+    return;
+  }
+  if (!offers.length) {
+    const p = document.createElement('p');
+    p.className = 'card-sub';
+    p.textContent = 'Nothing pending — everything is claimed. 🎉';
+    list.appendChild(p);
+    return;
+  }
+  list.replaceChildren(...offers.map(offerRow));
+}
+
+// Accept payload built ON CLICK only (open-payload cap, #260), rendered
+// inline in the row exactly like the bulk accept QR.
+async function offerAccept(o, row, btn) {
+  btn.disabled = true;
+  try {
+    const r = await api('/api/offers/accept', {
+      method: 'POST',
+      body: JSON.stringify({ ...discordCtx(), offer_index: o.offer_index }),
+    });
+    let qrWrap = row.querySelector('.u-accept');
+    if (!qrWrap) {
+      qrWrap = document.createElement('div');
+      qrWrap.className = 'u-accept';
+      row.appendChild(qrWrap);
+    }
+    qrWrap.replaceChildren();
+    const note = document.createElement('p');
+    note.className = 'card-sub';
+    note.textContent = signText(r.push, 'Scan to claim this one to your wallet.');
+    qrWrap.appendChild(note);
+    const img = document.createElement('img');
+    img.className = 'u-qr';
+    img.src = qrUrl(r.link);
+    img.alt = 'Accept QR — scan with Xaman';
+    qrWrap.appendChild(img);
+    const open = document.createElement('button');
+    open.className = 'link';
+    open.textContent = 'Open in Xaman ↗';
+    open.onclick = () => openExternal(r.link);
+    qrWrap.appendChild(open);
+  } catch (e) {
+    showError(e.message);
+  } finally {
+    btn.disabled = false; // repeat click = fresh payload, same as bulkAccept
   }
 }
 
@@ -3194,6 +3301,8 @@ async function main() {
   el('change-wallet-btn').onclick = () => (insideWeb ? startWebSignin() : startSignin());
   el('flow-done-btn').onclick = () => { showMintHome(); };
   el('bulk-done-btn').onclick = () => { clearTimeout(bulkPollTimer); bulkPollGen++; currentBulkId = null; showMintHome(); };
+  el('offers-btn').onclick = () => openOffers();
+  el('offers-back-btn').onclick = () => { refreshOffersBadge(true); showMintHome(); };
 
   // --- Marketplace (#44 Task 10) ---
   el('market-btn').onclick = () => { ensureMarketTraitSlotOptions(); openMarket(); };

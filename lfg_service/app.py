@@ -3632,6 +3632,99 @@ async def handle_bulk_mint_unit_accept(request):
     )
 
 
+@require_wallet
+async def handle_pending_offers(request):
+    """Pending-offers tray (#218): every live gift offer destination-locked to
+    the caller's wallet, joined with edition metadata from the on-chain index.
+    Ledger-driven — survives service restarts, session pruning, and webview
+    relaunches (the #215 bulk accept list did not). Offers carry no
+    Expiration, so this is the durable claim-later surface.
+
+    Dev mode has no ledger: answers an empty tray (the tray is additive UI —
+    nothing else depends on it)."""
+    if config.WEBAPP_DEV_MODE:
+        return web.json_response({"offers": []})
+    wallet = request["wallet"]
+    try:
+        offers = await xrpl_ops.get_account_nft_offers(xrpl_ops.bot_wallet_address())
+    except Exception as e:
+        logging.warning(f"pending offers lookup failed for {wallet}: {e}")
+        return web.json_response(
+            {"error": "offer lookup failed", "code": "pending_unavailable"}, status=503
+        )
+    claimable = xrpl_ops.filter_claimable_offers(offers, wallet, time.time())
+    rows = []
+    try:
+        conn = nft_index.init_db(nft_index.index_db_path(config.XRPL_NETWORK))
+        try:
+            for o in claimable:
+                cur = conn.execute(
+                    "SELECT nft_number, image FROM onchain_nfts WHERE nft_id = ?",
+                    (o["nft_id"],),
+                )
+                meta = cur.fetchone()
+                rows.append(
+                    {
+                        "offer_index": o["offer_index"],
+                        "nft_id": o["nft_id"],
+                        "nft_number": meta[0] if meta else None,
+                        "image": meta[1] if meta else None,
+                        "amount": o["amount"],
+                    }
+                )
+        finally:
+            conn.close()
+    except Exception as e:
+        # A locked/corrupt index is the same availability failure as a ledger
+        # blip — the documented 503, not an unstructured 500 (Greptile P1).
+        logging.warning(f"pending offers index join failed for {wallet}: {e}")
+        return web.json_response(
+            {"error": "offer lookup failed", "code": "pending_unavailable"}, status=503
+        )
+    return web.json_response({"offers": rows})
+
+
+@require_wallet
+async def handle_pending_offer_accept(request):
+    """Build the XUMM accept payload for ONE pending offer, on click only
+    (open-payload cap, #260). Fail-closed like the marketplace buy: the offer
+    is re-verified on-ledger — still live, still a sell offer locked to the
+    caller — immediately before the payload is built."""
+    if config.WEBAPP_DEV_MODE:
+        return web.json_response({"error": "not available in dev mode"}, status=501)
+    body = await request.json()
+    offer_index = body.get("offer_index")
+    if not offer_index or not isinstance(offer_index, str):
+        return web.json_response({"error": "offer_index required"}, status=400)
+    wallet = request["wallet"]
+    try:
+        offers = await xrpl_ops.get_account_nft_offers(xrpl_ops.bot_wallet_address())
+    except Exception as e:
+        logging.warning(f"pending offer verify failed for {wallet}: {e}")
+        return web.json_response(
+            {"error": "offer lookup failed", "code": "pending_unavailable"}, status=503
+        )
+    live = {o["offer_index"] for o in xrpl_ops.filter_claimable_offers(offers, wallet, time.time())}
+    if offer_index not in live:
+        # Verified absent (lookup succeeded above): claimed already, expired,
+        # or never this wallet's — either way there is nothing to sign.
+        return web.json_response(
+            {"error": "offer no longer available", "code": "offer_gone"}, status=410
+        )
+    return_url = await _request_return_url(request)
+    payload = await xumm_ops.create_accept_offer_payload(
+        offer_index,
+        return_url=return_url,
+        user_token=await _push_token(request["user"]),
+        platform=memos.platform_for_surface(_platform(request["user"])),
+    )
+    if not payload:
+        return web.json_response({"error": "payload_failed"}, status=502)
+    return web.json_response(
+        {"qr": payload["qr_url"], "link": payload["xumm_url"], "push": payload.get("push")}
+    )
+
+
 async def resume_bulk_jobs() -> None:
     """On startup, re-attach and resume any awaiting-payment/paid/fulfilling
     bulk jobs so a service restart mid-fulfillment doesn't strand paid units
@@ -5220,6 +5313,9 @@ def create_app() -> web.Application:
     app.router.add_post(
         "/api/mint/bulk/{session_id}/units/{index}/accept", handle_bulk_mint_unit_accept
     )
+    # Pending-offers tray (#218): claim any outstanding gift offer anytime.
+    app.router.add_get("/api/offers/pending", handle_pending_offers)
+    app.router.add_post("/api/offers/accept", handle_pending_offer_accept)
     app.router.add_get("/api/mint/bulk/{session_id}", handle_bulk_mint_status)
     app.router.add_get("/api/mint/{session_id}", handle_mint_status)
     app.router.add_post("/api/mint/{session_id}/regenerate", handle_mint_regenerate)
