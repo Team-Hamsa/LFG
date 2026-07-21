@@ -69,7 +69,9 @@ def test_default_empty_roster_is_null():
 def test_default_prefers_dressed_over_blank():
     # A leading indexed-but-blank character must yield to a later dressed one so
     # the canvas opens on real art, not a bare silhouette.
-    chars = "[{nft_id: 'A', body: 'male', blank: true}, {nft_id: 'B', body: 'female', blank: false}]"
+    chars = (
+        "[{nft_id: 'A', body: 'male', blank: true}, {nft_id: 'B', body: 'female', blank: false}]"
+    )
     assert run_js(f"M.pickDefaultCharacter({chars})") == "B"
 
 
@@ -266,7 +268,9 @@ def test_closet_tile_hidden_for_unindexed_character():
 
 def test_default_chosen_picks_first_value_per_slot():
     slots = "['Hat', 'Eyes', 'Mouth']"
-    slotOptions = "{'Hat': ['Wizard Hat', 'Baseball Cap'], 'Eyes': ['Blue', 'Green'], 'Mouth': ['Smile']}"
+    slotOptions = (
+        "{'Hat': ['Wizard Hat', 'Baseball Cap'], 'Eyes': ['Blue', 'Green'], 'Mouth': ['Smile']}"
+    )
     result = run_js(f"M.defaultChosen({slots}, {slotOptions})")
     assert result == {"Hat": "Wizard Hat", "Eyes": "Blue", "Mouth": "Smile"}
 
