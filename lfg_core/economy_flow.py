@@ -51,13 +51,14 @@
 #   reminted                      legacy path: blank remint +      none (in-flight) — offer/
 #                                 +1 supply_changes row written,    accept surfaced to the user
 #                                 delivery offer created
-#   reminted_no_offer             legacy path: remint OK but the   admin: re-offer the blank
-#                                 delivery offer FAILED; Closet     (record has new_nft_id);
-#                                 still credited (parts are the     the harvested assets are
-#                                 owner's)                          already safe in the Closet
-#   complete_pending_offer        harvest done + Closet credited,  admin: re-offer the reminted
-#                                 but the legacy blank was never    blank so the owner can claim it
-#                                 delivered (see reminted_no_offer)
+#   reminted_no_offer             legacy path: remint OK but the   intermediate checkpoint (has
+#                                 delivery offer FAILED; journaled  new_nft_id) written BEFORE
+#                                 BEFORE the Closet credit          the credit; not terminal
+#   reminted_no_offer_failed      TERMINAL/FAILED: parts credited   admin: re-offer the reminted
+#                                 to the Closet but the reminted    blank (record has new_nft_id
+#                                 blank was never delivered — the   + sync_tx_hash) so the owner
+#                                 session FAILS honestly, never a   can claim it; parts are
+#                                 success screen                    already safe in the Closet
 #   burned_no_remint               legacy path: burn committed,    admin: remint the edition as a
 #                                 remint failed                    blank (journal has the -1 row)
 #   failed_modify                 mutable path: NFTokenModify to   none (nothing changed)
@@ -505,6 +506,21 @@ async def run_harvest(session: HarvestSession, deps: EconomyDeps) -> None:
             session.sync_tx_hash = e.tx_hash
             session.mirror_pending = True
             es.set_mirror_pending(conn, owner, True)
+            if legacy_offer_failed:
+                # Parts landed (mirror will self-heal), but the upgraded blank was
+                # never delivered — this is NOT a success. Fail honestly.
+                session.fail(
+                    f"your parts were credited to your Closet, but delivering your "
+                    f"upgraded blank #{session.edition} failed — an admin will re-offer "
+                    f"it (journal {session.id}); your Closet is still syncing"
+                )
+                _write_record(
+                    deps.records_dir,
+                    "harvest",
+                    session.id,
+                    session._record("reminted_no_offer_failed"),
+                )
+                return
             session.state = DONE
             _write_record(
                 deps.records_dir, "harvest", session.id, session._record("complete_pending_mirror")
@@ -549,9 +565,25 @@ async def run_harvest(session: HarvestSession, deps: EconomyDeps) -> None:
             )
             return
 
+        if legacy_offer_failed:
+            # Parts are safely in the Closet, but the reminted blank could not be
+            # delivered — do NOT show a success screen. Fail with an admin-recovery
+            # message; the terminal journal carries new_nft_id + sync_tx_hash.
+            session.fail(
+                f"your parts were credited to your Closet, but delivering your "
+                f"upgraded blank #{session.edition} failed — an admin will re-offer "
+                f"it (journal {session.id})"
+            )
+            _write_record(
+                deps.records_dir,
+                "harvest",
+                session.id,
+                session._record("reminted_no_offer_failed"),
+            )
+            return
+
         session.state = DONE
-        final_status = "complete_pending_offer" if legacy_offer_failed else "complete"
-        _write_record(deps.records_dir, "harvest", session.id, session._record(final_status))
+        _write_record(deps.records_dir, "harvest", session.id, session._record("complete"))
     except Exception as e:
         logging.error(f"Harvest {session.id} failed: {traceback.format_exc()}")
         session.fail(str(e))

@@ -11,6 +11,8 @@ import sqlite3
 import uuid
 from typing import Any
 
+import aiohttp
+
 from lfg_core import (
     cdn,
     closet_token,
@@ -33,6 +35,36 @@ NFT_FLAG_BURNABLE = 0x0001
 # by the owner in that case, so the delivery offer/accept is a no-op we skip.
 # (Cross-account runs with a real owner take the normal offer + XUMM accept path.)
 _SELF_OFFER_SKIPPED = "self-offer-skipped"
+
+# Positive-result cache: once the BLANK art URL is confirmed present on-ledger
+# CDN we never re-HEAD it this process. Negative results are deliberately NOT
+# cached — a missing object may be uploaded before the next harvest.
+_BLANK_ART_VERIFIED = False
+
+
+async def _blank_art_exists(url: str) -> bool:
+    """HEAD the BLANK art URL to confirm the object was actually uploaded (a
+    non-empty BLANK_IMAGE_URL whose object is missing would strand blanks with
+    404 art). Runs at most once per process on success; failures re-check."""
+    global _BLANK_ART_VERIFIED
+    if _BLANK_ART_VERIFIED:
+        return True
+    try:
+        timeout = aiohttp.ClientTimeout(total=20, connect=10)
+        async with aiohttp.ClientSession(timeout=timeout) as session:
+            async with session.head(url) as resp:
+                if resp.status == 200:
+                    _BLANK_ART_VERIFIED = True
+                    return True
+                logging.warning(
+                    "BLANK art HEAD %s returned status %s — upload blank art first",
+                    url,
+                    resp.status,
+                )
+                return False
+    except Exception as e:
+        logging.warning("BLANK art HEAD %s failed (%s) — upload blank art first", url, e)
+        return False
 
 
 async def _offer_or_skip(nft_id: str, owner: str) -> str | None:
@@ -126,6 +158,8 @@ async def _blank_meta(edition: int) -> str | None:
 
     if not config.BLANK_IMAGE_URL:
         logging.warning("BLANK_IMAGE_URL unset — upload blank art first")
+        return None
+    if not await _blank_art_exists(config.BLANK_IMAGE_URL):
         return None
 
     season = swap_meta.season_for_number(edition)

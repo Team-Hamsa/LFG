@@ -90,7 +90,9 @@ def build_closet_metadata(owner: str, assets: list[Asset], bodies: list[int]) ->
                 {"slot": slot, "value": value, "count": count}
                 for slot, value, count in sorted(assets)
             ],
-            "bodies": sorted(b for b in bodies if isinstance(b, int)),
+            # `type(b) is int` (not isinstance): bool subclasses int, so an
+            # untrusted True/False would otherwise serialize as edition 1/0.
+            "bodies": sorted(b for b in bodies if type(b) is int),
         },
     }
 
@@ -129,7 +131,10 @@ def parse_closet_metadata(
     legacy_editions: list[int] = []
     raw_bodies = block.get("bodies")
     if isinstance(raw_bodies, list):
-        legacy_editions = [b for b in raw_bodies if isinstance(b, int)]
+        # `type(b) is int` (not isinstance): exclude bools before any genesis
+        # resolution — a True in an untrusted on-chain list must never parse as
+        # edition 1 and inject a Body asset.
+        legacy_editions = [b for b in raw_bodies if type(b) is int]
     if genesis is not None and legacy_editions:
         from collections import Counter
 
