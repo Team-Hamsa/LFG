@@ -3654,25 +3654,33 @@ async def handle_pending_offers(request):
         )
     claimable = xrpl_ops.filter_claimable_offers(offers, wallet, time.time())
     rows = []
-    conn = nft_index.init_db(nft_index.index_db_path(config.XRPL_NETWORK))
     try:
-        for o in claimable:
-            cur = conn.execute(
-                "SELECT nft_number, image FROM onchain_nfts WHERE nft_id = ?",
-                (o["nft_id"],),
-            )
-            meta = cur.fetchone()
-            rows.append(
-                {
-                    "offer_index": o["offer_index"],
-                    "nft_id": o["nft_id"],
-                    "nft_number": meta[0] if meta else None,
-                    "image": meta[1] if meta else None,
-                    "amount": o["amount"],
-                }
-            )
-    finally:
-        conn.close()
+        conn = nft_index.init_db(nft_index.index_db_path(config.XRPL_NETWORK))
+        try:
+            for o in claimable:
+                cur = conn.execute(
+                    "SELECT nft_number, image FROM onchain_nfts WHERE nft_id = ?",
+                    (o["nft_id"],),
+                )
+                meta = cur.fetchone()
+                rows.append(
+                    {
+                        "offer_index": o["offer_index"],
+                        "nft_id": o["nft_id"],
+                        "nft_number": meta[0] if meta else None,
+                        "image": meta[1] if meta else None,
+                        "amount": o["amount"],
+                    }
+                )
+        finally:
+            conn.close()
+    except Exception as e:
+        # A locked/corrupt index is the same availability failure as a ledger
+        # blip — the documented 503, not an unstructured 500 (Greptile P1).
+        logging.warning(f"pending offers index join failed for {wallet}: {e}")
+        return web.json_response(
+            {"error": "offer lookup failed", "code": "pending_unavailable"}, status=503
+        )
     return web.json_response({"offers": rows})
 
 

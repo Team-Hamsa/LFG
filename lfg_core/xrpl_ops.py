@@ -531,6 +531,12 @@ def filter_claimable_offers(
             continue
         if o.get("destination") != wallet:
             continue
+        # Free gifts only ("0" = zero XRP drops). The signing account also
+        # holds PRICED destination-locked offers (Trait Shop #217 sells, XRP
+        # or BRIX-dict amounts) — surfacing those as claimable would let a
+        # user unknowingly sign a charging transaction (Greptile P1).
+        if o.get("amount") != "0":
+            continue
         exp = o.get("expiration")
         if exp is not None and exp + RIPPLE_EPOCH_OFFSET <= now_unix:
             continue

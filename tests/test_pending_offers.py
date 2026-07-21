@@ -54,6 +54,19 @@ def test_claimable_drops_other_destinations_and_open_offers():
     assert [o["offer_index"] for o in kept] == ["OFFc"]
 
 
+def test_claimable_drops_priced_offers():
+    # The signing account also holds PRICED destination-locked sells (Trait
+    # Shop #217: XRP-drops string or BRIX amount dict). Only free gifts
+    # ("0" drops) are claimable — anything else would charge on accept.
+    offers = [
+        _offer(offer_index="xrp", amount="10000000"),
+        _offer(offer_index="brix", amount={"currency": "4C46", "issuer": "rISS", "value": "5"}),
+        _offer(offer_index="gift"),
+    ]
+    kept = xrpl_ops.filter_claimable_offers(offers, WALLET, 1_800_000_000)
+    assert [o["offer_index"] for o in kept] == ["OFFgift"]
+
+
 def test_claimable_drops_buy_offers():
     # A buy bid (no sell flag) destined to the wallet must never be claimable.
     offers = [_offer(flags=0)]
