@@ -326,6 +326,9 @@ CREATE TABLE burned_nfts (
    `validate-trait-config` pre-push hook will catch mistakes
 4. Add a corresponding column to the LFG table if storing trait data
 5. Run `scripts/audit_trait_files.py` to confirm every stored trait value still resolves
+6. Run `scripts/make_layer_thumbs.py` to refresh the preview-thumbnail tier
+   (`layers/.thumbs/`, served by `/api/layer?thumb=1` — 512px, animated art as
+   GIF so it renders in `<img>`; missing thumbs fall back to the full asset)
 
 ### Minting an NFT (Manual Testing)
 1. Run `/letsgo` command in Discord
