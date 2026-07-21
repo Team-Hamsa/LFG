@@ -61,7 +61,7 @@ def _econ_conn() -> sqlite3.Connection:
 
 
 def test_taxon_176_mint_upserts_trait_token():
-    assert config.TRAIT_TAXON == 176  # locks in the flipped default (T1)
+    assert config.TRAIT_TAXON_DEFAULT == 176  # locks in the flipped default (T1)
     conn = _econ_conn()
     meta = trait_token.build_trait_metadata("Hat", "Cap", "https://example.com/img.png")
 
@@ -103,7 +103,7 @@ def test_taxon_1760_mint_is_not_classified_as_trait_or_closet():
     """apply_economy_tx must not route a taxon-1760 (character) mint into the
     closet/trait economy tables — those are gated to CLOSET_TAXON/LEGACY_BUCKET_TAXON
     and TRAIT_TAXON specifically."""
-    assert config.ASSEMBLE_TAXON == 1760
+    assert config.ASSEMBLE_TAXON_DEFAULT == 1760
     conn = _econ_conn()
 
     async def fetch_token(nft_id):

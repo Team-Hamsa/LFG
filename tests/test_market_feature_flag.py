@@ -67,8 +67,10 @@ def _assert_disabled(resp):
     assert body.get("code") == "market_disabled"
 
 
-def test_config_default_is_enabled():
-    assert app.config.MARKET_ENABLED is True
+def test_config_default_is_enabled(monkeypatch):
+    # The shipped default, not the ambient-.env-sensitive frozen constant.
+    monkeypatch.delenv("MARKET_ENABLED", raising=False)
+    assert app.config.env_flag("MARKET_ENABLED", app.config.MARKET_ENABLED_DEFAULT) is True
 
 
 def test_api_config_reports_market_enabled(monkeypatch):
