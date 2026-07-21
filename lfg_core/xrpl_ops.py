@@ -17,6 +17,8 @@ from xrpl.models.currencies import XRP, IssuedCurrency
 from xrpl.models.requests import (
     AccountLines,
     AccountNFTs,
+    AccountObjects,
+    AccountObjectType,
     AccountTx,
     AMMInfo,
     Ledger,
@@ -465,6 +467,75 @@ async def get_nft_sell_offers(nft_id: str, raise_on_error: bool = False) -> list
             raise
         logging.warning(f"get_nft_sell_offers failed for {nft_id}: {e}")
         return []
+
+
+# NFTokenOffer ledger-object flag: this offer SELLS the token (vs a buy bid).
+LSF_SELL_NFTOKEN = 0x00000001
+
+
+async def get_account_nft_offers(address: str) -> list[dict[str, Any]]:
+    """Every live NFTokenOffer object OWNED by `address`, via paginated
+    `account_objects` (one call per page instead of one `nft_sell_offers`
+    call per token). Used by the pending-offers tray (#218): the app's
+    gift/mint offers are all created by the signing account, so its account
+    objects are the complete set of claimable offers.
+
+    Each dict is normalized to `{offer_index, nft_id, amount, destination,
+    flags, owner, expiration}` — the same shape as get_nft_sell_offers plus
+    `nft_id`. Always raises on RPC/soft errors (callers are fail-closed
+    verifiers or 503 the read; an empty list must mean "genuinely none")."""
+    out: list[dict[str, Any]] = []
+    client = JsonRpcClient(config.JSON_RPC_URL)
+    marker: Any = None
+    while True:
+        req = AccountObjects(
+            account=address,
+            type=AccountObjectType.NFT_OFFER,
+            limit=400,
+            marker=marker,
+        )
+        response = await asyncio.to_thread(client.request, req)
+        result = response.result
+        if not isinstance(result, dict) or result.get("error"):
+            err = result.get("error") if isinstance(result, dict) else "malformed result"
+            raise RuntimeError(f"account_objects error for {address}: {err}")
+        for obj in result.get("account_objects") or []:
+            if not isinstance(obj, dict) or obj.get("LedgerEntryType") != "NFTokenOffer":
+                continue
+            out.append(
+                {
+                    "offer_index": obj.get("index"),
+                    "nft_id": obj.get("NFTokenID"),
+                    "amount": obj.get("Amount"),
+                    "destination": obj.get("Destination"),
+                    "flags": obj.get("Flags"),
+                    "owner": obj.get("Owner", address),
+                    "expiration": obj.get("Expiration"),
+                }
+            )
+        marker = result.get("marker")
+        if not marker:
+            return out
+
+
+def filter_claimable_offers(
+    offers: list[dict[str, Any]], wallet: str, now_unix: float
+) -> list[dict[str, Any]]:
+    """The subset of get_account_nft_offers() rows `wallet` can claim: sell
+    offers destination-locked to that wallet and not expired. Pure (Node-free
+    unit target, tests/test_pending_offers.py). Offers with no Expiration
+    never expire — the bulk/single mint gift offers (#215) are all such."""
+    claimable = []
+    for o in offers:
+        if not (o.get("flags") or 0) & LSF_SELL_NFTOKEN:
+            continue
+        if o.get("destination") != wallet:
+            continue
+        exp = o.get("expiration")
+        if exp is not None and exp + RIPPLE_EPOCH_OFFSET <= now_unix:
+            continue
+        claimable.append(o)
+    return claimable
 
 
 async def get_nft_buy_offers(nft_id: str, raise_on_error: bool = False) -> list[dict[str, Any]]:
