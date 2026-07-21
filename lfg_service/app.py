@@ -5200,22 +5200,24 @@ def _economy_post(kind, start_coro, mock_call):
         placeholder_id, conflict = _reserve_economy_slot(kind, user["id"], _platform(user), body)
         if conflict:
             return web.json_response({"error": conflict}, status=409)
+        # finally (not per-except pops): a CancelledError raised while awaiting
+        # start_coro is not an Exception, and a leaked placeholder would 409
+        # every later action for this user until restart.
         try:
-            ws = await start_coro(user["id"], request["wallet"], body, await _push_token(user))
-        except economy_api.EconomyError as e:
+            try:
+                ws = await start_coro(user["id"], request["wallet"], body, await _push_token(user))
+            except economy_api.EconomyError as e:
+                return web.json_response({"error": str(e)}, status=400)
+            except (KeyError, ValueError) as e:
+                return web.json_response({"error": f"missing or invalid field: {e}"}, status=400)
+            except Exception as e:
+                logging.error(f"{kind} failed to start: {e}")
+                return web.json_response({"error": "could not start the action"}, status=502)
+            ws.platform = _platform(user)
+            economy_sessions[ws.id] = ws
+            return web.json_response(ws.to_dict())
+        finally:
             economy_sessions.pop(placeholder_id, None)
-            return web.json_response({"error": str(e)}, status=400)
-        except (KeyError, ValueError) as e:
-            economy_sessions.pop(placeholder_id, None)
-            return web.json_response({"error": f"missing or invalid field: {e}"}, status=400)
-        except Exception as e:
-            economy_sessions.pop(placeholder_id, None)
-            logging.error(f"{kind} failed to start: {e}")
-            return web.json_response({"error": "could not start the action"}, status=502)
-        ws.platform = _platform(user)
-        economy_sessions.pop(placeholder_id, None)
-        economy_sessions[ws.id] = ws
-        return web.json_response(ws.to_dict())
 
     return handler
 
