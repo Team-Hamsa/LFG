@@ -67,9 +67,10 @@ non-blocking notification when it lands.
   `autofill_and_sign` + `submit_and_wait` for backend-wallet submissions.
   Eliminates the sequence-collision race (fixes the latent cross-user bug
   too).
-- **Per-owner Closet lock**: an `asyncio.Lock` keyed by owner around the
-  Closet sync-then-persist step in the harvest flow, so concurrent harvests'
-  Closet metadata read-modify-writes serialize and both asset sets land.
+- **Per-owner Closet lock**: ALREADY EXISTS — `economy_flow._serialize_by_owner`
+  (#180, `lfg_core/owner_lock.py`) wraps every `run_*` flow whole, so stacked
+  harvests for one owner queue on that lock automatically. No new code needed;
+  the plan only adds a test asserting two concurrent `run_harvest`s both land.
 - Net behavior: stacked harvests **pipeline** through the single issuer
   wallet rather than run truly simultaneously on-chain (unavoidable with one
   signing account); the user never waits on any of it.
