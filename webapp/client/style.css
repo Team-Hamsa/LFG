@@ -740,7 +740,7 @@ button.back:hover { color: var(--text); border: none; }
   cursor: pointer; padding: 0;
 }
 .closet-item.incompatible { opacity: .35; cursor: not-allowed; }
-.closet-item img { width: 100%; height: 100%; object-fit: contain; }
+.closet-item img, .closet-item video { width: 100%; height: 100%; object-fit: contain; }
 .closet-item .count {
   position: absolute; bottom: 2px; right: 4px; font-size: .7rem; font-weight: 700;
 }
@@ -758,7 +758,7 @@ button.back:hover { color: var(--text); border: none; }
   padding: 8px 4px; border: 2px solid var(--ink); border-radius: 10px;
   background: var(--surface-2); cursor: pointer;
 }
-.go-tile img { width: 72px; height: 72px; object-fit: contain; }
+.go-tile img, .go-tile video { width: 72px; height: 72px; object-fit: contain; }
 .go-tile.active { box-shadow: 0 0 0 3px var(--blue); }
 /* NFT with empty/missing on-chain metadata (freshly minted, not yet indexed):
    a calm striped placeholder, disabled until the indexer catches up. */
@@ -802,7 +802,7 @@ button.back:hover { color: var(--text); border: none; }
   background: var(--surface-2); border: 1px solid var(--line);
   border-radius: 8px; padding: 4px 8px 4px 4px;
 }
-.trait-chip img { width: 36px; height: 36px; object-fit: contain; border-radius: 5px; background: var(--surface); }
+.trait-chip img, .trait-chip video { width: 36px; height: 36px; object-fit: contain; border-radius: 5px; background: var(--surface); }
 .trait-chip-label { font-size: .75rem; color: var(--text); flex: 1; }
 .trait-chip .deposit,
 .trait-chip .chip-action {

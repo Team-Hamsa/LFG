@@ -108,3 +108,34 @@ def test_find_display_body_missing_everywhere(tmp_path):
     (tmp_path / "male").mkdir()
     store = layer_store.LocalLayerStore(str(tmp_path))
     assert store.find_display_body("Hat", "Ghost", ["male"]) is None
+
+
+def test_local_resolve_webm_layer(tmp_path):
+    base = tmp_path / "layers" / "male" / "Body"
+    os.makedirs(base)
+    (base / "Straight Diamond.webm").write_bytes(b"x")
+    store = layer_store.LocalLayerStore(str(tmp_path / "layers"))
+    path = _run(store.resolve("male", "Body", "Straight Diamond"))
+    assert path is not None and path.endswith(".webm")
+
+
+def test_local_resolve_static_shadows_animated(tmp_path):
+    # Extension precedence: png > gif > webm > mp4 — replacing a static trait
+    # with an animated one means deleting the png (same stem), so the static
+    # file must win while both exist.
+    base = tmp_path / "layers" / "male" / "Body"
+    os.makedirs(base)
+    for ext in (".png", ".gif", ".webm", ".mp4"):
+        (base / f"Straight Diamond{ext}").write_bytes(b"x")
+    store = layer_store.LocalLayerStore(str(tmp_path / "layers"))
+    path = _run(store.resolve("male", "Body", "Straight Diamond"))
+    assert path is not None and path.endswith(".png")
+    (base / "Straight Diamond.png").unlink()
+    path = _run(store.resolve("male", "Body", "Straight Diamond"))
+    assert path is not None and path.endswith(".gif")
+    (base / "Straight Diamond.gif").unlink()
+    path = _run(store.resolve("male", "Body", "Straight Diamond"))
+    assert path is not None and path.endswith(".webm")
+    (base / "Straight Diamond.webm").unlink()
+    path = _run(store.resolve("male", "Body", "Straight Diamond"))
+    assert path is not None and path.endswith(".mp4")

@@ -2,7 +2,7 @@
 # Unified trait-layer source shared by the mint and swap flows.
 #
 # Canonical structure (one tree, locally or on BunnyCDN storage):
-#   <body>/<TraitType>/<Value>.png|.gif|.mp4
+#   <body>/<TraitType>/<Value>.png|.gif|.webm|.mp4
 # e.g. male/Eyes/Laser.png  —  the file stem IS the metadata trait value.
 #
 # CdnLayerStore lists directories via the Bunny storage API and downloads
@@ -17,7 +17,7 @@ import aiohttp
 
 from lfg_core import config
 
-LAYER_EXTENSIONS = (".png", ".gif", ".mp4")
+LAYER_EXTENSIONS = (".png", ".gif", ".webm", ".mp4")
 
 # Traits under this directory are available to every body (e.g. seasonal
 # cosmetics that aren't body-specific). list_values/list_trait_types union it
