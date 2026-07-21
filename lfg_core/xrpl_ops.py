@@ -41,7 +41,7 @@ from xrpl.transaction import autofill_and_sign, submit_and_wait
 from xrpl.utils import get_nftoken_id, xrp_to_drops
 from xrpl.wallet import Wallet
 
-from lfg_core import config, memos, payment_ledger
+from lfg_core import config, memos, owner_lock, payment_ledger
 
 # On-ledger NFToken flag bits (mirror the tf* mint flags)
 NFT_FLAG_BURNABLE = 0x0001
@@ -121,23 +121,32 @@ async def _submit_and_confirm(
     LastLedgerSequence, so if it raised the tx may still have landed. Instead of
     resubmitting, the prior hash is looked up on-ledger and only its validated
     outcome is trusted; an unconfirmable outcome fails closed as indeterminate.
-    (This also removes the duplicate-mint risk of the old blind retry loop, #179.)"""
-    signed = await asyncio.to_thread(autofill_and_sign, tx, client, wallet)
-    try:
-        # Pass wallet=None: `signed` is already signed, so submit_and_wait must
-        # not re-sign/re-autofill it — otherwise the submitted tx could differ
-        # from signed.get_hash() and the exception path would confirm the wrong
-        # hash, marking an actually-submitted tx as indeterminate (#188).
-        response = await asyncio.to_thread(submit_and_wait, signed, client, None, autofill=False)
-    except Exception as e:
-        logging.warning(f"{label}: submit_and_wait raised ({e}); confirming by hash")
-        confirmed = await _confirm_by_hash(client, signed.get_hash())
-        if confirmed is None:
-            raise IndeterminateResultError(
-                f"{label}: on-ledger outcome unknown after submit raised ({e})"
-            ) from e
-        return _validated_result(confirmed, label)
-    return _validated_result(response.result, label)
+    (This also removes the duplicate-mint risk of the old blind retry loop, #179.)
+
+    Serialized per signing account (fire-and-forget harvests, 2026-07-21):
+    autofill reads the account sequence, so two concurrent backend-signed txs
+    would sign the same sequence and one would fail tefPAST_SEQ. The lock
+    spans sign→validate; backend txs pipeline instead of colliding. Keyed on
+    the classic address via the loop-keyed owner_lock registry (#180)."""
+    async with owner_lock.owner_lock(f"xrpl-submit:{wallet.classic_address}"):
+        signed = await asyncio.to_thread(autofill_and_sign, tx, client, wallet)
+        try:
+            # Pass wallet=None: `signed` is already signed, so submit_and_wait must
+            # not re-sign/re-autofill it — otherwise the submitted tx could differ
+            # from signed.get_hash() and the exception path would confirm the wrong
+            # hash, marking an actually-submitted tx as indeterminate (#188).
+            response = await asyncio.to_thread(
+                submit_and_wait, signed, client, None, autofill=False
+            )
+        except Exception as e:
+            logging.warning(f"{label}: submit_and_wait raised ({e}); confirming by hash")
+            confirmed = await _confirm_by_hash(client, signed.get_hash())
+            if confirmed is None:
+                raise IndeterminateResultError(
+                    f"{label}: on-ledger outcome unknown after submit raised ({e})"
+                ) from e
+            return _validated_result(confirmed, label)
+        return _validated_result(response.result, label)
 
 
 async def mint_nft(
