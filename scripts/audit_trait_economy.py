@@ -69,18 +69,7 @@ def format_economy_report(
         lines.append("_None._")
     lines.append("")
 
-    lines.append("## Wrong body (live edition body ≠ genesis)")
-    lines.append("")
-    if completeness.wrong_body:
-        lines.append("| Edition | Found | Expected |")
-        lines.append("| --- | --- | --- |")
-        for ed, (found, expected) in sorted(completeness.wrong_body.items()):
-            lines.append(f"| {ed} | {found} | {expected} |")
-    else:
-        lines.append("_None._")
-    lines.append("")
-
-    lines.append("## Orphan bodies (live edition not in genesis)")
+    lines.append("## Orphan bodies (dressed live edition not in genesis)")
     lines.append("")
     lines.append(
         ", ".join(str(e) for e in completeness.orphan_bodies) if completeness.orphan_bodies else "—"

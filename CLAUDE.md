@@ -586,8 +586,11 @@ upgrade path (journaled -1/+1 for audit clarity) to bring it onto the mutable
 blank model. Bodies are themselves ordinary `("Body", value)` Closet assets
 (no separate body-editions list) — `closet_bodies` is a retired legacy table;
 `scripts/migrate_closet_bodies_to_values.py` converts any remaining legacy
-rows and **MUST run once before the new listener/flows serve traffic**, or a
-pre-migration Closet's bodies are invisible to Assemble. Blank character art
+rows and **MUST run once before the new listener/flows serve traffic** (stop
+economy traffic → migrate each network → audit → restart on the new code) —
+the new flows WIPE `closet_bodies` (DB rows and the on-chain token's `bodies`
+list) on a user's first economy op, so any un-migrated legacy body edition is
+lost, not merely invisible, once the new code is live. Blank character art
 is uploaded via `scripts/upload_blank_art.py` and served from
 `BLANK_IMAGE_URL`.
 

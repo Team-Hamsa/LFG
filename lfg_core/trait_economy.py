@@ -41,7 +41,6 @@ class ConservationReport:
 
 @dataclass
 class CompletenessReport:
-    wrong_body: dict[int, tuple[str, str]]
     orphan_bodies: list[int]
     slot_anomalies: dict[int, list[str]]
     ok: bool
@@ -221,13 +220,26 @@ def verify_conservation(
 
 
 def verify_completeness(characters: dict[int, OnchainNft], genesis: Genesis) -> CompletenessReport:
-    """Completeness: every live character holds exactly one asset per non-body
-    slot and its body matches the genesis body ledger."""
-    wrong_body: dict[int, tuple[str, str]] = {}
+    """Completeness (blank model): every DRESSED live character holds exactly
+    one asset per non-body slot, and every DRESSED edition is a known edition in
+    the (effective) genesis ledger.
+
+    BLANK characters (all slots "None") are skipped entirely — a blank has no
+    per-slot assets by design, and its body no longer defines anything.
+
+    The genesis body value is NO LONGER compared against a dressed character's
+    live body: bodies are swappable now (harvest→Closet, assemble/equip a
+    different body back on), so genesis does not define a live character's body.
+    The old `wrong_body` check is retired; `orphan_bodies` still flags a dressed
+    live edition that is unknown to the genesis ledger (a real accounting
+    anomaly, independent of which body value it currently wears)."""
     orphan_bodies: list[int] = []
     slot_anomalies: dict[int, list[str]] = {}
 
     for edition, rec in characters.items():
+        if is_blank(rec):
+            continue
+
         seen: Counter[str] = Counter(
             a["trait_type"] for a in rec.attributes if a.get("trait_type") in NON_BODY_SLOTS
         )
@@ -235,17 +247,11 @@ def verify_completeness(characters: dict[int, OnchainNft], genesis: Genesis) -> 
         if bad_slots:
             slot_anomalies[edition] = bad_slots
 
-        expected = genesis.edition_bodies.get(edition)
-        if expected is None:
+        if edition not in genesis.edition_bodies:
             orphan_bodies.append(edition)
-            continue
-        found_body = swap_meta.get_attr(rec.attributes, "Body") or ""
-        if found_body != expected[0]:
-            wrong_body[edition] = (found_body, expected[0])
 
-    ok = not wrong_body and not orphan_bodies and not slot_anomalies
+    ok = not orphan_bodies and not slot_anomalies
     return CompletenessReport(
-        wrong_body=wrong_body,
         orphan_bodies=sorted(orphan_bodies),
         slot_anomalies=slot_anomalies,
         ok=ok,

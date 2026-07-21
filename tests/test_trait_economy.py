@@ -159,22 +159,30 @@ def test_verify_completeness_ok_for_normalized_characters():
     g = trait_economy.build_genesis({1: a})
     rep = trait_economy.verify_completeness({1: a}, g)
     assert rep.ok
-    assert rep.wrong_body == {}
     assert rep.orphan_bodies == []
     assert rep.slot_anomalies == {}
 
 
-def test_verify_completeness_flags_wrong_body_and_orphan():
+def test_verify_completeness_ignores_swapped_body_flags_orphan():
+    """Blank model: a live character wearing a DIFFERENT body value than its
+    genesis body is NOT a violation (bodies are swappable — the old wrong_body
+    check is retired). An edition unknown to the genesis ledger is still an
+    orphan; a dressed character missing non-body slots is still a slot anomaly."""
     a = _nft("a", 1, body_class="male", attrs=_attrs(body="Straight"))
     g = trait_economy.build_genesis({1: a})
-    # Edition 1 now shows a different body value; edition 9 isn't in genesis.
-    mutated = _nft("a2", 1, body_class="male", attrs=_attrs(body="Curved"))
+    # Edition 1 now shows a different body value — must NOT be flagged.
+    rebodied = _nft(
+        "a2",
+        1,
+        body_class="male",
+        attrs=swap_meta.normalize_attributes(_attrs(body="Curved", Background="Sky")),
+    )
     orphan = _nft("z", 9, attrs=_attrs(body="Straight"))
-    rep = trait_economy.verify_completeness({1: mutated, 9: orphan}, g)
+    rep = trait_economy.verify_completeness({1: rebodied, 9: orphan}, g)
     assert not rep.ok
-    assert rep.wrong_body[1] == ("Curved", "Straight")
     assert rep.orphan_bodies == [9]
-    assert 1 in rep.slot_anomalies  # missing non-body slots are flagged
+    assert 1 not in rep.slot_anomalies  # rebodied char has a full valid slot set
+    assert 9 in rep.slot_anomalies  # orphan is missing non-body slots
 
 
 def test_verify_completeness_flags_duplicate_slot():

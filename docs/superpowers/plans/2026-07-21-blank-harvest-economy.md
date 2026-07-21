@@ -563,7 +563,13 @@ The body value → layer-dir class mapping the preview needs: have Task 10 retur
 
 - [ ] **Step 1:** Full gate: `.venv/bin/pytest -q`, `ruff check .`, `ruff format --check .` → green.
 - [ ] **Step 2:** Open Phase B PR — `feat(activity): assemble builder UI (Phase B)`, body links spec + Phase A PR.
-- [ ] **Step 3:** Ops notes in the PR body: run `scripts/upload_blank_art.py` (needs the silhouette PNG from the user — 1080×1080, flag it explicitly), then `scripts/migrate_closet_bodies_to_values.py --network testnet` and `--network mainnet` post-deploy of Phase A; verify with `scripts/audit_trait_economy.py`.
+- [ ] **Step 3:** Ops notes in the PR body: run `scripts/upload_blank_art.py` (needs the silhouette PNG from the user — 1080×1080, flag it explicitly).
+
+  **Closet-bodies migration ordering — run it BEFORE the new code serves traffic, NOT after.** The Phase A flows wipe `closet_bodies` (both the DB rows and the on-chain Closet token's `bodies` list) on a user's first economy op, so once the new code is live any un-migrated legacy body edition is lost. The correct deploy sequence per network is:
+  1. Stop economy traffic (take the economy stack down, or use a deploy window where no harvest/assemble/equip/extract/deposit can run).
+  2. Run the migration on each network: `scripts/migrate_closet_bodies_to_values.py --network testnet` then `--network mainnet`.
+  3. Verify with `scripts/audit_trait_economy.py --network testnet|mainnet` (conservation OK).
+  4. Only then restart with the new Phase A code.
 
 ---
 
