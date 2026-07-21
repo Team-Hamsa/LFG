@@ -110,3 +110,19 @@ export function closetTileState(asset, char) {
   if (!char.body) return { visible: false, art: 'blank', label: '' };
   return { visible: true, art: 'layer', label: '' };
 }
+
+// First legal value per slot from an options map — mirrors the server's old
+// first-match prefill so one-tap assemble still works.
+export function defaultChosen(slots, slotOptions) {
+  const chosen = {};
+  for (const s of slots) {
+    const vals = slotOptions[s] || [];
+    if (vals.length) chosen[s] = vals[0];
+  }
+  return chosen;
+}
+
+// Slots with no legal closet asset for this body (blocks the commit button).
+export function missingSlots(slots, slotOptions) {
+  return slots.filter((s) => !(slotOptions[s] || []).length);
+}
