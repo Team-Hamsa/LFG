@@ -45,13 +45,12 @@ class _ClosetFakes:
 
 def test_metadata_roundtrips():
     assets = [("Head", "None", 3), ("Background", "Blue", 1)]
-    bodies = [3536, 12]
-    meta = bt.build_closet_metadata("rUser", assets, bodies)
-    assert meta["lfg_closet"]["bodies"] == [12, 3536]  # sorted
+    meta = bt.build_closet_metadata("rUser", assets, [])
+    assert meta["lfg_closet"]["bodies"] == []  # schema v2: always empty
     assert meta["name"] == "LFG Closet — rUser"
     got_assets, got_bodies = bt.parse_closet_metadata(meta)
     assert sorted(got_assets) == sorted(assets)
-    assert got_bodies == [12, 3536]
+    assert got_bodies == []
 
 
 def test_none_assets_preserved():

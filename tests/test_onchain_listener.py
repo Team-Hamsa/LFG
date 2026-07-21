@@ -206,7 +206,7 @@ def test_listen_path_fetches_token_and_meta_once_per_mint():
 def test_listen_path_rebuilds_bucket_from_modify():
     conn = _conn()
     _freeze(conn)
-    meta = bt.build_closet_metadata("rUser", [("Head", "None", 2), ("Eyes", "Blue", 1)], [3536])
+    meta = bt.build_closet_metadata("rUser", [("Head", "None", 2), ("Eyes", "Blue", 1)], [])
 
     async def fetch_token(nft_id):
         return {
@@ -236,7 +236,8 @@ def test_listen_path_rebuilds_bucket_from_modify():
     )
     assets = {(s, v): n for o, s, v, n in es.read_closet_assets(conn)}
     assert assets == {("Head", "None"): 2, ("Eyes", "Blue"): 1}
-    assert es.read_closet_bodies(conn) == [("rUser", 3536)]
+    # schema v2: build_closet_metadata never writes legacy body editions.
+    assert es.read_closet_bodies(conn) == []
 
 
 def test_listen_path_accept_closet_promotes_pending_to_active():

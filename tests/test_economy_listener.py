@@ -34,7 +34,7 @@ def _char_meta(edition: int, body: str = "Straight Blue") -> dict:
 
 def test_closet_modify_rebuilds_tables():
     conn = _conn()
-    meta = bt.build_closet_metadata("rUser", [("Head", "None", 2), ("Eyes", "Blue", 1)], [3536])
+    meta = bt.build_closet_metadata("rUser", [("Head", "None", 2), ("Eyes", "Blue", 1)], [])
 
     async def fetch_token(nft_id):
         return {
@@ -64,7 +64,8 @@ def test_closet_modify_rebuilds_tables():
     )
     assets = {(s, v): n for o, s, v, n in es.read_closet_assets(conn)}
     assert assets == {("Head", "None"): 2, ("Eyes", "Blue"): 1}
-    assert es.read_closet_bodies(conn) == [("rUser", 3536)]
+    # schema v2: build_closet_metadata never writes legacy body editions.
+    assert es.read_closet_bodies(conn) == []
     assert es.get_closet_token(conn, "rUser") == ("CLOSET", "AB")
 
 
