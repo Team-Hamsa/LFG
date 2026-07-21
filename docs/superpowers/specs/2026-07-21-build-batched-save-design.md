@@ -1,7 +1,7 @@
 # Build panel: batched Save instead of per-click equip
 
 **Date:** 2026-07-21
-**Status:** Design approved, ready for planning
+**Status:** Implemented
 
 ## Problem
 

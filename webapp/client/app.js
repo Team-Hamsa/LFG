@@ -2388,6 +2388,13 @@ function discardPending() {
 // it is safe to proceed (nothing staged, or the user chose to discard).
 // Native window.confirm is a silent no-op in Discord's sandboxed iframe.
 async function confirmDiscardIfDirty() {
+  // A save is already in flight — pendingEquips isn't cleared until saveBuild's
+  // finally, so isDirty() would still read true here. Refuse the exit instead of
+  // offering "Discard" (which would lie about the in-flight batch never landing).
+  if (saveBusy) {
+    showError('Still saving your build — please wait a moment.');
+    return false;
+  }
   if (!isDirty()) return true;
   const char = activeChar();
   const ok = await confirmDialog({
@@ -3455,8 +3462,10 @@ async function main() {
     if (!(await confirmDiscardIfDirty())) return;
     showMintHome();
   };
-  el('build-save-btn').onclick = () => saveBuild();
-  el('build-discard-btn').onclick = () => discardPending();
+  const saveBtn = el('build-save-btn');
+  if (saveBtn) saveBtn.onclick = () => saveBuild();
+  const discardBtn = el('build-discard-btn');
+  if (discardBtn) discardBtn.onclick = () => discardPending();
   el('go-switch-btn').onclick = () => openGoPicker();
   el('swapper-btn').onclick = () => openSwapper();
   el('swap-back-btn').onclick = () => showMintHome();
