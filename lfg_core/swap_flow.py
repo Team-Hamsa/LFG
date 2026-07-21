@@ -245,22 +245,32 @@ def _swap_metadata(
 
 async def _build_and_upload(
     nft: dict[str, Any], attributes: list[dict[str, Any]], store: Any, token: str
-) -> tuple[str, str | None, int]:
+) -> tuple[str, str | None, int, str]:
     """Compose the re-crafted NFT and upload image/video; returns
-    (image_url, video_url, new_burn_count)."""
+    (image_url, video_url, new_burn_count, cdn_stem) — the caller uploads the
+    metadata JSON under the same stem so image and metadata stay paired.
+
+    The CDN stem carries a random suffix so every swap publishes at a URL
+    that has never been served before. `burnCount` alone is NOT a safe
+    revision counter: economy-written metadata (scripts/_economy_deps) omits
+    the field, so the swap after an economy op reads 0 and would re-upload
+    over the `<edition>_1.*` an earlier swap already published — after which
+    every URL-keyed cache (the browser, the Bunny edge, and the listener's
+    own metadata fetch, which then indexes pre-swap attributes) keeps
+    serving the old art. Same reasoning as _economy_deps._compose_char /
+    _upload_closet, which have always suffixed for exactly this reason."""
     new_burn = nft["burn_count"] + 1
-    path, is_video = await swap_compose.compose_nft(
-        attributes, nft["gender"], store, f"{nft['number']}_{new_burn}"
-    )
     num = nft["number"]
+    stem = f"{num}_{new_burn}_{uuid.uuid4().hex[:8]}"
+    path, is_video = await swap_compose.compose_nft(attributes, nft["gender"], store, stem)
     image_url, video_url = await swap_compose.upload_output(
         path,
         is_video,
         _upload_swap_file,
-        f"{num}/{num}_{new_burn}",
+        f"{num}/{stem}",
         keep_still=image_archive.pending_still_path(config.XRPL_NETWORK, num, token),
     )
-    return image_url, video_url, new_burn
+    return image_url, video_url, new_burn, stem
 
 
 def _archive_stills(items: list[dict[str, Any]], token: str) -> None:
@@ -715,11 +725,13 @@ async def run_swap_session(session: SwapSession) -> None:
         session.state = COMPOSING
         for item in items:
             nft, attrs = item["nft"], item["attrs"]
-            image_url, video_url, new_burn = await _build_and_upload(nft, attrs, store, session.id)
+            image_url, video_url, new_burn, stem = await _build_and_upload(
+                nft, attrs, store, session.id
+            )
             session.state = UPLOADING
             meta = _swap_metadata(nft, attrs, image_url, video_url)
             meta_url = await _upload_swap_file(
-                f"{nft['number']}/{nft['number']}_{new_burn}.json",
+                f"{nft['number']}/{stem}.json",
                 json.dumps(meta, indent=2).encode(),
                 "application/json",
             )
