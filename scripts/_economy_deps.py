@@ -199,7 +199,7 @@ def build_economy_deps(
         char_modify_fn=lambda nft_id, owner, url: xrpl_ops.modify_nft(nft_id, owner, url),
         char_burn_fn=lambda nft_id, owner: xrpl_ops.burn_nft(nft_id, owner or None),
         char_offer_fn=_offer_or_skip,
-        char_accept_fn=lambda offer_id: _accept_or_skip(offer_id, user_token),
+        char_accept_fn=lambda offer_id: _accept_or_skip(offer_id, user_token, owner),
         trait_compose_fn=lambda slot, value: _compose_trait(slot, value),
         trait_upload_fn=_upload_closet,
         trait_mint_fn=lambda url: xrpl_ops.mint_nft(

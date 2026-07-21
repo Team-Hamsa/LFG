@@ -116,3 +116,44 @@ def test_mint_callables_thread_memo_actions(monkeypatch):
     _run(d.char_mint_fn("https://x/m.json"))
     _run(d.trait_mint_fn("https://x/t.json"))
     assert captured == [memos.ACTION_ASSEMBLE, memos.ACTION_EXTRACT]
+
+
+def test_build_economy_deps_pins_accept_payloads_to_owner(monkeypatch):
+    """BOTH delivery accepts — the Closet claim/extract one and the assemble
+    character one — must pin the payload to the owner's wallet, or Xaman lets
+    another account sign a delivery it can't legally accept."""
+    import sqlite3
+
+    import _economy_deps as deps
+
+    from lfg_core import economy_store, xumm_ops
+
+    seen = []
+
+    async def fake_accept(offer_id, **kw):
+        seen.append(kw.get("account"))
+        return {"uuid": "u", "qr_url": "q", "xumm_url": "x"}
+
+    monkeypatch.setattr(xumm_ops, "create_accept_offer_payload", fake_accept)
+    conn = sqlite3.connect(":memory:")
+    economy_store.init_economy_schema(conn)
+    d = deps.build_economy_deps(conn, owner="rOWNER")
+    _run(d.closet_accept_fn("OFFER1"))
+    _run(d.char_accept_fn("OFFER2"))
+    assert seen == ["rOWNER", "rOWNER"]
+
+
+def test_build_economy_deps_without_owner_leaves_account_unset():
+    """The CLI drivers build deps with no identity context; the payload must
+    still be creatable (QR-only, unpinned) rather than erroring."""
+    import sqlite3
+
+    import _economy_deps as deps
+
+    from lfg_core import economy_store
+
+    conn = sqlite3.connect(":memory:")
+    economy_store.init_economy_schema(conn)
+    d = deps.build_economy_deps(conn)
+    assert callable(d.closet_accept_fn)
+    assert callable(d.char_accept_fn)
