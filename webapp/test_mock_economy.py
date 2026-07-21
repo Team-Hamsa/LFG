@@ -32,7 +32,7 @@ def test_equip_swaps_and_returns_displaced():
     )
 
 
-def test_harvest_moves_parts_to_bucket():
+def test_harvest_strips_character_to_blank_in_place():
     m = mock_economy.MockEconomy()
     owner = mock_economy.DEV_OWNER
     char = m.read_state(owner)["characters"][0]
@@ -41,7 +41,40 @@ def test_harvest_moves_parts_to_bucket():
     m.create_closet(owner)  # -> active
     res = m.harvest(owner, char["nft_id"])
     assert res["state"] == "done"
-    assert not any(c["nft_id"] == char["nft_id"] for c in m.read_state(owner)["characters"])
+    # Blank model: the character stays (same nft_id) but is now blank; its body
+    # + traits dropped into the Closet as loose assets.
+    after = next(c for c in m.read_state(owner)["characters"] if c["nft_id"] == char["nft_id"])
+    assert after["blank"] is True
+    assert all(a["value"] == "None" for a in after["attributes"])
+    assert ("Body", "male") in m.assets and m.assets[("Body", "male")] >= 1
+
+
+def test_assemble_dresses_blank_in_place():
+    m = mock_economy.MockEconomy()
+    owner = mock_economy.DEV_OWNER
+    m.create_closet(owner)
+    m.create_closet(owner)  # -> active
+    char = m.read_state(owner)["characters"][0]
+    m.harvest(owner, char["nft_id"])  # strip to blank; body+traits into Closet
+    chosen = {"Head": "Crown", "Clothing": "Hoodie"}
+    for slot, value in chosen.items():
+        m.assets[(slot, value)] = m.assets.get((slot, value), 0) + 1
+    res = m.assemble(owner, char["nft_id"], "male", chosen)
+    assert res["state"] == "done" and res["nft_id"] == char["nft_id"]
+    assert res["accept"] is None and res["edition"] == char["edition"]
+    after = next(c for c in m.read_state(owner)["characters"] if c["nft_id"] == char["nft_id"])
+    assert after["blank"] is False
+    assert next(a["value"] for a in after["attributes"] if a["trait_type"] == "Head") == "Crown"
+
+
+def test_assemble_rejects_dressed_target():
+    m = mock_economy.MockEconomy()
+    owner = mock_economy.DEV_OWNER
+    m.create_closet(owner)
+    m.create_closet(owner)  # -> active
+    char = m.read_state(owner)["characters"][0]  # seeded dressed (not blank)
+    with pytest.raises(mock_economy.MockEconomyError, match="not blank"):
+        m.assemble(owner, char["nft_id"], "male", {})
 
 
 def test_mock_closet_lifecycle_gates_harvest():

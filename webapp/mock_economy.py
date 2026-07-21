@@ -24,6 +24,10 @@ def _attrs(**slots: str) -> list[dict[str, str]]:
     return [{"trait_type": s, "value": slots.get(s, "None")} for s in swap_meta.TRAIT_ORDER]
 
 
+def _is_blank(char: dict[str, Any]) -> bool:
+    return all(a["value"] == "None" for a in char["attributes"])
+
+
 class MockEconomy:
     def __init__(self) -> None:
         self.characters: list[dict[str, Any]] = [
@@ -67,7 +71,6 @@ class MockEconomy:
             ("Eyes", "Shades"): 1,
             ("Clothing", "Suit"): 1,
         }
-        self.bodies: list[int] = [42]
         # Per-wallet closet token state: maps owner -> {status, nft_id}
         self._closet: dict[str, dict[str, Any]] = {}
         # Per-wallet standalone trait tokens: maps owner -> list of {nft_id, slot, value}
@@ -77,13 +80,17 @@ class MockEconomy:
 
     # --- reads ---
     def read_state(self, owner: str) -> dict[str, Any]:
-        chars = copy.deepcopy(self.characters) if owner == DEV_OWNER else []
+        chars = []
+        if owner == DEV_OWNER:
+            for c in self.characters:
+                d = copy.deepcopy(c)
+                d["blank"] = _is_blank(c)
+                chars.append(d)
         assets = (
             [{"slot": s, "value": v, "count": c} for (s, v), c in self.assets.items() if c > 0]
             if owner == DEV_OWNER
             else []
         )
-        bodies = list(self.bodies) if owner == DEV_OWNER else []
         closet_rec = self._closet.get(owner)
         token: dict[str, Any] = {
             "status": closet_rec["status"] if closet_rec else _CLOSET_NONE,
@@ -92,7 +99,7 @@ class MockEconomy:
         trait_tokens = list(self._trait_tokens.get(owner, []))
         return {
             "characters": chars,
-            "closet": {"assets": assets, "bodies": bodies, "token": token},
+            "closet": {"assets": assets, "token": token},
             "trait_order": swap_meta.TRAIT_ORDER,
             "slots": trait_economy.NON_BODY_SLOTS,
             "trait_tokens": trait_tokens,
@@ -168,64 +175,54 @@ class MockEconomy:
         return {"id": "mock", "state": "done", "error": None, "displaced": displaced}
 
     def harvest(self, owner: str, nft_id: str) -> dict[str, Any]:
+        """Strip a character to a BLANK in place: every slot value (all 8
+        non-body values plus the Body) drops into the Closet as loose assets and
+        the character's attributes go all-"None". Supply-neutral; no burn/mint."""
         if not self._closet_active(owner):
             raise MockEconomyError("Create and claim your Closet first.")
         char = self._char(nft_id)
         moved = []
         for a in char["attributes"]:
-            if a["trait_type"] in trait_economy.NON_BODY_SLOTS and a["value"] != "None":
-                self.assets[(a["trait_type"], a["value"])] = (
-                    self.assets.get((a["trait_type"], a["value"]), 0) + 1
-                )
-                moved.append((a["trait_type"], a["value"]))
-        self.bodies.append(char["edition"])
-        self.characters = [c for c in self.characters if c["nft_id"] != nft_id]
-        return {"id": "mock", "state": "done", "error": None, "accept": None, "moved_assets": moved}
-
-    def assemble_prefill(self, owner: str) -> dict[str, Any]:
-        """Dev-mode stand-in for economy_api.assemble_prefill: no affinity
-        knowledge here, so just propose the first body + first held asset per
-        slot (the mock's assemble accepts anything)."""
-        if not self._closet_active(owner):
-            raise MockEconomyError("Create and claim your Closet first.")
-        if not self.bodies:
-            raise MockEconomyError("No bodies in your Closet to assemble.")
-        chosen: dict[str, str] = {}
-        missing: list[str] = []
-        for slot in trait_economy.NON_BODY_SLOTS:
-            value = next((v for (s, v), c in self.assets.items() if s == slot and c > 0), None)
-            if value is None:
-                missing.append(slot)
-            else:
-                chosen[slot] = value
-        return {"edition": self.bodies[0], "body": "male", "chosen": chosen, "missing": missing}
-
-    def assemble(self, owner: str, edition: int, chosen: dict[str, str]) -> dict[str, Any]:
-        if not self._closet_active(owner):
-            raise MockEconomyError("Create and claim your Closet first.")
-        for slot, value in chosen.items():
-            self.assets[(slot, value)] = self.assets.get((slot, value), 0) - 1
-        if edition in self.bodies:
-            self.bodies.remove(edition)
-        self.characters.append(
-            {
-                "nft_id": f"MOCK-{edition}",
-                "edition": edition,
-                "body": "male",
-                "mutable": True,
-                "image_url": "",
-                "attributes": [
-                    {"trait_type": s, "value": chosen.get(s, "None")} for s in swap_meta.TRAIT_ORDER
-                ],
-            }
-        )
+            slot, value = a["trait_type"], a["value"]
+            self.assets[(slot, value)] = self.assets.get((slot, value), 0) + 1
+            moved.append((slot, value))
+        char["attributes"] = _attrs()  # all "None" -> blank
         return {
             "id": "mock",
             "state": "done",
             "error": None,
-            "accept": "https://xaman/MOCK",
-            "nft_id": f"MOCK-{edition}",
+            "accept": None,
+            "new_nft_id": None,
+            "moved_assets": moved,
+        }
+
+    def assemble(
+        self, owner: str, nft_id: str, body: str, chosen: dict[str, str]
+    ) -> dict[str, Any]:
+        """Dress a caller-owned BLANK character in place: debit the body + the
+        chosen non-body set from the Closet, set the character's attributes. No
+        mint/offer/accept — the character keeps its nft_id."""
+        if not self._closet_active(owner):
+            raise MockEconomyError("Create and claim your Closet first.")
+        char = self._char(nft_id)
+        if not _is_blank(char):
+            raise MockEconomyError("cannot assemble: character is not blank — harvest it first")
+        self.assets[("Body", body)] = self.assets.get(("Body", body), 0) - 1
+        for slot, value in chosen.items():
+            self.assets[(slot, value)] = self.assets.get((slot, value), 0) - 1
+        char["body"] = body
+        char["attributes"] = [
+            {"trait_type": s, "value": (body if s == "Body" else chosen.get(s, "None"))}
+            for s in swap_meta.TRAIT_ORDER
+        ]
+        return {
+            "id": "mock",
+            "state": "done",
+            "error": None,
+            "accept": None,
+            "nft_id": nft_id,
             "image_url": "",
+            "edition": char["edition"],
         }
 
     def extract(self, owner: str, body: dict[str, Any]) -> dict[str, Any]:

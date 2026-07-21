@@ -365,12 +365,13 @@ def test_swap_announcements(ev_mod):
 
 
 def test_assemble_announcements(ev_mod):
-    assert "assembled" in ev_mod.make_announcement(_ev("assemble.completed"))
+    msg = ev_mod.make_announcement(_ev("assemble.completed", edition=3537))
+    assert "dressed a blank" in msg and "#3537" in msg
     assert "ailed" in ev_mod.make_announcement(_ev("assemble.failed"))
 
 
 def test_harvest_announcements(ev_mod):
-    assert "harvested" in ev_mod.make_announcement(_ev("harvest.completed"))
+    assert "blank" in ev_mod.make_announcement(_ev("harvest.completed"))
     assert "ailed" in ev_mod.make_announcement(_ev("harvest.failed"))
 
 

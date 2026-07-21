@@ -114,6 +114,34 @@ async def _compose_char(
     return image_url, video_url, meta_url
 
 
+async def _blank_meta(edition: int) -> str | None:
+    """Build + upload BLANK-character metadata for `edition` and return its URL.
+    Same envelope as `_compose_char` but with the fixed silhouette image and
+    trait_economy.blank_attributes() (every slot "None") — no layer compose.
+    Returns None on upload failure so the harvest flow fails safe."""
+    from lfg_core import trait_economy as te
+
+    season = swap_meta.season_for_number(edition)
+    meta: dict[str, Any] = {
+        "schema": config.NFT_SCHEMA_URL,
+        "name": f"{config.NFT_COLLECTION_NAME} #{edition}",
+        "description": f"Season {season}",
+        "image": config.BLANK_IMAGE_URL,
+        "external_link": config.EXTERNAL_WEBSITE_URL,
+        "collection": {"name": config.NFT_COLLECTION_NAME, "family": f"Season {season}"},
+        "edition": edition,
+        "attributes": te.blank_attributes(),
+    }
+    try:
+        return await _upload(
+            f"{edition}/blank_{uuid.uuid4().hex[:8]}.json",
+            json.dumps(meta, indent=2).encode(),
+            "application/json",
+        )
+    except Exception:
+        return None
+
+
 async def _compose_trait(slot: str, value: str) -> str:
     """Resolve the bare layer from the FIRST body that has it, upload, return URL."""
     store = layer_store.get_layer_store()
@@ -212,9 +240,13 @@ def build_economy_deps(
         trait_burn_fn=lambda nft_id, owner: xrpl_ops.burn_nft(nft_id, owner or None),
         trait_info_fn=lambda nft_id: _trait_info(nft_id),
         trait_meta_fn=lambda nft_id: _trait_meta(nft_id),
+<<<<<<< HEAD
         # Rarity bookkeeping (#305): harvest/assemble adjust the app-DB
         # live-count the Trait Shop price formula reads.
         app_conn_factory=lambda: sqlite3.connect(db_path.app_db_path(config.ECONOMY_NETWORK)),
+=======
+        blank_meta_fn=_blank_meta,
+>>>>>>> 769c882 (feat(service): blank-model harvest/assemble API + blank art plumbing)
     )
 
 

@@ -5263,9 +5263,9 @@ handle_harvest_start = _economy_post(
 handle_assemble_start = _economy_post(
     "assemble",
     lambda uid, w, b, tok: economy_api.start_assemble(
-        uid, w, int(b["edition"]), b["chosen"], user_token=tok
+        uid, w, b["nft_id"], b["body"], b["chosen"], user_token=tok
     ),
-    lambda w, b: mock_economy.INSTANCE.assemble(w, int(b["edition"]), b["chosen"]),
+    lambda w, b: mock_economy.INSTANCE.assemble(w, b["nft_id"], b["body"], b["chosen"]),
 )
 handle_extract_start = _economy_post(
     "extract",
@@ -5277,25 +5277,6 @@ handle_deposit_start = _economy_post(
     lambda uid, w, b, tok: economy_api.start_deposit(uid, w, b, user_token=tok),
     lambda w, b: mock_economy.INSTANCE.deposit(w, b),
 )
-
-
-async def handle_assemble_prefill(request):
-    """Server-picked assemble proposal for the Build panel's + tile — the
-    client can't judge body affinity, so it must not auto-fill the set itself."""
-    if not config.ECONOMY_ENABLED:
-        return _economy_disabled_response()
-    if config.WEBAPP_DEV_MODE:
-        try:
-            return web.json_response(mock_economy.INSTANCE.assemble_prefill(request["wallet"]))
-        except Exception as e:
-            return web.json_response({"error": str(e)}, status=400)
-    conn = economy_api.open_conn()
-    try:
-        return web.json_response(await economy_api.assemble_prefill(conn, request["wallet"]))
-    except economy_api.EconomyError as e:
-        return web.json_response({"error": str(e)}, status=400)
-    finally:
-        conn.close()
 
 
 def _make_economy_status_handler(prefix: str):
@@ -5489,8 +5470,6 @@ def create_app() -> web.Application:
     app.router.add_post("/api/harvest", require_wallet(handle_harvest_start))
     app.router.add_get("/api/harvest/{session_id}", handle_harvest_status)
     app.router.add_post("/api/assemble", require_wallet(handle_assemble_start))
-    # Must precede the {session_id} route or "prefill" is read as a session id.
-    app.router.add_get("/api/assemble/prefill", require_wallet(handle_assemble_prefill))
     app.router.add_get("/api/assemble/{session_id}", handle_assemble_status)
     app.router.add_post("/api/extract", require_wallet(handle_extract_start))
     app.router.add_get("/api/extract/{session_id}", handle_extract_status)

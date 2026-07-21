@@ -316,6 +316,13 @@ EXTERNAL_WEBSITE_URL = os.getenv("EXTERNAL_WEBSITE_URL", "https://letseffinggo.c
 NFT_COLLECTION_LOGO = os.getenv(
     "NFT_COLLECTION_LOGO", "https://lfgo.b-cdn.net/LFGO_square_logo.png"
 )
+# Silhouette art for a BLANK character (every slot "None"). Harvest points a
+# stripped character's metadata `image` here; assemble replaces it with the
+# composed art. Default is the pull-zone path scripts/upload_blank_art.py writes.
+BLANK_IMAGE_URL = os.getenv(
+    "BLANK_IMAGE_URL",
+    f"https://{BUNNY_PULL_ZONE}/blank/silhouette.png" if BUNNY_PULL_ZONE else "",
+)
 
 
 DB_PATH = app_db_path(XRPL_NETWORK)

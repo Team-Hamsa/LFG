@@ -1857,14 +1857,11 @@ def test_economy_routes_registered():
         "/api/harvest",
         "/api/harvest/{session_id}",
         "/api/assemble",
-        "/api/assemble/prefill",
         "/api/assemble/{session_id}",
     ]:
         assert expected in paths, f"missing route {expected}"
-    # prefill must be registered BEFORE the {session_id} wildcard, or aiohttp
-    # routes GET /api/assemble/prefill to the status handler ("prefill" as id).
-    ordered = [getattr(r.resource, "canonical", "") for r in app.router.routes()]
-    assert ordered.index("/api/assemble/prefill") < ordered.index("/api/assemble/{session_id}")
+    # assemble_prefill is gone (blank model, Task 8): no /api/assemble/prefill.
+    assert "/api/assemble/prefill" not in paths
 
 
 @pytest.mark.filterwarnings("ignore::aiohttp.web_exceptions.NotAppKeyWarning")
