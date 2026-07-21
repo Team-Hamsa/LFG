@@ -10,7 +10,11 @@ from types import SimpleNamespace
 os.environ.setdefault("BUNNY_PULL_ZONE", "nft.pullzone.example")
 os.environ.setdefault("LAYER_SOURCE", "local")
 
-from lfg_service.app import _economy_conflict  # noqa: E402
+from lfg_service.app import (  # noqa: E402
+    _economy_conflict,
+    _reserve_economy_slot,
+    economy_sessions,
+)
 
 TERMINAL = {"done", "failed"}
 
@@ -74,3 +78,70 @@ def test_harvest_blocks_non_harvest():
     sessions = {"a": _sess("harvest", nft_id="AAA")}
     err = _economy_conflict(sessions, TERMINAL, "equip", "u1", "discord", {})
     assert err == "wait for your running harvests to finish first"
+
+
+# --- _reserve_economy_slot: the check+reserve seam that closes the TOCTOU
+# window (Greptile P1, PR #307). This is fully synchronous, so no `await`
+# ever separates the conflict check from the reservation write — two
+# concurrent requests processed on the same event loop can never both pass.
+
+
+def _clear_economy_sessions():
+    economy_sessions.clear()
+
+
+def test_reserve_then_conflict_then_release_then_reserve_again():
+    _clear_economy_sessions()
+    try:
+        # First reservation for a harvest on nft AAA succeeds.
+        placeholder_id, conflict = _reserve_economy_slot(
+            "harvest", "u1", "discord", {"nft_id": "AAA"}
+        )
+        assert conflict is None
+        assert placeholder_id in economy_sessions
+
+        # A second concurrent reservation for the SAME nft_id, while the
+        # placeholder is still live, is refused -- this is the exact race
+        # that used to slip through the old check-then-await-then-insert
+        # ordering.
+        placeholder_id2, conflict2 = _reserve_economy_slot(
+            "harvest", "u1", "discord", {"nft_id": "AAA"}
+        )
+        assert conflict2 == "that character is already being harvested"
+        assert placeholder_id2 == ""
+        # The failed reservation must not have touched the sessions table.
+        assert len(economy_sessions) == 1
+
+        # Releasing the first placeholder (as the handler does on
+        # start_coro failure, or after swapping in the real session) frees
+        # the slot for a new reservation.
+        economy_sessions.pop(placeholder_id, None)
+        placeholder_id3, conflict3 = _reserve_economy_slot(
+            "harvest", "u1", "discord", {"nft_id": "AAA"}
+        )
+        assert conflict3 is None
+        assert placeholder_id3 in economy_sessions
+    finally:
+        _clear_economy_sessions()
+
+
+def test_reserve_different_nfts_both_succeed():
+    _clear_economy_sessions()
+    try:
+        id_a, conflict_a = _reserve_economy_slot("harvest", "u1", "discord", {"nft_id": "AAA"})
+        id_b, conflict_b = _reserve_economy_slot("harvest", "u1", "discord", {"nft_id": "BBB"})
+        assert conflict_a is None and conflict_b is None
+        assert {id_a, id_b} <= set(economy_sessions)
+    finally:
+        _clear_economy_sessions()
+
+
+def test_reserve_non_harvest_blocks_second_non_harvest():
+    _clear_economy_sessions()
+    try:
+        placeholder_id, conflict = _reserve_economy_slot("equip", "u1", "discord", {})
+        assert conflict is None
+        _, conflict2 = _reserve_economy_slot("assemble", "u1", "discord", {})
+        assert conflict2 == "an economy action is already in progress"
+    finally:
+        _clear_economy_sessions()

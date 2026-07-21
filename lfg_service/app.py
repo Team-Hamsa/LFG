@@ -23,7 +23,9 @@ import tempfile
 import threading
 import time
 import traceback
+import uuid as uuid_lib
 from collections.abc import Awaitable, Callable
+from dataclasses import dataclass, field
 from decimal import Decimal
 from html import escape
 from typing import Any, TypeVar, cast
@@ -5132,6 +5134,58 @@ def _economy_conflict(
     return None
 
 
+@dataclass
+class _PendingCharacter:
+    nft_id: str | None
+
+
+@dataclass
+class _PendingInner:
+    character: _PendingCharacter | None = None
+
+
+@dataclass
+class _PendingEconomySession:
+    """Reservation placeholder inserted into `economy_sessions` synchronously
+    (no `await` between the `_economy_conflict` check and this insert) to
+    close the TOCTOU window where two concurrent requests could both pass the
+    conflict check before either real session existed — same class of bug as
+    the #135 push-token race. Exposes just the attrs `_economy_conflict`
+    reads. Replaced by the real `EconomyWebSession` once `start_coro`
+    resolves, or removed on any failure."""
+
+    discord_id: str
+    platform: str
+    kind: str
+    state: str = "running"
+    inner: _PendingInner = field(default_factory=_PendingInner)
+
+
+def _reserve_economy_slot(
+    kind: str, user_id: str, platform: str, body: dict[str, Any]
+) -> tuple[str, str | None]:
+    """Check the concurrency policy and, if it passes, atomically reserve a
+    slot with a placeholder session. Returns (placeholder_id, conflict) —
+    on conflict the placeholder id is still returned but nothing was
+    reserved; callers must `del economy_sessions[placeholder_id]` only when
+    conflict is None."""
+    _prune_sessions(economy_sessions, economy_api.TERMINAL_STATES)
+    conflict = _economy_conflict(
+        economy_sessions, economy_api.TERMINAL_STATES, kind, user_id, platform, body
+    )
+    if conflict:
+        return "", conflict
+    placeholder_id = uuid_lib.uuid4().hex
+    nft_id = body.get("nft_id") if kind == "harvest" else None
+    economy_sessions[placeholder_id] = _PendingEconomySession(
+        discord_id=user_id,
+        platform=platform,
+        kind=kind,
+        inner=_PendingInner(character=_PendingCharacter(nft_id=nft_id)),
+    )
+    return placeholder_id, None
+
+
 def _economy_post(kind, start_coro, mock_call):
     async def handler(request):
         if not config.ECONOMY_ENABLED:
@@ -5143,22 +5197,23 @@ def _economy_post(kind, start_coro, mock_call):
                 return web.json_response(mock_call(request["wallet"], body))
             except Exception as e:
                 return web.json_response({"error": str(e)}, status=400)
-        _prune_sessions(economy_sessions, economy_api.TERMINAL_STATES)
-        conflict = _economy_conflict(
-            economy_sessions, economy_api.TERMINAL_STATES, kind, user["id"], _platform(user), body
-        )
+        placeholder_id, conflict = _reserve_economy_slot(kind, user["id"], _platform(user), body)
         if conflict:
             return web.json_response({"error": conflict}, status=409)
         try:
             ws = await start_coro(user["id"], request["wallet"], body, await _push_token(user))
         except economy_api.EconomyError as e:
+            economy_sessions.pop(placeholder_id, None)
             return web.json_response({"error": str(e)}, status=400)
         except (KeyError, ValueError) as e:
+            economy_sessions.pop(placeholder_id, None)
             return web.json_response({"error": f"missing or invalid field: {e}"}, status=400)
         except Exception as e:
+            economy_sessions.pop(placeholder_id, None)
             logging.error(f"{kind} failed to start: {e}")
             return web.json_response({"error": "could not start the action"}, status=502)
         ws.platform = _platform(user)
+        economy_sessions.pop(placeholder_id, None)
         economy_sessions[ws.id] = ws
         return web.json_response(ws.to_dict())
 
