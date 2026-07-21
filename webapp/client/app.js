@@ -15,7 +15,7 @@ import * as marketPure from './market_pure.js?v=23';
 import * as mintPure from './mint_pure.js?v=23';
 // Build-panel decision logic lives in its own pure module so it's
 // Node-testable too (tests/test_build_pure_js.py).
-import * as buildPure from './build_pure.js?v=25';
+import * as buildPure from './build_pure.js?v=26';
 
 const params = new URLSearchParams(window.location.search);
 const insideDiscord = params.has('frame_id');
@@ -1921,6 +1921,19 @@ function renderCanvas(char) {
   const canvas = el('dressup-canvas');
   canvas.replaceChildren();
   const order = economyState.trait_order;
+  // A blank (harvested) character has no traits to stack: render its own
+  // silhouette metadata image and invite the user to build it.
+  if (char.blank) {
+    canvas.classList.remove('incomplete');
+    if (char.image_url) {
+      const img = document.createElement('img');
+      img.src = imgUrl(char.image_url);
+      img.alt = 'Blank character';
+      canvas.appendChild(img);
+    }
+    el('dressup-id').textContent = `#${char.edition} · Blank — build me!`;
+    return;
+  }
   // Incomplete metadata (empty body) means every layer fetch would 400; show a
   // graceful "still indexing" state instead of a wall of broken images.
   if (!char.body) {
@@ -1975,7 +1988,7 @@ function renderGoPicker() {
     cap.textContent = t.state === 'active' ? `✓ ${t.label}` : t.label;
     const sub = document.createElement('span');
     sub.className = 'go-tile-sub';
-    sub.textContent = t.sub;
+    sub.textContent = char.blank ? 'Blank — build me!' : t.sub;
     tile.replaceChildren(media, cap, sub);
     if (t.state === 'indexing') {
       tile.disabled = true; // no body -> every layer fetch would 400
@@ -2520,11 +2533,21 @@ async function harvestActive() {
   const char = activeChar();
   if (!char) return;
   if (!(await confirmDiscardIfDirty())) return;
-  if (!(await confirmDialog({
-    title: 'Harvest this character?',
-    text: `This permanently burns #${char.edition}. Its parts go to your Closet.`,
-    confirmLabel: '🔥 Harvest',
-  }))) return;
+  // A mutable char is stripped to a blank in place (no burn, nothing to sign);
+  // a legacy non-mutable one must be burned and re-minted as a blank, which
+  // costs the user one Xaman accept — keep the heavier warning for it.
+  const confirmOpts = char.mutable
+    ? {
+        title: 'Strip this character down?',
+        text: `This strips #${char.edition} to a blank. Its parts go to your Closet; the NFT stays in your wallet.`,
+        confirmLabel: '🧺 Harvest',
+      }
+    : {
+        title: 'Harvest this character?',
+        text: `#${char.edition} predates Dynamic NFTs: harvesting burns and re-mints it as a blank (one Xaman accept), then its parts go to your Closet.`,
+        confirmLabel: '🔥 Harvest',
+      };
+  if (!(await confirmDialog(confirmOpts))) return;
   let res;
   try {
     res = await api('/api/harvest', {
@@ -2557,6 +2580,17 @@ async function trackHarvest(char, startResp) {
     showError(`Harvest of #${char.edition} failed: ${final.error || 'unknown error'}`);
   } else {
     toast(`✅ #${char.edition} harvested — parts added to your Closet.`);
+    // Legacy upgrade path: the re-mint produced a fresh blank the user must
+    // accept in Xaman — surface its QR (mutable strips have no accept).
+    if (final.accept) {
+      showFlow({
+        title: '👛 Accept your upgraded blank',
+        text: signText(final.accept_push, 'Accept your upgraded blank in Xaman.'),
+        qrData: final.accept,
+        link: final.accept,
+        done: true,
+      });
+    }
   }
   // Reconcile real state silently; re-render ONLY if the Dressing Room is the
   // visible panel — never yank the user out of another flow (e.g. a mint).
@@ -2578,42 +2612,250 @@ async function trackHarvest(char, startResp) {
 }
 
 async function openAssemble() {
-  // The server picks the edition + asset set: only it knows body affinity
-  // (a client-side "first asset per slot" pick proposed sets the commit
-  // gate rejected, e.g. a female-only beard on a skeleton body).
-  let pre;
+  let opts;
   try {
-    pre = await api('/api/assemble/prefill');
+    opts = await api('/api/assemble/options');
   } catch (e) {
     showError(e.message);
     return;
   }
-  if (pre.missing.length) {
-    showError(`Closet is missing ${pre.body}-compatible assets for: ${pre.missing.join(', ')}`);
+  if (!opts.blanks.length) {
+    showError('No blank characters to assemble — harvest a character first.');
     return;
   }
-  if (!(await confirmDialog({
-    title: 'Assemble new character?',
-    text: `Assemble a new ${pre.body} character for edition #${pre.edition}?`,
-    confirmLabel: 'Assemble',
-  }))) return;
-  commitAssemble(pre.edition, pre.chosen);
+  if (!opts.bodies.length) {
+    showError('Your Closet has no bodies — harvest a character first.');
+    return;
+  }
+  openBuilder(opts);
 }
 
-async function commitAssemble(edition, chosen) {
+// --- Assemble builder overlay ---
+// A three-step, fully client-side wizard: pick a blank -> pick a body -> pick
+// a trait per slot beside a live stacked preview. The server's
+// /api/assemble/options payload is the single source of truth: `options` is
+// keyed by body VALUE, `body_class` maps that value to its layer-dir class so
+// the preview never guesses. Commit POSTs {nft_id, body, chosen}; nothing is
+// signed (a mutable blank is dressed in place).
+let builderState = null;
+
+// The blank's silhouette art: options.blanks carry only {nft_id, edition}, so
+// cross-reference the loaded roster for the character's own metadata image
+// (the silhouette), falling back to a transparent placeholder.
+function blankImgSrc(nftId) {
+  const c = economyState && economyState.characters.find((x) => x.nft_id === nftId);
+  return c && c.image_url ? imgUrl(c.image_url, THUMB_W) : BLANK_IMG;
+}
+
+function openBuilder(opts) {
+  const overlay = el('builder-overlay');
+  if (!overlay.hidden) return; // already open
+  builderState = {
+    opts,
+    blank: opts.blanks.length === 1 ? opts.blanks[0] : null, // auto-select the lone blank
+    body: null,
+    chosen: {},
+  };
+  overlay.hidden = false;
+  const onKey = (e) => { if (e.key === 'Escape') closeBuilder(); };
+  overlay._onKey = onKey;
+  document.addEventListener('keydown', onKey);
+  el('builder-close').onclick = () => closeBuilder();
+  overlay.onclick = (e) => { if (e.target === overlay) closeBuilder(); }; // backdrop = close
+  renderBuilder();
+}
+
+function closeBuilder() {
+  const overlay = el('builder-overlay');
+  overlay.hidden = true;
+  overlay.onclick = null;
+  if (overlay._onKey) {
+    document.removeEventListener('keydown', overlay._onKey);
+    overlay._onKey = null;
+  }
+  builderState = null;
+}
+
+function builderStepTitle(text) {
+  const h = document.createElement('h3');
+  h.className = 'builder-step-title';
+  h.textContent = text;
+  return h;
+}
+
+function builderBlankStep() {
+  const { opts, blank } = builderState;
+  const wrap = document.createElement('div');
+  wrap.className = 'builder-step';
+  wrap.appendChild(builderStepTitle('1 · Pick a blank'));
+  const grid = document.createElement('div');
+  grid.className = 'go-picker-grid';
+  for (const b of opts.blanks) {
+    const tile = document.createElement('button');
+    tile.className = 'go-tile' + (blank && blank.nft_id === b.nft_id ? ' active' : '');
+    const img = document.createElement('img');
+    img.src = blankImgSrc(b.nft_id);
+    img.alt = `#${b.edition}`;
+    img.loading = 'lazy';
+    const cap = document.createElement('span');
+    cap.className = 'go-tile-label';
+    cap.textContent = `#${b.edition}`;
+    tile.replaceChildren(img, cap);
+    tile.onclick = () => { builderState.blank = b; renderBuilder(); };
+    grid.appendChild(tile);
+  }
+  wrap.appendChild(grid);
+  return wrap;
+}
+
+function builderBodyStep() {
+  const { opts, body } = builderState;
+  const wrap = document.createElement('div');
+  wrap.className = 'builder-step';
+  wrap.appendChild(builderStepTitle('2 · Pick a body'));
+  const grid = document.createElement('div');
+  grid.className = 'go-picker-grid';
+  for (const b of opts.bodies) {
+    const cls = opts.body_class[b];
+    const tile = document.createElement('button');
+    tile.className = 'go-tile' + (body === b ? ' active' : '');
+    const media = layerMediaEl(layerSrc(cls, 'Body', b), b);
+    media.loading = 'lazy';
+    const cap = document.createElement('span');
+    cap.className = 'go-tile-label';
+    cap.textContent = b;
+    tile.replaceChildren(media, cap);
+    tile.onclick = () => {
+      builderState.body = b;
+      // Switching body re-defaults the chosen set to that body's first legal
+      // value per slot (a previous body's picks may not be legal here).
+      builderState.chosen = buildPure.defaultChosen(opts.slots, opts.options[b] || {});
+      renderBuilder();
+    };
+    grid.appendChild(tile);
+  }
+  wrap.appendChild(grid);
+  return wrap;
+}
+
+function builderTraitStep() {
+  const { opts, body } = builderState;
+  const slotOptions = opts.options[body] || {};
+  const wrap = document.createElement('div');
+  wrap.className = 'builder-step builder-trait-step';
+  wrap.appendChild(builderStepTitle('3 · Choose traits'));
+
+  const layout = document.createElement('div');
+  layout.className = 'builder-trait-layout';
+
+  const preview = document.createElement('div');
+  preview.className = 'builder-preview';
+  preview.id = 'builder-preview';
+
+  const pickers = document.createElement('div');
+  pickers.className = 'builder-pickers';
+  for (const slot of opts.slots) {
+    const row = document.createElement('label');
+    row.className = 'builder-picker';
+    const name = document.createElement('span');
+    name.className = 'builder-picker-label';
+    name.textContent = slot;
+    const sel = document.createElement('select');
+    const vals = slotOptions[slot] || [];
+    if (vals.length) {
+      for (const v of vals) {
+        const o = document.createElement('option');
+        o.value = v; o.textContent = v;
+        sel.appendChild(o);
+      }
+      if (builderState.chosen[slot] != null) sel.value = builderState.chosen[slot];
+      sel.onchange = () => { builderState.chosen[slot] = sel.value; refreshBuilderPreview(); };
+    } else {
+      const o = document.createElement('option');
+      o.textContent = '— none available —';
+      sel.appendChild(o);
+      sel.disabled = true;
+    }
+    row.replaceChildren(name, sel);
+    pickers.appendChild(row);
+  }
+  layout.replaceChildren(preview, pickers);
+  wrap.appendChild(layout);
+
+  const warn = document.createElement('p');
+  warn.className = 'builder-warn';
+  warn.id = 'builder-warn';
+  warn.hidden = true;
+  wrap.appendChild(warn);
+
+  const assembleBtn = document.createElement('button');
+  assembleBtn.id = 'builder-assemble-btn';
+  assembleBtn.className = 'primary';
+  assembleBtn.textContent = 'Assemble';
+  assembleBtn.onclick = () => {
+    const b = builderState.blank;
+    const bodyVal = builderState.body;
+    const chosen = { ...builderState.chosen };
+    closeBuilder();
+    commitAssemble(b.nft_id, bodyVal, chosen, b.edition);
+  };
+  wrap.appendChild(assembleBtn);
+  return wrap;
+}
+
+// Repaint the live preview stack + missing-slot warning + Assemble enabled
+// state. Reads elements by id, so it must run only after builderTraitStep's
+// nodes are attached (renderBuilder calls it at the end).
+function refreshBuilderPreview() {
+  const preview = el('builder-preview');
+  if (!preview) return;
+  const { opts, body, chosen } = builderState;
+  const cls = opts.body_class[body];
+  const stack = [layerMediaEl(layerSrc(cls, 'Body', body), body)];
+  for (const slot of opts.slots) {
+    const v = chosen[slot];
+    if (v && v !== 'None') stack.push(layerMediaEl(layerSrc(cls, slot, v), `${slot}: ${v}`));
+  }
+  preview.replaceChildren(...stack);
+
+  const missing = buildPure.missingSlots(opts.slots, opts.options[body] || {});
+  const warn = el('builder-warn');
+  warn.hidden = missing.length === 0;
+  if (missing.length) {
+    warn.textContent = `Your Closet has no ${body}-compatible options for: ${missing.join(', ')}`;
+  }
+  el('builder-assemble-btn').disabled = missing.length > 0;
+}
+
+function renderBuilder() {
+  const bodyEl = el('builder-body');
+  bodyEl.replaceChildren();
+  bodyEl.appendChild(builderBlankStep());
+  if (builderState.blank) bodyEl.appendChild(builderBodyStep());
+  if (builderState.blank && builderState.body) {
+    bodyEl.appendChild(builderTraitStep());
+    refreshBuilderPreview();
+  }
+}
+
+async function commitAssemble(nftId, body, chosen, edition) {
   status('Assembling…');
   try {
     const res = await api('/api/assemble', {
-      method: 'POST', body: JSON.stringify({ edition, chosen }),
+      method: 'POST', body: JSON.stringify({ nft_id: nftId, body, chosen }),
     });
     const final = await pollEconomyOp('assemble', res);
     status('');
     if (final.state === 'failed') throw new Error(final.error || 'assemble failed');
-    showFlow({ title: `🎉 #${edition} assembled!`,
-      text: final.accept ? signText(final.accept_push, 'Scan to accept your new character in Xaman.')
-                         : 'Your new character is on its way.',
-      qrData: final.accept || null, link: final.accept || null,
-      image: final.image_url, video: final.video_url, done: true, celebrate: true });
+    // Nothing to sign: a mutable blank is dressed in place. Show the new art.
+    showFlow({
+      title: `🎉 #${edition} assembled!`,
+      text: 'Your character has been dressed — no signature needed.',
+      image: final.image_url,
+      video: final.video_url,
+      done: true,
+      celebrate: true,
+    });
     economyState = await api('/api/economy');
   } catch (e) {
     showError(e.message);

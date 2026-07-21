@@ -288,6 +288,18 @@
 
   <div id="toasts" class="toasts" aria-live="assertive"></div>
 
+  <!-- Assemble builder: pick a blank -> body -> traits, with a live preview. -->
+  <div id="builder-overlay" class="confirm-overlay" role="dialog" aria-modal="true"
+       aria-labelledby="builder-title" hidden>
+    <div class="confirm-box card builder-box">
+      <div class="go-picker-head">
+        <h2 id="builder-title">Assemble a character</h2>
+        <button id="builder-close" class="secondary" aria-label="Close">✕</button>
+      </div>
+      <div id="builder-body" class="builder-body"></div>
+    </div>
+  </div>
+
   <!-- In-app confirm: Discord's sandboxed iframe makes native window.confirm a no-op. -->
   <div id="go-picker-overlay" class="confirm-overlay" role="dialog" aria-modal="true"
        aria-labelledby="go-picker-title" hidden>
