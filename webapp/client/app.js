@@ -1853,8 +1853,19 @@ let economyState = null;
 let activeNftId = null;
 
 function layerSrc(body, trait, value) {
-  return `/api/layer?body=${encodeURIComponent(body)}` +
+  return `${API_BASE}/api/layer?body=${encodeURIComponent(body)}` +
          `&trait=${encodeURIComponent(trait)}&value=${encodeURIComponent(value)}`;
+}
+
+// A backend trait-layer URL (/api/layer?...) is same-origin art that must NOT
+// go through the CDN proxy (imgUrl). But on the standalone web surface the API
+// is cross-origin, so — exactly like every other API call — a relative
+// /api/layer path still needs the API_BASE prefix or it resolves against the
+// Pages host and 404s. layerSrc() builds these client-side; the shop and
+// marketplace receive them pre-built from the backend as image_url. Route those
+// server-built URLs through here so they carry API_BASE too.
+function traitLayerSrc(url) {
+  return url ? API_BASE + url : null;
 }
 
 // WebM layers (VP9-alpha bodies) don't render in <img> — browsers only decode
@@ -2466,13 +2477,14 @@ function switchMarketTab(tab) {
   else loadShopCatalog();
 }
 
-// A trait-image URL from the backend (/api/layer?...) is already same-origin
-// and must NOT go through the CDN proxy (imgUrl); a character's `image` is an
-// absolute CDN URL and must. Mirrors the same distinction renderCanvas/
-// renderCloset draw between layerSrc() and imgUrl() elsewhere in this file.
+// A trait-image URL from the backend (/api/layer?...) must NOT go through the
+// CDN proxy (imgUrl); a character's `image` is an absolute CDN URL and must.
+// The trait URL is same-origin under Discord/Telegram but cross-origin on the
+// web surface, so it still needs API_BASE (traitLayerSrc). Mirrors the same
+// distinction renderCanvas/renderCloset draw between layerSrc() and imgUrl().
 function marketRowImgSrc(vm) {
   if (!vm.image) return null;
-  return vm.kind === 'trait' ? vm.image : imgUrl(vm.image, THUMB_W);
+  return vm.kind === 'trait' ? traitLayerSrc(vm.image) : imgUrl(vm.image, THUMB_W);
 }
 
 // #203: append=true keeps existing cards ("Load more" pagination); every
@@ -2941,7 +2953,7 @@ function marketTraitListRender(s) {
 let shopFlowTimer = null;
 
 function shopImgSrc(item) {
-  return item.image_url || null;
+  return traitLayerSrc(item.image_url);
 }
 
 function renderShopGrid(items) {

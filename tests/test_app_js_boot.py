@@ -51,6 +51,25 @@ def test_app_js_guards_layer_requests_against_incomplete_metadata():
     assert "|| 'None')" not in src
 
 
+def test_trait_layer_urls_carry_api_base():
+    # Web-surface regression: trait-layer art (/api/layer?...) must NOT go
+    # through the CDN imgUrl proxy, but on the standalone web surface the API is
+    # cross-origin, so every trait URL still needs the API_BASE prefix or it
+    # resolves against the Pages host and 404s (character NFTs already prefix via
+    # imgUrl). Both origins — client-built layerSrc() and server-built
+    # image_url/vm.image via traitLayerSrc() — must carry API_BASE.
+    src = _read("app.js")
+    # Client-built URLs: layerSrc embeds API_BASE, no bare "/api/layer" left.
+    assert "`${API_BASE}/api/layer?body=" in src
+    assert "`/api/layer?body=" not in src  # the un-prefixed form is gone
+    # Server-built URLs go through the API_BASE-prefixing helper.
+    assert "function traitLayerSrc(" in src
+    assert "return url ? API_BASE + url : null;" in src
+    # The shop and marketplace-trait paths use the helper (not the raw field).
+    assert "return traitLayerSrc(item.image_url);" in src
+    assert "traitLayerSrc(vm.image)" in src
+
+
 def test_app_js_has_closet_states():
     src = _read("app.js")
     assert "Create your Closet" in src
