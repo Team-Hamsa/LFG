@@ -2588,7 +2588,16 @@ async def handle_shop_buy_start(request):
     # price). BRIX holders keep today's flow byte-identically; everyone else
     # gets an XRP-denominated offer at the buffered AMM quote.
     try:
-        pay_with, pay_amount = await brix_payment.detect_payment_path(wallet, str(price))
+        # Must check the same currency pair the shop offer is denominated in
+        # (shop_flow.brix_amount → TOKEN_CURRENCY_HEX/TOKEN_ISSUER_ADDRESS);
+        # the SWAP_OFFER_* defaults can be a different pair, in which case the
+        # buyer passes the balance check but the accept fails on-ledger.
+        pay_with, pay_amount = await brix_payment.detect_payment_path(
+            wallet,
+            str(price),
+            currency=config.TOKEN_CURRENCY_HEX,
+            issuer=config.TOKEN_ISSUER_ADDRESS,
+        )
     except RuntimeError:
         return web.json_response(
             {"error": "pricing unavailable", "code": "pricing_unavailable"}, status=503
