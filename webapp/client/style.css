@@ -782,6 +782,41 @@ button.back:hover { color: var(--text); border: none; }
 }
 .dressup-canvas.incomplete::after { content: '…'; font-size: 2rem; }
 
+/* --- Assemble builder overlay (blank -> body -> traits + live preview) --- */
+.builder-box {
+  width: min(640px, 100%); text-align: left;
+  max-height: 90vh; overflow-y: auto;
+}
+.builder-step { margin-top: 16px; }
+.builder-step:first-child { margin-top: 8px; }
+.builder-step-title {
+  margin: 0 0 8px; font-size: .95rem; color: var(--muted);
+}
+.builder-trait-layout {
+  display: flex; gap: 16px; flex-wrap: wrap; align-items: flex-start;
+}
+.builder-preview {
+  position: relative; width: 200px; height: 200px; flex: 0 0 auto;
+  background: var(--surface-2); border: 3px solid var(--ink);
+  border-radius: 16px; box-shadow: var(--sticker-sm); overflow: hidden;
+}
+.builder-preview img, .builder-preview video {
+  position: absolute; inset: 0; width: 100%; height: 100%; object-fit: contain;
+}
+.builder-pickers {
+  flex: 1 1 220px; display: flex; flex-direction: column; gap: 8px;
+}
+.builder-picker {
+  display: flex; align-items: center; justify-content: space-between; gap: 10px;
+}
+.builder-picker-label { font-weight: 700; font-size: .85rem; }
+.builder-picker select { flex: 1 1 auto; max-width: 60%; }
+.builder-warn {
+  margin: 12px 0 0; color: var(--red); font-size: .85rem; font-weight: 700;
+}
+#builder-assemble-btn { margin-top: 16px; width: 100%; }
+#builder-assemble-btn:disabled { opacity: .5; cursor: not-allowed; }
+
 /* Extract button on each closet tile — a comfortable touch target (>=28px). */
 .closet-item .extract {
   position: absolute; top: 2px; right: 2px;

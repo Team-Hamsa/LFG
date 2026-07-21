@@ -4,10 +4,14 @@
 // (tests/test_build_pure_js.py) — same split as mint_pure.js/market_pure.js.
 
 // Default GO selection: never land on an unindexed token ("#null · still
-// indexing…"). Prefer the first character whose metadata has a body; fall
-// back to the first character only when none are indexed yet.
+// indexing…"). Prefer the first DRESSED (non-blank) indexed character so the
+// canvas opens on something to look at rather than a bare silhouette; fall
+// back to the first indexed character (which may be a blank), then to the
+// first character only when none are indexed yet.
 export function pickDefaultCharacter(characters) {
   if (!characters || !characters.length) return null;
+  const dressed = characters.find((c) => Boolean(c.body) && !c.blank);
+  if (dressed) return dressed.nft_id;
   const indexed = characters.find((c) => Boolean(c.body));
   return (indexed || characters[0]).nft_id;
 }
