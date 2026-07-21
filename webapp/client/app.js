@@ -2378,6 +2378,12 @@ function renderSaveBar() {
 }
 
 function discardPending() {
+  // Defense-in-depth: renderSaveBar() disables the Discard button while a
+  // save is in flight, but this must not be the only guard — a stale cached
+  // index.html (renderSaveBar tolerates its own missing #build-save-bar) or
+  // any other caller must never clear pendingEquips out from under a
+  // running saveBuild().
+  if (saveBusy) return;
   clearPending();
   const char = activeChar();
   if (char) renderCanvas(char);

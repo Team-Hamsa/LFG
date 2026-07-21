@@ -7,6 +7,7 @@ import sqlite3
 
 from lfg_core import economy_flow as ef
 from lfg_core import economy_store as es
+from lfg_core import nft_index
 from lfg_core import trait_economy as te
 from lfg_core.nft_index import OnchainNft
 from tests.economy_helpers import flaky_mirror_conn
@@ -44,6 +45,11 @@ def _char() -> OnchainNft:
 def _conn_with_bucket() -> sqlite3.Connection:
     c = sqlite3.connect(":memory:")
     es.init_economy_schema(c)
+    # The on-chain index lives in the same per-network DB as the economy
+    # tables (deps.conn is a single shared connection) — extend the test
+    # fixture with the onchain_nfts schema so run_equip's post-success index
+    # stamp (economy_flow._persist_equip_to_index) has a table to write to.
+    c.executescript(nft_index._SCHEMA)
     es.freeze_genesis(
         c, te.Genesis(trait_counts={}, edition_bodies={7: ("Straight Blue", "male")}), {}
     )
@@ -238,6 +244,7 @@ def _conn_with_assets(pairs) -> sqlite3.Connection:
     """A Closet seeded with explicit (slot, value, count) rows."""
     c = sqlite3.connect(":memory:")
     es.init_economy_schema(c)
+    c.executescript(nft_index._SCHEMA)
     es.freeze_genesis(
         c, te.Genesis(trait_counts={}, edition_bodies={7: ("Straight Blue", "male")}), {}
     )
@@ -348,3 +355,55 @@ def test_equip_batch_journal_records_every_change(tmp_path):
         {"slot": "Head", "incoming": "Crown", "displaced": "None"},
         {"slot": "Eyes", "incoming": "Laser", "displaced": "None"},
     ]
+
+
+# --- Post-save on-chain index stamp: the client refetches immediately after
+# Save succeeds, so a successful equip must be reflected in onchain_nfts right
+# away rather than waiting on the listener (task-4 fix). ---
+
+
+def test_equip_success_stamps_index_with_new_attributes(tmp_path):
+    conn, f = _conn_with_bucket(), _Fakes()
+    s = ef.EquipSession(owner="rUser", character=_char(), changes=[("Head", "Crown")])
+    _run(ef.run_equip(s, _deps(conn, f, tmp_path)))
+
+    assert s.state == ef.DONE
+    conn.row_factory = sqlite3.Row
+    row = conn.execute("SELECT * FROM onchain_nfts WHERE nft_id=?", ("NFT7",)).fetchone()
+    assert row is not None
+    attrs = json.loads(row["attributes_json"])
+    by_type = {a["trait_type"]: a["value"] for a in attrs}
+    assert by_type["Head"] == "Crown"
+    assert row["owner"] == "rUser"  # unchanged — an equip never moves ownership
+    assert row["is_burned"] == 0
+    assert row["uri_hex"] == b"https://cdn/new.json".hex()
+
+
+def test_equip_reverted_path_does_not_stamp_index(tmp_path):
+    """The ledger-failed revert branch restores the character's OLD traits —
+    the index must NOT be stamped with the (discarded) new attributes."""
+    conn, f = _conn_with_bucket(), _Fakes(fail_closet_modify=True)
+    s = ef.EquipSession(owner="rUser", character=_char(), changes=[("Head", "Crown")])
+    _run(ef.run_equip(s, _deps(conn, f, tmp_path)))
+
+    assert s.state == ef.FAILED
+    row = conn.execute("SELECT * FROM onchain_nfts WHERE nft_id=?", ("NFT7",)).fetchone()
+    assert row is None
+
+
+def test_equip_index_stamp_failure_does_not_fail_session(tmp_path, monkeypatch):
+    """A best-effort index write that blows up must be swallowed (LOUD-logged,
+    per the swap_flow precedent) — the successful equip session must still
+    finish DONE with a "complete" journal."""
+    conn, f = _conn_with_bucket(), _Fakes()
+
+    def _boom(*_args, **_kwargs):
+        raise RuntimeError("index db is locked")
+
+    monkeypatch.setattr(ef.nft_index, "upsert", _boom)
+    s = ef.EquipSession(owner="rUser", character=_char(), changes=[("Head", "Crown")])
+    _run(ef.run_equip(s, _deps(conn, f, tmp_path)))
+
+    assert s.state == ef.DONE
+    record = json.loads((tmp_path / f"equip-{s.id}.json").read_text())
+    assert record["status"] == "complete"

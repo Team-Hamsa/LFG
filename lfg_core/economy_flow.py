@@ -55,7 +55,7 @@ from dataclasses import dataclass, field
 from typing import Any, TypeVar
 
 from lfg_core import closet_token as bt
-from lfg_core import config, db_helpers, owner_lock
+from lfg_core import config, db_helpers, nft_index, owner_lock
 from lfg_core import economy_store as es
 from lfg_core import trait_economy as te
 from lfg_core import trait_token as tt
@@ -616,6 +616,57 @@ def _raw_uri(uri_hex: str) -> str:
         return ""
 
 
+def _persist_equip_to_index(
+    deps: EconomyDeps,
+    session: EquipSession,
+    new_attrs: list[dict[str, str]],
+    image_url: str,
+    meta_url: str,
+) -> None:
+    """Write the post-modify ledger truth straight into the on-chain index
+    (mirrors swap_flow._persist_remint_to_index / the #211 pattern), so a
+    client that refetches the roster immediately after Save sees the new
+    traits instead of racing the listener. Unlike a swap remint, an equip is
+    an in-place NFTokenModify: the nft_id, owner, and mutability are
+    UNCHANGED — this is a single upsert of the same record with its new
+    attributes/uri_hex/image, never a mark_burned + new row.
+
+    deps.conn is already an open connection to the same per-network index DB
+    that holds onchain_nfts (opened via _economy_deps.open_index), so this
+    reuses it directly rather than opening a second connection.
+
+    Best-effort only: failures are LOUD (a CRITICAL log line, mirroring
+    swap_flow) but must never fail the session — the chain is truth and the
+    listener/backfill self-heals the index. Callers must only invoke this on
+    a confirmed-committed success path (DONE or complete_pending_mirror),
+    never on a reverted/indeterminate branch."""
+    rec = session.character
+    try:
+        nft_index.upsert(
+            deps.conn,
+            OnchainNft(
+                nft_id=rec.nft_id,
+                nft_number=rec.nft_number,
+                owner=rec.owner,
+                is_burned=False,
+                mutable=rec.mutable,
+                # .hex() is lowercase — the index's canonical case (matches
+                # swap_flow._persist_remint_to_index).
+                uri_hex=meta_url.encode("utf-8").hex(),
+                body=rec.body,
+                attributes=new_attrs,
+                image=image_url,
+                ledger_index=None,
+            ),
+        )
+    except Exception:
+        logging.critical(
+            f"post-equip index persist FAILED for {rec.nft_id} (modify {session.modify_hash} "
+            f"committed on-chain): the roster will serve stale traits until the "
+            f"listener/backfill catches up. {traceback.format_exc()}"
+        )
+
+
 # --- Equip: move a loose asset onto a live character; displaced -> Closet ---
 
 
@@ -700,7 +751,7 @@ async def run_equip(session: EquipSession, deps: EconomyDeps) -> None:
             }
             for a in rec.attributes
         ]
-        _image_url, _video_url, meta_url = await deps.char_compose_fn(
+        image_url, _video_url, meta_url = await deps.char_compose_fn(
             new_attrs, rec.body, rec.nft_number or 0, 0
         )
         _write_record(deps.records_dir, "equip", session.id, session._record("equipping"))
@@ -724,6 +775,7 @@ async def run_equip(session: EquipSession, deps: EconomyDeps) -> None:
             session.mirror_pending = True
             es.set_mirror_pending(conn, owner, True)
             session.state = DONE
+            _persist_equip_to_index(deps, session, new_attrs, image_url, meta_url)
             _write_record(
                 deps.records_dir, "equip", session.id, session._record("complete_pending_mirror")
             )
@@ -764,6 +816,7 @@ async def run_equip(session: EquipSession, deps: EconomyDeps) -> None:
             return
 
         session.state = DONE
+        _persist_equip_to_index(deps, session, new_attrs, image_url, meta_url)
         _write_record(deps.records_dir, "equip", session.id, session._record("complete"))
     except Exception as e:
         logging.error(f"Equip {session.id} failed: {traceback.format_exc()}")
