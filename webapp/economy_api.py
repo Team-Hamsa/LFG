@@ -318,8 +318,16 @@ async def start_equip(
             (s, v): c for (o, s, v, c) in economy_store.read_closet_assets(conn) if o == owner
         }
         # Mirror run_equip's running working copy so an over-spending batch is
-        # rejected up front, with the same message the flow would produce.
+        # rejected up front, with the same message the flow would produce —
+        # including its duplicate-slot guard. A repeated slot would otherwise
+        # miscompute displaced/asset counts here (run_equip still rejects it, so
+        # nothing reaches the ledger, but the three implementations of this batch
+        # contract must agree).
+        seen: set[str] = set()
         for slot, value in changes:
+            if slot in seen:
+                raise EconomyError(f"cannot equip: duplicate slot in one batch ({slot})")
+            seen.add(slot)
             chk = trait_economy.can_equip(rec, slot, value, assets, mutable=bool(rec.mutable))
             if not chk.ok:
                 raise EconomyError(f"cannot equip: {chk.reason}")

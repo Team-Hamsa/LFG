@@ -208,3 +208,16 @@ def test_deposit_raises_for_unknown_nft_id():
     _active_closet(m, owner)
     with pytest.raises(mock_economy.MockEconomyError):
         m.deposit(owner, {"nft_id": "UNKNOWN_NFT_ID"})
+
+
+def test_equip_rejects_duplicate_slot():
+    """Mock mirrors run_equip / start_equip: a repeated slot fails the batch
+    instead of silently miscounting the displaced assets."""
+    m = mock_economy.MockEconomy()
+    owner = mock_economy.DEV_OWNER
+    char = m.read_state(owner)["characters"][0]
+    asset = m.read_state(owner)["closet"]["assets"][0]
+    before = m.read_state(owner)["closet"]["assets"]
+    res = m.equip(owner, char["nft_id"], [(asset["slot"], asset["value"])] * 2)
+    assert res["state"] == "failed" and "duplicate slot" in res["error"]
+    assert m.read_state(owner)["closet"]["assets"] == before  # nothing mutated

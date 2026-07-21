@@ -221,6 +221,23 @@ def test_start_equip_happy_returns_session(monkeypatch):
     assert captured["changes"] == [("Head", "Halo")]
 
 
+def test_start_equip_rejects_duplicate_slot(monkeypatch):
+    """The three implementations of the batch contract (run_equip, start_equip,
+    the dev mock) must agree: a repeated slot is rejected, never silently
+    miscounted. Reaches start_equip directly, bypassing normalize_equip_changes."""
+    conn = _seed_conn()
+    monkeypatch.setattr(economy_api, "open_conn", lambda: conn)
+    _stub_permissive_layer_store(monkeypatch)
+
+    async def go():
+        with pytest.raises(economy_api.EconomyError, match="duplicate slot"):
+            await economy_api.start_equip(
+                "123", "rOwner", "A", [("Head", "Halo"), ("Head", "Halo")]
+            )
+
+    asyncio.get_event_loop().run_until_complete(go())
+
+
 def test_start_equip_batch_rejects_a_bad_change(monkeypatch):
     """Every change is prechecked up front: the seeded Closet holds only
     Head=Halo, so a batch whose second change is Eyes=Laser is rejected before

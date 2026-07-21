@@ -1981,7 +1981,11 @@ function renderGoPicker() {
       tile.disabled = true; // no body -> every layer fetch would 400
     } else {
       tile.onclick = async () => {
-        if (!(await confirmDiscardIfDirty())) return;
+        // Reselecting the ALREADY-active GO is a no-op switch, not an exit —
+        // prompting there would let a habitual "Discard" wipe a staged batch
+        // that selectCharacter() would have kept anyway (same nft_id).
+        const leaving = char.nft_id !== activeNftId;
+        if (leaving && !(await confirmDiscardIfDirty())) return;
         closeGoPicker();
         selectCharacter(char.nft_id);
       };

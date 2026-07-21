@@ -138,7 +138,18 @@ class MockEconomy:
         # partial apply is impossible (mirrors run_equip's precheck).
         working = dict(self.assets)
         displaced: list[dict[str, str]] = []
+        seen: set[str] = set()
         for slot, value in changes:
+            # Same duplicate-slot guard as run_equip / start_equip: a repeat
+            # would silently miscount displaced assets here.
+            if slot in seen:
+                return {
+                    "id": "mock",
+                    "state": "failed",
+                    "error": f"duplicate slot in one batch ({slot})",
+                    "displaced": [],
+                }
+            seen.add(slot)
             if working.get((slot, value), 0) <= 0:
                 return {
                     "id": "mock",
