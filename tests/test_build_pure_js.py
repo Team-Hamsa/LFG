@@ -93,3 +93,106 @@ def test_tile_unindexed_active_stays_indexing():
     # layer fetch (missing body metadata takes precedence over active state).
     out = run_js("M.goTileState({nft_id: 'A', edition: 3521, body: ''}, 'A')")
     assert out["state"] == "indexing"
+
+
+# ---------------------------------------------------------------------------
+# applyPending(attributes, pending) -> attributes with staged values applied
+# ---------------------------------------------------------------------------
+
+ATTRS = (
+    "[{trait_type: 'Body', value: 'Straight Blue'},"
+    " {trait_type: 'Head', value: 'Crown'},"
+    " {trait_type: 'Eyes', value: 'None'}]"
+)
+CHAR = f"{{nft_id: 'A', body: 'male', attributes: {ATTRS}}}"
+
+
+def test_apply_pending_overrides_only_staged_slots():
+    out = run_js(f"M.applyPending({ATTRS}, {{Head: 'Tiara'}})")
+    assert out == [
+        {"trait_type": "Body", "value": "Straight Blue"},
+        {"trait_type": "Head", "value": "Tiara"},
+        {"trait_type": "Eyes", "value": "None"},
+    ]
+
+
+def test_apply_pending_empty_is_identity():
+    out = run_js(f"M.applyPending({ATTRS}, {{}})")
+    assert out[1] == {"trait_type": "Head", "value": "Crown"}
+
+
+def test_apply_pending_ignores_slots_the_character_lacks():
+    out = run_js(f"M.applyPending({ATTRS}, {{Wings: 'Angel'}})")
+    assert len(out) == 3 and all(a["trait_type"] != "Wings" for a in out)
+
+
+# ---------------------------------------------------------------------------
+# effectiveAssets(assets, character, pending) -> optimistic Closet counts
+# ---------------------------------------------------------------------------
+
+
+def test_effective_assets_decrements_the_staged_incoming():
+    assets = "[{slot: 'Head', value: 'Tiara', count: 2}]"
+    out = run_js(f"M.effectiveAssets({assets}, {CHAR}, {{Head: 'Tiara'}})")
+    # Tiara -1; Crown (displaced off the character) appears
+    assert {"slot": "Head", "value": "Tiara", "count": 1} in out
+    assert {"slot": "Head", "value": "Crown", "count": 1} in out
+
+
+def test_effective_assets_drops_entries_reaching_zero():
+    assets = "[{slot: 'Head', value: 'Tiara', count: 1}]"
+    out = run_js(f"M.effectiveAssets({assets}, {CHAR}, {{Head: 'Tiara'}})")
+    assert all(a["value"] != "Tiara" for a in out)
+    assert out == [{"slot": "Head", "value": "Crown", "count": 1}]
+
+
+def test_effective_assets_never_materializes_none():
+    # Eyes currently holds 'None'; staging Laser must not create an Eyes/None tile
+    assets = "[{slot: 'Eyes', value: 'Laser', count: 1}]"
+    out = run_js(f"M.effectiveAssets({assets}, {CHAR}, {{Eyes: 'Laser'}})")
+    assert out == []
+
+
+def test_effective_assets_merges_displaced_into_an_existing_stack():
+    assets = "[{slot: 'Head', value: 'Tiara', count: 1}, {slot: 'Head', value: 'Crown', count: 2}]"
+    out = run_js(f"M.effectiveAssets({assets}, {CHAR}, {{Head: 'Tiara'}})")
+    assert {"slot": "Head", "value": "Crown", "count": 3} in out
+
+
+def test_effective_assets_no_pending_is_identity():
+    assets = "[{slot: 'Head', value: 'Tiara', count: 2}]"
+    out = run_js(f"M.effectiveAssets({assets}, {CHAR}, {{}})")
+    assert out == [{"slot": "Head", "value": "Tiara", "count": 2}]
+
+
+def test_effective_assets_without_a_character_is_identity():
+    assets = "[{slot: 'Head', value: 'Tiara', count: 2}]"
+    out = run_js(f"M.effectiveAssets({assets}, null, {{Head: 'Tiara'}})")
+    assert out == [{"slot": "Head", "value": "Tiara", "count": 2}]
+
+
+# ---------------------------------------------------------------------------
+# netChanges(character, pending) -> the POST payload
+# ---------------------------------------------------------------------------
+
+
+def test_net_changes_lists_staged_slots():
+    out = run_js(f"M.netChanges({CHAR}, {{Head: 'Tiara', Eyes: 'Laser'}})")
+    assert sorted(out, key=lambda c: c["slot"]) == [
+        {"slot": "Eyes", "value": "Laser"},
+        {"slot": "Head", "value": "Tiara"},
+    ]
+
+
+def test_net_changes_drops_a_slot_staged_back_to_its_current_value():
+    # Re-clicking the character's own Crown undoes the stage -> empty batch
+    out = run_js(f"M.netChanges({CHAR}, {{Head: 'Crown'}})")
+    assert out == []
+
+
+def test_net_changes_empty_pending_is_empty():
+    assert run_js(f"M.netChanges({CHAR}, {{}})") == []
+
+
+def test_net_changes_without_a_character_is_empty():
+    assert run_js("M.netChanges(null, {Head: 'Tiara'})") == []

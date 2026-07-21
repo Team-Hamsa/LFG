@@ -28,3 +28,65 @@ export function goTileState(char, activeNftId) {
     state: !indexed ? 'indexing' : char.nft_id === activeNftId ? 'active' : 'selectable',
   };
 }
+
+// --- Pending (unsaved) Build changes -----------------------------------
+// The Build panel stages tile clicks in a `{slot: incomingValue}` map and only
+// commits them on Save, as ONE NFTokenModify. These three functions are the
+// whole model: what the canvas draws, what the Closet grid shows, and what the
+// POST body is.
+
+// The character's attributes with every staged change applied. Slots the
+// character does not have are ignored (never invented).
+export function applyPending(attributes, pending) {
+  const staged = pending || {};
+  return (attributes || []).map((a) => (
+    Object.prototype.hasOwnProperty.call(staged, a.trait_type)
+      ? { ...a, value: staged[a.trait_type] }
+      : a
+  ));
+}
+
+// Current value held in `slot` by `character`; 'None' when the slot is empty or
+// the character has no such attribute — the same convention the server's
+// trait_economy.slot_value uses.
+function currentValue(character, slot) {
+  if (!character) return 'None';
+  const a = (character.attributes || []).find((x) => x.trait_type === slot);
+  return (a && a.value) || 'None';
+}
+
+// Closet counts with the staged changes applied: each staged incoming asset is
+// -1, each displaced value is +1. Entries reaching 0 are dropped; a displaced
+// value the Closet did not already hold is synthesized so it can be clicked
+// back on. 'None' is never materialized as a tile (it is the file-less
+// stand-in for an empty slot, not a real asset).
+export function effectiveAssets(assets, character, pending) {
+  const staged = pending || {};
+  const out = (assets || []).map((a) => ({ ...a }));
+  if (!character) return out;
+  const find = (slot, value) => out.find((a) => a.slot === slot && a.value === value);
+  for (const slot of Object.keys(staged)) {
+    const incoming = staged[slot];
+    const displaced = currentValue(character, slot);
+    if (incoming === displaced) continue;       // staged back to current: no-op
+    const inEntry = find(slot, incoming);
+    if (inEntry) inEntry.count -= 1;
+    if (displaced !== 'None') {
+      const outEntry = find(slot, displaced);
+      if (outEntry) outEntry.count += 1;
+      else out.push({ slot, value: displaced, count: 1 });
+    }
+  }
+  return out.filter((a) => a.count > 0);
+}
+
+// The `changes` array for POST /api/equip: one {slot, value} per staged slot
+// whose value actually differs from what the character wears on-chain. A slot
+// staged back to its current value nets out — that is how undo works.
+export function netChanges(character, pending) {
+  const staged = pending || {};
+  if (!character) return [];
+  return Object.keys(staged)
+    .filter((slot) => staged[slot] !== currentValue(character, slot))
+    .map((slot) => ({ slot, value: staged[slot] }));
+}
