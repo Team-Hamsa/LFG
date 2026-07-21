@@ -7,7 +7,7 @@ import os
 from types import SimpleNamespace
 from unittest.mock import patch
 
-os.environ.setdefault("BUNNY_PULL_ZONE", "example.b-cdn.net")
+os.environ.setdefault("BUNNY_PULL_ZONE", "nft.pullzone.example")
 os.environ.setdefault("LAYER_SOURCE", "local")
 
 from lfg_core import xrpl_ops  # noqa: E402
@@ -38,7 +38,11 @@ def test_concurrent_submits_serialize_per_account():
                 xrpl_ops._submit_and_confirm("tx2", wallet, None, "b"),
             )
 
-    asyncio.run(go())
+    loop = asyncio.new_event_loop()
+    try:
+        loop.run_until_complete(go())
+    finally:
+        loop.close()
     # Serialized: each tx's sign is immediately followed by its own submit —
     # never sign,sign,submit,submit (the sequence-collision interleaving).
     assert order in (
