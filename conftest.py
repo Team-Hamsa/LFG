@@ -25,6 +25,19 @@ os.environ.setdefault("ECONOMY_NETWORK", "testnet")
 # remains; the fixture below clears it between tests).
 os.environ.setdefault("XUMM_WS_WATCH", "0")
 os.environ.setdefault("XUMM_STATUS_CACHE_SECONDS", "0")
+# Same hazard, tuned knobs: test_bulk_mint_ui_flag / test_shop_config /
+# test_shop_pricing assert the DEFAULT each of these falls back to when unset,
+# but they read the frozen config constant — so the machine .env's live values
+# (BULK_MINT_UI_ENABLED=1 since the flag went on, SHOP_* retuned for mainnet
+# pricing) fail them for no real reason. Pin the documented defaults, matching
+# lfg_core/config.py. Every push from a checkout under the deployment tree runs
+# these through the pre-push pytest gate; CI passes only because the runner has
+# no .env at all.
+os.environ.setdefault("BULK_MINT_UI_ENABLED", "0")
+os.environ.setdefault("SHOP_BASE_BRIX", "1.0")
+os.environ.setdefault("SHOP_MIN_BRIX", "5")
+os.environ.setdefault("SHOP_MAX_BRIX", "5000")
+os.environ.setdefault("SHOP_OFFER_TTL_SECONDS", "900")
 
 
 from pathlib import Path
