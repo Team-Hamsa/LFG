@@ -309,6 +309,40 @@ def test_sync_then_persist_returns_tx_hash(tmp_path):
     assert got == "MODHASH"
 
 
+class _InterleavingFakes(_Fakes):
+    """Variant used only by the concurrency regression test below: injects real
+    suspension points (`await asyncio.sleep(0)`) into the fakes the flow awaits
+    between its closet READ (`_owner_contents`, in `run_harvest`) and its closet
+    SYNC/mirror WRITE (`_sync_then_persist` -> `sync_closet` -> upload/modify).
+
+    Without a genuine `await` that actually yields control, `asyncio.gather` over
+    two coroutines built entirely from fakes that return immediately never
+    interleaves them — the event loop just runs one coroutine to completion
+    before touching the other, since there is no suspension point to switch on.
+    That made the original test pass even with `@_serialize_by_owner` removed
+    from `run_harvest`: the two `run_harvest` calls never actually overlapped,
+    so a missing per-owner lock could never manifest as a lost update. Adding
+    `asyncio.sleep(0)` yields around the burn and around the closet
+    upload/modify calls gives the scheduler real interleaving points, so two
+    concurrent harvests for one owner can now race for real: one coroutine's
+    read (of the closet mirror) can happen before the other's write lands,
+    and — without the lock — the second write is a full overwrite that erases
+    the first's assets.
+    """
+
+    async def char_burn(self, nft_id: str, owner: str):
+        await asyncio.sleep(0)
+        return await super().char_burn(nft_id, owner)
+
+    async def closet_upload(self, meta: dict) -> str:
+        await asyncio.sleep(0)
+        return await super().closet_upload(meta)
+
+    async def closet_modify(self, nft_id: str, owner: str, url: str):
+        await asyncio.sleep(0)
+        return await super().closet_modify(nft_id, owner, url)
+
+
 def _two_character_setup(tmp_path):
     """Two live characters owned by the same user, distinct editions/bodies,
     with a genesis + active Closet already in place."""
@@ -320,7 +354,7 @@ def _two_character_setup(tmp_path):
     )
     es.freeze_genesis(conn, genesis, {})
     es.set_closet_token(conn, "rUser", "CLOSET0", "00", status=ct.ACTIVE, offer_id=None)
-    f = _Fakes()
+    f = _InterleavingFakes()
     deps = _deps(conn, f, tmp_path)
     char_a = _char(edition=7, body="Straight Blue")
     char_b = _char(edition=8, body="Straight Red")
