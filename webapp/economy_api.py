@@ -300,7 +300,7 @@ async def assemble_options(conn: sqlite3.Connection, owner: str) -> dict[str, An
                     continue
                 if v == "None" or await swap_compose.resolve_layer(store, cfg, body_class, s, v):
                     values.append(v)
-            per_slot[slot] = values
+            per_slot[slot] = sorted(values)
         options[body_value] = per_slot
 
     return {
