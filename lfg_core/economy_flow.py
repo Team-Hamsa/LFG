@@ -29,7 +29,7 @@
 #                                 DB mirror write failed           the mirror from the Closet
 #                                                                  token (or restart/backfill)
 #   harvested_pending_closet      ledger deposit did NOT commit    re-apply the deposit from the
-#   deposited_pending_closet      (burn already happened)          journal — safe, no
+#   deposited_pending_closet      (burn/blank already happened)    journal — safe, no
 #                                                                  double-credit possible
 #   <op>_sync_indeterminate       Closet modify outcome UNKNOWN    reconcile from chain (check
 #                                 (modify raised mid-flight)       the Closet token's URI /
@@ -41,6 +41,27 @@
 #   reverted_modify               on-chain compensation succeeded
 #   failed_revert_mint /          compensation ALSO failed         admin: locate the journaled
 #   failed_revert                                                  token and resolve manually
+#
+# Harvest-specific statuses (strip-to-blank, #<blank-harvest>):
+#
+#   harvesting                    assets snapshotted, no chain     none (in-flight)
+#                                 effect yet
+#   burned                        legacy path: burn committed,     none (in-flight) — the pair
+#                                 -1 supply_changes row written     nets zero once reminted
+#   reminted                      legacy path: blank remint +      none (in-flight) — offer/
+#                                 +1 supply_changes row written,    accept surfaced to the user
+#                                 delivery offer attempted
+#   burned_no_remint               legacy path: burn committed,    admin: remint the edition as a
+#                                 remint failed                    blank (journal has the -1 row)
+#   failed_modify                 mutable path: NFTokenModify to   none (nothing changed)
+#                                 blank failed pre-commit
+#   reverted_modify                mutable path: deposit failed,   none (compensated — character
+#                                 modify-back to the old URI OK    restored to its old traits)
+#   harvest_sync_indeterminate    Closet deposit outcome UNKNOWN   reconcile from chain — NEVER
+#                                 after burn/blank                blind re-apply
+#   harvested_pending_closet       burn/blank committed, Closet    re-apply the deposit from the
+#                                 deposit definitively did NOT     journal (moved_assets) — safe
+#                                 commit
 
 from __future__ import annotations
 
@@ -140,6 +161,11 @@ class EconomyDeps:
     # Trait Shop price formula reads. Optional so test/CLI constructions that
     # omit it simply skip the bookkeeping.
     app_conn_factory: Callable[[], Any] | None = None
+    # Uploads blank-character metadata (silhouette image URL, blank_attributes(),
+    # edition-numbered name) for the given edition and returns its metadata URL,
+    # or None on failure. Optional/None so existing test constructions that omit
+    # it keep compiling; real wiring lands in Task 8.
+    blank_meta_fn: Callable[[int], Awaitable[str | None]] | None = None
     records_dir: str = config.ECONOMY_RECORDS_DIR
 
 
@@ -175,12 +201,11 @@ def _apply_rarity_change(deps: EconomyDeps, op: str, apply: Callable[[Any], Any]
         logging.error(f"{op}: rarity bookkeeping failed (non-fatal): {traceback.format_exc()}")
 
 
-def _owner_contents(conn: Any, owner: str) -> tuple[dict[tuple[str, str], int], set[int]]:
-    """The owner's current loose-asset counts and loose-body editions, read from
-    the DB mirror."""
-    assets = {(s, v): n for o, s, v, n in es.read_closet_assets(conn) if o == owner}
-    bodies = {e for o, e in es.read_closet_bodies(conn) if o == owner}
-    return assets, bodies
+def _owner_contents(conn: Any, owner: str) -> dict[tuple[str, str], int]:
+    """The owner's current loose-asset counts, read from the DB mirror.
+    Bodies are Task 2+ loose assets too — they live in `closet_assets` as
+    ("Body", value) rows now, not the separate `closet_bodies` table."""
+    return {(s, v): n for o, s, v, n in es.read_closet_assets(conn) if o == owner}
 
 
 def _assets_to_list(assets: dict[tuple[str, str], int]) -> list[bt.Asset]:
@@ -188,10 +213,14 @@ def _assets_to_list(assets: dict[tuple[str, str], int]) -> list[bt.Asset]:
 
 
 async def _sync_then_persist(
-    deps: EconomyDeps, owner: str, assets: dict[tuple[str, str], int], bodies: set[int]
+    deps: EconomyDeps, owner: str, assets: dict[tuple[str, str], int]
 ) -> str:
     """Write the new Closet contents to the on-chain token FIRST (authoritative),
     then mirror to the local DB. Returns the Closet modify tx hash.
+
+    Bodies are loose assets now (("Body", value) rows) — the separate `bodies`
+    param is gone; `[]` is passed through to `sync_closet`/`set_closet_contents`
+    for the now-unused body-editions list.
 
     Phase-aware raises (#107) — callers pick the compensation by type:
     - bt.ClosetError (plain): the modify did NOT commit; on-chain compensation
@@ -204,17 +233,16 @@ async def _sync_then_persist(
       listener rebuilds it from the token's on-chain metadata. Do NOT undo
       anything on-chain."""
     asset_list = _assets_to_list(assets)
-    body_list = sorted(bodies)
     tx_hash = await bt.sync_closet(
         deps.conn,
         owner,
         asset_list,
-        body_list,
+        [],
         upload_fn=deps.closet_upload_fn,
         modify_fn=deps.closet_modify_fn,
     )
     try:
-        es.set_closet_contents(deps.conn, owner, asset_list, body_list)
+        es.set_closet_contents(deps.conn, owner, asset_list, [])
     except Exception as e:
         deps.conn.rollback()
         raise bt.ClosetMirrorError(f"closet contents mirror failed: {e}", tx_hash) from e
@@ -294,7 +322,17 @@ def _mirror_pending_error(deps: EconomyDeps, owner: str) -> str | None:
     return None
 
 
-# --- Harvest: burn a live character; its 8 assets + body drop into the Closet ---
+# --- Harvest: strip a live character to a BLANK; its 9 slot values (8
+# non-body incl. "None", plus Body) drop into the Closet as loose assets ---
+
+
+def _legacy_deltas(rec: OnchainNft, sign: int) -> dict[str, int]:
+    """{"slot|value": sign} over all 9 TRAIT_ORDER slots (Body + the 8
+    non-body slots) for the legacy burn+remint pair's supply_changes row —
+    the exact key format `trait_economy.effective_genesis` parses."""
+    deltas = {f"Body|{te.slot_value(rec, 'Body')}": sign}
+    deltas.update({f"{s}|{te.slot_value(rec, s)}": sign for s in te.NON_BODY_SLOTS})
+    return deltas
 
 
 @dataclass
@@ -305,6 +343,10 @@ class HarvestSession:
     state: str = RUNNING
     error: str | None = None
     burn_hash: str | None = None
+    modify_hash: str | None = None
+    legacy_upgrade: bool = False
+    new_nft_id: str | None = None
+    accept: dict[str, Any] | None = None
     moved_assets: list[tuple[str, str]] = field(default_factory=list)
     sync_tx_hash: str | None = None
     mirror_pending: bool = False
@@ -323,6 +365,9 @@ class HarvestSession:
             "nft_id": self.character.nft_id,
             "moved_assets": self.moved_assets,
             "burn_hash": self.burn_hash,
+            "modify_hash": self.modify_hash,
+            "legacy_upgrade": self.legacy_upgrade,
+            "new_nft_id": self.new_nft_id,
             "sync_tx_hash": self.sync_tx_hash,
             "mirror_pending": self.mirror_pending,
             "status": status,
@@ -336,12 +381,13 @@ class HarvestSession:
 
 @_serialize_by_owner
 async def run_harvest(session: HarvestSession, deps: EconomyDeps) -> None:
-    """Drive a harvest to a terminal state. Order: precheck -> require ACTIVE
-    Closet -> BURN (irreversible) -> deposit assets to the Closet token then DB.
-    If the deposit fails after the burn, the journal carries the moved assets +
-    burn hash for recovery; the assets are never silently lost."""
-    conn = deps.conn
-    rec, owner = session.character, session.owner
+    """Strip a character to a BLANK. Mutable path: NFTokenModify to blank
+    metadata (reversible: modify back), then credit all assets + the body to
+    the Closet. Legacy (non-mutable, burnable) path: one-time upgrade — burn,
+    remint the same edition as a mutable blank, offer it back (one accept),
+    then credit the Closet. Supply-neutral; the legacy pair is journaled as
+    -1/+1 for audit clarity."""
+    conn, rec, owner = deps.conn, session.character, session.owner
     try:
         stale = _mirror_pending_error(deps, owner)
         if stale:
@@ -351,26 +397,80 @@ async def run_harvest(session: HarvestSession, deps: EconomyDeps) -> None:
         if not chk.ok:
             session.fail(f"cannot harvest: {chk.reason}")
             return
-
         err = await _require_active_closet(deps, owner)
         if err:
             session.fail(err)
             return
 
-        # Snapshot the assets to move BEFORE the burn (the character is gone after).
+        body_value = te.slot_value(rec, "Body")
         session.moved_assets = [(s, te.slot_value(rec, s)) for s in te.NON_BODY_SLOTS]
+        session.moved_assets.append(("Body", body_value))
         _write_record(deps.records_dir, "harvest", session.id, session._record("harvesting"))
 
-        # IRREVERSIBLE: burn the character; the edition dies.
-        burn_hash = await deps.char_burn_fn(rec.nft_id, owner)
-        if not burn_hash:
-            session.fail(f"failed to burn character {rec.nft_id}; nothing was lost")
-            _write_record(deps.records_dir, "harvest", session.id, session._record("failed_burn"))
+        blank_meta_url = await deps.blank_meta_fn(session.edition) if deps.blank_meta_fn else None
+        if not blank_meta_url:
+            session.fail("failed to prepare blank metadata; nothing was changed")
             return
-        session.burn_hash = burn_hash
-        _write_record(deps.records_dir, "harvest", session.id, session._record("burned"))
-        # The character is dead on-chain from this point regardless of how the
-        # Closet deposit below goes — take it out of the rarity live-count now.
+
+        if rec.mutable:
+            modify_hash = await deps.char_modify_fn(rec.nft_id, owner, blank_meta_url)
+            if not modify_hash:
+                session.fail(f"failed to blank character {rec.nft_id}; nothing was changed")
+                _write_record(
+                    deps.records_dir, "harvest", session.id, session._record("failed_modify")
+                )
+                return
+            session.modify_hash = modify_hash
+        else:
+            session.legacy_upgrade = True
+            burn_hash = await deps.char_burn_fn(rec.nft_id, owner)
+            if not burn_hash:
+                session.fail(f"failed to burn character {rec.nft_id}; nothing was lost")
+                _write_record(
+                    deps.records_dir, "harvest", session.id, session._record("failed_burn")
+                )
+                return
+            session.burn_hash = burn_hash
+            es.record_supply_change(
+                conn,
+                kind="burn",
+                edition=session.edition,
+                body_value=body_value,
+                body_class=rec.body,
+                trait_deltas=_legacy_deltas(rec, sign=-1),
+                actor="harvest",
+                reason=f"legacy harvest upgrade {session.id}",
+            )
+            _write_record(deps.records_dir, "harvest", session.id, session._record("burned"))
+
+            new_id = await deps.char_mint_fn(blank_meta_url)
+            if not new_id:
+                session.fail(
+                    f"character burned but the blank remint failed — admin must remint "
+                    f"edition {session.edition} (journal {session.id})"
+                )
+                _write_record(
+                    deps.records_dir, "harvest", session.id, session._record("burned_no_remint")
+                )
+                return
+            session.new_nft_id = new_id
+            es.record_supply_change(
+                conn,
+                kind="mint",
+                edition=session.edition,
+                body_value=body_value,
+                body_class=rec.body,
+                trait_deltas=_legacy_deltas(rec, sign=+1),
+                actor="harvest",
+                reason=f"legacy harvest upgrade {session.id}",
+            )
+            offer_id = await deps.char_offer_fn(new_id, owner)
+            session.accept = await deps.char_accept_fn(offer_id) if offer_id else None
+            _write_record(deps.records_dir, "harvest", session.id, session._record("reminted"))
+
+        # The character is blank on-chain from this point regardless of how the
+        # Closet deposit below goes — take its traits out of the rarity
+        # live-count now so shop prices reflect the harvest (#305).
         _apply_rarity_change(
             deps,
             "harvest",
@@ -378,12 +478,11 @@ async def run_harvest(session: HarvestSession, deps: EconomyDeps) -> None:
         )
 
         # Deposit: closet token first (authoritative), then DB mirror.
-        assets, bodies = _owner_contents(conn, owner)
+        assets = _owner_contents(conn, owner)
         for slot, value in session.moved_assets:
             assets[(slot, value)] = assets.get((slot, value), 0) + 1
-        bodies.add(session.edition)
         try:
-            session.sync_tx_hash = await _sync_then_persist(deps, owner, assets, bodies)
+            session.sync_tx_hash = await _sync_then_persist(deps, owner, assets)
         except bt.ClosetMirrorError as e:
             # The Closet token IS updated on-chain; only the DB mirror lags.
             # No compensation — the listener rebuilds the mirror from the token.
@@ -398,8 +497,8 @@ async def run_harvest(session: HarvestSession, deps: EconomyDeps) -> None:
         except bt.ClosetIndeterminateError as e:
             # Unknown whether the deposit committed: fail-closed — no re-apply.
             session.fail(
-                f"character burned but the Closet deposit outcome is unknown ({e}); "
-                f"reconcile from chain before any re-credit (journal {session.id})"
+                f"character blanked but the Closet deposit outcome is unknown ({e}); "
+                f"reconcile from chain (journal {session.id})"
             )
             _write_record(
                 deps.records_dir,
@@ -409,9 +508,24 @@ async def run_harvest(session: HarvestSession, deps: EconomyDeps) -> None:
             )
             return
         except Exception as e:
-            # Ledger-failed: the deposit definitively did not commit.
+            # Ledger-failed: the deposit definitively did not commit. On the
+            # mutable path (not the legacy burn+remint upgrade, which has no
+            # character left to revert), modify the character back to its
+            # original URI — otherwise the assets ride in the journal.
+            if rec.mutable and not session.legacy_upgrade:
+                old_uri = _raw_uri(rec.uri_hex)
+                revert = await deps.char_modify_fn(rec.nft_id, owner, old_uri) if old_uri else None
+                if revert:
+                    session.fail(
+                        f"harvest failed depositing to the Closet ({e}); "
+                        f"your character was restored"
+                    )
+                    _write_record(
+                        deps.records_dir, "harvest", session.id, session._record("reverted_modify")
+                    )
+                    return
             session.fail(
-                f"character burned but Closet deposit failed ({e}); assets are recorded in "
+                f"harvest failed depositing to the Closet ({e}); assets are in "
                 f"the journal ({session.id}) for recovery"
             )
             _write_record(
@@ -496,8 +610,14 @@ async def run_assemble(session: AssembleSession, deps: EconomyDeps) -> None:
         if stale:
             session.fail(stale)
             return
-        assets, bodies = _owner_contents(conn, owner)
+        assets = _owner_contents(conn, owner)
         # Task 5/6 reworks this call — see _legacy_can_assemble_by_edition.
+        # `bodies` here is read directly from the legacy closet_bodies table
+        # (no longer surfaced by _owner_contents, which is assets-only per
+        # Task 5); `_sync_then_persist` unconditionally syncs an empty body
+        # list now, so the drain of `edition` below happens as a side effect
+        # of any successful sync, not from this local set mutation.
+        bodies = {e for o, e in es.read_closet_bodies(conn) if o == owner}
         chk = _legacy_can_assemble_by_edition(
             edition,
             session.chosen,
@@ -531,12 +651,11 @@ async def run_assemble(session: AssembleSession, deps: EconomyDeps) -> None:
         _write_record(deps.records_dir, "assemble", session.id, session._record("minted"))
 
         # Drain the Closet: token first (authoritative), then DB mirror.
-        bodies.discard(edition)
         for slot in te.NON_BODY_SLOTS:
             key = (slot, session.chosen[slot])
             assets[key] = assets.get(key, 0) - 1
         try:
-            session.sync_tx_hash = await _sync_then_persist(deps, owner, assets, bodies)
+            session.sync_tx_hash = await _sync_then_persist(deps, owner, assets)
         except bt.ClosetMirrorError as e:
             # The drain COMMITTED on-chain; only the DB mirror failed. Burning
             # the mint back here would destroy it against a Closet that already
@@ -776,7 +895,7 @@ async def run_equip(session: EquipSession, deps: EconomyDeps) -> None:
         if not session.changes:
             session.fail("cannot equip: no changes to apply")
             return
-        assets, _bodies = _owner_contents(conn, owner)
+        assets = _owner_contents(conn, owner)
         # Precheck every change, accumulating each (-incoming, +displaced) delta
         # into ONE asset dict for the single Closet sync below. Assets are keyed
         # (slot, value) and a slot may appear at most once, so the changes are
@@ -820,7 +939,7 @@ async def run_equip(session: EquipSession, deps: EconomyDeps) -> None:
 
         # Swap the closet with every delta at once. Token first, then DB.
         try:
-            session.sync_tx_hash = await _sync_then_persist(deps, owner, assets, _bodies)
+            session.sync_tx_hash = await _sync_then_persist(deps, owner, assets)
         except bt.ClosetMirrorError as e:
             # The Closet swap COMMITTED on-chain; only the DB mirror failed.
             # Reverting the character would strand the swapped Closet — keep the
@@ -939,7 +1058,7 @@ async def run_extract(session: ExtractSession, deps: EconomyDeps) -> None:
         if stale:
             session.fail(stale)
             return
-        assets, bodies = _owner_contents(conn, owner)
+        assets = _owner_contents(conn, owner)
         if assets.get((slot, value), 0) < 1:
             session.fail(f"no loose '{value}' {slot} in your Closet to extract")
             return
@@ -958,7 +1077,7 @@ async def run_extract(session: ExtractSession, deps: EconomyDeps) -> None:
 
         assets[(slot, value)] = assets.get((slot, value), 0) - 1
         try:
-            session.sync_tx_hash = await _sync_then_persist(deps, owner, assets, bodies)
+            session.sync_tx_hash = await _sync_then_persist(deps, owner, assets)
         except bt.ClosetMirrorError as e:
             # The decrement COMMITTED on-chain; only the DB mirror failed.
             # Burning the token back would destroy it against a Closet that
@@ -1152,10 +1271,10 @@ async def run_deposit(session: DepositSession, deps: EconomyDeps) -> None:
         es.delete_trait_token(conn, nft_id)
         _write_record(deps.records_dir, "deposit", session.id, session._record("burned"))
 
-        assets, bodies = _owner_contents(conn, owner)
+        assets = _owner_contents(conn, owner)
         assets[(session.slot, session.value)] = assets.get((session.slot, session.value), 0) + 1
         try:
-            session.sync_tx_hash = await _sync_then_persist(deps, owner, assets, bodies)
+            session.sync_tx_hash = await _sync_then_persist(deps, owner, assets)
         except bt.ClosetMirrorError as e:
             # The credit COMMITTED on-chain; only the DB mirror lags. The
             # operator must NOT re-credit (double-credit) — the listener
