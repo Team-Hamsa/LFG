@@ -60,8 +60,11 @@ def _econ_conn() -> sqlite3.Connection:
 # --- 1. taxon 176 (TRAIT_TAXON) mint from our issuer -> trait_tokens row ----
 
 
-def test_taxon_176_mint_upserts_trait_token():
+def test_taxon_176_mint_upserts_trait_token(monkeypatch):
     assert config.TRAIT_TAXON_DEFAULT == 176  # locks in the flipped default (T1)
+    # Pin the live gate to the shipped default so the test exercises taxon 176
+    # (what its name claims) even where an ambient .env overrides TRAIT_TAXON.
+    monkeypatch.setattr(config, "TRAIT_TAXON", config.TRAIT_TAXON_DEFAULT)
     conn = _econ_conn()
     meta = trait_token.build_trait_metadata("Hat", "Cap", "https://example.com/img.png")
 
@@ -69,7 +72,7 @@ def test_taxon_176_mint_upserts_trait_token():
         return {
             "nft_id": "TRAIT176",
             "owner": "rUser",
-            "taxon": config.TRAIT_TAXON,
+            "taxon": config.TRAIT_TAXON_DEFAULT,
             "uri_hex": "AA",
             "issuer": config.SWAP_ISSUER_ADDRESS,
         }
@@ -99,18 +102,21 @@ def test_taxon_176_mint_upserts_trait_token():
 # --- 2. taxon 1760 (ASSEMBLE_TAXON) mint from our issuer ---------------------
 
 
-def test_taxon_1760_mint_is_not_classified_as_trait_or_closet():
+def test_taxon_1760_mint_is_not_classified_as_trait_or_closet(monkeypatch):
     """apply_economy_tx must not route a taxon-1760 (character) mint into the
     closet/trait economy tables — those are gated to CLOSET_TAXON/LEGACY_BUCKET_TAXON
     and TRAIT_TAXON specifically."""
     assert config.ASSEMBLE_TAXON_DEFAULT == 1760
+    # Both sides pinned to their shipped defaults: an ambient .env override of
+    # TRAIT_TAXON would otherwise change which gate this 1760 mint is tested against.
+    monkeypatch.setattr(config, "TRAIT_TAXON", config.TRAIT_TAXON_DEFAULT)
     conn = _econ_conn()
 
     async def fetch_token(nft_id):
         return {
             "nft_id": "CHAR1760",
             "owner": "rUser",
-            "taxon": config.ASSEMBLE_TAXON,
+            "taxon": config.ASSEMBLE_TAXON_DEFAULT,
             "uri_hex": "CD",
             "issuer": config.SWAP_ISSUER_ADDRESS,
         }
