@@ -4,6 +4,7 @@ tefPAST_SEQ (fire-and-forget harvests spec 2026-07-21)."""
 
 import asyncio
 import os
+import time
 from types import SimpleNamespace
 from unittest.mock import patch
 
@@ -18,6 +19,11 @@ def test_concurrent_submits_serialize_per_account():
 
     def fake_autofill_and_sign(tx, client, wallet):
         order.append(f"sign:{tx}")
+        # Runs in a to_thread worker: block long enough that, without the lock,
+        # the other task's sign deterministically lands before our submit —
+        # making the sign,sign,submit,submit collision ordering a guaranteed
+        # failure rather than a scheduling-dependent one.
+        time.sleep(0.05)
         return SimpleNamespace(get_hash=lambda: f"H{tx}")
 
     def fake_submit_and_wait(signed, client, wallet, autofill):

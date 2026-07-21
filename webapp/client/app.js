@@ -2369,6 +2369,10 @@ function pollEconomyOp(kind, startResp) {
 // nft_ids with a harvest in flight (fire-and-forget, spec 2026-07-21). Used to
 // keep a burned-in-progress character out of the selectable set on re-render.
 const harvestingIds = new Set();
+// Monotonic sequence for tracker-driven economy refetches: concurrent
+// trackHarvest completions can resolve /api/economy out of order — only the
+// newest fetch may overwrite economyState.
+let economyRefreshSeq = 0;
 
 async function harvestActive() {
   const char = activeChar();
@@ -2413,8 +2417,11 @@ async function trackHarvest(char, startResp) {
   }
   // Reconcile real state silently; re-render ONLY if the Dressing Room is the
   // visible panel — never yank the user out of another flow (e.g. a mint).
+  const seq = ++economyRefreshSeq;
   try {
-    economyState = await api('/api/economy');
+    const fresh = await api('/api/economy');
+    if (seq !== economyRefreshSeq) return; // a newer refetch superseded this one
+    economyState = fresh;
   } catch (e) {
     return; // transient; next openDressup() refetches anyway
   }
