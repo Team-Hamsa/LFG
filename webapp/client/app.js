@@ -15,7 +15,7 @@ import * as marketPure from './market_pure.js?v=23';
 import * as mintPure from './mint_pure.js?v=23';
 // Build-panel decision logic lives in its own pure module so it's
 // Node-testable too (tests/test_build_pure_js.py).
-import * as buildPure from './build_pure.js?v=24';
+import * as buildPure from './build_pure.js?v=25';
 
 const params = new URLSearchParams(window.location.search);
 const insideDiscord = params.has('frame_id');
@@ -2192,10 +2192,12 @@ function renderCloset() {
     if (!compatible) item.classList.add('incompatible');
     // With a GO selected, a trait that can't render on its body is hidden
     // entirely (it reappears on a GO whose body has the art). With no GO
-    // selected, keep a blank placeholder so the Closet contents stay visible.
-    if (char && !layerComplete(char.body, asset.value)) continue;
+    // selected — and for the always-visible "None" asset — keep a blank
+    // placeholder so the Closet contents stay visible.
+    const tile = buildPure.closetTileState(asset, char);
+    if (!tile.visible) continue;
     let img;
-    if (char) {
+    if (tile.art === 'layer') {
       // Art missing for this body (layer fetch 404s even as video): drop the
       // whole tile instead of rendering a broken image.
       img = layerMediaEl(
@@ -2226,7 +2228,16 @@ function renderCloset() {
       e.stopPropagation();  // don't also fire the tile equip click
       extractTrait(asset.slot, asset.value, extractBtn);
     };
-    item.replaceChildren(img, count, extractBtn);
+    const parts = [img];
+    if (tile.label) {
+      // A blank tile needs words: "None" art is an empty image, so without a
+      // caption a harvested empty slot reads as a rendering failure.
+      const caption = document.createElement('span');
+      caption.className = 'closet-caption';
+      caption.textContent = `${asset.slot}\n${tile.label}`;
+      parts.push(caption);
+    }
+    item.replaceChildren(...parts, count, extractBtn);
     if (staged[asset.slot] === asset.value) item.classList.add('staged');
     // Equip is wired only when the asset is compatible with the active character;
     // the tile still renders (and Extract still works) when it isn't.
@@ -2252,11 +2263,12 @@ function renderTraitStrip() {
   }
   const char = activeChar();
   for (const t of tokens) {
-    if (char && !layerComplete(char.body, t.value)) continue;
+    const tile = buildPure.closetTileState(t, char);
+    if (!tile.visible) continue;   // a "None" token stays listed — it must remain depositable
     const chip = document.createElement('div');
     chip.className = 'trait-chip';
     let img;
-    if (char) {
+    if (tile.art === 'layer') {
       img = layerMediaEl(
         layerSrc(char.body, t.slot, t.value),
         `${t.slot}: ${t.value}`,

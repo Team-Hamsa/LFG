@@ -90,3 +90,23 @@ export function netChanges(character, pending) {
     .filter((slot) => staged[slot] !== currentValue(character, slot))
     .map((slot) => ({ slot, value: staged[slot] }));
 }
+
+// Presentation state for one Closet tile (asset {slot, value}) given the
+// selected GO (`char`, or null when none is selected).
+//   visible — false only when the value's art can't render on this body (it
+//             reappears under a GO whose body does have the art)
+//   art     — 'layer' (fetch the body-specific layer file) | 'blank'
+//   label   — text to show in place of art
+//
+// "None" is a real, conserved asset — a harvest deposits one per empty slot,
+// and equipping it is how a slot gets cleared — so a "None" tile is ALWAYS
+// visible. It just has nothing to draw (its art is an empty image, and some
+// bodies have no None file at all, whose 404 used to delete the tile), hence
+// a labeled blank placeholder rather than a layer fetch.
+export function closetTileState(asset, char) {
+  const value = asset && asset.value;
+  if (!value || value === 'None') return { visible: true, art: 'blank', label: 'None' };
+  if (!char) return { visible: true, art: 'blank', label: '' };
+  if (!char.body) return { visible: false, art: 'blank', label: '' };
+  return { visible: true, art: 'layer', label: '' };
+}
