@@ -233,8 +233,12 @@ def _swap_metadata(
             "image": config.NFT_COLLECTION_LOGO,
         },
         "edition": nft["number"],
-        # Kept on the modify path too: it doubles as the revision counter
-        # that keeps CDN filenames unique across successive swaps.
+        # Kept on the modify path too: it is the swap path's revision counter,
+        # and it prefixes the CDN stem so a file's revision is readable at a
+        # glance (scripts/rebuild_cdn_images.target_basename reads it back).
+        # It is NOT what makes the stem unique — the economy flows never
+        # write this field, so the counter restarts at 0 after any economy op.
+        # _build_and_upload's random suffix is what guarantees uniqueness.
         "burnCount": nft["burn_count"] + 1,
         "attributes": attributes,
     }
