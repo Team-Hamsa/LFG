@@ -216,25 +216,60 @@ def get_nft_data(nft_number: int) -> dict[str, Any] | None:
 HARVEST_BURN_REASON = "harvest"
 
 
+_BURNED_NFTS_DDL = """CREATE TABLE {name} (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    nft_number INTEGER,
+    nft_id TEXT,
+    discord_id TEXT,
+    burned_by TEXT,
+    reason TEXT,
+    burned_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    original_mint_time TIMESTAMP
+)"""
+
+_BURNED_NFTS_DATA_COLS = (
+    "nft_number",
+    "nft_id",
+    "discord_id",
+    "burned_by",
+    "reason",
+    "burned_at",
+    "original_mint_time",
+)
+
+
 def ensure_burned_nfts_schema(conn: sqlite3.Connection) -> None:
     """Create burned_nfts if missing (surrogate key: the same nft_number can
-    burn more than once over time) and self-migrate the revived_at column."""
-    conn.execute(
-        """CREATE TABLE IF NOT EXISTS burned_nfts (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            nft_number INTEGER,
-            nft_id TEXT,
-            discord_id TEXT,
-            burned_by TEXT,
-            reason TEXT,
-            burned_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-            original_mint_time TIMESTAMP
-        )"""
-    )
-    cols = {r[1] for r in conn.execute("PRAGMA table_info(burned_nfts)")}
-    if "revived_at" not in cols:
-        conn.execute("ALTER TABLE burned_nfts ADD COLUMN revived_at TIMESTAMP")
-    conn.commit()
+    burn more than once over time — harvest → assemble → harvest), rebuild the
+    deployed legacy `nft_number INTEGER PRIMARY KEY` shape into the
+    surrogate-key one preserving every audit row, and self-migrate the
+    revived_at column. sqlite DDL is transactional: any failure mid-rebuild
+    rolls back to the untouched legacy table."""
+    try:
+        if not conn.execute(
+            "SELECT 1 FROM sqlite_master WHERE type='table' AND name='burned_nfts'"
+        ).fetchone():
+            conn.execute(_BURNED_NFTS_DDL.format(name="burned_nfts"))
+        cols = {r[1] for r in conn.execute("PRAGMA table_info(burned_nfts)")}
+        if "id" not in cols:
+            # Legacy shape: nft_number is the PK, so a second burn of the same
+            # edition would conflict and revive_harvested_edition's SELECT id
+            # would error. Rebuild with the surrogate key, keeping all rows.
+            conn.execute("ALTER TABLE burned_nfts RENAME TO burned_nfts_legacy")
+            conn.execute(_BURNED_NFTS_DDL.format(name="burned_nfts"))
+            keep = ", ".join(c for c in _BURNED_NFTS_DATA_COLS if c in cols)
+            conn.execute(
+                f"INSERT INTO burned_nfts ({keep})"
+                f" SELECT {keep} FROM burned_nfts_legacy ORDER BY rowid"
+            )
+            conn.execute("DROP TABLE burned_nfts_legacy")
+            cols = {r[1] for r in conn.execute("PRAGMA table_info(burned_nfts)")}
+        if "revived_at" not in cols:
+            conn.execute("ALTER TABLE burned_nfts ADD COLUMN revived_at TIMESTAMP")
+        conn.commit()
+    except Exception:
+        conn.rollback()
+        raise
 
 
 def record_harvest_burn(

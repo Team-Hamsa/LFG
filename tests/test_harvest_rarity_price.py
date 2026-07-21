@@ -50,11 +50,12 @@ def _app_db(path):
         body_type TEXT, network TEXT,
         created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP)"""
     )
-    # Legacy shape: no revived_at column — exercises the self-migration.
+    # The DEPLOYED legacy shape (verified against prod lfg_nfts.db):
+    # nft_number is the PRIMARY KEY, there is no surrogate id and no
+    # revived_at — exercises the full table rebuild.
     c.execute(
         """CREATE TABLE burned_nfts (
-        id INTEGER PRIMARY KEY AUTOINCREMENT,
-        nft_number INTEGER, nft_id TEXT, discord_id TEXT,
+        nft_number INTEGER PRIMARY KEY, nft_id TEXT, discord_id TEXT,
         burned_by TEXT, reason TEXT,
         burned_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
         original_mint_time TIMESTAMP)"""
@@ -97,9 +98,9 @@ def test_recalc_excludes_harvest_burn_and_migrates_legacy_schema(tmp_path):
     db_helpers.record_harvest_burn(c, 7, "NFT7", "rUser")
     rarity.recalculate_rarity(c, network=NET)
     assert _clothing_count(c) == 1
-    # migration added revived_at to the legacy table
+    # migration rebuilt the legacy PK table into the surrogate-key shape
     cols = {r[1] for r in c.execute("PRAGMA table_info(burned_nfts)")}
-    assert "revived_at" in cols
+    assert {"id", "revived_at"} <= cols
     # audit fields captured from the LFG row
     row = c.execute(
         "SELECT discord_id, burned_by, reason FROM burned_nfts WHERE nft_number=7"
@@ -122,6 +123,47 @@ def test_revive_restores_live_count_and_keeps_audit_row(tmp_path):
     assert revived is not None
     # nothing left to revive
     assert db_helpers.revive_harvested_edition(c, 7) is False
+
+
+def test_legacy_rebuild_preserves_rows_and_allows_reburn(tmp_path):
+    """The deployed legacy table (nft_number PK) must be rebuilt preserving
+    existing audit rows, after which harvest → assemble → harvest of the SAME
+    edition works (the legacy PK would have rejected the second burn row)."""
+    c = _app_db(tmp_path / "app.db")
+    _mint_row(c, 7)
+    # pre-existing admin-burn audit row in the legacy table
+    c.execute(
+        "INSERT INTO burned_nfts (nft_number, nft_id, burned_by, reason)"
+        " VALUES (3, 'NFT3', 'admin', 'violation')"
+    )
+    c.commit()
+
+    db_helpers.record_harvest_burn(c, 7, "NFT7", "rUser")  # triggers the rebuild
+    # legacy row survived the rebuild, scratch table is gone
+    assert c.execute("SELECT reason FROM burned_nfts WHERE nft_number=3").fetchone() == (
+        "violation",
+    )
+    assert not c.execute("SELECT 1 FROM sqlite_master WHERE name='burned_nfts_legacy'").fetchone()
+
+    # full cycle on one edition: revive, then burn it again
+    assert db_helpers.revive_harvested_edition(c, 7) is True
+    db_helpers.record_harvest_burn(c, 7, "NFT7b", "rUser")
+    rows = c.execute(
+        "SELECT nft_id, revived_at FROM burned_nfts WHERE nft_number=7 ORDER BY id"
+    ).fetchall()
+    assert len(rows) == 2
+    assert rows[0][1] is not None and rows[1][1] is None
+    rarity.recalculate_rarity(c, network=NET)
+    assert _clothing_count(c) == 0  # the second, un-revived burn excludes it
+
+
+def test_ensure_schema_idempotent_on_current_shape(tmp_path):
+    c = _app_db(tmp_path / "app.db")
+    db_helpers.ensure_burned_nfts_schema(c)
+    before = c.execute("SELECT sql FROM sqlite_master WHERE name='burned_nfts'").fetchone()
+    db_helpers.ensure_burned_nfts_schema(c)  # no second rebuild
+    after = c.execute("SELECT sql FROM sqlite_master WHERE name='burned_nfts'").fetchone()
+    assert before == after
 
 
 def test_revive_ignores_admin_burns(tmp_path):
