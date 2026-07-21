@@ -48,9 +48,17 @@ def scan(base_dir: str) -> tuple[list[tuple[str, str]], list[str]]:
     missing or older than its source (mtime), `orphans` is thumb files whose
     source no longer exists in any format that maps to them. Hidden dirs
     (including .thumbs itself) are never treated as sources.
+
+    When several same-stem sources map to one thumb (e.g. X.gif + X.webm ->
+    .thumbs/X.gif), only the source LocalLayerStore.resolve() would serve
+    (LAYER_EXTENSIONS priority) drives the thumb — otherwise the generator's
+    last-write-wins order could leave a thumb showing different art from the
+    full layer.
     """
-    stale: list[tuple[str, str]] = []
+    # Extension priority mirroring layer_store.LAYER_EXTENSIONS resolve order.
+    priority = {".png": 0, ".gif": 1, ".webm": 2, ".mp4": 3}
     sources: set[str] = set()
+    winner_for: dict[str, str] = {}
     for root, dirs, files in os.walk(base_dir):
         dirs[:] = sorted(d for d in dirs if not d.startswith("."))
         for f in sorted(files):
@@ -59,12 +67,22 @@ def scan(base_dir: str) -> tuple[list[tuple[str, str]], list[str]]:
             if thumb is None:
                 continue
             sources.add(src)
-            try:
-                fresh = os.path.getmtime(thumb) >= os.path.getmtime(src)
-            except OSError:
-                fresh = False
-            if not fresh:
-                stale.append((src, thumb))
+            best = winner_for.get(thumb)
+            if (
+                best is None
+                or priority[os.path.splitext(src)[1].lower()]
+                < priority[os.path.splitext(best)[1].lower()]
+            ):
+                winner_for[thumb] = src
+
+    stale: list[tuple[str, str]] = []
+    for thumb, src in sorted(winner_for.items(), key=lambda kv: kv[1]):
+        try:
+            fresh = os.path.getmtime(thumb) >= os.path.getmtime(src)
+        except OSError:
+            fresh = False
+        if not fresh:
+            stale.append((src, thumb))
 
     orphans: list[str] = []
     thumbs_root = os.path.join(base_dir, THUMBS_DIR)

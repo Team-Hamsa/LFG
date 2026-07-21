@@ -95,6 +95,21 @@ def test_scan_reports_missing_stale_fresh_and_orphans(tmp_path):
     assert [os.path.relpath(t, base) for t in orphans] == [".thumbs/male/Body/Orphan.gif"]
 
 
+def test_scan_same_stem_winner_follows_resolve_priority(tmp_path):
+    # X.gif + X.webm share one thumb; resolve() serves the .gif, so the .gif
+    # must drive the thumb — even when the .webm is newer than the thumb.
+    base = str(tmp_path)
+    _touch(os.path.join(base, "male/Body/X.gif"), mtime=100)
+    _touch(os.path.join(base, "male/Body/X.webm"), mtime=300)
+    _touch(os.path.join(base, ".thumbs/male/Body/X.gif"), mtime=200)
+    stale, orphans = layer_thumbs.scan(base)
+    assert stale == [] and orphans == []
+    # and when the thumb is stale, only the winning source is scheduled
+    _touch(os.path.join(base, "male/Body/X.gif"), mtime=400)
+    stale, _ = layer_thumbs.scan(base)
+    assert [os.path.relpath(s, base) for s, _ in stale] == ["male/Body/X.gif"]
+
+
 def test_scan_ignores_hidden_dirs_as_sources(tmp_path):
     base = str(tmp_path)
     _touch(os.path.join(base, ".thumbs/male/Body/X.png"))

@@ -50,6 +50,8 @@ def probe_fps(path: str) -> int:
                 "ffprobe",
                 "-v",
                 "quiet",
+                "-select_streams",
+                "v:0",
                 "-show_entries",
                 "stream=r_frame_rate",
                 "-of",
@@ -76,28 +78,40 @@ def _decode_args(src: str) -> list[str]:
     return []
 
 
+# Converters write to a same-directory temp file and os.replace() it into
+# place only on success: an interrupted run must never leave a truncated thumb
+# whose fresh mtime makes scan() (and /api/layer?thumb=1) treat it as done.
+
+
 def build_png_thumb(src: str, dest: str, size: int) -> None:
     os.makedirs(os.path.dirname(dest), exist_ok=True)
-    run(
-        [
-            "ffmpeg",
-            "-y",
-            "-v",
-            "error",
-            "-i",
-            src,
-            "-vf",
-            f"scale={size}:{size}:flags=lanczos",
-            "-frames:v",
-            "1",
-            dest,
-        ]
-    )
+    tmp_dest = dest + ".tmp.png"
+    try:
+        run(
+            [
+                "ffmpeg",
+                "-y",
+                "-v",
+                "error",
+                "-i",
+                src,
+                "-vf",
+                f"scale={size}:{size}:flags=lanczos",
+                "-frames:v",
+                "1",
+                tmp_dest,
+            ]
+        )
+        os.replace(tmp_dest, dest)
+    finally:
+        if os.path.exists(tmp_dest):
+            os.remove(tmp_dest)
 
 
 def build_gif_thumb(src: str, dest: str, size: int, quality: int) -> None:
     os.makedirs(os.path.dirname(dest), exist_ok=True)
     fps = probe_fps(src)
+    tmp_dest = dest + ".tmp.gif"
     with tempfile.TemporaryDirectory() as tmp:
         run(
             [
@@ -118,22 +132,27 @@ def build_gif_thumb(src: str, dest: str, size: int, quality: int) -> None:
         frames = sorted(os.path.join(tmp, f) for f in os.listdir(tmp) if f.endswith(".png"))
         if not frames:
             raise RuntimeError(f"no frames decoded from {src}")
-        run(
-            [
-                "gifski",
-                "--fps",
-                str(fps),
-                "--quality",
-                str(quality),
-                "-W",
-                str(size),
-                "-H",
-                str(size),
-                "-o",
-                dest,
-                *frames,
-            ]
-        )
+        try:
+            run(
+                [
+                    "gifski",
+                    "--fps",
+                    str(fps),
+                    "--quality",
+                    str(quality),
+                    "-W",
+                    str(size),
+                    "-H",
+                    str(size),
+                    "-o",
+                    tmp_dest,
+                    *frames,
+                ]
+            )
+            os.replace(tmp_dest, dest)
+        finally:
+            if os.path.exists(tmp_dest):
+                os.remove(tmp_dest)
 
 
 def build_thumb(src: str, dest: str, size: int, quality: int) -> None:
