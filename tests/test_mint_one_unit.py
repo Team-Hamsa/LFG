@@ -72,6 +72,7 @@ def _mint_mocks(monkeypatch):
         return "OFFER1"
 
     async def fake_create_accept_offer_payload(*args, **kwargs):
+        captured["accept_kwargs"] = kwargs
         return {"qr_url": "q", "xumm_url": "x", "uuid": "u"}
 
     def fake_record_nft_mint(**kwargs):
@@ -131,6 +132,10 @@ def test_mint_one_unit_happy_path(monkeypatch, _mint_mocks):
     # can store them on the session / bulk unit for downstream consumers.
     assert res.traits == _expected_traits()
     assert res.body_type == "male"
+    # The delivery offer is locked to this wallet on-ledger; pin the payload
+    # to it too, so Xaman refuses a wrong-account signature up front instead
+    # of letting it fail as tecNO_PERMISSION.
+    assert _mint_mocks["accept_kwargs"]["account"] == "rUSER"
 
 
 def test_mint_one_unit_offer_fail_reports_nft_id(monkeypatch, _mint_mocks):

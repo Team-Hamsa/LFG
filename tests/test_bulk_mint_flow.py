@@ -244,3 +244,24 @@ def test_prepare_payment_multiplies_price_xrp(monkeypatch):
     asyncio.run(j.prepare_payment())
     assert j.pay_with == "XRP"
     assert j.pay_amount == "40"  # 4 x 10
+
+
+def test_prepare_payment_pins_signing_account(monkeypatch):
+    """Same invariant as single mint: only the job's own wallet may sign the
+    payment, so a second Xaman account cannot pay into a wait that will never
+    match it."""
+    import asyncio
+
+    captured = {}
+
+    async def fake_payload(destination, **kw):
+        captured.update(kw)
+        return {"xumm_url": "x", "uuid": "u"}
+
+    monkeypatch.setattr(config, "BULK_MINT_MAX", 10)
+    monkeypatch.setattr(bulk_mint_flow.xrpl_ops, "get_trustline_balance", _async_return(None))
+    monkeypatch.setattr(bulk_mint_flow.xumm_ops, "create_payment_payload", fake_payload)
+    j = _job(2)
+    j.clamp_to_headroom()
+    asyncio.run(j.prepare_payment())
+    assert captured["account"] == "rUSER"

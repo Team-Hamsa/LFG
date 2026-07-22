@@ -40,10 +40,18 @@ async def _offer_or_skip(nft_id: str, owner: str) -> str | None:
     return await xrpl_ops.create_nft_offer(nft_id, owner, amount="0")
 
 
-async def _accept_or_skip(offer_id: str, user_token: str | None = None) -> Any:
+async def _accept_or_skip(
+    offer_id: str, user_token: str | None = None, owner: str | None = None
+) -> Any:
     if offer_id == _SELF_OFFER_SKIPPED:
         return None
-    return await xumm_ops.create_accept_offer_payload(offer_id, user_token=user_token)
+    # `owner` pins the payload to the wallet the offer is Destination-locked
+    # to, so Xaman refuses a wrong-account signature instead of letting it
+    # fail on-ledger. None only for the CLI drivers, which have no identity
+    # context to resolve an owner from.
+    return await xumm_ops.create_accept_offer_payload(
+        offer_id, user_token=user_token, account=owner
+    )
 
 
 async def _closet_exists(nft_id: str) -> bool:
@@ -152,14 +160,18 @@ async def _trait_meta(nft_id: str) -> dict[str, Any] | None:
 
 
 def build_economy_deps(
-    conn: sqlite3.Connection, user_token: str | None = None
+    conn: sqlite3.Connection, user_token: str | None = None, owner: str | None = None
 ) -> economy_flow.EconomyDeps:
     """An EconomyDeps backed by the real testnet/mainnet operations.
 
     ``user_token`` (#135/#212) is the owner's stored XUMM push token, if any:
     every accept-offer payload these deps build (Closet claim, assemble/extract
     delivery) is then push-delivered to their Xaman app instead of QR-only.
-    The CLI drivers pass none and keep their QR behavior."""
+    The CLI drivers pass none and keep their QR behavior.
+
+    ``owner`` is the wallet those accept payloads are for: it pins each
+    payload's `Account` so only that wallet can sign it. Optional because the
+    CLI drivers build deps without an identity context."""
     return economy_flow.EconomyDeps(
         conn=conn,
         closet_upload_fn=_upload_closet,
@@ -167,7 +179,7 @@ def build_economy_deps(
             url, config.CLOSET_TAXON, config.SWAP_ISSUER_ADDRESS, flags=config.CLOSET_NFT_FLAGS
         ),
         closet_offer_fn=_offer_or_skip,
-        closet_accept_fn=lambda offer_id: _accept_or_skip(offer_id, user_token),
+        closet_accept_fn=lambda offer_id: _accept_or_skip(offer_id, user_token, owner),
         closet_modify_fn=_closet_modify,
         closet_exists_fn=lambda nft_id: _closet_exists(nft_id),
         closet_owner_fn=lambda nft_id: _closet_owner(nft_id),
@@ -187,7 +199,7 @@ def build_economy_deps(
         char_modify_fn=lambda nft_id, owner, url: xrpl_ops.modify_nft(nft_id, owner, url),
         char_burn_fn=lambda nft_id, owner: xrpl_ops.burn_nft(nft_id, owner or None),
         char_offer_fn=_offer_or_skip,
-        char_accept_fn=lambda offer_id: _accept_or_skip(offer_id, user_token),
+        char_accept_fn=lambda offer_id: _accept_or_skip(offer_id, user_token, owner),
         trait_compose_fn=lambda slot, value: _compose_trait(slot, value),
         trait_upload_fn=_upload_closet,
         trait_mint_fn=lambda url: xrpl_ops.mint_nft(

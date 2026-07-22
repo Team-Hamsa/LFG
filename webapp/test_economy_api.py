@@ -207,7 +207,9 @@ def test_start_equip_happy_returns_session(monkeypatch):
     # Stub the real deps builder so no XRPL/CDN is touched.
     from scripts import _economy_deps
 
-    monkeypatch.setattr(_economy_deps, "build_economy_deps", lambda c, user_token=None: object())
+    monkeypatch.setattr(
+        _economy_deps, "build_economy_deps", lambda c, user_token=None, owner=None: object()
+    )
 
     async def go():
         ws = await economy_api.start_equip("123", "rOwner", "A", [("Head", "Halo")])
@@ -318,7 +320,9 @@ def test_start_equip_closes_conn_after_task(monkeypatch):
     monkeypatch.setattr(economy_flow, "run_equip", fake_run_equip)
     from scripts import _economy_deps
 
-    monkeypatch.setattr(_economy_deps, "build_economy_deps", lambda c, user_token=None: object())
+    monkeypatch.setattr(
+        _economy_deps, "build_economy_deps", lambda c, user_token=None, owner=None: object()
+    )
 
     async def go():
         await economy_api.start_equip("123", "rOwner", "A", [("Head", "Halo")])
@@ -394,7 +398,9 @@ def test_run_and_close_marks_session_failed_on_runner_crash(monkeypatch):
     monkeypatch.setattr(economy_flow, "run_equip", crashing_runner)
     from scripts import _economy_deps
 
-    monkeypatch.setattr(_economy_deps, "build_economy_deps", lambda c, user_token=None: object())
+    monkeypatch.setattr(
+        _economy_deps, "build_economy_deps", lambda c, user_token=None, owner=None: object()
+    )
 
     async def go():
         ws = await economy_api.start_equip("123", "rOwner", "A", [("Head", "Halo")])
@@ -762,7 +768,9 @@ def test_start_equip_compatible_value_still_starts(monkeypatch, body_gate_store)
     monkeypatch.setattr(economy_flow, "run_equip", fake_run_equip)
     from scripts import _economy_deps
 
-    monkeypatch.setattr(_economy_deps, "build_economy_deps", lambda c, user_token=None: object())
+    monkeypatch.setattr(
+        _economy_deps, "build_economy_deps", lambda c, user_token=None, owner=None: object()
+    )
 
     async def go():
         ws = await economy_api.start_equip("123", "rOwner", "A", [("Clothing", "Hoodie")])
@@ -811,7 +819,9 @@ def test_start_equip_accepts_matrix_permitted_foreign_value(monkeypatch, body_ga
     monkeypatch.setattr(economy_flow, "run_equip", fake_run_equip)
     from scripts import _economy_deps
 
-    monkeypatch.setattr(_economy_deps, "build_economy_deps", lambda c, user_token=None: object())
+    monkeypatch.setattr(
+        _economy_deps, "build_economy_deps", lambda c, user_token=None, owner=None: object()
+    )
 
     async def go():
         ws = await economy_api.start_equip("123", "rOwner", "APE1", [("Head", "Spikey Black")])

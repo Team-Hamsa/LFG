@@ -2255,6 +2255,10 @@ def test_buy_status_onramp_accept_payload_carries_return_url(
     body = _run(_read_json(resp))
     assert body["state"] == "awaiting_signature"
     assert seen_kwargs["return_url"] == ret
+    # A marketplace sell offer has no Destination, so a wrong-wallet accept
+    # would actually SUCCEED and buy the NFT into that wallet. Pin the payload
+    # to the session's buyer.
+    assert seen_kwargs["account"] == s.wallet_address
 
 
 # ---------------------------------------------------------------------------

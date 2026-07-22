@@ -171,6 +171,10 @@ class MintSession:
             return_url=self.return_url,
             user_token=self.push_user_token,
             platform=memos.platform_for_surface(self.platform),
+            # The payment wait below is sender-verified against this wallet;
+            # pin the payload to it so Xaman cannot sign from another account
+            # (whose payment would land, unmatched, and be lost).
+            account=self.wallet_address,
         )
         if payload:
             self.payment_link = payload["xumm_url"]
@@ -546,6 +550,10 @@ async def mint_one_unit(
             return_url=return_url,
             user_token=push_user_token,
             platform=memos.platform_for_surface(platform),
+            # The offer is Destination-locked to this wallet; pin the payload
+            # too so a wrong-account signature is refused in Xaman rather than
+            # burning a fee on a tecNO_PERMISSION.
+            account=wallet_address,
         )
         if not accept:
             return UnitResult(

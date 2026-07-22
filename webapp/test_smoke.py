@@ -190,6 +190,46 @@ def test_xrp_payment_payload_uses_drops(monkeypatch):
     assert captured["txjson"]["Amount"] == "10000000"  # drops string, not dict
 
 
+def test_payment_payload_pins_signing_account(monkeypatch):
+    """An account-less Payment payload lets Xaman sign from WHICHEVER account
+    is selected. The backend then correctly ignores the wrong-wallet payment
+    (sender-verified on-ledger), so the user pays and gets nothing. Pinning
+    Account makes Xaman refuse the signature up front (mainnet 2026-07-21:
+    2 LFGO left rwr84Q… for a session expecting rHaMsAjo…)."""
+    captured = {}
+    _fake_xumm_api(monkeypatch, captured)
+    asyncio.get_event_loop().run_until_complete(
+        xumm_ops.create_payment_payload("rDest", account="rPayer")
+    )
+    assert captured["txjson"]["Account"] == "rPayer"
+
+
+def test_payment_payload_omits_account_when_unknown(monkeypatch):
+    captured = {}
+    _fake_xumm_api(monkeypatch, captured)
+    asyncio.get_event_loop().run_until_complete(xumm_ops.create_payment_payload("rDest"))
+    assert "Account" not in captured["txjson"]
+
+
+def test_accept_offer_payload_pins_signing_account(monkeypatch):
+    """Same trap as the payment payload: an account-less accept lets a second
+    Xaman account sign. A delivery offer is Destination-locked so the ledger
+    refuses it, but a marketplace buy would succeed — into the wrong wallet."""
+    captured = {}
+    _fake_xumm_api(monkeypatch, captured)
+    asyncio.get_event_loop().run_until_complete(
+        xumm_ops.create_accept_offer_payload("OFFER", account="rBuyer")
+    )
+    assert captured["txjson"]["Account"] == "rBuyer"
+
+
+def test_accept_offer_payload_omits_account_when_unknown(monkeypatch):
+    captured = {}
+    _fake_xumm_api(monkeypatch, captured)
+    asyncio.get_event_loop().run_until_complete(xumm_ops.create_accept_offer_payload("OFFER"))
+    assert "Account" not in captured["txjson"]
+
+
 def _stub_balance(monkeypatch, balance):
     async def fake_balance(address, currency, issuer):
         return balance
@@ -210,6 +250,23 @@ def test_mint_session_threads_return_url(monkeypatch):
     session = mint_flow.MintSession(discord_id="1", wallet_address="rTest", return_url=ru)
     asyncio.get_event_loop().run_until_complete(session.prepare_payment())
     assert seen["return_url"] == ru
+
+
+def test_mint_session_pins_payment_to_session_wallet(monkeypatch):
+    """The payment payload must be signable ONLY by the wallet the session
+    verifies on-ledger — otherwise a second Xaman account can sign it, the
+    funds move, and wait_for_payment never matches them."""
+    seen = {}
+
+    async def fake_payload(destination, **kw):
+        seen.update(kw)
+        return {"qr_url": "q", "xumm_url": "https://xumm.app/sign/PAY", "uuid": "u"}
+
+    _stub_balance(monkeypatch, Decimal("5"))
+    monkeypatch.setattr(mint_flow.xumm_ops, "create_payment_payload", fake_payload)
+    session = mint_flow.MintSession(discord_id="1", wallet_address="rTest")
+    asyncio.get_event_loop().run_until_complete(session.prepare_payment())
+    assert seen["account"] == "rTest"
 
 
 def test_mint_session_prepare_uses_xumm_payload(monkeypatch):
