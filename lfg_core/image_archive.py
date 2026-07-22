@@ -206,15 +206,46 @@ def edition_for_url(conn: sqlite3.Connection, url: str) -> int | None:
     equivalent shapes (see url_forms), or None.
 
     Only live rows count: a burned duplicate's URL must not shadow-serve.
-    Identical URLs across editions mean identical art, so MIN is a safe,
-    deterministic pick."""
+    Duplicate live tokens of ONE edition are fine — same edition, same art.
+
+    A URL shared by SEVERAL live editions is ambiguous and resolves to None:
+    it is not per-edition art, so no archived file can be the right answer.
+    The blank silhouette every harvested character points at is the real
+    case — the archive still holds each edition's own (now stale) dressed
+    still, so picking one edition served its old artwork for every other
+    edition's blank. Returning None falls through to the real fetch, which
+    is always correct."""
     forms = url_forms(url)
     if not forms:
         return None
     placeholders = ",".join("?" * len(forms))
-    row = conn.execute(
-        "SELECT MIN(nft_number) FROM onchain_nfts"
-        f" WHERE image IN ({placeholders}) AND is_burned = 0 AND nft_number IS NOT NULL",
+    rows = conn.execute(
+        "SELECT DISTINCT nft_number FROM onchain_nfts"
+        f" WHERE image IN ({placeholders}) AND is_burned = 0 AND nft_number IS NOT NULL"
+        " LIMIT 2",
         forms,
-    ).fetchone()
-    return int(row[0]) if row and row[0] is not None else None
+    ).fetchall()
+    if len(rows) != 1:
+        return None
+    return int(rows[0][0])
+
+
+def drop_archived(network: str, edition: int) -> None:
+    """Invalidate `edition`'s archived still + thumb. Never raises.
+
+    For ops that change an edition's art WITHOUT composing a still into the
+    archive — the trait economy's harvest (to the shared blank silhouette)
+    and assemble (to freshly composed art uploaded straight to the CDN).
+    The on-chain `image` URL changes, `edition_for_url` still maps it to
+    this edition, and the archive would keep serving the pre-op artwork.
+    Dropping it degrades /api/img to the CDN fetch: slower once, correct
+    always. (The mint/swap paths instead promote_still() their new art.)"""
+    base = archive_dir(network)
+    paths = [os.path.join(base, f"{edition}{ext}") for ext in CONTENT_TYPES]
+    paths.append(os.path.join(base, THUMB_SUBDIR, f"{edition}.webp"))
+    for path in paths:
+        try:
+            if os.path.exists(path):
+                os.remove(path)
+        except Exception:
+            logging.exception(f"image_archive: dropping archived {path} failed")
