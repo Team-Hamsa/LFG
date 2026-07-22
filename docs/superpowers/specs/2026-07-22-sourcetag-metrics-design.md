@@ -17,7 +17,7 @@ and unique participating wallets, in the existing brand style.
 
 ## Baseline (measured 2026-07-22, `history_mainnet.db`)
 
-- 1,935 tagged transactions, archive current through 2026-07-22 03:20 UTC
+- 1,943 tagged transactions (grows continuously; the listener is live)
 - 19 distinct signing accounts → **16** after excluding our own wallets
 - By type: Mint 700 · CreateOffer 692 · AcceptOffer 311 · Modify 89 · Burn 77 ·
   Payment 64 · CancelOffer 2
@@ -33,16 +33,24 @@ since-2026-07-10 differ by 22 transactions. Reporting all-time is simpler and
 loses nothing.
 
 **Unique wallets counts signers, not recipients.** A wallet is counted when it
-*signed* a tagged transaction. Measured gap: 24 distinct `Destination`
-addresses vs 19 signers. The 5 non-signing destinations are
-`rLfgoBriX…` (our BRIX issuer, 33 Payments) and `rBETMo1JS…` — both
-infrastructure — plus three real wallets (`rMCHcWdhV…`, `rhNkDbyf…`,
-`rpx9JThQ2…`) that were offered an NFT and never accepted it. A wallet that
-ignored an offer did not interact with the project. The wider figure is carried
-in the JSON as `wallets_reached` (16 counted signers + the three real
-non-acceptors = 19) but is not rendered on the badge. That 19 coincidentally
-equals the raw signer count; the two are unrelated quantities and must not be
-computed from each other.
+*signed* a tagged transaction. Recipients are not counted and are not
+reported. Measured for the record: 24 distinct `Destination` addresses vs 19
+signers, the gap being two infrastructure addresses (`rLfgoBriX…`, our BRIX
+issuer; `rBETMo1JS…`) and three wallets that were offered an NFT and never
+accepted it. A wallet that ignored an offer did not interact with the project.
+
+**The exclusion set applies to `unique_wallets` only, not to
+`total_tagged_txs`.** This asymmetry is deliberate and must not be
+"corrected". `unique_wallets` answers "how many people used this", so our own
+wallets are removed. `total_tagged_txs` answers "how much tagged volume did
+this project generate", and an issuer-signed `NFTokenMint` is our volume
+regardless of who pressed the button — the hackathon scores it. The two
+figures are measured over the same rows but filtered differently: 16 wallets,
+1,943 transactions. Filtering the transaction count the same way yields 280
+(Accept 262 · Pay 17 · Offer 1), because the backend signs every mint, offer,
+modify and burn and a user's only signature is the accept or the payment.
+That view discards roughly 85% of the tagged volume and is not what the badge
+reports.
 
 **Exclusion set.** `rHU8nu9zSnCpkL3gShG4aGawHzaRVfmKwQ`,
 `rHaMsAjoAN21s1XG5TCAM6ErAefzrggsHf` (the operator's wallets) and
@@ -86,7 +94,6 @@ Output schema:
 | `network` | str | `mainnet` |
 | `total_tagged_txs` | int | all rows with `source_tag = 2606160021` |
 | `unique_wallets` | int | distinct `account`, minus the exclusion set |
-| `wallets_reached` | int | secondary: signers + non-infrastructure destinations |
 | `by_type` | dict | tx type → count, descending |
 | `daily` | list | `[{date, count}]`, gap-filled contiguous UTC days |
 | `excluded` | list | the excluded addresses, explicitly |
@@ -152,7 +159,7 @@ Layout:
 │  XRPL source tag · 2606160021                            │
 │  live on-ledger volume · auto-updated daily              │
 │                                                          │
-│    16                    1,935                           │
+│    16                    1,943                           │
 │    unique wallets        tagged transactions             │
 │                                                          │
 │  mint    ████████████████████ 700                        │
@@ -186,8 +193,8 @@ A `role="img"` + `aria-label` describing the figures, as the existing badges do.
 
 - Collector: fixture `history_*.db` built in a tmpdir with known tagged and
   untagged rows; assert `total_tagged_txs`, `unique_wallets` honours the
-  exclusion set, `wallets_reached` counts non-infrastructure destinations only,
-  `by_type` ordering, and `daily` gap-filling across a missing day.
+  exclusion set while `total_tagged_txs` does not, `by_type` ordering, and
+  `daily` gap-filling across a missing day.
 - Regression: assert `close_time` is interpreted as unix seconds — a row at a
   known timestamp must land on the expected UTC date.
 - `--push` is exercised with the `gh` invocation stubbed; assert no writes land
