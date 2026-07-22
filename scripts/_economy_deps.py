@@ -281,13 +281,10 @@ def build_economy_deps(
         trait_burn_fn=lambda nft_id, owner: xrpl_ops.burn_nft(nft_id, owner or None),
         trait_info_fn=lambda nft_id: _trait_info(nft_id),
         trait_meta_fn=lambda nft_id: _trait_meta(nft_id),
-<<<<<<< HEAD
         # Rarity bookkeeping (#305): harvest/assemble adjust the app-DB
         # live-count the Trait Shop price formula reads.
         app_conn_factory=lambda: sqlite3.connect(db_path.app_db_path(config.ECONOMY_NETWORK)),
-=======
         blank_meta_fn=_blank_meta,
->>>>>>> 769c882 (feat(service): blank-model harvest/assemble API + blank art plumbing)
     )
 
 

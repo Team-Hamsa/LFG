@@ -217,6 +217,23 @@ def _char(edition=7, body="Straight Blue"):
     )
 
 
+def _blank_char(edition=7):
+    attrs = [{"trait_type": "Body", "value": "None"}]
+    attrs += [{"trait_type": s, "value": "None"} for s in NON_BODY]
+    return OnchainNft(
+        nft_id=f"NFT{edition}",
+        nft_number=edition,
+        owner="rUser",
+        is_burned=False,
+        mutable=True,
+        uri_hex="68747470733A2F2F63646E2F626C616E6B2F6D6574612E6A736F6E",
+        body="male",
+        attributes=attrs,
+        image="",
+        ledger_index=1,
+    )
+
+
 def _econ_conn(edition=7, body="Straight Blue"):
     c = sqlite3.connect(":memory:")
     es.init_economy_schema(c)
@@ -268,6 +285,9 @@ class _Fakes:
     async def char_accept(self, offer_id):
         return {"url": "x", "qr": "y", "uuid": "z"}
 
+    async def blank_meta(self, edition):
+        return "https://cdn/blank/meta.json"
+
 
 def _deps(conn, records_dir, app_db_file):
     f = _Fakes()
@@ -287,6 +307,7 @@ def _deps(conn, records_dir, app_db_file):
         closet_exists_fn=f.closet_exists,
         closet_owner_fn=f.closet_owner,
         app_conn_factory=lambda: sqlite3.connect(app_db_file),
+        blank_meta_fn=f.blank_meta,
         records_dir=str(records_dir),
     )
 
@@ -319,15 +340,20 @@ def test_run_assemble_revives_edition(tmp_path):
 
     conn = _econ_conn()
     es.set_closet_token(conn, "rUser", "CLOSET0", "00", status=ct.ACTIVE, offer_id=None)
-    # Closet holds the body + a full asset set, mirroring a completed harvest.
-    es.set_closet_contents(conn, "rUser", [(s, "None", 1) for s in NON_BODY], [7])
+    # Closet holds the body + a full asset set, mirroring a completed harvest
+    # (blank model: the body is a ("Body", value) loose asset).
+    es.set_closet_contents(
+        conn,
+        "rUser",
+        [(s, "None", 1) for s in NON_BODY] + [("Body", "Straight Blue", 1)],
+        [],
+    )
     session = ef.AssembleSession(
         owner="rUser",
-        edition=7,
+        character=_blank_char(edition=7),
         chosen=dict.fromkeys(NON_BODY, "None"),
         body_value="Straight Blue",
         body_class="male",
-        live_editions=set(),
     )
     _run(ef.run_assemble(session, _deps(conn, tmp_path, app_db_file)))
 

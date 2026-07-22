@@ -434,3 +434,61 @@ def test_sync_then_persist_returns_tx_hash(tmp_path):
     deps = _deps(conn, f, tmp_path)
     got = _run(ef._sync_then_persist(deps, "rUser", {("Head", "Crown"): 1}))
     assert got == "MODHASH"
+
+
+# --- Concurrency: per-owner serialization (#180, fire-and-forget #307) ------
+
+
+class _InterleavingFakes(_Fakes):
+    """Injects real suspension points (`await asyncio.sleep(0)`) into the fakes
+    the flow awaits between its closet READ (`_owner_contents`) and its closet
+    SYNC/mirror WRITE (`_sync_then_persist` -> `sync_closet` -> upload/modify).
+    Without a genuine yield, asyncio.gather over fakes that return immediately
+    never interleaves the coroutines, so a missing `@_serialize_by_owner` could
+    never manifest as a lost update."""
+
+    async def char_modify(self, nft_id, owner, url):
+        await asyncio.sleep(0)
+        return await super().char_modify(nft_id, owner, url)
+
+    async def closet_upload(self, meta: dict) -> str:
+        await asyncio.sleep(0)
+        return await super().closet_upload(meta)
+
+    async def closet_modify(self, nft_id: str, owner: str, url: str):
+        await asyncio.sleep(0)
+        return await super().closet_modify(nft_id, owner, url)
+
+
+def test_two_concurrent_harvests_both_land(tmp_path):
+    """#180's per-owner lock must make stacked harvests (fire-and-forget spec
+    2026-07-21) serialize: run two run_harvest coroutines concurrently for one
+    owner and assert BOTH characters' assets are in the closet afterwards and
+    both sessions end DONE."""
+    conn = sqlite3.connect(":memory:")
+    es.init_economy_schema(conn)
+    genesis = te.Genesis(
+        trait_counts={(s, "None"): 2 for s in NON_BODY},
+        edition_bodies={7: ("Straight Blue", "male"), 8: ("Straight Red", "male")},
+    )
+    es.freeze_genesis(conn, genesis, {})
+    es.set_closet_token(conn, "rUser", "CLOSET0", "00", status=ct.ACTIVE, offer_id=None)
+    f = _InterleavingFakes()
+    deps = _deps(conn, f, tmp_path)
+    sa = ef.HarvestSession(owner="rUser", character=_char(edition=7), burnable=True)
+    sb = ef.HarvestSession(
+        owner="rUser", character=_char(edition=8, body="Straight Red"), burnable=True
+    )
+
+    async def go():
+        await asyncio.gather(ef.run_harvest(sa, deps), ef.run_harvest(sb, deps))
+
+    _run(go())
+    assert sa.state == ef.DONE and sb.state == ef.DONE
+    assets = {(s, v): n for o, s, v, n in es.read_closet_assets(conn) if o == "rUser"}
+    # Both harvests' assets landed (no lost update from the race): each
+    # character contributes 1 to every NON_BODY slot's "None" count, and both
+    # bodies arrived as ("Body", value) loose assets.
+    assert all(assets[(s, "None")] == 2 for s in NON_BODY)
+    assert assets[("Body", "Straight Blue")] == 1
+    assert assets[("Body", "Straight Red")] == 1
