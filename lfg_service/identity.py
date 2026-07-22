@@ -43,6 +43,24 @@ def ensure_identities_table() -> None:
         if "user_token" not in cols:
             conn.execute("ALTER TABLE identities ADD COLUMN user_token TEXT")
         conn.execute("CREATE INDEX IF NOT EXISTS idx_identities_wallet ON identities(wallet)")
+        # Append-only wallet history (free-mint newcomer eligibility): keeps every
+        # wallet ever linked so a wallet switch no longer erases a user's past
+        # wallets. identities.wallet stays the active pointer.
+        conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS wallet_links (
+                platform          TEXT NOT NULL,
+                platform_user_id  TEXT NOT NULL,
+                wallet            TEXT NOT NULL,
+                linked_at         TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                PRIMARY KEY (platform, platform_user_id, wallet)
+            )
+            """
+        )
+        conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_wallet_links_identity "
+            "ON wallet_links(platform, platform_user_id)"
+        )
         conn.commit()
     finally:
         conn.close()
@@ -74,6 +92,11 @@ def link(
                 updated_at = CURRENT_TIMESTAMP
             """,
             (platform, platform_user_id, platform_username, handle, wallet),
+        )
+        conn.execute(
+            "INSERT OR IGNORE INTO wallet_links (platform, platform_user_id, wallet) "
+            "VALUES (?, ?, ?)",
+            (platform, platform_user_id, wallet),
         )
         conn.commit()
         return True

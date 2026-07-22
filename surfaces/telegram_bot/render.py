@@ -34,6 +34,14 @@ def payment_caption(payment_link: str, push: Any = None) -> str:
     )
 
 
+def free_mint_caption() -> str:
+    return (
+        "🎉 Free mint\n\n"
+        "You're a newcomer — this one's on us. No payment needed.\n"
+        "Building your avatar now… hang tight here."
+    )
+
+
 def offer_caption(final: dict[str, Any], *, with_qr: bool = True) -> str:
     number = final.get("nft_number", "?")
     accept_link = final.get("accept_deeplink", "")

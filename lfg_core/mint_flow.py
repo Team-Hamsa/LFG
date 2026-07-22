@@ -20,6 +20,7 @@ from lfg_core import (
     cdn,
     config,
     db_path,
+    free_mint,
     headroom,
     image_archive,
     layer_store,
@@ -64,10 +65,13 @@ class MintSession:
         return_url: dict[str, str] | None = None,
         platform: str = "discord",
         push_user_token: str | None = None,
+        network: str | None = None,
     ) -> None:
         self.id = uuid.uuid4().hex
         self.discord_id = discord_id
         self.platform = platform
+        self.network = network or config.XRPL_NETWORK
+        self.free = False  # set by prepare_payment when the newcomer gate opens
         self.wallet_address = wallet_address
         self.return_url = return_url  # XUMM return_url back into Discord
         # #135: stored XUMM push token for this user, if any. Threaded into
@@ -152,6 +156,18 @@ class MintSession:
         stays None — both callers (handle_mint_start and run_mint_session)
         gate on it and fail the session terminally rather than entering the
         payment wait with only the unparseable static detect link (#262)."""
+        # Newcomer free mint: an eligible identity with no LFG NFT and no prior
+        # claim mints free. Wallet control is already proven at connect, so no
+        # payment payload is built. reserve_claim atomically wins the single
+        # claim row; losing the race falls through to the paid path.
+        if free_mint.is_eligible(
+            self.platform, self.discord_id, self.network
+        ) and free_mint.reserve_claim(
+            self.platform, self.discord_id, self.network, self.wallet_address
+        ):
+            self.free = True
+            self.pay_with, self.pay_amount = "FREE", "0"
+            return
         balance = await xrpl_ops.get_trustline_balance(
             self.wallet_address, config.TOKEN_CURRENCY_HEX, config.TOKEN_ISSUER_ADDRESS
         )
@@ -241,6 +257,7 @@ class MintSession:
             "platform": self.platform,
             "state": self.state,
             "error": self.error,
+            "free": self.free,
             "pay_with": self.pay_with,
             "pay_amount": self.pay_amount,
             "payment_link": self.payment_link,
@@ -358,6 +375,7 @@ async def mint_one_unit(
     return_url: dict[str, str] | None,
     nft_number: int,
     session_tag: str,
+    campaign: str | None = None,
     on_state: Callable[[str], None] | None = None,
     on_mint: Callable[[int, str, str | None], Awaitable[None]] | None = None,
 ) -> UnitResult:
@@ -447,6 +465,7 @@ async def mint_one_unit(
             taxon=config.NFT_TAXON,
             issuer=config.SWAP_ISSUER_ADDRESS,
             platform=memos.platform_for_surface(platform),
+            campaign=campaign,
         )
         if not nft_id:
             image_archive.discard_still(config.XRPL_NETWORK, nft_number, session_tag)
@@ -637,6 +656,35 @@ def _capture_issued_token(session: MintSession, s: dict[str, Any]) -> None:
         session.push_user_token = s["user_token"]
 
 
+async def _settle_free_claim(session: "MintSession") -> None:
+    """Reconcile a free mint's claim at terminal state. Confirm as soon as the
+    mint reached the chain (nft_id set) — even if a later step (offer creation,
+    accept payload) then failed, the NFT exists and the user has it (or an
+    accept offer for it), so the free mint is spent. Releasing on a post-mint
+    failure would hand back the claim while the user keeps the minted NFT → a
+    second free mint on retry. Only a session that never minted (nft_id None:
+    payment timeout, pre-mint error, cancel) releases the reserved row so the
+    identity can retry. No-op for paid sessions."""
+    if not session.free:
+        return
+    if session.nft_id is not None and session.nft_number is not None:
+        await asyncio.to_thread(
+            free_mint.confirm_claim,
+            session.platform,
+            session.discord_id,
+            session.network,
+            session.wallet_address,
+            session.nft_number,
+        )
+    else:
+        await asyncio.to_thread(
+            free_mint.release_claim,
+            session.platform,
+            session.discord_id,
+            session.network,
+        )
+
+
 async def run_mint_session(session: MintSession) -> None:
     """Drive a MintSession to a terminal state. Run as a background task."""
     if session.state in TERMINAL_STATES:
@@ -648,44 +696,48 @@ async def run_mint_session(session: MintSession) -> None:
         # 1. Wait for the sender-verified payment on whichever path
         #    prepare_payment detected. not_before bounds the missed-payment
         #    backfill to this session's lifetime.
-        session.ensure_payment_fallback()
-        # #262 defense-in-depth (handle_mint_start already fails fast): with
-        # no XUMM payload the session holds only the static detect link,
-        # which Xaman cannot parse as a sign request — entering the payment
-        # wait would show a dead pay screen for the full 300s. The
-        # pay_with/pay_amount defaulting above must still run first. Known
-        # tradeoff: this also defers #196 mint-credit redemption (normally
-        # consumed by wait_for_payment's allow_credit backfill with no new
-        # signature) until XUMM recovers — delay-only, the 30d credit TTL
-        # far outlasts any outage.
-        if session.payment_uuid is None:
-            session.state = FAILED
-            session.error = "signing service is busy — please try again shortly"
-            return
-        p = session._payment_params()
-        paid = await xrpl_ops.wait_for_payment(
-            destination=p["destination"],
-            expected_sender=session.wallet_address,
-            expected_amount=p["value"],
-            not_before=session.created_at - 10,
-            currency=p["currency"],
-            # LFGO mints pay the issuer, which receives nothing else, so an
-            # unconsumed earlier payment is always a mint credit (#196). The
-            # XRP path pays the busier bot wallet - no credit window there.
-            allow_credit=session.pay_with != "XRP",
-        )
-        if not paid:
-            session.state = PAYMENT_TIMEOUT
-            return
+        if session.free:
+            # Free path: no payment to wait for; go straight to generation.
+            session.state = GENERATING
+        else:
+            session.ensure_payment_fallback()
+            # #262 defense-in-depth (handle_mint_start already fails fast): with
+            # no XUMM payload the session holds only the static detect link,
+            # which Xaman cannot parse as a sign request — entering the payment
+            # wait would show a dead pay screen for the full 300s. The
+            # pay_with/pay_amount defaulting above must still run first. Known
+            # tradeoff: this also defers #196 mint-credit redemption (normally
+            # consumed by wait_for_payment's allow_credit backfill with no new
+            # signature) until XUMM recovers — delay-only, the 30d credit TTL
+            # far outlasts any outage.
+            if session.payment_uuid is None:
+                session.state = FAILED
+                session.error = "signing service is busy — please try again shortly"
+                return
+            p = session._payment_params()
+            paid = await xrpl_ops.wait_for_payment(
+                destination=p["destination"],
+                expected_sender=session.wallet_address,
+                expected_amount=p["value"],
+                not_before=session.created_at - 10,
+                currency=p["currency"],
+                # LFGO mints pay the issuer, which receives nothing else, so an
+                # unconsumed earlier payment is always a mint credit (#196). The
+                # XRP path pays the busier bot wallet - no credit window there.
+                allow_credit=session.pay_with != "XRP",
+            )
+            if not paid:
+                session.state = PAYMENT_TIMEOUT
+                return
 
-        # The payment is irrevocably confirmed on-ledger: leave
-        # AWAITING_PAYMENT *now*, before any further await (the XRP-path
-        # buy_and_burn below is a multi-second submit_and_wait), so a
-        # concurrent cancel() can never land on a session whose money has
-        # already been taken.
-        session.state = GENERATING
+            # The payment is irrevocably confirmed on-ledger: leave
+            # AWAITING_PAYMENT *now*, before any further await (the XRP-path
+            # buy_and_burn below is a multi-second submit_and_wait), so a
+            # concurrent cancel() can never land on a session whose money has
+            # already been taken.
+            session.state = GENERATING
 
-        if session.pay_with == "XRP":
+        if not session.free and session.pay_with == "XRP":
             # Buy the mint's LFGO off the DEX and burn it, spending at most
             # the XRP just collected. Best-effort: a failed buyback must
             # never cost the user their mint.
@@ -732,6 +784,8 @@ async def run_mint_session(session: MintSession) -> None:
             return_url=session.return_url,
             nft_number=session.nft_number,
             session_tag=session.id,
+            # #209: free newcomer mints carry a free-mint provenance memo.
+            campaign="free-mint" if session.free else None,
             on_state=_on_state,
             on_mint=_on_mint,
         )
@@ -761,6 +815,7 @@ async def run_mint_session(session: MintSession) -> None:
         session.state = FAILED
         session.error = str(e)
     finally:
+        await _settle_free_claim(session)
         # #226: every exit — OFFER_READY, FAILED, PAYMENT_TIMEOUT, and the
         # CancelledError a cancel() delivers (BaseException, uncatchable
         # above) — settles the session's headroom reservation: retire to

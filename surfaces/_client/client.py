@@ -237,6 +237,12 @@ class LFGServiceClient:
     async def regenerate(self, user_id: str, session_id: str) -> dict[str, Any]:
         return await self._user_request("POST", f"/api/mint/{session_id}/regenerate", user_id)
 
+    async def cancel_mint(self, user_id: str, session_id: str) -> dict[str, Any]:
+        """Cancel an in-flight mint session (e.g. after a client-side payment-QR
+        render failure) so it doesn't hold the session open until timeout and
+        block a retry."""
+        return await self._user_request("POST", f"/api/mint/{session_id}/cancel", user_id)
+
     async def wait_for_mint(
         self,
         user_id: str,

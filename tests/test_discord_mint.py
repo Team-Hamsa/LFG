@@ -110,6 +110,20 @@ def test_mint_offer_falls_back_to_qr_png(mint_mod):
     assert ix.followup.send.await_count == 2
 
 
+def test_mint_free_skips_payment_qr(mint_mod):
+    svc, ix = _svc(), _ix()
+    svc.start_mint = AsyncMock(
+        return_value={"id": "sid", "free": True, "payment_link": "", "state": "awaiting_payment"}
+    )
+    _run(mint_mod.handle_mint(svc, ix))
+    # no payment QR rendered for the free path; the offer uses hosted accept_qr_url
+    svc.qr_png.assert_not_awaited()
+    # first followup is the free-mint confirmation (embed only, no file kwarg)
+    first = ix.followup.send.await_args_list[0]
+    assert "Free mint" in first.kwargs["embed"].title
+    assert "file" not in first.kwargs
+
+
 def test_mint_no_wallet_maps_to_register(mint_mod):
     svc, ix = _svc(), _ix()
     svc.start_mint = AsyncMock(side_effect=BadRequest("no wallet registered", status=400))

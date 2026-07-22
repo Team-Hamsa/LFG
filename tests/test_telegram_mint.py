@@ -87,6 +87,21 @@ def test_hosted_qr_url_used_directly():
     assert bot.photos[1][1] == "https://cdn/qr.png"
 
 
+def test_free_mint_skips_payment_qr():
+    bot = _Bot()
+    update, ctx = _update_ctx(bot)
+    svc = _Svc(
+        start={"id": "sid", "free": True, "payment_link": ""},
+        final={"state": "done", "nft_number": 7, "accept_qr_url": "https://cdn/qr.png"},
+    )
+    _run(mint_view.handle_mint(svc, update, ctx))
+    # free path: no payment QR photo; only the offer photo goes out
+    assert len(bot.photos) == 1
+    assert bot.photos[0][1] == "https://cdn/qr.png"
+    # the free-mint confirmation is sent as a plain message
+    assert any("free mint" in m[1].lower() for m in bot.messages)
+
+
 def test_no_wallet_sends_register_hint():
     bot = _Bot()
     update, ctx = _update_ctx(bot)

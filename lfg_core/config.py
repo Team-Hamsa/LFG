@@ -2,6 +2,7 @@
 # Centralized environment configuration for the webapp/core modules.
 # main.py keeps its own loading for backwards compatibility.
 
+import logging
 import os
 
 from dotenv import load_dotenv
@@ -122,6 +123,17 @@ NFT_COLLECTION_NAME = os.getenv("NFT_COLLECTION_NAME", "Let's Effing Go!")
 # detected silently per-wallet; the user only ever sees their own price.
 MINT_PRICE_LFGO = os.getenv("MINT_PRICE_LFGO", "1")
 MINT_PRICE_XRP = os.getenv("MINT_PRICE_XRP", "10")
+
+# Newcomer free-mint giveaway cap: the maximum number of free mints handed out
+# (per network). Counts active claims (reserved + claimed); a released reservation
+# frees a slot. Enforced atomically in free_mint.reserve_claim. 0 disables the
+# giveaway entirely. Starting conservative at 10; raise via the FREE_MINT_CAP
+# env var (no code change / redeploy of logic needed).
+try:
+    FREE_MINT_CAP = int(os.getenv("FREE_MINT_CAP", "10"))
+except ValueError:
+    logging.warning("Invalid FREE_MINT_CAP env var; defaulting to 10")
+    FREE_MINT_CAP = 10
 
 # Bulk minting (#215). MAX_COLLECTION_SIZE caps total live editions; a bulk
 # request is clamped to the remaining headroom before payment. BULK_MINT_MAX
