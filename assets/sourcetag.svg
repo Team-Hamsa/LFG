@@ -26,9 +26,9 @@
 <text x="24.0" y="230" font-family="-apple-system,'Segoe UI',Roboto,Helvetica,Arial,sans-serif" font-size="11" fill="#9C9A94">burn</text>
 <rect x="82.0" y="222.0" width="63.2" height="9" rx="4.5" fill="#F0D848"/>
 <text x="660.0" y="230" font-family="-apple-system,'Segoe UI',Roboto,Helvetica,Arial,sans-serif" font-size="11" fill="#F5F4F1">78</text>
-<text x="24.0" y="246" font-family="-apple-system,'Segoe UI',Roboto,Helvetica,Arial,sans-serif" font-size="11" fill="#9C9A94">payment</text>
-<rect x="82.0" y="238.0" width="51.9" height="9" rx="4.5" fill="#601878"/>
-<text x="660.0" y="246" font-family="-apple-system,'Segoe UI',Roboto,Helvetica,Arial,sans-serif" font-size="11" fill="#F5F4F1">64</text>
+<text x="24.0" y="246" font-family="-apple-system,'Segoe UI',Roboto,Helvetica,Arial,sans-serif" font-size="11" fill="#9C9A94">+2 more</text>
+<rect x="82.0" y="238.0" width="53.5" height="9" rx="4.5" fill="#601878"/>
+<text x="660.0" y="246" font-family="-apple-system,'Segoe UI',Roboto,Helvetica,Arial,sans-serif" font-size="11" fill="#F5F4F1">66</text>
 <text x="24" y="276" font-family="-apple-system,'Segoe UI',Roboto,Helvetica,Arial,sans-serif" font-size="12" fill="#9C9A94">tagged tx / day</text>
 <line x1="24.0" y1="310" x2="696.0" y2="310" stroke="#2C2C2C" stroke-width="1"/>
 <rect x="31.2" y="308.0" width="17.6" height="2.0" rx="2" fill="#D89030"/>
