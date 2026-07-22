@@ -126,21 +126,54 @@ def test_breakdown_rows_are_descending_and_match_input_counts():
     offer_idx = svg.index(">offer<")
     assert mint_idx < offer_idx
 
+    # Real rows' printed counts must appear in non-increasing numeric order,
+    # not just the two labels checked above.
+    real_row_counts = [700, 692, 311, 89, 77]
+    positions = [svg.index(f">{count}<") for count in real_row_counts]
+    assert positions == sorted(positions)
 
-def test_breakdown_bar_widths_are_non_increasing():
-    svg = rs.build_svg(DATA)
+
+def _breakdown_bar_widths(svg: str) -> list[float]:
+    """Widths of <rect> breakdown bars (x=82.0, height=9) in document order."""
     root = ET.fromstring(svg)
     # Breakdown bars all share the same x (area_x + label_w = 24 + 58 = 82)
     # and height (9), which distinguishes them from the card/shadow/sparkline
     # rects that share this <rect> tag.
-    bar_widths = [
+    return [
         float(el.attrib["width"])
         for el in root.iter()
         if el.tag.endswith("rect")
         and el.attrib.get("x") == "82.0"
         and el.attrib.get("height") == "9"
     ]
-    assert len(bar_widths) == 6  # 5 real rows + the folded "+2 more" row
+
+
+def test_breakdown_bar_widths_are_non_increasing():
+    svg = rs.build_svg(DATA)
+    bar_widths = _breakdown_bar_widths(svg)
+    # 5 real rows; the folded "+2 more" row draws no bar at all.
+    assert len(bar_widths) == 5
+    assert bar_widths == sorted(bar_widths, reverse=True)
+
+
+def test_breakdown_bar_widths_are_non_increasing_with_heavy_long_tail():
+    """Regression test: a long tail whose SUMMED fold count (120) exceeds the
+    top row's count (100) must not make the "+N more" row the widest bar."""
+    by_type = {
+        "NFTokenMint": 100,
+        "NFTokenCreateOffer": 90,
+        "NFTokenAcceptOffer": 80,
+        "NFTokenModify": 70,
+        "NFTokenBurn": 60,
+        "Payment": 50,
+        "TrustSet": 40,
+        "NFTokenCancelOffer": 30,
+    }
+    svg = rs.build_svg(dict(DATA, by_type=by_type))
+    bar_widths = _breakdown_bar_widths(svg)
+    # Only the 5 real rows draw bars; the folded "+3 more" row (sum 120,
+    # bigger than every real row) must not contribute one.
+    assert len(bar_widths) == 5
     assert bar_widths == sorted(bar_widths, reverse=True)
 
 
