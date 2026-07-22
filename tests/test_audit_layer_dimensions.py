@@ -93,6 +93,15 @@ def test_cache_skips_unchanged_and_detects_changes(tmp_path, monkeypatch):
     assert len(ald.scan(str(layers), cache_path=cache)) == 1
 
 
+def test_hidden_dirs_are_pruned(tmp_path):
+    # layers/.thumbs/ is a derived 512x512 preview cache, not trait art the
+    # compositor ever loads — scanning it would fail every push with noise.
+    layers = tmp_path / "layers"
+    _write_png(str(layers / "male" / "Body" / "Straight.png"), (1080, 1080))
+    _write_png(str(layers / ".thumbs" / "male" / "Body" / "Straight.png"), (512, 512))
+    assert ald.scan(str(layers)) == []
+
+
 def test_non_layer_extensions_ignored(tmp_path):
     layers = tmp_path / "layers"
     os.makedirs(layers)
@@ -121,6 +130,37 @@ def test_undersized_mp4_is_flagged(tmp_path):
             "-pix_fmt",
             "yuv420p",
             str(mp4),
+        ],
+        check=True,
+    )
+    offenders = ald.scan(str(layers))
+    assert len(offenders) == 1
+    assert "600x600" in offenders[0][1]
+
+
+@pytest.mark.skipif(
+    subprocess.run(["which", "ffprobe"], capture_output=True).returncode != 0
+    or subprocess.run(["which", "ffmpeg"], capture_output=True).returncode != 0,
+    reason="ffprobe or ffmpeg not on PATH",
+)
+def test_undersized_webm_is_flagged(tmp_path):
+    # The Diamond/Irridescent bodies ship as VP9-alpha WebM (PR #296), so the
+    # guardrail must cover .webm or it skips exactly the art it exists for.
+    layers = tmp_path / "layers"
+    os.makedirs(layers / "male" / "Body")
+    webm = layers / "male" / "Body" / "Straight Diamond.webm"
+    subprocess.run(
+        [
+            "ffmpeg",
+            "-v",
+            "quiet",
+            "-f",
+            "lavfi",
+            "-i",
+            "color=c=black:s=600x600:d=0.2",
+            "-c:v",
+            "libvpx-vp9",
+            str(webm),
         ],
         check=True,
     )

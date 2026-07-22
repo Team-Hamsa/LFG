@@ -13,7 +13,7 @@
 # (CI checkouts have no art).
 #
 # GIF/PNG dimensions come from Pillow with a full per-frame decode (a
-# truncated file can still report header dimensions); MP4 from ffprobe.
+# truncated file can still report header dimensions); MP4/WebM from ffprobe.
 # Unreadable/corrupt files are reported as failures too. Results are cached
 # per (size, mtime) so unchanged art is never re-decoded.
 #
@@ -29,7 +29,9 @@ import sys
 from typing import Any
 
 CANVAS = (1080, 1080)
-ANIMATED_EXTS = {".gif", ".mp4"}
+ANIMATED_EXTS = {".gif", ".mp4", ".webm"}
+# Extensions probed with ffprobe rather than Pillow.
+VIDEO_EXTS = {".mp4", ".webm"}
 STATIC_EXTS = {".png"}
 
 # Full-decode validation of the whole tree takes ~2 minutes, so results are
@@ -59,7 +61,7 @@ def _save_cache(path: str, files: dict[str, Any]) -> None:
         pass  # cache is an optimization only — never fail the audit over it
 
 
-def _probe_mp4(path: str) -> tuple[int, int] | None:
+def _probe_video(path: str) -> tuple[int, int] | None:
     try:
         proc = subprocess.run(
             [
@@ -81,7 +83,8 @@ def _probe_mp4(path: str) -> tuple[int, int] | None:
         return None
     if proc.returncode != 0:
         return None
-    parts = proc.stdout.decode().strip().split(",")
+    # Some containers emit one row per stream despite -select_streams; take the first.
+    parts = proc.stdout.decode().strip().splitlines()[0].split(",") if proc.stdout.strip() else []
     try:
         return int(parts[0]), int(parts[1])
     except (IndexError, ValueError):
@@ -105,8 +108,8 @@ def _probe_image(path: str) -> tuple[int, int] | None:
 
 def read_dimensions(path: str) -> tuple[int, int] | None:
     """Return (width, height) or None if unreadable."""
-    if path.lower().endswith(".mp4"):
-        return _probe_mp4(path)
+    if os.path.splitext(path)[1].lower() in VIDEO_EXTS:
+        return _probe_video(path)
     return _probe_image(path)
 
 
@@ -118,7 +121,10 @@ def scan(
     cache = _load_cache(cache_path) if cache_path else {}
     fresh: dict[str, Any] = {}
     offenders: list[tuple[str, str]] = []
-    for root, _dirs, files in os.walk(layers_dir):
+    for root, dirs, files in os.walk(layers_dir):
+        # Prune hidden dirs in place: they hold derived caches (e.g. .thumbs/,
+        # 512x512 preview art), never trait layers that reach the compositor.
+        dirs[:] = [d for d in sorted(dirs) if not d.startswith(".")]
         for name in sorted(files):
             ext = os.path.splitext(name)[1].lower()
             if ext not in exts:
