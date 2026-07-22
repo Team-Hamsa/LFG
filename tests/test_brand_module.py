@@ -57,6 +57,19 @@ def test_fmt_and_esc():
     assert brand.esc("a & b <c>") == "a &amp; b &lt;c&gt;"
 
 
+def test_esc_escapes_quotes_for_attribute_context():
+    assert brand.esc('say "hi"') == "say &quot;hi&quot;"
+    assert brand.esc("it's") == "it&#39;s"
+
+
+def test_open_svg_escapes_quotes_in_aria_label():
+    """esc() is used inside an attribute (aria-label="..."); an unescaped
+    quote in the label would break out of the attribute."""
+    tag = brand.open_svg(728, 330, 'say "hi"')
+    assert "&quot;" in tag
+    assert '"say "hi""' not in tag
+
+
 def test_open_svg_escapes_the_aria_label():
     tag = brand.open_svg(728, 330, "a & b")
     assert 'width="728"' in tag

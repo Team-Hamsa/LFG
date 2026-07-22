@@ -4,8 +4,13 @@ has generated, and how many unique non-project wallets have signed one.
 Reads the `source_tag` column of the per-network ledger archive
 (history_<net>.db, maintained live by the pm2 listeners) and emits a small
 JSON snapshot. `--push` commits that snapshot to `main` via the GitHub
-Contents API, deliberately without touching any local checkout so neither
-polling deployer can observe divergence and halt.
+Contents API. When `--push` is given and `--out` was NOT explicitly passed,
+the local write is skipped entirely (the default `--out` path is relative to
+CWD, and the documented pm2 registration runs with CWD = a checkout on
+`deploy` or `main` — writing there would locally-modify a tracked file every
+night and break `promote.sh`'s fast-forward merge). Pass `--out` explicitly
+(e.g. for a manual snapshot or the seed-snapshot workflow) to get the local
+file written in addition to the push.
 
 The snapshot is rendered into assets/sourcetag.svg by CI — see
 scripts/render_sourcetag_svg.py.
@@ -121,6 +126,10 @@ def collect(db_path: str, network: str) -> dict[str, Any]:
         "by_type": by_type,
         "daily": daily,
         "excluded": excluded,
+        # This is the earliest day PRESENT IN THE ARCHIVE (history_<net>.db),
+        # which begins wherever the backfill was started from — not the
+        # earliest day the SourceTag actually appears on-ledger. Don't read it
+        # as a ledger fact.
         "first_tagged_tx": daily[0]["date"] if daily else None,
         "archive_max_close_time": (
             datetime.fromtimestamp(newest, tz=timezone.utc).isoformat() if newest else None
@@ -193,14 +202,18 @@ def validate_payload(payload: dict[str, Any]) -> None:
     for key in ("source_tag", "total_tagged_txs", "unique_wallets"):
         _int(key)
 
-    if not _NETWORK_RE.match(str(payload["network"])):
+    if not _NETWORK_RE.fullmatch(str(payload["network"])):
         raise ValueError("network must be a bare lowercase name")
 
     by_type = payload["by_type"]
     if not isinstance(by_type, dict):
         raise ValueError("by_type must be a dict")
     for name, count in by_type.items():
-        if not _TX_TYPE_RE.match(str(name)) or not isinstance(count, int):
+        if (
+            not isinstance(name, str)
+            or not _TX_TYPE_RE.fullmatch(name)
+            or not isinstance(count, int)
+        ):
             raise ValueError(f"bad by_type entry: {name!r}")
 
     daily = payload["daily"]
@@ -209,22 +222,22 @@ def validate_payload(payload: dict[str, Any]) -> None:
     for entry in daily:
         if set(entry) != {"date", "count"}:
             raise ValueError(f"bad daily entry: {entry!r}")
-        if not _DATE_RE.match(str(entry["date"])) or not isinstance(entry["count"], int):
+        if not _DATE_RE.fullmatch(str(entry["date"])) or not isinstance(entry["count"], int):
             raise ValueError(f"bad daily entry: {entry!r}")
 
     excluded = payload["excluded"]
-    if not isinstance(excluded, list) or not all(_ADDRESS_RE.match(str(a)) for a in excluded):
+    if not isinstance(excluded, list) or not all(_ADDRESS_RE.fullmatch(str(a)) for a in excluded):
         raise ValueError("excluded must be a list of XRPL addresses")
 
     first = payload["first_tagged_tx"]
-    if first is not None and not _DATE_RE.match(str(first)):
+    if first is not None and not _DATE_RE.fullmatch(str(first)):
         raise ValueError("first_tagged_tx must be YYYY-MM-DD or null")
 
     newest = payload["archive_max_close_time"]
-    if newest is not None and not _ISO_RE.match(str(newest)):
+    if newest is not None and not _ISO_RE.fullmatch(str(newest)):
         raise ValueError("archive_max_close_time must be ISO-8601 or null")
 
-    if not isinstance(payload["as_of"], str) or not _ISO_RE.match(payload["as_of"]):
+    if not isinstance(payload["as_of"], str) or not _ISO_RE.fullmatch(payload["as_of"]):
         raise ValueError("as_of must be an ISO-8601 string")
 
 
@@ -267,10 +280,12 @@ def _fetch_remote(runner: Any) -> tuple[str | None, str | None]:
 def push_to_github(payload: dict[str, Any], runner: Any = subprocess.run) -> bool:
     """Commit the snapshot to `main` via the Contents API. True if committed.
 
-    Deliberately does not touch any working tree: ~/LFG stays on `deploy` and
-    ~/LFG-staging stays on `main`, so neither deployer sees divergence. The
-    trade-off is that this commit bypasses the local pre-push gate, so the
-    payload is schema-validated here BEFORE any network call.
+    Does not touch any working tree itself — it talks to GitHub over the
+    Contents API only. Callers running under `--push` are additionally
+    responsible for not writing the same content into a local checkout (see
+    `main()`), so that neither polling deployer sees local divergence. This
+    commit bypasses the local pre-push gate, so the payload is
+    schema-validated here BEFORE any network call.
     """
     validate_payload(payload)
     existing, sha = _fetch_remote(runner)
@@ -300,7 +315,18 @@ def main(argv: list[str] | None = None) -> int:
     ap = argparse.ArgumentParser(description=__doc__)
     ap.add_argument("--network", default=config.XRPL_NETWORK)
     ap.add_argument("--db", default=None, help="override the history DB path")
-    ap.add_argument("--out", default=str(DEFAULT_OUT), help="where to write the snapshot")
+    ap.add_argument(
+        "--out",
+        default=None,
+        help=(
+            "where to write the snapshot locally (default: metrics/sourcetag.json, "
+            "CWD-relative). If --push is given and --out is NOT explicitly set, the "
+            "local write is skipped entirely — writing into a checkout that a pm2 "
+            "deployer polls would locally-modify a tracked file every run and break "
+            "promote.sh's fast-forward merge. Pass --out explicitly to force a local "
+            "write alongside the push."
+        ),
+    )
     ap.add_argument("--json", action="store_true", help="also print the payload")
     ap.add_argument("--push", action="store_true", help="commit the snapshot to main via gh")
     args = ap.parse_args(argv)
@@ -316,17 +342,26 @@ def main(argv: list[str] | None = None) -> int:
         print(f"failed to read {db_path}: {exc}", file=sys.stderr)
         return 2
 
-    out = Path(args.out)
-    out.parent.mkdir(parents=True, exist_ok=True)
-    out.write_text(_serialize(payload))
+    explicit_out = args.out is not None
+    skip_local_write = args.push and not explicit_out
+    out = Path(args.out) if explicit_out else DEFAULT_OUT
 
-    if args.json:
-        print(_serialize(payload), end="")
-    else:
+    if skip_local_write:
         print(
             f"{payload['total_tagged_txs']} tagged txs · "
-            f"{payload['unique_wallets']} unique wallets → {out}"
+            f"{payload['unique_wallets']} unique wallets → (no local write; --push "
+            "with no explicit --out never touches a checkout)"
         )
+    else:
+        out.parent.mkdir(parents=True, exist_ok=True)
+        out.write_text(_serialize(payload))
+        if args.json:
+            print(_serialize(payload), end="")
+        else:
+            print(
+                f"{payload['total_tagged_txs']} tagged txs · "
+                f"{payload['unique_wallets']} unique wallets → {out}"
+            )
 
     if args.push:
         try:

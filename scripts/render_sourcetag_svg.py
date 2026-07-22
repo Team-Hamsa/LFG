@@ -48,6 +48,20 @@ TYPE_LABELS = {
 }
 BAR_COLORS = [ORANGE, BLUE, RED, GREEN, YELLOW, PURPLE]
 
+# The type-breakdown label gutter is 58px at 11px font — roughly 8 lowercase
+# characters before text collides with the bar starting at x=82. An unknown
+# tx type (not in TYPE_LABELS) falls back to its lowercased name, which must
+# be clipped to fit rather than allowed to run wide and overlap the bar.
+_MAX_FALLBACK_LABEL = 8
+
+
+def _fallback_label(type_name: str) -> str:
+    """Lowercase the type name, truncating with an ellipsis to fit the gutter."""
+    lowered = type_name.lower()
+    if len(lowered) <= _MAX_FALLBACK_LABEL:
+        return lowered
+    return lowered[: _MAX_FALLBACK_LABEL - 1] + "…"
+
 
 def build_svg(data: dict[str, Any]) -> str:
     """Sticker-style badge: two stat tiles, a type breakdown, a daily sparkline."""
@@ -113,7 +127,7 @@ def build_svg(data: dict[str, Any]) -> str:
         for i, (type_name, count) in enumerate(ordered):
             ry = row_y + i * 16
             color = BAR_COLORS[i % len(BAR_COLORS)]
-            label_text = TYPE_LABELS.get(type_name, type_name.lower())
+            label_text = TYPE_LABELS.get(type_name, _fallback_label(type_name))
             parts.append(
                 f'<text x="{area_x:.1f}" y="{ry + 8}" font-family="{FONT}" '
                 f'font-size="11" fill="{MUTED}">'

@@ -550,9 +550,13 @@ chain on every request.
   ```
 - **SourceTag metrics badge:** `scripts/sourcetag_metrics.py --network mainnet
   --push` reads the `source_tag` column of `history_<net>.db` and commits
-  `metrics/sourcetag.json` to `main` **via the GitHub Contents API** — it never
-  writes into a working tree, so neither polling deployer can see divergence
-  and halt. CI (`hackathon-loc.yml`) then renders `assets/sourcetag.svg` via
+  `metrics/sourcetag.json` to `main` **via the GitHub Contents API**. When
+  `--push` is given and `--out` is NOT explicitly passed (the pm2 registration
+  below never passes it), the script skips the local write entirely — its
+  default `--out` is CWD-relative, and the pm2 process's CWD is a checkout a
+  polling deployer watches, so writing there would locally-modify a tracked
+  file every night and break `promote.sh`'s fast-forward. CI
+  (`hackathon-loc.yml`) then renders `assets/sourcetag.svg` via
   `scripts/render_sourcetag_svg.py`. Registered as pm2 process
   `lfg-sourcetag` (cron 00:20, `--no-autorestart` — pm2 shows it "stopped"
   between runs; that is normal). `unique_wallets` excludes the operator's
@@ -562,7 +566,10 @@ chain on every request.
   ripple epoch — no `946684800` correction applies here. The `--push` commit
   bypasses the local pre-push gate, so `validate_payload`'s `ALLOWED_KEYS`
   allowlist is the only thing inspecting what lands on `main` — add a new
-  payload field there deliberately when changing `collect()`'s shape.
+  payload field there deliberately when changing `collect()`'s shape. The pm2
+  daemon's PATH must include `gh`, and the token it runs as must resolve to a
+  human GitHub actor (not an Actions bot) — `hackathon-loc.yml`'s badge-render
+  step is gated on `github.actor != 'github-actions[bot]'`.
   ```bash
   pm2 start scripts/sourcetag_metrics.py --name lfg-sourcetag \
     --cron "20 0 * * *" --no-autorestart --interpreter .venv/bin/python \
