@@ -520,7 +520,7 @@ def test_start_assemble_happy_schedules_session(monkeypatch):
     monkeypatch.setattr(economy_flow, "run_assemble", fake_run_assemble)
     from scripts import _economy_deps
 
-    monkeypatch.setattr(_economy_deps, "build_economy_deps", lambda c, user_token=None: object())
+    monkeypatch.setattr(_economy_deps, "build_economy_deps", lambda c, user_token=None, owner=None: object())
 
     async def go():
         ws = await economy_api.start_assemble(
@@ -567,7 +567,7 @@ def test_start_assemble_dressed_target_rejected_in_flow(monkeypatch):
     async def _noop(*a, **k):
         return None
 
-    def fake_deps(c, user_token=None):
+    def fake_deps(c, user_token=None, owner=None):
         return economy_flow.EconomyDeps(
             conn=c,
             closet_upload_fn=_noop,
