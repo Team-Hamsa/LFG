@@ -4,6 +4,7 @@
 # branch AND preserves the Discord path (regression). True end-to-end is a Part B
 # verification once the public URL exists.
 import os
+import re
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 CLIENT = os.path.join(ROOT, "webapp", "client")
@@ -12,6 +13,16 @@ CLIENT = os.path.join(ROOT, "webapp", "client")
 def _read(name: str) -> str:
     with open(os.path.join(CLIENT, name), encoding="utf-8") as f:
         return f.read()
+
+
+def _stylesheet() -> str:
+    """The app stylesheet's contents, resolved from index.html rather than a
+    hardcoded name: the file carries its cache version in the FILENAME
+    (Discord's desktop asset cache keys on path and ignores `?v=` query
+    strings), so the name changes whenever the CSS must bust that cache."""
+    m = re.search(r'<link rel="stylesheet" href="(style[^"]*\.css)[^"]*"', _read("index.html"))
+    assert m, "index.html has no app stylesheet <link>"
+    return _read(m.group(1))
 
 
 def test_app_js_has_telegram_branch():
@@ -105,7 +116,7 @@ def test_app_js_renders_animated_nfts_as_video():
     assert "final.video_url" in src
     # Roster grid stays stills but flags animated cards.
     assert "anim-badge" in src
-    assert ".anim-badge" in _read("style.css")
+    assert ".anim-badge" in _stylesheet()
 
 
 def test_leaderboard_card_present():

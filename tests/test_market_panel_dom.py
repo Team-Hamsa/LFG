@@ -4,6 +4,7 @@
 # webapp client has no JS execution harness for DOM code — only
 # market_pure.js's pure functions are executed, see test_market_pure_js.py).
 import os
+import re
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 CLIENT = os.path.join(ROOT, "webapp", "client")
@@ -12,6 +13,17 @@ CLIENT = os.path.join(ROOT, "webapp", "client")
 def _read(name: str) -> str:
     with open(os.path.join(CLIENT, name), encoding="utf-8") as f:
         return f.read()
+
+
+def _stylesheet() -> str:
+    """The app stylesheet's contents, resolved from index.html rather than a
+    hardcoded name: the file carries its cache version in the FILENAME
+    (Discord's desktop asset cache keys on path and ignores `?v=` query
+    strings), so the name changes whenever the CSS must bust that cache."""
+    html = _read("index.html")
+    m = re.search(r'<link rel="stylesheet" href="(style[^"]*\.css)[^"]*"', html)
+    assert m, "index.html has no app stylesheet <link>"
+    return _read(m.group(1))
 
 
 def test_index_has_market_panel_and_nav_entry():
@@ -139,7 +151,7 @@ def test_external_listing_wiring():
     assert "marketPure.externalLabel(vm)" in js
     # External cards never enter openBuyFlow; they link out (or explain).
     assert "vm.externalUrl" in js
-    css = _read("style.css")
+    css = _stylesheet()
     assert ".nft-card.market-card-external" in css
 
 
@@ -166,7 +178,7 @@ def test_browse_ux_wiring():
     assert "el('market-mine-only')?.checked" in js
     assert "marketPure.rarityLabel(vm)" in js
     assert "/api/market/history?" in js
-    css = _read("style.css")
+    css = _stylesheet()
     assert ".listing-detail" in css
     assert ".market-card-rarity" in css
 
