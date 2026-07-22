@@ -333,3 +333,100 @@ def test_validate_payload_rejects_non_string_by_type_key():
     payload = _valid_payload(by_type={None: 3})
     with pytest.raises(ValueError, match="by_type"):
         stm.validate_payload(payload)
+
+
+def test_historical_signer_stays_excluded_after_key_rotation(tmp_path, monkeypatch):
+    """A previous backend signing address must stay excluded even after
+    config.SIGNING_ACCOUNT rotates to a different address — rows archived
+    under the old address must never reclassify as user activity."""
+    historical = next(iter(stm.HISTORICAL_SIGNING_ADDRESSES))
+    rotated = "rNewSignerAAAAAAAAAAAAAAAAAAAAAAAA"
+    monkeypatch.setattr(config, "SIGNING_ACCOUNT", rotated)
+    monkeypatch.setattr(stm.config, "SIGNING_ACCOUNT", rotated)
+
+    excluded = stm.excluded_wallets()
+    assert historical in excluded
+    assert rotated in excluded
+
+    path = _db(
+        tmp_path,
+        [
+            ("h1", DAY0, "NFTokenMint", historical, TAG),
+            ("h2", DAY0, "Payment", USER_A, TAG),
+        ],
+    )
+    out = stm.collect(path, "testnet")
+    # the historical signer's row counts toward total activity but must not
+    # be counted as a unique external wallet, even post-rotation
+    assert out["total_tagged_txs"] == 2
+    assert out["unique_wallets"] == 1
+
+
+def test_collect_reads_are_internally_consistent(tmp_path):
+    """total_tagged_txs must always equal the sum of by_type and the sum of
+    daily counts — the three are read inside one explicit transaction so a
+    concurrent writer can never make them disagree.
+
+    This fixture doesn't simulate a true concurrent writer thread (sqlite3
+    connections aren't trivially shareable across threads against the same
+    file in-process without extra plumbing); it asserts the invariant that
+    property is supposed to guarantee.
+    """
+    path = _db(
+        tmp_path,
+        [
+            ("h1", DAY0, "NFTokenMint", USER_A, TAG),
+            ("h2", DAY0, "NFTokenAcceptOffer", USER_B, TAG),
+            ("h3", DAY2, "NFTokenMint", USER_A, TAG),
+        ],
+    )
+    out = stm.collect(path, "testnet")
+    assert out["total_tagged_txs"] == sum(out["by_type"].values())
+    assert out["total_tagged_txs"] == sum(d["count"] for d in out["daily"])
+
+
+def test_collect_commits_transaction_so_connection_is_reusable(tmp_path):
+    """collect() must leave no dangling transaction behind — a second read
+    against the same underlying file must see fresh data, proving the BEGIN
+    opened inside collect() was actually committed rather than left open."""
+    path = _db(tmp_path, [("h1", DAY0, "Payment", USER_A, TAG)])
+    first = stm.collect(path, "testnet")
+    assert first["total_tagged_txs"] == 1
+
+    import sqlite3 as _sqlite3
+
+    conn = _sqlite3.connect(path)
+    conn.execute(
+        "INSERT INTO xrpl_txs (tx_hash, ledger_index, close_time, tx_type,"
+        " account, source_tag, raw_json) VALUES ('h2',1,?,?,?,?,'{}')",
+        (DAY0, "Payment", USER_B, TAG),
+    )
+    conn.commit()
+    conn.close()
+
+    second = stm.collect(path, "testnet")
+    assert second["total_tagged_txs"] == 2
+
+
+def test_push_wraps_missing_gh_executable_with_diagnostic_message(tmp_path, monkeypatch, capsys):
+    """If `gh` isn't on PATH, subprocess.run raises FileNotFoundError (an
+    OSError) before push_to_github's own RuntimeError wrapping ever runs.
+    main() must catch that too, exit 1, and print something more useful than
+    the bare filename.
+
+    A monkeypatched fake runner can't reproduce this: push_to_github's
+    `runner: Any = subprocess.run` default is bound to the real function
+    object at def-time, so patching `stm.subprocess.run` (or the real
+    `subprocess.run`) afterwards doesn't change what the already-bound
+    default calls. So this test empties PATH, making the real
+    `subprocess.run(["gh", ...])` genuinely unable to find the executable —
+    the same failure mode the pm2 daemon hits when `gh` is missing.
+    """
+    path = _db(tmp_path, [("h1", DAY0, "Payment", USER_A, TAG)])
+    monkeypatch.setenv("PATH", str(tmp_path))  # a dir with no `gh` in it
+
+    rc = stm.main(["--network", "testnet", "--db", path, "--push"])
+    assert rc == 1
+    err = capsys.readouterr().err
+    assert "gh" in err
+    assert len(err.strip()) > len("[Errno 2] No such file or directory: 'gh'")
