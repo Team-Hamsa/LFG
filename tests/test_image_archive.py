@@ -331,3 +331,100 @@ def test_img_survives_broken_archive_lookup(monkeypatch, tmp_path):
     monkeypatch.setattr(server, "_fetch_cdn", fake_fetch)
     resp = asyncio.get_event_loop().run_until_complete(server.handle_img(_img_request(_IPFS_URL)))
     assert resp.status == 200
+
+
+def test_edition_for_url_shared_by_many_editions_is_ambiguous():
+    """A URL that several LIVE editions point at is not per-edition art — the
+    blank silhouette every harvested character shares is the real case. The
+    archive is keyed by edition and holds each one's own (now stale) dressed
+    still, so resolving to MIN() served edition A's old artwork for edition
+    B's blank. Ambiguous URLs must fall through to the real fetch."""
+    conn = _index_conn()
+    blank = "https://nft.example.com/blank/silhouette.png"
+    _insert(conn, nft_id="C" * 64, nft_number=3557, image=blank)
+    _insert(conn, nft_id="D" * 64, nft_number=3569, image=blank)
+    assert image_archive.edition_for_url(conn, blank) is None
+
+
+def test_edition_for_url_still_resolves_when_duplicates_are_burned():
+    """Only LIVE rows create ambiguity: an edition whose burned predecessors
+    carried the same URL still resolves (that is one edition's own art)."""
+    conn = _index_conn()
+    url = "https://cdn.example.com/LFGO/9/9_0_abc.png"
+    _insert(conn, nft_id="E" * 64, nft_number=9, image=url, is_burned=1)
+    _insert(conn, nft_id="F" * 64, nft_number=9, image=url)
+    assert image_archive.edition_for_url(conn, url) == 9
+
+
+def test_edition_for_url_same_edition_twice_live_is_not_ambiguous():
+    """Two live tokens of the SAME edition (duplicate mints) share art — that
+    is unambiguous, the edition is still the answer."""
+    conn = _index_conn()
+    url = "https://cdn.example.com/LFGO/11/11_0_abc.png"
+    _insert(conn, nft_id="1" * 64, nft_number=11, image=url)
+    _insert(conn, nft_id="2" * 64, nft_number=11, image=url)
+    assert image_archive.edition_for_url(conn, url) == 11
+
+
+def test_drop_archived_removes_still_and_thumb(monkeypatch, tmp_path):
+    """Economy ops change an edition's art without composing into the archive,
+    so the archived copy must be invalidated or /api/img keeps serving it."""
+    monkeypatch.setenv("IMAGES_DIR", str(tmp_path))
+    (tmp_path / "42.png").write_bytes(b"\x89PNG old still")
+    (tmp_path / "42.mp4").write_bytes(b"old animation")
+    thumbs = tmp_path / image_archive.THUMB_SUBDIR
+    thumbs.mkdir()
+    (thumbs / "42.webp").write_bytes(b"old thumb")
+
+    image_archive.drop_archived("testnet", 42)
+
+    assert image_archive.local_image("testnet", 42) is None
+    assert image_archive.local_thumb("testnet", 42) is None
+
+
+def test_drop_archived_is_silent_when_nothing_archived(monkeypatch, tmp_path):
+    monkeypatch.setenv("IMAGES_DIR", str(tmp_path))
+    image_archive.drop_archived("testnet", 999)  # must not raise
+
+
+def test_drop_archived_removes_the_thumb_before_the_still(monkeypatch, tmp_path):
+    """handle_img consults the thumb BEFORE the full still, so a partial
+    deletion must never leave the thumbnail as the surviving copy. Record the
+    unlink order and assert the thumb goes first."""
+    monkeypatch.setenv("IMAGES_DIR", str(tmp_path))
+    (tmp_path / "42.png").write_bytes(b"still")
+    thumbs = tmp_path / image_archive.THUMB_SUBDIR
+    thumbs.mkdir()
+    (thumbs / "42.webp").write_bytes(b"thumb")
+
+    removed: list[str] = []
+    real_remove = os.remove
+
+    def _tracking_remove(path):
+        removed.append(os.path.basename(path))
+        real_remove(path)
+
+    monkeypatch.setattr(os, "remove", _tracking_remove)
+    image_archive.drop_archived("testnet", 42)
+    assert removed[0] == "42.webp", removed
+
+
+def test_drop_archived_continues_after_a_failed_unlink(monkeypatch, tmp_path):
+    """One unremovable path must not strand the others (the thumb is attempted
+    first, so the still is still cleaned when a later unlink fails)."""
+    monkeypatch.setenv("IMAGES_DIR", str(tmp_path))
+    (tmp_path / "42.png").write_bytes(b"still")
+    thumbs = tmp_path / image_archive.THUMB_SUBDIR
+    thumbs.mkdir()
+    (thumbs / "42.webp").write_bytes(b"thumb")
+
+    real_remove = os.remove
+
+    def _flaky_remove(path):
+        if path.endswith("42.webp"):
+            raise OSError("permission denied")
+        real_remove(path)
+
+    monkeypatch.setattr(os, "remove", _flaky_remove)
+    image_archive.drop_archived("testnet", 42)  # must not raise
+    assert image_archive.local_image("testnet", 42) is None

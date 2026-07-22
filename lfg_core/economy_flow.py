@@ -227,6 +227,32 @@ def _apply_rarity_change(deps: EconomyDeps, op: str, apply: Callable[[Any], Any]
         logging.error(f"{op}: rarity bookkeeping failed (non-fatal): {traceback.format_exc()}")
 
 
+def _invalidate_archived_art(op: str, edition: int | None) -> None:
+    """Drop `edition`'s locally archived still after an op changed its art.
+
+    Harvest (to the shared blank silhouette) and assemble (to freshly
+    composed art uploaded straight to the CDN) never write a still into the
+    images_<network>/ archive the way mint/swap do, but the edition's
+    on-chain `image` URL still maps back to it — so /api/img would keep
+    serving the pre-op artwork. Best-effort: the ledger op already
+    committed, and a stale thumbnail must never fail a session.
+
+    Skipped when the economy runs on a different chain than the archive the
+    proxy serves (the documented mainnet-characters / testnet-economy
+    split): the edition numbers collide across networks, so invalidating
+    would delete an unrelated edition's art."""
+    if edition is None or config.ECONOMY_NETWORK != config.XRPL_NETWORK:
+        return
+    try:
+        from lfg_core import image_archive  # local import: keeps the flows import-light
+
+        image_archive.drop_archived(config.XRPL_NETWORK, edition)
+    except Exception:
+        logging.error(
+            f"{op}: archived-art invalidation failed (non-fatal): {traceback.format_exc()}"
+        )
+
+
 def _owner_contents(conn: Any, owner: str) -> dict[tuple[str, str], int]:
     """The owner's current loose-asset counts, read from the DB mirror.
     Bodies are Task 2+ loose assets too — they live in `closet_assets` as
@@ -493,6 +519,9 @@ async def run_harvest(session: HarvestSession, deps: EconomyDeps) -> None:
             "harvest",
             lambda c: db_helpers.record_harvest_burn(c, session.edition, rec.nft_id, owner),
         )
+        # The edition now wears the shared blank silhouette; its archived
+        # dressed still would otherwise keep being served as its thumbnail.
+        _invalidate_archived_art("harvest", session.edition)
 
         # Deposit: closet token first (authoritative), then DB mirror.
         assets = _owner_contents(conn, owner)
@@ -691,6 +720,13 @@ async def run_assemble(session: AssembleSession, deps: EconomyDeps) -> None:
             )
             return
         session.modify_hash = modify_hash
+        # The character's art changed the moment this modify committed —
+        # invalidate the archived still HERE, not after the Closet/index
+        # writes below, so the mirror-failed and index-failed branches
+        # (which return early yet leave the new art on-chain) can't skip
+        # it. Dropping a cache entry is never wrong, so doing it before a
+        # possible revert is safe: the revert just re-proxies from the CDN.
+        _invalidate_archived_art("assemble", session.edition)
         _write_record(deps.records_dir, "assemble", session.id, session._record("modified"))
 
         # Debit the Closet: the body plus each chosen slot value (incl.
@@ -767,6 +803,9 @@ async def run_assemble(session: AssembleSession, deps: EconomyDeps) -> None:
             "assemble",
             lambda c: db_helpers.revive_harvested_edition(c, session.edition),
         )
+        # Freshly composed art went straight to the CDN — drop the archived
+        # (blank or pre-assemble) still so the new artwork is what shows.
+        _invalidate_archived_art("assemble", session.edition)
         session.state = DONE
         session.results.append(
             {
@@ -969,6 +1008,13 @@ async def run_equip(session: EquipSession, deps: EconomyDeps) -> None:
             _write_record(deps.records_dir, "equip", session.id, session._record("failed_modify"))
             return
         session.modify_hash = modify_hash
+        # The character's art changed the moment this modify committed —
+        # invalidate the archived still HERE, not after the Closet/index
+        # writes below, so the mirror-failed and index-failed branches
+        # (which return early yet leave the new art on-chain) can't skip
+        # it. Dropping a cache entry is never wrong, so doing it before a
+        # possible revert is safe: the revert just re-proxies from the CDN.
+        _invalidate_archived_art("equip", rec.nft_number)
 
         # Swap the closet with every delta at once. Token first, then DB.
         try:
