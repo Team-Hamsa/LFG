@@ -1,13 +1,99 @@
 {
-  "archive_max_close_time": "2026-07-20T12:00:00+00:00",
-  "as_of": "2026-07-22T14:59:48+00:00",
+  "archive_max_close_time": "2026-07-22T12:21:31+00:00",
+  "as_of": "2026-07-22T14:04:09+00:00",
   "by_type": {
-    "Payment": 1
+    "NFTokenAcceptOffer": 312,
+    "NFTokenBurn": 78,
+    "NFTokenCancelOffer": 2,
+    "NFTokenCreateOffer": 695,
+    "NFTokenMint": 703,
+    "NFTokenModify": 95,
+    "Payment": 64
   },
   "daily": [
     {
-      "count": 1,
+      "count": 11,
+      "date": "2026-07-02"
+    },
+    {
+      "count": 0,
+      "date": "2026-07-03"
+    },
+    {
+      "count": 11,
+      "date": "2026-07-04"
+    },
+    {
+      "count": 0,
+      "date": "2026-07-05"
+    },
+    {
+      "count": 0,
+      "date": "2026-07-06"
+    },
+    {
+      "count": 0,
+      "date": "2026-07-07"
+    },
+    {
+      "count": 0,
+      "date": "2026-07-08"
+    },
+    {
+      "count": 0,
+      "date": "2026-07-09"
+    },
+    {
+      "count": 5,
+      "date": "2026-07-10"
+    },
+    {
+      "count": 320,
+      "date": "2026-07-11"
+    },
+    {
+      "count": 651,
+      "date": "2026-07-12"
+    },
+    {
+      "count": 154,
+      "date": "2026-07-13"
+    },
+    {
+      "count": 75,
+      "date": "2026-07-14"
+    },
+    {
+      "count": 32,
+      "date": "2026-07-15"
+    },
+    {
+      "count": 32,
+      "date": "2026-07-16"
+    },
+    {
+      "count": 188,
+      "date": "2026-07-17"
+    },
+    {
+      "count": 99,
+      "date": "2026-07-18"
+    },
+    {
+      "count": 79,
+      "date": "2026-07-19"
+    },
+    {
+      "count": 43,
       "date": "2026-07-20"
+    },
+    {
+      "count": 170,
+      "date": "2026-07-21"
+    },
+    {
+      "count": 79,
+      "date": "2026-07-22"
     }
   ],
   "excluded": [
@@ -15,9 +101,9 @@
     "rHaMsAjoAN21s1XG5TCAM6ErAefzrggsHf",
     "rLfgoMintj3KBcs4s2XKtquvDwEte2kYfJ"
   ],
-  "first_tagged_tx": "2026-07-20",
-  "network": "testnet",
+  "first_tagged_tx": "2026-07-02",
+  "network": "mainnet",
   "source_tag": 2606160021,
-  "total_tagged_txs": 1,
-  "unique_wallets": 1
+  "total_tagged_txs": 1949,
+  "unique_wallets": 17
 }
