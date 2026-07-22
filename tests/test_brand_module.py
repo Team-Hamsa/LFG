@@ -110,7 +110,8 @@ def test_sparkline_single_element_series_produces_one_bar():
 def test_sparkline_all_identical_nonzero_series_produces_full_height_bars():
     series = [3, 3, 3, 3]
     bars = [
-        p for p in brand.sparkline(0.0, 100, 100.0, series, brand.ORANGE, max_bar_h=26)
+        p
+        for p in brand.sparkline(0.0, 100, 100.0, series, brand.ORANGE, max_bar_h=26)
         if p.startswith("<rect")
     ]
     assert len(bars) == len(series)
