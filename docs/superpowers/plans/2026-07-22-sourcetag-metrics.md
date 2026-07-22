@@ -17,7 +17,7 @@
 - The exclusion set applies to `unique_wallets` ONLY. `total_tagged_txs` and `by_type` count every tagged row including backend-signed ones. This asymmetry is deliberate; do not "fix" it.
 - Excluded wallets: `rHU8nu9zSnCpkL3gShG4aGawHzaRVfmKwQ`, `rHaMsAjoAN21s1XG5TCAM6ErAefzrggsHf`, plus `config.SIGNING_ACCOUNT` (the backend issuer, resolved dynamically so a key rotation cannot silently start counting the backend as a user).
 - Recipients/`Destination` addresses are never counted and never reported.
-- Brand palette and font stack are copied from `scripts/readme_dashboard.py`; SVG width is 728px to match `assets/dashboard.svg`.
+- Brand palette, font stack and drawing primitives live in `scripts/_brand.py` (Task 3) and are imported, never re-declared; SVG width is 728px to match `assets/dashboard.svg`.
 - `mypy` excludes `^scripts/` (see `pyproject.toml`), so these scripts are not type-gated, but tests for them are required.
 - New test files that import `lfg_core` at module top MUST carry the env-guard preamble (see Task 1 Step 1) or they strand frozen config constants and break `webapp/test_smoke` in full-suite order.
 - No AI/Claude attribution in any commit message.
@@ -27,6 +27,8 @@
 | Path | Responsibility |
 |---|---|
 | `scripts/sourcetag_metrics.py` | **Create.** Collector + publisher. Reads the history DB, emits the JSON snapshot, optionally PUTs it to `main` via `gh`. |
+| `scripts/_brand.py` | **Create.** Shared palette + sticker/tile/sparkline primitives, lifted out of `readme_dashboard.py`. Stdlib only. |
+| `scripts/readme_dashboard.py` | **Modify.** Consume `_brand` instead of its own copies. Output must stay byte-identical. |
 | `scripts/render_sourcetag_svg.py` | **Create.** Pure renderer. `metrics/sourcetag.json` → `assets/sourcetag.svg`. No DB access, runs on CI. |
 | `tests/test_sourcetag_metrics.py` | **Create.** Collector tests against a fixture DB. |
 | `tests/test_render_sourcetag_svg.py` | **Create.** Renderer tests against a fixture JSON. |
@@ -605,7 +607,314 @@ git commit -m "feat(metrics): snapshot output + gh-api publish to main"
 
 ---
 
-### Task 3: Renderer — brand-styled SVG badge
+### Task 3: Extract the shared brand module
+
+**Files:**
+- Create: `scripts/_brand.py`
+- Modify: `scripts/readme_dashboard.py`
+- Modify: `.github/workflows/hackathon-loc.yml` (invocation style only)
+- Create: `tests/test_brand_module.py`
+
+**Why:** the SourceTag badge (Task 4) must be visually identical in style to
+`assets/dashboard.svg`. Duplicating the palette and the sticker/tile/sparkline
+drawing code into a second renderer guarantees the two badges drift apart the
+first time the brand changes. This task extracts the shared vocabulary FIRST so
+Task 4 consumes it instead of copying it.
+
+**Constraints:**
+- `scripts/_brand.py` must import NOTHING from `lfg_core` and nothing outside
+  the stdlib. Both renderers run on a bare CI runner with no `.env`.
+- **Both renderers must be invoked as modules** (`python -m scripts.X`), not as
+  file paths. `python scripts/readme_dashboard.py` puts `scripts/` on
+  `sys.path` but NOT the repo root, so `from scripts._brand import …` would
+  raise `ModuleNotFoundError`. Update the existing
+  `run: python3 scripts/readme_dashboard.py` step in
+  `.github/workflows/hackathon-loc.yml` to `run: python3 -m
+  scripts.readme_dashboard` as part of this task. Do not paper over this with a
+  `sys.path` mutation.
+- This is a pure refactor of `readme_dashboard.py`: `assets/dashboard.svg` must
+  be **byte-identical** before and after. That is the acceptance test.
+
+**Interfaces:**
+- Consumes: nothing from earlier tasks.
+- Produces (used by Task 4):
+  - Palette constants: `INK`, `SURFACE`, `SURFACE_LIGHT`, `LINE`, `PAPER`,
+    `TEXT`, `MUTED`, `ORANGE`, `RED`, `BLUE`, `YELLOW`, `GREEN`, `PURPLE`, `FONT`
+  - `PALETTE: frozenset[str]` — every colour constant above, for tests
+  - `fmt(n: int) -> str` — thousands separators
+  - `esc(s: str) -> str` — XML-escapes `&`, `<`, `>`
+  - `open_svg(w: int, h: int, label: str) -> str` — the `<svg …>` opening tag
+    with `role="img"` and an escaped `aria-label`
+  - `sticker_card(card_w: int, card_h: int) -> list[str]` — the hard `INK`
+    offset shadow rect plus the `SURFACE` card with its 3px `PAPER` ring
+  - `title_block(pad: int, title: str, subtitle: str) -> list[str]` — the
+    19px/700 title at y=34 and the 13px `MUTED` subtitle at y=56
+  - `stat_tiles(x: float, y: int, area_w: float, tiles: list[tuple[str, str, str]]) -> list[str]`
+    — evenly spaced `SURFACE_LIGHT` tiles (height 60, gap 16, rx 12), each with
+    a 30×5 colour bar, a 26px/800 numeral, and an 11px `MUTED` label.
+    `tiles` items are `(value, label, colour)`.
+  - `sparkline(x: float, base_y: int, area_w: float, series: list[int], colour: str, max_bar_h: int = 26) -> list[str]`
+    — a `LINE` baseline plus one `ORANGE`-by-default bar per value, 55% of slot
+    width, rx 2, zero values skipped.
+
+- [ ] **Step 1: Capture the current dashboard SVG as the refactor oracle**
+
+Run:
+```bash
+.venv/bin/python -m scripts.readme_dashboard
+cp assets/dashboard.svg /tmp/dashboard-before.svg
+```
+Expected: `updated` or `already current`, and `/tmp/dashboard-before.svg` exists.
+
+- [ ] **Step 2: Write the failing test**
+
+Create `tests/test_brand_module.py`:
+
+```python
+# Tests for scripts/_brand.py — the shared badge vocabulary. Stdlib only:
+# this module must import cleanly on a bare CI runner with no .env.
+import importlib
+import os
+import sys
+import xml.etree.ElementTree as ET
+
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+
+brand = importlib.import_module("scripts._brand")
+
+
+def test_module_has_no_lfg_core_dependency():
+    src = open(os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
+                            "scripts", "_brand.py")).read()
+    assert "lfg_core" not in src
+    assert "dotenv" not in src
+
+
+def test_palette_contains_every_colour_constant():
+    for name in ("INK", "SURFACE", "SURFACE_LIGHT", "LINE", "PAPER", "TEXT",
+                 "MUTED", "ORANGE", "RED", "BLUE", "YELLOW", "GREEN", "PURPLE"):
+        assert getattr(brand, name) in brand.PALETTE
+
+
+def test_fmt_and_esc():
+    assert brand.fmt(1943) == "1,943"
+    assert brand.esc("a & b <c>") == "a &amp; b &lt;c&gt;"
+
+
+def test_open_svg_escapes_the_aria_label():
+    tag = brand.open_svg(728, 330, "a & b")
+    assert 'width="728"' in tag
+    assert 'role="img"' in tag
+    assert "a &amp; b" in tag
+
+
+def test_sticker_card_and_tiles_parse_as_svg():
+    parts = [brand.open_svg(728, 330, "t")]
+    parts += brand.sticker_card(718, 320)
+    parts += brand.title_block(24, "title", "subtitle")
+    parts += brand.stat_tiles(24.0, 72, 672.0, [("16", "wallets", brand.BLUE),
+                                                ("1,943", "txs", brand.ORANGE)])
+    parts += brand.sparkline(24.0, 310, 672.0, [1, 0, 5], brand.ORANGE)
+    parts.append("</svg>")
+    root = ET.fromstring("\n".join(parts))
+    assert root.attrib["height"] == "330"
+
+
+def test_sparkline_skips_zero_values():
+    bars = [p for p in brand.sparkline(0.0, 100, 100.0, [0, 0, 0], brand.ORANGE)
+            if p.startswith("<rect")]
+    assert bars == []
+```
+
+- [ ] **Step 3: Run test to verify it fails**
+
+Run: `.venv/bin/python -m pytest tests/test_brand_module.py -v`
+Expected: FAIL — `ModuleNotFoundError: No module named 'scripts._brand'`
+
+- [ ] **Step 4: Create the shared module**
+
+Create `scripts/_brand.py` by lifting the palette and the drawing code out of
+`scripts/readme_dashboard.py` verbatim — same numbers, same rounding, same
+f-string formatting (`:.1f` where it is used today), so the rendered output is
+unchanged:
+
+```python
+"""Shared LFG brand vocabulary for the README badge renderers.
+
+Palette and drawing primitives used by scripts/readme_dashboard.py and
+scripts/render_sourcetag_svg.py, so the badges cannot drift apart. Stdlib
+only, and deliberately free of lfg_core imports: these run on a bare CI
+runner with no .env. Source of truth for the colours is
+webapp/client/style.css.
+"""
+
+from __future__ import annotations
+
+INK = "#0A0A0A"
+SURFACE = "#181818"
+SURFACE_LIGHT = "#202020"  # subtle tile fill, one step up from the card
+LINE = "#2C2C2C"
+PAPER = "#FFFFFF"
+TEXT = "#F5F4F1"
+MUTED = "#9C9A94"
+ORANGE = "#D89030"
+RED = "#D84830"
+BLUE = "#4890C0"
+YELLOW = "#F0D848"
+GREEN = "#3DA35D"
+PURPLE = "#601878"
+FONT = "-apple-system,'Segoe UI',Roboto,Helvetica,Arial,sans-serif"
+
+PALETTE = frozenset(
+    {INK, SURFACE, SURFACE_LIGHT, LINE, PAPER, TEXT, MUTED,
+     ORANGE, RED, BLUE, YELLOW, GREEN, PURPLE}
+)
+
+
+def fmt(n: int) -> str:
+    return f"{n:,}"
+
+
+def esc(s: str) -> str:
+    return s.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
+
+
+def open_svg(w: int, h: int, label: str) -> str:
+    return (
+        f'<svg xmlns="http://www.w3.org/2000/svg" width="{w}" height="{h}" '
+        f'viewBox="0 0 {w} {h}" role="img" aria-label="{esc(label)}">'
+    )
+
+
+def sticker_card(card_w: int, card_h: int) -> list[str]:
+    """Hard offset shadow, then the card with its paper ring. The dark fill is
+    what lets the badge read on both GitHub light and dark themes."""
+    return [
+        f'<rect x="8" y="8" width="{card_w}" height="{card_h}" rx="18" fill="{INK}"/>',
+        f'<rect x="2" y="2" width="{card_w}" height="{card_h}" rx="18" '
+        f'fill="{SURFACE}" stroke="{PAPER}" stroke-width="3"/>',
+    ]
+
+
+def title_block(pad: int, title: str, subtitle: str) -> list[str]:
+    return [
+        f'<text x="{pad}" y="34" font-family="{FONT}" font-size="19" '
+        f'font-weight="700" fill="{TEXT}">{esc(title)}</text>',
+        f'<text x="{pad}" y="56" font-family="{FONT}" font-size="13" '
+        f'fill="{MUTED}">{esc(subtitle)}</text>',
+    ]
+
+
+def stat_tiles(
+    x: float, y: int, area_w: float, tiles: list[tuple[str, str, str]]
+) -> list[str]:
+    """Evenly spaced tiles: big brand-coloured number over a muted label."""
+    parts: list[str] = []
+    tile_h, gap = 60, 16
+    tile_w = (area_w - gap * (len(tiles) - 1)) / len(tiles)
+    for i, (value, label, color) in enumerate(tiles):
+        tx = x + i * (tile_w + gap)
+        parts.append(
+            f'<rect x="{tx:.1f}" y="{y}" width="{tile_w:.1f}" height="{tile_h}" '
+            f'rx="12" fill="{SURFACE_LIGHT}" stroke="{LINE}" stroke-width="1"/>'
+        )
+        parts.append(
+            f'<rect x="{tx + 16:.1f}" y="{y + 12}" width="30" height="5" '
+            f'rx="2.5" fill="{color}"/>'
+        )
+        parts.append(
+            f'<text x="{tx + 16:.1f}" y="{y + 42}" font-family="{FONT}" '
+            f'font-size="26" font-weight="800" fill="{color}">{value}</text>'
+        )
+        parts.append(
+            f'<text x="{tx + 16:.1f}" y="{y + 55}" font-family="{FONT}" '
+            f'font-size="11" fill="{MUTED}">{esc(label)}</text>'
+        )
+    return parts
+
+
+def sparkline(
+    x: float, base_y: int, area_w: float, series: list[int],
+    colour: str = ORANGE, max_bar_h: int = 26,
+) -> list[str]:
+    """A baseline with one thin bar per value; zero-height days are skipped."""
+    parts = [
+        f'<line x1="{x:.1f}" y1="{base_y}" x2="{x + area_w:.1f}" '
+        f'y2="{base_y}" stroke="{LINE}" stroke-width="1"/>'
+    ]
+    if not series:
+        return parts
+    peak = max(max(series), 1)
+    slot = area_w / len(series)
+    bar_w = slot * 0.55
+    for i, count in enumerate(series):
+        if count <= 0:
+            continue
+        bar_h = max(max_bar_h * count / peak, 2.0)
+        bx = x + i * slot + (slot - bar_w) / 2
+        parts.append(
+            f'<rect x="{bx:.1f}" y="{base_y - bar_h:.1f}" width="{bar_w:.1f}" '
+            f'height="{bar_h:.1f}" rx="2" fill="{colour}"/>'
+        )
+    return parts
+```
+
+- [ ] **Step 5: Run the new test**
+
+Run: `.venv/bin/python -m pytest tests/test_brand_module.py -v`
+Expected: PASS, 6 passed
+
+- [ ] **Step 6: Rewrite readme_dashboard.py to use the module**
+
+In `scripts/readme_dashboard.py`, delete the palette constant block, the local
+`fmt()`, and the inline tile/sparkline/card/title drawing code, replacing them
+with calls into `scripts._brand`. Import as:
+
+```python
+from scripts._brand import (
+    BLUE, GREEN, LINE, MUTED, ORANGE, RED, FONT,
+    fmt, open_svg, sparkline, stat_tiles, sticker_card, title_block,
+)
+```
+
+`build_svg` keeps its own geometry (`w, h = 728, 210`, `card_w, card_h = 718,
+200`, `pad = 24`, `area_x, area_w = 24.0, 672.0`), its own `aria-label` string,
+its own four-tile list, and its own "commits / day since …" caption — only the
+shared drawing primitives move. The velocity chart becomes
+`sparkline(area_x, 192, area_w, series, ORANGE)`.
+
+Do NOT change any coordinate, font size, colour, or label text. The output must
+be byte-identical.
+
+- [ ] **Step 7: Prove the refactor changed nothing**
+
+Run:
+```bash
+.venv/bin/python -m scripts.readme_dashboard
+diff /tmp/dashboard-before.svg assets/dashboard.svg && echo "IDENTICAL"
+```
+Expected: `already current` (or `updated`), then `IDENTICAL` with no diff output.
+
+If the diff is non-empty the refactor is wrong — fix the drawing code until it
+matches exactly. Do not accept a "cosmetically equivalent" SVG.
+
+- [ ] **Step 8: Run the full suite**
+
+Run: `.venv/bin/python -m pytest tests/ -q`
+Expected: all pass, no regressions.
+
+- [ ] **Step 9: Commit**
+
+```bash
+git add scripts/_brand.py scripts/readme_dashboard.py tests/test_brand_module.py \
+        .github/workflows/hackathon-loc.yml
+git commit -m "refactor(badges): extract shared brand vocabulary into scripts/_brand.py"
+```
+
+---
+
+
+### Task 4: Renderer — brand-styled SVG badge
 
 **Files:**
 - Create: `scripts/render_sourcetag_svg.py`
@@ -615,7 +924,9 @@ git commit -m "feat(metrics): snapshot output + gh-api publish to main"
 - Consumes: `metrics/sourcetag.json` written by Task 2
 - Produces: `build_svg(data: dict) -> str`, `SVG_PATH: Path`, `main() -> int`
 
-**Note:** this module imports nothing from `lfg_core` — it must run on a bare CI runner with no `.env`.
+**Note:** this module imports nothing from `lfg_core` — it must run on a bare
+CI runner with no `.env`. It gets its palette and drawing primitives from
+`scripts/_brand.py` (Task 3) and must NOT redefine them.
 
 - [ ] **Step 1: Write the failing test**
 
@@ -631,6 +942,7 @@ import xml.etree.ElementTree as ET
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
+brand = importlib.import_module("scripts._brand")
 rs = importlib.import_module("scripts.render_sourcetag_svg")
 
 DATA = {
@@ -678,13 +990,15 @@ def test_uses_only_brand_palette_colours():
     import re
 
     svg = rs.build_svg(DATA)
-    allowed = {
-        rs.INK, rs.SURFACE, rs.SURFACE_LIGHT, rs.LINE, rs.PAPER,
-        rs.TEXT, rs.MUTED, rs.ORANGE, rs.RED, rs.BLUE, rs.YELLOW,
-        rs.GREEN, rs.PURPLE,
-    }
     for colour in set(re.findall(r"#[0-9A-Fa-f]{6}", svg)):
-        assert colour in allowed, f"non-brand colour {colour}"
+        assert colour in brand.PALETTE, f"non-brand colour {colour}"
+
+
+def test_renderer_does_not_redeclare_the_palette():
+    """The palette lives in scripts/_brand.py; a second copy would drift."""
+    src = open(os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
+                            "scripts", "render_sourcetag_svg.py")).read()
+    assert "#0A0A0A" not in src and "#D89030" not in src
 
 
 def test_all_content_stays_inside_the_card():
@@ -753,24 +1067,27 @@ import sys
 from pathlib import Path
 from typing import Any
 
+from scripts._brand import (
+    BLUE,
+    FONT,
+    GREEN,
+    MUTED,
+    ORANGE,
+    PURPLE,
+    RED,
+    TEXT,
+    YELLOW,
+    esc,
+    fmt,
+    open_svg,
+    sparkline,
+    stat_tiles,
+    sticker_card,
+    title_block,
+)
+
 JSON_PATH = Path("metrics/sourcetag.json")
 SVG_PATH = Path("assets/sourcetag.svg")
-
-# LFG brand kit — identical to scripts/readme_dashboard.py (webapp/client/style.css)
-INK = "#0A0A0A"
-SURFACE = "#181818"
-SURFACE_LIGHT = "#202020"
-LINE = "#2C2C2C"
-PAPER = "#FFFFFF"
-TEXT = "#F5F4F1"
-MUTED = "#9C9A94"
-ORANGE = "#D89030"
-RED = "#D84830"
-BLUE = "#4890C0"
-YELLOW = "#F0D848"
-GREEN = "#3DA35D"
-PURPLE = "#601878"
-FONT = "-apple-system,'Segoe UI',Roboto,Helvetica,Arial,sans-serif"
 
 # Long XRPL type names are unreadable at 11px; these are the badge labels.
 TYPE_LABELS = {
@@ -784,14 +1101,6 @@ TYPE_LABELS = {
     "TrustSet": "trustset",
 }
 BAR_COLORS = [ORANGE, BLUE, RED, GREEN, YELLOW, PURPLE]
-
-
-def fmt(n: int) -> str:
-    return f"{n:,}"
-
-
-def esc(s: str) -> str:
-    return s.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
 
 
 def build_svg(data: dict[str, Any]) -> str:
@@ -816,42 +1125,20 @@ def build_svg(data: dict[str, Any]) -> str:
         f"from {fmt(wallets)} unique wallets"
     )
 
-    parts = [
-        f'<svg xmlns="http://www.w3.org/2000/svg" width="{w}" height="{h}" '
-        f'viewBox="0 0 {w} {h}" role="img" aria-label="{esc(label)}">',
-        # sticker: hard offset shadow, then card with paper ring so it reads on
-        # both GitHub light and dark themes
-        f'<rect x="8" y="8" width="{card_w}" height="{card_h}" rx="18" fill="{INK}"/>',
-        f'<rect x="2" y="2" width="{card_w}" height="{card_h}" rx="18" '
-        f'fill="{SURFACE}" stroke="{PAPER}" stroke-width="3"/>',
-        f'<text x="{pad}" y="34" font-family="{FONT}" font-size="19" '
-        f'font-weight="700" fill="{TEXT}">XRPL source tag · {tag}</text>',
-        f'<text x="{pad}" y="56" font-family="{FONT}" font-size="13" fill="{MUTED}">'
-        f"live on-ledger volume · auto-updated daily</text>",
-    ]
-
-    # Two stat tiles.
-    tiles = [(fmt(wallets), "unique wallets", BLUE), (fmt(total), "tagged transactions", ORANGE)]
-    tile_y, tile_h, gap = 72, 60, 16
-    tile_w = (area_w - gap * (len(tiles) - 1)) / len(tiles)
-    for i, (value, tile_label, color) in enumerate(tiles):
-        tx = area_x + i * (tile_w + gap)
-        parts.append(
-            f'<rect x="{tx:.1f}" y="{tile_y}" width="{tile_w:.1f}" height="{tile_h}" '
-            f'rx="12" fill="{SURFACE_LIGHT}" stroke="{LINE}" stroke-width="1"/>'
-        )
-        parts.append(
-            f'<rect x="{tx + 16:.1f}" y="{tile_y + 12}" width="30" height="5" '
-            f'rx="2.5" fill="{color}"/>'
-        )
-        parts.append(
-            f'<text x="{tx + 16:.1f}" y="{tile_y + 42}" font-family="{FONT}" '
-            f'font-size="26" font-weight="800" fill="{color}">{value}</text>'
-        )
-        parts.append(
-            f'<text x="{tx + 16:.1f}" y="{tile_y + 55}" font-family="{FONT}" '
-            f'font-size="11" fill="{MUTED}">{tile_label}</text>'
-        )
+    parts = [open_svg(w, h, label)]
+    parts += sticker_card(card_w, card_h)
+    parts += title_block(
+        pad, f"XRPL source tag · {tag}", "live on-ledger volume · auto-updated daily"
+    )
+    parts += stat_tiles(
+        area_x,
+        72,
+        area_w,
+        [
+            (fmt(wallets), "unique wallets", BLUE),
+            (fmt(total), "tagged transactions", ORANGE),
+        ],
+    )
 
     # Type breakdown: one horizontal bar per tx type, longest first.
     row_y = 158
@@ -883,24 +1170,7 @@ def build_svg(data: dict[str, Any]) -> str:
         f'<text x="{pad}" y="276" font-family="{FONT}" font-size="12" '
         f'fill="{MUTED}">tagged tx / day</text>'
     )
-    base_y, max_bar_h = 310, 26
-    parts.append(
-        f'<line x1="{area_x:.1f}" y1="{base_y}" x2="{area_x + area_w:.1f}" '
-        f'y2="{base_y}" stroke="{LINE}" stroke-width="1"/>'
-    )
-    if series:
-        peak_day = max(max(series), 1)
-        slot = area_w / len(series)
-        bar_w = slot * 0.55
-        for i, count in enumerate(series):
-            if count <= 0:
-                continue
-            bar_h = max(max_bar_h * count / peak_day, 2.0)
-            bx = area_x + i * slot + (slot - bar_w) / 2
-            parts.append(
-                f'<rect x="{bx:.1f}" y="{base_y - bar_h:.1f}" width="{bar_w:.1f}" '
-                f'height="{bar_h:.1f}" rx="2" fill="{ORANGE}"/>'
-            )
+    parts += sparkline(area_x, 310, area_w, series, ORANGE)
 
     parts.append("</svg>")
     return "\n".join(parts) + "\n"
@@ -932,11 +1202,11 @@ if __name__ == "__main__":
 - [ ] **Step 4: Run test to verify it passes**
 
 Run: `.venv/bin/python -m pytest tests/test_render_sourcetag_svg.py -v`
-Expected: PASS, 7 passed
+Expected: PASS, 8 passed
 
 - [ ] **Step 5: Render the real badge and eyeball it**
 
-Run: `.venv/bin/python scripts/render_sourcetag_svg.py && head -5 assets/sourcetag.svg`
+Run: `.venv/bin/python -m scripts.render_sourcetag_svg && head -5 assets/sourcetag.svg`
 Expected: `updated`, then SVG opening tags with the real numbers.
 
 - [ ] **Step 6: Commit**
@@ -948,7 +1218,7 @@ git commit -m "feat(metrics): render SourceTag badge SVG in brand style"
 
 ---
 
-### Task 4: Wire into CI and the README
+### Task 5: Wire into CI and the README
 
 **Files:**
 - Modify: `.github/workflows/ci.yml:9-13`
@@ -974,7 +1244,7 @@ In `.github/workflows/hackathon-loc.yml`, after the "Update repo-vitals dashboar
 
 ```yaml
       - name: Update SourceTag badge
-        run: python3 scripts/render_sourcetag_svg.py
+        run: python3 -m scripts.render_sourcetag_svg
 ```
 
 and extend the `git add` line in the "Commit if changed" step:
@@ -1002,7 +1272,7 @@ Expected: `1` for each file.
 - [ ] **Step 5: Run the full suite**
 
 Run: `.venv/bin/python -m pytest tests/test_sourcetag_metrics.py tests/test_render_sourcetag_svg.py -q`
-Expected: 18 passed
+Expected: 25 passed
 
 - [ ] **Step 6: Commit**
 
@@ -1013,7 +1283,7 @@ git commit -m "ci(metrics): render SourceTag badge on main, exempt metrics/ from
 
 ---
 
-### Task 5: Document the pm2 cron
+### Task 6: Document the pm2 cron
 
 **Files:**
 - Modify: `CLAUDE.md` (the "Running (two pm2 stacks…)" process table and the env/ops notes)
