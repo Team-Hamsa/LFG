@@ -36,6 +36,24 @@ DAY0 = 1784548800
 DAY2 = DAY0 + 2 * 86400
 
 
+def _valid_payload(**overrides):
+    """A complete, schema-valid payload; override individual fields per test."""
+    payload = {
+        "source_tag": TAG,
+        "network": "testnet",
+        "total_tagged_txs": 5,
+        "unique_wallets": 2,
+        "by_type": {"Payment": 5},
+        "daily": [{"date": "2026-07-20", "count": 5}],
+        "excluded": sorted(stm.OPERATOR_WALLETS),
+        "first_tagged_tx": "2026-07-20",
+        "archive_max_close_time": "2026-07-20T12:00:00+00:00",
+        "as_of": "2026-07-22T00:20:00+00:00",
+    }
+    payload.update(overrides)
+    return payload
+
+
 def _db(tmp_path, rows):
     """rows: (hash, close_time, tx_type, account, source_tag)"""
     path = str(tmp_path / "history_testnet.db")
@@ -147,7 +165,20 @@ def test_push_refuses_to_call_gh_when_validation_fails():
         raise AssertionError("must not touch the network on an invalid payload")
 
     with pytest.raises(ValueError):
-        stm.push_to_github({"total_tagged_txs": 1, "sneaky": "x"}, runner=runner)
+        stm.push_to_github(_valid_payload(sneaky="x"), runner=runner)
+
+
+def test_validate_payload_rejects_missing_required_key():
+    payload = _valid_payload()
+    del payload["excluded"]
+    with pytest.raises(ValueError, match="excluded"):
+        stm.validate_payload(payload)
+
+
+def test_validate_payload_rejects_malformed_as_of():
+    payload = _valid_payload(as_of="now")
+    with pytest.raises(ValueError, match="as_of"):
+        stm.validate_payload(payload)
 
 
 def test_is_unchanged_ignores_as_of():
@@ -162,6 +193,9 @@ def test_is_unchanged_ignores_as_of():
 
 def test_push_skips_when_unchanged_and_makes_no_write_call():
     calls = []
+    payload = _valid_payload()
+    # Same payload, differing only in as_of, as the "existing remote" content.
+    remote = _valid_payload(as_of="2026-07-21T00:00:00+00:00")
 
     def runner(cmd, **kw):
         calls.append(cmd)
@@ -172,18 +206,19 @@ def test_push_skips_when_unchanged_and_makes_no_write_call():
         body = json.dumps(
             {
                 "sha": "abc123",
-                "content": stm._b64(json.dumps({"total_tagged_txs": 5}, indent=2) + "\n"),
+                "content": stm._b64(stm._serialize(remote)),
             }
         )
         return sp.CompletedProcess(cmd, 0, stdout=body, stderr="")
 
-    made = stm.push_to_github({"total_tagged_txs": 5, "as_of": "now"}, runner=runner)
+    made = stm.push_to_github(payload, runner=runner)
     assert made is False
     assert any("GET" in c or "contents" in " ".join(c) for c in calls)
 
 
 def test_push_puts_with_existing_sha_when_changed():
     seen = {}
+    remote = _valid_payload(total_tagged_txs=1)
 
     def runner(cmd, **kw):
         import subprocess as sp
@@ -195,12 +230,12 @@ def test_push_puts_with_existing_sha_when_changed():
         body = json.dumps(
             {
                 "sha": "abc123",
-                "content": stm._b64(json.dumps({"total_tagged_txs": 1}, indent=2) + "\n"),
+                "content": stm._b64(stm._serialize(remote)),
             }
         )
         return sp.CompletedProcess(cmd, 0, stdout=body, stderr="")
 
-    made = stm.push_to_github({"total_tagged_txs": 99, "as_of": "now"}, runner=runner)
+    made = stm.push_to_github(_valid_payload(total_tagged_txs=99), runner=runner)
     assert made is True
     assert "abc123" in seen["input"]
     assert "main" in seen["input"]
@@ -218,7 +253,7 @@ def test_push_creates_file_when_absent_remotely():
         # gh exits non-zero on 404
         return sp.CompletedProcess(cmd, 1, stdout="", stderr="Not Found (HTTP 404)")
 
-    made = stm.push_to_github({"total_tagged_txs": 1, "as_of": "now"}, runner=runner)
+    made = stm.push_to_github(_valid_payload(total_tagged_txs=1), runner=runner)
     assert made is True
     assert '"sha"' not in seen["input"]
 
