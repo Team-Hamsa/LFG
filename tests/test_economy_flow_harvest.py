@@ -69,6 +69,7 @@ class _Fakes:
         fail_char_burn: bool = False,
         fail_char_mint: bool = False,
         fail_char_offer: bool = False,
+        fail_char_accept: bool = False,
         fail_blank_meta: bool = False,
     ) -> None:
         self.burns: list[tuple[str, str]] = []
@@ -83,6 +84,7 @@ class _Fakes:
         self.fail_char_burn = fail_char_burn
         self.fail_char_mint = fail_char_mint
         self.fail_char_offer = fail_char_offer
+        self.fail_char_accept = fail_char_accept
         self.fail_blank_meta = fail_blank_meta
         self.uploads = 0
         # nft_ids that exist_fn should report as on-ledger; everything else is stale.
@@ -144,7 +146,7 @@ class _Fakes:
         return None if self.fail_char_offer else "O"
 
     async def char_accept(self, offer_id):
-        return {"xumm_url": "x"}
+        return None if self.fail_char_accept else {"xumm_url": "x"}
 
     async def blank_meta(self, edition: int) -> str | None:
         return None if self.fail_blank_meta else f"https://cdn/blank/{edition}.json"
@@ -281,6 +283,26 @@ def test_harvest_legacy_offer_fails_credits_closet_then_fails_honestly(tmp_path)
     record = json.loads((tmp_path / f"harvest-{session.id}.json").read_text())
     assert record["status"] == "reminted_no_offer_failed"
     assert record["new_nft_id"] == "NEWCHAR"
+
+
+def test_harvest_legacy_accept_payload_fails_still_completes_and_warns(tmp_path, caplog):
+    # The sell offer WAS created on-ledger; only the XUMM accept payload failed
+    # (#262). The blank is still claimable from Xaman's Events tab, so failing
+    # would strand a delivery that actually succeeded — complete, but log loudly
+    # (the same posture run_extract takes).
+    conn, f = _conn_with_genesis(), _Fakes(fail_char_accept=True)
+    es.set_closet_token(conn, "rUser", "CLOSET0", "00", status=ct.ACTIVE, offer_id=None)
+    session = ef.HarvestSession(owner="rUser", character=_char(mutable=False), burnable=True)
+    with caplog.at_level("WARNING"):
+        _run(ef.run_harvest(session, _deps(conn, f, tmp_path)))
+
+    assert session.state == ef.DONE  # NOT failed — the offer is on-chain
+    assert session.accept is None
+    assert f.offers == [("NEWCHAR", "rUser")]
+    assert "claimable via Xaman Events" in caplog.text
+    # Journals the normal reminted checkpoint, not an offer-failure status.
+    record = json.loads((tmp_path / f"harvest-{session.id}.json").read_text())
+    assert record["status"] != "reminted_no_offer_failed"
 
 
 def test_harvest_legacy_remint_fails_after_burn(tmp_path):

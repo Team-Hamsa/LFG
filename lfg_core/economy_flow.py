@@ -486,14 +486,27 @@ async def run_harvest(session: HarvestSession, deps: EconomyDeps) -> None:
             offer_id = await deps.char_offer_fn(new_id, owner)
             if offer_id:
                 session.accept = await deps.char_accept_fn(offer_id)
+                if not session.accept:
+                    # #262: ONLY the XUMM delivery payload failed — the sell
+                    # offer is on-chain, so the blank is still claimable from
+                    # Xaman's Events tab. Warn, don't fail (same posture as
+                    # run_extract); failing here would strand a delivery that
+                    # actually succeeded.
+                    logging.warning(
+                        "Harvest %s: accept payload creation failed for offer %s; "
+                        "the offer is on-chain and claimable via Xaman Events",
+                        session.id,
+                        offer_id,
+                    )
                 _write_record(deps.records_dir, "harvest", session.id, session._record("reminted"))
             else:
                 # Remint succeeded but the delivery offer could not be created:
                 # the blank is stranded in the issuer wallet with nothing
                 # claimable. The harvested parts still belong to the owner, so
                 # we credit the Closet, but journal a DISTINCT checkpoint (with
-                # new_nft_id) BEFORE the credit and finish `complete_pending_offer`
-                # so an admin can locate and re-offer the blank.
+                # new_nft_id) BEFORE the credit — `reminted_no_offer` — and end
+                # the session FAILED as `reminted_no_offer_failed` so an admin
+                # can locate and re-offer the blank.
                 session.accept = None
                 legacy_offer_failed = True
                 logging.warning(
