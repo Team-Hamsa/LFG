@@ -520,7 +520,9 @@ def test_start_assemble_happy_schedules_session(monkeypatch):
     monkeypatch.setattr(economy_flow, "run_assemble", fake_run_assemble)
     from scripts import _economy_deps
 
-    monkeypatch.setattr(_economy_deps, "build_economy_deps", lambda c, user_token=None, owner=None: object())
+    monkeypatch.setattr(
+        _economy_deps, "build_economy_deps", lambda c, user_token=None, owner=None: object()
+    )
 
     async def go():
         ws = await economy_api.start_assemble(
