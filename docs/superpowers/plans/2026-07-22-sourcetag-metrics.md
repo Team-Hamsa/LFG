@@ -20,6 +20,18 @@
 - Brand palette, font stack and drawing primitives live in `scripts/_brand.py` (Task 3) and are imported, never re-declared; SVG width is 728px to match `assets/dashboard.svg`.
 - `mypy` excludes `^scripts/` (see `pyproject.toml`), so these scripts are not type-gated, but tests for them are required.
 - New test files that import `lfg_core` at module top MUST carry the env-guard preamble (see Task 1 Step 1) or they strand frozen config constants and break `webapp/test_smoke` in full-suite order.
+- **The pushed payload must pass a schema whitelist before any network call.**
+  The nightly `--push` commits to `main` of a PUBLIC repo without passing
+  through the local pre-push gate (ruff/mypy/gitleaks/pytest), so nothing else
+  inspects it. `push_to_github` must refuse to push any payload whose keys are
+  not exactly the known set, or whose values are not ints / plain
+  `YYYY-MM-DD` or ISO-8601 strings / `r`-prefixed XRPL addresses / the two
+  known containers. This is what stops a later code change from leaking raw tx
+  JSON or an env value into a file gitleaks never sees.
+- Scripts launched by pm2 resolve `lfg_core` with the house bootstrap
+  `sys.path.insert(0, REPO_ROOT)` — see `scripts/snapshot_balances.py:20-24`.
+  `scripts/sourcetag_metrics.py` must do the same so pm2 can run it as a plain
+  file path, exactly like `lfg-snapshot`.
 - No AI/Claude attribution in any commit message.
 
 ## File Structure
@@ -356,15 +368,48 @@ git commit -m "feat(metrics): SourceTag volume + unique-wallet collector"
 **Interfaces:**
 - Consumes: `collect()` from Task 1
 - Produces:
+  - `ALLOWED_KEYS: frozenset[str]`
+  - `validate_payload(payload: dict) -> None` — raises `ValueError` on any
+    unexpected key or disallowed value type/shape
   - `is_unchanged(new: dict, existing: str | None) -> bool` — compares ignoring `as_of`
   - `push_to_github(payload: dict, runner=subprocess.run) -> bool` — returns True if a commit was made, False if skipped as unchanged
   - `main()` gains `--out PATH` (default `metrics/sourcetag.json`), `--json`, `--push`
 
 - [ ] **Step 1: Write the failing test**
 
-Append to `tests/test_sourcetag_metrics.py`:
+Add `import pytest` to the import block at the top of
+`tests/test_sourcetag_metrics.py` (Task 1 did not need it), then append:
 
 ```python
+def test_validate_payload_accepts_a_real_payload(tmp_path):
+    path = _db(tmp_path, [("h1", DAY0, "Payment", USER_A, TAG)])
+    stm.validate_payload(stm.collect(path, "testnet"))  # must not raise
+
+
+def test_validate_payload_rejects_unknown_keys(tmp_path):
+    path = _db(tmp_path, [("h1", DAY0, "Payment", USER_A, TAG)])
+    payload = stm.collect(path, "testnet")
+    payload["raw_tx"] = {"Account": "rX", "secret": "shhh"}
+    with pytest.raises(ValueError, match="unexpected key"):
+        stm.validate_payload(payload)
+
+
+def test_validate_payload_rejects_non_whitelisted_value_shapes(tmp_path):
+    path = _db(tmp_path, [("h1", DAY0, "Payment", USER_A, TAG)])
+    payload = stm.collect(path, "testnet")
+    payload["network"] = "sEdTM1uX8pu2do5XvTnutH6HsouMaM2"  # looks like a seed
+    with pytest.raises(ValueError):
+        stm.validate_payload(payload)
+
+
+def test_push_refuses_to_call_gh_when_validation_fails():
+    def runner(cmd, **kw):
+        raise AssertionError("must not touch the network on an invalid payload")
+
+    with pytest.raises(ValueError):
+        stm.push_to_github({"total_tagged_txs": 1, "sneaky": "x"}, runner=runner)
+
+
 def test_is_unchanged_ignores_as_of():
     a = {"total_tagged_txs": 5, "as_of": "2026-07-22T00:00:00+00:00"}
     b = json.dumps({"total_tagged_txs": 5, "as_of": "2026-07-23T00:00:00+00:00"}, indent=2)
@@ -465,8 +510,18 @@ In `scripts/sourcetag_metrics.py`, add these imports at the top:
 ```python
 import base64
 import os
+import re
 import subprocess
 from pathlib import Path
+```
+
+Confirm the module already carries the house pm2 bootstrap (matching
+`scripts/snapshot_balances.py:20-24`); add it if it is missing, immediately
+after the stdlib imports and BEFORE the `lfg_core` import:
+
+```python
+REPO_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+sys.path.insert(0, REPO_ROOT)
 ```
 
 Then add, above `main()`:
@@ -476,6 +531,86 @@ REPO = "Team-Hamsa/LFG"
 REMOTE_PATH = "metrics/sourcetag.json"
 BRANCH = "main"
 DEFAULT_OUT = Path("metrics/sourcetag.json")
+
+
+# The nightly push lands on `main` of a public repo without passing through
+# the pre-push gate, so this whitelist is the only thing inspecting it. Keep it
+# in lockstep with collect()'s payload: a new field must be added here
+# deliberately, which is the point.
+ALLOWED_KEYS = frozenset(
+    {
+        "source_tag",
+        "network",
+        "total_tagged_txs",
+        "unique_wallets",
+        "by_type",
+        "daily",
+        "excluded",
+        "first_tagged_tx",
+        "archive_max_close_time",
+        "as_of",
+    }
+)
+_NETWORK_RE = re.compile(r"^[a-z]+$")
+_ADDRESS_RE = re.compile(r"^r[1-9A-HJ-NP-Za-km-z]{24,34}$")
+_DATE_RE = re.compile(r"^\d{4}-\d{2}-\d{2}$")
+_ISO_RE = re.compile(r"^\d{4}-\d{2}-\d{2}T[\d:.+\-]{8,}$")
+_TX_TYPE_RE = re.compile(r"^[A-Za-z]+$")
+
+
+def validate_payload(payload: dict[str, Any]) -> None:
+    """Refuse to publish anything outside the known schema.
+
+    Raises ValueError on the first violation. This is a publication guard, not
+    a correctness check: it exists so a future change that starts folding raw
+    ledger JSON or an env value into the snapshot cannot silently push it.
+    """
+    unexpected = set(payload) - ALLOWED_KEYS
+    if unexpected:
+        raise ValueError(f"unexpected key(s) in payload: {sorted(unexpected)}")
+
+    def _int(key: str) -> None:
+        if not isinstance(payload.get(key), int) or isinstance(payload.get(key), bool):
+            raise ValueError(f"{key} must be an int")
+
+    for key in ("source_tag", "total_tagged_txs", "unique_wallets"):
+        _int(key)
+
+    if not _NETWORK_RE.match(str(payload.get("network", ""))):
+        raise ValueError("network must be a bare lowercase name")
+
+    by_type = payload.get("by_type")
+    if not isinstance(by_type, dict):
+        raise ValueError("by_type must be a dict")
+    for name, count in by_type.items():
+        if not _TX_TYPE_RE.match(str(name)) or not isinstance(count, int):
+            raise ValueError(f"bad by_type entry: {name!r}")
+
+    daily = payload.get("daily")
+    if not isinstance(daily, list):
+        raise ValueError("daily must be a list")
+    for entry in daily:
+        if set(entry) != {"date", "count"}:
+            raise ValueError(f"bad daily entry: {entry!r}")
+        if not _DATE_RE.match(str(entry["date"])) or not isinstance(entry["count"], int):
+            raise ValueError(f"bad daily entry: {entry!r}")
+
+    excluded = payload.get("excluded")
+    if not isinstance(excluded, list) or not all(
+        _ADDRESS_RE.match(str(a)) for a in excluded
+    ):
+        raise ValueError("excluded must be a list of XRPL addresses")
+
+    first = payload.get("first_tagged_tx")
+    if first is not None and not _DATE_RE.match(str(first)):
+        raise ValueError("first_tagged_tx must be YYYY-MM-DD or null")
+
+    newest = payload.get("archive_max_close_time")
+    if newest is not None and not _ISO_RE.match(str(newest)):
+        raise ValueError("archive_max_close_time must be ISO-8601 or null")
+
+    if not _ISO_RE.match(str(payload.get("as_of", ""))):
+        raise ValueError("as_of must be ISO-8601")
 
 
 def _b64(text: str) -> str:
@@ -518,8 +653,11 @@ def push_to_github(payload: dict[str, Any], runner: Any = subprocess.run) -> boo
     """Commit the snapshot to `main` via the Contents API. True if committed.
 
     Deliberately does not touch any working tree: ~/LFG stays on `deploy` and
-    ~/LFG-staging stays on `main`, so neither deployer sees divergence.
+    ~/LFG-staging stays on `main`, so neither deployer sees divergence. The
+    trade-off is that this commit bypasses the local pre-push gate, so the
+    payload is schema-validated here BEFORE any network call.
     """
+    validate_payload(payload)
     existing, sha = _fetch_remote(runner)
     if is_unchanged(payload, existing):
         return False
@@ -591,7 +729,7 @@ def main(argv: list[str] | None = None) -> int:
 - [ ] **Step 4: Run test to verify it passes**
 
 Run: `.venv/bin/python -m pytest tests/test_sourcetag_metrics.py -v`
-Expected: PASS, 11 passed
+Expected: PASS, 15 passed
 
 - [ ] **Step 5: Generate the seed snapshot**
 
@@ -1272,7 +1410,7 @@ Expected: `1` for each file.
 - [ ] **Step 5: Run the full suite**
 
 Run: `.venv/bin/python -m pytest tests/test_sourcetag_metrics.py tests/test_render_sourcetag_svg.py -q`
-Expected: 25 passed
+Expected: 29 passed
 
 - [ ] **Step 6: Commit**
 
