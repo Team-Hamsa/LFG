@@ -45,10 +45,28 @@ OPERATOR_WALLETS = frozenset(
     }
 )
 
+# Every address that has EVER signed transactions for the backend, durably.
+# `config.SIGNING_ACCOUNT` only ever reflects the CURRENT signer (mainnet
+# signs via a regular key today, and that key has rotated before and can
+# rotate again) — rows already archived under a previous signing address
+# don't move or disappear when the key rotates, so if that old address isn't
+# listed here it silently reclassifies as external "user" activity the
+# instant the rotation happens, permanently inflating `unique_wallets`.
+# Any address the backend has ever signed with MUST be added here permanently
+# — do not remove an entry just because it's no longer the active signer.
+HISTORICAL_SIGNING_ADDRESSES = frozenset(
+    {
+        "rLfgoMintj3KBcs4s2XKtquvDwEte2kYfJ",  # mainnet issuer
+    }
+)
+
 
 def excluded_wallets() -> list[str]:
     """Addresses that never count toward `unique_wallets`, sorted."""
-    return sorted(OPERATOR_WALLETS | {config.SIGNING_ACCOUNT})
+    # config.SIGNING_ACCOUNT stays unioned in on top of the durable historical
+    # set so a newly-rotated key is excluded immediately, before anyone
+    # remembers to add it to HISTORICAL_SIGNING_ADDRESSES.
+    return sorted(OPERATOR_WALLETS | HISTORICAL_SIGNING_ADDRESSES | {config.SIGNING_ACCOUNT})
 
 
 def _iso_day(close_time: int) -> str:
@@ -72,9 +90,20 @@ def build_daily(rows: list[tuple[str, int]]) -> list[dict[str, Any]]:
 
 
 def collect(db_path: str, network: str) -> dict[str, Any]:
-    """Compute the full metrics payload from a history archive."""
-    conn = sqlite3.connect(db_path)
+    """Compute the full metrics payload from a history archive.
+
+    All reads run inside one explicit read transaction so they observe a
+    single consistent snapshot of `xrpl_txs`, even though the pm2 listeners
+    are writing to this database concurrently. `isolation_level=None` puts
+    the connection in autocommit mode so we control the transaction
+    boundary ourselves — a plain `sqlite3.connect()` in its default mode
+    never issues a `BEGIN` for SELECTs, so it would give no snapshot
+    guarantee at all (SQLite would happily interleave a concurrent writer's
+    commit between our statements).
+    """
+    conn = sqlite3.connect(db_path, isolation_level=None)
     try:
+        conn.execute("BEGIN")
         tag = config.SOURCE_TAG
         excluded = excluded_wallets()
         placeholders = ",".join("?" for _ in excluded)
@@ -115,6 +144,10 @@ def collect(db_path: str, network: str) -> dict[str, Any]:
         daily = build_daily(sorted(merged.items()))
 
         newest = conn.execute("SELECT MAX(close_time) FROM xrpl_txs").fetchone()[0]
+        conn.execute("COMMIT")
+    except BaseException:
+        conn.execute("ROLLBACK")
+        raise
     finally:
         conn.close()
 
@@ -366,8 +399,8 @@ def main(argv: list[str] | None = None) -> int:
     if args.push:
         try:
             committed = push_to_github(payload)
-        except RuntimeError as exc:
-            print(str(exc), file=sys.stderr)
+        except (RuntimeError, OSError) as exc:
+            print(f"failed to push metrics snapshot: {exc}", file=sys.stderr)
             return 1
         print("pushed to main" if committed else "already current, no commit")
     return 0
