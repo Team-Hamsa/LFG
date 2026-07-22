@@ -28,9 +28,12 @@ jobs:
       - name: Update repo-vitals dashboard
         run: python3 -m scripts.readme_dashboard
 
+      - name: Update SourceTag badge
+        run: python3 -m scripts.render_sourcetag_svg
+
       - name: Commit if changed
         run: |
-          git add README.md assets/hackathon_loc.svg assets/dashboard.svg
+          git add README.md assets/hackathon_loc.svg assets/dashboard.svg assets/sourcetag.svg
           if ! git diff --quiet --cached; then
             git config user.name "github-actions[bot]"
             git config user.email "github-actions[bot]@users.noreply.github.com"

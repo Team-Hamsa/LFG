@@ -12,6 +12,9 @@ on:
     paths-ignore:
       - 'README.md'
       - 'assets/**'
+      # The nightly lfg-sourcetag snapshot commits only this JSON; no code
+      # imports it, so it must not drag the full ruff/mypy/pytest gate.
+      - 'metrics/**'
   pull_request:
     branches: [main]
 
