@@ -2792,12 +2792,18 @@ function builderTraitStep() {
   assembleBtn.id = 'builder-assemble-btn';
   assembleBtn.className = 'primary';
   assembleBtn.textContent = 'Assemble';
-  assembleBtn.onclick = () => {
+  assembleBtn.onclick = async () => {
+    // Keep the builder (and its selections) alive until the op actually
+    // succeeds — a transient failure must not discard the user's picks.
     const b = builderState.blank;
     const bodyVal = builderState.body;
     const chosen = { ...builderState.chosen };
-    closeBuilder();
-    commitAssemble(b.nft_id, bodyVal, chosen, b.edition);
+    assembleBtn.disabled = true;
+    assembleBtn.textContent = 'Assembling…';
+    const ok = await commitAssemble(b.nft_id, bodyVal, chosen, b.edition);
+    if (ok) { closeBuilder(); return; }
+    assembleBtn.disabled = false;
+    assembleBtn.textContent = 'Assemble';
   };
   wrap.appendChild(assembleBtn);
   return wrap;
@@ -2838,6 +2844,8 @@ function renderBuilder() {
   }
 }
 
+// Returns true on success so the caller (the builder's Assemble button) knows
+// whether to close the overlay or keep the user's selections for a retry.
 async function commitAssemble(nftId, body, chosen, edition) {
   status('Assembling…');
   try {
@@ -2857,8 +2865,11 @@ async function commitAssemble(nftId, body, chosen, edition) {
       celebrate: true,
     });
     economyState = await api('/api/economy');
+    return true;
   } catch (e) {
+    status('');
     showError(e.message);
+    return false;
   }
 }
 
