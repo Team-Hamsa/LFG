@@ -92,28 +92,28 @@ def build_svg(data: dict[str, Any]) -> str:
         ((name, int(count)) for name, count in by_type.items()),
         key=lambda kv: (-kv[1], kv[0]),
     )
+    summary_row: tuple[str, int] | None = None
     if len(all_ordered) > 6:
         # Keep the top 5 rows and fold everything else into one visible
-        # "+N more" row (summed count) rather than silently dropping types
-        # past the 6-row layout cap.
+        # "+N more" summary row (summed count) rather than silently dropping
+        # types past the 6-row layout cap. The summary is a footnote, not a
+        # category: it never draws a bar and never feeds `peak` (its summed
+        # count can exceed every real row's count and would otherwise lie
+        # about which type dominates — see the regression this fixes).
         ordered = list(all_ordered[:5])
         rest = all_ordered[5:]
         rest_count = sum(count for _, count in rest)
-        ordered.append((f"+{len(rest)} more", rest_count))
+        summary_row = (f"+{len(rest)} more", rest_count)
     else:
         ordered = all_ordered
-    if ordered:
+    if ordered or summary_row is not None:
         peak = max((count for _, count in ordered), default=0) or 1
         label_w, count_w = 58.0, 44.0
         track = area_w - label_w - count_w
         for i, (type_name, count) in enumerate(ordered):
             ry = row_y + i * 16
             color = BAR_COLORS[i % len(BAR_COLORS)]
-            label_text = (
-                type_name
-                if type_name.startswith("+")
-                else TYPE_LABELS.get(type_name, type_name.lower())
-            )
+            label_text = TYPE_LABELS.get(type_name, type_name.lower())
             parts.append(
                 f'<text x="{area_x:.1f}" y="{ry + 8}" font-family="{FONT}" '
                 f'font-size="11" fill="{MUTED}">'
@@ -127,6 +127,21 @@ def build_svg(data: dict[str, Any]) -> str:
             parts.append(
                 f'<text x="{area_x + label_w + track + 8:.1f}" y="{ry + 8}" '
                 f'font-family="{FONT}" font-size="11" fill="{TEXT}">{fmt(count)}</text>'
+            )
+        if summary_row is not None:
+            # No bar: a summary footnote must not visually compete with the
+            # real rows it stands in for. Label and count both render MUTED
+            # to read as a footnote, not a category.
+            ry = row_y + len(ordered) * 16
+            label_text, count = summary_row
+            parts.append(
+                f'<text x="{area_x:.1f}" y="{ry + 8}" font-family="{FONT}" '
+                f'font-size="11" fill="{MUTED}">'
+                f"{esc(label_text)}</text>"
+            )
+            parts.append(
+                f'<text x="{area_x + label_w + track + 8:.1f}" y="{ry + 8}" '
+                f'font-family="{FONT}" font-size="11" fill="{MUTED}">{fmt(count)}</text>'
             )
 
     # Daily sparkline along the bottom.
