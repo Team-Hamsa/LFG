@@ -17,6 +17,21 @@ import sys
 from datetime import date, timedelta
 from pathlib import Path
 
+from scripts._brand import (
+    BLUE,
+    FONT,
+    GREEN,
+    MUTED,
+    ORANGE,
+    RED,
+    fmt,
+    open_svg,
+    sparkline,
+    stat_tiles,
+    sticker_card,
+    title_block,
+)
+
 # Last commit before the hackathon started (2026-06-21), pinned so the
 # commit-count and velocity series can't drift if history is ever touched.
 BASELINE_SHA = "e296308a57296a8d2f04497f7fc8872112e8ed49"
@@ -25,22 +40,6 @@ BASELINE_SHA = "e296308a57296a8d2f04497f7fc8872112e8ed49"
 SURFACES = 4
 TEST_DEF_RE = r"^\s*def test_"
 SVG_PATH = Path("assets/dashboard.svg")
-
-# LFG brand kit (webapp/client/style.css)
-INK = "#0A0A0A"
-SURFACE = "#181818"
-SURFACE_LIGHT = "#202020"  # subtle tile fill, one step up from the card
-LINE = "#2C2C2C"
-PAPER = "#FFFFFF"
-TEXT = "#F5F4F1"
-MUTED = "#9C9A94"
-ORANGE = "#D89030"
-RED = "#D84830"
-BLUE = "#4890C0"
-YELLOW = "#F0D848"
-GREEN = "#3DA35D"
-PURPLE = "#601878"
-FONT = "-apple-system,'Segoe UI',Roboto,Helvetica,Arial,sans-serif"
 
 
 def git(*args: str) -> str:
@@ -87,10 +86,6 @@ def velocity() -> tuple[str, list[int]]:
     return f"{start:%B} {start.day}", series
 
 
-def fmt(n: int) -> str:
-    return f"{n:,}"
-
-
 def build_svg(
     tests: int,
     modules: int,
@@ -105,23 +100,22 @@ def build_svg(
     pad = 24
     area_x, area_w = float(pad), 672.0
 
-    parts = [
-        f'<svg xmlns="http://www.w3.org/2000/svg" width="{w}" height="{h}" '
-        f'viewBox="0 0 {w} {h}" role="img" '
-        f'aria-label="Live repo vitals: {fmt(tests)} tests, {fmt(modules)} modules, '
+    aria_label = (
+        f"Live repo vitals: {fmt(tests)} tests, {fmt(modules)} modules, "
         f"{fmt(commits)} commits across {surfaces} surfaces, with a commits-per-day "
-        f'sprint velocity chart since {start_label}">',
-        # sticker: hard offset shadow, then card with paper ring (renders on
-        # both GitHub light and dark themes thanks to its own dark fill)
-        f'<rect x="8" y="8" width="{card_w}" height="{card_h}" rx="18" fill="{INK}"/>',
-        f'<rect x="2" y="2" width="{card_w}" height="{card_h}" rx="18" '
-        f'fill="{SURFACE}" stroke="{PAPER}" stroke-width="3"/>',
-        # title + subtitle
-        f'<text x="{pad}" y="34" font-family="{FONT}" font-size="19" '
-        f'font-weight="700" fill="{TEXT}">Built in a hackathon sprint</text>',
-        f'<text x="{pad}" y="56" font-family="{FONT}" font-size="13" fill="{MUTED}">'
-        f"live repo vitals · auto-updated on every push to main</text>",
-    ]
+        f"sprint velocity chart since {start_label}"
+    )
+
+    parts = [open_svg(w, h, aria_label)]
+    # sticker: hard offset shadow, then card with paper ring (renders on
+    # both GitHub light and dark themes thanks to its own dark fill)
+    parts += sticker_card(card_w, card_h)
+    # title + subtitle
+    parts += title_block(
+        pad,
+        "Built in a hackathon sprint",
+        "live repo vitals · auto-updated on every push to main",
+    )
 
     # Four stat tiles: big brand-colored number over a muted label.
     tiles = [
@@ -130,50 +124,14 @@ def build_svg(
         (fmt(commits), "commits", RED),
         (str(surfaces), "surfaces", GREEN),
     ]
-    tile_y, tile_h, gap = 72, 60, 16
-    tile_w = (area_w - gap * (len(tiles) - 1)) / len(tiles)
-    for i, (value, label, color) in enumerate(tiles):
-        tx = area_x + i * (tile_w + gap)
-        parts.append(
-            f'<rect x="{tx:.1f}" y="{tile_y}" width="{tile_w:.1f}" height="{tile_h}" '
-            f'rx="12" fill="{SURFACE_LIGHT}" stroke="{LINE}" stroke-width="1"/>'
-        )
-        parts.append(
-            f'<rect x="{tx + 16:.1f}" y="{tile_y + 12}" width="30" height="5" '
-            f'rx="2.5" fill="{color}"/>'
-        )
-        parts.append(
-            f'<text x="{tx + 16:.1f}" y="{tile_y + 42}" font-family="{FONT}" '
-            f'font-size="26" font-weight="800" fill="{color}">{value}</text>'
-        )
-        parts.append(
-            f'<text x="{tx + 16:.1f}" y="{tile_y + 55}" font-family="{FONT}" '
-            f'font-size="11" fill="{MUTED}">{label}</text>'
-        )
+    parts += stat_tiles(area_x, 72, area_w, tiles)
 
     # Velocity chart: caption over a baseline with one thin bar per day.
     parts.append(
         f'<text x="{pad}" y="156" font-family="{FONT}" font-size="12" '
         f'fill="{MUTED}">commits / day since {start_label}</text>'
     )
-    base_y, max_bar_h = 192, 26
-    parts.append(
-        f'<line x1="{area_x:.1f}" y1="{base_y}" x2="{area_x + area_w:.1f}" '
-        f'y2="{base_y}" stroke="{LINE}" stroke-width="1"/>'
-    )
-    if series:
-        peak = max(max(series), 1)
-        slot = area_w / len(series)
-        bar_w = slot * 0.55
-        for i, count in enumerate(series):
-            if count <= 0:
-                continue
-            bar_h = max(max_bar_h * count / peak, 2.0)
-            bx = area_x + i * slot + (slot - bar_w) / 2
-            parts.append(
-                f'<rect x="{bx:.1f}" y="{base_y - bar_h:.1f}" width="{bar_w:.1f}" '
-                f'height="{bar_h:.1f}" rx="2" fill="{ORANGE}"/>'
-            )
+    parts += sparkline(area_x, 192, area_w, series, ORANGE)
 
     parts.append("</svg>")
     return "\n".join(parts) + "\n"
