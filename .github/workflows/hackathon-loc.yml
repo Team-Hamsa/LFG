@@ -26,7 +26,7 @@ jobs:
         run: python3 scripts/hackathon_loc.py
 
       - name: Update repo-vitals dashboard
-        run: python3 scripts/readme_dashboard.py
+        run: python3 -m scripts.readme_dashboard
 
       - name: Commit if changed
         run: |
