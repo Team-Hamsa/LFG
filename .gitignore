@@ -5,6 +5,9 @@ __pycache__/
 .env
 lfg_nfts.db
 output_nft_*.png
+# Blank-character source art staged for scripts/upload_blank_art.py — the
+# uploaded copy on the CDN (BLANK_IMAGE_URL) is what the app reads.
+silhouette.png
 metadata_*.json
 .layer_cache/
 generated/
