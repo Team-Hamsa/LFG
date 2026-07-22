@@ -270,3 +270,66 @@ def test_missing_db_exits_nonzero_without_writing(tmp_path):
     rc = stm.main(["--network", "testnet", "--db", str(tmp_path / "nope.db"), "--out", str(dest)])
     assert rc != 0
     assert not dest.exists()
+
+
+def test_push_with_no_explicit_out_never_writes_default_path(tmp_path, monkeypatch):
+    """--push with no --out must never touch metrics/sourcetag.json under CWD —
+    that's the tracked-file-in-a-deployer-watched-checkout footgun (finding 1)."""
+    path = _db(tmp_path, [("h1", DAY0, "Payment", USER_A, TAG)])
+    fake_cwd = tmp_path / "checkout"
+    fake_cwd.mkdir()
+    monkeypatch.chdir(fake_cwd)
+
+    def runner(cmd, **kw):
+        import subprocess as sp
+
+        if "PUT" in cmd:
+            return sp.CompletedProcess(cmd, 0, stdout="{}", stderr="")
+        return sp.CompletedProcess(cmd, 1, stdout="", stderr="Not Found (HTTP 404)")
+
+    monkeypatch.setattr(stm.subprocess, "run", runner)
+    rc = stm.main(["--network", "testnet", "--db", path, "--push"])
+    assert rc == 0
+    assert not (fake_cwd / "metrics" / "sourcetag.json").exists()
+    assert not stm.DEFAULT_OUT.exists()
+
+
+def test_push_with_explicit_out_still_writes_locally(tmp_path, monkeypatch):
+    path = _db(tmp_path, [("h1", DAY0, "Payment", USER_A, TAG)])
+    dest = tmp_path / "explicit" / "sourcetag.json"
+
+    def runner(cmd, **kw):
+        import subprocess as sp
+
+        if "PUT" in cmd:
+            return sp.CompletedProcess(cmd, 0, stdout="{}", stderr="")
+        return sp.CompletedProcess(cmd, 1, stdout="", stderr="Not Found (HTTP 404)")
+
+    monkeypatch.setattr(stm.subprocess, "run", runner)
+    rc = stm.main(["--network", "testnet", "--db", path, "--push", "--out", str(dest)])
+    assert rc == 0
+    assert dest.exists()
+
+
+def test_validate_payload_rejects_trailing_newline_via_dollar_sign():
+    """`$` in re.match also matches just before a trailing '\\n' — must use
+    fullmatch so a smuggled newline can't sneak a value past validation."""
+    payload = _valid_payload(network="testnet\n")
+    with pytest.raises(ValueError):
+        stm.validate_payload(payload)
+
+    payload = _valid_payload(first_tagged_tx="2026-07-20\n")
+    with pytest.raises(ValueError):
+        stm.validate_payload(payload)
+
+    payload = _valid_payload(as_of="2026-07-22T00:20:00+00:00\n")
+    with pytest.raises(ValueError):
+        stm.validate_payload(payload)
+
+
+def test_validate_payload_rejects_non_string_by_type_key():
+    """A NULL tx_type becomes the dict key None; str(None) == 'None' passes a
+    letters-only regex — the key itself must be a str, not coerced."""
+    payload = _valid_payload(by_type={None: 3})
+    with pytest.raises(ValueError, match="by_type"):
+        stm.validate_payload(payload)

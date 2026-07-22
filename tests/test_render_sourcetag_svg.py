@@ -180,10 +180,21 @@ def test_breakdown_bar_widths_are_non_increasing_with_heavy_long_tail():
 def test_unknown_type_name_falls_back_to_lowercased_name():
     data = dict(
         DATA,
-        by_type={"SomeNewTxType": 5},
+        by_type={"Escrow": 5},
     )
     svg = rs.build_svg(data)
-    assert ">somenewtxtype<" in svg
+    assert ">escrow<" in svg
+
+
+def test_long_unknown_type_name_is_truncated_to_fit_the_gutter():
+    """A future tx type longer than the 58px label gutter (~8 chars at 11px)
+    must be clipped, not left to run wide and collide with the bar at x=82."""
+    data = dict(DATA, by_type={"AMMDeposit": 5})
+    svg = rs.build_svg(data)
+    assert ">ammdeposit<" not in svg
+    label = rs._fallback_label("AMMDeposit")
+    assert len(label) <= rs._MAX_FALLBACK_LABEL
+    assert f">{label}<" in svg
 
 
 def test_all_zero_counts_render_without_zerodivisionerror():
