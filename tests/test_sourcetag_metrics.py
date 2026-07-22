@@ -5,6 +5,8 @@ import os
 import sqlite3
 import sys
 
+import pytest
+
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 os.environ.setdefault("DISCORD_BOT_TOKEN", "x")
 os.environ.setdefault("XUMM_API_KEY", "x")
@@ -117,3 +119,120 @@ def test_no_tagged_rows_yields_zeros_not_a_crash(tmp_path):
     assert out["daily"] == []
     assert out["first_tagged_tx"] is None
     assert json.dumps(out)  # serialisable
+
+
+def test_validate_payload_accepts_a_real_payload(tmp_path):
+    path = _db(tmp_path, [("h1", DAY0, "Payment", USER_A, TAG)])
+    stm.validate_payload(stm.collect(path, "testnet"))  # must not raise
+
+
+def test_validate_payload_rejects_unknown_keys(tmp_path):
+    path = _db(tmp_path, [("h1", DAY0, "Payment", USER_A, TAG)])
+    payload = stm.collect(path, "testnet")
+    payload["raw_tx"] = {"Account": "rX", "secret": "shhh"}
+    with pytest.raises(ValueError, match="unexpected key"):
+        stm.validate_payload(payload)
+
+
+def test_validate_payload_rejects_non_whitelisted_value_shapes(tmp_path):
+    path = _db(tmp_path, [("h1", DAY0, "Payment", USER_A, TAG)])
+    payload = stm.collect(path, "testnet")
+    payload["network"] = "sEdTM1uX8pu2do5XvTnutH6HsouMaM2"  # looks like a seed
+    with pytest.raises(ValueError):
+        stm.validate_payload(payload)
+
+
+def test_push_refuses_to_call_gh_when_validation_fails():
+    def runner(cmd, **kw):
+        raise AssertionError("must not touch the network on an invalid payload")
+
+    with pytest.raises(ValueError):
+        stm.push_to_github({"total_tagged_txs": 1, "sneaky": "x"}, runner=runner)
+
+
+def test_is_unchanged_ignores_as_of():
+    a = {"total_tagged_txs": 5, "as_of": "2026-07-22T00:00:00+00:00"}
+    b = json.dumps({"total_tagged_txs": 5, "as_of": "2026-07-23T00:00:00+00:00"}, indent=2)
+    assert stm.is_unchanged(a, b) is True
+
+    c = json.dumps({"total_tagged_txs": 6, "as_of": "2026-07-22T00:00:00+00:00"}, indent=2)
+    assert stm.is_unchanged(a, c) is False
+    assert stm.is_unchanged(a, None) is False
+
+
+def test_push_skips_when_unchanged_and_makes_no_write_call():
+    calls = []
+
+    def runner(cmd, **kw):
+        calls.append(cmd)
+        import subprocess as sp
+
+        if "-X" in cmd and "PUT" in cmd:
+            raise AssertionError("must not PUT when unchanged")
+        body = json.dumps(
+            {
+                "sha": "abc123",
+                "content": stm._b64(json.dumps({"total_tagged_txs": 5}, indent=2) + "\n"),
+            }
+        )
+        return sp.CompletedProcess(cmd, 0, stdout=body, stderr="")
+
+    made = stm.push_to_github({"total_tagged_txs": 5, "as_of": "now"}, runner=runner)
+    assert made is False
+    assert any("GET" in c or "contents" in " ".join(c) for c in calls)
+
+
+def test_push_puts_with_existing_sha_when_changed():
+    seen = {}
+
+    def runner(cmd, **kw):
+        import subprocess as sp
+
+        if "PUT" in cmd:
+            seen["put"] = cmd
+            seen["input"] = kw.get("input")
+            return sp.CompletedProcess(cmd, 0, stdout="{}", stderr="")
+        body = json.dumps(
+            {
+                "sha": "abc123",
+                "content": stm._b64(json.dumps({"total_tagged_txs": 1}, indent=2) + "\n"),
+            }
+        )
+        return sp.CompletedProcess(cmd, 0, stdout=body, stderr="")
+
+    made = stm.push_to_github({"total_tagged_txs": 99, "as_of": "now"}, runner=runner)
+    assert made is True
+    assert "abc123" in seen["input"]
+    assert "main" in seen["input"]
+
+
+def test_push_creates_file_when_absent_remotely():
+    seen = {}
+
+    def runner(cmd, **kw):
+        import subprocess as sp
+
+        if "PUT" in cmd:
+            seen["input"] = kw.get("input")
+            return sp.CompletedProcess(cmd, 0, stdout="{}", stderr="")
+        # gh exits non-zero on 404
+        return sp.CompletedProcess(cmd, 1, stdout="", stderr="Not Found (HTTP 404)")
+
+    made = stm.push_to_github({"total_tagged_txs": 1, "as_of": "now"}, runner=runner)
+    assert made is True
+    assert '"sha"' not in seen["input"]
+
+
+def test_out_writes_file(tmp_path):
+    path = _db(tmp_path, [("h1", DAY0, "Payment", USER_A, TAG)])
+    dest = tmp_path / "metrics" / "sourcetag.json"
+    rc = stm.main(["--network", "testnet", "--db", path, "--out", str(dest)])
+    assert rc == 0
+    assert json.loads(dest.read_text())["total_tagged_txs"] == 1
+
+
+def test_missing_db_exits_nonzero_without_writing(tmp_path):
+    dest = tmp_path / "out.json"
+    rc = stm.main(["--network", "testnet", "--db", str(tmp_path / "nope.db"), "--out", str(dest)])
+    assert rc != 0
+    assert not dest.exists()

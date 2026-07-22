@@ -14,13 +14,21 @@ scripts/render_sourcetag_svg.py.
 from __future__ import annotations
 
 import argparse
+import base64
 import json
+import os
+import re
 import sqlite3
+import subprocess
 import sys
 from datetime import date, datetime, timedelta, timezone
+from pathlib import Path
 from typing import Any
 
-from lfg_core import config, history_store
+REPO_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+sys.path.insert(0, REPO_ROOT)
+
+from lfg_core import config, history_store  # noqa: E402
 
 # The operator's own wallets. The backend-signing issuer is resolved from
 # config at call time instead of being listed here, so rotating the signing
@@ -121,14 +129,209 @@ def collect(db_path: str, network: str) -> dict[str, Any]:
     }
 
 
+REPO = "Team-Hamsa/LFG"
+REMOTE_PATH = "metrics/sourcetag.json"
+BRANCH = "main"
+DEFAULT_OUT = Path("metrics/sourcetag.json")
+
+
+# The nightly push lands on `main` of a public repo without passing through
+# the pre-push gate, so this whitelist is the only thing inspecting it. Keep it
+# in lockstep with collect()'s payload: a new field must be added here
+# deliberately, which is the point.
+ALLOWED_KEYS = frozenset(
+    {
+        "source_tag",
+        "network",
+        "total_tagged_txs",
+        "unique_wallets",
+        "by_type",
+        "daily",
+        "excluded",
+        "first_tagged_tx",
+        "archive_max_close_time",
+        "as_of",
+    }
+)
+_NETWORK_RE = re.compile(r"^[a-z]+$")
+_ADDRESS_RE = re.compile(r"^r[1-9A-HJ-NP-Za-km-z]{24,34}$")
+_DATE_RE = re.compile(r"^\d{4}-\d{2}-\d{2}$")
+_ISO_RE = re.compile(r"^\d{4}-\d{2}-\d{2}T[\d:.+\-]{8,}$")
+_TX_TYPE_RE = re.compile(r"^[A-Za-z]+$")
+
+
+def validate_payload(payload: dict[str, Any]) -> None:
+    """Refuse to publish anything outside the known schema.
+
+    Raises ValueError on the first violation. This is a publication guard, not
+    a correctness check: it exists so a future change that starts folding raw
+    ledger JSON or an env value into the snapshot cannot silently push it.
+    """
+    unexpected = set(payload) - ALLOWED_KEYS
+    if unexpected:
+        raise ValueError(f"unexpected key(s) in payload: {sorted(unexpected)}")
+
+    # Every check below only fires when its key is present: ALLOWED_KEYS is a
+    # whitelist of what MAY appear (enforced unconditionally above), not a
+    # requirement that every key appear (push_to_github callers may pass a
+    # partial payload, e.g. in tests). A field that IS present must still
+    # match its whitelisted shape.
+    def _int(key: str) -> None:
+        if key not in payload:
+            return
+        if not isinstance(payload[key], int) or isinstance(payload[key], bool):
+            raise ValueError(f"{key} must be an int")
+
+    for key in ("source_tag", "total_tagged_txs", "unique_wallets"):
+        _int(key)
+
+    if "network" in payload and not _NETWORK_RE.match(str(payload["network"])):
+        raise ValueError("network must be a bare lowercase name")
+
+    if "by_type" in payload:
+        by_type = payload["by_type"]
+        if not isinstance(by_type, dict):
+            raise ValueError("by_type must be a dict")
+        for name, count in by_type.items():
+            if not _TX_TYPE_RE.match(str(name)) or not isinstance(count, int):
+                raise ValueError(f"bad by_type entry: {name!r}")
+
+    if "daily" in payload:
+        daily = payload["daily"]
+        if not isinstance(daily, list):
+            raise ValueError("daily must be a list")
+        for entry in daily:
+            if set(entry) != {"date", "count"}:
+                raise ValueError(f"bad daily entry: {entry!r}")
+            if not _DATE_RE.match(str(entry["date"])) or not isinstance(entry["count"], int):
+                raise ValueError(f"bad daily entry: {entry!r}")
+
+    if "excluded" in payload:
+        excluded = payload["excluded"]
+        if not isinstance(excluded, list) or not all(_ADDRESS_RE.match(str(a)) for a in excluded):
+            raise ValueError("excluded must be a list of XRPL addresses")
+
+    if "first_tagged_tx" in payload:
+        first = payload["first_tagged_tx"]
+        if first is not None and not _DATE_RE.match(str(first)):
+            raise ValueError("first_tagged_tx must be YYYY-MM-DD or null")
+
+    if "archive_max_close_time" in payload:
+        newest = payload["archive_max_close_time"]
+        if newest is not None and not _ISO_RE.match(str(newest)):
+            raise ValueError("archive_max_close_time must be ISO-8601 or null")
+
+    if "as_of" in payload and not isinstance(payload["as_of"], str):
+        raise ValueError("as_of must be a string")
+
+
+def _b64(text: str) -> str:
+    return base64.b64encode(text.encode()).decode()
+
+
+def _serialize(payload: dict[str, Any]) -> str:
+    return json.dumps(payload, indent=2, sort_keys=True) + "\n"
+
+
+def is_unchanged(new: dict[str, Any], existing: str | None) -> bool:
+    """True when only `as_of` differs, so a quiet day produces no commit."""
+    if existing is None:
+        return False
+    try:
+        old = json.loads(existing)
+    except json.JSONDecodeError:
+        return False
+    return {k: v for k, v in old.items() if k != "as_of"} == {
+        k: v for k, v in new.items() if k != "as_of"
+    }
+
+
+def _fetch_remote(runner: Any) -> tuple[str | None, str | None]:
+    """(decoded_content, blob_sha) for the file on `main`; (None, None) if absent."""
+    proc = runner(
+        ["gh", "api", f"repos/{REPO}/contents/{REMOTE_PATH}?ref={BRANCH}"],
+        capture_output=True,
+        text=True,
+    )
+    if proc.returncode != 0:
+        if "404" in (proc.stderr or "") or "Not Found" in (proc.stderr or ""):
+            return None, None
+        raise RuntimeError(f"gh api GET failed: {proc.stderr.strip()}")
+    body = json.loads(proc.stdout)
+    return base64.b64decode(body["content"]).decode(), body["sha"]
+
+
+def push_to_github(payload: dict[str, Any], runner: Any = subprocess.run) -> bool:
+    """Commit the snapshot to `main` via the Contents API. True if committed.
+
+    Deliberately does not touch any working tree: ~/LFG stays on `deploy` and
+    ~/LFG-staging stays on `main`, so neither deployer sees divergence. The
+    trade-off is that this commit bypasses the local pre-push gate, so the
+    payload is schema-validated here BEFORE any network call.
+    """
+    validate_payload(payload)
+    existing, sha = _fetch_remote(runner)
+    if is_unchanged(payload, existing):
+        return False
+
+    body: dict[str, Any] = {
+        "message": "chore(metrics): refresh SourceTag snapshot",
+        "content": _b64(_serialize(payload)),
+        "branch": BRANCH,
+    }
+    if sha:
+        body["sha"] = sha
+
+    proc = runner(
+        ["gh", "api", "-X", "PUT", f"repos/{REPO}/contents/{REMOTE_PATH}", "--input", "-"],
+        input=json.dumps(body),
+        capture_output=True,
+        text=True,
+    )
+    if proc.returncode != 0:
+        raise RuntimeError(f"gh api PUT failed: {proc.stderr.strip()}")
+    return True
+
+
 def main(argv: list[str] | None = None) -> int:
     ap = argparse.ArgumentParser(description=__doc__)
     ap.add_argument("--network", default=config.XRPL_NETWORK)
+    ap.add_argument("--db", default=None, help="override the history DB path")
+    ap.add_argument("--out", default=str(DEFAULT_OUT), help="where to write the snapshot")
+    ap.add_argument("--json", action="store_true", help="also print the payload")
+    ap.add_argument("--push", action="store_true", help="commit the snapshot to main via gh")
     args = ap.parse_args(argv)
 
-    db_path = history_store.history_db_path(args.network)
-    payload = collect(db_path, args.network)
-    print(json.dumps(payload, indent=2))
+    db_path = args.db or history_store.history_db_path(args.network)
+    if not os.path.exists(db_path):
+        print(f"history DB not found: {db_path}", file=sys.stderr)
+        return 2
+
+    try:
+        payload = collect(db_path, args.network)
+    except sqlite3.Error as exc:
+        print(f"failed to read {db_path}: {exc}", file=sys.stderr)
+        return 2
+
+    out = Path(args.out)
+    out.parent.mkdir(parents=True, exist_ok=True)
+    out.write_text(_serialize(payload))
+
+    if args.json:
+        print(_serialize(payload), end="")
+    else:
+        print(
+            f"{payload['total_tagged_txs']} tagged txs · "
+            f"{payload['unique_wallets']} unique wallets → {out}"
+        )
+
+    if args.push:
+        try:
+            committed = push_to_github(payload)
+        except RuntimeError as exc:
+            print(str(exc), file=sys.stderr)
+            return 1
+        print("pushed to main" if committed else "already current, no commit")
     return 0
 
 
