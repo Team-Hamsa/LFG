@@ -720,6 +720,13 @@ async def run_assemble(session: AssembleSession, deps: EconomyDeps) -> None:
             )
             return
         session.modify_hash = modify_hash
+        # The character's art changed the moment this modify committed —
+        # invalidate the archived still HERE, not after the Closet/index
+        # writes below, so the mirror-failed and index-failed branches
+        # (which return early yet leave the new art on-chain) can't skip
+        # it. Dropping a cache entry is never wrong, so doing it before a
+        # possible revert is safe: the revert just re-proxies from the CDN.
+        _invalidate_archived_art("assemble", session.edition)
         _write_record(deps.records_dir, "assemble", session.id, session._record("modified"))
 
         # Debit the Closet: the body plus each chosen slot value (incl.
@@ -879,9 +886,6 @@ def _persist_equip_to_index(
                 ledger_index=None,
             ),
         )
-        # Same reason as harvest/assemble: the newly composed art went
-        # straight to the CDN, so the archived still is now the old look.
-        _invalidate_archived_art("equip", rec.nft_number)
     except Exception:
         logging.critical(
             f"post-equip index persist FAILED for {rec.nft_id} (modify {session.modify_hash} "
@@ -1004,6 +1008,13 @@ async def run_equip(session: EquipSession, deps: EconomyDeps) -> None:
             _write_record(deps.records_dir, "equip", session.id, session._record("failed_modify"))
             return
         session.modify_hash = modify_hash
+        # The character's art changed the moment this modify committed —
+        # invalidate the archived still HERE, not after the Closet/index
+        # writes below, so the mirror-failed and index-failed branches
+        # (which return early yet leave the new art on-chain) can't skip
+        # it. Dropping a cache entry is never wrong, so doing it before a
+        # possible revert is safe: the revert just re-proxies from the CDN.
+        _invalidate_archived_art("equip", rec.nft_number)
 
         # Swap the closet with every delta at once. Token first, then DB.
         try:

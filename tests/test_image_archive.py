@@ -385,3 +385,46 @@ def test_drop_archived_removes_still_and_thumb(monkeypatch, tmp_path):
 def test_drop_archived_is_silent_when_nothing_archived(monkeypatch, tmp_path):
     monkeypatch.setenv("IMAGES_DIR", str(tmp_path))
     image_archive.drop_archived("testnet", 999)  # must not raise
+
+
+def test_drop_archived_removes_the_thumb_before_the_still(monkeypatch, tmp_path):
+    """handle_img consults the thumb BEFORE the full still, so a partial
+    deletion must never leave the thumbnail as the surviving copy. Record the
+    unlink order and assert the thumb goes first."""
+    monkeypatch.setenv("IMAGES_DIR", str(tmp_path))
+    (tmp_path / "42.png").write_bytes(b"still")
+    thumbs = tmp_path / image_archive.THUMB_SUBDIR
+    thumbs.mkdir()
+    (thumbs / "42.webp").write_bytes(b"thumb")
+
+    removed: list[str] = []
+    real_remove = os.remove
+
+    def _tracking_remove(path):
+        removed.append(os.path.basename(path))
+        real_remove(path)
+
+    monkeypatch.setattr(os, "remove", _tracking_remove)
+    image_archive.drop_archived("testnet", 42)
+    assert removed[0] == "42.webp", removed
+
+
+def test_drop_archived_continues_after_a_failed_unlink(monkeypatch, tmp_path):
+    """One unremovable path must not strand the others (the thumb is attempted
+    first, so the still is still cleaned when a later unlink fails)."""
+    monkeypatch.setenv("IMAGES_DIR", str(tmp_path))
+    (tmp_path / "42.png").write_bytes(b"still")
+    thumbs = tmp_path / image_archive.THUMB_SUBDIR
+    thumbs.mkdir()
+    (thumbs / "42.webp").write_bytes(b"thumb")
+
+    real_remove = os.remove
+
+    def _flaky_remove(path):
+        if path.endswith("42.webp"):
+            raise OSError("permission denied")
+        real_remove(path)
+
+    monkeypatch.setattr(os, "remove", _flaky_remove)
+    image_archive.drop_archived("testnet", 42)  # must not raise
+    assert image_archive.local_image("testnet", 42) is None

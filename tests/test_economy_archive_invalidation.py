@@ -196,3 +196,31 @@ def test_split_network_deployment_never_touches_the_other_chains_archive(tmp_pat
 
     assert session.state == ef.DONE, session.error
     assert image_archive.local_image("mainnet", EDITION) is not None
+
+
+def test_assemble_invalidates_even_when_only_the_db_mirror_fails(tmp_path, monkeypatch):
+    """ClosetMirrorError returns early with the character modify + Closet debit
+    COMMITTED on-chain — the new art is live, so the archived still must
+    already be gone. Regression: the invalidation used to sit after this
+    branch's early return and was skipped."""
+    _seed_archive(tmp_path, monkeypatch)
+    conn = _conn(blank=True)
+    deps = _deps(conn, tmp_path / "rec")
+
+    async def _mirror_fail(*a, **k):
+        raise ef.bt.ClosetMirrorError("db mirror down", tx_hash="SYNCHASH")
+
+    monkeypatch.setattr(ef, "_sync_then_persist", _mirror_fail)
+    session = ef.AssembleSession(
+        owner="rUser",
+        character=_char(blank=True),
+        body_value="Straight Blue",
+        body_class="male",
+        chosen=dict.fromkeys(NON_BODY, "None"),
+    )
+    _run(ef.run_assemble(session, deps))
+
+    assert session.state == ef.DONE
+    assert session.mirror_pending is True
+    assert image_archive.local_image(config.XRPL_NETWORK, EDITION) is None
+    assert image_archive.local_thumb(config.XRPL_NETWORK, EDITION) is None

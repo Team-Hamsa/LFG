@@ -239,13 +239,24 @@ def drop_archived(network: str, edition: int) -> None:
     The on-chain `image` URL changes, `edition_for_url` still maps it to
     this edition, and the archive would keep serving the pre-op artwork.
     Dropping it degrades /api/img to the CDN fetch: slower once, correct
-    always. (The mint/swap paths instead promote_still() their new art.)"""
+    always. (The mint/swap paths instead promote_still() their new art.)
+
+    Deletion order is deliberate: the THUMB goes first because handle_img
+    consults it BEFORE the full still, so a partial deletion (crash or a
+    failed unlink midway) can never leave the thumbnail as the one surviving
+    copy that keeps serving the old art. A leftover still after the thumb is
+    gone is the strictly safer half-state, and any failure is logged so the
+    survivor is greppable rather than silent."""
     base = archive_dir(network)
-    paths = [os.path.join(base, f"{edition}{ext}") for ext in CONTENT_TYPES]
-    paths.append(os.path.join(base, THUMB_SUBDIR, f"{edition}.webp"))
+    # Thumb first (served first), then every still extension.
+    paths = [os.path.join(base, THUMB_SUBDIR, f"{edition}.webp")]
+    paths += [os.path.join(base, f"{edition}{ext}") for ext in CONTENT_TYPES]
     for path in paths:
         try:
             if os.path.exists(path):
                 os.remove(path)
         except Exception:
-            logging.exception(f"image_archive: dropping archived {path} failed")
+            logging.exception(
+                f"image_archive: dropping archived {path} failed — it may keep "
+                f"serving stale art for edition {edition} until removed by hand"
+            )
