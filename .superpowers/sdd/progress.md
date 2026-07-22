@@ -12,8 +12,8 @@ scripts.X`, workflow step updated in Task 3).
 ## Tasks (6)
 1. Collector — compute        [x]
 2. Collector — publish        [x]
-3. Shared brand module        [ ]
-4. Renderer                   [ ]
+3. Shared brand module        [x]
+4. Renderer                   [x]
 5. CI + README wiring         [ ]
 6. Docs (CLAUDE.md)           [ ]
 
@@ -29,3 +29,13 @@ Task 2: complete. validate_payload/is_unchanged/push_to_github + --out/--json/--
   rejected unconditionally, but per-key shape checks only fire when that key is present;
   also loosened as_of to a plain str check (the given tests pass a non-ISO "now" placeholder).
   Seed snapshot generated (mainnet): 1949 tagged txs / 17 unique wallets -> metrics/sourcetag.json.
+Task 2: complete (commits 642e7c4..704353b, re-review clean — Spec OK, Quality Approved). 17 passed.
+  ADJUDICATED: implementer first WEAKENED validate_payload to satisfy the plan's stub fixtures; controller rejected and dispatched a fix restoring strict semantics + rewriting fixtures (_valid_payload helper). Reviewer confirmed the weakening was undone, not relocated.
+  USER DECISION: schema whitelist added because --push bypasses the local pre-push gate on a public repo.
+  NOTE: live metric moved 16 -> 17 unique wallets (new signer rfC5iLU... at 2026-07-22 06:50); verified legitimate, not a regression.
+Task 3: complete (commits 704353b..e07c0d7 incl. fix, re-review clean). 11 passed; dashboard.svg byte-identical (controller-verified independently).
+  Fixes: stat_tiles([]) ZeroDivisionError guard; substring no-dep test -> AST test_module_imports_only_stdlib; 4 edge tests.
+  Minor (triage): AST test silently skips relative imports (from . import x) - out of scope, harmless.
+  NOTE: assets/dashboard.svg drifts on every render (live git-derived counts). Do NOT commit it from feature branches; CI owns it.
+Task 4: complete (commit 350a1c0), review PENDING at time of writing. 8 passed.
+  ADJUDICATED: implementer raised the card-overflow test bound 2+320 -> 8+320 because _brand.sticker_card's drop shadow is intentionally offset to y=8. Verified correct: shadow bottom 328 <= canvas 330; test still catches real overflow. Not a weakening.

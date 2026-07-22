@@ -2,7 +2,6 @@
 import importlib
 import json
 import os
-import sqlite3
 import sys
 
 import pytest

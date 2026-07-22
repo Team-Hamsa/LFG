@@ -154,7 +154,7 @@ auto-restart hook is retired.
 | `lfg-telegram` | `stg-telegram` (stopped until staging TG token) |
 | `lfg-index-mainnet` | `stg-index-testnet` (moved out of prod) |
 | `lfg-snapshot` (cron 00:10) | `stg-snapshot` (cron 00:10, testnet) |
-| `lfg-sourcetag` (cron 00:20) | — |
+| `lfg-sourcetag` (cron 00:20) | not registered yet (post-merge ops step) |
 | `lfg-deployer` | `stg-deployer` |
 
 The X auto-poster (#41, `run_x.py`) is not yet in the pm2 tables — it goes live via the ops checklist on #41 (`lfg-x`, with `stop_exit_codes: [0]` so the X_ENABLED-off exit(0) parks instead of thrashing).
@@ -559,7 +559,10 @@ chain on every request.
   wallets and `config.SIGNING_ACCOUNT`; `total_tagged_txs` and `by_type`
   deliberately do not (backend-signed mints are still the project's tagged
   volume). Note `xrpl_txs.close_time` is stored as UNIX seconds, not the
-  ripple epoch — no `946684800` correction applies here.
+  ripple epoch — no `946684800` correction applies here. The `--push` commit
+  bypasses the local pre-push gate, so `validate_payload`'s `ALLOWED_KEYS`
+  allowlist is the only thing inspecting what lands on `main` — add a new
+  payload field there deliberately when changing `collect()`'s shape.
   ```bash
   pm2 start scripts/sourcetag_metrics.py --name lfg-sourcetag \
     --cron "20 0 * * *" --no-autorestart --interpreter .venv/bin/python \
