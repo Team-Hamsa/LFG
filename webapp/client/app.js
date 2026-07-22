@@ -15,7 +15,7 @@ import * as marketPure from './market_pure.js?v=23';
 import * as mintPure from './mint_pure.js?v=23';
 // Build-panel decision logic lives in its own pure module so it's
 // Node-testable too (tests/test_build_pure_js.py).
-import * as buildPure from './build_pure.js?v=23';
+import * as buildPure from './build_pure.js?v=24';
 
 const params = new URLSearchParams(window.location.search);
 const insideDiscord = params.has('frame_id');
@@ -1929,7 +1929,9 @@ function renderCanvas(char) {
     return;
   }
   canvas.classList.remove('incomplete');
-  const byType = Object.fromEntries(char.attributes.map((a) => [a.trait_type, a.value]));
+  // Draw staged (unsaved) changes, not just what is on-ledger.
+  const shown = buildPure.applyPending(char.attributes, pending());
+  const byType = Object.fromEntries(shown.map((a) => [a.trait_type, a.value]));
   for (const slot of order) {
     const value = byType[slot];
     if (!layerComplete(char.body, value)) continue;
@@ -1978,7 +1980,15 @@ function renderGoPicker() {
     if (t.state === 'indexing') {
       tile.disabled = true; // no body -> every layer fetch would 400
     } else {
-      tile.onclick = () => { closeGoPicker(); selectCharacter(char.nft_id); };
+      tile.onclick = async () => {
+        // Reselecting the ALREADY-active GO is a no-op switch, not an exit —
+        // prompting there would let a habitual "Discard" wipe a staged batch
+        // that selectCharacter() would have kept anyway (same nft_id).
+        const leaving = char.nft_id !== activeNftId;
+        if (leaving && !(await confirmDiscardIfDirty())) return;
+        closeGoPicker();
+        selectCharacter(char.nft_id);
+      };
     }
     grid.appendChild(tile);
   }
@@ -1994,7 +2004,11 @@ function renderGoPicker() {
   cap.textContent = goAssembleEnabled ? 'Assemble new' : 'Needs a Closet';
   add.replaceChildren(plus, cap);
   add.title = goAssembleEnabled ? 'Assemble new' : 'Create your Closet first';
-  if (goAssembleEnabled) add.onclick = () => { closeGoPicker(); openAssemble(); };
+  if (goAssembleEnabled) add.onclick = async () => {
+    if (!(await confirmDiscardIfDirty())) return;
+    closeGoPicker();
+    openAssemble();
+  };
   else add.disabled = true;
   grid.appendChild(add);
 }
@@ -2022,6 +2036,7 @@ function closeGoPicker() {
 }
 
 function selectCharacter(nftId) {
+  if (nftId !== pendingFor) clearPending();
   activeNftId = nftId;
   const char = economyState.characters.find((c) => c.nft_id === nftId);
   if (char) renderCanvas(char);
@@ -2036,6 +2051,7 @@ function closetStatus() {
 
 async function openDressup() {
   showPanel('dressup-panel');
+  clearPending();
   status('Loading your wardrobe…');
   try {
     economyState = await api('/api/economy');
@@ -2133,7 +2149,9 @@ async function openDressup() {
 }
 
 let closetFilter = 'All';
-let equipBusy = false;
+let saveBusy = false;
+let pendingEquips = {};   // {slot: incomingValue} — staged, uncommitted
+let pendingFor = null;    // nft_id the staged batch belongs to
 let extractBusy = {};   // keyed by `${slot}:${value}` to guard per-tile double-clicks
 let depositBusy = {};   // keyed by nft_id
 
@@ -2158,7 +2176,8 @@ function renderCloset() {
   const grid = el('closet-grid');
   grid.replaceChildren();
   const char = activeChar();
-  for (const asset of economyState.closet.assets) {
+  const staged = pending();
+  for (const asset of buildPure.effectiveAssets(economyState.closet.assets, char, staged)) {
     if (closetFilter !== 'All' && asset.slot !== closetFilter) continue;
     // The tile is a non-button container (not a <button>) so the Extract control
     // can be a valid nested <button> AND remain usable even when equip is not
@@ -2197,16 +2216,25 @@ function renderCloset() {
     extractBtn.className = 'extract';
     extractBtn.title = 'Extract as tradeable trait';
     extractBtn.textContent = '↑';
+    // Extract mutates the very Closet counts the staged batch is computed
+    // against — block it until the batch is saved or discarded.
+    if (isDirty()) {
+      extractBtn.disabled = true;
+      extractBtn.title = 'Save or discard your changes first';
+    }
     extractBtn.onclick = (e) => {
       e.stopPropagation();  // don't also fire the tile equip click
       extractTrait(asset.slot, asset.value, extractBtn);
     };
     item.replaceChildren(img, count, extractBtn);
+    if (staged[asset.slot] === asset.value) item.classList.add('staged');
     // Equip is wired only when the asset is compatible with the active character;
     // the tile still renders (and Extract still works) when it isn't.
-    if (compatible) item.onclick = () => equipTrait(asset.slot, asset.value, item);
+    // Staging only — nothing goes on-ledger until Save.
+    if (compatible) item.onclick = () => stagePendingEquip(asset.slot, asset.value);
     grid.appendChild(item);
   }
+  renderSaveBar();
   renderTraitStrip();
 }
 
@@ -2245,6 +2273,10 @@ function renderTraitStrip() {
     const depositBtn = document.createElement('button');
     depositBtn.className = 'deposit';
     depositBtn.textContent = 'Deposit';
+    if (isDirty()) {
+      depositBtn.disabled = true;
+      depositBtn.title = 'Save or discard your changes first';
+    }
     depositBtn.onclick = () => depositTrait(t.nft_id, depositBtn);
     chip.replaceChildren(img, label, depositBtn);
     strip.appendChild(chip);
@@ -2311,33 +2343,128 @@ async function depositTrait(nftId, btnEl) {
   }
 }
 
-async function equipTrait(slot, value, tileEl) {
-  if (equipBusy || !activeChar()) return;       // in-flight lock
-  equipBusy = true;
-  tileEl.classList.add('busy');
-  // Optimistic client stack: update the active character's attribute now.
+// Staged (unsaved) Build helpers. A tile click no longer transacts: it records
+// the change, repaints from the pending model, and surfaces the Save bar. The
+// whole batch commits in ONE NFTokenModify when the user clicks Save.
+
+function pending() {
+  return pendingFor === activeNftId ? pendingEquips : {};
+}
+
+function isDirty() {
   const char = activeChar();
-  const attr = char.attributes.find((a) => a.trait_type === slot);
-  const previous = attr ? attr.value : 'None';
-  if (attr) attr.value = value;
+  return Boolean(char) && buildPure.netChanges(char, pending()).length > 0;
+}
+
+function clearPending() {
+  pendingEquips = {};
+  pendingFor = null;
+}
+
+function stagePendingEquip(slot, value) {
+  const char = activeChar();
+  if (!char || saveBusy) return;
+  if (pendingFor !== activeNftId) { pendingEquips = {}; pendingFor = activeNftId; }
+  pendingEquips[slot] = value;
   renderCanvas(char);
+  renderCloset();
+}
+
+function renderSaveBar() {
+  const bar = el('build-save-bar');
+  if (!bar) return;   // tolerate a stale cached index.html
+  const char = activeChar();
+  const n = char ? buildPure.netChanges(char, pending()).length : 0;
+  bar.hidden = n === 0;
+  el('build-save-btn').textContent = `💾 Save changes (${n})`;
+  el('build-save-btn').disabled = saveBusy;
+  el('build-discard-btn').disabled = saveBusy;
+}
+
+function discardPending() {
+  // Defense-in-depth: renderSaveBar() disables the Discard button while a
+  // save is in flight, but this must not be the only guard — a stale cached
+  // index.html (renderSaveBar tolerates its own missing #build-save-bar) or
+  // any other caller must never clear pendingEquips out from under a
+  // running saveBuild().
+  if (saveBusy) return;
+  clearPending();
+  const char = activeChar();
+  if (char) renderCanvas(char);
+  renderCloset();
+}
+
+// Every exit from the current character routes through here. Returns true when
+// it is safe to proceed (nothing staged, or the user chose to discard).
+// Native window.confirm is a silent no-op in Discord's sandboxed iframe.
+async function confirmDiscardIfDirty() {
+  // A save is already in flight — pendingEquips isn't cleared until saveBuild's
+  // finally, so isDirty() would still read true here. Refuse the exit instead of
+  // offering "Discard" (which would lie about the in-flight batch never landing).
+  if (saveBusy) {
+    showError('Still saving your build — please wait a moment.');
+    return false;
+  }
+  if (!isDirty()) return true;
+  const char = activeChar();
+  const ok = await confirmDialog({
+    title: 'Discard unsaved changes?',
+    text: `You have unsaved changes to #${char.edition}. They have not been saved to the ledger.`,
+    confirmLabel: 'Discard',
+  });
+  if (ok) discardPending();
+  return ok;
+}
+
+// Fold a just-committed batch into the in-memory state, reusing the same pure
+// helpers the staged preview uses. Only ever called after the ledger accepted
+// the batch, so this is truth, not optimism.
+function applySavedLocally(char, saved) {
+  const assets = economyState.closet && economyState.closet.assets;
+  // Closet first: effectiveAssets needs the character's PRE-change values.
+  if (assets) economyState.closet.assets = buildPure.effectiveAssets(assets, char, saved);
+  char.attributes = buildPure.applyPending(char.attributes, saved);
+}
+
+async function saveBuild() {
+  const char = activeChar();
+  if (!char || saveBusy) return;
+  const staged = { ...pending() };
+  const changes = buildPure.netChanges(char, staged);
+  if (!changes.length) return;
+  saveBusy = true;
+  renderSaveBar();
+  status('Saving your build…');
+  let committed = false;
   try {
     const res = await api('/api/equip', {
       method: 'POST',
-      body: JSON.stringify({ nft_id: activeNftId, slot, value }),
+      body: JSON.stringify({ nft_id: activeNftId, changes }),
     });
     const final = await pollEconomyOp('equip', res);
-    if (final.state === 'failed') throw new Error(final.error || 'equip failed');
-    // Reconcile the Closet from authoritative state.
-    economyState = await api('/api/economy');
-    selectCharacter(activeNftId);
+    if (final.state === 'failed') throw new Error(final.error || 'save failed');
+    committed = true;
+    status('');
   } catch (e) {
-    if (attr) attr.value = previous;             // revert optimistic stack
-    renderCanvas(char);
     showError(e.message);
+    status('');
   } finally {
-    equipBusy = false;
-    tileEl.classList.remove('busy');
+    // Always resync from authoritative state and drop the staged batch — the
+    // indeterminate / mirror-pending branches can leave the character genuinely
+    // changed, so silently re-offering the same batch could double-apply it.
+    saveBusy = false;
+    clearPending();
+    // The batch is on-ledger: fold it into local state BEFORE the refetch, so a
+    // refetch that FAILS still shows the new look instead of silently redrawing
+    // the pre-save character and reading as a lost save. A refetch that
+    // succeeds overwrites this with authoritative truth anyway.
+    if (committed) applySavedLocally(char, staged);
+    try {
+      economyState = await api('/api/economy');
+    } catch (e) {
+      showError(e.message);
+    }
+    selectCharacter(activeNftId);
   }
 }
 
@@ -2380,6 +2507,7 @@ let economyRefreshSeq = 0;
 async function harvestActive() {
   const char = activeChar();
   if (!char) return;
+  if (!(await confirmDiscardIfDirty())) return;
   if (!(await confirmDialog({
     title: 'Harvest this character?',
     text: `This permanently burns #${char.edition}. Its parts go to your Closet.`,
@@ -3358,7 +3486,14 @@ async function main() {
   el('mint-btn').onclick = () => startMint();
   el('flow-regen-btn').onclick = onFlowRegen;
   el('swap-btn').onclick = () => openDressup();
-  el('dressup-back-btn').onclick = () => showMintHome();
+  el('dressup-back-btn').onclick = async () => {
+    if (!(await confirmDiscardIfDirty())) return;
+    showMintHome();
+  };
+  const saveBtn = el('build-save-btn');
+  if (saveBtn) saveBtn.onclick = () => saveBuild();
+  const discardBtn = el('build-discard-btn');
+  if (discardBtn) discardBtn.onclick = () => discardPending();
   el('go-switch-btn').onclick = () => openGoPicker();
   el('swapper-btn').onclick = () => openSwapper();
   el('swap-back-btn').onclick = () => showMintHome();

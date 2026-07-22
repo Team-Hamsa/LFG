@@ -19,7 +19,24 @@ os.environ.setdefault("BUNNY_PULL_ZONE", "nft.pullzone.example")
 
 import sqlite3
 
+import pytest
+
 from lfg_core import config, rarity, shop
+
+
+@pytest.fixture(autouse=True)
+def _pinned_pricing_knobs(monkeypatch):
+    """Pin the three price knobs to their documented defaults.
+
+    These tests assert the FORMULA, but `derived_price` reads
+    config.SHOP_BASE_BRIX / MIN / MAX at call time — so a deployment .env that
+    tunes them (prod currently runs SHOP_BASE_BRIX=10.0) turns the hardcoded
+    expectations red in every checkout and blocks the pre-push pytest gate for
+    unrelated work. Same class of bug as the BULK_MINT_UI_ENABLED fix.
+    """
+    monkeypatch.setattr(config, "SHOP_BASE_BRIX", 1.0)
+    monkeypatch.setattr(config, "SHOP_MIN_BRIX", 5)
+    monkeypatch.setattr(config, "SHOP_MAX_BRIX", 5000)
 
 
 def _conn():

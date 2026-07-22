@@ -7,6 +7,7 @@ import sqlite3
 
 from lfg_core import economy_flow as ef
 from lfg_core import economy_store as es
+from lfg_core import nft_index
 from lfg_core import trait_economy as te
 from lfg_core.nft_index import OnchainNft
 from tests.economy_helpers import flaky_mirror_conn
@@ -44,6 +45,11 @@ def _char() -> OnchainNft:
 def _conn_with_bucket() -> sqlite3.Connection:
     c = sqlite3.connect(":memory:")
     es.init_economy_schema(c)
+    # The on-chain index lives in the same per-network DB as the economy
+    # tables (deps.conn is a single shared connection) — extend the test
+    # fixture with the onchain_nfts schema so run_equip's post-success index
+    # stamp (economy_flow._persist_equip_to_index) has a table to write to.
+    c.executescript(nft_index._SCHEMA)
     es.freeze_genesis(
         c, te.Genesis(trait_counts={}, edition_bodies={7: ("Straight Blue", "male")}), {}
     )
@@ -123,11 +129,11 @@ def _deps(conn, f, records_dir):
 
 def test_equip_happy_path(tmp_path):
     conn, f = _conn_with_bucket(), _Fakes()
-    s = ef.EquipSession(owner="rUser", character=_char(), slot="Head", incoming_value="Crown")
+    s = ef.EquipSession(owner="rUser", character=_char(), changes=[("Head", "Crown")])
     _run(ef.run_equip(s, _deps(conn, f, tmp_path)))
 
     assert s.state == ef.DONE
-    assert s.displaced_value == "None"
+    assert s.displaced == {"Head": "None"}
     assert f.char_modifies == [("NFT7", "rUser", "https://cdn/new.json")]
     assets = {(slot, v): n for o, slot, v, n in es.read_closet_assets(conn)}
     assert ("Head", "Crown") not in assets  # incoming consumed
@@ -136,7 +142,7 @@ def test_equip_happy_path(tmp_path):
 
 def test_equip_rejects_missing_asset(tmp_path):
     conn, f = _conn_with_bucket(), _Fakes()
-    s = ef.EquipSession(owner="rUser", character=_char(), slot="Head", incoming_value="Tiara")
+    s = ef.EquipSession(owner="rUser", character=_char(), changes=[("Head", "Tiara")])
     _run(ef.run_equip(s, _deps(conn, f, tmp_path)))
 
     assert s.state == ef.FAILED
@@ -145,7 +151,7 @@ def test_equip_rejects_missing_asset(tmp_path):
 
 def test_equip_modify_then_bucket_fails_reverts(tmp_path):
     conn, f = _conn_with_bucket(), _Fakes(fail_closet_modify=True)
-    s = ef.EquipSession(owner="rUser", character=_char(), slot="Head", incoming_value="Crown")
+    s = ef.EquipSession(owner="rUser", character=_char(), changes=[("Head", "Crown")])
     _run(ef.run_equip(s, _deps(conn, f, tmp_path)))
 
     assert s.state == ef.FAILED
@@ -163,7 +169,7 @@ def test_equip_bucket_fails_and_uri_undecodable_reports_honestly(tmp_path):
     conn, f = _conn_with_bucket(), _Fakes(fail_closet_modify=True)
     rec = _char()
     rec.uri_hex = ""  # no decodable old URI to revert to
-    s = ef.EquipSession(owner="rUser", character=rec, slot="Head", incoming_value="Crown")
+    s = ef.EquipSession(owner="rUser", character=rec, changes=[("Head", "Crown")])
     _run(ef.run_equip(s, _deps(conn, f, tmp_path)))
 
     assert s.state == ef.FAILED
@@ -181,7 +187,7 @@ def test_equip_revert_modify_not_landing_marks_failed_revert(tmp_path):
     reverted_modify that a landed revert produces."""
     conn = _conn_with_bucket()
     f = _Fakes(fail_closet_modify=True, fail_revert_modify=True)
-    s = ef.EquipSession(owner="rUser", character=_char(), slot="Head", incoming_value="Crown")
+    s = ef.EquipSession(owner="rUser", character=_char(), changes=[("Head", "Crown")])
     _run(ef.run_equip(s, _deps(conn, f, tmp_path)))
 
     assert s.state == ef.FAILED
@@ -203,7 +209,7 @@ def test_equip_mirror_failure_keeps_new_traits(tmp_path):
     character must keep its new traits, the session ends DONE, and the journal
     records complete_pending_mirror."""
     conn, f = _conn_with_bucket(), _Fakes()
-    s = ef.EquipSession(owner="rUser", character=_char(), slot="Head", incoming_value="Crown")
+    s = ef.EquipSession(owner="rUser", character=_char(), changes=[("Head", "Crown")])
     _run(ef.run_equip(s, _deps(flaky_mirror_conn(conn), f, tmp_path)))
 
     assert s.state == ef.DONE
@@ -219,7 +225,7 @@ def test_equip_indeterminate_no_revert(tmp_path):
     """closet_modify raises (swap outcome unknown): fail-closed — FAILED, the
     character keeps its new URI (no revert), journal equip_sync_indeterminate."""
     conn, f = _conn_with_bucket(), _Fakes(raise_closet_modify=True)
-    s = ef.EquipSession(owner="rUser", character=_char(), slot="Head", incoming_value="Crown")
+    s = ef.EquipSession(owner="rUser", character=_char(), changes=[("Head", "Crown")])
     _run(ef.run_equip(s, _deps(conn, f, tmp_path)))
 
     assert s.state == ef.FAILED
@@ -229,3 +235,221 @@ def test_equip_indeterminate_no_revert(tmp_path):
     # closet mirror untouched
     assets = {(slot, v): n for o, slot, v, n in es.read_closet_assets(conn)}
     assert assets == {("Head", "Crown"): 1}
+
+
+# --- Batch equip: multiple slot changes in one save ---
+
+
+def _conn_with_assets(pairs) -> sqlite3.Connection:
+    """A Closet seeded with explicit (slot, value, count) rows."""
+    c = sqlite3.connect(":memory:")
+    es.init_economy_schema(c)
+    c.executescript(nft_index._SCHEMA)
+    es.freeze_genesis(
+        c, te.Genesis(trait_counts={}, edition_bodies={7: ("Straight Blue", "male")}), {}
+    )
+    es.set_closet_token(c, "rUser", "CLOSET", "00")
+    es.set_closet_contents(c, "rUser", list(pairs), [])
+    return c
+
+
+def test_equip_batch_is_one_modify_and_one_sync(tmp_path):
+    """Two slots in one batch: exactly one compose, one character modify, one
+    Closet sync carrying BOTH deltas."""
+    conn = _conn_with_assets([("Head", "Crown", 1), ("Eyes", "Laser", 1)])
+    f = _Fakes()
+    composed = []
+    orig_compose = f.char_compose
+
+    async def spy_compose(attrs, body, edition, rev):
+        composed.append(attrs)
+        return await orig_compose(attrs, body, edition, rev)
+
+    f.char_compose = spy_compose
+    s = ef.EquipSession(
+        owner="rUser", character=_char(), changes=[("Head", "Crown"), ("Eyes", "Laser")]
+    )
+    _run(ef.run_equip(s, _deps(conn, f, tmp_path)))
+
+    assert s.state == ef.DONE
+    assert len(composed) == 1  # one compose for the whole batch
+    assert f.char_modifies == [("NFT7", "rUser", "https://cdn/new.json")]  # one modify
+    by_type = {a["trait_type"]: a["value"] for a in composed[0]}
+    assert by_type["Head"] == "Crown" and by_type["Eyes"] == "Laser"
+    assets = {(slot, v): n for o, slot, v, n in es.read_closet_assets(conn)}
+    assert ("Head", "Crown") not in assets and ("Eyes", "Laser") not in assets
+    assert assets[("Head", "None")] == 1 and assets[("Eyes", "None")] == 1
+    assert s.displaced == {"Head": "None", "Eyes": "None"}
+
+
+def test_equip_batch_aborts_whole_batch_on_a_bad_change(tmp_path):
+    """The second change is not in the Closet: the batch is all-or-nothing, so
+    the character is never modified and the Closet is untouched."""
+    conn = _conn_with_assets([("Head", "Crown", 1)])
+    f = _Fakes()
+    s = ef.EquipSession(
+        owner="rUser", character=_char(), changes=[("Head", "Crown"), ("Eyes", "Laser")]
+    )
+    _run(ef.run_equip(s, _deps(conn, f, tmp_path)))
+
+    assert s.state == ef.FAILED
+    assert f.char_modifies == []  # never touched the character
+    assets = {(slot, v): n for o, slot, v, n in es.read_closet_assets(conn)}
+    assert assets == {("Head", "Crown"): 1}  # Closet untouched
+
+
+def test_equip_batch_displaces_a_worn_trait_back_per_slot(tmp_path):
+    """Closet assets are keyed (slot, value): a Crown displaced off Head returns
+    as ('Head', 'Crown'), independent of any Eyes change in the same batch."""
+    rec = _char()
+    next(a for a in rec.attributes if a["trait_type"] == "Head")["value"] = "Crown"
+    conn = _conn_with_assets([("Head", "Tiara", 1), ("Eyes", "Laser", 1)])
+    f = _Fakes()
+    s = ef.EquipSession(
+        owner="rUser", character=rec, changes=[("Head", "Tiara"), ("Eyes", "Laser")]
+    )
+    _run(ef.run_equip(s, _deps(conn, f, tmp_path)))
+
+    assert s.state == ef.DONE
+    assert s.displaced == {"Head": "Crown", "Eyes": "None"}
+    assets = {(slot, v): n for o, slot, v, n in es.read_closet_assets(conn)}
+    assert assets[("Head", "Crown")] == 1  # displaced back into its own slot key
+    assert assets[("Eyes", "None")] == 1
+    assert ("Head", "Tiara") not in assets and ("Eyes", "Laser") not in assets
+
+
+def test_equip_rejects_duplicate_slot_in_one_batch(tmp_path):
+    conn = _conn_with_assets([("Head", "Crown", 1), ("Head", "Tiara", 1)])
+    f = _Fakes()
+    s = ef.EquipSession(
+        owner="rUser", character=_char(), changes=[("Head", "Crown"), ("Head", "Tiara")]
+    )
+    _run(ef.run_equip(s, _deps(conn, f, tmp_path)))
+
+    assert s.state == ef.FAILED
+    assert "duplicate slot" in (s.error or "")
+    assert f.char_modifies == []
+
+
+def test_equip_rejects_empty_batch(tmp_path):
+    conn, f = _conn_with_bucket(), _Fakes()
+    s = ef.EquipSession(owner="rUser", character=_char(), changes=[])
+    _run(ef.run_equip(s, _deps(conn, f, tmp_path)))
+
+    assert s.state == ef.FAILED
+    assert f.char_modifies == []
+
+
+def test_equip_batch_journal_records_every_change(tmp_path):
+    conn = _conn_with_assets([("Head", "Crown", 1), ("Eyes", "Laser", 1)])
+    f = _Fakes()
+    s = ef.EquipSession(
+        owner="rUser", character=_char(), changes=[("Head", "Crown"), ("Eyes", "Laser")]
+    )
+    _run(ef.run_equip(s, _deps(conn, f, tmp_path)))
+
+    record = json.loads((tmp_path / f"equip-{s.id}.json").read_text())
+    assert record["status"] == "complete"
+    assert record["op"] == "equip"
+    assert record["changes"] == [
+        {"slot": "Head", "incoming": "Crown", "displaced": "None"},
+        {"slot": "Eyes", "incoming": "Laser", "displaced": "None"},
+    ]
+
+
+# --- Post-save on-chain index stamp: the client refetches immediately after
+# Save succeeds, so a successful equip must be reflected in onchain_nfts right
+# away rather than waiting on the listener (task-4 fix). ---
+
+
+def test_equip_success_stamps_index_with_new_attributes(tmp_path):
+    conn, f = _conn_with_bucket(), _Fakes()
+    s = ef.EquipSession(owner="rUser", character=_char(), changes=[("Head", "Crown")])
+    _run(ef.run_equip(s, _deps(conn, f, tmp_path)))
+
+    assert s.state == ef.DONE
+    conn.row_factory = sqlite3.Row
+    row = conn.execute("SELECT * FROM onchain_nfts WHERE nft_id=?", ("NFT7",)).fetchone()
+    assert row is not None
+    attrs = json.loads(row["attributes_json"])
+    by_type = {a["trait_type"]: a["value"] for a in attrs}
+    assert by_type["Head"] == "Crown"
+    assert row["owner"] == "rUser"  # unchanged — an equip never moves ownership
+    assert row["is_burned"] == 0
+    assert row["uri_hex"] == b"https://cdn/new.json".hex()
+
+
+def test_equip_reverted_path_does_not_stamp_index(tmp_path):
+    """The ledger-failed revert branch restores the character's OLD traits —
+    the index must NOT be stamped with the (discarded) new attributes. Seed
+    the pre-equip index row so this can actually distinguish "correctly not
+    stamped" from "stamped with stale data": the old trait value must still
+    be what a client sees after the revert."""
+    conn, f = _conn_with_bucket(), _Fakes(fail_closet_modify=True)
+    rec = _char()
+    nft_index.upsert(
+        conn,
+        OnchainNft(
+            nft_id=rec.nft_id,
+            nft_number=rec.nft_number,
+            owner=rec.owner,
+            is_burned=False,
+            mutable=rec.mutable,
+            uri_hex=rec.uri_hex,
+            body=rec.body,
+            attributes=rec.attributes,
+            image="https://cdn/old-image.png",
+            ledger_index=1,
+        ),
+    )
+    s = ef.EquipSession(owner="rUser", character=rec, changes=[("Head", "Crown")])
+    _run(ef.run_equip(s, _deps(conn, f, tmp_path)))
+
+    assert s.state == ef.FAILED
+    conn.row_factory = sqlite3.Row
+    row = conn.execute("SELECT * FROM onchain_nfts WHERE nft_id=?", ("NFT7",)).fetchone()
+    assert row is not None  # the pre-equip row is untouched, not stamped
+    attrs = json.loads(row["attributes_json"])
+    by_type = {a["trait_type"]: a["value"] for a in attrs}
+    assert by_type["Head"] == "None"  # the OLD trait value still survives
+    assert row["image"] == "https://cdn/old-image.png"  # not overwritten with the new one
+
+
+def test_equip_mirror_failure_still_stamps_index_with_new_attributes(tmp_path):
+    """The complete_pending_mirror branch (Closet swap COMMITTED on-chain,
+    only the local DB mirror failed) still ends the session DONE with the
+    character's new traits — the index stamp must fire on THIS success path
+    too, not just the plain DONE completion."""
+    conn, f = _conn_with_bucket(), _Fakes()
+    s = ef.EquipSession(owner="rUser", character=_char(), changes=[("Head", "Crown")])
+    _run(ef.run_equip(s, _deps(flaky_mirror_conn(conn), f, tmp_path)))
+
+    assert s.state == ef.DONE
+    record = json.loads((tmp_path / f"equip-{s.id}.json").read_text())
+    assert record["status"] == "complete_pending_mirror"
+
+    conn.row_factory = sqlite3.Row
+    row = conn.execute("SELECT * FROM onchain_nfts WHERE nft_id=?", ("NFT7",)).fetchone()
+    assert row is not None
+    attrs = json.loads(row["attributes_json"])
+    by_type = {a["trait_type"]: a["value"] for a in attrs}
+    assert by_type["Head"] == "Crown"
+    assert row["uri_hex"] == b"https://cdn/new.json".hex()
+
+
+def test_equip_index_stamp_failure_does_not_fail_session(tmp_path, monkeypatch):
+    """A best-effort index write that blows up must be swallowed (LOUD-logged,
+    per the swap_flow precedent) — the successful equip session must still
+    finish DONE with a "complete" journal."""
+    conn, f = _conn_with_bucket(), _Fakes()
+
+    def _boom(*_args, **_kwargs):
+        raise RuntimeError("index db is locked")
+
+    monkeypatch.setattr(ef.nft_index, "upsert", _boom)
+    s = ef.EquipSession(owner="rUser", character=_char(), changes=[("Head", "Crown")])
+    _run(ef.run_equip(s, _deps(conn, f, tmp_path)))
+
+    assert s.state == ef.DONE
+    record = json.loads((tmp_path / f"equip-{s.id}.json").read_text())
+    assert record["status"] == "complete"

@@ -744,7 +744,6 @@ button.back:hover { color: var(--text); border: none; }
 .closet-item .count {
   position: absolute; bottom: 2px; right: 4px; font-size: .7rem; font-weight: 700;
 }
-.closet-item.busy { opacity: .5; }
 /* --- GO picker overlay (replaces the old roster strip) --- */
 .go-picker-box { width: min(520px, 100%); text-align: left; }
 .go-picker-head { display: flex; justify-content: space-between; align-items: center; }
@@ -952,3 +951,11 @@ button.back:hover { color: var(--text); border: none; }
   #flow-regen-btn.needs-regen { animation: none; text-decoration: underline; }
   #flow-qr.qr-stale { transition: none; }
 }
+.build-save-bar {
+  display: flex;
+  gap: .5rem;
+  justify-content: center;
+  margin-top: .5rem;
+}
+.build-save-bar button { flex: 0 1 auto; }
+.closet-item.staged { outline: 2px solid var(--blue); }

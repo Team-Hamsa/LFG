@@ -55,7 +55,7 @@ from dataclasses import dataclass, field
 from typing import Any, TypeVar
 
 from lfg_core import closet_token as bt
-from lfg_core import config, db_helpers, owner_lock
+from lfg_core import config, db_helpers, nft_index, owner_lock
 from lfg_core import economy_store as es
 from lfg_core import trait_economy as te
 from lfg_core import trait_token as tt
@@ -616,6 +616,75 @@ def _raw_uri(uri_hex: str) -> str:
         return ""
 
 
+def _persist_equip_to_index(
+    deps: EconomyDeps,
+    session: EquipSession,
+    new_attrs: list[dict[str, str]],
+    image_url: str,
+    meta_url: str,
+) -> None:
+    """Write the post-modify ledger truth straight into the on-chain index
+    (mirrors swap_flow._persist_remint_to_index / the #211 pattern), so a
+    client that refetches the roster immediately after Save sees the new
+    traits instead of racing the listener. Unlike a swap remint, an equip is
+    an in-place NFTokenModify: the nft_id, owner, and mutability are
+    UNCHANGED — this is a single upsert of the same record with its new
+    attributes/uri_hex/image, never a mark_burned + new row.
+
+    deps.conn is already an open connection to the same per-network index DB
+    that holds onchain_nfts (opened via _economy_deps.open_index), so this
+    reuses it directly rather than opening a second connection.
+
+    Best-effort only: failures are LOUD (a CRITICAL log line, mirroring
+    swap_flow) but must never fail the session — the chain is truth and the
+    listener/backfill self-heals the index. Callers must only invoke this on
+    a confirmed-committed success path (DONE or complete_pending_mirror),
+    never on a reverted/indeterminate branch."""
+    rec = session.character
+    try:
+        nft_index.upsert(
+            deps.conn,
+            OnchainNft(
+                nft_id=rec.nft_id,
+                nft_number=rec.nft_number,
+                owner=rec.owner,
+                is_burned=False,
+                mutable=rec.mutable,
+                # .hex() is lowercase — the index's canonical case (matches
+                # swap_flow._persist_remint_to_index).
+                uri_hex=meta_url.encode("utf-8").hex(),
+                body=rec.body,
+                attributes=new_attrs,
+                image=image_url,
+                ledger_index=None,
+            ),
+        )
+    except Exception:
+        logging.critical(
+            f"post-equip index persist FAILED for {rec.nft_id} (modify {session.modify_hash} "
+            f"committed on-chain): the roster will serve stale traits until the "
+            f"listener/backfill catches up. {traceback.format_exc()}"
+        )
+        # Unlike swap_flow._persist_remint_to_index (which opens and owns a
+        # private connection that a failure here simply leaves for the caller
+        # to close/discard), deps.conn is SHARED with the rest of the economy
+        # flow — nft_index.upsert commits internally, but if it blows up
+        # partway through its own commit() rather than its execute(), a
+        # half-applied transaction can be left open on deps.conn, which the
+        # caller goes on to reuse. Roll it back explicitly so a failed index
+        # stamp can never leak an implicit transaction onto shared state. This
+        # itself must never raise — a rollback on an already-closed or
+        # otherwise broken connection must not turn a logged warning into a
+        # thrown exception.
+        try:
+            deps.conn.rollback()
+        except Exception:
+            logging.critical(
+                f"post-equip index persist rollback ALSO failed for {rec.nft_id}: "
+                f"{traceback.format_exc()}"
+            )
+
+
 # --- Equip: move a loose asset onto a live character; displaced -> Closet ---
 
 
@@ -623,11 +692,10 @@ def _raw_uri(uri_hex: str) -> str:
 class EquipSession:
     owner: str
     character: OnchainNft
-    slot: str
-    incoming_value: str
+    changes: list[tuple[str, str]]  # ordered (slot, incoming_value) pairs
     state: str = RUNNING
     error: str | None = None
-    displaced_value: str = ""
+    displaced: dict[str, str] = field(default_factory=dict)  # slot -> value pushed out
     modify_hash: str | None = None
     sync_tx_hash: str | None = None
     mirror_pending: bool = False
@@ -639,9 +707,10 @@ class EquipSession:
             "id": self.id,
             "owner": self.owner,
             "nft_id": self.character.nft_id,
-            "slot": self.slot,
-            "incoming": self.incoming_value,
-            "displaced": self.displaced_value,
+            "changes": [
+                {"slot": slot, "incoming": value, "displaced": self.displaced.get(slot, "")}
+                for slot, value in self.changes
+            ],
             "modify_hash": self.modify_hash,
             "sync_tx_hash": self.sync_tx_hash,
             "mirror_pending": self.mirror_pending,
@@ -656,32 +725,51 @@ class EquipSession:
 
 @_serialize_by_owner
 async def run_equip(session: EquipSession, deps: EconomyDeps) -> None:
-    """Drive an equip to a terminal state. Order: precheck -> compose+upload ->
-    MODIFY the character in place (reversible: modify back to the old URI) ->
-    swap the Closet (-incoming, +displaced; token then DB). If the closet swap
-    fails after the modify, the character is reverted and the Closet untouched."""
+    """Drive a batch equip to a terminal state. Order: precheck every change ->
+    compose+upload ONCE -> ONE MODIFY of the character in place (reversible:
+    modify back to the old URI) -> ONE Closet swap carrying every
+    (-incoming, +displaced) delta. If the closet swap fails after the modify,
+    the character is reverted (a whole-URI revert restores all slots at once)
+    and the Closet untouched."""
     conn, owner, rec = deps.conn, session.owner, session.character
-    slot, incoming = session.slot, session.incoming_value
     try:
         stale = _mirror_pending_error(deps, owner)
         if stale:
             session.fail(stale)
             return
-        assets, _bodies = _owner_contents(conn, owner)
-        chk = te.can_equip(rec, slot, incoming, assets, mutable=bool(rec.mutable))
-        if not chk.ok:
-            session.fail(f"cannot equip: {chk.reason}")
+        if not session.changes:
+            session.fail("cannot equip: no changes to apply")
             return
-        session.displaced_value = te.slot_value(rec, slot)
+        assets, _bodies = _owner_contents(conn, owner)
+        # Precheck every change, accumulating each (-incoming, +displaced) delta
+        # into ONE asset dict for the single Closet sync below. Assets are keyed
+        # (slot, value) and a slot may appear at most once, so the changes are
+        # independent; any failing precheck aborts the batch before the ledger
+        # is touched.
+        seen: set[str] = set()
+        for slot, incoming in session.changes:
+            if slot in seen:
+                session.fail(f"cannot equip: duplicate slot in one batch ({slot})")
+                return
+            seen.add(slot)
+            chk = te.can_equip(rec, slot, incoming, assets, mutable=bool(rec.mutable))
+            if not chk.ok:
+                session.fail(f"cannot equip: {chk.reason}")
+                return
+            displaced = te.slot_value(rec, slot)
+            session.displaced[slot] = displaced
+            assets[(slot, incoming)] = assets.get((slot, incoming), 0) - 1
+            assets[(slot, displaced)] = assets.get((slot, displaced), 0) + 1
 
+        incoming_by_slot = dict(session.changes)
         new_attrs = [
             {
                 "trait_type": a["trait_type"],
-                "value": incoming if a["trait_type"] == slot else a["value"],
+                "value": incoming_by_slot.get(a["trait_type"], a["value"]),
             }
             for a in rec.attributes
         ]
-        _image_url, _video_url, meta_url = await deps.char_compose_fn(
+        image_url, _video_url, meta_url = await deps.char_compose_fn(
             new_attrs, rec.body, rec.nft_number or 0, 0
         )
         _write_record(deps.records_dir, "equip", session.id, session._record("equipping"))
@@ -694,9 +782,7 @@ async def run_equip(session: EquipSession, deps: EconomyDeps) -> None:
             return
         session.modify_hash = modify_hash
 
-        # Swap the closet: -incoming, +displaced. Token first, then DB.
-        assets[(slot, incoming)] = assets.get((slot, incoming), 0) - 1
-        assets[(slot, session.displaced_value)] = assets.get((slot, session.displaced_value), 0) + 1
+        # Swap the closet with every delta at once. Token first, then DB.
         try:
             session.sync_tx_hash = await _sync_then_persist(deps, owner, assets, _bodies)
         except bt.ClosetMirrorError as e:
@@ -707,6 +793,7 @@ async def run_equip(session: EquipSession, deps: EconomyDeps) -> None:
             session.mirror_pending = True
             es.set_mirror_pending(conn, owner, True)
             session.state = DONE
+            _persist_equip_to_index(deps, session, new_attrs, image_url, meta_url)
             _write_record(
                 deps.records_dir, "equip", session.id, session._record("complete_pending_mirror")
             )
@@ -747,6 +834,7 @@ async def run_equip(session: EquipSession, deps: EconomyDeps) -> None:
             return
 
         session.state = DONE
+        _persist_equip_to_index(deps, session, new_attrs, image_url, meta_url)
         _write_record(deps.records_dir, "equip", session.id, session._record("complete"))
     except Exception as e:
         logging.error(f"Equip {session.id} failed: {traceback.format_exc()}")

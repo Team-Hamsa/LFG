@@ -36,8 +36,8 @@ def test_swap_session_platform_default_and_explicit():
 
 def test_economy_web_session_platform_default_and_explicit():
     # Minimal fake inner: economy_session_dict needs .id/.state/.error, and the
-    # "equip" branch reads .displaced_value.
-    inner = SimpleNamespace(id="x", state="running", error=None, displaced_value="")
+    # "equip" branch reads .displaced (a dict of slot -> displaced value).
+    inner = SimpleNamespace(id="x", state="running", error=None, displaced={})
     s = EconomyWebSession(discord_id="9", kind="equip", inner=inner)
     assert s.platform == "discord"
     assert s.to_dict()["platform"] == "discord"

@@ -5236,9 +5236,11 @@ def _economy_post(kind, start_coro, mock_call):
 handle_equip_start = _economy_post(
     "equip",
     lambda uid, w, b, tok: economy_api.start_equip(
-        uid, w, b["nft_id"], b["slot"], b["value"], user_token=tok
+        uid, w, b["nft_id"], economy_api.normalize_equip_changes(b), user_token=tok
     ),
-    lambda w, b: mock_economy.INSTANCE.equip(w, b["nft_id"], b["slot"], b["value"]),
+    lambda w, b: mock_economy.INSTANCE.equip(
+        w, b["nft_id"], economy_api.normalize_equip_changes(b)
+    ),
 )
 handle_harvest_start = _economy_post(
     "harvest",
