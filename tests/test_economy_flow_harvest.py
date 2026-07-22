@@ -14,6 +14,7 @@ import pytest
 from lfg_core import closet_token as ct
 from lfg_core import economy_flow as ef
 from lfg_core import economy_store as es
+from lfg_core import nft_index
 from lfg_core import trait_economy as te
 from lfg_core.nft_index import OnchainNft
 from tests.economy_helpers import flaky_mirror_conn
@@ -194,6 +195,47 @@ def test_harvest_mutable_modifies_to_blank_no_burn(tmp_path):
     assert all(assets[(s, "None")] == 1 for s in NON_BODY)
     assert assets[("Body", "Straight Blue")] == 1
     assert es.read_supply_changes(conn) == []  # supply-neutral, no ledger rows
+
+
+def test_harvest_mutable_success_stamps_index_as_blank(tmp_path):
+    """The GO grid thumbnail reads onchain_nfts.image; after a harvest the
+    character wears the shared blank silhouette, but its index row still holds
+    the pre-harvest DRESSED art until the listener catches up. A successful
+    mutable harvest must stamp the row blank right away (the stale-thumbnail
+    fix)."""
+    conn, f = _conn_with_genesis(), _Fakes()
+    conn.executescript(nft_index._SCHEMA)
+    es.set_closet_token(conn, "rUser", "CLOSET0", "00", status=ct.ACTIVE, offer_id=None)
+    rec = _char(mutable=True)
+    nft_index.upsert(
+        conn,
+        OnchainNft(
+            nft_id=rec.nft_id,
+            nft_number=rec.nft_number,
+            owner=rec.owner,
+            is_burned=False,
+            mutable=rec.mutable,
+            uri_hex=rec.uri_hex,
+            body=rec.body,
+            attributes=rec.attributes,
+            image="https://cdn/dressed-old.png",
+            ledger_index=1,
+        ),
+    )
+    session = ef.HarvestSession(owner="rUser", character=rec, burnable=False)
+    _run(ef.run_harvest(session, _deps(conn, f, tmp_path)))
+
+    assert session.state == ef.DONE
+    conn.row_factory = sqlite3.Row
+    row = conn.execute("SELECT * FROM onchain_nfts WHERE nft_id=?", ("NFT7",)).fetchone()
+    assert row is not None
+    attrs = json.loads(row["attributes_json"])
+    assert all(a["value"] == "None" for a in attrs)  # every slot blanked
+    assert row["image"] == ef.config.BLANK_IMAGE_URL
+    assert row["image"] != "https://cdn/dressed-old.png"
+    assert row["uri_hex"] == b"https://cdn/blank/7.json".hex()
+    assert row["owner"] == "rUser"
+    assert row["is_burned"] == 0
 
 
 def test_harvest_mutable_closet_fail_reverts_character(tmp_path):

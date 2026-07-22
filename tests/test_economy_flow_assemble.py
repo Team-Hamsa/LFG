@@ -8,6 +8,7 @@ import sqlite3
 
 from lfg_core import economy_flow as ef
 from lfg_core import economy_store as es
+from lfg_core import nft_index
 from lfg_core import trait_economy as te
 from lfg_core.nft_index import OnchainNft
 from tests.economy_helpers import flaky_mirror_conn
@@ -48,6 +49,10 @@ def _conn_with_closet(body_value: str = "Straight Blue") -> sqlite3.Connection:
     """A closet stocked with one Body + a full 'None' set for the owner."""
     c = sqlite3.connect(":memory:")
     es.init_economy_schema(c)
+    # The on-chain index shares the per-network DB (deps.conn is one shared
+    # connection); assemble's post-success stamp writes onchain_nfts, so the
+    # fixture must carry that schema too (mirrors the equip test fixture).
+    c.executescript(nft_index._SCHEMA)
     es.set_closet_token(c, "rUser", "CLOSET", "00")
     contents = [(s, "None", 1) for s in NON_BODY] + [("Body", body_value, 1)]
     es.set_closet_contents(c, "rUser", contents, [])
@@ -176,6 +181,68 @@ def test_assemble_happy_path_modifies_and_debits_closet(tmp_path):
     record = json.loads((tmp_path / f"assemble-{s.id}.json").read_text())
     assert record["status"] == "complete"
     assert record["nft_id"] == "NFT7"
+
+
+# --- Post-save on-chain index stamp: the GO grid thumbnail reads
+# onchain_nfts.image, so a successful assemble must stamp the freshly composed
+# art there right away rather than racing the listener (the stale-thumbnail
+# fix). ---
+
+
+def test_assemble_success_stamps_index_with_new_art(tmp_path):
+    conn, f = _conn_with_closet(), _Fakes()
+    # Seed the pre-assemble BLANK row so we can prove it flips to the new art,
+    # not merely that a row appears.
+    rec = _blank_char()
+    nft_index.upsert(
+        conn,
+        OnchainNft(
+            nft_id=rec.nft_id,
+            nft_number=rec.nft_number,
+            owner=rec.owner,
+            is_burned=False,
+            mutable=rec.mutable,
+            uri_hex=rec.uri_hex,
+            body=rec.body,
+            attributes=rec.attributes,
+            image=ef.config.BLANK_IMAGE_URL,
+            ledger_index=1,
+        ),
+    )
+    s = _session(character=rec)
+    _run(ef.run_assemble(s, _deps(conn, f, tmp_path)))
+
+    assert s.state == ef.DONE
+    conn.row_factory = sqlite3.Row
+    row = conn.execute("SELECT * FROM onchain_nfts WHERE nft_id=?", ("NFT7",)).fetchone()
+    assert row is not None
+    by_type = {a["trait_type"]: a["value"] for a in json.loads(row["attributes_json"])}
+    assert by_type["Body"] == "Straight Blue"  # dressed, not blank
+    assert row["image"] == "img"  # the composed art (char_compose -> "img")
+    assert row["image"] != ef.config.BLANK_IMAGE_URL
+    assert row["uri_hex"] == b"meta".hex()  # composed metadata URL
+    assert row["owner"] == "rUser"  # an in-place modify never moves ownership
+    assert row["is_burned"] == 0
+
+
+def test_assemble_mirror_failure_still_stamps_index_with_new_art(tmp_path):
+    """The complete_pending_mirror branch (Closet debit COMMITTED on-chain,
+    only the DB mirror failed) still ends DONE with the character dressed — the
+    index stamp must fire on THIS success path too."""
+    conn, f = _conn_with_closet(), _Fakes()
+    s = _session()
+    _run(ef.run_assemble(s, _deps(flaky_mirror_conn(conn), f, tmp_path)))
+
+    assert s.state == ef.DONE
+    record = json.loads((tmp_path / f"assemble-{s.id}.json").read_text())
+    assert record["status"] == "complete_pending_mirror"
+
+    conn.row_factory = sqlite3.Row
+    row = conn.execute("SELECT * FROM onchain_nfts WHERE nft_id=?", ("NFT7",)).fetchone()
+    assert row is not None
+    by_type = {a["trait_type"]: a["value"] for a in json.loads(row["attributes_json"])}
+    assert by_type["Body"] == "Straight Blue"
+    assert row["image"] == "img"
 
 
 # --- Precheck rejections ---

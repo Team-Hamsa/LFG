@@ -48,7 +48,7 @@ def _conn_with_bucket() -> sqlite3.Connection:
     # The on-chain index lives in the same per-network DB as the economy
     # tables (deps.conn is a single shared connection) — extend the test
     # fixture with the onchain_nfts schema so run_equip's post-success index
-    # stamp (economy_flow._persist_equip_to_index) has a table to write to.
+    # stamp (economy_flow._persist_char_modify_to_index) has a table to write to.
     c.executescript(nft_index._SCHEMA)
     es.freeze_genesis(
         c, te.Genesis(trait_counts={}, edition_bodies={7: ("Straight Blue", "male")}), {}
