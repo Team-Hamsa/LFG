@@ -1,4 +1,4 @@
-<svg xmlns="http://www.w3.org/2000/svg" width="728" height="330" viewBox="0 0 728 330" role="img" aria-label="XRPL source tag 2606160021: 1,949 tagged transactions from 17 unique wallets">
+<svg xmlns="http://www.w3.org/2000/svg" width="728" height="330" viewBox="0 0 728 330" role="img" aria-label="XRPL source tag 2606160021: 1,961 tagged transactions from 17 unique wallets">
 <rect x="8" y="8" width="718" height="320" rx="18" fill="#0A0A0A"/>
 <rect x="2" y="2" width="718" height="320" rx="18" fill="#181818" stroke="#FFFFFF" stroke-width="3"/>
 <text x="24" y="34" font-family="-apple-system,'Segoe UI',Roboto,Helvetica,Arial,sans-serif" font-size="19" font-weight="700" fill="#F5F4F1">XRPL source tag · 2606160021</text>
@@ -9,25 +9,25 @@
 <text x="40.0" y="127" font-family="-apple-system,'Segoe UI',Roboto,Helvetica,Arial,sans-serif" font-size="11" fill="#9C9A94">unique wallets</text>
 <rect x="368.0" y="72" width="328.0" height="60" rx="12" fill="#202020" stroke="#2C2C2C" stroke-width="1"/>
 <rect x="384.0" y="84" width="30" height="5" rx="2.5" fill="#D89030"/>
-<text x="384.0" y="114" font-family="-apple-system,'Segoe UI',Roboto,Helvetica,Arial,sans-serif" font-size="26" font-weight="800" fill="#D89030">1,949</text>
+<text x="384.0" y="114" font-family="-apple-system,'Segoe UI',Roboto,Helvetica,Arial,sans-serif" font-size="26" font-weight="800" fill="#D89030">1,961</text>
 <text x="384.0" y="127" font-family="-apple-system,'Segoe UI',Roboto,Helvetica,Arial,sans-serif" font-size="11" fill="#9C9A94">tagged transactions</text>
 <text x="24.0" y="166" font-family="-apple-system,'Segoe UI',Roboto,Helvetica,Arial,sans-serif" font-size="11" fill="#9C9A94">mint</text>
 <rect x="82.0" y="158.0" width="570.0" height="9" rx="4.5" fill="#D89030"/>
-<text x="660.0" y="166" font-family="-apple-system,'Segoe UI',Roboto,Helvetica,Arial,sans-serif" font-size="11" fill="#F5F4F1">703</text>
+<text x="660.0" y="166" font-family="-apple-system,'Segoe UI',Roboto,Helvetica,Arial,sans-serif" font-size="11" fill="#F5F4F1">705</text>
 <text x="24.0" y="182" font-family="-apple-system,'Segoe UI',Roboto,Helvetica,Arial,sans-serif" font-size="11" fill="#9C9A94">offer</text>
 <rect x="82.0" y="174.0" width="563.5" height="9" rx="4.5" fill="#4890C0"/>
-<text x="660.0" y="182" font-family="-apple-system,'Segoe UI',Roboto,Helvetica,Arial,sans-serif" font-size="11" fill="#F5F4F1">695</text>
+<text x="660.0" y="182" font-family="-apple-system,'Segoe UI',Roboto,Helvetica,Arial,sans-serif" font-size="11" fill="#F5F4F1">697</text>
 <text x="24.0" y="198" font-family="-apple-system,'Segoe UI',Roboto,Helvetica,Arial,sans-serif" font-size="11" fill="#9C9A94">accept</text>
-<rect x="82.0" y="190.0" width="253.0" height="9" rx="4.5" fill="#D84830"/>
-<text x="660.0" y="198" font-family="-apple-system,'Segoe UI',Roboto,Helvetica,Arial,sans-serif" font-size="11" fill="#F5F4F1">312</text>
+<rect x="82.0" y="190.0" width="253.9" height="9" rx="4.5" fill="#D84830"/>
+<text x="660.0" y="198" font-family="-apple-system,'Segoe UI',Roboto,Helvetica,Arial,sans-serif" font-size="11" fill="#F5F4F1">314</text>
 <text x="24.0" y="214" font-family="-apple-system,'Segoe UI',Roboto,Helvetica,Arial,sans-serif" font-size="11" fill="#9C9A94">modify</text>
-<rect x="82.0" y="206.0" width="77.0" height="9" rx="4.5" fill="#3DA35D"/>
-<text x="660.0" y="214" font-family="-apple-system,'Segoe UI',Roboto,Helvetica,Arial,sans-serif" font-size="11" fill="#F5F4F1">95</text>
+<rect x="82.0" y="206.0" width="80.0" height="9" rx="4.5" fill="#3DA35D"/>
+<text x="660.0" y="214" font-family="-apple-system,'Segoe UI',Roboto,Helvetica,Arial,sans-serif" font-size="11" fill="#F5F4F1">99</text>
 <text x="24.0" y="230" font-family="-apple-system,'Segoe UI',Roboto,Helvetica,Arial,sans-serif" font-size="11" fill="#9C9A94">burn</text>
-<rect x="82.0" y="222.0" width="63.2" height="9" rx="4.5" fill="#F0D848"/>
+<rect x="82.0" y="222.0" width="63.1" height="9" rx="4.5" fill="#F0D848"/>
 <text x="660.0" y="230" font-family="-apple-system,'Segoe UI',Roboto,Helvetica,Arial,sans-serif" font-size="11" fill="#F5F4F1">78</text>
 <text x="24.0" y="246" font-family="-apple-system,'Segoe UI',Roboto,Helvetica,Arial,sans-serif" font-size="11" fill="#9C9A94">+2 more</text>
-<text x="660.0" y="246" font-family="-apple-system,'Segoe UI',Roboto,Helvetica,Arial,sans-serif" font-size="11" fill="#9C9A94">66</text>
+<text x="660.0" y="246" font-family="-apple-system,'Segoe UI',Roboto,Helvetica,Arial,sans-serif" font-size="11" fill="#9C9A94">68</text>
 <text x="24" y="276" font-family="-apple-system,'Segoe UI',Roboto,Helvetica,Arial,sans-serif" font-size="12" fill="#9C9A94">tagged tx / day</text>
 <line x1="24.0" y1="310" x2="696.0" y2="310" stroke="#2C2C2C" stroke-width="1"/>
 <rect x="31.2" y="308.0" width="17.6" height="2.0" rx="2" fill="#D89030"/>
@@ -44,5 +44,5 @@
 <rect x="575.2" y="306.8" width="17.6" height="3.2" rx="2" fill="#D89030"/>
 <rect x="607.2" y="308.0" width="17.6" height="2.0" rx="2" fill="#D89030"/>
 <rect x="639.2" y="303.2" width="17.6" height="6.8" rx="2" fill="#D89030"/>
-<rect x="671.2" y="306.8" width="17.6" height="3.2" rx="2" fill="#D89030"/>
+<rect x="671.2" y="306.4" width="17.6" height="3.6" rx="2" fill="#D89030"/>
 </svg>
