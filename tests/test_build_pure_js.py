@@ -66,6 +66,28 @@ def test_default_empty_roster_is_null():
     assert run_js("M.pickDefaultCharacter(null)") is None
 
 
+def test_default_prefers_dressed_over_blank():
+    # A leading indexed-but-blank character must yield to a later dressed one so
+    # the canvas opens on real art, not a bare silhouette.
+    chars = (
+        "[{nft_id: 'A', body: 'male', blank: true}, {nft_id: 'B', body: 'female', blank: false}]"
+    )
+    assert run_js(f"M.pickDefaultCharacter({chars})") == "B"
+
+
+def test_default_falls_back_to_blank_when_none_dressed():
+    # Every character is a blank: pick the first indexed one anyway.
+    chars = "[{nft_id: 'A', body: '', blank: true}, {nft_id: 'B', body: 'male', blank: true}]"
+    assert run_js(f"M.pickDefaultCharacter({chars})") == "B"
+
+
+def test_default_dressed_preference_ignores_unindexed():
+    # An unindexed (no body) character is never dressed-preferred even if blank
+    # is false — it would 400 on every layer fetch.
+    chars = "[{nft_id: 'A', body: '', blank: false}, {nft_id: 'B', body: 'ape', blank: false}]"
+    assert run_js(f"M.pickDefaultCharacter({chars})") == "B"
+
+
 # ---------------------------------------------------------------------------
 # goTileState(char, activeNftId) -> {label, sub, state}
 # ---------------------------------------------------------------------------
@@ -236,3 +258,87 @@ def test_closet_tile_hidden_for_unindexed_character():
     hidden = run_js("M.closetTileState({slot: 'Head', value: 'Camp Hat'}, {body: ''})")
     assert hidden["visible"] is False
     assert run_js("M.closetTileState({slot: 'Head', value: 'None'}, {body: ''})")["visible"] is True
+
+
+# defaultChosen(slots, slotOptions) -> {slot: firstValue, ...}
+# First legal value per slot from an options map — mirrors the server's old
+# first-match prefill so one-tap assemble still works.
+# ---------------------------------------------------------------------------
+
+
+def test_default_chosen_picks_first_value_per_slot():
+    slots = "['Hat', 'Eyes', 'Mouth']"
+    slotOptions = (
+        "{'Hat': ['Wizard Hat', 'Baseball Cap'], 'Eyes': ['Blue', 'Green'], 'Mouth': ['Smile']}"
+    )
+    result = run_js(f"M.defaultChosen({slots}, {slotOptions})")
+    assert result == {"Hat": "Wizard Hat", "Eyes": "Blue", "Mouth": "Smile"}
+
+
+def test_default_chosen_skips_empty_slots():
+    slots = "['Hat', 'Eyes', 'Mouth']"
+    slotOptions = "{'Hat': ['Wizard Hat'], 'Eyes': [], 'Mouth': []}"
+    result = run_js(f"M.defaultChosen({slots}, {slotOptions})")
+    assert result == {"Hat": "Wizard Hat"}
+
+
+def test_default_chosen_empty_slots_list():
+    slots = "[]"
+    slotOptions = "{}"
+    result = run_js(f"M.defaultChosen({slots}, {slotOptions})")
+    assert result == {}
+
+
+def test_default_chosen_all_empty_options():
+    slots = "['Hat', 'Eyes']"
+    slotOptions = "{'Hat': [], 'Eyes': []}"
+    result = run_js(f"M.defaultChosen({slots}, {slotOptions})")
+    assert result == {}
+
+
+def test_default_chosen_missing_slot_in_options():
+    slots = "['Hat', 'Eyes', 'Unknown']"
+    slotOptions = "{'Hat': ['Wizard Hat'], 'Eyes': ['Blue']}"
+    result = run_js(f"M.defaultChosen({slots}, {slotOptions})")
+    assert result == {"Hat": "Wizard Hat", "Eyes": "Blue"}
+
+
+# ---------------------------------------------------------------------------
+# missingSlots(slots, slotOptions) -> [slot, ...]
+# Slots with no legal closet asset for this body (blocks the commit button).
+# ---------------------------------------------------------------------------
+
+
+def test_missing_slots_returns_empty_when_all_have_options():
+    slots = "['Hat', 'Eyes']"
+    slotOptions = "{'Hat': ['Wizard Hat'], 'Eyes': ['Blue']}"
+    result = run_js(f"M.missingSlots({slots}, {slotOptions})")
+    assert result == []
+
+
+def test_missing_slots_returns_empty_slots():
+    slots = "['Hat', 'Eyes', 'Mouth']"
+    slotOptions = "{'Hat': ['Wizard Hat'], 'Eyes': [], 'Mouth': []}"
+    result = run_js(f"M.missingSlots({slots}, {slotOptions})")
+    assert result == ["Eyes", "Mouth"]
+
+
+def test_missing_slots_empty_slots_list():
+    slots = "[]"
+    slotOptions = "{}"
+    result = run_js(f"M.missingSlots({slots}, {slotOptions})")
+    assert result == []
+
+
+def test_missing_slots_missing_slot_in_options():
+    slots = "['Hat', 'Eyes', 'Unknown']"
+    slotOptions = "{'Hat': ['Wizard Hat']}"
+    result = run_js(f"M.missingSlots({slots}, {slotOptions})")
+    assert result == ["Eyes", "Unknown"]
+
+
+def test_missing_slots_all_empty_options():
+    slots = "['Hat', 'Eyes']"
+    slotOptions = "{'Hat': [], 'Eyes': []}"
+    result = run_js(f"M.missingSlots({slots}, {slotOptions})")
+    assert result == ["Hat", "Eyes"]

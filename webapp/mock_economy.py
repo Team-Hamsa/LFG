@@ -225,6 +225,44 @@ class MockEconomy:
             "edition": char["edition"],
         }
 
+    def assemble_options(self, owner: str) -> dict[str, Any]:
+        """Mirrors economy_api.assemble_options's payload shape for
+        WEBAPP_DEV_MODE=1: caller-owned blank characters + every legal
+        (body, slot, value) combination the caller's Closet can support. The
+        mock has no body-affinity engine, so every asset is offered under
+        every held body (dev-mode is a demo harness, not a correctness gate)."""
+        if not self._closet_active(owner):
+            raise MockEconomyError("Create and claim your Closet first.")
+        blanks = (
+            [
+                {"nft_id": c["nft_id"], "edition": c["edition"]}
+                for c in self.characters
+                if c["mutable"] and _is_blank(c)
+            ]
+            if owner == DEV_OWNER
+            else []
+        )
+        assets = (
+            [(s, v) for (s, v), c in self.assets.items() if c > 0] if owner == DEV_OWNER else []
+        )
+        bodies = sorted({v for (s, v) in assets if s == "Body"})
+        body_class = {b: b for b in bodies}  # mock bodies are already layer-dir classes
+        non_body_values: dict[str, list[str]] = {}
+        for s, v in assets:
+            if s != "Body":
+                non_body_values.setdefault(s, []).append(v)
+        options = {
+            b: {slot: list(non_body_values.get(slot, [])) for slot in trait_economy.NON_BODY_SLOTS}
+            for b in bodies
+        }
+        return {
+            "blanks": blanks,
+            "bodies": bodies,
+            "body_class": body_class,
+            "slots": trait_economy.NON_BODY_SLOTS,
+            "options": options,
+        }
+
     def extract(self, owner: str, body: dict[str, Any]) -> dict[str, Any]:
         """Extract a closet asset into a standalone trait token.
 

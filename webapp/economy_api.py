@@ -260,6 +260,58 @@ def normalize_equip_changes(body: dict[str, Any]) -> list[tuple[str, str]]:
     return changes
 
 
+async def assemble_options(conn: sqlite3.Connection, owner: str) -> dict[str, Any]:
+    """The Builder's data source for assembling a blank: caller-owned blank
+    characters + every legal (body, slot, value) combination the caller's
+    Closet can currently support. Gates on an active Closet, same as
+    start_harvest/start_extract/start_deposit. An empty Closet is NOT an
+    error -- it returns empty bodies/options so the client can explain."""
+    closet_rec = economy_store.get_closet_record(conn, owner)
+    if closet_rec is None or closet_rec[2] != ct.ACTIVE:
+        raise EconomyError("Create and claim your Closet first.")
+
+    blanks = [
+        {"nft_id": r.nft_id, "edition": r.nft_number}
+        for r in nft_index.owner_live_nfts(conn, owner)
+        if bool(r.mutable) and trait_economy.is_blank(r)
+    ]
+
+    genesis = trait_economy.effective_genesis(
+        economy_store.read_genesis(conn), economy_store.read_supply_changes(conn)
+    )
+    body_class_map = trait_economy.body_class_map(genesis)
+
+    owned_assets = [
+        (s, v) for (o, s, v, c) in economy_store.read_closet_assets(conn) if o == owner and c > 0
+    ]
+    bodies = sorted({v for (s, v) in owned_assets if s == "Body" and v in body_class_map})
+    non_body_assets = [(s, v) for (s, v) in owned_assets if s != "Body"]
+
+    cfg = trait_config.get_config()
+    store = layer_store.get_layer_store()
+    options: dict[str, dict[str, list[str]]] = {}
+    for body_value in bodies:
+        body_class = body_class_map[body_value]
+        per_slot: dict[str, list[str]] = {}
+        for slot in trait_economy.NON_BODY_SLOTS:
+            values = []
+            for s, v in non_body_assets:
+                if s != slot:
+                    continue
+                if v == "None" or await swap_compose.resolve_layer(store, cfg, body_class, s, v):
+                    values.append(v)
+            per_slot[slot] = sorted(values)
+        options[body_value] = per_slot
+
+    return {
+        "blanks": blanks,
+        "bodies": bodies,
+        "body_class": {b: body_class_map[b] for b in bodies},
+        "slots": trait_economy.NON_BODY_SLOTS,
+        "options": options,
+    }
+
+
 async def start_equip(
     discord_id: str,
     owner: str,

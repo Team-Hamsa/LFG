@@ -18,7 +18,14 @@ os.environ.setdefault("BUNNY_CDN_STORAGE_ZONE", "test")
 os.environ.setdefault("LAYER_SOURCE", "local")
 os.environ.setdefault("BUNNY_PULL_ZONE", "nft.pullzone.example")
 
-from lfg_core import economy_flow, economy_store, layer_store, nft_index, trait_config  # noqa: E402
+from lfg_core import (  # noqa: E402
+    economy_flow,
+    economy_store,
+    layer_store,
+    nft_index,
+    trait_config,
+    trait_economy,
+)
 from lfg_core.nft_index import OnchainNft  # noqa: E402
 from webapp import economy_api  # noqa: E402
 
@@ -1026,3 +1033,155 @@ def test_harvest_session_dict_mutable_path_no_accept():
     s.state = economy_flow.DONE
     d = economy_api.economy_session_dict("harvest", s)
     assert d["accept"] is None and d["accept_push"] is None and d["new_nft_id"] is None
+
+
+# --- Task 10: GET /api/assemble/options ---
+
+
+def _options_conn(edition_bodies, assets, closet_active=True, characters=()):
+    """A fresh index+economy DB with a frozen genesis (for body_class_map), an
+    active Closet holding `assets` (list of (slot, value, count)), and any
+    extra `characters` (OnchainNft) upserted alongside the default seed."""
+    from lfg_core import trait_economy
+
+    conn = nft_index.init_db(":memory:")
+    economy_store.init_economy_schema(conn)
+    economy_store.freeze_genesis(
+        conn, trait_economy.Genesis(trait_counts={}, edition_bodies=edition_bodies), {}
+    )
+    if closet_active:
+        economy_store.set_closet_token(conn, "rOwner", "NFT_CLOSET", "deadbeef", status="active")
+    economy_store.set_closet_contents(conn, "rOwner", assets, [])
+    for c in characters:
+        nft_index.upsert(conn, c)
+    return conn
+
+
+def _blank(nft_id, edition, body, *, mutable=True, is_burned=False, owner="rOwner"):
+    from lfg_core import trait_economy
+
+    return OnchainNft(
+        nft_id=nft_id,
+        nft_number=edition,
+        owner=owner,
+        is_burned=is_burned,
+        mutable=mutable,
+        uri_hex="",
+        body=body,
+        attributes=trait_economy.blank_attributes(),
+        image="",
+        ledger_index=1,
+    )
+
+
+def _dressed(nft_id, edition, body, *, mutable=True, owner="rOwner"):
+    return OnchainNft(
+        nft_id=nft_id,
+        nft_number=edition,
+        owner=owner,
+        is_burned=False,
+        mutable=mutable,
+        uri_hex="",
+        body=body,
+        attributes=[{"trait_type": "Head", "value": "Crown"}],
+        image="",
+        ledger_index=1,
+    )
+
+
+def test_assemble_options_no_closet_raises():
+    conn = _options_conn({}, [], closet_active=False)
+
+    async def go():
+        with pytest.raises(economy_api.EconomyError, match="Closet"):
+            await economy_api.assemble_options(conn, "rOwner")
+
+    asyncio.get_event_loop().run_until_complete(go())
+
+
+def test_assemble_options_empty_closet_is_not_an_error():
+    """An active but empty Closet returns empty bodies/options -- the UI
+    explains, it does not error."""
+    conn = _options_conn({}, [], closet_active=True)
+
+    async def go():
+        return await economy_api.assemble_options(conn, "rOwner")
+
+    out = asyncio.get_event_loop().run_until_complete(go())
+    assert out["blanks"] == []
+    assert out["bodies"] == []
+    assert out["body_class"] == {}
+    assert out["options"] == {}
+    assert out["slots"] == trait_economy.NON_BODY_SLOTS
+
+
+def test_assemble_options_affinity_filters_per_body_class(monkeypatch, body_gate_store):
+    """'Summer Dress' (female-only Clothing) must appear as an option under
+    the female body but be absent under the skeleton body — the exact
+    per-body-class affinity filter start_assemble/_require_body_affinity
+    enforces on commit."""
+    conn = _options_conn(
+        {1: ("female", "female"), 2: ("skeleton", "skeleton")},
+        [
+            ("Body", "female", 1),
+            ("Body", "skeleton", 1),
+            ("Clothing", "Summer Dress", 1),
+            ("Clothing", "Hoodie", 1),
+        ],
+    )
+    monkeypatch.setattr(economy_api.layer_store, "get_layer_store", lambda: body_gate_store)
+
+    async def go():
+        return await economy_api.assemble_options(conn, "rOwner")
+
+    out = asyncio.get_event_loop().run_until_complete(go())
+    assert set(out["bodies"]) == {"female", "skeleton"}
+    assert out["body_class"] == {"female": "female", "skeleton": "skeleton"}
+    assert "Summer Dress" in out["options"]["female"]["Clothing"]
+    assert "Summer Dress" not in out["options"]["skeleton"]["Clothing"]
+    # "None" is always a legal value for every non-body slot.
+    for body in out["bodies"]:
+        for slot in trait_economy.NON_BODY_SLOTS:
+            if slot != "Clothing":
+                assert out["options"][body][slot] == []
+
+
+def test_assemble_options_only_computed_for_held_bodies(monkeypatch, body_gate_store):
+    """Options are computed only for body classes of bodies actually held
+    (count > 0) in the Closet -- a Clothing asset alone must not fabricate a
+    body the caller doesn't have."""
+    conn = _options_conn(
+        {1: ("male", "male")},
+        [("Clothing", "Hoodie", 1)],
+    )
+    monkeypatch.setattr(economy_api.layer_store, "get_layer_store", lambda: body_gate_store)
+
+    async def go():
+        return await economy_api.assemble_options(conn, "rOwner")
+
+    out = asyncio.get_event_loop().run_until_complete(go())
+    assert out["bodies"] == []
+    assert out["options"] == {}
+
+
+def test_assemble_options_blanks_exclude_dressed_and_non_mutable(monkeypatch, body_gate_store):
+    """blanks lists only caller-owned, live, mutable, is_blank characters --
+    a dressed character and a non-mutable blank are both excluded."""
+    conn = _options_conn(
+        {},
+        [],
+        characters=[
+            _blank("BLANK1", 10, "male"),
+            _dressed("DRESSED1", 11, "male"),
+            _blank("NONMUT1", 12, "male", mutable=False),
+            _blank("BURNED1", 13, "male", is_burned=True),
+            _blank("OTHER1", 14, "male", owner="rSomeoneElse"),
+        ],
+    )
+    monkeypatch.setattr(economy_api.layer_store, "get_layer_store", lambda: body_gate_store)
+
+    async def go():
+        return await economy_api.assemble_options(conn, "rOwner")
+
+    out = asyncio.get_event_loop().run_until_complete(go())
+    assert out["blanks"] == [{"nft_id": "BLANK1", "edition": 10}]
