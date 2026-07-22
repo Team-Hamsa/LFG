@@ -154,6 +154,7 @@ auto-restart hook is retired.
 | `lfg-telegram` | `stg-telegram` (stopped until staging TG token) |
 | `lfg-index-mainnet` | `stg-index-testnet` (moved out of prod) |
 | `lfg-snapshot` (cron 00:10) | `stg-snapshot` (cron 00:10, testnet) |
+| `lfg-sourcetag` (cron 00:20) | — |
 | `lfg-deployer` | `stg-deployer` |
 
 The X auto-poster (#41, `run_x.py`) is not yet in the pm2 tables — it goes live via the ops checklist on #41 (`lfg-x`, with `stop_exit_codes: [0]` so the X_ENABLED-off exit(0) parks instead of thrashing).
@@ -546,6 +547,23 @@ chain on every request.
   "stopped" between runs; that is normal, not a failure). Original setup command:
   ```bash
   pm2 start scripts/snapshot_balances.py --name lfg-snapshot --cron "10 0 * * *" --no-autorestart --interpreter .venv/bin/python -- --network mainnet
+  ```
+- **SourceTag metrics badge:** `scripts/sourcetag_metrics.py --network mainnet
+  --push` reads the `source_tag` column of `history_<net>.db` and commits
+  `metrics/sourcetag.json` to `main` **via the GitHub Contents API** — it never
+  writes into a working tree, so neither polling deployer can see divergence
+  and halt. CI (`hackathon-loc.yml`) then renders `assets/sourcetag.svg` via
+  `scripts/render_sourcetag_svg.py`. Registered as pm2 process
+  `lfg-sourcetag` (cron 00:20, `--no-autorestart` — pm2 shows it "stopped"
+  between runs; that is normal). `unique_wallets` excludes the operator's
+  wallets and `config.SIGNING_ACCOUNT`; `total_tagged_txs` and `by_type`
+  deliberately do not (backend-signed mints are still the project's tagged
+  volume). Note `xrpl_txs.close_time` is stored as UNIX seconds, not the
+  ripple epoch — no `946684800` correction applies here.
+  ```bash
+  pm2 start scripts/sourcetag_metrics.py --name lfg-sourcetag \
+    --cron "20 0 * * *" --no-autorestart --interpreter .venv/bin/python \
+    -- --network mainnet --push
   ```
 - **API:** `GET /api/leaderboard?board=&period=&start=&me=` — public, no auth.
   `board` selects one of 8 boards (`users_nfts`, `users_swaps`,
