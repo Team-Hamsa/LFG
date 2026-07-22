@@ -2864,13 +2864,21 @@ async function commitAssemble(nftId, body, chosen, edition) {
       done: true,
       celebrate: true,
     });
-    economyState = await api('/api/economy');
-    return true;
   } catch (e) {
     status('');
     showError(e.message);
     return false;
   }
+  // Past the point of no return: the blank IS dressed and its Closet assets
+  // are spent. The roster refresh is best-effort — a failure here must never
+  // report failure, or the builder would reopen with stale selections and
+  // invite a double submission (the next openDressup() refetches anyway).
+  try {
+    economyState = await api('/api/economy');
+  } catch (e) {
+    // ignore: transient; state reconciles on the next economy fetch
+  }
+  return true;
 }
 
 // --- Marketplace (#44 Task 10) ---
