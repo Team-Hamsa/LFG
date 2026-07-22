@@ -112,3 +112,85 @@ def test_main_fails_loudly_when_json_missing(tmp_path, monkeypatch):
     monkeypatch.setattr(rs, "JSON_PATH", tmp_path / "absent.json")
     monkeypatch.setattr(rs, "SVG_PATH", tmp_path / "out.svg")
     assert rs.main() != 0
+
+
+def test_breakdown_rows_are_descending_and_match_input_counts():
+    svg = rs.build_svg(DATA)
+    # DATA's by_type sorted descending: mint 700, offer 692, accept 311,
+    # modify 89, burn 77, then Payment 64 + NFTokenCancelOffer 2 fold into
+    # one "+2 more" row (66) since there are 7 types (> the 6-row cap).
+    assert ">700<" in svg
+    assert ">692<" in svg
+    assert ">311<" in svg
+    mint_idx = svg.index(">mint<")
+    offer_idx = svg.index(">offer<")
+    assert mint_idx < offer_idx
+
+
+def test_breakdown_bar_widths_are_non_increasing():
+    svg = rs.build_svg(DATA)
+    root = ET.fromstring(svg)
+    # Breakdown bars all share the same x (area_x + label_w = 24 + 58 = 82)
+    # and height (9), which distinguishes them from the card/shadow/sparkline
+    # rects that share this <rect> tag.
+    bar_widths = [
+        float(el.attrib["width"])
+        for el in root.iter()
+        if el.tag.endswith("rect")
+        and el.attrib.get("x") == "82.0"
+        and el.attrib.get("height") == "9"
+    ]
+    assert len(bar_widths) == 6  # 5 real rows + the folded "+2 more" row
+    assert bar_widths == sorted(bar_widths, reverse=True)
+
+
+def test_unknown_type_name_falls_back_to_lowercased_name():
+    data = dict(
+        DATA,
+        by_type={"SomeNewTxType": 5},
+    )
+    svg = rs.build_svg(data)
+    assert ">somenewtxtype<" in svg
+
+
+def test_all_zero_counts_render_without_zerodivisionerror():
+    data = dict(DATA, by_type={"NFTokenMint": 0, "Payment": 0})
+    root = ET.fromstring(rs.build_svg(data))
+    assert root.attrib["width"] == "728"
+
+
+def test_overflow_beyond_six_types_is_visibly_represented():
+    by_type = {
+        "NFTokenMint": 100,
+        "NFTokenCreateOffer": 90,
+        "NFTokenAcceptOffer": 80,
+        "NFTokenModify": 70,
+        "NFTokenBurn": 60,
+        "Payment": 50,
+        "TrustSet": 40,
+        "NFTokenCancelOffer": 30,
+    }
+    svg = rs.build_svg(dict(DATA, by_type=by_type))
+    # 8 types, top 5 shown individually (mint/offer/accept/modify/burn) + 1
+    # folded "+N more" row carrying the combined remainder
+    # (Payment 50 + TrustSet 40 + NFTokenCancelOffer 30 = 120).
+    assert ">+3 more<" in svg
+    assert ">120<" in svg
+
+
+def test_string_typed_counts_are_coerced_to_int():
+    data = dict(DATA, by_type={"NFTokenMint": "700", "Payment": "64"})
+    svg = rs.build_svg(data)
+    assert ">700<" in svg
+    assert ">64<" in svg
+
+
+def test_main_fails_cleanly_on_structurally_malformed_json(tmp_path, monkeypatch):
+    src = tmp_path / "sourcetag.json"
+    src.write_text(json.dumps({}))
+    dest = tmp_path / "sourcetag.svg"
+    monkeypatch.setattr(rs, "JSON_PATH", src)
+    monkeypatch.setattr(rs, "SVG_PATH", dest)
+
+    assert rs.main() != 0
+    assert not dest.exists()

@@ -88,18 +88,36 @@ def build_svg(data: dict[str, Any]) -> str:
 
     # Type breakdown: one horizontal bar per tx type, longest first.
     row_y = 158
-    ordered = sorted(by_type.items(), key=lambda kv: (-kv[1], kv[0]))[:6]
+    all_ordered = sorted(
+        ((name, int(count)) for name, count in by_type.items()),
+        key=lambda kv: (-kv[1], kv[0]),
+    )
+    if len(all_ordered) > 6:
+        # Keep the top 5 rows and fold everything else into one visible
+        # "+N more" row (summed count) rather than silently dropping types
+        # past the 6-row layout cap.
+        ordered = list(all_ordered[:5])
+        rest = all_ordered[5:]
+        rest_count = sum(count for _, count in rest)
+        ordered.append((f"+{len(rest)} more", rest_count))
+    else:
+        ordered = all_ordered
     if ordered:
-        peak = max(count for _, count in ordered)
+        peak = max((count for _, count in ordered), default=0) or 1
         label_w, count_w = 58.0, 44.0
         track = area_w - label_w - count_w
         for i, (type_name, count) in enumerate(ordered):
             ry = row_y + i * 16
             color = BAR_COLORS[i % len(BAR_COLORS)]
+            label_text = (
+                type_name
+                if type_name.startswith("+")
+                else TYPE_LABELS.get(type_name, type_name.lower())
+            )
             parts.append(
                 f'<text x="{area_x:.1f}" y="{ry + 8}" font-family="{FONT}" '
                 f'font-size="11" fill="{MUTED}">'
-                f"{esc(TYPE_LABELS.get(type_name, type_name.lower()))}</text>"
+                f"{esc(label_text)}</text>"
             )
             bar_w = max(track * count / peak, 2.0)
             parts.append(
@@ -132,7 +150,11 @@ def main() -> int:
         print(f"malformed {JSON_PATH}: {exc}", file=sys.stderr)
         return 2
 
-    svg = build_svg(data)
+    try:
+        svg = build_svg(data)
+    except (KeyError, TypeError, ValueError) as exc:
+        print(f"malformed {JSON_PATH}: {exc}", file=sys.stderr)
+        return 2
     changed = not SVG_PATH.exists() or SVG_PATH.read_text() != svg
     if changed:
         SVG_PATH.parent.mkdir(parents=True, exist_ok=True)
