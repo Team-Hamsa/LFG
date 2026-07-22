@@ -46,3 +46,7 @@ Task 5: complete (commit d321e51, review Approved). Self-trigger loop verified c
 Task 6: complete (commits f9d7801 + 225a1bc fix, review Approved after adding the pre-push-bypass rationale + unregistered marker).
   Also fixed: unused sqlite3 import (ruff), ruff-format on tests/test_brand_module.py (8c0b8f4) - both would have failed the pre-push gate.
 ALL 6 TASKS COMPLETE. Full gate green: 2416 passed/1 skipped, mypy 331 files clean, ruff+format clean.
+WHOLE-BRANCH REVIEW (opus): Ready-to-merge NO -> fixed in 0d7e5a9. 1 IMPORTANT + 6 minor.
+  CRITICAL CATCH (missed by all 6 per-task reviews): collector wrote tracked metrics/sourcetag.json into ~/LFG (prod checkout on `deploy`); every nightly run dirtied the tree -> promote.sh `git merge --ff-only` refuses -> deployer.run_git raises -> 60s retry loop -> PROD DEPLOYS WEDGED. Fixed in code: --push without explicit --out skips the local write entirely (2 tests). pm2 cmd carries no --out.
+  Also fixed: regex `$` matched trailing newline in the publish guard -> fullmatch + non-str tx_type key rejected; continue-on-error on the badge step so a bad snapshot can't block the LoC/dashboard badges; esc() now escapes quotes (attribute context); long unknown tx-type labels truncated; first_tagged_tx documented as an ARCHIVE fact not a ledger fact; ops preconditions (gh on pm2 PATH, human actor) in CLAUDE.md.
+FINAL GATE: 2423 passed, 1 skipped; mypy clean; ruff+format clean.
