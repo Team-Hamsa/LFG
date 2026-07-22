@@ -1,0 +1,23 @@
+{
+  "archive_max_close_time": "2026-07-20T12:00:00+00:00",
+  "as_of": "2026-07-22T14:59:48+00:00",
+  "by_type": {
+    "Payment": 1
+  },
+  "daily": [
+    {
+      "count": 1,
+      "date": "2026-07-20"
+    }
+  ],
+  "excluded": [
+    "rHU8nu9zSnCpkL3gShG4aGawHzaRVfmKwQ",
+    "rHaMsAjoAN21s1XG5TCAM6ErAefzrggsHf",
+    "rLfgoMintj3KBcs4s2XKtquvDwEte2kYfJ"
+  ],
+  "first_tagged_tx": "2026-07-20",
+  "network": "testnet",
+  "source_tag": 2606160021,
+  "total_tagged_txs": 1,
+  "unique_wallets": 1
+}
