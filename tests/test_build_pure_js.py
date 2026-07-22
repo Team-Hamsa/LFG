@@ -196,3 +196,43 @@ def test_net_changes_empty_pending_is_empty():
 
 def test_net_changes_without_a_character_is_empty():
     assert run_js("M.netChanges(null, {Head: 'Tiara'})") == []
+
+
+# ---------------------------------------------------------------------------
+# closetTileState(asset, char) -> {visible, art, label}
+# A harvested character deposits one asset per non-body slot, INCLUDING the
+# literal "None" of an empty slot (trait_economy conserves it). Those tiles
+# must stay visible with a GO selected — they were being dropped, so a
+# harvested "None" Back simply vanished from the Closet.
+# ---------------------------------------------------------------------------
+
+
+def test_closet_tile_none_stays_visible_with_a_go_selected():
+    out = run_js("M.closetTileState({slot: 'Back', value: 'None', count: 3}, {body: 'male'})")
+    assert out["visible"] is True
+    assert out["art"] == "blank"
+    assert out["label"] == "None"
+
+
+def test_closet_tile_none_visible_without_a_go():
+    out = run_js("M.closetTileState({slot: 'Back', value: 'None', count: 1}, null)")
+    assert out["visible"] is True
+    assert out["art"] == "blank"
+
+
+def test_closet_tile_real_asset_renders_layer_art():
+    out = run_js("M.closetTileState({slot: 'Head', value: 'Camp Hat', count: 1}, {body: 'male'})")
+    assert out == {"visible": True, "art": "layer", "label": ""}
+
+
+def test_closet_tile_real_asset_without_a_go_is_a_blank_placeholder():
+    out = run_js("M.closetTileState({slot: 'Head', value: 'Camp Hat', count: 1}, null)")
+    assert out == {"visible": True, "art": "blank", "label": ""}
+
+
+def test_closet_tile_hidden_for_unindexed_character():
+    # No body metadata: a layer fetch would 400, so the tile is dropped
+    # (unchanged behavior) — but a "None" asset is still never dropped.
+    hidden = run_js("M.closetTileState({slot: 'Head', value: 'Camp Hat'}, {body: ''})")
+    assert hidden["visible"] is False
+    assert run_js("M.closetTileState({slot: 'Head', value: 'None'}, {body: ''})")["visible"] is True
