@@ -45,13 +45,12 @@ class _ClosetFakes:
 
 def test_metadata_roundtrips():
     assets = [("Head", "None", 3), ("Background", "Blue", 1)]
-    bodies = [3536, 12]
-    meta = bt.build_closet_metadata("rUser", assets, bodies)
-    assert meta["lfg_closet"]["bodies"] == [12, 3536]  # sorted
+    meta = bt.build_closet_metadata("rUser", assets, [])
+    assert meta["lfg_closet"]["bodies"] == []  # schema v2: always empty
     assert meta["name"] == "LFG Closet — rUser"
     got_assets, got_bodies = bt.parse_closet_metadata(meta)
     assert sorted(got_assets) == sorted(assets)
-    assert got_bodies == [12, 3536]
+    assert got_bodies == []
 
 
 def test_none_assets_preserved():
@@ -78,6 +77,32 @@ def test_parse_tolerates_garbage():
         }
     }
     assert bt.parse_closet_metadata(mixed) == ([("Eyes", "Blue", 1)], [7])
+
+
+def test_parse_excludes_bools_from_legacy_editions():
+    # bool subclasses int; True must NEVER parse as edition 1 (it could inject a
+    # Body asset). Only exact ints are accepted.
+    meta = {"lfg_closet": {"assets": [], "bodies": [True, False, 3]}}
+    assert bt.parse_closet_metadata(meta) == ([], [3])
+
+
+def test_parse_excludes_bools_from_legacy_editions_with_genesis():
+    from lfg_core import trait_economy as te
+
+    genesis = te.Genesis(
+        trait_counts={},
+        edition_bodies={1: ("Milady", "milady"), 3: ("Skeleton", "skeleton")},
+    )
+    meta = {"lfg_closet": {"assets": [], "bodies": [True, 3]}}
+    assets, legacy_editions = bt.parse_closet_metadata(meta, genesis=genesis)
+    # True never becomes edition 1: only edition 3 resolves to a Body asset.
+    assert assets == [("Body", "Skeleton", 1)]
+    assert legacy_editions == []
+
+
+def test_build_excludes_bools_from_bodies():
+    meta = bt.build_closet_metadata("rUser", [], [True, 3, False])
+    assert meta["lfg_closet"]["bodies"] == [3]
 
 
 # --- Task 3 tests (new lifecycle: pending_accept → active) ---

@@ -5,10 +5,13 @@ and remain unit-testable with fakes. (scripts/ is excluded from mypy --strict.)"
 from __future__ import annotations
 
 import json
+import logging
 import os
 import sqlite3
 import uuid
 from typing import Any
+
+import aiohttp
 
 from lfg_core import (
     cdn,
@@ -32,6 +35,36 @@ NFT_FLAG_BURNABLE = 0x0001
 # by the owner in that case, so the delivery offer/accept is a no-op we skip.
 # (Cross-account runs with a real owner take the normal offer + XUMM accept path.)
 _SELF_OFFER_SKIPPED = "self-offer-skipped"
+
+# Positive-result cache: once the BLANK art URL is confirmed present on-ledger
+# CDN we never re-HEAD it this process. Negative results are deliberately NOT
+# cached — a missing object may be uploaded before the next harvest.
+_BLANK_ART_VERIFIED = False
+
+
+async def _blank_art_exists(url: str) -> bool:
+    """HEAD the BLANK art URL to confirm the object was actually uploaded (a
+    non-empty BLANK_IMAGE_URL whose object is missing would strand blanks with
+    404 art). Runs at most once per process on success; failures re-check."""
+    global _BLANK_ART_VERIFIED
+    if _BLANK_ART_VERIFIED:
+        return True
+    try:
+        timeout = aiohttp.ClientTimeout(total=20, connect=10)
+        async with aiohttp.ClientSession(timeout=timeout) as session:
+            async with session.head(url) as resp:
+                if resp.status == 200:
+                    _BLANK_ART_VERIFIED = True
+                    return True
+                logging.warning(
+                    "BLANK art HEAD %s returned status %s — upload blank art first",
+                    url,
+                    resp.status,
+                )
+                return False
+    except Exception as e:
+        logging.warning("BLANK art HEAD %s failed (%s) — upload blank art first", url, e)
+        return False
 
 
 async def _offer_or_skip(nft_id: str, owner: str) -> str | None:
@@ -112,6 +145,42 @@ async def _compose_char(
         f"{edition}/{basename}.json", json.dumps(meta, indent=2).encode(), "application/json"
     )
     return image_url, video_url, meta_url
+
+
+async def _blank_meta(edition: int) -> str | None:
+    """Build + upload BLANK-character metadata for `edition` and return its URL.
+    Same envelope as `_compose_char` but with the fixed silhouette image and
+    trait_economy.blank_attributes() (every slot "None") — no layer compose.
+    Returns None on upload failure — or if BLANK_IMAGE_URL is unset (uploading
+    metadata with an empty image would strand the character) — so the harvest
+    flow fails safe."""
+    from lfg_core import trait_economy as te
+
+    if not config.BLANK_IMAGE_URL:
+        logging.warning("BLANK_IMAGE_URL unset — upload blank art first")
+        return None
+    if not await _blank_art_exists(config.BLANK_IMAGE_URL):
+        return None
+
+    season = swap_meta.season_for_number(edition)
+    meta: dict[str, Any] = {
+        "schema": config.NFT_SCHEMA_URL,
+        "name": f"{config.NFT_COLLECTION_NAME} #{edition}",
+        "description": f"Season {season}",
+        "image": config.BLANK_IMAGE_URL,
+        "external_link": config.EXTERNAL_WEBSITE_URL,
+        "collection": {"name": config.NFT_COLLECTION_NAME, "family": f"Season {season}"},
+        "edition": edition,
+        "attributes": te.blank_attributes(),
+    }
+    try:
+        return await _upload(
+            f"{edition}/blank_{uuid.uuid4().hex[:8]}.json",
+            json.dumps(meta, indent=2).encode(),
+            "application/json",
+        )
+    except Exception:
+        return None
 
 
 async def _compose_trait(slot: str, value: str) -> str:
@@ -215,6 +284,7 @@ def build_economy_deps(
         # Rarity bookkeeping (#305): harvest/assemble adjust the app-DB
         # live-count the Trait Shop price formula reads.
         app_conn_factory=lambda: sqlite3.connect(db_path.app_db_path(config.ECONOMY_NETWORK)),
+        blank_meta_fn=_blank_meta,
     )
 
 

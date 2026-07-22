@@ -148,17 +148,27 @@ async def apply_tx(
             logging.exception(f"apply_tx failed for {nft_id} ({kind})")
 
 
-def _apply_closet(conn: sqlite3.Connection, token: dict[str, Any], metadata: Any) -> None:
+def _apply_closet(
+    conn: sqlite3.Connection,
+    token: dict[str, Any],
+    metadata: Any,
+    genesis: trait_economy.Genesis | None = None,
+) -> None:
     """Rebuild an owner's closet_assets/closet_bodies rows from their Closet
     NFToken's metadata and set its lifecycle status: a token held by anyone other
     than the issuer has been accepted (active); one still in the issuer wallet is
     pending_accept. The offer_id is NOT on-chain — preserve any stored value so
-    the UI can re-show the pending accept QR."""
+    the UI can re-show the pending accept QR.
+
+    `genesis` (the EFFECTIVE genesis) is forwarded to `parse_closet_metadata` so
+    a legacy-schema token's integer `bodies` list converts to `("Body", value)`
+    asset rows on rebuild instead of being silently dropped; `None` (no genesis
+    frozen) leaves that conversion off and behavior unchanged."""
     owner = token.get("owner")
     if not owner:
         return
     assets, bodies = closet_token.parse_closet_metadata(
-        metadata if isinstance(metadata, dict) else {}
+        metadata if isinstance(metadata, dict) else {}, genesis
     )
     economy_store.set_closet_contents(conn, owner, assets, bodies)
     status = (
@@ -272,7 +282,7 @@ async def apply_economy_tx(
             metadata = await fetch_meta_fn(uri_hex) if uri_hex else None
             taxon = int(token.get("taxon") or -1)
             if taxon in (config.CLOSET_TAXON, config.LEGACY_BUCKET_TAXON):
-                _apply_closet(conn, token, metadata)
+                _apply_closet(conn, token, metadata, genesis)
             elif taxon == config.TRAIT_TAXON:
                 _apply_trait_token(conn, kind, token, metadata)
             elif kind == "mint" and genesis is not None:

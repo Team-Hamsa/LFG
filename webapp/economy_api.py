@@ -38,6 +38,7 @@ def _char_dict(r: nft_index.OnchainNft) -> dict[str, Any]:
         "mutable": bool(r.mutable),
         "image_url": r.image,
         "attributes": r.attributes,
+        "blank": trait_economy.is_blank(r),
     }
 
 
@@ -49,7 +50,6 @@ def read_economy_state(conn: sqlite3.Connection, owner: str) -> dict[str, Any]:
         for (o, s, v, c) in economy_store.read_closet_assets(conn)
         if o == owner
     ]
-    bodies = [ed for (o, ed) in economy_store.read_closet_bodies(conn) if o == owner]
     rec = economy_store.get_closet_record(conn, owner)
     closet_token = {"status": "none", "nft_id": None}
     if rec is not None:
@@ -61,7 +61,7 @@ def read_economy_state(conn: sqlite3.Connection, owner: str) -> dict[str, Any]:
     ]
     return {
         "characters": chars,
-        "closet": {"assets": assets, "bodies": bodies, "token": closet_token},
+        "closet": {"assets": assets, "token": closet_token},
         "trait_order": swap_meta.TRAIT_ORDER,
         "slots": trait_economy.NON_BODY_SLOTS,
         "trait_tokens": trait_tokens,
@@ -104,6 +104,13 @@ def economy_session_dict(kind: str, s: Any) -> dict[str, Any]:
         base["displaced"] = [{"slot": k, "value": v} for k, v in s.displaced.items()]
     elif kind == "harvest":
         base["moved_assets"] = s.moved_assets
+        # Legacy (non-mutable) harvest remints the edition as a mutable blank and
+        # offers it back — surface the one-time upgrade accept QR/push so the
+        # client can prompt the sign. The mutable path modifies in place and
+        # carries no accept (all None).
+        base["accept"] = (s.accept or {}).get("xumm_url")
+        base["accept_push"] = (s.accept or {}).get("push")
+        base["new_nft_id"] = s.new_nft_id
     elif kind == "assemble":
         r = s.results[0] if s.results else None
         base["accept"] = ((r["accept"] or {}).get("xumm_url")) if r else None
@@ -112,6 +119,8 @@ def economy_session_dict(kind: str, s: Any) -> dict[str, Any]:
         # .get(): older journals / fakes predate the animated-NFT field (#250).
         base["video_url"] = r.get("video_url") if r else None
         base["nft_id"] = r["nft_id"] if r else None
+        # Edition surfaces so the firehose announce can say "dressed a blank into #N".
+        base["edition"] = s.edition
     elif kind == "extract":
         base["accept"] = (s.accept or {}).get("xumm_url")
         base["accept_push"] = (s.accept or {}).get("push")
@@ -221,63 +230,6 @@ async def _require_body_affinity(char_body: str, slot: str, value: str) -> None:
         raise EconomyError(f"'{value}' does not fit a {char_body} body")
 
 
-async def assemble_prefill(conn: sqlite3.Connection, owner: str) -> dict[str, Any]:
-    """Server-side auto-fill for the Build panel's Assemble tile. The client
-    has no body-affinity knowledge (that lives in trait_config +
-    swap_compose.resolve_layer), so it must not pick assets itself — a naive
-    first-asset pick proposes sets the commit gate rejects ("'X' does not fit
-    a Y body"). For each dead Closet body edition (in Closet order), fill each
-    non-body slot with the first Closet asset that passes the SAME
-    resolve_layer gate start_assemble enforces; return the first edition that
-    fills completely, else the candidate with the fewest missing slots
-    (missing listed so the UI can explain). Raises EconomyError when the
-    Closet holds no assemblable body."""
-    # Gate on an active Closet up front, exactly like start_assemble (the commit
-    # path) — otherwise a prefill can propose a set that start_assemble would
-    # immediately reject with "Create and claim your Closet first." (In practice
-    # bodies only land in the Closet after a harvest, which already gates on
-    # active, but a manual DB repair could violate that invariant.)
-    closet_rec = economy_store.get_closet_record(conn, owner)
-    if closet_rec is None or closet_rec[2] != ct.ACTIVE:
-        raise EconomyError("Create and claim your Closet first.")
-    genesis = trait_economy.effective_genesis(
-        economy_store.read_genesis(conn), economy_store.read_supply_changes(conn)
-    )
-    bodies = [ed for (o, ed) in economy_store.read_closet_bodies(conn) if o == owner]
-    if not bodies:
-        raise EconomyError("No bodies in your Closet to assemble.")
-    live_editions = {r.nft_number for r in nft_index.live_nfts(conn) if r.nft_number is not None}
-    assets = [
-        (s, v) for (o, s, v, c) in economy_store.read_closet_assets(conn) if o == owner and c > 0
-    ]
-    cfg = trait_config.get_config()
-    store = layer_store.get_layer_store()
-    best: dict[str, Any] | None = None
-    for edition in bodies:
-        body = genesis.edition_bodies.get(edition)
-        if body is None or edition in live_editions:
-            continue
-        chosen: dict[str, str] = {}
-        missing: list[str] = []
-        for slot in trait_economy.NON_BODY_SLOTS:
-            for s, v in assets:
-                if s != slot:
-                    continue
-                if v == "None" or await swap_compose.resolve_layer(store, cfg, body[1], slot, v):
-                    chosen[slot] = v
-                    break
-            else:
-                missing.append(slot)
-        candidate = {"edition": edition, "body": body[1], "chosen": chosen, "missing": missing}
-        if not missing:
-            return candidate
-        if best is None or len(missing) < len(best["missing"]):
-            best = candidate
-    if best is None:
-        raise EconomyError("No bodies in your Closet can be assembled right now.")
-    return best
-
-
 def normalize_equip_changes(body: dict[str, Any]) -> list[tuple[str, str]]:
     """Wire-level compatibility seam: accept either the batch shape
     {"changes": [{"slot", "value"}, ...]} or the legacy single
@@ -355,11 +307,8 @@ async def start_harvest(
         conn.close()
         raise EconomyError("Create and claim your Closet first.")
     rec = _load_owned_character(conn, owner, nft_id)
-    genesis = trait_economy.effective_genesis(
-        economy_store.read_genesis(conn), economy_store.read_supply_changes(conn)
-    )
     burnable = await _economy_deps.fetch_burnable(owner, nft_id)
-    chk = trait_economy.can_harvest(rec, genesis, burnable)
+    chk = trait_economy.can_harvest(rec, mutable=bool(rec.mutable), burnable=burnable)
     if not chk.ok:
         conn.close()
         raise EconomyError(f"cannot harvest: {chk.reason}")
@@ -370,43 +319,37 @@ async def start_harvest(
 async def start_assemble(
     discord_id: str,
     owner: str,
-    edition: int,
+    nft_id: str,
+    body: str,
     chosen: dict[str, str],
     user_token: str | None = None,
 ) -> EconomyWebSession:
+    """Dress a caller-owned BLANK character in place. Loads the character by
+    nft_id, resolves its target body class from the effective genesis, runs the
+    per-slot body-affinity gate (the same swap_compose.resolve_layer check the
+    swap path uses), then schedules run_assemble. The blank precondition is
+    enforced inside the flow (te.can_assemble); an unknown body raises here."""
     conn = open_conn()
     try:
-        closet_rec = economy_store.get_closet_record(conn, owner)
-        if closet_rec is None or closet_rec[2] != ct.ACTIVE:
-            raise EconomyError("Create and claim your Closet first.")
+        rec = _load_owned_character(conn, owner, nft_id)
         genesis = trait_economy.effective_genesis(
             economy_store.read_genesis(conn), economy_store.read_supply_changes(conn)
         )
-        body = genesis.edition_bodies.get(edition)
-        if body is None:
-            raise EconomyError(f"edition {edition} has no known body")
-        assets = {
-            (s, v): c for (o, s, v, c) in economy_store.read_closet_assets(conn) if o == owner
-        }
-        bodies = {ed for (o, ed) in economy_store.read_closet_bodies(conn) if o == owner}
-        live_editions = {
-            r.nft_number for r in nft_index.live_nfts(conn) if r.nft_number is not None
-        }
-        chk = trait_economy.can_assemble(edition, chosen, bodies, assets, live_editions, genesis)
-        if not chk.ok:
-            raise EconomyError(f"cannot assemble: {chk.reason}")
-        for slot, value in chosen.items():
-            await _require_body_affinity(body[1], slot, value)
+        body_class = trait_economy.body_class_map(genesis).get(body)
+        if body_class is None:
+            raise EconomyError(f"unknown body: {body}")
+        for slot in trait_economy.NON_BODY_SLOTS:
+            if slot in chosen:
+                await _require_body_affinity(body_class, slot, chosen[slot])
     except Exception:
         conn.close()
         raise
     session = economy_flow.AssembleSession(
         owner=owner,
-        edition=edition,
+        character=rec,
+        body_value=body,
+        body_class=body_class,
         chosen=chosen,
-        body_value=body[0],
-        body_class=body[1],
-        live_editions=live_editions,
     )
     return _schedule("assemble", discord_id, session, conn, economy_flow.run_assemble, user_token)
 

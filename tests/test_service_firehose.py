@@ -239,6 +239,7 @@ def test_assemble_status_publishes_with_wallet_and_image(monkeypatch):
         state = "done"
         error = None
         owner = "rOWNER"
+        edition = 3537
         results = [{"accept": None, "image_url": "https://cdn/assemble.png", "nft_id": "N"}]
 
     sess = economy_api.EconomyWebSession(discord_id="dev", kind="assemble", inner=_Inner())
@@ -307,6 +308,9 @@ def _economy_session(kind, inner_state="done"):
         results = [{"image_url": "https://cdn/x.png", "nft_id": "N", "accept": None}]
         moved_assets: list = []
         displaced_value = None
+        accept = None
+        new_nft_id = None
+        edition = 3537
 
     return economy_api.EconomyWebSession(discord_id="dev", kind=kind, inner=_Inner())
 

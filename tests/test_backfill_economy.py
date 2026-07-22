@@ -83,7 +83,7 @@ def _meta(mapping: dict[str, Any]) -> Any:
 
 def test_closet_reconciled_active_with_contents(tmp_path):
     conn = _conn(tmp_path)
-    meta = ct.build_closet_metadata(OWNER, [("Hat", "Cap", 2)], [7])
+    meta = ct.build_closet_metadata(OWNER, [("Hat", "Cap", 2)], [])
     enum = _enum({CLOSET_TAXON: [_tok("CLOSET1", OWNER, "URIC")]})
     fetch = _meta({"URIC": meta})
 
@@ -94,8 +94,9 @@ def test_closet_reconciled_active_with_contents(tmp_path):
     assert rec is not None and rec[2] == ct.ACTIVE
     assets = {(s, v): n for o, s, v, n in es.read_closet_assets(conn) if o == OWNER}
     assert assets[("Hat", "Cap")] == 2
+    # schema v2: build_closet_metadata never writes legacy body editions.
     bodies = {e for o, e in es.read_closet_bodies(conn) if o == OWNER}
-    assert bodies == {7}
+    assert bodies == set()
 
 
 def test_closet_issuer_held_pending_is_skipped_not_stored_under_issuer(tmp_path):

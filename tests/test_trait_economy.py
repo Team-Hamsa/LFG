@@ -90,56 +90,67 @@ def test_build_genesis_counts_traits_and_bodies():
 
 
 def test_asset_census_sums_chars_buckets_and_tokens():
-    char = _nft("c", 1, attrs=_attrs(Background="Sky"))
+    char = _nft("c", 1, body_class="male", attrs=_attrs(body="Straight", Background="Sky"))
     census = trait_economy.asset_census(
         characters={1: char},
         closet_assets=[("rA", "Background", "Sky", 2), ("rA", "Head", "None", 1)],
-        closet_bodies=[("rA", 7)],
         trait_tokens=[("tok1", "rB", "Background", "Sky")],
     )
     # 1 on the live character + 2 in a bucket + 1 standalone token.
     assert census.trait_counts[("Background", "Sky")] == 4
     assert census.trait_counts[("Head", "None")] == 1 + 1  # char's empty Head + bucket
-    # Body presence: edition 1 live, edition 7 loose in a bucket.
-    assert census.body_presence == {1: 1, 7: 1}
+    # Body is a first-class asset too: the dressed (non-blank) character
+    # contributes its ("Body", value).
+    assert census.trait_counts[("Body", "Straight")] == 1
+
+
+def test_asset_census_blank_character_contributes_nothing():
+    blank = _nft("c", 1, attrs=trait_economy.blank_attributes())
+    census = trait_economy.asset_census(characters={1: blank}, closet_assets=[], trait_tokens=[])
+    # A blank character is not a separate asset holder at all — not for Body,
+    # and not for its (all-"None") non-body slots either. Its 9 slot values
+    # are presumed already relocated to the owner's Closet.
+    assert census.trait_counts == {}
 
 
 def test_verify_conservation_ok_when_census_matches_genesis():
     g = trait_economy.Genesis(
         trait_counts={("Background", "Sky"): 2}, edition_bodies={1: ("S", "male")}
     )
-    c = trait_economy.Census(trait_counts={("Background", "Sky"): 2}, body_presence={1: 1})
+    c = trait_economy.Census(trait_counts={("Background", "Sky"): 2, ("Body", "S"): 1})
     rep = trait_economy.verify_conservation(g, c)
     assert rep.ok
     assert rep.trait_drift == {}
-    assert rep.body_drift == {}
 
 
 def test_verify_conservation_flags_trait_and_body_drift():
     g = trait_economy.Genesis(
         trait_counts={("Background", "Sky"): 2, ("Head", "Crown"): 1},
-        edition_bodies={1: ("S", "male"), 2: ("S", "male")},
+        edition_bodies={1: ("S", "male"), 2: ("S2", "male")},
     )
     c = trait_economy.Census(
-        trait_counts={("Background", "Sky"): 3},  # +1 created; Crown destroyed
-        body_presence={1: 2},  # edition 1 duplicated, edition 2 vanished
+        trait_counts={
+            ("Background", "Sky"): 3,  # +1 created; Crown destroyed
+            ("Body", "S"): 2,  # edition 1's body duplicated
+            # edition 2's body ("Body", "S2") is missing entirely -> drift
+        },
     )
     rep = trait_economy.verify_conservation(g, c)
     assert not rep.ok
     assert rep.trait_drift[("Background", "Sky")] == 1
     assert rep.trait_drift[("Head", "Crown")] == -1
-    assert rep.body_drift[1] == 2
-    assert rep.body_drift[2] == 0
+    assert rep.trait_drift[("Body", "S")] == 1
+    assert rep.trait_drift[("Body", "S2")] == -1
 
 
-def test_verify_conservation_flags_ghost_edition_in_census():
-    """Ghost edition: in census.body_presence but not in genesis.edition_bodies."""
+def test_verify_conservation_flags_ghost_body_in_census():
+    """A ("Body", value) asset in the census with no matching genesis body."""
     g = trait_economy.Genesis(trait_counts={}, edition_bodies={1: ("S", "male")})
-    c = trait_economy.Census(trait_counts={}, body_presence={1: 1, 99: 1})
+    c = trait_economy.Census(trait_counts={("Body", "S"): 1, ("Body", "Ghost"): 1})
     rep = trait_economy.verify_conservation(g, c)
     assert not rep.ok
-    assert rep.body_drift[99] == 1
-    assert 1 not in rep.body_drift  # edition 1 is healthy (presence == 1)
+    assert rep.trait_drift[("Body", "Ghost")] == 1
+    assert ("Body", "S") not in rep.trait_drift  # edition 1's body is healthy
 
 
 def test_verify_completeness_ok_for_normalized_characters():
@@ -148,22 +159,30 @@ def test_verify_completeness_ok_for_normalized_characters():
     g = trait_economy.build_genesis({1: a})
     rep = trait_economy.verify_completeness({1: a}, g)
     assert rep.ok
-    assert rep.wrong_body == {}
     assert rep.orphan_bodies == []
     assert rep.slot_anomalies == {}
 
 
-def test_verify_completeness_flags_wrong_body_and_orphan():
+def test_verify_completeness_ignores_swapped_body_flags_orphan():
+    """Blank model: a live character wearing a DIFFERENT body value than its
+    genesis body is NOT a violation (bodies are swappable — the old wrong_body
+    check is retired). An edition unknown to the genesis ledger is still an
+    orphan; a dressed character missing non-body slots is still a slot anomaly."""
     a = _nft("a", 1, body_class="male", attrs=_attrs(body="Straight"))
     g = trait_economy.build_genesis({1: a})
-    # Edition 1 now shows a different body value; edition 9 isn't in genesis.
-    mutated = _nft("a2", 1, body_class="male", attrs=_attrs(body="Curved"))
+    # Edition 1 now shows a different body value — must NOT be flagged.
+    rebodied = _nft(
+        "a2",
+        1,
+        body_class="male",
+        attrs=swap_meta.normalize_attributes(_attrs(body="Curved", Background="Sky")),
+    )
     orphan = _nft("z", 9, attrs=_attrs(body="Straight"))
-    rep = trait_economy.verify_completeness({1: mutated, 9: orphan}, g)
+    rep = trait_economy.verify_completeness({1: rebodied, 9: orphan}, g)
     assert not rep.ok
-    assert rep.wrong_body[1] == ("Curved", "Straight")
     assert rep.orphan_bodies == [9]
-    assert 1 in rep.slot_anomalies  # missing non-body slots are flagged
+    assert 1 not in rep.slot_anomalies  # rebodied char has a full valid slot set
+    assert 9 in rep.slot_anomalies  # orphan is missing non-body slots
 
 
 def test_verify_completeness_flags_duplicate_slot():

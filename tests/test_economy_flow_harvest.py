@@ -1,5 +1,9 @@
-# Harvest flow: burn a live character, drop its 8 assets + body into the Closet.
-# Driven entirely through injected fakes — no network.
+# Harvest flow: strip a live character to a BLANK. Mutable characters are
+# stripped via NFTokenModify in place; legacy non-mutable-but-burnable
+# characters get a one-time burn + remint-as-blank + offer-back upgrade.
+# Either way its 9 slot values (8 non-body incl. "None", plus Body) drop into
+# the Closet as loose assets. Driven entirely through injected fakes — no
+# network.
 
 import asyncio
 import json
@@ -25,7 +29,9 @@ def _run(coro):
         loop.close()
 
 
-def _char(edition: int = 7, body: str = "Straight Blue") -> OnchainNft:
+def _char(
+    edition: int = 7, body: str = "Straight Blue", mutable: bool = True, uri_hex: str = "AABB"
+) -> OnchainNft:
     attrs = [{"trait_type": "Body", "value": body}]
     attrs += [{"trait_type": s, "value": "None"} for s in NON_BODY]
     return OnchainNft(
@@ -33,8 +39,8 @@ def _char(edition: int = 7, body: str = "Straight Blue") -> OnchainNft:
         nft_number=edition,
         owner="rUser",
         is_burned=False,
-        mutable=True,
-        uri_hex="",
+        mutable=mutable,
+        uri_hex=uri_hex,
         body="male",
         attributes=attrs,
         image="",
@@ -55,13 +61,29 @@ def _conn_with_genesis(edition: int = 7, body: str = "Straight Blue") -> sqlite3
 
 class _Fakes:
     def __init__(
-        self, *, fail_closet_modify: bool = False, raise_closet_modify: bool = False
+        self,
+        *,
+        fail_closet_modify: bool = False,
+        raise_closet_modify: bool = False,
+        fail_char_modify: bool = False,
+        fail_char_burn: bool = False,
+        fail_char_mint: bool = False,
+        fail_char_offer: bool = False,
+        fail_blank_meta: bool = False,
     ) -> None:
         self.burns: list[tuple[str, str]] = []
+        self.char_modifies: list[tuple[str, str, str]] = []
         self.bucket_modifies: list[tuple[str, str, str]] = []
         self.closet_mints: list[str] = []
+        self.mints: list[str] = []
+        self.offers: list[tuple[str, str]] = []
         self.fail_closet_modify = fail_closet_modify
         self.raise_closet_modify = raise_closet_modify
+        self.fail_char_modify = fail_char_modify
+        self.fail_char_burn = fail_char_burn
+        self.fail_char_mint = fail_char_mint
+        self.fail_char_offer = fail_char_offer
+        self.fail_blank_meta = fail_blank_meta
         self.uploads = 0
         # nft_ids that exist_fn should report as on-ledger; everything else is stale.
         self.live_closet_ids: set[str] = set()
@@ -104,22 +126,28 @@ class _Fakes:
     async def char_burn(self, nft_id: str, owner: str):
         self.burns.append((nft_id, owner))
         self.events.append("char_burn")
-        return "BURNHASH"
+        return None if self.fail_char_burn else "BURNHASH"
 
     async def char_compose(self, attrs, body, edition, rev):
         return ("img", None, "meta")
 
     async def char_mint(self, url: str):
-        return "CHAR"
+        self.mints.append(url)
+        return None if self.fail_char_mint else "NEWCHAR"
 
     async def char_modify(self, nft_id, owner, url):
-        return "H"
+        self.char_modifies.append((nft_id, owner, url))
+        return None if self.fail_char_modify else "MODIFYHASH"
 
     async def char_offer(self, nft_id, owner):
-        return "O"
+        self.offers.append((nft_id, owner))
+        return None if self.fail_char_offer else "O"
 
     async def char_accept(self, offer_id):
         return {"xumm_url": "x"}
+
+    async def blank_meta(self, edition: int) -> str | None:
+        return None if self.fail_blank_meta else f"https://cdn/blank/{edition}.json"
 
 
 def _deps(conn, f, records_dir):
@@ -138,111 +166,64 @@ def _deps(conn, f, records_dir):
         char_accept_fn=f.char_accept,
         closet_exists_fn=f.closet_exists,
         closet_owner_fn=f.closet_owner,
+        blank_meta_fn=f.blank_meta,
         records_dir=str(records_dir),
     )
 
 
-def test_harvest_happy_path(tmp_path):
+def _all_slot_assets(conn) -> dict[tuple[str, str], int]:
+    return {(s, v): n for o, s, v, n in es.read_closet_assets(conn)}
+
+
+# --- Mutable path: NFTokenModify to blank in place ---
+
+
+def test_harvest_mutable_modifies_to_blank_no_burn(tmp_path):
     conn, f = _conn_with_genesis(), _Fakes()
     es.set_closet_token(conn, "rUser", "CLOSET0", "00", status=ct.ACTIVE, offer_id=None)
-    session = ef.HarvestSession(owner="rUser", character=_char(), burnable=True)
+    session = ef.HarvestSession(owner="rUser", character=_char(mutable=True), burnable=False)
     _run(ef.run_harvest(session, _deps(conn, f, tmp_path)))
 
     assert session.state == ef.DONE
-    assert f.burns == [("NFT7", "rUser")]
-    assert len(f.bucket_modifies) == 1  # bucket synced on-chain
-    assets = {(s, v): n for o, s, v, n in es.read_closet_assets(conn)}
-    assert all(assets[(s, "None")] == 1 for s in NON_BODY)
-    assert es.read_closet_bodies(conn) == [("rUser", 7)]
-
-
-def test_harvest_rejects_non_burnable(tmp_path):
-    conn, f = _conn_with_genesis(), _Fakes()
-    session = ef.HarvestSession(owner="rUser", character=_char(), burnable=False)
-    _run(ef.run_harvest(session, _deps(conn, f, tmp_path)))
-
-    assert session.state == ef.FAILED
-    assert f.burns == []  # never touched the chain
-    assert es.read_closet_bodies(conn) == []
-
-
-def test_harvest_burn_then_bucket_sync_fails(tmp_path):
-    conn, f = _conn_with_genesis(), _Fakes(fail_closet_modify=True)
-    es.set_closet_token(conn, "rUser", "CLOSET0", "00", status=ct.ACTIVE, offer_id=None)
-    session = ef.HarvestSession(owner="rUser", character=_char(), burnable=True)
-    _run(ef.run_harvest(session, _deps(conn, f, tmp_path)))
-
-    assert session.state == ef.FAILED
-    assert f.burns == [("NFT7", "rUser")]  # burn happened (irreversible)
-    # assets are NOT in the DB (deposit failed) but ARE preserved in the journal
-    assert es.read_closet_bodies(conn) == []
-    record = json.loads((tmp_path / f"harvest-{session.id}.json").read_text())
-    assert record["status"] == "harvested_pending_closet"
-    assert record["burn_hash"] == "BURNHASH"
-    assert len(record["moved_assets"]) == len(NON_BODY)
-
-
-def test_harvest_stale_active_closet_fails_after_burn(tmp_path):
-    """A Closet that is ACTIVE in the DB but missing from the ledger (stale) passes
-    the precondition check (DB status is ACTIVE), so the burn proceeds. The
-    subsequent NFTokenModify (sync_closet) then hits a missing token and fails,
-    leaving assets in the journal for recovery.
-
-    Previously (#101) the old ensure_closet block would re-mint before the burn.
-    That block is now removed: users must hold an ACTIVE Closet via the issuance
-    UI before harvesting; staleness caught here is a post-burn failure recorded in
-    the journal."""
-    conn, f = _conn_with_genesis(), _Fakes(fail_closet_modify=True)
-    # A stale row: ACTIVE in the DB but the on-ledger token is gone (modify fails).
-    es.set_closet_token(conn, "rUser", "DEADBUCKET", "AABB", status=ct.ACTIVE)
-
-    session = ef.HarvestSession(owner="rUser", character=_char(), burnable=True)
-    _run(ef.run_harvest(session, _deps(conn, f, tmp_path)))
-
-    # Precondition passes (DB says ACTIVE), burn happens, then deposit fails.
-    assert session.state == ef.FAILED
-    assert f.burns == [("NFT7", "rUser")]  # burn happened (irreversible)
-    assert f.closet_mints == []  # no re-mint; ensure_closet block removed
-    assert es.read_closet_bodies(conn) == []  # deposit not committed to DB
-    record = json.loads((tmp_path / f"harvest-{session.id}.json").read_text())
-    assert record["status"] == "harvested_pending_closet"
-    assert record["burn_hash"] == "BURNHASH"
-    assert len(record["moved_assets"]) == len(NON_BODY)
-
-
-def test_harvest_rejected_without_active_closet(tmp_path):
-    conn, f = _conn_with_genesis(), _Fakes()
-    # no closet row at all → status none
-    session = ef.HarvestSession(owner="rUser", character=_char(), burnable=True)
-    _run(ef.run_harvest(session, _deps(conn, f, tmp_path)))
-    assert session.state == ef.FAILED
+    assert f.char_modifies == [("NFT7", "rUser", "https://cdn/blank/7.json")]
     assert f.burns == []  # never burned
-    assert "closet" in (session.error or "").lower()
+    assert session.legacy_upgrade is False
+    assets = _all_slot_assets(conn)
+    assert all(assets[(s, "None")] == 1 for s in NON_BODY)
+    assert assets[("Body", "Straight Blue")] == 1
+    assert es.read_supply_changes(conn) == []  # supply-neutral, no ledger rows
 
 
-def test_harvest_succeeds_with_active_closet(tmp_path):
-    conn, f = _conn_with_genesis(), _Fakes()
-    es.set_closet_token(conn, "rUser", "NFTC", "AB", status=ct.ACTIVE, offer_id=None)
-    session = ef.HarvestSession(owner="rUser", character=_char(), burnable=True)
+def test_harvest_mutable_closet_fail_reverts_character(tmp_path):
+    """Modify-to-blank succeeds, then the Closet deposit definitively does not
+    commit: the character is modified back to its original URI, journaled
+    reverted_modify, and the Closet is left untouched."""
+    conn, f = _conn_with_genesis(), _Fakes(fail_closet_modify=True)
+    es.set_closet_token(conn, "rUser", "CLOSET0", "00", status=ct.ACTIVE, offer_id=None)
+    old_uri_hex = b"ipfs://old".hex()
+    char = _char(mutable=True, uri_hex=old_uri_hex)
+    session = ef.HarvestSession(owner="rUser", character=char, burnable=False)
     _run(ef.run_harvest(session, _deps(conn, f, tmp_path)))
-    assert session.state == ef.DONE
-    assert f.burns == [("NFT7", "rUser")]
+
+    assert session.state == ef.FAILED
+    # First call blanks the character, second call reverts to the old URI.
+    assert f.char_modifies[0] == ("NFT7", "rUser", "https://cdn/blank/7.json")
+    assert f.char_modifies[1] == ("NFT7", "rUser", "ipfs://old")
+    assert _all_slot_assets(conn) == {}  # closet untouched
+    record = json.loads((tmp_path / f"harvest-{session.id}.json").read_text())
+    assert record["status"] == "reverted_modify"
 
 
-# --- #107: phase-aware harvest branches ---
-
-
-def test_harvest_mirror_failure_completes_pending_mirror(tmp_path):
-    """Burn OK, Closet modify OK, only the DB mirror write fails: the chain is
-    fully consistent — the session ends DONE (listener converges the mirror)
-    and the journal records complete_pending_mirror with the modify tx hash."""
+def test_harvest_mutable_mirror_failure_completes_pending_mirror(tmp_path):
+    """The Closet modify committed on-chain; only the DB mirror write fails:
+    DONE, mirror_pending set, no revert of the character."""
     conn, f = _conn_with_genesis(), _Fakes()
     es.set_closet_token(conn, "rUser", "CLOSET0", "00", status=ct.ACTIVE, offer_id=None)
-    session = ef.HarvestSession(owner="rUser", character=_char(), burnable=True)
+    session = ef.HarvestSession(owner="rUser", character=_char(mutable=True), burnable=False)
     _run(ef.run_harvest(session, _deps(flaky_mirror_conn(conn), f, tmp_path)))
 
     assert session.state == ef.DONE
-    assert f.burns == [("NFT7", "rUser")]  # exactly one burn, no compensation
+    assert len(f.char_modifies) == 1  # only the blank modify; NO revert modify
     assert len(f.bucket_modifies) == 1
     record = json.loads((tmp_path / f"harvest-{session.id}.json").read_text())
     assert record["status"] == "complete_pending_mirror"
@@ -250,25 +231,172 @@ def test_harvest_mirror_failure_completes_pending_mirror(tmp_path):
     assert record["mirror_pending"] is True
 
 
-def test_harvest_indeterminate_sync_journals_and_fails(tmp_path):
-    """closet_modify raises (commit status unknown): fail-closed — FAILED, no
-    compensation, journal harvest_sync_indeterminate with the moved assets."""
-    conn, f = _conn_with_genesis(), _Fakes(raise_closet_modify=True)
+# --- Legacy path: burn + remint-as-blank + offer-back ---
+
+
+def test_harvest_legacy_burns_reminits_and_credits_closet(tmp_path):
+    conn, f = _conn_with_genesis(), _Fakes()
     es.set_closet_token(conn, "rUser", "CLOSET0", "00", status=ct.ACTIVE, offer_id=None)
-    session = ef.HarvestSession(owner="rUser", character=_char(), burnable=True)
+    session = ef.HarvestSession(owner="rUser", character=_char(mutable=False), burnable=True)
+    _run(ef.run_harvest(session, _deps(conn, f, tmp_path)))
+
+    assert session.state == ef.DONE
+    assert session.legacy_upgrade is True
+    assert f.burns == [("NFT7", "rUser")]
+    assert f.mints == ["https://cdn/blank/7.json"]
+    assert f.offers == [("NEWCHAR", "rUser")]
+    assert session.new_nft_id == "NEWCHAR"
+    assert session.accept == {"xumm_url": "x"}
+    assets = _all_slot_assets(conn)
+    assert all(assets[(s, "None")] == 1 for s in NON_BODY)
+    assert assets[("Body", "Straight Blue")] == 1
+
+    changes = es.read_supply_changes(conn)
+    assert [c["kind"] for c in changes] == ["burn", "mint"]
+    assert changes[0]["edition"] == changes[1]["edition"] == 7
+    # net zero across the pair, per key
+    for key, delta in changes[0]["trait_deltas"].items():
+        assert changes[1]["trait_deltas"][key] == -delta
+
+
+def test_harvest_legacy_offer_fails_credits_closet_then_fails_honestly(tmp_path):
+    # Remint succeeds but the delivery offer creation fails: the Closet is still
+    # credited (parts belong to the owner), but the reminted blank is stranded in
+    # the issuer wallet — so the session must FAIL honestly (not show a success
+    # screen). The terminal journal is reminted_no_offer_failed and carries
+    # new_nft_id so an admin can locate and re-offer the stranded blank.
+    conn, f = _conn_with_genesis(), _Fakes(fail_char_offer=True)
+    es.set_closet_token(conn, "rUser", "CLOSET0", "00", status=ct.ACTIVE, offer_id=None)
+    session = ef.HarvestSession(owner="rUser", character=_char(mutable=False), burnable=True)
     _run(ef.run_harvest(session, _deps(conn, f, tmp_path)))
 
     assert session.state == ef.FAILED
-    assert f.burns == [("NFT7", "rUser")]  # the irreversible burn had happened
+    assert session.new_nft_id == "NEWCHAR"
+    assert session.accept is None
+    # Closet was still credited with all the harvested parts (they're the owner's).
+    assets = _all_slot_assets(conn)
+    assert all(assets[(s, "None")] == 1 for s in NON_BODY)
+    assert assets[("Body", "Straight Blue")] == 1
+
+    record = json.loads((tmp_path / f"harvest-{session.id}.json").read_text())
+    assert record["status"] == "reminted_no_offer_failed"
+    assert record["new_nft_id"] == "NEWCHAR"
+
+
+def test_harvest_legacy_remint_fails_after_burn(tmp_path):
+    conn, f = _conn_with_genesis(), _Fakes(fail_char_mint=True)
+    es.set_closet_token(conn, "rUser", "CLOSET0", "00", status=ct.ACTIVE, offer_id=None)
+    session = ef.HarvestSession(owner="rUser", character=_char(mutable=False), burnable=True)
+    _run(ef.run_harvest(session, _deps(conn, f, tmp_path)))
+
+    assert session.state == ef.FAILED
+    assert f.burns == [("NFT7", "rUser")]  # burn happened (irreversible)
+    assert f.offers == []  # never offered
+    assert "admin" in (session.error or "").lower()
+    assert _all_slot_assets(conn) == {}  # closet untouched
+    record = json.loads((tmp_path / f"harvest-{session.id}.json").read_text())
+    assert record["status"] == "burned_no_remint"
+    # only the -1 burn row was written; no +1 mint row (remint never happened)
+    changes = es.read_supply_changes(conn)
+    assert [c["kind"] for c in changes] == ["burn"]
+
+
+def test_harvest_legacy_burn_fails_nothing_lost(tmp_path):
+    conn, f = _conn_with_genesis(), _Fakes(fail_char_burn=True)
+    es.set_closet_token(conn, "rUser", "CLOSET0", "00", status=ct.ACTIVE, offer_id=None)
+    session = ef.HarvestSession(owner="rUser", character=_char(mutable=False), burnable=True)
+    _run(ef.run_harvest(session, _deps(conn, f, tmp_path)))
+
+    assert session.state == ef.FAILED
+    assert f.mints == []  # never reminted
+    assert es.read_supply_changes(conn) == []
+    record = json.loads((tmp_path / f"harvest-{session.id}.json").read_text())
+    assert record["status"] == "failed_burn"
+
+
+# --- Blank-metadata prep failure (shared by both paths) ---
+
+
+def test_harvest_blank_meta_failure_changes_nothing(tmp_path):
+    conn, f = _conn_with_genesis(), _Fakes(fail_blank_meta=True)
+    es.set_closet_token(conn, "rUser", "CLOSET0", "00", status=ct.ACTIVE, offer_id=None)
+    session = ef.HarvestSession(owner="rUser", character=_char(mutable=True), burnable=False)
+    _run(ef.run_harvest(session, _deps(conn, f, tmp_path)))
+
+    assert session.state == ef.FAILED
+    assert f.char_modifies == []
+    assert f.burns == []
+    assert _all_slot_assets(conn) == {}
+
+
+# --- Preconditions (mutable/burnable gating; Closet requirement) ---
+
+
+def test_harvest_rejects_neither_mutable_nor_burnable(tmp_path):
+    conn, f = _conn_with_genesis(), _Fakes()
+    session = ef.HarvestSession(owner="rUser", character=_char(mutable=False), burnable=False)
+    _run(ef.run_harvest(session, _deps(conn, f, tmp_path)))
+
+    assert session.state == ef.FAILED
+    assert f.burns == []
+    assert f.char_modifies == []
+    assert _all_slot_assets(conn) == {}
+
+
+def test_harvest_rejected_without_active_closet(tmp_path):
+    conn, f = _conn_with_genesis(), _Fakes()
+    # no closet row at all → status none
+    session = ef.HarvestSession(owner="rUser", character=_char(), burnable=False)
+    _run(ef.run_harvest(session, _deps(conn, f, tmp_path)))
+    assert session.state == ef.FAILED
+    assert f.char_modifies == []  # never touched the chain
+    assert "closet" in (session.error or "").lower()
+
+
+def test_harvest_rejected_when_active_closet_gone_onledger(tmp_path):
+    """ACTIVE in the DB but owner-check returns None (token gone on-ledger) → the
+    gate fires before the irreversible step, so no character is lost (#101)."""
+    conn, f = _conn_with_genesis(), _Fakes()
+    es.set_closet_token(conn, "rUser", "CLOSETX", "AB", status=ct.ACTIVE)
+    # Simulate the token no longer owned by the user (gone/transferred).
+    f.closet_owner_addr = None
+
+    session = ef.HarvestSession(owner="rUser", character=_char(), burnable=False)
+    _run(ef.run_harvest(session, _deps(conn, f, tmp_path)))
+
+    assert session.state == ef.FAILED
+    assert f.char_modifies == []
+    assert "closet" in (session.error or "").lower() or "verified" in (session.error or "").lower()
+
+
+def test_harvest_succeeds_with_active_closet(tmp_path):
+    conn, f = _conn_with_genesis(), _Fakes()
+    es.set_closet_token(conn, "rUser", "NFTC", "AB", status=ct.ACTIVE, offer_id=None)
+    session = ef.HarvestSession(owner="rUser", character=_char(), burnable=False)
+    _run(ef.run_harvest(session, _deps(conn, f, tmp_path)))
+    assert session.state == ef.DONE
+    assert f.char_modifies == [("NFT7", "rUser", "https://cdn/blank/7.json")]
+
+
+def test_harvest_indeterminate_sync_journals_and_fails(tmp_path):
+    """closet_modify raises (commit status unknown): fail-closed — FAILED, no
+    compensation, journal harvest_sync_indeterminate."""
+    conn, f = _conn_with_genesis(), _Fakes(raise_closet_modify=True)
+    es.set_closet_token(conn, "rUser", "CLOSET0", "00", status=ct.ACTIVE, offer_id=None)
+    session = ef.HarvestSession(owner="rUser", character=_char(mutable=True), burnable=False)
+    _run(ef.run_harvest(session, _deps(conn, f, tmp_path)))
+
+    assert session.state == ef.FAILED
+    assert len(f.char_modifies) == 1  # the blank modify had happened; no revert
     record = json.loads((tmp_path / f"harvest-{session.id}.json").read_text())
     assert record["status"] == "harvest_sync_indeterminate"
-    assert len(record["moved_assets"]) == len(NON_BODY)
+    assert len(record["moved_assets"]) == len(NON_BODY) + 1
     assert record["sync_tx_hash"] is None
     # DB mirror untouched (nothing was credited)
-    assert es.read_closet_bodies(conn) == []
+    assert _all_slot_assets(conn) == {}
 
 
-# --- #107: phase-aware _sync_then_persist ---
+# --- #107: phase-aware _sync_then_persist (assets-only, Task 5) ---
 
 
 def test_sync_then_persist_mirror_failure_is_typed(tmp_path):
@@ -278,7 +406,7 @@ def test_sync_then_persist_mirror_failure_is_typed(tmp_path):
     es.set_closet_token(conn, "rUser", "CLOSET0", "00", status=ct.ACTIVE, offer_id=None)
     deps = _deps(flaky_mirror_conn(conn), f, tmp_path)
     with pytest.raises(ct.ClosetMirrorError) as ei:
-        _run(ef._sync_then_persist(deps, "rUser", {("Head", "Crown"): 1}, {7}))
+        _run(ef._sync_then_persist(deps, "rUser", {("Head", "Crown"): 1}))
     assert ei.value.tx_hash == "MODHASH"
     assert len(f.bucket_modifies) == 1  # on-chain modify DID happen
 
@@ -290,13 +418,12 @@ def test_sync_then_persist_mirror_failure_rolls_back(tmp_path):
     commit() must not persist the half-applied delete."""
     conn, f = _conn_with_genesis(), _Fakes()
     es.set_closet_token(conn, "rUser", "CLOSET0", "00", status=ct.ACTIVE, offer_id=None)
-    es.set_closet_contents(conn, "rUser", [("Head", "Crown", 2)], [3])
+    es.set_closet_contents(conn, "rUser", [("Head", "Crown", 2)], [])
     deps = _deps(flaky_mirror_conn(conn), f, tmp_path)
     with pytest.raises(ct.ClosetMirrorError):
-        _run(ef._sync_then_persist(deps, "rUser", {("Head", "Crown"): 1}, {7}))
+        _run(ef._sync_then_persist(deps, "rUser", {("Head", "Crown"): 1}))
     original = [("rUser", "Head", "Crown", 2)]
     assert es.read_closet_assets(conn) == original  # delete rolled back
-    assert es.read_closet_bodies(conn) == [("rUser", 3)]
     conn.commit()  # an unrelated later commit must not resurrect the delete
     assert es.read_closet_assets(conn) == original
 
@@ -305,34 +432,24 @@ def test_sync_then_persist_returns_tx_hash(tmp_path):
     conn, f = _conn_with_genesis(), _Fakes()
     es.set_closet_token(conn, "rUser", "CLOSET0", "00", status=ct.ACTIVE, offer_id=None)
     deps = _deps(conn, f, tmp_path)
-    got = _run(ef._sync_then_persist(deps, "rUser", {("Head", "Crown"): 1}, {7}))
+    got = _run(ef._sync_then_persist(deps, "rUser", {("Head", "Crown"): 1}))
     assert got == "MODHASH"
 
 
+# --- Concurrency: per-owner serialization (#180, fire-and-forget #307) ------
+
+
 class _InterleavingFakes(_Fakes):
-    """Variant used only by the concurrency regression test below: injects real
-    suspension points (`await asyncio.sleep(0)`) into the fakes the flow awaits
-    between its closet READ (`_owner_contents`, in `run_harvest`) and its closet
+    """Injects real suspension points (`await asyncio.sleep(0)`) into the fakes
+    the flow awaits between its closet READ (`_owner_contents`) and its closet
     SYNC/mirror WRITE (`_sync_then_persist` -> `sync_closet` -> upload/modify).
+    Without a genuine yield, asyncio.gather over fakes that return immediately
+    never interleaves the coroutines, so a missing `@_serialize_by_owner` could
+    never manifest as a lost update."""
 
-    Without a genuine `await` that actually yields control, `asyncio.gather` over
-    two coroutines built entirely from fakes that return immediately never
-    interleaves them — the event loop just runs one coroutine to completion
-    before touching the other, since there is no suspension point to switch on.
-    That made the original test pass even with `@_serialize_by_owner` removed
-    from `run_harvest`: the two `run_harvest` calls never actually overlapped,
-    so a missing per-owner lock could never manifest as a lost update. Adding
-    `asyncio.sleep(0)` yields around the burn and around the closet
-    upload/modify calls gives the scheduler real interleaving points, so two
-    concurrent harvests for one owner can now race for real: one coroutine's
-    read (of the closet mirror) can happen before the other's write lands,
-    and — without the lock — the second write is a full overwrite that erases
-    the first's assets.
-    """
-
-    async def char_burn(self, nft_id: str, owner: str):
+    async def char_modify(self, nft_id, owner, url):
         await asyncio.sleep(0)
-        return await super().char_burn(nft_id, owner)
+        return await super().char_modify(nft_id, owner, url)
 
     async def closet_upload(self, meta: dict) -> str:
         await asyncio.sleep(0)
@@ -343,9 +460,11 @@ class _InterleavingFakes(_Fakes):
         return await super().closet_modify(nft_id, owner, url)
 
 
-def _two_character_setup(tmp_path):
-    """Two live characters owned by the same user, distinct editions/bodies,
-    with a genesis + active Closet already in place."""
+def test_two_concurrent_harvests_both_land(tmp_path):
+    """#180's per-owner lock must make stacked harvests (fire-and-forget spec
+    2026-07-21) serialize: run two run_harvest coroutines concurrently for one
+    owner and assert BOTH characters' assets are in the closet afterwards and
+    both sessions end DONE."""
     conn = sqlite3.connect(":memory:")
     es.init_economy_schema(conn)
     genesis = te.Genesis(
@@ -356,47 +475,20 @@ def _two_character_setup(tmp_path):
     es.set_closet_token(conn, "rUser", "CLOSET0", "00", status=ct.ACTIVE, offer_id=None)
     f = _InterleavingFakes()
     deps = _deps(conn, f, tmp_path)
-    char_a = _char(edition=7, body="Straight Blue")
-    char_b = _char(edition=8, body="Straight Red")
-    return conn, deps, "rUser", char_a, char_b
-
-
-def test_two_concurrent_harvests_both_land(tmp_path):
-    """#180's per-owner lock must make stacked harvests (fire-and-forget spec
-    2026-07-21) serialize: run two run_harvest coroutines concurrently for one
-    owner and assert BOTH characters' assets are in the closet afterwards and
-    both sessions end DONE."""
-    conn, deps, owner, char_a, char_b = _two_character_setup(tmp_path)
-    sa = ef.HarvestSession(owner=owner, character=char_a, burnable=True)
-    sb = ef.HarvestSession(owner=owner, character=char_b, burnable=True)
+    sa = ef.HarvestSession(owner="rUser", character=_char(edition=7), burnable=True)
+    sb = ef.HarvestSession(
+        owner="rUser", character=_char(edition=8, body="Straight Red"), burnable=True
+    )
 
     async def go():
         await asyncio.gather(ef.run_harvest(sa, deps), ef.run_harvest(sb, deps))
 
     _run(go())
     assert sa.state == ef.DONE and sb.state == ef.DONE
-    assets = {(s, v): n for o, s, v, n in es.read_closet_assets(conn) if o == owner}
-    for char in (char_a, char_b):
-        for attr in char.attributes:
-            if attr["trait_type"] != "Body" and attr["value"] != "None":
-                assert assets.get((attr["trait_type"], attr["value"]), 0) >= 1
-    # Both harvests' None-slot assets landed (no lost update from the race):
-    # each character contributes 1 to every NON_BODY slot's "None" count.
+    assets = {(s, v): n for o, s, v, n in es.read_closet_assets(conn) if o == "rUser"}
+    # Both harvests' assets landed (no lost update from the race): each
+    # character contributes 1 to every NON_BODY slot's "None" count, and both
+    # bodies arrived as ("Body", value) loose assets.
     assert all(assets[(s, "None")] == 2 for s in NON_BODY)
-    assert sorted(es.read_closet_bodies(conn)) == [("rUser", 7), ("rUser", 8)]
-
-
-def test_harvest_rejected_when_active_closet_gone_onledger(tmp_path):
-    """ACTIVE in the DB but owner-check returns None (token gone on-ledger) → the
-    gate fires before the irreversible burn, so no character is lost (#101)."""
-    conn, f = _conn_with_genesis(), _Fakes()
-    es.set_closet_token(conn, "rUser", "CLOSETX", "AB", status=ct.ACTIVE)
-    # Simulate the token no longer owned by the user (gone/transferred).
-    f.closet_owner_addr = None
-
-    session = ef.HarvestSession(owner="rUser", character=_char(), burnable=True)
-    _run(ef.run_harvest(session, _deps(conn, f, tmp_path)))
-
-    assert session.state == ef.FAILED
-    assert f.burns == []  # character was NOT burned
-    assert "closet" in (session.error or "").lower() or "verified" in (session.error or "").lower()
+    assert assets[("Body", "Straight Blue")] == 1
+    assert assets[("Body", "Straight Red")] == 1

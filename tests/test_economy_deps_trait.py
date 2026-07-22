@@ -157,3 +157,103 @@ def test_build_economy_deps_without_owner_leaves_account_unset():
     d = deps.build_economy_deps(conn)
     assert callable(d.closet_accept_fn)
     assert callable(d.char_accept_fn)
+
+
+def test_blank_meta_returns_none_when_image_url_unset(monkeypatch):
+    """_blank_meta must fail safe (return None) rather than upload metadata with
+    an empty image when BLANK_IMAGE_URL is unset."""
+    import _economy_deps as deps
+
+    from lfg_core import config
+
+    monkeypatch.setattr(config, "BLANK_IMAGE_URL", "")
+
+    async def _fail_upload(*a, **k):
+        raise AssertionError("upload must not be called when BLANK_IMAGE_URL is unset")
+
+    monkeypatch.setattr(deps, "_upload", _fail_upload)
+    assert _run(deps._blank_meta(2297)) is None
+
+
+class _FakeHeadResp:
+    def __init__(self, status):
+        self.status = status
+
+    async def __aenter__(self):
+        return self
+
+    async def __aexit__(self, *a):
+        return False
+
+
+class _FakeSession:
+    def __init__(self, status, calls):
+        self._status = status
+        self._calls = calls
+
+    async def __aenter__(self):
+        return self
+
+    async def __aexit__(self, *a):
+        return False
+
+    def head(self, url):
+        self._calls.append(url)
+        return _FakeHeadResp(self._status)
+
+
+def _patch_head(monkeypatch, deps, status, calls):
+    monkeypatch.setattr(deps, "_BLANK_ART_VERIFIED", False)
+    monkeypatch.setattr(
+        deps.aiohttp,
+        "ClientSession",
+        lambda *a, **k: _FakeSession(status, calls),
+    )
+
+
+def test_blank_meta_returns_none_when_art_missing(monkeypatch):
+    """A non-empty BLANK_IMAGE_URL whose object 404s must fail safe (None)
+    without uploading metadata."""
+    import _economy_deps as deps
+
+    from lfg_core import config
+
+    monkeypatch.setattr(config, "BLANK_IMAGE_URL", "https://cdn/blank.png")
+    calls: list = []
+    _patch_head(monkeypatch, deps, 404, calls)
+
+    async def _fail_upload(*a, **k):
+        raise AssertionError("upload must not be called when the blank art is missing")
+
+    monkeypatch.setattr(deps, "_upload", _fail_upload)
+    assert _run(deps._blank_meta(2297)) is None
+    assert calls == ["https://cdn/blank.png"]
+    # Negative results are NOT cached — a later harvest re-checks.
+    assert deps._BLANK_ART_VERIFIED is False
+
+
+def test_blank_meta_head_success_uploads_and_caches(monkeypatch):
+    """A HEAD 200 lets metadata build; the positive result is cached so the HEAD
+    runs at most once per process."""
+    import _economy_deps as deps
+
+    from lfg_core import config
+
+    monkeypatch.setattr(config, "BLANK_IMAGE_URL", "https://cdn/blank.png")
+    calls: list = []
+    _patch_head(monkeypatch, deps, 200, calls)
+
+    uploaded: list = []
+
+    async def _ok_upload(path, data, content_type):
+        uploaded.append(path)
+        return f"https://cdn/{path}"
+
+    monkeypatch.setattr(deps, "_upload", _ok_upload)
+
+    assert _run(deps._blank_meta(2297)) is not None
+    assert deps._BLANK_ART_VERIFIED is True
+    # Second call: cache short-circuits the HEAD (still only one head call).
+    assert _run(deps._blank_meta(2298)) is not None
+    assert calls == ["https://cdn/blank.png"]
+    assert len(uploaded) == 2

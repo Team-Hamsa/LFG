@@ -70,8 +70,15 @@ def _hex(url: str) -> str:
 
 def build_closet_metadata(owner: str, assets: list[Asset], bodies: list[int]) -> dict[str, Any]:
     """The Closet NFToken metadata JSON. `lfg_closet` enumerates the loose
-    contents deterministically (assets sorted by (slot, value), bodies sorted)
-    so the same state always produces byte-identical metadata."""
+    contents deterministically (assets sorted by (slot, value)) so the same
+    state always produces byte-identical metadata.
+
+    Schema v2: bodies are ordinary `slot="Body"` rows inside `assets` (keyed by
+    body VALUE, e.g. "Milady", not by edition number), so `"bodies"` is normally
+    written empty. It carries integer editions only when a caller explicitly
+    passes UNRESOLVED legacy editions (ones not yet convertible via the frozen
+    genesis) — those must stay on the authoritative token until resolvable
+    rather than be dropped."""
     return {
         "schema": config.NFT_SCHEMA_URL,
         "name": f"LFG Closet — {owner}",
@@ -83,16 +90,30 @@ def build_closet_metadata(owner: str, assets: list[Asset], bodies: list[int]) ->
                 {"slot": slot, "value": value, "count": count}
                 for slot, value, count in sorted(assets)
             ],
-            "bodies": sorted(bodies),
+            # `type(b) is int` (not isinstance): bool subclasses int, so an
+            # untrusted True/False would otherwise serialize as edition 1/0.
+            "bodies": sorted(b for b in bodies if type(b) is int),
         },
     }
 
 
-def parse_closet_metadata(meta: dict[str, Any]) -> tuple[list[Asset], list[int]]:
-    """Inverse of build_closet_metadata: read (assets, bodies) back out of a
-    Closet NFToken's metadata. Tolerant of missing/garbage fields — anything
-    malformed yields empty lists rather than raising (the listener consumes
-    untrusted on-chain metadata). Tries lfg_closet first, falls back to lfg_bucket."""
+def parse_closet_metadata(
+    meta: dict[str, Any], genesis: Any | None = None
+) -> tuple[list[Asset], list[int]]:
+    """Inverse of build_closet_metadata: read (assets, legacy_editions) back out
+    of a Closet NFToken's metadata. Tolerant of missing/garbage fields —
+    anything malformed yields empty lists rather than raising (the listener
+    consumes untrusted on-chain metadata). Tries lfg_closet first, falls back
+    to lfg_bucket.
+
+    Schema v2: `"bodies"` may still hold legacy integer editions from a
+    pre-migration token. When `genesis` is given, each KNOWN legacy edition is
+    resolved via `genesis.edition_bodies` into a `("Body", value, count)` asset
+    row; editions NOT in the genesis are UNRESOLVED and returned in
+    `legacy_editions` (never dropped — the token is authoritative, so a
+    listener rebuild that discarded them would permanently lose those bodies).
+    Without a genesis, all legacy editions are returned unconverted so a caller
+    can decide how to handle them."""
     block = meta.get("lfg_closet")
     if not isinstance(block, dict):
         block = meta.get("lfg_bucket")  # backward compat: old Bucket tokens
@@ -107,11 +128,28 @@ def parse_closet_metadata(meta: dict[str, Any]) -> tuple[list[Asset], list[int]]
             slot, value, count = entry.get("slot"), entry.get("value"), entry.get("count")
             if isinstance(slot, str) and isinstance(value, str) and isinstance(count, int):
                 assets.append((slot, value, count))
-    bodies: list[int] = []
+    legacy_editions: list[int] = []
     raw_bodies = block.get("bodies")
     if isinstance(raw_bodies, list):
-        bodies = [b for b in raw_bodies if isinstance(b, int)]
-    return assets, bodies
+        # `type(b) is int` (not isinstance): exclude bools before any genesis
+        # resolution — a True in an untrusted on-chain list must never parse as
+        # edition 1 and inject a Body asset.
+        legacy_editions = [b for b in raw_bodies if type(b) is int]
+    if genesis is not None and legacy_editions:
+        from collections import Counter
+
+        body_counts: Counter[str] = Counter()
+        unresolved: list[int] = []
+        for edition in legacy_editions:
+            pair = genesis.edition_bodies.get(edition)
+            if pair:
+                body_counts[pair[0]] += 1
+            else:
+                unresolved.append(edition)
+        assets += [("Body", value, count) for value, count in sorted(body_counts.items())]
+        # Keep UNKNOWN editions on-record so a listener rebuild doesn't lose them.
+        legacy_editions = sorted(unresolved)
+    return assets, legacy_editions
 
 
 async def ensure_closet(

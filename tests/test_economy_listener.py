@@ -34,7 +34,7 @@ def _char_meta(edition: int, body: str = "Straight Blue") -> dict:
 
 def test_closet_modify_rebuilds_tables():
     conn = _conn()
-    meta = bt.build_closet_metadata("rUser", [("Head", "None", 2), ("Eyes", "Blue", 1)], [3536])
+    meta = bt.build_closet_metadata("rUser", [("Head", "None", 2), ("Eyes", "Blue", 1)], [])
 
     async def fetch_token(nft_id):
         return {
@@ -64,7 +64,8 @@ def test_closet_modify_rebuilds_tables():
     )
     assets = {(s, v): n for o, s, v, n in es.read_closet_assets(conn)}
     assert assets == {("Head", "None"): 2, ("Eyes", "Blue"): 1}
-    assert es.read_closet_bodies(conn) == [("rUser", 3536)]
+    # schema v2: build_closet_metadata never writes legacy body editions.
+    assert es.read_closet_bodies(conn) == []
     assert es.get_closet_token(conn, "rUser") == ("CLOSET", "AB")
 
 
@@ -577,6 +578,97 @@ def test_foreign_issuer_named_mint_logs_no_growth():
             conn, tx, fetch_token_fn=fetch_token, fetch_meta_fn=fetch_meta, genesis=genesis
         )
     )
+    assert es.read_supply_changes(conn) == []
+
+
+# --- Task 9: genesis wiring for legacy Closet metadata + blank-model Modify ---
+
+
+def test_closet_rebuild_converts_legacy_integer_bodies_with_genesis():
+    """A legacy-schema Closet token whose metadata still carries an integer
+    `bodies` list (pre-migration) must convert to a ("Body", value) asset row
+    on listener rebuild when the effective genesis is forwarded in."""
+    conn = _conn()
+    # build_closet_metadata (schema v2) never writes a non-empty "bodies" list
+    # (every caller passes []), so a legacy pre-migration token is constructed
+    # by hand here to exercise the conversion path.
+    meta = {
+        "lfg_closet": {
+            "assets": [],
+            "bodies": [3],
+        }
+    }
+
+    async def fetch_token(nft_id):
+        return {
+            "nft_id": "CLOSET_LEGACY",
+            "owner": "rUser",
+            "taxon": config.CLOSET_TAXON,
+            "uri_hex": "AB",
+            "issuer": config.SWAP_ISSUER_ADDRESS,
+        }
+
+    async def fetch_meta(uri_hex):
+        return meta
+
+    tx = {
+        "TransactionType": "NFTokenModify",
+        "NFTokenID": "CLOSET_LEGACY",
+        "meta": {"TransactionResult": "tesSUCCESS"},
+    }
+    genesis = te.Genesis(trait_counts={}, edition_bodies={3: ("Milady", "milady")})
+    _run(
+        nft_listener.apply_economy_tx(
+            conn,
+            tx,
+            fetch_token_fn=fetch_token,
+            fetch_meta_fn=fetch_meta,
+            genesis=genesis,
+        )
+    )
+    assets = {(s, v): n for o, s, v, n in es.read_closet_assets(conn)}
+    assert assets.get(("Body", "Milady")) == 1
+    # legacy bodies list must not also land in closet_bodies once converted.
+    assert es.read_closet_bodies(conn) == []
+
+
+def test_character_modify_to_blank_writes_no_economy_rows():
+    """A character NFTokenModify (blank-harvest strip-in-place) is not a Closet
+    or trait-token taxon, so it must leave closet_assets/trait_tokens
+    completely untouched -- no spurious economy writes."""
+    conn = _conn()
+
+    async def fetch_token(nft_id):
+        return {
+            "nft_id": "CHAR_BLANKED",
+            "owner": "rUser",
+            "taxon": config.SWAP_TAXON,
+            "uri_hex": "CD",
+            "issuer": config.SWAP_ISSUER_ADDRESS,
+        }
+
+    async def fetch_meta(uri_hex):
+        # Blanked character metadata: no trait attributes of interest.
+        return {"name": "LFG #42", "attributes": []}
+
+    tx = {
+        "TransactionType": "NFTokenModify",
+        "NFTokenID": "CHAR_BLANKED",
+        "meta": {"TransactionResult": "tesSUCCESS"},
+    }
+    genesis = te.Genesis(trait_counts={}, edition_bodies={42: ("Straight Blue", "male")})
+    _run(
+        nft_listener.apply_economy_tx(
+            conn,
+            tx,
+            fetch_token_fn=fetch_token,
+            fetch_meta_fn=fetch_meta,
+            genesis=genesis,
+        )
+    )
+    assert es.read_closet_assets(conn) == []
+    assert es.read_closet_bodies(conn) == []
+    assert es.read_trait_tokens(conn) == []
     assert es.read_supply_changes(conn) == []
 
 

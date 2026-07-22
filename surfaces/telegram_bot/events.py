@@ -57,11 +57,11 @@ def make_announcement(ev: Event) -> str:
     if ev.type == "swap.failed":
         return f"❌ {name}'s trait swap failed."
     if ev.type == "assemble.completed":
-        return f"🛠️ {name} assembled a new character."
+        return f"🛠️ {name} dressed a blank into #{data.get('edition', '?')}."
     if ev.type == "assemble.failed":
         return f"❌ {name}'s assemble failed."
     if ev.type == "harvest.completed":
-        return f"🌾 {name} harvested a character into their closet."
+        return f"🌾 {name} stripped a character down to a blank."
     if ev.type == "harvest.failed":
         return f"❌ {name}'s harvest failed."
     if ev.type == "equip.completed":

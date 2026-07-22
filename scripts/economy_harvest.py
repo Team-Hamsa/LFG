@@ -1,5 +1,7 @@
 #!/usr/bin/env python3
-"""Harvest a live character into its owner's Closet (burn -> assets to Closet).
+"""Harvest a live character into its owner's Closet (NFTokenModify strip to a
+blank; legacy non-mutable tokens get a one-time burn + remint-as-blank upgrade).
+All 8 non-body values plus the body drop into the Closet as loose assets.
 
   python scripts/economy_harvest.py --network testnet --owner rUSER --nft-id 00...
 

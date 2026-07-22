@@ -58,7 +58,7 @@ def format_economy_report(
         lines.append("_None._")
     lines.append("")
 
-    lines.append("## Trait conservation drift (census − genesis)")
+    lines.append("## Trait conservation drift (census − genesis, incl. Body)")
     lines.append("")
     if conservation.trait_drift:
         lines.append("| Slot | Value | Drift |")
@@ -69,29 +69,7 @@ def format_economy_report(
         lines.append("_None._")
     lines.append("")
 
-    lines.append("## Body conservation drift (edition presence ≠ 1)")
-    lines.append("")
-    if conservation.body_drift:
-        lines.append("| Edition | Places |")
-        lines.append("| --- | --- |")
-        for ed, presence in sorted(conservation.body_drift.items()):
-            lines.append(f"| {ed} | {presence} |")
-    else:
-        lines.append("_None._")
-    lines.append("")
-
-    lines.append("## Wrong body (live edition body ≠ genesis)")
-    lines.append("")
-    if completeness.wrong_body:
-        lines.append("| Edition | Found | Expected |")
-        lines.append("| --- | --- | --- |")
-        for ed, (found, expected) in sorted(completeness.wrong_body.items()):
-            lines.append(f"| {ed} | {found} | {expected} |")
-    else:
-        lines.append("_None._")
-    lines.append("")
-
-    lines.append("## Orphan bodies (live edition not in genesis)")
+    lines.append("## Orphan bodies (dressed live edition not in genesis)")
     lines.append("")
     lines.append(
         ", ".join(str(e) for e in completeness.orphan_bodies) if completeness.orphan_bodies else "—"
@@ -142,7 +120,6 @@ def main() -> int:
     census = trait_economy.asset_census(
         canonical,
         economy_store.read_closet_assets(conn),
-        economy_store.read_closet_bodies(conn),
         economy_store.read_trait_tokens(conn),
     )
     conservation = trait_economy.verify_conservation(genesis, census, supply_changes)

@@ -1,10 +1,12 @@
 #!/usr/bin/env python3
-"""Assemble (rebirth) an edition: body + a full asset set from the Closet -> mint.
+"""Assemble: dress a caller-owned BLANK edition in place with a body + a full
+asset set from the Closet (NFTokenModify — no mint/offer/accept).
 
   python scripts/economy_assemble.py --network testnet --owner rUSER --edition 42 \\
       --set Background=Blue --set Back=None --set Clothing=Hoodie ... (all 8 slots)
 
-The body is taken from the (effective) genesis ledger. Operations are free.
+The target edition must already be a live blank (harvest it first). The body is
+taken from the (effective) genesis ledger. Operations are free.
 """
 
 from __future__ import annotations
@@ -43,22 +45,30 @@ async def _amain(args: argparse.Namespace) -> int:
     if body is None:
         print(f"Edition {args.edition} has no known body in genesis.")
         return 2
-    live_editions = {r.nft_number for r in nft_index.live_nfts(conn) if r.nft_number is not None}
+    character = nft_index.nft_by_number(conn, args.edition)
+    if character is None:
+        print(f"Edition {args.edition} not found in the on-chain index.")
+        return 2
+    if character.owner != args.owner:
+        print(f"Edition {args.edition} is not owned by {args.owner}.")
+        return 2
     session = economy_flow.AssembleSession(
         owner=args.owner,
-        edition=args.edition,
+        character=character,
         chosen=_parse_set(args.set),
         body_value=body[0],
         body_class=body[1],
-        live_editions=live_editions,
     )
+    if not trait_economy.is_blank(character):
+        print(f"Edition {args.edition} is not blank — harvest it first.")
+        return 2
     await economy_flow.run_assemble(session, deps.build_economy_deps(conn))
     print(f"State: {session.state}")
     if session.error:
         print(f"Error: {session.error}")
+    # Assemble dresses the blank in place (NFTokenModify) — no new mint/offer.
     for r in session.results:
-        accept = (r.get("accept") or {}).get("xumm_url")
-        print(f"Minted {r['nft_id']} — accept: {accept}")
+        print(f"Dressed {r['nft_id']} in place — image: {r.get('image_url')}")
     return 0 if session.state == economy_flow.DONE else 1
 
 

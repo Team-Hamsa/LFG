@@ -87,7 +87,10 @@ def test_read_economy_state_shape():
     assert state["characters"][0]["image_url"] == "https://cdn.example/3537.png"
     assert state["characters"][0]["mutable"] is True
     assert state["closet"]["assets"][0] == {"slot": "Head", "value": "Halo", "count": 2}
-    assert state["closet"]["bodies"] == [42]
+    # Blank model (Task 8): closet payload no longer carries a "bodies" list.
+    assert "bodies" not in state["closet"]
+    # A character with a real trait value is not blank.
+    assert state["characters"][0]["blank"] is False
     assert state["trait_order"][0] == "Background"
     assert "Body" not in state["slots"]
 
@@ -97,7 +100,7 @@ def test_read_economy_state_excludes_other_owners():
     state = economy_api.read_economy_state(conn, "rNobody")
     assert state["characters"] == []
     assert state["closet"]["assets"] == []
-    assert state["closet"]["bodies"] == []
+    assert "bodies" not in state["closet"]
 
 
 def test_equip_session_dict():
@@ -111,7 +114,7 @@ def test_equip_session_dict():
 
 def test_assemble_session_dict_surfaces_accept_link():
     s = economy_flow.AssembleSession(
-        owner="rOwner", edition=42, chosen={}, body_value="male", body_class="male"
+        owner="rOwner", character=_char(), chosen={}, body_value="male", body_class="male"
     )
     s.results = [
         {
@@ -464,51 +467,139 @@ def test_start_harvest_rejects_without_active_closet(monkeypatch):
     asyncio.get_event_loop().run_until_complete(go())
 
 
-def test_start_assemble_rejects_without_active_closet(monkeypatch):
-    """start_assemble raises EconomyError if the owner has no active Closet."""
-    conn = _seed_conn()  # no closet_tokens row -> no active closet
-    # Seed genesis so the edition lookup doesn't fail before the closet gate
+# --- Task 8: blank flag + start_assemble (dress a caller-owned blank) ---
+
+
+def _seed_blank_conn():
+    """A blank male character (edition 3537, nft_id "A") owned by rOwner, with a
+    frozen genesis so body_class_map resolves 'male'."""
     from lfg_core import trait_economy
 
+    conn = nft_index.init_db(":memory:")
+    economy_store.init_economy_schema(conn)
+    nft_index.upsert(
+        conn,
+        OnchainNft(
+            nft_id="A",
+            nft_number=3537,
+            owner="rOwner",
+            is_burned=False,
+            mutable=True,
+            uri_hex="",
+            body="male",
+            attributes=trait_economy.blank_attributes(),
+            image="",
+            ledger_index=1,
+        ),
+    )
     economy_store.freeze_genesis(
         conn,
-        trait_economy.Genesis(
-            trait_counts={("Head", "Crown"): 1},
-            edition_bodies={3537: ("male", "male")},
-        ),
+        trait_economy.Genesis(trait_counts={}, edition_bodies={3537: ("male", "male")}),
         {},
     )
+    return conn
+
+
+def test_read_economy_state_flags_blank_character():
+    conn = _seed_blank_conn()
+    state = economy_api.read_economy_state(conn, "rOwner")
+    assert state["characters"][0]["blank"] is True
+
+
+def test_start_assemble_happy_schedules_session(monkeypatch):
+    conn = _seed_blank_conn()
     monkeypatch.setattr(economy_api, "open_conn", lambda: conn)
+    _stub_permissive_layer_store(monkeypatch)
+
+    captured = {}
+
+    async def fake_run_assemble(session, deps):
+        captured["session"] = session
+        session.state = economy_flow.DONE
+
+    monkeypatch.setattr(economy_flow, "run_assemble", fake_run_assemble)
+    from scripts import _economy_deps
+
+    monkeypatch.setattr(
+        _economy_deps, "build_economy_deps", lambda c, user_token=None, owner=None: object()
+    )
 
     async def go():
-        with pytest.raises(economy_api.EconomyError, match="Closet"):
-            await economy_api.start_assemble("123", "rOwner", 3537, {"Head": "Crown"})
+        ws = await economy_api.start_assemble(
+            "123", "rOwner", "A", "male", {"Head": "Halo", "Clothing": "Suit"}
+        )
+        await asyncio.sleep(0)
+        return ws
+
+    ws = asyncio.get_event_loop().run_until_complete(go())
+    assert ws.kind == "assemble" and ws.discord_id == "123"
+    s = captured["session"]
+    assert s.body_value == "male" and s.body_class == "male"
+    assert s.chosen == {"Head": "Halo", "Clothing": "Suit"}
+    assert s.character.nft_id == "A"
+
+
+def test_start_assemble_unknown_body_raises(monkeypatch):
+    conn = _seed_blank_conn()
+    monkeypatch.setattr(economy_api, "open_conn", lambda: conn)
+    _stub_permissive_layer_store(monkeypatch)
+
+    async def go():
+        with pytest.raises(economy_api.EconomyError, match="unknown body"):
+            await economy_api.start_assemble("123", "rOwner", "A", "alien", {})
 
     asyncio.get_event_loop().run_until_complete(go())
 
 
-def test_assemble_prefill_rejects_without_active_closet():
-    """assemble_prefill gates on an active Closet up front, like start_assemble
-    (the commit path) — even when a body is present, no active Closet means the
-    prefill must raise rather than propose a set start_assemble would reject."""
-    conn = _seed_conn()  # no closet_tokens row -> no active closet
+def test_start_assemble_dressed_target_rejected_in_flow(monkeypatch):
+    """A non-blank (dressed) target is rejected inside run_assemble: te.can_assemble
+    fails fast and the session surfaces 'not blank — harvest it first'."""
+    conn = _seed_conn()  # nft_id "A" holds a real Head=Crown -> not blank
     from lfg_core import trait_economy
 
     economy_store.freeze_genesis(
         conn,
-        trait_economy.Genesis(
-            trait_counts={("Head", "Crown"): 1},
-            edition_bodies={3537: ("male", "male")},
-        ),
+        trait_economy.Genesis(trait_counts={}, edition_bodies={3537: ("male", "male")}),
         {},
     )
-    economy_store.set_closet_contents(conn, "rOwner", [("Head", "Crown", 1)], [3537])
+    economy_store.set_closet_token(conn, "rOwner", "NFT_CLOSET", "deadbeef", status="active")
+    monkeypatch.setattr(economy_api, "open_conn", lambda: conn)
+    _stub_permissive_layer_store(monkeypatch)
+
+    async def _noop(*a, **k):
+        return None
+
+    def fake_deps(c, user_token=None, owner=None):
+        return economy_flow.EconomyDeps(
+            conn=c,
+            closet_upload_fn=_noop,
+            closet_mint_fn=_noop,
+            closet_offer_fn=_noop,
+            closet_accept_fn=_noop,
+            closet_modify_fn=_noop,
+            char_compose_fn=_noop,
+            char_mint_fn=_noop,
+            char_modify_fn=_noop,
+            char_burn_fn=_noop,
+            char_offer_fn=_noop,
+            char_accept_fn=_noop,
+        )
+
+    from scripts import _economy_deps
+
+    monkeypatch.setattr(_economy_deps, "build_economy_deps", fake_deps)
 
     async def go():
-        with pytest.raises(economy_api.EconomyError, match="Closet"):
-            await economy_api.assemble_prefill(conn, "rOwner")
+        ws = await economy_api.start_assemble(
+            "123", "rOwner", "A", "male", dict.fromkeys(trait_economy.NON_BODY_SLOTS, "None")
+        )
+        await asyncio.sleep(0)
+        await asyncio.sleep(0)
+        return ws
 
-    asyncio.get_event_loop().run_until_complete(go())
+    ws = asyncio.get_event_loop().run_until_complete(go())
+    assert ws.inner.state == economy_flow.FAILED
+    assert "not blank" in (ws.inner.error or "")
 
 
 # --- Task 6: start_closet returns session-like dict ---
@@ -833,36 +924,6 @@ def test_start_equip_accepts_matrix_permitted_foreign_value(monkeypatch, body_ga
     assert captured.get("ran") is True
 
 
-def test_start_assemble_rejects_incompatible_asset_in_set(monkeypatch, body_gate_store):
-    """assemble must gate EVERY asset in the requested set: a female-only
-    Clothing value in the chosen set for a male-bodied edition is rejected,
-    even though every other slot in the set is the legal 'None' asset."""
-    from lfg_core import trait_economy
-
-    conn = nft_index.init_db(":memory:")
-    economy_store.init_economy_schema(conn)
-    edition = 99
-    economy_store.freeze_genesis(
-        conn,
-        trait_economy.Genesis(trait_counts={}, edition_bodies={edition: ("male", "male")}),
-        {},
-    )
-    economy_store.set_closet_token(conn, "rOwner", "NFT_CLOSET", "deadbeef", status="active")
-    chosen = dict.fromkeys(trait_economy.NON_BODY_SLOTS, "None")
-    chosen["Clothing"] = "Summer Dress"
-    economy_store.set_closet_contents(
-        conn, "rOwner", [(slot, value, 1) for slot, value in chosen.items()], [edition]
-    )
-    monkeypatch.setattr(economy_api, "open_conn", lambda: conn)
-    monkeypatch.setattr(economy_api.layer_store, "get_layer_store", lambda: body_gate_store)
-
-    async def go():
-        with pytest.raises(economy_api.EconomyError, match="does not fit"):
-            await economy_api.start_assemble("123", "rOwner", edition, chosen)
-
-    asyncio.get_event_loop().run_until_complete(go())
-
-
 # --- Fix (review, PR #125): conn must close on every reject between
 # open_conn() and _schedule(), including the body-affinity gate ---
 
@@ -939,127 +1000,29 @@ def test_start_equip_closes_conn_on_body_affinity_reject(monkeypatch, body_gate_
     )
 
 
-def test_start_assemble_closes_conn_on_body_affinity_reject(monkeypatch, body_gate_store):
-    """Regression: the per-slot _require_body_affinity loop rejecting an
-    assemble request AFTER open_conn() but BEFORE _schedule() must still
-    close the conn -- this leaked before the try/except wrap in
-    start_assemble."""
-    from lfg_core import trait_economy
-
-    tracked = _tracked_char_conn()
-    edition = 99
-    economy_store.freeze_genesis(
-        tracked,
-        trait_economy.Genesis(trait_counts={}, edition_bodies={edition: ("male", "male")}),
-        {},
-    )
-    economy_store.set_closet_token(tracked, "rOwner", "NFT_CLOSET", "deadbeef", status="active")
-    chosen = dict.fromkeys(trait_economy.NON_BODY_SLOTS, "None")
-    chosen["Clothing"] = "Summer Dress"
-    economy_store.set_closet_contents(
-        tracked, "rOwner", [(slot, value, 1) for slot, value in chosen.items()], [edition]
-    )
-    monkeypatch.setattr(economy_api, "open_conn", lambda: tracked)
-    monkeypatch.setattr(economy_api.layer_store, "get_layer_store", lambda: body_gate_store)
-
-    async def go():
-        with pytest.raises(economy_api.EconomyError, match="does not fit"):
-            await economy_api.start_assemble("123", "rOwner", edition, chosen)
-
-    asyncio.get_event_loop().run_until_complete(go())
-    assert tracked.close_count == 1, (
-        f"expected conn.close() called exactly once on reject, got {tracked.close_count}"
-    )
+# --- Task 8: harvest session dict surfaces the legacy-upgrade accept ---
 
 
-# --- Assemble prefill (server-side auto-fill for the Build panel's + tile) ---
-# The client cannot know body affinity (that lives in trait_config +
-# swap_compose.resolve_layer), so it asks the server which edition/asset set
-# to propose instead of blindly picking the first asset per slot.
+def test_harvest_session_dict_carries_legacy_accept():
+    """A legacy (non-mutable) harvest remints the edition as a mutable blank and
+    offers it back — the session dict must surface the one-time-upgrade accept
+    QR/push + new_nft_id so the client can prompt the sign."""
+    s = economy_flow.HarvestSession(owner="rOwner", character=_char(), burnable=True)
+    s.state = economy_flow.DONE
+    s.legacy_upgrade = True
+    s.new_nft_id = "NEWBLANK"
+    s.accept = {"xumm_url": "https://xaman/upgrade", "push": True}
+    s.moved_assets = [("Body", "male")]
+    d = economy_api.economy_session_dict("harvest", s)
+    assert d["accept"] == "https://xaman/upgrade"
+    assert d["accept_push"] is True
+    assert d["new_nft_id"] == "NEWBLANK"
+    assert d["moved_assets"] == [("Body", "male")]
 
 
-def _prefill_conn(edition_bodies, assets, bodies):
-    from lfg_core import trait_economy
-
-    conn = nft_index.init_db(":memory:")
-    economy_store.init_economy_schema(conn)
-    economy_store.freeze_genesis(
-        conn,
-        trait_economy.Genesis(trait_counts={}, edition_bodies=edition_bodies),
-        {},
-    )
-    economy_store.set_closet_token(conn, "rOwner", "NFT_CLOSET", "deadbeef", status="active")
-    economy_store.set_closet_contents(conn, "rOwner", assets, bodies)
-    return conn
-
-
-def test_assemble_prefill_skips_incompatible_asset(monkeypatch, body_gate_store):
-    """Prefill must skip a female-only Clothing asset when filling a
-    male-bodied edition and fall through to the next compatible asset --
-    the exact bug behind 'Davy Jones Beard does not fit a skeleton body'."""
-    from lfg_core import trait_economy
-
-    edition = 99
-    assets = [(s, "None", 1) for s in trait_economy.NON_BODY_SLOTS if s != "Clothing"]
-    # Incompatible asset first: the naive "first asset with count>0" pick fails.
-    assets += [("Clothing", "Summer Dress", 1), ("Clothing", "Hoodie", 1)]
-    conn = _prefill_conn({edition: ("male", "male")}, assets, [edition])
-    monkeypatch.setattr(economy_api.layer_store, "get_layer_store", lambda: body_gate_store)
-
-    pre = asyncio.get_event_loop().run_until_complete(economy_api.assemble_prefill(conn, "rOwner"))
-    assert pre["edition"] == edition
-    assert pre["body"] == "male"
-    assert pre["chosen"]["Clothing"] == "Hoodie"
-    assert pre["missing"] == []
-    # The proposed set must actually pass the commit-path gate.
-    from lfg_core.trait_economy import can_assemble, effective_genesis
-
-    genesis = effective_genesis(
-        economy_store.read_genesis(conn), economy_store.read_supply_changes(conn)
-    )
-    owned = {(s, v): c for (o, s, v, c) in economy_store.read_closet_assets(conn) if o == "rOwner"}
-    assert can_assemble(edition, pre["chosen"], {edition}, owned, set(), genesis).ok
-
-
-def test_assemble_prefill_reports_missing_slot(monkeypatch, body_gate_store):
-    """When no compatible asset exists for a slot, prefill reports the slot
-    as missing instead of proposing a set the server would reject."""
-    from lfg_core import trait_economy
-
-    edition = 99
-    assets = [(s, "None", 1) for s in trait_economy.NON_BODY_SLOTS if s != "Clothing"]
-    assets += [("Clothing", "Summer Dress", 1)]  # female-only; male body can't use it
-    conn = _prefill_conn({edition: ("male", "male")}, assets, [edition])
-    monkeypatch.setattr(economy_api.layer_store, "get_layer_store", lambda: body_gate_store)
-
-    pre = asyncio.get_event_loop().run_until_complete(economy_api.assemble_prefill(conn, "rOwner"))
-    assert pre["missing"] == ["Clothing"]
-    assert pre["body"] == "male"
-
-
-def test_assemble_prefill_prefers_fully_fillable_body(monkeypatch, body_gate_store):
-    """With two closet bodies, prefill returns the first edition whose set
-    fills completely -- here the female body, whose dir holds Summer Dress --
-    rather than stopping at the male body with a missing Clothing slot."""
-    from lfg_core import trait_economy
-
-    assets = [(s, "None", 1) for s in trait_economy.NON_BODY_SLOTS if s != "Clothing"]
-    assets += [("Clothing", "Summer Dress", 1)]
-    conn = _prefill_conn({99: ("male", "male"), 100: ("female", "female")}, assets, [99, 100])
-    monkeypatch.setattr(economy_api.layer_store, "get_layer_store", lambda: body_gate_store)
-
-    pre = asyncio.get_event_loop().run_until_complete(economy_api.assemble_prefill(conn, "rOwner"))
-    assert pre["edition"] == 100
-    assert pre["chosen"]["Clothing"] == "Summer Dress"
-    assert pre["missing"] == []
-
-
-def test_assemble_prefill_no_bodies_raises(monkeypatch, body_gate_store):
-    conn = _prefill_conn({}, [("Head", "Halo", 1)], [])
-    monkeypatch.setattr(economy_api.layer_store, "get_layer_store", lambda: body_gate_store)
-
-    async def go():
-        with pytest.raises(economy_api.EconomyError, match="[Nn]o bodies"):
-            await economy_api.assemble_prefill(conn, "rOwner")
-
-    asyncio.get_event_loop().run_until_complete(go())
+def test_harvest_session_dict_mutable_path_no_accept():
+    """The mutable path modifies in place — no remint/offer, so accept is None."""
+    s = economy_flow.HarvestSession(owner="rOwner", character=_char(), burnable=False)
+    s.state = economy_flow.DONE
+    d = economy_api.economy_session_dict("harvest", s)
+    assert d["accept"] is None and d["accept_push"] is None and d["new_nft_id"] is None
