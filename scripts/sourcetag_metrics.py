@@ -171,58 +171,61 @@ def validate_payload(payload: dict[str, Any]) -> None:
     if unexpected:
         raise ValueError(f"unexpected key(s) in payload: {sorted(unexpected)}")
 
-    # Every check below only fires when its key is present: ALLOWED_KEYS is a
-    # whitelist of what MAY appear (enforced unconditionally above), not a
-    # requirement that every key appear (push_to_github callers may pass a
-    # partial payload, e.g. in tests). A field that IS present must still
-    # match its whitelisted shape.
+    # ALLOWED_KEYS is both a whitelist (enforced above) and a completeness
+    # requirement: every published snapshot must carry every known field, so a
+    # future change that drops a field (or forgets to add a new one to the
+    # payload) cannot silently publish an incomplete document. Only these two
+    # fields may be present-but-null; every other key must be present and
+    # non-null.
+    missing = ALLOWED_KEYS - set(payload)
+    if missing:
+        raise ValueError(f"missing required key(s): {sorted(missing)}")
+
+    _NULLABLE_KEYS = {"first_tagged_tx", "archive_max_close_time"}
+    for key in ALLOWED_KEYS - _NULLABLE_KEYS:
+        if payload[key] is None:
+            raise ValueError(f"{key} must not be null")
+
     def _int(key: str) -> None:
-        if key not in payload:
-            return
         if not isinstance(payload[key], int) or isinstance(payload[key], bool):
             raise ValueError(f"{key} must be an int")
 
     for key in ("source_tag", "total_tagged_txs", "unique_wallets"):
         _int(key)
 
-    if "network" in payload and not _NETWORK_RE.match(str(payload["network"])):
+    if not _NETWORK_RE.match(str(payload["network"])):
         raise ValueError("network must be a bare lowercase name")
 
-    if "by_type" in payload:
-        by_type = payload["by_type"]
-        if not isinstance(by_type, dict):
-            raise ValueError("by_type must be a dict")
-        for name, count in by_type.items():
-            if not _TX_TYPE_RE.match(str(name)) or not isinstance(count, int):
-                raise ValueError(f"bad by_type entry: {name!r}")
+    by_type = payload["by_type"]
+    if not isinstance(by_type, dict):
+        raise ValueError("by_type must be a dict")
+    for name, count in by_type.items():
+        if not _TX_TYPE_RE.match(str(name)) or not isinstance(count, int):
+            raise ValueError(f"bad by_type entry: {name!r}")
 
-    if "daily" in payload:
-        daily = payload["daily"]
-        if not isinstance(daily, list):
-            raise ValueError("daily must be a list")
-        for entry in daily:
-            if set(entry) != {"date", "count"}:
-                raise ValueError(f"bad daily entry: {entry!r}")
-            if not _DATE_RE.match(str(entry["date"])) or not isinstance(entry["count"], int):
-                raise ValueError(f"bad daily entry: {entry!r}")
+    daily = payload["daily"]
+    if not isinstance(daily, list):
+        raise ValueError("daily must be a list")
+    for entry in daily:
+        if set(entry) != {"date", "count"}:
+            raise ValueError(f"bad daily entry: {entry!r}")
+        if not _DATE_RE.match(str(entry["date"])) or not isinstance(entry["count"], int):
+            raise ValueError(f"bad daily entry: {entry!r}")
 
-    if "excluded" in payload:
-        excluded = payload["excluded"]
-        if not isinstance(excluded, list) or not all(_ADDRESS_RE.match(str(a)) for a in excluded):
-            raise ValueError("excluded must be a list of XRPL addresses")
+    excluded = payload["excluded"]
+    if not isinstance(excluded, list) or not all(_ADDRESS_RE.match(str(a)) for a in excluded):
+        raise ValueError("excluded must be a list of XRPL addresses")
 
-    if "first_tagged_tx" in payload:
-        first = payload["first_tagged_tx"]
-        if first is not None and not _DATE_RE.match(str(first)):
-            raise ValueError("first_tagged_tx must be YYYY-MM-DD or null")
+    first = payload["first_tagged_tx"]
+    if first is not None and not _DATE_RE.match(str(first)):
+        raise ValueError("first_tagged_tx must be YYYY-MM-DD or null")
 
-    if "archive_max_close_time" in payload:
-        newest = payload["archive_max_close_time"]
-        if newest is not None and not _ISO_RE.match(str(newest)):
-            raise ValueError("archive_max_close_time must be ISO-8601 or null")
+    newest = payload["archive_max_close_time"]
+    if newest is not None and not _ISO_RE.match(str(newest)):
+        raise ValueError("archive_max_close_time must be ISO-8601 or null")
 
-    if "as_of" in payload and not isinstance(payload["as_of"], str):
-        raise ValueError("as_of must be a string")
+    if not isinstance(payload["as_of"], str) or not _ISO_RE.match(payload["as_of"]):
+        raise ValueError("as_of must be an ISO-8601 string")
 
 
 def _b64(text: str) -> str:
