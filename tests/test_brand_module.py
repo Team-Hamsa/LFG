@@ -1,5 +1,6 @@
 # Tests for scripts/_brand.py — the shared badge vocabulary. Stdlib only:
 # this module must import cleanly on a bare CI runner with no .env.
+import ast
 import importlib
 import os
 import sys
@@ -9,15 +10,27 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 brand = importlib.import_module("scripts._brand")
 
+_BRAND_PATH = os.path.join(
+    os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "scripts", "_brand.py"
+)
 
-def test_module_has_no_lfg_core_dependency():
-    src = open(
-        os.path.join(
-            os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "scripts", "_brand.py"
-        )
-    ).read()
-    assert "lfg_core" not in src
-    assert "dotenv" not in src
+
+def test_module_imports_only_stdlib():
+    """_brand.py must import cleanly on a bare CI runner with no .env, so it
+    can never pull in lfg_core's config (which requires secrets). Check what
+    the module actually imports (AST) rather than grepping its source text —
+    a substring search on prose false-positived on this before."""
+    tree = ast.parse(open(_BRAND_PATH).read(), filename=_BRAND_PATH)
+    top_level_names: set[str] = set()
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Import):
+            for alias in node.names:
+                top_level_names.add(alias.name.split(".")[0])
+        elif isinstance(node, ast.ImportFrom):
+            if node.module:
+                top_level_names.add(node.module.split(".")[0])
+    for name in top_level_names:
+        assert name == "__future__" or name in sys.stdlib_module_names
 
 
 def test_palette_contains_every_colour_constant():
@@ -71,3 +84,35 @@ def test_sparkline_skips_zero_values():
         if p.startswith("<rect")
     ]
     assert bars == []
+
+
+def test_stat_tiles_empty_returns_empty_list():
+    assert brand.stat_tiles(0.0, 0, 100.0, []) == []
+
+
+def test_stat_tiles_single_tile_does_not_crash():
+    parts = brand.stat_tiles(24.0, 72, 672.0, [("16", "wallets", brand.BLUE)])
+    assert len(parts) == 4
+
+
+def test_sparkline_empty_series_returns_only_baseline():
+    parts = brand.sparkline(0.0, 100, 100.0, [], brand.ORANGE)
+    assert len(parts) == 1
+    assert parts[0].startswith("<line")
+    assert not any(p.startswith("<rect") for p in parts)
+
+
+def test_sparkline_single_element_series_produces_one_bar():
+    bars = [p for p in brand.sparkline(0.0, 100, 100.0, [5], brand.ORANGE) if p.startswith("<rect")]
+    assert len(bars) == 1
+
+
+def test_sparkline_all_identical_nonzero_series_produces_full_height_bars():
+    series = [3, 3, 3, 3]
+    bars = [
+        p for p in brand.sparkline(0.0, 100, 100.0, series, brand.ORANGE, max_bar_h=26)
+        if p.startswith("<rect")
+    ]
+    assert len(bars) == len(series)
+    for bar in bars:
+        assert 'height="26.0"' in bar

@@ -79,6 +79,8 @@ def title_block(pad: int, title: str, subtitle: str) -> list[str]:
 
 def stat_tiles(x: float, y: int, area_w: float, tiles: list[tuple[str, str, str]]) -> list[str]:
     """Evenly spaced tiles: big brand-coloured number over a muted label."""
+    if not tiles:
+        return []
     parts: list[str] = []
     tile_h, gap = 60, 16
     tile_w = (area_w - gap * (len(tiles) - 1)) / len(tiles)
