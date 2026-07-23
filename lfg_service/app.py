@@ -3657,6 +3657,65 @@ async def handle_bulk_mint_unit_accept(request):
     )
 
 
+def _pending_offer_row(
+    o: dict[str, Any], char_network: str, econ_network: str, cfg: Any
+) -> dict[str, Any]:
+    """Enrich one claimable offer with display metadata by on-chain membership,
+    mirroring the marketplace's per-kind resolution (see _resolve_ownable):
+    onchain_nfts (character net) first, then trait_tokens (economy net).
+
+    A character resolves to nft_number + CDN image. An Extract-minted trait
+    token is unknown to onchain_nfts but lives in trait_tokens — without this
+    branch it fell through to nft_number=None/image=None and the tray rendered
+    the raw nft_id with no art. Trait rows carry slot/value + a same-origin
+    /api/layer thumbnail (image_url), exactly like the marketplace/shop tiles.
+    A token unknown to both keeps the bare fallback (kind=None)."""
+    conn = nft_index.init_db(nft_index.index_db_path(char_network))
+    try:
+        meta = conn.execute(
+            "SELECT nft_number, image FROM onchain_nfts WHERE nft_id = ?", (o["nft_id"],)
+        ).fetchone()
+    finally:
+        conn.close()
+    if meta is not None:
+        return {
+            "offer_index": o["offer_index"],
+            "nft_id": o["nft_id"],
+            "kind": "character",
+            "nft_number": meta[0],
+            "image": meta[1],
+            "amount": o["amount"],
+        }
+    conn = nft_index.init_db(nft_index.index_db_path(econ_network))
+    try:
+        economy_store.init_economy_schema(conn)
+        trow = conn.execute(
+            "SELECT slot, value FROM trait_tokens WHERE nft_id = ?", (o["nft_id"],)
+        ).fetchone()
+    finally:
+        conn.close()
+    if trow is not None:
+        slot, value = trow[0], trow[1]
+        return {
+            "offer_index": o["offer_index"],
+            "nft_id": o["nft_id"],
+            "kind": "trait",
+            "nft_number": None,
+            "slot": slot,
+            "value": value,
+            "image_url": _trait_image_url(cfg, slot, value),
+            "amount": o["amount"],
+        }
+    return {
+        "offer_index": o["offer_index"],
+        "nft_id": o["nft_id"],
+        "kind": None,
+        "nft_number": None,
+        "image": None,
+        "amount": o["amount"],
+    }
+
+
 @require_wallet
 async def handle_pending_offers(request):
     """Pending-offers tray (#218): every live gift offer destination-locked to
@@ -3664,6 +3723,11 @@ async def handle_pending_offers(request):
     Ledger-driven — survives service restarts, session pruning, and webview
     relaunches (the #215 bulk accept list did not). Offers carry no
     Expiration, so this is the durable claim-later surface.
+
+    Rows resolve per-kind (see _pending_offer_row): character editions from
+    onchain_nfts (XRPL_NETWORK), Extract-minted trait tokens from trait_tokens
+    (ECONOMY_NETWORK) so the tray shows the trait art + slot/value, not a bare
+    nft_id.
 
     Dev mode has no ledger: answers an empty tray (the tray is additive UI —
     nothing else depends on it)."""
@@ -3678,27 +3742,11 @@ async def handle_pending_offers(request):
             {"error": "offer lookup failed", "code": "pending_unavailable"}, status=503
         )
     claimable = xrpl_ops.filter_claimable_offers(offers, wallet, time.time())
+    cfg = trait_config.get_config()
     rows = []
     try:
-        conn = nft_index.init_db(nft_index.index_db_path(config.XRPL_NETWORK))
-        try:
-            for o in claimable:
-                cur = conn.execute(
-                    "SELECT nft_number, image FROM onchain_nfts WHERE nft_id = ?",
-                    (o["nft_id"],),
-                )
-                meta = cur.fetchone()
-                rows.append(
-                    {
-                        "offer_index": o["offer_index"],
-                        "nft_id": o["nft_id"],
-                        "nft_number": meta[0] if meta else None,
-                        "image": meta[1] if meta else None,
-                        "amount": o["amount"],
-                    }
-                )
-        finally:
-            conn.close()
+        for o in claimable:
+            rows.append(_pending_offer_row(o, config.XRPL_NETWORK, config.ECONOMY_NETWORK, cfg))
     except Exception as e:
         # A locked/corrupt index is the same availability failure as a ledger
         # blip — the documented 503, not an unstructured 500 (Greptile P1).
