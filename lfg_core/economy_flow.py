@@ -770,6 +770,7 @@ async def run_assemble(session: AssembleSession, deps: EconomyDeps) -> None:
                 meta_url,
                 op="assemble",
                 modify_hash=session.modify_hash,
+                body=session.body_class,
             )
             session.results.append(
                 {
@@ -844,6 +845,7 @@ async def run_assemble(session: AssembleSession, deps: EconomyDeps) -> None:
             meta_url,
             op="assemble",
             modify_hash=session.modify_hash,
+            body=session.body_class,
         )
         session.results.append(
             {
@@ -979,6 +981,7 @@ def _stamp_blanked_index(
         blank_meta_url,
         op="harvest",
         modify_hash=session.modify_hash,
+        body="",
     )
 
 

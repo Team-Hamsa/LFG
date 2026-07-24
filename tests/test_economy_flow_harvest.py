@@ -236,6 +236,7 @@ def test_harvest_mutable_success_stamps_index_as_blank(tmp_path):
     assert row["uri_hex"] == b"https://cdn/blank/7.json".hex()
     assert row["owner"] == "rUser"
     assert row["is_burned"] == 0
+    assert row["body"] == ""
 
 
 def test_harvest_mutable_closet_fail_reverts_character(tmp_path):
@@ -262,6 +263,7 @@ def test_harvest_mutable_mirror_failure_completes_pending_mirror(tmp_path):
     """The Closet modify committed on-chain; only the DB mirror write fails:
     DONE, mirror_pending set, no revert of the character."""
     conn, f = _conn_with_genesis(), _Fakes()
+    conn.executescript(nft_index._SCHEMA)
     es.set_closet_token(conn, "rUser", "CLOSET0", "00", status=ct.ACTIVE, offer_id=None)
     session = ef.HarvestSession(owner="rUser", character=_char(mutable=True), burnable=False)
     _run(ef.run_harvest(session, _deps(flaky_mirror_conn(conn), f, tmp_path)))
@@ -273,6 +275,11 @@ def test_harvest_mutable_mirror_failure_completes_pending_mirror(tmp_path):
     assert record["status"] == "complete_pending_mirror"
     assert record["sync_tx_hash"] == "MODHASH"
     assert record["mirror_pending"] is True
+    conn.row_factory = sqlite3.Row
+    row = conn.execute("SELECT * FROM onchain_nfts WHERE nft_id=?", ("NFT7",)).fetchone()
+    assert row is not None
+    assert row["image"] == ef.config.BLANK_IMAGE_URL
+    assert row["body"] == ""
 
 
 # --- Legacy path: burn + remint-as-blank + offer-back ---

@@ -194,6 +194,7 @@ def test_assemble_success_stamps_index_with_new_art(tmp_path):
     # Seed the pre-assemble BLANK row so we can prove it flips to the new art,
     # not merely that a row appears.
     rec = _blank_char()
+    rec.body = "skeleton"
     nft_index.upsert(
         conn,
         OnchainNft(
@@ -223,6 +224,7 @@ def test_assemble_success_stamps_index_with_new_art(tmp_path):
     assert row["uri_hex"] == b"meta".hex()  # composed metadata URL
     assert row["owner"] == "rUser"  # an in-place modify never moves ownership
     assert row["is_burned"] == 0
+    assert row["body"] == "male"
 
 
 def test_assemble_mirror_failure_still_stamps_index_with_new_art(tmp_path):
@@ -230,7 +232,9 @@ def test_assemble_mirror_failure_still_stamps_index_with_new_art(tmp_path):
     only the DB mirror failed) still ends DONE with the character dressed — the
     index stamp must fire on THIS success path too."""
     conn, f = _conn_with_closet(), _Fakes()
-    s = _session()
+    rec = _blank_char()
+    rec.body = "skeleton"
+    s = _session(character=rec)
     _run(ef.run_assemble(s, _deps(flaky_mirror_conn(conn), f, tmp_path)))
 
     assert s.state == ef.DONE
@@ -243,6 +247,7 @@ def test_assemble_mirror_failure_still_stamps_index_with_new_art(tmp_path):
     by_type = {a["trait_type"]: a["value"] for a in json.loads(row["attributes_json"])}
     assert by_type["Body"] == "Straight Blue"
     assert row["image"] == "img"
+    assert row["body"] == "male"
 
 
 # --- Precheck rejections ---
