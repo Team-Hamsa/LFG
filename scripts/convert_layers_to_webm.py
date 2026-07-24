@@ -20,6 +20,8 @@
 #   - Outputs are scaled to the 1080x1080 layer canvas (lanczos); non-square
 #     sources are refused rather than stretched.
 #   - A layer shadowed by a same-stem .png is dead art and is skipped.
+#   - Hidden dirs are skipped, chiefly the derived .thumbs/ preview tier
+#     (512px, GIF-only by design — see lfg_core/layer_thumbs.py).
 #
 # Usage:
 #   .venv/bin/python scripts/convert_layers_to_webm.py                    # convert layers/
@@ -190,7 +192,14 @@ def convert_one(src: str, dest: str, crf: int, fps: int | None) -> str:
 
 def find_sources(layers_dir: str, only: str | None) -> list[str]:
     out = []
-    for root, _dirs, files in os.walk(layers_dir):
+    for root, dirs, files in os.walk(layers_dir):
+        # Skip hidden dirs, mirroring layer_thumbs.scan(). Chiefly .thumbs/ —
+        # a derived 512px mirror that is deliberately GIF-only so previews
+        # render in a plain <img> (WebM doesn't). Converting it would upscale
+        # thumbnails to the 1080 layer canvas AND write a format that tier
+        # must not serve; make_layer_thumbs.py regenerates it from the real
+        # sources, .webm included.
+        dirs[:] = sorted(d for d in dirs if not d.startswith("."))
         for f in sorted(files):
             if not f.lower().endswith((".gif", ".mp4")):
                 continue
