@@ -564,6 +564,7 @@ async def run_harvest(session: HarvestSession, deps: EconomyDeps) -> None:
                 )
                 return
             session.state = DONE
+            _stamp_blanked_index(deps, session, rec, blank_meta_url)
             _write_record(
                 deps.records_dir, "harvest", session.id, session._record("complete_pending_mirror")
             )
@@ -625,6 +626,7 @@ async def run_harvest(session: HarvestSession, deps: EconomyDeps) -> None:
             return
 
         session.state = DONE
+        _stamp_blanked_index(deps, session, rec, blank_meta_url)
         _write_record(deps.records_dir, "harvest", session.id, session._record("complete"))
     except Exception as e:
         logging.error(f"Harvest {session.id} failed: {traceback.format_exc()}")
@@ -758,6 +760,18 @@ async def run_assemble(session: AssembleSession, deps: EconomyDeps) -> None:
             session.mirror_pending = True
             es.set_mirror_pending(conn, owner, True)
             session.state = DONE
+            # The GO grid reads onchain_nfts.image — stamp the freshly composed
+            # art now so it isn't stale until the listener catches the modify.
+            _persist_char_modify_to_index(
+                deps,
+                rec,
+                attrs,
+                image_url,
+                meta_url,
+                op="assemble",
+                modify_hash=session.modify_hash,
+                body=session.body_class,
+            )
             session.results.append(
                 {
                     "nft_id": rec.nft_id,
@@ -820,6 +834,19 @@ async def run_assemble(session: AssembleSession, deps: EconomyDeps) -> None:
         # (blank or pre-assemble) still so the new artwork is what shows.
         _invalidate_archived_art("assemble", session.edition)
         session.state = DONE
+        # Stamp the on-chain index with the dressed art/traits so a client
+        # refetching the roster/GO grid right after Save sees the new look
+        # rather than racing the listener (the stale-thumbnail fix).
+        _persist_char_modify_to_index(
+            deps,
+            rec,
+            attrs,
+            image_url,
+            meta_url,
+            op="assemble",
+            modify_hash=session.modify_hash,
+            body=session.body_class,
+        )
         session.results.append(
             {
                 "nft_id": rec.nft_id,
@@ -856,20 +883,25 @@ def _raw_uri(uri_hex: str) -> str:
         return ""
 
 
-def _persist_equip_to_index(
+def _persist_char_modify_to_index(
     deps: EconomyDeps,
-    session: EquipSession,
+    rec: OnchainNft,
     new_attrs: list[dict[str, str]],
     image_url: str,
     meta_url: str,
+    *,
+    op: str,
+    modify_hash: str | None = None,
+    body: str | None = None,
 ) -> None:
     """Write the post-modify ledger truth straight into the on-chain index
     (mirrors swap_flow._persist_remint_to_index / the #211 pattern), so a
-    client that refetches the roster immediately after Save sees the new
-    traits instead of racing the listener. Unlike a swap remint, an equip is
-    an in-place NFTokenModify: the nft_id, owner, and mutability are
-    UNCHANGED — this is a single upsert of the same record with its new
-    attributes/uri_hex/image, never a mark_burned + new row.
+    client that refetches the roster/GO grid immediately after the op sees the
+    new art and traits instead of racing the listener. Shared by equip,
+    assemble, and mutable harvest — all in-place NFTokenModify ops: the
+    nft_id, owner, and mutability are UNCHANGED, so this is a single upsert of
+    the same record with its new attributes/uri_hex/image, never a mark_burned
+    + new row. `body` overrides rec.body (harvest blanks the Body slot too).
 
     deps.conn is already an open connection to the same per-network index DB
     that holds onchain_nfts (opened via _economy_deps.open_index), so this
@@ -880,7 +912,6 @@ def _persist_equip_to_index(
     listener/backfill self-heals the index. Callers must only invoke this on
     a confirmed-committed success path (DONE or complete_pending_mirror),
     never on a reverted/indeterminate branch."""
-    rec = session.character
     try:
         nft_index.upsert(
             deps.conn,
@@ -893,7 +924,7 @@ def _persist_equip_to_index(
                 # .hex() is lowercase — the index's canonical case (matches
                 # swap_flow._persist_remint_to_index).
                 uri_hex=meta_url.encode("utf-8").hex(),
-                body=rec.body,
+                body=rec.body if body is None else body,
                 attributes=new_attrs,
                 image=image_url,
                 ledger_index=None,
@@ -901,7 +932,7 @@ def _persist_equip_to_index(
         )
     except Exception:
         logging.critical(
-            f"post-equip index persist FAILED for {rec.nft_id} (modify {session.modify_hash} "
+            f"post-{op} index persist FAILED for {rec.nft_id} (modify {modify_hash} "
             f"committed on-chain): the roster will serve stale traits until the "
             f"listener/backfill catches up. {traceback.format_exc()}"
         )
@@ -920,9 +951,38 @@ def _persist_equip_to_index(
             deps.conn.rollback()
         except Exception:
             logging.critical(
-                f"post-equip index persist rollback ALSO failed for {rec.nft_id}: "
+                f"post-{op} index persist rollback ALSO failed for {rec.nft_id}: "
                 f"{traceback.format_exc()}"
             )
+
+
+def _stamp_blanked_index(
+    deps: EconomyDeps,
+    session: HarvestSession,
+    rec: OnchainNft,
+    blank_meta_url: str,
+) -> None:
+    """Stamp the on-chain index to the canonical BLANK after a successful
+    MUTABLE harvest, so the GO grid thumbnail (which reads onchain_nfts.image)
+    shows the shared silhouette immediately instead of the pre-harvest dressed
+    art until the listener catches the NFTokenModify.
+
+    Only the mutable modify-in-place path is stamped here: the legacy
+    burn+remint upgrade produces a NEW nft_id (a mark_burned-old + new-row
+    change), which the listener/backfill reconcile — so it is deliberately
+    left to them rather than half-applied inline."""
+    if not rec.mutable or session.legacy_upgrade:
+        return
+    _persist_char_modify_to_index(
+        deps,
+        rec,
+        te.blank_attributes(),
+        config.BLANK_IMAGE_URL,
+        blank_meta_url,
+        op="harvest",
+        modify_hash=session.modify_hash,
+        body="",
+    )
 
 
 # --- Equip: move a loose asset onto a live character; displaced -> Closet ---
@@ -1040,7 +1100,15 @@ async def run_equip(session: EquipSession, deps: EconomyDeps) -> None:
             session.mirror_pending = True
             es.set_mirror_pending(conn, owner, True)
             session.state = DONE
-            _persist_equip_to_index(deps, session, new_attrs, image_url, meta_url)
+            _persist_char_modify_to_index(
+                deps,
+                session.character,
+                new_attrs,
+                image_url,
+                meta_url,
+                op="equip",
+                modify_hash=session.modify_hash,
+            )
             _write_record(
                 deps.records_dir, "equip", session.id, session._record("complete_pending_mirror")
             )
@@ -1081,7 +1149,15 @@ async def run_equip(session: EquipSession, deps: EconomyDeps) -> None:
             return
 
         session.state = DONE
-        _persist_equip_to_index(deps, session, new_attrs, image_url, meta_url)
+        _persist_char_modify_to_index(
+            deps,
+            session.character,
+            new_attrs,
+            image_url,
+            meta_url,
+            op="equip",
+            modify_hash=session.modify_hash,
+        )
         _write_record(deps.records_dir, "equip", session.id, session._record("complete"))
     except Exception as e:
         logging.error(f"Equip {session.id} failed: {traceback.format_exc()}")
