@@ -1050,16 +1050,23 @@ async function refreshOffersBadge(force) {
 function offerRow(o) {
   const row = document.createElement('div');
   row.className = 'bulk-unit offered'; // same row styling as the bulk list
-  if (o.image) {
+  // Trait tokens (Extract) carry their /api/layer art as a same-origin
+  // image_url + slot/value; characters carry a CDN image + nft_number. Both
+  // fall back to the short nft_id only when neither resolved on-chain.
+  const isTrait = o.kind === 'trait';
+  const src = isTrait ? traitLayerSrc(o.image_url) : (o.image ? imgUrl(o.image, THUMB_W) : null);
+  if (src) {
     const img = document.createElement('img');
     img.className = 'thumb';
-    img.src = imgUrl(o.image, THUMB_W);
-    img.alt = o.nft_number != null ? `NFT #${o.nft_number}` : 'NFT';
+    img.src = src;
+    img.alt = isTrait ? `${o.slot}: ${o.value}` : (o.nft_number != null ? `NFT #${o.nft_number}` : 'NFT');
     row.appendChild(img);
   }
   const label = document.createElement('span');
   label.className = 'u-label';
-  label.textContent = o.nft_number != null ? `#${o.nft_number}` : `${o.nft_id.slice(0, 8)}…`;
+  if (isTrait) label.textContent = `${o.slot} — ${o.value}`;
+  else if (o.nft_number != null) label.textContent = `#${o.nft_number}`;
+  else label.textContent = `${o.nft_id.slice(0, 8)}…`;
   row.appendChild(label);
   const btn = document.createElement('button');
   btn.className = 'secondary';
