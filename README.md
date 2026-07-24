@@ -47,7 +47,7 @@ Short walkthroughs of each core flow:
 </tr>
 <tr>
 <td align="center"><img src="assets/demo/animated.gif" width="380" alt="Animated NFTs — GIF/MP4 trait layers compose into living video NFTs"><br><b>Animated NFTs</b></td>
-<td align="center"><img src="assets/demo/marketplace.svg" width="380" alt="Marketplace — browse XRP listings, buy and settle on native NFTokenOffers"><br><b>Marketplace</b></td>
+<td align="center"><img src="assets/demo/market.gif" width="380" alt="Marketplace — browse XRP listings, buy and settle on native NFTokenOffers"><br><b>Marketplace</b></td>
 </tr>
 </table>
 </div>
