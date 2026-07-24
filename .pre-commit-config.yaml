@@ -45,3 +45,12 @@ repos:
         language: system
         files: ^(trait_config\.yaml|layers/)
         pass_filenames: false
+
+      - id: audit-layer-dimensions
+        name: audit layer dimensions (1080x1080)
+        # layers/ is gitignored, so file filters never match — scan the
+        # working tree unconditionally (no-op when layers/ is absent, as in CI).
+        entry: .venv/bin/python scripts/audit_layer_dimensions.py
+        language: system
+        pass_filenames: false
+        always_run: true
