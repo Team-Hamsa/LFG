@@ -3742,9 +3742,9 @@ async def handle_pending_offers(request):
             {"error": "offer lookup failed", "code": "pending_unavailable"}, status=503
         )
     claimable = xrpl_ops.filter_claimable_offers(offers, wallet, time.time())
-    cfg = trait_config.get_config()
     rows = []
     try:
+        cfg = trait_config.get_config()
         for o in claimable:
             rows.append(_pending_offer_row(o, config.XRPL_NETWORK, config.ECONOMY_NETWORK, cfg))
     except Exception as e:

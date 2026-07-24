@@ -2,6 +2,8 @@
 # Pending-offers tray (#218): pure claimability filter + source-assertion
 # guards for the HTML/JS wiring (same posture as test_market_panel_dom.py —
 # the webapp client has no JS execution harness for DOM code).
+import asyncio
+import json
 import os
 
 # Set env vars before any lfg_core.config import so module-level constants
@@ -143,6 +145,36 @@ def test_pending_offer_row_enriches_trait_token(monkeypatch, tmp_path):
     assert row["slot"] == "Hat"
     assert row["value"] == "Wizard Hat"
     assert row["image_url"] == "/api/layer?trait=Hat&value=Wizard Hat"
+
+
+def test_pending_offers_config_failure_uses_availability_error_contract(monkeypatch):
+    from lfg_service import app
+
+    class _Request(dict):
+        headers = {"Authorization": "Bearer test"}
+
+    async def _offers(_wallet):
+        return [_offer()]
+
+    monkeypatch.setattr(app.config, "WEBAPP_DEV_MODE", False)
+    monkeypatch.setattr(
+        app, "verify_session_token", lambda _token: {"id": "user", "platform": "web"}
+    )
+    monkeypatch.setattr(
+        app, "_resolve_wallet", lambda _platform, _user: asyncio.sleep(0, result=WALLET)
+    )
+    monkeypatch.setattr(app.xrpl_ops, "bot_wallet_address", lambda: "rISSUER")
+    monkeypatch.setattr(app.xrpl_ops, "get_account_nft_offers", _offers)
+    monkeypatch.setattr(
+        app.trait_config, "get_config", lambda: (_ for _ in ()).throw(OSError("bad"))
+    )
+    response = asyncio.get_event_loop().run_until_complete(app.handle_pending_offers(_Request()))
+
+    assert response.status == 503
+    assert json.loads(response.body) == {
+        "error": "offer lookup failed",
+        "code": "pending_unavailable",
+    }
 
 
 def _read(name: str) -> str:
