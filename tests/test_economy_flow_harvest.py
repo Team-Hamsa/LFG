@@ -302,7 +302,7 @@ def test_harvest_legacy_accept_payload_fails_still_completes_and_warns(tmp_path,
     assert "claimable via Xaman Events" in caplog.text
     # Journals the normal reminted checkpoint, not an offer-failure status.
     record = json.loads((tmp_path / f"harvest-{session.id}.json").read_text())
-    assert record["status"] != "reminted_no_offer_failed"
+    assert record["status"] == "complete"
 
 
 def test_harvest_legacy_remint_fails_after_burn(tmp_path):
