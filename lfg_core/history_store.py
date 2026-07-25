@@ -8,6 +8,9 @@ from __future__ import annotations
 
 import os
 import sqlite3
+import time
+from collections.abc import Awaitable, Callable
+from dataclasses import dataclass
 from typing import Any
 
 _SCHEMA = """
@@ -22,6 +25,8 @@ CREATE TABLE IF NOT EXISTS xrpl_txs (
 );
 CREATE INDEX IF NOT EXISTS idx_txs_time ON xrpl_txs(close_time);
 CREATE INDEX IF NOT EXISTS idx_txs_type ON xrpl_txs(tx_type);
+CREATE INDEX IF NOT EXISTS idx_txs_source_tag_account
+    ON xrpl_txs(source_tag, account);
 
 CREATE TABLE IF NOT EXISTS nft_events (
     tx_hash      TEXT,
@@ -58,6 +63,27 @@ CREATE TABLE IF NOT EXISTS backfill_state (
     updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
 );
 
+CREATE TABLE IF NOT EXISTS archive_state (
+    network                 TEXT PRIMARY KEY,
+    genesis_hash            TEXT NOT NULL,
+    source_tag              INTEGER,
+    baseline_complete       INTEGER NOT NULL DEFAULT 0,
+    baseline_ledger_min     INTEGER,
+    baseline_ledger_max     INTEGER,
+    baseline_provenance     TEXT,
+    baseline_coverage       TEXT,
+    baseline_completed_at   INTEGER,
+    validated_ledger_index  INTEGER,
+    validated_close_time    INTEGER,
+    heartbeat_at            INTEGER,
+    continuity_gap_at       INTEGER,
+    continuity_gap_after    INTEGER,
+    continuity_gap_before   INTEGER,
+    continuity_gap_reason   TEXT,
+    updated_at              INTEGER NOT NULL,
+    CHECK (baseline_complete IN (0, 1))
+);
+
 CREATE TABLE IF NOT EXISTS balance_snapshots (
     snap_date TEXT,
     account   TEXT,
@@ -66,6 +92,35 @@ CREATE TABLE IF NOT EXISTS balance_snapshots (
     PRIMARY KEY (snap_date, account)
 );
 """
+
+
+@dataclass(frozen=True)
+class ArchiveState:
+    network: str
+    genesis_hash: str
+    source_tag: int | None
+    baseline_complete: bool
+    baseline_ledger_min: int | None
+    baseline_ledger_max: int | None
+    baseline_provenance: str | None
+    baseline_coverage: str | None
+    baseline_completed_at: int | None
+    validated_ledger_index: int | None
+    validated_close_time: int | None
+    heartbeat_at: int | None
+    continuity_gap_at: int | None
+    continuity_gap_after: int | None
+    continuity_gap_before: int | None
+    continuity_gap_reason: str | None
+    updated_at: int
+
+
+@dataclass(frozen=True)
+class EndpointSnapshot:
+    """Chain identity and validated tip observed from one live endpoint."""
+
+    genesis_hash: str
+    validated_ledger_index: int
 
 
 def history_db_path(network: str) -> str:
@@ -88,8 +143,293 @@ def init_history_db(path: str) -> sqlite3.Connection:
     cols = {r[1] for r in conn.execute("PRAGMA table_info(nft_events)")}
     if "memo_action" not in cols:
         conn.execute("ALTER TABLE nft_events ADD COLUMN memo_action TEXT")
+    archive_cols = {r[1] for r in conn.execute("PRAGMA table_info(archive_state)")}
+    archive_migrations = {
+        "source_tag": "INTEGER",
+        "baseline_coverage": "TEXT",
+        "continuity_gap_at": "INTEGER",
+        "continuity_gap_after": "INTEGER",
+        "continuity_gap_before": "INTEGER",
+        "continuity_gap_reason": "TEXT",
+    }
+    source_tag_was_missing = "source_tag" not in archive_cols
+    for column, declaration in archive_migrations.items():
+        if column not in archive_cols:
+            conn.execute(f"ALTER TABLE archive_state ADD COLUMN {column} {declaration}")
+    if source_tag_was_missing:
+        # An old row has no durable record of which eligibility tag its external
+        # audit covered. Preserve its evidence but require explicit recertification.
+        timestamp = int(time.time())
+        conn.execute(
+            "UPDATE archive_state SET baseline_complete = 0, continuity_gap_at = ?, "
+            "continuity_gap_reason = ?, updated_at = ?",
+            (timestamp, "archive predates SourceTag provenance", timestamp),
+        )
     conn.commit()
     return conn
+
+
+def get_archive_state(conn: sqlite3.Connection, network: str) -> ArchiveState | None:
+    """Read the authoritative provenance/freshness record for one archive."""
+
+    row = conn.execute(
+        """
+        SELECT network, genesis_hash, source_tag, baseline_complete,
+               baseline_ledger_min, baseline_ledger_max, baseline_provenance,
+               baseline_coverage, baseline_completed_at, validated_ledger_index,
+               validated_close_time, heartbeat_at, continuity_gap_at,
+               continuity_gap_after, continuity_gap_before, continuity_gap_reason,
+               updated_at
+        FROM archive_state WHERE network = ?
+        """,
+        (network,),
+    ).fetchone()
+    if row is None:
+        return None
+    return ArchiveState(
+        network=row["network"],
+        genesis_hash=row["genesis_hash"],
+        source_tag=row["source_tag"],
+        baseline_complete=bool(row["baseline_complete"]),
+        baseline_ledger_min=row["baseline_ledger_min"],
+        baseline_ledger_max=row["baseline_ledger_max"],
+        baseline_provenance=row["baseline_provenance"],
+        baseline_coverage=row["baseline_coverage"],
+        baseline_completed_at=row["baseline_completed_at"],
+        validated_ledger_index=row["validated_ledger_index"],
+        validated_close_time=row["validated_close_time"],
+        heartbeat_at=row["heartbeat_at"],
+        continuity_gap_at=row["continuity_gap_at"],
+        continuity_gap_after=row["continuity_gap_after"],
+        continuity_gap_before=row["continuity_gap_before"],
+        continuity_gap_reason=row["continuity_gap_reason"],
+        updated_at=row["updated_at"],
+    )
+
+
+def _validate_archive_identity(network: str, genesis_hash: str) -> tuple[str, str]:
+    network = network.strip().lower()
+    genesis_hash = genesis_hash.strip()
+    if network not in {"mainnet", "testnet"}:
+        raise ValueError(f"unsupported archive network: {network}")
+    if not genesis_hash:
+        raise ValueError("archive genesis hash is required")
+    return network, genesis_hash
+
+
+def _configured_source_tag() -> int:
+    from lfg_core import config
+
+    return config.SOURCE_TAG
+
+
+def _validate_source_tag(source_tag: int | None) -> int:
+    value = _configured_source_tag() if source_tag is None else source_tag
+    if isinstance(value, bool) or not isinstance(value, int) or not 0 <= value <= 0xFFFFFFFF:
+        raise ValueError("archive SourceTag must be an unsigned 32-bit integer")
+    return value
+
+
+def _ledger_index(result: dict[str, Any]) -> int:
+    ledger = result.get("ledger")
+    ledger_dict = ledger if isinstance(ledger, dict) else {}
+    raw = result.get("ledger_index", ledger_dict.get("ledger_index", ledger_dict.get("seqNum")))
+    if isinstance(raw, bool) or not isinstance(raw, (int, str)):
+        raise ValueError("endpoint ledger response omitted a valid ledger index")
+    try:
+        value = int(raw)
+    except ValueError as exc:
+        raise ValueError("endpoint ledger response omitted a valid ledger index") from exc
+    if value < 0:
+        raise ValueError("endpoint ledger index must be non-negative")
+    return value
+
+
+def _ledger_hash(result: dict[str, Any]) -> str:
+    ledger = result.get("ledger")
+    ledger_dict = ledger if isinstance(ledger, dict) else {}
+    value = str(result.get("ledger_hash") or ledger_dict.get("hash") or "").strip()
+    if not value:
+        raise ValueError("endpoint ledger response omitted its hash")
+    return value
+
+
+async def fetch_endpoint_snapshot(
+    request_fn: Callable[[dict[str, Any]], Awaitable[dict[str, Any]]],
+) -> EndpointSnapshot:
+    """Read ledger 1 and the validated tip through the same endpoint session."""
+
+    genesis = await request_fn({"method": "ledger", "ledger_index": 1, "transactions": False})
+    if _ledger_index(genesis) != 1:
+        raise ValueError("endpoint did not return ledger 1 for the identity request")
+    tip = await request_fn({"method": "ledger", "ledger_index": "validated", "transactions": False})
+    return EndpointSnapshot(
+        genesis_hash=_ledger_hash(genesis),
+        validated_ledger_index=_ledger_index(tip),
+    )
+
+
+def record_archive_baseline(
+    conn: sqlite3.Connection,
+    *,
+    network: str,
+    genesis_hash: str,
+    ledger_min: int,
+    ledger_max: int,
+    provenance: str,
+    source_tag: int | None = None,
+    coverage: str | None = None,
+    completed_at: int | None = None,
+) -> None:
+    """Mark an audited SourceTag baseline complete for exactly one chain."""
+
+    network, genesis_hash = _validate_archive_identity(network, genesis_hash)
+    source_tag = _validate_source_tag(source_tag)
+    provenance = provenance.strip()
+    coverage = coverage.strip() if coverage is not None else None
+    if ledger_min < 0 or ledger_max < ledger_min:
+        raise ValueError("invalid archive baseline ledger range")
+    if not provenance:
+        raise ValueError("archive baseline provenance is required")
+    if coverage == "":
+        raise ValueError("archive baseline coverage cannot be blank")
+    timestamp = int(time.time()) if completed_at is None else int(completed_at)
+    existing = get_archive_state(conn, network)
+    if existing is not None and existing.genesis_hash != genesis_hash:
+        raise ValueError("archive genesis hash conflicts with persisted provenance")
+    other = conn.execute(
+        "SELECT network FROM archive_state WHERE network != ? LIMIT 1", (network,)
+    ).fetchone()
+    if other is not None:
+        raise ValueError("one history archive cannot contain multiple XRPL networks")
+    conn.execute(
+        """
+        INSERT INTO archive_state (
+            network, genesis_hash, source_tag, baseline_complete,
+            baseline_ledger_min, baseline_ledger_max, baseline_provenance,
+            baseline_coverage, baseline_completed_at, validated_ledger_index,
+            validated_close_time, heartbeat_at, continuity_gap_at,
+            continuity_gap_after, continuity_gap_before, continuity_gap_reason,
+            updated_at
+        ) VALUES (?, ?, ?, 1, ?, ?, ?, ?, ?, NULL, NULL, NULL, NULL, NULL, NULL, NULL, ?)
+        ON CONFLICT(network) DO UPDATE SET
+            source_tag = excluded.source_tag,
+            baseline_complete = 1,
+            baseline_ledger_min = excluded.baseline_ledger_min,
+            baseline_ledger_max = excluded.baseline_ledger_max,
+            baseline_provenance = excluded.baseline_provenance,
+            baseline_coverage = excluded.baseline_coverage,
+            baseline_completed_at = excluded.baseline_completed_at,
+            validated_ledger_index = NULL,
+            validated_close_time = NULL,
+            heartbeat_at = NULL,
+            continuity_gap_at = NULL,
+            continuity_gap_after = NULL,
+            continuity_gap_before = NULL,
+            continuity_gap_reason = NULL,
+            updated_at = excluded.updated_at
+        """,
+        (
+            network,
+            genesis_hash,
+            source_tag,
+            ledger_min,
+            ledger_max,
+            provenance,
+            coverage,
+            timestamp,
+            timestamp,
+        ),
+    )
+    conn.commit()
+
+
+def record_validated_ledger(
+    conn: sqlite3.Connection,
+    *,
+    network: str,
+    genesis_hash: str,
+    ledger_index: int,
+    close_time: int,
+    source_tag: int | None = None,
+    observed_at: int | None = None,
+) -> None:
+    """Advance the validated-ledger cursor and liveness heartbeat monotonically."""
+
+    network, genesis_hash = _validate_archive_identity(network, genesis_hash)
+    source_tag = _validate_source_tag(source_tag)
+    if ledger_index < 0 or close_time < 0:
+        raise ValueError("validated ledger index and close time must be non-negative")
+    timestamp = int(time.time()) if observed_at is None else int(observed_at)
+    existing = get_archive_state(conn, network)
+    if existing is not None and existing.genesis_hash != genesis_hash:
+        raise ValueError("validated ledger genesis conflicts with archive baseline")
+    if existing is not None and existing.source_tag not in {None, source_tag}:
+        raise ValueError("validated ledger SourceTag conflicts with archive baseline")
+    other = conn.execute(
+        "SELECT network FROM archive_state WHERE network != ? LIMIT 1", (network,)
+    ).fetchone()
+    if other is not None:
+        raise ValueError("one history archive cannot contain multiple XRPL networks")
+    conn.execute(
+        """
+        INSERT INTO archive_state (
+            network, genesis_hash, source_tag, baseline_complete, validated_ledger_index,
+            validated_close_time, heartbeat_at, updated_at
+        ) VALUES (?, ?, ?, 0, ?, ?, ?, ?)
+        ON CONFLICT(network) DO UPDATE SET
+            source_tag = COALESCE(archive_state.source_tag, excluded.source_tag),
+            validated_ledger_index = CASE
+                WHEN archive_state.validated_ledger_index IS NULL
+                  OR excluded.validated_ledger_index > archive_state.validated_ledger_index
+                THEN excluded.validated_ledger_index
+                ELSE archive_state.validated_ledger_index END,
+            validated_close_time = CASE
+                WHEN archive_state.validated_ledger_index IS NULL
+                  OR excluded.validated_ledger_index >= archive_state.validated_ledger_index
+                THEN excluded.validated_close_time
+                ELSE archive_state.validated_close_time END,
+            heartbeat_at = excluded.heartbeat_at,
+            updated_at = excluded.updated_at
+        """,
+        (network, genesis_hash, source_tag, ledger_index, close_time, timestamp, timestamp),
+    )
+    conn.commit()
+
+
+def invalidate_archive_continuity(
+    conn: sqlite3.Connection,
+    *,
+    network: str,
+    reason: str,
+    gap_after: int | None = None,
+    gap_before: int | None = None,
+    invalidated_at: int | None = None,
+) -> None:
+    """Fail closed after any interval the transaction stream cannot prove complete."""
+
+    reason = reason.strip()
+    if not reason:
+        raise ValueError("archive continuity invalidation reason is required")
+    if gap_after is not None and gap_after < 0:
+        raise ValueError("archive gap lower bound must be non-negative")
+    if gap_before is not None and gap_before < 0:
+        raise ValueError("archive gap upper bound must be non-negative")
+    timestamp = int(time.time()) if invalidated_at is None else int(invalidated_at)
+    conn.execute(
+        """
+        UPDATE archive_state
+        SET baseline_complete = 0,
+            continuity_gap_at = COALESCE(continuity_gap_at, ?),
+            continuity_gap_after = COALESCE(continuity_gap_after, ?),
+            continuity_gap_before = COALESCE(continuity_gap_before, ?),
+            continuity_gap_reason = COALESCE(continuity_gap_reason, ?),
+            updated_at = ?
+        WHERE network = ?
+        """,
+        (timestamp, gap_after, gap_before, reason, timestamp, network),
+    )
+    conn.commit()
 
 
 def insert_tx(

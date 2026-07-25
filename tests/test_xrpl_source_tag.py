@@ -29,6 +29,7 @@ def _patch_client(monkeypatch, captured):
         captured["tx"] = tx
         return _Resp(
             {
+                "validated": True,
                 "hash": "HASH",
                 "meta": {
                     "TransactionResult": "tesSUCCESS",
@@ -41,11 +42,13 @@ def _patch_client(monkeypatch, captured):
     def fake_request(self, req):
         return _Resp(
             {
+                "validated": True,
+                "ledger_index": 100,
                 "meta": {
                     "TransactionResult": "tesSUCCESS",
                     "nftoken_id": "NFTID",
                     "offer_id": "OFFERID",
-                }
+                },
             }
         )
 
@@ -177,3 +180,30 @@ def test_buy_and_burn_different_issuer_submits(monkeypatch):
     )
     assert result == "HASH"  # the fake tesSUCCESS response's hash
     assert "tx" in captured  # submit_and_wait was called
+
+
+def test_sponsored_burn_sets_source_tag(monkeypatch):
+    captured: dict = {}
+    _patch_client(monkeypatch, captured)
+
+    class Signed:
+        def __init__(self, tx):
+            self.tx = tx
+
+        def __getattr__(self, name):
+            return getattr(self.tx, name)
+
+        def blob(self):
+            return "ABCD"
+
+        def get_hash(self):
+            return "HASH"
+
+    signed = {}
+    monkeypatch.setattr(
+        xrpl_ops, "autofill_and_sign", lambda tx, *args: signed.setdefault("tx", Signed(tx))
+    )
+    monkeypatch.setattr(xrpl_ops.Transaction, "from_blob", lambda blob: signed["tx"])
+    result = _run(xrpl_ops.submit_sponsored_burn("fm-a2345678901234567890123456"))
+    assert result.state == "validated"
+    assert captured["tx"].source_tag == 2606160021 == config.SOURCE_TAG

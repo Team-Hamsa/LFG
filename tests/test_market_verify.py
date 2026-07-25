@@ -128,12 +128,74 @@ class TestGetNftSellOffers:
         with pytest.raises(RuntimeError):
             _run(xrpl_ops.get_nft_sell_offers(NFT_ID, raise_on_error=True))
 
-    def test_raise_on_error_no_offers_still_returns_empty(self, monkeypatch) -> None:
-        """A genuinely-empty (or objectNotFound-shaped) response is NOT a
-        failure — it must still return [] even in strict mode."""
+    def test_strict_missing_offers_key_raises(self, monkeypatch) -> None:
+        """Strict recovery cannot treat a malformed result as authoritative absence."""
         monkeypatch.setattr(xrpl_ops, "JsonRpcClient", _fake_json_rpc_client({}))
-        offers = _run(xrpl_ops.get_nft_sell_offers(NFT_ID, raise_on_error=True))
-        assert offers == []
+        with pytest.raises(RuntimeError, match="malformed nft_sell_offers response"):
+            _run(xrpl_ops.get_nft_sell_offers(NFT_ID, raise_on_error=True))
+
+    def test_strict_non_list_offers_raises(self, monkeypatch) -> None:
+        result = {"offers": {"nft_offer_index": OFFER_INDEX}}
+        monkeypatch.setattr(xrpl_ops, "JsonRpcClient", _fake_json_rpc_client(result))
+        with pytest.raises(RuntimeError, match="malformed nft_sell_offers response"):
+            _run(xrpl_ops.get_nft_sell_offers(NFT_ID, raise_on_error=True))
+
+    def test_strict_malformed_offer_entry_raises(self, monkeypatch) -> None:
+        result = {"offers": ["not-an-offer"]}
+        monkeypatch.setattr(xrpl_ops, "JsonRpcClient", _fake_json_rpc_client(result))
+        with pytest.raises(RuntimeError, match="malformed nft_sell_offers response"):
+            _run(xrpl_ops.get_nft_sell_offers(NFT_ID, raise_on_error=True))
+
+    def test_strict_offer_missing_authoritative_fields_raises(self, monkeypatch) -> None:
+        result = {"offers": [{"nft_offer_index": OFFER_INDEX}]}
+        monkeypatch.setattr(xrpl_ops, "JsonRpcClient", _fake_json_rpc_client(result))
+        with pytest.raises(RuntimeError, match="malformed nft_sell_offers response"):
+            _run(xrpl_ops.get_nft_sell_offers(NFT_ID, raise_on_error=True))
+
+    @pytest.mark.parametrize(
+        "field,value",
+        [
+            ("amount", 0),
+            ("amount", []),
+            ("amount", {"currency": "USD", "issuer": "rISSUER", "value": ""}),
+            ("destination", 123),
+            ("destination", ["rRECIPIENT"]),
+        ],
+    )
+    def test_strict_rejects_malformed_offer_classification_fields(
+        self, monkeypatch, field, value
+    ) -> None:
+        offer = {
+            "nft_offer_index": OFFER_INDEX,
+            "amount": "0",
+            "destination": "rRECIPIENT",
+            "flags": xrpl_ops.LSF_SELL_NFTOKEN,
+            "owner": "rOWNER",
+        }
+        offer[field] = value
+        monkeypatch.setattr(xrpl_ops, "JsonRpcClient", _fake_json_rpc_client({"offers": [offer]}))
+
+        with pytest.raises(RuntimeError, match="malformed nft_sell_offers response"):
+            _run(xrpl_ops.get_nft_sell_offers(NFT_ID, raise_on_error=True))
+
+    def test_strict_accepts_issued_currency_amount_shape(self, monkeypatch) -> None:
+        amount = {"currency": "USD", "issuer": "rISSUER", "value": "1.25"}
+        offer = {
+            "nft_offer_index": OFFER_INDEX,
+            "amount": amount,
+            "destination": None,
+            "flags": xrpl_ops.LSF_SELL_NFTOKEN,
+            "owner": "rOWNER",
+        }
+        monkeypatch.setattr(xrpl_ops, "JsonRpcClient", _fake_json_rpc_client({"offers": [offer]}))
+
+        assert (
+            _run(xrpl_ops.get_nft_sell_offers(NFT_ID, raise_on_error=True))[0]["amount"] == amount
+        )
+
+    def test_strict_empty_offers_list_is_authoritative(self, monkeypatch) -> None:
+        monkeypatch.setattr(xrpl_ops, "JsonRpcClient", _fake_json_rpc_client({"offers": []}))
+        assert _run(xrpl_ops.get_nft_sell_offers(NFT_ID, raise_on_error=True)) == []
 
     def test_strict_object_not_found_result_returns_empty(self, monkeypatch) -> None:
         """objectNotFound is the ONLY unsuccessful RESULT that legitimately

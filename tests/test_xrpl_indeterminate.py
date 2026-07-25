@@ -197,6 +197,50 @@ def test_closet_modify_definitive_failure_stays_none(monkeypatch):
 # --- committed mint whose meta lacks the convenience nftoken_id (#188) ---
 
 
+def test_mint_default_return_contract_remains_nft_id_string(monkeypatch):
+    _stub_sign(monkeypatch)
+    monkeypatch.setattr(
+        xrpl_ops,
+        "submit_and_wait",
+        lambda tx, client, wallet, **k: _Resp(
+            {
+                "hash": "MINTTX1",
+                "meta": {"TransactionResult": "tesSUCCESS", "nftoken_id": "NFTID1"},
+            }
+        ),
+    )
+
+    result = _run(xrpl_ops.mint_nft("https://x/m.json", 1763, config.SIGNING_ACCOUNT))
+
+    assert result == "NFTID1"
+    assert isinstance(result, str)
+
+
+def test_mint_opt_in_details_include_validated_transaction_hash(monkeypatch):
+    _stub_sign(monkeypatch)
+    monkeypatch.setattr(
+        xrpl_ops,
+        "submit_and_wait",
+        lambda tx, client, wallet, **k: _Resp(
+            {
+                "hash": "MINTTX1",
+                "meta": {"TransactionResult": "tesSUCCESS", "nftoken_id": "NFTID1"},
+            }
+        ),
+    )
+
+    result = _run(
+        xrpl_ops.mint_nft(
+            "https://x/m.json",
+            1763,
+            config.SIGNING_ACCOUNT,
+            return_details=True,
+        )
+    )
+
+    assert result == xrpl_ops.MintNFTResult(nft_id="NFTID1", tx_hash="MINTTX1")
+
+
 def test_mint_committed_without_convenience_id_resolves_from_meta(monkeypatch):
     # A validated NFTokenMint whose meta omits the convenience `nftoken_id`
     # field must resolve the id from the affected nodes, not return None

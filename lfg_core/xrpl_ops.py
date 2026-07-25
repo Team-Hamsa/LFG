@@ -2,17 +2,24 @@
 # XRPL operations: mint, offer creation, payment watching (extracted from main.py).
 
 import asyncio
+import fcntl
+import hashlib
+import json
 import logging
+import os
+import tempfile
 import time
 import traceback
-from collections.abc import Callable
+from collections.abc import AsyncIterator, Callable
+from contextlib import asynccontextmanager
+from dataclasses import dataclass
 from datetime import datetime
 from decimal import Decimal, InvalidOperation
-from typing import Any
+from typing import Any, BinaryIO, Literal, cast, overload
 
 from xrpl.asyncio.clients import AsyncWebsocketClient
 from xrpl.clients import JsonRpcClient
-from xrpl.models import IssuedCurrencyAmount
+from xrpl.models import IssuedCurrencyAmount, TransactionMetadata
 from xrpl.models.currencies import XRP, IssuedCurrency
 from xrpl.models.requests import (
     AccountLines,
@@ -66,6 +73,63 @@ class IndeterminateResultError(RuntimeError):
     ('did NOT commit') and running an asset-destroying compensation (#179)."""
 
 
+@dataclass(frozen=True)
+class MintNFTResult:
+    """Confirmed NFToken mint identifiers for callers that need durability."""
+
+    nft_id: str
+    tx_hash: str
+
+
+@dataclass(frozen=True)
+class MintPreparation:
+    state: Literal["prepared", "failed"]
+    tx_hash: str | None
+    tx_blob: str | None
+    error: str | None
+    signed_ledger_floor: int | None = None
+
+
+@dataclass(frozen=True)
+class MintSubmission:
+    state: Literal["validated", "failed", "indeterminate"]
+    tx_hash: str | None
+    nft_id: str | None
+    error: str | None
+
+
+@dataclass(frozen=True)
+class MintReconciliation:
+    complete: bool
+    state: Literal["validated", "failed", "indeterminate"]
+    tx_hash: str | None
+    nft_id: str | None
+    error: str | None
+
+
+@dataclass(frozen=True)
+class BurnPreparation:
+    state: Literal["prepared", "noop", "failed"]
+    tx_hash: str | None
+    tx_blob: str | None
+    error: str | None
+    signed_ledger_floor: int | None = None
+
+
+@dataclass(frozen=True)
+class BurnSubmission:
+    state: Literal["validated", "failed", "indeterminate"]
+    tx_hash: str | None
+    error: str | None
+
+
+@dataclass(frozen=True)
+class BurnReconciliation:
+    complete: bool
+    tx_hash: str | None
+    error: str | None
+
+
 def convert_str_to_hex(string: str) -> str:
     """Convert string to hex for XRPL URI"""
     return string.encode("utf-8").hex().upper()
@@ -106,8 +170,71 @@ async def _confirm_by_hash(
     return None
 
 
+def _acquire_submission_file_lock(account: str) -> BinaryIO:
+    """Take the cross-process half of the per-Account sequence lock."""
+    lock_root = os.getenv(
+        "XRPL_SUBMISSION_LOCK_DIR",
+        os.path.join(tempfile.gettempdir(), "lfg-xrpl-submission-locks"),
+    )
+    os.makedirs(lock_root, mode=0o700, exist_ok=True)
+    digest = hashlib.sha256(account.encode("utf-8")).hexdigest()
+    handle = open(os.path.join(lock_root, f"{digest}.lock"), "a+b")
+    fcntl.flock(handle.fileno(), fcntl.LOCK_EX)
+    return handle
+
+
+def _release_submission_file_lock(handle: BinaryIO) -> None:
+    try:
+        fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
+    finally:
+        handle.close()
+
+
+async def _acquire_submission_lock_cancellation_safe(account: str) -> BinaryIO:
+    task = asyncio.create_task(asyncio.to_thread(_acquire_submission_file_lock, account))
+    try:
+        return await asyncio.shield(task)
+    except asyncio.CancelledError:
+        # A blocking flock cannot be cancelled in its worker thread. Wait for
+        # it to acquire, release immediately, then preserve cancellation.
+        handle = await task
+        await asyncio.to_thread(_release_submission_file_lock, handle)
+        raise
+
+
+@asynccontextmanager
+async def submission_coordinator(account: str) -> AsyncIterator[None]:
+    """Serialize backend submissions for one Account across loops/processes."""
+
+    async with owner_lock.owner_lock(f"xrpl-submit:{account}"):
+        yield
+
+
+@asynccontextmanager
+async def _submission_scope(account: str, coordinator_held: bool) -> AsyncIterator[None]:
+    if coordinator_held:
+        handle = await _acquire_submission_lock_cancellation_safe(account)
+        try:
+            yield
+        finally:
+            release = asyncio.create_task(asyncio.to_thread(_release_submission_file_lock, handle))
+            try:
+                await asyncio.shield(release)
+            except asyncio.CancelledError:
+                await release
+                raise
+        return
+    async with submission_coordinator(account):
+        yield
+
+
 async def _submit_and_confirm(
-    tx: Transaction, wallet: Wallet, client: JsonRpcClient, label: str
+    tx: Transaction,
+    wallet: Wallet,
+    client: JsonRpcClient,
+    label: str,
+    *,
+    coordinator_held: bool = False,
 ) -> dict[str, Any] | None:
     """Sign `tx` ONCE, submit it, and confirm the outcome from the ledger.
 
@@ -126,9 +253,11 @@ async def _submit_and_confirm(
     Serialized per signing account (fire-and-forget harvests, 2026-07-21):
     autofill reads the account sequence, so two concurrent backend-signed txs
     would sign the same sequence and one would fail tefPAST_SEQ. The lock
-    spans sign→validate; backend txs pipeline instead of colliding. Keyed on
-    the classic address via the loop-keyed owner_lock registry (#180)."""
-    async with owner_lock.owner_lock(f"xrpl-submit:{wallet.classic_address}"):
+    spans sign→validate; backend txs pipeline instead of colliding. It is keyed
+    on the transaction Account (not the seed-derived signer, which may be a
+    regular key) via the loop-keyed owner_lock registry (#180)."""
+    account = getattr(tx, "account", None) or wallet.classic_address
+    async with _submission_scope(account, coordinator_held):
         signed = await asyncio.to_thread(autofill_and_sign, tx, client, wallet)
         try:
             # Pass wallet=None: `signed` is already signed, so submit_and_wait must
@@ -145,8 +274,44 @@ async def _submit_and_confirm(
                 raise IndeterminateResultError(
                     f"{label}: on-ledger outcome unknown after submit raised ({e})"
                 ) from e
-            return _validated_result(confirmed, label)
-        return _validated_result(response.result, label)
+            validated = _validated_result(confirmed, label)
+        else:
+            validated = _validated_result(response.result, label)
+        if validated is not None:
+            # Some xrpl-py response fakes and older rippled response shapes
+            # omit `hash`; the exact signed hash is authoritative because this
+            # helper signs once and never resubmits a fresh transaction.
+            if not validated.get("hash"):
+                validated["hash"] = signed.get_hash()
+        return validated
+
+
+@overload
+async def mint_nft(
+    metadata_cdn_url: str,
+    taxon: int,
+    issuer: str,
+    flags: int | None = None,
+    platform: str = memos.PLATFORM_BACKEND,
+    campaign: str | None = None,
+    action: str = memos.ACTION_MINT,
+    *,
+    return_details: Literal[False] = False,
+) -> str | None: ...
+
+
+@overload
+async def mint_nft(
+    metadata_cdn_url: str,
+    taxon: int,
+    issuer: str,
+    flags: int | None = None,
+    platform: str = memos.PLATFORM_BACKEND,
+    campaign: str | None = None,
+    action: str = memos.ACTION_MINT,
+    *,
+    return_details: Literal[True],
+) -> MintNFTResult | None: ...
 
 
 async def mint_nft(
@@ -157,12 +322,18 @@ async def mint_nft(
     platform: str = memos.PLATFORM_BACKEND,
     campaign: str | None = None,
     action: str = memos.ACTION_MINT,
-) -> str | None:
-    """Mint an NFT on XRPL; returns the NFToken ID or None. `flags` overrides
-    config.NFT_FLAGS (e.g. burnable economy characters / soulbound buckets).
-    `platform` records the originating surface in the provenance memo (#54);
-    `action` the app operation (economy assembles/extracts pass their own so
-    the memo distinguishes them from plain mints and legacy remint swaps)."""
+    *,
+    return_details: bool = False,
+) -> str | MintNFTResult | None:
+    """Mint an NFT on XRPL; returns the NFToken ID or None by default.
+
+    `return_details=True` opts into a `MintNFTResult` containing the same ID
+    plus the validated transaction hash. `flags` overrides config.NFT_FLAGS
+    (e.g. burnable economy characters / soulbound buckets). `platform`
+    records the originating surface in the provenance memo (#54); `action`
+    the app operation (economy assembles/extracts pass their own so the memo
+    distinguishes them from plain mints and legacy remint swaps).
+    """
     try:
         wallet = Wallet.from_seed(config.SEED)
         client = JsonRpcClient(config.JSON_RPC_URL)
@@ -204,6 +375,8 @@ async def mint_nft(
                 nft_id = None
         if nft_id:
             logging.info(f"NFT minted: {nft_id}")
+            if return_details:
+                return MintNFTResult(nft_id=str(nft_id), tx_hash=str(result["hash"]))
             return str(nft_id)
         # Committed but unidentifiable: fail closed as indeterminate, never as a
         # definitive-failure None — the NFT is on-ledger and must not be treated
@@ -217,6 +390,214 @@ async def mint_nft(
     except Exception:
         logging.error(f"mint_nft error: {traceback.format_exc()}")
         return None
+
+
+def _sponsored_mint_transaction(
+    metadata_cdn_url: str,
+    taxon: int,
+    issuer: str,
+    *,
+    flags: int | None,
+    platform: str,
+    campaign: str,
+) -> NFTokenMint:
+    eff_flags = config.NFT_FLAGS if flags is None else flags
+    kwargs: dict[str, Any] = {
+        "account": config.SIGNING_ACCOUNT,
+        "uri": convert_str_to_hex(metadata_cdn_url),
+        "nftoken_taxon": taxon,
+        "flags": eff_flags,
+        "source_tag": config.SOURCE_TAG,
+        "memos": memos.build_memo_models(
+            memos.INITIATOR_BACKEND,
+            platform,
+            memos.ACTION_MINT,
+            campaign,
+        ),
+    }
+    if eff_flags & TF_TRANSFERABLE:
+        kwargs["transfer_fee"] = config.NFT_TRANSFER_FEE
+    if issuer != config.SIGNING_ACCOUNT:
+        kwargs["issuer"] = issuer
+    return NFTokenMint(**kwargs)
+
+
+async def prepare_sponsored_mint(
+    metadata_cdn_url: str,
+    taxon: int,
+    issuer: str,
+    *,
+    campaign: str,
+    flags: int | None = None,
+    platform: str = memos.PLATFORM_BACKEND,
+    coordinator_held: bool = False,
+) -> MintPreparation:
+    """Sign one correlated mint and return its immutable identity without forwarding."""
+
+    if not campaign.strip():
+        return MintPreparation("failed", None, None, "claim correlation is required")
+    try:
+        wallet = Wallet.from_seed(config.SEED)
+        client = JsonRpcClient(config.JSON_RPC_URL)
+        async with _submission_scope(config.SIGNING_ACCOUNT, coordinator_held):
+            signed_ledger_floor = await _current_validated_ledger_index(client)
+            if signed_ledger_floor is None:
+                return MintPreparation(
+                    "failed",
+                    None,
+                    None,
+                    "mint preparation could not observe a validated ledger floor",
+                )
+            tx = _sponsored_mint_transaction(
+                metadata_cdn_url,
+                taxon,
+                issuer,
+                flags=flags,
+                platform=platform,
+                campaign=campaign,
+            )
+            signed = await asyncio.to_thread(autofill_and_sign, tx, client, wallet)
+        return MintPreparation(
+            "prepared",
+            signed.get_hash(),
+            signed.blob(),
+            None,
+            signed_ledger_floor,
+        )
+    except Exception as exc:
+        return MintPreparation("failed", None, None, f"mint preparation failed: {exc}")
+
+
+def _classify_sponsored_mint(result: object, tx_hash: str) -> MintSubmission:
+    if not isinstance(result, dict) or result.get("validated") is not True:
+        return MintSubmission(
+            "indeterminate", tx_hash, None, "response was not explicitly validated"
+        )
+    result_hash = result.get("hash")
+    if result_hash is not None and result_hash != tx_hash:
+        return MintSubmission("indeterminate", tx_hash, None, "validated response hash mismatch")
+    meta = result.get("meta")
+    if not isinstance(meta, dict):
+        return MintSubmission("indeterminate", tx_hash, None, "validated response omitted metadata")
+    engine_result = meta.get("TransactionResult")
+    if not isinstance(engine_result, str) or not engine_result:
+        return MintSubmission(
+            "indeterminate", tx_hash, None, "validated response omitted TransactionResult"
+        )
+    if engine_result != "tesSUCCESS":
+        return MintSubmission("failed", tx_hash, None, engine_result)
+    nft_id = meta.get("nftoken_id")
+    if not nft_id:
+        try:
+            nft_id = get_nftoken_id(cast(TransactionMetadata, meta))
+        except Exception:
+            nft_id = None
+    if not nft_id:
+        return MintSubmission(
+            "indeterminate",
+            tx_hash,
+            None,
+            "validated mint succeeded but NFTokenID could not be derived",
+        )
+    return MintSubmission("validated", tx_hash, str(nft_id), None)
+
+
+async def submit_sponsored_mint(
+    *,
+    signed_tx_blob: str,
+    signed_tx_hash: str,
+    coordinator_held: bool = False,
+    prove_expiry: bool = False,
+) -> MintSubmission:
+    """Forward exactly the persisted signed mint; never sign a replacement."""
+
+    try:
+        signed = Transaction.from_blob(signed_tx_blob)
+        decoded_hash = signed.get_hash()
+    except Exception as exc:
+        return MintSubmission(
+            "indeterminate",
+            signed_tx_hash,
+            None,
+            f"persisted mint decode failed: {exc}",
+        )
+    if decoded_hash != signed_tx_hash:
+        return MintSubmission(
+            "indeterminate", signed_tx_hash, None, "signed mint hash/blob mismatch"
+        )
+    client = JsonRpcClient(config.JSON_RPC_URL)
+    last_ledger_sequence = getattr(signed, "last_ledger_sequence", None)
+    if (
+        prove_expiry
+        and isinstance(last_ledger_sequence, int)
+        and not isinstance(last_ledger_sequence, bool)
+    ):
+        current_ledger = await _current_validated_ledger_index(client)
+        if current_ledger is not None and current_ledger > last_ledger_sequence:
+            # The exact identity can no longer enter a validated ledger. One
+            # final exact-hash lookup distinguishes a transaction that landed
+            # before expiry from the crash-before-forward case. Never sign a
+            # replacement here: an expired absence restores the durable free
+            # promise, while a validated match is recorded normally.
+            confirmed = await _confirm_by_hash(client, signed_tx_hash)
+            if confirmed is not None:
+                return _classify_sponsored_mint(confirmed, signed_tx_hash)
+            return MintSubmission(
+                "failed",
+                signed_tx_hash,
+                None,
+                "prepared mint expired without validation",
+            )
+    try:
+        transaction_account = getattr(signed, "account", None) or config.SIGNING_ACCOUNT
+        async with _submission_scope(transaction_account, coordinator_held):
+            try:
+                response = await asyncio.to_thread(
+                    submit_and_wait, signed, client, None, autofill=False
+                )
+                result = response.result
+            except Exception as exc:
+                confirmed = await _confirm_by_hash(client, signed_tx_hash)
+                if confirmed is None:
+                    return MintSubmission(
+                        "indeterminate",
+                        signed_tx_hash,
+                        None,
+                        f"mint submit outcome unknown after exception: {exc}",
+                    )
+                result = confirmed
+        return _classify_sponsored_mint(result, signed_tx_hash)
+    except Exception as exc:
+        return MintSubmission(
+            "indeterminate",
+            signed_tx_hash,
+            None,
+            f"mint outcome unknown after forwarding began: {exc}",
+        )
+
+
+async def reconcile_sponsored_mint(tx_hash: str) -> MintReconciliation:
+    """Classify only the exact journaled hash; this path never submits."""
+
+    client = JsonRpcClient(config.JSON_RPC_URL)
+    try:
+        response = await asyncio.to_thread(client.request, Tx(transaction=tx_hash))
+        result = response.result
+    except Exception as exc:
+        return MintReconciliation(False, "indeterminate", tx_hash, None, str(exc))
+    if not isinstance(result, dict) or result.get("validated") is not True:
+        return MintReconciliation(
+            False, "indeterminate", tx_hash, None, "exact mint hash is not validated"
+        )
+    classified = _classify_sponsored_mint(result, tx_hash)
+    complete = classified.state in ("validated", "failed")
+    return MintReconciliation(
+        complete,
+        classified.state,
+        classified.tx_hash,
+        classified.nft_id,
+        classified.error,
+    )
 
 
 async def create_nft_offer(
@@ -248,23 +629,25 @@ async def create_nft_offer(
             memos=memos.build_memo_models(memos.INITIATOR_BACKEND, platform, action, campaign),
         )
 
-        response = await asyncio.to_thread(submit_and_wait, offer, client, wallet)
-        hash_txn = response.result["hash"]
+        result = await _submit_and_confirm(offer, wallet, client, "NFTokenCreateOffer")
+        if result is None:
+            return None
+        meta = result.get("meta")
+        offer_id = meta.get("offer_id") if isinstance(meta, dict) else None
+        if not isinstance(offer_id, str) or not offer_id:
+            raise IndeterminateResultError(
+                "NFTokenCreateOffer validated but its offer ID was absent"
+            )
+        logging.info(f"Offer created: {offer_id}")
+        return offer_id
 
-        for _ in range(3):
-            try:
-                txn = await asyncio.to_thread(client.request, Tx(transaction=hash_txn))
-                res = txn.result
-                if res["meta"]["TransactionResult"] == "tesSUCCESS":
-                    offer_id = res["meta"]["offer_id"]
-                    logging.info(f"Offer created: {offer_id}")
-                    return offer_id  # type: ignore[no-any-return]
-                await asyncio.sleep(5)
-            except Exception as e:
-                logging.error(f"Error checking offer status: {e}")
-                await asyncio.sleep(5)
-        return None
-
+    # NOTE (#211): every indeterminate outcome MUST collapse to None here,
+    # including IndeterminateResultError out of _submit_and_confirm. Callers
+    # are written against the "falsy return means the offer may still have
+    # landed — go look on-ledger" contract: swap_flow._create_offer_and_accept
+    # adopts a landed issuer→swapper offer instead of stranding a reminted
+    # token (tests/test_swap_offer_recovery.py::test_offer_failure_adopts_
+    # landed_offer pins exactly this). Re-raising here skips that recovery.
     except Exception as e:
         logging.error(f"create_nft_offer error: {e}")
         return None
@@ -412,6 +795,17 @@ async def nft_exists(nft_id: str, clio: str | None = None, attempts: int = 3) ->
     return None
 
 
+def _valid_xrpl_amount_shape(amount: Any) -> bool:
+    if isinstance(amount, str):
+        return bool(amount.strip())
+    if not isinstance(amount, dict):
+        return False
+    return all(
+        isinstance(amount.get(field), str) and bool(amount[field].strip())
+        for field in ("currency", "issuer", "value")
+    )
+
+
 async def get_nft_sell_offers(nft_id: str, raise_on_error: bool = False) -> list[dict[str, Any]]:
     """List sell offers for `nft_id` via the standard (non-clio) rippled
     `nft_sell_offers` method. Unlike nft_info/nft_exists this is a plain
@@ -455,16 +849,34 @@ async def get_nft_sell_offers(nft_id: str, raise_on_error: bool = False) -> list
             return []
         offers = result.get("offers") if isinstance(result, dict) else None
         if not isinstance(offers, list):
+            if raise_on_error:
+                raise RuntimeError("malformed nft_sell_offers response: offers must be a list")
             return []
         normalized: list[dict[str, Any]] = []
         for offer in offers:
             if not isinstance(offer, dict):
+                if raise_on_error:
+                    raise RuntimeError("malformed nft_sell_offers response: invalid offer entry")
                 continue
+            offer_index = offer.get("nft_offer_index", offer.get("index"))
+            amount = offer.get("amount")
+            destination = offer.get("destination")
+            if raise_on_error and (
+                not isinstance(offer_index, str)
+                or not offer_index
+                or not _valid_xrpl_amount_shape(amount)
+                or (destination is not None and not isinstance(destination, str))
+                or not isinstance(offer.get("flags"), int)
+                or isinstance(offer.get("flags"), bool)
+                or not isinstance(offer.get("owner"), str)
+                or not offer["owner"]
+            ):
+                raise RuntimeError("malformed nft_sell_offers response: incomplete offer entry")
             normalized.append(
                 {
-                    "offer_index": offer.get("nft_offer_index", offer.get("index")),
-                    "amount": offer.get("amount"),
-                    "destination": offer.get("destination"),
+                    "offer_index": offer_index,
+                    "amount": amount,
+                    "destination": destination,
                     "flags": offer.get("flags"),
                     "owner": offer.get("owner"),
                     "expiration": offer.get("expiration"),
@@ -681,6 +1093,465 @@ async def get_amm_xrp_cost(currency: str, issuer: str, token_amount: Decimal) ->
         return None
 
 
+async def prepare_sponsored_burn(
+    memo_id: str,
+    *,
+    amount: str | None = None,
+    source_account: str | None = None,
+    network: str | None = None,
+    issuer: str | None = None,
+    currency: str | None = None,
+    source_tag: int | None = None,
+    coordinator_held: bool = False,
+) -> BurnPreparation:
+    burn_amount = config.MINT_PRICE_LFGO if amount is None else amount
+    source = config.SIGNING_ACCOUNT if source_account is None else source_account
+    selected_network = config.XRPL_NETWORK if network is None else network
+    burn_issuer = config.TOKEN_ISSUER_ADDRESS if issuer is None else issuer
+    burn_currency = config.TOKEN_CURRENCY_HEX if currency is None else currency
+    burn_source_tag = config.SOURCE_TAG if source_tag is None else source_tag
+    if source == burn_issuer:
+        if selected_network == "testnet":
+            return BurnPreparation(
+                "noop", None, None, "testnet self-issuer burn requires no transaction"
+            )
+        return BurnPreparation(
+            "failed", None, None, "mainnet self-issuer burn topology is forbidden"
+        )
+    if selected_network != config.XRPL_NETWORK:
+        return BurnPreparation(
+            "failed", None, None, "burn obligation network does not match the active XRPL network"
+        )
+    try:
+        wallet = Wallet.from_seed(config.SEED)
+        client = JsonRpcClient(config.JSON_RPC_URL)
+        async with _submission_scope(source, coordinator_held):
+            signed_ledger_floor = await _current_validated_ledger_index(client)
+            if signed_ledger_floor is None:
+                return BurnPreparation(
+                    "failed",
+                    None,
+                    None,
+                    "burn preparation could not observe a validated ledger floor",
+                )
+            payment = Payment(
+                account=source,
+                destination=burn_issuer,
+                amount=IssuedCurrencyAmount(
+                    currency=burn_currency,
+                    issuer=burn_issuer,
+                    value=burn_amount,
+                ),
+                source_tag=burn_source_tag,
+                memos=memos.build_memo_models(
+                    memos.INITIATOR_BACKEND,
+                    memos.PLATFORM_BACKEND,
+                    memos.ACTION_SPONSORED_MINT_BURN,
+                    memo_id,
+                ),
+            )
+            signed = await asyncio.to_thread(autofill_and_sign, payment, client, wallet)
+        return BurnPreparation(
+            "prepared",
+            signed.get_hash(),
+            signed.blob(),
+            None,
+            signed_ledger_floor,
+        )
+    except Exception as exc:
+        return BurnPreparation("failed", None, None, f"burn preparation failed: {exc}")
+
+
+def _classify_sponsored_burn(result: object, tx_hash: str) -> BurnSubmission:
+    if not isinstance(result, dict) or result.get("validated") is not True:
+        return BurnSubmission("indeterminate", tx_hash, "response was not explicitly validated")
+    result_hash = result.get("hash")
+    if result_hash is not None and result_hash != tx_hash:
+        return BurnSubmission("indeterminate", tx_hash, "validated response hash mismatch")
+    meta = result.get("meta")
+    if not isinstance(meta, dict):
+        return BurnSubmission("indeterminate", tx_hash, "validated response omitted metadata")
+    engine_result = meta.get("TransactionResult")
+    if not isinstance(engine_result, str) or not engine_result:
+        return BurnSubmission(
+            "indeterminate", tx_hash, "validated response omitted TransactionResult"
+        )
+    if engine_result == "tesSUCCESS":
+        return BurnSubmission("validated", tx_hash, None)
+    return BurnSubmission("failed", tx_hash, engine_result)
+
+
+async def submit_sponsored_burn(
+    memo_id: str,
+    *,
+    amount: str | None = None,
+    source_account: str | None = None,
+    signed_tx_blob: str | None = None,
+    signed_tx_hash: str | None = None,
+    network: str | None = None,
+    issuer: str | None = None,
+    currency: str | None = None,
+    source_tag: int | None = None,
+    coordinator_held: bool = False,
+) -> BurnSubmission:
+    source = config.SIGNING_ACCOUNT if source_account is None else source_account
+    selected_network = config.XRPL_NETWORK if network is None else network
+    burn_issuer = config.TOKEN_ISSUER_ADDRESS if issuer is None else issuer
+    if selected_network != config.XRPL_NETWORK:
+        return BurnSubmission(
+            "failed", signed_tx_hash, "burn obligation network does not match active XRPL network"
+        )
+    if source == burn_issuer:
+        if selected_network == "testnet":
+            return BurnSubmission("validated", None, None)
+        return BurnSubmission("failed", signed_tx_hash, "mainnet self-issuer burn is forbidden")
+    if signed_tx_blob is None or signed_tx_hash is None:
+        prepared = await prepare_sponsored_burn(
+            memo_id,
+            amount=amount,
+            source_account=source,
+            network=selected_network,
+            issuer=burn_issuer,
+            currency=currency,
+            source_tag=source_tag,
+            coordinator_held=coordinator_held,
+        )
+        if prepared.state == "noop":
+            return BurnSubmission("validated", None, None)
+        if prepared.state != "prepared" or not prepared.tx_blob or not prepared.tx_hash:
+            return BurnSubmission("failed", None, prepared.error or "burn preparation failed")
+        signed_tx_blob, signed_tx_hash = prepared.tx_blob, prepared.tx_hash
+    try:
+        signed = Transaction.from_blob(signed_tx_blob)
+        decoded_hash = signed.get_hash()
+    except Exception as exc:
+        return BurnSubmission("failed", signed_tx_hash, f"persisted burn decode failed: {exc}")
+    if decoded_hash != signed_tx_hash:
+        return BurnSubmission("failed", signed_tx_hash, "signed burn hash/blob mismatch")
+    client = JsonRpcClient(config.JSON_RPC_URL)
+    try:
+        async with _submission_scope(source, coordinator_held):
+            try:
+                response = await asyncio.to_thread(
+                    submit_and_wait, signed, client, None, autofill=False
+                )
+                result = response.result
+            except Exception as exc:
+                confirmed = await _confirm_by_hash(client, signed_tx_hash)
+                if confirmed is None:
+                    return BurnSubmission(
+                        "indeterminate",
+                        signed_tx_hash,
+                        f"submit outcome unknown after exception: {exc}",
+                    )
+                result = confirmed
+        return _classify_sponsored_burn(result, signed_tx_hash)
+    except Exception as exc:
+        return BurnSubmission(
+            "indeterminate",
+            signed_tx_hash,
+            f"burn outcome unknown after forwarding began: {exc}",
+        )
+
+
+def _ledger_index(value: object) -> int | None:
+    if isinstance(value, bool) or not isinstance(value, (int, str)):
+        return None
+    try:
+        index = int(value)
+    except ValueError:
+        return None
+    return index if index > 0 else None
+
+
+async def _current_validated_ledger_index(client: JsonRpcClient) -> int | None:
+    response = await asyncio.to_thread(
+        client.request,
+        Ledger(ledger_index="validated"),
+    )
+    result = response.result
+    if not isinstance(result, dict) or result.get("validated") is False:
+        return None
+    raw_index = result.get("ledger_index")
+    if raw_index is None:
+        ledger = result.get("ledger")
+        raw_index = ledger.get("ledger_index") if isinstance(ledger, dict) else None
+    return _ledger_index(raw_index)
+
+
+async def sponsored_burn_identity_expired(signed_tx_blob: str) -> int | None:
+    """Return the expired identity's LLS only after a later validated ledger."""
+
+    try:
+        signed = Transaction.from_blob(signed_tx_blob)
+        last_ledger_sequence = signed.last_ledger_sequence
+        if (
+            isinstance(last_ledger_sequence, bool)
+            or not isinstance(last_ledger_sequence, int)
+            or last_ledger_sequence <= 0
+        ):
+            return None
+        client = JsonRpcClient(config.JSON_RPC_URL)
+        validated_index = await _current_validated_ledger_index(client)
+        if validated_index is not None and validated_index > last_ledger_sequence:
+            return last_ledger_sequence
+        return None
+    except Exception as exc:
+        logging.warning("sponsored burn expiry check failed: %s", exc)
+        return None
+
+
+def _target_burn_amount(
+    value: object,
+    expected: Decimal,
+    expected_currency: str,
+    expected_issuer: str,
+) -> Literal["match", "non_match", "incomplete"]:
+    if isinstance(value, str):
+        return "non_match"
+    if not isinstance(value, dict):
+        return "incomplete"
+    currency, issuer = value.get("currency"), value.get("issuer")
+    if not isinstance(currency, str) or not isinstance(issuer, str):
+        return "incomplete"
+    if currency != expected_currency or issuer != expected_issuer:
+        return "non_match"
+    amount = value.get("value")
+    if not isinstance(amount, str):
+        return "incomplete"
+    try:
+        return "match" if Decimal(amount) == expected else "non_match"
+    except InvalidOperation:
+        return "incomplete"
+
+
+def _sponsored_burn_entry(
+    entry: object,
+    *,
+    memo_id: str,
+    amount: str,
+    source_account: str,
+    issuer: str,
+    currency: str,
+    source_tag: int,
+    signed_tx_hash: str | None,
+) -> tuple[Literal["match", "non_match", "incomplete"], str | None, str | None]:
+    if not isinstance(entry, dict):
+        return "incomplete", None, "account_tx contained a non-object entry"
+    if entry.get("validated") is not True:
+        return "incomplete", None, "account_tx contained a non-validated entry"
+    tx, meta = _extract_tx_and_meta(entry)
+    if tx is None:
+        return "incomplete", None, "validated entry omitted transaction"
+    if not isinstance(meta, dict):
+        return "incomplete", None, "validated entry omitted metadata"
+    engine_result = meta.get("TransactionResult")
+    if not isinstance(engine_result, str) or not engine_result:
+        return "incomplete", None, "metadata omitted TransactionResult"
+    tx_type = tx.get("TransactionType")
+    if not isinstance(tx_type, str) or not tx_type:
+        return "incomplete", None, "transaction omitted TransactionType"
+    if engine_result != "tesSUCCESS" or tx_type != "Payment":
+        return "non_match", None, None
+    account, destination = tx.get("Account"), tx.get("Destination")
+    if not isinstance(account, str) or not isinstance(destination, str):
+        return "incomplete", None, "Payment omitted account or destination"
+    if account != source_account or destination != issuer:
+        return "non_match", None, None
+    observed_source_tag = tx.get("SourceTag")
+    if observed_source_tag is not None and (
+        isinstance(observed_source_tag, bool) or not isinstance(observed_source_tag, int)
+    ):
+        return "incomplete", None, "Payment had malformed SourceTag"
+    if observed_source_tag != source_tag:
+        return "non_match", None, None
+    try:
+        expected = Decimal(amount)
+    except InvalidOperation:
+        return "incomplete", None, "burn obligation had malformed amount"
+    requested = _target_burn_amount(
+        tx.get("Amount", tx.get("DeliverMax")), expected, currency, issuer
+    )
+    if requested == "non_match":
+        return "non_match", None, None
+    if requested == "incomplete":
+        return "incomplete", None, "Payment had malformed requested amount"
+    delivered = _target_burn_amount(
+        meta.get("delivered_amount", meta.get("DeliveredAmount")),
+        expected,
+        currency,
+        issuer,
+    )
+    if delivered == "non_match":
+        return "non_match", None, None
+    if delivered == "incomplete":
+        return "incomplete", None, "Payment omitted exact delivered amount"
+    decoded = memos.decode_memos(tx.get("Memos", []))
+    if decoded is None:
+        return "incomplete", None, "Payment had malformed or duplicate memos"
+    if decoded != {
+        "initiator": memos.INITIATOR_BACKEND,
+        "platform": memos.PLATFORM_BACKEND,
+        "action": memos.ACTION_SPONSORED_MINT_BURN,
+        "campaign": memo_id,
+    }:
+        return "non_match", None, None
+    tx_hash = _tx_hash(entry, tx)
+    if tx_hash is None:
+        return "incomplete", None, "matching burn omitted transaction hash"
+    if signed_tx_hash is not None and tx_hash != signed_tx_hash:
+        return "non_match", None, None
+    return "match", tx_hash, None
+
+
+def _burn_marker_key(marker: object) -> str | None:
+    if isinstance(marker, bool):
+        return None
+    if isinstance(marker, (str, int)):
+        return repr(marker)
+    if not isinstance(marker, dict) or not marker:
+        return None
+    if not all(
+        isinstance(key, str) and isinstance(value, (str, int)) and not isinstance(value, bool)
+        for key, value in marker.items()
+    ):
+        return None
+    return json.dumps(marker, sort_keys=True, separators=(",", ":"))
+
+
+async def find_sponsored_burn(
+    memo_id: str,
+    *,
+    amount: str | None = None,
+    source_account: str | None = None,
+    network: str | None = None,
+    issuer: str | None = None,
+    currency: str | None = None,
+    source_tag: int | None = None,
+    signed_tx_hash: str | None = None,
+    required_ledger_min: int | None = None,
+    required_ledger_max: int | None = None,
+) -> BurnReconciliation:
+    """Scan full validated history; malformed data never proves absence."""
+    burn_amount = config.MINT_PRICE_LFGO if amount is None else amount
+    source = config.SIGNING_ACCOUNT if source_account is None else source_account
+    selected_network = config.XRPL_NETWORK if network is None else network
+    burn_issuer = config.TOKEN_ISSUER_ADDRESS if issuer is None else issuer
+    burn_currency = config.TOKEN_CURRENCY_HEX if currency is None else currency
+    burn_source_tag = config.SOURCE_TAG if source_tag is None else source_tag
+    if selected_network != config.XRPL_NETWORK:
+        return BurnReconciliation(
+            False, None, "burn obligation network does not match the active XRPL network"
+        )
+    bounded = required_ledger_min is not None or required_ledger_max is not None
+    if bounded and (
+        isinstance(required_ledger_min, bool)
+        or not isinstance(required_ledger_min, int)
+        or required_ledger_min <= 0
+        or isinstance(required_ledger_max, bool)
+        or not isinstance(required_ledger_max, int)
+        or required_ledger_max < required_ledger_min
+    ):
+        return BurnReconciliation(False, None, "required account_tx ledger range was malformed")
+    request_ledger_min = required_ledger_min if bounded else -1
+    request_ledger_max = required_ledger_max if bounded else -1
+    assert isinstance(request_ledger_min, int)
+    assert isinstance(request_ledger_max, int)
+    client = JsonRpcClient(config.JSON_RPC_URL)
+    marker = None
+    seen_markers: set[str] = set()
+    incomplete_error: str | None = None
+    try:
+        while True:
+            response = await asyncio.to_thread(
+                client.request,
+                AccountTx(
+                    account=source,
+                    ledger_index_min=request_ledger_min,
+                    ledger_index_max=request_ledger_max,
+                    limit=200,
+                    marker=marker,
+                ),
+            )
+            result = response.result
+            if not isinstance(result, dict):
+                return BurnReconciliation(False, None, "account_tx response was malformed")
+            if bounded:
+                if result.get("validated") is not True:
+                    return BurnReconciliation(
+                        False,
+                        None,
+                        "bounded account_tx response was not explicitly validated",
+                    )
+                response_account = result.get("account")
+                if not isinstance(response_account, str) or response_account != source:
+                    return BurnReconciliation(
+                        False,
+                        None,
+                        "bounded account_tx response account did not match the requested account",
+                    )
+                returned_min = result.get("ledger_index_min")
+                returned_max = result.get("ledger_index_max")
+                if (
+                    isinstance(returned_min, bool)
+                    or not isinstance(returned_min, int)
+                    or returned_min <= 0
+                    or isinstance(returned_max, bool)
+                    or not isinstance(returned_max, int)
+                    or returned_max <= 0
+                ):
+                    return BurnReconciliation(
+                        False,
+                        None,
+                        "bounded account_tx response omitted a well-formed ledger range",
+                    )
+                if returned_min > request_ledger_min:
+                    return BurnReconciliation(
+                        False,
+                        None,
+                        "account_tx history was pruned before the required ledger floor",
+                    )
+                if returned_max < request_ledger_max:
+                    return BurnReconciliation(
+                        False,
+                        None,
+                        "account_tx validated range lagged the required last ledger sequence",
+                    )
+            transactions = result.get("transactions")
+            if not isinstance(transactions, list):
+                return BurnReconciliation(False, None, "account_tx omitted transactions")
+            for entry in transactions:
+                state, tx_hash, error = _sponsored_burn_entry(
+                    entry,
+                    memo_id=memo_id,
+                    amount=burn_amount,
+                    source_account=source,
+                    signed_tx_hash=signed_tx_hash,
+                    issuer=burn_issuer,
+                    currency=burn_currency,
+                    source_tag=burn_source_tag,
+                )
+                if state == "incomplete":
+                    if incomplete_error is None:
+                        incomplete_error = error or "account_tx contained an incomplete entry"
+                    continue
+                if state == "match":
+                    return BurnReconciliation(True, tx_hash, None)
+            marker = result.get("marker")
+            if marker is None:
+                if incomplete_error is not None:
+                    return BurnReconciliation(False, None, incomplete_error)
+                return BurnReconciliation(True, None, None)
+            marker_key = _burn_marker_key(marker)
+            if marker_key is None:
+                return BurnReconciliation(False, None, "account_tx marker was malformed")
+            if marker_key in seen_markers:
+                return BurnReconciliation(False, None, "account_tx marker repeated")
+            seen_markers.add(marker_key)
+    except Exception as exc:
+        return BurnReconciliation(False, None, f"account_tx scan failed: {exc}")
+
+
 async def buy_and_burn(
     currency: str, issuer: str, value: str, max_xrp: str | None = None
 ) -> str | None:
@@ -714,13 +1585,15 @@ async def buy_and_burn(
         }
         if max_xrp is not None:
             kwargs["send_max"] = xrp_to_drops(Decimal(max_xrp))
-        response = await asyncio.to_thread(submit_and_wait, Payment(**kwargs), client, wallet)
-        result = response.result["meta"]["TransactionResult"]
-        if result == "tesSUCCESS":
-            logging.info(f"Burned {value} {currency}: {response.result['hash']}")
-            return response.result["hash"]  # type: ignore[no-any-return]
-        logging.error(f"buy_and_burn result: {result}")
-        return None
+        burn = Payment(**kwargs)
+        result = await _submit_and_confirm(burn, wallet, client, "buy_and_burn")
+        if result is None:
+            return None
+        tx_hash = result.get("hash")
+        if not isinstance(tx_hash, str) or not tx_hash:
+            raise IndeterminateResultError("buy_and_burn validated without a transaction hash")
+        logging.info(f"Burned {value} {currency}: {tx_hash}")
+        return tx_hash
     except Exception:
         logging.error(f"buy_and_burn error: {traceback.format_exc()}")
         return None

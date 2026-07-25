@@ -68,6 +68,7 @@ ACTION_BURN = "burn"
 ACTION_MODIFY = "modify"
 ACTION_TRAIT_SWAP_FEE = "trait-swap-fee"
 ACTION_BUY_AND_BURN = "buy-and-burn"
+ACTION_SPONSORED_MINT_BURN = "sponsored-mint-burn"
 ACTION_TRUSTSET = "trustset"
 ACTION_PAYMENT = "payment"
 ACTION_LIST = "list"
@@ -90,6 +91,7 @@ _ACTIONS = frozenset(
         ACTION_MODIFY,
         ACTION_TRAIT_SWAP_FEE,
         ACTION_BUY_AND_BURN,
+        ACTION_SPONSORED_MINT_BURN,
         ACTION_TRUSTSET,
         ACTION_PAYMENT,
         ACTION_LIST,
@@ -190,3 +192,34 @@ def build_memo_models(
         )
         for key, value in pairs
     ]
+
+
+def decode_memos(value: object) -> dict[str, str] | None:
+    """Decode an account_tx Memos array, rejecting malformed or duplicate keys.
+
+    Duplicate provenance keys are ambiguous. Reconciliation therefore treats
+    them as a non-match instead of allowing the last value to silently win.
+    """
+
+    if not isinstance(value, list):
+        return None
+    decoded: dict[str, str] = {}
+    try:
+        for entry in value:
+            if not isinstance(entry, dict):
+                return None
+            body = entry.get("Memo")
+            if not isinstance(body, dict):
+                return None
+            memo_type = body.get("MemoType")
+            memo_data = body.get("MemoData")
+            if not isinstance(memo_type, str) or not isinstance(memo_data, str):
+                return None
+            key = bytes.fromhex(memo_type).decode("utf-8")
+            data = bytes.fromhex(memo_data).decode("utf-8")
+            if key in decoded:
+                return None
+            decoded[key] = data
+    except (UnicodeDecodeError, ValueError):
+        return None
+    return decoded

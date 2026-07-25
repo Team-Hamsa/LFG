@@ -32,6 +32,7 @@ def _patch_client(monkeypatch, captured):
         captured["tx"] = tx
         return _Resp(
             {
+                "validated": True,
                 "hash": "HASH",
                 "meta": {
                     "TransactionResult": "tesSUCCESS",
@@ -44,11 +45,13 @@ def _patch_client(monkeypatch, captured):
     def fake_request(self, req):
         return _Resp(
             {
+                "validated": True,
+                "ledger_index": 100,
                 "meta": {
                     "TransactionResult": "tesSUCCESS",
                     "nftoken_id": "NFTID",
                     "offer_id": "OFFERID",
-                }
+                },
             }
         )
 
@@ -214,3 +217,41 @@ def test_mint_action_defaults_to_mint(monkeypatch):
     _patch_client(monkeypatch, captured)
     _run(xrpl_ops.mint_nft("https://x/m.json", taxon=1, issuer=config.SWAP_ISSUER_ADDRESS))
     assert _decoded_memos(captured["tx"])["action"] == "mint"
+
+
+def test_sponsored_burn_carries_unique_provenance_and_snapshot(monkeypatch):
+    captured: dict = {}
+    _patch_client(monkeypatch, captured)
+
+    class Signed:
+        def __init__(self, tx):
+            self.tx = tx
+
+        def __getattr__(self, name):
+            return getattr(self.tx, name)
+
+        def blob(self):
+            return "ABCD"
+
+        def get_hash(self):
+            return "HASH"
+
+    signed = {}
+    monkeypatch.setattr(
+        xrpl_ops, "autofill_and_sign", lambda tx, *args: signed.setdefault("tx", Signed(tx))
+    )
+    monkeypatch.setattr(xrpl_ops.Transaction, "from_blob", lambda blob: signed["tx"])
+    memo_id = "fm-a2345678901234567890123456"
+    result = _run(
+        xrpl_ops.submit_sponsored_burn(memo_id, amount="7.25", source_account="rSnapSource")
+    )
+    assert result.state == "validated"
+    assert _decoded_memos(captured["tx"]) == {
+        "initiator": memos.INITIATOR_BACKEND,
+        "platform": memos.PLATFORM_BACKEND,
+        "action": memos.ACTION_SPONSORED_MINT_BURN,
+        "campaign": memo_id,
+    }
+    assert captured["tx"].account == "rSnapSource"
+    assert captured["tx"].destination == config.TOKEN_ISSUER_ADDRESS
+    assert captured["tx"].amount.value == "7.25"
