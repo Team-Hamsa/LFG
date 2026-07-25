@@ -613,3 +613,137 @@ def test_warn_if_unvalidated_is_quiet_when_nothing_was_dropped(caplog):
     with caplog.at_level(logging.WARNING):
         bh._warn_if_unvalidated("signing_tx", {}, 0)
     assert caplog.text == ""
+
+
+def test_certification_cannot_erase_a_gap_above_the_certified_tip(tmp_path):
+    """Greptile #328 (P1): a certification run proves coverage of its range and
+    nothing above it. The listener streams concurrently with the backfill, so a
+    disconnect can stamp a gap past the certified tip. Clearing that would make
+    the archive read as certified-complete while missing the gap's transactions
+    — and a wallet that IS already tagged would look eligible for a free mint."""
+    conn = history_store.init_history_db(str(tmp_path / "h.db"))
+    history_store.record_archive_baseline(
+        conn,
+        network="testnet",
+        genesis_hash="g",
+        ledger_min=1,
+        ledger_max=100,
+        provenance="first",
+        completed_at=10,
+    )
+    # Stream drops at ledger 150, well past the tip the next run will certify.
+    history_store.invalidate_archive_continuity(
+        conn,
+        network="testnet",
+        reason="transaction stream disconnected",
+        gap_after=150,
+        gap_before=200,
+        invalidated_at=20,
+    )
+
+    history_store.record_archive_baseline(
+        conn,
+        network="testnet",
+        genesis_hash="g",
+        ledger_min=1,
+        ledger_max=100,
+        provenance="second",
+        completed_at=30,
+    )
+
+    state = history_store.get_archive_state(conn, "testnet")
+    assert state.continuity_gap_after == 150, "gap above the certified tip was erased"
+    assert state.baseline_complete is False, "archive claimed complete despite an uncovered gap"
+
+
+def test_certification_clears_a_gap_it_provably_re_swept(tmp_path):
+    """The mirror case: a gap wholly inside the newly certified range WAS
+    re-fetched by the backfill, so certification legitimately clears it and the
+    archive becomes usable again. Without this, a gap would be permanent."""
+    conn = history_store.init_history_db(str(tmp_path / "h.db"))
+    history_store.record_archive_baseline(
+        conn,
+        network="testnet",
+        genesis_hash="g",
+        ledger_min=1,
+        ledger_max=100,
+        provenance="first",
+        completed_at=10,
+    )
+    history_store.invalidate_archive_continuity(
+        conn,
+        network="testnet",
+        reason="listener process restart lacks exact stream catch-up",
+        gap_after=40,
+        gap_before=60,
+        invalidated_at=20,
+    )
+
+    history_store.record_archive_baseline(
+        conn,
+        network="testnet",
+        genesis_hash="g",
+        ledger_min=1,
+        ledger_max=500,
+        provenance="re-swept through 500",
+        completed_at=30,
+    )
+
+    state = history_store.get_archive_state(conn, "testnet")
+    assert state.continuity_gap_at is None
+    assert state.continuity_gap_before is None
+    assert state.baseline_complete is True
+
+
+def test_certification_keeps_an_unbounded_gap_the_sweep_never_reached(tmp_path):
+    """An open-ended gap (`_mark_stream_disconnected` records only a lower
+    bound) clears once the sweep runs past where continuity was lost, since
+    account_tx paging genuinely re-fetches that range. It must NOT clear when
+    the certified tip stops short of the loss point — that is Greptile's
+    scenario, and the common one, because ledger_max is pinned to the tip
+    observed BEFORE a long backfill starts while the stream keeps running."""
+    conn = history_store.init_history_db(str(tmp_path / "h.db"))
+    history_store.record_archive_baseline(
+        conn,
+        network="testnet",
+        genesis_hash="g",
+        ledger_min=1,
+        ledger_max=100,
+        provenance="first",
+        completed_at=10,
+    )
+    history_store.invalidate_archive_continuity(
+        conn,
+        network="testnet",
+        reason="transaction stream disconnected",
+        gap_after=900,
+        invalidated_at=20,
+    )
+
+    history_store.record_archive_baseline(
+        conn,
+        network="testnet",
+        genesis_hash="g",
+        ledger_min=1,
+        ledger_max=500,
+        provenance="sweep stopped short of the loss point",
+        completed_at=30,
+    )
+
+    state = history_store.get_archive_state(conn, "testnet")
+    assert state.continuity_gap_after == 900
+    assert state.baseline_complete is False
+
+    # Sweeping past the loss point is the proof that clears it.
+    history_store.record_archive_baseline(
+        conn,
+        network="testnet",
+        genesis_hash="g",
+        ledger_min=1,
+        ledger_max=1000,
+        provenance="re-swept past the loss point",
+        completed_at=40,
+    )
+    state = history_store.get_archive_state(conn, "testnet")
+    assert state.continuity_gap_at is None
+    assert state.baseline_complete is True

@@ -314,7 +314,33 @@ def record_archive_baseline(
         ) VALUES (?, ?, ?, 1, ?, ?, ?, ?, ?, NULL, NULL, NULL, NULL, NULL, NULL, NULL, ?)
         ON CONFLICT(network) DO UPDATE SET
             source_tag = excluded.source_tag,
-            baseline_complete = 1,
+            -- A certification run proves coverage of [ledger_min, ledger_max]
+            -- and NOTHING above it. The listener streams concurrently with the
+            -- (often long) backfill, so a disconnect can stamp a gap whose
+            -- upper bound lies past the certified tip. Clearing that
+            -- unconditionally would assert coverage the sweep never had: the
+            -- archive would read as certified-complete while missing the
+            -- transactions from the gap, and a wallet that IS already tagged
+            -- would look eligible and be handed a free mint.
+            --
+            -- So a gap clears only when the certified sweep reached at or past
+            -- the gap's upper extent: `continuity_gap_before` when the stream
+            -- resumed at a known ledger, otherwise `continuity_gap_after` (the
+            -- last ledger we know we had, where continuity was lost). An
+            -- account_tx sweep of [1, ledger_max] genuinely re-fetches
+            -- everything below ledger_max, so reaching past the loss point is
+            -- the proof. The lower bound needs no test because
+            -- baseline_ledger_min is pinned to 1. A gap with no bounds at all
+            -- can never be proven covered. A surviving gap keeps
+            -- baseline_complete = 0, so archive_is_usable keeps failing closed
+            -- until the operator re-certifies against a tip above the gap.
+            baseline_complete = CASE
+                WHEN continuity_gap_at IS NULL THEN 1
+                WHEN COALESCE(continuity_gap_before, continuity_gap_after) IS NOT NULL
+                     AND excluded.baseline_ledger_max
+                         >= COALESCE(continuity_gap_before, continuity_gap_after) THEN 1
+                ELSE 0
+            END,
             baseline_ledger_min = excluded.baseline_ledger_min,
             baseline_ledger_max = excluded.baseline_ledger_max,
             baseline_provenance = excluded.baseline_provenance,
@@ -323,10 +349,30 @@ def record_archive_baseline(
             validated_ledger_index = NULL,
             validated_close_time = NULL,
             heartbeat_at = NULL,
-            continuity_gap_at = NULL,
-            continuity_gap_after = NULL,
-            continuity_gap_before = NULL,
-            continuity_gap_reason = NULL,
+            continuity_gap_at = CASE
+                WHEN COALESCE(continuity_gap_before, continuity_gap_after) IS NOT NULL
+                     AND excluded.baseline_ledger_max
+                         >= COALESCE(continuity_gap_before, continuity_gap_after) THEN NULL
+                ELSE continuity_gap_at
+            END,
+            continuity_gap_after = CASE
+                WHEN COALESCE(continuity_gap_before, continuity_gap_after) IS NOT NULL
+                     AND excluded.baseline_ledger_max
+                         >= COALESCE(continuity_gap_before, continuity_gap_after) THEN NULL
+                ELSE continuity_gap_after
+            END,
+            continuity_gap_reason = CASE
+                WHEN COALESCE(continuity_gap_before, continuity_gap_after) IS NOT NULL
+                     AND excluded.baseline_ledger_max
+                         >= COALESCE(continuity_gap_before, continuity_gap_after) THEN NULL
+                ELSE continuity_gap_reason
+            END,
+            continuity_gap_before = CASE
+                WHEN COALESCE(continuity_gap_before, continuity_gap_after) IS NOT NULL
+                     AND excluded.baseline_ledger_max
+                         >= COALESCE(continuity_gap_before, continuity_gap_after) THEN NULL
+                ELSE continuity_gap_before
+            END,
             updated_at = excluded.updated_at
         """,
         (
