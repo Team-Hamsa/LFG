@@ -31,18 +31,30 @@ async def handle_mint(svc: LFGServiceClient, interaction: discord.Interaction) -
     payment_link = session.get("payment_link", "")
 
     # 2. payment QR (rendered locally from the deeplink — the service exposes no
-    #    hosted payment-QR url, only the link)
-    try:
-        qr_png = await svc.qr_png(payment_link)
-    except ServiceError as e:
-        logging.error(f"payment QR render failed: {e}")
-        await interaction.followup.send(embed=render.error_embed(friendly_error(e)), ephemeral=True)
-        return
-    await interaction.followup.send(
-        embed=render.payment_embed(payment_link, push=session.get("payment_push")),
-        file=render.file_from_png(qr_png, "payment_qr.png"),
-        ephemeral=True,
-    )
+    #    hosted payment-QR url, only the link).
+    #    A sponsored session (#free-mint) skips payment entirely, so it carries
+    #    payment_link=None. Rendering a QR from that raises TypeError out of the
+    #    SDK — NOT ServiceError, so the handler below would not catch it, and the
+    #    mint would run to completion server-side while this surface died before
+    #    ever delivering the accept-offer QR. Admission is surface-agnostic, so
+    #    this branch is reachable from the /letsgo mint button just as it is in
+    #    the Activity.
+    if session.get("sponsored"):
+        await interaction.followup.send(embed=render.sponsored_embed(), ephemeral=True)
+    else:
+        try:
+            qr_png = await svc.qr_png(payment_link)
+        except ServiceError as e:
+            logging.error(f"payment QR render failed: {e}")
+            await interaction.followup.send(
+                embed=render.error_embed(friendly_error(e)), ephemeral=True
+            )
+            return
+        await interaction.followup.send(
+            embed=render.payment_embed(payment_link, push=session.get("payment_push")),
+            file=render.file_from_png(qr_png, "payment_qr.png"),
+            ephemeral=True,
+        )
 
     # 3. wait for a terminal state (SDK polls /api/mint/<id> + backs off)
     try:

@@ -21,6 +21,20 @@ def _push_hint(push: Any) -> str:
     return ""
 
 
+def sponsored_caption() -> str:
+    """Copy for a sponsored session, which has no payment step at all.
+
+    Mirrors mint_pure.sponsoredMintCopy in the Activity client: no purchase
+    price, but the user still signs an on-ledger NFTokenAcceptOffer, so normal
+    network fee / reserve behavior still applies and must not be hidden."""
+    return (
+        "🎟️ Sponsored mint\n\n"
+        "No XRP or LFGO purchase price — this one is on us.\n"
+        "Building your NFT now; you'll accept the transfer in Xaman when it's ready.\n\n"
+        "Normal XRPL network fees and account reserve requirements may still apply."
+    )
+
+
 def payment_caption(payment_link: str, push: Any = None) -> str:
     return (
         "💰 Token Payment Required\n\n"

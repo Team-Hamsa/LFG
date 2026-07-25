@@ -12,7 +12,7 @@
 import * as marketPure from './market_pure.js?v=23';
 // Mint-flow pure helpers (issue #141): the cancel-outcome decision lives in
 // its own module so it's Node-testable too (tests/test_mint_pure_js.py).
-import * as mintPure from './mint_pure.js?v=23';
+import * as mintPure from './mint_pure.js?v=24';
 // Build-panel decision logic lives in its own pure module so it's
 // Node-testable too (tests/test_build_pure_js.py).
 import * as buildPure from './build_pure.js?v=26';
@@ -716,6 +716,17 @@ function mintPayView(s) {
   };
 }
 
+
+function sponsoredMintView(s) {
+  const copy = mintPure.sponsoredMintCopy(s);
+  if (!copy) return null;
+  return { title: copy.title, text: copy.body };
+}
+
+function mintStartView(s) {
+  return sponsoredMintView(s) || mintPayView(s);
+}
+
 const STAGE_TEXT = {
   generating: ['🎨 Building your avatar', "Payment's in. Laying the bricks on your one-of-a-kind build…"],
   minting: ['⛏️ Minting on XRPL', 'Stamping your build onto the ledger…'],
@@ -739,6 +750,7 @@ function pollMint(sessionId) {
     }
     if (gen !== pollGen) return; // a newer chain started while we awaited
 
+    const sponsored = sponsoredMintView(s);
     if (s.state === 'offer_ready') {
       if (s.accept_signed) {
         showFlow({
@@ -756,8 +768,8 @@ function pollMint(sessionId) {
       showFlow({
         title: `🎉 Minted! #${s.nft_number} is yours`,
         text: s.accept_scanned
-          ? 'Approve the transfer in Xaman to claim it to your wallet…'
-          : signText(s.accept_push, 'Scan to accept the transfer and claim it to your wallet. Welcome to the job site.'),
+          ? 'Approve the transfer in Xaman to claim it to your wallet… Normal XRPL network fees and account reserve requirements may still apply.'
+          : signText(s.accept_push, 'Scan to accept the transfer and claim it to your wallet. Welcome to the job site. Normal XRPL network fees and account reserve requirements may still apply.'),
         qrData: s.accept_scanned ? null : s.accept_deeplink,
         spinner: s.accept_scanned,
         link: s.accept_deeplink,
@@ -772,7 +784,11 @@ function pollMint(sessionId) {
       return;
     }
     if (s.state === 'payment_timeout') {
-      showFlow({ title: '⏰ Payment timed out', text: 'No payment came through in time. Give it another go.', done: true });
+      if (sponsored) {
+        showFlow({ ...sponsored, done: true });
+      } else {
+        showFlow({ title: '⏰ Payment timed out', text: 'No payment came through in time. Give it another go.', done: true });
+      }
       return;
     }
     if (s.state === 'failed') {
@@ -782,9 +798,10 @@ function pollMint(sessionId) {
     if (s.state === 'cancelled') { showMintHome(); return; } // cancelled elsewhere (issue #141)
 
     if (s.state === 'awaiting_payment') {
-      showFlow(mintPayView(s));
+      showFlow(sponsored || mintPayView(s));
     } else if (STAGE_TEXT[s.state]) {
-      const [title, text] = STAGE_TEXT[s.state];
+      const [title, stageText] = STAGE_TEXT[s.state];
+      const text = sponsored ? `No XRP or LFGO payment. ${stageText.replace("Payment's in. ", '')}` : stageText;
       showFlow({ title, text, stage: s.state, spinner: true });
     }
     pollTimer = setTimeout(tick, 3000);
@@ -1223,7 +1240,7 @@ async function startMint() {
     currentMintId = s.id;
     mintQty = 1;
     liveQty = 1;
-    showFlow(mintPayView(s));
+    showFlow(mintStartView(s));
     pollMint(s.id);
   } catch (e) {
     showError(e.message);
@@ -1245,7 +1262,7 @@ async function resumeMint() {
   currentMintId = id;
   mintQty = 1;
   liveQty = 1;
-  showFlow({
+  showFlow(sponsoredMintView(active.session) || {
     title: '🔄 Reconnecting…',
     text: 'You have a mint in progress — picking it back up where you left off.',
     spinner: true,

@@ -22,6 +22,24 @@ def _push_hint(push: Any) -> str:
     return ""
 
 
+def sponsored_embed() -> Embed:
+    """Step-1 embed for a sponsored session, which has no payment step.
+
+    Mirrors mint_pure.sponsoredMintCopy in the Activity client: no purchase
+    price, but the user still signs an on-ledger NFTokenAcceptOffer, so normal
+    network fee / reserve behavior still applies and must not be hidden."""
+    embed = Embed(
+        title="🎟️ Sponsored Mint",
+        description=(
+            "No XRP or LFGO purchase price — this one is on us.\n\n"
+            "Building your NFT now; you'll accept the transfer in Xaman when it's ready.\n\n"
+            "Normal XRPL network fees and account reserve requirements may still apply."
+        ),
+        color=0x9C84EF,
+    )
+    return embed
+
+
 def payment_embed(payment_link: str, push: Any = None) -> Embed:
     """Step-1 embed. The payment QR is always rendered locally from the
     deeplink and attached, so the image points at the attachment."""

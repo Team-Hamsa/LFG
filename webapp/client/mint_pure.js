@@ -72,3 +72,14 @@ export function qtyStale(selectedQty, liveQty) {
 export function qtyMintTarget(selectedQty) {
   return selectedQty > 1 ? 'bulk' : 'single';
 }
+
+// Sponsored sessions skip the normal LFGO/XRP payment request, but the user
+// still needs to accept the completed NFT transfer in Xaman.
+export function sponsoredMintCopy(session) {
+  if (!session?.sponsored) return null;
+  return {
+    title: 'Sponsored mint',
+    body: 'No XRP or LFGO purchase price. We’ll mint your NFT, then you’ll accept it in Xaman. Normal XRPL network fees and account reserve requirements may still apply.',
+    action: 'Mint my free NFT',
+  };
+}
