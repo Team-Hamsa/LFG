@@ -23,7 +23,7 @@ from typing import Any
 
 import aiohttp
 from xrpl.asyncio.clients import AsyncWebsocketClient
-from xrpl.models.requests import StreamParameter, Subscribe
+from xrpl.models.requests import Request, StreamParameter, Subscribe
 
 REPO_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
 sys.path.insert(0, REPO_ROOT)
@@ -38,6 +38,7 @@ from lfg_core import (  # noqa: E402
     market_store,
     nft_index,
     nft_listener,
+    sponsored_mint,
     swap_meta,
     trait_economy,
     xrpl_ops,
@@ -65,6 +66,7 @@ def _normalize_stream_tx(msg: dict[str, Any]) -> dict[str, Any] | None:
         return None
     tx = dict(msg.get("tx_json") or msg.get("transaction") or {})
     tx["meta"] = msg.get("meta") or msg.get("metaData") or {}
+    tx["validated"] = msg.get("validated") is True
     tx.setdefault("hash", msg.get("hash"))
     tx.setdefault("ledger_index", msg.get("ledger_index"))
     if "close_time_iso" in msg:
@@ -78,6 +80,169 @@ def _effective_genesis(conn: Any) -> trait_economy.Genesis:
     stream is recognised, making new-edition growth-logging idempotent."""
     genesis = economy_store.read_genesis(conn)
     return trait_economy.effective_genesis(genesis, economy_store.read_supply_changes(conn))
+
+
+def _archive_eligibility_tx(hconn: Any, tx: dict[str, Any], ctx: dict[str, Any]) -> bool:
+    """Durably archive validated SourceTag evidence before business processing."""
+
+    from lfg_core import config
+
+    if tx.get("validated") is not True or not tx.get("hash"):
+        return False
+    inserted = False
+    if tx.get("SourceTag") == config.SOURCE_TAG:
+        inserted = history_store.insert_tx(
+            hconn,
+            tx_hash=str(tx["hash"]),
+            ledger_index=tx.get("ledger_index"),
+            close_time=history_events.tx_unix_time(tx),
+            tx_type=str(tx.get("TransactionType", "")),
+            account=tx.get("Account"),
+            source_tag=tx.get("SourceTag"),
+            raw_json=_json.dumps(tx, sort_keys=True),
+        )
+
+    ledger_index = tx.get("ledger_index")
+    close_time = history_events.tx_unix_time(tx)
+    genesis_hash = str(ctx.get("genesis_hash") or "").strip()
+    if (
+        isinstance(ledger_index, int)
+        and not isinstance(ledger_index, bool)
+        and ledger_index >= 0
+        and isinstance(close_time, int)
+        and close_time >= 0
+        and genesis_hash
+    ):
+        history_store.record_validated_ledger(
+            hconn,
+            network=str(ctx.get("network") or ""),
+            genesis_hash=genesis_hash,
+            ledger_index=ledger_index,
+            close_time=close_time,
+            source_tag=int(ctx.get("source_tag", config.SOURCE_TAG)),
+        )
+    else:
+        hconn.commit()
+
+    if inserted:
+        try:
+            sponsored_mint.observe_sponsored_acceptance(
+                tx, tx.get("meta") or {}, network=str(ctx.get("network") or "")
+            )
+        except Exception:
+            # Raw eligibility evidence is more fundamental than its derived
+            # claim state. Startup replay repairs an observation that loses a
+            # race or temporarily cannot acquire the application database.
+            logging.exception("sponsored acceptance observation deferred for %s", tx["hash"])
+    return inserted
+
+
+def _mark_stream_disconnected(
+    hconn: Any,
+    *,
+    network: str,
+    after_ledger: int | None,
+    at: int | None = None,
+) -> None:
+    history_store.invalidate_archive_continuity(
+        hconn,
+        network=network,
+        reason="transaction stream disconnected",
+        gap_after=after_ledger,
+        invalidated_at=at,
+    )
+
+
+def _verify_archive_connection(
+    hconn: Any,
+    ctx: dict[str, Any],
+    snapshot: history_store.EndpointSnapshot,
+) -> None:
+    """Bind one subscribed stream to its real chain before accepting evidence."""
+
+    network = str(ctx.get("network") or "")
+    expected_genesis = str(ctx.get("genesis_hash") or "").strip()
+    source_tag = ctx.get("source_tag")
+    if not expected_genesis:
+        # No certified archive identity (see _listen): there is nothing to bind
+        # this stream to and nothing to invalidate. Returning here keeps the
+        # listener's index/market/history duties running exactly as they did
+        # before the sponsored-mint archive existed.
+        return
+    state = history_store.get_archive_state(hconn, network)
+    if snapshot.genesis_hash != expected_genesis or (
+        state is not None and state.genesis_hash != snapshot.genesis_hash
+    ):
+        history_store.invalidate_archive_continuity(
+            hconn,
+            network=network,
+            reason="endpoint ledger-1 identity mismatch",
+            gap_after=state.validated_ledger_index if state is not None else None,
+            gap_before=snapshot.validated_ledger_index,
+        )
+        raise RuntimeError(f"[{network}] endpoint ledger-1 identity mismatch")
+    if state is not None and state.source_tag not in {None, source_tag}:
+        history_store.invalidate_archive_continuity(
+            hconn,
+            network=network,
+            reason="configured SourceTag differs from certified archive snapshot",
+            gap_after=state.validated_ledger_index,
+            gap_before=snapshot.validated_ledger_index,
+        )
+        raise RuntimeError(f"[{network}] configured SourceTag conflicts with archive provenance")
+    if state is None or not state.baseline_complete:
+        return
+    if state.validated_ledger_index is not None:
+        # A persisted live cursor proves a previous listener session existed,
+        # but transaction streams have no replay token. A process restart can
+        # miss another tx in the same ledger, so equality is not sufficient.
+        history_store.invalidate_archive_continuity(
+            hconn,
+            network=network,
+            reason="listener process restart lacks exact stream catch-up",
+            gap_after=state.validated_ledger_index,
+            gap_before=snapshot.validated_ledger_index,
+        )
+        return
+    if state.baseline_ledger_max != snapshot.validated_ledger_index:
+        history_store.invalidate_archive_continuity(
+            hconn,
+            network=network,
+            reason="listener start is ahead of certified baseline",
+            gap_after=state.baseline_ledger_max,
+            gap_before=snapshot.validated_ledger_index,
+        )
+
+
+async def _dispatch_stream_tx(
+    conn: Any,
+    tx: dict[str, Any],
+    *,
+    collection_issuer: str,
+    fetch_token: nft_listener.FetchTokenFn,
+    fetch_meta: nft_listener.FetchMetaFn,
+    is_ours: Callable[[dict[str, Any]], bool],
+    history_conn: Any,
+    history_ctx: dict[str, Any],
+) -> None:
+    """Archive eligibility first, then apply collection-only optimizations."""
+
+    if (
+        tx.get("TransactionType") == "NFTokenMint"
+        and tx.get("Issuer")
+        and tx["Issuer"] != collection_issuer
+    ):
+        _archive_eligibility_tx(history_conn, tx, history_ctx)
+        return
+    await process_stream_tx(
+        conn,
+        tx,
+        fetch_token=fetch_token,
+        fetch_meta=fetch_meta,
+        is_ours=is_ours,
+        history_conn=history_conn,
+        history_ctx=history_ctx,
+    )
 
 
 async def process_stream_tx(
@@ -101,6 +266,9 @@ async def process_stream_tx(
     nft_id, so per-tx memo caches feed both helpers from a single clio nft_info
     call and (on mainnet) a single IPFS metadata fetch — the token/meta state is
     fixed for the duration of one tx, so caching is correctness-safe."""
+    if history_conn is not None and history_ctx is not None:
+        _archive_eligibility_tx(history_conn, tx, history_ctx)
+
     token_cache: dict[str, dict[str, Any] | None] = {}
     meta_cache: dict[str, dict[str, Any] | None] = {}
 
@@ -134,18 +302,33 @@ async def process_stream_tx(
     # same nft_id) reads the just-updated onchain_nfts/trait_tokens row, not stale data.
     await nft_listener.apply_market_tx(conn, tx)
     if history_conn is not None and history_ctx is not None:
-        _record_history(history_conn, tx, history_ctx, index_conn=conn)
+        # already_archived: the eligibility write happened above, BEFORE the
+        # business applies, so a raising apply_tx cannot lose the evidence.
+        # Without this flag every transaction on the whole-network stream paid
+        # for the archive twice — two record_validated_ledger round-trips and
+        # two synchronous commits per tx, on the listener's serial event loop.
+        _record_history(history_conn, tx, history_ctx, index_conn=conn, already_archived=True)
 
 
 def _record_history(
-    hconn: Any, tx: dict[str, Any], ctx: dict[str, Any], *, index_conn: Any = None
+    hconn: Any,
+    tx: dict[str, Any],
+    ctx: dict[str, Any],
+    *,
+    index_conn: Any = None,
+    already_archived: bool = False,
 ) -> None:
-    """Append one stream tx to the history archive iff it produces events.
+    """Append a stream transaction and any derived business events.
 
+    Validated SourceTag rows are archived before these event filters by
+    `_archive_eligibility_tx`; calling this helper directly preserves that rule.
     The listener subscribes to the WHOLE network tx stream, so derived NFT
     events must be scoped to our collection: every NFTokenID embeds its
     issuer's AccountID, and events whose nft_id embeds a foreign issuer are
     dropped. The raw tx is archived only if any events survive."""
+    if not already_archived:
+        _archive_eligibility_tx(hconn, tx, ctx)
+
     nft_evs = history_events.derive_nft_events(tx, nft_issuer=ctx["nft_issuer"])
     if nft_evs:
         issuer_hex = ctx.get("issuer_hex")
@@ -211,14 +394,43 @@ async def _listen(network: str, issuer: str, taxon: int, clio: str) -> None:
         logging.info(f"[{network}] reconciled {healed} nft_number(s) from app DB")
     hconn = history_store.init_history_db(history_store.history_db_path(network))
     # Numbers map is read once at startup, not refreshed per-tx: a mint of a
+    state = history_store.get_archive_state(hconn, network)
+    configured_genesis = config.SPONSORED_MINT_ARCHIVE_GENESIS_HASHES.get(network, "")
+    if state is not None and configured_genesis and state.genesis_hash != configured_genesis:
+        raise RuntimeError(
+            f"[{network}] configured genesis hash conflicts with history archive provenance"
+        )
+    genesis_hash = configured_genesis or (state.genesis_hash if state is not None else "")
+    if not genesis_hash:
+        # No certified archive identity yet — the normal state on every stack
+        # until an operator runs the audited baseline (see
+        # docs/ops/sponsored-free-mint.md). This listener's PRIMARY jobs (the
+        # per-nft_id index, market listings, and derived history) predate the
+        # sponsored-mint archive and must keep running, so degrade instead of
+        # raising: raising here killed the process before it ever subscribed,
+        # which pm2 turns into a crash loop that takes the NFT index and
+        # marketplace down on any stack whose history DB has no archive_state
+        # row. Sponsored eligibility stays fail-closed regardless —
+        # sponsored_mint.archive_is_usable rejects an archive with no certified
+        # baseline, so no wallet can be admitted off an unproven archive.
+        logging.warning(
+            "[%s] no certified archive genesis identity; SourceTag eligibility archiving is "
+            "DISABLED (sponsored mint cannot admit). Index, market and history sync continue. "
+            "Run scripts/backfill_history.py --complete-audited-baseline to enable it.",
+            network,
+        )
+
     # brand-new edition within this process's lifetime won't have its number
     # yet, so that nft_event row is stored with nft_number=None. The nightly
     # `--derive-only` rerun (scripts/derive_history_events.py) fills it in
     # from the now-updated index — acceptable staleness, not data loss.
     numbers = dict(conn.execute("SELECT nft_id, nft_number FROM onchain_nfts"))
     history_ctx: dict[str, Any] = {
+        "network": network,
         "nft_issuer": issuer,
         "issuer_hex": history_events.issuer_account_hex(issuer),
+        "genesis_hash": genesis_hash,
+        "source_tag": config.SOURCE_TAG,
         "brix_issuer": config.SWAP_OFFER_ISSUER,
         "brix_hex": config.SWAP_OFFER_CURRENCY_HEX,
         "distributor": config.BRIX_DISTRIBUTOR_ADDRESS,
@@ -237,24 +449,33 @@ async def _listen(network: str, issuer: str, taxon: int, clio: str) -> None:
             return token.get("issuer") == issuer and int(token.get("taxon") or -1) == taxon
 
         while True:
+            stream_open = False
             try:
                 async with AsyncWebsocketClient(clio) as client:
                     await client.request(Subscribe(streams=[StreamParameter.TRANSACTIONS]))
-                    logging.info(f"[{network}] subscribed to tx stream on {clio}")
+                    stream_open = True
+
+                    async def endpoint_request(req: dict[str, Any]) -> dict[str, Any]:
+                        response = await client.request(Request.from_dict(req))
+                        if not response.is_successful() or not isinstance(response.result, dict):
+                            raise RuntimeError(
+                                f"[{network}] {req['method']} identity request failed: "
+                                f"{response.result}"
+                            )
+                        return response.result
+
+                    snapshot = await history_store.fetch_endpoint_snapshot(endpoint_request)
+                    _verify_archive_connection(hconn, history_ctx, snapshot)
+                    logging.info(f"[{network}] subscribed to verified tx stream on {clio}")
                     backoff = RECONNECT_BASE
                     async for msg in client:
                         tx = _normalize_stream_tx(dict(msg))
                         if tx is None:
                             continue
-                        # Only collection NFTs matter; cheap filter by issuer when present.
-                        if tx.get("Issuer") and tx["Issuer"] != issuer:
-                            # AcceptOffer/Burn won't carry Issuer; apply_tx + nft_info
-                            # still scope correctness, so only skip clear mismatches.
-                            if tx.get("TransactionType") == "NFTokenMint":
-                                continue
-                        await process_stream_tx(
+                        await _dispatch_stream_tx(
                             conn,
                             tx,
+                            collection_issuer=issuer,
                             fetch_token=fetch_token,
                             fetch_meta=fetch_meta,
                             is_ours=is_ours,
@@ -262,9 +483,25 @@ async def _listen(network: str, issuer: str, taxon: int, clio: str) -> None:
                             history_ctx=history_ctx,
                         )
             except Exception as e:
+                if stream_open:
+                    current = history_store.get_archive_state(hconn, network)
+                    _mark_stream_disconnected(
+                        hconn,
+                        network=network,
+                        after_ledger=current.validated_ledger_index if current else None,
+                    )
+                    stream_open = False
                 logging.warning(f"[{network}] stream error: {e}; reconnecting in {backoff}s")
                 await asyncio.sleep(backoff)
                 backoff = min(backoff * 2, RECONNECT_MAX)
+            finally:
+                if stream_open:
+                    current = history_store.get_archive_state(hconn, network)
+                    _mark_stream_disconnected(
+                        hconn,
+                        network=network,
+                        after_ledger=current.validated_ledger_index if current else None,
+                    )
 
 
 async def _amain() -> int:

@@ -1,8 +1,11 @@
 # Tests for scripts/backfill_history.py
 import asyncio
 import importlib
+import logging
 import os
 import sys
+
+import pytest
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 os.environ.setdefault("DISCORD_BOT_TOKEN", "x")
@@ -366,3 +369,247 @@ def test_audit_history_scopes_by_taxon(tmp_path):
     assert unscoped["drift"] == 1
     scoped = ah.audit_history(h, o, taxon=ah.nftoken_taxon(coll))
     assert scoped["drift"] == 0
+
+
+def test_baseline_sources_default_to_lfgo_issuer_and_signing_account():
+    assert {"token_issuer", "signing"}.issubset(bh.DEFAULT_SOURCES)
+
+
+def test_baseline_certification_rejects_omitted_required_account_sources():
+    with pytest.raises(ValueError, match="signing, token_issuer"):
+        bh.validate_baseline_source_coverage({"issuer", "brix", "nfts"})
+
+
+def test_baseline_coverage_snapshot_binds_required_accounts(monkeypatch):
+    from lfg_core import config
+
+    monkeypatch.setattr(config, "TOKEN_ISSUER_ADDRESS", "rLfgoTokenIssuer")
+    monkeypatch.setattr(config, "SIGNING_ACCOUNT", "rLfgoSigningAccount")
+    coverage = bh.baseline_account_coverage(bh.DEFAULT_SOURCES, distributor=None)
+    assert coverage["token_issuer"] == "rLfgoTokenIssuer"
+    assert coverage["signing"] == "rLfgoSigningAccount"
+
+
+def test_endpoint_snapshot_reads_actual_ledger_one_identity_and_validated_tip():
+    requests = []
+
+    async def request_fn(req):
+        requests.append(req)
+        if req["ledger_index"] == 1:
+            return {"ledger": {"ledger_index": 1, "hash": "ACTUAL-GENESIS"}}
+        return {"ledger": {"ledger_index": 777, "hash": "TIP"}}
+
+    snapshot = _run(history_store.fetch_endpoint_snapshot(request_fn))
+    assert snapshot == history_store.EndpointSnapshot(
+        genesis_hash="ACTUAL-GENESIS", validated_ledger_index=777
+    )
+    assert requests == [
+        {"method": "ledger", "ledger_index": 1, "transactions": False},
+        {"method": "ledger", "ledger_index": "validated", "transactions": False},
+    ]
+
+
+def test_certification_rejects_typed_genesis_that_does_not_match_endpoint():
+    snapshot = history_store.EndpointSnapshot(
+        genesis_hash="ACTUAL-GENESIS", validated_ledger_index=777
+    )
+    with pytest.raises(ValueError, match="endpoint ledger-1 identity"):
+        bh.validate_baseline_endpoint(
+            snapshot,
+            claimed_genesis_hash="TYPED-GENESIS",
+            baseline_ledger_min=1,
+            baseline_ledger_max=777,
+        )
+
+
+def test_certification_rejects_baseline_that_stops_before_endpoint_tip():
+    snapshot = history_store.EndpointSnapshot(
+        genesis_hash="ACTUAL-GENESIS", validated_ledger_index=777
+    )
+    with pytest.raises(ValueError, match="validated endpoint tip"):
+        bh.validate_baseline_endpoint(
+            snapshot,
+            claimed_genesis_hash="ACTUAL-GENESIS",
+            baseline_ledger_min=1,
+            baseline_ledger_max=776,
+        )
+
+
+def test_certification_rejects_operator_chosen_non_genesis_lower_bound():
+    snapshot = history_store.EndpointSnapshot(
+        genesis_hash="ACTUAL-GENESIS", validated_ledger_index=777
+    )
+    with pytest.raises(ValueError, match="ledger 1"):
+        bh.validate_baseline_endpoint(
+            snapshot,
+            claimed_genesis_hash="ACTUAL-GENESIS",
+            baseline_ledger_min=2,
+            baseline_ledger_max=777,
+        )
+
+
+def test_certified_account_backfill_is_bound_to_one_explicit_range(tmp_path):
+    conn = history_store.init_history_db(str(tmp_path / "h.db"))
+    calls = []
+
+    async def request_fn(req):
+        calls.append(dict(req))
+        return {
+            "account": "rRequired",
+            "ledger_index_min": 1,
+            "ledger_index_max": 777,
+            "validated": True,
+            "transactions": [],
+        }
+
+    assert (
+        _run(
+            bh.backfill_account_tx(
+                conn,
+                request_fn,
+                "rRequired",
+                "required_tx",
+                ledger_min=1,
+                ledger_max=777,
+            )
+        )
+        == 0
+    )
+    assert calls[0]["ledger_index_min"] == 1
+    assert calls[0]["ledger_index_max"] == 777
+
+
+@pytest.mark.parametrize(
+    "response",
+    [
+        {"account": "rOther", "ledger_index_min": 1, "ledger_index_max": 777, "validated": True},
+        {"account": "rRequired", "ledger_index_min": 2, "ledger_index_max": 777, "validated": True},
+        {"account": "rRequired", "ledger_index_min": 1, "ledger_index_max": 778, "validated": True},
+        {"account": "rRequired", "ledger_index_min": 1, "ledger_index_max": 777},
+    ],
+)
+def test_certified_account_backfill_rejects_unbound_page_evidence(tmp_path, response):
+    conn = history_store.init_history_db(str(tmp_path / "h.db"))
+
+    async def request_fn(_req):
+        return {**response, "transactions": []}
+
+    with pytest.raises(ValueError, match="certified account_tx"):
+        _run(
+            bh.backfill_account_tx(
+                conn,
+                request_fn,
+                "rRequired",
+                "required_tx",
+                ledger_min=1,
+                ledger_max=777,
+            )
+        )
+
+
+def test_baseline_coverage_document_binds_accounts_tag_and_common_range():
+    document = bh.baseline_coverage_document(
+        {"signing": "rSigner", "token_issuer": "rIssuer"},
+        source_tag=2606160021,
+        ledger_min=1,
+        ledger_max=777,
+    )
+    assert document == {
+        "version": 1,
+        "source_tag": 2606160021,
+        "ledger_min": 1,
+        "ledger_max": 777,
+        "accounts": {"signing": "rSigner", "token_issuer": "rIssuer"},
+    }
+
+
+def test_archive_baseline_persists_source_tag_and_coverage(tmp_path):
+    conn = history_store.init_history_db(str(tmp_path / "h.db"))
+    history_store.record_archive_baseline(
+        conn,
+        network="mainnet",
+        genesis_hash="ACTUAL-GENESIS",
+        ledger_min=1,
+        ledger_max=777,
+        provenance="external-audit",
+        source_tag=2606160021,
+        coverage='{"signing":"rSigner","token_issuer":"rIssuer"}',
+        completed_at=100,
+    )
+    state = history_store.get_archive_state(conn, "mainnet")
+    assert state is not None
+    assert state.source_tag == 2606160021
+    assert state.baseline_coverage == '{"signing":"rSigner","token_issuer":"rIssuer"}'
+
+
+def test_only_explicit_baseline_recertification_clears_gap_and_live_cursor(tmp_path):
+    conn = history_store.init_history_db(str(tmp_path / "h.db"))
+    history_store.record_archive_baseline(
+        conn,
+        network="mainnet",
+        genesis_hash="ACTUAL-GENESIS",
+        ledger_min=1,
+        ledger_max=777,
+        provenance="audit-v1",
+        source_tag=1,
+        completed_at=100,
+    )
+    history_store.record_validated_ledger(
+        conn,
+        network="mainnet",
+        genesis_hash="ACTUAL-GENESIS",
+        ledger_index=778,
+        close_time=101,
+        source_tag=1,
+        observed_at=101,
+    )
+    history_store.invalidate_archive_continuity(
+        conn,
+        network="mainnet",
+        reason="disconnect",
+        gap_after=778,
+        invalidated_at=102,
+    )
+
+    history_store.record_archive_baseline(
+        conn,
+        network="mainnet",
+        genesis_hash="ACTUAL-GENESIS",
+        ledger_min=1,
+        ledger_max=800,
+        provenance="audit-v2",
+        source_tag=2,
+        completed_at=110,
+    )
+
+    state = history_store.get_archive_state(conn, "mainnet")
+    assert state is not None
+    assert state.baseline_complete is True
+    assert state.source_tag == 2
+    assert state.validated_ledger_index is None
+    assert state.validated_close_time is None
+    assert state.heartbeat_at is None
+    assert state.continuity_gap_at is None
+    assert state.continuity_gap_reason is None
+
+
+def test_unvalidated_entries_are_skipped_loudly(tmp_path, caplog):
+    """A response shape carrying validation in neither the page nor its entries
+    archives nothing. That must not be silent: an empty archive reads as "no
+    wallet has ever used our SourceTag", which makes every wallet look eligible
+    for a sponsored mint. Verify the drop is counted and warned, not swallowed."""
+    conn = history_store.init_history_db(str(tmp_path / "h.db"))
+    page = {"transactions": [{"tx": {"hash": "A" * 64}, "meta": {}}]}
+
+    with caplog.at_level(logging.WARNING):
+        bh._warn_if_unvalidated("nft_history:TOKEN", page, 1)
+
+    assert "archiving nothing" in caplog.text
+    assert "nft_history:TOKEN" in caplog.text
+    conn.close()
+
+
+def test_warn_if_unvalidated_is_quiet_when_nothing_was_dropped(caplog):
+    with caplog.at_level(logging.WARNING):
+        bh._warn_if_unvalidated("signing_tx", {}, 0)
+    assert caplog.text == ""
