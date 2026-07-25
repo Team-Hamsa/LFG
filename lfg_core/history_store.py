@@ -6,6 +6,7 @@ same per-network-file posture as lfg_core/nft_index.py (onchain_<net>.db)."""
 
 from __future__ import annotations
 
+import logging
 import os
 import sqlite3
 import time
@@ -454,6 +455,16 @@ def invalidate_archive_continuity(
 ) -> None:
     """Fail closed after any interval the transaction stream cannot prove complete."""
 
+    # Normalize exactly like record_archive_baseline/record_validated_ledger.
+    # This is the one writer whose entire job is failing CLOSED, so a silent
+    # miss is the worst possible failure mode: an unnormalized name ("Mainnet",
+    # " mainnet") matches zero rows, the UPDATE reports success, and a
+    # certified archive keeps baseline_complete = 1 having just lost
+    # continuity — i.e. it fails open, and eligibility then runs against an
+    # archive known to be incomplete.
+    network = network.strip().lower()
+    if network not in {"mainnet", "testnet"}:
+        raise ValueError(f"unsupported archive network: {network}")
     reason = reason.strip()
     if not reason:
         raise ValueError("archive continuity invalidation reason is required")
@@ -462,7 +473,7 @@ def invalidate_archive_continuity(
     if gap_before is not None and gap_before < 0:
         raise ValueError("archive gap upper bound must be non-negative")
     timestamp = int(time.time()) if invalidated_at is None else int(invalidated_at)
-    conn.execute(
+    cursor = conn.execute(
         """
         UPDATE archive_state
         SET baseline_complete = 0,
@@ -476,6 +487,17 @@ def invalidate_archive_continuity(
         (timestamp, gap_after, gap_before, reason, timestamp, network),
     )
     conn.commit()
+    if cursor.rowcount == 0:
+        # No row for this network. There is nothing to fail closed ON — an
+        # uncertified archive already fails closed in archive_is_usable — but
+        # a silent zero-row update here would be indistinguishable from a
+        # successful invalidation, so say so rather than returning quietly.
+        logging.warning(
+            "archive continuity invalidation for %s matched no archive_state row (%s); "
+            "the archive is uncertified, so eligibility remains unavailable either way",
+            network,
+            reason,
+        )
 
 
 def insert_tx(

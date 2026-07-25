@@ -267,7 +267,23 @@ async def process_stream_tx(
     call and (on mainnet) a single IPFS metadata fetch — the token/meta state is
     fixed for the duration of one tx, so caching is correctness-safe."""
     if history_conn is not None and history_ctx is not None:
-        _archive_eligibility_tx(history_conn, tx, history_ctx)
+        # Archiving runs FIRST so a raising apply_tx cannot lose the eligibility
+        # evidence — but it must not be able to take the reverse hostage. This
+        # listener's primary duties (the per-nft_id index, market listings,
+        # derived history) predate the sponsored-mint archive and are what the
+        # marketplace and Activity read; a sqlite hiccup here used to propagate
+        # and skip all of them for that transaction. Sponsored eligibility
+        # degrades safely on a miss (the wallet looks untagged only if the row
+        # was never archived, and archive_is_usable independently gates on
+        # freshness), so log and carry on rather than dropping index work.
+        try:
+            _archive_eligibility_tx(history_conn, tx, history_ctx)
+        except Exception:
+            logging.exception(
+                "[%s] eligibility archiving failed for %s; continuing with index/market apply",
+                history_ctx.get("network"),
+                tx.get("hash"),
+            )
 
     token_cache: dict[str, dict[str, Any] | None] = {}
     meta_cache: dict[str, dict[str, Any] | None] = {}
@@ -492,6 +508,25 @@ async def _listen(network: str, issuer: str, taxon: int, clio: str) -> None:
                     )
                     stream_open = False
                 logging.warning(f"[{network}] stream error: {e}; reconnecting in {backoff}s")
+                await asyncio.sleep(backoff)
+                backoff = min(backoff * 2, RECONNECT_MAX)
+            else:
+                # The `async for` ended without raising — the endpoint closed
+                # the subscription cleanly. That is still a disconnect, and it
+                # took the SAME backoff path as an error until now: the sleep
+                # lived only in `except`, so a server that closes immediately
+                # (maintenance, connection cap) spun this loop reconnecting as
+                # fast as clio would accept, with no ceiling. Mark the gap and
+                # back off exactly like the error path.
+                if stream_open:
+                    current = history_store.get_archive_state(hconn, network)
+                    _mark_stream_disconnected(
+                        hconn,
+                        network=network,
+                        after_ledger=current.validated_ledger_index if current else None,
+                    )
+                    stream_open = False
+                logging.warning(f"[{network}] stream closed cleanly; reconnecting in {backoff}s")
                 await asyncio.sleep(backoff)
                 backoff = min(backoff * 2, RECONNECT_MAX)
             finally:

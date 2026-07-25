@@ -7,6 +7,7 @@
 
 import asyncio
 import base64
+import contextlib
 import dataclasses
 import datetime
 import functools
@@ -2890,6 +2891,10 @@ async def _settle_trait_sale(buyer: str, nft_id: str, offer_index: str, network:
 # once they do claim a Closet) — without a bound this would retry forever.
 _SWEEP_MAX_ATTEMPTS = 5
 _SWEEP_PERIOD_SECONDS = 120
+# Bounded grace for an in-flight sponsored burn to settle during shutdown.
+# Long enough for a submit/reconcile round-trip to persist its result, short
+# enough that a wedged RPC can't hold the process (and pm2's restart) open.
+_BURN_SHUTDOWN_GRACE_SECONDS = 30
 # offer_index -> consecutive failed sweep attempts. In-memory only (not
 # persisted): a service restart resets every count to 0, so a mid-flight
 # restart costs a stuck row a few retries rather than falsely reading as
@@ -4580,7 +4585,28 @@ async def _stop_sponsored_burn_worker(app: web.Application) -> None:
     if stop is None or task is None:
         return
     stop.set()
-    await task
+    # stop.set() only interrupts the poll sleep — it cannot interrupt an
+    # in-flight process_one, whose submit/reconcile calls talk to the XRPL.
+    # aiohttp awaits on_cleanup with no timeout of its own, so a bare
+    # `await task` here lets a wedged RPC hang process shutdown indefinitely
+    # (and pm2's restart with it). Give the in-flight burn a bounded grace
+    # period to classify and persist its result, then cancel. Cancelling is
+    # safe: the obligation keeps its lease, which expires, and the next worker
+    # pass reconciles it by memo before ever resubmitting.
+    try:
+        await asyncio.wait_for(asyncio.shield(task), timeout=_BURN_SHUTDOWN_GRACE_SECONDS)
+    except asyncio.TimeoutError:
+        logging.warning(
+            "sponsored burn worker did not settle within %ss; cancelling (its lease will "
+            "expire and the obligation reconciles by memo on the next pass)",
+            _BURN_SHUTDOWN_GRACE_SECONDS,
+        )
+        task.cancel()
+        with contextlib.suppress(asyncio.CancelledError):
+            await task
+    except asyncio.CancelledError:
+        task.cancel()
+        raise
 
 
 def _index_roster(conn: sqlite3.Connection, wallet: str) -> list[dict[str, Any]] | None:

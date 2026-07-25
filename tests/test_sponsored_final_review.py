@@ -1090,12 +1090,23 @@ def test_burn_worker_rejects_burn_claim_network_mismatch(tmp_path, monkeypatch):
 
 
 def test_self_issuer_burn_is_only_a_testnet_noop(monkeypatch):
+    # Each case pins config.XRPL_NETWORK to the obligation's own network.
+    # prepare_sponsored_burn now checks network mismatch BEFORE the self-issuer
+    # topology (CodeRabbit on #328): reversed, a testnet-scoped obligation
+    # processed on mainnet took the self-issuer branch and returned "noop",
+    # which process_one records as burned/self_issuer_noop — discharging a real
+    # LFGO debt with no ledger effect. Passing network="mainnet" while the
+    # ambient config is testnet now correctly reports the mismatch, so the
+    # topology assertions need a matching network to reach the branch at all.
     monkeypatch.setattr(config, "TOKEN_ISSUER_ADDRESS", "rIssuer")
+
+    monkeypatch.setattr(config, "XRPL_NETWORK", "mainnet")
     mainnet = _run(
         xrpl_ops.prepare_sponsored_burn(
             "fm-review", network="mainnet", source_account="rIssuer", issuer="rIssuer"
         )
     )
+    monkeypatch.setattr(config, "XRPL_NETWORK", "testnet")
     testnet = _run(
         xrpl_ops.prepare_sponsored_burn(
             "fm-review", network="testnet", source_account="rIssuer", issuer="rIssuer"
@@ -1104,6 +1115,23 @@ def test_self_issuer_burn_is_only_a_testnet_noop(monkeypatch):
     assert mainnet.state == "failed"
     assert "mainnet" in (mainnet.error or "")
     assert testnet.state == "noop"
+
+
+def test_cross_network_obligation_never_discharges_as_a_self_issuer_noop(monkeypatch):
+    """The guard-order regression itself: a testnet-scoped self-issuer
+    obligation reaching a mainnet worker must FAIL, not return the "noop" that
+    process_one would record as a settled burn."""
+    monkeypatch.setattr(config, "TOKEN_ISSUER_ADDRESS", "rIssuer")
+    monkeypatch.setattr(config, "XRPL_NETWORK", "mainnet")
+
+    result = _run(
+        xrpl_ops.prepare_sponsored_burn(
+            "fm-review", network="testnet", source_account="rIssuer", issuer="rIssuer"
+        )
+    )
+
+    assert result.state == "failed"
+    assert "network does not match" in (result.error or "")
 
 
 def test_mainnet_campaign_rejects_self_issuer_topology(tmp_path, monkeypatch):

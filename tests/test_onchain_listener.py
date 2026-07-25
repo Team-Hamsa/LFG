@@ -980,3 +980,54 @@ def test_uncertified_archive_still_applies_index_events_without_archive_state(tm
     assert history_store.get_archive_state(hconn, "testnet") is None
     row = hconn.execute("SELECT account FROM xrpl_txs WHERE tx_hash = ?", ("A" * 64,)).fetchone()
     assert row["account"] == "rSOMEONE"
+
+
+def test_archive_failure_does_not_stall_index_and_market_applies(tmp_path, monkeypatch):
+    """CodeRabbit on #328: eligibility archiving runs before the business
+    applies so a raising apply_tx can't lose the evidence — but the reverse must
+    not hold. The index, market listings and derived history predate the
+    sponsored archive and are what the marketplace and Activity read; a sqlite
+    hiccup in archiving must not skip them for that transaction."""
+    from lfg_core import history_store
+
+    hconn = history_store.init_history_db(str(tmp_path / "history.db"))
+    ctx = {"network": "testnet", "genesis_hash": "", "source_tag": config.SOURCE_TAG}
+
+    def boom(*args, **kwargs):
+        raise sqlite3.OperationalError("database is locked")
+
+    monkeypatch.setattr(oln, "_archive_eligibility_tx", boom)
+
+    applied = []
+
+    async def fake_apply_tx(conn, tx, *args, **kwargs):
+        applied.append(tx.get("hash"))
+
+    async def noop(*args, **kwargs):
+        return None
+
+    monkeypatch.setattr(oln.nft_listener, "apply_tx", fake_apply_tx)
+    monkeypatch.setattr(oln.nft_listener, "apply_economy_tx", noop)
+    monkeypatch.setattr(oln.nft_listener, "apply_market_tx", noop)
+    monkeypatch.setattr(oln, "_record_history", lambda *a, **k: None)
+
+    tx = {"validated": True, "hash": "B" * 64, "TransactionType": "Payment", "ledger_index": 5}
+
+    async def scenario():
+        await oln.process_stream_tx(
+            sqlite3.connect(":memory:"),
+            tx,
+            fetch_token=noop,
+            fetch_meta=noop,
+            is_ours=lambda t: False,
+            history_conn=hconn,
+            history_ctx=ctx,
+        )
+
+    # _run, not asyncio.run: asyncio.run sets the policy's current loop to None
+    # on exit, which strands later tests that call asyncio.get_event_loop()
+    # (test_pending_offers, test_rarity). That is why this module has its own
+    # runner — see the note on _run.
+    _run(scenario())
+
+    assert applied == ["B" * 64], "index apply was skipped because archiving raised"

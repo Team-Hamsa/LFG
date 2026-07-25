@@ -204,15 +204,27 @@ async def _acquire_submission_lock_cancellation_safe(account: str) -> BinaryIO:
 
 @asynccontextmanager
 async def submission_coordinator(account: str) -> AsyncIterator[None]:
-    """Serialize backend submissions for one Account across loops/processes."""
+    """Serialize backend submissions for one Account across tasks AND processes.
+
+    Both halves are required and both are held for the whole block:
+
+    - `owner_lock` is an asyncio.Lock in a per-event-loop registry, so it only
+      serializes tasks within one process. On its own it is NOT enough — the
+      box runs several writers for SIGNING_ACCOUNT (the service, the sponsored
+      burn worker, the CLI economy scripts, admin burns).
+    - the flock'd file is the cross-process half.
+
+    Earlier revisions took the file lock inside `_submission_scope` instead, so
+    it was released the moment a helper returned. A caller that signs in one
+    helper and forwards in another (the sponsored mint's prepare/submit split)
+    left a window where another process could submit for the same Account,
+    advance its sequence, and strand the already-signed blob at tefPAST_SEQ.
+    Holding both here, for the caller's whole critical section, closes that —
+    and gives the default `coordinator_held=False` path (mint_nft,
+    create_nft_offer, buy_and_burn) cross-process protection it never had.
+    """
 
     async with owner_lock.owner_lock(f"xrpl-submit:{account}"):
-        yield
-
-
-@asynccontextmanager
-async def _submission_scope(account: str, coordinator_held: bool) -> AsyncIterator[None]:
-    if coordinator_held:
         handle = await _acquire_submission_lock_cancellation_safe(account)
         try:
             yield
@@ -223,6 +235,18 @@ async def _submission_scope(account: str, coordinator_held: bool) -> AsyncIterat
             except asyncio.CancelledError:
                 await release
                 raise
+
+
+@asynccontextmanager
+async def _submission_scope(account: str, coordinator_held: bool) -> AsyncIterator[None]:
+    """Acquire the submission lock unless the caller already holds it.
+
+    `coordinator_held=True` means an enclosing `submission_coordinator` owns
+    both halves for a span wider than this helper — re-acquiring would
+    self-deadlock on the non-reentrant asyncio.Lock, and releasing at this
+    helper's exit would punch a hole in the caller's critical section."""
+    if coordinator_held:
+        yield
         return
     async with submission_coordinator(account):
         yield
@@ -1110,6 +1134,17 @@ async def prepare_sponsored_burn(
     burn_issuer = config.TOKEN_ISSUER_ADDRESS if issuer is None else issuer
     burn_currency = config.TOKEN_CURRENCY_HEX if currency is None else currency
     burn_source_tag = config.SOURCE_TAG if source_tag is None else source_tag
+    # Network mismatch is checked FIRST, before the self-issuer shortcut.
+    # Reversed, a testnet-scoped obligation processed while XRPL_NETWORK is
+    # mainnet takes the `source == burn_issuer` branch, returns "noop", and
+    # sponsored_burn.process_one maps noop to status="burned",
+    # fulfillment="self_issuer_noop" — discharging a real LFGO debt with no
+    # ledger effect. submit_sponsored_burn already validates network first;
+    # preparation must match it.
+    if selected_network != config.XRPL_NETWORK:
+        return BurnPreparation(
+            "failed", None, None, "burn obligation network does not match the active XRPL network"
+        )
     if source == burn_issuer:
         if selected_network == "testnet":
             return BurnPreparation(
@@ -1117,10 +1152,6 @@ async def prepare_sponsored_burn(
             )
         return BurnPreparation(
             "failed", None, None, "mainnet self-issuer burn topology is forbidden"
-        )
-    if selected_network != config.XRPL_NETWORK:
-        return BurnPreparation(
-            "failed", None, None, "burn obligation network does not match the active XRPL network"
         )
     try:
         wallet = Wallet.from_seed(config.SEED)
@@ -1591,7 +1622,19 @@ async def buy_and_burn(
             return None
         tx_hash = result.get("hash")
         if not isinstance(tx_hash, str) or not tx_hash:
-            raise IndeterminateResultError("buy_and_burn validated without a transaction hash")
+            # Raising here would only be caught by this function's own
+            # `except Exception` two lines down and logged as a generic error
+            # with a full traceback — noise for a case that is not a failure.
+            # The burn DID validate; we just can't name its transaction.
+            # Callers only check truthiness and continue (it is best-effort),
+            # so say precisely what happened and return None.
+            logging.warning(
+                "buy_and_burn: %s %s validated but the response carried no transaction hash; "
+                "the burn landed and cannot be cited",
+                value,
+                currency,
+            )
+            return None
         logging.info(f"Burned {value} {currency}: {tx_hash}")
         return tx_hash
     except Exception:

@@ -438,37 +438,38 @@ def _format_countdown(seconds: int | None) -> str:
 
 def _sponsored_status_embed(status: dict[str, Any]) -> Embed:
     """Render the service's authoritative sponsored-mint campaign status."""
-    state = str(status["state"]).replace("_", " ").title()
+    state = str(status.get("state", "unknown")).replace("_", " ").title()
     admitted = sum(
-        int(status[name]) for name in ("reserved", "minting", "minted", "offered", "accepted")
+        int(status.get(name, 0))
+        for name in ("reserved", "minting", "minted", "offered", "accepted")
     )
-    confirmed = sum(int(status[name]) for name in ("minted", "offered", "accepted"))
-    changed_at = status["changed_at"]
+    confirmed = sum(int(status.get(name, 0)) for name in ("minted", "offered", "accepted"))
+    changed_at = status.get("changed_at")
     embed = Embed(title="🎟️ Sponsored Mint Status", color=0x9C84EF)
     embed.add_field(name="Campaign", value=state, inline=True)
     embed.add_field(
         name="Countdown",
-        value=_format_countdown(status["countdown_seconds"]),
+        value=_format_countdown(status.get("countdown_seconds")),
         inline=True,
     )
-    embed.add_field(name="Admitted", value=f"{admitted} / {status['cap']}", inline=True)
-    embed.add_field(name="Confirmed", value=f"{confirmed} / {status['cap']}", inline=True)
+    embed.add_field(name="Admitted", value=f"{admitted} / {status.get('cap', '?')}", inline=True)
+    embed.add_field(name="Confirmed", value=f"{confirmed} / {status.get('cap', '?')}", inline=True)
     embed.add_field(
         name="Accepted / Tagged",
-        value=f"{status['accepted']} / {status['tagged_sponsored_wallets']}",
+        value=f"{status.get('accepted', 0)} / {status.get('tagged_sponsored_wallets', 0)}",
         inline=True,
     )
-    unique = status["unique_tagged_wallets"]
+    unique = status.get("unique_tagged_wallets")
     embed.add_field(
         name="Unique SourceTag",
-        value=f"{unique if unique is not None else 'History unavailable'} / {status['unique_target']}",
+        value=f"{unique if unique is not None else 'History unavailable'} / {status.get('unique_target', '?')}",
         inline=True,
     )
     embed.add_field(
         name="LFGO Balance",
         value=str(
-            status["lfgo_balance"]
-            if status["lfgo_balance"] is not None
+            status.get("lfgo_balance")
+            if status.get("lfgo_balance") is not None
             else "Balance lookup failed"
         ),
         inline=True,
@@ -506,7 +507,7 @@ def _sponsored_status_embed(status: dict[str, Any]) -> Embed:
     )
     embed.add_field(
         name="Last Operator",
-        value=str(status["last_operator"] or "No campaign activity"),
+        value=str(status.get("last_operator") or "No campaign activity"),
         inline=False,
     )
     embed.add_field(
@@ -524,19 +525,9 @@ class AdminView(View):
         logging.info("Initializing AdminView")
 
     async def interaction_check(self, interaction: discord.Interaction) -> bool:
-        perms = getattr(interaction.user, "guild_permissions", None)
-        if not perms or not perms.administrator:
-            if interaction.response.is_done():
-                await interaction.followup.send(
-                    "Administrator permission required.", ephemeral=True
-                )
-            else:
-                await interaction.response.send_message(
-                    "Administrator permission required.", ephemeral=True
-                )
-            logging.warning("Rejected /admin interaction from %s", interaction.user)
-            return False
-        return True
+        # Delegate rather than re-implement: this gate and the one every modal
+        # calls must never be able to drift apart.
+        return await _admin_interaction_check(interaction)
 
     def _apply_sponsored_status(self, status: dict[str, Any]) -> None:
         active = status.get("state") in {"active", "at_capacity"}

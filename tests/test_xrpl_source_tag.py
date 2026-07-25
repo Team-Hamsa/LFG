@@ -207,3 +207,67 @@ def test_sponsored_burn_sets_source_tag(monkeypatch):
     result = _run(xrpl_ops.submit_sponsored_burn("fm-a2345678901234567890123456"))
     assert result.state == "validated"
     assert captured["tx"].source_tag == 2606160021 == config.SOURCE_TAG
+
+
+def test_submission_coordinator_holds_the_cross_process_lock_for_the_whole_block(monkeypatch):
+    """Greptile/CodeRabbit on #328: `owner_lock` is a per-loop asyncio.Lock, so
+    it only serializes tasks inside one process. The flock'd file is the only
+    cross-process half, and it used to be taken inside `_submission_scope` —
+    released as soon as each helper returned. A caller that signs in one helper
+    and forwards in another (the sponsored mint's prepare/submit split) then had
+    a window where another process could advance the account sequence and strand
+    the signed blob. Pin that the file lock is held across the caller's whole
+    block, and that a nested coordinator_held scope neither re-acquires nor
+    releases it early."""
+    events = []
+
+    def fake_acquire(account):
+        events.append(("acquire", account))
+        return object()
+
+    def fake_release(handle):
+        events.append(("release", None))
+
+    monkeypatch.setattr(xrpl_ops, "_acquire_submission_file_lock", fake_acquire)
+    monkeypatch.setattr(xrpl_ops, "_release_submission_file_lock", fake_release)
+
+    async def scenario():
+        async with xrpl_ops.submission_coordinator("rACCOUNT"):
+            events.append(("signed", None))
+            # What prepare_/submit_sponsored_* do internally.
+            async with xrpl_ops._submission_scope("rACCOUNT", True):
+                events.append(("inner", None))
+            events.append(("forwarded", None))
+
+    _run(scenario())
+
+    assert events == [
+        ("acquire", "rACCOUNT"),
+        ("signed", None),
+        ("inner", None),
+        ("forwarded", None),
+        ("release", None),
+    ], f"lock did not span the whole block: {events}"
+
+
+def test_default_submission_scope_takes_the_cross_process_lock(monkeypatch):
+    """The `coordinator_held=False` default — used by mint_nft, create_nft_offer
+    and buy_and_burn — must also take the file lock, not just the in-process
+    one."""
+    events = []
+    monkeypatch.setattr(
+        xrpl_ops,
+        "_acquire_submission_file_lock",
+        lambda a: events.append(("acquire", a)) or object(),
+    )
+    monkeypatch.setattr(
+        xrpl_ops, "_release_submission_file_lock", lambda h: events.append(("release", None))
+    )
+
+    async def scenario():
+        async with xrpl_ops._submission_scope("rACCOUNT", False):
+            events.append(("work", None))
+
+    _run(scenario())
+
+    assert events == [("acquire", "rACCOUNT"), ("work", None), ("release", None)]

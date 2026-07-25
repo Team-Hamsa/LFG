@@ -429,6 +429,15 @@ async def _resume_prepared_mint_one_unit(
     nft_number = claim.mint_nft_number
     metadata_url = claim.mint_metadata_url
     body: str | None = claim.mint_body_type
+    # Hoisted like mint_one_unit's (#41 fix-wave): once the mint is confirmed
+    # these are known, and an exception in a LATER step (offer, accept payload)
+    # must still return them. The except block below used to reset traits_dict
+    # to None and re-derive image/video from raw JSON, so a failure after
+    # on_mint_confirmed returned a populated nft_id with no traits — losing
+    # exactly the data the session and the X-poster consume.
+    image_url: str | None = None
+    video_url: str | None = None
+    traits_dict: dict[str, str] | None = None
     try:
         if (
             claim.status != "reserved"
@@ -453,7 +462,14 @@ async def _resume_prepared_mint_one_unit(
             raise RuntimeError("prepared sponsored metadata has no image URL")
         if video_url is not None and not isinstance(video_url, str):
             raise RuntimeError("prepared sponsored metadata has an invalid video URL")
+        # `body` is declared str | None for the except block's benefit. The
+        # guard above proved claim.mint_body_type non-empty, but mypy cannot
+        # carry that through the compound condition — re-test the local so the
+        # rarity call below gets a genuinely narrowed str rather than a bare
+        # assert papering over it.
         body = claim.mint_body_type
+        if not body:
+            raise RuntimeError("prepared sponsored claim is incomplete")
         traits_dict = {
             str(attr["trait_type"]): str(attr["value"])
             for attr in metadata["attributes"]
@@ -489,6 +505,16 @@ async def _resume_prepared_mint_one_unit(
                 submission.error or "sponsored mint outcome is indeterminate"
             )
         nft_id = submission.nft_id
+        # Mirror mint_one_unit: publish the new edition's art to the local
+        # archive so /api/img serves it immediately (best-effort, #163).
+        # The staging token is the session id that COMPOSED the still. That is
+        # claim.session_id for an in-process resume, which is the common case.
+        # After a restart the claim has been rebound to a fresh session id and
+        # the original token is not persisted, so the staged file cannot be
+        # matched — promote_still then returns False and the edition serves
+        # from the CDN, exactly as it did before the archive tier existed.
+        # Degradation only; never a failed mint.
+        image_archive.promote_still(config.XRPL_NETWORK, nft_number, claim.session_id)
         await on_mint_confirmed(nft_number, nft_id, tx_hash, image_url)
 
         record: dict[str, Any] = {
@@ -509,6 +535,35 @@ async def _resume_prepared_mint_one_unit(
             saved = False
         if saved:
             _reserved_numbers.discard(nft_number)
+
+            # Mirror mint_one_unit's saved branch. Omitting this left every
+            # RESUMED sponsored edition out of rarity accounting entirely —
+            # its traits never started a boost clock and shares were never
+            # recalculated, so the odds engine silently diverged from the
+            # minted set by exactly the editions that needed recovery.
+            # Bind a non-optional local for the closure: `body` is narrowed to
+            # str by the guard above, but capturing it widens it back to its
+            # declared str | None (the except block reassigns it).
+            rarity_body: str = body
+
+            def _update_rarity() -> None:
+                conn = rarity.connect()
+                try:
+                    for attr in metadata["attributes"]:
+                        rarity.start_boost_clock(
+                            conn, rarity_body, attr["trait_type"], attr["value"]
+                        )
+                    rarity.start_boost_clock(
+                        conn, rarity.BODY_SENTINEL, rarity.BODY_CATEGORY, rarity_body
+                    )
+                    rarity.recalculate_rarity(conn)
+                finally:
+                    conn.close()
+
+            try:
+                await asyncio.to_thread(_update_rarity)
+            except Exception:
+                logging.error(f"rarity update failed: {traceback.format_exc()}")
         else:
             _save_recovery_record(record)
 
@@ -575,15 +630,15 @@ async def _resume_prepared_mint_one_unit(
             nft_number,
             traceback.format_exc(),
         )
-        image_url = None
-        video_url = None
-        traits_dict = None
         body = claim.mint_body_type
-        if claim.mint_metadata_json:
+        # Only fill in what the try block never got far enough to compute.
+        # Anything already derived above (traits especially) is preserved.
+        if image_url is None and claim.mint_metadata_json:
             try:
                 metadata = json.loads(claim.mint_metadata_json)
-                image_url = metadata.get("image") if isinstance(metadata, dict) else None
-                video_url = metadata.get("video") if isinstance(metadata, dict) else None
+                if isinstance(metadata, dict):
+                    image_url = metadata.get("image")
+                    video_url = metadata.get("video")
             except (TypeError, ValueError):
                 pass
         return UnitResult(

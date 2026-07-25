@@ -127,8 +127,16 @@ def _acquire(db_path: str, now: int, network: str | None = None) -> _LeasedBurn 
         if row is None:
             return None
         previous_status = row["status"]
-        attempt_count = row["attempt_count"] + (1 if previous_status == "pending" else 0)
-        last_attempt_at = now if previous_status == "pending" else None
+        # Count EVERY lease, not just those from `pending`. Counting only
+        # pending meant a burn that keeps reconciling as `indeterminate`
+        # re-entered at the same attempt_count forever, so _backoff stayed
+        # pinned at its floor (5s) — and each of those passes runs
+        # find_sponsored_burn, which pages the signing account's whole
+        # validated history. One permanently-indeterminate obligation would
+        # hammer the RPC endpoint every 5 seconds indefinitely, with the
+        # backoff curve that exists to prevent exactly that never engaging.
+        attempt_count = row["attempt_count"] + 1
+        last_attempt_at = now
         conn.execute(
             """
             UPDATE free_mint_burns

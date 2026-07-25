@@ -303,13 +303,18 @@ def test_prepared_transaction_is_persisted_before_submit_and_overlap_reuses_iden
         assert retained["signed_tx_blob"] == "PERSISTEDBLOB"
         release_first.set()
         await first
+        # now=211, not 206: every lease now increments attempt_count (a
+        # permanently-indeterminate obligation used to re-enter at a constant
+        # 5s and hammer find_sponsored_burn forever), so the second pass
+        # scheduled the retry at 201 + _backoff(2) = 211 rather than 206. The
+        # identity-reuse semantics under test are unchanged.
         assert await sponsored_burn.process_one(
             db,
             prepare=prepare,
             submit=submit,
             reconcile=reconcile,
             identity_expired=still_live,
-            now=206,
+            now=211,
         )
 
     run(scenario())
@@ -1098,3 +1103,45 @@ def test_pruned_post_expiry_history_cannot_authorize_a_second_burn(tmp_path, mon
     assert row["status"] == "indeterminate"
     assert row["signed_tx_hash"] == "OLD-HASH"
     assert row["signed_ledger_floor"] == 100
+
+
+def test_indeterminate_burns_escalate_their_backoff(tmp_path, monkeypatch):
+    """CodeRabbit on #328: attempt_count only incremented out of `pending`, so a
+    burn that keeps reconciling as `indeterminate` re-entered at the same count
+    forever and _backoff stayed pinned at its 5s floor. Each of those passes
+    runs find_sponsored_burn, which pages the signing account's whole validated
+    history — one stuck obligation would hammer the RPC endpoint every 5s
+    indefinitely. Every lease must now advance the curve."""
+    db, _ = obligation(tmp_path, monkeypatch)
+
+    async def prepare(*args, **kwargs):
+        return xrpl_ops.BurnPreparation("prepared", "H", "B", None, 10)
+
+    async def submit(*args, **kwargs):
+        return xrpl_ops.BurnSubmission("indeterminate", "H", "unknown")
+
+    async def reconcile(*args, **kwargs):
+        return xrpl_ops.BurnReconciliation(True, None, None)
+
+    async def still_live(tx_blob):
+        return None
+
+    schedule = []
+    now = 200
+    for _ in range(4):
+        assert run(
+            sponsored_burn.process_one(
+                db,
+                prepare=prepare,
+                submit=submit,
+                reconcile=reconcile,
+                identity_expired=still_live,
+                now=now,
+            )
+        )
+        row = burn_row(db)
+        schedule.append(row["next_attempt_at"] - now)
+        now = row["next_attempt_at"]
+
+    assert schedule == sorted(schedule), f"backoff did not escalate: {schedule}"
+    assert schedule[-1] > schedule[0], f"backoff stayed flat: {schedule}"

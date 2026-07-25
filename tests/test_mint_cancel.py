@@ -119,15 +119,45 @@ def test_cancel_sponsored_session_releases_reserved_claim(monkeypatch):
 
 
 def test_cancel_never_releases_confirmed_sponsored_claim(monkeypatch):
+    """The session must stay in AWAITING_PAYMENT for this to test anything.
+
+    An earlier version set state=FAILED, but cancel() returns False on ANY
+    non-AWAITING_PAYMENT state before it ever reaches
+    release_sponsored_reservation — so the test passed on the state guard and
+    the confirmed-claim guard it names was never exercised (CodeRabbit on
+    #328). Here the cancel is legal and DOES run, and the nft_id guard inside
+    release_sponsored_reservation is what must refuse to hand the slot back."""
+
     def forbidden(*args, **kwargs):
         raise AssertionError("confirmed sponsored claim must not be released")
 
     monkeypatch.setattr(sponsored_mint, "release_reservation", forbidden)
     session = mint_flow.MintSession("55", "rA", sponsored=True)
+    session.sponsored_claim_id = "claim-1"
     session.nft_id = "NFT1"
-    session.state = mint_flow.FAILED
+    assert session.state == mint_flow.AWAITING_PAYMENT
 
-    assert session.cancel() is False
+    # The cancel itself is legal and succeeds...
+    assert session.cancel() is True
+    assert session.state == mint_flow.CANCELLED
+    # ...but the confirmed claim was never released — `forbidden` proves it.
+
+
+def test_cancel_releases_a_still_reversible_sponsored_claim(monkeypatch):
+    """The mirror: with no NFT confirmed the reservation IS returned, so the
+    slot reopens. Without this, the test above would also pass if
+    release_sponsored_reservation were simply never called at all."""
+    released = []
+    monkeypatch.setattr(
+        sponsored_mint,
+        "release_reservation",
+        lambda *a, **k: released.append(k.get("reason")) or True,
+    )
+    session = mint_flow.MintSession("55", "rA", sponsored=True)
+    session.sponsored_claim_id = "claim-1"
+
+    assert session.cancel() is True
+    assert released == ["session_cancelled"]
 
 
 def test_cancel_refused_once_payment_confirmed_mid_buy_and_burn(monkeypatch):
