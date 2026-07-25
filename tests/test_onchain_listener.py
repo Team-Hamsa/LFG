@@ -27,7 +27,7 @@ sys.path.insert(0, os.path.join(REPO, "scripts"))
 import onchain_listener as oln  # noqa: E402
 
 from lfg_core import closet_token as bt  # noqa: E402
-from lfg_core import config, market_store, nft_index, trait_token  # noqa: E402
+from lfg_core import config, market_store, nft_index, sponsored_mint, trait_token  # noqa: E402
 from lfg_core import economy_store as es  # noqa: E402
 from lfg_core import trait_economy as te  # noqa: E402
 
@@ -1031,3 +1031,84 @@ def test_archive_failure_does_not_stall_index_and_market_applies(tmp_path, monke
     _run(scenario())
 
     assert applied == ["B" * 64], "index apply was skipped because archiving raised"
+
+
+def _certified(hconn, *, ledger_max, network="testnet"):
+    from lfg_core import history_store
+
+    history_store.record_archive_baseline(
+        hconn,
+        network=network,
+        genesis_hash="testnet-ledger-one",
+        ledger_min=1,
+        ledger_max=ledger_max,
+        provenance="external-audit",
+        completed_at=100,
+    )
+
+
+def test_reconnect_at_the_certified_tip_is_the_intended_clean_path(tmp_path):
+    """Greptile #328 round 2 flags the equal-tip branch as "skips continuity
+    invalidation". It is the only route to a usable archive and it is sound:
+    the baseline swept [1, N] via account_tx over CLOSED, immutable validated
+    ledgers, and the stream resumes at N+1. Invalidating here would mean
+    certification could never produce a usable archive at all — the documented
+    flow is certify at tip N, start the listener at tip N."""
+    from lfg_core import history_store
+
+    hconn = history_store.init_history_db(str(tmp_path / "history.db"))
+    _certified(hconn, ledger_max=500)
+    ctx = {
+        "network": "testnet",
+        "genesis_hash": "testnet-ledger-one",
+        "source_tag": config.SOURCE_TAG,
+    }
+    snapshot = history_store.EndpointSnapshot(
+        genesis_hash="testnet-ledger-one", validated_ledger_index=500
+    )
+
+    oln._verify_archive_connection(hconn, ctx, snapshot)
+
+    state = history_store.get_archive_state(hconn, "testnet")
+    assert state.continuity_gap_at is None
+    assert state.baseline_complete is True
+
+
+def test_reconnect_cannot_resurrect_an_uncovered_gap(tmp_path):
+    """The residual Greptile is reaching for — a gap around a restart making
+    the archive usable again — is closed one layer down, by the certification
+    fix in 8f7e370. A gap the sweep never re-covered keeps baseline_complete=0,
+    so _verify_archive_connection returns before the equal-tip branch and
+    archive_is_usable stays closed no matter what the stream does next."""
+    from lfg_core import history_store
+
+    hconn = history_store.init_history_db(str(tmp_path / "history.db"))
+    _certified(hconn, ledger_max=500)
+    # Continuity lost well past the tip the next certification will reach.
+    history_store.invalidate_archive_continuity(
+        hconn,
+        network="testnet",
+        reason="transaction stream disconnected",
+        gap_after=900,
+        invalidated_at=110,
+    )
+    # Re-certifying at a tip BELOW the loss point must not clear it.
+    _certified(hconn, ledger_max=600)
+    assert history_store.get_archive_state(hconn, "testnet").baseline_complete is False
+
+    ctx = {
+        "network": "testnet",
+        "genesis_hash": "testnet-ledger-one",
+        "source_tag": config.SOURCE_TAG,
+    }
+    snapshot = history_store.EndpointSnapshot(
+        genesis_hash="testnet-ledger-one", validated_ledger_index=600
+    )
+    oln._verify_archive_connection(hconn, ctx, snapshot)
+
+    state = history_store.get_archive_state(hconn, "testnet")
+    assert state.continuity_gap_after == 900, "the uncovered gap was lost"
+    assert state.baseline_complete is False
+    assert not sponsored_mint.archive_is_usable(
+        str(tmp_path / "history.db"), network="testnet", now=200
+    )
