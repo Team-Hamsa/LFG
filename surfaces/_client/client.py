@@ -411,3 +411,24 @@ class LFGServiceClient:
 
     async def x_resume(self) -> dict[str, Any]:
         return await self._request("POST", "/api/admin/x/resume", token=self._service_token)
+
+    async def sponsored_mint_status(self) -> dict[str, Any]:
+        return await self._request(
+            "GET", "/api/admin/sponsored-mint/status", token=self._service_token
+        )
+
+    async def sponsored_mint_start(self, actor: str) -> dict[str, Any]:
+        return await self._request(
+            "POST",
+            "/api/admin/sponsored-mint/start",
+            token=self._service_token,
+            json={"actor": actor},
+        )
+
+    async def sponsored_mint_stop(self, actor: str) -> dict[str, Any]:
+        return await self._request(
+            "POST",
+            "/api/admin/sponsored-mint/stop",
+            token=self._service_token,
+            json={"actor": actor},
+        )

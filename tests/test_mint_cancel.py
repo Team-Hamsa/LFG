@@ -27,6 +27,7 @@ import asyncio  # noqa: E402
 import json  # noqa: E402
 
 import lfg_core.mint_flow as mint_flow  # noqa: E402
+import lfg_core.sponsored_mint as sponsored_mint  # noqa: E402
 import lfg_service.app as app  # noqa: E402
 from lfg_service.app import make_session_token  # noqa: E402
 
@@ -94,6 +95,39 @@ def test_cancel_terminal_session_is_noop():
     session.state = mint_flow.OFFER_READY
     assert session.cancel() is False
     assert session.state == mint_flow.OFFER_READY
+
+
+def test_cancel_sponsored_session_releases_reserved_claim(monkeypatch):
+    released = []
+
+    def release(*args, **kwargs):
+        released.append(kwargs)
+        return True
+
+    monkeypatch.setattr(sponsored_mint, "release_reservation", release)
+    session = mint_flow.MintSession("55", "rA", sponsored=True)
+
+    assert session.cancel() is True
+    assert released == [
+        {
+            "network": mint_flow.config.XRPL_NETWORK,
+            "wallet": "rA",
+            "session_id": session.id,
+            "reason": "session_cancelled",
+        }
+    ]
+
+
+def test_cancel_never_releases_confirmed_sponsored_claim(monkeypatch):
+    def forbidden(*args, **kwargs):
+        raise AssertionError("confirmed sponsored claim must not be released")
+
+    monkeypatch.setattr(sponsored_mint, "release_reservation", forbidden)
+    session = mint_flow.MintSession("55", "rA", sponsored=True)
+    session.nft_id = "NFT1"
+    session.state = mint_flow.FAILED
+
+    assert session.cancel() is False
 
 
 def test_cancel_refused_once_payment_confirmed_mid_buy_and_burn(monkeypatch):
