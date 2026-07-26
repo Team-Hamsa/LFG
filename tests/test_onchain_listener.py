@@ -29,6 +29,10 @@ import onchain_listener as oln  # noqa: E402
 from lfg_core import closet_token as bt  # noqa: E402
 from lfg_core import config, market_store, nft_index, sponsored_mint, trait_token  # noqa: E402
 from lfg_core import economy_store as es  # noqa: E402
+from lfg_core import history_store as _hs  # noqa: E402
+
+# Fixture ledger ranges must sit above the real earliest-available ledger (32570).
+L0 = _hs.EARLIEST_AVAILABLE_LEDGER
 from lfg_core import trait_economy as te  # noqa: E402
 
 NON_BODY = te.NON_BODY_SLOTS
@@ -715,8 +719,8 @@ def test_dispatch_archives_tagged_foreign_issuer_mint_before_business_filter(tmp
         hconn,
         network="testnet",
         genesis_hash="testnet-ledger-one",
-        ledger_min=1,
-        ledger_max=50,
+        ledger_min=history_store.EARLIEST_AVAILABLE_LEDGER,
+        ledger_max=L0 + 50,
         provenance="external-audit",
         completed_at=100,
     )
@@ -773,8 +777,8 @@ def test_listener_reconnect_invalidates_baseline_and_later_ledgers_do_not_heal_i
         hconn,
         network="testnet",
         genesis_hash="testnet-ledger-one",
-        ledger_min=1,
-        ledger_max=50,
+        ledger_min=history_store.EARLIEST_AVAILABLE_LEDGER,
+        ledger_max=L0 + 50,
         provenance="external-audit",
         completed_at=100,
     )
@@ -782,17 +786,17 @@ def test_listener_reconnect_invalidates_baseline_and_later_ledgers_do_not_heal_i
         hconn,
         network="testnet",
         genesis_hash="testnet-ledger-one",
-        ledger_index=51,
+        ledger_index=L0 + 51,
         close_time=100,
         observed_at=100,
     )
 
-    oln._mark_stream_disconnected(hconn, network="testnet", after_ledger=51, at=101)
+    oln._mark_stream_disconnected(hconn, network="testnet", after_ledger=L0 + 51, at=101)
     history_store.record_validated_ledger(
         hconn,
         network="testnet",
         genesis_hash="testnet-ledger-one",
-        ledger_index=60,
+        ledger_index=L0 + 60,
         close_time=110,
         observed_at=110,
     )
@@ -800,9 +804,9 @@ def test_listener_reconnect_invalidates_baseline_and_later_ledgers_do_not_heal_i
     state = history_store.get_archive_state(hconn, "testnet")
     assert state is not None
     assert state.baseline_complete is False
-    assert state.continuity_gap_after == 51
+    assert state.continuity_gap_after == L0 + 51
     assert state.continuity_gap_reason == "transaction stream disconnected"
-    assert state.validated_ledger_index == 60
+    assert state.validated_ledger_index == L0 + 60
 
 
 def test_endpoint_mismatch_is_rejected_before_archive_cursor_advances(tmp_path):
@@ -813,8 +817,8 @@ def test_endpoint_mismatch_is_rejected_before_archive_cursor_advances(tmp_path):
         hconn,
         network="testnet",
         genesis_hash="expected-ledger-one",
-        ledger_min=1,
-        ledger_max=50,
+        ledger_min=history_store.EARLIEST_AVAILABLE_LEDGER,
+        ledger_max=L0 + 50,
         provenance="external-audit",
         completed_at=100,
     )
@@ -824,7 +828,7 @@ def test_endpoint_mismatch_is_rejected_before_archive_cursor_advances(tmp_path):
         "source_tag": config.SOURCE_TAG,
     }
     snapshot = history_store.EndpointSnapshot(
-        genesis_hash="different-ledger-one", validated_ledger_index=50
+        genesis_hash="different-ledger-one", validated_ledger_index=L0 + 50
     )
 
     with pytest.raises(RuntimeError, match="ledger-1 identity"):
@@ -844,8 +848,8 @@ def test_listener_start_rejects_source_tag_snapshot_change(tmp_path):
         hconn,
         network="testnet",
         genesis_hash="testnet-ledger-one",
-        ledger_min=1,
-        ledger_max=50,
+        ledger_min=history_store.EARLIEST_AVAILABLE_LEDGER,
+        ledger_max=L0 + 50,
         provenance="external-audit",
         source_tag=config.SOURCE_TAG + 1,
         completed_at=100,
@@ -856,7 +860,7 @@ def test_listener_start_rejects_source_tag_snapshot_change(tmp_path):
         "source_tag": config.SOURCE_TAG,
     }
     snapshot = history_store.EndpointSnapshot(
-        genesis_hash="testnet-ledger-one", validated_ledger_index=50
+        genesis_hash="testnet-ledger-one", validated_ledger_index=L0 + 50
     )
 
     with pytest.raises(RuntimeError, match="SourceTag"):
@@ -873,8 +877,8 @@ def test_listener_start_invalidates_uncovered_ledgers_after_certified_baseline(t
         hconn,
         network="testnet",
         genesis_hash="testnet-ledger-one",
-        ledger_min=1,
-        ledger_max=50,
+        ledger_min=history_store.EARLIEST_AVAILABLE_LEDGER,
+        ledger_max=L0 + 50,
         provenance="external-audit",
         completed_at=100,
     )
@@ -884,7 +888,7 @@ def test_listener_start_invalidates_uncovered_ledgers_after_certified_baseline(t
         "source_tag": config.SOURCE_TAG,
     }
     snapshot = history_store.EndpointSnapshot(
-        genesis_hash="testnet-ledger-one", validated_ledger_index=52
+        genesis_hash="testnet-ledger-one", validated_ledger_index=L0 + 52
     )
 
     oln._verify_archive_connection(hconn, ctx, snapshot)
@@ -892,8 +896,8 @@ def test_listener_start_invalidates_uncovered_ledgers_after_certified_baseline(t
     state = history_store.get_archive_state(hconn, "testnet")
     assert state is not None
     assert state.baseline_complete is False
-    assert state.continuity_gap_after == 50
-    assert state.continuity_gap_before == 52
+    assert state.continuity_gap_after == L0 + 50
+    assert state.continuity_gap_before == L0 + 52
 
 
 def test_listener_restart_with_prior_live_cursor_fails_closed(tmp_path):
@@ -904,8 +908,8 @@ def test_listener_restart_with_prior_live_cursor_fails_closed(tmp_path):
         hconn,
         network="testnet",
         genesis_hash="testnet-ledger-one",
-        ledger_min=1,
-        ledger_max=50,
+        ledger_min=history_store.EARLIEST_AVAILABLE_LEDGER,
+        ledger_max=L0 + 50,
         provenance="external-audit",
         completed_at=100,
     )
@@ -913,7 +917,7 @@ def test_listener_restart_with_prior_live_cursor_fails_closed(tmp_path):
         hconn,
         network="testnet",
         genesis_hash="testnet-ledger-one",
-        ledger_index=51,
+        ledger_index=L0 + 51,
         close_time=100,
         observed_at=100,
     )
@@ -923,7 +927,7 @@ def test_listener_restart_with_prior_live_cursor_fails_closed(tmp_path):
         "source_tag": config.SOURCE_TAG,
     }
     snapshot = history_store.EndpointSnapshot(
-        genesis_hash="testnet-ledger-one", validated_ledger_index=51
+        genesis_hash="testnet-ledger-one", validated_ledger_index=L0 + 51
     )
 
     oln._verify_archive_connection(hconn, ctx, snapshot)
@@ -931,7 +935,7 @@ def test_listener_restart_with_prior_live_cursor_fails_closed(tmp_path):
     state = history_store.get_archive_state(hconn, "testnet")
     assert state is not None
     assert state.baseline_complete is False
-    assert state.continuity_gap_after == 51
+    assert state.continuity_gap_after == L0 + 51
     assert "restart" in state.continuity_gap_reason
 
 
@@ -948,7 +952,7 @@ def test_uncertified_archive_does_not_block_the_listener_or_write_state(tmp_path
     hconn = history_store.init_history_db(str(tmp_path / "history.db"))
     ctx = {"network": "testnet", "genesis_hash": "", "source_tag": config.SOURCE_TAG}
     snapshot = history_store.EndpointSnapshot(
-        genesis_hash="testnet-ledger-one", validated_ledger_index=51
+        genesis_hash="testnet-ledger-one", validated_ledger_index=L0 + 51
     )
 
     oln._verify_archive_connection(hconn, ctx, snapshot)
@@ -1040,7 +1044,7 @@ def _certified(hconn, *, ledger_max, network="testnet"):
         hconn,
         network=network,
         genesis_hash="testnet-ledger-one",
-        ledger_min=1,
+        ledger_min=history_store.EARLIEST_AVAILABLE_LEDGER,
         ledger_max=ledger_max,
         provenance="external-audit",
         completed_at=100,
@@ -1057,14 +1061,14 @@ def test_reconnect_at_the_certified_tip_is_the_intended_clean_path(tmp_path):
     from lfg_core import history_store
 
     hconn = history_store.init_history_db(str(tmp_path / "history.db"))
-    _certified(hconn, ledger_max=500)
+    _certified(hconn, ledger_max=L0 + 500)
     ctx = {
         "network": "testnet",
         "genesis_hash": "testnet-ledger-one",
         "source_tag": config.SOURCE_TAG,
     }
     snapshot = history_store.EndpointSnapshot(
-        genesis_hash="testnet-ledger-one", validated_ledger_index=500
+        genesis_hash="testnet-ledger-one", validated_ledger_index=L0 + 500
     )
 
     oln._verify_archive_connection(hconn, ctx, snapshot)
@@ -1083,17 +1087,17 @@ def test_reconnect_cannot_resurrect_an_uncovered_gap(tmp_path):
     from lfg_core import history_store
 
     hconn = history_store.init_history_db(str(tmp_path / "history.db"))
-    _certified(hconn, ledger_max=500)
+    _certified(hconn, ledger_max=L0 + 500)
     # Continuity lost well past the tip the next certification will reach.
     history_store.invalidate_archive_continuity(
         hconn,
         network="testnet",
         reason="transaction stream disconnected",
-        gap_after=900,
+        gap_after=L0 + 900,
         invalidated_at=110,
     )
     # Re-certifying at a tip BELOW the loss point must not clear it.
-    _certified(hconn, ledger_max=600)
+    _certified(hconn, ledger_max=L0 + 600)
     assert history_store.get_archive_state(hconn, "testnet").baseline_complete is False
 
     ctx = {
@@ -1102,12 +1106,12 @@ def test_reconnect_cannot_resurrect_an_uncovered_gap(tmp_path):
         "source_tag": config.SOURCE_TAG,
     }
     snapshot = history_store.EndpointSnapshot(
-        genesis_hash="testnet-ledger-one", validated_ledger_index=600
+        genesis_hash="testnet-ledger-one", validated_ledger_index=L0 + 600
     )
     oln._verify_archive_connection(hconn, ctx, snapshot)
 
     state = history_store.get_archive_state(hconn, "testnet")
-    assert state.continuity_gap_after == 900, "the uncovered gap was lost"
+    assert state.continuity_gap_after == L0 + 900, "the uncovered gap was lost"
     assert state.baseline_complete is False
     assert not sponsored_mint.archive_is_usable(
         str(tmp_path / "history.db"), network="testnet", now=200

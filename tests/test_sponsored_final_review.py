@@ -43,6 +43,9 @@ from lfg_core import (  # noqa: E402
 )
 from lfg_service import app as server  # noqa: E402
 
+# Fixture ledger ranges must sit above the real earliest-available ledger (32570).
+L0 = history_store.EARLIEST_AVAILABLE_LEDGER
+
 
 def _run(coro):
     return asyncio.run(coro)
@@ -54,15 +57,15 @@ def _ready_history(path: str, *, network: str = "mainnet", now: int = 1_000):
         conn,
         network=network,
         genesis_hash=f"{network}-genesis",
-        ledger_min=1,
-        ledger_max=500,
+        ledger_min=history_store.EARLIEST_AVAILABLE_LEDGER,
+        ledger_max=L0 + 500,
         provenance="review-test",
         coverage=json.dumps(
             {
                 "version": 1,
                 "source_tag": config.SOURCE_TAG,
-                "ledger_min": 1,
-                "ledger_max": 500,
+                "ledger_min": history_store.EARLIEST_AVAILABLE_LEDGER,
+                "ledger_max": L0 + 500,
                 "accounts": {
                     "signing": config.SIGNING_ACCOUNT,
                     "token_issuer": config.TOKEN_ISSUER_ADDRESS,
@@ -75,7 +78,7 @@ def _ready_history(path: str, *, network: str = "mainnet", now: int = 1_000):
         conn,
         network=network,
         genesis_hash=f"{network}-genesis",
-        ledger_index=501,
+        ledger_index=L0 + 501,
         close_time=now - 1,
         observed_at=now,
     )
@@ -103,15 +106,15 @@ def test_archive_health_requires_complete_matching_fresh_provenance(tmp_path):
         conn,
         network="mainnet",
         genesis_hash="mainnet-genesis",
-        ledger_min=1,
-        ledger_max=500,
+        ledger_min=history_store.EARLIEST_AVAILABLE_LEDGER,
+        ledger_max=L0 + 500,
         provenance="clio-account-tx-audit",
         coverage=json.dumps(
             {
                 "version": 1,
                 "source_tag": config.SOURCE_TAG,
-                "ledger_min": 1,
-                "ledger_max": 500,
+                "ledger_min": history_store.EARLIEST_AVAILABLE_LEDGER,
+                "ledger_max": L0 + 500,
                 "accounts": {
                     "signing": config.SIGNING_ACCOUNT,
                     "token_issuer": config.TOKEN_ISSUER_ADDRESS,
@@ -124,7 +127,7 @@ def test_archive_health_requires_complete_matching_fresh_provenance(tmp_path):
         conn,
         network="mainnet",
         genesis_hash="mainnet-genesis",
-        ledger_index=501,
+        ledger_index=L0 + 501,
         close_time=999,
         observed_at=1_000,
     )
@@ -166,7 +169,7 @@ def test_archive_health_requires_matching_source_tag_and_no_continuity_gap(tmp_p
             conn,
             network="mainnet",
             reason="listener disconnected",
-            gap_after=501,
+            gap_after=L0 + 501,
             invalidated_at=1_000,
         )
         # Even a corrupt/manual baseline flag cannot conceal the durable gap marker.
@@ -197,7 +200,7 @@ def test_reservation_serializes_archive_snapshot_against_invalidation(tmp_path, 
                     conn,
                     network="mainnet",
                     reason="disconnect during admission",
-                    gap_after=501,
+                    gap_after=L0 + 501,
                     invalidated_at=101,
                 )
             finally:
@@ -256,7 +259,7 @@ def test_listener_archives_validated_sourcetag_before_event_filters(tmp_path, mo
         "Account": "rTagged",
         "SourceTag": config.SOURCE_TAG,
         "hash": "A" * 64,
-        "ledger_index": 502,
+        "ledger_index": L0 + 502,
         "date": 53,
         "validated": True,
         "meta": {"TransactionResult": "tesSUCCESS"},
@@ -291,7 +294,7 @@ def test_listener_archives_validated_sourcetag_before_event_filters(tmp_path, mo
     assert tuple(row) == ("rTagged", config.SOURCE_TAG)
     state = history_store.get_archive_state(hconn, "mainnet")
     assert state is not None
-    assert state.validated_ledger_index == 502
+    assert state.validated_ledger_index == L0 + 502
 
 
 def test_campaign_off_does_not_scan_archive(tmp_path, monkeypatch):
@@ -902,7 +905,7 @@ def test_offer_persistence_does_not_replay_from_an_invalidated_archive(tmp_path)
             conn,
             network="mainnet",
             reason="listener disconnected",
-            gap_after=501,
+            gap_after=L0 + 501,
             invalidated_at=102,
         )
 

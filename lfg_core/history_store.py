@@ -116,6 +116,15 @@ class ArchiveState:
     updated_at: int
 
 
+# The oldest ledger any XRPL node can serve. Ledgers 1-32569 were lost in a
+# 2012 operational incident and exist nowhere — asking for one returns
+# lgrNotFound on mainnet and testnet alike, and account_tx rejects a
+# ledger_index_min below this with lgrIdxMalformed. Every full-history range
+# therefore starts here, not at 1, and this ledger's hash is the stable
+# per-chain identity anchor the archive binds itself to.
+EARLIEST_AVAILABLE_LEDGER = 32570
+
+
 @dataclass(frozen=True)
 class EndpointSnapshot:
     """Chain identity and validated tip observed from one live endpoint."""
@@ -258,11 +267,25 @@ def _ledger_hash(result: dict[str, Any]) -> str:
 async def fetch_endpoint_snapshot(
     request_fn: Callable[[dict[str, Any]], Awaitable[dict[str, Any]]],
 ) -> EndpointSnapshot:
-    """Read ledger 1 and the validated tip through the same endpoint session."""
+    """Read the earliest retrievable ledger and the validated tip from one session.
 
-    genesis = await request_fn({"method": "ledger", "ledger_index": 1, "transactions": False})
-    if _ledger_index(genesis) != 1:
-        raise ValueError("endpoint did not return ledger 1 for the identity request")
+    The first is the chain-identity anchor: its hash is stable forever on a
+    given chain and differs across chains, so it binds an archive to the ledger
+    it was built from. A testnet reset changes it, which is exactly the
+    confusion worth catching.
+
+    It is NOT ledger 1. Ledgers 1-32569 were lost in 2012 and no node serves
+    them — live mainnet AND testnet clio both answer `ledger_index: 1` with
+    lgrNotFound, and `account_tx` rejects `ledger_index_min` below
+    EARLIEST_AVAILABLE_LEDGER with lgrIdxMalformed."""
+
+    genesis = await request_fn(
+        {"method": "ledger", "ledger_index": EARLIEST_AVAILABLE_LEDGER, "transactions": False}
+    )
+    if _ledger_index(genesis) != EARLIEST_AVAILABLE_LEDGER:
+        raise ValueError(
+            f"endpoint did not return ledger {EARLIEST_AVAILABLE_LEDGER} for the identity request"
+        )
     tip = await request_fn({"method": "ledger", "ledger_index": "validated", "transactions": False})
     return EndpointSnapshot(
         genesis_hash=_ledger_hash(genesis),

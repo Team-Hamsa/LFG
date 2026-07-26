@@ -41,8 +41,8 @@ Record the current validated tip first, then certify against it:
 cd /home/hamsa/LFG           # staging: /home/hamsa/LFG-staging
 .venv/bin/python scripts/backfill_history.py --network mainnet \
   --complete-audited-baseline \
-  --genesis-hash <ledger-1-hash> \
-  --baseline-ledger-min 1 \
+  --genesis-hash <ledger-32570-hash> \
+  --baseline-ledger-min 32570 \
   --baseline-ledger-max <current-validated-tip> \
   --baseline-provenance "<who audited this archive and how>"
 ```

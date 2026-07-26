@@ -120,8 +120,8 @@ BRIX_CURRENCY_HEX=<hex-currency-code>                       # optional; trait-ec
 BRIX_ISSUER=<xrpl-address>                                  # optional; trait-economy BRIX issuer, defaults to SWAP_OFFER_ISSUER
 MARKET_BID_TTL_SECONDS=604800                               # optional (#283); on-ledger Expiration for in-app bids (native buy offers), default 7 days
 SPONSORED_MINT_EXCLUDED_WALLETS=<addr,addr>                 # sponsored free mint; operator/test wallets that may never be sponsored (signing + token issuer are ALWAYS excluded in code, but do not satisfy the readiness audit — it requires this list set explicitly)
-SPONSORED_MINT_MAINNET_GENESIS_HASH=<ledger-1-hash>         # optional; pins history_mainnet.db to a chain identity. Unset = the archive's own recorded genesis is trusted (still fail-closed: an uncertified archive admits nobody)
-SPONSORED_MINT_TESTNET_GENESIS_HASH=<ledger-1-hash>         # optional; same, for history_testnet.db
+SPONSORED_MINT_MAINNET_GENESIS_HASH=<ledger-32570-hash>         # optional; pins history_mainnet.db to a chain identity. Unset = the archive's own recorded genesis is trusted (still fail-closed: an uncertified archive admits nobody)
+SPONSORED_MINT_TESTNET_GENESIS_HASH=<ledger-32570-hash>         # optional; same, for history_testnet.db
 SPONSORED_MINT_ARCHIVE_MAX_LAG_SECONDS=900                  # optional; how stale the eligibility archive's listener heartbeat may be before admission fails closed (default 900)
 ```
 
@@ -136,13 +136,13 @@ SPONSORED_MINT_ARCHIVE_MAX_LAG_SECONDS=900                  # optional; how stal
 > ```bash
 > .venv/bin/python scripts/backfill_history.py --network mainnet \
 >   --complete-audited-baseline \
->   --genesis-hash <ledger-1-hash> \
->   --baseline-ledger-min 1 --baseline-ledger-max <current-validated-tip> \
+>   --genesis-hash <ledger-32570-hash> \
+>   --baseline-ledger-min 32570 --baseline-ledger-max <current-validated-tip> \
 >   --baseline-provenance "<who audited this and how>"
 > ```
 >
 > `--sources` must include `token_issuer` and `signing` (they are in the
-> default set); `--baseline-ledger-min` must be `1`; `--baseline-ledger-max`
+> default set); `--baseline-ledger-min` must be `32570`; `--baseline-ledger-max`
 > must equal the endpoint's current validated tip. **A listener restart
 > invalidates continuity** (a tx stream has no replay token, so a restart
 > cannot prove it missed nothing) and the certification must be re-run before

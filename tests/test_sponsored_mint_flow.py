@@ -172,7 +172,7 @@ def _persist_corroborated_mint_evidence(paths, claim, *, include_lfg):
     history_store.insert_tx(
         hconn,
         tx_hash="TX-RECOVERED",
-        ledger_index=123,
+        ledger_index=history_store.EARLIEST_AVAILABLE_LEDGER + 123,
         close_time=103,
         tx_type="NFTokenMint",
         account="rSIGNER",
@@ -185,7 +185,7 @@ def _persist_corroborated_mint_evidence(paths, claim, *, include_lfg):
             "tx_hash": "TX-RECOVERED",
             "nft_id": "NFT-RECOVERED",
             "event": "mint",
-            "ledger_index": 123,
+            "ledger_index": history_store.EARLIEST_AVAILABLE_LEDGER + 123,
             "ts": 103,
         },
     )
@@ -193,7 +193,7 @@ def _persist_corroborated_mint_evidence(paths, claim, *, include_lfg):
         hconn,
         network="mainnet",
         genesis_hash="mainnet-test-genesis",
-        ledger_index=124,
+        ledger_index=history_store.EARLIEST_AVAILABLE_LEDGER + 124,
         close_time=3990,
         observed_at=4000,
     )
@@ -1538,7 +1538,7 @@ def test_readiness_audit_counts_debt_only_for_requested_network(_service_env, mo
     history_store.insert_tx(
         hconn,
         tx_hash="TX-FRESH",
-        ledger_index=123,
+        ledger_index=history_store.EARLIEST_AVAILABLE_LEDGER + 123,
         close_time=3990,
         tx_type="Payment",
         account="rUNIQUE",
@@ -1578,7 +1578,7 @@ def test_readiness_audit_is_read_only_and_passes_a_safe_off_state(_service_env, 
     history_store.insert_tx(
         hconn,
         tx_hash="TX-FRESH",
-        ledger_index=123,
+        ledger_index=history_store.EARLIEST_AVAILABLE_LEDGER + 123,
         close_time=3990,
         tx_type="Payment",
         account="rUNIQUE",
@@ -1659,7 +1659,7 @@ def test_readiness_audit_rejects_nonempty_but_incomplete_operator_exclusions(
     history_store.insert_tx(
         hconn,
         tx_hash="TX-FRESH",
-        ledger_index=123,
+        ledger_index=history_store.EARLIEST_AVAILABLE_LEDGER + 123,
         close_time=3990,
         tx_type="Payment",
         account="rUNIQUE",
@@ -1781,7 +1781,7 @@ def test_readiness_audit_fails_for_debt_and_incomplete_claims(_service_env, monk
     history_store.insert_tx(
         hconn,
         tx_hash="TX-FRESH",
-        ledger_index=123,
+        ledger_index=history_store.EARLIEST_AVAILABLE_LEDGER + 123,
         close_time=3990,
         tx_type="Payment",
         account="rUNIQUE",

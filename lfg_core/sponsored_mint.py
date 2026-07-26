@@ -13,7 +13,7 @@ from typing import Any, Literal, cast
 from urllib.parse import quote
 from uuid import uuid4
 
-from lfg_core import config, db_path, history_events, market_ops, nft_index
+from lfg_core import config, db_path, history_events, history_store, market_ops, nft_index
 
 CampaignState = Literal["off", "active", "stopped", "expired", "full", "at_capacity"]
 ReservationReason = Literal[
@@ -802,7 +802,11 @@ def _baseline_coverage_is_bound(row: Mapping[str, Any]) -> bool:
     }
     return (
         coverage.get("source_tag") == config.SOURCE_TAG
-        and coverage.get("ledger_min") == row["baseline_ledger_min"] == 1
+        # Not 1 — ledgers 1-32569 were lost in 2012 and no node serves them, so
+        # a genuinely complete sweep starts at the earliest ledger that exists.
+        and coverage.get("ledger_min")
+        == row["baseline_ledger_min"]
+        == history_store.EARLIEST_AVAILABLE_LEDGER
         and coverage.get("ledger_max") == row["baseline_ledger_max"]
         and all(accounts.get(name) == account for name, account in expected_accounts.items())
     )

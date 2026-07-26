@@ -111,9 +111,15 @@ def validate_baseline_endpoint(
     baseline_ledger_max: int,
 ) -> None:
     if claimed_genesis_hash.strip() != snapshot.genesis_hash:
-        raise ValueError("claimed genesis does not match endpoint ledger-1 identity")
-    if baseline_ledger_min != 1:
-        raise ValueError("complete SourceTag baseline must start at ledger 1")
+        raise ValueError("claimed genesis does not match the endpoint chain identity")
+    # Not 1: ledgers 1-32569 were lost in 2012 and no node serves them, so a
+    # "complete" sweep starts at the earliest ledger that exists. account_tx
+    # rejects a lower ledger_index_min outright (lgrIdxMalformed).
+    if baseline_ledger_min != history_store.EARLIEST_AVAILABLE_LEDGER:
+        raise ValueError(
+            "complete SourceTag baseline must start at ledger "
+            f"{history_store.EARLIEST_AVAILABLE_LEDGER} (ledgers 1-32569 do not exist)"
+        )
     if baseline_ledger_max != snapshot.validated_ledger_index:
         raise ValueError("baseline maximum must equal the validated endpoint tip")
 

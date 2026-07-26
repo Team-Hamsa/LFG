@@ -22,6 +22,9 @@ os.environ.setdefault("BUNNY_PULL_ZONE", "nft.pullzone.example")
 from lfg_core import history_store
 from tests.fixtures import history_txs as fx
 
+# Fixture ledger ranges must sit above the real earliest-available ledger (32570).
+L0 = history_store.EARLIEST_AVAILABLE_LEDGER
+
 bh = importlib.import_module("scripts.backfill_history")
 
 
@@ -356,7 +359,7 @@ def test_audit_history_scopes_by_taxon(tmp_path):
                 "to_addr": "rI",
                 "price_drops": None,
                 "price_token": None,
-                "ledger_index": 1,
+                "ledger_index": history_store.EARLIEST_AVAILABLE_LEDGER,
                 "ts": 1,
             },
         )
@@ -395,56 +398,65 @@ def test_endpoint_snapshot_reads_actual_ledger_one_identity_and_validated_tip():
 
     async def request_fn(req):
         requests.append(req)
-        if req["ledger_index"] == 1:
-            return {"ledger": {"ledger_index": 1, "hash": "ACTUAL-GENESIS"}}
-        return {"ledger": {"ledger_index": 777, "hash": "TIP"}}
+        if req["ledger_index"] == history_store.EARLIEST_AVAILABLE_LEDGER:
+            return {
+                "ledger": {
+                    "ledger_index": history_store.EARLIEST_AVAILABLE_LEDGER,
+                    "hash": "ACTUAL-GENESIS",
+                }
+            }
+        return {"ledger": {"ledger_index": L0 + 777, "hash": "TIP"}}
 
     snapshot = _run(history_store.fetch_endpoint_snapshot(request_fn))
     assert snapshot == history_store.EndpointSnapshot(
-        genesis_hash="ACTUAL-GENESIS", validated_ledger_index=777
+        genesis_hash="ACTUAL-GENESIS", validated_ledger_index=L0 + 777
     )
     assert requests == [
-        {"method": "ledger", "ledger_index": 1, "transactions": False},
+        {
+            "method": "ledger",
+            "ledger_index": history_store.EARLIEST_AVAILABLE_LEDGER,
+            "transactions": False,
+        },
         {"method": "ledger", "ledger_index": "validated", "transactions": False},
     ]
 
 
 def test_certification_rejects_typed_genesis_that_does_not_match_endpoint():
     snapshot = history_store.EndpointSnapshot(
-        genesis_hash="ACTUAL-GENESIS", validated_ledger_index=777
+        genesis_hash="ACTUAL-GENESIS", validated_ledger_index=L0 + 777
     )
-    with pytest.raises(ValueError, match="endpoint ledger-1 identity"):
+    with pytest.raises(ValueError, match="endpoint chain identity"):
         bh.validate_baseline_endpoint(
             snapshot,
             claimed_genesis_hash="TYPED-GENESIS",
-            baseline_ledger_min=1,
-            baseline_ledger_max=777,
+            baseline_ledger_min=history_store.EARLIEST_AVAILABLE_LEDGER,
+            baseline_ledger_max=L0 + 777,
         )
 
 
 def test_certification_rejects_baseline_that_stops_before_endpoint_tip():
     snapshot = history_store.EndpointSnapshot(
-        genesis_hash="ACTUAL-GENESIS", validated_ledger_index=777
+        genesis_hash="ACTUAL-GENESIS", validated_ledger_index=L0 + 777
     )
     with pytest.raises(ValueError, match="validated endpoint tip"):
         bh.validate_baseline_endpoint(
             snapshot,
             claimed_genesis_hash="ACTUAL-GENESIS",
-            baseline_ledger_min=1,
-            baseline_ledger_max=776,
+            baseline_ledger_min=history_store.EARLIEST_AVAILABLE_LEDGER,
+            baseline_ledger_max=L0 + 776,
         )
 
 
 def test_certification_rejects_operator_chosen_non_genesis_lower_bound():
     snapshot = history_store.EndpointSnapshot(
-        genesis_hash="ACTUAL-GENESIS", validated_ledger_index=777
+        genesis_hash="ACTUAL-GENESIS", validated_ledger_index=L0 + 777
     )
-    with pytest.raises(ValueError, match="ledger 1"):
+    with pytest.raises(ValueError, match="must start at ledger 32570"):
         bh.validate_baseline_endpoint(
             snapshot,
             claimed_genesis_hash="ACTUAL-GENESIS",
             baseline_ledger_min=2,
-            baseline_ledger_max=777,
+            baseline_ledger_max=L0 + 777,
         )
 
 
@@ -454,10 +466,12 @@ def test_certified_account_backfill_is_bound_to_one_explicit_range(tmp_path):
 
     async def request_fn(req):
         calls.append(dict(req))
+        # Echo the requested range back, as a real endpoint does — the certified
+        # path checks the page proves the exact account and bounds it asked for.
         return {
             "account": "rRequired",
-            "ledger_index_min": 1,
-            "ledger_index_max": 777,
+            "ledger_index_min": req["ledger_index_min"],
+            "ledger_index_max": req["ledger_index_max"],
             "validated": True,
             "transactions": [],
         }
@@ -469,14 +483,14 @@ def test_certified_account_backfill_is_bound_to_one_explicit_range(tmp_path):
                 request_fn,
                 "rRequired",
                 "required_tx",
-                ledger_min=1,
-                ledger_max=777,
+                ledger_min=history_store.EARLIEST_AVAILABLE_LEDGER,
+                ledger_max=L0 + 777,
             )
         )
         == 0
     )
-    assert calls[0]["ledger_index_min"] == 1
-    assert calls[0]["ledger_index_max"] == 777
+    assert calls[0]["ledger_index_min"] == history_store.EARLIEST_AVAILABLE_LEDGER
+    assert calls[0]["ledger_index_max"] == L0 + 777
 
 
 @pytest.mark.parametrize(
@@ -501,8 +515,8 @@ def test_certified_account_backfill_rejects_unbound_page_evidence(tmp_path, resp
                 request_fn,
                 "rRequired",
                 "required_tx",
-                ledger_min=1,
-                ledger_max=777,
+                ledger_min=history_store.EARLIEST_AVAILABLE_LEDGER,
+                ledger_max=L0 + 777,
             )
         )
 
@@ -511,14 +525,14 @@ def test_baseline_coverage_document_binds_accounts_tag_and_common_range():
     document = bh.baseline_coverage_document(
         {"signing": "rSigner", "token_issuer": "rIssuer"},
         source_tag=2606160021,
-        ledger_min=1,
-        ledger_max=777,
+        ledger_min=history_store.EARLIEST_AVAILABLE_LEDGER,
+        ledger_max=L0 + 777,
     )
     assert document == {
         "version": 1,
         "source_tag": 2606160021,
-        "ledger_min": 1,
-        "ledger_max": 777,
+        "ledger_min": history_store.EARLIEST_AVAILABLE_LEDGER,
+        "ledger_max": L0 + 777,
         "accounts": {"signing": "rSigner", "token_issuer": "rIssuer"},
     }
 
@@ -529,8 +543,8 @@ def test_archive_baseline_persists_source_tag_and_coverage(tmp_path):
         conn,
         network="mainnet",
         genesis_hash="ACTUAL-GENESIS",
-        ledger_min=1,
-        ledger_max=777,
+        ledger_min=history_store.EARLIEST_AVAILABLE_LEDGER,
+        ledger_max=L0 + 777,
         provenance="external-audit",
         source_tag=2606160021,
         coverage='{"signing":"rSigner","token_issuer":"rIssuer"}',
@@ -548,8 +562,8 @@ def test_only_explicit_baseline_recertification_clears_gap_and_live_cursor(tmp_p
         conn,
         network="mainnet",
         genesis_hash="ACTUAL-GENESIS",
-        ledger_min=1,
-        ledger_max=777,
+        ledger_min=history_store.EARLIEST_AVAILABLE_LEDGER,
+        ledger_max=L0 + 777,
         provenance="audit-v1",
         source_tag=1,
         completed_at=100,
@@ -558,7 +572,7 @@ def test_only_explicit_baseline_recertification_clears_gap_and_live_cursor(tmp_p
         conn,
         network="mainnet",
         genesis_hash="ACTUAL-GENESIS",
-        ledger_index=778,
+        ledger_index=L0 + 778,
         close_time=101,
         source_tag=1,
         observed_at=101,
@@ -567,7 +581,7 @@ def test_only_explicit_baseline_recertification_clears_gap_and_live_cursor(tmp_p
         conn,
         network="mainnet",
         reason="disconnect",
-        gap_after=778,
+        gap_after=L0 + 778,
         invalidated_at=102,
     )
 
@@ -575,8 +589,8 @@ def test_only_explicit_baseline_recertification_clears_gap_and_live_cursor(tmp_p
         conn,
         network="mainnet",
         genesis_hash="ACTUAL-GENESIS",
-        ledger_min=1,
-        ledger_max=800,
+        ledger_min=history_store.EARLIEST_AVAILABLE_LEDGER,
+        ledger_max=L0 + 800,
         provenance="audit-v2",
         source_tag=2,
         completed_at=110,
@@ -626,8 +640,8 @@ def test_certification_cannot_erase_a_gap_above_the_certified_tip(tmp_path):
         conn,
         network="testnet",
         genesis_hash="g",
-        ledger_min=1,
-        ledger_max=100,
+        ledger_min=history_store.EARLIEST_AVAILABLE_LEDGER,
+        ledger_max=L0 + 100,
         provenance="first",
         completed_at=10,
     )
@@ -636,8 +650,8 @@ def test_certification_cannot_erase_a_gap_above_the_certified_tip(tmp_path):
         conn,
         network="testnet",
         reason="transaction stream disconnected",
-        gap_after=150,
-        gap_before=200,
+        gap_after=L0 + 150,
+        gap_before=L0 + 200,
         invalidated_at=20,
     )
 
@@ -645,14 +659,14 @@ def test_certification_cannot_erase_a_gap_above_the_certified_tip(tmp_path):
         conn,
         network="testnet",
         genesis_hash="g",
-        ledger_min=1,
-        ledger_max=100,
+        ledger_min=history_store.EARLIEST_AVAILABLE_LEDGER,
+        ledger_max=L0 + 100,
         provenance="second",
         completed_at=30,
     )
 
     state = history_store.get_archive_state(conn, "testnet")
-    assert state.continuity_gap_after == 150, "gap above the certified tip was erased"
+    assert state.continuity_gap_after == L0 + 150, "gap above the certified tip was erased"
     assert state.baseline_complete is False, "archive claimed complete despite an uncovered gap"
 
 
@@ -665,8 +679,8 @@ def test_certification_clears_a_gap_it_provably_re_swept(tmp_path):
         conn,
         network="testnet",
         genesis_hash="g",
-        ledger_min=1,
-        ledger_max=100,
+        ledger_min=history_store.EARLIEST_AVAILABLE_LEDGER,
+        ledger_max=L0 + 100,
         provenance="first",
         completed_at=10,
     )
@@ -674,8 +688,8 @@ def test_certification_clears_a_gap_it_provably_re_swept(tmp_path):
         conn,
         network="testnet",
         reason="listener process restart lacks exact stream catch-up",
-        gap_after=40,
-        gap_before=60,
+        gap_after=L0 + 40,
+        gap_before=L0 + 60,
         invalidated_at=20,
     )
 
@@ -683,8 +697,8 @@ def test_certification_clears_a_gap_it_provably_re_swept(tmp_path):
         conn,
         network="testnet",
         genesis_hash="g",
-        ledger_min=1,
-        ledger_max=500,
+        ledger_min=history_store.EARLIEST_AVAILABLE_LEDGER,
+        ledger_max=L0 + 500,
         provenance="re-swept through 500",
         completed_at=30,
     )
@@ -707,8 +721,8 @@ def test_certification_keeps_an_unbounded_gap_the_sweep_never_reached(tmp_path):
         conn,
         network="testnet",
         genesis_hash="g",
-        ledger_min=1,
-        ledger_max=100,
+        ledger_min=history_store.EARLIEST_AVAILABLE_LEDGER,
+        ledger_max=L0 + 100,
         provenance="first",
         completed_at=10,
     )
@@ -716,7 +730,7 @@ def test_certification_keeps_an_unbounded_gap_the_sweep_never_reached(tmp_path):
         conn,
         network="testnet",
         reason="transaction stream disconnected",
-        gap_after=900,
+        gap_after=L0 + 900,
         invalidated_at=20,
     )
 
@@ -724,14 +738,14 @@ def test_certification_keeps_an_unbounded_gap_the_sweep_never_reached(tmp_path):
         conn,
         network="testnet",
         genesis_hash="g",
-        ledger_min=1,
-        ledger_max=500,
+        ledger_min=history_store.EARLIEST_AVAILABLE_LEDGER,
+        ledger_max=L0 + 500,
         provenance="sweep stopped short of the loss point",
         completed_at=30,
     )
 
     state = history_store.get_archive_state(conn, "testnet")
-    assert state.continuity_gap_after == 900
+    assert state.continuity_gap_after == L0 + 900
     assert state.baseline_complete is False
 
     # Sweeping past the loss point is the proof that clears it.
@@ -739,11 +753,71 @@ def test_certification_keeps_an_unbounded_gap_the_sweep_never_reached(tmp_path):
         conn,
         network="testnet",
         genesis_hash="g",
-        ledger_min=1,
-        ledger_max=1000,
+        ledger_min=history_store.EARLIEST_AVAILABLE_LEDGER,
+        ledger_max=L0 + 1000,
         provenance="re-swept past the loss point",
         completed_at=40,
     )
     state = history_store.get_archive_state(conn, "testnet")
     assert state.continuity_gap_at is None
     assert state.baseline_complete is True
+
+
+def test_identity_probe_never_asks_for_a_ledger_the_chain_cannot_serve():
+    """Ledgers 1-32569 were lost in 2012 and no XRPL node serves them. Verified
+    against live clio (mainnet wss://s2-clio.ripple.com and testnet) while
+    reviewing PR #328:
+
+        ledger_index=L0 + 1     -> lgrNotFound   (both networks)
+        ledger_index=32570 -> success
+
+    The identity probe used to request ledger 1, so fetch_endpoint_snapshot
+    raised on EVERY reconnect. In scripts/onchain_listener.py that raise is
+    caught by the outer reconnect handler, which backs off and retries forever
+    — the listener never reached its `async for msg in client` and processed
+    zero transactions, taking the NFT index, market listings and history sync
+    with it. `account_tx` likewise rejects ledger_index_min below this bound
+    (lgrIdxMalformed), so --complete-audited-baseline could never finish either.
+
+    CI passed throughout because the fixture below stubbed the ledger-1
+    response. This test pins the bound itself so a stub can't hide it again."""
+    assert history_store.EARLIEST_AVAILABLE_LEDGER == 32570
+
+    requested = []
+
+    async def request_fn(req):
+        requested.append(req)
+        if req["ledger_index"] == "validated":
+            return {"ledger_index": 900000, "ledger_hash": "TIP"}
+        # Model the real endpoint: anything below the bound does not exist.
+        if int(req["ledger_index"]) < history_store.EARLIEST_AVAILABLE_LEDGER:
+            raise RuntimeError("ledger identity request failed: lgrNotFound")
+        return {"ledger": {"ledger_index": req["ledger_index"], "hash": "CHAIN-ANCHOR"}}
+
+    snapshot = _run(history_store.fetch_endpoint_snapshot(request_fn))
+
+    assert snapshot.genesis_hash == "CHAIN-ANCHOR"
+    assert snapshot.validated_ledger_index == 900000
+    assert requested[0]["ledger_index"] == history_store.EARLIEST_AVAILABLE_LEDGER
+
+
+def test_certification_refuses_a_baseline_starting_below_the_earliest_ledger():
+    """The mirror: a sweep claiming to start at ledger 1 is claiming coverage of
+    ledgers that do not exist, and account_tx would reject the request anyway."""
+    snapshot = history_store.EndpointSnapshot(genesis_hash="G", validated_ledger_index=900000)
+
+    with pytest.raises(ValueError, match="must start at ledger 32570"):
+        bh.validate_baseline_endpoint(
+            snapshot,
+            claimed_genesis_hash="G",
+            baseline_ledger_min=1,
+            baseline_ledger_max=900000,
+        )
+
+    # The real bound is accepted.
+    bh.validate_baseline_endpoint(
+        snapshot,
+        claimed_genesis_hash="G",
+        baseline_ledger_min=history_store.EARLIEST_AVAILABLE_LEDGER,
+        baseline_ledger_max=900000,
+    )

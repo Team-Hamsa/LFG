@@ -8,6 +8,9 @@ from typing import Any
 
 from lfg_core import config, history_store
 
+# Fixture ledger ranges must sit above the real earliest-available ledger (32570).
+L0 = history_store.EARLIEST_AVAILABLE_LEDGER
+
 
 def ready_history(
     path: str,
@@ -22,16 +25,16 @@ def ready_history(
         conn,
         network=network,
         genesis_hash=genesis_hash,
-        ledger_min=1,
-        ledger_max=1,
+        ledger_min=history_store.EARLIEST_AVAILABLE_LEDGER,
+        ledger_max=L0 + 1,
         provenance="pytest-authoritative-baseline",
         completed_at=now - 1,
         coverage=json.dumps(
             {
                 "version": 1,
                 "source_tag": config.SOURCE_TAG,
-                "ledger_min": 1,
-                "ledger_max": 1,
+                "ledger_min": history_store.EARLIEST_AVAILABLE_LEDGER,
+                "ledger_max": L0 + 1,
                 "accounts": {
                     "signing": config.SIGNING_ACCOUNT,
                     "token_issuer": config.TOKEN_ISSUER_ADDRESS,
@@ -43,7 +46,7 @@ def ready_history(
         conn,
         network=network,
         genesis_hash=genesis_hash,
-        ledger_index=2,
+        ledger_index=L0 + 2,
         close_time=now if close_time is None else close_time,
         observed_at=now,
     )
