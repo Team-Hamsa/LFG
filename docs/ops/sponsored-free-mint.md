@@ -47,8 +47,14 @@ cd /home/hamsa/LFG           # staging: /home/hamsa/LFG-staging
   --baseline-provenance "<who audited this archive and how>"
 ```
 
-- `--baseline-ledger-min` **must** be `1`; `--baseline-ledger-max` **must**
-  equal the endpoint's current validated tip (the run refuses otherwise).
+- `--baseline-ledger-min` **must** be `32570`
+  (`history_store.EARLIEST_AVAILABLE_LEDGER`), not `1`: ledgers 1-32569 were
+  lost in 2012, no node serves them, and `account_tx` rejects a lower bound
+  outright. `--baseline-ledger-max` **must** equal the endpoint's current
+  validated tip (the run refuses otherwise). The tip moves every few seconds
+  and the run re-reads it at start, so read the tip and launch immediately;
+  on `baseline maximum must equal the validated endpoint tip`, re-read and
+  retry rather than reusing the stale number.
 - `--sources` must include `token_issuer` and `signing`. Both are in the
   default set — do not narrow `--sources` for a certification run, or the
   coverage document will attest less than the archive is treated as proving.
@@ -64,7 +70,16 @@ cut off in. Any listener restart — a deploy, a `pm2 restart`, a websocket
 error — therefore stamps `continuity_gap_*` and clears `baseline_complete`,
 and admission fails closed until Step 0 is re-run. Consequences for planning:
 
-- Certify **after** the deploy that will serve the campaign, not before.
+- Certify **after** the deploy that will serve the campaign, not before —
+  and **after the listener is back up**, in that order. The listener reads
+  the certified archive identity **once at startup** and latches it for the
+  process lifetime: a listener started against an uncertified archive logs
+  `no certified archive genesis identity; SourceTag eligibility archiving is
+  DISABLED` and never stamps a heartbeat, so the audit's archive and
+  freshness checks fail no matter how long it runs. Certifying first and
+  restarting the listener afterwards does not work either — the restart
+  stamps a fresh gap that clears `baseline_complete` again. The working
+  order is: deploy → let the listener subscribe → certify → audit.
 - Do not promote, restart, or redeploy either stack during a live campaign.
 - Verify with the readiness audit immediately before starting a campaign; a
   green audit is the only proof the archive is currently usable.
