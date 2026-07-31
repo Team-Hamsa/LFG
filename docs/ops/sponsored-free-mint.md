@@ -47,8 +47,14 @@ cd /home/hamsa/LFG           # staging: /home/hamsa/LFG-staging
   --baseline-provenance "<who audited this archive and how>"
 ```
 
-- `--baseline-ledger-min` **must** be `1`; `--baseline-ledger-max` **must**
-  equal the endpoint's current validated tip (the run refuses otherwise).
+- `--baseline-ledger-min` **must** be `32570`
+  (`history_store.EARLIEST_AVAILABLE_LEDGER`), not `1`: ledgers 1-32569 were
+  lost in 2012, no node serves them, and `account_tx` rejects a lower bound
+  outright. `--baseline-ledger-max` **must** equal the endpoint's current
+  validated tip (the run refuses otherwise). The tip moves every few seconds
+  and the run re-reads it at start, so read the tip and launch immediately;
+  on `baseline maximum must equal the validated endpoint tip`, re-read and
+  retry rather than reusing the stale number.
 - `--sources` must include `token_issuer` and `signing`. Both are in the
   default set — do not narrow `--sources` for a certification run, or the
   coverage document will attest less than the archive is treated as proving.
@@ -65,7 +71,34 @@ error — therefore stamps `continuity_gap_*` and clears `baseline_complete`,
 and admission fails closed until Step 0 is re-run. Consequences for planning:
 
 - Certify **after** the deploy that will serve the campaign, not before.
+  The listener reads the archive genesis identity **once at startup** — from
+  `SPONSORED_MINT_MAINNET_GENESIS_HASH` / `SPONSORED_MINT_TESTNET_GENESIS_HASH`
+  in the stack's `.env`, else from a previously certified `archive_state`
+  row — and latches it for the process lifetime; it only stamps heartbeats
+  once it has one. Which order works depends on whether an identity exists
+  at listener startup:
+  - **Identity available at startup** (env hash set, or the archive was
+    certified before): deploy → let the listener subscribe → certify →
+    audit. No restart needed.
+  - **No identity at startup** (env hash unset AND the archive has never
+    been certified): the listener logs `no certified archive genesis
+    identity; SourceTag eligibility archiving is DISABLED` and will never
+    heartbeat, no matter what is certified while it runs — certifying alone
+    cannot go green. The order is: certify → restart the listener (it loads
+    the just-certified identity; the restart stamps a fresh, bounded
+    continuity gap) → certify **again** (the second sweep reaches past the
+    gap's bound and clears it) → audit. Prefer setting the env genesis hash
+    before deploying so the single-certification order above applies
+    instead.
 - Do not promote, restart, or redeploy either stack during a live campaign.
+- **Every certification clears the listener's heartbeat** (`heartbeat_at` and
+  `validated_ledger_index` are reset to NULL), and `archive_is_usable` fails
+  closed while the heartbeat is absent. The running listener restamps it on
+  the next transaction it streams, so an audit run in the seconds after a
+  certification can fail on freshness alone. If the audit fails right after
+  certifying, wait for the listener to process a transaction (check the row:
+  `SELECT heartbeat_at FROM archive_state;`) and re-run the audit — do not
+  re-certify, which would only clear the heartbeat again.
 - Verify with the readiness audit immediately before starting a campaign; a
   green audit is the only proof the archive is currently usable.
 
@@ -73,6 +106,39 @@ Recovering from a continuity gap is exactly Step 0 again — re-run the
 certification. Never hand-edit `archive_state` to clear the gap flags; they
 are the only record that the archive was, at some point, not provably
 complete.
+
+### Repairing an archive stuck with an unbounded gap
+
+A gap clears only when a certification sweep provably reaches its upper
+extent, so a gap stored with **no bounds at all** cannot be cleared by
+re-certifying — the symptom is a certification run that reports success while
+the audit still says `archive provenance incomplete, mismatched, or stale`
+and `baseline_complete` stays `0`. Check with:
+
+```bash
+sqlite3 -readonly "$HISTORY_DB" \
+  "SELECT baseline_complete, continuity_gap_at, continuity_gap_after,
+          continuity_gap_before, continuity_gap_reason FROM archive_state;"
+```
+
+Versions before the fix for #337 could record that state after a listener
+disconnect that followed a certification. Re-record the gap once — the writer
+now backfills a bound from the row's own certified tip — then certify again:
+
+```bash
+cd /home/hamsa/LFG           # staging: /home/hamsa/LFG-staging
+.venv/bin/python - <<'PY'
+from lfg_core import history_store
+conn = history_store.init_history_db(history_store.history_db_path("mainnet"))
+history_store.invalidate_archive_continuity(
+    conn, network="mainnet", reason="rebound unbounded gap (#337)"
+)
+PY
+```
+
+This preserves the gap — it does not erase the record that continuity was
+lost — it only gives it the bound the sweep can be measured against. Confirm
+`continuity_gap_after` is now non-NULL, then re-run Step 0.
 
 ## Safety rules
 

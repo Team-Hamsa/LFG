@@ -169,9 +169,17 @@ def init_history_db(path: str) -> sqlite3.Connection:
     if source_tag_was_missing:
         # An old row has no durable record of which eligibility tag its external
         # audit covered. Preserve its evidence but require explicit recertification.
+        #
+        # The gap must carry a bound for that recertification to be POSSIBLE
+        # (see invalidate_archive_continuity): an unbounded gap can never be
+        # proven covered, so stamping one here would turn "recertify to
+        # continue" into "this archive can never be certified again" for every
+        # stack upgrading from the pre-source_tag schema.
         timestamp = int(time.time())
         conn.execute(
             "UPDATE archive_state SET baseline_complete = 0, continuity_gap_at = ?, "
+            "continuity_gap_after = COALESCE("
+            "  continuity_gap_after, validated_ledger_index, baseline_ledger_max), "
             "continuity_gap_reason = ?, updated_at = ?",
             (timestamp, "archive predates SourceTag provenance", timestamp),
         )
@@ -501,7 +509,25 @@ def invalidate_archive_continuity(
         UPDATE archive_state
         SET baseline_complete = 0,
             continuity_gap_at = COALESCE(continuity_gap_at, ?),
-            continuity_gap_after = COALESCE(continuity_gap_after, ?),
+            -- An unbounded gap is UNCLEARABLE: record_archive_baseline only
+            -- clears a gap whose upper extent the certified sweep provably
+            -- reached, and COALESCE(before, after) IS NULL fails that test on
+            -- every future certification. So a gap reported with no bounds
+            -- would fail closed forever, with no recovery short of hand-
+            -- editing this table.
+            --
+            -- Callers legitimately have nothing to report: the listener
+            -- derives its bound from validated_ledger_index, which
+            -- record_archive_baseline sets to NULL, so any disconnect before
+            -- the next validated-ledger write passes None. Fall back to the
+            -- row's own knowledge instead of storing NULL — the certified
+            -- tip is proven-covered ground, so a later sweep past it is
+            -- honest proof the gap is covered. Only an archive with no
+            -- certified baseline at all can still land unbounded, and that
+            -- one already fails closed for want of a baseline.
+            continuity_gap_after = COALESCE(
+                continuity_gap_after, ?, validated_ledger_index, baseline_ledger_max
+            ),
             continuity_gap_before = COALESCE(continuity_gap_before, ?),
             continuity_gap_reason = COALESCE(continuity_gap_reason, ?),
             updated_at = ?
