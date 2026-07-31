@@ -70,16 +70,26 @@ cut off in. Any listener restart — a deploy, a `pm2 restart`, a websocket
 error — therefore stamps `continuity_gap_*` and clears `baseline_complete`,
 and admission fails closed until Step 0 is re-run. Consequences for planning:
 
-- Certify **after** the deploy that will serve the campaign, not before —
-  and **after the listener is back up**, in that order. The listener reads
-  the certified archive identity **once at startup** and latches it for the
-  process lifetime: a listener started against an uncertified archive logs
-  `no certified archive genesis identity; SourceTag eligibility archiving is
-  DISABLED` and never stamps a heartbeat, so the audit's archive and
-  freshness checks fail no matter how long it runs. Certifying first and
-  restarting the listener afterwards does not work either — the restart
-  stamps a fresh gap that clears `baseline_complete` again. The working
-  order is: deploy → let the listener subscribe → certify → audit.
+- Certify **after** the deploy that will serve the campaign, not before.
+  The listener reads the archive genesis identity **once at startup** — from
+  `SPONSORED_MINT_MAINNET_GENESIS_HASH` / `SPONSORED_MINT_TESTNET_GENESIS_HASH`
+  in the stack's `.env`, else from a previously certified `archive_state`
+  row — and latches it for the process lifetime; it only stamps heartbeats
+  once it has one. Which order works depends on whether an identity exists
+  at listener startup:
+  - **Identity available at startup** (env hash set, or the archive was
+    certified before): deploy → let the listener subscribe → certify →
+    audit. No restart needed.
+  - **No identity at startup** (env hash unset AND the archive has never
+    been certified): the listener logs `no certified archive genesis
+    identity; SourceTag eligibility archiving is DISABLED` and will never
+    heartbeat, no matter what is certified while it runs — certifying alone
+    cannot go green. The order is: certify → restart the listener (it loads
+    the just-certified identity; the restart stamps a fresh, bounded
+    continuity gap) → certify **again** (the second sweep reaches past the
+    gap's bound and clears it) → audit. Prefer setting the env genesis hash
+    before deploying so the single-certification order above applies
+    instead.
 - Do not promote, restart, or redeploy either stack during a live campaign.
 - Verify with the readiness audit immediately before starting a campaign; a
   green audit is the only proof the archive is currently usable.
