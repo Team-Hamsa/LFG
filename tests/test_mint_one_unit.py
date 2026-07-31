@@ -138,6 +138,43 @@ def test_mint_one_unit_happy_path(monkeypatch, _mint_mocks):
     assert _mint_mocks["accept_kwargs"]["account"] == "rUSER"
 
 
+@pytest.mark.parametrize("legacy_caller", ["paid", "bulk"])
+def test_paid_and_bulk_paths_keep_exact_legacy_mint_signature(
+    monkeypatch, _mint_mocks, legacy_caller
+):
+    seen = {}
+
+    async def strict_mint_nft(*, metadata_cdn_url, taxon, issuer, platform):
+        seen.update(
+            metadata_cdn_url=metadata_cdn_url,
+            taxon=taxon,
+            issuer=issuer,
+            platform=platform,
+        )
+        return "NFTID1"
+
+    async def bulk_record(_nft_number, _nft_id, _image_url):
+        return None
+
+    monkeypatch.setattr(mint_flow.xrpl_ops, "mint_nft", strict_mint_nft)
+    res = _run(
+        mint_flow.mint_one_unit(
+            discord_id="u1",
+            wallet_address="rUSER",
+            platform="discord",
+            push_user_token=None,
+            return_url=None,
+            nft_number=4008,
+            session_tag=f"{legacy_caller}:0",
+            on_mint=bulk_record if legacy_caller == "bulk" else None,
+        )
+    )
+
+    assert res.error is None
+    assert res.nft_id == "NFTID1"
+    assert seen["issuer"] == mint_flow.config.SWAP_ISSUER_ADDRESS
+
+
 def test_mint_one_unit_offer_fail_reports_nft_id(monkeypatch, _mint_mocks):
     monkeypatch.setattr(mint_flow.xrpl_ops, "create_nft_offer", _async_return(None))
     res = _run(
@@ -302,6 +339,35 @@ def test_mint_one_unit_calls_on_mint_before_creating_offer_state(monkeypatch, _m
     # on_mint must fire before the CREATING_OFFER state -- i.e. the unit is
     # persisted as MINTED before any offer/XUMM steps run.
     assert order == [mint_flow.MINTING, "on_mint", mint_flow.CREATING_OFFER]
+
+
+def test_mint_one_unit_detailed_callback_receives_validated_mint_hash(monkeypatch, _mint_mocks):
+    observed = []
+
+    async def fake_mint_nft(**kwargs):
+        assert kwargs["return_details"] is True
+        return mint_flow.xrpl_ops.MintNFTResult(nft_id="NFTID1", tx_hash="MINTTX1")
+
+    async def on_mint_confirmed(nft_number, nft_id, mint_tx_hash, image_url):
+        observed.append((nft_number, nft_id, mint_tx_hash, image_url))
+
+    monkeypatch.setattr(mint_flow.xrpl_ops, "mint_nft", fake_mint_nft)
+    res = _run(
+        mint_flow.mint_one_unit(
+            discord_id="u1",
+            wallet_address="rUSER",
+            platform="discord",
+            push_user_token=None,
+            return_url=None,
+            nft_number=4007,
+            session_tag="job1:7",
+            on_mint_confirmed=on_mint_confirmed,
+        )
+    )
+
+    assert res.error is None
+    assert res.mint_tx_hash == "MINTTX1"
+    assert observed == [(4007, "NFTID1", "MINTTX1", res.image_url)]
 
 
 def test_mint_one_unit_video_carries_video_url(monkeypatch, _mint_mocks):

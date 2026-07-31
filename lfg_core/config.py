@@ -336,6 +336,24 @@ RARITY_BOOST_STEP_HOURS = int(os.getenv("RARITY_BOOST_STEP_HOURS", "24"))
 # source tag or its volume does not count toward the hackathon.
 SOURCE_TAG = int(os.getenv("SOURCE_TAG", "2606160021"))
 
+# SourceTag-sponsored free mint campaign. Duration and cap are persisted on
+# each activation; the explicit wallet list supplements the signing/issuer
+# accounts that the store always excludes.
+SPONSORED_MINT_DURATION_SECONDS = 3600
+SPONSORED_MINT_CAP = 100
+SPONSORED_MINT_ARCHIVE_MAX_LAG_SECONDS = int(
+    os.getenv("SPONSORED_MINT_ARCHIVE_MAX_LAG_SECONDS", "900")
+)
+SPONSORED_MINT_ARCHIVE_GENESIS_HASHES = {
+    "mainnet": os.getenv("SPONSORED_MINT_MAINNET_GENESIS_HASH", "").strip(),
+    "testnet": os.getenv("SPONSORED_MINT_TESTNET_GENESIS_HASH", "").strip(),
+}
+SPONSORED_MINT_EXCLUDED_WALLETS = tuple(
+    value.strip()
+    for value in os.getenv("SPONSORED_MINT_EXCLUDED_WALLETS", "").split(",")
+    if value.strip()
+)
+
 # Dress-up trait economy (Phase 2). Economy characters are minted burnable so
 # the issuer can harvest (burn) them; the per-user Closet is a soulbound
 # (non-transferable) mutable NFToken the issuer updates in place.

@@ -141,3 +141,37 @@ def test_mint_already_in_progress(mint_mod):
     _run(mint_mod.handle_mint(svc, ix))
     embed = ix.followup.send.await_args.kwargs["embed"]
     assert "in progress" in embed.description.lower()
+
+
+def test_sponsored_session_skips_the_payment_qr_and_still_delivers_the_offer(mint_mod):
+    """Regression: sponsored admission happens in the shared service handler, so
+    ANY surface can be admitted — but only the Activity client had a sponsored
+    branch. A sponsored session carries payment_link=None; qr_png(None) raises
+    TypeError, which is not a ServiceError and so escaped the handler's except.
+    The service kept minting in the background, so the user's one free mint was
+    consumed and 1 LFGO burned while this surface died before ever showing the
+    accept QR."""
+    svc, ix = _svc(), _ix()
+    svc.start_mint = AsyncMock(
+        return_value={
+            "id": "sid",
+            "payment_link": None,
+            "state": "awaiting_payment",
+            "sponsored": True,
+            "pay_with": "SPONSORED",
+            "pay_amount": "0",
+        }
+    )
+
+    _run(mint_mod.handle_mint(svc, ix))
+
+    # No payment QR was requested for the (nonexistent) payment link...
+    assert svc.qr_png.await_args_list == []
+    # ...and the flow still ran to the offer step.
+    svc.wait_for_mint.assert_awaited_once_with("7", "sid")
+    assert ix.followup.send.await_count == 2
+    first = ix.followup.send.await_args_list[0].kwargs["embed"]
+    assert "Sponsored" in first.title
+    assert "No XRP or LFGO" in first.description
+    # Honesty: the accept is still an on-ledger tx the user signs.
+    assert "reserve" in first.description.lower()

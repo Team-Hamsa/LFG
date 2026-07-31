@@ -8,6 +8,7 @@
 # (same harness as tests/test_market_pure_js.py).
 #
 # No lfg_core import at module top -> no env-guard preamble needed.
+import hashlib
 import json
 import os
 import shutil
@@ -446,3 +447,78 @@ def test_app_js_bulk_payview_hides_regen():
     body = src.split("function bulkPayView", 1)[1].split("\n}\n", 1)[0]
     assert "qtyStepper: true" in body
     assert "regen: true" not in body
+
+
+# Sponsored mints never collect XRP/LFGO, but their offer still needs a Xaman
+# acceptance signature after it has been created.
+
+
+def test_sponsored_mint_copy_is_free_and_requires_xaman_acceptance():
+    assert run_js("M.sponsoredMintCopy({sponsored: true, pay_with: 'XRP', pay_amount: '99'})") == {
+        "title": "Sponsored mint",
+        "body": "No XRP or LFGO purchase price. We’ll mint your NFT, then you’ll accept it in Xaman. Normal XRPL network fees and account reserve requirements may still apply.",
+        "action": "Mint my free NFT",
+    }
+
+
+def test_offer_ready_copy_discloses_normal_xrpl_fee_and_reserve_behavior():
+    src = open(APP_JS).read()
+    offer_ready = src.split("if (s.state === 'offer_ready')", 1)[1].split(
+        "if (s.state === 'payment_timeout')", 1
+    )[0]
+    assert (
+        "Normal XRPL network fees and account reserve requirements may still apply." in offer_ready
+    )
+
+
+def test_unsponsored_mint_has_no_sponsored_copy():
+    assert (
+        run_js("M.sponsoredMintCopy({sponsored: false, pay_with: 'LFGO', pay_amount: '1'})") is None
+    )
+
+
+def _function_source(src, name):
+    return src.split(f"function {name}", 1)[1].split("\n}\n", 1)[0]
+
+
+def test_app_js_sponsored_view_has_no_payment_controls():
+    src = open(APP_JS).read()
+    body = _function_source(src, "sponsoredMintView")
+    assert "sponsoredMintCopy(s)" in body
+    assert "qrData" not in body
+    assert "spinner" not in body
+    assert "regen" not in body
+    assert "payment_timeout" not in body
+
+
+def test_app_js_sponsored_poll_bypasses_payment_and_timeout_copy():
+    src = open(APP_JS).read()
+    body = _function_source(src, "pollMint")
+    sponsored_idx = body.index("const sponsored = sponsoredMintView(s)")
+    timeout_idx = body.index("if (s.state === 'payment_timeout')")
+    paid_timeout_idx = body.index("Payment timed out")
+    payment_view_idx = body.index("mintPayView(s)")
+    assert sponsored_idx < timeout_idx < paid_timeout_idx
+    assert sponsored_idx < payment_view_idx
+    assert "showFlow({ ...sponsored, done: true })" in body
+    assert "const text = sponsored" in body
+    assert "stageText.replace(\"Payment's in. \", '')" in body
+
+
+def test_app_js_sponsored_view_is_used_at_start_and_polling():
+    src = open(APP_JS).read()
+    start = _function_source(src, "startMint")
+    poll = _function_source(src, "pollMint")
+    resume = _function_source(src, "resumeMint")
+    assert "showFlow(mintStartView(s))" in start
+    assert "showFlow(sponsored || mintPayView(s))" in poll
+    assert "showFlow(sponsoredMintView(active.session) || {" in resume
+
+
+def test_paid_lfgo_xrp_view_snapshot_is_unchanged():
+    src = open(APP_JS).read()
+    body = _function_source(src, "mintPayView")
+    assert (
+        hashlib.sha256(body.encode()).hexdigest()
+        == "ff16aa4846dd6f2f7e7c8a7da1f7f150c1e65c3e1339510a45baac2d4ac732a6"
+    )

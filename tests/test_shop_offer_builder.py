@@ -40,6 +40,16 @@ class _Resp:
 def _patch_client(monkeypatch, captured):
     """Capture the tx model passed to submit_and_wait; stub Tx status checks."""
 
+    async def fake_confirm(tx, wallet, client, label, **kwargs):
+        captured["tx"] = tx
+        return {
+            "hash": "HASH",
+            "meta": {
+                "TransactionResult": "tesSUCCESS",
+                "offer_id": "OFFERID",
+            },
+        }
+
     def fake_submit(tx, client, wallet, **kwargs):
         captured["tx"] = tx
         return _Resp(
@@ -62,6 +72,7 @@ def _patch_client(monkeypatch, captured):
             }
         )
 
+    monkeypatch.setattr(xrpl_ops, "_submit_and_confirm", fake_confirm)
     monkeypatch.setattr(xrpl_ops, "submit_and_wait", fake_submit)
     monkeypatch.setattr(xrpl_ops.JsonRpcClient, "request", fake_request)
 

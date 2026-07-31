@@ -25,6 +25,7 @@ from lfg_core import (
     layer_store,
     memos,
     rarity,
+    sponsored_mint,
     swap_compose,
     swap_meta,
     traits,
@@ -64,11 +65,16 @@ class MintSession:
         return_url: dict[str, str] | None = None,
         platform: str = "discord",
         push_user_token: str | None = None,
+        sponsored: bool = False,
     ) -> None:
         self.id = uuid.uuid4().hex
         self.discord_id = discord_id
         self.platform = platform
         self.wallet_address = wallet_address
+        self.sponsored = sponsored
+        self.sponsorship_reason = "source_tag_newcomer" if sponsored else None
+        self.claim_wallet = wallet_address if sponsored else None
+        self.sponsored_claim_id: str | None = None
         self.return_url = return_url  # XUMM return_url back into Discord
         # #135: stored XUMM push token for this user, if any. Threaded into
         # every sign request this session builds so a returning user gets a
@@ -77,8 +83,8 @@ class MintSession:
         self.created_at = time.time()
         self.state = AWAITING_PAYMENT
         self.error: str | None = None
-        self.pay_with: str | None = None  # "LFGO" or "XRP", set by prepare_payment
-        self.pay_amount: str | None = None
+        self.pay_with: str | None = "SPONSORED" if sponsored else None
+        self.pay_amount: str | None = "0" if sponsored else None
         self.payment_link: str | None = None
         self.payment_uuid: str | None = None  # XUMM payload uuid for scan tracking
         # Whether the payment payload itself was signed in Xaman. Polling of
@@ -121,6 +127,10 @@ class MintSession:
         # no-op while False, so sessions created outside the service (tests,
         # tooling) never touch the reservation store.
         self.headroom_reserved = False
+        # Once a sponsored claim reaches minting, lack of an NFT ID means
+        # "submission outcome unknown", not "safe to release". This keeps
+        # both the claim and its cap reservation intact for recovery.
+        self.sponsorship_irreversible = False
         # Terminal-event publish guard, read/set by lfg_service.app when it
         # publishes mint.completed/mint.failed to the event firehose.
         self._published = False
@@ -129,6 +139,8 @@ class MintSession:
         """Destination/amount for this session's payment path. LFGO goes to
         the issuer (= burned on arrival); XRP goes to the bot wallet, which
         buys and burns the LFGO off the DEX after payment."""
+        if self.sponsored:
+            raise RuntimeError("sponsored sessions do not have payment parameters")
         if self.pay_with == "XRP":
             return {
                 "destination": xrpl_ops.bot_wallet_address(),
@@ -152,6 +164,8 @@ class MintSession:
         stays None — both callers (handle_mint_start and run_mint_session)
         gate on it and fail the session terminally rather than entering the
         payment wait with only the unparseable static detect link (#262)."""
+        if self.sponsored:
+            raise RuntimeError("sponsored sessions do not prepare payment")
         balance = await xrpl_ops.get_trustline_balance(
             self.wallet_address, config.TOKEN_CURRENCY_HEX, config.TOKEN_ISSUER_ADDRESS
         )
@@ -184,6 +198,8 @@ class MintSession:
     async def regenerate_payment(self) -> None:
         """Replace an expired/missed payment QR with a fresh XUMM payload
         without restarting the whole session (issue #22)."""
+        if self.sponsored:
+            raise RuntimeError("sponsored sessions do not regenerate payment")
         self.qr_scanned = False
         self.payment_uuid = None
         self.payment_push = None
@@ -210,6 +226,7 @@ class MintSession:
             # CancelledError is a BaseException, so run_mint_session's
             # `except Exception` cannot catch it and overwrite CANCELLED.
             self.task.cancel()
+        release_sponsored_reservation(self, "session_cancelled")
         # #226: give the headroom reservation back right here — a task
         # cancelled before it ever started running skips run_mint_session's
         # finally, so the cancel path must settle directly. Idempotent: the
@@ -227,6 +244,8 @@ class MintSession:
         """If prepare_payment was cancelled or failed, default to the XRP
         path (any wallet can pay XRP; a trustline-less wallet could never
         complete an LFGO payment) with the static detect link."""
+        if self.sponsored:
+            return
         if self.pay_with is None:
             self.pay_with, self.pay_amount = "XRP", config.MINT_PRICE_XRP
         if not self.payment_link:
@@ -241,6 +260,8 @@ class MintSession:
             "platform": self.platform,
             "state": self.state,
             "error": self.error,
+            "sponsored": self.sponsored,
+            "sponsorship_reason": self.sponsorship_reason,
             "pay_with": self.pay_with,
             "pay_amount": self.pay_amount,
             "payment_link": self.payment_link,
@@ -301,6 +322,8 @@ def settle_headroom(session: MintSession) -> None:
     claimant = f"mint:{session.id}"
     if session.nft_id:
         ok = headroom.retire_to_pending(db, claimant, session.nft_id)
+    elif getattr(session, "sponsorship_irreversible", False):
+        return
     else:
         ok = headroom.release(db, claimant)
     if ok:
@@ -310,6 +333,37 @@ def settle_headroom(session: MintSession) -> None:
             f"mint session {session.id}: headroom settle FAILED "
             f"(nft_id={session.nft_id}) — flag retained for retry"
         )
+
+
+def release_sponsored_reservation(session: MintSession, reason: str) -> bool:
+    """Release only a still-reversible sponsored reservation.
+
+    The store refuses to release `minting` and consumed claims. The in-memory
+    NFT guard provides the same fail-safe before touching it, so a failure
+    after confirmation can never make the wallet eligible for another free
+    mint.
+    """
+    if (
+        not getattr(session, "sponsored", False)
+        or getattr(session, "sponsorship_irreversible", False)
+        or session.nft_id is not None
+        or not session.claim_wallet
+    ):
+        return False
+    try:
+        return sponsored_mint.release_reservation(
+            db_path.app_db_path(config.XRPL_NETWORK),
+            network=config.XRPL_NETWORK,
+            wallet=session.claim_wallet,
+            session_id=session.id,
+            reason=reason,
+        )
+    except Exception:
+        logging.error(
+            f"Mint session {session.id}: sponsored reservation release failed: "
+            f"{traceback.format_exc()}"
+        )
+        return False
 
 
 def _save_recovery_record(record: dict[str, Any]) -> None:
@@ -347,6 +401,258 @@ class UnitResult:
     # earlier return statements, tests) stays valid unchanged.
     traits: dict[str, str] | None = None
     body_type: str | None = None
+    # Opt-in validated transaction hash used by sponsored-claim durability.
+    # Defaulted so existing bulk/tests constructing UnitResult stay compatible.
+    mint_tx_hash: str | None = None
+    # True only for an explicit validated non-success result. Indeterminate
+    # submission errors must never set this or restore/release the promise.
+    mint_definitively_failed: bool = False
+
+
+async def _resume_prepared_mint_one_unit(
+    *,
+    claim: sponsored_mint.Claim,
+    discord_id: str,
+    wallet_address: str,
+    platform: str,
+    push_user_token: str | None,
+    return_url: dict[str, str] | None,
+    on_state: Callable[[str], None] | None,
+    on_mint_forwarded: Callable[[str], Awaitable[None]] | None,
+    on_mint_confirmed: Callable[[int, str, str, str | None], Awaitable[None]] | None,
+    on_offer_created: Callable[[str | None, str | None], Awaitable[None]] | None,
+) -> UnitResult:
+    """Resume an uploaded/signed reversible promise without composing or signing again."""
+
+    nft_id: str | None = None
+    tx_hash = claim.mint_signed_tx_hash
+    nft_number = claim.mint_nft_number
+    metadata_url = claim.mint_metadata_url
+    body: str | None = claim.mint_body_type
+    # Hoisted like mint_one_unit's (#41 fix-wave): once the mint is confirmed
+    # these are known, and an exception in a LATER step (offer, accept payload)
+    # must still return them. The except block below used to reset traits_dict
+    # to None and re-derive image/video from raw JSON, so a failure after
+    # on_mint_confirmed returned a populated nft_id with no traits — losing
+    # exactly the data the session and the X-poster consume.
+    image_url: str | None = None
+    video_url: str | None = None
+    traits_dict: dict[str, str] | None = None
+    try:
+        if (
+            claim.status != "reserved"
+            or not tx_hash
+            or not claim.mint_signed_tx_blob
+            or not claim.mint_signed_ledger_floor
+            or not nft_number
+            or not metadata_url
+            or not claim.mint_metadata_json
+            or not claim.mint_body_type
+            or on_mint_forwarded is None
+            or on_mint_confirmed is None
+            or on_offer_created is None
+        ):
+            raise RuntimeError("prepared sponsored claim is incomplete")
+        metadata = json.loads(claim.mint_metadata_json)
+        if not isinstance(metadata, dict) or not isinstance(metadata.get("attributes"), list):
+            raise RuntimeError("prepared sponsored metadata is invalid")
+        image_url = metadata.get("image")
+        video_url = metadata.get("video")
+        if not isinstance(image_url, str) or not image_url:
+            raise RuntimeError("prepared sponsored metadata has no image URL")
+        if video_url is not None and not isinstance(video_url, str):
+            raise RuntimeError("prepared sponsored metadata has an invalid video URL")
+        # `body` is declared str | None for the except block's benefit. The
+        # guard above proved claim.mint_body_type non-empty, but mypy cannot
+        # carry that through the compound condition — re-test the local so the
+        # rarity call below gets a genuinely narrowed str rather than a bare
+        # assert papering over it.
+        body = claim.mint_body_type
+        if not body:
+            raise RuntimeError("prepared sponsored claim is incomplete")
+        traits_dict = {
+            str(attr["trait_type"]): str(attr["value"])
+            for attr in metadata["attributes"]
+            if isinstance(attr, dict) and "trait_type" in attr and "value" in attr
+        }
+        if "Head" in traits_dict:
+            traits_dict["Hat"] = traits_dict.pop("Head")
+
+        _reserved_numbers.add(nft_number)
+        if on_state:
+            on_state(MINTING)
+        await on_mint_forwarded(tx_hash)
+        submission = await xrpl_ops.submit_sponsored_mint(
+            signed_tx_blob=claim.mint_signed_tx_blob,
+            signed_tx_hash=tx_hash,
+        )
+        if submission.state == "failed":
+            return UnitResult(
+                nft_number,
+                None,
+                image_url,
+                None,
+                None,
+                submission.error or "Sponsored XRPL mint failed validation.",
+                video_url=video_url,
+                traits=traits_dict,
+                body_type=body,
+                mint_tx_hash=tx_hash,
+                mint_definitively_failed=True,
+            )
+        if submission.state != "validated" or not submission.nft_id:
+            raise xrpl_ops.IndeterminateResultError(
+                submission.error or "sponsored mint outcome is indeterminate"
+            )
+        nft_id = submission.nft_id
+        # Mirror mint_one_unit: publish the new edition's art to the local
+        # archive so /api/img serves it immediately (best-effort, #163).
+        # The staging token is the session id that COMPOSED the still. That is
+        # claim.session_id for an in-process resume, which is the common case.
+        # After a restart the claim has been rebound to a fresh session id and
+        # the original token is not persisted, so the staged file cannot be
+        # matched — promote_still then returns False and the edition serves
+        # from the CDN, exactly as it did before the archive tier existed.
+        # Degradation only; never a failed mint.
+        image_archive.promote_still(config.XRPL_NETWORK, nft_number, claim.session_id)
+        await on_mint_confirmed(nft_number, nft_id, tx_hash, image_url)
+
+        record: dict[str, Any] = {
+            "nft_number": nft_number,
+            "nft_id": nft_id,
+            "discord_id": discord_id,
+            "owner_address": wallet_address,
+            "metadata_url": metadata_url,
+            "image_url": image_url,
+            "traits": traits_dict,
+            "network": config.XRPL_NETWORK,
+            "body_type": body,
+        }
+        try:
+            saved = await asyncio.to_thread(lambda: record_nft_mint(**record))
+        except Exception:
+            logging.error(f"record_nft_mint raised: {traceback.format_exc()}")
+            saved = False
+        if saved:
+            _reserved_numbers.discard(nft_number)
+
+            # Mirror mint_one_unit's saved branch. Omitting this left every
+            # RESUMED sponsored edition out of rarity accounting entirely —
+            # its traits never started a boost clock and shares were never
+            # recalculated, so the odds engine silently diverged from the
+            # minted set by exactly the editions that needed recovery.
+            # Bind a non-optional local for the closure: `body` is narrowed to
+            # str by the guard above, but capturing it widens it back to its
+            # declared str | None (the except block reassigns it).
+            rarity_body: str = body
+
+            def _update_rarity() -> None:
+                conn = rarity.connect()
+                try:
+                    for attr in metadata["attributes"]:
+                        rarity.start_boost_clock(
+                            conn, rarity_body, attr["trait_type"], attr["value"]
+                        )
+                    rarity.start_boost_clock(
+                        conn, rarity.BODY_SENTINEL, rarity.BODY_CATEGORY, rarity_body
+                    )
+                    rarity.recalculate_rarity(conn)
+                finally:
+                    conn.close()
+
+            try:
+                await asyncio.to_thread(_update_rarity)
+            except Exception:
+                logging.error(f"rarity update failed: {traceback.format_exc()}")
+        else:
+            _save_recovery_record(record)
+
+        if on_state:
+            on_state(CREATING_OFFER)
+        offer_id = await xrpl_ops.create_nft_offer(
+            nft_id, wallet_address, platform=memos.platform_for_surface(platform)
+        )
+        if not offer_id:
+            error = (
+                f"NFT minted (ID: {nft_id}) but offer creation failed. "
+                "Please contact an administrator."
+            )
+            await on_offer_created(None, error)
+            return UnitResult(
+                nft_number,
+                nft_id,
+                image_url,
+                None,
+                None,
+                error,
+                video_url=video_url,
+                traits=traits_dict,
+                body_type=body,
+                mint_tx_hash=tx_hash,
+            )
+        await on_offer_created(offer_id, None)
+        accept = await xumm_ops.create_accept_offer_payload(
+            offer_id,
+            return_url=return_url,
+            user_token=push_user_token,
+            platform=memos.platform_for_surface(platform),
+            account=wallet_address,
+        )
+        if not accept:
+            return UnitResult(
+                nft_number,
+                nft_id,
+                image_url,
+                offer_id,
+                None,
+                f"NFT minted and offer created ({offer_id}) but the XUMM request failed. "
+                "Please accept the offer manually.",
+                video_url=video_url,
+                traits=traits_dict,
+                body_type=body,
+                mint_tx_hash=tx_hash,
+            )
+        return UnitResult(
+            nft_number,
+            nft_id,
+            image_url,
+            offer_id,
+            accept,
+            None,
+            video_url=video_url,
+            traits=traits_dict,
+            body_type=body,
+            mint_tx_hash=tx_hash,
+        )
+    except Exception as exc:
+        logging.error(
+            "resume_prepared_mint_one_unit(%s) failed: %s",
+            nft_number,
+            traceback.format_exc(),
+        )
+        body = claim.mint_body_type
+        # Only fill in what the try block never got far enough to compute.
+        # Anything already derived above (traits especially) is preserved.
+        if image_url is None and claim.mint_metadata_json:
+            try:
+                metadata = json.loads(claim.mint_metadata_json)
+                if isinstance(metadata, dict):
+                    image_url = metadata.get("image")
+                    video_url = metadata.get("video")
+            except (TypeError, ValueError):
+                pass
+        return UnitResult(
+            nft_number,
+            nft_id,
+            image_url,
+            None,
+            None,
+            str(exc),
+            video_url=video_url,
+            traits=traits_dict,
+            body_type=body,
+            mint_tx_hash=tx_hash,
+        )
 
 
 async def mint_one_unit(
@@ -360,6 +666,13 @@ async def mint_one_unit(
     session_tag: str,
     on_state: Callable[[str], None] | None = None,
     on_mint: Callable[[int, str, str | None], Awaitable[None]] | None = None,
+    on_mint_confirmed: Callable[[int, str, str, str | None], Awaitable[None]] | None = None,
+    on_mint_prepared: Callable[[int, str, str, str, xrpl_ops.MintPreparation], Awaitable[None]]
+    | None = None,
+    on_mint_forwarded: Callable[[str], Awaitable[None]] | None = None,
+    on_offer_created: Callable[[str | None, str | None], Awaitable[None]] | None = None,
+    sponsored_claim_id: str | None = None,
+    resume_prepared: sponsored_mint.Claim | None = None,
 ) -> UnitResult:
     """Compose -> upload -> mint -> record (+ rarity) -> offer -> XUMM accept
     payload for a single edition, on a pre-allocated `nft_number`. Extracted
@@ -378,11 +691,30 @@ async def mint_one_unit(
     confirmed on-chain (nft_number, nft_id, image_url), before the offer/XUMM
     steps run. A bulk caller uses it to durably persist MINTED immediately so
     a crash in the offer step can never trigger a re-mint on resume.
+
+    `on_mint_confirmed` is the detailed twin for callers that also require the
+    validated mint transaction hash. It fires before `on_mint` and before any
+    offer work.
     """
     nft_id: str | None = None
+    mint_tx_hash: str | None = None
     # Hoisted with None defaults so the catch-all below can return whatever
     # was already computed at the point of failure (#41 fix-wave, CodeRabbit
     # PR #245): an exception from on_mint/offer-creation/payload-creation
+    if resume_prepared is not None:
+        return await _resume_prepared_mint_one_unit(
+            claim=resume_prepared,
+            discord_id=discord_id,
+            wallet_address=wallet_address,
+            platform=platform,
+            push_user_token=push_user_token,
+            return_url=return_url,
+            on_state=on_state,
+            on_mint_forwarded=on_mint_forwarded,
+            on_mint_confirmed=on_mint_confirmed,
+            on_offer_created=on_offer_created,
+        )
+
     # after a confirmed mint must not blank out traits/body_type that are
     # already known.
     traits_dict: dict[str, str] | None = None
@@ -442,12 +774,100 @@ async def mint_one_unit(
         # path uses) — NOT the LFGO token issuer. On mainnet those differ, and
         # passing the token issuer makes mint_nft add an Issuer field = an
         # unauthorized mint-on-behalf, tecNO_PERMISSION on every attempt.
-        nft_id = await xrpl_ops.mint_nft(
-            metadata_cdn_url=metadata_cdn_url,
-            taxon=config.NFT_TAXON,
-            issuer=config.SWAP_ISSUER_ADDRESS,
-            platform=memos.platform_for_surface(platform),
-        )
+        mint_result: xrpl_ops.MintNFTResult | str | None
+        if on_mint_prepared is not None:
+            if on_mint_forwarded is None or not sponsored_claim_id:
+                raise RuntimeError("sponsored prepared-mint callbacks and claim id are required")
+            async with xrpl_ops.submission_coordinator(config.SIGNING_ACCOUNT):
+                preparation = await xrpl_ops.prepare_sponsored_mint(
+                    metadata_cdn_url=metadata_cdn_url,
+                    taxon=config.NFT_TAXON,
+                    issuer=config.SWAP_ISSUER_ADDRESS,
+                    platform=memos.platform_for_surface(platform),
+                    campaign=sponsored_claim_id,
+                    coordinator_held=True,
+                )
+                if (
+                    preparation.state != "prepared"
+                    or not preparation.tx_hash
+                    or not preparation.tx_blob
+                    or not preparation.signed_ledger_floor
+                ):
+                    image_archive.discard_still(config.XRPL_NETWORK, nft_number, session_tag)
+                    _reserved_numbers.discard(nft_number)
+                    return UnitResult(
+                        nft_number=nft_number,
+                        nft_id=None,
+                        image_url=image_cdn_url,
+                        video_url=video_cdn_url,
+                        offer_id=None,
+                        accept=None,
+                        error=preparation.error or "Failed to prepare sponsored XRPL mint.",
+                    )
+                await on_mint_prepared(
+                    nft_number,
+                    metadata_cdn_url,
+                    json.dumps(metadata, sort_keys=True),
+                    body,
+                    preparation,
+                )
+                prepared_tx_hash = preparation.tx_hash
+                await on_mint_forwarded(prepared_tx_hash)
+                submission = await xrpl_ops.submit_sponsored_mint(
+                    signed_tx_blob=preparation.tx_blob,
+                    signed_tx_hash=prepared_tx_hash,
+                    coordinator_held=True,
+                )
+            if submission.tx_hash not in (None, prepared_tx_hash):
+                raise xrpl_ops.IndeterminateResultError(
+                    "sponsored mint response did not match the prepared transaction hash"
+                )
+            mint_tx_hash = prepared_tx_hash
+            if submission.state == "validated" and submission.nft_id:
+                nft_id = submission.nft_id
+            elif submission.state == "failed":
+                return UnitResult(
+                    nft_number=nft_number,
+                    nft_id=None,
+                    image_url=image_cdn_url,
+                    video_url=video_cdn_url,
+                    offer_id=None,
+                    accept=None,
+                    error=submission.error or "Sponsored XRPL mint failed validation.",
+                    mint_tx_hash=mint_tx_hash,
+                    mint_definitively_failed=True,
+                )
+            else:
+                raise xrpl_ops.IndeterminateResultError(
+                    submission.error or "sponsored mint outcome is indeterminate"
+                )
+            mint_result = xrpl_ops.MintNFTResult(nft_id=nft_id, tx_hash=mint_tx_hash)
+        elif on_mint_confirmed is not None:
+            mint_result = await xrpl_ops.mint_nft(
+                metadata_cdn_url=metadata_cdn_url,
+                taxon=config.NFT_TAXON,
+                issuer=config.SWAP_ISSUER_ADDRESS,
+                platform=memos.platform_for_surface(platform),
+                return_details=True,
+            )
+        else:
+            # Preserve the exact legacy call contract for paid single mints
+            # and bulk fulfillment (including strict plugin/test doubles).
+            mint_result = await xrpl_ops.mint_nft(
+                metadata_cdn_url=metadata_cdn_url,
+                taxon=config.NFT_TAXON,
+                issuer=config.SWAP_ISSUER_ADDRESS,
+                platform=memos.platform_for_surface(platform),
+            )
+        if isinstance(mint_result, xrpl_ops.MintNFTResult):
+            nft_id = mint_result.nft_id
+            mint_tx_hash = mint_result.tx_hash
+        else:
+            # Backward-compatible test/plugin fakes may still return the
+            # legacy string contract. Ordinary callers use mint_nft's default
+            # string result; this detailed path is production-strict only when
+            # on_mint_confirmed is requested below.
+            nft_id = mint_result
         if not nft_id:
             image_archive.discard_still(config.XRPL_NETWORK, nft_number, session_tag)
             _reserved_numbers.discard(nft_number)
@@ -480,6 +900,12 @@ async def mint_one_unit(
         # the offer step can never cause a resume to re-mint a second edition
         # for the same unit (#215 double-mint window). Single mint passes
         # nothing -> no behavior change.
+        if on_mint_confirmed:
+            if not mint_tx_hash:
+                raise RuntimeError(
+                    "NFT mint confirmed but validated transaction hash is unavailable"
+                )
+            await on_mint_confirmed(nft_number, nft_id, mint_tx_hash, image_cdn_url)
         if on_mint:
             await on_mint(nft_number, nft_id, image_cdn_url)
 
@@ -529,7 +955,12 @@ async def mint_one_unit(
         offer_id = await xrpl_ops.create_nft_offer(
             nft_id, wallet_address, platform=memos.platform_for_surface(platform)
         )
+        offer_error = (
+            f"NFT minted (ID: {nft_id}) but offer creation failed. Please contact an administrator."
+        )
         if not offer_id:
+            if on_offer_created is not None:
+                await on_offer_created(None, offer_error)
             return UnitResult(
                 nft_number=nft_number,
                 nft_id=nft_id,
@@ -537,13 +968,14 @@ async def mint_one_unit(
                 video_url=video_cdn_url,
                 offer_id=None,
                 accept=None,
-                error=(
-                    f"NFT minted (ID: {nft_id}) but offer creation failed. "
-                    "Please contact an administrator."
-                ),
+                error=offer_error,
                 traits=traits_dict,
                 body_type=body,
+                mint_tx_hash=mint_tx_hash,
             )
+        if on_offer_created is not None:
+            # Persist before an acceptance payload can be exposed or pushed.
+            await on_offer_created(offer_id, None)
 
         accept = await xumm_ops.create_accept_offer_payload(
             offer_id,
@@ -569,6 +1001,7 @@ async def mint_one_unit(
                 ),
                 traits=traits_dict,
                 body_type=body,
+                mint_tx_hash=mint_tx_hash,
             )
 
         return UnitResult(
@@ -581,6 +1014,7 @@ async def mint_one_unit(
             error=None,
             traits=traits_dict,
             body_type=body,
+            mint_tx_hash=mint_tx_hash,
         )
 
     except Exception as e:
@@ -599,6 +1033,7 @@ async def mint_one_unit(
             error=str(e),
             traits=traits_dict,
             body_type=body,
+            mint_tx_hash=mint_tx_hash,
         )
 
 
@@ -637,79 +1072,175 @@ def _capture_issued_token(session: MintSession, s: dict[str, Any]) -> None:
         session.push_user_token = s["user_token"]
 
 
-async def run_mint_session(session: MintSession) -> None:
+async def run_mint_session(
+    session: MintSession,
+    *,
+    on_sponsored_mint: Callable[[int, str, str, str | None], Awaitable[None]] | None = None,
+    on_sponsored_prepared: Callable[[int, str, str, str, xrpl_ops.MintPreparation], Awaitable[None]]
+    | None = None,
+    on_sponsored_forwarded: Callable[[str], Awaitable[None]] | None = None,
+    on_sponsored_offer: Callable[[str | None, str | None], Awaitable[None]] | None = None,
+) -> None:
     """Drive a MintSession to a terminal state. Run as a background task."""
     if session.state in TERMINAL_STATES:
         # A cancel can land while handle_mint_start awaits prepare_payment;
         # running a terminal session would resurrect it (waiting for a
         # payment the user backed out of). Same guard bulk mint has.
         return
+    sponsored_promise_restored = False
     try:
-        # 1. Wait for the sender-verified payment on whichever path
-        #    prepare_payment detected. not_before bounds the missed-payment
-        #    backfill to this session's lifetime.
-        session.ensure_payment_fallback()
-        # #262 defense-in-depth (handle_mint_start already fails fast): with
-        # no XUMM payload the session holds only the static detect link,
-        # which Xaman cannot parse as a sign request — entering the payment
-        # wait would show a dead pay screen for the full 300s. The
-        # pay_with/pay_amount defaulting above must still run first. Known
-        # tradeoff: this also defers #196 mint-credit redemption (normally
-        # consumed by wait_for_payment's allow_credit backfill with no new
-        # signature) until XUMM recovers — delay-only, the 30d credit TTL
-        # far outlasts any outage.
-        if session.payment_uuid is None:
-            session.state = FAILED
-            session.error = "signing service is busy — please try again shortly"
-            return
-        p = session._payment_params()
-        paid = await xrpl_ops.wait_for_payment(
-            destination=p["destination"],
-            expected_sender=session.wallet_address,
-            expected_amount=p["value"],
-            not_before=session.created_at - 10,
-            currency=p["currency"],
-            # LFGO mints pay the issuer, which receives nothing else, so an
-            # unconsumed earlier payment is always a mint credit (#196). The
-            # XRP path pays the busier bot wallet - no credit window there.
-            allow_credit=session.pay_with != "XRP",
-        )
-        if not paid:
-            session.state = PAYMENT_TIMEOUT
-            return
-
-        # The payment is irrevocably confirmed on-ledger: leave
-        # AWAITING_PAYMENT *now*, before any further await (the XRP-path
-        # buy_and_burn below is a multi-second submit_and_wait), so a
-        # concurrent cancel() can never land on a session whose money has
-        # already been taken.
-        session.state = GENERATING
-
-        if session.pay_with == "XRP":
-            # Buy the mint's LFGO off the DEX and burn it, spending at most
-            # the XRP just collected. Best-effort: a failed buyback must
-            # never cost the user their mint.
-            if not await xrpl_ops.buy_and_burn(
-                config.TOKEN_CURRENCY_HEX,
-                config.TOKEN_ISSUER_ADDRESS,
-                config.MINT_PRICE_LFGO,
-                max_xrp=session.pay_amount,
-            ):
-                logging.error(
-                    f"LFGO buy-and-burn failed for mint session "
-                    f"{session.id}; XRP stays in the bot wallet"
+        if session.sponsored:
+            # The reservation is a durable promise but remains reversible
+            # through composition, upload, signing, and prepared-journal save.
+            if any(
+                callback is None
+                for callback in (
+                    on_sponsored_prepared,
+                    on_sponsored_forwarded,
+                    on_sponsored_mint,
+                    on_sponsored_offer,
                 )
+            ):
+                raise RuntimeError("complete sponsored mint persistence callbacks are required")
+            current_claim = await asyncio.to_thread(
+                sponsored_mint.claim_for_session,
+                db_path.app_db_path(config.XRPL_NETWORK),
+                network=config.XRPL_NETWORK,
+                wallet=session.claim_wallet or session.wallet_address,
+                session_id=session.id,
+            )
+            if current_claim is None:
+                raise RuntimeError("sponsored mint recovery required: claim is unavailable")
+            if current_claim.status != "reserved":
+                session.nft_id = current_claim.nft_id
+                session.sponsorship_irreversible = current_claim.status in (
+                    "minting",
+                    "minted",
+                    "offered",
+                    "accepted",
+                    "failed_terminal",
+                )
+                raise RuntimeError(
+                    f"sponsored mint recovery required: claim is {current_claim.status}"
+                )
+            session.state = GENERATING
+        else:
+            # 1. Wait for the sender-verified payment on whichever path
+            #    prepare_payment detected. not_before bounds the missed-payment
+            #    backfill to this session's lifetime.
+            session.ensure_payment_fallback()
+            # #262 defense-in-depth (handle_mint_start already fails fast): with
+            # no XUMM payload the session holds only the static detect link,
+            # which Xaman cannot parse as a sign request — entering the payment
+            # wait would show a dead pay screen for the full 300s. The
+            # pay_with/pay_amount defaulting above must still run first. Known
+            # tradeoff: this also defers #196 mint-credit redemption (normally
+            # consumed by wait_for_payment's allow_credit backfill with no new
+            # signature) until XUMM recovers — delay-only, the 30d credit TTL
+            # far outlasts any outage.
+            if session.payment_uuid is None:
+                session.state = FAILED
+                session.error = "signing service is busy — please try again shortly"
+                return
+            p = session._payment_params()
+            paid = await xrpl_ops.wait_for_payment(
+                destination=p["destination"],
+                expected_sender=session.wallet_address,
+                expected_amount=p["value"],
+                not_before=session.created_at - 10,
+                currency=p["currency"],
+                # LFGO mints pay the issuer, which receives nothing else, so an
+                # unconsumed earlier payment is always a mint credit (#196). The
+                # XRP path pays the busier bot wallet - no credit window there.
+                allow_credit=session.pay_with != "XRP",
+            )
+            if not paid:
+                session.state = PAYMENT_TIMEOUT
+                return
+
+            # The payment is irrevocably confirmed on-ledger: leave
+            # AWAITING_PAYMENT *now*, before any further await (the XRP-path
+            # buy_and_burn below is a multi-second submit_and_wait), so a
+            # concurrent cancel() can never land on a session whose money has
+            # already been taken.
+            session.state = GENERATING
+
+            if session.pay_with == "XRP":
+                # Buy the mint's LFGO off the DEX and burn it, spending at most
+                # the XRP just collected. Best-effort: a failed buyback must
+                # never cost the user their mint.
+                if not await xrpl_ops.buy_and_burn(
+                    config.TOKEN_CURRENCY_HEX,
+                    config.TOKEN_ISSUER_ADDRESS,
+                    config.MINT_PRICE_LFGO,
+                    max_xrp=session.pay_amount,
+                ):
+                    logging.error(
+                        f"LFGO buy-and-burn failed for mint session "
+                        f"{session.id}; XRP stays in the bot wallet"
+                    )
 
         # 2-5. Compose -> upload -> mint -> record -> offer -> accept payload,
         # extracted into mint_one_unit (#215) so bulk mint can share the same
         # path. on_state keeps the single-mint session's finer-grained
         # MINTING/CREATING_OFFER states for the UI.
-        session.nft_number = await _allocate_nft_number()
+        prepared_claim = None
+        if session.sponsored and current_claim is not None:
+            journal = (
+                current_claim.mint_signed_tx_hash,
+                current_claim.mint_signed_tx_blob,
+                current_claim.mint_signed_ledger_floor,
+                getattr(current_claim, "mint_nft_number", None),
+                getattr(current_claim, "mint_metadata_url", None),
+                getattr(current_claim, "mint_metadata_json", None),
+                getattr(current_claim, "mint_body_type", None),
+            )
+            populated = tuple(value is not None for value in journal)
+            if any(populated) and not all(populated):
+                raise RuntimeError(
+                    "sponsored mint recovery required: prepared journal is incomplete"
+                )
+            if all(populated):
+                prepared_claim = current_claim
+        if prepared_claim is not None:
+            assert prepared_claim.mint_nft_number is not None
+            session.nft_number = prepared_claim.mint_nft_number
+        else:
+            session.nft_number = await _allocate_nft_number()
+
+        assert session.nft_number is not None
 
         def _on_state(state: str) -> None:
             session.state = state
 
-        async def _on_mint(nft_number: int, nft_id: str, image_url: str | None) -> None:
+        sponsored_mint_recorded = False
+
+        async def _on_paid_mint(nft_number: int, nft_id: str, image_url: str | None) -> None:
+            session.nft_id = nft_id
+            settle_headroom(session)
+
+        async def _on_sponsored_prepared(
+            nft_number: int,
+            metadata_url: str,
+            metadata_json: str,
+            body_type: str,
+            preparation: xrpl_ops.MintPreparation,
+        ) -> None:
+            assert on_sponsored_prepared is not None
+            await on_sponsored_prepared(
+                nft_number, metadata_url, metadata_json, body_type, preparation
+            )
+
+        async def _on_sponsored_forwarded(tx_hash: str) -> None:
+            assert on_sponsored_forwarded is not None
+            await on_sponsored_forwarded(tx_hash)
+            # The exact identity is durable and its first forward is now
+            # journaled. Every later error is recovery work, never releasable.
+            session.sponsorship_irreversible = True
+
+        async def _on_sponsored_mint(
+            nft_number: int, nft_id: str, mint_tx_hash: str, image_url: str | None
+        ) -> None:
             # #226 (review): settle the headroom reservation the INSTANT the
             # mint lands, symmetric with bulk's _on_mint — waiting for the
             # session-end finally leaves a window (offer creation + XUMM
@@ -722,6 +1253,11 @@ async def run_mint_session(session: MintSession) -> None:
             # sessions that never minted (idempotent — the flag drops before
             # the store write).
             session.nft_id = nft_id
+            nonlocal sponsored_mint_recorded
+            if session.sponsored:
+                assert on_sponsored_mint is not None
+                await on_sponsored_mint(nft_number, nft_id, mint_tx_hash, image_url)
+                sponsored_mint_recorded = True
             settle_headroom(session)
 
         res = await mint_one_unit(
@@ -733,13 +1269,40 @@ async def run_mint_session(session: MintSession) -> None:
             nft_number=session.nft_number,
             session_tag=session.id,
             on_state=_on_state,
-            on_mint=_on_mint,
+            on_mint_prepared=_on_sponsored_prepared if session.sponsored else None,
+            on_mint_forwarded=_on_sponsored_forwarded if session.sponsored else None,
+            sponsored_claim_id=(
+                prepared_claim.id if prepared_claim is not None else session.sponsored_claim_id
+            ),
+            resume_prepared=prepared_claim,
+            on_offer_created=on_sponsored_offer if session.sponsored else None,
+            on_mint=_on_paid_mint if not session.sponsored else None,
+            on_mint_confirmed=_on_sponsored_mint if session.sponsored else None,
         )
         session.nft_id = res.nft_id
         session.image_url = res.image_url
         session.video_url = res.video_url
         session.traits = res.traits
         session.body_type = res.body_type
+        if session.sponsored and res.mint_definitively_failed:
+            restored = await asyncio.to_thread(
+                sponsored_mint.reset_validated_mint_failure,
+                db_path.app_db_path(config.XRPL_NETWORK),
+                network=config.XRPL_NETWORK,
+                wallet=session.claim_wallet or session.wallet_address,
+                session_id=session.id,
+                error=res.error or "validated mint failure",
+            )
+            if restored is None or restored.status != "reserved":
+                raise RuntimeError(
+                    "sponsored mint recovery required: validated failure could not "
+                    "restore its promise"
+                )
+            # Retain the durable reservation for a replacement session. This
+            # exact signed identity is definitively retired, so it is no longer
+            # an irreversible/uncertain submission.
+            session.sponsorship_irreversible = False
+            sponsored_promise_restored = True
         if res.error or not res.offer_id or not res.accept:
             _release_unused_number(session)
             session.state = FAILED
@@ -768,3 +1331,10 @@ async def run_mint_session(session: MintSession) -> None:
         # mint landed this is a no-op (idempotent): _on_mint already settled
         # at mint-land so a crash mid-offer can't uncount the mint.
         settle_headroom(session)
+        if (
+            session.sponsored
+            and session.nft_id is None
+            and not session.sponsorship_irreversible
+            and not sponsored_promise_restored
+        ):
+            release_sponsored_reservation(session, session.error or session.state)

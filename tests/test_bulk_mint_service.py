@@ -24,7 +24,6 @@ import asyncio  # noqa: E402
 import json  # noqa: E402
 
 import pytest  # noqa: E402
-from aiohttp.test_utils import make_mocked_request  # noqa: E402
 
 from lfg_core import bulk_mint_flow, headroom, mint_flow, supply  # noqa: E402
 from lfg_service import app as server  # noqa: E402
@@ -45,16 +44,28 @@ def _run(coro):
         loop.close()
 
 
+class _PostRequest:
+    """Minimal mutable POST request double without aiohttp app-key warnings."""
+
+    headers: dict[str, str] = {}
+
+    def __init__(self, body):
+        self._body = body
+        self._store = {}
+
+    async def json(self):
+        return self._body
+
+    def __getitem__(self, key):
+        return self._store[key]
+
+    def __setitem__(self, key, value):
+        self._store[key] = value
+
+
 def _post_request(path, body):
-    """Mirrors tests/test_market_api.py's _post_request: stub request.json()
-    since there's no full aiohttp TestClient fixture wired for these routes."""
-    req = make_mocked_request("POST", path)
-
-    async def _json():
-        return body
-
-    req.json = _json  # type: ignore[method-assign]
-    return req
+    del path
+    return _PostRequest(body)
 
 
 class _StatusReq:

@@ -35,18 +35,27 @@ async def handle_mint(svc: LFGServiceClient, update: Any, context: Any) -> None:
     payment_link = session.get("payment_link", "")
 
     # 2. payment QR (rendered locally from the deeplink — the service exposes no
-    #    hosted payment-QR url, only the link)
-    try:
-        qr_png = await svc.qr_png(payment_link)
-    except ServiceError as e:
-        logging.error(f"payment QR render failed: {e}")
-        await bot.send_message(chat_id, render.error_caption(friendly_error(e)))
-        return
-    await bot.send_photo(
-        chat_id,
-        photo=render.photo_input(qr_png, "payment_qr.png"),
-        caption=render.payment_caption(payment_link, push=session.get("payment_push")),
-    )
+    #    hosted payment-QR url, only the link).
+    #    A sponsored session (#free-mint) skips payment entirely, so it carries
+    #    payment_link=None. Rendering a QR from that raises TypeError out of the
+    #    SDK — NOT ServiceError, so the handler below would not catch it, and the
+    #    mint would run to completion server-side while this surface died before
+    #    ever delivering the accept-offer QR. Admission is surface-agnostic, so
+    #    this branch is reachable from /mint here just as it is in the Activity.
+    if session.get("sponsored"):
+        await bot.send_message(chat_id, render.sponsored_caption())
+    else:
+        try:
+            qr_png = await svc.qr_png(payment_link)
+        except ServiceError as e:
+            logging.error(f"payment QR render failed: {e}")
+            await bot.send_message(chat_id, render.error_caption(friendly_error(e)))
+            return
+        await bot.send_photo(
+            chat_id,
+            photo=render.photo_input(qr_png, "payment_qr.png"),
+            caption=render.payment_caption(payment_link, push=session.get("payment_push")),
+        )
 
     # 3. wait for a terminal state (SDK polls /api/mint/<id> + backs off)
     try:

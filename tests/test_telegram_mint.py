@@ -165,3 +165,49 @@ def test_animated_mint_sends_video_not_photo():
     assert "3601" in bot.videos[0][2]
     # payment QR + offer QR remain photos; the artwork is the video
     assert len(bot.photos) == 2
+
+
+def test_sponsored_session_skips_the_payment_qr_and_still_delivers_the_offer():
+    """Regression, mirror of the Discord case: sponsored admission is
+    surface-agnostic, but this handler rendered a payment QR unconditionally.
+    A sponsored session carries payment_link=None, and qr_png(None) raises
+    TypeError — not ServiceError — so /mint died here while the service went on
+    to mint the NFT, consuming the wallet's one free mint and burning 1 LFGO
+    with no accept QR ever delivered."""
+
+    class _StrictQrSvc(_Svc):
+        async def qr_png(self, data):
+            # Reproduces the real SDK: aiohttp rejects a None query param.
+            if data is None:
+                raise TypeError("Invalid variable type: value should be str, int or float")
+            return self._qr
+
+    bot = _Bot()
+    update, ctx = _update_ctx(bot)
+    svc = _StrictQrSvc(
+        start={
+            "id": "sid",
+            "payment_link": None,
+            "state": "awaiting_payment",
+            "sponsored": True,
+            "pay_with": "SPONSORED",
+            "pay_amount": "0",
+        },
+        final={
+            "id": "sid",
+            "state": "offer_ready",
+            "nft_number": 3600,
+            "accept_qr_url": "https://cdn/qr.png",
+            "accept_deeplink": "https://xumm/accept",
+        },
+    )
+
+    _run(mint_view.handle_mint(svc, update, ctx))
+
+    # The sponsored notice went out as a message, not a payment photo.
+    assert any("Sponsored mint" in text for _, text in bot.messages)
+    notice = next(text for _, text in bot.messages if "Sponsored mint" in text)
+    assert "No XRP or LFGO" in notice
+    assert "reserve" in notice.lower()
+    # And the flow still reached the offer step (a photo was sent for the claim).
+    assert bot.photos, "sponsored mint never delivered the accept QR"

@@ -7,6 +7,8 @@
 
 import asyncio
 import base64
+import contextlib
+import dataclasses
 import datetime
 import functools
 import hashlib
@@ -64,13 +66,15 @@ from lfg_core import (
     shop,
     shop_flow,
     shop_store,
+    sponsored_burn,
+    sponsored_mint,
     swap_flow,
     swap_meta,
     trait_config,
     xrpl_ops,
     xumm_ops,
 )
-from lfg_core.db_helpers import get_nft_data
+from lfg_core.db_helpers import get_nft_data, record_nft_mint
 from lfg_core.user_db import create_users_table, get_user, register_user
 from lfg_service import identity as identity_store
 from lfg_service.auth import require_service_token, surface_for_token
@@ -112,6 +116,9 @@ _shop_session_created: dict[str, float] = {}
 # deliberately non-terminal (see bulk_mint_flow.TERMINAL_STATES) so a live job
 # stays visible to /api/mint/bulk/active and the startup resume sweep.
 bulk_sessions: dict[str, Any] = {}
+# Sponsored admission stays fail-closed until the startup recovery sweep has
+# completed. Paid minting does not depend on this gate.
+_sponsored_recovery_ready = False
 SESSION_RETENTION = 3600  # keep terminal sessions briefly for late polls
 
 BUS = InMemoryEventBus()
@@ -273,7 +280,93 @@ async def _run_mint_session_and_publish(session: Any) -> None:
     suppresses any late poll), so a deliberate cancel still announces
     nothing. handle_mint_status calls the same idempotent helper, covering
     poll-first ordering."""
-    await mint_flow.run_mint_session(session)
+
+    async def _record_sponsored_prepared(
+        nft_number: int,
+        metadata_url: str,
+        metadata_json: str,
+        body_type: str,
+        preparation: xrpl_ops.MintPreparation,
+    ) -> None:
+        if (
+            preparation.state != "prepared"
+            or not preparation.tx_hash
+            or not preparation.tx_blob
+            or not preparation.signed_ledger_floor
+        ):
+            raise RuntimeError(f"sponsored mint {session.id}: incomplete preparation")
+        claim = await asyncio.to_thread(
+            sponsored_mint.record_mint_prepared,
+            db_path.app_db_path(config.XRPL_NETWORK),
+            network=config.XRPL_NETWORK,
+            wallet=session.claim_wallet,
+            session_id=session.id,
+            tx_hash=preparation.tx_hash,
+            tx_blob=preparation.tx_blob,
+            signed_ledger_floor=preparation.signed_ledger_floor,
+            nft_number=nft_number,
+            metadata_url=metadata_url,
+            metadata_json=metadata_json,
+            body_type=body_type,
+        )
+        if claim is None or claim.mint_signed_tx_hash != preparation.tx_hash:
+            raise RuntimeError(f"sponsored mint {session.id}: prepared identity was not persisted")
+
+    async def _record_sponsored_forwarded(tx_hash: str) -> None:
+        transition = await asyncio.to_thread(
+            sponsored_mint.mark_mint_forwarded,
+            db_path.app_db_path(config.XRPL_NETWORK),
+            network=config.XRPL_NETWORK,
+            wallet=session.claim_wallet,
+            session_id=session.id,
+            tx_hash=tx_hash,
+        )
+        if transition is None or transition.claim.mint_signed_tx_hash != tx_hash:
+            raise RuntimeError(f"sponsored mint {session.id}: first forward was not journaled")
+
+    async def _record_sponsored_mint(
+        nft_number: int, nft_id: str, mint_tx_hash: str, image_url: str | None
+    ) -> None:
+        claim = await asyncio.to_thread(
+            sponsored_mint.record_minted_and_enqueue_burn,
+            db_path.app_db_path(config.XRPL_NETWORK),
+            network=config.XRPL_NETWORK,
+            wallet=session.claim_wallet,
+            session_id=session.id,
+            mint_tx_hash=mint_tx_hash,
+            nft_id=nft_id,
+        )
+        if claim is None:
+            raise RuntimeError(
+                f"sponsored mint {session.id}: confirmed NFT was not persisted to its claim"
+            )
+
+    async def _record_sponsored_offer(offer_id: str | None, error: str | None) -> None:
+        claim = await asyncio.to_thread(
+            sponsored_mint.record_offer,
+            db_path.app_db_path(config.XRPL_NETWORK),
+            network=config.XRPL_NETWORK,
+            wallet=session.claim_wallet,
+            session_id=session.id,
+            offer_id=offer_id,
+            error=error,
+            history_path=history_store.history_db_path(config.XRPL_NETWORK),
+        )
+        if claim is None:
+            raise RuntimeError(
+                f"sponsored mint {session.id}: offer outcome was not persisted to its claim"
+            )
+
+    if session.sponsored:
+        await mint_flow.run_mint_session(
+            session,
+            on_sponsored_prepared=_record_sponsored_prepared,
+            on_sponsored_forwarded=_record_sponsored_forwarded,
+            on_sponsored_mint=_record_sponsored_mint,
+            on_sponsored_offer=_record_sponsored_offer,
+        )
+    else:
+        await mint_flow.run_mint_session(session)
     try:
         await _publish_mint_terminal(session)
     except Exception as e:
@@ -581,6 +674,86 @@ async def handle_x_status(request):
             "enabled": config.X_ENABLED,
         }
     )
+
+
+def _require_discord_surface(request):
+    if request["surface"] != "discord":
+        return web.json_response({"error": "forbidden", "code": "wrong_surface"}, status=403)
+    return None
+
+
+async def _sponsored_mint_actor(request) -> str | None:
+    try:
+        body = await request.json()
+    except (json.JSONDecodeError, ValueError):
+        return None
+    actor = body.get("actor") if isinstance(body, dict) else None
+    if not isinstance(actor, str) or not actor.strip():
+        return None
+    return actor.strip()
+
+
+def _sponsored_mint_paths() -> tuple[str, str]:
+    return (
+        db_path.app_db_path(config.XRPL_NETWORK),
+        history_store.history_db_path(config.XRPL_NETWORK),
+    )
+
+
+@require_service_token
+async def handle_sponsored_mint_start(request):
+    denied = _require_discord_surface(request)
+    if denied is not None:
+        return denied
+    actor = await _sponsored_mint_actor(request)
+    if actor is None:
+        return web.json_response({"error": "actor is required", "code": "bad_request"}, status=400)
+    campaign_db, _ = _sponsored_mint_paths()
+    status = sponsored_mint.start_campaign(campaign_db, network=config.XRPL_NETWORK, actor=actor)
+    return web.json_response(dataclasses.asdict(status))
+
+
+@require_service_token
+async def handle_sponsored_mint_stop(request):
+    denied = _require_discord_surface(request)
+    if denied is not None:
+        return denied
+    actor = await _sponsored_mint_actor(request)
+    if actor is None:
+        return web.json_response({"error": "actor is required", "code": "bad_request"}, status=400)
+    campaign_db, _ = _sponsored_mint_paths()
+    status = sponsored_mint.stop_campaign(campaign_db, network=config.XRPL_NETWORK, actor=actor)
+    return web.json_response(dataclasses.asdict(status))
+
+
+@require_service_token
+async def handle_sponsored_mint_status(request):
+    denied = _require_discord_surface(request)
+    if denied is not None:
+        return denied
+    campaign_db, history_db = _sponsored_mint_paths()
+    status = dataclasses.asdict(
+        sponsored_mint.campaign_status(campaign_db, history_db, network=config.XRPL_NETWORK)
+    )
+    if config.SIGNING_ACCOUNT == config.TOKEN_ISSUER_ADDRESS:
+        balance = None
+        status["lfgo_balance_state"] = (
+            "not_applicable_testnet_self_issuer"
+            if config.XRPL_NETWORK == "testnet"
+            else "invalid_mainnet_self_issuer"
+        )
+    else:
+        try:
+            balance = await xrpl_ops.get_trustline_balance(
+                config.SIGNING_ACCOUNT, config.TOKEN_CURRENCY_HEX, config.TOKEN_ISSUER_ADDRESS
+            )
+        except Exception as e:
+            logging.warning("sponsored mint LFGO balance lookup failed: %s", e)
+            balance = None
+        status["lfgo_balance_state"] = "available" if balance is not None else "lookup_failed"
+    status["lfgo_balance"] = str(balance) if balance is not None else None
+    status["recovery_ready"] = _sponsored_recovery_ready
+    return web.json_response(status)
 
 
 async def handle_telegram_auth(request):
@@ -2718,6 +2891,10 @@ async def _settle_trait_sale(buyer: str, nft_id: str, offer_index: str, network:
 # once they do claim a Closet) — without a bound this would retry forever.
 _SWEEP_MAX_ATTEMPTS = 5
 _SWEEP_PERIOD_SECONDS = 120
+# Bounded grace for an in-flight sponsored burn to settle during shutdown.
+# Long enough for a submit/reconcile round-trip to persist its result, short
+# enough that a wedged RPC can't hold the process (and pm2's restart) open.
+_BURN_SHUTDOWN_GRACE_SECONDS = 30
 # offer_index -> consecutive failed sweep attempts. In-memory only (not
 # persisted): a service restart resets every count to 0, so a mid-flight
 # restart costs a stuck row a few retries rather than falsely reading as
@@ -3326,6 +3503,59 @@ async def _request_return_url(request):
     return xumm_ops.discord_return_url(body.get("guild_id"), body.get("channel_id"))
 
 
+def _cleanup_cancelled_mint_admission(session: mint_flow.MintSession) -> None:
+    """Synchronously unwind every resource acquired after session insertion.
+
+    Threaded admission workers are awaited before this runs, so direct store
+    cleanup cannot race a late commit. Neither release depends on the
+    in-memory flags whose assignment occurs only after those workers return.
+    """
+    session.state = mint_flow.CANCELLED
+    session.mark_published()
+    mint_sessions.pop(session.id, None)
+    app_db = db_path.app_db_path(config.XRPL_NETWORK)
+    try:
+        sponsored_mint.release_reservation(
+            app_db,
+            network=config.XRPL_NETWORK,
+            wallet=session.wallet_address,
+            session_id=session.id,
+            reason="handler_cancelled",
+        )
+    except Exception:
+        logging.exception(
+            "sponsored reservation cleanup failed after handler cancellation for mint session %s",
+            session.id,
+        )
+    claimant = f"mint:{session.id}"
+    if headroom.release(app_db, claimant):
+        session.headroom_reserved = False
+    else:
+        logging.critical(
+            "headroom cleanup failed after handler cancellation for mint session %s",
+            session.id,
+        )
+
+
+async def _await_mint_admission_thread(
+    task: asyncio.Task[Any], session: mint_flow.MintSession
+) -> Any:
+    """Await a threaded admission write without losing a late commit."""
+    try:
+        return await asyncio.shield(task)
+    except asyncio.CancelledError:
+        try:
+            await task
+        except Exception as e:
+            logging.warning(
+                "admission worker failed after cancellation for mint session %s: %s",
+                session.id,
+                e,
+            )
+        _cleanup_cancelled_mint_admission(session)
+        raise
+
+
 @require_wallet
 async def handle_mint_start(request):
     user = request["user"]
@@ -3360,13 +3590,16 @@ async def handle_mint_start(request):
     # collection_full the bulk endpoint returns. Placed after the insert
     # above so the one-active-session guard window stays await-free; the
     # FAILED mark frees the slot for _prune_sessions.
-    granted = await asyncio.to_thread(
-        headroom.try_reserve,
-        db_path.app_db_path(config.XRPL_NETWORK),
-        f"mint:{session.id}",
-        1,
-        config.XRPL_NETWORK,
+    headroom_task = asyncio.create_task(
+        asyncio.to_thread(
+            headroom.try_reserve,
+            db_path.app_db_path(config.XRPL_NETWORK),
+            f"mint:{session.id}",
+            1,
+            config.XRPL_NETWORK,
+        )
     )
+    granted = await _await_mint_admission_thread(headroom_task, session)
     if granted < 1:
         if session.state == mint_flow.AWAITING_PAYMENT:
             # Guard like #262: a concurrent cancel during the reserve await is
@@ -3382,6 +3615,78 @@ async def handle_mint_start(request):
         # cancelled session (#226 review).
         mint_flow.settle_headroom(session)
         return web.json_response(session.to_dict())
+    # Do not expose free pricing until the wallet+session claim transaction
+    # commits. Every non-admission result, including archive/store failure,
+    # falls through to the existing paid preparation path below.
+    reservation = None
+    if _sponsored_recovery_ready:
+        try:
+            orphan = await asyncio.to_thread(
+                sponsored_mint.reversible_reservation_for_wallet,
+                db_path.app_db_path(config.XRPL_NETWORK),
+                network=config.XRPL_NETWORK,
+                wallet=session.wallet_address,
+            )
+            if orphan is not None:
+                prior_session = mint_sessions.get(orphan.session_id)
+                prior_session_is_live = (
+                    prior_session is not None
+                    and prior_session.state not in mint_flow.TERMINAL_STATES
+                )
+                rebound = (
+                    None
+                    if prior_session_is_live
+                    else await asyncio.to_thread(
+                        sponsored_mint.rebind_reservation,
+                        db_path.app_db_path(config.XRPL_NETWORK),
+                        network=config.XRPL_NETWORK,
+                        wallet=session.wallet_address,
+                        expected_session_id=orphan.session_id,
+                        new_session_id=session.id,
+                    )
+                )
+                if rebound is not None:
+                    reservation = sponsored_mint.ReservationResult(True, "reserved", rebound)
+            if reservation is None:
+                reserve_task = asyncio.create_task(
+                    asyncio.to_thread(
+                        sponsored_mint.reserve_if_eligible,
+                        db_path.app_db_path(config.XRPL_NETWORK),
+                        history_store.history_db_path(config.XRPL_NETWORK),
+                        network=config.XRPL_NETWORK,
+                        wallet=session.wallet_address,
+                        session_id=session.id,
+                    )
+                )
+                reservation = await _await_mint_admission_thread(reserve_task, session)
+        except Exception as e:
+            logging.warning(
+                f"sponsored admission failed for mint session {session.id}; using paid path: {e}"
+            )
+    else:
+        logging.warning(
+            "sponsored admission unavailable until startup recovery succeeds; "
+            "using paid path for mint session %s",
+            session.id,
+        )
+    if reservation is not None and reservation.sponsored:
+        session.sponsored = True
+        if reservation.claim is None:
+            raise RuntimeError("sponsored admission omitted its durable claim")
+        session.sponsored_claim_id = reservation.claim.id
+        session.sponsorship_reason = "source_tag_newcomer"
+        session.claim_wallet = session.wallet_address
+        session.pay_with = "SPONSORED"
+        session.pay_amount = "0"
+        if session.state != mint_flow.AWAITING_PAYMENT:
+            # A cancel can land while the reservation transaction runs. The
+            # claim committed, but minting did not begin, so release it and
+            # never resurrect the cancelled session.
+            mint_flow.release_sponsored_reservation(session, "session_cancelled")
+            mint_flow.settle_headroom(session)
+            return web.json_response(session.to_dict())
+        session.task = asyncio.create_task(_run_mint_session_and_publish(session))
+        return web.json_response(session.to_dict())
     # Detect the payment path (LFGO holder vs XRP newcomer) and create the
     # XUMM sign request before the first QR is rendered (after the insert
     # above, so the one-active-session guard stays race-free). Bounded so a
@@ -3389,6 +3694,9 @@ async def handle_mint_start(request):
     # falls back to the XRP path with the static detect link.
     try:
         await asyncio.wait_for(session.prepare_payment(), timeout=8)
+    except asyncio.CancelledError:
+        _cleanup_cancelled_mint_admission(session)
+        raise
     except asyncio.TimeoutError:
         logging.warning("prepare_payment timed out; falling back to XRP path")
     except Exception as e:
@@ -3799,12 +4107,352 @@ async def handle_pending_offer_accept(request):
     )
 
 
+async def _recover_sponsored_mint_submissions(app_db: str, *, network: str) -> None:
+    """Reconcile every first-forwarded mint by its persisted exact hash."""
+
+    claims = await asyncio.to_thread(
+        sponsored_mint.mint_recovery_claims,
+        app_db,
+        network=network,
+    )
+    failures: list[str] = []
+    for claim in claims:
+        if (
+            not claim.mint_signed_tx_hash
+            or not claim.mint_signed_tx_blob
+            or not claim.mint_signed_ledger_floor
+            or not claim.mint_forwarded_at
+        ):
+            failures.append(f"{claim.id}: incomplete prepared mint journal")
+            continue
+        result = await xrpl_ops.reconcile_sponsored_mint(claim.mint_signed_tx_hash)
+        if not result.complete:
+            # Re-forward only the exact persisted transaction identity. This is
+            # idempotent at the ledger hash level and repairs the crash window
+            # after first-forward journaling but before the network call; it is
+            # never a freshly signed replacement transaction.
+            replay = await xrpl_ops.submit_sponsored_mint(
+                signed_tx_blob=claim.mint_signed_tx_blob,
+                signed_tx_hash=claim.mint_signed_tx_hash,
+                prove_expiry=True,
+            )
+            result = xrpl_ops.MintReconciliation(
+                replay.state in ("validated", "failed"),
+                replay.state,
+                replay.tx_hash,
+                replay.nft_id,
+                replay.error,
+            )
+        if result.complete and result.state == "validated" and result.nft_id:
+            persisted = await asyncio.to_thread(
+                sponsored_mint.record_minted_and_enqueue_burn,
+                app_db,
+                network=network,
+                wallet=claim.wallet,
+                session_id=claim.session_id,
+                mint_tx_hash=claim.mint_signed_tx_hash,
+                nft_id=result.nft_id,
+            )
+            if (
+                persisted is None
+                or persisted.nft_id != result.nft_id
+                or persisted.mint_tx_hash != claim.mint_signed_tx_hash
+            ):
+                failures.append(f"{claim.id}: validated mint/debt atomic record failed")
+            continue
+        if result.complete and result.state == "failed":
+            reset = await asyncio.to_thread(
+                sponsored_mint.reset_validated_mint_failure,
+                app_db,
+                network=network,
+                wallet=claim.wallet,
+                session_id=claim.session_id,
+                error=result.error or "validated mint failure",
+            )
+            if reset is None or reset.status != "reserved":
+                failures.append(f"{claim.id}: validated failure could not restore promise")
+            continue
+        failures.append(
+            f"{claim.id}: exact hash remains indeterminate ({result.error or 'not validated'})"
+        )
+    if failures:
+        raise RuntimeError("sponsored mint recovery failed: " + "; ".join(failures))
+
+
+def _expected_sponsored_nft_projection(claim: sponsored_mint.Claim) -> dict[str, Any]:
+    """Build the canonical LFG row from the durable pre-submission journal."""
+
+    if (
+        claim.nft_id is None
+        or claim.mint_nft_number is None
+        or claim.mint_metadata_url is None
+        or claim.mint_metadata_json is None
+        or claim.mint_body_type is None
+    ):
+        raise RuntimeError("consumed claim has an incomplete NFT projection journal")
+    try:
+        metadata = json.loads(claim.mint_metadata_json)
+    except (TypeError, ValueError) as exc:
+        raise RuntimeError("consumed claim has invalid metadata JSON") from exc
+    if not isinstance(metadata, dict):
+        raise RuntimeError("consumed claim metadata is not an object")
+    image_url = metadata.get("image")
+    attributes = metadata.get("attributes")
+    if not isinstance(image_url, str) or not image_url:
+        raise RuntimeError("consumed claim metadata has no image URL")
+    if not isinstance(attributes, list):
+        raise RuntimeError("consumed claim metadata has invalid attributes")
+    traits: dict[str, str] = {}
+    for attribute in attributes:
+        if (
+            not isinstance(attribute, dict)
+            or "trait_type" not in attribute
+            or "value" not in attribute
+        ):
+            raise RuntimeError("consumed claim metadata has an invalid attribute")
+        traits[str(attribute["trait_type"])] = str(attribute["value"])
+    if "Head" in traits:
+        traits["Hat"] = traits.pop("Head")
+    return {
+        "nft_number": claim.mint_nft_number,
+        "nft_id": claim.nft_id,
+        # The claim predates a durable platform-user field. Keep its stable
+        # session identity rather than inventing a user ID during recovery.
+        "discord_id": claim.session_id,
+        "owner_address": claim.wallet,
+        "metadata_url": claim.mint_metadata_url,
+        "image_url": image_url,
+        "traits": traits,
+        "network": claim.network,
+        "body_type": claim.mint_body_type,
+    }
+
+
+def _read_sponsored_nft_projection(app_db: str, *, nft_number: int) -> dict[str, Any] | None:
+    with sqlite3.connect(app_db) as conn:
+        conn.row_factory = sqlite3.Row
+        table = conn.execute(
+            "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'LFG'"
+        ).fetchone()
+        if table is None:
+            return None
+        columns = {row[1] for row in conn.execute("PRAGMA table_info(LFG)")}
+        required = {
+            "nft_number",
+            "nft_id",
+            "discord_id",
+            "owner_address",
+            "metadata_url",
+            "image_url",
+            "Background",
+            "Back",
+            "Body",
+            "Clothing",
+            "Eyes",
+            "Eyebrows",
+            "Mouth",
+            "Hat",
+            "Accessory",
+            "network",
+            "body_type",
+        }
+        if not required.issubset(columns):
+            return None
+        row = conn.execute("SELECT * FROM LFG WHERE nft_number = ?", (nft_number,)).fetchone()
+        return dict(row) if row is not None else None
+
+
+def _sponsored_nft_projection_matches(row: dict[str, Any], expected: dict[str, Any]) -> bool:
+    scalar_fields = (
+        "nft_number",
+        "nft_id",
+        "owner_address",
+        "metadata_url",
+        "image_url",
+        "network",
+        "body_type",
+    )
+    if any(row[field] != expected[field] for field in scalar_fields):
+        return False
+    traits = expected["traits"]
+    return all(
+        row[field] == traits.get(field, "")
+        for field in (
+            "Background",
+            "Back",
+            "Body",
+            "Clothing",
+            "Eyes",
+            "Eyebrows",
+            "Mouth",
+            "Hat",
+            "Accessory",
+        )
+    )
+
+
+async def _recover_sponsored_nft_records(app_db: str, *, network: str) -> None:
+    """Replay the canonical LFG insert after a post-confirmation crash."""
+
+    claims = await asyncio.to_thread(
+        sponsored_mint.nft_projection_recovery_claims, app_db, network=network
+    )
+    failures: list[str] = []
+    for claim in claims:
+        try:
+            expected = _expected_sponsored_nft_projection(claim)
+            existing = await asyncio.to_thread(
+                _read_sponsored_nft_projection,
+                app_db,
+                nft_number=expected["nft_number"],
+            )
+            if existing is None:
+                with sqlite3.connect(app_db) as conn:
+                    conn.execute("CREATE TABLE IF NOT EXISTS LFG (nft_number INTEGER PRIMARY KEY)")
+                await asyncio.to_thread(record_nft_mint, db_path=app_db, **expected)
+                existing = await asyncio.to_thread(
+                    _read_sponsored_nft_projection,
+                    app_db,
+                    nft_number=expected["nft_number"],
+                )
+            if existing is None or not _sponsored_nft_projection_matches(existing, expected):
+                raise RuntimeError("canonical LFG projection conflicts with durable claim")
+        except Exception as exc:
+            failures.append(f"{claim.id}: {exc}")
+    if failures:
+        raise RuntimeError("sponsored NFT projection recovery failed: " + "; ".join(failures))
+
+
+async def _recover_sponsored_offers(app_db: str, *, network: str) -> None:
+    """Reconcile or recreate offers for already-consumed sponsored claims.
+
+    The ledger lookup comes first so a crash after a successful offer submit but
+    before `record_offer` cannot produce a duplicate on the next restart. Once
+    recorded, the existing ledger-driven pending-offers tray exposes the locked
+    offer and builds a fresh acceptance payload when the recipient asks for it.
+    """
+
+    claims = await asyncio.to_thread(
+        sponsored_mint.offer_recovery_claims,
+        app_db,
+        network=network,
+    )
+    failures: list[tuple[str, str]] = []
+    for claim in claims:
+        assert claim.nft_id is not None
+        try:
+            replayed = await asyncio.to_thread(
+                sponsored_mint.replay_archived_acceptance,
+                app_db,
+                history_store.history_db_path(network),
+                network=network,
+                wallet=claim.wallet,
+                offer_id=claim.offer_id,
+                nft_id=claim.nft_id,
+                session_id=claim.session_id,
+                now=int(time.time()),
+            )
+            if replayed is not None and replayed.status == "accepted":
+                logging.info(
+                    "sponsored acceptance recovered: claim=%s nft=%s offer=%s wallet=%s",
+                    claim.id,
+                    claim.nft_id,
+                    replayed.offer_id,
+                    claim.wallet,
+                )
+                continue
+            if claim.status == "offered":
+                # Its exact offer ID is already durable. With no matching
+                # archived acceptance there is nothing to recreate; the live
+                # listener or a later startup sweep can project acceptance.
+                continue
+            offers = await xrpl_ops.get_nft_sell_offers(claim.nft_id, raise_on_error=True)
+            live = [
+                offer
+                for offer in xrpl_ops.filter_claimable_offers(offers, claim.wallet, time.time())
+                if offer.get("owner") == xrpl_ops.bot_wallet_address()
+                and isinstance(offer.get("offer_index"), str)
+                and offer["offer_index"]
+            ]
+            offer_id = live[0]["offer_index"] if live else None
+            if offer_id is None:
+                # Startup recovery has no originating user surface, so the memo
+                # platform is the backend default. It must be a member of the
+                # closed enum in lfg_core/memos.py — a service *surface* name
+                # like "discord" raises ValueError inside build_memo_models,
+                # which create_nft_offer swallows into None, failing recovery
+                # and pinning _sponsored_recovery_ready False on every boot.
+                offer_id = await xrpl_ops.create_nft_offer(
+                    claim.nft_id,
+                    claim.wallet,
+                    platform=memos.PLATFORM_BACKEND,
+                )
+            if not offer_id:
+                raise RuntimeError("locked offer creation returned no offer id")
+            recorded = await asyncio.to_thread(
+                sponsored_mint.record_offer,
+                app_db,
+                network=network,
+                wallet=claim.wallet,
+                session_id=claim.session_id,
+                offer_id=offer_id,
+                history_path=history_store.history_db_path(network),
+            )
+            if recorded is None or recorded.offer_id != offer_id:
+                raise RuntimeError("locked offer could not be persisted")
+            logging.info(
+                "sponsored offer recovered: claim=%s nft=%s offer=%s wallet=%s",
+                claim.id,
+                claim.nft_id,
+                offer_id,
+                claim.wallet,
+            )
+        except Exception as exc:
+            error = f"startup offer recovery failed: {exc}"
+            try:
+                recorded = await asyncio.to_thread(
+                    sponsored_mint.record_offer,
+                    app_db,
+                    network=network,
+                    wallet=claim.wallet,
+                    session_id=claim.session_id,
+                    offer_id=None,
+                    error=error,
+                    history_path=history_store.history_db_path(network),
+                )
+                if recorded is None or recorded.last_error != error:
+                    raise RuntimeError("startup offer recovery error could not be persisted")
+            except Exception as record_exc:
+                error = f"{error}; last_error persistence failed: {record_exc}"
+                logging.exception(
+                    "sponsored offer recovery last_error persistence failed: "
+                    "claim=%s nft=%s wallet=%s",
+                    claim.id,
+                    claim.nft_id,
+                    claim.wallet,
+                )
+            failures.append((claim.id, error))
+            logging.exception(
+                "sponsored offer recovery failed: claim=%s nft=%s wallet=%s",
+                claim.id,
+                claim.nft_id,
+                claim.wallet,
+            )
+
+    if failures:
+        label = "failure" if len(failures) == 1 else "failures"
+        details = "; ".join(f"{claim_id}: {error}" for claim_id, error in failures)
+        raise RuntimeError(f"{len(failures)} sponsored offer recovery {label}: {details}")
+
+
 async def resume_bulk_jobs() -> None:
     """On startup, re-attach and resume any awaiting-payment/paid/fulfilling
     bulk jobs so a service restart mid-fulfillment doesn't strand paid units
     (or, for awaiting-payment records, a payment signed just before the
     crash)."""
+    app_db = db_path.app_db_path(config.XRPL_NETWORK)
     jobs = bulk_mint_flow.load_all_resumable()
+    sponsored_recovery_errors: list[Exception] = []
     # #226: reconstruct the headroom-reservation overlay BEFORE relaunching.
     # Reservations from a dead process are rebuilt from the durable job
     # records — a job that crashed between clamp and its first persist left
@@ -3840,11 +4488,56 @@ async def resume_bulk_jobs() -> None:
         snap = bulk_mint_flow.headroom_snapshot(job)
         if snap is not None:
             specs.append(snap)
-    for net, specs in by_net.items():
-        headroom.rebuild(db_path.app_db_path(net), specs, keep=keep)
+    # Sponsored single-mint sessions are not resumable in memory, but claims
+    # at/after `minting` are irreversible or uncertain. Reconstruct them
+    # before rebuild drops old mint:* rows. Snapshot failure aborts the sweep
+    # (caught by the startup hook), preserving old rows and failing closed.
+    headroom_ready = True
+    try:
+        for net, specs in by_net.items():
+            specs.extend(
+                sponsored_mint.headroom_snapshots(
+                    db_path.app_db_path(net),
+                    network=net,
+                )
+            )
+    except Exception as exc:
+        headroom_ready = False
+        sponsored_recovery_errors.append(exc)
+    if headroom_ready:
+        for net, specs in by_net.items():
+            headroom.rebuild(db_path.app_db_path(net), specs, keep=keep)
     for job in jobs:
         bulk_sessions[job.id] = job
         job.task = asyncio.create_task(bulk_mint_flow.run_bulk_mint_job(job))
+    # Paid work is now fully attached and running before any sponsored network
+    # reconciliation. A slow or unavailable XRPL lookup can keep sponsorship
+    # disabled, but can never strand a previously paid bulk job.
+    try:
+        await _recover_sponsored_mint_submissions(app_db, network=config.XRPL_NETWORK)
+        recovery = sponsored_mint.recover_incomplete_claims(
+            app_db,
+            history_store.history_db_path(config.XRPL_NETWORK),
+            network=config.XRPL_NETWORK,
+        )
+        logging.info(
+            "sponsored startup recovery: held_minting=%d missing_offers=%d burn_debt=%d",
+            len(recovery.held_minting),
+            len(recovery.missing_offers),
+            recovery.debt_count,
+        )
+        await _recover_sponsored_nft_records(app_db, network=config.XRPL_NETWORK)
+    except Exception as exc:
+        sponsored_recovery_errors.append(exc)
+    try:
+        await _recover_sponsored_offers(app_db, network=config.XRPL_NETWORK)
+    except Exception as exc:
+        sponsored_recovery_errors.append(exc)
+    if sponsored_recovery_errors:
+        raise RuntimeError(
+            "sponsored startup recovery failed: "
+            + "; ".join(str(error) for error in sponsored_recovery_errors)
+        )
 
 
 async def _start_bulk_resume(app: web.Application) -> None:
@@ -3856,11 +4549,64 @@ async def _start_bulk_resume(app: web.Application) -> None:
     sweep itself is fast local work (a job-dir scan + one sqlite transaction);
     per-job fulfillment still runs as background tasks created inside
     resume_bulk_jobs. Never fails startup: a broken resume must not down the
-    whole API."""
+    whole API. Sponsored admission remains disabled after a failed sweep;
+    paid minting continues to use its existing path."""
+    global _sponsored_recovery_ready
+    _sponsored_recovery_ready = False
     try:
         await resume_bulk_jobs()
     except Exception:
-        logging.exception("bulk resume sweep failed at startup")
+        logging.exception(
+            "bulk resume sweep failed at startup; sponsored admission remains disabled"
+        )
+    else:
+        _sponsored_recovery_ready = True
+        logging.info("sponsored startup recovery ready")
+
+
+async def _start_sponsored_burn_worker(app: web.Application) -> None:
+    """Start the durable burn worker without delaying user-facing startup."""
+
+    stop = asyncio.Event()
+    app["sponsored_burn_stop"] = stop
+    app["sponsored_burn_task"] = asyncio.create_task(
+        sponsored_burn.run_worker(
+            db_path.app_db_path(config.XRPL_NETWORK),
+            stop,
+        )
+    )
+
+
+async def _stop_sponsored_burn_worker(app: web.Application) -> None:
+    """Let an in-flight burn classify and persist its result before shutdown."""
+
+    stop = app.get("sponsored_burn_stop")
+    task = app.get("sponsored_burn_task")
+    if stop is None or task is None:
+        return
+    stop.set()
+    # stop.set() only interrupts the poll sleep — it cannot interrupt an
+    # in-flight process_one, whose submit/reconcile calls talk to the XRPL.
+    # aiohttp awaits on_cleanup with no timeout of its own, so a bare
+    # `await task` here lets a wedged RPC hang process shutdown indefinitely
+    # (and pm2's restart with it). Give the in-flight burn a bounded grace
+    # period to classify and persist its result, then cancel. Cancelling is
+    # safe: the obligation keeps its lease, which expires, and the next worker
+    # pass reconciles it by memo before ever resubmitting.
+    try:
+        await asyncio.wait_for(asyncio.shield(task), timeout=_BURN_SHUTDOWN_GRACE_SECONDS)
+    except asyncio.TimeoutError:
+        logging.warning(
+            "sponsored burn worker did not settle within %ss; cancelling (its lease will "
+            "expire and the obligation reconciles by memo on the next pass)",
+            _BURN_SHUTDOWN_GRACE_SECONDS,
+        )
+        task.cancel()
+        with contextlib.suppress(asyncio.CancelledError):
+            await task
+    except asyncio.CancelledError:
+        task.cancel()
+        raise
 
 
 def _index_roster(conn: sqlite3.Connection, wallet: str) -> list[dict[str, Any]] | None:
@@ -5550,6 +6296,9 @@ def create_app() -> web.Application:
     app.router.add_post("/api/admin/x/pause", handle_x_pause)
     app.router.add_post("/api/admin/x/resume", handle_x_resume)
     app.router.add_get("/api/admin/x/status", handle_x_status)
+    app.router.add_post("/api/admin/sponsored-mint/start", handle_sponsored_mint_start)
+    app.router.add_post("/api/admin/sponsored-mint/stop", handle_sponsored_mint_stop)
+    app.router.add_get("/api/admin/sponsored-mint/status", handle_sponsored_mint_status)
     app.router.add_get("/events", handle_events)
     app.router.add_get("/events/me", handle_events_me)
     app.router.add_get("/__dev/reload", handle_dev_reload)
@@ -5558,6 +6307,8 @@ def create_app() -> web.Application:
     app.on_startup.append(_start_settlement_sweep)
     app.on_cleanup.append(_stop_settlement_sweep)
     app.on_startup.append(_start_bulk_resume)
+    app.on_startup.append(_start_sponsored_burn_worker)
+    app.on_cleanup.append(_stop_sponsored_burn_worker)
     return app
 
 

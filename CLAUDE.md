@@ -119,7 +119,38 @@ BROKER_ALLOWLIST_PATH=<path-to-json>                        # optional (#131); e
 BRIX_CURRENCY_HEX=<hex-currency-code>                       # optional; trait-economy BRIX pair (shop/trait listings/on-ramp), defaults to SWAP_OFFER_CURRENCY_HEX — never TOKEN_* (LFGO)
 BRIX_ISSUER=<xrpl-address>                                  # optional; trait-economy BRIX issuer, defaults to SWAP_OFFER_ISSUER
 MARKET_BID_TTL_SECONDS=604800                               # optional (#283); on-ledger Expiration for in-app bids (native buy offers), default 7 days
+SPONSORED_MINT_EXCLUDED_WALLETS=<addr,addr>                 # sponsored free mint; operator/test wallets that may never be sponsored (signing + token issuer are ALWAYS excluded in code, but do not satisfy the readiness audit — it requires this list set explicitly)
+SPONSORED_MINT_MAINNET_GENESIS_HASH=<ledger-32570-hash>         # optional; pins history_mainnet.db to a chain identity. Unset = the archive's own recorded genesis is trusted (still fail-closed: an uncertified archive admits nobody)
+SPONSORED_MINT_TESTNET_GENESIS_HASH=<ledger-32570-hash>         # optional; same, for history_testnet.db
+SPONSORED_MINT_ARCHIVE_MAX_LAG_SECONDS=900                  # optional; how stale the eligibility archive's listener heartbeat may be before admission fails closed (default 900)
 ```
+
+> **Sponsored free mint — the archive baseline is a hard prerequisite.**
+> Eligibility ("this wallet has never submitted a SourceTag-carrying
+> transaction") is only answerable from a history archive that has *proven*
+> itself complete. Until an operator records that attestation, every
+> reservation returns `eligibility_unavailable` and the campaign admits nobody
+> — the feature is inert but harmless, and paid minting is unaffected. Arm it
+> with one certification run per network:
+>
+> ```bash
+> .venv/bin/python scripts/backfill_history.py --network mainnet \
+>   --complete-audited-baseline \
+>   --genesis-hash <ledger-32570-hash> \
+>   --baseline-ledger-min 32570 --baseline-ledger-max <current-validated-tip> \
+>   --baseline-provenance "<who audited this and how>"
+> ```
+>
+> `--sources` must include `token_issuer` and `signing` (they are in the
+> default set); `--baseline-ledger-min` must be `32570`; `--baseline-ledger-max`
+> must equal the endpoint's current validated tip. **A listener restart
+> invalidates continuity** (a tx stream has no replay token, so a restart
+> cannot prove it missed nothing) and the certification must be re-run before
+> the next campaign — plan activations around deploys, not across them.
+> `SPONSORED_MINT_*_GENESIS_HASH` is unset by default; the listener no longer
+> refuses to start without it (that once crash-looped the index listeners), it
+> just leaves eligibility archiving off and logs a warning. Full procedure:
+> `docs/ops/sponsored-free-mint.md`.
 
 > **Standalone web surface (#240):** the same vanilla-JS Activity runs as a
 > plain website at `build.letseffinggo.com` — GitHub Pages serves
@@ -172,6 +203,24 @@ sits on `deploy` — do day-to-day dev in worktrees/feature branches, not by
 switching `~/LFG` back to `main` (the deployer would halt on divergence).
 Rollback: `git push origin <sha>:deploy --force-with-lease`, then on the box
 `scripts/deployer.py prod --once --force-reset`.
+
+Sponsored free mint ships with campaign state OFF. Before activation or
+promotion, follow `docs/ops/sponsored-free-mint.md` and run
+`scripts/audit_sponsored_mint_readiness.py`. Operational rollback is the
+Discord `/admin` Stop action: paid minting and the durable burn worker stay
+live. A code rollback must preserve the `free_mint_claims` and
+`free_mint_burns` tables; never delete or restore over outstanding debt.
+Sponsored admission supports isolated staging rehearsal on `testnet` and
+production on `mainnet`; other network names are rejected. The hard campaign
+limits remain 3600 seconds and 100 slots on both networks, and production still
+starts OFF. Readiness requires both `rHU8nu9zSnCpkL3gShG4aGawHzaRVfmKwQ` and
+`rHaMsAjoAN21s1XG5TCAM6ErAefzrggsHf` to be explicitly configured in
+`SPONSORED_MINT_EXCLUDED_WALLETS`; automatic signer/issuer exclusions do not
+satisfy that check. Sponsored admission also stays disabled until startup
+recovery succeeds, while paid minting remains available after a recovery fault.
+Offer reconciliation is authoritative only when strict XRPL offer parsing
+accepts the amount and destination shapes; every per-claim error is persisted,
+all claims are attempted, and any failure keeps startup recovery not ready.
 
 The deployers never restart themselves (`lfg-deployer`/`stg-deployer` are
 excluded from their own `restart_processes`) — after changing

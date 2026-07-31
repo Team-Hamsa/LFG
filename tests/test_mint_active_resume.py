@@ -50,8 +50,30 @@ def _run(coro):
         loop.close()
 
 
-def _request():
+def _router_request():
     return make_mocked_request("GET", "/api/mint/active", app=web.Application())
+
+
+class _PlainRequest:
+    """Mutable handler request double without aiohttp app-key warnings."""
+
+    headers: dict[str, str] = {}
+
+    def __init__(self):
+        self._store = {}
+
+    async def json(self):
+        return {}
+
+    def __getitem__(self, key):
+        return self._store[key]
+
+    def __setitem__(self, key, value):
+        self._store[key] = value
+
+
+def _request():
+    return _PlainRequest()
 
 
 async def _read_json(resp):
@@ -77,7 +99,7 @@ def test_active_route_resolves_to_active_handler(dev_auth):
     (aiohttp dispatches in registration order): a GET with no live session
     answers 200 {"session": null}, not the status handler's 404."""
     app = server.create_app()
-    match = _run(app.router.resolve(_request()))
+    match = _run(app.router.resolve(_router_request()))
     assert getattr(match, "http_exception", None) is None
     # Assert the actual dispatch target: a registration-order regression would
     # route here through handle_mint_status with session_id='active'.
@@ -125,13 +147,7 @@ def test_active_ignores_other_platform_sessions(dev_auth):
 def _post_start_request():
     """POST /api/mint stand-in (mirrors tests/test_bulk_mint_service.py's
     _post_request): stub request.json() for _request_return_url."""
-    req = make_mocked_request("POST", "/api/mint", app=web.Application())
-
-    async def _json():
-        return {}
-
-    req.json = _json  # type: ignore[method-assign]
-    return req
+    return _PlainRequest()
 
 
 async def _prepare_static_link_only(self):

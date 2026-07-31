@@ -17,6 +17,7 @@ from xrpl.wallet import Wallet
 
 from lfg_core import config as core_config
 from lfg_core import rarity as _rarity
+from lfg_core import xrpl_ops
 from lfg_core.config import JSON_RPC_URL, SOURCE_TAG
 from surfaces._client.errors import ServiceError
 from surfaces.discord_bot import config
@@ -28,6 +29,20 @@ SEED = config.SEED
 # admin burns hit mainnet on a mainnet deploy. (Was hardcoded to testnet;
 # Greptile P1 on #79.)
 ADMIN_LOG_CHANNEL_ID = config.ADMIN_LOG_CHANNEL_ID
+
+
+async def _admin_interaction_check(interaction: discord.Interaction) -> bool:
+    perms = getattr(interaction.user, "guild_permissions", None)
+    if not perms or not perms.administrator:
+        if interaction.response.is_done():
+            await interaction.followup.send("Administrator permission required.", ephemeral=True)
+        else:
+            await interaction.response.send_message(
+                "Administrator permission required.", ephemeral=True
+            )
+        logging.warning("Rejected /admin interaction from %s", interaction.user)
+        return False
+    return True
 
 
 async def burn_nft(nft_id: str) -> bool:
@@ -49,7 +64,8 @@ async def burn_nft(nft_id: str) -> bool:
 
         # Submit and wait for validation
         logging.info("Submitting burn transaction...")
-        response = await asyncio.to_thread(submit_and_wait, burn_tx, client, wallet)
+        async with xrpl_ops.submission_coordinator(core_config.SIGNING_ACCOUNT):
+            response = await asyncio.to_thread(submit_and_wait, burn_tx, client, wallet)
 
         if response.result.get("meta", {}).get("TransactionResult") == "tesSUCCESS":
             logging.info(f"Successfully burned NFT: {nft_id}")
@@ -81,6 +97,8 @@ class BurnNFTModal(Modal, title="Burn NFT"):
     )
 
     async def on_submit(self, interaction: discord.Interaction):
+        if not await _admin_interaction_check(interaction):
+            return
         await interaction.response.defer(ephemeral=True)
 
         try:
@@ -145,6 +163,9 @@ class BurnConfirmView(View):
         self.nft_number = nft_number
         self.nft_id = nft_id
         self.reason = reason
+
+    async def interaction_check(self, interaction: discord.Interaction) -> bool:
+        return await _admin_interaction_check(interaction)
 
     @discord.ui.button(label="Confirm Burn", style=discord.ButtonStyle.danger)
     async def confirm_burn(self, interaction: discord.Interaction, button: Button[Any]):
@@ -268,6 +289,8 @@ class RarityOddsModal(Modal, title="View Rarity Odds"):
     )
 
     async def on_submit(self, interaction: discord.Interaction):
+        if not await _admin_interaction_check(interaction):
+            return
         conn = _rarity.connect()
         try:
             rows = _rarity.get_odds(conn, self.body.value.strip(), self.category.value.strip())
@@ -299,6 +322,8 @@ class RarityBoostModal(Modal, title="Arm Trait Boost"):
     )
 
     async def on_submit(self, interaction: discord.Interaction):
+        if not await _admin_interaction_check(interaction):
+            return
         from lfg_core import config as _cfg
 
         conn = _rarity.connect()
@@ -355,6 +380,8 @@ class RarityDisableModal(Modal, title="Toggle Trait"):
     action: TextInput[Any] = TextInput(label="Action (DISABLE or ENABLE)", max_length=10)
 
     async def on_submit(self, interaction: discord.Interaction):
+        if not await _admin_interaction_check(interaction):
+            return
         val = self.action.value.strip().upper()
         if val not in ("DISABLE", "ENABLE"):
             await interaction.response.send_message(
@@ -401,11 +428,120 @@ def _x_status_embed(status: dict[str, Any]) -> Embed:
     return embed
 
 
+def _format_countdown(seconds: int | None) -> str:
+    if seconds is None:
+        return "Unavailable"
+    hours, remainder = divmod(max(0, seconds), 3600)
+    minutes, seconds = divmod(remainder, 60)
+    return f"{hours:02}:{minutes:02}:{seconds:02}"
+
+
+def _sponsored_status_embed(status: dict[str, Any]) -> Embed:
+    """Render the service's authoritative sponsored-mint campaign status."""
+    state = str(status.get("state", "unknown")).replace("_", " ").title()
+    admitted = sum(
+        int(status.get(name, 0))
+        for name in ("reserved", "minting", "minted", "offered", "accepted")
+    )
+    confirmed = sum(int(status.get(name, 0)) for name in ("minted", "offered", "accepted"))
+    changed_at = status.get("changed_at")
+    embed = Embed(title="🎟️ Sponsored Mint Status", color=0x9C84EF)
+    embed.add_field(name="Campaign", value=state, inline=True)
+    embed.add_field(
+        name="Countdown",
+        value=_format_countdown(status.get("countdown_seconds")),
+        inline=True,
+    )
+    embed.add_field(name="Admitted", value=f"{admitted} / {status.get('cap', '?')}", inline=True)
+    embed.add_field(name="Confirmed", value=f"{confirmed} / {status.get('cap', '?')}", inline=True)
+    embed.add_field(
+        name="Accepted / Tagged",
+        value=f"{status.get('accepted', 0)} / {status.get('tagged_sponsored_wallets', 0)}",
+        inline=True,
+    )
+    unique = status.get("unique_tagged_wallets")
+    embed.add_field(
+        name="Unique SourceTag",
+        value=f"{unique if unique is not None else 'History unavailable'} / {status.get('unique_target', '?')}",
+        inline=True,
+    )
+    embed.add_field(
+        name="LFGO Balance",
+        value=str(
+            status.get("lfgo_balance")
+            if status.get("lfgo_balance") is not None
+            else "Balance lookup failed"
+        ),
+        inline=True,
+    )
+    embed.add_field(
+        name="Recovery",
+        value="✅ Ready" if status.get("recovery_ready") else "❌ Sponsored disabled",
+        inline=True,
+    )
+    burn_ledger = int(status.get("burn_burned", 0))
+    burn_pending = int(status.get("burn_pending", 0))
+    burn_noop = int(status.get("burn_noop", 0))
+    burn_retryable = int(status.get("burn_retryable", burn_pending))
+    burn_indeterminate = int(status.get("burn_indeterminate", 0))
+    burn_terminal = int(status.get("burn_terminal", 0))
+    embed.add_field(
+        name="Burned / Pending",
+        value=f"{burn_ledger} / {burn_pending}",
+        inline=True,
+    )
+    embed.add_field(
+        name="Burn ledger / No-op",
+        value=f"{burn_ledger} / {burn_noop}",
+        inline=True,
+    )
+    embed.add_field(
+        name="Burn retryable",
+        value=str(burn_retryable),
+        inline=True,
+    )
+    embed.add_field(
+        name="Burn intervention",
+        value=f"Indeterminate {burn_indeterminate} / Terminal {burn_terminal}",
+        inline=True,
+    )
+    embed.add_field(
+        name="Last Operator",
+        value=str(status.get("last_operator") or "No campaign activity"),
+        inline=False,
+    )
+    embed.add_field(
+        name="Last Change",
+        value=f"<t:{changed_at}:f>" if changed_at is not None else "No campaign activity",
+        inline=False,
+    )
+    return embed
+
+
 # Add burn button to AdminView
 class AdminView(View):
     def __init__(self):
         super().__init__(timeout=600)  # 10 minute timeout
         logging.info("Initializing AdminView")
+
+    async def interaction_check(self, interaction: discord.Interaction) -> bool:
+        # Delegate rather than re-implement: this gate and the one every modal
+        # calls must never be able to drift apart.
+        return await _admin_interaction_check(interaction)
+
+    def _apply_sponsored_status(self, status: dict[str, Any]) -> None:
+        active = status.get("state") in {"active", "at_capacity"}
+        self.sponsored_start_button.disabled = active
+        self.sponsored_stop_button.disabled = not active
+
+    async def _refresh_sponsored_status(self, interaction: discord.Interaction) -> None:
+        status = await svc.sponsored_mint_status()
+        self._apply_sponsored_status(status)
+        try:
+            await interaction.edit_original_response(view=self)
+        except discord.HTTPException as e:
+            logging.warning("Sponsored mint panel re-render failed: %s", e)
+        await interaction.followup.send(embed=_sponsored_status_embed(status), ephemeral=True)
 
     @discord.ui.button(label="📊 View Stats", style=discord.ButtonStyle.primary)
     async def stats_button(self, interaction: discord.Interaction, button: Button[Any]):
@@ -526,6 +662,61 @@ class AdminView(View):
         action = "paused" if status["paused"] else "resumed"
         await log_admin_action(interaction.client, f"📡 X posting {action} by {interaction.user}")
 
+    @discord.ui.button(label="▶️ Start Sponsored Mint", style=discord.ButtonStyle.success, row=2)
+    async def sponsored_start_button(self, interaction: discord.Interaction, button: Button[Any]):
+        await interaction.response.defer(ephemeral=True)
+        actor = f"discord:{interaction.user.id}"
+        try:
+            await svc.sponsored_mint_start(actor)
+        except ServiceError as e:
+            logging.error("Sponsored mint start failed: %s", e)
+            await interaction.followup.send(
+                f"❌ Failed to start sponsored mint: {e.message}", ephemeral=True
+            )
+            return
+        await log_admin_action(interaction.client, f"🎟️ Sponsored mint started by {actor}")
+        try:
+            await self._refresh_sponsored_status(interaction)
+        except ServiceError as e:
+            logging.warning("Sponsored mint started but status refresh failed: %s", e)
+            await interaction.followup.send(
+                "✅ Sponsored mint started, but status refresh failed.", ephemeral=True
+            )
+
+    @discord.ui.button(label="⏹️ Stop Sponsored Mint", style=discord.ButtonStyle.danger, row=2)
+    async def sponsored_stop_button(self, interaction: discord.Interaction, button: Button[Any]):
+        await interaction.response.defer(ephemeral=True)
+        actor = f"discord:{interaction.user.id}"
+        try:
+            await svc.sponsored_mint_stop(actor)
+        except ServiceError as e:
+            logging.error("Sponsored mint stop failed: %s", e)
+            await interaction.followup.send(
+                f"❌ Failed to stop sponsored mint: {e.message}", ephemeral=True
+            )
+            return
+        await log_admin_action(interaction.client, f"🎟️ Sponsored mint stopped by {actor}")
+        try:
+            await self._refresh_sponsored_status(interaction)
+        except ServiceError as e:
+            logging.warning("Sponsored mint stopped but status refresh failed: %s", e)
+            await interaction.followup.send(
+                "✅ Sponsored mint stopped, but status refresh failed.", ephemeral=True
+            )
+
+    @discord.ui.button(
+        label="🔄 Refresh Sponsored Mint", style=discord.ButtonStyle.secondary, row=2
+    )
+    async def sponsored_refresh_button(self, interaction: discord.Interaction, button: Button[Any]):
+        await interaction.response.defer(ephemeral=True)
+        try:
+            await self._refresh_sponsored_status(interaction)
+        except ServiceError as e:
+            logging.error("Sponsored mint status refresh failed: %s", e)
+            await interaction.followup.send(
+                f"❌ Failed to refresh sponsored mint: {e.message}", ephemeral=True
+            )
+
 
 @tree.command(name="admin", description="Admin control panel for NFT management")
 @app_commands.checks.has_permissions(administrator=True)  # Add explicit permission check
@@ -565,6 +756,13 @@ async def admin_command(interaction: discord.Interaction):
         view.x_toggle_button.label = _x_toggle_label(status["paused"])
     except ServiceError as e:
         logging.warning(f"x_status failed while building admin panel: {e}")
+    try:
+        sponsored_status = await svc.sponsored_mint_status()
+        view._apply_sponsored_status(sponsored_status)
+        for field in _sponsored_status_embed(sponsored_status).fields:
+            embed.add_field(name=field.name, value=field.value, inline=field.inline)
+    except ServiceError as e:
+        logging.warning(f"sponsored_mint_status failed while building admin panel: {e}")
 
     await interaction.followup.send(embed=embed, view=view, ephemeral=True)
 
@@ -579,6 +777,8 @@ class NFTLookupModal(Modal, title="NFT Lookup"):
     )
 
     async def on_submit(self, interaction: discord.Interaction):
+        if not await _admin_interaction_check(interaction):
+            return
         await interaction.response.defer(ephemeral=True)
         logging.info(
             f"NFT lookup requested for number {self.nft_number.value} by {interaction.user}"

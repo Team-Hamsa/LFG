@@ -8,6 +8,8 @@ import os
 import sqlite3
 import sys
 
+import pytest
+
 os.environ.setdefault("DISCORD_BOT_TOKEN", "x")
 os.environ.setdefault("XUMM_API_KEY", "x")
 os.environ.setdefault("XUMM_API_SECRET", "x")
@@ -25,8 +27,12 @@ sys.path.insert(0, os.path.join(REPO, "scripts"))
 import onchain_listener as oln  # noqa: E402
 
 from lfg_core import closet_token as bt  # noqa: E402
-from lfg_core import config, market_store, nft_index, trait_token  # noqa: E402
+from lfg_core import config, market_store, nft_index, sponsored_mint, trait_token  # noqa: E402
 from lfg_core import economy_store as es  # noqa: E402
+from lfg_core import history_store as _hs  # noqa: E402
+
+# Fixture ledger ranges must sit above the real earliest-available ledger (32570).
+L0 = _hs.EARLIEST_AVAILABLE_LEDGER
 from lfg_core import trait_economy as te  # noqa: E402
 
 NON_BODY = te.NON_BODY_SLOTS
@@ -568,3 +574,545 @@ def test_stream_tx_tec_burn_mutates_nothing(tmp_path):
         "SELECT is_burned FROM onchain_nfts WHERE nft_id=?", (fx.NFT_A,)
     ).fetchone() == (1,)
     assert hconn.execute("SELECT COUNT(*) FROM nft_events").fetchone()[0] == 1
+
+
+def test_listener_records_only_newly_archived_sponsored_acceptance(tmp_path, monkeypatch):
+    from types import SimpleNamespace
+
+    from lfg_core import history_store
+    from lfg_core import sponsored_mint as sm
+
+    app = str(tmp_path / "app.db")
+    campaign = sm.start_campaign(app, network="mainnet", actor="admin", now=100)
+    with sqlite3.connect(app) as app_conn:
+        app_conn.execute(
+            """
+            INSERT INTO free_mint_claims (
+                id, network, wallet, campaign_id, session_id, status,
+                reserved_at, reservation_expires_at, offer_id, created_at, updated_at
+            ) VALUES (?, ?, ?, ?, ?, ?, 100, NULL, ?, 100, 100)
+            """,
+            (
+                "listener-claim",
+                "mainnet",
+                "rListener",
+                campaign.campaign_id,
+                "session",
+                "offered",
+                "LISTENER-OFFER",
+            ),
+        )
+    monkeypatch.setattr(
+        sm, "db_path", SimpleNamespace(app_db_path=lambda network: app), raising=False
+    )
+    monkeypatch.setattr(
+        oln.history_events,
+        "derive_nft_events",
+        lambda *_args, **_kwargs: [{"nft_id": "listener-nft"}],
+    )
+    monkeypatch.setattr(oln.history_events, "nft_id_issuer_matches", lambda *_args: True)
+    monkeypatch.setattr(oln.history_events, "derive_brix_events", lambda *_args, **_kwargs: [])
+
+    hconn = history_store.init_history_db(str(tmp_path / "history.db"))
+    tx = {
+        "TransactionType": "NFTokenAcceptOffer",
+        "Account": "rListener",
+        "SourceTag": config.SOURCE_TAG,
+        "hash": "C" * 64,
+        "date": 800_000_000,
+        "validated": True,
+        "NFTokenSellOffer": "LISTENER-OFFER",
+        "meta": {"TransactionResult": "tesSUCCESS"},
+    }
+    ctx = {
+        "nft_issuer": "unused",
+        "issuer_hex": "00" * 20,
+        "brix_issuer": "unused",
+        "brix_hex": "unused",
+        "numbers": {},
+        "network": "mainnet",
+    }
+
+    oln._record_history(hconn, tx, ctx)
+    oln._record_history(hconn, tx, ctx)
+    with sqlite3.connect(app) as app_conn:
+        claim = app_conn.execute(
+            "SELECT status, accept_tx_hash FROM free_mint_claims WHERE wallet=?", ("rListener",)
+        ).fetchone()
+        audits = app_conn.execute(
+            "SELECT count(*) FROM free_mint_audit WHERE action='claim_accepted'"
+        ).fetchone()[0]
+    assert claim == ("accepted", tx["hash"])
+    assert audits == 1
+
+
+def test_listener_keeps_raw_history_when_acceptance_projection_is_deferred(tmp_path, monkeypatch):
+    from lfg_core import history_store
+    from lfg_core import sponsored_mint as sm
+
+    monkeypatch.setattr(
+        oln.history_events,
+        "derive_nft_events",
+        lambda *_args, **_kwargs: [{"nft_id": "listener-nft"}],
+    )
+    monkeypatch.setattr(oln.history_events, "nft_id_issuer_matches", lambda *_args: True)
+    monkeypatch.setattr(oln.history_events, "derive_brix_events", lambda *_args, **_kwargs: [])
+    hconn = history_store.init_history_db(str(tmp_path / "history.db"))
+    tx = {
+        "TransactionType": "NFTokenAcceptOffer",
+        "Account": "rListener",
+        "SourceTag": config.SOURCE_TAG,
+        "hash": "D" * 64,
+        "date": 800_000_000,
+        "validated": True,
+        "meta": {"TransactionResult": "tesSUCCESS"},
+    }
+    ctx = {
+        "nft_issuer": "unused",
+        "issuer_hex": "00" * 20,
+        "brix_issuer": "unused",
+        "brix_hex": "unused",
+        "numbers": {},
+        "network": "mainnet",
+    }
+    calls = {"count": 0}
+
+    def fail_once(*_args, **_kwargs):
+        calls["count"] += 1
+        if calls["count"] == 1:
+            raise sqlite3.OperationalError("busy")
+        return True
+
+    monkeypatch.setattr(sm, "observe_sponsored_acceptance", fail_once)
+    oln._record_history(hconn, tx, ctx)
+    assert hconn.execute("SELECT count(*) FROM xrpl_txs").fetchone()[0] == 1
+
+    oln._record_history(hconn, tx, ctx)
+    assert hconn.execute("SELECT count(*) FROM xrpl_txs").fetchone()[0] == 1
+    assert calls["count"] == 1
+
+
+@pytest.mark.parametrize(
+    ("validated", "expected"),
+    [(True, True), (False, False), (None, False), ("yes", False)],
+)
+def test_stream_normalization_requires_explicit_validated_flag(validated, expected):
+    msg = {
+        "type": "transaction",
+        "tx_json": {"TransactionType": "NFTokenAcceptOffer"},
+        "meta": {"TransactionResult": "tesSUCCESS"},
+    }
+    if validated is not None:
+        msg["validated"] = validated
+
+    tx = oln._normalize_stream_tx(msg)
+    assert tx is not None
+    assert tx["validated"] is expected
+
+
+def test_dispatch_archives_tagged_foreign_issuer_mint_before_business_filter(tmp_path, monkeypatch):
+    """The loop-level foreign collection optimization cannot hide eligibility."""
+    from lfg_core import history_store
+
+    hconn = history_store.init_history_db(str(tmp_path / "history.db"))
+    history_store.record_archive_baseline(
+        hconn,
+        network="testnet",
+        genesis_hash="testnet-ledger-one",
+        ledger_min=history_store.EARLIEST_AVAILABLE_LEDGER,
+        ledger_max=L0 + 50,
+        provenance="external-audit",
+        completed_at=100,
+    )
+    tx = {
+        "TransactionType": "NFTokenMint",
+        "Issuer": "rForeignIssuer",
+        "Account": "rEligibleWallet",
+        "SourceTag": config.SOURCE_TAG,
+        "hash": "E" * 64,
+        "ledger_index": 51,
+        "date": 100,
+        "validated": True,
+        "meta": {"TransactionResult": "tesSUCCESS"},
+    }
+    ctx = {
+        "network": "testnet",
+        "genesis_hash": "testnet-ledger-one",
+        "source_tag": config.SOURCE_TAG,
+        "nft_issuer": "rOurIssuer",
+        "issuer_hex": "00" * 20,
+        "brix_issuer": "unused",
+        "brix_hex": "unused",
+        "numbers": {},
+    }
+
+    async def business_processing_must_be_skipped(*_args, **_kwargs):
+        raise AssertionError("foreign mint reached business processing")
+
+    monkeypatch.setattr(oln, "process_stream_tx", business_processing_must_be_skipped)
+    _run(
+        oln._dispatch_stream_tx(
+            _conn(),
+            tx,
+            collection_issuer="rOurIssuer",
+            fetch_token=_none_token,
+            fetch_meta=_none_meta,
+            is_ours=lambda _token: False,
+            history_conn=hconn,
+            history_ctx=ctx,
+        )
+    )
+
+    row = hconn.execute(
+        "SELECT account, source_tag FROM xrpl_txs WHERE tx_hash = ?", (tx["hash"],)
+    ).fetchone()
+    assert tuple(row) == ("rEligibleWallet", config.SOURCE_TAG)
+
+
+def test_listener_reconnect_invalidates_baseline_and_later_ledgers_do_not_heal_it(tmp_path):
+    from lfg_core import history_store
+
+    hconn = history_store.init_history_db(str(tmp_path / "history.db"))
+    history_store.record_archive_baseline(
+        hconn,
+        network="testnet",
+        genesis_hash="testnet-ledger-one",
+        ledger_min=history_store.EARLIEST_AVAILABLE_LEDGER,
+        ledger_max=L0 + 50,
+        provenance="external-audit",
+        completed_at=100,
+    )
+    history_store.record_validated_ledger(
+        hconn,
+        network="testnet",
+        genesis_hash="testnet-ledger-one",
+        ledger_index=L0 + 51,
+        close_time=100,
+        observed_at=100,
+    )
+
+    oln._mark_stream_disconnected(hconn, network="testnet", after_ledger=L0 + 51, at=101)
+    history_store.record_validated_ledger(
+        hconn,
+        network="testnet",
+        genesis_hash="testnet-ledger-one",
+        ledger_index=L0 + 60,
+        close_time=110,
+        observed_at=110,
+    )
+
+    state = history_store.get_archive_state(hconn, "testnet")
+    assert state is not None
+    assert state.baseline_complete is False
+    assert state.continuity_gap_after == L0 + 51
+    assert state.continuity_gap_reason == "transaction stream disconnected"
+    assert state.validated_ledger_index == L0 + 60
+
+
+def test_endpoint_mismatch_is_rejected_before_archive_cursor_advances(tmp_path):
+    from lfg_core import history_store
+
+    hconn = history_store.init_history_db(str(tmp_path / "history.db"))
+    history_store.record_archive_baseline(
+        hconn,
+        network="testnet",
+        genesis_hash="expected-ledger-one",
+        ledger_min=history_store.EARLIEST_AVAILABLE_LEDGER,
+        ledger_max=L0 + 50,
+        provenance="external-audit",
+        completed_at=100,
+    )
+    ctx = {
+        "network": "testnet",
+        "genesis_hash": "expected-ledger-one",
+        "source_tag": config.SOURCE_TAG,
+    }
+    snapshot = history_store.EndpointSnapshot(
+        genesis_hash="different-ledger-one", validated_ledger_index=L0 + 50
+    )
+
+    with pytest.raises(RuntimeError, match="ledger-1 identity"):
+        oln._verify_archive_connection(hconn, ctx, snapshot)
+
+    state = history_store.get_archive_state(hconn, "testnet")
+    assert state is not None
+    assert state.validated_ledger_index is None
+    assert state.baseline_complete is False
+
+
+def test_listener_start_rejects_source_tag_snapshot_change(tmp_path):
+    from lfg_core import history_store
+
+    hconn = history_store.init_history_db(str(tmp_path / "history.db"))
+    history_store.record_archive_baseline(
+        hconn,
+        network="testnet",
+        genesis_hash="testnet-ledger-one",
+        ledger_min=history_store.EARLIEST_AVAILABLE_LEDGER,
+        ledger_max=L0 + 50,
+        provenance="external-audit",
+        source_tag=config.SOURCE_TAG + 1,
+        completed_at=100,
+    )
+    ctx = {
+        "network": "testnet",
+        "genesis_hash": "testnet-ledger-one",
+        "source_tag": config.SOURCE_TAG,
+    }
+    snapshot = history_store.EndpointSnapshot(
+        genesis_hash="testnet-ledger-one", validated_ledger_index=L0 + 50
+    )
+
+    with pytest.raises(RuntimeError, match="SourceTag"):
+        oln._verify_archive_connection(hconn, ctx, snapshot)
+
+    assert history_store.get_archive_state(hconn, "testnet").baseline_complete is False
+
+
+def test_listener_start_invalidates_uncovered_ledgers_after_certified_baseline(tmp_path):
+    from lfg_core import history_store
+
+    hconn = history_store.init_history_db(str(tmp_path / "history.db"))
+    history_store.record_archive_baseline(
+        hconn,
+        network="testnet",
+        genesis_hash="testnet-ledger-one",
+        ledger_min=history_store.EARLIEST_AVAILABLE_LEDGER,
+        ledger_max=L0 + 50,
+        provenance="external-audit",
+        completed_at=100,
+    )
+    ctx = {
+        "network": "testnet",
+        "genesis_hash": "testnet-ledger-one",
+        "source_tag": config.SOURCE_TAG,
+    }
+    snapshot = history_store.EndpointSnapshot(
+        genesis_hash="testnet-ledger-one", validated_ledger_index=L0 + 52
+    )
+
+    oln._verify_archive_connection(hconn, ctx, snapshot)
+
+    state = history_store.get_archive_state(hconn, "testnet")
+    assert state is not None
+    assert state.baseline_complete is False
+    assert state.continuity_gap_after == L0 + 50
+    assert state.continuity_gap_before == L0 + 52
+
+
+def test_listener_restart_with_prior_live_cursor_fails_closed(tmp_path):
+    from lfg_core import history_store
+
+    hconn = history_store.init_history_db(str(tmp_path / "history.db"))
+    history_store.record_archive_baseline(
+        hconn,
+        network="testnet",
+        genesis_hash="testnet-ledger-one",
+        ledger_min=history_store.EARLIEST_AVAILABLE_LEDGER,
+        ledger_max=L0 + 50,
+        provenance="external-audit",
+        completed_at=100,
+    )
+    history_store.record_validated_ledger(
+        hconn,
+        network="testnet",
+        genesis_hash="testnet-ledger-one",
+        ledger_index=L0 + 51,
+        close_time=100,
+        observed_at=100,
+    )
+    ctx = {
+        "network": "testnet",
+        "genesis_hash": "testnet-ledger-one",
+        "source_tag": config.SOURCE_TAG,
+    }
+    snapshot = history_store.EndpointSnapshot(
+        genesis_hash="testnet-ledger-one", validated_ledger_index=L0 + 51
+    )
+
+    oln._verify_archive_connection(hconn, ctx, snapshot)
+
+    state = history_store.get_archive_state(hconn, "testnet")
+    assert state is not None
+    assert state.baseline_complete is False
+    assert state.continuity_gap_after == L0 + 51
+    assert "restart" in state.continuity_gap_reason
+
+
+def test_uncertified_archive_does_not_block_the_listener_or_write_state(tmp_path):
+    """Regression: a stack whose history DB has no certified baseline (every
+    stack, until an operator runs the audited backfill) must still run the
+    listener. `_verify_archive_connection` previously had no empty-identity
+    branch, and `_listen` raised outright before subscribing — pm2 turned that
+    into a crash loop that took the NFT index, market listings and history sync
+    down with it. With no certified identity the verifier is a no-op: it does
+    not raise, and it must not stamp continuity state it cannot vouch for."""
+    from lfg_core import history_store
+
+    hconn = history_store.init_history_db(str(tmp_path / "history.db"))
+    ctx = {"network": "testnet", "genesis_hash": "", "source_tag": config.SOURCE_TAG}
+    snapshot = history_store.EndpointSnapshot(
+        genesis_hash="testnet-ledger-one", validated_ledger_index=L0 + 51
+    )
+
+    oln._verify_archive_connection(hconn, ctx, snapshot)
+
+    assert history_store.get_archive_state(hconn, "testnet") is None
+
+
+def test_uncertified_archive_still_applies_index_events_without_archive_state(tmp_path):
+    """The listener's pre-sponsored duties are unchanged with no certified
+    archive: a validated tagged tx is archived as raw evidence, but no
+    archive_state row is fabricated from an unproven genesis identity."""
+    from lfg_core import history_store
+
+    hconn = history_store.init_history_db(str(tmp_path / "history.db"))
+    ctx = {"network": "testnet", "genesis_hash": "", "source_tag": config.SOURCE_TAG}
+    tx = {
+        "validated": True,
+        "hash": "A" * 64,
+        "ledger_index": 77,
+        "TransactionType": "Payment",
+        "Account": "rSOMEONE",
+        "SourceTag": config.SOURCE_TAG,
+        "date": 700000000,
+        "meta": {"TransactionResult": "tesSUCCESS"},
+    }
+
+    assert oln._archive_eligibility_tx(hconn, tx, ctx) is True
+
+    assert history_store.get_archive_state(hconn, "testnet") is None
+    row = hconn.execute("SELECT account FROM xrpl_txs WHERE tx_hash = ?", ("A" * 64,)).fetchone()
+    assert row["account"] == "rSOMEONE"
+
+
+def test_archive_failure_does_not_stall_index_and_market_applies(tmp_path, monkeypatch):
+    """CodeRabbit on #328: eligibility archiving runs before the business
+    applies so a raising apply_tx can't lose the evidence — but the reverse must
+    not hold. The index, market listings and derived history predate the
+    sponsored archive and are what the marketplace and Activity read; a sqlite
+    hiccup in archiving must not skip them for that transaction."""
+    from lfg_core import history_store
+
+    hconn = history_store.init_history_db(str(tmp_path / "history.db"))
+    ctx = {"network": "testnet", "genesis_hash": "", "source_tag": config.SOURCE_TAG}
+
+    def boom(*args, **kwargs):
+        raise sqlite3.OperationalError("database is locked")
+
+    monkeypatch.setattr(oln, "_archive_eligibility_tx", boom)
+
+    applied = []
+
+    async def fake_apply_tx(conn, tx, *args, **kwargs):
+        applied.append(tx.get("hash"))
+
+    async def noop(*args, **kwargs):
+        return None
+
+    monkeypatch.setattr(oln.nft_listener, "apply_tx", fake_apply_tx)
+    monkeypatch.setattr(oln.nft_listener, "apply_economy_tx", noop)
+    monkeypatch.setattr(oln.nft_listener, "apply_market_tx", noop)
+    monkeypatch.setattr(oln, "_record_history", lambda *a, **k: None)
+
+    tx = {"validated": True, "hash": "B" * 64, "TransactionType": "Payment", "ledger_index": 5}
+
+    async def scenario():
+        await oln.process_stream_tx(
+            sqlite3.connect(":memory:"),
+            tx,
+            fetch_token=noop,
+            fetch_meta=noop,
+            is_ours=lambda t: False,
+            history_conn=hconn,
+            history_ctx=ctx,
+        )
+
+    # _run, not asyncio.run: asyncio.run sets the policy's current loop to None
+    # on exit, which strands later tests that call asyncio.get_event_loop()
+    # (test_pending_offers, test_rarity). That is why this module has its own
+    # runner — see the note on _run.
+    _run(scenario())
+
+    assert applied == ["B" * 64], "index apply was skipped because archiving raised"
+
+
+def _certified(hconn, *, ledger_max, network="testnet"):
+    from lfg_core import history_store
+
+    history_store.record_archive_baseline(
+        hconn,
+        network=network,
+        genesis_hash="testnet-ledger-one",
+        ledger_min=history_store.EARLIEST_AVAILABLE_LEDGER,
+        ledger_max=ledger_max,
+        provenance="external-audit",
+        completed_at=100,
+    )
+
+
+def test_reconnect_at_the_certified_tip_is_the_intended_clean_path(tmp_path):
+    """Greptile #328 round 2 flags the equal-tip branch as "skips continuity
+    invalidation". It is the only route to a usable archive and it is sound:
+    the baseline swept [1, N] via account_tx over CLOSED, immutable validated
+    ledgers, and the stream resumes at N+1. Invalidating here would mean
+    certification could never produce a usable archive at all — the documented
+    flow is certify at tip N, start the listener at tip N."""
+    from lfg_core import history_store
+
+    hconn = history_store.init_history_db(str(tmp_path / "history.db"))
+    _certified(hconn, ledger_max=L0 + 500)
+    ctx = {
+        "network": "testnet",
+        "genesis_hash": "testnet-ledger-one",
+        "source_tag": config.SOURCE_TAG,
+    }
+    snapshot = history_store.EndpointSnapshot(
+        genesis_hash="testnet-ledger-one", validated_ledger_index=L0 + 500
+    )
+
+    oln._verify_archive_connection(hconn, ctx, snapshot)
+
+    state = history_store.get_archive_state(hconn, "testnet")
+    assert state.continuity_gap_at is None
+    assert state.baseline_complete is True
+
+
+def test_reconnect_cannot_resurrect_an_uncovered_gap(tmp_path):
+    """The residual Greptile is reaching for — a gap around a restart making
+    the archive usable again — is closed one layer down, by the certification
+    fix in 8f7e370. A gap the sweep never re-covered keeps baseline_complete=0,
+    so _verify_archive_connection returns before the equal-tip branch and
+    archive_is_usable stays closed no matter what the stream does next."""
+    from lfg_core import history_store
+
+    hconn = history_store.init_history_db(str(tmp_path / "history.db"))
+    _certified(hconn, ledger_max=L0 + 500)
+    # Continuity lost well past the tip the next certification will reach.
+    history_store.invalidate_archive_continuity(
+        hconn,
+        network="testnet",
+        reason="transaction stream disconnected",
+        gap_after=L0 + 900,
+        invalidated_at=110,
+    )
+    # Re-certifying at a tip BELOW the loss point must not clear it.
+    _certified(hconn, ledger_max=L0 + 600)
+    assert history_store.get_archive_state(hconn, "testnet").baseline_complete is False
+
+    ctx = {
+        "network": "testnet",
+        "genesis_hash": "testnet-ledger-one",
+        "source_tag": config.SOURCE_TAG,
+    }
+    snapshot = history_store.EndpointSnapshot(
+        genesis_hash="testnet-ledger-one", validated_ledger_index=L0 + 600
+    )
+    oln._verify_archive_connection(hconn, ctx, snapshot)
+
+    state = history_store.get_archive_state(hconn, "testnet")
+    assert state.continuity_gap_after == L0 + 900, "the uncovered gap was lost"
+    assert state.baseline_complete is False
+    assert not sponsored_mint.archive_is_usable(
+        str(tmp_path / "history.db"), network="testnet", now=200
+    )

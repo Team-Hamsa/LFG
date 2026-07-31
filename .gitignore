@@ -77,3 +77,9 @@ share_cards/
 
 # layer-dimension audit result cache (scripts/audit_layer_dimensions.py)
 .layer_dimensions_cache.json
+
+# Superpowers SDD scratch: per-task review diffs and the progress ledger are
+# agent working state, not repo content. A single feature branch accumulated
+# ~52k lines of them, which is larger than the change itself and blinds PR
+# review tooling.
+.superpowers/
