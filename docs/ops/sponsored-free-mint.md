@@ -91,6 +91,14 @@ and admission fails closed until Step 0 is re-run. Consequences for planning:
     before deploying so the single-certification order above applies
     instead.
 - Do not promote, restart, or redeploy either stack during a live campaign.
+- **Every certification clears the listener's heartbeat** (`heartbeat_at` and
+  `validated_ledger_index` are reset to NULL), and `archive_is_usable` fails
+  closed while the heartbeat is absent. The running listener restamps it on
+  the next transaction it streams, so an audit run in the seconds after a
+  certification can fail on freshness alone. If the audit fails right after
+  certifying, wait for the listener to process a transaction (check the row:
+  `SELECT heartbeat_at FROM archive_state;`) and re-run the audit — do not
+  re-certify, which would only clear the heartbeat again.
 - Verify with the readiness audit immediately before starting a campaign; a
   green audit is the only proof the archive is currently usable.
 
