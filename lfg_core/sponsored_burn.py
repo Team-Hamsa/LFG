@@ -181,7 +181,9 @@ async def _heartbeat(db_path: str, burn: _LeasedBurn, stopped: asyncio.Event) ->
         try:
             await asyncio.wait_for(stopped.wait(), timeout=LEASE_SECONDS / 3)
             return
-        except TimeoutError:
+        except (TimeoutError, asyncio.TimeoutError):
+            # asyncio.TimeoutError is not the builtin TimeoutError before
+            # Python 3.11; see run_worker's idle sleep.
             pass
         now = int(time.time())
         try:
@@ -654,5 +656,8 @@ async def run_worker(db_path: str, stop: asyncio.Event) -> None:
             continue
         try:
             await asyncio.wait_for(stop.wait(), timeout=POLL_SECONDS)
-        except TimeoutError:
+        except (TimeoutError, asyncio.TimeoutError):
+            # asyncio.TimeoutError only became the builtin TimeoutError in
+            # Python 3.11; on 3.10 catching the builtin alone kills the
+            # worker on its first idle poll.
             pass
