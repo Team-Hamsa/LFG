@@ -17,6 +17,7 @@ import asyncio
 import sqlite3
 import struct
 import zlib
+from datetime import datetime, timedelta, timezone
 
 from lfg_core import rarity
 
@@ -573,7 +574,11 @@ def test_reschedule_preserves_clock(tmp_path, monkeypatch):
     from scripts import trait_dashboard as td
 
     db = str(tmp_path / "m.db")
-    started = "2026-07-11T00:00:00+00:00"
+    # Anchor the decay clock to now, not a literal date: reschedule_boost
+    # refuses a boost that has already finished decaying, so a hardcoded
+    # start silently becomes a time bomb once initial/step run out (7x over
+    # 6 x 72h = 18 days). One hour ago is unambiguously still active.
+    started = (datetime.now(timezone.utc) - timedelta(hours=1)).isoformat()
     _seed(db, "mainnet", [("ape", "Eyes", "Laser", 3, 1), ("ape", "Eyes", "Star", 1, 1)])
     _arm(db, "mainnet", "ape", "Eyes", "Laser", 7.0, 72, started)
     monkeypatch.setattr(td, "app_db_path", lambda net: db)

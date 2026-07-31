@@ -763,6 +763,107 @@ def test_certification_keeps_an_unbounded_gap_the_sweep_never_reached(tmp_path):
     assert state.baseline_complete is True
 
 
+def test_gap_reported_with_no_bounds_falls_back_to_the_certified_tip(tmp_path):
+    """A gap must never be recorded unbounded, or it can never be cleared.
+
+    `record_archive_baseline` sets `validated_ledger_index = NULL`, and the
+    listener's disconnect handlers derive their bound from exactly that
+    column. So a disconnect between a certification and the listener's next
+    validated-ledger write reports gap_after=None, and the clearing CASE
+    (which requires a non-NULL bound) then pins baseline_complete to 0 on
+    every future certification — permanently. The certified tip is the
+    correct fallback: coverage was proven through it, so a later sweep past
+    it genuinely proves the gap covered.
+    """
+    conn = history_store.init_history_db(str(tmp_path / "h.db"))
+    history_store.record_archive_baseline(
+        conn,
+        network="testnet",
+        genesis_hash="g",
+        ledger_min=history_store.EARLIEST_AVAILABLE_LEDGER,
+        ledger_max=L0 + 100,
+        provenance="first",
+        completed_at=10,
+    )
+    # The disconnect the listener actually reports after a certification.
+    history_store.invalidate_archive_continuity(
+        conn,
+        network="testnet",
+        reason="transaction stream disconnected",
+        gap_after=None,
+        gap_before=None,
+        invalidated_at=20,
+    )
+    state = history_store.get_archive_state(conn, "testnet")
+    assert state.baseline_complete is False
+    assert state.continuity_gap_after == L0 + 100, "gap must carry a provable bound"
+
+    history_store.record_archive_baseline(
+        conn,
+        network="testnet",
+        genesis_hash="g",
+        ledger_min=history_store.EARLIEST_AVAILABLE_LEDGER,
+        ledger_max=L0 + 500,
+        provenance="re-swept past the certified tip",
+        completed_at=30,
+    )
+    state = history_store.get_archive_state(conn, "testnet")
+    assert state.continuity_gap_at is None
+    assert state.baseline_complete is True
+
+
+def test_pre_source_tag_migration_leaves_a_recertifiable_archive(tmp_path):
+    """Upgrading a pre-`source_tag` archive must demand recertification, not
+    make it impossible. The migration invalidates the old baseline; if it
+    stamped an unbounded gap, no later certification could ever clear it and
+    the upgrade would permanently brick the feature on that stack."""
+    import sqlite3
+
+    path = str(tmp_path / "h.db")
+    old = sqlite3.connect(path)
+    old.execute(
+        """CREATE TABLE archive_state (
+               network               TEXT PRIMARY KEY,
+               genesis_hash          TEXT NOT NULL,
+               baseline_complete     INTEGER NOT NULL DEFAULT 0,
+               baseline_ledger_min   INTEGER,
+               baseline_ledger_max   INTEGER,
+               baseline_provenance   TEXT,
+               baseline_completed_at INTEGER,
+               validated_ledger_index INTEGER,
+               validated_close_time  INTEGER,
+               heartbeat_at          INTEGER,
+               updated_at            INTEGER NOT NULL
+           )"""
+    )
+    old.execute(
+        "INSERT INTO archive_state (network, genesis_hash, baseline_complete, "
+        "baseline_ledger_min, baseline_ledger_max, baseline_provenance, updated_at) "
+        "VALUES (?, ?, 1, ?, ?, ?, ?)",
+        ("testnet", "g", history_store.EARLIEST_AVAILABLE_LEDGER, L0 + 100, "legacy audit", 1),
+    )
+    old.commit()
+    old.close()
+
+    conn = history_store.init_history_db(path)
+    state = history_store.get_archive_state(conn, "testnet")
+    assert state.baseline_complete is False, "migration must force recertification"
+    assert state.continuity_gap_after == L0 + 100, "and must leave it recertifiable"
+
+    history_store.record_archive_baseline(
+        conn,
+        network="testnet",
+        genesis_hash="g",
+        ledger_min=history_store.EARLIEST_AVAILABLE_LEDGER,
+        ledger_max=L0 + 500,
+        provenance="recertified after upgrade",
+        completed_at=30,
+    )
+    state = history_store.get_archive_state(conn, "testnet")
+    assert state.baseline_complete is True
+    assert state.continuity_gap_at is None
+
+
 def test_identity_probe_never_asks_for_a_ledger_the_chain_cannot_serve():
     """Ledgers 1-32569 were lost in 2012 and no XRPL node serves them. Verified
     against live clio (mainnet wss://s2-clio.ripple.com and testnet) while

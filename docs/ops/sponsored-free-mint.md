@@ -89,6 +89,39 @@ certification. Never hand-edit `archive_state` to clear the gap flags; they
 are the only record that the archive was, at some point, not provably
 complete.
 
+### Repairing an archive stuck with an unbounded gap
+
+A gap clears only when a certification sweep provably reaches its upper
+extent, so a gap stored with **no bounds at all** cannot be cleared by
+re-certifying — the symptom is a certification run that reports success while
+the audit still says `archive provenance incomplete, mismatched, or stale`
+and `baseline_complete` stays `0`. Check with:
+
+```bash
+sqlite3 -readonly "$HISTORY_DB" \
+  "SELECT baseline_complete, continuity_gap_at, continuity_gap_after,
+          continuity_gap_before, continuity_gap_reason FROM archive_state;"
+```
+
+Versions before the fix for #337 could record that state after a listener
+disconnect that followed a certification. Re-record the gap once — the writer
+now backfills a bound from the row's own certified tip — then certify again:
+
+```bash
+cd /home/hamsa/LFG           # staging: /home/hamsa/LFG-staging
+.venv/bin/python - <<'PY'
+from lfg_core import history_store
+conn = history_store.init_history_db(history_store.history_db_path("mainnet"))
+history_store.invalidate_archive_continuity(
+    conn, network="mainnet", reason="rebound unbounded gap (#337)"
+)
+PY
+```
+
+This preserves the gap — it does not erase the record that continuity was
+lost — it only gives it the bound the sweep can be measured against. Confirm
+`continuity_gap_after` is now non-NULL, then re-run Step 0.
+
 ## Safety rules
 
 - Never re-mint a `minting`, `minted`, `offered`, `accepted`, or
