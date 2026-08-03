@@ -522,3 +522,29 @@ async def reverify_archive(
         # design (record_archive_baseline's CASE). Report it, don't mask it.
         return ReverifyResult(False, "gap_not_covered", ledger_max, provenance)
     return ReverifyResult(True, None, ledger_max, provenance)
+
+
+async def wait_for_archive_usable(
+    history_path: str,
+    *,
+    network: str,
+    timeout: float = 90.0,
+    poll: float = 5.0,
+    now_fn: Callable[[], float] = time.time,
+    sleep_fn: Callable[[float], Awaitable[None]] = asyncio.sleep,
+) -> bool:
+    """Wait for the listener to restamp the heartbeat after certification.
+
+    record_archive_baseline clears heartbeat/validated fields by design; the
+    streaming listener restamps them on the next validated ledger it applies.
+    Bounded so a listener with no archive identity (env genesis hash unset and
+    no prior row at ITS startup) turns into a clear failure, not a hang."""
+    from lfg_core import sponsored_mint
+
+    deadline = now_fn() + timeout
+    while True:
+        if sponsored_mint.archive_is_usable(history_path, network=network):
+            return True
+        if now_fn() >= deadline:
+            return False
+        await sleep_fn(poll)

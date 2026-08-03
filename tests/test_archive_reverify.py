@@ -163,3 +163,55 @@ def test_reverify_reports_sweep_failure(tmp_path):
     )
     assert not result.ok
     assert result.reason is not None and result.reason.startswith("sweep_failed: ")
+
+
+def test_wait_for_archive_usable_polls_until_true(monkeypatch, tmp_path):
+    from lfg_core import sponsored_mint
+
+    calls = {"n": 0}
+
+    def fake_usable(path, *, network=None, now=None):
+        calls["n"] += 1
+        return calls["n"] >= 3
+
+    monkeypatch.setattr(sponsored_mint, "archive_is_usable", fake_usable)
+    clock = {"t": 0.0}
+    slept: list[float] = []
+
+    async def fake_sleep(seconds):
+        clock["t"] += seconds
+        slept.append(seconds)
+
+    ok = asyncio.run(
+        archive_reverify.wait_for_archive_usable(
+            str(tmp_path / "h.db"),
+            network="testnet",
+            timeout=90.0,
+            poll=5.0,
+            now_fn=lambda: clock["t"],
+            sleep_fn=fake_sleep,
+        )
+    )
+    assert ok and calls["n"] == 3 and slept == [5.0, 5.0]
+
+
+def test_wait_for_archive_usable_times_out(monkeypatch, tmp_path):
+    from lfg_core import sponsored_mint
+
+    monkeypatch.setattr(sponsored_mint, "archive_is_usable", lambda *a, **k: False)
+    clock = {"t": 0.0}
+
+    async def fake_sleep(seconds):
+        clock["t"] += seconds
+
+    ok = asyncio.run(
+        archive_reverify.wait_for_archive_usable(
+            str(tmp_path / "h.db"),
+            network="testnet",
+            timeout=20.0,
+            poll=5.0,
+            now_fn=lambda: clock["t"],
+            sleep_fn=fake_sleep,
+        )
+    )
+    assert not ok

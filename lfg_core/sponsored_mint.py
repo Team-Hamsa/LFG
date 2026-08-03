@@ -703,6 +703,26 @@ def _status(
     )
 
 
+def audit_archive_reverify(
+    db_path: str, *, network: str, actor: str, result: str, now: int | None = None
+) -> None:
+    """Durable free_mint_audit row for an automated archive re-verification."""
+    _require_supported_network(network)
+    timestamp = _timestamp(now)
+    ensure_schema(db_path)
+    with _connect(db_path) as conn:
+        conn.execute("BEGIN IMMEDIATE")
+        _audit(
+            conn,
+            network=network,
+            actor=actor.strip() or "system",
+            action="archive_reverify",
+            at=timestamp,
+            campaign_id=None,
+            result=result,
+        )
+
+
 def start_campaign(
     db_path: str, *, network: str, actor: str, now: int | None = None
 ) -> CampaignStatus:

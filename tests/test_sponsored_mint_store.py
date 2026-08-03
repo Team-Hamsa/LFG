@@ -642,3 +642,19 @@ def test_empty_normalized_identifiers_do_not_consume_capacity(tmp_path):
     assert blank_session == sm.ReservationResult(False, "invalid_request", None)
     with sqlite3.connect(db) as conn:
         assert conn.execute("SELECT count(*) FROM free_mint_claims").fetchone()[0] == 0
+
+
+def test_audit_archive_reverify_writes_row(tmp_path):
+    db = str(tmp_path / "app.db")
+    sm.audit_archive_reverify(
+        db, network="testnet", actor="admin:42", result="ok", now=1_800_000_000
+    )
+    sm.audit_archive_reverify(
+        db, network="testnet", actor="admin:42", result="failed: genesis_mismatch"
+    )
+    with sqlite3.connect(db) as conn:
+        rows = conn.execute(
+            "SELECT actor, action, result FROM free_mint_audit ORDER BY at"
+        ).fetchall()
+    assert ("admin:42", "archive_reverify", "ok") in rows
+    assert ("admin:42", "archive_reverify", "failed: genesis_mismatch") in rows
