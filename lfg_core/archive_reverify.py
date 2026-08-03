@@ -5,6 +5,12 @@ Shared by the one-time manual baseline certification CLI
 re-verification job the sponsored-mint campaign start kicks (#340). The
 functions here perform read-only XRPL RPCs and history-DB writes; they never
 sign or submit transactions.
+
+`reverify_archive` is the deterministic re-certification entry point. It
+never raises on expected failures, returning a `ReverifyResult` with one of
+these closed-set machine-readable reasons instead: `"baseline_never_certified"`,
+`"genesis_mismatch"`, `"coverage_unbound"`, `"missing_required_sources"`,
+`"sweep_failed: <exc>"`, `"gap_not_covered"`.
 """
 
 from __future__ import annotations
@@ -12,7 +18,11 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import re
+import sqlite3
+import time
 from collections.abc import Awaitable, Callable
+from dataclasses import dataclass
 from typing import Any
 
 from websockets.exceptions import WebSocketException
@@ -405,3 +415,110 @@ def make_request_fn(
         raise RuntimeError(f"{req['method']} failed after {RETRY_MAX} attempts")
 
     return request_fn
+
+
+_ATTESTATION_RE = re.compile(r"^auto-reverify at \S+ \(baseline: (?P<orig>.*)\)$", re.DOTALL)
+
+
+@dataclass(frozen=True)
+class ReverifyResult:
+    """Outcome of one automated re-certification attempt."""
+
+    ok: bool
+    reason: str | None
+    ledger_max: int | None
+    provenance: str | None
+
+
+def inherit_attestation(provenance: str) -> str:
+    """Return the original human attestation, unwrapping one auto-reverify layer.
+
+    Repeated re-verifies must carry the SAME baseline attestation forever, not
+    a nested chain of wrappers."""
+    match = _ATTESTATION_RE.match(provenance.strip())
+    return match.group("orig") if match else provenance.strip()
+
+
+async def reverify_archive(
+    conn: sqlite3.Connection,
+    request_fn: Callable[[dict[str, Any]], Awaitable[dict[str, Any]]],
+    *,
+    network: str,
+    now: int | None = None,
+) -> ReverifyResult:
+    """Deterministically re-certify a previously human-certified archive.
+
+    Preconditions are read from archive_state: a prior baseline with a
+    non-empty provenance and a bound coverage document. The sweep re-pages
+    account_tx over exactly the accounts the original certification covered,
+    from EARLIEST_AVAILABLE_LEDGER to the live validated tip, then certifies
+    through record_archive_baseline (whose gap-clearing CASE logic is the
+    single authority on whether a continuity gap is healed). Never raises on
+    expected failures — returns a ReverifyResult with a machine-readable
+    reason instead."""
+
+    state = history_store.get_archive_state(conn, network)
+    if state is None or not (state.baseline_provenance or "").strip():
+        return ReverifyResult(False, "baseline_never_certified", None, None)
+    try:
+        coverage_doc = json.loads(state.baseline_coverage or "")
+        accounts = dict(coverage_doc["accounts"])
+    except (ValueError, TypeError, KeyError):
+        return ReverifyResult(False, "coverage_unbound", None, None)
+    if not accounts:
+        return ReverifyResult(False, "coverage_unbound", None, None)
+    try:
+        validate_baseline_source_coverage(set(accounts))
+    except ValueError:
+        return ReverifyResult(False, "missing_required_sources", None, None)
+
+    try:
+        snapshot = await history_store.fetch_endpoint_snapshot(request_fn)
+    except Exception as exc:  # endpoint identity unreadable — nothing to certify against
+        return ReverifyResult(False, f"sweep_failed: {exc}", None, None)
+    if snapshot.genesis_hash != state.genesis_hash:
+        return ReverifyResult(False, "genesis_mismatch", None, None)
+
+    ledger_min = history_store.EARLIEST_AVAILABLE_LEDGER
+    ledger_max = snapshot.validated_ledger_index
+    try:
+        for source, account in sorted(accounts.items()):
+            await backfill_account_tx(
+                conn,
+                request_fn,
+                account,
+                f"{source}_tx",
+                network=network,
+                ledger_min=ledger_min,
+                ledger_max=ledger_max,
+            )
+    except Exception as exc:
+        # Cursors persisted per page; a retry resumes, exactly like a Ctrl-C'd
+        # manual backfill. Nothing was certified, so fail-closed is preserved.
+        return ReverifyResult(False, f"sweep_failed: {exc}", None, None)
+
+    from lfg_core import config
+
+    timestamp = int(time.time()) if now is None else int(now)
+    stamp = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(timestamp))
+    provenance = f"auto-reverify at {stamp} (baseline: {inherit_attestation(state.baseline_provenance or '')})"
+    doc = baseline_coverage_document(
+        accounts, source_tag=config.SOURCE_TAG, ledger_min=ledger_min, ledger_max=ledger_max
+    )
+    history_store.record_archive_baseline(
+        conn,
+        network=network,
+        genesis_hash=snapshot.genesis_hash,
+        ledger_min=ledger_min,
+        ledger_max=ledger_max,
+        provenance=provenance,
+        source_tag=config.SOURCE_TAG,
+        coverage=json.dumps(doc, sort_keys=True, separators=(",", ":")),
+        completed_at=timestamp,
+    )
+    refreshed = history_store.get_archive_state(conn, network)
+    if refreshed is None or not refreshed.baseline_complete:
+        # A gap whose bound lies past the swept tip survives certification by
+        # design (record_archive_baseline's CASE). Report it, don't mask it.
+        return ReverifyResult(False, "gap_not_covered", ledger_max, provenance)
+    return ReverifyResult(True, None, ledger_max, provenance)

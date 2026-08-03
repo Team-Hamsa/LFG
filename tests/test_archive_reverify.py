@@ -1,0 +1,165 @@
+# Tests for lfg_core/archive_reverify.py
+import os
+import sys
+
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+os.environ.setdefault("DISCORD_BOT_TOKEN", "x")
+os.environ.setdefault("XUMM_API_KEY", "x")
+os.environ.setdefault("XUMM_API_SECRET", "x")
+os.environ.setdefault("BUNNY_CDN_ACCESS_KEY", "x")
+os.environ.setdefault("BUNNY_CDN_STORAGE_ZONE", "x")
+os.environ.setdefault("SEED", "sEdTM1uX8pu2do5XvTnutH6HsouMaM2")
+os.environ.setdefault("TOKEN_ISSUER_ADDRESS", "rrrrrrrrrrrrrrrrrrrrrhoLvTp")
+os.environ.setdefault("TOKEN_CURRENCY_HEX", "4C46474F00000000000000000000000000000000")
+os.environ.setdefault("XRPL_NETWORK", "testnet")
+os.environ.setdefault("BUNNY_PULL_ZONE", "nft.pullzone.example")
+
+import asyncio
+import json
+
+from lfg_core import archive_reverify, history_store
+
+GENESIS = "ABC123GENESISHASH"
+
+
+def _fake_request_fn(tip=500_000, genesis=GENESIS, account_pages=None, fail_account_tx=False):
+    async def request_fn(req):
+        if req["method"] == "ledger":
+            if req["ledger_index"] == history_store.EARLIEST_AVAILABLE_LEDGER:
+                return {
+                    "ledger_index": history_store.EARLIEST_AVAILABLE_LEDGER,
+                    "ledger_hash": genesis,
+                }
+            return {"ledger_index": tip, "ledger_hash": "TIPHASH"}
+        if req["method"] == "account_tx":
+            if fail_account_tx:
+                raise RuntimeError("account_tx failed: boom")
+            return {
+                "account": req["account"],
+                "ledger_index_min": req["ledger_index_min"],
+                "ledger_index_max": req["ledger_index_max"],
+                "validated": True,
+                "transactions": (account_pages or {}).get(req["account"], []),
+            }
+        raise AssertionError(f"unexpected method {req['method']}")
+
+    return request_fn
+
+
+def _certified_conn(tmp_path, *, provenance="hamsa manual audit 2026-08-01", coverage=True):
+    conn = history_store.init_history_db(str(tmp_path / "history_testnet.db"))
+    doc = archive_reverify.baseline_coverage_document(
+        {"token_issuer": "rTOKEN", "signing": "rSIGN"},
+        source_tag=2606160021,
+        ledger_min=history_store.EARLIEST_AVAILABLE_LEDGER,
+        ledger_max=400_000,
+    )
+    history_store.record_archive_baseline(
+        conn,
+        network="testnet",
+        genesis_hash=GENESIS,
+        ledger_min=history_store.EARLIEST_AVAILABLE_LEDGER,
+        ledger_max=400_000,
+        provenance=provenance,
+        source_tag=2606160021,
+        coverage=json.dumps(doc, sort_keys=True, separators=(",", ":")) if coverage else None,
+    )
+    return conn
+
+
+def test_inherit_attestation_passthrough_and_unnesting():
+    assert archive_reverify.inherit_attestation("hamsa audit") == "hamsa audit"
+    wrapped = "auto-reverify at 2026-08-03T14:00:00Z (baseline: hamsa audit)"
+    assert archive_reverify.inherit_attestation(wrapped) == "hamsa audit"
+    # double-wrap never nests
+    rewrapped = f"auto-reverify at 2026-08-04T00:00:00Z (baseline: {archive_reverify.inherit_attestation(wrapped)})"
+    assert archive_reverify.inherit_attestation(rewrapped) == "hamsa audit"
+
+
+def test_reverify_refuses_without_prior_baseline(tmp_path):
+    conn = history_store.init_history_db(str(tmp_path / "history_testnet.db"))
+    result = asyncio.run(
+        archive_reverify.reverify_archive(conn, _fake_request_fn(), network="testnet")
+    )
+    assert result == archive_reverify.ReverifyResult(False, "baseline_never_certified", None, None)
+
+
+def test_reverify_refuses_on_genesis_mismatch(tmp_path):
+    conn = _certified_conn(tmp_path)
+    result = asyncio.run(
+        archive_reverify.reverify_archive(
+            conn, _fake_request_fn(genesis="OTHERCHAIN"), network="testnet"
+        )
+    )
+    assert (result.ok, result.reason) == (False, "genesis_mismatch")
+
+
+def test_reverify_refuses_on_unbound_coverage(tmp_path):
+    conn = _certified_conn(tmp_path, coverage=False)
+    result = asyncio.run(
+        archive_reverify.reverify_archive(conn, _fake_request_fn(), network="testnet")
+    )
+    assert (result.ok, result.reason) == (False, "coverage_unbound")
+
+
+def test_reverify_certifies_to_tip_and_inherits_attestation(tmp_path):
+    conn = _certified_conn(tmp_path, provenance="hamsa manual audit 2026-08-01")
+    result = asyncio.run(
+        archive_reverify.reverify_archive(
+            conn, _fake_request_fn(tip=600_000), network="testnet", now=1_800_000_000
+        )
+    )
+    assert result.ok and result.reason is None
+    state = history_store.get_archive_state(conn, "testnet")
+    assert state is not None and state.baseline_complete
+    assert state.baseline_ledger_max == 600_000 == result.ledger_max
+    assert state.baseline_provenance is not None
+    assert "(baseline: hamsa manual audit 2026-08-01)" in state.baseline_provenance
+    assert state.baseline_provenance.startswith("auto-reverify at ")
+    # coverage doc rebuilt against the new range, same accounts
+    doc = json.loads(state.baseline_coverage or "{}")
+    assert doc["ledger_max"] == 600_000
+    assert doc["accounts"] == {"signing": "rSIGN", "token_issuer": "rTOKEN"}
+    # certification clears the heartbeat by design
+    assert state.heartbeat_at is None and state.validated_ledger_index is None
+
+
+def test_second_reverify_does_not_nest_provenance(tmp_path):
+    conn = _certified_conn(tmp_path, provenance="hamsa manual audit 2026-08-01")
+    asyncio.run(
+        archive_reverify.reverify_archive(conn, _fake_request_fn(tip=600_000), network="testnet")
+    )
+    asyncio.run(
+        archive_reverify.reverify_archive(conn, _fake_request_fn(tip=700_000), network="testnet")
+    )
+    state = history_store.get_archive_state(conn, "testnet")
+    assert state is not None and state.baseline_provenance is not None
+    assert state.baseline_provenance.count("auto-reverify at") == 1
+    assert state.baseline_provenance.endswith("(baseline: hamsa manual audit 2026-08-01)")
+
+
+def test_reverify_heals_bounded_continuity_gap(tmp_path):
+    conn = _certified_conn(tmp_path)
+    history_store.invalidate_archive_continuity(
+        conn, network="testnet", gap_after=450_000, reason="listener disconnect"
+    )
+    state = history_store.get_archive_state(conn, "testnet")
+    assert state is not None and not state.baseline_complete
+    result = asyncio.run(
+        archive_reverify.reverify_archive(conn, _fake_request_fn(tip=600_000), network="testnet")
+    )
+    assert result.ok
+    state = history_store.get_archive_state(conn, "testnet")
+    assert state is not None and state.baseline_complete
+    assert state.continuity_gap_at is None
+
+
+def test_reverify_reports_sweep_failure(tmp_path):
+    conn = _certified_conn(tmp_path)
+    result = asyncio.run(
+        archive_reverify.reverify_archive(
+            conn, _fake_request_fn(fail_account_tx=True), network="testnet"
+        )
+    )
+    assert not result.ok
+    assert result.reason is not None and result.reason.startswith("sweep_failed: ")
