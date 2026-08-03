@@ -51,7 +51,7 @@ Record the current validated tip first, then certify against it:
 
 ```bash
 cd /home/hamsa/LFG           # staging: /home/hamsa/LFG-staging
-.venv/bin/python scripts/backfill_history.py --network mainnet \
+.venv/bin/python scripts/backfill_history.py --network <net> \
   --complete-audited-baseline \
   --genesis-hash <ledger-32570-hash> \
   --baseline-ledger-min 32570 \
@@ -59,6 +59,8 @@ cd /home/hamsa/LFG           # staging: /home/hamsa/LFG-staging
   --baseline-provenance "<who audited this archive and how>" \
   --distributor <airdrop-distributor-wallet>
 ```
+
+`<net>` is `testnet` on staging, `mainnet` on prod.
 
 - `--baseline-ledger-min` **must** be `32570`
   (`history_store.EARLIEST_AVAILABLE_LEDGER`), not `1`: ledgers 1-32569 were
@@ -128,6 +130,23 @@ network's most recent job. State is in-memory only: a service restart
 forgets a finished job, but the next Start re-kicks one, so that's harmless,
 not a data-loss concern.
 
+**Mandatory post-Start readiness check.** `Start sponsored mint` returns the
+moment the campaign row flips active — it does **not** wait for Step 0b's
+sweep. A campaign can be active-but-inert for the ~seconds-to-minutes the
+reverify job and the subsequent heartbeat wait take, during which
+`eligibility_available` is still `false` and every reservation fails closed
+with `eligibility_unavailable`. Before advertising the campaign or exercising
+it end to end, poll `GET /api/admin/sponsored-mint/status` until **both**:
+
+- `reverify.state == "ok"` (not `"running"` or `"failed"`), and
+- the top-level `eligibility_available` field is `true` (the same
+  `sponsored_mint.archive_is_usable` gate `campaign_status` always reports —
+  it is the live truth, `reverify` is only the most recent job's outcome, see
+  the stickiness note below).
+
+If `reverify.state` lands on `"failed"`, consult the failure-reasons table
+below before retrying Start.
+
 The `reverify` block is **sticky for the service's lifetime**: a `failed`
 state persists there even after the archive later becomes usable again (for
 example after a listener restamp), because nothing clears it except a fresh
@@ -135,7 +154,7 @@ job — so treat the campaign-status **eligibility fields**, not the `reverify`
 block, as the live truth of whether the archive gate is open, and know that
 pressing Start again re-runs reverify and refreshes the block.
 
-**Failure reasons** (`reverify.error`). The first six are `reverify_archive`'s
+**Failure reasons** (`reverify.error`). The first seven are `reverify_archive`'s
 closed, machine-readable set; the last two are wrapper conditions from the
 service job itself (`lfg_service/app.py::run_archive_reverify`) around that
 call, so together the table is exhaustive for everything `reverify.error` can
@@ -144,12 +163,13 @@ hold, not just the deterministic core:
 | reason | meaning | operator action |
 |---|---|---|
 | `baseline_never_certified` | no Step 0a has ever run for this network | run Step 0a |
+| `source_tag_changed` | the configured `SOURCE_TAG` differs from the value the baseline was certified under | the configured SOURCE_TAG changed since the human baseline — a new Step 0a attestation is required |
 | `genesis_mismatch` | the live endpoint's chain identity doesn't match the certified baseline | wrong RPC endpoint, or the testnet chain was reset — re-run Step 0a |
 | `coverage_unbound` | the stored coverage document is missing or empty | re-run Step 0a |
 | `missing_required_sources` | the stored coverage doesn't cover `token_issuer` and `signing` | re-run Step 0a with the required `--sources` |
 | `gap_not_covered` | the sweep completed but a continuity gap's bound lies past the reached tip | transient/ops — press Start again |
 | `sweep_failed: <exc>` | an `account_tx` page or endpoint-identity request failed mid-sweep | transient/ops (RPC hiccup) — press Start again |
-| `listener never restamped the heartbeat — it has no archive identity; set SPONSORED_MINT_*_GENESIS_HASH and restart the listener (not during a live campaign)` | the sweep and re-certification succeeded, but the listener process has no archive genesis identity at all, so it can never heartbeat | set `SPONSORED_MINT_*_GENESIS_HASH` (see the prerequisite below) and restart the listener — never during a live campaign |
+| `heartbeat_timeout: the listener has not restamped the archive heartbeat within 90s — on a quiet network wait for the next validated transaction and press Start again; if the listener has no archive identity, set SPONSORED_MINT_*_GENESIS_HASH and restart the listener (never during a live campaign)` | the sweep and re-certification succeeded, but the listener either hasn't seen a validated transaction yet or has no archive genesis identity at all, so it can never heartbeat | on a quiet network, wait and press Start again; if the listener truly has no archive identity, set `SPONSORED_MINT_*_GENESIS_HASH` (see the prerequisite below) and restart the listener — never during a live campaign |
 | `internal_error` | an unexpected exception escaped the job entirely (the outer catch-all around the sweep/wait/audit sequence) | check the `lfg-activity` service logs for the traceback, then press Start again to retry |
 
 ### Prerequisite — set the genesis hash so the listener always has an identity
@@ -188,6 +208,7 @@ Constraints that are still true and still matter:
   certifying, wait for the listener to process a transaction (check the row:
   `SELECT heartbeat_at FROM archive_state;`) and re-run the audit — do not
   re-certify, which would only clear the heartbeat again.
+<<<<<<< HEAD
 - Verify with the readiness audit immediately before starting a campaign; a
   green audit is the only proof the archive is currently usable.
 
@@ -230,12 +251,17 @@ window; the bounded run proves exactly as much.
 
 Step 0b's automatic re-verify (a full-range sweep over the certified
 accounts) can also clear a bounded gap as a side effect, but the bounded
-catch-up above is the cheap, explicit tool for it. Either way, gap recovery
-never starts from scratch: Step 0a is only needed when no certified baseline
-exists at all (Step 0b and the catch-up can only extend an existing baseline,
-not create one). Never hand-edit `archive_state` to clear the gap flags; they
-are the only record that the archive was, at some point, not provably
-complete.
+catch-up above is the cheap, explicit tool for it. Recovering from a
+continuity gap only requires Step 0a when there is **no existing baseline to
+refresh** — i.e. no `archive_state` row yet, the testnet chain was reset (new
+genesis), or the failure reason is `genesis_mismatch`. If a baseline already
+exists, do **not** re-run Step 0a: run the bounded catch-up above (or, for an
+unbounded gap, follow "Repairing an archive stuck with an unbounded gap"
+below to rebind the gap's bound, then let Step 0b — press Start — do the
+re-certification). Step 0b and the catch-up can only extend an existing
+baseline, they cannot create the first one. Never hand-edit `archive_state`
+to clear the gap flags directly; they are the only record that the archive
+was, at some point, not provably complete.
 
 ### What the historical baseline can and cannot see
 
@@ -283,11 +309,12 @@ now backfills a bound from the row's own certified tip — then certify again:
 
 ```bash
 cd /home/hamsa/LFG           # staging: /home/hamsa/LFG-staging
-.venv/bin/python - <<'PY'
+NETWORK=mainnet               # testnet on staging, mainnet on prod
+.venv/bin/python - <<PY
 from lfg_core import history_store
-conn = history_store.init_history_db(history_store.history_db_path("mainnet"))
+conn = history_store.init_history_db(history_store.history_db_path("$NETWORK"))
 history_store.invalidate_archive_continuity(
-    conn, network="mainnet", reason="rebound unbounded gap (#337)"
+    conn, network="$NETWORK", reason="rebound unbounded gap (#337)"
 )
 PY
 ```
@@ -420,10 +447,15 @@ hand, or start a campaign to let Step 0b's automatic re-verify do it.
    confirmation prompt. Then watch `pm2 logs lfg-deployer --lines 200
    --nostream` on production.
 
-8. On production, complete **Step 0a** against `history_mainnet.db` (the
-   promote in step 7 restarted the stack, so any prior certification is
-   already invalidated), then verify the feature is OFF using both the audit
-   and Discord `/admin` **Refresh**:
+8. On production, if this is the first time Step 0a has ever run against
+   `history_mainnet.db`, complete it now. If a baseline was already
+   certified in an earlier rehearsal, skip straight to Step 0b — the
+   promote in step 7 restarted the stack, which resets the listener's
+   heartbeat and stamps a fresh continuity gap, but that is exactly what
+   pressing Start's automatic re-verify (Step 0b) repairs; re-running
+   Step 0a is not required after every promotion. Either way, verify the
+   feature is OFF using both the audit and Discord `/admin` **Refresh**
+   before pressing Start:
 
    ```bash
    cd /home/hamsa/LFG
@@ -433,8 +465,11 @@ hand, or start a campaign to let Step 0b's automatic re-verify do it.
      --history-db /home/hamsa/LFG/history_mainnet.db
    ```
 
-   Only after every check is green, use `/admin` **Start sponsored mint** for
-   one controlled wallet, complete mint → locked offer → tagged acceptance →
+   Only after every check is green, use `/admin` **Start sponsored mint**,
+   then complete the mandatory post-Start readiness check above (poll
+   `/api/admin/sponsored-mint/status` until `reverify.state == "ok"` and
+   `eligibility_available` is `true`) before exercising anything — for one
+   controlled wallet, complete mint → locked offer → tagged acceptance →
    unique increment → one burn, then use **Stop sponsored mint**.
 
 9. For operational rollback, immediately use Discord `/admin` **Stop

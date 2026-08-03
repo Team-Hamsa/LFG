@@ -102,6 +102,17 @@ def test_reverify_refuses_on_genesis_mismatch(tmp_path):
     assert (result.ok, result.reason) == (False, "genesis_mismatch")
 
 
+def test_reverify_refuses_on_source_tag_change(tmp_path, monkeypatch):
+    from lfg_core import config
+
+    monkeypatch.setattr(config, "SOURCE_TAG", config.SOURCE_TAG + 1)
+    conn = _certified_conn(tmp_path)
+    result = asyncio.run(
+        archive_reverify.reverify_archive(conn, _fake_request_fn(), network="testnet")
+    )
+    assert (result.ok, result.reason) == (False, "source_tag_changed")
+
+
 def test_reverify_refuses_on_unbound_coverage(tmp_path):
     conn = _certified_conn(tmp_path, coverage=False)
     result = asyncio.run(

@@ -728,26 +728,48 @@ def _reverify_client() -> Any:
     return AsyncWebsocketClient(config.CLIO_WS_URL)
 
 
+async def _reverify_in_thread(history_db: str, network: str) -> archive_reverify.ReverifyResult:
+    """Run the blocking sweep (sqlite + websocket) off the caller's event loop.
+
+    Opens its own connection and its own websocket client inside a fresh event
+    loop in a worker thread, so the DB writes and the paced clio requests never
+    block whatever loop `run_archive_reverify` is running on.
+    """
+    conn = history_store.init_history_db(history_db)
+    try:
+        async with _reverify_client() as client:
+            request_fn = archive_reverify.make_request_fn(client)
+            return await archive_reverify.reverify_archive(conn, request_fn, network=network)
+    finally:
+        conn.close()
+
+
 async def run_archive_reverify(network: str, actor: str) -> None:
     campaign_db, history_db = _sponsored_mint_paths()
     _reverify_state[network] = {"state": "running", "error": None, "finished_at": None}
     error: str | None = None
     try:
-        conn = history_store.init_history_db(history_db)
-        try:
-            async with _reverify_client() as client:
-                request_fn = archive_reverify.make_request_fn(client)
-                result = await archive_reverify.reverify_archive(conn, request_fn, network=network)
-        finally:
-            conn.close()
+        result = await asyncio.to_thread(asyncio.run, _reverify_in_thread(history_db, network))
         if not result.ok:
             error = result.reason or "reverify_failed"
         elif not await archive_reverify.wait_for_archive_usable(history_db, network=network):
             error = (
-                "listener never restamped the heartbeat — it has no archive identity; set "
-                "SPONSORED_MINT_*_GENESIS_HASH and restart the listener (not during a live campaign)"
+                "heartbeat_timeout: the listener has not restamped the archive heartbeat "
+                "within 90s — on a quiet network wait for the next validated transaction and "
+                "press Start again; if the listener has no archive identity, set "
+                "SPONSORED_MINT_*_GENESIS_HASH and restart the listener (never during a live "
+                "campaign)"
             )
     except asyncio.CancelledError:
+        # The outer task can be cancelled (e.g. a new Start supersedes this
+        # one) while the worker thread is still mid-sweep. asyncio.to_thread
+        # cannot interrupt a running thread, so the thread's own event loop
+        # keeps running to completion in the background by design — its
+        # result is simply discarded. Single-flight (kick_archive_reverify)
+        # means no overlapping sweep can start until this task is done, so a
+        # stray background thread overwriting _reverify_state after the
+        # cancel branch below has already set it to "failed: cancelled" is
+        # acceptable: the next kick starts a fresh, correctly-ordered run.
         error = "cancelled"
         _reverify_state[network] = {
             "state": "failed",

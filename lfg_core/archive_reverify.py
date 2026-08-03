@@ -9,8 +9,8 @@ sign or submit transactions.
 `reverify_archive` is the deterministic re-certification entry point. It
 never raises on expected failures, returning a `ReverifyResult` with one of
 these closed-set machine-readable reasons instead: `"baseline_never_certified"`,
-`"genesis_mismatch"`, `"coverage_unbound"`, `"missing_required_sources"`,
-`"sweep_failed: <exc>"`, `"gap_not_covered"`.
+`"source_tag_changed"`, `"genesis_mismatch"`, `"coverage_unbound"`,
+`"missing_required_sources"`, `"sweep_failed: <exc>"`, `"gap_not_covered"`.
 """
 
 from __future__ import annotations
@@ -460,9 +460,13 @@ async def reverify_archive(
     expected failures — returns a ReverifyResult with a machine-readable
     reason instead."""
 
+    from lfg_core import config
+
     state = history_store.get_archive_state(conn, network)
     if state is None or not (state.baseline_provenance or "").strip():
         return ReverifyResult(False, "baseline_never_certified", None, None)
+    if state.source_tag is not None and state.source_tag != config.SOURCE_TAG:
+        return ReverifyResult(False, "source_tag_changed", None, None)
     try:
         coverage_doc = json.loads(state.baseline_coverage or "")
         accounts = dict(coverage_doc["accounts"])
@@ -499,8 +503,6 @@ async def reverify_archive(
         # Cursors persisted per page; a retry resumes, exactly like a Ctrl-C'd
         # manual backfill. Nothing was certified, so fail-closed is preserved.
         return ReverifyResult(False, f"sweep_failed: {exc}", None, None)
-
-    from lfg_core import config
 
     timestamp = int(time.time()) if now is None else int(now)
     stamp = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(timestamp))

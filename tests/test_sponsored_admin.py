@@ -507,7 +507,7 @@ def test_run_archive_reverify_heartbeat_timeout(monkeypatch, tmp_path):
     monkeypatch.setattr(server, "_reverify_client", _fake_ws_client_factory())
     _run(server.run_archive_reverify("testnet", "admin:42"))
     assert server._reverify_state["testnet"]["state"] == "failed"
-    assert "listener" in server._reverify_state["testnet"]["error"]
+    assert server._reverify_state["testnet"]["error"].startswith("heartbeat_timeout")
     assert audits and audits[0].startswith("failed: ")
 
 
