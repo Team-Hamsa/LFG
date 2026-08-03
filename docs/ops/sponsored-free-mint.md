@@ -128,7 +128,11 @@ network's most recent job. State is in-memory only: a service restart
 forgets a finished job, but the next Start re-kicks one, so that's harmless,
 not a data-loss concern.
 
-**Failure reasons** (`reverify.error`, closed set):
+**Failure reasons** (`reverify.error`). The first six are `reverify_archive`'s
+closed, machine-readable set; the last two are wrapper conditions from the
+service job itself (`lfg_service/app.py::run_archive_reverify`) around that
+call, so together the table is exhaustive for everything `reverify.error` can
+hold, not just the deterministic core:
 
 | reason | meaning | operator action |
 |---|---|---|
@@ -139,6 +143,7 @@ not a data-loss concern.
 | `gap_not_covered` | the sweep completed but a continuity gap's bound lies past the reached tip | transient/ops — press Start again |
 | `sweep_failed: <exc>` | an `account_tx` page or endpoint-identity request failed mid-sweep | transient/ops (RPC hiccup) — press Start again |
 | `listener never restamped the heartbeat — it has no archive identity; set SPONSORED_MINT_*_GENESIS_HASH and restart the listener (not during a live campaign)` | the sweep and re-certification succeeded, but the listener process has no archive genesis identity at all, so it can never heartbeat | set `SPONSORED_MINT_*_GENESIS_HASH` (see the prerequisite below) and restart the listener — never during a live campaign |
+| `internal_error` | an unexpected exception escaped the job entirely (the outer catch-all around the sweep/wait/audit sequence) | check the `lfg-activity` service logs for the traceback, then press Start again to retry |
 
 ### Prerequisite — set the genesis hash so the listener always has an identity
 
