@@ -321,8 +321,10 @@ PY
 
 This preserves the gap — it does not erase the record that continuity was
 lost — it only gives it the bound the sweep can be measured against. Confirm
-`continuity_gap_after` is now non-NULL, then re-certify — either Step 0a by
-hand, or start a campaign to let Step 0b's automatic re-verify do it.
+`continuity_gap_after` is now non-NULL, then start a campaign (press Start)
+and let Step 0b's automatic re-verify do the re-certification. Do not re-run
+Step 0a here — a baseline already exists, and Step 0a stays reserved for a
+missing baseline, a new genesis, or `genesis_mismatch`.
 
 ## Safety rules
 
