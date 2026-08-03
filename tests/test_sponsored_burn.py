@@ -441,3 +441,55 @@ def test_task4_database_is_forward_migrated_with_crash_lease_columns(tmp_path):
     with sqlite3.connect(db) as conn:
         columns = {row[1] for row in conn.execute("PRAGMA table_info(free_mint_burns)")}
     assert {"lease_until", "lease_token", "signed_ledger_floor"} <= columns
+
+
+def test_run_worker_survives_idle_poll_timeout(tmp_path, monkeypatch):
+    """The idle sleep raises asyncio.TimeoutError, which on Python < 3.11 is
+    NOT the builtin TimeoutError — an `except TimeoutError` alone lets the
+    worker task die silently on its first idle second (staging 2026-07-31)."""
+    calls = 0
+
+    async def idle_pass(*args, **kwargs):
+        nonlocal calls
+        calls += 1
+        return False
+
+    monkeypatch.setattr(sponsored_burn, "process_one", idle_pass)
+    monkeypatch.setattr(sponsored_burn, "POLL_SECONDS", 0.01)
+
+    async def scenario():
+        stop = asyncio.Event()
+        task = asyncio.create_task(sponsored_burn.run_worker(str(tmp_path / "app.db"), stop))
+        await asyncio.sleep(0.2)
+        alive = not task.done()
+        stop.set()
+        await asyncio.wait_for(task, timeout=2)
+        return alive
+
+    assert run(scenario())
+    assert calls > 1
+
+
+def test_heartbeat_survives_poll_timeout_and_extends_lease(tmp_path, monkeypatch):
+    """Same Python 3.10 asyncio.TimeoutError pitfall as run_worker: the lease
+    heartbeat must outlive its first poll timeout and keep extending."""
+    db, _claim_id = obligation(tmp_path, monkeypatch)
+    acquired = sponsored_burn._acquire(db, 200, "mainnet")
+    assert acquired is not None
+    monkeypatch.setattr(sponsored_burn, "LEASE_SECONDS", 0.03)
+
+    async def scenario():
+        stopped = asyncio.Event()
+        task = asyncio.create_task(sponsored_burn._heartbeat(db, acquired, stopped))
+        await asyncio.sleep(0.2)
+        alive = not task.done()
+        stopped.set()
+        await asyncio.wait_for(task, timeout=2)
+        return alive
+
+    assert run(scenario())
+    with sqlite3.connect(db) as conn:
+        lease_until = conn.execute(
+            "SELECT lease_until FROM free_mint_burns WHERE id = ?", (acquired.id,)
+        ).fetchone()[0]
+    assert lease_until >= int(__import__("time").time()) - 1
