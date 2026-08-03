@@ -335,7 +335,26 @@ def test_sponsored_admin_routes_are_registered_before_static_mount():
         assert paths.index(path) < static_index
 
 
-def test_start_kicks_single_flight_reverify(monkeypatch):
+@pytest.fixture
+def _clean_reverify_state():
+    """Snapshot + restore module-level reverify state so ordering can't couple tests."""
+    saved_state = dict(server._reverify_state)
+    saved_tasks = dict(server._reverify_tasks)
+    server._reverify_state.clear()
+    server._reverify_tasks.clear()
+    try:
+        yield
+    finally:
+        for task in server._reverify_tasks.values():
+            if not task.done():
+                task.cancel()
+        server._reverify_state.clear()
+        server._reverify_state.update(saved_state)
+        server._reverify_tasks.clear()
+        server._reverify_tasks.update(saved_tasks)
+
+
+def test_start_kicks_reverify(monkeypatch, _clean_reverify_state):
     kicked: list[tuple[str, str]] = []
     monkeypatch.setattr(
         server, "kick_archive_reverify", lambda net, actor: kicked.append((net, actor))
@@ -345,7 +364,7 @@ def test_start_kicks_single_flight_reverify(monkeypatch):
     assert kicked == [(server.config.XRPL_NETWORK, "admin:42")]
 
 
-def test_kick_archive_reverify_is_single_flight(monkeypatch):
+def test_kick_archive_reverify_is_single_flight(monkeypatch, _clean_reverify_state):
     started = {"n": 0}
 
     async def fake_job(network, actor):
@@ -360,28 +379,70 @@ def test_kick_archive_reverify_is_single_flight(monkeypatch):
         await asyncio.sleep(0)
         assert started["n"] == 1
         server._reverify_tasks["testnet"].cancel()
+        try:
+            await server._reverify_tasks["testnet"]
+        except asyncio.CancelledError:
+            pass
 
     _run(scenario())
 
 
-def test_status_exposes_reverify_block():
+def test_status_exposes_reverify_block(_clean_reverify_state):
     network = server.config.XRPL_NETWORK
     server._reverify_state[network] = {
         "state": "failed",
         "error": "genesis_mismatch",
         "finished_at": 1_800_000_000,
     }
-    try:
-        headers = {"Authorization": "Bearer tok-d"}
-        resp = _run(server.handle_sponsored_mint_status(_Request(headers, {})))
-        body = json.loads(resp.body)
-        assert body["reverify"] == {
-            "state": "failed",
-            "error": "genesis_mismatch",
-            "finished_at": 1_800_000_000,
-        }
-    finally:
-        server._reverify_state.pop(network, None)
+    headers = {"Authorization": "Bearer tok-d"}
+    resp = _run(server.handle_sponsored_mint_status(_Request(headers, {})))
+    body = json.loads(resp.body)
+    assert body["reverify"] == {
+        "state": "failed",
+        "error": "genesis_mismatch",
+        "finished_at": 1_800_000_000,
+    }
+
+
+def test_run_archive_reverify_cancellation_sets_terminal_state_and_reraises(
+    monkeypatch, _clean_reverify_state
+):
+    """asyncio.CancelledError is a BaseException (3.8+), not Exception — a bare
+    `except Exception` around the reverify job would swallow a task cancel and
+    leave _reverify_state stuck 'running' forever with no audit row. The fix
+    must catch CancelledError explicitly, record a terminal 'failed: cancelled'
+    state + audit row, and re-raise so the cancellation still propagates."""
+
+    async def hanging_reverify(conn, request_fn, *, network, now=None):
+        await asyncio.Event().wait()
+
+    audits: list[str] = []
+    monkeypatch.setattr(server.archive_reverify, "reverify_archive", hanging_reverify)
+    monkeypatch.setattr(server, "_reverify_client", _fake_ws_client_factory())
+    monkeypatch.setattr(
+        server.sponsored_mint,
+        "audit_archive_reverify",
+        lambda db, *, network, actor, result, now=None: audits.append(result),
+    )
+
+    async def scenario():
+        task = asyncio.create_task(server.run_archive_reverify("testnet", "admin:42"))
+        # Let the job start and reach the hang point before cancelling.
+        await asyncio.sleep(0)
+        await asyncio.sleep(0)
+        task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await task
+        assert task.cancelled()
+
+    _run(scenario())
+    assert server._reverify_state["testnet"] == {
+        "state": "failed",
+        "error": "cancelled",
+        "finished_at": server._reverify_state["testnet"]["finished_at"],
+    }
+    assert server._reverify_state["testnet"]["finished_at"] is not None
+    assert audits == ["failed: cancelled"]
 
 
 def _fake_ws_client_factory():

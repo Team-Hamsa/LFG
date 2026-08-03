@@ -165,6 +165,65 @@ def test_reverify_reports_sweep_failure(tmp_path):
     assert result.reason is not None and result.reason.startswith("sweep_failed: ")
 
 
+def test_reverify_refuses_when_gap_bound_lies_past_tip(tmp_path):
+    conn = _certified_conn(tmp_path)
+    history_store.invalidate_archive_continuity(
+        conn, network="testnet", gap_after=700_000, reason="listener disconnect"
+    )
+    state = history_store.get_archive_state(conn, "testnet")
+    assert state is not None and not state.baseline_complete
+    result = asyncio.run(
+        archive_reverify.reverify_archive(conn, _fake_request_fn(tip=600_000), network="testnet")
+    )
+    assert (result.ok, result.reason) == (False, "gap_not_covered")
+    state = history_store.get_archive_state(conn, "testnet")
+    assert state is not None and not state.baseline_complete
+
+
+def test_reverify_refuses_when_coverage_lacks_required_source(tmp_path):
+    conn = history_store.init_history_db(str(tmp_path / "history_testnet.db"))
+    doc = archive_reverify.baseline_coverage_document(
+        {"issuer": "rISS"},
+        source_tag=2606160021,
+        ledger_min=history_store.EARLIEST_AVAILABLE_LEDGER,
+        ledger_max=400_000,
+    )
+    history_store.record_archive_baseline(
+        conn,
+        network="testnet",
+        genesis_hash=GENESIS,
+        ledger_min=history_store.EARLIEST_AVAILABLE_LEDGER,
+        ledger_max=400_000,
+        provenance="hamsa manual audit 2026-08-01",
+        source_tag=2606160021,
+        coverage=json.dumps(doc, sort_keys=True, separators=(",", ":")),
+    )
+    result = asyncio.run(
+        archive_reverify.reverify_archive(conn, _fake_request_fn(), network="testnet")
+    )
+    assert (result.ok, result.reason) == (False, "missing_required_sources")
+
+
+def test_reverify_refuses_listener_created_row_never_certified(tmp_path):
+    conn = history_store.init_history_db(str(tmp_path / "history_testnet.db"))
+    # A row created purely by the streaming listener's heartbeat, with no
+    # baseline ever certified through record_archive_baseline, must never be
+    # treated as a certified archive — otherwise a listener could "launder"
+    # an uncertified archive into eligibility just by staying connected.
+    history_store.record_validated_ledger(
+        conn,
+        network="testnet",
+        genesis_hash=GENESIS,
+        ledger_index=500_000,
+        close_time=1_800_000_000,
+        source_tag=2606160021,
+    )
+    result = asyncio.run(
+        archive_reverify.reverify_archive(conn, _fake_request_fn(), network="testnet")
+    )
+    assert (result.ok, result.reason) == (False, "baseline_never_certified")
+
+
 def test_wait_for_archive_usable_polls_until_true(monkeypatch, tmp_path):
     from lfg_core import sponsored_mint
 

@@ -729,8 +729,7 @@ def _reverify_client() -> Any:
 
 
 async def run_archive_reverify(network: str, actor: str) -> None:
-    _, history_db = _sponsored_mint_paths()
-    campaign_db, _ = _sponsored_mint_paths()
+    campaign_db, history_db = _sponsored_mint_paths()
     _reverify_state[network] = {"state": "running", "error": None, "finished_at": None}
     error: str | None = None
     try:
@@ -748,6 +747,23 @@ async def run_archive_reverify(network: str, actor: str) -> None:
                 "listener never restamped the heartbeat — it has no archive identity; set "
                 "SPONSORED_MINT_*_GENESIS_HASH and restart the listener (not during a live campaign)"
             )
+    except asyncio.CancelledError:
+        error = "cancelled"
+        _reverify_state[network] = {
+            "state": "failed",
+            "error": error,
+            "finished_at": int(time.time()),
+        }
+        try:
+            sponsored_mint.audit_archive_reverify(
+                campaign_db,
+                network=network,
+                actor=actor,
+                result=f"failed: {error}",
+            )
+        except Exception:
+            logging.error(f"archive reverify audit write failed: {traceback.format_exc()}")
+        raise
     except Exception:
         logging.error(f"archive reverify crashed: {traceback.format_exc()}")
         error = "internal_error"
@@ -771,9 +787,7 @@ def kick_archive_reverify(network: str, actor: str) -> None:
     task = _reverify_tasks.get(network)
     if task is not None and not task.done():
         return  # single-flight: join the running job
-    _reverify_tasks[network] = asyncio.get_event_loop().create_task(
-        run_archive_reverify(network, actor)
-    )
+    _reverify_tasks[network] = asyncio.create_task(run_archive_reverify(network, actor))
 
 
 @require_service_token

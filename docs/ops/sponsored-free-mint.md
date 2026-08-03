@@ -128,6 +128,13 @@ network's most recent job. State is in-memory only: a service restart
 forgets a finished job, but the next Start re-kicks one, so that's harmless,
 not a data-loss concern.
 
+The `reverify` block is **sticky for the service's lifetime**: a `failed`
+state persists there even after the archive later becomes usable again (for
+example after a listener restamp), because nothing clears it except a fresh
+job — so treat the campaign-status **eligibility fields**, not the `reverify`
+block, as the live truth of whether the archive gate is open, and know that
+pressing Start again re-runs reverify and refreshes the block.
+
 **Failure reasons** (`reverify.error`). The first six are `reverify_archive`'s
 closed, machine-readable set; the last two are wrapper conditions from the
 service job itself (`lfg_service/app.py::run_archive_reverify`) around that

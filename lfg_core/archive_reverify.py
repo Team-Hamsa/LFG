@@ -397,6 +397,9 @@ def make_request_fn(
                 WebSocketException,
                 XRPLWebsocketException,
             ) as e:
+                # Transient transport trouble gets the same bounded backoff as
+                # slowDown. A torn-down websocket will keep failing and exhaust
+                # the attempts — the run is cursor-resumable, so that is safe.
                 if attempt < RETRY_MAX - 1:
                     logging.warning(f"{req['method']}: {e!r}; backing off {delay:.0f}s")
                     await asyncio.sleep(delay)
