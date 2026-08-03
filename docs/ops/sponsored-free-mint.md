@@ -23,17 +23,29 @@ The signing account and token issuer are always excluded in code, but they do
 not satisfy this explicit readiness check. A nonempty or arbitrary configured
 wallet list also fails unless both approved addresses above are present.
 
-## Step 0 — certify the eligibility archive (REQUIRED, and not one-time)
+## Step 0 — certify the eligibility archive (REQUIRED)
 
 Nothing else in this runbook works until this is done. Eligibility means "this
 wallet has never submitted a transaction carrying LFG's SourceTag", and that
 question is only answerable from an archive that has proven itself complete.
 `sponsored_mint.archive_is_usable` demands an `archive_state` row with
 `baseline_complete=1`, a bound coverage document, and a fresh listener
-heartbeat. **The only writer of that row is the command below.** Without it
-every reservation returns `eligibility_unavailable` and the campaign admits
-nobody — inert and harmless, but a campaign that silently sponsors zero
-wallets looks identical to one that is switched off.
+heartbeat. Without it every reservation returns `eligibility_unavailable` and
+the campaign admits nobody — inert and harmless, but a campaign that silently
+sponsors zero wallets looks identical to one that is switched off.
+
+This is now two steps: a manual one-time baseline (Step 0a) that establishes
+the human audit claim, and an automatic re-verification (Step 0b, #340) that
+keeps that claim current with zero manual action across deploys and listener
+restarts, as long as Step 0a has run at least once per network.
+
+### Step 0a — one-time baseline certification (manual)
+
+Run once per network, and again after any testnet reset (a reset gives the
+chain a new genesis, which invalidates every prior certification for that
+network — see `genesis_mismatch` below). This is the only command that can
+create the archive's first `archive_state` row; nothing downstream, including
+the automatic re-verification in Step 0b, can bootstrap one from nothing.
 
 Record the current validated tip first, then certify against it:
 
@@ -73,38 +85,94 @@ cd /home/hamsa/LFG           # staging: /home/hamsa/LFG-staging
   source reports that for every entry it is archiving **nothing**; stop and
   verify the endpoint's response shape before certifying.
 
-**This is not one-time.** A transaction stream carries no replay token, so a
-listener that restarts cannot prove it missed nothing in the ledger it was
-cut off in. Any listener restart — a deploy, a `pm2 restart`, a websocket
-error — therefore stamps `continuity_gap_*` and clears `baseline_complete`,
-and admission fails closed until Step 0 is re-run. Consequences for planning:
+A transaction stream carries no replay token, so a listener that restarts
+cannot prove it missed nothing in the ledger it was cut off in. Any listener
+restart — a deploy, a `pm2 restart`, a websocket error — therefore stamps
+`continuity_gap_*` and clears `baseline_complete`, and admission fails closed
+until the archive is re-certified. Historically that meant re-running Step 0a
+by hand before every campaign; **that manual re-run is now automatic — see
+Step 0b, below.**
 
-- Certify **after** the deploy that will serve the campaign, not before.
-  The listener reads the archive genesis identity **once at startup** — from
-  `SPONSORED_MINT_MAINNET_GENESIS_HASH` / `SPONSORED_MINT_TESTNET_GENESIS_HASH`
-  in the stack's `.env`, else from a previously certified `archive_state`
-  row — and latches it for the process lifetime; it only stamps heartbeats
-  once it has one. Which order works depends on whether an identity exists
-  at listener startup:
-  - **Identity available at startup** (env hash set, or the archive was
-    certified before): deploy → let the listener subscribe → certify →
-    audit. No restart needed.
-  - **No identity at startup** (env hash unset AND the archive has never
-    been certified): the listener logs `no certified archive genesis
-    identity; SourceTag eligibility archiving is DISABLED` and will never
-    heartbeat, no matter what is certified while it runs — certifying alone
-    cannot go green. The order is: certify → restart the listener (it loads
-    the just-certified identity; the restart stamps a fresh, bounded
-    continuity gap) → certify **again** (the second sweep reaches past the
-    gap's bound and clears it) → audit. Prefer setting the env genesis hash
-    before deploying so the single-certification order above applies
-    instead.
-- Do not promote, restart, or redeploy either stack during a live campaign.
+### Step 0b — automatic re-verification (no action needed)
+
+Every time an operator starts a campaign (`/admin` → Start Sponsored Mint, or
+`POST /api/admin/sponsored-mint/start`), the service kicks one background job
+per network (`lfg_service/app.py::kick_archive_reverify` →
+`lfg_core.archive_reverify.reverify_archive`) that:
+
+1. Re-sweeps `account_tx` for exactly the accounts Step 0a's coverage
+   document recorded, from ledger 32570 to the current validated tip —
+   nothing new to configure, it replays the same `--sources` Step 0a was
+   certified with.
+2. Re-certifies through the same `record_archive_baseline` writer Step 0a
+   uses, but inherits the original attestation instead of asking for a new
+   one: the stored provenance becomes `auto-reverify at <ts> (baseline:
+   <original attestation>)`. Repeated re-verifies unwrap and reuse that same
+   original claim rather than nesting wrappers, so the human audit claim from
+   Step 0a survives indefinitely.
+3. Waits (bounded, ~90s) for the listener to restamp its heartbeat, since
+   certification always clears it (below).
+4. Writes an `archive_reverify` row to `free_mint_audit` recording the actor,
+   network, and outcome — win or lose.
+
+This is single-flight per network (a Start while one is already running joins
+it rather than launching a second) and is purely additive to the fail-closed
+gate: `sponsored_mint.archive_is_usable` is still the sole admission
+authority, unchanged from before #340. The job only exists to keep that gate
+green without an operator having to remember to re-run Step 0a after every
+deploy or restart.
+
+Poll `GET /api/admin/sponsored-mint/status` — its `reverify` block reports
+`{state: "idle"|"running"|"ok"|"failed", error, finished_at}` for that
+network's most recent job. State is in-memory only: a service restart
+forgets a finished job, but the next Start re-kicks one, so that's harmless,
+not a data-loss concern.
+
+**Failure reasons** (`reverify.error`, closed set):
+
+| reason | meaning | operator action |
+|---|---|---|
+| `baseline_never_certified` | no Step 0a has ever run for this network | run Step 0a |
+| `genesis_mismatch` | the live endpoint's chain identity doesn't match the certified baseline | wrong RPC endpoint, or the testnet chain was reset — re-run Step 0a |
+| `coverage_unbound` | the stored coverage document is missing or empty | re-run Step 0a |
+| `missing_required_sources` | the stored coverage doesn't cover `token_issuer` and `signing` | re-run Step 0a with the required `--sources` |
+| `gap_not_covered` | the sweep completed but a continuity gap's bound lies past the reached tip | transient/ops — press Start again |
+| `sweep_failed: <exc>` | an `account_tx` page or endpoint-identity request failed mid-sweep | transient/ops (RPC hiccup) — press Start again |
+| `listener never restamped the heartbeat — it has no archive identity; set SPONSORED_MINT_*_GENESIS_HASH and restart the listener (not during a live campaign)` | the sweep and re-certification succeeded, but the listener process has no archive genesis identity at all, so it can never heartbeat | set `SPONSORED_MINT_*_GENESIS_HASH` (see the prerequisite below) and restart the listener — never during a live campaign |
+
+### Prerequisite — set the genesis hash so the listener always has an identity
+
+Set `SPONSORED_MINT_MAINNET_GENESIS_HASH` / `SPONSORED_MINT_TESTNET_GENESIS_HASH`
+in each stack's `.env` so the listener has an archive identity at **every**
+startup, not only after a certification has already happened once. This is
+what makes Step 0a truly one-time per network (plus testnet resets, which
+mint a new genesis) instead of something that has to precede every deploy:
+with the hash set, a freshly started listener always has an identity to
+heartbeat against, so Step 0b's automatic re-verify is always sufficient on
+its own.
+
+Without the hash set, a **brand-new** archive (no `archive_state` row yet)
+still needs the old manual dance once, because nothing can certify against an
+identity the listener doesn't have and Step 0b cannot bootstrap a first
+baseline: certify (Step 0a) → restart the listener (it loads the
+just-certified identity; the restart stamps a fresh, bounded continuity gap)
+→ certify again → verify. Once any identity exists — from the env var, or
+from that first certification — every later listener start already has it,
+and Step 0b handles everything from there.
+
+Constraints that are still true and still matter:
+
+- **Never restart, promote, or redeploy either stack during a live
+  campaign.** Every certification (manual or automatic) clears the
+  listener's heartbeat, so a mid-campaign restart forces the archive back to
+  fail-closed on top of dropping connections — there is no live-campaign path
+  that avoids this, automatic re-verify included.
 - **Every certification clears the listener's heartbeat** (`heartbeat_at` and
   `validated_ledger_index` are reset to NULL), and `archive_is_usable` fails
   closed while the heartbeat is absent. The running listener restamps it on
-  the next transaction it streams, so an audit run in the seconds after a
-  certification can fail on freshness alone. If the audit fails right after
+  the next transaction it streams — this is exactly why Step 0b waits (up to
+  ~90s) instead of declaring success right after the sweep. If you're
+  driving Step 0a by hand and the readiness audit fails right after
   certifying, wait for the listener to process a transaction (check the row:
   `SELECT heartbeat_at FROM archive_state;`) and re-run the audit — do not
   re-certify, which would only clear the heartbeat again.
@@ -148,7 +216,12 @@ listener archives at (see "What the historical baseline can and cannot see"
 below). The expensive full re-page never bought extra coverage over the gap
 window; the bounded run proves exactly as much.
 
-Never hand-edit `archive_state` to clear the gap flags; they
+Step 0b's automatic re-verify (a full-range sweep over the certified
+accounts) can also clear a bounded gap as a side effect, but the bounded
+catch-up above is the cheap, explicit tool for it. Either way, gap recovery
+never starts from scratch: Step 0a is only needed when no certified baseline
+exists at all (Step 0b and the catch-up can only extend an existing baseline,
+not create one). Never hand-edit `archive_state` to clear the gap flags; they
 are the only record that the archive was, at some point, not provably
 complete.
 
@@ -209,7 +282,8 @@ PY
 
 This preserves the gap — it does not erase the record that continuity was
 lost — it only gives it the bound the sweep can be measured against. Confirm
-`continuity_gap_after` is now non-NULL, then re-run Step 0.
+`continuity_gap_after` is now non-NULL, then re-certify — either Step 0a by
+hand, or start a campaign to let Step 0b's automatic re-verify do it.
 
 ## Safety rules
 
@@ -237,7 +311,7 @@ lost — it only gives it the bound the sweep can be measured against. Confirm
 
 ## Release rehearsal
 
-0. Complete **Step 0** above on staging. The readiness audit in step 1 reports
+0. Complete **Step 0a** above on staging. The readiness audit in step 1 reports
    the archive check as FAIL until you do, and the `free_mint_*` tables do not
    exist until the service has started once on this code (the audit opens the
    database read-only and never creates them) — so deploy, let the service
@@ -334,7 +408,7 @@ lost — it only gives it the bound the sweep can be measured against. Confirm
    confirmation prompt. Then watch `pm2 logs lfg-deployer --lines 200
    --nostream` on production.
 
-8. On production, complete **Step 0** against `history_mainnet.db` (the
+8. On production, complete **Step 0a** against `history_mainnet.db` (the
    promote in step 7 restarted the stack, so any prior certification is
    already invalidated), then verify the feature is OFF using both the audit
    and Discord `/admin` **Refresh**:
