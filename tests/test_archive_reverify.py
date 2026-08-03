@@ -17,9 +17,17 @@ os.environ.setdefault("BUNNY_PULL_ZONE", "nft.pullzone.example")
 import asyncio
 import json
 
+import pytest
+
 from lfg_core import archive_reverify, history_store
 
 GENESIS = "ABC123GENESISHASH"
+
+
+@pytest.fixture(scope="module", autouse=True)
+def _restore_event_loop():
+    yield
+    asyncio.set_event_loop(asyncio.new_event_loop())
 
 
 def _fake_request_fn(tip=500_000, genesis=GENESIS, account_pages=None, fail_account_tx=False):
