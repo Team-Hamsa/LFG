@@ -335,6 +335,149 @@ def test_sponsored_admin_routes_are_registered_before_static_mount():
         assert paths.index(path) < static_index
 
 
+def test_start_kicks_single_flight_reverify(monkeypatch):
+    kicked: list[tuple[str, str]] = []
+    monkeypatch.setattr(
+        server, "kick_archive_reverify", lambda net, actor: kicked.append((net, actor))
+    )
+    headers = {"Authorization": "Bearer tok-d"}
+    _run(server.handle_sponsored_mint_start(_Request(headers, {"actor": "admin:42"})))
+    assert kicked == [(server.config.XRPL_NETWORK, "admin:42")]
+
+
+def test_kick_archive_reverify_is_single_flight(monkeypatch):
+    started = {"n": 0}
+
+    async def fake_job(network, actor):
+        started["n"] += 1
+        await asyncio.sleep(3600)
+
+    monkeypatch.setattr(server, "run_archive_reverify", fake_job)
+
+    async def scenario():
+        server.kick_archive_reverify("testnet", "admin:42")
+        server.kick_archive_reverify("testnet", "admin:42")  # joins, doesn't double-run
+        await asyncio.sleep(0)
+        assert started["n"] == 1
+        server._reverify_tasks["testnet"].cancel()
+
+    _run(scenario())
+
+
+def test_status_exposes_reverify_block():
+    network = server.config.XRPL_NETWORK
+    server._reverify_state[network] = {
+        "state": "failed",
+        "error": "genesis_mismatch",
+        "finished_at": 1_800_000_000,
+    }
+    try:
+        headers = {"Authorization": "Bearer tok-d"}
+        resp = _run(server.handle_sponsored_mint_status(_Request(headers, {})))
+        body = json.loads(resp.body)
+        assert body["reverify"] == {
+            "state": "failed",
+            "error": "genesis_mismatch",
+            "finished_at": 1_800_000_000,
+        }
+    finally:
+        server._reverify_state.pop(network, None)
+
+
+def _fake_ws_client_factory():
+    class _FakeClient:
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, exc_type, exc, tb):
+            return False
+
+    return lambda: _FakeClient()
+
+
+def test_run_archive_reverify_success_path(monkeypatch, tmp_path):
+    class _Result:
+        ok = True
+        reason = None
+        ledger_max = 600_000
+        provenance = "auto-reverify …"
+
+    async def fake_reverify(conn, request_fn, *, network, now=None):
+        return _Result()
+
+    async def fake_wait(path, *, network, **kw):
+        return True
+
+    audits: list[str] = []
+    monkeypatch.setattr(server.archive_reverify, "reverify_archive", fake_reverify)
+    monkeypatch.setattr(server.archive_reverify, "wait_for_archive_usable", fake_wait)
+    monkeypatch.setattr(
+        server.sponsored_mint,
+        "audit_archive_reverify",
+        lambda db, *, network, actor, result, now=None: audits.append(result),
+    )
+    monkeypatch.setattr(server, "_reverify_client", _fake_ws_client_factory())
+    _run(server.run_archive_reverify("testnet", "admin:42"))
+    assert server._reverify_state["testnet"]["state"] == "ok"
+    assert audits == ["ok"]
+
+
+def test_run_archive_reverify_heartbeat_timeout(monkeypatch, tmp_path):
+    class _Result:
+        ok = True
+        reason = None
+        ledger_max = 600_000
+        provenance = "auto-reverify …"
+
+    async def fake_reverify(conn, request_fn, *, network, now=None):
+        return _Result()
+
+    async def fake_wait(path, *, network, **kw):
+        return False
+
+    audits: list[str] = []
+    monkeypatch.setattr(server.archive_reverify, "reverify_archive", fake_reverify)
+    monkeypatch.setattr(server.archive_reverify, "wait_for_archive_usable", fake_wait)
+    monkeypatch.setattr(
+        server.sponsored_mint,
+        "audit_archive_reverify",
+        lambda db, *, network, actor, result, now=None: audits.append(result),
+    )
+    monkeypatch.setattr(server, "_reverify_client", _fake_ws_client_factory())
+    _run(server.run_archive_reverify("testnet", "admin:42"))
+    assert server._reverify_state["testnet"]["state"] == "failed"
+    assert "listener" in server._reverify_state["testnet"]["error"]
+    assert audits and audits[0].startswith("failed: ")
+
+
+def test_run_archive_reverify_failure_path(monkeypatch, tmp_path):
+    class _Result:
+        ok = False
+        reason = "genesis_mismatch"
+        ledger_max = None
+        provenance = None
+
+    async def fake_reverify(conn, request_fn, *, network, now=None):
+        return _Result()
+
+    async def fake_wait(path, *, network, **kw):
+        return True
+
+    audits: list[str] = []
+    monkeypatch.setattr(server.archive_reverify, "reverify_archive", fake_reverify)
+    monkeypatch.setattr(server.archive_reverify, "wait_for_archive_usable", fake_wait)
+    monkeypatch.setattr(
+        server.sponsored_mint,
+        "audit_archive_reverify",
+        lambda db, *, network, actor, result, now=None: audits.append(result),
+    )
+    monkeypatch.setattr(server, "_reverify_client", _fake_ws_client_factory())
+    _run(server.run_archive_reverify("testnet", "admin:42"))
+    assert server._reverify_state["testnet"]["state"] == "failed"
+    assert server._reverify_state["testnet"]["error"] == "genesis_mismatch"
+    assert audits and audits[0].startswith("failed: ")
+
+
 def test_sdk_sponsored_mint_methods_use_service_token_and_actor_payload():
     async def _inner():
         app = web.Application()
