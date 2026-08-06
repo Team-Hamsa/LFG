@@ -44,7 +44,8 @@ cd /home/hamsa/LFG           # staging: /home/hamsa/LFG-staging
   --genesis-hash <ledger-32570-hash> \
   --baseline-ledger-min 32570 \
   --baseline-ledger-max <current-validated-tip> \
-  --baseline-provenance "<who audited this archive and how>"
+  --baseline-provenance "<who audited this archive and how>" \
+  --distributor <airdrop-distributor-wallet>
 ```
 
 - `--baseline-ledger-min` **must** be `32570`
@@ -62,6 +63,10 @@ cd /home/hamsa/LFG           # staging: /home/hamsa/LFG-staging
   the sweep was not narrowed. Leave `--sources` at its default. The `nfts`
   sweep is by far the slowest part of the run; that is the cost of an
   attestable baseline, not a corner to cut.
+- `--distributor` is **required** for a certification run (though optional for
+  a plain backfill): the distributor source can only be swept when an address
+  is supplied, so certifying without one would attest a sweep that never
+  happened. Use the airdrop distributor wallet (`BRIX_DISTRIBUTOR_ADDRESS`).
 - `--baseline-provenance` is a free-text operator attestation. It is evidence
   for a human reader, not a machine check: write who verified completeness.
 - Watch for `skipped N entries carrying no explicit validated flag`. If a

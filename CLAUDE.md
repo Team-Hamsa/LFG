@@ -138,11 +138,13 @@ SPONSORED_MINT_ARCHIVE_MAX_LAG_SECONDS=900                  # optional; how stal
 >   --complete-audited-baseline \
 >   --genesis-hash <ledger-32570-hash> \
 >   --baseline-ledger-min 32570 --baseline-ledger-max <current-validated-tip> \
->   --baseline-provenance "<who audited this and how>"
+>   --baseline-provenance "<who audited this and how>" \
+>   --distributor <airdrop-distributor-wallet>
 > ```
 >
-> `--sources` must be the full default set — a certification run refuses any
-> narrowing (#331); `--baseline-ledger-min` must be `32570`; `--baseline-ledger-max`
+> `--sources` must be the full default set and `--distributor` is required —
+> a certification run refuses any narrowing or a missing distributor address
+> (#331); `--baseline-ledger-min` must be `32570`; `--baseline-ledger-max`
 > must equal the endpoint's current validated tip. **A listener restart
 > invalidates continuity** (a tx stream has no replay token, so a restart
 > cannot prove it missed nothing) and the certification must be re-run before

@@ -57,12 +57,25 @@ REQUIRED_BASELINE_SOURCES = sponsored_mint.BASELINE_REQUIRED_SOURCES
 assert REQUIRED_BASELINE_SOURCES <= VALID_SOURCES
 
 
-def validate_baseline_source_coverage(sources: set[str] | frozenset[str]) -> None:
-    """Require the full source set for a certification run (#331)."""
+def validate_baseline_source_coverage(
+    sources: set[str] | frozenset[str],
+    *,
+    distributor: str | None = None,
+) -> None:
+    """Require the full source set for a certification run (#331).
+
+    The distributor source is only actually swept when an address is supplied,
+    so certifying without `--distributor` would attest a sweep that never
+    happened — refuse up front rather than record a false attestation."""
 
     missing = sorted(REQUIRED_BASELINE_SOURCES - sources)
     if missing:
         raise ValueError("baseline certification requires sources: " + ", ".join(missing))
+    if "distributor" in sources and not distributor:
+        raise ValueError(
+            "baseline certification requires --distributor: the distributor source "
+            "cannot be swept (and must not be attested) without an address"
+        )
 
 
 def baseline_account_coverage(
@@ -336,7 +349,7 @@ async def _amain() -> int:
         parser.error("--derive-only cannot certify a baseline")
     if args.complete_audited_baseline:
         try:
-            validate_baseline_source_coverage(wanted)
+            validate_baseline_source_coverage(wanted, distributor=args.distributor)
         except ValueError as exc:
             parser.error(str(exc))
 

@@ -391,7 +391,17 @@ def test_baseline_certification_requires_the_full_default_source_set():
     assert bh.REQUIRED_BASELINE_SOURCES == bh.DEFAULT_SOURCES
     with pytest.raises(ValueError, match="brix, distributor, issuer, nfts"):
         bh.validate_baseline_source_coverage({"token_issuer", "signing"})
-    bh.validate_baseline_source_coverage(bh.DEFAULT_SOURCES)
+    bh.validate_baseline_source_coverage(bh.DEFAULT_SOURCES, distributor="rDistributor")
+
+
+def test_baseline_certification_requires_a_distributor_address():
+    # Bot finding on #350: without --distributor the distributor branch never
+    # runs, so certifying would attest a sweep that never happened — refuse.
+    with pytest.raises(ValueError, match="--distributor"):
+        bh.validate_baseline_source_coverage(bh.DEFAULT_SOURCES)
+    with pytest.raises(ValueError, match="--distributor"):
+        bh.validate_baseline_source_coverage(bh.DEFAULT_SOURCES, distributor="")
+    bh.validate_baseline_source_coverage(bh.DEFAULT_SOURCES, distributor="rDistributor")
 
 
 def test_baseline_coverage_snapshot_binds_required_accounts(monkeypatch):
