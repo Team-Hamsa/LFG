@@ -1618,6 +1618,40 @@ def test_readiness_audit_is_read_only_and_passes_a_safe_off_state(_service_env, 
     assert before == after
 
 
+def test_readiness_audit_fails_on_a_narrowed_baseline_source_sweep(_service_env, monkeypatch):
+    # #331: a certification that swept fewer than the full source set must be
+    # a FAIL in the readiness audit, not a warning — and the archive gate
+    # itself must refuse the narrowed attestation.
+    audit = importlib.import_module("scripts.audit_sponsored_mint_readiness")
+    sponsored_mint.ensure_schema(_service_env.app_db)
+    ready_history(
+        _service_env.history_db,
+        network="mainnet",
+        now=4000,
+        close_time=3990,
+        sources=("token_issuer", "signing"),
+    )
+
+    assert not sponsored_mint.archive_is_usable(
+        _service_env.history_db, network="mainnet", now=4000
+    )
+    report = _run(
+        audit.build_report(
+            network="mainnet",
+            app_db=_service_env.app_db,
+            history_db=_service_env.history_db,
+            now=4000,
+            balance_fetch=lambda: asyncio.sleep(0, result=Decimal("100")),
+        )
+    )
+    assert report["ok"] is False
+    baseline = report["checks"]["baseline_sources"]
+    assert baseline["ok"] is False
+    assert baseline["swept"] == ["signing", "token_issuer"]
+    assert baseline["missing"] == ["brix", "distributor", "issuer", "nfts"]
+    assert report["checks"]["archive"]["ok"] is False
+
+
 def test_readiness_audit_uses_configured_archive_lag_limit(_service_env, monkeypatch):
     audit = importlib.import_module("scripts.audit_sponsored_mint_readiness")
     sponsored_mint.ensure_schema(_service_env.app_db)

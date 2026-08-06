@@ -46,6 +46,18 @@ _CAMPAIGN_DURATION_SECONDS = config.SPONSORED_MINT_DURATION_SECONDS
 _CAMPAIGN_CAP = config.SPONSORED_MINT_CAP
 SUPPORTED_NETWORKS = frozenset(("mainnet", "testnet"))
 
+# The eligibility rule is "this wallet has never submitted a SourceTag-carrying
+# transaction", and the historical baseline can only prove that if every
+# backfill source was swept. A certification narrowed to fewer sources attests
+# less than this archive is trusted to prove, so the coverage document must
+# record the full set and the runtime gate refuses anything narrower (#331).
+BASELINE_REQUIRED_SOURCES = frozenset(
+    ("issuer", "brix", "token_issuer", "signing", "distributor", "nfts")
+)
+# Version 2 added the `sources` attestation; older documents cannot carry it
+# and are rejected rather than trusted.
+BASELINE_COVERAGE_VERSION = 2
+
 _SCHEMA = """
 CREATE TABLE IF NOT EXISTS free_mint_campaigns (
     id            TEXT PRIMARY KEY,
@@ -787,6 +799,29 @@ def stop_campaign(
         return _status(conn, network=network, now=timestamp)
 
 
+def baseline_coverage_sources(raw: object) -> list[str] | None:
+    """Parse the swept-source attestation out of a coverage document.
+
+    Returns the sorted source names a certification run attested to sweeping,
+    or None when the document is missing, unparseable, from an unknown or
+    older schema version (which cannot carry the attestation), or carries a
+    malformed `sources` field. Callers must treat None as "not attested",
+    never as "assume the full set"."""
+
+    if not isinstance(raw, str) or not raw:
+        return None
+    try:
+        coverage = json.loads(raw)
+    except (TypeError, ValueError):
+        return None
+    if not isinstance(coverage, dict) or coverage.get("version") != BASELINE_COVERAGE_VERSION:
+        return None
+    sources = coverage.get("sources")
+    if not isinstance(sources, list) or not all(isinstance(item, str) for item in sources):
+        return None
+    return sorted(sources)
+
+
 def _baseline_coverage_is_bound(row: Mapping[str, Any]) -> bool:
     raw = row["baseline_coverage"]
     if not isinstance(raw, str) or not raw:
@@ -795,7 +830,13 @@ def _baseline_coverage_is_bound(row: Mapping[str, Any]) -> bool:
         coverage = json.loads(raw)
     except (TypeError, ValueError):
         return False
-    if not isinstance(coverage, dict) or coverage.get("version") != 1:
+    # An unknown or older coverage version is rejected outright — version 1
+    # documents could not record which sources were swept, so they cannot
+    # attest what this gate is trusted to prove (#331).
+    if not isinstance(coverage, dict) or coverage.get("version") != BASELINE_COVERAGE_VERSION:
+        return False
+    sources = baseline_coverage_sources(raw)
+    if sources is None or not BASELINE_REQUIRED_SOURCES.issubset(sources):
         return False
     accounts = coverage.get("accounts")
     if not isinstance(accounts, dict):

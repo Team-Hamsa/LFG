@@ -19,7 +19,9 @@ os.environ.setdefault("TOKEN_CURRENCY_HEX", "4C46474F000000000000000000000000000
 os.environ.setdefault("XRPL_NETWORK", "testnet")
 os.environ.setdefault("BUNNY_PULL_ZONE", "nft.pullzone.example")
 
-from lfg_core import history_store
+import json
+
+from lfg_core import history_store, sponsored_mint
 from tests.fixtures import history_txs as fx
 
 # Fixture ledger ranges must sit above the real earliest-available ledger (32570).
@@ -383,6 +385,25 @@ def test_baseline_certification_rejects_omitted_required_account_sources():
         bh.validate_baseline_source_coverage({"issuer", "brix", "nfts"})
 
 
+def test_baseline_certification_requires_the_full_default_source_set():
+    # #331: the two-account minimum is not enough — a narrowed sweep attests
+    # less than the eligibility baseline is trusted to prove.
+    assert bh.REQUIRED_BASELINE_SOURCES == bh.DEFAULT_SOURCES
+    with pytest.raises(ValueError, match="brix, distributor, issuer, nfts"):
+        bh.validate_baseline_source_coverage({"token_issuer", "signing"})
+    bh.validate_baseline_source_coverage(bh.DEFAULT_SOURCES, distributor="rDistributor")
+
+
+def test_baseline_certification_requires_a_distributor_address():
+    # Bot finding on #350: without --distributor the distributor branch never
+    # runs, so certifying would attest a sweep that never happened — refuse.
+    with pytest.raises(ValueError, match="--distributor"):
+        bh.validate_baseline_source_coverage(bh.DEFAULT_SOURCES)
+    with pytest.raises(ValueError, match="--distributor"):
+        bh.validate_baseline_source_coverage(bh.DEFAULT_SOURCES, distributor="")
+    bh.validate_baseline_source_coverage(bh.DEFAULT_SOURCES, distributor="rDistributor")
+
+
 def test_baseline_coverage_snapshot_binds_required_accounts(monkeypatch):
     from lfg_core import config
 
@@ -521,20 +542,92 @@ def test_certified_account_backfill_rejects_unbound_page_evidence(tmp_path, resp
         )
 
 
-def test_baseline_coverage_document_binds_accounts_tag_and_common_range():
+def test_baseline_coverage_document_binds_accounts_tag_range_and_sources():
     document = bh.baseline_coverage_document(
         {"signing": "rSigner", "token_issuer": "rIssuer"},
+        sources=bh.DEFAULT_SOURCES,
         source_tag=2606160021,
         ledger_min=history_store.EARLIEST_AVAILABLE_LEDGER,
         ledger_max=L0 + 777,
     )
     assert document == {
-        "version": 1,
+        "version": sponsored_mint.BASELINE_COVERAGE_VERSION,
         "source_tag": 2606160021,
         "ledger_min": history_store.EARLIEST_AVAILABLE_LEDGER,
         "ledger_max": L0 + 777,
+        "sources": ["brix", "distributor", "issuer", "nfts", "signing", "token_issuer"],
         "accounts": {"signing": "rSigner", "token_issuer": "rIssuer"},
     }
+
+
+def _coverage_row(monkeypatch, **overrides):
+    from lfg_core import config
+
+    monkeypatch.setattr(config, "TOKEN_ISSUER_ADDRESS", "rLfgoTokenIssuer")
+    monkeypatch.setattr(config, "SIGNING_ACCOUNT", "rLfgoSigningAccount")
+    document = {
+        "version": sponsored_mint.BASELINE_COVERAGE_VERSION,
+        "source_tag": config.SOURCE_TAG,
+        "ledger_min": history_store.EARLIEST_AVAILABLE_LEDGER,
+        "ledger_max": L0 + 777,
+        "sources": sorted(sponsored_mint.BASELINE_REQUIRED_SOURCES),
+        "accounts": {"signing": "rLfgoSigningAccount", "token_issuer": "rLfgoTokenIssuer"},
+    }
+    document.update(overrides)
+    for key in [k for k, v in overrides.items() if v is _DROP]:
+        del document[key]
+    return {
+        "baseline_coverage": json.dumps(document),
+        "baseline_ledger_min": history_store.EARLIEST_AVAILABLE_LEDGER,
+        "baseline_ledger_max": L0 + 777,
+    }
+
+
+_DROP = object()
+
+
+def test_runtime_gate_accepts_a_full_source_attestation(monkeypatch):
+    row = _coverage_row(monkeypatch)
+    assert sponsored_mint._baseline_coverage_is_bound(row)
+
+
+def test_runtime_gate_rejects_a_narrowed_source_attestation(monkeypatch):
+    row = _coverage_row(monkeypatch, sources=["signing", "token_issuer"])
+    assert not sponsored_mint._baseline_coverage_is_bound(row)
+
+
+def test_runtime_gate_rejects_a_document_without_a_source_attestation(monkeypatch):
+    row = _coverage_row(monkeypatch, sources=_DROP)
+    assert not sponsored_mint._baseline_coverage_is_bound(row)
+
+
+def test_runtime_gate_rejects_a_malformed_source_attestation(monkeypatch):
+    row = _coverage_row(monkeypatch, sources="issuer,brix,token_issuer,signing,distributor,nfts")
+    assert not sponsored_mint._baseline_coverage_is_bound(row)
+
+
+def test_runtime_gate_rejects_version_one_and_unknown_coverage_versions(monkeypatch):
+    # A pre-#331 version-1 document cannot carry the sources attestation, and
+    # an unknown future version must not fall through as trusted.
+    for version in (1, 3, "2", None):
+        row = _coverage_row(monkeypatch, version=version)
+        assert not sponsored_mint._baseline_coverage_is_bound(row), version
+
+
+def test_baseline_coverage_sources_parser_is_fail_closed():
+    assert sponsored_mint.baseline_coverage_sources(None) is None
+    assert sponsored_mint.baseline_coverage_sources("") is None
+    assert sponsored_mint.baseline_coverage_sources("not json") is None
+    assert sponsored_mint.baseline_coverage_sources(json.dumps({"version": 1})) is None
+    assert (
+        sponsored_mint.baseline_coverage_sources(
+            json.dumps({"version": sponsored_mint.BASELINE_COVERAGE_VERSION, "sources": [1]})
+        )
+        is None
+    )
+    assert sponsored_mint.baseline_coverage_sources(
+        json.dumps({"version": sponsored_mint.BASELINE_COVERAGE_VERSION, "sources": ["b", "a"]})
+    ) == ["a", "b"]
 
 
 def test_archive_baseline_persists_source_tag_and_coverage(tmp_path):

@@ -44,7 +44,8 @@ cd /home/hamsa/LFG           # staging: /home/hamsa/LFG-staging
   --genesis-hash <ledger-32570-hash> \
   --baseline-ledger-min 32570 \
   --baseline-ledger-max <current-validated-tip> \
-  --baseline-provenance "<who audited this archive and how>"
+  --baseline-provenance "<who audited this archive and how>" \
+  --distributor <airdrop-distributor-wallet>
 ```
 
 - `--baseline-ledger-min` **must** be `32570`
@@ -55,9 +56,17 @@ cd /home/hamsa/LFG           # staging: /home/hamsa/LFG-staging
   and the run re-reads it at start, so read the tip and launch immediately;
   on `baseline maximum must equal the validated endpoint tip`, re-read and
   retry rather than reusing the stale number.
-- `--sources` must include `token_issuer` and `signing`. Both are in the
-  default set — do not narrow `--sources` for a certification run, or the
-  coverage document will attest less than the archive is treated as proving.
+- `--sources` must be the **full default set** for a certification run — the
+  run refuses to certify if any source is narrowed away (#331), and the
+  coverage document records the exact source set swept (including `nfts`,
+  which has no account address) so `_baseline_coverage_is_bound` can verify
+  the sweep was not narrowed. Leave `--sources` at its default. The `nfts`
+  sweep is by far the slowest part of the run; that is the cost of an
+  attestable baseline, not a corner to cut.
+- `--distributor` is **required** for a certification run (though optional for
+  a plain backfill): the distributor source can only be swept when an address
+  is supplied, so certifying without one would attest a sweep that never
+  happened. Use the airdrop distributor wallet (`BRIX_DISTRIBUTOR_ADDRESS`).
 - `--baseline-provenance` is a free-text operator attestation. It is evidence
   for a human reader, not a machine check: write who verified completeness.
 - Watch for `skipped N entries carrying no explicit validated flag`. If a
@@ -106,6 +115,32 @@ Recovering from a continuity gap is exactly Step 0 again — re-run the
 certification. Never hand-edit `archive_state` to clear the gap flags; they
 are the only record that the archive was, at some point, not provably
 complete.
+
+### What the historical baseline can and cannot see
+
+The live listener half of the archive is complete — it subscribes to the
+whole-network transaction stream and archives every validated
+SourceTag-carrying transaction regardless of which accounts it touches. The
+**historical** half is not: `account_tx` is affected-account-scoped, so the
+certified baseline can only see transactions that touched a swept account
+(NFT issuer, BRIX issuer, LFGO token issuer, signing account, distributor)
+or an indexed character token (`nft_history` over `onchain_nfts`). Requiring
+the full source set closes the operator-shortcut hole; two narrow blind
+spots remain inherent to the design:
+
+- **Trait-token offer create/cancel.** A trait-token sell offer's only
+  affected account is the offeror, and trait tokens live in `trait_tokens`,
+  not `onchain_nfts`, so the `nfts` sweep never visits them. A wallet whose
+  sole tagged activity is listing/cancelling an off-platform-acquired trait
+  token is invisible to the baseline.
+- **`tec`-failed tagged transactions.** Their metadata touches only the
+  sender, so they appear in no other account's `account_tx`. (Asymmetry: the
+  live listener *does* treat a `tec` tagged transaction as evidence.)
+
+The consequence of a leaked wallet is bounded: `free_mint_claims` has
+`UNIQUE (network, wallet)`, so it costs at most one of the campaign's slots
+plus one 1-LFGO burn on a wallet that already counted toward the
+unique-wallet metric — never funds or a double mint.
 
 ### Repairing an archive stuck with an unbounded gap
 

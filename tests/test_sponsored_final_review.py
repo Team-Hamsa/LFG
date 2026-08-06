@@ -62,10 +62,11 @@ def _ready_history(path: str, *, network: str = "mainnet", now: int = 1_000):
         provenance="review-test",
         coverage=json.dumps(
             {
-                "version": 1,
+                "version": sponsored_mint.BASELINE_COVERAGE_VERSION,
                 "source_tag": config.SOURCE_TAG,
                 "ledger_min": history_store.EARLIEST_AVAILABLE_LEDGER,
                 "ledger_max": L0 + 500,
+                "sources": sorted(sponsored_mint.BASELINE_REQUIRED_SOURCES),
                 "accounts": {
                     "signing": config.SIGNING_ACCOUNT,
                     "token_issuer": config.TOKEN_ISSUER_ADDRESS,
@@ -111,10 +112,11 @@ def test_archive_health_requires_complete_matching_fresh_provenance(tmp_path):
         provenance="clio-account-tx-audit",
         coverage=json.dumps(
             {
-                "version": 1,
+                "version": sponsored_mint.BASELINE_COVERAGE_VERSION,
                 "source_tag": config.SOURCE_TAG,
                 "ledger_min": history_store.EARLIEST_AVAILABLE_LEDGER,
                 "ledger_max": L0 + 500,
+                "sources": sorted(sponsored_mint.BASELINE_REQUIRED_SOURCES),
                 "accounts": {
                     "signing": config.SIGNING_ACCOUNT,
                     "token_issuer": config.TOKEN_ISSUER_ADDRESS,
