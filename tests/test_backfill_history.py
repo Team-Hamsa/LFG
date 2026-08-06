@@ -145,6 +145,101 @@ def test_backfill_nft_history_resumes_after_failure(tmp_path):
     assert _run(bh.backfill_nft_history(conn, resuming_request_fn, nft_id)) == 0
 
 
+@pytest.mark.parametrize("fn_name", ["account", "nft"])
+def test_certified_page_without_a_transaction_list_is_refused(tmp_path, fn_name):
+    """`result.get("transactions", [])` would read a response that omits the
+    key as a genuinely empty page and advance the cursor to done/complete —
+    recording certified coverage for a window the endpoint never answered."""
+    conn = history_store.init_history_db(str(tmp_path / "h.db"))
+
+    async def request_fn(req):
+        base = {
+            "ledger_index_min": req["ledger_index_min"],
+            "ledger_index_max": req["ledger_index_max"],
+            "validated": True,
+        }
+        if fn_name == "account":
+            return {**base, "account": "rRequired"}
+        return {**base, "nft_id": fx.NFT_A}
+
+    with pytest.raises(ValueError, match="certified"):
+        if fn_name == "account":
+            _run(
+                bh.backfill_account_tx(
+                    conn,
+                    request_fn,
+                    "rRequired",
+                    "required_tx",
+                    ledger_min=L0 + 200,
+                    ledger_max=L0 + 400,
+                )
+            )
+        else:
+            _run(
+                bh.backfill_nft_history(
+                    conn, request_fn, fx.NFT_A, ledger_min=L0 + 200, ledger_max=L0 + 400
+                )
+            )
+
+
+@pytest.mark.parametrize("fn_name", ["account", "nft"])
+def test_certified_page_with_a_skipped_unvalidated_entry_is_refused(tmp_path, fn_name):
+    """An entry `_is_validated_entry` rejects is silently dropped, and the
+    cursor would still complete — certifying a window whose contents were
+    only partly archived. In certified mode that must fail closed."""
+    conn = history_store.init_history_db(str(tmp_path / "h.db"))
+    dropped = _entry_at_ledger(fx.MINT, "79" * 32, L0 + 300)
+    dropped["validated"] = False
+
+    async def request_fn(req):
+        base = {
+            "ledger_index_min": req["ledger_index_min"],
+            "ledger_index_max": req["ledger_index_max"],
+            "validated": True,
+            "transactions": [dropped],
+        }
+        if fn_name == "account":
+            return {**base, "account": "rRequired"}
+        return {**base, "nft_id": fx.NFT_A}
+
+    with pytest.raises(ValueError, match="certified"):
+        if fn_name == "account":
+            _run(
+                bh.backfill_account_tx(
+                    conn,
+                    request_fn,
+                    "rRequired",
+                    "required_tx",
+                    ledger_min=L0 + 200,
+                    ledger_max=L0 + 400,
+                )
+            )
+        else:
+            _run(
+                bh.backfill_nft_history(
+                    conn, request_fn, fx.NFT_A, ledger_min=L0 + 200, ledger_max=L0 + 400
+                )
+            )
+
+
+def test_catchup_discovers_tokens_minted_during_the_gap(tmp_path):
+    """The NFT index is maintained by the listener, so tokens minted while it
+    was down are missing from it. Paging `nfts` from the index alone would
+    skip exactly those tokens while still attesting cumulative coverage —
+    so the gap-window raw archive is mined for token IDs too."""
+    conn = history_store.init_history_db(str(tmp_path / "h.db"))
+    from lfg_core import history_events
+
+    bh.store_raw_tx(conn, history_events.normalize_entry(_entry(fx.MINT, "80" * 32, ledger=101)))
+
+    found = bh.nft_ids_in_ledger_range(conn, nft_issuer=fx.ISSUER, ledger_min=100, ledger_max=200)
+    assert fx.NFT_A in found, "a token minted during the gap was not discovered"
+    # Outside the window it is not claimed.
+    assert not bh.nft_ids_in_ledger_range(
+        conn, nft_issuer=fx.ISSUER, ledger_min=500, ledger_max=600
+    )
+
+
 def _entry_at_ledger(tx, hash_, ledger):
     """Like _entry, but the ledger the range checks read (the tx's own
     ledger_index, which wins over the envelope's) really is `ledger`."""

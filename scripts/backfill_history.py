@@ -416,8 +416,13 @@ async def backfill_account_tx(
             or result.get("validated") is not True
         ):
             raise ValueError("certified account_tx page did not prove its account and range")
+        entries = result.get("transactions")
+        if certified_range and not isinstance(entries, list):
+            # Defaulting a missing key to [] would read "the endpoint did not
+            # answer" as "this window is empty" and complete the cursor.
+            raise ValueError("certified account_tx page carried no transaction list")
         skipped_unvalidated = 0
-        for entry in result.get("transactions", []):
+        for entry in entries or []:
             if not _is_validated_entry(result, entry):
                 skipped_unvalidated += 1
                 continue
@@ -433,10 +438,44 @@ async def backfill_account_tx(
             if store_raw_tx(conn, tx, network=network):
                 new += 1
         _warn_if_unvalidated(cursor_source, result, skipped_unvalidated)
+        if certified_range and skipped_unvalidated:
+            # A dropped entry means this window was only partly archived; the
+            # cursor must not advance over evidence that was never stored.
+            raise ValueError("certified account_tx page contained unvalidated entries")
         marker = result.get("marker")
         history_store.set_cursor(conn, cursor_source, json.dumps(marker) if marker else None)
         if not marker:
             return new
+
+
+def nft_ids_in_ledger_range(
+    conn: Any, *, nft_issuer: str, ledger_min: int, ledger_max: int
+) -> set[str]:
+    """Our collection's token IDs appearing in archived txs within a range.
+
+    The `nfts` source pages per-token history for every token in the on-chain
+    index, but that index is maintained by the listener — so tokens minted
+    while it was down are missing from it, which is exactly the window a
+    catch-up covers. Paging the index alone would skip those tokens while the
+    run still attests cumulative `nfts` coverage. Mining the raw archive
+    (already populated for this window by the account sweeps, which run first)
+    recovers them."""
+
+    issuer_hex = history_events.issuer_account_hex(nft_issuer)
+    found: set[str] = set()
+    for row in conn.execute(
+        "SELECT raw_json FROM xrpl_txs WHERE ledger_index BETWEEN ? AND ?",
+        (ledger_min, ledger_max),
+    ):
+        try:
+            tx = json.loads(row["raw_json"])
+        except (TypeError, ValueError):
+            continue
+        for ev in history_events.derive_nft_events(tx, nft_issuer=nft_issuer):
+            nft_id = ev.get("nft_id")
+            if isinstance(nft_id, str) and history_events.nft_id_issuer_matches(nft_id, issuer_hex):
+                found.add(nft_id)
+    return found
 
 
 async def backfill_nft_history(
@@ -484,8 +523,11 @@ async def backfill_nft_history(
             or result.get("validated") is not True
         ):
             raise ValueError("certified nft_history page did not prove its token and range")
+        entries = result.get("transactions")
+        if certified_range and not isinstance(entries, list):
+            raise ValueError("certified nft_history page carried no transaction list")
         skipped_unvalidated = 0
-        for entry in result.get("transactions", []):
+        for entry in entries or []:
             if not _is_validated_entry(result, entry):
                 skipped_unvalidated += 1
                 continue
@@ -501,6 +543,8 @@ async def backfill_nft_history(
             if store_raw_tx(conn, tx, network=network):
                 new += 1
         _warn_if_unvalidated(cursor_source, result, skipped_unvalidated)
+        if certified_range and skipped_unvalidated:
+            raise ValueError("certified nft_history page contained unvalidated entries")
         marker = result.get("marker")
         history_store.set_cursor(conn, cursor_source, json.dumps(marker) if marker else "done")
         if not marker:
@@ -731,6 +775,26 @@ async def _amain() -> int:
         if "nfts" in wanted:
             oconn = nft_index.init_db(nft_index.index_db_path(args.network))
             ids = [r[0] for r in oconn.execute("SELECT nft_id FROM onchain_nfts")]
+            if fixed_ledger_min != -1:
+                # The account sweeps above already archived this window, so any
+                # token minted while the listener (and thus the index) was down
+                # is recoverable from the raw rows.
+                extra = sorted(
+                    nft_ids_in_ledger_range(
+                        conn,
+                        nft_issuer=issuer,
+                        ledger_min=fixed_ledger_min,
+                        ledger_max=fixed_ledger_max,
+                    )
+                    - set(ids)
+                )
+                if extra:
+                    logging.info(
+                        "nft_history: %d token(s) absent from the index were discovered "
+                        "in the certified window and will be paged too",
+                        len(extra),
+                    )
+                    ids += extra
             total = 0
             for i, nft_id in enumerate(ids, 1):
                 total += await backfill_nft_history(
