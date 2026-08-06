@@ -10,6 +10,8 @@ module.exports = {
     { name: "lfg-telegram", cwd: CWD, script: "run_telegram.py", interpreter: PY },
     { name: "lfg-index-mainnet", cwd: CWD, script: "scripts/onchain_listener.py", interpreter: PY, args: ["--network", "mainnet", "listen"] },
     { name: "lfg-snapshot", cwd: CWD, script: "scripts/snapshot_balances.py", interpreter: PY, args: ["--network", "mainnet"], cron_restart: "10 0 * * *", autorestart: false },
+    { name: "lfg-economy-reconcile", cwd: CWD, script: "scripts/economy_nightly_reconcile.py", interpreter: PY, args: ["--network", "mainnet"], cron_restart: "20 0 * * *", autorestart: false },
+    { name: "lfg-economy-audit", cwd: CWD, script: "scripts/audit_trait_economy.py", interpreter: PY, args: ["--network", "mainnet"], cron_restart: "25 0 * * *", autorestart: false },
     { name: "lfg-deployer", cwd: CWD, script: "scripts/deployer.py", interpreter: PY, args: ["prod"] },
   ],
 };

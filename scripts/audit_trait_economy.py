@@ -24,6 +24,79 @@ sys.path.insert(0, REPO_ROOT)
 from lfg_core import config, economy_store, nft_index, trait_economy  # noqa: E402
 
 
+def classify_drift(
+    conservation: trait_economy.ConservationReport,
+) -> dict[str, dict[tuple[str, str], int]]:
+    """Partition per-(slot, value) conservation drift into `benign_swap` —
+    every entry of a slot whose signed deltas sum to zero (the trait-swap
+    substitution pattern: -1 old value, +1 new value, net zero) — and `real`,
+    a slot whose total is non-zero (assets actually created/destroyed
+    unaccounted; investigate)."""
+    by_slot: dict[str, dict[tuple[str, str], int]] = {}
+    for (slot, value), delta in conservation.trait_drift.items():
+        by_slot.setdefault(slot, {})[(slot, value)] = delta
+    out: dict[str, dict[tuple[str, str], int]] = {"benign_swap": {}, "real": {}}
+    for entries in by_slot.values():
+        bucket = "benign_swap" if sum(entries.values()) == 0 else "real"
+        out[bucket].update(entries)
+    return out
+
+
+def build_alert_body(
+    network: str,
+    live_count: int,
+    conservation: trait_economy.ConservationReport,
+    completeness: trait_economy.CompletenessReport,
+    report_path: str,
+) -> str:
+    """Compact Discord-webhook message for a NON-CLEAN audit run, labelling
+    benign swap substitution separately from real conservation drift."""
+    classes = classify_drift(conservation)
+    lines = [
+        f"**Trait economy audit: {'DRIFT' if not conservation.ok else 'VIOLATIONS'}** "
+        f"({network}, {live_count} live characters)"
+    ]
+    if classes["real"]:
+        lines.append("Real conservation drift — investigate (do NOT re-freeze genesis):")
+        for (slot, value), delta in sorted(classes["real"].items()):
+            lines.append(f"- {slot} | {value}: {delta:+d}")
+    if classes["benign_swap"]:
+        lines.append(
+            "Net-zero-per-slot pattern — benign swap substitution, review, likely not a leak:"
+        )
+        for (slot, value), delta in sorted(classes["benign_swap"].items()):
+            lines.append(f"- {slot} | {value}: {delta:+d}")
+    if not completeness.ok:
+        lines.append(
+            f"Completeness violations: orphan bodies {completeness.orphan_bodies or '—'}, "
+            f"slot anomalies in editions {sorted(completeness.slot_anomalies) or '—'}"
+        )
+    lines.append(
+        "Run scripts/reconcile_supply_growth.py + reconcile_supply_shrinkage.py "
+        "(dry-run first), then re-audit."
+    )
+    lines.append(f"Report: {report_path}")
+    return "\n".join(lines)
+
+
+def post_alert(webhook_url: str, body: str) -> bool:
+    """Best-effort POST to a Discord webhook; failures only log."""
+    import json
+    import urllib.request
+
+    try:
+        req = urllib.request.Request(
+            webhook_url,
+            data=json.dumps({"content": body[:1900]}).encode(),
+            headers={"Content-Type": "application/json"},
+        )
+        urllib.request.urlopen(req, timeout=10)
+        return True
+    except Exception as exc:  # noqa: BLE001 — alerting must never fail the audit
+        print(f"alert webhook failed: {exc}", file=sys.stderr)
+        return False
+
+
 def format_economy_report(
     conservation: trait_economy.ConservationReport,
     completeness: trait_economy.CompletenessReport,
@@ -93,6 +166,12 @@ def main() -> int:
     parser = argparse.ArgumentParser(description="Audit the trait economy against genesis.")
     parser.add_argument("--network", choices=["mainnet", "testnet"], default=config.XRPL_NETWORK)
     parser.add_argument("--report-dir", default=os.path.join(REPO_ROOT, "reports"))
+    parser.add_argument(
+        "--alert-webhook",
+        default=os.environ.get("ECONOMY_AUDIT_WEBHOOK_URL"),
+        help="Discord webhook URL to post to when the run is non-clean "
+        "(default: $ECONOMY_AUDIT_WEBHOOK_URL; unset = no alert)",
+    )
     args = parser.parse_args()
 
     db_path = nft_index.index_db_path(args.network)
@@ -149,7 +228,13 @@ def main() -> int:
     print(f"Conservation: {'OK' if conservation.ok else 'DRIFT'}")
     print(f"Completeness: {'OK' if completeness.ok else 'VIOLATIONS'}")
     print(f"Report: {report_path}")
-    return 0 if conservation.ok and completeness.ok else 1
+    clean = conservation.ok and completeness.ok
+    if not clean and args.alert_webhook:
+        post_alert(
+            args.alert_webhook,
+            build_alert_body(args.network, len(canonical), conservation, completeness, report_path),
+        )
+    return 0 if clean else 1
 
 
 if __name__ == "__main__":

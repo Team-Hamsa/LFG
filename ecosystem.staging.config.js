@@ -12,6 +12,8 @@ module.exports = {
     { name: "stg-telegram", cwd: CWD, script: "run_telegram.py", interpreter: PY },
     { name: "stg-index-testnet", cwd: CWD, script: "scripts/onchain_listener.py", interpreter: PY, args: ["--network", "testnet", "listen"] },
     { name: "stg-snapshot", cwd: CWD, script: "scripts/snapshot_balances.py", interpreter: PY, args: ["--network", "testnet"], cron_restart: "10 0 * * *", autorestart: false },
+    { name: "stg-economy-reconcile", cwd: CWD, script: "scripts/economy_nightly_reconcile.py", interpreter: PY, args: ["--network", "testnet"], cron_restart: "20 0 * * *", autorestart: false },
+    { name: "stg-economy-audit", cwd: CWD, script: "scripts/audit_trait_economy.py", interpreter: PY, args: ["--network", "testnet"], cron_restart: "25 0 * * *", autorestart: false },
     { name: "stg-deployer", cwd: CWD, script: "scripts/deployer.py", interpreter: PY, args: ["staging"] },
   ],
 };

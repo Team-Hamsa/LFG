@@ -123,6 +123,7 @@ SPONSORED_MINT_EXCLUDED_WALLETS=<addr,addr>                 # sponsored free min
 SPONSORED_MINT_MAINNET_GENESIS_HASH=<ledger-32570-hash>         # optional; pins history_mainnet.db to a chain identity. Unset = the archive's own recorded genesis is trusted (still fail-closed: an uncertified archive admits nobody)
 SPONSORED_MINT_TESTNET_GENESIS_HASH=<ledger-32570-hash>         # optional; same, for history_testnet.db
 SPONSORED_MINT_ARCHIVE_MAX_LAG_SECONDS=900                  # optional; how stale the eligibility archive's listener heartbeat may be before admission fails closed (default 900)
+ECONOMY_AUDIT_WEBHOOK_URL=<discord-webhook-url>             # optional (#322); nightly trait-economy audit posts here on a non-clean run (unset = log only)
 ```
 
 > **Sponsored free mint — the archive baseline is a hard prerequisite.**
@@ -692,6 +693,20 @@ Model:
   (new-edition mint / permanent burn). Conservation:
   `census == genesis + Σ supply_changes`; `max_edition` is dynamic. The auditor
   (`scripts/audit_trait_economy.py`) flags any unlogged delta as drift.
+  **Genesis is frozen exactly ONCE per network; re-freezing is break-glass
+  only, never routine** (#322) — a re-freeze redefines "correct" as "whatever
+  we have now" and destroys the audit's power. The listener records an
+  out-of-band character burn (admin burn, legacy path) as an idempotent `-1`
+  shrinkage row keyed on the burned `nft_id`
+  (`nft_listener._record_burn_shrinkage`; blank characters write nothing —
+  their assets survive in the Closet). Historical gaps are repaired with
+  `scripts/reconcile_supply_growth.py` + `scripts/reconcile_supply_shrinkage.py`
+  (dry-run by default, `--apply` to write). Nightly pm2 cron entries
+  (`lfg-economy-reconcile` 00:20 → `lfg-economy-audit` 00:25, staging `stg-*`
+  on testnet) run reconcile-then-audit; a non-clean audit posts to the
+  optional `ECONOMY_AUDIT_WEBHOOK_URL` Discord webhook, labelling
+  net-zero-per-slot drift as benign swap substitution vs real drift. Diagnose
+  drift with the sweeps + audit — never normalize it with a re-freeze.
 - Core modules: `lfg_core/economy_flow.py` (flows + `EconomyDeps`),
   `lfg_core/closet_token.py` (Closet metadata + lifecycle — `ensure_closet`,
   `confirm_accept`, `sync_closet`, `ClosetRef`),

@@ -386,6 +386,18 @@ def nft_by_number(conn: sqlite3.Connection, nft_number: int) -> OnchainNft | Non
     return _row_to_nft(row) if row else None
 
 
+def nft_by_id(conn: sqlite3.Connection, nft_id: str) -> OnchainNft | None:
+    """The index row for this exact token, or None if unknown. Returns BURNED
+    rows too — the burn-shrinkage recorder reads a just-burned character's
+    stored traits from here (mark_burned preserves attributes_json, and
+    nft_info returns None post-burn). Same row_factory side effect as
+    nft_by_number."""
+    conn.row_factory = sqlite3.Row
+    cur = conn.execute("SELECT * FROM onchain_nfts WHERE nft_id=?", (nft_id,))
+    row = cur.fetchone()
+    return _row_to_nft(row) if row else None
+
+
 def retryable_unreadable(conn: sqlite3.Connection) -> list[OnchainNft]:
     """Non-burned tokens whose metadata never resolved (empty attributes) but
     that still carry a URI — candidates for a re-fetch pass."""

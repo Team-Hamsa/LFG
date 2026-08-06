@@ -72,3 +72,65 @@ def reconcile_growth(conn: sqlite3.Connection, *, dry_run: bool = False) -> dict
             )
         written.append(edition)
     return {"written": sorted(written), "skipped_unreadable": sorted(set(skipped_unreadable))}
+
+
+def reconcile_shrinkage(conn: sqlite3.Connection, *, dry_run: bool = False) -> dict[str, Any]:
+    """Write a 'burn' supply_changes row for every historical out-of-band
+    character burn the listener never accounted for (#322): a BURNED
+    `onchain_nfts` character whose edition is in the effective genesis, that
+    was DRESSED at burn time (a blank's assets survive in the Closet — no
+    shrinkage), and has no burn row stamped with its nft_id yet. Deltas come
+    from the index's preserved attributes via
+    `trait_economy.burn_shrinkage_deltas` (+ body compensation when the worn
+    body differs from the recorded one). Unreadable rows are skipped and
+    reported, never guessed at. Idempotent per burned nft_id.
+    Returns {"written": [(edition, nft_id)], "skipped_unreadable": [...]}."""
+    genesis = trait_economy.effective_genesis(
+        economy_store.read_genesis(conn), economy_store.read_supply_changes(conn)
+    )
+    written: list[tuple[int, str]] = []
+    skipped_unreadable: list[tuple[int, str]] = []
+    conn.row_factory = sqlite3.Row
+    rows = conn.execute(
+        "SELECT * FROM onchain_nfts WHERE is_burned=1 AND nft_number IS NOT NULL "
+        "ORDER BY nft_number, nft_id"
+    ).fetchall()
+    for row in rows:
+        rec = nft_index._row_to_nft(row)
+        edition = rec.nft_number
+        assert edition is not None  # filtered in SQL
+        if edition not in genesis.edition_bodies:
+            continue
+        # A burned duplicate whose edition is still LIVE (legacy burn+remint
+        # swap, reminted edition) is a replacement, not shrinkage — the live
+        # token carries the edition's assets; writing -1 would wrongly pop it.
+        if nft_index.nft_by_number(conn, edition) is not None:
+            continue
+        if economy_store.supply_change_exists_for_nft(conn, rec.nft_id):
+            continue
+        if not rec.attributes:
+            skipped_unreadable.append((edition, rec.nft_id))
+            continue
+        deltas = trait_economy.burn_shrinkage_deltas(rec)
+        if deltas is None:  # blank — assets conserved in the Closet
+            continue
+        deltas.update(trait_economy.body_compensation_deltas(rec, genesis))
+        if not dry_run:
+            economy_store.record_supply_change(
+                conn,
+                "burn",
+                edition,
+                swap_meta.get_attr(rec.attributes, "Body") or "",
+                rec.body,
+                deltas,
+                ACTOR,
+                f"shrinkage reconcile {rec.nft_id}",
+                nft_id=rec.nft_id,
+            )
+            # The burn row pops the edition from the effective genesis; refresh
+            # so a duplicate token at the same edition is not written twice.
+            genesis = trait_economy.effective_genesis(
+                economy_store.read_genesis(conn), economy_store.read_supply_changes(conn)
+            )
+        written.append((edition, rec.nft_id))
+    return {"written": sorted(written), "skipped_unreadable": sorted(set(skipped_unreadable))}

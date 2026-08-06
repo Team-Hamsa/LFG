@@ -459,6 +459,9 @@ async def run_harvest(session: HarvestSession, deps: EconomyDeps) -> None:
                 trait_deltas=_legacy_deltas(rec, sign=-1),
                 actor="harvest",
                 reason=f"legacy harvest upgrade {session.id}",
+                # Stamp the burned token so the listener's out-of-band burn
+                # recorder (#322) recognises this burn as already accounted for.
+                nft_id=rec.nft_id,
             )
             _write_record(deps.records_dir, "harvest", session.id, session._record("burned"))
 
