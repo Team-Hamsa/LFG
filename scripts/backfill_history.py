@@ -150,7 +150,11 @@ def validate_baseline_endpoint(
         raise ValueError("baseline maximum must equal the validated endpoint tip")
 
 
-def validate_catchup_state(state: history_store.ArchiveState | None) -> int:
+def validate_catchup_state(
+    state: history_store.ArchiveState | None,
+    *,
+    expected_source_tag: int | None = None,
+) -> int:
     """Admit a bounded catch-up (#329) only when it can be provably sound.
 
     A catch-up records a cumulative [earliest, tip] baseline while paging only
@@ -175,6 +179,24 @@ def validate_catchup_state(state: history_store.ArchiveState | None) -> int:
             "archive has no prior full-range certification to extend — "
             "run full certification (--complete-audited-baseline)"
         )
+    # A prior baseline is only trustworthy ground if its breadth was attested
+    # under the current rules: an archive migrated from the pre-SourceTag (or
+    # pre-#331 version-1) format keeps its bounds but carries no verifiable
+    # coverage document, and sponsored_mint would reject it at admission time
+    # anyway. Re-certifying on top of it would launder that unattested history
+    # into a fresh v2 baseline.
+    if sponsored_mint.baseline_coverage_sources(state.baseline_coverage) is None:
+        raise ValueError(
+            "archive baseline carries no verifiable coverage document (legacy or "
+            "pre-#331 format); its historical breadth was never attested under the "
+            "current rules — run full certification (--complete-audited-baseline)"
+        )
+    if expected_source_tag is not None and state.source_tag != expected_source_tag:
+        raise ValueError(
+            f"archive was certified for SourceTag {state.source_tag}, but this run "
+            f"would attest SourceTag {expected_source_tag}; a bounded catch-up must "
+            "not rebrand an archive — run full certification for the new tag"
+        )
     if state.continuity_gap_at is None:
         raise ValueError(
             "archive records no continuity gap — nothing to catch up "
@@ -193,10 +215,11 @@ def catchup_bounds(
     snapshot: history_store.EndpointSnapshot,
     *,
     claimed_genesis_hash: str | None = None,
+    expected_source_tag: int | None = None,
 ) -> tuple[int, int]:
     """Resolve the bounded paging window [gap_after, validated tip], fail-closed."""
 
-    gap_after = validate_catchup_state(state)
+    gap_after = validate_catchup_state(state, expected_source_tag=expected_source_tag)
     assert state is not None
     if claimed_genesis_hash is not None and claimed_genesis_hash.strip() != snapshot.genesis_hash:
         raise ValueError("claimed genesis does not match the endpoint chain identity")
@@ -552,6 +575,7 @@ async def _amain() -> int:
                     archive_state,
                     endpoint_snapshot,
                     claimed_genesis_hash=args.genesis_hash,
+                    expected_source_tag=config.SOURCE_TAG,
                 )
             except ValueError as exc:
                 logging.error("bounded catch-up refused: %s", exc)

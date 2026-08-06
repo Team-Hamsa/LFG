@@ -1020,6 +1020,20 @@ def test_certification_refuses_a_baseline_starting_below_the_earliest_ledger():
 # --- Bounded gap catch-up (#329) -------------------------------------------
 
 
+def _v2_coverage(tip):
+    return json.dumps(
+        bh.baseline_coverage_document(
+            {"signing": "rSigner", "token_issuer": "rIssuer"},
+            sources=set(bh.DEFAULT_SOURCE_ORDER),
+            source_tag=2606160021,
+            ledger_min=history_store.EARLIEST_AVAILABLE_LEDGER,
+            ledger_max=tip,
+        ),
+        sort_keys=True,
+        separators=(",", ":"),
+    )
+
+
 def _seed_certified_archive_with_gap(
     conn,
     *,
@@ -1027,6 +1041,8 @@ def _seed_certified_archive_with_gap(
     tip=L0 + 100,
     gap_after=L0 + 140,
     gap_before=None,
+    coverage="v2",
+    source_tag=None,
 ):
     """A previously certified archive whose listener later lost continuity."""
     history_store.record_archive_baseline(
@@ -1036,6 +1052,8 @@ def _seed_certified_archive_with_gap(
         ledger_min=history_store.EARLIEST_AVAILABLE_LEDGER,
         ledger_max=tip,
         provenance="first full certification",
+        source_tag=source_tag,
+        coverage=_v2_coverage(tip) if coverage == "v2" else coverage,
         completed_at=10,
     )
     history_store.record_validated_ledger(
@@ -1044,6 +1062,7 @@ def _seed_certified_archive_with_gap(
         genesis_hash="CHAIN-ANCHOR",
         ledger_index=gap_after,
         close_time=11,
+        source_tag=source_tag,
         observed_at=11,
     )
     history_store.invalidate_archive_continuity(
@@ -1094,11 +1113,46 @@ def test_catchup_refuses_an_archive_with_no_gap(tmp_path):
         ledger_min=history_store.EARLIEST_AVAILABLE_LEDGER,
         ledger_max=L0 + 100,
         provenance="first",
+        coverage=_v2_coverage(L0 + 100),
         completed_at=10,
     )
     state = history_store.get_archive_state(conn, "testnet")
     with pytest.raises(ValueError, match="no continuity gap"):
         bh.validate_catchup_state(state)
+
+
+def test_catchup_refuses_a_legacy_archive_without_a_coverage_document(tmp_path):
+    """Greptile P1 (#353): an archive migrated from the pre-SourceTag baseline
+    format keeps its bounds and a bounded gap but carries no v2 coverage
+    document — its historical breadth was never attested under the current
+    rules, so a bounded catch-up must not re-certify it."""
+    conn = history_store.init_history_db(str(tmp_path / "h.db"))
+    _seed_certified_archive_with_gap(conn, coverage=None)
+    state = history_store.get_archive_state(conn, "testnet")
+    with pytest.raises(ValueError, match="coverage document"):
+        bh.validate_catchup_state(state)
+
+    # A pre-#331 version-1 document cannot attest the swept sources either.
+    conn2 = history_store.init_history_db(str(tmp_path / "h2.db"))
+    _seed_certified_archive_with_gap(
+        conn2, coverage='{"version":1,"ledger_min":32570,"ledger_max":32670}'
+    )
+    state2 = history_store.get_archive_state(conn2, "testnet")
+    with pytest.raises(ValueError, match="coverage document"):
+        bh.validate_catchup_state(state2)
+
+
+def test_catchup_refuses_a_source_tag_mismatch(tmp_path):
+    """CodeRabbit (#353): record_archive_baseline overwrites source_tag
+    unconditionally, so a catch-up run configured with a different tag would
+    silently rebrand an archive certified for another one. Refuse instead."""
+    conn = history_store.init_history_db(str(tmp_path / "h.db"))
+    _seed_certified_archive_with_gap(conn, source_tag=111)
+    state = history_store.get_archive_state(conn, "testnet")
+    with pytest.raises(ValueError, match="SourceTag"):
+        bh.validate_catchup_state(state, expected_source_tag=222)
+    # The matching tag is accepted.
+    assert bh.validate_catchup_state(state, expected_source_tag=111) == L0 + 140
 
 
 def test_catchup_refuses_an_unbounded_gap(tmp_path):
