@@ -46,6 +46,60 @@ from lfg_core import (  # noqa: E402
 
 RECONNECT_BASE = 2
 RECONNECT_MAX = 60
+# Watchdog (#345): validated ledgers close every ~4s, so even a silent
+# collection sees a whole-network stream message far more often than this.
+# Silence past the window means the subscription is wedged (e.g. a keepalive
+# ping timeout the endpoint never followed with a close frame) — force a
+# reconnect instead of sitting online-but-dead for days.
+STREAM_IDLE_TIMEOUT = float(os.environ.get("LISTENER_STREAM_IDLE_TIMEOUT", "300"))
+# Side-channel awaits (clio nft_info, IPFS/CDN metadata, the identity request)
+# run inline in the stream loop; a single hung call used to freeze the whole
+# listener without ever tripping the reconnect loop.
+SIDE_CALL_TIMEOUT = float(os.environ.get("LISTENER_SIDE_CALL_TIMEOUT", "30"))
+
+
+class StreamStalled(Exception):
+    """No stream traffic within STREAM_IDLE_TIMEOUT — treat as a disconnect."""
+
+
+async def _iter_with_watchdog(source: Any, idle_timeout: float | None = None) -> Any:
+    """Yield messages from an async iterable, raising StreamStalled if the next
+    message doesn't arrive within the idle window. StreamStalled is a plain
+    Exception on purpose: it rides the existing reconnect/backoff path."""
+    timeout = STREAM_IDLE_TIMEOUT if idle_timeout is None else idle_timeout
+    it = source.__aiter__()
+    while True:
+        try:
+            msg = await asyncio.wait_for(it.__anext__(), timeout=timeout)
+        except StopAsyncIteration:
+            return
+        except asyncio.TimeoutError:
+            raise StreamStalled(
+                f"watchdog: no stream message for {timeout:.0f}s "
+                "(ledgers close every ~4s; subscription presumed wedged)"
+            ) from None
+        yield msg
+
+
+def _bounded(
+    fn: Callable[[str], Any], *, label: str, network: str, timeout: float | None = None
+) -> Callable[[str], Any]:
+    """Wrap a single-argument async fetch with a hard timeout. A timeout
+    degrades to None (both nft_info and fetch_metadata already return None for
+    'unavailable', which every consumer handles) instead of hanging the stream
+    loop forever; anything else propagates unchanged."""
+
+    async def wrapped(arg: str) -> Any:
+        t = SIDE_CALL_TIMEOUT if timeout is None else timeout
+        try:
+            return await asyncio.wait_for(fn(arg), timeout=t)
+        except asyncio.TimeoutError:
+            logging.warning(
+                f"[{network}] {label}({arg}) timed out after {t:.0f}s; treating as unavailable"
+            )
+            return None
+
+    return wrapped
 
 
 def _resolve(args: argparse.Namespace) -> tuple[str, str, int, str]:
@@ -455,11 +509,16 @@ async def _listen(network: str, issuer: str, taxon: int, clio: str) -> None:
     backoff = RECONNECT_BASE
     async with aiohttp.ClientSession() as http:
 
-        async def fetch_meta(uri_hex: str) -> dict[str, Any] | None:
+        async def _fetch_meta(uri_hex: str) -> dict[str, Any] | None:
             return await swap_meta.fetch_metadata(uri_hex, http)
 
-        async def fetch_token(nft_id: str) -> dict[str, Any] | None:
+        async def _fetch_token(nft_id: str) -> dict[str, Any] | None:
             return await xrpl_ops.nft_info(nft_id, clio)
+
+        # Bounded (#345): these are awaited inline in the stream loop; a hung
+        # side call must not freeze the subscription without tripping reconnect.
+        fetch_meta = _bounded(_fetch_meta, label="fetch_meta", network=network)
+        fetch_token = _bounded(_fetch_token, label="nft_info", network=network)
 
         def is_ours(token: dict[str, Any]) -> bool:
             return token.get("issuer") == issuer and int(token.get("taxon") or -1) == taxon
@@ -468,11 +527,16 @@ async def _listen(network: str, issuer: str, taxon: int, clio: str) -> None:
             stream_open = False
             try:
                 async with AsyncWebsocketClient(clio) as client:
-                    await client.request(Subscribe(streams=[StreamParameter.TRANSACTIONS]))
+                    await asyncio.wait_for(
+                        client.request(Subscribe(streams=[StreamParameter.TRANSACTIONS])),
+                        timeout=SIDE_CALL_TIMEOUT,
+                    )
                     stream_open = True
 
                     async def endpoint_request(req: dict[str, Any]) -> dict[str, Any]:
-                        response = await client.request(Request.from_dict(req))
+                        response = await asyncio.wait_for(
+                            client.request(Request.from_dict(req)), timeout=SIDE_CALL_TIMEOUT
+                        )
                         if not response.is_successful() or not isinstance(response.result, dict):
                             raise RuntimeError(
                                 f"[{network}] {req['method']} identity request failed: "
@@ -484,7 +548,7 @@ async def _listen(network: str, issuer: str, taxon: int, clio: str) -> None:
                     _verify_archive_connection(hconn, history_ctx, snapshot)
                     logging.info(f"[{network}] subscribed to verified tx stream on {clio}")
                     backoff = RECONNECT_BASE
-                    async for msg in client:
+                    async for msg in _iter_with_watchdog(client):
                         tx = _normalize_stream_tx(dict(msg))
                         if tx is None:
                             continue
