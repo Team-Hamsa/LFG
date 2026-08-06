@@ -11,5 +11,8 @@ module.exports = {
     { name: "lfg-index-mainnet", cwd: CWD, script: "scripts/onchain_listener.py", interpreter: PY, args: ["--network", "mainnet", "listen"] },
     { name: "lfg-snapshot", cwd: CWD, script: "scripts/snapshot_balances.py", interpreter: PY, args: ["--network", "mainnet"], cron_restart: "10 0 * * *", autorestart: false },
     { name: "lfg-deployer", cwd: CWD, script: "scripts/deployer.py", interpreter: PY, args: ["prod"] },
+    // Public-edge funnel health probe (full TLS handshake through the ts.net funnel).
+    // Log-only → reports/funnel_healthcheck.log; catches SSL/blank-site outages the :8176 probe can't see.
+    { name: "lfg-funnel-health", cwd: CWD, script: "scripts/funnel_healthcheck.py", interpreter: PY },
   ],
 };
