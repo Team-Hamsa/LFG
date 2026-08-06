@@ -137,6 +137,35 @@ def test_bounded_attempts_are_bounded():
     assert calls["n"] == oln.SIDE_CALL_ATTEMPTS
 
 
+def test_bounded_retries_internal_timeout_none():
+    """fetch_metadata swallows its own ~20s internal timeout and returns None —
+    shorter than the 30s side-call bound, so _bounded never sees a wait_for
+    timeout. A None result must still get the full SIDE_CALL_ATTEMPTS tries."""
+    calls = {"n": 0}
+
+    async def fetch(arg):
+        calls["n"] += 1
+        if calls["n"] == 1:
+            return None  # internal timeout swallowed, surfaced as None
+        return {"got": arg}
+
+    wrapped = oln._bounded(fetch, label="fetch_meta", network="testnet", timeout=1.0)
+    assert _run(wrapped("abc")) == {"got": "abc"}
+    assert calls["n"] == 2
+
+
+def test_bounded_all_none_attempts_degrade_to_none():
+    calls = {"n": 0}
+
+    async def fetch(arg):
+        calls["n"] += 1
+        return None
+
+    wrapped = oln._bounded(fetch, label="fetch_meta", network="testnet", timeout=1.0)
+    assert _run(wrapped("abc")) is None
+    assert calls["n"] == oln.SIDE_CALL_ATTEMPTS
+
+
 # ------------------------------------------- fail-closed economy on unresolved metadata
 
 

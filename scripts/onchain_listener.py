@@ -101,21 +101,31 @@ def _bounded(
     fn: Callable[[str], Any], *, label: str, network: str, timeout: float | None = None
 ) -> Callable[[str], Any]:
     """Wrap a single-argument async fetch with a hard per-attempt timeout and
-    SIDE_CALL_ATTEMPTS bounded tries. After the final timeout it degrades to
-    None — the exact shape nft_info and fetch_metadata already return on RPC
-    failure, which apply_tx handles ("could not resolve token", skip) — instead
-    of hanging the stream loop forever; anything else propagates unchanged."""
+    SIDE_CALL_ATTEMPTS bounded tries. Both a wait_for timeout AND a None result
+    are retryable: nft_info and fetch_metadata swallow their own internal
+    timeouts/errors and return None (fetch_metadata's ~20s aiohttp timeout is
+    shorter than the default 30s side-call bound, so it surfaces here as a
+    "successful" None, never as asyncio.TimeoutError). After the final attempt
+    it degrades to None — the pre-existing 'unavailable' shape apply_tx handles
+    ("could not resolve token", skip) — instead of hanging the stream loop
+    forever; non-timeout exceptions propagate unchanged."""
 
     async def wrapped(arg: str) -> Any:
         t = SIDE_CALL_TIMEOUT if timeout is None else timeout
         for attempt in range(1, SIDE_CALL_ATTEMPTS + 1):
             try:
-                return await asyncio.wait_for(fn(arg), timeout=t)
+                result = await asyncio.wait_for(fn(arg), timeout=t)
             except asyncio.TimeoutError:
                 logging.warning(
                     f"[{network}] {label}({arg}) timed out after {t:.0f}s "
                     f"(attempt {attempt}/{SIDE_CALL_ATTEMPTS})"
                 )
+                continue
+            if result is not None:
+                return result
+            logging.warning(
+                f"[{network}] {label}({arg}) unresolved (attempt {attempt}/{SIDE_CALL_ATTEMPTS})"
+            )
         logging.warning(f"[{network}] {label}({arg}) exhausted retries; treating as unavailable")
         return None
 
