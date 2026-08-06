@@ -2099,6 +2099,7 @@ async def _record_prepared(
     metadata_json,
     body_type,
     preparation,
+    still_token=None,
 ):
     return await asyncio.to_thread(
         sponsored_mint.record_mint_prepared,
@@ -2113,6 +2114,7 @@ async def _record_prepared(
         metadata_url=metadata_url,
         metadata_json=metadata_json,
         body_type=body_type,
+        still_token=still_token,
     )
 
 
@@ -2462,3 +2464,194 @@ def test_service_wrapper_supplies_durable_sponsored_callbacks(monkeypatch):
     assert seen["mint"]["nft_id"] == "NFT1"
     assert seen["mint"]["mint_tx_hash"] == "MINTTX1"
     assert seen["offer"]["offer_id"] == "OFFER1"
+
+
+# --- #330: persist the image-archive staging token on sponsored claims ------
+
+
+_STILL_METADATA = json.dumps(
+    {
+        "name": "LFG #4000",
+        "image": "https://cdn.example/4000/4000_0.png",
+        "attributes": [{"trait_type": "Body", "value": "Alien"}],
+    }
+)
+
+
+def _prepare_rebound_claim(paths, *, still_token, old="sess-old", new="sess-new"):
+    """Reserve -> journal the prepared mint (optionally with a staging token)
+    -> rebind to a fresh session id, mirroring a resumed sponsored mint."""
+    sponsored_mint.start_campaign(paths.app_db, network="mainnet", actor="test", now=100)
+    result = sponsored_mint.reserve_if_eligible(
+        paths.app_db,
+        paths.history_db,
+        network="mainnet",
+        wallet="rNEW",
+        session_id=old,
+        now=101,
+    )
+    assert result.sponsored and result.claim is not None
+    sponsored_mint.record_mint_prepared(
+        paths.app_db,
+        network="mainnet",
+        wallet="rNEW",
+        session_id=old,
+        tx_hash="A" * 64,
+        tx_blob="BLOB:" + "A" * 64,
+        signed_ledger_floor=500,
+        nft_number=4000,
+        metadata_url="https://cdn.example/4000/4000_0.json",
+        metadata_json=_STILL_METADATA,
+        body_type="Alien",
+        still_token=still_token,
+    )
+    rebound = sponsored_mint.rebind_reservation(
+        paths.app_db,
+        network="mainnet",
+        wallet="rNEW",
+        expected_session_id=old,
+        new_session_id=new,
+    )
+    assert rebound is not None
+    return rebound
+
+
+def test_prepared_journal_persists_composing_still_token(_service_env):
+    rebound = _prepare_rebound_claim(_service_env, still_token="sess-old")
+    assert rebound.session_id == "sess-new"
+    # The composing session's staging token survives the rebind verbatim.
+    assert rebound.mint_still_token == "sess-old"
+
+
+def test_prepared_journal_still_token_forward_migrates(_service_env):
+    _prepare_rebound_claim(_service_env, still_token="sess-old")
+    with sqlite3.connect(_service_env.app_db) as conn:
+        conn.execute("ALTER TABLE free_mint_claims DROP COLUMN mint_still_token")
+    sponsored_mint.ensure_schema(_service_env.app_db)
+    claim = sponsored_mint.claim_for_session(
+        _service_env.app_db, network="mainnet", wallet="rNEW", session_id="sess-new"
+    )
+    assert claim is not None
+    # Re-added by the self-migration; pre-migration rows read as NULL.
+    assert claim.mint_still_token is None
+
+
+def _stub_resume_success(monkeypatch):
+    async def submit(**kwargs):
+        return SimpleNamespace(state="validated", nft_id="NFTID1", error=None, tx_hash="A" * 64)
+
+    async def create_offer(*args, **kwargs):
+        return "OFFER1"
+
+    async def accept_payload(*args, **kwargs):
+        return {"qr_url": "q", "xumm_url": "x", "uuid": "u"}
+
+    monkeypatch.setattr(mint_flow.xrpl_ops, "submit_sponsored_mint", submit)
+    monkeypatch.setattr(mint_flow.xrpl_ops, "create_nft_offer", create_offer)
+    monkeypatch.setattr(mint_flow.xumm_ops, "create_accept_offer_payload", accept_payload)
+    monkeypatch.setattr(mint_flow, "record_nft_mint", lambda **kwargs: True)
+    monkeypatch.setattr(
+        mint_flow,
+        "rarity",
+        SimpleNamespace(
+            connect=lambda: SimpleNamespace(close=lambda: None),
+            start_boost_clock=lambda *a, **k: None,
+            recalculate_rarity=lambda conn: None,
+            BODY_SENTINEL="_body",
+            BODY_CATEGORY="Body",
+        ),
+    )
+
+
+async def _resume_noop(*args, **kwargs):
+    return None
+
+
+def _run_resume(claim):
+    return _run(
+        mint_flow.mint_one_unit(
+            discord_id="dev",
+            wallet_address="rNEW",
+            platform="discord",
+            push_user_token=None,
+            return_url=None,
+            nft_number=4000,
+            session_tag="sess-new",
+            resume_prepared=claim,
+            on_mint_forwarded=_resume_noop,
+            on_mint_confirmed=_resume_noop,
+            on_offer_created=_resume_noop,
+        )
+    )
+
+
+def test_resumed_sponsored_mint_promotes_persisted_still(_service_env, tmp_path, monkeypatch):
+    from lfg_core import image_archive
+
+    archive = tmp_path / "images"
+    monkeypatch.setenv("IMAGES_DIR", str(archive))
+    claim = _prepare_rebound_claim(_service_env, still_token="sess-old")
+    staged = image_archive.pending_still_path("mainnet", 4000, "sess-old")
+    os.makedirs(os.path.dirname(staged), exist_ok=True)
+    with open(staged, "wb") as fh:
+        fh.write(b"composed-still")
+
+    _stub_resume_success(monkeypatch)
+    res = _run_resume(claim)
+
+    assert res.error is None and res.nft_id == "NFTID1"
+    assert (archive / "4000.png").read_bytes() == b"composed-still"
+    assert not os.path.exists(staged)
+
+
+def test_resumed_sponsored_mint_null_token_skips_archive(_service_env, tmp_path, monkeypatch):
+    monkeypatch.setenv("IMAGES_DIR", str(tmp_path / "images"))
+    claim = _prepare_rebound_claim(_service_env, still_token=None)
+    assert claim.mint_still_token is None
+
+    calls = []
+    monkeypatch.setattr(
+        mint_flow.image_archive,
+        "promote_still",
+        lambda *args: calls.append(("promote", args)) or False,
+    )
+    monkeypatch.setattr(
+        mint_flow.image_archive,
+        "discard_still",
+        lambda *args: calls.append(("discard", args)),
+    )
+
+    _stub_resume_success(monkeypatch)
+    res = _run_resume(claim)
+
+    # Pre-migration claim resumes fine but never touches the archive: a wrong
+    # token must neither promote foreign staged art nor delete anything.
+    assert res.error is None and res.nft_id == "NFTID1"
+    assert calls == []
+
+
+def test_resumed_sponsored_mint_definitive_failure_discards_staged_still(
+    _service_env, tmp_path, monkeypatch
+):
+    from lfg_core import image_archive
+
+    archive = tmp_path / "images"
+    monkeypatch.setenv("IMAGES_DIR", str(archive))
+    claim = _prepare_rebound_claim(_service_env, still_token="sess-old")
+    staged = image_archive.pending_still_path("mainnet", 4000, "sess-old")
+    os.makedirs(os.path.dirname(staged), exist_ok=True)
+    with open(staged, "wb") as fh:
+        fh.write(b"composed-still")
+
+    async def submit(**kwargs):
+        return SimpleNamespace(state="failed", nft_id=None, error="tec failure", tx_hash=None)
+
+    monkeypatch.setattr(mint_flow.xrpl_ops, "submit_sponsored_mint", submit)
+
+    res = _run_resume(claim)
+
+    assert res.mint_definitively_failed
+    # The staged file is unreachable by any current-session discard; the
+    # persisted token is the only key that can clean it up.
+    assert not os.path.exists(staged)
+    assert not (archive / "4000.png").exists()
