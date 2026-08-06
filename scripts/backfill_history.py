@@ -49,11 +49,16 @@ DEFAULT_SOURCE_ORDER = (
 )
 DEFAULT_SOURCES = frozenset(DEFAULT_SOURCE_ORDER)
 VALID_SOURCES = DEFAULT_SOURCES
-REQUIRED_BASELINE_SOURCES = frozenset({"token_issuer", "signing"})
+# A certification run must sweep every source — narrowing `--sources` would
+# make the coverage document attest less than the eligibility baseline is
+# trusted to prove (#331). The canonical set lives in sponsored_mint so the
+# runtime gate and this writer can never disagree.
+REQUIRED_BASELINE_SOURCES = sponsored_mint.BASELINE_REQUIRED_SOURCES
+assert REQUIRED_BASELINE_SOURCES <= VALID_SOURCES
 
 
 def validate_baseline_source_coverage(sources: set[str] | frozenset[str]) -> None:
-    """Require both LFGO accounts whose tagged transactions affect eligibility."""
+    """Require the full source set for a certification run (#331)."""
 
     missing = sorted(REQUIRED_BASELINE_SOURCES - sources)
     if missing:
@@ -88,17 +93,23 @@ def baseline_account_coverage(
 def baseline_coverage_document(
     accounts: dict[str, str],
     *,
+    sources: set[str] | frozenset[str],
     source_tag: int,
     ledger_min: int,
     ledger_max: int,
 ) -> dict[str, Any]:
-    """Persist the exact common range and concrete accounts that were swept."""
+    """Persist the exact range, source set, and concrete accounts swept.
+
+    `sources` records source *names* (including `nfts`, which has no account
+    address to record) so the runtime gate can verify the sweep was not
+    narrowed (#331). Version 2 added that field; the gate rejects version 1."""
 
     return {
-        "version": 1,
+        "version": sponsored_mint.BASELINE_COVERAGE_VERSION,
         "source_tag": source_tag,
         "ledger_min": ledger_min,
         "ledger_max": ledger_max,
+        "sources": sorted(sources),
         "accounts": dict(sorted(accounts.items())),
     }
 
@@ -476,6 +487,7 @@ async def _amain() -> int:
         )
         coverage = baseline_coverage_document(
             accounts,
+            sources=wanted,
             source_tag=config.SOURCE_TAG,
             ledger_min=args.baseline_ledger_min,
             ledger_max=args.baseline_ledger_max,

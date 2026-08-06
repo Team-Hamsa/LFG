@@ -141,8 +141,8 @@ SPONSORED_MINT_ARCHIVE_MAX_LAG_SECONDS=900                  # optional; how stal
 >   --baseline-provenance "<who audited this and how>"
 > ```
 >
-> `--sources` must include `token_issuer` and `signing` (they are in the
-> default set); `--baseline-ledger-min` must be `32570`; `--baseline-ledger-max`
+> `--sources` must be the full default set — a certification run refuses any
+> narrowing (#331); `--baseline-ledger-min` must be `32570`; `--baseline-ledger-max`
 > must equal the endpoint's current validated tip. **A listener restart
 > invalidates continuity** (a tx stream has no replay token, so a restart
 > cannot prove it missed nothing) and the certification must be re-run before

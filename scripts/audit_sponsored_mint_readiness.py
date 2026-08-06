@@ -274,6 +274,7 @@ async def build_report(
     latest_close_time: int | None = None
     heartbeat_at: int | None = None
     unique_count: int | None = None
+    baseline_coverage_raw: str | None = None
     effective_exclusions = sponsored_mint.excluded_wallets()
     try:
         with _readonly(history_db) as conn:
@@ -313,6 +314,7 @@ async def build_report(
             }
             latest_close_time = state.validated_close_time if state else None
             heartbeat_at = state.heartbeat_at if state else None
+            baseline_coverage_raw = state.baseline_coverage if state else None
             excluded = tuple(sorted(effective_exclusions))
             marks = ",".join("?" for _ in excluded)
             exclusion_sql = f"AND trim(account) NOT IN ({marks})" if excluded else ""
@@ -328,6 +330,19 @@ async def build_report(
             unique_count = int(row["count"] or 0)
     except (OSError, sqlite3.Error) as exc:
         checks.setdefault("archive", {"ok": False, "detail": str(exc)})
+
+    # A certification narrowed with --sources attests less than the archive
+    # is trusted to prove; that is a FAIL, not a warning (#331). None means
+    # no attestation at all (missing, unparseable, or pre-#331 version-1
+    # coverage document, which cannot carry the sources field).
+    swept_sources = sponsored_mint.baseline_coverage_sources(baseline_coverage_raw)
+    missing_sources = sorted(sponsored_mint.BASELINE_REQUIRED_SOURCES - set(swept_sources or ()))
+    checks["baseline_sources"] = {
+        "ok": bool(swept_sources is not None and not missing_sources),
+        "swept": swept_sources,
+        "missing": missing_sources if swept_sources is not None else None,
+        "required": sorted(sponsored_mint.BASELINE_REQUIRED_SOURCES),
+    }
 
     close_age = timestamp - latest_close_time if latest_close_time is not None else None
     heartbeat_age = timestamp - heartbeat_at if heartbeat_at is not None else None
@@ -419,6 +434,12 @@ def _human_lines(report: dict[str, Any]) -> list[str]:
         ("schema", f"schema {checks['schema'].get('detail', '')}".strip()),
         ("campaign", f"campaign state={checks['campaign'].get('state', 'unknown')}"),
         ("archive", f"archive {checks['archive'].get('detail', '')}".strip()),
+        (
+            "baseline_sources",
+            "baseline sources "
+            f"swept={','.join(checks['baseline_sources'].get('swept') or []) or 'none'} "
+            f"missing={','.join(checks['baseline_sources'].get('missing') or []) or 'none'}",
+        ),
         (
             "listener_freshness",
             "latest archived ledger time="
