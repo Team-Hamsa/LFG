@@ -440,36 +440,69 @@ async def backfill_account_tx(
 
 
 async def backfill_nft_history(
-    conn: Any, request_fn: Any, nft_id: str, *, network: str | None = None
+    conn: Any,
+    request_fn: Any,
+    nft_id: str,
+    *,
+    network: str | None = None,
+    ledger_min: int = -1,
+    ledger_max: int = -1,
 ) -> int:
     """Full nft_history (clio) for one token; cursor keyed per nft_id.
 
     The pagination marker is persisted after every page (like
     backfill_account_tx) so an interrupted long token history resumes from
-    where it left off instead of restarting from page 1."""
+    where it left off instead of restarting from page 1.
+
+    A certified range namespaces the cursor, exactly as backfill_account_tx
+    does. Without that, a bounded catch-up would short-circuit on the plain
+    cursor's terminal "done" — set by the prior full certification — and skip
+    the token entirely, leaving its gap-period transactions out of an archive
+    that nonetheless attests cumulative `nfts` coverage."""
     source = f"nft_history:{nft_id}"
-    stored = history_store.get_cursor(conn, source)
+    certified_range = ledger_min != -1 or ledger_max != -1
+    if certified_range and (ledger_min < 0 or ledger_max < ledger_min):
+        raise ValueError("certified nft_history range is invalid")
+    cursor_source = f"{source}:certified:{ledger_min}:{ledger_max}" if certified_range else source
+    stored = history_store.get_cursor(conn, cursor_source)
     if stored == "done":
         return 0
     marker: Any = json.loads(stored) if stored else None
     new = 0
     while True:
         req: dict[str, Any] = {"method": "nft_history", "nft_id": nft_id, "limit": 100}
+        if certified_range:
+            req["ledger_index_min"] = ledger_min
+            req["ledger_index_max"] = ledger_max
         if marker:
             req["marker"] = marker
         result = await request_fn(req)
+        if certified_range and (
+            result.get("nft_id") != nft_id
+            or result.get("ledger_index_min") != ledger_min
+            or result.get("ledger_index_max") != ledger_max
+            or result.get("validated") is not True
+        ):
+            raise ValueError("certified nft_history page did not prove its token and range")
         skipped_unvalidated = 0
         for entry in result.get("transactions", []):
             if not _is_validated_entry(result, entry):
                 skipped_unvalidated += 1
                 continue
             tx = history_events.normalize_entry(entry)
+            entry_ledger = tx.get("ledger_index")
+            if certified_range and (
+                isinstance(entry_ledger, bool)
+                or not isinstance(entry_ledger, int)
+                or not ledger_min <= entry_ledger <= ledger_max
+            ):
+                raise ValueError("certified nft_history entry fell outside its proven range")
             tx["validated"] = True
             if store_raw_tx(conn, tx, network=network):
                 new += 1
-        _warn_if_unvalidated(source, result, skipped_unvalidated)
+        _warn_if_unvalidated(cursor_source, result, skipped_unvalidated)
         marker = result.get("marker")
-        history_store.set_cursor(conn, source, json.dumps(marker) if marker else "done")
+        history_store.set_cursor(conn, cursor_source, json.dumps(marker) if marker else "done")
         if not marker:
             return new
 
@@ -700,7 +733,14 @@ async def _amain() -> int:
             ids = [r[0] for r in oconn.execute("SELECT nft_id FROM onchain_nfts")]
             total = 0
             for i, nft_id in enumerate(ids, 1):
-                total += await backfill_nft_history(conn, request_fn, nft_id, network=args.network)
+                total += await backfill_nft_history(
+                    conn,
+                    request_fn,
+                    nft_id,
+                    network=args.network,
+                    ledger_min=fixed_ledger_min,
+                    ledger_max=fixed_ledger_max,
+                )
                 if i % 100 == 0:
                     logging.info(f"nft_history: {i}/{len(ids)} tokens, +{total} txs")
             logging.info(f"nft_history: done, +{total}")

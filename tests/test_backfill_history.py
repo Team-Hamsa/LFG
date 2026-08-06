@@ -145,6 +145,94 @@ def test_backfill_nft_history_resumes_after_failure(tmp_path):
     assert _run(bh.backfill_nft_history(conn, resuming_request_fn, nft_id)) == 0
 
 
+def _entry_at_ledger(tx, hash_, ledger):
+    """Like _entry, but the ledger the range checks read (the tx's own
+    ledger_index, which wins over the envelope's) really is `ledger`."""
+    e = _entry(tx, hash_, ledger)
+    e["tx"] = {**e["tx"], "ledger_index": ledger}
+    return e
+
+
+def test_certified_nft_history_is_not_skipped_by_a_completed_full_cursor(tmp_path):
+    """A bounded catch-up must re-page every token over the gap window.
+
+    The plain cursor goes to "done" once a token's full history is paged, and
+    a `done` cursor short-circuits the whole call. If the certified run reused
+    that cursor, every token the prior certification finished would be skipped
+    while the run still attests cumulative `nfts` coverage — the token's
+    gap-period transactions would be absent from the archive."""
+    conn = history_store.init_history_db(str(tmp_path / "h.db"))
+    nft_id = fx.NFT_A
+    # The prior full certification finished this token.
+    history_store.set_cursor(conn, f"nft_history:{nft_id}", "done")
+
+    calls = []
+
+    async def request_fn(req):
+        calls.append(dict(req))
+        return {
+            "nft_id": nft_id,
+            "ledger_index_min": req["ledger_index_min"],
+            "ledger_index_max": req["ledger_index_max"],
+            "validated": True,
+            "transactions": [_entry_at_ledger(fx.BURN, "77" * 32, L0 + 300)],
+        }
+
+    n = _run(
+        bh.backfill_nft_history(conn, request_fn, nft_id, ledger_min=L0 + 200, ledger_max=L0 + 400)
+    )
+    assert calls, "certified catch-up skipped a token the prior certification had finished"
+    assert calls[0]["ledger_index_min"] == L0 + 200
+    assert calls[0]["ledger_index_max"] == L0 + 400
+    assert n == 1
+    # The full-history cursor is untouched; the certified one is tracked apart.
+    assert history_store.get_cursor(conn, f"nft_history:{nft_id}") == "done"
+
+
+def test_certified_nft_history_rejects_unbound_page_evidence(tmp_path):
+    """A page that does not prove the token and range it was asked for cannot
+    be counted toward certified coverage."""
+    conn = history_store.init_history_db(str(tmp_path / "h.db"))
+
+    async def request_fn(req):
+        return {
+            "nft_id": "SOME-OTHER-TOKEN",
+            "ledger_index_min": req["ledger_index_min"],
+            "ledger_index_max": req["ledger_index_max"],
+            "validated": True,
+            "transactions": [],
+        }
+
+    with pytest.raises(ValueError, match="certified nft_history"):
+        _run(
+            bh.backfill_nft_history(
+                conn, request_fn, fx.NFT_A, ledger_min=L0 + 200, ledger_max=L0 + 400
+            )
+        )
+
+
+def test_certified_nft_history_rejects_an_entry_outside_the_range(tmp_path):
+    """An out-of-range entry means the endpoint did not honour the bounds the
+    attestation will claim — refuse rather than record it as proven."""
+    conn = history_store.init_history_db(str(tmp_path / "h.db"))
+
+    async def request_fn(req):
+        return {
+            "nft_id": fx.NFT_A,
+            "ledger_index_min": req["ledger_index_min"],
+            "ledger_index_max": req["ledger_index_max"],
+            "validated": True,
+            "transactions": [_entry_at_ledger(fx.MINT, "78" * 32, L0 + 5)],
+        }
+
+    with pytest.raises(ValueError, match="certified nft_history"):
+        _run(
+            bh.backfill_nft_history(
+                conn, request_fn, fx.NFT_A, ledger_min=L0 + 200, ledger_max=L0 + 400
+            )
+        )
+
+
 def test_rederive_from_raw(tmp_path):
     import importlib
     import sqlite3
