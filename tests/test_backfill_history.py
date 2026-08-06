@@ -1015,3 +1015,225 @@ def test_certification_refuses_a_baseline_starting_below_the_earliest_ledger():
         baseline_ledger_min=history_store.EARLIEST_AVAILABLE_LEDGER,
         baseline_ledger_max=900000,
     )
+
+
+# --- Bounded gap catch-up (#329) -------------------------------------------
+
+
+def _seed_certified_archive_with_gap(
+    conn,
+    *,
+    network="testnet",
+    tip=L0 + 100,
+    gap_after=L0 + 140,
+    gap_before=None,
+):
+    """A previously certified archive whose listener later lost continuity."""
+    history_store.record_archive_baseline(
+        conn,
+        network=network,
+        genesis_hash="CHAIN-ANCHOR",
+        ledger_min=history_store.EARLIEST_AVAILABLE_LEDGER,
+        ledger_max=tip,
+        provenance="first full certification",
+        completed_at=10,
+    )
+    history_store.record_validated_ledger(
+        conn,
+        network=network,
+        genesis_hash="CHAIN-ANCHOR",
+        ledger_index=gap_after,
+        close_time=11,
+        observed_at=11,
+    )
+    history_store.invalidate_archive_continuity(
+        conn,
+        network=network,
+        reason="listener process restart lacks exact stream catch-up",
+        gap_after=gap_after,
+        gap_before=gap_before,
+        invalidated_at=20,
+    )
+    return history_store.get_archive_state(conn, network)
+
+
+def test_catchup_refuses_an_uncertified_archive():
+    """No archive_state row means there is no prior certification to extend —
+    a bounded run cannot claim cumulative coverage it never had."""
+    with pytest.raises(ValueError, match="full certification"):
+        bh.validate_catchup_state(None)
+
+
+def test_catchup_refuses_an_archive_without_a_prior_full_baseline(tmp_path):
+    """A row that only ever saw the listener (validated cursor, no baseline)
+    has no proven [earliest, tip] floor for the catch-up to stand on."""
+    conn = history_store.init_history_db(str(tmp_path / "h.db"))
+    history_store.record_validated_ledger(
+        conn,
+        network="testnet",
+        genesis_hash="CHAIN-ANCHOR",
+        ledger_index=L0 + 50,
+        close_time=1,
+        observed_at=1,
+    )
+    history_store.invalidate_archive_continuity(
+        conn, network="testnet", reason="restart", gap_after=L0 + 50, invalidated_at=2
+    )
+    state = history_store.get_archive_state(conn, "testnet")
+    with pytest.raises(ValueError, match="full certification"):
+        bh.validate_catchup_state(state)
+
+
+def test_catchup_refuses_an_archive_with_no_gap(tmp_path):
+    """Nothing to catch up: the mode must refuse rather than re-certify."""
+    conn = history_store.init_history_db(str(tmp_path / "h.db"))
+    history_store.record_archive_baseline(
+        conn,
+        network="testnet",
+        genesis_hash="CHAIN-ANCHOR",
+        ledger_min=history_store.EARLIEST_AVAILABLE_LEDGER,
+        ledger_max=L0 + 100,
+        provenance="first",
+        completed_at=10,
+    )
+    state = history_store.get_archive_state(conn, "testnet")
+    with pytest.raises(ValueError, match="no continuity gap"):
+        bh.validate_catchup_state(state)
+
+
+def test_catchup_refuses_an_unbounded_gap(tmp_path):
+    """A gap with continuity_gap_after IS NULL has no provable lower bound, so
+    a bounded page cannot cover it — only full certification can."""
+    conn = history_store.init_history_db(str(tmp_path / "h.db"))
+    _seed_certified_archive_with_gap(conn)
+    # Force the pathological unbounded shape (invalidate_archive_continuity
+    # normally coalesces a bound in; a hand-damaged or pre-fix row may not).
+    conn.execute("UPDATE archive_state SET continuity_gap_after = NULL")
+    conn.commit()
+    state = history_store.get_archive_state(conn, "testnet")
+    with pytest.raises(ValueError, match="full certification"):
+        bh.validate_catchup_state(state)
+
+
+def test_catchup_bounds_page_only_the_gap(tmp_path):
+    """The paging window is [gap_after, endpoint tip], never [earliest, tip]."""
+    conn = history_store.init_history_db(str(tmp_path / "h.db"))
+    state = _seed_certified_archive_with_gap(conn, gap_after=L0 + 140)
+    snapshot = history_store.EndpointSnapshot(
+        genesis_hash="CHAIN-ANCHOR", validated_ledger_index=L0 + 500
+    )
+    page_min, page_max = bh.catchup_bounds(state, snapshot)
+    assert page_min == L0 + 140
+    assert page_max == L0 + 500
+
+
+def test_catchup_refuses_a_genesis_mismatch(tmp_path):
+    """A bounded run against the wrong chain (testnet reset, wrong endpoint)
+    must refuse before paging anything."""
+    conn = history_store.init_history_db(str(tmp_path / "h.db"))
+    state = _seed_certified_archive_with_gap(conn)
+    snapshot = history_store.EndpointSnapshot(
+        genesis_hash="A-DIFFERENT-CHAIN", validated_ledger_index=L0 + 500
+    )
+    with pytest.raises(ValueError, match="chain identity"):
+        bh.catchup_bounds(state, snapshot)
+    # An operator-typed --genesis-hash is cross-checked too.
+    good = history_store.EndpointSnapshot(
+        genesis_hash="CHAIN-ANCHOR", validated_ledger_index=L0 + 500
+    )
+    with pytest.raises(ValueError, match="chain identity"):
+        bh.catchup_bounds(state, good, claimed_genesis_hash="TYPO")
+
+
+def test_catchup_refuses_a_tip_below_the_gap_lower_bound(tmp_path):
+    """If the endpoint cannot even see the gap's start, the gap cannot be
+    provably covered — fail closed."""
+    conn = history_store.init_history_db(str(tmp_path / "h.db"))
+    state = _seed_certified_archive_with_gap(conn, gap_after=L0 + 900)
+    snapshot = history_store.EndpointSnapshot(
+        genesis_hash="CHAIN-ANCHOR", validated_ledger_index=L0 + 500
+    )
+    with pytest.raises(ValueError, match="below the gap"):
+        bh.catchup_bounds(state, snapshot)
+
+
+def test_catchup_clears_the_gap_and_restores_the_baseline(tmp_path):
+    """The recorded baseline stays [earliest, tip] (cumulative coverage) even
+    though only the gap window was paged; the gap clears and archive_state
+    reads certified-complete again."""
+    conn = history_store.init_history_db(str(tmp_path / "h.db"))
+    state = _seed_certified_archive_with_gap(conn, gap_after=L0 + 140, gap_before=L0 + 160)
+    snapshot = history_store.EndpointSnapshot(
+        genesis_hash="CHAIN-ANCHOR", validated_ledger_index=L0 + 500
+    )
+    page_min, tip = bh.catchup_bounds(state, snapshot)
+
+    cleared = bh.record_catchup_baseline(
+        conn,
+        network="testnet",
+        genesis_hash="CHAIN-ANCHOR",
+        tip=tip,
+        paged_min=page_min,
+        provenance="ops re-swept the deploy gap",
+        sources=set(bh.DEFAULT_SOURCE_ORDER),
+        accounts={"signing": "rSigner", "token_issuer": "rIssuer"},
+        source_tag=2606160021,
+    )
+    assert cleared is True
+
+    after = history_store.get_archive_state(conn, "testnet")
+    assert after.baseline_complete is True
+    assert after.continuity_gap_at is None
+    assert after.continuity_gap_after is None
+    assert after.continuity_gap_before is None
+    assert after.continuity_gap_reason is None
+    # The recorded range is cumulative, not the bounded paging window.
+    assert after.baseline_ledger_min == history_store.EARLIEST_AVAILABLE_LEDGER
+    assert after.baseline_ledger_max == tip
+    # The provenance records that this was a bounded catch-up and over what.
+    assert "bounded catch-up" in after.baseline_provenance
+    assert str(page_min) in after.baseline_provenance
+    # The coverage document carries the cumulative range + full source set,
+    # exactly what sponsored_mint._baseline_coverage_is_bound verifies.
+    coverage = json.loads(after.baseline_coverage)
+    assert coverage["ledger_min"] == history_store.EARLIEST_AVAILABLE_LEDGER
+    assert coverage["ledger_max"] == tip
+    assert set(coverage["sources"]) == set(bh.DEFAULT_SOURCE_ORDER)
+
+
+def test_catchup_below_gap_before_leaves_the_gap_intact(tmp_path):
+    """A tip past gap_after but short of gap_before does not prove coverage of
+    the gap's upper extent: record_archive_baseline keeps the gap and
+    baseline_complete stays 0. The helper reports failure."""
+    conn = history_store.init_history_db(str(tmp_path / "h.db"))
+    state = _seed_certified_archive_with_gap(conn, gap_after=L0 + 140, gap_before=L0 + 800)
+    snapshot = history_store.EndpointSnapshot(
+        genesis_hash="CHAIN-ANCHOR", validated_ledger_index=L0 + 500
+    )
+    page_min, tip = bh.catchup_bounds(state, snapshot)
+
+    cleared = bh.record_catchup_baseline(
+        conn,
+        network="testnet",
+        genesis_hash="CHAIN-ANCHOR",
+        tip=tip,
+        paged_min=page_min,
+        provenance="tip lags the resume point",
+        sources=set(bh.DEFAULT_SOURCE_ORDER),
+        accounts={},
+        source_tag=1,
+    )
+    assert cleared is False
+
+    after = history_store.get_archive_state(conn, "testnet")
+    assert after.baseline_complete is False
+    assert after.continuity_gap_before == L0 + 800
+
+
+def test_catchup_still_requires_full_source_coverage():
+    """A bounded run is still a certification: narrowing --sources (or omitting
+    the distributor address) must refuse exactly like the full run (#331)."""
+    with pytest.raises(ValueError, match="requires sources"):
+        bh.validate_baseline_source_coverage({"issuer", "brix"}, distributor="rD")
+    with pytest.raises(ValueError, match="--distributor"):
+        bh.validate_baseline_source_coverage(set(bh.DEFAULT_SOURCE_ORDER), distributor=None)

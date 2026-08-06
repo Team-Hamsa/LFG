@@ -148,7 +148,12 @@ SPONSORED_MINT_ARCHIVE_MAX_LAG_SECONDS=900                  # optional; how stal
 > must equal the endpoint's current validated tip. **A listener restart
 > invalidates continuity** (a tx stream has no replay token, so a restart
 > cannot prove it missed nothing) and the certification must be re-run before
-> the next campaign — plan activations around deploys, not across them.
+> the next campaign — plan activations around deploys, not across them. A
+> restart's bounded gap is recovered cheaply with `scripts/backfill_history.py
+> --network <net> --catch-up-from-gap --baseline-provenance "…" --distributor
+> <addr>` (#329), which pages only `[continuity_gap_after, tip]` and records
+> the cumulative baseline; only an unbounded/never-certified archive needs the
+> full re-page.
 > `SPONSORED_MINT_*_GENESIS_HASH` is unset by default; the listener no longer
 > refuses to start without it (that once crash-looped the index listeners), it
 > just leaves eligibility archiving off and logs a warning. Full procedure:

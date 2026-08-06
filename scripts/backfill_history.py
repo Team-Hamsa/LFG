@@ -4,6 +4,8 @@
   python scripts/backfill_history.py --network mainnet
   python scripts/backfill_history.py --network mainnet --distributor rXXX
   python scripts/backfill_history.py --network mainnet --derive-only
+  python scripts/backfill_history.py --network mainnet --catch-up-from-gap \
+      --baseline-provenance "..." --distributor rXXX   # bounded gap recovery (#329)
 
 Sources: account_tx over the NFT issuer, the BRIX issuer, and (if given) the
 airdrop distributor; clio nft_history per nft_id known to onchain_<net>.db.
@@ -146,6 +148,109 @@ def validate_baseline_endpoint(
         )
     if baseline_ledger_max != snapshot.validated_ledger_index:
         raise ValueError("baseline maximum must equal the validated endpoint tip")
+
+
+def validate_catchup_state(state: history_store.ArchiveState | None) -> int:
+    """Admit a bounded catch-up (#329) only when it can be provably sound.
+
+    A catch-up records a cumulative [earliest, tip] baseline while paging only
+    the gap window, so it stands on three legs: a prior full certification
+    proved [earliest, old tip], the live stream (or that certification) proved
+    coverage through `continuity_gap_after`, and the bounded page proves
+    [gap_after, tip]. Missing any leg means the cumulative claim would be
+    false — refuse and direct the operator to full certification instead.
+
+    Returns the gap's lower bound (the paging start)."""
+
+    if state is None:
+        raise ValueError(
+            "no archive_state row: this archive was never certified — "
+            "run full certification (--complete-audited-baseline)"
+        )
+    if (
+        state.baseline_ledger_min != history_store.EARLIEST_AVAILABLE_LEDGER
+        or state.baseline_ledger_max is None
+    ):
+        raise ValueError(
+            "archive has no prior full-range certification to extend — "
+            "run full certification (--complete-audited-baseline)"
+        )
+    if state.continuity_gap_at is None:
+        raise ValueError(
+            "archive records no continuity gap — nothing to catch up "
+            "(if the baseline is incomplete for another reason, run full certification)"
+        )
+    if state.continuity_gap_after is None:
+        raise ValueError(
+            "continuity gap has no lower bound (continuity_gap_after IS NULL); a bounded "
+            "page cannot prove coverage of an unbounded gap — run full certification"
+        )
+    return state.continuity_gap_after
+
+
+def catchup_bounds(
+    state: history_store.ArchiveState | None,
+    snapshot: history_store.EndpointSnapshot,
+    *,
+    claimed_genesis_hash: str | None = None,
+) -> tuple[int, int]:
+    """Resolve the bounded paging window [gap_after, validated tip], fail-closed."""
+
+    gap_after = validate_catchup_state(state)
+    assert state is not None
+    if claimed_genesis_hash is not None and claimed_genesis_hash.strip() != snapshot.genesis_hash:
+        raise ValueError("claimed genesis does not match the endpoint chain identity")
+    if state.genesis_hash != snapshot.genesis_hash:
+        raise ValueError("archive genesis does not match the endpoint chain identity")
+    page_min = max(gap_after, history_store.EARLIEST_AVAILABLE_LEDGER)
+    if snapshot.validated_ledger_index < page_min:
+        raise ValueError(
+            "endpoint validated tip is below the gap's lower bound; "
+            "the gap cannot be provably covered from this endpoint"
+        )
+    return page_min, snapshot.validated_ledger_index
+
+
+def record_catchup_baseline(
+    conn: Any,
+    *,
+    network: str,
+    genesis_hash: str,
+    tip: int,
+    paged_min: int,
+    provenance: str,
+    sources: set[str] | frozenset[str],
+    accounts: dict[str, str],
+    source_tag: int,
+) -> bool:
+    """Record the cumulative [earliest, tip] baseline after a bounded page.
+
+    Only the *paging* was bounded: [earliest, gap_after] is already in the
+    archive from the prior certification plus the live stream, and store_raw_tx
+    is INSERT OR IGNORE, so bounded-run ∪ existing-archive covers the full
+    range. The gap-clearing gate stays in record_archive_baseline unchanged —
+    this returns whether the gap actually cleared (it does not when the tip
+    stopped short of the gap's upper extent)."""
+
+    coverage = baseline_coverage_document(
+        accounts,
+        sources=sources,
+        source_tag=source_tag,
+        ledger_min=history_store.EARLIEST_AVAILABLE_LEDGER,
+        ledger_max=tip,
+    )
+    history_store.record_archive_baseline(
+        conn,
+        network=network,
+        genesis_hash=genesis_hash,
+        ledger_min=history_store.EARLIEST_AVAILABLE_LEDGER,
+        ledger_max=tip,
+        provenance=f"bounded catch-up over [{paged_min}, {tip}]: {provenance}",
+        source_tag=source_tag,
+        coverage=json.dumps(coverage, sort_keys=True, separators=(",", ":")),
+    )
+    state = history_store.get_archive_state(conn, network)
+    return state is not None and state.baseline_complete and state.continuity_gap_at is None
 
 
 def _is_validated_entry(page: dict[str, Any], entry: dict[str, Any]) -> bool:
@@ -327,6 +432,12 @@ async def _amain() -> int:
         "--baseline-provenance",
         help="audit/export identifier proving all SourceTag transactions were covered",
     )
+    parser.add_argument(
+        "--catch-up-from-gap",
+        action="store_true",
+        help="bounded re-certification (#329): page only [continuity_gap_after, validated "
+        "tip] and clear the recorded continuity gap, instead of re-paging the full range",
+    )
     args = parser.parse_args()
     wanted = set(args.sources.split(","))
     unknown = wanted - VALID_SOURCES
@@ -338,16 +449,28 @@ async def _amain() -> int:
         args.baseline_ledger_max,
         args.baseline_provenance,
     )
+    if args.complete_audited_baseline and args.catch_up_from_gap:
+        parser.error("--catch-up-from-gap and --complete-audited-baseline are mutually exclusive")
     if args.complete_audited_baseline and any(value is None for value in baseline_values):
         parser.error(
             "--complete-audited-baseline requires --genesis-hash, --baseline-ledger-min, "
             "--baseline-ledger-max, and --baseline-provenance"
         )
-    if not args.complete_audited_baseline and any(value is not None for value in baseline_values):
-        parser.error("baseline metadata requires --complete-audited-baseline")
-    if args.derive_only and args.complete_audited_baseline:
+    if args.catch_up_from_gap:
+        # The paging range comes from archive_state and the endpoint tip, never
+        # the operator; the provenance attestation stays mandatory (#329 keeps
+        # the human in the loop — no auto self-heal). --genesis-hash is an
+        # optional cross-check against the archive's recorded chain identity.
+        if args.baseline_ledger_min is not None or args.baseline_ledger_max is not None:
+            parser.error("--catch-up-from-gap derives its ledger range; do not pass one")
+        if args.baseline_provenance is None:
+            parser.error("--catch-up-from-gap requires --baseline-provenance")
+    if not args.complete_audited_baseline and not args.catch_up_from_gap:
+        if any(value is not None for value in baseline_values):
+            parser.error("baseline metadata requires --complete-audited-baseline")
+    if args.derive_only and (args.complete_audited_baseline or args.catch_up_from_gap):
         parser.error("--derive-only cannot certify a baseline")
-    if args.complete_audited_baseline:
+    if args.complete_audited_baseline or args.catch_up_from_gap:
         try:
             validate_baseline_source_coverage(wanted, distributor=args.distributor)
         except ValueError as exc:
@@ -421,6 +544,25 @@ async def _amain() -> int:
             )
             fixed_ledger_min = args.baseline_ledger_min
             fixed_ledger_max = args.baseline_ledger_max
+        elif args.catch_up_from_gap:
+            archive_state = history_store.get_archive_state(conn, args.network)
+            endpoint_snapshot = await history_store.fetch_endpoint_snapshot(request_fn)
+            try:
+                fixed_ledger_min, fixed_ledger_max = catchup_bounds(
+                    archive_state,
+                    endpoint_snapshot,
+                    claimed_genesis_hash=args.genesis_hash,
+                )
+            except ValueError as exc:
+                logging.error("bounded catch-up refused: %s", exc)
+                return 2
+            logging.info(
+                "bounded catch-up: paging [%d, %d] (gap stamped at %s: %s)",
+                fixed_ledger_min,
+                fixed_ledger_max,
+                archive_state.continuity_gap_at if archive_state else "?",
+                archive_state.continuity_gap_reason if archive_state else "?",
+            )
 
         if "issuer" in wanted:
             n = await backfill_account_tx(
@@ -516,6 +658,40 @@ async def _amain() -> int:
             coverage=json.dumps(coverage, sort_keys=True, separators=(",", ":")),
         )
         logging.info("recorded externally audited SourceTag baseline provenance")
+    elif args.catch_up_from_gap:
+        assert args.baseline_provenance is not None
+        assert endpoint_snapshot is not None
+        accounts = baseline_account_coverage(
+            wanted,
+            distributor=args.distributor,
+            nft_issuer=issuer,
+            brix_issuer=brix_issuer,
+        )
+        cleared = record_catchup_baseline(
+            conn,
+            network=args.network,
+            genesis_hash=endpoint_snapshot.genesis_hash,
+            tip=fixed_ledger_max,
+            paged_min=fixed_ledger_min,
+            provenance=args.baseline_provenance,
+            sources=wanted,
+            accounts=accounts,
+            source_tag=config.SOURCE_TAG,
+        )
+        if not cleared:
+            logging.error(
+                "bounded catch-up recorded a baseline through ledger %d but the "
+                "continuity gap did NOT clear (its upper extent lies above the tip "
+                "this run certified). The archive stays fail-closed; re-run "
+                "--catch-up-from-gap against a fresher tip, or run full certification.",
+                fixed_ledger_max,
+            )
+            return 1
+        logging.info(
+            "bounded catch-up cleared the continuity gap; certified baseline restored "
+            "through ledger %d",
+            fixed_ledger_max,
+        )
     return 0
 
 
