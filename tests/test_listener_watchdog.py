@@ -137,6 +137,161 @@ def test_bounded_attempts_are_bounded():
     assert calls["n"] == oln.SIDE_CALL_ATTEMPTS
 
 
+# ------------------------------------------- fail-closed economy on unresolved metadata
+
+
+def _economy_conn():
+    import sqlite3
+
+    from lfg_core import economy_store, market_store, nft_index
+
+    c = sqlite3.connect(":memory:")
+    c.executescript(nft_index._SCHEMA)
+    economy_store.init_economy_schema(c)
+    market_store.init_db(c)
+    return c
+
+
+def _closet_token_shape():
+    from lfg_core import config
+
+    return {
+        "nft_id": "CLOSET_TO",
+        "owner": "rUser",
+        "taxon": config.CLOSET_TAXON,
+        "uri_hex": "AB",
+        "issuer": config.SWAP_ISSUER_ADDRESS,
+    }
+
+
+_CLOSET_MODIFY_TX = {
+    "TransactionType": "NFTokenModify",
+    "NFTokenID": "CLOSET_TO",
+    "meta": {"TransactionResult": "tesSUCCESS"},
+}
+
+
+def test_metadata_timeout_preserves_closet_supply_and_archive(tmp_path):
+    """A timed-out metadata fetch (the None `_bounded` returns) must fail
+    closed: persisted closet contents and the supply ledger stay untouched,
+    lifecycle status (owner-derived) still updates, and the SourceTag archive
+    evidence — written before the economy apply — survives."""
+    from lfg_core import closet_token as bt
+    from lfg_core import config, history_store
+    from lfg_core import economy_store as es
+
+    conn = _economy_conn()
+    es.set_closet_contents(conn, "rUser", [("Head", "Crown", 2), ("Eyes", "Blue", 1)], [])
+    supply_before = es.read_supply_changes(conn)
+
+    hconn = history_store.init_history_db(str(tmp_path / "h.db"))
+    ctx = {
+        "network": "testnet",
+        "nft_issuer": config.SWAP_ISSUER_ADDRESS,
+        "genesis_hash": "",
+        "source_tag": config.SOURCE_TAG,
+        "brix_issuer": "rBrixIssuer",
+        "brix_hex": "00",
+        "distributor": None,
+        "numbers": {},
+    }
+
+    async def fetch_token(nft_id):
+        return _closet_token_shape()
+
+    async def fetch_meta(uri_hex):
+        return None  # what _bounded returns after exhausted timeouts
+
+    tx = dict(
+        _CLOSET_MODIFY_TX,
+        hash="AB" * 32,
+        validated=True,
+        ledger_index=100,
+        SourceTag=config.SOURCE_TAG,
+        date=1_000_000,
+    )
+    _run(
+        oln.process_stream_tx(
+            conn,
+            tx,
+            fetch_token=fetch_token,
+            fetch_meta=fetch_meta,
+            is_ours=lambda t: False,
+            history_conn=hconn,
+            history_ctx=ctx,
+        )
+    )
+    # Closet contents preserved — NOT wiped by a rebuild from {}.
+    assets = {(s, v): n for o, s, v, n in es.read_closet_assets(conn)}
+    assert assets == {("Head", "Crown"): 2, ("Eyes", "Blue"): 1}
+    # Supply ledger untouched.
+    assert es.read_supply_changes(conn) == supply_before
+    # Owner-derived lifecycle still updated (owner != issuer → active).
+    record = es.get_closet_record(conn, "rUser")
+    assert record is not None and record[2] == bt.ACTIVE
+    # SourceTag archive evidence survived the degraded economy apply.
+    assert hconn.execute("SELECT COUNT(*) FROM xrpl_txs").fetchone()[0] == 1
+
+
+def test_next_event_processes_after_metadata_timeout():
+    """The event AFTER a timed-out one must still apply normally: resolved
+    metadata rebuilds the closet contents as usual."""
+    from lfg_core import closet_token as bt
+    from lfg_core import economy_store as es
+
+    conn = _economy_conn()
+    es.set_closet_contents(conn, "rUser", [("Head", "Crown", 2)], [])
+    meta = bt.build_closet_metadata("rUser", [("Head", "Crown", 1), ("Mouth", "Grin", 1)], [])
+    responses = [None, meta]  # first fetch times out, second resolves
+
+    async def fetch_token(nft_id):
+        return _closet_token_shape()
+
+    async def fetch_meta(uri_hex):
+        return responses.pop(0)
+
+    for _ in range(2):
+        _run(
+            oln.process_stream_tx(
+                conn,
+                dict(_CLOSET_MODIFY_TX),
+                fetch_token=fetch_token,
+                fetch_meta=fetch_meta,
+                is_ours=lambda t: False,
+            )
+        )
+    assets = {(s, v): n for o, s, v, n in es.read_closet_assets(conn)}
+    assert assets == {("Head", "Crown"): 1, ("Mouth", "Grin"): 1}
+
+
+def test_nft_token_timeout_skips_economy_apply_without_state_change():
+    """A timed-out nft_info (fetch_token → None) skips both index and economy
+    application for that tx and leaves persisted state untouched."""
+    from lfg_core import economy_store as es
+
+    conn = _economy_conn()
+    es.set_closet_contents(conn, "rUser", [("Head", "Crown", 2)], [])
+
+    async def fetch_token(nft_id):
+        return None
+
+    async def fetch_meta(uri_hex):
+        raise AssertionError("metadata must not be fetched when the token is unresolved")
+
+    _run(
+        oln.process_stream_tx(
+            conn,
+            dict(_CLOSET_MODIFY_TX),
+            fetch_token=fetch_token,
+            fetch_meta=fetch_meta,
+            is_ours=lambda t: False,
+        )
+    )
+    assets = {(s, v): n for o, s, v, n in es.read_closet_assets(conn)}
+    assert assets == {("Head", "Crown"): 2}
+    assert es.read_supply_changes(conn) == []
+
+
 # ---------------------------------------------------------------- env validation
 
 

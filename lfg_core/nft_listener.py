@@ -167,10 +167,22 @@ def _apply_closet(
     owner = token.get("owner")
     if not owner:
         return
-    assets, bodies = closet_token.parse_closet_metadata(
-        metadata if isinstance(metadata, dict) else {}, genesis
-    )
-    economy_store.set_closet_contents(conn, owner, assets, bodies)
+    if isinstance(metadata, dict):
+        assets, bodies = closet_token.parse_closet_metadata(metadata, genesis)
+        economy_store.set_closet_contents(conn, owner, assets, bodies)
+    else:
+        # Fail closed on UNRESOLVED metadata (fetch returned None — RPC/IPFS
+        # failure or a #345 side-call timeout): rebuilding from {} would wipe
+        # the owner's persisted closet rows. A real Closet token always carries
+        # a metadata dict (an empty closet is an empty lfg_closet block, not a
+        # missing one), so None can only mean "couldn't read" — keep the
+        # persisted contents and let a later modify/sync refine them. The
+        # lifecycle status below still updates: it derives from the token's
+        # owner, which we did resolve.
+        logging.warning(
+            f"_apply_closet: unresolved metadata for {token.get('nft_id')}; "
+            "keeping persisted closet contents (fail closed)"
+        )
     status = (
         closet_token.ACTIVE if owner != config.SWAP_ISSUER_ADDRESS else closet_token.PENDING_ACCEPT
     )
