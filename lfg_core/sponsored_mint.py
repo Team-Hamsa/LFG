@@ -91,6 +91,7 @@ CREATE TABLE IF NOT EXISTS free_mint_claims (
     mint_metadata_url        TEXT,
     mint_metadata_json       TEXT,
     mint_body_type           TEXT,
+    mint_still_token         TEXT,
     nft_id                 TEXT,
     offer_id               TEXT,
     accept_tx_hash         TEXT,
@@ -201,6 +202,7 @@ class Claim:
     mint_metadata_url: str | None
     mint_metadata_json: str | None
     mint_body_type: str | None
+    mint_still_token: str | None
     mint_tx_hash: str | None
     nft_id: str | None
     offer_id: str | None
@@ -310,6 +312,7 @@ def ensure_schema(db_path: str) -> None:
             "mint_metadata_url": "TEXT",
             "mint_metadata_json": "TEXT",
             "mint_body_type": "TEXT",
+            "mint_still_token": "TEXT",
         }
         for column, declaration in claim_migrations.items():
             if column not in claim_columns:
@@ -430,6 +433,7 @@ def _claim(row: sqlite3.Row | None) -> Claim | None:
         mint_metadata_url=row["mint_metadata_url"] if "mint_metadata_url" in columns else None,
         mint_metadata_json=row["mint_metadata_json"] if "mint_metadata_json" in columns else None,
         mint_body_type=row["mint_body_type"] if "mint_body_type" in columns else None,
+        mint_still_token=row["mint_still_token"] if "mint_still_token" in columns else None,
         offer_id=row["offer_id"],
         accept_tx_hash=row["accept_tx_hash"],
         tagged_at=row["tagged_at"],
@@ -1175,7 +1179,8 @@ def reserve_if_eligible(
                     mint_signed_tx_blob = NULL, mint_signed_ledger_floor = NULL,
                     mint_forwarded_at = NULL, mint_nft_number = NULL,
                     mint_metadata_url = NULL, mint_metadata_json = NULL,
-                    mint_body_type = NULL, nft_id = NULL, offer_id = NULL,
+                    mint_body_type = NULL, mint_still_token = NULL,
+                    nft_id = NULL, offer_id = NULL,
                     accept_tx_hash = NULL, tagged_at = NULL, last_error = NULL,
                     updated_at = ?
                 WHERE id = ? AND status = 'released'
@@ -1389,15 +1394,25 @@ def record_mint_prepared(
     metadata_url: str,
     metadata_json: str,
     body_type: str,
+    still_token: str | None = None,
     now: int | None = None,
 ) -> Claim | None:
-    """Persist the exact signed mint and its claim correlation before forwarding."""
+    """Persist the exact signed mint and its claim correlation before forwarding.
+
+    `still_token` is the image-archive staging token of the session that
+    composed the still (#330) — the only key that can promote or discard
+    `pending/<edition>.<token>.png` after the claim is rebound to a fresh
+    session id on resume. Optional so legacy callers stay valid; a NULL
+    token simply skips archive promotion on resume."""
 
     timestamp = _timestamp(now)
     tx_hash = tx_hash.strip()
     tx_blob = tx_blob.strip()
     metadata_url = metadata_url.strip()
     body_type = body_type.strip()
+    still_token = still_token.strip() if still_token else None
+    if still_token == "":
+        still_token = None
     if (
         network not in SUPPORTED_NETWORKS
         or not wallet.strip()
@@ -1441,6 +1456,9 @@ def record_mint_prepared(
             claim.mint_body_type,
         )
         if any(value is not None for value in persisted):
+            # `mint_still_token` is deliberately outside this equality check:
+            # a pre-#330 journal retried by post-#330 code must stay idempotent
+            # even though its persisted token is NULL.
             if persisted != expected:
                 raise ValueError("prepared mint conflicts with the persisted claim")
             return claim
@@ -1450,12 +1468,12 @@ def record_mint_prepared(
             SET mint_signed_tx_hash = ?, mint_signed_tx_blob = ?,
                 mint_signed_ledger_floor = ?, mint_nft_number = ?,
                 mint_metadata_url = ?, mint_metadata_json = ?, mint_body_type = ?,
-                last_error = NULL, updated_at = ?
+                mint_still_token = ?, last_error = NULL, updated_at = ?
             WHERE id = ? AND status = 'reserved'
               AND mint_signed_tx_hash IS NULL AND mint_signed_tx_blob IS NULL
               AND mint_signed_ledger_floor IS NULL
             """,
-            (*expected, timestamp, claim.id),
+            (*expected, still_token, timestamp, claim.id),
         )
         if cursor.rowcount != 1:
             raise RuntimeError("prepared mint journal compare-and-set failed")
@@ -1628,7 +1646,7 @@ def reset_validated_mint_failure(
                 mint_signed_ledger_floor = NULL, mint_forwarded_at = NULL,
                 mint_nft_number = NULL, mint_metadata_url = NULL,
                 mint_metadata_json = NULL, mint_body_type = NULL,
-                last_error = ?, updated_at = ?
+                mint_still_token = NULL, last_error = ?, updated_at = ?
             WHERE id = ? AND status = 'minting'
             """,
             (error, timestamp, claim.id),

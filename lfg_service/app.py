@@ -287,6 +287,10 @@ async def _run_mint_session_and_publish(session: Any) -> None:
         metadata_json: str,
         body_type: str,
         preparation: xrpl_ops.MintPreparation,
+        # Image-archive staging token of the composing session (#330);
+        # defaulted for legacy 5-arg callers, falling back to this session's
+        # id (which IS the composing token when this callback fires).
+        still_token: str | None = None,
     ) -> None:
         if (
             preparation.state != "prepared"
@@ -308,6 +312,7 @@ async def _run_mint_session_and_publish(session: Any) -> None:
             metadata_url=metadata_url,
             metadata_json=metadata_json,
             body_type=body_type,
+            still_token=still_token or session.id,
         )
         if claim is None or claim.mint_signed_tx_hash != preparation.tx_hash:
             raise RuntimeError(f"sponsored mint {session.id}: prepared identity was not persisted")

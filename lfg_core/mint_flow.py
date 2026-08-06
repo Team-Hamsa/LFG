@@ -487,6 +487,14 @@ async def _resume_prepared_mint_one_unit(
             signed_tx_hash=tx_hash,
         )
         if submission.state == "failed":
+            # This exact signed identity is definitively retired, so the
+            # staged still can never be promoted — discard it with the
+            # persisted composing token (#330) or it leaks in pending/
+            # forever (no sweep exists and every other discard site keys on
+            # the CURRENT session's tag). Indeterminate outcomes keep the
+            # file: a later resume may still confirm and promote it.
+            if claim.mint_still_token:
+                image_archive.discard_still(config.XRPL_NETWORK, nft_number, claim.mint_still_token)
             return UnitResult(
                 nft_number,
                 None,
@@ -507,14 +515,16 @@ async def _resume_prepared_mint_one_unit(
         nft_id = submission.nft_id
         # Mirror mint_one_unit: publish the new edition's art to the local
         # archive so /api/img serves it immediately (best-effort, #163).
-        # The staging token is the session id that COMPOSED the still. That is
-        # claim.session_id for an in-process resume, which is the common case.
-        # After a restart the claim has been rebound to a fresh session id and
-        # the original token is not persisted, so the staged file cannot be
-        # matched — promote_still then returns False and the edition serves
-        # from the CDN, exactly as it did before the archive tier existed.
-        # Degradation only; never a failed mint.
-        image_archive.promote_still(config.XRPL_NETWORK, nft_number, claim.session_id)
+        # The staging token is the session id that COMPOSED the still — never
+        # `claim.session_id`, which by construction is the CURRENT session's
+        # id (the resume path is only reached after `rebind_reservation`
+        # rewrote it). The composing token is persisted alongside the rest of
+        # the prepared journal (#330); a legacy pre-#330 claim has none, so
+        # the promote is skipped and the edition serves from the CDN exactly
+        # as it did before the archive tier existed. Degradation only; never
+        # a failed mint.
+        if claim.mint_still_token:
+            image_archive.promote_still(config.XRPL_NETWORK, nft_number, claim.mint_still_token)
         await on_mint_confirmed(nft_number, nft_id, tx_hash, image_url)
 
         record: dict[str, Any] = {
@@ -667,7 +677,7 @@ async def mint_one_unit(
     on_state: Callable[[str], None] | None = None,
     on_mint: Callable[[int, str, str | None], Awaitable[None]] | None = None,
     on_mint_confirmed: Callable[[int, str, str, str | None], Awaitable[None]] | None = None,
-    on_mint_prepared: Callable[[int, str, str, str, xrpl_ops.MintPreparation], Awaitable[None]]
+    on_mint_prepared: Callable[[int, str, str, str, xrpl_ops.MintPreparation, str], Awaitable[None]]
     | None = None,
     on_mint_forwarded: Callable[[str], Awaitable[None]] | None = None,
     on_offer_created: Callable[[str | None, str | None], Awaitable[None]] | None = None,
@@ -810,6 +820,10 @@ async def mint_one_unit(
                     json.dumps(metadata, sort_keys=True),
                     body,
                     preparation,
+                    # The image-archive staging token that keys this unit's
+                    # pending still — journaled with the prepared mint so a
+                    # resumed session can still promote/discard it (#330).
+                    session_tag,
                 )
                 prepared_tx_hash = preparation.tx_hash
                 await on_mint_forwarded(prepared_tx_hash)
@@ -1076,7 +1090,9 @@ async def run_mint_session(
     session: MintSession,
     *,
     on_sponsored_mint: Callable[[int, str, str, str | None], Awaitable[None]] | None = None,
-    on_sponsored_prepared: Callable[[int, str, str, str, xrpl_ops.MintPreparation], Awaitable[None]]
+    on_sponsored_prepared: Callable[
+        [int, str, str, str, xrpl_ops.MintPreparation, str], Awaitable[None]
+    ]
     | None = None,
     on_sponsored_forwarded: Callable[[str], Awaitable[None]] | None = None,
     on_sponsored_offer: Callable[[str | None, str | None], Awaitable[None]] | None = None,
@@ -1225,10 +1241,18 @@ async def run_mint_session(
             metadata_json: str,
             body_type: str,
             preparation: xrpl_ops.MintPreparation,
+            # Defaulted for legacy 5-arg callers (test doubles); the real
+            # mint_one_unit always passes its session_tag (#330).
+            still_token: str | None = None,
         ) -> None:
             assert on_sponsored_prepared is not None
             await on_sponsored_prepared(
-                nft_number, metadata_url, metadata_json, body_type, preparation
+                nft_number,
+                metadata_url,
+                metadata_json,
+                body_type,
+                preparation,
+                still_token or session.id,
             )
 
         async def _on_sponsored_forwarded(tx_hash: str) -> None:
