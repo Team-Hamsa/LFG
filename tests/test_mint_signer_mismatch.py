@@ -94,6 +94,43 @@ def test_mismatched_signer_fails_session_and_cancels_task(monkeypatch, caplog):
     assert OTHER in joined and "ABCD1234" in joined
 
 
+def test_mismatched_signer_releases_headroom_reservation(monkeypatch, tmp_path):
+    # CodeRabbit on PR #348: the base mismatch test carries no headroom
+    # reservation, so the release path was unverified. Take a real 1-unit
+    # reservation (the same claimant shape handle_mint_start uses) and assert
+    # the signer-mismatch guard settles it — the cancelled task may never run
+    # its finally, so update_scan_state must release directly, like cancel().
+    from lfg_core import db_path, headroom, supply
+
+    db = str(tmp_path / "app.db")
+    monkeypatch.setattr(db_path, "app_db_path", lambda net=None: db)
+    monkeypatch.setattr(mint_flow.db_path, "app_db_path", lambda net=None: db)
+    monkeypatch.setattr(supply, "current_supply", lambda net: 0)
+    monkeypatch.setattr(headroom.nft_index, "index_db_path", lambda net: str(tmp_path / "idx.db"))
+
+    _patch_status(monkeypatch, _payload_status(account=OTHER))
+    session = _session()
+    claimant = f"mint:{session.id}"
+    granted = headroom.try_reserve(db, claimant, 1, mint_flow.config.XRPL_NETWORK)
+    assert granted == 1
+    session.headroom_reserved = True
+    assert headroom.outstanding(db) == 1
+
+    async def scenario():
+        session.task = asyncio.get_running_loop().create_task(asyncio.sleep(3600))
+        await mint_flow.update_scan_state(session)
+        await asyncio.sleep(0)  # let the cancellation propagate
+
+    _run(scenario())
+
+    assert session.state == mint_flow.FAILED
+    assert session.reason == "signer_mismatch"
+    assert session.task.cancelled() or session.task.done()
+    # the reservation is released outright (no mint landed) and the flag drops
+    assert session.headroom_reserved is False
+    assert headroom.outstanding(db) == 0
+
+
 def test_matching_signer_unchanged_behavior(monkeypatch):
     _patch_status(monkeypatch, _payload_status())
     session = _session()
