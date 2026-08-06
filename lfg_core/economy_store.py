@@ -108,6 +108,16 @@ def _migrate_supply_changes_columns(conn: sqlite3.Connection) -> None:
     cols = {r[1] for r in conn.execute("PRAGMA table_info(supply_changes)")}
     if "nft_id" not in cols:
         conn.execute("ALTER TABLE supply_changes ADD COLUMN nft_id TEXT")
+    # At most ONE burn row per stamped token, enforced by the database itself:
+    # the standalone existence check + INSERT is not atomic across writers
+    # (listener vs an apply-mode reconciler), so the INSERT (OR IGNORE, see
+    # record_supply_change) must be the arbiter. Partial index — NULL nft_id
+    # (legacy/flow rows) stays unconstrained. Safe on existing DBs: the column
+    # is new in the same release, so no stamped duplicates can pre-exist.
+    conn.execute(
+        "CREATE UNIQUE INDEX IF NOT EXISTS idx_supply_changes_burn_nft "
+        "ON supply_changes(nft_id) WHERE kind='burn' AND nft_id IS NOT NULL"
+    )
     conn.commit()
 
 
@@ -358,10 +368,13 @@ def record_supply_change(
     """Append one intentional supply change (kind 'mint' grows supply, 'burn'
     shrinks it). trait_deltas keys are "slot|value", values are signed counts.
     `nft_id` (optional) stamps the token the change accounts for, so burn
-    recording can be idempotent per token (#322)."""
+    recording can be idempotent per token (#322): the partial unique index
+    idx_supply_changes_burn_nft makes a duplicate stamped burn INSERT an
+    atomic no-op (OR IGNORE) even across concurrent connections — the
+    existence pre-check in callers is an optimisation, not the guarantee."""
     conn.execute(
         """
-        INSERT INTO supply_changes
+        INSERT OR IGNORE INTO supply_changes
             (kind, edition, body_value, body_class, trait_deltas_json, actor, reason, nft_id)
         VALUES (?, ?, ?, ?, ?, ?, ?, ?)
         """,

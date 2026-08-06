@@ -366,3 +366,79 @@ def test_classify_drift_benign_vs_real():
     assert "Real conservation drift" in body
     assert "benign swap substitution" in body
     assert "re-freeze" in body
+
+
+# ------------------------------------------------- review-round fixes
+
+
+def test_duplicate_burn_insert_for_same_nft_is_atomic_noop():
+    # Concurrent listener + apply-mode reconciler can both pass the existence
+    # check; the INSERT itself must be idempotent per (burn, nft_id).
+    conn = _db()
+    for _ in range(2):
+        es.record_supply_change(
+            conn,
+            "burn",
+            7,
+            "Straight",
+            "male",
+            {"Eyes|None": -1},
+            "listener",
+            "out-of-band burn DUP",
+            nft_id="DUP",
+        )
+    assert len(_burn_rows(conn)) == 1
+
+
+def test_duplicate_burn_insert_across_two_connections_is_noop(tmp_path):
+    path = str(tmp_path / "idx.db")
+    c1 = nft_index.init_db(path)
+    es.init_economy_schema(c1)
+    c2 = sqlite3.connect(path)
+    for conn in (c1, c2):
+        es.record_supply_change(
+            conn,
+            "burn",
+            8,
+            "Straight",
+            "male",
+            {"Eyes|None": -1},
+            "listener",
+            "out-of-band burn TWOCONN",
+            nft_id="TWOCONN",
+        )
+    assert len(_burn_rows(c1)) == 1
+
+
+def test_burn_rows_without_nft_id_are_not_constrained():
+    # Legacy/flow rows with nft_id=NULL must never collide with each other.
+    conn = _db()
+    for edition in (1, 2):
+        es.record_supply_change(
+            conn, "burn", edition, "Straight", "male", {"Eyes|None": -1}, "harvest", "legacy"
+        )
+    assert len(_burn_rows(conn)) == 2
+
+
+def test_reconcile_shrinkage_dry_run_matches_apply_for_duplicates():
+    # Two burned duplicates at the same dead edition: apply writes one row, so
+    # the dry-run preview must also report exactly one.
+    conn = _db()
+    _freeze(conn, [_token(5)])
+    nft_index.upsert(conn, _token(5, nft_id="DUP_A", burned=True))
+    nft_index.upsert(conn, _token(5, nft_id="DUP_B", burned=True))
+    dry = supply_reconcile.reconcile_shrinkage(conn, dry_run=True)
+    assert len(dry["written"]) == 1
+    assert _burn_rows(conn) == []
+
+
+def test_reconcile_shrinkage_survives_malformed_attribute_entry():
+    # A stored attribute entry missing trait_type/value must read as
+    # unreadable for that row only, never abort the sweep.
+    conn = _db()
+    _freeze(conn, [_token(1), _token(2)])
+    nft_index.upsert(conn, _token(1, nft_id="BAD", attrs=[{"foo": "bar"}], burned=True))
+    nft_index.upsert(conn, _token(2, nft_id="GOOD", burned=True))
+    report = supply_reconcile.reconcile_shrinkage(conn)
+    assert report["written"] == [(2, "GOOD")]
+    assert report["skipped_unreadable"] == [(1, "BAD")]
