@@ -67,6 +67,7 @@ CREATE TABLE IF NOT EXISTS supply_changes (
     trait_deltas_json TEXT,   -- {"slot|value": signed_count, ...}
     actor             TEXT,
     reason            TEXT,
+    nft_id            TEXT,   -- token this change accounts for (burn idempotency key, #322)
     applied_at        TIMESTAMP DEFAULT CURRENT_TIMESTAMP
 );
 """
@@ -99,12 +100,34 @@ def _migrate_closet_columns(conn: sqlite3.Connection) -> None:
     conn.commit()
 
 
+def _migrate_supply_changes_columns(conn: sqlite3.Connection) -> None:
+    """Self-migrate supply_changes columns added after the table first shipped.
+    `nft_id` (#322) stamps the burned/minted token on a row so out-of-band burn
+    recording can be idempotent per token (see supply_change_exists_for_nft).
+    ADD COLUMN is idempotent-guarded by the PRAGMA check."""
+    cols = {r[1] for r in conn.execute("PRAGMA table_info(supply_changes)")}
+    if "nft_id" not in cols:
+        conn.execute("ALTER TABLE supply_changes ADD COLUMN nft_id TEXT")
+    # At most ONE burn row per stamped token, enforced by the database itself:
+    # the standalone existence check + INSERT is not atomic across writers
+    # (listener vs an apply-mode reconciler), so the INSERT (OR IGNORE, see
+    # record_supply_change) must be the arbiter. Partial index — NULL nft_id
+    # (legacy/flow rows) stays unconstrained. Safe on existing DBs: the column
+    # is new in the same release, so no stamped duplicates can pre-exist.
+    conn.execute(
+        "CREATE UNIQUE INDEX IF NOT EXISTS idx_supply_changes_burn_nft "
+        "ON supply_changes(nft_id) WHERE kind='burn' AND nft_id IS NOT NULL"
+    )
+    conn.commit()
+
+
 def init_economy_schema(conn: sqlite3.Connection) -> None:
     """Create the genesis + live-state tables if absent, and migrate legacy bucket_* tables."""
     conn.executescript(_ECONOMY_SCHEMA)
     conn.commit()
     _migrate_bucket_tables(conn)
     _migrate_closet_columns(conn)
+    _migrate_supply_changes_columns(conn)
 
 
 def genesis_exists(conn: sqlite3.Connection) -> bool:
@@ -340,28 +363,56 @@ def record_supply_change(
     trait_deltas: dict[str, int],
     actor: str,
     reason: str,
+    nft_id: str | None = None,
 ) -> None:
     """Append one intentional supply change (kind 'mint' grows supply, 'burn'
-    shrinks it). trait_deltas keys are "slot|value", values are signed counts."""
+    shrinks it). trait_deltas keys are "slot|value", values are signed counts.
+    `nft_id` (optional) stamps the token the change accounts for, so burn
+    recording can be idempotent per token (#322): the partial unique index
+    idx_supply_changes_burn_nft makes a duplicate stamped burn INSERT an
+    atomic no-op (OR IGNORE) even across concurrent connections — the
+    existence pre-check in callers is an optimisation, not the guarantee."""
     conn.execute(
         """
-        INSERT INTO supply_changes
-            (kind, edition, body_value, body_class, trait_deltas_json, actor, reason)
-        VALUES (?, ?, ?, ?, ?, ?, ?)
+        INSERT OR IGNORE INTO supply_changes
+            (kind, edition, body_value, body_class, trait_deltas_json, actor, reason, nft_id)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?)
         """,
-        (kind, edition, body_value, body_class, json.dumps(trait_deltas), actor, reason),
+        (kind, edition, body_value, body_class, json.dumps(trait_deltas), actor, reason, nft_id),
     )
     conn.commit()
 
 
+def supply_change_exists_for_nft(conn: sqlite3.Connection, nft_id: str, kind: str = "burn") -> bool:
+    """True if a supply_changes row of `kind` already accounts for this token —
+    the idempotency gate that stops the listener/reconciler double-counting a
+    burn a flow (e.g. the legacy flag-24 harvest upgrade) already logged.
+    A pre-migration DB (no nft_id column, e.g. opened read-only for a dry-run)
+    has no stamped rows by definition -> False."""
+    try:
+        cur = conn.execute(
+            "SELECT 1 FROM supply_changes WHERE kind=? AND nft_id=? LIMIT 1", (kind, nft_id)
+        )
+    except sqlite3.OperationalError:
+        return False
+    return cur.fetchone() is not None
+
+
 def read_supply_changes(conn: sqlite3.Connection) -> list[dict[str, Any]]:
     """Every supply-change row, oldest first, with trait_deltas parsed back to a dict."""
-    rows = conn.execute(
-        "SELECT kind, edition, body_value, body_class, trait_deltas_json, actor, reason "
-        "FROM supply_changes ORDER BY id"
-    )
+    try:
+        rows = conn.execute(
+            "SELECT kind, edition, body_value, body_class, trait_deltas_json, actor, reason, "
+            "nft_id FROM supply_changes ORDER BY id"
+        )
+    except sqlite3.OperationalError:
+        # Pre-migration DB opened read-only (dry-run tooling): no nft_id column.
+        rows = conn.execute(
+            "SELECT kind, edition, body_value, body_class, trait_deltas_json, actor, reason, "
+            "NULL FROM supply_changes ORDER BY id"
+        )
     out: list[dict[str, Any]] = []
-    for kind, edition, body_value, body_class, deltas_json, actor, reason in rows:
+    for kind, edition, body_value, body_class, deltas_json, actor, reason, nft_id in rows:
         out.append(
             {
                 "kind": str(kind),
@@ -371,6 +422,7 @@ def read_supply_changes(conn: sqlite3.Connection) -> list[dict[str, Any]]:
                 "trait_deltas": dict(json.loads(deltas_json)) if deltas_json else {},
                 "actor": str(actor),
                 "reason": str(reason),
+                "nft_id": None if nft_id is None else str(nft_id),
             }
         )
     return out

@@ -241,6 +241,54 @@ def _apply_possible_growth(
     )
 
 
+def _record_burn_shrinkage(
+    conn: sqlite3.Connection, nft_id: str, genesis: trait_economy.Genesis
+) -> None:
+    """Record an out-of-band character burn as a `-1` supply_changes shrinkage
+    row (#322). Membership is authoritative — the token must have a character
+    row in `onchain_nfts` (written under the issuer gate; never taxon-from-ID)
+    whose edition is in the EFFECTIVE genesis. Idempotent per burned nft_id
+    (`supply_change_exists_for_nft`), so a flow that already logged its own
+    burn (legacy flag-24 harvest upgrade stamps nft_id) is never double-
+    counted. A BLANK character writes nothing — its assets live on in the
+    owner's Closet. The listener runs apply_tx (mark_burned, attributes
+    preserved) before this, so the index row is the correct trait source."""
+    try:
+        rec = nft_index.nft_by_id(conn, nft_id)
+    except sqlite3.OperationalError:
+        # Connection has no onchain_nfts table (economy-only DB) — no character
+        # index means nothing to account for.
+        return
+    if rec is None or rec.nft_number is None:
+        return
+    if rec.nft_number not in genesis.edition_bodies:
+        return
+    # Another token still LIVE at this edition (multi-live duplicate) means the
+    # edition's assets survive — this burn is a duplicate cleanup, not shrinkage.
+    if nft_index.nft_by_number(conn, rec.nft_number) is not None:
+        return
+    if economy_store.supply_change_exists_for_nft(conn, nft_id):
+        return
+    deltas = trait_economy.burn_shrinkage_deltas(rec)
+    if deltas is None:
+        return
+    # The 'burn' row pops the edition's RECORDED body from edition_bodies; when
+    # the worn body differs (bodies are swappable), compensate so the baseline
+    # loses exactly what the census lost.
+    deltas.update(trait_economy.body_compensation_deltas(rec, genesis))
+    economy_store.record_supply_change(
+        conn,
+        "burn",
+        rec.nft_number,
+        swap_meta.get_attr(rec.attributes, "Body") or "",
+        rec.body,
+        deltas,
+        "listener",
+        f"out-of-band burn {nft_id}",
+        nft_id=nft_id,
+    )
+
+
 async def apply_economy_tx(
     conn: sqlite3.Connection,
     tx: dict[str, Any],
@@ -275,9 +323,15 @@ async def apply_economy_tx(
             if kind == "burn":
                 # A burn may leave nft_info returning None (token gone from ledger),
                 # so route the burn by nft_id alone. delete_trait_token is idempotent
-                # and a no-op for non-trait tokens; characters/closets need no economy
-                # action on burn (the harvest flow already updated the Closet).
+                # and a no-op for non-trait tokens. The economy's own flows write
+                # their own supply rows, but an OUT-OF-BAND character burn (admin
+                # /admin burn, legacy paths) destroys on-token assets that only a
+                # listener-written shrinkage row can account for (#322) — without
+                # it, mints write +1 and burns write nothing, drifting the
+                # conservation audit until someone re-freezes genesis.
                 economy_store.delete_trait_token(conn, nft_id)
+                if genesis is not None:
+                    _record_burn_shrinkage(conn, nft_id, genesis)
                 continue
             token = await fetch_token_fn(nft_id)
             if not token:

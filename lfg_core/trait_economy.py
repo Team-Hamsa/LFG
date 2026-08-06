@@ -157,6 +157,40 @@ def asset_census(
     return Census(trait_counts=dict(trait_counts))
 
 
+def burn_shrinkage_deltas(rec: OnchainNft) -> dict[str, int] | None:
+    """The signed {"slot|value": -1} deltas an out-of-band burn of this DRESSED
+    character destroys — its 8 non-body on-token assets. Returns None for a
+    BLANK character (its 9 asset values already live in the owner's Closet and
+    survive the burn — recording shrinkage would double-shrink) and for a
+    record with unreadable attributes (skip, never guess — a wrong delta row
+    corrupts the conservation audit; mirrors supply_reconcile's posture).
+
+    The worn Body is NOT in these deltas: `effective_genesis` removes the
+    edition's recorded body by popping `edition_bodies` on a 'burn' row. When
+    the worn body differs from the recorded one (bodies are swappable), the
+    caller must compensate with an explicit Body +/- pair — see
+    `body_compensation_deltas`."""
+    if not rec.attributes or is_blank(rec):
+        return None
+    return {f"{slot}|{slot_value(rec, slot)}": -1 for slot in NON_BODY_SLOTS}
+
+
+def body_compensation_deltas(rec: OnchainNft, effective: Genesis) -> dict[str, int]:
+    """Body correction for a burn row of `rec`: the census loses the WORN body
+    value, but the 'burn' edition_bodies pop removes the RECORDED one. When
+    they differ, return {"Body|worn": -1, "Body|recorded": +1} so the net
+    baseline change matches the census; identical (the common case) or an
+    unknown edition returns {}."""
+    edition = rec.nft_number
+    if edition is None or edition not in effective.edition_bodies:
+        return {}
+    recorded, _cls = effective.edition_bodies[edition]
+    worn = slot_value(rec, "Body")
+    if worn == recorded:
+        return {}
+    return {f"Body|{worn}": -1, f"Body|{recorded}": +1}
+
+
 def genesis_trait_counts_with_bodies(genesis: Genesis) -> dict[tuple[str, str], int]:
     """Genesis trait_counts (non-body) plus per-edition body values folded in
     under ("Body", value) keys — the conservation baseline that covers Body
