@@ -83,6 +83,10 @@ class MintSession:
         self.created_at = time.time()
         self.state = AWAITING_PAYMENT
         self.error: str | None = None
+        # #275: machine-readable terminal reason (parity with market_flow's
+        # session.reason) — e.g. "signer_mismatch" when the payment payload
+        # was signed by a different Xaman account than the session wallet.
+        self.reason: str | None = None
         self.pay_with: str | None = "SPONSORED" if sponsored else None
         self.pay_amount: str | None = "0" if sponsored else None
         self.payment_link: str | None = None
@@ -260,6 +264,7 @@ class MintSession:
             "platform": self.platform,
             "state": self.state,
             "error": self.error,
+            "reason": self.reason,
             "sponsored": self.sponsored,
             "sponsorship_reason": self.sponsorship_reason,
             "pay_with": self.pay_with,
@@ -1048,6 +1053,47 @@ async def update_scan_state(session: MintSession) -> None:
     if session.state == AWAITING_PAYMENT and session.payment_uuid and not session.payment_signed:
         s = await xumm_ops.get_payload_status(session.payment_uuid)
         if s:
+            if s["signed"] and s.get("account") != session.wallet_address:
+                # #275: Xaman signed the mint payment from a different account
+                # than the session wallet. Account-pinning (#314) should
+                # prevent this; if it ever slips through, the wrong wallet's
+                # money has already moved on-ledger and wait_for_payment
+                # (expected_sender=session wallet) will never match it — the
+                # session would silently payment_timeout with zero server-side
+                # record that money arrived. Fail loudly + log the txid so ops
+                # can reconcile. Mirrors market_flow's signer_mismatch guard.
+                signer = s.get("account")
+                txid = s.get("txid")
+                logging.warning(
+                    "mint session %s: payment signed by %s, not session wallet %s "
+                    "(txid=%s) — reconcile manually",
+                    session.id,
+                    signer,
+                    session.wallet_address,
+                    txid,
+                )
+                # State check-and-set is synchronous (no await since the guard
+                # above), so it cannot race the background task's transitions.
+                session.state = FAILED
+                session.reason = "signer_mismatch"
+                session.error = (
+                    f"Payment was signed by a different Xaman account ({signer}) "
+                    f"than your session wallet. Your session wallet was not "
+                    f"charged; if another account paid, contact support to "
+                    f"reconcile."
+                )
+                if session.task is not None:
+                    # Stop the doomed wait_for_payment. CancelledError is a
+                    # BaseException, so run_mint_session's `except Exception`
+                    # cannot catch it; its finally settles the headroom
+                    # reservation (release-only — no mint landed).
+                    session.task.cancel()
+                release_sponsored_reservation(session, "signer_mismatch")
+                # #226: same direct settle the cancel() path does — a task
+                # cancelled before it ever ran skips run_mint_session's
+                # finally. Idempotent with the dying task's own finally.
+                settle_headroom(session)
+                return
             session.qr_scanned = s["opened"] or s["signed"]
             session.payment_signed = bool(s["signed"])
             _capture_issued_token(session, s)
