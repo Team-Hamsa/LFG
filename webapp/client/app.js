@@ -15,7 +15,7 @@ import * as marketPure from './market_pure.js?v=23';
 import * as mintPure from './mint_pure.js?v=24';
 // Build-panel decision logic lives in its own pure module so it's
 // Node-testable too (tests/test_build_pure_js.py).
-import * as buildPure from './build_pure.js?v=26';
+import * as buildPure from './build_pure.js?v=27';
 
 const params = new URLSearchParams(window.location.search);
 const insideDiscord = params.has('frame_id');
@@ -1974,7 +1974,10 @@ function renderCanvas(char) {
     if (!layerComplete(char.body, value)) continue;
     canvas.appendChild(layerMediaEl(layerSrc(char.body, slot, value), ''));
   }
-  el('dressup-id').textContent = `#${char.edition} · ${char.body} · live`;
+  // #316: an unconfirmed save means this redraw may not match the ledger.
+  el('dressup-id').textContent = reconcileUncertainIds.has(char.nft_id)
+    ? `#${char.edition} · ${char.body} · ⚠️ save unconfirmed — refresh to re-check`
+    : `#${char.edition} · ${char.body} · live`;
 }
 
 // --- GO picker (overlay) ---
@@ -2092,6 +2095,10 @@ async function openDressup() {
   status('Loading your wardrobe…');
   try {
     economyState = await api('/api/economy');
+    // #316: a fresh wardrobe fetch is the reconcile point — by now the
+    // listener/admin reconcile has (or will have) stamped the index, so the
+    // next authoritative read is trustworthy. Clear the unconfirmed-save flags.
+    reconcileUncertainIds.clear();
     status('');
 
     const cStatus = closetStatus();
@@ -2187,6 +2194,17 @@ async function openDressup() {
 
 let closetFilter = 'All';
 let saveBusy = false;
+// #316: characters whose last equip save ended with an UNKNOWN on-ledger
+// outcome (equip_sync_indeterminate / failed_revert). The index was deliberately
+// not stamped on those branches, so a redraw from /api/economy is not
+// authoritative — banner the character and refuse staging/saving until the next
+// wardrobe refresh (openDressup) returns fresh state. Same pattern as
+// harvestingIds.
+const reconcileUncertainIds = new Set();
+const RECONCILE_MSG =
+  "We couldn't confirm your save on the ledger — your character may or may not "
+  + 'be wearing the new traits. Support is reconciling. Refresh to re-check; '
+  + "don't re-save until then.";
 let pendingEquips = {};   // {slot: incomingValue} — staged, uncommitted
 let pendingFor = null;    // nft_id the staged batch belongs to
 let extractBusy = {};   // keyed by `${slot}:${value}` to guard per-tile double-clicks
@@ -2413,6 +2431,7 @@ function clearPending() {
 function stagePendingEquip(slot, value) {
   const char = activeChar();
   if (!char || saveBusy) return;
+  if (reconcileUncertainIds.has(activeNftId)) { showError(RECONCILE_MSG); return; }
   if (pendingFor !== activeNftId) { pendingEquips = {}; pendingFor = activeNftId; }
   pendingEquips[slot] = value;
   renderCanvas(char);
@@ -2478,6 +2497,7 @@ function applySavedLocally(char, saved) {
 async function saveBuild() {
   const char = activeChar();
   if (!char || saveBusy) return;
+  if (reconcileUncertainIds.has(activeNftId)) { showError(RECONCILE_MSG); return; }
   const staged = { ...pending() };
   const changes = buildPure.netChanges(char, staged);
   if (!changes.length) return;
@@ -2491,6 +2511,15 @@ async function saveBuild() {
       body: JSON.stringify({ nft_id: activeNftId, changes }),
     });
     const final = await pollEconomyOp('equip', res);
+    const outcome = buildPure.saveOutcome(final);
+    if (outcome === 'uncertain') {
+      // The ledger outcome is UNKNOWN (equip_sync_indeterminate / failed_revert):
+      // the index was not stamped, so the refetch below redraws a look that may
+      // be wrong. Flag the character so the redraw carries a banner and further
+      // staging/saving is refused until a wardrobe refresh.
+      reconcileUncertainIds.add(activeNftId);
+      throw new Error(RECONCILE_MSG);
+    }
     if (final.state === 'failed') throw new Error(final.error || 'save failed');
     committed = true;
     status('');

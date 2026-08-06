@@ -999,6 +999,13 @@ class EquipSession:
     modify_hash: str | None = None
     sync_tx_hash: str | None = None
     mirror_pending: bool = False
+    # Machine-readable outcome discriminator for the client (#316):
+    #   "committed"  — new traits are on-ledger (incl. complete_pending_mirror)
+    #   "reverted"   — character definitively unchanged on-ledger
+    #   "uncertain"  — outcome unknown (equip_sync_indeterminate / failed_revert);
+    #                  the client must not trust an index redraw or invite a re-save
+    #   None         — generic outer-catch; client treats as "reverted"
+    resolution: str | None = None
     id: str = field(default_factory=lambda: uuid.uuid4().hex)
 
     def _record(self, status: str) -> dict[str, Any]:
@@ -1035,9 +1042,11 @@ async def run_equip(session: EquipSession, deps: EconomyDeps) -> None:
     try:
         stale = _mirror_pending_error(deps, owner)
         if stale:
+            session.resolution = "reverted"
             session.fail(stale)
             return
         if not session.changes:
+            session.resolution = "reverted"
             session.fail("cannot equip: no changes to apply")
             return
         assets = _owner_contents(conn, owner)
@@ -1049,11 +1058,13 @@ async def run_equip(session: EquipSession, deps: EconomyDeps) -> None:
         seen: set[str] = set()
         for slot, incoming in session.changes:
             if slot in seen:
+                session.resolution = "reverted"
                 session.fail(f"cannot equip: duplicate slot in one batch ({slot})")
                 return
             seen.add(slot)
             chk = te.can_equip(rec, slot, incoming, assets, mutable=bool(rec.mutable))
             if not chk.ok:
+                session.resolution = "reverted"
                 session.fail(f"cannot equip: {chk.reason}")
                 return
             displaced = te.slot_value(rec, slot)
@@ -1077,6 +1088,7 @@ async def run_equip(session: EquipSession, deps: EconomyDeps) -> None:
         # Reversible: NFTokenModify keeps the nft_id; we can modify back.
         modify_hash = await deps.char_modify_fn(rec.nft_id, owner, meta_url)
         if not modify_hash:
+            session.resolution = "reverted"
             session.fail(f"failed to update character {rec.nft_id}; your character is unchanged")
             _write_record(deps.records_dir, "equip", session.id, session._record("failed_modify"))
             return
@@ -1098,6 +1110,7 @@ async def run_equip(session: EquipSession, deps: EconomyDeps) -> None:
             # new traits; the listener converges the mirror.
             session.sync_tx_hash = e.tx_hash
             session.mirror_pending = True
+            session.resolution = "committed"
             es.set_mirror_pending(conn, owner, True)
             session.state = DONE
             _persist_char_modify_to_index(
@@ -1116,6 +1129,7 @@ async def run_equip(session: EquipSession, deps: EconomyDeps) -> None:
         except bt.ClosetIndeterminateError as e:
             # Swap outcome unknown: fail-closed — no revert against an unknown
             # Closet; an admin reconciles from chain.
+            session.resolution = "uncertain"
             session.fail(
                 f"equip closet swap outcome unknown ({e}); the character keeps its new traits — "
                 f"reconcile from chain (journal {session.id})"
@@ -1134,11 +1148,13 @@ async def run_equip(session: EquipSession, deps: EconomyDeps) -> None:
             # failed_revert case (admin recovery), not a clean reverted_modify.
             revert_hash = await deps.char_modify_fn(rec.nft_id, owner, old_uri) if old_uri else None
             if revert_hash:
+                session.resolution = "reverted"
                 session.fail(f"equip failed updating the closet ({e}); your character was reverted")
                 _write_record(
                     deps.records_dir, "equip", session.id, session._record("reverted_modify")
                 )
             else:
+                session.resolution = "uncertain"
                 session.fail(
                     f"equip failed updating the closet ({e}); the character could NOT be reverted "
                     f"to its old traits — it may retain the new traits (journal {session.id})"
@@ -1149,6 +1165,7 @@ async def run_equip(session: EquipSession, deps: EconomyDeps) -> None:
             return
 
         session.state = DONE
+        session.resolution = "committed"
         _persist_char_modify_to_index(
             deps,
             session.character,
