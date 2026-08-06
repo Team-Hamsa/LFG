@@ -16,6 +16,7 @@ import argparse
 import asyncio
 import json as _json
 import logging
+import math
 import os
 import sys
 from collections.abc import Callable
@@ -46,16 +47,31 @@ from lfg_core import (  # noqa: E402
 
 RECONNECT_BASE = 2
 RECONNECT_MAX = 60
+
+
 # Watchdog (#345): validated ledgers close every ~4s, so even a silent
 # collection sees a whole-network stream message far more often than this.
 # Silence past the window means the subscription is wedged (e.g. a keepalive
 # ping timeout the endpoint never followed with a close frame) — force a
 # reconnect instead of sitting online-but-dead for days.
-STREAM_IDLE_TIMEOUT = float(os.environ.get("LISTENER_STREAM_IDLE_TIMEOUT", "300"))
+def _read_positive_timeout(name: str, default: str) -> float:
+    """Read a timeout env var, rejecting values that would break the watchdog:
+    0/negative fire immediately, inf/nan disable it entirely."""
+    value = float(os.environ.get(name, default))
+    if not math.isfinite(value) or value <= 0:
+        raise ValueError(f"{name} must be a finite value greater than zero, got {value!r}")
+    return value
+
+
+STREAM_IDLE_TIMEOUT = _read_positive_timeout("LISTENER_STREAM_IDLE_TIMEOUT", "300")
 # Side-channel awaits (clio nft_info, IPFS/CDN metadata, the identity request)
 # run inline in the stream loop; a single hung call used to freeze the whole
 # listener without ever tripping the reconnect loop.
-SIDE_CALL_TIMEOUT = float(os.environ.get("LISTENER_SIDE_CALL_TIMEOUT", "30"))
+SIDE_CALL_TIMEOUT = _read_positive_timeout("LISTENER_SIDE_CALL_TIMEOUT", "30")
+# One bounded retry before a timed-out side call degrades to None — a transient
+# clio/IPFS stall usually clears immediately, and a retry is far cheaper than
+# leaving the tx's index/economy state to the next backfill.
+SIDE_CALL_ATTEMPTS = 2
 
 
 class StreamStalled(Exception):
@@ -84,20 +100,24 @@ async def _iter_with_watchdog(source: Any, idle_timeout: float | None = None) ->
 def _bounded(
     fn: Callable[[str], Any], *, label: str, network: str, timeout: float | None = None
 ) -> Callable[[str], Any]:
-    """Wrap a single-argument async fetch with a hard timeout. A timeout
-    degrades to None (both nft_info and fetch_metadata already return None for
-    'unavailable', which every consumer handles) instead of hanging the stream
-    loop forever; anything else propagates unchanged."""
+    """Wrap a single-argument async fetch with a hard per-attempt timeout and
+    SIDE_CALL_ATTEMPTS bounded tries. After the final timeout it degrades to
+    None — the exact shape nft_info and fetch_metadata already return on RPC
+    failure, which apply_tx handles ("could not resolve token", skip) — instead
+    of hanging the stream loop forever; anything else propagates unchanged."""
 
     async def wrapped(arg: str) -> Any:
         t = SIDE_CALL_TIMEOUT if timeout is None else timeout
-        try:
-            return await asyncio.wait_for(fn(arg), timeout=t)
-        except asyncio.TimeoutError:
-            logging.warning(
-                f"[{network}] {label}({arg}) timed out after {t:.0f}s; treating as unavailable"
-            )
-            return None
+        for attempt in range(1, SIDE_CALL_ATTEMPTS + 1):
+            try:
+                return await asyncio.wait_for(fn(arg), timeout=t)
+            except asyncio.TimeoutError:
+                logging.warning(
+                    f"[{network}] {label}({arg}) timed out after {t:.0f}s "
+                    f"(attempt {attempt}/{SIDE_CALL_ATTEMPTS})"
+                )
+        logging.warning(f"[{network}] {label}({arg}) exhausted retries; treating as unavailable")
+        return None
 
     return wrapped
 

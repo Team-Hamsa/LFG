@@ -109,3 +109,46 @@ def test_bounded_propagates_non_timeout_errors():
     wrapped = oln._bounded(fetch, label="fetch_meta", network="testnet", timeout=1.0)
     with pytest.raises(ValueError):
         _run(wrapped("x"))
+
+
+def test_bounded_retries_once_then_succeeds():
+    calls = {"n": 0}
+
+    async def fetch(arg):
+        calls["n"] += 1
+        if calls["n"] == 1:
+            await asyncio.sleep(5.0)  # first attempt stalls
+        return {"got": arg}
+
+    wrapped = oln._bounded(fetch, label="nft_info", network="testnet", timeout=0.05)
+    assert _run(wrapped("abc")) == {"got": "abc"}
+    assert calls["n"] == 2
+
+
+def test_bounded_attempts_are_bounded():
+    calls = {"n": 0}
+
+    async def fetch(arg):
+        calls["n"] += 1
+        await asyncio.sleep(5.0)
+
+    wrapped = oln._bounded(fetch, label="nft_info", network="testnet", timeout=0.05)
+    assert _run(wrapped("abc")) is None
+    assert calls["n"] == oln.SIDE_CALL_ATTEMPTS
+
+
+# ---------------------------------------------------------------- env validation
+
+
+@pytest.mark.parametrize("bad", ["0", "-1", "nan", "inf", "-inf"])
+def test_timeout_env_rejects_non_positive_and_non_finite(monkeypatch, bad):
+    monkeypatch.setenv("LISTENER_STREAM_IDLE_TIMEOUT", bad)
+    with pytest.raises(ValueError):
+        oln._read_positive_timeout("LISTENER_STREAM_IDLE_TIMEOUT", "300")
+
+
+def test_timeout_env_accepts_positive_finite(monkeypatch):
+    monkeypatch.setenv("LISTENER_SIDE_CALL_TIMEOUT", "12.5")
+    assert oln._read_positive_timeout("LISTENER_SIDE_CALL_TIMEOUT", "30") == 12.5
+    monkeypatch.delenv("LISTENER_SIDE_CALL_TIMEOUT")
+    assert oln._read_positive_timeout("LISTENER_SIDE_CALL_TIMEOUT", "30") == 30.0
