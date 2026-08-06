@@ -130,3 +130,15 @@ export function defaultChosen(slots, slotOptions) {
 export function missingSlots(slots, slotOptions) {
   return slots.filter((s) => !(slotOptions[s] || []).length);
 }
+
+// #316: classify a terminal equip session for the Build save UX.
+// "committed"  — new traits are on-ledger; apply the save locally.
+// "uncertain"  — outcome unknown (equip_sync_indeterminate / failed_revert);
+//                do not trust an index redraw, gate re-saves until a refresh.
+// "reverted"   — everything else (clean failure; character unchanged).
+export function saveOutcome(s) {
+  if (!s) return 'reverted';
+  if (s.resolution === 'uncertain') return 'uncertain';
+  if (s.state === 'done' || s.resolution === 'committed') return 'committed';
+  return 'reverted';
+}

@@ -133,6 +133,7 @@ def test_equip_happy_path(tmp_path):
     _run(ef.run_equip(s, _deps(conn, f, tmp_path)))
 
     assert s.state == ef.DONE
+    assert s.resolution == "committed"
     assert s.displaced == {"Head": "None"}
     assert f.char_modifies == [("NFT7", "rUser", "https://cdn/new.json")]
     assets = {(slot, v): n for o, slot, v, n in es.read_closet_assets(conn)}
@@ -155,6 +156,7 @@ def test_equip_modify_then_bucket_fails_reverts(tmp_path):
     _run(ef.run_equip(s, _deps(conn, f, tmp_path)))
 
     assert s.state == ef.FAILED
+    assert s.resolution == "reverted"
     # modified to the new metadata, then reverted to the old on-chain URI
     assert f.char_modifies == [
         ("NFT7", "rUser", "https://cdn/new.json"),
@@ -173,10 +175,12 @@ def test_equip_bucket_fails_and_uri_undecodable_reports_honestly(tmp_path):
     _run(ef.run_equip(s, _deps(conn, f, tmp_path)))
 
     assert s.state == ef.FAILED
+    assert s.resolution == "uncertain"
     # only the forward modify happened; NO false revert was attempted
     assert f.char_modifies == [("NFT7", "rUser", "https://cdn/new.json")]
     record = json.loads((tmp_path / f"equip-{s.id}.json").read_text())
     assert record["status"] == "failed_revert"
+    assert record["resolution"] == "uncertain"  # discriminator survives recovery
 
 
 def test_equip_revert_modify_not_landing_marks_failed_revert(tmp_path):
@@ -191,6 +195,7 @@ def test_equip_revert_modify_not_landing_marks_failed_revert(tmp_path):
     _run(ef.run_equip(s, _deps(conn, f, tmp_path)))
 
     assert s.state == ef.FAILED
+    assert s.resolution == "uncertain"
     # forward modify happened, then a revert-back was ATTEMPTED (but didn't land)
     assert f.char_modifies == [
         ("NFT7", "rUser", "https://cdn/new.json"),
@@ -198,6 +203,7 @@ def test_equip_revert_modify_not_landing_marks_failed_revert(tmp_path):
     ]
     record = json.loads((tmp_path / f"equip-{s.id}.json").read_text())
     assert record["status"] == "failed_revert"  # NOT reverted_modify
+    assert record["resolution"] == "uncertain"  # discriminator survives recovery
 
 
 # --- #107: phase-aware equip branches ---
@@ -213,6 +219,7 @@ def test_equip_mirror_failure_keeps_new_traits(tmp_path):
     _run(ef.run_equip(s, _deps(flaky_mirror_conn(conn), f, tmp_path)))
 
     assert s.state == ef.DONE
+    assert s.resolution == "committed"
     # exactly ONE character modify — no revert back to the old URI
     assert f.char_modifies == [("NFT7", "rUser", "https://cdn/new.json")]
     record = json.loads((tmp_path / f"equip-{s.id}.json").read_text())
@@ -229,9 +236,11 @@ def test_equip_indeterminate_no_revert(tmp_path):
     _run(ef.run_equip(s, _deps(conn, f, tmp_path)))
 
     assert s.state == ef.FAILED
+    assert s.resolution == "uncertain"
     assert f.char_modifies == [("NFT7", "rUser", "https://cdn/new.json")]  # no revert
     record = json.loads((tmp_path / f"equip-{s.id}.json").read_text())
     assert record["status"] == "equip_sync_indeterminate"
+    assert record["resolution"] == "uncertain"  # discriminator survives recovery
     # closet mirror untouched
     assets = {(slot, v): n for o, slot, v, n in es.read_closet_assets(conn)}
     assert assets == {("Head", "Crown"): 1}

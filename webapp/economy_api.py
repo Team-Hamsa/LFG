@@ -102,6 +102,9 @@ def economy_session_dict(kind: str, s: Any) -> dict[str, Any]:
     base: dict[str, Any] = {"id": s.id, "state": s.state, "error": s.error}
     if kind == "equip":
         base["displaced"] = [{"slot": k, "value": v} for k, v in s.displaced.items()]
+        # #316: machine-readable outcome discriminator ("committed" | "reverted" |
+        # "uncertain" | None). getattr default keeps old journals / fakes safe.
+        base["resolution"] = getattr(s, "resolution", None)
     elif kind == "harvest":
         base["moved_assets"] = s.moved_assets
         # Legacy (non-mutable) harvest remints the edition as a mutable blank and

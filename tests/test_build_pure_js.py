@@ -342,3 +342,36 @@ def test_missing_slots_all_empty_options():
     slotOptions = "{'Hat': [], 'Eyes': []}"
     result = run_js(f"M.missingSlots({slots}, {slotOptions})")
     assert result == ["Hat", "Eyes"]
+
+
+# ---------------------------------------------------------------------------
+# saveOutcome(finalSession) -> "committed" | "reverted" | "uncertain"  (#316)
+# ---------------------------------------------------------------------------
+
+
+def test_save_outcome_uncertain():
+    assert run_js('M.saveOutcome({state:"failed", resolution:"uncertain"})') == "uncertain"
+
+
+def test_save_outcome_reverted_on_null_resolution():
+    assert run_js('M.saveOutcome({state:"failed", resolution:null})') == "reverted"
+
+
+def test_save_outcome_reverted_on_unknown_resolution():
+    assert run_js('M.saveOutcome({state:"failed", resolution:"bogus"})') == "reverted"
+
+
+def test_save_outcome_reverted_on_explicit_reverted():
+    assert run_js('M.saveOutcome({state:"failed", resolution:"reverted"})') == "reverted"
+
+
+def test_save_outcome_committed_on_done():
+    assert run_js('M.saveOutcome({state:"done"})') == "committed"
+
+
+def test_save_outcome_committed_on_resolution_committed():
+    assert run_js('M.saveOutcome({state:"done", resolution:"committed"})') == "committed"
+
+
+def test_save_outcome_missing_session_is_reverted():
+    assert run_js("M.saveOutcome(null)") == "reverted"
