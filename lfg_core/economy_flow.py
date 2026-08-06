@@ -1023,6 +1023,10 @@ class EquipSession:
             "mirror_pending": self.mirror_pending,
             "status": status,
             "error": self.error,
+            # Recovery must not lose the outcome discriminator: a recovered
+            # equip_sync_indeterminate / failed_revert journal without it would
+            # read as a clean revert and invite a conflicting re-save (#316).
+            "resolution": self.resolution,
         }
 
     def fail(self, msg: str) -> None:

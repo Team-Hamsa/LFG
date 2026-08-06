@@ -2498,6 +2498,10 @@ async function saveBuild() {
   const char = activeChar();
   if (!char || saveBusy) return;
   if (reconcileUncertainIds.has(activeNftId)) { showError(RECONCILE_MSG); return; }
+  // The user can switch characters while the poll below is pending — pin the
+  // submitted NFT ID now so the request and the uncertain flag can never target
+  // a character other than the one this batch was saved against.
+  const submittedNftId = activeNftId;
   const staged = { ...pending() };
   const changes = buildPure.netChanges(char, staged);
   if (!changes.length) return;
@@ -2508,7 +2512,7 @@ async function saveBuild() {
   try {
     const res = await api('/api/equip', {
       method: 'POST',
-      body: JSON.stringify({ nft_id: activeNftId, changes }),
+      body: JSON.stringify({ nft_id: submittedNftId, changes }),
     });
     const final = await pollEconomyOp('equip', res);
     const outcome = buildPure.saveOutcome(final);
@@ -2517,7 +2521,7 @@ async function saveBuild() {
       // the index was not stamped, so the refetch below redraws a look that may
       // be wrong. Flag the character so the redraw carries a banner and further
       // staging/saving is refused until a wardrobe refresh.
-      reconcileUncertainIds.add(activeNftId);
+      reconcileUncertainIds.add(submittedNftId);
       throw new Error(RECONCILE_MSG);
     }
     if (final.state === 'failed') throw new Error(final.error || 'save failed');

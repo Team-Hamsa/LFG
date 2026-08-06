@@ -180,6 +180,7 @@ def test_equip_bucket_fails_and_uri_undecodable_reports_honestly(tmp_path):
     assert f.char_modifies == [("NFT7", "rUser", "https://cdn/new.json")]
     record = json.loads((tmp_path / f"equip-{s.id}.json").read_text())
     assert record["status"] == "failed_revert"
+    assert record["resolution"] == "uncertain"  # discriminator survives recovery
 
 
 def test_equip_revert_modify_not_landing_marks_failed_revert(tmp_path):
@@ -202,6 +203,7 @@ def test_equip_revert_modify_not_landing_marks_failed_revert(tmp_path):
     ]
     record = json.loads((tmp_path / f"equip-{s.id}.json").read_text())
     assert record["status"] == "failed_revert"  # NOT reverted_modify
+    assert record["resolution"] == "uncertain"  # discriminator survives recovery
 
 
 # --- #107: phase-aware equip branches ---
@@ -238,6 +240,7 @@ def test_equip_indeterminate_no_revert(tmp_path):
     assert f.char_modifies == [("NFT7", "rUser", "https://cdn/new.json")]  # no revert
     record = json.loads((tmp_path / f"equip-{s.id}.json").read_text())
     assert record["status"] == "equip_sync_indeterminate"
+    assert record["resolution"] == "uncertain"  # discriminator survives recovery
     # closet mirror untouched
     assets = {(slot, v): n for o, slot, v, n in es.read_closet_assets(conn)}
     assert assets == {("Head", "Crown"): 1}
