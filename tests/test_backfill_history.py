@@ -1020,11 +1020,11 @@ def test_certification_refuses_a_baseline_starting_below_the_earliest_ledger():
 # --- Bounded gap catch-up (#329) -------------------------------------------
 
 
-def _v2_coverage(tip):
+def _v2_coverage(tip, *, sources=None, accounts=None):
     return json.dumps(
         bh.baseline_coverage_document(
-            {"signing": "rSigner", "token_issuer": "rIssuer"},
-            sources=set(bh.DEFAULT_SOURCE_ORDER),
+            accounts if accounts is not None else {"signing": "rSigner", "token_issuer": "rIssuer"},
+            sources=set(bh.DEFAULT_SOURCE_ORDER) if sources is None else set(sources),
             source_tag=2606160021,
             ledger_min=history_store.EARLIEST_AVAILABLE_LEDGER,
             ledger_max=tip,
@@ -1179,6 +1179,86 @@ def test_catchup_bounds_page_only_the_gap(tmp_path):
     page_min, page_max = bh.catchup_bounds(state, snapshot)
     assert page_min == L0 + 140
     assert page_max == L0 + 500
+
+
+def test_catchup_refuses_a_narrower_prior_source_set(tmp_path):
+    """A catch-up records cumulative [earliest, tip] coverage for every source
+    it attests, but only pages the gap. If the prior certification swept a
+    NARROWER set, the pre-gap history of the added sources was never covered —
+    attesting it would be a lie, so refuse."""
+    conn = history_store.init_history_db(str(tmp_path / "h.db"))
+    state = _seed_certified_archive_with_gap(
+        conn, coverage=_v2_coverage(L0 + 100, sources={"issuer"})
+    )
+    with pytest.raises(ValueError, match="full certification"):
+        bh.validate_catchup_state(state, expected_sources=set(bh.DEFAULT_SOURCE_ORDER))
+    # A prior sweep that was BROADER than this run is sound ground to stand on.
+    assert bh.validate_catchup_state(state, expected_sources={"issuer"}) == L0 + 140
+
+
+def test_catchup_refuses_a_swapped_account_for_a_source(tmp_path):
+    """Same laundering hazard, per account: certifying with distributor A and
+    then catching up with distributor B would record B as covered from the
+    earliest ledger, though B's pre-gap transactions were never paged."""
+    conn = history_store.init_history_db(str(tmp_path / "h.db"))
+    state = _seed_certified_archive_with_gap(
+        conn,
+        coverage=_v2_coverage(
+            L0 + 100,
+            accounts={"signing": "rSigner", "token_issuer": "rIssuer", "distributor": "rOldDist"},
+        ),
+    )
+    with pytest.raises(ValueError, match="full certification"):
+        bh.validate_catchup_state(
+            state,
+            expected_accounts={
+                "signing": "rSigner",
+                "token_issuer": "rIssuer",
+                "distributor": "rNewDist",
+            },
+        )
+    # The unchanged account set is accepted.
+    assert (
+        bh.validate_catchup_state(
+            state,
+            expected_accounts={
+                "signing": "rSigner",
+                "token_issuer": "rIssuer",
+                "distributor": "rOldDist",
+            },
+        )
+        == L0 + 140
+    )
+
+
+def test_catchup_refuses_an_account_absent_from_the_prior_coverage(tmp_path):
+    """Adding a distributor that the prior certification never covered at all
+    is the same unpaged-pre-gap-history hole as swapping one."""
+    conn = history_store.init_history_db(str(tmp_path / "h.db"))
+    state = _seed_certified_archive_with_gap(conn)
+    with pytest.raises(ValueError, match="full certification"):
+        bh.validate_catchup_state(
+            state,
+            expected_accounts={
+                "signing": "rSigner",
+                "token_issuer": "rIssuer",
+                "distributor": "rBrandNew",
+            },
+        )
+
+
+def test_catchup_bounds_threads_the_breadth_check(tmp_path):
+    """catchup_bounds is the real entry point — the breadth gate must apply
+    there, not only on the lower-level helper."""
+    conn = history_store.init_history_db(str(tmp_path / "h.db"))
+    state = _seed_certified_archive_with_gap(
+        conn, coverage=_v2_coverage(L0 + 100, sources={"issuer"})
+    )
+    snapshot = history_store.EndpointSnapshot(
+        genesis_hash="CHAIN-ANCHOR", validated_ledger_index=L0 + 500
+    )
+    with pytest.raises(ValueError, match="full certification"):
+        bh.catchup_bounds(state, snapshot, expected_sources=set(bh.DEFAULT_SOURCE_ORDER))
 
 
 def test_catchup_refuses_a_genesis_mismatch(tmp_path):

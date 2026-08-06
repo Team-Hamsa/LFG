@@ -21,6 +21,7 @@ import json
 import logging
 import os
 import sys
+from collections.abc import Mapping
 from typing import Any
 
 REPO_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
@@ -154,6 +155,8 @@ def validate_catchup_state(
     state: history_store.ArchiveState | None,
     *,
     expected_source_tag: int | None = None,
+    expected_sources: set[str] | frozenset[str] | None = None,
+    expected_accounts: Mapping[str, str] | None = None,
 ) -> int:
     """Admit a bounded catch-up (#329) only when it can be provably sound.
 
@@ -163,6 +166,15 @@ def validate_catchup_state(
     coverage through `continuity_gap_after`, and the bounded page proves
     [gap_after, tip]. Missing any leg means the cumulative claim would be
     false — refuse and direct the operator to full certification instead.
+
+    The first leg is a claim about BREADTH as well as range: this run records
+    cumulative [earliest, tip] coverage for every source and account it
+    attests, while paging only the gap. So the prior certification must
+    already cover each of them — a source it never swept, or the same source
+    swept for a DIFFERENT account, has no pre-gap history in the archive, and
+    attesting it would launder that hole into a fresh baseline (an
+    already-served wallet could then look eligible for another sponsored
+    mint).
 
     Returns the gap's lower bound (the paging start)."""
 
@@ -185,12 +197,36 @@ def validate_catchup_state(
     # coverage document, and sponsored_mint would reject it at admission time
     # anyway. Re-certifying on top of it would launder that unattested history
     # into a fresh v2 baseline.
-    if sponsored_mint.baseline_coverage_sources(state.baseline_coverage) is None:
+    prior_sources = sponsored_mint.baseline_coverage_sources(state.baseline_coverage)
+    prior_accounts = sponsored_mint.baseline_coverage_accounts(state.baseline_coverage)
+    if prior_sources is None or prior_accounts is None:
         raise ValueError(
             "archive baseline carries no verifiable coverage document (legacy or "
             "pre-#331 format); its historical breadth was never attested under the "
             "current rules — run full certification (--complete-audited-baseline)"
         )
+    if expected_sources is not None:
+        unproven = sorted(set(expected_sources) - set(prior_sources))
+        if unproven:
+            raise ValueError(
+                "prior certification never swept source(s) "
+                f"{', '.join(unproven)}, so this archive holds no pre-gap history "
+                "for them; a bounded catch-up must not attest coverage it does not "
+                "have — run full certification (--complete-audited-baseline)"
+            )
+    if expected_accounts is not None:
+        changed = sorted(
+            name
+            for name, account in expected_accounts.items()
+            if prior_accounts.get(name) != account
+        )
+        if changed:
+            raise ValueError(
+                "prior certification covered a different (or no) account for "
+                f"{', '.join(changed)}; the new account's pre-gap history was never "
+                "paged, so a bounded catch-up must not attest it — run full "
+                "certification (--complete-audited-baseline)"
+            )
     if expected_source_tag is not None and state.source_tag != expected_source_tag:
         raise ValueError(
             f"archive was certified for SourceTag {state.source_tag}, but this run "
@@ -216,10 +252,17 @@ def catchup_bounds(
     *,
     claimed_genesis_hash: str | None = None,
     expected_source_tag: int | None = None,
+    expected_sources: set[str] | frozenset[str] | None = None,
+    expected_accounts: Mapping[str, str] | None = None,
 ) -> tuple[int, int]:
     """Resolve the bounded paging window [gap_after, validated tip], fail-closed."""
 
-    gap_after = validate_catchup_state(state, expected_source_tag=expected_source_tag)
+    gap_after = validate_catchup_state(
+        state,
+        expected_source_tag=expected_source_tag,
+        expected_sources=expected_sources,
+        expected_accounts=expected_accounts,
+    )
     assert state is not None
     if claimed_genesis_hash is not None and claimed_genesis_hash.strip() != snapshot.genesis_hash:
         raise ValueError("claimed genesis does not match the endpoint chain identity")
@@ -576,6 +619,15 @@ async def _amain() -> int:
                     endpoint_snapshot,
                     claimed_genesis_hash=args.genesis_hash,
                     expected_source_tag=config.SOURCE_TAG,
+                    # The breadth this run would attest below — checked against
+                    # the prior certification before a single page is fetched.
+                    expected_sources=wanted,
+                    expected_accounts=baseline_account_coverage(
+                        wanted,
+                        distributor=args.distributor,
+                        nft_issuer=issuer,
+                        brix_issuer=brix_issuer,
+                    ),
                 )
             except ValueError as exc:
                 logging.error("bounded catch-up refused: %s", exc)

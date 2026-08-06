@@ -822,6 +822,30 @@ def baseline_coverage_sources(raw: object) -> list[str] | None:
     return sorted(sources)
 
 
+def baseline_coverage_accounts(raw: object) -> dict[str, str] | None:
+    """Parse the covered-accounts attestation out of a coverage document.
+
+    Returns the concrete account each named source was swept for, or None when
+    the document is missing, unparseable, from a version that cannot carry the
+    attestation, or carries a malformed `accounts` field. As with
+    `baseline_coverage_sources`, callers must treat None as "not attested"."""
+
+    if not isinstance(raw, str) or not raw:
+        return None
+    try:
+        coverage = json.loads(raw)
+    except (TypeError, ValueError):
+        return None
+    if not isinstance(coverage, dict) or coverage.get("version") != BASELINE_COVERAGE_VERSION:
+        return None
+    accounts = coverage.get("accounts")
+    if not isinstance(accounts, dict) or not all(
+        isinstance(name, str) and isinstance(account, str) for name, account in accounts.items()
+    ):
+        return None
+    return dict(accounts)
+
+
 def _baseline_coverage_is_bound(row: Mapping[str, Any]) -> bool:
     raw = row["baseline_coverage"]
     if not isinstance(raw, str) or not raw:
