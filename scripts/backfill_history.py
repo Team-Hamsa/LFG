@@ -469,8 +469,13 @@ def nft_ids_in_ledger_range(
     ):
         try:
             tx = json.loads(row["raw_json"])
-        except (TypeError, ValueError):
-            continue
+        except (TypeError, ValueError) as exc:
+            # An unreadable archived tx could be the only record of a token
+            # minted during the gap; skipping it would let the run attest
+            # `nfts` coverage it never obtained.
+            raise ValueError(
+                "certified NFT discovery found an unverifiable archived transaction"
+            ) from exc
         for ev in history_events.derive_nft_events(tx, nft_issuer=nft_issuer):
             nft_id = ev.get("nft_id")
             if isinstance(nft_id, str) and history_events.nft_id_issuer_matches(nft_id, issuer_hex):

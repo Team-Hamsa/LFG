@@ -240,6 +240,20 @@ def test_catchup_discovers_tokens_minted_during_the_gap(tmp_path):
     )
 
 
+def test_catchup_token_discovery_fails_closed_on_unreadable_archive_row(tmp_path):
+    """An unreadable archived tx could be the only record of a gap-minted
+    token; skipping it would attest `nfts` coverage that was never obtained."""
+    conn = history_store.init_history_db(str(tmp_path / "h.db"))
+    from lfg_core import history_events
+
+    bh.store_raw_tx(conn, history_events.normalize_entry(_entry(fx.MINT, "80" * 32, ledger=101)))
+    conn.execute("UPDATE xrpl_txs SET raw_json = ?", ("{not json",))
+    conn.commit()
+
+    with pytest.raises(ValueError, match="unverifiable archived transaction"):
+        bh.nft_ids_in_ledger_range(conn, nft_issuer=fx.ISSUER, ledger_min=100, ledger_max=200)
+
+
 def _entry_at_ledger(tx, hash_, ledger):
     """Like _entry, but the ledger the range checks read (the tx's own
     ledger_index, which wins over the envelope's) really is `ledger`."""
