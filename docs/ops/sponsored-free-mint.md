@@ -111,8 +111,44 @@ and admission fails closed until Step 0 is re-run. Consequences for planning:
 - Verify with the readiness audit immediately before starting a campaign; a
   green audit is the only proof the archive is currently usable.
 
-Recovering from a continuity gap is exactly Step 0 again — re-run the
-certification. Never hand-edit `archive_state` to clear the gap flags; they
+**Recovering from a continuity gap — bounded catch-up (#329).** A restart's
+gap is bounded (`continuity_gap_after` = the last ledger the stream provably
+covered), so recovery does not require re-paging the full range from ledger
+32570. Run:
+
+```bash
+.venv/bin/python scripts/backfill_history.py --network mainnet \
+  --catch-up-from-gap \
+  --baseline-provenance "<who ran this catch-up and why>" \
+  --distributor <airdrop-distributor-wallet>
+```
+
+This pages `account_tx` over only `[continuity_gap_after, current validated
+tip]` for the full source set (the same #331 rules apply: no `--sources`
+narrowing, `--distributor` required), sweeps `nft_history` for any
+`onchain_nfts` token not already cursor-complete, then records a **cumulative**
+`[32570, tip]` baseline — sound because the prior certification plus the live
+stream already cover everything below the gap, and raw inserts are
+INSERT OR IGNORE, so bounded-run ∪ existing-archive equals a full re-page in
+coverage. `--genesis-hash` is optional here (the archive's recorded identity is
+cross-checked against the endpoint either way). The run refuses (non-zero
+exit) when there is no gap, when the gap has no lower bound
+(`continuity_gap_after IS NULL` — see "Repairing an archive stuck with an
+unbounded gap" below), when the archive was never fully certified, or when the
+endpoint tip cannot reach the gap; those cases are full certification's job.
+If the gap's upper extent lies above the tip this run certified, the gap
+survives, the archive stays fail-closed, and the run exits 1 — re-run against
+a fresher tip. This is still an explicit operator command with a provenance
+attestation: nothing self-heals, and a restart still fails closed until an
+operator runs it.
+
+Note the honest limit: **both** full and bounded certification re-prove a
+window at `account_tx` breadth only — not at the firehose breadth the live
+listener archives at (see "What the historical baseline can and cannot see"
+below). The expensive full re-page never bought extra coverage over the gap
+window; the bounded run proves exactly as much.
+
+Never hand-edit `archive_state` to clear the gap flags; they
 are the only record that the archive was, at some point, not provably
 complete.
 

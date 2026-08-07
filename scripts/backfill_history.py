@@ -4,6 +4,8 @@
   python scripts/backfill_history.py --network mainnet
   python scripts/backfill_history.py --network mainnet --distributor rXXX
   python scripts/backfill_history.py --network mainnet --derive-only
+  python scripts/backfill_history.py --network mainnet --catch-up-from-gap \
+      --baseline-provenance "..." --distributor rXXX   # bounded gap recovery (#329)
 
 Sources: account_tx over the NFT issuer, the BRIX issuer, and (if given) the
 airdrop distributor; clio nft_history per nft_id known to onchain_<net>.db.
@@ -19,6 +21,7 @@ import json
 import logging
 import os
 import sys
+from collections.abc import Mapping
 from typing import Any
 
 REPO_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
@@ -148,6 +151,174 @@ def validate_baseline_endpoint(
         raise ValueError("baseline maximum must equal the validated endpoint tip")
 
 
+def validate_catchup_state(
+    state: history_store.ArchiveState | None,
+    *,
+    expected_source_tag: int | None = None,
+    expected_sources: set[str] | frozenset[str] | None = None,
+    expected_accounts: Mapping[str, str] | None = None,
+) -> int:
+    """Admit a bounded catch-up (#329) only when it can be provably sound.
+
+    A catch-up records a cumulative [earliest, tip] baseline while paging only
+    the gap window, so it stands on three legs: a prior full certification
+    proved [earliest, old tip], the live stream (or that certification) proved
+    coverage through `continuity_gap_after`, and the bounded page proves
+    [gap_after, tip]. Missing any leg means the cumulative claim would be
+    false — refuse and direct the operator to full certification instead.
+
+    The first leg is a claim about BREADTH as well as range: this run records
+    cumulative [earliest, tip] coverage for every source and account it
+    attests, while paging only the gap. So the prior certification must
+    already cover each of them — a source it never swept, or the same source
+    swept for a DIFFERENT account, has no pre-gap history in the archive, and
+    attesting it would launder that hole into a fresh baseline (an
+    already-served wallet could then look eligible for another sponsored
+    mint).
+
+    Returns the gap's lower bound (the paging start)."""
+
+    if state is None:
+        raise ValueError(
+            "no archive_state row: this archive was never certified — "
+            "run full certification (--complete-audited-baseline)"
+        )
+    if (
+        state.baseline_ledger_min != history_store.EARLIEST_AVAILABLE_LEDGER
+        or state.baseline_ledger_max is None
+    ):
+        raise ValueError(
+            "archive has no prior full-range certification to extend — "
+            "run full certification (--complete-audited-baseline)"
+        )
+    # A prior baseline is only trustworthy ground if its breadth was attested
+    # under the current rules: an archive migrated from the pre-SourceTag (or
+    # pre-#331 version-1) format keeps its bounds but carries no verifiable
+    # coverage document, and sponsored_mint would reject it at admission time
+    # anyway. Re-certifying on top of it would launder that unattested history
+    # into a fresh v2 baseline.
+    prior_sources = sponsored_mint.baseline_coverage_sources(state.baseline_coverage)
+    prior_accounts = sponsored_mint.baseline_coverage_accounts(state.baseline_coverage)
+    if prior_sources is None or prior_accounts is None:
+        raise ValueError(
+            "archive baseline carries no verifiable coverage document (legacy or "
+            "pre-#331 format); its historical breadth was never attested under the "
+            "current rules — run full certification (--complete-audited-baseline)"
+        )
+    if expected_sources is not None:
+        unproven = sorted(set(expected_sources) - set(prior_sources))
+        if unproven:
+            raise ValueError(
+                "prior certification never swept source(s) "
+                f"{', '.join(unproven)}, so this archive holds no pre-gap history "
+                "for them; a bounded catch-up must not attest coverage it does not "
+                "have — run full certification (--complete-audited-baseline)"
+            )
+    if expected_accounts is not None:
+        changed = sorted(
+            name
+            for name, account in expected_accounts.items()
+            if prior_accounts.get(name) != account
+        )
+        if changed:
+            raise ValueError(
+                "prior certification covered a different (or no) account for "
+                f"{', '.join(changed)}; the new account's pre-gap history was never "
+                "paged, so a bounded catch-up must not attest it — run full "
+                "certification (--complete-audited-baseline)"
+            )
+    if expected_source_tag is not None and state.source_tag != expected_source_tag:
+        raise ValueError(
+            f"archive was certified for SourceTag {state.source_tag}, but this run "
+            f"would attest SourceTag {expected_source_tag}; a bounded catch-up must "
+            "not rebrand an archive — run full certification for the new tag"
+        )
+    if state.continuity_gap_at is None:
+        raise ValueError(
+            "archive records no continuity gap — nothing to catch up "
+            "(if the baseline is incomplete for another reason, run full certification)"
+        )
+    if state.continuity_gap_after is None:
+        raise ValueError(
+            "continuity gap has no lower bound (continuity_gap_after IS NULL); a bounded "
+            "page cannot prove coverage of an unbounded gap — run full certification"
+        )
+    return state.continuity_gap_after
+
+
+def catchup_bounds(
+    state: history_store.ArchiveState | None,
+    snapshot: history_store.EndpointSnapshot,
+    *,
+    claimed_genesis_hash: str | None = None,
+    expected_source_tag: int | None = None,
+    expected_sources: set[str] | frozenset[str] | None = None,
+    expected_accounts: Mapping[str, str] | None = None,
+) -> tuple[int, int]:
+    """Resolve the bounded paging window [gap_after, validated tip], fail-closed."""
+
+    gap_after = validate_catchup_state(
+        state,
+        expected_source_tag=expected_source_tag,
+        expected_sources=expected_sources,
+        expected_accounts=expected_accounts,
+    )
+    assert state is not None
+    if claimed_genesis_hash is not None and claimed_genesis_hash.strip() != snapshot.genesis_hash:
+        raise ValueError("claimed genesis does not match the endpoint chain identity")
+    if state.genesis_hash != snapshot.genesis_hash:
+        raise ValueError("archive genesis does not match the endpoint chain identity")
+    page_min = max(gap_after, history_store.EARLIEST_AVAILABLE_LEDGER)
+    if snapshot.validated_ledger_index < page_min:
+        raise ValueError(
+            "endpoint validated tip is below the gap's lower bound; "
+            "the gap cannot be provably covered from this endpoint"
+        )
+    return page_min, snapshot.validated_ledger_index
+
+
+def record_catchup_baseline(
+    conn: Any,
+    *,
+    network: str,
+    genesis_hash: str,
+    tip: int,
+    paged_min: int,
+    provenance: str,
+    sources: set[str] | frozenset[str],
+    accounts: dict[str, str],
+    source_tag: int,
+) -> bool:
+    """Record the cumulative [earliest, tip] baseline after a bounded page.
+
+    Only the *paging* was bounded: [earliest, gap_after] is already in the
+    archive from the prior certification plus the live stream, and store_raw_tx
+    is INSERT OR IGNORE, so bounded-run ∪ existing-archive covers the full
+    range. The gap-clearing gate stays in record_archive_baseline unchanged —
+    this returns whether the gap actually cleared (it does not when the tip
+    stopped short of the gap's upper extent)."""
+
+    coverage = baseline_coverage_document(
+        accounts,
+        sources=sources,
+        source_tag=source_tag,
+        ledger_min=history_store.EARLIEST_AVAILABLE_LEDGER,
+        ledger_max=tip,
+    )
+    history_store.record_archive_baseline(
+        conn,
+        network=network,
+        genesis_hash=genesis_hash,
+        ledger_min=history_store.EARLIEST_AVAILABLE_LEDGER,
+        ledger_max=tip,
+        provenance=f"bounded catch-up over [{paged_min}, {tip}]: {provenance}",
+        source_tag=source_tag,
+        coverage=json.dumps(coverage, sort_keys=True, separators=(",", ":")),
+    )
+    state = history_store.get_archive_state(conn, network)
+    return state is not None and state.baseline_complete and state.continuity_gap_at is None
+
+
 def _is_validated_entry(page: dict[str, Any], entry: dict[str, Any]) -> bool:
     """Accept only explicit non-conflicting validation from page or entry.
 
@@ -245,8 +416,13 @@ async def backfill_account_tx(
             or result.get("validated") is not True
         ):
             raise ValueError("certified account_tx page did not prove its account and range")
+        entries = result.get("transactions")
+        if certified_range and not isinstance(entries, list):
+            # Defaulting a missing key to [] would read "the endpoint did not
+            # answer" as "this window is empty" and complete the cursor.
+            raise ValueError("certified account_tx page carried no transaction list")
         skipped_unvalidated = 0
-        for entry in result.get("transactions", []):
+        for entry in entries or []:
             if not _is_validated_entry(result, entry):
                 skipped_unvalidated += 1
                 continue
@@ -262,43 +438,120 @@ async def backfill_account_tx(
             if store_raw_tx(conn, tx, network=network):
                 new += 1
         _warn_if_unvalidated(cursor_source, result, skipped_unvalidated)
+        if certified_range and skipped_unvalidated:
+            # A dropped entry means this window was only partly archived; the
+            # cursor must not advance over evidence that was never stored.
+            raise ValueError("certified account_tx page contained unvalidated entries")
         marker = result.get("marker")
         history_store.set_cursor(conn, cursor_source, json.dumps(marker) if marker else None)
         if not marker:
             return new
 
 
+def nft_ids_in_ledger_range(
+    conn: Any, *, nft_issuer: str, ledger_min: int, ledger_max: int
+) -> set[str]:
+    """Our collection's token IDs appearing in archived txs within a range.
+
+    The `nfts` source pages per-token history for every token in the on-chain
+    index, but that index is maintained by the listener — so tokens minted
+    while it was down are missing from it, which is exactly the window a
+    catch-up covers. Paging the index alone would skip those tokens while the
+    run still attests cumulative `nfts` coverage. Mining the raw archive
+    (already populated for this window by the account sweeps, which run first)
+    recovers them."""
+
+    issuer_hex = history_events.issuer_account_hex(nft_issuer)
+    found: set[str] = set()
+    for row in conn.execute(
+        "SELECT raw_json FROM xrpl_txs WHERE ledger_index BETWEEN ? AND ?",
+        (ledger_min, ledger_max),
+    ):
+        try:
+            tx = json.loads(row["raw_json"])
+        except (TypeError, ValueError) as exc:
+            # An unreadable archived tx could be the only record of a token
+            # minted during the gap; skipping it would let the run attest
+            # `nfts` coverage it never obtained.
+            raise ValueError(
+                "certified NFT discovery found an unverifiable archived transaction"
+            ) from exc
+        for ev in history_events.derive_nft_events(tx, nft_issuer=nft_issuer):
+            nft_id = ev.get("nft_id")
+            if isinstance(nft_id, str) and history_events.nft_id_issuer_matches(nft_id, issuer_hex):
+                found.add(nft_id)
+    return found
+
+
 async def backfill_nft_history(
-    conn: Any, request_fn: Any, nft_id: str, *, network: str | None = None
+    conn: Any,
+    request_fn: Any,
+    nft_id: str,
+    *,
+    network: str | None = None,
+    ledger_min: int = -1,
+    ledger_max: int = -1,
 ) -> int:
     """Full nft_history (clio) for one token; cursor keyed per nft_id.
 
     The pagination marker is persisted after every page (like
     backfill_account_tx) so an interrupted long token history resumes from
-    where it left off instead of restarting from page 1."""
+    where it left off instead of restarting from page 1.
+
+    A certified range namespaces the cursor, exactly as backfill_account_tx
+    does. Without that, a bounded catch-up would short-circuit on the plain
+    cursor's terminal "done" — set by the prior full certification — and skip
+    the token entirely, leaving its gap-period transactions out of an archive
+    that nonetheless attests cumulative `nfts` coverage."""
     source = f"nft_history:{nft_id}"
-    stored = history_store.get_cursor(conn, source)
+    certified_range = ledger_min != -1 or ledger_max != -1
+    if certified_range and (ledger_min < 0 or ledger_max < ledger_min):
+        raise ValueError("certified nft_history range is invalid")
+    cursor_source = f"{source}:certified:{ledger_min}:{ledger_max}" if certified_range else source
+    stored = history_store.get_cursor(conn, cursor_source)
     if stored == "done":
         return 0
     marker: Any = json.loads(stored) if stored else None
     new = 0
     while True:
         req: dict[str, Any] = {"method": "nft_history", "nft_id": nft_id, "limit": 100}
+        if certified_range:
+            req["ledger_index_min"] = ledger_min
+            req["ledger_index_max"] = ledger_max
         if marker:
             req["marker"] = marker
         result = await request_fn(req)
+        if certified_range and (
+            result.get("nft_id") != nft_id
+            or result.get("ledger_index_min") != ledger_min
+            or result.get("ledger_index_max") != ledger_max
+            or result.get("validated") is not True
+        ):
+            raise ValueError("certified nft_history page did not prove its token and range")
+        entries = result.get("transactions")
+        if certified_range and not isinstance(entries, list):
+            raise ValueError("certified nft_history page carried no transaction list")
         skipped_unvalidated = 0
-        for entry in result.get("transactions", []):
+        for entry in entries or []:
             if not _is_validated_entry(result, entry):
                 skipped_unvalidated += 1
                 continue
             tx = history_events.normalize_entry(entry)
+            entry_ledger = tx.get("ledger_index")
+            if certified_range and (
+                isinstance(entry_ledger, bool)
+                or not isinstance(entry_ledger, int)
+                or not ledger_min <= entry_ledger <= ledger_max
+            ):
+                raise ValueError("certified nft_history entry fell outside its proven range")
             tx["validated"] = True
             if store_raw_tx(conn, tx, network=network):
                 new += 1
-        _warn_if_unvalidated(source, result, skipped_unvalidated)
+        _warn_if_unvalidated(cursor_source, result, skipped_unvalidated)
+        if certified_range and skipped_unvalidated:
+            raise ValueError("certified nft_history page contained unvalidated entries")
         marker = result.get("marker")
-        history_store.set_cursor(conn, source, json.dumps(marker) if marker else "done")
+        history_store.set_cursor(conn, cursor_source, json.dumps(marker) if marker else "done")
         if not marker:
             return new
 
@@ -327,6 +580,12 @@ async def _amain() -> int:
         "--baseline-provenance",
         help="audit/export identifier proving all SourceTag transactions were covered",
     )
+    parser.add_argument(
+        "--catch-up-from-gap",
+        action="store_true",
+        help="bounded re-certification (#329): page only [continuity_gap_after, validated "
+        "tip] and clear the recorded continuity gap, instead of re-paging the full range",
+    )
     args = parser.parse_args()
     wanted = set(args.sources.split(","))
     unknown = wanted - VALID_SOURCES
@@ -338,16 +597,28 @@ async def _amain() -> int:
         args.baseline_ledger_max,
         args.baseline_provenance,
     )
+    if args.complete_audited_baseline and args.catch_up_from_gap:
+        parser.error("--catch-up-from-gap and --complete-audited-baseline are mutually exclusive")
     if args.complete_audited_baseline and any(value is None for value in baseline_values):
         parser.error(
             "--complete-audited-baseline requires --genesis-hash, --baseline-ledger-min, "
             "--baseline-ledger-max, and --baseline-provenance"
         )
-    if not args.complete_audited_baseline and any(value is not None for value in baseline_values):
-        parser.error("baseline metadata requires --complete-audited-baseline")
-    if args.derive_only and args.complete_audited_baseline:
+    if args.catch_up_from_gap:
+        # The paging range comes from archive_state and the endpoint tip, never
+        # the operator; the provenance attestation stays mandatory (#329 keeps
+        # the human in the loop — no auto self-heal). --genesis-hash is an
+        # optional cross-check against the archive's recorded chain identity.
+        if args.baseline_ledger_min is not None or args.baseline_ledger_max is not None:
+            parser.error("--catch-up-from-gap derives its ledger range; do not pass one")
+        if args.baseline_provenance is None:
+            parser.error("--catch-up-from-gap requires --baseline-provenance")
+    if not args.complete_audited_baseline and not args.catch_up_from_gap:
+        if any(value is not None for value in baseline_values):
+            parser.error("baseline metadata requires --complete-audited-baseline")
+    if args.derive_only and (args.complete_audited_baseline or args.catch_up_from_gap):
         parser.error("--derive-only cannot certify a baseline")
-    if args.complete_audited_baseline:
+    if args.complete_audited_baseline or args.catch_up_from_gap:
         try:
             validate_baseline_source_coverage(wanted, distributor=args.distributor)
         except ValueError as exc:
@@ -421,6 +692,35 @@ async def _amain() -> int:
             )
             fixed_ledger_min = args.baseline_ledger_min
             fixed_ledger_max = args.baseline_ledger_max
+        elif args.catch_up_from_gap:
+            archive_state = history_store.get_archive_state(conn, args.network)
+            endpoint_snapshot = await history_store.fetch_endpoint_snapshot(request_fn)
+            try:
+                fixed_ledger_min, fixed_ledger_max = catchup_bounds(
+                    archive_state,
+                    endpoint_snapshot,
+                    claimed_genesis_hash=args.genesis_hash,
+                    expected_source_tag=config.SOURCE_TAG,
+                    # The breadth this run would attest below — checked against
+                    # the prior certification before a single page is fetched.
+                    expected_sources=wanted,
+                    expected_accounts=baseline_account_coverage(
+                        wanted,
+                        distributor=args.distributor,
+                        nft_issuer=issuer,
+                        brix_issuer=brix_issuer,
+                    ),
+                )
+            except ValueError as exc:
+                logging.error("bounded catch-up refused: %s", exc)
+                return 2
+            logging.info(
+                "bounded catch-up: paging [%d, %d] (gap stamped at %s: %s)",
+                fixed_ledger_min,
+                fixed_ledger_max,
+                archive_state.continuity_gap_at if archive_state else "?",
+                archive_state.continuity_gap_reason if archive_state else "?",
+            )
 
         if "issuer" in wanted:
             n = await backfill_account_tx(
@@ -480,9 +780,36 @@ async def _amain() -> int:
         if "nfts" in wanted:
             oconn = nft_index.init_db(nft_index.index_db_path(args.network))
             ids = [r[0] for r in oconn.execute("SELECT nft_id FROM onchain_nfts")]
+            if fixed_ledger_min != -1:
+                # The account sweeps above already archived this window, so any
+                # token minted while the listener (and thus the index) was down
+                # is recoverable from the raw rows.
+                extra = sorted(
+                    nft_ids_in_ledger_range(
+                        conn,
+                        nft_issuer=issuer,
+                        ledger_min=fixed_ledger_min,
+                        ledger_max=fixed_ledger_max,
+                    )
+                    - set(ids)
+                )
+                if extra:
+                    logging.info(
+                        "nft_history: %d token(s) absent from the index were discovered "
+                        "in the certified window and will be paged too",
+                        len(extra),
+                    )
+                    ids += extra
             total = 0
             for i, nft_id in enumerate(ids, 1):
-                total += await backfill_nft_history(conn, request_fn, nft_id, network=args.network)
+                total += await backfill_nft_history(
+                    conn,
+                    request_fn,
+                    nft_id,
+                    network=args.network,
+                    ledger_min=fixed_ledger_min,
+                    ledger_max=fixed_ledger_max,
+                )
                 if i % 100 == 0:
                     logging.info(f"nft_history: {i}/{len(ids)} tokens, +{total} txs")
             logging.info(f"nft_history: done, +{total}")
@@ -516,6 +843,40 @@ async def _amain() -> int:
             coverage=json.dumps(coverage, sort_keys=True, separators=(",", ":")),
         )
         logging.info("recorded externally audited SourceTag baseline provenance")
+    elif args.catch_up_from_gap:
+        assert args.baseline_provenance is not None
+        assert endpoint_snapshot is not None
+        accounts = baseline_account_coverage(
+            wanted,
+            distributor=args.distributor,
+            nft_issuer=issuer,
+            brix_issuer=brix_issuer,
+        )
+        cleared = record_catchup_baseline(
+            conn,
+            network=args.network,
+            genesis_hash=endpoint_snapshot.genesis_hash,
+            tip=fixed_ledger_max,
+            paged_min=fixed_ledger_min,
+            provenance=args.baseline_provenance,
+            sources=wanted,
+            accounts=accounts,
+            source_tag=config.SOURCE_TAG,
+        )
+        if not cleared:
+            logging.error(
+                "bounded catch-up recorded a baseline through ledger %d but the "
+                "continuity gap did NOT clear (its upper extent lies above the tip "
+                "this run certified). The archive stays fail-closed; re-run "
+                "--catch-up-from-gap against a fresher tip, or run full certification.",
+                fixed_ledger_max,
+            )
+            return 1
+        logging.info(
+            "bounded catch-up cleared the continuity gap; certified baseline restored "
+            "through ledger %d",
+            fixed_ledger_max,
+        )
     return 0
 
 
