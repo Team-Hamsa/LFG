@@ -26,14 +26,18 @@ Or under pm2 as `lfg-funnel-health` (see README / ecosystem config).
 from __future__ import annotations
 
 import logging
+import math
 import os
 import signal
 import ssl
 import time
 import urllib.error
+import urllib.parse
 import urllib.request
 from dataclasses import dataclass
 from logging.handlers import RotatingFileHandler
+
+from dotenv import load_dotenv
 
 DEFAULT_URL = "https://letseffinggo.tail82fcc6.ts.net/lfg/api/health"
 
@@ -57,6 +61,23 @@ def classify_status(status: int) -> tuple[bool, str]:
     return False, "http_other"
 
 
+class _HTTPSOnlyRedirectHandler(urllib.request.HTTPRedirectHandler):
+    """Refuse a redirect that leaves HTTPS.
+
+    The probe exists to prove the public TLS path works; silently following a
+    plaintext redirect would report the funnel healthy without ever completing
+    the handshake this monitor was built to watch.
+    """
+
+    def redirect_request(self, req, fp, code, msg, headers, newurl):  # type: ignore[no-untyped-def]
+        if urllib.parse.urlsplit(newurl).scheme != "https":
+            raise urllib.error.HTTPError(newurl, code, "non-HTTPS redirect refused", headers, fp)
+        return super().redirect_request(req, fp, code, msg, headers, newurl)
+
+
+_OPENER = urllib.request.build_opener(_HTTPSOnlyRedirectHandler)
+
+
 def probe(url: str, timeout: float) -> ProbeResult:
     """Do one full HTTPS request and classify the outcome.
 
@@ -70,7 +91,7 @@ def probe(url: str, timeout: float) -> ProbeResult:
 
     req = urllib.request.Request(url, method="GET", headers={"User-Agent": "lfg-funnel-health/1"})
     try:
-        with urllib.request.urlopen(req, timeout=timeout) as resp:  # noqa: S310 (fixed https URL)
+        with _OPENER.open(req, timeout=timeout) as resp:  # noqa: S310 (https-pinned URL)
             ok, category = classify_status(resp.status)
             return ProbeResult(ok, category, f"HTTP {resp.status}", elapsed())
     except urllib.error.HTTPError as e:
@@ -115,7 +136,12 @@ class Monitor:
             return None
 
         self.consecutive_failures += 1
-        if not self.down and self.consecutive_failures >= self.fail_threshold:
+        if self.down:
+            # Keep counting while down so RECOVERED reports the true outage
+            # length, not just the probes it took to trip the threshold.
+            self._down_streak = self.consecutive_failures
+            return None
+        if self.consecutive_failures >= self.fail_threshold:
             self.down = True
             self._down_streak = self.consecutive_failures
             return (
@@ -140,11 +166,35 @@ def _build_logger(log_path: str) -> logging.Logger:
     return logger
 
 
+def _positive(name: str, raw: str, cast) -> float:  # type: ignore[no-untyped-def]
+    try:
+        value = cast(raw)
+    except ValueError as exc:
+        raise ValueError(f"{name} must be a number, got {raw!r}") from exc
+    if not math.isfinite(value) or value <= 0:
+        raise ValueError(f"{name} must be a positive finite number, got {raw!r}")
+    return value
+
+
 def main() -> None:
+    # The pm2 entry supplies no env block, so the operator's `.env` is the only
+    # place FUNNEL_HEALTH_* overrides live — without this they were dead knobs.
+    load_dotenv()
+
     url = os.environ.get("FUNNEL_HEALTH_URL", DEFAULT_URL)
-    interval = float(os.environ.get("FUNNEL_HEALTH_INTERVAL", "60"))
-    timeout = float(os.environ.get("FUNNEL_HEALTH_TIMEOUT", "15"))
-    threshold = int(os.environ.get("FUNNEL_HEALTH_FAIL_THRESHOLD", "2"))
+    if urllib.parse.urlsplit(url).scheme != "https":
+        raise ValueError(f"FUNNEL_HEALTH_URL must be an https:// URL, got {url!r}")
+    interval = _positive(
+        "FUNNEL_HEALTH_INTERVAL", os.environ.get("FUNNEL_HEALTH_INTERVAL", "60"), float
+    )
+    timeout = _positive(
+        "FUNNEL_HEALTH_TIMEOUT", os.environ.get("FUNNEL_HEALTH_TIMEOUT", "15"), float
+    )
+    threshold = int(
+        _positive(
+            "FUNNEL_HEALTH_FAIL_THRESHOLD", os.environ.get("FUNNEL_HEALTH_FAIL_THRESHOLD", "2"), int
+        )
+    )
     log_path = os.environ.get("FUNNEL_HEALTH_LOG", "reports/funnel_healthcheck.log")
 
     logger = _build_logger(log_path)

@@ -5,6 +5,11 @@ here — no network. The probe itself is a thin urllib wrapper tested in the wil
 """
 
 import importlib
+import ssl
+import urllib.error
+import urllib.request
+
+import pytest
 
 hc = importlib.import_module("scripts.funnel_healthcheck")
 
@@ -45,6 +50,15 @@ def test_recovery_emits_event_and_resets():
     assert m.consecutive_failures == 0
 
 
+def test_recovery_reports_every_failure_including_ones_after_down():
+    """A 5-probe outage must not be summarised as the 2 probes that tripped it."""
+    m = hc.Monitor(fail_threshold=2)
+    for _ in range(5):
+        m.record(_fail())
+    event = m.record(ok)
+    assert "after 5 failed probe(s)" in event
+
+
 def test_success_before_threshold_clears_streak():
     m = hc.Monitor(fail_threshold=2)
     assert m.record(_fail()) is None
@@ -65,3 +79,47 @@ def test_classify_status_ok_and_server_error():
     down, cat = hc.classify_status(404)
     assert down is False
     assert cat == "http_4xx"
+
+
+@pytest.mark.parametrize(
+    "exc,expected",
+    [
+        (ssl.SSLError("handshake"), "tls"),
+        (urllib.error.URLError(ssl.SSLError("handshake")), "tls"),
+        (urllib.error.URLError("timed out"), "timeout"),
+        (urllib.error.URLError(ConnectionRefusedError("refused")), "conn"),
+        (TimeoutError("slow"), "timeout"),
+        (urllib.error.HTTPError("https://x/", 503, "boom", {}, None), "http_5xx"),
+    ],
+)
+def test_probe_classifies_transport_failures(monkeypatch, exc, expected):
+    """Every failure branch of probe() maps to its category without a network."""
+
+    def boom(*_a, **_kw):
+        raise exc
+
+    monkeypatch.setattr(hc._OPENER, "open", boom)
+    result = hc.probe("https://example.invalid/health", timeout=1.0)
+    assert result.ok is False
+    assert result.category == expected
+
+
+def test_non_https_redirect_is_refused():
+    handler = hc._HTTPSOnlyRedirectHandler()
+    req = urllib.request.Request("https://example.invalid/health")
+    with pytest.raises(urllib.error.HTTPError):
+        handler.redirect_request(req, None, 302, "Found", {}, "http://example.invalid/health")
+
+
+def test_main_rejects_invalid_interval(monkeypatch):
+    monkeypatch.setattr(hc, "load_dotenv", lambda *a, **k: None)
+    monkeypatch.setenv("FUNNEL_HEALTH_INTERVAL", "0")
+    with pytest.raises(ValueError, match="FUNNEL_HEALTH_INTERVAL"):
+        hc.main()
+
+
+def test_main_rejects_plaintext_url(monkeypatch):
+    monkeypatch.setattr(hc, "load_dotenv", lambda *a, **k: None)
+    monkeypatch.setenv("FUNNEL_HEALTH_URL", "http://example.invalid/health")
+    with pytest.raises(ValueError, match="https://"):
+        hc.main()
