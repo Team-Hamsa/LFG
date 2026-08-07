@@ -686,6 +686,10 @@ async def run_swap_session(session: SwapSession) -> None:
         if missing:
             session.state = FAILED
             session.error = f"Missing trait layer files: {', '.join(missing)}"
+            logging.warning(
+                f"Swap session {session.id} failed layer pre-check "
+                f"(#{nft1['number']} × #{nft2['number']}): missing {', '.join(missing)}"
+            )
             return
 
         # Detect the fee path up front: it prices the modify fee AND the
