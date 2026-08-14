@@ -528,7 +528,54 @@ def test_mine_returns_four_groups(onchain_env, monkeypatch):
     unlisted_trait_ids = {t["nft_id"] for t in body["unlisted_trait_tokens"]}
     assert unlisted_trait_ids == {TRAIT2_UNLISTED}
 
-    assert body["closet_assets"] == [{"slot": "Mouth", "value": "Grin", "count": 2}]
+    assert body["closet_assets"] == [
+        {
+            "slot": "Mouth",
+            "value": "Grin",
+            "count": 2,
+            "image_url": body["closet_assets"][0]["image_url"],
+        }
+    ]
+
+
+def test_mine_trait_groups_carry_a_resolvable_image_url(onchain_env, monkeypatch):
+    # Regression: /api/market/mine returned trait tokens and Closet assets with
+    # slot/value only, so the client built the /api/layer URL from the ACTIVE
+    # CHARACTER's body (mineTraitImgSrc). Trait art rarely lives under the
+    # active character's body dir — most values live in shared/ or another
+    # body — so those URLs 404'd and the Mine tab rendered blank tiles, while
+    # the listings group (which gets a server-built image_url via
+    # _trait_image_url) rendered fine. The server picks a disk-verified
+    # display body; the client must not have to guess one.
+    monkeypatch.setattr(server.config, "WEBAPP_DEV_MODE", True)
+    monkeypatch.setattr(server, "_use_market_mock", lambda: False)
+    from webapp import mock_economy
+
+    monkeypatch.setattr(mock_economy, "DEV_OWNER", SELLER)
+
+    conn = _reopen(onchain_env)
+    upsert_trait_token(conn, TRAIT2_UNLISTED, SELLER, "Eyes", "Hypno")
+    set_closet_contents(conn, SELLER, [("Mouth", "Grin", 2), ("Back", "None", 3)], [])
+    conn.commit()
+    conn.close()
+
+    req = _mocked_request("GET", "/api/market/mine")
+    resp = _run(server.handle_market_mine(req))
+    assert resp.status == 200
+    body = _run(_read_json(resp))
+
+    token = body["unlisted_trait_tokens"][0]
+    assert token["image_url"] == server._trait_image_url(
+        server.trait_config.get_config(), "Eyes", "Hypno"
+    )
+
+    by_slot = {a["slot"]: a for a in body["closet_assets"]}
+    assert by_slot["Mouth"]["image_url"] == server._trait_image_url(
+        server.trait_config.get_config(), "Mouth", "Grin"
+    )
+    # "None" is the absence of a trait — there is no art to point at, and a
+    # URL built for it would 404 exactly like the body-pinned ones did.
+    assert by_slot["Back"]["image_url"] is None
 
 
 def test_mine_character_listing_carries_nft_number(onchain_env, monkeypatch):
@@ -751,7 +798,10 @@ def test_split_network_mine_all_four_groups(split_network_env, monkeypatch):
     assert {r["nft_id"] for r in body["listings"]} == {CHAR1, TRAIT1}
     assert {c["nft_id"] for c in body["unlisted_characters"]} == {CHAR3_UNLISTED}
     assert {t["nft_id"] for t in body["unlisted_trait_tokens"]} == {TRAIT2_UNLISTED}
-    assert body["closet_assets"] == [{"slot": "Mouth", "value": "Grin", "count": 2}]
+    assert [{k: v for k, v in a.items() if k != "image_url"} for a in body["closet_assets"]] == [
+        {"slot": "Mouth", "value": "Grin", "count": 2}
+    ]
+    assert body["closet_assets"][0]["image_url"]
 
 
 def test_split_network_history_slot_value_reads_economy_db(split_network_env):
