@@ -183,8 +183,13 @@ def main() -> None:
     load_dotenv()
 
     url = os.environ.get("FUNNEL_HEALTH_URL", DEFAULT_URL)
-    if urllib.parse.urlsplit(url).scheme != "https":
-        raise ValueError(f"FUNNEL_HEALTH_URL must be an https:// URL, got {url!r}")
+    try:
+        parsed_url = urllib.parse.urlsplit(url)
+        _ = parsed_url.port  # raises ValueError on a non-numeric/out-of-range port
+    except ValueError as exc:
+        raise ValueError(f"FUNNEL_HEALTH_URL is invalid: {url!r}") from exc
+    if parsed_url.scheme != "https" or not parsed_url.hostname:
+        raise ValueError(f"FUNNEL_HEALTH_URL must be an https:// URL with a host, got {url!r}")
     interval = _positive(
         "FUNNEL_HEALTH_INTERVAL", os.environ.get("FUNNEL_HEALTH_INTERVAL", "60"), float
     )

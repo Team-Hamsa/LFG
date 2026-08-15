@@ -66,7 +66,13 @@ STACKS: dict[str, StackConfig] = {
         drain_max_wait=900,
         drain_poll=10,
         refuse_on_drain_failure=True,
-        restart_processes=("lfg-bot", "lfg-activity", "lfg-telegram", "lfg-index-mainnet"),
+        restart_processes=(
+            "lfg-bot",
+            "lfg-activity",
+            "lfg-telegram",
+            "lfg-index-mainnet",
+            "lfg-funnel-health",
+        ),
         pip=f"{HOME}/LFG/.venv/bin/pip",
     ),
 }
