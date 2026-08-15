@@ -159,11 +159,16 @@ def test_layer_without_thumb_param_serves_full(tmp_path, monkeypatch):
     assert str(resp._path).endswith("male/Body/Straight Diamond.webm")
 
 
-def test_trait_image_url_carries_thumb_flag():
-    # every server-built trait preview URL must opt into the thumb tier
+def test_trait_image_url_carries_thumb_flag(tmp_path, monkeypatch):
+    # every server-built trait preview URL must opt into the thumb tier.
+    # _trait_image_url is disk-verified with a local store (None on a miss),
+    # so give it a store that actually holds the art.
     from lfg_core import trait_config
 
+    base = str(tmp_path)
+    _touch(os.path.join(base, "male/Body/Straight Diamond.webm"))
+    monkeypatch.setattr(layer_store, "_store", layer_store.LocalLayerStore(base_dir=base))
     cfg = trait_config.get_config()
     url = service_app._trait_image_url(cfg, "Body", "Straight Diamond")
-    assert url.startswith("/api/layer?")
+    assert url is not None and url.startswith("/api/layer?")
     assert "thumb=1" in url

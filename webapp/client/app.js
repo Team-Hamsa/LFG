@@ -3254,7 +3254,13 @@ function renderChipList(containerEl, emptyEl, entries, actionLabel, onAction) {
 // the active Dressing Room character's body (if the economy state happens to
 // be loaded already) exactly like renderTraitStrip() does; falls back to no
 // image rather than fetching economy state just for a thumbnail.
-function mineTraitImgSrc(slot, value) {
+// The server picks a disk-verified display body for each (slot, value) and
+// sends it as image_url — trait art usually is NOT under the active
+// character's body (it lives in shared/ or another body), so guessing the body
+// client-side produced 404s for most tiles. Fall back to the old body-pinned
+// guess only for a row from an older server that sends no image_url.
+function mineTraitImgSrc(slot, value, imageUrl) {
+  if (imageUrl) return traitLayerSrc(imageUrl);
   if (!economyState) return null;
   const char = activeChar();
   return char && layerComplete(char.body, value) ? layerSrc(char.body, slot, value) : null;
@@ -3282,14 +3288,14 @@ function renderMineGroups(data) {
   renderChipList(el('mine-characters'), el('mine-characters-empty'), charEntries, 'List', openListForm);
 
   const traitEntries = data.unlisted_trait_tokens.map((t) => ({
-    imgSrc: mineTraitImgSrc(t.slot, t.value),
+    imgSrc: mineTraitImgSrc(t.slot, t.value, t.image_url),
     label: `${t.slot}: ${t.value}`,
     payload: { nftId: t.nft_id, slot: t.slot, value: t.value, label: `${t.slot}: ${t.value}`, wizard: false },
   }));
   renderChipList(el('mine-traits'), el('mine-traits-empty'), traitEntries, 'List', openListForm);
 
   const closetEntries = data.closet_assets.map((a) => ({
-    imgSrc: mineTraitImgSrc(a.slot, a.value),
+    imgSrc: mineTraitImgSrc(a.slot, a.value, a.image_url),
     label: `${a.slot}: ${a.value} ×${a.count}`,
     payload: { slot: a.slot, value: a.value, label: `${a.slot}: ${a.value}`, wizard: true },
   }));

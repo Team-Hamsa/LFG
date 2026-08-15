@@ -19,7 +19,7 @@ from __future__ import annotations
 
 from typing import Any
 
-from lfg_core import brokers, market_ops, market_store
+from lfg_core import brokers, market_ops, market_store, trait_config, trait_images
 from webapp import mock_economy
 
 DEV_OWNER = mock_economy.DEV_OWNER
@@ -51,6 +51,19 @@ def _trait_image_url(slot: str, value: str) -> str:
     # _trait_image_url uses; body is cosmetic in the mock (dev mode's
     # /api/layer path serves whatever local layer tree exists, if any).
     return f"/api/layer?body=male&trait={slot}&value={value}"
+
+
+def _mine_trait_image_url(slot: str | None, value: str | None) -> str | None:
+    # Mirrors the real handler's _img: "None" is the absence of a trait —
+    # no art exists for it, so no URL (the client renders a blank tile
+    # instead of requesting a guaranteed 404). Non-None values resolve
+    # through the SAME shared resolver the service uses
+    # (lfg_core.trait_images: disk-verified body pick with a local store) —
+    # the hardcoded body=male of _trait_image_url above 404s for any value
+    # whose art lives in shared/ or another body dir.
+    if not slot or not value or value == "None":
+        return None
+    return trait_images.trait_image_url(trait_config.get_config(), slot, value)
 
 
 class MockMarket:
@@ -270,13 +283,23 @@ class MockMarket:
             for c in econ.characters
             if c["nft_id"] not in listed_ids
         ]
+        # Same shape as the real /api/market/mine (image_url on the two trait
+        # groups) so the dev-mode client exercises the server-picked-URL path
+        # instead of falling back to the active-character body guess.
         unlisted_trait_tokens = [
-            {"nft_id": t["nft_id"], "slot": t["slot"], "value": t["value"]}
+            {
+                "nft_id": t["nft_id"],
+                "slot": t["slot"],
+                "value": t["value"],
+                "image_url": _mine_trait_image_url(t["slot"], t["value"]),
+            }
             for t in econ._trait_tokens.get(owner, [])
             if t["nft_id"] not in listed_ids
         ]
         closet_assets = [
-            {"slot": s, "value": v, "count": c} for (s, v), c in econ.assets.items() if c > 0
+            {"slot": s, "value": v, "count": c, "image_url": _mine_trait_image_url(s, v)}
+            for (s, v), c in econ.assets.items()
+            if c > 0
         ]
         return {
             "listings": my_listings,

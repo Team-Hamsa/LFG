@@ -575,7 +575,9 @@ def test_extracted_unlisted_trait_token_appears_under_mine(onchain_env, market_w
     resp = _run(server.handle_market_mine(req))
     assert resp.status == 200
     body = _run(_read_json(resp))
-    assert {"nft_id": TRAIT1, "slot": "Hat", "value": "Wizard Hat"} in body["unlisted_trait_tokens"]
+    assert {"nft_id": TRAIT1, "slot": "Hat", "value": "Wizard Hat"} in [
+        {k: v for k, v in t.items() if k != "image_url"} for t in body["unlisted_trait_tokens"]
+    ]
     assert body["listings"] == []
 
 

@@ -31,7 +31,6 @@ from dataclasses import dataclass, field
 from decimal import Decimal
 from html import escape
 from typing import Any, TypeVar, cast
-from urllib.parse import quote as urlquote
 from urllib.parse import urlparse
 
 import aiohttp
@@ -71,6 +70,7 @@ from lfg_core import (
     swap_flow,
     swap_meta,
     trait_config,
+    trait_images,
     xrpl_ops,
     xumm_ops,
 )
@@ -1147,31 +1147,11 @@ def _market_network(kind: str) -> str:
     return config.ECONOMY_NETWORK if kind == "trait" else config.XRPL_NETWORK
 
 
-def _trait_image_url(cfg: trait_config.TraitConfig, slot: str, value: str) -> str:
-    """A same-origin /api/layer URL for a trait value, picking a representative
-    body. With a local layer store the pick is disk-verified
-    (LocalLayerStore.find_display_body: affinity-allowed bodies, then
-    shared/, then any body with the art — display-only, so an
-    affinity-illegal body's art is fine). With a CDN store (no cheap
-    existence probe) it falls back to the affinity-only guess: first allowed
-    body, or shared/ for an unrestricted value."""
-    allowed = cfg.allowed_bodies(slot, value)
-    preferred = sorted(allowed) if allowed else []
-    body: str | None = None
-    store = layer_store.get_layer_store()
-    if isinstance(store, layer_store.LocalLayerStore):
-        # Affinity alone can't pick a servable dir: an unrestricted value
-        # usually lives in per-body dirs (not shared/), and a restricted
-        # value's first allowed body may lack the file. Probe the disk so
-        # the URL points at art that actually resolves.
-        body = store.find_display_body(slot, value, preferred)
-    if body is None:
-        body = preferred[0] if preferred else layer_store.SHARED_DIR
-    return (
-        f"/api/layer?body={urlquote(body, safe='')}"
-        f"&trait={urlquote(slot, safe='')}&value={urlquote(value, safe='')}"
-        "&thumb=1"
-    )
+def _trait_image_url(cfg: trait_config.TraitConfig, slot: str, value: str) -> str | None:
+    """Delegates to the shared resolver in lfg_core.trait_images (also used by
+    webapp.mock_market, which cannot import it from here — this module imports
+    mock_market). Kept as a module-level name so tests can monkeypatch it."""
+    return trait_images.trait_image_url(cfg, slot, value)
 
 
 def _serialize_listing_row(
@@ -1474,14 +1454,26 @@ def _compute_mine_data(char_network: str, econ_network: str, wallet: str) -> dic
         trait_listing_rows = [dict(row) for row in cur.fetchall()]
         listed_trait_ids = {r["nft_id"] for r in trait_listing_rows}
 
+        # Trait art is keyed (slot, value) but SERVED per body dir, and a
+        # value's art usually is not under the body of whichever character the
+        # client happens to have selected — it lives in shared/ or another
+        # body entirely. So the display body must be picked here, disk-verified
+        # (_trait_image_url), exactly as the listing / pending-offer / shop rows
+        # already do; a client that guesses the body builds 404s.
+        cfg = trait_config.get_config()
+
+        def _img(slot: str, value: str) -> str | None:
+            # "None" is the absence of a trait, not a value with art.
+            return _trait_image_url(cfg, slot, value) if value and value != "None" else None
+
         unlisted_trait_tokens = [
-            {"nft_id": nid, "slot": s, "value": v}
+            {"nft_id": nid, "slot": s, "value": v, "image_url": _img(s, v)}
             for nid, o, s, v in economy_store.read_trait_tokens(conn)
             if o == wallet and nid not in listed_trait_ids
         ]
 
         closet_assets = [
-            {"slot": s, "value": v, "count": c}
+            {"slot": s, "value": v, "count": c, "image_url": _img(s, v)}
             for (o, s, v, c) in economy_store.read_closet_assets(conn)
             if o == wallet and c > 0
         ]
