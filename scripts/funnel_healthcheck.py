@@ -34,6 +34,7 @@ import time
 import urllib.error
 import urllib.parse
 import urllib.request
+from collections.abc import Callable
 from dataclasses import dataclass
 from logging.handlers import RotatingFileHandler
 
@@ -166,7 +167,7 @@ def _build_logger(log_path: str) -> logging.Logger:
     return logger
 
 
-def _positive(name: str, raw: str, cast) -> float:  # type: ignore[no-untyped-def]
+def _positive(name: str, raw: str, cast: Callable[[str], float]) -> float:
     try:
         value = cast(raw)
     except ValueError as exc:
@@ -202,7 +203,7 @@ def main() -> None:
 
     stop = {"now": False}
 
-    def _handle(signum, _frame):
+    def _handle(signum: int, _frame: object) -> None:
         stop["now"] = True
         logger.info("received signal %s, shutting down", signum)
 
