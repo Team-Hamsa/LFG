@@ -69,6 +69,11 @@ def build_svg(data: dict[str, Any]) -> str:
     total = int(data["total_tagged_txs"])
     tag = data["source_tag"]
     by_type = data.get("by_type") or {}
+    if not isinstance(by_type, dict):
+        # A list here is valid JSON but not a valid payload — raise ValueError
+        # so main() reports "malformed metrics/sourcetag.json" + exit 2 instead
+        # of an uncaught AttributeError traceback on .items().
+        raise ValueError(f"by_type must be a JSON object, got {type(by_type).__name__}")
     series = [int(d["count"]) for d in (data.get("daily") or [])]
 
     # Geometry: title block ends ~y=132, stat tiles 72..132, breakdown rows

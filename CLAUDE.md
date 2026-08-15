@@ -625,7 +625,11 @@ chain on every request.
   `scripts/render_sourcetag_svg.py`. Registered as pm2 process
   `lfg-sourcetag` (cron 00:20, `--no-autorestart` — pm2 shows it "stopped"
   between runs; that is normal). `unique_wallets` excludes the operator's
-  wallets and `config.SIGNING_ACCOUNT`; `total_tagged_txs` and `by_type`
+  wallets, `config.SIGNING_ACCOUNT`, and the script's durable
+  `HISTORICAL_SIGNING_ADDRESSES` set — on a signer rotation the outgoing
+  address MUST be added to that set permanently (never removed), or archived
+  backend activity reclassifies as an external wallet and permanently
+  inflates `unique_wallets`; `total_tagged_txs` and `by_type`
   deliberately do not (backend-signed mints are still the project's tagged
   volume). Note `xrpl_txs.close_time` is stored as UNIX seconds, not the
   ripple epoch — no `946684800` correction applies here. The `--push` commit

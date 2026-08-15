@@ -294,6 +294,32 @@ def test_push_with_no_explicit_out_never_writes_default_path(tmp_path, monkeypat
     assert not stm.DEFAULT_OUT.exists()
 
 
+def test_push_without_out_still_prints_payload_when_json_flag_set(tmp_path, monkeypatch, capsys):
+    """--json --push with no --out must still print the payload (the --json
+    contract holds even when the local write is skipped)."""
+    path = _db(tmp_path, [("h1", DAY0, "Payment", USER_A, TAG)])
+    fake_cwd = tmp_path / "checkout"
+    fake_cwd.mkdir()
+    monkeypatch.chdir(fake_cwd)
+
+    def runner(cmd, **kw):
+        import subprocess as sp
+
+        if "PUT" in cmd:
+            return sp.CompletedProcess(cmd, 0, stdout="{}", stderr="")
+        return sp.CompletedProcess(cmd, 1, stdout="", stderr="Not Found (HTTP 404)")
+
+    monkeypatch.setattr(stm.subprocess, "run", runner)
+    rc = stm.main(["--network", "testnet", "--db", path, "--push", "--json"])
+    assert rc == 0
+    out = capsys.readouterr().out
+    # The push-status line ("pushed to main") follows the JSON on stdout, same
+    # as the local-write --json path — parse the leading JSON document only.
+    payload_out, _end = json.JSONDecoder().raw_decode(out)
+    assert payload_out["total_tagged_txs"] == 1
+    assert not (fake_cwd / "metrics" / "sourcetag.json").exists()
+
+
 def test_push_with_explicit_out_still_writes_locally(tmp_path, monkeypatch):
     path = _db(tmp_path, [("h1", DAY0, "Payment", USER_A, TAG)])
     dest = tmp_path / "explicit" / "sourcetag.json"

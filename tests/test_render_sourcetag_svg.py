@@ -5,6 +5,8 @@ import os
 import sys
 import xml.etree.ElementTree as ET
 
+import pytest
+
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 brand = importlib.import_module("scripts._brand")
@@ -106,6 +108,20 @@ def test_main_writes_only_when_changed(tmp_path, monkeypatch):
     first = dest.stat().st_mtime_ns
     assert rs.main() == 0
     assert dest.stat().st_mtime_ns == first  # idempotent, no rewrite
+
+
+def test_list_valued_by_type_raises_value_error_not_attribute_error():
+    with pytest.raises(ValueError):
+        rs.build_svg(dict(DATA, by_type=["Payment"]))
+
+
+def test_main_exits_2_on_list_valued_by_type(tmp_path, monkeypatch, capsys):
+    src = tmp_path / "sourcetag.json"
+    src.write_text(json.dumps(dict(DATA, by_type=["Payment"])))
+    monkeypatch.setattr(rs, "JSON_PATH", src)
+    monkeypatch.setattr(rs, "SVG_PATH", tmp_path / "out.svg")
+    assert rs.main() == 2
+    assert "malformed" in capsys.readouterr().err
 
 
 def test_main_fails_loudly_when_json_missing(tmp_path, monkeypatch):

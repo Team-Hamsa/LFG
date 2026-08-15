@@ -386,11 +386,14 @@ def main(argv: list[str] | None = None) -> int:
     out = Path(args.out) if explicit_out else DEFAULT_OUT
 
     if skip_local_write:
-        print(
-            f"{payload['total_tagged_txs']} tagged txs · "
-            f"{payload['unique_wallets']} unique wallets → (no local write; --push "
-            "with no explicit --out never touches a checkout)"
-        )
+        if args.json:
+            print(_serialize(payload), end="")
+        else:
+            print(
+                f"{payload['total_tagged_txs']} tagged txs · "
+                f"{payload['unique_wallets']} unique wallets → (no local write; --push "
+                "with no explicit --out never touches a checkout)"
+            )
     else:
         out.parent.mkdir(parents=True, exist_ok=True)
         out.write_text(_serialize(payload))
