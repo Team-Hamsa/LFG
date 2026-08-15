@@ -26,11 +26,19 @@ jobs:
         run: python3 scripts/hackathon_loc.py
 
       - name: Update repo-vitals dashboard
-        run: python3 scripts/readme_dashboard.py
+        run: python3 -m scripts.readme_dashboard
+
+      - name: Update SourceTag badge
+        # metrics/sourcetag.json is pushed nightly by a separate pm2 job, not
+        # this workflow — if it's missing or malformed, that's a real problem
+        # to surface, but it must not fail this job and block the unrelated
+        # README LoC / dashboard commits below.
+        continue-on-error: true
+        run: python3 -m scripts.render_sourcetag_svg
 
       - name: Commit if changed
         run: |
-          git add README.md assets/hackathon_loc.svg assets/dashboard.svg
+          git add README.md assets/hackathon_loc.svg assets/dashboard.svg assets/sourcetag.svg
           if ! git diff --quiet --cached; then
             git config user.name "github-actions[bot]"
             git config user.email "github-actions[bot]@users.noreply.github.com"
