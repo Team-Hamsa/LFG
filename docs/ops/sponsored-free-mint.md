@@ -467,7 +467,12 @@ missing baseline, a new genesis, or `genesis_mismatch`.
      --history-db /home/hamsa/LFG/history_mainnet.db
    ```
 
-   Only after every check is green, use `/admin` **Start sponsored mint**,
+   If the promotion cleared the heartbeat, the audit's archive/listener
+   freshness checks may fail before Step 0b has run — that is the expected
+   post-promotion state, and blocking Start on it would prevent the very
+   re-verify that repairs it. Confirm the campaign is inactive and every
+   *other* pre-start safety check passes, then use `/admin` **Start
+   sponsored mint**,
    then complete the mandatory post-Start readiness check above (poll
    `/api/admin/sponsored-mint/status` until `reverify.state == "ok"` and
    `eligibility_available` is `true`) before exercising anything — for one
