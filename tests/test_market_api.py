@@ -31,6 +31,7 @@ import pytest  # noqa: E402
 from aiohttp import web  # noqa: E402
 from aiohttp.test_utils import make_mocked_request  # noqa: E402
 
+from lfg_core import layer_store  # noqa: E402
 from lfg_core.economy_store import (  # noqa: E402
     _ECONOMY_SCHEMA,  # noqa: E402
     set_closet_contents,
@@ -131,6 +132,29 @@ def onchain_env(tmp_path, monkeypatch):
     yield onchain_path
     server._MARKET_CACHE.clear()
     server.market_sessions.clear()
+
+
+@pytest.fixture
+def layer_art(tmp_path, monkeypatch):
+    """A hermetic local layer tree + LocalLayerStore singleton, so tests that
+    assert on trait image URLs are disk-verified against known art rather than
+    whatever (if any) layer tree the test runner's cwd happens to hold —
+    _trait_image_url probes the disk and returns None on a miss."""
+    base = tmp_path / "layer_art"
+    for rel in ("shared/Hat/Wizard Hat.png", "shared/Eyes/Hypno.png", "male/Mouth/Grin.png"):
+        p = base / rel
+        p.parent.mkdir(parents=True, exist_ok=True)
+        p.write_bytes(b"\x89PNG\r\n\x1a\n")
+    monkeypatch.setattr(layer_store, "_store", layer_store.LocalLayerStore(base_dir=str(base)))
+    return str(base)
+
+
+def _assert_layer_url_resolves(url):
+    """The URL must not just be present — GET it through the real /api/layer
+    handler and require a 200, i.e. it points at art that actually exists."""
+    assert url and url.startswith("/api/layer?")
+    resp = _run(server.handle_layer(_mocked_request("GET", url)))
+    assert resp.status == 200
 
 
 def _reopen(onchain_path):
@@ -281,7 +305,7 @@ def test_browse_filters_price_and_trait(onchain_env):
     assert [r["nft_id"] for r in body3["rows"]] == [CHAR1]
 
 
-def test_browse_trait_kind_rows_have_slot_value_and_image(onchain_env):
+def test_browse_trait_kind_rows_have_slot_value_and_image(onchain_env, layer_art):
     conn = _reopen(onchain_env)
     upsert_trait_token(conn, TRAIT1, SELLER, "Hat", "Wizard Hat")
     _seed_listing(
@@ -305,8 +329,7 @@ def test_browse_trait_kind_rows_have_slot_value_and_image(onchain_env):
     assert row["kind"] == "trait"
     assert row["slot"] == "Hat"
     assert row["value"] == "Wizard Hat"
-    assert row["image"]  # some layer-proxy URL, non-empty
-    assert row["image"].startswith("/api/layer?")
+    _assert_layer_url_resolves(row["image"])  # a layer-proxy URL that serves art
 
 
 def test_browse_pagination_limit_offset(onchain_env):
@@ -483,7 +506,7 @@ def test_mine_requires_wallet_401(onchain_env, monkeypatch):
     assert resp.status == 401
 
 
-def test_mine_returns_four_groups(onchain_env, monkeypatch):
+def test_mine_returns_four_groups(onchain_env, layer_art, monkeypatch):
     monkeypatch.setattr(server.config, "WEBAPP_DEV_MODE", True)
     monkeypatch.setattr(server, "_use_market_mock", lambda: False)
     from webapp import mock_economy
@@ -528,17 +551,14 @@ def test_mine_returns_four_groups(onchain_env, monkeypatch):
     unlisted_trait_ids = {t["nft_id"] for t in body["unlisted_trait_tokens"]}
     assert unlisted_trait_ids == {TRAIT2_UNLISTED}
 
-    assert body["closet_assets"] == [
-        {
-            "slot": "Mouth",
-            "value": "Grin",
-            "count": 2,
-            "image_url": body["closet_assets"][0]["image_url"],
-        }
+    closet = body["closet_assets"]
+    assert [{k: v for k, v in a.items() if k != "image_url"} for a in closet] == [
+        {"slot": "Mouth", "value": "Grin", "count": 2}
     ]
+    _assert_layer_url_resolves(closet[0]["image_url"])
 
 
-def test_mine_trait_groups_carry_a_resolvable_image_url(onchain_env, monkeypatch):
+def test_mine_trait_groups_carry_a_resolvable_image_url(onchain_env, layer_art, monkeypatch):
     # Regression: /api/market/mine returned trait tokens and Closet assets with
     # slot/value only, so the client built the /api/layer URL from the ACTIVE
     # CHARACTER's body (mineTraitImgSrc). Trait art rarely lives under the
@@ -564,18 +584,39 @@ def test_mine_trait_groups_carry_a_resolvable_image_url(onchain_env, monkeypatch
     assert resp.status == 200
     body = _run(_read_json(resp))
 
+    # Don't compare against the production helper (a shared bug would pass) —
+    # GET each URL through the real /api/layer handler and require art back.
     token = body["unlisted_trait_tokens"][0]
-    assert token["image_url"] == server._trait_image_url(
-        server.trait_config.get_config(), "Eyes", "Hypno"
-    )
+    _assert_layer_url_resolves(token["image_url"])
 
     by_slot = {a["slot"]: a for a in body["closet_assets"]}
-    assert by_slot["Mouth"]["image_url"] == server._trait_image_url(
-        server.trait_config.get_config(), "Mouth", "Grin"
-    )
+    _assert_layer_url_resolves(by_slot["Mouth"]["image_url"])
     # "None" is the absence of a trait — there is no art to point at, and a
     # URL built for it would 404 exactly like the body-pinned ones did.
     assert by_slot["Back"]["image_url"] is None
+
+
+def test_trait_image_url_none_when_no_local_art(layer_art):
+    # With a local layer store the URL is disk-verified; a value with no art
+    # anywhere must yield None, not a fallback URL that is known to 404.
+    cfg = server.trait_config.get_config()
+    assert server._trait_image_url(cfg, "Hat", "Definitely Not On Disk") is None
+
+
+def test_mock_mine_trait_groups_carry_image_url():
+    # Greptile P1 on #357: the dev-mode market mock's Mine payload must carry
+    # the same image_url field the real handler attaches, or the client falls
+    # back to the active-character body guess it was just cured of.
+    from webapp import mock_market
+
+    body = mock_market.MockMarket().mine(mock_economy.DEV_OWNER)
+    for group in ("unlisted_trait_tokens", "closet_assets"):
+        for row in body[group]:
+            assert "image_url" in row
+            if row["value"] and row["value"] != "None":
+                assert row["image_url"].startswith("/api/layer?")
+            else:
+                assert row["image_url"] is None
 
 
 def test_mine_character_listing_carries_nft_number(onchain_env, monkeypatch):
@@ -783,7 +824,7 @@ def test_split_network_browse_per_kind_networks(split_network_env):
     assert len(server._MARKET_CACHE) <= 4
 
 
-def test_split_network_mine_all_four_groups(split_network_env, monkeypatch):
+def test_split_network_mine_all_four_groups(split_network_env, layer_art, monkeypatch):
     monkeypatch.setattr(server.config, "WEBAPP_DEV_MODE", True)
     monkeypatch.setattr(server, "_use_market_mock", lambda: False)
     from webapp import mock_economy
@@ -801,7 +842,8 @@ def test_split_network_mine_all_four_groups(split_network_env, monkeypatch):
     assert [{k: v for k, v in a.items() if k != "image_url"} for a in body["closet_assets"]] == [
         {"slot": "Mouth", "value": "Grin", "count": 2}
     ]
-    assert body["closet_assets"][0]["image_url"]
+    _assert_layer_url_resolves(body["closet_assets"][0]["image_url"])
+    _assert_layer_url_resolves(body["unlisted_trait_tokens"][0]["image_url"])
 
 
 def test_split_network_history_slot_value_reads_economy_db(split_network_env):

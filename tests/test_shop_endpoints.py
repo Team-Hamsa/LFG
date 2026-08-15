@@ -166,8 +166,18 @@ def test_catalog_empty_when_economy_disabled(onchain_env, monkeypatch):
     assert body == {"items": []}
 
 
-def test_catalog_shape(onchain_env):
+def test_catalog_shape(onchain_env, tmp_path, monkeypatch):
     onchain_path, app_db = onchain_env
+    # _trait_image_url is disk-verified with a local layer store (None on a
+    # miss), so back the catalog value with real art in a hermetic tree.
+    from lfg_core import layer_store
+
+    art = tmp_path / "layer_art" / "shared" / "Head" / "Wizard Hat.png"
+    art.parent.mkdir(parents=True, exist_ok=True)
+    art.write_bytes(b"\x89PNG")
+    monkeypatch.setattr(
+        layer_store, "_store", layer_store.LocalLayerStore(base_dir=str(tmp_path / "layer_art"))
+    )
     _seed_rarity(app_db, "testnet", "Head", "Wizard Hat", live=4)
     req = _mocked_request("GET", "/api/shop/catalog")
     resp = _run(server.handle_shop_catalog(req))

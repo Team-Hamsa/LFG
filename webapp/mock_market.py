@@ -53,6 +53,15 @@ def _trait_image_url(slot: str, value: str) -> str:
     return f"/api/layer?body=male&trait={slot}&value={value}"
 
 
+def _mine_trait_image_url(slot: str | None, value: str | None) -> str | None:
+    # Mirrors the real handler's _img: "None" is the absence of a trait —
+    # no art exists for it, so no URL (the client renders a blank tile
+    # instead of requesting a guaranteed 404).
+    if not slot or not value or value == "None":
+        return None
+    return _trait_image_url(slot, value)
+
+
 class MockMarket:
     def __init__(self) -> None:
         # Seed a few THIRD-PARTY listings so Browse has something to show
@@ -270,13 +279,23 @@ class MockMarket:
             for c in econ.characters
             if c["nft_id"] not in listed_ids
         ]
+        # Same shape as the real /api/market/mine (image_url on the two trait
+        # groups) so the dev-mode client exercises the server-picked-URL path
+        # instead of falling back to the active-character body guess.
         unlisted_trait_tokens = [
-            {"nft_id": t["nft_id"], "slot": t["slot"], "value": t["value"]}
+            {
+                "nft_id": t["nft_id"],
+                "slot": t["slot"],
+                "value": t["value"],
+                "image_url": _mine_trait_image_url(t["slot"], t["value"]),
+            }
             for t in econ._trait_tokens.get(owner, [])
             if t["nft_id"] not in listed_ids
         ]
         closet_assets = [
-            {"slot": s, "value": v, "count": c} for (s, v), c in econ.assets.items() if c > 0
+            {"slot": s, "value": v, "count": c, "image_url": _mine_trait_image_url(s, v)}
+            for (s, v), c in econ.assets.items()
+            if c > 0
         ]
         return {
             "listings": my_listings,
