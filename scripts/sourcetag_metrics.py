@@ -310,7 +310,7 @@ def _fetch_remote(runner: Any) -> tuple[str | None, str | None]:
     return base64.b64decode(body["content"]).decode(), body["sha"]
 
 
-def push_to_github(payload: dict[str, Any], runner: Any = subprocess.run) -> bool:
+def push_to_github(payload: dict[str, Any], runner: Any = None) -> bool:
     """Commit the snapshot to `main` via the Contents API. True if committed.
 
     Does not touch any working tree itself — it talks to GitHub over the
@@ -320,6 +320,12 @@ def push_to_github(payload: dict[str, Any], runner: Any = subprocess.run) -> boo
     commit bypasses the local pre-push gate, so the payload is
     schema-validated here BEFORE any network call.
     """
+    if runner is None:
+        # Resolved at call time (not def time) so tests that monkeypatch
+        # `subprocess.run` on this module actually intercept the gh calls —
+        # a def-time default would freeze the real subprocess.run and let the
+        # tests hit the live GitHub API.
+        runner = subprocess.run
     validate_payload(payload)
     existing, sha = _fetch_remote(runner)
     if is_unchanged(payload, existing):
