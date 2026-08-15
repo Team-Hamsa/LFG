@@ -30,6 +30,24 @@ def _restore_event_loop():
     asyncio.set_event_loop(asyncio.new_event_loop())
 
 
+@pytest.fixture(autouse=True)
+def _isolated_onchain_index(tmp_path, monkeypatch):
+    # The `nfts` sweep reads the on-chain index; never let a test touch the
+    # repo's real onchain_<net>.db.
+    monkeypatch.setenv("ONCHAIN_DB_PATH", str(tmp_path / "onchain_testnet.db"))
+
+
+# The full attested account set (#331): every certified source that carries an
+# address. `nfts` is attested in `sources` but has no account.
+COVERED_ACCOUNTS = {
+    "issuer": "rrrrrrrrrrrrrrrrrrrrrhoLvTp",
+    "brix": "rBRIX",
+    "token_issuer": "rTOKEN",
+    "signing": "rSIGN",
+    "distributor": "rDIST",
+}
+
+
 def _fake_request_fn(tip=500_000, genesis=GENESIS, account_pages=None, fail_account_tx=False):
     async def request_fn(req):
         if req["method"] == "ledger":
@@ -49,6 +67,14 @@ def _fake_request_fn(tip=500_000, genesis=GENESIS, account_pages=None, fail_acco
                 "validated": True,
                 "transactions": (account_pages or {}).get(req["account"], []),
             }
+        if req["method"] == "nft_history":
+            return {
+                "nft_id": req["nft_id"],
+                "ledger_index_min": req["ledger_index_min"],
+                "ledger_index_max": req["ledger_index_max"],
+                "validated": True,
+                "transactions": [],
+            }
         raise AssertionError(f"unexpected method {req['method']}")
 
     return request_fn
@@ -57,7 +83,8 @@ def _fake_request_fn(tip=500_000, genesis=GENESIS, account_pages=None, fail_acco
 def _certified_conn(tmp_path, *, provenance="hamsa manual audit 2026-08-01", coverage=True):
     conn = history_store.init_history_db(str(tmp_path / "history_testnet.db"))
     doc = archive_reverify.baseline_coverage_document(
-        {"token_issuer": "rTOKEN", "signing": "rSIGN"},
+        COVERED_ACCOUNTS,
+        sources=archive_reverify.REQUIRED_BASELINE_SOURCES,
         source_tag=2606160021,
         ledger_min=history_store.EARLIEST_AVAILABLE_LEDGER,
         ledger_max=400_000,
@@ -138,7 +165,8 @@ def test_reverify_certifies_to_tip_and_inherits_attestation(tmp_path):
     # coverage doc rebuilt against the new range, same accounts
     doc = json.loads(state.baseline_coverage or "{}")
     assert doc["ledger_max"] == 600_000
-    assert doc["accounts"] == {"signing": "rSIGN", "token_issuer": "rTOKEN"}
+    assert doc["accounts"] == dict(sorted(COVERED_ACCOUNTS.items()))
+    assert doc["sources"] == sorted(archive_reverify.REQUIRED_BASELINE_SOURCES)
     # certification clears the heartbeat by design
     assert state.heartbeat_at is None and state.validated_ledger_index is None
 
@@ -203,6 +231,7 @@ def test_reverify_refuses_when_coverage_lacks_required_source(tmp_path):
     conn = history_store.init_history_db(str(tmp_path / "history_testnet.db"))
     doc = archive_reverify.baseline_coverage_document(
         {"issuer": "rISS"},
+        sources={"issuer"},
         source_tag=2606160021,
         ledger_min=history_store.EARLIEST_AVAILABLE_LEDGER,
         ledger_max=400_000,

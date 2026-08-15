@@ -452,8 +452,10 @@ async def reverify_archive(
     """Deterministically re-certify a previously human-certified archive.
 
     Preconditions are read from archive_state: a prior baseline with a
-    non-empty provenance and a bound coverage document. The sweep re-pages
-    account_tx over exactly the accounts the original certification covered,
+    non-empty provenance and a bound (#331 v2) coverage document. The sweep
+    re-pages account_tx over exactly the accounts the original certification
+    covered — plus, when the attested source set includes `nfts`, per-token
+    nft_history over the on-chain index and any archive-mined tokens —
     from EARLIEST_AVAILABLE_LEDGER to the live validated tip, then certifies
     through record_archive_baseline (whose gap-clearing CASE logic is the
     single authority on whether a continuity gap is healed). Never raises on
@@ -467,17 +469,24 @@ async def reverify_archive(
         return ReverifyResult(False, "baseline_never_certified", None, None)
     if state.source_tag is not None and state.source_tag != config.SOURCE_TAG:
         return ReverifyResult(False, "source_tag_changed", None, None)
-    try:
-        coverage_doc = json.loads(state.baseline_coverage or "")
-        accounts = dict(coverage_doc["accounts"])
-    except (ValueError, TypeError, KeyError):
+    # The v2 helpers enforce the #331 coverage-document shape: a legacy or
+    # pre-#331 document has no verifiable `sources` attestation, and admission
+    # would reject it anyway — refuse to launder it into a fresh baseline.
+    sources_list = sponsored_mint.baseline_coverage_sources(state.baseline_coverage)
+    accounts_raw = sponsored_mint.baseline_coverage_accounts(state.baseline_coverage)
+    if sources_list is None or accounts_raw is None or not accounts_raw:
         return ReverifyResult(False, "coverage_unbound", None, None)
-    if not accounts:
-        return ReverifyResult(False, "coverage_unbound", None, None)
+    sources = set(sources_list)
+    accounts = dict(accounts_raw)
     try:
-        validate_baseline_source_coverage(set(accounts))
+        validate_baseline_source_coverage(sources, distributor=accounts.get("distributor"))
     except ValueError:
         return ReverifyResult(False, "missing_required_sources", None, None)
+    nft_issuer = accounts.get("issuer")
+    if "nfts" in sources and not nft_issuer:
+        # The nfts sweep needs the issuer address to discover archive-mined
+        # tokens; attesting `nfts` without it would be a false claim.
+        return ReverifyResult(False, "coverage_unbound", None, None)
 
     try:
         snapshot = await history_store.fetch_endpoint_snapshot(request_fn)
@@ -504,11 +513,47 @@ async def reverify_archive(
         # manual backfill. Nothing was certified, so fail-closed is preserved.
         return ReverifyResult(False, f"sweep_failed: {exc}", None, None)
 
+    if "nfts" in sources:
+        # The run attests cumulative `nfts` coverage, so it must sweep it:
+        # every token the on-chain index knows, plus any token the account
+        # sweeps above surfaced in the raw archive that the (listener-fed)
+        # index missed — exactly the manual certification's discovery rule.
+        assert nft_issuer is not None
+        try:
+            from lfg_core import nft_index
+
+            oconn = nft_index.init_db(nft_index.index_db_path(network))
+            try:
+                ids = [r[0] for r in oconn.execute("SELECT nft_id FROM onchain_nfts")]
+            finally:
+                oconn.close()
+            extra = sorted(
+                nft_ids_in_ledger_range(
+                    conn, nft_issuer=nft_issuer, ledger_min=ledger_min, ledger_max=ledger_max
+                )
+                - set(ids)
+            )
+            for nft_id in ids + extra:
+                await backfill_nft_history(
+                    conn,
+                    request_fn,
+                    nft_id,
+                    network=network,
+                    ledger_min=ledger_min,
+                    ledger_max=ledger_max,
+                )
+        except Exception as exc:
+            return ReverifyResult(False, f"sweep_failed: {exc}", None, None)
+
     timestamp = int(time.time()) if now is None else int(now)
     stamp = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(timestamp))
     provenance = f"auto-reverify at {stamp} (baseline: {inherit_attestation(state.baseline_provenance or '')})"
     doc = baseline_coverage_document(
-        accounts, source_tag=config.SOURCE_TAG, ledger_min=ledger_min, ledger_max=ledger_max
+        accounts,
+        sources=sources,
+        source_tag=config.SOURCE_TAG,
+        ledger_min=ledger_min,
+        ledger_max=ledger_max,
     )
     history_store.record_archive_baseline(
         conn,

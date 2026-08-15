@@ -103,9 +103,10 @@ per network (`lfg_service/app.py::kick_archive_reverify` →
 `lfg_core.archive_reverify.reverify_archive`) that:
 
 1. Re-sweeps `account_tx` for exactly the accounts Step 0a's coverage
-   document recorded, from ledger 32570 to the current validated tip —
-   nothing new to configure, it replays the same `--sources` Step 0a was
-   certified with.
+   document recorded — plus the `nfts` per-token `nft_history` sweep when
+   (as #331 requires) the attested source set includes it — from ledger
+   32570 to the current validated tip. Nothing new to configure: it replays
+   the same `--sources` Step 0a was certified with.
 2. Re-certifies through the same `record_archive_baseline` writer Step 0a
    uses, but inherits the original attestation instead of asking for a new
    one: the stored provenance becomes `auto-reverify at <ts> (baseline:
@@ -165,8 +166,8 @@ hold, not just the deterministic core:
 | `baseline_never_certified` | no Step 0a has ever run for this network | run Step 0a |
 | `source_tag_changed` | the configured `SOURCE_TAG` differs from the value the baseline was certified under | the configured SOURCE_TAG changed since the human baseline — a new Step 0a attestation is required |
 | `genesis_mismatch` | the live endpoint's chain identity doesn't match the certified baseline | wrong RPC endpoint, or the testnet chain was reset — re-run Step 0a |
-| `coverage_unbound` | the stored coverage document is missing or empty | re-run Step 0a |
-| `missing_required_sources` | the stored coverage doesn't cover `token_issuer` and `signing` | re-run Step 0a with the required `--sources` |
+| `coverage_unbound` | the stored coverage document is missing, empty, or in the legacy pre-#331 (version 1) format that carries no verifiable `sources` attestation | re-run Step 0a |
+| `missing_required_sources` | the stored coverage doesn't attest the full required source set (#331: `issuer`, `brix`, `token_issuer`, `signing`, `distributor`, `nfts`) or lacks a distributor address | re-run Step 0a with the full default `--sources` and `--distributor` |
 | `gap_not_covered` | the sweep completed but a continuity gap's bound lies past the reached tip | transient/ops — press Start again |
 | `sweep_failed: <exc>` | an `account_tx` page or endpoint-identity request failed mid-sweep | transient/ops (RPC hiccup) — press Start again |
 | `heartbeat_timeout: the listener has not restamped the archive heartbeat within 90s — on a quiet network wait for the next validated transaction and press Start again; if the listener has no archive identity, set SPONSORED_MINT_*_GENESIS_HASH and restart the listener (never during a live campaign)` | the sweep and re-certification succeeded, but the listener either hasn't seen a validated transaction yet or has no archive genesis identity at all, so it can never heartbeat | on a quiet network, wait and press Start again; if the listener truly has no archive identity, set `SPONSORED_MINT_*_GENESIS_HASH` (see the prerequisite below) and restart the listener — never during a live campaign |
@@ -208,7 +209,6 @@ Constraints that are still true and still matter:
   certifying, wait for the listener to process a transaction (check the row:
   `SELECT heartbeat_at FROM archive_state;`) and re-run the audit — do not
   re-certify, which would only clear the heartbeat again.
-<<<<<<< HEAD
 - Verify with the readiness audit immediately before starting a campaign; a
   green audit is the only proof the archive is currently usable.
 
