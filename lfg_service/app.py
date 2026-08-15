@@ -40,6 +40,7 @@ from xrpl.core.addresscodec import is_valid_classic_address
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from lfg_core import (
+    archive_reverify,
     brix_payment,
     brokers,
     bulk_mint_flow,
@@ -705,6 +706,112 @@ def _sponsored_mint_paths() -> tuple[str, str]:
     )
 
 
+# --- Sponsored archive auto-reverify (#340) -------------------------------
+# Campaign start kicks one background re-certification per network. The
+# fail-closed archive_is_usable gate stays the admission authority; this job
+# only repairs the archive so the gate can open. State is in-memory — a
+# restart forgets a finished job, which is harmless: the next start re-kicks.
+_reverify_state: dict[str, dict[str, Any]] = {}
+_reverify_tasks: dict[str, "asyncio.Task[None]"] = {}
+
+
+def _reverify_status(network: str) -> dict[str, Any]:
+    return dict(
+        _reverify_state.get(network) or {"state": "idle", "error": None, "finished_at": None}
+    )
+
+
+def _reverify_client() -> Any:
+    """Seam for tests: one websocket client on the configured clio endpoint."""
+    from xrpl.asyncio.clients import AsyncWebsocketClient
+
+    return AsyncWebsocketClient(config.CLIO_WS_URL)
+
+
+async def _reverify_in_thread(history_db: str, network: str) -> archive_reverify.ReverifyResult:
+    """Run the blocking sweep (sqlite + websocket) off the caller's event loop.
+
+    Opens its own connection and its own websocket client inside a fresh event
+    loop in a worker thread, so the DB writes and the paced clio requests never
+    block whatever loop `run_archive_reverify` is running on.
+    """
+    conn = history_store.init_history_db(history_db)
+    try:
+        async with _reverify_client() as client:
+            request_fn = archive_reverify.make_request_fn(client)
+            return await archive_reverify.reverify_archive(conn, request_fn, network=network)
+    finally:
+        conn.close()
+
+
+async def run_archive_reverify(network: str, actor: str) -> None:
+    campaign_db, history_db = _sponsored_mint_paths()
+    _reverify_state[network] = {"state": "running", "error": None, "finished_at": None}
+    error: str | None = None
+    try:
+        result = await asyncio.to_thread(asyncio.run, _reverify_in_thread(history_db, network))
+        if not result.ok:
+            error = result.reason or "reverify_failed"
+        elif not await archive_reverify.wait_for_archive_usable(history_db, network=network):
+            error = (
+                "heartbeat_timeout: the listener has not restamped the archive heartbeat "
+                "within 90s — on a quiet network wait for the next validated transaction and "
+                "press Start again; if the listener has no archive identity, set "
+                "SPONSORED_MINT_*_GENESIS_HASH and restart the listener (never during a live "
+                "campaign)"
+            )
+    except asyncio.CancelledError:
+        # The outer task can be cancelled (e.g. a new Start supersedes this
+        # one) while the worker thread is still mid-sweep. asyncio.to_thread
+        # cannot interrupt a running thread, so the thread's own event loop
+        # keeps running to completion in the background by design — its
+        # result is simply discarded. Single-flight (kick_archive_reverify)
+        # means no overlapping sweep can start until this task is done, so a
+        # stray background thread overwriting _reverify_state after the
+        # cancel branch below has already set it to "failed: cancelled" is
+        # acceptable: the next kick starts a fresh, correctly-ordered run.
+        error = "cancelled"
+        _reverify_state[network] = {
+            "state": "failed",
+            "error": error,
+            "finished_at": int(time.time()),
+        }
+        try:
+            sponsored_mint.audit_archive_reverify(
+                campaign_db,
+                network=network,
+                actor=actor,
+                result=f"failed: {error}",
+            )
+        except Exception:
+            logging.error(f"archive reverify audit write failed: {traceback.format_exc()}")
+        raise
+    except Exception:
+        logging.error(f"archive reverify crashed: {traceback.format_exc()}")
+        error = "internal_error"
+    _reverify_state[network] = {
+        "state": "failed" if error else "ok",
+        "error": error,
+        "finished_at": int(time.time()),
+    }
+    try:
+        sponsored_mint.audit_archive_reverify(
+            campaign_db,
+            network=network,
+            actor=actor,
+            result=f"failed: {error}" if error else "ok",
+        )
+    except Exception:
+        logging.error(f"archive reverify audit write failed: {traceback.format_exc()}")
+
+
+def kick_archive_reverify(network: str, actor: str) -> None:
+    task = _reverify_tasks.get(network)
+    if task is not None and not task.done():
+        return  # single-flight: join the running job
+    _reverify_tasks[network] = asyncio.create_task(run_archive_reverify(network, actor))
+
+
 @require_service_token
 async def handle_sponsored_mint_start(request):
     denied = _require_discord_surface(request)
@@ -715,6 +822,7 @@ async def handle_sponsored_mint_start(request):
         return web.json_response({"error": "actor is required", "code": "bad_request"}, status=400)
     campaign_db, _ = _sponsored_mint_paths()
     status = sponsored_mint.start_campaign(campaign_db, network=config.XRPL_NETWORK, actor=actor)
+    kick_archive_reverify(config.XRPL_NETWORK, actor)
     return web.json_response(dataclasses.asdict(status))
 
 
@@ -758,6 +866,7 @@ async def handle_sponsored_mint_status(request):
         status["lfgo_balance_state"] = "available" if balance is not None else "lookup_failed"
     status["lfgo_balance"] = str(balance) if balance is not None else None
     status["recovery_ready"] = _sponsored_recovery_ready
+    status["reverify"] = _reverify_status(config.XRPL_NETWORK)
     return web.json_response(status)
 
 
