@@ -13,5 +13,8 @@ module.exports = {
     { name: "lfg-economy-reconcile", cwd: CWD, script: "scripts/economy_nightly_reconcile.py", interpreter: PY, args: ["--network", "mainnet"], cron_restart: "20 0 * * *", autorestart: false },
     { name: "lfg-economy-audit", cwd: CWD, script: "scripts/audit_trait_economy.py", interpreter: PY, args: ["--network", "mainnet"], cron_restart: "25 0 * * *", autorestart: false },
     { name: "lfg-deployer", cwd: CWD, script: "scripts/deployer.py", interpreter: PY, args: ["prod"] },
+    // Public-edge funnel health probe (full TLS handshake through the ts.net funnel).
+    // Log-only → reports/funnel_healthcheck.log; catches SSL/blank-site outages the :8176 probe can't see.
+    { name: "lfg-funnel-health", cwd: CWD, script: "scripts/funnel_healthcheck.py", interpreter: PY },
   ],
 };
