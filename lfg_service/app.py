@@ -31,7 +31,6 @@ from dataclasses import dataclass, field
 from decimal import Decimal
 from html import escape
 from typing import Any, TypeVar, cast
-from urllib.parse import quote as urlquote
 from urllib.parse import urlparse
 
 import aiohttp
@@ -71,6 +70,7 @@ from lfg_core import (
     swap_flow,
     swap_meta,
     trait_config,
+    trait_images,
     xrpl_ops,
     xumm_ops,
 )
@@ -1148,34 +1148,10 @@ def _market_network(kind: str) -> str:
 
 
 def _trait_image_url(cfg: trait_config.TraitConfig, slot: str, value: str) -> str | None:
-    """A same-origin /api/layer URL for a trait value, picking a representative
-    body. With a local layer store the pick is disk-verified
-    (LocalLayerStore.find_display_body: affinity-allowed bodies, then
-    shared/, then any body with the art — display-only, so an
-    affinity-illegal body's art is fine); a miss means the value has no art
-    anywhere on disk, so return None rather than a URL that is known to 404.
-    With a CDN store (no cheap existence probe) it falls back to the
-    affinity-only guess: first allowed body, or shared/ for an unrestricted
-    value."""
-    allowed = cfg.allowed_bodies(slot, value)
-    preferred = sorted(allowed) if allowed else []
-    store = layer_store.get_layer_store()
-    if isinstance(store, layer_store.LocalLayerStore):
-        # Affinity alone can't pick a servable dir: an unrestricted value
-        # usually lives in per-body dirs (not shared/), and a restricted
-        # value's first allowed body may lack the file. Probe the disk so
-        # the URL points at art that actually resolves — and admit a miss
-        # (stale/renamed value) as None instead of emitting a guaranteed 404.
-        body = store.find_display_body(slot, value, preferred)
-        if body is None:
-            return None
-    else:
-        body = preferred[0] if preferred else layer_store.SHARED_DIR
-    return (
-        f"/api/layer?body={urlquote(body, safe='')}"
-        f"&trait={urlquote(slot, safe='')}&value={urlquote(value, safe='')}"
-        "&thumb=1"
-    )
+    """Delegates to the shared resolver in lfg_core.trait_images (also used by
+    webapp.mock_market, which cannot import it from here — this module imports
+    mock_market). Kept as a module-level name so tests can monkeypatch it."""
+    return trait_images.trait_image_url(cfg, slot, value)
 
 
 def _serialize_listing_row(

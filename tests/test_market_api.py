@@ -603,20 +603,38 @@ def test_trait_image_url_none_when_no_local_art(layer_art):
     assert server._trait_image_url(cfg, "Hat", "Definitely Not On Disk") is None
 
 
-def test_mock_mine_trait_groups_carry_image_url():
-    # Greptile P1 on #357: the dev-mode market mock's Mine payload must carry
-    # the same image_url field the real handler attaches, or the client falls
-    # back to the active-character body guess it was just cured of.
+def test_mock_mine_trait_groups_carry_image_url(tmp_path, monkeypatch):
+    # Greptile P1 + CodeRabbit major on #357: the dev-mode market mock's Mine
+    # payload must carry the same image_url field the real handler attaches,
+    # resolved with the SAME disk-aware body selection (shared resolver in
+    # lfg_core.trait_images) — a hardcoded body=male 404s for art that lives
+    # in shared/ or another body dir. So install art ONLY outside male/ and
+    # require every non-null URL to actually serve through /api/layer.
     from webapp import mock_market
 
+    base = tmp_path / "mock_art"
+    for rel in ("shared/Head/Tophat.png", "skeleton/Eyes/Shades.png", "female/Clothing/Suit.png"):
+        p = base / rel
+        p.parent.mkdir(parents=True, exist_ok=True)
+        p.write_bytes(b"\x89PNG\r\n\x1a\n")
+    monkeypatch.setattr(layer_store, "_store", layer_store.LocalLayerStore(base_dir=str(base)))
+
+    econ = mock_economy.MockEconomy()
+    econ._trait_tokens[mock_economy.DEV_OWNER] = [
+        {"nft_id": "MOCKTRAIT1", "slot": "Eyes", "value": "Shades"}
+    ]
+    monkeypatch.setattr(mock_economy, "INSTANCE", econ)
+
     body = mock_market.MockMarket().mine(mock_economy.DEV_OWNER)
-    for group in ("unlisted_trait_tokens", "closet_assets"):
-        for row in body[group]:
-            assert "image_url" in row
-            if row["value"] and row["value"] != "None":
-                assert row["image_url"].startswith("/api/layer?")
-            else:
-                assert row["image_url"] is None
+
+    token = body["unlisted_trait_tokens"][0]
+    _assert_layer_url_resolves(token["image_url"])
+
+    by_key = {(a["slot"], a["value"]): a for a in body["closet_assets"]}
+    for key in (("Head", "Tophat"), ("Eyes", "Shades"), ("Clothing", "Suit")):
+        _assert_layer_url_resolves(by_key[key]["image_url"])
+    # a value with no art anywhere yields None, not a guaranteed 404
+    assert by_key[("Head", "Halo")]["image_url"] is None
 
 
 def test_mine_character_listing_carries_nft_number(onchain_env, monkeypatch):

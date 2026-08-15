@@ -19,7 +19,7 @@ from __future__ import annotations
 
 from typing import Any
 
-from lfg_core import brokers, market_ops, market_store
+from lfg_core import brokers, market_ops, market_store, trait_config, trait_images
 from webapp import mock_economy
 
 DEV_OWNER = mock_economy.DEV_OWNER
@@ -56,10 +56,14 @@ def _trait_image_url(slot: str, value: str) -> str:
 def _mine_trait_image_url(slot: str | None, value: str | None) -> str | None:
     # Mirrors the real handler's _img: "None" is the absence of a trait —
     # no art exists for it, so no URL (the client renders a blank tile
-    # instead of requesting a guaranteed 404).
+    # instead of requesting a guaranteed 404). Non-None values resolve
+    # through the SAME shared resolver the service uses
+    # (lfg_core.trait_images: disk-verified body pick with a local store) —
+    # the hardcoded body=male of _trait_image_url above 404s for any value
+    # whose art lives in shared/ or another body dir.
     if not slot or not value or value == "None":
         return None
-    return _trait_image_url(slot, value)
+    return trait_images.trait_image_url(trait_config.get_config(), slot, value)
 
 
 class MockMarket:
