@@ -39,12 +39,16 @@ _TYPO_BODY_PREFIX = "Iridescent "
 
 
 def find_typo_body_files(layers_dir: str) -> list[str]:
-    """Paths of any `layers/<body>/Body/Iridescent *` (single-r) art files."""
+    """Paths of any `layers/<body>/Body/Iridescent *` (single-r) art files.
+
+    A missing layers root is clean (nothing in the pool to guard — fresh
+    checkouts and CI have no gitignored `layers/`); any other OSError
+    (permissions, I/O) propagates so the caller fails closed instead of
+    silently passing an unscanned tree."""
     flagged: list[str] = []
-    try:
-        bodies = sorted(os.listdir(layers_dir))
-    except OSError:
+    if not os.path.exists(layers_dir):
         return flagged
+    bodies = sorted(os.listdir(layers_dir))
     for body in bodies:
         body_dir = os.path.join(layers_dir, body, "Body")
         if not os.path.isdir(body_dir):
@@ -73,11 +77,16 @@ def main(argv: list[str] | None = None) -> int:
     except OSError as e:
         print(f"ERROR: could not read layers dir {args.layers_dir!r}: {e}")
         return 1
-    for typo_path in find_typo_body_files(args.layers_dir):
-        error_list.append(
-            f"misspelled Body art file (single-r 'Iridescent', canonical is "
-            f"'Irridescent'): {typo_path} (#301)"
-        )
+    try:
+        for typo_path in find_typo_body_files(args.layers_dir):
+            error_list.append(
+                f"misspelled Body art file (single-r 'Iridescent', canonical is "
+                f"'Irridescent'): {typo_path} (#301)"
+            )
+    except OSError as e:
+        # Fail closed: an unscannable layer tree is a validation failure,
+        # not a pass.
+        error_list.append(f"could not scan layers dir {args.layers_dir!r} for typo Body art: {e}")
     for w in warning_list:
         print(f"warning: {w}")
     for err in error_list:

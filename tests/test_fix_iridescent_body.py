@@ -209,3 +209,107 @@ def test_rerun_is_noop(dbs, monkeypatch):
     results = _run(index_db, app_db, apply=True)
     assert results == []
     assert calls2["modify"] == []
+
+
+def test_indeterminate_modify_recorded_and_batch_continues(dbs, monkeypatch):
+    index_db, app_db = dbs
+    calls = _stub_ledger(monkeypatch)
+    from lfg_core.xrpl_ops import IndeterminateResultError
+
+    async def boom(nft_id, owner, uri, platform="backend"):
+        raise IndeterminateResultError("submission outcome unknown")
+
+    monkeypatch.setattr(fx.xrpl_ops, "modify_nft", boom)
+    results = _run(index_db, app_db, apply=True)
+    # the token is journaled indeterminate, not crashed; mirrors untouched
+    assert [r.status for r in results] == ["indeterminate"]
+    assert calls["modify"] == []
+    with sqlite3.connect(index_db) as ic:
+        (attrs,) = ic.execute(
+            "SELECT attributes_json FROM onchain_nfts WHERE nft_id=?", (LIVE_ID,)
+        ).fetchone()
+    assert BAD in attrs
+    with sqlite3.connect(app_db) as ac:
+        (body,) = ac.execute("SELECT Body FROM LFG WHERE nft_number=64").fetchone()
+    assert body == BAD
+
+
+def test_confirmed_owner_persisted_to_index(dbs, monkeypatch):
+    """The nft_info-confirmed owner (post-transfer) wins over the stale index snapshot."""
+    index_db, app_db = dbs
+    calls = _stub_ledger(monkeypatch)
+    new_owner = "rNewOwnerYYYYYYYYYYYYYYYYYYYYYY"
+
+    async def fresh_info(nft_id, clio=None):
+        return {
+            "nft_id": nft_id,
+            "owner": new_owner,
+            "flags": NFT_FLAG_MUTABLE,
+            "uri_hex": URI_HEX,
+            "is_burned": False,
+        }
+
+    monkeypatch.setattr(fx.xrpl_ops, "nft_info", fresh_info)
+    _run(index_db, app_db, apply=True)
+    assert calls["modify"][0][1] == new_owner
+    with sqlite3.connect(index_db) as ic:
+        (owner,) = ic.execute(
+            "SELECT owner FROM onchain_nfts WHERE nft_id=?", (LIVE_ID,)
+        ).fetchone()
+    assert owner == new_owner
+
+
+def _strand_app_only(index_db, app_db):
+    """Simulate a partial mirror failure / unreadable index: the index row is
+    already canonical while LFG.Body still carries the typo."""
+    with sqlite3.connect(index_db) as ic:
+        ic.execute(
+            "UPDATE onchain_nfts SET attributes_json=? WHERE nft_id=?",
+            (json.dumps(_attrs(GOOD)), LIVE_ID),
+        )
+        ic.commit()
+
+
+def test_app_db_only_edition_repaired(dbs, monkeypatch):
+    index_db, app_db = dbs
+    _strand_app_only(index_db, app_db)
+    calls = _stub_ledger(monkeypatch)
+    results = _run(index_db, app_db, apply=True)
+    # no live token carries the typo -> pure local repair, no ledger op
+    assert calls["modify"] == [] and calls["upload"] == []
+    assert [r.status for r in results] == ["corrected"]
+    assert results[0].edition == 64 and results[0].nft_id == ""
+    with sqlite3.connect(app_db) as ac:
+        (body,) = ac.execute("SELECT Body FROM LFG WHERE nft_number=64").fetchone()
+    assert body == GOOD
+
+
+def test_app_db_only_edition_dry_run_is_planned_and_untouched(dbs, monkeypatch):
+    index_db, app_db = dbs
+    _strand_app_only(index_db, app_db)
+    _stub_ledger(monkeypatch)
+    results = _run(index_db, app_db, apply=False)
+    assert [r.status for r in results] == ["planned"]
+    with sqlite3.connect(app_db) as ac:
+        (body,) = ac.execute("SELECT Body FROM LFG WHERE nft_number=64").fetchone()
+    assert body == BAD
+
+
+def test_rerun_converges_after_partial_mirror_failure(dbs, monkeypatch):
+    """Index synced, LFG commit lost (crash between mirror writes): a rerun
+    must still find and repair the LFG row, then reach a true no-op."""
+    index_db, app_db = dbs
+    _stub_ledger(monkeypatch)
+    _run(index_db, app_db, apply=True)
+    # simulate the LFG update having been lost
+    with sqlite3.connect(app_db) as ac:
+        ac.execute("UPDATE LFG SET Body=? WHERE nft_number=64", (BAD,))
+        ac.commit()
+    calls2 = _stub_ledger(monkeypatch)
+    results = _run(index_db, app_db, apply=True)
+    assert calls2["modify"] == []  # ledger/index already canonical
+    assert [r.status for r in results] == ["corrected"]
+    with sqlite3.connect(app_db) as ac:
+        (body,) = ac.execute("SELECT Body FROM LFG WHERE nft_number=64").fetchone()
+    assert body == GOOD
+    assert _run(index_db, app_db, apply=True) == []

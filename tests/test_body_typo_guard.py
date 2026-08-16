@@ -75,3 +75,22 @@ def test_resolution_regression_good_resolves_bad_gaps():
     assert _missing(GOOD) == []
     gaps = _missing(BAD)
     assert gaps and any("Body" in g for g in gaps)
+
+
+def test_missing_layers_root_is_clean(tmp_path):
+    assert find_typo_body_files(str(tmp_path / "no-such-layers")) == []
+
+
+def test_unreadable_layers_root_fails_closed(tmp_path):
+    import pytest
+
+    layers = tmp_path / "layers"
+    _mk(layers / "skeleton" / "Body" / f"{GOOD}.webm")
+    if os.geteuid() == 0:
+        pytest.skip("chmod-based unreadability test is meaningless as root")
+    os.chmod(layers, 0)
+    try:
+        with pytest.raises(OSError):
+            find_typo_body_files(str(layers))
+    finally:
+        os.chmod(layers, 0o755)

@@ -61,7 +61,9 @@ class Targets:
 class Result:
     nft_id: str
     edition: int | None
-    status: str  # planned | corrected | skipped_non_mutable | skipped_burned | failed
+    status: (
+        str  # planned | corrected | skipped_non_mutable | skipped_burned | failed | indeterminate
+    )
     detail: str = ""
     tx_hash: str | None = None
     new_url: str | None = None
@@ -141,7 +143,7 @@ async def correct_token(
         # On-CDN metadata already carries the double-r spelling; only the
         # mirrors are stale. Still surgical: no upload/modify needed.
         if apply:
-            _sync_mirrors(index_conn, app_conn, target, new_meta, uri_hex)
+            _sync_mirrors(index_conn, app_conn, target, new_meta, uri_hex, owner)
         return Result(
             nft_id,
             edition,
@@ -173,7 +175,19 @@ async def correct_token(
         return Result(nft_id, edition, "failed", f"CDN upload failed: {e}")
 
     # 4. Ledger first — modify_nft stamps SourceTag + provenance memos.
-    tx_hash = await xrpl_ops.modify_nft(nft_id, owner, new_url)
+    # Fail-closed on an unconfirmable submission (#107 taxonomy): journal it,
+    # touch no mirrors, never blind-retry — reconcile from chain, then re-run.
+    try:
+        tx_hash = await xrpl_ops.modify_nft(nft_id, owner, new_url)
+    except xrpl_ops.IndeterminateResultError as e:
+        return Result(
+            nft_id,
+            edition,
+            "indeterminate",
+            f"NFTokenModify outcome unknown ({e}) — mirrors untouched; verify the tx "
+            "on-ledger (nft_info) before re-running; never blind-retry",
+            new_url=new_url,
+        )
     if tx_hash is None:
         return Result(
             nft_id,
@@ -185,7 +199,7 @@ async def correct_token(
 
     # 5. Mirrors from the confirmed result.
     new_uri_hex = xrpl_ops.convert_str_to_hex(new_url)
-    _sync_mirrors(index_conn, app_conn, target, new_meta, new_uri_hex)
+    _sync_mirrors(index_conn, app_conn, target, new_meta, new_uri_hex, owner)
     return Result(nft_id, edition, "corrected", tx_hash=tx_hash, new_url=new_url)
 
 
@@ -195,12 +209,26 @@ def _sync_mirrors(
     target: Target,
     new_meta: dict[str, Any],
     uri_hex: str,
+    owner: str,
 ) -> None:
+    # LFG first, index second. Either ordering can be interrupted, but
+    # discovery keys off BOTH mirrors (index attributes AND LFG.Body), so a
+    # rerun after a partial failure re-finds whichever mirror is still stale
+    # and converges — the app-only repair path handles a corrected index with
+    # a stale LFG row, and a stale index row is rediscovered as a token.
+    if target.nft_number is not None:
+        app_conn.execute(
+            "UPDATE LFG SET Body = ? WHERE nft_number = ? AND Body = ?",
+            (GOOD, target.nft_number, BAD),
+        )
+        app_conn.commit()
     attributes = new_meta.get("attributes") or []
     rec = nft_index.OnchainNft(
         nft_id=target.nft_id,
         nft_number=target.nft_number,
-        owner=target.owner,
+        # The nft_info-confirmed current owner — never the possibly-stale
+        # index snapshot (the token may have transferred since).
+        owner=owner or target.owner,
         is_burned=False,
         mutable=True,
         uri_hex=uri_hex,
@@ -211,12 +239,6 @@ def _sync_mirrors(
     )
     nft_index.upsert(index_conn, rec)
     index_conn.commit()
-    if target.nft_number is not None:
-        app_conn.execute(
-            "UPDATE LFG SET Body = ? WHERE nft_number = ? AND Body = ?",
-            (GOOD, target.nft_number, BAD),
-        )
-        app_conn.commit()
 
 
 def _journal(network: str, results: list[Result]) -> None:
@@ -247,18 +269,42 @@ async def run(
             f"[{network}] targets: {len(targets.tokens)} live token(s) "
             f"{[t.nft_id for t in targets.tokens]}, app-DB editions {targets.editions}"
         )
-        if not targets.tokens:
+        if not targets.tokens and not targets.editions:
             print("nothing to do — already clean.")
             return results
-        async with aiohttp.ClientSession() as http:
-            for target in targets.tokens:
-                res = await correct_token(target, http, index_conn, app_conn, apply=apply)
-                results.append(res)
-                print(
-                    f"  {res.nft_id} (edition {res.edition}): {res.status}"
-                    + (f" tx={res.tx_hash}" if res.tx_hash else "")
-                    + (f" — {res.detail}" if res.detail else "")
+        if targets.tokens:
+            async with aiohttp.ClientSession() as http:
+                for target in targets.tokens:
+                    res = await correct_token(target, http, index_conn, app_conn, apply=apply)
+                    results.append(res)
+                    print(
+                        f"  {res.nft_id} (edition {res.edition}): {res.status}"
+                        + (f" tx={res.tx_hash}" if res.tx_hash else "")
+                        + (f" — {res.detail}" if res.detail else "")
+                    )
+        # App-DB-only editions: LFG.Body is stale but no live index token
+        # carries the typo (index record unreadable/empty, or already
+        # canonical — e.g. a rerun after a partial mirror failure). A pure
+        # local-DB repair; no ledger op is needed or attempted.
+        covered = {t.nft_number for t in targets.tokens if t.nft_number is not None}
+        for edition in targets.editions:
+            if edition in covered:
+                continue
+            if apply:
+                app_conn.execute(
+                    "UPDATE LFG SET Body = ? WHERE nft_number = ? AND Body = ?",
+                    (GOOD, edition, BAD),
                 )
+                app_conn.commit()
+            res = Result(
+                "",
+                edition,
+                "corrected" if apply else "planned",
+                "app-DB-only repair: LFG.Body rewritten, no matching live index token"
+                " (ledger/index already canonical or index metadata unreadable)",
+            )
+            results.append(res)
+            print(f"  edition {res.edition} (app-DB only): {res.status} — {res.detail}")
     if apply:
         _journal(network, results)
     else:
@@ -278,7 +324,7 @@ def main() -> int:
         )
         return 2
     results = asyncio.run(run(args.network, args.apply))
-    return 1 if any(r.status == "failed" for r in results) else 0
+    return 1 if any(r.status in ("failed", "indeterminate") for r in results) else 0
 
 
 if __name__ == "__main__":
