@@ -117,8 +117,18 @@ def _stub_ledger(monkeypatch, *, mutable=True, calls=None):
     return calls
 
 
+def _await(coro):
+    # Repo convention: never asyncio.run() in tests — it unsets the ambient
+    # event loop and breaks later get_event_loop()-based tests in a full run.
+    loop = asyncio.new_event_loop()
+    try:
+        return loop.run_until_complete(coro)
+    finally:
+        loop.close()
+
+
 def _run(index_db, app_db, apply):
-    return asyncio.run(fx.run(network="testnet", apply=apply, index_db=index_db, app_db=app_db))
+    return _await(fx.run(network="testnet", apply=apply, index_db=index_db, app_db=app_db))
 
 
 def test_discover_targets_finds_live_bad_only(dbs):

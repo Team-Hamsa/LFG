@@ -63,7 +63,12 @@ class _FakeStore:
 
 def _missing(value):
     attrs = [{"trait_type": "Body", "value": value}]
-    return asyncio.run(swap_compose.missing_layers(attrs, "skeleton", _FakeStore()))
+    # new_event_loop (not asyncio.run) — see repo convention note above.
+    loop = asyncio.new_event_loop()
+    try:
+        return loop.run_until_complete(swap_compose.missing_layers(attrs, "skeleton", _FakeStore()))
+    finally:
+        loop.close()
 
 
 def test_resolution_regression_good_resolves_bad_gaps():
