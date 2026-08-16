@@ -4,6 +4,7 @@
 
 <br>
 
+<!-- badges:start -->
 <img src="https://img.shields.io/badge/mainnet-live-2ea043?style=flat-square" alt="Mainnet: live">
 <a href="https://build.letseffinggo.com"><img src="https://img.shields.io/badge/web_app-live-D89030?style=flat-square" alt="Web app live at build.letseffinggo.com"></a>
 <img src="https://img.shields.io/badge/XRPL-NFTs-3E8DE3?style=flat-square" alt="Built on the XRP Ledger">
@@ -11,9 +12,12 @@
 <img src="https://img.shields.io/badge/surfaces-Discord%20%C2%B7%20Telegram%20%C2%B7%20Web-5865F2?style=flat-square" alt="Surfaces: Discord, Telegram, Web">
 <img src="https://img.shields.io/badge/X-share%20%E2%86%92%20mint-000000?style=flat-square&logo=x&logoColor=white" alt="Share on X — per-NFT cards funnel into the app">
 <img src="https://img.shields.io/badge/PWA-installable-6B4FBB?style=flat-square" alt="Installable PWA">
-<img src="https://img.shields.io/badge/tests-2.2k%2B-2ea043?style=flat-square" alt="2,200+ tests">
-<img src="https://img.shields.io/badge/license-MIT-blue?style=flat-square" alt="MIT license">
+<img src="https://img.shields.io/badge/tests-2%2C971-2ea043?style=flat-square" alt="2,971 tests">
+<a href="https://github.com/Team-Hamsa/LFG/actions/workflows/ci.yml"><img src="https://img.shields.io/github/actions/workflow/status/Team-Hamsa/LFG/ci.yml?branch=main&style=flat-square&label=CI" alt="CI status on main"></a>
+<img src="https://img.shields.io/github/license/Team-Hamsa/LFG?style=flat-square&color=blue" alt="MIT license">
 <img src="https://img.shields.io/badge/SourceTag-2606160021-8957E5?style=flat-square" alt="XRPL SourceTag 2606160021">
+<img src="https://img.shields.io/badge/tagged_txs-1%2C961-3E8DE3?style=flat-square" alt="1,961 SourceTag-tagged XRPL transactions">
+<!-- badges:end -->
 
 <br><br>
 
@@ -406,4 +410,4 @@ LFG is released under the **MIT License** — see [LICENSE](LICENSE).
 
 **Acknowledgments** — [xrpl-py](https://github.com/XRPLF/xrpl-py), the [Xaman (XUMM) SDK](https://github.com/XRPL-Labs/XUMM-SDK), the [Discord Embedded App SDK](https://github.com/discord/embedded-app-sdk), [BunnyCDN](https://bunny.net/), and [FFmpeg](https://ffmpeg.org/).
 
-*XRPL Make Waves Hackathon — every XRPL tx carries `SourceTag 2606160021`.*
+*XRPL Make Waves Hackathon entry.*
