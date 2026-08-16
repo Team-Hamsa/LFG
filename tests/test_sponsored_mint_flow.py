@@ -35,6 +35,14 @@ from lfg_core import (  # noqa: E402
 from lfg_service import app as server  # noqa: E402
 from tests.sponsored_helpers import prepare_and_forward, ready_history  # noqa: E402
 
+# Well-formed placeholder classic addresses (not the operator's real wallets):
+# the readiness audit validates the *shape* of SPONSORED_MINT_EXCLUDED_WALLETS,
+# not specific identities (#334).
+_PLACEHOLDER_EXCLUSIONS = (
+    "raJ1Aqkhf19P7cyUc33MMVAzgvHPvtNFC",
+    "rBcktgVfNjHmxNAQDEE66ztz4qZkdngdm",
+)
+
 
 def _run(coro):
     loop = asyncio.new_event_loop()
@@ -1417,10 +1425,7 @@ def test_readiness_audit_counts_debt_only_for_requested_network(_service_env, mo
     monkeypatch.setattr(
         audit.config,
         "SPONSORED_MINT_EXCLUDED_WALLETS",
-        (
-            "rHU8nu9zSnCpkL3gShG4aGawHzaRVfmKwQ",
-            "rHaMsAjoAN21s1XG5TCAM6ErAefzrggsHf",
-        ),
+        _PLACEHOLDER_EXCLUSIONS,
     )
 
     report = _run(
@@ -1457,10 +1462,7 @@ def test_readiness_audit_is_read_only_and_passes_a_safe_off_state(_service_env, 
     monkeypatch.setattr(
         audit.config,
         "SPONSORED_MINT_EXCLUDED_WALLETS",
-        (
-            "rHU8nu9zSnCpkL3gShG4aGawHzaRVfmKwQ",
-            "rHaMsAjoAN21s1XG5TCAM6ErAefzrggsHf",
-        ),
+        _PLACEHOLDER_EXCLUSIONS,
     )
 
     with sqlite3.connect(_service_env.app_db) as conn:
@@ -1543,16 +1545,7 @@ def test_readiness_audit_uses_configured_archive_lag_limit(_service_env, monkeyp
     assert freshness["ok"] is False
 
 
-@pytest.mark.parametrize(
-    "configured",
-    [
-        ("rARBITRARY",),
-        ("rHU8nu9zSnCpkL3gShG4aGawHzaRVfmKwQ",),
-    ],
-)
-def test_readiness_audit_rejects_nonempty_but_incomplete_operator_exclusions(
-    _service_env, monkeypatch, configured
-):
+def _exclusions_report(_service_env, monkeypatch, configured):
     audit = importlib.import_module("scripts.audit_sponsored_mint_readiness")
     sponsored_mint.ensure_schema(_service_env.app_db)
     hconn = history_store.init_history_db(_service_env.history_db)
@@ -1571,7 +1564,7 @@ def test_readiness_audit_rejects_nonempty_but_incomplete_operator_exclusions(
     ready_history(_service_env.history_db, network="mainnet", now=4000, close_time=3990)
     monkeypatch.setattr(audit.config, "SPONSORED_MINT_EXCLUDED_WALLETS", configured)
 
-    report = _run(
+    return audit, _run(
         audit.build_report(
             network="mainnet",
             app_db=_service_env.app_db,
@@ -1581,11 +1574,58 @@ def test_readiness_audit_rejects_nonempty_but_incomplete_operator_exclusions(
         )
     )
 
+
+@pytest.mark.parametrize("configured", [(), ("",), ("  ",)])
+def test_readiness_audit_rejects_empty_operator_exclusions(_service_env, monkeypatch, configured):
+    # The safety intent of #334: an operator who never declared an exclusion
+    # list must not reach a green preflight.
+    audit, report = _exclusions_report(_service_env, monkeypatch, configured)
+
     assert report["ok"] is False
-    assert report["checks"]["exclusions"]["ok"] is False
-    assert report["checks"]["exclusions"]["missing_required"]
-    assert audit.config.SIGNING_ACCOUNT in report["checks"]["exclusions"]["effective"]
-    assert audit.config.TOKEN_ISSUER_ADDRESS in report["checks"]["exclusions"]["effective"]
+    exclusions = report["checks"]["exclusions"]
+    assert exclusions["ok"] is False
+    assert exclusions["configured"] == []
+    assert audit.config.SIGNING_ACCOUNT in exclusions["effective"]
+    assert audit.config.TOKEN_ISSUER_ADDRESS in exclusions["effective"]
+
+
+@pytest.mark.parametrize(
+    ("configured", "expected_invalid"),
+    [
+        (("rARBITRARY",), ["rARBITRARY"]),
+        ((_PLACEHOLDER_EXCLUSIONS[0], "not-an-address"), ["not-an-address"]),
+    ],
+)
+def test_readiness_audit_rejects_malformed_operator_exclusions(
+    _service_env, monkeypatch, configured, expected_invalid
+):
+    audit, report = _exclusions_report(_service_env, monkeypatch, configured)
+
+    assert report["ok"] is False
+    exclusions = report["checks"]["exclusions"]
+    assert exclusions["ok"] is False
+    assert exclusions["invalid"] == expected_invalid
+
+
+@pytest.mark.parametrize(
+    "configured",
+    [
+        (_PLACEHOLDER_EXCLUSIONS[0],),
+        _PLACEHOLDER_EXCLUSIONS,
+    ],
+)
+def test_readiness_audit_accepts_any_wellformed_nonempty_exclusion_list(
+    _service_env, monkeypatch, configured
+):
+    # #334: the check is structural, not identity — any explicitly configured,
+    # well-formed exclusion list passes; the operator reviews the reported sets.
+    audit, report = _exclusions_report(_service_env, monkeypatch, configured)
+
+    exclusions = report["checks"]["exclusions"]
+    assert exclusions["ok"] is True
+    assert exclusions["invalid"] == []
+    assert sorted(configured) == exclusions["configured"]
+    assert audit.config.SIGNING_ACCOUNT in exclusions["effective"]
 
 
 def test_readiness_audit_rejects_config_network_mismatch_before_balance_rpc(
@@ -1621,10 +1661,7 @@ def test_readiness_audit_marks_testnet_self_issuer_balance_as_noop(_service_env,
     monkeypatch.setattr(
         audit.config,
         "SPONSORED_MINT_EXCLUDED_WALLETS",
-        (
-            "rHU8nu9zSnCpkL3gShG4aGawHzaRVfmKwQ",
-            "rHaMsAjoAN21s1XG5TCAM6ErAefzrggsHf",
-        ),
+        _PLACEHOLDER_EXCLUSIONS,
     )
     sponsored_mint.ensure_schema(_service_env.app_db)
     history_db = _service_env.history_dbs["testnet"]
@@ -1694,10 +1731,7 @@ def test_readiness_audit_fails_for_debt_and_incomplete_claims(_service_env, monk
     monkeypatch.setattr(
         audit.config,
         "SPONSORED_MINT_EXCLUDED_WALLETS",
-        (
-            "rHU8nu9zSnCpkL3gShG4aGawHzaRVfmKwQ",
-            "rHaMsAjoAN21s1XG5TCAM6ErAefzrggsHf",
-        ),
+        _PLACEHOLDER_EXCLUSIONS,
     )
 
     report = _run(
