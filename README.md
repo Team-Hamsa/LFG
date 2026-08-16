@@ -192,7 +192,7 @@ A nightly reconcile + conservation audit (`scripts/audit_trait_economy.py`) guar
 ## Architecture
 
 <div align="center">
-<img src="assets/architecture.png" alt="LFG architecture — four surfaces to lfg_service to lfg_core to XRPL, Xaman, and BunnyCDN" width="820">
+<img src="assets/architecture.svg" alt="LFG architecture — four client surfaces plus the X funnel into lfg_service, lfg_core flow modules, listener processes with per-network SQLite, and XRPL, Xaman, and BunnyCDN" width="820">
 </div>
 
 Four thin client surfaces all talk over REST/WS to one aiohttp backend (`lfg_service`):

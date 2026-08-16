@@ -1,82 +1,88 @@
-<svg xmlns="http://www.w3.org/2000/svg" width="900" height="480" viewBox="0 0 900 480" role="img" aria-label="LFG system architecture: four client surfaces (Discord Activity, the web app at build.letseffinggo.com, Telegram, and the classic Discord bot) call the shared lfg_service backend, which calls lfg_core (mint, trait-swap, marketplace, economy, on-chain index, history), which talks to the XRP Ledger, Xaman (XUMM), and BunnyCDN plus IPFS.">
-  <!-- sticker shadow + card -->
-  <rect x="8" y="8" width="884" height="464" rx="18" fill="#0A0A0A"/>
-  <rect x="2" y="2" width="884" height="464" rx="18" fill="#181818" stroke="#FFFFFF" stroke-width="3"/>
-
-  <!-- header (real LFG wordmark via LOGO_HREF placeholder, baked by build_architecture.py) -->
-  <image x="32" y="14" width="142" height="24" href="__LOGO_HREF__"/>
-  <text x="186" y="36" font-family="-apple-system,'Segoe UI',Roboto,Helvetica,Arial,sans-serif" font-size="22" font-weight="900" fill="#F5F4F1">system architecture</text>
-  <text x="858" y="34" text-anchor="end" font-family="-apple-system,'Segoe UI',Roboto,Helvetica,Arial,sans-serif" font-size="12" fill="#9C9A94">SQLite: lfg_nfts &#183; onchain_&lt;net&gt; &#183; history_&lt;net&gt;</text>
-
-  <!-- arrows: row 1 -> row 2 (four surfaces into lfg_service) -->
-  <path d="M133,122 L133,152 L310,152 L310,180" fill="none" stroke="#9C9A94" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/>
-  <polygon points="305,172 315,172 310,180" fill="#9C9A94"/>
-  <path d="M344,122 L344,152 L405,152 L405,180" fill="none" stroke="#9C9A94" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/>
-  <polygon points="400,172 410,172 405,180" fill="#9C9A94"/>
-  <path d="M555,122 L555,152 L495,152 L495,180" fill="none" stroke="#9C9A94" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/>
-  <polygon points="490,172 500,172 495,180" fill="#9C9A94"/>
-  <path d="M766,122 L766,152 L590,152 L590,180" fill="none" stroke="#9C9A94" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/>
-  <polygon points="585,172 595,172 590,180" fill="#9C9A94"/>
-
-  <!-- arrow: row 2 -> row 3 (lfg_service into lfg_core) -->
-  <path d="M450,242 L450,284" fill="none" stroke="#9C9A94" stroke-width="2" stroke-linecap="round"/>
-  <polygon points="445,276 455,276 450,284" fill="#9C9A94"/>
-
-  <!-- arrows: row 3 -> row 4 (lfg_core into three externals) -->
-  <path d="M250,346 L250,369 L161,369 L161,390" fill="none" stroke="#9C9A94" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/>
-  <polygon points="156,382 166,382 161,390" fill="#9C9A94"/>
-  <path d="M450,346 L450,390" fill="none" stroke="#9C9A94" stroke-width="2" stroke-linecap="round"/>
-  <polygon points="445,382 455,382 450,390" fill="#9C9A94"/>
-  <path d="M650,346 L650,369 L739,369 L739,390" fill="none" stroke="#9C9A94" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/>
-  <polygon points="734,382 744,382 739,390" fill="#9C9A94"/>
-
-  <!-- ROW 1: client surfaces -->
-  <rect x="36" y="56" width="195" height="66" rx="12" fill="#181818" stroke="#FFFFFF" stroke-width="2"/>
-  <rect x="50" y="71" width="6" height="36" rx="3" fill="#601878"/>
-  <text x="66" y="90" font-family="-apple-system,'Segoe UI',Roboto,Helvetica,Arial,sans-serif" font-size="16" font-weight="800" fill="#F5F4F1">Discord Activity</text>
-  <text x="66" y="108" font-family="-apple-system,'Segoe UI',Roboto,Helvetica,Arial,sans-serif" font-size="11" fill="#9C9A94">embedded webapp</text>
-
-  <rect x="247" y="56" width="195" height="66" rx="12" fill="#181818" stroke="#FFFFFF" stroke-width="2"/>
-  <rect x="261" y="71" width="6" height="36" rx="3" fill="#D89030"/>
-  <text x="277" y="90" font-family="-apple-system,'Segoe UI',Roboto,Helvetica,Arial,sans-serif" font-size="16" font-weight="800" fill="#F5F4F1">Web App</text>
-  <text x="277" y="108" font-family="-apple-system,'Segoe UI',Roboto,Helvetica,Arial,sans-serif" font-size="11" fill="#9C9A94">build.letseffinggo.com</text>
-
-  <rect x="458" y="56" width="195" height="66" rx="12" fill="#181818" stroke="#FFFFFF" stroke-width="2"/>
-  <rect x="472" y="71" width="6" height="36" rx="3" fill="#F0D848"/>
-  <text x="488" y="90" font-family="-apple-system,'Segoe UI',Roboto,Helvetica,Arial,sans-serif" font-size="16" font-weight="800" fill="#F5F4F1">Telegram</text>
-  <text x="488" y="108" font-family="-apple-system,'Segoe UI',Roboto,Helvetica,Arial,sans-serif" font-size="11" fill="#9C9A94">bot + Mini App</text>
-
-  <rect x="669" y="56" width="195" height="66" rx="12" fill="#181818" stroke="#FFFFFF" stroke-width="2"/>
-  <rect x="683" y="71" width="6" height="36" rx="3" fill="#3DA35D"/>
-  <text x="699" y="90" font-family="-apple-system,'Segoe UI',Roboto,Helvetica,Arial,sans-serif" font-size="16" font-weight="800" fill="#F5F4F1">Discord Bot</text>
-  <text x="699" y="108" font-family="-apple-system,'Segoe UI',Roboto,Helvetica,Arial,sans-serif" font-size="11" fill="#9C9A94">classic slash commands</text>
-
-  <!-- ROW 2: service backend -->
-  <rect x="250" y="182" width="400" height="60" rx="12" fill="#181818" stroke="#FFFFFF" stroke-width="2"/>
-  <rect x="264" y="197" width="6" height="30" rx="3" fill="#4890C0"/>
-  <text x="280" y="212" font-family="-apple-system,'Segoe UI',Roboto,Helvetica,Arial,sans-serif" font-size="17" font-weight="800" fill="#F5F4F1">lfg_service</text>
-  <text x="280" y="230" font-family="-apple-system,'Segoe UI',Roboto,Helvetica,Arial,sans-serif" font-size="12" fill="#9C9A94">shared REST + WebSocket backend &#183; auth &#183; identity</text>
-
-  <!-- ROW 3: core domain -->
-  <rect x="170" y="286" width="560" height="60" rx="12" fill="#181818" stroke="#FFFFFF" stroke-width="2"/>
-  <rect x="184" y="301" width="6" height="30" rx="3" fill="#D89030"/>
-  <text x="200" y="316" font-family="-apple-system,'Segoe UI',Roboto,Helvetica,Arial,sans-serif" font-size="17" font-weight="800" fill="#F5F4F1">lfg_core</text>
-  <text x="200" y="334" font-family="-apple-system,'Segoe UI',Roboto,Helvetica,Arial,sans-serif" font-size="12" fill="#9C9A94">mint &#183; trait-swap &#183; marketplace &#183; economy &#183; on-chain index &#183; history</text>
-
-  <!-- ROW 4: external systems -->
-  <rect x="36" y="392" width="250" height="66" rx="12" fill="#181818" stroke="#FFFFFF" stroke-width="2"/>
-  <rect x="50" y="407" width="6" height="36" rx="3" fill="#D84830"/>
-  <text x="66" y="426" font-family="-apple-system,'Segoe UI',Roboto,Helvetica,Arial,sans-serif" font-size="17" font-weight="800" fill="#F5F4F1">XRP Ledger</text>
-  <text x="66" y="440" font-family="-apple-system,'Segoe UI',Roboto,Helvetica,Arial,sans-serif" font-size="11" fill="#9C9A94">clio + rippled</text>
-  <text x="66" y="453" font-family="-apple-system,'Segoe UI',Roboto,Helvetica,Arial,sans-serif" font-size="11" fill="#9C9A94">NFTokenMint/Offer/Modify</text>
-
-  <rect x="325" y="392" width="250" height="66" rx="12" fill="#181818" stroke="#FFFFFF" stroke-width="2"/>
-  <rect x="339" y="407" width="6" height="36" rx="3" fill="#D89030"/>
-  <text x="355" y="426" font-family="-apple-system,'Segoe UI',Roboto,Helvetica,Arial,sans-serif" font-size="17" font-weight="800" fill="#F5F4F1">Xaman (XUMM)</text>
-  <text x="355" y="444" font-family="-apple-system,'Segoe UI',Roboto,Helvetica,Arial,sans-serif" font-size="12" fill="#9C9A94">QR + push signing, no custody</text>
-
-  <rect x="614" y="392" width="250" height="66" rx="12" fill="#181818" stroke="#FFFFFF" stroke-width="2"/>
-  <rect x="628" y="407" width="6" height="36" rx="3" fill="#4890C0"/>
-  <text x="644" y="426" font-family="-apple-system,'Segoe UI',Roboto,Helvetica,Arial,sans-serif" font-size="17" font-weight="800" fill="#F5F4F1">BunnyCDN + IPFS</text>
-  <text x="644" y="444" font-family="-apple-system,'Segoe UI',Roboto,Helvetica,Arial,sans-serif" font-size="12" fill="#9C9A94">image + metadata hosting</text>
+<svg xmlns="http://www.w3.org/2000/svg" width="900" height="600" viewBox="0 0 900 600" role="img" aria-label="LFG system architecture: four client surfaces (Discord bot, Discord Activity, Telegram bot + Mini App, and the web app at build.letseffinggo.com) plus the X funnel path all call the shared lfg_service backend, which runs the session state machines over lfg_core (bulk_mint_flow, economy_flow, market_flow, mint_flow, shop_flow, swap_flow). A separate listener process group streams the Clio transaction feed into per-network SQLite stores. External systems: XRP Ledger (Clio + rippled), Xaman (XUMM) signing, and BunnyCDN + IPFS hosting.">
+<rect x="8" y="8" width="884" height="584" rx="18" fill="#0A0A0A"/>
+<rect x="2" y="2" width="884" height="584" rx="18" fill="#181818" stroke="#FFFFFF" stroke-width="3"/>
+<text x="29" y="38" font-family="-apple-system,'Segoe UI',Roboto,Helvetica,Arial,sans-serif" font-size="22" font-weight="900"><tspan fill="#F0D848">LFG</tspan><tspan fill="#F5F4F1"> system architecture</tspan></text>
+<text x="871" y="36" text-anchor="end" font-family="-apple-system,'Segoe UI',Roboto,Helvetica,Arial,sans-serif" font-size="12" fill="#9C9A94">one backend &#183; every surface &#183; no custody</text>
+<rect x="29.0" y="60.0" width="162.0" height="62.0" rx="12" fill="#181818" stroke="#FFFFFF" stroke-width="2"/>
+<rect x="41.0" y="73.0" width="6" height="36.0" rx="3" fill="#3DA35D"/>
+<text x="57.0" y="87.0" font-family="-apple-system,'Segoe UI',Roboto,Helvetica,Arial,sans-serif" font-size="12" font-weight="800" fill="#F5F4F1">Discord Bot</text>
+<text x="57.0" y="104.0" font-family="-apple-system,'Segoe UI',Roboto,Helvetica,Arial,sans-serif" font-size="9.5" fill="#9C9A94">slash commands</text>
+<rect x="199.0" y="60.0" width="162.0" height="62.0" rx="12" fill="#181818" stroke="#FFFFFF" stroke-width="2"/>
+<rect x="211.0" y="73.0" width="6" height="36.0" rx="3" fill="#601878"/>
+<text x="227.0" y="87.0" font-family="-apple-system,'Segoe UI',Roboto,Helvetica,Arial,sans-serif" font-size="12" font-weight="800" fill="#F5F4F1">Discord Activity</text>
+<text x="227.0" y="104.0" font-family="-apple-system,'Segoe UI',Roboto,Helvetica,Arial,sans-serif" font-size="9.5" fill="#9C9A94">embedded client</text>
+<rect x="369.0" y="60.0" width="162.0" height="62.0" rx="12" fill="#181818" stroke="#FFFFFF" stroke-width="2"/>
+<rect x="381.0" y="73.0" width="6" height="36.0" rx="3" fill="#F0D848"/>
+<text x="397.0" y="87.0" font-family="-apple-system,'Segoe UI',Roboto,Helvetica,Arial,sans-serif" font-size="12" font-weight="800" fill="#F5F4F1">Telegram</text>
+<text x="397.0" y="104.0" font-family="-apple-system,'Segoe UI',Roboto,Helvetica,Arial,sans-serif" font-size="9.5" fill="#9C9A94">bot + Mini App</text>
+<rect x="539.0" y="60.0" width="162.0" height="62.0" rx="12" fill="#181818" stroke="#FFFFFF" stroke-width="2"/>
+<rect x="551.0" y="73.0" width="6" height="36.0" rx="3" fill="#D89030"/>
+<text x="567.0" y="87.0" font-family="-apple-system,'Segoe UI',Roboto,Helvetica,Arial,sans-serif" font-size="12" font-weight="800" fill="#F5F4F1">Web App</text>
+<text x="567.0" y="104.0" font-family="-apple-system,'Segoe UI',Roboto,Helvetica,Arial,sans-serif" font-size="9.5" fill="#9C9A94">build.letseffinggo.com</text>
+<rect x="709.0" y="60.0" width="162.0" height="62.0" rx="12" fill="#181818" stroke="#FFFFFF" stroke-width="2"/>
+<rect x="721.0" y="73.0" width="6" height="36.0" rx="3" fill="#4890C0"/>
+<text x="737.0" y="87.0" font-family="-apple-system,'Segoe UI',Roboto,Helvetica,Arial,sans-serif" font-size="12" font-weight="800" fill="#F5F4F1">X funnel</text>
+<text x="737.0" y="104.0" font-family="-apple-system,'Segoe UI',Roboto,Helvetica,Arial,sans-serif" font-size="9.5" fill="#9C9A94">share cards → PWA</text>
+<path d="M110.0,122.0 L110.0,149.0 L210.0,149.0 L210.0,176.0" fill="none" stroke="#9C9A94" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/>
+<polygon points="205.0,168.0 215.0,168.0 210.0,176.0" fill="#9C9A94"/>
+<path d="M280.0,122.0 L280.0,149.0 L280.0,149.0 L280.0,176.0" fill="none" stroke="#9C9A94" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/>
+<polygon points="275.0,168.0 285.0,168.0 280.0,176.0" fill="#9C9A94"/>
+<path d="M450.0,122.0 L450.0,149.0 L450.0,149.0 L450.0,176.0" fill="none" stroke="#9C9A94" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/>
+<polygon points="445.0,168.0 455.0,168.0 450.0,176.0" fill="#9C9A94"/>
+<path d="M620.0,122.0 L620.0,149.0 L620.0,149.0 L620.0,176.0" fill="none" stroke="#9C9A94" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/>
+<polygon points="615.0,168.0 625.0,168.0 620.0,176.0" fill="#9C9A94"/>
+<path d="M790.0,122.0 L790.0,149.0 L690.0,149.0 L690.0,176.0" fill="none" stroke="#9C9A94" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/>
+<polygon points="685.0,168.0 695.0,168.0 690.0,176.0" fill="#9C9A94"/>
+<rect x="170.0" y="176.0" width="560.0" height="62.0" rx="12" fill="#181818" stroke="#FFFFFF" stroke-width="2"/>
+<rect x="182.0" y="189.0" width="6" height="36.0" rx="3" fill="#4890C0"/>
+<text x="198.0" y="203.0" font-family="-apple-system,'Segoe UI',Roboto,Helvetica,Arial,sans-serif" font-size="17" font-weight="800" fill="#F5F4F1">lfg_service</text>
+<text x="198.0" y="220.0" font-family="-apple-system,'Segoe UI',Roboto,Helvetica,Arial,sans-serif" font-size="12" fill="#9C9A94">aiohttp REST/WS hub · auth + identity · session state machines</text>
+<path d="M450.0,238.0 L450.0,286.0" fill="none" stroke="#9C9A94" stroke-width="2" stroke-linecap="round"/>
+<polygon points="445.0,278.0 455.0,278.0 450.0,286.0" fill="#9C9A94"/>
+<rect x="29" y="286" width="560" height="128" rx="12" fill="#181818" stroke="#FFFFFF" stroke-width="2"/>
+<rect x="41" y="299" width="6" height="30" rx="3" fill="#D89030"/>
+<text x="57" y="312" font-family="-apple-system,'Segoe UI',Roboto,Helvetica,Arial,sans-serif" font-size="17" font-weight="800" fill="#F5F4F1">lfg_core</text>
+<text x="57" y="329" font-family="-apple-system,'Segoe UI',Roboto,Helvetica,Arial,sans-serif" font-size="11" fill="#9C9A94">shared domain library · XRPL + Xaman ops · trait engine · rarity</text>
+<rect x="49.0" y="342.0" width="117.5" height="24.0" rx="12.0" fill="#202020" stroke="#2C2C2C" stroke-width="1"/>
+<text x="107.7" y="358.0" text-anchor="middle" font-family="-apple-system,'Segoe UI',Roboto,Helvetica,Arial,sans-serif" font-size="11" fill="#F5F4F1">bulk_mint_flow</text>
+<rect x="174.5" y="342.0" width="103.8" height="24.0" rx="12.0" fill="#202020" stroke="#2C2C2C" stroke-width="1"/>
+<text x="226.4" y="358.0" text-anchor="middle" font-family="-apple-system,'Segoe UI',Roboto,Helvetica,Arial,sans-serif" font-size="11" fill="#F5F4F1">economy_flow</text>
+<rect x="286.3" y="342.0" width="97.0" height="24.0" rx="12.0" fill="#202020" stroke="#2C2C2C" stroke-width="1"/>
+<text x="334.8" y="358.0" text-anchor="middle" font-family="-apple-system,'Segoe UI',Roboto,Helvetica,Arial,sans-serif" font-size="11" fill="#F5F4F1">market_flow</text>
+<rect x="391.3" y="342.0" width="83.4" height="24.0" rx="12.0" fill="#202020" stroke="#2C2C2C" stroke-width="1"/>
+<text x="433.0" y="358.0" text-anchor="middle" font-family="-apple-system,'Segoe UI',Roboto,Helvetica,Arial,sans-serif" font-size="11" fill="#F5F4F1">mint_flow</text>
+<rect x="482.7" y="342.0" width="83.4" height="24.0" rx="12.0" fill="#202020" stroke="#2C2C2C" stroke-width="1"/>
+<text x="524.4" y="358.0" text-anchor="middle" font-family="-apple-system,'Segoe UI',Roboto,Helvetica,Arial,sans-serif" font-size="11" fill="#F5F4F1">shop_flow</text>
+<rect x="49.0" y="374.0" width="83.4" height="24.0" rx="12.0" fill="#202020" stroke="#2C2C2C" stroke-width="1"/>
+<text x="90.7" y="390.0" text-anchor="middle" font-family="-apple-system,'Segoe UI',Roboto,Helvetica,Arial,sans-serif" font-size="11" fill="#F5F4F1">swap_flow</text>
+<rect x="613.0" y="286.0" width="258.0" height="56.0" rx="12" fill="#181818" stroke="#FFFFFF" stroke-width="2"/>
+<rect x="625.0" y="299.0" width="6" height="30.0" rx="3" fill="#D84830"/>
+<text x="641.0" y="310.0" font-family="-apple-system,'Segoe UI',Roboto,Helvetica,Arial,sans-serif" font-size="13" font-weight="800" fill="#F5F4F1">Listener processes</text>
+<text x="641.0" y="327.0" font-family="-apple-system,'Segoe UI',Roboto,Helvetica,Arial,sans-serif" font-size="10" fill="#9C9A94">Clio tx stream → live indexes</text>
+<rect x="613.0" y="358.0" width="258.0" height="56.0" rx="12" fill="#181818" stroke="#FFFFFF" stroke-width="2"/>
+<rect x="625.0" y="371.0" width="6" height="30.0" rx="3" fill="#3DA35D"/>
+<text x="641.0" y="382.0" font-family="-apple-system,'Segoe UI',Roboto,Helvetica,Arial,sans-serif" font-size="13" font-weight="800" fill="#F5F4F1">Per-network SQLite</text>
+<text x="641.0" y="399.0" font-family="-apple-system,'Segoe UI',Roboto,Helvetica,Arial,sans-serif" font-size="10" fill="#9C9A94">lfg_nfts · onchain_* · history_*</text>
+<path d="M742.0,342.0 L742.0,358.0" fill="none" stroke="#9C9A94" stroke-width="2" stroke-linecap="round"/>
+<polygon points="737.0,350.0 747.0,350.0 742.0,358.0" fill="#9C9A94"/>
+<path d="M589,386.0 L613,386.0" fill="none" stroke="#9C9A94" stroke-width="2" stroke-linecap="round" stroke-dasharray="4 4"/>
+<path d="M164.0,414.0 L164.0,456.0 L164.0,456.0 L164.0,470.0" fill="none" stroke="#9C9A94" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/>
+<polygon points="159.0,462.0 169.0,462.0 164.0,470.0" fill="#9C9A94"/>
+<rect x="29.0" y="470.0" width="270.0" height="66.0" rx="12" fill="#181818" stroke="#FFFFFF" stroke-width="2"/>
+<rect x="41.0" y="483.0" width="6" height="40.0" rx="3" fill="#D84830"/>
+<text x="57.0" y="499.0" font-family="-apple-system,'Segoe UI',Roboto,Helvetica,Arial,sans-serif" font-size="15" font-weight="800" fill="#F5F4F1">XRP Ledger</text>
+<text x="57.0" y="516.0" font-family="-apple-system,'Segoe UI',Roboto,Helvetica,Arial,sans-serif" font-size="10" fill="#9C9A94">Clio + rippled · NFToken txs</text>
+<path d="M450.0,414.0 L450.0,456.0 L450.0,456.0 L450.0,470.0" fill="none" stroke="#9C9A94" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/>
+<polygon points="445.0,462.0 455.0,462.0 450.0,470.0" fill="#9C9A94"/>
+<rect x="315.0" y="470.0" width="270.0" height="66.0" rx="12" fill="#181818" stroke="#FFFFFF" stroke-width="2"/>
+<rect x="327.0" y="483.0" width="6" height="40.0" rx="3" fill="#D89030"/>
+<text x="343.0" y="499.0" font-family="-apple-system,'Segoe UI',Roboto,Helvetica,Arial,sans-serif" font-size="15" font-weight="800" fill="#F5F4F1">Xaman (XUMM)</text>
+<text x="343.0" y="516.0" font-family="-apple-system,'Segoe UI',Roboto,Helvetica,Arial,sans-serif" font-size="10" fill="#9C9A94">QR + push signing · no custody</text>
+<path d="M549.0,414.0 L549.0,456.0 L736.0,456.0 L736.0,470.0" fill="none" stroke="#9C9A94" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/>
+<polygon points="731.0,462.0 741.0,462.0 736.0,470.0" fill="#9C9A94"/>
+<rect x="601.0" y="470.0" width="270.0" height="66.0" rx="12" fill="#181818" stroke="#FFFFFF" stroke-width="2"/>
+<rect x="613.0" y="483.0" width="6" height="40.0" rx="3" fill="#4890C0"/>
+<text x="629.0" y="499.0" font-family="-apple-system,'Segoe UI',Roboto,Helvetica,Arial,sans-serif" font-size="15" font-weight="800" fill="#F5F4F1">BunnyCDN + IPFS</text>
+<text x="629.0" y="516.0" font-family="-apple-system,'Segoe UI',Roboto,Helvetica,Arial,sans-serif" font-size="10" fill="#9C9A94">image + metadata hosting</text>
+<text x="450.0" y="578" text-anchor="middle" font-family="-apple-system,'Segoe UI',Roboto,Helvetica,Arial,sans-serif" font-size="11.5" fill="#9C9A94">every XRPL transaction carries SourceTag 2606160021 + provenance memos — all signing happens in the user’s Xaman wallet</text>
 </svg>
