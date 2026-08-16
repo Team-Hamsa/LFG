@@ -1553,6 +1553,8 @@ def test_buy_status_ledger_race_failure_maps_reason(onchain_env, market_wallet, 
     body = _run(_read_json(resp))
     assert body == {
         "id": s.id,
+        "kind": "buy",
+        "listing_kind": "character",
         "platform": "discord",
         "state": "failed",
         "error": body["error"],

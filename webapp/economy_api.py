@@ -99,7 +99,8 @@ async def start_closet(
 
 def economy_session_dict(kind: str, s: Any) -> dict[str, Any]:
     """JSON-safe per-op session status for the client poller."""
-    base: dict[str, Any] = {"id": s.id, "state": s.state, "error": s.error}
+    # `kind` routes a resumed session to the right client poller (#221).
+    base: dict[str, Any] = {"id": s.id, "kind": kind, "state": s.state, "error": s.error}
     if kind == "equip":
         base["displaced"] = [{"slot": k, "value": v} for k, v in s.displaced.items()]
         # #316: machine-readable outcome discriminator ("committed" | "reverted" |

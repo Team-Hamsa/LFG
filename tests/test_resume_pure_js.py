@@ -1,0 +1,115 @@
+# tests/test_resume_pure_js.py
+# Issue #221: the cold-boot session-resume decision (which live flow to
+# re-attach to after an Activity webview relaunch) is a pure function in
+# webapp/client/resume_pure.js, executed here under Node (same harness as
+# tests/test_mint_pure_js.py / test_market_pure_js.py).
+#
+# No lfg_core import at module top -> no env-guard preamble needed.
+import json
+import os
+import shutil
+import subprocess
+
+import pytest
+
+ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+MODULE_REL = "./webapp/client/resume_pure.js"
+
+NODE = shutil.which("node")
+pytestmark = pytest.mark.skipif(NODE is None, reason="node is not installed on this host")
+
+
+def run_js(expr: str):
+    script = (
+        f"import * as M from {json.dumps(MODULE_REL)};\n"
+        f"const result = ({expr});\n"
+        f"console.log(JSON.stringify(result === undefined ? null : result));\n"
+    )
+    proc = subprocess.run(
+        [NODE, "--input-type=module"],
+        input=script,
+        capture_output=True,
+        text=True,
+        cwd=ROOT,
+        timeout=15,
+    )
+    assert proc.returncode == 0, f"node script failed:\n{script}\n--- stderr ---\n{proc.stderr}"
+    return json.loads(proc.stdout)
+
+
+def pick(sessions):
+    return run_js(f"M.pickActiveFlow({json.dumps(sessions)})")
+
+
+EMPTY = {"mint": None, "bulk": None, "swap": None, "market": None, "economy": None, "shop": None}
+
+
+def _with(**kw):
+    d = dict(EMPTY)
+    d.update(kw)
+    return d
+
+
+def test_null_or_empty_payload():
+    assert pick(None) is None
+    assert pick({}) is None
+    assert pick(EMPTY) is None
+
+
+def test_single_live_flow_is_picked():
+    got = pick(_with(swap={"id": "s1", "state": "awaiting_payment"}))
+    assert got == {"flow": "swap", "session": {"id": "s1", "state": "awaiting_payment"}}
+
+
+def test_priority_mint_over_market():
+    got = pick(
+        _with(
+            mint={"id": "m1", "state": "awaiting_payment"},
+            market={"id": "k1", "state": "awaiting_signature", "kind": "buy"},
+        )
+    )
+    assert got["flow"] == "mint"
+
+
+def test_priority_bulk_over_swap():
+    got = pick(
+        _with(
+            bulk={"id": "b1", "state": "fulfilling"},
+            swap={"id": "s1", "state": "composing"},
+        )
+    )
+    assert got["flow"] == "bulk"
+
+
+def test_terminal_states_skipped_per_flow():
+    # A (stale-race) terminal session must never be resumed; the next live
+    # flow down the priority order wins instead.
+    got = pick(
+        _with(
+            mint={"id": "m1", "state": "offer_ready"},  # terminal for mint
+            shop={"id": "h1", "state": "awaiting_accept"},
+        )
+    )
+    assert got["flow"] == "shop"
+    # swap's offers_ready is terminal (results screen already reachable via
+    # Xaman); economy done/failed likewise.
+    assert pick(_with(swap={"id": "s1", "state": "offers_ready"})) is None
+    assert pick(_with(economy={"id": "e1", "state": "failed"})) is None
+    assert pick(_with(market={"id": "k1", "state": "listed"})) is None
+    assert pick(_with(market={"id": "k1", "state": "unknown"})) is None
+    assert pick(_with(bulk={"id": "b1", "state": "payment_timeout"})) is None
+    assert pick(_with(shop={"id": "h1", "state": "done"})) is None
+
+
+def test_sessions_without_id_ignored():
+    assert pick(_with(swap={"state": "awaiting_payment"})) is None
+
+
+def test_market_session_returned_intact_for_routing():
+    s = {"id": "k1", "state": "awaiting_signature", "kind": "trait_list", "nft_id": "00A"}
+    got = pick(_with(market=s))
+    assert got == {"flow": "market", "session": s}
+
+
+def test_flow_order_exported():
+    assert run_js("M.FLOW_ORDER") == ["mint", "bulk", "swap", "market", "economy", "shop"]

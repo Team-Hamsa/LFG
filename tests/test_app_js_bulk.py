@@ -50,8 +50,10 @@ def test_app_js_bulk_flow_wiring():
     assert "function pollBulk(" in src
     assert "function renderBulkJob(" in src
     assert "async function bulkAccept(" in src
-    assert "async function resumeBulkMint(" in src
-    assert "'/api/mint/bulk/active'" in src
+    # #221: boot resume consolidated onto GET /api/sessions/active; the bulk
+    # leg is attachBulkResume, fed the already-fetched job.
+    assert "function attachBulkResume(" in src
+    assert "'/api/sessions/active'" in src
     assert "/units/" in src and "/accept" in src
     # accept payloads are lazy: exactly the one endpoint call site, no
     # eager loop over units[]
@@ -59,8 +61,10 @@ def test_app_js_bulk_flow_wiring():
 
 
 def test_app_js_bulk_resume_runs_before_single_resume():
+    # #221: the priority ordering lives in resume_pure.FLOW_ORDER now — mint
+    # outranks bulk deliberately (money/irreversibility first), and only one
+    # flow can be live per user anyway. Assert the boot dispatcher wiring.
     src = _read("app.js")
-    # every boot path that resumes single mint checks bulk first: the two
-    # call sites use the combined guard, so the counts must match
-    assert src.count("await resumeBulkMint()") == src.count("await resumeMint()")
-    assert "await resumeBulkMint()) && !(await resumeMint()" in src
+    assert src.count("if (!(await resumeAnyFlow())) showMintHome();") == 2
+    pure = _read("resume_pure.js")
+    assert "'bulk'" in pure.split("FLOW_ORDER", 1)[1].split(";", 1)[0]

@@ -16,6 +16,10 @@ import * as mintPure from './mint_pure.js?v=24';
 // Build-panel decision logic lives in its own pure module so it's
 // Node-testable too (tests/test_build_pure_js.py).
 import * as buildPure from './build_pure.js?v=27';
+// Cold-boot session-resume decisions (#221): which live flow to re-attach to
+// after a webview relaunch is a pure priority picker, Node-testable
+// (tests/test_resume_pure_js.py); resumeAnyFlow() below is the thin DOM glue.
+import * as resumePure from './resume_pure.js?v=1';
 
 const params = new URLSearchParams(window.location.search);
 const insideDiscord = params.has('frame_id');
@@ -1218,13 +1222,9 @@ function pollBulk(jobId) {
 // being killed while the user app-switches to Xaman. Checked BEFORE the
 // single-mint resume — a user can't have both, and bulk is the costlier
 // flow to strand. Returns true when a job resumed.
-async function resumeBulkMint() {
-  let active = null;
-  try {
-    active = await api('/api/mint/bulk/active');
-  } catch (_) { return false; }
-  const j = active && active.session;
-  if (!j) return false;
+// Re-attach to an already-fetched live bulk job (#221: the consolidated
+// /api/sessions/active boot path hands the session in; no refetch).
+function attachBulkResume(j) {
   currentBulkId = j.id;
   mintQty = j.quantity;
   liveQty = j.quantity;
@@ -1250,30 +1250,63 @@ async function startMint() {
 // Mint session resume: Discord mobile kills/reloads the Activity webview when
 // the user app-switches to Xaman to sign the payment, losing currentMintId
 // while the server-side session keeps running — the user lands back on the
-// home screen mid-mint. Called on boot: re-attach to any live session and
-// let the poll render its real state. Returns true when a session resumed.
-async function resumeMint() {
-  let active = null;
-  try {
-    active = await api('/api/mint/active');
-  } catch (_) { /* endpoint unreachable: boot the home screen as before */ }
-  const id = mintPure.activeMintSessionId(active);
+// home screen mid-mint. Called on boot with the already-fetched live session
+// (#221: one /api/sessions/active round-trip); re-attach and let the poll
+// render its real state.
+function attachMintResume(session) {
+  const id = mintPure.activeMintSessionId({ session });
   if (!id) return false;
   currentMintId = id;
   mintQty = 1;
   liveQty = 1;
-  showFlow(sponsoredMintView(active.session) || {
+  showFlow(sponsoredMintView(session) || {
     title: '🔄 Reconnecting…',
     text: 'You have a mint in progress — picking it back up where you left off.',
     spinner: true,
-    stage: active.session.state,
+    stage: session.state,
     // Warn before backing out only if the QR was already opened in Xaman
     // (same distinction mintPayView draws) — an unscanned payload provably
     // has nothing signed.
-    cancel: () => cancelMint(!!active.session.qr_scanned),
+    cancel: () => cancelMint(!!session.qr_scanned),
   });
   pollMint(id);
   return true;
+}
+
+// Re-attach to a running trait swap: reveal the swap progress panel and let
+// pollSwap render whatever the real state is (fee QR, progress, results).
+function attachSwapResume(session) {
+  showPanel('swap-result-panel');
+  el('swap-results').innerHTML = '';
+  el('swap-done-btn').hidden = true;
+  el('swap-result-title').textContent = '🔄 Reconnecting…';
+  el('swap-result-text').textContent =
+    'You have a trait swap in progress — picking it back up where you left off.';
+  pollSwap(session.id);
+  return true;
+}
+
+// One boot round-trip (#221): GET /api/sessions/active, pick the
+// highest-priority live flow (resume_pure.js), and route it to the existing
+// per-flow poller/renderer. Returns true when a flow resumed. Read-only
+// re-attach: nothing is signed or started here.
+async function resumeAnyFlow() {
+  let sessions = null;
+  try {
+    sessions = await api('/api/sessions/active');
+  } catch (_) { return false; /* endpoint unreachable: boot home as before */ }
+  const picked = resumePure.pickActiveFlow(sessions);
+  if (!picked) return false;
+  const { flow, session } = picked;
+  switch (flow) {
+    case 'mint': return attachMintResume(session);
+    case 'bulk': return attachBulkResume(session);
+    case 'swap': return attachSwapResume(session);
+    case 'market': return attachMarketResume(session);
+    case 'economy': return attachEconomyResume(session);
+    case 'shop': await resumeShopBuy(session.id); return true;
+  }
+  return false;
 }
 
 // Missed the QR before it expired? Mint a fresh payment payload without
@@ -3364,6 +3397,75 @@ function pollMarketFlow(kind, sessionId, render) {
   marketFlowTimer = setTimeout(tick, 3000);
 }
 
+// #221: per-kind render lookup for a RESUMED market session — the same render
+// fns marketFlow(...) passes at start time. buy is a per-listing-kind factory,
+// hence the indirection through the session dict.
+const MARKET_RESUME_RENDER = {
+  list: () => marketListRender,
+  cancel: () => marketCancelRender,
+  buy: (s) => marketBuyRender(s.listing_kind || 'character'),
+  bid: () => marketBidRender,
+  bid_accept: () => marketBidAcceptRender,
+  trait_list: () => marketTraitListRender,
+};
+
+// Re-attach to a running marketplace op (#221): render its real state
+// immediately from the resumed session dict, then resume the normal poll.
+function attachMarketResume(session) {
+  const pick = MARKET_RESUME_RENDER[session.kind];
+  if (!pick || !MARKET_STATUS_PATH[session.kind]) return false;
+  const render = pick(session);
+  clearTimeout(marketFlowTimer);
+  showPanel('flow-panel');
+  showFlow(render(session));
+  if (!marketPure.isMarketTerminal(session.state)) {
+    pollMarketFlow(session.kind, session.id, render);
+  }
+  return true;
+}
+
+// Re-attach to a running economy op (#221): compact reconnect -> result
+// overlay (matches mint's reconnect banner) rather than re-opening the full
+// Dressing Room panel; pollEconomyOp drives the same status endpoint the
+// original start call would have polled.
+const ECONOMY_OP_LABEL = {
+  harvest: 'Harvest', assemble: 'Assemble', equip: 'Save',
+  extract: 'Extract', deposit: 'Deposit',
+};
+function attachEconomyResume(session) {
+  const kind = session.kind;
+  if (!ECONOMY_OP_LABEL[kind]) return false;
+  showPanel('flow-panel');
+  showFlow({
+    title: '🔄 Reconnecting…',
+    text: `You have a ${ECONOMY_OP_LABEL[kind]} in progress — picking it back up.`,
+    spinner: true,
+  });
+  pollEconomyOp(kind, session).then((final) => {
+    if (el('flow-panel').hidden) return; // user navigated away
+    if (final.state === 'failed') {
+      showFlow({ title: `❌ ${ECONOMY_OP_LABEL[kind]} failed`, text: final.error || 'Something went wrong.', done: true });
+    } else if (final.accept) {
+      // harvest (legacy upgrade), assemble and extract can end with an offer
+      // the user must still accept in Xaman — surface its QR/deep link.
+      showFlow({
+        title: '👛 Accept in Xaman',
+        text: signText(final.accept_push, 'Scan to accept in Xaman.'),
+        qrData: final.accept,
+        link: final.accept,
+        done: true,
+      });
+    } else {
+      showFlow({
+        title: `✅ ${ECONOMY_OP_LABEL[kind]} complete`,
+        text: 'Open the Dressing Room to see the result.',
+        done: true,
+      });
+    }
+  });
+  return true;
+}
+
 async function marketFlow(kind, startPath, body, render) {
   clearTimeout(marketFlowTimer);
   showPanel('flow-panel');
@@ -3897,7 +3999,7 @@ async function main() {
       if (user) {
         me = user;
         // Re-attach to a mint an earlier tab/reload orphaned before going home.
-        if (!(await resumeBulkMint()) && !(await resumeMint())) showMintHome();
+        if (!(await resumeAnyFlow())) showMintHome();
       }
       // else: startWebSignin() is already driving the register panel.
     } catch (e) {
@@ -3919,7 +4021,7 @@ async function main() {
     me = await api('/api/me');
     if (me.wallet) {
       // Re-attach to a mint the webview reload orphaned before going home.
-      if (!(await resumeBulkMint()) && !(await resumeMint())) showMintHome();
+      if (!(await resumeAnyFlow())) showMintHome();
     }
     else {
       status(`Hey ${me.username} — sign in with Xaman to start building.`);
