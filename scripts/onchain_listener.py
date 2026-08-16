@@ -118,6 +118,13 @@ ARCHIVE_FLUSH_MAX_RETAINED_TXS = _read_flush_threshold(
 ARCHIVE_FLUSH_RETRY_SECONDS = _read_flush_threshold(
     "ARCHIVE_FLUSH_RETRY_SECONDS", 5.0, minimum=0.0, cast=float
 )
+# Bounded retry list for acceptance observations that failed AFTER the history
+# commit (transient app-DB error): observation is idempotent, so re-attempting
+# on later flushes is safe, and the bound keeps a wedged app DB from growing
+# the list without limit (startup replay remains the backstop past the bound).
+ARCHIVE_OBSERVE_RETRY_MAX = _read_flush_threshold(
+    "ARCHIVE_OBSERVE_RETRY_MAX", 100, minimum=1, cast=int
+)
 
 
 class ArchiveBatch:
@@ -150,6 +157,7 @@ class ArchiveBatch:
         max_seconds: float | None = None,
         max_retained: int | None = None,
         retry_seconds: float | None = None,
+        observe_retry_max: int | None = None,
     ) -> None:
         self._hconn = hconn
         self._ctx = ctx
@@ -161,12 +169,24 @@ class ArchiveBatch:
         self._retry_seconds = (
             ARCHIVE_FLUSH_RETRY_SECONDS if retry_seconds is None else retry_seconds
         )
+        self._observe_retry_max = (
+            ARCHIVE_OBSERVE_RETRY_MAX if observe_retry_max is None else observe_retry_max
+        )
         self._tagged: list[dict[str, Any]] = []
         self._cursor: tuple[int, int] | None = None  # (ledger_index, close_time)
         self._observed_at: int | None = None
         self._count = 0
         self._first_add_monotonic: float | None = None
         self._failed_flush_monotonic: float | None = None
+        # Latch: a retained-evidence cap breach whose continuity invalidation
+        # has not yet landed durably. While set, cursor/heartbeat writes are
+        # blocked and every flush retries the invalidation — otherwise a
+        # failed invalidation write followed by a later successful flush would
+        # re-advance the heartbeat over dropped evidence (fail-open).
+        self._continuity_break_pending = False
+        # Tagged txs whose post-commit acceptance observation failed; retried
+        # (bounded) on later flushes instead of waiting for a startup replay.
+        self._observe_retry: list[dict[str, Any]] = []
 
     @property
     def pending(self) -> bool:
@@ -206,6 +226,11 @@ class ArchiveBatch:
             self._first_add_monotonic = time.monotonic()
 
     def due(self) -> bool:
+        if self._continuity_break_pending or self._observe_retry:
+            # Outstanding recovery work (a continuity invalidation that has
+            # not landed, or deferred acceptance observations) is retried by
+            # flush() even with no buffered evidence.
+            return True
         if not self.pending:
             return False
         if self._failed_flush_monotonic is not None and (
@@ -226,10 +251,12 @@ class ArchiveBatch:
         """Persist the batch in one transaction; retain state on failure."""
         from lfg_core import config
 
+        network = str(self._ctx.get("network") or "")
+        self._retry_continuity_break()
         if not self.pending:
             self._reset()
+            self._run_observations([], network)
             return
-        network = str(self._ctx.get("network") or "")
         genesis_hash = str(self._ctx.get("genesis_hash") or "").strip()
         buffered = list(self._tagged)
         try:
@@ -244,7 +271,11 @@ class ArchiveBatch:
                     source_tag=tx.get("SourceTag"),
                     raw_json=_json.dumps(tx, sort_keys=True),
                 )
-            if self._cursor is not None and genesis_hash:
+            if self._cursor is not None and genesis_hash and not self._continuity_break_pending:
+                # While a continuity break is pending durably landing, the
+                # cursor/heartbeat must not advance: a fresh heartbeat over an
+                # archive with dropped evidence and no gap marker would read
+                # as usable (fail-open).
                 history_store.record_validated_ledger(
                     self._hconn,
                     network=network,
@@ -275,22 +306,43 @@ class ArchiveBatch:
                 self._break_continuity()
             raise
         self._reset()
-        # Observe EVERY buffered tagged tx, not just the ones whose INSERT was
-        # fresh: on the batched path _record_history can commit the raw row
-        # for a derived-events tx BEFORE this flush runs, so INSERT OR IGNORE
-        # reporting a duplicate must not suppress the acceptance observation
-        # (the claim would sit at `offered` until a later replay). Safe because
-        # record_acceptance is idempotent — a matching accept_tx_hash returns
-        # the claim untouched, with no second audit row.
-        for tx in buffered:
+        self._run_observations(buffered, network)
+
+    def _run_observations(self, fresh: list[dict[str, Any]], network: str) -> None:
+        """Observe EVERY buffered tagged tx, not just the ones whose INSERT was
+        fresh: on the batched path _record_history can commit the raw row
+        for a derived-events tx BEFORE this flush runs, so INSERT OR IGNORE
+        reporting a duplicate must not suppress the acceptance observation
+        (the claim would sit at `offered` until a later replay). Safe because
+        record_acceptance is idempotent — a matching accept_tx_hash returns
+        the claim untouched, with no second audit row.
+
+        A tx whose observation raises (transient app-DB error) is retained in
+        a bounded retry list and re-attempted on the next flush/idle tick, so
+        the claim does not sit at `offered` until a restart replay."""
+        txs = self._observe_retry + fresh
+        self._observe_retry = []
+        failed: list[dict[str, Any]] = []
+        for tx in txs:
             try:
                 sponsored_mint.observe_sponsored_acceptance(
                     tx, tx.get("meta") or {}, network=network
                 )
             except Exception:
-                # Raw eligibility evidence is more fundamental than its
-                # derived claim state; startup replay repairs a lost race.
                 logging.exception("sponsored acceptance observation deferred for %s", tx["hash"])
+                failed.append(tx)
+        if len(failed) > self._observe_retry_max:
+            # Bounded: drop the oldest beyond the cap — the raw evidence is
+            # durably archived, so startup replay still repairs these claims.
+            dropped = len(failed) - self._observe_retry_max
+            logging.warning(
+                "[%s] observation retry list overflowed; dropping %d oldest "
+                "(startup replay repairs them)",
+                network,
+                dropped,
+            )
+            failed = failed[dropped:]
+        self._observe_retry = failed
 
     def _break_continuity(self) -> None:
         network = str(self._ctx.get("network") or "")
@@ -301,6 +353,17 @@ class ArchiveBatch:
             network,
             len(self._tagged),
         )
+        # Latch BEFORE dropping/attempting the write: until the invalidation
+        # lands durably, cursor/heartbeat writes stay blocked and every
+        # flush/idle tick retries it.
+        self._continuity_break_pending = True
+        self._reset()
+        self._retry_continuity_break()
+
+    def _retry_continuity_break(self) -> None:
+        if not self._continuity_break_pending:
+            return
+        network = str(self._ctx.get("network") or "")
         try:
             history_store.invalidate_archive_continuity(
                 self._hconn,
@@ -308,22 +371,32 @@ class ArchiveBatch:
                 reason="sustained eligibility flush failures overflowed the retained-evidence cap",
             )
         except Exception:
-            # The invalidation write can fail on the same wedged DB. Evidence
-            # admission still fails closed regardless: the heartbeat has not
-            # advanced since the first failed flush, so freshness decays until
-            # the sponsored-mint gate closes on its own.
+            # The invalidation write can fail on the same wedged DB. The latch
+            # stays set: heartbeat writes remain blocked (fail-closed) and the
+            # next flush/idle tick retries this invalidation.
             logging.exception("[%s] archive continuity invalidation itself failed", network)
-        self._reset()
+        else:
+            self._continuity_break_pending = False
 
     def flush_logged(self) -> None:
-        """Flush, downgrading failure to a log line (state stays retained)."""
+        """Flush, downgrading failure to a log line."""
         try:
             self.flush()
         except Exception:
-            logging.exception(
-                "[%s] eligibility archive flush failed; batch retained for retry",
-                self._ctx.get("network"),
-            )
+            if self.pending:
+                logging.exception(
+                    "[%s] eligibility archive flush failed; batch retained for retry",
+                    self._ctx.get("network"),
+                )
+            else:
+                # The failure path dropped the buffer (retained-evidence cap
+                # breach): nothing is retained — continuity is broken and
+                # re-certification / --catch-up-from-gap is required.
+                logging.exception(
+                    "[%s] eligibility archive flush failed and the buffer was dropped "
+                    "after a retained-evidence cap breach; re-certification required",
+                    self._ctx.get("network"),
+                )
 
     def _reset(self) -> None:
         self._tagged.clear()
@@ -363,6 +436,33 @@ def _flush_and_mark_disconnected(
         after_ledger=current.validated_ledger_index if current else None,
         at=at,
     )
+
+
+async def _shutdown_stream(
+    idle_flusher: asyncio.Task[None] | None,
+    batch: ArchiveBatch | None,
+    hconn: Any,
+    *,
+    network: str,
+    stream_open: bool,
+) -> tuple[None, bool]:
+    """Shared teardown for the error / clean-close / cancellation paths.
+
+    Cancels AND awaits the idle flusher BEFORE flushing + invalidating
+    continuity, so a late idle-timer flush can never run after the continuity
+    invalidation during reconnect backoff (it would land evidence into an
+    archive whose gap bound was already recorded without it)."""
+    if idle_flusher is not None:
+        idle_flusher.cancel()
+        try:
+            await idle_flusher
+        except asyncio.CancelledError:
+            pass
+        except Exception:
+            logging.exception("[%s] archive idle flusher exited abnormally", network)
+    if stream_open:
+        _flush_and_mark_disconnected(batch, hconn, network=network)
+    return None, False
 
 
 class StreamStalled(Exception):
@@ -907,9 +1007,9 @@ async def _listen(network: str, issuer: str, taxon: int, clio: str) -> None:
                             # sponsored-mint gate closed.
                             archive_batch.flush_logged()
             except Exception as e:
-                if stream_open:
-                    _flush_and_mark_disconnected(archive_batch, hconn, network=network)
-                    stream_open = False
+                idle_flusher, stream_open = await _shutdown_stream(
+                    idle_flusher, archive_batch, hconn, network=network, stream_open=stream_open
+                )
                 logging.warning(f"[{network}] stream error: {e}; reconnecting in {backoff}s")
                 await asyncio.sleep(backoff)
                 backoff = min(backoff * 2, RECONNECT_MAX)
@@ -921,17 +1021,19 @@ async def _listen(network: str, issuer: str, taxon: int, clio: str) -> None:
                 # (maintenance, connection cap) spun this loop reconnecting as
                 # fast as clio would accept, with no ceiling. Mark the gap and
                 # back off exactly like the error path.
-                if stream_open:
-                    _flush_and_mark_disconnected(archive_batch, hconn, network=network)
-                    stream_open = False
+                idle_flusher, stream_open = await _shutdown_stream(
+                    idle_flusher, archive_batch, hconn, network=network, stream_open=stream_open
+                )
                 logging.warning(f"[{network}] stream closed cleanly; reconnecting in {backoff}s")
                 await asyncio.sleep(backoff)
                 backoff = min(backoff * 2, RECONNECT_MAX)
             finally:
-                if idle_flusher is not None:
-                    idle_flusher.cancel()
-                if stream_open:
-                    _flush_and_mark_disconnected(archive_batch, hconn, network=network)
+                # Cancellation path (task cancelled mid-loop skips except/else):
+                # same teardown, idle flusher awaited-closed BEFORE the flush +
+                # continuity invalidation.
+                idle_flusher, stream_open = await _shutdown_stream(
+                    idle_flusher, archive_batch, hconn, network=network, stream_open=stream_open
+                )
 
 
 async def _amain() -> int:

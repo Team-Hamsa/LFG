@@ -1489,6 +1489,188 @@ def test_archive_batch_backs_off_between_failed_flushes(tmp_path, monkeypatch):
     assert hconn.execute("SELECT count(*) FROM xrpl_txs").fetchone()[0] == 1
 
 
+def test_failed_acceptance_observation_is_retried_on_next_flush(tmp_path, monkeypatch):
+    """A transient app-DB error AFTER the history commit must not strand the
+    claim at `offered` until a restart replay: the tx is kept in a bounded
+    retry list and re-observed on the next flush."""
+    hconn = _certified_hconn(tmp_path)
+    calls = {"n": 0}
+
+    def fail_once(tx, meta, network):
+        calls["n"] += 1
+        if calls["n"] == 1:
+            raise sqlite3.OperationalError("app db busy")
+
+    monkeypatch.setattr(oln.sponsored_mint, "observe_sponsored_acceptance", fail_once)
+    batch = oln.ArchiveBatch(hconn, _batch_ctx(), max_txs=1000, max_seconds=999)
+    batch.add(_stream_tx(1, tagged=True))
+    batch.flush()
+    # evidence committed, observation deferred — the batch reports work due
+    assert hconn.execute("SELECT count(*) FROM xrpl_txs").fetchone()[0] == 1
+    assert not batch.pending
+    assert batch.due() is True
+    batch.flush()  # no new adds; retries the deferred observation
+    assert calls["n"] == 2
+    assert batch.due() is False
+
+
+def test_observation_retry_list_is_bounded(tmp_path, monkeypatch):
+    hconn = _certified_hconn(tmp_path)
+
+    def always_fail(tx, meta, network):
+        raise sqlite3.OperationalError("app db wedged")
+
+    monkeypatch.setattr(oln.sponsored_mint, "observe_sponsored_acceptance", always_fail)
+    batch = oln.ArchiveBatch(
+        hconn, _batch_ctx(), max_txs=1000, max_seconds=999, observe_retry_max=2
+    )
+    for i in range(5):
+        batch.add(_stream_tx(i, tagged=True))
+    batch.flush()
+    assert len(batch._observe_retry) == 2  # bounded; oldest dropped, replay backstops
+    batch.flush()
+    assert len(batch._observe_retry) == 2
+
+
+def test_continuity_break_latch_survives_a_failed_invalidation_write(tmp_path, monkeypatch):
+    """If the invalidation write fails during a cap breach, the batch must NOT
+    let a later successful flush re-advance the heartbeat over the dropped
+    evidence — the latch blocks cursor/heartbeat writes and keeps retrying the
+    invalidation until it lands durably."""
+    hconn = _certified_hconn(tmp_path)
+    batch = oln.ArchiveBatch(
+        hconn, _batch_ctx(), max_txs=1000, max_seconds=999, max_retained=1, retry_seconds=0.0
+    )
+
+    def wedged_invalidate(*a, **k):
+        raise sqlite3.OperationalError("disk I/O error")
+
+    real_invalidate = _hs.invalidate_archive_continuity
+    monkeypatch.setattr(oln.history_store, "invalidate_archive_continuity", wedged_invalidate)
+    batch.add(_stream_tx(1, tagged=True))
+    batch.add(_stream_tx(2, tagged=True))  # breaches the cap; invalidation write fails
+    assert not batch.pending
+    assert batch._continuity_break_pending is True
+    # no durable gap marker yet — baseline still reads complete
+    assert _hs.get_archive_state(hconn, "testnet").baseline_complete is True
+    # a later healthy flush must NOT advance the cursor/heartbeat (fail-open guard)
+    batch.add(_stream_tx(3))
+    batch2_state_before = _hs.get_archive_state(hconn, "testnet")
+    with monkeypatch.context() as m:
+        # keep invalidation failing for this flush only
+        m.setattr(oln.history_store, "invalidate_archive_continuity", wedged_invalidate)
+        batch.flush()
+    state = _hs.get_archive_state(hconn, "testnet")
+    assert state.validated_ledger_index == batch2_state_before.validated_ledger_index
+    assert state.heartbeat_at == batch2_state_before.heartbeat_at
+    assert batch._continuity_break_pending is True
+    # once the DB recovers, the next flush lands the gap marker and clears the latch
+    monkeypatch.setattr(oln.history_store, "invalidate_archive_continuity", real_invalidate)
+    batch.flush()
+    assert batch._continuity_break_pending is False
+    state = _hs.get_archive_state(hconn, "testnet")
+    assert state.baseline_complete is False
+    assert state.continuity_gap_reason is not None
+    assert not sponsored_mint.archive_is_usable(
+        str(tmp_path / "history.db"), network="testnet", now=200
+    )
+
+
+def test_continuity_break_with_healthy_invalidation_lands_immediately(tmp_path):
+    hconn = _certified_hconn(tmp_path)
+    batch = oln.ArchiveBatch(
+        hconn, _batch_ctx(), max_txs=1000, max_seconds=999, max_retained=1, retry_seconds=0.0
+    )
+    batch.add(_stream_tx(1, tagged=True))
+    batch.add(_stream_tx(2, tagged=True))  # breach; invalidation succeeds inline
+    assert batch._continuity_break_pending is False
+    state = _hs.get_archive_state(hconn, "testnet")
+    assert state.baseline_complete is False
+    assert state.continuity_gap_reason is not None
+    # cursor/heartbeat writes resume (gate stays closed via the gap marker)
+    batch.add(_stream_tx(3))
+    batch.flush()
+    assert _hs.get_archive_state(hconn, "testnet").validated_ledger_index == L0 + 103
+    assert not sponsored_mint.archive_is_usable(
+        str(tmp_path / "history.db"), network="testnet", now=200
+    )
+
+
+def test_flush_logged_distinguishes_retained_from_dropped(tmp_path, monkeypatch, caplog):
+    hconn = _certified_hconn(tmp_path)
+    batch = oln.ArchiveBatch(hconn, _batch_ctx(), max_txs=1000, max_seconds=999)
+    batch.add(_stream_tx(1, tagged=True))
+
+    def wedged(*a, **k):
+        raise sqlite3.OperationalError("busy")
+
+    monkeypatch.setattr(oln.history_store, "insert_tx", wedged)
+    with caplog.at_level("ERROR"):
+        batch.flush_logged()
+    assert "retained for retry" in caplog.text
+    caplog.clear()
+
+    # dropped-buffer failure path: flush raises after the buffer was dropped
+    def raise_after_drop():
+        batch._reset()
+        raise sqlite3.OperationalError("dropped")
+
+    monkeypatch.setattr(batch, "flush", raise_after_drop)
+    with caplog.at_level("ERROR"):
+        batch.flush_logged()
+    assert "buffer was dropped" in caplog.text
+    assert "re-certification required" in caplog.text
+
+
+def test_shutdown_stream_cancels_idle_flusher_before_invalidation(tmp_path):
+    """All three _listen teardown paths share _shutdown_stream: the idle
+    flusher is cancelled AND awaited before the pending batch is flushed and
+    continuity is invalidated, so no late idle flush can land after the gap
+    marker."""
+    hconn = _certified_hconn(tmp_path)
+    batch = oln.ArchiveBatch(hconn, _batch_ctx(), max_txs=1000, max_seconds=999)
+    batch.add(_stream_tx(5, tagged=True))
+
+    async def drive():
+        task = asyncio.get_event_loop().create_task(
+            oln._archive_idle_flush_loop(batch, interval=3600)
+        )
+        await asyncio.sleep(0)  # let the loop start
+        result = await oln._shutdown_stream(task, batch, hconn, network="testnet", stream_open=True)
+        assert result == (None, False)
+        assert task.done()
+
+    _run(drive())
+    # evidence flushed, then continuity invalidated with the flushed bound
+    assert hconn.execute("SELECT count(*) FROM xrpl_txs").fetchone()[0] == 1
+    state = _hs.get_archive_state(hconn, "testnet")
+    assert state.baseline_complete is False
+    assert state.continuity_gap_after == L0 + 105
+    assert not batch.pending
+
+
+def test_shutdown_stream_without_open_stream_only_stops_the_flusher(tmp_path):
+    hconn = _certified_hconn(tmp_path)
+    batch = oln.ArchiveBatch(hconn, _batch_ctx(), max_txs=1000, max_seconds=999)
+    batch.add(_stream_tx(6, tagged=True))
+
+    async def drive():
+        task = asyncio.get_event_loop().create_task(
+            oln._archive_idle_flush_loop(batch, interval=3600)
+        )
+        await asyncio.sleep(0)
+        result = await oln._shutdown_stream(
+            task, batch, hconn, network="testnet", stream_open=False
+        )
+        assert result == (None, False)
+        assert task.done()
+
+    _run(drive())
+    # never-opened stream: no flush, no invalidation
+    assert batch.pending
+    assert _hs.get_archive_state(hconn, "testnet").baseline_complete is True
+
+
 def test_flush_lands_before_continuity_invalidation(tmp_path):
     """The disconnect path flushes pending evidence FIRST, so the recorded gap
     bound reflects the last archived ledger and no observed tx is lost."""
