@@ -25,7 +25,7 @@ jobs:
       contains(github.event.issue.labels.*.name, 'roadmap') ||
       github.event.label.name == 'roadmap'
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
           ref: main
 
@@ -45,5 +45,13 @@ jobs:
             # commits via paths-ignore, and none of this workflow's triggers
             # fire on push, so it cannot retrigger itself.
             git commit -m "docs(README): sync roadmap from issue state"
+            # main can move between checkout and push (deploys, other bots) —
+            # rebase our one doc commit and retry instead of failing the sync.
+            for attempt in 1 2 3; do
+              if git push; then
+                exit 0
+              fi
+              git pull --rebase origin main
+            done
             git push
           fi

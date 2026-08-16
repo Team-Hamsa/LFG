@@ -63,9 +63,20 @@ def fetch_issues() -> list[dict[str, Any]]:
     return issues
 
 
+def escape_title(title: str) -> str:
+    """Make an externally authored issue title safe inside a Markdown link label.
+
+    Collapses line breaks/whitespace and escapes the characters that could
+    close the link label or open new Markdown/HTML constructs — otherwise a
+    title like ``x](https://evil)`` would redirect the generated README link.
+    """
+    flat = " ".join(title.split())
+    return re.sub(r"([\\\[\]<>`])", r"\\\1", flat)
+
+
 def bullet(issue: dict[str, Any], checked: bool) -> str:
     number = issue["number"]
-    title = str(issue["title"]).strip()
+    title = escape_title(str(issue["title"]).strip())
     box = "x" if checked else " "
     line = f"- [{box}] [#{number} — {title}](../../issues/{number})"
     if checked and issue.get("closedAt"):

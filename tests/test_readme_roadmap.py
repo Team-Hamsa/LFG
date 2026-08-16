@@ -84,3 +84,22 @@ def test_repo_readme_carries_markers() -> None:
     text = readme_roadmap.README_PATH.read_text()
     assert readme_roadmap.START_MARK in text
     assert readme_roadmap.END_MARK in text
+
+
+def test_escape_title_neutralizes_link_breakout() -> None:
+    hostile = "x](https://evil.example) [click"
+    escaped = readme_roadmap.escape_title(hostile)
+    # every bracket is backslash-escaped, so none can close the link label
+    assert escaped == r"x\](https://evil.example) \[click"
+
+
+def test_escape_title_collapses_newlines_and_escapes_html() -> None:
+    assert readme_roadmap.escape_title("a\nb\r\n  c") == "a b c"
+    assert readme_roadmap.escape_title("<img> `x` \\y") == r"\<img\> \`x\` \\y"
+
+
+def test_bullet_uses_escaped_title() -> None:
+    issue = {"number": 7, "title": "bad ] title", "state": "OPEN", "closedAt": None}
+    assert readme_roadmap.bullet(issue, checked=False) == (
+        r"- [ ] [#7 — bad \] title](../../issues/7)"
+    )
