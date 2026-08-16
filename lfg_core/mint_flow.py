@@ -209,14 +209,22 @@ class MintSession:
             raise RuntimeError("sponsored sessions do not regenerate payment")
         old_uuid = self.payment_uuid
         self.qr_scanned = False
-        self.payment_uuid = None
         self.payment_push = None
         self.payment_signed = False
         await self.prepare_payment()
         # #152: only mark the old payload stale once a replacement actually
-        # exists — on a failed rebuild the old QR stays the user's only link.
+        # exists — on a failed rebuild the old QR stays the user's only link
+        # (payment_uuid is deliberately NOT cleared up front, so a failure
+        # here leaves the old uuid cancellable by the session-cancel path).
         if old_uuid and self.payment_uuid and self.payment_uuid != old_uuid:
             self.stale_payment_uuids.append(old_uuid)
+        # Cancel raced the payload-creation await: the session is already
+        # terminal, so the fresh payload belongs to nobody — park it in the
+        # stale list (the regenerate handler drains it) instead of leaving a
+        # signable QR outside every cancellation set.
+        if self.state in TERMINAL_STATES and self.payment_uuid:
+            self.stale_payment_uuids.append(self.payment_uuid)
+            self.payment_uuid = None
 
     def cancel(self) -> bool:
         """Back out of the pay screen (issue #141): mark the session terminal

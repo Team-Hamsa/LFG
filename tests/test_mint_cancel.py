@@ -497,3 +497,41 @@ def test_mint_regenerate_marks_superseded_uuid_stale(monkeypatch):
         assert s.stale_payment_uuids == ["OLDUUID"]
 
     _run(scenario())
+
+
+def test_mint_regenerate_failure_keeps_old_uuid_cancellable(monkeypatch):
+    """A failed rebuild must leave the old (still-signable) payload tracked
+    on payment_uuid so the session-cancel path can DELETE it."""
+
+    async def no_payload(destination, **kw):
+        return None
+
+    async def scenario():
+        s = mint_flow.MintSession("55", "rA", platform="discord")
+        s.payment_uuid = "OLDUUID"
+        monkeypatch.setattr(mint_flow.xumm_ops, "create_payment_payload", no_payload)
+        await s.regenerate_payment()
+        assert s.payment_uuid == "OLDUUID"
+        assert s.stale_payment_uuids == []
+
+    _run(scenario())
+
+
+def test_mint_regeneration_after_cancel_parks_new_payload_stale(monkeypatch):
+    """cancel() completing during prepare_payment's await must not leave the
+    replacement payload signable outside every cancellation set."""
+
+    async def scenario():
+        s = mint_flow.MintSession("55", "rA", platform="discord")
+        s.payment_uuid = "OLDUUID"
+
+        async def cancel_mid_build(destination, **kw):
+            s.state = mint_flow.CANCELLED
+            return {"xumm_url": "https://xumm.app/sign/NEW", "uuid": "NEWUUID"}
+
+        monkeypatch.setattr(mint_flow.xumm_ops, "create_payment_payload", cancel_mid_build)
+        await s.regenerate_payment()
+        assert s.payment_uuid is None
+        assert sorted(s.stale_payment_uuids) == ["NEWUUID", "OLDUUID"]
+
+    _run(scenario())

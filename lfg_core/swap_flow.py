@@ -200,6 +200,13 @@ class SwapSession:
             self.payment_link = payload["xumm_url"]
             self.payment_push = payload.get("push")
             self.payment_uuid = new_uuid  # #152: kept for cancel
+            # Cancel raced the payload-creation await: the session is already
+            # terminal, so this fresh payload belongs to nobody — park it in
+            # the stale list (the regenerate handler drains it) instead of
+            # leaving a signable QR outside every cancellation set.
+            if self.state in TERMINAL_STATES and self.payment_uuid:
+                self.stale_payment_uuids.append(self.payment_uuid)
+                self.payment_uuid = None
             return True
         return False
 

@@ -540,3 +540,22 @@ def test_swap_regenerate_kills_superseded_payload_immediately(dev_auth, monkeypa
         assert s.stale_payment_uuids == []
 
     _run(scenario())
+
+
+def test_swap_regeneration_after_cancel_parks_new_payload_stale(monkeypatch):
+    """cancel() completing during the payload-creation await must not leave
+    the replacement payload signable outside every cancellation set."""
+    s = _session()
+    s.fee_amount = "6"
+    s.fee_destination = "rBotWallet"
+    s.fee_currency = "XRP"
+    s.fee_issuer = None
+
+    async def cancel_mid_build(destination, **kw):
+        s.state = swap_flow.CANCELLED  # cancel lands during the await
+        return {"xumm_url": "https://xumm.app/sign/NEW", "uuid": "NEWUUID"}
+
+    monkeypatch.setattr(xumm_ops, "create_payment_payload", cancel_mid_build)
+    _run(s.regenerate_payment())
+    assert s.payment_uuid is None
+    assert "NEWUUID" in s.stale_payment_uuids
