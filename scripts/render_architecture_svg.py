@@ -113,16 +113,26 @@ def chip(x: float, y: float, w: float, h: float, label: str, size: int = 11) -> 
     ]
 
 
-def count_chip_rows(flow_modules: list[str], avail_w: float, chip_gap: float, size: int) -> int:
-    """How many wrapped rows the flow chips need inside the lfg_core card."""
-    rows, used = 1, 0.0
+def layout_chips(
+    flow_modules: list[str], avail_w: float, chip_gap: float, size: int
+) -> list[tuple[int, float, float]]:
+    """One (row, x_offset, width) per chip — the single wrap/size authority.
+
+    Both the card-height computation and the rendering pass consume this, so
+    they can never disagree. A chip wider than the row is clamped to the full
+    row width, keeping it inside the card instead of spilling into the
+    listener column.
+    """
+    out: list[tuple[int, float, float]] = []
+    row, used = 0, 0.0
     for name in flow_modules:
-        cw = text_w(name, size) + 22
+        cw = min(text_w(name, size) + 22, avail_w)
         if used and used + cw > avail_w:
-            rows += 1
+            row += 1
             used = 0.0
+        out.append((row, used, cw))
         used += cw + chip_gap
-    return rows
+    return out
 
 
 def build_svg(flow_modules: list[str]) -> str:
@@ -142,7 +152,8 @@ def build_svg(flow_modules: list[str]) -> str:
     chip_h, chip_gap, chip_size = 24, 8, 11
     core_x, core_w = PAD, 560
     chip_avail_w = core_w - 20.0 - 16.0
-    chip_rows = count_chip_rows(flow_modules, chip_avail_w, chip_gap, chip_size)
+    chips = layout_chips(flow_modules, chip_avail_w, chip_gap, chip_size)
+    chip_rows = (chips[-1][0] + 1) if chips else 1
     core_h = max(128, 56 + chip_rows * chip_h + (chip_rows - 1) * chip_gap + 16)
     delta = core_h - 128
     h_total = H + delta
@@ -216,18 +227,13 @@ def build_svg(flow_modules: list[str]) -> str:
         f'fill="{MUTED}">shared domain library · XRPL + Xaman ops · '
         "trait engine · rarity</text>"
     )
-    # Flow-module chips, wrapped inside the card (sized above to always fit).
+    # Flow-module chips, positioned by the same layout the card was sized by.
     cx0 = core_x + 20.0
-    cx = cx0
-    cy = core_y + 56.0
-    for name in flow_modules:
-        cw = text_w(name, chip_size) + 22
-        if cx + cw > core_x + core_w - 16:
-            cx = cx0
-            cy += chip_h + chip_gap
-        assert cy + chip_h <= core_y + core_h - 10, "flow chips overflow lfg_core box"
-        parts += chip(cx, cy, cw, chip_h, name, size=chip_size)
-        cx += cw + chip_gap
+    cy0 = core_y + 56.0
+    for name, (row, x_off, cw) in zip(flow_modules, chips, strict=True):
+        parts += chip(
+            cx0 + x_off, cy0 + row * (chip_h + chip_gap), cw, chip_h, name, size=chip_size
+        )
 
     # Right column: listener process group + per-network SQLite stores
     side_x, side_w = 613, W - PAD - 613  # 258

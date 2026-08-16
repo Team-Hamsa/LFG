@@ -82,3 +82,13 @@ def test_many_flow_modules_grow_the_canvas_instead_of_failing() -> None:
 
     assert height(many_svg := svg) > height(base)
     assert all(f"very_long_flow_module_name_{i}_flow" in many_svg for i in range(12))
+
+
+def test_oversized_chip_is_clamped_inside_the_card() -> None:
+    monster = "an_absurdly_long_flow_module_name_that_exceeds_any_single_row_width_flow"
+    chips = ras.layout_chips([monster, "mint_flow"], 100.0, 8, 11)
+    assert chips[0][2] == 100.0  # clamped to the full row width
+    assert chips[1][0] == chips[0][0] + 1  # next chip wraps to a new row
+    # rendering must not raise and must include both chips
+    svg = ras.build_svg([monster, "mint_flow"])
+    assert monster in svg and "mint_flow" in svg
