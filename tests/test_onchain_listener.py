@@ -1403,6 +1403,73 @@ def test_flush_advances_claim_even_when_record_history_committed_the_row_first(
     assert audits == 1
 
 
+@pytest.mark.parametrize(
+    ("raw", "expected"),
+    [("0", 200), ("-5", 200), ("nan", 200), ("bogus", 200), ("300", 300), (None, 200)],
+)
+def test_flush_threshold_env_falls_back_on_invalid_values(monkeypatch, raw, expected):
+    if raw is None:
+        monkeypatch.delenv("X_TEST_FLUSH", raising=False)
+    else:
+        monkeypatch.setenv("X_TEST_FLUSH", raw)
+    assert oln._read_flush_threshold("X_TEST_FLUSH", 200, minimum=1, cast=int) == expected
+
+
+def test_archive_batch_retention_cap_breach_fails_closed_and_bounds_memory(tmp_path, monkeypatch):
+    """A wedged DB cannot grow the retained batch without limit. On breaching
+    the cap the batch invalidates archive continuity (same fail-closed posture
+    as a stream disconnect) BEFORE dropping the buffer, so dropped evidence can
+    never coexist with a usable archive."""
+    hconn = _certified_hconn(tmp_path)
+    batch = oln.ArchiveBatch(
+        hconn, _batch_ctx(), max_txs=1000, max_seconds=999, max_retained=2, retry_seconds=0.0
+    )
+    for i in range(3):
+        batch.add(_stream_tx(i, tagged=True))
+
+    def wedged(*a, **k):
+        raise sqlite3.OperationalError("disk I/O error")
+
+    monkeypatch.setattr(oln.history_store, "insert_tx", wedged)
+    with pytest.raises(sqlite3.OperationalError):
+        batch.flush()
+    # buffer dropped (memory bounded), continuity broken, gate closed
+    assert not batch.pending
+    state = _hs.get_archive_state(hconn, "testnet")
+    assert state.baseline_complete is False
+    assert state.continuity_gap_reason is not None
+    assert not sponsored_mint.archive_is_usable(
+        str(tmp_path / "history.db"), network="testnet", now=200
+    )
+
+
+def test_archive_batch_backs_off_between_failed_flushes(tmp_path, monkeypatch):
+    hconn = _certified_hconn(tmp_path)
+    batch = oln.ArchiveBatch(
+        hconn, _batch_ctx(), max_txs=1, max_seconds=0.0, max_retained=100, retry_seconds=60.0
+    )
+    batch.add(_stream_tx(1, tagged=True))
+    assert batch.due() is True
+
+    def wedged(*a, **k):
+        raise sqlite3.OperationalError("busy")
+
+    real_insert = _hs.insert_tx
+    monkeypatch.setattr(oln.history_store, "insert_tx", wedged)
+    batch.flush_logged()
+    assert batch.pending
+    # within the retry window: not due, despite count/time thresholds passing
+    assert batch.due() is False
+    # once the window elapses, retry is due again
+    batch._failed_flush_monotonic -= 120
+    assert batch.due() is True
+    monkeypatch.setattr(oln.history_store, "insert_tx", real_insert)
+    batch.flush()
+    assert not batch.pending
+    assert batch._failed_flush_monotonic is None
+    assert hconn.execute("SELECT count(*) FROM xrpl_txs").fetchone()[0] == 1
+
+
 def test_flush_lands_before_continuity_invalidation(tmp_path):
     """The disconnect path flushes pending evidence FIRST, so the recorded gap
     bound reflects the last archived ledger and no observed tx is lost."""

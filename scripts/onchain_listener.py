@@ -80,8 +80,44 @@ SIDE_CALL_ATTEMPTS = 2
 # the listener's serial event loop. Accumulate in memory and flush at most one
 # commit per window. The 900s SPONSORED_MINT_ARCHIVE_MAX_LAG_SECONDS freshness
 # gate has three orders of magnitude of headroom over a 1-2s flush window.
-ARCHIVE_FLUSH_MAX_TXS = int(os.environ.get("ARCHIVE_FLUSH_MAX_TXS", "200"))
-ARCHIVE_FLUSH_MAX_SECONDS = float(os.environ.get("ARCHIVE_FLUSH_MAX_SECONDS", "1.0"))
+def _read_flush_threshold(name: str, default: float, *, minimum: float, cast: Any) -> Any:
+    """Read a batching threshold from the environment, falling back to the
+    default (with a warning) on unparseable, non-finite or below-minimum
+    values — a zero/negative flush window would spin the idle loop on the
+    listener's event loop, and a parse error must not kill the listener
+    before it ever subscribes."""
+    raw = os.environ.get(name)
+    if raw is None:
+        return cast(default)
+    try:
+        value = cast(raw)
+    except (TypeError, ValueError):
+        logging.warning("%s=%r is not a valid number; using default %s", name, raw, default)
+        return cast(default)
+    if not math.isfinite(value) or value < minimum:
+        logging.warning(
+            "%s=%r is below the minimum %s; using default %s", name, raw, minimum, default
+        )
+        return cast(default)
+    return value
+
+
+ARCHIVE_FLUSH_MAX_TXS = _read_flush_threshold("ARCHIVE_FLUSH_MAX_TXS", 200, minimum=1, cast=int)
+ARCHIVE_FLUSH_MAX_SECONDS = _read_flush_threshold(
+    "ARCHIVE_FLUSH_MAX_SECONDS", 1.0, minimum=0.001, cast=float
+)
+# Retained-evidence bound: a wedged history DB (disk full, SQLITE_IOERR) makes
+# every flush fail while the whole-network stream keeps feeding add(), so the
+# retained batch cannot be allowed to grow without limit.
+ARCHIVE_FLUSH_MAX_RETAINED_TXS = _read_flush_threshold(
+    "ARCHIVE_FLUSH_MAX_RETAINED_TXS", 10000, minimum=1, cast=int
+)
+# After a failed flush, wait this long before retrying: without it every
+# subsequent transaction re-runs insert_tx over the whole retained buffer
+# (quadratic retry cost against a DB that is already failing).
+ARCHIVE_FLUSH_RETRY_SECONDS = _read_flush_threshold(
+    "ARCHIVE_FLUSH_RETRY_SECONDS", 5.0, minimum=0.0, cast=float
+)
 
 
 class ArchiveBatch:
@@ -112,16 +148,25 @@ class ArchiveBatch:
         *,
         max_txs: int | None = None,
         max_seconds: float | None = None,
+        max_retained: int | None = None,
+        retry_seconds: float | None = None,
     ) -> None:
         self._hconn = hconn
         self._ctx = ctx
         self._max_txs = ARCHIVE_FLUSH_MAX_TXS if max_txs is None else max_txs
         self._max_seconds = ARCHIVE_FLUSH_MAX_SECONDS if max_seconds is None else max_seconds
+        self._max_retained = (
+            ARCHIVE_FLUSH_MAX_RETAINED_TXS if max_retained is None else max_retained
+        )
+        self._retry_seconds = (
+            ARCHIVE_FLUSH_RETRY_SECONDS if retry_seconds is None else retry_seconds
+        )
         self._tagged: list[dict[str, Any]] = []
         self._cursor: tuple[int, int] | None = None  # (ledger_index, close_time)
         self._observed_at: int | None = None
         self._count = 0
         self._first_add_monotonic: float | None = None
+        self._failed_flush_monotonic: float | None = None
 
     @property
     def pending(self) -> bool:
@@ -155,6 +200,13 @@ class ArchiveBatch:
 
     def due(self) -> bool:
         if not self.pending:
+            return False
+        if self._failed_flush_monotonic is not None and (
+            time.monotonic() - self._failed_flush_monotonic < self._retry_seconds
+        ):
+            # Backoff after a failed flush: without it, every subsequent
+            # transaction would re-run insert_tx over the whole retained
+            # buffer against a DB that is already failing.
             return False
         if self._count >= self._max_txs:
             return True
@@ -203,6 +255,17 @@ class ArchiveBatch:
             # INSERT OR IGNORE, so retry is idempotent). Until a flush lands,
             # the heartbeat stays frozen and the freshness gate closes.
             self._hconn.rollback()
+            self._failed_flush_monotonic = time.monotonic()
+            if len(self._tagged) > self._max_retained:
+                # Sustained failure overflowed the retained-evidence cap. The
+                # memory bound has to win, but silently dropping tagged
+                # evidence while a later flush re-advances the heartbeat would
+                # fail OPEN — so break archive continuity FIRST (the same
+                # fail-closed posture as a stream disconnect: the gate stays
+                # shut until an operator re-certifies, and the recovery paging
+                # sweep recovers the dropped evidence from the chain), then
+                # drop the buffer.
+                self._break_continuity()
             raise
         self._reset()
         # Observe EVERY buffered tagged tx, not just the ones whose INSERT was
@@ -222,6 +285,29 @@ class ArchiveBatch:
                 # derived claim state; startup replay repairs a lost race.
                 logging.exception("sponsored acceptance observation deferred for %s", tx["hash"])
 
+    def _break_continuity(self) -> None:
+        network = str(self._ctx.get("network") or "")
+        logging.critical(
+            "[%s] eligibility flush failures overflowed the retained-evidence cap "
+            "(%d tagged rows); invalidating archive continuity and dropping the buffer — "
+            "re-certification (or --catch-up-from-gap) is required before the next campaign",
+            network,
+            len(self._tagged),
+        )
+        try:
+            history_store.invalidate_archive_continuity(
+                self._hconn,
+                network=network,
+                reason="sustained eligibility flush failures overflowed the retained-evidence cap",
+            )
+        except Exception:
+            # The invalidation write can fail on the same wedged DB. Evidence
+            # admission still fails closed regardless: the heartbeat has not
+            # advanced since the first failed flush, so freshness decays until
+            # the sponsored-mint gate closes on its own.
+            logging.exception("[%s] archive continuity invalidation itself failed", network)
+        self._reset()
+
     def flush_logged(self) -> None:
         """Flush, downgrading failure to a log line (state stays retained)."""
         try:
@@ -238,12 +324,13 @@ class ArchiveBatch:
         self._observed_at = None
         self._count = 0
         self._first_add_monotonic = None
+        self._failed_flush_monotonic = None
 
 
 async def _archive_idle_flush_loop(batch: ArchiveBatch, interval: float | None = None) -> None:
     """Flush a quiet batch so a lull in stream traffic can neither strand a
     partial batch nor let the heartbeat go stale between messages."""
-    period = ARCHIVE_FLUSH_MAX_SECONDS if interval is None else interval
+    period = max(ARCHIVE_FLUSH_MAX_SECONDS if interval is None else interval, 0.001)
     while True:
         await asyncio.sleep(period)
         if batch.due():
