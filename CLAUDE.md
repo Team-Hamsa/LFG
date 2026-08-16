@@ -205,7 +205,22 @@ auto-restart hook is retired.
 | `lfg-index-mainnet` | `stg-index-testnet` (moved out of prod) |
 | `lfg-snapshot` (cron 00:10) | `stg-snapshot` (cron 00:10, testnet) |
 | `lfg-sourcetag` (cron 00:20) | not registered yet (post-merge ops step) |
+| `lfg-market-sweep` (cron 03:30) | `stg-market-sweep` (cron 03:30, testnet) |
 | `lfg-deployer` | `stg-deployer` |
+
+`lfg-market-sweep` / `stg-market-sweep` (#288) run `scripts/backfill_market.py
+--network <net> --report` nightly at 03:30 UTC (deliberately offset from the
+00:10 snapshot and 00:20-00:25 economy crons; pm2 `cron_restart` has no
+timezone option and fires in host-local time — the deploy box runs Etc/UTC,
+so keep it on UTC or adjust the cron slots) to self-heal
+`market_listings`/`buy_offers` drift from listener downtime. Like every cron
+entry they park "stopped" between runs — normal, not a failure. Drift is
+greppable in the pm2 log (`backfill_market drift:` at WARNING when non-zero)
+and appended as JSON lines to `reports/backfill_market_drift.log`
+(gitignored). Adding an app to an ecosystem file does not start it on a
+running stack — going live is an ops step per stack:
+`pm2 start ecosystem.prod.config.js --only lfg-market-sweep && pm2 save`
+(staging: `--only stg-market-sweep`).
 
 The X auto-poster (#41, `run_x.py`) is not yet in the pm2 tables — it goes live via the ops checklist on #41 (`lfg-x`, with `stop_exit_codes: [0]` so the X_ENABLED-off exit(0) parks instead of thrashing).
 

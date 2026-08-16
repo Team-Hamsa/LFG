@@ -32,6 +32,8 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+import datetime
+import json
 import logging
 import os
 import sqlite3
@@ -280,25 +282,84 @@ def _build_parser() -> argparse.ArgumentParser:
     choices = ("testnet", "mainnet")
     default = config.XRPL_NETWORK if config.XRPL_NETWORK in choices else None
     parser.add_argument("--network", choices=choices, default=default, required=default is None)
+    parser.add_argument(
+        "--report",
+        action="store_true",
+        help="append a JSON drift record to reports/backfill_market_drift.log "
+        "(for the scheduled pm2 cron run, #288)",
+    )
     return parser
 
 
+# Scheduled-run lock safety (#288): the live listener writes the same
+# per-network onchain_<net>.db; a busy_timeout waits out a brief write lock
+# instead of crashing the cron with 'database is locked'. Threaded into
+# nft_index.init_db so it applies BEFORE the schema DDL — otherwise
+# initialization itself could still die at sqlite's 5s default.
+BUSY_TIMEOUT_MS = 30000
+
+
+def _log_summary(network: str, counts: dict[str, int]) -> None:
+    """Emit the human summary via logging plus one machine-greppable drift
+    line -- WARNING when any drift counter is non-zero, INFO otherwise."""
+    logging.info(
+        "backfill_market summary: net=%s characters_swept=%d traits_swept=%d "
+        "live_listings=%d live_bids=%d",
+        network,
+        counts["characters_swept"],
+        counts["traits_swept"],
+        counts["live_listings"],
+        counts["live_bids"],
+    )
+    drift = (
+        counts["closed_stale"]
+        + counts["bids_closed_stale"]
+        + counts["fetch_failures"]
+        + counts["bid_fetch_failures"]
+    )
+    level = logging.WARNING if drift else logging.INFO
+    logging.log(
+        level,
+        "backfill_market drift: net=%s closed_stale=%d bids_closed_stale=%d "
+        "fetch_failures=%d bid_fetch_failures=%d live_listings=%d",
+        network,
+        counts["closed_stale"],
+        counts["bids_closed_stale"],
+        counts["fetch_failures"],
+        counts["bid_fetch_failures"],
+        counts["live_listings"],
+    )
+
+
+def _append_drift_report(path: str, network: str, counts: dict[str, int]) -> None:
+    """Append one JSON line per run to the (gitignored) reports/ drift log."""
+    parent = os.path.dirname(path)
+    if parent:
+        os.makedirs(parent, exist_ok=True)
+    record = {
+        "ts": datetime.datetime.now(datetime.timezone.utc).isoformat(),
+        "network": network,
+        **counts,
+    }
+    with open(path, "a", encoding="utf-8") as fh:
+        fh.write(json.dumps(record) + "\n")
+
+
 async def _amain() -> int:
+    logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
     args = _build_parser().parse_args()
 
-    conn = nft_index.init_db(nft_index.index_db_path(args.network))
+    conn = nft_index.init_db(nft_index.index_db_path(args.network), busy_timeout_ms=BUSY_TIMEOUT_MS)
     counts = await backfill_market(conn)
 
-    print(f"Network: {args.network}  DB: {nft_index.index_db_path(args.network)}")
-    print(f"  Characters swept: {counts['characters_swept']}")
-    print(f"  Traits swept: {counts['traits_swept']}")
-    print(f"  Live listings: {counts['live_listings']}")
-    print(f"  Closed stale: {counts['closed_stale']}")
-    print(
-        f"  Live bids: {counts['live_bids']} (closed stale: {counts['bids_closed_stale']}, "
-        f"fetch failures: {counts['bid_fetch_failures']})"
-    )
-    print(f"  Fetch failures (stale-close exempt): {counts['fetch_failures']}")
+    logging.info("Network: %s  DB: %s", args.network, nft_index.index_db_path(args.network))
+    _log_summary(args.network, counts)
+    if args.report:
+        _append_drift_report(
+            os.path.join(REPO_ROOT, "reports", "backfill_market_drift.log"),
+            args.network,
+            counts,
+        )
     return 0
 
 
