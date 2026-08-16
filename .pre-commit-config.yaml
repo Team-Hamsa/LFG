@@ -46,6 +46,13 @@ repos:
         files: ^(trait_config\.yaml|layers/)
         pass_filenames: false
 
+      - id: check-repo-layout
+        name: check README repository layout
+        entry: .venv/bin/python scripts/check_repo_layout.py
+        language: system
+        pass_filenames: false
+        always_run: true
+
       - id: audit-layer-dimensions
         name: audit layer dimensions (1080x1080)
         # layers/ is gitignored, so file filters never match — scan the
