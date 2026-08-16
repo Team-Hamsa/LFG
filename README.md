@@ -67,7 +67,7 @@ Short walkthroughs of each core flow:
 <img src="assets/hackathon_loc.svg" alt="Hackathon code growth bar" width="728">
 </div>
 
-> **Baseline: code written before the June 21, 2026 Make Waves hackathon began**, measured from `e296308` (2026-06-19, 12,080 lines) by `git diff --numstat` over `.py`/`.js`/`.css`/`.html`, excluding docs, data files (CSV/JSON manifests), dependency lists, and the legacy/backup trees. Regenerated on every push to `main`.
+> **Baseline: Code written before the June 21 Make Waves hackathon began** measured from `e296308` (2026-06-19, 12,080 lines) by `git diff --numstat` over `.py`/`.js`/`.css`/`.html`, excluding docs, data files (CSV/JSON manifests), dependency lists, and the legacy/backup trees. Regenerated on every push to `main`.
 <!-- hackathon-loc:end -->
 
 <div align="center">
