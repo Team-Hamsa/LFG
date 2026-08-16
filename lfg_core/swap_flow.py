@@ -149,6 +149,9 @@ class SwapSession:
         self.error: str | None = None
         self.results: list[dict[str, Any]] = []  # one dict per re-crafted NFT
         self.payment_link: str | None = None  # set when an upfront modify fee is due
+        # #152: XUMM uuid of the live fee payload, so a session cancel can
+        # best-effort DELETE it (stale QR no longer signable in Xaman).
+        self.payment_uuid: str | None = None
         # #212: push delivery state of the fee payment payload
         # ("sent" | "failed" | None) for honest client messaging.
         self.payment_push: str | None = None
@@ -188,6 +191,7 @@ class SwapSession:
         if payload:
             self.payment_link = payload["xumm_url"]
             self.payment_push = payload.get("push")
+            self.payment_uuid = payload.get("uuid")  # #152: kept for cancel
             return True
         return False
 
