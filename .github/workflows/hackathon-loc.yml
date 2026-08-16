@@ -25,6 +25,12 @@ jobs:
       - name: Update README LoC block
         run: python3 scripts/hackathon_loc.py
 
+      - name: Demo GIF staleness report (advisory)
+        # Advisory only — exits 0 unless a README-referenced GIF is missing
+        # from disk. Prints a per-GIF lag table when webapp/client/ has moved
+        # past the captures by more than the grace window.
+        run: python3 scripts/check_demo_staleness.py
+
       - name: Update repo-vitals dashboard
         run: python3 -m scripts.readme_dashboard
 
