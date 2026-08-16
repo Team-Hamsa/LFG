@@ -1116,3 +1116,269 @@ def test_reconnect_cannot_resurrect_an_uncovered_gap(tmp_path):
     assert not sponsored_mint.archive_is_usable(
         str(tmp_path / "history.db"), network="testnet", now=200
     )
+
+
+# ---------------------------------------------------------------------------
+# #333 — batched eligibility-archive commits (ArchiveBatch)
+# ---------------------------------------------------------------------------
+
+GEN = "testnet-ledger-one"
+
+
+def _certified_hconn(tmp_path, name="history.db"):
+    hconn = _hs.init_history_db(str(tmp_path / name))
+    _hs.record_archive_baseline(
+        hconn,
+        network="testnet",
+        genesis_hash=GEN,
+        ledger_min=_hs.EARLIEST_AVAILABLE_LEDGER,
+        ledger_max=L0 + 50,
+        provenance="external-audit",
+        completed_at=100,
+    )
+    return hconn
+
+
+def _batch_ctx(genesis_hash=GEN):
+    return {
+        "network": "testnet",
+        "genesis_hash": genesis_hash,
+        "source_tag": config.SOURCE_TAG,
+        "nft_issuer": "rOurIssuer",
+        "issuer_hex": "00" * 20,
+        "brix_issuer": "unused",
+        "brix_hex": "unused",
+        "numbers": {},
+    }
+
+
+def _stream_tx(i, tagged=False):
+    tx = {
+        "TransactionType": "Payment",
+        "Account": f"rWallet{i}",
+        "hash": f"{i:064X}",
+        "ledger_index": L0 + 100 + i,
+        "date": 800_000_000 + i,
+        "validated": True,
+        "meta": {"TransactionResult": "tesSUCCESS"},
+    }
+    if tagged:
+        tx["SourceTag"] = config.SOURCE_TAG
+    return tx
+
+
+class _CommitCountingConn:
+    """sqlite3.Connection.commit is read-only; count commits via delegation."""
+
+    def __init__(self, conn):
+        self._conn = conn
+        self.commits = 0
+
+    def commit(self):
+        self.commits += 1
+        self._conn.commit()
+
+    def __getattr__(self, name):
+        return getattr(self._conn, name)
+
+
+def test_archive_batch_flushes_by_count_with_single_commit(tmp_path):
+    hconn = _CommitCountingConn(_certified_hconn(tmp_path))
+    batch = oln.ArchiveBatch(hconn, _batch_ctx(), max_txs=5, max_seconds=999)
+    for i in range(4):
+        batch.add(_stream_tx(i, tagged=(i == 0)))
+        assert batch.due() is False
+    batch.add(_stream_tx(4))
+    assert batch.due() is True
+    batch.flush()
+    assert hconn.commits == 1, "one flush = one commit"
+    assert hconn.execute("SELECT count(*) FROM xrpl_txs").fetchone()[0] == 1
+    state = _hs.get_archive_state(hconn, "testnet")
+    assert state.validated_ledger_index == L0 + 104
+    assert batch.due() is False and not batch.pending
+
+
+def test_archive_batch_flushes_by_time(tmp_path):
+    hconn = _certified_hconn(tmp_path)
+    batch = oln.ArchiveBatch(hconn, _batch_ctx(), max_txs=1000, max_seconds=0.0)
+    batch.add(_stream_tx(1))
+    assert batch.due() is True
+    batch.flush()
+    assert _hs.get_archive_state(hconn, "testnet").validated_ledger_index == L0 + 101
+
+
+def test_archive_batch_failed_flush_leaves_heartbeat_unadvanced_and_retries(tmp_path, monkeypatch):
+    """Evidence and freshness fail together: a failed flush rolls back the
+    tagged rows AND the heartbeat, so the freshness gate closes as the
+    heartbeat ages past SPONSORED_MINT_ARCHIVE_MAX_LAG_SECONDS; a later
+    successful flush persists the retained evidence atomically."""
+    hconn = _certified_hconn(tmp_path)
+    batch = oln.ArchiveBatch(hconn, _batch_ctx(), max_txs=1, max_seconds=999)
+    before = _hs.get_archive_state(hconn, "testnet")
+    batch.add(_stream_tx(1, tagged=True))
+
+    real_rvl = _hs.record_validated_ledger
+
+    def boom(*a, **k):
+        raise sqlite3.OperationalError("disk I/O error")
+
+    monkeypatch.setattr(oln.history_store, "record_validated_ledger", boom)
+    with pytest.raises(sqlite3.OperationalError):
+        batch.flush()
+    # rolled back: no evidence, no heartbeat advance
+    assert hconn.execute("SELECT count(*) FROM xrpl_txs").fetchone()[0] == 0
+    after = _hs.get_archive_state(hconn, "testnet")
+    assert after.heartbeat_at == before.heartbeat_at
+    # with the heartbeat frozen, the freshness gate closes once max lag passes
+    lag = config.SPONSORED_MINT_ARCHIVE_MAX_LAG_SECONDS
+    assert not sponsored_mint.archive_is_usable(
+        str(tmp_path / "history.db"),
+        network="testnet",
+        now=(after.heartbeat_at or 100) + lag + 61,
+    )
+    # the batch retained its state and a healthy retry lands everything
+    assert batch.pending
+    monkeypatch.setattr(oln.history_store, "record_validated_ledger", real_rvl)
+    batch.flush()
+    assert hconn.execute("SELECT count(*) FROM xrpl_txs").fetchone()[0] == 1
+    assert _hs.get_archive_state(hconn, "testnet").validated_ledger_index == L0 + 101
+
+
+def test_archive_batch_stamps_heartbeat_with_last_observation_time(tmp_path, monkeypatch):
+    hconn = _certified_hconn(tmp_path)
+    batch = oln.ArchiveBatch(hconn, _batch_ctx(), max_txs=1000, max_seconds=999)
+    monkeypatch.setattr(oln.time, "time", lambda: 5000)
+    batch.add(_stream_tx(1))
+    monkeypatch.setattr(oln.time, "time", lambda: 5003)
+    batch.add(_stream_tx(2))
+    # flush happens much later — the heartbeat must NOT claim flush-time currency
+    monkeypatch.setattr(oln.time, "time", lambda: 9999)
+    batch.flush()
+    state = _hs.get_archive_state(hconn, "testnet")
+    assert state.heartbeat_at == 5003
+    assert state.validated_ledger_index == L0 + 102
+
+
+def test_archive_batch_cursor_is_highest_in_window(tmp_path):
+    hconn = _certified_hconn(tmp_path)
+    batch = oln.ArchiveBatch(hconn, _batch_ctx(), max_txs=1000, max_seconds=999)
+    for i in (7, 3, 9, 1):
+        batch.add(_stream_tx(i))
+    batch.flush()
+    state = _hs.get_archive_state(hconn, "testnet")
+    assert state.validated_ledger_index == L0 + 109
+    # tx_unix_time applies the ripple-epoch offset to the tx `date` field
+    assert state.validated_close_time == 800_000_009 + 946_684_800
+    # a later flush with only lower ledgers cannot regress the cursor
+    batch.add(_stream_tx(2))
+    batch.flush()
+    assert _hs.get_archive_state(hconn, "testnet").validated_ledger_index == L0 + 109
+
+
+def test_archive_batch_uncertified_path_persists_tagged_rows_without_heartbeat(tmp_path):
+    hconn = _hs.init_history_db(str(tmp_path / "history.db"))
+    batch = oln.ArchiveBatch(hconn, _batch_ctx(genesis_hash=""), max_txs=1000, max_seconds=999)
+    batch.add(_stream_tx(1, tagged=True))
+    batch.add(_stream_tx(2))
+    batch.flush()
+    assert hconn.execute("SELECT count(*) FROM xrpl_txs").fetchone()[0] == 1
+    assert _hs.get_archive_state(hconn, "testnet") is None
+
+
+def test_archive_batch_skips_unvalidated_and_hashless(tmp_path):
+    hconn = _certified_hconn(tmp_path)
+    batch = oln.ArchiveBatch(hconn, _batch_ctx(), max_txs=1000, max_seconds=999)
+    tx = _stream_tx(1, tagged=True)
+    tx["validated"] = False
+    batch.add(tx)
+    tx2 = _stream_tx(2, tagged=True)
+    del tx2["hash"]
+    batch.add(tx2)
+    assert not batch.pending
+    batch.flush()
+    assert hconn.execute("SELECT count(*) FROM xrpl_txs").fetchone()[0] == 0
+
+
+def test_archive_batch_observes_sponsored_acceptance_only_for_new_rows(tmp_path, monkeypatch):
+    hconn = _certified_hconn(tmp_path)
+    calls = []
+    monkeypatch.setattr(
+        oln.sponsored_mint,
+        "observe_sponsored_acceptance",
+        lambda tx, meta, network: calls.append(tx["hash"]),
+    )
+    batch = oln.ArchiveBatch(hconn, _batch_ctx(), max_txs=1000, max_seconds=999)
+    batch.add(_stream_tx(1, tagged=True))
+    batch.flush()
+    batch.add(_stream_tx(1, tagged=True))  # duplicate hash — INSERT OR IGNORE
+    batch.add(_stream_tx(3, tagged=True))
+    batch.flush()
+    assert calls == [_stream_tx(1)["hash"], _stream_tx(3)["hash"]]
+
+
+def test_flush_lands_before_continuity_invalidation(tmp_path):
+    """The disconnect path flushes pending evidence FIRST, so the recorded gap
+    bound reflects the last archived ledger and no observed tx is lost."""
+    hconn = _certified_hconn(tmp_path)
+    batch = oln.ArchiveBatch(hconn, _batch_ctx(), max_txs=1000, max_seconds=999)
+    batch.add(_stream_tx(5, tagged=True))
+    oln._flush_and_mark_disconnected(batch, hconn, network="testnet")
+    assert hconn.execute("SELECT count(*) FROM xrpl_txs").fetchone()[0] == 1
+    state = _hs.get_archive_state(hconn, "testnet")
+    assert state.baseline_complete is False
+    assert state.continuity_gap_after == L0 + 105
+    assert not batch.pending
+
+
+def test_idle_flush_loop_flushes_a_quiet_batch(tmp_path):
+    hconn = _certified_hconn(tmp_path)
+    batch = oln.ArchiveBatch(hconn, _batch_ctx(), max_txs=1000, max_seconds=0.01)
+    batch.add(_stream_tx(1, tagged=True))
+
+    async def drive():
+        task = asyncio.get_event_loop().create_task(
+            oln._archive_idle_flush_loop(batch, interval=0.01)
+        )
+        try:
+            for _ in range(100):
+                await asyncio.sleep(0.01)
+                if not batch.pending:
+                    break
+        finally:
+            task.cancel()
+
+    _run(drive())
+    assert not batch.pending
+    assert hconn.execute("SELECT count(*) FROM xrpl_txs").fetchone()[0] == 1
+
+
+def test_dispatch_stream_tx_batches_instead_of_committing_inline(tmp_path, monkeypatch):
+    """With a batch supplied, _dispatch_stream_tx/process_stream_tx must not
+    touch the history DB per-tx — evidence waits for the flush."""
+    hconn = _certified_hconn(tmp_path)
+    batch = oln.ArchiveBatch(hconn, _batch_ctx(), max_txs=1000, max_seconds=999)
+
+    def no_inline(*a, **k):
+        raise AssertionError("per-tx archive call on the batched path")
+
+    monkeypatch.setattr(oln, "_archive_eligibility_tx", no_inline)
+    tx = _stream_tx(1, tagged=True)
+    tx["TransactionType"] = "NFTokenMint"
+    tx["Issuer"] = "rForeignIssuer"
+    _run(
+        oln._dispatch_stream_tx(
+            _conn(),
+            tx,
+            collection_issuer="rOurIssuer",
+            fetch_token=_none_token,
+            fetch_meta=_none_meta,
+            is_ours=lambda _t: False,
+            history_conn=hconn,
+            history_ctx=_batch_ctx(),
+            archive_batch=batch,
+        )
+    )
+    assert hconn.execute("SELECT count(*) FROM xrpl_txs").fetchone()[0] == 0
+    assert batch.pending
+    batch.flush()
+    assert hconn.execute("SELECT count(*) FROM xrpl_txs").fetchone()[0] == 1

@@ -19,6 +19,7 @@ import logging
 import math
 import os
 import sys
+import time
 from collections.abc import Callable
 from typing import Any
 
@@ -72,6 +73,196 @@ SIDE_CALL_TIMEOUT = _read_positive_timeout("LISTENER_SIDE_CALL_TIMEOUT", "30")
 # clio/IPFS stall usually clears immediately, and a retry is far cheaper than
 # leaving the tx's index/economy state to the next backfill.
 SIDE_CALL_ATTEMPTS = 2
+
+
+# Batched eligibility-archive commits (#333): the certified-archive path used
+# to pay one synchronous fsync per streamed transaction (~2.2ms measured) on
+# the listener's serial event loop. Accumulate in memory and flush at most one
+# commit per window. The 900s SPONSORED_MINT_ARCHIVE_MAX_LAG_SECONDS freshness
+# gate has three orders of magnitude of headroom over a 1-2s flush window.
+ARCHIVE_FLUSH_MAX_TXS = int(os.environ.get("ARCHIVE_FLUSH_MAX_TXS", "200"))
+ARCHIVE_FLUSH_MAX_SECONDS = float(os.environ.get("ARCHIVE_FLUSH_MAX_SECONDS", "1.0"))
+
+
+class ArchiveBatch:
+    """In-memory accumulator for the eligibility archive's per-tx writes.
+
+    `add()` buffers tagged-transaction evidence plus the highest
+    `(ledger_index, close_time)` cursor seen and the wall-clock time the last
+    contributing transaction was OBSERVED. `flush()` writes everything in ONE
+    sqlite transaction — evidence rows and the `record_validated_ledger`
+    cursor/heartbeat advance commit atomically, so the heartbeat can never
+    persist past evidence that failed to. A failed flush rolls back AND
+    retains the batch for retry: freshness then decays until the
+    sponsored-mint gate closes (fail-closed by construction, closing the old
+    per-tx fail-open where dropped evidence never blocked the heartbeat).
+
+    Crash durability is deliberately not attempted here: a listener restart
+    already invalidates archive continuity (`_verify_archive_connection`), so
+    losing an unflushed batch to a hard kill can never yield a
+    usable-but-incomplete archive.
+
+    Uncertified path (`ctx["genesis_hash"]` empty): tagged rows still persist
+    on flush; no cursor/heartbeat is ever written — same as before."""
+
+    def __init__(
+        self,
+        hconn: Any,
+        ctx: dict[str, Any],
+        *,
+        max_txs: int | None = None,
+        max_seconds: float | None = None,
+    ) -> None:
+        self._hconn = hconn
+        self._ctx = ctx
+        self._max_txs = ARCHIVE_FLUSH_MAX_TXS if max_txs is None else max_txs
+        self._max_seconds = ARCHIVE_FLUSH_MAX_SECONDS if max_seconds is None else max_seconds
+        self._tagged: list[dict[str, Any]] = []
+        self._cursor: tuple[int, int] | None = None  # (ledger_index, close_time)
+        self._observed_at: int | None = None
+        self._count = 0
+        self._first_add_monotonic: float | None = None
+
+    @property
+    def pending(self) -> bool:
+        return bool(self._tagged) or self._cursor is not None
+
+    def add(self, tx: dict[str, Any]) -> None:
+        """Buffer one normalized stream tx (same filters as the old per-tx path)."""
+        from lfg_core import config
+
+        if tx.get("validated") is not True or not tx.get("hash"):
+            return
+        if tx.get("SourceTag") == config.SOURCE_TAG:
+            self._tagged.append(dict(tx))
+        ledger_index = tx.get("ledger_index")
+        close_time = history_events.tx_unix_time(tx)
+        if (
+            isinstance(ledger_index, int)
+            and not isinstance(ledger_index, bool)
+            and ledger_index >= 0
+            and isinstance(close_time, int)
+            and close_time >= 0
+        ):
+            if self._cursor is None or ledger_index > self._cursor[0]:
+                self._cursor = (ledger_index, close_time)
+            # Honest heartbeat: stamp with the time this tx was OBSERVED, not
+            # a later flush time — the archive never claims currency it lacks.
+            self._observed_at = int(time.time())
+        self._count += 1
+        if self._first_add_monotonic is None:
+            self._first_add_monotonic = time.monotonic()
+
+    def due(self) -> bool:
+        if not self.pending:
+            return False
+        if self._count >= self._max_txs:
+            return True
+        return (
+            self._first_add_monotonic is not None
+            and time.monotonic() - self._first_add_monotonic >= self._max_seconds
+        )
+
+    def flush(self) -> None:
+        """Persist the batch in one transaction; retain state on failure."""
+        from lfg_core import config
+
+        if not self.pending:
+            self._reset()
+            return
+        network = str(self._ctx.get("network") or "")
+        genesis_hash = str(self._ctx.get("genesis_hash") or "").strip()
+        inserted: list[dict[str, Any]] = []
+        try:
+            for tx in self._tagged:
+                if history_store.insert_tx(
+                    self._hconn,
+                    tx_hash=str(tx["hash"]),
+                    ledger_index=tx.get("ledger_index"),
+                    close_time=history_events.tx_unix_time(tx),
+                    tx_type=str(tx.get("TransactionType", "")),
+                    account=tx.get("Account"),
+                    source_tag=tx.get("SourceTag"),
+                    raw_json=_json.dumps(tx, sort_keys=True),
+                ):
+                    inserted.append(tx)
+            if self._cursor is not None and genesis_hash:
+                history_store.record_validated_ledger(
+                    self._hconn,
+                    network=network,
+                    genesis_hash=genesis_hash,
+                    ledger_index=self._cursor[0],
+                    close_time=self._cursor[1],
+                    source_tag=int(self._ctx.get("source_tag", config.SOURCE_TAG)),
+                    observed_at=self._observed_at,
+                    commit=False,
+                )
+            self._hconn.commit()
+        except Exception:
+            # Atomic failure: evidence AND heartbeat roll back together, and
+            # the batch is kept so the next flush retries it (insert_tx is
+            # INSERT OR IGNORE, so retry is idempotent). Until a flush lands,
+            # the heartbeat stays frozen and the freshness gate closes.
+            self._hconn.rollback()
+            raise
+        self._reset()
+        for tx in inserted:
+            try:
+                sponsored_mint.observe_sponsored_acceptance(
+                    tx, tx.get("meta") or {}, network=network
+                )
+            except Exception:
+                # Raw eligibility evidence is more fundamental than its
+                # derived claim state; startup replay repairs a lost race.
+                logging.exception("sponsored acceptance observation deferred for %s", tx["hash"])
+
+    def flush_logged(self) -> None:
+        """Flush, downgrading failure to a log line (state stays retained)."""
+        try:
+            self.flush()
+        except Exception:
+            logging.exception(
+                "[%s] eligibility archive flush failed; batch retained for retry",
+                self._ctx.get("network"),
+            )
+
+    def _reset(self) -> None:
+        self._tagged.clear()
+        self._cursor = None
+        self._observed_at = None
+        self._count = 0
+        self._first_add_monotonic = None
+
+
+async def _archive_idle_flush_loop(batch: ArchiveBatch, interval: float | None = None) -> None:
+    """Flush a quiet batch so a lull in stream traffic can neither strand a
+    partial batch nor let the heartbeat go stale between messages."""
+    period = ARCHIVE_FLUSH_MAX_SECONDS if interval is None else interval
+    while True:
+        await asyncio.sleep(period)
+        if batch.due():
+            batch.flush_logged()
+
+
+def _flush_and_mark_disconnected(
+    batch: ArchiveBatch | None,
+    hconn: Any,
+    *,
+    network: str,
+    at: int | None = None,
+) -> None:
+    """Disconnect path: land pending evidence FIRST, then invalidate continuity
+    — the recorded gap bound then reflects the last archived ledger, and no
+    observed transaction is silently dropped on the way out."""
+    if batch is not None:
+        batch.flush_logged()
+    current = history_store.get_archive_state(hconn, network)
+    _mark_stream_disconnected(
+        hconn,
+        network=network,
+        after_ledger=current.validated_ledger_index if current else None,
+        at=at,
+    )
 
 
 class StreamStalled(Exception):
@@ -308,6 +499,7 @@ async def _dispatch_stream_tx(
     is_ours: Callable[[dict[str, Any]], bool],
     history_conn: Any,
     history_ctx: dict[str, Any],
+    archive_batch: ArchiveBatch | None = None,
 ) -> None:
     """Archive eligibility first, then apply collection-only optimizations."""
 
@@ -316,7 +508,10 @@ async def _dispatch_stream_tx(
         and tx.get("Issuer")
         and tx["Issuer"] != collection_issuer
     ):
-        _archive_eligibility_tx(history_conn, tx, history_ctx)
+        if archive_batch is not None:
+            archive_batch.add(tx)
+        else:
+            _archive_eligibility_tx(history_conn, tx, history_ctx)
         return
     await process_stream_tx(
         conn,
@@ -326,6 +521,7 @@ async def _dispatch_stream_tx(
         is_ours=is_ours,
         history_conn=history_conn,
         history_ctx=history_ctx,
+        archive_batch=archive_batch,
     )
 
 
@@ -338,6 +534,7 @@ async def process_stream_tx(
     is_ours: Callable[[dict[str, Any]], bool],
     history_conn: Any = None,
     history_ctx: dict[str, Any] | None = None,
+    archive_batch: ArchiveBatch | None = None,
 ) -> None:
     """Apply one normalized stream tx to BOTH the per-nft_id index and the
     trait-economy tables. The single per-message seam the live loop drives,
@@ -361,7 +558,11 @@ async def process_stream_tx(
         # was never archived, and archive_is_usable independently gates on
         # freshness), so log and carry on rather than dropping index work.
         try:
-            _archive_eligibility_tx(history_conn, tx, history_ctx)
+            if archive_batch is not None:
+                # Batched path (#333): buffer only — no per-tx sqlite work.
+                archive_batch.add(tx)
+            else:
+                _archive_eligibility_tx(history_conn, tx, history_ctx)
         except Exception:
             logging.exception(
                 "[%s] eligibility archiving failed for %s; continuing with index/market apply",
@@ -536,6 +737,7 @@ async def _listen(network: str, issuer: str, taxon: int, clio: str) -> None:
         "distributor": config.BRIX_DISTRIBUTOR_ADDRESS,
         "numbers": numbers,
     }
+    archive_batch = ArchiveBatch(hconn, history_ctx)
     backoff = RECONNECT_BASE
     async with aiohttp.ClientSession() as http:
 
@@ -555,6 +757,7 @@ async def _listen(network: str, issuer: str, taxon: int, clio: str) -> None:
 
         while True:
             stream_open = False
+            idle_flusher: asyncio.Task[None] | None = None
             try:
                 async with AsyncWebsocketClient(clio) as client:
                     await asyncio.wait_for(
@@ -578,6 +781,9 @@ async def _listen(network: str, issuer: str, taxon: int, clio: str) -> None:
                     _verify_archive_connection(hconn, history_ctx, snapshot)
                     logging.info(f"[{network}] subscribed to verified tx stream on {clio}")
                     backoff = RECONNECT_BASE
+                    # Idle backstop (#333): a quiet stream must not strand a
+                    # partial batch and let the heartbeat go stale.
+                    idle_flusher = asyncio.create_task(_archive_idle_flush_loop(archive_batch))
                     async for msg in _iter_with_watchdog(client):
                         tx = _normalize_stream_tx(dict(msg))
                         if tx is None:
@@ -591,15 +797,18 @@ async def _listen(network: str, issuer: str, taxon: int, clio: str) -> None:
                             is_ours=is_ours,
                             history_conn=hconn,
                             history_ctx=history_ctx,
+                            archive_batch=archive_batch,
                         )
+                        if archive_batch.due():
+                            # A failed flush is retained and retried; it must
+                            # not tear down the stream (that would force a
+                            # full re-certification for a transient sqlite
+                            # error) — the frozen heartbeat already fails the
+                            # sponsored-mint gate closed.
+                            archive_batch.flush_logged()
             except Exception as e:
                 if stream_open:
-                    current = history_store.get_archive_state(hconn, network)
-                    _mark_stream_disconnected(
-                        hconn,
-                        network=network,
-                        after_ledger=current.validated_ledger_index if current else None,
-                    )
+                    _flush_and_mark_disconnected(archive_batch, hconn, network=network)
                     stream_open = False
                 logging.warning(f"[{network}] stream error: {e}; reconnecting in {backoff}s")
                 await asyncio.sleep(backoff)
@@ -613,24 +822,16 @@ async def _listen(network: str, issuer: str, taxon: int, clio: str) -> None:
                 # fast as clio would accept, with no ceiling. Mark the gap and
                 # back off exactly like the error path.
                 if stream_open:
-                    current = history_store.get_archive_state(hconn, network)
-                    _mark_stream_disconnected(
-                        hconn,
-                        network=network,
-                        after_ledger=current.validated_ledger_index if current else None,
-                    )
+                    _flush_and_mark_disconnected(archive_batch, hconn, network=network)
                     stream_open = False
                 logging.warning(f"[{network}] stream closed cleanly; reconnecting in {backoff}s")
                 await asyncio.sleep(backoff)
                 backoff = min(backoff * 2, RECONNECT_MAX)
             finally:
+                if idle_flusher is not None:
+                    idle_flusher.cancel()
                 if stream_open:
-                    current = history_store.get_archive_state(hconn, network)
-                    _mark_stream_disconnected(
-                        hconn,
-                        network=network,
-                        after_ledger=current.validated_ledger_index if current else None,
-                    )
+                    _flush_and_mark_disconnected(archive_batch, hconn, network=network)
 
 
 async def _amain() -> int:

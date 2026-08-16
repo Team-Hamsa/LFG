@@ -431,8 +431,14 @@ def record_validated_ledger(
     close_time: int,
     source_tag: int | None = None,
     observed_at: int | None = None,
+    commit: bool = True,
 ) -> None:
-    """Advance the validated-ledger cursor and liveness heartbeat monotonically."""
+    """Advance the validated-ledger cursor and liveness heartbeat monotonically.
+
+    `commit=False` leaves the write inside the caller's open transaction so a
+    batched flush can commit evidence rows and this heartbeat advance
+    atomically (#333) — the heartbeat must never persist past evidence that
+    failed to."""
 
     network, genesis_hash = _validate_archive_identity(network, genesis_hash)
     source_tag = _validate_source_tag(source_tag)
@@ -472,7 +478,8 @@ def record_validated_ledger(
         """,
         (network, genesis_hash, source_tag, ledger_index, close_time, timestamp, timestamp),
     )
-    conn.commit()
+    if commit:
+        conn.commit()
 
 
 def invalidate_archive_continuity(
