@@ -4,11 +4,13 @@
 
 import os
 
-from dotenv import load_dotenv
-
 from lfg_core.db_path import app_db_path
+from lfg_core.envload import load_dotenv_unless_skipped
 
-load_dotenv()
+# The pytest suite opts out of the deployed .env via LFG_SKIP_DOTENV=1 in the
+# root conftest.py (#323) — see lfg_core/envload.py. Runtime (main.py / pm2)
+# never sets the var, so it still loads normally.
+load_dotenv_unless_skipped()
 
 
 def _require(name: str) -> str:
