@@ -119,7 +119,7 @@ BROKER_ALLOWLIST_PATH=<path-to-json>                        # optional (#131); e
 BRIX_CURRENCY_HEX=<hex-currency-code>                       # optional; trait-economy BRIX pair (shop/trait listings/on-ramp), defaults to SWAP_OFFER_CURRENCY_HEX — never TOKEN_* (LFGO)
 BRIX_ISSUER=<xrpl-address>                                  # optional; trait-economy BRIX issuer, defaults to SWAP_OFFER_ISSUER
 MARKET_BID_TTL_SECONDS=604800                               # optional (#283); on-ledger Expiration for in-app bids (native buy offers), default 7 days
-SPONSORED_MINT_EXCLUDED_WALLETS=<addr,addr>                 # sponsored free mint; operator/test wallets that may never be sponsored (signing + token issuer are ALWAYS excluded in code, but do not satisfy the readiness audit — it requires this list set explicitly)
+SPONSORED_MINT_EXCLUDED_WALLETS=<addr,addr>                 # sponsored free mint; operator/test wallets that may never be sponsored (signing + token issuer are ALWAYS excluded in code, but do not satisfy the readiness audit — it requires this list set explicitly, non-empty, every entry a well-formed classic address)
 SPONSORED_MINT_MAINNET_GENESIS_HASH=<ledger-32570-hash>         # optional; pins history_mainnet.db to a chain identity. Unset = the archive's own recorded genesis is trusted (still fail-closed: an uncertified archive admits nobody)
 SPONSORED_MINT_TESTNET_GENESIS_HASH=<ledger-32570-hash>         # optional; same, for history_testnet.db
 SPONSORED_MINT_ARCHIVE_MAX_LAG_SECONDS=900                  # optional; how stale the eligibility archive's listener heartbeat may be before admission fails closed (default 900)
@@ -222,10 +222,12 @@ live. A code rollback must preserve the `free_mint_claims` and
 Sponsored admission supports isolated staging rehearsal on `testnet` and
 production on `mainnet`; other network names are rejected. The hard campaign
 limits remain 3600 seconds and 100 slots on both networks, and production still
-starts OFF. Readiness requires both `rHU8nu9zSnCpkL3gShG4aGawHzaRVfmKwQ` and
-`rHaMsAjoAN21s1XG5TCAM6ErAefzrggsHf` to be explicitly configured in
-`SPONSORED_MINT_EXCLUDED_WALLETS`; automatic signer/issuer exclusions do not
-satisfy that check. Sponsored admission also stays disabled until startup
+starts OFF. Readiness requires `SPONSORED_MINT_EXCLUDED_WALLETS` to be
+explicitly configured as a non-empty list of well-formed XRPL classic
+addresses (the audit validates shape, and its report surfaces the
+configured/effective sets for operator review; the concrete wallets for this
+deployment are prescribed in `docs/ops/sponsored-free-mint.md`); automatic
+signer/issuer exclusions do not satisfy that check. Sponsored admission also stays disabled until startup
 recovery succeeds, while paid minting remains available after a recovery fault.
 Offer reconciliation is authoritative only when strict XRPL offer parsing
 accepts the amount and destination shapes; every per-claim error is persisted,

@@ -16,17 +16,13 @@ from decimal import Decimal, InvalidOperation
 from typing import Any
 from urllib.parse import quote
 
+from xrpl.core.addresscodec import is_valid_classic_address
+
 REPO_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
 sys.path.insert(0, REPO_ROOT)
 
 from lfg_core import config, db_path, history_store, sponsored_mint, xrpl_ops  # noqa: E402
 
-REQUIRED_OPERATOR_WALLETS = frozenset(
-    {
-        "rHU8nu9zSnCpkL3gShG4aGawHzaRVfmKwQ",
-        "rHaMsAjoAN21s1XG5TCAM6ErAefzrggsHf",
-    }
-)
 _APP_TABLE_COLUMNS = {
     "free_mint_campaigns": {
         "id",
@@ -368,17 +364,22 @@ async def build_report(
         "target": 300,
     }
 
+    # Structural check (#334): the operator must have consciously declared a
+    # non-empty, well-formed exclusion list. WHICH wallets belong in it is a
+    # deployment fact, prescribed in docs/ops/sponsored-free-mint.md — the
+    # operator reviews the reported sets, the audit only validates shape.
     configured_exclusions = {
         value.strip() for value in config.SPONSORED_MINT_EXCLUDED_WALLETS if value.strip()
     }
-    required = REQUIRED_OPERATOR_WALLETS
-    exclusions_ok = required <= configured_exclusions
+    invalid_exclusions = {
+        value for value in configured_exclusions if not is_valid_classic_address(value)
+    }
+    exclusions_ok = bool(configured_exclusions) and not invalid_exclusions
     checks["exclusions"] = {
         "ok": exclusions_ok,
         "configured": sorted(configured_exclusions),
         "effective": sorted(effective_exclusions),
-        "required_members_present": sorted(required & configured_exclusions),
-        "missing_required": sorted(required - configured_exclusions),
+        "invalid": sorted(invalid_exclusions),
     }
 
     required_balance = debt_amount + Decimal(config.MINT_PRICE_LFGO) * possible_admissions
@@ -450,9 +451,9 @@ def _human_lines(report: dict[str, Any]) -> list[str]:
         (
             "exclusions",
             "configured exclusions="
-            f"{','.join(checks['exclusions'].get('configured', []))} "
-            "missing required="
-            f"{','.join(checks['exclusions'].get('missing_required', [])) or 'none'}",
+            f"{','.join(checks['exclusions'].get('configured', [])) or 'none'} "
+            "invalid="
+            f"{','.join(checks['exclusions'].get('invalid', [])) or 'none'}",
         ),
         (
             "balance",
