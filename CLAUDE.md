@@ -39,6 +39,9 @@ Install all dependencies with:
 ### Pre-push gate (BLOCKING)
 `.pre-commit-config.yaml` runs at the **pre-push** stage: ruff (--fix), ruff-format, mypy (from the
 project `.venv`, real dep types), gitleaks, pytest, validate-trait-config,
+check-repo-layout (`scripts/check_repo_layout.py` — the README "Repository
+layout" tree must name only paths that exist, and every `lfg_core/*_flow.py`
+module and `surfaces/<pkg>/` package must appear in it),
 audit-layer-dimensions (`scripts/audit_layer_dimensions.py` — every `.png` /
 `.gif` / `.mp4` / `.webm` under the gitignored `layers/` working tree must be
 exactly 1080×1080; the compose pipeline does no scaling, so an undersized layer
