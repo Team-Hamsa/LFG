@@ -75,14 +75,25 @@ def parse_default(flag: str, config_text: str) -> str:
     match — the drift signal that the flag moved or changed shape.
     """
     patterns = (
-        rf'{re.escape(flag)}_DEFAULT\s*=\s*"([^"]*)"',
-        rf'env_flag\(\s*"{re.escape(flag)}",\s*"([^"]*)"\s*\)',
-        rf'os\.getenv\(\s*"{re.escape(flag)}",\s*"([^"]*)"\s*\)',
+        # a real assignment at line start, not a mention in a comment/string
+        rf'^\s*{re.escape(flag)}_DEFAULT\s*=\s*"([^"]*)"',
+        rf'\benv_flag\(\s*"{re.escape(flag)}",\s*"([^"]*)"\s*\)',
+        rf'\bos\.getenv\(\s*"{re.escape(flag)}",\s*"([^"]*)"\s*\)',
     )
-    for pattern in patterns:
-        match = re.search(pattern, config_text)
-        if match:
-            return match.group(1)
+    found: set[str] = set()
+    for line in config_text.splitlines():
+        if line.lstrip().startswith("#"):
+            continue
+        for pattern in patterns:
+            for match in re.finditer(pattern, line):
+                found.add(match.group(1))
+    if len(found) > 1:
+        raise SystemExit(
+            f"conflicting defaults for {flag} in {CONFIG_PATH}: {sorted(found)!r} — "
+            "a stale _DEFAULT constant or duplicated literal must be reconciled"
+        )
+    if found:
+        return found.pop()
     raise SystemExit(f"default for {flag} not found in {CONFIG_PATH} — update readme_features.py")
 
 

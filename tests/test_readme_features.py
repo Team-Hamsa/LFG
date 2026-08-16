@@ -72,3 +72,19 @@ def test_repo_readme_block_is_current() -> None:
     """The checked-in README must already carry the freshly generated block."""
     readme = readme_features.README_PATH.read_text()
     assert readme_features.replace_block(readme, readme_features.render(CONFIG_TEXT)) == readme
+
+
+def test_parse_default_ignores_comment_lines() -> None:
+    config = '# X_ENABLED_DEFAULT = "1"  (old example)\nX_ENABLED_DEFAULT = "0"\n'
+    assert readme_features.parse_default("X_ENABLED", config) == "0"
+
+
+def test_parse_default_rejects_conflicting_values() -> None:
+    config = 'X_ENABLED_DEFAULT = "1"\nfoo = os.getenv("X_ENABLED", "0")\n'
+    with pytest.raises(SystemExit):
+        readme_features.parse_default("X_ENABLED", config)
+
+
+def test_parse_default_agreeing_duplicates_are_fine() -> None:
+    config = 'X_ENABLED_DEFAULT = "0"\nfoo = os.getenv("X_ENABLED", "0")\n'
+    assert readme_features.parse_default("X_ENABLED", config) == "0"
