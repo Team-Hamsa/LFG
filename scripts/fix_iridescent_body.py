@@ -241,6 +241,19 @@ def _sync_mirrors(
     index_conn.commit()
 
 
+def _edition_has_unreadable_live_row(index_conn: sqlite3.Connection, edition: int) -> bool:
+    """True when the edition has a live index row whose attributes are empty/
+    unreadable — i.e. the on-ledger state is NOT provably canonical."""
+    row = index_conn.execute(
+        "SELECT 1 FROM onchain_nfts"
+        " WHERE nft_number = ? AND (is_burned IS NULL OR is_burned = 0)"
+        "   AND (attributes_json IS NULL OR attributes_json = '' OR attributes_json = '[]')"
+        " LIMIT 1",
+        (edition,),
+    ).fetchone()
+    return row is not None
+
+
 def _journal(network: str, results: list[Result]) -> None:
     try:
         os.makedirs(REPORTS_DIR, exist_ok=True)
@@ -283,12 +296,29 @@ async def run(
                         + (f" — {res.detail}" if res.detail else "")
                     )
         # App-DB-only editions: LFG.Body is stale but no live index token
-        # carries the typo (index record unreadable/empty, or already
-        # canonical — e.g. a rerun after a partial mirror failure). A pure
-        # local-DB repair; no ledger op is needed or attempted.
+        # carries the typo. Rewrite ONLY when that is provable — the edition
+        # has no live index row at all, or its live rows' attributes are
+        # readable and already canonical. A live row with empty/unreadable
+        # attributes may still hide the typo on-ledger; rewriting LFG.Body
+        # then would destroy the discovery key while the ledger typo
+        # survives, so those editions are skipped loudly instead.
         covered = {t.nft_number for t in targets.tokens if t.nft_number is not None}
         for edition in targets.editions:
             if edition in covered:
+                continue
+            if _edition_has_unreadable_live_row(index_conn, edition):
+                res = Result(
+                    "",
+                    edition,
+                    "skipped_unreadable_metadata",
+                    "live index row has empty/unreadable attributes — the ledger may still"
+                    " carry the typo, so LFG.Body is left as the discovery key; repair the"
+                    " index metadata first (backfill_onchain.py / import_bithomp_csv.py),"
+                    " then re-run",
+                )
+                results.append(res)
+                logging.warning(f"edition {edition}: {res.status} — {res.detail}")
+                print(f"  edition {res.edition}: {res.status} — {res.detail}")
                 continue
             if apply:
                 app_conn.execute(
@@ -324,7 +354,8 @@ def main() -> int:
         )
         return 2
     results = asyncio.run(run(args.network, args.apply))
-    return 1 if any(r.status in ("failed", "indeterminate") for r in results) else 0
+    bad = ("failed", "indeterminate", "skipped_unreadable_metadata")
+    return 1 if any(r.status in bad for r in results) else 0
 
 
 if __name__ == "__main__":

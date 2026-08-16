@@ -313,3 +313,24 @@ def test_rerun_converges_after_partial_mirror_failure(dbs, monkeypatch):
         (body,) = ac.execute("SELECT Body FROM LFG WHERE nft_number=64").fetchone()
     assert body == GOOD
     assert _run(index_db, app_db, apply=True) == []
+
+
+def test_unreadable_live_index_row_blocks_app_only_rewrite(dbs, monkeypatch):
+    """A live index row with empty/unreadable attributes may still hide the
+    on-ledger typo: LFG.Body must NOT be rewritten (it is the discovery key),
+    the edition is reported skipped_unreadable_metadata, and a rerun still
+    finds it."""
+    index_db, app_db = dbs
+    with sqlite3.connect(index_db) as ic:
+        ic.execute("UPDATE onchain_nfts SET attributes_json='[]' WHERE nft_id=?", (LIVE_ID,))
+        ic.commit()
+    calls = _stub_ledger(monkeypatch)
+    results = _run(index_db, app_db, apply=True)
+    assert [r.status for r in results] == ["skipped_unreadable_metadata"]
+    assert calls["modify"] == [] and calls["upload"] == []
+    with sqlite3.connect(app_db) as ac:
+        (body,) = ac.execute("SELECT Body FROM LFG WHERE nft_number=64").fetchone()
+    assert body == BAD  # discovery key preserved
+    # a rerun still discovers the edition (nothing was destroyed)
+    results2 = _run(index_db, app_db, apply=True)
+    assert [r.status for r in results2] == ["skipped_unreadable_metadata"]
