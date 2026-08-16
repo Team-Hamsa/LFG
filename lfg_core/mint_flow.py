@@ -430,6 +430,141 @@ class UnitResult:
     mint_definitively_failed: bool = False
 
 
+async def _finalize_minted_unit(
+    *,
+    nft_number: int,
+    nft_id: str,
+    discord_id: str,
+    wallet_address: str,
+    metadata_url: str,
+    image_url: str | None,
+    video_url: str | None,
+    traits_dict: dict[str, str],
+    body: str,
+    attributes: list[Any],
+    mint_tx_hash: str | None,
+    platform: str,
+    push_user_token: str | None,
+    return_url: dict[str, str] | None,
+    on_state: Callable[[str], None] | None,
+    on_offer_created: Callable[[str | None, str | None], Awaitable[None]] | None,
+) -> UnitResult:
+    """The shared post-mint tail (#336): record (+ rarity) -> offer -> XUMM
+    accept payload, once a mint is confirmed on-chain. Extracted verbatim from
+    `mint_one_unit` and `_resume_prepared_mint_one_unit`, whose tails had
+    drifted apart twice before being re-synced in 4c485d3. The heads and
+    except blocks of the two callers differ BY DESIGN (compose+sign vs replay
+    of a persisted signed blob; discard-and-release vs keep-everything) and
+    must stay separate."""
+    record: dict[str, Any] = {
+        "nft_number": nft_number,
+        "nft_id": nft_id,
+        "discord_id": discord_id,
+        "owner_address": wallet_address,
+        "metadata_url": metadata_url,
+        "image_url": image_url,
+        "traits": traits_dict,
+        "network": config.XRPL_NETWORK,
+        "body_type": body,
+    }
+    # The mint is on-chain at this point; a DB failure must not stop the
+    # transfer offer from reaching the user.
+    try:
+        saved = await asyncio.to_thread(lambda: record_nft_mint(**record))
+    except Exception:
+        logging.error(f"record_nft_mint raised: {traceback.format_exc()}")
+        saved = False
+    if saved:
+        _reserved_numbers.discard(nft_number)
+
+        def _update_rarity() -> None:
+            conn = rarity.connect()
+            try:
+                for attr in attributes:
+                    rarity.start_boost_clock(conn, body, attr["trait_type"], attr["value"])
+                rarity.start_boost_clock(conn, rarity.BODY_SENTINEL, rarity.BODY_CATEGORY, body)
+                rarity.recalculate_rarity(conn)
+            finally:
+                conn.close()
+
+        try:
+            await asyncio.to_thread(_update_rarity)
+        except Exception:
+            logging.error(f"rarity update failed: {traceback.format_exc()}")
+    else:
+        # Keep the number reserved so it can't be reused this process,
+        # and persist the record for manual recovery.
+        _save_recovery_record(record)
+
+    # Create the transfer offer and the XUMM accept payload
+    if on_state:
+        on_state(CREATING_OFFER)
+    offer_id = await xrpl_ops.create_nft_offer(
+        nft_id, wallet_address, platform=memos.platform_for_surface(platform)
+    )
+    offer_error = (
+        f"NFT minted (ID: {nft_id}) but offer creation failed. Please contact an administrator."
+    )
+    if not offer_id:
+        if on_offer_created is not None:
+            await on_offer_created(None, offer_error)
+        return UnitResult(
+            nft_number=nft_number,
+            nft_id=nft_id,
+            image_url=image_url,
+            video_url=video_url,
+            offer_id=None,
+            accept=None,
+            error=offer_error,
+            traits=traits_dict,
+            body_type=body,
+            mint_tx_hash=mint_tx_hash,
+        )
+    if on_offer_created is not None:
+        # Persist before an acceptance payload can be exposed or pushed.
+        await on_offer_created(offer_id, None)
+
+    accept = await xumm_ops.create_accept_offer_payload(
+        offer_id,
+        return_url=return_url,
+        user_token=push_user_token,
+        platform=memos.platform_for_surface(platform),
+        # The offer is Destination-locked to this wallet; pin the payload
+        # too so a wrong-account signature is refused in Xaman rather than
+        # burning a fee on a tecNO_PERMISSION.
+        account=wallet_address,
+    )
+    if not accept:
+        return UnitResult(
+            nft_number=nft_number,
+            nft_id=nft_id,
+            image_url=image_url,
+            video_url=video_url,
+            offer_id=offer_id,
+            accept=None,
+            error=(
+                f"NFT minted and offer created ({offer_id}) but the XUMM "
+                "request failed. Please accept the offer manually."
+            ),
+            traits=traits_dict,
+            body_type=body,
+            mint_tx_hash=mint_tx_hash,
+        )
+
+    return UnitResult(
+        nft_number=nft_number,
+        nft_id=nft_id,
+        image_url=image_url,
+        video_url=video_url,
+        offer_id=offer_id,
+        accept=accept,
+        error=None,
+        traits=traits_dict,
+        body_type=body,
+        mint_tx_hash=mint_tx_hash,
+    )
+
+
 async def _resume_prepared_mint_one_unit(
     *,
     claim: sponsored_mint.Claim,
@@ -548,112 +683,28 @@ async def _resume_prepared_mint_one_unit(
             image_archive.promote_still(config.XRPL_NETWORK, nft_number, claim.mint_still_token)
         await on_mint_confirmed(nft_number, nft_id, tx_hash, image_url)
 
-        record: dict[str, Any] = {
-            "nft_number": nft_number,
-            "nft_id": nft_id,
-            "discord_id": discord_id,
-            "owner_address": wallet_address,
-            "metadata_url": metadata_url,
-            "image_url": image_url,
-            "traits": traits_dict,
-            "network": config.XRPL_NETWORK,
-            "body_type": body,
-        }
-        try:
-            saved = await asyncio.to_thread(lambda: record_nft_mint(**record))
-        except Exception:
-            logging.error(f"record_nft_mint raised: {traceback.format_exc()}")
-            saved = False
-        if saved:
-            _reserved_numbers.discard(nft_number)
-
-            # Mirror mint_one_unit's saved branch. Omitting this left every
-            # RESUMED sponsored edition out of rarity accounting entirely —
-            # its traits never started a boost clock and shares were never
-            # recalculated, so the odds engine silently diverged from the
-            # minted set by exactly the editions that needed recovery.
-            # Bind a non-optional local for the closure: `body` is narrowed to
-            # str by the guard above, but capturing it widens it back to its
-            # declared str | None (the except block reassigns it).
-            rarity_body: str = body
-
-            def _update_rarity() -> None:
-                conn = rarity.connect()
-                try:
-                    for attr in metadata["attributes"]:
-                        rarity.start_boost_clock(
-                            conn, rarity_body, attr["trait_type"], attr["value"]
-                        )
-                    rarity.start_boost_clock(
-                        conn, rarity.BODY_SENTINEL, rarity.BODY_CATEGORY, rarity_body
-                    )
-                    rarity.recalculate_rarity(conn)
-                finally:
-                    conn.close()
-
-            try:
-                await asyncio.to_thread(_update_rarity)
-            except Exception:
-                logging.error(f"rarity update failed: {traceback.format_exc()}")
-        else:
-            _save_recovery_record(record)
-
-        if on_state:
-            on_state(CREATING_OFFER)
-        offer_id = await xrpl_ops.create_nft_offer(
-            nft_id, wallet_address, platform=memos.platform_for_surface(platform)
-        )
-        if not offer_id:
-            error = (
-                f"NFT minted (ID: {nft_id}) but offer creation failed. "
-                "Please contact an administrator."
-            )
-            await on_offer_created(None, error)
-            return UnitResult(
-                nft_number,
-                nft_id,
-                image_url,
-                None,
-                None,
-                error,
-                video_url=video_url,
-                traits=traits_dict,
-                body_type=body,
-                mint_tx_hash=tx_hash,
-            )
-        await on_offer_created(offer_id, None)
-        accept = await xumm_ops.create_accept_offer_payload(
-            offer_id,
-            return_url=return_url,
-            user_token=push_user_token,
-            platform=memos.platform_for_surface(platform),
-            account=wallet_address,
-        )
-        if not accept:
-            return UnitResult(
-                nft_number,
-                nft_id,
-                image_url,
-                offer_id,
-                None,
-                f"NFT minted and offer created ({offer_id}) but the XUMM request failed. "
-                "Please accept the offer manually.",
-                video_url=video_url,
-                traits=traits_dict,
-                body_type=body,
-                mint_tx_hash=tx_hash,
-            )
-        return UnitResult(
-            nft_number,
-            nft_id,
-            image_url,
-            offer_id,
-            accept,
-            None,
+        # Shared post-mint tail (#336). The rarity update inside was once
+        # omitted here — leaving every RESUMED sponsored edition out of rarity
+        # accounting entirely (no boost clock, no recalculation, restored in
+        # 4c485d3); sharing the tail with mint_one_unit makes that class of
+        # drift structurally impossible.
+        return await _finalize_minted_unit(
+            nft_number=nft_number,
+            nft_id=nft_id,
+            discord_id=discord_id,
+            wallet_address=wallet_address,
+            metadata_url=metadata_url,
+            image_url=image_url,
             video_url=video_url,
-            traits=traits_dict,
-            body_type=body,
+            traits_dict=traits_dict,
+            body=body,
+            attributes=metadata["attributes"],
             mint_tx_hash=tx_hash,
+            platform=platform,
+            push_user_token=push_user_token,
+            return_url=return_url,
+            on_state=on_state,
+            on_offer_created=on_offer_created,
         )
     except Exception as exc:
         logging.error(
@@ -944,112 +995,25 @@ async def mint_one_unit(
         if on_mint:
             await on_mint(nft_number, nft_id, image_cdn_url)
 
-        record: dict[str, Any] = {
-            "nft_number": nft_number,
-            "nft_id": nft_id,
-            "discord_id": discord_id,
-            "owner_address": wallet_address,
-            "metadata_url": metadata_cdn_url,
-            "image_url": image_cdn_url,
-            "traits": traits_dict,
-            "network": config.XRPL_NETWORK,
-            "body_type": body,
-        }
-        # The mint is on-chain at this point; a DB failure must not stop the
-        # transfer offer from reaching the user.
-        try:
-            saved = await asyncio.to_thread(lambda: record_nft_mint(**record))
-        except Exception:
-            logging.error(f"record_nft_mint raised: {traceback.format_exc()}")
-            saved = False
-        if saved:
-            _reserved_numbers.discard(nft_number)
-
-            def _update_rarity() -> None:
-                conn = rarity.connect()
-                try:
-                    for attr in metadata["attributes"]:
-                        rarity.start_boost_clock(conn, body, attr["trait_type"], attr["value"])
-                    rarity.start_boost_clock(conn, rarity.BODY_SENTINEL, rarity.BODY_CATEGORY, body)
-                    rarity.recalculate_rarity(conn)
-                finally:
-                    conn.close()
-
-            try:
-                await asyncio.to_thread(_update_rarity)
-            except Exception:
-                logging.error(f"rarity update failed: {traceback.format_exc()}")
-        else:
-            # Keep the number reserved so it can't be reused this process,
-            # and persist the record for manual recovery.
-            _save_recovery_record(record)
-
-        # 4. Create the transfer offer and the XUMM accept payload
-        if on_state:
-            on_state(CREATING_OFFER)
-        offer_id = await xrpl_ops.create_nft_offer(
-            nft_id, wallet_address, platform=memos.platform_for_surface(platform)
-        )
-        offer_error = (
-            f"NFT minted (ID: {nft_id}) but offer creation failed. Please contact an administrator."
-        )
-        if not offer_id:
-            if on_offer_created is not None:
-                await on_offer_created(None, offer_error)
-            return UnitResult(
-                nft_number=nft_number,
-                nft_id=nft_id,
-                image_url=image_cdn_url,
-                video_url=video_cdn_url,
-                offer_id=None,
-                accept=None,
-                error=offer_error,
-                traits=traits_dict,
-                body_type=body,
-                mint_tx_hash=mint_tx_hash,
-            )
-        if on_offer_created is not None:
-            # Persist before an acceptance payload can be exposed or pushed.
-            await on_offer_created(offer_id, None)
-
-        accept = await xumm_ops.create_accept_offer_payload(
-            offer_id,
-            return_url=return_url,
-            user_token=push_user_token,
-            platform=memos.platform_for_surface(platform),
-            # The offer is Destination-locked to this wallet; pin the payload
-            # too so a wrong-account signature is refused in Xaman rather than
-            # burning a fee on a tecNO_PERMISSION.
-            account=wallet_address,
-        )
-        if not accept:
-            return UnitResult(
-                nft_number=nft_number,
-                nft_id=nft_id,
-                image_url=image_cdn_url,
-                video_url=video_cdn_url,
-                offer_id=offer_id,
-                accept=None,
-                error=(
-                    f"NFT minted and offer created ({offer_id}) but the XUMM "
-                    "request failed. Please accept the offer manually."
-                ),
-                traits=traits_dict,
-                body_type=body,
-                mint_tx_hash=mint_tx_hash,
-            )
-
-        return UnitResult(
+        # 4. Shared post-mint tail (#336): record (+ rarity) -> offer -> XUMM
+        # accept payload.
+        return await _finalize_minted_unit(
             nft_number=nft_number,
             nft_id=nft_id,
+            discord_id=discord_id,
+            wallet_address=wallet_address,
+            metadata_url=metadata_cdn_url,
             image_url=image_cdn_url,
             video_url=video_cdn_url,
-            offer_id=offer_id,
-            accept=accept,
-            error=None,
-            traits=traits_dict,
-            body_type=body,
+            traits_dict=traits_dict,
+            body=body,
+            attributes=metadata["attributes"],
             mint_tx_hash=mint_tx_hash,
+            platform=platform,
+            push_user_token=push_user_token,
+            return_url=return_url,
+            on_state=on_state,
+            on_offer_created=on_offer_created,
         )
 
     except Exception as e:
