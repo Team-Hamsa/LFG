@@ -1301,6 +1301,24 @@ function attachSwapResume(session) {
   return true;
 }
 
+// Greptile #376: kill every poller that renders into the shared flow-panel
+// before attaching a resumed flow. pollMint keeps a 3 s watch alive through
+// offer_ready (waiting for the accept signature) and its only stop guard is
+// flow-panel visibility — a chained market/economy/shop resume keeps that
+// panel visible, so the stale mint tick would repaint its result over the
+// newly attached flow. Generation bumps invalidate ticks already awaiting
+// their fetch; clearTimeout alone cannot.
+function invalidateFlowPolls() {
+  clearTimeout(pollTimer);
+  pollGen++;
+  clearTimeout(bulkPollTimer);
+  bulkPollGen++;
+  clearTimeout(swapPollTimer);
+  ++swapPollGen;
+  clearTimeout(marketFlowTimer);
+  clearTimeout(shopFlowTimer);
+}
+
 // One boot round-trip (#221): GET /api/sessions/active, pick the
 // highest-priority live flow (resume_pure.js), and route it to the existing
 // per-flow poller/renderer. Returns true when a flow resumed. Read-only
@@ -1313,6 +1331,7 @@ async function resumeAnyFlow() {
   const picked = resumePure.pickActiveFlow(sessions);
   if (!picked) return false;
   const { flow, session } = picked;
+  invalidateFlowPolls();
   // A second live flow can't be rendered alongside the winner — arm the
   // one-shot home-landing re-check (see showMintHome) so it surfaces once
   // this one finishes.

@@ -175,3 +175,20 @@ def test_app_js_arms_recheck_and_home_rechecks():
     # one-shot: the flag is cleared BEFORE the re-check so a no-op recheck
     # (nothing live) lands home without looping.
     assert home_body.index("resumeRecheckArmed = false") < home_body.index("resumeAnyFlow()")
+
+
+def test_app_js_resume_invalidates_stale_flow_polls():
+    """Greptile #376 round 2: pollMint keeps watching through offer_ready and
+    only stops when flow-panel hides — a chained market/economy/shop resume
+    keeps that panel visible, so the attach must invalidate every flow-panel
+    poller (generation bumps for the gen-guarded ones) or the stale mint tick
+    repaints over the resumed flow."""
+    src = open(APP_JS).read()
+    resume_body = src.split("async function resumeAnyFlow", 1)[1].split("\n}\n", 1)[0]
+    assert "invalidateFlowPolls()" in resume_body
+    inv = src.split("function invalidateFlowPolls", 1)[1].split("\n}\n", 1)[0]
+    assert "pollGen++" in inv
+    assert "bulkPollGen++" in inv
+    assert "swapPollGen" in inv
+    assert "marketFlowTimer" in inv
+    assert "shopFlowTimer" in inv
