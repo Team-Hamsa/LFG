@@ -1424,15 +1424,10 @@ def test_archive_batch_retention_cap_breach_fails_closed_and_bounds_memory(tmp_p
     batch = oln.ArchiveBatch(
         hconn, _batch_ctx(), max_txs=1000, max_seconds=999, max_retained=2, retry_seconds=0.0
     )
+    # The cap is enforced at add() time, so it holds even while a retry
+    # backoff keeps flush() un-runnable — the 3rd tagged add breaches.
     for i in range(3):
         batch.add(_stream_tx(i, tagged=True))
-
-    def wedged(*a, **k):
-        raise sqlite3.OperationalError("disk I/O error")
-
-    monkeypatch.setattr(oln.history_store, "insert_tx", wedged)
-    with pytest.raises(sqlite3.OperationalError):
-        batch.flush()
     # buffer dropped (memory bounded), continuity broken, gate closed
     assert not batch.pending
     state = _hs.get_archive_state(hconn, "testnet")
@@ -1441,6 +1436,30 @@ def test_archive_batch_retention_cap_breach_fails_closed_and_bounds_memory(tmp_p
     assert not sponsored_mint.archive_is_usable(
         str(tmp_path / "history.db"), network="testnet", now=200
     )
+
+
+def test_archive_batch_cap_holds_during_retry_backoff(tmp_path, monkeypatch):
+    """A wedged DB plus retry backoff must not let add() grow the retained
+    buffer past the cap between flush attempts."""
+    hconn = _certified_hconn(tmp_path)
+    batch = oln.ArchiveBatch(
+        hconn, _batch_ctx(), max_txs=1, max_seconds=0.0, max_retained=2, retry_seconds=600.0
+    )
+    batch.add(_stream_tx(1, tagged=True))
+
+    def wedged(*a, **k):
+        raise sqlite3.OperationalError("busy")
+
+    monkeypatch.setattr(oln.history_store, "insert_tx", wedged)
+    batch.flush_logged()
+    assert batch.pending and batch.due() is False  # in backoff, flush blocked
+    batch.add(_stream_tx(2, tagged=True))
+    assert batch.pending  # cap (2) not yet exceeded
+    batch.add(_stream_tx(3, tagged=True))  # 3rd tagged row breaches the cap
+    assert not batch.pending  # dropped, bounded
+    state = _hs.get_archive_state(hconn, "testnet")
+    assert state.baseline_complete is False
+    assert state.continuity_gap_reason is not None
 
 
 def test_archive_batch_backs_off_between_failed_flushes(tmp_path, monkeypatch):

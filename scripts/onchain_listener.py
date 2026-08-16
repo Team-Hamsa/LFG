@@ -180,6 +180,13 @@ class ArchiveBatch:
             return
         if tx.get("SourceTag") == config.SOURCE_TAG:
             self._tagged.append(dict(tx))
+            if len(self._tagged) > self._max_retained:
+                # The cap must hold while the retry backoff keeps flush()
+                # un-runnable — otherwise a wedged DB lets add() grow the
+                # buffer without limit between attempts. Same fail-closed
+                # breach path as the flush-failure overflow.
+                self._break_continuity()
+                return
         ledger_index = tx.get("ledger_index")
         close_time = history_events.tx_unix_time(tx)
         if (
