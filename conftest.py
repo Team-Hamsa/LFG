@@ -1,11 +1,10 @@
 # conftest.py — repo-root pytest env guard.
-# lfg_core/config.py freezes constants from the environment (via load_dotenv)
-# at first import, and the machine's .env is the LIVE deployment config — e.g.
-# it sets ECONOMY_ENABLED=0 after the mainnet cutover (#113), which broke the
-# tests that assert the enabled default. pytest imports this file before any
-# test module, and load_dotenv() never overrides an already-set variable, so
-# setdefault here pins the test default suite-wide. Explicit shell exports
-# still win (setdefault), so a run can force a value when needed.
+# lfg_core/config.py freezes constants from the environment at first import,
+# and the machine's .env is the LIVE deployment config. Since #323 the suite
+# SKIPS that .env entirely (LFG_SKIP_DOTENV=1 below gates config's
+# load_dotenv()), so the pins here — applied before any test module imports
+# lfg_core — are the suite's environment. Explicit shell exports still win
+# (setdefault), so a run can force a value when needed.
 #
 # config.validate_economy_config now refuses to import when ECONOMY_ENABLED is
 # on while ECONOMY_NETWORK != XRPL_NETWORK (go-live review B5). The machine
@@ -14,6 +13,24 @@
 # networks to testnet here too, giving the suite a coherent enabled+matching
 # posture. (setdefault, so explicit shell exports still win.)
 import os
+
+# --- Isolate the suite from the deployed .env (#323) ---
+# lfg_core/config.py gates its load_dotenv() on LFG_SKIP_DOTENV, so with this
+# set the box's live .env never reaches a test — every pin below (and the
+# shipped defaults) become the suite's whole environment. Because the .env no
+# longer supplies them, the _require(...)-mandatory vars and layer knobs must
+# be pinned here centrally (they used to arrive via per-file env-guard
+# preambles racing the .env; those preambles are now harmless no-ops).
+os.environ.setdefault("LFG_SKIP_DOTENV", "1")
+os.environ.setdefault("XUMM_API_KEY", "test")
+os.environ.setdefault("XUMM_API_SECRET", "test")
+os.environ.setdefault("SEED", "sEdTM1uX8pu2do5XvTnutH6HsouMaM2")  # throwaway testnet seed
+os.environ.setdefault("TOKEN_ISSUER_ADDRESS", "rrrrrrrrrrrrrrrrrrrrrhoLvTp")
+os.environ.setdefault("TOKEN_CURRENCY_HEX", "4C46474F00000000000000000000000000000000")
+os.environ.setdefault("BUNNY_CDN_ACCESS_KEY", "test")
+os.environ.setdefault("BUNNY_CDN_STORAGE_ZONE", "test")
+os.environ.setdefault("LAYER_SOURCE", "local")
+os.environ.setdefault("BUNNY_PULL_ZONE", "nft.pullzone.example")
 
 os.environ.setdefault("ECONOMY_ENABLED", "1")
 os.environ.setdefault("XRPL_NETWORK", "testnet")
