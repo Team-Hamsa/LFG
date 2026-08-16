@@ -91,6 +91,9 @@ class MintSession:
         self.pay_amount: str | None = "0" if sponsored else None
         self.payment_link: str | None = None
         self.payment_uuid: str | None = None  # XUMM payload uuid for scan tracking
+        # #152: uuids of superseded (regenerated-over) payloads, still open at
+        # XUMM until their 15-min expire — kept so cancel can DELETE them too.
+        self.stale_payment_uuids: list[str] = []
         # Whether the payment payload itself was signed in Xaman. Polling of
         # the payment payload stops here (NOT at qr_scanned — the signature,
         # and the rotated push token it carries, lands after the open).
@@ -204,11 +207,16 @@ class MintSession:
         without restarting the whole session (issue #22)."""
         if self.sponsored:
             raise RuntimeError("sponsored sessions do not regenerate payment")
+        old_uuid = self.payment_uuid
         self.qr_scanned = False
         self.payment_uuid = None
         self.payment_push = None
         self.payment_signed = False
         await self.prepare_payment()
+        # #152: only mark the old payload stale once a replacement actually
+        # exists — on a failed rebuild the old QR stays the user's only link.
+        if old_uuid and self.payment_uuid and self.payment_uuid != old_uuid:
+            self.stale_payment_uuids.append(old_uuid)
 
     def cancel(self) -> bool:
         """Back out of the pay screen (issue #141): mark the session terminal

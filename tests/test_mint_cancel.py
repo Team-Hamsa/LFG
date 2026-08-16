@@ -446,3 +446,54 @@ def test_mint_cancel_terminal_session_does_not_touch_payload(monkeypatch):
             app.mint_sessions.pop(s.id, None)
 
     _run(scenario())
+
+
+def test_mint_cancel_cancels_superseded_payloads_too(monkeypatch):
+    """Regenerate-then-cancel (#360 review): the superseded payload stays
+    signable at XUMM, so cancel must DELETE it alongside the live one."""
+    monkeypatch.setattr(app.config, "WEBAPP_DEV_MODE", False)
+    seen = []
+
+    async def fake_cancel(uuid):
+        seen.append(uuid)
+        return True
+
+    monkeypatch.setattr(app.xumm_ops, "cancel_xumm_payload", fake_cancel)
+
+    async def scenario():
+        s = mint_flow.MintSession("55", "rA", platform="discord")
+        s.payment_uuid = "NEWUUID"
+        s.stale_payment_uuids = ["OLDUUID"]
+        app.mint_sessions[s.id] = s
+        try:
+            resp = await app.handle_mint_cancel(_MockRequest(s.id, _token()))
+            assert resp.status == 200
+            await asyncio.sleep(0)
+            assert sorted(seen) == ["NEWUUID", "OLDUUID"]
+            assert s.stale_payment_uuids == []
+        finally:
+            app.mint_sessions.pop(s.id, None)
+
+    _run(scenario())
+
+
+def test_mint_regenerate_marks_superseded_uuid_stale(monkeypatch):
+    """MintSession.regenerate_payment records the replaced uuid — and only
+    when a fresh payload was actually built."""
+
+    async def fake_payload(destination, **kw):
+        return {"xumm_url": "https://xumm.app/sign/NEW", "uuid": "NEWUUID"}
+
+    async def scenario():
+        s = mint_flow.MintSession("55", "rA", platform="discord")
+        s.payment_uuid = "OLDUUID"
+        s.payment_destination = "rDest"
+        s.payment_value = "1"
+        s.payment_currency = "XRP"
+        s.payment_issuer = None
+        monkeypatch.setattr(mint_flow.xumm_ops, "create_payment_payload", fake_payload)
+        await s.regenerate_payment()
+        assert s.payment_uuid == "NEWUUID"
+        assert s.stale_payment_uuids == ["OLDUUID"]
+
+    _run(scenario())

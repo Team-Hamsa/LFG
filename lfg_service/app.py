@@ -469,6 +469,16 @@ def _spawn_payload_cancel(uuid: str | None) -> None:
     task.add_done_callback(_payload_cancel_tasks.discard)
 
 
+def _spawn_stale_payload_cancels(session: Any) -> None:
+    """Best-effort cancel of every superseded payload a session accumulated
+    across QR regenerations (#152) — each stays signable at XUMM until its
+    own expire otherwise. Drains the list so a later call never re-cancels."""
+    for uuid in getattr(session, "stale_payment_uuids", None) or []:
+        _spawn_payload_cancel(uuid)
+    if getattr(session, "stale_payment_uuids", None):
+        session.stale_payment_uuids.clear()
+
+
 def _session_secret() -> bytes:
     if config.WEBAPP_SESSION_SECRET:
         return config.WEBAPP_SESSION_SECRET.encode()
@@ -5073,6 +5083,9 @@ async def handle_mint_regenerate(request):
         await asyncio.wait_for(session.regenerate_payment(), timeout=8)
     except Exception as e:
         logging.warning(f"regenerate_payment failed: {e}")
+    # #152: the replaced payload (if any) is dead weight — kill it now
+    # rather than leaving a second signable QR until its expire.
+    _spawn_stale_payload_cancels(session)
     session.ensure_payment_fallback()
     return web.json_response(session.to_dict())
 
@@ -5095,8 +5108,10 @@ async def handle_mint_cancel(request):
     if not session.cancel():
         return web.json_response({"error": "session is past payment"}, status=409)
     # #152: best-effort cancel of the open XUMM payment payload so the stale
-    # QR/deeplink can no longer be signed in Xaman (lock already released).
+    # QR/deeplink can no longer be signed in Xaman (lock already released) —
+    # including any superseded payloads from earlier QR regenerations.
     _spawn_payload_cancel(session.payment_uuid)
+    _spawn_stale_payload_cancels(session)
     # A deliberate cancel is not a mint outcome: suppress the terminal
     # mint.completed/mint.failed publish a late status poll would fire.
     session.mark_published()
@@ -5182,6 +5197,9 @@ async def handle_swap_regenerate(request):
         ok = False
     if not ok:
         return web.json_response({"error": "could not build a new payment QR"}, status=502)
+    # #152: the replaced fee payload is dead weight — kill it now rather
+    # than leaving a second signable QR until its expire.
+    _spawn_stale_payload_cancels(session)
     return web.json_response(session.to_dict())
 
 
@@ -5199,8 +5217,10 @@ async def handle_swap_cancel(request):
         return web.json_response(session.to_dict())  # already over — no-op
     if not session.cancel():
         return web.json_response({"error": "session is past payment"}, status=409)
-    # #152: best-effort cancel of the open XUMM fee payload.
+    # #152: best-effort cancel of the open XUMM fee payload — including any
+    # superseded payloads from earlier QR regenerations.
     _spawn_payload_cancel(session.payment_uuid)
+    _spawn_stale_payload_cancels(session)
     # A deliberate cancel is not a swap outcome: suppress the terminal
     # swap.completed/swap.failed publish a late status poll would fire.
     session.mark_published()
