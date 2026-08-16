@@ -15,6 +15,8 @@ module.exports = {
     { name: "stg-economy-reconcile", cwd: CWD, script: "scripts/economy_nightly_reconcile.py", interpreter: PY, args: ["--network", "testnet"], cron_restart: "20 0 * * *", autorestart: false },
     { name: "stg-economy-audit", cwd: CWD, script: "scripts/audit_trait_economy.py", interpreter: PY, args: ["--network", "testnet"], cron_restart: "25 0 * * *", autorestart: false },
     // Nightly market_listings/buy_offers self-heal sweep (#288) — 03:30 UTC, offset from the 00:10-00:25 crons.
+    // pm2 cron_restart fires in HOST-LOCAL time (no timezone option); this box runs Etc/UTC
+    // (timedatectl, verified 2026-08-16) — keep the host on UTC or adjust these schedules.
     { name: "stg-market-sweep", cwd: CWD, script: "scripts/backfill_market.py", interpreter: PY, args: ["--network", "testnet", "--report"], cron_restart: "30 3 * * *", autorestart: false },
     { name: "stg-deployer", cwd: CWD, script: "scripts/deployer.py", interpreter: PY, args: ["staging"] },
   ],

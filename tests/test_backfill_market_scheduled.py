@@ -18,11 +18,17 @@ import json  # noqa: E402
 import logging  # noqa: E402
 import sqlite3  # noqa: E402
 import sys  # noqa: E402
+import threading  # noqa: E402
+import time  # noqa: E402
+
+import pytest  # noqa: E402
 
 REPO_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, os.path.join(REPO_ROOT, "scripts"))
 
 import backfill_market as bm  # noqa: E402
+
+from lfg_core import nft_index  # noqa: E402
 
 
 def _counts(**overrides: int) -> dict[str, int]:
@@ -106,11 +112,65 @@ def test_report_appends_json_line(tmp_path):
 # --- busy_timeout ------------------------------------------------------------
 
 
-def test_prepare_conn_sets_busy_timeout():
-    conn = sqlite3.connect(":memory:")
+def test_init_db_sets_busy_timeout():
+    assert bm.BUSY_TIMEOUT_MS == 30000
+    conn = nft_index.init_db(":memory:", busy_timeout_ms=bm.BUSY_TIMEOUT_MS)
     try:
-        bm._prepare_conn(conn)
         (timeout,) = conn.execute("PRAGMA busy_timeout").fetchone()
         assert timeout == 30000
     finally:
         conn.close()
+
+
+def test_init_db_default_leaves_timeout_untouched():
+    conn = nft_index.init_db(":memory:")
+    try:
+        (timeout,) = conn.execute("PRAGMA busy_timeout").fetchone()
+        assert timeout == 5000  # sqlite3.connect default (5s)
+    finally:
+        conn.close()
+
+
+def test_init_db_busy_timeout_applies_before_schema_ddl(tmp_path):
+    """CodeRabbit #288 regression: the timeout must be set BEFORE init_db's
+    schema DDL. With a writer holding the lock, a tiny busy_timeout must fail
+    fast (well under sqlite3.connect's 5s default handler — proving the PRAGMA
+    governed the DDL), while a generous one must survive a briefly-held lock."""
+    db = str(tmp_path / "onchain.db")
+    # Create the FILE but not the index schema, so init_db's DDL genuinely
+    # writes (the schema is IF NOT EXISTS — a fully-initialized db would make
+    # the second init a no-op that never touches the lock).
+    seed = sqlite3.connect(db)
+    seed.execute("CREATE TABLE lock_anchor (id INTEGER)")
+    seed.commit()
+    seed.close()
+
+    writer = sqlite3.connect(db)
+    try:
+        writer.execute("BEGIN IMMEDIATE")
+
+        # (a) tiny timeout: DDL hits the lock and gives up fast, not at 5s.
+        start = time.monotonic()
+        with pytest.raises(sqlite3.OperationalError, match="locked"):
+            nft_index.init_db(db, busy_timeout_ms=100)
+        assert time.monotonic() - start < 2.0
+
+        # (b) generous timeout: init waits out a briefly-held lock.
+        result: dict[str, object] = {}
+
+        def _init():
+            try:
+                nft_index.init_db(db, busy_timeout_ms=bm.BUSY_TIMEOUT_MS).close()
+                result["ok"] = True
+            except Exception as e:  # pragma: no cover - failure detail
+                result["error"] = repr(e)
+
+        t = threading.Thread(target=_init)
+        t.start()
+        time.sleep(0.5)
+        writer.rollback()  # release the lock while the init thread is waiting
+        t.join(timeout=10)
+        assert not t.is_alive()
+        assert result.get("ok") is True, result
+    finally:
+        writer.close()

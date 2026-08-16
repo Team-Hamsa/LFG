@@ -291,12 +291,12 @@ def _build_parser() -> argparse.ArgumentParser:
     return parser
 
 
-def _prepare_conn(conn: sqlite3.Connection) -> sqlite3.Connection:
-    """Scheduled-run lock safety (#288): the live listener writes the same
-    per-network onchain_<net>.db; a busy_timeout waits out a brief write lock
-    instead of crashing the cron with 'database is locked'."""
-    conn.execute("PRAGMA busy_timeout = 30000")
-    return conn
+# Scheduled-run lock safety (#288): the live listener writes the same
+# per-network onchain_<net>.db; a busy_timeout waits out a brief write lock
+# instead of crashing the cron with 'database is locked'. Threaded into
+# nft_index.init_db so it applies BEFORE the schema DDL — otherwise
+# initialization itself could still die at sqlite's 5s default.
+BUSY_TIMEOUT_MS = 30000
 
 
 def _log_summary(network: str, counts: dict[str, int]) -> None:
@@ -349,7 +349,7 @@ async def _amain() -> int:
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
     args = _build_parser().parse_args()
 
-    conn = _prepare_conn(nft_index.init_db(nft_index.index_db_path(args.network)))
+    conn = nft_index.init_db(nft_index.index_db_path(args.network), busy_timeout_ms=BUSY_TIMEOUT_MS)
     counts = await backfill_market(conn)
 
     logging.info("Network: %s  DB: %s", args.network, nft_index.index_db_path(args.network))

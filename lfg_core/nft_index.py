@@ -104,9 +104,16 @@ def index_db_path(network: str) -> str:
     return os.path.join(repo_root, f"onchain_{network}.db")
 
 
-def init_db(path: str) -> sqlite3.Connection:
-    """Open (creating if needed) the index DB and ensure the schema exists."""
+def init_db(path: str, busy_timeout_ms: int | None = None) -> sqlite3.Connection:
+    """Open (creating if needed) the index DB and ensure the schema exists.
+
+    `busy_timeout_ms` (#288) is applied BEFORE the schema DDL so a caller
+    sharing the DB with the live listener (e.g. the scheduled
+    backfill_market sweep) can't die on sqlite's 5s default while another
+    writer holds the lock during initialization."""
     conn = sqlite3.connect(path)
+    if busy_timeout_ms is not None:
+        conn.execute(f"PRAGMA busy_timeout = {int(busy_timeout_ms)}")
     conn.executescript(_SCHEMA)
     conn.commit()
     return conn

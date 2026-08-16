@@ -210,7 +210,9 @@ auto-restart hook is retired.
 
 `lfg-market-sweep` / `stg-market-sweep` (#288) run `scripts/backfill_market.py
 --network <net> --report` nightly at 03:30 UTC (deliberately offset from the
-00:10 snapshot and 00:20-00:25 economy crons) to self-heal
+00:10 snapshot and 00:20-00:25 economy crons; pm2 `cron_restart` has no
+timezone option and fires in host-local time — the deploy box runs Etc/UTC,
+so keep it on UTC or adjust the cron slots) to self-heal
 `market_listings`/`buy_offers` drift from listener downtime. Like every cron
 entry they park "stopped" between runs — normal, not a failure. Drift is
 greppable in the pm2 log (`backfill_market drift:` at WARNING when non-zero)
