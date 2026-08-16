@@ -10,7 +10,8 @@ sign or submit transactions.
 never raises on expected failures, returning a `ReverifyResult` with one of
 these closed-set machine-readable reasons instead: `"baseline_never_certified"`,
 `"source_tag_changed"`, `"genesis_mismatch"`, `"coverage_unbound"`,
-`"missing_required_sources"`, `"sweep_failed: <exc>"`, `"gap_not_covered"`.
+`"missing_required_sources"`, `"accounts_config_mismatch"`,
+`"sweep_failed: <exc>"`, `"gap_not_covered"`.
 """
 
 from __future__ import annotations
@@ -487,16 +488,38 @@ async def reverify_archive(
         # The nfts sweep needs the issuer address to discover archive-mined
         # tokens; attesting `nfts` without it would be a false claim.
         return ReverifyResult(False, "coverage_unbound", None, None)
+    # A rotated issuer/signer means the stored account set no longer describes
+    # this deployment; re-sweeping the OLD accounts would attest coverage the
+    # new configuration never had. That warrants a fresh human baseline, not an
+    # automated re-certification — refuse with a distinct reason (#342).
+    current_required = {
+        "token_issuer": str(config.TOKEN_ISSUER_ADDRESS or "") or None,
+        "signing": str(config.SIGNING_ACCOUNT or "") or None,
+    }
+    for source, current in current_required.items():
+        if accounts.get(source) != current:
+            return ReverifyResult(False, "accounts_config_mismatch", None, None)
 
     try:
         snapshot = await history_store.fetch_endpoint_snapshot(request_fn)
     except Exception as exc:  # endpoint identity unreadable — nothing to certify against
         return ReverifyResult(False, f"sweep_failed: {exc}", None, None)
-    if snapshot.genesis_hash != state.genesis_hash:
-        return ReverifyResult(False, "genesis_mismatch", None, None)
 
     ledger_min = history_store.EARLIEST_AVAILABLE_LEDGER
     ledger_max = snapshot.validated_ledger_index
+    # One fail-closed authority for endpoint identity: the same helper the
+    # manual certification CLI uses. The ledger-range arguments are derived
+    # from this very snapshot, so only the genesis compare can fire here —
+    # keeping both callers on one predicate is the point (#342).
+    try:
+        validate_baseline_endpoint(
+            snapshot,
+            claimed_genesis_hash=state.genesis_hash or "",
+            baseline_ledger_min=ledger_min,
+            baseline_ledger_max=ledger_max,
+        )
+    except ValueError:
+        return ReverifyResult(False, "genesis_mismatch", None, None)
     try:
         for source, account in sorted(accounts.items()):
             await backfill_account_tx(
