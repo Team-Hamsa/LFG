@@ -12,7 +12,7 @@
 <img src="https://img.shields.io/badge/surfaces-Discord%20%C2%B7%20Telegram%20%C2%B7%20Web-5865F2?style=flat-square" alt="Surfaces: Discord, Telegram, Web">
 <img src="https://img.shields.io/badge/X-share%20%E2%86%92%20mint-000000?style=flat-square&logo=x&logoColor=white" alt="Share on X — per-NFT cards funnel into the app">
 <img src="https://img.shields.io/badge/PWA-installable-6B4FBB?style=flat-square" alt="Installable PWA">
-<img src="https://img.shields.io/badge/tests-3%2C036-2ea043?style=flat-square" alt="3,036 tests">
+<img src="https://img.shields.io/badge/tests-3%2C046-2ea043?style=flat-square" alt="3,046 tests">
 <a href="https://github.com/Team-Hamsa/LFG/actions/workflows/ci.yml"><img src="https://img.shields.io/github/actions/workflow/status/Team-Hamsa/LFG/ci.yml?branch=main&style=flat-square&label=CI" alt="CI status on main"></a>
 <img src="https://img.shields.io/github/license/Team-Hamsa/LFG?style=flat-square&color=blue" alt="MIT license">
 <img src="https://img.shields.io/badge/SourceTag-2606160021-8957E5?style=flat-square" alt="XRPL SourceTag 2606160021">
