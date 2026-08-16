@@ -1,0 +1,99 @@
+#!/usr/bin/env python3
+"""CI / pre-commit gate: structural + store-consistency validation of
+trait_config.yaml. Exit 1 on errors; warnings are informational.
+"""
+
+import argparse
+import asyncio
+import os
+import sys
+
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+
+# Env-guard: importing lfg_core.layer_store pulls in lfg_core.config, which
+# calls _require() at module load time and crashes without these vars. A
+# fresh checkout (or the local pre-push hook, which runs this script
+# directly rather than via pytest) has no .env, so supply the same dummy
+# values tests/test_seasons.py uses (copied verbatim, same keys/values) —
+# this is CI-only-safe validation, not real credentials.
+os.environ.setdefault("XUMM_API_KEY", "test")
+os.environ.setdefault("XUMM_API_SECRET", "test")
+os.environ.setdefault("SEED", "sEdTM1uX8pu2do5XvTnutH6HsouMaM2")
+os.environ.setdefault("TOKEN_ISSUER_ADDRESS", "rrrrrrrrrrrrrrrrrrrrrhoLvTp")
+os.environ.setdefault("TOKEN_CURRENCY_HEX", "4C46474F00000000000000000000000000000000")
+os.environ.setdefault("BUNNY_CDN_ACCESS_KEY", "test")
+os.environ.setdefault("BUNNY_CDN_STORAGE_ZONE", "test")
+os.environ.setdefault("LAYER_SOURCE", "local")
+os.environ.setdefault("BUNNY_PULL_ZONE", "nft.pullzone.example")
+
+import yaml  # noqa: E402
+
+from lfg_core import trait_config  # noqa: E402
+from lfg_core.layer_store import LocalLayerStore  # noqa: E402
+
+# #301 recurrence guard — a stray single-r "Iridescent *" Body art file (the
+# staging typo that produced the misspelled on-chain value) must never re-enter
+# the live mint pool. Narrow denylist by design, not a spell-checker: the
+# canonical spelling is the double-r "Irridescent *".
+_TYPO_BODY_PREFIX = "Iridescent "
+
+
+def find_typo_body_files(layers_dir: str) -> list[str]:
+    """Paths of any `layers/<body>/Body/Iridescent *` (single-r) art files.
+
+    A missing layers root is clean (nothing in the pool to guard — fresh
+    checkouts and CI have no gitignored `layers/`); any other OSError
+    (permissions, I/O) propagates so the caller fails closed instead of
+    silently passing an unscanned tree."""
+    flagged: list[str] = []
+    if not os.path.exists(layers_dir):
+        return flagged
+    bodies = sorted(os.listdir(layers_dir))
+    for body in bodies:
+        body_dir = os.path.join(layers_dir, body, "Body")
+        if not os.path.isdir(body_dir):
+            continue
+        for name in sorted(os.listdir(body_dir)):
+            stem = os.path.splitext(name)[0]
+            if stem.startswith(_TYPO_BODY_PREFIX):
+                flagged.append(os.path.join(body_dir, name))
+    return flagged
+
+
+def main(argv: list[str] | None = None) -> int:
+    p = argparse.ArgumentParser(description=__doc__)
+    p.add_argument("--config", default=trait_config.DEFAULT_CONFIG_PATH)
+    p.add_argument("--layers-dir", default="layers")
+    args = p.parse_args(argv)
+    try:
+        cfg = trait_config.load_config(args.config)
+    except (FileNotFoundError, trait_config.TraitConfigError, yaml.YAMLError) as e:
+        print(f"ERROR: {e}")
+        return 1
+    try:
+        error_list, warning_list = asyncio.run(
+            trait_config.validate_against_store(cfg, LocalLayerStore(args.layers_dir))
+        )
+    except OSError as e:
+        print(f"ERROR: could not read layers dir {args.layers_dir!r}: {e}")
+        return 1
+    try:
+        for typo_path in find_typo_body_files(args.layers_dir):
+            error_list.append(
+                f"misspelled Body art file (single-r 'Iridescent', canonical is "
+                f"'Irridescent'): {typo_path} (#301)"
+            )
+    except OSError as e:
+        # Fail closed: an unscannable layer tree is a validation failure,
+        # not a pass.
+        error_list.append(f"could not scan layers dir {args.layers_dir!r} for typo Body art: {e}")
+    for w in warning_list:
+        print(f"warning: {w}")
+    for err in error_list:
+        print(f"ERROR: {err}")
+    print(f"{len(error_list)} error(s), {len(warning_list)} warning(s)")
+    return 1 if error_list else 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

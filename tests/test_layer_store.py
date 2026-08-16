@@ -1,0 +1,141 @@
+# tests/test_layer_store.py
+# Env-guard preamble: importing lfg_core.config freezes its constants (e.g.
+# IMG_PROXY_ALLOWED_BASES, LAYER_SOURCE) at import time; set the same defaults
+# test_smoke.py uses so collection order can't strand them. (Copy the block
+# verbatim from tests/test_server_identity_wiring.py — same keys/values.)
+import os
+
+os.environ.setdefault("XUMM_API_KEY", "test")
+os.environ.setdefault("XUMM_API_SECRET", "test")
+os.environ.setdefault("SEED", "sEdTM1uX8pu2do5XvTnutH6HsouMaM2")
+os.environ.setdefault("TOKEN_ISSUER_ADDRESS", "rrrrrrrrrrrrrrrrrrrrrhoLvTp")
+os.environ.setdefault("TOKEN_CURRENCY_HEX", "4C46474F00000000000000000000000000000000")
+os.environ.setdefault("BUNNY_CDN_ACCESS_KEY", "test")
+os.environ.setdefault("BUNNY_CDN_STORAGE_ZONE", "test")
+os.environ.setdefault("LAYER_SOURCE", "local")
+os.environ.setdefault("BUNNY_PULL_ZONE", "nft.pullzone.example")
+
+import asyncio  # noqa: E402
+
+from lfg_core import layer_store  # noqa: E402
+
+
+def _run(coro):
+    loop = asyncio.new_event_loop()
+    try:
+        return loop.run_until_complete(coro)
+    finally:
+        loop.close()
+
+
+def test_local_resolve_asset_found(tmp_path):
+    ape = tmp_path / "ape"
+    ape.mkdir()
+    (ape / "Nose.png").write_bytes(b"x")
+    store = layer_store.LocalLayerStore(str(tmp_path))
+    assert _run(store.resolve_asset("ape/Nose.png")) == os.path.join(
+        str(tmp_path), "ape", "Nose.png"
+    )
+
+
+def test_local_resolve_asset_missing(tmp_path):
+    store = layer_store.LocalLayerStore(str(tmp_path))
+    assert _run(store.resolve_asset("ape/Nose.png")) is None
+
+
+def test_cdn_resolve_asset_lists_parent_then_downloads(monkeypatch):
+    store = layer_store.CdnLayerStore()
+
+    async def fake_list(rel_path):
+        assert rel_path == "ape"
+        return [("Nose.png", False), ("Eyes", True)]
+
+    async def fake_download(rel_path):
+        assert rel_path == "ape/Nose.png"
+        return "/cache/ape/Nose.png"
+
+    monkeypatch.setattr(store, "_list_dir", fake_list)
+    monkeypatch.setattr(store, "_download", fake_download)
+    assert _run(store.resolve_asset("ape/Nose.png")) == "/cache/ape/Nose.png"
+
+
+def test_cdn_resolve_asset_absent_returns_none(monkeypatch):
+    store = layer_store.CdnLayerStore()
+
+    async def fake_list(rel_path):
+        return [("Eyes", True)]
+
+    monkeypatch.setattr(store, "_list_dir", fake_list)
+    assert _run(store.resolve_asset("ape/Nose.png")) is None
+
+
+def _mk_layer(tmp_path, dirname, trait, value, ext=".png"):
+    d = tmp_path / dirname / trait
+    d.mkdir(parents=True, exist_ok=True)
+    (d / f"{value}{ext}").write_bytes(b"x")
+
+
+def test_find_display_body_prefers_allowed_body(tmp_path):
+    _mk_layer(tmp_path, "male", "Hat", "Cap")
+    _mk_layer(tmp_path, "female", "Hat", "Cap")
+    store = layer_store.LocalLayerStore(str(tmp_path))
+    assert store.find_display_body("Hat", "Cap", ["female", "male"]) == "female"
+
+
+def test_find_display_body_skips_artless_preferred(tmp_path):
+    # First preferred body has no art; the probe must move on, not 404.
+    _mk_layer(tmp_path, "male", "Hat", "Cap")
+    store = layer_store.LocalLayerStore(str(tmp_path))
+    assert store.find_display_body("Hat", "Cap", ["ape", "male"]) == "male"
+
+
+def test_find_display_body_unrestricted_finds_per_body_art(tmp_path):
+    # The 120-broken-thumbnails bug: unrestricted values usually live in
+    # per-body dirs, not shared/ — the probe must find them anyway.
+    _mk_layer(tmp_path, "skeleton", "Accessory", "Double Swords", ".gif")
+    store = layer_store.LocalLayerStore(str(tmp_path))
+    assert store.find_display_body("Accessory", "Double Swords", []) == "skeleton"
+
+
+def test_find_display_body_shared_beats_foreign_bodies(tmp_path):
+    _mk_layer(tmp_path, "shared", "Accessory", "Halo")
+    _mk_layer(tmp_path, "ape", "Accessory", "Halo")
+    store = layer_store.LocalLayerStore(str(tmp_path))
+    assert store.find_display_body("Accessory", "Halo", []) == "shared"
+
+
+def test_find_display_body_missing_everywhere(tmp_path):
+    (tmp_path / "male").mkdir()
+    store = layer_store.LocalLayerStore(str(tmp_path))
+    assert store.find_display_body("Hat", "Ghost", ["male"]) is None
+
+
+def test_local_resolve_webm_layer(tmp_path):
+    base = tmp_path / "layers" / "male" / "Body"
+    os.makedirs(base)
+    (base / "Straight Diamond.webm").write_bytes(b"x")
+    store = layer_store.LocalLayerStore(str(tmp_path / "layers"))
+    path = _run(store.resolve("male", "Body", "Straight Diamond"))
+    assert path is not None and path.endswith(".webm")
+
+
+def test_local_resolve_static_shadows_animated(tmp_path):
+    # Extension precedence: png > gif > webm > mp4 — replacing a static trait
+    # with an animated one means deleting the png (same stem), so the static
+    # file must win while both exist.
+    base = tmp_path / "layers" / "male" / "Body"
+    os.makedirs(base)
+    for ext in (".png", ".gif", ".webm", ".mp4"):
+        (base / f"Straight Diamond{ext}").write_bytes(b"x")
+    store = layer_store.LocalLayerStore(str(tmp_path / "layers"))
+    path = _run(store.resolve("male", "Body", "Straight Diamond"))
+    assert path is not None and path.endswith(".png")
+    (base / "Straight Diamond.png").unlink()
+    path = _run(store.resolve("male", "Body", "Straight Diamond"))
+    assert path is not None and path.endswith(".gif")
+    (base / "Straight Diamond.gif").unlink()
+    path = _run(store.resolve("male", "Body", "Straight Diamond"))
+    assert path is not None and path.endswith(".webm")
+    (base / "Straight Diamond.webm").unlink()
+    path = _run(store.resolve("male", "Body", "Straight Diamond"))
+    assert path is not None and path.endswith(".mp4")

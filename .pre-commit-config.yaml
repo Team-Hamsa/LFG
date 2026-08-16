@@ -1,0 +1,56 @@
+# Single source of truth for the check gate. Runs at pre-push locally and in CI.
+# Pin/refresh revs with: pre-commit autoupdate
+default_stages: [pre-push]
+default_install_hook_types: [pre-push]
+
+repos:
+  - repo: https://github.com/astral-sh/ruff-pre-commit
+    rev: v0.15.17
+    hooks:
+      - id: ruff
+        args: [--fix]
+      - id: ruff-format
+
+  - repo: local
+    hooks:
+      - id: mypy
+        name: mypy
+        # Run from the project venv (like pytest below) so mypy type-checks
+        # against the REAL installed deps (discord.py/xrpl-py are typed). The
+        # isolated mirrors-mypy env has no deps, which forces every third-party
+        # import to Any — that both hides real bugs and emits false
+        # subclass-Any / untyped-decorator noise. mypy reads pyproject.toml.
+        entry: scripts/venv-python -m mypy .
+        language: system
+        pass_filenames: false
+        always_run: true
+
+  - repo: https://github.com/gitleaks/gitleaks
+    rev: v8.30.0
+    hooks:
+      - id: gitleaks
+
+  - repo: local
+    hooks:
+      - id: pytest
+        name: pytest
+        entry: scripts/venv-python -m pytest
+        language: system
+        pass_filenames: false
+        always_run: true
+
+      - id: validate-trait-config
+        name: validate trait_config.yaml
+        entry: scripts/venv-python scripts/validate_trait_config.py
+        language: system
+        files: ^(trait_config\.yaml|layers/)
+        pass_filenames: false
+
+      - id: audit-layer-dimensions
+        name: audit layer dimensions (1080x1080)
+        # layers/ is gitignored, so file filters never match — scan the
+        # working tree unconditionally (no-op when layers/ is absent, as in CI).
+        entry: scripts/venv-python scripts/audit_layer_dimensions.py
+        language: system
+        pass_filenames: false
+        always_run: true

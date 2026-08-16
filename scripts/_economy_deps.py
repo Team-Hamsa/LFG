@@ -1,0 +1,318 @@
+"""Wire the real XRPL/CDN/XUMM operations into an EconomyDeps for the CLI
+drivers. Kept out of lfg_core so the core flows stay free of CDN/compose imports
+and remain unit-testable with fakes. (scripts/ is excluded from mypy --strict.)"""
+
+from __future__ import annotations
+
+import json
+import logging
+import os
+import sqlite3
+import uuid
+from typing import Any
+
+import aiohttp
+
+from lfg_core import (
+    cdn,
+    closet_token,
+    config,
+    db_path,
+    economy_flow,
+    layer_store,
+    memos,
+    nft_index,
+    swap_compose,
+    swap_meta,
+    xrpl_ops,
+    xumm_ops,
+)
+
+NFT_FLAG_BURNABLE = 0x0001
+
+# Issuer-as-owner (headless test/admin) runs can't create an NFT offer to the
+# issuer itself — XRPL rejects destination == account. The token is already held
+# by the owner in that case, so the delivery offer/accept is a no-op we skip.
+# (Cross-account runs with a real owner take the normal offer + XUMM accept path.)
+_SELF_OFFER_SKIPPED = "self-offer-skipped"
+
+# Positive-result cache: once the BLANK art URL is confirmed present on-ledger
+# CDN we never re-HEAD it this process. Negative results are deliberately NOT
+# cached — a missing object may be uploaded before the next harvest.
+_BLANK_ART_VERIFIED = False
+
+
+async def _blank_art_exists(url: str) -> bool:
+    """HEAD the BLANK art URL to confirm the object was actually uploaded (a
+    non-empty BLANK_IMAGE_URL whose object is missing would strand blanks with
+    404 art). Runs at most once per process on success; failures re-check."""
+    global _BLANK_ART_VERIFIED
+    if _BLANK_ART_VERIFIED:
+        return True
+    try:
+        timeout = aiohttp.ClientTimeout(total=20, connect=10)
+        async with aiohttp.ClientSession(timeout=timeout) as session:
+            async with session.head(url) as resp:
+                if resp.status == 200:
+                    _BLANK_ART_VERIFIED = True
+                    return True
+                logging.warning(
+                    "BLANK art HEAD %s returned status %s — upload blank art first",
+                    url,
+                    resp.status,
+                )
+                return False
+    except Exception as e:
+        logging.warning("BLANK art HEAD %s failed (%s) — upload blank art first", url, e)
+        return False
+
+
+async def _offer_or_skip(nft_id: str, owner: str) -> str | None:
+    if owner == config.SWAP_ISSUER_ADDRESS:
+        return _SELF_OFFER_SKIPPED
+    return await xrpl_ops.create_nft_offer(nft_id, owner, amount="0")
+
+
+async def _accept_or_skip(
+    offer_id: str, user_token: str | None = None, owner: str | None = None
+) -> Any:
+    if offer_id == _SELF_OFFER_SKIPPED:
+        return None
+    # `owner` pins the payload to the wallet the offer is Destination-locked
+    # to, so Xaman refuses a wrong-account signature instead of letting it
+    # fail on-ledger. None only for the CLI drivers, which have no identity
+    # context to resolve an owner from.
+    return await xumm_ops.create_accept_offer_payload(
+        offer_id, user_token=user_token, account=owner
+    )
+
+
+async def _closet_exists(nft_id: str) -> bool:
+    """Whether a recorded Closet NFToken still exists on-ledger, for ensure_closet's
+    stale-record / re-mint decision (#101).
+
+    Fail-safe: only a DEFINITIVE on-ledger absence (clio objectNotFound) returns
+    False — the one case where re-minting is correct (burned / never-existed /
+    post-testnet-reset). A transient lookup failure (`nft_exists` -> None) returns
+    True so a network blip never re-mints and orphans a live Closet."""
+    return (await xrpl_ops.nft_exists(nft_id)) is not False
+
+
+async def _closet_owner(nft_id: str) -> str | None:
+    """The current on-ledger owner of a Closet NFToken, for confirm_accept's
+    pending->active promotion. Returns None on any lookup failure (fail-safe:
+    the promotion is skipped, not the op)."""
+    info = await xrpl_ops.nft_info(nft_id)
+    return info.get("owner") if info else None
+
+
+async def _upload(path_on_cdn: str, data: bytes, content_type: str) -> str:
+    return await cdn.upload_to_bunny(config.ECONOMY_CDN_FOLDER, path_on_cdn, data, content_type)
+
+
+async def _upload_closet(meta: dict[str, Any]) -> str:
+    """Upload closet metadata JSON to a fresh CDN path (unique per sync so the
+    modified URI is never a stale cache hit)."""
+    path = f"closets/{uuid.uuid4().hex}.json"
+    return await _upload(path, json.dumps(meta, indent=2).encode(), "application/json")
+
+
+async def _compose_char(
+    attrs: list[dict[str, str]], body: str, edition: int, rev: int
+) -> tuple[str, str | None, str]:
+    """Compose a character image from its trait layers, upload image + metadata,
+    return (image_url, video_url, metadata_url)."""
+    store = layer_store.get_layer_store()
+    basename = f"{edition}_{rev}_{uuid.uuid4().hex[:8]}"
+    path, is_video = await swap_compose.compose_nft(attrs, body, store, basename)
+    image_url, video_url = await swap_compose.upload_output(
+        path, is_video, _upload, f"{edition}/{basename}"
+    )
+    season = swap_meta.season_for_number(edition)
+    meta: dict[str, Any] = {
+        "schema": config.NFT_SCHEMA_URL,
+        "name": f"{config.NFT_COLLECTION_NAME} #{edition}",
+        "description": f"Season {season}",
+        "image": image_url,
+        "external_link": config.EXTERNAL_WEBSITE_URL,
+        "collection": {"name": config.NFT_COLLECTION_NAME, "family": f"Season {season}"},
+        "edition": edition,
+        "attributes": attrs,
+    }
+    if video_url:
+        meta["video"] = video_url
+    meta_url = await _upload(
+        f"{edition}/{basename}.json", json.dumps(meta, indent=2).encode(), "application/json"
+    )
+    return image_url, video_url, meta_url
+
+
+async def _blank_meta(edition: int) -> str | None:
+    """Build + upload BLANK-character metadata for `edition` and return its URL.
+    Same envelope as `_compose_char` but with the fixed silhouette image and
+    trait_economy.blank_attributes() (every slot "None") — no layer compose.
+    Returns None on upload failure — or if BLANK_IMAGE_URL is unset (uploading
+    metadata with an empty image would strand the character) — so the harvest
+    flow fails safe."""
+    from lfg_core import trait_economy as te
+
+    if not config.BLANK_IMAGE_URL:
+        logging.warning("BLANK_IMAGE_URL unset — upload blank art first")
+        return None
+    if not await _blank_art_exists(config.BLANK_IMAGE_URL):
+        return None
+
+    season = swap_meta.season_for_number(edition)
+    meta: dict[str, Any] = {
+        "schema": config.NFT_SCHEMA_URL,
+        "name": f"{config.NFT_COLLECTION_NAME} #{edition}",
+        "description": f"Season {season}",
+        "image": config.BLANK_IMAGE_URL,
+        "external_link": config.EXTERNAL_WEBSITE_URL,
+        "collection": {"name": config.NFT_COLLECTION_NAME, "family": f"Season {season}"},
+        "edition": edition,
+        "attributes": te.blank_attributes(),
+    }
+    try:
+        return await _upload(
+            f"{edition}/blank_{uuid.uuid4().hex[:8]}.json",
+            json.dumps(meta, indent=2).encode(),
+            "application/json",
+        )
+    except Exception:
+        return None
+
+
+async def _compose_trait(slot: str, value: str) -> str:
+    """Resolve the bare layer from the FIRST body that has it, upload, return URL."""
+    store = layer_store.get_layer_store()
+    for body in await store.list_bodies():
+        path = await store.resolve(body, slot, value)
+        if path:
+            ext = os.path.splitext(path)[1].lstrip(".") or "png"
+            with open(path, "rb") as f:
+                data = f.read()
+            return await _upload(
+                f"{config.TRAIT_CDN_SUBDIR}/{uuid.uuid4().hex}.{ext}",
+                data,
+                f"image/{ext}",
+            )
+    raise RuntimeError(f"no layer found for {slot}={value!r}")
+
+
+async def _closet_modify(nft_id: str, owner: str, url: str) -> str | None:
+    """NFTokenModify the Closet URI, mapping an INDETERMINATE on-chain outcome
+    (xrpl_ops.IndeterminateResultError — submit raised and the tx could not be
+    confirmed either way) to closet_token.ClosetIndeterminateError so
+    sync_closet's phase-aware taxonomy (#107/#179) fails closed (no on-chain
+    compensation, reconcile from chain) instead of collapsing an unknown outcome
+    to a plain ClosetError ('did NOT commit'). A definitive, validated failure
+    still returns None → plain ClosetError; a success returns the tx hash."""
+    try:
+        return await xrpl_ops.modify_nft(nft_id, owner, url)
+    except xrpl_ops.IndeterminateResultError as e:
+        raise closet_token.ClosetIndeterminateError(str(e)) from e
+
+
+async def _trait_info(nft_id: str) -> dict[str, Any] | None:
+    return await xrpl_ops.nft_info(nft_id)
+
+
+async def _trait_meta(nft_id: str) -> dict[str, Any] | None:
+    info = await xrpl_ops.nft_info(nft_id)
+    if not info:
+        return None
+    uri_hex = (info or {}).get("uri_hex") or ""
+    if not uri_hex:
+        return None
+    return await swap_meta.fetch_metadata(uri_hex)
+
+
+def build_economy_deps(
+    conn: sqlite3.Connection, user_token: str | None = None, owner: str | None = None
+) -> economy_flow.EconomyDeps:
+    """An EconomyDeps backed by the real testnet/mainnet operations.
+
+    ``user_token`` (#135/#212) is the owner's stored XUMM push token, if any:
+    every accept-offer payload these deps build (Closet claim, assemble/extract
+    delivery) is then push-delivered to their Xaman app instead of QR-only.
+    The CLI drivers pass none and keep their QR behavior.
+
+    ``owner`` is the wallet those accept payloads are for: it pins each
+    payload's `Account` so only that wallet can sign it. Optional because the
+    CLI drivers build deps without an identity context."""
+    return economy_flow.EconomyDeps(
+        conn=conn,
+        closet_upload_fn=_upload_closet,
+        closet_mint_fn=lambda url: xrpl_ops.mint_nft(
+            url, config.CLOSET_TAXON, config.SWAP_ISSUER_ADDRESS, flags=config.CLOSET_NFT_FLAGS
+        ),
+        closet_offer_fn=_offer_or_skip,
+        closet_accept_fn=lambda offer_id: _accept_or_skip(offer_id, user_token, owner),
+        closet_modify_fn=_closet_modify,
+        closet_exists_fn=lambda nft_id: _closet_exists(nft_id),
+        closet_owner_fn=lambda nft_id: _closet_owner(nft_id),
+        char_compose_fn=_compose_char,
+        char_mint_fn=lambda url: xrpl_ops.mint_nft(
+            url,
+            # Assemble-minted rebirths get their own taxon (#217) — pinned to
+            # ASSEMBLE_TAXON, not SWAP_TAXON, even though the two currently
+            # share the same default value (1760): the constants mean different
+            # things (SWAP_TAXON is the legacy Trait-Swapper remint taxon) and
+            # must not silently diverge if either is retuned independently.
+            config.ASSEMBLE_TAXON,
+            config.SWAP_ISSUER_ADDRESS,
+            flags=config.ECONOMY_NFT_FLAGS,
+            action=memos.ACTION_ASSEMBLE,
+        ),
+        char_modify_fn=lambda nft_id, owner, url: xrpl_ops.modify_nft(nft_id, owner, url),
+        char_burn_fn=lambda nft_id, owner: xrpl_ops.burn_nft(nft_id, owner or None),
+        char_offer_fn=_offer_or_skip,
+        char_accept_fn=lambda offer_id: _accept_or_skip(offer_id, user_token, owner),
+        trait_compose_fn=lambda slot, value: _compose_trait(slot, value),
+        trait_upload_fn=_upload_closet,
+        trait_mint_fn=lambda url: xrpl_ops.mint_nft(
+            url,
+            config.TRAIT_TAXON,
+            config.SWAP_ISSUER_ADDRESS,
+            flags=config.TRAIT_NFT_FLAGS,
+            action=memos.ACTION_EXTRACT,
+        ),
+        trait_burn_fn=lambda nft_id, owner: xrpl_ops.burn_nft(nft_id, owner or None),
+        trait_info_fn=lambda nft_id: _trait_info(nft_id),
+        trait_meta_fn=lambda nft_id: _trait_meta(nft_id),
+        # Rarity bookkeeping (#305): harvest/assemble adjust the app-DB
+        # live-count the Trait Shop price formula reads.
+        app_conn_factory=lambda: sqlite3.connect(db_path.app_db_path(config.ECONOMY_NETWORK)),
+        blank_meta_fn=_blank_meta,
+    )
+
+
+def load_index_character(conn: sqlite3.Connection, nft_id: str) -> nft_index.OnchainNft | None:
+    """The character record from the on-chain index, by nft_id."""
+    conn.row_factory = sqlite3.Row
+    row = conn.execute("SELECT * FROM onchain_nfts WHERE nft_id = ?", (nft_id,)).fetchone()
+    return nft_index._row_to_nft(row) if row else None
+
+
+async def fetch_burnable(owner: str, nft_id: str) -> bool:
+    """Whether `nft_id` (held by `owner`) carries the on-ledger burnable flag —
+    required before a harvest can issuer-burn it."""
+    for nft in await xrpl_ops.get_account_nfts(owner, config.SWAP_ISSUER_ADDRESS):
+        if nft["nft_id"] == nft_id:
+            return bool(int(nft.get("flags") or 0) & NFT_FLAG_BURNABLE)
+    return False
+
+
+def open_index(network: str) -> sqlite3.Connection:
+    """Open the per-network index DB and ensure the economy schema exists.
+
+    Guards against a split-network CLI run (#187): the DB we open here must be
+    the same chain xrpl_ops signs against, else reads and irreversible asset ops
+    would target different ledgers."""
+    from lfg_core import economy_store
+
+    config.assert_cli_network_match(network)
+    conn = nft_index.init_db(nft_index.index_db_path(network))
+    economy_store.init_economy_schema(conn)
+    return conn

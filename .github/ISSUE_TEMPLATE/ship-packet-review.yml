@@ -1,0 +1,61 @@
+name: "Ship Packet Review"
+description: "Review a daily XRPL Ship Packet"
+labels: ["ship-packet", "feedback"]
+body:
+  - type: dropdown
+    id: section
+    attributes:
+      label: "Section"
+      description: "Which section are you commenting on?"
+      options:
+        - Executive Summary
+        - One-liner
+        - Target User + Painful Problem
+        - Why XRPL Here
+        - Why Now
+        - ICP + Not ICP
+        - Jobs-to-be-done + Success Metrics
+        - Competitive Landscape + Differentiation
+        - MVP Definition
+        - User Flows
+        - Data Model
+        - XRPL Integration Design
+        - API Surface
+        - UI Surface
+        - Architecture
+        - Milestones + Task Breakdown
+        - Security + Privacy
+        - Observability + Analytics
+        - Pricing + Packaging
+        - Go-to-Market
+        - Risks & Assumptions
+        - Repo & Bootstrap Plan
+        - CI/CD + Security Workflows
+        - Build Instructions for Agents
+        - Appendix
+    validations:
+      required: true
+  - type: textarea
+    id: what-you-like
+    attributes:
+      label: "What you like"
+      description: "What should we keep?"
+      placeholder: "e.g., The ICP is clear and feels realistic."
+    validations:
+      required: false
+  - type: textarea
+    id: concerns
+    attributes:
+      label: "Concerns / risks"
+      description: "What feels off or risky?"
+      placeholder: "e.g., This assumes wallet adoption that may be too high."
+    validations:
+      required: false
+  - type: textarea
+    id: change-request
+    attributes:
+      label: "Change request"
+      description: "What should we change or add?"
+      placeholder: "Be specific about the change you want."
+    validations:
+      required: true

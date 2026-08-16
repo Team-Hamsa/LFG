@@ -1,0 +1,23 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="960" height="300" viewBox="0 0 960 300" role="img" aria-label="LFG — mint, swap and trade dynamic trait-layer NFTs on the XRP Ledger, signed with Xaman, from Discord, Telegram, or the web. Mainnet live.">
+  <!-- sticker shadow + card -->
+  <rect x="8" y="8" width="944" height="284" rx="18" fill="#0A0A0A"/>
+  <rect x="2" y="2" width="944" height="284" rx="18" fill="#181818" stroke="#FFFFFF" stroke-width="3"/>
+  <!-- LFG wordmark (real logo baked in place of the placeholder by the render step) -->
+  <image x="285.0" y="30" width="390" height="66.0" href="__LOGO_HREF__"/>
+  <!-- headline + subtitle -->
+  <text x="480.0" y="178" text-anchor="middle" font-family="-apple-system,'Segoe UI',Roboto,Helvetica,Arial,sans-serif" font-size="38" font-weight="800" fill="#F5F4F1">Mint &#183; Swap &#183; Trade on the XRP Ledger</text>
+  <text x="480.0" y="210" text-anchor="middle" font-family="-apple-system,'Segoe UI',Roboto,Helvetica,Arial,sans-serif" font-size="16" fill="#9C9A94">Dynamic trait-layer NFTs, signed with Xaman &#8212; one pipeline, four surfaces.</text>
+  <!-- surface chips -->
+  <rect x="179.5" y="228" width="66" height="34" rx="17.0" fill="#181818" stroke="#4890C0" stroke-width="2.5"/>
+  <text x="212.5" y="251" text-anchor="middle" font-family="-apple-system,'Segoe UI',Roboto,Helvetica,Arial,sans-serif" font-size="16" font-weight="700" fill="#4890C0">XRPL</text>
+  <rect x="259.5" y="228" width="75" height="34" rx="17.0" fill="#181818" stroke="#D89030" stroke-width="2.5"/>
+  <text x="297.0" y="251" text-anchor="middle" font-family="-apple-system,'Segoe UI',Roboto,Helvetica,Arial,sans-serif" font-size="16" font-weight="700" fill="#D89030">Xaman</text>
+  <rect x="348.5" y="228" width="93" height="34" rx="17.0" fill="#181818" stroke="#8957E5" stroke-width="2.5"/>
+  <text x="395.0" y="251" text-anchor="middle" font-family="-apple-system,'Segoe UI',Roboto,Helvetica,Arial,sans-serif" font-size="16" font-weight="700" fill="#8957E5">Discord</text>
+  <rect x="455.5" y="228" width="102" height="34" rx="17.0" fill="#181818" stroke="#38A8E8" stroke-width="2.5"/>
+  <text x="506.5" y="251" text-anchor="middle" font-family="-apple-system,'Segoe UI',Roboto,Helvetica,Arial,sans-serif" font-size="16" font-weight="700" fill="#38A8E8">Telegram</text>
+  <rect x="571.5" y="228" width="57" height="34" rx="17.0" fill="#181818" stroke="#F0D848" stroke-width="2.5"/>
+  <text x="600.0" y="251" text-anchor="middle" font-family="-apple-system,'Segoe UI',Roboto,Helvetica,Arial,sans-serif" font-size="16" font-weight="700" fill="#F0D848">Web</text>
+  <rect x="642.5" y="228" width="138" height="34" rx="17.0" fill="#181818" stroke="#3DA35D" stroke-width="2.5"/>
+  <text x="711.5" y="251" text-anchor="middle" font-family="-apple-system,'Segoe UI',Roboto,Helvetica,Arial,sans-serif" font-size="16" font-weight="700" fill="#3DA35D">Mainnet Live</text>
+</svg>

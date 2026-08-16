@@ -1,0 +1,8 @@
+# CodeRabbit config.
+# drafts: false pins draft-skipping so draft PRs never trigger an automated
+# review — this is how we stay under CodeRabbit's 5-reviews/hour/seat cap.
+# Workflow: open PRs as draft, then `gh pr ready <n>` (rate-limited) to trigger review.
+reviews:
+  auto_review:
+    enabled: true
+    drafts: false
