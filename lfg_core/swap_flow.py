@@ -99,6 +99,27 @@ async def detect_swap_payment(wallet_address: str, brix_amount: str) -> tuple[st
     return await brix_payment.detect_payment_path(wallet_address, brix_amount)
 
 
+async def _issuer_holds_offer_trustline() -> bool:
+    """True if the NFT issuer holds a trustline for the BRIX pair the
+    replacement offers are priced in (#166). Under XLS-20, an
+    NFTokenCreateOffer whose Amount is an IOU, on an NFT carrying a
+    TransferFee, requires the NFT's issuer to hold a trustline for that IOU
+    (the royalty pays out in it) — otherwise every BRIX-priced offer fails
+    tecNO_LINE. Invisible on testnet (NFT issuer == BRIX issuer); on mainnet
+    they are separate accounts and this is a real ops precondition."""
+    if config.SWAP_ISSUER_ADDRESS == config.SWAP_OFFER_ISSUER:
+        # An account cannot hold a trustline to itself and never needs one
+        # for its own IOU — the lookup would return None and wrongly divert
+        # valid BRIX swaps to XRP on the same-issuer (testnet) shape.
+        return True
+    balance = await xrpl_ops.get_trustline_balance(
+        config.SWAP_ISSUER_ADDRESS,
+        config.SWAP_OFFER_CURRENCY_HEX,
+        config.SWAP_OFFER_ISSUER,
+    )
+    return balance is not None
+
+
 class SwapSession:
     def __init__(
         self,
@@ -706,6 +727,48 @@ async def run_swap_session(session: SwapSession) -> None:
         ]
         modify_items = [it for it in items if it["nft"].get("mutable")]
         burn_items = [it for it in items if not it["nft"].get("mutable")]
+
+        # #166 pre-burn precondition: a BRIX fee path prices the burn-remint
+        # replacement offers as IOU amounts, which fail tecNO_LINE unless the
+        # NFT issuer holds the BRIX trustline (XLS-20 royalty payout). The
+        # answer is knowable up front, and the burn is the point of no return
+        # — so check now and gracefully fall back to the trustline-safe XRP
+        # fee path (native drops carry no IOU royalty) instead of burning and
+        # then stranding the reminted tokens. Only the burn path is affected:
+        # the modify fee is a plain Payment, no NFTokenCreateOffer.
+        if burn_items and session.pay_with == "BRIX" and not await _issuer_holds_offer_trustline():
+            logging.error(
+                "OPS: NFT issuer %s holds NO trustline for the swap-offer BRIX pair "
+                "%s/%s — BRIX-priced replacement offers would fail tecNO_LINE. "
+                "Falling back to the XRP fee path for swap session %s. "
+                "Fix: set the BRIX trustline on the NFT issuer (see #166), or "
+                "every BRIX-holding swapper silently pays XRP.",
+                config.SWAP_ISSUER_ADDRESS,
+                config.SWAP_OFFER_CURRENCY_HEX,
+                config.SWAP_OFFER_ISSUER,
+                session.id,
+            )
+            quote = await xrpl_ops.get_amm_xrp_cost(
+                config.SWAP_OFFER_CURRENCY_HEX,
+                config.SWAP_OFFER_ISSUER,
+                Decimal(swap_fee_total(2)),
+            )
+            if quote is None:
+                session.state = FAILED
+                session.error = (
+                    "Swap fee pricing is unavailable right now — please try "
+                    "again in a moment. Your NFTs are untouched."
+                )
+                return
+            session.pay_with = "XRP"
+            total = str(
+                (quote * Decimal(config.SWAP_XRP_FEE_BUFFER)).quantize(
+                    Decimal("0.000001"), rounding=ROUND_UP
+                )
+            )
+            session.fee_per_nft = (Decimal(total) / 2).quantize(
+                Decimal("0.000001"), rounding=ROUND_UP
+            )
 
         # #211 stale-pointer pre-check (see module docstring): the roster that
         # built this session reads the on-chain index, and a stale row feeds
