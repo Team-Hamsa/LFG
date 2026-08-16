@@ -66,3 +66,19 @@ def test_checked_in_svg_matches_generator() -> None:
     """The committed asset must be regenerated whenever the generator changes."""
     svg = ras.build_svg(ras.discover_flow_modules())
     assert ras.SVG_PATH.read_text() == svg
+
+
+def test_many_flow_modules_grow_the_canvas_instead_of_failing() -> None:
+    many = [f"very_long_flow_module_name_{i}_flow" for i in range(12)]
+    svg = ras.build_svg(many)
+    base = ras.build_svg(["mint_flow"])
+
+    def height(s: str) -> int:
+        import re as _re
+
+        m = _re.search(r'<svg[^>]*height="(\d+)"', s)
+        assert m is not None
+        return int(m.group(1))
+
+    assert height(many_svg := svg) > height(base)
+    assert all(f"very_long_flow_module_name_{i}_flow" in many_svg for i in range(12))

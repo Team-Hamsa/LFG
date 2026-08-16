@@ -113,6 +113,18 @@ def chip(x: float, y: float, w: float, h: float, label: str, size: int = 11) -> 
     ]
 
 
+def count_chip_rows(flow_modules: list[str], avail_w: float, chip_gap: float, size: int) -> int:
+    """How many wrapped rows the flow chips need inside the lfg_core card."""
+    rows, used = 1, 0.0
+    for name in flow_modules:
+        cw = text_w(name, size) + 22
+        if used and used + cw > avail_w:
+            rows += 1
+            used = 0.0
+        used += cw + chip_gap
+    return rows
+
+
 def build_svg(flow_modules: list[str]) -> str:
     label = (
         "LFG system architecture: four client surfaces (Discord bot, Discord "
@@ -124,8 +136,19 @@ def build_svg(flow_modules: list[str]) -> str:
         "SQLite stores. External systems: XRP Ledger (Clio + rippled), Xaman "
         "(XUMM) signing, and BunnyCDN + IPFS hosting."
     )
-    parts: list[str] = [open_svg(W, H, label)]
-    parts += sticker_card(W - 16, H - 16)
+    # The lfg_core card grows with the discovered flow modules; everything
+    # below it (externals row, footer, canvas) shifts by the same delta, so a
+    # new flow module expands the diagram instead of overflowing it.
+    chip_h, chip_gap, chip_size = 24, 8, 11
+    core_x, core_w = PAD, 560
+    chip_avail_w = core_w - 20.0 - 16.0
+    chip_rows = count_chip_rows(flow_modules, chip_avail_w, chip_gap, chip_size)
+    core_h = max(128, 56 + chip_rows * chip_h + (chip_rows - 1) * chip_gap + 16)
+    delta = core_h - 128
+    h_total = H + delta
+
+    parts: list[str] = [open_svg(W, h_total, label)]
+    parts += sticker_card(W - 16, h_total - 16)
 
     # Header
     parts.append(
@@ -175,8 +198,7 @@ def build_svg(flow_modules: list[str]) -> str:
     )
 
     # Row 3: lfg_core with dynamic flow chips, listener + SQLite on the right
-    core_x, core_w = PAD, 560
-    core_y, core_h = 286, 128
+    core_y = 286
     parts += arrow_down(svc_x + svc_w / 2, svc_y + svc_h, core_y)
     parts.append(
         f'<rect x="{core_x}" y="{core_y}" width="{core_w}" height="{core_h}" rx="12" '
@@ -194,8 +216,7 @@ def build_svg(flow_modules: list[str]) -> str:
         f'fill="{MUTED}">shared domain library · XRPL + Xaman ops · '
         "trait engine · rarity</text>"
     )
-    # Flow-module chips, wrapped inside the card.
-    chip_h, chip_gap, chip_size = 24, 8, 11
+    # Flow-module chips, wrapped inside the card (sized above to always fit).
     cx0 = core_x + 20.0
     cx = cx0
     cy = core_y + 56.0
@@ -248,7 +269,7 @@ def build_svg(flow_modules: list[str]) -> str:
         ("Xaman (XUMM)", "QR + push signing · no custody", ORANGE),
         ("BunnyCDN + IPFS", "image + metadata hosting", BLUE),
     ]
-    ext_y, ext_h, ext_gap = 470, 66, 16
+    ext_y, ext_h, ext_gap = 470 + delta, 66, 16
     ew = (AREA_W - ext_gap * (len(externals) - 1)) / len(externals)  # 270
     core_bot = core_y + core_h
     for i, (title, sub, accent) in enumerate(externals):
@@ -260,7 +281,7 @@ def build_svg(flow_modules: list[str]) -> str:
 
     # Footer
     parts.append(
-        f'<text x="{W / 2}" y="{H - 22}" text-anchor="middle" font-family="{FONT}" '
+        f'<text x="{W / 2}" y="{h_total - 22}" text-anchor="middle" font-family="{FONT}" '
         f'font-size="11.5" fill="{MUTED}">every XRPL transaction carries SourceTag '
         "2606160021 + provenance memos — all signing happens in the user’s "
         "Xaman wallet</text>"
