@@ -35,7 +35,6 @@ from lfg_core import (  # noqa: E402
 from lfg_service import app as server  # noqa: E402
 from tests.sponsored_helpers import prepare_and_forward, ready_history  # noqa: E402
 
-
 # Well-formed placeholder classic addresses (not the operator's real wallets):
 # the readiness audit validates the *shape* of SPONSORED_MINT_EXCLUDED_WALLETS,
 # not specific identities (#334).
