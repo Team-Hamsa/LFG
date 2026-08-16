@@ -48,7 +48,7 @@ repos:
 
       - id: check-repo-layout
         name: check README repository layout
-        entry: .venv/bin/python scripts/check_repo_layout.py
+        entry: scripts/venv-python scripts/check_repo_layout.py
         language: system
         pass_filenames: false
         always_run: true

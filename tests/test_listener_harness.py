@@ -246,7 +246,18 @@ def test_listen_subscribes_verifies_identity_then_processes_and_invalidates_on_d
     assert kinds.count("flusher-cancelled") == 2
     # Reconnect re-runs the full subscribe + identity sequence.
     second_conn = kinds[kinds.index("closed") + 1 :]
-    assert second_conn[:5] == ["exit", "flusher-cancelled", "enter", "subscribe", "ledger"]
+    assert second_conn[:6] == [
+        "exit",
+        "flusher-cancelled",
+        "enter",
+        "subscribe",
+        "ledger",
+        "ledger",
+    ]
+    # ...and the second identity snapshot is COMPLETE: the genesis (ledger 1)
+    # AND validated-ledger requests both re-run after reconnect.
+    ledger_reqs = [e for e in h.log if e[0] == "ledger"]
+    assert ledger_reqs[-2:] == [("ledger", L0), ("ledger", "validated")]
     # Clean close backed off at RECONNECT_BASE before reconnecting.
     assert h.sleeps[0] == oln.RECONNECT_BASE
 
