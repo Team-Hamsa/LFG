@@ -1,18 +1,18 @@
-<svg xmlns="http://www.w3.org/2000/svg" width="728" height="158" viewBox="0 0 728 158" role="img" aria-label="Code growth: 12,080 baseline lines, 50,787 application lines and 64,419 test lines added during the hackathon">
+<svg xmlns="http://www.w3.org/2000/svg" width="728" height="158" viewBox="0 0 728 158" role="img" aria-label="Code growth: 12,080 baseline lines, 50,751 application lines and 64,923 test lines added during the hackathon">
 <rect x="8" y="8" width="717" height="147" rx="18" fill="#0A0A0A"/>
 <rect x="1.5" y="1.5" width="717" height="147" rx="18" fill="#181818" stroke="#FFFFFF" stroke-width="3"/>
 <text x="24" y="38" font-family="-apple-system,'Segoe UI',Roboto,Helvetica,Arial,sans-serif" font-size="19" font-weight="700" fill="#F5F4F1">Code written during the hackathon</text>
-<text x="24" y="58" font-family="-apple-system,'Segoe UI',Roboto,Helvetica,Arial,sans-serif" font-size="13" fill="#9C9A94">since June 21 · +115,206 net lines · codebase now 127,286 lines</text>
+<text x="24" y="58" font-family="-apple-system,'Segoe UI',Roboto,Helvetica,Arial,sans-serif" font-size="13" fill="#9C9A94">since June 21 · +115,674 net lines · codebase now 127,754 lines</text>
 <clipPath id="pill"><rect x="24" y="76" width="672" height="16" rx="8.0"/></clipPath>
 <g clip-path="url(#pill)">
-<rect x="24.0" y="76" width="63.4" height="16" fill="#D89030"/>
-<rect x="89.4" y="76" width="266.5" height="16" fill="#4890C0"/>
-<rect x="357.9" y="76" width="338.1" height="16" fill="#D84830"/>
+<rect x="24.0" y="76" width="63.2" height="16" fill="#D89030"/>
+<rect x="89.2" y="76" width="265.4" height="16" fill="#4890C0"/>
+<rect x="356.5" y="76" width="339.5" height="16" fill="#D84830"/>
 </g>
 <circle cx="30.0" cy="116" r="6" fill="#D89030"/>
 <text x="44.0" y="120" font-family="-apple-system,'Segoe UI',Roboto,Helvetica,Arial,sans-serif" font-size="13" fill="#F5F4F1">Baseline  12,080 (9%)</text>
 <circle cx="250.2" cy="116" r="6" fill="#4890C0"/>
-<text x="264.2" y="120" font-family="-apple-system,'Segoe UI',Roboto,Helvetica,Arial,sans-serif" font-size="13" fill="#F5F4F1">App code  50,787 (40%)</text>
+<text x="264.2" y="120" font-family="-apple-system,'Segoe UI',Roboto,Helvetica,Arial,sans-serif" font-size="13" fill="#F5F4F1">App code  50,751 (40%)</text>
 <circle cx="478.6" cy="116" r="6" fill="#D84830"/>
-<text x="492.6" y="120" font-family="-apple-system,'Segoe UI',Roboto,Helvetica,Arial,sans-serif" font-size="13" fill="#F5F4F1">Tests  64,419 (51%)</text>
+<text x="492.6" y="120" font-family="-apple-system,'Segoe UI',Roboto,Helvetica,Arial,sans-serif" font-size="13" fill="#F5F4F1">Tests  64,923 (51%)</text>
 </svg>
