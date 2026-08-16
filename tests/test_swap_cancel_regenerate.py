@@ -385,3 +385,177 @@ def test_swap_regenerate_timeout_returns_504(dev_auth, monkeypatch):
     dev_auth[s.id] = s
     resp = _run(server.handle_swap_regenerate(_request("POST", s.id)))
     assert resp.status == 504
+
+
+# --- #152: swap cancel best-effort cancels the open XUMM fee payload --------
+
+
+def test_regenerate_payment_captures_payment_uuid(monkeypatch):
+    """SwapSession must store the fee payload's uuid so a later cancel can
+    DELETE it (issue #152) — it was previously dropped on the floor."""
+    s = _session()
+    s.fee_amount = "6"
+    s.fee_destination = "rBotWallet"
+    s.fee_currency = "XRP"
+    s.fee_issuer = None
+
+    async def fake_payload(destination, **kw):
+        return {"xumm_url": "https://xumm.app/sign/NEW", "uuid": "SWAPUUID"}
+
+    monkeypatch.setattr(xumm_ops, "create_payment_payload", fake_payload)
+    _run(s.regenerate_payment())
+    assert s.payment_uuid == "SWAPUUID"
+
+
+def test_regenerate_payment_failure_keeps_old_uuid(monkeypatch):
+    s = _session()
+    s.fee_amount = "6"
+    s.fee_destination = "rBotWallet"
+    s.fee_currency = "XRP"
+    s.fee_issuer = None
+    s.payment_uuid = "OLDUUID"
+
+    async def fail(destination, **kw):
+        return None
+
+    monkeypatch.setattr(xumm_ops, "create_payment_payload", fail)
+    _run(s.regenerate_payment())
+    assert s.payment_uuid == "OLDUUID"
+
+
+def test_swap_cancel_cancels_open_payload(dev_auth, monkeypatch):
+    seen = []
+
+    async def fake_cancel(uuid):
+        seen.append(uuid)
+        return True
+
+    monkeypatch.setattr(server.xumm_ops, "cancel_xumm_payload", fake_cancel)
+
+    async def scenario():
+        s = _session()
+        s.payment_uuid = "SWAPUUID"
+        dev_auth[s.id] = s
+        resp = await server.handle_swap_cancel(_request("POST", s.id))
+        assert resp.status == 200
+        await asyncio.sleep(0)  # let the fire-and-forget task run
+        assert seen == ["SWAPUUID"]
+
+    _run(scenario())
+
+
+def test_swap_cancel_no_payload_uuid_skips_cancel(dev_auth, monkeypatch):
+    seen = []
+
+    async def fake_cancel(uuid):
+        seen.append(uuid)
+        return True
+
+    monkeypatch.setattr(server.xumm_ops, "cancel_xumm_payload", fake_cancel)
+
+    async def scenario():
+        s = _session()
+        dev_auth[s.id] = s
+        resp = await server.handle_swap_cancel(_request("POST", s.id))
+        assert resp.status == 200
+        await asyncio.sleep(0)
+        assert seen == []
+
+    _run(scenario())
+
+
+def test_regeneration_marks_superseded_uuid_stale(monkeypatch):
+    """A regenerated-over fee payload stays signable at XUMM — the session
+    must remember its uuid so cancel can DELETE it too (#360 review)."""
+    s = _session()
+    s.fee_amount = "6"
+    s.fee_destination = "rBotWallet"
+    s.fee_currency = "XRP"
+    s.fee_issuer = None
+    s.payment_uuid = "OLDUUID"
+
+    async def fake_payload(destination, **kw):
+        return {"xumm_url": "https://xumm.app/sign/NEW", "uuid": "NEWUUID"}
+
+    monkeypatch.setattr(xumm_ops, "create_payment_payload", fake_payload)
+    _run(s.regenerate_payment())
+    assert s.payment_uuid == "NEWUUID"
+    assert s.stale_payment_uuids == ["OLDUUID"]
+
+
+def test_swap_cancel_cancels_superseded_payloads_too(dev_auth, monkeypatch):
+    """Regenerate then cancel: BOTH the live and the superseded payloads are
+    best-effort cancelled, so no orphan QR remains signable."""
+    seen = []
+
+    async def fake_cancel(uuid):
+        seen.append(uuid)
+        return True
+
+    monkeypatch.setattr(server.xumm_ops, "cancel_xumm_payload", fake_cancel)
+
+    async def scenario():
+        s = _session()
+        s.payment_uuid = "NEWUUID"
+        s.stale_payment_uuids = ["OLDUUID"]
+        dev_auth[s.id] = s
+        resp = await server.handle_swap_cancel(_request("POST", s.id))
+        assert resp.status == 200
+        await asyncio.sleep(0)
+        assert sorted(seen) == ["NEWUUID", "OLDUUID"]
+        assert s.stale_payment_uuids == []  # drained — never re-cancelled
+
+    _run(scenario())
+
+
+def test_swap_regenerate_kills_superseded_payload_immediately(dev_auth, monkeypatch):
+    """The regenerate endpoint itself cancels the payload it replaced —
+    without waiting for a session cancel that may never come."""
+    seen = []
+
+    async def fake_cancel(uuid):
+        seen.append(uuid)
+        return True
+
+    async def fake_payload(destination, **kw):
+        return {"xumm_url": "https://xumm.app/sign/NEW", "uuid": "NEWUUID"}
+
+    monkeypatch.setattr(server.xumm_ops, "cancel_xumm_payload", fake_cancel)
+    monkeypatch.setattr(xumm_ops, "create_payment_payload", fake_payload)
+
+    async def scenario():
+        s = _session()
+        s.state = swap_flow.AWAITING_PAYMENT
+        s.fee_amount = "6"
+        s.fee_destination = "rBotWallet"
+        s.fee_currency = "XRP"
+        s.fee_issuer = None
+        s.payment_uuid = "OLDUUID"
+        dev_auth[s.id] = s
+        resp = await server.handle_swap_regenerate(_request("POST", s.id))
+        assert resp.status == 200
+        await asyncio.sleep(0)
+        assert seen == ["OLDUUID"]
+        assert s.payment_uuid == "NEWUUID"
+        assert s.stale_payment_uuids == []
+
+    _run(scenario())
+
+
+def test_swap_regeneration_after_cancel_parks_new_payload_stale(monkeypatch):
+    """cancel() completing during the payload-creation await must not leave
+    the replacement payload signable outside every cancellation set."""
+    s = _session()
+    s.fee_amount = "6"
+    s.fee_destination = "rBotWallet"
+    s.fee_currency = "XRP"
+    s.fee_issuer = None
+
+    async def cancel_mid_build(destination, **kw):
+        s.state = swap_flow.CANCELLED  # cancel lands during the await
+        return {"xumm_url": "https://xumm.app/sign/NEW", "uuid": "NEWUUID"}
+
+    monkeypatch.setattr(xumm_ops, "create_payment_payload", cancel_mid_build)
+    _run(s.regenerate_payment())
+    assert s.payment_uuid is None
+    assert "NEWUUID" in s.stale_payment_uuids

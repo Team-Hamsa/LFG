@@ -333,3 +333,205 @@ def test_mint_cancel_suppresses_terminal_event(monkeypatch):
         assert published == []
     finally:
         app.mint_sessions.pop(s.id, None)
+
+
+# ---------------------------------------------------------------------------
+# Issue #152: cancelling a mint session best-effort cancels its open XUMM
+# payload (DELETE /platform/payload/{uuid}) so a stale QR/deeplink can no
+# longer be signed in Xaman. The delete is fire-and-forget: a XUMM failure
+# must never block the session cancel / lock release.
+# ---------------------------------------------------------------------------
+
+
+def test_mint_cancel_cancels_open_payload(monkeypatch):
+    monkeypatch.setattr(app.config, "WEBAPP_DEV_MODE", False)
+    seen = []
+
+    async def fake_cancel(uuid):
+        seen.append(uuid)
+        return True
+
+    monkeypatch.setattr(app.xumm_ops, "cancel_xumm_payload", fake_cancel)
+
+    async def scenario():
+        s = mint_flow.MintSession("55", "rA", platform="discord")
+        s.payment_uuid = "PAYUUID"
+        app.mint_sessions[s.id] = s
+        try:
+            resp = await app.handle_mint_cancel(_MockRequest(s.id, _token()))
+            assert resp.status == 200
+            await asyncio.sleep(0)  # let the fire-and-forget task run
+            assert seen == ["PAYUUID"]
+        finally:
+            app.mint_sessions.pop(s.id, None)
+
+    _run(scenario())
+
+
+def test_mint_cancel_no_payload_uuid_skips_cancel(monkeypatch):
+    monkeypatch.setattr(app.config, "WEBAPP_DEV_MODE", False)
+    seen = []
+
+    async def fake_cancel(uuid):
+        seen.append(uuid)
+        return True
+
+    monkeypatch.setattr(app.xumm_ops, "cancel_xumm_payload", fake_cancel)
+
+    async def scenario():
+        s = mint_flow.MintSession("55", "rA", platform="discord")
+        s.payment_uuid = None
+        app.mint_sessions[s.id] = s
+        try:
+            resp = await app.handle_mint_cancel(_MockRequest(s.id, _token()))
+            assert resp.status == 200
+            await asyncio.sleep(0)
+            assert seen == []
+        finally:
+            app.mint_sessions.pop(s.id, None)
+
+    _run(scenario())
+
+
+def test_mint_cancel_payload_failure_does_not_block(monkeypatch):
+    monkeypatch.setattr(app.config, "WEBAPP_DEV_MODE", False)
+
+    async def boom(uuid):
+        raise RuntimeError("xumm down")
+
+    monkeypatch.setattr(app.xumm_ops, "cancel_xumm_payload", boom)
+
+    async def scenario():
+        s = mint_flow.MintSession("55", "rA", platform="discord")
+        s.payment_uuid = "PAYUUID"
+        app.mint_sessions[s.id] = s
+        try:
+            resp = await app.handle_mint_cancel(_MockRequest(s.id, _token()))
+            assert resp.status == 200
+            await asyncio.sleep(0)  # let the failing background task settle
+            assert s.state == mint_flow.CANCELLED
+            assert (
+                app._active_session(app.mint_sessions, mint_flow.TERMINAL_STATES, "55", "discord")
+                is None
+            )
+        finally:
+            app.mint_sessions.pop(s.id, None)
+
+    _run(scenario())
+
+
+def test_mint_cancel_terminal_session_does_not_touch_payload(monkeypatch):
+    """Double-cancel / already-terminal: the no-op path must not re-fire the
+    XUMM DELETE."""
+    monkeypatch.setattr(app.config, "WEBAPP_DEV_MODE", False)
+    seen = []
+
+    async def fake_cancel(uuid):
+        seen.append(uuid)
+        return True
+
+    monkeypatch.setattr(app.xumm_ops, "cancel_xumm_payload", fake_cancel)
+
+    async def scenario():
+        s = mint_flow.MintSession("55", "rA", platform="discord")
+        s.payment_uuid = "PAYUUID"
+        s.state = mint_flow.OFFER_READY
+        app.mint_sessions[s.id] = s
+        try:
+            resp = await app.handle_mint_cancel(_MockRequest(s.id, _token()))
+            assert resp.status == 200
+            await asyncio.sleep(0)
+            assert seen == []
+        finally:
+            app.mint_sessions.pop(s.id, None)
+
+    _run(scenario())
+
+
+def test_mint_cancel_cancels_superseded_payloads_too(monkeypatch):
+    """Regenerate-then-cancel (#360 review): the superseded payload stays
+    signable at XUMM, so cancel must DELETE it alongside the live one."""
+    monkeypatch.setattr(app.config, "WEBAPP_DEV_MODE", False)
+    seen = []
+
+    async def fake_cancel(uuid):
+        seen.append(uuid)
+        return True
+
+    monkeypatch.setattr(app.xumm_ops, "cancel_xumm_payload", fake_cancel)
+
+    async def scenario():
+        s = mint_flow.MintSession("55", "rA", platform="discord")
+        s.payment_uuid = "NEWUUID"
+        s.stale_payment_uuids = ["OLDUUID"]
+        app.mint_sessions[s.id] = s
+        try:
+            resp = await app.handle_mint_cancel(_MockRequest(s.id, _token()))
+            assert resp.status == 200
+            await asyncio.sleep(0)
+            assert sorted(seen) == ["NEWUUID", "OLDUUID"]
+            assert s.stale_payment_uuids == []
+        finally:
+            app.mint_sessions.pop(s.id, None)
+
+    _run(scenario())
+
+
+def test_mint_regenerate_marks_superseded_uuid_stale(monkeypatch):
+    """MintSession.regenerate_payment records the replaced uuid — and only
+    when a fresh payload was actually built."""
+
+    async def fake_payload(destination, **kw):
+        return {"xumm_url": "https://xumm.app/sign/NEW", "uuid": "NEWUUID"}
+
+    async def scenario():
+        s = mint_flow.MintSession("55", "rA", platform="discord")
+        s.payment_uuid = "OLDUUID"
+        s.payment_destination = "rDest"
+        s.payment_value = "1"
+        s.payment_currency = "XRP"
+        s.payment_issuer = None
+        monkeypatch.setattr(mint_flow.xumm_ops, "create_payment_payload", fake_payload)
+        await s.regenerate_payment()
+        assert s.payment_uuid == "NEWUUID"
+        assert s.stale_payment_uuids == ["OLDUUID"]
+
+    _run(scenario())
+
+
+def test_mint_regenerate_failure_keeps_old_uuid_cancellable(monkeypatch):
+    """A failed rebuild must leave the old (still-signable) payload tracked
+    on payment_uuid so the session-cancel path can DELETE it."""
+
+    async def no_payload(destination, **kw):
+        return None
+
+    async def scenario():
+        s = mint_flow.MintSession("55", "rA", platform="discord")
+        s.payment_uuid = "OLDUUID"
+        monkeypatch.setattr(mint_flow.xumm_ops, "create_payment_payload", no_payload)
+        await s.regenerate_payment()
+        assert s.payment_uuid == "OLDUUID"
+        assert s.stale_payment_uuids == []
+
+    _run(scenario())
+
+
+def test_mint_regeneration_after_cancel_parks_new_payload_stale(monkeypatch):
+    """cancel() completing during prepare_payment's await must not leave the
+    replacement payload signable outside every cancellation set."""
+
+    async def scenario():
+        s = mint_flow.MintSession("55", "rA", platform="discord")
+        s.payment_uuid = "OLDUUID"
+
+        async def cancel_mid_build(destination, **kw):
+            s.state = mint_flow.CANCELLED
+            return {"xumm_url": "https://xumm.app/sign/NEW", "uuid": "NEWUUID"}
+
+        monkeypatch.setattr(mint_flow.xumm_ops, "create_payment_payload", cancel_mid_build)
+        await s.regenerate_payment()
+        assert s.payment_uuid is None
+        assert sorted(s.stale_payment_uuids) == ["NEWUUID", "OLDUUID"]
+
+    _run(scenario())

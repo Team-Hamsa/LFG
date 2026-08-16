@@ -149,6 +149,12 @@ class SwapSession:
         self.error: str | None = None
         self.results: list[dict[str, Any]] = []  # one dict per re-crafted NFT
         self.payment_link: str | None = None  # set when an upfront modify fee is due
+        # #152: XUMM uuid of the live fee payload, so a session cancel can
+        # best-effort DELETE it (stale QR no longer signable in Xaman).
+        self.payment_uuid: str | None = None
+        # #152: uuids of superseded (regenerated-over) fee payloads, still
+        # open at XUMM until their expire — cancel must DELETE these too.
+        self.stale_payment_uuids: list[str] = []
         # #212: push delivery state of the fee payment payload
         # ("sent" | "failed" | None) for honest client messaging.
         self.payment_push: str | None = None
@@ -186,8 +192,21 @@ class SwapSession:
             account=self.wallet_address,
         )
         if payload:
+            # #152: the payload being replaced stays open (signable) at XUMM
+            # until its expire — remember it so cancel can DELETE it too.
+            new_uuid = payload.get("uuid")
+            if self.payment_uuid and new_uuid and new_uuid != self.payment_uuid:
+                self.stale_payment_uuids.append(self.payment_uuid)
             self.payment_link = payload["xumm_url"]
             self.payment_push = payload.get("push")
+            self.payment_uuid = new_uuid  # #152: kept for cancel
+            # Cancel raced the payload-creation await: the session is already
+            # terminal, so this fresh payload belongs to nobody — park it in
+            # the stale list (the regenerate handler drains it) instead of
+            # leaving a signable QR outside every cancellation set.
+            if self.state in TERMINAL_STATES and self.payment_uuid:
+                self.stale_payment_uuids.append(self.payment_uuid)
+                self.payment_uuid = None
             return True
         return False
 

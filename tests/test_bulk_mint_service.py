@@ -653,3 +653,51 @@ def test_bulk_unit_accept_payload_failure_502(dev_auth, monkeypatch):
     monkeypatch.setattr(server.xumm_ops, "create_accept_offer_payload", none_payload)
     resp = _run(server.handle_bulk_mint_unit_accept(_AcceptReq(job.id, "0")))
     assert resp.status == 502
+
+
+# --- #152: bulk cancel best-effort cancels the open XUMM payload -----------
+
+
+def test_bulk_cancel_cancels_open_payload(dev_auth, monkeypatch):
+    seen = []
+
+    async def fake_cancel(uuid):
+        seen.append(uuid)
+        return True
+
+    monkeypatch.setattr(server.xumm_ops, "cancel_xumm_payload", fake_cancel)
+
+    async def scenario():
+        job = bulk_mint_flow.BulkMintJob(
+            discord_id="dev", wallet_address="rTest", requested_qty=1, platform="discord"
+        )
+        job.payment_uuid = "BULKUUID"
+        dev_auth[job.id] = job
+        resp = await server.handle_bulk_mint_cancel(_StatusReq(job.id))
+        assert resp.status == 200
+        await asyncio.sleep(0)  # let the fire-and-forget task run
+        assert seen == ["BULKUUID"]
+
+    _run(scenario())
+
+
+def test_bulk_cancel_no_payload_uuid_skips_cancel(dev_auth, monkeypatch):
+    seen = []
+
+    async def fake_cancel(uuid):
+        seen.append(uuid)
+        return True
+
+    monkeypatch.setattr(server.xumm_ops, "cancel_xumm_payload", fake_cancel)
+
+    async def scenario():
+        job = bulk_mint_flow.BulkMintJob(
+            discord_id="dev", wallet_address="rTest", requested_qty=1, platform="discord"
+        )
+        dev_auth[job.id] = job
+        resp = await server.handle_bulk_mint_cancel(_StatusReq(job.id))
+        assert resp.status == 200
+        await asyncio.sleep(0)
+        assert seen == []
+
+    _run(scenario())
