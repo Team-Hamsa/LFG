@@ -31,6 +31,30 @@ import yaml  # noqa: E402
 from lfg_core import trait_config  # noqa: E402
 from lfg_core.layer_store import LocalLayerStore  # noqa: E402
 
+# #301 recurrence guard — a stray single-r "Iridescent *" Body art file (the
+# staging typo that produced the misspelled on-chain value) must never re-enter
+# the live mint pool. Narrow denylist by design, not a spell-checker: the
+# canonical spelling is the double-r "Irridescent *".
+_TYPO_BODY_PREFIX = "Iridescent "
+
+
+def find_typo_body_files(layers_dir: str) -> list[str]:
+    """Paths of any `layers/<body>/Body/Iridescent *` (single-r) art files."""
+    flagged: list[str] = []
+    try:
+        bodies = sorted(os.listdir(layers_dir))
+    except OSError:
+        return flagged
+    for body in bodies:
+        body_dir = os.path.join(layers_dir, body, "Body")
+        if not os.path.isdir(body_dir):
+            continue
+        for name in sorted(os.listdir(body_dir)):
+            stem = os.path.splitext(name)[0]
+            if stem.startswith(_TYPO_BODY_PREFIX):
+                flagged.append(os.path.join(body_dir, name))
+    return flagged
+
 
 def main(argv: list[str] | None = None) -> int:
     p = argparse.ArgumentParser(description=__doc__)
@@ -49,6 +73,11 @@ def main(argv: list[str] | None = None) -> int:
     except OSError as e:
         print(f"ERROR: could not read layers dir {args.layers_dir!r}: {e}")
         return 1
+    for typo_path in find_typo_body_files(args.layers_dir):
+        error_list.append(
+            f"misspelled Body art file (single-r 'Iridescent', canonical is "
+            f"'Irridescent'): {typo_path} (#301)"
+        )
     for w in warning_list:
         print(f"warning: {w}")
     for err in error_list:
