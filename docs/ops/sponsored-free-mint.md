@@ -159,7 +159,7 @@ job — so treat the campaign-status **eligibility fields**, not the `reverify`
 block, as the live truth of whether the archive gate is open, and know that
 pressing Start again re-runs reverify and refreshes the block.
 
-**Failure reasons** (`reverify.error`). The first seven are `reverify_archive`'s
+**Failure reasons** (`reverify.error`). The first eight are `reverify_archive`'s
 closed, machine-readable set; the last two are wrapper conditions from the
 service job itself (`lfg_service/app.py::run_archive_reverify`) around that
 call, so together the table is exhaustive for everything `reverify.error` can
@@ -172,6 +172,7 @@ hold, not just the deterministic core:
 | `genesis_mismatch` | the live endpoint's chain identity doesn't match the certified baseline | wrong RPC endpoint, or the testnet chain was reset — re-run Step 0a |
 | `coverage_unbound` | the stored coverage document is missing, empty, or in the legacy pre-#331 (version 1) format that carries no verifiable `sources` attestation | re-run Step 0a |
 | `missing_required_sources` | the stored coverage doesn't attest the full required source set (#331: `issuer`, `brix`, `token_issuer`, `signing`, `distributor`, `nfts`) or lacks a distributor address | re-run Step 0a with the full default `--sources` and `--distributor` |
+| `accounts_config_mismatch` | the stored coverage's `token_issuer`/`signing` accounts no longer match the current `TOKEN_ISSUER_ADDRESS`/`SIGNING_ACCOUNT` config — an account rotation means re-sweeping the old accounts would attest coverage this deployment never had | an issuer/signer change warrants a fresh human baseline — re-run Step 0a under the new configuration |
 | `gap_not_covered` | the sweep completed but a continuity gap's bound lies past the reached tip | transient/ops — press Start again |
 | `sweep_failed: <exc>` | an `account_tx` page or endpoint-identity request failed mid-sweep | transient/ops (RPC hiccup) — press Start again |
 | `heartbeat_timeout: the listener has not restamped the archive heartbeat within 90s — on a quiet network wait for the next validated transaction and press Start again; if the listener has no archive identity, set SPONSORED_MINT_*_GENESIS_HASH and restart the listener (never during a live campaign)` | the sweep and re-certification succeeded, but the listener either hasn't seen a validated transaction yet or has no archive genesis identity at all, so it can never heartbeat | on a quiet network, wait and press Start again; if the listener truly has no archive identity, set `SPONSORED_MINT_*_GENESIS_HASH` (see the prerequisite below) and restart the listener — never during a live campaign |

@@ -135,7 +135,7 @@ def run(conn: sqlite3.Connection, csv_paths: list[str], fetch: bool = True) -> d
         stats["from_csv"] += apply_csv(conn, path, set(missing))
         missing = missing_uri_hexes(conn, uris)
     if fetch and missing:
-        stats["fetched"] = asyncio.get_event_loop().run_until_complete(fetch_missing(conn, missing))
+        stats["fetched"] = asyncio.run(fetch_missing(conn, missing))
         missing = missing_uri_hexes(conn, uris)
     stats["still_missing"] = len(missing)
     return stats

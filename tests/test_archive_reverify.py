@@ -38,12 +38,15 @@ def _isolated_onchain_index(tmp_path, monkeypatch):
 
 
 # The full attested account set (#331): every certified source that carries an
-# address. `nfts` is attested in `sources` but has no account.
+# address. `nfts` is attested in `sources` but has no account. `token_issuer`
+# and `signing` must match live config (#342 accounts_config_mismatch check).
+from lfg_core import config as _config  # noqa: E402
+
 COVERED_ACCOUNTS = {
     "issuer": "rrrrrrrrrrrrrrrrrrrrrhoLvTp",
     "brix": "rBRIX",
-    "token_issuer": "rTOKEN",
-    "signing": "rSIGN",
+    "token_issuer": str(_config.TOKEN_ISSUER_ADDRESS),
+    "signing": str(_config.SIGNING_ACCOUNT),
     "distributor": "rDIST",
 }
 
@@ -138,6 +141,43 @@ def test_reverify_refuses_on_source_tag_change(tmp_path, monkeypatch):
         archive_reverify.reverify_archive(conn, _fake_request_fn(), network="testnet")
     )
     assert (result.ok, result.reason) == (False, "source_tag_changed")
+
+
+def test_reverify_refuses_when_token_issuer_config_drifted(tmp_path, monkeypatch):
+    from lfg_core import config
+
+    conn = _certified_conn(tmp_path)
+    monkeypatch.setattr(config, "TOKEN_ISSUER_ADDRESS", "rNEWTOKENISSUER")
+    result = asyncio.run(
+        archive_reverify.reverify_archive(conn, _fake_request_fn(), network="testnet")
+    )
+    assert (result.ok, result.reason) == (False, "accounts_config_mismatch")
+
+
+def test_reverify_refuses_when_signing_account_config_drifted(tmp_path, monkeypatch):
+    from lfg_core import config
+
+    conn = _certified_conn(tmp_path)
+    monkeypatch.setattr(config, "SIGNING_ACCOUNT", "rNEWSIGNER")
+    result = asyncio.run(
+        archive_reverify.reverify_archive(conn, _fake_request_fn(), network="testnet")
+    )
+    assert (result.ok, result.reason) == (False, "accounts_config_mismatch")
+
+
+def test_reverify_genesis_check_delegates_to_validate_baseline_endpoint(tmp_path, monkeypatch):
+    # One fail-closed authority (#342): the endpoint-identity check must run
+    # through validate_baseline_endpoint, not a local inline compare.
+    conn = _certified_conn(tmp_path)
+
+    def boom(*args, **kwargs):
+        raise ValueError("claimed genesis does not match the endpoint chain identity")
+
+    monkeypatch.setattr(archive_reverify, "validate_baseline_endpoint", boom)
+    result = asyncio.run(
+        archive_reverify.reverify_archive(conn, _fake_request_fn(), network="testnet")
+    )
+    assert (result.ok, result.reason) == (False, "genesis_mismatch")
 
 
 def test_reverify_refuses_on_unbound_coverage(tmp_path):
