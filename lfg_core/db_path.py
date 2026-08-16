@@ -6,7 +6,11 @@ import os
 
 from dotenv import load_dotenv
 
-load_dotenv()
+# Same gate as lfg_core/envload.py, inlined because this module must stay free
+# of lfg_core imports (see above): the pytest suite sets LFG_SKIP_DOTENV=1 in
+# the root conftest.py so the deployed .env never reaches a test (#323).
+if os.getenv("LFG_SKIP_DOTENV", "0") in ("0", "false", "False"):
+    load_dotenv()
 
 
 def app_db_path(network: str | None = None) -> str:

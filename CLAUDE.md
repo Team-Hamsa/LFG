@@ -1154,6 +1154,33 @@ the single-mint machinery per unit.
   gitignored, regenerable only in the sense that in-flight jobs resume from
   it; deleting it mid-flight loses resume state for any live job).
 
+## Test env isolation (#323)
+
+The pytest suite never sees the deployed `.env`: the root `conftest.py` sets
+`LFG_SKIP_DOTENV=1` (before anything imports `lfg_core`), and every
+`load_dotenv()` call site is gated on it (`lfg_core/envload.py`
+`load_dotenv_unless_skipped()`; inlined in `lfg_core/db_path.py`, which must
+stay lfg_core-import-free). Runtime entrypoints (`main.py`, pm2 processes,
+`scripts/*`) never set the var and load `.env` normally. Rules:
+
+- **Never add a bare `load_dotenv()`** in code a test can import — call
+  `lfg_core.envload.load_dotenv_unless_skipped()` instead, or the #312 bug
+  class ("tests fail only on boxes whose `.env` sets a flag") comes back.
+- **Asserting a shipped default:** never read the frozen `config.X` constant —
+  assert `config.env_flag("X", config.X_DEFAULT)` (or the raw `X_DEFAULT`), or
+  monkeypatch the value under test. The constant tests whatever the ambient
+  env froze at import, not the default.
+- **Where a pin must live:** a per-test-module preamble pin does **not** fix an
+  import-frozen constant — pytest imports every module at collection,
+  alphabetically, before running anything, so an earlier module freezes config
+  first. Only the root `conftest.py` runs early enough; pin suite-wide values
+  there (always `os.environ.setdefault`, so explicit shell exports still win —
+  the deliberate escape hatch, e.g. `XRPL_NETWORK=mainnet pytest -k …`).
+- **New test files need no env-guard preamble**: `conftest.py` supplies all
+  `_require(...)`-mandatory vars (`SEED`, `XUMM_*`, `TOKEN_*`, `BUNNY_CDN_*`)
+  and the layer knobs centrally. The ~116 existing per-file preambles are
+  harmless no-ops kept for now (cleanup = follow-up).
+
 ## Important Notes
 
 1. **Token Trustline Required**: Users must set up a trustline for LFGO tokens before receiving payment instructions. The `/letsgo` command provides a "Set LFGO Trustline" button.

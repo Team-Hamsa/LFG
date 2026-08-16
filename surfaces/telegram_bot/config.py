@@ -5,9 +5,10 @@
 import logging
 import os
 
-from dotenv import load_dotenv
+from lfg_core.envload import load_dotenv_unless_skipped
 
-load_dotenv()
+# Gated on LFG_SKIP_DOTENV so the pytest suite never inherits the deployed .env (#323).
+load_dotenv_unless_skipped()
 
 
 def _require(name: str) -> str:

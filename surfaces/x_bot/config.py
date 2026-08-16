@@ -15,9 +15,10 @@
 import logging
 import os
 
-from dotenv import load_dotenv
+from lfg_core.envload import load_dotenv_unless_skipped
 
-load_dotenv()
+# Gated on LFG_SKIP_DOTENV so the pytest suite never inherits the deployed .env (#323).
+load_dotenv_unless_skipped()
 
 LFG_SERVICE_URL = os.getenv("LFG_SERVICE_URL", "http://localhost:8000")
 SERVICE_TOKEN_X = os.getenv("SERVICE_TOKEN_X", "")
