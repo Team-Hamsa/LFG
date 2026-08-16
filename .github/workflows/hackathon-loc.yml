@@ -31,6 +31,9 @@ jobs:
       - name: Update README badge row
         run: python3 -m scripts.readme_badges
 
+      - name: Update README feature-flags table
+        run: python3 -m scripts.readme_features
+
       - name: Update SourceTag badge
         # metrics/sourcetag.json is pushed nightly by a separate pm2 job, not
         # this workflow — if it's missing or malformed, that's a real problem

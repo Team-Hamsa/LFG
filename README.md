@@ -159,6 +159,19 @@ Short walkthroughs of each core flow:
 | Animated trait layers (transparent GIF bodies → video NFTs, gifski pipeline) | ✅ |
 | Mainnet launch — live collection, network-aware databases, regular-key signing, live BRIX/XRP AMM, post-cutover hardening | ✅ |
 
+<!-- feature-flags:start -->
+**Feature flags** — the *code default* column below is generated from `lfg_core/config.py` by CI and cannot drift:
+
+| Flag | Code default | Feature | Production |
+|---|---|---|---|
+| `ECONOMY_ENABLED` | `0` (off) | Dress-up trait economy — Closet, harvest/assemble/equip, trait tokens, Trait Shop | `1` since 2026-07-21 ([#185](../../issues/185)) |
+| `MARKET_ENABLED` | `1` (on) | In-app NFT marketplace (list / browse / buy via Xaman) | on (default) |
+| `BULK_MINT_UI_ENABLED` | `0` (off) | Activity bulk-mint quantity stepper (server bulk endpoints stay live regardless) | staging first; enable per stack |
+| `X_ENABLED` | `0` (off) | X brand-account auto-poster (also requires all four OAuth creds) | off — go-live is a pending ops step ([#41](../../issues/41)) |
+| `SHARE_CARD_RENDER_ENABLED` | `0` (off) | Branded share-card PNG for X cards (needs node + Playwright Chromium) | off — raw art serves as the card image |
+| `WEB_ALLOWED_ORIGINS` | empty (off) | Standalone web surface CORS allowlist (empty = feature off) | set to the GitHub Pages origins ([#240](../../issues/240)) |
+<!-- feature-flags:end -->
+
 </details>
 
 ---
