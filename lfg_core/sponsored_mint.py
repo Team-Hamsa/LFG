@@ -13,7 +13,7 @@ from typing import Any, Literal, cast
 from urllib.parse import quote
 from uuid import uuid4
 
-from lfg_core import config, db_path, history_events, history_store, market_ops, nft_index
+from lfg_core import config, db_path, history_events, history_store, market_ops
 
 CampaignState = Literal["off", "active", "stopped", "expired", "full", "at_capacity"]
 ReservationReason = Literal[
@@ -1025,22 +1025,6 @@ def archive_is_usable(
         return False
 
 
-def is_tagged_wallet(history_path: str, wallet: str) -> bool:
-    wallet = wallet.strip()
-    uri = f"file:{quote(os.path.abspath(history_path))}?mode=ro"
-    with sqlite3.connect(uri, uri=True, timeout=5) as conn:
-        row = conn.execute(
-            """
-            SELECT 1
-            FROM xrpl_txs
-            WHERE account = ? AND source_tag = ?
-            LIMIT 1
-            """,
-            (wallet, config.SOURCE_TAG),
-        ).fetchone()
-    return row is not None
-
-
 def excluded_wallets() -> frozenset[str]:
     values = (
         *config.SPONSORED_MINT_EXCLUDED_WALLETS,
@@ -1655,25 +1639,6 @@ def mint_recovery_claims(db_path: str, *, network: str) -> tuple[Claim, ...]:
     return tuple(claim for row in rows if (claim := _claim(row)) is not None)
 
 
-def prepared_reservation(
-    db_path: str, *, network: str, wallet: str, session_id: str
-) -> Claim | None:
-    """Return a resumable exact prepared identity without changing its status."""
-
-    ensure_schema(db_path)
-    with _connect(db_path) as conn:
-        claim = _claim_for_session(conn, network, wallet, session_id)
-    if (
-        claim is None
-        or claim.status != "reserved"
-        or not claim.mint_signed_tx_hash
-        or not claim.mint_signed_tx_blob
-        or not claim.mint_signed_ledger_floor
-    ):
-        return None
-    return claim
-
-
 def reversible_reservation_for_wallet(db_path: str, *, network: str, wallet: str) -> Claim | None:
     """Find a promised but not-yet-forwarded claim, even after campaign close."""
 
@@ -1687,29 +1652,6 @@ def reversible_reservation_for_wallet(db_path: str, *, network: str, wallet: str
             (network, wallet.strip()),
         ).fetchone()
     return _claim(row)
-
-
-def mark_minting(
-    db_path: str,
-    *,
-    network: str,
-    wallet: str,
-    session_id: str,
-    now: int | None = None,
-) -> MintingResult | None:
-    ensure_schema(db_path)
-    with _connect(db_path) as conn:
-        claim = _claim_for_session(conn, network, wallet, session_id)
-    if claim is None or not claim.mint_signed_tx_hash:
-        return None
-    return mark_mint_forwarded(
-        db_path,
-        network=network,
-        wallet=wallet,
-        session_id=session_id,
-        tx_hash=claim.mint_signed_tx_hash,
-        now=now,
-    )
 
 
 def reset_validated_mint_failure(
@@ -1776,93 +1718,6 @@ def headroom_snapshots(db_path: str, *, network: str) -> list[tuple[str, int, li
     return snapshots
 
 
-def _mint_evidence_is_corroborated(
-    app_db_path: str,
-    history_path: str,
-    *,
-    network: str,
-    wallet: str,
-    mint_tx_hash: str,
-    nft_id: str,
-) -> bool:
-    """Prove persisted mint identifiers against every durable mint mirror.
-
-    An absent/stale mirror is not proof that no mint happened. Recovery therefore
-    returns false on every read or validation failure and leaves the claim held.
-    """
-
-    if not archive_is_usable(history_path, network=network):
-        return False
-    history_uri = f"file:{quote(os.path.abspath(history_path))}?mode=ro"
-    try:
-        with sqlite3.connect(history_uri, uri=True, timeout=5) as conn:
-            conn.execute("PRAGMA query_only=ON")
-            row = conn.execute(
-                """
-                SELECT tx.raw_json
-                FROM xrpl_txs AS tx
-                JOIN nft_events AS event ON event.tx_hash = tx.tx_hash
-                WHERE tx.tx_hash = ?
-                  AND tx.tx_type = 'NFTokenMint'
-                  AND event.nft_id = ?
-                  AND event.event = 'mint'
-                LIMIT 1
-                """,
-                (mint_tx_hash, nft_id),
-            ).fetchone()
-        if row is None:
-            return False
-        raw = json.loads(row[0])
-        tx = raw.get("tx", raw) if isinstance(raw, dict) else {}
-        meta = tx.get("meta") if isinstance(tx, dict) else None
-        if not isinstance(meta, dict) and isinstance(raw, dict):
-            meta = raw.get("meta")
-        if tx.get("validated") is not True or not isinstance(meta, dict):
-            return False
-        if meta.get("TransactionResult") != "tesSUCCESS":
-            return False
-    except (OSError, sqlite3.Error, TypeError, ValueError, json.JSONDecodeError):
-        return False
-
-    app_uri = f"file:{quote(os.path.abspath(app_db_path))}?mode=ro"
-    try:
-        with sqlite3.connect(app_uri, uri=True, timeout=5) as conn:
-            conn.execute("PRAGMA query_only=ON")
-            row = conn.execute(
-                """
-                SELECT 1
-                FROM LFG
-                WHERE nft_id = ? AND owner_address = ?
-                LIMIT 1
-                """,
-                (nft_id, wallet),
-            ).fetchone()
-    except (OSError, sqlite3.Error):
-        return False
-    if row is None:
-        return False
-
-    index_path = nft_index.index_db_path(network)
-    if not os.path.isfile(index_path) or not os.access(index_path, os.R_OK):
-        return False
-    index_uri = f"file:{quote(os.path.abspath(index_path))}?mode=ro"
-    try:
-        with sqlite3.connect(index_uri, uri=True, timeout=5) as conn:
-            conn.execute("PRAGMA query_only=ON")
-            row = conn.execute(
-                """
-                SELECT 1
-                FROM onchain_nfts
-                WHERE nft_id = ? AND COALESCE(is_burned, 0) = 0
-                LIMIT 1
-                """,
-                (nft_id,),
-            ).fetchone()
-    except (OSError, sqlite3.Error):
-        return False
-    return row is not None
-
-
 def _enqueue_missing_burn(
     conn: sqlite3.Connection,
     *,
@@ -1912,41 +1767,16 @@ def recover_incomplete_claims(
     """Classify persisted sponsored work before the service accepts requests.
 
     Only an expired `reserved` row with no irreversible identifiers is released.
-    `minting` is uncertain by default and remains consumed/held. The sole automatic
-    promotion requires a transaction hash and NFT ID already persisted on the claim
-    and corroborated by both the validated history archive and live NFT index.
+    `minting` is uncertain and always remains consumed/held here; promotion to
+    `minted` happens only in `_recover_sponsored_mint_submissions`
+    (lfg_service/app.py), which reconciles each forwarded transaction against
+    the ledger and runs immediately before this classification at startup.
     Existing burn rows are never updated or deleted; missing debt is only added.
     Expired submitting leases are reported for the existing burn worker to reclaim.
     """
 
     timestamp = _timestamp(None)
     ensure_schema(db_path)
-    with _connect(db_path) as conn:
-        minting_rows = conn.execute(
-            """
-            SELECT id, wallet, mint_tx_hash, nft_id
-            FROM free_mint_claims
-            WHERE network = ? AND status = 'minting'
-            ORDER BY created_at, id
-            """,
-            (network,),
-        ).fetchall()
-
-    corroborated = {
-        row["id"]
-        for row in minting_rows
-        if row["mint_tx_hash"]
-        and row["nft_id"]
-        and _mint_evidence_is_corroborated(
-            db_path,
-            history_path,
-            network=network,
-            wallet=row["wallet"],
-            mint_tx_hash=row["mint_tx_hash"],
-            nft_id=row["nft_id"],
-        )
-    }
-
     with _connect(db_path) as conn:
         conn.execute("BEGIN IMMEDIATE")
         _, campaign_state, _ = _effective_campaign(conn, network, timestamp)
@@ -1961,17 +1791,14 @@ def recover_incomplete_claims(
         # campaign's end, not a reservation TTL; nothing reads it back.
         released: tuple[str, ...] = ()
 
-        recovered = tuple(row["id"] for row in minting_rows if row["id"] in corroborated)
-        for claim_id in recovered:
-            conn.execute(
-                """
-                UPDATE free_mint_claims
-                SET status = 'minted', last_error = NULL, updated_at = ?
-                WHERE id = ? AND status = 'minting'
-                """,
-                (timestamp, claim_id),
-            )
-            _enqueue_missing_burn(conn, claim_id=claim_id, timestamp=timestamp)
+        # `minting` claims are never auto-promoted here. The only writer that
+        # sets `mint_tx_hash`/`nft_id` (`record_minted_and_enqueue_burn`) flips
+        # the status to 'minted' in the same UPDATE, so a 'minting' row can
+        # never carry corroborable mint evidence; ledger reconciliation of
+        # forwarded transactions is `_recover_sponsored_mint_submissions`'s
+        # job. Like `released`, this tuple is ALWAYS empty by design and stays
+        # in the report so callers keep a stable shape.
+        recovered: tuple[str, ...] = ()
 
         consumed_rows = conn.execute(
             """

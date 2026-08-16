@@ -307,7 +307,7 @@ def test_campaign_off_does_not_scan_archive(tmp_path, monkeypatch):
     def forbidden(*_args, **_kwargs):
         raise AssertionError("archive scan should not run while campaign is off")
 
-    monkeypatch.setattr(sponsored_mint, "is_tagged_wallet", forbidden)
+    monkeypatch.setattr(sponsored_mint, "_archive_eligibility_snapshot", forbidden)
     result = sponsored_mint.reserve_if_eligible(
         db,
         history,
