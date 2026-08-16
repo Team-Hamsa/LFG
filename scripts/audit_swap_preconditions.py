@@ -29,11 +29,16 @@ import sys
 REPO_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
 sys.path.insert(0, REPO_ROOT)
 
-from lfg_core import config, xrpl_ops  # noqa: E402
-
 
 async def check() -> tuple[int, str]:
-    """Return (exit_code, message) for the issuer BRIX-trustline precondition."""
+    """Return (exit_code, message) for the issuer BRIX-trustline precondition.
+
+    lfg_core is imported here, not at module top, so main() can pin
+    XRPL_NETWORK from --network BEFORE config freezes its endpoints/issuers —
+    otherwise the flag would only change the printed label while the audit
+    silently ran against the ambient network."""
+    from lfg_core import config, xrpl_ops
+
     issuer = config.SWAP_ISSUER_ADDRESS
     currency = config.SWAP_OFFER_CURRENCY_HEX
     brix_issuer = config.SWAP_OFFER_ISSUER
@@ -68,9 +73,12 @@ def main() -> None:
         "--network",
         choices=["testnet", "mainnet"],
         default=os.getenv("XRPL_NETWORK", "testnet"),
-        help="informational — endpoints resolve from XRPL_NETWORK at import",
+        help="network to audit — pins XRPL_NETWORK before lfg_core loads",
     )
     args = parser.parse_args()
+    # Pin the network BEFORE lfg_core.config is imported (inside check()) so
+    # --network selects the actual endpoints/issuers, not just the label.
+    os.environ["XRPL_NETWORK"] = args.network
     code, msg = asyncio.run(check())
     print(f"[{args.network}] {msg}")
     sys.exit(code)

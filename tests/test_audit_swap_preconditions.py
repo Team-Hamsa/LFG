@@ -77,3 +77,40 @@ def test_same_issuer_config_trivially_ok(monkeypatch):
     monkeypatch.setattr(xrpl_ops, "get_trustline_balance", boom)
     code, msg = _run(audit_swap_preconditions.check())
     assert code == 0
+
+
+def test_lookup_exception_is_indeterminate(monkeypatch):
+    # CodeRabbit nitpick on #358: protect the documented exit-code contract —
+    # a transient lookup failure is exit 2 / INDETERMINATE, never a pass/fail.
+    _split_issuers(monkeypatch)
+
+    async def boom(*a, **k):
+        raise RuntimeError("rpc blip")
+
+    monkeypatch.setattr(xrpl_ops, "get_trustline_balance", boom)
+    code, msg = _run(audit_swap_preconditions.check())
+    assert code == 2
+    assert "INDETERMINATE" in msg
+
+
+def test_main_pins_network_env_before_check(monkeypatch, capsys):
+    # #358 review: --network must select the actual network, not just the
+    # printed label — main() pins XRPL_NETWORK before check() imports config.
+    seen = {}
+
+    async def fake_check():
+        seen["env"] = os.environ.get("XRPL_NETWORK")
+        return 0, "OK: stub"
+
+    monkeypatch.setattr(audit_swap_preconditions, "check", fake_check)
+    # main() uses asyncio.run, which strands the thread's loop state for
+    # later tests (repo convention: fresh-loop _run) — swap in a safe runner.
+    monkeypatch.setattr(audit_swap_preconditions.asyncio, "run", _run)
+    monkeypatch.setattr(sys, "argv", ["audit_swap_preconditions.py", "--network", "mainnet"])
+    monkeypatch.setenv("XRPL_NETWORK", "testnet")
+    try:
+        audit_swap_preconditions.main()
+    except SystemExit as e:
+        assert e.code == 0
+    assert seen["env"] == "mainnet"
+    assert "[mainnet]" in capsys.readouterr().out

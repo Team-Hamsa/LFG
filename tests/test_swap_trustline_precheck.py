@@ -32,7 +32,15 @@ REPO_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
 sys.path.insert(0, REPO_ROOT)
 sys.path.insert(0, os.path.join(REPO_ROOT, "scripts"))
 
-from lfg_core import swap_flow, xrpl_ops  # noqa: E402
+from lfg_core import config, swap_flow, xrpl_ops  # noqa: E402
+
+
+def _split_issuers(monkeypatch):
+    """Give the NFT issuer and the BRIX issuer distinct addresses (the mainnet
+    shape) so the trustline lookup actually runs — on the same-issuer testnet
+    defaults the helper short-circuits True without any lookup."""
+    monkeypatch.setattr(config, "SWAP_ISSUER_ADDRESS", "rNFTISSUERxxxxxxxxxxxxxxxxxxxxxx")
+    monkeypatch.setattr(config, "SWAP_OFFER_ISSUER", "rBRIXISSUERxxxxxxxxxxxxxxxxxxxxx")
 
 
 def _run(coro):
@@ -97,16 +105,19 @@ def _stub_flow_until_precheck(monkeypatch, *, pay_with="BRIX", total="20"):
 
 
 def test_helper_true_when_issuer_has_trustline(monkeypatch):
+    _split_issuers(monkeypatch)
     monkeypatch.setattr(xrpl_ops, "get_trustline_balance", _amock(Decimal("5")))
     assert _run(swap_flow._issuer_holds_offer_trustline()) is True
 
 
 def test_helper_false_when_issuer_missing_trustline(monkeypatch):
+    _split_issuers(monkeypatch)
     monkeypatch.setattr(xrpl_ops, "get_trustline_balance", _amock(None))
     assert _run(swap_flow._issuer_holds_offer_trustline()) is False
 
 
 def test_issuer_has_trustline_keeps_brix(monkeypatch):
+    _split_issuers(monkeypatch)
     _stub_flow_until_precheck(monkeypatch)
     monkeypatch.setattr(xrpl_ops, "get_trustline_balance", _amock(Decimal("5")))
     burns = []
@@ -121,6 +132,7 @@ def test_issuer_has_trustline_keeps_brix(monkeypatch):
 
 
 def test_missing_trustline_falls_back_to_xrp(monkeypatch, caplog):
+    _split_issuers(monkeypatch)
     _stub_flow_until_precheck(monkeypatch)
     monkeypatch.setattr(xrpl_ops, "get_trustline_balance", _amock(None))
     monkeypatch.setattr(xrpl_ops, "get_amm_xrp_cost", _amock(Decimal("0.5")))
@@ -144,6 +156,7 @@ def test_missing_trustline_falls_back_to_xrp(monkeypatch, caplog):
 
 
 def test_missing_trustline_and_no_amm_quote_fails_pre_burn(monkeypatch):
+    _split_issuers(monkeypatch)
     _stub_flow_until_precheck(monkeypatch)
     monkeypatch.setattr(xrpl_ops, "get_trustline_balance", _amock(None))
     monkeypatch.setattr(xrpl_ops, "get_amm_xrp_cost", _amock(None))
@@ -164,6 +177,7 @@ def test_missing_trustline_and_no_amm_quote_fails_pre_burn(monkeypatch):
 
 
 def test_modify_only_session_skips_precheck(monkeypatch):
+    _split_issuers(monkeypatch)
     _stub_flow_until_precheck(monkeypatch)
     calls = []
     monkeypatch.setattr(xrpl_ops, "get_trustline_balance", _amock(None, calls))
@@ -174,3 +188,32 @@ def test_modify_only_session_skips_precheck(monkeypatch):
     # No burn items -> no BRIX-priced offer -> no precheck, no fallback.
     assert s.pay_with == "BRIX"
     assert calls == []
+
+
+def test_helper_same_issuer_shortcircuits_true(monkeypatch):
+    # Same-issuer (testnet) shape: an account cannot hold a trustline to
+    # itself and never needs one for its own IOU — the helper must return
+    # True WITHOUT consulting the ledger (a lookup would return None and
+    # wrongly divert valid BRIX swaps to XRP).
+    monkeypatch.setattr(config, "SWAP_ISSUER_ADDRESS", "rSAMExxxxxxxxxxxxxxxxxxxxxxxxxxx")
+    monkeypatch.setattr(config, "SWAP_OFFER_ISSUER", "rSAMExxxxxxxxxxxxxxxxxxxxxxxxxxx")
+
+    async def boom(*a, **k):
+        raise AssertionError("lookup must be skipped for the same-issuer shape")
+
+    monkeypatch.setattr(xrpl_ops, "get_trustline_balance", boom)
+    assert _run(swap_flow._issuer_holds_offer_trustline()) is True
+
+
+def test_same_issuer_burn_swap_keeps_brix(monkeypatch):
+    # Regression (#358 review): a burn-remint swap on the same-issuer shape
+    # must stay on the BRIX fee path.
+    _stub_flow_until_precheck(monkeypatch)
+    monkeypatch.setattr(config, "SWAP_ISSUER_ADDRESS", "rSAMExxxxxxxxxxxxxxxxxxxxxxxxxxx")
+    monkeypatch.setattr(config, "SWAP_OFFER_ISSUER", "rSAMExxxxxxxxxxxxxxxxxxxxxxxxxxx")
+    monkeypatch.setattr(xrpl_ops, "get_trustline_balance", _amock(None))
+
+    s = _make_session()
+    _run(swap_flow.run_swap_session(s))
+
+    assert s.pay_with == "BRIX"

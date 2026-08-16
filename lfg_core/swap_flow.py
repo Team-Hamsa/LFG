@@ -107,6 +107,11 @@ async def _issuer_holds_offer_trustline() -> bool:
     (the royalty pays out in it) — otherwise every BRIX-priced offer fails
     tecNO_LINE. Invisible on testnet (NFT issuer == BRIX issuer); on mainnet
     they are separate accounts and this is a real ops precondition."""
+    if config.SWAP_ISSUER_ADDRESS == config.SWAP_OFFER_ISSUER:
+        # An account cannot hold a trustline to itself and never needs one
+        # for its own IOU — the lookup would return None and wrongly divert
+        # valid BRIX swaps to XRP on the same-issuer (testnet) shape.
+        return True
     balance = await xrpl_ops.get_trustline_balance(
         config.SWAP_ISSUER_ADDRESS,
         config.SWAP_OFFER_CURRENCY_HEX,
