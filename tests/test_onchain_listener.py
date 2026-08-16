@@ -1299,7 +1299,10 @@ def test_archive_batch_skips_unvalidated_and_hashless(tmp_path):
     assert hconn.execute("SELECT count(*) FROM xrpl_txs").fetchone()[0] == 0
 
 
-def test_archive_batch_observes_sponsored_acceptance_only_for_new_rows(tmp_path, monkeypatch):
+def test_archive_batch_observes_every_buffered_tagged_tx(tmp_path, monkeypatch):
+    """Observation must not key off the INSERT's rowcount: a duplicate raw row
+    (e.g. one _record_history already committed) still gets its acceptance
+    observed — record_acceptance is idempotent, so replays are harmless."""
     hconn = _certified_hconn(tmp_path)
     calls = []
     monkeypatch.setattr(
@@ -1313,7 +1316,91 @@ def test_archive_batch_observes_sponsored_acceptance_only_for_new_rows(tmp_path,
     batch.add(_stream_tx(1, tagged=True))  # duplicate hash — INSERT OR IGNORE
     batch.add(_stream_tx(3, tagged=True))
     batch.flush()
-    assert calls == [_stream_tx(1)["hash"], _stream_tx(3)["hash"]]
+    assert calls == [_stream_tx(1)["hash"], _stream_tx(1)["hash"], _stream_tx(3)["hash"]]
+    assert hconn.execute("SELECT count(*) FROM xrpl_txs").fetchone()[0] == 2
+
+
+def test_flush_advances_claim_even_when_record_history_committed_the_row_first(
+    tmp_path, monkeypatch
+):
+    """Regression for the PR #362 P1: on the batched path _record_history
+    (already_archived=True) commits a derived-events tx's raw row BEFORE the
+    flush runs; the flush's INSERT OR IGNORE then reports a duplicate, which
+    must NOT suppress the acceptance observation — the claim still advances
+    offered -> accepted, exactly once (idempotent audit)."""
+    from types import SimpleNamespace
+
+    from lfg_core import sponsored_mint as sm
+
+    app = str(tmp_path / "app.db")
+    campaign = sm.start_campaign(app, network="testnet", actor="admin", now=100)
+    with sqlite3.connect(app) as app_conn:
+        app_conn.execute(
+            """
+            INSERT INTO free_mint_claims (
+                id, network, wallet, campaign_id, session_id, status,
+                reserved_at, reservation_expires_at, offer_id, created_at, updated_at
+            ) VALUES (?, ?, ?, ?, ?, ?, 100, NULL, ?, 100, 100)
+            """,
+            (
+                "batch-claim",
+                "testnet",
+                "rBatchWallet",
+                campaign.campaign_id,
+                "session",
+                "offered",
+                "BATCH-OFFER",
+            ),
+        )
+    monkeypatch.setattr(
+        sm, "db_path", SimpleNamespace(app_db_path=lambda network: app), raising=False
+    )
+    monkeypatch.setattr(
+        oln.history_events,
+        "derive_nft_events",
+        lambda *_args, **_kwargs: [{"nft_id": "batch-nft"}],
+    )
+    monkeypatch.setattr(oln.history_events, "nft_id_issuer_matches", lambda *_args: True)
+    monkeypatch.setattr(oln.history_events, "derive_brix_events", lambda *_args, **_kwargs: [])
+
+    hconn = _certified_hconn(tmp_path)
+    tx = {
+        "TransactionType": "NFTokenAcceptOffer",
+        "Account": "rBatchWallet",
+        "SourceTag": config.SOURCE_TAG,
+        "hash": "F" * 64,
+        "ledger_index": L0 + 105,
+        "date": 800_000_000,
+        "validated": True,
+        "NFTokenSellOffer": "BATCH-OFFER",
+        "meta": {"TransactionResult": "tesSUCCESS"},
+    }
+    ctx = _batch_ctx()
+    batch = oln.ArchiveBatch(hconn, ctx, max_txs=1000, max_seconds=999)
+    # Production order on the batched path: buffer first, then _record_history
+    # commits the raw row inline (already_archived=True), then the flush lands.
+    batch.add(tx)
+    oln._record_history(hconn, tx, ctx, already_archived=True)
+    assert hconn.execute("SELECT count(*) FROM xrpl_txs").fetchone()[0] == 1
+    batch.flush()
+    with sqlite3.connect(app) as app_conn:
+        claim = app_conn.execute(
+            "SELECT status, accept_tx_hash FROM free_mint_claims WHERE wallet=?",
+            ("rBatchWallet",),
+        ).fetchone()
+        audits = app_conn.execute(
+            "SELECT count(*) FROM free_mint_audit WHERE action='claim_accepted'"
+        ).fetchone()[0]
+    assert claim == ("accepted", tx["hash"])
+    assert audits == 1
+    # a replayed flush of the same tx stays idempotent
+    batch.add(tx)
+    batch.flush()
+    with sqlite3.connect(app) as app_conn:
+        audits = app_conn.execute(
+            "SELECT count(*) FROM free_mint_audit WHERE action='claim_accepted'"
+        ).fetchone()[0]
+    assert audits == 1
 
 
 def test_flush_lands_before_continuity_invalidation(tmp_path):

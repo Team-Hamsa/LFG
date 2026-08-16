@@ -172,10 +172,10 @@ class ArchiveBatch:
             return
         network = str(self._ctx.get("network") or "")
         genesis_hash = str(self._ctx.get("genesis_hash") or "").strip()
-        inserted: list[dict[str, Any]] = []
+        buffered = list(self._tagged)
         try:
-            for tx in self._tagged:
-                if history_store.insert_tx(
+            for tx in buffered:
+                history_store.insert_tx(
                     self._hconn,
                     tx_hash=str(tx["hash"]),
                     ledger_index=tx.get("ledger_index"),
@@ -184,8 +184,7 @@ class ArchiveBatch:
                     account=tx.get("Account"),
                     source_tag=tx.get("SourceTag"),
                     raw_json=_json.dumps(tx, sort_keys=True),
-                ):
-                    inserted.append(tx)
+                )
             if self._cursor is not None and genesis_hash:
                 history_store.record_validated_ledger(
                     self._hconn,
@@ -206,7 +205,14 @@ class ArchiveBatch:
             self._hconn.rollback()
             raise
         self._reset()
-        for tx in inserted:
+        # Observe EVERY buffered tagged tx, not just the ones whose INSERT was
+        # fresh: on the batched path _record_history can commit the raw row
+        # for a derived-events tx BEFORE this flush runs, so INSERT OR IGNORE
+        # reporting a duplicate must not suppress the acceptance observation
+        # (the claim would sit at `offered` until a later replay). Safe because
+        # record_acceptance is idempotent — a matching accept_tx_hash returns
+        # the claim untouched, with no second audit row.
+        for tx in buffered:
             try:
                 sponsored_mint.observe_sponsored_acceptance(
                     tx, tx.get("meta") or {}, network=network
