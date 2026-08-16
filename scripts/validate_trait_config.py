@@ -31,6 +31,34 @@ import yaml  # noqa: E402
 from lfg_core import trait_config  # noqa: E402
 from lfg_core.layer_store import LocalLayerStore  # noqa: E402
 
+# #301 recurrence guard — a stray single-r "Iridescent *" Body art file (the
+# staging typo that produced the misspelled on-chain value) must never re-enter
+# the live mint pool. Narrow denylist by design, not a spell-checker: the
+# canonical spelling is the double-r "Irridescent *".
+_TYPO_BODY_PREFIX = "Iridescent "
+
+
+def find_typo_body_files(layers_dir: str) -> list[str]:
+    """Paths of any `layers/<body>/Body/Iridescent *` (single-r) art files.
+
+    A missing layers root is clean (nothing in the pool to guard — fresh
+    checkouts and CI have no gitignored `layers/`); any other OSError
+    (permissions, I/O) propagates so the caller fails closed instead of
+    silently passing an unscanned tree."""
+    flagged: list[str] = []
+    if not os.path.exists(layers_dir):
+        return flagged
+    bodies = sorted(os.listdir(layers_dir))
+    for body in bodies:
+        body_dir = os.path.join(layers_dir, body, "Body")
+        if not os.path.isdir(body_dir):
+            continue
+        for name in sorted(os.listdir(body_dir)):
+            stem = os.path.splitext(name)[0]
+            if stem.startswith(_TYPO_BODY_PREFIX):
+                flagged.append(os.path.join(body_dir, name))
+    return flagged
+
 
 def main(argv: list[str] | None = None) -> int:
     p = argparse.ArgumentParser(description=__doc__)
@@ -49,6 +77,16 @@ def main(argv: list[str] | None = None) -> int:
     except OSError as e:
         print(f"ERROR: could not read layers dir {args.layers_dir!r}: {e}")
         return 1
+    try:
+        for typo_path in find_typo_body_files(args.layers_dir):
+            error_list.append(
+                f"misspelled Body art file (single-r 'Iridescent', canonical is "
+                f"'Irridescent'): {typo_path} (#301)"
+            )
+    except OSError as e:
+        # Fail closed: an unscannable layer tree is a validation failure,
+        # not a pass.
+        error_list.append(f"could not scan layers dir {args.layers_dir!r} for typo Body art: {e}")
     for w in warning_list:
         print(f"warning: {w}")
     for err in error_list:
