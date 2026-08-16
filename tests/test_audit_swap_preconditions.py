@@ -112,5 +112,7 @@ def test_main_pins_network_env_before_check(monkeypatch, capsys):
         audit_swap_preconditions.main()
     except SystemExit as e:
         assert e.code == 0
+    else:
+        raise AssertionError("main() must exit with the audit result code")
     assert seen["env"] == "mainnet"
     assert "[mainnet]" in capsys.readouterr().out
