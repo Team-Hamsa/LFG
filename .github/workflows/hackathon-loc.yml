@@ -40,6 +40,9 @@ jobs:
       - name: Update README feature-flags table
         run: python3 -m scripts.readme_features
 
+      - name: Update architecture diagram
+        run: python3 -m scripts.render_architecture_svg
+
       - name: Update SourceTag badge
         # metrics/sourcetag.json is pushed nightly by a separate pm2 job, not
         # this workflow — if it's missing or malformed, that's a real problem
@@ -50,7 +53,7 @@ jobs:
 
       - name: Commit if changed
         run: |
-          git add README.md assets/hackathon_loc.svg assets/dashboard.svg assets/sourcetag.svg
+          git add README.md assets/hackathon_loc.svg assets/dashboard.svg assets/sourcetag.svg assets/architecture.svg
           if ! git diff --quiet --cached; then
             git config user.name "github-actions[bot]"
             git config user.email "github-actions[bot]@users.noreply.github.com"
