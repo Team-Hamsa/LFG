@@ -20,8 +20,11 @@ SPONSORED_MINT_EXCLUDED_WALLETS=rHU8nu9zSnCpkL3gShG4aGawHzaRVfmKwQ,rHaMsAjoAN21s
 ```
 
 The signing account and token issuer are always excluded in code, but they do
-not satisfy this explicit readiness check. A nonempty or arbitrary configured
-wallet list also fails unless both approved addresses above are present.
+not satisfy this explicit readiness check. The audit validates structure, not
+identity (#334): it fails on an empty/unset list or any malformed address, and
+passes any non-empty list of well-formed classic addresses — so review the
+`configured`/`effective` sets it reports and confirm they match the approved
+addresses above; the audit will not catch a wrong-but-well-formed wallet.
 
 ## Step 0 — certify the eligibility archive (REQUIRED)
 
