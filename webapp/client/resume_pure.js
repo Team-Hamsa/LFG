@@ -39,3 +39,17 @@ export function pickActiveFlow(sessions) {
   }
   return null;
 }
+
+// hasOtherActiveFlow(sessions, excludeFlow) -> bool: is any flow BESIDES
+// `excludeFlow` live in this envelope? Single-winner attach can only render
+// one flow, so resumeAnyFlow arms a one-shot re-check when this is true —
+// once the attached flow finishes and the user lands home, the remaining
+// live session is picked up instead of staying hidden until a relaunch.
+export function hasOtherActiveFlow(sessions, excludeFlow) {
+  if (!sessions) return false;
+  return FLOW_ORDER.some((flow) => {
+    if (flow === excludeFlow) return false;
+    const s = sessions[flow];
+    return !!(s && s.id && !TERMINAL[flow].has(s.state));
+  });
+}

@@ -113,3 +113,65 @@ def test_market_session_returned_intact_for_routing():
 
 def test_flow_order_exported():
     assert run_js("M.FLOW_ORDER") == ["mint", "bulk", "swap", "market", "economy", "shop"]
+
+
+# --- Greptile #376 P1: chained resume when two flows were live ---------------
+# Single-winner attach is deliberate (one panel), but once the attached flow
+# finishes, the OTHER still-live session must surface on the next home
+# landing instead of staying hidden until a full relaunch.
+
+
+def test_terminal_flow_yields_to_next_live_flow():
+    # Envelope re-fetched after flow A (mint) went terminal: picker must now
+    # return flow B (swap) — the chained resumeAnyFlow re-check relies on this.
+    got = pick(
+        _with(
+            mint={"id": "m1", "state": "done"},
+            swap={"id": "s1", "state": "awaiting_payment"},
+        )
+    )
+    assert got["flow"] == "swap"
+
+
+def has_other(sessions, flow):
+    return run_js(f"M.hasOtherActiveFlow({json.dumps(sessions)}, {json.dumps(flow)})")
+
+
+def test_has_other_active_flow():
+    two = _with(
+        mint={"id": "m1", "state": "awaiting_payment"},
+        swap={"id": "s1", "state": "awaiting_payment"},
+    )
+    assert has_other(two, "mint") is True
+    assert has_other(_with(mint={"id": "m1", "state": "awaiting_payment"}), "mint") is False
+    # a terminal or id-less other flow doesn't count
+    assert (
+        has_other(
+            _with(
+                mint={"id": "m1", "state": "awaiting_payment"},
+                swap={"id": "s1", "state": "done"},
+            ),
+            "mint",
+        )
+        is False
+    )
+    assert has_other(None, "mint") is False
+
+
+APP_JS = os.path.join(ROOT, "webapp", "client", "app.js")
+
+
+def test_app_js_arms_recheck_and_home_rechecks():
+    """Wiring: resumeAnyFlow arms a one-shot re-check when another flow was
+    live besides the attached winner, and showMintHome consumes it — re-running
+    resumeAnyFlow (falling through to the real home render when nothing is
+    left) so the second flow can never be stranded invisible."""
+    src = open(APP_JS).read()
+    resume_body = src.split("async function resumeAnyFlow", 1)[1].split("\n}\n", 1)[0]
+    assert "hasOtherActiveFlow(sessions, flow)" in resume_body
+    home_body = src.split("function showMintHome", 1)[1].split("\n}\n", 1)[0]
+    assert "resumeRecheckArmed" in home_body
+    assert "resumeAnyFlow()" in home_body
+    # one-shot: the flag is cleared BEFORE the re-check so a no-op recheck
+    # (nothing live) lands home without looping.
+    assert home_body.index("resumeRecheckArmed = false") < home_body.index("resumeAnyFlow()")

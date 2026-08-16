@@ -19,7 +19,7 @@ import * as buildPure from './build_pure.js?v=27';
 // Cold-boot session-resume decisions (#221): which live flow to re-attach to
 // after a webview relaunch is a pure priority picker, Node-testable
 // (tests/test_resume_pure_js.py); resumeAnyFlow() below is the thin DOM glue.
-import * as resumePure from './resume_pure.js?v=1';
+import * as resumePure from './resume_pure.js?v=2';
 
 const params = new URLSearchParams(window.location.search);
 const insideDiscord = params.has('frame_id');
@@ -408,6 +408,17 @@ function showPanel(id) {
 }
 
 function showMintHome() {
+  // Greptile #376 P1: boot resume attaches only ONE flow (single panel), so
+  // when a second flow was live too, the next home landing re-checks — the
+  // just-finished flow is terminal now (pruned/skipped), so the other one
+  // surfaces instead of staying hidden until a full relaunch. One-shot: the
+  // flag is cleared before the re-check, and only re-arms if resumeAnyFlow
+  // finds yet another concurrent flow — plain navigation can never loop.
+  if (resumeRecheckArmed) {
+    resumeRecheckArmed = false;
+    resumeAnyFlow().then((resumed) => { if (!resumed) showMintHome(); });
+    return;
+  }
   el('wallet-display').textContent = me.wallet;
   showPanel('mint-panel');
   status(`Hey ${me.username} — welcome to the job site.`);
@@ -1273,6 +1284,10 @@ function attachMintResume(session) {
   return true;
 }
 
+// Greptile #376 P1: one-shot flag — a second live flow existed at resume
+// time; the next showMintHome landing re-runs resumeAnyFlow to surface it.
+let resumeRecheckArmed = false;
+
 // Re-attach to a running trait swap: reveal the swap progress panel and let
 // pollSwap render whatever the real state is (fee QR, progress, results).
 function attachSwapResume(session) {
@@ -1298,6 +1313,10 @@ async function resumeAnyFlow() {
   const picked = resumePure.pickActiveFlow(sessions);
   if (!picked) return false;
   const { flow, session } = picked;
+  // A second live flow can't be rendered alongside the winner — arm the
+  // one-shot home-landing re-check (see showMintHome) so it surfaces once
+  // this one finishes.
+  resumeRecheckArmed = resumePure.hasOtherActiveFlow(sessions, flow);
   switch (flow) {
     case 'mint': return attachMintResume(session);
     case 'bulk': return attachBulkResume(session);
