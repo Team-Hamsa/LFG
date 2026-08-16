@@ -85,13 +85,22 @@ def source_tag() -> str:
 
 
 def tagged_tx_total() -> int | None:
-    """total_tagged_txs from the nightly metrics snapshot, or None if absent."""
+    """total_tagged_txs from the nightly metrics snapshot.
+
+    An absent file is expected before the first nightly snapshot lands and
+    omits the badge; a file that exists but can't be parsed is a real problem
+    and must fail the run rather than silently dropping the badge.
+    """
+    if not METRICS_PATH.exists():
+        return None
     try:
         data = json.loads(METRICS_PATH.read_text())
-    except (OSError, ValueError):
-        return None
+    except (OSError, ValueError) as exc:
+        raise SystemExit(f"{METRICS_PATH} exists but is unreadable: {exc}") from exc
     total = data.get("total_tagged_txs")
-    return total if isinstance(total, int) else None
+    if not isinstance(total, int):
+        raise SystemExit(f"{METRICS_PATH} has no integer total_tagged_txs (got {total!r})")
+    return total
 
 
 def badge(url: str, alt: str, href: str | None = None) -> str:

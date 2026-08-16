@@ -1,5 +1,9 @@
 """Tests for the README badge-row generator (scripts/readme_badges.py)."""
 
+from pathlib import Path
+
+import pytest
+
 from scripts import readme_badges
 
 
@@ -45,10 +49,33 @@ def test_replace_block_is_idempotent() -> None:
 
 
 def test_replace_block_requires_markers() -> None:
-    import pytest
-
     with pytest.raises(SystemExit):
         readme_badges.replace_block("no markers here", ["<img>"])
+
+
+def test_tagged_tx_total_absent_file_omits(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(readme_badges, "METRICS_PATH", tmp_path / "missing.json")
+    assert readme_badges.tagged_tx_total() is None
+
+
+def test_tagged_tx_total_malformed_file_fails(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    bad = tmp_path / "sourcetag.json"
+    bad.write_text("{not json")
+    monkeypatch.setattr(readme_badges, "METRICS_PATH", bad)
+    with pytest.raises(SystemExit):
+        readme_badges.tagged_tx_total()
+
+
+def test_tagged_tx_total_non_integer_total_fails(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    bad = tmp_path / "sourcetag.json"
+    bad.write_text('{"total_tagged_txs": "1961"}')
+    monkeypatch.setattr(readme_badges, "METRICS_PATH", bad)
+    with pytest.raises(SystemExit):
+        readme_badges.tagged_tx_total()
 
 
 def test_replace_block_handles_backslashes_in_content() -> None:
