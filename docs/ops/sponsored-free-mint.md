@@ -23,8 +23,9 @@ The signing account and token issuer are always excluded in code, but they do
 not satisfy this explicit readiness check. The audit validates structure, not
 identity (#334): it fails on an empty/unset list or any malformed address, and
 passes any non-empty list of well-formed classic addresses — so review the
-`configured`/`effective` sets it reports and confirm they match the approved
-addresses above; the audit will not catch a wrong-but-well-formed wallet.
+sets it reports: `configured` must match the approved addresses above exactly,
+and `effective` must be that list plus the signing and issuer addresses (which
+the code always adds). The audit will not catch a wrong-but-well-formed wallet.
 
 ## Step 0 — certify the eligibility archive (REQUIRED)
 
