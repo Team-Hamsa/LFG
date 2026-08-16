@@ -129,13 +129,13 @@ Short walkthroughs of each core flow:
 | Admin panel (stats, NFT lookup, burn with audit log) | ✅ |
 | Shared-services spine — one `lfg_service` backend, thin surface clients | ✅ |
 | Telegram surface (bot + trait swapper + Mini App) | ✅ |
-| Dress-up trait economy (Closet, harvest/assemble/equip, tradeable trait tokens) | ⏸ built, disabled in production — see note below |
+| Dress-up trait economy (Closet, harvest/assemble/equip, tradeable trait tokens) | ✅ live on mainnet |
 | In-app NFT marketplace (list / browse / buy via Xaman; characters in XRP, traits in BRIX with an XRP→BRIX AMM on-ramp) | ✅ |
 | Bulk minting — pay once, mint N editions in one durable, crash-resumable batch job (`/api/mint/bulk`) | ✅ (Activity stepper UI behind `BULK_MINT_UI_ENABLED`) |
 | Share on X — per-NFT OG/Twitter card pages, JS click-through forward into the web app, `?ref=` share attribution | ✅ |
 | X brand-account auto-post on mint (`run_x.py`, budget-capped, admin runtime toggle) | ⏸ built, flag-gated (`X_ENABLED`) — go-live is an ops step on [#41](../../issues/41) |
 | Animated NFTs play as live video in the Activity and Telegram (not frozen posters) | ✅ |
-| Trait Shop — BRIX-priced on-demand trait minting with rarity-based pricing | ⏸ built, economy-gated (off in prod) |
+| Trait Shop — BRIX-priced on-demand trait minting with rarity-based pricing | ✅ live on mainnet |
 | On-chain provenance memos (initiator / platform / action stamped on every transaction) | ✅ |
 | Xaman push delivery (sign requests pushed to the app, QR fallback) | ✅ |
 | Ledger history database + Activity leaderboards (incl. BRIX richlist) | ✅ |
@@ -156,7 +156,7 @@ Short walkthroughs of each core flow:
 
 ## Trait economy status
 
-> **The dress-up trait economy is built but switched off in production.** All four phases — the soulbound **Closet**, **Harvest / Assemble / Equip** on-ledger ops, and **tradeable trait tokens** (Extract / Deposit) — plus the BRIX-priced **Trait Shop** (on-demand trait minting, [#217](../../issues/217)) are implemented and ran on testnet. They share one flag, `ECONOMY_ENABLED=0`, which stays off in production: characters run on mainnet while the trait economy is still testnet-scoped, and a startup guard refuses to enable it until both resolve to the same network. Remaining review findings are [#178](../../issues/178)–[#184](../../issues/184); re-enable is tracked in **[#185](../../issues/185)**.
+> **The dress-up trait economy is live on mainnet** (enabled 2026-07-21, [#185](../../issues/185)). All four phases — the soulbound **Closet**, **Harvest / Assemble / Equip** on-ledger ops, and **tradeable trait tokens** (Extract / Deposit) — plus the BRIX-priced **Trait Shop** (on-demand trait minting, [#217](../../issues/217)) run in production behind `ECONOMY_ENABLED=1`, with characters and the trait economy both resolving to mainnet. A nightly reconcile + conservation audit (`scripts/audit_trait_economy.py`) guards supply integrity.
 
 ---
 
@@ -281,7 +281,7 @@ WEBAPP_PORT=8176
 
 Optional surfaces / features: `TELEGRAM_BOT_TOKEN`, `SERVICE_TOKEN_TELEGRAM`,
 `TELEGRAM_MINI_APP_URL` (Mini App), `MARKET_ENABLED` (character marketplace, `1`
-by default), `ECONOMY_ENABLED` (trait economy + Trait Shop, `0` in production),
+by default), `ECONOMY_ENABLED` (trait economy + Trait Shop, live in production),
 `MAX_COLLECTION_SIZE` / `BULK_MINT_MAX` (bulk-mint caps), `SHOP_BASE_BRIX` /
 `SHOP_MIN_BRIX` / `SHOP_MAX_BRIX` (Trait Shop pricing), `WEB_ALLOWED_ORIGINS`
 (standalone web app CORS allowlist; empty = off), `PUBLIC_SHARE_BASE_URL` /
@@ -324,7 +324,6 @@ matrix — lives in `trait_config.yaml` at the repo root, validated by
 
 - [ ] [#42 — Web UI: remaining scope (profile + admin pages)](../../issues/42) — core mint/browse shipped live via [#240](../../issues/240)
 - [ ] **X auto-poster go-live** — code shipped and flag-gated (`X_ENABLED`); remaining work is the ops checklist on [#41](../../issues/41)
-- [ ] **Trait economy re-enable** — clear review findings [#178](../../issues/178)–[#184](../../issues/184), go-live checklist [#185](../../issues/185)
 - [ ] [#45 — DEX integration backend (OfferCreate/Cancel, order book)](../../issues/45)
 - [ ] [#47 — AMM integration backend (deposit/withdraw/swap, pool stats)](../../issues/47)
 - [ ] [#48 — BRIX daily distribution (1/day per unlisted NFT, claim flow)](../../issues/48)
@@ -342,10 +341,10 @@ matrix — lives in `trait_config.yaml` at the repo root, validated by
 - [x] [#40 — Trait selection rules engine (`trait_config.yaml`)](../../issues/40)
 - [x] [#43 — Telegram integration](../../issues/43)
 - [x] [#44 — In-app marketplace (list, browse, buy via Xaman)](../../issues/44)
-- [x] [#46 — Dress-up game](../../issues/46) — built; disabled in production pending [#185](../../issues/185)
+- [x] [#46 — Dress-up game](../../issues/46) — live on mainnet since 2026-07-21 ([#185](../../issues/185))
 - [x] [#49 — AI agent integration via XRPL Payments skill (exploration)](../../issues/49)
 - [x] [#215 — Bulk minting (pay once, mint N editions in one durable batch job)](../../issues/215)
-- [x] [#217 — Trait Shop (BRIX-priced on-demand trait minting)](../../issues/217) — built; economy-gated pending [#185](../../issues/185)
+- [x] [#217 — Trait Shop (BRIX-priced on-demand trait minting)](../../issues/217) — live on mainnet with the [#185](../../issues/185) economy flip
 - [x] [#240 — Standalone web surface — the Activity live in any browser at build.letseffinggo.com](../../issues/240)
 - [x] [#41 — X (Twitter) integration](../../issues/41) — auto-post on mint (PR [#245](../../pull/245)), admin runtime toggle ([#255](../../pull/255)), Share-on-X buttons + per-NFT card pages ([#258](../../pull/258)), click-through forwarding + share attribution ([#274](../../pull/274)); auto-poster go-live tracked above
 - [x] PWA install + social share card — manifest, favicons, homescreen icons (PR [#246](../../pull/246))
