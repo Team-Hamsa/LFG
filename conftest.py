@@ -16,11 +16,15 @@ import os
 
 # --- Isolate the suite from the deployed .env (#323) ---
 # lfg_core/config.py gates its load_dotenv() on LFG_SKIP_DOTENV, so with this
-# set the box's live .env never reaches a test — every pin below (and the
-# shipped defaults) become the suite's whole environment. Because the .env no
-# longer supplies them, the _require(...)-mandatory vars and layer knobs must
-# be pinned here centrally (they used to arrive via per-file env-guard
-# preambles racing the .env; those preambles are now harmless no-ops).
+# set the box's live .env FILE never reaches a test. Everything below is a
+# FALLBACK pin (setdefault): it fills the value only when the shell didn't —
+# an explicit export deliberately still wins, the documented escape hatch
+# (e.g. `XRPL_NETWORK=mainnet pytest -k …`). So the suite runs against these
+# fallbacks plus whatever the invoker explicitly exported — NOT a fully fixed
+# environment. Because the .env no longer supplies them, the
+# _require(...)-mandatory vars and layer knobs must be pinned here centrally
+# (they used to arrive via per-file env-guard preambles racing the .env;
+# those preambles are now harmless no-ops).
 os.environ.setdefault("LFG_SKIP_DOTENV", "1")
 os.environ.setdefault("XUMM_API_KEY", "test")
 os.environ.setdefault("XUMM_API_SECRET", "test")
