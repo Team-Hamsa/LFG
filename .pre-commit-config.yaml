@@ -20,7 +20,7 @@ repos:
         # isolated mirrors-mypy env has no deps, which forces every third-party
         # import to Any — that both hides real bugs and emits false
         # subclass-Any / untyped-decorator noise. mypy reads pyproject.toml.
-        entry: .venv/bin/python -m mypy .
+        entry: scripts/venv-python -m mypy .
         language: system
         pass_filenames: false
         always_run: true
@@ -34,14 +34,14 @@ repos:
     hooks:
       - id: pytest
         name: pytest
-        entry: .venv/bin/python -m pytest
+        entry: scripts/venv-python -m pytest
         language: system
         pass_filenames: false
         always_run: true
 
       - id: validate-trait-config
         name: validate trait_config.yaml
-        entry: .venv/bin/python scripts/validate_trait_config.py
+        entry: scripts/venv-python scripts/validate_trait_config.py
         language: system
         files: ^(trait_config\.yaml|layers/)
         pass_filenames: false
@@ -50,7 +50,7 @@ repos:
         name: audit layer dimensions (1080x1080)
         # layers/ is gitignored, so file filters never match — scan the
         # working tree unconditionally (no-op when layers/ is absent, as in CI).
-        entry: .venv/bin/python scripts/audit_layer_dimensions.py
+        entry: scripts/venv-python scripts/audit_layer_dimensions.py
         language: system
         pass_filenames: false
         always_run: true

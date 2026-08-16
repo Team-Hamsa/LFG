@@ -1,0 +1,33 @@
+#!/usr/bin/env bash
+# Resolve the ONE shared project venv interpreter — whether we're in the main
+# checkout or a git worktree — and exec it with the given args.
+#
+# Used by the local pre-push hooks in .pre-commit-config.yaml (mypy, pytest,
+# validate-trait-config, audit-layer-dimensions) so the gate actually runs in
+# a worktree instead of dying with "Executable `.venv/bin/python` not found"
+# (worktrees have no .venv; only the main checkout does). See issue #315.
+#
+# `git rev-parse --git-common-dir` points at the MAIN repo's .git even from a
+# worktree (absolute path there; the relative ".git" in a normal checkout), so
+# "<common-dir>/../.venv/bin/python" is the single shared venv in both cases.
+# CI is unchanged: at the checkout root it resolves ".git/../.venv" = ".venv".
+#
+# If the venv genuinely doesn't exist, FAIL LOUDLY with the fix — never
+# silently skip: a gate that appears to run but doesn't is the failure mode
+# this shim exists to remove.
+set -euo pipefail
+
+common_dir="$(git rev-parse --git-common-dir)"
+main_root="$(cd "$(dirname "$common_dir")" && pwd)"
+python="$main_root/.venv/bin/python"
+
+if [[ ! -x "$python" ]]; then
+    {
+        echo "error: project venv interpreter not found: $python"
+        echo "The pre-push gate needs the shared .venv in the main checkout ($main_root)."
+        echo "Fix: run ./setup.sh from $main_root (builds .venv/bin/python; one venv serves every worktree)."
+    } >&2
+    exit 1
+fi
+
+exec "$python" "$@"
