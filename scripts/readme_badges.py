@@ -98,7 +98,7 @@ def tagged_tx_total() -> int | None:
     except (OSError, ValueError) as exc:
         raise SystemExit(f"{METRICS_PATH} exists but is unreadable: {exc}") from exc
     total = data.get("total_tagged_txs")
-    if not isinstance(total, int):
+    if not isinstance(total, int) or isinstance(total, bool):
         raise SystemExit(f"{METRICS_PATH} has no integer total_tagged_txs (got {total!r})")
     return total
 

@@ -78,6 +78,17 @@ def test_tagged_tx_total_non_integer_total_fails(
         readme_badges.tagged_tx_total()
 
 
+def test_tagged_tx_total_boolean_total_fails(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # JSON true/false parse as Python bools, which are ints — must be rejected
+    bad = tmp_path / "sourcetag.json"
+    bad.write_text('{"total_tagged_txs": true}')
+    monkeypatch.setattr(readme_badges, "METRICS_PATH", bad)
+    with pytest.raises(SystemExit):
+        readme_badges.tagged_tx_total()
+
+
 def test_replace_block_handles_backslashes_in_content() -> None:
     # re.sub replacement escaping must not mangle literal backslashes/groups
     readme = f"{readme_badges.START_MARK}\nx\n{readme_badges.END_MARK}"
