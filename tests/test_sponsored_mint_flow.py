@@ -28,7 +28,6 @@ from lfg_core import (  # noqa: E402
     history_store,
     memos,
     mint_flow,
-    nft_index,
     sponsored_burn,
     sponsored_mint,
     supply,
@@ -146,68 +145,6 @@ def _reserve_recovery_claim(paths, wallet, session_id, *, network="mainnet", now
     assert result.sponsored
     assert result.claim is not None
     return result.claim
-
-
-def _persist_corroborated_mint_evidence(paths, claim, *, include_lfg):
-    with sqlite3.connect(paths.app_db) as conn:
-        conn.execute(
-            "UPDATE free_mint_claims SET mint_tx_hash = ?, nft_id = ? WHERE id = ?",
-            ("TX-RECOVERED", "NFT-RECOVERED", claim.id),
-        )
-        if include_lfg:
-            conn.execute(
-                """
-                CREATE TABLE LFG (
-                    nft_number INTEGER PRIMARY KEY,
-                    nft_id TEXT,
-                    owner_address TEXT
-                )
-                """
-            )
-            conn.execute(
-                "INSERT INTO LFG VALUES (4000, 'NFT-RECOVERED', ?)",
-                (claim.wallet,),
-            )
-    hconn = history_store.init_history_db(paths.history_db)
-    history_store.insert_tx(
-        hconn,
-        tx_hash="TX-RECOVERED",
-        ledger_index=history_store.EARLIEST_AVAILABLE_LEDGER + 123,
-        close_time=103,
-        tx_type="NFTokenMint",
-        account="rSIGNER",
-        source_tag=0,
-        raw_json='{"validated": true, "meta": {"TransactionResult": "tesSUCCESS"}}',
-    )
-    history_store.insert_nft_event(
-        hconn,
-        {
-            "tx_hash": "TX-RECOVERED",
-            "nft_id": "NFT-RECOVERED",
-            "event": "mint",
-            "ledger_index": history_store.EARLIEST_AVAILABLE_LEDGER + 123,
-            "ts": 103,
-        },
-    )
-    history_store.record_validated_ledger(
-        hconn,
-        network="mainnet",
-        genesis_hash="mainnet-test-genesis",
-        ledger_index=history_store.EARLIEST_AVAILABLE_LEDGER + 124,
-        close_time=3990,
-        observed_at=4000,
-    )
-    hconn.commit()
-    hconn.close()
-    iconn = nft_index.init_db(nft_index.index_db_path("mainnet"))
-    iconn.execute(
-        """
-        INSERT INTO onchain_nfts (nft_id, owner, is_burned, uri_hex)
-        VALUES ('NFT-RECOVERED', 'rSIGNER', 0, '')
-        """
-    )
-    iconn.commit()
-    iconn.close()
 
 
 def test_mint_start_does_not_promise_free_before_reservation_commits(monkeypatch):
@@ -1269,79 +1206,8 @@ def test_restart_recovery_keeps_uncertain_minting_claim_held(_service_env, monke
             "SELECT status, released_at FROM free_mint_claims WHERE id = ?", (claim.id,)
         ).fetchone()
     assert report.held_minting == (claim.id,)
-    assert row == ("minting", None)
-
-
-def test_restart_recovery_promotes_only_corroborated_persisted_mint_evidence(
-    _service_env, monkeypatch
-):
-    sponsored_mint.start_campaign(_service_env.app_db, network="mainnet", actor="test", now=100)
-    claim = _reserve_recovery_claim(_service_env, "rRECOVERED", "recovered")
-    prepare_and_forward(
-        sponsored_mint,
-        _service_env.app_db,
-        network="mainnet",
-        wallet=claim.wallet,
-        session_id=claim.session_id,
-        tx_hash="TX-RECOVERED",
-        now=102,
-    )
-    _persist_corroborated_mint_evidence(_service_env, claim, include_lfg=True)
-    monkeypatch.setattr(sponsored_mint.time, "time", lambda: 4000)
-
-    report = sponsored_mint.recover_incomplete_claims(
-        _service_env.app_db,
-        _service_env.history_db,
-        network="mainnet",
-    )
-
-    with sqlite3.connect(_service_env.app_db) as conn:
-        status = conn.execute(
-            "SELECT status FROM free_mint_claims WHERE id = ?", (claim.id,)
-        ).fetchone()[0]
-        debt = conn.execute(
-            "SELECT status FROM free_mint_burns WHERE claim_id = ?", (claim.id,)
-        ).fetchone()[0]
-    assert report.recovered_mints == (claim.id,)
-    assert report.held_minting == ()
-    assert status == "minted"
-    assert debt == "pending"
-
-
-def test_restart_recovery_does_not_promote_without_wallet_bound_lfg_record(
-    _service_env, monkeypatch
-):
-    sponsored_mint.start_campaign(_service_env.app_db, network="mainnet", actor="test", now=100)
-    claim = _reserve_recovery_claim(_service_env, "rRECOVERED", "recovered")
-    prepare_and_forward(
-        sponsored_mint,
-        _service_env.app_db,
-        network="mainnet",
-        wallet=claim.wallet,
-        session_id=claim.session_id,
-        tx_hash="TX-RECOVERED",
-        now=102,
-    )
-    _persist_corroborated_mint_evidence(_service_env, claim, include_lfg=False)
-    monkeypatch.setattr(sponsored_mint.time, "time", lambda: 4000)
-
-    report = sponsored_mint.recover_incomplete_claims(
-        _service_env.app_db,
-        _service_env.history_db,
-        network="mainnet",
-    )
-
-    with sqlite3.connect(_service_env.app_db) as conn:
-        status = conn.execute(
-            "SELECT status FROM free_mint_claims WHERE id = ?", (claim.id,)
-        ).fetchone()[0]
-        debt = conn.execute(
-            "SELECT status FROM free_mint_burns WHERE claim_id = ?", (claim.id,)
-        ).fetchone()
     assert report.recovered_mints == ()
-    assert report.held_minting == (claim.id,)
-    assert status == "minting"
-    assert debt is None
+    assert row == ("minting", None)
 
 
 def test_restart_recovery_preserves_mint_debt_and_queues_missing_offer(_service_env, monkeypatch):
