@@ -444,7 +444,7 @@ def _active_session(
 
 # Retain references so fire-and-forget payload-cancel tasks aren't GC'd
 # mid-flight (#152).
-_payload_cancel_tasks: set[asyncio.Task] = set()
+_payload_cancel_tasks: set[asyncio.Task[None]] = set()
 
 
 def _spawn_payload_cancel(uuid: str | None) -> None:
