@@ -57,7 +57,6 @@ python3 -m venv .venv
 
 echo ""
 echo "📦 Installing the blocking pre-push gate (ruff, mypy, gitleaks, pytest)..."
-# Bypass in genuine emergencies with: git push --no-verify
 # The hooks resolve the interpreter via scripts/venv-python: this ONE
 # main-checkout .venv serves every git worktree too — do not build
 # per-worktree venvs (#315).
