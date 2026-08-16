@@ -244,14 +244,23 @@ def _sync_mirrors(
 def _edition_has_unreadable_live_row(index_conn: sqlite3.Connection, edition: int) -> bool:
     """True when the edition has a live index row whose attributes are empty/
     unreadable — i.e. the on-ledger state is NOT provably canonical."""
-    row = index_conn.execute(
-        "SELECT 1 FROM onchain_nfts"
-        " WHERE nft_number = ? AND (is_burned IS NULL OR is_burned = 0)"
-        "   AND (attributes_json IS NULL OR attributes_json = '' OR attributes_json = '[]')"
-        " LIMIT 1",
+    rows = index_conn.execute(
+        "SELECT attributes_json FROM onchain_nfts"
+        " WHERE nft_number = ? AND (is_burned IS NULL OR is_burned = 0)",
         (edition,),
-    ).fetchone()
-    return row is not None
+    ).fetchall()
+    for (raw,) in rows:
+        if raw is None or raw == "" or raw == "[]":
+            return True
+        try:
+            attrs = json.loads(raw)
+        except (TypeError, ValueError):
+            return True
+        if not isinstance(attrs, list) or not attrs:
+            return True
+        if not all(isinstance(a, dict) for a in attrs):
+            return True
+    return False
 
 
 def _journal(network: str, results: list[Result]) -> None:

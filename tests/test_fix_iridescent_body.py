@@ -334,3 +334,20 @@ def test_unreadable_live_index_row_blocks_app_only_rewrite(dbs, monkeypatch):
     # a rerun still discovers the edition (nothing was destroyed)
     results2 = _run(index_db, app_db, apply=True)
     assert [r.status for r in results2] == ["skipped_unreadable_metadata"]
+
+
+def test_malformed_live_index_attributes_block_app_only_rewrite(dbs, monkeypatch):
+    """A non-empty but malformed attributes_json is just as unverifiable as an
+    empty one: the app-only path must treat it as unreadable and preserve the
+    LFG.Body discovery key."""
+    index_db, app_db = dbs
+    with sqlite3.connect(index_db) as ic:
+        ic.execute("UPDATE onchain_nfts SET attributes_json='{not json' WHERE nft_id=?", (LIVE_ID,))
+        ic.commit()
+    calls = _stub_ledger(monkeypatch)
+    results = _run(index_db, app_db, apply=True)
+    assert [r.status for r in results] == ["skipped_unreadable_metadata"]
+    assert calls["modify"] == [] and calls["upload"] == []
+    with sqlite3.connect(app_db) as ac:
+        (body,) = ac.execute("SELECT Body FROM LFG WHERE nft_number=64").fetchone()
+    assert body == BAD
