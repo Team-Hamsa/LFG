@@ -1319,6 +1319,7 @@ function invalidateFlowPolls() {
   marketFlowGen++;
   clearTimeout(shopFlowTimer);
   shopFlowGen++;
+  economyResumeGen++;
 }
 
 // One boot round-trip (#221): GET /api/sessions/active, pick the
@@ -3480,9 +3481,16 @@ const ECONOMY_OP_LABEL = {
   harvest: 'Harvest', assemble: 'Assemble', equip: 'Save',
   extract: 'Extract', deposit: 'Deposit',
 };
+// Ownership generation for the resumed-economy result callback: the awaited
+// pollEconomyOp promise can resolve long after another flow took over the
+// shared flow-panel, and a visibility check alone can't tell "my panel" from
+// "someone else's panel that is visible again". Bumped by
+// invalidateFlowPolls() (i.e. by every later attach).
+let economyResumeGen = 0;
 function attachEconomyResume(session) {
   const kind = session.kind;
   if (!ECONOMY_OP_LABEL[kind]) return false;
+  const gen = ++economyResumeGen;
   showPanel('flow-panel');
   showFlow({
     title: '🔄 Reconnecting…',
@@ -3490,6 +3498,7 @@ function attachEconomyResume(session) {
     spinner: true,
   });
   pollEconomyOp(kind, session).then((final) => {
+    if (gen !== economyResumeGen) return; // another flow owns the panel now
     if (el('flow-panel').hidden) return; // user navigated away
     if (final.state === 'failed') {
       showFlow({ title: `❌ ${ECONOMY_OP_LABEL[kind]} failed`, text: final.error || 'Something went wrong.', done: true });

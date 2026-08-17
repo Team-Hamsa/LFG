@@ -202,6 +202,21 @@ def test_app_js_resume_invalidates_stale_flow_polls():
     assert "marketFlowGen++" in inv
     assert "clearTimeout(shopFlowTimer)" in inv
     assert "shopFlowGen++" in inv
+    assert "economyResumeGen++" in inv
+
+
+def test_app_js_economy_resume_result_is_ownership_guarded():
+    """Greptile #376 round 4: the awaited pollEconomyOp promise can resolve
+    after another flow took over the shared flow-panel; a visibility check
+    alone can't tell 'my panel' from 'someone else's panel'. The result
+    callback must capture an ownership generation at attach and bail when
+    superseded."""
+    src = open(APP_JS).read()
+    body = src.split("function attachEconomyResume", 1)[1].split("\n}\n", 1)[0]
+    assert "const gen = ++economyResumeGen;" in body
+    assert "if (gen !== economyResumeGen) return;" in body
+    # the ownership check comes before the visibility check in the callback
+    assert body.index("gen !== economyResumeGen") < body.index("el('flow-panel').hidden")
 
 
 def test_app_js_market_and_shop_polls_are_generation_guarded():
