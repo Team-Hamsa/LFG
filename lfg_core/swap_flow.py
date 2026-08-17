@@ -414,6 +414,7 @@ def _persist_remint_to_index(item: dict[str, Any]) -> None:
                     attributes=item["attrs"],
                     image=item["image_url"],
                     ledger_index=None,
+                    video=item["video_url"] or "",
                 ),
             )
         finally:

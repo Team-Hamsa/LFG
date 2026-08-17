@@ -68,6 +68,7 @@ CREATE TABLE IF NOT EXISTS onchain_nfts (
     body            TEXT,
     attributes_json TEXT,
     image           TEXT,
+    video           TEXT,
     ledger_index    INTEGER,
     last_synced_at  TIMESTAMP
 );
@@ -93,6 +94,10 @@ class OnchainNft:
     attributes: list[dict[str, Any]]
     image: str
     ledger_index: int | None
+    # Metadata `video` URL (MP4 animation for post-animated-support mints and
+    # swap outputs; "" for static NFTs). Defaulted so pre-#204 constructors
+    # keep working — the roster's cache-miss synthesis reads it (#204).
+    video: str = ""
 
 
 def index_db_path(network: str) -> str:
@@ -115,6 +120,11 @@ def init_db(path: str, busy_timeout_ms: int | None = None) -> sqlite3.Connection
     if busy_timeout_ms is not None:
         conn.execute(f"PRAGMA busy_timeout = {int(busy_timeout_ms)}")
     conn.executescript(_SCHEMA)
+    # Self-migrate pre-#204 DBs (no `video` column). Same posture as the other
+    # per-network stores' self-migrating columns.
+    cols = {r[1] for r in conn.execute("PRAGMA table_info(onchain_nfts)")}
+    if "video" not in cols:
+        conn.execute("ALTER TABLE onchain_nfts ADD COLUMN video TEXT")
     conn.commit()
     return conn
 
@@ -212,6 +222,7 @@ def _nft_to_row(rec: OnchainNft) -> tuple[Any, ...]:
         rec.body,
         json.dumps(rec.attributes),
         rec.image,
+        rec.video,
         rec.ledger_index,
     )
 
@@ -228,6 +239,9 @@ def _row_to_nft(row: sqlite3.Row) -> OnchainNft:
         attributes=json.loads(row["attributes_json"]) if row["attributes_json"] else [],
         image=row["image"] or "",
         ledger_index=row["ledger_index"],
+        # Tolerate rows from a pre-#204 schema (init_db self-migrates, but a
+        # reader can be handed a connection to a DB opened elsewhere).
+        video=(row["video"] if "video" in row.keys() else "") or "",
     )
 
 
@@ -237,8 +251,8 @@ def upsert(conn: sqlite3.Connection, rec: OnchainNft) -> None:
         """
         INSERT INTO onchain_nfts
             (nft_id, nft_number, owner, is_burned, mutable, uri_hex, body,
-             attributes_json, image, ledger_index, last_synced_at)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
+             attributes_json, image, video, ledger_index, last_synced_at)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
         ON CONFLICT(nft_id) DO UPDATE SET
             -- COALESCE: an nft_id's edition is fixed for life, but some tokens'
             -- on-chain metadata `name` carries no parseable number, so a re-scan
@@ -280,6 +294,12 @@ def upsert(conn: sqlite3.Connection, rec: OnchainNft) -> None:
                                OR onchain_nfts.image LIKE '%.ipfs.%')
                    THEN image
                  ELSE excluded.image END,
+            -- video rides the same failed-fetch guard as body/image: a []
+            -- write (metadata fetch failed) must not clobber a known
+            -- animation URL, while a good-metadata write with no video
+            -- (e.g. a modify back to all-static art) legitimately clears it.
+            video=CASE WHEN excluded.attributes_json='[]'
+                 THEN video ELSE excluded.video END,
             -- COALESCE: a writer that doesn't know the ledger height (the
             -- swap flow's burn-point stamp passes None) must never erase one
             -- the listener already recorded — nft_by_number orders duplicate
@@ -522,11 +542,13 @@ def token_record(token: dict[str, Any], metadata: dict[str, Any] | None) -> Onch
         body = swap_meta.detect_body(attributes)
         number = swap_meta.extract_nft_number(str(metadata.get("name", "")))
         image = swap_meta.resolve_ipfs(str(metadata.get("image", "")))
+        video = swap_meta.resolve_ipfs(str(metadata.get("video") or ""))
     else:
         attributes = []
         body = ""
         number = None
         image = ""
+        video = ""
     return OnchainNft(
         nft_id=token["nft_id"],
         nft_number=number,
@@ -538,4 +560,5 @@ def token_record(token: dict[str, Any], metadata: dict[str, Any] | None) -> Onch
         attributes=attributes,
         image=image,
         ledger_index=token.get("ledger_index"),
+        video=video,
     )

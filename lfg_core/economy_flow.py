@@ -774,6 +774,7 @@ async def run_assemble(session: AssembleSession, deps: EconomyDeps) -> None:
                 op="assemble",
                 modify_hash=session.modify_hash,
                 body=session.body_class,
+                video_url=video_url,
             )
             session.results.append(
                 {
@@ -849,6 +850,7 @@ async def run_assemble(session: AssembleSession, deps: EconomyDeps) -> None:
             op="assemble",
             modify_hash=session.modify_hash,
             body=session.body_class,
+            video_url=video_url,
         )
         session.results.append(
             {
@@ -896,6 +898,7 @@ def _persist_char_modify_to_index(
     op: str,
     modify_hash: str | None = None,
     body: str | None = None,
+    video_url: str | None = None,
 ) -> None:
     """Write the post-modify ledger truth straight into the on-chain index
     (mirrors swap_flow._persist_remint_to_index / the #211 pattern), so a
@@ -931,6 +934,9 @@ def _persist_char_modify_to_index(
                 attributes=new_attrs,
                 image=image_url,
                 ledger_index=None,
+                # "" (not None) when the new art is static — an animated
+                # character modified to all-static must clear its stale MP4.
+                video=video_url or "",
             ),
         )
     except Exception:
@@ -1087,7 +1093,7 @@ async def run_equip(session: EquipSession, deps: EconomyDeps) -> None:
             }
             for a in rec.attributes
         ]
-        image_url, _video_url, meta_url = await deps.char_compose_fn(
+        image_url, video_url, meta_url = await deps.char_compose_fn(
             new_attrs, rec.body, rec.nft_number or 0, 0
         )
         _write_record(deps.records_dir, "equip", session.id, session._record("equipping"))
@@ -1128,6 +1134,7 @@ async def run_equip(session: EquipSession, deps: EconomyDeps) -> None:
                 meta_url,
                 op="equip",
                 modify_hash=session.modify_hash,
+                video_url=video_url,
             )
             _write_record(
                 deps.records_dir, "equip", session.id, session._record("complete_pending_mirror")
@@ -1181,6 +1188,7 @@ async def run_equip(session: EquipSession, deps: EconomyDeps) -> None:
             meta_url,
             op="equip",
             modify_hash=session.modify_hash,
+            video_url=video_url,
         )
         _write_record(deps.records_dir, "equip", session.id, session._record("complete"))
     except Exception as e:
