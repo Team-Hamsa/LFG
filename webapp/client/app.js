@@ -25,6 +25,9 @@ import * as resumePure from './resume_pure.js?v=2';
 // static image (badged when animated); only detail/focused views upgrade to
 // the video.
 import * as mediaPure from './media_pure.js?v=2';
+// Batch-harvest (#356) selection/summary decisions are pure and Node-testable
+// (tests/test_harvest_pure_js.py); the GO-picker multi-select below is the glue.
+import * as harvestPure from './harvest_pure.js?v=2';
 
 const params = new URLSearchParams(window.location.search);
 const insideDiscord = params.has('frame_id');
@@ -2121,9 +2124,35 @@ function renderCanvas(char) {
 // of labeled tiles (#edition · body), opened from the Switch GO button.
 let goAssembleEnabled = true;
 
+// Batch-harvest (#356) multi-select: null = normal picker; an array = the
+// selected nft_ids while the GO picker is in "pick characters to harvest" mode.
+let batchSelect = null;
+// Generation guard (same idiom as pollGen/bulkPollGen): bumps on every batch
+// open/close so a batch POST response that was superseded by a close/reopen
+// can never close the CURRENT picker or clobber its selection.
+let batchGen = 0;
+// One batch POST in flight at a time — the confirm button locks while pending.
+let batchBusy = false;
+
+function renderBatchBar() {
+  const bar = el('go-picker-batch-bar');
+  if (!bar) return; // stale cached index.html predating this id
+  if (batchSelect === null) { bar.hidden = true; return; }
+  bar.hidden = false;
+  const summary = harvestPure.batchSummary(economyState.characters, batchSelect);
+  const sumEl = el('go-picker-batch-summary');
+  sumEl.textContent = summary.count === 0
+    ? 'Tap characters to select them for harvest.'
+    : `${summary.count} selected` + (summary.legacy ? ` · ${summary.legacy} need a Xaman tap` : ' · nothing to sign');
+  const btn = el('go-picker-batch-confirm');
+  btn.disabled = summary.count === 0 || batchBusy;
+  btn.onclick = () => confirmBatchHarvest();
+}
+
 function renderGoPicker() {
   const grid = el('go-picker-grid');
   grid.replaceChildren();
+  const batchMode = batchSelect !== null;
   for (const char of economyState.characters) {
     const t = buildPure.goTileState(char, activeNftId);
     const tile = document.createElement('button');
@@ -2162,6 +2191,26 @@ function renderGoPicker() {
       anim.setAttribute('aria-hidden', 'true');
       tile.appendChild(anim);
     }
+    if (batchMode) {
+      // Multi-select mode: tiles toggle membership instead of switching GOs.
+      const selectable = harvestPure.harvestSelectable(char, [...harvestingIds]);
+      if (!selectable) {
+        tile.disabled = true;
+        if (char.blank) sub.textContent = 'Already blank';
+      } else {
+        const selected = batchSelect.includes(char.nft_id);
+        if (selected) {
+          tile.style.outline = '3px solid var(--accent, #e91e63)';
+          cap.textContent = `✓ ${t.label}`;
+        }
+        tile.onclick = () => {
+          batchSelect = harvestPure.toggleSelected(batchSelect, char.nft_id);
+          renderGoPicker();
+        };
+      }
+      grid.appendChild(tile);
+      continue;
+    }
     if (t.state === 'indexing') {
       tile.disabled = true; // no body -> every layer fetch would 400
     } else {
@@ -2177,6 +2226,12 @@ function renderGoPicker() {
     }
     grid.appendChild(tile);
   }
+  renderBatchBar();
+  if (batchMode) {
+    el('go-picker-title').textContent = 'Harvest many';
+    return; // no "Assemble new" tile while picking a harvest batch
+  }
+  el('go-picker-title').textContent = 'Your GOs';
   const add = document.createElement('button');
   add.className = 'go-tile assemble';
   // A bare ＋ with only a hover title reads as "add a GO" on touch devices —
@@ -2212,6 +2267,9 @@ function openGoPicker() {
 
 function closeGoPicker() {
   const overlay = el('go-picker-overlay');
+  batchGen++; // invalidate any in-flight batch response handler
+  batchSelect = null; // leaving the picker always exits multi-select mode
+  renderBatchBar();
   overlay.hidden = true;
   overlay.onclick = null;
   if (overlay._onKey) {
@@ -2251,6 +2309,8 @@ async function openDressup() {
     const gateMsg = el('closet-gate-msg');
     const gateBtn = el('closet-gate-btn');
     const harvestBtn = el('dressup-harvest-btn');
+    // Tolerate a stale cached index.html predating the batch button (#356).
+    const harvestManyBtn = el('dressup-harvest-many-btn');
 
     // Hide the Dressing Room (canvas, Closet grid, trait strip) while gated —
     // otherwise the empty canvas and unpopulated closet-filter <select> render
@@ -2270,6 +2330,7 @@ async function openDressup() {
       gateBtn.disabled = false;
       harvestBtn.disabled = true;
       harvestBtn.hidden = true;
+      if (harvestManyBtn) { harvestManyBtn.disabled = true; harvestManyBtn.hidden = true; }
 
       if (cStatus === 'none') {
         gateMsg.textContent = 'You need a Closet to store your traits.';
@@ -2326,6 +2387,11 @@ async function openDressup() {
     harvestBtn.disabled = false;
     harvestBtn.hidden = false;
     harvestBtn.onclick = () => harvestActive();
+    if (harvestManyBtn) {
+      harvestManyBtn.disabled = false;
+      harvestManyBtn.hidden = false;
+      harvestManyBtn.onclick = () => openBatchHarvest();
+    }
 
     economyState.characters = economyState.characters.filter((c) => !harvestingIds.has(c.nft_id));
     goAssembleEnabled = true;
@@ -2773,6 +2839,83 @@ async function harvestActive() {
     }
   }
   trackHarvest(char, res);
+}
+
+// Batch harvest (#356): open the GO picker in multi-select mode.
+async function openBatchHarvest() {
+  if (!(await confirmDiscardIfDirty())) return;
+  batchGen++; // a fresh selection round supersedes any older response handler
+  batchSelect = [];
+  openGoPicker();
+  renderGoPicker(); // re-render in batch mode even if the overlay was open
+}
+
+async function confirmBatchHarvest() {
+  if (batchBusy) return; // one batch POST at a time
+  const summary = harvestPure.batchSummary(economyState.characters, batchSelect);
+  if (!summary.count) return;
+  const ok = await confirmDialog({
+    title: summary.count === 1 ? 'Harvest this character?' : `Harvest ${summary.count} characters?`,
+    text: harvestPure.confirmText(summary),
+    confirmLabel: summary.legacy ? '🔥 Harvest all' : '🧺 Harvest all',
+  });
+  if (!ok) return;
+  if (batchSelect === null) return; // picker closed while the dialog was up
+  const selected = batchSelect.slice();
+  // Generation guard (P1, #376/#378 idiom): capture the round this POST
+  // belongs to. If the user closes the picker and opens a new selection while
+  // the request is pending, this handler must not touch the new picker.
+  const gen = batchGen;
+  batchBusy = true;
+  renderBatchBar();
+  let res;
+  try {
+    res = await api('/api/harvest/batch', {
+      method: 'POST', body: JSON.stringify({ nft_ids: selected }),
+    });
+  } catch (e) {
+    showError(e.message);
+    return;
+  } finally {
+    batchBusy = false;
+    renderBatchBar();
+  }
+  const fresh = gen === batchGen;
+  if (fresh) closeGoPicker(); // also resets batchSelect; superseded -> hands off
+  const { started, rejected } = harvestPure.splitBatchResults(res.results);
+  // Fire-and-forget per started unit — exactly the single-harvest pattern:
+  // drop each from the roster now, poll each session, reconcile when it lands.
+  for (const r of started) {
+    const char = economyState.characters.find((c) => c.nft_id === r.nft_id)
+      || { nft_id: r.nft_id, edition: '?' };
+    harvestingIds.add(r.nft_id);
+    trackHarvest(char, { id: r.session_id, state: r.state });
+  }
+  economyState.characters = economyState.characters.filter((c) => !harvestingIds.has(c.nft_id));
+  if (!fresh && batchSelect !== null) {
+    // A newer selection round is open: drop any id this batch just started
+    // and refresh its tiles/summary — but leave the picker itself alone.
+    batchSelect = harvestPure.pruneSelection(batchSelect, [...harvestingIds]);
+    renderGoPicker();
+  }
+  if (started.length) {
+    toast(`🔥 Harvesting ${started.length} character${started.length === 1 ? '' : 's'} — keep playing, this takes a moment.`);
+  }
+  if (rejected.length) {
+    showError(rejected.map((r) => `Could not harvest ${labelForNft(r.nft_id)}: ${r.error}`).join('\n'));
+  }
+  if (harvestingIds.has(activeNftId)) {
+    activeNftId = buildPure.pickDefaultCharacter(economyState.characters);
+    if (!el('dressup-panel').hidden) {
+      if (activeNftId) selectCharacter(activeNftId);
+      else { el('dressup-canvas').replaceChildren(); renderCloset(); }
+    }
+  }
+}
+
+function labelForNft(nftId) {
+  const char = economyState.characters.find((c) => c.nft_id === nftId);
+  return char && char.edition != null ? `#${char.edition}` : 'a character';
 }
 
 async function trackHarvest(char, startResp) {
