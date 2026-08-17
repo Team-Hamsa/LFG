@@ -1848,6 +1848,15 @@ async function cancelSwap(sessionId, btn) {
   // A tick already awaiting the status API survives clearTimeout — bump the
   // generation so it can't repaint the fee screen after we leave.
   ++swapPollGen;
+  exitSwapAfterCancel();
+}
+
+// Leaving a cancelled swap (#376 review): when the boot resume armed the
+// chained re-check (a second flow was live), route through showMintHome so it
+// is consumed and the other flow surfaces — otherwise the swap picker as
+// before.
+function exitSwapAfterCancel() {
+  if (resumeRecheckArmed) { showMintHome(); return; }
   openSwapper();
 }
 
@@ -1917,7 +1926,7 @@ function pollSwap(sessionId) {
       return;
     }
     if (gen !== swapPollGen) return; // a newer chain started while we awaited
-    if (s.state === 'cancelled') { openSwapper(); return; } // cancelled elsewhere
+    if (s.state === 'cancelled') { exitSwapAfterCancel(); return; } // cancelled elsewhere
     if (s.state === 'offers_ready') {
       renderSwapResults(s);
       return;
@@ -3433,19 +3442,26 @@ async function promptClosetRequired() {
 function pollMarketFlow(kind, sessionId, render) {
   clearTimeout(marketFlowTimer);
   const gen = ++marketFlowGen;
+  // Shared-panel ownership: another flow kind (e.g. a shop buy) taking over
+  // flow-panel bumps flowRenderGen but not OUR gen — track it too, refreshed
+  // after each render this poller makes itself.
+  let ownerGen = flowRenderGen;
   const path = MARKET_STATUS_PATH[kind](sessionId);
   const tick = async () => {
-    if (gen !== marketFlowGen) return; // superseded by a newer poll chain
+    if (gen !== marketFlowGen || ownerGen !== flowRenderGen) return; // superseded
     if (el('flow-panel').hidden) return; // user navigated away
     let s;
     try {
       s = await api(path);
     } catch (e) {
-      if (gen === marketFlowGen) marketFlowTimer = setTimeout(tick, 3000); // transient; keep polling
+      if (gen === marketFlowGen && ownerGen === flowRenderGen) {
+        marketFlowTimer = setTimeout(tick, 3000); // transient; keep polling
+      }
       return;
     }
-    if (gen !== marketFlowGen) return; // a newer chain started while we awaited
+    if (gen !== marketFlowGen || ownerGen !== flowRenderGen) return; // superseded while we awaited
     showFlow(render(s));
+    ownerGen = flowRenderGen; // our own render; keep ownership current
     if (!marketPure.isMarketTerminal(s.state)) marketFlowTimer = setTimeout(tick, 3000);
   };
   marketFlowTimer = setTimeout(tick, 3000);
@@ -3733,19 +3749,23 @@ function shopBuyRender(s) {
 function pollShopFlow(sessionId) {
   clearTimeout(shopFlowTimer);
   const gen = ++shopFlowGen;
+  let ownerGen = flowRenderGen; // see pollMarketFlow
   const path = `/api/shop/buy/${sessionId}`;
   const tick = async () => {
-    if (gen !== shopFlowGen) return; // superseded by a newer poll chain
+    if (gen !== shopFlowGen || ownerGen !== flowRenderGen) return; // superseded
     if (el('flow-panel').hidden) return; // user navigated away
     let s;
     try {
       s = await api(path);
     } catch (e) {
-      if (gen === shopFlowGen) shopFlowTimer = setTimeout(tick, 3000); // transient; keep polling
+      if (gen === shopFlowGen && ownerGen === flowRenderGen) {
+        shopFlowTimer = setTimeout(tick, 3000); // transient; keep polling
+      }
       return;
     }
-    if (gen !== shopFlowGen) return; // a newer chain started while we awaited
+    if (gen !== shopFlowGen || ownerGen !== flowRenderGen) return; // superseded while we awaited
     showFlow(shopBuyRender(s));
+    ownerGen = flowRenderGen; // our own render; keep ownership current
     if (!marketPure.isMarketTerminal(s.state)) shopFlowTimer = setTimeout(tick, 3000);
   };
   shopFlowTimer = setTimeout(tick, 3000);

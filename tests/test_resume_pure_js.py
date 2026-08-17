@@ -239,7 +239,42 @@ def test_app_js_market_and_shop_polls_are_generation_guarded():
     ):
         body = src.split(fn, 1)[1].split("\n}\n", 1)[0]
         assert f"const gen = ++{gen};" in body
-        # bail when superseded: at tick start and again after the await
-        assert body.count(f"if (gen !== {gen}) return;") == 2
-        # the transient-error re-arm is guarded too
-        assert f"if (gen === {gen})" in body
+        # positions, not counts: one guard before the await, one strictly
+        # between the await and the render (a regression placing both guards
+        # before the await must fail here).
+        guard = f"if (gen !== {gen} || ownerGen !== flowRenderGen) return;"
+        first_guard = body.index(guard)
+        await_api = body.index("await api(")
+        second_guard = body.index(guard, await_api)
+        render = body.index("showFlow(")
+        assert first_guard < await_api < second_guard < render
+        # the transient-error re-arm after catch is guarded, and the guard
+        # precedes that setTimeout
+        catch_idx = body.index("} catch (e) {")
+        rearm_guard = body.index(f"if (gen === {gen} && ownerGen === flowRenderGen)", catch_idx)
+        rearm = body.index("setTimeout(tick, 3000)", rearm_guard)
+        assert catch_idx < rearm_guard < rearm
+        # shared-panel ownership (CodeRabbit #376): captured at chain start,
+        # refreshed after this poller's own render
+        assert "let ownerGen = flowRenderGen;" in body
+        refresh = body.index("ownerGen = flowRenderGen;", render)
+        assert render < refresh
+
+
+def test_app_js_swap_cancel_consumes_armed_recheck():
+    """Greptile #376 round 5: cancelling a resumed swap used to exit to
+    openSwapper(), never consuming the armed re-check — the other live flow
+    stayed hidden until another relaunch. Both swap-cancel exits (the cancel
+    handler and pollSwap's cancelled-elsewhere branch) must route through
+    exitSwapAfterCancel, which lands on showMintHome (consuming the re-check)
+    when it is armed."""
+    src = open(APP_JS).read()
+    exit_body = src.split("function exitSwapAfterCancel", 1)[1].split("\n}\n", 1)[0]
+    assert "resumeRecheckArmed" in exit_body
+    assert "showMintHome()" in exit_body
+    assert "openSwapper()" in exit_body
+    cancel_body = src.split("async function cancelSwap", 1)[1].split("\n}\n", 1)[0]
+    assert "exitSwapAfterCancel();" in cancel_body
+    assert "openSwapper()" not in cancel_body
+    poll_body = src.split("function pollSwap", 1)[1].split("\n}\n", 1)[0]
+    assert "if (s.state === 'cancelled') { exitSwapAfterCancel(); return; }" in poll_body

@@ -251,7 +251,9 @@ def test_app_js_swap_cancel_invalidates_inflight_poll():
     # panel switch — not merely somewhere in the function.
     outcome_idx = body.index("cancelMintOutcome")
     bump_idx = body.index("++swapPollGen")
-    open_idx = body.index("openSwapper()", outcome_idx)
+    # #376: the exit is routed through exitSwapAfterCancel (which consumes an
+    # armed resume re-check before falling back to openSwapper).
+    open_idx = body.index("exitSwapAfterCancel()", outcome_idx)
     assert outcome_idx < bump_idx < open_idx
 
 
