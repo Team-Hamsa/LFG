@@ -1,4 +1,5 @@
 # Sponsored single-mint admission and irreversible pipeline boundaries.
+import logging
 import os
 import sqlite3
 from types import SimpleNamespace
@@ -2779,7 +2780,9 @@ def test_account_exists_three_way_contract(monkeypatch, response, expected):
 
 
 @pytest.mark.parametrize("outcome", ["returns_none", "raises"])
-def test_undeliverable_note_failure_does_not_disable_admission(_service_env, monkeypatch, outcome):
+def test_undeliverable_note_failure_does_not_disable_admission(
+    _service_env, monkeypatch, caplog, outcome
+):
     # CodeRabbit (PR #387) rightly flagged that the record_offer result was
     # discarded. It is now validated -- but a failure must NOT raise: the write
     # is only an explanatory breadcrumb, the claim is already 'minted' and stays
@@ -2791,7 +2794,10 @@ def test_undeliverable_note_failure_does_not_disable_admission(_service_env, mon
         _service_env, "rUNFUNDED3", f"offer-note-{outcome}", f"NFT-NOTE-{outcome}"
     )
 
+    record_calls = []
+
     def broken_record_offer(*args, **kwargs):
+        record_calls.append((args, kwargs))
         if outcome == "raises":
             raise sqlite3.OperationalError("database is locked")
         return None
@@ -2807,8 +2813,23 @@ def test_undeliverable_note_failure_does_not_disable_admission(_service_env, mon
     monkeypatch.setattr(server.xrpl_ops, "account_exists", account_exists)
     monkeypatch.setattr(server.sponsored_mint, "record_offer", broken_record_offer)
 
-    # the sweep still completes -> startup stays ready -> admission stays live
-    _run(server._recover_sponsored_offers(_service_env.app_db, network="mainnet"))
+    with caplog.at_level(logging.ERROR):
+        # the sweep still completes -> startup stays ready -> admission stays live
+        _run(server._recover_sponsored_offers(_service_env.app_db, network="mainnet"))
+
+    # the diagnostic write must actually be ATTEMPTED, with the right payload --
+    # otherwise this test would still pass if the call were dropped entirely
+    assert len(record_calls) == 1
+    _, kwargs = record_calls[0]
+    assert kwargs["wallet"] == claim.wallet
+    assert kwargs["offer_id"] is None
+    assert kwargs["error"].startswith("destination account does not exist on-ledger")
+
+    # and its failure must be visible to an operator, not swallowed
+    assert any(
+        rec.levelname == "ERROR" and "note not persisted" in rec.getMessage()
+        for rec in caplog.records
+    )
 
     with sqlite3.connect(_service_env.app_db) as conn:
         status = conn.execute(
@@ -2816,3 +2837,33 @@ def test_undeliverable_note_failure_does_not_disable_admission(_service_env, mon
         ).fetchone()[0]
     # still recoverable on the next boot, which is the property that matters
     assert status == "minted"
+
+
+def test_undeliverable_claim_leaves_startup_recovery_ready(_service_env, monkeypatch):
+    # The boundary that actually matters. _recover_sponsored_offers not raising
+    # is only a proxy; what the outage came down to is _sponsored_recovery_ready
+    # being pinned False, which is what gates sponsored admission. Drive the real
+    # startup entry point and assert the gate itself.
+    sponsored_mint.start_campaign(_service_env.app_db, network="mainnet", actor="test", now=100)
+    _minted_claim_awaiting_offer(_service_env, "rUNFUNDED4", "offer-ready", "NFT-READY")
+
+    async def account_exists(address):
+        return False
+
+    async def create_offer(*args, **kwargs):
+        raise AssertionError("must not submit a doomed offer")
+
+    monkeypatch.setattr(server.xrpl_ops, "JsonRpcClient", _NoSellOffersClient)
+    monkeypatch.setattr(server.xrpl_ops, "create_nft_offer", create_offer)
+    monkeypatch.setattr(server.xrpl_ops, "account_exists", account_exists)
+    monkeypatch.setattr(server, "_sponsored_recovery_ready", False, raising=False)
+
+    async def resume():
+        await server._recover_sponsored_offers(_service_env.app_db, network="mainnet")
+
+    monkeypatch.setattr(server, "resume_bulk_jobs", resume)
+
+    _run(server._start_bulk_resume({}))
+
+    # before the fix this was False -> sponsored admission disabled for everyone
+    assert server._sponsored_recovery_ready is True
