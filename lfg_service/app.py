@@ -4550,16 +4550,40 @@ async def _recover_sponsored_offers(app_db: str, *, network: str) -> None:
                     "destination account does not exist on-ledger (unfunded); "
                     "offer creation deferred until it is funded"
                 )
-                await asyncio.to_thread(
-                    sponsored_mint.record_offer,
-                    app_db,
-                    network=network,
-                    wallet=claim.wallet,
-                    session_id=claim.session_id,
-                    offer_id=None,
-                    error=undeliverable,
-                    history_path=history_store.history_db_path(network),
-                )
+                # This write is a diagnostic breadcrumb, not a state
+                # transition: the claim is already 'minted' and STAYS 'minted'
+                # whether or not it lands, so a later boot retries either way.
+                # Validate it (never silently discard — a failure that looks
+                # identical to a success in the log is how this class of bug
+                # hides), but do NOT raise on it: raising would re-disable
+                # admission campaign-wide over a failed explanatory string,
+                # which is precisely the blast radius this branch exists to
+                # remove. Log loudly and carry on.
+                try:
+                    recorded = await asyncio.to_thread(
+                        sponsored_mint.record_offer,
+                        app_db,
+                        network=network,
+                        wallet=claim.wallet,
+                        session_id=claim.session_id,
+                        offer_id=None,
+                        error=undeliverable,
+                        history_path=history_store.history_db_path(network),
+                    )
+                except Exception:
+                    recorded = None
+                    logging.exception(
+                        "sponsored undeliverable-claim note raised: claim=%s wallet=%s",
+                        claim.id,
+                        claim.wallet,
+                    )
+                if recorded is None or recorded.last_error != undeliverable:
+                    logging.error(
+                        "sponsored undeliverable-claim note not persisted "
+                        "(claim remains 'minted' and will be retried): claim=%s wallet=%s",
+                        claim.id,
+                        claim.wallet,
+                    )
                 logging.warning(
                     "sponsored offer undeliverable, skipped: claim=%s nft=%s wallet=%s",
                     claim.id,

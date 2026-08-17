@@ -2776,3 +2776,43 @@ def _account_client(response):
 def test_account_exists_three_way_contract(monkeypatch, response, expected):
     monkeypatch.setattr(server.xrpl_ops, "AsyncJsonRpcClient", _account_client(response))
     assert _run(server.xrpl_ops.account_exists("rSOMEBODY")) is expected
+
+
+@pytest.mark.parametrize("outcome", ["returns_none", "raises"])
+def test_undeliverable_note_failure_does_not_disable_admission(_service_env, monkeypatch, outcome):
+    # CodeRabbit (PR #387) rightly flagged that the record_offer result was
+    # discarded. It is now validated -- but a failure must NOT raise: the write
+    # is only an explanatory breadcrumb, the claim is already 'minted' and stays
+    # 'minted' either way, and raising would re-disable admission
+    # campaign-wide over a failed log string. That is exactly the blast radius
+    # this branch removes.
+    sponsored_mint.start_campaign(_service_env.app_db, network="mainnet", actor="test", now=100)
+    claim = _minted_claim_awaiting_offer(
+        _service_env, "rUNFUNDED3", f"offer-note-{outcome}", f"NFT-NOTE-{outcome}"
+    )
+
+    def broken_record_offer(*args, **kwargs):
+        if outcome == "raises":
+            raise sqlite3.OperationalError("database is locked")
+        return None
+
+    async def account_exists(address):
+        return False
+
+    async def create_offer(*args, **kwargs):
+        raise AssertionError("must not submit a doomed offer")
+
+    monkeypatch.setattr(server.xrpl_ops, "JsonRpcClient", _NoSellOffersClient)
+    monkeypatch.setattr(server.xrpl_ops, "create_nft_offer", create_offer)
+    monkeypatch.setattr(server.xrpl_ops, "account_exists", account_exists)
+    monkeypatch.setattr(server.sponsored_mint, "record_offer", broken_record_offer)
+
+    # the sweep still completes -> startup stays ready -> admission stays live
+    _run(server._recover_sponsored_offers(_service_env.app_db, network="mainnet"))
+
+    with sqlite3.connect(_service_env.app_db) as conn:
+        status = conn.execute(
+            "SELECT status FROM free_mint_claims WHERE id = ?", (claim.id,)
+        ).fetchone()[0]
+    # still recoverable on the next boot, which is the property that matters
+    assert status == "minted"
