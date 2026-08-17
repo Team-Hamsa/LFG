@@ -1586,6 +1586,7 @@ def _compute_mine_data(char_network: str, econ_network: str, wallet: str) -> dic
                 "nft_id": c.nft_id,
                 "nft_number": c.nft_number,
                 "image": c.image or None,
+                "video": c.video or None,
                 "attributes": c.attributes,
             }
             for c in nft_index.owner_live_nfts(conn, wallet)

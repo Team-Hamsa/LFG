@@ -78,7 +78,7 @@ class MockMarket:
                 "nft_id": "MOCK-9001",
                 "kind": "character",
                 "nft_number": 9001,
-                "image": "",
+                "image": "https://cdn.example/mock/9001.png",
                 # #298: one animated seed so the grid badge + detail-video
                 # (and its error fallback — the URL won't actually play in
                 # dev mode) are exercisable in WEBAPP_DEV_MODE.

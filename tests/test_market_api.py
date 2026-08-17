@@ -880,6 +880,8 @@ def test_split_network_mine_all_four_groups(split_network_env, layer_art, monkey
 
     assert {r["nft_id"] for r in body["listings"]} == {CHAR1, TRAIT1}
     assert {c["nft_id"] for c in body["unlisted_characters"]} == {CHAR3_UNLISTED}
+    # #298: unlisted characters carry animation metadata like listing rows do.
+    assert all("video" in c for c in body["unlisted_characters"])
     assert {t["nft_id"] for t in body["unlisted_trait_tokens"]} == {TRAIT2_UNLISTED}
     assert [{k: v for k, v in a.items() if k != "image_url"} for a in body["closet_assets"]] == [
         {"slot": "Mouth", "value": "Grin", "count": 2}
