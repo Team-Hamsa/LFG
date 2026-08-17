@@ -1314,9 +1314,11 @@ function invalidateFlowPolls() {
   clearTimeout(bulkPollTimer);
   bulkPollGen++;
   clearTimeout(swapPollTimer);
-  ++swapPollGen;
+  swapPollGen++;
   clearTimeout(marketFlowTimer);
+  marketFlowGen++;
   clearTimeout(shopFlowTimer);
+  shopFlowGen++;
 }
 
 // One boot round-trip (#221): GET /api/sessions/active, pick the
@@ -3031,6 +3033,11 @@ const MARKET_STATUS_PATH = {
 const marketState = { tab: 'browse', kind: 'character', offset: 0 };
 let marketPendingItem = null; // the character/trait/closet-asset the list-form panel is acting on
 let marketFlowTimer = null;
+// Generation counter (mirrors pollMint's pollGen): clearTimeout alone cannot
+// kill a tick already awaiting its status fetch — it would resume, repaint
+// the shared flow-panel, and re-arm. Bumped on every pollMarketFlow start and
+// by invalidateFlowPolls().
+let marketFlowGen = 0;
 
 function highlightTabs(containerId, dataKey, activeValue) {
   for (const btn of el(containerId).querySelectorAll('.lb-chip')) {
@@ -3419,16 +3426,19 @@ async function promptClosetRequired() {
 
 function pollMarketFlow(kind, sessionId, render) {
   clearTimeout(marketFlowTimer);
+  const gen = ++marketFlowGen;
   const path = MARKET_STATUS_PATH[kind](sessionId);
   const tick = async () => {
+    if (gen !== marketFlowGen) return; // superseded by a newer poll chain
     if (el('flow-panel').hidden) return; // user navigated away
     let s;
     try {
       s = await api(path);
     } catch (e) {
-      marketFlowTimer = setTimeout(tick, 3000); // transient; keep polling
+      if (gen === marketFlowGen) marketFlowTimer = setTimeout(tick, 3000); // transient; keep polling
       return;
     }
+    if (gen !== marketFlowGen) return; // a newer chain started while we awaited
     showFlow(render(s));
     if (!marketPure.isMarketTerminal(s.state)) marketFlowTimer = setTimeout(tick, 3000);
   };
@@ -3506,6 +3516,7 @@ function attachEconomyResume(session) {
 
 async function marketFlow(kind, startPath, body, render) {
   clearTimeout(marketFlowTimer);
+  ++marketFlowGen; // kill any in-flight tick across the awaited start POST
   showPanel('flow-panel');
   showFlow({ title: 'Starting…', spinner: true });
   let s;
@@ -3611,6 +3622,7 @@ function marketTraitListRender(s) {
 // xumm_url) differs from the market sessions' MARKET_STATUS_PATH table.
 
 let shopFlowTimer = null;
+let shopFlowGen = 0; // see marketFlowGen
 
 function shopImgSrc(item) {
   return traitLayerSrc(item.image_url);
@@ -3708,16 +3720,19 @@ function shopBuyRender(s) {
 
 function pollShopFlow(sessionId) {
   clearTimeout(shopFlowTimer);
+  const gen = ++shopFlowGen;
   const path = `/api/shop/buy/${sessionId}`;
   const tick = async () => {
+    if (gen !== shopFlowGen) return; // superseded by a newer poll chain
     if (el('flow-panel').hidden) return; // user navigated away
     let s;
     try {
       s = await api(path);
     } catch (e) {
-      shopFlowTimer = setTimeout(tick, 3000); // transient; keep polling
+      if (gen === shopFlowGen) shopFlowTimer = setTimeout(tick, 3000); // transient; keep polling
       return;
     }
+    if (gen !== shopFlowGen) return; // a newer chain started while we awaited
     showFlow(shopBuyRender(s));
     if (!marketPure.isMarketTerminal(s.state)) shopFlowTimer = setTimeout(tick, 3000);
   };
@@ -3746,6 +3761,7 @@ async function openShopBuyFlow(item) {
   });
   if (!ok) return;
   clearTimeout(shopFlowTimer);
+  ++shopFlowGen; // kill any in-flight tick across the awaited start POST
   showPanel('flow-panel');
   showFlow({ title: 'Starting…', spinner: true });
   let s;

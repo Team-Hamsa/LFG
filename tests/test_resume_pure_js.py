@@ -186,9 +186,39 @@ def test_app_js_resume_invalidates_stale_flow_polls():
     src = open(APP_JS).read()
     resume_body = src.split("async function resumeAnyFlow", 1)[1].split("\n}\n", 1)[0]
     assert "invalidateFlowPolls()" in resume_body
+    # ...and it runs BEFORE any attach is dispatched (the switch), not after.
+    assert resume_body.index("invalidateFlowPolls()") < resume_body.index("switch (flow)")
+    # The exact state changes, not mere identifier presence: every gen-guarded
+    # poller's generation bumps (killing ticks already awaiting their fetch)
+    # and every plain timer is cleared.
     inv = src.split("function invalidateFlowPolls", 1)[1].split("\n}\n", 1)[0]
+    assert "clearTimeout(pollTimer)" in inv
     assert "pollGen++" in inv
+    assert "clearTimeout(bulkPollTimer)" in inv
     assert "bulkPollGen++" in inv
-    assert "swapPollGen" in inv
-    assert "marketFlowTimer" in inv
-    assert "shopFlowTimer" in inv
+    assert "clearTimeout(swapPollTimer)" in inv
+    assert "swapPollGen++" in inv
+    assert "clearTimeout(marketFlowTimer)" in inv
+    assert "marketFlowGen++" in inv
+    assert "clearTimeout(shopFlowTimer)" in inv
+    assert "shopFlowGen++" in inv
+
+
+def test_app_js_market_and_shop_polls_are_generation_guarded():
+    """Greptile #376 round 3: clearTimeout only cancels the NEXT tick — a tick
+    already awaiting its status fetch resumes afterwards, repaints flow-panel
+    over the newly attached flow, and re-arms. The market/shop pollers need
+    the same generation guard pollMint/pollSwap already carry: capture the gen
+    at chain start and bail (before render AND before re-arming) when
+    superseded."""
+    src = open(APP_JS).read()
+    for fn, gen in (
+        ("function pollMarketFlow", "marketFlowGen"),
+        ("function pollShopFlow", "shopFlowGen"),
+    ):
+        body = src.split(fn, 1)[1].split("\n}\n", 1)[0]
+        assert f"const gen = ++{gen};" in body
+        # bail when superseded: at tick start and again after the await
+        assert body.count(f"if (gen !== {gen}) return;") == 2
+        # the transient-error re-arm is guarded too
+        assert f"if (gen === {gen})" in body
