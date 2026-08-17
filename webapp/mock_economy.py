@@ -37,6 +37,9 @@ class MockEconomy:
                 "body": "male",
                 "mutable": True,
                 "image_url": "",
+                # #298: one animated character so the GO-picker badge is
+                # exercisable in WEBAPP_DEV_MODE (mirrors _char_dict's shape).
+                "video_url": "https://cdn.example/mock-3537.mp4",
                 "attributes": _attrs(
                     Body="male",
                     Background="Blue",
@@ -53,6 +56,7 @@ class MockEconomy:
                 "body": "female",
                 "mutable": True,
                 "image_url": "",
+                "video_url": None,  # #298: static art
                 "attributes": _attrs(
                     Body="female",
                     Background="Pink",

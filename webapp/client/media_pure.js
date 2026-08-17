@@ -36,3 +36,13 @@ export function gridMedia(row) {
 export function detailMedia(row, canPlay = true) {
   return { image: imageOf(row), video: canPlay ? videoOf(row) : null };
 }
+
+// What a failed <video> degrades to. The inputs are the element's CURRENT
+// poster/label — setMedia reuses one fixed-id element across renders, so the
+// fallback must reflect the render in effect at error time, never
+// creation-time closure values (a stale closure would resurrect the previous
+// NFT's still). No poster → null: keep the video, never a broken <img>.
+export function videoFallback(poster, label) {
+  if (!poster) return null;
+  return { src: poster, alt: label || '' };
+}

@@ -103,3 +103,31 @@ def test_detail_media_respects_can_play_false():
 def test_detail_media_alias_fields():
     out = run_js('M.detailMedia({image_url: "b.png", video_url: "b.mp4"})')
     assert out == {"image": "b.png", "video": "b.mp4"}
+
+
+# --- videoFallback: what a failed <video> degrades to -----------------------
+# The inputs are the element's CURRENT poster/label — setMedia reuses one
+# fixed-id element across renders, so the fallback must reflect the render
+# in effect at error time, never the creation-time closure values.
+
+
+def test_video_fallback_uses_current_poster():
+    # Two renders on one slot, then an error: the SECOND render's poster wins.
+    out = run_js(
+        "(() => {"
+        "  let el = { poster: 'first.png', label: 'first' };"  # render 1
+        "  el = { poster: 'second.png', label: 'second' };"  # render 2 (same slot)
+        "  return M.videoFallback(el.poster, el.label);"  # error fires now
+        "})()"
+    )
+    assert out == {"src": "second.png", "alt": "second"}
+
+
+def test_video_fallback_without_poster_is_null():
+    # No still to degrade to: keep the video element rather than a broken img.
+    assert run_js("M.videoFallback('', 'x')") is None
+    assert run_js("M.videoFallback(null, 'x')") is None
+
+
+def test_video_fallback_missing_label_defaults_empty():
+    assert run_js("M.videoFallback('a.png', null)") == {"src": "a.png", "alt": ""}

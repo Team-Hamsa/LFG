@@ -24,7 +24,7 @@ import * as resumePure from './resume_pure.js?v=2';
 // Node-testable (tests/test_media_pure_js.py) — grids always render the
 // static image (badged when animated); only detail/focused views upgrade to
 // the video.
-import * as mediaPure from './media_pure.js?v=1';
+import * as mediaPure from './media_pure.js?v=2';
 
 const params = new URLSearchParams(window.location.search);
 const insideDiscord = params.has('frame_id');
@@ -182,19 +182,21 @@ function mediaEl({ image, video, thumbW, className, alt }) {
     m.preload = 'metadata';
     if (image) m.poster = imgUrl(image, thumbW);
     // #298: a failed/undecodable video degrades to the static still instead
-    // of a dead black box. id/class/hidden carry over so setMedia (and any
-    // fixed-id caller) keeps addressing the slot.
-    if (image) {
-      m.onerror = () => {
-        const still = document.createElement('img');
-        still.id = m.id;
-        still.className = m.className;
-        still.hidden = m.hidden;
-        still.src = imgUrl(image, thumbW);
-        still.alt = alt || '';
-        m.replaceWith(still);
-      };
-    }
+    // of a dead black box. The fallback reads the element's CURRENT
+    // poster/label — setMedia reuses this element across renders, so
+    // creation-time closure values would resurrect the previous NFT's still.
+    // id/class/hidden carry over so fixed-id callers keep addressing the slot.
+    m.onerror = () => {
+      const fb = mediaPure.videoFallback(m.poster, m.getAttribute('aria-label'));
+      if (!fb) return; // no still to degrade to — keep the video element
+      const still = document.createElement('img');
+      still.id = m.id;
+      still.className = m.className;
+      still.hidden = m.hidden;
+      still.src = fb.src;
+      still.alt = fb.alt;
+      m.replaceWith(still);
+    };
     m.src = imgUrl(video);
   } else {
     m.src = imgUrl(image, thumbW);
@@ -213,7 +215,13 @@ function setMedia(id, { image, video, thumbW }) {
     // every few seconds and resetting src would restart video playback.
     const src = video ? imgUrl(video) : imgUrl(image, thumbW);
     if (old.getAttribute('src') !== src) {
-      if (video && image) old.poster = imgUrl(image, thumbW);
+      // #298: refresh the poster with the render — and CLEAR a stale one
+      // when the new piece has no still, so the error fallback (which reads
+      // the current poster) can never show the previous NFT's art.
+      if (video) {
+        if (image) old.poster = imgUrl(image, thumbW);
+        else old.removeAttribute('poster');
+      }
       old.src = src;
     }
     // Re-arm playback: autoplay only fires on load, and showFlow pauses the
