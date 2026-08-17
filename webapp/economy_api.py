@@ -37,6 +37,10 @@ def _char_dict(r: nft_index.OnchainNft) -> dict[str, Any]:
         "body": r.body,
         "mutable": bool(r.mutable),
         "image_url": r.image,
+        # #298: the metadata video URL (#377) so the client can badge animated
+        # tiles / upgrade detail views without a metadata fetch. Grid art stays
+        # the static image_url (PNG first frame for animated NFTs).
+        "video_url": r.video or None,
         "attributes": r.attributes,
         "blank": trait_economy.is_blank(r),
     }

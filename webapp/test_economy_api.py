@@ -98,6 +98,32 @@ def test_read_economy_state_shape():
     assert "bodies" not in state["closet"]
     # A character with a real trait value is not blank.
     assert state["characters"][0]["blank"] is False
+    # #298: a static character carries video_url=None so the client can badge
+    # animated tiles without a metadata fetch (onchain_nfts.video, #377).
+    assert state["characters"][0]["video_url"] is None
+
+
+def test_read_economy_state_animated_character_carries_video_url():
+    conn = _seed_conn()
+    nft_index.upsert(
+        conn,
+        OnchainNft(
+            nft_id="B",
+            nft_number=3538,
+            owner="rOwner",
+            is_burned=False,
+            mutable=True,
+            uri_hex="",
+            body="male",
+            attributes=[{"trait_type": "Body", "value": "Diamond"}],
+            image="https://cdn.example/3538.png",
+            video="https://cdn.example/3538.mp4",
+            ledger_index=1,
+        ),
+    )
+    state = economy_api.read_economy_state(conn, "rOwner")
+    by_id = {c["nft_id"]: c for c in state["characters"]}
+    assert by_id["B"]["video_url"] == "https://cdn.example/3538.mp4"
     assert state["trait_order"][0] == "Background"
     assert "Body" not in state["slots"]
 
