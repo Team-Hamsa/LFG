@@ -264,8 +264,12 @@ function discordCtx() {
 }
 
 function openExternal(url) {
-  if (externalOpener) externalOpener(url);
-  else window.open(url, '_blank');
+  // Returns the launch result so callers can detect a blocked window.open
+  // (null). The Discord SDK opener's outcome is genuinely undetectable (it
+  // returns a promise that resolves either way) — callers must treat only an
+  // explicit null as "blocked".
+  if (externalOpener) return externalOpener(url);
+  return window.open(url, '_blank');
 }
 
 // --- Xaman sign-request delivery (#142) --------------------------------
@@ -288,11 +292,17 @@ function isCoarsePointer() {
 
 // Auto-open fires at most once per unique payload link — flow panels
 // re-render on every status poll, and each poll must NOT re-launch Xaman.
-const autoOpenedLinks = [];
+// Marked optimistically, then un-marked when the launch is DETECTABLY
+// blocked (window.open returning null in a standalone browser) so the next
+// poll render retries; the Discord SDK opener gives no success signal, so
+// there the optimistic mark stands (the primary button remains the
+// guaranteed path either way).
+let autoOpenedLinks = [];
 function maybeAutoOpen(link) {
   if (!signDeliveryPure.shouldAutoOpen(autoOpenedLinks, link)) return;
   autoOpenedLinks.push(link);
-  openExternal(link);
+  const launched = openExternal(link);
+  autoOpenedLinks = signDeliveryPure.autoOpenOutcome(autoOpenedLinks, link, launched !== null);
 }
 
 // "Show QR to sign on another device" disclosure button for dynamically

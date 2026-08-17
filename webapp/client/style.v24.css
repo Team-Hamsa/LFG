@@ -1012,7 +1012,7 @@ button.link.sign-primary {
   font-size: 1.1rem;
   font-weight: 700;
   padding: .6rem 1.2rem;
-  border: 2px solid currentColor;
+  border: 2px solid currentcolor;
   border-radius: 10px;
   text-decoration: none;
 }

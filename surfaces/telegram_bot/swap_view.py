@@ -194,20 +194,25 @@ async def handle_swap_confirm(svc: Any, update: Any, context: Any) -> None:
     #    awaiting_payment with a payment_link).
     payment_link = sess.get("payment_link")
     if sess.get("state") == "awaiting_payment" and payment_link:
+        caption = swap_render.swap_payment_caption(
+            str(sess.get("fee_amount") or ""),
+            str(sess.get("pay_with") or ""),
+            payment_link=str(payment_link),
+        )
         try:
             qr_png = await svc.qr_png(payment_link)
-        except ServiceError as e:
-            await bot.send_message(chat_id, render.error_caption(friendly_error(e)))
-            return
-        await bot.send_photo(
-            chat_id,
-            photo=render.photo_input(qr_png, "swap_fee_qr.png"),
-            caption=swap_render.swap_payment_caption(
-                str(sess.get("fee_amount") or ""),
-                str(sess.get("pay_with") or ""),
-                payment_link=str(payment_link),
-            ),
-        )
+        except ServiceError:
+            # #142: only the QR render failed — the deep link is still
+            # perfectly signable. Send the caption as plain text (Telegram
+            # auto-links the URL) and keep waiting for the payment instead of
+            # abandoning a session the user can still complete.
+            await bot.send_message(chat_id, caption)
+        else:
+            await bot.send_photo(
+                chat_id,
+                photo=render.photo_input(qr_png, "swap_fee_qr.png"),
+                caption=caption,
+            )
 
     # 3. wait for a terminal state.
     try:

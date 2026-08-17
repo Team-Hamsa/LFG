@@ -34,3 +34,13 @@ export function shouldAutoOpen(seen, link) {
   if (!link) return false;
   return !seen.includes(link);
 }
+
+// Post-launch bookkeeping: `launched === false` means the launch was
+// DETECTABLY blocked (window.open returned null under a popup blocker) — the
+// link is un-marked so a later render may retry the auto-open. Any other
+// outcome (success, or an opener whose result is undetectable, like the
+// Discord SDK's promise) keeps the optimistic mark.
+export function autoOpenOutcome(seen, link, launched) {
+  if (launched === false) return seen.filter((l) => l !== link);
+  return seen;
+}

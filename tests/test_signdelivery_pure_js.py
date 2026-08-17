@@ -99,3 +99,31 @@ def test_should_auto_open_once_per_link():
 def test_should_auto_open_rejects_missing_link():
     assert run_js("M.shouldAutoOpen([], null)") is False
     assert run_js("M.shouldAutoOpen([], '')") is False
+
+
+# ---------------------------------------------------------------------------
+# autoOpenOutcome(seen, link, launched) — a DETECTABLY blocked launch
+# (window.open returning null) un-marks the link so a later render retries;
+# success or an undetectable opener (Discord SDK promise) keeps the mark.
+# ---------------------------------------------------------------------------
+
+
+def test_blocked_launch_unmarks_for_retry():
+    link = "https://xumm.app/sign/u"
+    # optimistic mark, launch blocked -> un-marked -> shouldAutoOpen again
+    assert run_js(f"M.autoOpenOutcome(['{link}'], '{link}', false)") == []
+    assert (
+        run_js(f"M.shouldAutoOpen(M.autoOpenOutcome(['{link}'], '{link}', false), '{link}')")
+        is True
+    )
+
+
+def test_successful_or_undetectable_launch_keeps_mark():
+    link = "https://xumm.app/sign/u"
+    assert run_js(f"M.autoOpenOutcome(['{link}'], '{link}', true)") == [link]
+    # undetectable opener result (e.g. a promise coerced to truthy/undefined)
+    assert run_js(f"M.autoOpenOutcome(['{link}'], '{link}', undefined)") == [link]
+
+
+def test_blocked_unmark_only_removes_that_link():
+    assert run_js("M.autoOpenOutcome(['a', 'b'], 'a', false)") == ["b"]
