@@ -185,4 +185,63 @@ def test_app_js_imports_harvest_pure():
 
 def test_index_html_cache_buster_bumped():
     src = open(os.path.join(ROOT, "webapp", "client", "index.html")).read()
-    assert "app.js?v=50" in src
+    assert "app.js?v=51" in src
+
+
+# ---------------------------------------------------------------------------
+# pruneSelection(selectedIds, harvestingIds) -> ids not already in flight
+# On a superseded batch response the NEW picker's selection must drop any id
+# the older batch just started harvesting.
+# ---------------------------------------------------------------------------
+
+
+def test_prune_selection_drops_inflight_ids():
+    assert run_js("M.pruneSelection(['A','B','C'], ['B'])") == ["A", "C"]
+
+
+def test_prune_selection_empty_inflight_is_identity():
+    assert run_js("M.pruneSelection(['A','B'], [])") == ["A", "B"]
+
+
+def test_prune_selection_null_selected_is_empty():
+    assert run_js("M.pruneSelection(null, ['A'])") == []
+
+
+# ---------------------------------------------------------------------------
+# Generation-guard wiring (Greptile P1, PR #379): a batch POST response that
+# was superseded by a picker close/reopen must NOT close the current picker.
+# The decision itself is `gen !== batchGen` (trivial), so the regression net
+# is a source assertion on the established #376/#378 guard idiom.
+# ---------------------------------------------------------------------------
+
+
+def _app_js():
+    return open(os.path.join(ROOT, "webapp", "client", "app.js")).read()
+
+
+def test_batch_generation_guard_wired():
+    src = _app_js()
+    # the guard variable exists and the response handler checks it
+    assert "batchGen" in src
+    assert "gen === batchGen" in src or "gen !== batchGen" in src
+    # both open and close bump the generation, invalidating in-flight handlers
+    import re
+
+    assert len(re.findall(r"batchGen\+\+|\+\+batchGen", src)) >= 2
+
+
+def test_batch_close_is_guarded_not_unconditional():
+    # closeGoPicker() inside confirmBatchHarvest must be behind the freshness
+    # check — an unconditional call is exactly the P1 regression.
+    src = _app_js()
+    body = src.split("async function confirmBatchHarvest", 1)[1].split("\nasync function", 1)[0]
+    assert "closeGoPicker" in body
+    idx_guard = body.find("batchGen")
+    idx_close = body.find("closeGoPicker")
+    assert idx_guard != -1 and idx_guard < idx_close
+
+
+def test_batch_submit_lock_wired():
+    # one batch POST at a time: the confirm handler is locked while in flight
+    src = _app_js()
+    assert "batchBusy" in src

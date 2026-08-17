@@ -47,6 +47,14 @@ export function confirmText(summary) {
   return text;
 }
 
+// Drop ids that are already being harvested. Used when a superseded batch
+// response lands while a NEW picker selection is open: the older batch's
+// started units must fall out of the new selection.
+export function pruneSelection(selectedIds, harvestingIds) {
+  const inflight = Array.isArray(harvestingIds) ? harvestingIds : [...(harvestingIds || [])];
+  return (selectedIds || []).filter((id) => !inflight.includes(id));
+}
+
 // Partition per-unit server results into pollable starts vs rejections.
 // A unit only counts as started when it carries a session_id.
 export function splitBatchResults(results) {

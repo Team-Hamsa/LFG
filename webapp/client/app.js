@@ -27,7 +27,7 @@ import * as resumePure from './resume_pure.js?v=2';
 import * as mediaPure from './media_pure.js?v=2';
 // Batch-harvest (#356) selection/summary decisions are pure and Node-testable
 // (tests/test_harvest_pure_js.py); the GO-picker multi-select below is the glue.
-import * as harvestPure from './harvest_pure.js?v=1';
+import * as harvestPure from './harvest_pure.js?v=2';
 
 const params = new URLSearchParams(window.location.search);
 const insideDiscord = params.has('frame_id');
@@ -2127,6 +2127,12 @@ let goAssembleEnabled = true;
 // Batch-harvest (#356) multi-select: null = normal picker; an array = the
 // selected nft_ids while the GO picker is in "pick characters to harvest" mode.
 let batchSelect = null;
+// Generation guard (same idiom as pollGen/bulkPollGen): bumps on every batch
+// open/close so a batch POST response that was superseded by a close/reopen
+// can never close the CURRENT picker or clobber its selection.
+let batchGen = 0;
+// One batch POST in flight at a time — the confirm button locks while pending.
+let batchBusy = false;
 
 function renderBatchBar() {
   const bar = el('go-picker-batch-bar');
@@ -2139,7 +2145,7 @@ function renderBatchBar() {
     ? 'Tap characters to select them for harvest.'
     : `${summary.count} selected` + (summary.legacy ? ` · ${summary.legacy} need a Xaman tap` : ' · nothing to sign');
   const btn = el('go-picker-batch-confirm');
-  btn.disabled = summary.count === 0;
+  btn.disabled = summary.count === 0 || batchBusy;
   btn.onclick = () => confirmBatchHarvest();
 }
 
@@ -2261,6 +2267,7 @@ function openGoPicker() {
 
 function closeGoPicker() {
   const overlay = el('go-picker-overlay');
+  batchGen++; // invalidate any in-flight batch response handler
   batchSelect = null; // leaving the picker always exits multi-select mode
   renderBatchBar();
   overlay.hidden = true;
@@ -2837,12 +2844,14 @@ async function harvestActive() {
 // Batch harvest (#356): open the GO picker in multi-select mode.
 async function openBatchHarvest() {
   if (!(await confirmDiscardIfDirty())) return;
+  batchGen++; // a fresh selection round supersedes any older response handler
   batchSelect = [];
   openGoPicker();
   renderGoPicker(); // re-render in batch mode even if the overlay was open
 }
 
 async function confirmBatchHarvest() {
+  if (batchBusy) return; // one batch POST at a time
   const summary = harvestPure.batchSummary(economyState.characters, batchSelect);
   if (!summary.count) return;
   const ok = await confirmDialog({
@@ -2851,7 +2860,14 @@ async function confirmBatchHarvest() {
     confirmLabel: summary.legacy ? '🔥 Harvest all' : '🧺 Harvest all',
   });
   if (!ok) return;
+  if (batchSelect === null) return; // picker closed while the dialog was up
   const selected = batchSelect.slice();
+  // Generation guard (P1, #376/#378 idiom): capture the round this POST
+  // belongs to. If the user closes the picker and opens a new selection while
+  // the request is pending, this handler must not touch the new picker.
+  const gen = batchGen;
+  batchBusy = true;
+  renderBatchBar();
   let res;
   try {
     res = await api('/api/harvest/batch', {
@@ -2860,8 +2876,12 @@ async function confirmBatchHarvest() {
   } catch (e) {
     showError(e.message);
     return;
+  } finally {
+    batchBusy = false;
+    renderBatchBar();
   }
-  closeGoPicker(); // also resets batchSelect
+  const fresh = gen === batchGen;
+  if (fresh) closeGoPicker(); // also resets batchSelect; superseded -> hands off
   const { started, rejected } = harvestPure.splitBatchResults(res.results);
   // Fire-and-forget per started unit — exactly the single-harvest pattern:
   // drop each from the roster now, poll each session, reconcile when it lands.
@@ -2872,6 +2892,12 @@ async function confirmBatchHarvest() {
     trackHarvest(char, { id: r.session_id, state: r.state });
   }
   economyState.characters = economyState.characters.filter((c) => !harvestingIds.has(c.nft_id));
+  if (!fresh && batchSelect !== null) {
+    // A newer selection round is open: drop any id this batch just started
+    // and refresh its tiles/summary — but leave the picker itself alone.
+    batchSelect = harvestPure.pruneSelection(batchSelect, [...harvestingIds]);
+    renderGoPicker();
+  }
   if (started.length) {
     toast(`🔥 Harvesting ${started.length} character${started.length === 1 ? '' : 's'} — keep playing, this takes a moment.`);
   }
