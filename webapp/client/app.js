@@ -1828,6 +1828,11 @@ async function cancelSwap(sessionId, btn) {
     confirmLabel: 'Cancel swap',
   });
   if (!ok) return;
+  // Ownership (#376): if a NEW swap/poll chain starts while this cancel's
+  // requests are in flight, this stale cancel must become a no-op — it may
+  // neither navigate away from the new swap nor consume an armed resume
+  // re-check that belongs to the new chain.
+  const gen = swapPollGen;
   btn.disabled = true;
   let cancelResult = null;
   let refetchResult = null;
@@ -1840,6 +1845,7 @@ async function cancelSwap(sessionId, btn) {
   } finally {
     btn.disabled = false;
   }
+  if (gen !== swapPollGen) return; // superseded while we awaited
   if (mintPure.cancelMintOutcome(cancelResult, refetchResult) === 'resume') {
     pollSwap(sessionId);
     return;

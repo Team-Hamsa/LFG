@@ -298,3 +298,12 @@ def test_app_js_swap_cancel_consumes_armed_recheck():
     tick_idx = poll_body.index("const tick = async () =>")
     assert reset_idx < tick_idx
     assert "swapExitHandled" not in poll_body[tick_idx:]
+    # Greptile #376 round 8: a stale cancelSwap resuming after a NEW poll
+    # chain started must be a no-op — it captures the chain generation before
+    # its awaited requests and bails when superseded, BEFORE the outcome
+    # decision (so it can neither exit nor restart polling for the old id).
+    assert "const gen = swapPollGen;" in cancel_body
+    bail = cancel_body.index("if (gen !== swapPollGen) return;")
+    await_api = cancel_body.index("await api(")
+    assert cancel_body.index("const gen = swapPollGen;") < await_api
+    assert await_api < bail < cancel_body.index("cancelMintOutcome")
