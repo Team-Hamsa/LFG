@@ -28,6 +28,10 @@ import * as mediaPure from './media_pure.js?v=2';
 // Batch-harvest (#356) selection/summary decisions are pure and Node-testable
 // (tests/test_harvest_pure_js.py); the GO-picker multi-select below is the glue.
 import * as harvestPure from './harvest_pure.js?v=2';
+// Xaman sign-request delivery decisions (#142): mobile-primary deep link vs
+// desktop-primary QR is a pure truth table, Node-testable
+// (tests/test_signdelivery_pure_js.py); applySignDelivery() below is the glue.
+import * as signDeliveryPure from './signdelivery_pure.js?v=1';
 
 const params = new URLSearchParams(window.location.search);
 const insideDiscord = params.has('frame_id');
@@ -260,8 +264,85 @@ function discordCtx() {
 }
 
 function openExternal(url) {
-  if (externalOpener) externalOpener(url);
-  else window.open(url, '_blank');
+  // Returns the launch result so callers can detect a blocked window.open
+  // (null). The Discord SDK opener's outcome is genuinely undetectable (it
+  // returns a promise that resolves either way) — callers must treat only an
+  // explicit null as "blocked".
+  if (externalOpener) return externalOpener(url);
+  return window.open(url, '_blank');
+}
+
+// --- Xaman sign-request delivery (#142) --------------------------------
+//
+// On a touch-primary device the user's Xaman is (almost always) on THIS
+// device — the deep link is the primary path (tap / auto-open once), and the
+// QR collapses behind a "sign on another device" disclosure. On desktop the
+// QR stays primary exactly as before. Decision logic lives in
+// signdelivery_pure.js; this is the DOM glue.
+
+let coarsePointerMql = null;
+function isCoarsePointer() {
+  if (coarsePointerMql === null) {
+    coarsePointerMql = window.matchMedia
+      ? window.matchMedia('(pointer: coarse)')
+      : { matches: false };
+  }
+  return !!coarsePointerMql.matches;
+}
+
+// Auto-open fires at most once per unique payload link — flow panels
+// re-render on every status poll, and each poll must NOT re-launch Xaman.
+// Marked optimistically, then un-marked when the launch is DETECTABLY
+// blocked (window.open returning null in a standalone browser) so the next
+// poll render retries; the Discord SDK opener gives no success signal, so
+// there the optimistic mark stands (the primary button remains the
+// guaranteed path either way).
+let autoOpenedLinks = [];
+function maybeAutoOpen(link) {
+  if (!signDeliveryPure.shouldAutoOpen(autoOpenedLinks, link)) return;
+  autoOpenedLinks.push(link);
+  const launched = openExternal(link);
+  autoOpenedLinks = signDeliveryPure.autoOpenOutcome(autoOpenedLinks, link, launched !== null);
+}
+
+// "Show QR to sign on another device" disclosure button for dynamically
+// built sign panels; hidden until applySignDelivery collapses the QR.
+function makeQrToggle() {
+  const btn = document.createElement('button');
+  btn.className = 'link qr-toggle';
+  btn.textContent = 'Show QR to sign on another device';
+  btn.hidden = true;
+  return btn;
+}
+
+// Single choke-point wiring a sign panel's QR <img> + "Open in Xaman"
+// button (+ optional disclosure toggle) per the signDelivery truth table.
+// Pass autoOpen:false for panels reached passively (not a fresh sign ask).
+function applySignDelivery({ qrEl, linkBtn, toggleBtn, link, qrData, push, autoOpen = true }) {
+  const d = signDeliveryPure.signDelivery({
+    push,
+    coarse: isCoarsePointer(),
+    hasLink: !!link,
+    hasQr: !!qrData,
+  });
+  if (linkBtn) {
+    linkBtn.hidden = !link;
+    if (link) linkBtn.onclick = () => openExternal(link);
+    linkBtn.classList.toggle('sign-primary', d.linkPrimary);
+  }
+  if (qrEl) {
+    qrEl.hidden = !qrData || d.qrCollapsed;
+    if (qrData) qrEl.src = qrUrl(qrData);
+  }
+  if (toggleBtn) {
+    toggleBtn.hidden = !d.qrCollapsed;
+    toggleBtn.onclick = () => {
+      toggleBtn.hidden = true;
+      if (qrEl) qrEl.hidden = false;
+    };
+  }
+  if (autoOpen && d.autoOpen) maybeAutoOpen(link);
+  return d;
 }
 
 // --- "Share on X" (#41 T9) ---------------------------------------------
@@ -686,7 +767,7 @@ function signText(push, base) {
   return base;
 }
 
-function showFlow({ title, text, qrData, link, image, video, done, stage, spinner, celebrate, pill, regen, cancel, share, qtyStepper }) {
+function showFlow({ title, text, qrData, link, push, image, video, done, stage, spinner, celebrate, pill, regen, cancel, share, qtyStepper }) {
   flowRenderGen++;
   showPanel('flow-panel');
   renderSteps(stage);
@@ -698,10 +779,14 @@ function showFlow({ title, text, qrData, link, image, video, done, stage, spinne
   el('flow-title').textContent = title;
   el('flow-text').textContent = text || '';
   el('flow-spinner').hidden = !spinner;
-  el('flow-qr').hidden = !qrData;
-  if (qrData) el('flow-qr').src = qrUrl(qrData);
-  el('flow-link-btn').hidden = !link;
-  if (link) el('flow-link-btn').onclick = () => openExternal(link);
+  // #142: deep-link-primary on touch devices (auto-open once per payload),
+  // QR-primary on desktop — one decision path for every sign screen.
+  applySignDelivery({
+    qrEl: el('flow-qr'),
+    linkBtn: el('flow-link-btn'),
+    toggleBtn: el('flow-qr-toggle'),
+    link, qrData, push,
+  });
   // The minted NFT is the hero: with an image on screen the QR drops to a
   // compact companion size (issue #22). Animated results play as <video>.
   let hero = el('nft-image');
@@ -765,6 +850,7 @@ function mintPayView(s) {
     pill,
     qrData: s.payment_link,
     link: s.payment_link,
+    push: s.payment_push,
     stage: s.state,
     regen: true,
     qtyStepper: true,
@@ -830,6 +916,7 @@ function pollMint(sessionId) {
         qrData: s.accept_scanned ? null : s.accept_deeplink,
         spinner: s.accept_scanned,
         link: s.accept_deeplink,
+        push: s.accept_push,
         image: s.image_url,
         video: s.video_url,
         done: true,
@@ -904,6 +991,8 @@ function onQtyChange(delta) {
   if (mintPure.qtyStale(mintQty, liveQty)) {
     cancelLiveMintSilently(); // fire-and-forget: cancel whatever is live
     el('flow-qr').classList.add('qr-stale');
+    el('flow-qr').hidden = false;                    // reveal even if collapsed (#142)
+    el('flow-qr-toggle').hidden = true;
     el('flow-link-btn').hidden = true;               // no accept while stale
     el('flow-regen-btn').hidden = false;
     el('flow-regen-btn').classList.add('needs-regen');
@@ -976,6 +1065,7 @@ function bulkPayView(j) {
     pill: j.pay_with ? { kind: xrp ? 'xrp' : 'lfgo', text: `Paying with ${xrp ? 'XRP' : 'LFGO'}` } : null,
     qrData: j.payment_link,
     link: j.payment_link,
+    push: j.payment_push,
     // No same-session refresh for a fresh bulk job (onFlowRegen always cancels
     // + restarts it) — hide Regenerate; onQtyChange reveals it when a qty
     // change actually invalidates the shown QR.
@@ -1081,14 +1171,17 @@ async function bulkAccept(jobId, index, row, btn) {
     qrWrap.appendChild(note);
     const img = document.createElement('img');
     img.className = 'u-qr';
-    img.src = qrUrl(r.link);
     img.alt = 'Accept QR — scan with Xaman';
     qrWrap.appendChild(img);
     const open = document.createElement('button');
     open.className = 'link';
     open.textContent = 'Open in Xaman ↗';
-    open.onclick = () => openExternal(r.link);
     qrWrap.appendChild(open);
+    const toggle = makeQrToggle();
+    qrWrap.insertBefore(toggle, img);
+    // #142: user tapped "claim" — a fresh sign ask, so auto-open applies.
+    applySignDelivery({ qrEl: img, linkBtn: open, toggleBtn: toggle,
+      link: r.link, qrData: r.link, push: r.push });
   } catch (e) {
     showError(e.message);
   } finally {
@@ -1193,14 +1286,17 @@ async function offerAccept(o, row, btn) {
     qrWrap.appendChild(note);
     const img = document.createElement('img');
     img.className = 'u-qr';
-    img.src = qrUrl(r.link);
     img.alt = 'Accept QR — scan with Xaman';
     qrWrap.appendChild(img);
     const open = document.createElement('button');
     open.className = 'link';
     open.textContent = 'Open in Xaman ↗';
-    open.onclick = () => openExternal(r.link);
     qrWrap.appendChild(open);
+    const toggle = makeQrToggle();
+    qrWrap.insertBefore(toggle, img);
+    // #142: user tapped "claim" — a fresh sign ask, so auto-open applies.
+    applySignDelivery({ qrEl: img, linkBtn: open, toggleBtn: toggle,
+      link: r.link, qrData: r.link, push: r.push });
   } catch (e) {
     showError(e.message);
   } finally {
@@ -1461,10 +1557,14 @@ let signinPollTimer = null;
 function renderSignin({ sub, spinner, qrLink, retry }) {
   el('register-sub').textContent = sub;
   el('register-spinner').hidden = !spinner;
-  el('register-qr').hidden = !qrLink;
-  if (qrLink) el('register-qr').src = qrUrl(qrLink);
-  el('register-link-btn').hidden = !qrLink;
-  if (qrLink) el('register-link-btn').onclick = () => openExternal(qrLink);
+  // #142: same delivery decision as every other sign screen — the sign-in QR
+  // data IS the deep link.
+  applySignDelivery({
+    qrEl: el('register-qr'),
+    linkBtn: el('register-link-btn'),
+    toggleBtn: el('register-qr-toggle'),
+    link: qrLink, qrData: qrLink,
+  });
   el('register-retry-btn').hidden = !retry;
 }
 
@@ -1820,12 +1920,16 @@ function renderSwapPayment(s) {
   const box = el('swap-results');
   const qrImg = document.createElement('img');
   qrImg.className = 'result-qr';
-  qrImg.src = qrUrl(s.payment_link);
   qrImg.alt = 'QR';
   const btn = document.createElement('button');
   btn.className = 'link';
   btn.textContent = 'Open in Xaman';
-  btn.onclick = () => openExternal(s.payment_link);
+  const qrToggle = makeQrToggle();
+  // #142: fee payment is a fresh sign ask — deep-link primary + auto-open on
+  // touch, QR primary on desktop. (The dedup key already includes the link,
+  // so a regenerated QR auto-opens its new payload exactly once.)
+  applySignDelivery({ qrEl: qrImg, linkBtn: btn, toggleBtn: qrToggle,
+    link: s.payment_link, qrData: s.payment_link, push: s.payment_push });
   // A XUMM payload expires after a few minutes: offer a fresh QR and a way
   // out (mirror of the mint pay screen's regen + cancel — previously a stale
   // fee QR left no exit but closing the whole Activity).
@@ -1837,7 +1941,7 @@ function renderSwapPayment(s) {
   cancelBtn.className = 'link';
   cancelBtn.textContent = 'Cancel swap';
   cancelBtn.onclick = () => cancelSwap(s.id, cancelBtn);
-  box.replaceChildren(qrImg, btn, regenBtn, cancelBtn);
+  box.replaceChildren(qrToggle, qrImg, btn, regenBtn, cancelBtn);
 }
 
 async function regenerateSwapQr(sessionId, btn) {
@@ -1940,14 +2044,17 @@ function renderSwapResults(s) {
     } else {
       const qrImg = document.createElement('img');
       qrImg.className = 'result-qr';
-      qrImg.src = qrUrl(r.accept_deeplink);
       qrImg.alt = 'QR';
-      div.appendChild(qrImg);
       const btn = document.createElement('button');
       btn.className = 'link';
       btn.textContent = 'Open in Xaman';
-      btn.onclick = () => openExternal(r.accept_deeplink);
+      const toggle = makeQrToggle();
+      div.appendChild(toggle);
+      div.appendChild(qrImg);
       div.appendChild(btn);
+      // #142: claim-your-swapped-NFT is a fresh sign ask; auto-open applies.
+      applySignDelivery({ qrEl: qrImg, linkBtn: btn, toggleBtn: toggle,
+        link: r.accept_deeplink, qrData: r.accept_deeplink, push: r.accept_push });
     }
     // The traits are already final on-chain at this point regardless of
     // `modified` (see run_swap_session: results are only appended once
@@ -2343,7 +2450,7 @@ async function openDressup() {
             if (r.accept) {
               showFlow({ title: '👜 Create your Closet',
                 text: signText(r.accept_push, 'Scan to accept your Closet in Xaman.'),
-                qrData: r.accept, link: r.accept, done: true });
+                qrData: r.accept, link: r.accept, push: r.accept_push, done: true });
             }
             economyState = await api('/api/economy');
             openDressup();
@@ -2365,7 +2472,7 @@ async function openDressup() {
             if (r.accept) {
               showFlow({ title: '👜 Finish claiming your Closet',
                 text: signText(r.accept_push, 'Scan to accept your Closet in Xaman.'),
-                qrData: r.accept, link: r.accept, done: true });
+                qrData: r.accept, link: r.accept, push: r.accept_push, done: true });
             }
             economyState = await api('/api/economy');
             openDressup();
@@ -2582,6 +2689,7 @@ async function extractTrait(slot, value, btnEl) {
         text: signText(final.accept_push, 'Scan to accept your tradeable trait in Xaman.'),
         qrData: final.accept,
         link: final.accept,
+        push: final.accept_push,
         done: true,
       });
     }
@@ -2933,6 +3041,7 @@ async function trackHarvest(char, startResp) {
         text: signText(final.accept_push, 'Accept your upgraded blank in Xaman.'),
         qrData: final.accept,
         link: final.accept,
+        push: final.accept_push,
         done: true,
       });
     }
@@ -3753,6 +3862,7 @@ function attachEconomyResume(session) {
         text: signText(final.accept_push, 'Scan to accept in Xaman.'),
         qrData: final.accept,
         link: final.accept,
+        push: final.accept_push,
         done: true,
       });
     } else {
@@ -3801,7 +3911,7 @@ function marketListRender(s) {
     return { title: '🎉 Listed!', text: 'Your listing is live on the Marketplace.', done: true };
   }
   if (s.state === 'awaiting_signature') {
-    return { title: '📋 List for sale', text: signText(s.push, 'Scan to sign the sell offer in Xaman.'), qrData: s.xumm_url, link: s.xumm_url };
+    return { title: '📋 List for sale', text: signText(s.push, 'Scan to sign the sell offer in Xaman.'), qrData: s.xumm_url, link: s.xumm_url, push: s.push };
   }
   if (s.state === 'unknown') {
     // The finalize poller gave up before confirming, but the listener/backfill
@@ -3816,7 +3926,7 @@ function marketCancelRender(s) {
     return { title: '✅ Listing cancelled', text: 'It is no longer for sale.', done: true };
   }
   if (s.state === 'awaiting_signature') {
-    return { title: '🗑️ Cancel listing', text: signText(s.push, 'Scan to sign the cancellation in Xaman.'), qrData: s.xumm_url, link: s.xumm_url };
+    return { title: '🗑️ Cancel listing', text: signText(s.push, 'Scan to sign the cancellation in Xaman.'), qrData: s.xumm_url, link: s.xumm_url, push: s.push };
   }
   return { title: '❌ Cancel failed', text: s.error || 'Something went wrong.', done: true };
 }
@@ -3834,12 +3944,12 @@ function marketBuyRender(listingKind) {
       };
     }
     if (s.state === 'awaiting_signature') {
-      return { title: '💳 Confirm purchase', text: signText(s.push, s.instruction || 'Scan to sign the purchase in Xaman.'), qrData: s.xumm_url, link: s.xumm_url };
+      return { title: '💳 Confirm purchase', text: signText(s.push, s.instruction || 'Scan to sign the purchase in Xaman.'), qrData: s.xumm_url, link: s.xumm_url, push: s.push };
     }
     // #239 two-step on-ramp: sign the XRP→BRIX top-up first, then the accept.
     if (s.state === 'awaiting_onramp') {
       const quote = s.price_xrp_quote ? ` (~${s.price_xrp_quote} XRP)` : '';
-      return { title: `💱 Get BRIX${quote}`, text: signText(s.push, s.instruction || 'Scan to buy the BRIX for this purchase in Xaman.'), qrData: s.xumm_url, link: s.xumm_url };
+      return { title: `💱 Get BRIX${quote}`, text: signText(s.push, s.instruction || 'Scan to buy the BRIX for this purchase in Xaman.'), qrData: s.xumm_url, link: s.xumm_url, push: s.push };
     }
     if (s.state === 'onramp_confirmed') {
       return { title: '⏳ BRIX acquired', text: 'Preparing your purchase…', spinner: true };
@@ -3857,10 +3967,10 @@ function marketTraitListRender(s) {
     return { title: `🎟️ ${step}`, text: 'Preparing your trait token…', spinner: true };
   }
   if (s.state === 'extract_done') {
-    return { title: `🎟️ ${step}`, text: signText(s.extract_push, 'Scan to accept your trait token in Xaman.'), qrData: s.extract_xumm_url, link: s.extract_xumm_url };
+    return { title: `🎟️ ${step}`, text: signText(s.extract_push, 'Scan to accept your trait token in Xaman.'), qrData: s.extract_xumm_url, link: s.extract_xumm_url, push: s.extract_push };
   }
   if (s.state === 'list_pending') {
-    return { title: `📤 ${step}`, text: signText(s.list_push, 'Scan to sign the sell offer in Xaman.'), qrData: s.list_xumm_url, link: s.list_xumm_url };
+    return { title: `📤 ${step}`, text: signText(s.list_push, 'Scan to sign the sell offer in Xaman.'), qrData: s.list_xumm_url, link: s.list_xumm_url, push: s.list_push };
   }
   if (s.state === 'listed') {
     return { title: '🎉 Listed!', text: 'Your trait is live on the Marketplace.', done: true };
@@ -4055,7 +4165,7 @@ function marketBidRender(s) {
     return { title: '🎉 Bid placed!', text: 'Your bid is live on-ledger. The owner can accept it any time before it expires (7 days).', done: true };
   }
   if (s.state === 'awaiting_signature') {
-    return { title: '🏷️ Place bid', text: signText(s.push, 'Scan to sign your bid in Xaman.'), qrData: s.xumm_url, link: s.xumm_url };
+    return { title: '🏷️ Place bid', text: signText(s.push, 'Scan to sign your bid in Xaman.'), qrData: s.xumm_url, link: s.xumm_url, push: s.push };
   }
   if (s.state === 'unknown') {
     return { title: "⏳ Couldn't confirm", text: "We couldn't confirm the bid in time — check My bids shortly; it may still have gone through.", done: true };
@@ -4071,7 +4181,7 @@ function marketBidAcceptRender(s) {
     return { title: '🎉 Sold!', text: 'You accepted the bid — the XRP is in your wallet and the NFT is on its way to the bidder.', done: true };
   }
   if (s.state === 'awaiting_signature') {
-    return { title: '🤝 Accept bid', text: signText(s.push, 'Scan to accept the bid in Xaman.'), qrData: s.xumm_url, link: s.xumm_url };
+    return { title: '🤝 Accept bid', text: signText(s.push, 'Scan to accept the bid in Xaman.'), qrData: s.xumm_url, link: s.xumm_url, push: s.push };
   }
   if (s.state === 'unknown') {
     return { title: "⏳ Couldn't confirm", text: "We couldn't confirm the accept in time — it may still have gone through.", done: true };

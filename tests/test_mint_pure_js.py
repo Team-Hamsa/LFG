@@ -526,5 +526,7 @@ def test_paid_lfgo_xrp_view_snapshot_is_unchanged():
     body = _function_source(src, "mintPayView")
     assert (
         hashlib.sha256(body.encode()).hexdigest()
-        == "ff16aa4846dd6f2f7e7c8a7da1f7f150c1e65c3e1339510a45baac2d4ac732a6"
+        # #142: mintPayView now threads `push` into showFlow for the
+        # mobile-primary deep-link delivery decision.
+        == "e7bdfd8eaf038807b5cea809c084e19d2a806973c0855f5c075674990bb53fe5"
     )

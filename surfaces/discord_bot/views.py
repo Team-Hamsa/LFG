@@ -62,7 +62,7 @@ class MintView(View):
                 "1. Scan the QR code with your XUMM app\n"
                 "2. Review and approve the trustline\n"
                 "3. Wait for confirmation\n\n"
-                f"[Open in XUMM]({data['xumm_url']})"
+                f"[Open in Xaman]({data['xumm_url']})"
             ),
             color=0x00FF00,
         )

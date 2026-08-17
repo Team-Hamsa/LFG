@@ -24,7 +24,7 @@
   <meta name="twitter:description" content="Mint, dress up, and trade LFG NFTs on the XRP Ledger.">
   <meta name="twitter:image" content="https://build.letseffinggo.com/assets/og-card.png">
   <link rel="stylesheet" href="fonts/fonts.css">
-  <link rel="stylesheet" href="style.v23.css">
+  <link rel="stylesheet" href="style.v24.css">
 </head>
 <body>
   <main id="app">
@@ -40,6 +40,7 @@
       <h2>👋 Register your wallet</h2>
       <p id="register-sub" class="card-sub">Scan with Xaman to sign in — your wallet address is captured automatically.</p>
       <div id="register-spinner" class="spinner" role="img" aria-label="Working…" hidden></div>
+      <button id="register-qr-toggle" class="link qr-toggle" hidden>Show QR to sign on another device</button>
       <img id="register-qr" class="qr" alt="Sign-in QR — scan with Xaman" hidden>
       <p><button id="register-link-btn" class="link" hidden>Open in Xaman ↗</button></p>
       <p><button id="register-retry-btn" class="primary" hidden>↻ Try again</button></p>
@@ -265,6 +266,9 @@
         <div class="flow-visual">
           <img id="nft-image" alt="Your freshly minted NFT" hidden>
           <div id="flow-spinner" class="spinner" role="img" aria-label="Working…" hidden></div>
+          <!-- #142: on touch devices the deep link is primary and the QR
+               collapses behind this disclosure; desktop keeps QR-first. -->
+          <button id="flow-qr-toggle" class="link qr-toggle" hidden>Show QR to sign on another device</button>
           <img id="flow-qr" class="qr" alt="QR code — scan with Xaman" hidden>
         </div>
       </div>
@@ -366,6 +370,6 @@
        Telegram (window.Telegram stays undefined); loaded BEFORE app.js so the
        dual-mode boot can detect the Telegram context. -->
   <script src="telegram-web-app.js"></script>
-  <script type="module" src="app.js?v=51"></script>
+  <script type="module" src="app.js?v=52"></script>
 </body>
 </html>

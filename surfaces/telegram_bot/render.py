@@ -42,7 +42,7 @@ def payment_caption(payment_link: str, push: Any = None) -> str:
         "1. Scan the QR with your XRPL wallet (XUMM/Xaman)\n"
         "2. Approve the payment\n"
         "3. Wait for confirmation\n\n"
-        f"Open payment link: {payment_link}\n"
+        f"Open in Xaman: {payment_link}\n"
         f"{_push_hint(push)}"
         "(expires in 5 minutes)"
     )
@@ -62,7 +62,7 @@ def offer_caption(final: dict[str, Any], *, with_qr: bool = True) -> str:
         f"{step1}\n"
         "2. Review and accept the offer\n"
         "3. Your NFT appears in your wallet\n\n"
-        f"Open in XUMM: {accept_link}\n"
+        f"Open in Xaman: {accept_link}\n"
         f"{_push_hint(final.get('accept_push'))}"
         "(offer expires in 24 hours)"
     )
