@@ -287,4 +287,14 @@ def test_app_js_swap_cancel_consumes_armed_recheck():
         "swapExitHandled = true;"
     )
     assert exit_body.index("swapExitHandled = true;") < exit_body.index("resumeRecheckArmed")
-    assert "swapExitHandled = false;" in poll_body
+    # branch behavior: the armed path takes showMintHome AND returns without
+    # reaching openSwapper; the unarmed fallthrough is openSwapper.
+    assert "if (resumeRecheckArmed) { showMintHome(); return; }" in exit_body
+    assert exit_body.index("showMintHome()") < exit_body.index("openSwapper()")
+    # reset scope: the flag re-arms once per poll chain, BEFORE tick is
+    # defined/scheduled — never inside tick (a mid-chain reset would let the
+    # second racing exit act again).
+    reset_idx = poll_body.index("swapExitHandled = false;")
+    tick_idx = poll_body.index("const tick = async () =>")
+    assert reset_idx < tick_idx
+    assert "swapExitHandled" not in poll_body[tick_idx:]
