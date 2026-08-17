@@ -202,21 +202,27 @@ def test_app_js_resume_invalidates_stale_flow_polls():
     assert "marketFlowGen++" in inv
     assert "clearTimeout(shopFlowTimer)" in inv
     assert "shopFlowGen++" in inv
-    assert "economyResumeGen++" in inv
+    assert "flowRenderGen++" in inv
 
 
 def test_app_js_economy_resume_result_is_ownership_guarded():
-    """Greptile #376 round 4: the awaited pollEconomyOp promise can resolve
+    """Greptile #376 rounds 4-5: the awaited pollEconomyOp promise can resolve
     after another flow took over the shared flow-panel; a visibility check
-    alone can't tell 'my panel' from 'someone else's panel'. The result
-    callback must capture an ownership generation at attach and bail when
-    superseded."""
+    alone can't tell 'my panel' from 'someone else's panel'. Ownership is
+    flowRenderGen, bumped by EVERY showFlow() render — so a normal flow start
+    (mint/market/shop/bulk/economy), not just a resume attach, supersedes the
+    pending callback. attachEconomyResume captures it AFTER its own render and
+    the callback bails when superseded, before the visibility check."""
     src = open(APP_JS).read()
+    show_flow = src.split("function showFlow(", 1)[1].split("\n}\n", 1)[0]
+    assert "flowRenderGen++;" in show_flow
     body = src.split("function attachEconomyResume", 1)[1].split("\n}\n", 1)[0]
-    assert "const gen = ++economyResumeGen;" in body
-    assert "if (gen !== economyResumeGen) return;" in body
+    assert "const gen = flowRenderGen;" in body
+    # captured after this attach's own showFlow render (which bumped it)
+    assert body.index("showFlow({") < body.index("const gen = flowRenderGen;")
+    assert "if (gen !== flowRenderGen) return;" in body
     # the ownership check comes before the visibility check in the callback
-    assert body.index("gen !== economyResumeGen") < body.index("el('flow-panel').hidden")
+    assert body.index("gen !== flowRenderGen) return") < body.index("el('flow-panel').hidden")
 
 
 def test_app_js_market_and_shop_polls_are_generation_guarded():

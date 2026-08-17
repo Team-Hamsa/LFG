@@ -91,6 +91,10 @@ let sessionToken = null;
 let me = null;
 let pollTimer = null;
 let pollGen = 0; // bumps on every pollMint call, invalidating in-flight ticks
+// Bumped by EVERY showFlow() render (and invalidateFlowPolls): lets an async
+// callback that captured it detect that some other flow has since taken over
+// the shared flow-panel (visibility alone can't tell whose panel it is).
+let flowRenderGen = 0;
 let externalOpener = null; // set when the SDK is available
 // "Share on X" (#41 T9): populated from /api/config by BOTH fetch sites —
 // main()'s init probe (whose failure is deliberately swallowed) AND
@@ -646,6 +650,7 @@ function signText(push, base) {
 }
 
 function showFlow({ title, text, qrData, link, image, video, done, stage, spinner, celebrate, pill, regen, cancel, share, qtyStepper }) {
+  flowRenderGen++;
   showPanel('flow-panel');
   renderSteps(stage);
   el('pay-method').hidden = !pill;
@@ -1319,7 +1324,7 @@ function invalidateFlowPolls() {
   marketFlowGen++;
   clearTimeout(shopFlowTimer);
   shopFlowGen++;
-  economyResumeGen++;
+  flowRenderGen++;
 }
 
 // One boot round-trip (#221): GET /api/sessions/active, pick the
@@ -3481,24 +3486,22 @@ const ECONOMY_OP_LABEL = {
   harvest: 'Harvest', assemble: 'Assemble', equip: 'Save',
   extract: 'Extract', deposit: 'Deposit',
 };
-// Ownership generation for the resumed-economy result callback: the awaited
-// pollEconomyOp promise can resolve long after another flow took over the
-// shared flow-panel, and a visibility check alone can't tell "my panel" from
-// "someone else's panel that is visible again". Bumped by
-// invalidateFlowPolls() (i.e. by every later attach).
-let economyResumeGen = 0;
 function attachEconomyResume(session) {
   const kind = session.kind;
   if (!ECONOMY_OP_LABEL[kind]) return false;
-  const gen = ++economyResumeGen;
   showPanel('flow-panel');
   showFlow({
     title: '🔄 Reconnecting…',
     text: `You have a ${ECONOMY_OP_LABEL[kind]} in progress — picking it back up.`,
     spinner: true,
   });
+  // Ownership: showFlow() bumps flowRenderGen on EVERY flow-panel render, so
+  // capturing it right after our own render means ANY later takeover of the
+  // panel — a normal flow start or another resume attach, not just
+  // invalidateFlowPolls — supersedes this pending result callback.
+  const gen = flowRenderGen;
   pollEconomyOp(kind, session).then((final) => {
-    if (gen !== economyResumeGen) return; // another flow owns the panel now
+    if (gen !== flowRenderGen) return; // another flow owns the panel now
     if (el('flow-panel').hidden) return; // user navigated away
     if (final.state === 'failed') {
       showFlow({ title: `❌ ${ECONOMY_OP_LABEL[kind]} failed`, text: final.error || 'Something went wrong.', done: true });
