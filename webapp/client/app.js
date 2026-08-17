@@ -1855,7 +1855,14 @@ async function cancelSwap(sessionId, btn) {
 // chained re-check (a second flow was live), route through showMintHome so it
 // is consumed and the other flow surfaces — otherwise the swap picker as
 // before.
+let swapExitHandled = false; // reset by each pollSwap chain; dedupes the exits
 function exitSwapAfterCancel() {
+  // The cancel handler and pollSwap's cancelled-elsewhere branch can race —
+  // both observing the same cancellation. Only the FIRST exit acts: a second
+  // call would find the re-check flag already consumed and open the swap
+  // picker over the freshly resumed flow.
+  if (swapExitHandled) return;
+  swapExitHandled = true;
   if (resumeRecheckArmed) { showMintHome(); return; }
   openSwapper();
 }
@@ -1915,6 +1922,7 @@ function renderSwapResults(s) {
 
 function pollSwap(sessionId) {
   clearTimeout(swapPollTimer);
+  swapExitHandled = false; // new chain, new cancellation to (maybe) exit from
   const gen = ++swapPollGen;
   const tick = async () => {
     if (gen !== swapPollGen) return; // superseded by a newer poll chain

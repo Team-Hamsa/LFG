@@ -278,3 +278,13 @@ def test_app_js_swap_cancel_consumes_armed_recheck():
     assert "openSwapper()" not in cancel_body
     poll_body = src.split("function pollSwap", 1)[1].split("\n}\n", 1)[0]
     assert "if (s.state === 'cancelled') { exitSwapAfterCancel(); return; }" in poll_body
+    # Greptile #376 round 6: cancelSwap and pollSwap's cancelled branch can
+    # race — both observing the same cancellation. Only the first exit may
+    # act, or the second (finding the re-check consumed) opens the swap
+    # picker over the freshly resumed flow. The dedupe flag guards the exit
+    # and is re-armed by each new poll chain.
+    assert exit_body.index("if (swapExitHandled) return;") < exit_body.index(
+        "swapExitHandled = true;"
+    )
+    assert exit_body.index("swapExitHandled = true;") < exit_body.index("resumeRecheckArmed")
+    assert "swapExitHandled = false;" in poll_body
