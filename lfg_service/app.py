@@ -6314,6 +6314,133 @@ handle_deposit_start = _economy_post(
 )
 
 
+# --- Batch harvest (#356) ---------------------------------------------------
+# One gesture, N stacked harvests. This is pure orchestration over the
+# EXISTING fire-and-forget single-harvest machinery (PR #307): each unit takes
+# the same _reserve_economy_slot reservation and economy_api.start_harvest
+# precondition gate + session the single POST /api/harvest does, so the
+# concurrency policy, journaling and #107 phase-aware recovery are identical.
+# No new on-ledger primitives — XLS-56 batching is #219, out of scope.
+
+BATCH_HARVEST_MAX = 20  # per-request unit cap; mirrors BULK_MINT_MAX's role
+
+
+def validate_batch_nft_ids(body: dict[str, Any]) -> list[str]:
+    """Wire-shape preconditions for POST /api/harvest/batch -> the ordered,
+    duplicate-free nft_id list. Raises economy_api.EconomyError (HTTP 400) on
+    anything malformed — before any reservation or session is touched."""
+    raw = body.get("nft_ids")
+    if not isinstance(raw, list) or not raw:
+        raise economy_api.EconomyError("nft_ids must be a non-empty list")
+    if len(raw) > BATCH_HARVEST_MAX:
+        raise economy_api.EconomyError(
+            f"at most {BATCH_HARVEST_MAX} characters per batch"
+        )
+    seen: set[str] = set()
+    for nft_id in raw:
+        if not isinstance(nft_id, str) or not nft_id:
+            raise economy_api.EconomyError("each nft_id must be a non-empty string")
+        if nft_id in seen:
+            raise economy_api.EconomyError(f"duplicate nft_id in batch ({nft_id})")
+        seen.add(nft_id)
+    return list(raw)
+
+
+async def start_batch_harvest(
+    user_id: str,
+    wallet: str,
+    platform: str,
+    nft_ids: list[str],
+    user_token: str | None = None,
+) -> list[dict[str, Any]]:
+    """Start one harvest session per nft_id, sequentially. Per-unit failure is
+    isolated: a conflicting/failing unit records its error and the rest still
+    start (issue #356 — a mid-batch failure must not strand the batch). Each
+    started session is registered in economy_sessions and pollable via the
+    existing GET /api/harvest/{session_id}."""
+    results: list[dict[str, Any]] = []
+    for nft_id in nft_ids:
+        placeholder_id, conflict = _reserve_economy_slot(
+            "harvest", user_id, platform, {"nft_id": nft_id}
+        )
+        if conflict:
+            results.append(
+                {"nft_id": nft_id, "session_id": None, "state": "failed", "error": conflict}
+            )
+            continue
+        # finally-pop, same as _economy_post: a leaked placeholder would 409
+        # every later economy action for this user until restart.
+        try:
+            try:
+                ws = await economy_api.start_harvest(
+                    user_id, wallet, nft_id, user_token=user_token
+                )
+            except economy_api.EconomyError as e:
+                results.append(
+                    {"nft_id": nft_id, "session_id": None, "state": "failed", "error": str(e)}
+                )
+                continue
+            except Exception as e:
+                logging.error(f"batch harvest unit {nft_id} failed to start: {e}")
+                results.append(
+                    {
+                        "nft_id": nft_id,
+                        "session_id": None,
+                        "state": "failed",
+                        "error": "could not start the harvest",
+                    }
+                )
+                continue
+            ws.platform = platform
+            economy_sessions[ws.id] = ws
+            results.append(
+                {"nft_id": nft_id, "session_id": ws.id, "state": ws.state, "error": None}
+            )
+        finally:
+            economy_sessions.pop(placeholder_id, None)
+    return results
+
+
+async def handle_harvest_batch_start(request):
+    """POST /api/harvest/batch {nft_ids: [...]} -> {results: [...]} — always
+    HTTP 200 with per-unit outcomes once the list shape validates (per-unit
+    conflicts/preconditions surface inside `results`, mirroring the batch's
+    partial-failure contract); 400 only on a malformed body."""
+    if not config.ECONOMY_ENABLED:
+        return _economy_disabled_response()
+    user = request["user"]
+    try:
+        body = await request.json()
+    except Exception:
+        return web.json_response({"error": "invalid JSON body"}, status=400)
+    try:
+        nft_ids = validate_batch_nft_ids(body if isinstance(body, dict) else {})
+    except economy_api.EconomyError as e:
+        return web.json_response({"error": str(e)}, status=400)
+    if config.WEBAPP_DEV_MODE:
+        results = []
+        for nft_id in nft_ids:
+            try:
+                mock = mock_economy.INSTANCE.harvest(request["wallet"], nft_id)
+                results.append(
+                    {
+                        "nft_id": nft_id,
+                        "session_id": mock.get("id"),
+                        "state": mock.get("state"),
+                        "error": mock.get("error"),
+                    }
+                )
+            except Exception as e:
+                results.append(
+                    {"nft_id": nft_id, "session_id": None, "state": "failed", "error": str(e)}
+                )
+        return web.json_response({"results": results})
+    results = await start_batch_harvest(
+        user["id"], request["wallet"], _platform(user), nft_ids, await _push_token(user)
+    )
+    return web.json_response({"results": results})
+
+
 def _make_economy_status_handler(prefix: str):
     @require_auth
     async def handler(request):
@@ -6505,6 +6632,9 @@ def create_app() -> web.Application:
     app.router.add_post("/api/equip", require_wallet(handle_equip_start))
     app.router.add_get("/api/equip/{session_id}", handle_equip_status)
     app.router.add_post("/api/harvest", require_wallet(handle_harvest_start))
+    # Batch harvest (#356) — must register before the {session_id} status route
+    # so "batch" never resolves as a session id.
+    app.router.add_post("/api/harvest/batch", require_wallet(handle_harvest_batch_start))
     app.router.add_get("/api/harvest/{session_id}", handle_harvest_status)
     app.router.add_get("/api/assemble/options", handle_assemble_options)
     app.router.add_post("/api/assemble", require_wallet(handle_assemble_start))

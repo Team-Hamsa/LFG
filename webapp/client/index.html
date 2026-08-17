@@ -126,6 +126,7 @@
           <p id="dressup-id" class="cap"></p>
           <button id="go-switch-btn" class="secondary">🔄 Switch GO</button>
           <button id="dressup-harvest-btn" class="secondary">🔥 Harvest</button>
+          <button id="dressup-harvest-many-btn" class="secondary">🧺 Harvest many</button>
           <div id="build-save-bar" class="build-save-bar" hidden>
             <button id="build-save-btn" class="primary">💾 Save changes</button>
             <button id="build-discard-btn" class="secondary">Discard</button>
@@ -309,6 +310,13 @@
         <button id="go-picker-close" class="secondary" aria-label="Close">✕</button>
       </div>
       <div id="go-picker-grid" class="go-picker-grid"></div>
+      <!-- Batch-harvest (#356) footer: summary + confirm, shown only in
+           multi-select mode. Styled inline to avoid a CSS-file rename. -->
+      <div id="go-picker-batch-bar" hidden
+           style="display:flex; gap:.5rem; align-items:center; justify-content:space-between; margin-top:.75rem;">
+        <span id="go-picker-batch-summary" class="cap"></span>
+        <button id="go-picker-batch-confirm" class="primary">🧺 Harvest selected</button>
+      </div>
     </div>
   </div>
 
@@ -358,6 +366,6 @@
        Telegram (window.Telegram stays undefined); loaded BEFORE app.js so the
        dual-mode boot can detect the Telegram context. -->
   <script src="telegram-web-app.js"></script>
-  <script type="module" src="app.js?v=49"></script>
+  <script type="module" src="app.js?v=50"></script>
 </body>
 </html>
