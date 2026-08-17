@@ -17,11 +17,12 @@ from datetime import datetime
 from decimal import Decimal, InvalidOperation
 from typing import Any, BinaryIO, Literal, cast, overload
 
-from xrpl.asyncio.clients import AsyncWebsocketClient
+from xrpl.asyncio.clients import AsyncJsonRpcClient, AsyncWebsocketClient
 from xrpl.clients import JsonRpcClient
 from xrpl.models import IssuedCurrencyAmount, TransactionMetadata
 from xrpl.models.currencies import XRP, IssuedCurrency
 from xrpl.models.requests import (
+    AccountInfo,
     AccountLines,
     AccountNFTs,
     AccountObjects,
@@ -622,6 +623,35 @@ async def reconcile_sponsored_mint(tx_hash: str) -> MintReconciliation:
         classified.nft_id,
         classified.error,
     )
+
+
+async def account_exists(address: str) -> bool | None:
+    """Does this account exist on-ledger (i.e. is it funded above the base
+    reserve)?
+
+    True  -- present in the validated ledger.
+    False -- DEFINITIVELY absent: rippled answered `actNotFound`.
+    None  -- unknown: the lookup itself failed, which says nothing either way.
+
+    The three-way return is the point. An unfunded destination makes
+    NFTokenCreateOffer fail `tecNO_DST` no matter how often it is retried, so
+    callers may treat False as terminal — but only False. None must stay
+    fail-closed, or a transient RPC blip reads as "this account is gone" and
+    silently drops real work.
+    """
+    try:
+        client = AsyncJsonRpcClient(config.JSON_RPC_URL)
+        response = await client.request(AccountInfo(account=address, ledger_index="validated"))
+    except Exception as e:
+        logging.warning(f"account_exists({address}) lookup failed: {e}")
+        return None
+    if response.is_successful():
+        return True
+    error = response.result.get("error")
+    if error == "actNotFound":
+        return False
+    logging.warning(f"account_exists({address}) inconclusive: {error}")
+    return None
 
 
 async def create_nft_offer(
