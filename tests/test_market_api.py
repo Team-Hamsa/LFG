@@ -85,7 +85,9 @@ def _init_onchain(path):
     return conn
 
 
-def _seed_character(conn, nft_id, owner, nft_number, attrs=None, image="https://cdn.example/x.png"):
+def _seed_character(
+    conn, nft_id, owner, nft_number, attrs=None, image="https://cdn.example/x.png", video=""
+):
     attrs = attrs if attrs is not None else [{"trait_type": "Hat", "value": "Wizard Hat"}]
     upsert_onchain_nft(
         conn,
@@ -99,6 +101,7 @@ def _seed_character(conn, nft_id, owner, nft_number, attrs=None, image="https://
             body="Ape",
             attributes=attrs,
             image=image,
+            video=video,
             ledger_index=1,
         ),
     )
@@ -191,6 +194,27 @@ def test_browse_default_kind_character_200(onchain_env):
     assert row["offer_index"] == "A" * 64
     assert row["image"] == "https://cdn.example/x.png"
     assert row["attributes"] == [{"trait_type": "Hat", "value": "Wizard Hat"}]
+
+
+def test_browse_character_rows_carry_video(onchain_env):
+    # #298: an animated character's metadata video URL (onchain_nfts.video,
+    # #377) rides the browse row so the detail overlay can upgrade to <video>
+    # without a metadata fetch; a static character serializes video=None.
+    conn = _reopen(onchain_env)
+    _seed_character(conn, CHAR1, SELLER, 1, video="https://cdn.example/x.mp4")
+    _seed_listing(conn)
+    _seed_character(conn, CHAR2, SELLER, 2)
+    _seed_listing(conn, offer_index="B" * 64, nft_id=CHAR2)
+    conn.commit()
+    conn.close()
+
+    req = _mocked_request("GET", "/api/market/listings?sort=price_asc&limit=10")
+    resp = _run(server.handle_market_listings(req))
+    assert resp.status == 200
+    body = _run(_read_json(resp))
+    by_id = {r["nft_id"]: r for r in body["rows"]}
+    assert by_id[CHAR1]["video"] == "https://cdn.example/x.mp4"
+    assert by_id[CHAR2]["video"] is None
 
 
 def test_browse_bad_kind_400(onchain_env):
@@ -856,6 +880,8 @@ def test_split_network_mine_all_four_groups(split_network_env, layer_art, monkey
 
     assert {r["nft_id"] for r in body["listings"]} == {CHAR1, TRAIT1}
     assert {c["nft_id"] for c in body["unlisted_characters"]} == {CHAR3_UNLISTED}
+    # #298: unlisted characters carry animation metadata like listing rows do.
+    assert all("video" in c for c in body["unlisted_characters"])
     assert {t["nft_id"] for t in body["unlisted_trait_tokens"]} == {TRAIT2_UNLISTED}
     assert [{k: v for k, v in a.items() if k != "image_url"} for a in body["closet_assets"]] == [
         {"slot": "Mouth", "value": "Grin", "count": 2}

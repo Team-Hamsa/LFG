@@ -254,3 +254,14 @@ def test_equip_rejects_duplicate_slot():
     res = m.equip(owner, char["nft_id"], [(asset["slot"], asset["value"])] * 2)
     assert res["state"] == "failed" and "duplicate slot" in res["error"]
     assert m.read_state(owner)["closet"]["assets"] == before  # nothing mutated
+
+
+def test_seeded_characters_carry_video_url():
+    """#298 review (Greptile P2): dev-mode characters mirror economy_api's
+    prod shape — every character carries `video_url` (None for static art),
+    with at least one animated so the GO-picker badge is exercisable."""
+    m = mock_economy.MockEconomy()
+    st = m.read_state(mock_economy.DEV_OWNER)
+    assert all("video_url" in c for c in st["characters"])
+    assert any(c["video_url"] for c in st["characters"])
+    assert any(c["video_url"] is None for c in st["characters"])

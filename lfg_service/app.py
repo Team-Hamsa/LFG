@@ -1214,13 +1214,17 @@ def _attach_character_meta(conn: sqlite3.Connection, rows: list[dict[str, Any]])
         return
     placeholders = ",".join("?" * len(nft_ids))
     cur = conn.execute(
-        f"SELECT nft_id, nft_number, image FROM onchain_nfts WHERE nft_id IN ({placeholders})",
+        f"SELECT nft_id, nft_number, image, video FROM onchain_nfts "
+        f"WHERE nft_id IN ({placeholders})",
         nft_ids,
     )
     meta = {r["nft_id"]: r for r in cur.fetchall()}
     for r in rows:
         m = meta.get(r["nft_id"])
         r["image"] = (m["image"] if m else None) or None
+        # #298: the metadata video URL (onchain_nfts.video, #377) rides the
+        # row so detail views can upgrade to <video> without a metadata fetch.
+        r["video"] = (m["video"] if m else None) or None
         if r.get("nft_number") is None:
             r["nft_number"] = m["nft_number"] if m else None
 
@@ -1335,6 +1339,9 @@ def _serialize_listing_row(
         out["amount_brix"] = r["amount_brix"]
     if kind == "character":
         out["nft_number"] = r.get("nft_number")
+        # #298: animated characters carry their MP4 URL (grid tiles stay on
+        # the static `image`; the detail overlay lazily upgrades to <video>).
+        out["video"] = r.get("video") or None
         raw_attrs = r.get("attributes_json")
         out["attributes"] = json.loads(raw_attrs) if raw_attrs else []
         # #203: collection-wide statistical rarity, attached at cache fill
@@ -1579,6 +1586,7 @@ def _compute_mine_data(char_network: str, econ_network: str, wallet: str) -> dic
                 "nft_id": c.nft_id,
                 "nft_number": c.nft_number,
                 "image": c.image or None,
+                "video": c.video or None,
                 "attributes": c.attributes,
             }
             for c in nft_index.owner_live_nfts(conn, wallet)

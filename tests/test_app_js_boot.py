@@ -140,3 +140,18 @@ def test_telegram_webapp_js_vendored_same_origin():
     assert html.index("telegram-web-app.js") < html.index('src="app.js')
     # Same-origin: not hotlinking the CDN.
     assert "telegram.org/js/telegram-web-app.js" not in html
+
+
+def test_media_el_video_fallback_reads_current_element_state():
+    """#298 review (Greptile P1): setMedia reuses one fixed-id element across
+    renders, so mediaEl's <video> error fallback must consult the element's
+    CURRENT poster/label at error time (via mediaPure.videoFallback), never
+    creation-time closure variables — else a later failure resurrects the
+    previous NFT's still. setMedia's same-tag update must also clear a stale
+    poster when the new render has no image."""
+    js = _read("app.js")
+    assert "mediaPure.videoFallback(m.poster" in js
+    assert "removeAttribute('poster')" in js
+    # ...and the stale accessible label from the previous render likewise
+    # (the fallback reads it as the replacement image's alt).
+    assert "removeAttribute('aria-label')" in js

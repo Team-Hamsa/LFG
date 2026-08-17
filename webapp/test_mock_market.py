@@ -247,3 +247,16 @@ def test_start_trait_list_wizard_progresses_through_both_steps(market):
         kind="trait", trait_filters={}, min_drops=None, max_drops=None, sort="price_asc"
     )
     assert any(r["offer_index"] == s["offer_index"] for r in rows)
+
+
+def test_browse_character_rows_carry_video_field(market):
+    """#298 review (Greptile P2): dev-mode rows mirror the prod shape — every
+    character row carries `video` (None for static art), and at least one
+    seeded row is animated so the badge/detail-video paths are exercisable in
+    WEBAPP_DEV_MODE."""
+    rows = market.browse(
+        kind="character", trait_filters={}, min_drops=None, max_drops=None, sort="price_asc"
+    )
+    assert all("video" in r for r in rows)
+    assert any(r["video"] for r in rows), "seed at least one animated character listing"
+    assert any(r["video"] is None for r in rows), "keep static rows too"

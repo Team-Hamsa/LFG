@@ -78,7 +78,11 @@ class MockMarket:
                 "nft_id": "MOCK-9001",
                 "kind": "character",
                 "nft_number": 9001,
-                "image": "",
+                "image": "https://cdn.example/mock/9001.png",
+                # #298: one animated seed so the grid badge + detail-video
+                # (and its error fallback — the URL won't actually play in
+                # dev mode) are exercisable in WEBAPP_DEV_MODE.
+                "video": "https://cdn.example/mock-9001.mp4",
                 "attributes": [{"trait_type": "Body", "value": "skeleton"}],
                 "amount_drops": 25_000_000,
                 "seller": OTHER_SELLER_1,
@@ -92,6 +96,7 @@ class MockMarket:
                 "kind": "character",
                 "nft_number": 9002,
                 "image": "",
+                "video": None,  # #298: static art, mirrors prod's video=None
                 "attributes": [{"trait_type": "Body", "value": "female"}],
                 "amount_drops": 8_000_000,
                 "seller": OTHER_SELLER_2,
@@ -212,6 +217,9 @@ class MockMarket:
             out["amount_brix"] = row["amount_brix"]
         if row["kind"] == "character":
             out["nft_number"] = row["nft_number"]
+            # #298: mirrors app._serialize_listing_row — animated characters
+            # carry their video URL, static rows serialize video=None.
+            out["video"] = row.get("video") or None
             out["attributes"] = row["attributes"] or []
         else:
             out["slot"] = row["slot"]
