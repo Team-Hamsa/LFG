@@ -137,6 +137,7 @@ class ListSession:
     def to_dict(self) -> dict[str, Any]:
         return {
             "id": self.id,
+            "kind": self.kind,
             "platform": self.platform,
             "state": self.state,
             "error": self.error,
@@ -172,6 +173,7 @@ class CancelSession:
     def to_dict(self) -> dict[str, Any]:
         return {
             "id": self.id,
+            "kind": self.kind,
             "platform": self.platform,
             "state": self.state,
             "error": self.error,
@@ -227,6 +229,7 @@ class BuySession:
     def to_dict(self) -> dict[str, Any]:
         return {
             "id": self.id,
+            "kind": self.kind,
             "platform": self.platform,
             "state": self.state,
             "error": self.error,
@@ -236,6 +239,7 @@ class BuySession:
             "push": self.push,
             "instruction": self.instruction,
             "offer_index": self.offer_index,
+            "listing_kind": self.listing_kind,
             "pay_with": self.pay_with,
             "price_xrp_quote": self.price_xrp_quote,
         }
@@ -272,6 +276,7 @@ class BidSession:
     def to_dict(self) -> dict[str, Any]:
         return {
             "id": self.id,
+            "kind": self.kind,
             "platform": self.platform,
             "state": self.state,
             "error": self.error,
@@ -313,6 +318,7 @@ class BidAcceptSession:
     def to_dict(self) -> dict[str, Any]:
         return {
             "id": self.id,
+            "kind": self.kind,
             "platform": self.platform,
             "state": self.state,
             "error": self.error,
@@ -778,6 +784,7 @@ class TraitSellSession:
     def to_dict(self) -> dict[str, Any]:
         return {
             "id": self.id,
+            "kind": self.kind,
             "platform": self.platform,
             "state": self.state,
             "error": self.error,

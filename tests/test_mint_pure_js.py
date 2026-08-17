@@ -172,9 +172,13 @@ def test_active_session_without_id_goes_home():
 
 def test_app_js_boot_resumes_active_mint():
     src = open(APP_JS).read()
-    assert "/api/mint/active" in src
+    # #221: boot consolidated onto GET /api/sessions/active + resumeAnyFlow();
+    # the mint leg lives in attachMintResume (same terminal-state guard via
+    # activeMintSessionId).
+    assert "/api/sessions/active" in src
     assert "activeMintSessionId" in src
-    assert "function resumeMint" in src
+    assert "function attachMintResume" in src
+    assert "function resumeAnyFlow" in src
 
 
 # --- app.js wiring: the swap fee-QR screen must offer a way out ------------
@@ -222,7 +226,7 @@ def test_app_js_main_wallet_branch_awaits_resume_before_home():
     and only falls back to showMintHome when nothing resumed."""
     src = open(APP_JS).read()
     main_body = src.split("async function main", 1)[1]
-    assert "if (!(await resumeBulkMint()) && !(await resumeMint())) showMintHome();" in main_body
+    assert "if (!(await resumeAnyFlow())) showMintHome();" in main_body
 
 
 def test_app_js_resume_cancel_warns_only_when_scanned():
@@ -230,11 +234,11 @@ def test_app_js_resume_cancel_warns_only_when_scanned():
     has nothing signed in Xaman — the cancel warning must key on the session's
     qr_scanned flag, not fire unconditionally."""
     src = open(APP_JS).read()
-    body = src.split("async function resumeMint", 1)[1].split("\n}\n", 1)[0]
+    body = src.split("function attachMintResume", 1)[1].split("\n}\n", 1)[0]
     assert "cancelMint(true)" not in body
     # The exact conditional wiring, not mere symbol presence: the warning flag
     # IS the session's scan state.
-    assert "cancelMint(!!active.session.qr_scanned)" in body
+    assert "cancelMint(!!session.qr_scanned)" in body
 
 
 def test_app_js_swap_cancel_invalidates_inflight_poll():
@@ -247,7 +251,9 @@ def test_app_js_swap_cancel_invalidates_inflight_poll():
     # panel switch — not merely somewhere in the function.
     outcome_idx = body.index("cancelMintOutcome")
     bump_idx = body.index("++swapPollGen")
-    open_idx = body.index("openSwapper()", outcome_idx)
+    # #376: the exit is routed through exitSwapAfterCancel (which consumes an
+    # armed resume re-check before falling back to openSwapper).
+    open_idx = body.index("exitSwapAfterCancel()", outcome_idx)
     assert outcome_idx < bump_idx < open_idx
 
 
@@ -509,10 +515,10 @@ def test_app_js_sponsored_view_is_used_at_start_and_polling():
     src = open(APP_JS).read()
     start = _function_source(src, "startMint")
     poll = _function_source(src, "pollMint")
-    resume = _function_source(src, "resumeMint")
+    resume = _function_source(src, "attachMintResume")
     assert "showFlow(mintStartView(s))" in start
     assert "showFlow(sponsored || mintPayView(s))" in poll
-    assert "showFlow(sponsoredMintView(active.session) || {" in resume
+    assert "showFlow(sponsoredMintView(session) || {" in resume
 
 
 def test_paid_lfgo_xrp_view_snapshot_is_unchanged():

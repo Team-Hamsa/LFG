@@ -16,6 +16,10 @@ import * as mintPure from './mint_pure.js?v=24';
 // Build-panel decision logic lives in its own pure module so it's
 // Node-testable too (tests/test_build_pure_js.py).
 import * as buildPure from './build_pure.js?v=27';
+// Cold-boot session-resume decisions (#221): which live flow to re-attach to
+// after a webview relaunch is a pure priority picker, Node-testable
+// (tests/test_resume_pure_js.py); resumeAnyFlow() below is the thin DOM glue.
+import * as resumePure from './resume_pure.js?v=2';
 
 const params = new URLSearchParams(window.location.search);
 const insideDiscord = params.has('frame_id');
@@ -87,6 +91,10 @@ let sessionToken = null;
 let me = null;
 let pollTimer = null;
 let pollGen = 0; // bumps on every pollMint call, invalidating in-flight ticks
+// Bumped by EVERY showFlow() render (and invalidateFlowPolls): lets an async
+// callback that captured it detect that some other flow has since taken over
+// the shared flow-panel (visibility alone can't tell whose panel it is).
+let flowRenderGen = 0;
 let externalOpener = null; // set when the SDK is available
 // "Share on X" (#41 T9): populated from /api/config by BOTH fetch sites —
 // main()'s init probe (whose failure is deliberately swallowed) AND
@@ -404,6 +412,17 @@ function showPanel(id) {
 }
 
 function showMintHome() {
+  // Greptile #376 P1: boot resume attaches only ONE flow (single panel), so
+  // when a second flow was live too, the next home landing re-checks — the
+  // just-finished flow is terminal now (pruned/skipped), so the other one
+  // surfaces instead of staying hidden until a full relaunch. One-shot: the
+  // flag is cleared before the re-check, and only re-arms if resumeAnyFlow
+  // finds yet another concurrent flow — plain navigation can never loop.
+  if (resumeRecheckArmed) {
+    resumeRecheckArmed = false;
+    resumeAnyFlow().then((resumed) => { if (!resumed) showMintHome(); });
+    return;
+  }
   el('wallet-display').textContent = me.wallet;
   showPanel('mint-panel');
   status(`Hey ${me.username} — welcome to the job site.`);
@@ -631,6 +650,7 @@ function signText(push, base) {
 }
 
 function showFlow({ title, text, qrData, link, image, video, done, stage, spinner, celebrate, pill, regen, cancel, share, qtyStepper }) {
+  flowRenderGen++;
   showPanel('flow-panel');
   renderSteps(stage);
   el('pay-method').hidden = !pill;
@@ -1218,13 +1238,9 @@ function pollBulk(jobId) {
 // being killed while the user app-switches to Xaman. Checked BEFORE the
 // single-mint resume — a user can't have both, and bulk is the costlier
 // flow to strand. Returns true when a job resumed.
-async function resumeBulkMint() {
-  let active = null;
-  try {
-    active = await api('/api/mint/bulk/active');
-  } catch (_) { return false; }
-  const j = active && active.session;
-  if (!j) return false;
+// Re-attach to an already-fetched live bulk job (#221: the consolidated
+// /api/sessions/active boot path hands the session in; no refetch).
+function attachBulkResume(j) {
   currentBulkId = j.id;
   mintQty = j.quantity;
   liveQty = j.quantity;
@@ -1250,30 +1266,93 @@ async function startMint() {
 // Mint session resume: Discord mobile kills/reloads the Activity webview when
 // the user app-switches to Xaman to sign the payment, losing currentMintId
 // while the server-side session keeps running — the user lands back on the
-// home screen mid-mint. Called on boot: re-attach to any live session and
-// let the poll render its real state. Returns true when a session resumed.
-async function resumeMint() {
-  let active = null;
-  try {
-    active = await api('/api/mint/active');
-  } catch (_) { /* endpoint unreachable: boot the home screen as before */ }
-  const id = mintPure.activeMintSessionId(active);
+// home screen mid-mint. Called on boot with the already-fetched live session
+// (#221: one /api/sessions/active round-trip); re-attach and let the poll
+// render its real state.
+function attachMintResume(session) {
+  const id = mintPure.activeMintSessionId({ session });
   if (!id) return false;
   currentMintId = id;
   mintQty = 1;
   liveQty = 1;
-  showFlow(sponsoredMintView(active.session) || {
+  showFlow(sponsoredMintView(session) || {
     title: '🔄 Reconnecting…',
     text: 'You have a mint in progress — picking it back up where you left off.',
     spinner: true,
-    stage: active.session.state,
+    stage: session.state,
     // Warn before backing out only if the QR was already opened in Xaman
     // (same distinction mintPayView draws) — an unscanned payload provably
     // has nothing signed.
-    cancel: () => cancelMint(!!active.session.qr_scanned),
+    cancel: () => cancelMint(!!session.qr_scanned),
   });
   pollMint(id);
   return true;
+}
+
+// Greptile #376 P1: one-shot flag — a second live flow existed at resume
+// time; the next showMintHome landing re-runs resumeAnyFlow to surface it.
+let resumeRecheckArmed = false;
+
+// Re-attach to a running trait swap: reveal the swap progress panel and let
+// pollSwap render whatever the real state is (fee QR, progress, results).
+function attachSwapResume(session) {
+  showPanel('swap-result-panel');
+  el('swap-results').innerHTML = '';
+  el('swap-done-btn').hidden = true;
+  el('swap-result-title').textContent = '🔄 Reconnecting…';
+  el('swap-result-text').textContent =
+    'You have a trait swap in progress — picking it back up where you left off.';
+  pollSwap(session.id);
+  return true;
+}
+
+// Greptile #376: kill every poller that renders into the shared flow-panel
+// before attaching a resumed flow. pollMint keeps a 3 s watch alive through
+// offer_ready (waiting for the accept signature) and its only stop guard is
+// flow-panel visibility — a chained market/economy/shop resume keeps that
+// panel visible, so the stale mint tick would repaint its result over the
+// newly attached flow. Generation bumps invalidate ticks already awaiting
+// their fetch; clearTimeout alone cannot.
+function invalidateFlowPolls() {
+  clearTimeout(pollTimer);
+  pollGen++;
+  clearTimeout(bulkPollTimer);
+  bulkPollGen++;
+  clearTimeout(swapPollTimer);
+  swapPollGen++;
+  clearTimeout(marketFlowTimer);
+  marketFlowGen++;
+  clearTimeout(shopFlowTimer);
+  shopFlowGen++;
+  flowRenderGen++;
+}
+
+// One boot round-trip (#221): GET /api/sessions/active, pick the
+// highest-priority live flow (resume_pure.js), and route it to the existing
+// per-flow poller/renderer. Returns true when a flow resumed. Read-only
+// re-attach: nothing is signed or started here.
+async function resumeAnyFlow() {
+  let sessions = null;
+  try {
+    sessions = await api('/api/sessions/active');
+  } catch (_) { return false; /* endpoint unreachable: boot home as before */ }
+  const picked = resumePure.pickActiveFlow(sessions);
+  if (!picked) return false;
+  const { flow, session } = picked;
+  invalidateFlowPolls();
+  // A second live flow can't be rendered alongside the winner — arm the
+  // one-shot home-landing re-check (see showMintHome) so it surfaces once
+  // this one finishes.
+  resumeRecheckArmed = resumePure.hasOtherActiveFlow(sessions, flow);
+  switch (flow) {
+    case 'mint': return attachMintResume(session);
+    case 'bulk': return attachBulkResume(session);
+    case 'swap': return attachSwapResume(session);
+    case 'market': return attachMarketResume(session);
+    case 'economy': return attachEconomyResume(session);
+    case 'shop': await resumeShopBuy(session.id); return true;
+  }
+  return false;
 }
 
 // Missed the QR before it expired? Mint a fresh payment payload without
@@ -1749,6 +1828,11 @@ async function cancelSwap(sessionId, btn) {
     confirmLabel: 'Cancel swap',
   });
   if (!ok) return;
+  // Ownership (#376): if a NEW swap/poll chain starts while this cancel's
+  // requests are in flight, this stale cancel must become a no-op — it may
+  // neither navigate away from the new swap nor consume an armed resume
+  // re-check that belongs to the new chain.
+  const gen = swapPollGen;
   btn.disabled = true;
   let cancelResult = null;
   let refetchResult = null;
@@ -1761,6 +1845,7 @@ async function cancelSwap(sessionId, btn) {
   } finally {
     btn.disabled = false;
   }
+  if (gen !== swapPollGen) return; // superseded while we awaited
   if (mintPure.cancelMintOutcome(cancelResult, refetchResult) === 'resume') {
     pollSwap(sessionId);
     return;
@@ -1769,6 +1854,22 @@ async function cancelSwap(sessionId, btn) {
   // A tick already awaiting the status API survives clearTimeout — bump the
   // generation so it can't repaint the fee screen after we leave.
   ++swapPollGen;
+  exitSwapAfterCancel();
+}
+
+// Leaving a cancelled swap (#376 review): when the boot resume armed the
+// chained re-check (a second flow was live), route through showMintHome so it
+// is consumed and the other flow surfaces — otherwise the swap picker as
+// before.
+let swapExitHandled = false; // reset by each pollSwap chain; dedupes the exits
+function exitSwapAfterCancel() {
+  // The cancel handler and pollSwap's cancelled-elsewhere branch can race —
+  // both observing the same cancellation. Only the FIRST exit acts: a second
+  // call would find the re-check flag already consumed and open the swap
+  // picker over the freshly resumed flow.
+  if (swapExitHandled) return;
+  swapExitHandled = true;
+  if (resumeRecheckArmed) { showMintHome(); return; }
   openSwapper();
 }
 
@@ -1827,6 +1928,7 @@ function renderSwapResults(s) {
 
 function pollSwap(sessionId) {
   clearTimeout(swapPollTimer);
+  swapExitHandled = false; // new chain, new cancellation to (maybe) exit from
   const gen = ++swapPollGen;
   const tick = async () => {
     if (gen !== swapPollGen) return; // superseded by a newer poll chain
@@ -1838,7 +1940,7 @@ function pollSwap(sessionId) {
       return;
     }
     if (gen !== swapPollGen) return; // a newer chain started while we awaited
-    if (s.state === 'cancelled') { openSwapper(); return; } // cancelled elsewhere
+    if (s.state === 'cancelled') { exitSwapAfterCancel(); return; } // cancelled elsewhere
     if (s.state === 'offers_ready') {
       renderSwapResults(s);
       return;
@@ -2960,6 +3062,11 @@ const MARKET_STATUS_PATH = {
 const marketState = { tab: 'browse', kind: 'character', offset: 0 };
 let marketPendingItem = null; // the character/trait/closet-asset the list-form panel is acting on
 let marketFlowTimer = null;
+// Generation counter (mirrors pollMint's pollGen): clearTimeout alone cannot
+// kill a tick already awaiting its status fetch — it would resume, repaint
+// the shared flow-panel, and re-arm. Bumped on every pollMarketFlow start and
+// by invalidateFlowPolls().
+let marketFlowGen = 0;
 
 function highlightTabs(containerId, dataKey, activeValue) {
   for (const btn of el(containerId).querySelectorAll('.lb-chip')) {
@@ -3348,24 +3455,110 @@ async function promptClosetRequired() {
 
 function pollMarketFlow(kind, sessionId, render) {
   clearTimeout(marketFlowTimer);
+  const gen = ++marketFlowGen;
+  // Shared-panel ownership: another flow kind (e.g. a shop buy) taking over
+  // flow-panel bumps flowRenderGen but not OUR gen — track it too, refreshed
+  // after each render this poller makes itself.
+  let ownerGen = flowRenderGen;
   const path = MARKET_STATUS_PATH[kind](sessionId);
   const tick = async () => {
+    if (gen !== marketFlowGen || ownerGen !== flowRenderGen) return; // superseded
     if (el('flow-panel').hidden) return; // user navigated away
     let s;
     try {
       s = await api(path);
     } catch (e) {
-      marketFlowTimer = setTimeout(tick, 3000); // transient; keep polling
+      if (gen === marketFlowGen && ownerGen === flowRenderGen) {
+        marketFlowTimer = setTimeout(tick, 3000); // transient; keep polling
+      }
       return;
     }
+    if (gen !== marketFlowGen || ownerGen !== flowRenderGen) return; // superseded while we awaited
     showFlow(render(s));
+    ownerGen = flowRenderGen; // our own render; keep ownership current
     if (!marketPure.isMarketTerminal(s.state)) marketFlowTimer = setTimeout(tick, 3000);
   };
   marketFlowTimer = setTimeout(tick, 3000);
 }
 
+// #221: per-kind render lookup for a RESUMED market session — the same render
+// fns marketFlow(...) passes at start time. buy is a per-listing-kind factory,
+// hence the indirection through the session dict.
+const MARKET_RESUME_RENDER = {
+  list: () => marketListRender,
+  cancel: () => marketCancelRender,
+  buy: (s) => marketBuyRender(s.listing_kind || 'character'),
+  bid: () => marketBidRender,
+  bid_accept: () => marketBidAcceptRender,
+  trait_list: () => marketTraitListRender,
+};
+
+// Re-attach to a running marketplace op (#221): render its real state
+// immediately from the resumed session dict, then resume the normal poll.
+function attachMarketResume(session) {
+  const pick = MARKET_RESUME_RENDER[session.kind];
+  if (!pick || !MARKET_STATUS_PATH[session.kind]) return false;
+  const render = pick(session);
+  clearTimeout(marketFlowTimer);
+  showPanel('flow-panel');
+  showFlow(render(session));
+  if (!marketPure.isMarketTerminal(session.state)) {
+    pollMarketFlow(session.kind, session.id, render);
+  }
+  return true;
+}
+
+// Re-attach to a running economy op (#221): compact reconnect -> result
+// overlay (matches mint's reconnect banner) rather than re-opening the full
+// Dressing Room panel; pollEconomyOp drives the same status endpoint the
+// original start call would have polled.
+const ECONOMY_OP_LABEL = {
+  harvest: 'Harvest', assemble: 'Assemble', equip: 'Save',
+  extract: 'Extract', deposit: 'Deposit',
+};
+function attachEconomyResume(session) {
+  const kind = session.kind;
+  if (!ECONOMY_OP_LABEL[kind]) return false;
+  showPanel('flow-panel');
+  showFlow({
+    title: '🔄 Reconnecting…',
+    text: `You have a ${ECONOMY_OP_LABEL[kind]} in progress — picking it back up.`,
+    spinner: true,
+  });
+  // Ownership: showFlow() bumps flowRenderGen on EVERY flow-panel render, so
+  // capturing it right after our own render means ANY later takeover of the
+  // panel — a normal flow start or another resume attach, not just
+  // invalidateFlowPolls — supersedes this pending result callback.
+  const gen = flowRenderGen;
+  pollEconomyOp(kind, session).then((final) => {
+    if (gen !== flowRenderGen) return; // another flow owns the panel now
+    if (el('flow-panel').hidden) return; // user navigated away
+    if (final.state === 'failed') {
+      showFlow({ title: `❌ ${ECONOMY_OP_LABEL[kind]} failed`, text: final.error || 'Something went wrong.', done: true });
+    } else if (final.accept) {
+      // harvest (legacy upgrade), assemble and extract can end with an offer
+      // the user must still accept in Xaman — surface its QR/deep link.
+      showFlow({
+        title: '👛 Accept in Xaman',
+        text: signText(final.accept_push, 'Scan to accept in Xaman.'),
+        qrData: final.accept,
+        link: final.accept,
+        done: true,
+      });
+    } else {
+      showFlow({
+        title: `✅ ${ECONOMY_OP_LABEL[kind]} complete`,
+        text: 'Open the Dressing Room to see the result.',
+        done: true,
+      });
+    }
+  });
+  return true;
+}
+
 async function marketFlow(kind, startPath, body, render) {
   clearTimeout(marketFlowTimer);
+  ++marketFlowGen; // kill any in-flight tick across the awaited start POST
   showPanel('flow-panel');
   showFlow({ title: 'Starting…', spinner: true });
   let s;
@@ -3471,6 +3664,7 @@ function marketTraitListRender(s) {
 // xumm_url) differs from the market sessions' MARKET_STATUS_PATH table.
 
 let shopFlowTimer = null;
+let shopFlowGen = 0; // see marketFlowGen
 
 function shopImgSrc(item) {
   return traitLayerSrc(item.image_url);
@@ -3568,17 +3762,24 @@ function shopBuyRender(s) {
 
 function pollShopFlow(sessionId) {
   clearTimeout(shopFlowTimer);
+  const gen = ++shopFlowGen;
+  let ownerGen = flowRenderGen; // see pollMarketFlow
   const path = `/api/shop/buy/${sessionId}`;
   const tick = async () => {
+    if (gen !== shopFlowGen || ownerGen !== flowRenderGen) return; // superseded
     if (el('flow-panel').hidden) return; // user navigated away
     let s;
     try {
       s = await api(path);
     } catch (e) {
-      shopFlowTimer = setTimeout(tick, 3000); // transient; keep polling
+      if (gen === shopFlowGen && ownerGen === flowRenderGen) {
+        shopFlowTimer = setTimeout(tick, 3000); // transient; keep polling
+      }
       return;
     }
+    if (gen !== shopFlowGen || ownerGen !== flowRenderGen) return; // superseded while we awaited
     showFlow(shopBuyRender(s));
+    ownerGen = flowRenderGen; // our own render; keep ownership current
     if (!marketPure.isMarketTerminal(s.state)) shopFlowTimer = setTimeout(tick, 3000);
   };
   shopFlowTimer = setTimeout(tick, 3000);
@@ -3606,6 +3807,7 @@ async function openShopBuyFlow(item) {
   });
   if (!ok) return;
   clearTimeout(shopFlowTimer);
+  ++shopFlowGen; // kill any in-flight tick across the awaited start POST
   showPanel('flow-panel');
   showFlow({ title: 'Starting…', spinner: true });
   let s;
@@ -3897,7 +4099,7 @@ async function main() {
       if (user) {
         me = user;
         // Re-attach to a mint an earlier tab/reload orphaned before going home.
-        if (!(await resumeBulkMint()) && !(await resumeMint())) showMintHome();
+        if (!(await resumeAnyFlow())) showMintHome();
       }
       // else: startWebSignin() is already driving the register panel.
     } catch (e) {
@@ -3919,7 +4121,7 @@ async function main() {
     me = await api('/api/me');
     if (me.wallet) {
       // Re-attach to a mint the webview reload orphaned before going home.
-      if (!(await resumeBulkMint()) && !(await resumeMint())) showMintHome();
+      if (!(await resumeAnyFlow())) showMintHome();
     }
     else {
       status(`Hey ${me.username} — sign in with Xaman to start building.`);

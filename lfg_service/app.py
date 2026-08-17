@@ -5038,6 +5038,55 @@ async def handle_mint_active(request):
     return web.json_response({"session": session.to_dict() if session else None})
 
 
+@require_wallet
+async def handle_sessions_active(request):
+    """GET /api/sessions/active (#221): every live (non-terminal) flow for the
+    caller in one payload, so a relaunched Activity webview can re-attach to
+    whatever was in flight instead of booting to the mint home screen. Extends
+    #216's per-flow /api/mint/active pattern across mint/bulk/swap/market/
+    economy/shop in a single round-trip. Read-only re-attach: no session is
+    created or advanced here, and no transaction is built (SourceTag/memos
+    were already stamped when the flow's payload was first built)."""
+    user = request["user"]
+    uid, plat = user["id"], _platform(user)
+    _prune_sessions(mint_sessions, mint_flow.TERMINAL_STATES)
+    _prune_sessions(bulk_sessions, bulk_mint_flow.TERMINAL_STATES)
+    _prune_sessions(swap_sessions, swap_flow.TERMINAL_STATES)
+    _prune_sessions(market_sessions, market_flow.TERMINAL_STATES)
+    _prune_sessions(economy_sessions, economy_api.TERMINAL_STATES)
+    _prune_shop_sessions()
+
+    def pick(store: dict[str, Any], terminal: set[str]) -> dict[str, Any] | None:
+        s = _active_session(store, terminal, uid, plat)
+        return s.to_dict() if s else None
+
+    # ShopBuySession carries no platform-user identity — ownership is the
+    # buyer wallet (same identity require_wallet resolved), mirroring
+    # handle_shop_buy_start's own active-session scan.
+    wallet = request["wallet"]
+    shop = next(
+        (
+            s.to_dict()
+            for s in shop_sessions.values()
+            if s.buyer == wallet
+            and s.state not in shop_flow.TERMINAL_STATES
+            and getattr(s, "platform", "discord") == plat
+        ),
+        None,
+    )
+
+    return web.json_response(
+        {
+            "mint": pick(mint_sessions, mint_flow.TERMINAL_STATES),
+            "bulk": pick(bulk_sessions, bulk_mint_flow.TERMINAL_STATES),
+            "swap": pick(swap_sessions, swap_flow.TERMINAL_STATES),
+            "market": pick(market_sessions, market_flow.TERMINAL_STATES),
+            "economy": pick(economy_sessions, economy_api.TERMINAL_STATES),
+            "shop": shop,
+        }
+    )
+
+
 @require_auth
 async def handle_mint_status(request):
     session = mint_sessions.get(request.match_info["session_id"])
@@ -6391,6 +6440,8 @@ def create_app() -> web.Application:
     # /active must register BEFORE /{session_id}: aiohttp dispatches in
     # registration order, and the dynamic route would swallow it as an id.
     app.router.add_get("/api/mint/active", handle_mint_active)
+    # #221: consolidated resume endpoint — every live flow in one round-trip.
+    app.router.add_get("/api/sessions/active", handle_sessions_active)
     # Bulk mint (#215) routes must also register BEFORE /{session_id} for the
     # same reason — "bulk" would otherwise be swallowed as a session id.
     app.router.add_post("/api/mint/bulk", handle_bulk_mint_start)
