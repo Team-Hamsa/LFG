@@ -203,7 +203,9 @@ async def handle_swap_confirm(svc: Any, update: Any, context: Any) -> None:
             chat_id,
             photo=render.photo_input(qr_png, "swap_fee_qr.png"),
             caption=swap_render.swap_payment_caption(
-                str(sess.get("fee_amount") or ""), str(sess.get("pay_with") or "")
+                str(sess.get("fee_amount") or ""),
+                str(sess.get("pay_with") or ""),
+                payment_link=str(payment_link),
             ),
         )
 

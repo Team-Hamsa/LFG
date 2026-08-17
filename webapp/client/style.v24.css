@@ -1003,3 +1003,17 @@ button.back:hover { color: var(--text); border: none; }
 }
 .build-save-bar button { flex: 0 1 auto; }
 .closet-item.staged { outline: 2px solid var(--blue); }
+
+/* #142: mobile-primary Xaman deep link. On touch devices the "Open in
+   Xaman" button is promoted to the primary affordance and the QR collapses
+   behind the .qr-toggle disclosure. */
+button.link.sign-primary {
+  display: inline-block;
+  font-size: 1.1rem;
+  font-weight: 700;
+  padding: .6rem 1.2rem;
+  border: 2px solid currentColor;
+  border-radius: 10px;
+  text-decoration: none;
+}
+button.link.qr-toggle { font-size: .85rem; opacity: .8; }

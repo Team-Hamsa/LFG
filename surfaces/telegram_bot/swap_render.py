@@ -126,13 +126,17 @@ def swap_cost_line(swap_fee: Any) -> str:
     return f"Cost: {per_nft} {pay_with} per NFT"
 
 
-def swap_payment_caption(fee_amount: str, pay_with: str) -> str:
+def swap_payment_caption(fee_amount: str, pay_with: str, payment_link: str = "") -> str:
+    # #142: the deep link is the mobile tap-to-open path (Telegram auto-links
+    # plain URLs); the QR photo stays for signing on another device.
+    link_line = f"\nOpen in Xaman: {payment_link}\n" if payment_link else ""
     return (
         "💰 Swap Fee Required\n\n"
         f"Pay {fee_amount} {pay_with} to complete the swap:\n"
-        "1. Scan the QR with your XRPL wallet (XUMM/Xaman)\n"
+        "1. Tap the link below (or scan the QR with Xaman)\n"
         "2. Approve the payment\n"
         "3. The swap proceeds automatically\n"
+        f"{link_line}"
     )
 
 
@@ -140,4 +144,7 @@ def swap_result_caption(result: dict[str, Any]) -> str:
     name = result.get("name", "?")
     if result.get("modified"):
         return f"✅ {name} updated in your wallet — no action needed."
-    return f"📨 Open in Xaman to claim {name}."
+    # #142: carry the tappable accept deep link next to the QR photo.
+    accept_link = result.get("accept_deeplink", "")
+    link_line = f"\nOpen in Xaman: {accept_link}" if accept_link else ""
+    return f"📨 Open in Xaman to claim {name}.{link_line}"
