@@ -124,7 +124,14 @@ def init_db(path: str, busy_timeout_ms: int | None = None) -> sqlite3.Connection
     # per-network stores' self-migrating columns.
     cols = {r[1] for r in conn.execute("PRAGMA table_info(onchain_nfts)")}
     if "video" not in cols:
-        conn.execute("ALTER TABLE onchain_nfts ADD COLUMN video TEXT")
+        try:
+            conn.execute("ALTER TABLE onchain_nfts ADD COLUMN video TEXT")
+        except sqlite3.OperationalError as e:
+            # Two processes (service + listener) can race the check-then-ALTER
+            # on a legacy DB — the loser's ALTER is a harmless duplicate
+            # (same tolerance as shop_store's self-migrating columns).
+            if "duplicate column" not in str(e).lower():
+                raise
     conn.commit()
     return conn
 

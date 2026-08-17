@@ -117,3 +117,36 @@ def test_token_record_derives_video_from_metadata():
     del meta["video"]
     assert nft_index.token_record(token, meta).video == ""
     assert nft_index.token_record(token, None).video == ""
+
+
+def test_migration_race_duplicate_column_is_tolerated(tmp_path, monkeypatch):
+    """Two processes racing the check-then-ALTER on a legacy DB: the loser's
+    duplicate-column error must not break initialization."""
+    path = str(tmp_path / "race.db")
+    nft_index.init_db(path).close()  # column now exists
+
+    class RacedConn:
+        """Proxy that hides `video` from PRAGMA table_info (stale view), so
+        init_db takes the ALTER branch against a DB that already has it."""
+
+        def __init__(self, real):
+            self._real = real
+
+        def execute(self, sql, *a):
+            cur = self._real.execute(sql, *a)
+            if sql.startswith("PRAGMA table_info"):
+                rows = [r for r in cur.fetchall() if r[1] != "video"]
+                return iter(rows)
+            return cur
+
+        def __getattr__(self, name):
+            return getattr(self._real, name)
+
+    real_connect = nft_index.sqlite3.connect
+    monkeypatch.setattr(
+        nft_index.sqlite3, "connect", lambda p, *a, **k: RacedConn(real_connect(p, *a, **k))
+    )
+    conn = nft_index.init_db(path)  # would raise "duplicate column" unguarded
+    cols = {r[1] for r in conn._real.execute("PRAGMA table_info(onchain_nfts)")}
+    assert "video" in cols
+    conn._real.close()
