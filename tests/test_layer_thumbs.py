@@ -159,6 +159,30 @@ def test_layer_without_thumb_param_serves_full(tmp_path, monkeypatch):
     assert str(resp._path).endswith("male/Body/Straight Diamond.webm")
 
 
+def test_layer_falls_back_to_matrix_permitted_foreign_body(tmp_path, monkeypatch):
+    # A Closet asset whose art lives only in another body's dir is still
+    # renderable — swap_compose.resolve_layer() falls back own dir -> shared/
+    # -> matrix-permitted foreign dir, and that is exactly what a real
+    # equip/assemble composes. /api/layer must use the SAME resolution, or the
+    # Builder's client-side tile pruning (layerMediaEl -> onMissing) deletes
+    # traits the user legitimately owns and can wear, and they can never be
+    # put back on a character.
+    base = str(tmp_path)
+    _touch(os.path.join(base, "male/Head/Suave.png"))
+    resp = _serve(monkeypatch, base, "body=female&trait=Head&value=Suave&thumb=1")
+    assert resp.status == 200
+    assert str(resp._path).endswith("male/Head/Suave.png")
+
+
+def test_layer_404s_when_no_body_may_supply_it(tmp_path, monkeypatch):
+    # The fallback must stay matrix-gated: Clothing is not swappable
+    # female<-male, so this stays a 404 and the tile is correctly pruned.
+    base = str(tmp_path)
+    _touch(os.path.join(base, "male/Clothing/Hanna Suit.png"))
+    resp = _serve(monkeypatch, base, "body=female&trait=Clothing&value=Hanna%20Suit&thumb=1")
+    assert resp.status == 404
+
+
 def test_trait_image_url_carries_thumb_flag(tmp_path, monkeypatch):
     # every server-built trait preview URL must opt into the thumb tier.
     # _trait_image_url is disk-verified with a local store (None on a miss),

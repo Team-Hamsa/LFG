@@ -68,6 +68,7 @@ from lfg_core import (
     shop_store,
     sponsored_burn,
     sponsored_mint,
+    swap_compose,
     swap_flow,
     swap_meta,
     trait_config,
@@ -6103,7 +6104,13 @@ async def handle_layer(request):
     ):
         return web.json_response({"error": "bad layer params"}, status=400)
     store = layer_store.get_layer_store()
-    path = await store.resolve(body, trait, value)
+    # Resolve exactly like a real mint/swap/equip composes: own dir ->
+    # layers/shared/ -> matrix-permitted foreign body dir. Resolving against
+    # the requested body dir ALONE 404s every Closet asset whose art only
+    # exists under another body, and the Builder prunes those tiles client-side
+    # (layerMediaEl -> onMissing) — so traits the user owns and can legitimately
+    # wear silently vanish and can never be put back on a character.
+    path = await swap_compose.resolve_layer(store, trait_config.get_config(), body, trait, value)
     if not path or not os.path.exists(path):
         return web.json_response({"error": "layer not found"}, status=404)
     # thumb=1 asks for the pre-generated preview tier (layers/.thumbs/): same
