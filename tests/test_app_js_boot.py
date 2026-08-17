@@ -152,3 +152,6 @@ def test_media_el_video_fallback_reads_current_element_state():
     js = _read("app.js")
     assert "mediaPure.videoFallback(m.poster" in js
     assert "removeAttribute('poster')" in js
+    # ...and the stale accessible label from the previous render likewise
+    # (the fallback reads it as the replacement image's alt).
+    assert "removeAttribute('aria-label')" in js

@@ -221,6 +221,10 @@ function setMedia(id, { image, video, thumbW }) {
       if (video) {
         if (image) old.poster = imgUrl(image, thumbW);
         else old.removeAttribute('poster');
+        // The accessible label was baked in at creation for a different
+        // piece; without a fresh one, stale is worse than none — the error
+        // fallback reads it as the replacement image's alt.
+        old.removeAttribute('aria-label');
       }
       old.src = src;
     }
