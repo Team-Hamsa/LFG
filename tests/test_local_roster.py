@@ -46,7 +46,7 @@ def _seed_index(tmp_path, monkeypatch, rows: list[dict[str, Any]]):
     for r in rows:
         conn.execute(
             "INSERT INTO onchain_nfts (nft_id, nft_number, owner, is_burned, mutable,"
-            " uri_hex, attributes_json, image) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+            " uri_hex, attributes_json, image, video) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
             (
                 r["nft_id"],
                 r.get("nft_number"),
@@ -56,6 +56,7 @@ def _seed_index(tmp_path, monkeypatch, rows: list[dict[str, Any]]):
                 r.get("uri_hex", ""),
                 json.dumps(r.get("attributes", [])),
                 r.get("image", ""),
+                r.get("video", ""),
             ),
         )
     conn.commit()
@@ -249,6 +250,46 @@ def test_wallet_nfts_falls_back_to_ledger_when_index_unbuilt(tmp_path, monkeypat
     nfts = _run(server._wallet_nfts("rWallet"))
     assert called == ["rWallet"]
     assert [n["number"] for n in nfts] == [12]
+
+
+def test_synthesized_cache_miss_record_keeps_video(tmp_path, monkeypatch):
+    """#204 residual: a roster record synthesized from the index row on a
+    metadata-cache miss must carry the row's `video` URL, so an animated NFT
+    (post-animated-support mint/swap) still plays in the client instead of
+    silently degrading to its static PNG thumbnail. A row with no video must
+    synthesize video=None (the static-fallback signal the client reads)."""
+    uncached_anim = "697066733a2f2f62616679616e696d6d697373"
+    uncached_flat = "697066733a2f2f62616679666c61746d697373"
+    mp4 = "https://nft.pullzone.example/nfts/21_3.mp4"
+    conn = _seed_index(
+        tmp_path,
+        monkeypatch,
+        [
+            {
+                "nft_id": "0019" + "A" * 60,
+                "nft_number": 21,
+                "owner": "rWallet",
+                "uri_hex": uncached_anim,
+                "image": "https://nft.pullzone.example/nfts/21_3.png",
+                "video": mp4,
+                "attributes": [{"trait_type": "Body", "value": "Irridescent"}],
+            },
+            {
+                "nft_id": "0019" + "B" * 60,
+                "nft_number": 22,
+                "owner": "rWallet",
+                "uri_hex": uncached_flat,
+                "image": "https://nft.pullzone.example/nfts/22_1.png",
+                "attributes": [{"trait_type": "Body", "value": "Buck Straight"}],
+            },
+        ],
+    )
+    conn.close()
+    _no_network(monkeypatch)
+    nfts = _run(server._wallet_nfts("rWallet"))
+    assert [n["number"] for n in nfts] == [21, 22]
+    assert nfts[0]["video"] == mp4
+    assert nfts[1]["video"] is None
 
 
 def test_to_token_derives_flags_from_nft_id_when_mutable_unknown():

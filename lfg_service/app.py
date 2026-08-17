@@ -4788,6 +4788,7 @@ def _index_roster(conn: sqlite3.Connection, wallet: str) -> list[dict[str, Any]]
             meta = {
                 "name": f"{config.NFT_COLLECTION_NAME} #{rec.nft_number}",
                 "image": rec.image,
+                "video": rec.video or None,
                 "attributes": rec.attributes,
             }
         elif rec.image:
