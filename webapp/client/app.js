@@ -20,6 +20,11 @@ import * as buildPure from './build_pure.js?v=27';
 // after a webview relaunch is a pure priority picker, Node-testable
 // (tests/test_resume_pure_js.py); resumeAnyFlow() below is the thin DOM glue.
 import * as resumePure from './resume_pure.js?v=2';
+// Animated-art strategy (#298): grid-vs-detail asset decisions are pure and
+// Node-testable (tests/test_media_pure_js.py) — grids always render the
+// static image (badged when animated); only detail/focused views upgrade to
+// the video.
+import * as mediaPure from './media_pure.js?v=1';
 
 const params = new URLSearchParams(window.location.search);
 const insideDiscord = params.has('frame_id');
@@ -172,7 +177,24 @@ function mediaEl({ image, video, thumbW, className, alt }) {
     // <video> has no alt: carry the label as the accessible name so a later
     // video->img rebuild in setMedia can round-trip it losslessly.
     if (alt) m.setAttribute('aria-label', alt);
+    // #298: lazy — fetch only what's needed to start playback (autoplay then
+    // pulls the rest); until data arrives the poster still shows instantly.
+    m.preload = 'metadata';
     if (image) m.poster = imgUrl(image, thumbW);
+    // #298: a failed/undecodable video degrades to the static still instead
+    // of a dead black box. id/class/hidden carry over so setMedia (and any
+    // fixed-id caller) keeps addressing the slot.
+    if (image) {
+      m.onerror = () => {
+        const still = document.createElement('img');
+        still.id = m.id;
+        still.className = m.className;
+        still.hidden = m.hidden;
+        still.src = imgUrl(image, thumbW);
+        still.alt = alt || '';
+        m.replaceWith(still);
+      };
+    }
     m.src = imgUrl(video);
   } else {
     m.src = imgUrl(image, thumbW);
@@ -2119,6 +2141,15 @@ function renderGoPicker() {
     sub.className = 'go-tile-sub';
     sub.textContent = char.blank ? 'Blank — build me!' : t.sub;
     tile.replaceChildren(media, cap, sub);
+    // #298: GO tiles stay static (image_url is the PNG first frame for
+    // animated art); the badge flags GOs whose art plays as video.
+    if (mediaPure.isAnimated(char)) {
+      const anim = document.createElement('span');
+      anim.className = 'anim-badge';
+      anim.textContent = '▶';
+      anim.setAttribute('aria-hidden', 'true');
+      tile.appendChild(anim);
+    }
     if (t.state === 'indexing') {
       tile.disabled = true; // no body -> every layer fetch would 400
     } else {
@@ -3150,6 +3181,15 @@ function renderMarketGrid(rows, { append = false } = {}) {
       name.appendChild(badge);
     }
     card.replaceChildren(img, name);
+    // #298: grid tiles stay static stills; the badge flags art that plays as
+    // video in the listing-detail overlay (same marker as the swap grid).
+    if (mediaPure.isAnimated(row)) {
+      const anim = document.createElement('span');
+      anim.className = 'anim-badge';
+      anim.textContent = '▶';
+      anim.setAttribute('aria-hidden', 'true');
+      card.appendChild(anim);
+    }
     // #133: async handler — route any throw to the toast surface.
     card.onclick = () => openListingDetail(row).catch((e) => showError(e.message));
     grid.appendChild(card);
@@ -3165,6 +3205,10 @@ let lastListingTrigger = null;
 let activeListingId = null;
 
 function closeListingDetail() {
+  // #298: free the decoder — an animated listing's <video> keeps playing
+  // (and downloading) inside the hidden overlay otherwise.
+  const art = el('listing-detail-img');
+  if (art && art.tagName === 'VIDEO') art.pause();
   el('listing-overlay').hidden = true;
   el('listing-detail-action').onclick = null;
   activeListingId = null;
@@ -3192,7 +3236,18 @@ async function openListingDetail(row) {
   const requestId = vm.offerIndex || vm.nftId;
   activeListingId = requestId;
   lastListingTrigger = document.activeElement;
-  el('listing-detail-img').src = marketRowImgSrc(vm) || BLANK_IMG;
+  // #298: the detail view is where animation belongs — upgrade to the MP4
+  // (autoplay/loop/muted, preload=metadata, poster = the static still; a
+  // playback error degrades back to the still inside mediaEl). Static rows
+  // (and all traits, whose image is a /api/layer URL that must not go
+  // through the imgUrl CDN proxy) keep the plain <img> exactly as before.
+  const dm = mediaPure.detailMedia(row);
+  if (dm.video) {
+    setMedia('listing-detail-img', { image: dm.image, video: dm.video });
+  } else {
+    const still = setMedia('listing-detail-img', { image: dm.image });
+    still.src = marketRowImgSrc(vm) || BLANK_IMG;
+  }
   el('listing-detail-title').textContent = vm.title;
   el('listing-detail-price').textContent = vm.priceLabel;
   const sellerShort = vm.seller ? `${vm.seller.slice(0, 8)}…${vm.seller.slice(-4)}` : '';

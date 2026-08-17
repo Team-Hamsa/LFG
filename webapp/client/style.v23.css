@@ -480,9 +480,10 @@ button.back:hover { color: var(--text); border: none; }
 }
 .nft-card.sel-1 .pick { display: grid; background: var(--blue); }
 .nft-card.sel-2 .pick { display: grid; background: var(--green); }
-/* Animated-NFT marker (#250): grid tiles stay stills, the badge flags cards
-   whose art plays as video on the chooser/result screens. */
-.nft-card .anim-badge {
+/* Animated-NFT marker (#250/#298): grid tiles stay stills, the badge flags
+   cards/tiles whose art plays as video in the detail/focused views. */
+.nft-card .anim-badge,
+.go-tile .anim-badge {
   position: absolute;
   top: 7px;
   right: 7px;
@@ -763,6 +764,7 @@ button.back:hover { color: var(--text); border: none; }
   display: flex; flex-direction: column; align-items: center; gap: 2px;
   padding: 8px 4px; border: 2px solid var(--ink); border-radius: 10px;
   background: var(--surface-2); cursor: pointer;
+  position: relative; /* #298: anchors the .anim-badge marker */
 }
 .go-tile img, .go-tile video { width: 72px; height: 72px; object-fit: contain; }
 .go-tile.active { box-shadow: 0 0 0 3px var(--blue); }
