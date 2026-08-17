@@ -25,7 +25,13 @@ from webapp import economy_api  # noqa: E402
 
 
 def _run(coro):
-    return asyncio.get_event_loop().run_until_complete(coro)
+    # A fresh loop per call: earlier async suites close/replace the ambient
+    # loop, so get_event_loop() is not full-suite-order safe.
+    loop = asyncio.new_event_loop()
+    try:
+        return loop.run_until_complete(coro)
+    finally:
+        loop.close()
 
 
 @pytest.fixture(autouse=True)
@@ -88,9 +94,7 @@ class _FakeWebSession:
         self.platform = "discord"
         self.id = f"sess-{nft_id}"
         self.state = "running"
-        self.inner = SimpleNamespace(
-            owner="rOWNER", character=SimpleNamespace(nft_id=nft_id)
-        )
+        self.inner = SimpleNamespace(owner="rOWNER", character=SimpleNamespace(nft_id=nft_id))
 
     def to_dict(self):
         return {"id": self.id, "kind": self.kind, "state": self.state, "error": None}

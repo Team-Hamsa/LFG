@@ -6333,9 +6333,7 @@ def validate_batch_nft_ids(body: dict[str, Any]) -> list[str]:
     if not isinstance(raw, list) or not raw:
         raise economy_api.EconomyError("nft_ids must be a non-empty list")
     if len(raw) > BATCH_HARVEST_MAX:
-        raise economy_api.EconomyError(
-            f"at most {BATCH_HARVEST_MAX} characters per batch"
-        )
+        raise economy_api.EconomyError(f"at most {BATCH_HARVEST_MAX} characters per batch")
     seen: set[str] = set()
     for nft_id in raw:
         if not isinstance(nft_id, str) or not nft_id:
@@ -6372,9 +6370,7 @@ async def start_batch_harvest(
         # every later economy action for this user until restart.
         try:
             try:
-                ws = await economy_api.start_harvest(
-                    user_id, wallet, nft_id, user_token=user_token
-                )
+                ws = await economy_api.start_harvest(user_id, wallet, nft_id, user_token=user_token)
             except economy_api.EconomyError as e:
                 results.append(
                     {"nft_id": nft_id, "session_id": None, "state": "failed", "error": str(e)}
