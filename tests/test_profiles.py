@@ -255,3 +255,41 @@ def test_ensure_blocks_on_concurrent_writer(tmp_path, monkeypatch):
     # and once the lock is released, ensure succeeds normally
     p = identity.ensure_profile_for("discord", "1")
     assert p["id"] >= 1
+
+
+def test_bucket_snapshot_inside_lock_sees_concurrent_link(tmp_path, monkeypatch):
+    # TOCTOU regression: the bucket snapshot is taken INSIDE the write lock.
+    # A wallet link committed while ensure waits for the lock must be seen —
+    # ensure merges the newly-joined profiles instead of operating on a stale
+    # pre-lock bucket.
+    import threading
+
+    db = _fresh_db(tmp_path, monkeypatch)
+    identity.link("discord", "1", "bob", "rW1")
+    identity.link("telegram", "9", "eve", "rW2")
+    pa = identity.ensure_profile_for("discord", "1")
+    pb = identity.ensure_profile_for("telegram", "9")
+    blocker = sqlite3.connect(db, isolation_level=None)
+    blocker.execute("BEGIN IMMEDIATE")
+    # the joining link commits only when the blocker releases the lock —
+    # i.e. strictly after ensure has started but before it can proceed
+    blocker.execute(
+        "INSERT OR IGNORE INTO wallet_links (platform, platform_user_id, wallet) "
+        "VALUES ('discord', '1', 'rW2')"
+    )
+    result: dict[str, dict] = {}
+    t = threading.Thread(
+        target=lambda: result.update(p=identity.ensure_profile_for("discord", "1"))
+    )
+    t.start()
+    t.join(timeout=0.5)  # ensure is parked on BEGIN IMMEDIATE
+    assert t.is_alive(), "ensure should be blocked on the write lock"
+    blocker.execute("COMMIT")
+    blocker.close()
+    t.join(timeout=10)
+    assert not t.is_alive()
+    p = result["p"]
+    winner = min(pa["id"], pb["id"])
+    assert p["id"] == winner  # the just-committed link was seen and merged
+    assert len(p["merge_reports"]) == 1
+    assert identity.profile_for("telegram", "9")["profile"]["id"] == winner

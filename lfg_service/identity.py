@@ -332,48 +332,60 @@ def bucket_for(platform: str, platform_user_id: str) -> dict[str, object] | None
     conn = None
     try:
         conn = sqlite3.connect(DATABASE)
-        seed = conn.execute(
-            "SELECT 1 FROM wallet_links WHERE platform = ? AND platform_user_id = ? LIMIT 1",
-            (platform, platform_user_id),
-        ).fetchone()
-        if not seed:
-            return None
-        identities: set[tuple[str, str]] = {(platform, platform_user_id)}
-        wallets: set[str] = set()
-        frontier_ids = [(platform, platform_user_id)]
-        while frontier_ids:
-            # identities -> their wallets
-            new_wallets: set[str] = set()
-            for p, uid in frontier_ids:
-                for (w,) in conn.execute(
-                    "SELECT wallet FROM wallet_links WHERE platform = ? AND platform_user_id = ?",
-                    (p, uid),
-                ):
-                    if w not in wallets:
-                        new_wallets.add(w)
-            wallets |= new_wallets
-            # wallets -> their identities
-            frontier_ids = []
-            for w in new_wallets:
-                for p, uid in conn.execute(
-                    "SELECT platform, platform_user_id FROM wallet_links WHERE wallet = ?",
-                    (w,),
-                ):
-                    if (p, uid) not in identities:
-                        identities.add((p, uid))
-                        frontier_ids.append((p, uid))
-        members = sorted(identities)
-        return {
-            "bucket_id": json.dumps(list(members[0])),
-            "identities": [{"platform": p, "platform_user_id": uid} for p, uid in members],
-            "wallets": sorted(wallets),
-        }
+        return _bucket_on_conn(conn, platform, platform_user_id)
     except Exception as e:
         logging.error(f"identity.bucket_for failed: {e}")
         raise BucketLookupError(f"bucket lookup failed for {platform!r}: {e}") from e
     finally:
         if conn is not None:
             conn.close()
+
+
+def _bucket_on_conn(
+    conn: sqlite3.Connection, platform: str, platform_user_id: str
+) -> dict[str, object] | None:
+    """bucket_for's BFS on a caller-provided connection, so a caller holding a
+    write lock (ensure_profile_for's BEGIN IMMEDIATE) resolves the bucket
+    INSIDE its transaction — snapshot, decision, and write all under one lock,
+    no TOCTOU window against a concurrent link(). Raises raw DB errors; the
+    caller wraps them (bucket_for -> BucketLookupError, ensure_profile_for ->
+    ProfileError)."""
+    seed = conn.execute(
+        "SELECT 1 FROM wallet_links WHERE platform = ? AND platform_user_id = ? LIMIT 1",
+        (platform, platform_user_id),
+    ).fetchone()
+    if not seed:
+        return None
+    identities: set[tuple[str, str]] = {(platform, platform_user_id)}
+    wallets: set[str] = set()
+    frontier_ids = [(platform, platform_user_id)]
+    while frontier_ids:
+        # identities -> their wallets
+        new_wallets: set[str] = set()
+        for p, uid in frontier_ids:
+            for (w,) in conn.execute(
+                "SELECT wallet FROM wallet_links WHERE platform = ? AND platform_user_id = ?",
+                (p, uid),
+            ):
+                if w not in wallets:
+                    new_wallets.add(w)
+        wallets |= new_wallets
+        # wallets -> their identities
+        frontier_ids = []
+        for w in new_wallets:
+            for p, uid in conn.execute(
+                "SELECT platform, platform_user_id FROM wallet_links WHERE wallet = ?",
+                (w,),
+            ):
+                if (p, uid) not in identities:
+                    identities.add((p, uid))
+                    frontier_ids.append((p, uid))
+    members = sorted(identities)
+    return {
+        "bucket_id": json.dumps(list(members[0])),
+        "identities": [{"platform": p, "platform_user_id": uid} for p, uid in members],
+        "wallets": sorted(wallets),
+    }
 
 
 def same_bucket(a: tuple[str, str], b: tuple[str, str]) -> bool:
@@ -508,27 +520,33 @@ def ensure_profile_for(platform: str, platform_user_id: str) -> dict[str, object
     display_handle. Deterministic winner: the oldest (smallest-id) profile —
     see merge_profiles.
 
-    Serialized find-or-create: the read-decide-write runs inside a BEGIN
-    IMMEDIATE transaction (the lfg_core/headroom.py precedent — one writer
-    wins), so two overlapping ensures for the same identity or bucket cannot
-    both observe "no profile" and double-insert; the second call re-reads
-    after the first commits and attaches to the same profile.
+    Serialized find-or-create: the ENTIRE read-decide-write — including the
+    #206 bucket resolution itself (`_bucket_on_conn` on the locked connection)
+    — runs inside a BEGIN IMMEDIATE transaction (the lfg_core/headroom.py
+    precedent — one writer wins). Two overlapping ensures for the same
+    identity or bucket cannot both observe "no profile" and double-insert,
+    and a wallet link committed while this call waited for the lock IS seen
+    (the bucket snapshot is taken after lock acquisition, so there is no
+    stale-snapshot TOCTOU window against a concurrent link()).
 
-    Raises BucketLookupError / ProfileError on infrastructure failure and
-    ProfileError for an unknown identity (fail-closed — never guesses).
+    Raises ProfileError on infrastructure failure and for an unknown
+    identity (fail-closed — never guesses).
     Returns the profile dict (profile_for()["profile"] shape) plus a
     "merge_reports" key: the conflict reports of any merges this call
     performed (see merge_profiles; [] when none). Conflicted merges are
     additionally logged at WARNING — conflict info is never silently
     discarded.
     """
-    bucket = bucket_for(platform, platform_user_id)  # may raise BucketLookupError
     conn = None
     try:
         # isolation_level=None: explicit BEGIN IMMEDIATE / COMMIT control;
         # closing without COMMIT rolls back.
         conn = sqlite3.connect(DATABASE, isolation_level=None)
         conn.execute("BEGIN IMMEDIATE")
+        # Bucket snapshot INSIDE the write lock — a concurrent link() either
+        # committed before we acquired it (and is seen here) or is blocked
+        # until we commit. Never resolve the bucket before BEGIN IMMEDIATE.
+        bucket = _bucket_on_conn(conn, platform, platform_user_id)
         ident = conn.execute(
             "SELECT account_id, display_handle FROM identities "
             "WHERE platform = ? AND platform_user_id = ?",
