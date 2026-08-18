@@ -264,13 +264,38 @@ function discordCtx() {
 }
 
 // #273: the share click-through ref stashed by main() (localStorage lfg_ref,
-// shape-validated on write). Sent with every mint start so the service can
-// attribute the mint; the server re-validates and rejects self-referrals.
+// shape-validated on write, stored as {ref, ts}). Sent with a mint start so
+// the service can attribute the mint; the server re-validates and rejects
+// self-referrals. Attribution window (Greptile P1 on PR #393): the stash
+// expires REF_TTL_MS after the click, and consumeRef() clears it once a
+// mint/bulk-mint start succeeds — only the first mint after a click is
+// attributed, never every later mint forever.
+const REF_TTL_MS = 24 * 60 * 60 * 1000; // 24h click->mint attribution window
+
 function stashedRef() {
   try {
-    const r = localStorage.getItem('lfg_ref');
-    return r && XRPL_ADDR_RE.test(r) ? r : null;
+    const raw = localStorage.getItem('lfg_ref');
+    if (!raw) return null;
+    let ref = raw;
+    let ts = null;
+    if (raw[0] === '{') {
+      const o = JSON.parse(raw);
+      ref = o && o.ref;
+      ts = o && o.ts;
+    }
+    // Legacy plain-string stashes (pre-window) have no timestamp: age is
+    // unknown, so treat them as expired rather than attribute a mint to an
+    // arbitrarily old click.
+    if (typeof ts !== 'number' || Date.now() - ts > REF_TTL_MS) {
+      localStorage.removeItem('lfg_ref');
+      return null;
+    }
+    return typeof ref === 'string' && XRPL_ADDR_RE.test(ref) ? ref : null;
   } catch (_) { return null; }
+}
+
+function consumeRef() {
+  try { localStorage.removeItem('lfg_ref'); } catch (_) { /* no storage */ }
 }
 
 function openExternal(url) {
@@ -1091,6 +1116,7 @@ async function startBulkMint(quantity) {
       method: 'POST',
       body: JSON.stringify({ ...discordCtx(), quantity, ref: stashedRef() }),
     });
+    consumeRef(); // one attribution per click: clear on successful start
     currentBulkId = j.id;
     mintQty = quantity;
     liveQty = quantity;
@@ -1399,6 +1425,7 @@ async function startMint() {
       method: 'POST',
       body: JSON.stringify({ ...discordCtx(), ref: stashedRef() }),
     });
+    consumeRef(); // one attribution per click: clear on successful start
     currentMintId = s.id;
     mintQty = 1;
     liveQty = 1;
@@ -4359,7 +4386,9 @@ async function main() {
   // check so arbitrary query junk never lands in storage.
   try {
     const refParam = new URLSearchParams(location.search).get('ref');
-    if (refParam && XRPL_ADDR_RE.test(refParam)) localStorage.setItem('lfg_ref', refParam);
+    if (refParam && XRPL_ADDR_RE.test(refParam)) {
+      localStorage.setItem('lfg_ref', JSON.stringify({ ref: refParam, ts: Date.now() }));
+    }
   } catch (_) { /* private mode / no storage */ }
 
   setupLogo();

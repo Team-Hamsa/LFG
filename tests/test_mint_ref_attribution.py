@@ -1,6 +1,7 @@
 """Share-link mint attribution (#273): ref validation, referrer recording,
 bulk-job threading, and the conversion metrics query."""
 
+import os
 import sqlite3
 
 from lfg_core import bulk_mint_flow, share_clicks
@@ -149,3 +150,27 @@ def test_conversion_rows_wrong_network_excluded(tmp_path):
     _mint_row(db, 20, referrer=SHARER)  # network="testnet"
     rows = share_clicks.conversion_rows(db, "mainnet")
     assert rows == []
+
+
+# --- client stash window (static assertions, no JS runtime — same style as
+# --- the other webapp/client tests) ---------------------------------------
+
+
+def _app_js() -> str:
+    root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+    with open(os.path.join(root, "webapp", "client", "app.js")) as f:
+        return f.read()
+
+
+def test_client_ref_stash_has_attribution_window():
+    """Greptile P1 (PR #393): the stash must carry a timestamp, expire on a
+    TTL, and be consumed after a successful mint start — never attributing
+    every later mint to one old click."""
+    src = _app_js()
+    assert "REF_TTL_MS" in src
+    assert "JSON.stringify({ ref: refParam, ts: Date.now() })" in src
+    assert "function consumeRef()" in src
+    # consumed on BOTH mint-start paths (single + bulk)
+    assert src.count("consumeRef(); // one attribution per click") == 2
+    # legacy plain-string stashes (no ts) are treated as expired, not eternal
+    assert "typeof ts !== 'number'" in src
