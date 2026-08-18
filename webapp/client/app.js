@@ -428,8 +428,8 @@ function mintShareText(nftNumber) {
   // nft_number can be null/undefined in edge cases (mirrors swapShareText below)
   // — don't render a literal "#null"/"#undefined" in the tweet text.
   return nftNumber != null
-    ? `I just minted LFG #${nftNumber}! 🧱 #XRPL`
-    : 'I just minted an LFG! 🧱 #XRPL';
+    ? `I just minted LFG #${nftNumber}! 🧱 @letseffinggo #XRPL`
+    : 'I just minted an LFG! 🧱 @letseffinggo #XRPL';
 }
 
 function swapShareText(nftNumber) {
@@ -437,8 +437,8 @@ function swapShareText(nftNumber) {
   // display name) — the URL still falls back to bithomp via shareUrlFor, but
   // the tweet text can't reference a number that doesn't exist.
   return nftNumber != null
-    ? `I just swapped traits on LFG #${nftNumber}! 🧱 #XRPL`
-    : 'I just swapped traits on my LFG! 🧱 #XRPL';
+    ? `I just swapped traits on LFG #${nftNumber}! 🧱 @letseffinggo #XRPL`
+    : 'I just swapped traits on my LFG! 🧱 @letseffinggo #XRPL';
 }
 
 // Build a "Share on X" control: a real <a target=_blank> anchor (Task 0's
