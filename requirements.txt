@@ -31,6 +31,10 @@ aiohttp
 # import it directly, so declare it directly.
 oauthlib
 
+# Fernet at-rest encryption for per-user X OAuth2 tokens (#252,
+# lfg_service/x_oauth.py — a leaked DB file must not leak posting capability).
+cryptography
+
 # Voice support for Discord (optional)
 PyNaCl
 
