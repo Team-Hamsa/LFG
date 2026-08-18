@@ -140,9 +140,11 @@ def _conn() -> sqlite3.Connection:
 
 
 class _Fakes:
-    def __init__(self, fail_first_mint: bool = False) -> None:
+    def __init__(self, fail_first_mint: bool = False, fail_first_offer: bool = False) -> None:
         self.mints = 0
+        self.offers = 0
         self.fail_first_mint = fail_first_mint
+        self.fail_first_offer = fail_first_offer
 
     async def up(self, meta: dict) -> str:
         return "https://cdn/closet/1.json"
@@ -153,8 +155,11 @@ class _Fakes:
             return None  # definitive upstream failure (the #386 shape)
         return f"NFT{self.mints}"
 
-    async def offer(self, nft_id: str, owner: str) -> str:
-        return "OFFER1"
+    async def offer(self, nft_id: str, owner: str) -> str | None:
+        self.offers += 1
+        if self.fail_first_offer and self.offers == 1:
+            return None  # mint committed, offer creation failed
+        return f"OFFER{self.offers}"
 
     async def accept(self, offer_id: str) -> dict:
         return {"xumm_url": "x"}
@@ -185,3 +190,41 @@ def test_ensure_closet_failed_mint_records_nothing_and_retry_mints_clean():
     assert ref.status == ct.PENDING_ACCEPT
     assert ref.nft_id == "NFT2"
     assert es.get_closet_record(c, "rA") is not None
+
+
+def test_ensure_closet_offer_failure_after_committed_mint_never_duplicates():
+    # Greptile P1 (PR #390): the mint COMMITTED but offer creation failed —
+    # the minted token must be recorded before the offer step, so the raised
+    # ClosetError (-> retryable 503) leads to a retry that RE-OFFERS the same
+    # token instead of minting a second issuer-held Closet.
+    c = _conn()
+    f = _Fakes(fail_first_offer=True)
+
+    def call():
+        return _run(
+            ct.ensure_closet(
+                c,
+                "rA",
+                upload_fn=f.up,
+                mint_fn=f.mint,
+                offer_fn=f.offer,
+                accept_payload_fn=f.accept,
+            )
+        )
+
+    with pytest.raises(ct.ClosetError):
+        call()
+    # The committed mint IS on record (pending_accept, no offer id yet)...
+    rec = es.get_closet_record(c, "rA")
+    assert rec is not None
+    assert rec[0] == "NFT1"
+    assert rec[2] == ct.PENDING_ACCEPT
+    # ...so the retry re-enters the pending self-heal path: fresh offer for
+    # the SAME token, and crucially no second mint.
+    ref = call()
+    assert f.mints == 1
+    assert ref.nft_id == "NFT1"
+    assert ref.status == ct.PENDING_ACCEPT
+    assert ref.accept_payload == {"xumm_url": "x"}
+    rec = es.get_closet_record(c, "rA")
+    assert rec is not None and rec[3] == "OFFER2"

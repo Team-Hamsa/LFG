@@ -3599,10 +3599,12 @@ async def handle_closet(request):
         logging.error(f"start_closet indeterminate for {user['id']}: {e}")
         return web.json_response({"error": "could not create or retrieve Closet"}, status=502)
     except closet_token.ClosetError as e:
-        # Definitive did-not-commit failure (mint/offer returned falsey) —
-        # usually upstream rippled flakiness (#385/#386). Nothing was recorded
-        # and ensure_closet is idempotent, so a client retry is safe: surface a
-        # structured, retryable 503 instead of a dead-end 502.
+        # Definitive failure of a single step (mint/offer returned falsey) —
+        # usually upstream rippled flakiness (#385/#386). A retry is safe:
+        # ensure_closet records nothing when the mint never committed, and
+        # records the minted token BEFORE the offer step when it did, so a
+        # re-run either mints fresh or re-offers the SAME token — never a
+        # duplicate mint. Surface a structured, retryable 503, not a dead 502.
         logging.warning(f"start_closet transient failure for {user['id']}: {e}")
         return web.json_response({"error": "closet_mint_transient", "retryable": True}, status=503)
     except Exception as e:
