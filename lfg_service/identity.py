@@ -3,6 +3,7 @@
 # The wallet is the canonical account; account_id is a reserved hook for
 # future linked multi-surface profiles (nullable, unused now).
 
+import json
 import logging
 import sqlite3
 
@@ -43,6 +44,28 @@ def ensure_identities_table() -> None:
         if "user_token" not in cols:
             conn.execute("ALTER TABLE identities ADD COLUMN user_token TEXT")
         conn.execute("CREATE INDEX IF NOT EXISTS idx_identities_wallet ON identities(wallet)")
+        # #206: append-only identity->wallet link history. identities.wallet is
+        # an upsert (only the CURRENT wallet survives); this table keeps every
+        # wallet an identity has ever linked, which is what the bucket resolver
+        # walks. Never UPDATE/DELETE rows here.
+        conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS wallet_links (
+                platform          TEXT NOT NULL,
+                platform_user_id  TEXT NOT NULL,
+                wallet            TEXT NOT NULL,
+                linked_at         TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                PRIMARY KEY (platform, platform_user_id, wallet)
+            )
+            """
+        )
+        conn.execute("CREATE INDEX IF NOT EXISTS idx_wallet_links_wallet ON wallet_links(wallet)")
+        # Seed history from identities rows that predate wallet_links so
+        # existing users participate in buckets. Idempotent (INSERT OR IGNORE).
+        conn.execute(
+            "INSERT OR IGNORE INTO wallet_links (platform, platform_user_id, wallet) "
+            "SELECT platform, platform_user_id, wallet FROM identities"
+        )
         conn.commit()
     finally:
         conn.close()
@@ -74,6 +97,14 @@ def link(
                 updated_at = CURRENT_TIMESTAMP
             """,
             (platform, platform_user_id, platform_username, handle, wallet),
+        )
+        # #206: record the link in the append-only history alongside the upsert
+        # (same transaction), so re-linking a new wallet never erases the old
+        # association the bucket resolver depends on.
+        conn.execute(
+            "INSERT OR IGNORE INTO wallet_links (platform, platform_user_id, wallet) "
+            "VALUES (?, ?, ?)",
+            (platform, platform_user_id, wallet),
         )
         conn.commit()
         return True
@@ -225,6 +256,153 @@ def handle_for_wallet(wallet: str) -> str | None:
             conn.close()
 
 
+# ---------------------------------------------------------------------------
+# #206: identity buckets — "same human" resolution over shared wallets.
+#
+# Identities are keyed (platform, platform_user_id); the same human on Discord,
+# Telegram, and web is three separate identities. Two identities belong to one
+# logical-user BUCKET when they are connected through the append-only
+# wallet_links history: connected components of the bipartite identity—wallet
+# graph, so linkage is transitive (A—w1—B, B—w2—C puts A, B, C in one bucket)
+# and permanent (an old, since-replaced wallet still links).
+#
+# Buckets are computed on demand, not materialized: the identities/wallet_links
+# tables are tiny (hundreds of rows), each lookup is a bounded BFS over an
+# indexed table, and on-demand computation can never go stale after a new link.
+# If the table ever grows large enough to matter, swap in a maintained
+# union-find table behind the same bucket_for() API.
+#
+# LEAKY BY DESIGN: the graph only captures users who link the SAME wallet on
+# multiple platforms. A human who uses a different wallet per platform (and
+# never cross-links) is multiple buckets — per-bucket gating (free-mint B2)
+# deters casual double-claiming, it is not sybil-proof.
+# ---------------------------------------------------------------------------
+
+
+class BucketLookupError(Exception):
+    """A bucket lookup failed for infrastructure reasons (DB error).
+
+    Deliberately distinct from the None "unknown identity" result: bucket
+    resolution backs per-human gating, so an infrastructure failure must fail
+    CLOSED — callers must deny (or propagate), never treat it as "no bucket".
+    This is an intentional exception to this module's never-raises style.
+    """
+
+
+def bucket_for(platform: str, platform_user_id: str) -> dict[str, object] | None:
+    """Resolve the logical-user bucket containing an identity.
+
+    Returns None ONLY for an unknown identity (no wallet_links row); raises
+    BucketLookupError on any database failure (fail-closed — see above).
+    Otherwise a dict:
+      - "bucket_id": deterministic stable id — the JSON encoding of the
+        lexicographically smallest [platform, platform_user_id] member key
+        (unambiguous even when a field contains ":" or other separators;
+        stable as long as that member exists; adding links can only merge
+        buckets, never split them).
+      - "identities": sorted list of {"platform", "platform_user_id"} members.
+      - "wallets": sorted list of every wallet ever linked by any member.
+
+    Wallets are matched verbatim — XRPL classic addresses are case-sensitive;
+    never case-fold before calling.
+    """
+    conn = None
+    try:
+        conn = sqlite3.connect(DATABASE)
+        seed = conn.execute(
+            "SELECT 1 FROM wallet_links WHERE platform = ? AND platform_user_id = ? LIMIT 1",
+            (platform, platform_user_id),
+        ).fetchone()
+        if not seed:
+            return None
+        identities: set[tuple[str, str]] = {(platform, platform_user_id)}
+        wallets: set[str] = set()
+        frontier_ids = [(platform, platform_user_id)]
+        while frontier_ids:
+            # identities -> their wallets
+            new_wallets: set[str] = set()
+            for p, uid in frontier_ids:
+                for (w,) in conn.execute(
+                    "SELECT wallet FROM wallet_links WHERE platform = ? AND platform_user_id = ?",
+                    (p, uid),
+                ):
+                    if w not in wallets:
+                        new_wallets.add(w)
+            wallets |= new_wallets
+            # wallets -> their identities
+            frontier_ids = []
+            for w in new_wallets:
+                for p, uid in conn.execute(
+                    "SELECT platform, platform_user_id FROM wallet_links WHERE wallet = ?",
+                    (w,),
+                ):
+                    if (p, uid) not in identities:
+                        identities.add((p, uid))
+                        frontier_ids.append((p, uid))
+        members = sorted(identities)
+        return {
+            "bucket_id": json.dumps(list(members[0])),
+            "identities": [{"platform": p, "platform_user_id": uid} for p, uid in members],
+            "wallets": sorted(wallets),
+        }
+    except Exception as e:
+        logging.error(f"identity.bucket_for failed: {e}")
+        raise BucketLookupError(f"bucket lookup failed for {platform!r}: {e}") from e
+    finally:
+        if conn is not None:
+            conn.close()
+
+
+def same_bucket(a: tuple[str, str], b: tuple[str, str]) -> bool:
+    """True when two (platform, platform_user_id) identities resolve to the
+    same logical-user bucket. Unknown identities are never the same bucket.
+    Raises BucketLookupError on DB failure (fail-closed; never a silent
+    False)."""
+    ba = bucket_for(*a)
+    return (
+        ba is not None and (bb := bucket_for(*b)) is not None and ba["bucket_id"] == bb["bucket_id"]
+    )
+
+
+def bucket_overlaps(
+    platform: str,
+    platform_user_id: str,
+    *,
+    identities: set[tuple[str, str]] | frozenset[tuple[str, str]] = frozenset(),
+    wallets: set[str] | frozenset[str] = frozenset(),
+) -> bool:
+    """Per-bucket gating capability (#206, free-mint design decision B2).
+
+    Given the sets a gate has already consumed — identity keys and/or wallets
+    that have claimed a one-per-human benefit — returns True when ANY member of
+    the caller's bucket appears in either set, i.e. the claim should be denied
+    under per-human (B2) semantics.
+
+    An unknown identity (no bucket) only matches on nothing, so this is safe to
+    call unconditionally in front of an existing per-identity (B1) check: it
+    can only widen the deny set, never grant.
+
+    FAIL-CLOSED: a database failure raises BucketLookupError instead of
+    quietly degrading to the direct-identity fallback (which could return
+    False while a linked identity in the bucket has already claimed). Gating
+    callers must treat the exception as deny.
+
+    NOTE: this is a capability, not live wiring — the shipped sponsored free
+    mint gates per-wallet on the SourceTag archive and is unchanged; the parked
+    per-identity free-mint (#209) can adopt this at its call sites when
+    revived. Leaky by design: only same-wallet linkage is caught.
+    """
+    bucket = bucket_for(platform, platform_user_id)
+    if bucket is None:
+        return (platform, platform_user_id) in identities
+    members: list[dict[str, str]] = bucket["identities"]  # type: ignore[assignment]
+    bucket_wallets: list[str] = bucket["wallets"]  # type: ignore[assignment]
+    member_keys = {(m["platform"], m["platform_user_id"]) for m in members}
+    if member_keys & set(identities):
+        return True
+    return bool(set(bucket_wallets) & set(wallets))
+
+
 def migrate_users_to_identities() -> int:
     """Copy legacy Users rows into identities as platform='discord'. Idempotent."""
     conn = sqlite3.connect(DATABASE)
@@ -235,6 +413,15 @@ def migrate_users_to_identities() -> int:
         rows = conn.execute("SELECT discord_id, discord_name, wallet FROM Users").fetchall()
         migrated = 0
         for discord_id, discord_name, wallet in rows:
+            # #206: record the legacy wallet in the append-only history even
+            # when an identities row already exists — the pre-upgrade Users
+            # wallet may differ from the current identities.wallet, and losing
+            # it would drop a linkage from the bucket graph. Idempotent.
+            conn.execute(
+                "INSERT OR IGNORE INTO wallet_links (platform, platform_user_id, wallet) "
+                "VALUES ('discord', ?, ?)",
+                (discord_id, wallet),
+            )
             exists = conn.execute(
                 "SELECT 1 FROM identities WHERE platform='discord' AND platform_user_id=?",
                 (discord_id,),
