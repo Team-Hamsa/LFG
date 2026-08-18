@@ -371,7 +371,6 @@ matrix — lives in `trait_config.yaml` at the repo root, validated by
 <!-- roadmap:start -->
 - [ ] [#39 — Admin tooling for authoring trait_config.yaml (config-gen UI)](../../issues/39)
 - [ ] [#48 — feat: BRIX daily distribution to holders (1/day per unlisted NFT; claim in app)](../../issues/48)
-- [ ] [#207 — feat: User profiles (first-class profile above per-platform identities)](../../issues/207)
 - [ ] [#252 — feat(x): per-user OAuth2 PKCE — share from my account (phase 3 of #41)](../../issues/252)
 - [ ] [#332 — ops(sponsored-mint): execute the staging rehearsal before any production activation of the SourceTag free mint](../../issues/332)
 - [ ] [#354 — Skeleton body cannot wear the pirate outfit ("Swashbuckler") — missing skeleton art](../../issues/354)
@@ -379,6 +378,7 @@ matrix — lives in `trait_config.yaml` at the repo root, validated by
 
 **Recently completed** (moved here automatically when a roadmap issue closes)
 
+- [x] [#207 — feat: User profiles (first-class profile above per-platform identities)](../../issues/207) (closed 2026-08-18)
 - [x] [#273 — Share-link mint attribution: record stashed ref on mint, conversion metrics](../../issues/273) (closed 2026-08-18)
 - [x] [#334 — refactor(sponsored-mint): readiness audit hardcodes two operator wallet addresses as a pass requirement](../../issues/334) (closed 2026-08-16)
 - [x] [#336 — test(mint): the sponsored prepared-mint resume path has zero coverage — pin it, then consider extracting the duplicated post-mint tail](../../issues/336) (closed 2026-08-16)
