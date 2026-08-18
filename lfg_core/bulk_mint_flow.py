@@ -64,6 +64,19 @@ class CollectionFull(Exception):
 unit_event_publisher: Callable[[BulkMintJob, Unit], Awaitable[None]] | None = None
 
 
+def events_pending(job: BulkMintJob) -> bool:
+    """True while any offered unit still owes its mint.completed event (#253).
+
+    Gates the DONE transition: a job with a pending event must stay
+    FULFILLING (non-terminal, resumable) so the startup sweep retries the
+    publish — DONE records are pruned and never resumed, which would lose the
+    event forever. No hook installed (CLI / bare-flow tests, where no bus
+    exists) means no events are owed."""
+    if unit_event_publisher is None:
+        return False
+    return any(u.state == OFFERED and u.nft_id and not u.published for u in job.units)
+
+
 async def publish_unit_events(job: BulkMintJob) -> None:
     """Publish mint.completed for every OFFERED-but-unpublished unit (#253).
 
@@ -73,10 +86,22 @@ async def publish_unit_events(job: BulkMintJob) -> None:
     `published` flag (set only AFTER the hook returns, then persisted — a
     crash between publish and persist leaves the rare sub-tick double-publish
     window, which consumers dedup by nft_id), and NEVER raises — a bus
-    failure logs and leaves the unit unpublished for a later pass/resume to
-    retry, without ever failing the mint/offer path."""
+    failure logs and leaves the unit unpublished; events_pending() then keeps
+    the job non-terminal so a later pass/resume retries, without ever failing
+    the mint/offer path.
+
+    Durability-honest: never publishes off an OFFERED state that isn't on
+    disk. While the record is stale (persist_failed) a crash+resume would
+    reload pre-OFFERED units and re-process them — publishing now could
+    double-announce. One persist retry here, else defer the whole sweep."""
     hook = unit_event_publisher
     if hook is None:
+        return
+    if job.persist_failed and not persist(job):
+        logging.warning(
+            "bulk job %s: record not durable — deferring mint.completed publishes",
+            job.id,
+        )
         return
     dirty = False
     for unit in job.units:
@@ -802,7 +827,12 @@ async def run_bulk_mint_job(job: BulkMintJob) -> None:
         # re-minting. Tradeoff: the active-job lock holds until it clears --
         # rare (offer failure right after a successful mint is uncommon), and
         # the NFT itself is safe (minted + journaled), just pending an offer.
-        if all(u.state in (OFFERED, UNIT_FAILED) for u in job.units):
+        # ... and conditional on every offered unit's mint.completed event
+        # having been published (#253): DONE is pruned and never resumed, so
+        # terminalizing with an event still owed would suppress it forever.
+        # Same deferral semantics as the minted-but-unoffered case above —
+        # stay FULFILLING and let the startup sweep retry the publish.
+        if all(u.state in (OFFERED, UNIT_FAILED) for u in job.units) and not events_pending(job):
             job.state = DONE
             # Every unit already retired (to pending) or released its slot
             # individually, so the reservation row is empty by now — this is

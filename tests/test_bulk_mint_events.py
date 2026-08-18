@@ -135,16 +135,52 @@ def test_resume_publishes_offered_but_unpublished_units(monkeypatch):
     assert j2.units[0].published
 
 
-def test_publish_failure_never_breaks_fulfillment(monkeypatch):
+def test_publish_failure_defers_completion_and_retries_on_resume(monkeypatch):
+    """A failing bus never crashes fulfillment, but it must DEFER the event,
+    not discard it: the job stays FULFILLING (non-terminal, resumable — DONE
+    records are pruned and never resumed, which would lose the events), and a
+    resume with a healthy bus delivers each event exactly once then reaches
+    DONE. Mirrors the minted-but-unoffered deferral semantics."""
+
     async def _boom(job, unit):
         raise RuntimeError("bus down")
 
     monkeypatch.setattr(bulk_mint_flow, "unit_event_publisher", _boom)
     j = _run_paid_job(monkeypatch, qty=2)
-    assert j.state == bulk_mint_flow.DONE
+    assert j.state == bulk_mint_flow.FULFILLING  # deferred, not DONE
     assert all(u.state == bulk_mint_flow.OFFERED for u in j.units)
-    # left unpublished so a later resume can retry the event
     assert not any(u.published for u in j.units)
+    # Resume (startup sweep) with the bus healthy: events deliver, job closes.
+    calls = []
+    monkeypatch.setattr(bulk_mint_flow, "unit_event_publisher", _recorder(calls))
+    with open(os.path.join(bulk_mint_flow.JOBS_DIR, f"{j.id}.json")) as f:
+        j2 = bulk_mint_flow.BulkMintJob.from_serialized(json.load(f))
+    asyncio.run(bulk_mint_flow.run_bulk_mint_job(j2))
+    assert len(calls) == 2
+    assert j2.state == bulk_mint_flow.DONE
+    assert all(u.published for u in j2.units)
+
+
+def test_publish_deferred_while_record_not_durable(monkeypatch):
+    """Durability-honest publishing: while persist keeps failing, an
+    in-memory OFFERED state must not be announced (a crash+resume would
+    reload pre-OFFERED units and re-process them — double-announce risk)."""
+    calls = []
+    monkeypatch.setattr(bulk_mint_flow, "unit_event_publisher", _recorder(calls))
+    j = _job(1)
+    j.clamp_to_headroom()
+    j.units[0].state = bulk_mint_flow.OFFERED
+    j.units[0].nft_id = "nft-1"
+    j.persist_failed = True
+    monkeypatch.setattr(bulk_mint_flow, "persist", lambda job: False)
+    asyncio.run(bulk_mint_flow.publish_unit_events(j))
+    assert calls == []
+    assert not j.units[0].published
+    # persist recovers -> the same sweep publishes
+    monkeypatch.setattr(bulk_mint_flow, "persist", lambda job: True)
+    asyncio.run(bulk_mint_flow.publish_unit_events(j))
+    assert len(calls) == 1
+    assert j.units[0].published
 
 
 def test_service_event_shape_matches_single_mint(monkeypatch):
@@ -182,6 +218,12 @@ def test_service_event_shape_matches_single_mint(monkeypatch):
     assert data["state"] == mint_flow.OFFER_READY
     assert data["bulk_job_id"] == j.id
     assert data["unit_index"] == 0
+    # Complete key parity with the single-mint payload: every
+    # MintSession.to_dict() key must appear (bulk extras allowed on top), so
+    # a new session field fails here until _bulk_unit_event_data carries it.
+    session_keys = set(mint_flow.MintSession("u1", "rUSER").to_dict())
+    assert session_keys <= set(data)
+    assert set(data) - session_keys == {"bulk_job_id", "unit_index"}
     # the X poster's dedup key requires a non-empty nft_id
     from surfaces.x_bot import poster
 
