@@ -146,6 +146,14 @@ if BULK_MINT_MAX < 1:
 BULK_MINT_UI_ENABLED_DEFAULT = "0"  # named so a test can lock the shipped default
 BULK_MINT_UI_ENABLED = env_flag("BULK_MINT_UI_ENABLED", BULK_MINT_UI_ENABLED_DEFAULT)
 
+# Burn-to-mint (#220): burn M of your own live LFG NFTs for M fresh mints —
+# supply-neutral, so exempt from MAX_COLLECTION_SIZE. Ships dark: with the
+# flag off the /api/mint/burn2mint endpoints refuse new sessions (403).
+# Startup RESUME of already-burned sessions ignores the flag — a validated
+# burn is irreversible and its owed mints must never depend on a config knob.
+BURN_TO_MINT_ENABLED_DEFAULT = "0"  # named so a test can lock the shipped default
+BURN_TO_MINT_ENABLED = env_flag("BURN_TO_MINT_ENABLED", BURN_TO_MINT_ENABLED_DEFAULT)
+
 # BunnyCDN
 BUNNY_CDN_ACCESS_KEY = _require("BUNNY_CDN_ACCESS_KEY")
 BUNNY_CDN_STORAGE_ZONE = _require("BUNNY_CDN_STORAGE_ZONE")

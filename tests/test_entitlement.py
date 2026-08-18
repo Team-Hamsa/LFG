@@ -29,6 +29,16 @@ def test_burn_entitlement_is_cap_exempt_and_roundtrips():
     assert entitlement.from_dict(e.to_dict()) == e
 
 
-def test_build_burn_entitlement_is_stub():
-    with pytest.raises(NotImplementedError):
-        entitlement.build_burn_entitlement(quantity=1, burn_nft_ids=["a"])
+def test_build_burn_entitlement_counts_validated_burns():
+    e = entitlement.build_burn_entitlement(["a", "b", "c"])
+    assert e.quantity == 3
+    assert e.burn_nft_ids == ["a", "b", "c"]
+    assert e.cap_exempt is True
+    assert entitlement.from_dict(e.to_dict()) == e
+
+
+def test_build_burn_entitlement_rejects_empty_and_dupes():
+    with pytest.raises(ValueError):
+        entitlement.build_burn_entitlement([])
+    with pytest.raises(ValueError):
+        entitlement.build_burn_entitlement(["a", "a"])
