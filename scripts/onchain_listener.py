@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+import collections
 import json as _json
 import logging
 import math
@@ -817,8 +818,15 @@ class AutoCatchup:
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.STDOUT,
         )
-        out, _ = await proc.communicate()
-        return proc.returncode, out.decode(errors="replace")
+        # Drain incrementally, retaining only a bounded tail — a long catch-up
+        # logs per-token progress and buffering it all would pressure the
+        # listener process this task must never destabilize.
+        tail: collections.deque[bytes] = collections.deque(maxlen=80)
+        assert proc.stdout is not None
+        async for line in proc.stdout:
+            tail.append(line[-500:])
+        rc = await proc.wait()
+        return rc, b"".join(tail).decode(errors="replace")
 
 
 async def _dispatch_stream_tx(
