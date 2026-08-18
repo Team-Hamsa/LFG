@@ -269,6 +269,65 @@ async def _publish_mint_terminal(session: Any) -> None:
     session._published = True
 
 
+async def _publish_bulk_unit(job: Any, unit: Any) -> None:
+    """Publish a mint.completed firehose event for one OFFERED bulk-mint unit
+    (#253, option 1: per-unit events). The payload mirrors the single-mint
+    MintSession.to_dict() shape so every consumer (X poster, Telegram/Discord
+    announce) works untouched — they read nft_number / nft_id / image_url /
+    traits / body_type from data. Wired into bulk_mint_flow.unit_event_publisher
+    below, so it runs server-side inside the bulk fulfillment task (a killed
+    client can't suppress it); idempotency lives in the flow's durable
+    per-unit `published` flag, and any exception here is caught+logged by
+    publish_unit_events without ever failing fulfillment."""
+    await publish_event(
+        "mint.completed",
+        enrich_minter_identity(job.platform, job.discord_id, job.wallet_address),
+        job.wallet_address,
+        _bulk_unit_event_data(job, unit),
+    )
+
+
+def _bulk_unit_event_data(job: Any, unit: Any) -> dict[str, Any]:
+    """Full-key-parity payload for a bulk unit's mint.completed event: every
+    MintSession.to_dict() key is present (session-only fields carry their
+    session-default values — a bulk unit has no per-unit payment link or
+    accept-scan telemetry; payment facts come from the job), plus bulk
+    extras. test_bulk_mint_events asserts the parity, so a new MintSession
+    field fails tests until it is accounted for here."""
+    return {
+        "id": f"{job.id}:{unit.index}",
+        "platform": job.platform,
+        "state": mint_flow.OFFER_READY,
+        "error": None,
+        "reason": None,
+        "sponsored": False,
+        "sponsorship_reason": None,
+        "pay_with": job.pay_with,
+        "pay_amount": job.unit_price,
+        "payment_link": None,
+        "payment_push": None,
+        "qr_scanned": False,
+        "accept_scanned": False,
+        "accept_signed": False,
+        "nft_number": unit.nft_number,
+        "nft_id": unit.nft_id,
+        "image_url": unit.image_url,
+        "video_url": None,
+        "traits": unit.traits,
+        "body_type": unit.body_type,
+        "accept_qr_url": None,
+        "accept_deeplink": None,
+        "accept_push": None,
+        "bulk_job_id": job.id,
+        "unit_index": unit.index,
+    }
+
+
+# The flow module owns WHEN to publish (durably-OFFERED units, once each);
+# the service owns HOW (it holds the bus). lfg_core never imports lfg_service.
+bulk_mint_flow.unit_event_publisher = _publish_bulk_unit
+
+
 async def _run_mint_session_and_publish(session: Any) -> None:
     """Drive run_mint_session to terminal, then publish the terminal event
     server-side. Until #41 the client status poll was the ONLY publish site —
