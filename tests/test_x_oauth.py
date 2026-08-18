@@ -511,6 +511,50 @@ def test_share_rejects_boolean_nft_number(_feature_on):
     assert resp.status == 400
 
 
+def test_refresh_never_clobbers_reconnected_account(monkeypatch):
+    """Greptile 3803679817: a wallet completes a NEW OAuth callback (account
+    B) while a refresh of the OLD account (A) is in flight. The rotation
+    result for A must be discarded (CAS on the consumed refresh-token
+    ciphertext), the row must keep B's identity/tokens, and the caller must
+    be served B's access token — never A's rotated one."""
+    x_oauth.upsert_account(WALLET, "user-A", "a", "a-access", "a-refresh", time.time() - 10)
+
+    async def fake_refresh(refresh_token):
+        assert refresh_token == "a-refresh"
+        # Mid-refresh, the reconnect callback lands account B on the row
+        # (bypassing the per-wallet lock — this exercises the CAS backstop,
+        # e.g. a second process).
+        x_oauth.upsert_account(WALLET, "user-B", "b", "b-access", "b-refresh", time.time() + 7200)
+        return {
+            "access_token": "a-rotated-access",
+            "refresh_token": "a-rotated-refresh",
+            "expires_at": time.time() + 7200,
+        }
+
+    monkeypatch.setattr(x_oauth, "refresh_access_token", fake_refresh)
+    token = _run(x_oauth.get_usable_access_token(WALLET))
+    assert token == "b-access"  # served from the newer connection
+    account = x_oauth.get_account(WALLET)
+    assert account["x_user_id"] == "user-B"
+    assert x_oauth.decrypt_token(account["access_token_enc"]) == "b-access"
+    assert x_oauth.decrypt_token(account["refresh_token_enc"]) == "b-refresh"
+
+
+def test_stale_refresh_rejection_never_deletes_reconnected_account(monkeypatch):
+    """Same race, rejection flavor: X 400s the OLD account's refresh after
+    the wallet reconnected as account B — the CAS delete must not fire."""
+    x_oauth.upsert_account(WALLET, "user-A", "a", "a-access", "a-refresh", time.time() - 10)
+
+    async def fake_refresh(refresh_token):
+        x_oauth.upsert_account(WALLET, "user-B", "b", "b-access", "b-refresh", time.time() + 7200)
+        raise x_oauth.XOAuthError("invalid_grant", status=400)
+
+    monkeypatch.setattr(x_oauth, "refresh_access_token", fake_refresh)
+    assert _run(x_oauth.get_usable_access_token(WALLET)) == "b-access"
+    account = x_oauth.get_account(WALLET)
+    assert account is not None and account["x_user_id"] == "user-B"
+
+
 def test_client_x_user_share_flag_can_turn_off():
     """The client must adopt x_user_share only when the server sent the
     field — a truthy-OR latch could never disarm (CR 3803544743)."""

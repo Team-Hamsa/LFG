@@ -165,27 +165,39 @@ def rotate_tokens(
     refresh_token: str | None,
     expires_at: float,
     db_path: str | None = None,
-) -> None:
+    expected_refresh_enc: str | None = None,
+) -> bool:
     """Persist a rotated access+refresh pair in one UPDATE (spec A4: the
     rotation MUST land on disk before the new access token is used — the old
     refresh token is already dead server-side, so losing the new one here
-    permanently disconnects the user)."""
+    permanently disconnects the user).
+
+    `expected_refresh_enc` makes the write a compare-and-swap: the UPDATE
+    only lands if the row still carries the exact refresh-token ciphertext
+    the refresh consumed. If the wallet reconnected (a NEW OAuth callback
+    replaced the row) while the refresh was in flight, the row now belongs
+    to a different X account and MUST NOT be clobbered with the old
+    account's rotated credentials — the caller discards the rotation
+    result. Returns True when the write landed."""
     conn = sqlite3.connect(db_path or DATABASE)
     try:
-        conn.execute(
-            """
-            UPDATE x_accounts
-               SET access_token_enc = ?, refresh_token_enc = ?, expires_at = ?
-             WHERE wallet = ?
-            """,
-            (
-                encrypt_token(access_token),
-                encrypt_token(refresh_token) if refresh_token else None,
-                expires_at,
-                wallet,
-            ),
+        params: list[Any] = [
+            encrypt_token(access_token),
+            encrypt_token(refresh_token) if refresh_token else None,
+            expires_at,
+            wallet,
+        ]
+        sql = (
+            "UPDATE x_accounts "
+            "SET access_token_enc = ?, refresh_token_enc = ?, expires_at = ? "
+            "WHERE wallet = ?"
         )
+        if expected_refresh_enc is not None:
+            sql += " AND refresh_token_enc = ?"
+            params.append(expected_refresh_enc)
+        cur = conn.execute(sql, params)
         conn.commit()
+        return cur.rowcount > 0
     finally:
         conn.close()
 
@@ -215,11 +227,25 @@ def get_account(wallet: str, db_path: str | None = None) -> dict[str, Any] | Non
     }
 
 
-def delete_account(wallet: str, db_path: str | None = None) -> bool:
+def delete_account(
+    wallet: str,
+    db_path: str | None = None,
+    expected_refresh_enc: str | None = None,
+) -> bool:
+    """Delete a wallet's connected account. With `expected_refresh_enc` set
+    the DELETE is a compare-and-swap (same rule as rotate_tokens): it only
+    fires while the row still carries the refresh-token ciphertext whose
+    server-side rejection motivated the delete — a row replaced by a newer
+    connection is left alone."""
     ensure_x_accounts_table(db_path)
     conn = sqlite3.connect(db_path or DATABASE)
     try:
-        cur = conn.execute("DELETE FROM x_accounts WHERE wallet = ?", (wallet,))
+        params: list[Any] = [wallet]
+        sql = "DELETE FROM x_accounts WHERE wallet = ?"
+        if expected_refresh_enc is not None:
+            sql += " AND refresh_token_enc = ?"
+            params.append(expected_refresh_enc)
+        cur = conn.execute(sql, params)
         conn.commit()
         return cur.rowcount > 0
     finally:
@@ -436,6 +462,13 @@ def _refresh_lock(wallet: str) -> asyncio.Lock:
     return lock
 
 
+# Public alias: the OAuth callback's account upsert takes the same per-wallet
+# lock so a reconnect can never interleave with an in-flight refresh's
+# read→refresh→persist section (belt); the CAS predicates on rotate_tokens /
+# delete_account remain the cross-process backstop (suspenders).
+wallet_lock = _refresh_lock
+
+
 async def get_usable_access_token(wallet: str, db_path: str | None = None) -> str | None:
     """Return a live access token for `wallet`, refreshing (with atomic
     rotation persistence) if the stored one is expired. None = not
@@ -464,40 +497,44 @@ async def _get_usable_access_token_locked(wallet: str, db_path: str | None) -> s
     except XOAuthError:
         # Undecryptable tokens (rotated enc key) — the connection is dead.
         return None
+    # The exact ciphertext the refresh consumed — the CAS predicate for both
+    # the rotation write and the stale-refresh delete below. If the wallet
+    # completes a NEW OAuth callback (reconnects, possibly to a different X
+    # account) while our refresh awaits X, the row's refresh_token_enc
+    # changes and neither write may touch it.
+    consumed_refresh_enc: str = account["refresh_token_enc"]
 
     try:
         rotated = await refresh_access_token(refresh_token)
     except XOAuthError as exc:
         if exc.status in (400, 401):
-            # Refresh token revoked/expired server-side. Delete the row ONLY
-            # if it still holds the exact token we just used — if another
-            # writer (a second process; in-process racers are serialized by
-            # the lock) rotated it meanwhile, the stored connection is
-            # healthy and must survive; retry against the fresh row instead.
-            current = get_account(wallet, db_path)
-            if current is None:
-                return None
-            try:
-                stored = (
-                    decrypt_token(current["refresh_token_enc"])
-                    if current["refresh_token_enc"]
-                    else None
-                )
-            except XOAuthError:
-                stored = None
-            if stored is not None and stored != refresh_token:
+            # Refresh token revoked/expired server-side. CAS-delete the row
+            # ONLY while it still holds the exact ciphertext we just used —
+            # if another writer (a reconnect callback or a second process;
+            # in-process refreshers are serialized by the lock) replaced it
+            # meanwhile, the stored connection is healthy and must survive;
+            # retry against the fresh row instead.
+            if not delete_account(wallet, db_path, expected_refresh_enc=consumed_refresh_enc):
+                if get_account(wallet, db_path) is None:
+                    return None
                 return await _get_usable_access_token_locked(wallet, db_path)
-            delete_account(wallet, db_path)
             return None
         raise
 
     # A4: persist the rotated pair BEFORE the new access token is used —
-    # the old refresh token died the moment X rotated it.
-    rotate_tokens(
+    # the old refresh token died the moment X rotated it. Compare-and-swap:
+    # if the row no longer carries the refresh token this rotation came from
+    # (the wallet reconnected mid-refresh), DISCARD the rotation result — the
+    # row now belongs to the newer connection, whose tokens are already valid
+    # — and serve from the fresh row instead of clobbering it with the old
+    # account's credentials.
+    if not rotate_tokens(
         wallet,
         rotated["access_token"],
         rotated["refresh_token"],
         rotated["expires_at"],
         db_path,
-    )
+        expected_refresh_enc=consumed_refresh_enc,
+    ):
+        return await _get_usable_access_token_locked(wallet, db_path)
     return str(rotated["access_token"])

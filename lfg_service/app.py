@@ -868,15 +868,20 @@ async def handle_x_callback(request):
     try:
         tokens = await x_oauth.exchange_code(query["code"], pending.code_verifier)
         me = await x_oauth.fetch_me(tokens["access_token"])
-        await asyncio.to_thread(
-            x_oauth.upsert_account,
-            pending.wallet,
-            str(me.get("id", "")),
-            me.get("username"),
-            tokens["access_token"],
-            tokens["refresh_token"],
-            tokens["expires_at"],
-        )
+        # Same per-wallet lock the refresh path holds: a reconnect must not
+        # interleave with an in-flight refresh's read→refresh→persist section
+        # (the CAS predicates in rotate_tokens/delete_account are the
+        # cross-process backstop for the same race).
+        async with x_oauth.wallet_lock(pending.wallet):
+            await asyncio.to_thread(
+                x_oauth.upsert_account,
+                pending.wallet,
+                str(me.get("id", "")),
+                me.get("username"),
+                tokens["access_token"],
+                tokens["refresh_token"],
+                tokens["expires_at"],
+            )
     except x_oauth.XOAuthError as exc:
         logging.getLogger(__name__).warning(
             "X OAuth callback failed for %s: %s", pending.wallet, exc
