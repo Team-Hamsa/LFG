@@ -361,6 +361,171 @@ def test_resume_with_no_validated_burns_fails_session():
     assert sessions[0].state == burn2mint_flow.FAILED
 
 
+# -- review hardening: durability around irreversible burns -----------------
+
+
+def test_unpersistable_burn_payload_is_never_exposed(monkeypatch):
+    """Persist-before-expose: if the session record can't be written after
+    XUMM created the payload, the payload is withdrawn and the call fails —
+    a signable burn must never exist without a durable record of its uuid."""
+    real_persist = burn2mint_flow.persist
+    calls = {"n": 0}
+
+    def _flaky_persist(session):
+        calls["n"] += 1
+        if calls["n"] == 1:  # the persist-before-expose write
+            return False
+        return real_persist(session)
+
+    monkeypatch.setattr(burn2mint_flow, "persist", _flaky_persist)
+
+    async def _payload(*a, **k):
+        return {"uuid": "u-1", "xumm_url": "https://xumm.app/sign/u-1"}
+
+    cancelled = []
+
+    async def _cancel(uuid):
+        cancelled.append(uuid)
+        return True
+
+    monkeypatch.setattr(burn2mint_flow.xumm_ops, "create_burn_payload", _payload)
+    monkeypatch.setattr(burn2mint_flow.xumm_ops, "cancel_xumm_payload", _cancel)
+    s = _session(("A",))
+    ok = _run(burn2mint_flow.start_next_burn(s, nft_info=_info_fn()))
+    assert ok is False
+    assert s.burns[0].state == burn2mint_flow.B_FAILED
+    assert s.burns[0].payload_link is None  # nothing signable exposed
+    assert cancelled == ["u-1"]  # payload withdrawn at XUMM
+
+
+def test_convert_requires_durable_job_before_fulfilling(monkeypatch):
+    """Job-persist failure must NOT mark the session FULFILLING over an
+    in-memory-only job: it stays AWAITING_BURNS so the next poll/restart
+    re-converts (idempotent job id) — validated burns are never stranded."""
+    s = _session(("A",))
+    s.burns[0].state = burn2mint_flow.B_BURNED
+    s.current = 1
+    launched = []
+
+    async def _launch(job):
+        launched.append(job)
+        return job
+
+    monkeypatch.setattr(bulk_mint_flow, "persist", lambda job: False)
+    _run(burn2mint_flow.convert(s, _launch))
+    assert s.state == burn2mint_flow.AWAITING_BURNS  # NOT fulfilling
+    assert s.bulk_job_id is None
+    assert launched == []
+    monkeypatch.undo()
+    # Retry (what the next status poll / resume does) now converts fully.
+    _run(burn2mint_flow.convert(s, _launch))
+    assert s.state == burn2mint_flow.FULFILLING
+    assert len(launched) == 1
+    with open(bulk_mint_flow._record_path(launched[0].id)) as f:
+        assert json.load(f)["state"] == bulk_mint_flow.PAID
+
+
+def _patch_ledger(monkeypatch, *, signed=True, txid="TX1", validated=True, result="tesSUCCESS"):
+    async def _status(uuid):
+        return {"signed": signed, "account": WALLET, "txid": txid, "expired": False}
+
+    async def _tx(tx_hash):
+        return {
+            "validated": validated,
+            "meta": {"TransactionResult": result},
+            "tx_json": {"NFTokenID": "A", "Account": WALLET},
+        }
+
+    monkeypatch.setattr(burn2mint_flow.xumm_ops, "get_payload_status", _status)
+    monkeypatch.setattr(burn2mint_flow.xrpl_ops, "get_tx", _tx)
+
+
+def test_cancel_counts_burn_signed_just_before_cancel(monkeypatch):
+    """Cancel after signing: the validated burn is counted and converted —
+    a cancel can never orphan a burn."""
+    _patch_ledger(monkeypatch)
+    s, b = _armed(("A", "B"))
+    launched = []
+
+    async def _launch(job):
+        launched.append(job)
+        return job
+
+    _run(burn2mint_flow.cancel(s, _launch))
+    assert b.state == burn2mint_flow.B_BURNED
+    assert s.state == burn2mint_flow.FULFILLING
+    assert len(launched) == 1 and launched[0].entitlement.burn_nft_ids == ["A"]
+    assert s.burns[1].state == burn2mint_flow.B_FAILED  # never-signed remainder
+
+
+def test_cancel_parks_signed_but_unvalidated_burn(monkeypatch):
+    """Cancel while the signed tx is still validating: the burn is NOT
+    discarded — the session parks in AWAITING_BURNS until the tx resolves
+    (it can still land on-ledger after the cancel)."""
+    _patch_ledger(monkeypatch, validated=False)
+    s, b = _armed(("A",))
+
+    async def _launch(job):  # pragma: no cover - must not run while parked
+        raise AssertionError("parked session must not convert")
+
+    _run(burn2mint_flow.cancel(s, _launch))
+    assert s.state == burn2mint_flow.AWAITING_BURNS
+    assert b.state == burn2mint_flow.B_AWAITING_SIGNATURE
+    assert b.txid == "TX1"
+
+
+def test_cancel_parks_when_payload_cancel_unconfirmed(monkeypatch):
+    """Unsigned in-flight payload whose XUMM cancel cannot be confirmed may
+    still get signed — fail-closed: park, don't discard."""
+    _patch_ledger(monkeypatch, signed=False, txid=None)
+
+    async def _cancel(uuid):
+        return False
+
+    monkeypatch.setattr(burn2mint_flow.xumm_ops, "cancel_xumm_payload", _cancel)
+    s, b = _armed(("A",))
+
+    async def _launch(job):  # pragma: no cover
+        raise AssertionError("parked session must not convert")
+
+    _run(burn2mint_flow.cancel(s, _launch))
+    assert s.state == burn2mint_flow.AWAITING_BURNS
+    assert b.state == burn2mint_flow.B_AWAITING_SIGNATURE
+
+
+def test_cancel_discards_only_confirmed_dead_payload(monkeypatch):
+    _patch_ledger(monkeypatch, signed=False, txid=None)
+
+    async def _cancel(uuid):
+        return True
+
+    monkeypatch.setattr(burn2mint_flow.xumm_ops, "cancel_xumm_payload", _cancel)
+    s, b = _armed(("A",))
+
+    async def _launch(job):  # pragma: no cover
+        raise AssertionError("nothing burned; no job")
+
+    _run(burn2mint_flow.cancel(s, _launch))
+    assert s.state == burn2mint_flow.CANCELLED
+    assert b.state == burn2mint_flow.B_FAILED
+
+
+def test_resume_parks_signed_but_unvalidated_burn(monkeypatch):
+    """Restart with a signed-but-unvalidated burn in flight: never discarded —
+    the session stays AWAITING_BURNS (durable, resumable) until it resolves."""
+    _patch_ledger(monkeypatch, validated=False)
+    s, b = _armed(("A",))
+    b.txid = "TX1"
+    assert burn2mint_flow.persist(s)
+
+    async def _launch(job):  # pragma: no cover
+        raise AssertionError("parked session must not convert")
+
+    sessions = _run(burn2mint_flow.resume_all(_launch))
+    assert sessions[0].state == burn2mint_flow.AWAITING_BURNS
+    assert sessions[0].burns[0].state == burn2mint_flow.B_AWAITING_SIGNATURE
+
+
 # -- service layer: flag + endpoints ---------------------------------------
 
 
@@ -473,6 +638,7 @@ def test_launch_burn_mint_job_adopts_registered_job(dev_auth):
     s = _session(("A",))
     s.burns[0].state = burn2mint_flow.B_BURNED
     job = burn2mint_flow.build_mint_job(s)
+    job.task = object()  # already running elsewhere; adopter must not relaunch
     server.bulk_sessions[job.id] = job
 
     async def _go():

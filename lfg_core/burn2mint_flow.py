@@ -274,7 +274,36 @@ async def start_next_burn(session: Burn2MintSession, *, nft_info: Any = None) ->
     burn.payload_uuid = payload.get("uuid")
     burn.payload_link = payload.get("xumm_url")
     burn.state = B_AWAITING_SIGNATURE
-    persist(session)
+    # PERSIST-BEFORE-EXPOSE: a signable burn payload must never outlive the
+    # process without a durable record of its uuid — if the user signed it
+    # after a crash, recovery could not find the validated burn and the NFT
+    # would be destroyed with no entitlement. If the record can't be written,
+    # withdraw the payload (best-effort cancel) and refuse instead of
+    # exposing it; nothing is burned, the user simply retries.
+    if not persist(session):
+        cancelled = False
+        if burn.payload_uuid:
+            try:
+                cancelled = bool(await xumm_ops.cancel_xumm_payload(burn.payload_uuid))
+            except Exception:
+                pass
+        burn.state = B_FAILED
+        burn.error = "burn record not durable"
+        burn.payload_link = None  # keep payload_uuid for manual reconciliation
+        persist(session)
+        if not cancelled:
+            # The payload could not be confirmed withdrawn AND the record is
+            # (or was) not durable: if the user somehow signs it (push
+            # delivery), the burn would be untracked on disk. The uuid stays
+            # on the burn record for reconciliation; scream for the operator.
+            logging.critical(
+                "burn2mint %s: unpersistable burn payload %s for %s could not "
+                "be cancelled — reconcile manually if it gets signed",
+                session.id,
+                burn.payload_uuid,
+                burn.nft_id,
+            )
+        return False
     return True
 
 
@@ -401,19 +430,29 @@ async def convert(session: Burn2MintSession, launch_job: Any) -> None:
         persist(session)
         return
     job = build_mint_job(session)
-    # Persist the job record FIRST (durable owed-mints ledger), then the
-    # session pointer. Crash between the two: resume finds the session
-    # without bulk_job_id, rebuilds the SAME job id, and the existing record
-    # is honoured instead of double-created (launch_job idempotence).
+    # Persist the job record FIRST (durable owed-mints ledger); only a
+    # durable job may flip the session to FULFILLING. If the job record
+    # cannot be written, the session STAYS AWAITING_BURNS (all burns already
+    # resolved), which advance()/resume_all() re-convert on the next poll or
+    # restart — the deterministic job id (b2m<session_id>) makes that retry
+    # target the same record, never a double-create. Marking FULFILLING over
+    # an in-memory-only job would let a crash strand the validated burns:
+    # startup would skip reconversion and the next status poll would mark the
+    # session DONE with no job ever recorded.
     if not bulk_mint_flow.persist(job):
+        session.error = "mint-job record not durable; conversion will retry"
+        persist(session)
         logging.critical(
             "burn2mint %s: mint-job record failed to persist — validated burns %s "
-            "are safe in the session record; conversion retries on resume",
+            "stay convertible (session remains awaiting_burns); retried on next "
+            "poll/restart",
             session.id,
             burned,
         )
+        return
     session.bulk_job_id = job.id
     session.state = FULFILLING
+    session.error = None
     persist(session)
     await launch_job(job)
 
@@ -450,30 +489,58 @@ async def advance(
     await convert(session, launch_job)
 
 
+async def _discard_or_park_inflight(session: Burn2MintSession, cur: Burn) -> bool:
+    """Resolve/withdraw the in-flight burn during cancel/resume. Returns True
+    when the burn is RESOLVED (B_BURNED/B_FAILED); False when it must be
+    PARKED — still awaiting, because the signed (or unwithdrawable) tx may
+    yet validate on-ledger. FAIL-CLOSED: a burn is discarded only when it
+    provably cannot land — never-signed AND confirmed cancelled at XUMM. A
+    signed-but-unvalidated burn, an indeterminate payload status, or an
+    unconfirmed cancel all park (the tx could still burn the NFT after we
+    forgot it — the exact hole this closes)."""
+    await _check_signed_burn(session, cur)
+    if cur.state != B_AWAITING_SIGNATURE:
+        return True
+    if cur.txid is not None:
+        return False  # signed: it can still validate — never discard
+    cancelled = False
+    if cur.payload_uuid:
+        try:
+            cancelled = bool(await xumm_ops.cancel_xumm_payload(cur.payload_uuid))
+        except Exception:
+            pass
+    if not cancelled:
+        # Cancel unconfirmed (XUMM error, or the payload already resolved —
+        # possibly SIGNED — between our status check and the cancel): the
+        # burn may still land. Park it.
+        return False
+    cur.state = B_FAILED
+    cur.error = "cancelled"
+    persist(session)
+    return True
+
+
 async def cancel(session: Burn2MintSession, launch_job: Any) -> None:
     """Back out of the signing loop. Burns already validated are IRREVERSIBLE
     and still convert into mints (a cancel can never orphan a burn); with no
-    validated burns the session simply cancels. The in-flight payload is
-    best-effort cancelled either way."""
+    validated burns the session simply cancels. An in-flight payload that is
+    signed (or cannot be confirmed withdrawn) PARKS the session in
+    AWAITING_BURNS instead of being discarded — the tx can still validate
+    after a cancel, and forgetting it would burn the NFT with no entitlement;
+    the next poll / startup resume resolves it and then converts/cancels."""
     if session.state != AWAITING_BURNS:
         return
+    for b in session.burns:
+        if b.state == B_PENDING:
+            b.state = B_FAILED
+            b.error = "cancelled"
     if session.current < len(session.burns):
         cur = session.burns[session.current]
         if cur.state == B_AWAITING_SIGNATURE and cur.payload_uuid:
-            # Race: the user may have signed just before cancelling — resolve
-            # the in-flight payload once before deciding.
-            await _check_signed_burn(session, cur)
-            if cur.state == B_AWAITING_SIGNATURE:
-                cur.state = B_FAILED
-                cur.error = "cancelled"
-                try:
-                    await xumm_ops.cancel_xumm_payload(cur.payload_uuid)
-                except Exception:
-                    pass
-        for b in session.burns:
-            if b.state == B_PENDING:
-                b.state = B_FAILED
-                b.error = "cancelled"
+            if not await _discard_or_park_inflight(session, cur):
+                session.error = "cancel pending: in-flight burn must resolve first"
+                persist(session)
+                return  # parked: still AWAITING_BURNS, resolved by poll/resume
     if session.burned_ids():
         await convert(session, launch_job)
         return
@@ -493,22 +560,41 @@ async def resume_all(launch_job: Any) -> list[Burn2MintSession]:
     - AWAITING_BURNS sessions re-check the one in-flight payload (a burn
       signed just before the crash still counts), then convert whatever
       validated. Unsigned remainders are NOT re-solicited — no client is
-      attached — the user simply keeps those NFTs. Runs regardless of
-      BURN_TO_MINT_ENABLED: validated burns are owed their mints even if the
-      feature was flipped off."""
+      attached — the user simply keeps those NFTs. An in-flight burn that is
+      signed-but-unvalidated (or whose payload cannot be confirmed dead) is
+      NEVER discarded: the session PARKS in AWAITING_BURNS — still durable,
+      still resumable, still advanceable by a status poll — until the tx
+      resolves (an unsigned payload self-resolves via its 15-min expiry, so
+      a parked session converts on a later poll/restart at the latest).
+      Runs regardless of BURN_TO_MINT_ENABLED: validated burns are owed
+      their mints even if the feature was flipped off."""
     sessions = load_all_resumable()
     for session in sessions:
         try:
             if session.state == FULFILLING:
                 continue
-            if session.current < len(session.burns):
-                cur = session.burns[session.current]
-                if cur.state == B_AWAITING_SIGNATURE:
-                    await _check_signed_burn(session, cur)
             for b in session.burns:
-                if b.state in (B_PENDING, B_AWAITING_SIGNATURE):
+                if b.state == B_PENDING:
                     b.state = B_FAILED
-                    b.error = b.error or "service restarted before signing completed"
+                    b.error = "service restarted before signing completed"
+            parked = False
+            for b in session.burns:
+                if b.state != B_AWAITING_SIGNATURE:
+                    continue
+                if not b.payload_uuid:
+                    b.state = B_FAILED
+                    b.error = "service restarted before signing completed"
+                    continue
+                if not await _discard_or_park_inflight(session, b):
+                    parked = True
+            if parked:
+                persist(session)
+                logging.warning(
+                    "burn2mint %s: in-flight burn unresolved at resume — session "
+                    "parked awaiting_burns until the tx/payload resolves",
+                    session.id,
+                )
+                continue
             await convert(session, launch_job)
         except Exception:
             logging.exception("burn2mint resume failed for session %s", session.id)
