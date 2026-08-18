@@ -116,3 +116,13 @@ def test_certification_mode_never_calls_filter():
     idx = src.index("skip_burned_before_window")
     guard = src.rindex("if args.catch_up_from_gap", 0, idx)
     assert guard != -1
+
+
+def test_nonpositive_burn_ledger_paged():
+    # Malformed evidence (0 / negative ledger index) must not count as proof
+    # the burn predates the window — fail closed and page the token.
+    oconn = _onchain_db([("A", 1), ("B", 1)])
+    hconn = _history_db([("A", 0), ("B", -5)])
+    kept, skipped = bh.skip_burned_before_window(oconn, hconn, ["A", "B"], WINDOW_MIN)
+    assert kept == ["A", "B"]
+    assert skipped == 0

@@ -272,7 +272,9 @@ def skip_burned_before_window(
                 # nft_events missing/unreadable: no proof — page everything.
                 return ids, 0
             burn_li = row[0] if row else None
-            if isinstance(burn_li, int) and burn_li < window_min:
+            # A non-positive ledger index is malformed burn evidence, not proof
+            # the burn predates the window — fail closed and page the token.
+            if isinstance(burn_li, int) and 0 < burn_li < window_min:
                 skipped += 1
                 continue
         kept.append(nft_id)
