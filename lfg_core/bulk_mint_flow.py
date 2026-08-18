@@ -15,6 +15,7 @@ import os
 import tempfile
 import time
 import uuid
+from collections.abc import Awaitable, Callable
 from dataclasses import asdict, dataclass
 from decimal import Decimal
 from typing import Any
@@ -56,6 +57,49 @@ class CollectionFull(Exception):
     """No headroom under MAX_COLLECTION_SIZE."""
 
 
+# #253: per-unit firehose publisher, injected by the service layer (which owns
+# the event bus — lfg_core must not import lfg_service). lfg_service.app sets
+# this to a coroutine that publishes a single-mint-shaped mint.completed event
+# for one OFFERED unit. None (CLI / tests without the service) = no events.
+unit_event_publisher: Callable[[BulkMintJob, Unit], Awaitable[None]] | None = None
+
+
+async def publish_unit_events(job: BulkMintJob) -> None:
+    """Publish mint.completed for every OFFERED-but-unpublished unit (#253).
+
+    Same posture as the service's server-side _publish_mint_terminal for
+    single mints: runs inside the background fulfillment task so a killed
+    client can't suppress events, is idempotent via the durable per-unit
+    `published` flag (set only AFTER the hook returns, then persisted — a
+    crash between publish and persist leaves the rare sub-tick double-publish
+    window, which consumers dedup by nft_id), and NEVER raises — a bus
+    failure logs and leaves the unit unpublished for a later pass/resume to
+    retry, without ever failing the mint/offer path."""
+    hook = unit_event_publisher
+    if hook is None:
+        return
+    dirty = False
+    for unit in job.units:
+        if unit.state != OFFERED or unit.published or not unit.nft_id:
+            continue
+        try:
+            await hook(job, unit)
+        except asyncio.CancelledError:
+            raise
+        except Exception as e:
+            logging.error(
+                "bulk job %s unit %d: mint.completed publish failed (retried later): %s",
+                job.id,
+                unit.index,
+                e,
+            )
+            continue
+        unit.published = True
+        dirty = True
+    if dirty:
+        persist(job)
+
+
 @dataclass
 class Unit:
     index: int
@@ -65,6 +109,15 @@ class Unit:
     image_url: str | None = None
     offer_id: str | None = None
     error: str | None = None
+    # #253: LFG-naming traits dict + body_type (same fields UnitResult carries
+    # since #41 PR-1), persisted so a resumed job can still publish a fully
+    # shaped mint.completed event for a unit minted by a prior process.
+    traits: dict[str, str] | None = None
+    body_type: str | None = None
+    # #253: durable per-unit firehose-published flag. Set only AFTER the
+    # publish hook returns successfully, then persisted — a unit re-offered /
+    # re-processed on resume never emits a second mint.completed event.
+    published: bool = False
 
 
 class BulkMintJob:
@@ -578,6 +631,8 @@ async def _fulfill_unit(job: BulkMintJob, unit: Unit) -> None:
             unit.nft_id = res.nft_id
             unit.nft_number = res.nft_number
             unit.image_url = res.image_url
+            unit.traits = res.traits
+            unit.body_type = res.body_type
             if res.offer_id:
                 unit.offer_id = res.offer_id
                 unit.state = OFFERED
@@ -713,6 +768,10 @@ async def run_bulk_mint_job(job: BulkMintJob) -> None:
                 await _fulfill_unit(job, unit)
             processed_any = True
             persist(job)
+            # #253: announce this unit (and any straggler) now that its
+            # OFFERED state is durable. Never raises; failures retry on the
+            # next pass / resume.
+            await publish_unit_events(job)
 
         # Bounded final re-offer pass: a unit that minted but never reached
         # OFFERED (transient offer failure during the loop above) gets a
@@ -726,6 +785,12 @@ async def run_bulk_mint_job(job: BulkMintJob) -> None:
                 persist(job)
                 if unit.state == OFFERED:
                     break
+
+        # #253: final publish sweep. Covers units offered in the re-offer
+        # pass above AND resume paths where every unit was already OFFERED
+        # (the main loop `continue`s them) but a pre-crash process never got
+        # to publish — the durable per-unit flag makes this idempotent.
+        await publish_unit_events(job)
 
         # Completion is conditional on every unit having reached a resolved
         # state (OFFERED or UNIT_FAILED). A unit stuck at MINTED means the
