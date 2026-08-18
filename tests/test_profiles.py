@@ -168,3 +168,90 @@ def test_db_error_fails_closed(tmp_path, monkeypatch):
         identity.profile_for("discord", "1")
     with pytest.raises(identity.ProfileError):
         identity.merge_profiles(1, 2)
+
+
+def test_ensure_surfaces_merge_conflicts(tmp_path, monkeypatch):
+    # Unifying a multi-profile bucket must not discard conflict info: the
+    # reports come back on the ensure result (and are logged at WARNING).
+    _fresh_db(tmp_path, monkeypatch)
+    identity.link("discord", "1", "bob", "rW1")
+    identity.link("telegram", "9", "eve", "rW2")
+    pa = identity.ensure_profile_for("discord", "1")
+    pb = identity.ensure_profile_for("telegram", "9")
+    assert pa["merge_reports"] == []
+    identity.link("web", "rW3", "w", "rW1")
+    identity.link("web", "rW3", "w", "rW2")  # bridges both buckets
+    p = identity.ensure_profile_for("web", "rW3")
+    assert len(p["merge_reports"]) == 1
+    report = p["merge_reports"][0]
+    assert report["winner"] == min(pa["id"], pb["id"])
+    assert report["loser"] == max(pa["id"], pb["id"])
+    assert report["conflicts"]["display_name"] == {"kept": "bob", "discarded": "eve"}
+
+
+def test_profiled_identity_joining_profiled_bucket_reconciles(tmp_path, monkeypatch):
+    # An ALREADY-profiled identity whose bucket gained a second profile via a
+    # new wallet link is reconciled on ensure (no early-return split bucket).
+    _fresh_db(tmp_path, monkeypatch)
+    identity.link("discord", "1", "bob", "rW1")
+    identity.link("telegram", "9", "eve", "rW2")
+    pa = identity.ensure_profile_for("discord", "1")
+    pb = identity.ensure_profile_for("telegram", "9")
+    identity.link("discord", "1", "bob", "rW2")  # joins the buckets
+    p = identity.ensure_profile_for("discord", "1")  # caller already profiled
+    winner = min(pa["id"], pb["id"])
+    assert p["id"] == winner
+    assert len(p["merge_reports"]) == 1
+    # both identities now resolve to the single surviving profile
+    assert identity.profile_for("discord", "1")["profile"]["id"] == winner
+    assert identity.profile_for("telegram", "9")["profile"]["id"] == winner
+    assert len(identity.profile_for("telegram", "9")["identities"]) == 2
+
+
+def test_double_ensure_converges_single_profile(tmp_path, monkeypatch):
+    # Find-or-create is serialized (BEGIN IMMEDIATE): overlapping ensures for
+    # two members of one profile-less bucket converge on ONE profile. True
+    # concurrency is untestable deterministically; assert the convergence
+    # property the transaction guarantees — the later ensure re-reads the
+    # bucket inside the write lock and attaches instead of inserting, leaving
+    # exactly one profile row.
+    db = _fresh_db(tmp_path, monkeypatch)
+    identity.link("discord", "1", "bob", "rW1")
+    identity.link("telegram", "9", "bob_tg", "rW1")  # same bucket
+    p1 = identity.ensure_profile_for("discord", "1")
+    p2 = identity.ensure_profile_for("telegram", "9")
+    p3 = identity.ensure_profile_for("discord", "1")
+    assert p1["id"] == p2["id"] == p3["id"]
+    conn = sqlite3.connect(db)
+    try:
+        live = conn.execute("SELECT COUNT(*) FROM profiles WHERE merged_into IS NULL").fetchone()[0]
+        total = conn.execute("SELECT COUNT(*) FROM profiles").fetchone()[0]
+    finally:
+        conn.close()
+    assert live == 1
+    assert total == 1  # attach, not insert-then-merge
+
+
+def test_ensure_blocks_on_concurrent_writer(tmp_path, monkeypatch):
+    # The write lock is real: with another connection holding BEGIN IMMEDIATE,
+    # ensure cannot sneak its read-decide-write through — it fails closed
+    # (ProfileError on lock timeout) rather than double-inserting.
+    db = _fresh_db(tmp_path, monkeypatch)
+    identity.link("discord", "1", "bob", "rW1")
+    blocker = sqlite3.connect(db, isolation_level=None)
+    try:
+        blocker.execute("BEGIN IMMEDIATE")
+        real_connect = sqlite3.connect
+        monkeypatch.setattr(
+            identity.sqlite3,
+            "connect",
+            lambda *a, **k: real_connect(*a, timeout=0.1, **k),
+        )
+        with pytest.raises(identity.ProfileError):
+            identity.ensure_profile_for("discord", "1")
+    finally:
+        blocker.execute("ROLLBACK")
+        blocker.close()
+    # and once the lock is released, ensure succeeds normally
+    p = identity.ensure_profile_for("discord", "1")
+    assert p["id"] >= 1

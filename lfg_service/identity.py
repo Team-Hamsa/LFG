@@ -499,20 +499,36 @@ def _bucket_profile_ids(conn: sqlite3.Connection, bucket: dict[str, object]) -> 
 def ensure_profile_for(platform: str, platform_user_id: str) -> dict[str, object]:
     """Find-or-create the profile for an identity.
 
-    If any member of the identity's #206 bucket already has a profile, this
-    identity is attached to it (if the bucket somehow spans several profiles,
-    they are merged first — deterministic winner, see merge_profiles). Only
-    when the whole bucket is profile-less is a new profile created, seeded
-    with the identity's display_handle.
+    This is the CONVERGENCE POINT for a bucket: every call unifies ALL
+    profiles attached to any member of the identity's #206 bucket (including
+    the caller's own — an already-profiled identity whose bucket gained a
+    second profile via a new wallet link is reconciled here, not skipped),
+    then attaches the identity to the survivor. Only when the whole bucket is
+    profile-less is a new profile created, seeded with the identity's
+    display_handle. Deterministic winner: the oldest (smallest-id) profile —
+    see merge_profiles.
+
+    Serialized find-or-create: the read-decide-write runs inside a BEGIN
+    IMMEDIATE transaction (the lfg_core/headroom.py precedent — one writer
+    wins), so two overlapping ensures for the same identity or bucket cannot
+    both observe "no profile" and double-insert; the second call re-reads
+    after the first commits and attaches to the same profile.
 
     Raises BucketLookupError / ProfileError on infrastructure failure and
     ProfileError for an unknown identity (fail-closed — never guesses).
-    Returns the profile dict (same shape as profile_for()["profile"]).
+    Returns the profile dict (profile_for()["profile"] shape) plus a
+    "merge_reports" key: the conflict reports of any merges this call
+    performed (see merge_profiles; [] when none). Conflicted merges are
+    additionally logged at WARNING — conflict info is never silently
+    discarded.
     """
     bucket = bucket_for(platform, platform_user_id)  # may raise BucketLookupError
     conn = None
     try:
-        conn = sqlite3.connect(DATABASE)
+        # isolation_level=None: explicit BEGIN IMMEDIATE / COMMIT control;
+        # closing without COMMIT rolls back.
+        conn = sqlite3.connect(DATABASE, isolation_level=None)
+        conn.execute("BEGIN IMMEDIATE")
         ident = conn.execute(
             "SELECT account_id, display_handle FROM identities "
             "WHERE platform = ? AND platform_user_id = ?",
@@ -520,13 +536,23 @@ def ensure_profile_for(platform: str, platform_user_id: str) -> dict[str, object
         ).fetchone()
         if ident is None:
             raise ProfileError(f"unknown identity ({platform!r}, {platform_user_id!r})")
+        profile_ids = set(_bucket_profile_ids(conn, bucket)) if bucket else set()
         if ident[0] is not None:
-            return _profile_row(conn, _resolve_merged(conn, ident[0]))
-        existing = _bucket_profile_ids(conn, bucket) if bucket else []
-        if existing:
-            winner = existing[0]
-            for loser in existing[1:]:
-                _merge_in_conn(conn, winner, loser)
+            profile_ids.add(_resolve_merged(conn, ident[0]))
+        merge_reports: list[dict[str, object]] = []
+        if profile_ids:
+            ordered = sorted(profile_ids)
+            winner = ordered[0]
+            for loser in ordered[1:]:
+                report = _merge_in_conn(conn, winner, loser)
+                if report["conflicts"]:
+                    logging.warning(
+                        "identity.ensure_profile_for merged profile %s into %s with conflicts: %s",
+                        loser,
+                        winner,
+                        report["conflicts"],
+                    )
+                merge_reports.append(report)
         else:
             cur = conn.execute("INSERT INTO profiles (display_name) VALUES (?)", (ident[1],))
             winner = int(cur.lastrowid)  # type: ignore[arg-type]
@@ -534,8 +560,10 @@ def ensure_profile_for(platform: str, platform_user_id: str) -> dict[str, object
             "UPDATE identities SET account_id = ? WHERE platform = ? AND platform_user_id = ?",
             (winner, platform, platform_user_id),
         )
-        conn.commit()
-        return _profile_row(conn, winner)
+        conn.execute("COMMIT")
+        profile = _profile_row(conn, winner)
+        profile["merge_reports"] = merge_reports
+        return profile
     except ProfileError:
         raise
     except Exception as e:
