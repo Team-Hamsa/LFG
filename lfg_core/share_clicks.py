@@ -69,3 +69,46 @@ def record_click(
     except sqlite3.Error:
         log.warning("share_clicks write failed (nft #%s)", nft_number, exc_info=True)
         return False
+
+
+def conversion_rows(db_file: str, network: str, limit: int = 100) -> list[dict[str, int | str]]:
+    """Share->mint conversion aggregate (#273): per sharer wallet, how many
+    (non-bot) share-link clicks their links drew and how many mints were
+    attributed to them (LFG.referrer). Read-only, two indexed GROUP BYs merged
+    in Python — deliberately a small aggregate rather than a full leaderboard
+    board: attribution is metrics-only (no rewards) and the row set is tiny.
+    Missing tables/columns (fresh DB, pre-migration) read as empty, never
+    raise."""
+    clicks: dict[str, int] = {}
+    mints: dict[str, int] = {}
+    try:
+        conn = sqlite3.connect(db_file)
+        try:
+            _ensure_schema(conn)
+            for wallet, n in conn.execute(
+                "SELECT ref_wallet, COUNT(*) FROM share_clicks"
+                " WHERE ref_wallet IS NOT NULL AND is_bot = 0 GROUP BY ref_wallet"
+            ):
+                clicks[wallet] = n
+            try:
+                for wallet, n in conn.execute(
+                    "SELECT referrer, COUNT(*) FROM LFG"
+                    " WHERE referrer IS NOT NULL AND network = ? GROUP BY referrer",
+                    (network,),
+                ):
+                    mints[wallet] = n
+            except sqlite3.Error:
+                # LFG table/referrer column not there yet — no attributed
+                # mints to report; clicks alone are still useful.
+                pass
+        finally:
+            conn.close()
+    except sqlite3.Error:
+        log.warning("share conversion read failed", exc_info=True)
+        return []
+    rows: list[dict[str, int | str]] = [
+        {"wallet": w, "clicks": clicks.get(w, 0), "mints": mints.get(w, 0)}
+        for w in set(clicks) | set(mints)
+    ]
+    rows.sort(key=lambda r: (-int(r["mints"]), -int(r["clicks"]), str(r["wallet"])))
+    return rows[: max(1, min(limit, 500))]
