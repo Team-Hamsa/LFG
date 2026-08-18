@@ -2399,6 +2399,21 @@ function closetStatus() {
   return (economyState.closet && economyState.closet.token && economyState.closet.token.status) || 'none';
 }
 
+// #386: a transient upstream failure while minting the Closet comes back as a
+// structured retryable 503 ({error: 'closet_mint_transient', retryable: true}).
+// ensure_closet is idempotent server-side, so clicking again is always safe —
+// say so instead of showing a generic dead failure.
+function closetFailure(e, gateBtn) {
+  if (e.body && e.body.retryable) {
+    showError('Temporary problem creating your Closet — nothing was lost. Please try again.');
+    gateBtn.textContent = 'Try again';
+  } else {
+    showError(e.message);
+  }
+  gateBtn.disabled = false;
+  status('');
+}
+
 async function openDressup() {
   showPanel('dressup-panel');
   clearPending();
@@ -2455,9 +2470,7 @@ async function openDressup() {
             economyState = await api('/api/economy');
             openDressup();
           } catch (e) {
-            showError(e.message);
-            gateBtn.disabled = false;
-            status('');
+            closetFailure(e, gateBtn);
           }
         };
       } else {
@@ -2477,9 +2490,7 @@ async function openDressup() {
             economyState = await api('/api/economy');
             openDressup();
           } catch (e) {
-            showError(e.message);
-            gateBtn.disabled = false;
-            status('');
+            closetFailure(e, gateBtn);
           }
         };
       }

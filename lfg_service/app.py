@@ -3593,6 +3593,20 @@ async def handle_closet(request):
         result = await economy_api.start_closet(
             user["id"], request["wallet"], user_token=await _push_token(user)
         )
+    except closet_token.ClosetIndeterminateError as e:
+        # Outcome unknown — do NOT advertise a retry (a re-run could mint a
+        # duplicate issuer-held token); keep the opaque 502.
+        logging.error(f"start_closet indeterminate for {user['id']}: {e}")
+        return web.json_response({"error": "could not create or retrieve Closet"}, status=502)
+    except closet_token.ClosetError as e:
+        # Definitive failure of a single step (mint/offer returned falsey) —
+        # usually upstream rippled flakiness (#385/#386). A retry is safe:
+        # ensure_closet records nothing when the mint never committed, and
+        # records the minted token BEFORE the offer step when it did, so a
+        # re-run either mints fresh or re-offers the SAME token — never a
+        # duplicate mint. Surface a structured, retryable 503, not a dead 502.
+        logging.warning(f"start_closet transient failure for {user['id']}: {e}")
+        return web.json_response({"error": "closet_mint_transient", "retryable": True}, status=503)
     except Exception as e:
         logging.error(f"start_closet failed for {user['id']}: {e}")
         return web.json_response({"error": "could not create or retrieve Closet"}, status=502)
