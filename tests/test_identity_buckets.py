@@ -87,9 +87,38 @@ def test_bucket_id_deterministic(tmp_path, monkeypatch):
     _fresh_db(tmp_path, monkeypatch)
     identity.link("telegram", "9", "b", "rW1")
     identity.link("discord", "1", "b", "rW1")
-    # lexicographically smallest member key, regardless of query entry point
-    assert identity.bucket_for("telegram", "9")["bucket_id"] == "discord:1"
-    assert identity.bucket_for("discord", "1")["bucket_id"] == "discord:1"
+    # lexicographically smallest member key, regardless of query entry point;
+    # JSON-encoded so separator characters in either field cannot collide
+    assert identity.bucket_for("telegram", "9")["bucket_id"] == '["discord", "1"]'
+    assert identity.bucket_for("discord", "1")["bucket_id"] == '["discord", "1"]'
+
+
+def test_bucket_id_separator_collision(tmp_path, monkeypatch):
+    # ("a:b", "c") and ("a", "b:c") must NOT share a bucket_id when they have
+    # no shared wallet (a ":"-joined id would collide as "a:b:c").
+    _fresh_db(tmp_path, monkeypatch)
+    identity.link("a:b", "c", "x", "rW1")
+    identity.link("a", "b:c", "y", "rW2")
+    b1 = identity.bucket_for("a:b", "c")
+    b2 = identity.bucket_for("a", "b:c")
+    assert b1["bucket_id"] != b2["bucket_id"]
+    assert not identity.same_bucket(("a:b", "c"), ("a", "b:c"))
+
+
+def test_db_failure_fails_closed(tmp_path, monkeypatch):
+    # A database failure must raise BucketLookupError — never read as
+    # "unknown identity" / not-same-bucket, which would fail a gate open.
+    _fresh_db(tmp_path, monkeypatch)
+    identity.link("discord", "1", "bob", "rW1")
+    monkeypatch.setattr(identity, "DATABASE", str(tmp_path))  # a directory: queries fail
+    import pytest
+
+    with pytest.raises(identity.BucketLookupError):
+        identity.bucket_for("discord", "1")
+    with pytest.raises(identity.BucketLookupError):
+        identity.same_bucket(("discord", "1"), ("telegram", "9"))
+    with pytest.raises(identity.BucketLookupError):
+        identity.bucket_overlaps("discord", "1", identities={("x", "y")})
 
 
 def test_seed_backfill_from_existing_identities(tmp_path, monkeypatch):

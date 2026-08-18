@@ -3,6 +3,7 @@
 # The wallet is the canonical account; account_id is a reserved hook for
 # future linked multi-surface profiles (nullable, unused now).
 
+import json
 import logging
 import sqlite3
 
@@ -278,14 +279,27 @@ def handle_for_wallet(wallet: str) -> str | None:
 # ---------------------------------------------------------------------------
 
 
+class BucketLookupError(Exception):
+    """A bucket lookup failed for infrastructure reasons (DB error).
+
+    Deliberately distinct from the None "unknown identity" result: bucket
+    resolution backs per-human gating, so an infrastructure failure must fail
+    CLOSED — callers must deny (or propagate), never treat it as "no bucket".
+    This is an intentional exception to this module's never-raises style.
+    """
+
+
 def bucket_for(platform: str, platform_user_id: str) -> dict[str, object] | None:
     """Resolve the logical-user bucket containing an identity.
 
-    Returns None for an unknown identity (no wallet_links row) or on DB error.
+    Returns None ONLY for an unknown identity (no wallet_links row); raises
+    BucketLookupError on any database failure (fail-closed — see above).
     Otherwise a dict:
-      - "bucket_id": deterministic stable id — the lexicographically smallest
-        "platform:platform_user_id" member key (stable as long as that member
-        exists; adding links can only merge buckets, never split them).
+      - "bucket_id": deterministic stable id — the JSON encoding of the
+        lexicographically smallest [platform, platform_user_id] member key
+        (unambiguous even when a field contains ":" or other separators;
+        stable as long as that member exists; adding links can only merge
+        buckets, never split them).
       - "identities": sorted list of {"platform", "platform_user_id"} members.
       - "wallets": sorted list of every wallet ever linked by any member.
 
@@ -327,13 +341,13 @@ def bucket_for(platform: str, platform_user_id: str) -> dict[str, object] | None
                         frontier_ids.append((p, uid))
         members = sorted(identities)
         return {
-            "bucket_id": f"{members[0][0]}:{members[0][1]}",
+            "bucket_id": json.dumps(list(members[0])),
             "identities": [{"platform": p, "platform_user_id": uid} for p, uid in members],
             "wallets": sorted(wallets),
         }
     except Exception as e:
         logging.error(f"identity.bucket_for failed: {e}")
-        return None
+        raise BucketLookupError(f"bucket lookup failed for {platform!r}: {e}") from e
     finally:
         if conn is not None:
             conn.close()
@@ -341,7 +355,9 @@ def bucket_for(platform: str, platform_user_id: str) -> dict[str, object] | None
 
 def same_bucket(a: tuple[str, str], b: tuple[str, str]) -> bool:
     """True when two (platform, platform_user_id) identities resolve to the
-    same logical-user bucket. Unknown identities are never the same bucket."""
+    same logical-user bucket. Unknown identities are never the same bucket.
+    Raises BucketLookupError on DB failure (fail-closed; never a silent
+    False)."""
     ba = bucket_for(*a)
     return (
         ba is not None and (bb := bucket_for(*b)) is not None and ba["bucket_id"] == bb["bucket_id"]
@@ -365,6 +381,11 @@ def bucket_overlaps(
     An unknown identity (no bucket) only matches on nothing, so this is safe to
     call unconditionally in front of an existing per-identity (B1) check: it
     can only widen the deny set, never grant.
+
+    FAIL-CLOSED: a database failure raises BucketLookupError instead of
+    quietly degrading to the direct-identity fallback (which could return
+    False while a linked identity in the bucket has already claimed). Gating
+    callers must treat the exception as deny.
 
     NOTE: this is a capability, not live wiring — the shipped sponsored free
     mint gates per-wallet on the SourceTag archive and is unchanged; the parked
