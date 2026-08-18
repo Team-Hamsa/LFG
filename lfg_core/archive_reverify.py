@@ -421,6 +421,33 @@ def make_request_fn(
     return request_fn
 
 
+def certification_lock_path(history_db_path: str) -> str:
+    """Sidecar advisory-lock file guarding certification writers for one archive."""
+    return history_db_path + ".certify.lock"
+
+
+def acquire_certification_lock(history_db_path: str) -> Any | None:
+    """Serialize archive certification/catch-up writers across processes.
+
+    Every path that can record an archive baseline for this history DB — the
+    manual/auto `backfill_history.py` certify modes (incl. the listener's #402
+    auto catch-up subprocess) and the service's #341 Start-time auto-reverify —
+    must hold this flock for the duration of its sweep, so two catch-ups can
+    never interleave against the same archive. Non-blocking: returns an open
+    file handle to keep until done (`.close()` releases), or None when another
+    certification run already holds it. The kernel releases a dead holder's
+    flock automatically, so a crashed run can never wedge the lock."""
+    import fcntl
+
+    fh = open(certification_lock_path(history_db_path), "a+")
+    try:
+        fcntl.flock(fh.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+    except OSError:
+        fh.close()
+        return None
+    return fh
+
+
 _ATTESTATION_RE = re.compile(r"^auto-reverify at \S+ \(baseline: (?P<orig>.*)\)$", re.DOTALL)
 
 

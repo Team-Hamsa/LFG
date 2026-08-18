@@ -1076,13 +1076,29 @@ async def _reverify_in_thread(history_db: str, network: str) -> archive_reverify
     loop in a worker thread, so the DB writes and the paced clio requests never
     block whatever loop `run_archive_reverify` is running on.
     """
-    conn = history_store.init_history_db(history_db)
+    # Cross-process single-flight (#402): the listener's auto catch-up and the
+    # manual backfill_history certify modes hold the same advisory flock. If a
+    # bounded catch-up is already repairing this archive, fail this reverify
+    # attempt cleanly (the operator can press Start again once it finishes)
+    # rather than sweep concurrently against the same DB.
+    lock = archive_reverify.acquire_certification_lock(history_db)
+    if lock is None:
+        return archive_reverify.ReverifyResult(
+            False,
+            "certification_lock_busy: another catch-up/certification run is active",
+            None,
+            None,
+        )
     try:
-        async with _reverify_client() as client:
-            request_fn = archive_reverify.make_request_fn(client)
-            return await archive_reverify.reverify_archive(conn, request_fn, network=network)
+        conn = history_store.init_history_db(history_db)
+        try:
+            async with _reverify_client() as client:
+                request_fn = archive_reverify.make_request_fn(client)
+                return await archive_reverify.reverify_archive(conn, request_fn, network=network)
+        finally:
+            conn.close()
     finally:
-        conn.close()
+        lock.close()
 
 
 async def run_archive_reverify(network: str, actor: str) -> None:
