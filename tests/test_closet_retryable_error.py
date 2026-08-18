@@ -228,3 +228,41 @@ def test_ensure_closet_offer_failure_after_committed_mint_never_duplicates():
     assert ref.accept_payload == {"xumm_url": "x"}
     rec = es.get_closet_record(c, "rA")
     assert rec is not None and rec[3] == "OFFER2"
+
+
+def test_ensure_closet_persist_failure_after_committed_mint_is_indeterminate(monkeypatch):
+    # Greptile P1 round 2 (PR #390): mint COMMITTED but the record write
+    # itself raised — there is no durable pointer to the minted token, so a
+    # retry could double-mint. That must surface as indeterminate-class
+    # (-> opaque 502, NO retryable flag), never plain ClosetError (-> 503).
+    c = _conn()
+    f = _Fakes()
+
+    def broken_set(*a, **kw):
+        raise sqlite3.OperationalError("disk I/O error")
+
+    monkeypatch.setattr(ct.economy_store, "set_closet_token", broken_set)
+    with pytest.raises(ct.ClosetIndeterminateError):
+        _run(
+            ct.ensure_closet(
+                c,
+                "rA",
+                upload_fn=f.up,
+                mint_fn=f.mint,
+                offer_fn=f.offer,
+                accept_payload_fn=f.accept,
+            )
+        )
+    assert f.mints == 1  # the mint did commit; only the persist failed
+
+
+def test_persist_failure_maps_to_opaque_502_not_retryable(monkeypatch):
+    # End-to-end shape of the above through the handler: indeterminate-class
+    # must never advertise retryable:true.
+    resp = _closet_resp(
+        monkeypatch,
+        ct.ClosetIndeterminateError("Closet mint NFT1 committed but recording it failed"),
+    )
+    assert resp.status == 502
+    body = json.loads(resp.body)
+    assert "retryable" not in body

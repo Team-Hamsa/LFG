@@ -218,9 +218,19 @@ async def ensure_closet(
         # duplicate issuer-held Closet. With the record in place, a retry
         # re-enters the pending_accept self-heal path above and creates a
         # fresh offer for THIS token instead of re-minting.
-        economy_store.set_closet_token(
-            conn, owner, nft_id, _hex(url), status=PENDING_ACCEPT, offer_id=None
-        )
+        try:
+            economy_store.set_closet_token(
+                conn, owner, nft_id, _hex(url), status=PENDING_ACCEPT, offer_id=None
+            )
+        except Exception as e:
+            # The mint committed on-chain but the record write itself failed:
+            # there is now NO durable pointer to the minted token, so a later
+            # request would follow the no-record path and mint a duplicate.
+            # Fail closed as indeterminate-class — the service maps this to an
+            # opaque 502 with no retryable flag, never an advertised retry.
+            raise ClosetIndeterminateError(
+                f"Closet mint {nft_id} committed but recording it failed: {e}"
+            ) from e
         offer_id = await offer_fn(nft_id, owner)
         if not offer_id:
             raise ClosetError("failed to offer Closet NFToken to owner")
