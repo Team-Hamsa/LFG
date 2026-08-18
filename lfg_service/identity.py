@@ -6,6 +6,7 @@
 import json
 import logging
 import sqlite3
+from typing import cast
 
 from lfg_core.user_db import DATABASE  # single source of truth for the db path
 
@@ -468,8 +469,7 @@ def _resolve_merged(conn: sqlite3.Connection, profile_id: int) -> int:
 
 def _profile_row(conn: sqlite3.Connection, profile_id: int) -> dict[str, object]:
     row = conn.execute(
-        "SELECT id, display_name, avatar_url, preferences, created_at "
-        "FROM profiles WHERE id = ?",
+        "SELECT id, display_name, avatar_url, preferences, created_at FROM profiles WHERE id = ?",
         (profile_id,),
     ).fetchone()
     if row is None:
@@ -486,7 +486,7 @@ def _profile_row(conn: sqlite3.Connection, profile_id: int) -> dict[str, object]
 def _bucket_profile_ids(conn: sqlite3.Connection, bucket: dict[str, object]) -> list[int]:
     """Distinct surviving profile ids attached to any bucket member, ascending."""
     ids: set[int] = set()
-    for m in bucket["identities"]:  # type: ignore[union-attr]
+    for m in cast(list[dict[str, str]], bucket["identities"]):
         row = conn.execute(
             "SELECT account_id FROM identities WHERE platform = ? AND platform_user_id = ?",
             (m["platform"], m["platform_user_id"]),
@@ -528,9 +528,7 @@ def ensure_profile_for(platform: str, platform_user_id: str) -> dict[str, object
             for loser in existing[1:]:
                 _merge_in_conn(conn, winner, loser)
         else:
-            cur = conn.execute(
-                "INSERT INTO profiles (display_name) VALUES (?)", (ident[1],)
-            )
+            cur = conn.execute("INSERT INTO profiles (display_name) VALUES (?)", (ident[1],))
             winner = int(cur.lastrowid)  # type: ignore[arg-type]
         conn.execute(
             "UPDATE identities SET account_id = ? WHERE platform = ? AND platform_user_id = ?",
@@ -548,9 +546,7 @@ def ensure_profile_for(platform: str, platform_user_id: str) -> dict[str, object
             conn.close()
 
 
-def _merge_in_conn(
-    conn: sqlite3.Connection, winner: int, loser: int
-) -> dict[str, object]:
+def _merge_in_conn(conn: sqlite3.Connection, winner: int, loser: int) -> dict[str, object]:
     """Merge loser into winner inside an open transaction. Winner's fields are
     kept verbatim; differing loser fields are reported, never applied."""
     w = _profile_row(conn, winner)
@@ -559,18 +555,14 @@ def _merge_in_conn(
     for field in ("display_name", "avatar_url"):
         if lrow[field] is not None and lrow[field] != w[field]:
             conflicts[field] = {"kept": w[field], "discarded": lrow[field]}
-    w_prefs: dict = w["preferences"]  # type: ignore[assignment]
-    for k, v in lrow["preferences"].items():  # type: ignore[union-attr]
-        if k in w_prefs and w_prefs[k] != v:
-            conflicts.setdefault("preferences", {})[k] = {  # type: ignore[union-attr]
-                "kept": w_prefs[k],
-                "discarded": v,
-            }
-        elif k not in w_prefs:
-            conflicts.setdefault("preferences", {})[k] = {  # type: ignore[union-attr]
-                "kept": None,
-                "discarded": v,
-            }
+    w_prefs = cast(dict[str, object], w["preferences"])
+    l_prefs = cast(dict[str, object], lrow["preferences"])
+    pref_conflicts: dict[str, object] = {}
+    for k, v in l_prefs.items():
+        if k not in w_prefs or w_prefs[k] != v:
+            pref_conflicts[k] = {"kept": w_prefs.get(k), "discarded": v}
+    if pref_conflicts:
+        conflicts["preferences"] = pref_conflicts
     moved = conn.execute(
         "UPDATE identities SET account_id = ? WHERE account_id = ?", (winner, loser)
     ).rowcount
@@ -652,7 +644,7 @@ def profile_for(platform: str, platform_user_id: str) -> dict[str, object] | Non
         if conn is not None:
             conn.close()
     bucket = bucket_for(platform, platform_user_id)  # may raise BucketLookupError
-    wallets = list(bucket["wallets"]) if bucket else []  # type: ignore[arg-type]
+    wallets = list(cast(list[str], bucket["wallets"])) if bucket else []
     return {"profile": profile, "identities": members, "wallets": wallets}
 
 
