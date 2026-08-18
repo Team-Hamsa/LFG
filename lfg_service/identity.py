@@ -6,6 +6,7 @@
 import json
 import logging
 import sqlite3
+from typing import cast
 
 from lfg_core.user_db import DATABASE  # single source of truth for the db path
 
@@ -43,6 +44,10 @@ def ensure_identities_table() -> None:
         # push-delivered to Xaman instead of forcing a QR scan every time.
         if "user_token" not in cols:
             conn.execute("ALTER TABLE identities ADD COLUMN user_token TEXT")
+        # #207: tables created before the account_id hook was reserved get the
+        # column added here so profile attachment works on any on-disk shape.
+        if "account_id" not in cols:
+            conn.execute("ALTER TABLE identities ADD COLUMN account_id INTEGER")
         conn.execute("CREATE INDEX IF NOT EXISTS idx_identities_wallet ON identities(wallet)")
         # #206: append-only identity->wallet link history. identities.wallet is
         # an upsert (only the CURRENT wallet survives); this table keeps every
@@ -60,6 +65,24 @@ def ensure_identities_table() -> None:
             """
         )
         conn.execute("CREATE INDEX IF NOT EXISTS idx_wallet_links_wallet ON wallet_links(wallet)")
+        # #207: first-class profiles above per-platform identities. A profile
+        # owns multiple identities (identities.account_id -> profiles.id) and,
+        # through them, multiple wallets. merged_into implements append-only
+        # merges: a losing profile row is never deleted, it points at its
+        # winner so historical account_id references stay resolvable.
+        conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS profiles (
+                id           INTEGER PRIMARY KEY AUTOINCREMENT,
+                display_name TEXT,
+                avatar_url   TEXT,
+                preferences  TEXT NOT NULL DEFAULT '{}',
+                merged_into  INTEGER,
+                created_at   TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+            )
+            """
+        )
+        conn.execute("CREATE INDEX IF NOT EXISTS idx_identities_account ON identities(account_id)")
         # Seed history from identities rows that predate wallet_links so
         # existing users participate in buckets. Idempotent (INSERT OR IGNORE).
         conn.execute(
@@ -309,48 +332,60 @@ def bucket_for(platform: str, platform_user_id: str) -> dict[str, object] | None
     conn = None
     try:
         conn = sqlite3.connect(DATABASE)
-        seed = conn.execute(
-            "SELECT 1 FROM wallet_links WHERE platform = ? AND platform_user_id = ? LIMIT 1",
-            (platform, platform_user_id),
-        ).fetchone()
-        if not seed:
-            return None
-        identities: set[tuple[str, str]] = {(platform, platform_user_id)}
-        wallets: set[str] = set()
-        frontier_ids = [(platform, platform_user_id)]
-        while frontier_ids:
-            # identities -> their wallets
-            new_wallets: set[str] = set()
-            for p, uid in frontier_ids:
-                for (w,) in conn.execute(
-                    "SELECT wallet FROM wallet_links WHERE platform = ? AND platform_user_id = ?",
-                    (p, uid),
-                ):
-                    if w not in wallets:
-                        new_wallets.add(w)
-            wallets |= new_wallets
-            # wallets -> their identities
-            frontier_ids = []
-            for w in new_wallets:
-                for p, uid in conn.execute(
-                    "SELECT platform, platform_user_id FROM wallet_links WHERE wallet = ?",
-                    (w,),
-                ):
-                    if (p, uid) not in identities:
-                        identities.add((p, uid))
-                        frontier_ids.append((p, uid))
-        members = sorted(identities)
-        return {
-            "bucket_id": json.dumps(list(members[0])),
-            "identities": [{"platform": p, "platform_user_id": uid} for p, uid in members],
-            "wallets": sorted(wallets),
-        }
+        return _bucket_on_conn(conn, platform, platform_user_id)
     except Exception as e:
         logging.error(f"identity.bucket_for failed: {e}")
         raise BucketLookupError(f"bucket lookup failed for {platform!r}: {e}") from e
     finally:
         if conn is not None:
             conn.close()
+
+
+def _bucket_on_conn(
+    conn: sqlite3.Connection, platform: str, platform_user_id: str
+) -> dict[str, object] | None:
+    """bucket_for's BFS on a caller-provided connection, so a caller holding a
+    write lock (ensure_profile_for's BEGIN IMMEDIATE) resolves the bucket
+    INSIDE its transaction — snapshot, decision, and write all under one lock,
+    no TOCTOU window against a concurrent link(). Raises raw DB errors; the
+    caller wraps them (bucket_for -> BucketLookupError, ensure_profile_for ->
+    ProfileError)."""
+    seed = conn.execute(
+        "SELECT 1 FROM wallet_links WHERE platform = ? AND platform_user_id = ? LIMIT 1",
+        (platform, platform_user_id),
+    ).fetchone()
+    if not seed:
+        return None
+    identities: set[tuple[str, str]] = {(platform, platform_user_id)}
+    wallets: set[str] = set()
+    frontier_ids = [(platform, platform_user_id)]
+    while frontier_ids:
+        # identities -> their wallets
+        new_wallets: set[str] = set()
+        for p, uid in frontier_ids:
+            for (w,) in conn.execute(
+                "SELECT wallet FROM wallet_links WHERE platform = ? AND platform_user_id = ?",
+                (p, uid),
+            ):
+                if w not in wallets:
+                    new_wallets.add(w)
+        wallets |= new_wallets
+        # wallets -> their identities
+        frontier_ids = []
+        for w in new_wallets:
+            for p, uid in conn.execute(
+                "SELECT platform, platform_user_id FROM wallet_links WHERE wallet = ?",
+                (w,),
+            ):
+                if (p, uid) not in identities:
+                    identities.add((p, uid))
+                    frontier_ids.append((p, uid))
+    members = sorted(identities)
+    return {
+        "bucket_id": json.dumps(list(members[0])),
+        "identities": [{"platform": p, "platform_user_id": uid} for p, uid in members],
+        "wallets": sorted(wallets),
+    }
 
 
 def same_bucket(a: tuple[str, str], b: tuple[str, str]) -> bool:
@@ -401,6 +436,262 @@ def bucket_overlaps(
     if member_keys & set(identities):
         return True
     return bool(set(bucket_wallets) & set(wallets))
+
+
+# ---------------------------------------------------------------------------
+# #207: user profiles — a first-class entity above per-platform identities.
+#
+# One profile owns multiple platform identities (identities.account_id ->
+# profiles.id, the reserved hook) and, through them, multiple wallets. The
+# #206 bucket graph is one INPUT to membership: ensure_profile_for attaches a
+# new identity to a bucket-mate's existing profile instead of creating a
+# duplicate. FOUNDATION ONLY — nothing live reads profiles yet; per-human
+# accounting (free mints, credits, leaderboards) migrates onto them later.
+#
+# Fail-closed, like buckets: profile resolution will back per-human
+# accounting, so infrastructure errors raise (ProfileError /
+# BucketLookupError) instead of silently creating or attaching the wrong
+# profile. This is a deliberate exception to this module's never-raises style.
+# ---------------------------------------------------------------------------
+
+
+class ProfileError(Exception):
+    """A profile operation failed (DB error, or an unknown identity).
+
+    Fail-closed: callers must treat this as "no answer", never as "no
+    profile" — silently proceeding could create or attach a wrong profile.
+    """
+
+
+def _resolve_merged(conn: sqlite3.Connection, profile_id: int) -> int:
+    """Follow the merged_into chain to the surviving profile id."""
+    seen: set[int] = set()
+    while profile_id not in seen:
+        seen.add(profile_id)
+        row = conn.execute(
+            "SELECT merged_into FROM profiles WHERE id = ?", (profile_id,)
+        ).fetchone()
+        if row is None:
+            raise ProfileError(f"profile {profile_id} does not exist")
+        if row[0] is None:
+            return profile_id
+        profile_id = row[0]
+    raise ProfileError(f"merged_into cycle at profile {profile_id}")
+
+
+def _profile_row(conn: sqlite3.Connection, profile_id: int) -> dict[str, object]:
+    row = conn.execute(
+        "SELECT id, display_name, avatar_url, preferences, created_at FROM profiles WHERE id = ?",
+        (profile_id,),
+    ).fetchone()
+    if row is None:
+        raise ProfileError(f"profile {profile_id} does not exist")
+    return {
+        "id": row[0],
+        "display_name": row[1],
+        "avatar_url": row[2],
+        "preferences": json.loads(row[3] or "{}"),
+        "created_at": row[4],
+    }
+
+
+def _bucket_profile_ids(conn: sqlite3.Connection, bucket: dict[str, object]) -> list[int]:
+    """Distinct surviving profile ids attached to any bucket member, ascending."""
+    ids: set[int] = set()
+    for m in cast(list[dict[str, str]], bucket["identities"]):
+        row = conn.execute(
+            "SELECT account_id FROM identities WHERE platform = ? AND platform_user_id = ?",
+            (m["platform"], m["platform_user_id"]),
+        ).fetchone()
+        if row and row[0] is not None:
+            ids.add(_resolve_merged(conn, row[0]))
+    return sorted(ids)
+
+
+def ensure_profile_for(platform: str, platform_user_id: str) -> dict[str, object]:
+    """Find-or-create the profile for an identity.
+
+    This is the CONVERGENCE POINT for a bucket: every call unifies ALL
+    profiles attached to any member of the identity's #206 bucket (including
+    the caller's own — an already-profiled identity whose bucket gained a
+    second profile via a new wallet link is reconciled here, not skipped),
+    then attaches the identity to the survivor. Only when the whole bucket is
+    profile-less is a new profile created, seeded with the identity's
+    display_handle. Deterministic winner: the oldest (smallest-id) profile —
+    see merge_profiles.
+
+    Serialized find-or-create: the ENTIRE read-decide-write — including the
+    #206 bucket resolution itself (`_bucket_on_conn` on the locked connection)
+    — runs inside a BEGIN IMMEDIATE transaction (the lfg_core/headroom.py
+    precedent — one writer wins). Two overlapping ensures for the same
+    identity or bucket cannot both observe "no profile" and double-insert,
+    and a wallet link committed while this call waited for the lock IS seen
+    (the bucket snapshot is taken after lock acquisition, so there is no
+    stale-snapshot TOCTOU window against a concurrent link()).
+
+    Raises ProfileError on infrastructure failure and for an unknown
+    identity (fail-closed — never guesses).
+    Returns the profile dict (profile_for()["profile"] shape) plus a
+    "merge_reports" key: the conflict reports of any merges this call
+    performed (see merge_profiles; [] when none). Conflicted merges are
+    additionally logged at WARNING — conflict info is never silently
+    discarded.
+    """
+    conn = None
+    try:
+        # isolation_level=None: explicit BEGIN IMMEDIATE / COMMIT control;
+        # closing without COMMIT rolls back.
+        conn = sqlite3.connect(DATABASE, isolation_level=None)
+        conn.execute("BEGIN IMMEDIATE")
+        # Bucket snapshot INSIDE the write lock — a concurrent link() either
+        # committed before we acquired it (and is seen here) or is blocked
+        # until we commit. Never resolve the bucket before BEGIN IMMEDIATE.
+        bucket = _bucket_on_conn(conn, platform, platform_user_id)
+        ident = conn.execute(
+            "SELECT account_id, display_handle FROM identities "
+            "WHERE platform = ? AND platform_user_id = ?",
+            (platform, platform_user_id),
+        ).fetchone()
+        if ident is None:
+            raise ProfileError(f"unknown identity ({platform!r}, {platform_user_id!r})")
+        profile_ids = set(_bucket_profile_ids(conn, bucket)) if bucket else set()
+        if ident[0] is not None:
+            profile_ids.add(_resolve_merged(conn, ident[0]))
+        merge_reports: list[dict[str, object]] = []
+        if profile_ids:
+            ordered = sorted(profile_ids)
+            winner = ordered[0]
+            for loser in ordered[1:]:
+                report = _merge_in_conn(conn, winner, loser)
+                if report["conflicts"]:
+                    logging.warning(
+                        "identity.ensure_profile_for merged profile %s into %s with conflicts: %s",
+                        loser,
+                        winner,
+                        report["conflicts"],
+                    )
+                merge_reports.append(report)
+        else:
+            cur = conn.execute("INSERT INTO profiles (display_name) VALUES (?)", (ident[1],))
+            winner = int(cur.lastrowid)  # type: ignore[arg-type]
+        conn.execute(
+            "UPDATE identities SET account_id = ? WHERE platform = ? AND platform_user_id = ?",
+            (winner, platform, platform_user_id),
+        )
+        conn.execute("COMMIT")
+        profile = _profile_row(conn, winner)
+        profile["merge_reports"] = merge_reports
+        return profile
+    except ProfileError:
+        raise
+    except Exception as e:
+        logging.error(f"identity.ensure_profile_for failed: {e}")
+        raise ProfileError(f"ensure_profile_for failed: {e}") from e
+    finally:
+        if conn is not None:
+            conn.close()
+
+
+def _merge_in_conn(conn: sqlite3.Connection, winner: int, loser: int) -> dict[str, object]:
+    """Merge loser into winner inside an open transaction. Winner's fields are
+    kept verbatim; differing loser fields are reported, never applied."""
+    w = _profile_row(conn, winner)
+    lrow = _profile_row(conn, loser)
+    conflicts: dict[str, object] = {}
+    for field in ("display_name", "avatar_url"):
+        if lrow[field] is not None and lrow[field] != w[field]:
+            conflicts[field] = {"kept": w[field], "discarded": lrow[field]}
+    w_prefs = cast(dict[str, object], w["preferences"])
+    l_prefs = cast(dict[str, object], lrow["preferences"])
+    pref_conflicts: dict[str, object] = {}
+    for k, v in l_prefs.items():
+        if k not in w_prefs or w_prefs[k] != v:
+            pref_conflicts[k] = {"kept": w_prefs.get(k), "discarded": v}
+    if pref_conflicts:
+        conflicts["preferences"] = pref_conflicts
+    moved = conn.execute(
+        "UPDATE identities SET account_id = ? WHERE account_id = ?", (winner, loser)
+    ).rowcount
+    conn.execute("UPDATE profiles SET merged_into = ? WHERE id = ?", (winner, loser))
+    return {
+        "winner": winner,
+        "loser": loser,
+        "moved_identities": moved,
+        "conflicts": conflicts,
+    }
+
+
+def merge_profiles(profile_id_a: int, profile_id_b: int) -> dict[str, object]:
+    """Merge two profiles (e.g. a new wallet link joined two bucketed
+    profiles). Deterministic winner: the OLDER profile (smaller id — ids are
+    monotonic). Loser's identities move to the winner; the loser row survives
+    with merged_into set, so re-merging is idempotent. Winner's
+    display_name/avatar_url/preferences are kept; differing loser fields are
+    surfaced in the returned conflict report, never silently merged.
+
+    Raises ProfileError on DB failure or unknown profile ids (fail-closed).
+    Returns {"winner", "loser", "moved_identities", "conflicts"}; merging a
+    profile with itself (incl. already-merged pairs) is a no-op report.
+    """
+    conn = None
+    try:
+        conn = sqlite3.connect(DATABASE)
+        a = _resolve_merged(conn, profile_id_a)
+        b = _resolve_merged(conn, profile_id_b)
+        if a == b:
+            return {"winner": a, "loser": None, "moved_identities": 0, "conflicts": {}}
+        winner, loser = (a, b) if a < b else (b, a)
+        report = _merge_in_conn(conn, winner, loser)
+        conn.commit()
+        return report
+    except ProfileError:
+        raise
+    except Exception as e:
+        logging.error(f"identity.merge_profiles failed: {e}")
+        raise ProfileError(f"merge_profiles failed: {e}") from e
+    finally:
+        if conn is not None:
+            conn.close()
+
+
+def profile_for(platform: str, platform_user_id: str) -> dict[str, object] | None:
+    """The profile an identity is attached to, or None if it has none yet
+    (never creates — see ensure_profile_for). Raises ProfileError /
+    BucketLookupError on infrastructure failure (fail-closed).
+
+    Returns {"profile": {...}, "identities": [member identity keys],
+    "wallets": [every wallet linked by any member, via the #206 bucket]}.
+    """
+    conn = None
+    try:
+        conn = sqlite3.connect(DATABASE)
+        row = conn.execute(
+            "SELECT account_id FROM identities WHERE platform = ? AND platform_user_id = ?",
+            (platform, platform_user_id),
+        ).fetchone()
+        if row is None or row[0] is None:
+            return None
+        profile_id = _resolve_merged(conn, row[0])
+        profile = _profile_row(conn, profile_id)
+        members = [
+            {"platform": r[0], "platform_user_id": r[1]}
+            for r in conn.execute(
+                "SELECT platform, platform_user_id FROM identities "
+                "WHERE account_id = ? ORDER BY platform, platform_user_id",
+                (profile_id,),
+            )
+        ]
+    except ProfileError:
+        raise
+    except Exception as e:
+        logging.error(f"identity.profile_for failed: {e}")
+        raise ProfileError(f"profile_for failed: {e}") from e
+    finally:
+        if conn is not None:
+            conn.close()
+    bucket = bucket_for(platform, platform_user_id)  # may raise BucketLookupError
+    wallets = list(cast(list[str], bucket["wallets"])) if bucket else []
+    return {"profile": profile, "identities": members, "wallets": wallets}
 
 
 def migrate_users_to_identities() -> int:
