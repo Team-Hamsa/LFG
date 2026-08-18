@@ -266,10 +266,14 @@ function discordCtx() {
 // #273: the share click-through ref stashed by main() (localStorage lfg_ref,
 // shape-validated on write, stored as {ref, ts}). Sent with a mint start so
 // the service can attribute the mint; the server re-validates and rejects
-// self-referrals. Attribution window (Greptile P1 on PR #393): the stash
-// expires REF_TTL_MS after the click, and consumeRef() clears it once a
-// mint/bulk-mint start succeeds — only the first mint after a click is
-// attributed, never every later mint forever.
+// self-referrals. Attribution window (Greptile P1s on PR #393): the stash
+// expires REF_TTL_MS after the click, and consumeRef() clears it only once
+// the status poll observes a MINTED outcome (single: offer_ready; bulk:
+// minted > 0) — a timed-out/cancelled/failed attempt keeps the click's
+// attribution for the retry, while the first mint that actually records a
+// referrer stops later mints re-attributing the same click. Idempotent; the
+// server records per-mint whatever ref the start carried, and one active
+// session per user means no overlapping starts.
 const REF_TTL_MS = 24 * 60 * 60 * 1000; // 24h click->mint attribution window
 
 function stashedRef() {
@@ -930,6 +934,7 @@ function pollMint(sessionId) {
 
     const sponsored = sponsoredMintView(s);
     if (s.state === 'offer_ready') {
+      consumeRef(); // one attribution per click: mint record written (idempotent)
       if (s.accept_signed) {
         showFlow({
           title: `🎉 #${s.nft_number} claimed!`,
@@ -1116,7 +1121,6 @@ async function startBulkMint(quantity) {
       method: 'POST',
       body: JSON.stringify({ ...discordCtx(), quantity, ref: stashedRef() }),
     });
-    consumeRef(); // one attribution per click: clear on successful start
     currentBulkId = j.id;
     mintQty = quantity;
     liveQty = quantity;
@@ -1395,6 +1399,7 @@ function pollBulk(jobId) {
       showMintHome();
       return;
     } else {
+      if ((j.minted | 0) > 0) consumeRef(); // one attribution per click: mint record written (idempotent)
       renderBulkJob(j); // paid / fulfilling / done / failed
       if (j.state === 'done' || j.state === 'failed') return; // final render, stop polling
     }
@@ -1425,7 +1430,6 @@ async function startMint() {
       method: 'POST',
       body: JSON.stringify({ ...discordCtx(), ref: stashedRef() }),
     });
-    consumeRef(); // one attribution per click: clear on successful start
     currentMintId = s.id;
     mintQty = 1;
     liveQty = 1;

@@ -163,14 +163,17 @@ def _app_js() -> str:
 
 
 def test_client_ref_stash_has_attribution_window():
-    """Greptile P1 (PR #393): the stash must carry a timestamp, expire on a
-    TTL, and be consumed after a successful mint start — never attributing
-    every later mint to one old click."""
+    """Greptile P1s (PR #393): the stash must carry a timestamp, expire on a
+    TTL, and be consumed only on an observed MINTED outcome — a failed/
+    cancelled/timed-out attempt keeps the click's attribution for the retry,
+    while a recorded mint stops later mints re-attributing the same click."""
     src = _app_js()
     assert "REF_TTL_MS" in src
     assert "JSON.stringify({ ref: refParam, ts: Date.now() })" in src
     assert "function consumeRef()" in src
-    # consumed on BOTH mint-start paths (single + bulk)
-    assert src.count("consumeRef(); // one attribution per click") == 2
+    # consumed on the minted signal of BOTH poll paths (single + bulk),
+    # never at mint start (early consume loses attribution on failure)
+    assert src.count("consumeRef(); // one attribution per click: mint record written") == 2
+    assert "consumeRef(); // one attribution per click: clear on successful start" not in src
     # legacy plain-string stashes (no ts) are treated as expired, not eternal
     assert "typeof ts !== 'number'" in src
