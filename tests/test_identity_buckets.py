@@ -139,3 +139,26 @@ def test_migrate_users_seeds_wallet_links(tmp_path, monkeypatch):
     conn.close()
     assert identity.migrate_users_to_identities() == 1
     assert identity.bucket_for("discord", "7")["wallets"] == ["rW7"]
+
+
+def test_migrate_records_legacy_wallet_for_existing_identity(tmp_path, monkeypatch):
+    # Pre-upgrade user: identities row already exists with a NEWER wallet than
+    # the legacy Users row. The migration must still record the legacy wallet
+    # into wallet_links (append-only, idempotent) even though the identity
+    # upsert is skipped — otherwise the bucket graph loses the W1 linkage.
+    db = _fresh_db(tmp_path, monkeypatch)
+    identity.link("discord", "5", "bob", "rW2")  # current identity wallet
+    conn = sqlite3.connect(db)
+    conn.execute(
+        "CREATE TABLE Users (id INTEGER PRIMARY KEY AUTOINCREMENT, "
+        "discord_id TEXT NOT NULL UNIQUE, discord_name TEXT NOT NULL, wallet TEXT NOT NULL)"
+    )
+    conn.execute("INSERT INTO Users (discord_id, discord_name, wallet) VALUES ('5', 'bob', 'rW1')")
+    conn.commit()
+    conn.close()
+    assert identity.migrate_users_to_identities() == 0  # no new identity row
+    b = identity.bucket_for("discord", "5")
+    assert b["wallets"] == ["rW1", "rW2"]
+    # And the legacy wallet links buckets: another platform on rW1 merges.
+    identity.link("telegram", "9", "bob_tg", "rW1")
+    assert identity.same_bucket(("discord", "5"), ("telegram", "9"))

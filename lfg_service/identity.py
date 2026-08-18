@@ -392,6 +392,15 @@ def migrate_users_to_identities() -> int:
         rows = conn.execute("SELECT discord_id, discord_name, wallet FROM Users").fetchall()
         migrated = 0
         for discord_id, discord_name, wallet in rows:
+            # #206: record the legacy wallet in the append-only history even
+            # when an identities row already exists — the pre-upgrade Users
+            # wallet may differ from the current identities.wallet, and losing
+            # it would drop a linkage from the bucket graph. Idempotent.
+            conn.execute(
+                "INSERT OR IGNORE INTO wallet_links (platform, platform_user_id, wallet) "
+                "VALUES ('discord', ?, ?)",
+                (discord_id, wallet),
+            )
             exists = conn.execute(
                 "SELECT 1 FROM identities WHERE platform='discord' AND platform_user_id=?",
                 (discord_id,),
@@ -402,11 +411,6 @@ def migrate_users_to_identities() -> int:
                 "INSERT INTO identities (platform, platform_user_id, platform_username, wallet) "
                 "VALUES ('discord', ?, ?, ?)",
                 (discord_id, discord_name, wallet),
-            )
-            conn.execute(
-                "INSERT OR IGNORE INTO wallet_links (platform, platform_user_id, wallet) "
-                "VALUES ('discord', ?, ?)",
-                (discord_id, wallet),
             )
             migrated += 1
         conn.commit()
