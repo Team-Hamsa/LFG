@@ -156,6 +156,68 @@ def test_malformed_classifier_matches_chained_keyerror():
     assert not xrpl_ops._is_malformed_result_error(TimeoutError("x"))
 
 
+def test_malformed_classifier_walks_context_when_cause_points_elsewhere():
+    # __cause__ leads to a dead end while __context__ carries the KeyError:
+    # both links must be traversed at every hop.
+    target = KeyError("result")
+    dead_end = ValueError("unrelated")
+    outer = RuntimeError("wrapped")
+    outer.__cause__ = dead_end
+    outer.__context__ = target
+    assert xrpl_ops._is_malformed_result_error(outer)
+
+
+def test_malformed_classifier_survives_exception_cycles():
+    a = RuntimeError("a")
+    b = RuntimeError("b")
+    a.__context__ = b
+    b.__context__ = a
+    assert not xrpl_ops._is_malformed_result_error(a)
+
+
+def test_confirm_attempts_widen_only_for_malformed_shape():
+    assert xrpl_ops._confirm_attempts_for(KeyError("result")) == 6
+    assert xrpl_ops._confirm_attempts_for(TimeoutError("x")) == 3
+
+
+# --- sponsored paths get the same widened confirm window (fail-closed intact) ---
+
+
+def _capture_confirm_attempts(monkeypatch):
+    seen = {}
+
+    async def fake_confirm(client, tx_hash, attempts=3):
+        seen["attempts"] = attempts
+        return None
+
+    monkeypatch.setattr(xrpl_ops, "_confirm_by_hash", fake_confirm)
+    return seen
+
+
+def test_sponsored_mint_widens_confirm_on_malformed_submit(monkeypatch):
+    seen = _capture_confirm_attempts(monkeypatch)
+    monkeypatch.setattr(xrpl_ops, "submit_and_wait", _malformed_submit)
+    signed = _Signed("SPONSHASH")
+    monkeypatch.setattr(xrpl_ops.Transaction, "from_blob", classmethod(lambda cls, blob: signed))
+    sub = _run(xrpl_ops.submit_sponsored_mint(signed_tx_blob="BLOB", signed_tx_hash="SPONSHASH"))
+    assert sub.state == "indeterminate"  # still fail-closed, never resubmitted
+    assert seen["attempts"] == 6
+
+
+def test_sponsored_burn_widens_confirm_on_malformed_submit(monkeypatch):
+    seen = _capture_confirm_attempts(monkeypatch)
+    monkeypatch.setattr(xrpl_ops, "submit_and_wait", _malformed_submit)
+    signed = _Signed("BURNHASH")
+    monkeypatch.setattr(xrpl_ops.Transaction, "from_blob", classmethod(lambda cls, blob: signed))
+    monkeypatch.setattr(xrpl_ops.config, "SIGNING_ACCOUNT", "rSourceWallet")
+    monkeypatch.setattr(xrpl_ops.config, "TOKEN_ISSUER_ADDRESS", "rIssuerWallet")
+    sub = _run(
+        xrpl_ops.submit_sponsored_burn("memo-1", signed_tx_blob="BLOB", signed_tx_hash="BURNHASH")
+    )
+    assert sub.state == "indeterminate"
+    assert seen["attempts"] == 6
+
+
 # --- get_tx shares the same read-retry (confirm-by-hash path, market pollers) ---
 
 

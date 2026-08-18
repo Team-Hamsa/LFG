@@ -159,13 +159,26 @@ def _is_malformed_result_error(e: BaseException) -> bool:
     (#385) — KeyError('result') raised by xrpl-py's json_to_response, possibly
     wrapped by a chained exception."""
     seen: set[int] = set()
-    current: BaseException | None = e
-    while current is not None and id(current) not in seen:
+    stack: list[BaseException] = [e]
+    while stack:
+        current = stack.pop()
+        if id(current) in seen:
+            continue
         seen.add(id(current))
         if isinstance(current, KeyError) and current.args == ("result",):
             return True
-        current = current.__cause__ or current.__context__
+        for linked in (current.__cause__, current.__context__):
+            if linked is not None:
+                stack.append(linked)
     return False
+
+
+def _confirm_attempts_for(exc: BaseException) -> int:
+    """How patient the post-submit confirm-by-hash read should be. A malformed
+    poll body (#385) means the Tx *read* choked on upstream garbage, not that
+    the submit failed — the tx is usually fine and merely awaiting validation,
+    so widen the confirm window before failing closed."""
+    return 6 if _is_malformed_result_error(exc) else 3
 
 
 async def _tx_lookup_with_retry(
@@ -337,12 +350,9 @@ async def _submit_and_confirm(
             )
         except Exception as e:
             logging.warning(f"{label}: submit_and_wait raised ({e}); confirming by hash")
-            # A malformed poll body (#385) means submit_and_wait's Tx *read*
-            # choked on upstream garbage, not that the submit failed — the tx
-            # is usually fine and merely awaiting validation, so give the
-            # confirm-by-hash read more patience before failing closed.
-            attempts = 6 if _is_malformed_result_error(e) else 3
-            confirmed = await _confirm_by_hash(client, signed.get_hash(), attempts=attempts)
+            confirmed = await _confirm_by_hash(
+                client, signed.get_hash(), attempts=_confirm_attempts_for(e)
+            )
             if confirmed is None:
                 raise IndeterminateResultError(
                     f"{label}: on-ledger outcome unknown after submit raised ({e})"
@@ -630,7 +640,9 @@ async def submit_sponsored_mint(
                 )
                 result = response.result
             except Exception as exc:
-                confirmed = await _confirm_by_hash(client, signed_tx_hash)
+                confirmed = await _confirm_by_hash(
+                    client, signed_tx_hash, attempts=_confirm_attempts_for(exc)
+                )
                 if confirmed is None:
                     return MintSubmission(
                         "indeterminate",
@@ -1349,7 +1361,9 @@ async def submit_sponsored_burn(
                 )
                 result = response.result
             except Exception as exc:
-                confirmed = await _confirm_by_hash(client, signed_tx_hash)
+                confirmed = await _confirm_by_hash(
+                    client, signed_tx_hash, attempts=_confirm_attempts_for(exc)
+                )
                 if confirmed is None:
                     return BurnSubmission(
                         "indeterminate",
