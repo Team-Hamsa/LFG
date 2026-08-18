@@ -815,12 +815,14 @@ def _x_share_text(kind: str, nft_number: Any) -> str:
     n = nft_number if isinstance(nft_number, int) else None
     if kind == "swap":
         return (
-            f"I just swapped traits on LFG #{n}! 🧱 #XRPL"
+            f"I just swapped traits on LFG #{n}! 🧱 @letseffinggo #XRPL"
             if n is not None
-            else "I just swapped traits on my LFG! 🧱 #XRPL"
+            else "I just swapped traits on my LFG! 🧱 @letseffinggo #XRPL"
         )
     return (
-        f"I just minted LFG #{n}! 🧱 #XRPL" if n is not None else "I just minted an LFG! 🧱 #XRPL"
+        f"I just minted LFG #{n}! 🧱 @letseffinggo #XRPL"
+        if n is not None
+        else "I just minted an LFG! 🧱 @letseffinggo #XRPL"
     )
 
 

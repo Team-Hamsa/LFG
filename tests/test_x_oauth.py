@@ -300,7 +300,7 @@ def test_share_posts_server_built_link_free_text(_feature_on, monkeypatch):
     assert resp.status == 200
     body = json.loads(resp.body)
     assert body["posted"] is True and body["tweet_id"] == "999"
-    assert posted["text"] == "I just minted LFG #7! 🧱 #XRPL"
+    assert posted["text"] == "I just minted LFG #7! 🧱 @letseffinggo #XRPL"
     assert "http" not in posted["text"]  # link-free by directive
 
 
