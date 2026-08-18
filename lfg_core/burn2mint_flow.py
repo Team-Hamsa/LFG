@@ -43,7 +43,16 @@ import uuid
 from dataclasses import asdict, dataclass
 from typing import Any
 
-from lfg_core import bulk_mint_flow, config, entitlement, memos, xrpl_ops, xumm_ops
+from lfg_core import (
+    bulk_mint_flow,
+    config,
+    db_path,
+    entitlement,
+    memos,
+    mint_credits,
+    xrpl_ops,
+    xumm_ops,
+)
 
 JOBS_DIR = os.getenv("BURN2MINT_JOBS_DIR", "burn2mint_jobs")
 
@@ -313,9 +322,12 @@ def _journal_orphan_payload(session: Burn2MintSession, burn: Burn) -> bool:
     session record could not be persisted (and whose XUMM cancel was not
     confirmed). Written as its own file so no session-record lifecycle
     (including the start handler's delete_record on a failed start) can drop
-    it; load_all_resumable ignores it (state 'orphan_payload' is not
-    resumable). If even this write fails (fully degraded disk), the CRITICAL
-    log line with the uuid is the last resort."""
+    it; load_all_resumable ignores it (state 'orphan_payload' is not a
+    resumable session) — instead the startup sweep's recover_orphan_payloads
+    resolves each journal automatically (signed-and-validated -> durable
+    mint credit; expired-unsigned -> retired; indeterminate -> kept). If
+    even this write fails (fully degraded disk), the CRITICAL log line with
+    the uuid is the last resort."""
     record = {
         "state": "orphan_payload",
         "session_id": session.id,
@@ -621,6 +633,119 @@ async def cancel(session: Burn2MintSession, launch_job: Any) -> None:
         persist(session)  # tombstone so a restart can't resurrect it
 
 
+def _load_orphan_records() -> list[tuple[str, dict[str, Any]]]:
+    out: list[tuple[str, dict[str, Any]]] = []
+    if not os.path.isdir(JOBS_DIR):
+        return out
+    for name in os.listdir(JOBS_DIR):
+        if not (name.startswith("orphan-payload-") and name.endswith(".json")):
+            continue
+        path = os.path.join(JOBS_DIR, name)
+        try:
+            with open(path) as f:
+                data = json.load(f)
+            if data.get("state") == "orphan_payload":
+                out.append((path, data))
+        except Exception:
+            # Fail-closed: an unreadable journal is never deleted.
+            logging.error("unreadable orphan-payload journal %s (kept)", name)
+    return out
+
+
+def _retire_orphan(path: str) -> None:
+    try:
+        os.remove(path)
+    except FileNotFoundError:
+        pass
+    except OSError as e:
+        logging.error("failed to retire orphan-payload journal %s: %s", path, e)
+
+
+async def recover_orphan_payloads() -> None:
+    """Automated recovery for orphan-payload journals (startup sweep, wired
+    into resume_all): each journal is a burn payload that outlived a failed
+    session write with an unconfirmed cancel — the user may have signed it.
+    Resolve each payload's fate and honour the "a validated burn is never
+    lost" invariant WITHOUT an operator:
+
+    - unsigned + expired -> the payload is dead, nothing burned: retire.
+    - signed + validated tesSUCCESS (signer == wallet, NFTokenID matches) ->
+      the NFT was destroyed with no session to convert it: award a durable
+      mint_credits row (#226 pattern — same terminal value as a failed bulk
+      unit) and retire the journal. Credit-then-retire ordering: a crash
+      between the two can at worst double-credit on the next sweep (operator-
+      visible, same posture as publish_unit_events' sub-tick window) — never
+      lose the burn.
+    - signed + validated but NOT our burn (tec, foreign signer/NFTokenID) ->
+      nothing is owed: retire.
+    - anything indeterminate (status lookup failed, unsigned-but-live,
+      signed-but-unvalidated, signed-with-no-txid, tx lookup failed, credit
+      write failed) -> FAIL-CLOSED: keep the journal for the next sweep."""
+    for path, rec in _load_orphan_records():
+        uuid_ = rec.get("payload_uuid")
+        if not uuid_:
+            continue  # keep: nothing checkable, operator territory
+        try:
+            s = await xumm_ops.get_payload_status(uuid_)
+        except Exception:
+            s = None
+        if s is None:
+            continue  # indeterminate: keep
+        if not s.get("signed"):
+            if s.get("expired"):
+                logging.info("orphan burn payload %s expired unsigned — retired", uuid_)
+                _retire_orphan(path)
+            continue  # still live/unsigned: keep for the next sweep
+        txid = s.get("txid")
+        if not txid:
+            continue  # signed but no hash reported: keep (fail-closed)
+        try:
+            tx = await xrpl_ops.get_tx(txid)
+        except Exception:
+            continue  # lookup blip: keep
+        if not tx.get("validated"):
+            continue  # still pending: keep
+        meta = tx.get("meta") or {}
+        txf = tx.get("tx_json") or tx
+        our_burn = (
+            meta.get("TransactionResult") == "tesSUCCESS"
+            and s.get("account") == rec.get("wallet_address")
+            and txf.get("Account") == rec.get("wallet_address")
+            and txf.get("NFTokenID") == rec.get("nft_id")
+        )
+        if not our_burn:
+            logging.warning(
+                "orphan burn payload %s resolved without a matching burn "
+                "(result=%s) — retired, nothing owed",
+                uuid_,
+                meta.get("TransactionResult"),
+            )
+            _retire_orphan(path)
+            continue
+        network = rec.get("network") or config.XRPL_NETWORK
+        try:
+            mint_credits.add_credit(
+                db_path.app_db_path(network), str(rec.get("discord_id")), network, 1
+            )
+        except Exception:
+            logging.critical(
+                "orphan burn %s (payload %s): VALIDATED burn but mint-credit "
+                "write failed — journal kept, retried next sweep",
+                rec.get("nft_id"),
+                uuid_,
+            )
+            continue
+        logging.warning(
+            "orphan burn payload %s: validated burn of %s recovered as a "
+            "durable mint credit for %s on %s",
+            uuid_,
+            rec.get("nft_id"),
+            rec.get("discord_id"),
+            network,
+        )
+        _retire_orphan(path)
+
+
 async def resume_all(launch_job: Any) -> list[Burn2MintSession]:
     """Startup recovery (invariant #4), called from lfg_service.app AFTER
     resume_bulk_jobs (so an already-converted mint job is resumed by the
@@ -639,7 +764,14 @@ async def resume_all(launch_job: Any) -> list[Burn2MintSession]:
       resolves (an unsigned payload self-resolves via its 15-min expiry, so
       a parked session converts on a later poll/restart at the latest).
       Runs regardless of BURN_TO_MINT_ENABLED: validated burns are owed
-      their mints even if the feature was flipped off."""
+      their mints even if the feature was flipped off.
+    - Orphan-payload journals get automated recovery first (see
+      recover_orphan_payloads): a signed-anyway orphan burn becomes a
+      durable mint credit — never an operator-only reconciliation."""
+    try:
+        await recover_orphan_payloads()
+    except Exception:
+        logging.exception("orphan-payload recovery sweep failed")
     sessions = load_all_resumable()
     for session in sessions:
         try:

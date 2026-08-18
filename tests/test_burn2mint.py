@@ -444,6 +444,83 @@ def test_no_orphan_journal_when_cancel_confirmed(monkeypatch):
     assert not os.path.exists(burn2mint_flow._orphan_record_path("u-dead"))
 
 
+def _write_orphan(uuid="u-orphan", nft_id="A", discord_id="u1"):
+    s = _session((nft_id,))
+    s.discord_id = discord_id
+    b = s.burns[0]
+    b.payload_uuid = uuid
+    assert burn2mint_flow._journal_orphan_payload(s, b)
+    return burn2mint_flow._orphan_record_path(uuid), s
+
+
+def test_orphan_recovery_credits_validated_burn(tmp_path, monkeypatch):
+    """A signed-anyway orphan burn that validated tesSUCCESS is recovered
+    AUTOMATICALLY on the startup sweep: durable mint credit + journal
+    retired — never operator-only reconciliation."""
+    path, s = _write_orphan()
+    _patch_ledger(monkeypatch)  # signed, validated tesSUCCESS, NFTokenID=A
+    _run(burn2mint_flow.recover_orphan_payloads())
+    assert not os.path.exists(path)  # retired
+    assert mint_credits.get_credits(str(tmp_path / "app.db"), "u1", s.network) == 1
+
+
+def test_orphan_recovery_retires_expired_unsigned(tmp_path, monkeypatch):
+    path, s = _write_orphan(uuid="u-exp")
+
+    async def _status(uuid):
+        return {"signed": False, "expired": True, "account": None, "txid": None}
+
+    monkeypatch.setattr(burn2mint_flow.xumm_ops, "get_payload_status", _status)
+    _run(burn2mint_flow.recover_orphan_payloads())
+    assert not os.path.exists(path)  # dead payload, nothing burned
+    assert mint_credits.get_credits(str(tmp_path / "app.db"), "u1", s.network) == 0
+
+
+def test_orphan_recovery_keeps_indeterminate(tmp_path, monkeypatch):
+    """Fail-closed: unknown payload status never deletes the journal."""
+    path, s = _write_orphan(uuid="u-unk")
+
+    async def _status(uuid):
+        return None
+
+    monkeypatch.setattr(burn2mint_flow.xumm_ops, "get_payload_status", _status)
+    _run(burn2mint_flow.recover_orphan_payloads())
+    assert os.path.exists(path)  # kept for the next sweep
+    assert mint_credits.get_credits(str(tmp_path / "app.db"), "u1", s.network) == 0
+
+
+def test_orphan_recovery_keeps_signed_but_unvalidated(tmp_path, monkeypatch):
+    path, s = _write_orphan(uuid="u-pend")
+    _patch_ledger(monkeypatch, validated=False)
+    _run(burn2mint_flow.recover_orphan_payloads())
+    assert os.path.exists(path)
+    assert mint_credits.get_credits(str(tmp_path / "app.db"), "u1", s.network) == 0
+
+
+def test_orphan_recovery_keeps_journal_on_credit_failure(monkeypatch):
+    path, _s = _write_orphan(uuid="u-cred")
+    _patch_ledger(monkeypatch)
+
+    def _boom(*a, **k):
+        raise RuntimeError("db down")
+
+    monkeypatch.setattr(burn2mint_flow.mint_credits, "add_credit", _boom)
+    _run(burn2mint_flow.recover_orphan_payloads())
+    assert os.path.exists(path)  # validated burn: journal kept until credited
+
+
+def test_orphan_recovery_runs_inside_resume_all(tmp_path, monkeypatch):
+    path, s = _write_orphan(uuid="u-resume")
+    _patch_ledger(monkeypatch)
+
+    async def _launch(job):  # pragma: no cover - no sessions to convert
+        raise AssertionError("no resumable sessions in this test")
+
+    _run(burn2mint_flow.resume_all(_launch))
+    assert not os.path.exists(path)
+    assert mint_credits.get_credits(str(tmp_path / "app.db"), "u1", s.network) == 1
+
+
 def test_reconvert_adopts_existing_job_preserving_mint_progress():
     """Session write failed after the job record landed; the resumed job then
     made mint progress. Re-convert must ADOPT the existing record — never
