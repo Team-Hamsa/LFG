@@ -292,19 +292,64 @@ async def start_next_burn(session: Burn2MintSession, *, nft_info: Any = None) ->
         burn.payload_link = None  # keep payload_uuid for manual reconciliation
         persist(session)
         if not cancelled:
-            # The payload could not be confirmed withdrawn AND the record is
-            # (or was) not durable: if the user somehow signs it (push
-            # delivery), the burn would be untracked on disk. The uuid stays
-            # on the burn record for reconciliation; scream for the operator.
-            logging.critical(
-                "burn2mint %s: unpersistable burn payload %s for %s could not "
-                "be cancelled — reconcile manually if it gets signed",
-                session.id,
-                burn.payload_uuid,
-                burn.nft_id,
-            )
+            # The payload could not be confirmed withdrawn AND the session
+            # record is (or was) not durable — and the start handler deletes
+            # the session record on this failure path, so the session file
+            # alone cannot be trusted to carry the uuid. Journal a dedicated
+            # ORPHAN-PAYLOAD record (own file, never deleted by the session
+            # lifecycle) so a signed-anyway burn stays discoverable and
+            # reconcilable by payload uuid / wallet / nft_id.
+            _journal_orphan_payload(session, burn)
         return False
     return True
+
+
+def _orphan_record_path(payload_uuid: str) -> str:
+    return os.path.join(JOBS_DIR, f"orphan-payload-{payload_uuid}.json")
+
+
+def _journal_orphan_payload(session: Burn2MintSession, burn: Burn) -> bool:
+    """Durable journal for a burn payload that may still be signed but whose
+    session record could not be persisted (and whose XUMM cancel was not
+    confirmed). Written as its own file so no session-record lifecycle
+    (including the start handler's delete_record on a failed start) can drop
+    it; load_all_resumable ignores it (state 'orphan_payload' is not
+    resumable). If even this write fails (fully degraded disk), the CRITICAL
+    log line with the uuid is the last resort."""
+    record = {
+        "state": "orphan_payload",
+        "session_id": session.id,
+        "wallet_address": session.wallet_address,
+        "discord_id": session.discord_id,
+        "network": session.network,
+        "nft_id": burn.nft_id,
+        "payload_uuid": burn.payload_uuid,
+        "created_at": time.time(),
+    }
+    ok = False
+    tmp: str | None = None
+    try:
+        os.makedirs(JOBS_DIR, exist_ok=True)
+        fd, tmp = tempfile.mkstemp(dir=JOBS_DIR, suffix=".tmp")
+        with os.fdopen(fd, "w") as f:
+            json.dump(record, f, indent=2)
+        os.replace(tmp, _orphan_record_path(burn.payload_uuid or session.id))
+        ok = True
+    except Exception:
+        if tmp is not None and os.path.exists(tmp):
+            try:
+                os.remove(tmp)
+            except OSError:
+                pass
+    logging.critical(
+        "burn2mint %s: unpersistable burn payload %s for %s could not be "
+        "cancelled — orphan journal %s; reconcile manually if it gets signed",
+        session.id,
+        burn.payload_uuid,
+        burn.nft_id,
+        "written" if ok else "ALSO FAILED (log line is the only record)",
+    )
+    return ok
 
 
 async def _check_signed_burn(
@@ -429,28 +474,55 @@ async def convert(session: Burn2MintSession, launch_job: Any) -> None:
         session.error = session.error or "no burns validated"
         persist(session)
         return
-    job = build_mint_job(session)
-    # Persist the job record FIRST (durable owed-mints ledger); only a
-    # durable job may flip the session to FULFILLING. If the job record
-    # cannot be written, the session STAYS AWAITING_BURNS (all burns already
-    # resolved), which advance()/resume_all() re-convert on the next poll or
-    # restart — the deterministic job id (b2m<session_id>) makes that retry
-    # target the same record, never a double-create. Marking FULFILLING over
-    # an in-memory-only job would let a crash strand the validated burns:
-    # startup would skip reconversion and the next status poll would mark the
-    # session DONE with no job ever recorded.
-    if not bulk_mint_flow.persist(job):
-        session.error = "mint-job record not durable; conversion will retry"
-        persist(session)
-        logging.critical(
-            "burn2mint %s: mint-job record failed to persist — validated burns %s "
-            "stay convertible (session remains awaiting_burns); retried on next "
-            "poll/restart",
-            session.id,
-            burned,
-        )
-        return
-    session.bulk_job_id = job.id
+    # ADOPT-BEFORE-CREATE: a job record for this session may already exist —
+    # a prior convert persisted it but crashed (or failed) before the session
+    # write landed, and by now the resumed job may carry REAL MINT PROGRESS
+    # (minted/offered units). Re-persisting a fresh PAID job over it would
+    # erase that progress and let a later restart re-mint units that already
+    # landed on-ledger. So: load the existing record and only create+persist
+    # when none exists. An existing-but-unreadable record is fail-closed —
+    # never overwritten; the session stays AWAITING_BURNS and retries later.
+    job_id = bulk_job_id_for(session)
+    job: bulk_mint_flow.BulkMintJob | None = None
+    job_path = bulk_mint_flow._record_path(job_id)
+    if os.path.exists(job_path):
+        try:
+            with open(job_path) as f:
+                job = bulk_mint_flow.BulkMintJob.from_serialized(json.load(f))
+        except Exception as e:
+            session.error = "existing mint-job record unreadable; conversion will retry"
+            persist(session)
+            logging.critical(
+                "burn2mint %s: existing mint-job record %s unreadable (%s) — "
+                "NOT overwriting (it may hold mint progress); retried later",
+                session.id,
+                job_id,
+                e,
+            )
+            return
+    if job is None:
+        job = build_mint_job(session)
+        # Persist the job record FIRST (durable owed-mints ledger); only a
+        # durable job may flip the session to FULFILLING. If the job record
+        # cannot be written, the session STAYS AWAITING_BURNS (all burns
+        # already resolved), which advance()/resume_all() re-convert on the
+        # next poll or restart — the deterministic job id makes that retry
+        # target the same record, never a double-create. Marking FULFILLING
+        # over an in-memory-only job would let a crash strand the validated
+        # burns: startup would skip reconversion and the next status poll
+        # would mark the session DONE with no job ever recorded.
+        if not bulk_mint_flow.persist(job):
+            session.error = "mint-job record not durable; conversion will retry"
+            persist(session)
+            logging.critical(
+                "burn2mint %s: mint-job record failed to persist — validated "
+                "burns %s stay convertible (session remains awaiting_burns); "
+                "retried on next poll/restart",
+                session.id,
+                burned,
+            )
+            return
+    session.bulk_job_id = job_id
     session.state = FULFILLING
     session.error = None
     persist(session)

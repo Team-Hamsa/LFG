@@ -398,6 +398,104 @@ def test_unpersistable_burn_payload_is_never_exposed(monkeypatch):
     assert cancelled == ["u-1"]  # payload withdrawn at XUMM
 
 
+def test_orphan_payload_is_journaled_when_cancel_unconfirmed(monkeypatch):
+    """If the session record can't be written AND XUMM doesn't confirm the
+    cancel, the payload uuid is journaled to a dedicated orphan record that
+    no session-record delete can drop — a signed-anyway burn stays
+    discoverable and reconcilable."""
+    monkeypatch.setattr(burn2mint_flow, "persist", lambda session: False)
+
+    async def _payload(*a, **k):
+        return {"uuid": "u-orphan", "xumm_url": "https://xumm.app/sign/u-orphan"}
+
+    async def _cancel(uuid):
+        return False  # cancel unconfirmed: the payload may still be signed
+
+    monkeypatch.setattr(burn2mint_flow.xumm_ops, "create_burn_payload", _payload)
+    monkeypatch.setattr(burn2mint_flow.xumm_ops, "cancel_xumm_payload", _cancel)
+    s = _session(("A",))
+    ok = _run(burn2mint_flow.start_next_burn(s, nft_info=_info_fn()))
+    assert ok is False
+    # Dedicated durable journal — survives delete_record(session.id).
+    with open(burn2mint_flow._orphan_record_path("u-orphan")) as f:
+        rec = json.load(f)
+    assert rec["payload_uuid"] == "u-orphan"
+    assert rec["nft_id"] == "A"
+    assert rec["wallet_address"] == WALLET
+    burn2mint_flow.delete_record(s.id)  # the start handler's failure path
+    assert json.load(open(burn2mint_flow._orphan_record_path("u-orphan")))
+    # The orphan record is never picked up as a resumable session.
+    assert burn2mint_flow.load_all_resumable() == []
+
+
+def test_no_orphan_journal_when_cancel_confirmed(monkeypatch):
+    monkeypatch.setattr(burn2mint_flow, "persist", lambda session: False)
+
+    async def _payload(*a, **k):
+        return {"uuid": "u-dead", "xumm_url": "https://xumm.app/sign/u-dead"}
+
+    async def _cancel(uuid):
+        return True  # confirmed withdrawn: nothing signable survives
+
+    monkeypatch.setattr(burn2mint_flow.xumm_ops, "create_burn_payload", _payload)
+    monkeypatch.setattr(burn2mint_flow.xumm_ops, "cancel_xumm_payload", _cancel)
+    s = _session(("A",))
+    assert _run(burn2mint_flow.start_next_burn(s, nft_info=_info_fn())) is False
+    assert not os.path.exists(burn2mint_flow._orphan_record_path("u-dead"))
+
+
+def test_reconvert_adopts_existing_job_preserving_mint_progress():
+    """Session write failed after the job record landed; the resumed job then
+    made mint progress. Re-convert must ADOPT the existing record — never
+    re-persist a fresh PAID job over minted units (re-mint risk)."""
+    s = _session(("A",))
+    s.burns[0].state = burn2mint_flow.B_BURNED
+    job = burn2mint_flow.build_mint_job(s)
+    # Simulate progress written by the resumed job before re-convert runs.
+    job.state = bulk_mint_flow.FULFILLING
+    job.units[0].state = bulk_mint_flow.OFFERED
+    job.units[0].nft_id = "nft-minted-already"
+    assert bulk_mint_flow.persist(job)
+    launched = []
+
+    async def _launch(j):
+        launched.append(j)
+        return j
+
+    _run(burn2mint_flow.convert(s, _launch))
+    assert s.state == burn2mint_flow.FULFILLING
+    assert len(launched) == 1
+    adopted = launched[0]
+    # The adopted job carries the prior progress, and the on-disk record was
+    # not overwritten back to a fresh PAID/PENDING shape.
+    assert adopted.units[0].state == bulk_mint_flow.OFFERED
+    assert adopted.units[0].nft_id == "nft-minted-already"
+    with open(bulk_mint_flow._record_path(job.id)) as f:
+        rec = json.load(f)
+    assert rec["state"] == bulk_mint_flow.FULFILLING
+    assert rec["units"][0]["state"] == bulk_mint_flow.OFFERED
+    assert rec["units"][0]["nft_id"] == "nft-minted-already"
+
+
+def test_reconvert_never_overwrites_unreadable_job_record(tmp_path):
+    """Fail-closed: an existing-but-unreadable job record may hold mint
+    progress — re-convert must not clobber it; the session stays retryable."""
+    s = _session(("A",))
+    s.burns[0].state = burn2mint_flow.B_BURNED
+    path = bulk_mint_flow._record_path(burn2mint_flow.bulk_job_id_for(s))
+    os.makedirs(os.path.dirname(path), exist_ok=True)
+    with open(path, "w") as f:
+        f.write("{corrupt")
+
+    async def _launch(job):  # pragma: no cover - must not be called
+        raise AssertionError("must not launch over an unreadable record")
+
+    _run(burn2mint_flow.convert(s, _launch))
+    assert s.state == burn2mint_flow.AWAITING_BURNS
+    with open(path) as f:
+        assert f.read() == "{corrupt"  # untouched
+
+
 def test_convert_requires_durable_job_before_fulfilling(monkeypatch):
     """Job-persist failure must NOT mark the session FULFILLING over an
     in-memory-only job: it stays AWAITING_BURNS so the next poll/restart
@@ -563,12 +661,11 @@ def test_burn2mint_routes_registered():
     assert "/api/mint/burn2mint/{session_id}/cancel" in paths
 
 
-def test_flag_default_is_off():
+def test_flag_default_is_off(monkeypatch):
     assert config.BURN_TO_MINT_ENABLED_DEFAULT == "0"
-    assert config.env_flag("BURN_TO_MINT_ENABLED", config.BURN_TO_MINT_ENABLED_DEFAULT) in (
-        True,
-        False,
-    )
+    # Remove the var so an ambient .env cannot mask the shipped default.
+    monkeypatch.delenv("BURN_TO_MINT_ENABLED", raising=False)
+    assert config.env_flag("BURN_TO_MINT_ENABLED", config.BURN_TO_MINT_ENABLED_DEFAULT) is False
 
 
 def test_start_refused_when_flag_off(dev_auth, monkeypatch):
