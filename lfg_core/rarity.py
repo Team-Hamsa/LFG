@@ -586,7 +586,9 @@ def available_values(body: str, category: str) -> set[str] | None:
     universe weighted_pick is called with — or None when it can't be derived
     (non-local layer source, missing dir, legacy '*' body). Display consumers
     use it so their share-ceiling candidate_count matches real picks (#198)."""
-    if config.LAYER_SOURCE != "local":
+    if config.LAYER_SOURCE != "local" or body == BODY_SENTINEL:
+        # Legacy '*' rows have no body dir — a lookup would see only shared/
+        # and produce a partial set; fall back to all-enabled instead.
         return None
     from lfg_core.layer_store import LocalLayerStore
 

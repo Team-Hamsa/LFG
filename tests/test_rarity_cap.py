@@ -284,16 +284,68 @@ def test_get_odds_derives_available_from_layer_store(conn, monkeypatch, tmp_path
     assert odds["Runaway"] == pytest.approx(0.3)
 
 
+def test_available_values_legacy_body_returns_none(monkeypatch, tmp_path):
+    # Legacy '*' rows have no body dir; auto-resolution must fall back to the
+    # all-enabled candidate count, never a partial shared/-only set.
+    monkeypatch.setattr(config, "LAYER_SOURCE", "local")
+    monkeypatch.setattr(config, "LAYERS_DIR", str(tmp_path))
+    (tmp_path / "shared" / "Background").mkdir(parents=True)
+    (tmp_path / "shared" / "Background" / "OnlyShared.png").write_bytes(b"x")
+    assert rarity.available_values("*", "Background") is None
+
+
+def test_get_odds_legacy_body_auto_resolution_falls_back(conn, monkeypatch, tmp_path):
+    monkeypatch.setattr(config, "RARITY_CAP_MULTIPLE", 3.0)
+    monkeypatch.setattr(config, "LAYER_SOURCE", "local")
+    monkeypatch.setattr(config, "LAYERS_DIR", str(tmp_path))
+    (tmp_path / "shared" / "Background").mkdir(parents=True)
+    (tmp_path / "shared" / "Background" / "OnlyShared.png").write_bytes(b"x")
+    _seed_lfg_background(conn, [("Runaway", 60)])
+    seed_row(conn, "Runaway", 60)
+    for i in range(9):
+        seed_row(conn, f"T{i}", 0)
+    odds = {
+        t: w
+        for t, _c, _s, w, _st in rarity.get_odds(
+            conn, "*", "Background", network="testnet", now=NOW
+        )
+    }
+    # Fallback candidate_count = 10 enabled rows (NOT the 1-value shared/
+    # set, which would have given ceiling 3/1 = uncapped).
+    assert odds["Runaway"] == pytest.approx(0.3)
+
+
+def test_available_values_includes_webm(monkeypatch, tmp_path):
+    monkeypatch.setattr(config, "LAYER_SOURCE", "local")
+    monkeypatch.setattr(config, "LAYERS_DIR", str(tmp_path))
+    d = tmp_path / "ape" / "Background"
+    d.mkdir(parents=True)
+    (d / "Animated.webm").write_bytes(b"x")
+    (d / "Still.png").write_bytes(b"x")
+    assert rarity.available_values("ape", "Background") == {"Animated", "Still"}
+
+
+def test_available_values_non_local_source_returns_none(monkeypatch, tmp_path):
+    monkeypatch.setattr(config, "LAYER_SOURCE", "cdn")
+    monkeypatch.setattr(config, "LAYERS_DIR", str(tmp_path))
+    assert rarity.available_values("ape", "Background") is None
+
+
 def test_dashboard_fetch_rows_applies_cap(monkeypatch, tmp_path):
     from scripts import trait_dashboard as td
 
     monkeypatch.setattr(config, "RARITY_CAP_MULTIPLE", 3.0)
+    monkeypatch.setattr(config, "LAYER_SOURCE", "local")
     monkeypatch.setattr(config, "LAYERS_DIR", str(tmp_path / "layers"))
     d = tmp_path / "layers" / "ape" / "Background"
     d.mkdir(parents=True)
     traits = ["Runaway", *[f"T{i}" for i in range(9)]]
     for t in traits:
         (d / f"{t}.png").write_bytes(b"x")
+    # T8 is a .webm-only layer: the dashboard must count it as a candidate
+    # (shared resolver semantics), or the ceiling would tighten to 3/9.
+    (d / "T8.png").unlink()
+    (d / "T8.webm").write_bytes(b"x")
     db = str(tmp_path / "t.db")
     c = sqlite3.connect(db)
     rarity.ensure_schema(c)
