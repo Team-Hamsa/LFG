@@ -111,8 +111,16 @@ def test_laplace_smoothed_share_still_capped():
     # Smoothing widens the denominator but a runaway stays above the ceiling
     # and is clamped identically.
     w = rarity.effective_weight(
-        60, 100, 0.005, None, 24, None, NOW,
-        population_size=10, candidate_count=10, cap_multiple=3.0,
+        60,
+        100,
+        0.005,
+        None,
+        24,
+        None,
+        NOW,
+        population_size=10,
+        candidate_count=10,
+        cap_multiple=3.0,
     )
     assert w == pytest.approx(0.3)
 
@@ -178,12 +186,14 @@ def test_weighted_pick_caps_runaway(conn, monkeypatch):
     rng = CaptureRng()
     available = ["Runaway", *others]
     rarity.weighted_pick(conn, "*", "Background", available, network="testnet", now=NOW, rng=rng)
-    w = dict(zip(rng.traits, rng.weights))
+    w = dict(zip(rng.traits, rng.weights, strict=True))
     # candidate_count = 10 enabled candidates → ceiling 0.3. Smoothed share
     # of Runaway = 61/70 ≈ 0.87 → clamped to 0.3.
     assert w["Runaway"] == pytest.approx(0.3)
     # A floor trait is untouched by the cap.
-    assert w["T0"] == pytest.approx(rarity.effective_weight(0, 60, 0.005, None, 24, None, NOW, population_size=10))
+    assert w["T0"] == pytest.approx(
+        rarity.effective_weight(0, 60, 0.005, None, 24, None, NOW, population_size=10)
+    )
 
 
 def test_weighted_pick_candidate_count_excludes_disabled(conn, monkeypatch):
@@ -197,7 +207,7 @@ def test_weighted_pick_candidate_count_excludes_disabled(conn, monkeypatch):
     available = ["Runaway", "Off", *[f"E{i}" for i in range(5)]]
     rarity.weighted_pick(conn, "*", "Background", available, network="testnet", now=NOW, rng=rng)
     # 6 enabled candidates (Off excluded) → fair 1/6, ceiling 3/6 = 0.5.
-    w = dict(zip(rng.traits, rng.weights))
+    w = dict(zip(rng.traits, rng.weights, strict=True))
     assert "Off" not in w
     assert w["Runaway"] == pytest.approx(0.5)
 
@@ -211,6 +221,6 @@ def test_weighted_pick_uncapped_when_config_off(conn, monkeypatch):
     rng = CaptureRng()
     available = ["Runaway", *[f"T{i}" for i in range(9)]]
     rarity.weighted_pick(conn, "*", "Background", available, network="testnet", now=NOW, rng=rng)
-    w = dict(zip(rng.traits, rng.weights))
+    w = dict(zip(rng.traits, rng.weights, strict=True))
     # Uncapped smoothed share 61/70 — identical to the pre-cap engine.
     assert w["Runaway"] == pytest.approx(61 / 70)
