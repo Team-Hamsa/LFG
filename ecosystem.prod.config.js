@@ -10,6 +10,11 @@ module.exports = {
     { name: "lfg-telegram", cwd: CWD, script: "run_telegram.py", interpreter: PY },
     { name: "lfg-index-mainnet", cwd: CWD, script: "scripts/onchain_listener.py", interpreter: PY, args: ["--network", "mainnet", "listen"] },
     { name: "lfg-snapshot", cwd: CWD, script: "scripts/snapshot_balances.py", interpreter: PY, args: ["--network", "mainnet"], cron_restart: "10 0 * * *", autorestart: false },
+    // SourceTag metrics badge (#321): commits metrics/sourcetag.json to main via the GitHub
+    // Contents API, then CI renders assets/sourcetag.svg. No explicit --out on purpose — with
+    // --push the script skips the local write, so it never dirties this deployer-watched checkout.
+    // Requires `gh` on the pm2 daemon's PATH, authed as a human actor (not github-actions[bot]).
+    { name: "lfg-sourcetag", cwd: CWD, script: "scripts/sourcetag_metrics.py", interpreter: PY, args: ["--network", "mainnet", "--push"], cron_restart: "20 0 * * *", autorestart: false },
     { name: "lfg-economy-reconcile", cwd: CWD, script: "scripts/economy_nightly_reconcile.py", interpreter: PY, args: ["--network", "mainnet"], cron_restart: "20 0 * * *", autorestart: false },
     { name: "lfg-economy-audit", cwd: CWD, script: "scripts/audit_trait_economy.py", interpreter: PY, args: ["--network", "mainnet"], cron_restart: "25 0 * * *", autorestart: false },
     // Nightly market_listings/buy_offers self-heal sweep (#288) — 03:30 UTC, offset from the 00:10-00:25 crons.
