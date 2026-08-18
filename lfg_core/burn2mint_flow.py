@@ -672,10 +672,10 @@ async def recover_orphan_payloads() -> None:
     - signed + validated tesSUCCESS (signer == wallet, NFTokenID matches) ->
       the NFT was destroyed with no session to convert it: award a durable
       mint_credits row (#226 pattern — same terminal value as a failed bulk
-      unit) and retire the journal. Credit-then-retire ordering: a crash
-      between the two can at worst double-credit on the next sweep (operator-
-      visible, same posture as publish_unit_events' sub-tick window) — never
-      lose the burn.
+      unit) and retire the journal. Credit-then-retire ordering (never lose
+      the burn), and the credit is IDEMPOTENT — keyed on the payload uuid via
+      mint_credits' source_key dedup — so a crash between credit and retire
+      converges on the next sweep instead of double-crediting.
     - signed + validated but NOT our burn (tec, foreign signer/NFTokenID) ->
       nothing is owed: retire.
     - anything indeterminate (status lookup failed, unsigned-but-live,
@@ -724,8 +724,16 @@ async def recover_orphan_payloads() -> None:
             continue
         network = rec.get("network") or config.XRPL_NETWORK
         try:
+            # Idempotent on the payload uuid (source_key): if a prior sweep
+            # credited this orphan but died before retiring the journal, this
+            # retry is a no-op — the crash window converges instead of
+            # double-crediting one burned NFT.
             mint_credits.add_credit(
-                db_path.app_db_path(network), str(rec.get("discord_id")), network, 1
+                db_path.app_db_path(network),
+                str(rec.get("discord_id")),
+                network,
+                1,
+                source_key=f"burn2mint-orphan:{uuid_}",
             )
         except Exception:
             logging.critical(

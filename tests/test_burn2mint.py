@@ -464,6 +464,36 @@ def test_orphan_recovery_credits_validated_burn(tmp_path, monkeypatch):
     assert mint_credits.get_credits(str(tmp_path / "app.db"), "u1", s.network) == 1
 
 
+def test_orphan_recovery_is_idempotent_across_crash_window(tmp_path, monkeypatch):
+    """Crash between add_credit committing and the journal being retired:
+    the next sweep re-processes the same validated orphan but the credit is
+    keyed on the payload uuid — exactly ONE credit ever exists."""
+    path, s = _write_orphan(uuid="u-twice")
+    _patch_ledger(monkeypatch)
+    app_db = str(tmp_path / "app.db")
+
+    real_retire = burn2mint_flow._retire_orphan
+    monkeypatch.setattr(burn2mint_flow, "_retire_orphan", lambda p: None)  # simulate crash
+    _run(burn2mint_flow.recover_orphan_payloads())
+    assert os.path.exists(path)  # credited but journal survived the "crash"
+    assert mint_credits.get_credits(app_db, "u1", s.network) == 1
+
+    monkeypatch.setattr(burn2mint_flow, "_retire_orphan", real_retire)
+    _run(burn2mint_flow.recover_orphan_payloads())  # next startup sweep
+    assert not os.path.exists(path)  # retired this time
+    assert mint_credits.get_credits(app_db, "u1", s.network) == 1  # NOT 2
+
+
+def test_add_credit_source_key_dedups(tmp_path):
+    db = str(tmp_path / "app.db")
+    assert mint_credits.add_credit(db, "u1", "testnet", 1, source_key="k1") == 1
+    assert mint_credits.add_credit(db, "u1", "testnet", 1, source_key="k1") == 1  # no-op
+    assert mint_credits.add_credit(db, "u1", "testnet", 1, source_key="k2") == 2
+    # Un-keyed calls keep the original additive behavior (bulk-mint tail).
+    assert mint_credits.add_credit(db, "u1", "testnet", 1) == 3
+    assert mint_credits.add_credit(db, "u1", "testnet", 1) == 4
+
+
 def test_orphan_recovery_retires_expired_unsigned(tmp_path, monkeypatch):
     path, s = _write_orphan(uuid="u-exp")
 
