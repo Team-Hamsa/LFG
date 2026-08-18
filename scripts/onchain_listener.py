@@ -18,6 +18,7 @@ import json as _json
 import logging
 import math
 import os
+import socket
 import sys
 import time
 from collections.abc import Callable
@@ -689,6 +690,137 @@ def _verify_archive_connection(
         )
 
 
+# Auto catch-up on (re)subscribe (#402): every deploy restarts this listener,
+# which stamps a bounded continuity gap and left the eligibility archive
+# uncertified until an operator (or the #341 campaign Start) ran the bounded
+# catch-up. Kick it here instead — as a background SUBPROCESS running the
+# exact same `backfill_history.py --catch-up-from-gap` code path, so success
+# is only ever declared by the existing certification logic. Cross-process
+# single-flight with #341's Start-time reverify and manual runs is the
+# advisory flock in `archive_reverify.acquire_certification_lock`, which the
+# subprocess itself acquires (busy → it exits 3, harmless).
+CATCHUP_COOLDOWN_SECONDS = _read_positive_timeout("LISTENER_AUTO_CATCHUP_COOLDOWN", "600")
+
+
+class AutoCatchup:
+    """Fire-and-forget bounded catch-up trigger; never blocks or raises into
+    the stream loop. One in-flight attempt at a time, with a cooldown between
+    attempts so a flapping stream can't re-fire in a tight loop (a failed
+    attempt may retry on a later reconnect; a successful one clears the gap,
+    so the precondition check naturally stops re-firing)."""
+
+    def __init__(
+        self,
+        network: str,
+        *,
+        runner: Callable[..., Any] | None = None,
+        cooldown: float | None = None,
+    ) -> None:
+        self._network = network
+        self._runner = runner or self._run_subprocess
+        self._cooldown = CATCHUP_COOLDOWN_SECONDS if cooldown is None else cooldown
+        self._task: asyncio.Task[None] | None = None
+        self._last_attempt_monotonic: float | None = None
+
+    def maybe_start(self, hconn: Any) -> str:
+        """Check preconditions and launch the catch-up task. Returns a
+        machine-readable reason (for logs/tests); swallows every error."""
+        from lfg_core import config
+
+        try:
+            if not config.env_flag("LISTENER_AUTO_CATCHUP", config.LISTENER_AUTO_CATCHUP_DEFAULT):
+                return "disabled"
+            if self._task is not None and not self._task.done():
+                return "already_running"
+            if self._last_attempt_monotonic is not None and (
+                time.monotonic() - self._last_attempt_monotonic < self._cooldown
+            ):
+                return "cooldown"
+            state = history_store.get_archive_state(hconn, self._network)
+            if state is None or not (state.baseline_provenance or "").strip():
+                return "never_certified"
+            if (
+                state.baseline_ledger_min != history_store.EARLIEST_AVAILABLE_LEDGER
+                or state.baseline_ledger_max is None
+            ):
+                # No prior full-range certification to extend — operator-only.
+                return "never_certified"
+            if state.continuity_gap_at is None:
+                return "no_gap"
+            if state.continuity_gap_after is None:
+                # Unbounded gap: a bounded page cannot prove coverage —
+                # fail-closed, full certification is the operator's call.
+                return "unbounded_gap"
+            distributor = config.BRIX_DISTRIBUTOR_ADDRESS
+            if not distributor:
+                # The bounded catch-up refuses to run with a narrowed source
+                # set / missing distributor (#331); never launch a run that
+                # would attest less than the certification requires.
+                logging.warning(
+                    "[%s] auto catch-up skipped: BRIX_DISTRIBUTOR_ADDRESS is not "
+                    "configured and a certification run requires the distributor "
+                    "source — run the bounded catch-up manually",
+                    self._network,
+                )
+                return "no_distributor"
+            provenance = (
+                "auto catch-up after listener restart @"
+                f"{socket.gethostname()} "
+                f"{time.strftime('%Y-%m-%dT%H:%M:%SZ', time.gmtime())}"
+            )
+            self._last_attempt_monotonic = time.monotonic()
+            self._task = asyncio.create_task(self._run(provenance, distributor))
+            logging.info(
+                "[%s] launching background bounded catch-up (gap after ledger %s: %s)",
+                self._network,
+                state.continuity_gap_after,
+                state.continuity_gap_reason,
+            )
+            return "started"
+        except Exception:
+            # The trigger must never take down (or even delay) the stream loop.
+            logging.exception("[%s] auto catch-up trigger failed", self._network)
+            return "error"
+
+    async def _run(self, provenance: str, distributor: str) -> None:
+        try:
+            rc, output = await self._runner(provenance, distributor)
+            if rc == 0:
+                logging.info("[%s] auto catch-up cleared the continuity gap", self._network)
+            else:
+                logging.warning(
+                    "[%s] auto catch-up did not clear the gap (exit %s); the archive stays "
+                    "fail-closed. Output tail:\n%s",
+                    self._network,
+                    rc,
+                    output[-4000:],
+                )
+        except Exception:
+            # A crashed catch-up leaves the archive uncertified (fail-closed)
+            # and must never propagate into the listener's indexing loop.
+            logging.exception("[%s] auto catch-up crashed", self._network)
+
+    async def _run_subprocess(self, provenance: str, distributor: str) -> tuple[int | None, str]:
+        argv = [
+            sys.executable,
+            os.path.join(REPO_ROOT, "scripts", "backfill_history.py"),
+            "--network",
+            self._network,
+            "--catch-up-from-gap",
+            "--baseline-provenance",
+            provenance,
+            "--distributor",
+            distributor,
+        ]
+        proc = await asyncio.create_subprocess_exec(
+            *argv,
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.STDOUT,
+        )
+        out, _ = await proc.communicate()
+        return proc.returncode, out.decode(errors="replace")
+
+
 async def _dispatch_stream_tx(
     conn: Any,
     tx: dict[str, Any],
@@ -938,6 +1070,7 @@ async def _listen(network: str, issuer: str, taxon: int, clio: str) -> None:
         "numbers": numbers,
     }
     archive_batch = ArchiveBatch(hconn, history_ctx)
+    auto_catchup = AutoCatchup(network)
     backoff = RECONNECT_BASE
     async with aiohttp.ClientSession() as http:
 
@@ -980,6 +1113,11 @@ async def _listen(network: str, issuer: str, taxon: int, clio: str) -> None:
                     snapshot = await history_store.fetch_endpoint_snapshot(endpoint_request)
                     _verify_archive_connection(hconn, history_ctx, snapshot)
                     logging.info(f"[{network}] subscribed to verified tx stream on {clio}")
+                    # Self-heal (#402): _verify_archive_connection above just
+                    # stamped this restart's bounded gap on a certified
+                    # archive — kick the bounded catch-up in the background.
+                    # Never blocks/raises; failures only log.
+                    auto_catchup.maybe_start(hconn)
                     backoff = RECONNECT_BASE
                     # Idle backstop (#333): a quiet stream must not strand a
                     # partial batch and let the heartbeat go stale.

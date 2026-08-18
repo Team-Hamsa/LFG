@@ -41,6 +41,7 @@ from lfg_core.archive_reverify import (  # noqa: E402,F401
     THROTTLE_SECONDS,
     _is_validated_entry,
     _warn_if_unvalidated,
+    acquire_certification_lock,
     backfill_account_tx,
     backfill_nft_history,
     baseline_account_coverage,
@@ -356,6 +357,20 @@ async def _amain() -> int:
     issuer, brix_issuer = issuers_for_network(args.network)
     issuer = net["issuer"] or issuer
     conn = history_store.init_history_db(history_store.history_db_path(args.network))
+
+    certify_lock = None
+    if args.complete_audited_baseline or args.catch_up_from_gap:
+        # Cross-process single-flight (#402): the listener's auto catch-up,
+        # the service's Start-time auto-reverify and manual runs all serialize
+        # on the same advisory flock — never two certification sweeps against
+        # one archive. Held (via the open handle) until process exit.
+        certify_lock = acquire_certification_lock(history_store.history_db_path(args.network))
+        if certify_lock is None:
+            logging.error(
+                "another certification/catch-up run holds the lock for this archive; "
+                "refusing to run concurrently — retry after it finishes"
+            )
+            return 3
 
     if args.derive_only:
         from derive_history_events import rederive  # Task 5

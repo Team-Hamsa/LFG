@@ -131,6 +131,8 @@ SPONSORED_MINT_EXCLUDED_WALLETS=<addr,addr>                 # sponsored free min
 SPONSORED_MINT_MAINNET_GENESIS_HASH=<ledger-32570-hash>         # optional; pins history_mainnet.db to a chain identity. Unset = the archive's own recorded genesis is trusted (still fail-closed: an uncertified archive admits nobody)
 SPONSORED_MINT_TESTNET_GENESIS_HASH=<ledger-32570-hash>         # optional; same, for history_testnet.db
 SPONSORED_MINT_ARCHIVE_MAX_LAG_SECONDS=900                  # optional; how stale the eligibility archive's listener heartbeat may be before admission fails closed (default 900)
+LISTENER_AUTO_CATCHUP=1                                     # optional (#402); default ON — on (re)subscribe the index listener auto-runs the bounded --catch-up-from-gap in the background when the archive is certified-but-gapped (needs BRIX_DISTRIBUTOR_ADDRESS; skips otherwise)
+LISTENER_AUTO_CATCHUP_COOLDOWN=600                          # optional (#402); min seconds between auto catch-up attempts (flap debounce)
 ECONOMY_AUDIT_WEBHOOK_URL=<discord-webhook-url>             # optional (#322); nightly trait-economy audit posts here on a non-clean run (unset = log only)
 ```
 
@@ -162,7 +164,11 @@ ECONOMY_AUDIT_WEBHOOK_URL=<discord-webhook-url>             # optional (#322); n
 > --network <net> --catch-up-from-gap --baseline-provenance "…" --distributor
 > <addr>` (#329), which pages only `[continuity_gap_after, tip]` and records
 > the cumulative baseline; only an unbounded/never-certified archive needs the
-> full re-page.
+> full re-page. Since #402 the listener runs that bounded catch-up itself on
+> (re)subscribe (background subprocess, mechanical provenance, single-flight
+> with the #341 Start-time reverify via a shared flock; `LISTENER_AUTO_CATCHUP=0`
+> disables) — continuity self-heals minutes after a deploy, still fail-closed
+> until the catch-up completes cleanly.
 > `SPONSORED_MINT_*_GENESIS_HASH` is unset by default; the listener no longer
 > refuses to start without it (that once crash-looped the index listeners), it
 > just leaves eligibility archiving off and logs a warning. Full procedure:

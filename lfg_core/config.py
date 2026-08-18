@@ -365,6 +365,12 @@ SPONSORED_MINT_ARCHIVE_GENESIS_HASHES = {
     "mainnet": os.getenv("SPONSORED_MINT_MAINNET_GENESIS_HASH", "").strip(),
     "testnet": os.getenv("SPONSORED_MINT_TESTNET_GENESIS_HASH", "").strip(),
 }
+# Listener self-heal (#402): on (re)subscribe, an index listener that finds a
+# certified-but-gapped (bounded) eligibility archive kicks the bounded
+# --catch-up-from-gap automatically in the background. On by default; the
+# listener reads the flag live via env_flag at trigger time (never freeze it).
+LISTENER_AUTO_CATCHUP_DEFAULT = "1"  # named so a test can lock the shipped default
+LISTENER_AUTO_CATCHUP = env_flag("LISTENER_AUTO_CATCHUP", LISTENER_AUTO_CATCHUP_DEFAULT)
 SPONSORED_MINT_EXCLUDED_WALLETS = tuple(
     value.strip()
     for value in os.getenv("SPONSORED_MINT_EXCLUDED_WALLETS", "").split(",")

@@ -244,9 +244,22 @@ unbounded gap" below), when the archive was never fully certified, or when the
 endpoint tip cannot reach the gap; those cases are full certification's job.
 If the gap's upper extent lies above the tip this run certified, the gap
 survives, the archive stays fail-closed, and the run exits 1 — re-run against
-a fresher tip. This is still an explicit operator command with a provenance
-attestation: nothing self-heals, and a restart still fails closed until an
-operator runs it.
+a fresher tip.
+
+Since #402 this bounded catch-up is also **self-healing**: on every
+(re)subscribe the index listener (`scripts/onchain_listener.py`) checks for a
+certified-but-gapped (bounded) archive and, when `LISTENER_AUTO_CATCHUP` is
+on (the default) and `BRIX_DISTRIBUTOR_ADDRESS` is configured, launches the
+exact command above as a background subprocess with a mechanical provenance
+(`auto catch-up after listener restart @<host> <utc-ts>`). It is single-flight
+with the Step 0b Start-time re-verify and any manual run (all certification
+writers serialize on an advisory flock next to the history DB; a busy lock
+makes the late-comer exit cleanly), never blocks the listener's indexing, and
+changes nothing about the fail-closed posture: until the catch-up completes
+cleanly the archive stays uncertified, and a never-certified or unbounded
+archive is never touched — those remain the operator's explicit full
+certification. The manual command remains available and identical (e.g. when
+the distributor is unconfigured, the flag is off, or an attempt failed).
 
 Note the honest limit: **both** full and bounded certification re-prove a
 window at `account_tx` breadth only — not at the firehose breadth the live
