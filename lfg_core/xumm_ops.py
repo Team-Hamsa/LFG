@@ -496,6 +496,39 @@ async def create_accept_buy_offer_payload(
     )
 
 
+async def create_burn_payload(
+    account: str,
+    nft_id: str,
+    return_url: dict[str, str] | None = None,
+    user_token: str | None = None,
+    platform: str = memos.PLATFORM_BACKEND,
+    campaign: str | None = None,
+) -> dict[str, Any] | None:
+    """XUMM payload for a USER-signed NFTokenBurn (#220 burn-to-mint).
+
+    The no-forced-burns principle: the app never issuer-burns tokens out of a
+    user's wallet — the OWNER signs the burn themselves (an NFTokenBurn signed
+    by the current owner is always legal for their own token, regardless of
+    the lsfBurnable flag, which only governs issuer/authorized burns).
+    `account` is therefore required and pinned into the txjson so Xaman
+    refuses to sign from any other wallet (same rationale as
+    create_payment_payload's money-trap note). SourceTag is stamped by
+    _create_xumm_payload; the provenance memo records action=burn with
+    initiator=user."""
+    return await _create_xumm_payload(
+        {
+            "TransactionType": "NFTokenBurn",
+            "Account": account,
+            "NFTokenID": nft_id,
+        },
+        options=_with_return_url({}, return_url),
+        user_token=user_token,
+        memos_json=memos.build_memos_json(
+            memos.INITIATOR_USER, platform, memos.ACTION_BURN, campaign
+        ),
+    )
+
+
 async def create_cancel_offer_payload(
     account: str,
     offer_index: str,

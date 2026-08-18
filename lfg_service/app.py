@@ -44,6 +44,7 @@ from lfg_core import (
     brix_payment,
     brokers,
     bulk_mint_flow,
+    burn2mint_flow,
     closet_token,
     config,
     db_path,
@@ -118,6 +119,10 @@ _shop_session_created: dict[str, float] = {}
 # deliberately non-terminal (see bulk_mint_flow.TERMINAL_STATES) so a live job
 # stays visible to /api/mint/bulk/active and the startup resume sweep.
 bulk_sessions: dict[str, Any] = {}
+# Burn-to-mint (#220) sessions: burn2mint_flow.Burn2MintSession keyed by .id.
+# The mint half of a converted session is a cap-exempt BulkMintJob that lives
+# in bulk_sessions like any other bulk job (id "b2m<session_id>").
+burn2mint_sessions: dict[str, Any] = {}
 # Sponsored admission stays fail-closed until the startup recovery sweep has
 # completed. Paid minting does not depend on this gate.
 _sponsored_recovery_ready = False
@@ -4244,6 +4249,145 @@ async def handle_bulk_mint_unit_accept(request):
     )
 
 
+async def _launch_burn_mint_job(job: Any) -> Any:
+    """Register + run a burn-to-mint bulk job. IDEMPOTENT by job id — the id
+    is derived from the burn session (b2m<session_id>), so a crash-resumed
+    job already re-attached by resume_bulk_jobs is adopted, never re-created
+    (the double-mint guard of burn2mint_flow.convert)."""
+    existing = bulk_sessions.get(job.id)
+    if existing is not None:
+        job = existing
+    else:
+        bulk_sessions[job.id] = job
+    if job.task is None and job.state not in bulk_mint_flow.TERMINAL_STATES:
+        job.task = asyncio.create_task(bulk_mint_flow.run_bulk_mint_job(job))
+    return job
+
+
+@require_wallet
+async def handle_burn2mint_start(request):
+    """Start a burn-to-mint session (#220): the caller lists M of their own
+    live LFG NFTs; a sequential XUMM signing loop collects M USER-signed
+    NFTokenBurn transactions (no-forced-burns — the app never issuer-burns
+    from user wallets; XLS-56 Batch would make this one signature but the
+    amendment is not enabled), and only burns that VALIDATE on-ledger convert
+    into a cap-exempt bulk mint job. Ownership of every nft_id is verified
+    on-ledger, fail-closed, before the first signature is requested."""
+    if not config.BURN_TO_MINT_ENABLED:
+        return web.json_response({"error": "burn_to_mint_disabled"}, status=403)
+    user = request["user"]
+    _prune_sessions(burn2mint_sessions, burn2mint_flow.TERMINAL_STATES)
+    try:
+        body = await request.json()
+    except Exception:
+        body = {}
+    nft_ids = body.get("nft_ids")
+    if (
+        not isinstance(nft_ids, list)
+        or not nft_ids
+        or len(nft_ids) > config.BULK_MINT_MAX
+        or not all(isinstance(n, str) and n for n in nft_ids)
+        or len(set(nft_ids)) != len(nft_ids)
+    ):
+        return web.json_response({"error": "invalid_nft_ids"}, status=400)
+    platform = _platform(user)
+    return_url = await _request_return_url(request)
+    push_user_token = await _push_token(user)
+    err = await burn2mint_flow.verify_ownership(request["wallet"], nft_ids)
+    if err is not None:
+        return web.json_response({"error": "ownership_failed", "detail": err}, status=409)
+    # One active session per user (no awaits between check and insert).
+    active = _active_session(
+        burn2mint_sessions, burn2mint_flow.TERMINAL_STATES, user["id"], platform
+    )
+    if active:
+        return web.json_response(
+            {"error": "burn2mint already in progress", "session": active.to_dict()}, status=409
+        )
+    session = burn2mint_flow.Burn2MintSession(
+        discord_id=user["id"],
+        wallet_address=request["wallet"],
+        nft_ids=nft_ids,
+        platform=platform,
+        push_user_token=push_user_token,
+        return_url=return_url,
+    )
+    burn2mint_sessions[session.id] = session
+    async with session.lock:
+        ok = await burn2mint_flow.start_next_burn(session)
+    if not ok:
+        # Nothing was burned yet; fail fast so the user can retry cleanly.
+        session.state = burn2mint_flow.FAILED
+        session.error = session.burns[0].error or "burn_payload_failed"
+        burn2mint_flow.delete_record(session.id)
+        return web.json_response({"error": session.error}, status=502)
+    return web.json_response(session.to_dict())
+
+
+def _burn2mint_lookup(request):
+    session = burn2mint_sessions.get(request.match_info["session_id"])
+    if (
+        not session
+        or session.discord_id != request["user"]["id"]
+        or session.platform != _platform(request["user"])
+    ):
+        return None
+    return session
+
+
+@require_auth
+async def handle_burn2mint_status(request):
+    """Poll a burn-to-mint session: advances the signing loop (verifies the
+    current burn on-ledger, offers the next payload, converts on completion)
+    and embeds the mint job once fulfilling."""
+    session = _burn2mint_lookup(request)
+    if session is None:
+        return web.json_response({"error": "not found"}, status=404)
+    async with session.lock:
+        if session.state == burn2mint_flow.AWAITING_BURNS:
+            await burn2mint_flow.advance(session, _launch_burn_mint_job)
+        job = bulk_sessions.get(session.bulk_job_id) if session.bulk_job_id else None
+        if session.state == burn2mint_flow.FULFILLING and (
+            job is None or job.state in bulk_mint_flow.TERMINAL_STATES
+        ):
+            # Job finished (or was resumed+finished and pruned): the session
+            # is over. DONE is terminal; keep the tombstone record.
+            session.state = burn2mint_flow.DONE
+            burn2mint_flow.persist(session)
+        d = session.to_dict()
+        if job is not None:
+            d["job"] = job.to_dict()
+    return web.json_response(d)
+
+
+@require_auth
+async def handle_burn2mint_active(request):
+    """The caller's live (non-terminal) burn-to-mint session, or null."""
+    user = request["user"]
+    session = _active_session(
+        burn2mint_sessions, burn2mint_flow.TERMINAL_STATES, user["id"], _platform(user)
+    )
+    return web.json_response({"session": session.to_dict() if session else None})
+
+
+@require_auth
+async def handle_burn2mint_cancel(request):
+    """Back out of the signing loop. Burns already validated are irreversible
+    and STILL convert into their owed mints (the session moves to fulfilling
+    rather than cancelled); with zero validated burns the session cancels
+    cleanly and nothing is owed either way."""
+    session = _burn2mint_lookup(request)
+    if session is None:
+        return web.json_response({"error": "not found"}, status=404)
+    if session.state in burn2mint_flow.TERMINAL_STATES:
+        return web.json_response(session.to_dict())
+    if session.state != burn2mint_flow.AWAITING_BURNS:
+        return web.json_response({"error": "session is past burning"}, status=409)
+    async with session.lock:
+        await burn2mint_flow.cancel(session, _launch_burn_mint_job)
+    return web.json_response(session.to_dict())
+
+
 def _pending_offer_row(
     o: dict[str, Any], char_network: str, econ_network: str, cfg: Any
 ) -> dict[str, Any]:
@@ -4851,6 +4995,17 @@ async def resume_bulk_jobs() -> None:
     for job in jobs:
         bulk_sessions[job.id] = job
         job.task = asyncio.create_task(bulk_mint_flow.run_bulk_mint_job(job))
+    # #220: burn-to-mint recovery, AFTER bulk jobs re-attach so an already-
+    # converted mint job (id b2m<session_id>) is adopted by _launch_burn_mint_
+    # job instead of re-created. Validated burns are irreversible: any session
+    # holding them converts here even mid-signing-loop (unsigned remainders
+    # simply stay unburned in the user's wallet) and even with
+    # BURN_TO_MINT_ENABLED off. Never fails the startup sweep.
+    try:
+        for b2m in await burn2mint_flow.resume_all(_launch_burn_mint_job):
+            burn2mint_sessions[b2m.id] = b2m
+    except Exception:
+        logging.exception("burn2mint resume sweep failed")
     # Paid work is now fully attached and running before any sponsored network
     # reconciliation. A slow or unavailable XRPL lookup can keep sponsorship
     # disabled, but can never strand a previously paid bulk job.
@@ -6780,6 +6935,10 @@ def create_app() -> web.Application:
     app.router.add_get("/api/offers/pending", handle_pending_offers)
     app.router.add_post("/api/offers/accept", handle_pending_offer_accept)
     app.router.add_get("/api/mint/bulk/{session_id}", handle_bulk_mint_status)
+    app.router.add_post("/api/mint/burn2mint", handle_burn2mint_start)
+    app.router.add_get("/api/mint/burn2mint/active", handle_burn2mint_active)
+    app.router.add_post("/api/mint/burn2mint/{session_id}/cancel", handle_burn2mint_cancel)
+    app.router.add_get("/api/mint/burn2mint/{session_id}", handle_burn2mint_status)
     app.router.add_get("/api/mint/{session_id}", handle_mint_status)
     app.router.add_post("/api/mint/{session_id}/regenerate", handle_mint_regenerate)
     app.router.add_post("/api/mint/{session_id}/cancel", handle_mint_cancel)

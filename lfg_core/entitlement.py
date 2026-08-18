@@ -39,6 +39,18 @@ def from_dict(d: dict[str, Any]) -> PaymentEntitlement | BurnEntitlement:
     raise ValueError(f"unknown entitlement source: {d['source']!r}")
 
 
-def build_burn_entitlement(quantity: int, burn_nft_ids: list[str]) -> BurnEntitlement:
-    """Stub for #220 (burn-to-mint). The seam exists; the logic does not yet."""
-    raise NotImplementedError("burn-to-mint is not implemented yet (#220)")
+def build_burn_entitlement(burn_nft_ids: list[str]) -> BurnEntitlement:
+    """Convert VALIDATED burns into a cap-exempt mint entitlement (#220).
+
+    `burn_nft_ids` must contain only NFTs whose user-signed NFTokenBurn was
+    confirmed validated + tesSUCCESS on-ledger (lfg_core/burn2mint_flow.py is
+    the only caller and enforces that). quantity == the validated burn count,
+    never the requested count: an unsigned/failed burn earns no mint. The
+    resulting entitlement is `cap_exempt` — burning M live NFTs to mint M
+    fresh ones is supply-neutral, so the headroom clamp/reservation
+    (MAX_COLLECTION_SIZE, #226) is skipped entirely."""
+    if not burn_nft_ids:
+        raise ValueError("burn entitlement requires at least one validated burn")
+    if len(set(burn_nft_ids)) != len(burn_nft_ids):
+        raise ValueError("burn entitlement nft_ids must be unique")
+    return BurnEntitlement(quantity=len(burn_nft_ids), burn_nft_ids=list(burn_nft_ids))

@@ -229,6 +229,7 @@ LFG/
 │   ├── economy_flow.py     # Dress-up economy flows
 │   ├── shop_flow.py        # Trait Shop — BRIX-priced on-demand trait mint
 │   ├── bulk_mint_flow.py   # Bulk mint — pay once, mint N editions
+│   ├── burn2mint_flow.py   # Burn-to-mint — burn M own NFTs for M fresh mints (#220)
 │   ├── layer_store.py      # Trait layer store (local-first)
 │   └── traits.py           # Rules-driven trait selection
 ├── surfaces/
