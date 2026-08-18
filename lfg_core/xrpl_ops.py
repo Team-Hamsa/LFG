@@ -204,6 +204,34 @@ async def _tx_lookup_with_retry(
     raise AssertionError("unreachable")
 
 
+async def _autofill_and_sign_with_retry(
+    tx: Any,
+    wallet: Wallet,
+    client: JsonRpcClient,
+    label: str,
+    retries: int = _MALFORMED_POLL_RETRIES,
+) -> Any:
+    """autofill_and_sign, retrying (with backoff) ONLY the malformed
+    200-no-`result` body (#385/#386). Autofill issues pure server reads
+    (account sequence, fee, ledger index) and NOTHING has been signed or
+    submitted yet, so re-running the whole step is safe — this can never
+    blind-resubmit a signed transaction. Any other exception propagates
+    immediately."""
+    for attempt in range(retries + 1):
+        try:
+            return await asyncio.to_thread(autofill_and_sign, tx, client, wallet)
+        except Exception as e:
+            if not _is_malformed_result_error(e) or attempt >= retries:
+                raise
+            delay = 0.5 * (2**attempt)
+            logging.warning(
+                f"{label}: malformed rippled response (no 'result' key) during "
+                f"autofill; retrying {attempt + 1}/{retries} in {delay}s"
+            )
+            await asyncio.sleep(delay)
+    raise AssertionError("unreachable")
+
+
 async def _confirm_by_hash(
     client: JsonRpcClient, tx_hash: str, attempts: int = 3
 ) -> dict[str, Any] | None:
@@ -339,7 +367,7 @@ async def _submit_and_confirm(
     regular key) via the loop-keyed owner_lock registry (#180)."""
     account = getattr(tx, "account", None) or wallet.classic_address
     async with _submission_scope(account, coordinator_held):
-        signed = await asyncio.to_thread(autofill_and_sign, tx, client, wallet)
+        signed = await _autofill_and_sign_with_retry(tx, wallet, client, label)
         try:
             # Pass wallet=None: `signed` is already signed, so submit_and_wait must
             # not re-sign/re-autofill it — otherwise the submitted tx could differ
