@@ -118,11 +118,16 @@ let externalOpener = null; // set when the SDK is available
 // X's crawler.
 let shareBase = '';
 let bithompBase = '';
+// #252: server-side "Share from my account" (per-user X OAuth). False until
+// /api/config reports the feature armed; the Web Intent button is always the
+// fallback either way.
+let xUserShare = false;
 
 function applyShareConfig(cfg) {
   // Keep an already-populated base if a later fetch omits the field.
   shareBase = (cfg && cfg.public_share_base_url) || shareBase;
   bithompBase = (cfg && cfg.bithomp_base_url) || bithompBase;
+  xUserShare = (cfg && !!cfg.x_user_share) || xUserShare;
 }
 
 async function api(path, opts = {}) {
@@ -439,7 +444,7 @@ function swapShareText(nftNumber) {
 // either way, not just a JS-only click handler) plus a "Copy link"
 // affordance. Never window.confirm/alert for feedback — both are silent
 // no-ops inside the Discord Activity iframe.
-function buildShareControl(text, url) {
+function buildShareControl(text, url, meta) {
   const intentUrl = `https://x.com/intent/tweet?text=${encodeURIComponent(text)}&url=${encodeURIComponent(url)}`;
 
   const wrap = document.createElement('p');
@@ -492,6 +497,59 @@ function buildShareControl(text, url) {
   };
 
   wrap.append(link, copyBtn, copyInput);
+
+  // #252: "Share from my account" — server-side post via the user's own
+  // connected X account. Only rendered when the service reports the feature
+  // armed AND the caller supplied share metadata (kind + nft number; the
+  // tweet text is built server-side). Falls back to the Web Intent composer
+  // when not connected or on any failure — the intent link above never
+  // depends on this path.
+  if (xUserShare && meta) {
+    const mineBtn = document.createElement('button');
+    mineBtn.type = 'button';
+    mineBtn.className = 'link';
+    mineBtn.textContent = 'Share from my account';
+    mineBtn.onclick = async () => {
+      mineBtn.disabled = true;
+      const original = mineBtn.textContent;
+      mineBtn.textContent = 'Sharing…';
+      try {
+        const res = await api('/api/x/share', {
+          method: 'POST',
+          body: JSON.stringify({ kind: meta.kind || 'mint', nft_number: meta.nftNumber ?? null }),
+        });
+        if (res && res.posted) {
+          mineBtn.textContent = 'Shared! 🎉';
+          return; // stays disabled — one server-side post per control
+        }
+        // Unexpected 2xx shape: fall back to the zero-OAuth composer.
+        openExternal(intentUrl);
+        mineBtn.textContent = original;
+        mineBtn.disabled = false;
+      } catch (e) {
+        // api() throws on non-2xx with the body attached (see api()).
+        if (e && e.body && e.body.code === 'not_connected') {
+          // Kick off the OAuth connect dance in a new window, then let the
+          // user click again once connected.
+          try {
+            const conn = await api('/api/x/connect');
+            if (conn && conn.authorize_url) {
+              openExternal(conn.authorize_url);
+              mineBtn.textContent = 'Connect in the opened window, then retry';
+              mineBtn.disabled = false;
+              setTimeout(() => { mineBtn.textContent = original; }, 8000);
+              return;
+            }
+          } catch (_) { /* fall through to Web Intent */ }
+        }
+        openExternal(intentUrl);
+        mineBtn.textContent = original;
+        mineBtn.disabled = false;
+      }
+    };
+    wrap.appendChild(mineBtn);
+  }
+
   return wrap;
 }
 
@@ -859,7 +917,7 @@ function showFlow({ title, text, qrData, link, push, image, video, done, stage, 
   shareRow.replaceChildren();
   const showShare = !!(share && share.url);
   shareRow.hidden = !showShare;
-  if (showShare) shareRow.appendChild(buildShareControl(share.text, share.url));
+  if (showShare) shareRow.appendChild(buildShareControl(share.text, share.url, share.meta));
 }
 
 // The pay screen adapts to the backend's silently-detected payment path:
@@ -944,7 +1002,7 @@ function pollMint(sessionId) {
           done: true,
           stage: s.state,
           celebrate: true,
-          share: { text: mintShareText(s.nft_number), url: shareUrlFor(s.nft_number, s.nft_id) },
+          share: { text: mintShareText(s.nft_number), url: shareUrlFor(s.nft_number, s.nft_id), meta: { kind: 'mint', nftNumber: s.nft_number } },
         });
         return;
       }
@@ -962,7 +1020,7 @@ function pollMint(sessionId) {
         done: true,
         stage: s.state,
         celebrate: true,
-        share: { text: mintShareText(s.nft_number), url: shareUrlFor(s.nft_number, s.nft_id) },
+        share: { text: mintShareText(s.nft_number), url: shareUrlFor(s.nft_number, s.nft_id), meta: { kind: 'mint', nftNumber: s.nft_number } },
       });
       pollTimer = setTimeout(tick, 3000); // keep watching for the accept signature
       return;
@@ -2107,7 +2165,7 @@ function renderSwapResults(s) {
     // shareUrlFor degrades to '' (no base known — dead link otherwise).
     const swapShareUrl = shareUrlFor(r.nft_number, r.nft_id);
     if (swapShareUrl) {
-      div.appendChild(buildShareControl(swapShareText(r.nft_number), swapShareUrl));
+      div.appendChild(buildShareControl(swapShareText(r.nft_number), swapShareUrl, { kind: 'swap', nftNumber: r.nft_number }));
     }
     box.appendChild(div);
   }

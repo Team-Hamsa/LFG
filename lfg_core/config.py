@@ -432,6 +432,24 @@ X_ENABLED = env_flag("X_ENABLED", "0") and all(
 # read by both the poster (surfaces/x_bot/) and the service admin endpoints.
 X_STATE_DB_PATH = os.getenv("X_STATE_DB_PATH", "x_state.db")
 
+# Per-user X OAuth2 PKCE — "Share from my account" (#252, spec §7). Separate
+# credential set from the brand poster's OAuth 1.0a block above: this is an
+# OAuth 2.0 app client (confidential secret optional — public PKCE clients
+# omit it). X_TOKEN_ENC_KEY is a Fernet key (generate with
+# `python -c "from cryptography.fernet import Fernet; print(Fernet.generate_key().decode())"`)
+# encrypting users' access/refresh tokens at rest in the identity DB.
+# X_OAUTH_CALLBACK_URL must be the app's PUBLIC HTTPS callback
+# (<public-base>/api/x/callback) registered on the X developer portal — the
+# same public-HTTPS ops dependency as PUBLIC_SHARE_BASE_URL / Mini-App #89
+# Part B. Feature-off posture: unless all three of client id, callback URL,
+# and enc key are set, X_USER_SHARE_ENABLED is False and every /api/x/*
+# route 404s (ships DARK; going live is an ops step).
+X_OAUTH_CLIENT_ID = os.getenv("X_OAUTH_CLIENT_ID", "")
+X_OAUTH_CLIENT_SECRET = os.getenv("X_OAUTH_CLIENT_SECRET", "")
+X_OAUTH_CALLBACK_URL = os.getenv("X_OAUTH_CALLBACK_URL", "").strip()
+X_TOKEN_ENC_KEY = os.getenv("X_TOKEN_ENC_KEY", "")
+X_USER_SHARE_ENABLED = all((X_OAUTH_CLIENT_ID, X_OAUTH_CALLBACK_URL, X_TOKEN_ENC_KEY))
+
 # Public base URL the OG card page (GET /nft/{number}, lfg_service/app.py) uses
 # to build its OWN absolute self-links (og:url, canonical) — NEVER derived from
 # the request Host header, which is unstable across ingress paths (Discord's

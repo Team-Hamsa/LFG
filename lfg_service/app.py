@@ -80,6 +80,7 @@ from lfg_core import (
 from lfg_core.db_helpers import get_nft_data, record_nft_mint
 from lfg_core.user_db import create_users_table, get_user, register_user
 from lfg_service import identity as identity_store
+from lfg_service import x_oauth
 from lfg_service.auth import require_service_token, surface_for_token
 from lfg_service.events import Event, InMemoryEventBus
 from lfg_service.telegram_auth import validate_init_data
@@ -782,6 +783,183 @@ async def handle_x_status(request):
             "enabled": config.X_ENABLED,
         }
     )
+
+
+# --- Per-user X OAuth2 PKCE — "Share from my account" (#252, spec §7) ------
+#
+# Ships DARK: config.X_USER_SHARE_ENABLED is False unless X_OAUTH_CLIENT_ID +
+# X_OAUTH_CALLBACK_URL + X_TOKEN_ENC_KEY are all set, and every route below
+# 404s while it is off (the public HTTPS callback is an ops prerequisite —
+# same dependency as PUBLIC_SHARE_BASE_URL / Mini-App #89 Part B).
+# No XRPL transactions anywhere in this block — no SourceTag/memos surface.
+
+
+def require_x_user_share(handler):
+    @functools.wraps(handler)
+    async def wrapper(request: web.Request) -> web.StreamResponse:
+        if not config.X_USER_SHARE_ENABLED:
+            # Indistinguishable from a route that doesn't exist: an undeployed
+            # feature exposes nothing (mirrors the issue's "ship it dark").
+            return web.json_response({"error": "not found"}, status=404)
+        return await handler(request)
+
+    return wrapper
+
+
+def _x_share_text(kind: str, nft_number: Any) -> str:
+    """Server-built tweet text (the client never supplies free text — this
+    endpoint spends real money per post on X's pay-per-use API). Mirrors the
+    client's mintShareText/swapShareText. Deliberately LINK-FREE, matching
+    the brand poster's 2026-07-17 directive: X bills $0.20/post containing a
+    URL vs $0.015 without, and spec §7 specs no link for per-user shares."""
+    n = nft_number if isinstance(nft_number, int) else None
+    if kind == "swap":
+        return (
+            f"I just swapped traits on LFG #{n}! 🧱 #XRPL"
+            if n is not None
+            else "I just swapped traits on my LFG! 🧱 #XRPL"
+        )
+    return (
+        f"I just minted LFG #{n}! 🧱 #XRPL" if n is not None else "I just minted an LFG! 🧱 #XRPL"
+    )
+
+
+@require_x_user_share
+@require_wallet
+async def handle_x_connect(request):
+    """Start the PKCE dance: returns the X authorize URL for the caller's
+    wallet. The state is bound to the wallet here — only this wallet can be
+    credited by the callback."""
+    url = x_oauth.begin_authorization(request["wallet"])
+    return web.json_response({"authorize_url": url})
+
+
+_X_CALLBACK_HTML = (
+    '<!doctype html><meta charset="utf-8"><title>X account</title>'
+    '<p style="font-family:sans-serif">{msg}</p>'
+)
+
+
+@require_x_user_share
+async def handle_x_callback(request):
+    """X redirects the user's browser here after consent. Unauthenticated by
+    necessity (the browser context carries no session token); the one-shot
+    `state` param IS the authentication — it was minted for a specific wallet
+    by handle_x_connect and can never be replayed."""
+    query = request.rel_url.query
+    state = query.get("state", "")
+    pending = x_oauth.claim_state(state) if state else None
+    if pending is None:
+        return web.Response(
+            text=_X_CALLBACK_HTML.format(
+                msg="This connect link is invalid or expired. Please start again from the app."
+            ),
+            content_type="text/html",
+            status=400,
+        )
+    if query.get("error") or not query.get("code"):
+        return web.Response(
+            text=_X_CALLBACK_HTML.format(
+                msg="X connection was cancelled. You can close this window."
+            ),
+            content_type="text/html",
+            status=400,
+        )
+    try:
+        tokens = await x_oauth.exchange_code(query["code"], pending.code_verifier)
+        me = await x_oauth.fetch_me(tokens["access_token"])
+        await asyncio.to_thread(
+            x_oauth.upsert_account,
+            pending.wallet,
+            str(me.get("id", "")),
+            me.get("username"),
+            tokens["access_token"],
+            tokens["refresh_token"],
+            tokens["expires_at"],
+        )
+    except x_oauth.XOAuthError as exc:
+        logging.getLogger(__name__).warning(
+            "X OAuth callback failed for %s: %s", pending.wallet, exc
+        )
+        return web.Response(
+            text=_X_CALLBACK_HTML.format(msg="Connecting your X account failed. Please try again."),
+            content_type="text/html",
+            status=502,
+        )
+    handle = me.get("username") or "your X account"
+    return web.Response(
+        text=_X_CALLBACK_HTML.format(
+            msg=f"Connected @{handle}! You can close this window and share from the app."
+        ),
+        content_type="text/html",
+    )
+
+
+@require_x_user_share
+@require_wallet
+async def handle_x_account(request):
+    account = await asyncio.to_thread(x_oauth.get_account, request["wallet"])
+    if not account:
+        return web.json_response({"connected": False})
+    return web.json_response({"connected": True, "x_handle": account["x_handle"]})
+
+
+@require_x_user_share
+@require_wallet
+async def handle_x_disconnect(request):
+    """Best-effort revoke at X, then unconditional local delete — the local
+    delete always wins (fail-closed on our side, spec §7)."""
+    wallet = request["wallet"]
+    account = await asyncio.to_thread(x_oauth.get_account, wallet)
+    if account:
+        for enc in (account["access_token_enc"], account["refresh_token_enc"]):
+            if not enc:
+                continue
+            try:
+                await x_oauth.revoke_token(x_oauth.decrypt_token(enc))
+            except x_oauth.XOAuthError:
+                pass  # undecryptable token: nothing to revoke, still delete
+    await asyncio.to_thread(x_oauth.delete_account, wallet)
+    return web.json_response({"connected": False})
+
+
+@require_x_user_share
+@require_wallet
+async def handle_x_share(request):
+    """Post a share tweet from the caller's OWN connected X account. 409
+    `not_connected` tells the client to fall back to the Web Intent button
+    (which needs no OAuth and always works)."""
+    try:
+        body = await request.json()
+    except Exception:
+        body = {}
+    kind = body.get("kind", "mint")
+    if kind not in ("mint", "swap"):
+        return web.json_response({"error": "unknown share kind"}, status=400)
+    text = _x_share_text(kind, body.get("nft_number"))
+
+    try:
+        access_token = await x_oauth.get_usable_access_token(request["wallet"])
+    except x_oauth.XOAuthError:
+        return web.json_response(
+            {"error": "X is unreachable — try again shortly", "code": "x_unavailable"},
+            status=503,
+        )
+    if not access_token:
+        return web.json_response(
+            {"error": "no X account connected", "code": "not_connected"}, status=409
+        )
+    try:
+        tweet_id = await x_oauth.post_tweet(access_token, text)
+    except x_oauth.XOAuthError as exc:
+        status = 401 if exc.status in (401, 403) else 502
+        code = "not_connected" if status == 401 else "post_failed"
+        if status == 401:
+            # Token rejected despite a fresh refresh: connection is dead.
+            await asyncio.to_thread(x_oauth.delete_account, request["wallet"])
+            status = 409
+        return web.json_response({"error": str(exc), "code": code}, status=status)
+    return web.json_response({"posted": True, "tweet_id": tweet_id, "text": text})
 
 
 def _require_discord_surface(request):
@@ -5928,6 +6106,7 @@ async def handle_config(request):
             "bulk_mint_ui": config.BULK_MINT_UI_ENABLED,
             "bulk_mint_max": config.BULK_MINT_MAX,
             "public_share_base_url": config.PUBLIC_SHARE_BASE_URL,
+            "x_user_share": config.X_USER_SHARE_ENABLED,
             "bithomp_base_url": _bithomp_base_url(),
         }
     )
@@ -6996,6 +7175,12 @@ def create_app() -> web.Application:
     app.router.add_post("/api/admin/x/pause", handle_x_pause)
     app.router.add_post("/api/admin/x/resume", handle_x_resume)
     app.router.add_get("/api/admin/x/status", handle_x_status)
+    # Per-user X OAuth2 PKCE (#252) — all 404 while X_USER_SHARE_ENABLED is off.
+    app.router.add_get("/api/x/connect", handle_x_connect)
+    app.router.add_delete("/api/x/connect", handle_x_disconnect)
+    app.router.add_get("/api/x/callback", handle_x_callback)
+    app.router.add_get("/api/x/account", handle_x_account)
+    app.router.add_post("/api/x/share", handle_x_share)
     app.router.add_post("/api/admin/sponsored-mint/start", handle_sponsored_mint_start)
     app.router.add_post("/api/admin/sponsored-mint/stop", handle_sponsored_mint_stop)
     app.router.add_get("/api/admin/sponsored-mint/status", handle_sponsored_mint_status)

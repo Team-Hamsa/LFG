@@ -111,6 +111,10 @@ X_ACCESS_SECRET=<brand-account-access-secret>
 SERVICE_TOKEN_X=<x-surface-token>                           # firehose token; auth.py auto-registers surface "x"
 X_MONTHLY_POST_BUDGET=100                                   # optional; UTC-month post cap — COST knob (pay-per-use: $0.015/post link-free), default 100
 X_STATE_DB_PATH=x_state.db                                  # optional; poster dedup/budget/pause sqlite (gitignored)
+X_OAUTH_CLIENT_ID=<x-oauth2-app-client-id>                  # optional (#252); per-user OAuth2 PKCE "Share from my account" — feature OFF unless client id + callback + enc key all set
+X_OAUTH_CLIENT_SECRET=<x-oauth2-app-client-secret>          # optional (#252); only for confidential X app clients (public PKCE clients omit)
+X_OAUTH_CALLBACK_URL=<public-https-base>/api/x/callback     # optional (#252); MUST be public HTTPS + registered on the X dev portal (same ops dep as #89 Part B)
+X_TOKEN_ENC_KEY=<fernet-key>                                # optional (#252); Fernet key encrypting users' X tokens at rest (python -c "from cryptography.fernet import Fernet; print(Fernet.generate_key().decode())")
 PUBLIC_SHARE_BASE_URL=<public-https-base>                   # optional (#41); unset ⇒ share buttons use bithomp URLs; needs public HTTPS (same dep as #89 Part B)
 SHARE_FORWARD_URL=https://build.letseffinggo.com              # optional (#41); humans clicking a share card are JS-forwarded here (never HTTP-redirect — the X crawler must stay on the per-NFT card page); unset = legacy card body
 SHARE_CARD_RENDER_ENABLED=0                                   # optional (#41); 1 = twitter:image serves branded PNG from /nft/{n}/card.png (needs node + `cd scripts/share_card && npm i && npx playwright install --with-deps chromium`); render failures 302 to raw art
