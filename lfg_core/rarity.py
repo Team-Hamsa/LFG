@@ -1,6 +1,8 @@
 # lfg_core/rarity.py
 # Variable rarity engine: proportional-with-floor trait weights cached in
-# the trait_rarity table, with a dormant-then-stepped boost for new traits.
+# the trait_rarity table, with a dormant-then-stepped boost for new traits
+# and an opt-in share ceiling (#198, RARITY_CAP_MULTIPLE × fair share) that
+# plateaus runaway-common traits without touching flat categories.
 # Pure sqlite3 + stdlib; time and randomness are injectable for tests.
 # Spec: docs/superpowers/specs/2026-06-12-variable-rarity-engine-design.md
 
@@ -109,9 +111,20 @@ def effective_weight(
     boost_started_at: str | None,
     now: datetime,
     population_size: int = 0,
+    candidate_count: int = 0,
+    cap_multiple: float | None = None,
 ) -> float:
-    """weight = max(live_share, floor) × boost multiplier. Relative weight,
-    not a normalized probability.
+    """weight = min(max(live_share, floor), ceiling) × boost multiplier.
+    Relative weight, not a normalized probability.
+
+    Share-ceiling cap (#198): when candidate_count (the number of ENABLED
+    candidates in the actual pick) and a positive cap multiple are given, the
+    share term is clamped at ceiling = cap_multiple × (1 / candidate_count) —
+    a multiple of the category's fair share, so flat categories self-exempt
+    and only runaways plateau. The ceiling never sinks below floor_weight,
+    and the boost multiplies AFTER the clamp (deliberately-boosted rares are
+    never fought by the cap). cap_multiple=None reads the live
+    config.RARITY_CAP_MULTIPLE; 0 disables the cap entirely.
 
     When population_size (the number of trait rows in the whole
     (body, category) population) is given, the share is Laplace-smoothed:
@@ -127,6 +140,11 @@ def effective_weight(
     else:
         share = (live_count / category_total) if category_total else 0.0
     base = max(share, floor_weight)
+    if cap_multiple is None:
+        cap_multiple = config.RARITY_CAP_MULTIPLE
+    if cap_multiple > 0 and candidate_count > 0:
+        ceiling = max(cap_multiple / candidate_count, floor_weight)
+        base = min(base, ceiling)
     return base * boost_multiplier(boost_initial, boost_step_hours, boost_started_at, now)
 
 
@@ -204,7 +222,20 @@ def weighted_pick(
     population = rows[0][7]
     traits = [r[0] for r in rows]
     weights = [
-        effective_weight(r[1], total, r[2], r[3], r[4], r[5], now, population_size=population)
+        effective_weight(
+            r[1],
+            total,
+            r[2],
+            r[3],
+            r[4],
+            r[5],
+            now,
+            population_size=population,
+            # candidate_count = enabled candidates in THIS pick (len(rows)),
+            # not the whole-population row count feeding Laplace smoothing —
+            # disabled/legacy placeholder rows must not distort fair share.
+            candidate_count=len(rows),
+        )
         for r in rows
     ]
     return rng.choices(traits, weights=weights, k=1)[0]  # type: ignore[no-any-return]
@@ -550,6 +581,24 @@ def set_enabled(
     conn.commit()
 
 
+def available_values(body: str, category: str) -> set[str] | None:
+    """Layer-store candidate set for (body, category) — the same `available`
+    universe weighted_pick is called with — or None when it can't be derived
+    (non-local layer source, missing dir, legacy '*' body). Display consumers
+    use it so their share-ceiling candidate_count matches real picks (#198)."""
+    if config.LAYER_SOURCE != "local" or body == BODY_SENTINEL:
+        # Legacy '*' rows have no body dir — a lookup would see only shared/
+        # and produce a partial set; fall back to all-enabled instead.
+        return None
+    from lfg_core.layer_store import LocalLayerStore
+
+    try:
+        values = set(LocalLayerStore().list_values_sync(body, category))
+    except OSError:
+        return None
+    return values or None
+
+
 def get_odds(
     conn: sqlite3.Connection,
     body: str,
@@ -557,11 +606,20 @@ def get_odds(
     *,
     network: str | None = None,
     now: datetime | None = None,
+    available: list[str] | set[str] | None = None,
 ) -> list[tuple[str, int, float, float, str]]:
     """Rows for admin display: (trait, live_count, share%, weight, status)
-    sorted by effective weight descending."""
+    sorted by effective weight descending.
+
+    `available` is the layer-store candidate set (what weighted_pick would be
+    called with); it defaults to a live layer-store scan so the share-ceiling
+    candidate_count counts only enabled AND available traits — exactly the
+    picker's candidate set. Unresolvable (no local layer tree) falls back to
+    all enabled rows."""
     network = network or config.XRPL_NETWORK
     now = now or utcnow()
+    if available is None:
+        available = available_values(body, category)
     rows = conn.execute(
         """SELECT trait, live_count, floor_weight, boost_initial,
                   boost_step_hours, boost_started_at, enabled
@@ -569,12 +627,31 @@ def get_odds(
         (network, body, category),
     ).fetchall()
     total = sum(r[1] for r in rows)
+    # candidate_count for the share ceiling mirrors weighted_pick exactly:
+    # enabled rows that are also in the layer-store candidate set (the
+    # picker's len(rows) is enabled ∩ available). Without a resolvable
+    # candidate set, fall back to all enabled rows.
+    if available is not None:
+        avail_set = set(available)
+        enabled_count = sum(1 for r in rows if r[6] and r[0] in avail_set)
+    else:
+        enabled_count = sum(1 for r in rows if r[6])
     out: list[tuple[str, int, float, float, str]] = []
     for trait, count, floor, bi, bs, bsa, enabled in rows:
         share = (count / total * 100) if total else 0.0
         # population_size = len(rows): same Laplace smoothing as weighted_pick
         # so the admin view shows the weights the picker actually uses.
-        weight = effective_weight(count, total, floor, bi, bs, bsa, now, population_size=len(rows))
+        weight = effective_weight(
+            count,
+            total,
+            floor,
+            bi,
+            bs,
+            bsa,
+            now,
+            population_size=len(rows),
+            candidate_count=enabled_count,
+        )
         status = "disabled" if not enabled else boost_status(bi, bs, bsa, now)
         out.append((trait, count, share, weight, status))
     return sorted(out, key=lambda r: -r[3])

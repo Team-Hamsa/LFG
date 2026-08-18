@@ -331,6 +331,13 @@ DB_PATH = app_db_path(XRPL_NETWORK)
 
 # Variable rarity engine
 RARITY_FLOOR = float(os.getenv("RARITY_FLOOR", "0.005"))
+# Share-ceiling cap (#198): clamp effective_weight's share term at
+# RARITY_CAP_MULTIPLE × fair share (fair share = 1 / enabled-candidate-count
+# in the pick). 0 or unset = no cap (behavior identical to the uncapped
+# engine); 3.0 is the recommended opt-in value. The ceiling never sinks below
+# floor_weight, and boosts multiply AFTER the cap.
+RARITY_CAP_MULTIPLE_DEFAULT = 0.0  # named so a test can lock the shipped default
+RARITY_CAP_MULTIPLE = float(os.getenv("RARITY_CAP_MULTIPLE", str(RARITY_CAP_MULTIPLE_DEFAULT)))
 RARITY_BOOST_INITIAL = float(os.getenv("RARITY_BOOST_INITIAL", "7"))
 RARITY_BOOST_STEP_HOURS = int(os.getenv("RARITY_BOOST_STEP_HOURS", "24"))
 

@@ -159,6 +159,24 @@ def fetch_rows(
         totals[key] = totals.get(key, 0) + r[3]
         pops[key] = pops.get(key, 0) + 1
 
+    # Share-ceiling candidate_count (#198): mirror weighted_pick exactly by
+    # resolving each (body, category)'s candidate set through the SAME
+    # resolver get_odds uses — rarity.available_values (LocalLayerStore
+    # semantics: body dir ∪ shared/, all layer extensions incl. .webm,
+    # None for legacy '*' bodies / non-local layer sources / missing dirs).
+    # None → fall back to all enabled rows, same as rarity.get_odds.
+    avail: dict[tuple[str, str], set[str] | None] = {}
+    cands: dict[tuple[str, str], int] = {}
+    for r in raw:
+        key = (r[0], r[1])
+        if not r[8]:
+            continue
+        if key not in avail:
+            avail[key] = rarity.available_values(*key)
+        a = avail[key]
+        if a is None or r[2] in a:
+            cands[key] = cands.get(key, 0) + 1
+
     rows: list[dict] = []
     bodies: set[str] = set()
     categories: set[str] = set()
@@ -176,7 +194,15 @@ def fetch_rows(
                 "live_count": count,
                 "share": (count / total * 100) if total else 0.0,
                 "weight": rarity.effective_weight(
-                    count, total, floor, bi, bs, bsa, now, population_size=pops[key]
+                    count,
+                    total,
+                    floor,
+                    bi,
+                    bs,
+                    bsa,
+                    now,
+                    population_size=pops[key],
+                    candidate_count=cands.get(key, 0),
                 ),
                 "enabled": bool(enabled),
                 "boost_status": rarity.boost_status(bi, bs, bsa, now),
