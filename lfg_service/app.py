@@ -4529,6 +4529,68 @@ async def _recover_sponsored_offers(app_db: str, *, network: str) -> None:
                 and offer["offer_index"]
             ]
             offer_id = live[0]["offer_index"] if live else None
+            if offer_id is None and await xrpl_ops.account_exists(claim.wallet) is False:
+                # The destination account does not exist on-ledger (never
+                # funded above the base reserve). NFTokenCreateOffer against it
+                # can only ever return tecNO_DST — a fee burned per boot for a
+                # guaranteed failure — and create_nft_offer collapses that to
+                # None (the #211 contract), so the old code raised and pinned
+                # _sponsored_recovery_ready False. That took sponsored
+                # admission down campaign-wide, for everyone, on EVERY restart,
+                # because of one undeliverable claim (prod, 2026-08-17).
+                #
+                # Skip it instead: not a failure, so the sweep stays ready. The
+                # claim is deliberately LEFT 'minted' rather than parked
+                # terminal — the NFT is still held by the issuer and the user
+                # is still owed it, so a later boot re-attempts and succeeds by
+                # itself once they fund the wallet. Only a definitive
+                # actNotFound reaches here; an inconclusive lookup returns None
+                # and falls through to the fail-closed path below.
+                undeliverable = (
+                    "destination account does not exist on-ledger (unfunded); "
+                    "offer creation deferred until it is funded"
+                )
+                # This write is a diagnostic breadcrumb, not a state
+                # transition: the claim is already 'minted' and STAYS 'minted'
+                # whether or not it lands, so a later boot retries either way.
+                # Validate it (never silently discard — a failure that looks
+                # identical to a success in the log is how this class of bug
+                # hides), but do NOT raise on it: raising would re-disable
+                # admission campaign-wide over a failed explanatory string,
+                # which is precisely the blast radius this branch exists to
+                # remove. Log loudly and carry on.
+                try:
+                    recorded = await asyncio.to_thread(
+                        sponsored_mint.record_offer,
+                        app_db,
+                        network=network,
+                        wallet=claim.wallet,
+                        session_id=claim.session_id,
+                        offer_id=None,
+                        error=undeliverable,
+                        history_path=history_store.history_db_path(network),
+                    )
+                except Exception:
+                    recorded = None
+                    logging.exception(
+                        "sponsored undeliverable-claim note raised: claim=%s wallet=%s",
+                        claim.id,
+                        claim.wallet,
+                    )
+                if recorded is None or recorded.last_error != undeliverable:
+                    logging.error(
+                        "sponsored undeliverable-claim note not persisted "
+                        "(claim remains 'minted' and will be retried): claim=%s wallet=%s",
+                        claim.id,
+                        claim.wallet,
+                    )
+                logging.warning(
+                    "sponsored offer undeliverable, skipped: claim=%s nft=%s wallet=%s",
+                    claim.id,
+                    claim.nft_id,
+                    claim.wallet,
+                )
+                continue
             if offer_id is None:
                 # Startup recovery has no originating user surface, so the memo
                 # platform is the backend default. It must be a member of the

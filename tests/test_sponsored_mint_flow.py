@@ -1,4 +1,5 @@
 # Sponsored single-mint admission and irreversible pipeline boundaries.
+import logging
 import os
 import sqlite3
 from types import SimpleNamespace
@@ -2589,3 +2590,280 @@ def test_resumed_sponsored_mint_definitive_failure_discards_staged_still(
     # persisted token is the only key that can clean it up.
     assert not os.path.exists(staged)
     assert not (archive / "4000.png").exists()
+
+
+# --- undeliverable destination (unfunded wallet) ---------------------------
+#
+# Prod incident 2026-08-17: a claim's destination account had never been
+# funded, so it did not exist on-ledger. NFTokenCreateOffer against it can only
+# ever return tecNO_DST, create_nft_offer collapses that to None (the #211
+# contract), and recovery raised -- pinning _sponsored_recovery_ready False and
+# disabling sponsored admission campaign-wide on EVERY boot. One undeliverable
+# claim must never take free mints down for everyone.
+
+
+def _minted_claim_awaiting_offer(_service_env, wallet, session, nft_id):
+    claim = _reserve_recovery_claim(_service_env, wallet, session)
+    prepare_and_forward(
+        sponsored_mint,
+        _service_env.app_db,
+        network="mainnet",
+        wallet=claim.wallet,
+        session_id=claim.session_id,
+        tx_hash=f"TX-{nft_id}",
+        now=102,
+    )
+    sponsored_mint.record_minted_and_enqueue_burn(
+        _service_env.app_db,
+        network="mainnet",
+        wallet=claim.wallet,
+        session_id=claim.session_id,
+        mint_tx_hash=f"TX-{nft_id}",
+        nft_id=nft_id,
+        now=103,
+    )
+    return claim
+
+
+class _NoSellOffers:
+    result = {"offers": []}
+
+
+class _NoSellOffersClient:
+    def __init__(self, *args, **kwargs):
+        pass
+
+    def request(self, request):
+        return _NoSellOffers()
+
+
+def test_offer_recovery_skips_unfunded_destination_without_blocking_admission(
+    _service_env, monkeypatch
+):
+    sponsored_mint.start_campaign(_service_env.app_db, network="mainnet", actor="test", now=100)
+    claim = _minted_claim_awaiting_offer(
+        _service_env, "rUNFUNDED", "offer-unfunded", "NFT-UNFUNDED"
+    )
+
+    create_calls = []
+
+    async def create_offer(*args, **kwargs):
+        create_calls.append((args, kwargs))
+        return None
+
+    async def account_exists(address):
+        assert address == claim.wallet
+        return False
+
+    monkeypatch.setattr(server.xrpl_ops, "JsonRpcClient", _NoSellOffersClient)
+    monkeypatch.setattr(server.xrpl_ops, "create_nft_offer", create_offer)
+    monkeypatch.setattr(server.xrpl_ops, "account_exists", account_exists)
+
+    # must NOT raise -- an undeliverable claim is skipped, not fatal
+    _run(server._recover_sponsored_offers(_service_env.app_db, network="mainnet"))
+
+    # and must not waste a doomed tecNO_DST submission (which burns a fee)
+    assert create_calls == []
+
+    with sqlite3.connect(_service_env.app_db) as conn:
+        row = conn.execute(
+            "SELECT status, offer_id, last_error FROM free_mint_claims WHERE id = ?",
+            (claim.id,),
+        ).fetchone()
+    # left recoverable on purpose: the NFT is still held by the issuer and the
+    # user is still owed it, so a later boot re-attempts once they fund up.
+    assert row[0:2] == ("minted", None)
+    assert "unfunded" in row[2] or "does not exist" in row[2]
+
+
+def test_offer_recovery_still_fails_closed_when_account_lookup_is_indeterminate(
+    _service_env, monkeypatch
+):
+    # Only a DEFINITIVE actNotFound may downgrade the failure. A lookup that
+    # merely failed says nothing about deliverability, so the old fail-closed
+    # behavior must survive -- otherwise an RPC blip silently drops a claim.
+    sponsored_mint.start_campaign(_service_env.app_db, network="mainnet", actor="test", now=100)
+    claim = _minted_claim_awaiting_offer(_service_env, "rINDETERMINATE", "offer-indet", "NFT-INDET")
+
+    async def create_offer(*args, **kwargs):
+        return None
+
+    async def account_exists(address):
+        return None  # lookup failed -- unknown, not "absent"
+
+    monkeypatch.setattr(server.xrpl_ops, "JsonRpcClient", _NoSellOffersClient)
+    monkeypatch.setattr(server.xrpl_ops, "create_nft_offer", create_offer)
+    monkeypatch.setattr(server.xrpl_ops, "account_exists", account_exists)
+
+    with pytest.raises(RuntimeError, match="sponsored offer recovery failure"):
+        _run(server._recover_sponsored_offers(_service_env.app_db, network="mainnet"))
+
+    with sqlite3.connect(_service_env.app_db) as conn:
+        status = conn.execute(
+            "SELECT status FROM free_mint_claims WHERE id = ?", (claim.id,)
+        ).fetchone()[0]
+    assert status == "minted"
+
+
+def test_offer_recovery_one_undeliverable_claim_does_not_block_a_deliverable_one(
+    _service_env, monkeypatch
+):
+    # The blast-radius regression itself: the campaign must keep working for
+    # everybody else while one claim sits undeliverable.
+    sponsored_mint.start_campaign(_service_env.app_db, network="mainnet", actor="test", now=100)
+    bad = _minted_claim_awaiting_offer(_service_env, "rUNFUNDED2", "offer-bad", "NFT-BAD")
+    good = _minted_claim_awaiting_offer(_service_env, "rFUNDED", "offer-good", "NFT-GOOD")
+
+    async def create_offer(nft_id, destination, *args, **kwargs):
+        assert destination == good.wallet
+        return "OFFER-GOOD"
+
+    async def account_exists(address):
+        return address != bad.wallet
+
+    monkeypatch.setattr(server.xrpl_ops, "JsonRpcClient", _NoSellOffersClient)
+    monkeypatch.setattr(server.xrpl_ops, "create_nft_offer", create_offer)
+    monkeypatch.setattr(server.xrpl_ops, "account_exists", account_exists)
+
+    _run(server._recover_sponsored_offers(_service_env.app_db, network="mainnet"))
+
+    with sqlite3.connect(_service_env.app_db) as conn:
+        rows = dict(
+            conn.execute(
+                "SELECT id, offer_id FROM free_mint_claims WHERE id IN (?, ?)",
+                (bad.id, good.id),
+            ).fetchall()
+        )
+    assert rows[good.id] == "OFFER-GOOD"
+    assert rows[bad.id] is None
+
+
+# --- xrpl_ops.account_exists three-way contract ----------------------------
+
+
+class _AccountInfoResponse:
+    def __init__(self, ok, result):
+        self._ok = ok
+        self.result = result
+
+    def is_successful(self):
+        return self._ok
+
+
+def _account_client(response):
+    class _Client:
+        def __init__(self, *args, **kwargs):
+            pass
+
+        async def request(self, request):
+            if isinstance(response, Exception):
+                raise response
+            return response
+
+    return _Client
+
+
+@pytest.mark.parametrize(
+    "response,expected",
+    [
+        (_AccountInfoResponse(True, {"account_data": {"Balance": "10000000"}}), True),
+        (_AccountInfoResponse(False, {"error": "actNotFound"}), False),
+        # anything short of a definitive actNotFound is UNKNOWN, not absent
+        (_AccountInfoResponse(False, {"error": "tooBusy"}), None),
+        (_AccountInfoResponse(False, {}), None),
+        (RuntimeError("connection reset"), None),
+    ],
+)
+def test_account_exists_three_way_contract(monkeypatch, response, expected):
+    monkeypatch.setattr(server.xrpl_ops, "AsyncJsonRpcClient", _account_client(response))
+    assert _run(server.xrpl_ops.account_exists("rSOMEBODY")) is expected
+
+
+@pytest.mark.parametrize("outcome", ["returns_none", "raises"])
+def test_undeliverable_note_failure_does_not_disable_admission(
+    _service_env, monkeypatch, caplog, outcome
+):
+    # CodeRabbit (PR #387) rightly flagged that the record_offer result was
+    # discarded. It is now validated -- but a failure must NOT raise: the write
+    # is only an explanatory breadcrumb, the claim is already 'minted' and stays
+    # 'minted' either way, and raising would re-disable admission
+    # campaign-wide over a failed log string. That is exactly the blast radius
+    # this branch removes.
+    sponsored_mint.start_campaign(_service_env.app_db, network="mainnet", actor="test", now=100)
+    claim = _minted_claim_awaiting_offer(
+        _service_env, "rUNFUNDED3", f"offer-note-{outcome}", f"NFT-NOTE-{outcome}"
+    )
+
+    record_calls = []
+
+    def broken_record_offer(*args, **kwargs):
+        record_calls.append((args, kwargs))
+        if outcome == "raises":
+            raise sqlite3.OperationalError("database is locked")
+        return None
+
+    async def account_exists(address):
+        return False
+
+    async def create_offer(*args, **kwargs):
+        raise AssertionError("must not submit a doomed offer")
+
+    monkeypatch.setattr(server.xrpl_ops, "JsonRpcClient", _NoSellOffersClient)
+    monkeypatch.setattr(server.xrpl_ops, "create_nft_offer", create_offer)
+    monkeypatch.setattr(server.xrpl_ops, "account_exists", account_exists)
+    monkeypatch.setattr(server.sponsored_mint, "record_offer", broken_record_offer)
+
+    with caplog.at_level(logging.ERROR):
+        # the sweep still completes -> startup stays ready -> admission stays live
+        _run(server._recover_sponsored_offers(_service_env.app_db, network="mainnet"))
+
+    # the diagnostic write must actually be ATTEMPTED, with the right payload --
+    # otherwise this test would still pass if the call were dropped entirely
+    assert len(record_calls) == 1
+    _, kwargs = record_calls[0]
+    assert kwargs["wallet"] == claim.wallet
+    assert kwargs["offer_id"] is None
+    assert kwargs["error"].startswith("destination account does not exist on-ledger")
+
+    # and its failure must be visible to an operator, not swallowed
+    assert any(
+        rec.levelname == "ERROR" and "note not persisted" in rec.getMessage()
+        for rec in caplog.records
+    )
+
+    with sqlite3.connect(_service_env.app_db) as conn:
+        status = conn.execute(
+            "SELECT status FROM free_mint_claims WHERE id = ?", (claim.id,)
+        ).fetchone()[0]
+    # still recoverable on the next boot, which is the property that matters
+    assert status == "minted"
+
+
+def test_undeliverable_claim_leaves_startup_recovery_ready(_service_env, monkeypatch):
+    # The boundary that actually matters. _recover_sponsored_offers not raising
+    # is only a proxy; what the outage came down to is _sponsored_recovery_ready
+    # being pinned False, which is what gates sponsored admission. Drive the real
+    # startup entry point and assert the gate itself.
+    sponsored_mint.start_campaign(_service_env.app_db, network="mainnet", actor="test", now=100)
+    _minted_claim_awaiting_offer(_service_env, "rUNFUNDED4", "offer-ready", "NFT-READY")
+
+    async def account_exists(address):
+        return False
+
+    async def create_offer(*args, **kwargs):
+        raise AssertionError("must not submit a doomed offer")
+
+    monkeypatch.setattr(server.xrpl_ops, "JsonRpcClient", _NoSellOffersClient)
+    monkeypatch.setattr(server.xrpl_ops, "create_nft_offer", create_offer)
+    monkeypatch.setattr(server.xrpl_ops, "account_exists", account_exists)
+    monkeypatch.setattr(server, "_sponsored_recovery_ready", False, raising=False)
+
+    async def resume():
+        await server._recover_sponsored_offers(_service_env.app_db, network="mainnet")
+
+    monkeypatch.setattr(server, "resume_bulk_jobs", resume)
+
+    _run(server._start_bulk_resume({}))
+
+    # before the fix this was False -> sponsored admission disabled for everyone
+    assert server._sponsored_recovery_ready is True
