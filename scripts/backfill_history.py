@@ -233,6 +233,54 @@ def record_catchup_baseline(
     return state is not None and state.baseline_complete and state.continuity_gap_at is None
 
 
+def skip_burned_before_window(
+    oconn: Any,
+    hconn: Any,
+    ids: list[str],
+    window_min: int,
+) -> tuple[list[str], int]:
+    """Drop tokens provably burned strictly before the catch-up window (#381).
+
+    A token whose burn is already indexed (`onchain_nfts.is_burned=1`) AND
+    whose burn event's ledger position (`nft_events`, event='burn') is known
+    and strictly below `window_min` cannot have any transaction inside
+    [window_min, tip] — paging it is a guaranteed "+0 txs" RPC round-trip.
+
+    Fail-closed: a token is only skipped on positive proof. Not marked burned,
+    no recorded burn event, a NULL/unparsable ledger_index, or a burn at/after
+    the window's lower bound → the token is paged anyway. Only bounded
+    catch-up mode calls this; full certification sweeps everything.
+
+    Returns (ids_to_page, skipped_count)."""
+
+    import sqlite3
+
+    try:
+        burned = {r[0] for r in oconn.execute("SELECT nft_id FROM onchain_nfts WHERE is_burned=1")}
+    except sqlite3.Error:
+        return ids, 0
+    kept: list[str] = []
+    skipped = 0
+    for nft_id in ids:
+        if nft_id in burned:
+            try:
+                row = hconn.execute(
+                    "SELECT MAX(ledger_index) FROM nft_events WHERE nft_id=? AND event='burn'",
+                    (nft_id,),
+                ).fetchone()
+            except sqlite3.Error:
+                # nft_events missing/unreadable: no proof — page everything.
+                return ids, 0
+            burn_li = row[0] if row else None
+            # A non-positive ledger index is malformed burn evidence, not proof
+            # the burn predates the window — fail closed and page the token.
+            if isinstance(burn_li, int) and 0 < burn_li < window_min:
+                skipped += 1
+                continue
+        kept.append(nft_id)
+    return kept, skipped
+
+
 async def _amain() -> int:
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
     import backfill_onchain as bf
@@ -442,6 +490,21 @@ async def _amain() -> int:
                         len(extra),
                     )
                     ids += extra
+            if args.catch_up_from_gap:
+                # Bounded window only (#381): a token provably burned before
+                # the gap opened cannot have txs inside [gap_after, tip].
+                # Full certification runs never narrow.
+                before = len(ids)
+                ids, skipped = skip_burned_before_window(oconn, conn, ids, fixed_ledger_min)
+                if skipped:
+                    logging.info(
+                        "nft_history: skipping %d of %d token(s) whose indexed burn "
+                        "predates the gap window (burn ledger < %d); tokens with an "
+                        "unknown burn position are paged anyway (fail-closed)",
+                        skipped,
+                        before,
+                        fixed_ledger_min,
+                    )
             total = 0
             for i, nft_id in enumerate(ids, 1):
                 total += await backfill_nft_history(
