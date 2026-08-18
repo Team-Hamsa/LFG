@@ -127,7 +127,10 @@ function applyShareConfig(cfg) {
   // Keep an already-populated base if a later fetch omits the field.
   shareBase = (cfg && cfg.public_share_base_url) || shareBase;
   bithompBase = (cfg && cfg.bithomp_base_url) || bithompBase;
-  xUserShare = (cfg && !!cfg.x_user_share) || xUserShare;
+  // Boolean, not a string base: the latch-on ||-merge above would make
+  // `false` indistinguishable from "field absent" and the feature could
+  // never turn off. Only adopt the value when the server actually sent it.
+  if (cfg && 'x_user_share' in cfg) xUserShare = !!cfg.x_user_share;
 }
 
 async function api(path, opts = {}) {

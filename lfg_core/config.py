@@ -449,6 +449,12 @@ X_OAUTH_CLIENT_SECRET = os.getenv("X_OAUTH_CLIENT_SECRET", "")
 X_OAUTH_CALLBACK_URL = os.getenv("X_OAUTH_CALLBACK_URL", "").strip()
 X_TOKEN_ENC_KEY = os.getenv("X_TOKEN_ENC_KEY", "")
 X_USER_SHARE_ENABLED = all((X_OAUTH_CLIENT_ID, X_OAUTH_CALLBACK_URL, X_TOKEN_ENC_KEY))
+# Spend guards for POST /api/x/share (every accepted post bills the app
+# account on X's pay-per-use API): per-wallet cooldown between posts, and a
+# dedup window in which re-sharing the same (kind, nft_number) returns the
+# cached tweet instead of a second paid post.
+X_USER_SHARE_COOLDOWN_SECONDS = float(os.getenv("X_USER_SHARE_COOLDOWN_SECONDS", "60"))
+X_USER_SHARE_DEDUP_SECONDS = float(os.getenv("X_USER_SHARE_DEDUP_SECONDS", "86400"))
 
 # Public base URL the OG card page (GET /nft/{number}, lfg_service/app.py) uses
 # to build its OWN absolute self-links (og:url, canonical) — NEVER derived from

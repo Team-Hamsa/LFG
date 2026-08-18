@@ -886,7 +886,9 @@ async def handle_x_callback(request):
             content_type="text/html",
             status=502,
         )
-    handle = me.get("username") or "your X account"
+    # The handle is remote (X API response) data landing in a text/html
+    # response — escape it, same rule handle_nft_card documents below.
+    handle = escape(str(me.get("username") or "your X account"), quote=True)
     return web.Response(
         text=_X_CALLBACK_HTML.format(
             msg=f"Connected @{handle}! You can close this window and share from the app."
@@ -923,6 +925,26 @@ async def handle_x_disconnect(request):
     return web.json_response({"connected": False})
 
 
+# Spend guards for /api/x/share — every accepted call bills real money on
+# X's pay-per-use API, and the client-side disabled flag protects nothing.
+# In-memory on purpose (same posture as the flow sessions): a restart resets
+# the guards, which only risks one extra paid post per wallet, not a leak.
+# _x_share_last: wallet -> last successful-post time (cooldown);
+# _x_share_posted: (wallet, kind, nft_number) -> tweet_id (dedup — re-sharing
+# the same event returns the cached tweet instead of a second paid post).
+_x_share_last: dict[str, float] = {}
+_x_share_posted: dict[tuple[str, str, Any], tuple[str, float]] = {}
+
+
+def _prune_x_share_guards(now: float) -> None:
+    horizon = now - max(config.X_USER_SHARE_COOLDOWN_SECONDS, 1)
+    for wallet in [w for w, ts in _x_share_last.items() if ts < horizon]:
+        del _x_share_last[wallet]
+    dedup_horizon = now - max(config.X_USER_SHARE_DEDUP_SECONDS, 1)
+    for key in [k for k, (_, ts) in _x_share_posted.items() if ts < dedup_horizon]:
+        del _x_share_posted[key]
+
+
 @require_x_user_share
 @require_wallet
 async def handle_x_share(request):
@@ -936,10 +958,36 @@ async def handle_x_share(request):
     kind = body.get("kind", "mint")
     if kind not in ("mint", "swap"):
         return web.json_response({"error": "unknown share kind"}, status=400)
-    text = _x_share_text(kind, body.get("nft_number"))
+    nft_number = body.get("nft_number")
+    # bool is a subclass of int — `true` would tweet "#True" at real cost
+    # (same explicit rejection handle_bulk_mint_start uses).
+    if nft_number is not None and (isinstance(nft_number, bool) or not isinstance(nft_number, int)):
+        return web.json_response({"error": "nft_number must be an integer"}, status=400)
+    text = _x_share_text(kind, nft_number)
+
+    wallet = request["wallet"]
+    now = time.time()
+    _prune_x_share_guards(now)
+    dedup_key = (wallet, kind, nft_number)
+    cached = _x_share_posted.get(dedup_key)
+    if cached is not None:
+        # Same wallet re-sharing the same event: no second paid post.
+        return web.json_response(
+            {"posted": True, "tweet_id": cached[0], "text": text, "deduped": True}
+        )
+    last = _x_share_last.get(wallet)
+    if last is not None and now - last < config.X_USER_SHARE_COOLDOWN_SECONDS:
+        return web.json_response(
+            {
+                "error": "you just shared — try again in a moment",
+                "code": "cooldown",
+                "retry_after": int(config.X_USER_SHARE_COOLDOWN_SECONDS - (now - last)) + 1,
+            },
+            status=429,
+        )
 
     try:
-        access_token = await x_oauth.get_usable_access_token(request["wallet"])
+        access_token = await x_oauth.get_usable_access_token(wallet)
     except x_oauth.XOAuthError:
         return web.json_response(
             {"error": "X is unreachable — try again shortly", "code": "x_unavailable"},
@@ -952,13 +1000,19 @@ async def handle_x_share(request):
     try:
         tweet_id = await x_oauth.post_tweet(access_token, text)
     except x_oauth.XOAuthError as exc:
-        status = 401 if exc.status in (401, 403) else 502
-        code = "not_connected" if status == 401 else "post_failed"
-        if status == 401:
+        if exc.status == 401:
             # Token rejected despite a fresh refresh: connection is dead.
-            await asyncio.to_thread(x_oauth.delete_account, request["wallet"])
-            status = 409
-        return web.json_response({"error": str(exc), "code": code}, status=status)
+            await asyncio.to_thread(x_oauth.delete_account, wallet)
+            return web.json_response({"error": str(exc), "code": "not_connected"}, status=409)
+        if exc.status == 403:
+            # NOT a dead token — duplicate-content, policy, or scope refusal.
+            # The connection stays; surface a distinct code (the client's
+            # not_connected special-case doesn't match, so it falls through
+            # to the Web Intent composer without disconnecting anyone).
+            return web.json_response({"error": str(exc), "code": "post_refused"}, status=403)
+        return web.json_response({"error": str(exc), "code": "post_failed"}, status=502)
+    _x_share_last[wallet] = now
+    _x_share_posted[dedup_key] = (tweet_id, now)
     return web.json_response({"posted": True, "tweet_id": tweet_id, "text": text})
 
 

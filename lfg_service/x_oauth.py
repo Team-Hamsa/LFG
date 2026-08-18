@@ -23,7 +23,9 @@
 
 from __future__ import annotations
 
+import asyncio
 import base64
+import binascii
 import hashlib
 import logging
 import secrets
@@ -84,7 +86,10 @@ def encrypt_token(token: str) -> str:
 def decrypt_token(blob: str) -> str:
     try:
         return _fernet().decrypt(blob.encode()).decode()
-    except InvalidToken as exc:  # wrong/rotated key: treat as disconnected
+    except (InvalidToken, ValueError, TypeError, binascii.Error) as exc:
+        # Wrong/rotated key OR a truncated/non-base64 blob: either way the
+        # stored token is unusable — treat as disconnected, never let a raw
+        # binascii/ValueError escape the XOAuthError contract.
         raise XOAuthError("stored X token cannot be decrypted") from exc
 
 
@@ -280,6 +285,28 @@ def claim_state(state: str) -> PendingAuth | None:
 
 # --- HTTP to X --------------------------------------------------------------
 
+# Every X HTTP call is bounded and funneled through the XOAuthError contract:
+# app.py's handlers catch ONLY XOAuthError, so a transport failure, stall, or
+# unparseable payload must never surface as a raw aiohttp/asyncio/JSON error
+# (which would become an unstructured 500 and, with aiohttp's default
+# unbounded total timeout, could hang a callback/share request indefinitely).
+_HTTP_TIMEOUT = aiohttp.ClientTimeout(total=15)
+
+# Exceptions any aiohttp request/parse step can raise for reasons outside our
+# control (network, DNS, stall, HTML error page instead of JSON).
+_TRANSPORT_ERRORS = (aiohttp.ClientError, asyncio.TimeoutError, OSError, ValueError)
+
+
+async def _read_json(resp: aiohttp.ClientResponse) -> dict[str, Any]:
+    """Best-effort JSON body: X sometimes answers errors with HTML pages —
+    treat any unparseable/non-dict payload as an empty dict and let the
+    status-code checks raise the structured XOAuthError."""
+    try:
+        body = await resp.json(content_type=None)
+    except Exception:
+        return {}
+    return body if isinstance(body, dict) else {}
+
 
 def _token_request_auth() -> tuple[dict[str, str], dict[str, str]]:
     """(extra headers, extra form fields) for the token/revoke endpoints:
@@ -294,13 +321,12 @@ def _token_request_auth() -> tuple[dict[str, str], dict[str, str]]:
 
 async def _post_form(url: str, form: dict[str, str]) -> tuple[int, dict[str, Any]]:
     headers, extra = _token_request_auth()
-    async with aiohttp.ClientSession() as http:
-        async with http.post(url, data={**form, **extra}, headers=headers) as resp:
-            try:
-                body = await resp.json(content_type=None)
-            except Exception:
-                body = {}
-            return resp.status, body if isinstance(body, dict) else {}
+    try:
+        async with aiohttp.ClientSession(timeout=_HTTP_TIMEOUT) as http:
+            async with http.post(url, data={**form, **extra}, headers=headers) as resp:
+                return resp.status, await _read_json(resp)
+    except _TRANSPORT_ERRORS as exc:
+        raise XOAuthError(f"X request to {url} failed: {exc}") from exc
 
 
 def _parse_token_response(status: int, body: dict[str, Any]) -> dict[str, Any]:
@@ -309,10 +335,17 @@ def _parse_token_response(status: int, body: dict[str, Any]) -> dict[str, Any]:
             f"X token endpoint returned {status}: {body.get('error', 'unknown error')}",
             status=status,
         )
+    try:
+        expires_in = float(body.get("expires_in", 7200))
+    except (TypeError, ValueError):
+        # X returned a non-numeric expires_in: keep the token usable but
+        # assume the documented ~2h window rather than raising a raw
+        # ValueError past the XOAuthError contract.
+        expires_in = 7200.0
     return {
         "access_token": body["access_token"],
         "refresh_token": body.get("refresh_token"),
-        "expires_at": time.time() + float(body.get("expires_in", 7200)),
+        "expires_at": time.time() + expires_in,
     }
 
 
@@ -349,31 +382,58 @@ async def revoke_token(token: str) -> bool:
 
 
 async def fetch_me(access_token: str) -> dict[str, Any]:
-    async with aiohttp.ClientSession() as http:
-        async with http.get(
-            USERS_ME_URL, headers={"Authorization": f"Bearer {access_token}"}
-        ) as resp:
-            body = await resp.json(content_type=None)
-            if resp.status != 200 or "data" not in body:
-                raise XOAuthError(f"X users/me returned {resp.status}", status=resp.status)
-            data: dict[str, Any] = body["data"]  # {id, name, username}
-            return data
+    try:
+        async with aiohttp.ClientSession(timeout=_HTTP_TIMEOUT) as http:
+            async with http.get(
+                USERS_ME_URL, headers={"Authorization": f"Bearer {access_token}"}
+            ) as resp:
+                body = await _read_json(resp)
+                if resp.status != 200 or not isinstance(body.get("data"), dict):
+                    raise XOAuthError(f"X users/me returned {resp.status}", status=resp.status)
+                data: dict[str, Any] = body["data"]  # {id, name, username}
+                return data
+    except _TRANSPORT_ERRORS as exc:
+        raise XOAuthError(f"X users/me request failed: {exc}") from exc
 
 
 async def post_tweet(access_token: str, text: str) -> str:
-    async with aiohttp.ClientSession() as http:
-        async with http.post(
-            TWEET_CREATE_URL,
-            json={"text": text},
-            headers={"Authorization": f"Bearer {access_token}"},
-        ) as resp:
-            body = await resp.json(content_type=None)
-            if resp.status not in (200, 201) or "data" not in body:
-                raise XOAuthError(f"X tweet create returned {resp.status}", status=resp.status)
-            return str(body["data"].get("id", ""))
+    try:
+        async with aiohttp.ClientSession(timeout=_HTTP_TIMEOUT) as http:
+            async with http.post(
+                TWEET_CREATE_URL,
+                json={"text": text},
+                headers={"Authorization": f"Bearer {access_token}"},
+            ) as resp:
+                body = await _read_json(resp)
+                if resp.status not in (200, 201) or not isinstance(body.get("data"), dict):
+                    raise XOAuthError(f"X tweet create returned {resp.status}", status=resp.status)
+                return str(body["data"].get("id", ""))
+    except _TRANSPORT_ERRORS as exc:
+        raise XOAuthError(f"X tweet create request failed: {exc}") from exc
 
 
 # --- token lifecycle --------------------------------------------------------
+
+# Per-wallet refresh serialization: X rotates the refresh token on every use
+# and INVALIDATES the old one, so two overlapping requests that both read the
+# same expired row and both call the token endpoint would race — the loser's
+# 400 used to delete a perfectly healthy, freshly-rotated connection. One
+# asyncio.Lock per wallet serializes the read→refresh→persist critical
+# section; the loser re-reads the row inside the lock and simply uses the
+# winner's rotated tokens. Bounded: released, unheld locks are evicted once
+# the dict grows past _REFRESH_LOCKS_MAX so it can't grow per-wallet forever.
+_refresh_locks: dict[str, asyncio.Lock] = {}
+_REFRESH_LOCKS_MAX = 256
+
+
+def _refresh_lock(wallet: str) -> asyncio.Lock:
+    lock = _refresh_locks.get(wallet)
+    if lock is None:
+        if len(_refresh_locks) >= _REFRESH_LOCKS_MAX:
+            for key in [k for k, v in _refresh_locks.items() if not v.locked()]:
+                del _refresh_locks[key]
+        lock = _refresh_locks.setdefault(wallet, asyncio.Lock())
+    return lock
 
 
 async def get_usable_access_token(wallet: str, db_path: str | None = None) -> str | None:
@@ -381,6 +441,17 @@ async def get_usable_access_token(wallet: str, db_path: str | None = None) -> st
     rotation persistence) if the stored one is expired. None = not
     connected (no row, no refresh token when needed, or refresh rejected
     — the caller should treat all of these as "fall back to Web Intent")."""
+    if not get_account(wallet, db_path):
+        return None
+    async with _refresh_lock(wallet):
+        return await _get_usable_access_token_locked(wallet, db_path)
+
+
+async def _get_usable_access_token_locked(wallet: str, db_path: str | None) -> str | None:
+    # Re-read INSIDE the lock: a concurrent request may have rotated the
+    # tokens while we waited — its fresh access token is the one to use, and
+    # its rotated refresh token must never be "refreshed" again (the old one
+    # is already invalid server-side).
     account = get_account(wallet, db_path)
     if not account:
         return None
@@ -398,8 +469,24 @@ async def get_usable_access_token(wallet: str, db_path: str | None = None) -> st
         rotated = await refresh_access_token(refresh_token)
     except XOAuthError as exc:
         if exc.status in (400, 401):
-            # Refresh token revoked/expired server-side: connection is dead.
-            # Drop the row so the UI reports "not connected" honestly.
+            # Refresh token revoked/expired server-side. Delete the row ONLY
+            # if it still holds the exact token we just used — if another
+            # writer (a second process; in-process racers are serialized by
+            # the lock) rotated it meanwhile, the stored connection is
+            # healthy and must survive; retry against the fresh row instead.
+            current = get_account(wallet, db_path)
+            if current is None:
+                return None
+            try:
+                stored = (
+                    decrypt_token(current["refresh_token_enc"])
+                    if current["refresh_token_enc"]
+                    else None
+                )
+            except XOAuthError:
+                stored = None
+            if stored is not None and stored != refresh_token:
+                return await _get_usable_access_token_locked(wallet, db_path)
             delete_account(wallet, db_path)
             return None
         raise

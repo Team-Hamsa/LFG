@@ -62,6 +62,15 @@ def _enc_key(monkeypatch):
     yield key
 
 
+@pytest.fixture(autouse=True)
+def _reset_share_guards():
+    server._x_share_last.clear()
+    server._x_share_posted.clear()
+    yield
+    server._x_share_last.clear()
+    server._x_share_posted.clear()
+
+
 @pytest.fixture
 def _feature_on(monkeypatch):
     monkeypatch.setattr(config, "X_OAUTH_CLIENT_ID", "client-id")
@@ -312,3 +321,202 @@ def test_x_accounts_table_schema(_isolated_db):
         "expires_at",
         "connected_at",
     }
+
+
+# --- review-round hardening (PR #398 bot findings) ---------------------------
+
+
+def test_concurrent_refresh_single_rotation_no_delete(monkeypatch):
+    """Two overlapping requests after expiry must serialize: exactly one
+    refresh call, both callers converge on the rotated token, the row
+    survives (Greptile 3803522292 / CodeRabbit 3803544737)."""
+    x_oauth.upsert_account(WALLET, "42", "t", "old-access", "old-refresh", time.time() - 10)
+    refresh_calls = []
+
+    async def fake_refresh(refresh_token):
+        refresh_calls.append(refresh_token)
+        if len(refresh_calls) > 1:
+            # X would reject a second use of the same (now-invalidated) token.
+            raise x_oauth.XOAuthError("invalid_grant", status=400)
+        await asyncio.sleep(0.01)  # widen the race window
+        return {
+            "access_token": "new-access",
+            "refresh_token": "new-refresh",
+            "expires_at": time.time() + 7200,
+        }
+
+    monkeypatch.setattr(x_oauth, "refresh_access_token", fake_refresh)
+
+    async def both():
+        return await asyncio.gather(
+            x_oauth.get_usable_access_token(WALLET),
+            x_oauth.get_usable_access_token(WALLET),
+        )
+
+    results = _run(both())
+    assert results == ["new-access", "new-access"]
+    assert refresh_calls == ["old-refresh"]  # one rotation, not two
+    account = x_oauth.get_account(WALLET)
+    assert account is not None  # never deleted
+    assert x_oauth.decrypt_token(account["refresh_token_enc"]) == "new-refresh"
+
+
+def test_rejected_refresh_spares_row_rotated_by_another_writer(monkeypatch):
+    """A 400 on OUR refresh token must not delete a row another writer has
+    already rotated — re-read and use the fresh tokens instead."""
+    x_oauth.upsert_account(WALLET, "42", "t", "old-access", "old-refresh", time.time() - 10)
+
+    async def fake_refresh(refresh_token):
+        # Simulate a second process winning the rotation mid-flight: the row
+        # now carries fresh tokens, and X rejects our stale one.
+        x_oauth.rotate_tokens(WALLET, "winner-access", "winner-refresh", time.time() + 7200)
+        raise x_oauth.XOAuthError("invalid_grant", status=400)
+
+    monkeypatch.setattr(x_oauth, "refresh_access_token", fake_refresh)
+    assert _run(x_oauth.get_usable_access_token(WALLET)) == "winner-access"
+    assert x_oauth.get_account(WALLET) is not None
+
+
+def test_transport_timeout_becomes_xoautherror(monkeypatch):
+    """A stalled/broken connection to X must surface as XOAuthError, not a
+    raw aiohttp/asyncio exception (Greptile 3803522298 / CR 3803544721)."""
+
+    class _BoomSession:
+        def __init__(self, *args, **kwargs):
+            assert kwargs.get("timeout") is x_oauth._HTTP_TIMEOUT  # bounded
+            raise TimeoutError()
+
+    monkeypatch.setattr(x_oauth.aiohttp, "ClientSession", _BoomSession)
+    with pytest.raises(x_oauth.XOAuthError):
+        _run(x_oauth._post_form(x_oauth.TOKEN_URL, {}))
+    with pytest.raises(x_oauth.XOAuthError):
+        _run(x_oauth.fetch_me("tok"))
+    with pytest.raises(x_oauth.XOAuthError):
+        _run(x_oauth.post_tweet("tok", "hi"))
+
+
+def test_non_json_response_and_bad_expires_in_stay_in_contract():
+    """HTML error pages and junk expires_in must not escape XOAuthError /
+    raise raw ValueError (CR 3803544729)."""
+
+    class _HtmlResp:
+        async def json(self, content_type=None):
+            raise ValueError("not JSON")
+
+    assert _run(x_oauth._read_json(_HtmlResp())) == {}
+    parsed = x_oauth._parse_token_response(200, {"access_token": "a", "expires_in": "soon(tm)"})
+    assert parsed["access_token"] == "a"
+    assert parsed["expires_at"] > time.time()  # fell back to the ~2h default
+
+
+def test_decrypt_garbage_blob_is_xoautherror():
+    with pytest.raises(x_oauth.XOAuthError):
+        x_oauth.decrypt_token("not-even-base64!!")
+
+
+def test_callback_escapes_handle(_feature_on, monkeypatch):
+    """The X handle is remote data interpolated into text/html — it must be
+    escaped (CR 3803544702)."""
+    x_oauth.begin_authorization(WALLET)
+    state = next(iter(x_oauth.pending_auths))
+
+    async def fake_exchange(code, verifier):
+        return {"access_token": "a", "refresh_token": "r", "expires_at": time.time() + 7200}
+
+    async def fake_me(access_token):
+        return {"id": "42", "username": "<img src=x onerror=alert(1)>"}
+
+    monkeypatch.setattr(x_oauth, "exchange_code", fake_exchange)
+    monkeypatch.setattr(x_oauth, "fetch_me", fake_me)
+    resp = _run(server.handle_x_callback(_FakeRequest(query={"state": state, "code": "c"})))
+    assert resp.status == 200
+    assert "<img" not in resp.text
+    assert "&lt;img" in resp.text
+
+
+def test_share_cooldown_and_dedup(_feature_on, monkeypatch):
+    """Spend guards (CR 3803544709): same (kind, nft) re-share returns the
+    cached tweet with no second paid post; a different share inside the
+    cooldown window is 429."""
+    posts = []
+
+    async def fake_token(wallet, db_path=None):
+        return "tok"
+
+    async def fake_post(access_token, text):
+        posts.append(text)
+        return str(len(posts))
+
+    monkeypatch.setattr(x_oauth, "get_usable_access_token", fake_token)
+    monkeypatch.setattr(x_oauth, "post_tweet", fake_post)
+
+    r1 = _run(server.handle_x_share(_FakeRequest(body={"kind": "mint", "nft_number": 1})))
+    assert r1.status == 200 and len(posts) == 1
+
+    # Same event again: deduped, still one paid post.
+    r2 = _run(server.handle_x_share(_FakeRequest(body={"kind": "mint", "nft_number": 1})))
+    assert r2.status == 200
+    body2 = json.loads(r2.body)
+    assert body2["deduped"] is True and body2["tweet_id"] == "1"
+    assert len(posts) == 1
+
+    # A different event inside the cooldown: 429, no post.
+    r3 = _run(server.handle_x_share(_FakeRequest(body={"kind": "mint", "nft_number": 2})))
+    assert r3.status == 429
+    assert json.loads(r3.body)["code"] == "cooldown"
+    assert len(posts) == 1
+
+    # Cooldown elapsed: the different event posts.
+    server._x_share_last[_dev_wallet()] -= config.X_USER_SHARE_COOLDOWN_SECONDS + 1
+    r4 = _run(server.handle_x_share(_FakeRequest(body={"kind": "mint", "nft_number": 2})))
+    assert r4.status == 200 and len(posts) == 2
+
+
+def test_share_403_keeps_connection(_feature_on, monkeypatch):
+    """A 403 (duplicate content / policy) is NOT a dead token: the account
+    row must survive and the client gets a distinct code (CR 3803544711)."""
+    wallet = _dev_wallet()
+    x_oauth.upsert_account(wallet, "42", "t", "live-access", "r", time.time() + 7200)
+
+    async def refused(access_token, text):
+        raise x_oauth.XOAuthError("duplicate content", status=403)
+
+    monkeypatch.setattr(x_oauth, "post_tweet", refused)
+    resp = _run(server.handle_x_share(_FakeRequest(body={"kind": "mint", "nft_number": 3})))
+    assert resp.status == 403
+    assert json.loads(resp.body)["code"] == "post_refused"
+    assert x_oauth.get_account(wallet) is not None  # connection intact
+
+
+def test_share_401_deletes_connection(_feature_on, monkeypatch):
+    wallet = _dev_wallet()
+    x_oauth.upsert_account(wallet, "42", "t", "live-access", "r", time.time() + 7200)
+
+    async def rejected(access_token, text):
+        raise x_oauth.XOAuthError("token revoked", status=401)
+
+    monkeypatch.setattr(x_oauth, "post_tweet", rejected)
+    resp = _run(server.handle_x_share(_FakeRequest(body={"kind": "mint", "nft_number": 3})))
+    assert resp.status == 409
+    assert json.loads(resp.body)["code"] == "not_connected"
+    assert x_oauth.get_account(wallet) is None
+
+
+def test_share_rejects_boolean_nft_number(_feature_on):
+    """bool is a subclass of int — `true` must not tweet '#True' at real
+    cost (CR 3803544685)."""
+    resp = _run(server.handle_x_share(_FakeRequest(body={"kind": "mint", "nft_number": True})))
+    assert resp.status == 400
+    resp = _run(server.handle_x_share(_FakeRequest(body={"kind": "mint", "nft_number": "7"})))
+    assert resp.status == 400
+
+
+def test_client_x_user_share_flag_can_turn_off():
+    """The client must adopt x_user_share only when the server sent the
+    field — a truthy-OR latch could never disarm (CR 3803544743)."""
+    import os as _os
+
+    root = _os.path.dirname(_os.path.dirname(_os.path.abspath(__file__)))
+    src = open(_os.path.join(root, "webapp", "client", "app.js")).read()
+    assert "'x_user_share' in cfg" in src
+    assert "!!cfg.x_user_share) || xUserShare" not in src
