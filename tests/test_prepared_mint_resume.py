@@ -228,6 +228,7 @@ def test_resume_happy_path_runs_the_full_post_mint_tail(_resume_mocks, monkeypat
         "traits": {"Body": "Alien", "Hat": "Crown"},
         "network": config.XRPL_NETWORK,
         "body_type": "Alien",
+        "referrer": None,
     }
 
     # Rarity accounting (restored in 4c485d3 — the omission this pins): one

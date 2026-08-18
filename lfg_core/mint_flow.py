@@ -66,6 +66,7 @@ class MintSession:
         platform: str = "discord",
         push_user_token: str | None = None,
         sponsored: bool = False,
+        referrer: str | None = None,
     ) -> None:
         self.id = uuid.uuid4().hex
         self.discord_id = discord_id
@@ -80,6 +81,9 @@ class MintSession:
         # every sign request this session builds so a returning user gets a
         # push to Xaman instead of a QR. None falls back to the QR/deep link.
         self.push_user_token = push_user_token
+        # #273: validated sharer wallet (?ref= attribution) or None — recorded
+        # on the LFG row at mint time, metrics-only (no rewards).
+        self.referrer = referrer
         self.created_at = time.time()
         self.state = AWAITING_PAYMENT
         self.error: str | None = None
@@ -448,6 +452,7 @@ async def _finalize_minted_unit(
     return_url: dict[str, str] | None,
     on_state: Callable[[str], None] | None,
     on_offer_created: Callable[[str | None, str | None], Awaitable[None]] | None,
+    referrer: str | None = None,
 ) -> UnitResult:
     """The shared post-mint tail (#336): record (+ rarity) -> offer -> XUMM
     accept payload, once a mint is confirmed on-chain. Extracted verbatim from
@@ -466,6 +471,7 @@ async def _finalize_minted_unit(
         "traits": traits_dict,
         "network": config.XRPL_NETWORK,
         "body_type": body,
+        "referrer": referrer,
     }
     # The mint is on-chain at this point; a DB failure must not stop the
     # transfer offer from reaching the user.
@@ -577,6 +583,7 @@ async def _resume_prepared_mint_one_unit(
     on_mint_forwarded: Callable[[str], Awaitable[None]] | None,
     on_mint_confirmed: Callable[[int, str, str, str | None], Awaitable[None]] | None,
     on_offer_created: Callable[[str | None, str | None], Awaitable[None]] | None,
+    referrer: str | None = None,
 ) -> UnitResult:
     """Resume an uploaded/signed reversible promise without composing or signing again."""
 
@@ -705,6 +712,7 @@ async def _resume_prepared_mint_one_unit(
             return_url=return_url,
             on_state=on_state,
             on_offer_created=on_offer_created,
+            referrer=referrer,
         )
     except Exception as exc:
         logging.error(
@@ -755,6 +763,7 @@ async def mint_one_unit(
     on_offer_created: Callable[[str | None, str | None], Awaitable[None]] | None = None,
     sponsored_claim_id: str | None = None,
     resume_prepared: sponsored_mint.Claim | None = None,
+    referrer: str | None = None,
 ) -> UnitResult:
     """Compose -> upload -> mint -> record (+ rarity) -> offer -> XUMM accept
     payload for a single edition, on a pre-allocated `nft_number`. Extracted
@@ -795,6 +804,7 @@ async def mint_one_unit(
             on_mint_forwarded=on_mint_forwarded,
             on_mint_confirmed=on_mint_confirmed,
             on_offer_created=on_offer_created,
+            referrer=referrer,
         )
 
     # after a confirmed mint must not blank out traits/body_type that are
@@ -1014,6 +1024,7 @@ async def mint_one_unit(
             return_url=return_url,
             on_state=on_state,
             on_offer_created=on_offer_created,
+            referrer=referrer,
         )
 
     except Exception as e:
@@ -1328,6 +1339,7 @@ async def run_mint_session(
             on_offer_created=on_sponsored_offer if session.sponsored else None,
             on_mint=_on_paid_mint if not session.sponsored else None,
             on_mint_confirmed=_on_sponsored_mint if session.sponsored else None,
+            referrer=session.referrer,
         )
         session.nft_id = res.nft_id
         session.image_url = res.image_url

@@ -1195,6 +1195,35 @@ async def handle_leaderboard(request):
     )
 
 
+_SHARE_CONVERSIONS_TTL_SECONDS = 60
+_share_conversions_cache: dict[str, tuple[float, list[dict[str, int | str]]]] = {}
+
+
+async def handle_share_conversions(request):
+    """Public share->mint conversion report (#273): GET /api/share/conversions.
+
+    Per sharer wallet: non-bot share-link clicks (share_clicks) vs mints
+    attributed to that wallet (LFG.referrer). A deliberately small read-only
+    aggregate rather than a 9th leaderboard board — attribution is
+    metrics-only (no rewards) and the joinable row set is tiny. Cached 60s
+    per network, mirroring the leaderboard's caching posture."""
+    try:
+        limit = max(1, min(int(request.query.get("limit", "100")), 500))
+    except ValueError:
+        limit = 100
+    network = config.XRPL_NETWORK
+    now = time.time()
+    cached = _share_conversions_cache.get(network)
+    if cached and now - cached[0] < _SHARE_CONVERSIONS_TTL_SECONDS:
+        rows = cached[1]
+    else:
+        rows = await asyncio.to_thread(
+            share_clicks.conversion_rows, db_path.app_db_path(), network, 500
+        )
+        _share_conversions_cache[network] = (now, rows)
+    return web.json_response({"network": network, "rows": rows[:limit]})
+
+
 # --- In-app marketplace (#44): browse + mine + history ---
 
 
@@ -3728,6 +3757,22 @@ async def _request_return_url(request):
     return xumm_ops.discord_return_url(body.get("guild_id"), body.get("channel_id"))
 
 
+def _mint_referrer(body: Any, wallet: str) -> str | None:
+    """#273: validated share-ref attribution from a mint-start body.
+
+    Fail-open by design — a malformed ref, a non-address, or a self-referral
+    (ref == the minting wallet, enforced server-side so the client can't be
+    trusted) is silently dropped (None); a bad ref must never fail a mint.
+    Attribution is metrics-only (no rewards), so dropping is always safe."""
+    ref = body.get("ref") if isinstance(body, dict) else None
+    if not isinstance(ref, str):
+        return None
+    ref = ref.strip()
+    if not ref or not is_valid_classic_address(ref) or ref == wallet:
+        return None
+    return ref
+
+
 def _cleanup_cancelled_mint_admission(session: mint_flow.MintSession) -> None:
     """Synchronously unwind every resource acquired after session insertion.
 
@@ -3791,6 +3836,11 @@ async def handle_mint_start(request):
     # race-free while that window stays await-free).
     return_url = await _request_return_url(request)
     push_user_token = await _push_token(user)
+    try:
+        body = await request.json()
+    except Exception:
+        body = {}
+    referrer = _mint_referrer(body, request["wallet"])
 
     # One active session per user (no awaits between this check and the
     # insert below, so it cannot race)
@@ -3806,6 +3856,7 @@ async def handle_mint_start(request):
         return_url=return_url,
         platform=_platform(user),
         push_user_token=push_user_token,
+        referrer=referrer,
     )
     mint_sessions[session.id] = session
     # #226: single mints previously checked no collection cap at all. Take a
@@ -4021,6 +4072,7 @@ async def handle_bulk_mint_start(request):
         platform=platform,
         push_user_token=push_user_token,
         return_url=return_url,
+        referrer=_mint_referrer(body, request["wallet"]),
     )
     try:
         # to_thread like the single-mint reserve at handle_mint_start (#226
@@ -6738,6 +6790,7 @@ def create_app() -> web.Application:
     app.router.add_get("/api/web/signin/{payload_uuid}", handle_web_signin_status)
     app.router.add_get("/api/nfts", handle_nfts)
     app.router.add_get("/api/leaderboard", handle_leaderboard)
+    app.router.add_get("/api/share/conversions", handle_share_conversions)
     app.router.add_get("/api/market/listings", handle_market_listings)
     app.router.add_get("/api/market/mine", handle_market_mine)
     app.router.add_get("/api/market/history", handle_market_history)

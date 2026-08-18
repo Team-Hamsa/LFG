@@ -69,6 +69,7 @@ def record_nft_mint(
     network: str = "mainnet",
     body_type: str = "*",
     db_path: str | None = None,
+    referrer: str | None = None,
 ) -> bool:
     """Record a new NFT mint in the database"""
     try:
@@ -98,6 +99,9 @@ def record_nft_mint(
             "created_at": "TIMESTAMP DEFAULT CURRENT_TIMESTAMP",
             "network": "TEXT NOT NULL DEFAULT 'mainnet'",
             "body_type": "TEXT NOT NULL DEFAULT '*'",
+            # #273: sharer wallet whose ?ref= link led to this mint
+            # (validated upstream; NULL for unattributed mints).
+            "referrer": "TEXT",
         }
 
         for col_name, col_type in new_columns.items():
@@ -115,8 +119,8 @@ def record_nft_mint(
             nft_number, nft_id, discord_id, owner_address,
             metadata_url, image_url,
             Background, Back, Body, Clothing, Eyes, Eyebrows,
-            Mouth, Hat, Accessory, network, body_type
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            Mouth, Hat, Accessory, network, body_type, referrer
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         """,
             (
                 nft_number,
@@ -136,6 +140,7 @@ def record_nft_mint(
                 traits.get("Accessory", ""),
                 network,
                 body_type,
+                referrer,
             ),
         )
 

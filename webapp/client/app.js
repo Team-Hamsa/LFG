@@ -263,6 +263,16 @@ function discordCtx() {
   };
 }
 
+// #273: the share click-through ref stashed by main() (localStorage lfg_ref,
+// shape-validated on write). Sent with every mint start so the service can
+// attribute the mint; the server re-validates and rejects self-referrals.
+function stashedRef() {
+  try {
+    const r = localStorage.getItem('lfg_ref');
+    return r && XRPL_ADDR_RE.test(r) ? r : null;
+  } catch (_) { return null; }
+}
+
 function openExternal(url) {
   // Returns the launch result so callers can detect a blocked window.open
   // (null). The Discord SDK opener's outcome is genuinely undetectable (it
@@ -1079,7 +1089,7 @@ async function startBulkMint(quantity) {
   try {
     const j = await api('/api/mint/bulk', {
       method: 'POST',
-      body: JSON.stringify({ ...discordCtx(), quantity }),
+      body: JSON.stringify({ ...discordCtx(), quantity, ref: stashedRef() }),
     });
     currentBulkId = j.id;
     mintQty = quantity;
@@ -1385,7 +1395,10 @@ function attachBulkResume(j) {
 
 async function startMint() {
   try {
-    const s = await api('/api/mint', { method: 'POST', body: JSON.stringify(discordCtx()) });
+    const s = await api('/api/mint', {
+      method: 'POST',
+      body: JSON.stringify({ ...discordCtx(), ref: stashedRef() }),
+    });
     currentMintId = s.id;
     mintQty = 1;
     liveQty = 1;

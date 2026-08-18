@@ -33,7 +33,7 @@ def test_app_js_routes_qty_to_bulk_and_preserves_single_mint():
     src = _read("app.js")
     assert "startBulkMint" in src
     # single-mint path untouched: startMint still POSTs /api/mint
-    assert "api('/api/mint', { method: 'POST'" in src
+    assert "api('/api/mint', {" in src
     assert "'/api/mint/bulk'" in src
 
 
