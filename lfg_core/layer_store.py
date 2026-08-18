@@ -60,6 +60,11 @@ class LocalLayerStore:
         ]
 
     async def list_values(self, body: str, trait_type: str) -> list[str]:
+        return self.list_values_sync(body, trait_type)
+
+    def list_values_sync(self, body: str, trait_type: str) -> list[str]:
+        """Sync twin of list_values (body dir ∪ shared/) for callers with no
+        event loop — e.g. rarity.get_odds deriving the candidate set (#198)."""
         values = set(self._list_values_one(body, trait_type))
         values |= set(self._list_values_one(SHARED_DIR, trait_type))
         return sorted(values)

@@ -159,6 +159,23 @@ def fetch_rows(
         totals[key] = totals.get(key, 0) + r[3]
         pops[key] = pops.get(key, 0) + 1
 
+    # Share-ceiling candidate_count (#198): mirror weighted_pick exactly —
+    # enabled rows ∩ the layer-store candidate set. Where the layer tree has
+    # no dir for a (body, category) (legacy '*' rows, missing art root), fall
+    # back to all enabled rows, same as rarity.get_odds.
+    tree = scan_layer_tree()
+    avail: dict[tuple[str, str], set[str]] = {
+        (b, c): set(vs) for b, cats in tree.items() for c, vs in cats.items()
+    }
+    cands: dict[tuple[str, str], int] = {}
+    for r in raw:
+        key = (r[0], r[1])
+        if not r[8]:
+            continue
+        a = avail.get(key)
+        if a is None or r[2] in a:
+            cands[key] = cands.get(key, 0) + 1
+
     rows: list[dict] = []
     bodies: set[str] = set()
     categories: set[str] = set()
@@ -176,7 +193,15 @@ def fetch_rows(
                 "live_count": count,
                 "share": (count / total * 100) if total else 0.0,
                 "weight": rarity.effective_weight(
-                    count, total, floor, bi, bs, bsa, now, population_size=pops[key]
+                    count,
+                    total,
+                    floor,
+                    bi,
+                    bs,
+                    bsa,
+                    now,
+                    population_size=pops[key],
+                    candidate_count=cands.get(key, 0),
                 ),
                 "enabled": bool(enabled),
                 "boost_status": rarity.boost_status(bi, bs, bsa, now),

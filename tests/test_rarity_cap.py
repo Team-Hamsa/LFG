@@ -224,3 +224,90 @@ def test_weighted_pick_uncapped_when_config_off(conn, monkeypatch):
     w = dict(zip(rng.traits, rng.weights, strict=True))
     # Uncapped smoothed share 61/70 — identical to the pre-cap engine.
     assert w["Runaway"] == pytest.approx(61 / 70)
+
+
+# ---------------------------------------------------------------------------
+# Display-vs-pick parity: get_odds and the dashboard must use the exact
+# candidate set weighted_pick uses (enabled ∩ layer-store available), so the
+# displayed weights equal the ones real picks are made with.
+# ---------------------------------------------------------------------------
+
+
+def test_get_odds_matches_weighted_pick_weights(conn, monkeypatch):
+    monkeypatch.setattr(config, "RARITY_CAP_MULTIPLE", 3.0)
+    _seed_lfg_background(conn, [("Runaway", 60)])
+    seed_row(conn, "Runaway", 60)
+    for i in range(9):
+        seed_row(conn, f"T{i}", 0)
+    seed_row(conn, "Retired", 0)  # enabled row with NO art in the layer store
+    seed_row(conn, "Off", 0, enabled=0)
+    available = ["Runaway", *[f"T{i}" for i in range(9)]]
+
+    rng = CaptureRng()
+    rarity.weighted_pick(conn, "*", "Background", available, network="testnet", now=NOW, rng=rng)
+    picked = dict(zip(rng.traits, rng.weights, strict=True))
+
+    odds = {
+        t: w
+        for t, _c, _s, w, _st in rarity.get_odds(
+            conn, "*", "Background", network="testnet", now=NOW, available=available
+        )
+    }
+    # Every pick candidate's displayed weight equals the weight the picker used.
+    for trait in available:
+        assert odds[trait] == pytest.approx(picked[trait]), trait
+    # candidate_count = 10 (Retired and Off excluded) → ceiling 0.3.
+    assert odds["Runaway"] == pytest.approx(0.3)
+
+
+def test_get_odds_derives_available_from_layer_store(conn, monkeypatch, tmp_path):
+    monkeypatch.setattr(config, "RARITY_CAP_MULTIPLE", 3.0)
+    monkeypatch.setattr(config, "LAYER_SOURCE", "local")
+    monkeypatch.setattr(config, "LAYERS_DIR", str(tmp_path))
+    d = tmp_path / "ape" / "Background"
+    d.mkdir(parents=True)
+    traits = ["Runaway", *[f"T{i}" for i in range(9)]]
+    for t in traits:
+        (d / f"{t}.png").write_bytes(b"x")
+    seed_row(conn, "Runaway", 60, body="ape")
+    for t in traits[1:]:
+        seed_row(conn, t, 0, body="ape")
+    seed_row(conn, "Retired", 0, body="ape")  # enabled, no art → not a candidate
+    odds = {
+        t: w
+        for t, _c, _s, w, _st in rarity.get_odds(
+            conn, "ape", "Background", network="testnet", now=NOW
+        )
+    }
+    # 10 available candidates (Retired excluded) → ceiling 3/10, smoothed
+    # share 61/71 clamped to 0.3.
+    assert odds["Runaway"] == pytest.approx(0.3)
+
+
+def test_dashboard_fetch_rows_applies_cap(monkeypatch, tmp_path):
+    from scripts import trait_dashboard as td
+
+    monkeypatch.setattr(config, "RARITY_CAP_MULTIPLE", 3.0)
+    monkeypatch.setattr(config, "LAYERS_DIR", str(tmp_path / "layers"))
+    d = tmp_path / "layers" / "ape" / "Background"
+    d.mkdir(parents=True)
+    traits = ["Runaway", *[f"T{i}" for i in range(9)]]
+    for t in traits:
+        (d / f"{t}.png").write_bytes(b"x")
+    db = str(tmp_path / "t.db")
+    c = sqlite3.connect(db)
+    rarity.ensure_schema(c)
+    seed_row(c, "Runaway", 60, body="ape")
+    for t in traits[1:]:
+        seed_row(c, t, 0, body="ape")
+    seed_row(c, "Retired", 0, body="ape")  # enabled, no art → not a candidate
+    c.close()
+
+    out = td.fetch_rows("testnet", db_path=db)
+    rows = {r["trait"]: r for r in out["rows"]}
+    # Dashboard shows the CAPPED weight (ceiling 3/10 = 0.3), the same number
+    # weighted_pick would use — not the uncapped smoothed share 61/71.
+    assert rows["Runaway"]["weight"] == pytest.approx(0.3)
+    assert rows["T0"]["weight"] == pytest.approx(
+        rarity.effective_weight(0, 60, 0.005, None, 24, None, rarity.utcnow(), population_size=11)
+    )

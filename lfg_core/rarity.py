@@ -581,6 +581,22 @@ def set_enabled(
     conn.commit()
 
 
+def available_values(body: str, category: str) -> set[str] | None:
+    """Layer-store candidate set for (body, category) — the same `available`
+    universe weighted_pick is called with — or None when it can't be derived
+    (non-local layer source, missing dir, legacy '*' body). Display consumers
+    use it so their share-ceiling candidate_count matches real picks (#198)."""
+    if config.LAYER_SOURCE != "local":
+        return None
+    from lfg_core.layer_store import LocalLayerStore
+
+    try:
+        values = set(LocalLayerStore().list_values_sync(body, category))
+    except OSError:
+        return None
+    return values or None
+
+
 def get_odds(
     conn: sqlite3.Connection,
     body: str,
@@ -588,11 +604,20 @@ def get_odds(
     *,
     network: str | None = None,
     now: datetime | None = None,
+    available: list[str] | set[str] | None = None,
 ) -> list[tuple[str, int, float, float, str]]:
     """Rows for admin display: (trait, live_count, share%, weight, status)
-    sorted by effective weight descending."""
+    sorted by effective weight descending.
+
+    `available` is the layer-store candidate set (what weighted_pick would be
+    called with); it defaults to a live layer-store scan so the share-ceiling
+    candidate_count counts only enabled AND available traits — exactly the
+    picker's candidate set. Unresolvable (no local layer tree) falls back to
+    all enabled rows."""
     network = network or config.XRPL_NETWORK
     now = now or utcnow()
+    if available is None:
+        available = available_values(body, category)
     rows = conn.execute(
         """SELECT trait, live_count, floor_weight, boost_initial,
                   boost_step_hours, boost_started_at, enabled
@@ -600,9 +625,15 @@ def get_odds(
         (network, body, category),
     ).fetchall()
     total = sum(r[1] for r in rows)
-    # candidate_count for the share ceiling mirrors weighted_pick: enabled
-    # rows only (the picker's len(rows) is the enabled-candidate set).
-    enabled_count = sum(1 for r in rows if r[6])
+    # candidate_count for the share ceiling mirrors weighted_pick exactly:
+    # enabled rows that are also in the layer-store candidate set (the
+    # picker's len(rows) is enabled ∩ available). Without a resolvable
+    # candidate set, fall back to all enabled rows.
+    if available is not None:
+        avail_set = set(available)
+        enabled_count = sum(1 for r in rows if r[6] and r[0] in avail_set)
+    else:
+        enabled_count = sum(1 for r in rows if r[6])
     out: list[tuple[str, int, float, float, str]] = []
     for trait, count, floor, bi, bs, bsa, enabled in rows:
         share = (count / total * 100) if total else 0.0
