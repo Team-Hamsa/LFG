@@ -147,6 +147,50 @@ def _validated_result(result: dict[str, Any], label: str) -> dict[str, Any] | No
     return None
 
 
+# Bounded retry budget for a malformed confirm-poll body (#385): rippled
+# sometimes answers HTTP 200 with a JSON body missing the `result` key, which
+# xrpl-py surfaces as KeyError('result') from json_to_response. The Tx lookup
+# is a pure read — re-issuing it is safe and idempotent, unlike the submit.
+_MALFORMED_POLL_RETRIES = 4
+
+
+def _is_malformed_result_error(e: BaseException) -> bool:
+    """True when an exception is the rippled 200-with-no-`result`-key shape
+    (#385) — KeyError('result') raised by xrpl-py's json_to_response, possibly
+    wrapped by a chained exception."""
+    seen: set[int] = set()
+    current: BaseException | None = e
+    while current is not None and id(current) not in seen:
+        seen.add(id(current))
+        if isinstance(current, KeyError) and current.args == ("result",):
+            return True
+        current = current.__cause__ or current.__context__
+    return False
+
+
+async def _tx_lookup_with_retry(
+    client: JsonRpcClient, tx_hash: str, label: str, retries: int = _MALFORMED_POLL_RETRIES
+) -> dict[str, Any]:
+    """Pure-read `Tx` lookup, retrying (with backoff) ONLY the malformed
+    200-body shape (#385) before letting the error propagate. Any other
+    exception propagates immediately — the caller's fail-closed handling
+    (`_confirm_by_hash`'s attempt loop / `get_tx`'s raise) is unchanged."""
+    for attempt in range(retries + 1):
+        try:
+            response = await asyncio.to_thread(client.request, Tx(transaction=tx_hash))
+            return response.result
+        except Exception as e:
+            if not _is_malformed_result_error(e) or attempt >= retries:
+                raise
+            delay = 0.5 * (2**attempt)
+            logging.warning(
+                f"{label}: malformed rippled response (no 'result' key) for "
+                f"{tx_hash}; retrying read {attempt + 1}/{retries} in {delay}s"
+            )
+            await asyncio.sleep(delay)
+    raise AssertionError("unreachable")
+
+
 async def _confirm_by_hash(
     client: JsonRpcClient, tx_hash: str, attempts: int = 3
 ) -> dict[str, Any] | None:
@@ -156,8 +200,7 @@ async def _confirm_by_hash(
     decide committed vs. indeterminate WITHOUT resubmitting a fresh transaction."""
     for attempt in range(attempts):
         try:
-            response = await asyncio.to_thread(client.request, Tx(transaction=tx_hash))
-            result = response.result
+            result = await _tx_lookup_with_retry(client, tx_hash, "tx confirm lookup")
             if (
                 isinstance(result, dict)
                 and result.get("validated")
@@ -294,7 +337,12 @@ async def _submit_and_confirm(
             )
         except Exception as e:
             logging.warning(f"{label}: submit_and_wait raised ({e}); confirming by hash")
-            confirmed = await _confirm_by_hash(client, signed.get_hash())
+            # A malformed poll body (#385) means submit_and_wait's Tx *read*
+            # choked on upstream garbage, not that the submit failed — the tx
+            # is usually fine and merely awaiting validation, so give the
+            # confirm-by-hash read more patience before failing closed.
+            attempts = 6 if _is_malformed_result_error(e) else 3
+            confirmed = await _confirm_by_hash(client, signed.get_hash(), attempts=attempts)
             if confirmed is None:
                 raise IndeterminateResultError(
                     f"{label}: on-ledger outcome unknown after submit raised ({e})"
@@ -1074,10 +1122,13 @@ async def get_tx(tx_hash: str) -> dict[str, Any]:
     get_nft_sell_offers, this does NOT swallow exceptions) — the marketplace
     list/buy finalize pollers (lfg_service/app.py, via lfg_core/market_flow.py)
     are fail-closed on writes and must be able to tell "the lookup itself
-    broke" apart from "still pending"."""
+    broke" apart from "still pending".
+
+    Like the confirm-by-hash path, this is a pure read — a malformed 200 body
+    with no `result` key (#385) is retried a bounded number of times before
+    the error propagates."""
     client = JsonRpcClient(config.JSON_RPC_URL)
-    response = await asyncio.to_thread(client.request, Tx(transaction=tx_hash))
-    return response.result
+    return await _tx_lookup_with_retry(client, tx_hash, "get_tx")
 
 
 async def get_ledger_time() -> int:
