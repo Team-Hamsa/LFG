@@ -337,11 +337,18 @@ def run_accrual(
 
 @dataclass(frozen=True)
 class AuditResult:
-    """One conservation check's verdict, in audit_history.py's shape."""
+    """One conservation check's verdict, in audit_history.py's shape.
+
+    `skipped` is a third state, distinct from both PASS and FAIL. A check that
+    could not run is neither evidence of health nor of drift, and collapsing it
+    into either is wrong in a different way: reporting FAIL trains operators to
+    ignore the audit, while reporting PASS hides that nothing was verified.
+    """
 
     name: str
     ok: bool
     detail: str
+    skipped: bool = False
 
 
 def audit_distribution(
@@ -434,16 +441,29 @@ def audit_distribution(
     # drift and fail the audit for a perfectly correct history. Total-ever-
     # minted is monotonic and still catches what this check is for: an epoch
     # with more accrual rows than tokens could possibly exist.
-    if token_supply_ceiling <= 0:
-        # An empty or unavailable index is not evidence of drift. Failing here
-        # would turn "I could not check" into "the ledger is wrong", which is
-        # exactly the false alarm that trains operators to ignore the audit.
+    if token_supply_ceiling <= 0 and worst_count > 0:
+        # Accruals exist for tokens the index does not know about. That is not
+        # an un-runnable check — it is a genuine contradiction (an empty,
+        # unavailable, or wrong-network index), and it must fail loudly.
+        results.append(
+            AuditResult(
+                "epoch_within_supply",
+                False,
+                f"the on-chain index reports no tokens, yet epoch {worst_epoch} "
+                f"accrued {worst_count} rows — the index is empty, unavailable, "
+                f"or pointed at the wrong network",
+            )
+        )
+    elif token_supply_ceiling <= 0:
+        # No tokens AND no accruals: a fresh install with nothing to verify
+        # yet. Genuinely un-runnable rather than wrong, so report it as such
+        # instead of claiming a pass.
         results.append(
             AuditResult(
                 "epoch_within_supply",
                 True,
-                "skipped: the on-chain index reports no tokens, so there is no "
-                "supply ceiling to check against",
+                "no tokens in the index and no accruals recorded — nothing to check yet",
+                skipped=True,
             )
         )
     else:

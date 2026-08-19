@@ -528,11 +528,22 @@ def test_verify_endpoint_chain_ignores_hash_case(conn, monkeypatch):
     assert asyncio.run(brix_drip.verify_endpoint_chain(conn, "mainnet")) is None
 
 
-def test_audit_skips_the_supply_check_when_the_index_is_empty(conn):
-    """ "I could not check" must not be reported as "the ledger is wrong" —
-    false alarms are how an audit gets ignored."""
+def test_audit_fails_when_accruals_exist_but_the_index_is_empty(conn):
+    """Accruals for tokens the index does not know is a real contradiction —
+    an empty, unavailable, or wrong-network index — not an un-runnable check."""
     brix_drip.record_accruals(conn, [brix_drip.Accrual("2026-08-18", "NFT_1", "rAlice", 1)])
     _seed_onchain_claim_event(conn, amount=0)
     results = {r.name: r for r in brix_drip.audit_distribution(conn, "rDistributor", 0)}
-    assert results["epoch_within_supply"].ok is True
-    assert "skipped" in results["epoch_within_supply"].detail
+    assert results["epoch_within_supply"].ok is False
+    assert results["epoch_within_supply"].skipped is False
+
+
+def test_audit_reports_skipped_not_passed_on_a_fresh_install(conn):
+    """No tokens and no accruals: nothing to verify. Reporting PASS would
+    claim a clean bill of health nothing actually earned."""
+    _seed_onchain_claim_event(conn, amount=0)
+    result = {r.name: r for r in brix_drip.audit_distribution(conn, "rDistributor", 0)}[
+        "epoch_within_supply"
+    ]
+    assert result.skipped is True
+    assert result.ok is True

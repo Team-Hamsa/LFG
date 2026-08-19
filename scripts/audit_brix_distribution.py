@@ -43,7 +43,14 @@ def main() -> int:
 
     results = brix_drip.audit_distribution(hconn, args.distributor, int(ever_minted))
     for r in results:
-        print(f"{'PASS' if r.ok else 'FAIL'} {r.name}: {r.detail}")
+        # SKIP is deliberately not printed as PASS — an operator scanning this
+        # output must be able to see that a check did not actually run.
+        verdict = "SKIP" if r.skipped else ("PASS" if r.ok else "FAIL")
+        print(f"{verdict} {r.name}: {r.detail}")
+
+    skipped = [r for r in results if r.skipped]
+    if skipped:
+        print(f"NOTE {len(skipped)} check(s) could not run — this is not a clean bill of health")
 
     failed = [r for r in results if not r.ok]
     print(f"{'FAIL' if failed else 'PASS'} brix distribution audit ({len(failed)} failing checks)")
