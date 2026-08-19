@@ -1,7 +1,7 @@
 # Telegram Mini App: parity with the Discord Activity — Design
 
 **Issue:** [Team-Hamsa/LFG #89](https://github.com/Team-Hamsa/LFG/issues/89)
-**Status:** Design / planning only — no application code in this doc.
+**Status:** shipped — PRs #98/#257, last merged 2026-07-17; Part B public-HTTPS + BotFather ops completed under #224 · design record
 **Depends on:** #87 (Telegram inline-keyboard launch buttons), #90 (account / `identities` auth mapping). Both merged.
 
 ## 1. Goal

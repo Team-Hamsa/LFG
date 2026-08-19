@@ -1,7 +1,7 @@
 # Re-enable the burnable flag on the minter
 
 **Date:** 2026-06-24
-**Status:** Approved (brainstorming → spec)
+**Status:** shipped — PR #74, merged 2026-06-24 · design record
 **Related:** Dress-Up Trait Economy (#46), Phase 2 harvest (#64), Phase 4 (#66)
 
 ## Problem

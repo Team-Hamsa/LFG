@@ -2,6 +2,8 @@
 
 Date: 2026-06-23 · Branch: `feat/dressup-trait-economy-phase2` · Issue: #64 · Milestone: Dress-Up Trait Economy
 
+**Status:** shipped — PRs #67/#69/#70, last merged 2026-06-23 · design record
+
 Builds on Phase 1 (merged, commit `7669c26`): the pure accounting core
 (`lfg_core/trait_economy.py`), the genesis + empty live-state tables
 (`lfg_core/economy_store.py`), the per-`nft_id` index + listener

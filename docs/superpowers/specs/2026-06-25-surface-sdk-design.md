@@ -3,7 +3,7 @@
 **Date:** 2026-06-25
 **Parent spec:** `docs/superpowers/specs/2026-06-17-shared-services-spine-design.md` (§5.1, §7, §8, §9 step 2)
 **Issues:** forward-looking for #53 (Discord migration, Plan 3) and #43 (Telegram, Plan 4) — both consume this SDK.
-**Status:** Approved design, pre-implementation.
+**Status:** shipped — PR #78, merged 2026-06-25 · design record
 
 ## 1. Problem
 

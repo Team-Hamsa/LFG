@@ -1,7 +1,7 @@
 # Discord Migration — Design Spec (Spine Plan 3 of 4)
 
 **Date:** 2026-06-25
-**Status:** Approved design (decisions D1–D5 answered by the user 2026-06-25), pre-implementation.
+**Status:** shipped — PR #79, merged 2026-06-25 · design record
 **Issue:** #53 (migrate `main.py` onto the shared spine). Addresses the SourceTag/divergence root cause behind #75/#61/#57.
 **Depends on:** PR #76 (Plan 1, `lfg_service`) + PR #77 (Plan 2, Surface SDK) — Plan 3 is stacked on `feat/spine-plan2-surface-sdk` and cannot merge until both land.
 **Parent spec:** `docs/superpowers/specs/2026-06-17-shared-services-spine-design.md` §5.2.

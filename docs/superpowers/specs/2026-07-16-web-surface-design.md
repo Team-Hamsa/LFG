@@ -1,7 +1,7 @@
 # Standalone Web Surface — build.letseffinggo.com (design)
 
 **Date:** 2026-07-16
-**Status:** Approved for implementation
+**Status:** shipped — PR #242, merged 2026-07-16 · design record
 **Goal:** Navigating to `https://build.letseffinggo.com` in any browser loads the
 same Activity interface that runs inside Discord and Telegram, fully functional
 (mint, swap, dress-up, marketplace, leaderboards), with the user's XRPL wallet

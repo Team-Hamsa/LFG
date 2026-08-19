@@ -1,6 +1,6 @@
 # AMM Integration (backend) — Design
 
-**Issue:** #47 · **Date:** 2026-07-05 · **Status:** Draft
+**Issue:** #47 · **Date:** 2026-07-05 · **Status:** abandoned — #47 closed not-planned 2026-07-20 (mint/swap token routing already covers the need); no AMM endpoint or deposit/withdraw payload builder was ever built · historical
 
 ## 0. Naming drift — LFGO → BRIX
 

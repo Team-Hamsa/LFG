@@ -2,7 +2,7 @@
 
 **Issue:** [#43](https://github.com/Team-Hamsa/LFG/issues/43)
 **Date:** 2026-06-25
-**Status:** Approved — ready for plan
+**Status:** shipped — PRs #80/#81/#82, last merged 2026-06-26 · design record
 **Predecessors:** Plan 1 service spine (#76), Plan 2 Surface SDK (#78), Plan 3 Discord migration (#79) — all merged to `main`.
 
 ## 1. Goal

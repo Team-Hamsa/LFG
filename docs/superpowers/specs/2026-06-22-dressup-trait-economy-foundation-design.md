@@ -2,6 +2,8 @@
 
 Date: 2026-06-22 · Branch: `feat/onchain-nft-index` (Phase 1 work to branch from here)
 
+**Status:** shipped — PR #62, merged 2026-06-23 · design record
+
 ## Context: the dress-up game (full initiative)
 
 The LFG collection becomes a **trait economy**. Instead of NFTs being fixed,

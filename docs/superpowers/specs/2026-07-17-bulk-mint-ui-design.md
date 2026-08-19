@@ -2,7 +2,7 @@
 
 **Date:** 2026-07-17
 **Issue:** #215 (backend merged; this spec covers the client UI + flag)
-**Status:** Approved design, pre-implementation
+**Status:** shipped — PR #272, merged 2026-07-18 · design record
 
 ## Goal
 

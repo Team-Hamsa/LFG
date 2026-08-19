@@ -1,6 +1,6 @@
 # Repoint on-chain-index images to the CDN + clobber-guard
 
-**Status:** Design approved 2026-07-20
+**Status:** shipped — PR #286, merged 2026-07-20 · design record
 **Issue:** (marketplace/Activity broken-image follow-up to PR #282)
 
 ## Problem

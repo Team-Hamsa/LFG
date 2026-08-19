@@ -1,7 +1,7 @@
 # Trait Shop XRP Payment Fallback via AMM — Design (#238)
 
 **Issue:** [#238](https://github.com/Team-Hamsa/LFG/issues/238)
-**Status:** Spec
+**Status:** shipped — PR #243, merged 2026-07-17 · design record
 **Depends on:** Trait Shop #217 (merged). Independent of #239 (marketplace trait BRIX), but shares the AMM-quote helper.
 
 ## Problem

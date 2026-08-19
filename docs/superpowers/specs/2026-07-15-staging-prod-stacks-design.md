@@ -2,7 +2,7 @@
 
 **Date:** 2026-07-15
 **Issue:** [#223](https://github.com/Team-Hamsa/LFG/issues/223)
-**Status:** Approved design
+**Status:** shipped — PR #230, merged 2026-07-16 · design record
 
 ## Problem
 

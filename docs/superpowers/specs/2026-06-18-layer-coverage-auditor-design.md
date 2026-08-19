@@ -1,7 +1,7 @@
 # Layer Coverage Auditor — Design
 
 **Date:** 2026-06-18
-**Status:** Approved (revised — source pivoted from DB to on-chain, see below)
+**Status:** shipped — PR #59, merged 2026-06-23 · design record
 
 ## Revision note: why the source is on-chain, not the DB
 

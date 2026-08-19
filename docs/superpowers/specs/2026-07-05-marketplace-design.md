@@ -1,6 +1,6 @@
 # In-App P2P Marketplace — Design (Rev 2)
 
-**Issue:** #44 · **Date:** 2026-07-05 (Rev 2) · **Status:** Draft
+**Issue:** #44 · **Date:** 2026-07-05 (Rev 2) · **Status:** shipped — PR #129, merged 2026-07-06 · design record
 
 ## Rev 2 — what changed and why
 

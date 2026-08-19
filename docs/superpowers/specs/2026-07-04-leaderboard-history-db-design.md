@@ -1,7 +1,7 @@
 # Leaderboard + Ledger History Database — Design
 
 **Date:** 2026-07-04
-**Status:** Approved (brainstorm session)
+**Status:** shipped — PR #118, merged 2026-07-04 · design record
 **Related issues:** #48 (BRIX daily claim — consumer of this data), #42 (Web UI)
 
 ## Goal

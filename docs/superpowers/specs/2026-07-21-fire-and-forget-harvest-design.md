@@ -1,7 +1,7 @@
 # Fire-and-forget stacked harvests — design
 
 **Date:** 2026-07-21
-**Status:** approved (brainstorm session)
+**Status:** shipped — PR #307, merged 2026-07-21 · design record
 
 ## Problem
 

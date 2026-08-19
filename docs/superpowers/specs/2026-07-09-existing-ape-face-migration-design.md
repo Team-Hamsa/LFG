@@ -1,6 +1,8 @@
 # Existing faceless apes — scope & decision (#146)
 
-_Status: decided. Follow-up to #38 (new ape mints get faces, PR #145). This
+**Status:** shipped — PR #147, merged 2026-07-10 · design record
+
+_Decided. Follow-up to #38 (new ape mints get faces, PR #145). This
 supersedes an earlier draft that centered on a burn+remint migration — that
 approach is **rejected** (see §4)._
 

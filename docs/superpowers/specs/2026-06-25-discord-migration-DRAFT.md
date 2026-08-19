@@ -1,6 +1,6 @@
 # Discord Migration (Spine Plan 3 of 4) — Design-Decisions DRAFT
 
-**Status:** ⚠️ DRAFT for review — NOT an approved spec. Produced autonomously overnight (2026-06-25) to tee up the decisions a real brainstorm needs. Do not implement from this; it exists so the open decisions below can be answered quickly, then promoted to a proper spec.
+**Status:** superseded by `docs/superpowers/specs/2026-06-25-discord-migration-design.md` · historical
 **Issue:** #53 (migrate `main.py` onto the shared spine). Closes tagging issues #75/#61/#57 per the initiative map.
 **Depends on:** PR #76 (Plan 1, `lfg_service`) + PR #77 (Plan 2, Surface SDK) — both open/unmerged. Plan 3 cannot land until both do.
 **Parent spec:** `docs/superpowers/specs/2026-06-17-shared-services-spine-design.md` §5.2.

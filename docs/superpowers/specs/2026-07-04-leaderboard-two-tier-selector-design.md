@@ -1,7 +1,7 @@
 # Leaderboard two-tier board selector — design
 
 **Date:** 2026-07-04
-**Status:** Approved (user)
+**Status:** shipped — PR #120, merged 2026-07-04 · design record
 **Scope:** Frontend-only (`webapp/client/`). No API, backend, cache, or DB changes.
 
 ## Problem

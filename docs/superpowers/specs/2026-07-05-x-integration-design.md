@@ -2,7 +2,7 @@
 
 **Date:** 2026-07-05
 **Issue:** #41 (feat: X (Twitter) integration)
-**Status:** Draft (pending brainstorm review)
+**Status:** shipped — PRs #245/#255/#258, last merged 2026-07-17 · design record
 
 ## 1. Motivation & scope
 

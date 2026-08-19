@@ -1,7 +1,7 @@
 # Standalone Rarity Admin Dashboard — Design (v1)
 
 **Date:** 2026-07-13
-**Status:** Approved (design)
+**Status:** shipped — PR #202, merged 2026-07-13 · design record
 **Related:** #39 (trait_config.yaml authoring — explicitly OUT of scope here), the
 variable-rarity engine (`lfg_core/rarity.py`), the existing Discord `/admin`
 rarity buttons, and the `scripts/rarity_admin.py` CLI.

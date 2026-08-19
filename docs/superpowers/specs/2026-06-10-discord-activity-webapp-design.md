@@ -1,6 +1,8 @@
 # Discord Activity Webapp — Design
 
-Date: 2026-06-10 · Branch: `webapp-activity` · Status: approved (autonomous /goal run; defaults chosen per CLAUDE.md)
+Date: 2026-06-10 · Branch: `webapp-activity` · autonomous /goal run; defaults chosen per CLAUDE.md
+
+**Status:** shipped — PR #1, merged 2026-06-11 · design record
 
 ## Goal
 

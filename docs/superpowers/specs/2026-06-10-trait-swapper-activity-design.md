@@ -2,6 +2,8 @@
 
 Date: 2026-06-10 · Branch: `webapp-activity` · Autonomous /goal run
 
+**Status:** shipped — PR #1, merged 2026-06-11 · design record
+
 ## Goal
 
 Combine the Trait Swapper bot (github.com/joshuahamsa/Trait-Swapper) with the

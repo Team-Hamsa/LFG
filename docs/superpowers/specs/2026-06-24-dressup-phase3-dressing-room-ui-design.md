@@ -3,7 +3,7 @@
 - **Date:** 2026-06-24
 - **Issue:** [#65](https://github.com/Team-Hamsa/LFG/issues/65) · Milestone: Dress-Up Trait Economy · Part of [#46](https://github.com/Team-Hamsa/LFG/issues/46)
 - **Depends on:** Phase 2 (on-ledger harvest/assemble/equip flows, merged #67/#69/#70)
-- **Status:** Approved (brainstorm), pending implementation plan
+- **Status:** shipped — PR #71, merged 2026-06-24 · design record
 
 ## 1. Summary
 

@@ -1,7 +1,7 @@
 # SourceTag metrics — living README badge
 
 **Date:** 2026-07-22
-**Status:** Design approved, pending implementation plan
+**Status:** shipped — PR #321, merged 2026-08-15 · design record
 
 ## Problem
 

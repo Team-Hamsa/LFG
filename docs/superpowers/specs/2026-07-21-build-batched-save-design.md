@@ -1,7 +1,7 @@
 # Build panel: batched Save instead of per-click equip
 
 **Date:** 2026-07-21
-**Status:** Implemented
+**Status:** shipped — PR #313, merged 2026-07-22 · design record
 
 ## Problem
 

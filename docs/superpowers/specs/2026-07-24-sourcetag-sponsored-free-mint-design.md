@@ -1,7 +1,6 @@
 # SourceTag-Sponsored Free Mint Design
 
-**Status:** Approved for implementation planning  
-**Target:** Production `deploy` branch by July 31, 2026  
+**Status:** shipped — PR #328, merged 2026-07-31 · design record  
 **Feature lineage:** Supersedes the identity-based approach in PR #209
 
 ## Summary

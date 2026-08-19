@@ -1,7 +1,7 @@
 # Xaman-Verified `/register` for the Discord & Telegram Bots — Design
 
 **Date:** 2026-06-26
-**Status:** Approved — ready for plan
+**Status:** shipped — PR #83, merged 2026-06-26 · design record
 **Context:** The bot `/register <wallet>` commands (Discord + Telegram) store a user-supplied address after only a **format check** (`is_valid_classic_address`) — no proof the user controls it. The webapp already verifies ownership via a XUMM (Xaman) sign-in. This brings that same proof-of-ownership to both bots.
 
 ## 1. Goal

@@ -3,6 +3,7 @@
 **Date:** 2026-07-20
 **Issue:** #215 follow-up (bulk-mint UX revision; supersedes the PR #272 home-screen stepper)
 **Surface:** Activity web client (`webapp/client/`) only — no server changes.
+**Status:** shipped — PR #290, merged 2026-07-20 · design record
 
 ## Problem
 

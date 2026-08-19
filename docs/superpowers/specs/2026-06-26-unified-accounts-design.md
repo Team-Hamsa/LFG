@@ -1,7 +1,7 @@
 # Unified User Accounts: Wallet-Keyed, Multi-Surface Identity Registry — Design
 
 **Date:** 2026-06-26
-**Status:** Draft — ready for review
+**Status:** shipped — PR #94, merged 2026-06-26 · design record
 **Issue:** [#90](https://github.com/Team-Hamsa/LFG/issues/90)
 **Context:** The shared-services spine introduced an `identities` table keying `(platform, platform_user_id) → wallet` (`lfg_service/identity.py`). #90 inverts and enriches that: make the **wallet** a first-class account that links a user's identities across surfaces (Discord, Telegram, eventually X), stores a **display handle** per identity, and supports an explicit **"link another surface"** flow. This unblocks #85 (real announcement handles), #89 (Mini App auth mapping), and #91 (firehose identity enrichment).
 

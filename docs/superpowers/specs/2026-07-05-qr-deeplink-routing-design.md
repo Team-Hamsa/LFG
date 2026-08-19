@@ -5,6 +5,7 @@
 conditional on the reproduction matrix (Task 1 of the plan). The issue explicitly allows
 "document why not feasible" as an outcome — and for its UA-redirect question that IS the
 outcome (§6).
+**Status:** shipped in part — the investigation was delivered and #27 closed 2026-07-10 (UA-aware redirect documented as not applicable, the outcome the issue allowed) and the high-value fixes landed as PRs #134/#139; the `xaman.app/detect` fallback retirement (F1) did not · design record
 
 **Staleness warning:** #27 was filed 2026-06-12, *before* the shared-services spine
 refactor (#76–#83), the Discord Activity, the Telegram surface, and the return_url work

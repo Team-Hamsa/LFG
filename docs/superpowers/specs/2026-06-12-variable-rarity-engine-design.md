@@ -1,7 +1,7 @@
 # Variable Rarity Generation Engine — Design
 
 **Date:** 2026-06-12
-**Status:** Approved design, pending implementation plan
+**Status:** shipped — PR #33, merged 2026-06-12 · design record
 
 ## Goal
 

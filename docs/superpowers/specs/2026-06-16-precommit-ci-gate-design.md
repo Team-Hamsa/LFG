@@ -1,7 +1,7 @@
 # Design: Pre-push CI Gate + Codebase Cleanup (LFG)
 
 **Date:** 2026-06-16
-**Status:** Approved (design); Phase B to get its own implementation plan
+**Status:** shipped — PR #56, merged 2026-06-17; Phase B landed as direct commits and never got its own plan doc · design record
 **Author:** Josh + Claude
 
 ## Problem

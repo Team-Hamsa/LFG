@@ -1,8 +1,10 @@
 # Legacy ape faces — auto-roll on swap (#168)
 
-_Status: approved 2026-07-11. Follow-up to #38/#145 (new ape mints get faces)
-and to `2026-07-09-existing-ape-face-migration-design.md` (#146), whose §6.1
-"reface my ape entrypoint" this supersedes with an automatic variant._
+**Status:** shipped — PR #170, merged 2026-07-11 · design record
+
+_Follow-up to #38/#145 (new ape mints get faces) and to
+`2026-07-09-existing-ape-face-migration-design.md` (#146), whose §6.1 "reface my
+ape entrypoint" this supersedes with an automatic variant._
 
 ## 1. Problem
 

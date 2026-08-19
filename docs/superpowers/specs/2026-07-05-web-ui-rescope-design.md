@@ -4,6 +4,7 @@
 its scope has since shipped as the vanilla-JS Activity (`webapp/`, served on
 :8176 by `webapp/server.py` → `lfg_service/app.py`). This doc inventories what
 exists, marks what is spec'd elsewhere, and designs ONLY the genuine remainder.
+**Status:** shipped in part — (A) standalone-browser wallet sign-in shipped under #240 (PR #242, merged 2026-07-16; #42 closed 2026-07-20); (B) the public per-wallet profile page (`GET /api/profile/{wallet}` + `profile-panel`) was never built · design record
 
 ## 1. Inventory — what the Activity already is
 

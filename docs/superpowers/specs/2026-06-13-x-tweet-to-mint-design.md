@@ -2,7 +2,7 @@
 
 **Issue:** Team-Hamsa/Mint-Bot#41
 **Date:** 2026-06-13
-**Status:** Design approved, pending spec review
+**Status:** superseded by `docs/superpowers/specs/2026-07-05-x-integration-design.md` · historical
 
 ## Overview
 

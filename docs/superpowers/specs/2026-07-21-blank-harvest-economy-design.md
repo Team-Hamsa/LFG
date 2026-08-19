@@ -1,7 +1,7 @@
 # Blank-harvest economy (modify-in-place) + Assemble builder — design
 
 **Date:** 2026-07-21
-**Status:** approved (brainstorm session)
+**Status:** shipped — PRs #309/#319, last merged 2026-07-22 · design record
 
 ## Problem
 

@@ -1,7 +1,7 @@
 # Dress-up Phase 4 — Hybrid tradeable trait NFTokens (Extract / Deposit)
 
 **Date:** 2026-06-27
-**Status:** Design (approved decisions; pending spec review)
+**Status:** shipped — PR #106, merged 2026-06-27 · design record
 **Issue:** #66 (part of epic #46, milestone "Dress-Up Trait Economy")
 **Builds on:** Phase 1–3 (Closet/economy flows, listener, Activity UI) and the
 Bucket→Closet rename (#105).

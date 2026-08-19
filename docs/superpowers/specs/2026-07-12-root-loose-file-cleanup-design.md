@@ -1,7 +1,7 @@
 # Root loose-file cleanup — design
 
 **Date:** 2026-07-12
-**Status:** Approved (brainstorming) → planning
+**Status:** shipped — PR #195, merged 2026-07-12 · design record
 **Origin:** Direct user request ("the repo has a ton of loose files in the root, which
 looks super unprofessional… likely going to require a bit of a refactor to point
 everything that references those files to their new location"). Not issue-linked.

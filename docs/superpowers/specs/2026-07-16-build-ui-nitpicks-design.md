@@ -1,6 +1,7 @@
 # Build UI nitpicks — design
 
 **Date:** 2026-07-16
+**Status:** shipped — PR #244, merged 2026-07-16 · design record
 **Scope:** `webapp/client/` (`app.js`, `index.html`, `style.css`) — five contained UX fixes to the Dressing Room ("Build") panel of the Discord Activity. No service/API changes.
 
 ## Background

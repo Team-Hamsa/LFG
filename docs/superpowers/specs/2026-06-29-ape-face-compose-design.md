@@ -1,7 +1,7 @@
 # Ape Face Compose Rule — Design
 
 **Date:** 2026-06-29
-**Status:** Design (pending implementation plan)
+**Status:** shipped — PR #110, merged 2026-07-02 · design record
 **Scope:** A compose-time rendering rule for ape NFTs: inject a fixed nose
 layer on all apes, and clip the right side of face-anchored features on the
 melt/xray ape bodies so they conform to the melted face silhouette.

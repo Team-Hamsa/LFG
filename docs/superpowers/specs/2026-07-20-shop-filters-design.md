@@ -1,5 +1,7 @@
 # Trait Shop filtering — design (2026-07-20)
 
+**Status:** shipped — PR #292, merged 2026-07-20 · design record
+
 ## Problem
 The Trait Shop grid renders the full catalog (521 items across 9 slots on
 testnet) as one flat list — finding a specific trait or browsing a slot is

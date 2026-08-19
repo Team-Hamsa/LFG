@@ -2,7 +2,7 @@
 
 **Issue:** [#26 — Stand up testnet BRIX/XRP AMM pool for swap testing](https://github.com/Team-Hamsa/LFG/issues/26)
 **Date:** 2026-06-17
-**Status:** Approved
+**Status:** shipped — 22cb260, 2026-06-17 · design record
 
 ## Problem
 

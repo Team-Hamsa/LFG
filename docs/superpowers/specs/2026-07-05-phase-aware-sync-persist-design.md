@@ -2,7 +2,7 @@
 
 **Date:** 2026-07-05
 **Issue:** #107 (raised by CodeRabbit on #106)
-**Status:** Draft
+**Status:** shipped — PR #151, merged 2026-07-10 · design record
 **Scope:** `lfg_core/economy_flow.py`, `lfg_core/closet_token.py`, all five
 economy flows (harvest / assemble / equip / extract / deposit), their tests,
 and journal-state documentation. Pre-existing, cross-cutting bug — predates

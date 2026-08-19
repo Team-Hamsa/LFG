@@ -1,7 +1,7 @@
 # Closet — standalone issuance + Bucket→Closet rename
 
 **Date:** 2026-06-27
-**Status:** Design (approved decisions; pending spec review)
+**Status:** shipped — PR #105, merged 2026-06-27 · design record
 **Supersedes:** PR #104 (harvest band-aid) — merge #104 first for interim
 protection, then this work refactors the same path.
 

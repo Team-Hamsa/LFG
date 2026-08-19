@@ -1,6 +1,6 @@
 # DEX Integration (order-book, backend) — Design
 
-**Issue:** #45 · **Date:** 2026-07-05 · **Status:** Draft
+**Issue:** #45 · **Date:** 2026-07-05 · **Status:** abandoned — #45 closed not-planned 2026-07-20 (mint/swap token routing already covers the need); no DEX endpoint, OfferCreate path, or dex_trade classifier was ever built · historical
 **Sibling:** docs/superpowers/specs/2026-07-05-amm-backend-design.md (issue #47)
 
 ## 0. Naming drift — LFGO → BRIX

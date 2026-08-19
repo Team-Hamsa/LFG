@@ -1,7 +1,7 @@
 # LFG On-Chain NFT Index — Design
 
 **Date:** 2026-06-19
-**Status:** Approved
+**Status:** shipped — PR #60, merged 2026-06-22 · design record
 
 ## Problem
 

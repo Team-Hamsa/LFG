@@ -2,7 +2,7 @@
 
 Issue: #340
 Date: 2026-08-03
-Status: agreed in session; supersedes nothing (extends `docs/ops/sponsored-free-mint.md` Step 0)
+**Status:** shipped — PR #341, merged 2026-08-15; extends Step 0 of `docs/ops/sponsored-free-mint.md` · design record
 
 ## Problem
 

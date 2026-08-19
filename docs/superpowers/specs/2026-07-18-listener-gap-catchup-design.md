@@ -1,7 +1,7 @@
 # Self-healing on-chain listener: ledger-gap catch-up
 
 **Date:** 2026-07-18
-**Status:** Approved design
+**Status:** abandoned — the `listener_state` cursor and `_replay_gap` ledger walk were never built; restart gaps are covered instead by the #345 idle watchdog, the #288 nightly `backfill_market` sweep and #402's bounded history catch-up · historical
 **Motivation:** 2026-07-17 incident — `lfg-index-mainnet` restarted 6× (deploys),
 missed the `NFTokenAcceptOffer` txs for mints #4020/#4037/#4052, and the stale
 `onchain_nfts.owner` rows made delivered NFTs look undelivered during an

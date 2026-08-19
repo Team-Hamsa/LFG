@@ -3,6 +3,7 @@
 **Issue:** [#89 — Telegram Mini App, Part B (ops)](https://github.com/Team-Hamsa/LFG/issues/89)
 **Date:** 2026-07-05
 **Type:** Ops runbook design (no app code changes except env; follow-ups flagged explicitly)
+**Status:** shipped in part — the public HTTPS origin this unblocked went live (#89 closed 2026-07-17: Tailscale Funnel → :8176, front-end at `build.letseffinggo.com`); the Caddy `app.letseffinggo.com` vhost designed here was never used · design record
 
 ## 1. Why now — one blocker, four consumers
 

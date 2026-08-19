@@ -2,7 +2,7 @@
 
 **Date:** 2026-07-04
 **Issues:** #40 (rules engine), #28 (legacy rules), #30 (cross-body swaps), #39 (admin tooling)
-**Status:** Approved (brainstormed 2026-07-04)
+**Status:** shipped — PRs #122/#123/#127/#128/#126, last merged 2026-07-05 · design record
 **Supersedes:** `2026-06-13-trait-selection-rules-design.md` (on branch
 `feat/trait-selection-rules`) — that spec predates the unified layer store,
 `LAYER_SOURCE=local`, the seasons manifest (#114–#117), and the ape-face

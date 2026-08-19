@@ -2,7 +2,7 @@
 
 **Date:** 2026-06-17
 **Issues:** #53 (migrate `main.py` onto `lfg_core`), #43 (Telegram integration). Forward-looking for #42 (Web UI), #41 (X integration).
-**Status:** Approved design, pre-implementation.
+**Status:** shipped — PRs #76/#78/#79/#80/#81, last merged 2026-06-26 · design record
 
 ## 1. Problem
 

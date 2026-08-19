@@ -2,6 +2,7 @@
 
 Date: 2026-07-17
 Related: #41 (X integration), spec `2026-07-16-web-surface-design.md` (build.letseffinggo.com)
+**Status:** shipped — PR #274, merged 2026-07-18 · design record
 
 ## Problem
 

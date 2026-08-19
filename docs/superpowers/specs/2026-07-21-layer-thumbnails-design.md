@@ -1,6 +1,6 @@
 # Layer thumbnail tier (`layers/.thumbs/`) — design
 
-**Date:** 2026-07-21 · **Status:** approved
+**Date:** 2026-07-21 · **Status:** shipped — PR #304, merged 2026-07-21 · design record
 
 ## Problem
 

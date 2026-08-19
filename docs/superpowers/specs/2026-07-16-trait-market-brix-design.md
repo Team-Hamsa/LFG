@@ -1,7 +1,7 @@
 # BRIX-Denominated P2P Trait Listings + XRP On-Ramp — Design (#239)
 
 **Issue:** [#239](https://github.com/Team-Hamsa/LFG/issues/239)
-**Status:** Spec
+**Status:** shipped — PR #248, merged 2026-07-17 · design record
 **Depends on:** Marketplace #44 (merged). Independent of #238 (shop XRP fallback) but
 shares the AMM-quote/detection helper. Trait side of the market is
 `ECONOMY_ENABLED`-gated (testnet today), so this ships without touching the live
