@@ -1513,7 +1513,9 @@ async def handle_brix_claim(request):
         )
 
     try:
-        payment = await xrpl_ops.send_brix_claim(wallet, amount, claim_id)
+        payment = await xrpl_ops.send_brix_claim(
+            wallet, amount, claim_id, max_last_ledger_seq=provisional
+        )
     except xrpl_ops.ClaimNotSubmitted as exc:
         # Nothing reached the ledger, so releasing the claim is safe — and
         # necessary: a pending claim with a NULL last_ledger_seq is one

@@ -2169,7 +2169,9 @@ def claim_memo_tag(claim_id: int) -> str:
     return f"lfg:brix_claim:{claim_id}"
 
 
-async def send_brix_claim(destination: str, value: int, claim_id: int) -> ClaimPayment:
+async def send_brix_claim(
+    destination: str, value: int, claim_id: int, max_last_ledger_seq: int | None = None
+) -> ClaimPayment:
     """Pay `value` whole BRIX from the DISTRIBUTOR wallet to `destination`.
 
     Paid from the distributor rather than the BRIX issuer on purpose: an
@@ -2198,6 +2200,15 @@ async def send_brix_claim(destination: str, value: int, claim_id: int) -> ClaimP
             "could not read the validated ledger index; refusing to submit a claim"
         )
     last_ledger_seq = current + config.BRIX_CLAIM_LEDGER_MARGIN
+    if max_last_ledger_seq is not None:
+        # Never exceed the deadline already durably recorded for this claim.
+        # Recovery reads THAT value until record_submission replaces it, and a
+        # payment allowed to outlive it could still validate after recovery had
+        # declared the claim failed and unbound the accruals — paying the same
+        # BRIX twice. Clamping keeps the stored deadline an upper bound at
+        # every instant; the only cost is a shorter validity window in the rare
+        # case the clamp binds.
+        last_ledger_seq = min(last_ledger_seq, max_last_ledger_seq)
 
     payment = Payment(
         account=account,

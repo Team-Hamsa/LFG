@@ -463,3 +463,21 @@ def test_find_claim_payment_bounds_the_scan_by_the_claim_deadline(account_tx, mo
     monkeypatch.setattr(xrpl_ops.JsonRpcClient, "request", capture, raising=False)
     asyncio.run(xrpl_ops.find_claim_payment(42, wallet="rAlice", amount=5, min_ledger=100000))
     assert seen["min"] == 100000 - xrpl_ops._CLAIM_SCAN_LEDGER_SLACK
+
+
+def test_send_brix_claim_never_outlives_the_recorded_deadline(capture_payment):
+    """The stored deadline must stay an upper bound at every instant. A payment
+    allowed to outlive it could still validate after recovery had declared the
+    claim failed and unbound the accruals — paying the same BRIX twice."""
+    result = asyncio.run(
+        xrpl_ops.send_brix_claim("rAlice", 5, claim_id=42, max_last_ledger_seq=1010)
+    )
+    assert result.last_ledger_seq == 1010
+    assert capture_payment.tx.last_ledger_sequence == 1010
+
+
+def test_send_brix_claim_keeps_its_own_deadline_when_it_is_tighter(capture_payment):
+    result = asyncio.run(
+        xrpl_ops.send_brix_claim("rAlice", 5, claim_id=42, max_last_ledger_seq=10**9)
+    )
+    assert result.last_ledger_seq == 1000 + config.BRIX_CLAIM_LEDGER_MARGIN
