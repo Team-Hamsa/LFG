@@ -3499,6 +3499,7 @@ async function openMarket() {
 }
 
 function switchMarketTab(tab) {
+  if (tab === 'shop' && !shopEnabled) tab = 'browse';
   marketState.tab = tab;
   highlightTabs('market-tabs', 'tab', tab);
   el('market-browse').hidden = tab !== 'browse';
@@ -4160,6 +4161,27 @@ function applyShopFilters() {
   renderShopGrid(marketPure.filterShopItems(shopState.items, shopState));
 }
 
+// Trait Shop (#217) visibility. With SHOP_ENABLED off the project does not
+// sell traits — users only buy them from each other — so the Shop tab is
+// removed rather than left over a permanently empty catalog. The API is the
+// real gate (catalog returns [], buy returns 403 shop_disabled); this is
+// presentation only.
+//
+// Fail-closed: the tab ships hidden in index.html and this flag starts false,
+// so a slow or failed /api/config never routes users to a surface the server
+// will refuse to serve. Only an explicit shop_enabled:true reveals it.
+let shopEnabled = false;
+
+function applyShopVisibility(cfg) {
+  shopEnabled = cfg.shop_enabled === true;
+  const chip = document.querySelector('#market-tabs [data-tab="shop"]');
+  if (chip) chip.hidden = !shopEnabled;
+  if (!shopEnabled) {
+    const section = el('market-shop');
+    if (section) section.hidden = true;
+  }
+}
+
 async function loadShopCatalog() {
   const grid = el('shop-grid');
   showGridSkeletons(grid);
@@ -4523,6 +4545,7 @@ async function main() {
     // off, hide the Marketplace entry point (the API answers 403 regardless).
     if (cfg.market_enabled === false) el('market-btn').hidden = true;
     setupBulkStepper(cfg);
+    applyShopVisibility(cfg);
     applyShareConfig(cfg);
     // Dev reload is same-origin only — never against a cross-origin API base.
     if (cfg.dev_mode && !API_BASE && 'EventSource' in window) {

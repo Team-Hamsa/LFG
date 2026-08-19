@@ -11,6 +11,7 @@ import os
 import time
 import traceback
 import uuid
+import weakref
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
 from decimal import Decimal
@@ -53,8 +54,31 @@ TERMINAL_STATES = {OFFER_READY, DONE, FAILED, PAYMENT_TIMEOUT, CANCELLED}
 # nft_numbers handed to in-flight sessions but not yet in the database.
 # get_next_nft_number() is MAX+1, so without this two concurrent mints would
 # get the same number and overwrite each other's CDN files.
-_nft_number_lock = asyncio.Lock()
+# Keyed by running loop rather than a single module-level Lock: an asyncio.Lock
+# binds permanently to the first loop that awaits it under contention, so once a
+# process runs more than one loop, allocation on the second raises "bound to a
+# different event loop". The service runs exactly one loop, so this holds a
+# single entry in production.
+#
+# Keyed by id() with an explicit prune rather than a WeakKeyDictionary: a
+# contended Lock stores a strong reference to its loop, so a weakly-keyed entry
+# would keep its own key alive and closed loops would never be collected.
+_nft_number_locks: dict[int, tuple["weakref.ref[Any]", asyncio.Lock]] = {}
 _reserved_numbers: set[int] = set()
+
+
+def _nft_number_lock() -> asyncio.Lock:
+    loop = asyncio.get_running_loop()
+    for key, (ref, _lock) in list(_nft_number_locks.items()):
+        stale = ref()
+        if stale is None or stale.is_closed():
+            del _nft_number_locks[key]
+    entry = _nft_number_locks.get(id(loop))
+    if entry is not None:
+        return entry[1]
+    lock = asyncio.Lock()
+    _nft_number_locks[id(loop)] = (weakref.ref(loop), lock)
+    return lock
 
 
 class MintSession:
@@ -312,7 +336,7 @@ async def _upload_to_bunny(path_on_cdn: str, data: bytes, content_type: str) -> 
 
 async def _allocate_nft_number() -> int:
     """Next NFT number, skipping numbers reserved by in-flight sessions."""
-    async with _nft_number_lock:
+    async with _nft_number_lock():
         number = await asyncio.to_thread(get_next_nft_number)
         while number in _reserved_numbers:
             number += 1

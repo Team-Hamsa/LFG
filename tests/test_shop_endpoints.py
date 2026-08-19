@@ -29,8 +29,13 @@ import pytest  # noqa: E402
 from aiohttp import web  # noqa: E402
 from aiohttp.test_utils import make_mocked_request  # noqa: E402
 
+from lfg_core import (  # noqa: E402
+    config,  # noqa: E402
+    rarity,
+    shop_flow,
+    shop_store,
+)
 from lfg_core import economy_store as es  # noqa: E402
-from lfg_core import rarity, shop_flow, shop_store  # noqa: E402
 from lfg_core.closet_token import ACTIVE  # noqa: E402
 from lfg_core.nft_index import init_db as init_onchain_db  # noqa: E402
 from lfg_service import app as server  # noqa: E402
@@ -117,6 +122,7 @@ def onchain_env(tmp_path, monkeypatch):
     monkeypatch.setattr(server.config, "XRPL_NETWORK", "testnet")
     monkeypatch.setattr(server.config, "ECONOMY_NETWORK", "testnet")
     monkeypatch.setattr(server.config, "ECONOMY_ENABLED", True)
+    monkeypatch.setattr(server.config, "SHOP_ENABLED", True)
     monkeypatch.setattr(server.db_path, "app_db_path", lambda net=None: app_db)
     server._SHOP_CACHE.clear()
     server._SHOP_CACHE_GEN.clear()
@@ -562,3 +568,56 @@ def test_buy_pricing_unavailable_503_before_any_session(onchain_env, shop_wallet
     body = _run(_read_json(resp))
     assert body["code"] == "pricing_unavailable"
     assert server.shop_sessions == {}
+
+
+# ---------------------------------------------------------------------------
+# SHOP_ENABLED: the project itself never sells traits unless explicitly armed.
+# User-to-user trait trading (market list/buy) is a separate path and is
+# unaffected by this flag.
+# ---------------------------------------------------------------------------
+
+
+def test_shop_enabled_defaults_off(monkeypatch):
+    """The shipped default is OFF. Read through env_flag rather than the
+    import-frozen constant (#323): the constant reflects whatever the ambient
+    env froze, not the default we ship. env_flag still consults os.environ, so
+    clear the var too — otherwise a box whose .env sets SHOP_ENABLED=1 fails a
+    test that is only ever about the shipped default."""
+    monkeypatch.delenv("SHOP_ENABLED", raising=False)
+    assert config.env_flag("SHOP_ENABLED", config.SHOP_ENABLED_DEFAULT) is False
+
+
+def test_catalog_empty_when_shop_disabled(onchain_env, monkeypatch):
+    monkeypatch.setattr(server.config, "SHOP_ENABLED", False)
+    req = _mocked_request("GET", "/api/shop/catalog")
+    resp = _run(server.handle_shop_catalog(req))
+    assert resp.status == 200
+    assert _run(_read_json(resp)) == {"items": []}
+
+
+def test_buy_shop_disabled_403(onchain_env, shop_wallet, monkeypatch):
+    monkeypatch.setattr(server.config, "SHOP_ENABLED", False)
+    req = _post_request("/api/shop/buy", {"slot": "Head", "value": "Wizard Hat"})
+    resp = _run(server.handle_shop_buy_start(req))
+    assert resp.status == 403
+    assert _run(_read_json(resp))["error"] == "shop_disabled"
+
+
+def test_buy_shop_disabled_creates_no_session(onchain_env, shop_wallet, monkeypatch):
+    """The gate must fire before any quote/mint/session — a disabled shop can
+    never leave a half-built purchase behind."""
+    monkeypatch.setattr(server.config, "SHOP_ENABLED", False)
+    req = _post_request("/api/shop/buy", {"slot": "Head", "value": "Wizard Hat"})
+    _run(server.handle_shop_buy_start(req))
+    assert server.shop_sessions == {}
+
+
+def test_api_config_reports_shop_enabled(monkeypatch):
+    """The client hides the Shop tab off this flag, so /api/config must carry
+    it (same pattern as market_enabled / bulk_mint_ui)."""
+    monkeypatch.setattr(server.config, "SHOP_ENABLED", False)
+    resp = _run(server.handle_config(_mocked_request("GET", "/api/config")))
+    assert _run(_read_json(resp))["shop_enabled"] is False
+    monkeypatch.setattr(server.config, "SHOP_ENABLED", True)
+    resp = _run(server.handle_config(_mocked_request("GET", "/api/config")))
+    assert _run(_read_json(resp))["shop_enabled"] is True

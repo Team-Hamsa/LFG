@@ -95,3 +95,31 @@ def test_api_helper_exposes_error_body_for_session_resume():
     # so 409 session_active's session_id is reachable by callers.
     src = _read("app.js")
     assert "err.body = data" in src
+
+
+# ---------------------------------------------------------------------------
+# SHOP_ENABLED: when the project isn't selling traits, the Shop tab must not
+# be offered at all (a visible tab over a permanently empty catalog reads as
+# breakage). User-to-user trait trading stays on the Browse/Mine tabs.
+# ---------------------------------------------------------------------------
+
+
+def test_config_gates_shop_tab_visibility():
+    src = _read("app.js")
+    assert "cfg.shop_enabled" in src
+    assert "shopEnabled" in src
+
+
+def test_shop_tab_hidden_when_shop_disabled():
+    src = _read("app.js")
+    assert "function applyShopVisibility(" in src
+
+
+def test_shop_tab_is_fail_closed_before_config_loads():
+    """A slow or failed /api/config must not reveal a Shop the server refuses
+    to serve: the chip ships hidden and the client flag starts false."""
+    src = _read("app.js")
+    assert "let shopEnabled = false;" in src
+    assert "shopEnabled = cfg.shop_enabled === true;" in src
+    html = _read("index.html")
+    assert 'data-tab="shop" hidden' in html

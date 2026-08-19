@@ -410,6 +410,15 @@ TRAIT_TAXON = int(os.getenv("TRAIT_TAXON", str(TRAIT_TAXON_DEFAULT)))
 ASSEMBLE_TAXON_DEFAULT = 1760
 ASSEMBLE_TAXON = int(os.getenv("ASSEMBLE_TAXON", str(ASSEMBLE_TAXON_DEFAULT)))
 
+# Trait Shop (#217): whether the PROJECT itself sells freshly-minted traits.
+# Default OFF — traits change hands between users (Extract -> list -> buy) and
+# the shop is the only path where the project is the seller. Turning it off
+# closes the catalog and the buy endpoint but leaves every user-to-user trait
+# path, and the shop's own settlement/expiry sweep, running: an order already
+# in flight when the flag flips still settles into the buyer's Closet.
+SHOP_ENABLED_DEFAULT = "0"
+SHOP_ENABLED = env_flag("SHOP_ENABLED", SHOP_ENABLED_DEFAULT)
+
 # Trait Shop (#217): price = clamp(SHOP_BASE_BRIX / smoothed_share, MIN, MAX)
 SHOP_BASE_BRIX = float(os.getenv("SHOP_BASE_BRIX", "1.0"))
 SHOP_MIN_BRIX = int(os.getenv("SHOP_MIN_BRIX", "5"))
