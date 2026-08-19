@@ -36,6 +36,7 @@ from xrpl.models.requests import (
     Tx,
 )
 from xrpl.models.transactions import (
+    Memo,
     NFTokenBurn,
     NFTokenCancelOffer,
     NFTokenCreateOffer,
@@ -2125,3 +2126,135 @@ async def wait_for_payment(
             logging.error(traceback.format_exc())
         await asyncio.sleep(min(2**reconnects, 15))
         reconnects += 1
+
+
+@dataclass(frozen=True)
+class ClaimPayment:
+    """Outcome of one BRIX claim payout.
+
+    `state` is deliberately tri-state, and the caller MUST respect all three:
+
+    * "confirmed" — validated tesSUCCESS; the claim is paid.
+    * "failed"    — a validated, definitive failure (tec-class, no trustline).
+                    Safe to unbind the accruals so the holder can retry.
+    * "unknown"   — submission raised and the hash could not be confirmed. The
+                    payment MAY have landed. NEVER unbind and never resubmit;
+                    leave the rows bound and let recovery decide from the chain.
+
+    `last_ledger_seq` is present on every path, including "unknown" — it is
+    exactly what makes the unknown case decidable later.
+    """
+
+    state: str
+    tx_hash: str | None
+    last_ledger_seq: int | None
+
+
+def claim_memo_tag(claim_id: int) -> str:
+    """The on-chain marker that makes a claim payout self-identifying.
+
+    Recovery finds a payment by this exact string rather than by guessing from
+    amounts and timestamps, so reconciliation is exact instead of heuristic.
+    """
+    return f"lfg:brix_claim:{claim_id}"
+
+
+async def send_brix_claim(destination: str, value: int, claim_id: int) -> ClaimPayment:
+    """Pay `value` whole BRIX from the DISTRIBUTOR wallet to `destination`.
+
+    Paid from the distributor rather than the BRIX issuer on purpose: an
+    issuer-signed payment would mint fresh supply on every claim, invisibly.
+    The distributor must be pre-funded, which keeps issuance an explicit
+    operation and keeps claims out of the BRIX leaderboards (the distributor is
+    already excluded as a system account).
+
+    LastLedgerSequence is pinned BEFORE submission, not left to autofill, so
+    the caller can persist it immediately; without it, an unknown outcome could
+    never be resolved into a definitive verdict.
+    """
+    if not config.BRIX_DISTRIBUTOR_SEED:
+        raise RuntimeError("BRIX_DISTRIBUTOR_SEED is not configured; claims are disabled")
+
+    wallet = Wallet.from_seed(config.BRIX_DISTRIBUTOR_SEED)
+    account = config.BRIX_DISTRIBUTOR_ADDRESS or wallet.classic_address
+    client = JsonRpcClient(config.JSON_RPC_URL)
+
+    current = await _current_validated_ledger_index(client)
+    if current is None:
+        # Without a pinned LastLedgerSequence an unknown outcome would be
+        # permanently undecidable, so refuse to submit rather than create a
+        # claim that recovery can never resolve.
+        raise RuntimeError("could not read the validated ledger index; refusing to submit a claim")
+    last_ledger_seq = current + config.BRIX_CLAIM_LEDGER_MARGIN
+
+    payment = Payment(
+        account=account,
+        destination=destination,
+        amount=IssuedCurrencyAmount(
+            currency=config.BRIX_CURRENCY_HEX,
+            issuer=config.BRIX_ISSUER,
+            value=str(int(value)),
+        ),
+        source_tag=config.SOURCE_TAG,
+        last_ledger_sequence=last_ledger_seq,
+        memos=[
+            *memos.build_memo_models(
+                memos.INITIATOR_BACKEND, memos.PLATFORM_BACKEND, memos.ACTION_BRIX_CLAIM
+            ),
+            Memo(memo_data=claim_memo_tag(claim_id).encode().hex().upper()),
+        ],
+    )
+
+    try:
+        result = await _submit_and_confirm(payment, wallet, client, "send_brix_claim")
+    except IndeterminateResultError:
+        logging.warning(
+            "send_brix_claim: claim %s outcome indeterminate; leaving accruals bound", claim_id
+        )
+        return ClaimPayment("unknown", None, last_ledger_seq)
+
+    if result is None:
+        return ClaimPayment("failed", None, last_ledger_seq)
+    tx_hash = result.get("hash")
+    return ClaimPayment("confirmed", tx_hash if isinstance(tx_hash, str) else None, last_ledger_seq)
+
+
+async def find_claim_payment(claim_id: int) -> str | None:
+    """Hash of the on-ledger payout for `claim_id`, or None if absent.
+
+    Scans the distributor's account_tx for the claim's memo tag. Absence here
+    is NOT by itself proof of failure — the caller must also confirm the
+    validated ledger has passed the claim's LastLedgerSequence.
+    """
+    distributor = config.BRIX_DISTRIBUTOR_ADDRESS
+    if not distributor:
+        raise RuntimeError("BRIX_DISTRIBUTOR_ADDRESS is not configured")
+    tag = claim_memo_tag(claim_id)
+    client = JsonRpcClient(config.JSON_RPC_URL)
+    marker: Any = None
+    while True:
+        request = AccountTx(account=distributor, limit=200, marker=marker)
+        response = await asyncio.to_thread(client.request, request)
+        result = response.result
+        if not isinstance(result, dict):
+            raise RuntimeError(f"account_tx returned an unexpected payload: {result!r}")
+        for entry in result.get("transactions", []):
+            tx = entry.get("tx") or entry.get("tx_json") or {}
+            for memo in tx.get("Memos", []) or []:
+                raw = (memo.get("Memo") or {}).get("MemoData") or ""
+                try:
+                    decoded = bytes.fromhex(raw).decode()
+                except ValueError:
+                    continue
+                if decoded == tag:
+                    tx_hash = entry.get("hash") or tx.get("hash")
+                    return tx_hash if isinstance(tx_hash, str) else None
+        marker = result.get("marker")
+        if not marker:
+            return None
+
+
+async def current_validated_ledger_index() -> int | None:
+    """Index of the latest validated ledger, or None if it can't be read."""
+    client = JsonRpcClient(config.JSON_RPC_URL)
+    return await _current_validated_ledger_index(client)

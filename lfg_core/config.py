@@ -317,6 +317,17 @@ SWAP_RECORDS_DIR = os.getenv("SWAP_RECORDS_DIR", "swap_records")
 # Distributor account for BRIX airdrops; used to classify history archive
 # BRIX events as "airdrop" vs plain "payment".
 BRIX_DISTRIBUTOR_ADDRESS = os.getenv("BRIX_DISTRIBUTOR_ADDRESS")
+# Seed for the distributor wallet, used to SIGN daily-drip claim payouts (#48).
+# Claims are paid from the distributor, never the BRIX issuer: paying from the
+# issuer would silently mint new supply on every claim, while a pre-funded
+# distributor keeps issuance an explicit, visible funding operation. Unset =
+# the claim endpoints stay disabled (accrual still works and costs nothing).
+BRIX_DISTRIBUTOR_SEED = os.getenv("BRIX_DISTRIBUTOR_SEED")
+# Ledger margin for a claim Payment's LastLedgerSequence. This is what makes
+# "definitively failed" decidable during recovery: past this ledger the XRPL
+# guarantees the transaction can never validate, so an absent tx is proof of
+# failure rather than a guess.
+BRIX_CLAIM_LEDGER_MARGIN = int(os.getenv("BRIX_CLAIM_LEDGER_MARGIN", "40"))
 # AMM account for LP token snapshots (testnet rLUnD5mskBnHfwFxCjakDA3RVgK584XQXG)
 BRIX_AMM_ACCOUNT = os.getenv("BRIX_AMM_ACCOUNT")
 NFT_SCHEMA_URL = os.getenv(

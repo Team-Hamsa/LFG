@@ -121,6 +121,8 @@ SHARE_CARD_RENDER_ENABLED=0                                   # optional (#41); 
 WEB_ALLOWED_ORIGINS=https://build.letseffinggo.com,https://team-hamsa.github.io   # optional (#240); standalone web surface CORS allowlist (empty = off)
 BRIX_DISTRIBUTOR_ADDRESS=<xrpl-address>                     # optional; airdrop distributor wallet, excluded from BRIX leaderboards/derivation as a counterparty
 BRIX_AMM_ACCOUNT=<xrpl-address>                             # optional; mainnet BRIX/XRP AMM pool account, used by snapshot_balances.py
+BRIX_DISTRIBUTOR_SEED=<seed>                                # optional (#48); signs daily-drip claim payouts. Unset = accrual still runs, claims 503 `claims_disabled`
+BRIX_CLAIM_LEDGER_MARGIN=40                                 # optional (#48); ledgers of LastLedgerSequence headroom on a claim Payment — what makes a failed claim decidable
 BULK_MINT_UI_ENABLED=0                                      # optional (#215); Activity bulk-mint stepper — off = today's UI, server endpoints stay live
 BURN_TO_MINT_ENABLED=0                                      # optional (#220); burn-to-mint endpoints — off = new sessions 403; startup resume of already-burned sessions runs regardless
 BROKER_ALLOWLIST_PATH=<path-to-json>                        # optional (#131); external-marketplace broker allowlist overlay ({addr: {name, url_template}}); unset = built-ins in lfg_core/brokers.py; edits are picked up live (mtime-keyed cache)
@@ -694,6 +696,67 @@ chain on every request.
   excluded as a counterparty when deriving/ranking BRIX events) and
   `BRIX_AMM_ACCOUNT` (mainnet BRIX/XRP AMM pool account, tracked by
   `snapshot_balances.py`).
+
+### BRIX daily drip (#48)
+
+Holders earn **1 BRIX per unlisted live NFT per UTC-day epoch**, accrued in the
+DB and paid on-chain only when the holder explicitly claims. Design:
+`docs/superpowers/specs/2026-07-05-brix-daily-distribution-design.md`.
+
+- **Stores** (in `history_<net>.db`, alongside `brix_events` so the audit can
+  join them): `brix_accruals` (PK `(epoch_date, nft_id)`), `brix_claims`, and a
+  `brix_meta` cursor. Managed by `lfg_core/brix_drip.py`.
+- **Two invariants are enforced by sqlite, not app logic.** The accruals PK +
+  `INSERT OR IGNORE` makes any re-run a no-op, so one token can never accrue
+  twice for an epoch. The partial unique index `idx_one_open_claim` allows one
+  open claim per wallet, across processes. Together a double-claim is
+  structurally impossible.
+- **Amounts are INTEGER whole BRIX.** The conservation audit compares SUMs
+  across three sources; float drift would force epsilon tolerances or false
+  FAILs. Only the on-chain `brix_events.delta` side is REAL, and it is rounded
+  before comparison.
+- **"Unlisted" is checked on-ledger and fails closed.** A token is listed if
+  its CURRENT holder has a live sell offer (destination-locked offers count —
+  that is how brokered marketplaces list; offers left by a previous owner do
+  not, being unfillable). Unknown offer state pays **nothing**: paying listed
+  NFTs through a clio outage is unrecoverable, a missed BRIX is not.
+- **Claims are paid by `BRIX_DISTRIBUTOR_ADDRESS`, never the issuer** — an
+  issuer-signed payout would silently mint new supply on every claim. The
+  distributor must be **pre-funded with BRIX**; `scripts/brix_admin_report.py`
+  prints liability-vs-balance headroom, which is the number to watch (a dry
+  distributor makes claims fail with tec errors).
+- **Claim ordering** (`lfg_core/brix_drip.py` + `handle_brix_claim`):
+  bind accruals to a new claim → submit the payout → record the outcome.
+  Accruals are unbound ONLY on a validated, definitive failure. An
+  **indeterminate** outcome leaves them bound and the claim open — the payment
+  may have landed, and restoring the balance would let it be claimed twice.
+- **Recovery is never a guess.** `scripts/recover_brix_claims.py` (also run at
+  service startup) confirms a claim only when its `lfg:brix_claim:<id>` memo is
+  found in the distributor's `account_tx`, and fails it only when the payout is
+  absent AND the validated ledger has passed the claim's `LastLedgerSequence`
+  — past that point the XRPL guarantees the tx can never validate. Absence
+  alone is not proof of failure.
+- **API:** `GET /api/brix` (balance + totals + open claim; a pure DB read,
+  never a live clio sweep), `POST /api/brix/claim`, `GET
+  /api/brix/claim/{claim_id}` (own claims only; another wallet's is a 404).
+  Discord surfaces it as `/claim`.
+- **Derivation:** a distributor Payment carrying the claim memo derives
+  `brix_events.kind='claim'` instead of `airdrop` (the sender check is not
+  redundant with the memo — memos are user-writable).
+- **Ops:**
+  ```bash
+  # daily accrual (pm2 cron, 00:20 UTC — after the 00:10 snapshot)
+  pm2 start scripts/accrue_brix.py --name lfg-brix-accrue \
+    --cron "20 0 * * *" --no-autorestart --interpreter .venv/bin/python \
+    -- --network mainnet
+  .venv/bin/python scripts/brix_admin_report.py --network mainnet
+  .venv/bin/python scripts/audit_brix_distribution.py --network mainnet  # exits non-zero on drift
+  .venv/bin/python scripts/recover_brix_claims.py --network mainnet
+  ```
+  `accrue_brix.py` refuses to run (exit 2) unless `--network` matches
+  `XRPL_NETWORK` **and** the endpoint's ledger-32570 hash matches the chain
+  identity the archive recorded — on the wrong chain every token looks unlisted,
+  and unlisted is what pays.
 
 ### Dress-up trait economy — Phase 2 (testnet, on-ledger ops)
 

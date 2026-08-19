@@ -81,6 +81,7 @@ ACTION_DEPOSIT = "deposit"
 ACTION_SHOP_BUY = "shop-buy"
 ACTION_BID = "bid"  # #283: place a native buy offer
 ACTION_BID_ACCEPT = "bid-accept"  # #283: owner accepts a bid
+ACTION_BRIX_CLAIM = "brix-claim"  # #48: daily-drip payout from the distributor
 _ACTIONS = frozenset(
     {
         ACTION_MINT,
@@ -104,6 +105,7 @@ _ACTIONS = frozenset(
         ACTION_SHOP_BUY,
         ACTION_BID,
         ACTION_BID_ACCEPT,
+        ACTION_BRIX_CLAIM,
     }
 )
 

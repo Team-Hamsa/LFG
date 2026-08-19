@@ -226,6 +226,19 @@ class LFGServiceClient:
         """The caller's account view: {wallet, identities} (#90)."""
         return await self._user_request("GET", "/api/account", user_id, username=username)
 
+    # ---- BRIX daily drip (#48) ----
+
+    async def brix_status(self, user_id: str, *, username: str = "") -> dict[str, Any]:
+        """Claimable BRIX balance and claim history for the caller."""
+        return await self._user_request("GET", "/api/brix", user_id, username=username)
+
+    async def brix_claim(self, user_id: str, *, username: str = "") -> dict[str, Any]:
+        """Claim accrued BRIX. The user signs nothing — the distributor pays."""
+        return await self._user_request("POST", "/api/brix/claim", user_id, username=username)
+
+    async def brix_claim_status(self, user_id: str, claim_id: int) -> dict[str, Any]:
+        return await self._user_request("GET", f"/api/brix/claim/{claim_id}", user_id)
+
     # ---- mint ----
 
     async def start_mint(self, user_id: str, *, username: str = "") -> dict[str, Any]:
