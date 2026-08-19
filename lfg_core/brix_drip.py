@@ -555,8 +555,17 @@ class ClaimInFlight(ClaimError):
 OPEN_STATES = ("pending", "submitted")
 
 
-def open_claim(conn: sqlite3.Connection, wallet: str) -> tuple[int, int]:
+def open_claim(
+    conn: sqlite3.Connection, wallet: str, last_ledger_seq: int | None = None
+) -> tuple[int, int]:
     """Open a claim for every currently-unclaimed accrual of `wallet`.
+
+    `last_ledger_seq` is written IN THIS TRANSACTION, not afterwards. Recovery
+    skips claims with a NULL deadline, so a claim that briefly exists without
+    one is unrecoverable if the process dies in that gap — accruals bound
+    forever and the wallet blocked by claim_in_flight. Two separate writes can
+    never be atomic across a crash, so the deadline is part of the insert and
+    the bad state is unrepresentable rather than merely unlikely.
 
     Runs as ONE immediate transaction so the balance read, the claim insert and
     the row binding cannot interleave with a competing claim. Two racing claims
@@ -586,8 +595,9 @@ def open_claim(conn: sqlite3.Connection, wallet: str) -> tuple[int, int]:
             conn.rollback()
             raise NothingToClaim(f"{wallet} has no unclaimed BRIX")
         cur = conn.execute(
-            "INSERT INTO brix_claims (wallet, amount, state) VALUES (?, ?, 'pending')",
-            (wallet, amount),
+            "INSERT INTO brix_claims (wallet, amount, state, last_ledger_seq)"
+            " VALUES (?, ?, 'pending', ?)",
+            (wallet, amount, last_ledger_seq),
         )
         claim_id = int(cur.lastrowid or 0)
         conn.execute(
@@ -604,26 +614,6 @@ def open_claim(conn: sqlite3.Connection, wallet: str) -> tuple[int, int]:
         conn.rollback()
         raise
     return claim_id, amount
-
-
-def record_deadline(conn: sqlite3.Connection, claim_id: int, last_ledger_seq: int) -> None:
-    """Persist a ledger deadline WITHOUT changing the claim's state.
-
-    Written immediately after open_claim, before anything is submitted, so the
-    window in which a claim can exist with a NULL deadline never opens. That
-    window is unrecoverable: recovery deliberately skips NULL-deadline claims,
-    so a crash or shutdown inside it would strand the accruals and block the
-    wallet with claim_in_flight forever.
-
-    Deliberately provisional and generous — the precise deadline replaces it
-    via record_submission once the payment is actually built.
-    """
-    conn.execute(
-        "UPDATE brix_claims SET last_ledger_seq = ?, updated_at = CURRENT_TIMESTAMP"
-        " WHERE claim_id = ?",
-        (last_ledger_seq, claim_id),
-    )
-    conn.commit()
 
 
 def record_submission(

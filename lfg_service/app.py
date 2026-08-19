@@ -1417,14 +1417,6 @@ def _settle_failed(claim_id: int) -> None:
         conn.close()
 
 
-def _record_deadline(claim_id: int, last_ledger_seq: int) -> None:
-    conn = _brix_conn()
-    try:
-        brix_drip.record_deadline(conn, claim_id, last_ledger_seq)
-    finally:
-        conn.close()
-
-
 async def _fallback_last_ledger_seq() -> int | None:
     """A conservative deadline for a claim whose own one was never recorded.
 
@@ -1487,10 +1479,25 @@ async def handle_brix_claim(request):
             {"error": "a BRIX trustline is required", "code": "trustline_required"}, status=409
         )
 
+    # The provisional deadline is read BEFORE the claim exists and written in
+    # the same transaction that creates it (see brix_drip.open_claim). A claim
+    # that exists without a deadline is unrecoverable — recovery skips it
+    # forever — and two separate writes can never be atomic across a crash, so
+    # the bad state is made unrepresentable instead.
+    #
+    # If the ledger cannot be read we refuse BEFORE opening anything: nothing
+    # is bound, so nothing can be stranded, and the holder simply retries.
+    provisional = await _fallback_last_ledger_seq()
+    if provisional is None:
+        return web.json_response(
+            {"error": "the payout could not be prepared", "code": "claim_unavailable"},
+            status=503,
+        )
+
     def _open():
         conn = _brix_conn()
         try:
-            return brix_drip.open_claim(conn, wallet)
+            return brix_drip.open_claim(conn, wallet, last_ledger_seq=provisional)
         finally:
             conn.close()
 
@@ -1504,16 +1511,6 @@ async def handle_brix_claim(request):
         return web.json_response(
             {"error": "a claim is already in flight", "code": "claim_in_flight"}, status=409
         )
-
-    # Close the NULL-deadline window before it can open. Between open_claim and
-    # the payout's own deadline being persisted, a shutdown (task cancellation)
-    # or crash would leave a pending claim recovery skips forever — accruals
-    # bound, wallet blocked by claim_in_flight. A provisional, generous
-    # deadline makes that window recoverable; the precise one replaces it as
-    # soon as the payment is built.
-    provisional = await _fallback_last_ledger_seq()
-    if provisional is not None:
-        await asyncio.to_thread(_record_deadline, claim_id, provisional)
 
     try:
         payment = await xrpl_ops.send_brix_claim(wallet, amount, claim_id)

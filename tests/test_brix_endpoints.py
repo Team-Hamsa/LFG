@@ -290,10 +290,11 @@ def test_an_unexpected_payout_error_still_records_a_ledger_deadline(drip, monkey
     assert row["last_ledger_seq"] > 500000
 
 
-def test_a_deadline_is_persisted_before_the_payout_is_attempted(drip, monkeypatch):
-    """Shutdown (task cancellation) between open_claim and the payout must not
-    strand the claim: recovery skips NULL-deadline claims forever, so the
-    window in which one can exist must never open."""
+def test_a_claim_row_never_exists_without_a_deadline(drip, monkeypatch):
+    """Recovery skips NULL-deadline claims forever, so a claim that exists
+    without one is unrecoverable. The deadline is written in the same
+    transaction as the insert, making that state unrepresentable rather than
+    merely unlikely — no crash or cancellation can land between them."""
     seen = {}
 
     async def cancelled(destination, value, claim_id):
@@ -317,3 +318,24 @@ def test_a_deadline_is_persisted_before_the_payout_is_attempted(drip, monkeypatc
     # still reach a verdict on this claim after the restart.
     assert seen["deadline_at_submit_time"] is not None
     assert seen["deadline_at_submit_time"] > 500000
+
+
+def test_no_claim_is_opened_when_the_ledger_cannot_be_read(drip, monkeypatch):
+    """Refuse before binding anything: with no readable ledger there is no
+    deadline to record, and a bound claim without one can never be recovered.
+    Nothing bound means nothing stranded, and the holder just retries."""
+
+    async def unreadable():
+        return None
+
+    async def must_not_run(destination, value, claim_id):
+        raise AssertionError("no payout may be attempted without a deadline")
+
+    monkeypatch.setattr(xrpl_ops, "current_validated_ledger_index", unreadable)
+    monkeypatch.setattr(xrpl_ops, "send_brix_claim", must_not_run)
+    _accrue(drip)
+
+    resp = _run(server.handle_brix_claim(_Req()))
+    assert resp.status == 503
+    assert drip.execute("SELECT COUNT(*) FROM brix_claims").fetchone()[0] == 0
+    assert _body(_run(server.handle_brix_status(_Req())))["claimable"] == 3
