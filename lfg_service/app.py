@@ -3400,7 +3400,7 @@ async def handle_shop_catalog(request: web.Request) -> web.Response:
     """Public: GET /api/shop/catalog. Empty list when the trait economy is
     disabled (mirrors handle_market_listings' empty-page-not-403 posture for
     a browse-only, non-transacting surface)."""
-    if not config.ECONOMY_ENABLED:
+    if not config.ECONOMY_ENABLED or not config.SHOP_ENABLED:
         return web.json_response({"items": []})
 
     network = config.ECONOMY_NETWORK
@@ -3516,6 +3516,11 @@ async def handle_shop_buy_start(request):
     background task fills in `accept`."""
     if not config.ECONOMY_ENABLED:
         return _economy_disabled_response()
+    if not config.SHOP_ENABLED:
+        # The project does not sell traits; users buy them from each other via
+        # the marketplace. Gated ahead of any quote/mint/session so a disabled
+        # shop can never strand a minted token.
+        return web.json_response({"error": "shop_disabled"}, status=403)
 
     user = request["user"]
     wallet = request["wallet"]
@@ -6480,6 +6485,7 @@ async def handle_config(request):
             "dev_mode": config.WEBAPP_DEV_MODE,
             "economy_enabled": config.ECONOMY_ENABLED,
             "market_enabled": config.MARKET_ENABLED,
+            "shop_enabled": config.SHOP_ENABLED,
             "bulk_mint_ui": config.BULK_MINT_UI_ENABLED,
             "bulk_mint_max": config.BULK_MINT_MAX,
             "public_share_base_url": config.PUBLIC_SHARE_BASE_URL,

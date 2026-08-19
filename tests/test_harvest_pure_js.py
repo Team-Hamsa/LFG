@@ -185,7 +185,7 @@ def test_app_js_imports_harvest_pure():
 
 def test_index_html_cache_buster_bumped():
     src = open(os.path.join(ROOT, "webapp", "client", "index.html")).read()
-    assert "app.js?v=59" in src
+    assert "app.js?v=60" in src
 
 
 # ---------------------------------------------------------------------------

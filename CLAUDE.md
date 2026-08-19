@@ -85,6 +85,7 @@ NFT_FLAGS=25
 CLOSET_TAXON=1762                                           # optional; Closet soulbound taxon (default 1762)
 TRAIT_TAXON=176                                             # optional; tradeable trait token taxon (default 176, flipped from 1763 for #217)
 ASSEMBLE_TAXON=1760                                         # optional; taxon for Assemble-minted rebirth characters, distinct from NFT_TAXON=0 (default 1760)
+SHOP_ENABLED=0                                              # optional; Trait Shop master flag — 0 (default) = the PROJECT never sells traits; users only buy them from each other via the marketplace
 SHOP_BASE_BRIX=1.0                                          # optional; Trait Shop price numerator, BRIX (default 1.0, #217)
 SHOP_MIN_BRIX=5                                             # optional; Trait Shop price floor, BRIX (default 5, #217)
 SHOP_MAX_BRIX=5000                                          # optional; Trait Shop price ceiling, BRIX (default 5000, #217)
@@ -1165,6 +1166,15 @@ matching Extract/List seller first. Design:
   `pay_with` (`NULL`/`"BRIX"`/`"XRP"`), `price_xrp`, `buyback_done`. The
   session/API surface carries `pay_with`/`price_xrp`; supply accounting and
   the BRIX path are unchanged.
+- **Off by default (`SHOP_ENABLED=0`):** the shop is the only path where the
+  *project* sells a trait, so it ships disabled — traits are meant to change
+  hands between users (Extract → list → buy). With the flag off,
+  `GET /api/shop/catalog` returns `{"items": []}`, `POST /api/shop/buy`
+  returns 403 `shop_disabled` before any quote/mint/session, `/api/config`
+  reports `shop_enabled:false` and the client hides the Shop tab. The
+  settlement/expiry sweep keeps running regardless, so an order already in
+  flight when the flag flips still settles into the buyer's Closet instead of
+  stranding a minted token. Nothing about user-to-user trait trading changes.
 - **Taxon:** trait tokens minted by the shop share `TRAIT_TAXON` with Extract
   — see the flip to 176 noted above; `ASSEMBLE_TAXON = 1760` is unrelated
   (Assemble-minted rebirth characters, not shop trait tokens).
