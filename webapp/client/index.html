@@ -131,6 +131,9 @@
           <button id="build-blank-btn" class="primary" hidden>🧱 Build this GO</button>
           <button id="dressup-harvest-btn" class="secondary">🔥 Harvest</button>
           <button id="dressup-harvest-many-btn" class="secondary">🧺 Harvest many</button>
+          <!-- Inline "Share on X" for a just-saved Build: the save never leaves
+               the Dressing Room, so it gets a row here instead of a flow panel. -->
+          <div id="dressup-share-row" hidden></div>
           <div id="build-save-bar" class="build-save-bar" hidden>
             <button id="build-save-btn" class="primary">💾 Save changes</button>
             <button id="build-discard-btn" class="secondary">Discard</button>
@@ -373,6 +376,6 @@
        Telegram (window.Telegram stays undefined); loaded BEFORE app.js so the
        dual-mode boot can detect the Telegram context. -->
   <script src="telegram-web-app.js"></script>
-  <script type="module" src="app.js?v=62"></script>
+  <script type="module" src="app.js?v=63"></script>
 </body>
 </html>

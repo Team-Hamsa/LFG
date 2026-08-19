@@ -327,7 +327,37 @@ def test_share_supports_the_assemble_kind(_feature_on, monkeypatch):
 
 
 def test_share_assemble_text_without_a_number(_feature_on):
-    assert server._x_share_text("assemble", None) == "I just built my LFG! \U0001f9f1 @letseffinggo #XRPL"
+    assert (
+        server._x_share_text("assemble", None)
+        == "I just built my LFG! \U0001f9f1 @letseffinggo #XRPL"
+    )
+
+
+def test_share_supports_the_equip_kind(_feature_on, monkeypatch):
+    # Saving a Build (equip) restyles a character in place — shareable like the
+    # other three events, so the own-account path must build text for it.
+    posted = {}
+
+    async def fake_token(wallet, db_path=None):
+        return "tok"
+
+    async def fake_post(access_token, text):
+        posted["text"] = text
+        return "1001"
+
+    monkeypatch.setattr(x_oauth, "get_usable_access_token", fake_token)
+    monkeypatch.setattr(x_oauth, "post_tweet", fake_post)
+    resp = _run(server.handle_x_share(_FakeRequest(body={"kind": "equip", "nft_number": 8})))
+    assert resp.status == 200
+    assert posted["text"] == "I just restyled LFG #8! \U0001f9f1 @letseffinggo #XRPL"
+    assert "http" not in posted["text"]  # link-free by directive
+
+
+def test_share_equip_text_without_a_number(_feature_on):
+    assert (
+        server._x_share_text("equip", None)
+        == "I just restyled my LFG! \U0001f9f1 @letseffinggo #XRPL"
+    )
 
 
 def test_share_rejects_unknown_kind(_feature_on):

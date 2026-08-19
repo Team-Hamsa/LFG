@@ -449,6 +449,14 @@ function assembleShareText(nftNumber) {
     : 'I just built my LFG! 🧱 @letseffinggo #XRPL';
 }
 
+function equipShareText(nftNumber) {
+  // Mirrors the server's _x_share_text("equip", ...) so the Web Intent and
+  // own-account paths tweet identical copy.
+  return nftNumber != null
+    ? `I just restyled LFG #${nftNumber}! 🧱 @letseffinggo #XRPL`
+    : 'I just restyled my LFG! 🧱 @letseffinggo #XRPL';
+}
+
 // Build a "Share on X" control: a real <a target=_blank> anchor (Task 0's
 // iframe verification of window.open/openExternal inside the sandboxed
 // Activity is tracked separately — a genuine anchor href is the fail-safe
@@ -2679,6 +2687,7 @@ function renderCloset() {
   // Dressing a blank goes through Assemble, which picks the body first — this
   // button is the only door to it from a selected blank. renderCloset owns the
   // button because every selection path ends here, with or without a GO.
+  renderBuildShareRow(char);
   const blankBtn = el('build-blank-btn');
   if (blankBtn) {
     blankBtn.hidden = !(char && char.blank);
@@ -2878,6 +2887,11 @@ function pending() {
   return pendingFor === activeNftId ? pendingEquips : {};
 }
 
+// The nft_id of the most recently SAVED build — the only character whose
+// inline share row shows. Cleared when the user stages new (unsaved) changes,
+// so the row can never advertise a look that is no longer on-ledger.
+let buildShareFor = null;
+
 function isDirty() {
   const char = activeChar();
   return Boolean(char) && buildPure.netChanges(char, pending()).length > 0;
@@ -2893,9 +2907,29 @@ function stagePendingEquip(slot, value) {
   if (!char || saveBusy) return;
   if (reconcileUncertainIds.has(activeNftId)) { showError(RECONCILE_MSG); return; }
   if (pendingFor !== activeNftId) { pendingEquips = {}; pendingFor = activeNftId; }
+  buildShareFor = null;   // staged edits supersede the saved look
   pendingEquips[slot] = value;
   renderCanvas(char);
   renderCloset();
+}
+
+// The inline share row for a just-saved build. Shown only for the character
+// that was saved, and only once its art is on-ledger — buildShareControl is
+// skipped entirely when shareUrlFor knows no base (a dead link is worse than
+// no button), exactly like the mint/swap/assemble flow panels.
+function renderBuildShareRow(char) {
+  const row = el('dressup-share-row');
+  if (!row) return;   // tolerate a stale cached index.html
+  row.replaceChildren();
+  const show = Boolean(char) && buildShareFor === char.nft_id;
+  const url = show ? shareUrlFor(char.edition, char.nft_id) : '';
+  row.hidden = !url;
+  if (!url) return;
+  row.appendChild(buildShareControl(
+    equipShareText(char.edition),
+    url,
+    { kind: 'equip', nftNumber: char.edition },
+  ));
 }
 
 function renderSaveBar() {
@@ -3000,7 +3034,10 @@ async function saveBuild() {
     // refetch that FAILS still shows the new look instead of silently redrawing
     // the pre-save character and reading as a lost save. A refetch that
     // succeeds overwrites this with authoritative truth anyway.
-    if (committed) applySavedLocally(char, staged);
+    if (committed) {
+      applySavedLocally(char, staged);
+      buildShareFor = submittedNftId;   // armed before the redraw below
+    }
     try {
       economyState = await api('/api/economy');
     } catch (e) {
