@@ -32,9 +32,11 @@ class _User:
 class _Response:
     def __init__(self):
         self.deferred = False
+        self.ephemeral = None
 
     async def defer(self, ephemeral=False):
         self.deferred = True
+        self.ephemeral = ephemeral
 
 
 class _Followup:
@@ -149,3 +151,6 @@ def test_the_response_is_always_deferred_ephemerally(claimable):
     it = _Interaction()
     _run(claim_view.handle_claim(svc, it))
     assert it.response.deferred
+    # Balances are private: asserting only that defer() was called would pass
+    # if it silently became public.
+    assert it.response.ephemeral is True

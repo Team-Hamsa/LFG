@@ -81,3 +81,23 @@ def test_unrelated_memo_on_a_distributor_payment_stays_airdrop():
 def test_malformed_memo_hex_does_not_crash_derivation():
     tx = _payment(DISTRIBUTOR, [{"Memo": {"MemoData": "not-hex"}}])
     assert _kinds(tx) == {"airdrop"}
+
+
+def test_non_dict_memos_entry_does_not_crash_derivation():
+    """Firehose input: a wrong type here would raise before the decode guard
+    and abort derivation for the whole transaction."""
+    tx = _payment(DISTRIBUTOR)
+    tx["Memos"] = ["not-a-dict"]
+    assert _kinds(tx) == {"airdrop"}
+
+
+def test_non_dict_inner_memo_does_not_crash_derivation():
+    tx = _payment(DISTRIBUTOR)
+    tx["Memos"] = [{"Memo": "not-a-dict"}]
+    assert _kinds(tx) == {"airdrop"}
+
+
+def test_numeric_memo_data_does_not_crash_derivation():
+    tx = _payment(DISTRIBUTOR)
+    tx["Memos"] = [{"Memo": {"MemoData": 12345}}]
+    assert _kinds(tx) == {"airdrop"}

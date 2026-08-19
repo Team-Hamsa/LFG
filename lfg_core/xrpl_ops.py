@@ -2224,11 +2224,29 @@ async def send_brix_claim(destination: str, value: int, claim_id: int) -> ClaimP
             "send_brix_claim: claim %s outcome indeterminate; leaving accruals bound", claim_id
         )
         return ClaimPayment("unknown", None, last_ledger_seq)
+    except asyncio.CancelledError:
+        raise
+    except Exception:
+        # Past this point the payment MAY have reached the ledger, so the
+        # outcome is unknown rather than failed. Crucially, return the
+        # LastLedgerSequence anyway: a claim recorded without it is one
+        # recovery can never resolve, which strands the holder's balance
+        # permanently. Never let an unexpected exception escape and take the
+        # deadline with it.
+        logging.exception(
+            "send_brix_claim: claim %s raised after the deadline was set; treating as unknown",
+            claim_id,
+        )
+        return ClaimPayment("unknown", None, last_ledger_seq)
 
     if result is None:
         return ClaimPayment("failed", None, last_ledger_seq)
     tx_hash = result.get("hash")
     return ClaimPayment("confirmed", tx_hash if isinstance(tx_hash, str) else None, last_ledger_seq)
+
+
+# How far before a claim's LastLedgerSequence to begin its account_tx scan.
+_CLAIM_SCAN_LEDGER_SLACK = 5000
 
 
 def distributor_address() -> str:
@@ -2239,10 +2257,23 @@ def distributor_address() -> str:
     signer knows its own address) but can NEVER be recovered, stranding an
     indeterminate payout open forever and blocking that wallet's later claims.
     """
-    if config.BRIX_DISTRIBUTOR_ADDRESS:
-        return str(config.BRIX_DISTRIBUTOR_ADDRESS)
-    if config.BRIX_DISTRIBUTOR_SEED:
-        return str(Wallet.from_seed(config.BRIX_DISTRIBUTOR_SEED).classic_address)
+    configured = config.BRIX_DISTRIBUTOR_ADDRESS
+    seed = config.BRIX_DISTRIBUTOR_SEED
+    if configured and seed:
+        derived = str(Wallet.from_seed(seed).classic_address)
+        if derived != configured:
+            # The Payment would be built for one account and signed by
+            # another, so every payout fails or goes indeterminate. Refuse
+            # up front rather than discovering it one stuck claim at a time.
+            raise RuntimeError(
+                "BRIX_DISTRIBUTOR_ADDRESS does not match the account BRIX_DISTRIBUTOR_SEED "
+                f"signs for ({configured} != {derived})"
+            )
+        return configured
+    if configured:
+        return str(configured)
+    if seed:
+        return str(Wallet.from_seed(seed).classic_address)
     raise RuntimeError("neither BRIX_DISTRIBUTOR_ADDRESS nor BRIX_DISTRIBUTOR_SEED is configured")
 
 
@@ -2295,7 +2326,9 @@ def _carries_memo(tx: dict[str, Any], tag: str) -> bool:
     return False
 
 
-async def find_claim_payment(claim_id: int, wallet: str, amount: int) -> str | None:
+async def find_claim_payment(
+    claim_id: int, wallet: str, amount: int, min_ledger: int | None = None
+) -> str | None:
     """Hash of the genuine on-ledger payout for `claim_id`, or None if absent.
 
     The memo makes the payout findable; `_is_genuine_claim_payout` makes it
@@ -2306,9 +2339,15 @@ async def find_claim_payment(claim_id: int, wallet: str, amount: int) -> str | N
     sender = distributor_address()
     tag = claim_memo_tag(claim_id)
     client = JsonRpcClient(config.JSON_RPC_URL)
+    # Bound the scan. A claim that was never paid is the COMMON recovery case,
+    # and unbounded it would page the distributor's entire history — once per
+    # open claim, growing forever as successful claims accumulate. The payout
+    # cannot predate the ledger window the claim was built for, so start a
+    # little before its deadline.
+    scan_from = -1 if min_ledger is None else max(1, min_ledger - _CLAIM_SCAN_LEDGER_SLACK)
     marker: Any = None
     while True:
-        request = AccountTx(account=sender, limit=200, marker=marker)
+        request = AccountTx(account=sender, limit=200, marker=marker, ledger_index_min=scan_from)
         response = await asyncio.to_thread(client.request, request)
         result = response.result
         if not isinstance(result, dict):
@@ -2325,7 +2364,15 @@ async def find_claim_payment(claim_id: int, wallet: str, amount: int) -> str | N
                 )
                 continue
             tx_hash = entry.get("hash") or tx.get("hash")
-            return tx_hash if isinstance(tx_hash, str) else None
+            if not isinstance(tx_hash, str) or not tx_hash:
+                # The payout is real and validated; we simply cannot name it.
+                # Returning None would mean "absent" to the caller, which past
+                # LastLedgerSequence is treated as proof of failure — the
+                # accruals would be unbound and the same BRIX paid twice.
+                raise RuntimeError(
+                    f"claim {claim_id}'s payout was found on-ledger but carries no usable hash"
+                )
+            return tx_hash
         marker = result.get("marker")
         if not marker:
             return None

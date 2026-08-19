@@ -28,6 +28,14 @@ SWAP_TERMINAL: frozenset[str] = frozenset({"done", "failed", "offers_ready", "pa
 SIGNIN_TERMINAL: frozenset[str] = frozenset({"signed", "expired"})
 
 
+# Codes that must never be retried because the SERVER already committed state
+# and cannot say whether the follow-on action landed. Retrying a BRIX claim
+# after `claim_unconfirmed` submits a second request against a claim that is
+# already bound, which comes back `claim_in_flight` and hides the in-progress
+# result the surface needs to show.
+_NON_RETRYABLE_CODES = frozenset({"claim_unconfirmed"})
+
+
 class LFGServiceClient:
     def __init__(
         self,
@@ -81,6 +89,8 @@ class LFGServiceClient:
         # retryable — those are genuinely transient.
         if isinstance(exc, ServiceError):
             if exc.code == "rate_limited":
+                return False
+            if exc.code in _NON_RETRYABLE_CODES:
                 return False
             return exc.status is not None and exc.status >= 500
         return isinstance(exc, (aiohttp.ClientError, asyncio.TimeoutError))

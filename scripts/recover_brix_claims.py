@@ -46,6 +46,15 @@ async def _amain() -> int:
         )
         return 2
 
+    if not (config.BRIX_DISTRIBUTOR_ADDRESS or config.BRIX_DISTRIBUTOR_SEED):
+        # Without it every lookup raises, recover() correctly leaves all claims
+        # untouched, and this script would print "no claims resolved" — which
+        # an operator reads as healthy when nothing was checked at all.
+        print(
+            "refusing to recover: neither BRIX_DISTRIBUTOR_ADDRESS nor BRIX_DISTRIBUTOR_SEED is set"
+        )
+        return 2
+
     conn = history_store.init_history_db(history_store.history_db_path(args.network))
     brix_drip.ensure_schema(conn)
 

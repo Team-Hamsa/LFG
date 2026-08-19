@@ -720,11 +720,14 @@ DB and paid on-chain only when the holder explicitly claims. Design:
   that is how brokered marketplaces list; offers left by a previous owner do
   not, being unfillable). Unknown offer state pays **nothing**: paying listed
   NFTs through a clio outage is unrecoverable, a missed BRIX is not.
-- **Claims are paid by `BRIX_DISTRIBUTOR_ADDRESS`, never the issuer** — an
+- **Claims are paid by the distributor account, never the issuer** — an
   issuer-signed payout would silently mint new supply on every claim. The
   distributor must be **pre-funded with BRIX**; `scripts/brix_admin_report.py`
   prints liability-vs-balance headroom, which is the number to watch (a dry
-  distributor makes claims fail with tec errors).
+  distributor makes claims fail with tec errors). `BRIX_DISTRIBUTOR_ADDRESS`
+  is optional when `BRIX_DISTRIBUTOR_SEED` is set — the address is derived
+  from the seed — but if BOTH are set they must agree, or startup refuses
+  (the Payment would be built for one account and signed by another).
 - **Claim ordering** (`lfg_core/brix_drip.py` + `handle_brix_claim`):
   bind accruals to a new claim → submit the payout → record the outcome.
   Accruals are unbound ONLY on a validated, definitive failure. An

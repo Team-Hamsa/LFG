@@ -13,6 +13,12 @@ import pytest
 
 from lfg_core import brix_drip, config, xrpl_ops
 
+# The distributor address MUST be the one this seed signs for; a mismatch is
+# now refused up front, and a fixture that faked it would test a configuration
+# the code rejects.
+DISTRIBUTOR_SEED = "sEdTM1uX8pu2do5XvTnutH6HsouMaM2"
+DISTRIBUTOR = str(xrpl_ops.Wallet.from_seed(DISTRIBUTOR_SEED).classic_address)
+
 
 @pytest.fixture()
 def conn(tmp_path):
@@ -54,10 +60,8 @@ def capture_payment(monkeypatch):
 
     monkeypatch.setattr(xrpl_ops, "_submit_and_confirm", fake_submit)
     monkeypatch.setattr(xrpl_ops, "_current_validated_ledger_index", fake_ledger)
-    monkeypatch.setattr(
-        config, "BRIX_DISTRIBUTOR_SEED", "sEdTM1uX8pu2do5XvTnutH6HsouMaM2", raising=False
-    )
-    monkeypatch.setattr(config, "BRIX_DISTRIBUTOR_ADDRESS", "rDistributor", raising=False)
+    monkeypatch.setattr(config, "BRIX_DISTRIBUTOR_SEED", DISTRIBUTOR_SEED, raising=False)
+    monkeypatch.setattr(config, "BRIX_DISTRIBUTOR_ADDRESS", DISTRIBUTOR, raising=False)
     return captured
 
 
@@ -66,11 +70,14 @@ def test_send_brix_claim_builds_a_tagged_memoed_brix_payment(capture_payment):
     tx = capture_payment.tx
 
     assert tx.destination == "rAlice"
+    assert tx.account == DISTRIBUTOR  # built for the account that signs it
     assert tx.amount.currency == config.BRIX_CURRENCY_HEX
     assert tx.amount.issuer == config.BRIX_ISSUER
     assert tx.amount.value == "5"
-    # Hackathon-mandatory: every transaction the app builds carries the tag.
-    assert tx.source_tag == config.SOURCE_TAG
+    # Hackathon-mandatory: the exact assigned tag, asserted as a literal.
+    # Comparing against config.SOURCE_TAG would pass for any value the
+    # constant happens to hold and could never catch a changed tag.
+    assert tx.source_tag == 2606160021
     assert result.state == "confirmed"
     assert result.tx_hash == "TXHASH"
 
@@ -299,7 +306,7 @@ def test_recover_ignores_already_terminal_claims(conn):
 
 
 def _tx_entry(
-    account="rDistributor",
+    account=DISTRIBUTOR,
     destination="rAlice",
     value="5",
     currency=None,
@@ -332,10 +339,8 @@ def _tx_entry(
 @pytest.fixture()
 def account_tx(monkeypatch):
     """Serve a canned account_tx page and pin the distributor config."""
-    monkeypatch.setattr(config, "BRIX_DISTRIBUTOR_ADDRESS", "rDistributor", raising=False)
-    monkeypatch.setattr(
-        config, "BRIX_DISTRIBUTOR_SEED", "sEdTM1uX8pu2do5XvTnutH6HsouMaM2", raising=False
-    )
+    monkeypatch.setattr(config, "BRIX_DISTRIBUTOR_ADDRESS", DISTRIBUTOR, raising=False)
+    monkeypatch.setattr(config, "BRIX_DISTRIBUTOR_SEED", DISTRIBUTOR_SEED, raising=False)
     box = {"entries": []}
 
     class _Resp:
@@ -401,6 +406,60 @@ def test_find_claim_payment_falls_back_to_the_seed_derived_address(account_tx, m
     """An operator who sets only BRIX_DISTRIBUTOR_SEED must not end up with
     claims that can be submitted but never recovered."""
     monkeypatch.setattr(config, "BRIX_DISTRIBUTOR_ADDRESS", None, raising=False)
-    derived = xrpl_ops.Wallet.from_seed(config.BRIX_DISTRIBUTOR_SEED).classic_address
-    account_tx["entries"] = [_tx_entry(account=derived)]
+    account_tx["entries"] = [_tx_entry(account=DISTRIBUTOR)]
     assert _find() == "REALHASH"
+
+
+def test_distributor_address_refuses_a_seed_address_mismatch(monkeypatch):
+    """A configured address that disagrees with the signing seed would build
+    every Payment for one account and sign it with another — each payout fails
+    or goes indeterminate. Refuse up front, not one stuck claim at a time."""
+    monkeypatch.setattr(config, "BRIX_DISTRIBUTOR_SEED", DISTRIBUTOR_SEED, raising=False)
+    monkeypatch.setattr(config, "BRIX_DISTRIBUTOR_ADDRESS", "rSomeOtherAccount", raising=False)
+    with pytest.raises(RuntimeError, match="does not match"):
+        xrpl_ops.distributor_address()
+
+
+def test_send_brix_claim_keeps_the_deadline_when_submission_raises(monkeypatch, capture_payment):
+    """An unexpected exception must not escape carrying the LastLedgerSequence
+    with it — a claim recorded without one is a claim recovery can never
+    resolve, stranding the holder's balance permanently."""
+
+    async def boom(tx, wallet, client, label, **kwargs):
+        capture_payment.tx = tx
+        raise RuntimeError("connection reset mid-submit")
+
+    monkeypatch.setattr(xrpl_ops, "_submit_and_confirm", boom)
+    result = asyncio.run(xrpl_ops.send_brix_claim("rAlice", 5, claim_id=42))
+    assert result.state == "unknown"
+    assert result.last_ledger_seq is not None
+
+
+def test_find_claim_payment_raises_rather_than_reporting_a_hashless_payout_absent(account_tx):
+    """The payout is real and validated; we just cannot name it. Returning
+    None would read as "absent", and past LastLedgerSequence that is treated as
+    proof of failure — the accruals would unbind and the BRIX be paid twice."""
+    entry = _tx_entry()
+    entry.pop("hash")
+    entry["tx"].pop("hash", None)
+    account_tx["entries"] = [entry]
+    with pytest.raises(RuntimeError, match="no usable hash"):
+        _find()
+
+
+def test_find_claim_payment_bounds_the_scan_by_the_claim_deadline(account_tx, monkeypatch):
+    """Unbounded, a never-paid claim pages the distributor's whole history —
+    once per open claim, growing forever as payouts accumulate."""
+    seen = {}
+
+    class _Resp:
+        def __init__(self, result):
+            self.result = result
+
+    def capture(self, request):
+        seen["min"] = request.ledger_index_min
+        return _Resp({"transactions": [], "marker": None})
+
+    monkeypatch.setattr(xrpl_ops.JsonRpcClient, "request", capture, raising=False)
+    asyncio.run(xrpl_ops.find_claim_payment(42, wallet="rAlice", amount=5, min_ledger=100000))
+    assert seen["min"] == 100000 - xrpl_ops._CLAIM_SCAN_LEDGER_SLACK

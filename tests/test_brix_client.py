@@ -85,3 +85,39 @@ def test_brix_claim_status_targets_the_claim_id():
 
 
 assert SERVICE_TOKEN  # imported for the shared auth token used by make_client
+
+
+def test_claim_unconfirmed_is_never_retried():
+    """The server has already bound the claim and cannot say whether the XRPL
+    payment landed. A retry submits a second request against that same claim,
+    gets `claim_in_flight`, and hides the in-progress result the surface must
+    show the user."""
+    calls: list[int] = []
+
+    def _app() -> web.Application:
+        app = build_mock_service()
+
+        async def claim(request):
+            calls.append(1)
+            return web.json_response(
+                {"error": "the payout outcome is unconfirmed", "code": "claim_unconfirmed"},
+                status=502,
+            )
+
+        app.router.add_post("/api/brix/claim", claim)
+        return app
+
+    async def go():
+        server, client = await make_client(_app())
+        try:
+            async with client:
+                try:
+                    await client.brix_claim("user-1", username="alice")
+                except Exception as exc:
+                    return exc
+        finally:
+            await server.close()
+
+    err = run(go())
+    assert getattr(err, "code", None) == "claim_unconfirmed"
+    assert len(calls) == 1, f"claim was retried {len(calls)} times"

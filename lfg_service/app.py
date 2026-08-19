@@ -1417,9 +1417,29 @@ def _settle_failed(claim_id: int) -> None:
         conn.close()
 
 
-def _mark_submitted_unknown(claim_id: int) -> None:
+async def _fallback_last_ledger_seq() -> int | None:
+    """A conservative deadline for a claim whose own one was never recorded.
+
+    Deliberately generous: too EARLY a deadline would let recovery declare a
+    still-live payment failed and unbind accruals that were really paid, so
+    err far on the late side. None if even this cannot be read — recovery then
+    keeps leaving the claim alone, which is the safe direction.
+    """
+    try:
+        current = await xrpl_ops.current_validated_ledger_index()
+    except Exception:
+        logging.warning("brix: could not read a fallback ledger deadline", exc_info=True)
+        return None
+    if current is None:
+        return None
+    return current + (config.BRIX_CLAIM_LEDGER_MARGIN * 10)
+
+
+def _mark_submitted_unknown(claim_id: int, last_ledger_seq: int | None = None) -> None:
     conn = _brix_conn()
     try:
+        if last_ledger_seq is not None:
+            brix_drip.record_submission(conn, claim_id, None, last_ledger_seq)
         brix_drip.settle_claim(conn, claim_id, "unknown")
     finally:
         conn.close()
@@ -1490,12 +1510,18 @@ async def handle_brix_claim(request):
             {"error": "the payout could not be submitted", "code": "claim_unavailable"},
             status=503,
         )
+    except asyncio.CancelledError:
+        raise
     except Exception:
-        # We cannot prove this happened before submission, so fail closed: the
-        # payment may have landed. Leave the accruals bound and let recovery
-        # reach a verdict from the chain rather than risk paying twice.
+        # send_brix_claim converts every post-deadline failure into an
+        # "unknown" result CARRYING its LastLedgerSequence, so reaching here
+        # means it broke before the deadline existed. We still cannot prove
+        # nothing was submitted, so fail closed — but persist a conservative
+        # deadline first. A claim recorded without one is a claim recovery can
+        # never resolve, and its accruals would be stranded forever.
         logging.exception("brix claim %s failed with an unexpected error", claim_id)
-        await asyncio.to_thread(_mark_submitted_unknown, claim_id)
+        fallback = await _fallback_last_ledger_seq()
+        await asyncio.to_thread(_mark_submitted_unknown, claim_id, fallback)
         return web.json_response(
             {"error": "the payout outcome is unconfirmed", "code": "claim_unconfirmed"},
             status=502,

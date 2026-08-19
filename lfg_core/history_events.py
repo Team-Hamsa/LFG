@@ -305,11 +305,21 @@ CLAIM_MEMO_PREFIX = "lfg:brix_claim:"
 def _has_claim_memo(tx: dict[str, Any]) -> bool:
     """True if this tx carries a BRIX daily-drip claim marker (#48)."""
     for memo in tx.get("Memos") or []:
-        raw = (memo.get("Memo") or {}).get("MemoData") or ""
+        # Firehose input: any of these may be the wrong type, and an
+        # AttributeError/TypeError here would abort derivation for the whole
+        # transaction. A malformed memo is simply not a claim.
+        if not isinstance(memo, dict):
+            continue
+        inner = memo.get("Memo")
+        if not isinstance(inner, dict):
+            continue
+        raw = inner.get("MemoData")
+        if not isinstance(raw, str):
+            continue
         try:
             decoded = bytes.fromhex(raw).decode()
         except (ValueError, UnicodeDecodeError):
-            continue  # firehose input: a malformed memo is not a claim
+            continue
         if decoded.startswith(CLAIM_MEMO_PREFIX):
             return True
     return False

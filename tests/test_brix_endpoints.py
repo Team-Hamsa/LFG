@@ -264,3 +264,27 @@ def test_an_unexpected_payout_error_keeps_the_balance_bound(drip, monkeypatch):
     status = _body(_run(server.handle_brix_status(_Req())))
     assert status["claimable"] == 0
     assert status["open_claim"]["state"] == "submitted"
+
+
+def test_an_unexpected_payout_error_still_records_a_ledger_deadline(drip, monkeypatch):
+    """Failing closed is only safe if recovery can eventually reach a verdict.
+    A claim marked unknown with a NULL last_ledger_seq is one recover() skips
+    forever, stranding the accruals — so a conservative deadline is persisted."""
+
+    async def mystery(destination, value, claim_id):
+        raise RuntimeError("broke before the deadline existed")
+
+    async def ledger():
+        return 500000
+
+    monkeypatch.setattr(xrpl_ops, "send_brix_claim", mystery)
+    monkeypatch.setattr(xrpl_ops, "current_validated_ledger_index", ledger)
+    _accrue(drip)
+    assert _run(server.handle_brix_claim(_Req())).status == 502
+
+    row = drip.execute("SELECT last_ledger_seq, state FROM brix_claims").fetchone()
+    assert row["state"] == "submitted"
+    assert row["last_ledger_seq"] is not None
+    # Generous on purpose: too EARLY a deadline would let recovery declare a
+    # still-live payment failed and unbind accruals that were really paid.
+    assert row["last_ledger_seq"] > 500000
