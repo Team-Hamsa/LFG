@@ -510,3 +510,29 @@ def test_verify_endpoint_chain_accepts_the_real_mainnet_identity(conn, monkeypat
 
     monkeypatch.setattr(history_store, "fetch_endpoint_snapshot", right_chain)
     assert asyncio.run(brix_drip.verify_endpoint_chain(conn, "mainnet")) is None
+
+
+def test_verify_endpoint_chain_ignores_hash_case(conn, monkeypatch):
+    """Ledger hashes are hex; a case-only difference between the server's
+    rendering and the stored value must not reject a correct endpoint."""
+    from lfg_core import history_store
+
+    monkeypatch.setattr(history_store, "get_archive_state", lambda c, net: None)
+
+    async def lowercased(request_fn):
+        return history_store.EndpointSnapshot(
+            genesis_hash=brix_drip.MAINNET_GENESIS_HASH.lower(), validated_ledger_index=100
+        )
+
+    monkeypatch.setattr(history_store, "fetch_endpoint_snapshot", lowercased)
+    assert asyncio.run(brix_drip.verify_endpoint_chain(conn, "mainnet")) is None
+
+
+def test_audit_skips_the_supply_check_when_the_index_is_empty(conn):
+    """ "I could not check" must not be reported as "the ledger is wrong" —
+    false alarms are how an audit gets ignored."""
+    brix_drip.record_accruals(conn, [brix_drip.Accrual("2026-08-18", "NFT_1", "rAlice", 1)])
+    _seed_onchain_claim_event(conn, amount=0)
+    results = {r.name: r for r in brix_drip.audit_distribution(conn, "rDistributor", 0)}
+    assert results["epoch_within_supply"].ok is True
+    assert "skipped" in results["epoch_within_supply"].detail

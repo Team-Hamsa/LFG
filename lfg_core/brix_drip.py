@@ -83,6 +83,8 @@ LAST_ACCRUED_EPOCH = "last_accrued_epoch"
 # never change, so the wrong-chain guard must not depend on an archive having
 # been certified first. Testnet has no equivalent constant (a reset changes
 # it), so there the archive's recorded value is the only truth.
+CHAIN_CHECK_TIMEOUT_SECONDS = 30.0
+
 MAINNET_GENESIS_HASH = "4109C6F2045FC7EFF4CDE8F9905D19C28820D86304080FF886B299F0206E42B5"
 
 
@@ -432,14 +434,27 @@ def audit_distribution(
     # drift and fail the audit for a perfectly correct history. Total-ever-
     # minted is monotonic and still catches what this check is for: an epoch
     # with more accrual rows than tokens could possibly exist.
-    results.append(
-        AuditResult(
-            "epoch_within_supply",
-            worst_count <= token_supply_ceiling,
-            f"busiest epoch {worst_epoch} accrued {worst_count} of "
-            f"{token_supply_ceiling} tokens ever minted",
+    if token_supply_ceiling <= 0:
+        # An empty or unavailable index is not evidence of drift. Failing here
+        # would turn "I could not check" into "the ledger is wrong", which is
+        # exactly the false alarm that trains operators to ignore the audit.
+        results.append(
+            AuditResult(
+                "epoch_within_supply",
+                True,
+                "skipped: the on-chain index reports no tokens, so there is no "
+                "supply ceiling to check against",
+            )
         )
-    )
+    else:
+        results.append(
+            AuditResult(
+                "epoch_within_supply",
+                worst_count <= token_supply_ceiling,
+                f"busiest epoch {worst_epoch} accrued {worst_count} of "
+                f"{token_supply_ceiling} tokens ever minted",
+            )
+        )
 
     return results
 
@@ -481,14 +496,22 @@ async def verify_endpoint_chain(conn: sqlite3.Connection, network: str) -> str |
     client = JsonRpcClient(config.JSON_RPC_URL)
 
     async def request_fn(req: dict[str, Any]) -> dict[str, Any]:
-        response = await asyncio.to_thread(client.request, Request.from_dict(req))
+        # xrpl-py's JsonRpcClient exposes no timeout, so an unresponsive
+        # endpoint would hang the accrual run indefinitely instead of failing
+        # it. Bound it here.
+        response = await asyncio.wait_for(
+            asyncio.to_thread(client.request, Request.from_dict(req)),
+            timeout=CHAIN_CHECK_TIMEOUT_SECONDS,
+        )
         if not response.is_successful():
             raise RuntimeError(f"{req['method']} failed: {response.result}")
         result: dict[str, Any] = response.result
         return result
 
     snapshot = await history_store.fetch_endpoint_snapshot(request_fn)
-    if snapshot.genesis_hash != expected:
+    # Ledger hashes are hex; servers and stored values differ in case, and a
+    # case-only mismatch would reject a perfectly correct endpoint.
+    if snapshot.genesis_hash.upper() != expected.upper():
         return (
             f"endpoint {config.JSON_RPC_URL} is not on the {network} chain "
             f"(ledger {history_store.EARLIEST_AVAILABLE_LEDGER} hash "

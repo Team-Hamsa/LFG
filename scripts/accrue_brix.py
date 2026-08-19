@@ -60,12 +60,16 @@ def _utc_date(value: str) -> str:
     databases are open and every sell-offer lookup has already been paid for.
     """
     try:
-        datetime.strptime(value, "%Y-%m-%d")
+        parsed = datetime.strptime(value, "%Y-%m-%d")
     except ValueError:
         raise argparse.ArgumentTypeError(
             f"expected a UTC date as YYYY-MM-DD, got {value!r}"
         ) from None
-    return value
+    # Return the RE-FORMATTED value, not the input. strptime happily accepts
+    # "2026-8-1", which would then become the epoch_date key verbatim — and an
+    # unpadded key neither sorts against padded ones nor collides with them on
+    # the primary key, so the same day could accrue twice.
+    return parsed.strftime("%Y-%m-%d")
 
 
 async def _amain() -> int:
