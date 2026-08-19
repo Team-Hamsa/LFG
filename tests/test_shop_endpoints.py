@@ -577,10 +577,13 @@ def test_buy_pricing_unavailable_503_before_any_session(onchain_env, shop_wallet
 # ---------------------------------------------------------------------------
 
 
-def test_shop_enabled_defaults_off():
+def test_shop_enabled_defaults_off(monkeypatch):
     """The shipped default is OFF. Read through env_flag rather than the
     import-frozen constant (#323): the constant reflects whatever the ambient
-    env froze, not the default we ship."""
+    env froze, not the default we ship. env_flag still consults os.environ, so
+    clear the var too — otherwise a box whose .env sets SHOP_ENABLED=1 fails a
+    test that is only ever about the shipped default."""
+    monkeypatch.delenv("SHOP_ENABLED", raising=False)
     assert config.env_flag("SHOP_ENABLED", config.SHOP_ENABLED_DEFAULT) is False
 
 

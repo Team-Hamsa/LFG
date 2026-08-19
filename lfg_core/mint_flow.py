@@ -55,20 +55,29 @@ TERMINAL_STATES = {OFFER_READY, DONE, FAILED, PAYMENT_TIMEOUT, CANCELLED}
 # get_next_nft_number() is MAX+1, so without this two concurrent mints would
 # get the same number and overwrite each other's CDN files.
 # Keyed by running loop rather than a single module-level Lock: an asyncio.Lock
-# binds permanently to the first loop that awaits it, so once a test (or any
-# process that runs more than one loop) leaves a waiter behind, every later
-# allocation on a fresh loop raises "bound to a different event loop". The
-# service runs exactly one loop, so this is a one-entry dict in production.
-_nft_number_locks: "weakref.WeakKeyDictionary[Any, asyncio.Lock]" = weakref.WeakKeyDictionary()
+# binds permanently to the first loop that awaits it under contention, so once a
+# process runs more than one loop, allocation on the second raises "bound to a
+# different event loop". The service runs exactly one loop, so this holds a
+# single entry in production.
+#
+# Keyed by id() with an explicit prune rather than a WeakKeyDictionary: a
+# contended Lock stores a strong reference to its loop, so a weakly-keyed entry
+# would keep its own key alive and closed loops would never be collected.
+_nft_number_locks: dict[int, tuple["weakref.ref[Any]", asyncio.Lock]] = {}
 _reserved_numbers: set[int] = set()
 
 
 def _nft_number_lock() -> asyncio.Lock:
     loop = asyncio.get_running_loop()
-    lock = _nft_number_locks.get(loop)
-    if lock is None:
-        lock = asyncio.Lock()
-        _nft_number_locks[loop] = lock
+    for key, (ref, _lock) in list(_nft_number_locks.items()):
+        stale = ref()
+        if stale is None or stale.is_closed():
+            del _nft_number_locks[key]
+    entry = _nft_number_locks.get(id(loop))
+    if entry is not None:
+        return entry[1]
+    lock = asyncio.Lock()
+    _nft_number_locks[id(loop)] = (weakref.ref(loop), lock)
     return lock
 
 
