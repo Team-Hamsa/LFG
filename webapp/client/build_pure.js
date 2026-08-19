@@ -22,10 +22,15 @@ export function pickDefaultCharacter(characters) {
 //   state — 'active' (currently selected) | 'selectable' | 'indexing'
 //           (disabled: no body means every layer fetch would 400)
 export function goTileState(char, activeNftId) {
-  const indexed = Boolean(char.body);
+  // A harvested blank has NO Body metadata (its index `body` is ''), yet it is
+  // fully indexed: renderCanvas draws its own silhouette image and fetches no
+  // layers, so the "no body -> every layer fetch would 400" disable must not
+  // apply to it. Without this, every blank rendered as a disabled "indexing…"
+  // tile and could never be selected to be rebuilt.
+  const indexed = Boolean(char.body) || Boolean(char.blank);
   return {
     label: `#${char.edition == null ? '?' : char.edition}`,
-    sub: indexed ? char.body : 'indexing…',
+    sub: char.blank ? 'Blank — build me!' : indexed ? char.body : 'indexing…',
     // Missing body metadata wins: the picker disables only 'indexing' tiles,
     // so an unindexed GO must never be labeled 'active' (it would be
     // selectable but every layer fetch would 400).

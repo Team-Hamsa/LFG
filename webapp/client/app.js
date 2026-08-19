@@ -15,7 +15,7 @@ import * as marketPure from './market_pure.js?v=23';
 import * as mintPure from './mint_pure.js?v=24';
 // Build-panel decision logic lives in its own pure module so it's
 // Node-testable too (tests/test_build_pure_js.py).
-import * as buildPure from './build_pure.js?v=27';
+import * as buildPure from './build_pure.js?v=28';
 // Cold-boot session-resume decisions (#221): which live flow to re-attach to
 // after a webview relaunch is a pure priority picker, Node-testable
 // (tests/test_resume_pure_js.py); resumeAnyFlow() below is the thin DOM glue.
@@ -2392,7 +2392,7 @@ function renderGoPicker() {
     cap.textContent = t.state === 'active' ? `✓ ${t.label}` : t.label;
     const sub = document.createElement('span');
     sub.className = 'go-tile-sub';
-    sub.textContent = char.blank ? 'Blank — build me!' : t.sub;
+    sub.textContent = t.sub; // goTileState already labels blanks "Blank — build me!"
     tile.replaceChildren(media, cap, sub);
     // #298: GO tiles stay static (image_url is the PNG first frame for
     // animated art); the badge flags GOs whose art plays as video.

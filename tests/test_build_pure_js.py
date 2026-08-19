@@ -108,6 +108,20 @@ def test_tile_unindexed_is_disabled_and_labeled():
     assert out == {"label": "#?", "sub": "indexing…", "state": "indexing"}
 
 
+def test_tile_blank_is_selectable_despite_empty_body():
+    # A harvested blank carries no Body metadata (its index `body` is ''), but
+    # it is fully indexed and MUST stay selectable — renderCanvas draws its
+    # silhouette image and fetches no layers, so the 'indexing' disable (which
+    # exists only because a layer fetch would 400) does not apply to it.
+    out = run_js("M.goTileState({nft_id: 'B', edition: 3543, body: '', blank: true}, 'A')")
+    assert out == {"label": "#3543", "sub": "Blank \u2014 build me!", "state": "selectable"}
+
+
+def test_tile_blank_can_be_the_active_character():
+    out = run_js("M.goTileState({nft_id: 'A', edition: 65, body: '', blank: true}, 'A')")
+    assert out["state"] == "active"
+
+
 def test_tile_unindexed_active_stays_indexing():
     # An unindexed GO that also happens to be the active character must render
     # 'indexing' (disabled), not 'active' — the picker only disables 'indexing'
