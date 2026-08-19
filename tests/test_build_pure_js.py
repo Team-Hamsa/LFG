@@ -234,6 +234,21 @@ def test_net_changes_without_a_character_is_empty():
     assert run_js("M.netChanges(null, {Head: 'Tiara'})") == []
 
 
+# A SELECTED BLANK cannot reach the equip path at all (guards the P1 raised on
+# PR #409): a blank's index `body` is '', so every real Closet trait tile is
+# invisible — only its "None" tiles render, and staging "None" onto a slot that
+# already holds "None" nets to zero changes, so the Save bar stays hidden and no
+# /api/equip is ever submitted against a bodyless character. Dressing a blank
+# goes through Assemble, which picks a body first.
+def test_blank_character_cannot_stage_an_equip():
+    blank = (
+        "{nft_id: 'A', body: '', blank: true, attributes: "
+        "[{trait_type: 'Head', value: 'None'}, {trait_type: 'Eyes', value: 'None'}]}"
+    )
+    assert run_js(f"M.closetTileState({{slot: 'Head', value: 'Camp Hat'}}, {blank})")["visible"] is False
+    assert run_js(f"M.netChanges({blank}, {{Head: 'None'}})") == []
+
+
 # ---------------------------------------------------------------------------
 # closetTileState(asset, char) -> {visible, art, label}
 # A harvested character deposits one asset per non-body slot, INCLUDING the
