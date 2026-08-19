@@ -28,6 +28,7 @@ import argparse
 import asyncio
 import os
 import sys
+from datetime import datetime
 
 REPO_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
 sys.path.insert(0, REPO_ROOT)
@@ -52,11 +53,28 @@ def system_accounts() -> frozenset[str]:
     )
 
 
+def _utc_date(value: str) -> str:
+    """Reject a malformed --date at parse time.
+
+    Otherwise the bad value only blows up inside run_accrual — after both
+    databases are open and every sell-offer lookup has already been paid for.
+    """
+    try:
+        datetime.strptime(value, "%Y-%m-%d")
+    except ValueError:
+        raise argparse.ArgumentTypeError(
+            f"expected a UTC date as YYYY-MM-DD, got {value!r}"
+        ) from None
+    return value
+
+
 async def _amain() -> int:
     ap = argparse.ArgumentParser(description=__doc__)
     ap.add_argument("--network", default=config.XRPL_NETWORK, choices=["testnet", "mainnet"])
     ap.add_argument(
         "--date",
+        type=_utc_date,
+        metavar="YYYY-MM-DD",
         help="Treat this UTC date as 'today'; epochs are accrued up to the day before it.",
     )
     args = ap.parse_args()

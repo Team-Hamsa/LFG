@@ -3,10 +3,11 @@
 
   python scripts/audit_brix_distribution.py --network mainnet
 
-Cross-checks four invariants (spec §6): accruals bound to confirmed claims sum
+Cross-checks five invariants (spec §6): accruals bound to confirmed claims sum
 to the confirmed claim total; that total matches the distributor's on-chain
 BRIX debits derived as `kind='claim'`; no accrual is left bound to a failed
-claim; and no epoch accrued more rows than there are live tokens.
+claim; every confirmed claim carries a tx hash; and no epoch accrued more rows
+than there are tokens.
 
 Exit code is non-zero (1) on any FAIL. Run it after the first epoch and
 whenever claim numbers look suspicious, before trusting them.
