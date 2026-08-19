@@ -730,6 +730,8 @@ button.back:hover { color: var(--text); border: none; }
   position: absolute; inset: 0; width: 100%; height: 100%; object-fit: contain;
 }
 .dressup-closet { flex: 1 1 240px; }
+/* Spans the whole closet grid: the blank's "pick a body first" explainer. */
+.closet-blank-hint { grid-column: 1 / -1; margin: 0 0 6px; font-size: .85rem; }
 .closet-head { display: flex; justify-content: space-between; align-items: center; }
 .closet-grid {
   display: grid; grid-template-columns: repeat(auto-fill, minmax(64px, 1fr));

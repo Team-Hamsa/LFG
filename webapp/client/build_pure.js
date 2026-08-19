@@ -38,6 +38,18 @@ export function goTileState(char, activeNftId) {
   };
 }
 
+// Which blank the Assemble builder opens on. `preselectNftId` is set when the
+// user came from a specific blank in the Build panel ("Build this GO"); an
+// unknown id (a blank the server did not return, e.g. a non-mutable legacy
+// character) falls back to the normal rule: auto-select a lone blank, else let
+// the user pick in step 1.
+export function pickBuilderBlank(blanks, preselectNftId) {
+  const list = blanks || [];
+  const pre = preselectNftId ? list.find((b) => b.nft_id === preselectNftId) : null;
+  if (pre) return pre;
+  return list.length === 1 ? list[0] : null;
+}
+
 // --- Pending (unsaved) Build changes -----------------------------------
 // The Build panel stages tile clicks in a `{slot: incomingValue}` map and only
 // commits them on Save, as ONE NFTokenModify. These three functions are the

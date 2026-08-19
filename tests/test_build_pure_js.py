@@ -132,6 +132,33 @@ def test_tile_unindexed_active_stays_indexing():
 
 
 # ---------------------------------------------------------------------------
+# pickBuilderBlank(blanks, preselectNftId) -> the blank the builder opens on
+# ---------------------------------------------------------------------------
+
+
+def test_builder_blank_preselects_the_requested_one():
+    blanks = "[{nft_id: 'A', edition: 1}, {nft_id: 'B', edition: 2}]"
+    assert run_js(f"M.pickBuilderBlank({blanks}, 'B')") == {"nft_id": "B", "edition": 2}
+
+
+def test_builder_blank_auto_selects_a_lone_blank():
+    assert run_js("M.pickBuilderBlank([{nft_id: 'A', edition: 1}], null)")["nft_id"] == "A"
+
+
+def test_builder_blank_is_null_when_several_and_none_requested():
+    blanks = "[{nft_id: 'A', edition: 1}, {nft_id: 'B', edition: 2}]"
+    assert run_js(f"M.pickBuilderBlank({blanks}, null)") is None
+
+
+def test_builder_blank_unknown_preselect_falls_back_to_the_normal_rule():
+    # A requested blank the server did not return (e.g. a non-mutable legacy
+    # character) must not preselect anything — the user picks from step 1.
+    blanks = "[{nft_id: 'A', edition: 1}, {nft_id: 'B', edition: 2}]"
+    assert run_js(f"M.pickBuilderBlank({blanks}, 'ZZ')") is None
+    assert run_js("M.pickBuilderBlank([{nft_id: 'A', edition: 1}], 'ZZ')")["nft_id"] == "A"
+
+
+# ---------------------------------------------------------------------------
 # applyPending(attributes, pending) -> attributes with staged values applied
 # ---------------------------------------------------------------------------
 
@@ -245,7 +272,10 @@ def test_blank_character_cannot_stage_an_equip():
         "{nft_id: 'A', body: '', blank: true, attributes: "
         "[{trait_type: 'Head', value: 'None'}, {trait_type: 'Eyes', value: 'None'}]}"
     )
-    assert run_js(f"M.closetTileState({{slot: 'Head', value: 'Camp Hat'}}, {blank})")["visible"] is False
+    assert (
+        run_js(f"M.closetTileState({{slot: 'Head', value: 'Camp Hat'}}, {blank})")["visible"]
+        is False
+    )
     assert run_js(f"M.netChanges({blank}, {{Head: 'None'}})") == []
 
 

@@ -15,7 +15,7 @@ import * as marketPure from './market_pure.js?v=23';
 import * as mintPure from './mint_pure.js?v=24';
 // Build-panel decision logic lives in its own pure module so it's
 // Node-testable too (tests/test_build_pure_js.py).
-import * as buildPure from './build_pure.js?v=28';
+import * as buildPure from './build_pure.js?v=29';
 // Cold-boot session-resume decisions (#221): which live flow to re-attach to
 // after a webview relaunch is a pure priority picker, Node-testable
 // (tests/test_resume_pure_js.py); resumeAnyFlow() below is the thin DOM glue.
@@ -2666,6 +2666,23 @@ function renderCloset() {
   grid.replaceChildren();
   const char = activeChar();
   const staged = pending();
+  // A blank has no body, so the Closet can show it no trait art at all
+  // (closetTileState hides every non-"None" tile) and equipping is a dead end.
+  // Dressing a blank goes through Assemble, which picks the body first — this
+  // button is the only door to it from a selected blank. renderCloset owns the
+  // button because every selection path ends here, with or without a GO.
+  const blankBtn = el('build-blank-btn');
+  if (blankBtn) {
+    blankBtn.hidden = !(char && char.blank);
+    blankBtn.onclick = char && char.blank ? () => openAssemble(char.nft_id) : null;
+  }
+  if (char && char.blank) {
+    // Without the hint the Closet reads as broken ("where did my traits go?").
+    const hint = document.createElement('p');
+    hint.className = 'closet-blank-hint';
+    hint.textContent = 'Pick a body first — hit “Build this GO” to dress this blank.';
+    grid.appendChild(hint);
+  }
   for (const asset of buildPure.effectiveAssets(economyState.closet.assets, char, staged)) {
     if (closetFilter !== 'All' && asset.slot !== closetFilter) continue;
     // The tile is a non-button container (not a <button>) so the Extract control
@@ -3181,7 +3198,8 @@ async function trackHarvest(char, startResp) {
   else { el('dressup-canvas').replaceChildren(); renderCloset(); }
 }
 
-async function openAssemble() {
+// `preselectNftId` (optional): the blank the user came from via "Build this GO".
+async function openAssemble(preselectNftId) {
   let opts;
   try {
     opts = await api('/api/assemble/options');
@@ -3197,7 +3215,7 @@ async function openAssemble() {
     showError('Your Closet has no bodies — harvest a character first.');
     return;
   }
-  openBuilder(opts);
+  openBuilder(opts, preselectNftId);
 }
 
 // --- Assemble builder overlay ---
@@ -3217,12 +3235,13 @@ function blankImgSrc(nftId) {
   return c && c.image_url ? imgUrl(c.image_url, THUMB_W) : BLANK_IMG;
 }
 
-function openBuilder(opts) {
+function openBuilder(opts, preselectNftId) {
   const overlay = el('builder-overlay');
   if (!overlay.hidden) return; // already open
   builderState = {
     opts,
-    blank: opts.blanks.length === 1 ? opts.blanks[0] : null, // auto-select the lone blank
+    // The blank the user came from, else the lone blank, else step 1 picks.
+    blank: buildPure.pickBuilderBlank(opts.blanks, preselectNftId),
     body: null,
     chosen: {},
   };
