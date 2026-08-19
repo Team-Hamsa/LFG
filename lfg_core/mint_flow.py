@@ -11,6 +11,7 @@ import os
 import time
 import traceback
 import uuid
+import weakref
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
 from decimal import Decimal
@@ -53,8 +54,22 @@ TERMINAL_STATES = {OFFER_READY, DONE, FAILED, PAYMENT_TIMEOUT, CANCELLED}
 # nft_numbers handed to in-flight sessions but not yet in the database.
 # get_next_nft_number() is MAX+1, so without this two concurrent mints would
 # get the same number and overwrite each other's CDN files.
-_nft_number_lock = asyncio.Lock()
+# Keyed by running loop rather than a single module-level Lock: an asyncio.Lock
+# binds permanently to the first loop that awaits it, so once a test (or any
+# process that runs more than one loop) leaves a waiter behind, every later
+# allocation on a fresh loop raises "bound to a different event loop". The
+# service runs exactly one loop, so this is a one-entry dict in production.
+_nft_number_locks: "weakref.WeakKeyDictionary[Any, asyncio.Lock]" = weakref.WeakKeyDictionary()
 _reserved_numbers: set[int] = set()
+
+
+def _nft_number_lock() -> asyncio.Lock:
+    loop = asyncio.get_running_loop()
+    lock = _nft_number_locks.get(loop)
+    if lock is None:
+        lock = asyncio.Lock()
+        _nft_number_locks[loop] = lock
+    return lock
 
 
 class MintSession:
@@ -312,7 +327,7 @@ async def _upload_to_bunny(path_on_cdn: str, data: bytes, content_type: str) -> 
 
 async def _allocate_nft_number() -> int:
     """Next NFT number, skipping numbers reserved by in-flight sessions."""
-    async with _nft_number_lock:
+    async with _nft_number_lock():
         number = await asyncio.to_thread(get_next_nft_number)
         while number in _reserved_numbers:
             number += 1
