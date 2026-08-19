@@ -4166,15 +4166,20 @@ function applyShopFilters() {
 // removed rather than left over a permanently empty catalog. The API is the
 // real gate (catalog returns [], buy returns 403 shop_disabled); this is
 // presentation only.
-let shopEnabled = true;
+//
+// Fail-closed: the tab ships hidden in index.html and this flag starts false,
+// so a slow or failed /api/config never routes users to a surface the server
+// will refuse to serve. Only an explicit shop_enabled:true reveals it.
+let shopEnabled = false;
 
 function applyShopVisibility(cfg) {
-  shopEnabled = cfg.shop_enabled !== false;
-  if (shopEnabled) return;
+  shopEnabled = cfg.shop_enabled === true;
   const chip = document.querySelector('#market-tabs [data-tab="shop"]');
-  if (chip) chip.hidden = true;
-  const section = el('market-shop');
-  if (section) section.hidden = true;
+  if (chip) chip.hidden = !shopEnabled;
+  if (!shopEnabled) {
+    const section = el('market-shop');
+    if (section) section.hidden = true;
+  }
 }
 
 async function loadShopCatalog() {

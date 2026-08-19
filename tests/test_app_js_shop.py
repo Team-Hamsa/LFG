@@ -113,3 +113,13 @@ def test_config_gates_shop_tab_visibility():
 def test_shop_tab_hidden_when_shop_disabled():
     src = _read("app.js")
     assert "function applyShopVisibility(" in src
+
+
+def test_shop_tab_is_fail_closed_before_config_loads():
+    """A slow or failed /api/config must not reveal a Shop the server refuses
+    to serve: the chip ships hidden and the client flag starts false."""
+    src = _read("app.js")
+    assert "let shopEnabled = false;" in src
+    assert "shopEnabled = cfg.shop_enabled === true;" in src
+    html = _read("index.html")
+    assert 'data-tab="shop" hidden' in html

@@ -152,7 +152,7 @@
       <div id="market-tabs" class="lb-chips" role="tablist" aria-label="Marketplace section">
         <button class="lb-chip active" role="tab" aria-selected="true" data-tab="browse">Browse</button>
         <button class="lb-chip" role="tab" aria-selected="false" data-tab="mine">Mine</button>
-        <button class="lb-chip" role="tab" aria-selected="false" data-tab="shop">Shop</button>
+        <button class="lb-chip" role="tab" aria-selected="false" data-tab="shop" hidden>Shop</button>
       </div>
 
       <div id="market-shop" class="market-section" hidden>
@@ -370,6 +370,6 @@
        Telegram (window.Telegram stays undefined); loaded BEFORE app.js so the
        dual-mode boot can detect the Telegram context. -->
   <script src="telegram-web-app.js"></script>
-  <script type="module" src="app.js?v=60"></script>
+  <script type="module" src="app.js?v=61"></script>
 </body>
 </html>
