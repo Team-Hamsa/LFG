@@ -337,7 +337,9 @@ def _seed_onchain_claim_event(conn, distributor="rDistributor", amount=2, tx_has
 def test_audit_passes_when_claims_match_accruals_and_chain(conn):
     _seed_confirmed_claim(conn)
     _seed_onchain_claim_event(conn)
-    results = brix_drip.audit_distribution(conn, distributor="rDistributor", live_token_count=100)
+    results = brix_drip.audit_distribution(
+        conn, distributor="rDistributor", token_supply_ceiling=100
+    )
     assert all(r.ok for r in results), [r for r in results if not r.ok]
 
 
@@ -397,3 +399,21 @@ def test_audit_fails_when_an_epoch_accrued_more_than_the_live_supply(conn):
     _seed_onchain_claim_event(conn, amount=0)
     results = {r.name: r for r in brix_drip.audit_distribution(conn, "rDistributor", 1)}
     assert results["epoch_within_supply"].ok is False
+
+
+def test_audit_supply_ceiling_counts_burned_tokens_too(conn):
+    """A past epoch legitimately accrued for tokens that have since been
+    burned. Comparing against today's LIVE count would report false drift and
+    fail the audit on a perfectly correct history."""
+    brix_drip.record_accruals(
+        conn,
+        [
+            brix_drip.Accrual("2026-08-18", "NFT_1", "rAlice", 1),
+            brix_drip.Accrual("2026-08-18", "NFT_2", "rBob", 1),
+            brix_drip.Accrual("2026-08-18", "NFT_3", "rCarol", 1),
+        ],
+    )
+    _seed_onchain_claim_event(conn, amount=0)
+    # 3 tokens existed then; only 1 is live now, but 3 were ever minted.
+    results = {r.name: r for r in brix_drip.audit_distribution(conn, "rDistributor", 3)}
+    assert results["epoch_within_supply"].ok is True

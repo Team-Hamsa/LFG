@@ -334,7 +334,7 @@ class AuditResult:
 def audit_distribution(
     conn: sqlite3.Connection,
     distributor: str,
-    live_token_count: int,
+    token_supply_ceiling: int,
 ) -> list[AuditResult]:
     """Cross-check the drip ledger against itself and against the chain.
 
@@ -415,11 +415,18 @@ def audit_distribution(
         " ORDER BY c DESC LIMIT 1"
     ).fetchone()
     worst_epoch, worst_count = (row[0], int(row[1])) if row else ("-", 0)
+    # The ceiling is every token EVER minted, not the currently-live count.
+    # Tokens get burned, so a past epoch's legitimate accrual count can easily
+    # exceed today's live supply — comparing against it would report false
+    # drift and fail the audit for a perfectly correct history. Total-ever-
+    # minted is monotonic and still catches what this check is for: an epoch
+    # with more accrual rows than tokens could possibly exist.
     results.append(
         AuditResult(
             "epoch_within_supply",
-            worst_count <= live_token_count,
-            f"busiest epoch {worst_epoch} accrued {worst_count} of {live_token_count} live tokens",
+            worst_count <= token_supply_ceiling,
+            f"busiest epoch {worst_epoch} accrued {worst_count} of "
+            f"{token_supply_ceiling} tokens ever minted",
         )
     )
 

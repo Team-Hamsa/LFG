@@ -61,6 +61,20 @@ async def _amain() -> int:
     )
     args = ap.parse_args()
 
+    # Fail closed on a split network. The DB paths follow --network, but the
+    # offer lookups go through xrpl_ops' single-network JSON_RPC_URL globals.
+    # Mismatched, every cross-network NFT id would come back "no offers" — and
+    # since unlisted is what PAYS, that silently grants BRIX to listed tokens,
+    # inverting the whole fail-closed posture. Same seam the marketplace gates
+    # trait on-ledger ops behind (ECONOMY_NETWORK == XRPL_NETWORK).
+    if args.network != config.XRPL_NETWORK:
+        print(
+            f"refusing to accrue: --network {args.network} but XRPL_NETWORK is "
+            f"{config.XRPL_NETWORK}; offer lookups would run against the wrong chain "
+            f"and pay listed tokens. Re-run with XRPL_NETWORK={args.network}."
+        )
+        return 2
+
     oconn = nft_index.init_db(nft_index.index_db_path(args.network))
     hconn = history_store.init_history_db(history_store.history_db_path(args.network))
     brix_drip.ensure_schema(hconn)

@@ -37,9 +37,10 @@ def main() -> int:
     hconn = history_store.init_history_db(history_store.history_db_path(args.network))
     brix_drip.ensure_schema(hconn)
     oconn = nft_index.init_db(nft_index.index_db_path(args.network))
-    live = oconn.execute("SELECT COUNT(*) FROM onchain_nfts WHERE is_burned=0").fetchone()[0]
+    # Every token ever minted, burned ones included — see audit_distribution.
+    ever_minted = oconn.execute("SELECT COUNT(*) FROM onchain_nfts").fetchone()[0]
 
-    results = brix_drip.audit_distribution(hconn, args.distributor, int(live))
+    results = brix_drip.audit_distribution(hconn, args.distributor, int(ever_minted))
     for r in results:
         print(f"{'PASS' if r.ok else 'FAIL'} {r.name}: {r.detail}")
 
