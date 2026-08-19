@@ -25,6 +25,7 @@ produce false FAILs.
 
 from __future__ import annotations
 
+import asyncio
 import logging
 import sqlite3
 from collections.abc import Callable, Iterable, Sequence
@@ -32,7 +33,10 @@ from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from typing import Any
 
-from lfg_core import xrpl_ops
+from xrpl.clients import JsonRpcClient
+from xrpl.models.requests import Request
+
+from lfg_core import config, history_store, xrpl_ops
 from lfg_core.nft_index import OnchainNft
 
 logger = logging.getLogger(__name__)
@@ -431,3 +435,44 @@ def audit_distribution(
     )
 
     return results
+
+
+async def verify_endpoint_chain(conn: sqlite3.Connection, network: str) -> str | None:
+    """Confirm the configured JSON-RPC endpoint really is on `network`'s chain.
+
+    Matching `--network` against `XRPL_NETWORK` is not sufficient on its own:
+    `XRPL_JSON_RPC_URL` can override the endpoint independently, so both names
+    can agree while the socket points at the other chain. Then every one of our
+    NFT ids is unknown there, `nft_sell_offers` reports no offers, and — because
+    UNLISTED is the state that pays — listed tokens get granted BRIX.
+
+    The anchor is ledger 32570's hash: stable forever on a given chain,
+    different across chains, and already recorded per network by the archive.
+
+    Returns None when the endpoint is verified (or cannot be verified because
+    the archive has no recorded identity yet), or an error string to refuse on.
+    """
+    state = history_store.get_archive_state(conn, network)
+    expected = (state.genesis_hash or "").strip() if state else ""
+    if not expected:
+        # Nothing trustworthy to compare against. Say so plainly rather than
+        # implying a check happened.
+        return None
+
+    client = JsonRpcClient(config.JSON_RPC_URL)
+
+    async def request_fn(req: dict[str, Any]) -> dict[str, Any]:
+        response = await asyncio.to_thread(client.request, Request.from_dict(req))
+        if not response.is_successful():
+            raise RuntimeError(f"{req['method']} failed: {response.result}")
+        result: dict[str, Any] = response.result
+        return result
+
+    snapshot = await history_store.fetch_endpoint_snapshot(request_fn)
+    if snapshot.genesis_hash != expected:
+        return (
+            f"endpoint {config.JSON_RPC_URL} is not on the {network} chain "
+            f"(ledger {history_store.EARLIEST_AVAILABLE_LEDGER} hash "
+            f"{snapshot.genesis_hash[:16]}… != recorded {expected[:16]}…)"
+        )
+    return None

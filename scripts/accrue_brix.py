@@ -97,6 +97,15 @@ async def _amain() -> int:
     hconn = history_store.init_history_db(history_store.history_db_path(args.network))
     brix_drip.ensure_schema(hconn)
 
+    # The name check above cannot see an XRPL_JSON_RPC_URL override, so also
+    # confirm the endpoint's actual chain identity before trusting any offer
+    # lookup. Fail-closed: on the wrong chain every token looks unlisted, and
+    # unlisted is what pays.
+    chain_error = await brix_drip.verify_endpoint_chain(hconn, args.network)
+    if chain_error:
+        print(f"refusing to accrue: {chain_error}")
+        return 2
+
     excluded = system_accounts()
     tokens = nft_index.live_nfts(oconn)
     # Only look up listing state for tokens that could actually earn — a clio

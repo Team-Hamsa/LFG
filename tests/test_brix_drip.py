@@ -417,3 +417,61 @@ def test_audit_supply_ceiling_counts_burned_tokens_too(conn):
     # 3 tokens existed then; only 1 is live now, but 3 were ever minted.
     results = {r.name: r for r in brix_drip.audit_distribution(conn, "rDistributor", 3)}
     assert results["epoch_within_supply"].ok is True
+
+
+# --- endpoint chain identity ----------------------------------------------
+
+
+def test_verify_endpoint_chain_refuses_a_wrong_chain_endpoint(conn, monkeypatch):
+    """--network matching XRPL_NETWORK does not prove the endpoint is on that
+    chain: XRPL_JSON_RPC_URL overrides it independently. On the wrong chain
+    every token looks unlisted, and unlisted is what pays."""
+    from lfg_core import history_store
+
+    monkeypatch.setattr(
+        history_store,
+        "get_archive_state",
+        lambda c, net: type("S", (), {"genesis_hash": "EXPECTED_HASH"})(),
+    )
+
+    async def wrong_chain(request_fn):
+        return history_store.EndpointSnapshot(
+            genesis_hash="OTHER_CHAIN_HASH", validated_ledger_index=100
+        )
+
+    monkeypatch.setattr(history_store, "fetch_endpoint_snapshot", wrong_chain)
+    error = asyncio.run(brix_drip.verify_endpoint_chain(conn, "mainnet"))
+    assert error is not None
+    assert "not on the mainnet chain" in error
+
+
+def test_verify_endpoint_chain_accepts_a_matching_endpoint(conn, monkeypatch):
+    from lfg_core import history_store
+
+    monkeypatch.setattr(
+        history_store,
+        "get_archive_state",
+        lambda c, net: type("S", (), {"genesis_hash": "EXPECTED_HASH"})(),
+    )
+
+    async def right_chain(request_fn):
+        return history_store.EndpointSnapshot(
+            genesis_hash="EXPECTED_HASH", validated_ledger_index=100
+        )
+
+    monkeypatch.setattr(history_store, "fetch_endpoint_snapshot", right_chain)
+    assert asyncio.run(brix_drip.verify_endpoint_chain(conn, "mainnet")) is None
+
+
+def test_verify_endpoint_chain_is_a_no_op_without_a_recorded_identity(conn, monkeypatch):
+    """With no archive identity there is nothing trustworthy to compare
+    against; don't fabricate a verdict either way."""
+    from lfg_core import history_store
+
+    monkeypatch.setattr(history_store, "get_archive_state", lambda c, net: None)
+
+    async def explode(request_fn):
+        raise AssertionError("must not query the endpoint with nothing to compare")
+
+    monkeypatch.setattr(history_store, "fetch_endpoint_snapshot", explode)
+    assert asyncio.run(brix_drip.verify_endpoint_chain(conn, "mainnet")) is None
