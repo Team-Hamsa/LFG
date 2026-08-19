@@ -440,9 +440,9 @@ def test_verify_endpoint_chain_refuses_a_wrong_chain_endpoint(conn, monkeypatch)
         )
 
     monkeypatch.setattr(history_store, "fetch_endpoint_snapshot", wrong_chain)
-    error = asyncio.run(brix_drip.verify_endpoint_chain(conn, "mainnet"))
+    error = asyncio.run(brix_drip.verify_endpoint_chain(conn, "testnet"))
     assert error is not None
-    assert "not on the mainnet chain" in error
+    assert "not on the testnet chain" in error
 
 
 def test_verify_endpoint_chain_accepts_a_matching_endpoint(conn, monkeypatch):
@@ -460,12 +460,13 @@ def test_verify_endpoint_chain_accepts_a_matching_endpoint(conn, monkeypatch):
         )
 
     monkeypatch.setattr(history_store, "fetch_endpoint_snapshot", right_chain)
-    assert asyncio.run(brix_drip.verify_endpoint_chain(conn, "mainnet")) is None
+    assert asyncio.run(brix_drip.verify_endpoint_chain(conn, "testnet")) is None
 
 
 def test_verify_endpoint_chain_is_a_no_op_without_a_recorded_identity(conn, monkeypatch):
-    """With no archive identity there is nothing trustworthy to compare
-    against; don't fabricate a verdict either way."""
+    """Testnet with an uncertified archive: nothing trustworthy to compare
+    against, so don't fabricate a verdict — or query the endpoint at all.
+    Mainnet never reaches this branch (it has a hardcoded identity)."""
     from lfg_core import history_store
 
     monkeypatch.setattr(history_store, "get_archive_state", lambda c, net: None)
@@ -474,4 +475,38 @@ def test_verify_endpoint_chain_is_a_no_op_without_a_recorded_identity(conn, monk
         raise AssertionError("must not query the endpoint with nothing to compare")
 
     monkeypatch.setattr(history_store, "fetch_endpoint_snapshot", explode)
+    assert asyncio.run(brix_drip.verify_endpoint_chain(conn, "testnet")) is None
+
+
+def test_verify_endpoint_chain_checks_mainnet_without_any_archive_identity(conn, monkeypatch):
+    """Mainnet's ledger-32570 hash is permanent, so the wrong-chain guard must
+    NOT depend on the archive having been certified first — otherwise an
+    uncertified mainnet archive silently disables the check that protects real
+    money."""
+    from lfg_core import history_store
+
+    monkeypatch.setattr(history_store, "get_archive_state", lambda c, net: None)
+
+    async def wrong_chain(request_fn):
+        return history_store.EndpointSnapshot(
+            genesis_hash="TESTNET_HASH", validated_ledger_index=100
+        )
+
+    monkeypatch.setattr(history_store, "fetch_endpoint_snapshot", wrong_chain)
+    error = asyncio.run(brix_drip.verify_endpoint_chain(conn, "mainnet"))
+    assert error is not None
+    assert "not on the mainnet chain" in error
+
+
+def test_verify_endpoint_chain_accepts_the_real_mainnet_identity(conn, monkeypatch):
+    from lfg_core import history_store
+
+    monkeypatch.setattr(history_store, "get_archive_state", lambda c, net: None)
+
+    async def right_chain(request_fn):
+        return history_store.EndpointSnapshot(
+            genesis_hash=brix_drip.MAINNET_GENESIS_HASH, validated_ledger_index=100
+        )
+
+    monkeypatch.setattr(history_store, "fetch_endpoint_snapshot", right_chain)
     assert asyncio.run(brix_drip.verify_endpoint_chain(conn, "mainnet")) is None

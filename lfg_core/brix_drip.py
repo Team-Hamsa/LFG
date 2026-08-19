@@ -78,6 +78,13 @@ CREATE TABLE IF NOT EXISTS brix_meta (
 
 LAST_ACCRUED_EPOCH = "last_accrued_epoch"
 
+# Hash of mainnet ledger 32570 — the earliest ledger any node still serves, and
+# a permanent chain fingerprint. Hardcoded on purpose: mainnet's identity can
+# never change, so the wrong-chain guard must not depend on an archive having
+# been certified first. Testnet has no equivalent constant (a reset changes
+# it), so there the archive's recorded value is the only truth.
+MAINNET_GENESIS_HASH = "4109C6F2045FC7EFF4CDE8F9905D19C28820D86304080FF886B299F0206E42B5"
+
 
 @dataclass(frozen=True)
 class Accrual:
@@ -452,11 +459,23 @@ async def verify_endpoint_chain(conn: sqlite3.Connection, network: str) -> str |
     Returns None when the endpoint is verified (or cannot be verified because
     the archive has no recorded identity yet), or an error string to refuse on.
     """
-    state = history_store.get_archive_state(conn, network)
-    expected = (state.genesis_hash or "").strip() if state else ""
+    expected = MAINNET_GENESIS_HASH if network == "mainnet" else ""
     if not expected:
-        # Nothing trustworthy to compare against. Say so plainly rather than
-        # implying a check happened.
+        # Testnet's identity is not a constant — a testnet reset changes ledger
+        # 32570's hash — so the archive's recorded value is the only truth
+        # available there.
+        state = history_store.get_archive_state(conn, network)
+        expected = (state.genesis_hash or "").strip() if state else ""
+    if not expected:
+        # Testnet with an uncertified archive: nothing trustworthy to compare
+        # against. Warn rather than fabricate a verdict, and rather than refuse
+        # — coupling the drip to archive certification would block staging for
+        # an unrelated feature, and the stakes here are test BRIX. Mainnet
+        # never reaches this branch.
+        logger.warning(
+            "brix_drip: no recorded chain identity for %s; the endpoint's chain is UNVERIFIED",
+            network,
+        )
         return None
 
     client = JsonRpcClient(config.JSON_RPC_URL)
