@@ -1,152 +1,202 @@
-# XRPL Transaction Hygiene — Implementation Plan
+# XRPL Transaction Hygiene — Implementation Plan (#58 only)
 
 **Spec:** docs/superpowers/specs/2026-07-05-tx-hygiene-design.md
-**Issues:** #61 #75 #57 #54 #58 · **Date:** 2026-07-05
+**Issues:** #58 (OPEN) · #61 #75 #57 #54 (CLOSED — see "already landed")
+**Date:** 2026-07-05 · **Last review:** 2026-08-19
+**Status:** live — re-reviewed 2026-08-19 against main@27dc301
 
-TDD throughout: each task writes the failing test first, then the minimal
-implementation, then runs the full suite. New test files that import
-`lfg_core` at module top copy the env-guard preamble **verbatim** from
-`tests/test_seasons.py:1-18`. All PRs open as **draft**; flip ready for
-CodeRabbit only when the branch is settled.
-
-Note: #75's original fix (inline mint in main.py) is **obsolete** — main.py is
-a shim; do NOT resurrect it. The live equivalent leak is Task 1.
+One PR remains: pre-submit `simulate` in `lfg_core/xrpl_ops.py`. TDD as usual —
+failing test first, then the minimal implementation, then the full suite.
+New test files need no env-guard preamble since #323 (the root `conftest.py`
+supplies every mandatory var).
 
 ---
 
-## PR-1 — SourceTag closure (#61, closes #75 as obsolete) — SHIP FIRST
+## 0. What changed since this was drafted
 
-The detect-link gap (Task 1) is losing mainnet hackathon credit today.
+- **PR-1 (SourceTag) and PR-3 (memos) are done and merged.** #61/#75/#57 closed
+  2026-07-09/10; #54 closed by PR #144 as `lfg_core/memos.py` (not
+  `lfg_core/tx_memo.py`, and with `initiator`/`platform`/`action` rather than
+  `actor`/`surface`/`flow`).
+- **PR-2 was never built, and half of it must not be.** The `submit_checked`
+  consolidation it described was overtaken by PR #188 (#179, merged
+  2026-07-12): `xrpl_ops._submit_and_confirm` is already the single
+  sign-once/submit-once choke point, and the "classified retry" table
+  (old Task 8) would reintroduce the blind resubmit that PR deleted. Task 8 and
+  Task 9 are **cut**.
+- **Old Task 6 (integer-drops reserve check) is cut.** rippled computes it
+  during simulated apply — verified 2026-08-19 that an over-balance mainnet
+  Payment simulates `tecUNFUNDED_PAYMENT`.
+- **Old Task 7's two "REQUIRED verification" gates are already satisfied.**
+  `simulate` exists in xrpl-py 4.5.0 and 5.0.0 (`requirements.txt` pins
+  neither) and both `config.JSON_RPC_URL` defaults answer the method. The
+  `PRESUBMIT_SIMULATE` default stays `1`.
+- **New constraint:** `simulate` rejects a *signed* transaction
+  (`transactionSigned`), so the pre-flight runs on the unsigned model before
+  `_autofill_and_sign_with_retry` / `autofill_and_sign`.
+- **New constraint:** the root `conftest.py` must pin `PRESUBMIT_SIMULATE=0`, or
+  ten existing test modules start issuing real network requests — their stubs
+  (`autofill_and_sign` / `submit_and_wait`, sometimes `JsonRpcClient.request`)
+  do not intercept a simulate, which xrpl-py issues through
+  `client._request_impl` (spec §3.7).
+- **Old Task 1's cross-spec note about #27 is moot** — #27 closed 2026-07-10,
+  and `generate_static_payment_link` stopped being a payment route: since #262
+  a mint session with no XUMM payload fails terminally instead of waiting
+  behind the detect link. It is still untagged (spec §1.3), tracked outside
+  this plan.
 
-### Task 1: tag `generate_static_payment_link` (the live leak)
+### Already landed (do not redo)
 
-> **Cross-spec note (#27):** this fix is INTERIM. The QR/deep-link routing spec
-> (`2026-07-05-qr-deeplink-routing-design.md` §5.1) owns the end state: the
-> user-facing detect fallback is retired (retry-then-error) once its device
-> matrix gates pass, which also retires the detect-hex SourceTag assertion this
-> task adds to `tests/test_xumm_source_tag.py`. If F1 lands first, drop this item.
-- [ ] Test (extend `tests/test_xumm_source_tag.py`): call
-      `generate_static_payment_link("r...")`, split the `/detect/` hex tail,
-      `json.loads(bytes.fromhex(tail))`, assert `SourceTag == 2606160021`.
+| Old task | Disposition |
+|---|---|
+| Task 1 — tag `generate_static_payment_link` | **Not done and not in scope.** The link still carries no `SourceTag`, but since #262 it is no longer a payment route at all (spec §1.3). File separately if it matters. |
+| Task 2 — tag `scripts/testnet_amm_setup.py` | **Not done and not in scope.** Testnet ops tool, no mainnet volume. |
+| Task 3 — AST sweep regression test | **Superseded.** The per-builder tests (`tests/test_xrpl_source_tag.py`, `test_xumm_source_tag.py`, `test_discord_sourcetag_invariant.py`, `test_telegram_sourcetag_invariant.py`, `test_signing_account.py`, `test_discord_trustline_sourcetag.py`, `test_market_payloads.py`) are the shipped guard. |
+| Task 4 — verify + ship #61 | Done; #61/#75/#57 closed 2026-07-09/10. |
+| Tasks 5, 8, 9 — `submit_checked` skeleton, classified retry, migrate submit sites | **Cut.** `_submit_and_confirm` already is the choke point, and retry is a deliberate non-goal (spec §3.5). |
+| Task 6 — integer-drops reserve check | **Cut** (spec §3.4). |
+| Tasks 10–13 — memos | Done; PR #144, `lfg_core/memos.py`, plus `tests/test_memos.py` and `tests/test_memos_transactions.py`. |
+
+---
+
+## PR — pre-submit simulation (#58)
+
+Single PR. Ships flag-on in code, flag-off in the test suite, and is measured
+on staging before prod carries it.
+
+### Task 1: suite isolation first (must land before anything calls the network)
+
+- [ ] Add `os.environ.setdefault("PRESUBMIT_SIMULATE", "0")` to the root
+      `conftest.py` alongside the other pins, with a comment naming the reason
+      (the existing `_submit_and_confirm` / sponsored-prepare tests stub
+      `autofill_and_sign` / `submit_and_wait`, which does not intercept a
+      simulate, so they would otherwise hit the network).
+- [ ] Full suite green — no behavior change yet, this is the guard rail.
+
+### Task 2: `_presubmit_simulate` helper
+
+- [ ] New `tests/test_presubmit_simulate.py`. Monkeypatch a module-level
+      `xrpl_ops.simulate` name (import it as one so tests can patch it exactly
+      like `submit_and_wait`). Cases, all with `PRESUBMIT_SIMULATE=1` forced
+      via `monkeypatch.setenv`:
+      - `engine_result="tesSUCCESS"` → returns `None` (proceed).
+      - `engine_result="terQUEUED"` → returns `None` (proceed; `ter*` is
+        "retry later", not "wrong").
+      - `engine_result="telINSUF_FEE_P"` → returns `None` (proceed; `tel*` is
+        a node-local verdict, spec §3.3 step 4).
+      - `engine_result` in `{"temREDUNDANT", "tefNFTOKEN_IS_NOT_TRANSFERABLE",
+        "tecPATH_DRY", "tecUNFUNDED_PAYMENT"}` → returns that code. (Use real
+        codes in the fixtures — there is no `tefNO_PERMISSION`; the
+        no-permission code is `tec*`.)
+      - `simulate` raises `XRPLRequestFailureException` → returns `None`
+        (degrade open) and logs a warning.
+      - `simulate` raises a plain transport exception → returns `None`.
+      - response missing `engine_result` entirely → returns `None`.
+      - flag off (`PRESUBMIT_SIMULATE=0`) → `simulate` is never called.
       Run → red.
-- [ ] Fix: add `"SourceTag": config.SOURCE_TAG` to `transaction_json` in
-      `lfg_core/xumm_ops.py:47`. Run → green.
+- [ ] Implement `_presubmit_simulate` in `lfg_core/xrpl_ops.py` per spec §3.3.
+      Gate on `config.env_flag("PRESUBMIT_SIMULATE", "1")` read at call time,
+      never a frozen constant. Green.
 
-### Task 2: tag `scripts/testnet_amm_setup.py`
-- [ ] Test (in new `tests/test_tx_hygiene.py`, env-guard preamble): AST-parse
-      the script; assert the `AccountSet(...)` and `AMMCreate(...)` calls carry
-      a `source_tag` keyword. Red.
-- [ ] Fix: add `source_tag=config.SOURCE_TAG` at :100 and :131. Green.
+### Task 3: wire it into `_submit_and_confirm`
 
-### Task 3: AST sweep — regression lock for all builders
-- [ ] In `tests/test_tx_hygiene.py`: walk `lfg_core/xrpl_ops.py`,
-      `scripts/testnet_amm_setup.py`, `surfaces/discord_bot/admin.py` ASTs;
-      for every `Call` to `{NFTokenMint, NFTokenCreateOffer, NFTokenBurn,
-      NFTokenModify, Payment, AMMCreate, AccountSet, TrustSet}` assert a
-      `source_tag` kwarg or `**kwargs` fed by a dict literal containing
-      `"source_tag"`. Should be green immediately after Tasks 1-2; commit as
-      the standing guard.
+- [ ] Tests (extend `tests/test_presubmit_simulate.py`):
+      - A rejected simulate makes `mint_nft` return `None` **and**
+        `autofill_and_sign` / `submit_and_wait` are never called (stub both to
+        raise `AssertionError`).
+      - The tx passed to `simulate` is the **unsigned** model — assert it is
+        the same object `mint_nft` built and that `tx.is_signed()` is False.
+        (Do not assert `signing_pub_key is None`: an unsigned xrpl-py
+        `Transaction` carries `signing_pub_key == ""`, in both 4.5.0 and
+        5.0.0, and rippled accepts that as unsigned.)
+      - A rejected simulate never raises `IndeterminateResultError` (nothing
+        was signed, so the outcome is known).
+      - Simulate is invoked **before** the submission lock: patch
+        `_submission_scope` to record ordering, assert `simulate` ran first.
+      - Flag off → `_submit_and_confirm` behaves exactly as today (this is
+        what the ten existing modules already assert; they must stay green
+        untouched).
+- [ ] Implement: call `_presubmit_simulate` at the top of
+      `_submit_and_confirm`, above `async with _submission_scope(...)`; on a
+      returned code, log `f"{label}: pre-submit simulate rejected ({code})"`
+      and return `None`.
+- [ ] Full suite green, and specifically the seven modules that drive
+      `_submit_and_confirm` through stubs: `tests/test_xrpl_source_tag.py`,
+      `test_xrpl_indeterminate.py`, `test_xrpl_malformed_poll_retry.py`,
+      `test_xrpl_submit_lock.py`, `test_memos_transactions.py`,
+      `test_nft_flags.py`, `test_signing_account.py`.
+      (`test_shop_offer_builder.py` stubs `_submit_and_confirm` itself, so it
+      exercises none of this — do not read it as coverage.)
 
-### Task 4: verify + ship
-- [ ] Full suite; testnet smoke: trigger one mint-fee payment via the deep
-      link, **sign it in Xaman**, and confirm `SourceTag` on the validated tx
-      (clio `tx`). REQUIRED gate — the assumption that Xaman's detect flow
-      preserves `SourceTag` is unverified (spec §2.1). **If Xaman strips
-      it**: switch mint_flow/swap_flow fee payments from the static detect
-      link to `_create_xumm_payload` payloads (server-side stamp) and
-      re-verify before closing #61.
-- [ ] Draft PR → ready → CodeRabbit → merge. Comment-close **#75**
-      (obsolete; point at spec §0/§7) and tick #61's checklist; close **#61**
-      after on-chain verification. Close **#57** as superseded
-      (source_tag half here, memo half in PR-3) — note this explicitly.
+### Task 4: wire the sponsored prepare paths
 
-## PR-2 — `submit_checked` choke point + pre-submit checks (#58)
+- [ ] Tests: `prepare_sponsored_mint` and `prepare_sponsored_burn` with a
+      rejecting simulate return their `"failed"` preparation state carrying the
+      engine code in the reason, and `autofill_and_sign` is never called (so no
+      signed blob is journaled). Flag off → unchanged. Existing green:
+      `tests/test_sponsored_burn.py`, `test_sponsored_burn_review.py`,
+      `test_sponsored_final_review.py` (they stub `autofill_and_sign`, which
+      does not shield a simulate — see Task 1).
+- [ ] Implement inside each `_submission_scope` block, immediately before
+      `autofill_and_sign`.
+- [ ] Decide and document the burn-worker consequence: a `"failed"` burn
+      preparation makes `sponsored_burn.process_one` re-queue the obligation
+      (`status="pending"` with `_backoff(attempt_count)`), so a *deterministic*
+      simulate rejection retries on a timer instead of terminating. Either
+      accept that (it matches today's preparation-failure behavior) or record
+      the engine code so an operator can see why it will never clear.
+- [ ] Confirm the sponsored recovery/reconcile paths are untouched:
+      `submit_sponsored_mint` / `submit_sponsored_burn` forward an
+      already-signed blob and must **not** simulate (it would be rejected
+      `transactionSigned` and, worse, is meaningless for a fixed identity).
 
-### Task 5: skeleton + SourceTag invariant gate
-- [ ] New `tests/test_submit_checked.py` (env-guard): tx without
-      `source_tag` → `TxHygieneError`, client stub asserts zero network
-      calls. Red → implement `submit_checked` + exception types in
-      `lfg_core/xrpl_ops.py` (initially: gate + plain `submit_and_wait`
-      pass-through). Green.
+### Task 5: admin burn (optional, same helper)
 
-### Task 6: reserve check (integer drops)
-- [ ] Tests: stub `ServerState`/`AccountInfo` responses; cases: ample
-      balance passes; balance below `reserve_base + (owner+Δ)*reserve_inc +
-      fee` → `ReserveError` with no submit; owner-delta table per tx type;
-      **xrp_outflow extraction**: XRP-drops `Amount` counted; a
-      buy_and_burn-shaped Payment (IOU `Amount` + XRP-drops `SendMax`) →
-      reserve check uses `SendMax`, not 0; IOU Amount with no SendMax → 0;
-      all math `int` (assert no float creeps in via a crafted response).
-- [ ] Implement per spec §4.1 step 3. Pre-flight *network* failure →
-      warn + proceed (test that too).
+- [ ] Test: `surfaces/discord_bot/admin.py::burn_nft` returns `False` on a
+      rejecting simulate without calling `submit_and_wait`.
+- [ ] Implement by calling `xrpl_ops._presubmit_simulate` (promote it to a
+      public name if importing a private one is objectionable in review).
 
-### Task 7: simulation
-- [ ] Tests (mock `xrpl.asyncio.transaction.simulate`): `tes*` → submits;
-      `tem*`/`tef*`/`tec*` → `SimulationError`, no submit, no retry sleep —
-      **including `tecPATH_DRY`** (deterministic, no carve-out; spec §4.1
-      step 4); simulate transport error → warn + submit anyway;
-      `PRESUBMIT_SIMULATE=0` skips.
-- [ ] Implement per spec §4.1 step 4; add `PRESUBMIT_SIMULATE` to
-      `lfg_core/config.py` + CLAUDE.md env list.
-- [ ] **Endpoint verification (REQUIRED, assumption in spec §4.1):** run one
-      live `simulate` call against BOTH `config.JSON_RPC_URL` endpoints
-      (testnet + mainnet). If either lacks the method, flip the
-      `PRESUBMIT_SIMULATE` default to `0` and note it in config.py.
+### Task 6: config + docs
 
-### Task 8: classified retry (spec §4.1 step 5 table — one test per class)
-- [ ] Tests, one representative code per class:
-      - RETRY: connection error (transport); `terQUEUED` (`ter*`);
-        `telINSUF_FEE_P`; `tefMAX_LEDGER` → re-autofill then retry.
-      - NO RETRY, raise on attempt 1: `temMALFORMED` (`tem*`);
-        `tefNO_PERMISSION` (other `tef*`); `tecPATH_DRY` and
-        `tecUNFUNDED_PAYMENT` (**all `tec*` — fee already burned; flow-level
-        journaling handles compensation, not the submit layer**).
-      - Backoff shape: `RETRY_BASE_DELAY * 2**n` up to `RETRY_MAX_ATTEMPTS`.
-- [ ] Implement; wire `config.RETRY_MAX_ATTEMPTS`/`RETRY_BASE_DELAY`
-      (kill the hardcoded `retries = 5`).
+- [ ] Add `PRESUBMIT_SIMULATE=1` to the CLAUDE.md env block with a one-line
+      description ("pre-submit `simulate` pre-flight on backend-signed txs;
+      `0` disables").
+- [ ] Note in the `xrpl_ops` module docstring or the helper docstring that
+      `simulate` must see the unsigned model, and that a rejection maps to the
+      existing `None` "definitive failure" contract — not
+      `IndeterminateResultError`.
 
-### Task 9: migrate all submit sites
-- [ ] Mechanically migrate the 5 `xrpl_ops` sites (:73, :123, :331, :363,
-      :415), `surfaces/discord_bot/admin.py:52`, and
-      `scripts/testnet_amm_setup.py:99,130` onto `submit_checked`; delete the
-      duplicated retry loops; keep each op's `return None` failure envelope
-      so swap/economy journaling semantics are unchanged.
-- [ ] Existing suites must stay green untouched (test_xrpl_source_tag,
-      economy/swap flow tests, test_discord_sourcetag_invariant).
-- [ ] Testnet smoke: one mint + one deliberately underfunded tx (expect
-      instant `ReserveError`, zero retries). Draft PR → CodeRabbit → merge.
-      Close **#58**.
+### Task 7: live verification
 
-## PR-3 — provenance memos (#54, absorbs #57's memo half)
+Staging first (`~/LFG-staging`, testnet, `stg-*` pm2 stack).
 
-### Task 10: `lfg_core/tx_memo.py`
-- [ ] New `tests/test_tx_memo.py` (env-guard): enum validation (free string
-      → raises); hex round-trip of MemoType `lfg/prov`, MemoFormat
-      `application/json`, compact-JSON MemoData; encoded size ≤ 256 bytes;
-      `parse_provenance` returns `None` on absent/foreign/malformed/oversized
-      memos and never raises; no PII fields possible (schema has no id slot).
-- [ ] Implement `Flow`/`Surface`/`Actor` constants, `build_memo`,
-      `build_memo_json`, `parse_provenance` per spec §3.1.
+- [ ] Underfunded-account probe: simulate an `NFTokenCreateOffer` (or any
+      owner-object-creating tx) from a testnet account funded just above the
+      base reserve, and record the engine result. The spec claims
+      `tecINSUFFICIENT_RESERVE` reaches us through simulate; this is the step
+      that confirms it. If it does not, say so in the PR — the design still
+      stands on `tecUNFUNDED_PAYMENT`/`tem*`/`tef*`.
+- [ ] Happy path: one testnet mint end to end with the flag on; confirm the
+      extra round-trips and that nothing regressed.
+- [ ] Deliberate rejection: a `buy_and_burn` against a currency with no AMM
+      path; expect an instant `tecPATH_DRY` refusal, no fee, and the engine
+      code in the pm2 log. Use a **non-self** issuer: on testnet
+      `config.SWAP_OFFER_ISSUER` defaults to the SEED address and
+      `buy_and_burn` short-circuits to `"self-issuer-noop"` without submitting
+      — or simulating — anything when `SIGNING_ACCOUNT == issuer`.
+- [ ] Measure added latency on the bulk-mint path — 2 simulate calls per unit,
+      each currently 2 requests (`ServerInfo` + `simulate`, spec §3.6) — before
+      recommending the flag on prod.
 
-### Task 11: stamp bot-signed txs
-- [ ] Tests: `submit_checked(..., memo_ctx=...)` attaches exactly one memo
-      with the right decoded JSON; omitted `memo_ctx` → no memo (backward
-      compatible).
-- [ ] Add `memo_ctx` params through `xrpl_ops` builders; flows pass
-      `flow` + `surface` (default `surface="cli"` so economy scripts run
-      unchanged); `actor="bot"`.
+### Task 8: ship
 
-### Task 12: stamp user-signed payloads
-- [ ] Tests: `create_payment_payload`/`create_accept_offer_payload`/
-      trustline txjson carry `Memos` with `actor:"user"`; SignIn has none;
-      detect link JSON includes the memo.
-- [ ] Implement in `_create_xumm_payload` + `generate_static_payment_link` +
-      `surfaces/discord_bot/trustline.py`.
-
-### Task 13: docs + verification + close-out
-- [ ] Document the schema (README section or CLAUDE.md pointer, per #54
-      acceptance). Testnet: mint + swap + trustline; confirm memos decode on
-      validated txs.
-- [ ] Draft PR → CodeRabbit → merge. Close **#54**; confirm **#57** closed
-      (superseded). File a small follow-up issue for history-derivation
-      consumption (`parse_provenance` → `history_events.py` per spec §3.3).
+- [ ] PR ready (non-draft), Greptile + CodeRabbit, close every finding on its
+      own thread.
+- [ ] Merge to `main` (auto-deploys staging). Promote with `scripts/promote.sh`
+      once the staging measurements look right.
+- [ ] Close **#58** with the staging evidence: the simulate probe table and the
+      `tecPATH_DRY` refusal log line.
+- [ ] Optional follow-up issue, not part of this PR: the two residual untagged
+      sites in spec §1.3 (`generate_static_payment_link`,
+      `scripts/testnet_amm_setup.py`).
