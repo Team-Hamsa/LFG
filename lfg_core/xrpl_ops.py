@@ -2128,6 +2128,16 @@ async def wait_for_payment(
         reconnects += 1
 
 
+class ClaimNotSubmitted(RuntimeError):
+    """A claim payout failed BEFORE anything reached the ledger.
+
+    Distinct from an indeterminate outcome on purpose: nothing was submitted,
+    so the caller can safely release the claim and hand the balance back. Only
+    raised from the pre-flight steps (missing config, unreadable validated
+    ledger) that all run before the Payment is built.
+    """
+
+
 @dataclass(frozen=True)
 class ClaimPayment:
     """Outcome of one BRIX claim payout.
@@ -2173,10 +2183,10 @@ async def send_brix_claim(destination: str, value: int, claim_id: int) -> ClaimP
     never be resolved into a definitive verdict.
     """
     if not config.BRIX_DISTRIBUTOR_SEED:
-        raise RuntimeError("BRIX_DISTRIBUTOR_SEED is not configured; claims are disabled")
+        raise ClaimNotSubmitted("BRIX_DISTRIBUTOR_SEED is not configured; claims are disabled")
 
     wallet = Wallet.from_seed(config.BRIX_DISTRIBUTOR_SEED)
-    account = config.BRIX_DISTRIBUTOR_ADDRESS or wallet.classic_address
+    account = distributor_address()
     client = JsonRpcClient(config.JSON_RPC_URL)
 
     current = await _current_validated_ledger_index(client)
@@ -2184,7 +2194,9 @@ async def send_brix_claim(destination: str, value: int, claim_id: int) -> ClaimP
         # Without a pinned LastLedgerSequence an unknown outcome would be
         # permanently undecidable, so refuse to submit rather than create a
         # claim that recovery can never resolve.
-        raise RuntimeError("could not read the validated ledger index; refusing to submit a claim")
+        raise ClaimNotSubmitted(
+            "could not read the validated ledger index; refusing to submit a claim"
+        )
     last_ledger_seq = current + config.BRIX_CLAIM_LEDGER_MARGIN
 
     payment = Payment(
@@ -2219,36 +2231,101 @@ async def send_brix_claim(destination: str, value: int, claim_id: int) -> ClaimP
     return ClaimPayment("confirmed", tx_hash if isinstance(tx_hash, str) else None, last_ledger_seq)
 
 
-async def find_claim_payment(claim_id: int) -> str | None:
-    """Hash of the on-ledger payout for `claim_id`, or None if absent.
+def distributor_address() -> str:
+    """The distributor's classic address.
 
-    Scans the distributor's account_tx for the claim's memo tag. Absence here
-    is NOT by itself proof of failure — the caller must also confirm the
-    validated ledger has passed the claim's LastLedgerSequence.
+    Falls back to deriving it from the seed: an operator who configures only
+    BRIX_DISTRIBUTOR_SEED would otherwise get claims that submit fine (the
+    signer knows its own address) but can NEVER be recovered, stranding an
+    indeterminate payout open forever and blocking that wallet's later claims.
     """
-    distributor = config.BRIX_DISTRIBUTOR_ADDRESS
-    if not distributor:
-        raise RuntimeError("BRIX_DISTRIBUTOR_ADDRESS is not configured")
+    if config.BRIX_DISTRIBUTOR_ADDRESS:
+        return str(config.BRIX_DISTRIBUTOR_ADDRESS)
+    if config.BRIX_DISTRIBUTOR_SEED:
+        return str(Wallet.from_seed(config.BRIX_DISTRIBUTOR_SEED).classic_address)
+    raise RuntimeError("neither BRIX_DISTRIBUTOR_ADDRESS nor BRIX_DISTRIBUTOR_SEED is configured")
+
+
+def _is_genuine_claim_payout(entry: dict[str, Any], wallet: str, amount: int, sender: str) -> bool:
+    """Whether this account_tx entry really is OUR payout for the claim.
+
+    The memo alone proves nothing. `account_tx` returns transactions the
+    distributor RECEIVED as well as sent, and memos are user-writable, so
+    anyone could send the distributor a payment carrying a guessed
+    `lfg:brix_claim:<n>` tag. Confirming on that would mark an unpaid claim
+    settled and permanently bind the holder's accruals — the holder simply
+    loses the BRIX. So every property that makes it a real payout is checked.
+    """
+    if not entry.get("validated"):
+        return False
+    meta = entry.get("meta") or entry.get("metaData") or {}
+    if not isinstance(meta, dict) or meta.get("TransactionResult") != "tesSUCCESS":
+        return False
+    tx = entry.get("tx") or entry.get("tx_json") or {}
+    if tx.get("TransactionType") != "Payment":
+        return False
+    if tx.get("Account") != sender:  # sent BY the distributor, not to it
+        return False
+    if tx.get("Destination") != wallet:
+        return False
+    paid = tx.get("Amount")
+    if not isinstance(paid, dict):
+        return False  # an XRP drops string is never a BRIX payout
+    if str(paid.get("currency", "")).upper() != str(config.BRIX_CURRENCY_HEX).upper():
+        return False
+    if paid.get("issuer") != config.BRIX_ISSUER:
+        return False
+    try:
+        if Decimal(str(paid.get("value", "0"))) < Decimal(amount):
+            return False
+    except (InvalidOperation, ValueError):
+        return False
+    return True
+
+
+def _carries_memo(tx: dict[str, Any], tag: str) -> bool:
+    for memo in tx.get("Memos", []) or []:
+        raw = (memo.get("Memo") or {}).get("MemoData") or ""
+        try:
+            decoded = bytes.fromhex(raw).decode()
+        except (ValueError, UnicodeDecodeError):
+            continue
+        if decoded == tag:
+            return True
+    return False
+
+
+async def find_claim_payment(claim_id: int, wallet: str, amount: int) -> str | None:
+    """Hash of the genuine on-ledger payout for `claim_id`, or None if absent.
+
+    The memo makes the payout findable; `_is_genuine_claim_payout` makes it
+    trustworthy. Absence is NOT by itself proof of failure — the caller must
+    also confirm the validated ledger has passed the claim's
+    LastLedgerSequence.
+    """
+    sender = distributor_address()
     tag = claim_memo_tag(claim_id)
     client = JsonRpcClient(config.JSON_RPC_URL)
     marker: Any = None
     while True:
-        request = AccountTx(account=distributor, limit=200, marker=marker)
+        request = AccountTx(account=sender, limit=200, marker=marker)
         response = await asyncio.to_thread(client.request, request)
         result = response.result
         if not isinstance(result, dict):
             raise RuntimeError(f"account_tx returned an unexpected payload: {result!r}")
         for entry in result.get("transactions", []):
             tx = entry.get("tx") or entry.get("tx_json") or {}
-            for memo in tx.get("Memos", []) or []:
-                raw = (memo.get("Memo") or {}).get("MemoData") or ""
-                try:
-                    decoded = bytes.fromhex(raw).decode()
-                except ValueError:
-                    continue
-                if decoded == tag:
-                    tx_hash = entry.get("hash") or tx.get("hash")
-                    return tx_hash if isinstance(tx_hash, str) else None
+            if not _carries_memo(tx, tag):
+                continue
+            if not _is_genuine_claim_payout(entry, wallet, amount, sender):
+                logging.warning(
+                    "find_claim_payment: ignoring a transaction carrying claim %s's memo that "
+                    "is not a valid payout from the distributor",
+                    claim_id,
+                )
+                continue
+            tx_hash = entry.get("hash") or tx.get("hash")
+            return tx_hash if isinstance(tx_hash, str) else None
         marker = result.get("marker")
         if not marker:
             return None

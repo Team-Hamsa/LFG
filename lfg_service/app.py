@@ -1409,6 +1409,22 @@ async def handle_brix_status(request):
     return web.json_response(await asyncio.to_thread(_read))
 
 
+def _settle_failed(claim_id: int) -> None:
+    conn = _brix_conn()
+    try:
+        brix_drip.settle_claim(conn, claim_id, "failed")
+    finally:
+        conn.close()
+
+
+def _mark_submitted_unknown(claim_id: int) -> None:
+    conn = _brix_conn()
+    try:
+        brix_drip.settle_claim(conn, claim_id, "unknown")
+    finally:
+        conn.close()
+
+
 @require_wallet
 async def handle_brix_claim(request):
     """Claim the caller's accrued BRIX.
@@ -1461,7 +1477,29 @@ async def handle_brix_claim(request):
             {"error": "a claim is already in flight", "code": "claim_in_flight"}, status=409
         )
 
-    payment = await xrpl_ops.send_brix_claim(wallet, amount, claim_id)
+    try:
+        payment = await xrpl_ops.send_brix_claim(wallet, amount, claim_id)
+    except xrpl_ops.ClaimNotSubmitted as exc:
+        # Nothing reached the ledger, so releasing the claim is safe — and
+        # necessary: a pending claim with a NULL last_ledger_seq is one
+        # recovery deliberately never resolves, which would block this wallet
+        # with claim_in_flight forever and make its BRIX unreachable.
+        await asyncio.to_thread(_settle_failed, claim_id)
+        logging.warning("brix claim %s could not be submitted: %s", claim_id, exc)
+        return web.json_response(
+            {"error": "the payout could not be submitted", "code": "claim_unavailable"},
+            status=503,
+        )
+    except Exception:
+        # We cannot prove this happened before submission, so fail closed: the
+        # payment may have landed. Leave the accruals bound and let recovery
+        # reach a verdict from the chain rather than risk paying twice.
+        logging.exception("brix claim %s failed with an unexpected error", claim_id)
+        await asyncio.to_thread(_mark_submitted_unknown, claim_id)
+        return web.json_response(
+            {"error": "the payout outcome is unconfirmed", "code": "claim_unconfirmed"},
+            status=502,
+        )
 
     def _settle():
         conn = _brix_conn()

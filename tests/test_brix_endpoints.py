@@ -230,3 +230,37 @@ def test_post_claim_is_503_when_no_distributor_seed_is_configured(drip, monkeypa
     assert resp.status == 503
     assert _body(resp)["code"] == "claims_disabled"
     assert _body(_run(server.handle_brix_status(_Req())))["claimable"] == 3
+
+
+def test_a_pre_submission_failure_releases_the_balance(drip, monkeypatch):
+    """If the payout raises BEFORE anything is submitted, the claim must not be
+    left pending with a NULL last_ledger_seq: recovery deliberately leaves such
+    claims untouched, so the wallet would be blocked by claim_in_flight forever
+    and its BRIX would be unreachable."""
+
+    async def cannot_submit(destination, value, claim_id):
+        raise xrpl_ops.ClaimNotSubmitted("could not read the validated ledger index")
+
+    monkeypatch.setattr(xrpl_ops, "send_brix_claim", cannot_submit)
+    _accrue(drip)
+    resp = _run(server.handle_brix_claim(_Req()))
+    assert resp.status == 503
+    # Balance restored and claimable again — nothing was ever submitted.
+    assert _body(_run(server.handle_brix_status(_Req())))["claimable"] == 3
+    assert _body(_run(server.handle_brix_status(_Req())))["open_claim"] is None
+
+
+def test_an_unexpected_payout_error_keeps_the_balance_bound(drip, monkeypatch):
+    """An error we cannot prove happened BEFORE submission must fail closed:
+    the payment may have landed, so the accruals stay bound for recovery."""
+
+    async def mystery(destination, value, claim_id):
+        raise RuntimeError("something unexpected after submit")
+
+    monkeypatch.setattr(xrpl_ops, "send_brix_claim", mystery)
+    _accrue(drip)
+    resp = _run(server.handle_brix_claim(_Req()))
+    assert resp.status == 502
+    status = _body(_run(server.handle_brix_status(_Req())))
+    assert status["claimable"] == 0
+    assert status["open_claim"]["state"] == "submitted"

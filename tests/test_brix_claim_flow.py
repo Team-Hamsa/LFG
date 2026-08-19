@@ -293,3 +293,114 @@ def test_recover_ignores_already_terminal_claims(conn):
     )
     assert outcomes == {}
     assert calls == []
+
+
+# --- review hardening: find_claim_payment must authenticate the payout ------
+
+
+def _tx_entry(
+    account="rDistributor",
+    destination="rAlice",
+    value="5",
+    currency=None,
+    result="tesSUCCESS",
+    validated=True,
+    tx_type="Payment",
+    memo="lfg:brix_claim:42",
+    tx_hash="REALHASH",
+):
+    from lfg_core import config as cfg
+
+    return {
+        "hash": tx_hash,
+        "validated": validated,
+        "meta": {"TransactionResult": result},
+        "tx": {
+            "TransactionType": tx_type,
+            "Account": account,
+            "Destination": destination,
+            "Amount": {
+                "currency": currency or cfg.BRIX_CURRENCY_HEX,
+                "issuer": cfg.BRIX_ISSUER,
+                "value": value,
+            },
+            "Memos": [{"Memo": {"MemoData": memo.encode().hex().upper()}}],
+        },
+    }
+
+
+@pytest.fixture()
+def account_tx(monkeypatch):
+    """Serve a canned account_tx page and pin the distributor config."""
+    monkeypatch.setattr(config, "BRIX_DISTRIBUTOR_ADDRESS", "rDistributor", raising=False)
+    monkeypatch.setattr(
+        config, "BRIX_DISTRIBUTOR_SEED", "sEdTM1uX8pu2do5XvTnutH6HsouMaM2", raising=False
+    )
+    box = {"entries": []}
+
+    class _Resp:
+        def __init__(self, result):
+            self.result = result
+
+    def fake_request(self, request):
+        return _Resp({"transactions": box["entries"], "marker": None})
+
+    monkeypatch.setattr(xrpl_ops.JsonRpcClient, "request", fake_request, raising=False)
+    return box
+
+
+def _find(claim_id=42, wallet="rAlice", amount=5):
+    return asyncio.run(xrpl_ops.find_claim_payment(claim_id, wallet=wallet, amount=amount))
+
+
+def test_find_claim_payment_accepts_a_genuine_payout(account_tx):
+    account_tx["entries"] = [_tx_entry()]
+    assert _find() == "REALHASH"
+
+
+def test_find_claim_payment_rejects_a_forged_memo_from_a_stranger(account_tx):
+    """SECURITY: anyone can send the distributor a transaction carrying a
+    guessed `lfg:brix_claim:<n>` memo. Trusting it would mark an unpaid claim
+    confirmed and permanently swallow the holder's accruals."""
+    account_tx["entries"] = [_tx_entry(account="rAttacker", tx_hash="FORGED")]
+    assert _find() is None
+
+
+def test_find_claim_payment_rejects_a_payout_to_the_wrong_wallet(account_tx):
+    account_tx["entries"] = [_tx_entry(destination="rSomeoneElse")]
+    assert _find() is None
+
+
+def test_find_claim_payment_rejects_a_failed_transaction(account_tx):
+    account_tx["entries"] = [_tx_entry(result="tecPATH_DRY")]
+    assert _find() is None
+
+
+def test_find_claim_payment_rejects_an_unvalidated_transaction(account_tx):
+    account_tx["entries"] = [_tx_entry(validated=False)]
+    assert _find() is None
+
+
+def test_find_claim_payment_rejects_a_short_payment(account_tx):
+    """A payout for less than the claim must not confirm the full amount."""
+    account_tx["entries"] = [_tx_entry(value="1")]
+    assert _find(amount=5) is None
+
+
+def test_find_claim_payment_rejects_the_wrong_currency(account_tx):
+    account_tx["entries"] = [_tx_entry(currency="4C46474F00000000000000000000000000000000")]
+    assert _find() is None
+
+
+def test_find_claim_payment_rejects_a_non_payment(account_tx):
+    account_tx["entries"] = [_tx_entry(tx_type="NFTokenMint")]
+    assert _find() is None
+
+
+def test_find_claim_payment_falls_back_to_the_seed_derived_address(account_tx, monkeypatch):
+    """An operator who sets only BRIX_DISTRIBUTOR_SEED must not end up with
+    claims that can be submitted but never recovered."""
+    monkeypatch.setattr(config, "BRIX_DISTRIBUTOR_ADDRESS", None, raising=False)
+    derived = xrpl_ops.Wallet.from_seed(config.BRIX_DISTRIBUTOR_SEED).classic_address
+    account_tx["entries"] = [_tx_entry(account=derived)]
+    assert _find() == "REALHASH"

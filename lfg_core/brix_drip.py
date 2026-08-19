@@ -724,10 +724,10 @@ async def recover_from_chain(conn: sqlite3.Connection) -> dict[int, str]:
         # ledger index. Do nothing rather than half-decide mid-outage.
         return {}
 
-    open_ids = [
-        int(r[0])
+    open_claims = [
+        (int(r[0]), str(r[1]), int(r[2]))
         for r in conn.execute(
-            f"SELECT claim_id FROM brix_claims"  # noqa: S608 — literal tuple below
+            f"SELECT claim_id, wallet, amount FROM brix_claims"  # noqa: S608 — literal tuple
             f" WHERE state IN ({','.join('?' * len(OPEN_STATES))})",
             OPEN_STATES,
         ).fetchall()
@@ -735,9 +735,14 @@ async def recover_from_chain(conn: sqlite3.Connection) -> dict[int, str]:
 
     found: dict[int, str | None] = {}
     failed_lookups: set[int] = set()
-    for claim_id in open_ids:
+    for claim_id, wallet, amount in open_claims:
         try:
-            found[claim_id] = await xrpl_ops.find_claim_payment(claim_id)
+            # wallet + amount are what make the memo trustworthy: a payout is
+            # only OURS if it went to this claim's wallet for at least this
+            # much BRIX, from the distributor, validated and successful.
+            found[claim_id] = await xrpl_ops.find_claim_payment(
+                claim_id, wallet=wallet, amount=amount
+            )
         except Exception:
             logger.warning("brix recover: account_tx lookup failed for claim %s", claim_id)
             failed_lookups.add(claim_id)
