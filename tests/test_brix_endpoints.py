@@ -288,3 +288,32 @@ def test_an_unexpected_payout_error_still_records_a_ledger_deadline(drip, monkey
     # Generous on purpose: too EARLY a deadline would let recovery declare a
     # still-live payment failed and unbind accruals that were really paid.
     assert row["last_ledger_seq"] > 500000
+
+
+def test_a_deadline_is_persisted_before_the_payout_is_attempted(drip, monkeypatch):
+    """Shutdown (task cancellation) between open_claim and the payout must not
+    strand the claim: recovery skips NULL-deadline claims forever, so the
+    window in which one can exist must never open."""
+    seen = {}
+
+    async def cancelled(destination, value, claim_id):
+        row = drip.execute(
+            "SELECT last_ledger_seq FROM brix_claims WHERE claim_id = ?", (claim_id,)
+        ).fetchone()
+        seen["deadline_at_submit_time"] = row["last_ledger_seq"]
+        raise asyncio.CancelledError()
+
+    async def ledger():
+        return 500000
+
+    monkeypatch.setattr(xrpl_ops, "send_brix_claim", cancelled)
+    monkeypatch.setattr(xrpl_ops, "current_validated_ledger_index", ledger)
+    _accrue(drip)
+
+    with pytest.raises(asyncio.CancelledError):
+        _run(server.handle_brix_claim(_Req()))
+
+    # The deadline was already durable when the payout began, so recovery can
+    # still reach a verdict on this claim after the restart.
+    assert seen["deadline_at_submit_time"] is not None
+    assert seen["deadline_at_submit_time"] > 500000

@@ -1417,6 +1417,14 @@ def _settle_failed(claim_id: int) -> None:
         conn.close()
 
 
+def _record_deadline(claim_id: int, last_ledger_seq: int) -> None:
+    conn = _brix_conn()
+    try:
+        brix_drip.record_deadline(conn, claim_id, last_ledger_seq)
+    finally:
+        conn.close()
+
+
 async def _fallback_last_ledger_seq() -> int | None:
     """A conservative deadline for a claim whose own one was never recorded.
 
@@ -1496,6 +1504,16 @@ async def handle_brix_claim(request):
         return web.json_response(
             {"error": "a claim is already in flight", "code": "claim_in_flight"}, status=409
         )
+
+    # Close the NULL-deadline window before it can open. Between open_claim and
+    # the payout's own deadline being persisted, a shutdown (task cancellation)
+    # or crash would leave a pending claim recovery skips forever — accruals
+    # bound, wallet blocked by claim_in_flight. A provisional, generous
+    # deadline makes that window recoverable; the precise one replaces it as
+    # soon as the payment is built.
+    provisional = await _fallback_last_ledger_seq()
+    if provisional is not None:
+        await asyncio.to_thread(_record_deadline, claim_id, provisional)
 
     try:
         payment = await xrpl_ops.send_brix_claim(wallet, amount, claim_id)

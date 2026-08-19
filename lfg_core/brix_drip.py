@@ -606,6 +606,26 @@ def open_claim(conn: sqlite3.Connection, wallet: str) -> tuple[int, int]:
     return claim_id, amount
 
 
+def record_deadline(conn: sqlite3.Connection, claim_id: int, last_ledger_seq: int) -> None:
+    """Persist a ledger deadline WITHOUT changing the claim's state.
+
+    Written immediately after open_claim, before anything is submitted, so the
+    window in which a claim can exist with a NULL deadline never opens. That
+    window is unrecoverable: recovery deliberately skips NULL-deadline claims,
+    so a crash or shutdown inside it would strand the accruals and block the
+    wallet with claim_in_flight forever.
+
+    Deliberately provisional and generous — the precise deadline replaces it
+    via record_submission once the payment is actually built.
+    """
+    conn.execute(
+        "UPDATE brix_claims SET last_ledger_seq = ?, updated_at = CURRENT_TIMESTAMP"
+        " WHERE claim_id = ?",
+        (last_ledger_seq, claim_id),
+    )
+    conn.commit()
+
+
 def record_submission(
     conn: sqlite3.Connection,
     claim_id: int,
