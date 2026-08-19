@@ -814,6 +814,12 @@ def _x_share_text(kind: str, nft_number: Any) -> str:
     the brand poster's 2026-07-17 directive: X bills $0.20/post containing a
     URL vs $0.015 without, and spec §7 specs no link for per-user shares."""
     n = nft_number if isinstance(nft_number, int) else None
+    if kind == "assemble":
+        return (
+            f"I just built LFG #{n}! \U0001f9f1 @letseffinggo #XRPL"
+            if n is not None
+            else "I just built my LFG! \U0001f9f1 @letseffinggo #XRPL"
+        )
     if kind == "swap":
         return (
             f"I just swapped traits on LFG #{n}! 🧱 @letseffinggo #XRPL"
@@ -964,7 +970,7 @@ async def handle_x_share(request):
     except Exception:
         body = {}
     kind = body.get("kind", "mint")
-    if kind not in ("mint", "swap"):
+    if kind not in ("mint", "swap", "assemble"):
         return web.json_response({"error": "unknown share kind"}, status=400)
     nft_number = body.get("nft_number")
     # bool is a subclass of int — `true` would tweet "#True" at real cost

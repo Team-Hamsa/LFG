@@ -441,6 +441,14 @@ function swapShareText(nftNumber) {
     : 'I just swapped traits on my LFG! 🧱 @letseffinggo #XRPL';
 }
 
+function assembleShareText(nftNumber) {
+  // Same null-guard as mintShareText/swapShareText; mirrors the server's
+  // _x_share_text("assemble", ...) so both paths tweet identical copy.
+  return nftNumber != null
+    ? `I just built LFG #${nftNumber}! 🧱 @letseffinggo #XRPL`
+    : 'I just built my LFG! 🧱 @letseffinggo #XRPL';
+}
+
 // Build a "Share on X" control: a real <a target=_blank> anchor (Task 0's
 // iframe verification of window.open/openExternal inside the sandboxed
 // Activity is tracked separately — a genuine anchor href is the fail-safe
@@ -3452,6 +3460,13 @@ async function commitAssemble(nftId, body, chosen, edition) {
       video: final.video_url,
       done: true,
       celebrate: true,
+      // Freshly built character: same share affordance as mint/swap. showFlow
+      // hides the row itself when shareUrlFor finds no base (dead link).
+      share: {
+        text: assembleShareText(edition),
+        url: shareUrlFor(edition, nftId),
+        meta: { kind: 'assemble', nftNumber: edition },
+      },
     });
   } catch (e) {
     status('');

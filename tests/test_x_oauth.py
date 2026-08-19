@@ -304,6 +304,32 @@ def test_share_posts_server_built_link_free_text(_feature_on, monkeypatch):
     assert "http" not in posted["text"]  # link-free by directive
 
 
+def test_share_supports_the_assemble_kind(_feature_on, monkeypatch):
+    # Assembling a blank into a character is a share-worthy event just like a
+    # mint or a swap; the client offers "Share on X" on the assemble-success
+    # screen, so the server must build text for it (link-free, same as the
+    # others) rather than 400 on an unknown kind.
+    posted = {}
+
+    async def fake_token(wallet, db_path=None):
+        return "tok"
+
+    async def fake_post(access_token, text):
+        posted["text"] = text
+        return "1000"
+
+    monkeypatch.setattr(x_oauth, "get_usable_access_token", fake_token)
+    monkeypatch.setattr(x_oauth, "post_tweet", fake_post)
+    resp = _run(server.handle_x_share(_FakeRequest(body={"kind": "assemble", "nft_number": 42})))
+    assert resp.status == 200
+    assert posted["text"] == "I just built LFG #42! \U0001f9f1 @letseffinggo #XRPL"
+    assert "http" not in posted["text"]  # link-free by directive
+
+
+def test_share_assemble_text_without_a_number(_feature_on):
+    assert server._x_share_text("assemble", None) == "I just built my LFG! \U0001f9f1 @letseffinggo #XRPL"
+
+
 def test_share_rejects_unknown_kind(_feature_on):
     resp = _run(server.handle_x_share(_FakeRequest(body={"kind": "evil text injection"})))
     assert resp.status == 400
