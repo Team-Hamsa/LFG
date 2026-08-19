@@ -36,6 +36,7 @@ from xrpl.models.requests import (
     Tx,
 )
 from xrpl.models.transactions import (
+    Memo,
     NFTokenBurn,
     NFTokenCancelOffer,
     NFTokenCreateOffer,
@@ -2125,3 +2126,270 @@ async def wait_for_payment(
             logging.error(traceback.format_exc())
         await asyncio.sleep(min(2**reconnects, 15))
         reconnects += 1
+
+
+class ClaimNotSubmitted(RuntimeError):
+    """A claim payout failed BEFORE anything reached the ledger.
+
+    Distinct from an indeterminate outcome on purpose: nothing was submitted,
+    so the caller can safely release the claim and hand the balance back. Only
+    raised from the pre-flight steps (missing config, unreadable validated
+    ledger) that all run before the Payment is built.
+    """
+
+
+@dataclass(frozen=True)
+class ClaimPayment:
+    """Outcome of one BRIX claim payout.
+
+    `state` is deliberately tri-state, and the caller MUST respect all three:
+
+    * "confirmed" — validated tesSUCCESS; the claim is paid.
+    * "failed"    — a validated, definitive failure (tec-class, no trustline).
+                    Safe to unbind the accruals so the holder can retry.
+    * "unknown"   — submission raised and the hash could not be confirmed. The
+                    payment MAY have landed. NEVER unbind and never resubmit;
+                    leave the rows bound and let recovery decide from the chain.
+
+    `last_ledger_seq` is present on every path, including "unknown" — it is
+    exactly what makes the unknown case decidable later.
+    """
+
+    state: str
+    tx_hash: str | None
+    last_ledger_seq: int | None
+
+
+def claim_memo_tag(claim_id: int) -> str:
+    """The on-chain marker that makes a claim payout self-identifying.
+
+    Recovery finds a payment by this exact string rather than by guessing from
+    amounts and timestamps, so reconciliation is exact instead of heuristic.
+    """
+    return f"lfg:brix_claim:{claim_id}"
+
+
+async def send_brix_claim(
+    destination: str, value: int, claim_id: int, max_last_ledger_seq: int | None = None
+) -> ClaimPayment:
+    """Pay `value` whole BRIX from the DISTRIBUTOR wallet to `destination`.
+
+    Paid from the distributor rather than the BRIX issuer on purpose: an
+    issuer-signed payment would mint fresh supply on every claim, invisibly.
+    The distributor must be pre-funded, which keeps issuance an explicit
+    operation and keeps claims out of the BRIX leaderboards (the distributor is
+    already excluded as a system account).
+
+    LastLedgerSequence is pinned BEFORE submission, not left to autofill, so
+    the caller can persist it immediately; without it, an unknown outcome could
+    never be resolved into a definitive verdict.
+    """
+    if not config.BRIX_DISTRIBUTOR_SEED:
+        raise ClaimNotSubmitted("BRIX_DISTRIBUTOR_SEED is not configured; claims are disabled")
+
+    wallet = Wallet.from_seed(config.BRIX_DISTRIBUTOR_SEED)
+    account = distributor_address()
+    client = JsonRpcClient(config.JSON_RPC_URL)
+
+    current = await _current_validated_ledger_index(client)
+    if current is None:
+        # Without a pinned LastLedgerSequence an unknown outcome would be
+        # permanently undecidable, so refuse to submit rather than create a
+        # claim that recovery can never resolve.
+        raise ClaimNotSubmitted(
+            "could not read the validated ledger index; refusing to submit a claim"
+        )
+    last_ledger_seq = current + config.BRIX_CLAIM_LEDGER_MARGIN
+    if max_last_ledger_seq is not None:
+        # Never exceed the deadline already durably recorded for this claim.
+        # Recovery reads THAT value until record_submission replaces it, and a
+        # payment allowed to outlive it could still validate after recovery had
+        # declared the claim failed and unbound the accruals — paying the same
+        # BRIX twice. Clamping keeps the stored deadline an upper bound at
+        # every instant; the only cost is a shorter validity window in the rare
+        # case the clamp binds.
+        last_ledger_seq = min(last_ledger_seq, max_last_ledger_seq)
+
+    payment = Payment(
+        account=account,
+        destination=destination,
+        amount=IssuedCurrencyAmount(
+            currency=config.BRIX_CURRENCY_HEX,
+            issuer=config.BRIX_ISSUER,
+            value=str(int(value)),
+        ),
+        source_tag=config.SOURCE_TAG,
+        last_ledger_sequence=last_ledger_seq,
+        memos=[
+            *memos.build_memo_models(
+                memos.INITIATOR_BACKEND, memos.PLATFORM_BACKEND, memos.ACTION_BRIX_CLAIM
+            ),
+            Memo(memo_data=claim_memo_tag(claim_id).encode().hex().upper()),
+        ],
+    )
+
+    try:
+        result = await _submit_and_confirm(payment, wallet, client, "send_brix_claim")
+    except IndeterminateResultError:
+        logging.warning(
+            "send_brix_claim: claim %s outcome indeterminate; leaving accruals bound", claim_id
+        )
+        return ClaimPayment("unknown", None, last_ledger_seq)
+    except asyncio.CancelledError:
+        raise
+    except Exception:
+        # Past this point the payment MAY have reached the ledger, so the
+        # outcome is unknown rather than failed. Crucially, return the
+        # LastLedgerSequence anyway: a claim recorded without it is one
+        # recovery can never resolve, which strands the holder's balance
+        # permanently. Never let an unexpected exception escape and take the
+        # deadline with it.
+        logging.exception(
+            "send_brix_claim: claim %s raised after the deadline was set; treating as unknown",
+            claim_id,
+        )
+        return ClaimPayment("unknown", None, last_ledger_seq)
+
+    if result is None:
+        return ClaimPayment("failed", None, last_ledger_seq)
+    tx_hash = result.get("hash")
+    return ClaimPayment("confirmed", tx_hash if isinstance(tx_hash, str) else None, last_ledger_seq)
+
+
+# How far before a claim's LastLedgerSequence to begin its account_tx scan.
+_CLAIM_SCAN_LEDGER_SLACK = 5000
+
+
+def distributor_address() -> str:
+    """The distributor's classic address.
+
+    Falls back to deriving it from the seed: an operator who configures only
+    BRIX_DISTRIBUTOR_SEED would otherwise get claims that submit fine (the
+    signer knows its own address) but can NEVER be recovered, stranding an
+    indeterminate payout open forever and blocking that wallet's later claims.
+    """
+    configured = config.BRIX_DISTRIBUTOR_ADDRESS
+    seed = config.BRIX_DISTRIBUTOR_SEED
+    if configured and seed:
+        derived = str(Wallet.from_seed(seed).classic_address)
+        if derived != configured:
+            # The Payment would be built for one account and signed by
+            # another, so every payout fails or goes indeterminate. Refuse
+            # up front rather than discovering it one stuck claim at a time.
+            raise RuntimeError(
+                "BRIX_DISTRIBUTOR_ADDRESS does not match the account BRIX_DISTRIBUTOR_SEED "
+                f"signs for ({configured} != {derived})"
+            )
+        return configured
+    if configured:
+        return str(configured)
+    if seed:
+        return str(Wallet.from_seed(seed).classic_address)
+    raise RuntimeError("neither BRIX_DISTRIBUTOR_ADDRESS nor BRIX_DISTRIBUTOR_SEED is configured")
+
+
+def _is_genuine_claim_payout(entry: dict[str, Any], wallet: str, amount: int, sender: str) -> bool:
+    """Whether this account_tx entry really is OUR payout for the claim.
+
+    The memo alone proves nothing. `account_tx` returns transactions the
+    distributor RECEIVED as well as sent, and memos are user-writable, so
+    anyone could send the distributor a payment carrying a guessed
+    `lfg:brix_claim:<n>` tag. Confirming on that would mark an unpaid claim
+    settled and permanently bind the holder's accruals — the holder simply
+    loses the BRIX. So every property that makes it a real payout is checked.
+    """
+    if not entry.get("validated"):
+        return False
+    meta = entry.get("meta") or entry.get("metaData") or {}
+    if not isinstance(meta, dict) or meta.get("TransactionResult") != "tesSUCCESS":
+        return False
+    tx = entry.get("tx") or entry.get("tx_json") or {}
+    if tx.get("TransactionType") != "Payment":
+        return False
+    if tx.get("Account") != sender:  # sent BY the distributor, not to it
+        return False
+    if tx.get("Destination") != wallet:
+        return False
+    paid = tx.get("Amount")
+    if not isinstance(paid, dict):
+        return False  # an XRP drops string is never a BRIX payout
+    if str(paid.get("currency", "")).upper() != str(config.BRIX_CURRENCY_HEX).upper():
+        return False
+    if paid.get("issuer") != config.BRIX_ISSUER:
+        return False
+    try:
+        if Decimal(str(paid.get("value", "0"))) < Decimal(amount):
+            return False
+    except (InvalidOperation, ValueError):
+        return False
+    return True
+
+
+def _carries_memo(tx: dict[str, Any], tag: str) -> bool:
+    for memo in tx.get("Memos", []) or []:
+        raw = (memo.get("Memo") or {}).get("MemoData") or ""
+        try:
+            decoded = bytes.fromhex(raw).decode()
+        except (ValueError, UnicodeDecodeError):
+            continue
+        if decoded == tag:
+            return True
+    return False
+
+
+async def find_claim_payment(
+    claim_id: int, wallet: str, amount: int, min_ledger: int | None = None
+) -> str | None:
+    """Hash of the genuine on-ledger payout for `claim_id`, or None if absent.
+
+    The memo makes the payout findable; `_is_genuine_claim_payout` makes it
+    trustworthy. Absence is NOT by itself proof of failure — the caller must
+    also confirm the validated ledger has passed the claim's
+    LastLedgerSequence.
+    """
+    sender = distributor_address()
+    tag = claim_memo_tag(claim_id)
+    client = JsonRpcClient(config.JSON_RPC_URL)
+    # Bound the scan. A claim that was never paid is the COMMON recovery case,
+    # and unbounded it would page the distributor's entire history — once per
+    # open claim, growing forever as successful claims accumulate. The payout
+    # cannot predate the ledger window the claim was built for, so start a
+    # little before its deadline.
+    scan_from = -1 if min_ledger is None else max(1, min_ledger - _CLAIM_SCAN_LEDGER_SLACK)
+    marker: Any = None
+    while True:
+        request = AccountTx(account=sender, limit=200, marker=marker, ledger_index_min=scan_from)
+        response = await asyncio.to_thread(client.request, request)
+        result = response.result
+        if not isinstance(result, dict):
+            raise RuntimeError(f"account_tx returned an unexpected payload: {result!r}")
+        for entry in result.get("transactions", []):
+            tx = entry.get("tx") or entry.get("tx_json") or {}
+            if not _carries_memo(tx, tag):
+                continue
+            if not _is_genuine_claim_payout(entry, wallet, amount, sender):
+                logging.warning(
+                    "find_claim_payment: ignoring a transaction carrying claim %s's memo that "
+                    "is not a valid payout from the distributor",
+                    claim_id,
+                )
+                continue
+            tx_hash = entry.get("hash") or tx.get("hash")
+            if not isinstance(tx_hash, str) or not tx_hash:
+                # The payout is real and validated; we simply cannot name it.
+                # Returning None would mean "absent" to the caller, which past
+                # LastLedgerSequence is treated as proof of failure — the
+                # accruals would be unbound and the same BRIX paid twice.
+                raise RuntimeError(
+                    f"claim {claim_id}'s payout was found on-ledger but carries no usable hash"
+                )
+            return tx_hash
+        marker = result.get("marker")
+        if not marker:
+            return None
+
+
+async def current_validated_ledger_index() -> int | None:
+    """Index of the latest validated ledger, or None if it can't be read."""
+    client = JsonRpcClient(config.JSON_RPC_URL)
+    return await _current_validated_ledger_index(client)

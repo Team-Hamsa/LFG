@@ -41,6 +41,7 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from lfg_core import (
     archive_reverify,
+    brix_drip,
     brix_payment,
     brokers,
     bulk_mint_flow,
@@ -1330,6 +1331,273 @@ def _lb_display_name(wallet: str) -> str:
     if handle:
         return handle
     return wallet[:6] + "…" + wallet[-4:] if len(wallet) > 10 else wallet
+
+
+# --- BRIX daily drip (#48) -------------------------------------------------
+
+
+def _brix_conn():
+    """Open the drip store on the CALLING thread.
+
+    sqlite3 here is not serialized (threadsafety=1), so connections are never
+    shared across threads — same posture as handle_leaderboard.
+    """
+    conn = history_store.init_history_db(history_store.history_db_path(config.XRPL_NETWORK))
+    brix_drip.ensure_schema(conn)
+    return conn
+
+
+def _open_claim_row(conn, wallet):
+    row = conn.execute(
+        "SELECT claim_id, state, tx_hash FROM brix_claims WHERE wallet = ?"
+        " ORDER BY claim_id DESC LIMIT 1",
+        (wallet,),
+    ).fetchone()
+    if row is None or row["state"] not in brix_drip.OPEN_STATES:
+        return None
+    return {"claim_id": row["claim_id"], "state": row["state"], "tx_hash": row["tx_hash"]}
+
+
+@require_wallet
+async def handle_brix_status(request):
+    """Claimable balance and claim history for the caller.
+
+    Every field is a plain DB read. `unlisted_last_epoch` in particular is a
+    COUNT of the caller's stored accrual rows, NOT a live listing sweep —
+    checking offers per request would put a multi-thousand-token clio scan
+    behind a page load.
+    """
+    wallet = request["wallet"]
+
+    def _read():
+        conn = _brix_conn()
+        try:
+            last_epoch = brix_drip.get_meta(conn, brix_drip.LAST_ACCRUED_EPOCH)
+            unlisted_last_epoch = 0
+            if last_epoch:
+                unlisted_last_epoch = int(
+                    conn.execute(
+                        "SELECT COUNT(*) FROM brix_accruals WHERE owner = ? AND epoch_date = ?",
+                        (wallet, last_epoch),
+                    ).fetchone()[0]
+                )
+            accrued_total = int(
+                conn.execute(
+                    "SELECT COALESCE(SUM(amount), 0) FROM brix_accruals WHERE owner = ?",
+                    (wallet,),
+                ).fetchone()[0]
+            )
+            claimed_total = int(
+                conn.execute(
+                    "SELECT COALESCE(SUM(amount), 0) FROM brix_claims"
+                    " WHERE wallet = ? AND state = 'confirmed'",
+                    (wallet,),
+                ).fetchone()[0]
+            )
+            return {
+                "wallet": wallet,
+                "claimable": brix_drip.claimable(conn, wallet),
+                "unlisted_last_epoch": unlisted_last_epoch,
+                "accrued_total": accrued_total,
+                "claimed_total": claimed_total,
+                "open_claim": _open_claim_row(conn, wallet),
+                "last_epoch": last_epoch,
+            }
+        finally:
+            conn.close()
+
+    return web.json_response(await asyncio.to_thread(_read))
+
+
+def _settle_failed(claim_id: int) -> None:
+    conn = _brix_conn()
+    try:
+        brix_drip.settle_claim(conn, claim_id, "failed")
+    finally:
+        conn.close()
+
+
+async def _fallback_last_ledger_seq() -> int | None:
+    """A conservative deadline for a claim whose own one was never recorded.
+
+    Deliberately generous: too EARLY a deadline would let recovery declare a
+    still-live payment failed and unbind accruals that were really paid, so
+    err far on the late side. None if even this cannot be read — recovery then
+    keeps leaving the claim alone, which is the safe direction.
+    """
+    try:
+        current = await xrpl_ops.current_validated_ledger_index()
+    except Exception:
+        logging.warning("brix: could not read a fallback ledger deadline", exc_info=True)
+        return None
+    if current is None:
+        return None
+    return current + (config.BRIX_CLAIM_LEDGER_MARGIN * 10)
+
+
+def _mark_submitted_unknown(claim_id: int, last_ledger_seq: int | None = None) -> None:
+    conn = _brix_conn()
+    try:
+        if last_ledger_seq is not None:
+            brix_drip.record_submission(conn, claim_id, None, last_ledger_seq)
+        brix_drip.settle_claim(conn, claim_id, "unknown")
+    finally:
+        conn.close()
+
+
+@require_wallet
+async def handle_brix_claim(request):
+    """Claim the caller's accrued BRIX.
+
+    Order of operations is DB-journal-first, chain second, with exactly one
+    ambiguous window that is never blind-retried:
+
+    1. Bind the accruals to a new claim (atomic; a second open claim is
+       rejected by the unique index).
+    2. Submit the payout from the distributor.
+    3. Record the outcome — and unbind ONLY on a validated, definitive failure.
+
+    An unknown outcome deliberately leaves the balance bound: the payment may
+    have landed, and restoring the balance would let it be claimed twice.
+    Recovery resolves it later from the chain.
+    """
+    wallet = request["wallet"]
+
+    if not config.BRIX_DISTRIBUTOR_SEED:
+        return web.json_response(
+            {"error": "claims are not enabled", "code": "claims_disabled"}, status=503
+        )
+
+    # Advisory pre-check: a claim to a wallet with no BRIX trustline would fail
+    # tecNO_LINE anyway, but refusing here means no claim row and no binding, so
+    # the holder's balance is untouched and the retry is clean.
+    balance = await xrpl_ops.get_trustline_balance(
+        wallet, config.BRIX_CURRENCY_HEX, config.BRIX_ISSUER
+    )
+    if balance is None:
+        return web.json_response(
+            {"error": "a BRIX trustline is required", "code": "trustline_required"}, status=409
+        )
+
+    # The provisional deadline is read BEFORE the claim exists and written in
+    # the same transaction that creates it (see brix_drip.open_claim). A claim
+    # that exists without a deadline is unrecoverable — recovery skips it
+    # forever — and two separate writes can never be atomic across a crash, so
+    # the bad state is made unrepresentable instead.
+    #
+    # If the ledger cannot be read we refuse BEFORE opening anything: nothing
+    # is bound, so nothing can be stranded, and the holder simply retries.
+    provisional = await _fallback_last_ledger_seq()
+    if provisional is None:
+        return web.json_response(
+            {"error": "the payout could not be prepared", "code": "claim_unavailable"},
+            status=503,
+        )
+
+    def _open():
+        conn = _brix_conn()
+        try:
+            return brix_drip.open_claim(conn, wallet, last_ledger_seq=provisional)
+        finally:
+            conn.close()
+
+    try:
+        claim_id, amount = await asyncio.to_thread(_open)
+    except brix_drip.NothingToClaim:
+        return web.json_response(
+            {"error": "nothing to claim", "code": "nothing_to_claim"}, status=400
+        )
+    except brix_drip.ClaimInFlight:
+        return web.json_response(
+            {"error": "a claim is already in flight", "code": "claim_in_flight"}, status=409
+        )
+
+    try:
+        payment = await xrpl_ops.send_brix_claim(
+            wallet, amount, claim_id, max_last_ledger_seq=provisional
+        )
+    except xrpl_ops.ClaimNotSubmitted as exc:
+        # Nothing reached the ledger, so releasing the claim is safe — and
+        # necessary: a pending claim with a NULL last_ledger_seq is one
+        # recovery deliberately never resolves, which would block this wallet
+        # with claim_in_flight forever and make its BRIX unreachable.
+        await asyncio.to_thread(_settle_failed, claim_id)
+        logging.warning("brix claim %s could not be submitted: %s", claim_id, exc)
+        return web.json_response(
+            {"error": "the payout could not be submitted", "code": "claim_unavailable"},
+            status=503,
+        )
+    except asyncio.CancelledError:
+        raise
+    except Exception:
+        # send_brix_claim converts every post-deadline failure into an
+        # "unknown" result CARRYING its LastLedgerSequence, so reaching here
+        # means it broke before the deadline existed. We still cannot prove
+        # nothing was submitted, so fail closed — but persist a conservative
+        # deadline first. A claim recorded without one is a claim recovery can
+        # never resolve, and its accruals would be stranded forever.
+        logging.exception("brix claim %s failed with an unexpected error", claim_id)
+        fallback = await _fallback_last_ledger_seq()
+        await asyncio.to_thread(_mark_submitted_unknown, claim_id, fallback)
+        return web.json_response(
+            {"error": "the payout outcome is unconfirmed", "code": "claim_unconfirmed"},
+            status=502,
+        )
+
+    def _settle():
+        conn = _brix_conn()
+        try:
+            brix_drip.record_submission(conn, claim_id, payment.tx_hash, payment.last_ledger_seq)
+            brix_drip.settle_claim(conn, claim_id, payment.state, tx_hash=payment.tx_hash)
+        finally:
+            conn.close()
+
+    await asyncio.to_thread(_settle)
+
+    state = "submitted" if payment.state == "unknown" else payment.state
+    return web.json_response(
+        {
+            "claim_id": claim_id,
+            "state": state,
+            "amount": amount,
+            "tx_hash": payment.tx_hash,
+        }
+    )
+
+
+@require_wallet
+async def handle_brix_claim_status(request):
+    """Poll one of the caller's own claims. Another wallet's claim is a 404 —
+    not a 403, which would confirm the claim exists."""
+    wallet = request["wallet"]
+    raw = request.match_info.get("claim_id", "")
+    try:
+        claim_id = int(raw)
+    except (TypeError, ValueError):
+        return web.json_response({"error": "unknown claim"}, status=404)
+
+    def _read():
+        conn = _brix_conn()
+        try:
+            return conn.execute(
+                "SELECT claim_id, wallet, amount, state, tx_hash FROM brix_claims"
+                " WHERE claim_id = ?",
+                (claim_id,),
+            ).fetchone()
+        finally:
+            conn.close()
+
+    row = await asyncio.to_thread(_read)
+    if row is None or row["wallet"] != wallet:
+        return web.json_response({"error": "unknown claim"}, status=404)
+    return web.json_response(
+        {
+            "claim_id": row["claim_id"],
+            "state": row["state"],
+            "amount": int(row["amount"]),
+            "tx_hash": row["tx_hash"],
+        }
+    )
 
 
 async def handle_leaderboard(request):
@@ -3772,6 +4040,38 @@ async def _settlement_sweep_loop() -> None:
         except Exception:
             logging.error(f"shop sweep loop crashed: {traceback.format_exc()}")
         await asyncio.sleep(_SWEEP_PERIOD_SECONDS)
+
+
+async def _start_brix_claim_recovery(app: web.Application) -> None:
+    """aiohttp on_startup hook: resolve BRIX claims left open by a crash (#48).
+
+    A claim whose payout was submitted but whose outcome was never recorded
+    keeps its accruals bound, so the holder's balance stays stuck until it is
+    reconciled against the chain. Doing that on startup means an ordinary
+    restart self-heals.
+
+    Fire-and-forget and fully guarded: recovery is a convenience, and it must
+    never delay or fail service startup. Skipped entirely when payouts are not
+    configured, since there can be no claims to recover.
+    """
+    if not config.BRIX_DISTRIBUTOR_SEED:
+        return
+
+    async def _run() -> None:
+        try:
+            conn = await asyncio.to_thread(_brix_conn)
+            try:
+                outcomes = await brix_drip.recover_from_chain(conn)
+            finally:
+                conn.close()
+            if outcomes:
+                logging.info(
+                    "brix claim recovery resolved %s claim(s): %s", len(outcomes), outcomes
+                )
+        except Exception:
+            logging.warning("brix claim recovery failed at startup", exc_info=True)
+
+    app["brix_recovery_task"] = asyncio.get_event_loop().create_task(_run())
 
 
 async def _start_settlement_sweep(app: web.Application) -> None:
@@ -7205,6 +7505,9 @@ def create_app() -> web.Application:
     app.router.add_get("/api/web/signin/{payload_uuid}", handle_web_signin_status)
     app.router.add_get("/api/nfts", handle_nfts)
     app.router.add_get("/api/leaderboard", handle_leaderboard)
+    app.router.add_get("/api/brix", handle_brix_status)
+    app.router.add_post("/api/brix/claim", handle_brix_claim)
+    app.router.add_get("/api/brix/claim/{claim_id}", handle_brix_claim_status)
     app.router.add_get("/api/share/conversions", handle_share_conversions)
     app.router.add_get("/api/market/listings", handle_market_listings)
     app.router.add_get("/api/market/mine", handle_market_mine)
@@ -7267,6 +7570,7 @@ def create_app() -> web.Application:
     app.router.add_get("/", handle_index)
     app.router.add_static("/", CLIENT_DIR)
     app.on_startup.append(_start_settlement_sweep)
+    app.on_startup.append(_start_brix_claim_recovery)
     app.on_cleanup.append(_stop_settlement_sweep)
     app.on_startup.append(_start_bulk_resume)
     app.on_startup.append(_start_sponsored_burn_worker)

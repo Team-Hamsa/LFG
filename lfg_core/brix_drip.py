@@ -538,3 +538,228 @@ async def verify_endpoint_chain(conn: sqlite3.Connection, network: str) -> str |
             f"{snapshot.genesis_hash[:16]}… != recorded {expected[:16]}…)"
         )
     return None
+
+
+class ClaimError(RuntimeError):
+    """Base for claim-opening refusals."""
+
+
+class NothingToClaim(ClaimError):
+    """The wallet has no unclaimed accruals."""
+
+
+class ClaimInFlight(ClaimError):
+    """The wallet already has an open (pending/submitted) claim."""
+
+
+OPEN_STATES = ("pending", "submitted")
+
+
+def open_claim(
+    conn: sqlite3.Connection, wallet: str, last_ledger_seq: int | None = None
+) -> tuple[int, int]:
+    """Open a claim for every currently-unclaimed accrual of `wallet`.
+
+    `last_ledger_seq` is written IN THIS TRANSACTION, not afterwards. Recovery
+    skips claims with a NULL deadline, so a claim that briefly exists without
+    one is unrecoverable if the process dies in that gap — accruals bound
+    forever and the wallet blocked by claim_in_flight. Two separate writes can
+    never be atomic across a crash, so the deadline is part of the insert and
+    the bad state is unrepresentable rather than merely unlikely.
+
+    Runs as ONE immediate transaction so the balance read, the claim insert and
+    the row binding cannot interleave with a competing claim. Two racing claims
+    resolve deterministically: sqlite serializes the writes, and whichever
+    arrives second is rejected by `idx_one_open_claim` — never by both binding
+    the same rows.
+
+    Returns `(claim_id, amount)`.
+    """
+    try:
+        conn.execute("BEGIN IMMEDIATE")
+        # Check for an open claim BEFORE the balance. The loser of a race has
+        # already had its rows bound by the winner, so a balance-first check
+        # would report "nothing to claim" — technically true, but it hides the
+        # real reason and tells the holder their BRIX vanished. The unique
+        # index still backstops this across processes.
+        open_claim_row = conn.execute(
+            f"SELECT claim_id FROM brix_claims WHERE wallet = ?"  # noqa: S608 — literal tuple
+            f" AND state IN ({','.join('?' * len(OPEN_STATES))})",
+            (wallet, *OPEN_STATES),
+        ).fetchone()
+        if open_claim_row is not None:
+            conn.rollback()
+            raise ClaimInFlight(f"{wallet} already has an open claim")
+        amount = claimable(conn, wallet)
+        if amount <= 0:
+            conn.rollback()
+            raise NothingToClaim(f"{wallet} has no unclaimed BRIX")
+        cur = conn.execute(
+            "INSERT INTO brix_claims (wallet, amount, state, last_ledger_seq)"
+            " VALUES (?, ?, 'pending', ?)",
+            (wallet, amount, last_ledger_seq),
+        )
+        claim_id = int(cur.lastrowid or 0)
+        conn.execute(
+            "UPDATE brix_accruals SET claim_id = ? WHERE owner = ? AND claim_id IS NULL",
+            (claim_id, wallet),
+        )
+        conn.commit()
+    except sqlite3.IntegrityError as exc:
+        conn.rollback()
+        raise ClaimInFlight(f"{wallet} already has an open claim") from exc
+    except ClaimError:
+        raise
+    except Exception:
+        conn.rollback()
+        raise
+    return claim_id, amount
+
+
+def record_submission(
+    conn: sqlite3.Connection,
+    claim_id: int,
+    tx_hash: str | None,
+    last_ledger_seq: int | None,
+) -> None:
+    """Persist what we know about an in-flight payout.
+
+    Written as early as possible: `last_ledger_seq` is what bounds the
+    ambiguous window, so a crash immediately after submit still leaves recovery
+    enough to reach a verdict.
+    """
+    conn.execute(
+        "UPDATE brix_claims SET state = 'submitted', tx_hash = COALESCE(?, tx_hash),"
+        " last_ledger_seq = COALESCE(?, last_ledger_seq),"
+        " updated_at = CURRENT_TIMESTAMP WHERE claim_id = ?",
+        (tx_hash, last_ledger_seq, claim_id),
+    )
+    conn.commit()
+
+
+def settle_claim(
+    conn: sqlite3.Connection,
+    claim_id: int,
+    outcome: str,
+    tx_hash: str | None = None,
+) -> None:
+    """Apply a payout outcome ("confirmed" | "failed" | "unknown").
+
+    "failed" is the ONLY outcome that unbinds accruals — and it must only ever
+    be passed for a validated, definitive failure. "unknown" deliberately
+    leaves the rows bound and the claim open: the payment may have landed, and
+    unbinding would let the holder claim the same BRIX twice.
+    """
+    if outcome == "unknown":
+        conn.execute(
+            "UPDATE brix_claims SET state = 'submitted', tx_hash = COALESCE(?, tx_hash),"
+            " updated_at = CURRENT_TIMESTAMP WHERE claim_id = ?",
+            (tx_hash, claim_id),
+        )
+        conn.commit()
+        return
+    if outcome not in ("confirmed", "failed"):
+        raise ValueError(f"unknown claim outcome: {outcome!r}")
+
+    conn.execute(
+        "UPDATE brix_claims SET state = ?, tx_hash = COALESCE(?, tx_hash),"
+        " updated_at = CURRENT_TIMESTAMP WHERE claim_id = ?",
+        (outcome, tx_hash, claim_id),
+    )
+    if outcome == "failed":
+        conn.execute("UPDATE brix_accruals SET claim_id = NULL WHERE claim_id = ?", (claim_id,))
+    conn.commit()
+
+
+def recover(
+    conn: sqlite3.Connection,
+    finder: Callable[[int], str | None],
+    validated_ledger_index: int,
+) -> dict[int, str]:
+    """Resolve claims left open by a crash, using the chain as the authority.
+
+    For each open claim, `finder(claim_id)` looks for its memo-tagged payout:
+
+    * found            -> confirmed (with the real tx hash).
+    * absent, AND the validated ledger has passed the claim's
+      LastLedgerSequence -> failed, accruals unbound. Past that ledger the XRPL
+      guarantees the transaction can never validate, so absence is proof.
+    * anything else (absence while the tx could still land, a NULL
+      LastLedgerSequence, or a lookup that raised) -> left untouched.
+
+    That last branch is the important one: absence alone is not failure, and
+    guessing would either double-pay or strand a holder's balance. Returns only
+    the claims actually transitioned.
+    """
+    outcomes: dict[int, str] = {}
+    rows = conn.execute(
+        f"SELECT claim_id, last_ledger_seq FROM brix_claims"  # noqa: S608 — literal tuple below
+        f" WHERE state IN ({','.join('?' * len(OPEN_STATES))})",
+        OPEN_STATES,
+    ).fetchall()
+
+    for row in rows:
+        claim_id = int(row[0])
+        last_ledger_seq = row[1]
+        try:
+            tx_hash = finder(claim_id)
+        except Exception:
+            logging.warning(
+                "brix_drip.recover: lookup failed for claim %s", claim_id, exc_info=True
+            )
+            continue
+        if tx_hash:
+            settle_claim(conn, claim_id, "confirmed", tx_hash=tx_hash)
+            outcomes[claim_id] = "confirmed"
+            continue
+        if last_ledger_seq is None or validated_ledger_index <= int(last_ledger_seq):
+            continue
+        settle_claim(conn, claim_id, "failed")
+        outcomes[claim_id] = "failed"
+    return outcomes
+
+
+async def recover_from_chain(conn: sqlite3.Connection) -> dict[int, str]:
+    """Reconcile every open claim against the ledger.
+
+    Wraps `recover` with the two async lookups it needs. A lookup that FAILED
+    stays distinguishable from one that found nothing: conflating them would
+    mark a genuinely paid claim failed and unbind it, letting the same BRIX be
+    claimed twice — so failures are surfaced as a raising finder, which keeps
+    recover()'s "never guess" branch in charge.
+    """
+    validated = await xrpl_ops.current_validated_ledger_index()
+    if validated is None:
+        # The "definitively failed" test is unanswerable without a validated
+        # ledger index. Do nothing rather than half-decide mid-outage.
+        return {}
+
+    open_claims = [
+        (int(r[0]), str(r[1]), int(r[2]), None if r[3] is None else int(r[3]))
+        for r in conn.execute(
+            f"SELECT claim_id, wallet, amount, last_ledger_seq FROM brix_claims"  # noqa: S608
+            f" WHERE state IN ({','.join('?' * len(OPEN_STATES))})",
+            OPEN_STATES,
+        ).fetchall()
+    ]
+
+    found: dict[int, str | None] = {}
+    failed_lookups: set[int] = set()
+    for claim_id, wallet, amount, last_ledger_seq in open_claims:
+        try:
+            # wallet + amount are what make the memo trustworthy: a payout is
+            # only OURS if it went to this claim's wallet for at least this
+            # much BRIX, from the distributor, validated and successful.
+            found[claim_id] = await xrpl_ops.find_claim_payment(
+                claim_id, wallet=wallet, amount=amount, min_ledger=last_ledger_seq
+            )
+        except Exception:
+            logger.warning("brix recover: account_tx lookup failed for claim %s", claim_id)
+            failed_lookups.add(claim_id)
+
+    def finder(claim_id: int) -> str | None:
+        if claim_id in failed_lookups:
+            raise RuntimeError(f"account_tx lookup failed for claim {claim_id}")
+        return found.get(claim_id)
+
+    return recover(conn, finder, validated)

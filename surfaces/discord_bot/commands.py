@@ -20,6 +20,13 @@ async def link(interaction: discord.Interaction) -> None:
     await handle_link(svc, interaction)
 
 
+@tree.command(name="claim", description="Claim the BRIX your unlisted NFTs have earned")
+async def claim(interaction: discord.Interaction) -> None:
+    from surfaces.discord_bot.claim_view import handle_claim
+
+    await handle_claim(svc, interaction)
+
+
 @tree.command(name="letsgo", description="Open the NFT minting interface")
 async def letsgo(interaction: discord.Interaction) -> None:
     embed = Embed(

@@ -299,6 +299,32 @@ def _brix_deltas(meta: dict[str, Any], brix_issuer: str, brix_hex: str) -> dict[
     return deltas
 
 
+CLAIM_MEMO_PREFIX = "lfg:brix_claim:"
+
+
+def _has_claim_memo(tx: dict[str, Any]) -> bool:
+    """True if this tx carries a BRIX daily-drip claim marker (#48)."""
+    for memo in tx.get("Memos") or []:
+        # Firehose input: any of these may be the wrong type, and an
+        # AttributeError/TypeError here would abort derivation for the whole
+        # transaction. A malformed memo is simply not a claim.
+        if not isinstance(memo, dict):
+            continue
+        inner = memo.get("Memo")
+        if not isinstance(inner, dict):
+            continue
+        raw = inner.get("MemoData")
+        if not isinstance(raw, str):
+            continue
+        try:
+            decoded = bytes.fromhex(raw).decode()
+        except (ValueError, UnicodeDecodeError):
+            continue
+        if decoded.startswith(CLAIM_MEMO_PREFIX):
+            return True
+    return False
+
+
 def derive_brix_events(
     tx: dict[str, Any],
     *,
@@ -321,7 +347,15 @@ def derive_brix_events(
     if ttype == "TrustSet":
         kind = "trustset"
     elif ttype == "Payment":
-        kind = "airdrop" if distributor and account == distributor else "payment"
+        if distributor and account == distributor:
+            # A daily-drip payout carries a self-identifying memo, which is
+            # what lets the conservation audit tell claims apart from ordinary
+            # airdrops out of the same wallet. The sender check is not
+            # redundant with the memo: memos are user-writable, so anyone could
+            # stamp the tag on their own payment.
+            kind = "claim" if _has_claim_memo(tx) else "airdrop"
+        else:
+            kind = "payment"
     elif ttype == "AMMDeposit":
         kind = "amm_deposit"
     elif ttype == "AMMWithdraw":
