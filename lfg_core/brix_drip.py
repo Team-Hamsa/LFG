@@ -223,9 +223,13 @@ def evaluate_accruals(
     )
 
 
+DEFAULT_OFFER_LOOKUP_CONCURRENCY = 15
+
+
 async def fetch_sell_offer_state(
     holders: dict[str, str],
     retries: int = 3,
+    concurrency: int = DEFAULT_OFFER_LOOKUP_CONCURRENCY,
 ) -> dict[str, bool | None]:
     """Look up live listing state for each `nft_id -> current holder`.
 
@@ -237,11 +241,21 @@ async def fetch_sell_offer_state(
     `backfill_market.py`'s stale-close pass needs it — the default swallows RPC
     failures into an empty list, which would read as "no offers" and pay a
     token that may well be listed.
+
+    Lookups run concurrently, bounded by `concurrency`. The mainnet set is
+    ~4.5k tokens and a strictly sequential pass took ~15 minutes per nightly
+    run (#411). Concurrency changes scheduling only: every token is still
+    classified independently, retries are still per-token, and a lookup that
+    never succeeds is still None.
     """
-    state: dict[str, bool | None] = {}
-    for nft_id, holder in holders.items():
-        state[nft_id] = await _lookup_one(nft_id, holder, retries)
-    return state
+    sem = asyncio.Semaphore(max(1, concurrency))
+
+    async def one(nft_id: str, holder: str) -> tuple[str, bool | None]:
+        async with sem:
+            return nft_id, await _lookup_one(nft_id, holder, retries)
+
+    results = await asyncio.gather(*(one(n, h) for n, h in holders.items()))
+    return dict(results)
 
 
 async def _lookup_one(nft_id: str, holder: str, retries: int) -> bool | None:
