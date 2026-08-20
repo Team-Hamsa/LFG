@@ -33,23 +33,28 @@ from datetime import datetime
 REPO_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
 sys.path.insert(0, REPO_ROOT)
 
-from lfg_core import brix_drip, config, history_store, nft_index  # noqa: E402
+from lfg_core import brix_drip, config, history_store, nft_index, system_wallets  # noqa: E402
 
 
 def system_accounts() -> frozenset[str]:
     """Wallets that must never earn a drip — the same set the leaderboards
-    exclude, so system-held inventory can't farm the distribution."""
-    return frozenset(
-        a
-        for a in (
-            config.SWAP_ISSUER_ADDRESS,
-            config.SWAP_OFFER_ISSUER,
-            config.BRIX_ISSUER,
-            config.BRIX_DISTRIBUTOR_ADDRESS,
-            config.BRIX_AMM_ACCOUNT,
-            config.SIGNING_ACCOUNT,
+    exclude, so system-held inventory can't farm the distribution.
+
+    Retired project wallets are unioned in durably (#414) — a wallet dropped
+    from a config slot is still ours and still must not earn."""
+    return system_wallets.with_durable(
+        frozenset(
+            a
+            for a in (
+                config.SWAP_ISSUER_ADDRESS,
+                config.SWAP_OFFER_ISSUER,
+                config.BRIX_ISSUER,
+                config.BRIX_DISTRIBUTOR_ADDRESS,
+                config.BRIX_AMM_ACCOUNT,
+                config.SIGNING_ACCOUNT,
+            )
+            if a
         )
-        if a
     )
 
 

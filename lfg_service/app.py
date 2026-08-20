@@ -73,6 +73,7 @@ from lfg_core import (
     swap_compose,
     swap_flow,
     swap_meta,
+    system_wallets,
     trait_config,
     trait_images,
     xrpl_ops,
@@ -1314,15 +1315,20 @@ def _lb_cache_put(key: _LbKey, value: dict[str, Any], now_mono: float) -> None:
 
 
 def _lb_system_accounts() -> frozenset[str]:
-    return frozenset(
-        a
-        for a in (
-            config.SWAP_ISSUER_ADDRESS,
-            config.SWAP_OFFER_ISSUER,
-            config.BRIX_DISTRIBUTOR_ADDRESS,
-            config.BRIX_AMM_ACCOUNT,
+    # Retired wallets are unioned in durably: archived rows keep the address
+    # that signed them, so a repointed BRIX_DISTRIBUTOR_ADDRESS would otherwise
+    # turn 60k historical payouts into ordinary counterparty activity (#414).
+    return system_wallets.with_durable(
+        frozenset(
+            a
+            for a in (
+                config.SWAP_ISSUER_ADDRESS,
+                config.SWAP_OFFER_ISSUER,
+                config.BRIX_DISTRIBUTOR_ADDRESS,
+                config.BRIX_AMM_ACCOUNT,
+            )
+            if a
         )
-        if a
     )
 
 
