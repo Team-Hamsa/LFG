@@ -12,6 +12,12 @@ module.exports = {
     { name: "lfg-snapshot", cwd: CWD, script: "scripts/snapshot_balances.py", interpreter: PY, args: ["--network", "mainnet"], cron_restart: "10 0 * * *", autorestart: false },
     { name: "lfg-economy-reconcile", cwd: CWD, script: "scripts/economy_nightly_reconcile.py", interpreter: PY, args: ["--network", "mainnet"], cron_restart: "20 0 * * *", autorestart: false },
     { name: "lfg-economy-audit", cwd: CWD, script: "scripts/audit_trait_economy.py", interpreter: PY, args: ["--network", "mainnet"], cron_restart: "25 0 * * *", autorestart: false },
+    // SourceTag metrics badge — commits metrics/sourcetag.json to main via the GitHub API.
+    { name: "lfg-sourcetag", cwd: CWD, script: "scripts/sourcetag_metrics.py", interpreter: PY, args: ["--network", "mainnet", "--push"], cron_restart: "20 0 * * *", autorestart: false },
+    // BRIX daily drip accrual (#48). 00:40, NOT the 00:20 the script's docstring
+    // originally suggested: 00:20 already holds lfg-economy-reconcile and
+    // lfg-sourcetag, and accrual does a per-token on-ledger listing sweep (#411).
+    { name: "lfg-brix-accrue", cwd: CWD, script: "scripts/accrue_brix.py", interpreter: PY, args: ["--network", "mainnet"], cron_restart: "40 0 * * *", autorestart: false },
     // Nightly market_listings/buy_offers self-heal sweep (#288) — 03:30 UTC, offset from the 00:10-00:25 crons.
     // pm2 cron_restart fires in HOST-LOCAL time (no timezone option); this box runs Etc/UTC
     // (timedatectl, verified 2026-08-16) — keep the host on UTC or adjust these schedules.

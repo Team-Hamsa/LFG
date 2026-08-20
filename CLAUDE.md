@@ -219,6 +219,7 @@ auto-restart hook is retired.
 | `lfg-index-mainnet` | `stg-index-testnet` (moved out of prod) |
 | `lfg-snapshot` (cron 00:10) | `stg-snapshot` (cron 00:10, testnet) |
 | `lfg-sourcetag` (cron 00:20) | not registered yet (post-merge ops step) |
+| `lfg-brix-accrue` (cron 00:40) | `stg-brix-accrue` (cron 00:40, testnet) |
 | `lfg-market-sweep` (cron 03:30) | `stg-market-sweep` (cron 03:30, testnet) |
 | `lfg-deployer` | `stg-deployer` |
 
@@ -749,9 +750,11 @@ DB and paid on-chain only when the holder explicitly claims. Design:
   redundant with the memo — memos are user-writable).
 - **Ops:**
   ```bash
-  # daily accrual (pm2 cron, 00:20 UTC — after the 00:10 snapshot)
+  # daily accrual — registered in ecosystem.{prod,staging}.config.js as
+  # lfg-brix-accrue / stg-brix-accrue at 00:40 UTC (00:20 is already taken by
+  # lfg-economy-reconcile + lfg-sourcetag). Manual equivalent:
   pm2 start scripts/accrue_brix.py --name lfg-brix-accrue \
-    --cron "20 0 * * *" --no-autorestart --interpreter .venv/bin/python \
+    --cron "40 0 * * *" --no-autorestart --interpreter .venv/bin/python \
     -- --network mainnet
   .venv/bin/python scripts/brix_admin_report.py --network mainnet
   .venv/bin/python scripts/audit_brix_distribution.py --network mainnet  # exits non-zero on drift

@@ -12,11 +12,14 @@ Idempotent twice over: the accruals table's PK makes a re-run a no-op, and a
 `brix_meta` cursor means a missed cron day is caught up automatically on the
 next run. Safe to run repeatedly.
 
-pm2 cron registration (mirrors lfg-snapshot; deliberately at 00:20 UTC, after
-the 00:10 snapshot):
+Registered in ecosystem.prod.config.js / ecosystem.staging.config.js as
+lfg-brix-accrue / stg-brix-accrue. The slot is 00:40 UTC, not the 00:20 this
+docstring once suggested: 00:20 already holds lfg-economy-reconcile and
+lfg-sourcetag, and this job spends real time on its per-token listing sweep
+(#411). Manual equivalent:
 
   pm2 start scripts/accrue_brix.py --name lfg-brix-accrue \
-    --cron "20 0 * * *" --no-autorestart --interpreter .venv/bin/python \
+    --cron "40 0 * * *" --no-autorestart --interpreter .venv/bin/python \
     -- --network mainnet
 
 Like every cron entry it parks "stopped" between runs — normal, not a failure.
