@@ -16,6 +16,24 @@ from uuid import uuid4
 from lfg_core import config, db_path, history_events, history_store, market_ops
 
 CampaignState = Literal["off", "active", "stopped", "expired", "full", "at_capacity"]
+
+# Exact `last_error` diagnostics the startup offer sweep
+# (lfg_service.app._recover_sponsored_offers) writes on a 'minted' claim whose
+# destination cannot receive the offer for a ledger-reported PERMANENT reason.
+# The NFT is still held by the issuer and is re-offered on a later boot once
+# the holder fixes their wallet, so these are not campaign blockers: the
+# readiness audit matches them EXACTLY (never by prefix) to exclude such
+# claims from the incomplete count. Add a new shape here, nowhere else.
+UNDELIVERABLE_UNFUNDED = (
+    "destination account does not exist on-ledger (unfunded); "
+    "offer creation deferred until it is funded"
+)
+UNDELIVERABLE_OFFER_BLOCKED = (
+    "destination account disallows incoming NFT offers "
+    "(lsfDisallowIncomingNFTokenOffer); offer creation deferred "
+    "until the flag is cleared"
+)
+UNDELIVERABLE_ERRORS: tuple[str, ...] = (UNDELIVERABLE_UNFUNDED, UNDELIVERABLE_OFFER_BLOCKED)
 ReservationReason = Literal[
     "invalid_request",
     "wrong_network",

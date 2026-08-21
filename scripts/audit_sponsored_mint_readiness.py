@@ -207,16 +207,6 @@ def _debt_check(conn: sqlite3.Connection, *, network: str) -> tuple[dict[str, An
     )
 
 
-# `last_error` prefix the service writes on a 'minted' claim whose destination
-# cannot receive the offer for a ledger-reported permanent reason (unfunded →
-# tecNO_DST, or lsfDisallowIncomingNFTokenOffer → tecNO_PERMISSION; see
-# lfg_service.app._recover_sponsored_offers). The NFT is still held by the
-# issuer and is re-offered on a later boot once the HOLDER fixes their wallet;
-# it is not a campaign blocker and must not fail readiness, or one such wallet
-# blocks every future campaign (prod 2026-08-17 and 2026-08-20).
-UNDELIVERABLE_ERROR_PREFIX = "destination account "
-
-
 def _incomplete_check(conn: sqlite3.Connection, *, network: str) -> dict[str, Any]:
     counts = {
         str(row["status"]): int(row["count"])
@@ -230,13 +220,18 @@ def _incomplete_check(conn: sqlite3.Connection, *, network: str) -> dict[str, An
             (network,),
         )
     }
+    # A 'minted' claim parked with one of the EXACT undeliverable diagnostics
+    # (sponsored_mint.UNDELIVERABLE_ERRORS: unfunded destination →
+    # tecNO_DST, lsfDisallowIncomingNFTokenOffer → tecNO_PERMISSION) is the
+    # holder's to fix and is re-offered on a later boot; it must not fail
+    # readiness, or one such wallet blocks every future campaign (prod
+    # 2026-08-17 and 2026-08-20). Matched exactly, never by prefix.
+    sentinels = sponsored_mint.UNDELIVERABLE_ERRORS
     undeliverable = int(
         conn.execute(
-            """
-            SELECT COUNT(*) FROM free_mint_claims
-            WHERE network = ? AND status = 'minted' AND last_error LIKE ? || '%'
-            """,
-            (network, UNDELIVERABLE_ERROR_PREFIX),
+            "SELECT COUNT(*) FROM free_mint_claims WHERE network = ? AND status = 'minted'"
+            f" AND last_error IN ({','.join('?' * len(sentinels))})",
+            (network, *sentinels),
         ).fetchone()[0]
     )
     minted = counts.get("minted", 0) - undeliverable

@@ -5366,10 +5366,7 @@ async def _recover_sponsored_offers(app_db: str, *, network: str) -> None:
             undeliverable = None
             if offer_id is None:
                 if await xrpl_ops.account_exists(claim.wallet) is False:
-                    undeliverable = (
-                        "destination account does not exist on-ledger (unfunded); "
-                        "offer creation deferred until it is funded"
-                    )
+                    undeliverable = sponsored_mint.UNDELIVERABLE_UNFUNDED
                 elif await xrpl_ops.disallows_incoming_nft_offers(claim.wallet) is True:
                     # Same terminal shape as the unfunded case below, different
                     # flag: the destination has lsfDisallowIncomingNFTokenOffer
@@ -5379,11 +5376,7 @@ async def _recover_sponsored_offers(app_db: str, *, network: str) -> None:
                     # (prod, 2026-08-20: claim 19f141ce…) exactly as the
                     # unfunded case once did. Only a definitive True is
                     # terminal; None falls through and stays fail-closed.
-                    undeliverable = (
-                        "destination account disallows incoming NFT offers "
-                        "(lsfDisallowIncomingNFTokenOffer); offer creation deferred "
-                        "until the flag is cleared"
-                    )
+                    undeliverable = sponsored_mint.UNDELIVERABLE_OFFER_BLOCKED
             if undeliverable is not None:
                 # The destination cannot receive this offer, for a reason the
                 # ledger reports as permanent: it is unfunded (tecNO_DST) or it

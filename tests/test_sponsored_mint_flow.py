@@ -2692,9 +2692,13 @@ def test_offer_recovery_still_fails_closed_when_account_lookup_is_indeterminate(
     async def account_exists(address):
         return None  # lookup failed -- unknown, not "absent"
 
+    async def disallows(address):
+        return None  # flag lookup also unknown -- must stay fail-closed
+
     monkeypatch.setattr(server.xrpl_ops, "JsonRpcClient", _NoSellOffersClient)
     monkeypatch.setattr(server.xrpl_ops, "create_nft_offer", create_offer)
     monkeypatch.setattr(server.xrpl_ops, "account_exists", account_exists)
+    monkeypatch.setattr(server.xrpl_ops, "disallows_incoming_nft_offers", disallows)
 
     # Per-claim failures are logged + persisted on the claim, never raised: one
     # undeliverable claim must not pin sponsored admission OFF campaign-wide.
@@ -2959,12 +2963,7 @@ def test_readiness_audit_tolerates_undeliverable_minted_claims(_service_env, mon
     with sqlite3.connect(_service_env.app_db) as conn:
         conn.execute(
             "UPDATE free_mint_claims SET last_error = ? WHERE id = ?",
-            (
-                "destination account disallows incoming NFT offers "
-                "(lsfDisallowIncomingNFTokenOffer); offer creation deferred "
-                "until the flag is cleared",
-                claim.id,
-            ),
+            (sponsored_mint.UNDELIVERABLE_OFFER_BLOCKED, claim.id),
         )
         conn.commit()
     sponsored_mint.stop_campaign(_service_env.app_db, network="mainnet", actor="test", now=200)
