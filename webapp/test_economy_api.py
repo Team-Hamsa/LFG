@@ -1264,3 +1264,57 @@ def test_start_closet_confirms_missed_accept_before_ensure(monkeypatch):
     assert result["accept"] is None
     # start_closet closes its conn; the persisted status was observed by
     # fake_ensure_closet above (seen_status), after confirm_accept committed.
+
+
+def test_start_closet_rolls_back_when_confirm_accept_commit_fails(monkeypatch):
+    """If the pre-check's commit raises, the shared connection is rolled back so
+    ensure_closet reads the durable `pending_accept`, not a phantom `active`."""
+    real = _seed_conn()
+    economy_store.set_closet_token(real, "rOwner", "CLOSET-1", "aabb", "pending_accept", "OFFER-1")
+    calls = {"n": 0}
+
+    class FlakyConn:
+        """sqlite3.Connection attributes are read-only; wrap to fail the first commit."""
+
+        def __getattr__(self, name):
+            return getattr(real, name)
+
+        def commit(self):
+            calls["n"] += 1
+            if calls["n"] == 1:
+                raise sqlite3.OperationalError("disk I/O error")
+            real.commit()
+
+    conn = FlakyConn()
+    monkeypatch.setattr(economy_api, "open_conn", lambda: conn)
+
+    async def closet_owner(nft_id):
+        return "rOwner"
+
+    class Deps:
+        closet_upload_fn = None
+        closet_mint_fn = None
+        closet_offer_fn = None
+        closet_accept_fn = None
+        closet_exists_fn = None
+        closet_owner_fn = staticmethod(closet_owner)
+
+    monkeypatch.setattr(economy_api._economy_deps, "build_economy_deps", lambda *a, **k: Deps())
+
+    import lfg_core.closet_token as ct
+
+    seen = []
+
+    async def fake_ensure_closet(conn, owner, **kw):
+        rec = economy_store.get_closet_record(conn, owner)
+        seen.append(rec[2])
+        return ct.ClosetRef(nft_id=rec[0], uri_hex=rec[1], status=rec[2], accept_payload=None)
+
+    monkeypatch.setattr(ct, "ensure_closet", fake_ensure_closet)
+
+    async def go():
+        return await economy_api.start_closet("123", "rOwner")
+
+    result = asyncio.get_event_loop().run_until_complete(go())
+    assert seen == ["pending_accept"]
+    assert result["status"] == "pending_accept"

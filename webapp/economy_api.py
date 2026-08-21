@@ -96,6 +96,9 @@ async def start_closet(
                 await ct.confirm_accept(conn, owner, owner_fn=owner_fn)
                 conn.commit()
             except Exception as e:  # noqa: BLE001 - best-effort pre-check
+                # Roll back so an un-committed status flip cannot leak into
+                # ensure_closet's read on the same connection.
+                conn.rollback()
                 logging.warning(f"closet confirm_accept pre-check failed for {owner}: {e}")
         ref = await ct.ensure_closet(
             conn,
