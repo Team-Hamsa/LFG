@@ -1182,6 +1182,17 @@ matching Extract/List seller first. Design:
   — see the flip to 176 noted above; `ASSEMBLE_TAXON = 1760` is unrelated
   (Assemble-minted rebirth characters, not shop trait tokens).
 
+### Share-on-X beacon (`share_intents`)
+
+`share_clicks` only sees the card page being fetched (X's crawler after a
+tweet posts — a proxy). The "Share on X" button itself beacons `POST
+/api/share/intent {kind, nft_number}` (authed, fire-and-forget after the
+composer opens) into `share_intents` (app DB, best-effort like
+`share_clicks`). Giveaway eligibility query:
+`share_clicks.intent_rows_since(db, "<ISO-UTC>")` or
+`sqlite3 lfg_nfts.db "select wallet, count(*), min(clicked_at) from share_intents where clicked_at >= '2026-08-21T13:14:31Z' group by 1"`.
+Logged-out shares carry no wallet and are not recorded.
+
 ### Bulk minting (#215)
 
 Mint N editions behind one payment instead of N separate mint flows —

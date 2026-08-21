@@ -49,3 +49,43 @@ def test_record_click_stamps_clicked_at(tmp_path):
     (ts,) = conn.execute("SELECT clicked_at FROM share_clicks").fetchone()
     conn.close()
     assert ts  # non-empty ISO timestamp
+
+
+# --- share_intents: the "Share on X" button beacon ---------------------------
+
+
+def test_record_intent_inserts_row(tmp_path):
+    db = str(tmp_path / "app.db")
+    ok = share_clicks.record_intent(db, "rrrrrrrrrrrrrrrrrrrrrhoLvTp", "mint", 42, "discord")
+    assert ok is True
+    conn = sqlite3.connect(db)
+    row = conn.execute("SELECT wallet, kind, nft_number, platform FROM share_intents").fetchone()
+    assert conn.execute("SELECT clicked_at FROM share_intents").fetchone()[0]
+    conn.close()
+    assert row == ("rrrrrrrrrrrrrrrrrrrrrhoLvTp", "mint", 42, "discord")
+
+
+def test_record_intent_null_nft_number(tmp_path):
+    db = str(tmp_path / "app.db")
+    assert share_clicks.record_intent(db, "rW", "swap", None, "web") is True
+    conn = sqlite3.connect(db)
+    assert conn.execute("SELECT nft_number FROM share_intents").fetchone() == (None,)
+    conn.close()
+
+
+def test_record_intent_swallows_db_failure(tmp_path):
+    import os
+
+    bad = str(tmp_path / "adir")
+    os.mkdir(bad)
+    assert share_clicks.record_intent(bad, "rW", "mint", 1, "discord") is False
+
+
+def test_intent_rows_since_groups_by_wallet(tmp_path):
+    db = str(tmp_path / "app.db")
+    share_clicks.record_intent(db, "rA", "mint", 1, "discord")
+    share_clicks.record_intent(db, "rA", "swap", 2, "discord")
+    share_clicks.record_intent(db, "rB", "mint", 3, "web")
+    rows = share_clicks.intent_rows_since(db, "2000-01-01T00:00:00Z")
+    assert [(r["wallet"], r["shares"]) for r in rows] == [("rA", 2), ("rB", 1)]
+    assert share_clicks.intent_rows_since(db, "2999-01-01T00:00:00Z") == []

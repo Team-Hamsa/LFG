@@ -32,10 +32,33 @@ _INDEXES = (
     "CREATE INDEX IF NOT EXISTS sc_ref ON share_clicks(ref_wallet)",
 )
 
+# share_intents: one row per "Share on X" BUTTON click, beaconed by the
+# client (POST /api/share/intent) before it opens the X composer. Unlike
+# share_clicks (hits on the card page — a proxy that only fires if the tweet
+# is actually posted and X crawls it), this is the exact "who pressed Share,
+# when" record giveaways need. Same best-effort posture: never block the share.
+_INTENT_SCHEMA = """
+CREATE TABLE IF NOT EXISTS share_intents (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    wallet TEXT NOT NULL,
+    kind TEXT NOT NULL,
+    nft_number INTEGER,
+    platform TEXT NOT NULL DEFAULT '',
+    clicked_at TEXT NOT NULL DEFAULT (STRFTIME('%Y-%m-%dT%H:%M:%fZ', 'now'))
+)
+"""
+_INTENT_INDEXES = (
+    "CREATE INDEX IF NOT EXISTS si_wallet ON share_intents(wallet)",
+    "CREATE INDEX IF NOT EXISTS si_clicked ON share_intents(clicked_at)",
+)
+
 
 def _ensure_schema(conn: sqlite3.Connection) -> None:
     conn.execute(_SCHEMA)
     for idx in _INDEXES:
+        conn.execute(idx)
+    conn.execute(_INTENT_SCHEMA)
+    for idx in _INTENT_INDEXES:
         conn.execute(idx)
 
 
@@ -69,6 +92,52 @@ def record_click(
     except sqlite3.Error:
         log.warning("share_clicks write failed (nft #%s)", nft_number, exc_info=True)
         return False
+
+
+def record_intent(
+    db_file: str, wallet: str, kind: str, nft_number: int | None, platform: str
+) -> bool:
+    """Log one Share-on-X button press. Best-effort: swallows sqlite errors."""
+    try:
+        conn = sqlite3.connect(db_file)
+        try:
+            _ensure_schema(conn)
+            conn.execute(
+                "INSERT INTO share_intents (wallet, kind, nft_number, platform)"
+                " VALUES (?, ?, ?, ?)",
+                (wallet, kind, nft_number, (platform or "")[:32]),
+            )
+            conn.commit()
+        finally:
+            conn.close()
+        return True
+    except sqlite3.Error:
+        log.warning("share_intents write failed (wallet %s)", wallet, exc_info=True)
+        return False
+
+
+def intent_rows_since(db_file: str, since_iso: str) -> list[dict[str, int | str]]:
+    """Per-wallet Share-on-X presses at/after `since_iso` (ISO-8601 UTC, the
+    same format clicked_at stores). Ordered by first press — the giveaway
+    eligibility list. Missing table reads as empty."""
+    try:
+        conn = sqlite3.connect(db_file)
+        try:
+            _ensure_schema(conn)
+            rows = conn.execute(
+                "SELECT wallet, COUNT(*), MIN(clicked_at), MAX(clicked_at)"
+                " FROM share_intents WHERE clicked_at >= ?"
+                " GROUP BY wallet ORDER BY MIN(clicked_at)",
+                (since_iso,),
+            ).fetchall()
+        finally:
+            conn.close()
+    except sqlite3.Error:
+        log.warning("share_intents read failed", exc_info=True)
+        return []
+    return [
+        {"wallet": w, "shares": n, "first_at": first, "last_at": last} for w, n, first, last in rows
+    ]
 
 
 def conversion_rows(db_file: str, network: str, limit: int = 100) -> list[dict[str, int | str]]:
