@@ -2947,3 +2947,53 @@ def test_disallows_incoming_nft_offers_three_way_contract(monkeypatch, result, e
 
     monkeypatch.setattr(server.xrpl_ops, "AsyncJsonRpcClient", Client)
     assert _run(server.xrpl_ops.disallows_incoming_nft_offers("rX")) is expected
+
+
+def test_readiness_audit_tolerates_undeliverable_minted_claims(_service_env, monkeypatch):
+    # A 'minted' claim parked because its destination is unfunded / blocks
+    # incoming NFT offers is the user's to fix, not a campaign blocker: the
+    # audit reports it separately and still passes the incomplete-claims check.
+    audit = importlib.import_module("scripts.audit_sponsored_mint_readiness")
+    sponsored_mint.start_campaign(_service_env.app_db, network="mainnet", actor="test", now=100)
+    claim = _minted_claim_awaiting_offer(_service_env, "rPARKED", "parked", "NFT-PARKED")
+    with sqlite3.connect(_service_env.app_db) as conn:
+        conn.execute(
+            "UPDATE free_mint_claims SET last_error = ? WHERE id = ?",
+            (
+                "destination account disallows incoming NFT offers "
+                "(lsfDisallowIncomingNFTokenOffer); offer creation deferred "
+                "until the flag is cleared",
+                claim.id,
+            ),
+        )
+        conn.commit()
+    sponsored_mint.stop_campaign(_service_env.app_db, network="mainnet", actor="test", now=200)
+    hconn = history_store.init_history_db(_service_env.history_db)
+    history_store.insert_tx(
+        hconn,
+        tx_hash="TX-FRESH",
+        ledger_index=history_store.EARLIEST_AVAILABLE_LEDGER + 123,
+        close_time=3990,
+        tx_type="Payment",
+        account="rUNIQUE",
+        source_tag=sponsored_mint.config.SOURCE_TAG,
+        raw_json="{}",
+    )
+    hconn.commit()
+    hconn.close()
+    ready_history(_service_env.history_db, network="mainnet", now=4000, close_time=3990)
+    monkeypatch.setattr(audit.config, "SPONSORED_MINT_EXCLUDED_WALLETS", _PLACEHOLDER_EXCLUSIONS)
+
+    report = _run(
+        audit.build_report(
+            network="mainnet",
+            app_db=_service_env.app_db,
+            history_db=_service_env.history_db,
+            now=4000,
+            balance_fetch=lambda: asyncio.sleep(0, result=Decimal("1000")),
+        )
+    )
+
+    assert report["checks"]["incomplete_claims"]["ok"] is True
+    assert report["checks"]["incomplete_claims"]["minted"] == 0
+    assert report["checks"]["incomplete_claims"]["minted_undeliverable"] == 1

@@ -207,6 +207,16 @@ def _debt_check(conn: sqlite3.Connection, *, network: str) -> tuple[dict[str, An
     )
 
 
+# `last_error` prefix the service writes on a 'minted' claim whose destination
+# cannot receive the offer for a ledger-reported permanent reason (unfunded →
+# tecNO_DST, or lsfDisallowIncomingNFTokenOffer → tecNO_PERMISSION; see
+# lfg_service.app._recover_sponsored_offers). The NFT is still held by the
+# issuer and is re-offered on a later boot once the HOLDER fixes their wallet;
+# it is not a campaign blocker and must not fail readiness, or one such wallet
+# blocks every future campaign (prod 2026-08-17 and 2026-08-20).
+UNDELIVERABLE_ERROR_PREFIX = "destination account "
+
+
 def _incomplete_check(conn: sqlite3.Connection, *, network: str) -> dict[str, Any]:
     counts = {
         str(row["status"]): int(row["count"])
@@ -220,11 +230,22 @@ def _incomplete_check(conn: sqlite3.Connection, *, network: str) -> dict[str, An
             (network,),
         )
     }
+    undeliverable = int(
+        conn.execute(
+            """
+            SELECT COUNT(*) FROM free_mint_claims
+            WHERE network = ? AND status = 'minted' AND last_error LIKE ? || '%'
+            """,
+            (network, UNDELIVERABLE_ERROR_PREFIX),
+        ).fetchone()[0]
+    )
+    minted = counts.get("minted", 0) - undeliverable
     return {
-        "ok": sum(counts.values()) == 0,
+        "ok": counts.get("reserved", 0) + counts.get("minting", 0) + minted == 0,
         "reserved": counts.get("reserved", 0),
         "minting": counts.get("minting", 0),
-        "minted": counts.get("minted", 0),
+        "minted": minted,
+        "minted_undeliverable": undeliverable,
     }
 
 
@@ -472,7 +493,9 @@ def _human_lines(report: dict[str, Any]) -> list[str]:
             "incomplete claims "
             f"reserved={checks['incomplete_claims'].get('reserved', '?')} "
             f"minting={checks['incomplete_claims'].get('minting', '?')} "
-            f"minted={checks['incomplete_claims'].get('minted', '?')}",
+            f"minted={checks['incomplete_claims'].get('minted', '?')} "
+            f"minted_undeliverable={checks['incomplete_claims'].get('minted_undeliverable', '?')}"
+            " (holder must fund / allow incoming NFT offers; not a blocker)",
         ),
     )
     return [f"{'PASS' if checks[key].get('ok') else 'FAIL'} {detail}" for key, detail in ordered]
