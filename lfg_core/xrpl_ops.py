@@ -743,6 +743,42 @@ async def account_exists(address: str) -> bool | None:
     return None
 
 
+async def disallows_incoming_nft_offers(address: str) -> bool | None:
+    """Does this account refuse incoming NFT offers (lsfDisallowIncomingNFTokenOffer)?
+
+    True  -- DEFINITIVELY set: NFTokenCreateOffer naming it as Destination can
+             only ever return `tecNO_PERMISSION`, however often it is retried.
+    False -- present on-ledger with the flag clear.
+    None  -- unknown: the lookup failed, or the account is absent (that case is
+             `account_exists`'s to report, not this one's).
+
+    Same three-way contract, and same reason, as `account_exists`: only True is
+    terminal. None must stay fail-closed so an RPC blip never reads as "this
+    user blocked us" and silently drops an NFT they are owed.
+    """
+    try:
+        client = AsyncJsonRpcClient(config.JSON_RPC_URL)
+        response = await client.request(AccountInfo(account=address, ledger_index="validated"))
+    except Exception as e:
+        logging.warning(f"disallows_incoming_nft_offers({address}) lookup failed: {e}")
+        return None
+    if not response.is_successful():
+        logging.warning(
+            f"disallows_incoming_nft_offers({address}) inconclusive: {response.result.get('error')}"
+        )
+        return None
+    flags = response.result.get("account_flags")
+    if isinstance(flags, dict) and "disallowIncomingNFTokenOffer" in flags:
+        return bool(flags["disallowIncomingNFTokenOffer"])
+    # Older rippled builds omit the decoded account_flags object; fall back to
+    # the raw bit (lsfDisallowIncomingNFTokenOffer = 0x04000000).
+    raw = response.result.get("account_data", {}).get("Flags")
+    if isinstance(raw, int):
+        return bool(raw & 0x04000000)
+    logging.warning(f"disallows_incoming_nft_offers({address}) inconclusive: no flags in response")
+    return None
+
+
 async def create_nft_offer(
     nft_id: str,
     destination: str,

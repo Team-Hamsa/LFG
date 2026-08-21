@@ -264,7 +264,12 @@ signer/issuer exclusions do not satisfy that check. Sponsored admission also sta
 recovery succeeds, while paid minting remains available after a recovery fault.
 Offer reconciliation is authoritative only when strict XRPL offer parsing
 accepts the amount and destination shapes; every per-claim error is persisted,
-all claims are attempted, and any failure keeps startup recovery not ready.
+all claims are attempted, and a per-claim offer failure does NOT revoke
+readiness — the claim stays `minted` (visible in `/admin` status), is retried
+next boot, and admission keeps running (one undeliverable wallet wedged every
+restart campaign-wide twice: 2026-08-17 unfunded, 2026-08-20
+`lsfDisallowIncomingNFTokenOffer`). Only the slot/debt reconciliation pins
+readiness.
 
 The deployers never restart themselves (`lfg-deployer`/`stg-deployer` are
 excluded from their own `restart_processes`) — after changing

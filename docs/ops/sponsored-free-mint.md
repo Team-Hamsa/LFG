@@ -605,9 +605,14 @@ pm2 logs stg-activity --lines 500 --nostream | \
 - `sponsored offer recovered` identifies the claim/NFT/offer/wallet repaired
   through the pending-offers surface.
 - `sponsored offer recovery failed` identifies each failed claim after its
-  `last_error` is recorded. Any such failure is aggregated after the other
-  claims are processed, keeps startup recovery not ready, and requires
-  investigation before restarting. `sponsored burn worker pass failed` also
+  `last_error` is recorded. Failures are aggregated after the other claims
+  are processed and logged at ERROR; they do **not** revoke readiness — the
+  claim stays `minted` (the `minted` count in the admin status) and is
+  retried on the next boot. Two known permanent shapes are skipped with a
+  `sponsored offer undeliverable` warning instead: an unfunded destination
+  (`tecNO_DST`) and a destination with `lsfDisallowIncomingNFTokenOffer`
+  set (`tecNO_PERMISSION`) — the user must fund the wallet / clear the flag
+  (Xaman → account settings → "Incoming NFT offers"), then a restart delivers. `sponsored burn worker pass failed` also
   requires investigation; inspect the durable rows before restarting again.
 - Campaign starts/stops are authoritative in `free_mint_audit`; Discord's
   admin-log message is supporting evidence, not the source of truth.
