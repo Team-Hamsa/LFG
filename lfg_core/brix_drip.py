@@ -28,16 +28,15 @@ from __future__ import annotations
 import asyncio
 import logging
 import sqlite3
-from collections.abc import Callable, Iterable, Sequence
+from collections.abc import Callable, Iterable, Mapping, Sequence
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
-from typing import Any
+from typing import Any, Protocol
 
 from xrpl.clients import JsonRpcClient
 from xrpl.models.requests import Request
 
-from lfg_core import config, history_store, xrpl_ops
-from lfg_core.nft_index import OnchainNft
+from lfg_core import config, epoch_state, history_store, xrpl_ops
 
 logger = logging.getLogger(__name__)
 
@@ -177,8 +176,20 @@ def classify_sell_offers(response: dict[str, Any], holder: str) -> bool:
     return False
 
 
+class TokenLike(Protocol):
+    """What the evaluator needs from a token — `nft_index.OnchainNft` (live
+    index) and `epoch_state.EpochToken` (archive replay) both satisfy it."""
+
+    @property
+    def nft_id(self) -> str: ...
+    @property
+    def owner(self) -> str | None: ...
+    @property
+    def is_burned(self) -> bool: ...
+
+
 def evaluate_accruals(
-    live_tokens: Sequence[OnchainNft],
+    live_tokens: Sequence[TokenLike],
     listed_fn: Callable[[str], bool | None],
     system_accounts: frozenset[str],
     epoch: str,
@@ -268,6 +279,8 @@ class EpochReport:
     skipped_system: int
     skipped_ownerless: int
     unknown: int
+    deferred: str | None = None
+    """Certification reason; when set, accrued == 0 and cursor did NOT move."""
 
 
 def epochs_to_accrue(last_accrued: str | None, today: str) -> list[str]:
@@ -298,40 +311,62 @@ def utc_today() -> str:
     return datetime.now(timezone.utc).strftime("%Y-%m-%d")
 
 
-def run_accrual(
+def accrue_epoch(
     conn: sqlite3.Connection,
-    live_tokens: Sequence[OnchainNft],
-    listed_fn: Callable[[str], bool | None],
+    epoch: str,
+    tokens: Mapping[str, epoch_state.EpochToken],
+    system_accounts: frozenset[str],
+) -> EpochReport:
+    """Evaluate + write one epoch from replayed state. Cursor untouched —
+    the nightly runner advances it, the #412 backfill never does."""
+    result = evaluate_accruals(
+        list(tokens.values()),
+        listed_fn=lambda nft_id: tokens[nft_id].listed,
+        system_accounts=system_accounts,
+        epoch=epoch,
+    )
+    inserted = record_accruals(conn, result.rows)
+    return EpochReport(
+        epoch=epoch,
+        accrued=inserted,
+        skipped_listed=result.skipped_listed,
+        skipped_burned=result.skipped_burned,
+        skipped_system=result.skipped_system,
+        skipped_ownerless=result.skipped_ownerless,
+        unknown=result.unknown,
+    )
+
+
+def run_archive_accrual(
+    conn: sqlite3.Connection,
+    network: str,
     system_accounts: frozenset[str],
     today: str | None = None,
+    *,
+    certify: Callable[[sqlite3.Connection, str, str], str | None] = epoch_state.certify_epoch,
+    replay_factory: Callable[[sqlite3.Connection], Any] = epoch_state.EpochReplay,
 ) -> list[EpochReport]:
-    """Accrue every epoch still owed, advancing the cursor as each one lands.
+    """Accrue every epoch still owed from the archive, advancing the cursor as
+    each one lands (#411 option 2).
 
-    A catch-up epoch is evaluated against ownership and listing state as they
-    are NOW, not as they were at that epoch's close — reconstructing historical
-    per-day state from `nft_events` is heavy and, given offer-index ambiguity,
-    unreliable (spec §3/§8). At 1 BRIX/day the drift is negligible.
-
-    The cursor advances per epoch rather than once at the end, so a crash
-    mid-catch-up never re-grants the epochs that already committed.
+    Zero RPCs: owner-of-record and listed-state come from `epoch_state`, as of
+    each epoch's close — so a catch-up epoch is evaluated against the state it
+    HAD, not the state things are in now. An epoch the archive cannot certify
+    is deferred: nothing written, cursor left behind it, and the walk stops
+    (a later epoch cannot be certified while an earlier one is not). The
+    accruals PK makes the eventual completion safe by construction.
     """
     today = today or utc_today()
     reports: list[EpochReport] = []
+    replay = replay_factory(conn)
     for epoch in epochs_to_accrue(get_meta(conn, LAST_ACCRUED_EPOCH), today):
-        result = evaluate_accruals(live_tokens, listed_fn, system_accounts, epoch)
-        inserted = record_accruals(conn, result.rows)
+        reason = certify(conn, network, epoch)
+        if reason is not None:
+            reports.append(EpochReport(epoch, 0, 0, 0, 0, 0, 0, deferred=reason))
+            break
+        report = accrue_epoch(conn, epoch, replay.advance_to(epoch), system_accounts)
         set_meta(conn, LAST_ACCRUED_EPOCH, epoch)
-        reports.append(
-            EpochReport(
-                epoch=epoch,
-                accrued=inserted,
-                skipped_listed=result.skipped_listed,
-                skipped_burned=result.skipped_burned,
-                skipped_system=result.skipped_system,
-                skipped_ownerless=result.skipped_ownerless,
-                unknown=result.unknown,
-            )
-        )
+        reports.append(report)
     return reports
 
 

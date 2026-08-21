@@ -11,6 +11,7 @@ import sqlite3
 import pytest
 
 from lfg_core import brix_drip
+from lfg_core.epoch_state import EpochToken
 from lfg_core.nft_index import OnchainNft
 
 
@@ -246,60 +247,121 @@ def test_epochs_to_accrue_is_empty_when_already_current():
     assert brix_drip.epochs_to_accrue("2026-08-25", "2026-08-19") == []
 
 
-def test_run_accrual_advances_cursor_and_is_a_no_op_on_rerun(conn):
-    tokens = [_nft("NFT_A", "rAlice"), _nft("NFT_B", "rBob")]
-    reports = brix_drip.run_accrual(
-        conn,
-        tokens,
-        listed_fn=lambda nft_id: False,
-        system_accounts=frozenset(),
-        today="2026-08-19",
-    )
-    assert [r.epoch for r in reports] == ["2026-08-18"]
-    assert reports[0].accrued == 2
-    assert brix_drip.get_meta(conn, brix_drip.LAST_ACCRUED_EPOCH) == "2026-08-18"
+class _FakeReplay:
+    """Stands in for epoch_state.EpochReplay: a fixed state for every epoch."""
 
-    again = brix_drip.run_accrual(
+    def __init__(self, tokens):
+        self._tokens = tokens
+
+    def advance_to(self, epoch):
+        return self._tokens
+
+
+def _tok(nft_id, owner="rHolder", listed=False, live=True):
+    return EpochToken(nft_id=nft_id, owner=owner, listed=listed, live=live)
+
+
+def _run(conn, tokens, *, today, certify=lambda c, n, e: None):
+    return brix_drip.run_archive_accrual(
         conn,
-        tokens,
-        listed_fn=lambda nft_id: False,
-        system_accounts=frozenset(),
-        today="2026-08-19",
+        "testnet",
+        frozenset(),
+        today=today,
+        certify=certify,
+        replay_factory=lambda c: _FakeReplay(tokens),
     )
-    assert again == []
+
+
+def test_run_archive_accrual_advances_cursor_and_is_a_no_op_on_rerun(conn):
+    tokens = {"A": _tok("A", "rAlice"), "B": _tok("B", "rBob")}
+    reports = _run(conn, tokens, today="2026-08-19")
+    assert [r.epoch for r in reports] == ["2026-08-18"]
+    assert reports[0].accrued == 2 and reports[0].deferred is None
+    assert brix_drip.get_meta(conn, brix_drip.LAST_ACCRUED_EPOCH) == "2026-08-18"
+    assert _run(conn, tokens, today="2026-08-19") == []
     assert conn.execute("SELECT COUNT(*) FROM brix_accruals").fetchone()[0] == 2
 
 
-def test_run_accrual_reports_skip_reasons_per_epoch(conn):
-    tokens = [_nft("A", "rAlice"), _nft("B", "rBob"), _nft("C", "rCarol")]
-
-    def listed_fn(nft_id):
-        return {"B": True, "C": None}.get(nft_id, False)
-
-    reports = brix_drip.run_accrual(
+def test_run_archive_accrual_reports_skip_reasons(conn):
+    tokens = {
+        "A": _tok("A", "rAlice"),
+        "B": _tok("B", "rBob", listed=True),
+        "C": _tok("C", "rCarol", listed=None),
+        "D": _tok("D", "rDave", live=False),
+        "E": _tok("E", "rSys"),
+    }
+    reports = brix_drip.run_archive_accrual(
         conn,
-        tokens,
-        listed_fn=listed_fn,
-        system_accounts=frozenset(),
+        "testnet",
+        frozenset({"rSys"}),
         today="2026-08-19",
+        certify=lambda c, n, e: None,
+        replay_factory=lambda c: _FakeReplay(tokens),
     )
-    assert reports[0].accrued == 1
-    assert reports[0].skipped_listed == 1
-    assert reports[0].unknown == 1
+    r = reports[0]
+    assert (r.accrued, r.skipped_listed, r.unknown, r.skipped_burned, r.skipped_system) == (
+        1,
+        1,
+        1,
+        1,
+        1,
+    )
 
 
-def test_run_accrual_catch_up_writes_every_missed_epoch(conn):
+def test_run_archive_accrual_catch_up_writes_every_missed_epoch(conn):
     brix_drip.set_meta(conn, brix_drip.LAST_ACCRUED_EPOCH, "2026-08-15")
-    reports = brix_drip.run_accrual(
-        conn,
-        [_nft("NFT_A", "rAlice")],
-        listed_fn=lambda nft_id: False,
-        system_accounts=frozenset(),
-        today="2026-08-19",
-    )
+    reports = _run(conn, {"A": _tok("A", "rAlice")}, today="2026-08-19")
     assert [r.epoch for r in reports] == ["2026-08-16", "2026-08-17", "2026-08-18"]
     assert brix_drip.claimable(conn, "rAlice") == 3
     assert brix_drip.get_meta(conn, brix_drip.LAST_ACCRUED_EPOCH) == "2026-08-18"
+
+
+def test_uncertified_epoch_defers_and_leaves_cursor_behind(conn):
+    brix_drip.set_meta(conn, brix_drip.LAST_ACCRUED_EPOCH, "2026-08-15")
+    gated = {"2026-08-17"}
+    certify = lambda c, n, e: "gap" if e in gated else None  # noqa: E731
+    reports = _run(conn, {"A": _tok("A", "rAlice")}, today="2026-08-19", certify=certify)
+    assert [(r.epoch, r.deferred) for r in reports] == [("2026-08-16", None), ("2026-08-17", "gap")]
+    assert brix_drip.get_meta(conn, brix_drip.LAST_ACCRUED_EPOCH) == "2026-08-16"
+    assert brix_drip.claimable(conn, "rAlice") == 1
+    # gap healed → next run completes 17 and 18 exactly once
+    again = _run(conn, {"A": _tok("A", "rAlice")}, today="2026-08-19")
+    assert [r.epoch for r in again] == ["2026-08-17", "2026-08-18"]
+    assert brix_drip.claimable(conn, "rAlice") == 3
+    assert conn.execute("SELECT COUNT(*) FROM brix_accruals").fetchone()[0] == 3
+
+
+def test_listed_token_earns_nothing_from_archive_fixtures(conn, tmp_path):
+    """Regression driven by the real replay, not a mocked RPC (spec §Testing)."""
+    from lfg_core import epoch_state, history_store
+
+    h = history_store.init_history_db(str(tmp_path / "h.db"))
+    brix_drip.ensure_schema(h)
+    h.execute(
+        "INSERT INTO archive_state (network, genesis_hash, baseline_complete, validated_close_time,"
+        " updated_at) VALUES ('testnet', ?, 1, ?, 1)",
+        ("G" * 64, 4102444800),
+    )
+    for i, (ev, kw) in enumerate(
+        [
+            ("mint", {"nft_id": "L", "to_addr": "rAlice"}),
+            (
+                "offer_create",
+                {"nft_id": "L", "from_addr": "rAlice", "offer_index": "O1", "offer_flags": 1},
+            ),
+            ("mint", {"nft_id": "U", "to_addr": "rBob"}),
+        ]
+    ):
+        history_store.insert_nft_event(
+            h, {"tx_hash": f"T{i}", "event": ev, "ts": 1767225600 + i, "ledger_index": i, **kw}
+        )
+    h.commit()
+    brix_drip.set_meta(h, brix_drip.LAST_ACCRUED_EPOCH, "2025-12-31")
+    reports = brix_drip.run_archive_accrual(h, "testnet", frozenset(), today="2026-01-03")
+    assert reports[-1].epoch == "2026-01-02"
+    assert brix_drip.claimable(h, "rAlice") == 0
+    assert brix_drip.claimable(h, "rBob") == 2  # 01-01 and 01-02
+    assert epoch_state.state_at_epoch(h, "2026-01-02")["L"].listed is True
 
 
 # --- Task 4: conservation audit -------------------------------------------
