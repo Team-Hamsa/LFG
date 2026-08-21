@@ -1,6 +1,6 @@
 # Epoch-accurate BRIX accrual from the archive (#411 option 2)
 
-**Status:** implemented — branch feat/411-412-epoch-accrual (PR number to be stamped on open)
+**Status:** implemented — PR #421 (branch feat/411-412-epoch-accrual)
 **Date:** 2026-08-20
 **Issue:** [#411](https://github.com/Team-Hamsa/LFG/issues/411)
 **Companion spec:** `2026-08-20-brix-gap-reimbursement-design.md` (#412) — shares
