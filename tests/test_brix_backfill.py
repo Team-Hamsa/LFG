@@ -67,7 +67,14 @@ def ev(
 
 
 def plan(
-    h, *, start="2026-01-01", end="2026-01-04", apply=False, system=frozenset(), eligible=None
+    h,
+    *,
+    start="2026-01-01",
+    end="2026-01-04",
+    apply=False,
+    system=frozenset(),
+    eligible=None,
+    today=None,
 ):
     if eligible is None:
         # Every nft_id the fixtures write is a collection character unless a
@@ -77,7 +84,14 @@ def plan(
 
         eligible = {k: v.owner for k, v in epoch_state.state_at_epoch(h, end).items()}
     return brix_backfill.plan_gap_backfill(
-        h, "testnet", system, start=start, end=end, apply=apply, eligible=eligible
+        h,
+        "testnet",
+        system,
+        start=start,
+        end=end,
+        apply=apply,
+        eligible=eligible,
+        today=today,
     )
 
 
@@ -248,3 +262,24 @@ def test_apply_is_idempotent_across_runs(h):
     second = plan(h, apply=True)
     assert (first.written, second.written) == (4, 0)
     assert brix_drip.claimable(h, ALICE) == 4
+
+
+def test_a_transfer_after_the_window_is_not_owner_drift(h):
+    """Greptile P1: drift is compared at the archive's CURRENT state, so a
+    legitimate post-`end` transfer that the index already reflects is not
+    drift — and the window's close-time holder is still credited."""
+    ev(h, "mint", ts=D["2026-01-01"] + 1, to_addr=ALICE)
+    ev(h, "transfer", ts=D["2026-01-05"] + 1, from_addr=ALICE, to_addr=BOB)
+    p = plan(h, apply=True, eligible={"N1": BOB}, today="2026-01-06")
+    assert p.owner_drift == [] and p.refused is None
+    assert p.written == 4 and brix_drip.claimable(h, ALICE) == 4
+    assert brix_drip.claimable(h, BOB) == 0
+
+
+def test_an_index_owner_with_no_archived_transfer_still_drifts(h):
+    """The stale-derived-table case: nothing in nft_events explains the index
+    owner even at today, so --apply is still refused."""
+    ev(h, "mint", ts=D["2026-01-01"] + 1, to_addr=ALICE)
+    p = plan(h, apply=True, eligible={"N1": BOB}, today="2026-01-06")
+    assert p.owner_drift == ["N1"] and p.refused is not None
+    assert p.written == 0

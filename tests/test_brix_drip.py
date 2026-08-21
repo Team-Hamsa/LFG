@@ -10,7 +10,7 @@ import sqlite3
 
 import pytest
 
-from lfg_core import brix_drip
+from lfg_core import brix_drip, epoch_state, history_store
 from lfg_core.epoch_state import EpochToken
 from lfg_core.nft_index import OnchainNft
 
@@ -725,3 +725,90 @@ def test_an_epoch_with_no_tokens_at_all_is_not_a_deferral(conn):
     reports = _run(conn, {}, today="2026-08-19", eligible={"A": "rAlice"})
     assert reports[0].deferred is None and reports[0].accrued == 0
     assert brix_drip.get_meta(conn, brix_drip.LAST_ACCRUED_EPOCH) == "2026-08-18"
+
+
+# --- Post-close transfers are NOT owner drift (Greptile P1) ----------------
+
+
+@pytest.fixture()
+def hconn(tmp_path):
+    """A real history DB, so the drift tests run the REAL EpochReplay over
+    real `nft_events` rows rather than a fixed fake state."""
+    c = history_store.init_history_db(str(tmp_path / "history_real.db"))
+    brix_drip.ensure_schema(c)
+    yield c
+    c.close()
+
+
+_EV = {"i": 0}
+
+
+def _ev(conn, event, *, nft_id, ts, to_addr=None, from_addr=None):
+    _EV["i"] += 1
+    history_store.insert_nft_event(
+        conn,
+        {
+            "tx_hash": f"H{_EV['i']}",
+            "nft_id": nft_id,
+            "event": event,
+            "from_addr": from_addr,
+            "to_addr": to_addr,
+            "ts": ts,
+            "ledger_index": _EV["i"],
+            "offer_index": None,
+            "offer_flags": None,
+        },
+    )
+    conn.commit()
+
+
+def _seed_padding(conn, eligible, count=20):
+    """Live, unlisted, undrifted tokens so one drifted token stays under the
+    I1 mass-unknown threshold and the drift behaviour is isolated."""
+    for i in range(count):
+        _ev(
+            conn,
+            "mint",
+            nft_id=f"P{i}",
+            ts=epoch_state.epoch_close_ts("2026-08-17") - 10,
+            to_addr=f"rPad{i}",
+        )
+        eligible[f"P{i}"] = f"rPad{i}"
+
+
+def _run_real(conn, eligible, today="2026-08-19"):
+    return brix_drip.run_archive_accrual(
+        conn,
+        "testnet",
+        frozenset(),
+        today=today,
+        eligible=eligible,
+        certify=lambda c, n, e: None,
+    )
+
+
+def test_a_transfer_after_the_epoch_closed_is_not_drift(hconn):
+    """The close-time holder is paid: the archive itself explains why the
+    index owner differs, so the derived table is not stale."""
+    close = epoch_state.epoch_close_ts("2026-08-18")
+    _ev(hconn, "mint", nft_id="A", ts=close - 100, to_addr="rAlice")
+    _ev(hconn, "transfer", nft_id="A", ts=close + 10, from_addr="rAlice", to_addr="rBob")
+    eligible = {"A": "rBob"}  # index already reflects the post-close transfer
+    _seed_padding(hconn, eligible)
+    r = _run_real(hconn, eligible)[0]
+    assert (r.epoch, r.owner_drift, r.unknown) == ("2026-08-18", 0, 0)
+    assert brix_drip.claimable(hconn, "rAlice") == 1
+    assert brix_drip.claimable(hconn, "rBob") == 0
+
+
+def test_an_index_owner_with_no_archived_transfer_is_still_drift(hconn):
+    """The stale-derived-table case the check exists for: nothing in
+    nft_events explains the index owner, so the token must not pay."""
+    close = epoch_state.epoch_close_ts("2026-08-18")
+    _ev(hconn, "mint", nft_id="A", ts=close - 100, to_addr="rAlice")
+    eligible = {"A": "rBob"}  # index moved; the archive never saw the accept
+    _seed_padding(hconn, eligible)
+    r = _run_real(hconn, eligible)[0]
+    assert (r.owner_drift, r.unknown) == (1, 1)
+    assert brix_drip.claimable(hconn, "rAlice") == 0
+    assert brix_drip.claimable(hconn, "rBob") == 0

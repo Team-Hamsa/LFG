@@ -293,8 +293,10 @@ class EpochReport:
     """Replayed tokens that are not in the collection index (#411 C1) — Closet
     and trait tokens live in `nft_events` but were never drip-eligible."""
     owner_drift: int = 0
-    """Tokens whose replayed owner disagreed with the index at the newest
-    epoch (#411 C2). Forced to unknown listing state, so they never pay."""
+    """Tokens whose replayed owner at the archive's LATEST state disagreed with
+    the index, checked on the newest epoch only (#411 C2). That means a stale
+    derived table, not a legitimate post-close transfer. Forced to unknown
+    listing state, so they never pay."""
 
 
 def epochs_to_accrue(last_accrued: str | None, today: str) -> list[str]:
@@ -359,22 +361,29 @@ def evaluate_epoch(
     *,
     eligible: Mapping[str, str | None],
     network: str = "",
-    drift_check: bool = False,
+    current: Mapping[str, epoch_state.EpochToken] | None = None,
 ) -> EpochEvaluation:
-    """Decide one epoch from replayed state. Pure — writes nothing."""
+    """Decide one epoch from replayed state. Pure — writes nothing.
+
+    `current` is the replay advanced to the archive's LATEST state (today's
+    close bound), supplied only for the newest epoch. Drift compares THAT owner
+    against the index — never the epoch-close owner. A token legitimately
+    transferred after the epoch closed replays the new owner at `current` too,
+    so it is not drift and still pays its close-time holder; a mismatch here
+    means the derived table is stale (a tesSUCCESS accept in `xrpl_txs` with no
+    `nft_events` row), and paying that replay would misattribute the drip.
+    """
     kept, skipped_ineligible = eligible_tokens(tokens, eligible)
 
     drift: set[str] = set()
-    if drift_check:
-        # Only meaningful for the NEWEST epoch (yesterday): for older catch-up
-        # epochs the replayed owner is legitimately not today's index owner.
-        # A mismatch there means the derived table is incomplete (a tesSUCCESS
-        # accept in xrpl_txs with no nft_events row), so the replayed owner is
-        # wrong and paying it would misattribute the drip.
+    if current is not None:
         drift = {
-            t.nft_id
-            for t in kept
-            if t.live and eligible[t.nft_id] is not None and t.owner != eligible[t.nft_id]
+            nft_id
+            for nft_id, tok in current.items()
+            if nft_id in eligible
+            and tok.live
+            and eligible[nft_id] is not None
+            and tok.owner != eligible[nft_id]
         }
 
     def _listed(nft_id: str) -> bool | None:
@@ -426,7 +435,7 @@ def accrue_epoch(
     *,
     eligible: Mapping[str, str | None],
     network: str = "",
-    drift_check: bool = False,
+    current: Mapping[str, epoch_state.EpochToken] | None = None,
 ) -> EpochReport:
     """Evaluate + write one epoch from replayed state. Cursor untouched —
     the nightly runner advances it, the #412 backfill never does.
@@ -440,7 +449,7 @@ def accrue_epoch(
         system_accounts,
         eligible=eligible,
         network=network,
-        drift_check=drift_check,
+        current=current,
     )
     result = ev.result
     inserted = 0 if ev.deferred else record_accruals(conn, result.rows)
@@ -483,6 +492,14 @@ def run_archive_accrual(
     replay = replay_factory(conn)
     owed = epochs_to_accrue(get_meta(conn, LAST_ACCRUED_EPOCH), today)
     newest = owed[-1] if owed else None
+    # A SEPARATE throwaway replay advanced to the archive's latest state, so
+    # the newest epoch's drift check compares index owner against the CURRENT
+    # replayed owner (a stale derived table) rather than the epoch-close owner
+    # (which a legitimate post-close transfer would make differ). The walking
+    # replay above must not be disturbed — it is mid-window.
+    current: Mapping[str, epoch_state.EpochToken] | None = None
+    if newest is not None:
+        current = replay_factory(conn).advance_to(today)
     for epoch in owed:
         reason = certify(conn, network, epoch)
         if reason is not None:
@@ -495,12 +512,12 @@ def run_archive_accrual(
             system_accounts,
             eligible=eligible,
             network=network,
-            drift_check=(epoch == newest),
+            current=current if epoch == newest else None,
         )
         reports.append(report)
         if report.owner_drift:
             logger.warning(
-                "brix_drip: %s tokens' replayed owner disagrees with onchain_nfts at %s — "
+                "brix_drip: %s tokens' current replayed owner disagrees with onchain_nfts at %s — "
                 "they were NOT paid; the derived table is incomplete, run "
                 "scripts/derive_history_events.py --network %s",
                 report.owner_drift,

@@ -786,9 +786,11 @@ DB and paid on-chain only when the holder explicitly claims. Design:
     still earned for the epochs it was live).
   - *Owner drift.* A `tesSUCCESS` accept in `xrpl_txs` with no `nft_events` row
     is invisible to certification and leaves the replay on a stale owner. The
-    nightly compares the replayed owner at the NEWEST epoch against the index
-    and pays nothing for a mismatch (`owner_drift` in the report); the backfill
-    REFUSES `--apply` (exit 2, nothing written) on any drift.
+    Both jobs compare the replay's CURRENT owner (advanced to today's archived
+    state) against the index — never the epoch-close owner, so a legitimate
+    post-close transfer is not drift. The nightly checks this on the newest
+    epoch and pays nothing for a mismatch (`owner_drift` in the report); the
+    backfill REFUSES `--apply` (exit 2, nothing written) on any drift.
   - *Mass-unknown deferral.* If listing state is unknown for more than
     `brix_drip.UNKNOWN_DEFER_FRACTION` (10%) of the eligible non-system live
     tokens, the epoch is DEFERRED — nothing written, cursor NOT advanced —

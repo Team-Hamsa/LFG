@@ -25,8 +25,9 @@ Window: 2025-09-15 (day after the last real payout run) → yesterday.
      AND NOT EXISTS (SELECT 1 FROM nft_events e WHERE e.tx_hash = t.tx_hash);
    ```
    A non-zero count means **rederive first** (step 1) — do not apply. The
-   script's own owner-drift check (it compares the replayed owner at `--to`
-   against `onchain_nfts` and REFUSES `--apply`, exit 2, writing nothing) is
+   script's own owner-drift check (it compares the replay's current owner —
+   advanced to today's archived state, not to `--to` — against `onchain_nfts`
+   and REFUSES `--apply`, exit 2, writing nothing) is
    the backstop, not the primary control.
 4. Confirm the nightly job is healthy: `pm2 logs lfg-brix-accrue --lines 20` shows `accrued=` lines with `unknown=0`.
 

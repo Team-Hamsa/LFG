@@ -45,9 +45,11 @@ class GapPlan:
     written: int = 0
     top: list[tuple[str, int]] = field(default_factory=list)
     owner_drift: list[str] = field(default_factory=list)
-    """nft_ids whose replayed owner at `end` disagrees with `onchain_nfts`
-    (#411 C2): the derived table is missing events, so the replay would credit
-    the wrong wallet. Reported on a dry run; refuses an --apply."""
+    """nft_ids whose replayed owner at the archive's LATEST state disagrees
+    with `onchain_nfts` (#411 C2): the derived table is missing events, so the
+    replay would credit the wrong wallet. Compared at today, never at `end`, so
+    a legitimate post-`end` transfer is not drift. Reported on a dry run;
+    refuses an --apply."""
     refused: str | None = None
     """Set when --apply was asked for but nothing was written."""
 
@@ -84,6 +86,7 @@ def plan_gap_backfill(
     certify: Callable[[sqlite3.Connection, str, str], str | None] = epoch_state.certify_epoch,
     replay_factory: Callable[[sqlite3.Connection], Any] = epoch_state.EpochReplay,
     top_n: int = 20,
+    today: str | None = None,
 ) -> GapPlan:
     """Walk start..end through the same per-epoch path as the nightly job.
 
@@ -97,13 +100,17 @@ def plan_gap_backfill(
     misattribute BRIX. Re-derive, then re-run.
     """
     # Owner-drift pre-check (#411 C2), BEFORE anything is written: a second,
-    # throwaway replay advanced straight to `end` (one pass, ~0.2s on mainnet)
-    # so an --apply can be refused rather than half-applied.
+    # throwaway replay advanced to the archive's LATEST state (one pass, ~0.2s
+    # on mainnet) so an --apply can be refused rather than half-applied. It
+    # advances to TODAY, not to `end`: drift means the derived table is stale
+    # (an accept in xrpl_txs with no nft_events row), and comparing the
+    # window's close-time owner against today's index would flag every
+    # legitimate transfer made after `end` as drift.
     drift_replay = replay_factory(hconn)
-    end_state = drift_replay.advance_to(end)
+    current = drift_replay.advance_to(today or brix_drip.utc_today())
     owner_drift = sorted(
         nft_id
-        for nft_id, tok in end_state.items()
+        for nft_id, tok in current.items()
         if nft_id in eligible
         and tok.live
         and eligible[nft_id] is not None
