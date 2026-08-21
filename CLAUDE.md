@@ -717,11 +717,19 @@ DB and paid on-chain only when the holder explicitly claims. Design:
   across three sources; float drift would force epsilon tolerances or false
   FAILs. Only the on-chain `brix_events.delta` side is REAL, and it is rounded
   before comparison.
-- **"Unlisted" is checked on-ledger and fails closed.** A token is listed if
-  its CURRENT holder has a live sell offer (destination-locked offers count —
-  that is how brokered marketplaces list; offers left by a previous owner do
-  not, being unfillable). Unknown offer state pays **nothing**: paying listed
-  NFTs through a clio outage is unrecoverable, a missed BRIX is not.
+- **"Unlisted" is reconstructed from the history archive and fails closed
+  (#411 option 2).** `lfg_core/epoch_state.py` replays `nft_events` to the
+  close of each epoch for owner-of-record + listed-state (a sell offer counts
+  only while its creator is still the holder; destination-locked offers
+  count; buy offers never do) — zero per-token RPCs. An epoch pays only when
+  `epoch_state.certify_epoch` passes (certified baseline, no continuity gap,
+  archive validated past the epoch close); otherwise it is **deferred** —
+  nothing written, `brix_meta.last_accrued_epoch` stays behind it — and the
+  next run completes it once the listener's auto catch-up heals the archive.
+  Unknown listing state (legacy `nft_events` rows without
+  `offer_index`/`offer_flags`) pays **nothing**; re-run
+  `scripts/derive_history_events.py` to populate them, then
+  `scripts/backfill_brix_gap.py` to reimburse the skipped epochs.
 - **Claims are paid by the distributor account, never the issuer** — an
   issuer-signed payout would silently mint new supply on every claim. The
   distributor must be **pre-funded with BRIX**; `scripts/brix_admin_report.py`
@@ -759,11 +767,16 @@ DB and paid on-chain only when the holder explicitly claims. Design:
   .venv/bin/python scripts/brix_admin_report.py --network mainnet
   .venv/bin/python scripts/audit_brix_distribution.py --network mainnet  # exits non-zero on drift
   .venv/bin/python scripts/recover_brix_claims.py --network mainnet
+
+  # #412 gap reimbursement — dry run first, review the report, then --apply
+  .venv/bin/python scripts/derive_history_events.py --network mainnet --distributor <current-distributor>
+  .venv/bin/python scripts/backfill_brix_gap.py --network mainnet            # dry run
+  .venv/bin/python scripts/backfill_brix_gap.py --network mainnet --apply
   ```
   `accrue_brix.py` refuses to run (exit 2) unless `--network` matches
   `XRPL_NETWORK` **and** the endpoint's ledger-32570 hash matches the chain
-  identity the archive recorded — on the wrong chain every token looks unlisted,
-  and unlisted is what pays.
+  identity the archive recorded — the archive's chain identity must match the
+  endpoint's.
 
 ### Dress-up trait economy — Phase 2 (testnet, on-ledger ops)
 

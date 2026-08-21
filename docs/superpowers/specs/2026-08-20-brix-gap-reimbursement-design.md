@@ -1,6 +1,6 @@
 # BRIX drip gap reimbursement (#412)
 
-**Status:** approved design, not yet implemented
+**Status:** implemented — branch feat/411-412-epoch-accrual (PR number to be stamped on open)
 **Date:** 2026-08-20
 **Issue:** [#412](https://github.com/Team-Hamsa/LFG/issues/412)
 **Depends on:** `2026-08-20-epoch-accurate-accrual-design.md` (#411 option 2) —
