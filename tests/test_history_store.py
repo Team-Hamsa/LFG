@@ -1,5 +1,6 @@
 # Tests for lfg_core/history_store.py
 import os
+import sqlite3
 import sys
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
@@ -139,3 +140,43 @@ def test_nft_events_rebirth_index_exists(tmp_path):
         )
     }
     assert "idx_nftev_event_number" in names
+
+
+def test_nft_events_has_offer_columns(tmp_path):
+    conn = history_store.init_history_db(str(tmp_path / "h.db"))
+    cols = {r[1] for r in conn.execute("PRAGMA table_info(nft_events)")}
+    assert {"offer_index", "offer_flags"} <= cols
+
+
+def test_pre_existing_db_self_migrates_offer_columns(tmp_path):
+    path = str(tmp_path / "old.db")
+    raw = sqlite3.connect(path)
+    raw.execute(
+        "CREATE TABLE nft_events (tx_hash TEXT, nft_id TEXT, nft_number INTEGER, event TEXT,"
+        " from_addr TEXT, to_addr TEXT, price_drops INTEGER, price_token TEXT,"
+        " ledger_index INTEGER, ts INTEGER, PRIMARY KEY (tx_hash, nft_id))"
+    )
+    raw.commit()
+    raw.close()
+    conn = history_store.init_history_db(path)
+    cols = {r[1] for r in conn.execute("PRAGMA table_info(nft_events)")}
+    assert {"memo_action", "offer_index", "offer_flags"} <= cols
+
+
+def test_insert_nft_event_persists_offer_columns(tmp_path):
+    conn = history_store.init_history_db(str(tmp_path / "h.db"))
+    history_store.insert_nft_event(
+        conn,
+        {
+            "tx_hash": "T1",
+            "nft_id": "N1",
+            "event": "offer_create",
+            "from_addr": "rA",
+            "ledger_index": 5,
+            "ts": 100,
+            "offer_index": "OI",
+            "offer_flags": 1,
+        },
+    )
+    row = conn.execute("SELECT offer_index, offer_flags FROM nft_events").fetchone()
+    assert tuple(row) == ("OI", 1)

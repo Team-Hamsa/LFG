@@ -1,4 +1,5 @@
 # Tests for lfg_core/history_events.py
+import json
 import os
 import sys
 
@@ -267,3 +268,89 @@ def test_malformed_memos_do_not_break_derivation():
     ]
     (ev,) = _nft(tx)
     assert ev["event"] == "mint" and ev["memo_action"] is None
+
+
+def _created_offer(owner, amount, flags, index="AA" * 32, nft_id=None):
+    return {
+        "CreatedNode": {
+            "LedgerEntryType": "NFTokenOffer",
+            "LedgerIndex": index,
+            "NewFields": {
+                "Owner": owner,
+                "Amount": amount,
+                "Flags": flags,
+                "NFTokenID": nft_id or fx.NFT_A,
+            },
+        }
+    }
+
+
+def test_offer_create_records_offer_index_and_flags():
+    tx = {
+        **fx.OFFER_CREATE,
+        "meta": {
+            "TransactionResult": "tesSUCCESS",
+            "AffectedNodes": [_created_offer(fx.ALICE, "9000000", 1, index="CC" * 32)],
+        },
+    }
+    (ev,) = _nft(tx)
+    assert ev["event"] == "offer_create"
+    assert ev["offer_index"] == "CC" * 32
+    assert ev["offer_flags"] == 1
+
+
+def test_offer_create_falls_back_to_meta_offer_id():
+    # clio/rippled stamp the created offer's index as meta.offer_id too.
+    tx = {
+        **fx.OFFER_CREATE,
+        "meta": {
+            "TransactionResult": "tesSUCCESS",
+            "AffectedNodes": [],
+            "offer_id": "DD" * 32,
+        },
+    }
+    (ev,) = _nft(tx)
+    assert ev["offer_index"] == "DD" * 32
+
+
+def test_offer_create_buy_offer_flags_zero():
+    tx = {**fx.OFFER_CREATE, "Flags": 0, "Account": fx.BOB}
+    (ev,) = _nft(tx)
+    assert ev["offer_flags"] == 0
+
+
+def test_offer_cancel_records_deleted_offer_index():
+    node = fx._deleted_offer(fx.ALICE, "9000000", 1)
+    node["DeletedNode"]["LedgerIndex"] = "EE" * 32
+    tx = {**fx.OFFER_CANCEL, "meta": {"TransactionResult": "tesSUCCESS", "AffectedNodes": [node]}}
+    (ev,) = _nft(tx)
+    assert ev["event"] == "offer_cancel"
+    assert ev["offer_index"] == "EE" * 32
+    assert ev["offer_flags"] == 1
+
+
+def test_sale_records_consumed_sell_offer_index():
+    tx = json.loads(json.dumps(fx.SALE_XRP))
+    for n in tx["meta"]["AffectedNodes"]:
+        if "DeletedNode" in n and n["DeletedNode"]["LedgerEntryType"] == "NFTokenOffer":
+            n["DeletedNode"]["LedgerIndex"] = "FF" * 32
+    (ev,) = _nft(tx)
+    assert ev["event"] == "sale"
+    assert ev["offer_index"] == "FF" * 32
+
+
+def test_brokered_sale_records_the_sell_side_index():
+    tx = json.loads(json.dumps(fx.SALE_BROKERED))
+    for n in tx["meta"]["AffectedNodes"]:
+        d = n.get("DeletedNode") or {}
+        if d.get("LedgerEntryType") == "NFTokenOffer":
+            d["LedgerIndex"] = (
+                ("SELL" * 16) if int(d["FinalFields"]["Flags"]) & 1 else ("BUY0" * 16)
+            )
+    (ev,) = _nft(tx)
+    assert ev["offer_index"] == "SELL" * 16
+
+
+def test_legacy_fixture_without_ledger_index_yields_none():
+    (ev,) = _nft(fx.OFFER_CANCEL)  # fixture node has no LedgerIndex
+    assert ev["offer_index"] is None and ev["offer_flags"] == 1

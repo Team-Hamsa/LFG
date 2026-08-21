@@ -62,12 +62,29 @@ def tx_unix_time(tx: dict[str, Any]) -> int | None:
 
 
 def _deleted_nft_offers(meta: dict[str, Any]) -> list[dict[str, Any]]:
+    """Deleted NFTokenOffer nodes as their FinalFields, plus the ledger-object
+    index under the synthetic key ``LedgerIndex`` (never a FinalFields key)
+    so callers can name WHICH offer closed — the epoch replay (#411) matches
+    an ``offer_cancel``/accept to the ``offer_create`` that opened it."""
     out = []
     for node in meta.get("AffectedNodes", []):
         wrapper = node.get("DeletedNode") or {}
         if wrapper.get("LedgerEntryType") == "NFTokenOffer":
-            out.append(wrapper.get("FinalFields") or {})
+            out.append(
+                {**(wrapper.get("FinalFields") or {}), "LedgerIndex": wrapper.get("LedgerIndex")}
+            )
     return out
+
+
+def _created_nft_offer_index(meta: dict[str, Any]) -> str | None:
+    """Index of the NFTokenOffer an NFTokenCreateOffer created. Prefers the
+    CreatedNode, falls back to clio's ``meta.offer_id`` convenience field."""
+    for node in meta.get("AffectedNodes", []):
+        wrapper = node.get("CreatedNode") or {}
+        if wrapper.get("LedgerEntryType") == "NFTokenOffer" and wrapper.get("LedgerIndex"):
+            return str(wrapper["LedgerIndex"])
+    offer_id = meta.get("offer_id")
+    return str(offer_id) if offer_id else None
 
 
 def _price_fields(amount: Any) -> tuple[int | None, str | None]:
@@ -142,6 +159,8 @@ def derive_nft_events(tx: dict[str, Any], *, nft_issuer: str) -> list[dict[str, 
         "nft_number": None,
         "price_drops": None,
         "price_token": None,
+        "offer_index": None,
+        "offer_flags": None,
         "ledger_index": tx.get("ledger_index"),
         "ts": ts,
     }
@@ -225,6 +244,7 @@ def derive_nft_events(tx: dict[str, Any], *, nft_issuer: str) -> list[dict[str, 
             "from_addr": seller,
             "to_addr": buyer,
             "price_token": token,
+            "offer_index": sell.get("LedgerIndex") if sell is not None else None,
         }
         if event == "sale" and drops:
             out["price_drops"] = drops
@@ -244,6 +264,8 @@ def derive_nft_events(tx: dict[str, Any], *, nft_issuer: str) -> list[dict[str, 
                 "to_addr": tx.get("Destination"),
                 "price_drops": drops,
                 "price_token": token,
+                "offer_index": _created_nft_offer_index(meta),
+                "offer_flags": int(tx.get("Flags") or 0),
             }
         ]
 
@@ -255,6 +277,8 @@ def derive_nft_events(tx: dict[str, Any], *, nft_issuer: str) -> list[dict[str, 
                 "event": "offer_cancel",
                 "from_addr": o.get("Owner"),
                 "to_addr": None,
+                "offer_index": o.get("LedgerIndex"),
+                "offer_flags": int(o.get("Flags") or 0),
             }
             for o in _deleted_nft_offers(meta)
             if o.get("NFTokenID")
