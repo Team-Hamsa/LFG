@@ -16,6 +16,12 @@ row with no `offer_index`/`offer_flags`, a cancel that cannot be matched while
 offers are open) makes that token's `listed` **None**, which
 `brix_drip.evaluate_accruals` never pays. Re-deriving the archive
 (`scripts/derive_history_events.py`) populates the columns and clears it.
+
+Scope note (#411 I3): the replay deliberately takes only `hconn` and therefore
+enumerates every `nft_id` the archive knows — including soulbound Closet and
+tradeable trait tokens, which are NOT drip-eligible. Collection scoping is the
+CALLER's job, done against `onchain_nfts` (`nft_index.collection_owners`) in
+`brix_drip` / `brix_backfill`, which keeps this module pure over one DB.
 """
 
 from __future__ import annotations
@@ -84,6 +90,12 @@ class EpochReplay:
         self._consumed_until: int | None = None  # exclusive ts bound already applied
 
     def advance_to(self, epoch: str) -> dict[str, EpochToken]:
+        # Assumption: `close_time` is monotonic non-decreasing in
+        # `ledger_index` (true on the XRPL — a ledger never closes before its
+        # parent). Under it, slicing the event stream by ts in increasing
+        # chunks yields exactly the same end state as one `ts < bound` pass,
+        # which is what makes this incremental replay equal the one-shot
+        # `state_at_epoch` while costing one archive scan for a whole window.
         bound = epoch_close_ts(epoch)
         if self._consumed_until is not None and bound < self._consumed_until:
             raise ValueError(

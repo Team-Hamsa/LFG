@@ -38,7 +38,7 @@ from datetime import datetime
 REPO_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
 sys.path.insert(0, REPO_ROOT)
 
-from lfg_core import brix_drip, config, history_store  # noqa: E402
+from lfg_core import brix_drip, config, history_store, nft_index  # noqa: E402
 
 
 def system_accounts() -> frozenset[str]:
@@ -61,8 +61,8 @@ def system_accounts() -> frozenset[str]:
 def _utc_date(value: str) -> str:
     """Reject a malformed --date at parse time.
 
-    Otherwise the bad value only blows up inside run_accrual — after both
-    databases are open and every sell-offer lookup has already been paid for.
+    Otherwise the bad value only blows up inside run_archive_accrual — after
+    both databases are open and the archive replay has already been walked.
     """
     try:
         parsed = datetime.strptime(value, "%Y-%m-%d")
@@ -118,7 +118,14 @@ async def _amain() -> int:
     # No per-token sweep (#411 option 2): owner-of-record and listed-state
     # come from the history archive as of each epoch's close. Zero RPCs;
     # DB-bound.
-    reports = brix_drip.run_archive_accrual(hconn, args.network, excluded, today=args.date)
+    # Eligibility is the COLLECTION index, not the archive (#411 C1):
+    # nft_events also carries soulbound Closet and tradeable trait tokens,
+    # which were never drip-eligible.
+    oconn = nft_index.init_db(nft_index.index_db_path(args.network))
+    eligible = nft_index.collection_owners(oconn)
+    reports = brix_drip.run_archive_accrual(
+        hconn, args.network, excluded, today=args.date, eligible=eligible
+    )
     if not reports:
         print(f"[{args.network}] nothing to accrue — cursor is current")
         return 0
@@ -133,8 +140,16 @@ async def _amain() -> int:
         print(
             f"[{args.network}] {r.epoch}: accrued={r.accrued} listed={r.skipped_listed} "
             f"system={r.skipped_system} burned={r.skipped_burned} "
-            f"ownerless={r.skipped_ownerless} unknown={r.unknown}"
+            f"ownerless={r.skipped_ownerless} unknown={r.unknown} "
+            f"ineligible={r.skipped_ineligible} owner_drift={r.owner_drift}"
         )
+        if r.owner_drift:
+            print(
+                f"[{args.network}] WARNING: {r.owner_drift} token(s) replay a different owner "
+                f"than onchain_nfts — the derived table is missing events, so they were NOT "
+                f"paid. Run scripts/derive_history_events.py --network {args.network}, then "
+                f"scripts/backfill_brix_gap.py to reimburse."
+            )
         if r.unknown:
             # Fail-closed under-accrual: listing state could not be
             # reconstructed for these tokens (legacy nft_events rows without

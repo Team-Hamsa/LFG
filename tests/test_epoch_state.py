@@ -306,3 +306,20 @@ def test_certify_defers_on_continuity_gap(hconn):
 def test_certify_is_per_network(hconn):
     _archive_row(hconn, validated_close=D["2026-01-04"])
     assert epoch_state.certify_epoch(hconn, "mainnet", "2026-01-01") is not None
+
+
+def test_bare_continuity_gap_at_defers_as_unbounded(tmp_path):
+    """T3: a gap recorded with only `continuity_gap_at` (no reason) must still
+    defer, and say so — an unbounded gap is the least trustworthy kind."""
+    from lfg_core import epoch_state, history_store
+
+    conn = history_store.init_history_db(str(tmp_path / "h.db"))
+    conn.execute(
+        "INSERT INTO archive_state (network, genesis_hash, baseline_complete,"
+        " validated_close_time, continuity_gap_at, updated_at)"
+        " VALUES ('testnet', ?, 1, ?, 12345, 1)",
+        ("G" * 64, 4102444800),
+    )
+    conn.commit()
+    reason = epoch_state.certify_epoch(conn, "testnet", "2026-01-01")
+    assert reason is not None and "unbounded" in reason

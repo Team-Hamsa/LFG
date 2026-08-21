@@ -261,12 +261,19 @@ def _tok(nft_id, owner="rHolder", listed=False, live=True):
     return EpochToken(nft_id=nft_id, owner=owner, listed=listed, live=live)
 
 
-def _run(conn, tokens, *, today, certify=lambda c, n, e: None):
+def _all_eligible(tokens):
+    """Default eligibility for the fixtures: every replayed token is a
+    collection character (the #411 C1 filter is exercised explicitly below)."""
+    return {nft_id: tok.owner for nft_id, tok in tokens.items()}
+
+
+def _run(conn, tokens, *, today, certify=lambda c, n, e: None, eligible=None):
     return brix_drip.run_archive_accrual(
         conn,
         "testnet",
         frozenset(),
         today=today,
+        eligible=_all_eligible(tokens) if eligible is None else eligible,
         certify=certify,
         replay_factory=lambda c: _FakeReplay(tokens),
     )
@@ -289,18 +296,23 @@ def test_run_archive_accrual_reports_skip_reasons(conn):
         "C": _tok("C", "rCarol", listed=None),
         "D": _tok("D", "rDave", live=False),
         "E": _tok("E", "rSys"),
+        # Padding: one unknown out of three decidable tokens would trip the
+        # #411 I1 mass-unknown deferral, which this test is not about.
+        **{f"P{i}": _tok(f"P{i}", f"rPad{i}") for i in range(10)},
     }
     reports = brix_drip.run_archive_accrual(
         conn,
         "testnet",
         frozenset({"rSys"}),
         today="2026-08-19",
+        eligible=_all_eligible(tokens),
         certify=lambda c, n, e: None,
         replay_factory=lambda c: _FakeReplay(tokens),
     )
     r = reports[0]
+    assert r.deferred is None
     assert (r.accrued, r.skipped_listed, r.unknown, r.skipped_burned, r.skipped_system) == (
-        1,
+        11,
         1,
         1,
         1,
@@ -357,7 +369,9 @@ def test_listed_token_earns_nothing_from_archive_fixtures(conn, tmp_path):
         )
     h.commit()
     brix_drip.set_meta(h, brix_drip.LAST_ACCRUED_EPOCH, "2025-12-31")
-    reports = brix_drip.run_archive_accrual(h, "testnet", frozenset(), today="2026-01-03")
+    reports = brix_drip.run_archive_accrual(
+        h, "testnet", frozenset(), today="2026-01-03", eligible={"L": "rAlice", "U": "rBob"}
+    )
     assert reports[-1].epoch == "2026-01-02"
     assert brix_drip.claimable(h, "rAlice") == 0
     assert brix_drip.claimable(h, "rBob") == 2  # 01-01 and 01-02
@@ -609,3 +623,72 @@ def test_audit_reports_skipped_not_passed_on_a_fresh_install(conn):
     ]
     assert result.skipped is True
     assert result.ok is True
+
+
+# --- #411 fix wave: eligibility scope, owner drift, mass-unknown deferral ---
+
+
+def test_tokens_outside_the_collection_index_never_accrue(conn):
+    """C1: nft_events also carries Closet (taxon 1762) and trait (176) tokens.
+    They were never drip-eligible; only onchain_nfts membership pays."""
+    tokens = {"CHAR": _tok("CHAR", "rAlice"), "CLOSET": _tok("CLOSET", "rAlice")}
+    reports = _run(conn, tokens, today="2026-08-19", eligible={"CHAR": "rAlice"})
+    r = reports[0]
+    assert (r.accrued, r.skipped_ineligible) == (1, 1)
+    assert brix_drip.claimable(conn, "rAlice") == 1
+    assert [row[0] for row in conn.execute("SELECT nft_id FROM brix_accruals")] == ["CHAR"]
+
+
+def test_owner_drift_on_the_newest_epoch_blocks_payment(conn):
+    """C2: a replayed owner that disagrees with the index means nft_events is
+    missing an accept — the token must not pay to the stale wallet."""
+    tokens = {"A": _tok("A", "rStale"), "B": _tok("B", "rBob")}
+    # Padding keeps the drift-induced unknown under the I1 mass-unknown
+    # threshold, so this test isolates the drift behaviour.
+    tokens.update({f"P{i}": _tok(f"P{i}", f"rPad{i}") for i in range(20)})
+    eligible = {"A": "rFresh", "B": "rBob"}
+    eligible.update({f"P{i}": f"rPad{i}" for i in range(20)})
+    reports = _run(conn, tokens, today="2026-08-19", eligible=eligible)
+    r = reports[0]
+    assert (r.accrued, r.owner_drift, r.unknown) == (21, 1, 1)
+    assert brix_drip.claimable(conn, "rStale") == 0
+    assert brix_drip.claimable(conn, "rBob") == 1
+
+
+def test_owner_drift_is_not_checked_on_older_catch_up_epochs(conn):
+    """The same mismatch on a catch-up epoch is legitimate history — the token
+    genuinely had a different owner then — so it still earns."""
+    brix_drip.set_meta(conn, brix_drip.LAST_ACCRUED_EPOCH, "2026-08-16")
+    tokens = {"A": _tok("A", "rStale"), "B": _tok("B", "rBob")}
+    # Padding keeps the drift-induced unknown under the I1 mass-unknown
+    # threshold, so this test isolates the drift behaviour.
+    tokens.update({f"P{i}": _tok(f"P{i}", f"rPad{i}") for i in range(20)})
+    eligible = {"A": "rFresh", "B": "rBob"}
+    eligible.update({f"P{i}": f"rPad{i}" for i in range(20)})
+    reports = _run(conn, tokens, today="2026-08-19", eligible=eligible)
+    assert [(r.epoch, r.owner_drift) for r in reports] == [
+        ("2026-08-17", 0),
+        ("2026-08-18", 1),
+    ]
+    # Paid for 08-17 (no drift check) but not for 08-18 (drift).
+    assert brix_drip.claimable(conn, "rStale") == 1
+
+
+def test_mass_unknown_epoch_defers_and_leaves_the_cursor_behind(conn):
+    """I1: a stale derived table makes almost everything unknown. Writing ~0
+    rows and advancing the cursor would silently forfeit the day forever."""
+    tokens = {f"N{i}": _tok(f"N{i}", f"r{i}", listed=None) for i in range(9)}
+    tokens["OK"] = _tok("OK", "rOk")
+    reports = _run(conn, tokens, today="2026-08-19")
+    r = reports[0]
+    assert r.deferred is not None and "derive_history_events" in r.deferred
+    assert r.accrued == 0
+    assert conn.execute("SELECT COUNT(*) FROM brix_accruals").fetchone()[0] == 0
+    assert brix_drip.get_meta(conn, brix_drip.LAST_ACCRUED_EPOCH) is None
+
+
+def test_a_few_unknowns_below_the_threshold_still_accrue(conn):
+    tokens = {f"N{i}": _tok(f"N{i}", f"r{i}") for i in range(20)}
+    tokens["U"] = _tok("U", "rUnknown", listed=None)
+    reports = _run(conn, tokens, today="2026-08-19")
+    assert reports[0].deferred is None and reports[0].accrued == 20

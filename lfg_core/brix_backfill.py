@@ -15,7 +15,7 @@ from __future__ import annotations
 
 import sqlite3
 from collections import Counter
-from collections.abc import Callable
+from collections.abc import Callable, Mapping
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
 from typing import Any
@@ -30,6 +30,9 @@ class EpochLine:
     listed: int
     unknown: int
     deferred: str | None = None
+    ineligible: int = 0
+    """Replayed tokens outside the collection index (#411 C1) — Closet /
+    trait tokens, never drip-eligible."""
 
 
 @dataclass(frozen=True)
@@ -41,6 +44,12 @@ class GapPlan:
     deferred: list[tuple[str, str]]
     written: int = 0
     top: list[tuple[str, int]] = field(default_factory=list)
+    owner_drift: list[str] = field(default_factory=list)
+    """nft_ids whose replayed owner at `end` disagrees with `onchain_nfts`
+    (#411 C2): the derived table is missing events, so the replay would credit
+    the wrong wallet. Reported on a dry run; refuses an --apply."""
+    refused: str | None = None
+    """Set when --apply was asked for but nothing was written."""
 
 
 def epoch_range(start: str, end: str) -> list[str]:
@@ -71,6 +80,7 @@ def plan_gap_backfill(
     start: str,
     end: str,
     apply: bool,
+    eligible: Mapping[str, str | None],
     certify: Callable[[sqlite3.Connection, str, str], str | None] = epoch_state.certify_epoch,
     replay_factory: Callable[[sqlite3.Connection], Any] = epoch_state.EpochReplay,
     top_n: int = 20,
@@ -80,13 +90,32 @@ def plan_gap_backfill(
     Uncertified epochs are reported and SKIPPED (not a stop — a healed
     historical gap must not hide the epochs after it). On a dry run, rows that
     already exist are subtracted so the report shows what is still owed.
+
+    `apply=True` is REFUSED (nothing written, `refused` set) when the archive
+    shows owner drift against the collection index or any unknown listing
+    state — both mean `nft_events` is incomplete and the reconstruction would
+    misattribute BRIX. Re-derive, then re-run.
     """
+    # Owner-drift pre-check (#411 C2), BEFORE anything is written: a second,
+    # throwaway replay advanced straight to `end` (one pass, ~0.2s on mainnet)
+    # so an --apply can be refused rather than half-applied.
+    drift_replay = replay_factory(hconn)
+    end_state = drift_replay.advance_to(end)
+    owner_drift = sorted(
+        nft_id
+        for nft_id, tok in end_state.items()
+        if nft_id in eligible
+        and tok.live
+        and eligible[nft_id] is not None
+        and tok.owner != eligible[nft_id]
+    )
+
     replay = replay_factory(hconn)
     lines: list[EpochLine] = []
     wallets: Counter[str] = Counter()
     nft_ids: set[str] = set()
     deferred: list[tuple[str, str]] = []
-    written = 0
+    pending: list[Any] = []
     for epoch in epoch_range(start, end):
         reason = certify(hconn, network, epoch)
         if reason is not None:
@@ -94,28 +123,55 @@ def plan_gap_backfill(
             lines.append(EpochLine(epoch, 0, 0, 0, deferred=reason))
             continue
         tokens = replay.advance_to(epoch)
+        kept, ineligible = brix_drip.eligible_tokens(tokens, eligible)
 
+        # The replay's tri-state `listed` IS the fail-closed signal
+        # evaluate_accruals wants (True/False/None) — passed straight through.
         def _listed(nft_id: str, _tokens: dict[str, Any] = tokens) -> bool | None:
-            return bool(_tokens[nft_id].listed) if _tokens[nft_id].listed is not None else None
+            listed: bool | None = _tokens[nft_id].listed
+            return listed
 
         result = brix_drip.evaluate_accruals(
-            list(tokens.values()),
+            kept,
             listed_fn=_listed,
             system_accounts=system_accounts,
             epoch=epoch,
         )
         existing = _already_accrued(hconn, epoch)
         fresh = [r for r in result.rows if r.nft_id not in existing]
-        if apply:
-            written += brix_drip.record_accruals(hconn, fresh)
+        pending.extend(fresh)
         for r in fresh:
             wallets[r.owner] += int(r.amount)
             nft_ids.add(r.nft_id)
         lines.append(
             EpochLine(
-                epoch, sum(int(r.amount) for r in fresh), result.skipped_listed, result.unknown
+                epoch,
+                sum(int(r.amount) for r in fresh),
+                result.skipped_listed,
+                result.unknown,
+                ineligible=ineligible,
             )
         )
+
+    # Writing is deferred to here so a refusal writes NOTHING. Both refusal
+    # conditions mean the archive itself is untrustworthy for this window:
+    # missing derived events (owner drift) or unreconstructable listing state.
+    unknown_total = sum(line.unknown for line in lines)
+    refused: str | None = None
+    written = 0
+    if apply and owner_drift:
+        refused = (
+            f"{len(owner_drift)} token(s) replay a different owner than onchain_nfts — "
+            f"run scripts/derive_history_events.py --network {network} first"
+        )
+    elif apply and unknown_total:
+        refused = (
+            f"{unknown_total} token-epoch(s) have unknown listing state — "
+            f"run scripts/derive_history_events.py --network {network} first"
+        )
+    elif apply:
+        written = brix_drip.record_accruals(hconn, pending)
+
     total = sum(wallets.values())
     return GapPlan(
         epochs=lines,
@@ -125,4 +181,6 @@ def plan_gap_backfill(
         deferred=deferred,
         written=written,
         top=wallets.most_common(top_n),
+        owner_drift=owner_drift,
+        refused=refused,
     )

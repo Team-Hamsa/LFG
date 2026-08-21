@@ -15,7 +15,9 @@ paid here, unclaimed backpay never leaves the treasury.
 The nightly cursor (`brix_meta.last_accrued_epoch`) is never touched.
 Idempotent: re-running is a no-op; a partial run resumes.
 
-PREREQUISITES (spec §Ops): re-derive the archive first so nft_events carries
+PREREQUISITES (spec §Ops): confirm the derived table is complete (see
+docs/ops/brix-gap-backfill.md — the tesSUCCESS-without-nft_events query must
+return 0), re-derive the archive first so nft_events carries
 offer_index/offer_flags (`scripts/derive_history_events.py --network <net>`),
 and make sure the archive is certified for the window (otherwise every epoch
 reports DEFERRED and nothing is written).
@@ -35,7 +37,7 @@ sys.path.insert(0, os.path.join(REPO_ROOT, "scripts"))
 
 from accrue_brix import _utc_date, system_accounts  # noqa: E402
 
-from lfg_core import brix_backfill, brix_drip, config, history_store  # noqa: E402
+from lfg_core import brix_backfill, brix_drip, config, history_store, nft_index  # noqa: E402
 
 DEFAULT_FROM = "2025-09-15"
 
@@ -71,10 +73,13 @@ def _print_report(
     )
     if applied:
         print(f"[{network}] rows inserted this run: {plan.written}")
-    print(f"[{network}] per-epoch (epoch brix listed unknown):")
+    print(f"[{network}] per-epoch (epoch brix listed unknown ineligible):")
     for line in plan.epochs:
         tag = f"  DEFERRED — {line.deferred}" if line.deferred else ""
-        print(f"  {line.epoch} {line.brix:6d} {line.listed:6d} {line.unknown:6d}{tag}")
+        print(
+            f"  {line.epoch} {line.brix:6d} {line.listed:6d} {line.unknown:6d} "
+            f"{line.ineligible:6d}{tag}"
+        )
     if plan.top:
         print(f"[{network}] top wallets:")
         for wallet, amount in plan.top:
@@ -85,6 +90,13 @@ def _print_report(
         )
         for epoch, reason in plan.deferred:
             print(f"  {epoch}: {reason}")
+    if plan.owner_drift:
+        print(
+            f"[{network}] WARNING: {len(plan.owner_drift)} token(s) replay a different owner "
+            f"than onchain_nfts — the derived table is incomplete. First 10: "
+            f"{', '.join(plan.owner_drift[:10])}"
+        )
+        print(f"[{network}] fix with: scripts/derive_history_events.py --network {network}")
     unknown_total = sum(line.unknown for line in plan.epochs)
     if unknown_total:
         print(
@@ -132,6 +144,10 @@ async def _amain() -> int:
         print(f"refusing: {chain_error}")
         return 2
 
+    # Drip eligibility = the collection index, never the raw archive (#411 C1).
+    oconn = nft_index.init_db(nft_index.index_db_path(args.network))
+    eligible = nft_index.collection_owners(oconn)
+
     plan = brix_backfill.plan_gap_backfill(
         hconn,
         args.network,
@@ -139,8 +155,19 @@ async def _amain() -> int:
         start=args.start,
         end=end,
         apply=args.apply,
+        eligible=eligible,
         top_n=args.top,
     )
+    if plan.refused:
+        # --apply refused BEFORE any write (#411 C2/I1).
+        print(f"[{args.network}] REFUSED: {plan.refused}")
+        if plan.owner_drift:
+            print(
+                f"[{args.network}] {len(plan.owner_drift)} drifting token(s); first 10: "
+                f"{', '.join(plan.owner_drift[:10])}"
+            )
+        print(f"[{args.network}] nothing was written.")
+        return 2
     liability = hconn.execute(
         "SELECT COALESCE(SUM(amount), 0) FROM brix_accruals WHERE claim_id IS NULL"
     ).fetchone()[0]

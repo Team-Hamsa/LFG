@@ -33,8 +33,9 @@ def fake_dbs(monkeypatch, tmp_path):
 def test_cli_calls_archive_accrual_and_never_fetches_offers(monkeypatch, fake_dbs, capsys):
     called = {}
 
-    def fake_run(conn, network, system_accounts, today=None):
+    def fake_run(conn, network, system_accounts, today=None, *, eligible, **kw):
         called["args"] = (network, today)
+        called["eligible"] = eligible
         return [brix_drip.EpochReport("2026-08-18", 3, 1, 0, 0, 0, 0)]
 
     async def boom(*a, **k):

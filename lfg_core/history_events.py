@@ -270,6 +270,13 @@ def derive_nft_events(tx: dict[str, Any], *, nft_issuer: str) -> list[dict[str, 
         ]
 
     if ttype == "NFTokenCancelOffer":
+        # KNOWN LOSS, deliberately not "fixed": nft_events is keyed
+        # (tx_hash, nft_id), so one tx cancelling TWO offers on the SAME token
+        # collides and only one row survives. The #411 epoch replay then still
+        # sees the lost offer as open and reads the token as LISTED — i.e. it
+        # under-pays the drip. That is the safe direction; widening the key (or
+        # dropping a row) to make the replay pay would risk paying genuinely
+        # listed tokens, which is unrecoverable. Leave it.
         return [
             {
                 **base,

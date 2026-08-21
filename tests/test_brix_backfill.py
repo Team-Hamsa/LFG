@@ -66,8 +66,19 @@ def ev(
     conn.commit()
 
 
-def plan(h, *, start="2026-01-01", end="2026-01-04", apply=False, system=frozenset()):
-    return brix_backfill.plan_gap_backfill(h, "testnet", system, start=start, end=end, apply=apply)
+def plan(
+    h, *, start="2026-01-01", end="2026-01-04", apply=False, system=frozenset(), eligible=None
+):
+    if eligible is None:
+        # Every nft_id the fixtures write is a collection character unless a
+        # test says otherwise (#411 C1). Owners are taken from the replay so
+        # the C2 drift check is a no-op by default.
+        from lfg_core import epoch_state
+
+        eligible = {k: v.owner for k, v in epoch_state.state_at_epoch(h, end).items()}
+    return brix_backfill.plan_gap_backfill(
+        h, "testnet", system, start=start, end=end, apply=apply, eligible=eligible
+    )
 
 
 def test_epoch_range_inclusive_and_validated():
@@ -171,3 +182,50 @@ def test_backfilled_accrual_binds_under_one_open_claim_index(h):
         ).fetchone()[0]
         == 4
     )
+
+
+# --- #411 fix wave: eligibility scope, owner drift, unknown refusal ---------
+
+
+def test_backfill_ignores_tokens_outside_the_collection_index(h):
+    """C1: a Closet/trait token lives in nft_events but never in onchain_nfts,
+    so it must earn nothing here either."""
+    ev(h, "mint", ts=D["2026-01-01"] + 1, nft_id="CHAR", to_addr=ALICE)
+    ev(h, "mint", ts=D["2026-01-01"] + 1, nft_id="CLOSET", to_addr=ALICE)
+    p = plan(h, eligible={"CHAR": ALICE})
+    assert p.wallets == {ALICE: 4} and p.nfts == 1
+    assert all(line.ineligible == 1 for line in p.epochs)
+
+
+def test_dry_run_reports_owner_drift_without_refusing(h):
+    ev(h, "mint", ts=D["2026-01-01"] + 1, to_addr=ALICE)
+    p = plan(h, eligible={"N1": BOB})
+    assert p.owner_drift == ["N1"] and p.refused is None
+    assert p.written == 0
+
+
+def test_apply_refuses_and_writes_nothing_on_owner_drift(h):
+    ev(h, "mint", ts=D["2026-01-01"] + 1, to_addr=ALICE)
+    p = plan(h, apply=True, eligible={"N1": BOB})
+    assert p.refused is not None and "derive_history_events" in p.refused
+    assert p.written == 0
+    assert h.execute("SELECT COUNT(*) FROM brix_accruals").fetchone()[0] == 0
+
+
+def test_apply_refuses_and_writes_nothing_on_unknown_listing_state(h):
+    """I1 for the backfill: legacy offer_create rows with no offer_flags make
+    listing state unreconstructable — reimbursing from that is a guess."""
+    ev(h, "mint", ts=D["2026-01-01"] + 1, to_addr=ALICE)
+    ev(h, "offer_create", ts=D["2026-01-02"] + 1, from_addr=ALICE)  # no flags
+    p = plan(h, apply=True)
+    assert p.refused is not None and "unknown listing state" in p.refused
+    assert p.written == 0
+    assert h.execute("SELECT COUNT(*) FROM brix_accruals").fetchone()[0] == 0
+
+
+def test_apply_writes_when_clean(h):
+    ev(h, "mint", ts=D["2026-01-01"] + 1, to_addr=ALICE)
+    p = plan(h, apply=True)
+    assert p.refused is None and p.owner_drift == []
+    assert p.written == 4
+    assert brix_drip.claimable(h, ALICE) == 4

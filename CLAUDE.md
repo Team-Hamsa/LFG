@@ -777,6 +777,31 @@ DB and paid on-chain only when the holder explicitly claims. Design:
   `XRPL_NETWORK` **and** the endpoint's ledger-32570 hash matches the chain
   identity the archive recorded — the archive's chain identity must match the
   endpoint's.
+- **The archive replay is only as good as the DERIVED table, and both jobs
+  fail closed on that.** Three guards, all added with #411/#412:
+  - *Eligibility is `onchain_nfts`, not `nft_events`.* The archive also carries
+    soulbound Closet (taxon 1762) and trait (176) tokens, which were never
+    drip-eligible; both jobs scope every epoch through
+    `nft_index.collection_owners` (burned rows included — a token burned today
+    still earned for the epochs it was live).
+  - *Owner drift.* A `tesSUCCESS` accept in `xrpl_txs` with no `nft_events` row
+    is invisible to certification and leaves the replay on a stale owner. The
+    nightly compares the replayed owner at the NEWEST epoch against the index
+    and pays nothing for a mismatch (`owner_drift` in the report); the backfill
+    REFUSES `--apply` (exit 2, nothing written) on any drift.
+  - *Mass-unknown deferral.* If listing state is unknown for more than
+    `brix_drip.UNKNOWN_DEFER_FRACTION` (10%) of the eligible non-system live
+    tokens, the epoch is DEFERRED — nothing written, cursor NOT advanced —
+    instead of certifying a silent zero-pay day the accruals PK would make
+    permanent. The backfill refuses `--apply` on any unknown at all.
+  Consequences to expect: **after every listener restart the nightly defers**
+  until #402's auto catch-up clears the `continuity_gap_*` columns, and a gap
+  present during a backfill makes EVERY epoch report DEFERRED — heal the
+  archive first. Likewise **the very first nightly run after deploy, before
+  the rederive, defers (or accrues ≈nothing) — expected**; re-run
+  `derive_history_events.py`, then `backfill_brix_gap.py` reimburses the missed
+  epochs. Full procedure incl. the mandatory derived-completeness SQL
+  pre-check: `docs/ops/brix-gap-backfill.md`.
 
 ### Dress-up trait economy — Phase 2 (testnet, on-ledger ops)
 

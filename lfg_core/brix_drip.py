@@ -44,6 +44,14 @@ logger = logging.getLogger(__name__)
 # explicit schema migration away (spec §9), not a config knob.
 DRIP_AMOUNT = 1
 
+# An epoch whose listing state is unknown for more than this fraction of the
+# eligible, non-system, live tokens is DEFERRED rather than accrued (#411 I1).
+# Without it a stale derived table (nft_events missing offer_index/offer_flags)
+# makes the nightly certify, write ~nothing, and ADVANCE the cursor — a silent
+# zero-pay day that the PK then makes permanent. Deferring costs a day of
+# latency; advancing costs the day's drip forever.
+UNKNOWN_DEFER_FRACTION = 0.10
+
 _SCHEMA = """
 CREATE TABLE IF NOT EXISTS brix_accruals (
     epoch_date TEXT NOT NULL,               -- YYYY-MM-DD (UTC)
@@ -281,6 +289,12 @@ class EpochReport:
     unknown: int
     deferred: str | None = None
     """Certification reason; when set, accrued == 0 and cursor did NOT move."""
+    skipped_ineligible: int = 0
+    """Replayed tokens that are not in the collection index (#411 C1) — Closet
+    and trait tokens live in `nft_events` but were never drip-eligible."""
+    owner_drift: int = 0
+    """Tokens whose replayed owner disagreed with the index at the newest
+    epoch (#411 C2). Forced to unknown listing state, so they never pay."""
 
 
 def epochs_to_accrue(last_accrued: str | None, today: str) -> list[str]:
@@ -311,21 +325,111 @@ def utc_today() -> str:
     return datetime.now(timezone.utc).strftime("%Y-%m-%d")
 
 
+@dataclass(frozen=True)
+class EpochEvaluation:
+    """One epoch decided but NOT yet written (#411 I1 needs the numbers before
+    the write, so evaluation and persistence are two steps)."""
+
+    result: EvaluationResult
+    skipped_ineligible: int = 0
+    owner_drift: int = 0
+    deferred: str | None = None
+
+
+def eligible_tokens(
+    tokens: Mapping[str, epoch_state.EpochToken],
+    eligible: Mapping[str, str | None],
+) -> tuple[list[epoch_state.EpochToken], int]:
+    """Replayed tokens restricted to the collection index, plus the drop count.
+
+    `nft_events` covers every taxon we archive — Closet (soulbound) and trait
+    tokens included — while `onchain_nfts` holds only the collection. Scoping
+    here (rather than inside the pure `epoch_state` replay) keeps the replay
+    free of the index DB; callers build `eligible` from
+    `nft_index.collection_owners`.
+    """
+    kept = [t for nft_id, t in tokens.items() if nft_id in eligible]
+    return kept, len(tokens) - len(kept)
+
+
+def evaluate_epoch(
+    epoch: str,
+    tokens: Mapping[str, epoch_state.EpochToken],
+    system_accounts: frozenset[str],
+    *,
+    eligible: Mapping[str, str | None],
+    network: str = "",
+    drift_check: bool = False,
+) -> EpochEvaluation:
+    """Decide one epoch from replayed state. Pure — writes nothing."""
+    kept, skipped_ineligible = eligible_tokens(tokens, eligible)
+
+    drift: set[str] = set()
+    if drift_check:
+        # Only meaningful for the NEWEST epoch (yesterday): for older catch-up
+        # epochs the replayed owner is legitimately not today's index owner.
+        # A mismatch there means the derived table is incomplete (a tesSUCCESS
+        # accept in xrpl_txs with no nft_events row), so the replayed owner is
+        # wrong and paying it would misattribute the drip.
+        drift = {
+            t.nft_id
+            for t in kept
+            if t.live and eligible[t.nft_id] is not None and t.owner != eligible[t.nft_id]
+        }
+
+    def _listed(nft_id: str) -> bool | None:
+        if nft_id in drift:
+            return None  # unknown → never paid
+        return tokens[nft_id].listed
+
+    result = evaluate_accruals(
+        kept,
+        listed_fn=_listed,
+        system_accounts=system_accounts,
+        epoch=epoch,
+    )
+    # Everything actually in scope for a pay/no-pay decision this epoch.
+    considered = len(result.rows) + result.skipped_listed + result.unknown
+    deferred: str | None = None
+    if considered and result.unknown > UNKNOWN_DEFER_FRACTION * considered:
+        deferred = (
+            f"listing state unknown for {result.unknown} of {considered} eligible tokens — "
+            f"run scripts/derive_history_events.py --network {network or '<net>'}"
+        )
+    return EpochEvaluation(
+        result=result,
+        skipped_ineligible=skipped_ineligible,
+        owner_drift=len(drift),
+        deferred=deferred,
+    )
+
+
 def accrue_epoch(
     conn: sqlite3.Connection,
     epoch: str,
     tokens: Mapping[str, epoch_state.EpochToken],
     system_accounts: frozenset[str],
+    *,
+    eligible: Mapping[str, str | None],
+    network: str = "",
+    drift_check: bool = False,
 ) -> EpochReport:
     """Evaluate + write one epoch from replayed state. Cursor untouched —
-    the nightly runner advances it, the #412 backfill never does."""
-    result = evaluate_accruals(
-        list(tokens.values()),
-        listed_fn=lambda nft_id: tokens[nft_id].listed,
-        system_accounts=system_accounts,
-        epoch=epoch,
+    the nightly runner advances it, the #412 backfill never does.
+
+    A mass-unknown epoch is deferred instead of written (see
+    `UNKNOWN_DEFER_FRACTION`): nothing is inserted and the caller must leave
+    the cursor behind it."""
+    ev = evaluate_epoch(
+        epoch,
+        tokens,
+        system_accounts,
+        eligible=eligible,
+        network=network,
+        drift_check=drift_check,
     )
-    inserted = record_accruals(conn, result.rows)
+    result = ev.result
+    inserted = 0 if ev.deferred else record_accruals(conn, result.rows)
     return EpochReport(
         epoch=epoch,
         accrued=inserted,
@@ -334,6 +438,9 @@ def accrue_epoch(
         skipped_system=result.skipped_system,
         skipped_ownerless=result.skipped_ownerless,
         unknown=result.unknown,
+        deferred=ev.deferred,
+        skipped_ineligible=ev.skipped_ineligible,
+        owner_drift=ev.owner_drift,
     )
 
 
@@ -343,6 +450,7 @@ def run_archive_accrual(
     system_accounts: frozenset[str],
     today: str | None = None,
     *,
+    eligible: Mapping[str, str | None],
     certify: Callable[[sqlite3.Connection, str, str], str | None] = epoch_state.certify_epoch,
     replay_factory: Callable[[sqlite3.Connection], Any] = epoch_state.EpochReplay,
 ) -> list[EpochReport]:
@@ -359,14 +467,37 @@ def run_archive_accrual(
     today = today or utc_today()
     reports: list[EpochReport] = []
     replay = replay_factory(conn)
-    for epoch in epochs_to_accrue(get_meta(conn, LAST_ACCRUED_EPOCH), today):
+    owed = epochs_to_accrue(get_meta(conn, LAST_ACCRUED_EPOCH), today)
+    newest = owed[-1] if owed else None
+    for epoch in owed:
         reason = certify(conn, network, epoch)
         if reason is not None:
             reports.append(EpochReport(epoch, 0, 0, 0, 0, 0, 0, deferred=reason))
             break
-        report = accrue_epoch(conn, epoch, replay.advance_to(epoch), system_accounts)
-        set_meta(conn, LAST_ACCRUED_EPOCH, epoch)
+        report = accrue_epoch(
+            conn,
+            epoch,
+            replay.advance_to(epoch),
+            system_accounts,
+            eligible=eligible,
+            network=network,
+            drift_check=(epoch == newest),
+        )
         reports.append(report)
+        if report.owner_drift:
+            logger.warning(
+                "brix_drip: %s tokens' replayed owner disagrees with onchain_nfts at %s — "
+                "they were NOT paid; the derived table is incomplete, run "
+                "scripts/derive_history_events.py --network %s",
+                report.owner_drift,
+                epoch,
+                network,
+            )
+        if report.deferred:
+            # Mass-unknown epoch: nothing written, cursor stays behind it so a
+            # later run (after a rederive) completes it. Stop the walk.
+            break
+        set_meta(conn, LAST_ACCRUED_EPOCH, epoch)
     return reports
 
 
