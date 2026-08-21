@@ -25,6 +25,8 @@ from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from typing import Any
 
+from lfg_core import history_store
+
 _LSF_SELL = 1
 
 
@@ -156,3 +158,36 @@ class EpochReplay:
 def state_at_epoch(hconn: sqlite3.Connection, epoch: str) -> dict[str, EpochToken]:
     """Per-`nft_id` owner / listed / live as of the close of `epoch`."""
     return EpochReplay(hconn).advance_to(epoch)
+
+
+def certify_epoch(hconn: sqlite3.Connection, network: str, epoch: str) -> str | None:
+    """Why `epoch` is NOT payable from this archive, or None when it is.
+
+    The replay is only as good as the archive's continuity, so an epoch pays
+    only when the same provenance sponsored-mint eligibility fails closed on
+    holds: certified baseline, no recorded continuity gap, and the listener has
+    validated past the epoch's close (it has SEEN the whole epoch). Anything
+    else is deferred — nothing written, cursor left behind — and the next run
+    completes it once the listener's auto catch-up (#402) heals the archive.
+    """
+    state = history_store.get_archive_state(hconn, network)
+    if state is None:
+        return "no archive_state row"
+    if not state.baseline_complete:
+        return "baseline not complete"
+    if (
+        state.continuity_gap_at is not None
+        or state.continuity_gap_after is not None
+        or state.continuity_gap_before is not None
+        or state.continuity_gap_reason is not None
+    ):
+        return f"continuity gap recorded ({state.continuity_gap_reason or 'unbounded'})"
+    close = epoch_close_ts(epoch)
+    if state.validated_close_time is None or state.validated_close_time < close:
+        seen = (
+            datetime.fromtimestamp(state.validated_close_time, tz=timezone.utc).isoformat()
+            if state.validated_close_time is not None
+            else "never"
+        )
+        return f"archive validated through {seen} — epoch {epoch} not yet closed in archive"
+    return None

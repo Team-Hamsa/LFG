@@ -264,3 +264,45 @@ def test_replay_orders_by_ledger_then_ts_not_insertion(hconn):
         ledger_index=2,
     )
     assert epoch_state.state_at_epoch(hconn, "2026-01-01")[NFT].listed is False
+
+
+def _archive_row(conn, *, complete=1, validated_close=None, gap_after=None, gap_reason=None):
+    conn.execute(
+        "INSERT INTO archive_state (network, genesis_hash, baseline_complete, validated_close_time,"
+        " continuity_gap_after, continuity_gap_reason, updated_at) VALUES (?,?,?,?,?,?,?)",
+        ("testnet", "G" * 64, complete, validated_close, gap_after, gap_reason, 1),
+    )
+    conn.commit()
+
+
+def test_certify_no_archive_row_defers(hconn):
+    assert epoch_state.certify_epoch(hconn, "testnet", "2026-01-01") is not None
+
+
+def test_certify_payable_when_complete_and_validated_past_close(hconn):
+    _archive_row(hconn, validated_close=D["2026-01-02"])
+    assert epoch_state.certify_epoch(hconn, "testnet", "2026-01-01") is None
+
+
+def test_certify_defers_when_archive_has_not_seen_epoch_close(hconn):
+    _archive_row(hconn, validated_close=D["2026-01-02"] - 1)
+    reason = epoch_state.certify_epoch(hconn, "testnet", "2026-01-01")
+    assert reason and "not yet closed" in reason
+
+
+def test_certify_defers_on_incomplete_baseline(hconn):
+    _archive_row(hconn, complete=0, validated_close=D["2026-01-04"])
+    assert "baseline" in (epoch_state.certify_epoch(hconn, "testnet", "2026-01-01") or "")
+
+
+def test_certify_defers_on_continuity_gap(hconn):
+    _archive_row(
+        hconn, validated_close=D["2026-01-04"], gap_after=123, gap_reason="listener restart"
+    )
+    reason = epoch_state.certify_epoch(hconn, "testnet", "2026-01-01")
+    assert reason and "listener restart" in reason
+
+
+def test_certify_is_per_network(hconn):
+    _archive_row(hconn, validated_close=D["2026-01-04"])
+    assert epoch_state.certify_epoch(hconn, "mainnet", "2026-01-01") is not None
