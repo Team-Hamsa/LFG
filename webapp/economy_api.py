@@ -6,6 +6,7 @@
 from __future__ import annotations
 
 import asyncio
+import logging
 import sqlite3
 import time
 from dataclasses import dataclass, field
@@ -81,6 +82,21 @@ async def start_closet(
     conn = open_conn()
     try:
         deps = _economy_deps.build_economy_deps(conn, user_token=user_token, owner=owner)
+        # Self-heal a listener-missed NFTokenAcceptOffer BEFORE ensure_closet:
+        # if the owner already holds the recorded Closet on-ledger, promote
+        # pending_accept -> active (idempotent, one clio lookup) — the same
+        # on-demand confirmation the harvest/assemble flows run. Without it the
+        # Closet screen re-served a stale "accept your Closet" prompt for days
+        # to users whose accept landed during a listener reconnect (prod
+        # 2026-08-17/18), while Harvest would have worked. A lookup failure
+        # leaves the status untouched (ensure_closet then re-offers as before).
+        owner_fn = getattr(deps, "closet_owner_fn", None)
+        if owner_fn is not None:
+            try:
+                await ct.confirm_accept(conn, owner, owner_fn=owner_fn)
+                conn.commit()
+            except Exception as e:  # noqa: BLE001 - best-effort pre-check
+                logging.warning(f"closet confirm_accept pre-check failed for {owner}: {e}")
         ref = await ct.ensure_closet(
             conn,
             owner,
