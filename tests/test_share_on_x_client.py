@@ -141,3 +141,15 @@ def test_share_controls_are_skipped_without_a_share_url():
     swap_idx = src.index("swapShareText(r.nft_number)")
     window = src[max(0, swap_idx - 400) : swap_idx + 400]
     assert "if (" in window and "shareUrlFor(r.nft_number, r.nft_id)" in window
+
+
+def test_share_on_x_click_fires_intent_beacon():
+    # Giveaway eligibility (2026-08-21): the "Share on X" click itself must be
+    # recorded server-side — the Twitterbot card fetch is only a proxy. The
+    # beacon is fire-and-forget and must never block/break openExternal.
+    src = _read_app_js()
+    body = _function_body(src, "function buildShareControl(")
+    assert "'/api/share/intent'" in body
+    assert "openExternal(intentUrl)" in body
+    # beacon is swallowed, never awaited before the open
+    assert ".catch(() => {})" in body or ".catch(() => {" in body

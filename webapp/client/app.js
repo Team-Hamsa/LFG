@@ -466,6 +466,17 @@ function buildShareControl(text, url, meta) {
     // "open in new tab" if the handler doesn't fire.
     e.preventDefault();
     openExternal(intentUrl);
+    // Beacon the press itself (exact giveaway eligibility; the card-page
+    // Twitterbot fetch is only a proxy). Fire-and-forget, after the open so
+    // it can never delay or break the composer.
+    if (meta && sessionToken) {
+      try {
+        api('/api/share/intent', {
+          method: 'POST',
+          body: JSON.stringify({ kind: meta.kind || 'mint', nft_number: meta.nftNumber ?? null }),
+        }).catch(() => {});
+      } catch (_) { /* never block the share */ }
+    }
   };
 
   const copyBtn = document.createElement('button');

@@ -1752,6 +1752,42 @@ async def handle_share_conversions(request):
     return web.json_response({"network": network, "rows": rows[:limit]})
 
 
+@require_wallet
+async def handle_share_intent(request):
+    """Share-on-X button beacon: POST /api/share/intent {kind, nft_number}.
+
+    Records the PRESS itself (share_intents) — the exact record a "share to
+    enter" giveaway needs. share_clicks only sees the card page being fetched,
+    which happens when X crawls a posted tweet, not when the button is hit.
+    Always 200 on a well-formed body even if the write fails: the client fires
+    this and opens the composer regardless, so a failure here must not surface.
+    """
+    try:
+        body = await request.json()
+    except Exception:
+        body = {}
+    if not isinstance(body, dict):
+        body = {}
+    kind = body.get("kind", "mint")
+    if kind not in ("mint", "swap"):
+        return web.json_response({"error": "unknown share kind"}, status=400)
+    nft_number = body.get("nft_number")
+    # bool is an int subclass; reject it explicitly (same as handle_x_share).
+    if nft_number is not None and (
+        isinstance(nft_number, bool) or not isinstance(nft_number, int) or nft_number < 0
+    ):
+        return web.json_response({"error": "nft_number must be a non-negative integer"}, status=400)
+    await asyncio.to_thread(
+        share_clicks.record_intent,
+        db_path.app_db_path(),
+        request["wallet"],
+        kind,
+        nft_number,
+        _platform(request["user"]),
+    )
+    return web.json_response({"ok": True})
+
+
 # --- In-app marketplace (#44): browse + mine + history ---
 
 
@@ -7515,6 +7551,7 @@ def create_app() -> web.Application:
     app.router.add_post("/api/brix/claim", handle_brix_claim)
     app.router.add_get("/api/brix/claim/{claim_id}", handle_brix_claim_status)
     app.router.add_get("/api/share/conversions", handle_share_conversions)
+    app.router.add_post("/api/share/intent", handle_share_intent)
     app.router.add_get("/api/market/listings", handle_market_listings)
     app.router.add_get("/api/market/mine", handle_market_mine)
     app.router.add_get("/api/market/history", handle_market_history)
