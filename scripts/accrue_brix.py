@@ -4,9 +4,10 @@
   python scripts/accrue_brix.py --network testnet
   python scripts/accrue_brix.py --network mainnet --date 2026-08-18
 
-Reads live tokens from `onchain_<net>.db`, checks each one's live sell offers
-on-ledger, and writes accrual rows to `history_<net>.db`. Nothing is paid here
-— accruals are DB-only until a holder claims (see POST /api/brix/claim).
+Replays the history archive (`epoch_state`) for owner-of-record and
+listed-state as of each epoch's close — zero per-token RPCs (#411) — and
+writes accrual rows to `history_<net>.db`. Nothing is paid here — accruals
+are DB-only until a holder claims (see POST /api/brix/claim).
 
 Idempotent twice over: the accruals table's PK makes a re-run a no-op, and a
 `brix_meta` cursor means a missed cron day is caught up automatically on the
@@ -15,8 +16,9 @@ next run. Safe to run repeatedly.
 Registered in ecosystem.prod.config.js / ecosystem.staging.config.js as
 lfg-brix-accrue / stg-brix-accrue. The slot is 00:40 UTC, not the 00:20 this
 docstring once suggested: 00:20 already holds lfg-economy-reconcile and
-lfg-sourcetag, and this job spends real time on its per-token listing sweep
-(#411). Manual equivalent:
+lfg-sourcetag. Since #411 this job is a DB-only archive replay (no per-token
+RPC sweep), so the slot no longer needs to absorb real per-token lookup time,
+but the offset is left as-is. Manual equivalent:
 
   pm2 start scripts/accrue_brix.py --name lfg-brix-accrue \
     --cron "40 0 * * *" --no-autorestart --interpreter .venv/bin/python \
@@ -36,7 +38,7 @@ from datetime import datetime
 REPO_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
 sys.path.insert(0, REPO_ROOT)
 
-from lfg_core import brix_drip, config, history_store, nft_index  # noqa: E402
+from lfg_core import brix_drip, config, history_store  # noqa: E402
 
 
 def system_accounts() -> frozenset[str]:
@@ -86,65 +88,64 @@ async def _amain() -> int:
     )
     args = ap.parse_args()
 
-    # Fail closed on a split network. The DB paths follow --network, but the
-    # offer lookups go through xrpl_ops' single-network JSON_RPC_URL globals.
-    # Mismatched, every cross-network NFT id would come back "no offers" — and
-    # since unlisted is what PAYS, that silently grants BRIX to listed tokens,
-    # inverting the whole fail-closed posture. Same seam the marketplace gates
-    # trait on-ledger ops behind (ECONOMY_NETWORK == XRPL_NETWORK).
+    # Fail closed on a split network. The DB paths follow --network, and the
+    # archive replay reads owner-of-record / listed-state purely from
+    # history_<net>.db — but the chain-identity check below still guards that
+    # this archive is actually the one for --network, not a stale/foreign one.
+    # Same seam the marketplace gates trait on-ledger ops behind
+    # (ECONOMY_NETWORK == XRPL_NETWORK).
     if args.network != config.XRPL_NETWORK:
         print(
             f"refusing to accrue: --network {args.network} but XRPL_NETWORK is "
-            f"{config.XRPL_NETWORK}; offer lookups would run against the wrong chain "
-            f"and pay listed tokens. Re-run with XRPL_NETWORK={args.network}."
+            f"{config.XRPL_NETWORK}; the archive would be read against the wrong "
+            f"chain identity. Re-run with XRPL_NETWORK={args.network}."
         )
         return 2
 
-    oconn = nft_index.init_db(nft_index.index_db_path(args.network))
     hconn = history_store.init_history_db(history_store.history_db_path(args.network))
     brix_drip.ensure_schema(hconn)
 
     # The name check above cannot see an XRPL_JSON_RPC_URL override, so also
-    # confirm the endpoint's actual chain identity before trusting any offer
-    # lookup. Fail-closed: on the wrong chain every token looks unlisted, and
-    # unlisted is what pays.
+    # confirm the endpoint's actual chain identity before trusting the
+    # archive. Fail-closed: on the wrong chain the archive's replayed history
+    # doesn't correspond to this network at all.
     chain_error = await brix_drip.verify_endpoint_chain(hconn, args.network)
     if chain_error:
         print(f"refusing to accrue: {chain_error}")
         return 2
 
     excluded = system_accounts()
-    tokens = nft_index.live_nfts(oconn)
-    # Only look up listing state for tokens that could actually earn — a clio
-    # round trip per system-held or ownerless token is pure waste.
-    holders = {
-        t.nft_id: t.owner for t in tokens if t.owner and not t.is_burned and t.owner not in excluded
-    }
-    print(f"[{args.network}] {len(tokens)} live tokens, {len(holders)} eligible; checking offers…")
-    listing_state = await brix_drip.fetch_sell_offer_state(holders)
-
-    reports = brix_drip.run_accrual(
-        hconn,
-        tokens,
-        listed_fn=lambda nft_id: listing_state.get(nft_id),
-        system_accounts=excluded,
-        today=args.date,
-    )
+    # No per-token sweep (#411 option 2): owner-of-record and listed-state
+    # come from the history archive as of each epoch's close. Zero RPCs;
+    # DB-bound.
+    reports = brix_drip.run_archive_accrual(hconn, args.network, excluded, today=args.date)
     if not reports:
         print(f"[{args.network}] nothing to accrue — cursor is current")
         return 0
 
     for r in reports:
+        if r.deferred:
+            print(
+                f"[{args.network}] {r.epoch}: DEFERRED — {r.deferred}. Nothing written; the "
+                f"cursor stays at the last certified epoch and this run will complete it later."
+            )
+            continue
         print(
             f"[{args.network}] {r.epoch}: accrued={r.accrued} listed={r.skipped_listed} "
             f"system={r.skipped_system} burned={r.skipped_burned} "
             f"ownerless={r.skipped_ownerless} unknown={r.unknown}"
         )
         if r.unknown:
-            # Fail-closed under-accrual: these tokens earned nothing because
-            # their offer state could not be read, and the PK means a re-run
-            # will NOT retroactively grant them (spec §10).
-            print(f"[{args.network}] WARNING: {r.unknown} tokens skipped on unknown offer state")
+            # Fail-closed under-accrual: listing state could not be
+            # reconstructed for these tokens (legacy nft_events rows without
+            # offer_index / offer_flags). The PK means a later run will NOT
+            # retroactively grant them — rebuild the derived table, then the
+            # gap backfill can.
+            print(
+                f"[{args.network}] WARNING: {r.unknown} tokens skipped on unknown listing state — "
+                f"run scripts/derive_history_events.py --network {args.network} to populate "
+                f"offer_index/offer_flags, then scripts/backfill_brix_gap.py for the missed epochs"
+            )
 
     outstanding = hconn.execute(
         "SELECT COALESCE(SUM(amount), 0) FROM brix_accruals WHERE claim_id IS NULL"
