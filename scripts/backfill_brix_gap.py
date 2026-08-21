@@ -145,8 +145,18 @@ async def _amain() -> int:
         return 2
 
     # Drip eligibility = the collection index, never the raw archive (#411 C1).
-    oconn = nft_index.init_db(nft_index.index_db_path(args.network))
+    index_path = nft_index.index_db_path(args.network)
+    oconn = nft_index.init_db(index_path)
     eligible = nft_index.collection_owners(oconn)
+    if not eligible:
+        # Same trap as the nightly: init_db creates an empty file. With an
+        # empty map every token is ineligible and the plan is a confident
+        # "nothing owed" — refuse before planning anything.
+        print(
+            f"refusing: the collection index at {index_path} is empty. "
+            f"Check ONCHAIN_DB_PATH / --network, and that the listener has run."
+        )
+        return 2
 
     plan = brix_backfill.plan_gap_backfill(
         hconn,

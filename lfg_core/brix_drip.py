@@ -391,10 +391,24 @@ def evaluate_epoch(
     # Everything actually in scope for a pay/no-pay decision this epoch.
     considered = len(result.rows) + result.skipped_listed + result.unknown
     deferred: str | None = None
-    if considered and result.unknown > UNKNOWN_DEFER_FRACTION * considered:
+    net = network or "<net>"
+    if not eligible:
+        # A missing/misconfigured index DB is CREATED empty by init_db, which
+        # would make every token ineligible, every count zero, the guard below
+        # a no-op — and the cursor would still advance over an epoch nobody
+        # can ever be paid for. Zero eligible tokens is never a real state.
+        deferred = (
+            f"no eligible tokens (eligible map empty) — check onchain_{net}.db / ONCHAIN_DB_PATH"
+        )
+    elif considered == 0 and skipped_ineligible > 0:
+        deferred = (
+            f"no eligible tokens (all {skipped_ineligible} replayed tokens ineligible) — "
+            f"check onchain_{net}.db / ONCHAIN_DB_PATH"
+        )
+    elif considered and result.unknown > UNKNOWN_DEFER_FRACTION * considered:
         deferred = (
             f"listing state unknown for {result.unknown} of {considered} eligible tokens — "
-            f"run scripts/derive_history_events.py --network {network or '<net>'}"
+            f"run scripts/derive_history_events.py --network {net}"
         )
     return EpochEvaluation(
         result=result,

@@ -27,6 +27,12 @@ def fake_dbs(monkeypatch, tmp_path):
         return None
 
     monkeypatch.setattr(brix_drip, "verify_endpoint_chain", ok)
+    # A non-empty collection index: the CLI refuses on an empty one, which is
+    # its own test below.
+    oconn = nft_index.init_db(str(tmp_path / "o_testnet.db"))
+    oconn.execute("INSERT INTO onchain_nfts (nft_id, owner, is_burned) VALUES ('A', 'rAlice', 0)")
+    oconn.commit()
+    oconn.close()
     return tmp_path
 
 
@@ -81,3 +87,19 @@ def test_cli_hints_rederive_on_unknown(monkeypatch, fake_dbs, capsys):
 def test_cli_refuses_network_mismatch(monkeypatch, fake_dbs, capsys):
     monkeypatch.setattr(sys, "argv", ["accrue_brix.py", "--network", "mainnet"])
     assert accrue_brix.main() == 2
+
+
+def test_cli_refuses_an_empty_collection_index(monkeypatch, fake_dbs, capsys):
+    """An empty index is never a real state on a deployed box — and init_db
+    creates one silently when the path is wrong (#411 re-review)."""
+    from lfg_core import nft_index
+
+    monkeypatch.setattr(nft_index, "collection_owners", lambda conn: {})
+
+    def boom(*a, **k):
+        raise AssertionError("must refuse before accruing")
+
+    monkeypatch.setattr(brix_drip, "run_archive_accrual", boom)
+    monkeypatch.setattr(sys, "argv", ["accrue_brix.py", "--network", "testnet"])
+    assert accrue_brix.main() == 2
+    assert "is empty" in capsys.readouterr().out

@@ -229,3 +229,22 @@ def test_apply_writes_when_clean(h):
     assert p.refused is None and p.owner_drift == []
     assert p.written == 4
     assert brix_drip.claimable(h, ALICE) == 4
+
+
+def test_refused_apply_leaves_payable_earlier_epochs_unwritten(h):
+    """The refusal must be decided BEFORE any write, even though the earlier
+    epochs of the window were perfectly payable."""
+    ev(h, "mint", ts=D["2026-01-01"] + 1, to_addr=ALICE)
+    ev(h, "offer_create", ts=D["2026-01-04"] + 1, from_addr=ALICE)  # no flags → unknown
+    before = h.execute("SELECT COUNT(*) FROM brix_accruals").fetchone()[0]
+    p = plan(h, apply=True)
+    assert p.refused is not None and p.written == 0
+    assert h.execute("SELECT COUNT(*) FROM brix_accruals").fetchone()[0] == before
+
+
+def test_apply_is_idempotent_across_runs(h):
+    ev(h, "mint", ts=D["2026-01-01"] + 1, to_addr=ALICE)
+    first = plan(h, apply=True)
+    second = plan(h, apply=True)
+    assert (first.written, second.written) == (4, 0)
+    assert brix_drip.claimable(h, ALICE) == 4

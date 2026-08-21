@@ -692,3 +692,36 @@ def test_a_few_unknowns_below_the_threshold_still_accrue(conn):
     tokens["U"] = _tok("U", "rUnknown", listed=None)
     reports = _run(conn, tokens, today="2026-08-19")
     assert reports[0].deferred is None and reports[0].accrued == 20
+
+
+def test_empty_eligible_map_defers_instead_of_advancing_the_cursor(conn):
+    """nft_index.init_db CREATES a missing index file, so a wrong path yields
+    an EMPTY map, not an error. Without this guard every token would be
+    'ineligible', every count zero, the mass-unknown check a no-op — and the
+    cursor would advance over an epoch nobody can ever be paid for."""
+    tokens = {"A": _tok("A", "rAlice"), "B": _tok("B", "rBob")}
+    reports = _run(conn, tokens, today="2026-08-19", eligible={})
+    r = reports[0]
+    assert r.deferred is not None and "onchain_testnet.db" in r.deferred
+    assert r.accrued == 0
+    assert conn.execute("SELECT COUNT(*) FROM brix_accruals").fetchone()[0] == 0
+    assert brix_drip.get_meta(conn, brix_drip.LAST_ACCRUED_EPOCH) is None
+
+
+def test_all_replayed_tokens_ineligible_defers(conn):
+    """A non-empty but wrong index (nothing overlapping the archive) is the
+    same silent zero-pay day."""
+    tokens = {"A": _tok("A", "rAlice"), "B": _tok("B", "rBob")}
+    reports = _run(conn, tokens, today="2026-08-19", eligible={"OTHER": "rZed"})
+    r = reports[0]
+    assert r.deferred is not None and "2 replayed tokens ineligible" in r.deferred
+    assert (r.accrued, r.skipped_ineligible) == (0, 2)
+    assert brix_drip.get_meta(conn, brix_drip.LAST_ACCRUED_EPOCH) is None
+
+
+def test_an_epoch_with_no_tokens_at_all_is_not_a_deferral(conn):
+    """Before the first mint the replay is legitimately empty — that must
+    accrue nothing and still advance, unlike a broken index."""
+    reports = _run(conn, {}, today="2026-08-19", eligible={"A": "rAlice"})
+    assert reports[0].deferred is None and reports[0].accrued == 0
+    assert brix_drip.get_meta(conn, brix_drip.LAST_ACCRUED_EPOCH) == "2026-08-18"

@@ -110,52 +110,64 @@ def plan_gap_backfill(
         and tok.owner != eligible[nft_id]
     )
 
-    replay = replay_factory(hconn)
-    lines: list[EpochLine] = []
-    wallets: Counter[str] = Counter()
-    nft_ids: set[str] = set()
-    deferred: list[tuple[str, str]] = []
-    pending: list[Any] = []
-    for epoch in epoch_range(start, end):
-        reason = certify(hconn, network, epoch)
-        if reason is not None:
-            deferred.append((epoch, reason))
-            lines.append(EpochLine(epoch, 0, 0, 0, deferred=reason))
-            continue
-        tokens = replay.advance_to(epoch)
-        kept, ineligible = brix_drip.eligible_tokens(tokens, eligible)
+    def _walk(
+        write: bool,
+    ) -> tuple[list[EpochLine], Counter[str], set[str], list[tuple[str, str]], int]:
+        """One pass over the window. `write=False` computes only — the numbers
+        the refusal decision needs. `write=True` inserts each epoch's rows as
+        it goes, so the whole window's Accruals are never held in memory at
+        once (~1.5M rows on mainnet)."""
+        replay = replay_factory(hconn)
+        lines: list[EpochLine] = []
+        wallets: Counter[str] = Counter()
+        nft_ids: set[str] = set()
+        skipped: list[tuple[str, str]] = []
+        inserted = 0
+        for epoch in epoch_range(start, end):
+            reason = certify(hconn, network, epoch)
+            if reason is not None:
+                skipped.append((epoch, reason))
+                lines.append(EpochLine(epoch, 0, 0, 0, deferred=reason))
+                continue
+            tokens = replay.advance_to(epoch)
+            kept, ineligible = brix_drip.eligible_tokens(tokens, eligible)
 
-        # The replay's tri-state `listed` IS the fail-closed signal
-        # evaluate_accruals wants (True/False/None) — passed straight through.
-        def _listed(nft_id: str, _tokens: dict[str, Any] = tokens) -> bool | None:
-            listed: bool | None = _tokens[nft_id].listed
-            return listed
+            # The replay's tri-state `listed` IS the fail-closed signal
+            # evaluate_accruals wants (True/False/None) — passed straight through.
+            def _listed(nft_id: str, _tokens: dict[str, Any] = tokens) -> bool | None:
+                listed: bool | None = _tokens[nft_id].listed
+                return listed
 
-        result = brix_drip.evaluate_accruals(
-            kept,
-            listed_fn=_listed,
-            system_accounts=system_accounts,
-            epoch=epoch,
-        )
-        existing = _already_accrued(hconn, epoch)
-        fresh = [r for r in result.rows if r.nft_id not in existing]
-        pending.extend(fresh)
-        for r in fresh:
-            wallets[r.owner] += int(r.amount)
-            nft_ids.add(r.nft_id)
-        lines.append(
-            EpochLine(
-                epoch,
-                sum(int(r.amount) for r in fresh),
-                result.skipped_listed,
-                result.unknown,
-                ineligible=ineligible,
+            result = brix_drip.evaluate_accruals(
+                kept,
+                listed_fn=_listed,
+                system_accounts=system_accounts,
+                epoch=epoch,
             )
-        )
+            existing = _already_accrued(hconn, epoch)
+            fresh = [r for r in result.rows if r.nft_id not in existing]
+            if write:
+                # INSERT OR IGNORE keeps this idempotent even though pass 2
+                # re-reads `existing` a second time.
+                inserted += brix_drip.record_accruals(hconn, fresh)
+            for r in fresh:
+                wallets[r.owner] += int(r.amount)
+                nft_ids.add(r.nft_id)
+            lines.append(
+                EpochLine(
+                    epoch,
+                    sum(int(r.amount) for r in fresh),
+                    result.skipped_listed,
+                    result.unknown,
+                    ineligible=ineligible,
+                )
+            )
+        return lines, wallets, nft_ids, skipped, inserted
 
-    # Writing is deferred to here so a refusal writes NOTHING. Both refusal
+    # Pass 1 is always a dry walk, so a refusal writes NOTHING. Both refusal
     # conditions mean the archive itself is untrustworthy for this window:
     # missing derived events (owner drift) or unreconstructable listing state.
+    lines, wallets, nft_ids, deferred, _ = _walk(write=False)
     unknown_total = sum(line.unknown for line in lines)
     refused: str | None = None
     written = 0
@@ -170,7 +182,8 @@ def plan_gap_backfill(
             f"run scripts/derive_history_events.py --network {network} first"
         )
     elif apply:
-        written = brix_drip.record_accruals(hconn, pending)
+        # Pass 2: re-walk with a fresh replay, writing per epoch.
+        lines, wallets, nft_ids, deferred, written = _walk(write=True)
 
     total = sum(wallets.values())
     return GapPlan(

@@ -121,8 +121,19 @@ async def _amain() -> int:
     # Eligibility is the COLLECTION index, not the archive (#411 C1):
     # nft_events also carries soulbound Closet and tradeable trait tokens,
     # which were never drip-eligible.
-    oconn = nft_index.init_db(nft_index.index_db_path(args.network))
+    index_path = nft_index.index_db_path(args.network)
+    oconn = nft_index.init_db(index_path)
     eligible = nft_index.collection_owners(oconn)
+    if not eligible:
+        # init_db CREATES the file, so a wrong path yields an EMPTY index
+        # rather than an error. An empty collection index is never a real
+        # state on a deployed box — refuse before the cursor can advance over
+        # an epoch that could never pay anyone.
+        print(
+            f"refusing to accrue: the collection index at {index_path} is empty. "
+            f"Check ONCHAIN_DB_PATH / --network, and that the listener has run."
+        )
+        return 2
     reports = brix_drip.run_archive_accrual(
         hconn, args.network, excluded, today=args.date, eligible=eligible
     )
