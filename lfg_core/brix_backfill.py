@@ -47,8 +47,11 @@ class GapPlan:
     owner_drift: list[str] = field(default_factory=list)
     """nft_ids whose replayed owner at the archive's LATEST state disagrees
     with `onchain_nfts` (#411 C2): the derived table is missing events, so the
-    replay would credit the wrong wallet. Compared at today, never at `end`, so
-    a legitimate post-`end` transfer is not drift. Reported on a dry run;
+    replay would credit the wrong wallet. Checked over burned tokens too — the
+    index keeps `owner` on burned rows, and a missing transfer followed by a
+    recorded burn is exactly this stale-derived-table signal even though the
+    token is no longer live. Compared at today, never at `end`, so a
+    legitimate post-`end` transfer is not drift. Reported on a dry run;
     refuses an --apply."""
     refused: str | None = None
     """Set when --apply was asked for but nothing was written."""
@@ -108,13 +111,17 @@ def plan_gap_backfill(
     # legitimate transfer made after `end` as drift.
     drift_replay = replay_factory(hconn)
     current = drift_replay.advance_to(today or brix_drip.utc_today())
+    # Checked over burned tokens too, not just live ones: the index
+    # (`nft_index.collection_owners`) keeps `owner` on burned rows, and a
+    # missing archived transfer followed by a recorded burn leaves the replay
+    # holding the stale pre-transfer owner while `tok.live` is False —
+    # excluding burned rows here would let the historical walk still pay this
+    # token's pre-burn epochs to the wrong wallet while drift stayed silent
+    # (Greptile #411 P1).
     owner_drift = sorted(
         nft_id
         for nft_id, tok in current.items()
-        if nft_id in eligible
-        and tok.live
-        and eligible[nft_id] is not None
-        and tok.owner != eligible[nft_id]
+        if nft_id in eligible and eligible[nft_id] is not None and tok.owner != eligible[nft_id]
     )
 
     def _walk(

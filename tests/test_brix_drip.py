@@ -812,3 +812,38 @@ def test_an_index_owner_with_no_archived_transfer_is_still_drift(hconn):
     assert (r.owner_drift, r.unknown) == (1, 1)
     assert brix_drip.claimable(hconn, "rAlice") == 0
     assert brix_drip.claimable(hconn, "rBob") == 0
+
+
+def test_a_burned_token_with_missing_transfer_is_still_drift(hconn):
+    """Greptile #411 P1: the `tok.live` filter used to exclude burned tokens
+    from drift entirely, so a missing archived transfer followed by a
+    recorded burn slipped past the check even though the archive is exactly
+    as stale as the still-live case above. The replay retains the
+    pre-transfer owner (burn does not touch `owner`); the index (which keeps
+    `owner` on burned rows) disagrees, and that disagreement must still count
+    as drift even though the token is no longer live at `today`."""
+    close = epoch_state.epoch_close_ts("2026-08-18")
+    _ev(hconn, "mint", nft_id="A", ts=close - 100, to_addr="rAlice")
+    _ev(hconn, "burn", nft_id="A", ts=close + 10, from_addr="rBob")
+    eligible = {"A": "rBob"}  # index says Bob; archive never saw Alice->Bob
+    _seed_padding(hconn, eligible)
+    r = _run_real(hconn, eligible)[0]
+    assert (r.owner_drift, r.unknown) == (1, 1)
+    assert brix_drip.claimable(hconn, "rAlice") == 0
+    assert brix_drip.claimable(hconn, "rBob") == 0
+
+
+def test_a_burned_token_with_a_complete_archive_is_not_drift(hconn):
+    """Sanity check: when the transfer IS archived before the burn, the
+    replay's owner matches the index and there is no false-positive drift
+    just because the token happens to be burned."""
+    close = epoch_state.epoch_close_ts("2026-08-18")
+    _ev(hconn, "mint", nft_id="A", ts=close - 100, to_addr="rAlice")
+    _ev(hconn, "transfer", nft_id="A", ts=close - 50, from_addr="rAlice", to_addr="rBob")
+    _ev(hconn, "burn", nft_id="A", ts=close + 10, from_addr="rBob")
+    eligible = {"A": "rBob"}
+    _seed_padding(hconn, eligible)
+    r = _run_real(hconn, eligible)[0]
+    assert (r.owner_drift, r.unknown) == (0, 0)
+    assert brix_drip.claimable(hconn, "rAlice") == 0
+    assert brix_drip.claimable(hconn, "rBob") == 1

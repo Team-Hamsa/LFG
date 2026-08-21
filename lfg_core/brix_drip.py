@@ -377,13 +377,16 @@ def evaluate_epoch(
 
     drift: set[str] = set()
     if current is not None:
+        # Checked over burned tokens too, not just live ones: the index
+        # (`nft_index.collection_owners`) keeps `owner` on burned rows, and a
+        # missing archived transfer followed by a recorded burn leaves the
+        # replay holding the stale pre-transfer owner while `tok.live` is
+        # False — excluding burned rows here would let that stale-derived-
+        # table signal escape drift detection entirely (Greptile #411 P1).
         drift = {
             nft_id
             for nft_id, tok in current.items()
-            if nft_id in eligible
-            and tok.live
-            and eligible[nft_id] is not None
-            and tok.owner != eligible[nft_id]
+            if nft_id in eligible and eligible[nft_id] is not None and tok.owner != eligible[nft_id]
         }
 
     def _listed(nft_id: str) -> bool | None:

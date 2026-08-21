@@ -283,3 +283,31 @@ def test_an_index_owner_with_no_archived_transfer_still_drifts(h):
     p = plan(h, apply=True, eligible={"N1": BOB}, today="2026-01-06")
     assert p.owner_drift == ["N1"] and p.refused is not None
     assert p.written == 0
+
+
+def test_a_burned_token_with_no_archived_transfer_still_drifts_and_refuses(h):
+    """Greptile #411 P1: the `tok.live` filter used to exclude burned tokens
+    from drift entirely, so a missing archived transfer followed by a
+    recorded burn slipped an --apply through even though the window still
+    pays the stale pre-transfer owner. Mint to Alice, no transfer archived,
+    burn from Bob after the window — the index (which keeps `owner` on
+    burned rows) says Bob, the archive never explains it, so this must
+    refuse exactly like the still-live case above."""
+    ev(h, "mint", ts=D["2026-01-01"] + 1, to_addr=ALICE)
+    ev(h, "burn", ts=D["2026-01-05"] + 1, from_addr=BOB)
+    p = plan(h, apply=True, eligible={"N1": BOB}, today="2026-01-06")
+    assert p.owner_drift == ["N1"] and p.refused is not None
+    assert p.written == 0
+    assert h.execute("SELECT COUNT(*) FROM brix_accruals").fetchone()[0] == 0
+
+
+def test_a_burned_token_with_a_complete_archive_is_not_drift(h):
+    """Sanity check: when the transfer IS archived before the burn, the
+    replay's owner matches the index and there is no false-positive drift
+    just because the token happens to be burned by `today`."""
+    ev(h, "mint", ts=D["2026-01-01"] + 1, to_addr=ALICE)
+    ev(h, "transfer", ts=D["2026-01-02"] + 1, from_addr=ALICE, to_addr=BOB)
+    ev(h, "burn", ts=D["2026-01-05"] + 1, from_addr=BOB)
+    p = plan(h, apply=True, eligible={"N1": BOB}, today="2026-01-06")
+    assert p.owner_drift == [] and p.refused is None
+    assert p.written == 4
