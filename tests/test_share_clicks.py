@@ -81,6 +81,28 @@ def test_record_intent_swallows_db_failure(tmp_path):
     assert share_clicks.record_intent(bad, "rW", "mint", 1, "discord") is False
 
 
+def test_record_intent_dedups_repeat_press_in_window(tmp_path):
+    db = str(tmp_path / "app.db")
+    assert share_clicks.record_intent(db, "rA", "mint", 1, "discord") is True
+    assert share_clicks.record_intent(db, "rA", "mint", 1, "discord") is True  # repeat: ok, no row
+    share_clicks.record_intent(db, "rA", "mint", 2, "discord")  # different nft: new row
+    share_clicks.record_intent(db, "rA", "swap", None, "discord")
+    share_clicks.record_intent(db, "rA", "swap", None, "discord")  # NULL nft dedups too
+    conn = sqlite3.connect(db)
+    assert conn.execute("SELECT COUNT(*) FROM share_intents").fetchone() == (3,)
+    conn.close()
+
+
+def test_record_click_does_not_create_intents_table(tmp_path):
+    # Greptile P2 on #420: the card-page path must not pay the intents DDL.
+    db = str(tmp_path / "app.db")
+    share_clicks.record_click(db, 1, None, False, "ua")
+    conn = sqlite3.connect(db)
+    names = {r[0] for r in conn.execute("SELECT name FROM sqlite_master WHERE type='table'")}
+    conn.close()
+    assert "share_clicks" in names and "share_intents" not in names
+
+
 def test_intent_rows_since_groups_by_wallet(tmp_path):
     db = str(tmp_path / "app.db")
     share_clicks.record_intent(db, "rA", "mint", 1, "discord")
