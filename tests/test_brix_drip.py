@@ -226,6 +226,46 @@ def test_fetch_sell_offer_state_recovers_on_a_later_attempt(monkeypatch):
     assert state == {"NFT": False}
 
 
+def test_fetch_sell_offer_state_runs_lookups_concurrently(monkeypatch):
+    """#411: a sequential pass over ~4.5k mainnet tokens took ~15 min/night."""
+    in_flight = 0
+    peak = 0
+
+    async def slow(nft_id, raise_on_error=False):
+        nonlocal in_flight, peak
+        in_flight += 1
+        peak = max(peak, in_flight)
+        await asyncio.sleep(0)
+        in_flight -= 1
+        return []
+
+    monkeypatch.setattr(brix_drip.xrpl_ops, "get_nft_sell_offers", slow)
+    holders = {f"NFT{i}": "rAlice" for i in range(20)}
+    state = asyncio.run(brix_drip.fetch_sell_offer_state(holders, concurrency=5))
+    assert state == dict.fromkeys(holders, False)
+    assert peak > 1
+    assert peak <= 5
+
+
+def test_fetch_sell_offer_state_keeps_failures_isolated(monkeypatch):
+    """One token's failure must not poison its neighbours' results."""
+
+    async def mixed(nft_id, raise_on_error=False):
+        if nft_id == "BAD":
+            raise RuntimeError("clio unavailable")
+        if nft_id == "LISTED":
+            return [{"owner": "rAlice", "amount": "1000"}]
+        return []
+
+    monkeypatch.setattr(brix_drip.xrpl_ops, "get_nft_sell_offers", mixed)
+    state = asyncio.run(
+        brix_drip.fetch_sell_offer_state(
+            {"BAD": "rAlice", "LISTED": "rAlice", "FREE": "rBob"}, retries=1
+        )
+    )
+    assert state == {"BAD": None, "LISTED": True, "FREE": False}
+
+
 # --- Task 3: epoch catch-up orchestration ---------------------------------
 
 
