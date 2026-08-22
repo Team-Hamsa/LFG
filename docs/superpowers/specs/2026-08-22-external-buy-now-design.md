@@ -37,6 +37,21 @@ of our NFTs, 2023-2026):
 
 The capability already works by accident. What is missing is the price.
 
+### Verified deliberately, 2026-08-22
+
+A bid placed from the LFG app on cafe-listed #4691 (ask 4,990,000 drops) at
+5,075,000 drops was brokered by cafe **nine seconds later**:
+
+- bid `2AF272B2…`, `SourceTag 2606160021`, **no `Destination`**
+- accept `FED6256D…` by `rpx9JT…`, `NFTokenBrokerFee = 80642`, `SourceTag 101102979`
+
+Predicted fee `5,075,000 * 0.015890 = 80,641.75`; actual **80,642**. The rate is
+exact and the rounding is `ceil()`. The seller received 4,994,358 against their
+4,990,000 ask — **the excess above the clearing price goes to the seller, never
+to the broker**, so a small safety buffer is cheap insurance against rate drift.
+
+This also holds across taxons: #4691 is taxon 1760 (Assemble-minted), not 0.
+
 ## The price
 
 Two fee regimes appear in the data (the fee taken against the buy side vs. the
@@ -47,8 +62,9 @@ min_bid_drops = ceil(ask_drops / (1 - broker_rate))     # cafe: rate = 0.015890
               ~= ask_drops * 1.016146
 ```
 
-Both failure modes are silent and invisible to the user, which is precisely
-why this must be computed rather than typed:
+cafe's rate is confirmed at `0.015890` against the buy amount (see above).
+Both failure modes are silent and invisible to the user, which is precisely why
+this must be computed rather than typed:
 
 - **Bidding the displayed ask** is ~1.6% short. The bot ignores it. The bid
   simply sits there and the user thinks the feature is broken.
