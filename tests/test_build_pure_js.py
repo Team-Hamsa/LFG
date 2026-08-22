@@ -108,6 +108,20 @@ def test_tile_unindexed_is_disabled_and_labeled():
     assert out == {"label": "#?", "sub": "indexing…", "state": "indexing"}
 
 
+def test_tile_blank_is_selectable_despite_empty_body():
+    # A harvested blank carries no Body metadata (its index `body` is ''), but
+    # it is fully indexed and MUST stay selectable — renderCanvas draws its
+    # silhouette image and fetches no layers, so the 'indexing' disable (which
+    # exists only because a layer fetch would 400) does not apply to it.
+    out = run_js("M.goTileState({nft_id: 'B', edition: 3543, body: '', blank: true}, 'A')")
+    assert out == {"label": "#3543", "sub": "Blank \u2014 build me!", "state": "selectable"}
+
+
+def test_tile_blank_can_be_the_active_character():
+    out = run_js("M.goTileState({nft_id: 'A', edition: 65, body: '', blank: true}, 'A')")
+    assert out["state"] == "active"
+
+
 def test_tile_unindexed_active_stays_indexing():
     # An unindexed GO that also happens to be the active character must render
     # 'indexing' (disabled), not 'active' — the picker only disables 'indexing'
@@ -115,6 +129,33 @@ def test_tile_unindexed_active_stays_indexing():
     # layer fetch (missing body metadata takes precedence over active state).
     out = run_js("M.goTileState({nft_id: 'A', edition: 3521, body: ''}, 'A')")
     assert out["state"] == "indexing"
+
+
+# ---------------------------------------------------------------------------
+# pickBuilderBlank(blanks, preselectNftId) -> the blank the builder opens on
+# ---------------------------------------------------------------------------
+
+
+def test_builder_blank_preselects_the_requested_one():
+    blanks = "[{nft_id: 'A', edition: 1}, {nft_id: 'B', edition: 2}]"
+    assert run_js(f"M.pickBuilderBlank({blanks}, 'B')") == {"nft_id": "B", "edition": 2}
+
+
+def test_builder_blank_auto_selects_a_lone_blank():
+    assert run_js("M.pickBuilderBlank([{nft_id: 'A', edition: 1}], null)")["nft_id"] == "A"
+
+
+def test_builder_blank_is_null_when_several_and_none_requested():
+    blanks = "[{nft_id: 'A', edition: 1}, {nft_id: 'B', edition: 2}]"
+    assert run_js(f"M.pickBuilderBlank({blanks}, null)") is None
+
+
+def test_builder_blank_unknown_preselect_falls_back_to_the_normal_rule():
+    # A requested blank the server did not return (e.g. a non-mutable legacy
+    # character) must not preselect anything — the user picks from step 1.
+    blanks = "[{nft_id: 'A', edition: 1}, {nft_id: 'B', edition: 2}]"
+    assert run_js(f"M.pickBuilderBlank({blanks}, 'ZZ')") is None
+    assert run_js("M.pickBuilderBlank([{nft_id: 'A', edition: 1}], 'ZZ')")["nft_id"] == "A"
 
 
 # ---------------------------------------------------------------------------
@@ -218,6 +259,24 @@ def test_net_changes_empty_pending_is_empty():
 
 def test_net_changes_without_a_character_is_empty():
     assert run_js("M.netChanges(null, {Head: 'Tiara'})") == []
+
+
+# A SELECTED BLANK cannot reach the equip path at all (guards the P1 raised on
+# PR #409): a blank's index `body` is '', so every real Closet trait tile is
+# invisible — only its "None" tiles render, and staging "None" onto a slot that
+# already holds "None" nets to zero changes, so the Save bar stays hidden and no
+# /api/equip is ever submitted against a bodyless character. Dressing a blank
+# goes through Assemble, which picks a body first.
+def test_blank_character_cannot_stage_an_equip():
+    blank = (
+        "{nft_id: 'A', body: '', blank: true, attributes: "
+        "[{trait_type: 'Head', value: 'None'}, {trait_type: 'Eyes', value: 'None'}]}"
+    )
+    assert (
+        run_js(f"M.closetTileState({{slot: 'Head', value: 'Camp Hat'}}, {blank})")["visible"]
+        is False
+    )
+    assert run_js(f"M.netChanges({blank}, {{Head: 'None'}})") == []
 
 
 # ---------------------------------------------------------------------------

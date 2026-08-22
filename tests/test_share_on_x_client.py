@@ -68,6 +68,27 @@ def test_mint_and_swap_share_text_present():
     assert "I just swapped traits on" in src
 
 
+def test_assemble_success_offers_a_share_control():
+    # Building a blank into a character is as share-worthy as a mint or a swap:
+    # the assemble-success flow panel must pass `share` to showFlow (which hides
+    # the row on its own when no share base is known).
+    src = _read_app_js()
+    assert "assembleShareText(" in src
+    assert "kind: 'assemble'" in src
+
+
+def test_saved_build_offers_an_inline_share_control():
+    # A Build save never leaves the Dressing Room (no flow-panel takeover), so
+    # its share control is an INLINE row in the stage, shown for the character
+    # that was just saved.
+    src = _read_app_js()
+    assert "equipShareText(" in src
+    assert "kind: 'equip'" in src
+    assert "dressup-share-row" in src
+    with open(os.path.join(_ROOT, "webapp", "client", "index.html"), encoding="utf-8") as f:
+        assert 'id="dressup-share-row"' in f.read()
+
+
 def test_copy_link_fallback_present_without_native_dialogs():
     # navigator.clipboard with a visible readonly-input fallback; never
     # window.confirm/alert — both are silent no-ops inside the Discord

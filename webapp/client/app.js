@@ -15,7 +15,7 @@ import * as marketPure from './market_pure.js?v=23';
 import * as mintPure from './mint_pure.js?v=24';
 // Build-panel decision logic lives in its own pure module so it's
 // Node-testable too (tests/test_build_pure_js.py).
-import * as buildPure from './build_pure.js?v=27';
+import * as buildPure from './build_pure.js?v=29';
 // Cold-boot session-resume decisions (#221): which live flow to re-attach to
 // after a webview relaunch is a pure priority picker, Node-testable
 // (tests/test_resume_pure_js.py); resumeAnyFlow() below is the thin DOM glue.
@@ -439,6 +439,22 @@ function swapShareText(nftNumber) {
   return nftNumber != null
     ? `I just swapped traits on LFG #${nftNumber}! 🧱 @letseffinggo #XRPL`
     : 'I just swapped traits on my LFG! 🧱 @letseffinggo #XRPL';
+}
+
+function assembleShareText(nftNumber) {
+  // Same null-guard as mintShareText/swapShareText; mirrors the server's
+  // _x_share_text("assemble", ...) so both paths tweet identical copy.
+  return nftNumber != null
+    ? `I just built LFG #${nftNumber}! 🧱 @letseffinggo #XRPL`
+    : 'I just built my LFG! 🧱 @letseffinggo #XRPL';
+}
+
+function equipShareText(nftNumber) {
+  // Mirrors the server's _x_share_text("equip", ...) so the Web Intent and
+  // own-account paths tweet identical copy.
+  return nftNumber != null
+    ? `I just restyled LFG #${nftNumber}! 🧱 @letseffinggo #XRPL`
+    : 'I just restyled my LFG! 🧱 @letseffinggo #XRPL';
 }
 
 // Build a "Share on X" control: a real <a target=_blank> anchor (Task 0's
@@ -2414,7 +2430,7 @@ function renderGoPicker() {
     cap.textContent = t.state === 'active' ? `✓ ${t.label}` : t.label;
     const sub = document.createElement('span');
     sub.className = 'go-tile-sub';
-    sub.textContent = char.blank ? 'Blank — build me!' : t.sub;
+    sub.textContent = t.sub; // goTileState already labels blanks "Blank — build me!"
     tile.replaceChildren(media, cap, sub);
     // #298: GO tiles stay static (image_url is the PNG first frame for
     // animated art); the badge flags GOs whose art plays as video.
@@ -2688,6 +2704,24 @@ function renderCloset() {
   grid.replaceChildren();
   const char = activeChar();
   const staged = pending();
+  // A blank has no body, so the Closet can show it no trait art at all
+  // (closetTileState hides every non-"None" tile) and equipping is a dead end.
+  // Dressing a blank goes through Assemble, which picks the body first — this
+  // button is the only door to it from a selected blank. renderCloset owns the
+  // button because every selection path ends here, with or without a GO.
+  renderBuildShareRow(char);
+  const blankBtn = el('build-blank-btn');
+  if (blankBtn) {
+    blankBtn.hidden = !(char && char.blank);
+    blankBtn.onclick = char && char.blank ? () => openAssemble(char.nft_id) : null;
+  }
+  if (char && char.blank) {
+    // Without the hint the Closet reads as broken ("where did my traits go?").
+    const hint = document.createElement('p');
+    hint.className = 'closet-blank-hint';
+    hint.textContent = 'Pick a body first — hit “Build this GO” to dress this blank.';
+    grid.appendChild(hint);
+  }
   for (const asset of buildPure.effectiveAssets(economyState.closet.assets, char, staged)) {
     if (closetFilter !== 'All' && asset.slot !== closetFilter) continue;
     // The tile is a non-button container (not a <button>) so the Extract control
@@ -2875,6 +2909,11 @@ function pending() {
   return pendingFor === activeNftId ? pendingEquips : {};
 }
 
+// The nft_id of the most recently SAVED build — the only character whose
+// inline share row shows. Cleared when the user stages new (unsaved) changes,
+// so the row can never advertise a look that is no longer on-ledger.
+let buildShareFor = null;
+
 function isDirty() {
   const char = activeChar();
   return Boolean(char) && buildPure.netChanges(char, pending()).length > 0;
@@ -2890,9 +2929,29 @@ function stagePendingEquip(slot, value) {
   if (!char || saveBusy) return;
   if (reconcileUncertainIds.has(activeNftId)) { showError(RECONCILE_MSG); return; }
   if (pendingFor !== activeNftId) { pendingEquips = {}; pendingFor = activeNftId; }
+  buildShareFor = null;   // staged edits supersede the saved look
   pendingEquips[slot] = value;
   renderCanvas(char);
   renderCloset();
+}
+
+// The inline share row for a just-saved build. Shown only for the character
+// that was saved, and only once its art is on-ledger — buildShareControl is
+// skipped entirely when shareUrlFor knows no base (a dead link is worse than
+// no button), exactly like the mint/swap/assemble flow panels.
+function renderBuildShareRow(char) {
+  const row = el('dressup-share-row');
+  if (!row) return;   // tolerate a stale cached index.html
+  row.replaceChildren();
+  const show = Boolean(char) && buildShareFor === char.nft_id;
+  const url = show ? shareUrlFor(char.edition, char.nft_id) : '';
+  row.hidden = !url;
+  if (!url) return;
+  row.appendChild(buildShareControl(
+    equipShareText(char.edition),
+    url,
+    { kind: 'equip', nftNumber: char.edition },
+  ));
 }
 
 function renderSaveBar() {
@@ -2997,7 +3056,10 @@ async function saveBuild() {
     // refetch that FAILS still shows the new look instead of silently redrawing
     // the pre-save character and reading as a lost save. A refetch that
     // succeeds overwrites this with authoritative truth anyway.
-    if (committed) applySavedLocally(char, staged);
+    if (committed) {
+      applySavedLocally(char, staged);
+      buildShareFor = submittedNftId;   // armed before the redraw below
+    }
     try {
       economyState = await api('/api/economy');
     } catch (e) {
@@ -3203,7 +3265,8 @@ async function trackHarvest(char, startResp) {
   else { el('dressup-canvas').replaceChildren(); renderCloset(); }
 }
 
-async function openAssemble() {
+// `preselectNftId` (optional): the blank the user came from via "Build this GO".
+async function openAssemble(preselectNftId) {
   let opts;
   try {
     opts = await api('/api/assemble/options');
@@ -3219,7 +3282,7 @@ async function openAssemble() {
     showError('Your Closet has no bodies — harvest a character first.');
     return;
   }
-  openBuilder(opts);
+  openBuilder(opts, preselectNftId);
 }
 
 // --- Assemble builder overlay ---
@@ -3239,12 +3302,13 @@ function blankImgSrc(nftId) {
   return c && c.image_url ? imgUrl(c.image_url, THUMB_W) : BLANK_IMG;
 }
 
-function openBuilder(opts) {
+function openBuilder(opts, preselectNftId) {
   const overlay = el('builder-overlay');
   if (!overlay.hidden) return; // already open
   builderState = {
     opts,
-    blank: opts.blanks.length === 1 ? opts.blanks[0] : null, // auto-select the lone blank
+    // The blank the user came from, else the lone blank, else step 1 picks.
+    blank: buildPure.pickBuilderBlank(opts.blanks, preselectNftId),
     body: null,
     chosen: {},
   };
@@ -3455,6 +3519,13 @@ async function commitAssemble(nftId, body, chosen, edition) {
       video: final.video_url,
       done: true,
       celebrate: true,
+      // Freshly built character: same share affordance as mint/swap. showFlow
+      // hides the row itself when shareUrlFor finds no base (dead link).
+      share: {
+        text: assembleShareText(edition),
+        url: shareUrlFor(edition, nftId),
+        meta: { kind: 'assemble', nftNumber: edition },
+      },
     });
   } catch (e) {
     status('');

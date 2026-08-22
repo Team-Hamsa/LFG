@@ -22,15 +22,32 @@ export function pickDefaultCharacter(characters) {
 //   state — 'active' (currently selected) | 'selectable' | 'indexing'
 //           (disabled: no body means every layer fetch would 400)
 export function goTileState(char, activeNftId) {
-  const indexed = Boolean(char.body);
+  // A harvested blank has NO Body metadata (its index `body` is ''), yet it is
+  // fully indexed: renderCanvas draws its own silhouette image and fetches no
+  // layers, so the "no body -> every layer fetch would 400" disable must not
+  // apply to it. Without this, every blank rendered as a disabled "indexing…"
+  // tile and could never be selected to be rebuilt.
+  const indexed = Boolean(char.body) || Boolean(char.blank);
   return {
     label: `#${char.edition == null ? '?' : char.edition}`,
-    sub: indexed ? char.body : 'indexing…',
+    sub: char.blank ? 'Blank — build me!' : indexed ? char.body : 'indexing…',
     // Missing body metadata wins: the picker disables only 'indexing' tiles,
     // so an unindexed GO must never be labeled 'active' (it would be
     // selectable but every layer fetch would 400).
     state: !indexed ? 'indexing' : char.nft_id === activeNftId ? 'active' : 'selectable',
   };
+}
+
+// Which blank the Assemble builder opens on. `preselectNftId` is set when the
+// user came from a specific blank in the Build panel ("Build this GO"); an
+// unknown id (a blank the server did not return, e.g. a non-mutable legacy
+// character) falls back to the normal rule: auto-select a lone blank, else let
+// the user pick in step 1.
+export function pickBuilderBlank(blanks, preselectNftId) {
+  const list = blanks || [];
+  const pre = preselectNftId ? list.find((b) => b.nft_id === preselectNftId) : null;
+  if (pre) return pre;
+  return list.length === 1 ? list[0] : null;
 }
 
 // --- Pending (unsaved) Build changes -----------------------------------
