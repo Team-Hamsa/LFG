@@ -33,7 +33,7 @@ from typing import Any
 REPO_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, REPO_ROOT)
 
-from lfg_core import config, history_store  # noqa: E402
+from lfg_core import config, history_store, system_wallets  # noqa: E402
 
 # The operator's own wallets. The backend-signing issuer is resolved from
 # config at call time instead of being listed here, so rotating the signing
@@ -63,10 +63,21 @@ HISTORICAL_SIGNING_ADDRESSES = frozenset(
 
 def excluded_wallets() -> list[str]:
     """Addresses that never count toward `unique_wallets`, sorted."""
-    # config.SIGNING_ACCOUNT stays unioned in on top of the durable historical
-    # set so a newly-rotated key is excluded immediately, before anyone
-    # remembers to add it to HISTORICAL_SIGNING_ADDRESSES.
-    return sorted(OPERATOR_WALLETS | HISTORICAL_SIGNING_ADDRESSES | {config.SIGNING_ACCOUNT})
+    # config.SIGNING_ACCOUNT and the configured BRIX distributor stay unioned
+    # in on top of the durable historical sets so a newly-rotated key is
+    # excluded immediately, before anyone remembers to add it here.
+    #
+    # The distributor matters as much as the signer: every BRIX claim payout
+    # has Account = the distributor and carries our SourceTag, so without this
+    # each nightly payout run counts a project wallet as an external user
+    # (#413). Retired distributors come from system_wallets, durably (#414).
+    configured = {config.SIGNING_ACCOUNT, config.BRIX_DISTRIBUTOR_ADDRESS}
+    return sorted(
+        OPERATOR_WALLETS
+        | HISTORICAL_SIGNING_ADDRESSES
+        | system_wallets.DURABLE_SYSTEM_ACCOUNTS
+        | {a for a in configured if a}
+    )
 
 
 def _iso_day(close_time: int) -> str:
