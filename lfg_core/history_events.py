@@ -174,7 +174,11 @@ def derive_nft_events(tx: dict[str, Any], *, nft_issuer: str) -> list[dict[str, 
                 "nft_id": i,
                 "event": "mint",
                 "from_addr": None,
-                "to_addr": tx.get("Issuer") or account,
+                # A mint with an `Issuer` field is an authorized-minter mint
+                # (NFTokenMinter): the token is created in tx.Account's wallet,
+                # the Issuer only lends its identity. The owner-of-record is
+                # therefore always the signer.
+                "to_addr": account,
             }
             for i in ids
         ]

@@ -30,6 +30,17 @@ def test_mint():
     assert ev["ts"] == 800000000 + history_events.RIPPLE_EPOCH
 
 
+def test_mint_by_authorized_minter_credits_the_minter_not_the_issuer():
+    """NFTokenMint with an `Issuer` field is an authorized-minter mint: the
+    token lands in the minter's (tx.Account) wallet, not the issuer's.
+    Crediting the issuer left the replay holding a system wallet as owner and
+    flagged 73 mainnet tokens as owner drift (2026-08-22)."""
+    tx = {**fx.MINT, "Account": fx.ALICE, "Issuer": fx.ISSUER}
+    (ev,) = _nft(tx)
+    assert ev["event"] == "mint"
+    assert ev["to_addr"] == fx.ALICE
+
+
 def test_burn_records_owner():
     (ev,) = _nft(fx.BURN)
     assert ev["event"] == "burn" and ev["from_addr"] == fx.ALICE
