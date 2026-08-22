@@ -160,6 +160,13 @@ def collect(db_path: str, network: str) -> dict[str, Any]:
             " AND json_type(raw_json, '$.meta.delivered_amount') = 'text'",
             (tag,),
         ):
+            # Not every text-valued delivered_amount is drops: rippled emits
+            # the sentinel "unavailable" for old partial payments. Skip anything
+            # that isn't a non-negative integer string rather than abort the
+            # nightly run (Greptile P1 on #422).
+            if not isinstance(delivered, str) or not delivered.isdigit():
+                print(f"skipping non-drops delivered_amount {delivered!r}", file=sys.stderr)
+                continue
             drops = int(delivered)
             if dest in excluded:
                 vol_in += drops

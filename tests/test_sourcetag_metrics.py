@@ -542,3 +542,23 @@ def test_xrp_payment_volume_is_zero_with_no_payments(tmp_path):
 def test_validate_payload_rejects_bad_xrp_payment_volume(bad):
     with pytest.raises(ValueError):
         stm.validate_payload(_valid_payload(xrp_payment_volume=bad))
+
+
+def test_xrp_payment_volume_skips_non_numeric_delivered_amount(tmp_path):
+    """A text `delivered_amount` that isn't a drops string (the historical
+    ``"unavailable"`` sentinel on pre-2014 partial payments) must be skipped,
+    not abort the nightly run."""
+    db = _db_raw(
+        tmp_path,
+        [
+            ("h1", "Payment", USER_A, TAG, _pay(USER_A, OPERATOR, "10000000")),
+            ("h2", "Payment", USER_A, TAG, _pay(USER_A, OPERATOR, "unavailable")),
+            ("h3", "Payment", OPERATOR, TAG, _pay(OPERATOR, USER_A, "-5")),
+        ],
+    )
+    out = stm.collect(db, "testnet")
+    assert out["xrp_payment_volume"] == {
+        "in_drops": 10_000_000,
+        "out_drops": 0,
+        "other_drops": 0,
+    }
