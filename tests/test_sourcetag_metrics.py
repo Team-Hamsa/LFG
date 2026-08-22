@@ -48,6 +48,7 @@ def _valid_payload(**overrides):
         "first_tagged_tx": "2026-07-20",
         "archive_max_close_time": "2026-07-20T12:00:00+00:00",
         "as_of": "2026-07-22T00:20:00+00:00",
+        "xrp_payment_volume": {"in_drops": 0, "out_drops": 0, "other_drops": 0},
     }
     payload.update(overrides)
     return payload
@@ -456,3 +457,108 @@ def test_push_wraps_missing_gh_executable_with_diagnostic_message(tmp_path, monk
     err = capsys.readouterr().err
     assert "gh" in err
     assert len(err.strip()) > len("[Errno 2] No such file or directory: 'gh'")
+
+
+# ---------------------------------------------------------------------------
+# XRP Payment volume, split by direction relative to the project's wallets.
+# ---------------------------------------------------------------------------
+
+
+def _pay(acct, dest, delivered, result="tesSUCCESS"):
+    """raw_json for a Payment whose meta.delivered_amount is `delivered`."""
+    return json.dumps(
+        {
+            "Account": acct,
+            "Destination": dest,
+            "TransactionType": "Payment",
+            "meta": {"TransactionResult": result, "delivered_amount": delivered},
+        }
+    )
+
+
+def _db_raw(tmp_path, rows):
+    """rows: (hash, tx_type, account, source_tag, raw_json)"""
+    path = str(tmp_path / "history_testnet.db")
+    conn = history_store.init_history_db(path)
+    conn.executemany(
+        "INSERT INTO xrpl_txs (tx_hash, ledger_index, close_time, tx_type,"
+        " account, source_tag, raw_json) VALUES (?,1,?,?,?,?,?)",
+        [(h, DAY0, t, a, s, r) for (h, t, a, s, r) in rows],
+    )
+    conn.commit()
+    conn.close()
+    return path
+
+
+def test_xrp_payment_volume_splits_in_out_other_and_ignores_iou(tmp_path):
+    brix = {"currency": "BRIX", "issuer": OPERATOR, "value": "500"}
+    db = _db_raw(
+        tmp_path,
+        [
+            # user -> project: IN
+            ("h1", "Payment", USER_A, TAG, _pay(USER_A, OPERATOR, "10000000")),
+            ("h2", "Payment", USER_B, TAG, _pay(USER_B, OPERATOR, "2500000")),
+            # project -> user: OUT
+            ("h3", "Payment", OPERATOR, TAG, _pay(OPERATOR, USER_A, "3000000")),
+            # user -> user: OTHER
+            ("h4", "Payment", USER_A, TAG, _pay(USER_A, USER_B, "1000000")),
+            # IOU payment: never counted
+            ("h5", "Payment", USER_A, TAG, _pay(USER_A, OPERATOR, brix)),
+            # failed XRP payment: never counted
+            ("h6", "Payment", USER_A, TAG, _pay(USER_A, OPERATOR, "9000000", "tecNO_DST")),
+            # untagged XRP payment: never counted
+            ("h7", "Payment", USER_A, 1, _pay(USER_A, OPERATOR, "7000000")),
+            # tagged non-Payment with an Amount-looking meta: never counted
+            ("h8", "NFTokenAcceptOffer", USER_A, TAG, _pay(USER_A, OPERATOR, "8000000")),
+        ],
+    )
+    out = stm.collect(db, "testnet")
+    assert out["xrp_payment_volume"] == {
+        "in_drops": 12_500_000,
+        "out_drops": 3_000_000,
+        "other_drops": 1_000_000,
+    }
+    stm.validate_payload(out)
+
+
+def test_xrp_payment_volume_is_zero_with_no_payments(tmp_path):
+    db = _db(tmp_path, [("h1", DAY0, "NFTokenMint", OPERATOR, TAG)])
+    out = stm.collect(db, "testnet")
+    assert out["xrp_payment_volume"] == {"in_drops": 0, "out_drops": 0, "other_drops": 0}
+
+
+@pytest.mark.parametrize(
+    "bad",
+    [
+        None,
+        {"in_drops": 1, "out_drops": 2},  # missing key
+        {"in_drops": 1, "out_drops": 2, "other_drops": 3, "extra": 4},
+        {"in_drops": -1, "out_drops": 2, "other_drops": 3},
+        {"in_drops": 1.5, "out_drops": 2, "other_drops": 3},
+        {"in_drops": True, "out_drops": 2, "other_drops": 3},
+        {"in_drops": "1", "out_drops": 2, "other_drops": 3},
+    ],
+)
+def test_validate_payload_rejects_bad_xrp_payment_volume(bad):
+    with pytest.raises(ValueError):
+        stm.validate_payload(_valid_payload(xrp_payment_volume=bad))
+
+
+def test_xrp_payment_volume_skips_non_numeric_delivered_amount(tmp_path):
+    """A text `delivered_amount` that isn't a drops string (the historical
+    ``"unavailable"`` sentinel on pre-2014 partial payments) must be skipped,
+    not abort the nightly run."""
+    db = _db_raw(
+        tmp_path,
+        [
+            ("h1", "Payment", USER_A, TAG, _pay(USER_A, OPERATOR, "10000000")),
+            ("h2", "Payment", USER_A, TAG, _pay(USER_A, OPERATOR, "unavailable")),
+            ("h3", "Payment", OPERATOR, TAG, _pay(OPERATOR, USER_A, "-5")),
+        ],
+    )
+    out = stm.collect(db, "testnet")
+    assert out["xrp_payment_volume"] == {
+        "in_drops": 10_000_000,
+        "out_drops": 0,
+        "other_drops": 0,
+    }
