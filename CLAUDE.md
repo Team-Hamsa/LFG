@@ -666,7 +666,12 @@ chain on every request.
   backend activity reclassifies as an external wallet and permanently
   inflates `unique_wallets`; `total_tagged_txs` and `by_type`
   deliberately do not (backend-signed mints are still the project's tagged
-  volume). Note `xrpl_txs.close_time` is stored as UNIX seconds, not the
+  volume). `xrp_payment_volume` (`in_drops`/`out_drops`/`other_drops`) sums
+  `meta.delivered_amount` of tagged `tesSUCCESS` XRP `Payment`s, split by
+  whether the project's wallets are receiver / sender / neither — XRP only,
+  IOU (BRIX/LFGO) payments are NOT valued; it exists to be compared against
+  external "volume" dashboards (XRPL Commons' VMT, reverse-engineered
+  2026-08-21 as exactly that sum). Note `xrpl_txs.close_time` is stored as UNIX seconds, not the
   ripple epoch — no `946684800` correction applies here. The `--push` commit
   bypasses the local pre-push gate, so `validate_payload`'s `ALLOWED_KEYS`
   allowlist is the only thing inspecting what lands on `main` — add a new

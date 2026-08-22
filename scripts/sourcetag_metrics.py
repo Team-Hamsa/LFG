@@ -143,6 +143,31 @@ def collect(db_path: str, network: str) -> dict[str, Any]:
             merged[day] = merged.get(day, 0) + count
         daily = build_daily(sorted(merged.items()))
 
+        # XRP moved by tagged, validated-successful `Payment`s, split by
+        # direction relative to the project's own wallets: `in` = a user
+        # paying the project (mint fees paid in XRP), `out` = the project
+        # paying a user (refunds, rebates, XRP-denominated payouts), `other`
+        # = neither side is ours. Only XRP counts — a `delivered_amount` that
+        # is a drops string. IOU payments (BRIX / LFGO) are an object and are
+        # deliberately NOT valued here; this exists to be compared against
+        # external "volume" dashboards, which sum XRP Payments only.
+        vol_in = vol_out = vol_other = 0
+        for account, dest, delivered in conn.execute(
+            "SELECT account, json_extract(raw_json, '$.Destination'),"
+            " json_extract(raw_json, '$.meta.delivered_amount')"
+            " FROM xrpl_txs WHERE source_tag = ? AND tx_type = 'Payment'"
+            " AND json_extract(raw_json, '$.meta.TransactionResult') = 'tesSUCCESS'"
+            " AND json_type(raw_json, '$.meta.delivered_amount') = 'text'",
+            (tag,),
+        ):
+            drops = int(delivered)
+            if dest in excluded:
+                vol_in += drops
+            elif account in excluded:
+                vol_out += drops
+            else:
+                vol_other += drops
+
         newest = conn.execute("SELECT MAX(close_time) FROM xrpl_txs").fetchone()[0]
         conn.execute("COMMIT")
     except BaseException:
@@ -159,6 +184,11 @@ def collect(db_path: str, network: str) -> dict[str, Any]:
         "by_type": by_type,
         "daily": daily,
         "excluded": excluded,
+        "xrp_payment_volume": {
+            "in_drops": vol_in,
+            "out_drops": vol_out,
+            "other_drops": vol_other,
+        },
         # This is the earliest day PRESENT IN THE ARCHIVE (history_<net>.db),
         # which begins wherever the backfill was started from — not the
         # earliest day the SourceTag actually appears on-ledger. Don't read it
@@ -190,6 +220,7 @@ ALLOWED_KEYS = frozenset(
         "by_type",
         "daily",
         "excluded",
+        "xrp_payment_volume",
         "first_tagged_tx",
         "archive_max_close_time",
         "as_of",
@@ -200,6 +231,7 @@ _ADDRESS_RE = re.compile(r"^r[1-9A-HJ-NP-Za-km-z]{24,34}$")
 _DATE_RE = re.compile(r"^\d{4}-\d{2}-\d{2}$")
 _ISO_RE = re.compile(r"^\d{4}-\d{2}-\d{2}T[\d:.+\-]{8,}$")
 _TX_TYPE_RE = re.compile(r"^[A-Za-z]+$")
+_VOLUME_KEYS = frozenset({"in_drops", "out_drops", "other_drops"})
 
 
 def validate_payload(payload: dict[str, Any]) -> None:
@@ -261,6 +293,13 @@ def validate_payload(payload: dict[str, Any]) -> None:
     excluded = payload["excluded"]
     if not isinstance(excluded, list) or not all(_ADDRESS_RE.fullmatch(str(a)) for a in excluded):
         raise ValueError("excluded must be a list of XRPL addresses")
+
+    volume = payload["xrp_payment_volume"]
+    if not isinstance(volume, dict) or set(volume) != _VOLUME_KEYS:
+        raise ValueError(f"xrp_payment_volume must have exactly keys {sorted(_VOLUME_KEYS)}")
+    for key, drops in volume.items():
+        if not isinstance(drops, int) or isinstance(drops, bool) or drops < 0:
+            raise ValueError(f"xrp_payment_volume.{key} must be a non-negative int")
 
     first = payload["first_tagged_tx"]
     if first is not None and not _DATE_RE.fullmatch(str(first)):
