@@ -16,7 +16,7 @@
 <a href="https://github.com/Team-Hamsa/LFG/actions/workflows/ci.yml"><img src="https://img.shields.io/github/actions/workflow/status/Team-Hamsa/LFG/ci.yml?branch=main&style=flat-square&label=CI" alt="CI status on main"></a>
 <img src="https://img.shields.io/github/license/Team-Hamsa/LFG?style=flat-square&color=blue" alt="MIT license">
 <img src="https://img.shields.io/badge/SourceTag-2606160021-8957E5?style=flat-square" alt="XRPL SourceTag 2606160021">
-<img src="https://img.shields.io/badge/tagged_txs-7%2C085-3E8DE3?style=flat-square" alt="7,085 SourceTag-tagged XRPL transactions">
+<img src="https://img.shields.io/badge/tagged_txs-7%2C738-3E8DE3?style=flat-square" alt="7,738 SourceTag-tagged XRPL transactions">
 <!-- badges:end -->
 
 <br><br>

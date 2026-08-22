@@ -1,67 +1,69 @@
-<svg xmlns="http://www.w3.org/2000/svg" width="728" height="330" viewBox="0 0 728 330" role="img" aria-label="XRPL source tag 2606160021: 7,085 tagged transactions from 302 unique wallets">
+<svg xmlns="http://www.w3.org/2000/svg" width="728" height="330" viewBox="0 0 728 330" role="img" aria-label="XRPL source tag 2606160021: 7,738 tagged transactions from 402 unique wallets">
 <rect x="8" y="8" width="718" height="320" rx="18" fill="#0A0A0A"/>
 <rect x="2" y="2" width="718" height="320" rx="18" fill="#181818" stroke="#FFFFFF" stroke-width="3"/>
 <text x="24" y="34" font-family="-apple-system,'Segoe UI',Roboto,Helvetica,Arial,sans-serif" font-size="19" font-weight="700" fill="#F5F4F1">XRPL source tag · 2606160021</text>
 <text x="24" y="56" font-family="-apple-system,'Segoe UI',Roboto,Helvetica,Arial,sans-serif" font-size="13" fill="#9C9A94">live on-ledger volume · auto-updated daily</text>
 <rect x="24.0" y="72" width="328.0" height="60" rx="12" fill="#202020" stroke="#2C2C2C" stroke-width="1"/>
 <rect x="40.0" y="84" width="30" height="5" rx="2.5" fill="#4890C0"/>
-<text x="40.0" y="114" font-family="-apple-system,'Segoe UI',Roboto,Helvetica,Arial,sans-serif" font-size="26" font-weight="800" fill="#4890C0">302</text>
+<text x="40.0" y="114" font-family="-apple-system,'Segoe UI',Roboto,Helvetica,Arial,sans-serif" font-size="26" font-weight="800" fill="#4890C0">402</text>
 <text x="40.0" y="127" font-family="-apple-system,'Segoe UI',Roboto,Helvetica,Arial,sans-serif" font-size="11" fill="#9C9A94">unique wallets</text>
 <rect x="368.0" y="72" width="328.0" height="60" rx="12" fill="#202020" stroke="#2C2C2C" stroke-width="1"/>
 <rect x="384.0" y="84" width="30" height="5" rx="2.5" fill="#D89030"/>
-<text x="384.0" y="114" font-family="-apple-system,'Segoe UI',Roboto,Helvetica,Arial,sans-serif" font-size="26" font-weight="800" fill="#D89030">7,085</text>
+<text x="384.0" y="114" font-family="-apple-system,'Segoe UI',Roboto,Helvetica,Arial,sans-serif" font-size="26" font-weight="800" fill="#D89030">7,738</text>
 <text x="384.0" y="127" font-family="-apple-system,'Segoe UI',Roboto,Helvetica,Arial,sans-serif" font-size="11" fill="#9C9A94">tagged transactions</text>
 <text x="24.0" y="166" font-family="-apple-system,'Segoe UI',Roboto,Helvetica,Arial,sans-serif" font-size="11" fill="#9C9A94">mint</text>
 <rect x="82.0" y="158.0" width="570.0" height="9" rx="4.5" fill="#D89030"/>
-<text x="660.0" y="166" font-family="-apple-system,'Segoe UI',Roboto,Helvetica,Arial,sans-serif" font-size="11" fill="#F5F4F1">1,652</text>
+<text x="660.0" y="166" font-family="-apple-system,'Segoe UI',Roboto,Helvetica,Arial,sans-serif" font-size="11" fill="#F5F4F1">1,804</text>
 <text x="24.0" y="182" font-family="-apple-system,'Segoe UI',Roboto,Helvetica,Arial,sans-serif" font-size="11" fill="#9C9A94">offer</text>
-<rect x="82.0" y="174.0" width="562.8" height="9" rx="4.5" fill="#4890C0"/>
-<text x="660.0" y="182" font-family="-apple-system,'Segoe UI',Roboto,Helvetica,Arial,sans-serif" font-size="11" fill="#F5F4F1">1,631</text>
+<rect x="82.0" y="174.0" width="563.7" height="9" rx="4.5" fill="#4890C0"/>
+<text x="660.0" y="182" font-family="-apple-system,'Segoe UI',Roboto,Helvetica,Arial,sans-serif" font-size="11" fill="#F5F4F1">1,784</text>
 <text x="24.0" y="198" font-family="-apple-system,'Segoe UI',Roboto,Helvetica,Arial,sans-serif" font-size="11" fill="#9C9A94">accept</text>
-<rect x="82.0" y="190.0" width="393.3" height="9" rx="4.5" fill="#D84830"/>
-<text x="660.0" y="198" font-family="-apple-system,'Segoe UI',Roboto,Helvetica,Arial,sans-serif" font-size="11" fill="#F5F4F1">1,140</text>
+<rect x="82.0" y="190.0" width="404.8" height="9" rx="4.5" fill="#D84830"/>
+<text x="660.0" y="198" font-family="-apple-system,'Segoe UI',Roboto,Helvetica,Arial,sans-serif" font-size="11" fill="#F5F4F1">1,281</text>
 <text x="24.0" y="214" font-family="-apple-system,'Segoe UI',Roboto,Helvetica,Arial,sans-serif" font-size="11" fill="#9C9A94">payment</text>
-<rect x="82.0" y="206.0" width="393.3" height="9" rx="4.5" fill="#3DA35D"/>
-<text x="660.0" y="214" font-family="-apple-system,'Segoe UI',Roboto,Helvetica,Arial,sans-serif" font-size="11" fill="#F5F4F1">1,140</text>
+<rect x="82.0" y="206.0" width="401.3" height="9" rx="4.5" fill="#3DA35D"/>
+<text x="660.0" y="214" font-family="-apple-system,'Segoe UI',Roboto,Helvetica,Arial,sans-serif" font-size="11" fill="#F5F4F1">1,270</text>
 <text x="24.0" y="230" font-family="-apple-system,'Segoe UI',Roboto,Helvetica,Arial,sans-serif" font-size="11" fill="#9C9A94">burn</text>
-<rect x="82.0" y="222.0" width="294.7" height="9" rx="4.5" fill="#F0D848"/>
-<text x="660.0" y="230" font-family="-apple-system,'Segoe UI',Roboto,Helvetica,Arial,sans-serif" font-size="11" fill="#F5F4F1">854</text>
+<rect x="82.0" y="222.0" width="284.7" height="9" rx="4.5" fill="#F0D848"/>
+<text x="660.0" y="230" font-family="-apple-system,'Segoe UI',Roboto,Helvetica,Arial,sans-serif" font-size="11" fill="#F5F4F1">901</text>
 <text x="24.0" y="246" font-family="-apple-system,'Segoe UI',Roboto,Helvetica,Arial,sans-serif" font-size="11" fill="#9C9A94">+3 more</text>
-<text x="660.0" y="246" font-family="-apple-system,'Segoe UI',Roboto,Helvetica,Arial,sans-serif" font-size="11" fill="#9C9A94">668</text>
+<text x="660.0" y="246" font-family="-apple-system,'Segoe UI',Roboto,Helvetica,Arial,sans-serif" font-size="11" fill="#9C9A94">698</text>
 <text x="24" y="276" font-family="-apple-system,'Segoe UI',Roboto,Helvetica,Arial,sans-serif" font-size="12" fill="#9C9A94">tagged tx / day</text>
 <line x1="24.0" y1="310" x2="696.0" y2="310" stroke="#2C2C2C" stroke-width="1"/>
-<rect x="27.0" y="308.0" width="7.4" height="2.0" rx="2" fill="#D89030"/>
-<rect x="53.9" y="308.0" width="7.4" height="2.0" rx="2" fill="#D89030"/>
-<rect x="134.5" y="308.0" width="7.4" height="2.0" rx="2" fill="#D89030"/>
-<rect x="148.0" y="297.9" width="7.4" height="12.1" rx="2" fill="#D89030"/>
-<rect x="161.4" y="284.0" width="7.4" height="26.0" rx="2" fill="#D89030"/>
-<rect x="174.9" y="304.1" width="7.4" height="5.9" rx="2" fill="#D89030"/>
-<rect x="188.3" y="307.0" width="7.4" height="3.0" rx="2" fill="#D89030"/>
-<rect x="201.7" y="308.0" width="7.4" height="2.0" rx="2" fill="#D89030"/>
-<rect x="215.2" y="308.0" width="7.4" height="2.0" rx="2" fill="#D89030"/>
-<rect x="228.6" y="302.8" width="7.4" height="7.2" rx="2" fill="#D89030"/>
-<rect x="242.1" y="306.3" width="7.4" height="3.7" rx="2" fill="#D89030"/>
-<rect x="255.5" y="307.4" width="7.4" height="2.6" rx="2" fill="#D89030"/>
-<rect x="268.9" y="308.0" width="7.4" height="2.0" rx="2" fill="#D89030"/>
-<rect x="282.4" y="304.4" width="7.4" height="5.6" rx="2" fill="#D89030"/>
-<rect x="295.8" y="306.7" width="7.4" height="3.3" rx="2" fill="#D89030"/>
-<rect x="309.3" y="308.0" width="7.4" height="2.0" rx="2" fill="#D89030"/>
-<rect x="322.7" y="308.0" width="7.4" height="2.0" rx="2" fill="#D89030"/>
-<rect x="363.0" y="308.0" width="7.4" height="2.0" rx="2" fill="#D89030"/>
-<rect x="430.2" y="308.0" width="7.4" height="2.0" rx="2" fill="#D89030"/>
-<rect x="443.7" y="308.0" width="7.4" height="2.0" rx="2" fill="#D89030"/>
-<rect x="457.1" y="308.0" width="7.4" height="2.0" rx="2" fill="#D89030"/>
-<rect x="484.0" y="305.1" width="7.4" height="4.9" rx="2" fill="#D89030"/>
-<rect x="497.4" y="297.4" width="7.4" height="12.6" rx="2" fill="#D89030"/>
-<rect x="510.9" y="298.2" width="7.4" height="11.8" rx="2" fill="#D89030"/>
-<rect x="524.3" y="306.9" width="7.4" height="3.1" rx="2" fill="#D89030"/>
-<rect x="537.7" y="292.9" width="7.4" height="17.1" rx="2" fill="#D89030"/>
-<rect x="551.2" y="299.4" width="7.4" height="10.6" rx="2" fill="#D89030"/>
-<rect x="604.9" y="307.8" width="7.4" height="2.2" rx="2" fill="#D89030"/>
-<rect x="618.4" y="308.0" width="7.4" height="2.0" rx="2" fill="#D89030"/>
-<rect x="631.8" y="308.0" width="7.4" height="2.0" rx="2" fill="#D89030"/>
-<rect x="645.3" y="292.1" width="7.4" height="17.9" rx="2" fill="#D89030"/>
-<rect x="658.7" y="307.4" width="7.4" height="2.6" rx="2" fill="#D89030"/>
-<rect x="672.1" y="284.6" width="7.4" height="25.4" rx="2" fill="#D89030"/>
-<rect x="685.6" y="299.5" width="7.4" height="10.5" rx="2" fill="#D89030"/>
+<rect x="26.9" y="308.0" width="7.1" height="2.0" rx="2" fill="#D89030"/>
+<rect x="52.8" y="308.0" width="7.1" height="2.0" rx="2" fill="#D89030"/>
+<rect x="130.3" y="308.0" width="7.1" height="2.0" rx="2" fill="#D89030"/>
+<rect x="143.2" y="297.9" width="7.1" height="12.1" rx="2" fill="#D89030"/>
+<rect x="156.1" y="284.0" width="7.1" height="26.0" rx="2" fill="#D89030"/>
+<rect x="169.1" y="304.1" width="7.1" height="5.9" rx="2" fill="#D89030"/>
+<rect x="182.0" y="307.0" width="7.1" height="3.0" rx="2" fill="#D89030"/>
+<rect x="194.9" y="308.0" width="7.1" height="2.0" rx="2" fill="#D89030"/>
+<rect x="207.8" y="308.0" width="7.1" height="2.0" rx="2" fill="#D89030"/>
+<rect x="220.8" y="302.8" width="7.1" height="7.2" rx="2" fill="#D89030"/>
+<rect x="233.7" y="306.3" width="7.1" height="3.7" rx="2" fill="#D89030"/>
+<rect x="246.6" y="307.4" width="7.1" height="2.6" rx="2" fill="#D89030"/>
+<rect x="259.5" y="308.0" width="7.1" height="2.0" rx="2" fill="#D89030"/>
+<rect x="272.4" y="304.4" width="7.1" height="5.6" rx="2" fill="#D89030"/>
+<rect x="285.4" y="306.7" width="7.1" height="3.3" rx="2" fill="#D89030"/>
+<rect x="298.3" y="308.0" width="7.1" height="2.0" rx="2" fill="#D89030"/>
+<rect x="311.2" y="308.0" width="7.1" height="2.0" rx="2" fill="#D89030"/>
+<rect x="350.0" y="308.0" width="7.1" height="2.0" rx="2" fill="#D89030"/>
+<rect x="414.6" y="308.0" width="7.1" height="2.0" rx="2" fill="#D89030"/>
+<rect x="427.5" y="308.0" width="7.1" height="2.0" rx="2" fill="#D89030"/>
+<rect x="440.4" y="308.0" width="7.1" height="2.0" rx="2" fill="#D89030"/>
+<rect x="466.3" y="305.1" width="7.1" height="4.9" rx="2" fill="#D89030"/>
+<rect x="479.2" y="297.4" width="7.1" height="12.6" rx="2" fill="#D89030"/>
+<rect x="492.1" y="298.2" width="7.1" height="11.8" rx="2" fill="#D89030"/>
+<rect x="505.1" y="306.9" width="7.1" height="3.1" rx="2" fill="#D89030"/>
+<rect x="518.0" y="292.9" width="7.1" height="17.1" rx="2" fill="#D89030"/>
+<rect x="530.9" y="299.4" width="7.1" height="10.6" rx="2" fill="#D89030"/>
+<rect x="582.6" y="307.8" width="7.1" height="2.2" rx="2" fill="#D89030"/>
+<rect x="595.5" y="308.0" width="7.1" height="2.0" rx="2" fill="#D89030"/>
+<rect x="608.4" y="308.0" width="7.1" height="2.0" rx="2" fill="#D89030"/>
+<rect x="621.4" y="292.1" width="7.1" height="17.9" rx="2" fill="#D89030"/>
+<rect x="634.3" y="307.4" width="7.1" height="2.6" rx="2" fill="#D89030"/>
+<rect x="647.2" y="284.6" width="7.1" height="25.4" rx="2" fill="#D89030"/>
+<rect x="660.1" y="299.5" width="7.1" height="10.5" rx="2" fill="#D89030"/>
+<rect x="673.1" y="292.4" width="7.1" height="17.6" rx="2" fill="#D89030"/>
+<rect x="686.0" y="308.0" width="7.1" height="2.0" rx="2" fill="#D89030"/>
 </svg>
