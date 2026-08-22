@@ -1211,3 +1211,110 @@ def test_assemble_options_blanks_exclude_dressed_and_non_mutable(monkeypatch, bo
 
     out = asyncio.get_event_loop().run_until_complete(go())
     assert out["blanks"] == [{"nft_id": "BLANK1", "edition": 10}]
+
+
+# --- Closet screen self-heals a listener-missed accept ---
+
+
+def test_start_closet_confirms_missed_accept_before_ensure(monkeypatch):
+    """A Closet recorded `pending_accept` whose token the owner ALREADY holds
+    on-ledger (the listener missed the NFTokenAcceptOffer — prod 2026-08-17/18,
+    two users stuck on "accept your Closet" for days) must be promoted to
+    `active` by the Closet screen itself, exactly as the harvest/assemble flows
+    already do via `_require_active_closet`, instead of re-serving the stale
+    accept prompt forever."""
+    conn = _seed_conn()
+    economy_store.set_closet_token(conn, "rOwner", "CLOSET-1", "aabb", "pending_accept", "OFFER-1")
+    monkeypatch.setattr(economy_api, "open_conn", lambda: conn)
+
+    owner_lookups = []
+
+    async def closet_owner(nft_id):
+        owner_lookups.append(nft_id)
+        return "rOwner"  # on-ledger: the offer WAS accepted
+
+    class Deps:
+        closet_upload_fn = None
+        closet_mint_fn = None
+        closet_offer_fn = None
+        closet_accept_fn = None
+        closet_exists_fn = None
+        closet_owner_fn = staticmethod(closet_owner)
+
+    monkeypatch.setattr(economy_api._economy_deps, "build_economy_deps", lambda *a, **k: Deps())
+
+    import lfg_core.closet_token as ct
+
+    seen_status = []
+
+    async def fake_ensure_closet(conn, owner, **kw):
+        rec = economy_store.get_closet_record(conn, owner)
+        seen_status.append(rec[2])
+        return ct.ClosetRef(nft_id=rec[0], uri_hex=rec[1], status=rec[2], accept_payload=None)
+
+    monkeypatch.setattr(ct, "ensure_closet", fake_ensure_closet)
+
+    async def go():
+        return await economy_api.start_closet("123", "rOwner")
+
+    result = asyncio.get_event_loop().run_until_complete(go())
+    assert owner_lookups == ["CLOSET-1"]
+    assert seen_status == ["active"], "confirm_accept must run BEFORE ensure_closet"
+    assert result["status"] == "active"
+    assert result["accept"] is None
+    # start_closet closes its conn; the persisted status was observed by
+    # fake_ensure_closet above (seen_status), after confirm_accept committed.
+
+
+def test_start_closet_rolls_back_when_confirm_accept_commit_fails(monkeypatch):
+    """If the pre-check's commit raises, the shared connection is rolled back so
+    ensure_closet reads the durable `pending_accept`, not a phantom `active`."""
+    real = _seed_conn()
+    economy_store.set_closet_token(real, "rOwner", "CLOSET-1", "aabb", "pending_accept", "OFFER-1")
+    calls = {"n": 0}
+
+    class FlakyConn:
+        """sqlite3.Connection attributes are read-only; wrap to fail the first commit."""
+
+        def __getattr__(self, name):
+            return getattr(real, name)
+
+        def commit(self):
+            calls["n"] += 1
+            if calls["n"] == 1:
+                raise sqlite3.OperationalError("disk I/O error")
+            real.commit()
+
+    conn = FlakyConn()
+    monkeypatch.setattr(economy_api, "open_conn", lambda: conn)
+
+    async def closet_owner(nft_id):
+        return "rOwner"
+
+    class Deps:
+        closet_upload_fn = None
+        closet_mint_fn = None
+        closet_offer_fn = None
+        closet_accept_fn = None
+        closet_exists_fn = None
+        closet_owner_fn = staticmethod(closet_owner)
+
+    monkeypatch.setattr(economy_api._economy_deps, "build_economy_deps", lambda *a, **k: Deps())
+
+    import lfg_core.closet_token as ct
+
+    seen = []
+
+    async def fake_ensure_closet(conn, owner, **kw):
+        rec = economy_store.get_closet_record(conn, owner)
+        seen.append(rec[2])
+        return ct.ClosetRef(nft_id=rec[0], uri_hex=rec[1], status=rec[2], accept_payload=None)
+
+    monkeypatch.setattr(ct, "ensure_closet", fake_ensure_closet)
+
+    async def go():
+        return await economy_api.start_closet("123", "rOwner")
+
+    result = asyncio.get_event_loop().run_until_complete(go())
+    assert seen == ["pending_accept"]
+    assert result["status"] == "pending_accept"
