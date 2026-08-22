@@ -10,7 +10,8 @@ import sqlite3
 
 import pytest
 
-from lfg_core import brix_drip
+from lfg_core import brix_drip, epoch_state, history_store
+from lfg_core.epoch_state import EpochToken
 from lfg_core.nft_index import OnchainNft
 
 
@@ -246,60 +247,135 @@ def test_epochs_to_accrue_is_empty_when_already_current():
     assert brix_drip.epochs_to_accrue("2026-08-25", "2026-08-19") == []
 
 
-def test_run_accrual_advances_cursor_and_is_a_no_op_on_rerun(conn):
-    tokens = [_nft("NFT_A", "rAlice"), _nft("NFT_B", "rBob")]
-    reports = brix_drip.run_accrual(
-        conn,
-        tokens,
-        listed_fn=lambda nft_id: False,
-        system_accounts=frozenset(),
-        today="2026-08-19",
-    )
-    assert [r.epoch for r in reports] == ["2026-08-18"]
-    assert reports[0].accrued == 2
-    assert brix_drip.get_meta(conn, brix_drip.LAST_ACCRUED_EPOCH) == "2026-08-18"
+class _FakeReplay:
+    """Stands in for epoch_state.EpochReplay: a fixed state for every epoch."""
 
-    again = brix_drip.run_accrual(
+    def __init__(self, tokens):
+        self._tokens = tokens
+
+    def advance_to(self, epoch):
+        return self._tokens
+
+
+def _tok(nft_id, owner="rHolder", listed=False, live=True):
+    return EpochToken(nft_id=nft_id, owner=owner, listed=listed, live=live)
+
+
+def _all_eligible(tokens):
+    """Default eligibility for the fixtures: every replayed token is a
+    collection character (the #411 C1 filter is exercised explicitly below)."""
+    return {nft_id: tok.owner for nft_id, tok in tokens.items()}
+
+
+def _run(conn, tokens, *, today, certify=lambda c, n, e: None, eligible=None):
+    return brix_drip.run_archive_accrual(
         conn,
-        tokens,
-        listed_fn=lambda nft_id: False,
-        system_accounts=frozenset(),
-        today="2026-08-19",
+        "testnet",
+        frozenset(),
+        today=today,
+        eligible=_all_eligible(tokens) if eligible is None else eligible,
+        certify=certify,
+        replay_factory=lambda c: _FakeReplay(tokens),
     )
-    assert again == []
+
+
+def test_run_archive_accrual_advances_cursor_and_is_a_no_op_on_rerun(conn):
+    tokens = {"A": _tok("A", "rAlice"), "B": _tok("B", "rBob")}
+    reports = _run(conn, tokens, today="2026-08-19")
+    assert [r.epoch for r in reports] == ["2026-08-18"]
+    assert reports[0].accrued == 2 and reports[0].deferred is None
+    assert brix_drip.get_meta(conn, brix_drip.LAST_ACCRUED_EPOCH) == "2026-08-18"
+    assert _run(conn, tokens, today="2026-08-19") == []
     assert conn.execute("SELECT COUNT(*) FROM brix_accruals").fetchone()[0] == 2
 
 
-def test_run_accrual_reports_skip_reasons_per_epoch(conn):
-    tokens = [_nft("A", "rAlice"), _nft("B", "rBob"), _nft("C", "rCarol")]
-
-    def listed_fn(nft_id):
-        return {"B": True, "C": None}.get(nft_id, False)
-
-    reports = brix_drip.run_accrual(
+def test_run_archive_accrual_reports_skip_reasons(conn):
+    tokens = {
+        "A": _tok("A", "rAlice"),
+        "B": _tok("B", "rBob", listed=True),
+        "C": _tok("C", "rCarol", listed=None),
+        "D": _tok("D", "rDave", live=False),
+        "E": _tok("E", "rSys"),
+        # Padding: one unknown out of three decidable tokens would trip the
+        # #411 I1 mass-unknown deferral, which this test is not about.
+        **{f"P{i}": _tok(f"P{i}", f"rPad{i}") for i in range(10)},
+    }
+    reports = brix_drip.run_archive_accrual(
         conn,
-        tokens,
-        listed_fn=listed_fn,
-        system_accounts=frozenset(),
+        "testnet",
+        frozenset({"rSys"}),
         today="2026-08-19",
+        eligible=_all_eligible(tokens),
+        certify=lambda c, n, e: None,
+        replay_factory=lambda c: _FakeReplay(tokens),
     )
-    assert reports[0].accrued == 1
-    assert reports[0].skipped_listed == 1
-    assert reports[0].unknown == 1
+    r = reports[0]
+    assert r.deferred is None
+    assert (r.accrued, r.skipped_listed, r.unknown, r.skipped_burned, r.skipped_system) == (
+        11,
+        1,
+        1,
+        1,
+        1,
+    )
 
 
-def test_run_accrual_catch_up_writes_every_missed_epoch(conn):
+def test_run_archive_accrual_catch_up_writes_every_missed_epoch(conn):
     brix_drip.set_meta(conn, brix_drip.LAST_ACCRUED_EPOCH, "2026-08-15")
-    reports = brix_drip.run_accrual(
-        conn,
-        [_nft("NFT_A", "rAlice")],
-        listed_fn=lambda nft_id: False,
-        system_accounts=frozenset(),
-        today="2026-08-19",
-    )
+    reports = _run(conn, {"A": _tok("A", "rAlice")}, today="2026-08-19")
     assert [r.epoch for r in reports] == ["2026-08-16", "2026-08-17", "2026-08-18"]
     assert brix_drip.claimable(conn, "rAlice") == 3
     assert brix_drip.get_meta(conn, brix_drip.LAST_ACCRUED_EPOCH) == "2026-08-18"
+
+
+def test_uncertified_epoch_defers_and_leaves_cursor_behind(conn):
+    brix_drip.set_meta(conn, brix_drip.LAST_ACCRUED_EPOCH, "2026-08-15")
+    gated = {"2026-08-17"}
+    certify = lambda c, n, e: "gap" if e in gated else None  # noqa: E731
+    reports = _run(conn, {"A": _tok("A", "rAlice")}, today="2026-08-19", certify=certify)
+    assert [(r.epoch, r.deferred) for r in reports] == [("2026-08-16", None), ("2026-08-17", "gap")]
+    assert brix_drip.get_meta(conn, brix_drip.LAST_ACCRUED_EPOCH) == "2026-08-16"
+    assert brix_drip.claimable(conn, "rAlice") == 1
+    # gap healed → next run completes 17 and 18 exactly once
+    again = _run(conn, {"A": _tok("A", "rAlice")}, today="2026-08-19")
+    assert [r.epoch for r in again] == ["2026-08-17", "2026-08-18"]
+    assert brix_drip.claimable(conn, "rAlice") == 3
+    assert conn.execute("SELECT COUNT(*) FROM brix_accruals").fetchone()[0] == 3
+
+
+def test_listed_token_earns_nothing_from_archive_fixtures(conn, tmp_path):
+    """Regression driven by the real replay, not a mocked RPC (spec §Testing)."""
+    from lfg_core import epoch_state, history_store
+
+    h = history_store.init_history_db(str(tmp_path / "h.db"))
+    brix_drip.ensure_schema(h)
+    h.execute(
+        "INSERT INTO archive_state (network, genesis_hash, baseline_complete, validated_close_time,"
+        " updated_at) VALUES ('testnet', ?, 1, ?, 1)",
+        ("G" * 64, 4102444800),
+    )
+    for i, (ev, kw) in enumerate(
+        [
+            ("mint", {"nft_id": "L", "to_addr": "rAlice"}),
+            (
+                "offer_create",
+                {"nft_id": "L", "from_addr": "rAlice", "offer_index": "O1", "offer_flags": 1},
+            ),
+            ("mint", {"nft_id": "U", "to_addr": "rBob"}),
+        ]
+    ):
+        history_store.insert_nft_event(
+            h, {"tx_hash": f"T{i}", "event": ev, "ts": 1767225600 + i, "ledger_index": i, **kw}
+        )
+    h.commit()
+    brix_drip.set_meta(h, brix_drip.LAST_ACCRUED_EPOCH, "2025-12-31")
+    reports = brix_drip.run_archive_accrual(
+        h, "testnet", frozenset(), today="2026-01-03", eligible={"L": "rAlice", "U": "rBob"}
+    )
+    assert reports[-1].epoch == "2026-01-02"
+    assert brix_drip.claimable(h, "rAlice") == 0
+    assert brix_drip.claimable(h, "rBob") == 2  # 01-01 and 01-02
+    assert epoch_state.state_at_epoch(h, "2026-01-02")["L"].listed is True
 
 
 # --- Task 4: conservation audit -------------------------------------------
@@ -547,3 +623,251 @@ def test_audit_reports_skipped_not_passed_on_a_fresh_install(conn):
     ]
     assert result.skipped is True
     assert result.ok is True
+
+
+# --- #411 fix wave: eligibility scope, owner drift, mass-unknown deferral ---
+
+
+def test_tokens_outside_the_collection_index_never_accrue(conn):
+    """C1: nft_events also carries Closet (taxon 1762) and trait (176) tokens.
+    They were never drip-eligible; only onchain_nfts membership pays."""
+    tokens = {"CHAR": _tok("CHAR", "rAlice"), "CLOSET": _tok("CLOSET", "rAlice")}
+    reports = _run(conn, tokens, today="2026-08-19", eligible={"CHAR": "rAlice"})
+    r = reports[0]
+    assert (r.accrued, r.skipped_ineligible) == (1, 1)
+    assert brix_drip.claimable(conn, "rAlice") == 1
+    assert [row[0] for row in conn.execute("SELECT nft_id FROM brix_accruals")] == ["CHAR"]
+
+
+def test_owner_drift_on_the_newest_epoch_blocks_payment(conn):
+    """C2: a replayed owner that disagrees with the index means nft_events is
+    missing an accept — the token must not pay to the stale wallet."""
+    tokens = {"A": _tok("A", "rStale"), "B": _tok("B", "rBob")}
+    # Padding keeps the drift-induced unknown under the I1 mass-unknown
+    # threshold, so this test isolates the drift behaviour.
+    tokens.update({f"P{i}": _tok(f"P{i}", f"rPad{i}") for i in range(20)})
+    eligible = {"A": "rFresh", "B": "rBob"}
+    eligible.update({f"P{i}": f"rPad{i}" for i in range(20)})
+    reports = _run(conn, tokens, today="2026-08-19", eligible=eligible)
+    r = reports[0]
+    assert (r.accrued, r.owner_drift, r.unknown) == (21, 1, 1)
+    assert brix_drip.claimable(conn, "rStale") == 0
+    assert brix_drip.claimable(conn, "rBob") == 1
+
+
+def test_owner_drift_is_not_checked_on_older_catch_up_epochs(conn):
+    """The same mismatch on a catch-up epoch is legitimate history — the token
+    genuinely had a different owner then — so it still earns."""
+    brix_drip.set_meta(conn, brix_drip.LAST_ACCRUED_EPOCH, "2026-08-16")
+    tokens = {"A": _tok("A", "rStale"), "B": _tok("B", "rBob")}
+    # Padding keeps the drift-induced unknown under the I1 mass-unknown
+    # threshold, so this test isolates the drift behaviour.
+    tokens.update({f"P{i}": _tok(f"P{i}", f"rPad{i}") for i in range(20)})
+    eligible = {"A": "rFresh", "B": "rBob"}
+    eligible.update({f"P{i}": f"rPad{i}" for i in range(20)})
+    reports = _run(conn, tokens, today="2026-08-19", eligible=eligible)
+    assert [(r.epoch, r.owner_drift) for r in reports] == [
+        ("2026-08-17", 0),
+        ("2026-08-18", 1),
+    ]
+    # Paid for 08-17 (no drift check) but not for 08-18 (drift).
+    assert brix_drip.claimable(conn, "rStale") == 1
+
+
+def test_mass_unknown_epoch_defers_and_leaves_the_cursor_behind(conn):
+    """I1: a stale derived table makes almost everything unknown. Writing ~0
+    rows and advancing the cursor would silently forfeit the day forever."""
+    tokens = {f"N{i}": _tok(f"N{i}", f"r{i}", listed=None) for i in range(9)}
+    tokens["OK"] = _tok("OK", "rOk")
+    reports = _run(conn, tokens, today="2026-08-19")
+    r = reports[0]
+    assert r.deferred is not None and "derive_history_events" in r.deferred
+    assert r.accrued == 0
+    assert conn.execute("SELECT COUNT(*) FROM brix_accruals").fetchone()[0] == 0
+    assert brix_drip.get_meta(conn, brix_drip.LAST_ACCRUED_EPOCH) is None
+
+
+def test_a_few_unknowns_below_the_threshold_still_accrue(conn):
+    tokens = {f"N{i}": _tok(f"N{i}", f"r{i}") for i in range(20)}
+    tokens["U"] = _tok("U", "rUnknown", listed=None)
+    reports = _run(conn, tokens, today="2026-08-19")
+    assert reports[0].deferred is None and reports[0].accrued == 20
+
+
+def test_empty_eligible_map_defers_instead_of_advancing_the_cursor(conn):
+    """nft_index.init_db CREATES a missing index file, so a wrong path yields
+    an EMPTY map, not an error. Without this guard every token would be
+    'ineligible', every count zero, the mass-unknown check a no-op — and the
+    cursor would advance over an epoch nobody can ever be paid for."""
+    tokens = {"A": _tok("A", "rAlice"), "B": _tok("B", "rBob")}
+    reports = _run(conn, tokens, today="2026-08-19", eligible={})
+    r = reports[0]
+    assert r.deferred is not None and "onchain_testnet.db" in r.deferred
+    assert r.accrued == 0
+    assert conn.execute("SELECT COUNT(*) FROM brix_accruals").fetchone()[0] == 0
+    assert brix_drip.get_meta(conn, brix_drip.LAST_ACCRUED_EPOCH) is None
+
+
+def test_all_replayed_tokens_ineligible_defers(conn):
+    """A non-empty but wrong index (nothing overlapping the archive) is the
+    same silent zero-pay day."""
+    tokens = {"A": _tok("A", "rAlice"), "B": _tok("B", "rBob")}
+    reports = _run(conn, tokens, today="2026-08-19", eligible={"OTHER": "rZed"})
+    r = reports[0]
+    assert r.deferred is not None and "2 replayed tokens ineligible" in r.deferred
+    assert (r.accrued, r.skipped_ineligible) == (0, 2)
+    assert brix_drip.get_meta(conn, brix_drip.LAST_ACCRUED_EPOCH) is None
+
+
+def test_an_epoch_with_no_tokens_at_all_is_not_a_deferral(conn):
+    """Before the first mint the replay is legitimately empty — that must
+    accrue nothing and still advance, unlike a broken index."""
+    reports = _run(conn, {}, today="2026-08-19", eligible={"A": "rAlice"})
+    assert reports[0].deferred is None and reports[0].accrued == 0
+    assert brix_drip.get_meta(conn, brix_drip.LAST_ACCRUED_EPOCH) == "2026-08-18"
+
+
+# --- Post-close transfers are NOT owner drift (Greptile P1) ----------------
+
+
+@pytest.fixture()
+def hconn(tmp_path):
+    """A real history DB, so the drift tests run the REAL EpochReplay over
+    real `nft_events` rows rather than a fixed fake state."""
+    c = history_store.init_history_db(str(tmp_path / "history_real.db"))
+    brix_drip.ensure_schema(c)
+    yield c
+    c.close()
+
+
+_EV = {"i": 0}
+
+
+def _ev(conn, event, *, nft_id, ts, to_addr=None, from_addr=None):
+    _EV["i"] += 1
+    history_store.insert_nft_event(
+        conn,
+        {
+            "tx_hash": f"H{_EV['i']}",
+            "nft_id": nft_id,
+            "event": event,
+            "from_addr": from_addr,
+            "to_addr": to_addr,
+            "ts": ts,
+            "ledger_index": _EV["i"],
+            "offer_index": None,
+            "offer_flags": None,
+        },
+    )
+    conn.commit()
+
+
+def _seed_padding(conn, eligible, count=20):
+    """Live, unlisted, undrifted tokens so one drifted token stays under the
+    I1 mass-unknown threshold and the drift behaviour is isolated."""
+    for i in range(count):
+        _ev(
+            conn,
+            "mint",
+            nft_id=f"P{i}",
+            ts=epoch_state.epoch_close_ts("2026-08-17") - 10,
+            to_addr=f"rPad{i}",
+        )
+        eligible[f"P{i}"] = f"rPad{i}"
+
+
+def _run_real(conn, eligible, today="2026-08-19"):
+    return brix_drip.run_archive_accrual(
+        conn,
+        "testnet",
+        frozenset(),
+        today=today,
+        eligible=eligible,
+        certify=lambda c, n, e: None,
+    )
+
+
+def test_a_transfer_after_the_epoch_closed_is_not_drift(hconn):
+    """The close-time holder is paid: the archive itself explains why the
+    index owner differs, so the derived table is not stale."""
+    close = epoch_state.epoch_close_ts("2026-08-18")
+    _ev(hconn, "mint", nft_id="A", ts=close - 100, to_addr="rAlice")
+    _ev(hconn, "transfer", nft_id="A", ts=close + 10, from_addr="rAlice", to_addr="rBob")
+    eligible = {"A": "rBob"}  # index already reflects the post-close transfer
+    _seed_padding(hconn, eligible)
+    r = _run_real(hconn, eligible)[0]
+    assert (r.epoch, r.owner_drift, r.unknown) == ("2026-08-18", 0, 0)
+    assert brix_drip.claimable(hconn, "rAlice") == 1
+    assert brix_drip.claimable(hconn, "rBob") == 0
+
+
+def test_an_index_owner_with_no_archived_transfer_is_still_drift(hconn):
+    """The stale-derived-table case the check exists for: nothing in
+    nft_events explains the index owner, so the token must not pay."""
+    close = epoch_state.epoch_close_ts("2026-08-18")
+    _ev(hconn, "mint", nft_id="A", ts=close - 100, to_addr="rAlice")
+    eligible = {"A": "rBob"}  # index moved; the archive never saw the accept
+    _seed_padding(hconn, eligible)
+    r = _run_real(hconn, eligible)[0]
+    assert (r.owner_drift, r.unknown) == (1, 1)
+    assert brix_drip.claimable(hconn, "rAlice") == 0
+    assert brix_drip.claimable(hconn, "rBob") == 0
+
+
+def test_a_burned_token_with_missing_transfer_is_still_drift(hconn):
+    """Greptile #411 P1: the `tok.live` filter used to exclude burned tokens
+    from drift entirely, so a missing archived transfer followed by a
+    recorded burn slipped past the check even though the archive is exactly
+    as stale as the still-live case above. The replay retains the
+    pre-transfer owner (burn does not touch `owner`); the index (which keeps
+    `owner` on burned rows) disagrees, and that disagreement must still count
+    as drift even though the token is no longer live at `today`."""
+    close = epoch_state.epoch_close_ts("2026-08-18")
+    _ev(hconn, "mint", nft_id="A", ts=close - 100, to_addr="rAlice")
+    _ev(hconn, "burn", nft_id="A", ts=close + 10, from_addr="rBob")
+    eligible = {"A": "rBob"}  # index says Bob; archive never saw Alice->Bob
+    _seed_padding(hconn, eligible)
+    r = _run_real(hconn, eligible)[0]
+    assert (r.owner_drift, r.unknown) == (1, 1)
+    assert brix_drip.claimable(hconn, "rAlice") == 0
+    assert brix_drip.claimable(hconn, "rBob") == 0
+
+
+def test_a_burned_token_with_a_complete_archive_is_not_drift(hconn):
+    """Sanity check: when the transfer IS archived before the burn, the
+    replay's owner matches the index and there is no false-positive drift
+    just because the token happens to be burned."""
+    close = epoch_state.epoch_close_ts("2026-08-18")
+    _ev(hconn, "mint", nft_id="A", ts=close - 100, to_addr="rAlice")
+    _ev(hconn, "transfer", nft_id="A", ts=close - 50, from_addr="rAlice", to_addr="rBob")
+    _ev(hconn, "burn", nft_id="A", ts=close + 10, from_addr="rBob")
+    eligible = {"A": "rBob"}
+    _seed_padding(hconn, eligible)
+    r = _run_real(hconn, eligible)[0]
+    assert (r.owner_drift, r.unknown) == (0, 0)
+    assert brix_drip.claimable(hconn, "rAlice") == 0
+    assert brix_drip.claimable(hconn, "rBob") == 1
+
+
+def test_accrual_source_defaults_to_null_for_the_nightly_job(conn):
+    brix_drip.record_accruals(conn, [brix_drip.Accrual("2026-01-01", "N1", "rHolder", 1)])
+    assert conn.execute("SELECT source FROM brix_accruals").fetchone()[0] is None
+
+
+def test_ensure_schema_adds_source_column_to_a_pre_existing_table(tmp_path):
+    c = sqlite3.connect(tmp_path / "legacy.db")
+    c.row_factory = sqlite3.Row
+    c.execute(
+        "CREATE TABLE brix_accruals (epoch_date TEXT NOT NULL, nft_id TEXT NOT NULL,"
+        " owner TEXT NOT NULL, amount INTEGER NOT NULL DEFAULT 1, claim_id INTEGER,"
+        " PRIMARY KEY (epoch_date, nft_id))"
+    )
+    c.execute("INSERT INTO brix_accruals VALUES ('2026-01-01', 'N1', 'rHolder', 1, NULL)")
+    c.commit()
+    brix_drip.ensure_schema(c)
+    cols = {r[1] for r in c.execute("PRAGMA table_info(brix_accruals)")}
+    assert "source" in cols
+    assert c.execute("SELECT source FROM brix_accruals").fetchone()[0] is None
+    brix_drip.record_accruals(c, [brix_drip.Accrual("2026-01-02", "N2", "rHolder", 1, "gap")])
+    assert c.execute("SELECT source FROM brix_accruals WHERE nft_id='N2'").fetchone()[0] == "gap"
+    c.close()

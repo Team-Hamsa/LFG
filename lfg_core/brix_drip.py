@@ -28,22 +28,29 @@ from __future__ import annotations
 import asyncio
 import logging
 import sqlite3
-from collections.abc import Callable, Iterable, Sequence
+from collections.abc import Callable, Iterable, Mapping, Sequence
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
-from typing import Any
+from typing import Any, Protocol
 
 from xrpl.clients import JsonRpcClient
 from xrpl.models.requests import Request
 
-from lfg_core import config, history_store, xrpl_ops
-from lfg_core.nft_index import OnchainNft
+from lfg_core import config, epoch_state, history_store, xrpl_ops
 
 logger = logging.getLogger(__name__)
 
 # One whole BRIX per unlisted token per epoch. Fractional rates are an
 # explicit schema migration away (spec §9), not a config knob.
 DRIP_AMOUNT = 1
+
+# An epoch whose listing state is unknown for more than this fraction of the
+# eligible, non-system, live tokens is DEFERRED rather than accrued (#411 I1).
+# Without it a stale derived table (nft_events missing offer_index/offer_flags)
+# makes the nightly certify, write ~nothing, and ADVANCE the cursor — a silent
+# zero-pay day that the PK then makes permanent. Deferring costs a day of
+# latency; advancing costs the day's drip forever.
+UNKNOWN_DEFER_FRACTION = 0.10
 
 _SCHEMA = """
 CREATE TABLE IF NOT EXISTS brix_accruals (
@@ -52,6 +59,7 @@ CREATE TABLE IF NOT EXISTS brix_accruals (
     owner      TEXT NOT NULL,               -- holder at evaluation time
     amount     INTEGER NOT NULL DEFAULT 1,  -- whole BRIX
     claim_id   INTEGER,                     -- NULL = unclaimed
+    source     TEXT,                        -- NULL = nightly; else the writer
     PRIMARY KEY (epoch_date, nft_id)
 );
 CREATE INDEX IF NOT EXISTS idx_accrual_owner ON brix_accruals(owner, claim_id);
@@ -96,6 +104,11 @@ class Accrual:
     nft_id: str
     owner: str
     amount: int = DRIP_AMOUNT
+    source: str | None = None
+    """Provenance of the row: NULL for the nightly job, a marker such as
+    `brix_backfill.BACKFILL_SOURCE` for a historical backfill. Rollback needs
+    to tell one from the other — the backfill window overlaps epochs the
+    nightly already wrote."""
 
 
 @dataclass(frozen=True)
@@ -113,6 +126,11 @@ class EvaluationResult:
 def ensure_schema(conn: sqlite3.Connection) -> None:
     """Create the drip tables if absent. Idempotent, like init_history_db."""
     conn.executescript(_SCHEMA)
+    cols = {r[1] for r in conn.execute("PRAGMA table_info(brix_accruals)")}
+    if "source" not in cols:
+        # Self-migrating, like history_store.init_history_db: pre-existing DBs
+        # carry nightly-written rows, which are exactly the NULL-source rows.
+        conn.execute("ALTER TABLE brix_accruals ADD COLUMN source TEXT")
     conn.commit()
 
 
@@ -122,13 +140,13 @@ def record_accruals(conn: sqlite3.Connection, rows: Iterable[Accrual]) -> int:
     Returns the number of rows actually inserted, so a catch-up run can report
     genuinely-new accruals rather than rows it merely re-attempted.
     """
-    payload = [(r.epoch_date, r.nft_id, r.owner, int(r.amount)) for r in rows]
+    payload = [(r.epoch_date, r.nft_id, r.owner, int(r.amount), r.source) for r in rows]
     if not payload:
         return 0
     before = conn.total_changes
     conn.executemany(
-        "INSERT OR IGNORE INTO brix_accruals (epoch_date, nft_id, owner, amount)"
-        " VALUES (?, ?, ?, ?)",
+        "INSERT OR IGNORE INTO brix_accruals (epoch_date, nft_id, owner, amount, source)"
+        " VALUES (?, ?, ?, ?, ?)",
         payload,
     )
     conn.commit()
@@ -177,8 +195,20 @@ def classify_sell_offers(response: dict[str, Any], holder: str) -> bool:
     return False
 
 
+class TokenLike(Protocol):
+    """What the evaluator needs from a token — `nft_index.OnchainNft` (live
+    index) and `epoch_state.EpochToken` (archive replay) both satisfy it."""
+
+    @property
+    def nft_id(self) -> str: ...
+    @property
+    def owner(self) -> str | None: ...
+    @property
+    def is_burned(self) -> bool: ...
+
+
 def evaluate_accruals(
-    live_tokens: Sequence[OnchainNft],
+    live_tokens: Sequence[TokenLike],
     listed_fn: Callable[[str], bool | None],
     system_accounts: frozenset[str],
     epoch: str,
@@ -268,6 +298,16 @@ class EpochReport:
     skipped_system: int
     skipped_ownerless: int
     unknown: int
+    deferred: str | None = None
+    """Certification reason; when set, accrued == 0 and cursor did NOT move."""
+    skipped_ineligible: int = 0
+    """Replayed tokens that are not in the collection index (#411 C1) — Closet
+    and trait tokens live in `nft_events` but were never drip-eligible."""
+    owner_drift: int = 0
+    """Tokens whose replayed owner at the archive's LATEST state disagreed with
+    the index, checked on the newest epoch only (#411 C2). That means a stale
+    derived table, not a legitimate post-close transfer. Forced to unknown
+    listing state, so they never pay."""
 
 
 def epochs_to_accrue(last_accrued: str | None, today: str) -> list[str]:
@@ -298,40 +338,211 @@ def utc_today() -> str:
     return datetime.now(timezone.utc).strftime("%Y-%m-%d")
 
 
-def run_accrual(
+@dataclass(frozen=True)
+class EpochEvaluation:
+    """One epoch decided but NOT yet written (#411 I1 needs the numbers before
+    the write, so evaluation and persistence are two steps)."""
+
+    result: EvaluationResult
+    skipped_ineligible: int = 0
+    owner_drift: int = 0
+    deferred: str | None = None
+
+
+def eligible_tokens(
+    tokens: Mapping[str, epoch_state.EpochToken],
+    eligible: Mapping[str, str | None],
+) -> tuple[list[epoch_state.EpochToken], int]:
+    """Replayed tokens restricted to the collection index, plus the drop count.
+
+    `nft_events` covers every taxon we archive — Closet (soulbound) and trait
+    tokens included — while `onchain_nfts` holds only the collection. Scoping
+    here (rather than inside the pure `epoch_state` replay) keeps the replay
+    free of the index DB; callers build `eligible` from
+    `nft_index.collection_owners`.
+    """
+    kept = [t for nft_id, t in tokens.items() if nft_id in eligible]
+    return kept, len(tokens) - len(kept)
+
+
+def evaluate_epoch(
+    epoch: str,
+    tokens: Mapping[str, epoch_state.EpochToken],
+    system_accounts: frozenset[str],
+    *,
+    eligible: Mapping[str, str | None],
+    network: str = "",
+    current: Mapping[str, epoch_state.EpochToken] | None = None,
+) -> EpochEvaluation:
+    """Decide one epoch from replayed state. Pure — writes nothing.
+
+    `current` is the replay advanced to the archive's LATEST state (today's
+    close bound), supplied only for the newest epoch. Drift compares THAT owner
+    against the index — never the epoch-close owner. A token legitimately
+    transferred after the epoch closed replays the new owner at `current` too,
+    so it is not drift and still pays its close-time holder; a mismatch here
+    means the derived table is stale (a tesSUCCESS accept in `xrpl_txs` with no
+    `nft_events` row), and paying that replay would misattribute the drip.
+    """
+    kept, skipped_ineligible = eligible_tokens(tokens, eligible)
+
+    drift: set[str] = set()
+    if current is not None:
+        # Checked over burned tokens too, not just live ones: the index
+        # (`nft_index.collection_owners`) keeps `owner` on burned rows, and a
+        # missing archived transfer followed by a recorded burn leaves the
+        # replay holding the stale pre-transfer owner while `tok.live` is
+        # False — excluding burned rows here would let that stale-derived-
+        # table signal escape drift detection entirely (Greptile #411 P1).
+        drift = {
+            nft_id
+            for nft_id, tok in current.items()
+            if nft_id in eligible and eligible[nft_id] is not None and tok.owner != eligible[nft_id]
+        }
+
+    def _listed(nft_id: str) -> bool | None:
+        if nft_id in drift:
+            return None  # unknown → never paid
+        return tokens[nft_id].listed
+
+    result = evaluate_accruals(
+        kept,
+        listed_fn=_listed,
+        system_accounts=system_accounts,
+        epoch=epoch,
+    )
+    # Everything actually in scope for a pay/no-pay decision this epoch.
+    considered = len(result.rows) + result.skipped_listed + result.unknown
+    deferred: str | None = None
+    net = network or "<net>"
+    if not eligible:
+        # A missing/misconfigured index DB is CREATED empty by init_db, which
+        # would make every token ineligible, every count zero, the guard below
+        # a no-op — and the cursor would still advance over an epoch nobody
+        # can ever be paid for. Zero eligible tokens is never a real state.
+        deferred = (
+            f"no eligible tokens (eligible map empty) — check onchain_{net}.db / ONCHAIN_DB_PATH"
+        )
+    elif considered == 0 and skipped_ineligible > 0:
+        deferred = (
+            f"no eligible tokens (all {skipped_ineligible} replayed tokens ineligible) — "
+            f"check onchain_{net}.db / ONCHAIN_DB_PATH"
+        )
+    elif considered and result.unknown > UNKNOWN_DEFER_FRACTION * considered:
+        deferred = (
+            f"listing state unknown for {result.unknown} of {considered} eligible tokens — "
+            f"run scripts/derive_history_events.py --network {net}"
+        )
+    return EpochEvaluation(
+        result=result,
+        skipped_ineligible=skipped_ineligible,
+        owner_drift=len(drift),
+        deferred=deferred,
+    )
+
+
+def accrue_epoch(
     conn: sqlite3.Connection,
-    live_tokens: Sequence[OnchainNft],
-    listed_fn: Callable[[str], bool | None],
+    epoch: str,
+    tokens: Mapping[str, epoch_state.EpochToken],
+    system_accounts: frozenset[str],
+    *,
+    eligible: Mapping[str, str | None],
+    network: str = "",
+    current: Mapping[str, epoch_state.EpochToken] | None = None,
+) -> EpochReport:
+    """Evaluate + write one epoch from replayed state. Cursor untouched —
+    the nightly runner advances it, the #412 backfill never does.
+
+    A mass-unknown epoch is deferred instead of written (see
+    `UNKNOWN_DEFER_FRACTION`): nothing is inserted and the caller must leave
+    the cursor behind it."""
+    ev = evaluate_epoch(
+        epoch,
+        tokens,
+        system_accounts,
+        eligible=eligible,
+        network=network,
+        current=current,
+    )
+    result = ev.result
+    inserted = 0 if ev.deferred else record_accruals(conn, result.rows)
+    return EpochReport(
+        epoch=epoch,
+        accrued=inserted,
+        skipped_listed=result.skipped_listed,
+        skipped_burned=result.skipped_burned,
+        skipped_system=result.skipped_system,
+        skipped_ownerless=result.skipped_ownerless,
+        unknown=result.unknown,
+        deferred=ev.deferred,
+        skipped_ineligible=ev.skipped_ineligible,
+        owner_drift=ev.owner_drift,
+    )
+
+
+def run_archive_accrual(
+    conn: sqlite3.Connection,
+    network: str,
     system_accounts: frozenset[str],
     today: str | None = None,
+    *,
+    eligible: Mapping[str, str | None],
+    certify: Callable[[sqlite3.Connection, str, str], str | None] = epoch_state.certify_epoch,
+    replay_factory: Callable[[sqlite3.Connection], Any] = epoch_state.EpochReplay,
 ) -> list[EpochReport]:
-    """Accrue every epoch still owed, advancing the cursor as each one lands.
+    """Accrue every epoch still owed from the archive, advancing the cursor as
+    each one lands (#411 option 2).
 
-    A catch-up epoch is evaluated against ownership and listing state as they
-    are NOW, not as they were at that epoch's close — reconstructing historical
-    per-day state from `nft_events` is heavy and, given offer-index ambiguity,
-    unreliable (spec §3/§8). At 1 BRIX/day the drift is negligible.
-
-    The cursor advances per epoch rather than once at the end, so a crash
-    mid-catch-up never re-grants the epochs that already committed.
+    Zero RPCs: owner-of-record and listed-state come from `epoch_state`, as of
+    each epoch's close — so a catch-up epoch is evaluated against the state it
+    HAD, not the state things are in now. An epoch the archive cannot certify
+    is deferred: nothing written, cursor left behind it, and the walk stops
+    (a later epoch cannot be certified while an earlier one is not). The
+    accruals PK makes the eventual completion safe by construction.
     """
     today = today or utc_today()
     reports: list[EpochReport] = []
-    for epoch in epochs_to_accrue(get_meta(conn, LAST_ACCRUED_EPOCH), today):
-        result = evaluate_accruals(live_tokens, listed_fn, system_accounts, epoch)
-        inserted = record_accruals(conn, result.rows)
-        set_meta(conn, LAST_ACCRUED_EPOCH, epoch)
-        reports.append(
-            EpochReport(
-                epoch=epoch,
-                accrued=inserted,
-                skipped_listed=result.skipped_listed,
-                skipped_burned=result.skipped_burned,
-                skipped_system=result.skipped_system,
-                skipped_ownerless=result.skipped_ownerless,
-                unknown=result.unknown,
-            )
+    replay = replay_factory(conn)
+    owed = epochs_to_accrue(get_meta(conn, LAST_ACCRUED_EPOCH), today)
+    newest = owed[-1] if owed else None
+    # A SEPARATE throwaway replay advanced to the archive's latest state, so
+    # the newest epoch's drift check compares index owner against the CURRENT
+    # replayed owner (a stale derived table) rather than the epoch-close owner
+    # (which a legitimate post-close transfer would make differ). The walking
+    # replay above must not be disturbed — it is mid-window.
+    current: Mapping[str, epoch_state.EpochToken] | None = None
+    if newest is not None:
+        current = replay_factory(conn).advance_to(today)
+    for epoch in owed:
+        reason = certify(conn, network, epoch)
+        if reason is not None:
+            reports.append(EpochReport(epoch, 0, 0, 0, 0, 0, 0, deferred=reason))
+            break
+        report = accrue_epoch(
+            conn,
+            epoch,
+            replay.advance_to(epoch),
+            system_accounts,
+            eligible=eligible,
+            network=network,
+            current=current if epoch == newest else None,
         )
+        reports.append(report)
+        if report.owner_drift:
+            logger.warning(
+                "brix_drip: %s tokens' current replayed owner disagrees with onchain_nfts at %s — "
+                "they were NOT paid; the derived table is incomplete, run "
+                "scripts/derive_history_events.py --network %s",
+                report.owner_drift,
+                epoch,
+                network,
+            )
+        if report.deferred:
+            # Mass-unknown epoch: nothing written, cursor stays behind it so a
+            # later run (after a rederive) completes it. Stop the walk.
+            break
+        set_meta(conn, LAST_ACCRUED_EPOCH, epoch)
     return reports
 
 

@@ -722,11 +722,19 @@ DB and paid on-chain only when the holder explicitly claims. Design:
   across three sources; float drift would force epsilon tolerances or false
   FAILs. Only the on-chain `brix_events.delta` side is REAL, and it is rounded
   before comparison.
-- **"Unlisted" is checked on-ledger and fails closed.** A token is listed if
-  its CURRENT holder has a live sell offer (destination-locked offers count —
-  that is how brokered marketplaces list; offers left by a previous owner do
-  not, being unfillable). Unknown offer state pays **nothing**: paying listed
-  NFTs through a clio outage is unrecoverable, a missed BRIX is not.
+- **"Unlisted" is reconstructed from the history archive and fails closed
+  (#411 option 2).** `lfg_core/epoch_state.py` replays `nft_events` to the
+  close of each epoch for owner-of-record + listed-state (a sell offer counts
+  only while its creator is still the holder; destination-locked offers
+  count; buy offers never do) — zero per-token RPCs. An epoch pays only when
+  `epoch_state.certify_epoch` passes (certified baseline, no continuity gap,
+  archive validated past the epoch close); otherwise it is **deferred** —
+  nothing written, `brix_meta.last_accrued_epoch` stays behind it — and the
+  next run completes it once the listener's auto catch-up heals the archive.
+  Unknown listing state (legacy `nft_events` rows without
+  `offer_index`/`offer_flags`) pays **nothing**; re-run
+  `scripts/derive_history_events.py` to populate them, then
+  `scripts/backfill_brix_gap.py` to reimburse the skipped epochs.
 - **Claims are paid by the distributor account, never the issuer** — an
   issuer-signed payout would silently mint new supply on every claim. The
   distributor must be **pre-funded with BRIX**; `scripts/brix_admin_report.py`
@@ -764,11 +772,44 @@ DB and paid on-chain only when the holder explicitly claims. Design:
   .venv/bin/python scripts/brix_admin_report.py --network mainnet
   .venv/bin/python scripts/audit_brix_distribution.py --network mainnet  # exits non-zero on drift
   .venv/bin/python scripts/recover_brix_claims.py --network mainnet
+
+  # #412 gap reimbursement — dry run first, review the report, then --apply
+  .venv/bin/python scripts/derive_history_events.py --network mainnet --distributor <current-distributor>
+  .venv/bin/python scripts/backfill_brix_gap.py --network mainnet            # dry run
+  .venv/bin/python scripts/backfill_brix_gap.py --network mainnet --apply
   ```
   `accrue_brix.py` refuses to run (exit 2) unless `--network` matches
-  `XRPL_NETWORK` **and** the endpoint's ledger-32570 hash matches the chain
-  identity the archive recorded — on the wrong chain every token looks unlisted,
-  and unlisted is what pays.
+  `XRPL_NETWORK`, the endpoint's ledger-32570 hash matches the chain identity
+  the archive recorded, **and** the collection index is non-empty
+  (`nft_index.collection_owners`) — an empty index would make every token look
+  ineligible and certify a silent zero-pay day.
+- **The archive replay is only as good as the DERIVED table, and both jobs
+  fail closed on that.** Three guards, all added with #411/#412:
+  - *Eligibility is `onchain_nfts`, not `nft_events`.* The archive also carries
+    soulbound Closet (taxon 1762) and trait (176) tokens, which were never
+    drip-eligible; both jobs scope every epoch through
+    `nft_index.collection_owners` (burned rows included — a token burned today
+    still earned for the epochs it was live).
+  - *Owner drift.* A `tesSUCCESS` accept in `xrpl_txs` with no `nft_events` row
+    is invisible to certification and leaves the replay on a stale owner.
+    Both jobs compare the replay's CURRENT owner (advanced to today's archived
+    state) against the index — never the epoch-close owner, so a legitimate
+    post-close transfer is not drift. The nightly checks this on the newest
+    epoch and pays nothing for a mismatch (`owner_drift` in the report); the
+    backfill REFUSES `--apply` (exit 2, nothing written) on any drift.
+  - *Mass-unknown deferral.* If listing state is unknown for more than
+    `brix_drip.UNKNOWN_DEFER_FRACTION` (10%) of the eligible non-system live
+    tokens, the epoch is DEFERRED — nothing written, cursor NOT advanced —
+    instead of certifying a silent zero-pay day the accruals PK would make
+    permanent. The backfill refuses `--apply` on any unknown at all.
+  Consequences to expect: **after every listener restart the nightly defers**
+  until #402's auto catch-up clears the `continuity_gap_*` columns, and a gap
+  present during a backfill makes EVERY epoch report DEFERRED — heal the
+  archive first. Likewise **the very first nightly run after deploy, before
+  the rederive, defers (or accrues ≈nothing) — expected**; re-run
+  `derive_history_events.py`, then `backfill_brix_gap.py` reimburses the missed
+  epochs. Full procedure incl. the mandatory derived-completeness SQL
+  pre-check: `docs/ops/brix-gap-backfill.md`.
 
 ### Dress-up trait economy — Phase 2 (testnet, on-ledger ops)
 

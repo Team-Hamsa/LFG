@@ -41,6 +41,8 @@ CREATE TABLE IF NOT EXISTS nft_events (
     ledger_index INTEGER,
     ts           INTEGER,
     memo_action  TEXT,   -- provenance `action` memo (#54); NULL pre-schema
+    offer_index  TEXT,    -- NFTokenOffer ledger-object index (#411); NULL pre-schema
+    offer_flags  INTEGER, -- NFTokenOffer Flags (bit 0 = sell) (#411); NULL pre-schema
     PRIMARY KEY (tx_hash, nft_id)
 );
 CREATE INDEX IF NOT EXISTS idx_nftev_ts ON nft_events(ts);
@@ -153,6 +155,9 @@ def init_history_db(path: str) -> sqlite3.Connection:
     cols = {r[1] for r in conn.execute("PRAGMA table_info(nft_events)")}
     if "memo_action" not in cols:
         conn.execute("ALTER TABLE nft_events ADD COLUMN memo_action TEXT")
+    for column, declaration in (("offer_index", "TEXT"), ("offer_flags", "INTEGER")):
+        if column not in cols:
+            conn.execute(f"ALTER TABLE nft_events ADD COLUMN {column} {declaration}")
     archive_cols = {r[1] for r in conn.execute("PRAGMA table_info(archive_state)")}
     archive_migrations = {
         "source_tag": "INTEGER",
@@ -605,6 +610,8 @@ _NFT_EV_COLS = (
     "ledger_index",
     "ts",
     "memo_action",
+    "offer_index",
+    "offer_flags",
 )
 _BRIX_EV_COLS = ("tx_hash", "account", "counterparty", "delta", "kind", "ts")
 

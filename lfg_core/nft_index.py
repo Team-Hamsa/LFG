@@ -385,6 +385,23 @@ def live_nfts(conn: sqlite3.Connection) -> list[OnchainNft]:
     return [_row_to_nft(r) for r in cur.fetchall()]
 
 
+def collection_owners(conn: sqlite3.Connection) -> dict[str, str | None]:
+    """`nft_id -> current owner-of-record` for EVERY token this index knows.
+
+    Burned rows are included on purpose (#411 C1): membership here is the
+    definition of "part of the collection", and a token burned today still
+    earned for the historical epochs during which it was live. The index only
+    ever holds collection characters — soulbound Closet tokens (taxon 1762) and
+    tradeable trait tokens (taxon 176) are never indexed here — so this map is
+    exactly the drip's eligibility universe, which `nft_events` (which does
+    carry those taxons) is not.
+    """
+    return {
+        str(r[0]): (str(r[1]) if r[1] is not None else None)
+        for r in conn.execute("SELECT nft_id, owner FROM onchain_nfts")
+    }
+
+
 def owner_live_nfts(conn: sqlite3.Connection, owner: str) -> list[OnchainNft]:
     """Non-burned tokens currently owned by `owner`, in edition order."""
     conn.row_factory = sqlite3.Row

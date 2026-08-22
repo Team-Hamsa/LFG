@@ -418,3 +418,17 @@ def test_image_guard_empty_fetch_still_keeps_stored():
     nft_index.upsert(conn, _nft_img("A", CDN))
     nft_index.upsert(conn, _nft_img("A", "ipfs://whatever", attrs=[]))  # failed fetch
     assert conn.execute("SELECT image FROM onchain_nfts WHERE nft_id='A'").fetchone()[0] == CDN
+
+
+def test_collection_owners_covers_burned_rows_too(tmp_path):
+    """#411 C1: membership defines drip eligibility, and a token burned today
+    still earned for the epochs it was live — so burned rows stay in the map."""
+    from lfg_core import nft_index
+
+    conn = nft_index.init_db(str(tmp_path / "o.db"))
+    conn.executemany(
+        "INSERT INTO onchain_nfts (nft_id, owner, is_burned) VALUES (?, ?, ?)",
+        [("A", "rAlice", 0), ("B", "rBob", 1), ("C", None, 0)],
+    )
+    conn.commit()
+    assert nft_index.collection_owners(conn) == {"A": "rAlice", "B": "rBob", "C": None}
