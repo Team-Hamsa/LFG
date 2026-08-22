@@ -1010,8 +1010,9 @@ def test_startup_offer_recovery_does_not_create_after_malformed_lookup(_service_
     monkeypatch.setattr(server.xrpl_ops, "JsonRpcClient", MalformedClient)
     monkeypatch.setattr(server.xrpl_ops, "create_nft_offer", create_offer)
 
-    with pytest.raises(RuntimeError, match="sponsored offer recovery failure"):
-        _run(server._recover_sponsored_offers(_service_env.app_db, network="mainnet"))
+    # Per-claim failures are logged + persisted on the claim, never raised: one
+    # undeliverable claim must not pin sponsored admission OFF campaign-wide.
+    _run(server._recover_sponsored_offers(_service_env.app_db, network="mainnet"))
 
     with sqlite3.connect(_service_env.app_db) as conn:
         row = conn.execute(
@@ -1078,8 +1079,9 @@ def test_offer_recovery_does_not_create_for_malformed_classification_fields(
     monkeypatch.setattr(server.xrpl_ops, "JsonRpcClient", MalformedClient)
     monkeypatch.setattr(server.xrpl_ops, "create_nft_offer", create_offer)
 
-    with pytest.raises(RuntimeError, match="sponsored offer recovery failure"):
-        _run(server._recover_sponsored_offers(_service_env.app_db, network="mainnet"))
+    # Per-claim failures are logged + persisted on the claim, never raised: one
+    # undeliverable claim must not pin sponsored admission OFF campaign-wide.
+    _run(server._recover_sponsored_offers(_service_env.app_db, network="mainnet"))
 
     with sqlite3.connect(_service_env.app_db) as conn:
         row = conn.execute(
@@ -1144,8 +1146,9 @@ def test_offer_recovery_aggregates_failure_after_processing_remaining_claims(
     monkeypatch.setattr(server.xrpl_ops, "bot_wallet_address", lambda: "rBOT")
     monkeypatch.setattr(server.xrpl_ops, "create_nft_offer", forbidden_create)
 
-    with pytest.raises(RuntimeError, match="2 sponsored offer recovery failures") as raised:
-        _run(server._recover_sponsored_offers(_service_env.app_db, network="mainnet"))
+    # Two failed claims: both are persisted with last_error and the sweep still
+    # returns normally -- readiness is not the offer pass's to revoke.
+    _run(server._recover_sponsored_offers(_service_env.app_db, network="mainnet"))
 
     with sqlite3.connect(_service_env.app_db) as conn:
         rows = {
@@ -1154,8 +1157,6 @@ def test_offer_recovery_aggregates_failure_after_processing_remaining_claims(
                 "SELECT session_id, status, offer_id, last_error FROM free_mint_claims"
             )
         }
-    assert claims[0].id in str(raised.value)
-    assert claims[2].id in str(raised.value)
     assert rows["offer-fail-first"][0:2] == ("minted", None)
     assert "NFT-offer-fail-first lookup malformed" in rows["offer-fail-first"][2]
     assert rows["offer-succeed-second"] == (
@@ -2691,12 +2692,17 @@ def test_offer_recovery_still_fails_closed_when_account_lookup_is_indeterminate(
     async def account_exists(address):
         return None  # lookup failed -- unknown, not "absent"
 
+    async def disallows(address):
+        return None  # flag lookup also unknown -- must stay fail-closed
+
     monkeypatch.setattr(server.xrpl_ops, "JsonRpcClient", _NoSellOffersClient)
     monkeypatch.setattr(server.xrpl_ops, "create_nft_offer", create_offer)
     monkeypatch.setattr(server.xrpl_ops, "account_exists", account_exists)
+    monkeypatch.setattr(server.xrpl_ops, "disallows_incoming_nft_offers", disallows)
 
-    with pytest.raises(RuntimeError, match="sponsored offer recovery failure"):
-        _run(server._recover_sponsored_offers(_service_env.app_db, network="mainnet"))
+    # Per-claim failures are logged + persisted on the claim, never raised: one
+    # undeliverable claim must not pin sponsored admission OFF campaign-wide.
+    _run(server._recover_sponsored_offers(_service_env.app_db, network="mainnet"))
 
     with sqlite3.connect(_service_env.app_db) as conn:
         status = conn.execute(
@@ -2867,3 +2873,126 @@ def test_undeliverable_claim_leaves_startup_recovery_ready(_service_env, monkeyp
 
     # before the fix this was False -> sponsored admission disabled for everyone
     assert server._sponsored_recovery_ready is True
+
+
+def test_offer_recovery_skips_offer_blocked_destination_without_blocking_admission(
+    _service_env, monkeypatch
+):
+    # prod 2026-08-20: a funded wallet with lsfDisallowIncomingNFTokenOffer set.
+    # NFTokenCreateOffer against it can only ever return tecNO_PERMISSION, so
+    # it is skipped (no doomed fee-burning submit) and left 'minted' for a
+    # later boot once the holder clears the flag.
+    sponsored_mint.start_campaign(_service_env.app_db, network="mainnet", actor="test", now=100)
+    claim = _minted_claim_awaiting_offer(_service_env, "rBLOCKED", "offer-blocked", "NFT-BLOCKED")
+
+    create_calls = []
+
+    async def create_offer(*args, **kwargs):
+        create_calls.append((args, kwargs))
+        return None
+
+    async def account_exists(address):
+        return True  # funded -- the unfunded branch must NOT fire
+
+    async def disallows(address):
+        assert address == claim.wallet
+        return True
+
+    monkeypatch.setattr(server.xrpl_ops, "JsonRpcClient", _NoSellOffersClient)
+    monkeypatch.setattr(server.xrpl_ops, "create_nft_offer", create_offer)
+    monkeypatch.setattr(server.xrpl_ops, "account_exists", account_exists)
+    monkeypatch.setattr(server.xrpl_ops, "disallows_incoming_nft_offers", disallows)
+
+    _run(server._recover_sponsored_offers(_service_env.app_db, network="mainnet"))
+
+    assert create_calls == []
+    with sqlite3.connect(_service_env.app_db) as conn:
+        row = conn.execute(
+            "SELECT status, offer_id, last_error FROM free_mint_claims WHERE id = ?",
+            (claim.id,),
+        ).fetchone()
+    assert row[0:2] == ("minted", None)
+    assert "lsfDisallowIncomingNFTokenOffer" in row[2]
+
+
+@pytest.mark.parametrize(
+    "result, expected",
+    [
+        (
+            {"account_flags": {"disallowIncomingNFTokenOffer": True}, "account_data": {"Flags": 0}},
+            True,
+        ),
+        (
+            {
+                "account_flags": {"disallowIncomingNFTokenOffer": False},
+                "account_data": {"Flags": 0},
+            },
+            False,
+        ),
+        ({"account_data": {"Flags": 0x04000000}}, True),
+        ({"account_data": {"Flags": 0x00800000}}, False),
+        ({}, None),
+    ],
+)
+def test_disallows_incoming_nft_offers_three_way_contract(monkeypatch, result, expected):
+    class Resp:
+        def __init__(self, r):
+            self.result = r
+
+        def is_successful(self):
+            return True
+
+    class Client:
+        def __init__(self, *a, **k):
+            pass
+
+        async def request(self, req):
+            return Resp(result)
+
+    monkeypatch.setattr(server.xrpl_ops, "AsyncJsonRpcClient", Client)
+    assert _run(server.xrpl_ops.disallows_incoming_nft_offers("rX")) is expected
+
+
+def test_readiness_audit_tolerates_undeliverable_minted_claims(_service_env, monkeypatch):
+    # A 'minted' claim parked because its destination is unfunded / blocks
+    # incoming NFT offers is the user's to fix, not a campaign blocker: the
+    # audit reports it separately and still passes the incomplete-claims check.
+    audit = importlib.import_module("scripts.audit_sponsored_mint_readiness")
+    sponsored_mint.start_campaign(_service_env.app_db, network="mainnet", actor="test", now=100)
+    claim = _minted_claim_awaiting_offer(_service_env, "rPARKED", "parked", "NFT-PARKED")
+    with sqlite3.connect(_service_env.app_db) as conn:
+        conn.execute(
+            "UPDATE free_mint_claims SET last_error = ? WHERE id = ?",
+            (sponsored_mint.UNDELIVERABLE_OFFER_BLOCKED, claim.id),
+        )
+        conn.commit()
+    sponsored_mint.stop_campaign(_service_env.app_db, network="mainnet", actor="test", now=200)
+    hconn = history_store.init_history_db(_service_env.history_db)
+    history_store.insert_tx(
+        hconn,
+        tx_hash="TX-FRESH",
+        ledger_index=history_store.EARLIEST_AVAILABLE_LEDGER + 123,
+        close_time=3990,
+        tx_type="Payment",
+        account="rUNIQUE",
+        source_tag=sponsored_mint.config.SOURCE_TAG,
+        raw_json="{}",
+    )
+    hconn.commit()
+    hconn.close()
+    ready_history(_service_env.history_db, network="mainnet", now=4000, close_time=3990)
+    monkeypatch.setattr(audit.config, "SPONSORED_MINT_EXCLUDED_WALLETS", _PLACEHOLDER_EXCLUSIONS)
+
+    report = _run(
+        audit.build_report(
+            network="mainnet",
+            app_db=_service_env.app_db,
+            history_db=_service_env.history_db,
+            now=4000,
+            balance_fetch=lambda: asyncio.sleep(0, result=Decimal("1000")),
+        )
+    )
+
+    assert report["checks"]["incomplete_claims"]["ok"] is True
+    assert report["checks"]["incomplete_claims"]["minted"] == 0
+    assert report["checks"]["incomplete_claims"]["minted_undeliverable"] == 1

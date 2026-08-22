@@ -5370,6 +5370,11 @@ async def _recover_sponsored_offers(app_db: str, *, network: str) -> None:
     before `record_offer` cannot produce a duplicate on the next restart. Once
     recorded, the existing ledger-driven pending-offers tray exposes the locked
     offer and builds a fresh acceptance payload when the recipient asks for it.
+
+    Never raises for a per-claim failure: every claim is attempted, each failure
+    is persisted as that claim's `last_error` and logged, and the claim stays
+    'minted' for the next boot to retry. Readiness (`_sponsored_recovery_ready`)
+    is governed by the slot/debt reconciliation, not by offer delivery.
     """
 
     claims = await asyncio.to_thread(
@@ -5415,27 +5420,39 @@ async def _recover_sponsored_offers(app_db: str, *, network: str) -> None:
                 and offer["offer_index"]
             ]
             offer_id = live[0]["offer_index"] if live else None
-            if offer_id is None and await xrpl_ops.account_exists(claim.wallet) is False:
-                # The destination account does not exist on-ledger (never
-                # funded above the base reserve). NFTokenCreateOffer against it
-                # can only ever return tecNO_DST — a fee burned per boot for a
-                # guaranteed failure — and create_nft_offer collapses that to
-                # None (the #211 contract), so the old code raised and pinned
-                # _sponsored_recovery_ready False. That took sponsored
-                # admission down campaign-wide, for everyone, on EVERY restart,
-                # because of one undeliverable claim (prod, 2026-08-17).
+            undeliverable = None
+            if offer_id is None:
+                if await xrpl_ops.account_exists(claim.wallet) is False:
+                    undeliverable = sponsored_mint.UNDELIVERABLE_UNFUNDED
+                elif await xrpl_ops.disallows_incoming_nft_offers(claim.wallet) is True:
+                    # Same terminal shape as the unfunded case below, different
+                    # flag: the destination has lsfDisallowIncomingNFTokenOffer
+                    # set, so NFTokenCreateOffer against it can only ever return
+                    # tecNO_PERMISSION. Before this branch existed, one such
+                    # wallet re-wedged the whole campaign on EVERY restart
+                    # (prod, 2026-08-20: claim 19f141ce…) exactly as the
+                    # unfunded case once did. Only a definitive True is
+                    # terminal; None falls through and stays fail-closed.
+                    undeliverable = sponsored_mint.UNDELIVERABLE_OFFER_BLOCKED
+            if undeliverable is not None:
+                # The destination cannot receive this offer, for a reason the
+                # ledger reports as permanent: it is unfunded (tecNO_DST) or it
+                # has lsfDisallowIncomingNFTokenOffer set (tecNO_PERMISSION).
+                # Either way NFTokenCreateOffer can only ever fail — a fee
+                # burned per boot for a guaranteed failure — and
+                # create_nft_offer collapses that to None (the #211 contract),
+                # so the old code raised and pinned _sponsored_recovery_ready
+                # False. That took sponsored admission down campaign-wide, for
+                # everyone, on EVERY restart, because of one undeliverable
+                # claim (prod, 2026-08-17 unfunded; 2026-08-20 offer-blocked).
                 #
                 # Skip it instead: not a failure, so the sweep stays ready. The
                 # claim is deliberately LEFT 'minted' rather than parked
                 # terminal — the NFT is still held by the issuer and the user
                 # is still owed it, so a later boot re-attempts and succeeds by
-                # itself once they fund the wallet. Only a definitive
-                # actNotFound reaches here; an inconclusive lookup returns None
-                # and falls through to the fail-closed path below.
-                undeliverable = (
-                    "destination account does not exist on-ledger (unfunded); "
-                    "offer creation deferred until it is funded"
-                )
+                # itself once they fund the wallet or clear the flag. Only a
+                # definitive answer reaches here; an inconclusive lookup returns
+                # None and falls through to the fail-closed path below.
                 # This write is a diagnostic breadcrumb, not a state
                 # transition: the claim is already 'minted' and STAYS 'minted'
                 # whether or not it lands, so a later boot retries either way.
@@ -5542,9 +5559,26 @@ async def _recover_sponsored_offers(app_db: str, *, network: str) -> None:
             )
 
     if failures:
+        # Deliberately NOT raised. A failed offer for an already-minted claim is
+        # a per-user delivery problem: the NFT is still held by the issuer, the
+        # claim stays 'minted' (visible as `minted` in the admin status) with
+        # its last_error persisted, and the next boot retries it. It says
+        # nothing about slot/debt accounting, which is what sponsored
+        # admission safety actually depends on (`_recover_sponsored_nft_records`
+        # still raises and pins readiness). Raising here took admission down
+        # campaign-wide on EVERY restart over one undeliverable wallet — twice
+        # in prod (2026-08-17 unfunded destination, 2026-08-20
+        # lsfDisallowIncomingNFTokenOffer) — and each time needed a hotfix for
+        # that one new failure shape. Log loudly and let the campaign run.
         label = "failure" if len(failures) == 1 else "failures"
         details = "; ".join(f"{claim_id}: {error}" for claim_id, error in failures)
-        raise RuntimeError(f"{len(failures)} sponsored offer recovery {label}: {details}")
+        logging.error(
+            "%d sponsored offer recovery %s (claims stay 'minted', retried next boot; "
+            "sponsored admission NOT affected): %s",
+            len(failures),
+            label,
+            details,
+        )
 
 
 async def resume_bulk_jobs() -> None:

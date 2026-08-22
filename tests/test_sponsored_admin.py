@@ -226,8 +226,12 @@ def test_malformed_offer_startup_keeps_admin_not_ready_and_never_creates_offer(m
         ).fetchone()
 
     assert create_calls == []
-    assert body["recovery_ready"] is False
-    assert fields["Recovery"] == "❌ Sponsored disabled"
+    # A per-claim offer-recovery failure no longer takes admission down
+    # campaign-wide (prod 2026-08-17 unfunded / 2026-08-20 offer-blocked
+    # wallets each wedged EVERY restart). The claim stays 'minted' with its
+    # last_error persisted and is retried next boot; readiness stays True.
+    assert body["recovery_ready"] is True
+    assert fields["Recovery"] != "❌ Sponsored disabled"
     assert row[0:2] == ("minted", None)
     assert "malformed nft_sell_offers response" in row[2]
 
