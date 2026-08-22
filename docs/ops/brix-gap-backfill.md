@@ -22,8 +22,22 @@ Window: 2025-09-15 (day after the last real payout run) → yesterday.
    WHERE t.tx_type IN ('NFTokenMint','NFTokenBurn','NFTokenAcceptOffer',
                        'NFTokenCreateOffer','NFTokenCancelOffer','NFTokenModify')
      AND json_extract(t.raw_json,'$.meta.TransactionResult') = 'tesSUCCESS'
+     -- only OUR collection: the archive also sweeps the distributor/issuer
+     -- wallets' history, which carries foreign-collection NFTs (airdrops,
+     -- the pre-LFG collection) that derivation deliberately ignores.
+     -- Bytes 4..23 of an NFTokenID are the issuer AccountID;
+     -- rLfgoMint… = 1B58D1AE1BC312BEF9C68233FB0C8CF6A338F7C2.
+     AND substr(COALESCE(json_extract(t.raw_json,'$.meta.nftoken_id'),
+                         json_extract(t.raw_json,'$.NFTokenID')), 9, 40)
+         = '1B58D1AE1BC312BEF9C68233FB0C8CF6A338F7C2'
      AND NOT EXISTS (SELECT 1 FROM nft_events e WHERE e.tx_hash = t.tx_hash);
    ```
+   (2026-08-22: the unfiltered form returned 274 on mainnet — every one a
+   foreign-collection token, 0 LFG transactions underived. Pre-2023 accepts
+   and cancels carry neither `meta.nftoken_id` nor `NFTokenID` and so fall
+   outside this query; the script's own owner-drift refusal is the backstop
+   for those. Do NOT filter with `raw_json LIKE '%<issuer hex>%'` — the
+   issuer's AccountID also appears in directory nodes of foreign-NFT txs.)
    A non-zero count means **rederive first** (step 1) — do not apply. The
    script's own owner-drift check (it compares the replay's current owner —
    advanced to today's archived state, not to `--to` — against `onchain_nfts`
