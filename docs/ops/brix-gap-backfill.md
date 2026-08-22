@@ -47,7 +47,7 @@ those epochs missed.
 `cd ~/LFG-staging && .venv/bin/python scripts/backfill_brix_gap.py --network testnet --from <d1> --to <d2>` then `--apply`; claim one backfilled balance via the Activity.
 
 ## 2. Mainnet dry run
-`.venv/bin/python scripts/backfill_brix_gap.py --network mainnet > reports/brix_gap_dryrun.txt`
+`mkdir -p reports && .venv/bin/python scripts/backfill_brix_gap.py --network mainnet > reports/brix_gap_dryrun.txt`
 Review: total vs the ~1.23M NFT-day upper bound, top-wallet concentration,
 `DEFERRED` epochs (must be none), `unknown` (must be 0 — `--apply` refuses
 otherwise), the owner-drift warning (must be absent — `--apply` refuses
@@ -55,12 +55,25 @@ otherwise), `ineligible` (Closet/trait tokens correctly excluded), and
 treasury headroom.
 
 ## 3. Apply
-`.venv/bin/python scripts/backfill_brix_gap.py --network mainnet --apply | tee reports/brix_gap_apply.txt`
+`mkdir -p reports && .venv/bin/python scripts/backfill_brix_gap.py --network mainnet --apply | tee reports/brix_gap_apply.txt`
 Then `scripts/brix_admin_report.py --network mainnet` and
 `scripts/audit_brix_distribution.py --network mainnet` (must PASS).
 Re-running `--apply` is a no-op. The nightly cursor is never moved.
 
 ## Rollback
-Rows are DB-only until claimed. To withdraw an unclaimed backfill:
-`DELETE FROM brix_accruals WHERE claim_id IS NULL AND epoch_date BETWEEN '2025-09-15' AND '<to>'`
-(never delete rows with a `claim_id` — a claim may be in flight).
+Rows are DB-only until claimed. Backfilled rows are tagged
+`brix_accruals.source = 'gap_backfill'`; the nightly job writes NULL there, so
+the two are distinguishable even though the backfill window overlaps epochs the
+nightly already wrote (mainnet nightly started 2026-08-19). **Never** delete by
+epoch range alone — that would take legitimate nightly rows with it.
+
+1. Back up first:
+   `sqlite3 history_mainnet.db ".backup history_mainnet.pre-rollback.db"`
+2. Preview exactly what would go:
+   `SELECT COUNT(*), SUM(amount) FROM brix_accruals WHERE source='gap_backfill' AND claim_id IS NULL;`
+3. Withdraw:
+   `DELETE FROM brix_accruals WHERE source='gap_backfill' AND claim_id IS NULL;`
+
+Never delete rows with a `claim_id` — a claim may be in flight. Nightly rows
+(`source IS NULL`) in the same epoch window are untouched by the statements
+above.

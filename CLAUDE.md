@@ -774,9 +774,10 @@ DB and paid on-chain only when the holder explicitly claims. Design:
   .venv/bin/python scripts/backfill_brix_gap.py --network mainnet --apply
   ```
   `accrue_brix.py` refuses to run (exit 2) unless `--network` matches
-  `XRPL_NETWORK` **and** the endpoint's ledger-32570 hash matches the chain
-  identity the archive recorded — the archive's chain identity must match the
-  endpoint's.
+  `XRPL_NETWORK`, the endpoint's ledger-32570 hash matches the chain identity
+  the archive recorded, **and** the collection index is non-empty
+  (`nft_index.collection_owners`) — an empty index would make every token look
+  ineligible and certify a silent zero-pay day.
 - **The archive replay is only as good as the DERIVED table, and both jobs
   fail closed on that.** Three guards, all added with #411/#412:
   - *Eligibility is `onchain_nfts`, not `nft_events`.* The archive also carries
@@ -785,7 +786,7 @@ DB and paid on-chain only when the holder explicitly claims. Design:
     `nft_index.collection_owners` (burned rows included — a token burned today
     still earned for the epochs it was live).
   - *Owner drift.* A `tesSUCCESS` accept in `xrpl_txs` with no `nft_events` row
-    is invisible to certification and leaves the replay on a stale owner. The
+    is invisible to certification and leaves the replay on a stale owner.
     Both jobs compare the replay's CURRENT owner (advanced to today's archived
     state) against the index — never the epoch-close owner, so a legitimate
     post-close transfer is not drift. The nightly checks this on the newest

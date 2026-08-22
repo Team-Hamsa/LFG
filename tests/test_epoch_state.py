@@ -323,3 +323,80 @@ def test_bare_continuity_gap_at_defers_as_unbounded(tmp_path):
     conn.commit()
     reason = epoch_state.certify_epoch(conn, "testnet", "2026-01-01")
     assert reason is not None and "unbounded" in reason
+
+
+def test_multi_offer_cancel_closes_every_joined_index(hconn):
+    ev(hconn, "mint", ts=D["2026-01-01"] + 1, to_addr=ALICE)
+    ev(
+        hconn,
+        "offer_create",
+        ts=D["2026-01-01"] + 2,
+        from_addr=ALICE,
+        offer_index="O1",
+        offer_flags=1,
+    )
+    ev(
+        hconn,
+        "offer_create",
+        ts=D["2026-01-01"] + 3,
+        from_addr=ALICE,
+        offer_index="O2",
+        offer_flags=1,
+    )
+    ev(
+        hconn,
+        "offer_cancel",
+        ts=D["2026-01-01"] + 4,
+        from_addr=ALICE,
+        offer_index="O1,O2",
+        offer_flags=1,
+    )
+    tok = epoch_state.state_at_epoch(hconn, "2026-01-01")[NFT]
+    assert tok.listed is False
+
+
+def test_modify_establishes_owner_and_life(hconn):
+    ev(hconn, "modify", ts=D["2026-01-01"] + 1, to_addr=ALICE)
+    tok = epoch_state.state_at_epoch(hconn, "2026-01-01")[NFT]
+    assert (tok.owner, tok.live, tok.listed) == (ALICE, True, False)
+
+
+def test_sell_offer_establishes_owner_when_unknown(hconn):
+    ev(
+        hconn,
+        "offer_create",
+        ts=D["2026-01-01"] + 1,
+        from_addr=ALICE,
+        offer_index="O1",
+        offer_flags=1,
+    )
+    tok = epoch_state.state_at_epoch(hconn, "2026-01-01")[NFT]
+    assert (tok.owner, tok.live, tok.listed) == (ALICE, True, True)
+
+
+def test_buy_offer_never_establishes_owner(hconn):
+    ev(
+        hconn,
+        "offer_create",
+        ts=D["2026-01-01"] + 1,
+        from_addr=BOB,
+        offer_index="O1",
+        offer_flags=0,
+    )
+    tok = epoch_state.state_at_epoch(hconn, "2026-01-01")[NFT]
+    assert tok.owner is None and tok.listed is False
+
+
+def test_sell_offer_does_not_override_known_owner(hconn):
+    ev(hconn, "mint", ts=D["2026-01-01"] + 1, to_addr=ALICE)
+    ev(hconn, "transfer", ts=D["2026-01-01"] + 2, from_addr=ALICE, to_addr=BOB)
+    ev(
+        hconn,
+        "offer_create",
+        ts=D["2026-01-01"] + 3,
+        from_addr=ALICE,  # stale offer from the previous holder
+        offer_index="O9",
+        offer_flags=1,
+    )
+    tok = epoch_state.state_at_epoch(hconn, "2026-01-01")[NFT]
+    assert tok.owner == BOB and tok.listed is False

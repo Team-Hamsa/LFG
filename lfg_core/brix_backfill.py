@@ -16,11 +16,16 @@ from __future__ import annotations
 import sqlite3
 from collections import Counter
 from collections.abc import Callable, Mapping
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from datetime import datetime, timedelta, timezone
 from typing import Any
 
 from lfg_core import brix_drip, epoch_state
+
+BACKFILL_SOURCE = "gap_backfill"
+"""`brix_accruals.source` marker for rows this module writes. Nightly rows
+carry NULL, so a rollback can delete exactly the backfilled ones even though
+the two overlap in epoch range."""
 
 
 @dataclass(frozen=True)
@@ -159,7 +164,9 @@ def plan_gap_backfill(
                 epoch=epoch,
             )
             existing = _already_accrued(hconn, epoch)
-            fresh = [r for r in result.rows if r.nft_id not in existing]
+            fresh = [
+                replace(r, source=BACKFILL_SOURCE) for r in result.rows if r.nft_id not in existing
+            ]
             if write:
                 # INSERT OR IGNORE keeps this idempotent even though pass 2
                 # re-reads `existing` a second time.

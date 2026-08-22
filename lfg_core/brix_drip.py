@@ -59,6 +59,7 @@ CREATE TABLE IF NOT EXISTS brix_accruals (
     owner      TEXT NOT NULL,               -- holder at evaluation time
     amount     INTEGER NOT NULL DEFAULT 1,  -- whole BRIX
     claim_id   INTEGER,                     -- NULL = unclaimed
+    source     TEXT,                        -- NULL = nightly; else the writer
     PRIMARY KEY (epoch_date, nft_id)
 );
 CREATE INDEX IF NOT EXISTS idx_accrual_owner ON brix_accruals(owner, claim_id);
@@ -103,6 +104,11 @@ class Accrual:
     nft_id: str
     owner: str
     amount: int = DRIP_AMOUNT
+    source: str | None = None
+    """Provenance of the row: NULL for the nightly job, a marker such as
+    `brix_backfill.BACKFILL_SOURCE` for a historical backfill. Rollback needs
+    to tell one from the other — the backfill window overlaps epochs the
+    nightly already wrote."""
 
 
 @dataclass(frozen=True)
@@ -120,6 +126,11 @@ class EvaluationResult:
 def ensure_schema(conn: sqlite3.Connection) -> None:
     """Create the drip tables if absent. Idempotent, like init_history_db."""
     conn.executescript(_SCHEMA)
+    cols = {r[1] for r in conn.execute("PRAGMA table_info(brix_accruals)")}
+    if "source" not in cols:
+        # Self-migrating, like history_store.init_history_db: pre-existing DBs
+        # carry nightly-written rows, which are exactly the NULL-source rows.
+        conn.execute("ALTER TABLE brix_accruals ADD COLUMN source TEXT")
     conn.commit()
 
 
@@ -129,13 +140,13 @@ def record_accruals(conn: sqlite3.Connection, rows: Iterable[Accrual]) -> int:
     Returns the number of rows actually inserted, so a catch-up run can report
     genuinely-new accruals rather than rows it merely re-attempted.
     """
-    payload = [(r.epoch_date, r.nft_id, r.owner, int(r.amount)) for r in rows]
+    payload = [(r.epoch_date, r.nft_id, r.owner, int(r.amount), r.source) for r in rows]
     if not payload:
         return 0
     before = conn.total_changes
     conn.executemany(
-        "INSERT OR IGNORE INTO brix_accruals (epoch_date, nft_id, owner, amount)"
-        " VALUES (?, ?, ?, ?)",
+        "INSERT OR IGNORE INTO brix_accruals (epoch_date, nft_id, owner, amount, source)"
+        " VALUES (?, ?, ?, ?, ?)",
         payload,
     )
     conn.commit()

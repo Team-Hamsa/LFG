@@ -270,26 +270,40 @@ def derive_nft_events(tx: dict[str, Any], *, nft_issuer: str) -> list[dict[str, 
         ]
 
     if ttype == "NFTokenCancelOffer":
-        # KNOWN LOSS, deliberately not "fixed": nft_events is keyed
-        # (tx_hash, nft_id), so one tx cancelling TWO offers on the SAME token
-        # collides and only one row survives. The #411 epoch replay then still
-        # sees the lost offer as open and reads the token as LISTED — i.e. it
-        # under-pays the drip. That is the safe direction; widening the key (or
-        # dropping a row) to make the replay pay would risk paying genuinely
-        # listed tokens, which is unrecoverable. Leave it.
-        return [
-            {
-                **base,
-                "nft_id": o.get("NFTokenID"),
-                "event": "offer_cancel",
-                "from_addr": o.get("Owner"),
-                "to_addr": None,
-                "offer_index": o.get("LedgerIndex"),
-                "offer_flags": int(o.get("Flags") or 0),
-            }
-            for o in _deleted_nft_offers(meta)
-            if o.get("NFTokenID")
-        ]
+        # `nft_events` is keyed (tx_hash, nft_id), so one tx cancelling TWO
+        # offers on the SAME token cannot be two rows. Rather than lose the
+        # extra offers (which would leave the #411 epoch replay believing they
+        # are still open — a token stuck LISTED forever, i.e. permanent
+        # under-pay), the offers are GROUPED per nft_id into one event whose
+        # `offer_index` is the comma-joined sorted list of every offer index
+        # closed for that token; `epoch_state._close_offer` splits on "," and
+        # closes each. If ANY of a token's deleted offers has no LedgerIndex,
+        # the whole group falls back to NULL — the replay's existing
+        # fail-closed "unknown which offer closed" rule.
+        grouped: dict[str, list[dict[str, Any]]] = {}
+        for o in _deleted_nft_offers(meta):
+            nft_id = o.get("NFTokenID")
+            if nft_id:
+                grouped.setdefault(str(nft_id), []).append(o)
+        events: list[dict[str, Any]] = []
+        for nft_id, offers_for_token in grouped.items():
+            indices = [o.get("LedgerIndex") for o in offers_for_token]
+            offer_index = ",".join(sorted(str(i) for i in indices)) if all(indices) else None
+            flags = 0
+            for o in offers_for_token:
+                flags |= int(o.get("Flags") or 0)
+            events.append(
+                {
+                    **base,
+                    "nft_id": nft_id,
+                    "event": "offer_cancel",
+                    "from_addr": offers_for_token[0].get("Owner"),
+                    "to_addr": None,
+                    "offer_index": offer_index,
+                    "offer_flags": flags,
+                }
+            )
+        return events
 
     return []
 

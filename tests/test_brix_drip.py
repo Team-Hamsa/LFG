@@ -847,3 +847,27 @@ def test_a_burned_token_with_a_complete_archive_is_not_drift(hconn):
     assert (r.owner_drift, r.unknown) == (0, 0)
     assert brix_drip.claimable(hconn, "rAlice") == 0
     assert brix_drip.claimable(hconn, "rBob") == 1
+
+
+def test_accrual_source_defaults_to_null_for_the_nightly_job(conn):
+    brix_drip.record_accruals(conn, [brix_drip.Accrual("2026-01-01", "N1", "rHolder", 1)])
+    assert conn.execute("SELECT source FROM brix_accruals").fetchone()[0] is None
+
+
+def test_ensure_schema_adds_source_column_to_a_pre_existing_table(tmp_path):
+    c = sqlite3.connect(tmp_path / "legacy.db")
+    c.row_factory = sqlite3.Row
+    c.execute(
+        "CREATE TABLE brix_accruals (epoch_date TEXT NOT NULL, nft_id TEXT NOT NULL,"
+        " owner TEXT NOT NULL, amount INTEGER NOT NULL DEFAULT 1, claim_id INTEGER,"
+        " PRIMARY KEY (epoch_date, nft_id))"
+    )
+    c.execute("INSERT INTO brix_accruals VALUES ('2026-01-01', 'N1', 'rHolder', 1, NULL)")
+    c.commit()
+    brix_drip.ensure_schema(c)
+    cols = {r[1] for r in c.execute("PRAGMA table_info(brix_accruals)")}
+    assert "source" in cols
+    assert c.execute("SELECT source FROM brix_accruals").fetchone()[0] is None
+    brix_drip.record_accruals(c, [brix_drip.Accrual("2026-01-02", "N2", "rHolder", 1, "gap")])
+    assert c.execute("SELECT source FROM brix_accruals WHERE nft_id='N2'").fetchone()[0] == "gap"
+    c.close()

@@ -145,17 +145,35 @@ class EpochReplay:
                 return
             if not st.live:
                 st.live = True  # archive predates this token's mint row
+            if st.owner is None and row["from_addr"]:
+                # First we hear of this token, and only its owner can create a
+                # SELL offer — so the creator IS the owner of record. Never
+                # override an already-known owner (a stale offer from a
+                # previous holder must not resurrect them).
+                st.owner = row["from_addr"]
             st.offers()[str(row["offer_index"])] = row["from_addr"]
             return
         if event == "offer_cancel":
             self._close_offer(st, row["offer_index"])
             return
-        # modify and anything else: no ownership/listing effect
+        if event == "modify":
+            # NFTokenModify is issuer-signed but its derived `to_addr` is the
+            # token's owner — an unambiguous ownership fact for a token whose
+            # mint row the archive may predate.
+            st.live = True
+            if row["to_addr"]:
+                st.owner = row["to_addr"]
+            return
+        # anything else: no ownership/listing effect
 
     @staticmethod
     def _close_offer(st: _TokenState, offer_index: Any) -> None:
         if offer_index:
-            st.offers().pop(str(offer_index), None)
+            # A cancel may close several offers on one token; history_events
+            # joins their indices with "," (one event per nft_id).
+            for idx in str(offer_index).split(","):
+                if idx:
+                    st.offers().pop(idx, None)
             return
         # NULL offer_index: we can't tell which offer (if any) closed. That
         # only matters if some OPEN offer's creator equals the CURRENT owner

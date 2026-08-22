@@ -311,3 +311,22 @@ def test_a_burned_token_with_a_complete_archive_is_not_drift(h):
     p = plan(h, apply=True, eligible={"N1": BOB}, today="2026-01-06")
     assert p.owner_drift == [] and p.refused is None
     assert p.written == 4
+
+
+def test_backfilled_rows_are_tagged_so_rollback_spares_nightly_rows(h):
+    ev(h, "mint", ts=D["2026-01-01"] + 1, to_addr=ALICE)
+    # a row the nightly job already wrote for an epoch inside the window
+    brix_drip.record_accruals(h, [brix_drip.Accrual("2026-01-02", "NIGHTLY", ALICE, 1)])
+    plan(h, apply=True)
+    sources = dict(
+        h.execute("SELECT source, COUNT(*) FROM brix_accruals GROUP BY source").fetchall()
+    )
+    assert sources[brix_backfill.BACKFILL_SOURCE] == 4
+    assert sources[None] == 1
+    # the documented rollback removes only the backfilled rows
+    h.execute(
+        "DELETE FROM brix_accruals WHERE source = ? AND claim_id IS NULL",
+        (brix_backfill.BACKFILL_SOURCE,),
+    )
+    h.commit()
+    assert h.execute("SELECT COUNT(*) FROM brix_accruals").fetchone()[0] == 1

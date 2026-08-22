@@ -354,3 +354,43 @@ def test_brokered_sale_records_the_sell_side_index():
 def test_legacy_fixture_without_ledger_index_yields_none():
     (ev,) = _nft(fx.OFFER_CANCEL)  # fixture node has no LedgerIndex
     assert ev["offer_index"] is None and ev["offer_flags"] == 1
+
+
+def _cancel_tx(nodes):
+    return {**fx.OFFER_CANCEL, "meta": {"TransactionResult": "tesSUCCESS", "AffectedNodes": nodes}}
+
+
+def _deleted(owner, flags, index, nft_id=None):
+    node = fx._deleted_offer(owner, "9000000", flags)
+    if nft_id:
+        node["DeletedNode"]["FinalFields"]["NFTokenID"] = nft_id
+    if index is not None:
+        node["DeletedNode"]["LedgerIndex"] = index
+    return node
+
+
+def test_cancel_of_two_offers_on_one_nft_is_one_event_with_joined_indices():
+    tx = _cancel_tx([_deleted(fx.ALICE, 1, "BB" * 32), _deleted(fx.ALICE, 1, "AA" * 32)])
+    (ev,) = _nft(tx)
+    assert ev["nft_id"] == fx.NFT_A
+    assert ev["offer_index"] == f"{'AA' * 32},{'BB' * 32}"
+    assert ev["offer_flags"] == 1
+
+
+def test_cancel_group_with_one_unknown_index_falls_back_to_null():
+    tx = _cancel_tx([_deleted(fx.ALICE, 1, "AA" * 32), _deleted(fx.ALICE, 0, None)])
+    (ev,) = _nft(tx)
+    assert ev["offer_index"] is None
+    assert ev["offer_flags"] == 1  # bitwise OR of the group
+
+
+def test_cancel_of_offers_on_different_nfts_stays_two_events():
+    tx = _cancel_tx(
+        [
+            _deleted(fx.ALICE, 1, "AA" * 32),
+            _deleted(fx.ALICE, 1, "CC" * 32, nft_id=fx.NFT_B),
+        ]
+    )
+    evs = _nft(tx)
+    assert {e["nft_id"] for e in evs} == {fx.NFT_A, fx.NFT_B}
+    assert len(evs) == 2
