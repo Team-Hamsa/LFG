@@ -4996,7 +4996,11 @@ def _pending_offer_row(
     branch it fell through to nft_number=None/image=None and the tray rendered
     the raw nft_id with no art. Trait rows carry slot/value + a same-origin
     /api/layer thumbnail (image_url), exactly like the marketplace/shop tiles.
-    A token unknown to both keeps the bare fallback (kind=None)."""
+    A soulbound Closet (ensure_closet's up-front offer) is in neither index
+    but lives in closet_tokens — without this branch a brand-new user saw
+    "0010000… Accept" with no hint the offer was ours (2026-08-22). Closet
+    rows resolve to kind="closet" + owner so the tray can name it. A token
+    unknown to all three keeps the bare fallback (kind=None)."""
     conn = nft_index.init_db(nft_index.index_db_path(char_network))
     try:
         meta = conn.execute(
@@ -5019,6 +5023,13 @@ def _pending_offer_row(
         trow = conn.execute(
             "SELECT slot, value FROM trait_tokens WHERE nft_id = ?", (o["nft_id"],)
         ).fetchone()
+        crow = (
+            None
+            if trow is not None
+            else conn.execute(
+                "SELECT owner FROM closet_tokens WHERE nft_id = ?", (o["nft_id"],)
+            ).fetchone()
+        )
     finally:
         conn.close()
     if trow is not None:
@@ -5031,6 +5042,16 @@ def _pending_offer_row(
             "slot": slot,
             "value": value,
             "image_url": _trait_image_url(cfg, slot, value),
+            "amount": o["amount"],
+        }
+    if crow is not None:
+        return {
+            "offer_index": o["offer_index"],
+            "nft_id": o["nft_id"],
+            "kind": "closet",
+            "nft_number": None,
+            "owner": crow[0],
+            "image": None,
             "amount": o["amount"],
         }
     return {

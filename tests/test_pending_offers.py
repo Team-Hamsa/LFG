@@ -147,6 +147,38 @@ def test_pending_offer_row_enriches_trait_token(monkeypatch, tmp_path):
     assert row["image_url"] == "/api/layer?trait=Hat&value=Wizard Hat"
 
 
+def test_pending_offer_row_enriches_closet_token(monkeypatch, tmp_path):
+    # A freshly minted soulbound Closet is in neither onchain_nfts nor
+    # trait_tokens, so the tray rendered "0010000… Accept" with no context —
+    # a user could not tell the offer was ours. Resolve it from closet_tokens.
+    import lfg_core.economy_store as economy_store
+    import lfg_core.nft_index as nft_index
+    from lfg_service import app
+
+    char_db = str(tmp_path / "char.db")
+    econ_db = str(tmp_path / "econ.db")
+    nft_index.init_db(char_db).close()
+    econ = nft_index.init_db(econ_db)
+    economy_store.init_economy_schema(econ)
+    nft_id = "00100000D1" + "0" * 54
+    econ.execute(
+        "INSERT INTO closet_tokens (owner, nft_id, uri_hex, status, offer_id) VALUES (?,?,?,?,?)",
+        (WALLET, nft_id, "", "pending_accept", "OFFc"),
+    )
+    econ.commit()
+    econ.close()
+
+    def _db(net):
+        return char_db if net == "MAINNET" else econ_db
+
+    monkeypatch.setattr(app.nft_index, "index_db_path", _db)
+    o = {"offer_index": "OFFc", "nft_id": nft_id, "amount": "0"}
+    row = app._pending_offer_row(o, "MAINNET", "TESTNET", object())
+    assert row["kind"] == "closet"
+    assert row["nft_number"] is None
+    assert row["owner"] == WALLET
+
+
 def test_pending_offers_config_failure_uses_availability_error_contract(monkeypatch):
     from lfg_service import app
 

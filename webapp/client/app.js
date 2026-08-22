@@ -1333,6 +1333,7 @@ function offerRow(o) {
   // image_url + slot/value; characters carry a CDN image + nft_number. Both
   // fall back to the short nft_id only when neither resolved on-chain.
   const isTrait = o.kind === 'trait';
+  const isCloset = o.kind === 'closet';
   const src = isTrait ? traitLayerSrc(o.image_url) : (o.image ? imgUrl(o.image, THUMB_W) : null);
   if (src) {
     const img = document.createElement('img');
@@ -1340,11 +1341,21 @@ function offerRow(o) {
     img.src = src;
     img.alt = isTrait ? `${o.slot}: ${o.value}` : (o.nft_number != null ? `NFT #${o.nft_number}` : 'NFT');
     row.appendChild(img);
+  } else if (isCloset) {
+    // Soulbound Closet has no art tile; a glyph beats a raw nft_id.
+    const glyph = document.createElement('span');
+    glyph.className = 'thumb';
+    glyph.textContent = '🧥';
+    glyph.setAttribute('aria-hidden', 'true');
+    row.appendChild(glyph);
   }
   const label = document.createElement('span');
   label.className = 'u-label';
   if (isTrait) label.textContent = `${o.slot} — ${o.value}`;
-  else if (o.nft_number != null) label.textContent = `#${o.nft_number}`;
+  else if (isCloset) {
+    label.textContent = 'Your LFG Closet';
+    label.title = 'Free soulbound token from LFG that holds your harvested traits. Accept to unlock Harvest / Build.';
+  } else if (o.nft_number != null) label.textContent = `#${o.nft_number}`;
   else label.textContent = `${o.nft_id.slice(0, 8)}…`;
   row.appendChild(label);
   const btn = document.createElement('button');
