@@ -9,7 +9,7 @@
 // money math, and wizard-step labels. Kept in a separate module so they're
 // unit-testable under Node (tests/test_market_pure_js.py) without a browser
 // — see webapp/client/market_pure.js's own header for the full rationale.
-import * as marketPure from './market_pure.js?v=24';
+import * as marketPure from './market_pure.js?v=25';
 // Mint-flow pure helpers (issue #141): the cancel-outcome decision lives in
 // its own module so it's Node-testable too (tests/test_mint_pure_js.py).
 import * as mintPure from './mint_pure.js?v=24';

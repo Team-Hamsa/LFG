@@ -284,16 +284,16 @@ export function buyNowLabel(vm) {
 
 /**
  * #426: the honest line under Buy now — names the displayed ask and what the
- * difference is (the broker's fee, taken against the buy amount; anything
- * above the clearing price goes to the seller, never the broker). Empty when
- * the row has no clearing price.
+ * difference is (the broker's fee, taken at its rate against the WHOLE buy
+ * amount — so the seller receives whatever remains after that fee, overshoot
+ * included net of the rate). Empty when the row has no clearing price.
  */
 export function externalFeeNote(vm) {
   if (!vm.external || vm.clearingXrp == null) return '';
   const who = vm.marketplace ? `${vm.marketplace}'s` : "the marketplace's";
   const pct = vm.brokerRate != null ? `${(vm.brokerRate * 100).toFixed(2)}% ` : '';
   const ask = vm.amountXrp != null ? `Listed at ${vm.amountXrp} XRP — the extra` : 'The premium over the ask';
-  return `${ask} covers ${who} ${pct}broker fee; anything above the clearing price goes to the seller.`;
+  return `${ask} covers ${who} ${pct}broker fee; the seller receives everything after that fee.`;
 }
 
 /**

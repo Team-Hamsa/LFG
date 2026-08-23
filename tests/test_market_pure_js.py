@@ -517,7 +517,7 @@ def test_external_fee_note():
     vm = '{external: true, marketplace: "xrp.cafe", clearingXrp: "5.070572", amountXrp: "4.99", brokerRate: 0.01589}'
     assert run_js(f"M.externalFeeNote({vm})") == (
         "Listed at 4.99 XRP — the extra covers xrp.cafe's 1.59% broker fee; "
-        "anything above the clearing price goes to the seller."
+        "the seller receives everything after that fee."
     )
     assert run_js("M.externalFeeNote({external: true, clearingXrp: null})") == ""
 

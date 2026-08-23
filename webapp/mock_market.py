@@ -564,7 +564,10 @@ class MockMarket:
             session["state"] = "done"
             bid = self._find_bid(session["offer_index"])
             if bid is not None:
+                # Mirror market_store.close_bid(reason="accepted") so the
+                # bidder's poll reports fill="accepted", not a generic "closed".
                 bid["is_live"] = False
+                bid["closed_reason"] = "accepted"
 
     def status(self, session_id: str) -> dict[str, Any]:
         session = self._sessions.get(session_id)
@@ -635,6 +638,7 @@ class MockMarket:
                 bid = self._find_bid(session["offer_index"])
                 if bid is not None:
                     bid["is_live"] = False
+                    bid["closed_reason"] = "cancelled"  # as close_bid(reason="cancelled")
                 return
             row = self._find(session["offer_index"])
             if row is not None:
