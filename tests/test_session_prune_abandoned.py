@@ -16,7 +16,7 @@ import time
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 import lfg_service.app as app  # noqa: E402
-from lfg_core import market_flow, mint_flow, swap_flow  # noqa: E402
+from lfg_core import market_flow, mint_flow, swap_flow, xumm_ops  # noqa: E402
 
 
 class _Req:
@@ -198,12 +198,20 @@ def test_swap_awaiting_payment_expired_but_paid_untouched(monkeypatch):
 
 
 def test_abandon_ttl_env_override(monkeypatch):
-    monkeypatch.setenv("SESSION_ABANDON_TTL_SECONDS", "42")
-    assert app._abandon_ttl_from_env() == 42
+    monkeypatch.setenv("SESSION_ABANDON_TTL_SECONDS", "1800")
+    assert app._abandon_ttl_from_env() == 1800
+    # the floor is the XUMM payload lifetime: below it the sweep could cancel
+    # a still-signable payload, so such values fall back to the default
+    for bad in ("42", "0", "-5", str(app.SESSION_ABANDON_TTL_MIN - 1)):
+        monkeypatch.setenv("SESSION_ABANDON_TTL_SECONDS", bad)
+        assert app._abandon_ttl_from_env() == app.SESSION_ABANDON_TTL_DEFAULT
+    monkeypatch.setenv("SESSION_ABANDON_TTL_SECONDS", str(app.SESSION_ABANDON_TTL_MIN))
+    assert app._abandon_ttl_from_env() == app.SESSION_ABANDON_TTL_MIN
     monkeypatch.setenv("SESSION_ABANDON_TTL_SECONDS", "garbage")
     assert app._abandon_ttl_from_env() == app.SESSION_ABANDON_TTL_DEFAULT
     monkeypatch.delenv("SESSION_ABANDON_TTL_SECONDS")
     assert app._abandon_ttl_from_env() == app.SESSION_ABANDON_TTL_DEFAULT
     # must outlast the XUMM payload expire (#260: 15 min) so a still-signable
     # payload is never pulled out from under a slow user
-    assert app.SESSION_ABANDON_TTL_DEFAULT > 15 * 60
+    assert app.SESSION_ABANDON_TTL_MIN == xumm_ops.DEFAULT_EXPIRE_MINUTES * 60
+    assert app.SESSION_ABANDON_TTL_DEFAULT > app.SESSION_ABANDON_TTL_MIN

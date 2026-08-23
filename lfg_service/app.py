@@ -505,19 +505,32 @@ def _prune_sessions(sessions: dict[str, Any], terminal_states: set[str]) -> None
 # still happen, so it is safe to expire client-side. The TTL carries slack past
 # that expire so a still-signable payload is never pulled out from under a
 # slow user. Only PRE-money states are eligible — see _ABANDONABLE_STATES.
-SESSION_ABANDON_TTL_DEFAULT = 15 * 60 + 120
+# Floor = the XUMM payload lifetime itself: anything shorter would let the
+# sweep fail a session (and cancel its payload) while the user can still sign.
+SESSION_ABANDON_TTL_MIN = xumm_ops.DEFAULT_EXPIRE_MINUTES * 60
+SESSION_ABANDON_TTL_DEFAULT = SESSION_ABANDON_TTL_MIN + 120
 
 
 def _abandon_ttl_from_env() -> int:
     raw = os.environ.get("SESSION_ABANDON_TTL_SECONDS")
+    if not raw:
+        return SESSION_ABANDON_TTL_DEFAULT
     try:
-        return int(raw) if raw else SESSION_ABANDON_TTL_DEFAULT
+        ttl = int(raw)
     except ValueError:
         logging.warning(
             f"SESSION_ABANDON_TTL_SECONDS={raw!r} is not an integer; "
             f"using default {SESSION_ABANDON_TTL_DEFAULT}"
         )
         return SESSION_ABANDON_TTL_DEFAULT
+    if ttl < SESSION_ABANDON_TTL_MIN:
+        logging.warning(
+            f"SESSION_ABANDON_TTL_SECONDS={ttl} is below the XUMM payload "
+            f"lifetime ({SESSION_ABANDON_TTL_MIN}s) and could cancel a "
+            f"still-signable payload; using default {SESSION_ABANDON_TTL_DEFAULT}"
+        )
+        return SESSION_ABANDON_TTL_DEFAULT
+    return ttl
 
 
 SESSION_ABANDON_TTL = _abandon_ttl_from_env()
