@@ -255,6 +255,26 @@ class TestBidStore:
         market_store.upsert_bid(conn, _bid())
         assert market_store.get_bid(conn, "BID1")["is_live"] == 1
 
+    def test_upsert_preserve_closed_overwrites_false_stale(self):
+        # #426 (Greptile P1, round 2): 'stale' is an INFERENCE by the nightly
+        # backfill (offers fetched for the token before the bid landed, then
+        # the stale pass closed the listener's fresh row), not a ledger fact.
+        # The finalize write follows a validated tesSUCCESS create and is the
+        # stronger evidence, so it repairs a stale row; only ledger-derived
+        # closes (accepted/cancelled — an offer index never comes back) stick.
+        conn = _conn()
+        market_store.upsert_bid(conn, _bid())
+        market_store.close_bid(conn, "BID1", "stale")
+        market_store.upsert_bid(conn, _bid(), preserve_closed=True)
+        row = market_store.get_bid(conn, "BID1")
+        assert row["is_live"] == 1
+        assert row["closed_reason"] is None
+        market_store.close_bid(conn, "BID1", "cancelled")
+        market_store.upsert_bid(conn, _bid(), preserve_closed=True)
+        row = market_store.get_bid(conn, "BID1")
+        assert row["is_live"] == 0
+        assert row["closed_reason"] == "cancelled"
+
     def test_live_bids_for_nft_ordered_highest_first(self):
         conn = _conn()
         market_store.upsert_bid(conn, _bid(offer_index="B1", amount=1_000_000))
