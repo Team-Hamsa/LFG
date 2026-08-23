@@ -12,7 +12,7 @@
 <img src="https://img.shields.io/badge/surfaces-Discord%20%C2%B7%20Telegram%20%C2%B7%20Web-5865F2?style=flat-square" alt="Surfaces: Discord, Telegram, Web">
 <img src="https://img.shields.io/badge/X-share%20%E2%86%92%20mint-000000?style=flat-square&logo=x&logoColor=white" alt="Share on X — per-NFT cards funnel into the app">
 <img src="https://img.shields.io/badge/PWA-installable-6B4FBB?style=flat-square" alt="Installable PWA">
-<img src="https://img.shields.io/badge/tests-3%2C696-2ea043?style=flat-square" alt="3,696 tests">
+<img src="https://img.shields.io/badge/tests-3%2C741-2ea043?style=flat-square" alt="3,741 tests">
 <a href="https://github.com/Team-Hamsa/LFG/actions/workflows/ci.yml"><img src="https://img.shields.io/github/actions/workflow/status/Team-Hamsa/LFG/ci.yml?branch=main&style=flat-square&label=CI" alt="CI status on main"></a>
 <img src="https://img.shields.io/github/license/Team-Hamsa/LFG?style=flat-square&color=blue" alt="MIT license">
 <img src="https://img.shields.io/badge/SourceTag-2606160021-8957E5?style=flat-square" alt="XRPL SourceTag 2606160021">
@@ -311,6 +311,33 @@ TOKEN_CURRENCY_HEX=...
 BUNNY_CDN_ACCESS_KEY=...
 BUNNY_CDN_STORAGE_ZONE=...
 ```
+
+**What `SEED` actually is on mainnet.** The collection issuer
+(`rLfgoMint…`) never signs with its own master key. `SEED` holds the issuer's
+**regular-key** seed and `SIGNING_ACCOUNT` names the account those transactions
+are submitted *for* — every backend builder in `lfg_core/xrpl_ops.py` signs
+with `Wallet.from_seed(SEED)` but sets `Account = SIGNING_ACCOUNT`. Without
+that override `Wallet.from_seed` would derive the regular key pair's *own*
+address and every issuer operation would sign for the wrong account. Leave
+`SIGNING_ACCOUNT` unset on testnet, where the seed *is* the issuer.
+
+```plaintext
+SIGNING_ACCOUNT=rLfgoMint...  # mainnet only: the account backend txs are submitted for
+```
+
+Be clear-eyed about what this does and does not buy. The issuer account has
+`disableMasterKey` set and no signer list, so **the regular key is the
+account's only signing authority** — there is no offline master key held in
+reserve, and the hot key can do anything the account can: mint, burn, create
+and cancel offers, send XRP and issued currency, set trust lines. What the
+split does give you is that the credential on the deploy box is *rotatable
+without moving the collection*: a box compromise is answered with a
+`SetRegularKey`, not by re-issuing 3,500+ NFTs under a new issuer. Losing it is
+an incident, not an inconvenience — and note there is **no written rotation
+runbook yet**: the linked document covers the original `SEED`/`SIGNING_ACCOUNT`
+cutover, not the on-ledger `SetRegularKey` you would need during one. Cutover
+procedure: [`docs/runbooks/mainnet-mvp-launch.md`](docs/runbooks/mainnet-mvp-launch.md)
+("Blocker 1 — Regular-key signing").
 
 The Discord Activity additionally needs:
 

@@ -69,3 +69,31 @@ def test_health_counts_only_non_terminal(monkeypatch):
     body = _body(_run(app.handle_health(_Req())))
     assert body["detail"]["mint"] == 1
     assert body["active_sessions"] == 1
+
+
+def test_health_reports_oldest_session_age(monkeypatch):
+    # #424: per-kind age of the oldest in-flight session so the deployer log
+    # can say WHY a drain is waiting. Terminal sessions don't count; a kind
+    # with nothing in flight reports null.
+    import time
+
+    class _Aged(_S):
+        def __init__(self, state, age):
+            super().__init__(state)
+            self.created_at = time.time() - age
+
+    in_flight = "in_flight_state_not_terminal"
+    terminal = next(iter(mint_flow.TERMINAL_STATES))
+    monkeypatch.setattr(
+        app,
+        "mint_sessions",
+        {"a": _Aged(in_flight, 120), "b": _Aged(in_flight, 30), "c": _Aged(terminal, 9999)},
+        raising=False,
+    )
+    monkeypatch.setattr(app, "swap_sessions", {}, raising=False)
+    monkeypatch.setattr(app, "economy_sessions", {}, raising=False)
+    monkeypatch.setattr(app, "market_sessions", {}, raising=False)
+    body = _body(_run(app.handle_health(_Req())))
+    ages = body["oldest_session_age"]
+    assert 119 <= ages["mint"] <= 125
+    assert ages["swap"] is None and ages["market"] is None and ages["economy"] is None

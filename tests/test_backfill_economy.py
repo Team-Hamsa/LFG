@@ -121,8 +121,19 @@ def test_issuer_held_scrubs_prior_bogus_issuer_row(tmp_path):
     # rerun the issuer-held skip must also scrub that bogus row so the real
     # user's pending Closet is not stranded (#190).
     conn = _conn(tmp_path)
-    es.set_closet_token(conn, ISSUER, "OLDBOGUS", "URIX", status=ct.PENDING_ACCEPT)
-    es.set_closet_contents(conn, ISSUER, [("Hat", "Cap", 1)], [3])
+    # Seeded with raw SQL: the store now REFUSES to write a Closet under a
+    # project signing account (#383), which is exactly the damage this test
+    # reproduces from a pre-guard database.
+    conn.execute(
+        "INSERT INTO closet_tokens (owner, nft_id, uri_hex, status) VALUES (?,?,?,?)",
+        (ISSUER, "OLDBOGUS", "URIX", ct.PENDING_ACCEPT),
+    )
+    conn.execute(
+        "INSERT INTO closet_assets (owner, slot, value, count) VALUES (?,?,?,?)",
+        (ISSUER, "Hat", "Cap", 1),
+    )
+    conn.execute("INSERT INTO closet_bodies (owner, edition) VALUES (?,?)", (ISSUER, 3))
+    conn.commit()
     meta = ct.build_closet_metadata(ISSUER, [], [])
     enum = _enum({CLOSET_TAXON: [_tok("CLOSET9", ISSUER, "URIP")]})
     fetch = _meta({"URIP": meta})

@@ -138,6 +138,7 @@ LISTENER_AUTO_CATCHUP=1                                     # optional (#402); d
 LISTENER_AUTO_CATCHUP_COOLDOWN=600                          # optional (#402); min seconds between auto catch-up attempts (flap debounce)
 ECONOMY_AUDIT_WEBHOOK_URL=<discord-webhook-url>             # optional (#322); nightly trait-economy audit posts here on a non-clean run (unset = log only)
 PRESUBMIT_SIMULATE=1                                        # optional (#58); pre-submit `simulate` pre-flight on backend-signed txs — deterministic tem*/tef*/tec* refuses before signing (no fee burned), transport errors degrade open; 0 disables
+SESSION_ABANDON_TTL_SECONDS=1020                            # optional (#424); age after which an abandoned PRE-money session (mint/swap awaiting_payment, market awaiting_signature/awaiting_onramp) is expired so the deployer drain can finish — default 15 min payload expire + 120 s slack, minimum 900 (the payload lifetime — lower values fall back to the default); paid/signed sessions are never expired
 ```
 
 > **Sponsored free mint — the archive baseline is a hard prerequisite.**
@@ -868,7 +869,16 @@ Model:
     promotes the record to `active` when it observes `NFTokenAcceptOffer` with
     `owner != issuer`. Harvest/Assemble gate on `status == active`; an offer
     payload is returned to the caller while status is `pending_accept` so the
-    user can be prompted to accept.
+    user can be prompted to accept. **Backstop (#382):** an accept that lands
+    while the listener is down (deployer drain-restart) is never observed, so
+    `lfg_service.app.sweep_pending_closet_accepts` runs in the same 2-minute
+    `_settlement_sweep_loop` as the trait-sale/shop sweeps — it re-checks up
+    to `_CLOSET_SWEEP_BATCH` (25) rows per pass from a rotating,
+    oldest-first `pending_accept` window (so a stuck oldest batch can't
+    starve newer rows) against clio (`nft_info`, `CLIO_WS_URL`) via the idempotent, fail-closed
+    `closet_token.confirm_accept` (promotes only when the on-ledger owner is
+    the row's owner; unaccepted offers / failed lookups stay pending). Gated
+    on `ECONOMY_ENABLED`.
 - **Taxon transition:** `CLOSET_TAXON = 1762` (new, default).
   `LEGACY_BUCKET_TAXON = 1761` (old; read from `BUCKET_TAXON` env var, default
   1761). The listener dual-reads both `lfg_closet` and `lfg_bucket` metadata

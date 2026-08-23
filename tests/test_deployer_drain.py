@@ -203,3 +203,38 @@ def test_staging_restarts_anyway_on_timeout():
         lister=boom,
     )
     assert out == "restarted" and len(calls) == 2
+
+
+def test_drain_logs_oldest_session_age_when_waiting_and_on_timeout(monkeypatch):
+    # #424: the deployer log says WHY it waits / refuses.
+    lines = []
+    monkeypatch.setattr(deployer, "log", lambda m: lines.append(m))
+    clock = FakeClock()
+    body = b'{"active_sessions": 1, "detail": {"market": 1}, "oldest_session_age": {"market": 1234, "mint": null}}'
+    f = _fetcher_seq([body] * 100)
+    assert (
+        deployer.drain(_cfg(True, max_wait=25), fetcher=f, sleeper=clock.sleep, clock=clock)
+        == "timeout"
+    )
+    waiting = [m for m in lines if "waiting for drain" in m]
+    assert waiting and "market" in waiting[0] and "1234s" in waiting[0]
+    final = [m for m in lines if "still in flight" in m]
+    assert final and "market" in final[0] and "1234s" in final[0]
+
+
+def test_drain_tolerates_health_body_without_ages(monkeypatch):
+    lines = []
+    monkeypatch.setattr(deployer, "log", lambda m: lines.append(m))
+    clock = FakeClock()
+    f = _fetcher_seq([b'{"active_sessions": 1}', b'{"active_sessions": 0}'])
+    assert deployer.drain(_cfg(True), fetcher=f, sleeper=clock.sleep, clock=clock) == "drained"
+    assert any("waiting for drain" in m for m in lines)
+
+
+def test_describe_oldest_age():
+    assert deployer.describe_oldest_age({}) == ""
+    assert deployer.describe_oldest_age({"oldest_session_age": {"a": None}}) == ""
+    assert (
+        deployer.describe_oldest_age({"oldest_session_age": {"mint": 5, "market": 77}})
+        == " (oldest: market 77s)"
+    )
