@@ -4088,6 +4088,60 @@ async def sweep_shop_orders() -> None:
             )
 
 
+# #382: Closet pending_accept backstop. The listener is the primary promoter
+# (it observes the NFTokenAcceptOffer); an accept that lands while the listener
+# is down (deployer drain-restart) is never seen, and the row stays
+# `pending_accept` forever while the user owns the Closet on-ledger. Each pass
+# re-checks a bounded batch against clio (`nft_info` is clio-only) and promotes
+# via the idempotent, fail-closed `closet_token.confirm_accept`.
+_CLOSET_SWEEP_BATCH = 25
+_CLOSET_SWEEP_DELAY_SECONDS = 0.2
+
+
+async def _closet_owner_on_ledger(nft_id: str) -> str | None:
+    """Current on-ledger owner of a Closet NFToken via clio; None on any
+    lookup failure so `confirm_accept` skips the promotion (fail-closed)."""
+    info = await xrpl_ops.nft_info(nft_id)
+    return info.get("owner") if info else None
+
+
+async def sweep_pending_closet_accepts() -> None:
+    """Backstop for the listener's `pending_accept -> active` Closet promotion
+    (#382). Scans `closet_tokens` rows still `pending_accept` on the trait
+    economy network (oldest first, at most `_CLOSET_SWEEP_BATCH` per pass) and
+    runs `confirm_accept` for each — promoted only when clio reports the
+    Closet's owner == the row's owner; a still-unaccepted offer (owner is the
+    issuer) or a failed lookup leaves the row pending. One bad row never stops
+    the pass. No-op while the economy is disabled."""
+    if not config.ECONOMY_ENABLED:
+        return
+    network = config.ECONOMY_NETWORK
+    conn = nft_index.init_db(nft_index.index_db_path(network))
+    try:
+        economy_store.init_economy_schema(conn)
+        pending = economy_store.list_pending_closets(conn, limit=_CLOSET_SWEEP_BATCH)
+        for i, (owner, nft_id) in enumerate(pending):
+            if i and _CLOSET_SWEEP_DELAY_SECONDS:
+                await asyncio.sleep(_CLOSET_SWEEP_DELAY_SECONDS)
+            try:
+                status = await closet_token.confirm_accept(
+                    conn, owner, owner_fn=_closet_owner_on_ledger
+                )
+            except Exception:
+                logging.error(
+                    f"closet pending-accept sweep failed for {owner} ({nft_id}): "
+                    f"{traceback.format_exc()}"
+                )
+                continue
+            if status == closet_token.ACTIVE:
+                logging.info(
+                    f"closet pending-accept sweep: promoted {owner} ({nft_id}) to active "
+                    f"(accept observed on-ledger, missed by the listener)"
+                )
+    finally:
+        conn.close()
+
+
 async def _settlement_sweep_loop() -> None:
     while True:
         try:
@@ -4098,6 +4152,10 @@ async def _settlement_sweep_loop() -> None:
             await sweep_shop_orders()
         except Exception:
             logging.error(f"shop sweep loop crashed: {traceback.format_exc()}")
+        try:
+            await sweep_pending_closet_accepts()
+        except Exception:
+            logging.error(f"closet pending-accept sweep loop crashed: {traceback.format_exc()}")
         await asyncio.sleep(_SWEEP_PERIOD_SECONDS)
 
 
