@@ -415,3 +415,39 @@ def test_surfaces_render_the_refusal_not_the_generic_409(code):
 def test_friendly_error_still_handles_a_real_in_progress_409():
     err = ServiceError("mint already in progress", code=None, status=409)
     assert "already have a mint in progress" in friendly_error(err)
+
+
+def test_cancel_during_the_preflight_await_leaks_nothing(_service_env, monkeypatch):
+    """The pre-flight adds a NEW await inside handle_mint_start's race-sensitive
+    admission region, after the headroom grant. handle_mint_start's own comments
+    call that window load-bearing (#226/#262), so pin it: a client disconnect
+    mid-lookup must release the collection slot and drop the session, not strand
+    a reservation that silently shrinks the mintable supply."""
+    started = asyncio.Event()
+
+    async def _hang(_wallet):
+        started.set()
+        await asyncio.Event().wait()  # never resolves
+
+    monkeypatch.setattr(server.xrpl_ops, "destination_preflight", _hang)
+
+    def _reserve(*_a, **_k):
+        raise AssertionError("sponsored admission must not run after cancellation")
+
+    monkeypatch.setattr(server.sponsored_mint, "reserve_if_eligible", _reserve)
+
+    async def scenario():
+        task = asyncio.create_task(server.handle_mint_start(_PostRequest()))
+        await started.wait()
+        session = next(iter(server.mint_sessions.values()))
+        task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await task
+        return session
+
+    session = _run(scenario())
+
+    assert session.state == mint_flow.CANCELLED
+    assert headroom.reserved_for(_service_env.app_db, f"mint:{session.id}") == 0
+    assert session.id not in server.mint_sessions
+    assert _tables_empty(_service_env.app_db) == {"free_mint_claims": 0, "free_mint_burns": 0}
