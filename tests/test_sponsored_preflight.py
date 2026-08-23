@@ -451,3 +451,42 @@ def test_cancel_during_the_preflight_await_leaks_nothing(_service_env, monkeypat
     assert headroom.reserved_for(_service_env.app_db, f"mint:{session.id}") == 0
     assert session.id not in server.mint_sessions
     assert _tables_empty(_service_env.app_db) == {"free_mint_claims": 0, "free_mint_burns": 0}
+
+
+def test_a_cancel_landing_during_the_preflight_wins_over_a_refusal(_service_env, monkeypatch):
+    """Greptile, on this PR: the pre-flight await is a NEW window in which a
+    concurrent POST /api/mint/{id}/cancel can flip the session to CANCELLED.
+    The handler must report that terminal state, not a wallet refusal for a
+    mint nobody is waiting on — and must still return the collection slot."""
+    started = asyncio.Event()
+    release = asyncio.Event()
+
+    async def _slow(_wallet):
+        started.set()
+        await release.wait()
+        # An unfunded wallet: without the re-check this returns 409 wallet_unfunded.
+        return xrpl_ops.DestinationPreflight(False, None, None, None)
+
+    monkeypatch.setattr(server.xrpl_ops, "destination_preflight", _slow)
+
+    def _reserve(*_a, **_k):
+        raise AssertionError("sponsored admission must not run for a cancelled session")
+
+    monkeypatch.setattr(server.sponsored_mint, "reserve_if_eligible", _reserve)
+
+    async def scenario():
+        task = asyncio.create_task(server.handle_mint_start(_PostRequest()))
+        await started.wait()
+        session = next(iter(server.mint_sessions.values()))
+        session.state = mint_flow.CANCELLED  # what the cancel endpoint does
+        release.set()
+        return await task, session
+
+    response, session = _run(scenario())
+    body = json.loads(response.body)
+
+    assert response.status == 200
+    assert body["state"] == mint_flow.CANCELLED
+    assert "code" not in body  # not a wallet refusal
+    assert session.state == mint_flow.CANCELLED
+    assert headroom.reserved_for(_service_env.app_db, f"mint:{session.id}") == 0

@@ -4577,6 +4577,16 @@ async def handle_mint_start(request):
     except Exception as e:
         logging.warning(f"destination pre-flight failed for mint session {session.id}: {e}")
         preflight = xrpl_ops.DestinationPreflight(None, None, None, None)
+    if session.state != mint_flow.AWAITING_PAYMENT:
+        # A cancel landed DURING the pre-flight await. That window did not
+        # exist before this check was added — the guard above the await used to
+        # be the last one before a state transition — so re-check it here and
+        # report the session's real terminal state. Returning a wallet refusal
+        # for a mint nobody is waiting on would tell the client the wrong
+        # thing, and the refusal branch below would settle headroom without
+        # ever surfacing the cancellation. Mirrors the identical guard above.
+        mint_flow.settle_headroom(session)
+        return web.json_response(session.to_dict())
     refusal = _preflight_refusal(preflight)
     if refusal is not None:
         if session.state == mint_flow.AWAITING_PAYMENT:
