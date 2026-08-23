@@ -1,0 +1,58 @@
+name: Build log changelog sync
+
+on:
+  schedule:
+    - cron: "50 0 * * *"
+  pull_request_target:
+    types: [closed]
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+  pull-requests: read
+
+concurrency:
+  group: build-log-sync
+  cancel-in-progress: true
+
+jobs:
+  sync:
+    runs-on: ubuntu-latest
+    # Only MERGED PRs matter; schedule and manual runs always proceed.
+    # pull_request_target (not pull_request) so the token can push to main,
+    # and the job only ever checks out `main` — never the PR head — so no
+    # fork code is executed under the write token.
+    if: >-
+      github.event_name != 'pull_request_target' ||
+      github.event.pull_request.merged == true
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          ref: main
+
+      - name: Sync merged-PR changelog block in docs/HACKATHON.md
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: python3 -m scripts.build_log_sync
+
+      - name: Commit if changed
+        run: |
+          git add docs/HACKATHON.md
+          if ! git diff --quiet --cached; then
+            git config user.name "github-actions[bot]"
+            git config user.email "github-actions[bot]@users.noreply.github.com"
+            # No `[skip ci]` — see hackathon-loc.yml for why. ci.yml ignores
+            # docs-only commits via paths-ignore, and none of this workflow's
+            # triggers fire on push, so it cannot retrigger itself.
+            git commit -m "docs(HACKATHON): sync merged-PR changelog"
+            # main can move between checkout and push (deploys, other bots) —
+            # rebase our one doc commit and retry instead of failing the sync.
+            for _ in 1 2 3; do
+              if git push; then
+                exit 0
+              fi
+              git pull --rebase origin main
+            done
+            git push
+          fi
