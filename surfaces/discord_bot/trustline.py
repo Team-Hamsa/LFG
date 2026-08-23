@@ -9,7 +9,7 @@ import discord
 import requests
 
 from lfg_core import memos
-from lfg_core.config import SOURCE_TAG
+from lfg_core.signing import provenance
 from surfaces.discord_bot import config
 
 
@@ -36,21 +36,32 @@ async def create_trustline_request() -> dict[str, Any] | None:
         "X-API-Secret": config.XUMM_API_SECRET,
     }
 
-    # Create the transaction JSON for setting up token trustline
+    # Create the transaction JSON for setting up token trustline.
+    #
+    # This is the app's ONE remaining hand-rolled XUMM door — it posts directly
+    # rather than going through xumm_ops (it is bot-local by design, D2=A). It
+    # therefore stamped its own SourceTag and memos, which is exactly how the
+    # "every transaction is attributed" invariant becomes a convention that one
+    # forgotten path can break. The transport stays local; the ATTRIBUTION now
+    # goes through the same stamp-and-validate every provider uses (#399), so
+    # this path cannot drift from the others.
     transaction_json = {
         "TransactionType": "TrustSet",
         "Flags": 131072,  # tfSetNoRipple flag
-        "SourceTag": SOURCE_TAG,  # Make Waves invariant (#75)
-        # Provenance memo (#54): user-signed TrustSet from the Discord bot.
-        "Memos": memos.build_memos_json(
-            memos.INITIATOR_USER, memos.PLATFORM_DISCORD_BOT, memos.ACTION_TRUSTSET
-        ),
         "LimitAmount": {
             "currency": config.TOKEN_CURRENCY_HEX,
             "issuer": config.TOKEN_ISSUER_ADDRESS,
             "value": config.TOKEN_TRUSTLINE_LIMIT,
         },
     }
+    provenance.stamp_and_validate(
+        transaction_json,
+        # Provenance memo (#54): user-signed TrustSet from the Discord bot.
+        memos.build_memos_json(
+            memos.INITIATOR_USER, memos.PLATFORM_DISCORD_BOT, memos.ACTION_TRUSTSET
+        ),
+        require_memos=True,
+    )
     logging.info(f"Trustline transaction JSON: {transaction_json!r}")
 
     payload = {
