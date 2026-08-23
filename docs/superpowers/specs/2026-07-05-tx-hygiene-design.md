@@ -3,7 +3,7 @@
 **Issues:** #58 (OPEN — the only live slice) · #61 · #75 · #57 · #54 (all
 CLOSED, kept below as the historical record) · **Date:** 2026-07-05 ·
 **Last review:** 2026-08-19 ·
-**Status:** live — re-reviewed 2026-08-19 against main@27dc301
+**Status:** shipped (PR for #58, 2026-08-23) — Tasks 1–6 landed: `xrpl_ops.presubmit_simulate` wired into `_submit_and_confirm`, both sponsored prepare paths and the admin burn; `PRESUBMIT_SIMULATE` (default 1) kill switch; root conftest pins it 0. Task 7 (live staging verification: underfunded-reserve probe, `tecPATH_DRY` refusal, bulk-mint latency) is an OPS follow-up, not part of the PR. Sponsored burn: a deterministic rejection re-queues with `_backoff` (matches existing preparation-failure behaviour) and the engine code is persisted in the obligation's `error` column so an operator can see why it will never clear.
 
 Originally one spec for the whole "tx hygiene" family. Four of its five issues
 shipped in July 2026. **Only §3 (#58, pre-submit simulation) is still
@@ -423,4 +423,4 @@ can monkeypatch it the way they already patch `submit_and_wait`.
 | #75 | CLOSED 2026-07-10 as obsolete. |
 | #57 | CLOSED 2026-07-09 as a duplicate of #54 (its SourceTag half was already covered by #61). |
 | #54 | CLOSED 2026-07-09 by PR #144 as `lfg_core/memos.py`. Schema differs from this doc's original §3 — see §1.2. |
-| #58 | OPEN. §3 above is the live design. Closes when `_presubmit_simulate` is wired at the paths in §3.3 with the flag defaulted on in prod. |
+| #58 | OPEN — code shipped (PR 2026-08-23: `presubmit_simulate` wired at every §3.3 path, `PRESUBMIT_SIMULATE` defaults on). Stays open only for the staging verification in the plan's Task 7 (underfunded-reserve probe, `tecPATH_DRY` refusal, bulk-mint latency); closes with that evidence posted on the issue. |
