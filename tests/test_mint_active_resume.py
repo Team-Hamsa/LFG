@@ -30,6 +30,18 @@ from aiohttp.test_utils import make_mocked_request  # noqa: E402
 
 from lfg_core import headroom, mint_flow, supply  # noqa: E402
 from lfg_service import app as server  # noqa: E402
+from tests import sponsored_helpers  # noqa: E402
+
+
+@pytest.fixture(autouse=True)
+def _clean_destination_preflight(monkeypatch):
+    """#388/#408: handle_mint_start now pre-flights the destination wallet with
+    an account_info before admitting a mint. With no ledger to ask, the real
+    helper reports UNRESOLVED — which correctly declines sponsorship, and would
+    quietly turn every test here into a paid-path test (and issue a real
+    mainnet RPC call besides). Pin a healthy wallet; the pre-flight's own
+    behaviour is covered in tests/test_sponsored_preflight.py."""
+    sponsored_helpers.stub_clean_preflight(monkeypatch, server)
 
 
 @pytest.fixture(autouse=True)

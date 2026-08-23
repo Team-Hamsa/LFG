@@ -34,6 +34,7 @@ from lfg_core import (  # noqa: E402
     supply,
 )
 from lfg_service import app as server  # noqa: E402
+from tests import sponsored_helpers  # noqa: E402
 from tests.sponsored_helpers import prepare_and_forward, ready_history  # noqa: E402
 
 # Well-formed placeholder classic addresses (not the operator's real wallets):
@@ -79,6 +80,17 @@ def _post_request(path="/api/mint", body=None):
 
 async def _allocate_4000():
     return 4000
+
+
+@pytest.fixture(autouse=True)
+def _clean_destination_preflight(monkeypatch):
+    """#388/#408: handle_mint_start now pre-flights the destination wallet with
+    an account_info before admitting a mint. With no ledger to ask, the real
+    helper reports UNRESOLVED — which correctly declines sponsorship, and would
+    quietly turn every test here into a paid-path test (and issue a real
+    mainnet RPC call besides). Pin a healthy wallet; the pre-flight's own
+    behaviour is covered in tests/test_sponsored_preflight.py."""
+    sponsored_helpers.stub_clean_preflight(monkeypatch, server)
 
 
 @pytest.fixture(autouse=True)

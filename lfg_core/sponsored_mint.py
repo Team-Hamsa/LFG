@@ -36,6 +36,13 @@ UNDELIVERABLE_OFFER_BLOCKED = (
 UNDELIVERABLE_ERRORS: tuple[str, ...] = (UNDELIVERABLE_UNFUNDED, UNDELIVERABLE_OFFER_BLOCKED)
 ReservationReason = Literal[
     "invalid_request",
+    # Destination pre-flight (#388/#408): the recipient provably cannot take
+    # delivery, so nothing is spent on it. Checked in the service before this
+    # function runs — reserve_if_eligible is synchronous pure-sqlite and cannot
+    # await an account_info — but the vocabulary lives here with the rest.
+    "wallet_unfunded",
+    "wallet_blocks_nft_offers",
+    "wallet_reserve_short",
     "wrong_network",
     "invalid_topology",
     "eligibility_unavailable",
