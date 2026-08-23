@@ -140,6 +140,22 @@ def test_app_js_market_click_seams_catch_async_throws():
     )
 
 
+def test_external_buy_now_wiring():
+    # #426: an external row with a server-computed clearing price gets a
+    # primary "Buy now" action (the plain bid flow at clearing_xrp), the fee
+    # line, a demoted deep link, and an honest fill watch after the bid lands.
+    html = _read("index.html")
+    js = _read("app.js")
+    assert 'id="listing-detail-external"' in html
+    assert 'id="listing-detail-fee"' in html
+    assert "marketPure.buyNowLabel(vm)" in js
+    assert "marketPure.externalFeeNote(vm)" in js
+    assert "price_xrp: vm.clearingXrp" in js
+    assert "marketPure.externalFillCopy(marketplace" in js
+    assert "MARKET_STATUS_PATH.bid(sessionId)" in js
+    assert "'/api/market/bid'" in js
+
+
 def test_external_listing_wiring():
     # #131: external (brokered) listings — toggle in the filter bar, distinct
     # disabled card treatment, no in-app buy path for external rows.

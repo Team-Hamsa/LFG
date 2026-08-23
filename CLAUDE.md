@@ -126,7 +126,8 @@ BRIX_DISTRIBUTOR_SEED=<seed>                                # optional (#48); si
 BRIX_CLAIM_LEDGER_MARGIN=40                                 # optional (#48); ledgers of LastLedgerSequence headroom on a claim Payment — what makes a failed claim decidable
 BULK_MINT_UI_ENABLED=0                                      # optional (#215); Activity bulk-mint stepper — off = today's UI, server endpoints stay live
 BURN_TO_MINT_ENABLED=0                                      # optional (#220); burn-to-mint endpoints — off = new sessions 403; startup resume of already-burned sessions runs regardless
-BROKER_ALLOWLIST_PATH=<path-to-json>                        # optional (#131); external-marketplace broker allowlist overlay ({addr: {name, url_template}}); unset = built-ins in lfg_core/brokers.py; edits are picked up live (mtime-keyed cache)
+BROKER_ALLOWLIST_PATH=<path-to-json>                        # optional (#131); external-marketplace broker allowlist overlay ({addr: {name, url_template, broker_rate}}); unset = built-ins in lfg_core/brokers.py; edits are picked up live (mtime-keyed cache). broker_rate (#426) = fee fraction of the BUY amount in [0, 0.25), null/absent = unmeasured (no Buy-now)
+BROKER_CLEARING_BUFFER_DROPS=0                              # optional (#426); extra drops added to every external Buy-now clearing price (cheap insurance against a broker rate bump — the overshoot goes to the seller)
 BRIX_CURRENCY_HEX=<hex-currency-code>                       # optional; trait-economy BRIX pair (shop/trait listings/on-ramp), defaults to SWAP_OFFER_CURRENCY_HEX — never TOKEN_* (LFGO)
 BRIX_ISSUER=<xrpl-address>                                  # optional; trait-economy BRIX issuer, defaults to SWAP_OFFER_ISSUER
 MARKET_BID_TTL_SECONDS=604800                               # optional (#283); on-ledger Expiration for in-app bids (native buy offers), default 7 days
@@ -137,6 +138,8 @@ SPONSORED_MINT_ARCHIVE_MAX_LAG_SECONDS=900                  # optional; how stal
 LISTENER_AUTO_CATCHUP=1                                     # optional (#402); default ON — on (re)subscribe the index listener auto-runs the bounded --catch-up-from-gap in the background when the archive is certified-but-gapped (needs BRIX_DISTRIBUTOR_ADDRESS; skips otherwise)
 LISTENER_AUTO_CATCHUP_COOLDOWN=600                          # optional (#402); min seconds between auto catch-up attempts (flap debounce)
 ECONOMY_AUDIT_WEBHOOK_URL=<discord-webhook-url>             # optional (#322); nightly trait-economy audit posts here on a non-clean run (unset = log only)
+PRESUBMIT_SIMULATE=1                                        # optional (#58); pre-submit `simulate` pre-flight on backend-signed txs — deterministic tem*/tef*/tec* refuses before signing (no fee burned), transport errors degrade open; 0 disables
+SESSION_ABANDON_TTL_SECONDS=1020                            # optional (#424); age after which an abandoned PRE-money session (mint/swap awaiting_payment, market awaiting_signature/awaiting_onramp) is expired so the deployer drain can finish — default 15 min payload expire + 120 s slack, minimum 900 (the payload lifetime — lower values fall back to the default); paid/signed sessions are never expired
 ```
 
 > **Sponsored free mint — the archive baseline is a hard prerequisite.**
@@ -867,7 +870,16 @@ Model:
     promotes the record to `active` when it observes `NFTokenAcceptOffer` with
     `owner != issuer`. Harvest/Assemble gate on `status == active`; an offer
     payload is returned to the caller while status is `pending_accept` so the
-    user can be prompted to accept.
+    user can be prompted to accept. **Backstop (#382):** an accept that lands
+    while the listener is down (deployer drain-restart) is never observed, so
+    `lfg_service.app.sweep_pending_closet_accepts` runs in the same 2-minute
+    `_settlement_sweep_loop` as the trait-sale/shop sweeps — it re-checks up
+    to `_CLOSET_SWEEP_BATCH` (25) rows per pass from a rotating,
+    oldest-first `pending_accept` window (so a stuck oldest batch can't
+    starve newer rows) against clio (`nft_info`, `CLIO_WS_URL`) via the idempotent, fail-closed
+    `closet_token.confirm_accept` (promotes only when the on-ledger owner is
+    the row's owner; unaccepted offers / failed lookups stay pending). Gated
+    on `ECONOMY_ENABLED`.
 - **Taxon transition:** `CLOSET_TAXON = 1762` (new, default).
   `LEGACY_BUCKET_TAXON = 1761` (old; read from `BUCKET_TAXON` env var, default
   1761). The listener dual-reads both `lfg_closet` and `lfg_bucket` metadata
@@ -1103,6 +1115,23 @@ the wrong chain.
   `external_listing` — deliberately BEFORE `verify_sell_offer`, whose
   fail-closed foreign-Destination rejection would otherwise stale-close the
   live external row.
+  **External "Buy now" (#426):** the brokers' bots auto-settle any plain buy
+  offer that clears the ask after their fee, wherever it came from — so an
+  external row whose broker has a **measured** `broker_rate` (allowlist
+  field, overlay-overridable; cafe `0.015890` verified to the drop against a
+  live mainnet fill, bidds/Art Dept ship `None` = no button) additionally
+  carries `broker_rate`, `clearing_drops` and `clearing_xrp`, where
+  `clearing_drops = brokers.clearing_drops(ask, rate) = ceil(ask / (1 -
+  rate))` (+ optional `BROKER_CLEARING_BUFFER_DROPS`, default 0). The client's
+  "Buy now — X XRP via <marketplace>" is the EXISTING bid flow (`POST
+  /api/market/bid` at `price_xrp = clearing_xrp`) — no new session/endpoint;
+  `buyable` stays `false` and the 409 guard is unchanged. Settlement is the
+  broker's bot, so the bid status poll reports `fill` (`live` | `accepted` |
+  `cancelled` | `stale` | null, from the `buy_offers` index) and the UI never
+  claims success until `fill == accepted`; after ~5 min unfilled it says so
+  ("Still waiting on <marketplace>…"). One drop short never fills (silently);
+  any overshoot goes to the seller, never the broker. We earn only the
+  `offer_create`; the broker's accept carries its own SourceTag (#427).
 - `GET /api/market/mine` — authed; four groups: the caller's own live
   `listings` (both kinds), `unlisted_characters`, `unlisted_trait_tokens`, and
   loose `closet_assets`.

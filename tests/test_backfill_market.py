@@ -664,3 +664,89 @@ def test_rerun_idempotent_with_brix_rows_preserves_listener_timestamps(tmp_path)
     assert row["created_ts"] == 1_700_000_777
     assert row["amount_brix"] == "10"
     assert row["is_live"] == 1
+
+
+# --- #426: a row created DURING the sweep is not judged by this sweep --------
+
+
+def _fetch_buy_offers_map(mapping: dict[str, list[dict[str, Any]]]) -> Any:
+    async def fetch(nft_id: str) -> list[dict[str, Any]]:
+        return mapping.get(nft_id, [])
+
+    return fetch
+
+
+def _seed_live_bid(conn: sqlite3.Connection, offer_index: str, created_ts: int | None) -> None:
+    market_store.init_bid_schema(conn)
+    market_store.upsert_bid(
+        conn,
+        market_store.BuyOffer(
+            offer_index=offer_index,
+            nft_id=CHAR_NFT,
+            bidder="rBIDDERxxxxxxxxxxxxxxxxxxxxxxxxxxx",
+            amount_drops=5_000_000,
+            created_ts=created_ts,
+            is_live=1,
+        ),
+    )
+
+
+def test_bid_created_during_sweep_not_closed_stale(tmp_path):
+    # The listener indexes a bid the instant its create validates; the sweep
+    # may already have fetched that token's buy offers (before the bid
+    # landed), so the stale pass would otherwise retire a genuinely live bid
+    # — and the service's finalize write (preserve_closed) would then keep
+    # that false close. Rows whose created_ts falls inside this sweep's
+    # window are left for the next run to judge.
+    import time
+
+    conn = _conn(tmp_path)
+    _seed_character(conn, CHAR_NFT, owner=SELLER)
+    _seed_live_bid(conn, "BID_FRESH", created_ts=int(time.time()))
+    _seed_live_bid(conn, "BID_OLD", created_ts=int(time.time()) - 86_400)
+    _seed_live_bid(conn, "BID_UNDATED", created_ts=None)
+    fetch = _fetch_offers_map({CHAR_NFT: []})
+    fetch_bids = _fetch_buy_offers_map({CHAR_NFT: []})  # none on-ledger (yet)
+
+    stats = _run(bm.backfill_market(conn, fetch_offers=fetch, fetch_buy_offers=fetch_bids))
+
+    assert market_store.get_bid(conn, "BID_FRESH")["is_live"] == 1
+    assert market_store.get_bid(conn, "BID_OLD")["is_live"] == 0
+    assert market_store.get_bid(conn, "BID_OLD")["closed_reason"] == "stale"
+    assert (
+        market_store.get_bid(conn, "BID_UNDATED")["is_live"] == 0
+    )  # unknown age: judged as before
+    assert stats["bids_closed_stale"] == 2
+
+
+def test_listing_created_during_sweep_not_closed_stale(tmp_path):
+    # Same race, sell side (symmetric guard).
+    import time
+
+    conn = _conn(tmp_path)
+    _seed_character(conn, CHAR_NFT, owner=SELLER)
+    for idx, ts in (("OFF_FRESH", int(time.time())), ("OFF_OLD", int(time.time()) - 86_400)):
+        market_store.upsert_listing(
+            conn,
+            MarketListing(
+                offer_index=idx,
+                nft_id=CHAR_NFT,
+                kind="character",
+                seller=SELLER,
+                amount_drops=1_000_000,
+                created_ts=ts,
+                is_live=1,
+            ),
+        )
+    fetch = _fetch_offers_map({CHAR_NFT: []})
+
+    stats = _run(bm.backfill_market(conn, fetch_offers=fetch))
+
+    conn.row_factory = sqlite3.Row
+    fresh = conn.execute(
+        "SELECT is_live FROM market_listings WHERE offer_index='OFF_FRESH'"
+    ).fetchone()
+    old = conn.execute("SELECT is_live FROM market_listings WHERE offer_index='OFF_OLD'").fetchone()
+    assert fresh["is_live"] == 1
+    assert old["is_live"] == 0
+    assert stats["closed_stale"] == 1

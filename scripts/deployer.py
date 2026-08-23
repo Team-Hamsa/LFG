@@ -21,6 +21,7 @@ import time
 import urllib.request
 from collections.abc import Callable
 from dataclasses import dataclass
+from typing import Any
 
 HOME = "/home/hamsa"
 
@@ -134,18 +135,44 @@ def _default_fetcher(url: str) -> bytes:
         return resp.read()  # type: ignore[no-any-return]
 
 
+def health_body(
+    url: str,
+    fetcher: Callable[[str], bytes] | None = None,
+) -> dict[str, Any] | None:
+    """The parsed /api/health JSON, or None when unreachable/malformed
+    (fail-unknown). `active_sessions` must be an int for the body to count."""
+    fetcher = fetcher or _default_fetcher
+    try:
+        body = json.loads(fetcher(url))
+        if not isinstance(body, dict) or not isinstance(body.get("active_sessions"), int):
+            return None
+        return body
+    except Exception:
+        return None
+
+
 def active_sessions(
     url: str,
     fetcher: Callable[[str], bytes] | None = None,
 ) -> int | None:
     # -> int | None ; None means unreachable or malformed (fail-unknown).
-    fetcher = fetcher or _default_fetcher
-    try:
-        body = json.loads(fetcher(url))
-        n = body["active_sessions"]
-        return n if isinstance(n, int) else None
-    except Exception:
-        return None
+    body = health_body(url, fetcher=fetcher)
+    return None if body is None else int(body["active_sessions"])
+
+
+def describe_oldest_age(body: dict[str, Any]) -> str:
+    """' (oldest: <kind> <n>s)' for the kind with the oldest in-flight
+    session per the health body's `oldest_session_age` map (#424), or ''
+    when the service predates the field / nothing is in flight — so the
+    deployer log says WHY it is waiting."""
+    ages = body.get("oldest_session_age")
+    if not isinstance(ages, dict):
+        return ""
+    known = {k: v for k, v in ages.items() if isinstance(v, int) and not isinstance(v, bool)}
+    if not known:
+        return ""
+    kind, age = max(known.items(), key=lambda kv: kv[1])
+    return f" (oldest: {kind} {age}s)"
 
 
 def drain(
@@ -157,8 +184,8 @@ def drain(
     deadline = clock() + cfg.drain_max_wait
     first = True
     while True:
-        n = active_sessions(cfg.health_url, fetcher=fetcher)
-        if n is None:
+        body = health_body(cfg.health_url, fetcher=fetcher)
+        if body is None:
             if first:
                 # No prior successful probe to fall back on: fail fast.
                 log(f"{cfg.name}: /api/health unreachable on first probe")
@@ -166,17 +193,19 @@ def drain(
             # Mid-drain: a single transient blip shouldn't abort a prod
             # deploy — retry once immediately before giving up.
             log(f"{cfg.name}: /api/health unreachable mid-drain; retrying once")
-            n = active_sessions(cfg.health_url, fetcher=fetcher)
-            if n is None:
+            body = health_body(cfg.health_url, fetcher=fetcher)
+            if body is None:
                 log(f"{cfg.name}: /api/health still unreachable after retry")
                 return "unreachable"
         first = False
+        n = int(body["active_sessions"])
         if n == 0:
             return "drained"
+        why = describe_oldest_age(body)
         if clock() >= deadline:
-            log(f"{cfg.name}: {n} session(s) still in flight after {cfg.drain_max_wait}s")
+            log(f"{cfg.name}: {n} session(s) still in flight after {cfg.drain_max_wait}s{why}")
             return "timeout"
-        log(f"{cfg.name}: {n} in-flight session(s); waiting for drain…")
+        log(f"{cfg.name}: {n} in-flight session(s){why}; waiting for drain…")
         sleeper(cfg.drain_poll)
 
 

@@ -62,6 +62,14 @@ async def burn_nft(nft_id: str) -> bool:
             source_tag=SOURCE_TAG,
         )
 
+        # Pre-submit simulate pre-flight (#58): a deterministic engine result
+        # (e.g. tecNO_PERMISSION when the token moved) refuses for free instead
+        # of burning a fee. Runs on the UNSIGNED model, outside the lock.
+        rejected = await xrpl_ops.presubmit_simulate(burn_tx, client, "admin NFTokenBurn")
+        if rejected is not None:
+            logging.error(f"Burn of {nft_id} rejected by pre-submit simulate: {rejected}")
+            return False
+
         # Submit and wait for validation
         logging.info("Submitting burn transaction...")
         async with xrpl_ops.submission_coordinator(core_config.SIGNING_ACCOUNT):

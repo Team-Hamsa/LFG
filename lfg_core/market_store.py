@@ -384,12 +384,35 @@ def init_bid_schema(conn: sqlite3.Connection) -> None:
     conn.commit()
 
 
-def upsert_bid(conn: sqlite3.Connection, bid: BuyOffer) -> None:
+def upsert_bid(conn: sqlite3.Connection, bid: BuyOffer, *, preserve_closed: bool = False) -> None:
     """Insert or overwrite a bid row (keyed on offer_index) — listener and
     backfill writer, mirroring upsert_listing's semantics: created_* COALESCE
-    on conflict (only the listener knows them), everything else overwrites."""
+    on conflict (only the listener knows them), everything else overwrites.
+
+    preserve_closed=True (#426) is for the SERVICE's finalize write, which
+    races the listener: a broker's bot can accept the offer within seconds,
+    and the listener's close ('accepted') may land before the session's
+    first `done` poll. A full overwrite would resurrect that row to
+    is_live=1 and the fill watcher would report "still waiting" on an NFT
+    that already moved. With the flag, an existing CLOSED row keeps its
+    is_live/closed_reason whatever the reason: accepted/cancelled come from
+    the consuming tx and 'stale' from a validated tec accept whose meta
+    DELETED the offer (fixExpiredNFTokenOfferRemoval) — all ledger-derived,
+    and an NFTokenOffer index is never re-created on ledger, so a closed row
+    never legitimately comes back to life. The one NON-ledger 'stale' (the
+    nightly backfill's stale pass racing a bid created mid-sweep) is prevented
+    at its source: backfill_market leaves rows created inside its own sweep
+    window for the next run to judge."""
+    if preserve_closed:
+        live_sql = (
+            "is_live=CASE WHEN buy_offers.is_live=0 THEN 0 ELSE excluded.is_live END,\n"
+            "closed_reason=CASE WHEN buy_offers.is_live=0 THEN buy_offers.closed_reason "
+            "ELSE excluded.closed_reason END"
+        )
+    else:
+        live_sql = "is_live=excluded.is_live,\n            closed_reason=excluded.closed_reason"
     conn.execute(
-        """
+        f"""
         INSERT INTO buy_offers
             (offer_index, nft_id, bidder, amount_drops, expiration,
              created_ledger, created_ts, is_live, closed_reason)
@@ -401,8 +424,7 @@ def upsert_bid(conn: sqlite3.Connection, bid: BuyOffer) -> None:
             expiration=excluded.expiration,
             created_ledger=COALESCE(excluded.created_ledger, buy_offers.created_ledger),
             created_ts=COALESCE(excluded.created_ts, buy_offers.created_ts),
-            is_live=excluded.is_live,
-            closed_reason=excluded.closed_reason
+            {live_sql}
         """,
         (
             bid.offer_index,

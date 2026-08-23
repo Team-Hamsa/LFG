@@ -20,6 +20,10 @@ survives re-runs untouched.
 A per-token fetch FAILURE (RPC/network blip) is not "no offers": failed
 tokens are counted in the summary and their rows are excluded from the
 stale-close pass, so a transient error can never close a real live listing.
+Likewise a row CREATED DURING the sweep (created_ts inside this run's window,
+#426) is left for the next run: the listener may index an offer seconds after
+this sweep fetched its token, and the service's finalize write preserves a
+closed bid row, so a false 'stale' here would stick.
 
 Same posture/conventions as scripts/backfill_onchain.py: per-network
 onchain_<network>.db, idempotent re-run, --network testnet|mainnet.
@@ -38,6 +42,7 @@ import logging
 import os
 import sqlite3
 import sys
+import time
 from typing import Any
 
 REPO_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
@@ -109,6 +114,17 @@ def _matching_sell_offers(
     return matches
 
 
+# Wall-clock slack ahead of the sweep start inside which a row's created_ts
+# still counts as "during this sweep" (ledger close time vs. time.time()).
+SWEEP_WINDOW_SLACK_SECONDS = 60
+
+
+def _created_during_sweep(created_ts: Any, sweep_started: int) -> bool:
+    """True when a live row's created_ts (unix, listener-stamped from the tx)
+    falls inside this run's window. NULL (age unknown) is judged as before."""
+    return isinstance(created_ts, int) and created_ts >= sweep_started
+
+
 async def _fetch_buy_offers_strict(nft_id: str) -> list[dict[str, Any]]:
     """#283: strict buy-offer fetch — same raise-on-error contract as
     _fetch_offers_strict, buy side."""
@@ -129,6 +145,10 @@ async def backfill_market(
     stale-close pass this run)."""
     market_store.init_db(conn)
     conn.row_factory = sqlite3.Row
+    # #426: rows created at/after this instant (ledger close time is within
+    # seconds of wall clock; the slack absorbs that) may post-date the fetch
+    # of their token's offers, so the stale passes below leave them alone.
+    sweep_started = int(time.time()) - SWEEP_WINDOW_SLACK_SECONDS
 
     characters = conn.execute(
         "SELECT nft_id, owner FROM onchain_nfts WHERE is_burned = 0"
@@ -190,12 +210,14 @@ async def backfill_market(
     valid_offer_indexes = {idx for group in results for idx in group}
 
     previously_live = conn.execute(
-        "SELECT offer_index, nft_id FROM market_listings WHERE is_live = 1"
+        "SELECT offer_index, nft_id, created_ts FROM market_listings WHERE is_live = 1"
     ).fetchall()
     closed = 0
     for row in previously_live:
         if row["nft_id"] in failed_nft_ids:
             continue  # token not successfully swept; can't judge its offers
+        if _created_during_sweep(row["created_ts"], sweep_started):
+            continue  # may post-date the fetch; next run judges it
         if row["offer_index"] not in valid_offer_indexes:
             market_store.close_listing(conn, row["offer_index"], "stale")
             closed += 1
@@ -250,11 +272,13 @@ async def backfill_market(
     bid_results = await asyncio.gather(*[sweep_bids(row["nft_id"]) for row in characters])
     valid_bid_indexes = {idx for group in bid_results for idx in group}
     previously_live_bids = conn.execute(
-        "SELECT offer_index, nft_id FROM buy_offers WHERE is_live = 1"
+        "SELECT offer_index, nft_id, created_ts FROM buy_offers WHERE is_live = 1"
     ).fetchall()
     bids_closed = 0
     for row in previously_live_bids:
         if row["nft_id"] in bid_failed_nft_ids:
+            continue
+        if _created_during_sweep(row["created_ts"], sweep_started):
             continue
         if row["offer_index"] not in valid_bid_indexes:
             market_store.close_bid(conn, row["offer_index"], "stale")

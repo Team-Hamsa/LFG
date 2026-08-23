@@ -31,6 +31,7 @@ sys.path.insert(0, os.path.join(REPO, "scripts"))
         "economy_extract",
         "economy_deposit",
         "reconcile_supply_growth",
+        "reconcile_closet_tokens",
     ],
 )
 def test_cli_driver_exposes_main(mod_name):

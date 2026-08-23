@@ -153,6 +153,26 @@ def _entries(
     return entries
 
 
+def assert_valid_values(decoded: dict[str, str]) -> None:
+    """Raise ValueError unless a DECODED memo dict's values are in the closed
+    enums — the inverse check to `_entries`, for provenance read back off a
+    built (or returned) transaction rather than built from constants.
+
+    Needed because a payload can be stamped correctly and still arrive at a
+    signer altered: a WalletConnect provider relays txjson through the user's
+    browser (#399), so what the wallet signs is not necessarily what we built.
+    """
+    if decoded.get("initiator") not in _INITIATORS:
+        raise ValueError(f"unknown memo initiator: {decoded.get('initiator')!r}")
+    if decoded.get("platform") not in _PLATFORMS:
+        raise ValueError(f"unknown memo platform: {decoded.get('platform')!r}")
+    if decoded.get("action") not in _ACTIONS:
+        raise ValueError(f"unknown memo action: {decoded.get('action')!r}")
+    campaign = decoded.get("campaign")
+    if campaign is not None and not _CAMPAIGN_RE.match(campaign):
+        raise ValueError(f"unsafe campaign tag {campaign!r}")
+
+
 def _assert_within_budget(pairs: list[tuple[str, str]]) -> None:
     total = 0
     for key, value in pairs:

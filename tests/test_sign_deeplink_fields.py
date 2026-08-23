@@ -23,7 +23,7 @@ os.environ.setdefault("BUNNY_PULL_ZONE", "nft.pullzone.example")
 
 import asyncio  # noqa: E402
 
-from lfg_core import market_flow, mint_flow, shop_flow, swap_flow, xumm_ops  # noqa: E402
+from lfg_core import market_flow, memos, mint_flow, shop_flow, swap_flow, xumm_ops  # noqa: E402
 
 
 def _run(coro):
@@ -52,7 +52,17 @@ def test_post_xumm_payload_surfaces_deeplink(monkeypatch):
         return _CreateResp()
 
     monkeypatch.setattr(xumm_ops.requests, "post", fake_post)
-    result = _run(xumm_ops._create_xumm_payload({"TransactionType": "Payment"}))
+    # A real (non-SignIn) transaction must carry provenance memos (#54/#399) —
+    # every production builder supplies them, and _create_xumm_payload now
+    # refuses one that does not.
+    result = _run(
+        xumm_ops._create_xumm_payload(
+            {"TransactionType": "Payment"},
+            memos_json=memos.build_memos_json(
+                memos.INITIATOR_USER, memos.PLATFORM_WEBAPP, memos.ACTION_PAYMENT
+            ),
+        )
+    )
     assert result is not None
     assert result["xumm_url"] == "https://xumm.app/sign/u"
     assert result["qr_url"]  # QR stays alongside, never replaced

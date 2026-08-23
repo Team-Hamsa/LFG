@@ -260,3 +260,40 @@ def test_browse_character_rows_carry_video_field(market):
     assert all("video" in r for r in rows)
     assert any(r["video"] for r in rows), "seed at least one animated character listing"
     assert any(r["video"] is None for r in rows), "keep static rows too"
+
+
+def _poll_done(market, sid):
+    s = market.status(sid)
+    for _ in range(10):
+        if s["state"] == "done":
+            break
+        s = market.status(sid)
+    assert s["state"] == "done"
+    return s
+
+
+def _place_bid(market):
+    econ = mock_economy.INSTANCE
+    nft_id = econ.characters[0]["nft_id"]
+    bidder = "rBIDDERmockwalletxxxxxxxxxxxxxxxxx"
+    s = market.start_bid(bidder, nft_id, 5_000_000)
+    s = _poll_done(market, s["id"])
+    assert s["offer_index"]
+    assert s["fill"] == "live"
+    return s, bidder
+
+
+def test_bid_fill_reports_accepted_after_owner_accepts(market):
+    # Mirrors production: close_bid(reason='accepted') surfaces as fill='accepted',
+    # not a generic 'closed' (which the UI renders as an unsuccessful terminal).
+    placed, _bidder = _place_bid(market)
+    acc = market.start_bid_accept(mock_market.DEV_OWNER, placed["offer_index"])
+    _poll_done(market, acc["id"])
+    assert market.status(placed["id"])["fill"] == "accepted"
+
+
+def test_bid_fill_reports_cancelled_after_bidder_cancels(market):
+    placed, bidder = _place_bid(market)
+    can = market.start_cancel(bidder, placed["offer_index"])
+    _poll_done(market, can["id"])
+    assert market.status(placed["id"])["fill"] == "cancelled"

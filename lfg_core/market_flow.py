@@ -272,6 +272,10 @@ class BidSession:
     push: str | None = None
     issued_user_token: str | None = field(default=None, repr=False)
     kind: str = "bid"
+    # #426: post-DONE index state of the placed buy offer — "live" |
+    # "accepted" | "cancelled" | "stale" | None (not indexed yet). Stamped by
+    # the service's status handler, read by the external Buy-now watcher.
+    fill: str | None = None
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -285,6 +289,7 @@ class BidSession:
             "push": self.push,
             "offer_index": self.offer_index,
             "reason": self.reason,
+            "fill": self.fill,
         }
 
 
