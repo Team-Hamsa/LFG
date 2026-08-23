@@ -18,6 +18,7 @@ from PIL import Image
 from xrpl.utils import xrp_to_drops
 
 from lfg_core import config, memos
+from lfg_core.signing import provenance
 
 _XUMM_HEADERS = {
     "accept": "application/json",
@@ -244,11 +245,14 @@ async def _create_xumm_payload(
     # Make Waves hackathon: every signed transaction must carry the source tag,
     # and provenance memos (#54). SignIn is a pseudo-transaction (no ledger
     # effect), so it is exempt from both.
+    #
+    # Stamping moved to lfg_core.signing.provenance (#399) so a second signing
+    # provider cannot reimplement it slightly differently. Same `setdefault`
+    # semantics as before — a caller that pre-set either field still wins — but
+    # the result is now VALIDATED, so a payload that reaches XUMM without our
+    # SourceTag raises instead of quietly costing hackathon volume credit.
     txtype = txjson.get("TransactionType")
-    if txtype != "SignIn":
-        txjson.setdefault("SourceTag", config.SOURCE_TAG)
-        if memos_json:
-            txjson.setdefault("Memos", memos_json)
+    provenance.stamp_and_validate(txjson, memos_json)
     payload: dict[str, Any] = {"txjson": txjson}
     if options:
         payload["options"] = options
