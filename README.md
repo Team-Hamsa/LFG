@@ -333,8 +333,11 @@ and cancel offers, send XRP and issued currency, set trust lines. What the
 split does give you is that the credential on the deploy box is *rotatable
 without moving the collection*: a box compromise is answered with a
 `SetRegularKey`, not by re-issuing 3,500+ NFTs under a new issuer. Losing it is
-an incident, not an inconvenience. Full setup and rotation procedure:
-[`docs/runbooks/mainnet-mvp-launch.md`](docs/runbooks/mainnet-mvp-launch.md).
+an incident, not an inconvenience — and note there is **no written rotation
+runbook yet**: the linked document covers the original `SEED`/`SIGNING_ACCOUNT`
+cutover, not the on-ledger `SetRegularKey` you would need during one. Cutover
+procedure: [`docs/runbooks/mainnet-mvp-launch.md`](docs/runbooks/mainnet-mvp-launch.md)
+("Blocker 1 — Regular-key signing").
 
 The Discord Activity additionally needs:
 
