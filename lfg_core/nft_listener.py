@@ -225,6 +225,14 @@ def _apply_possible_growth(
     edition = swap_meta.extract_nft_number(str(metadata.get("name", "")))
     if edition is None or edition in genesis.edition_bodies:
         return
+    # A BLANK mint of an edition the supply ledger already knows is the legacy
+    # flag-24 harvest upgrade reminting the edition it just burned: its own
+    # burn row popped the edition from the effective genesis moments ago, and
+    # the flow writes the matching mint row itself (with the harvested traits,
+    # which this blank metadata cannot tell us). Recording growth here double-
+    # counts the edition as +8 None — 37 such rows on mainnet, 2026-08-22.
+    if economy_store.supply_change_exists_for_edition(conn, edition) and _attrs_are_blank(attrs):
+        return
     deltas = {
         f"{slot}|{swap_meta.get_attr(attrs, slot) or 'None'}": 1
         for slot in trait_economy.NON_BODY_SLOTS
@@ -239,6 +247,12 @@ def _apply_possible_growth(
         "listener",
         f"new-edition mint {token['nft_id']}",
     )
+
+
+def _attrs_are_blank(attrs: list[dict[str, str]]) -> bool:
+    """Every TRAIT_ORDER slot explicitly present with value "None" (the shape
+    `trait_economy.blank_attributes()` writes)."""
+    return all(swap_meta.get_attr(attrs, slot) == "None" for slot in swap_meta.TRAIT_ORDER)
 
 
 def _record_burn_shrinkage(
