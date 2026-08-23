@@ -194,19 +194,34 @@ def test_unknown_code_has_a_generic_message():
     assert v["retryable"] is False
 
 
-def test_non_retryable_errors_carry_a_button_lock_label():
-    """A non-retryable error must keep the button OFF after the card reloads —
-    the refreshed status still shows a positive balance, which would otherwise
-    re-enable "Claim N BRIX" right under a toast saying don't retry."""
-    for code in ("claims_disabled", "trustline_required", "claim_unconfirmed", "something_new"):
+def test_server_side_preconditions_carry_a_button_lock_label():
+    """claims_disabled / trustline_required must keep the button OFF after the
+    card reloads — the refreshed status still shows a positive balance (the
+    server cannot express either condition in GET /api/brix), which would
+    otherwise re-enable "Claim N BRIX" right under a toast saying don't retry."""
+    for code in ("claims_disabled", "trustline_required"):
         v = err(code)
         assert v["retryable"] is False, code
+        assert v["refresh"] is False, code
         assert isinstance(v["lockLabel"], str) and v["lockLabel"], code
 
 
-def test_retryable_error_has_no_lock_label():
-    v = err("claim_unavailable")
-    assert v["lockLabel"] is None
+def test_refresh_codes_never_lock():
+    """Codes whose truth is in the refreshed status must NOT pin the button:
+    claim_in_flight / nothing_to_claim / claim_unconfirmed are all resolved by
+    the next GET /api/brix (an open claim disables + polls; a balance that
+    comes back after a concurrent claim fails must be claimable again without
+    leaving the home screen). Greptile P1 #2 on PR #434."""
+    for code in (
+        "claim_in_flight",
+        "nothing_to_claim",
+        "claim_unconfirmed",
+        "something_new",
+        "claim_unavailable",
+    ):
+        v = err(code)
+        assert v["lockLabel"] is None, code
+        assert v["refresh"] is True, code
 
 
 # ---------------------------------------------------------------------------

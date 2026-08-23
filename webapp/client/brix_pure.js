@@ -76,13 +76,18 @@ export function brixCardView(status) {
 //               the server bound nothing, so a retry cannot double-claim.
 //   refresh   — re-fetch GET /api/brix; the client's picture is stale.
 //   trustline — the user needs a BRIX trustline before this can work.
-//   lockLabel — non-null iff !retryable: the button label to pin, disabled,
-//               until the next home landing. A refreshed status still shows
-//               the positive balance, which would otherwise re-enable
-//               "Claim N BRIX" right under a toast saying not to retry.
+//   lockLabel — non-null ONLY for the server-side preconditions GET /api/brix
+//               cannot express (claims_disabled, trustline_required): the
+//               button label to pin, disabled, until the next home landing,
+//               since the refreshed status still shows the positive balance
+//               and would otherwise re-enable "Claim N BRIX" right under a
+//               toast saying not to retry. Every `refresh` code is null — its
+//               truth IS the refreshed status (an open claim disables + polls;
+//               a balance restored by a concurrent claim failing must become
+//               claimable again without leaving the home screen).
 export function claimErrorView(code) {
   const v = claimErrorBase(code);
-  v.lockLabel = v.retryable ? null : v.lockLabel || 'Claim unavailable';
+  if (!('lockLabel' in v)) v.lockLabel = null;
   return v;
 }
 
@@ -138,7 +143,6 @@ function claimErrorBase(code) {
         retryable: false,
         refresh: true,
         trustline: false,
-        lockLabel: 'Claim settling…',
       };
     default:
       return {

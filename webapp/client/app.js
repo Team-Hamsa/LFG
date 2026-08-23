@@ -35,7 +35,7 @@ import * as signDeliveryPure from './signdelivery_pure.js?v=1';
 // Daily BRIX drip card (#48): what the card renders and how each claim error
 // code is handled are pure decisions, Node-testable (tests/test_brix_pure_js.py);
 // loadBrix()/claimBrix() below are the glue.
-import * as brixPure from './brix_pure.js?v=2';
+import * as brixPure from './brix_pure.js?v=3';
 
 const params = new URLSearchParams(window.location.search);
 const insideDiscord = params.has('frame_id');
@@ -882,9 +882,11 @@ const BRIX_POLL_MAX = 20;
 let brixPollTimer = null;
 let brixPollGen = 0; // bumps on every poll start, invalidating in-flight ticks
 let brixClaiming = false;
-// Set from claimErrorView().lockLabel after a NON-retryable claim error; pins
-// the button disabled across loadBrix() reloads (the refreshed balance is still
-// positive) until the next home landing clears it. Greptile P1 on PR #434.
+// Set from claimErrorView().lockLabel after claims_disabled/trustline_required
+// — preconditions GET /api/brix cannot express, so the post-error reload would
+// otherwise re-arm the button on the still-positive balance. Pins the button
+// disabled until the next home landing clears it. Every other code leaves it
+// null: the refreshed status is the truth there. Greptile P1s on PR #434.
 let brixLock = null;
 
 function stopBrixPoll() {
@@ -1001,8 +1003,10 @@ async function claimBrix() {
     const code = (e.body && e.body.code) || '';
     // claimErrorView is the single place that decides whether a code may be
     // retried — notably claim_unconfirmed may NOT be, since the server left
-    // the accruals bound to a payout that may well have landed. A non-retryable
-    // code pins the button (lockLabel) so the reload below cannot re-arm it.
+    // the accruals bound to a payout that may well have landed (the reload
+    // below then sees the open claim and polls it). claims_disabled /
+    // trustline_required pin the button (lockLabel) so the reload cannot
+    // re-arm it on a balance the server refuses to pay.
     const ev = brixPure.claimErrorView(code);
     toast(ev.message);
     if (ev.lockLabel) brixLock = ev.lockLabel;
