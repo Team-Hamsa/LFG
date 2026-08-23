@@ -166,7 +166,7 @@ def ensure_closet_token_uniqueness(conn: sqlite3.Connection) -> None:
     cannot take the index, and refusing to open it would wedge the listener on
     exactly the deployments that need to keep running. Warn instead, leave the
     index off, and let `scripts/audit_trait_economy.py` flag it and
-    `scripts/reconcile_closet_owners.py --apply` repair it; the next open then
+    `scripts/reconcile_closet_tokens.py --apply` repair it; the next open then
     creates the index. The write-site guard (`_reject_project_account`) blocks
     recurrence meanwhile."""
     try:
@@ -180,7 +180,8 @@ def ensure_closet_token_uniqueness(conn: sqlite3.Connection) -> None:
             "idx_closet_tokens_nft_id not created: closet_tokens already holds one "
             "nft_id under more than one owner (#383). Run "
             "scripts/audit_trait_economy.py to see them and "
-            "scripts/reconcile_closet_owners.py --apply to repair."
+            "scripts/reconcile_closet_tokens.py --apply to repair "
+            "(runbook: docs/ops/closet-token-reconcile.md)."
         )
 
 

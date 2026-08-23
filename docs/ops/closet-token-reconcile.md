@@ -27,8 +27,9 @@ Three things changed with #383:
    `set_closet_contents` raise `ClosetOwnerError` for a project account.
 3. **The database refuses it.** A `UNIQUE` index on `closet_tokens(nft_id)` is
    created on schema init. A database that *already* carries a duplicate cannot
-   take the index — it is skipped with a `WARNING` naming this runbook, and
-   created by step 4 below once the duplicate is gone.
+   take the index — it is skipped with a `WARNING` naming the audit, the
+   reconciler, and this runbook, and the index is created by step 4 below once
+   the duplicate is gone.
 
 `scripts/backfill_economy.py` also scrubs project-account rows as a side effect,
 so **any recent backfill run will already have cleaned this up**. On mainnet a
