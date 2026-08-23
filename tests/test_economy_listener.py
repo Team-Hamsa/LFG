@@ -164,9 +164,16 @@ def test_closet_accept_marks_active():
     assert record[2] == bt.ACTIVE
 
 
-def test_closet_mint_marks_pending():
-    """An NFTokenMint of a CLOSET_TAXON token owned by the issuer should record
-    status == PENDING_ACCEPT (the token hasn't been transferred to the user yet)."""
+def test_closet_mint_records_nothing_for_the_issuer():
+    """An NFTokenMint of a CLOSET_TAXON token is issuer-held until the user
+    accepts, so the listener's owner-of-record is the ISSUER — not the user the
+    offer targets, whom this snapshot cannot identify.
+
+    This test used to assert the opposite (that a PENDING_ACCEPT row was written
+    under the issuer). That row was the #383 bug: it shadowed the real user's
+    row, pointing at the same token. `ensure_closet` already recorded the
+    pending Closet under the real owner before the mint was ever streamed, so
+    there is nothing here for the listener to add."""
     conn = _conn()
     meta = bt.build_closet_metadata(config.SWAP_ISSUER_ADDRESS, [], [])
 
@@ -195,9 +202,7 @@ def test_closet_mint_marks_pending():
             genesis=te.Genesis(trait_counts={}, edition_bodies={}),
         )
     )
-    record = es.get_closet_record(conn, config.SWAP_ISSUER_ADDRESS)
-    assert record is not None
-    assert record[2] == bt.PENDING_ACCEPT
+    assert es.get_closet_record(conn, config.SWAP_ISSUER_ADDRESS) is None
 
 
 def test_closet_listener_preserves_offer_id():
