@@ -779,6 +779,124 @@ async def disallows_incoming_nft_offers(address: str) -> bool | None:
     return None
 
 
+@dataclass(frozen=True)
+class DestinationPreflight:
+    """One `account_info` snapshot of a mint recipient, answering the three
+    ways delivery can be impossible (#388, #408).
+
+    Every field keeps the three-way contract `account_exists` established:
+    True/False are DEFINITIVE, None means the lookup could not say. Callers
+    must act only on the definitive values — a None that refuses would let an
+    RPC blip take minting down.
+    """
+
+    exists: bool | None
+    blocks_nft_offers: bool | None
+    balance_drops: int | None
+    owner_count: int | None
+
+    @property
+    def resolved(self) -> bool:
+        """True when the ledger answered at all (definitively present or
+        definitively absent), so a caller can distinguish 'we know' from 'the
+        lookup failed'."""
+        return self.exists is not None
+
+    @property
+    def reserve_short(self) -> bool:
+        """See `reserve_short_for_first_nft`."""
+        return reserve_short_for_first_nft(self.balance_drops, self.owner_count)
+
+
+def reserve_short_for_first_nft(
+    balance_drops: int | None,
+    owner_count: int | None,
+    reserve_base_drops: int | None = None,
+    reserve_inc_drops: int | None = None,
+) -> bool:
+    """Can this account provably NOT afford the owner reserve for an incoming
+    NFToken? Deliberately answers True only when there is NO ambiguity.
+
+    NFTokens live in `NFTokenPage` objects holding up to 32 tokens each, and
+    only the PAGE costs an owner reserve. So:
+
+      * `owner_count == 0` — the account owns nothing, so receiving an NFT must
+        create its first page. It needs `base + inc` (1.2 XRP on mainnet), full
+        stop. This is the case the pre-flight exists for: a brand-new wallet is
+        the ideal free-mint candidate by construction, and #408's stuck claim
+        (rMuseum…, Balance 999892 drops, OwnerCount 0) sat below even the base
+        reserve.
+      * `owner_count > 0` — the account may already have a page with room, in
+        which case the NFT costs no additional reserve. `account_info` cannot
+        tell us which, so we ABSTAIN rather than refuse a holder who is merely
+        within 0.2 XRP of their floor. False negatives here are cheap: the
+        offer is still created, and the user simply funds before accepting.
+
+    Unknown inputs abstain too — never refuse on a lookup that did not answer.
+
+    Note this is about ACCEPTANCE, not offer creation: `NFTokenCreateOffer`
+    with a `Destination` does not require the destination to hold reserve. It
+    is the recipient's `NFTokenAcceptOffer` that fails. So this check prevents
+    "offer created, user can never claim it", which is a quieter failure than
+    the tecNO_DST / tecNO_PERMISSION the other two checks catch.
+    """
+    if balance_drops is None or owner_count is None:
+        return False
+    if owner_count > 0:
+        return False
+    base = config.XRPL_RESERVE_BASE_DROPS if reserve_base_drops is None else reserve_base_drops
+    inc = config.XRPL_RESERVE_INC_DROPS if reserve_inc_drops is None else reserve_inc_drops
+    return balance_drops < base + inc
+
+
+async def destination_preflight(address: str) -> DestinationPreflight:
+    """Everything a single `account_info` can tell us about whether `address`
+    can take delivery of an NFT.
+
+    One round-trip on purpose. `account_exists` and `disallows_incoming_nft_offers`
+    each issue their own request; calling both from a latency-sensitive mint
+    handler would double the cost for the same data. Those two are left exactly
+    as they are — the startup recovery sweep depends on them and must not
+    regress — so this is a third helper, not a refactor of them.
+    """
+    try:
+        client = AsyncJsonRpcClient(config.JSON_RPC_URL)
+        response = await client.request(AccountInfo(account=address, ledger_index="validated"))
+    except Exception as e:
+        logging.warning(f"destination_preflight({address}) lookup failed: {e}")
+        return DestinationPreflight(None, None, None, None)
+
+    if not response.is_successful():
+        error = response.result.get("error")
+        if error == "actNotFound":
+            # Definitively absent. NFTokenCreateOffer naming it as Destination
+            # can only ever return tecNO_DST.
+            return DestinationPreflight(False, None, None, None)
+        logging.warning(f"destination_preflight({address}) inconclusive: {error}")
+        return DestinationPreflight(None, None, None, None)
+
+    data = response.result.get("account_data", {})
+    flags = response.result.get("account_flags")
+    if isinstance(flags, dict) and "disallowIncomingNFTokenOffer" in flags:
+        blocks: bool | None = bool(flags["disallowIncomingNFTokenOffer"])
+    else:
+        # Older rippled builds omit the decoded account_flags object; fall back
+        # to the raw bit (lsfDisallowIncomingNFTokenOffer = 0x04000000).
+        raw = data.get("Flags")
+        blocks = bool(raw & 0x04000000) if isinstance(raw, int) else None
+
+    balance = data.get("Balance")
+    try:
+        balance_drops: int | None = int(balance)
+    except (TypeError, ValueError):
+        balance_drops = None
+    owner_count = data.get("OwnerCount")
+    if not isinstance(owner_count, int):
+        owner_count = None
+
+    return DestinationPreflight(True, blocks, balance_drops, owner_count)
+
+
 async def create_nft_offer(
     nft_id: str,
     destination: str,

@@ -4445,6 +4445,51 @@ async def _await_mint_admission_thread(
         raise
 
 
+# How long the destination pre-flight may take before the mint proceeds without
+# it. One account_info against the configured JSON-RPC endpoint; a slow ledger
+# must delay a mint, never fail one.
+_PREFLIGHT_TIMEOUT_SECONDS = 5
+
+# Destination pre-flight refusals (#388, #408). Each names the ledger fact that
+# makes delivery impossible and the single thing the user can do about it. These
+# strings reach every surface: the web client keys off `code`, and Discord and
+# Telegram render `error` verbatim through `friendly_error`.
+_PREFLIGHT_REFUSALS: dict[str, str] = {
+    "wallet_unfunded": (
+        "Your wallet isn't activated on the XRP Ledger yet, so an NFT can't be sent to "
+        "it. Fund it with at least 1.2 XRP (1 XRP account reserve + 0.2 XRP to hold an "
+        "NFT), then try again."
+    ),
+    "wallet_blocks_nft_offers": (
+        "Your wallet is set to refuse incoming NFT offers, so the ledger will reject "
+        "the delivery. Turn off \u201cDisallow incoming NFT offers\u201d in your Xaman "
+        "account settings, then try again."
+    ),
+    "wallet_reserve_short": (
+        "Your wallet doesn't hold enough XRP to keep an NFT. Top it up to at least "
+        "1.2 XRP (1 XRP account reserve + 0.2 XRP to hold an NFT), then try again."
+    ),
+}
+
+
+def _preflight_refusal(preflight: xrpl_ops.DestinationPreflight) -> str | None:
+    """The refusal code for a destination that provably cannot take delivery,
+    or None to proceed.
+
+    Only DEFINITIVE ledger facts refuse. An unresolved lookup returns None here
+    on purpose: blocking every mint on an `account_info` blip would be a worse
+    outage than the failure being prevented. The sponsored path treats the same
+    unresolved case as fail-closed separately, where nothing is at stake but a
+    campaign slot."""
+    if preflight.exists is False:
+        return "wallet_unfunded"
+    if preflight.blocks_nft_offers is True:
+        return "wallet_blocks_nft_offers"
+    if preflight.reserve_short:
+        return "wallet_reserve_short"
+    return None
+
+
 @require_wallet
 async def handle_mint_start(request):
     user = request["user"]
@@ -4510,11 +4555,65 @@ async def handle_mint_start(request):
         # cancelled session (#226 review).
         mint_flow.settle_headroom(session)
         return web.json_response(session.to_dict())
+    # Destination pre-flight (#388, #408). Both mint paths end in an
+    # NFTokenCreateOffer to this wallet, so a wallet that provably cannot take
+    # delivery is refused HERE — before a campaign slot is consumed, before the
+    # sponsorship LFGO is burned, and before a paying user is charged. Ordering
+    # matters: the LFGO burn debt row is committed inside
+    # record_minted_and_enqueue_burn and drained by a 1s worker, so it can and
+    # does land before the offer is even attempted. No reordering downstream
+    # can prevent the spend; only refusing up here can.
+    #
+    # Bounded, and a timeout is NOT a refusal: an unresolved pre-flight falls
+    # through to the paid path exactly as before this check existed.
+    try:
+        preflight = await asyncio.wait_for(
+            xrpl_ops.destination_preflight(session.wallet_address),
+            timeout=_PREFLIGHT_TIMEOUT_SECONDS,
+        )
+    except asyncio.CancelledError:
+        _cleanup_cancelled_mint_admission(session)
+        raise
+    except Exception as e:
+        logging.warning(f"destination pre-flight failed for mint session {session.id}: {e}")
+        preflight = xrpl_ops.DestinationPreflight(None, None, None, None)
+    if session.state != mint_flow.AWAITING_PAYMENT:
+        # A cancel landed DURING the pre-flight await. That window did not
+        # exist before this check was added — the guard above the await used to
+        # be the last one before a state transition — so re-check it here and
+        # report the session's real terminal state. Returning a wallet refusal
+        # for a mint nobody is waiting on would tell the client the wrong
+        # thing, and the refusal branch below would settle headroom without
+        # ever surfacing the cancellation. Mirrors the identical guard above.
+        mint_flow.settle_headroom(session)
+        return web.json_response(session.to_dict())
+    refusal = _preflight_refusal(preflight)
+    if refusal is not None:
+        if session.state == mint_flow.AWAITING_PAYMENT:
+            session.state = mint_flow.FAILED
+            session.error = refusal
+        mint_flow.settle_headroom(session)
+        session.mark_published()  # a deliberate refusal, not a pipeline failure
+        return web.json_response(
+            {"error": _PREFLIGHT_REFUSALS[refusal], "code": refusal}, status=409
+        )
     # Do not expose free pricing until the wallet+session claim transaction
     # commits. Every non-admission result, including archive/store failure,
     # falls through to the existing paid preparation path below.
     reservation = None
-    if _sponsored_recovery_ready:
+    if _sponsored_recovery_ready and not preflight.resolved:
+        # Fail closed for SPONSORSHIP only. #408 asks that an unavailable
+        # account_info never silently admit a wallet; #388 asks that an RPC blip
+        # never refuse outright. Both hold if the unresolved case declines the
+        # free mint (costing the user nothing but a campaign slot they can
+        # retry for) and falls through to the paid path, which is exactly what
+        # happens today for every other non-admission result.
+        logging.warning(
+            "sponsored admission declined for mint session %s: destination pre-flight "
+            "unresolved (eligibility_unavailable); using paid path",
+            session.id,
+        )
+    elif _sponsored_recovery_ready:
         try:
             orphan = await asyncio.to_thread(
                 sponsored_mint.reversible_reservation_for_wallet,

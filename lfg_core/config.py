@@ -139,6 +139,26 @@ if MAX_COLLECTION_SIZE < 1:
 if BULK_MINT_MAX < 1:
     raise ValueError(f"BULK_MINT_MAX must be >= 1, got {BULK_MINT_MAX}")
 
+# XRPL account reserves, in drops (#388/#408). Used by the destination
+# pre-flight to refuse a mint whose recipient provably cannot hold the NFT.
+# Constants rather than a per-mint `server_state` round-trip: these change only
+# by amendment/validator vote, which is an ops edit, not a hot-path lookup.
+# Live mainnet values as of 2026-08-23 (rippled 3.3.0): 1 XRP base, 0.2 XRP per
+# owned object. Verify with:
+#   curl -s -X POST https://s1.ripple.com:51234/ -H 'Content-Type: application/json' \
+#     -d '{"method":"server_state"}' | jq '.result.state.validated_ledger
+#       | {reserve_base, reserve_inc}'
+XRPL_RESERVE_BASE_DROPS_DEFAULT = 1_000_000
+XRPL_RESERVE_INC_DROPS_DEFAULT = 200_000
+XRPL_RESERVE_BASE_DROPS = int(
+    os.getenv("XRPL_RESERVE_BASE_DROPS", str(XRPL_RESERVE_BASE_DROPS_DEFAULT))
+)
+XRPL_RESERVE_INC_DROPS = int(
+    os.getenv("XRPL_RESERVE_INC_DROPS", str(XRPL_RESERVE_INC_DROPS_DEFAULT))
+)
+if XRPL_RESERVE_BASE_DROPS < 0 or XRPL_RESERVE_INC_DROPS < 0:
+    raise ValueError("XRPL_RESERVE_*_DROPS must be >= 0")
+
 # Bulk mint UI flag (#215 follow-up): gates the Activity's quantity stepper /
 # bulk flow client-side via /api/config. Server bulk endpoints stay live
 # regardless (they're quantity-capped and auth'd on their own). Off by

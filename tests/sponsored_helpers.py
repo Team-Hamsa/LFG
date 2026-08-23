@@ -6,7 +6,7 @@ import hashlib
 import json
 from typing import Any
 
-from lfg_core import config, history_store, sponsored_mint
+from lfg_core import config, history_store, sponsored_mint, xrpl_ops
 
 # Fixture ledger ranges must sit above the real earliest-available ledger (32570).
 L0 = history_store.EARLIEST_AVAILABLE_LEDGER
@@ -101,3 +101,23 @@ def prepare_and_forward(
         tx_hash=identity,
         now=now,
     )
+
+
+def stub_clean_preflight(monkeypatch: Any, server: Any) -> None:
+    """Make the destination pre-flight (#388/#408) report a healthy, funded,
+    offer-accepting wallet.
+
+    Every handle_mint_start test needs this: the real helper issues an
+    `account_info` and, finding no ledger to ask, would report UNRESOLVED —
+    which correctly declines sponsorship and would silently turn every
+    sponsored-admission test into a paid-path test. Deliberately not gated on
+    WEBAPP_DEV_MODE: a delivery precondition must run in staging exactly as it
+    runs in production.
+    """
+
+    async def _clean(_wallet: str) -> xrpl_ops.DestinationPreflight:
+        return xrpl_ops.DestinationPreflight(
+            exists=True, blocks_nft_offers=False, balance_drops=50_000_000, owner_count=1
+        )
+
+    monkeypatch.setattr(server.xrpl_ops, "destination_preflight", _clean)
