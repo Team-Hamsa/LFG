@@ -312,6 +312,33 @@ BUNNY_CDN_ACCESS_KEY=...
 BUNNY_CDN_STORAGE_ZONE=...
 ```
 
+**What `SEED` actually is on mainnet.** The collection issuer
+(`rLfgoMint…`) never signs with its own master key. `SEED` holds the issuer's
+**regular-key** seed and `SIGNING_ACCOUNT` names the account those transactions
+are submitted *for* — every backend builder in `lfg_core/xrpl_ops.py` signs
+with `Wallet.from_seed(SEED)` but sets `Account = SIGNING_ACCOUNT`. Without
+that override `Wallet.from_seed` would derive the regular key pair's *own*
+address and every issuer operation would sign for the wrong account. Leave
+`SIGNING_ACCOUNT` unset on testnet, where the seed *is* the issuer.
+
+```plaintext
+SIGNING_ACCOUNT=rLfgoMint...  # mainnet only: the account backend txs are submitted for
+```
+
+Be clear-eyed about what this does and does not buy. The issuer account has
+`disableMasterKey` set and no signer list, so **the regular key is the
+account's only signing authority** — there is no offline master key held in
+reserve, and the hot key can do anything the account can: mint, burn, create
+and cancel offers, send XRP and issued currency, set trust lines. What the
+split does give you is that the credential on the deploy box is *rotatable
+without moving the collection*: a box compromise is answered with a
+`SetRegularKey`, not by re-issuing 3,500+ NFTs under a new issuer. Losing it is
+an incident, not an inconvenience — and note there is **no written rotation
+runbook yet**: the linked document covers the original `SEED`/`SIGNING_ACCOUNT`
+cutover, not the on-ledger `SetRegularKey` you would need during one. Cutover
+procedure: [`docs/runbooks/mainnet-mvp-launch.md`](docs/runbooks/mainnet-mvp-launch.md)
+("Blocker 1 — Regular-key signing").
+
 The Discord Activity additionally needs:
 
 ```plaintext
