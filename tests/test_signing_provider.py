@@ -359,11 +359,16 @@ def test_the_registry_refuses_a_provider_that_only_matches_the_protocol(monkeypa
     from lfg_core.signing.base import SigningProvider
 
     assert isinstance(_Impostor(), SigningProvider)
-    # ...and the registry still will not serve it.
-    monkeypatch.setitem(signing._PROVIDERS, "impostor", _Impostor())
-    monkeypatch.delitem(signing._PROVIDERS, "impostor")
-    with pytest.raises(ValueError, match="unknown signing provider"):
-        signing.get_provider("impostor")
+    # ...and the registry still will not serve it: swap the class the "xaman"
+    # branch constructs and evict the cached instance, so the isinstance guard
+    # is the only thing standing between the impostor and a caller.
+    monkeypatch.setattr("lfg_core.signing.xaman.XamanProvider", _Impostor)
+    monkeypatch.setitem(signing._PROVIDERS, "xaman", None)
+    monkeypatch.delitem(signing._PROVIDERS, "xaman")
+    with pytest.raises(TypeError, match="does not inherit BaseSigningProvider"):
+        signing.get_provider("xaman")
+    # The rejected impostor was never cached either.
+    assert "xaman" not in signing._PROVIDERS
 
 
 def test_resolved_is_derived_because_xumm_never_sends_it(monkeypatch):
