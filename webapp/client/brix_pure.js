@@ -71,12 +71,22 @@ export function brixCardView(status) {
 
 // How to react to a failed POST /api/brix/claim, by the server's error code.
 //
-// Returns { message, retryable, refresh, trustline }.
+// Returns { message, retryable, refresh, trustline, lockLabel }.
 //   retryable — safe to offer the button again immediately. TRUE only when
 //               the server bound nothing, so a retry cannot double-claim.
 //   refresh   — re-fetch GET /api/brix; the client's picture is stale.
 //   trustline — the user needs a BRIX trustline before this can work.
+//   lockLabel — non-null iff !retryable: the button label to pin, disabled,
+//               until the next home landing. A refreshed status still shows
+//               the positive balance, which would otherwise re-enable
+//               "Claim N BRIX" right under a toast saying not to retry.
 export function claimErrorView(code) {
+  const v = claimErrorBase(code);
+  v.lockLabel = v.retryable ? null : v.lockLabel || 'Claim unavailable';
+  return v;
+}
+
+function claimErrorBase(code) {
   switch (code) {
     case 'claims_disabled':
       return {
@@ -84,6 +94,7 @@ export function claimErrorView(code) {
         retryable: false,
         refresh: false,
         trustline: false,
+        lockLabel: 'Claims not open yet',
       };
     case 'trustline_required':
       return {
@@ -92,6 +103,7 @@ export function claimErrorView(code) {
         retryable: false,
         refresh: false,
         trustline: true,
+        lockLabel: 'BRIX trustline needed',
       };
     case 'nothing_to_claim':
       return {
@@ -126,6 +138,7 @@ export function claimErrorView(code) {
         retryable: false,
         refresh: true,
         trustline: false,
+        lockLabel: 'Claim settling…',
       };
     default:
       return {

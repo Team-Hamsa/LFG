@@ -69,6 +69,20 @@ def test_claim_button_is_disabled_while_the_request_is_in_flight():
     assert "disabled = true" in body
 
 
+def test_non_retryable_claim_error_locks_the_button_across_reload():
+    """Greptile P1 on PR #434: after claims_disabled / trustline_required the
+    unconditional loadBrix() re-enabled the button. The lock label from
+    claimErrorView must survive the reload and only clear on the next home
+    landing."""
+    js = _read("app.js")
+    body = js.split("async function claimBrix(", 1)[1][:4000]
+    assert "lockLabel" in body
+    render = js.split("function renderBrixCard(", 1)[1][:1500]
+    assert "brixLock" in render
+    home = js.split("function showMintHome()", 1)[1][:1200]
+    assert "brixLock = null" in home
+
+
 def test_module_cache_busters_are_bumped_in_lockstep():
     """ES-module imports are cache keys: a stale app.js against a fresh
     index.html serves a client with no card at all (see the 2026-07-21

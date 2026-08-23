@@ -194,6 +194,21 @@ def test_unknown_code_has_a_generic_message():
     assert v["retryable"] is False
 
 
+def test_non_retryable_errors_carry_a_button_lock_label():
+    """A non-retryable error must keep the button OFF after the card reloads —
+    the refreshed status still shows a positive balance, which would otherwise
+    re-enable "Claim N BRIX" right under a toast saying don't retry."""
+    for code in ("claims_disabled", "trustline_required", "claim_unconfirmed", "something_new"):
+        v = err(code)
+        assert v["retryable"] is False, code
+        assert isinstance(v["lockLabel"], str) and v["lockLabel"], code
+
+
+def test_retryable_error_has_no_lock_label():
+    v = err("claim_unavailable")
+    assert v["lockLabel"] is None
+
+
 # ---------------------------------------------------------------------------
 # isClaimTerminal(state) — when the status poll stops
 # ---------------------------------------------------------------------------

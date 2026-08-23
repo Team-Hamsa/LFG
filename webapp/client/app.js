@@ -35,7 +35,7 @@ import * as signDeliveryPure from './signdelivery_pure.js?v=1';
 // Daily BRIX drip card (#48): what the card renders and how each claim error
 // code is handled are pure decisions, Node-testable (tests/test_brix_pure_js.py);
 // loadBrix()/claimBrix() below are the glue.
-import * as brixPure from './brix_pure.js?v=1';
+import * as brixPure from './brix_pure.js?v=2';
 
 const params = new URLSearchParams(window.location.search);
 const insideDiscord = params.has('frame_id');
@@ -676,6 +676,7 @@ function showMintHome() {
   showPanel('mint-panel');
   status(`Hey ${me.username} — welcome to the job site.`);
   loadLeaderboard();
+  brixLock = null; // a fresh landing gets a fresh look at claimability
   loadBrix();
   refreshOffersBadge();
 }
@@ -881,6 +882,10 @@ const BRIX_POLL_MAX = 20;
 let brixPollTimer = null;
 let brixPollGen = 0; // bumps on every poll start, invalidating in-flight ticks
 let brixClaiming = false;
+// Set from claimErrorView().lockLabel after a NON-retryable claim error; pins
+// the button disabled across loadBrix() reloads (the refreshed balance is still
+// positive) until the next home landing clears it. Greptile P1 on PR #434.
+let brixLock = null;
 
 function stopBrixPoll() {
   brixPollGen++;
@@ -897,6 +902,11 @@ function renderBrixCard(view) {
   el('brix-headline').textContent = view.headline;
   el('brix-sub').textContent = view.sub;
   const btn = el('brix-claim-btn');
+  if (brixLock && !view.inFlight) {
+    btn.textContent = brixLock;
+    btn.disabled = true;
+    return;
+  }
   btn.textContent = view.button.label;
   // brixClaiming guards the window between the POST and its response, where
   // the freshly-rendered view still shows the old (claimable) balance.
@@ -991,8 +1001,11 @@ async function claimBrix() {
     const code = (e.body && e.body.code) || '';
     // claimErrorView is the single place that decides whether a code may be
     // retried — notably claim_unconfirmed may NOT be, since the server left
-    // the accruals bound to a payout that may well have landed.
-    toast(brixPure.claimErrorView(code).message);
+    // the accruals bound to a payout that may well have landed. A non-retryable
+    // code pins the button (lockLabel) so the reload below cannot re-arm it.
+    const ev = brixPure.claimErrorView(code);
+    toast(ev.message);
+    if (ev.lockLabel) brixLock = ev.lockLabel;
   } finally {
     brixClaiming = false;
   }
