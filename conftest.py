@@ -48,8 +48,10 @@ os.environ.setdefault("ECONOMY_NETWORK", "testnet")
 # sponsored-prepare suites stub autofill_and_sign / submit_and_wait, which
 # does NOT intercept a `simulate` call, so with the flag on they would hit the
 # network. Pin it off; tests that exercise the pre-flight force it on with
-# monkeypatch.setenv (the helper reads the flag at call time).
-os.environ.setdefault("PRESUBMIT_SIMULATE", "0")
+# monkeypatch.setenv (the helper reads the flag at call time). Assigned
+# unconditionally — unlike the other pins there is no legitimate shell override:
+# an inherited "1" would make the stubbed suites hit the network.
+os.environ["PRESUBMIT_SIMULATE"] = "0"
 os.environ.setdefault("XUMM_WS_WATCH", "0")
 os.environ.setdefault("XUMM_STATUS_CACHE_SECONDS", "0")
 # Same hazard, tuned knobs: test_bulk_mint_ui_flag / test_shop_config /

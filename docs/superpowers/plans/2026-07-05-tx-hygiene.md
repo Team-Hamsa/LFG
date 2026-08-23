@@ -5,7 +5,10 @@
 **Date:** 2026-07-05 · **Last review:** 2026-08-19
 **Status:** shipped (PR for #58, 2026-08-23) — Tasks 1–6 landed: `xrpl_ops.presubmit_simulate` wired into `_submit_and_confirm`, both sponsored prepare paths and the admin burn; `PRESUBMIT_SIMULATE` (default 1) kill switch; root conftest pins it 0. Task 7 (live staging verification: underfunded-reserve probe, `tecPATH_DRY` refusal, bulk-mint latency) is an OPS follow-up, not part of the PR. Sponsored burn: a deterministic rejection re-queues with `_backoff` (matches existing preparation-failure behaviour) and the engine code is persisted in the obligation's `error` column so an operator can see why it will never clear.
 
-One PR remains: pre-submit `simulate` in `lfg_core/xrpl_ops.py`. TDD as usual —
+The one remaining PR (pre-submit `simulate` in `lfg_core/xrpl_ops.py`) has
+shipped; Tasks 1–6 below are ticked as the record of what landed. Task 7
+(staging verification) and the close-out items of Task 8 are the open ops
+follow-up — #58 stays open until the staging evidence is posted. TDD as usual —
 failing test first, then the minimal implementation, then the full suite.
 New test files need no env-guard preamble since #323 (the root `conftest.py`
 supplies every mandatory var).
@@ -66,16 +69,16 @@ on staging before prod carries it.
 
 ### Task 1: suite isolation first (must land before anything calls the network)
 
-- [ ] Add `os.environ.setdefault("PRESUBMIT_SIMULATE", "0")` to the root
+- [x] Pin `os.environ["PRESUBMIT_SIMULATE"] = "0"` in the root
       `conftest.py` alongside the other pins, with a comment naming the reason
       (the existing `_submit_and_confirm` / sponsored-prepare tests stub
       `autofill_and_sign` / `submit_and_wait`, which does not intercept a
       simulate, so they would otherwise hit the network).
-- [ ] Full suite green — no behavior change yet, this is the guard rail.
+- [x] Full suite green — no behavior change yet, this is the guard rail.
 
 ### Task 2: `_presubmit_simulate` helper
 
-- [ ] New `tests/test_presubmit_simulate.py`. Monkeypatch a module-level
+- [x] New `tests/test_presubmit_simulate.py`. Monkeypatch a module-level
       `xrpl_ops.simulate` name (import it as one so tests can patch it exactly
       like `submit_and_wait`). Cases, all with `PRESUBMIT_SIMULATE=1` forced
       via `monkeypatch.setenv`:
@@ -94,13 +97,13 @@ on staging before prod carries it.
       - response missing `engine_result` entirely → returns `None`.
       - flag off (`PRESUBMIT_SIMULATE=0`) → `simulate` is never called.
       Run → red.
-- [ ] Implement `_presubmit_simulate` in `lfg_core/xrpl_ops.py` per spec §3.3.
+- [x] Implement `_presubmit_simulate` in `lfg_core/xrpl_ops.py` per spec §3.3.
       Gate on `config.env_flag("PRESUBMIT_SIMULATE", "1")` read at call time,
       never a frozen constant. Green.
 
 ### Task 3: wire it into `_submit_and_confirm`
 
-- [ ] Tests (extend `tests/test_presubmit_simulate.py`):
+- [x] Tests (extend `tests/test_presubmit_simulate.py`):
       - A rejected simulate makes `mint_nft` return `None` **and**
         `autofill_and_sign` / `submit_and_wait` are never called (stub both to
         raise `AssertionError`).
@@ -116,11 +119,11 @@ on staging before prod carries it.
       - Flag off → `_submit_and_confirm` behaves exactly as today (this is
         what the ten existing modules already assert; they must stay green
         untouched).
-- [ ] Implement: call `_presubmit_simulate` at the top of
+- [x] Implement: call `_presubmit_simulate` at the top of
       `_submit_and_confirm`, above `async with _submission_scope(...)`; on a
       returned code, log `f"{label}: pre-submit simulate rejected ({code})"`
       and return `None`.
-- [ ] Full suite green, and specifically the seven modules that drive
+- [x] Full suite green, and specifically the seven modules that drive
       `_submit_and_confirm` through stubs: `tests/test_xrpl_source_tag.py`,
       `test_xrpl_indeterminate.py`, `test_xrpl_malformed_poll_retry.py`,
       `test_xrpl_submit_lock.py`, `test_memos_transactions.py`,
@@ -130,39 +133,39 @@ on staging before prod carries it.
 
 ### Task 4: wire the sponsored prepare paths
 
-- [ ] Tests: `prepare_sponsored_mint` and `prepare_sponsored_burn` with a
+- [x] Tests: `prepare_sponsored_mint` and `prepare_sponsored_burn` with a
       rejecting simulate return their `"failed"` preparation state carrying the
       engine code in the reason, and `autofill_and_sign` is never called (so no
       signed blob is journaled). Flag off → unchanged. Existing green:
       `tests/test_sponsored_burn.py`, `test_sponsored_burn_review.py`,
       `test_sponsored_final_review.py` (they stub `autofill_and_sign`, which
       does not shield a simulate — see Task 1).
-- [ ] Implement inside each `_submission_scope` block, immediately before
+- [x] Implement inside each `_submission_scope` block, immediately before
       `autofill_and_sign`.
-- [ ] Decide and document the burn-worker consequence: a `"failed"` burn
+- [x] Decide and document the burn-worker consequence: a `"failed"` burn
       preparation makes `sponsored_burn.process_one` re-queue the obligation
       (`status="pending"` with `_backoff(attempt_count)`), so a *deterministic*
       simulate rejection retries on a timer instead of terminating. Either
       accept that (it matches today's preparation-failure behavior) or record
       the engine code so an operator can see why it will never clear.
-- [ ] Confirm the sponsored recovery/reconcile paths are untouched:
+- [x] Confirm the sponsored recovery/reconcile paths are untouched:
       `submit_sponsored_mint` / `submit_sponsored_burn` forward an
       already-signed blob and must **not** simulate (it would be rejected
       `transactionSigned` and, worse, is meaningless for a fixed identity).
 
 ### Task 5: admin burn (optional, same helper)
 
-- [ ] Test: `surfaces/discord_bot/admin.py::burn_nft` returns `False` on a
+- [x] Test: `surfaces/discord_bot/admin.py::burn_nft` returns `False` on a
       rejecting simulate without calling `submit_and_wait`.
-- [ ] Implement by calling `xrpl_ops._presubmit_simulate` (promote it to a
+- [x] Implement by calling `xrpl_ops._presubmit_simulate` (promote it to a
       public name if importing a private one is objectionable in review).
 
 ### Task 6: config + docs
 
-- [ ] Add `PRESUBMIT_SIMULATE=1` to the CLAUDE.md env block with a one-line
+- [x] Add `PRESUBMIT_SIMULATE=1` to the CLAUDE.md env block with a one-line
       description ("pre-submit `simulate` pre-flight on backend-signed txs;
       `0` disables").
-- [ ] Note in the `xrpl_ops` module docstring or the helper docstring that
+- [x] Note in the `xrpl_ops` module docstring or the helper docstring that
       `simulate` must see the unsigned model, and that a rejection maps to the
       existing `None` "definitive failure" contract — not
       `IndeterminateResultError`.

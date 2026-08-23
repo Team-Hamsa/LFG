@@ -423,4 +423,4 @@ can monkeypatch it the way they already patch `submit_and_wait`.
 | #75 | CLOSED 2026-07-10 as obsolete. |
 | #57 | CLOSED 2026-07-09 as a duplicate of #54 (its SourceTag half was already covered by #61). |
 | #54 | CLOSED 2026-07-09 by PR #144 as `lfg_core/memos.py`. Schema differs from this doc's original §3 — see §1.2. |
-| #58 | OPEN. §3 above is the live design. Closes when `_presubmit_simulate` is wired at the paths in §3.3 with the flag defaulted on in prod. |
+| #58 | OPEN — code shipped (PR 2026-08-23: `presubmit_simulate` wired at every §3.3 path, `PRESUBMIT_SIMULATE` defaults on). Stays open only for the staging verification in the plan's Task 7 (underfunded-reserve probe, `tecPATH_DRY` refusal, bulk-mint latency); closes with that evidence posted on the issue. |

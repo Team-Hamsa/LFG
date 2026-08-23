@@ -54,6 +54,17 @@ def test_shipped_default_is_on():
     assert config.PRESUBMIT_SIMULATE_DEFAULT == "1"
 
 
+def test_root_conftest_forces_simulate_off():
+    """The suite pin must be unconditional, not ``setdefault``: an inherited
+    ``PRESUBMIT_SIMULATE=1`` in the shell would otherwise send every stubbed
+    ``_submit_and_confirm`` test to the live ``simulate`` endpoint."""
+    import pathlib
+
+    src = pathlib.Path(__file__).resolve().parents[1].joinpath("conftest.py").read_text()
+    assert 'os.environ["PRESUBMIT_SIMULATE"] = "0"' in src
+    assert 'setdefault("PRESUBMIT_SIMULATE"' not in src
+
+
 @pytest.mark.parametrize("code", ["tesSUCCESS", "terQUEUED", "telINSUF_FEE_P"])
 def test_non_deterministic_results_proceed(monkeypatch, code):
     monkeypatch.setenv("PRESUBMIT_SIMULATE", "1")
