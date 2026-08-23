@@ -4096,6 +4096,11 @@ async def sweep_shop_orders() -> None:
 # via the idempotent, fail-closed `closet_token.confirm_accept`.
 _CLOSET_SWEEP_BATCH = 25
 _CLOSET_SWEEP_DELAY_SECONDS = 0.2
+# Rotating window start: a batch of genuinely-unaccepted oldest rows must not
+# monopolize every pass and starve newer accepted Closets, so each pass picks
+# up where the last one stopped and wraps to 0 when the pending set is
+# exhausted (in-process only — a restart simply starts from the oldest again).
+_closet_sweep_offset = 0
 
 
 async def _closet_owner_on_ledger(nft_id: str) -> str | None:
@@ -4113,13 +4118,25 @@ async def sweep_pending_closet_accepts() -> None:
     Closet's owner == the row's owner; a still-unaccepted offer (owner is the
     issuer) or a failed lookup leaves the row pending. One bad row never stops
     the pass. No-op while the economy is disabled."""
+    global _closet_sweep_offset
     if not config.ECONOMY_ENABLED:
         return
     network = config.ECONOMY_NETWORK
     conn = nft_index.init_db(nft_index.index_db_path(network))
     try:
         economy_store.init_economy_schema(conn)
-        pending = economy_store.list_pending_closets(conn, limit=_CLOSET_SWEEP_BATCH)
+        pending = economy_store.list_pending_closets(
+            conn, limit=_CLOSET_SWEEP_BATCH, offset=_closet_sweep_offset
+        )
+        if not pending and _closet_sweep_offset:
+            # Window ran off the end of the pending set: wrap and re-read so
+            # a pass is never wasted on an empty slice.
+            _closet_sweep_offset = 0
+            pending = economy_store.list_pending_closets(conn, limit=_CLOSET_SWEEP_BATCH)
+        # Rows promoted this pass drop out of the pending set, which shifts
+        # the ones behind them forward; advance by the un-promoted count so
+        # nothing is skipped (and wrap when the slice came up short).
+        advanced = 0
         for i, (owner, nft_id) in enumerate(pending):
             if i and _CLOSET_SWEEP_DELAY_SECONDS:
                 await asyncio.sleep(_CLOSET_SWEEP_DELAY_SECONDS)
@@ -4132,12 +4149,19 @@ async def sweep_pending_closet_accepts() -> None:
                     f"closet pending-accept sweep failed for {owner} ({nft_id}): "
                     f"{traceback.format_exc()}"
                 )
+                advanced += 1  # still pending, still occupies its slot
                 continue
             if status == closet_token.ACTIVE:
                 logging.info(
                     f"closet pending-accept sweep: promoted {owner} ({nft_id}) to active "
                     f"(accept observed on-ledger, missed by the listener)"
                 )
+            else:
+                advanced += 1
+        if len(pending) < _CLOSET_SWEEP_BATCH:
+            _closet_sweep_offset = 0
+        else:
+            _closet_sweep_offset += advanced
     finally:
         conn.close()
 

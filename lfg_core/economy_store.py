@@ -328,18 +328,22 @@ def get_closet_record(
 
 
 def list_pending_closets(
-    conn: sqlite3.Connection, limit: int | None = None
+    conn: sqlite3.Connection, limit: int | None = None, offset: int = 0
 ) -> list[tuple[str, str]]:
     """`(owner, nft_id)` for every Closet still `pending_accept`, oldest
-    `updated_at` first (#382 backstop sweep). `limit` bounds one pass."""
+    `updated_at` first (#382 backstop sweep). `limit`/`offset` window one
+    pass so successive passes can rotate through the whole pending set."""
     sql = (
         "SELECT owner, nft_id FROM closet_tokens WHERE status = 'pending_accept'"
         " ORDER BY updated_at ASC, owner ASC"
     )
     params: tuple[Any, ...] = ()
     if limit is not None:
-        sql += " LIMIT ?"
-        params = (int(limit),)
+        sql += " LIMIT ? OFFSET ?"
+        params = (int(limit), int(offset))
+    elif offset:
+        sql += " LIMIT -1 OFFSET ?"
+        params = (int(offset),)
     return [(str(r[0]), str(r[1])) for r in conn.execute(sql, params)]
 
 

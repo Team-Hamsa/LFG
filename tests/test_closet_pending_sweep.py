@@ -39,6 +39,7 @@ def onchain_env(tmp_path, monkeypatch):
     monkeypatch.setattr(server.config, "ECONOMY_NETWORK", "testnet")
     monkeypatch.setattr(server.config, "ECONOMY_ENABLED", True)
     monkeypatch.setattr(server, "_CLOSET_SWEEP_DELAY_SECONDS", 0)
+    monkeypatch.setattr(server, "_closet_sweep_offset", 0)
     yield onchain_path
 
 
@@ -72,6 +73,8 @@ def test_list_pending_closets_oldest_first_with_limit():
     conn.commit()
     assert es.list_pending_closets(conn) == [(OWNER_A, "NA"), (OWNER_B, "NB")]
     assert es.list_pending_closets(conn, limit=1) == [(OWNER_A, "NA")]
+    assert es.list_pending_closets(conn, limit=1, offset=1) == [(OWNER_B, "NB")]
+    assert es.list_pending_closets(conn, limit=1, offset=2) == []
 
 
 def test_sweep_promotes_only_ledger_confirmed_rows(onchain_env, monkeypatch):
@@ -124,6 +127,32 @@ def test_sweep_honors_batch_limit(onchain_env, monkeypatch):
     monkeypatch.setattr(server.xrpl_ops, "nft_info", fake_nft_info)
     _run(server.sweep_pending_closet_accepts())
     assert len(calls) == 2
+
+
+def test_sweep_rotates_so_stuck_oldest_rows_cannot_starve_newer_ones(onchain_env, monkeypatch):
+    # Greptile P1 on #436: if the oldest batch stays issuer-owned forever, later
+    # passes must still reach the newer rows — the window rotates across passes.
+    conn = sqlite3.connect(onchain_env)
+    for i, owner in enumerate([OWNER_A, OWNER_B, OWNER_C]):
+        es.set_closet_token(conn, owner, f"N{i}", "AB", status="pending_accept")
+        conn.execute(
+            "UPDATE closet_tokens SET updated_at=? WHERE owner=?",
+            (f"2026-0{i + 1}-01 00:00:00", owner),
+        )
+    conn.commit()
+    conn.close()
+    monkeypatch.setattr(server, "_CLOSET_SWEEP_BATCH", 2)
+
+    async def fake_nft_info(nft_id, clio=None):
+        return {"owner": OWNER_C if nft_id == "N2" else ISSUER}
+
+    monkeypatch.setattr(server.xrpl_ops, "nft_info", fake_nft_info)
+    _run(server.sweep_pending_closet_accepts())  # pass 1: N0, N1 (both still issuer-owned)
+    assert _status(onchain_env, OWNER_C) == "pending_accept"
+    _run(server.sweep_pending_closet_accepts())  # pass 2: N2 → promoted
+    assert _status(onchain_env, OWNER_C) == "active"
+    _run(server.sweep_pending_closet_accepts())  # pass 3 wraps back to the start, no crash
+    assert _status(onchain_env, OWNER_A) == "pending_accept"
 
 
 def test_sweep_noop_when_economy_disabled(onchain_env, monkeypatch):
