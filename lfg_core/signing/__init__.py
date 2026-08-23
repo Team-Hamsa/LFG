@@ -17,11 +17,19 @@ from lfg_core.signing.types import SignHandle, SignRequest, SignStatus
 #: through Xaman today; #399 adds WalletConnect for web sign-in only.
 DEFAULT_PROVIDER = "xaman"
 
-_PROVIDERS: dict[str, SigningProvider] = {}
+_PROVIDERS: dict[str, BaseSigningProvider] = {}
 
 
-def get_provider(name: str | None = None) -> SigningProvider:
+def get_provider(name: str | None = None) -> BaseSigningProvider:
     """The signing provider registered under `name` (default: Xaman).
+
+    Returns `BaseSigningProvider`, NOT the structural `SigningProvider`
+    protocol, and the isinstance check below is the reason. A class that merely
+    matches the protocol's shape would satisfy the type checker while
+    implementing its own `create()` — bypassing the stamp-and-validate this
+    whole seam exists to guarantee. Enforcement that a second provider can opt
+    out of by accident is not enforcement, so the registry only hands out
+    providers that inherit the template.
 
     Instances are cached: `XamanProvider` is stateless, and the flows resolve a
     provider per payload."""
@@ -32,9 +40,14 @@ def get_provider(name: str | None = None) -> SigningProvider:
     if key == "xaman":
         from lfg_core.signing.xaman import XamanProvider
 
-        provider: SigningProvider = XamanProvider()
+        provider: BaseSigningProvider = XamanProvider()
     else:
         raise ValueError(f"unknown signing provider: {name!r}")
+    if not isinstance(provider, BaseSigningProvider):
+        raise TypeError(
+            f"signing provider {key!r} does not inherit BaseSigningProvider, so its "
+            "transactions would skip SourceTag/memo enforcement"
+        )
     _PROVIDERS[key] = provider
     return provider
 

@@ -252,7 +252,7 @@ async def _create_xumm_payload(
     # the result is now VALIDATED, so a payload that reaches XUMM without our
     # SourceTag raises instead of quietly costing hackathon volume credit.
     txtype = txjson.get("TransactionType")
-    provenance.stamp_and_validate(txjson, memos_json)
+    provenance.stamp_and_validate(txjson, memos_json, require_memos=True)
     payload: dict[str, Any] = {"txjson": txjson}
     if options:
         payload["options"] = options

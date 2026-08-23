@@ -61,9 +61,16 @@ class XamanProvider(BaseSigningProvider):
 
     @staticmethod
     def to_status(raw: dict[str, Any]) -> SignStatus:
+        """`resolved` is DERIVED, not read: `get_payload_status` returns
+        `{opened, signed, expired, account, txid, user_token}` and has no
+        `resolved` key, so reading one would leave every status unresolved
+        forever — including terminal ones. A payload is settled once it is
+        signed or expired; anything else is still outstanding."""
+        signed = raw.get("signed")
+        expired = raw.get("expired")
         return SignStatus(
-            signed=raw.get("signed"),
-            resolved=bool(raw.get("resolved")),
+            signed=signed,
+            resolved=bool(signed) or bool(expired),
             txid=raw.get("txid"),
             signer=raw.get("signer") or raw.get("account"),
             user_token=raw.get("user_token"),

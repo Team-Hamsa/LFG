@@ -14,7 +14,7 @@
 from __future__ import annotations
 
 import abc
-from typing import Any, Protocol, runtime_checkable
+from typing import Any, Protocol, final, runtime_checkable
 
 from lfg_core.signing.provenance import stamp_and_validate
 from lfg_core.signing.types import SignHandle, SignRequest, SignStatus
@@ -42,19 +42,38 @@ class SigningProvider(Protocol):
 
 class BaseSigningProvider(abc.ABC):
     """Template implementation. Subclasses supply transport; the base supplies
-    the guarantee."""
+    the guarantee.
+
+    `create` is final in both senses that matter. `@final` makes an override a
+    type error, which the pre-push mypy gate catches — but only on a machine
+    running the gate, and `typing.final` does not even set `__final__` at
+    runtime before Python 3.11 (this project runs 3.10). So the check below
+    refuses the subclass outright at class-definition time. A guarantee a
+    future provider can opt out of by writing one method is not a guarantee.
+    """
 
     name: str = "base"
 
-    #: Whether a provider's transactions must carry provenance memos as well as
-    #: the SourceTag. Off by default because several legitimate builders (the
-    #: CLI economy drivers) have no surface to attribute to; the SourceTag is
-    #: required unconditionally either way.
-    require_memos: bool = False
+    def __init_subclass__(cls, **kwargs: Any) -> None:
+        super().__init_subclass__(**kwargs)
+        if "create" in cls.__dict__:
+            raise TypeError(
+                f"{cls.__name__} overrides BaseSigningProvider.create, which would skip "
+                "SourceTag/memo stamping and validation. Implement _create instead."
+            )
 
+    #: Whether a provider's transactions must carry provenance memos as well as
+    #: the SourceTag. ON, because #54 says memos ride on every transaction and
+    #: every one of `xumm_ops`' eight non-`SignIn` builders already supplies
+    #: them — including the ones the CLI economy drivers reach, which attribute
+    #: to `platform=backend` rather than omitting attribution. A provider with
+    #: a genuinely un-attributable path may lower it, and must say why.
+    require_memos: bool = True
+
+    @final
     async def create(self, request: SignRequest) -> SignHandle | None:
-        """Stamp, prove it stuck, then delegate. Do not override — override
-        `_create`."""
+        """Stamp, prove it stuck, then delegate. Override `_create`, not this —
+        `@final` makes that a type error rather than a convention."""
         txjson: dict[str, Any] = dict(request.txjson)
         stamp_and_validate(txjson, request.memos_json, require_memos=self.require_memos)
         return await self._create(
