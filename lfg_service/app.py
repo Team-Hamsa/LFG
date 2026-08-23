@@ -497,6 +497,140 @@ def _prune_sessions(sessions: dict[str, Any], terminal_states: set[str]) -> None
             del sessions[sid]
 
 
+# #424: a non-terminal session the user simply walked away from (closed the
+# Activity on the QR screen) never terminates on its own, and /api/health kept
+# counting it — prod's deployer drained the full 900s against a lone
+# `market: 1` and REFUSED to restart (2026-08-22). Once the XUMM payload's own
+# 15-min expire (#260) has passed, nothing that session was waiting for can
+# still happen, so it is safe to expire client-side. The TTL carries slack past
+# that expire so a still-signable payload is never pulled out from under a
+# slow user. Only PRE-money states are eligible — see _ABANDONABLE_STATES.
+# Floor = the XUMM payload lifetime itself: anything shorter would let the
+# sweep fail a session (and cancel its payload) while the user can still sign.
+SESSION_ABANDON_TTL_MIN = xumm_ops.DEFAULT_EXPIRE_MINUTES * 60
+SESSION_ABANDON_TTL_DEFAULT = SESSION_ABANDON_TTL_MIN + 120
+
+
+def _abandon_ttl_from_env() -> int:
+    raw = os.environ.get("SESSION_ABANDON_TTL_SECONDS")
+    if not raw:
+        return SESSION_ABANDON_TTL_DEFAULT
+    try:
+        ttl = int(raw)
+    except ValueError:
+        logging.warning(
+            f"SESSION_ABANDON_TTL_SECONDS={raw!r} is not an integer; "
+            f"using default {SESSION_ABANDON_TTL_DEFAULT}"
+        )
+        return SESSION_ABANDON_TTL_DEFAULT
+    if ttl < SESSION_ABANDON_TTL_MIN:
+        logging.warning(
+            f"SESSION_ABANDON_TTL_SECONDS={ttl} is below the XUMM payload "
+            f"lifetime ({SESSION_ABANDON_TTL_MIN}s) and could cancel a "
+            f"still-signable payload; using default {SESSION_ABANDON_TTL_DEFAULT}"
+        )
+        return SESSION_ABANDON_TTL_DEFAULT
+    return ttl
+
+
+SESSION_ABANDON_TTL = _abandon_ttl_from_env()
+
+
+def _expire_abandoned(
+    sessions: dict[str, Any],
+    expirable_states: set[str],
+    terminal_marker: str,
+    *,
+    now: float | None = None,
+    spawn_cancel: Callable[[str | None], None] | None = None,
+) -> int:
+    """Mark every session sitting in one of `expirable_states` for longer
+    than SESSION_ABANDON_TTL as terminal (#424). Returns how many expired.
+
+    `expirable_states` MUST be pre-money states only (awaiting a signature
+    or a payment that has not happened): expiring them changes no ledger
+    state — at most an already-expired XUMM payload is best-effort DELETEd
+    so a stale QR can't be signed — and a flow past that point (paid,
+    generating, minting, offer_ready, PENDING tx validation…) is never
+    touched regardless of age.
+
+    Sessions with their own `cancel()` (mint/swap) are retired through it so
+    the background payment wait stops and headroom/sponsored reservations
+    settle exactly as a user cancel would; a `cancel()` that declines (state
+    moved on concurrently) leaves the session alone. Everything else is
+    stamped `terminal_marker` with error/reason "abandoned" (the dict's
+    TERMINAL_STATES must contain the marker so _count_active/_prune_sessions
+    see it). `mark_published()` suppresses the terminal firehose event — an
+    abandoned QR is not a mint/swap outcome, same as a deliberate cancel.
+    """
+    now = time.time() if now is None else now
+    spawn_cancel = _spawn_payload_cancel if spawn_cancel is None else spawn_cancel
+    cutoff = now - SESSION_ABANDON_TTL
+    expired = 0
+    for s in list(sessions.values()):
+        if getattr(s, "state", None) not in expirable_states:
+            continue
+        if getattr(s, "created_at", now) >= cutoff:
+            continue
+        cancel = getattr(s, "cancel", None)
+        if callable(cancel):
+            if not cancel():
+                continue
+        else:
+            s.state = terminal_marker
+        if hasattr(s, "error"):
+            s.error = "abandoned"
+        if hasattr(s, "reason"):
+            s.reason = "abandoned"
+        mark_published = getattr(s, "mark_published", None)
+        if callable(mark_published):
+            mark_published()
+        for attr in ("payload_uuid", "payment_uuid", "onramp_payload_uuid"):
+            uuid = getattr(s, attr, None)
+            if uuid:
+                spawn_cancel(uuid)
+        for uuid in getattr(s, "stale_payment_uuids", None) or []:
+            if uuid:
+                spawn_cancel(uuid)
+        if getattr(s, "stale_payment_uuids", None):
+            s.stale_payment_uuids.clear()
+        expired += 1
+        logging.info(
+            f"expired abandoned {type(s).__name__} {getattr(s, 'id', '?')} "
+            f"after {int(now - s.created_at)}s (#424)"
+        )
+    return expired
+
+
+def _expire_abandoned_all() -> None:
+    """Apply _expire_abandoned to every in-memory session dict (#424).
+    Reads the module globals at call time (tests monkeypatch the dicts).
+
+    Per-flow eligible states — pre-money ONLY:
+    - mint/swap: AWAITING_PAYMENT (retired via session.cancel(); the
+      300s payment wait normally reaches PAYMENT_TIMEOUT first, this is the
+      backstop for a task that died without stamping it).
+    - market: AWAITING_SIGNATURE (List/Cancel/Buy/Bid/BidAccept) and the
+      Buy on-ramp's AWAITING_ONRAMP — nothing is held either side until the
+      signature lands, and the on-ramp is a self-Payment into the buyer's
+      OWN wallet: past the TTL its payload has either expired or validated
+      into BRIX the buyer simply keeps (the listing stays live; re-buy is
+      the one-signature BRIX-holder path), so expiring changes no ledger
+      state. PENDING/ONRAMP_CONFIRMED are signed-and-seen and excluded.
+      TraitSellSession's own states are deliberately NOT listed: its Extract
+      half runs a background task with a real mint in it.
+    - economy: nothing. EconomyWebSession is RUNNING only while its
+      background on-ledger op is executing (DONE/FAILED otherwise).
+    """
+    _expire_abandoned(mint_sessions, {mint_flow.AWAITING_PAYMENT}, mint_flow.FAILED)
+    _expire_abandoned(swap_sessions, {swap_flow.AWAITING_PAYMENT}, swap_flow.FAILED)
+    _expire_abandoned(
+        market_sessions,
+        {market_flow.AWAITING_SIGNATURE, market_flow.AWAITING_ONRAMP},
+        market_flow.FAILED,
+    )
+
+
 def _active_session(
     sessions: dict[str, Any],
     terminal_states: set[str],
@@ -6251,6 +6385,7 @@ async def handle_sessions_active(request):
     were already stamped when the flow's payload was first built)."""
     user = request["user"]
     uid, plat = user["id"], _platform(user)
+    _expire_abandoned_all()
     _prune_sessions(mint_sessions, mint_flow.TERMINAL_STATES)
     _prune_sessions(bulk_sessions, bulk_mint_flow.TERMINAL_STATES)
     _prune_sessions(swap_sessions, swap_flow.TERMINAL_STATES)
@@ -6790,18 +6925,42 @@ def _count_active(sessions: dict[str, Any], terminal_states: set[str]) -> int:
     return sum(1 for s in sessions.values() if getattr(s, "state", None) not in terminal_states)
 
 
+def _oldest_active_age(sessions: dict[str, Any], terminal_states: set[str]) -> int | None:
+    """Age in whole seconds of the oldest in-flight session, or None (#424) —
+    so the deployer log can say WHY a drain is waiting."""
+    now = time.time()
+    ages = [
+        now - getattr(s, "created_at", now)
+        for s in sessions.values()
+        if getattr(s, "state", None) not in terminal_states
+    ]
+    return int(max(ages)) if ages else None
+
+
 async def handle_health(request):
     """Liveness + in-flight session counts, so a deploy/restart can DRAIN first
     instead of killing users mid-mint (in-memory sessions are lost on restart).
-    Public + unauthenticated: exposes only integer counts, no PII."""
-    detail = {
-        "mint": _count_active(mint_sessions, mint_flow.TERMINAL_STATES),
-        "swap": _count_active(swap_sessions, swap_flow.TERMINAL_STATES),
-        "economy": _count_active(economy_sessions, economy_api.TERMINAL_STATES),
-        "market": _count_active(market_sessions, market_flow.TERMINAL_STATES),
-    }
+    Public + unauthenticated: exposes only integer counts/ages, no PII.
+
+    #424: abandoned pre-money sessions are expired here first, so the
+    deployer's own poll sees the pruned counts (no other request need arrive
+    on a quiet box), and `oldest_session_age` names the kind pinning a drain."""
+    _expire_abandoned_all()
+    kinds = (
+        ("mint", mint_sessions, mint_flow.TERMINAL_STATES),
+        ("swap", swap_sessions, swap_flow.TERMINAL_STATES),
+        ("economy", economy_sessions, economy_api.TERMINAL_STATES),
+        ("market", market_sessions, market_flow.TERMINAL_STATES),
+    )
+    detail = {name: _count_active(store, terminal) for name, store, terminal in kinds}
+    oldest = {name: _oldest_active_age(store, terminal) for name, store, terminal in kinds}
     return web.json_response(
-        {"ok": True, "active_sessions": sum(detail.values()), "detail": detail}
+        {
+            "ok": True,
+            "active_sessions": sum(detail.values()),
+            "detail": detail,
+            "oldest_session_age": oldest,
+        }
     )
 
 
