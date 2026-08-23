@@ -6,15 +6,47 @@
 from __future__ import annotations
 
 import json
+import logging
 import sqlite3
 from typing import Any
 
-from lfg_core import trait_economy
+from lfg_core import config, trait_economy
 
 # Written into genesis_meta as the final step of a freeze; genesis_exists keys
 # off this flag alone, so a partially-written (e.g. interrupted) genesis never
 # reads as complete.
 _GENESIS_COMPLETE_KEY = "genesis_complete"
+
+
+class ClosetOwnerError(ValueError):
+    """A Closet was about to be recorded under a project signing account.
+
+    A freshly minted Closet sits in the issuer's wallet until the user accepts
+    the offer, so the on-ledger owner-of-record at mint time is the ISSUER, not
+    the user the offer targets. Any writer that keys a row off that address
+    forges a duplicate Closet shadowing the real owner's (#383). The issuer is
+    never a Closet owner-of-record, so this is always a bug in the caller —
+    raise rather than silently drop, so it surfaces instead of recurring."""
+
+
+def project_accounts() -> frozenset[str]:
+    """Addresses the project itself signs from, which can never own a Closet.
+
+    Resolved at call time (not frozen at import) so a rotated SIGNING_ACCOUNT
+    is covered immediately, and so tests can monkeypatch config. On mainnet the
+    issuer signs via a regular key and both names resolve to rLfgoMint…; on
+    testnet they can legitimately differ, so both are excluded."""
+    return frozenset(a for a in (config.SWAP_ISSUER_ADDRESS, config.SIGNING_ACCOUNT) if a)
+
+
+def _reject_project_account(owner: str) -> None:
+    if owner in project_accounts():
+        raise ClosetOwnerError(
+            f"refusing to record a Closet under project signing account {owner} "
+            "(a pending Closet is issuer-held; the row belongs to the user the "
+            "offer targets)"
+        )
+
 
 _ECONOMY_SCHEMA = """
 CREATE TABLE IF NOT EXISTS trait_genesis (
@@ -121,6 +153,37 @@ def _migrate_supply_changes_columns(conn: sqlite3.Connection) -> None:
     conn.commit()
 
 
+def ensure_closet_token_uniqueness(conn: sqlite3.Connection) -> None:
+    """One Closet NFToken maps to exactly one owner row, enforced by the
+    database (#383).
+
+    `closet_tokens` is keyed on `owner`, which never stopped a second owner
+    from claiming the same `nft_id` — which is precisely what the listener did
+    for every pending Closet, writing an issuer-keyed duplicate of the real
+    user's row.
+
+    Best-effort by design: a database that ALREADY carries such a duplicate
+    cannot take the index, and refusing to open it would wedge the listener on
+    exactly the deployments that need to keep running. Warn instead, leave the
+    index off, and let `scripts/audit_trait_economy.py` flag it and
+    `scripts/reconcile_closet_owners.py --apply` repair it; the next open then
+    creates the index. The write-site guard (`_reject_project_account`) blocks
+    recurrence meanwhile."""
+    try:
+        conn.execute(
+            "CREATE UNIQUE INDEX IF NOT EXISTS idx_closet_tokens_nft_id ON closet_tokens(nft_id)"
+        )
+        conn.commit()
+    except sqlite3.IntegrityError:
+        conn.rollback()
+        logging.warning(
+            "idx_closet_tokens_nft_id not created: closet_tokens already holds one "
+            "nft_id under more than one owner (#383). Run "
+            "scripts/audit_trait_economy.py to see them and "
+            "scripts/reconcile_closet_owners.py --apply to repair."
+        )
+
+
 def init_economy_schema(conn: sqlite3.Connection) -> None:
     """Create the genesis + live-state tables if absent, and migrate legacy bucket_* tables."""
     conn.executescript(_ECONOMY_SCHEMA)
@@ -128,6 +191,7 @@ def init_economy_schema(conn: sqlite3.Connection) -> None:
     _migrate_bucket_tables(conn)
     _migrate_closet_columns(conn)
     _migrate_supply_changes_columns(conn)
+    ensure_closet_token_uniqueness(conn)
 
 
 def genesis_exists(conn: sqlite3.Connection) -> bool:
@@ -254,6 +318,7 @@ def set_closet_contents(
     transaction. Used by both the flows (optimistic write) and the listener
     (rebuild from the Closet NFToken's metadata). Rows with count <= 0 are
     dropped so the mirror never carries empty entries."""
+    _reject_project_account(owner)
     conn.execute("DELETE FROM closet_assets WHERE owner = ?", (owner,))
     conn.execute("DELETE FROM closet_bodies WHERE owner = ?", (owner,))
     conn.executemany(
@@ -295,6 +360,7 @@ def set_closet_token(
 ) -> None:
     """Record/update an owner's Closet NFToken id, URI, lifecycle status, and the
     outstanding accept offer id (kept so the UI can re-show the Xaman accept)."""
+    _reject_project_account(owner)
     conn.execute(
         """
         INSERT INTO closet_tokens (owner, nft_id, uri_hex, status, offer_id, updated_at)

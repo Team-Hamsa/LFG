@@ -92,3 +92,40 @@ def test_unlogged_growth_is_drift(tmp_path, monkeypatch):
     conn.commit()
     conn.close()
     assert _run_audit(tmp_path, monkeypatch) == 1  # now edition 3536 is unexplained drift
+
+
+def test_issuer_keyed_closet_row_fails_the_audit(tmp_path, monkeypatch):
+    """#383: the nightly audit is what notices a Closet keyed to a project
+    signing account, so a recurrence cannot sit unseen for days again."""
+    from lfg_core import config
+
+    db = str(tmp_path / "onchain_testnet.db")
+    _setup_db(db)
+    conn = nft_index.init_db(db)
+    conn.execute("DROP INDEX IF EXISTS idx_closet_tokens_nft_id")
+    conn.execute(
+        "INSERT INTO closet_tokens (owner, nft_id, uri_hex, status) VALUES (?,?,?,?)",
+        (config.SWAP_ISSUER_ADDRESS, "CLOSET1", "AB", "pending_accept"),
+    )
+    conn.commit()
+    conn.close()
+
+    assert _run_audit(tmp_path, monkeypatch) == 1
+
+    report = next((tmp_path / "r").glob("trait-economy-audit-*.md")).read_text()
+    assert "Closet ownership: **ANOMALIES**" in report
+    assert "project-account row" in report
+
+
+def test_clean_closet_ownership_does_not_fail_the_audit(tmp_path, monkeypatch):
+    db = str(tmp_path / "onchain_testnet.db")
+    _setup_db(db)
+    conn = nft_index.init_db(db)
+    conn.execute(
+        "INSERT INTO closet_tokens (owner, nft_id, uri_hex, status) VALUES (?,?,?,?)",
+        ("rRealUser", "CLOSET1", "AB", "active"),
+    )
+    conn.commit()
+    conn.close()
+
+    assert _run_audit(tmp_path, monkeypatch) == 0

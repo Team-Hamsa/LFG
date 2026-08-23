@@ -1,10 +1,12 @@
 #!/usr/bin/env python3
 """Audit the dress-up trait economy against the frozen genesis baseline.
 
-Verifies the two invariants over the on-chain index + Closet/trait-token state:
+Verifies the three invariants over the on-chain index + Closet/trait-token state:
   - Completeness: every live character holds one asset per slot and the right body
   - Conservation: no asset is silently created/destroyed; each body lives in
     exactly one place
+  - Closet ownership: no Closet is keyed to a project signing account, and no
+    Closet NFToken is claimed by two owners (#383)
 
   python scripts/audit_trait_economy.py --network mainnet
 
@@ -21,7 +23,13 @@ from datetime import datetime, timezone
 REPO_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
 sys.path.insert(0, REPO_ROOT)
 
-from lfg_core import config, economy_store, nft_index, trait_economy  # noqa: E402
+from lfg_core import (  # noqa: E402
+    closet_reconcile,
+    config,
+    economy_store,
+    nft_index,
+    trait_economy,
+)
 
 
 def classify_drift(
@@ -48,6 +56,7 @@ def build_alert_body(
     conservation: trait_economy.ConservationReport,
     completeness: trait_economy.CompletenessReport,
     report_path: str,
+    closet_ownership: closet_reconcile.ClosetOwnershipReport | None = None,
 ) -> str:
     """Compact Discord-webhook message for a NON-CLEAN audit run, labelling
     benign swap substitution separately from real conservation drift."""
@@ -71,6 +80,14 @@ def build_alert_body(
             f"Completeness violations: orphan bodies {completeness.orphan_bodies or '—'}, "
             f"slot anomalies in editions {sorted(completeness.slot_anomalies) or '—'}"
         )
+    if closet_ownership is not None and not closet_ownership.ok:
+        for row in closet_ownership.project_rows:
+            lines.append(f"- Closet keyed to project account {row.owner} -> {row.nft_id} (#383)")
+        for nft_id, owners in sorted(closet_ownership.unresolved_duplicates.items()):
+            lines.append(
+                f"- Closet {nft_id} claimed by {', '.join(owners)} — needs clio arbitration"
+            )
+        lines.append("Run scripts/reconcile_closet_tokens.py (dry-run first) for the above.")
     lines.append(
         "Run scripts/reconcile_supply_growth.py + reconcile_supply_shrinkage.py "
         "(dry-run first), then re-audit."
@@ -105,6 +122,7 @@ def format_economy_report(
     genesis_editions: int,
     timestamp: str,
     supply_changes: list[dict] | None = None,
+    closet_ownership: closet_reconcile.ClosetOwnershipReport | None = None,
 ) -> str:
     supply_changes = supply_changes or []
     lines: list[str] = []
@@ -115,6 +133,8 @@ def format_economy_report(
     lines.append(f"- Supply changes (ledger): **{len(supply_changes)}**")
     lines.append(f"- Conservation: **{'OK' if conservation.ok else 'DRIFT'}**")
     lines.append(f"- Completeness: **{'OK' if completeness.ok else 'VIOLATIONS'}**")
+    if closet_ownership is not None:
+        lines.append(f"- Closet ownership: **{'OK' if closet_ownership.ok else 'ANOMALIES'}**")
     lines.append("")
 
     lines.append("## Supply changes (intentional growth/shrinkage, from ledger)")
@@ -147,6 +167,19 @@ def format_economy_report(
     lines.append(
         ", ".join(str(e) for e in completeness.orphan_bodies) if completeness.orphan_bodies else "—"
     )
+    lines.append("")
+
+    lines.append("## Closet ownership anomalies (#383)")
+    lines.append("")
+    if closet_ownership is not None and not closet_ownership.ok:
+        lines.append("| Anomaly | Closet NFToken | Owner(s) |")
+        lines.append("| --- | --- | --- |")
+        for row in closet_ownership.project_rows:
+            lines.append(f"| project-account row ({row.status}) | {row.nft_id} | {row.owner} |")
+        for nft_id, owners in sorted(closet_ownership.unresolved_duplicates.items()):
+            lines.append(f"| duplicate token | {nft_id} | {', '.join(owners)} |")
+    else:
+        lines.append("_None._")
     lines.append("")
 
     lines.append("## Slot anomalies (slot not present exactly once)")
@@ -206,6 +239,7 @@ def main() -> int:
     # minted new editions are not mistaken for orphan bodies.
     effective = trait_economy.effective_genesis(genesis, supply_changes)
     completeness = trait_economy.verify_completeness(canonical, effective)
+    closet_ownership = closet_reconcile.audit_closet_ownership(conn)
 
     timestamp = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H-%M-%SZ")
     report = format_economy_report(
@@ -216,6 +250,7 @@ def main() -> int:
         len(genesis.edition_bodies),
         timestamp,
         supply_changes,
+        closet_ownership,
     )
     os.makedirs(args.report_dir, exist_ok=True)
     report_path = os.path.join(
@@ -227,12 +262,20 @@ def main() -> int:
     print(f"Network: {args.network}  live characters: {len(canonical)}")
     print(f"Conservation: {'OK' if conservation.ok else 'DRIFT'}")
     print(f"Completeness: {'OK' if completeness.ok else 'VIOLATIONS'}")
+    print(f"Closet ownership: {'OK' if closet_ownership.ok else 'ANOMALIES'}")
     print(f"Report: {report_path}")
-    clean = conservation.ok and completeness.ok
+    clean = conservation.ok and completeness.ok and closet_ownership.ok
     if not clean and args.alert_webhook:
         post_alert(
             args.alert_webhook,
-            build_alert_body(args.network, len(canonical), conservation, completeness, report_path),
+            build_alert_body(
+                args.network,
+                len(canonical),
+                conservation,
+                completeness,
+                report_path,
+                closet_ownership,
+            ),
         )
     return 0 if clean else 1
 

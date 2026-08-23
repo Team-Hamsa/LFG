@@ -155,10 +155,20 @@ def _apply_closet(
     genesis: trait_economy.Genesis | None = None,
 ) -> None:
     """Rebuild an owner's closet_assets/closet_bodies rows from their Closet
-    NFToken's metadata and set its lifecycle status: a token held by anyone other
-    than the issuer has been accepted (active); one still in the issuer wallet is
-    pending_accept. The offer_id is NOT on-chain — preserve any stored value so
-    the UI can re-show the pending accept QR.
+    NFToken's metadata and mark it active — the token is held by its real owner,
+    so the accept landed. The offer_id is NOT on-chain — preserve any stored
+    value so the UI can re-show the pending accept QR.
+
+    An ISSUER-held token is skipped, not recorded: a freshly minted Closet stays
+    in the issuer's wallet until the user accepts, so `owner` here is the issuer
+    and NOT the user the offer targets — whom this snapshot cannot identify.
+    Keying a row off it forged a second closet_tokens row pointing at the real
+    user's token (#383, one such row on mainnet 2026-08-17). The pending record
+    already exists: `closet_token.ensure_closet` wrote it under the real owner
+    before the mint was even streamed. Seeing an issuer-held Closet is also the
+    moment to scrub whatever a pre-fix run recorded, so the real user's Closet
+    stops being shadowed. This mirrors `backfill_economy._reconcile_closet`,
+    which learned the same lesson in #190 and was never ported back here.
 
     `genesis` (the EFFECTIVE genesis) is forwarded to `parse_closet_metadata` so
     a legacy-schema token's integer `bodies` list converts to `("Body", value)`
@@ -166,6 +176,9 @@ def _apply_closet(
     frozen) leaves that conversion off and behavior unchanged."""
     owner = token.get("owner")
     if not owner:
+        return
+    if owner in economy_store.project_accounts():
+        economy_store.delete_closet(conn, owner)
         return
     if isinstance(metadata, dict):
         assets, bodies = closet_token.parse_closet_metadata(metadata, genesis)
@@ -177,15 +190,13 @@ def _apply_closet(
         # a metadata dict (an empty closet is an empty lfg_closet block, not a
         # missing one), so None can only mean "couldn't read" — keep the
         # persisted contents and let a later modify/sync refine them. The
-        # lifecycle status below still updates: it derives from the token's
-        # owner, which we did resolve.
+        # token record below still updates: the owner resolved, and a
+        # user-held Closet is an accepted one regardless of what its
+        # metadata says.
         logging.warning(
             f"_apply_closet: unresolved metadata for {token.get('nft_id')}; "
             "keeping persisted closet contents (fail closed)"
         )
-    status = (
-        closet_token.ACTIVE if owner != config.SWAP_ISSUER_ADDRESS else closet_token.PENDING_ACCEPT
-    )
     existing = economy_store.get_closet_record(conn, owner)
     existing_offer_id = existing[3] if existing is not None else None
     economy_store.set_closet_token(
@@ -193,7 +204,7 @@ def _apply_closet(
         owner,
         token["nft_id"],
         token.get("uri_hex") or "",
-        status=status,
+        status=closet_token.ACTIVE,
         offer_id=existing_offer_id,
     )
 
