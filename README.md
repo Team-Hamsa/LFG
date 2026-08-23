@@ -82,7 +82,7 @@ Short walkthroughs of each core flow:
 <img src="assets/sourcetag.svg" alt="XRPL source tag 2606160021: tagged transaction volume and unique wallets" width="728">
 </div>
 
-**→ [Full hackathon build log](docs/HACKATHON.md)** — every feature, with the PRs and issues that landed it.
+**→ [Full hackathon build log](docs/HACKATHON.md)** — every feature, with the PRs and issues that landed it, plus a merged-PR changelog that regenerates on every merge.
 
 ---
 

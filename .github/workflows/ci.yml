@@ -15,6 +15,9 @@ on:
       # The nightly lfg-sourcetag snapshot commits only this JSON; no code
       # imports it, so it must not drag the full ruff/mypy/pytest gate.
       - 'metrics/**'
+      # The build-log-sync bot commits only docs/HACKATHON.md; docs never
+      # import into the gate.
+      - 'docs/**'
   pull_request:
     branches: [main]
 
