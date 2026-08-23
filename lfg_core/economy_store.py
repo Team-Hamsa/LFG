@@ -383,6 +383,15 @@ def record_supply_change(
     conn.commit()
 
 
+def supply_change_exists_for_edition(conn: sqlite3.Connection, edition: int) -> bool:
+    """True if ANY supply_changes row names this edition — i.e. the ledger has
+    ever seen it grow or shrink (a popped edition necessarily has a burn row)."""
+    row = conn.execute(
+        "SELECT 1 FROM supply_changes WHERE edition = ? LIMIT 1", (edition,)
+    ).fetchone()
+    return row is not None
+
+
 def supply_change_exists_for_nft(conn: sqlite3.Connection, nft_id: str, kind: str = "burn") -> bool:
     """True if a supply_changes row of `kind` already accounts for this token —
     the idempotency gate that stops the listener/reconciler double-counting a

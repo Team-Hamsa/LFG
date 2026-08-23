@@ -345,12 +345,16 @@ def _mirror_pending_error(deps: EconomyDeps, owner: str) -> str | None:
 
 
 def _legacy_deltas(rec: OnchainNft, sign: int) -> dict[str, int]:
-    """{"slot|value": sign} over all 9 TRAIT_ORDER slots (Body + the 8
-    non-body slots) for the legacy burn+remint pair's supply_changes row —
-    the exact key format `trait_economy.effective_genesis` parses."""
-    deltas = {f"Body|{te.slot_value(rec, 'Body')}": sign}
-    deltas.update({f"{s}|{te.slot_value(rec, s)}": sign for s in te.NON_BODY_SLOTS})
-    return deltas
+    """{"slot|value": sign} over the 8 NON-BODY slots for the legacy
+    burn+remint pair's supply_changes rows — the exact key format
+    `trait_economy.effective_genesis` parses. Body is deliberately NOT a key:
+    `effective_genesis` moves the edition's body via the `edition_bodies`
+    pop (burn) / set (mint), and the listener's out-of-band shrinkage row
+    (`trait_economy.burn_shrinkage_deltas`) is body-free for the same
+    reason. The two burn rows share one unique index (whichever lands first
+    wins), so they MUST be identical or the pair stops netting to zero —
+    the mainnet Body drift of 2026-08-22."""
+    return {f"{s}|{te.slot_value(rec, s)}": sign for s in te.NON_BODY_SLOTS}
 
 
 @dataclass
