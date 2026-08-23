@@ -209,6 +209,13 @@ class MockMarket:
             out["destination"] = destination
             out["marketplace"] = resolved["name"] if resolved else f"external ({destination[:8]}…)"
             out["external_url"] = resolved["url"] if resolved else None
+            # #426 clearing price, mirroring app._serialize_listing_row.
+            rate = resolved["broker_rate"] if resolved else None
+            out["broker_rate"] = rate
+            if rate is not None and row.get("amount_drops") is not None:
+                clearing = brokers.clearing_drops(int(row["amount_drops"]), rate)
+                out["clearing_drops"] = clearing
+                out["clearing_xrp"] = market_ops.drops_to_xrp_str(str(clearing))
         # #239 per-kind denomination, mirroring app._serialize_listing_row.
         if row.get("amount_drops") is not None:
             out["amount_drops"] = row["amount_drops"]
@@ -719,13 +726,22 @@ class MockMarket:
                 "offer_index": session["offer_index"],
             }
         if kind in ("bid", "bid_accept"):
-            return {
+            out = {
                 **base,
                 "reason": None,
                 "qr_url": "https://dev/mock-qr",
                 "xumm_url": "https://dev/mock-xumm",
                 "offer_index": session["offer_index"],
             }
+            if kind == "bid":
+                # #426: fill state of the placed bid (mirrors app._bid_fill_state).
+                bid = self._find_bid(session["offer_index"]) if session["offer_index"] else None
+                out["fill"] = (
+                    None
+                    if bid is None
+                    else ("live" if bid["is_live"] else bid.get("closed_reason") or "closed")
+                )
+            return out
         if kind == "cancel":
             return {
                 **base,

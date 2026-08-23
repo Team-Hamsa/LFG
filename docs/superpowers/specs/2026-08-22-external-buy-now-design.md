@@ -1,6 +1,6 @@
 # External listing "Buy now" — auto-calculated clearing price
 
-**Status:** proposed
+**Status:** implemented (#426)
 **Date:** 2026-08-22
 **Depends on:** #131 (external listing rows), #283 (native buy offers)
 

@@ -1999,6 +1999,19 @@ def _serialize_listing_row(
         resolved = brokers.resolve(destination, r["nft_id"])
         out["marketplace"] = resolved["name"] if resolved else f"external ({destination[:8]}…)"
         out["external_url"] = resolved["url"] if resolved else None
+        # #426: a broker with a MEASURED fee rate lets the client offer "Buy
+        # now" — a plain native bid (POST /api/market/bid) at the minimum
+        # amount the broker's bot will settle against this ask. Rate None
+        # (unmeasured broker) => no clearing fields => no button; guessing
+        # would produce bids that silently never fill. buyable stays False:
+        # the row is still not settleable by us and the /api/market/buy 409
+        # guard is unchanged — the bot settles, we only place the offer.
+        rate = resolved["broker_rate"] if resolved else None
+        out["broker_rate"] = rate
+        if rate is not None and r.get("amount_drops") is not None:
+            clearing = brokers.clearing_drops(int(r["amount_drops"]), rate)
+            out["clearing_drops"] = clearing
+            out["clearing_xrp"] = market_ops.drops_to_xrp_str(str(clearing))
     # #239 per-kind denomination: characters carry amount_drops/amount_xrp,
     # trait listings amount_brix. Emitted by presence rather than kind so a
     # legacy live XRP trait row (awaiting the backfill's stale-close) still
@@ -3008,6 +3021,15 @@ async def _advance_market_session(prefix: str, session: Any, loop: Any) -> None:
         bid_row = await market_flow.advance_bid_session(session)
         if bid_row is not None:
             await loop.run_in_executor(None, _write_bid_row, _market_network("character"), bid_row)
+        # #426: once the bid is on-ledger, report whether the indexed buy
+        # offer is still live or has been consumed (a broker's brokered
+        # accept closes it 'accepted' via the listener) — the external
+        # "Buy now" UI polls this and never claims success before the
+        # ledger shows the fill. None = no indexed row (yet); never guessed.
+        if session.state == market_flow.DONE and session.offer_index:
+            session.fill = await loop.run_in_executor(
+                None, _bid_fill_state, _market_network("character"), session.offer_index
+            )
     elif prefix == "bid_accept":
         accepted = await market_flow.advance_bid_accept_session(session)
         if accepted is not None:
@@ -3124,6 +3146,22 @@ def _write_bid_row(network: str, row: dict[str, Any]) -> None:
         market_store.upsert_bid(conn, market_store.BuyOffer(**row))
     finally:
         conn.close()
+
+
+def _bid_fill_state(network: str, offer_index: str) -> str | None:
+    """'live' while the indexed buy offer is open, its closed_reason
+    ('accepted' | 'cancelled' | 'stale') once closed, None when not indexed."""
+    conn = nft_index.init_db(nft_index.index_db_path(network))
+    try:
+        market_store.init_bid_schema(conn)
+        row = market_store.get_bid(conn, offer_index)
+    finally:
+        conn.close()
+    if row is None:
+        return None
+    if row.get("is_live"):
+        return "live"
+    return str(row.get("closed_reason") or "closed")
 
 
 def _close_bid_sync(network: str, offer_index: str, reason: str) -> None:

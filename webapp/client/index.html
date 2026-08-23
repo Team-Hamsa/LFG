@@ -339,6 +339,7 @@
       <p id="listing-detail-sub" class="card-sub"></p>
       <div id="listing-detail-attrs" class="listing-attrs"></div>
       <p id="listing-detail-bids" class="card-sub" hidden></p>
+      <p id="listing-detail-fee" class="card-sub" hidden></p>
       <div id="listing-bid-form" class="listing-bid-form" hidden>
         <input id="listing-bid-price" type="text" inputmode="decimal" placeholder="Bid in XRP">
         <button id="listing-bid-confirm" class="secondary">Confirm bid</button>
@@ -349,6 +350,7 @@
       </div>
       <div class="confirm-actions">
         <button id="listing-detail-bid" class="secondary" hidden>Place bid</button>
+        <button id="listing-detail-external" class="secondary" hidden></button>
         <button id="listing-detail-action" class="primary"></button>
         <button id="listing-detail-close" class="secondary">Close</button>
       </div>
@@ -376,6 +378,6 @@
        Telegram (window.Telegram stays undefined); loaded BEFORE app.js so the
        dual-mode boot can detect the Telegram context. -->
   <script src="telegram-web-app.js"></script>
-  <script type="module" src="app.js?v=63"></script>
+  <script type="module" src="app.js?v=64"></script>
 </body>
 </html>

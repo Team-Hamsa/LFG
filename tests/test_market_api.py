@@ -31,7 +31,7 @@ import pytest  # noqa: E402
 from aiohttp import web  # noqa: E402
 from aiohttp.test_utils import make_mocked_request  # noqa: E402
 
-from lfg_core import layer_store  # noqa: E402
+from lfg_core import brokers, layer_store  # noqa: E402
 from lfg_core.economy_store import (  # noqa: E402
     _ECONOMY_SCHEMA,  # noqa: E402
     set_closet_contents,
@@ -2455,9 +2455,41 @@ def test_browse_include_external_tags_broker_rows(onchain_env):
     assert ext["destination"] == XRPCAFE_BROKER
     assert ext["marketplace"] == "xrp.cafe"
     assert ext["external_url"] == f"https://xrp.cafe/nft/{CHAR2}"
+    # #426: cafe's rate is measured -> the clearing price rides on the row.
+    assert ext["broker_rate"] == 0.015890
+    assert ext["clearing_drops"] == brokers.clearing_drops(42_000_000, 0.015890) == 42_678_156
+    assert ext["clearing_xrp"] == "42.678156"
     internal = next(r for r in body["rows"] if r["offer_index"] == "A" * 64)
     assert internal["buyable"] is True
     assert "source" not in internal
+    for key in ("broker_rate", "clearing_drops", "clearing_xrp"):
+        assert key not in internal
+
+
+def test_browse_include_external_no_rate_no_clearing(onchain_env, tmp_path, monkeypatch):
+    # #426: an unmeasured broker (rate None) carries NO clearing fields — the
+    # client shows no Buy-now button rather than a bid that never fills.
+    path = tmp_path / "allow.json"
+    path.write_text(json.dumps({XRPCAFE_BROKER: {"name": "xrp.cafe", "broker_rate": None}}))
+    monkeypatch.setenv("BROKER_ALLOWLIST_PATH", str(path))
+    brokers._cache = None
+    brokers._cache_key = None
+    try:
+        _seed_external_listing(onchain_env)
+        resp = _run(
+            server.handle_market_listings(
+                _mocked_request("GET", "/api/market/listings?include_external=1")
+            )
+        )
+        body = _run(_read_json(resp))
+        ext = body["rows"][0]
+        assert ext["buyable"] is False
+        assert ext["broker_rate"] is None
+        assert "clearing_drops" not in ext
+        assert "clearing_xrp" not in ext
+    finally:
+        brokers._cache = None
+        brokers._cache_key = None
 
 
 def test_browse_include_external_never_shows_unknown_destinations(onchain_env):
@@ -2662,6 +2694,52 @@ def test_bid_start_happy_builds_expiring_payload(onchain_env, market_wallet, mon
     assert seen["owner"] == BUYER  # the NFT holder
     assert seen["amount_drops"] == "2000000"
     assert isinstance(seen["expiration"], int) and seen["expiration"] > 0
+
+
+def test_bid_status_done_reports_fill_state(onchain_env, market_wallet):
+    # #426: a placed bid's status poll reports whether the indexed buy offer
+    # is still live or was consumed (a broker's accept closes it 'accepted')
+    # so the external Buy-now UI never claims success before the ledger does.
+    s = server.market_flow.BidSession(
+        discord_id="dev",
+        wallet_address=SELLER,
+        nft_id=CHAR1,
+        owner=BUYER,
+        amount_drops=2_000_000,
+        platform="discord",
+    )
+    s.state = server.market_flow.DONE
+    s.offer_index = "D" * 64
+    server.market_sessions[s.id] = s
+
+    # No indexed row yet -> fill unknown (None), never a fabricated state.
+    body = _run(_read_json(_run(server.handle_market_bid_status(_StatusReq(s.id)))))
+    assert body["state"] == "done"
+    assert body["fill"] is None
+
+    _seed_bid(onchain_env, offer_index="D" * 64, bidder=SELLER)
+    body = _run(_read_json(_run(server.handle_market_bid_status(_StatusReq(s.id)))))
+    assert body["fill"] == "live"
+
+    conn = _reopen(onchain_env)
+    server.market_store.close_bid(conn, "D" * 64, "accepted")
+    conn.commit()
+    conn.close()
+    body = _run(_read_json(_run(server.handle_market_bid_status(_StatusReq(s.id)))))
+    assert body["fill"] == "accepted"
+
+    # A non-done session carries no fill (nothing on-ledger yet).
+    s2 = server.market_flow.BidSession(
+        discord_id="dev",
+        wallet_address=SELLER,
+        nft_id=CHAR1,
+        owner=BUYER,
+        amount_drops=2_000_000,
+        platform="discord",
+    )
+    server.market_sessions[s2.id] = s2
+    assert "fill" in server.market_flow.BidSession.to_dict(s2)
+    assert s2.to_dict()["fill"] is None
 
 
 def test_bid_accept_start_guards(onchain_env, market_wallet, monkeypatch):
