@@ -394,19 +394,19 @@ def upsert_bid(conn: sqlite3.Connection, bid: BuyOffer, *, preserve_closed: bool
     and the listener's close ('accepted') may land before the session's
     first `done` poll. A full overwrite would resurrect that row to
     is_live=1 and the fill watcher would report "still waiting" on an NFT
-    that already moved. With the flag, an existing row closed for a
-    LEDGER-DERIVED reason (accepted / cancelled — an NFTokenOffer index is
-    never re-created on ledger, so such a row never legitimately comes back
-    to life) keeps its is_live/closed_reason. A 'stale' close is NOT
-    preserved: it is an inference by the nightly backfill's stale pass (which
-    can race a bid created mid-sweep — offers fetched before the bid landed,
-    the listener's fresh row then closed stale), whereas the finalize write
-    follows a validated tesSUCCESS create and is the stronger evidence."""
+    that already moved. With the flag, an existing CLOSED row keeps its
+    is_live/closed_reason whatever the reason: accepted/cancelled come from
+    the consuming tx and 'stale' from a validated tec accept whose meta
+    DELETED the offer (fixExpiredNFTokenOfferRemoval) — all ledger-derived,
+    and an NFTokenOffer index is never re-created on ledger, so a closed row
+    never legitimately comes back to life. The one NON-ledger 'stale' (the
+    nightly backfill's stale pass racing a bid created mid-sweep) is prevented
+    at its source: backfill_market leaves rows created inside its own sweep
+    window for the next run to judge."""
     if preserve_closed:
-        keep = "buy_offers.is_live=0 AND buy_offers.closed_reason IN ('accepted','cancelled')"
         live_sql = (
-            f"is_live=CASE WHEN {keep} THEN 0 ELSE excluded.is_live END,\n"
-            f"closed_reason=CASE WHEN {keep} THEN buy_offers.closed_reason "
+            "is_live=CASE WHEN buy_offers.is_live=0 THEN 0 ELSE excluded.is_live END,\n"
+            "closed_reason=CASE WHEN buy_offers.is_live=0 THEN buy_offers.closed_reason "
             "ELSE excluded.closed_reason END"
         )
     else:

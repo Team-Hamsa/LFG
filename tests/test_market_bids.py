@@ -255,25 +255,22 @@ class TestBidStore:
         market_store.upsert_bid(conn, _bid())
         assert market_store.get_bid(conn, "BID1")["is_live"] == 1
 
-    def test_upsert_preserve_closed_overwrites_false_stale(self):
-        # #426 (Greptile P1, round 2): 'stale' is an INFERENCE by the nightly
-        # backfill (offers fetched for the token before the bid landed, then
-        # the stale pass closed the listener's fresh row), not a ledger fact.
-        # The finalize write follows a validated tesSUCCESS create and is the
-        # stronger evidence, so it repairs a stale row; only ledger-derived
-        # closes (accepted/cancelled — an offer index never comes back) stick.
-        conn = _conn()
-        market_store.upsert_bid(conn, _bid())
-        market_store.close_bid(conn, "BID1", "stale")
-        market_store.upsert_bid(conn, _bid(), preserve_closed=True)
-        row = market_store.get_bid(conn, "BID1")
-        assert row["is_live"] == 1
-        assert row["closed_reason"] is None
-        market_store.close_bid(conn, "BID1", "cancelled")
-        market_store.upsert_bid(conn, _bid(), preserve_closed=True)
-        row = market_store.get_bid(conn, "BID1")
-        assert row["is_live"] == 0
-        assert row["closed_reason"] == "cancelled"
+    def test_upsert_preserve_closed_keeps_every_close_reason(self):
+        # #426 (Greptile P1, rounds 2-3): every close the listener writes is
+        # ledger-derived — accepted/cancelled from the consuming tx, and
+        # 'stale' from a validated tec accept whose meta DELETED the offer
+        # (fixExpiredNFTokenOfferRemoval). None may be resurrected by the
+        # finalize write. The one NON-ledger 'stale' (the nightly backfill
+        # racing a bid created mid-sweep) is prevented at its source instead —
+        # see tests/test_backfill_market.py::test_bid_created_during_sweep_not_closed_stale.
+        for reason in ("accepted", "cancelled", "stale"):
+            conn = _conn()
+            market_store.upsert_bid(conn, _bid())
+            market_store.close_bid(conn, "BID1", reason)
+            market_store.upsert_bid(conn, _bid(), preserve_closed=True)
+            row = market_store.get_bid(conn, "BID1")
+            assert row["is_live"] == 0, reason
+            assert row["closed_reason"] == reason
 
     def test_live_bids_for_nft_ordered_highest_first(self):
         conn = _conn()
