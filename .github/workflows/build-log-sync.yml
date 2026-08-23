@@ -48,7 +48,7 @@ jobs:
             git commit -m "docs(HACKATHON): sync merged-PR changelog"
             # main can move between checkout and push (deploys, other bots) —
             # rebase our one doc commit and retry instead of failing the sync.
-            for attempt in 1 2 3; do
+            for _ in 1 2 3; do
               if git push; then
                 exit 0
               fi
