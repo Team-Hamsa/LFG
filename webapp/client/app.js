@@ -9,7 +9,7 @@
 // money math, and wizard-step labels. Kept in a separate module so they're
 // unit-testable under Node (tests/test_market_pure_js.py) without a browser
 // — see webapp/client/market_pure.js's own header for the full rationale.
-import * as marketPure from './market_pure.js?v=23';
+import * as marketPure from './market_pure.js?v=25';
 // Mint-flow pure helpers (issue #141): the cancel-outcome decision lives in
 // its own module so it's Node-testable too (tests/test_mint_pure_js.py).
 import * as mintPure from './mint_pure.js?v=24';
@@ -3742,7 +3742,27 @@ async function openListingDetail(row) {
     attrs.appendChild(chip);
   }
   const action = el('listing-detail-action');
-  if (vm.external) {
+  const extLink = el('listing-detail-external');
+  const feeNote = el('listing-detail-fee');
+  extLink.hidden = true;
+  feeNote.hidden = true;
+  const buyNow = marketPure.buyNowLabel(vm);
+  if (vm.external && buyNow) {
+    // #426: the broker's fee rate is measured, so the server computed the
+    // minimum bid its bot will settle. Primary = Buy now (a plain native
+    // bid at the clearing price; the broker's bot brokers the accept),
+    // deep link demoted to a secondary action.
+    action.textContent = buyNow;
+    action.disabled = false;
+    action.onclick = () => { buyExternalNow(row, vm).catch((e) => showError(e.message)); };
+    feeNote.textContent = marketPure.externalFeeNote(vm);
+    feeNote.hidden = false;
+    if (vm.externalUrl) {
+      extLink.textContent = `View on ${vm.marketplace} ↗`;
+      extLink.hidden = false;
+      extLink.onclick = () => window.open(vm.externalUrl, '_blank', 'noopener');
+    }
+  } else if (vm.external) {
     action.textContent = vm.marketplace ? `Buy on ${vm.marketplace} ↗` : 'External listing';
     action.disabled = !vm.externalUrl;
     action.onclick = () => { if (vm.externalUrl) window.open(vm.externalUrl, '_blank', 'noopener'); };
@@ -4424,6 +4444,78 @@ function marketBidAcceptRender(s) {
 async function placeBid(row, priceXrp) {
   closeListingDetail();
   await marketFlow('bid', '/api/market/bid', { nft_id: row.nft_id, price_xrp: priceXrp }, marketBidRender);
+}
+
+// --- #426: "Buy now" on an external (brokered) listing ---
+//
+// The seller's offer is destination-locked to the broker, so we can't settle
+// it — but the broker's bot auto-settles any plain buy offer that clears the
+// ask after its fee, wherever it came from. Buy now is therefore the EXISTING
+// bid flow at the server-computed clearing price (clearing_xrp on the row);
+// no new session type, no new endpoint. What differs is the copy after the
+// bid lands: settlement is somebody else's bot, so we keep polling the bid's
+// status (`fill` from the index) and only say "yours" once the ledger shows
+// the offer consumed; after ~5 minutes unfilled we say so honestly.
+
+const EXTERNAL_FILL_WAIT_MS = 5 * 60 * 1000;
+const EXTERNAL_FILL_POLL_MS = 5000;
+let externalFillTimer = null;
+
+async function buyExternalNow(row, vm) {
+  const ok = await confirmDialog({
+    title: `Buy now via ${vm.marketplace || 'the marketplace'}?`,
+    text: `${vm.clearingXrp} XRP — ${marketPure.externalFeeNote(vm)} Your offer expires on its own if it isn't taken (nothing is held).`,
+    confirmLabel: 'Place offer',
+  });
+  if (!ok) return;
+  closeListingDetail();
+  await marketFlow(
+    'bid',
+    '/api/market/bid',
+    { nft_id: row.nft_id, price_xrp: vm.clearingXrp },
+    marketExternalBuyRender(vm.marketplace),
+  );
+}
+
+function marketExternalBuyRender(marketplace) {
+  return (s) => {
+    if (s.state === 'done') {
+      const copy = marketPure.externalFillCopy(marketplace, s.fill);
+      // Start the fill watch AFTER showFlow() has painted this render (it
+      // bumps flowRenderGen; a watch armed before it would see itself as
+      // superseded and stop).
+      if (!copy.done) setTimeout(() => watchExternalFill(s.id, marketplace, Date.now()), 0);
+      return { ...copy, spinner: !copy.done };
+    }
+    const base = marketBidRender(s);
+    if (s.state === 'awaiting_signature') {
+      return { ...base, title: '🛒 Buy now', text: signText(s.push, `Scan to sign your ${marketplace || 'marketplace'} offer in Xaman.`) };
+    }
+    return base;
+  };
+}
+
+function watchExternalFill(sessionId, marketplace, startedAt) {
+  clearTimeout(externalFillTimer);
+  const gen = marketFlowGen;
+  const ownerGen = flowRenderGen;
+  externalFillTimer = setTimeout(async () => {
+    if (gen !== marketFlowGen || ownerGen !== flowRenderGen) return; // another flow took the panel
+    if (el('flow-panel').hidden) return; // user navigated away
+    let s;
+    try {
+      s = await api(MARKET_STATUS_PATH.bid(sessionId));
+    } catch (e) {
+      if (gen === marketFlowGen && ownerGen === flowRenderGen) watchExternalFill(sessionId, marketplace, startedAt);
+      return;
+    }
+    if (gen !== marketFlowGen || ownerGen !== flowRenderGen) return;
+    const unfilled = s.fill == null || s.fill === 'live';
+    const fill = unfilled && (Date.now() - startedAt) >= EXTERNAL_FILL_WAIT_MS ? 'waiting' : s.fill;
+    const copy = marketPure.externalFillCopy(marketplace, fill);
+    showFlow({ ...copy, spinner: !copy.done });
+    if (!copy.done) watchExternalFill(sessionId, marketplace, startedAt);
+  }, EXTERNAL_FILL_POLL_MS);
 }
 
 async function cancelBid(bid) {

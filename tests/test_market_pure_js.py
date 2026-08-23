@@ -467,6 +467,75 @@ def test_map_listing_row_defaults_to_buyable():
     assert vm["externalUrl"] is None
 
 
+def test_map_listing_row_external_clearing_fields():
+    # #426: an external row with a measured broker rate carries the
+    # auto-calculated clearing price; the view model passes it through.
+    row = {
+        "nft_id": "N1",
+        "kind": "character",
+        "nft_number": 1,
+        "image": None,
+        "amount_drops": 4990000,
+        "amount_xrp": "4.99",
+        "seller": "rS",
+        "offer_index": "EXT1",
+        "buyable": False,
+        "source": "external",
+        "destination": "rBroker",
+        "marketplace": "xrp.cafe",
+        "external_url": "https://xrp.cafe/nft/N1",
+        "broker_rate": 0.01589,
+        "clearing_drops": 5070572,
+        "clearing_xrp": "5.070572",
+    }
+    vm = run_js(f"M.mapListingRow({json.dumps(row)})")
+    assert vm["clearingXrp"] == "5.070572"
+    assert vm["brokerRate"] == 0.01589
+    assert vm["buyable"] is False
+    # Unmeasured broker / own rows: no clearing fields -> null.
+    row.pop("clearing_drops"), row.pop("clearing_xrp"), row.pop("broker_rate")
+    vm = run_js(f"M.mapListingRow({json.dumps(row)})")
+    assert vm["clearingXrp"] is None
+    assert vm["brokerRate"] is None
+
+
+def test_buy_now_label():
+    # #426: primary action text for an external card; empty when the row
+    # carries no clearing price (no rate measured) or isn't external.
+    ext = '{external: true, marketplace: "xrp.cafe", clearingXrp: "5.070572", amountXrp: "4.99"}'
+    assert run_js(f"M.buyNowLabel({ext})") == "Buy now — 5.070572 XRP via xrp.cafe"
+    no_rate = '{external: true, marketplace: "bidds", clearingXrp: null, amountXrp: "4.99"}'
+    assert run_js(f"M.buyNowLabel({no_rate})") == ""
+    own = '{external: false, marketplace: null, clearingXrp: "5.070572", amountXrp: "4.99"}'
+    assert run_js(f"M.buyNowLabel({own})") == ""
+    no_name = '{external: true, marketplace: null, clearingXrp: "5.070572"}'
+    assert run_js(f"M.buyNowLabel({no_name})") == "Buy now — 5.070572 XRP"
+
+
+def test_external_fee_note():
+    # The honest line under the button: ask + what the difference is.
+    vm = '{external: true, marketplace: "xrp.cafe", clearingXrp: "5.070572", amountXrp: "4.99", brokerRate: 0.01589}'
+    assert run_js(f"M.externalFeeNote({vm})") == (
+        "Listed at 4.99 XRP — the extra covers xrp.cafe's 1.59% broker fee; "
+        "the seller receives everything after that fee."
+    )
+    assert run_js("M.externalFeeNote({external: true, clearingXrp: null})") == ""
+
+
+def test_external_fill_copy():
+    # #426: settlement is the broker's bot — never claim success until the
+    # ledger shows the bid consumed. Copy keyed on the bid row's fill state.
+    mk = 'M.externalFillCopy("xrp.cafe", %s)'
+    assert "usually settles" in run_js(mk % '"live"')["text"]
+    assert run_js(mk % '"live"')["done"] is False
+    filled = run_js(mk % '"accepted"')
+    assert filled["done"] is True and "in your wallet" in filled["text"]
+    waiting = run_js(mk % '"waiting"')
+    assert waiting["done"] is True and "Still waiting on xrp.cafe" in waiting["text"]
+    gone = run_js(mk % '"cancelled"')
+    assert gone["done"] is True
+
+
 def test_external_label():
     assert run_js('M.externalLabel({external: true, marketplace: "bidds"})') == "Listed on bidds"
     assert run_js("M.externalLabel({external: true, marketplace: null})") == "External listing"

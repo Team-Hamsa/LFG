@@ -242,6 +242,10 @@ export function mapListingRow(row) {
     external: row.source === 'external',
     marketplace: row.marketplace ?? null,
     externalUrl: row.external_url ?? null,
+    // #426: auto-calculated clearing price for an external row whose broker
+    // has a MEASURED fee rate (null otherwise -> no Buy-now button).
+    clearingXrp: row.clearing_xrp ?? null,
+    brokerRate: row.broker_rate ?? null,
     // #203: collection-wide statistical rarity (characters only; null for
     // traits and for Mine rows, which never pass through the browse cache).
     rarityRank: row.rarity_rank ?? null,
@@ -264,6 +268,66 @@ export function rarityLabel(vm) {
 export function externalLabel(vm) {
   if (!vm.external) return '';
   return vm.marketplace ? `Listed on ${vm.marketplace}` : 'External listing';
+}
+
+/**
+ * #426: primary-action text for an external card that carries a clearing
+ * price — "Buy now — <clearing> XRP via <marketplace>". Empty string for a
+ * non-external row or one with no clearing price (unmeasured broker), so
+ * the caller falls back to the plain deep link.
+ */
+export function buyNowLabel(vm) {
+  if (!vm.external || vm.clearingXrp == null) return '';
+  const via = vm.marketplace ? ` via ${vm.marketplace}` : '';
+  return `Buy now — ${vm.clearingXrp} XRP${via}`;
+}
+
+/**
+ * #426: the honest line under Buy now — names the displayed ask and what the
+ * difference is (the broker's fee, taken at its rate against the WHOLE buy
+ * amount — so the seller receives whatever remains after that fee, overshoot
+ * included net of the rate). Empty when the row has no clearing price.
+ */
+export function externalFeeNote(vm) {
+  if (!vm.external || vm.clearingXrp == null) return '';
+  const who = vm.marketplace ? `${vm.marketplace}'s` : "the marketplace's";
+  const pct = vm.brokerRate != null ? `${(vm.brokerRate * 100).toFixed(2)}% ` : '';
+  const ask = vm.amountXrp != null ? `Listed at ${vm.amountXrp} XRP — the extra` : 'The premium over the ask';
+  return `${ask} covers ${who} ${pct}broker fee; the seller receives everything after that fee.`;
+}
+
+/**
+ * #426: flow-panel copy for an external Buy-now bid once it is on-ledger,
+ * keyed on the bid row's fill state from GET /api/market/bid/{id}
+ * ('live' | 'accepted' | 'cancelled' | 'stale' | null) — plus the
+ * client-side 'waiting' pseudo-state once the watch has run ~5 minutes.
+ * Settlement is the broker's bot, not us: we never say "yours" until the
+ * ledger shows the offer consumed. `done` = stop watching.
+ */
+export function externalFillCopy(marketplace, fill) {
+  const mp = marketplace || 'the marketplace';
+  if (fill === 'accepted') {
+    return { title: "🎉 It's yours!", text: `${mp} settled your offer — the NFT is now in your wallet.`, done: true };
+  }
+  if (fill === 'waiting') {
+    return {
+      title: '⏳ Still waiting',
+      text: `Still waiting on ${mp}. Your offer stays live for 7 days and will fill if they take it; you can cancel it any time from My bids.`,
+      done: true,
+    };
+  }
+  if (fill === 'live' || fill == null) {
+    return {
+      title: '✅ Offer placed',
+      text: `Offer placed. ${mp} usually settles these within a minute — this screen updates when the ledger shows the NFT moved.`,
+      done: false,
+    };
+  }
+  return {
+    title: 'Offer closed',
+    text: `Your offer is no longer live on-ledger (${fill}) and was not filled — nothing was charged.`,
+    done: true,
+  };
 }
 
 /**

@@ -1,6 +1,6 @@
 # External listing "Buy now" — auto-calculated clearing price
 
-**Status:** proposed
+**Status:** implemented (#426)
 **Date:** 2026-08-22
 **Depends on:** #131 (external listing rows), #283 (native buy offers)
 
@@ -47,8 +47,10 @@ A bid placed from the LFG app on cafe-listed #4691 (ask 4,990,000 drops) at
 
 Predicted fee `5,075,000 * 0.015890 = 80,641.75`; actual **80,642**. The rate is
 exact and the rounding is `ceil()`. The seller received 4,994,358 against their
-4,990,000 ask — **the excess above the clearing price goes to the seller, never
-to the broker**, so a small safety buffer is cheap insurance against rate drift.
+4,990,000 ask — **the broker's take is capped at its rate on the bid, so the
+excess above the clearing price reaches the seller (net of that rate), never
+the broker as a lump**, which makes a small safety buffer cheap insurance
+against rate drift.
 
 This also holds across taxons: #4691 is taxon 1760 (Assemble-minted), not 0.
 
@@ -58,9 +60,14 @@ Two fee regimes appear in the data (the fee taken against the buy side vs. the
 sell side), so the safe minimum is the worse of the two:
 
 ```
-min_bid_drops = ceil(ask_drops / (1 - broker_rate))     # cafe: rate = 0.015890
-              ~= ask_drops * 1.016146
+base_bid_drops = ceil(ask_drops / (1 - broker_rate))    # cafe: rate = 0.015890
+               ~= ask_drops * 1.016146
+min_bid_drops  = base_bid_drops + BROKER_CLEARING_BUFFER_DROPS   # env, default 0
 ```
+
+`lfg_core.brokers.clearing_drops` implements exactly this: the integer-rounded
+base plus the optional operator buffer (`BROKER_CLEARING_BUFFER_DROPS`, ignored
+when unset/unparsable/negative).
 
 cafe's rate is confirmed at `0.015890` against the buy amount (see above).
 Both failure modes are silent and invisible to the user, which is precisely why
@@ -157,7 +164,8 @@ funds are never held.
 ## Testing
 
 - Clearing-price math: exact drops, rounding up at the boundary, that the
-  computed bid satisfies `bid - rate*bid >= ask` for a spread of asks.
+  computed bid satisfies `bid - ceil(bid * rate) >= ask` for a spread of asks
+  (the broker fee is integer-rounded UP); the buffer is additive on top.
 - Allowlist: rate parsing, out-of-range rejection, `None` rate suppresses the
   field, malformed overlay falls back to built-ins.
 - Serialization: external row with and without a known rate; our own rows
