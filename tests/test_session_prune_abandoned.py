@@ -89,15 +89,19 @@ def test_buy_past_signature_never_expired(monkeypatch):
     assert s.state == market_flow.PENDING
 
 
-def test_abandoned_onramp_buy_is_expired_and_onramp_payload_cancelled(monkeypatch):
+def test_onramp_buy_never_expired(monkeypatch):
+    # AWAITING_ONRAMP is NOT pre-money: the buyer may already have signed the
+    # XRP->BRIX self-Payment and it can validate while the session still reads
+    # awaiting_onramp until the next poll. Expiring it would strand a purchase
+    # the buyer has already funded, so it is left alone at any age.
     cancels = _capture_cancels(monkeypatch)
-    s = _buy(market_flow.AWAITING_ONRAMP, app.SESSION_ABANDON_TTL + 1)
-    s.payload_uuid = None
-    s.onramp_payload_uuid = "onramp-uuid"
-    body = _health(monkeypatch, market_sessions={s.id: s})
-    assert body["detail"]["market"] == 0
-    assert s.state in market_flow.TERMINAL_STATES
-    assert cancels == ["onramp-uuid"]
+    for state in (market_flow.AWAITING_ONRAMP, market_flow.ONRAMP_CONFIRMED):
+        s = _buy(state, app.SESSION_ABANDON_TTL * 10)
+        s.onramp_payload_uuid = "onramp-uuid"
+        body = _health(monkeypatch, market_sessions={s.id: s})
+        assert body["detail"]["market"] == 1
+        assert s.state == state
+    assert cancels == []
 
 
 class _Mint:
