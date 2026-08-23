@@ -71,6 +71,19 @@ def test_hidden_when_the_drip_has_never_run():
     assert view(BASE)["visible"] is False
 
 
+def test_hidden_views_still_answer_the_claim_fields():
+    """claimBrix() re-reads /api/brix and gates on `view.claimable <= 0 ||
+    view.inFlight` without a visibility check; a hidden view must therefore
+    carry the full shape (claimable 0, not in flight) so an empty or unarmed
+    refresh can never fall through to the confirm dialog."""
+    for v in (view(None), view(BASE)):
+        assert v["visible"] is False
+        assert v["claimable"] == 0
+        assert v["inFlight"] is False
+        assert v["pollClaimId"] is None
+        assert v["button"]["disabled"] is True
+
+
 def test_visible_once_an_epoch_has_been_accrued():
     v = view(with_(last_epoch="2026-08-19"))
     assert v["visible"] is True

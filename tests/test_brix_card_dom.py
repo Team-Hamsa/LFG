@@ -91,5 +91,7 @@ def test_module_cache_busters_are_bumped_in_lockstep():
     js = _read("app.js")
     app_v = re.search(r'src="app\.js\?v=(\d+)"', html)
     assert app_v, "index.html does not cache-bust app.js"
-    assert int(app_v.group(1)) >= 60, "app.js changed but its ?v= was not bumped"
+    # Ratchet: raise this floor with every app.js ?v= bump. A version below the
+    # floor means index.html would serve a stale app.js to warm caches.
+    assert int(app_v.group(1)) >= 67, "app.js?v= regressed below the shipped version"
     assert re.search(r"from './brix_pure\.js\?v=\d+'", js)

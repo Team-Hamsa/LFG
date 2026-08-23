@@ -21,8 +21,20 @@ function plural(n) {
 // "0 BRIX" tile would advertise a payout the deployment cannot make yet. A
 // wallet with accrual history is always shown even if the meta row is
 // missing — that balance is real money and must never be hidden.
+// Hidden cards still answer every field claimBrix() reads, so a hidden view
+// can never be mistaken for a claimable one (`undefined <= 0` is false).
+const HIDDEN = Object.freeze({
+  visible: false,
+  claimable: 0,
+  headline: '',
+  sub: '',
+  inFlight: false,
+  pollClaimId: null,
+  button: Object.freeze({ label: 'Nothing to claim', disabled: true }),
+});
+
 export function brixCardView(status) {
-  if (!status) return { visible: false };
+  if (!status) return HIDDEN;
 
   const claimable = Number(status.claimable || 0);
   const accrued = Number(status.accrued_total || 0);
@@ -31,7 +43,7 @@ export function brixCardView(status) {
   const open = status.open_claim || null;
 
   if (!status.last_epoch && accrued === 0 && claimed === 0 && !open) {
-    return { visible: false };
+    return HIDDEN;
   }
 
   // An open claim (pending/submitted) has the accruals BOUND to it. Offering

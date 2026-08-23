@@ -35,7 +35,7 @@ import * as signDeliveryPure from './signdelivery_pure.js?v=1';
 // Daily BRIX drip card (#48): what the card renders and how each claim error
 // code is handled are pure decisions, Node-testable (tests/test_brix_pure_js.py);
 // loadBrix()/claimBrix() below are the glue.
-import * as brixPure from './brix_pure.js?v=3';
+import * as brixPure from './brix_pure.js?v=4';
 
 const params = new URLSearchParams(window.location.search);
 const insideDiscord = params.has('frame_id');
