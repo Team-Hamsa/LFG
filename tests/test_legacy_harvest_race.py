@@ -143,3 +143,15 @@ def test_blank_mint_of_never_seen_edition_still_logs_growth():
     conn = _conn()
     _mint(conn, POPPED, 9001, te.blank_attributes())
     assert len(_mint_rows(conn)) == 1
+
+
+def test_legacy_burn_row_carries_body_compensation_like_listener():
+    """Worn Body ≠ genesis-recorded Body (bodies are swappable): the listener's
+    shrinkage row adds `body_compensation_deltas`; harvest's burn row must too,
+    or whichever wins the unique-index race decides whether Body balances."""
+    rec = _rec(body="Ape")  # worn Ape, recorded Straight Dark
+    effective = te.Genesis(trait_counts={}, edition_bodies={528: ("Straight Dark", "male")})
+    expected = dict(te.burn_shrinkage_deltas(rec))
+    expected.update(te.body_compensation_deltas(rec, effective))
+    assert economy_flow._legacy_burn_deltas(rec, effective) == expected
+    assert expected["Body|Ape"] == -1 and expected["Body|Straight Dark"] == 1

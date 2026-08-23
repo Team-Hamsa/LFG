@@ -357,6 +357,16 @@ def _legacy_deltas(rec: OnchainNft, sign: int) -> dict[str, int]:
     return {f"{s}|{te.slot_value(rec, s)}": sign for s in te.NON_BODY_SLOTS}
 
 
+def _legacy_burn_deltas(rec: OnchainNft, effective: te.Genesis) -> dict[str, int]:
+    """The legacy upgrade's burn row: `_legacy_deltas(-1)` plus the listener's
+    `body_compensation_deltas` (worn Body ≠ genesis-recorded Body, bodies
+    being swappable) — byte-for-byte what `nft_listener._record_burn_shrinkage`
+    would write for the same token, so the unique-index race has no loser."""
+    deltas = _legacy_deltas(rec, sign=-1)
+    deltas.update(te.body_compensation_deltas(rec, effective))
+    return deltas
+
+
 @dataclass
 class HarvestSession:
     owner: str
@@ -460,7 +470,7 @@ async def run_harvest(session: HarvestSession, deps: EconomyDeps) -> None:
                 edition=session.edition,
                 body_value=body_value,
                 body_class=rec.body,
-                trait_deltas=_legacy_deltas(rec, sign=-1),
+                trait_deltas=_legacy_burn_deltas(rec, _effective_genesis(conn)),
                 actor="harvest",
                 reason=f"legacy harvest upgrade {session.id}",
                 # Stamp the burned token so the listener's out-of-band burn
