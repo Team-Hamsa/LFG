@@ -867,7 +867,16 @@ Model:
     promotes the record to `active` when it observes `NFTokenAcceptOffer` with
     `owner != issuer`. Harvest/Assemble gate on `status == active`; an offer
     payload is returned to the caller while status is `pending_accept` so the
-    user can be prompted to accept.
+    user can be prompted to accept. **Backstop (#382):** an accept that lands
+    while the listener is down (deployer drain-restart) is never observed, so
+    `lfg_service.app.sweep_pending_closet_accepts` runs in the same 2-minute
+    `_settlement_sweep_loop` as the trait-sale/shop sweeps — it re-checks up
+    to `_CLOSET_SWEEP_BATCH` (25) rows per pass from a rotating,
+    oldest-first `pending_accept` window (so a stuck oldest batch can't
+    starve newer rows) against clio (`nft_info`, `CLIO_WS_URL`) via the idempotent, fail-closed
+    `closet_token.confirm_accept` (promotes only when the on-ledger owner is
+    the row's owner; unaccepted offers / failed lookups stay pending). Gated
+    on `ECONOMY_ENABLED`.
 - **Taxon transition:** `CLOSET_TAXON = 1762` (new, default).
   `LEGACY_BUCKET_TAXON = 1761` (old; read from `BUCKET_TAXON` env var, default
   1761). The listener dual-reads both `lfg_closet` and `lfg_bucket` metadata
