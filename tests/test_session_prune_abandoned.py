@@ -89,18 +89,31 @@ def test_buy_past_signature_never_expired(monkeypatch):
     assert s.state == market_flow.PENDING
 
 
-def test_onramp_buy_never_expired(monkeypatch):
-    # AWAITING_ONRAMP is NOT pre-money: the buyer may already have signed the
-    # XRP->BRIX self-Payment and it can validate while the session still reads
-    # awaiting_onramp until the next poll. Expiring it would strand a purchase
-    # the buyer has already funded, so it is left alone at any age.
+def test_abandoned_onramp_buy_is_expired_and_onramp_payload_cancelled(monkeypatch):
+    # AWAITING_ONRAMP is still pre-money from the SERVICE's point of view: the
+    # on-ramp is a self-Payment into the buyer's own wallet, nothing is held
+    # either side, and the listing stays live. Past the TTL the payload has
+    # either expired or validated into BRIX the buyer keeps (re-buy is the
+    # one-signature path) — expiring the session changes no ledger state.
     cancels = _capture_cancels(monkeypatch)
-    for state in (market_flow.AWAITING_ONRAMP, market_flow.ONRAMP_CONFIRMED):
-        s = _buy(state, app.SESSION_ABANDON_TTL * 10)
-        s.onramp_payload_uuid = "onramp-uuid"
-        body = _health(monkeypatch, market_sessions={s.id: s})
-        assert body["detail"]["market"] == 1
-        assert s.state == state
+    s = _buy(market_flow.AWAITING_ONRAMP, app.SESSION_ABANDON_TTL + 1)
+    s.payload_uuid = None
+    s.onramp_payload_uuid = "onramp-uuid"
+    body = _health(monkeypatch, market_sessions={s.id: s})
+    assert body["detail"]["market"] == 0
+    assert s.state in market_flow.TERMINAL_STATES
+    assert cancels == ["onramp-uuid"]
+
+
+def test_onramp_confirmed_buy_never_expired(monkeypatch):
+    # ONRAMP_CONFIRMED is signed-and-seen: the service owes the buyer the
+    # accept payload on the next poll, so it is left alone at any age.
+    cancels = _capture_cancels(monkeypatch)
+    s = _buy(market_flow.ONRAMP_CONFIRMED, app.SESSION_ABANDON_TTL * 10)
+    s.onramp_payload_uuid = "onramp-uuid"
+    body = _health(monkeypatch, market_sessions={s.id: s})
+    assert body["detail"]["market"] == 1
+    assert s.state == market_flow.ONRAMP_CONFIRMED
     assert cancels == []
 
 

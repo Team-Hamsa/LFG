@@ -610,21 +610,25 @@ def _expire_abandoned_all() -> None:
     - mint/swap: AWAITING_PAYMENT (retired via session.cancel(); the
       300s payment wait normally reaches PAYMENT_TIMEOUT first, this is the
       backstop for a task that died without stamping it).
-    - market: AWAITING_SIGNATURE (List/Cancel/Buy/Bid/BidAccept) — nothing
-      is held either side until the signature lands. PENDING/
-      ONRAMP_CONFIRMED are signed and excluded, and so is the Buy on-ramp's
-      AWAITING_ONRAMP: the buyer may already have signed the XRP->BRIX
-      self-Payment, which can validate while the session still reads
-      awaiting_onramp until its next poll — expiring it would strand a
-      purchase the buyer has funded. TraitSellSession's own states are
-      deliberately NOT listed either: its Extract half runs a background
-      task with a real mint in it.
+    - market: AWAITING_SIGNATURE (List/Cancel/Buy/Bid/BidAccept) and the
+      Buy on-ramp's AWAITING_ONRAMP — nothing is held either side until the
+      signature lands, and the on-ramp is a self-Payment into the buyer's
+      OWN wallet: past the TTL its payload has either expired or validated
+      into BRIX the buyer simply keeps (the listing stays live; re-buy is
+      the one-signature BRIX-holder path), so expiring changes no ledger
+      state. PENDING/ONRAMP_CONFIRMED are signed-and-seen and excluded.
+      TraitSellSession's own states are deliberately NOT listed: its Extract
+      half runs a background task with a real mint in it.
     - economy: nothing. EconomyWebSession is RUNNING only while its
       background on-ledger op is executing (DONE/FAILED otherwise).
     """
     _expire_abandoned(mint_sessions, {mint_flow.AWAITING_PAYMENT}, mint_flow.FAILED)
     _expire_abandoned(swap_sessions, {swap_flow.AWAITING_PAYMENT}, swap_flow.FAILED)
-    _expire_abandoned(market_sessions, {market_flow.AWAITING_SIGNATURE}, market_flow.FAILED)
+    _expire_abandoned(
+        market_sessions,
+        {market_flow.AWAITING_SIGNATURE, market_flow.AWAITING_ONRAMP},
+        market_flow.FAILED,
+    )
 
 
 def _active_session(
