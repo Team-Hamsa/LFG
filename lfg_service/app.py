@@ -3143,7 +3143,9 @@ def _write_bid_row(network: str, row: dict[str, Any]) -> None:
     conn = nft_index.init_db(nft_index.index_db_path(network))
     try:
         market_store.init_bid_schema(conn)
-        market_store.upsert_bid(conn, market_store.BuyOffer(**row))
+        # preserve_closed (#426): the listener may already have closed this
+        # bid 'accepted' (a broker's bot settles in seconds) — never resurrect.
+        market_store.upsert_bid(conn, market_store.BuyOffer(**row), preserve_closed=True)
     finally:
         conn.close()
 

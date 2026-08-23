@@ -237,6 +237,24 @@ class TestBidStore:
         with pytest.raises(ValueError):
             market_store.close_bid(conn, "BID1", "sold")
 
+    def test_upsert_preserve_closed_keeps_accepted(self):
+        # #426 (Greptile P1 on PR #437): the service's finalize write can land
+        # AFTER the listener already closed the bid (a broker's bot settles in
+        # ~10s); preserve_closed must not resurrect it to is_live=1.
+        conn = _conn()
+        market_store.upsert_bid(conn, _bid())
+        market_store.close_bid(conn, "BID1", "accepted")
+        market_store.upsert_bid(conn, _bid(), preserve_closed=True)
+        row = market_store.get_bid(conn, "BID1")
+        assert row["is_live"] == 0
+        assert row["closed_reason"] == "accepted"
+        # No prior row: plain insert, live.
+        market_store.upsert_bid(conn, _bid(offer_index="BID2"), preserve_closed=True)
+        assert market_store.get_bid(conn, "BID2")["is_live"] == 1
+        # Default (listener/backfill) semantics still overwrite.
+        market_store.upsert_bid(conn, _bid())
+        assert market_store.get_bid(conn, "BID1")["is_live"] == 1
+
     def test_live_bids_for_nft_ordered_highest_first(self):
         conn = _conn()
         market_store.upsert_bid(conn, _bid(offer_index="B1", amount=1_000_000))
