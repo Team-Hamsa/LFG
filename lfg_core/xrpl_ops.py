@@ -17,7 +17,11 @@ from datetime import datetime
 from decimal import Decimal, InvalidOperation
 from typing import Any, BinaryIO, Literal, cast, overload
 
-from xrpl.asyncio.clients import AsyncJsonRpcClient, AsyncWebsocketClient
+from xrpl.asyncio.clients import (
+    AsyncJsonRpcClient,
+    AsyncWebsocketClient,
+    XRPLRequestFailureException,
+)
 from xrpl.clients import JsonRpcClient
 from xrpl.models import IssuedCurrencyAmount, TransactionMetadata
 from xrpl.models.currencies import XRP, IssuedCurrency
@@ -46,7 +50,7 @@ from xrpl.models.transactions import (
 )
 from xrpl.models.transactions.nftoken_create_offer import NFTokenCreateOfferFlag
 from xrpl.models.transactions.transaction import Transaction
-from xrpl.transaction import autofill_and_sign, submit_and_wait
+from xrpl.transaction import autofill_and_sign, simulate, submit_and_wait
 from xrpl.utils import get_nftoken_id, xrp_to_drops
 from xrpl.wallet import Wallet
 
@@ -338,6 +342,53 @@ async def _submission_scope(account: str, coordinator_held: bool) -> AsyncIterat
         yield
 
 
+_PRESUBMIT_REJECT_PREFIXES = ("tem", "tef", "tec")
+_PRESUBMIT_PROCEED_PREFIXES = ("tes", "ter", "tel")
+
+
+async def presubmit_simulate(tx: Transaction, client: JsonRpcClient, label: str) -> str | None:
+    """Pre-flight `tx` with rippled's `simulate`; return a deterministic
+    rejection code, or None to proceed (#58).
+
+    MUST see the UNSIGNED model — `simulate` refuses a signed transaction
+    (`transactionSigned`), so this runs before any autofill_and_sign. rippled
+    autofills Fee/Sequence for the simulation itself. A returned code maps to
+    the caller's existing `None` "definitive failure" contract — never
+    `IndeterminateResultError`, because nothing was signed, so the outcome is
+    known and no fee was burned.
+
+    Fail-closed ONLY on deterministic engine results (tem*/tef*/tec* — a tec*
+    would burn the fee on submit for the same verdict). tes*/ter*/tel* proceed
+    (ter = retry later; tel = node-local). Everything else — request failure,
+    transport error, unexpected shape, unclassified prefix — degrades OPEN
+    with a warning: the ledger stays the authority and a flaky node must never
+    brick minting. Gated on `PRESUBMIT_SIMULATE` read at call time (#323)."""
+    if not config.env_flag("PRESUBMIT_SIMULATE", config.PRESUBMIT_SIMULATE_DEFAULT):
+        return None
+    try:
+        response = await asyncio.to_thread(simulate, tx, client)
+        code = response.result.get("engine_result")
+    except XRPLRequestFailureException as e:
+        logging.warning(f"{label}: pre-submit simulate request failed ({e}); proceeding")
+        return None
+    except Exception as e:
+        logging.warning(f"{label}: pre-submit simulate errored ({e}); proceeding")
+        return None
+    if not isinstance(code, str) or not code:
+        logging.warning(f"{label}: pre-submit simulate returned no engine_result; proceeding")
+        return None
+    if code.startswith(_PRESUBMIT_REJECT_PREFIXES):
+        return code
+    if not code.startswith(_PRESUBMIT_PROCEED_PREFIXES):
+        logging.warning(f"{label}: pre-submit simulate unclassified result {code}; proceeding")
+    return None
+
+
+# Module-private alias: internal call sites and the spec (§3.3) name it this way;
+# `presubmit_simulate` is the public surface for other modules (admin burn).
+_presubmit_simulate = presubmit_simulate
+
+
 async def _submit_and_confirm(
     tx: Transaction,
     wallet: Wallet,
@@ -367,6 +418,13 @@ async def _submit_and_confirm(
     on the transaction Account (not the seed-derived signer, which may be a
     regular key) via the loop-keyed owner_lock registry (#180)."""
     account = getattr(tx, "account", None) or wallet.classic_address
+    # Pre-flight OUTSIDE the submission lock: simulation does not depend on
+    # the account sequence, and the per-Account critical section is shared
+    # with fire-and-forget harvests — no reason to serialize behind it.
+    rejected = await _presubmit_simulate(tx, client, label)
+    if rejected is not None:
+        logging.warning(f"{label}: pre-submit simulate rejected ({rejected})")
+        return None
     async with _submission_scope(account, coordinator_held):
         signed = await _autofill_and_sign_with_retry(tx, wallet, client, label)
         try:
@@ -568,6 +626,11 @@ async def prepare_sponsored_mint(
                 platform=platform,
                 campaign=campaign,
             )
+            rejected = await _presubmit_simulate(tx, client, "prepare_sponsored_mint")
+            if rejected is not None:
+                return MintPreparation(
+                    "failed", None, None, f"mint preparation rejected by simulate: {rejected}"
+                )
             signed = await asyncio.to_thread(autofill_and_sign, tx, client, wallet)
         return MintPreparation(
             "prepared",
@@ -1457,6 +1520,11 @@ async def prepare_sponsored_burn(
                     memo_id,
                 ),
             )
+            rejected = await _presubmit_simulate(payment, client, "prepare_sponsored_burn")
+            if rejected is not None:
+                return BurnPreparation(
+                    "failed", None, None, f"burn preparation rejected by simulate: {rejected}"
+                )
             signed = await asyncio.to_thread(autofill_and_sign, payment, client, wallet)
         return BurnPreparation(
             "prepared",

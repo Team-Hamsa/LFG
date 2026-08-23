@@ -92,3 +92,30 @@ def test_admin_burn_stamps_source_tag(monkeypatch):
     ok = _run(admin.burn_nft("00080000ABCD"))
     assert ok is True
     assert captured["tx"].source_tag == SOURCE_TAG
+
+
+def test_admin_burn_short_circuits_on_simulate_rejection(monkeypatch):
+    """#58: a deterministic simulate rejection returns False and never submits."""
+    _set_env(monkeypatch)
+    monkeypatch.setenv("PRESUBMIT_SIMULATE", "1")
+    import surfaces.discord_bot.admin as admin
+    from lfg_core import xrpl_ops
+
+    def never_submit(tx, client, wallet):
+        raise AssertionError("submit_and_wait must not run after a simulate rejection")
+
+    class _SimResp:
+        result = {"engine_result": "tecNO_PERMISSION", "applied": False}
+
+    simulated = {}
+
+    def fake_simulate(tx, client, *, binary=False):
+        simulated["tx"] = tx
+        return _SimResp()
+
+    monkeypatch.setattr(admin, "submit_and_wait", never_submit)
+    monkeypatch.setattr(xrpl_ops, "simulate", fake_simulate)
+    ok = _run(admin.burn_nft("00080000ABCD"))
+    assert ok is False
+    assert simulated["tx"].source_tag == SOURCE_TAG
+    assert not simulated["tx"].is_signed()

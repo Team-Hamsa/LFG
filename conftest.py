@@ -44,6 +44,12 @@ os.environ.setdefault("ECONOMY_NETWORK", "testnet")
 # cache's freshness window would likewise make repeated same-uuid polls in a
 # test serve stale state, so disable the throttle (terminal-state caching
 # remains; the fixture below clears it between tests).
+# Pre-submit simulate pre-flight (#58): the existing _submit_and_confirm /
+# sponsored-prepare suites stub autofill_and_sign / submit_and_wait, which
+# does NOT intercept a `simulate` call, so with the flag on they would hit the
+# network. Pin it off; tests that exercise the pre-flight force it on with
+# monkeypatch.setenv (the helper reads the flag at call time).
+os.environ.setdefault("PRESUBMIT_SIMULATE", "0")
 os.environ.setdefault("XUMM_WS_WATCH", "0")
 os.environ.setdefault("XUMM_STATUS_CACHE_SECONDS", "0")
 # Same hazard, tuned knobs: test_bulk_mint_ui_flag / test_shop_config /

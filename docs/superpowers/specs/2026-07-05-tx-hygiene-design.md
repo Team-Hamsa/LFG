@@ -3,7 +3,7 @@
 **Issues:** #58 (OPEN — the only live slice) · #61 · #75 · #57 · #54 (all
 CLOSED, kept below as the historical record) · **Date:** 2026-07-05 ·
 **Last review:** 2026-08-19 ·
-**Status:** live — re-reviewed 2026-08-19 against main@27dc301
+**Status:** shipped (PR for #58, 2026-08-23) — Tasks 1–6 landed: `xrpl_ops.presubmit_simulate` wired into `_submit_and_confirm`, both sponsored prepare paths and the admin burn; `PRESUBMIT_SIMULATE` (default 1) kill switch; root conftest pins it 0. Task 7 (live staging verification: underfunded-reserve probe, `tecPATH_DRY` refusal, bulk-mint latency) is an OPS follow-up, not part of the PR. Sponsored burn: a deterministic rejection re-queues with `_backoff` (matches existing preparation-failure behaviour) and the engine code is persisted in the obligation's `error` column so an operator can see why it will never clear.
 
 Originally one spec for the whole "tx hygiene" family. Four of its five issues
 shipped in July 2026. **Only §3 (#58, pre-submit simulation) is still

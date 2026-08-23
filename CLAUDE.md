@@ -137,6 +137,7 @@ SPONSORED_MINT_ARCHIVE_MAX_LAG_SECONDS=900                  # optional; how stal
 LISTENER_AUTO_CATCHUP=1                                     # optional (#402); default ON — on (re)subscribe the index listener auto-runs the bounded --catch-up-from-gap in the background when the archive is certified-but-gapped (needs BRIX_DISTRIBUTOR_ADDRESS; skips otherwise)
 LISTENER_AUTO_CATCHUP_COOLDOWN=600                          # optional (#402); min seconds between auto catch-up attempts (flap debounce)
 ECONOMY_AUDIT_WEBHOOK_URL=<discord-webhook-url>             # optional (#322); nightly trait-economy audit posts here on a non-clean run (unset = log only)
+PRESUBMIT_SIMULATE=1                                        # optional (#58); pre-submit `simulate` pre-flight on backend-signed txs — deterministic tem*/tef*/tec* refuses before signing (no fee burned), transport errors degrade open; 0 disables
 ```
 
 > **Sponsored free mint — the archive baseline is a hard prerequisite.**

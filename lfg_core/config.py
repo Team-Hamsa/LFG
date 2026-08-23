@@ -270,6 +270,10 @@ validate_economy_config(ECONOMY_ENABLED, ECONOMY_NETWORK, XRPL_NETWORK)
 # route answers 403 feature-disabled and the client hides the Marketplace UI —
 # lets the Minter + Trait Swapper launch on mainnet before the money-touching
 # marketplace (native NFTokenOffer list/buy/cancel) ships.
+# Pre-submit `simulate` pre-flight on backend-signed txs (#58). Read at CALL
+# time via env_flag (never this constant) so the kill switch and the test pin
+# both take effect without a restart/import-order dependency.
+PRESUBMIT_SIMULATE_DEFAULT = "1"  # named so a test can lock the shipped default
 MARKET_ENABLED_DEFAULT = "1"
 MARKET_ENABLED = env_flag("MARKET_ENABLED", MARKET_ENABLED_DEFAULT)
 WEBAPP_DEV_MODE = os.getenv("WEBAPP_DEV_MODE", "") not in ("", "0", "false", "False")
