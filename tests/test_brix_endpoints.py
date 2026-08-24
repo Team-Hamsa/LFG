@@ -355,3 +355,75 @@ def test_no_claim_is_opened_when_the_ledger_cannot_be_read(drip, monkeypatch):
     assert resp.status == 503
     assert drip.execute("SELECT COUNT(*) FROM brix_claims").fetchone()[0] == 0
     assert _body(_run(server.handle_brix_status(_Req())))["claimable"] == 3
+
+
+# --- get_trustline_state tri-state (PR #440) -----------------------------------
+
+
+class _WsResp:
+    def __init__(self, result, ok=True):
+        self.result = result
+        self._ok = ok
+
+    def is_successful(self):
+        return self._ok
+
+
+def _fake_ws(monkeypatch, responses):
+    class _Ws:
+        def __init__(self, *a, **k):
+            pass
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *a):
+            return False
+
+        async def request(self, req):
+            return responses.pop(0)
+
+    monkeypatch.setattr(xrpl_ops, "AsyncWebsocketClient", _Ws)
+
+
+def _state(monkeypatch, responses):
+    _fake_ws(monkeypatch, responses)
+    return _run(xrpl_ops.get_trustline_state("rW", "BRIX", "rIssuer"))
+
+
+def test_trustline_state_present_with_balance(monkeypatch):
+    resp = _WsResp({"lines": [{"currency": "BRIX", "account": "rIssuer", "balance": "12.5"}]})
+    assert _state(monkeypatch, [resp]) == (xrpl_ops.TrustlineState.PRESENT, Decimal("12.5"))
+
+
+def test_trustline_state_absent_after_a_full_page_walk(monkeypatch):
+    pages = [
+        _WsResp({"lines": [{"currency": "OTHER", "account": "rIssuer"}], "marker": "m1"}),
+        _WsResp({"lines": []}),
+    ]
+    assert _state(monkeypatch, pages) == (xrpl_ops.TrustlineState.ABSENT, None)
+
+
+def test_trustline_state_error_response_is_unknown_not_absent(monkeypatch):
+    """Greptile P1 on PR #440: xrpl-py returns (not raises) tooBusy & co. — a
+    result with no `lines`/`marker` must not read as an exhausted walk."""
+    resp = _WsResp({"error": "tooBusy", "status": "error"}, ok=False)
+    assert _state(monkeypatch, [resp]) == (xrpl_ops.TrustlineState.UNKNOWN, None)
+
+
+def test_trustline_state_transport_failure_is_unknown(monkeypatch):
+    class _Boom:
+        def __init__(self, *a, **k):
+            pass
+
+        async def __aenter__(self):
+            raise ConnectionError("down")
+
+        async def __aexit__(self, *a):
+            return False
+
+    monkeypatch.setattr(xrpl_ops, "AsyncWebsocketClient", _Boom)
+    assert _run(xrpl_ops.get_trustline_state("rW", "BRIX", "rI")) == (
+        xrpl_ops.TrustlineState.UNKNOWN,
+        None,
+    )
