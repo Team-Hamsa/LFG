@@ -90,7 +90,9 @@ def test_transient_poll_errors_keep_polling_then_refresh():
     and an exhausted budget must re-read status rather than freeze."""
     js = _read("app.js")
     body = js.split("function pollBrixClaim(", 1)[1][:2500]
-    catch = body.split("} catch (e) {", 1)[1].split("if (gen !== brixPollGen) return;\n    if (brixPure", 1)[0]
+    catch = body.split("} catch (e) {", 1)[1].split(
+        "if (gen !== brixPollGen) return;\n    if (brixPure", 1
+    )[0]
     assert "setTimeout(tick, BRIX_POLL_MS)" in catch
     assert "loadBrix()" in catch
     # the non-error budget exhaustion path refreshes too
