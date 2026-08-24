@@ -94,9 +94,13 @@ def test_transient_poll_errors_keep_polling_then_refresh():
         "if (gen !== brixPollGen) return;\n    if (brixPure", 1
     )[0]
     assert "setTimeout(tick, BRIX_POLL_MS)" in catch
-    assert "loadBrix()" in catch
-    # the non-error budget exhaustion path refreshes too
-    assert body.count("if (ticks >= BRIX_POLL_MAX) { loadBrix(); return; }") == 2
+    assert "loadBrix({ poll: false })" in catch
+    # Both budget-exhaustion paths refresh WITHOUT restarting the poll —
+    # otherwise loadBrix() sees the same open claim and resets the tick
+    # counter, making the bound meaningless (Greptile P1, second round).
+    assert body.count("if (ticks >= BRIX_POLL_MAX) { loadBrix({ poll: false }); return; }") == 2
+    load = js.split("async function loadBrix(", 1)[1][:1200]
+    assert "poll && view.visible && view.pollClaimId" in load
 
 
 def test_module_cache_busters_are_bumped_in_lockstep():
@@ -109,7 +113,7 @@ def test_module_cache_busters_are_bumped_in_lockstep():
     assert app_v, "index.html does not cache-bust app.js"
     # Ratchet: raise this floor with every app.js ?v= bump. A version below the
     # floor means index.html would serve a stale app.js to warm caches.
-    assert int(app_v.group(1)) >= 68, "app.js?v= regressed below the shipped version"
+    assert int(app_v.group(1)) >= 69, "app.js?v= regressed below the shipped version"
     brix_v = re.search(r"from './brix_pure\.js\?v=(\d+)'", js)
     assert brix_v, "app.js does not cache-bust the brix_pure.js import"
     # Same ratchet: raise with every brix_pure.js ?v= bump.

@@ -915,7 +915,10 @@ function renderBrixCard(view) {
   btn.disabled = view.button.disabled || brixClaiming;
 }
 
-async function loadBrix() {
+// { poll: false } refreshes the card without (re)starting the claim poll —
+// used once pollBrixClaim's budget is spent, so the bound is real and an
+// unresolved claim is handed to server-side recovery (Greptile P1, PR #434).
+async function loadBrix({ poll = true } = {}) {
   let status = null;
   try {
     status = await api('/api/brix');
@@ -927,7 +930,7 @@ async function loadBrix() {
   }
   const view = brixPure.brixCardView(status);
   renderBrixCard(view);
-  if (view.visible && view.pollClaimId) pollBrixClaim(view.pollClaimId);
+  if (poll && view.visible && view.pollClaimId) pollBrixClaim(view.pollClaimId);
   else stopBrixPoll();
   return view;
 }
@@ -950,7 +953,7 @@ function pollBrixClaim(claimId) {
       // within the same budget (Greptile P1 on PR #434). A 404 (claim gone /
       // not ours) keeps failing and simply burns down the same bound.
       if (gen !== brixPollGen) return;
-      if (ticks >= BRIX_POLL_MAX) { loadBrix(); return; }
+      if (ticks >= BRIX_POLL_MAX) { loadBrix({ poll: false }); return; }
       brixPollTimer = setTimeout(tick, BRIX_POLL_MS);
       return;
     }
@@ -963,7 +966,7 @@ function pollBrixClaim(claimId) {
     }
     // Budget exhausted: server-side recovery owns the claim from here, but
     // re-read status so the card reflects it instead of a frozen button.
-    if (ticks >= BRIX_POLL_MAX) { loadBrix(); return; }
+    if (ticks >= BRIX_POLL_MAX) { loadBrix({ poll: false }); return; }
     brixPollTimer = setTimeout(tick, BRIX_POLL_MS);
   };
   brixPollTimer = setTimeout(tick, BRIX_POLL_MS);
