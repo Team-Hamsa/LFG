@@ -881,6 +881,7 @@ const BRIX_POLL_MAX = 20;
 
 let brixPollTimer = null;
 let brixPollGen = 0; // bumps on every poll start, invalidating in-flight ticks
+let brixLoadGen = 0; // bumps on every loadBrix(), invalidating stale responses
 let brixClaiming = false;
 // Set from claimErrorView().lockLabel after claims_disabled/trustline_required
 // — preconditions GET /api/brix cannot express, so the post-error reload would
@@ -919,11 +920,12 @@ function renderBrixCard(view) {
 // used once pollBrixClaim's budget is spent, so the bound is real and an
 // unresolved claim is handed to server-side recovery (Greptile P1, PR #434).
 async function loadBrix({ poll = true } = {}) {
-  // A poll-less refresh is pinned to the poll generation it was issued under:
-  // if a newer poll/landing has moved it while the fetch was in flight, the
-  // (possibly stale, still-open) status is dropped rather than repainted
-  // over a terminal render (Greptile P1, PR #434).
-  const gen = brixPollGen;
+  // Every load is pinned to the load + poll generations it was issued under:
+  // if either moved while the fetch was in flight, the (possibly stale,
+  // still-open) status is dropped rather than repainted over a newer render
+  // or re-polled for an obsolete claim (Greptile + CodeRabbit on PR #434).
+  const loadGen = ++brixLoadGen;
+  const pollGen = brixPollGen;
   let status = null;
   try {
     status = await api('/api/brix');
@@ -933,7 +935,7 @@ async function loadBrix({ poll = true } = {}) {
     // screen the user actually came for.
     status = null;
   }
-  if (!poll && gen !== brixPollGen) return null;
+  if (loadGen !== brixLoadGen || pollGen !== brixPollGen) return null;
   const view = brixPure.brixCardView(status);
   renderBrixCard(view);
   // poll:false never touches the poll — an exhausted refresh resolving late

@@ -106,9 +106,9 @@ def test_transient_poll_errors_keep_polling_then_refresh():
     # ...and a poll-less refresh whose generation moved while fetching is
     # dropped before render, so it can't repaint "Claiming…" over a newer
     # poll's terminal render (Greptile, third round).
-    assert load.index("if (!poll && gen !== brixPollGen) return null;") < load.index(
-        "renderBrixCard(view)"
-    )
+    assert load.index(
+        "if (loadGen !== brixLoadGen || pollGen !== brixPollGen) return null;"
+    ) < load.index("renderBrixCard(view)")
 
 
 def test_module_cache_busters_are_bumped_in_lockstep():
@@ -121,7 +121,7 @@ def test_module_cache_busters_are_bumped_in_lockstep():
     assert app_v, "index.html does not cache-bust app.js"
     # Ratchet: raise this floor with every app.js ?v= bump. A version below the
     # floor means index.html would serve a stale app.js to warm caches.
-    assert int(app_v.group(1)) >= 71, "app.js?v= regressed below the shipped version"
+    assert int(app_v.group(1)) >= 72, "app.js?v= regressed below the shipped version"
     brix_v = re.search(r"from './brix_pure\.js\?v=(\d+)'", js)
     assert brix_v, "app.js does not cache-bust the brix_pure.js import"
     # Same ratchet: raise with every brix_pure.js ?v= bump.
