@@ -15,22 +15,26 @@ def _read(name: str) -> str:
         return f.read()
 
 
-def test_index_has_the_brix_card_inside_the_home_panel():
+def test_index_has_the_brix_claim_button_in_the_home_action_row():
+    """The drip is one action button alongside Mint/Build/Swap/Trade — not a
+    section of its own (user call, 2026-08-24)."""
     html = _read("index.html")
-    assert 'id="brix-card"' in html
-    for node in ("brix-headline", "brix-sub", "brix-claim-btn"):
-        assert f'id="{node}"' in html
-    # It belongs to the home screen, i.e. between #mint-panel and its close.
+    assert 'id="brix-claim-btn"' in html
     home = html.split('id="mint-panel"', 1)[1].split("</section>", 1)[0]
-    assert 'id="brix-card"' in home
+    actions = home.split('class="actions"', 1)[1].split('id="leaderboard"', 1)[0]
+    assert 'id="brix-claim-btn"' in actions
+    # ...in the same row as the other action buttons.
+    assert actions.index('id="brix-claim-btn"') > actions.index('id="market-btn"')
+    btn = re.search(r'<button id="brix-claim-btn"[^>]*>', html)
+    assert btn and 'class="secondary"' in btn.group(0)
 
 
-def test_card_starts_hidden():
+def test_button_starts_hidden():
     """brixCardView decides visibility; an unarmed deployment must never
-    flash a payout tile before the first fetch resolves."""
+    flash a payout button before the first fetch resolves."""
     html = _read("index.html")
-    card = re.search(r'<div id="brix-card"[^>]*>', html)
-    assert card and "hidden" in card.group(0)
+    btn = re.search(r'<button id="brix-claim-btn"[^>]*>', html)
+    assert btn and "hidden" in btn.group(0)
 
 
 def test_app_js_imports_brix_pure():
@@ -121,7 +125,7 @@ def test_module_cache_busters_are_bumped_in_lockstep():
     assert app_v, "index.html does not cache-bust app.js"
     # Ratchet: raise this floor with every app.js ?v= bump. A version below the
     # floor means index.html would serve a stale app.js to warm caches.
-    assert int(app_v.group(1)) >= 72, "app.js?v= regressed below the shipped version"
+    assert int(app_v.group(1)) >= 73, "app.js?v= regressed below the shipped version"
     brix_v = re.search(r"from './brix_pure\.js\?v=(\d+)'", js)
     assert brix_v, "app.js does not cache-bust the brix_pure.js import"
     # Same ratchet: raise with every brix_pure.js ?v= bump.

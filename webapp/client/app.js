@@ -899,18 +899,20 @@ function stopBrixPoll() {
 }
 
 function renderBrixCard(view) {
-  const card = el('brix-card');
-  card.hidden = !view.visible;
-  if (!view.visible) return;
-  el('brix-headline').textContent = view.headline;
-  el('brix-sub').textContent = view.sub;
+  // The drip is one action button in the home row, not a section: same class,
+  // size and alignment as Mint/Build/Swap/Trade. The explanatory copy the old
+  // card rendered lives on as the button's tooltip/aria label.
   const btn = el('brix-claim-btn');
+  btn.hidden = !view.visible;
+  if (!view.visible) return;
+  btn.title = view.sub;
+  btn.setAttribute('aria-label', `${view.button.label} — ${view.sub}`);
   if (brixLock && !view.inFlight) {
-    btn.textContent = brixLock;
+    btn.textContent = `\u{1F9F1} ${brixLock}`;
     btn.disabled = true;
     return;
   }
-  btn.textContent = view.button.label;
+  btn.textContent = `\u{1F9F1} ${view.button.label}`;
   // brixClaiming guards the window between the POST and its response, where
   // the freshly-rendered view still shows the old (claimable) balance.
   btn.disabled = view.button.disabled || brixClaiming;
