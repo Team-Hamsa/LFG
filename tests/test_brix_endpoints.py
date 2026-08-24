@@ -715,3 +715,19 @@ def test_trustline_concurrent_terminal_polls_do_not_500(drip, monkeypatch):
     a, b = _run(both())
     assert {a.status, b.status} == {200}
     assert _body(a)["code"] == "tx_unconfirmed"
+
+
+def test_trustline_status_survives_a_failed_push_token_write(drip, monkeypatch):
+    """Token persistence is best-effort (CodeRabbit on #442): a failing write
+    neither 500s the poll nor marks the token saved."""
+    uuid = _started(drip, monkeypatch)
+
+    def boom(*a):
+        raise RuntimeError("db locked")
+
+    monkeypatch.setattr(server.identity_store, "set_user_token", boom)
+    _status(monkeypatch, signed=True, account=WALLET, txid="TX1", user_token="tok")
+    _tx(monkeypatch, validated=False)
+    resp = _run(server.handle_brix_trustline_status(_Req(match_info={"uuid": uuid})))
+    assert resp.status == 200 and _body(resp)["state"] == "validating"
+    assert not server.brix_trustline_payloads[uuid].get("token_saved")

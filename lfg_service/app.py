@@ -1701,11 +1701,16 @@ async def handle_brix_trustline_status(request):
             brix_trustline_payloads.pop(uuid, None)  # tolerate a concurrent terminal poll
             return web.json_response({"state": "rejected", "code": "signer_mismatch"})
         # #212: refresh the push token off every signed payload we poll.
+        # Best-effort like every other capture site: a failed write is retried
+        # on the next poll and never turns a terminal state into a 500.
         if s.get("user_token") and not rec.get("token_saved"):
-            rec["token_saved"] = True
-            await asyncio.to_thread(
-                identity_store.set_user_token, rec["platform"], rec["user_id"], s["user_token"]
-            )
+            try:
+                await asyncio.to_thread(
+                    identity_store.set_user_token, rec["platform"], rec["user_id"], s["user_token"]
+                )
+                rec["token_saved"] = True
+            except Exception as e:  # noqa: BLE001
+                logging.warning("brix trustline %s: push-token persist failed: %s", uuid, e)
         # Signed is not set: a TrustSet can still fail on-ledger (tec*, or
         # never validate). Only a validated tesSUCCESS clears the record;
         # a validated failure is `rejected`; not-yet-validated keeps polling.
