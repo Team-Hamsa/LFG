@@ -32,6 +32,10 @@ import * as harvestPure from './harvest_pure.js?v=2';
 // desktop-primary QR is a pure truth table, Node-testable
 // (tests/test_signdelivery_pure_js.py); applySignDelivery() below is the glue.
 import * as signDeliveryPure from './signdelivery_pure.js?v=1';
+// Daily BRIX drip card (#48): what the card renders and how each claim error
+// code is handled are pure decisions, Node-testable (tests/test_brix_pure_js.py);
+// loadBrix()/claimBrix() below are the glue.
+import * as brixPure from './brix_pure.js?v=4';
 
 const params = new URLSearchParams(window.location.search);
 const insideDiscord = params.has('frame_id');
@@ -672,6 +676,8 @@ function showMintHome() {
   showPanel('mint-panel');
   status(`Hey ${me.username} — welcome to the job site.`);
   loadLeaderboard();
+  brixLock = null; // a fresh landing gets a fresh look at claimability
+  loadBrix();
   refreshOffersBadge();
 }
 
@@ -862,6 +868,179 @@ function setupLeaderboard() {
     lbState.anchor = next >= today ? null : next;
     loadLeaderboard();
   });
+}
+
+// --- Daily BRIX drip card (#48, home screen) ---
+
+// Poll cadence for a claim left in a non-terminal state. The payout is a
+// single Payment, so this is seconds — but an "unknown" outcome is resolved by
+// the server-side recovery job, not by us, so the poll gives up rather than
+// hammering the endpoint forever.
+const BRIX_POLL_MS = 3000;
+const BRIX_POLL_MAX = 20;
+
+let brixPollTimer = null;
+let brixPollGen = 0; // bumps on every poll start, invalidating in-flight ticks
+let brixLoadGen = 0; // bumps on every loadBrix(), invalidating stale responses
+let brixClaiming = false;
+// Set from claimErrorView().lockLabel after claims_disabled/trustline_required
+// — preconditions GET /api/brix cannot express, so the post-error reload would
+// otherwise re-arm the button on the still-positive balance. Pins the button
+// disabled until the next home landing clears it. Every other code leaves it
+// null: the refreshed status is the truth there. Greptile P1s on PR #434.
+let brixLock = null;
+
+function stopBrixPoll() {
+  brixPollGen++;
+  if (brixPollTimer) {
+    clearTimeout(brixPollTimer);
+    brixPollTimer = null;
+  }
+}
+
+function renderBrixCard(view) {
+  const card = el('brix-card');
+  card.hidden = !view.visible;
+  if (!view.visible) return;
+  el('brix-headline').textContent = view.headline;
+  el('brix-sub').textContent = view.sub;
+  const btn = el('brix-claim-btn');
+  if (brixLock && !view.inFlight) {
+    btn.textContent = brixLock;
+    btn.disabled = true;
+    return;
+  }
+  btn.textContent = view.button.label;
+  // brixClaiming guards the window between the POST and its response, where
+  // the freshly-rendered view still shows the old (claimable) balance.
+  btn.disabled = view.button.disabled || brixClaiming;
+}
+
+// { poll: false } refreshes the card without (re)starting the claim poll —
+// used once pollBrixClaim's budget is spent, so the bound is real and an
+// unresolved claim is handed to server-side recovery (Greptile P1, PR #434).
+async function loadBrix({ poll = true } = {}) {
+  // Every load is pinned to the load + poll generations it was issued under:
+  // if either moved while the fetch was in flight, the (possibly stale,
+  // still-open) status is dropped rather than repainted over a newer render
+  // or re-polled for an obsolete claim (Greptile + CodeRabbit on PR #434).
+  const loadGen = ++brixLoadGen;
+  const pollGen = brixPollGen;
+  let status = null;
+  try {
+    status = await api('/api/brix');
+  } catch (e) {
+    // The drip is a bonus tile, never the point of the page: a failed fetch
+    // hides it silently rather than throwing an error toast over the home
+    // screen the user actually came for.
+    status = null;
+  }
+  if (loadGen !== brixLoadGen || pollGen !== brixPollGen) return null;
+  const view = brixPure.brixCardView(status);
+  renderBrixCard(view);
+  // poll:false never touches the poll — an exhausted refresh resolving late
+  // must not stopBrixPoll() a poll a newer home landing has since started.
+  if (!poll) return view;
+  if (view.visible && view.pollClaimId) pollBrixClaim(view.pollClaimId);
+  else stopBrixPoll();
+  return view;
+}
+
+// Follow one claim to a terminal state. Only the claim's OWNER can read it
+// (the endpoint 404s otherwise), so any failure here just stops the poll.
+function pollBrixClaim(claimId) {
+  stopBrixPoll();
+  const gen = brixPollGen;
+  let ticks = 0;
+  const tick = async () => {
+    if (gen !== brixPollGen) return;
+    ticks++;
+    let res = null;
+    try {
+      res = await api(`/api/brix/claim/${claimId}`);
+    } catch (e) {
+      // A transient poll failure (network blip, 5xx) must not strand the
+      // button on "Claiming…" until the next home landing — keep ticking
+      // within the same budget (Greptile P1 on PR #434). A 404 (claim gone /
+      // not ours) keeps failing and simply burns down the same bound.
+      if (gen !== brixPollGen) return;
+      if (ticks >= BRIX_POLL_MAX) { loadBrix({ poll: false }); return; }
+      brixPollTimer = setTimeout(tick, BRIX_POLL_MS);
+      return;
+    }
+    if (gen !== brixPollGen) return;
+    if (brixPure.isClaimTerminal(res.state)) {
+      if (res.state === 'confirmed') toast(`🧱 ${res.amount} BRIX landed in your wallet.`);
+      else toast('That BRIX claim did not go through — your balance is back.');
+      loadBrix();
+      return;
+    }
+    // Budget exhausted: server-side recovery owns the claim from here, but
+    // re-read status so the card reflects it instead of a frozen button.
+    if (ticks >= BRIX_POLL_MAX) { loadBrix({ poll: false }); return; }
+    brixPollTimer = setTimeout(tick, BRIX_POLL_MS);
+  };
+  brixPollTimer = setTimeout(tick, BRIX_POLL_MS);
+}
+
+async function claimBrix() {
+  const btn = el('brix-claim-btn');
+  if (brixClaiming) return;
+  // Re-read the balance before asking: the amount goes into the confirm copy,
+  // and the accrual cron may have moved it since the card was rendered.
+  let fresh = null;
+  try {
+    fresh = await api('/api/brix');
+  } catch (e) {
+    toast('Could not read your BRIX balance right now.');
+    return; // leave the card exactly as it is — nothing was claimed
+  }
+  const view = brixPure.brixCardView(fresh);
+  renderBrixCard(view);
+  if (view.claimable <= 0 || view.inFlight) {
+    if (view.pollClaimId) pollBrixClaim(view.pollClaimId);
+    return;
+  }
+  const ok = await confirmDialog({
+    title: `Claim ${view.headline}?`,
+    text: 'This pays your accrued BRIX out to your wallet on the XRP Ledger.',
+    confirmLabel: 'Claim it',
+  });
+  if (!ok) return;
+
+  // A second POST while the first is in flight would bind nothing and report a
+  // false error (409 claim_in_flight), so the button is locked for the round trip.
+  brixClaiming = true;
+  btn.disabled = true;
+  btn.textContent = 'Claiming…';
+  try {
+    const res = await api('/api/brix/claim', { method: 'POST', body: '{}' });
+    if (brixPure.isClaimTerminal(res.state)) {
+      if (res.state === 'confirmed') toast(`🧱 ${res.amount} BRIX landed in your wallet.`);
+      else toast('That BRIX claim did not go through — your balance is back.');
+    } else {
+      toast('Claim submitted — settling on the ledger…');
+      pollBrixClaim(res.claim_id);
+    }
+  } catch (e) {
+    const code = (e.body && e.body.code) || '';
+    // claimErrorView is the single place that decides whether a code may be
+    // retried — notably claim_unconfirmed may NOT be, since the server left
+    // the accruals bound to a payout that may well have landed (the reload
+    // below then sees the open claim and polls it). claims_disabled /
+    // trustline_required pin the button (lockLabel) so the reload cannot
+    // re-arm it on a balance the server refuses to pay.
+    const ev = brixPure.claimErrorView(code);
+    toast(ev.message);
+    if (ev.lockLabel) brixLock = ev.lockLabel;
+  } finally {
+    brixClaiming = false;
+  }
+  await loadBrix();
+}
+
+function setupBrixCard() {
+  el('brix-claim-btn').addEventListener('click', claimBrix);
 }
 
 // Mint flow step indicator (hidden for flows without a stage, e.g. trustlines)
@@ -4665,6 +4844,7 @@ async function main() {
 
   setupLogo();
   setupLeaderboard();
+  setupBrixCard();
   el('register-retry-btn').onclick = () => (insideWeb ? startWebSignin() : startSignin());
   el('mint-btn').onclick = () => startMint();
   el('flow-regen-btn').onclick = onFlowRegen;

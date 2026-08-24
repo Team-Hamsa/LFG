@@ -58,7 +58,23 @@
         <button id="market-btn" class="secondary">🛒 Trade</button>
         <button id="offers-btn" class="secondary" hidden>🎁 Pending offers</button>
       </div>
-      <div id="leaderboard" class="leaderboard">
+
+      <!-- Daily BRIX drip (#48): 1 BRIX per unlisted NFT per UTC day, accrued
+           off-ledger and paid out on claim. Hidden until the drip has actually
+           produced something — see brixCardView(). Styled with existing card
+           classes plus inline rules so the stylesheet keeps its filename (the
+           Discord desktop cache keys on the CSS path, not on ?v=). -->
+      <div id="brix-card" class="brix-card" hidden
+           style="margin-top:1rem; padding:.85rem 1rem; border-radius:12px; background:rgba(255,255,255,.05);">
+        <div style="display:flex; align-items:center; justify-content:space-between; gap:.75rem; flex-wrap:wrap;">
+          <div>
+            <h3 style="margin:0;">🧱 <span id="brix-headline">0 BRIX</span></h3>
+            <p id="brix-sub" class="card-sub" style="margin:.25rem 0 0;"></p>
+          </div>
+          <button id="brix-claim-btn" class="secondary" disabled>Nothing to claim</button>
+        </div>
+      </div>
+            <div id="leaderboard" class="leaderboard">
         <h3 class="lb-title">🏆 Leaderboard</h3>
         <div id="lb-periods" class="lb-chips" role="tablist" aria-label="Time period">
           <button class="lb-chip active" role="tab" aria-selected="true" data-period="today">Today</button>
@@ -378,6 +394,6 @@
        Telegram (window.Telegram stays undefined); loaded BEFORE app.js so the
        dual-mode boot can detect the Telegram context. -->
   <script src="telegram-web-app.js"></script>
-  <script type="module" src="app.js?v=65"></script>
+  <script type="module" src="app.js?v=72"></script>
 </body>
 </html>
