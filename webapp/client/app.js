@@ -1114,17 +1114,25 @@ function finishTrustline(state, code) {
   }
 }
 
+let trustlinePollGen = 0;
 function pollTrustline(uuid, started) {
   clearTimeout(trustlinePollTimer);
+  const gen = ++trustlinePollGen;
+  // Stale once the user navigated away or a newer flow superseded this one —
+  // checked AFTER the await too, so a late response can never fire the
+  // captured onSet continuation (e.g. re-issue an old trait buy) over
+  // whatever panel the user is on now.
+  const stale = () => gen !== trustlinePollGen || el('trustline-panel').hidden;
   const tick = async () => {
-    if (el('trustline-panel').hidden) return; // user navigated away
+    if (stale()) return;
     let s;
     try {
       s = await api(`/api/brix/trustline/${uuid}`);
     } catch (e) {
-      trustlinePollTimer = setTimeout(tick, 3000); // transient; keep polling
+      if (!stale()) trustlinePollTimer = setTimeout(tick, 3000); // transient; keep polling
       return;
     }
+    if (stale()) return;
     if (brixPure.isTrustlineTerminal(s.state)) { finishTrustline(s.state, s.code); return; }
     // Re-render keeps the deep link / QR up; applySignDelivery auto-opens
     // at most once per link.

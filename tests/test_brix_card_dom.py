@@ -125,7 +125,7 @@ def test_module_cache_busters_are_bumped_in_lockstep():
     assert app_v, "index.html does not cache-bust app.js"
     # Ratchet: raise this floor with every app.js ?v= bump. A version below the
     # floor means index.html would serve a stale app.js to warm caches.
-    assert int(app_v.group(1)) >= 75, "app.js?v= regressed below the shipped version"
+    assert int(app_v.group(1)) >= 76, "app.js?v= regressed below the shipped version"
     brix_v = re.search(r"from './brix_pure\.js\?v=(\d+)'", js)
     assert brix_v, "app.js does not cache-bust the brix_pure.js import"
     # Same ratchet: raise with every brix_pure.js ?v= bump.
@@ -189,3 +189,13 @@ def test_trait_buy_reissues_after_trustline_set():
     src = open(os.path.join(CLIENT, "app.js")).read()
     assert "onSet: () => marketFlow(kind, startPath, body, render)" in src
     assert "(trustlineOnSet || trustlineBack || showMintHome)()" in src
+
+
+def test_trustline_poll_rechecks_staleness_after_the_await():
+    # A late status response must not fire the captured onSet continuation
+    # over whatever panel the user moved to (Greptile on #442).
+    src = open(os.path.join(CLIENT, "app.js")).read()
+    start = src.index("function pollTrustline")
+    body = src[start : src.index("\n}\n", start)]
+    assert body.count("if (stale()) return;") >= 2
+    assert "gen !== trustlinePollGen" in body
