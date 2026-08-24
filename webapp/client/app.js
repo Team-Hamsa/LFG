@@ -930,7 +930,10 @@ async function loadBrix({ poll = true } = {}) {
   }
   const view = brixPure.brixCardView(status);
   renderBrixCard(view);
-  if (poll && view.visible && view.pollClaimId) pollBrixClaim(view.pollClaimId);
+  // poll:false never touches the poll — an exhausted refresh resolving late
+  // must not stopBrixPoll() a poll a newer home landing has since started.
+  if (!poll) return view;
+  if (view.visible && view.pollClaimId) pollBrixClaim(view.pollClaimId);
   else stopBrixPoll();
   return view;
 }
