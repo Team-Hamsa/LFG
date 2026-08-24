@@ -398,11 +398,11 @@ matrix — lives in `trait_config.yaml` at the repo root, validated by
 
 <!-- roadmap:start -->
 - [ ] [#39 — Admin tooling for authoring trait_config.yaml (config-gen UI)](../../issues/39)
-- [ ] [#48 — feat: BRIX daily distribution to holders (1/day per unlisted NFT; claim in app)](../../issues/48)
 - [ ] [#355 — Skeleton body is missing ~247 pieces of trait art (Clothing + Head parity)](../../issues/355)
 
 **Recently completed** (moved here automatically when a roadmap issue closes)
 
+- [x] [#48 — feat: BRIX daily distribution to holders (1/day per unlisted NFT; claim in app)](../../issues/48) (closed 2026-08-24)
 - [x] [#354 — Skeleton body cannot wear the pirate outfit ("Swashbuckler") — missing skeleton art](../../issues/354) (closed 2026-08-24)
 - [x] [#332 — ops(sponsored-mint): execute the staging rehearsal before any production activation of the SourceTag free mint](../../issues/332) (closed 2026-08-23)
 - [x] [#252 — feat(x): per-user OAuth2 PKCE — share from my account (phase 3 of #41)](../../issues/252) (closed 2026-08-18)
