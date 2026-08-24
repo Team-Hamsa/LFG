@@ -945,7 +945,14 @@ function pollBrixClaim(claimId) {
     try {
       res = await api(`/api/brix/claim/${claimId}`);
     } catch (e) {
-      return; // claim unreadable/gone — the next home landing re-reads status
+      // A transient poll failure (network blip, 5xx) must not strand the
+      // button on "Claiming…" until the next home landing — keep ticking
+      // within the same budget (Greptile P1 on PR #434). A 404 (claim gone /
+      // not ours) keeps failing and simply burns down the same bound.
+      if (gen !== brixPollGen) return;
+      if (ticks >= BRIX_POLL_MAX) { loadBrix(); return; }
+      brixPollTimer = setTimeout(tick, BRIX_POLL_MS);
+      return;
     }
     if (gen !== brixPollGen) return;
     if (brixPure.isClaimTerminal(res.state)) {
@@ -954,7 +961,9 @@ function pollBrixClaim(claimId) {
       loadBrix();
       return;
     }
-    if (ticks >= BRIX_POLL_MAX) return; // server-side recovery owns it from here
+    // Budget exhausted: server-side recovery owns the claim from here, but
+    // re-read status so the card reflects it instead of a frozen button.
+    if (ticks >= BRIX_POLL_MAX) { loadBrix(); return; }
     brixPollTimer = setTimeout(tick, BRIX_POLL_MS);
   };
   brixPollTimer = setTimeout(tick, BRIX_POLL_MS);

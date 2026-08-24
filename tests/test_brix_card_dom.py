@@ -83,6 +83,20 @@ def test_non_retryable_claim_error_locks_the_button_across_reload():
     assert "brixLock = null" in home
 
 
+def test_transient_poll_errors_keep_polling_then_refresh():
+    """Greptile P1 on PR #434: a transient /api/brix/claim/{id} failure used
+    to end the poll silently, stranding the button on "Claiming…" until the
+    next home landing. The catch must reschedule within the same tick budget,
+    and an exhausted budget must re-read status rather than freeze."""
+    js = _read("app.js")
+    body = js.split("function pollBrixClaim(", 1)[1][:2500]
+    catch = body.split("} catch (e) {", 1)[1].split("if (gen !== brixPollGen) return;\n    if (brixPure", 1)[0]
+    assert "setTimeout(tick, BRIX_POLL_MS)" in catch
+    assert "loadBrix()" in catch
+    # the non-error budget exhaustion path refreshes too
+    assert body.count("if (ticks >= BRIX_POLL_MAX) { loadBrix(); return; }") == 2
+
+
 def test_module_cache_busters_are_bumped_in_lockstep():
     """ES-module imports are cache keys: a stale app.js against a fresh
     index.html serves a client with no card at all (see the 2026-07-21
@@ -93,7 +107,7 @@ def test_module_cache_busters_are_bumped_in_lockstep():
     assert app_v, "index.html does not cache-bust app.js"
     # Ratchet: raise this floor with every app.js ?v= bump. A version below the
     # floor means index.html would serve a stale app.js to warm caches.
-    assert int(app_v.group(1)) >= 67, "app.js?v= regressed below the shipped version"
+    assert int(app_v.group(1)) >= 68, "app.js?v= regressed below the shipped version"
     brix_v = re.search(r"from './brix_pure\.js\?v=(\d+)'", js)
     assert brix_v, "app.js does not cache-bust the brix_pure.js import"
     # Same ratchet: raise with every brix_pure.js ?v= bump.
