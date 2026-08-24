@@ -1609,6 +1609,9 @@ brix_trustline_payloads: dict[str, Any] = {}
 # that is dead weight (abandoned panel, repeated "Try again"); prune on every
 # create like signin_payloads does.
 BRIX_TRUSTLINE_TTL = 900
+# Per-caller lock so overlapping starts cannot both pass the reuse scan and
+# each mint a live payload (#260 open-payload cap).
+_brix_trustline_locks: dict[tuple[str, str], asyncio.Lock] = {}
 
 
 def _prune_brix_trustline_payloads() -> None:
@@ -1622,6 +1625,17 @@ def _prune_brix_trustline_payloads() -> None:
 async def handle_brix_trustline(request):
     wallet = request["wallet"]
     user = request["user"]
+    key = (_platform(user), str(user["id"]))
+    lock = _brix_trustline_locks.setdefault(key, asyncio.Lock())
+    try:
+        async with lock:
+            return await _start_brix_trustline(wallet, user)
+    finally:
+        if not lock.locked() and _brix_trustline_locks.get(key) is lock:
+            del _brix_trustline_locks[key]
+
+
+async def _start_brix_trustline(wallet, user):
     _prune_brix_trustline_payloads()
     line_state, _ = await xrpl_ops.get_trustline_state(
         wallet, config.BRIX_CURRENCY_HEX, config.BRIX_ISSUER

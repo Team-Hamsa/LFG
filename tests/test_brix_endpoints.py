@@ -638,3 +638,27 @@ def test_trustline_start_reuses_the_callers_live_payload(drip, monkeypatch):
     assert data["qr_png"] == "q" and data["xumm_url"] == "x"
     assert calls == []
     assert len(server.brix_trustline_payloads) == 1
+
+
+def test_trustline_concurrent_starts_share_one_payload(drip, monkeypatch):
+    """Overlapping starts for one caller serialize on a per-user lock, so the
+    second sees the first's record and reuses it (Greptile on #442)."""
+    _trustline_state(monkeypatch, xrpl_ops.TrustlineState.ABSENT)
+    calls = []
+
+    async def slow_create(*a, **k):
+        calls.append(1)
+        await asyncio.sleep(0.05)
+        return {"uuid": f"u-{len(calls)}", "qr_url": "q", "xumm_url": "x"}
+
+    monkeypatch.setattr(server.xumm_ops, "create_trustset_payload", slow_create)
+
+    async def both():
+        return await asyncio.gather(
+            server.handle_brix_trustline(_Req()), server.handle_brix_trustline(_Req())
+        )
+
+    a, b = _run(both())
+    assert _body(a)["uuid"] == _body(b)["uuid"] == "u-1"
+    assert calls == [1]
+    assert server._brix_trustline_locks == {}
