@@ -102,7 +102,7 @@ def test_transient_poll_errors_keep_polling_then_refresh():
     load = js.split("async function loadBrix(", 1)[1][:1200]
     # poll:false returns before the poll/stopBrixPoll branch — a late-resolving
     # exhausted refresh must not cancel a poll a newer landing started (CodeRabbit).
-    assert load.index("if (!poll) return view;") < load.index("stopBrixPoll()")
+    assert load.index("if (!poll) return view;") < load.index("else stopBrixPoll();")
 
 
 def test_module_cache_busters_are_bumped_in_lockstep():
