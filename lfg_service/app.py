@@ -1644,7 +1644,11 @@ async def _start_brix_trustline(wallet, user):
     # Back-then-Retry must not mint a second live Xaman payload (#260 open-
     # payload cap): hand the caller's still-live request back instead.
     for uuid, rec in brix_trustline_payloads.items():
-        if rec["user_id"] == user["id"] and rec["platform"] == _platform(user):
+        if (
+            rec["user_id"] == user["id"]
+            and rec["platform"] == _platform(user)
+            and rec["wallet"] == wallet
+        ):
             return web.json_response({"state": "pending", "uuid": uuid, **rec["delivery"]})
     payload = await xumm_ops.create_trustset_payload(
         wallet,

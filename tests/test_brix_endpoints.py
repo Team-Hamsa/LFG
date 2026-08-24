@@ -662,3 +662,15 @@ def test_trustline_concurrent_starts_share_one_payload(drip, monkeypatch):
     assert _body(a)["uuid"] == _body(b)["uuid"] == "u-1"
     assert calls == [1]
     assert not server._brix_trustline_lock.locked()
+
+
+def test_trustline_start_does_not_reuse_another_wallets_payload(drip, monkeypatch):
+    """Re-registering to wallet B mid-flow must not hand back wallet A's
+    signer-pinned payload (CodeRabbit on #442)."""
+    uuid_a = _started(drip, monkeypatch)
+    server.brix_trustline_payloads[uuid_a]["wallet"] = "rWalletA"
+    captured = {}
+    _fake_payload(monkeypatch, captured)
+    data = _body(_run(server.handle_brix_trustline(_Req())))
+    assert data["state"] == "pending"
+    assert captured["account"] == WALLET  # a fresh payload for the current wallet
