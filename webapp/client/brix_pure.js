@@ -186,7 +186,7 @@ export function isClaimTerminal(state) {
 //               line is still missing.
 // Unknown states keep polling — treating one as terminal would strand a live
 // sign request, same rule as isClaimTerminal.
-export function trustlineView(state) {
+export function trustlineView(state, code) {
   switch (state) {
     case 'signed':
       return { sub: 'BRIX trustline set — you can claim now.', spinner: false, retry: false, terminal: true, clearLock: true };
@@ -195,7 +195,12 @@ export function trustlineView(state) {
     case 'expired':
       return { sub: 'The trustline request expired.', spinner: false, retry: true, terminal: true, clearLock: false };
     case 'rejected':
+      if (code === 'tx_failed') {
+        return { sub: 'The trustline transaction failed on the ledger — try again.', spinner: false, retry: true, terminal: true, clearLock: false };
+      }
       return { sub: 'That was signed by a different wallet — sign it with the wallet you registered.', spinner: false, retry: true, terminal: true, clearLock: false };
+    case 'validating':
+      return { sub: 'Signed — waiting for the ledger to confirm…', spinner: true, retry: false, terminal: false, clearLock: false };
     case 'opened':
       return { sub: 'QR scanned — approve the trustline in Xaman…', spinner: true, retry: false, terminal: false, clearLock: false };
     default:

@@ -49,11 +49,19 @@ or trait Buy) with the button re-armed — without a page reload.
 Authed (`@require_wallet`). Builds a XUMM `TrustSet` payload for the BRIX pair
 and returns the standard sign-delivery shape the client already renders.
 
+```text
+POST /api/brix/trustline            →  { state: "pending", uuid, qr_png, xumm_url, pushed, push }
+                                    |  { state: "already_set" }
+GET  /api/brix/trustline/{uuid}     →  { state: "pending" | "opened" | "validating" | "signed"
+                                                 | "rejected" | "expired",
+                                          tx_hash?, code?: "signer_mismatch" | "tx_failed" }
 ```
-POST /api/brix/trustline            →  { uuid, qr_png, deep_link, pushed, push, expires_at }
-GET  /api/brix/trustline/{uuid}     →  { state: "pending" | "signed" | "rejected" | "expired",
-                                          tx_hash?, signer? }
-```
+
+`signed` means **validated `tesSUCCESS`**, not merely signed in Xaman: the
+status poll looks the signed tx up by hash and returns `validating` until the
+ledger has decided; a validated failure is `rejected` with
+`code: "tx_failed"`. Records are keyed `(platform, user_id)` and pruned after
+the 15-minute payload lifetime (`BRIX_TRUSTLINE_TTL`), like `signin_payloads`.
 
 Payload builder: new `xumm_ops.create_trustset_payload(currency, issuer,
 limit, *, account, user_token, platform, expire_minutes)` going through

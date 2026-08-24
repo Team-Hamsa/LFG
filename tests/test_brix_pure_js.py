@@ -304,3 +304,16 @@ def test_trustline_view_unknown_state_keeps_polling():
 def test_trustline_terminal_helper():
     assert run_js("M.isTrustlineTerminal('signed')") is True
     assert run_js("M.isTrustlineTerminal('pending')") is False
+
+
+def test_trustline_view_validating_keeps_polling_with_spinner():
+    v = tl("validating")
+    assert v["spinner"] is True and v["terminal"] is False and v["clearLock"] is False
+
+
+def test_trustline_view_rejected_tx_failed_is_distinct_from_signer_mismatch():
+    failed = run_js('M.trustlineView("rejected", "tx_failed")')
+    mismatch = run_js('M.trustlineView("rejected", "signer_mismatch")')
+    assert failed["retry"] and failed["terminal"] and not failed["clearLock"]
+    assert failed["sub"] != mismatch["sub"]
+    assert "ledger" in failed["sub"]

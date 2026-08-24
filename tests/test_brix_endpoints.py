@@ -442,7 +442,7 @@ def _trustline_state(monkeypatch, state):
 def _fake_payload(monkeypatch, captured):
     async def create(account, currency, issuer, limit, **kw):
         captured.update(account=account, currency=currency, issuer=issuer, limit=limit, **kw)
-        return {"uuid": "u-1", "qr_png": "q", "xumm_url": "x", "pushed": False, "push": None}
+        return {"uuid": "u-1", "qr_url": "q", "xumm_url": "x", "pushed": False, "push": None}
 
     monkeypatch.setattr(server.xumm_ops, "create_trustset_payload", create)
 
@@ -458,6 +458,8 @@ def test_trustline_start_builds_a_signer_pinned_brix_trustset(drip, monkeypatch)
     assert data["state"] == "pending"
     assert data["uuid"] == "u-1"
     assert data["xumm_url"] == "x"
+    # _create_xumm_payload's key is qr_url; the wire field is qr_png (CR on #442).
+    assert data["qr_png"] == "q"
     assert captured["account"] == WALLET
     assert captured["currency"] == server.config.BRIX_CURRENCY_HEX
     assert captured["issuer"] == server.config.BRIX_ISSUER
@@ -518,6 +520,15 @@ def _status(monkeypatch, **s):
     monkeypatch.setattr(server.xumm_ops, "get_payload_status", fake)
 
 
+def _tx(monkeypatch, *, validated, result=None, raise_=None):
+    async def get_tx(txid):
+        if raise_:
+            raise raise_
+        return {"validated": True, "meta": {"TransactionResult": result}} if validated else {}
+
+    monkeypatch.setattr(xrpl_ops, "get_tx", get_tx)
+
+
 def test_trustline_status_unknown_uuid_is_404(drip):
     resp = _run(server.handle_brix_trustline_status(_Req(match_info={"uuid": "nope"})))
     assert resp.status == 404
@@ -536,6 +547,7 @@ def test_trustline_status_pending_then_signed_recaptures_push_token(drip, monkey
         server.identity_store, "set_user_token", lambda p, u, t: saved.update(p=p, u=u, t=t)
     )
     _status(monkeypatch, signed=True, account=WALLET, txid="TX1", user_token="tok-new")
+    _tx(monkeypatch, validated=True, result="tesSUCCESS")
     data = _body(_run(server.handle_brix_trustline_status(_Req(match_info={"uuid": uuid}))))
     assert data == {"state": "signed", "tx_hash": "TX1"}
     assert saved["t"] == "tok-new"
@@ -569,3 +581,41 @@ def test_trustline_status_is_owner_scoped(drip, monkeypatch):
     _status(monkeypatch)
     server.brix_trustline_payloads[uuid]["user_id"] = "someone-else"
     assert _run(server.handle_brix_trustline_status(_Req(match_info={"uuid": uuid}))).status == 404
+
+
+def test_trustline_status_signed_but_unvalidated_keeps_polling(drip, monkeypatch):
+    """Signed is not set (Greptile P1 on #442): only a validated tesSUCCESS
+    clears the record; until then the client keeps polling."""
+    uuid = _started(drip, monkeypatch)
+    monkeypatch.setattr(server.identity_store, "set_user_token", lambda *a: None)
+    _status(monkeypatch, signed=True, account=WALLET, txid="TX1")
+    _tx(monkeypatch, validated=False)
+    data = _body(_run(server.handle_brix_trustline_status(_Req(match_info={"uuid": uuid}))))
+    assert data == {"state": "validating", "tx_hash": "TX1"}
+    assert uuid in server.brix_trustline_payloads
+    # A lookup blip is not a verdict either.
+    _tx(monkeypatch, validated=False, raise_=RuntimeError("rpc down"))
+    data = _body(_run(server.handle_brix_trustline_status(_Req(match_info={"uuid": uuid}))))
+    assert data["state"] == "validating"
+    assert uuid in server.brix_trustline_payloads
+
+
+def test_trustline_status_validated_failure_is_rejected_tx_failed(drip, monkeypatch):
+    uuid = _started(drip, monkeypatch)
+    monkeypatch.setattr(server.identity_store, "set_user_token", lambda *a: None)
+    _status(monkeypatch, signed=True, account=WALLET, txid="TX1")
+    _tx(monkeypatch, validated=True, result="tecNO_PERMISSION")
+    data = _body(_run(server.handle_brix_trustline_status(_Req(match_info={"uuid": uuid}))))
+    assert data == {"state": "rejected", "code": "tx_failed", "tx_result": "tecNO_PERMISSION"}
+    assert uuid not in server.brix_trustline_payloads
+
+
+def test_trustline_records_are_pruned_by_ttl(drip, monkeypatch):
+    """Abandoned flows must not accumulate for the process lifetime."""
+    _started(drip, monkeypatch)
+    stale = server.brix_trustline_payloads.pop("u-1")
+    stale["created_at"] -= server.BRIX_TRUSTLINE_TTL + 1
+    server.brix_trustline_payloads["u-stale"] = stale
+    assert _run(server.handle_brix_trustline(_Req())).status == 200
+    assert "u-stale" not in server.brix_trustline_payloads
+    assert "u-1" in server.brix_trustline_payloads

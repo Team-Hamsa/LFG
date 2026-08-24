@@ -125,11 +125,11 @@ def test_module_cache_busters_are_bumped_in_lockstep():
     assert app_v, "index.html does not cache-bust app.js"
     # Ratchet: raise this floor with every app.js ?v= bump. A version below the
     # floor means index.html would serve a stale app.js to warm caches.
-    assert int(app_v.group(1)) >= 74, "app.js?v= regressed below the shipped version"
+    assert int(app_v.group(1)) >= 75, "app.js?v= regressed below the shipped version"
     brix_v = re.search(r"from './brix_pure\.js\?v=(\d+)'", js)
     assert brix_v, "app.js does not cache-bust the brix_pure.js import"
     # Same ratchet: raise with every brix_pure.js ?v= bump.
-    assert int(brix_v.group(1)) >= 5, "brix_pure.js?v= regressed below the shipped version"
+    assert int(brix_v.group(1)) >= 6, "brix_pure.js?v= regressed below the shipped version"
 
 
 # --- BRIX trustline flow (#441) -----------------------------------------------
@@ -175,3 +175,17 @@ def test_home_landing_clears_the_trustline_arm():
     js = _read("app.js")
     home = js.split("function showMintHome()", 1)[1][:1200]
     assert "brixTrustlineNeeded = false" in home
+
+
+def test_trustline_panel_is_registered_with_show_panel():
+    # showPanel() only un-hides ids in ALL_PANELS; an unregistered panel keeps
+    # its shipped `hidden` attribute forever (CodeRabbit on #442).
+    src = open(os.path.join(CLIENT, "app.js")).read()
+    m = re.search(r"const ALL_PANELS = \[(.*?)\];", src, re.S)
+    assert m and "'trustline-panel'" in m.group(1)
+
+
+def test_trait_buy_reissues_after_trustline_set():
+    src = open(os.path.join(CLIENT, "app.js")).read()
+    assert "onSet: () => marketFlow(kind, startPath, body, render)" in src
+    assert "(trustlineOnSet || trustlineBack || showMintHome)()" in src

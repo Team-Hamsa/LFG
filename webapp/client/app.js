@@ -35,7 +35,7 @@ import * as signDeliveryPure from './signdelivery_pure.js?v=1';
 // Daily BRIX drip card (#48): what the card renders and how each claim error
 // code is handled are pure decisions, Node-testable (tests/test_brix_pure_js.py);
 // loadBrix()/claimBrix() below are the glue.
-import * as brixPure from './brix_pure.js?v=5';
+import * as brixPure from './brix_pure.js?v=6';
 
 const params = new URLSearchParams(window.location.search);
 const insideDiscord = params.has('frame_id');
@@ -648,7 +648,7 @@ async function setupTelegram() {
 const ALL_PANELS = ['register-panel', 'mint-panel', 'flow-panel', 'bulk-panel',
                     'swap-panel', 'swap-traits-panel', 'swap-result-panel',
                     'dressup-panel', 'market-panel', 'market-list-form-panel',
-                    'offers-panel'];
+                    'offers-panel', 'trustline-panel'];
 
 function showPanel(id) {
   for (const panel of ALL_PANELS) {
@@ -1054,7 +1054,7 @@ function setupBrixCard() {
     clearTimeout(trustlinePollTimer);
     (trustlineBack || showMintHome)();
   });
-  el('trustline-retry-btn').addEventListener('click', () => startBrixTrustline({ back: trustlineBack }));
+  el('trustline-retry-btn').addEventListener('click', () => startBrixTrustline({ back: trustlineBack, onSet: trustlineOnSet }));
 }
 
 // --- BRIX trustline flow (#441) ------------------------------------------
@@ -1066,6 +1066,9 @@ function setupBrixCard() {
 // panel returns to on Back / after a signed line.
 let trustlinePollTimer = null;
 let trustlineBack = null;
+// #441: continuation once the line is confirmed set (e.g. re-issue the trait
+// buy that 409'd); falls back to trustlineBack.
+let trustlineOnSet = null;
 
 function renderTrustline({ sub, spinner, retry, link, qrData, push }) {
   el('trustline-sub').textContent = sub;
@@ -1079,9 +1082,10 @@ function renderTrustline({ sub, spinner, retry, link, qrData, push }) {
   el('trustline-retry-btn').hidden = !retry;
 }
 
-async function startBrixTrustline({ back } = {}) {
+async function startBrixTrustline({ back, onSet } = {}) {
   clearTimeout(trustlinePollTimer);
   trustlineBack = back || showMintHome;
+  trustlineOnSet = onSet || null;
   showPanel('trustline-panel');
   renderTrustline({ sub: 'Setting up the trustline request…', spinner: true });
   let s;
@@ -1099,14 +1103,14 @@ async function startBrixTrustline({ back } = {}) {
   pollTrustline(s.uuid, s);
 }
 
-function finishTrustline(state) {
-  const v = brixPure.trustlineView(state);
+function finishTrustline(state, code) {
+  const v = brixPure.trustlineView(state, code);
   renderTrustline(v);
   if (v.clearLock) {
     brixLock = null;
     brixTrustlineNeeded = false;
     toast(`\u{1F9F1} ${v.sub}`);
-    (trustlineBack || showMintHome)();
+    (trustlineOnSet || trustlineBack || showMintHome)();
   }
 }
 
@@ -1121,7 +1125,7 @@ function pollTrustline(uuid, started) {
       trustlinePollTimer = setTimeout(tick, 3000); // transient; keep polling
       return;
     }
-    if (brixPure.isTrustlineTerminal(s.state)) { finishTrustline(s.state); return; }
+    if (brixPure.isTrustlineTerminal(s.state)) { finishTrustline(s.state, s.code); return; }
     // Re-render keeps the deep link / QR up; applySignDelivery auto-opens
     // at most once per link.
     renderTrustline({
@@ -4391,8 +4395,12 @@ async function marketFlow(kind, startPath, body, render) {
     }
     if (e.body && e.body.code === 'trustline_required') {
       // #441: a trait buy needs a BRIX line to receive the on-ramped BRIX;
-      // set it and come back to the listing rather than dead-ending.
-      startBrixTrustline({ back: () => showPanel('market-panel') });
+      // set it, then re-issue the very same buy so the user lands back on
+      // the listing they chose. Backing out (no line) just returns to browse.
+      startBrixTrustline({
+        back: () => showPanel('market-panel'),
+        onSet: () => marketFlow(kind, startPath, body, render),
+      });
       return;
     }
     showFlow({ title: '❌ Could not start', text: e.message, done: true });
