@@ -689,3 +689,29 @@ def test_trustline_validating_is_bounded(drip, monkeypatch):
     data = _body(_run(server.handle_brix_trustline_status(_Req(match_info={"uuid": uuid}))))
     assert data["state"] == "rejected" and data["code"] == "tx_unconfirmed"
     assert uuid not in server.brix_trustline_payloads
+
+
+def test_trustline_concurrent_terminal_polls_do_not_500(drip, monkeypatch):
+    """Two status polls past the validation timeout both terminate cleanly
+    (CodeRabbit on #442): the second sees the record gone, not a KeyError."""
+    uuid = _started(drip, monkeypatch)
+    monkeypatch.setattr(server.identity_store, "set_user_token", lambda *a: None)
+    _status(monkeypatch, signed=True, account=WALLET, txid="TX1")
+
+    async def slow_get_tx(txid):
+        await asyncio.sleep(0.02)
+        return {}
+
+    monkeypatch.setattr(xrpl_ops, "get_tx", slow_get_tx)
+    _run(server.handle_brix_trustline_status(_Req(match_info={"uuid": uuid})))  # stamps signed_at
+    server.brix_trustline_payloads[uuid]["signed_at"] -= server.BRIX_TRUSTLINE_VALIDATE_SECONDS + 1
+
+    async def both():
+        def req():
+            return server.handle_brix_trustline_status(_Req(match_info={"uuid": uuid}))
+
+        return await asyncio.gather(req(), req())
+
+    a, b = _run(both())
+    assert {a.status, b.status} == {200}
+    assert _body(a)["code"] == "tx_unconfirmed"

@@ -210,4 +210,5 @@ def test_start_trustline_orphans_prior_poll_before_showing_the_panel():
     assert body.index("++trustlinePollGen") < body.index("showPanel('trustline-panel')")
     # ...and the start POST's own response re-checks ownership after its await.
     post = body.index("await api('/api/brix/trustline'")
-    assert body.find("if (gen !== trustlinePollGen", post) < body.index("already_set")
+    guard = body.find("if (gen !== trustlinePollGen || el('trustline-panel').hidden) return;", post)
+    assert 0 < guard < body.index("already_set")

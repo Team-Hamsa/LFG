@@ -1698,7 +1698,7 @@ async def handle_brix_trustline_status(request):
         if s.get("account") != rec["wallet"]:
             # Someone else signed the shared QR: their line, not ours. The
             # session wallet's next claim still 409s and re-arms the button.
-            del brix_trustline_payloads[uuid]
+            brix_trustline_payloads.pop(uuid, None)  # tolerate a concurrent terminal poll
             return web.json_response({"state": "rejected", "code": "signer_mismatch"})
         # #212: refresh the push token off every signed payload we poll.
         if s.get("user_token") and not rec.get("token_saved"):
@@ -1716,7 +1716,7 @@ async def handle_brix_trustline_status(request):
             logging.warning("brix trustline %s: tx lookup failed: %s", uuid, e)
             tx = {}
         if tx.get("validated"):
-            del brix_trustline_payloads[uuid]
+            brix_trustline_payloads.pop(uuid, None)  # tolerate a concurrent terminal poll
             meta = tx.get("meta") or {}
             code = meta.get("TransactionResult") if isinstance(meta, dict) else None
             if code == "tesSUCCESS":
@@ -1726,13 +1726,13 @@ async def handle_brix_trustline_status(request):
         if time.time() - signed_at > BRIX_TRUSTLINE_VALIDATE_SECONDS:
             # Bounded: the next claim/buy re-checks the line on-ledger anyway,
             # so giving up here loses nothing if the tx did land late.
-            del brix_trustline_payloads[uuid]
+            brix_trustline_payloads.pop(uuid, None)  # tolerate a concurrent terminal poll
             return web.json_response(
                 {"state": "rejected", "code": "tx_unconfirmed", "tx_hash": txid}
             )
         return web.json_response({"state": "validating", "tx_hash": txid})
     if s["expired"]:
-        del brix_trustline_payloads[uuid]
+        brix_trustline_payloads.pop(uuid, None)  # tolerate a concurrent terminal poll
         return web.json_response({"state": "expired"})
     return web.json_response({"state": "opened" if s["opened"] else "pending"})
 
