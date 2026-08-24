@@ -1084,7 +1084,7 @@ function renderTrustline({ sub, spinner, retry, link, qrData, push }) {
 
 async function startBrixTrustline({ back, onSet } = {}) {
   clearTimeout(trustlinePollTimer);
-  ++trustlinePollGen; // orphan any in-flight status response from a prior flow
+  const gen = ++trustlinePollGen; // orphan any in-flight response from a prior flow
   trustlineBack = back || showMintHome;
   trustlineOnSet = onSet || null;
   showPanel('trustline-panel');
@@ -1093,9 +1093,13 @@ async function startBrixTrustline({ back, onSet } = {}) {
   try {
     s = await api('/api/brix/trustline', { method: 'POST', body: '{}' });
   } catch (e) {
+    if (gen !== trustlinePollGen || el('trustline-panel').hidden) return;
     renderTrustline({ sub: 'Could not start the trustline request.', retry: true });
     return;
   }
+  // The user backed out (or a replacement flow started) while the POST was
+  // in flight: this response owns nothing any more.
+  if (gen !== trustlinePollGen || el('trustline-panel').hidden) return;
   if (s.state === 'already_set') { finishTrustline(s.state); return; }
   renderTrustline({
     ...brixPure.trustlineView('pending'),
