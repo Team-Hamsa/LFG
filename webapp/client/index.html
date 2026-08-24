@@ -46,6 +46,20 @@
       <p><button id="register-retry-btn" class="primary" hidden>↻ Try again</button></p>
     </section>
 
+    <!-- BRIX trustline flow (#441): the exit from a trustline_required
+         refusal on Claim / trait Buy. Same shape as the sign-in panel so
+         applySignDelivery drives push / deep link / QR identically. -->
+    <section id="trustline-panel" class="card sticker" hidden>
+      <h2>🧱 Set your BRIX trustline</h2>
+      <p id="trustline-sub" class="card-sub">Approve the BRIX trustline in Xaman to get paid.</p>
+      <div id="trustline-spinner" class="spinner" role="img" aria-label="Working…" hidden></div>
+      <button id="trustline-qr-toggle" class="link qr-toggle" hidden>Show QR to sign on another device</button>
+      <img id="trustline-qr" class="qr" alt="Trustline QR — scan with Xaman" hidden>
+      <p><button id="trustline-link-btn" class="link" hidden>Open in Xaman ↗</button></p>
+      <p><button id="trustline-retry-btn" class="primary" hidden>↻ Try again</button></p>
+      <p><button id="trustline-back-btn" class="link">← Back</button></p>
+    </section>
+
     <section id="mint-panel" class="card sticker" hidden>
       <p class="wallet-line"><span class="wallet-lbl">Wallet</span> <code id="wallet-display"></code>
         <button id="change-wallet-btn" class="link">change</button></p>
@@ -384,6 +398,6 @@
        Telegram (window.Telegram stays undefined); loaded BEFORE app.js so the
        dual-mode boot can detect the Telegram context. -->
   <script src="telegram-web-app.js"></script>
-  <script type="module" src="app.js?v=73"></script>
+  <script type="module" src="app.js?v=77"></script>
 </body>
 </html>

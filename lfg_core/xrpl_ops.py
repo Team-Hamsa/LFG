@@ -15,6 +15,7 @@ from contextlib import asynccontextmanager
 from dataclasses import dataclass
 from datetime import datetime
 from decimal import Decimal, InvalidOperation
+from enum import Enum
 from typing import Any, BinaryIO, Literal, cast, overload
 
 from xrpl.asyncio.clients import (
@@ -1410,10 +1411,24 @@ async def get_ledger_time() -> int:
     return close_time
 
 
-async def get_trustline_balance(address: str, currency: str, issuer: str) -> Decimal | None:
-    """Balance `address` holds on its trustline to issuer/currency, as a
-    Decimal — or None if there is no trustline or the lookup failed (callers
-    treat both the same: not a holder)."""
+class TrustlineState(str, Enum):
+    """Outcome of a trustline lookup. ABSENT and UNKNOWN are deliberately
+    distinct: "the ledger says there is no line" and "we could not ask the
+    ledger" must never be conflated on a path whose response the client
+    treats as a verdict (the BRIX claim button locks on trustline_required)."""
+
+    PRESENT = "present"
+    ABSENT = "absent"
+    UNKNOWN = "unknown"
+
+
+async def get_trustline_state(
+    address: str, currency: str, issuer: str
+) -> tuple[TrustlineState, Decimal | None]:
+    """Tri-state trustline lookup: (PRESENT, balance) when `address` holds a
+    line to issuer/currency, (ABSENT, None) when the full account_lines page
+    set was read and no such line exists, (UNKNOWN, None) when the lookup
+    itself failed and nothing can be concluded either way."""
     try:
         marker = None
         async with AsyncWebsocketClient(config.WS_URL) as websocket:
@@ -1422,15 +1437,31 @@ async def get_trustline_balance(address: str, currency: str, issuer: str) -> Dec
                     AccountLines(account=address, peer=issuer, marker=marker, limit=400)
                 )
                 result = response.result
+                # xrpl-py does NOT raise on an error response (tooBusy,
+                # actNotFound, ...): `result` simply lacks `lines`/`marker`,
+                # which would read as an exhausted page set = ABSENT. That
+                # verdict locks the client's claim button, so surface it as
+                # UNKNOWN instead (Greptile P1, PR #440).
+                if not response.is_successful():
+                    raise RuntimeError(result.get("error", "account_lines request failed"))
                 for line in result.get("lines", []):
                     if line.get("currency") == currency and line.get("account") == issuer:
-                        return Decimal(line.get("balance", "0"))
+                        return TrustlineState.PRESENT, Decimal(line.get("balance", "0"))
                 marker = result.get("marker")
                 if not marker:
-                    return None
+                    return TrustlineState.ABSENT, None
     except Exception as e:
         logging.warning(f"account_lines lookup failed for {address}: {e}")
-        return None
+        return TrustlineState.UNKNOWN, None
+
+
+async def get_trustline_balance(address: str, currency: str, issuer: str) -> Decimal | None:
+    """Balance `address` holds on its trustline to issuer/currency, as a
+    Decimal — or None if there is no trustline or the lookup failed (callers
+    treat both the same: not a holder). Paths that must not mistake a lookup
+    failure for a missing line use `get_trustline_state` instead."""
+    _state, balance = await get_trustline_state(address, currency, issuer)
+    return balance
 
 
 async def get_amm_xrp_cost(currency: str, issuer: str, token_amount: Decimal) -> Decimal | None:

@@ -143,3 +143,40 @@ def test_onramp_payment_payload_sends_user_token(monkeypatch):
         )
     )
     assert captured["payload"]["user_token"] == "tok-1"
+
+
+# --- BRIX TrustSet (#441) ------------------------------------------------------
+
+
+def test_trustset_payload_shape(monkeypatch):
+    captured = _capture(monkeypatch)
+    _run(xumm_ops.create_trustset_payload("rHolder", "BRIXHEX", "rIssuer", "1000000000"))
+    txjson = captured["payload"]["txjson"]
+    assert txjson["TransactionType"] == "TrustSet"
+    # Signer-pinned (#314): a shared QR signed by another wallet must not set
+    # a line on the wrong account.
+    assert txjson["Account"] == "rHolder"
+    assert txjson["Flags"] == 131072  # tfSetNoRipple, same as the LFGO line
+    assert txjson["LimitAmount"] == {
+        "currency": "BRIXHEX",
+        "issuer": "rIssuer",
+        "value": "1000000000",
+    }
+    assert txjson["SourceTag"] == config.SOURCE_TAG
+
+
+def test_trustset_payload_memo_action_trustset(monkeypatch):
+    captured = _capture(monkeypatch)
+    _run(xumm_ops.create_trustset_payload("rHolder", "BRIXHEX", "rIssuer", "1"))
+    decoded = {
+        bytes.fromhex(m["Memo"]["MemoType"]).decode(): bytes.fromhex(m["Memo"]["MemoData"]).decode()
+        for m in captured["payload"]["txjson"]["Memos"]
+    }
+    assert decoded["action"] == "trustset"
+    assert decoded["initiator"] == "user"
+
+
+def test_trustset_payload_sends_user_token(monkeypatch):
+    captured = _capture(monkeypatch)
+    _run(xumm_ops.create_trustset_payload("rHolder", "BRIXHEX", "rIssuer", "1", user_token="tok-1"))
+    assert captured["payload"]["user_token"] == "tok-1"

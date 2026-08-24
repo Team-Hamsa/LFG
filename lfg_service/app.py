@@ -1597,6 +1597,151 @@ def _mark_submitted_unknown(claim_id: int, last_ledger_seq: int | None = None) -
         conn.close()
 
 
+# --- BRIX trustline flow (#441) ------------------------------------------------
+# A holder with no BRIX trustline is refused 409 trustline_required by the
+# claim and trait-buy paths; this is the exit. Stateless on our side beyond
+# the in-flight payload record: the ledger is the truth for whether a line
+# exists, and the next claim/buy POST re-checks it. Keyed like
+# signin_payloads — (platform, user_id) — so another caller holding the uuid
+# can neither read nor complete it.
+brix_trustline_payloads: dict[str, Any] = {}
+# A XUMM payload can never complete after its expiry, so a record older than
+# that is dead weight (abandoned panel, repeated "Try again"); prune on every
+# create like signin_payloads does.
+BRIX_TRUSTLINE_TTL = 900
+# How long a SIGNED TrustSet may sit unvalidated before the poll gives up
+# (rejected/tx_unconfirmed) — well past any LastLedgerSequence window, so the
+# panel can never spin forever on a txid that stays txnNotFound.
+BRIX_TRUSTLINE_VALIDATE_SECONDS = 120
+# One lock around the reuse-scan + create so overlapping starts cannot each
+# mint a live payload (#260 open-payload cap). Global rather than per-caller:
+# starts are rare and short, and a per-caller map needs a cleanup step that
+# races the lock handoff.
+_brix_trustline_lock = asyncio.Lock()
+
+
+def _prune_brix_trustline_payloads() -> None:
+    cutoff = time.time() - BRIX_TRUSTLINE_TTL
+    for k, rec in list(brix_trustline_payloads.items()):
+        if rec.get("created_at", 0) < cutoff:
+            del brix_trustline_payloads[k]
+
+
+@require_wallet
+async def handle_brix_trustline(request):
+    wallet = request["wallet"]
+    user = request["user"]
+    async with _brix_trustline_lock:
+        return await _start_brix_trustline(wallet, user)
+
+
+async def _start_brix_trustline(wallet, user):
+    _prune_brix_trustline_payloads()
+    line_state, _ = await xrpl_ops.get_trustline_state(
+        wallet, config.BRIX_CURRENCY_HEX, config.BRIX_ISSUER
+    )
+    if line_state is xrpl_ops.TrustlineState.PRESENT:
+        return web.json_response({"state": "already_set"})
+    # UNKNOWN deliberately falls through: nothing is bound here (unlike the
+    # claim path), the user explicitly asked for the line, and a redundant
+    # TrustSet on an existing line is a harmless no-op.
+    # Back-then-Retry must not mint a second live Xaman payload (#260 open-
+    # payload cap): hand the caller's still-live request back instead.
+    for uuid, rec in brix_trustline_payloads.items():
+        if (
+            rec["user_id"] == user["id"]
+            and rec["platform"] == _platform(user)
+            and rec["wallet"] == wallet
+        ):
+            return web.json_response({"state": "pending", "uuid": uuid, **rec["delivery"]})
+    payload = await xumm_ops.create_trustset_payload(
+        wallet,
+        config.BRIX_CURRENCY_HEX,
+        config.BRIX_ISSUER,
+        config.BRIX_TRUSTLINE_LIMIT,
+        user_token=await _push_token(user),
+        platform=memos.platform_for_surface(_platform(user)),
+    )
+    if not payload:
+        return web.json_response(
+            {"error": "could not reach Xaman", "code": "signing_unavailable"}, status=503
+        )
+    delivery = {
+        # _create_xumm_payload's key is qr_url (every session builder
+        # reads payload["qr_url"]); the wire name matches the spec.
+        "qr_png": payload.get("qr_url"),
+        "xumm_url": payload.get("xumm_url"),
+        "pushed": bool(payload.get("pushed")),
+        "push": payload.get("push"),
+    }
+    brix_trustline_payloads[payload["uuid"]] = {
+        "wallet": wallet,
+        "user_id": user["id"],
+        "platform": _platform(user),
+        "created_at": time.time(),
+        "delivery": delivery,
+    }
+    return web.json_response({"state": "pending", "uuid": payload["uuid"], **delivery})
+
+
+@require_wallet
+async def handle_brix_trustline_status(request):
+    uuid = request.match_info["uuid"]
+    rec = brix_trustline_payloads.get(uuid)
+    user = request["user"]
+    if not rec or rec["user_id"] != user["id"] or rec["platform"] != _platform(user):
+        return web.json_response({"error": "not found"}, status=404)
+    s = await xumm_ops.get_payload_status(uuid)
+    if not s:
+        return web.json_response({"error": "could not reach Xaman"}, status=502)
+    if s["signed"]:
+        if s.get("account") != rec["wallet"]:
+            # Someone else signed the shared QR: their line, not ours. The
+            # session wallet's next claim still 409s and re-arms the button.
+            brix_trustline_payloads.pop(uuid, None)  # tolerate a concurrent terminal poll
+            return web.json_response({"state": "rejected", "code": "signer_mismatch"})
+        # #212: refresh the push token off every signed payload we poll.
+        # Best-effort like every other capture site: a failed write is retried
+        # on the next poll and never turns a terminal state into a 500.
+        if s.get("user_token") and not rec.get("token_saved"):
+            try:
+                await asyncio.to_thread(
+                    identity_store.set_user_token, rec["platform"], rec["user_id"], s["user_token"]
+                )
+                rec["token_saved"] = True
+            except Exception as e:  # noqa: BLE001
+                logging.warning("brix trustline %s: push-token persist failed: %s", uuid, e)
+        # Signed is not set: a TrustSet can still fail on-ledger (tec*, or
+        # never validate). Only a validated tesSUCCESS clears the record;
+        # a validated failure is `rejected`; not-yet-validated keeps polling.
+        txid = s.get("txid")
+        try:
+            tx = await xrpl_ops.get_tx(txid) if txid else {}
+        except Exception as e:  # noqa: BLE001 — pure read; keep polling
+            logging.warning("brix trustline %s: tx lookup failed: %s", uuid, e)
+            tx = {}
+        if tx.get("validated"):
+            brix_trustline_payloads.pop(uuid, None)  # tolerate a concurrent terminal poll
+            meta = tx.get("meta") or {}
+            code = meta.get("TransactionResult") if isinstance(meta, dict) else None
+            if code == "tesSUCCESS":
+                return web.json_response({"state": "signed", "tx_hash": txid})
+            return web.json_response({"state": "rejected", "code": "tx_failed", "tx_result": code})
+        signed_at = rec.setdefault("signed_at", time.time())
+        if time.time() - signed_at > BRIX_TRUSTLINE_VALIDATE_SECONDS:
+            # Bounded: the next claim/buy re-checks the line on-ledger anyway,
+            # so giving up here loses nothing if the tx did land late.
+            brix_trustline_payloads.pop(uuid, None)  # tolerate a concurrent terminal poll
+            return web.json_response(
+                {"state": "rejected", "code": "tx_unconfirmed", "tx_hash": txid}
+            )
+        return web.json_response({"state": "validating", "tx_hash": txid})
+    if s["expired"]:
+        brix_trustline_payloads.pop(uuid, None)  # tolerate a concurrent terminal poll
+        return web.json_response({"state": "expired"})
+    return web.json_response({"state": "opened" if s["opened"] else "pending"})
+
+
 @require_wallet
 async def handle_brix_claim(request):
     """Claim the caller's accrued BRIX.
@@ -1622,13 +1767,21 @@ async def handle_brix_claim(request):
 
     # Advisory pre-check: a claim to a wallet with no BRIX trustline would fail
     # tecNO_LINE anyway, but refusing here means no claim row and no binding, so
-    # the holder's balance is untouched and the retry is clean.
-    balance = await xrpl_ops.get_trustline_balance(
+    # the holder's balance is untouched and the retry is clean. The lookup is
+    # tri-state on purpose: the client pins the claim button on
+    # trustline_required, so a transient account_lines failure must surface as
+    # a retryable 503, never as a verdict that the line is missing.
+    line_state, _balance = await xrpl_ops.get_trustline_state(
         wallet, config.BRIX_CURRENCY_HEX, config.BRIX_ISSUER
     )
-    if balance is None:
+    if line_state is xrpl_ops.TrustlineState.ABSENT:
         return web.json_response(
             {"error": "a BRIX trustline is required", "code": "trustline_required"}, status=409
+        )
+    if line_state is xrpl_ops.TrustlineState.UNKNOWN:
+        return web.json_response(
+            {"error": "the payout could not be prepared", "code": "claim_unavailable"},
+            status=503,
         )
 
     # The provisional deadline is read BEFORE the claim exists and written in
@@ -8002,6 +8155,8 @@ def create_app() -> web.Application:
     app.router.add_get("/api/leaderboard", handle_leaderboard)
     app.router.add_get("/api/brix", handle_brix_status)
     app.router.add_post("/api/brix/claim", handle_brix_claim)
+    app.router.add_post("/api/brix/trustline", handle_brix_trustline)
+    app.router.add_get("/api/brix/trustline/{uuid}", handle_brix_trustline_status)
     app.router.add_get("/api/brix/claim/{claim_id}", handle_brix_claim_status)
     app.router.add_get("/api/share/conversions", handle_share_conversions)
     app.router.add_post("/api/share/intent", handle_share_intent)

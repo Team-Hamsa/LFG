@@ -183,6 +183,10 @@ def test_claims_disabled_is_not_retryable_and_says_accrual_continues():
 
 def test_trustline_required_points_at_the_trustline():
     v = err("trustline_required")
+    # #441: the lock is actionable — the pinned label invites the TrustSet
+    # flow instead of telling the user to go do it by hand in Xaman.
+    assert v["lockLabel"] == "Set BRIX trustline"
+    assert "xaman" not in v["message"].lower()
     assert v["retryable"] is False
     assert "trustline" in v["message"].lower()
     assert v["trustline"] is True
@@ -254,3 +258,62 @@ def test_non_terminal_states_keep_polling():
 
 def test_unknown_state_is_not_treated_as_terminal():
     assert run_js("M.isClaimTerminal(null)") is False
+
+
+# --- BRIX trustline flow view (#441) -------------------------------------------
+
+
+def tl(state):
+    return run_js(f"M.trustlineView({json.dumps(state)})")
+
+
+def test_trustline_view_pending_and_opened_keep_waiting():
+    for state in ("pending", "opened"):
+        v = tl(state)
+        assert v["terminal"] is False, state
+        assert v["retry"] is False, state
+    assert tl("opened")["spinner"] is True
+
+
+def test_trustline_view_signed_is_terminal_and_clears_the_lock():
+    v = tl("signed")
+    assert v["terminal"] is True
+    assert v["clearLock"] is True
+    assert v["retry"] is False
+
+
+def test_trustline_view_already_set_behaves_like_signed():
+    v = tl("already_set")
+    assert v["terminal"] is True
+    assert v["clearLock"] is True
+
+
+def test_trustline_view_failures_are_terminal_and_retryable_but_keep_the_lock():
+    for state in ("expired", "rejected"):
+        v = tl(state)
+        assert v["terminal"] is True, state
+        assert v["retry"] is True, state
+        assert v["clearLock"] is False, state
+
+
+def test_trustline_view_unknown_state_keeps_polling():
+    v = tl("something_new")
+    assert v["terminal"] is False
+
+
+def test_trustline_terminal_helper():
+    assert run_js("M.isTrustlineTerminal('signed')") is True
+    assert run_js("M.isTrustlineTerminal('pending')") is False
+
+
+def test_trustline_view_validating_keeps_polling_with_spinner():
+    v = tl("validating")
+    assert v["spinner"] is True and v["terminal"] is False and v["clearLock"] is False
+
+
+def test_trustline_view_rejected_tx_failed_is_distinct_from_signer_mismatch():
+    failed = run_js('M.trustlineView("rejected", "tx_failed")')
+    mismatch = run_js('M.trustlineView("rejected", "signer_mismatch")')
+    assert failed["retry"] and failed["terminal"] and not failed["clearLock"]
+    assert failed["sub"] != mismatch["sub"]
+    assert "ledger" in failed["sub"]

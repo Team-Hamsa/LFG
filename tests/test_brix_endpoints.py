@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+from decimal import Decimal
 
 import pytest
 
@@ -56,6 +57,7 @@ def drip(monkeypatch, tmp_path):
         server.config, "BRIX_DISTRIBUTOR_SEED", "sEdTM1uX8pu2do5XvTnutH6HsouMaM2", raising=False
     )
     monkeypatch.setattr(server.mock_economy, "DEV_OWNER", WALLET, raising=False)
+    server.brix_trustline_payloads.clear()
     path = str(tmp_path / "history.db")
     monkeypatch.setattr(history_store, "history_db_path", lambda net=None: path)
     conn = history_store.init_history_db(path)
@@ -63,9 +65,9 @@ def drip(monkeypatch, tmp_path):
 
     # Claims never touch the network in these tests.
     async def ok_trustline(*a, **k):
-        return 100
+        return xrpl_ops.TrustlineState.PRESENT, Decimal(100)
 
-    monkeypatch.setattr(xrpl_ops, "get_trustline_balance", ok_trustline)
+    monkeypatch.setattr(xrpl_ops, "get_trustline_state", ok_trustline)
 
     async def paid(destination, value, claim_id, max_last_ledger_seq=None):
         return xrpl_ops.ClaimPayment("confirmed", "TXHASH", 999)
@@ -141,14 +143,29 @@ def test_post_claim_pays_out_and_zeroes_the_balance(drip):
 
 def test_post_claim_without_a_trustline_is_refused_before_any_state_change(drip, monkeypatch):
     async def no_line(*a, **k):
-        return None
+        return xrpl_ops.TrustlineState.ABSENT, None
 
-    monkeypatch.setattr(xrpl_ops, "get_trustline_balance", no_line)
+    monkeypatch.setattr(xrpl_ops, "get_trustline_state", no_line)
     _accrue(drip)
     resp = _run(server.handle_brix_claim(_Req()))
     assert resp.status == 409
     assert _body(resp)["code"] == "trustline_required"
     # Nothing was bound, so the balance is intact and retryable.
+    assert _body(_run(server.handle_brix_status(_Req())))["claimable"] == 3
+
+
+def test_post_claim_when_trustline_lookup_fails_is_503_not_a_trustline_verdict(drip, monkeypatch):
+    # A transient account_lines failure must NOT read as "no trustline": the
+    # client pins the claim button on trustline_required, so a false verdict
+    # would lock a real holder out of their payout. Report it as unavailable.
+    async def lookup_failed(*a, **k):
+        return xrpl_ops.TrustlineState.UNKNOWN, None
+
+    monkeypatch.setattr(xrpl_ops, "get_trustline_state", lookup_failed)
+    _accrue(drip)
+    resp = _run(server.handle_brix_claim(_Req()))
+    assert resp.status == 503
+    assert _body(resp)["code"] == "claim_unavailable"
     assert _body(_run(server.handle_brix_status(_Req())))["claimable"] == 3
 
 
@@ -339,3 +356,378 @@ def test_no_claim_is_opened_when_the_ledger_cannot_be_read(drip, monkeypatch):
     assert resp.status == 503
     assert drip.execute("SELECT COUNT(*) FROM brix_claims").fetchone()[0] == 0
     assert _body(_run(server.handle_brix_status(_Req())))["claimable"] == 3
+
+
+# --- get_trustline_state tri-state (PR #440) -----------------------------------
+
+
+class _WsResp:
+    def __init__(self, result, ok=True):
+        self.result = result
+        self._ok = ok
+
+    def is_successful(self):
+        return self._ok
+
+
+def _fake_ws(monkeypatch, responses):
+    class _Ws:
+        def __init__(self, *a, **k):
+            pass
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *a):
+            return False
+
+        async def request(self, req):
+            return responses.pop(0)
+
+    monkeypatch.setattr(xrpl_ops, "AsyncWebsocketClient", _Ws)
+
+
+def _state(monkeypatch, responses):
+    _fake_ws(monkeypatch, responses)
+    return _run(xrpl_ops.get_trustline_state("rW", "BRIX", "rIssuer"))
+
+
+def test_trustline_state_present_with_balance(monkeypatch):
+    resp = _WsResp({"lines": [{"currency": "BRIX", "account": "rIssuer", "balance": "12.5"}]})
+    assert _state(monkeypatch, [resp]) == (xrpl_ops.TrustlineState.PRESENT, Decimal("12.5"))
+
+
+def test_trustline_state_absent_after_a_full_page_walk(monkeypatch):
+    pages = [
+        _WsResp({"lines": [{"currency": "OTHER", "account": "rIssuer"}], "marker": "m1"}),
+        _WsResp({"lines": []}),
+    ]
+    assert _state(monkeypatch, pages) == (xrpl_ops.TrustlineState.ABSENT, None)
+
+
+def test_trustline_state_error_response_is_unknown_not_absent(monkeypatch):
+    """Greptile P1 on PR #440: xrpl-py returns (not raises) tooBusy & co. — a
+    result with no `lines`/`marker` must not read as an exhausted walk."""
+    resp = _WsResp({"error": "tooBusy", "status": "error"}, ok=False)
+    assert _state(monkeypatch, [resp]) == (xrpl_ops.TrustlineState.UNKNOWN, None)
+
+
+def test_trustline_state_transport_failure_is_unknown(monkeypatch):
+    class _Boom:
+        def __init__(self, *a, **k):
+            pass
+
+        async def __aenter__(self):
+            raise ConnectionError("down")
+
+        async def __aexit__(self, *a):
+            return False
+
+    monkeypatch.setattr(xrpl_ops, "AsyncWebsocketClient", _Boom)
+    assert _run(xrpl_ops.get_trustline_state("rW", "BRIX", "rI")) == (
+        xrpl_ops.TrustlineState.UNKNOWN,
+        None,
+    )
+
+
+# --- BRIX trustline flow (#441) -----------------------------------------------
+
+
+def _trustline_state(monkeypatch, state):
+    async def fake(*a, **k):
+        return state, (Decimal(1) if state is xrpl_ops.TrustlineState.PRESENT else None)
+
+    monkeypatch.setattr(xrpl_ops, "get_trustline_state", fake)
+
+
+def _fake_payload(monkeypatch, captured):
+    async def create(account, currency, issuer, limit, **kw):
+        captured.update(account=account, currency=currency, issuer=issuer, limit=limit, **kw)
+        return {"uuid": "u-1", "qr_url": "q", "xumm_url": "x", "pushed": False, "push": None}
+
+    monkeypatch.setattr(server.xumm_ops, "create_trustset_payload", create)
+
+
+def test_trustline_start_builds_a_signer_pinned_brix_trustset(drip, monkeypatch):
+    _trustline_state(monkeypatch, xrpl_ops.TrustlineState.ABSENT)
+    captured = {}
+    _fake_payload(monkeypatch, captured)
+    monkeypatch.setattr(server.config, "BRIX_TRUSTLINE_LIMIT", "1000000000", raising=False)
+    resp = _run(server.handle_brix_trustline(_Req()))
+    assert resp.status == 200
+    data = _body(resp)
+    assert data["state"] == "pending"
+    assert data["uuid"] == "u-1"
+    assert data["xumm_url"] == "x"
+    # _create_xumm_payload's key is qr_url; the wire field is qr_png (CR on #442).
+    assert data["qr_png"] == "q"
+    assert captured["account"] == WALLET
+    assert captured["currency"] == server.config.BRIX_CURRENCY_HEX
+    assert captured["issuer"] == server.config.BRIX_ISSUER
+    assert captured["limit"] == "1000000000"
+
+
+def test_trustline_start_is_a_noop_when_the_line_already_exists(drip, monkeypatch):
+    _trustline_state(monkeypatch, xrpl_ops.TrustlineState.PRESENT)
+    captured = {}
+    _fake_payload(monkeypatch, captured)
+    data = _body(_run(server.handle_brix_trustline(_Req())))
+    assert data["state"] == "already_set"
+    assert captured == {}  # nothing built
+
+
+def test_trustline_start_builds_anyway_when_the_lookup_fails(drip, monkeypatch):
+    # Unlike the claim path, nothing is bound here and the user explicitly
+    # asked for the line; a redundant TrustSet on an existing line is harmless.
+    _trustline_state(monkeypatch, xrpl_ops.TrustlineState.UNKNOWN)
+    captured = {}
+    _fake_payload(monkeypatch, captured)
+    assert _body(_run(server.handle_brix_trustline(_Req())))["state"] == "pending"
+    assert captured["account"] == WALLET
+
+
+def test_trustline_start_503_when_xumm_is_unavailable(drip, monkeypatch):
+    _trustline_state(monkeypatch, xrpl_ops.TrustlineState.ABSENT)
+
+    async def none(*a, **k):
+        return None
+
+    monkeypatch.setattr(server.xumm_ops, "create_trustset_payload", none)
+    resp = _run(server.handle_brix_trustline(_Req()))
+    assert resp.status == 503
+    assert _body(resp)["code"] == "signing_unavailable"
+
+
+def _started(drip, monkeypatch):
+    _trustline_state(monkeypatch, xrpl_ops.TrustlineState.ABSENT)
+    _fake_payload(monkeypatch, {})
+    return _body(_run(server.handle_brix_trustline(_Req())))["uuid"]
+
+
+def _status(monkeypatch, **s):
+    base = {
+        "opened": False,
+        "signed": False,
+        "expired": False,
+        "account": None,
+        "txid": None,
+        "user_token": None,
+    }
+    base.update(s)
+
+    async def fake(uuid, **k):
+        return base
+
+    monkeypatch.setattr(server.xumm_ops, "get_payload_status", fake)
+
+
+def _tx(monkeypatch, *, validated, result=None, raise_=None):
+    async def get_tx(txid):
+        if raise_:
+            raise raise_
+        return {"validated": True, "meta": {"TransactionResult": result}} if validated else {}
+
+    monkeypatch.setattr(xrpl_ops, "get_tx", get_tx)
+
+
+def test_trustline_status_unknown_uuid_is_404(drip):
+    resp = _run(server.handle_brix_trustline_status(_Req(match_info={"uuid": "nope"})))
+    assert resp.status == 404
+
+
+def test_trustline_status_pending_then_signed_recaptures_push_token(drip, monkeypatch):
+    uuid = _started(drip, monkeypatch)
+    _status(monkeypatch)
+    assert (
+        _body(_run(server.handle_brix_trustline_status(_Req(match_info={"uuid": uuid}))))["state"]
+        == "pending"
+    )
+
+    saved = {}
+    monkeypatch.setattr(
+        server.identity_store, "set_user_token", lambda p, u, t: saved.update(p=p, u=u, t=t)
+    )
+    _status(monkeypatch, signed=True, account=WALLET, txid="TX1", user_token="tok-new")
+    _tx(monkeypatch, validated=True, result="tesSUCCESS")
+    data = _body(_run(server.handle_brix_trustline_status(_Req(match_info={"uuid": uuid}))))
+    assert data == {"state": "signed", "tx_hash": "TX1"}
+    assert saved["t"] == "tok-new"
+    # Single-use: the record is gone once terminal.
+    assert _run(server.handle_brix_trustline_status(_Req(match_info={"uuid": uuid}))).status == 404
+
+
+def test_trustline_status_wrong_signer_is_rejected_and_persists_nothing(drip, monkeypatch):
+    uuid = _started(drip, monkeypatch)
+    saved = {}
+    monkeypatch.setattr(server.identity_store, "set_user_token", lambda *a: saved.update(hit=True))
+    _status(monkeypatch, signed=True, account="rSomeoneElse", txid="TX1", user_token="tok")
+    data = _body(_run(server.handle_brix_trustline_status(_Req(match_info={"uuid": uuid}))))
+    assert data == {"state": "rejected", "code": "signer_mismatch"}
+    assert saved == {}
+
+
+def test_trustline_status_expired(drip, monkeypatch):
+    uuid = _started(drip, monkeypatch)
+    _status(monkeypatch, expired=True)
+    assert (
+        _body(_run(server.handle_brix_trustline_status(_Req(match_info={"uuid": uuid}))))["state"]
+        == "expired"
+    )
+
+
+def test_trustline_status_is_owner_scoped(drip, monkeypatch):
+    """Keyed by (platform, user_id) like signin_payloads: another caller
+    holding the uuid cannot read or complete it."""
+    uuid = _started(drip, monkeypatch)
+    _status(monkeypatch)
+    server.brix_trustline_payloads[uuid]["user_id"] = "someone-else"
+    assert _run(server.handle_brix_trustline_status(_Req(match_info={"uuid": uuid}))).status == 404
+
+
+def test_trustline_status_signed_but_unvalidated_keeps_polling(drip, monkeypatch):
+    """Signed is not set (Greptile P1 on #442): only a validated tesSUCCESS
+    clears the record; until then the client keeps polling."""
+    uuid = _started(drip, monkeypatch)
+    monkeypatch.setattr(server.identity_store, "set_user_token", lambda *a: None)
+    _status(monkeypatch, signed=True, account=WALLET, txid="TX1")
+    _tx(monkeypatch, validated=False)
+    data = _body(_run(server.handle_brix_trustline_status(_Req(match_info={"uuid": uuid}))))
+    assert data == {"state": "validating", "tx_hash": "TX1"}
+    assert uuid in server.brix_trustline_payloads
+    # A lookup blip is not a verdict either.
+    _tx(monkeypatch, validated=False, raise_=RuntimeError("rpc down"))
+    data = _body(_run(server.handle_brix_trustline_status(_Req(match_info={"uuid": uuid}))))
+    assert data["state"] == "validating"
+    assert uuid in server.brix_trustline_payloads
+
+
+def test_trustline_status_validated_failure_is_rejected_tx_failed(drip, monkeypatch):
+    uuid = _started(drip, monkeypatch)
+    monkeypatch.setattr(server.identity_store, "set_user_token", lambda *a: None)
+    _status(monkeypatch, signed=True, account=WALLET, txid="TX1")
+    _tx(monkeypatch, validated=True, result="tecNO_PERMISSION")
+    data = _body(_run(server.handle_brix_trustline_status(_Req(match_info={"uuid": uuid}))))
+    assert data == {"state": "rejected", "code": "tx_failed", "tx_result": "tecNO_PERMISSION"}
+    assert uuid not in server.brix_trustline_payloads
+
+
+def test_trustline_records_are_pruned_by_ttl(drip, monkeypatch):
+    """Abandoned flows must not accumulate for the process lifetime."""
+    _started(drip, monkeypatch)
+    stale = server.brix_trustline_payloads.pop("u-1")
+    stale["user_id"] = "someone-else"  # not the caller's, so no reuse
+    stale["created_at"] -= server.BRIX_TRUSTLINE_TTL + 1
+    server.brix_trustline_payloads["u-stale"] = stale
+    assert _run(server.handle_brix_trustline(_Req())).status == 200
+    assert "u-stale" not in server.brix_trustline_payloads
+    assert "u-1" in server.brix_trustline_payloads
+
+
+def test_trustline_start_reuses_the_callers_live_payload(drip, monkeypatch):
+    """Back-then-Retry hands the still-live request back instead of minting a
+    second Xaman payload (#260 open-payload cap; Greptile on #442)."""
+    uuid = _started(drip, monkeypatch)
+    calls = []
+
+    async def must_not_create(*a, **k):
+        calls.append(1)
+
+    monkeypatch.setattr(server.xumm_ops, "create_trustset_payload", must_not_create)
+    data = _body(_run(server.handle_brix_trustline(_Req())))
+    assert data["state"] == "pending" and data["uuid"] == uuid
+    assert data["qr_png"] == "q" and data["xumm_url"] == "x"
+    assert calls == []
+    assert len(server.brix_trustline_payloads) == 1
+
+
+def test_trustline_concurrent_starts_share_one_payload(drip, monkeypatch):
+    """Overlapping starts for one caller serialize on the start lock, so the
+    second sees the first's record and reuses it (Greptile on #442)."""
+    _trustline_state(monkeypatch, xrpl_ops.TrustlineState.ABSENT)
+    calls = []
+
+    async def slow_create(*a, **k):
+        calls.append(1)
+        await asyncio.sleep(0.05)
+        return {"uuid": f"u-{len(calls)}", "qr_url": "q", "xumm_url": "x"}
+
+    monkeypatch.setattr(server.xumm_ops, "create_trustset_payload", slow_create)
+
+    async def both():
+        return await asyncio.gather(
+            server.handle_brix_trustline(_Req()), server.handle_brix_trustline(_Req())
+        )
+
+    a, b = _run(both())
+    assert _body(a)["uuid"] == _body(b)["uuid"] == "u-1"
+    assert calls == [1]
+    assert not server._brix_trustline_lock.locked()
+
+
+def test_trustline_start_does_not_reuse_another_wallets_payload(drip, monkeypatch):
+    """Re-registering to wallet B mid-flow must not hand back wallet A's
+    signer-pinned payload (CodeRabbit on #442)."""
+    uuid_a = _started(drip, monkeypatch)
+    server.brix_trustline_payloads[uuid_a]["wallet"] = "rWalletA"
+    captured = {}
+    _fake_payload(monkeypatch, captured)
+    data = _body(_run(server.handle_brix_trustline(_Req())))
+    assert data["state"] == "pending"
+    assert captured["account"] == WALLET  # a fresh payload for the current wallet
+
+
+def test_trustline_validating_is_bounded(drip, monkeypatch):
+    """A signed txid that never validates (txnNotFound forever) must not spin
+    the panel forever (Greptile on #442)."""
+    uuid = _started(drip, monkeypatch)
+    monkeypatch.setattr(server.identity_store, "set_user_token", lambda *a: None)
+    _status(monkeypatch, signed=True, account=WALLET, txid="TX1")
+    _tx(monkeypatch, validated=False)
+    first = _body(_run(server.handle_brix_trustline_status(_Req(match_info={"uuid": uuid}))))
+    assert first["state"] == "validating"
+    server.brix_trustline_payloads[uuid]["signed_at"] -= server.BRIX_TRUSTLINE_VALIDATE_SECONDS + 1
+    data = _body(_run(server.handle_brix_trustline_status(_Req(match_info={"uuid": uuid}))))
+    assert data["state"] == "rejected" and data["code"] == "tx_unconfirmed"
+    assert uuid not in server.brix_trustline_payloads
+
+
+def test_trustline_concurrent_terminal_polls_do_not_500(drip, monkeypatch):
+    """Two status polls past the validation timeout both terminate cleanly
+    (CodeRabbit on #442): the second sees the record gone, not a KeyError."""
+    uuid = _started(drip, monkeypatch)
+    monkeypatch.setattr(server.identity_store, "set_user_token", lambda *a: None)
+    _status(monkeypatch, signed=True, account=WALLET, txid="TX1")
+
+    async def slow_get_tx(txid):
+        await asyncio.sleep(0.02)
+        return {}
+
+    monkeypatch.setattr(xrpl_ops, "get_tx", slow_get_tx)
+    _run(server.handle_brix_trustline_status(_Req(match_info={"uuid": uuid})))  # stamps signed_at
+    server.brix_trustline_payloads[uuid]["signed_at"] -= server.BRIX_TRUSTLINE_VALIDATE_SECONDS + 1
+
+    async def both():
+        def req():
+            return server.handle_brix_trustline_status(_Req(match_info={"uuid": uuid}))
+
+        return await asyncio.gather(req(), req())
+
+    a, b = _run(both())
+    assert {a.status, b.status} == {200}
+    assert _body(a)["code"] == "tx_unconfirmed"
+
+
+def test_trustline_status_survives_a_failed_push_token_write(drip, monkeypatch):
+    """Token persistence is best-effort (CodeRabbit on #442): a failing write
+    neither 500s the poll nor marks the token saved."""
+    uuid = _started(drip, monkeypatch)
+
+    def boom(*a):
+        raise RuntimeError("db locked")
+
+    monkeypatch.setattr(server.identity_store, "set_user_token", boom)
+    _status(monkeypatch, signed=True, account=WALLET, txid="TX1", user_token="tok")
+    _tx(monkeypatch, validated=False)
+    resp = _run(server.handle_brix_trustline_status(_Req(match_info={"uuid": uuid})))
+    assert resp.status == 200 and _body(resp)["state"] == "validating"
+    assert not server.brix_trustline_payloads[uuid].get("token_saved")
