@@ -1597,6 +1597,85 @@ def _mark_submitted_unknown(claim_id: int, last_ledger_seq: int | None = None) -
         conn.close()
 
 
+# --- BRIX trustline flow (#441) ------------------------------------------------
+# A holder with no BRIX trustline is refused 409 trustline_required by the
+# claim and trait-buy paths; this is the exit. Stateless on our side beyond
+# the in-flight payload record: the ledger is the truth for whether a line
+# exists, and the next claim/buy POST re-checks it. Keyed like
+# signin_payloads — (platform, user_id) — so another caller holding the uuid
+# can neither read nor complete it.
+brix_trustline_payloads: dict[str, Any] = {}
+
+
+@require_wallet
+async def handle_brix_trustline(request):
+    wallet = request["wallet"]
+    user = request["user"]
+    line_state, _ = await xrpl_ops.get_trustline_state(
+        wallet, config.BRIX_CURRENCY_HEX, config.BRIX_ISSUER
+    )
+    if line_state is xrpl_ops.TrustlineState.PRESENT:
+        return web.json_response({"state": "already_set"})
+    # UNKNOWN deliberately falls through: nothing is bound here (unlike the
+    # claim path), the user explicitly asked for the line, and a redundant
+    # TrustSet on an existing line is a harmless no-op.
+    payload = await xumm_ops.create_trustset_payload(
+        wallet,
+        config.BRIX_CURRENCY_HEX,
+        config.BRIX_ISSUER,
+        config.BRIX_TRUSTLINE_LIMIT,
+        user_token=await _push_token(user),
+        platform=memos.platform_for_surface(_platform(user)),
+    )
+    if not payload:
+        return web.json_response(
+            {"error": "could not reach Xaman", "code": "signing_unavailable"}, status=503
+        )
+    brix_trustline_payloads[payload["uuid"]] = {
+        "wallet": wallet,
+        "user_id": user["id"],
+        "platform": _platform(user),
+    }
+    return web.json_response(
+        {
+            "state": "pending",
+            "uuid": payload["uuid"],
+            "qr_png": payload.get("qr_png"),
+            "xumm_url": payload.get("xumm_url"),
+            "pushed": bool(payload.get("pushed")),
+            "push": payload.get("push"),
+        }
+    )
+
+
+@require_wallet
+async def handle_brix_trustline_status(request):
+    uuid = request.match_info["uuid"]
+    rec = brix_trustline_payloads.get(uuid)
+    user = request["user"]
+    if not rec or rec["user_id"] != user["id"] or rec["platform"] != _platform(user):
+        return web.json_response({"error": "not found"}, status=404)
+    s = await xumm_ops.get_payload_status(uuid)
+    if not s:
+        return web.json_response({"error": "could not reach Xaman"}, status=502)
+    if s["signed"]:
+        del brix_trustline_payloads[uuid]
+        if s.get("account") != rec["wallet"]:
+            # Someone else signed the shared QR: their line, not ours. The
+            # session wallet's next claim still 409s and re-arms the button.
+            return web.json_response({"state": "rejected", "code": "signer_mismatch"})
+        # #212: refresh the push token off every signed payload we poll.
+        if s.get("user_token"):
+            await asyncio.to_thread(
+                identity_store.set_user_token, rec["platform"], rec["user_id"], s["user_token"]
+            )
+        return web.json_response({"state": "signed", "tx_hash": s.get("txid")})
+    if s["expired"]:
+        del brix_trustline_payloads[uuid]
+        return web.json_response({"state": "expired"})
+    return web.json_response({"state": "opened" if s["opened"] else "pending"})
+
+
 @require_wallet
 async def handle_brix_claim(request):
     """Claim the caller's accrued BRIX.
@@ -8010,6 +8089,8 @@ def create_app() -> web.Application:
     app.router.add_get("/api/leaderboard", handle_leaderboard)
     app.router.add_get("/api/brix", handle_brix_status)
     app.router.add_post("/api/brix/claim", handle_brix_claim)
+    app.router.add_post("/api/brix/trustline", handle_brix_trustline)
+    app.router.add_get("/api/brix/trustline/{uuid}", handle_brix_trustline_status)
     app.router.add_get("/api/brix/claim/{claim_id}", handle_brix_claim_status)
     app.router.add_get("/api/share/conversions", handle_share_conversions)
     app.router.add_post("/api/share/intent", handle_share_intent)

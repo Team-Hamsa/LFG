@@ -35,7 +35,7 @@ import * as signDeliveryPure from './signdelivery_pure.js?v=1';
 // Daily BRIX drip card (#48): what the card renders and how each claim error
 // code is handled are pure decisions, Node-testable (tests/test_brix_pure_js.py);
 // loadBrix()/claimBrix() below are the glue.
-import * as brixPure from './brix_pure.js?v=4';
+import * as brixPure from './brix_pure.js?v=5';
 
 const params = new URLSearchParams(window.location.search);
 const insideDiscord = params.has('frame_id');
@@ -677,6 +677,7 @@ function showMintHome() {
   status(`Hey ${me.username} — welcome to the job site.`);
   loadLeaderboard();
   brixLock = null; // a fresh landing gets a fresh look at claimability
+  brixTrustlineNeeded = false;
   loadBrix();
   refreshOffersBadge();
 }
@@ -889,6 +890,10 @@ let brixClaiming = false;
 // disabled until the next home landing clears it. Every other code leaves it
 // null: the refreshed status is the truth there. Greptile P1s on PR #434.
 let brixLock = null;
+// #441: true while brixLock came from trustline_required — the ONE lock that
+// is actionable: the button stays enabled under its label and the click runs
+// the TrustSet flow instead of another doomed claim POST.
+let brixTrustlineNeeded = false;
 
 function stopBrixPoll() {
   brixPollGen++;
@@ -909,7 +914,7 @@ function renderBrixCard(view) {
   btn.setAttribute('aria-label', `${view.button.label} — ${view.sub}`);
   if (brixLock && !view.inFlight) {
     btn.textContent = `\u{1F9F1} ${brixLock}`;
-    btn.disabled = true;
+    btn.disabled = !brixTrustlineNeeded || brixClaiming;
     return;
   }
   btn.textContent = `\u{1F9F1} ${view.button.label}`;
@@ -986,6 +991,7 @@ function pollBrixClaim(claimId) {
 }
 
 async function claimBrix() {
+  if (brixTrustlineNeeded) { startBrixTrustline({ back: showMintHome }); return; }
   const btn = el('brix-claim-btn');
   if (brixClaiming) return;
   // Re-read the balance before asking: the amount goes into the confirm copy,
@@ -1035,6 +1041,7 @@ async function claimBrix() {
     const ev = brixPure.claimErrorView(code);
     toast(ev.message);
     if (ev.lockLabel) brixLock = ev.lockLabel;
+    brixTrustlineNeeded = !!ev.trustline;
   } finally {
     brixClaiming = false;
   }
@@ -1043,6 +1050,87 @@ async function claimBrix() {
 
 function setupBrixCard() {
   el('brix-claim-btn').addEventListener('click', claimBrix);
+  el('trustline-back-btn').addEventListener('click', () => {
+    clearTimeout(trustlinePollTimer);
+    (trustlineBack || showMintHome)();
+  });
+  el('trustline-retry-btn').addEventListener('click', () => startBrixTrustline({ back: trustlineBack }));
+}
+
+// --- BRIX trustline flow (#441) ------------------------------------------
+//
+// The exit from a 409 trustline_required (Claim, trait Buy). Stateless
+// server-side beyond the in-flight payload, so there is nothing to resume:
+// on relaunch the user simply retries the original action and either it
+// proceeds (line landed) or the 409 re-arms this flow. `back` is where the
+// panel returns to on Back / after a signed line.
+let trustlinePollTimer = null;
+let trustlineBack = null;
+
+function renderTrustline({ sub, spinner, retry, link, qrData, push }) {
+  el('trustline-sub').textContent = sub;
+  el('trustline-spinner').hidden = !spinner;
+  applySignDelivery({
+    qrEl: el('trustline-qr'),
+    linkBtn: el('trustline-link-btn'),
+    toggleBtn: el('trustline-qr-toggle'),
+    link, qrData, push,
+  });
+  el('trustline-retry-btn').hidden = !retry;
+}
+
+async function startBrixTrustline({ back } = {}) {
+  clearTimeout(trustlinePollTimer);
+  trustlineBack = back || showMintHome;
+  showPanel('trustline-panel');
+  renderTrustline({ sub: 'Setting up the trustline request…', spinner: true });
+  let s;
+  try {
+    s = await api('/api/brix/trustline', { method: 'POST', body: '{}' });
+  } catch (e) {
+    renderTrustline({ sub: 'Could not start the trustline request.', retry: true });
+    return;
+  }
+  if (s.state === 'already_set') { finishTrustline(s.state); return; }
+  renderTrustline({
+    ...brixPure.trustlineView('pending'),
+    link: s.xumm_url, qrData: s.xumm_url, push: s.push,
+  });
+  pollTrustline(s.uuid, s);
+}
+
+function finishTrustline(state) {
+  const v = brixPure.trustlineView(state);
+  renderTrustline(v);
+  if (v.clearLock) {
+    brixLock = null;
+    brixTrustlineNeeded = false;
+    toast(`\u{1F9F1} ${v.sub}`);
+    (trustlineBack || showMintHome)();
+  }
+}
+
+function pollTrustline(uuid, started) {
+  clearTimeout(trustlinePollTimer);
+  const tick = async () => {
+    if (el('trustline-panel').hidden) return; // user navigated away
+    let s;
+    try {
+      s = await api(`/api/brix/trustline/${uuid}`);
+    } catch (e) {
+      trustlinePollTimer = setTimeout(tick, 3000); // transient; keep polling
+      return;
+    }
+    if (brixPure.isTrustlineTerminal(s.state)) { finishTrustline(s.state); return; }
+    // Re-render keeps the deep link / QR up; applySignDelivery auto-opens
+    // at most once per link.
+    renderTrustline({
+      ...brixPure.trustlineView(s.state),
+      link: started.xumm_url, qrData: started.xumm_url, push: started.push,
+    });
+    trustlinePollTimer = setTimeout(tick, 3000);
+  };
+  trustlinePollTimer = setTimeout(tick, 3000);
 }
 
 // Mint flow step indicator (hidden for flows without a stage, e.g. trustlines)
@@ -4299,6 +4387,12 @@ async function marketFlow(kind, startPath, body, render) {
     if (e.message === 'closet_required') {
       showPanel('market-panel');
       promptClosetRequired();
+      return;
+    }
+    if (e.body && e.body.code === 'trustline_required') {
+      // #441: a trait buy needs a BRIX line to receive the on-ramped BRIX;
+      // set it and come back to the listing rather than dead-ending.
+      startBrixTrustline({ back: () => showPanel('market-panel') });
       return;
     }
     showFlow({ title: '❌ Could not start', text: e.message, done: true });

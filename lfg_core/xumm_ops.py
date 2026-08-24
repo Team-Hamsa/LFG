@@ -594,6 +594,37 @@ async def create_onramp_payment_payload(
     )
 
 
+async def create_trustset_payload(
+    account: str,
+    currency: str,
+    issuer: str,
+    limit: str,
+    return_url: dict[str, str] | None = None,
+    user_token: str | None = None,
+    platform: str = memos.PLATFORM_BACKEND,
+    campaign: str | None = None,
+) -> dict[str, Any] | None:
+    """XUMM payload for a user-signed TrustSet on ``currency``/``issuer``
+    (#441: the Activity's BRIX trustline flow). ``Account`` is pinned to the
+    session wallet (#314) so a shared QR cannot set a line on another
+    account; ``Flags`` is tfSetNoRipple like the Discord bot's LFGO line.
+    SourceTag + provenance memos (``action=trustset``) are stamped by
+    ``_create_xumm_payload``; ``user_token`` push-delivers (#135)."""
+    return await _create_xumm_payload(
+        {
+            "TransactionType": "TrustSet",
+            "Account": account,
+            "Flags": 131072,
+            "LimitAmount": {"currency": currency, "issuer": issuer, "value": limit},
+        },
+        options=_with_return_url({}, return_url),
+        user_token=user_token,
+        memos_json=memos.build_memos_json(
+            memos.INITIATOR_USER, platform, memos.ACTION_TRUSTSET, campaign
+        ),
+    )
+
+
 async def create_signin_payload(return_url: dict[str, str] | None = None) -> dict[str, Any] | None:
     """XUMM SignIn payload: the user scans/approves in Xaman and the signed
     payload reveals their wallet address (registration flow, issue #24)."""

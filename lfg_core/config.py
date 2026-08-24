@@ -333,6 +333,11 @@ SWAP_OFFER_AMOUNT = os.getenv("SWAP_OFFER_AMOUNT", "10")
 # tecNO_LINE because the NFT issuer only holds a BRIX trustline for royalties.
 BRIX_CURRENCY_HEX = os.getenv("BRIX_CURRENCY_HEX", SWAP_OFFER_CURRENCY_HEX)
 BRIX_ISSUER = os.getenv("BRIX_ISSUER", SWAP_OFFER_ISSUER)
+# Limit on the BRIX trustline the Activity sets for a holder (#441). Must
+# exceed any single drip payout plus market activity — a line below an
+# incoming claim makes that Payment fail tecPATH_DRY. Deliberately NOT
+# TOKEN_TRUSTLINE_LIMIT (1000, sized for LFGO mint pricing).
+BRIX_TRUSTLINE_LIMIT = os.getenv("BRIX_TRUSTLINE_LIMIT", "1000000000")
 # Multiplier over the AMM spot quote when a swap fee is charged in XRP, so
 # the follow-up BRIX buy-and-burn still clears if the pool moves slightly.
 SWAP_XRP_FEE_BUFFER = os.getenv("SWAP_XRP_FEE_BUFFER", "1.05")

@@ -1,6 +1,6 @@
 # BRIX trustline flow in the Activity — design
 
-**Status:** proposed · 2026-08-24
+**Status:** implemented (#441) · 2026-08-24
 **Follows:** PR #440 (tri-state trustline lookup on the claim path)
 **Related:** #48 (BRIX daily drip), #239 (BRIX trait listings / on-ramp), #135 (push delivery)
 
