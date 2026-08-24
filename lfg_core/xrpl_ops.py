@@ -1437,6 +1437,13 @@ async def get_trustline_state(
                     AccountLines(account=address, peer=issuer, marker=marker, limit=400)
                 )
                 result = response.result
+                # xrpl-py does NOT raise on an error response (tooBusy,
+                # actNotFound, ...): `result` simply lacks `lines`/`marker`,
+                # which would read as an exhausted page set = ABSENT. That
+                # verdict locks the client's claim button, so surface it as
+                # UNKNOWN instead (Greptile P1, PR #440).
+                if not response.is_successful():
+                    raise RuntimeError(result.get("error", "account_lines request failed"))
                 for line in result.get("lines", []):
                     if line.get("currency") == currency and line.get("account") == issuer:
                         return TrustlineState.PRESENT, Decimal(line.get("balance", "0"))
