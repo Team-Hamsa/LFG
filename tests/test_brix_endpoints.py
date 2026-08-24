@@ -57,6 +57,7 @@ def drip(monkeypatch, tmp_path):
         server.config, "BRIX_DISTRIBUTOR_SEED", "sEdTM1uX8pu2do5XvTnutH6HsouMaM2", raising=False
     )
     monkeypatch.setattr(server.mock_economy, "DEV_OWNER", WALLET, raising=False)
+    server.brix_trustline_payloads.clear()
     path = str(tmp_path / "history.db")
     monkeypatch.setattr(history_store, "history_db_path", lambda net=None: path)
     conn = history_store.init_history_db(path)
@@ -614,8 +615,26 @@ def test_trustline_records_are_pruned_by_ttl(drip, monkeypatch):
     """Abandoned flows must not accumulate for the process lifetime."""
     _started(drip, monkeypatch)
     stale = server.brix_trustline_payloads.pop("u-1")
+    stale["user_id"] = "someone-else"  # not the caller's, so no reuse
     stale["created_at"] -= server.BRIX_TRUSTLINE_TTL + 1
     server.brix_trustline_payloads["u-stale"] = stale
     assert _run(server.handle_brix_trustline(_Req())).status == 200
     assert "u-stale" not in server.brix_trustline_payloads
     assert "u-1" in server.brix_trustline_payloads
+
+
+def test_trustline_start_reuses_the_callers_live_payload(drip, monkeypatch):
+    """Back-then-Retry hands the still-live request back instead of minting a
+    second Xaman payload (#260 open-payload cap; Greptile on #442)."""
+    uuid = _started(drip, monkeypatch)
+    calls = []
+
+    async def must_not_create(*a, **k):
+        calls.append(1)
+
+    monkeypatch.setattr(server.xumm_ops, "create_trustset_payload", must_not_create)
+    data = _body(_run(server.handle_brix_trustline(_Req())))
+    assert data["state"] == "pending" and data["uuid"] == uuid
+    assert data["qr_png"] == "q" and data["xumm_url"] == "x"
+    assert calls == []
+    assert len(server.brix_trustline_payloads) == 1

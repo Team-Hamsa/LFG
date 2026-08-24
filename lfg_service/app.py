@@ -1631,6 +1631,11 @@ async def handle_brix_trustline(request):
     # UNKNOWN deliberately falls through: nothing is bound here (unlike the
     # claim path), the user explicitly asked for the line, and a redundant
     # TrustSet on an existing line is a harmless no-op.
+    # Back-then-Retry must not mint a second live Xaman payload (#260 open-
+    # payload cap): hand the caller's still-live request back instead.
+    for uuid, rec in brix_trustline_payloads.items():
+        if rec["user_id"] == user["id"] and rec["platform"] == _platform(user):
+            return web.json_response({"state": "pending", "uuid": uuid, **rec["delivery"]})
     payload = await xumm_ops.create_trustset_payload(
         wallet,
         config.BRIX_CURRENCY_HEX,
@@ -1643,24 +1648,22 @@ async def handle_brix_trustline(request):
         return web.json_response(
             {"error": "could not reach Xaman", "code": "signing_unavailable"}, status=503
         )
+    delivery = {
+        # _create_xumm_payload's key is qr_url (every session builder
+        # reads payload["qr_url"]); the wire name matches the spec.
+        "qr_png": payload.get("qr_url"),
+        "xumm_url": payload.get("xumm_url"),
+        "pushed": bool(payload.get("pushed")),
+        "push": payload.get("push"),
+    }
     brix_trustline_payloads[payload["uuid"]] = {
         "wallet": wallet,
         "user_id": user["id"],
         "platform": _platform(user),
         "created_at": time.time(),
+        "delivery": delivery,
     }
-    return web.json_response(
-        {
-            "state": "pending",
-            "uuid": payload["uuid"],
-            # _create_xumm_payload's key is qr_url (every session builder
-            # reads payload["qr_url"]); the wire name matches the spec.
-            "qr_png": payload.get("qr_url"),
-            "xumm_url": payload.get("xumm_url"),
-            "pushed": bool(payload.get("pushed")),
-            "push": payload.get("push"),
-        }
-    )
+    return web.json_response({"state": "pending", "uuid": payload["uuid"], **delivery})
 
 
 @require_wallet

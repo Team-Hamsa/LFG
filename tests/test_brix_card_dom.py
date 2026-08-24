@@ -197,5 +197,7 @@ def test_trustline_poll_rechecks_staleness_after_the_await():
     src = open(os.path.join(CLIENT, "app.js")).read()
     start = src.index("function pollTrustline")
     body = src[start : src.index("\n}\n", start)]
-    assert body.count("if (stale()) return;") >= 2
+    await_pos = body.index("s = await api(")
+    assert body.find("if (stale()) return;", await_pos) >= 0, "no stale check after the await"
+    assert body.find("if (stale()) return;") < await_pos, "no stale check before the await"
     assert "gen !== trustlinePollGen" in body
