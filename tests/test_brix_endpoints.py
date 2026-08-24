@@ -641,7 +641,7 @@ def test_trustline_start_reuses_the_callers_live_payload(drip, monkeypatch):
 
 
 def test_trustline_concurrent_starts_share_one_payload(drip, monkeypatch):
-    """Overlapping starts for one caller serialize on a per-user lock, so the
+    """Overlapping starts for one caller serialize on the start lock, so the
     second sees the first's record and reuses it (Greptile on #442)."""
     _trustline_state(monkeypatch, xrpl_ops.TrustlineState.ABSENT)
     calls = []
@@ -661,4 +661,4 @@ def test_trustline_concurrent_starts_share_one_payload(drip, monkeypatch):
     a, b = _run(both())
     assert _body(a)["uuid"] == _body(b)["uuid"] == "u-1"
     assert calls == [1]
-    assert server._brix_trustline_locks == {}
+    assert not server._brix_trustline_lock.locked()
