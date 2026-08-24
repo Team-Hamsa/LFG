@@ -1622,13 +1622,21 @@ async def handle_brix_claim(request):
 
     # Advisory pre-check: a claim to a wallet with no BRIX trustline would fail
     # tecNO_LINE anyway, but refusing here means no claim row and no binding, so
-    # the holder's balance is untouched and the retry is clean.
-    balance = await xrpl_ops.get_trustline_balance(
+    # the holder's balance is untouched and the retry is clean. The lookup is
+    # tri-state on purpose: the client pins the claim button on
+    # trustline_required, so a transient account_lines failure must surface as
+    # a retryable 503, never as a verdict that the line is missing.
+    line_state, _balance = await xrpl_ops.get_trustline_state(
         wallet, config.BRIX_CURRENCY_HEX, config.BRIX_ISSUER
     )
-    if balance is None:
+    if line_state is xrpl_ops.TrustlineState.ABSENT:
         return web.json_response(
             {"error": "a BRIX trustline is required", "code": "trustline_required"}, status=409
+        )
+    if line_state is xrpl_ops.TrustlineState.UNKNOWN:
+        return web.json_response(
+            {"error": "the payout could not be prepared", "code": "claim_unavailable"},
+            status=503,
         )
 
     # The provisional deadline is read BEFORE the claim exists and written in

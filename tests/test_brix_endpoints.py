@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+from decimal import Decimal
 
 import pytest
 
@@ -63,9 +64,9 @@ def drip(monkeypatch, tmp_path):
 
     # Claims never touch the network in these tests.
     async def ok_trustline(*a, **k):
-        return 100
+        return xrpl_ops.TrustlineState.PRESENT, Decimal(100)
 
-    monkeypatch.setattr(xrpl_ops, "get_trustline_balance", ok_trustline)
+    monkeypatch.setattr(xrpl_ops, "get_trustline_state", ok_trustline)
 
     async def paid(destination, value, claim_id, max_last_ledger_seq=None):
         return xrpl_ops.ClaimPayment("confirmed", "TXHASH", 999)
@@ -141,14 +142,29 @@ def test_post_claim_pays_out_and_zeroes_the_balance(drip):
 
 def test_post_claim_without_a_trustline_is_refused_before_any_state_change(drip, monkeypatch):
     async def no_line(*a, **k):
-        return None
+        return xrpl_ops.TrustlineState.ABSENT, None
 
-    monkeypatch.setattr(xrpl_ops, "get_trustline_balance", no_line)
+    monkeypatch.setattr(xrpl_ops, "get_trustline_state", no_line)
     _accrue(drip)
     resp = _run(server.handle_brix_claim(_Req()))
     assert resp.status == 409
     assert _body(resp)["code"] == "trustline_required"
     # Nothing was bound, so the balance is intact and retryable.
+    assert _body(_run(server.handle_brix_status(_Req())))["claimable"] == 3
+
+
+def test_post_claim_when_trustline_lookup_fails_is_503_not_a_trustline_verdict(drip, monkeypatch):
+    # A transient account_lines failure must NOT read as "no trustline": the
+    # client pins the claim button on trustline_required, so a false verdict
+    # would lock a real holder out of their payout. Report it as unavailable.
+    async def lookup_failed(*a, **k):
+        return xrpl_ops.TrustlineState.UNKNOWN, None
+
+    monkeypatch.setattr(xrpl_ops, "get_trustline_state", lookup_failed)
+    _accrue(drip)
+    resp = _run(server.handle_brix_claim(_Req()))
+    assert resp.status == 503
+    assert _body(resp)["code"] == "claim_unavailable"
     assert _body(_run(server.handle_brix_status(_Req())))["claimable"] == 3
 
 
