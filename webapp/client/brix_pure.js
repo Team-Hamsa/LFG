@@ -195,8 +195,8 @@ export function trustlineView(state, code) {
     case 'expired':
       return { sub: 'The trustline request expired.', spinner: false, retry: true, terminal: true, clearLock: false };
     case 'rejected':
-      if (code === 'tx_failed') {
-        return { sub: 'The trustline transaction failed on the ledger — try again.', spinner: false, retry: true, terminal: true, clearLock: false };
+      if (code === 'tx_failed' || code === 'tx_unconfirmed') {
+        return { sub: 'The trustline transaction did not confirm on the ledger — try again.', spinner: false, retry: true, terminal: true, clearLock: false };
       }
       return { sub: 'That was signed by a different wallet — sign it with the wallet you registered.', spinner: false, retry: true, terminal: true, clearLock: false };
     case 'validating':

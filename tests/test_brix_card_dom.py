@@ -125,11 +125,11 @@ def test_module_cache_busters_are_bumped_in_lockstep():
     assert app_v, "index.html does not cache-bust app.js"
     # Ratchet: raise this floor with every app.js ?v= bump. A version below the
     # floor means index.html would serve a stale app.js to warm caches.
-    assert int(app_v.group(1)) >= 76, "app.js?v= regressed below the shipped version"
+    assert int(app_v.group(1)) >= 77, "app.js?v= regressed below the shipped version"
     brix_v = re.search(r"from './brix_pure\.js\?v=(\d+)'", js)
     assert brix_v, "app.js does not cache-bust the brix_pure.js import"
     # Same ratchet: raise with every brix_pure.js ?v= bump.
-    assert int(brix_v.group(1)) >= 6, "brix_pure.js?v= regressed below the shipped version"
+    assert int(brix_v.group(1)) >= 7, "brix_pure.js?v= regressed below the shipped version"
 
 
 # --- BRIX trustline flow (#441) -----------------------------------------------
@@ -201,3 +201,10 @@ def test_trustline_poll_rechecks_staleness_after_the_await():
     assert body.find("if (stale()) return;", await_pos) >= 0, "no stale check after the await"
     assert body.find("if (stale()) return;") < await_pos, "no stale check before the await"
     assert "gen !== trustlinePollGen" in body
+
+
+def test_start_trustline_orphans_prior_poll_before_showing_the_panel():
+    src = open(os.path.join(CLIENT, "app.js")).read()
+    start = src.index("async function startBrixTrustline")
+    body = src[start : src.index("\n}\n", start)]
+    assert body.index("++trustlinePollGen") < body.index("showPanel('trustline-panel')")

@@ -674,3 +674,18 @@ def test_trustline_start_does_not_reuse_another_wallets_payload(drip, monkeypatc
     data = _body(_run(server.handle_brix_trustline(_Req())))
     assert data["state"] == "pending"
     assert captured["account"] == WALLET  # a fresh payload for the current wallet
+
+
+def test_trustline_validating_is_bounded(drip, monkeypatch):
+    """A signed txid that never validates (txnNotFound forever) must not spin
+    the panel forever (Greptile on #442)."""
+    uuid = _started(drip, monkeypatch)
+    monkeypatch.setattr(server.identity_store, "set_user_token", lambda *a: None)
+    _status(monkeypatch, signed=True, account=WALLET, txid="TX1")
+    _tx(monkeypatch, validated=False)
+    first = _body(_run(server.handle_brix_trustline_status(_Req(match_info={"uuid": uuid}))))
+    assert first["state"] == "validating"
+    server.brix_trustline_payloads[uuid]["signed_at"] -= server.BRIX_TRUSTLINE_VALIDATE_SECONDS + 1
+    data = _body(_run(server.handle_brix_trustline_status(_Req(match_info={"uuid": uuid}))))
+    assert data["state"] == "rejected" and data["code"] == "tx_unconfirmed"
+    assert uuid not in server.brix_trustline_payloads

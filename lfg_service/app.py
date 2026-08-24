@@ -1609,6 +1609,10 @@ brix_trustline_payloads: dict[str, Any] = {}
 # that is dead weight (abandoned panel, repeated "Try again"); prune on every
 # create like signin_payloads does.
 BRIX_TRUSTLINE_TTL = 900
+# How long a SIGNED TrustSet may sit unvalidated before the poll gives up
+# (rejected/tx_unconfirmed) — well past any LastLedgerSequence window, so the
+# panel can never spin forever on a txid that stays txnNotFound.
+BRIX_TRUSTLINE_VALIDATE_SECONDS = 120
 # One lock around the reuse-scan + create so overlapping starts cannot each
 # mint a live payload (#260 open-payload cap). Global rather than per-caller:
 # starts are rare and short, and a per-caller map needs a cleanup step that
@@ -1718,6 +1722,14 @@ async def handle_brix_trustline_status(request):
             if code == "tesSUCCESS":
                 return web.json_response({"state": "signed", "tx_hash": txid})
             return web.json_response({"state": "rejected", "code": "tx_failed", "tx_result": code})
+        signed_at = rec.setdefault("signed_at", time.time())
+        if time.time() - signed_at > BRIX_TRUSTLINE_VALIDATE_SECONDS:
+            # Bounded: the next claim/buy re-checks the line on-ledger anyway,
+            # so giving up here loses nothing if the tx did land late.
+            del brix_trustline_payloads[uuid]
+            return web.json_response(
+                {"state": "rejected", "code": "tx_unconfirmed", "tx_hash": txid}
+            )
         return web.json_response({"state": "validating", "tx_hash": txid})
     if s["expired"]:
         del brix_trustline_payloads[uuid]

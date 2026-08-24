@@ -35,7 +35,7 @@ import * as signDeliveryPure from './signdelivery_pure.js?v=1';
 // Daily BRIX drip card (#48): what the card renders and how each claim error
 // code is handled are pure decisions, Node-testable (tests/test_brix_pure_js.py);
 // loadBrix()/claimBrix() below are the glue.
-import * as brixPure from './brix_pure.js?v=6';
+import * as brixPure from './brix_pure.js?v=7';
 
 const params = new URLSearchParams(window.location.search);
 const insideDiscord = params.has('frame_id');
@@ -1084,6 +1084,7 @@ function renderTrustline({ sub, spinner, retry, link, qrData, push }) {
 
 async function startBrixTrustline({ back, onSet } = {}) {
   clearTimeout(trustlinePollTimer);
+  ++trustlinePollGen; // orphan any in-flight status response from a prior flow
   trustlineBack = back || showMintHome;
   trustlineOnSet = onSet || null;
   showPanel('trustline-panel');
@@ -1129,7 +1130,9 @@ function pollTrustline(uuid, started) {
     try {
       s = await api(`/api/brix/trustline/${uuid}`);
     } catch (e) {
-      if (!stale()) trustlinePollTimer = setTimeout(tick, 3000); // transient; keep polling
+      if (stale()) return;
+      if (e.status === 404) { finishTrustline('expired'); return; } // record pruned server-side
+      trustlinePollTimer = setTimeout(tick, 3000); // transient; keep polling
       return;
     }
     if (stale()) return;
