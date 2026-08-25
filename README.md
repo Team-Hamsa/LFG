@@ -390,6 +390,28 @@ matrix — lives in `trait_config.yaml` at the repo root, validated by
 
 ---
 
+## Make Waves — ecosystem gaps this app addresses
+
+XRPL Commons maintains a list of [Make Waves builder opportunities](https://github.com/XRPL-Commons/community-ideas/blob/2495f5fca5b96d6c15f71b4e4e5695a7e543dc9d/make-waves/index.md) —
+market gaps the ecosystem wants filled. LFG was not built to that list, but
+several items are answered by what already ships. Claims are deliberately
+strict: **Fulfilled** means a working mainnet implementation of the idea as
+stated; **Partial** means the idea's core mechanism exists but scoped to this
+collection (not a general tool). Full rationale per row in
+[`docs/HACKATHON.md`](docs/HACKATHON.md#make-waves-opportunities-map).
+
+| Opportunity | Status | Where in LFG |
+|---|---|---|
+| **OPP-027 Dynamic NFT Framework** — URI-update post-mint | ✅ Fulfilled | Mutable mints (`NFT_FLAGS=25`) + `NFTokenModify` in-place trait swaps, harvest/assemble/equip; soulbound mutable Closet whose on-chain metadata is the source of truth — `lfg_core/swap_flow.py`, `economy_flow.py`, `closet_token.py` |
+| **OPP-053 XRPL Transaction Indexer** — TheGraph-equivalent | 🟡 Partial | Streaming listener + resumable backfills, raw tx archive with derived/rebuildable event tables, continuity-gap certification and self-healing catch-up — `scripts/onchain_listener.py`, `lfg_core/nft_index.py`, `history_store.py` |
+| **OPP-046 Gaming Utility-NFT Framework** — play-to-earn, asset interop | 🟡 Partial | Dress-up trait economy (harvest/assemble/equip/extract/deposit), tradeable trait tokens, BRIX hold-to-earn drip, supply-conservation ledger + nightly audit |
+| **OPP-001 / OPP-010 Session continuity · social onboarding** | 🟡 Partial | One identity across Discord, Telegram and web resolved to a wallet; Xaman push-signing so returning users never rescan a QR — `lfg_service/identity.py` |
+| **OPP-062 Community-Ops automation** | 🟡 Partial | X auto-poster, Discord/Telegram bots, nightly audits posting drift to a webhook — project-specific, not a service |
+| **OPP-016 POAP / event NFT** | 🔜 Buildable | Campaign-scoped sponsored free mint (slots, TTL, eligibility archive, `campaign` memo) is the whole substrate — a POAP is a fixed-trait campaign |
+| **OPP-074 Dev Utilities Pack** · **OPP-019 dApp analytics** | 🔜 Extractable | `scripts/` ops tooling (airdrop payouts, recovery, snapshots) and the per-SourceTag metrics badge / leaderboard API |
+
+---
+
 ## Roadmap
 
 **Remaining** — synced automatically from [`roadmap`-labelled issues](../../issues?q=label%3Aroadmap)

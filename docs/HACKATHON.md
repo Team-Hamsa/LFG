@@ -32,6 +32,7 @@ how transaction volume is credited to this entry.
 - [Staging/Prod Stacks + Ops Automation](#stagingprod-stacks--ops-automation)
 - [Payment & Signing Safety](#payment--signing-safety)
 - [Identity, Profiles & Rarity](#identity-profiles--rarity)
+- [Make Waves opportunities map](#make-waves-opportunities-map)
 - [Living README](#living-readme)
 - [Merged changelog](#merged-changelog)
 
@@ -255,6 +256,44 @@ paid on-chain by a dedicated distributor wallet only when explicitly claimed
 
 - First-class **user profiles** above per-platform identities ([#396](https://github.com/Team-Hamsa/LFG/pull/396)) and a `wallet_links` history + same-human bucket resolver ([#395](https://github.com/Team-Hamsa/LFG/pull/395)).
 - Rarity **share-ceiling cap** on trait weights ([#394](https://github.com/Team-Hamsa/LFG/pull/394)); harvest burns now raise Shop prices ([#306](https://github.com/Team-Hamsa/LFG/pull/306)); the Shop ships **off by default** — the project never sells traits, users trade them ([#410](https://github.com/Team-Hamsa/LFG/pull/410)).
+
+## Make Waves opportunities map
+
+XRPL Commons publishes a list of [Make Waves builder opportunities](https://github.com/XRPL-Commons/community-ideas/blob/2495f5fca5b96d6c15f71b4e4e5695a7e543dc9d/make-waves/index.md)
+(pinned at the commit reviewed on 2026-08-25; the list is edited over time and
+row numbers drift, so entries below cite the stable `OPP-` ids). It is a list of
+**market gaps**, tagged `APP`/`TOOL` and `HIGH`/`MEDIUM`/`LOW`. LFG predates the
+list and was not built against it; this section is an honest cross-reference of
+where the app already lands, where it lands in spirit, and what could be built
+into or out of it. Everything in Wallets 2–9/12, B2B 13–23, RWA, DeFi and AI
+Agents (bar community ops) is out of scope for an NFT collection app and is not
+claimed.
+
+### Fulfilled
+
+- **OPP-027 · Dynamic NFT Framework** (`APP`, `MEDIUM`) — *"dNFT ticketing/credentials/loyalty leveraging URI-update post-mint."*
+  This is LFG's core mechanic, live on mainnet. Every character mints burnable + transferable + **mutable** (`NFT_FLAGS=25`, Dynamic NFTs amendment). Trait swaps update the token in place via `NFTokenModify` (path selected by mutability in `lfg_core/swap_flow.py`); the trait economy's harvest / assemble / equip ops are all in-place modifies that keep collection size constant ([#309](https://github.com/Team-Hamsa/LFG/pull/309), [#319](https://github.com/Team-Hamsa/LFG/pull/319)); the per-user Closet is a soulbound mutable token whose metadata is the on-chain truth the DB is rebuilt from ([#62](https://github.com/Team-Hamsa/LFG/pull/62)). Legacy non-mutable tokens are migrated onto the model with a one-time burn + remint. A phase-aware failure taxonomy (`ClosetError` / `ClosetMirrorError` / `ClosetIndeterminateError`, [#151](https://github.com/Team-Hamsa/LFG/pull/151)) is what makes modify-in-place safe against partial failure — the part a "framework" would need to ship. Gap: it is an application, not a reusable package.
+
+### Partial / in spirit
+
+- **OPP-053 · XRPL Transaction Indexer** (`TOOL`, `MEDIUM`) — *"TheGraph-equivalent backend indexer."*
+  `scripts/onchain_listener.py` subscribes to the clio stream and dual-writes a per-`nft_id` index (`onchain_<net>.db`) and a raw `xrpl_txs` archive (`history_<net>.db`) from which `nft_events`, `brix_events`, market listings and bids are **derived, droppable and rebuildable** ([#118](https://github.com/Team-Hamsa/LFG/pull/118), [#129](https://github.com/Team-Hamsa/LFG/pull/129)). Resumable `account_tx` / `nft_history` backfills persist pagination markers per page. Because a tx stream has no replay token, a listener restart is treated as a continuity gap: the archive is **certified** with a genesis-hash chain identity and fails closed until a bounded catch-up heals it, which the listener now runs itself on resubscribe ([#329](https://github.com/Team-Hamsa/LFG/pull/329), [#341](https://github.com/Team-Hamsa/LFG/pull/341), [#402](https://github.com/Team-Hamsa/LFG/pull/402)). Conservation audits (`audit_history.py`, `audit_brix_distribution.py`) prove the derived tables against live state. Gap: scoped to one issuer's accounts and taxons; generalising the account/taxon set and packaging it is the extraction work.
+- **OPP-046 · Gaming Utility-NFT Framework** (`TOOL`, `LOW`) — *"Play-to-earn + cross-game asset interop."*
+  The dress-up economy ([#46](https://github.com/Team-Hamsa/LFG/issues/46) epic) treats every trait as an asset: harvest strips a character into loose Closet assets, assemble/equip put them back, extract mints a trait as a standalone tradeable NFToken (taxon 176) and deposit burns it back — supply-neutral by construction, with an append-only `supply_changes` ledger and nightly conservation audit ([#322](https://github.com/Team-Hamsa/LFG/issues/322)). The BRIX daily drip pays holders per unlisted live NFT per epoch, reconstructed from the archive and paid only on explicit claim ([#48](https://github.com/Team-Hamsa/LFG/issues/48)). Gap: one game, one collection; not a framework other games consume.
+- **OPP-001 · Cross-Device Session Continuity** (`TOOL`, `HIGH`) and **OPP-010 · Socials Onboarding** (`TOOL`, `MEDIUM`).
+  A single `identities` record spans Discord OAuth, Telegram signed `initData`, the Discord Activity and a plain-web Xaman SignIn, all resolving to one wallet ([#76](https://github.com/Team-Hamsa/LFG/pull/76)–[#83](https://github.com/Team-Hamsa/LFG/pull/83), [#242](https://github.com/Team-Hamsa/LFG/pull/242), [#257](https://github.com/Team-Hamsa/LFG/pull/257)), with profiles above per-platform identities ([#396](https://github.com/Team-Hamsa/LFG/pull/396)). Xaman push tokens are captured from every signed payload and persisted, so a returning user gets the sign request pushed to their phone from any surface instead of rescanning a QR ([#139](https://github.com/Team-Hamsa/LFG/pull/139), [#213](https://github.com/Team-Hamsa/LFG/pull/213)). Gap: social login still terminates in a self-custodied Xaman wallet (by design — no key custody), and none of it is packaged as a library.
+- **OPP-062 · Community-Ops-as-a-Service** (`APP`, `MEDIUM`).
+  Automated brand-account posting of mints to X with budget and dedup ([#41](https://github.com/Team-Hamsa/LFG/issues/41)), Discord and Telegram bots, nightly economy audits that post non-clean runs to a Discord webhook, and a self-maintaining README/build log. All project-specific; the idea asks for a service.
+
+### Buildable into LFG
+
+- **OPP-016 · POAP / Event Attendance NFT** (`APP`, `MEDIUM`). The sponsored free mint already provides campaign state, slot and time caps, an eligibility archive, backend-signed delivery with reconciliation, and a `campaign` provenance memo ([#328](https://github.com/Team-Hamsa/LFG/pull/328), [#54](https://github.com/Team-Hamsa/LFG/issues/54)). A POAP is that campaign with a fixed trait set and its own taxon — the smallest new feature on the list.
+- **OPP-055 · Proof of Humanity / KYA-NFT** (`TOOL`, `MEDIUM`). The soulbound mutable Closet is already a per-wallet credential token; a score field plus XLS-70 credential issuance would be incremental.
+
+### Extractable out of LFG
+
+- **OPP-074 · Dev Utilities Pack** — `scripts/` holds an airdrop/drip payout engine with decidable failure (`LastLedgerSequence` margin + memo-keyed recovery), open-payload cancellation, balance snapshots, and idempotent backfills.
+- **OPP-019 · XRPL-native dApp Analytics** — `scripts/sourcetag_metrics.py` computes per-SourceTag tx counts, unique wallets and XRP payment volume (matched to XRPL Commons' own volume metric) and renders a self-updating badge; the public leaderboard API serves eight boards from the archive.
 
 ## Living README
 
