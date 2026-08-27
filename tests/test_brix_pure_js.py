@@ -317,3 +317,126 @@ def test_trustline_view_rejected_tx_failed_is_distinct_from_signer_mismatch():
     assert failed["retry"] and failed["terminal"] and not failed["clearLock"]
     assert failed["sub"] != mismatch["sub"]
     assert "ledger" in failed["sub"]
+
+
+# --- claim-all across linked wallets (#446) --------------------------------
+
+
+def summary(status):
+    return run_js(f"M.linkedClaimSummary({json.dumps(status)})")
+
+
+def test_summary_no_linked_field_is_single_claim():
+    s = summary(with_(claimable=3))
+    assert s["multi"] is False
+    assert s["useClaimAll"] is False
+    assert s["total"] == 0
+
+
+def test_summary_two_positive_wallets_is_claim_all():
+    s = summary(
+        with_(
+            claimable=3,
+            linked=[
+                {"wallet": "rUSER", "claimable": 3},
+                {"wallet": "rB", "claimable": 2},
+                {"wallet": "rC", "claimable": 0},
+            ],
+        )
+    )
+    assert s["multi"] is True
+    assert s["useClaimAll"] is True
+    assert s["total"] == 5
+    assert [w["wallet"] for w in s["wallets"]] == ["rUSER", "rB"]
+
+
+def test_summary_balance_only_on_a_linked_wallet_uses_claim_all():
+    """A solo POST /api/brix/claim would 400 nothing_to_claim here."""
+    s = summary(
+        with_(
+            claimable=0,
+            linked=[{"wallet": "rUSER", "claimable": 0}, {"wallet": "rB", "claimable": 2}],
+        )
+    )
+    assert s["multi"] is False
+    assert s["useClaimAll"] is True
+    assert s["total"] == 2
+
+
+def test_summary_own_wallet_only_stays_single_claim():
+    s = summary(
+        with_(
+            claimable=3,
+            linked=[{"wallet": "rUSER", "claimable": 3}, {"wallet": "rB", "claimable": 0}],
+        )
+    )
+    assert s["useClaimAll"] is False
+
+
+def test_card_shows_the_combined_linked_balance():
+    v = view(
+        with_(
+            claimable=1,
+            last_epoch="2026-08-18",
+            linked=[{"wallet": "rUSER", "claimable": 1}, {"wallet": "rB", "claimable": 4}],
+        )
+    )
+    assert v["claimable"] == 5
+    assert v["button"]["label"] == "Claim 5 BRIX"
+
+
+def test_card_is_visible_on_a_linked_balance_even_with_no_own_history():
+    v = view(with_(linked=[{"wallet": "rUSER", "claimable": 0}, {"wallet": "rB", "claimable": 2}]))
+    assert v["visible"] is True
+    assert v["claimable"] == 2
+
+
+def test_card_without_linked_balances_is_unchanged():
+    assert view(with_())["visible"] is False
+
+
+def row(r):
+    return run_js(f"M.claimAllRowView({json.dumps(r)})")
+
+
+def test_row_trustline_required_offers_the_action():
+    r = row({"wallet": "rB", "status": "trustline_required", "claimable": 2})
+    assert r["trustline"] is True
+    assert r["ok"] is False
+
+
+def test_row_confirmed_shows_the_paid_amount():
+    r = row({"wallet": "rB", "status": "confirmed", "amount": 4})
+    assert r["ok"] is True
+    assert "4 BRIX" in r["text"]
+
+
+def test_row_unknown_status_keeps_working_never_a_verdict():
+    r = row({"wallet": "rB", "status": "someday_new_state"})
+    assert r["spinner"] is True
+    assert r["ok"] is False
+    assert r["trustline"] is False
+
+
+def job(j):
+    return run_js(f"M.claimAllJobView({json.dumps(j)})")
+
+
+def test_job_running_is_not_terminal():
+    v = job({"state": "running", "wallets": [{"wallet": "rA", "status": "claiming"}]})
+    assert v["terminal"] is False
+
+
+def test_job_done_counts_paid_and_flags_missing_trustlines():
+    v = job(
+        {
+            "state": "done",
+            "wallets": [
+                {"wallet": "rA", "status": "confirmed", "amount": 3},
+                {"wallet": "rB", "status": "trustline_required", "claimable": 2},
+            ],
+        }
+    )
+    assert v["terminal"] is True
+    assert "1 of 2" in v["sub"]
+    assert "trustline" in v["sub"]
