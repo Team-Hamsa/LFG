@@ -226,7 +226,7 @@ def test_persist_issued_user_token_passes_session_wallet(tmp_path, monkeypatch):
         "set_user_token",
         lambda *a, **k: calls.append((a, k)),
     )
-    session = SimpleNamespace(issued_user_token=RAW_TOKEN, wallet=W_A)
+    session = SimpleNamespace(issued_user_token=RAW_TOKEN, wallet_address=W_A)
     user = {"id": "111", "platform": "discord", "name": "alice"}
     _run(service_app._persist_issued_user_token(user, session))
     assert len(calls) == 1

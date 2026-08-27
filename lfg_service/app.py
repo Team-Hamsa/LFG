@@ -750,7 +750,7 @@ async def _persist_issued_user_token(user: dict[str, Any], session: Any) -> None
         _platform(user),
         user["id"],
         token,
-        signer_wallet=getattr(session, "wallet", None),
+        signer_wallet=getattr(session, "wallet_address", None),
     )
 
 
