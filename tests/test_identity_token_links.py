@@ -219,6 +219,14 @@ def test_persist_issued_user_token_passes_session_wallet(tmp_path, monkeypatch):
 
     from lfg_service import app as service_app
 
+    def _run(coro):  # suite convention — asyncio.run() would clear the
+        # thread's event loop (set_event_loop(None)) and poison later tests
+        loop = asyncio.new_event_loop()
+        try:
+            return loop.run_until_complete(coro)
+        finally:
+            loop.close()
+
     calls = []
     monkeypatch.setattr(
         service_app.identity_store,
@@ -227,7 +235,7 @@ def test_persist_issued_user_token_passes_session_wallet(tmp_path, monkeypatch):
     )
     session = SimpleNamespace(issued_user_token=RAW_TOKEN, wallet=W_A)
     user = {"id": "111", "platform": "discord", "name": "alice"}
-    asyncio.run(service_app._persist_issued_user_token(user, session))
+    _run(service_app._persist_issued_user_token(user, session))
     assert len(calls) == 1
     assert calls[0][0][2] == RAW_TOKEN
     assert calls[0][1] == {"signer_wallet": W_A}

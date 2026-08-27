@@ -559,7 +559,9 @@ def test_trustline_status_pending_then_signed_recaptures_push_token(drip, monkey
 def test_trustline_status_wrong_signer_is_rejected_and_persists_nothing(drip, monkeypatch):
     uuid = _started(drip, monkeypatch)
     saved = {}
-    monkeypatch.setattr(server.identity_store, "set_user_token", lambda *a, **kw: saved.update(hit=True))
+    monkeypatch.setattr(
+        server.identity_store, "set_user_token", lambda *a, **kw: saved.update(hit=True)
+    )
     _status(monkeypatch, signed=True, account="rSomeoneElse", txid="TX1", user_token="tok")
     data = _body(_run(server.handle_brix_trustline_status(_Req(match_info={"uuid": uuid}))))
     assert data == {"state": "rejected", "code": "signer_mismatch"}
