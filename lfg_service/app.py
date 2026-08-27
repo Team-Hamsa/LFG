@@ -1812,8 +1812,10 @@ async def _claim_one_wallet(wallet, progress=None):
     nothing_to_claim / claim_in_flight / claim_unconfirmed.
 
     `progress` (a dict, optional) gets `bound=True` the moment durable state
-    may exist — set BEFORE the open_claim thread starts, since a cancellation
-    mid-thread still lets the thread finish and create the claim. Everything
+    may exist — stamped as the FIRST statement inside the open_claim thread,
+    so it is set iff the executor actually started running (a cancellation
+    mid-thread still lets the thread finish and create the claim; a
+    cancellation while the work was still queued leaves it unset). Everything
     earlier (trustline check, ledger read) is a pure read, so a caller seeing
     no `bound` after a cancellation knows the wallet is untouched (#450).
     """
@@ -1847,14 +1849,14 @@ async def _claim_one_wallet(wallet, progress=None):
         return {"status": "claim_unavailable"}
 
     def _open():
+        if progress is not None:
+            progress["bound"] = True
         conn = _brix_conn()
         try:
             return brix_drip.open_claim(conn, wallet, last_ledger_seq=provisional)
         finally:
             conn.close()
 
-    if progress is not None:
-        progress["bound"] = True
     try:
         claim_id, amount = await asyncio.to_thread(_open)
     except brix_drip.NothingToClaim:
