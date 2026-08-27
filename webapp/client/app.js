@@ -1093,8 +1093,13 @@ function shortWallet(w) {
 
 function renderClaimAll(job) {
   const v = brixPure.claimAllJobView(job);
-  el('claimall-sub').textContent = v.sub;
+  // Stale cached index.html without the panel: nothing to paint into (the
+  // start path refuses before creating a job in that case; this guard keeps
+  // a late poll render from throwing too).
+  const sub = el('claimall-sub');
   const box = el('claimall-rows');
+  if (!sub || !box) return v;
+  sub.textContent = v.sub;
   box.replaceChildren(...v.rows.map((row) => {
     const div = document.createElement('div');
     div.className = 'claimall-row';
@@ -1119,6 +1124,12 @@ function renderClaimAll(job) {
 }
 
 async function startClaimAll(summary) {
+  // A cached pre-#446 index.html has no progress panel — refuse BEFORE the
+  // POST creates a server job the user could never watch (Greptile on #450).
+  if (!el('claimall-panel') || !el('claimall-rows')) {
+    toast('Please refresh the app to claim across linked wallets.');
+    return;
+  }
   const ok = await confirmDialog({
     title: `Claim ${summary.total} BRIX across ${summary.wallets.length} wallets?`,
     text: 'This pays each linked wallet its own accrued BRIX, one payout at a time.',

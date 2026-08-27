@@ -519,3 +519,35 @@ def test_claim_all_cancellation_finalizes_every_row(drip, monkeypatch):
     statuses = [r["status"] for r in poll["wallets"]]
     assert "pending" not in statuses
     assert sorted(statuses) == ["cancelled", "claim_unconfirmed"]
+
+
+def test_claim_all_cancelled_during_prechecks_marks_the_wallet_cancelled(drip, monkeypatch):
+    """Cancellation before anything durable exists (trustline/ledger pre-check
+    reads) must report `cancelled` — safe to retry — not a fail-closed
+    claim_unconfirmed that scares the user off an untouched wallet."""
+    started = asyncio.Event()
+    release = asyncio.Event()
+
+    async def hanging_trustline(*a, **k):
+        started.set()
+        await release.wait()
+        return xrpl_ops.TrustlineState.PRESENT, Decimal(100)
+
+    monkeypatch.setattr(xrpl_ops, "get_trustline_state", hanging_trustline)
+    _accrue(drip)
+
+    async def go():
+        body = _body(await server.handle_brix_claim_all(_Req()))
+        task = server.brix_claim_all_jobs[body["job_id"]]["task"]
+        await started.wait()  # first wallet is inside the pre-check
+        task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await task
+        return body["job_id"]
+
+    job_id = _run(go())
+    poll = _body(_run(server.handle_brix_claim_all_status(_Req(match_info={"job_id": job_id}))))
+    assert poll["state"] == "done"
+    assert poll["wallets"][0]["status"] == "cancelled"
+    # nothing was bound, so the balance is intact
+    assert brix_drip.claimable(drip, WALLET) == 3

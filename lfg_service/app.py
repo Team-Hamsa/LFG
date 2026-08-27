@@ -1790,7 +1790,7 @@ async def handle_brix_trustline_status(request):
     return web.json_response({"state": "opened" if s["opened"] else "pending"})
 
 
-async def _claim_one_wallet(wallet):
+async def _claim_one_wallet(wallet, progress=None):
     """One wallet's claim, the exact flow handle_brix_claim always ran (#446
     extracted it so claim-all can reuse it verbatim).
 
@@ -1810,6 +1810,12 @@ async def _claim_one_wallet(wallet):
     submitted claim, else {"status": <refusal code>} where the code is one of
     claims_disabled / trustline_required / claim_unavailable /
     nothing_to_claim / claim_in_flight / claim_unconfirmed.
+
+    `progress` (a dict, optional) gets `bound=True` the moment durable state
+    may exist — set BEFORE the open_claim thread starts, since a cancellation
+    mid-thread still lets the thread finish and create the claim. Everything
+    earlier (trustline check, ledger read) is a pure read, so a caller seeing
+    no `bound` after a cancellation knows the wallet is untouched (#450).
     """
     if not config.BRIX_DISTRIBUTOR_SEED:
         return {"status": "claims_disabled"}
@@ -1847,6 +1853,8 @@ async def _claim_one_wallet(wallet):
         finally:
             conn.close()
 
+    if progress is not None:
+        progress["bound"] = True
     try:
         claim_id, amount = await asyncio.to_thread(_open)
     except brix_drip.NothingToClaim:
@@ -1970,13 +1978,16 @@ async def _run_brix_claim_all(job_id: str) -> None:
         return
     for row in job["wallets"]:
         row["status"] = "claiming"
+        progress: dict[str, bool] = {}
         try:
-            result = await _claim_one_wallet(row["wallet"])
+            result = await _claim_one_wallet(row["wallet"], progress=progress)
         except asyncio.CancelledError:
-            # The interrupted row's payment may have gone out (fail-closed,
-            # same as any indeterminate outcome); the rows never reached are
-            # explicitly `cancelled`, not left "pending" under a done job.
-            row["status"] = "claim_unconfirmed"
+            # Interrupted before anything durable could exist (pure pre-check
+            # reads) -> cancelled and safe to retry; after the binding started
+            # -> fail-closed claim_unconfirmed, the payment may have gone out.
+            # The rows never reached are explicitly `cancelled`, not left
+            # "pending" under a done job.
+            row["status"] = "claim_unconfirmed" if progress.get("bound") else "cancelled"
             for later in job["wallets"]:
                 if later["status"] == "pending":
                     later["status"] = "cancelled"
