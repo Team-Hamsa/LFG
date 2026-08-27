@@ -80,3 +80,22 @@ def test_foreign_preflight_reaches_handler(monkeypatch):
     resp = _run(app.cors_mw(_req("OPTIONS", origin="https://evil.example"), _ok))
     assert resp.status == 200
     assert "Access-Control-Allow-Origin" not in resp.headers
+
+
+def test_allowed_origin_opts_in_to_local_network_access(monkeypatch):
+    # Firefox 153+ Local Network Access (2026-08-27): when a tailnet client
+    # resolves the API host to its 100.64/10 address, Firefox classifies it
+    # as local-network and blocks cross-origin no-cors subresources (<img>
+    # /api/layer) unless the server opts in. Chrome's older Private Network
+    # Access spelling rides along.
+    monkeypatch.setattr(app.config, "WEB_ALLOWED_ORIGINS", (ALLOWED,))
+    for method in ("GET", "OPTIONS"):
+        resp = _run(app.cors_mw(_req(method, origin=ALLOWED), _ok))
+        assert resp.headers["Access-Control-Allow-Local-Network"] == "true"
+        assert resp.headers["Access-Control-Allow-Private-Network"] == "true"
+
+
+def test_foreign_origin_gets_no_local_network_optin(monkeypatch):
+    monkeypatch.setattr(app.config, "WEB_ALLOWED_ORIGINS", (ALLOWED,))
+    resp = _run(app.cors_mw(_req(origin="https://evil.example"), _ok))
+    assert "Access-Control-Allow-Local-Network" not in resp.headers
