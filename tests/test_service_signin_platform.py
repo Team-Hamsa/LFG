@@ -142,7 +142,7 @@ def _signed_signin(monkeypatch, uuid, status_extra, link_ok=True):
     monkeypatch.setattr(app, "is_valid_classic_address", lambda w: True)
     monkeypatch.setattr(app.identity_store, "link", lambda *a: link_ok)
     captured = []
-    monkeypatch.setattr(app.identity_store, "set_user_token", lambda *a: captured.append(a))
+    monkeypatch.setattr(app.identity_store, "set_user_token", lambda *a, **kw: captured.append(a))
     token = make_session_token({"id": "55", "name": "tg", "platform": "telegram"})
     resp = _run(app.handle_signin_status(_Req(token, {"payload_uuid": uuid})))
     assert resp.status == 200

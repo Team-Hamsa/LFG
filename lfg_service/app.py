@@ -745,7 +745,13 @@ async def _persist_issued_user_token(user: dict[str, Any], session: Any) -> None
     if not token:
         return
     session.issued_user_token = None
-    await asyncio.to_thread(identity_store.set_user_token, _platform(user), user["id"], token)
+    await asyncio.to_thread(
+        identity_store.set_user_token,
+        _platform(user),
+        user["id"],
+        token,
+        signer_wallet=getattr(session, "wallet_address", None),
+    )
 
 
 def require_auth(handler):
@@ -1706,7 +1712,11 @@ async def handle_brix_trustline_status(request):
         if s.get("user_token") and not rec.get("token_saved"):
             try:
                 await asyncio.to_thread(
-                    identity_store.set_user_token, rec["platform"], rec["user_id"], s["user_token"]
+                    identity_store.set_user_token,
+                    rec["platform"],
+                    rec["user_id"],
+                    s["user_token"],
+                    signer_wallet=rec["wallet"],
                 )
                 rec["token_saved"] = True
             except Exception as e:  # noqa: BLE001
@@ -6971,7 +6981,11 @@ async def handle_signin_status(request):
         # missing row anyway.
         if s.get("user_token"):
             await asyncio.to_thread(
-                identity_store.set_user_token, platform, rec["user_id"], s["user_token"]
+                identity_store.set_user_token,
+                platform,
+                rec["user_id"],
+                s["user_token"],
+                signer_wallet=s["account"],
             )
         del signin_payloads[uuid]
         resp = {"state": "signed", "wallet": s["account"]}
@@ -7071,7 +7085,9 @@ async def handle_web_signin_status(request):
             return web.json_response({"error": "identity link failed"}, status=500)
         # #135: capture the push token so later sign requests push to Xaman.
         if s.get("user_token"):
-            await asyncio.to_thread(identity_store.set_user_token, "web", wallet, s["user_token"])
+            await asyncio.to_thread(
+                identity_store.set_user_token, "web", wallet, s["user_token"], signer_wallet=wallet
+            )
         del web_signin_payloads[uuid]
         token = make_session_token({"id": wallet, "name": name, "platform": "web"})
         return web.json_response(

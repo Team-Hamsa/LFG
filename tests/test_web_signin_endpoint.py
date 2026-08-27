@@ -150,7 +150,7 @@ def test_status_signed_issues_web_session(monkeypatch):
     monkeypatch.setattr(
         app.identity_store,
         "set_user_token",
-        lambda p, uid, tok: tokens.update({(p, uid): tok}),
+        lambda p, uid, tok, **kw: tokens.update({(p, uid): tok}),
     )
     resp = _run(app.handle_web_signin_status(_Req(match={"payload_uuid": "u-2"})))
     assert resp.status == 200
@@ -175,7 +175,7 @@ def test_status_signed_prefers_existing_handle(monkeypatch):
     monkeypatch.setattr(app.xumm_ops, "get_payload_status", fake_status)
     monkeypatch.setattr(app.identity_store, "handle_for_wallet", lambda w: "alice")
     monkeypatch.setattr(app.identity_store, "link", lambda p, uid, name, wallet: True)
-    monkeypatch.setattr(app.identity_store, "set_user_token", lambda p, uid, tok: None)
+    monkeypatch.setattr(app.identity_store, "set_user_token", lambda p, uid, tok, **kw: None)
     resp = _run(app.handle_web_signin_status(_Req(match={"payload_uuid": "u-h"})))
     assert json.loads(resp.body)["user"]["username"] == "alice"
 
