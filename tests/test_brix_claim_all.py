@@ -416,3 +416,42 @@ def test_trustline_post_bucket_lookup_failure_is_503(drip, monkeypatch):
     resp = _run(server.handle_brix_trustline(req))
     assert resp.status == 503
     assert _body(resp)["code"] == "bucket_unavailable"
+
+
+def test_claim_all_two_overlapping_starts_cannot_both_mint_a_job(drip, monkeypatch):
+    """The running-job scan sits before awaited bucket/claimable reads; without
+    the start lock two overlapping POSTs both pass it and race duplicate jobs
+    over the same wallets (Greptile P1 on #450)."""
+    release = asyncio.Event()
+    real_lookup = identity_store.bucket_for_wallet
+    calls = {"n": 0}
+
+    def slow_lookup(w):
+        calls["n"] += 1
+        return real_lookup(w)
+
+    monkeypatch.setattr(identity_store, "bucket_for_wallet", slow_lookup)
+
+    async def slow_paid(destination, value, claim_id, max_last_ledger_seq=None):
+        await release.wait()
+        return xrpl_ops.ClaimPayment("confirmed", f"TX_{destination}", 999)
+
+    monkeypatch.setattr(xrpl_ops, "send_brix_claim", slow_paid)
+    _accrue(drip)
+
+    async def go():
+        # launch both POSTs concurrently — with the lock, exactly one job wins
+        r1, r2 = await asyncio.gather(
+            server.handle_brix_claim_all(_Req()),
+            server.handle_brix_claim_all(_Req()),
+        )
+        release.set()
+        for job in list(server.brix_claim_all_jobs.values()):
+            task = job.get("task")
+            if task is not None:
+                await task
+        return sorted([r1.status, r2.status])
+
+    statuses = _run(go())
+    assert statuses == [200, 409]
+    assert len(server.brix_claim_all_jobs) == 1

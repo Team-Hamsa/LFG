@@ -1937,6 +1937,10 @@ async def handle_brix_claim(request):
 # the OWNER wallet only, like claim status.
 brix_claim_all_jobs: dict[str, dict[str, Any]] = {}
 BRIX_CLAIM_ALL_TTL = 3600
+# One lock around the running-job scan + insert: the scan sits before awaited
+# bucket/claimable reads, so two overlapping POSTs could otherwise both pass
+# it and race duplicate jobs over the same wallets (Greptile P1 on #450).
+_brix_claim_all_lock = asyncio.Lock()
 
 
 def _prune_brix_claim_all_jobs() -> None:
@@ -1993,6 +1997,11 @@ async def handle_brix_claim_all(request):
         return web.json_response(
             {"error": "claims are not enabled", "code": "claims_disabled"}, status=503
         )
+    async with _brix_claim_all_lock:
+        return await _start_brix_claim_all(wallet)
+
+
+async def _start_brix_claim_all(wallet):
     _prune_brix_claim_all_jobs()
     for job in brix_claim_all_jobs.values():
         if job["owner"] == wallet and job["state"] == "running":
