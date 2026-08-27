@@ -23,5 +23,5 @@ def test_layer_404_has_no_json_body(monkeypatch):
     finally:
         loop.close()
     assert resp.status == 404
-    assert resp.content_type.startswith("image/")
+    assert resp.content_type == "image/png"
     assert not resp.body
