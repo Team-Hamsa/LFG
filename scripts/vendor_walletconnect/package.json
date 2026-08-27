@@ -1,0 +1,17 @@
+{
+  "name": "lfg-vendor-walletconnect",
+  "private": true,
+  "type": "module",
+  "description": "Builds webapp/client/vendor/walletconnect.js — a single self-contained ESM bundle of the WalletConnect v2 sign client + modal (Joey Wallet / #399).",
+  "scripts": {
+    "build": "node build.mjs"
+  },
+  "dependencies": {
+    "@walletconnect/modal": "2.7.0",
+    "@walletconnect/sign-client": "2.21.1",
+    "buffer": "6.0.3"
+  },
+  "devDependencies": {
+    "esbuild": "0.24.2"
+  }
+}
