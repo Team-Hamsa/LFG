@@ -1058,7 +1058,10 @@ async function claimBrix() {
 
 function setupBrixCard() {
   el('brix-claim-btn').addEventListener('click', claimBrix);
-  el('claimall-back-btn').addEventListener('click', () => {
+  // Guarded: a client on a cached pre-#446 index.html has no claimall panel,
+  // and a throw here would strip the BRIX button of its click handler too.
+  const claimAllBack = el('claimall-back-btn');
+  if (claimAllBack) claimAllBack.addEventListener('click', () => {
     claimAllPollGen++; // orphan any in-flight poll
     clearTimeout(claimAllPollTimer);
     loadBrix();

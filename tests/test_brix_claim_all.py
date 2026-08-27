@@ -455,3 +455,33 @@ def test_claim_all_two_overlapping_starts_cannot_both_mint_a_job(drip, monkeypat
     statuses = _run(go())
     assert statuses == [200, 409]
     assert len(server.brix_claim_all_jobs) == 1
+
+
+def test_claim_all_a_bucket_sibling_cannot_start_an_overlapping_job(drip, monkeypatch):
+    """The duplicate guard must compare wallet sets, not owners: two different
+    wallets of one bucket would otherwise race per-wallet claims over the same
+    balances (Greptile P1 round 2 on #450)."""
+    release = asyncio.Event()
+
+    async def slow_paid(destination, value, claim_id, max_last_ledger_seq=None):
+        await release.wait()
+        return xrpl_ops.ClaimPayment("confirmed", f"TX_{destination}", 999)
+
+    monkeypatch.setattr(xrpl_ops, "send_brix_claim", slow_paid)
+    _link_bucket(WALLET, W_B)
+    _accrue(drip)
+    _accrue(drip, wallet=W_B, count=2)
+
+    async def go():
+        body = _body(await server.handle_brix_claim_all(_Req()))
+        # the same human, authed as the sibling wallet, tries again mid-run
+        monkeypatch.setattr(server.mock_economy, "DEV_OWNER", W_B, raising=False)
+        resp2 = await server.handle_brix_claim_all(_Req())
+        release.set()
+        await _drain_job(body["job_id"])
+        return resp2
+
+    resp2 = _run(go())
+    assert resp2.status == 409
+    assert _body(resp2)["code"] == "claim_all_in_flight"
+    assert len(server.brix_claim_all_jobs) == 1

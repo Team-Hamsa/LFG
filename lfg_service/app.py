@@ -2003,12 +2003,6 @@ async def handle_brix_claim_all(request):
 
 async def _start_brix_claim_all(wallet):
     _prune_brix_claim_all_jobs()
-    for job in brix_claim_all_jobs.values():
-        if job["owner"] == wallet and job["state"] == "running":
-            return web.json_response(
-                {"error": "a claim-all is already running", "code": "claim_all_in_flight"},
-                status=409,
-            )
     # Fail-closed on a broken bucket lookup: silently claiming only the
     # caller's wallet would read as "claim-all done" while linked balances
     # quietly stayed behind.
@@ -2019,6 +2013,20 @@ async def _start_brix_claim_all(wallet):
             {"error": "linked wallets could not be resolved", "code": "bucket_unavailable"},
             status=503,
         )
+    # The duplicate guard compares WALLET SETS, not owners: two different
+    # wallets of the same bucket would otherwise each pass an owner-only scan
+    # and race per-wallet claims over the same balances (Greptile P1 round 2
+    # on #450). Runs after the bucket resolve, still under the start lock.
+    targets_now = set(wallets)
+    for job in brix_claim_all_jobs.values():
+        if job["state"] != "running":
+            continue
+        job_wallets = {job["owner"]} | {r["wallet"] for r in job["wallets"]}
+        if job_wallets & targets_now:
+            return web.json_response(
+                {"error": "a claim-all is already running", "code": "claim_all_in_flight"},
+                status=409,
+            )
 
     def _claimables():
         conn = _brix_conn()
