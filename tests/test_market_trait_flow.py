@@ -953,3 +953,60 @@ def test_start_settlement_sweep_skipped_when_economy_disabled(monkeypatch):
         await server._stop_settlement_sweep(app)  # no-op, must not raise
 
     _run(go())
+
+
+# ---------------------------------------------------------------------------
+# Sweep give-up must survive a restart, and a Shop-settled token is settled
+# ---------------------------------------------------------------------------
+
+
+def test_sweep_giveup_is_durable_across_restart(onchain_env, monkeypatch, tmp_path):
+    # The in-memory attempt counter resets on every deployer restart; without
+    # reading the on-disk giveup record back, each restart re-ran run_deposit
+    # _SWEEP_MAX_ATTEMPTS more times against the same dead row (100+ failed_burn
+    # journals for one token in prod, 2026-08-14 -> 08-27).
+    conn = _reopen(onchain_env)
+    _seed_unsettled_trait_sale(conn, "L" * 64)  # no Closet -> always fails
+    conn.commit()
+    conn.close()
+    f = _SettleFakeDeps()
+    monkeypatch.setattr(
+        server.economy_api, "build_settlement_deps", lambda c: _settle_deps(c, f, tmp_path)
+    )
+    monkeypatch.setattr(server.config, "ECONOMY_RECORDS_DIR", str(tmp_path))
+    (tmp_path / f"trait-settlement-giveup-{'L' * 64}.json").write_text(
+        json.dumps({"offer_index": "L" * 64, "status": "abandoned"})
+    )
+    server._sweep_attempts.pop("L" * 64, None)  # "restart"
+
+    _run(server.settle_pending_trait_sales())
+    assert f.burns == []
+    assert "L" * 64 not in server._sweep_attempts or (
+        server._sweep_attempts["L" * 64] >= server._SWEEP_MAX_ATTEMPTS
+    )
+
+
+def test_sweep_marks_shop_settled_token_as_settled_without_burn(onchain_env, monkeypatch, tmp_path):
+    # A Shop purchase is a destination-locked sell offer on a freshly minted
+    # trait token; the listener also indexes its accept as a marketplace
+    # `sold` row. The Shop's own settlement already burned the token into the
+    # buyer's Closet, so the marketplace row is settled by construction —
+    # retrying run_deposit on a burned token can only ever fail.
+    from lfg_core import shop_store
+
+    conn = _reopen(onchain_env)
+    _seed_unsettled_trait_sale(conn, "M" * 64)
+    shop_store.create_order(conn, "shop-sess-1", BUYER, "Hat", "Wizard Hat", 5, 0)
+    shop_store.update_order(conn, "shop-sess-1", now_ts=1, status="settled", nft_id=TRAIT1)
+    conn.commit()
+    conn.close()
+    f = _SettleFakeDeps()
+    monkeypatch.setattr(
+        server.economy_api, "build_settlement_deps", lambda c: _settle_deps(c, f, tmp_path)
+    )
+
+    _run(server.settle_pending_trait_sales())
+    assert f.burns == []
+    conn = _reopen(onchain_env)
+    assert market_get_listing(conn, "M" * 64)["settled"] == 1
+    assert unsettled_trait_sales(conn) == []
