@@ -4308,6 +4308,30 @@ def _write_sweep_giveup_record(offer_index: str, nft_id: str, buyer: str) -> Non
         )
 
 
+def _sweep_giveup_recorded(offer_index: str) -> bool:
+    """Durable form of the in-memory attempt counter: a giveup record on disk
+    means a previous process already exhausted the budget for this row. Read
+    it back so a deployer restart does not re-arm _SWEEP_MAX_ATTEMPTS fresh
+    run_deposit attempts against the same dead row every ~hour."""
+    return os.path.exists(
+        os.path.join(config.ECONOMY_RECORDS_DIR, f"trait-settlement-giveup-{offer_index}.json")
+    )
+
+
+def _shop_settled_nft_ids(conn: sqlite3.Connection) -> set[str]:
+    """Trait tokens the Shop already burned into the buyer's Closet. The
+    Shop's destination-locked sell offer is ALSO indexed by the listener as
+    a marketplace `sold` row; that row is settled by construction, and
+    run_deposit on the burned token can only ever fail."""
+    shop_store.ensure_schema(conn)
+    return {
+        r[0]
+        for r in conn.execute(
+            "SELECT nft_id FROM shop_orders WHERE status='settled' AND nft_id IS NOT NULL"
+        )
+    }
+
+
 async def settle_pending_trait_sales() -> None:
     """Backstop for `_settle_trait_sale` (spec §Q7): scans
     `market_listings(kind='trait', closed_reason='sold', settled=0)` on the
@@ -4324,6 +4348,15 @@ async def settle_pending_trait_sales() -> None:
         market_store.init_db(conn)
         rows = market_store.unsettled_trait_sales(conn)
         owners = {nid: owner for nid, owner, _slot, _value in economy_store.read_trait_tokens(conn)}
+        shop_settled = _shop_settled_nft_ids(conn)
+        for row in rows:
+            if row["nft_id"] in shop_settled:
+                logging.info(
+                    f"settlement sweep: {row['offer_index']} is a Shop purchase already "
+                    f"settled by shop_flow; marking settled"
+                )
+                market_store.mark_settled(conn, row["offer_index"])
+        rows = [r for r in rows if r["nft_id"] not in shop_settled]
     finally:
         conn.close()
 
@@ -4331,6 +4364,9 @@ async def settle_pending_trait_sales() -> None:
         offer_index = row["offer_index"]
         if _sweep_attempts.get(offer_index, 0) >= _SWEEP_MAX_ATTEMPTS:
             continue  # already given up + journaled on a previous pass
+        if _sweep_giveup_recorded(offer_index):
+            _sweep_attempts[offer_index] = _SWEEP_MAX_ATTEMPTS
+            continue  # given up by a previous process (durable record)
         # Prefer the buyer persisted on the sold row (durable across
         # run_deposit's trait_tokens delete); fall back to the current token
         # owner for legacy rows written before buyer was persisted, or for
