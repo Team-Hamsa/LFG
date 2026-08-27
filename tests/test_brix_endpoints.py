@@ -545,7 +545,7 @@ def test_trustline_status_pending_then_signed_recaptures_push_token(drip, monkey
 
     saved = {}
     monkeypatch.setattr(
-        server.identity_store, "set_user_token", lambda p, u, t: saved.update(p=p, u=u, t=t)
+        server.identity_store, "set_user_token", lambda p, u, t, **kw: saved.update(p=p, u=u, t=t)
     )
     _status(monkeypatch, signed=True, account=WALLET, txid="TX1", user_token="tok-new")
     _tx(monkeypatch, validated=True, result="tesSUCCESS")
@@ -559,7 +559,7 @@ def test_trustline_status_pending_then_signed_recaptures_push_token(drip, monkey
 def test_trustline_status_wrong_signer_is_rejected_and_persists_nothing(drip, monkeypatch):
     uuid = _started(drip, monkeypatch)
     saved = {}
-    monkeypatch.setattr(server.identity_store, "set_user_token", lambda *a: saved.update(hit=True))
+    monkeypatch.setattr(server.identity_store, "set_user_token", lambda *a, **kw: saved.update(hit=True))
     _status(monkeypatch, signed=True, account="rSomeoneElse", txid="TX1", user_token="tok")
     data = _body(_run(server.handle_brix_trustline_status(_Req(match_info={"uuid": uuid}))))
     assert data == {"state": "rejected", "code": "signer_mismatch"}
@@ -588,7 +588,7 @@ def test_trustline_status_signed_but_unvalidated_keeps_polling(drip, monkeypatch
     """Signed is not set (Greptile P1 on #442): only a validated tesSUCCESS
     clears the record; until then the client keeps polling."""
     uuid = _started(drip, monkeypatch)
-    monkeypatch.setattr(server.identity_store, "set_user_token", lambda *a: None)
+    monkeypatch.setattr(server.identity_store, "set_user_token", lambda *a, **kw: None)
     _status(monkeypatch, signed=True, account=WALLET, txid="TX1")
     _tx(monkeypatch, validated=False)
     data = _body(_run(server.handle_brix_trustline_status(_Req(match_info={"uuid": uuid}))))
@@ -603,7 +603,7 @@ def test_trustline_status_signed_but_unvalidated_keeps_polling(drip, monkeypatch
 
 def test_trustline_status_validated_failure_is_rejected_tx_failed(drip, monkeypatch):
     uuid = _started(drip, monkeypatch)
-    monkeypatch.setattr(server.identity_store, "set_user_token", lambda *a: None)
+    monkeypatch.setattr(server.identity_store, "set_user_token", lambda *a, **kw: None)
     _status(monkeypatch, signed=True, account=WALLET, txid="TX1")
     _tx(monkeypatch, validated=True, result="tecNO_PERMISSION")
     data = _body(_run(server.handle_brix_trustline_status(_Req(match_info={"uuid": uuid}))))
@@ -680,7 +680,7 @@ def test_trustline_validating_is_bounded(drip, monkeypatch):
     """A signed txid that never validates (txnNotFound forever) must not spin
     the panel forever (Greptile on #442)."""
     uuid = _started(drip, monkeypatch)
-    monkeypatch.setattr(server.identity_store, "set_user_token", lambda *a: None)
+    monkeypatch.setattr(server.identity_store, "set_user_token", lambda *a, **kw: None)
     _status(monkeypatch, signed=True, account=WALLET, txid="TX1")
     _tx(monkeypatch, validated=False)
     first = _body(_run(server.handle_brix_trustline_status(_Req(match_info={"uuid": uuid}))))
@@ -695,7 +695,7 @@ def test_trustline_concurrent_terminal_polls_do_not_500(drip, monkeypatch):
     """Two status polls past the validation timeout both terminate cleanly
     (CodeRabbit on #442): the second sees the record gone, not a KeyError."""
     uuid = _started(drip, monkeypatch)
-    monkeypatch.setattr(server.identity_store, "set_user_token", lambda *a: None)
+    monkeypatch.setattr(server.identity_store, "set_user_token", lambda *a, **kw: None)
     _status(monkeypatch, signed=True, account=WALLET, txid="TX1")
 
     async def slow_get_tx(txid):
@@ -722,7 +722,7 @@ def test_trustline_status_survives_a_failed_push_token_write(drip, monkeypatch):
     neither 500s the poll nor marks the token saved."""
     uuid = _started(drip, monkeypatch)
 
-    def boom(*a):
+    def boom(*a, **kw):
         raise RuntimeError("db locked")
 
     monkeypatch.setattr(server.identity_store, "set_user_token", boom)
