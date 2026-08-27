@@ -7884,7 +7884,12 @@ async def handle_layer(request):
     # wear silently vanish and can never be put back on a character.
     path = await swap_compose.resolve_layer(store, trait_config.get_config(), body, trait, value)
     if not path or not os.path.exists(path):
-        return web.json_response({"error": "layer not found"}, status=404)
+        # Empty, image-typed 404 rather than JSON: the Builder loads these
+        # cross-origin as no-cors <img> tiles, and Firefox's Opaque Response
+        # Blocking logs a console error for every non-image opaque response
+        # — one per Closet tile the selected body can't wear. img.onerror
+        # still fires on a 404, so onMissing pruning is unchanged.
+        return web.Response(status=404, content_type="image/png")
     # thumb=1 asks for the pre-generated preview tier (layers/.thumbs/): same
     # art at 512px, with animated formats re-encoded as GIF so they render in
     # a plain <img> (WebM/MP4 don't — broken tiles in the shop/Activity). A
@@ -8313,6 +8318,14 @@ async def cors_mw(request, handler):
         resp = await handler(request)
     if allowed:
         resp.headers["Access-Control-Allow-Origin"] = origin
+        # Local Network Access opt-in (Firefox 153+, 2026-08-27): a client on
+        # the tailnet resolves the funnel host to its 100.64/10 address, which
+        # the browser classifies as local-network and then blocks every
+        # cross-origin no-cors subresource (<img> /api/layer) unless the
+        # server says so. Chrome's older Private Network Access spelling
+        # rides along. Only for allowlisted origins — same gate as ACAO.
+        resp.headers["Access-Control-Allow-Local-Network"] = "true"
+        resp.headers["Access-Control-Allow-Private-Network"] = "true"
         resp.headers.add("Vary", "Origin")
     return resp
 
