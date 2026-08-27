@@ -50,12 +50,15 @@ from a **signed** payload where signer == session wallet is already verified
 
 No new capture logic; no new XUMM fields read.
 
-## Seeding
+## No seeding
 
-Idempotent seed in `ensure_identities_table` (mirrors the existing
-`wallet_links` seed): one observation per `identities` row with a non-null
-`user_token`, so existing multi-wallet Xaman users bucket immediately on
-deploy without re-signing.
+`identities.user_token` is deliberately NOT seeded into the correlation
+table: `link()` preserves the stored token across a wallet relink, so a
+boot-time seed would pair a token with a wallet it was never observed
+signing as — a bucket merge without signed evidence. Observations come only
+from `observe_token()` at verified-signer capture sites; existing users
+bucket organically as they sign (#212 recaptures the token off every signed
+payload).
 
 ## Bucket walk
 

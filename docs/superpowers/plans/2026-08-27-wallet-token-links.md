@@ -11,11 +11,10 @@ TDD throughout — each task writes failing tests first.
 - Implement in `lfg_service/identity.py`: CREATE TABLE + wallet index in
   `ensure_identities_table`; `_token_hash()`; `observe_token()`.
 
-## Task 2 — seed from identities.user_token
-- Tests: identities rows with user_token get seeded observations on
-  `ensure_identities_table()`; re-run adds nothing; NULL-token rows skipped.
-- Implement: `INSERT OR IGNORE ... SELECT wallet, user_token FROM identities
-  WHERE user_token IS NOT NULL` (hashing in Python — iterate rows).
+## Task 2 — no seeding from identities.user_token
+- Test: a stored token surviving a wallet relink is NOT seeded on
+  `ensure_identities_table()` (seeding would merge without signed evidence —
+  Greptile P1 on #448). Observations come only from capture sites.
 
 ## Task 3 — bucket walk over token edges + bucket_for_wallet
 - Tests: two wallets sharing a token bucket together via

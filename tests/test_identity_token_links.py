@@ -84,27 +84,20 @@ def test_observe_never_raises(tmp_path, monkeypatch):
     identity.observe_token(W_A, RAW_TOKEN)  # best-effort: must not raise
 
 
-# --- Task 2: seed from identities.user_token -------------------------------
+# --- Task 2: NO seeding from identities.user_token -------------------------
 
 
-def test_seed_from_existing_identities(tmp_path, monkeypatch):
+def test_no_seed_from_identities_tokens(tmp_path, monkeypatch):
+    # link() preserves user_token across a wallet relink, so seeding stored
+    # tokens would pair a token with a wallet it never signed as — a bucket
+    # merge without signed evidence. Observations come only from
+    # observe_token() at verified-signer capture sites.
     db = _fresh_db(tmp_path, monkeypatch)
     identity.link("discord", "111", "alice", W_A)
-    identity.set_user_token("discord", "111", RAW_TOKEN)
-    identity.link("web", W_B, "bob", W_B)  # no token: must not seed
-    identity.ensure_identities_table()  # boot-time seed
-    rows = _rows(db)
-    assert [(r[0], r[1]) for r in rows] == [(hashlib.sha256(RAW_TOKEN.encode()).hexdigest(), W_A)]
-
-
-def test_seed_is_idempotent(tmp_path, monkeypatch):
-    db = _fresh_db(tmp_path, monkeypatch)
-    identity.link("discord", "111", "alice", W_A)
-    identity.set_user_token("discord", "111", RAW_TOKEN)
-    identity.ensure_identities_table()
-    first = _rows(db)
-    identity.ensure_identities_table()
-    assert _rows(db) == first
+    identity.set_user_token("discord", "111", RAW_TOKEN)  # no signer_wallet
+    identity.link("discord", "111", "alice", W_B)  # relink: token survives
+    identity.ensure_identities_table()  # boot: must NOT seed
+    assert _rows(db) == []
 
 
 # --- Task 3: bucket walk over token edges ----------------------------------

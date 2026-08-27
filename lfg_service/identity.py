@@ -106,18 +106,13 @@ def ensure_identities_table() -> None:
         conn.execute(
             "CREATE INDEX IF NOT EXISTS idx_wallet_token_links_wallet ON wallet_token_links(wallet)"
         )
-        # Seed observations from tokens already on file, so existing
-        # multi-wallet Xaman users bucket immediately on deploy without
-        # re-signing. Idempotent (INSERT OR IGNORE; hashing happens here
-        # because sqlite has no sha256).
-        for wallet, token in conn.execute(
-            "SELECT wallet, user_token FROM identities WHERE user_token IS NOT NULL"
-        ).fetchall():
-            if wallet and token:
-                conn.execute(
-                    "INSERT OR IGNORE INTO wallet_token_links (token_hash, wallet) VALUES (?, ?)",
-                    (_token_hash(token), wallet),
-                )
+        # Deliberately NOT seeded from identities.user_token: link() preserves
+        # the stored token across a wallet relink, so seeding would pair the
+        # token with a wallet it was never observed signing as — a bucket
+        # merge without signed evidence (Greptile P1 on #448). Rows only ever
+        # come from observe_token() at verified-signer capture sites; existing
+        # users bucket organically as they sign (#212 recaptures on every
+        # signed payload).
         # Seed history from identities rows that predate wallet_links so
         # existing users participate in buckets. Idempotent (INSERT OR IGNORE).
         conn.execute(
