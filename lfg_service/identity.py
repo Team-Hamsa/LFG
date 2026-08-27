@@ -3,6 +3,7 @@
 # The wallet is the canonical account; account_id is a reserved hook for
 # future linked multi-surface profiles (nullable, unused now).
 
+import hashlib
 import json
 import logging
 import sqlite3
@@ -83,6 +84,40 @@ def ensure_identities_table() -> None:
             """
         )
         conn.execute("CREATE INDEX IF NOT EXISTS idx_identities_account ON identities(account_id)")
+        # #445: append-only wallet <-> XUMM user-token co-observation. The
+        # issued_user_token is scoped per XUMM app + Xaman USER (identical
+        # across every r-address in that install), so wallets that ever shared
+        # a token belong to one human. The token ROTATES (30-day inactivity
+        # expiry), so correlation is by recorded co-observation — never
+        # live-token equality — and it is a push credential, so only a sha256
+        # hash is stored here (identities.user_token keeps the raw value for
+        # push delivery). Rows are never updated (beyond last_seen) or deleted.
+        conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS wallet_token_links (
+                token_hash TEXT NOT NULL,
+                wallet     TEXT NOT NULL,
+                first_seen TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                last_seen  TIMESTAMP,
+                PRIMARY KEY (token_hash, wallet)
+            )
+            """
+        )
+        conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_wallet_token_links_wallet ON wallet_token_links(wallet)"
+        )
+        # Seed observations from tokens already on file, so existing
+        # multi-wallet Xaman users bucket immediately on deploy without
+        # re-signing. Idempotent (INSERT OR IGNORE; hashing happens here
+        # because sqlite has no sha256).
+        for wallet, token in conn.execute(
+            "SELECT wallet, user_token FROM identities WHERE user_token IS NOT NULL"
+        ).fetchall():
+            if wallet and token:
+                conn.execute(
+                    "INSERT OR IGNORE INTO wallet_token_links (token_hash, wallet) VALUES (?, ?)",
+                    (_token_hash(token), wallet),
+                )
         # Seed history from identities rows that predate wallet_links so
         # existing users participate in buckets. Idempotent (INSERT OR IGNORE).
         conn.execute(
@@ -161,13 +196,52 @@ def touch_handle(platform: str, platform_user_id: str, handle: str) -> None:
             conn.close()
 
 
-def set_user_token(platform: str, platform_user_id: str, token: str | None) -> None:
+def _token_hash(token: str) -> str:
+    return hashlib.sha256(token.encode()).hexdigest()
+
+
+def observe_token(wallet: str | None, token: str | None) -> None:
+    """Record a wallet <-> user-token co-observation (#445). Call ONLY with a
+    token captured off a SIGNED payload whose signer was verified to be
+    `wallet` — the link evidence is that signature, never a client assertion.
+    Best-effort like set_user_token: falsy inputs are a no-op and DB errors
+    are swallowed (a correlation write must never fail a sign flow)."""
+    if not wallet or not token:
+        return
+    conn = None
+    try:
+        conn = sqlite3.connect(DATABASE)
+        conn.execute(
+            "INSERT INTO wallet_token_links (token_hash, wallet) VALUES (?, ?) "
+            "ON CONFLICT(token_hash, wallet) DO UPDATE SET last_seen = CURRENT_TIMESTAMP",
+            (_token_hash(token), wallet),
+        )
+        conn.commit()
+    except Exception as e:
+        logging.error(f"identity.observe_token failed: {e}")
+    finally:
+        if conn is not None:
+            conn.close()
+
+
+def set_user_token(
+    platform: str,
+    platform_user_id: str,
+    token: str | None,
+    *,
+    signer_wallet: str | None = None,
+) -> None:
     """Persist the XUMM push token for an identity (issue #135). Best-effort:
     a falsy token or a missing identity row is a no-op, and DB errors are
     swallowed — a push-token write must never fail a sign flow. The identity
-    row is created by link() at registration, so this only ever UPDATEs."""
+    row is created by link() at registration, so this only ever UPDATEs.
+
+    signer_wallet (#445): the verified signer of the payload the token came
+    off. When given, a wallet<->token co-observation is also recorded (see
+    observe_token) — pass it only where signer == session wallet was checked."""
     if not token:
         return
+    observe_token(signer_wallet, token)
     conn = None
     try:
         conn = sqlite3.connect(DATABASE)
@@ -356,12 +430,25 @@ def _bucket_on_conn(
     ).fetchone()
     if not seed:
         return None
-    identities: set[tuple[str, str]] = {(platform, platform_user_id)}
-    wallets: set[str] = set()
-    frontier_ids = [(platform, platform_user_id)]
-    while frontier_ids:
+    return _bucket_bfs(conn, seed_ids={(platform, platform_user_id)}, seed_wallets=set())
+
+
+def _bucket_bfs(
+    conn: sqlite3.Connection,
+    seed_ids: set[tuple[str, str]],
+    seed_wallets: set[str],
+) -> dict[str, object]:
+    """Connected-component BFS over BOTH edge types: identity—wallet
+    (wallet_links) and wallet—wallet via shared token hashes
+    (wallet_token_links, #445). Alternates identity->wallet and
+    wallet->{identity, token-sibling-wallet} expansions to fixpoint."""
+    identities: set[tuple[str, str]] = set(seed_ids)
+    wallets: set[str] = set(seed_wallets)
+    frontier_ids: list[tuple[str, str]] = sorted(seed_ids)
+    frontier_wallets: list[str] = sorted(seed_wallets)
+    while frontier_ids or frontier_wallets:
         # identities -> their wallets
-        new_wallets: set[str] = set()
+        new_wallets: set[str] = set(frontier_wallets)
         for p, uid in frontier_ids:
             for (w,) in conn.execute(
                 "SELECT wallet FROM wallet_links WHERE platform = ? AND platform_user_id = ?",
@@ -370,9 +457,10 @@ def _bucket_on_conn(
                 if w not in wallets:
                     new_wallets.add(w)
         wallets |= new_wallets
-        # wallets -> their identities
         frontier_ids = []
+        frontier_wallets = []
         for w in new_wallets:
+            # wallets -> their identities
             for p, uid in conn.execute(
                 "SELECT platform, platform_user_id FROM wallet_links WHERE wallet = ?",
                 (w,),
@@ -380,12 +468,51 @@ def _bucket_on_conn(
                 if (p, uid) not in identities:
                     identities.add((p, uid))
                     frontier_ids.append((p, uid))
+            # wallets -> token-sibling wallets (co-observed user tokens)
+            for (w2,) in conn.execute(
+                "SELECT DISTINCT l2.wallet FROM wallet_token_links l1 "
+                "JOIN wallet_token_links l2 ON l2.token_hash = l1.token_hash "
+                "WHERE l1.wallet = ?",
+                (w,),
+            ):
+                if w2 not in wallets:
+                    wallets.add(w2)
+                    frontier_wallets.append(w2)
     members = sorted(identities)
+    # A wallets-only bucket (web wallets known solely through token
+    # observations) has no identity member to name it; fall back to the
+    # smallest wallet under a reserved "wallet" pseudo-platform.
+    bucket_key = list(members[0]) if members else ["wallet", sorted(wallets)[0]]
     return {
-        "bucket_id": json.dumps(list(members[0])),
+        "bucket_id": json.dumps(bucket_key),
         "identities": [{"platform": p, "platform_user_id": uid} for p, uid in members],
         "wallets": sorted(wallets),
     }
+
+
+def bucket_for_wallet(wallet: str) -> dict[str, object] | None:
+    """bucket_for keyed by wallet (#445) — the entry point web-surface callers
+    need (their only key IS the wallet). Returns None for a wallet with no
+    wallet_links row AND no token observation; raises BucketLookupError on DB
+    failure (fail-closed, same contract as bucket_for). Wallets are matched
+    verbatim — never case-fold."""
+    conn = None
+    try:
+        conn = sqlite3.connect(DATABASE)
+        known = conn.execute(
+            "SELECT 1 FROM wallet_links WHERE wallet = ? "
+            "UNION SELECT 1 FROM wallet_token_links WHERE wallet = ? LIMIT 1",
+            (wallet, wallet),
+        ).fetchone()
+        if not known:
+            return None
+        return _bucket_bfs(conn, seed_ids=set(), seed_wallets={wallet})
+    except Exception as e:
+        logging.error(f"identity.bucket_for_wallet failed: {e}")
+        raise BucketLookupError(f"bucket lookup failed for wallet: {e}") from e
+    finally:
+        if conn is not None:
+            conn.close()
 
 
 def same_bucket(a: tuple[str, str], b: tuple[str, str]) -> bool:
