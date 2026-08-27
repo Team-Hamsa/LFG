@@ -35,7 +35,7 @@ import * as signDeliveryPure from './signdelivery_pure.js?v=1';
 // Daily BRIX drip card (#48): what the card renders and how each claim error
 // code is handled are pure decisions, Node-testable (tests/test_brix_pure_js.py);
 // loadBrix()/claimBrix() below are the glue.
-import * as brixPure from './brix_pure.js?v=7';
+import * as brixPure from './brix_pure.js?v=8';
 
 const params = new URLSearchParams(window.location.search);
 const insideDiscord = params.has('frame_id');
@@ -648,15 +648,19 @@ async function setupTelegram() {
 const ALL_PANELS = ['register-panel', 'mint-panel', 'flow-panel', 'bulk-panel',
                     'swap-panel', 'swap-traits-panel', 'swap-result-panel',
                     'dressup-panel', 'market-panel', 'market-list-form-panel',
-                    'offers-panel', 'trustline-panel'];
+                    'offers-panel', 'trustline-panel', 'claimall-panel'];
 
 function showPanel(id) {
   for (const panel of ALL_PANELS) {
     const hide = panel !== id;
-    el(panel).hidden = hide;
+    // Skip panels a cached older index.html doesn't have — a throw here would
+    // leave the app unable to render ANY panel (CodeRabbit on #450).
+    const panelEl = el(panel);
+    if (!panelEl) continue;
+    panelEl.hidden = hide;
     // A display:none <video> keeps playing (and decoding) — pause any in the
     // panels being hidden. setMedia re-arms playback on re-entry.
-    if (hide) el(panel).querySelectorAll('video').forEach((v) => v.pause());
+    if (hide) panelEl.querySelectorAll('video').forEach((v) => v.pause());
   }
 }
 
@@ -1009,6 +1013,14 @@ async function claimBrix() {
     if (view.pollClaimId) pollBrixClaim(view.pollClaimId);
     return;
   }
+  // #446: with more than one linked wallet holding BRIX (or the balance
+  // living on a linked wallet, not this one), claim through the fan-out
+  // endpoint instead of a solo claim.
+  const summary = brixPure.linkedClaimSummary(fresh);
+  if (summary.useClaimAll) {
+    await startClaimAll(summary);
+    return;
+  }
   const ok = await confirmDialog({
     title: `Claim ${view.headline}?`,
     text: 'This pays your accrued BRIX out to your wallet on the XRP Ledger.',
@@ -1050,11 +1062,118 @@ async function claimBrix() {
 
 function setupBrixCard() {
   el('brix-claim-btn').addEventListener('click', claimBrix);
+  // Guarded: a client on a cached pre-#446 index.html has no claimall panel,
+  // and a throw here would strip the BRIX button of its click handler too.
+  const claimAllBack = el('claimall-back-btn');
+  if (claimAllBack) claimAllBack.addEventListener('click', () => {
+    claimAllPollGen++; // orphan any in-flight poll
+    clearTimeout(claimAllPollTimer);
+    loadBrix();
+    showMintHome();
+  });
   el('trustline-back-btn').addEventListener('click', () => {
     clearTimeout(trustlinePollTimer);
     (trustlineBack || showMintHome)();
   });
   el('trustline-retry-btn').addEventListener('click', () => startBrixTrustline({ back: trustlineBack, onSet: trustlineOnSet }));
+}
+
+// --- BRIX claim-all across linked wallets (#446) --------------------------
+//
+// One POST fans out sequential per-wallet claims server-side; this panel
+// polls the job and renders one row per wallet. A wallet skipped for a
+// missing trustline gets a per-row "Set trustline" action (the #441 flow,
+// aimed at that wallet), then the user claims again.
+let claimAllPollTimer = null;
+let claimAllPollGen = 0;
+
+function shortWallet(w) {
+  return w.length > 12 ? `${w.slice(0, 6)}…${w.slice(-4)}` : w;
+}
+
+function renderClaimAll(job) {
+  const v = brixPure.claimAllJobView(job);
+  // Stale cached index.html without the panel: nothing to paint into (the
+  // start path refuses before creating a job in that case; this guard keeps
+  // a late poll render from throwing too).
+  const sub = el('claimall-sub');
+  const box = el('claimall-rows');
+  if (!sub || !box) return v;
+  sub.textContent = v.sub;
+  box.replaceChildren(...v.rows.map((row) => {
+    const div = document.createElement('div');
+    div.className = 'claimall-row';
+    const code = document.createElement('code');
+    code.textContent = shortWallet(row.wallet);
+    const span = document.createElement('span');
+    span.textContent = ` ${row.spinner ? '⏳ ' : ''}${row.text}`;
+    div.append(code, span);
+    if (row.trustline) {
+      const btn = document.createElement('button');
+      btn.className = 'link';
+      btn.textContent = 'Set trustline';
+      btn.addEventListener('click', () => startBrixTrustline({
+        wallet: row.wallet,
+        back: () => { showPanel('claimall-panel'); },
+      }));
+      div.append(btn);
+    }
+    return div;
+  }));
+  return v;
+}
+
+async function startClaimAll(summary) {
+  // A cached pre-#446 index.html has no progress panel — refuse BEFORE the
+  // POST creates a server job the user could never watch (Greptile on #450).
+  if (!el('claimall-panel') || !el('claimall-rows')) {
+    toast('Please refresh the app to claim across linked wallets.');
+    return;
+  }
+  const ok = await confirmDialog({
+    title: `Claim ${summary.total} BRIX across ${summary.wallets.length} wallets?`,
+    text: 'This pays each linked wallet its own accrued BRIX, one payout at a time.',
+    confirmLabel: 'Claim it all',
+  });
+  if (!ok) return;
+  let res;
+  try {
+    res = await api('/api/brix/claim/all', { method: 'POST', body: '{}' });
+  } catch (e) {
+    const code = (e.body && e.body.code) || '';
+    if (code === 'claim_all_in_flight') toast('A claim-all is already running.');
+    else if (code === 'bucket_unavailable') toast('Linked wallets could not be resolved — try again in a minute.');
+    else toast(brixPure.claimErrorView(code).message);
+    return;
+  }
+  showPanel('claimall-panel');
+  renderClaimAll({ state: 'running', wallets: res.wallets });
+  pollClaimAllJob(res.job_id);
+}
+
+function pollClaimAllJob(jobId) {
+  clearTimeout(claimAllPollTimer);
+  const gen = ++claimAllPollGen;
+  const stale = () => gen !== claimAllPollGen || el('claimall-panel').hidden;
+  const tick = async () => {
+    if (stale()) return;
+    let job;
+    try {
+      job = await api(`/api/brix/claim/all/${jobId}`);
+    } catch (e) {
+      if (stale()) return;
+      // 404 = the job aged out (or a restart dropped it) — every underlying
+      // claim is durable server-side, so just fall back to the card.
+      if (e.status === 404) { loadBrix(); showMintHome(); return; }
+      claimAllPollTimer = setTimeout(tick, 2000);
+      return;
+    }
+    if (stale()) return;
+    const v = renderClaimAll(job);
+    if (v.terminal) { loadBrix({ poll: false }); return; }
+    claimAllPollTimer = setTimeout(tick, 2000);
+  };
+  claimAllPollTimer = setTimeout(tick, 2000);
 }
 
 // --- BRIX trustline flow (#441) ------------------------------------------
@@ -1082,7 +1201,7 @@ function renderTrustline({ sub, spinner, retry, link, qrData, push }) {
   el('trustline-retry-btn').hidden = !retry;
 }
 
-async function startBrixTrustline({ back, onSet } = {}) {
+async function startBrixTrustline({ back, onSet, wallet } = {}) {
   clearTimeout(trustlinePollTimer);
   const gen = ++trustlinePollGen; // orphan any in-flight response from a prior flow
   trustlineBack = back || showMintHome;
@@ -1091,7 +1210,9 @@ async function startBrixTrustline({ back, onSet } = {}) {
   renderTrustline({ sub: 'Setting up the trustline request…', spinner: true });
   let s;
   try {
-    s = await api('/api/brix/trustline', { method: 'POST', body: '{}' });
+    // #446: `wallet` targets a linked wallet from the claim-all card; the
+    // server checks bucket membership and pins the TrustSet to that account.
+    s = await api('/api/brix/trustline', { method: 'POST', body: JSON.stringify(wallet ? { wallet } : {}) });
   } catch (e) {
     if (gen !== trustlinePollGen || el('trustline-panel').hidden) return;
     renderTrustline({ sub: 'Could not start the trustline request.', retry: true });

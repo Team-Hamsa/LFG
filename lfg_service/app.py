@@ -1527,6 +1527,14 @@ async def handle_brix_status(request):
     """
     wallet = request["wallet"]
 
+    # #446: the linked-wallets view. Purely cosmetic here (claim-all re-derives
+    # the bucket itself), so a broken identity DB omits the field rather than
+    # taking down the whole card.
+    try:
+        linked_wallets = await _linked_wallets_for(wallet)
+    except identity_store.BucketLookupError:
+        linked_wallets = None
+
     def _read():
         conn = _brix_conn()
         try:
@@ -1552,7 +1560,7 @@ async def handle_brix_status(request):
                     (wallet,),
                 ).fetchone()[0]
             )
-            return {
+            data = {
                 "wallet": wallet,
                 "claimable": brix_drip.claimable(conn, wallet),
                 "unlisted_last_epoch": unlisted_last_epoch,
@@ -1561,6 +1569,13 @@ async def handle_brix_status(request):
                 "open_claim": _open_claim_row(conn, wallet),
                 "last_epoch": last_epoch,
             }
+            if linked_wallets is not None:
+                linked = [
+                    {"wallet": w, "claimable": brix_drip.claimable(conn, w)} for w in linked_wallets
+                ]
+                data["linked"] = linked
+                data["linked_claimable_total"] = sum(r["claimable"] for r in linked)
+            return data
         finally:
             conn.close()
 
@@ -1637,8 +1652,31 @@ def _prune_brix_trustline_payloads() -> None:
 async def handle_brix_trustline(request):
     wallet = request["wallet"]
     user = request["user"]
+    # #446: an optional linked-wallet target, so a claim-all skip can set the
+    # line on a bucket sibling. Membership is checked against the CALLER's
+    # bucket (signed-evidence links only) — and the status poll's
+    # signer-mismatch check still requires that wallet's own signature, so
+    # the worst a bad request could do is build a payload nobody can complete.
+    try:
+        body = await request.json()
+    except Exception:
+        body = {}
+    target = (body or {}).get("wallet") or wallet
+    if target != wallet:
+        try:
+            linked = await _linked_wallets_for(wallet)
+        except identity_store.BucketLookupError:
+            return web.json_response(
+                {"error": "linked wallets could not be resolved", "code": "bucket_unavailable"},
+                status=503,
+            )
+        if target not in linked:
+            return web.json_response(
+                {"error": "that wallet is not linked to yours", "code": "not_linked"},
+                status=403,
+            )
     async with _brix_trustline_lock:
-        return await _start_brix_trustline(wallet, user)
+        return await _start_brix_trustline(target, user)
 
 
 async def _start_brix_trustline(wallet, user):
@@ -1752,9 +1790,9 @@ async def handle_brix_trustline_status(request):
     return web.json_response({"state": "opened" if s["opened"] else "pending"})
 
 
-@require_wallet
-async def handle_brix_claim(request):
-    """Claim the caller's accrued BRIX.
+async def _claim_one_wallet(wallet, progress=None):
+    """One wallet's claim, the exact flow handle_brix_claim always ran (#446
+    extracted it so claim-all can reuse it verbatim).
 
     Order of operations is DB-journal-first, chain second, with exactly one
     ambiguous window that is never blind-retried:
@@ -1767,32 +1805,36 @@ async def handle_brix_claim(request):
     An unknown outcome deliberately leaves the balance bound: the payment may
     have landed, and restoring the balance would let it be claimed twice.
     Recovery resolves it later from the chain.
-    """
-    wallet = request["wallet"]
 
+    Returns {"status": "ok", "state", "claim_id", "amount", "tx_hash"} on a
+    submitted claim, else {"status": <refusal code>} where the code is one of
+    claims_disabled / trustline_required / claim_unavailable /
+    nothing_to_claim / claim_in_flight / claim_unconfirmed.
+
+    `progress` (a dict, optional) gets `bound=True` the moment durable state
+    may exist — stamped as the FIRST statement inside the open_claim thread,
+    so it is set iff the executor actually started running (a cancellation
+    mid-thread still lets the thread finish and create the claim; a
+    cancellation while the work was still queued leaves it unset). Everything
+    earlier (trustline check, ledger read) is a pure read, so a caller seeing
+    no `bound` after a cancellation knows the wallet is untouched (#450).
+    """
     if not config.BRIX_DISTRIBUTOR_SEED:
-        return web.json_response(
-            {"error": "claims are not enabled", "code": "claims_disabled"}, status=503
-        )
+        return {"status": "claims_disabled"}
 
     # Advisory pre-check: a claim to a wallet with no BRIX trustline would fail
     # tecNO_LINE anyway, but refusing here means no claim row and no binding, so
     # the holder's balance is untouched and the retry is clean. The lookup is
     # tri-state on purpose: the client pins the claim button on
     # trustline_required, so a transient account_lines failure must surface as
-    # a retryable 503, never as a verdict that the line is missing.
+    # a retryable refusal, never as a verdict that the line is missing.
     line_state, _balance = await xrpl_ops.get_trustline_state(
         wallet, config.BRIX_CURRENCY_HEX, config.BRIX_ISSUER
     )
     if line_state is xrpl_ops.TrustlineState.ABSENT:
-        return web.json_response(
-            {"error": "a BRIX trustline is required", "code": "trustline_required"}, status=409
-        )
+        return {"status": "trustline_required"}
     if line_state is xrpl_ops.TrustlineState.UNKNOWN:
-        return web.json_response(
-            {"error": "the payout could not be prepared", "code": "claim_unavailable"},
-            status=503,
-        )
+        return {"status": "claim_unavailable"}
 
     # The provisional deadline is read BEFORE the claim exists and written in
     # the same transaction that creates it (see brix_drip.open_claim). A claim
@@ -1804,12 +1846,11 @@ async def handle_brix_claim(request):
     # is bound, so nothing can be stranded, and the holder simply retries.
     provisional = await _fallback_last_ledger_seq()
     if provisional is None:
-        return web.json_response(
-            {"error": "the payout could not be prepared", "code": "claim_unavailable"},
-            status=503,
-        )
+        return {"status": "claim_unavailable"}
 
     def _open():
+        if progress is not None:
+            progress["bound"] = True
         conn = _brix_conn()
         try:
             return brix_drip.open_claim(conn, wallet, last_ledger_seq=provisional)
@@ -1819,13 +1860,9 @@ async def handle_brix_claim(request):
     try:
         claim_id, amount = await asyncio.to_thread(_open)
     except brix_drip.NothingToClaim:
-        return web.json_response(
-            {"error": "nothing to claim", "code": "nothing_to_claim"}, status=400
-        )
+        return {"status": "nothing_to_claim"}
     except brix_drip.ClaimInFlight:
-        return web.json_response(
-            {"error": "a claim is already in flight", "code": "claim_in_flight"}, status=409
-        )
+        return {"status": "claim_in_flight"}
 
     try:
         payment = await xrpl_ops.send_brix_claim(
@@ -1838,10 +1875,7 @@ async def handle_brix_claim(request):
         # with claim_in_flight forever and make its BRIX unreachable.
         await asyncio.to_thread(_settle_failed, claim_id)
         logging.warning("brix claim %s could not be submitted: %s", claim_id, exc)
-        return web.json_response(
-            {"error": "the payout could not be submitted", "code": "claim_unavailable"},
-            status=503,
-        )
+        return {"status": "claim_unavailable"}
     except asyncio.CancelledError:
         raise
     except Exception:
@@ -1854,10 +1888,7 @@ async def handle_brix_claim(request):
         logging.exception("brix claim %s failed with an unexpected error", claim_id)
         fallback = await _fallback_last_ledger_seq()
         await asyncio.to_thread(_mark_submitted_unknown, claim_id, fallback)
-        return web.json_response(
-            {"error": "the payout outcome is unconfirmed", "code": "claim_unconfirmed"},
-            status=502,
-        )
+        return {"status": "claim_unconfirmed"}
 
     def _settle():
         conn = _brix_conn()
@@ -1870,12 +1901,191 @@ async def handle_brix_claim(request):
     await asyncio.to_thread(_settle)
 
     state = "submitted" if payment.state == "unknown" else payment.state
+    return {
+        "status": "ok",
+        "state": state,
+        "claim_id": claim_id,
+        "amount": amount,
+        "tx_hash": payment.tx_hash,
+    }
+
+
+# How each _claim_one_wallet refusal maps back to the single-claim HTTP
+# surface — codes and statuses exactly as they were before the #446 refactor.
+_CLAIM_REFUSALS = {
+    "claims_disabled": (503, "claims are not enabled"),
+    "trustline_required": (409, "a BRIX trustline is required"),
+    "claim_unavailable": (503, "the payout could not be prepared"),
+    "nothing_to_claim": (400, "nothing to claim"),
+    "claim_in_flight": (409, "a claim is already in flight"),
+    "claim_unconfirmed": (502, "the payout outcome is unconfirmed"),
+}
+
+
+@require_wallet
+async def handle_brix_claim(request):
+    """Claim the caller's accrued BRIX — a thin HTTP shim over
+    _claim_one_wallet (see its docstring for the ordering guarantees)."""
+    result = await _claim_one_wallet(request["wallet"])
+    if result["status"] != "ok":
+        http, message = _CLAIM_REFUSALS[result["status"]]
+        return web.json_response({"error": message, "code": result["status"]}, status=http)
     return web.json_response(
         {
-            "claim_id": claim_id,
-            "state": state,
-            "amount": amount,
-            "tx_hash": payment.tx_hash,
+            "claim_id": result["claim_id"],
+            "state": result["state"],
+            "amount": result["amount"],
+            "tx_hash": result["tx_hash"],
+        }
+    )
+
+
+# --- BRIX claim-all across linked wallets (#446) ---------------------------
+# One in-memory job per caller: every underlying claim is durable in
+# brix_claims and covered by recovery, so losing the JOB record to a restart
+# costs nothing — the client just re-reads GET /api/brix. Keyed and read by
+# the OWNER wallet only, like claim status.
+brix_claim_all_jobs: dict[str, dict[str, Any]] = {}
+BRIX_CLAIM_ALL_TTL = 3600
+# One lock around the running-job scan + insert: the scan sits before awaited
+# bucket/claimable reads, so two overlapping POSTs could otherwise both pass
+# it and race duplicate jobs over the same wallets (Greptile P1 on #450).
+_brix_claim_all_lock = asyncio.Lock()
+
+
+def _prune_brix_claim_all_jobs() -> None:
+    cutoff = time.time() - BRIX_CLAIM_ALL_TTL
+    for k, job in list(brix_claim_all_jobs.items()):
+        if job["created_at"] < cutoff and job["state"] == "done":
+            del brix_claim_all_jobs[k]
+
+
+async def _linked_wallets_for(wallet):
+    """The caller's bucket wallets (#445), caller first, caller-only when the
+    wallet has no signed-evidence links. Raises BucketLookupError on DB
+    failure — callers decide whether that is fatal (claim-all: yes) or
+    cosmetic (the GET view: omit)."""
+    bucket = await asyncio.to_thread(identity_store.bucket_for_wallet, wallet)
+    wallets = cast(list[str], bucket["wallets"]) if bucket else []
+    return [wallet] + sorted(w for w in wallets if w != wallet)
+
+
+async def _run_brix_claim_all(job_id: str) -> None:
+    """Sequential per-wallet claims — one at a time on purpose: each claim is
+    a distributor-signed Payment, and the invariants (one open claim per
+    wallet, accruals bound per wallet) are per-wallet, never aggregated. A
+    refusal or error on one wallet records that wallet's status and moves on."""
+    job = brix_claim_all_jobs.get(job_id)
+    if job is None:
+        return
+    for row in job["wallets"]:
+        row["status"] = "claiming"
+        progress: dict[str, bool] = {}
+        try:
+            result = await _claim_one_wallet(row["wallet"], progress=progress)
+        except asyncio.CancelledError:
+            # Interrupted before anything durable could exist (pure pre-check
+            # reads) -> cancelled and safe to retry; after the binding started
+            # -> fail-closed claim_unconfirmed, the payment may have gone out.
+            # The rows never reached are explicitly `cancelled`, not left
+            # "pending" under a done job.
+            row["status"] = "claim_unconfirmed" if progress.get("bound") else "cancelled"
+            for later in job["wallets"]:
+                if later["status"] == "pending":
+                    later["status"] = "cancelled"
+            job["state"] = "done"
+            raise
+        except Exception:
+            logging.exception("brix claim-all %s: wallet %s failed", job_id, row["wallet"])
+            row["status"] = "claim_unavailable"
+            continue
+        if result["status"] != "ok":
+            row["status"] = result["status"]
+            continue
+        row["status"] = result["state"]
+        row["claim_id"] = result["claim_id"]
+        row["amount"] = result["amount"]
+        row["tx_hash"] = result["tx_hash"]
+    job["state"] = "done"
+
+
+@require_wallet
+async def handle_brix_claim_all(request):
+    wallet = request["wallet"]
+    if not config.BRIX_DISTRIBUTOR_SEED:
+        return web.json_response(
+            {"error": "claims are not enabled", "code": "claims_disabled"}, status=503
+        )
+    async with _brix_claim_all_lock:
+        return await _start_brix_claim_all(wallet)
+
+
+async def _start_brix_claim_all(wallet):
+    _prune_brix_claim_all_jobs()
+    # Fail-closed on a broken bucket lookup: silently claiming only the
+    # caller's wallet would read as "claim-all done" while linked balances
+    # quietly stayed behind.
+    try:
+        wallets = await _linked_wallets_for(wallet)
+    except identity_store.BucketLookupError:
+        return web.json_response(
+            {"error": "linked wallets could not be resolved", "code": "bucket_unavailable"},
+            status=503,
+        )
+    # The duplicate guard compares WALLET SETS, not owners: two different
+    # wallets of the same bucket would otherwise each pass an owner-only scan
+    # and race per-wallet claims over the same balances (Greptile P1 round 2
+    # on #450). Runs after the bucket resolve, still under the start lock.
+    targets_now = set(wallets)
+    for job in brix_claim_all_jobs.values():
+        if job["state"] != "running":
+            continue
+        job_wallets = {job["owner"]} | {r["wallet"] for r in job["wallets"]}
+        if job_wallets & targets_now:
+            return web.json_response(
+                {"error": "a claim-all is already running", "code": "claim_all_in_flight"},
+                status=409,
+            )
+
+    def _claimables():
+        conn = _brix_conn()
+        try:
+            return {w: brix_drip.claimable(conn, w) for w in wallets}
+        finally:
+            conn.close()
+
+    claimable = await asyncio.to_thread(_claimables)
+    targets = [w for w in wallets if claimable[w] > 0]
+    if not targets:
+        return web.json_response(
+            {"error": "nothing to claim", "code": "nothing_to_claim"}, status=400
+        )
+    job_id = uuid_lib.uuid4().hex
+    job = {
+        "owner": wallet,
+        "created_at": time.time(),
+        "state": "running",
+        "wallets": [{"wallet": w, "status": "pending", "claimable": claimable[w]} for w in targets],
+    }
+    brix_claim_all_jobs[job_id] = job
+    # The task ref is kept on the job so it cannot be garbage-collected
+    # mid-run (asyncio holds tasks weakly).
+    job["task"] = asyncio.create_task(_run_brix_claim_all(job_id))
+    return web.json_response({"job_id": job_id, "wallets": [dict(r) for r in job["wallets"]]})
+
+
+@require_wallet
+async def handle_brix_claim_all_status(request):
+    """Poll the caller's own claim-all job. Another wallet's job is a 404 —
+    not a 403, which would confirm the job exists."""
+    wallet = request["wallet"]
+    job = brix_claim_all_jobs.get(request.match_info.get("job_id", ""))
+    if not job or job["owner"] != wallet:
+        return web.json_response({"error": "not found"}, status=404)
+    return web.json_response(
+        {
+            "state": job["state"],
+            "wallets": [dict(r) for r in job["wallets"]],
         }
     )
 
@@ -8171,6 +8381,10 @@ def create_app() -> web.Application:
     app.router.add_get("/api/leaderboard", handle_leaderboard)
     app.router.add_get("/api/brix", handle_brix_status)
     app.router.add_post("/api/brix/claim", handle_brix_claim)
+    # /claim/all must register before the /claim/{claim_id} wildcard, or a
+    # POST to it would match that resource first and 405 (#446).
+    app.router.add_post("/api/brix/claim/all", handle_brix_claim_all)
+    app.router.add_get("/api/brix/claim/all/{job_id}", handle_brix_claim_all_status)
     app.router.add_post("/api/brix/trustline", handle_brix_trustline)
     app.router.add_get("/api/brix/trustline/{uuid}", handle_brix_trustline_status)
     app.router.add_get("/api/brix/claim/{claim_id}", handle_brix_claim_status)

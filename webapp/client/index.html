@@ -60,6 +60,13 @@
       <p><button id="trustline-back-btn" class="link">← Back</button></p>
     </section>
 
+    <section id="claimall-panel" class="card sticker" hidden>
+      <h2>🧱 Claiming your BRIX</h2>
+      <p id="claimall-sub" class="card-sub"></p>
+      <div id="claimall-rows"></div>
+      <p><button id="claimall-back-btn" class="link">← Back</button></p>
+    </section>
+
     <section id="mint-panel" class="card sticker" hidden>
       <p class="wallet-line"><span class="wallet-lbl">Wallet</span> <code id="wallet-display"></code>
         <button id="change-wallet-btn" class="link">change</button></p>
@@ -398,6 +405,6 @@
        Telegram (window.Telegram stays undefined); loaded BEFORE app.js so the
        dual-mode boot can detect the Telegram context. -->
   <script src="telegram-web-app.js"></script>
-  <script type="module" src="app.js?v=77"></script>
+  <script type="module" src="app.js?v=78"></script>
 </body>
 </html>

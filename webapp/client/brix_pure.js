@@ -36,13 +36,17 @@ const HIDDEN = Object.freeze({
 export function brixCardView(status) {
   if (!status) return HIDDEN;
 
-  const claimable = Number(status.claimable || 0);
+  // #446: the button offers the COMBINED balance across the caller's linked
+  // wallets when the server resolved a bucket — a caller whose own wallet is
+  // empty but whose linked wallets hold BRIX must still get a live button.
+  const linkedTotal = linkedClaimSummary(status).total;
+  const claimable = Math.max(Number(status.claimable || 0), linkedTotal);
   const accrued = Number(status.accrued_total || 0);
   const claimed = Number(status.claimed_total || 0);
   const earning = Number(status.unlisted_last_epoch || 0);
   const open = status.open_claim || null;
 
-  if (!status.last_epoch && accrued === 0 && claimed === 0 && !open) {
+  if (!status.last_epoch && accrued === 0 && claimed === 0 && !open && linkedTotal === 0) {
     return HIDDEN;
   }
 
@@ -210,4 +214,74 @@ export function trustlineView(state, code) {
 
 export function isTrustlineTerminal(state) {
   return trustlineView(state).terminal;
+}
+
+// --- Claim-all across linked wallets (#446) ------------------------------
+//
+// Whether the claim button should offer the claim-all flow, from the GET
+// /api/brix body. `linked` is only present when the server could resolve the
+// caller's bucket; multi is true only when MORE THAN ONE wallet has a
+// positive balance — a single claimable wallet (even in a big bucket) takes
+// the plain single-claim path.
+export function linkedClaimSummary(status) {
+  const linked = (status && Array.isArray(status.linked)) ? status.linked : [];
+  const wallets = linked.filter((r) => Number(r.claimable || 0) > 0);
+  const total = wallets.reduce((n, r) => n + Number(r.claimable || 0), 0);
+  // useClaimAll — route the claim through the fan-out endpoint: more than
+  // one wallet has a balance, or the only one with a balance isn't the
+  // caller's own (a solo POST /api/brix/claim would 400 nothing_to_claim).
+  const own = status ? status.wallet : null;
+  const useClaimAll = wallets.length > 1 || (wallets.length === 1 && wallets[0].wallet !== own);
+  return { multi: wallets.length > 1, useClaimAll, wallets, total };
+}
+
+// One row of the claim-all progress card, from a job poll's per-wallet
+// status. Returns { text, spinner, trustline, ok }:
+//   trustline — render a "Set trustline" action for this wallet.
+//   ok        — the wallet's BRIX is (or will be) paid.
+// Unknown statuses render as still-working, never as a verdict — same rule
+// as isClaimTerminal.
+export function claimAllRowView(row) {
+  const amount = Number(row.amount || row.claimable || 0);
+  switch (row.status) {
+    case 'pending':
+      return { text: 'Waiting…', spinner: false, trustline: false, ok: false };
+    case 'claiming':
+      return { text: 'Claiming…', spinner: true, trustline: false, ok: false };
+    case 'confirmed':
+      return { text: `Paid ${plural(amount)}`, spinner: false, trustline: false, ok: true };
+    case 'submitted':
+      return { text: 'Submitted — settling on the ledger', spinner: false, trustline: false, ok: true };
+    case 'failed':
+      return { text: 'Did not go through — balance is back', spinner: false, trustline: false, ok: false };
+    case 'trustline_required':
+      return { text: 'Needs a BRIX trustline', spinner: false, trustline: true, ok: false };
+    case 'nothing_to_claim':
+      return { text: 'Nothing to claim', spinner: false, trustline: false, ok: false };
+    case 'claim_in_flight':
+      return { text: 'A claim is already on its way', spinner: false, trustline: false, ok: false };
+    case 'claim_unavailable':
+      return { text: 'Ledger unreachable — try again later', spinner: false, trustline: false, ok: false };
+    case 'claim_unconfirmed':
+      return { text: "Submitted but unconfirmed — it'll settle on its own", spinner: false, trustline: false, ok: false };
+    case 'claims_disabled':
+      return { text: "Claiming isn't open yet", spinner: false, trustline: false, ok: false };
+    case 'cancelled':
+      return { text: 'Not attempted — claim again', spinner: false, trustline: false, ok: false };
+    default:
+      return { text: 'Working…', spinner: true, trustline: false, ok: false };
+  }
+}
+
+// The claim-all card's summary line + whether to keep polling.
+export function claimAllJobView(job) {
+  const rows = ((job && job.wallets) || []).map((r) => ({ wallet: r.wallet, ...claimAllRowView(r) }));
+  const terminal = Boolean(job && job.state === 'done');
+  const paid = rows.filter((r) => r.ok).length;
+  const needLine = rows.filter((r) => r.trustline).length;
+  let sub;
+  if (!terminal) sub = 'Claiming wallet by wallet — each payout settles on the ledger.';
+  else if (needLine > 0) sub = `Done — ${paid} of ${rows.length} paid. Wallets missing a BRIX trustline can be set up below, then claim again.`;
+  else sub = `Done — ${paid} of ${rows.length} wallets paid.`;
+  return { rows, terminal, sub };
 }
