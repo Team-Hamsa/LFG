@@ -1973,7 +1973,13 @@ async def _run_brix_claim_all(job_id: str) -> None:
         try:
             result = await _claim_one_wallet(row["wallet"])
         except asyncio.CancelledError:
+            # The interrupted row's payment may have gone out (fail-closed,
+            # same as any indeterminate outcome); the rows never reached are
+            # explicitly `cancelled`, not left "pending" under a done job.
             row["status"] = "claim_unconfirmed"
+            for later in job["wallets"]:
+                if later["status"] == "pending":
+                    later["status"] = "cancelled"
             job["state"] = "done"
             raise
         except Exception:

@@ -266,6 +266,8 @@ export function claimAllRowView(row) {
       return { text: "Submitted but unconfirmed — it'll settle on its own", spinner: false, trustline: false, ok: false };
     case 'claims_disabled':
       return { text: "Claiming isn't open yet", spinner: false, trustline: false, ok: false };
+    case 'cancelled':
+      return { text: 'Not attempted — claim again', spinner: false, trustline: false, ok: false };
     default:
       return { text: 'Working…', spinner: true, trustline: false, ok: false };
   }

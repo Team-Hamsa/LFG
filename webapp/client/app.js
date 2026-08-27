@@ -653,10 +653,14 @@ const ALL_PANELS = ['register-panel', 'mint-panel', 'flow-panel', 'bulk-panel',
 function showPanel(id) {
   for (const panel of ALL_PANELS) {
     const hide = panel !== id;
-    el(panel).hidden = hide;
+    // Skip panels a cached older index.html doesn't have — a throw here would
+    // leave the app unable to render ANY panel (CodeRabbit on #450).
+    const panelEl = el(panel);
+    if (!panelEl) continue;
+    panelEl.hidden = hide;
     // A display:none <video> keeps playing (and decoding) — pause any in the
     // panels being hidden. setMedia re-arms playback on re-entry.
-    if (hide) el(panel).querySelectorAll('video').forEach((v) => v.pause());
+    if (hide) panelEl.querySelectorAll('video').forEach((v) => v.pause());
   }
 }
 

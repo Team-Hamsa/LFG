@@ -485,3 +485,37 @@ def test_claim_all_a_bucket_sibling_cannot_start_an_overlapping_job(drip, monkey
     assert resp2.status == 409
     assert _body(resp2)["code"] == "claim_all_in_flight"
     assert len(server.brix_claim_all_jobs) == 1
+
+
+def test_claim_all_cancellation_finalizes_every_row(drip, monkeypatch):
+    """A cancelled job must not report state=done with rows still 'pending':
+    the interrupted row is claim_unconfirmed (fail-closed), the never-reached
+    rows are an explicit 'cancelled' (CodeRabbit on #450)."""
+    started = asyncio.Event()
+    release = asyncio.Event()
+
+    async def hanging_paid(destination, value, claim_id, max_last_ledger_seq=None):
+        started.set()
+        await release.wait()
+        return xrpl_ops.ClaimPayment("confirmed", f"TX_{destination}", 999)
+
+    monkeypatch.setattr(xrpl_ops, "send_brix_claim", hanging_paid)
+    _link_bucket(WALLET, W_B)
+    _accrue(drip)
+    _accrue(drip, wallet=W_B, count=2)
+
+    async def go():
+        body = _body(await server.handle_brix_claim_all(_Req()))
+        task = server.brix_claim_all_jobs[body["job_id"]]["task"]
+        await started.wait()  # first wallet is mid-payment
+        task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await task
+        return body["job_id"]
+
+    job_id = _run(go())
+    poll = _body(_run(server.handle_brix_claim_all_status(_Req(match_info={"job_id": job_id}))))
+    assert poll["state"] == "done"
+    statuses = [r["status"] for r in poll["wallets"]]
+    assert "pending" not in statuses
+    assert sorted(statuses) == ["cancelled", "claim_unconfirmed"]

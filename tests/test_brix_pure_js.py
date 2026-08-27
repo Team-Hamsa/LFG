@@ -440,3 +440,9 @@ def test_job_done_counts_paid_and_flags_missing_trustlines():
     assert v["terminal"] is True
     assert "1 of 2" in v["sub"]
     assert "trustline" in v["sub"]
+
+
+def test_row_cancelled_is_terminal_not_working():
+    r = row({"wallet": "rB", "status": "cancelled"})
+    assert r["spinner"] is False
+    assert r["ok"] is False
