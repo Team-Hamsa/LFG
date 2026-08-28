@@ -29,7 +29,7 @@ import traceback
 import uuid as uuid_lib
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, field
-from decimal import Decimal
+from decimal import Decimal, InvalidOperation
 from html import escape
 from typing import Any, TypeVar, cast
 from urllib.parse import urlparse
@@ -7605,6 +7605,10 @@ _RIPPLE_EPOCH_OFFSET = 946684800
 # How far a validated tx may predate its own sign request — clock skew between
 # us and the ledger's close time, nothing more.
 _SIGN_TX_TIME_SLACK_SECONDS = 120
+# A result posted at the very edge of the TTL (the wallet was slow, the tx
+# validated just in time) is still honoured; past this grace the row is
+# abandoned, not late.
+_SIGN_RESULT_GRACE_SECONDS = 60
 
 
 def _flags_match(stored: dict[str, Any], onledger: dict[str, Any]) -> bool:
@@ -7620,6 +7624,90 @@ def _flags_match(stored: dict[str, Any], onledger: dict[str, Any]) -> bool:
     return _mask(stored.get("Flags")) == _mask(onledger.get("Flags"))
 
 
+# rippled hands blob fields back UPPER-case hex and canonicalizes IOU `value`
+# strings ("5" → "5" but "5.0" → "5", 40-char currency codes upper-cased), so a
+# raw `!=` against the txjson WE stored (lower-case hex memos, whatever decimal
+# shape the caller wrote) would flag every honest transaction a mismatch.
+# Normalize both sides into one shape before comparing — the comparison stays
+# strict, it just stops reading encoding as tampering.
+_HEX_BLOB_KEYS = frozenset(
+    {
+        "URI",
+        "Domain",
+        "InvoiceID",
+        "EmailHash",
+        "MemoType",
+        "MemoData",
+        "MemoFormat",
+        "NFTokenID",
+        "NFTokenOfferID",
+        "Digest",
+        "WalletLocator",
+        "Condition",
+        "Fulfillment",
+        "MessageKey",
+    }
+)
+# Fields whose scalar form is XRP drops — an integer string, so "10" == "010".
+_AMOUNT_KEYS = frozenset(
+    {
+        "Amount",
+        "LimitAmount",
+        "SendMax",
+        "DeliverMin",
+        "DeliverMax",
+        "TakerPays",
+        "TakerGets",
+        "NFTokenBrokerFee",
+    }
+)
+_HEX_RE = re.compile(r"^[0-9a-fA-F]*$")
+_CURRENCY_HEX_RE = re.compile(r"^[0-9a-fA-F]{40}$")
+
+
+def _canonical_decimal(value: str) -> str:
+    """ "5.0" and "5" are the same IOU amount; render both the same way."""
+    try:
+        dec = Decimal(value)
+    except (InvalidOperation, ValueError):
+        return value
+    if not dec.is_finite():
+        return value
+    dec = dec.normalize()
+    if dec == dec.to_integral_value():
+        dec = dec.quantize(Decimal(1))
+    return format(dec, "f")
+
+
+def _canonical_tx_field(key: str, value: Any) -> Any:
+    """Encoding-insensitive form of one transaction field (recursive)."""
+    if isinstance(value, dict):
+        if "currency" in value and "value" in value:
+            out: dict[str, Any] = {}
+            for k, v in value.items():
+                if k == "value" and isinstance(v, str):
+                    out[k] = _canonical_decimal(v)
+                elif k == "currency" and isinstance(v, str) and _CURRENCY_HEX_RE.match(v):
+                    out[k] = v.upper()
+                else:
+                    out[k] = _canonical_tx_field(k, v)
+            return out
+        return {k: _canonical_tx_field(k, v) for k, v in value.items()}
+    if isinstance(value, list):
+        return [_canonical_tx_field(key, v) for v in value]
+    if isinstance(value, str):
+        if key in _HEX_BLOB_KEYS and _HEX_RE.match(value):
+            return value.upper()
+        if key in _AMOUNT_KEYS:
+            try:
+                return str(int(value))
+            except ValueError:
+                return value
+        if key == "currency" and _CURRENCY_HEX_RE.match(value):
+            return value.upper()
+    return value
+
+
 def _semantic_match(stored: dict[str, Any], onledger: dict[str, Any]) -> bool:
     """True when the on-ledger transaction is EXACTLY what we asked for.
 
@@ -7633,7 +7721,7 @@ def _semantic_match(stored: dict[str, Any], onledger: dict[str, Any]) -> bool:
     for key, value in stored.items():
         if key in _AUTOFILL_KEYS:
             continue
-        if onledger.get(key) != value:
+        if _canonical_tx_field(key, onledger.get(key)) != _canonical_tx_field(key, value):
             return False
     return _flags_match(stored, onledger)
 
@@ -7814,11 +7902,41 @@ async def handle_sign_result(request):
                 status=409,
             ),
         )
+    # A validated transaction is not necessarily a SUCCESSFUL one. A tec* result
+    # is on-ledger and final but did nothing we asked for, so it must never read
+    # "signed" to the flows polling this row.
+    meta_result = (result.get("meta") or {}).get("TransactionResult")
+    if meta_result != "tesSUCCESS":
+        return await _record_sign_outcome(
+            request_id,
+            "failed",
+            result={"meta_result": meta_result},
+            response=web.json_response(
+                {
+                    "error": "transaction failed on-ledger",
+                    "code": "tx_failed",
+                    "state": "failed",
+                },
+                status=409,
+            ),
+        )
+    # Matched and successful, but posted long after the request lapsed: the row
+    # is abandoned, and whatever flow was waiting on it is gone. Retire it as
+    # expired rather than resurrecting it.
+    if time.time() > row["expires_at"] + _SIGN_RESULT_GRACE_SECONDS:
+        return await _record_sign_outcome(
+            request_id,
+            "expired",
+            response=web.json_response(
+                {"error": "sign request expired", "code": "expired", "state": "expired"},
+                status=410,
+            ),
+        )
     return await _record_sign_outcome(
         request_id,
         "signed",
         txid=tx_hash,
-        result={"meta_result": (result.get("meta") or {}).get("TransactionResult")},
+        result={"meta_result": meta_result},
         response=web.json_response({"state": "signed", "txid": tx_hash}),
     )
 
@@ -7895,8 +8013,10 @@ def _link_custom_meta(session_wallet: str) -> dict[str, str]:
     the account being linked to and states the "both wallets must be yours"
     precondition explicitly.
     """
-    identifier = f"lfg-link-{secrets.token_hex(15)}"
-    assert len(identifier) <= _LINK_IDENTIFIER_MAX
+    # Truncate rather than assert: an over-long identifier would have XUMM
+    # refuse the whole payload, and a shortened random token is still unique
+    # enough for a display-only field.
+    identifier = f"lfg-link-{secrets.token_hex(15)}"[:_LINK_IDENTIFIER_MAX]
     return {
         "instruction": (
             f"Link this wallet to {_short_wallet(session_wallet)} on LFG. "

@@ -11,6 +11,7 @@ import pytest
 from xrpl.wallet import Wallet
 
 import lfg_service.app as app
+from lfg_core import memos
 from lfg_core.signing import store
 
 DEV_OWNER = Wallet.create().classic_address
@@ -424,3 +425,180 @@ def test_sweep_loop_stays_off_with_both_disabled(monkeypatch):
     holder: dict = {}
     _run(app._start_settlement_sweep(holder))
     assert "settlement_sweep_task" not in holder
+
+
+# --- rippled's own encoding is not tampering (#447 review) ------------------
+#
+# The `tx` RPC hands blob fields back UPPER-case hex and canonicalizes IOU
+# `value` strings, while `memos.build_memos_json` writes LOWER-case hex. A raw
+# `!=` between the two flagged EVERY honest Joey transaction `mismatch`, so
+# these fixtures are deliberately NOT copies of the stored dict: they are
+# rebuilt the way a real server returns them.
+
+
+def _rippled_shape(stored, **over):
+    """`stored` as rippled's `tx` RPC would hand it back."""
+    tx = json.loads(json.dumps(stored))
+
+    def _upper(node):
+        if isinstance(node, dict):
+            for key, value in list(node.items()):
+                if key in ("MemoType", "MemoData", "MemoFormat", "URI", "InvoiceID") and isinstance(
+                    value, str
+                ):
+                    node[key] = value.upper()
+                elif key == "currency" and isinstance(value, str) and len(value) == 40:
+                    node[key] = value.upper()
+                else:
+                    _upper(value)
+        elif isinstance(node, list):
+            for item in node:
+                _upper(item)
+
+    _upper(tx)
+    tx.update(
+        {
+            "Fee": "12",
+            "Sequence": 4,
+            "LastLedgerSequence": 99,
+            "Flags": 0x80000000,
+            "SigningPubKey": "ED00",
+            "TxnSignature": "3045FF",
+            "hash": HASH,
+            "ctid": "C005D1EC00000000",
+            "date": int(time.time()) - RIPPLE_EPOCH + 5,
+            "ledger_index": 90,
+            "inLedger": 90,
+            "validated": True,
+        }
+    )
+    tx.update(over)
+    return {
+        "validated": True,
+        "ledger_index": 90,
+        "hash": HASH,
+        "ctid": "C005D1EC00000000",
+        "meta": {"TransactionResult": "tesSUCCESS"},
+        "tx_json": tx,
+    }
+
+
+def _memos():
+    return memos.build_memos_json("user", "webapp", "payment")
+
+
+def test_memos_we_write_are_lower_case_hex():
+    # The premise of the fix: our side is lower-case, rippled's is upper-case.
+    memo = _memos()[0]["Memo"]
+    assert memo["MemoType"] != memo["MemoType"].upper()
+
+
+def test_xrp_payment_survives_rippled_encoding(monkeypatch):
+    payment = {
+        "TransactionType": "Payment",
+        "Account": DEV_OWNER,
+        "Destination": OTHER,
+        "Amount": "1000000",
+        "SourceTag": 2606160021,
+        "Memos": _memos(),
+    }
+    row = _row(txjson=payment)
+    _fake_tx(monkeypatch, result=_rippled_shape(payment, Amount="1000000"))
+    r = _post(row["id"], {"hash": HASH})
+    assert r.status == 200 and _body(r)["state"] == "signed"
+
+
+def test_iou_trustset_survives_value_canonicalization(monkeypatch):
+    trustset = {
+        "TransactionType": "TrustSet",
+        "Account": DEV_OWNER,
+        "LimitAmount": {
+            "currency": "4252495800000000000000000000000000000000",
+            "issuer": OTHER,
+            "value": "5",
+        },
+        "Memos": _memos(),
+    }
+    row = _row(txjson=trustset)
+    onledger = _rippled_shape(trustset)
+    # rippled re-renders the amount: "5" comes back as "5.0", the currency hex
+    # upper-cased by _rippled_shape.
+    onledger["tx_json"]["LimitAmount"]["value"] = "5.0"
+    _fake_tx(monkeypatch, result=onledger)
+    r = _post(row["id"], {"hash": HASH})
+    assert r.status == 200 and _body(r)["state"] == "signed"
+
+
+def test_nftoken_create_offer_with_memos_survives(monkeypatch):
+    offer = {
+        "TransactionType": "NFTokenCreateOffer",
+        "Account": DEV_OWNER,
+        "NFTokenID": "000800001234567890abcdef1234567890abcdef1234567890abcdef12345678",
+        "Amount": "0100",
+        "Flags": 1,
+        "Memos": _memos(),
+    }
+    row = _row(txjson=offer)
+    _fake_tx(monkeypatch, result=_rippled_shape(offer, Flags=0x80000001))
+    r = _post(row["id"], {"hash": HASH})
+    assert r.status == 200 and _body(r)["state"] == "signed"
+
+
+def test_changed_memo_data_is_still_a_mismatch(monkeypatch):
+    payment = {
+        "TransactionType": "Payment",
+        "Account": DEV_OWNER,
+        "Destination": OTHER,
+        "Amount": "1000000",
+        "Memos": _memos(),
+    }
+    row = _row(txjson=payment)
+    onledger = _rippled_shape(payment)
+    onledger["tx_json"]["Memos"][0]["Memo"]["MemoData"] = "DEADBEEF"
+    _fake_tx(monkeypatch, result=onledger)
+    r = _post(row["id"], {"hash": HASH})
+    assert r.status == 409 and _body(r)["code"] == "tx_mismatch"
+    assert store.get(row["id"])["state"] == "mismatch"
+
+
+def test_different_iou_value_is_still_a_mismatch(monkeypatch):
+    row = _row()
+    res = _onledger()
+    res["tx_json"]["LimitAmount"] = {"currency": "USD", "issuer": OTHER, "value": "100.5"}
+    _fake_tx(monkeypatch, result=res)
+    assert _post(row["id"], {"hash": HASH}).status == 409
+
+
+# --- validated but not successful / long abandoned --------------------------
+
+
+def test_tec_result_is_failed_not_signed(monkeypatch):
+    row = _row()
+    res = _onledger()
+    res["meta"] = {"TransactionResult": "tecUNFUNDED_PAYMENT"}
+    _fake_tx(monkeypatch, result=res)
+    r = _post(row["id"], {"hash": HASH})
+    assert r.status == 409
+    assert _body(r) == {
+        "error": "transaction failed on-ledger",
+        "code": "tx_failed",
+        "state": "failed",
+    }
+    got = store.get(row["id"])
+    assert got["state"] == "failed" and got["result"]["meta_result"] == "tecUNFUNDED_PAYMENT"
+    assert got["txid"] is None
+
+
+def test_result_posted_long_after_expiry_is_410(monkeypatch):
+    row = _row(ttl=-(app._SIGN_RESULT_GRACE_SECONDS + 30))
+    _fake_tx(monkeypatch, result=_onledger())
+    r = _post(row["id"], {"hash": HASH})
+    assert r.status == 410 and _body(r)["code"] == "expired"
+    assert store.get(row["id"])["state"] == "expired"
+
+
+def test_result_just_inside_the_grace_still_signs(monkeypatch):
+    row = _row(ttl=-5)
+    _fake_tx(monkeypatch, result=_onledger())
+    r = _post(row["id"], {"hash": HASH})
+    assert r.status == 200 and _body(r)["state"] == "signed"

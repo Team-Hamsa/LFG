@@ -25,8 +25,9 @@ def current_provider() -> str:
 
 
 def current_wallet() -> str | None:
-    """The session wallet a WalletConnect session can sign AS. None outside a
-    web/Telegram request, or for Xaman sessions (where it is not needed)."""
+    """The session wallet a WalletConnect session can sign AS. Set only for
+    `platform == "web"` requests — WalletConnect transaction signing is
+    web-only in v1 — and None for Xaman sessions (where it is not needed)."""
     return _wallet.get()
 
 

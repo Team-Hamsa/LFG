@@ -1454,8 +1454,13 @@ stay lfg_core-import-free). Runtime entrypoints (`main.py`, pm2 processes,
    show the button — `discord-activity` needs URL Mappings configured in the
    Reown/WalletConnect dashboard first, so it's excluded from the default;
    the Reown dashboard's allowed-origins list must also include every surface
-   origin actually enabled. Joey **sign-in** is web-only in v1 (linking + tx
-   signing work on every `WC_SURFACES` entry). Known gaps: the #58
+   origin actually enabled. **Joey sign-in AND Joey transaction signing are
+   web-only in v1**: only the web sign-in mints a `provider="walletconnect"`
+   session token, and `signing_context.current_wallet` is set only for
+   `platform == "web"`, so the cross-wallet rule can never fire anywhere else.
+   `WC_SURFACES` therefore gates just the link panel's Joey arm (a proof
+   signature, not a session) on Telegram; the Discord Activity is unchanged.
+   Known gaps: the #58
    pre-submit `simulate` pre-flight does not run on the Joey path (the client
    submits directly); the Xaman link arm proves consent via a `SignIn` +
    `custom_meta` instruction only, not a signed proof.

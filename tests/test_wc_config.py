@@ -13,7 +13,7 @@ def _run(coro):
         loop.close()
 
 
-def test_default_is_off():
+def test_wc_surfaces_is_a_frozenset():
     assert isinstance(config.WC_SURFACES, frozenset)
 
 

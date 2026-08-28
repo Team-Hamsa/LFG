@@ -436,8 +436,10 @@ function applySignDelivery({ qrEl, linkBtn, toggleBtn, link, qrData, push, autoO
 // WalletConnect session instead of rendering a QR. The 600 KB vendored bundle
 // is behind a dynamic import so a Xaman user never loads it.
 //
-// Scope in v1: Joey SIGN-IN is web-only. Joey SIGNING (and the link panel's
-// Joey arm) work on every surface /api/config armed.
+// Scope in v1: Joey SIGN-IN and Joey SIGNING are both web-only — only a web
+// sign-in mints the provider="walletconnect" session the server dispatches
+// on. WC_SURFACES gates the link panel's Joey arm (a proof, not a session)
+// on the other surfaces it names.
 
 const WC_MODULE = './wc.js?v=1';
 const WC_POLL_MS = 3000;
@@ -459,9 +461,11 @@ function wcConfig() {
 // Both nodes are hidden in the markup, so a failed config fetch (or a cached
 // older index.html) simply leaves today's Xaman-only UI.
 function applyWcVisibility() {
-  // v1 ruling: Joey SIGN-IN is web-only (the wallet IS the login there).
-  // Transaction signing and the link panel's Joey arm stay available on every
-  // surface wcConfig() covers, Telegram included.
+  // v1 ruling: Joey SIGN-IN and Joey TRANSACTION SIGNING are both web-only
+  // (the wallet IS the login there, and only a web sign-in mints the
+  // provider="walletconnect" session the server dispatches on). What
+  // WC_SURFACES still gates elsewhere is the link panel's Joey arm — a proof
+  // signature, not a session.
   const wcBtn = el('register-wc-btn');
   if (wcBtn) wcBtn.hidden = !(insideWeb && wcConfig());
   // Linking is a multi-wallet convenience for the wallet-is-login surfaces;

@@ -65,7 +65,7 @@ directly (app.py, mint/swap/market/bulk/burn2mint flows). Every builder ends in
   already funnels into the client's single `applySignDelivery()` choke point, which
   recognises the scheme and hands the id to `wc.js` instead of rendering a QR.
 - Handle ids are namespaced (`wc-` prefix) so `get_payload_status` routes before its
-  XUMM uuid regex; `watch_payload` and the #260 cancel script skip them.
+  XUMM uuid regex; the #260 cancel script skips them.
 - New env: `REOWN_PROJECT_ID` (feature OFF and button hidden when unset),
   `WC_SURFACES` (default `web,telegram`; see §4).
 
@@ -147,7 +147,7 @@ row wallet must equal session wallet (else 403 `not_your_request`):
 
 **Status.** `get_payload_status("wc-…")` maps the row to the dict/`SignStatus` shape
 flows read today: `signed` (True / False / None-pending), `resolved`, `txid`,
-`signer=wallet`, `user_token=None`, `dispatched=(state=="signed")`. Flows' existing
+`signer=wallet`, `user_token=None`. Flows' existing
 "validated + tesSUCCESS" checks (market fetch-by-hash, mint payment watch) run unchanged.
 
 **Cancel.** `cancel()` sets `state=cancelled`. The #260 open-payload cap script skips
@@ -209,10 +209,14 @@ params}})`.
 410, `proof_replayed` 409, `same_wallet` 400, `tx_not_found` 202/410, `tx_mismatch` 409,
 `not_your_request` 403. `bad_proof` logs which check failed, never signature bytes.
 
-**Surfaces.** Web (build.letseffinggo.com) and Telegram Mini App: on. Discord Activity
-needs URL Mappings for `relay.walletconnect.com` (wss) and `api.web3modal.org`; the
-button stays hidden there (`WC_SURFACES` default `web,telegram`) until the smoke test
-confirms them.
+**Surfaces.** As built, **Joey sign-in AND Joey transaction signing are web-only in
+v1**: only the web sign-in mints a `provider="walletconnect"` session token, and
+`signing_context.current_wallet` is populated only for `platform == "web"`, so the
+cross-wallet dispatch rule cannot fire on any other surface. `WC_SURFACES` (default
+`web,telegram`) therefore gates one thing beyond web: the link panel's Joey arm on the
+Telegram Mini App — a proof signature, not a session. The Discord Activity is
+unchanged; it additionally needs URL Mappings for `relay.walletconnect.com` (wss) and
+`api.web3modal.org` before it could be enabled at all.
 
 ## 5. Testing
 

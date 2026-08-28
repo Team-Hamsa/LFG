@@ -5,6 +5,7 @@
 from __future__ import annotations
 
 import logging
+import time
 from typing import Any
 
 from lfg_core.signing import store
@@ -66,7 +67,11 @@ class WalletConnectProvider(BaseSigningProvider):
         row = store.get(request_id)
         if row is None:
             return None
-        if row["state"] == "pending" and store.expire_stale():
+        # Lapse THIS row only — a table-wide expire_stale() here would make an
+        # innocent status poll retire every other session's pending request.
+        # The periodic sweep keeps the table-wide job.
+        if row["state"] == "pending" and row["expires_at"] < time.time():
+            store.set_state(request_id, "expired")
             row = store.get(request_id) or row
         state = row["state"]
         return {
