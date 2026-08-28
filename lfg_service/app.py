@@ -19,6 +19,7 @@ import mimetypes
 import os
 import pathlib
 import re
+import secrets
 import sqlite3
 import sys
 import tempfile
@@ -81,6 +82,7 @@ from lfg_core import (
 )
 from lfg_core.db_helpers import get_nft_data, record_nft_mint
 from lfg_core.signing import context as signing_context
+from lfg_core.signing import proof as signing_proof
 from lfg_core.signing import store as sign_request_store
 from lfg_core.user_db import create_users_table, get_user, register_user
 from lfg_service import identity as identity_store
@@ -7303,12 +7305,64 @@ def _prune_web_signin_payloads():
             del _web_signin_hits[ip]
 
 
+# The proof Memos are account-independent, so they can be built against any
+# address; the client fills in its own Account. ACCOUNT_ZERO is used as an
+# unmistakably-not-a-user placeholder.
+_MEMO_TEMPLATE_ACCOUNT = "rrrrrrrrrrrrrrrrrrrrrhoLvTp"
+# A proof carries a handful of small fields plus our memos. Anything larger is
+# not a proof — refuse it before spending CPU on signature verification.
+WC_PROOF_MAX_BYTES = 8192
+
+
+async def _json_body(request) -> dict[str, Any]:
+    try:
+        body = await request.json()
+    except Exception:
+        return {}
+    return body if isinstance(body, dict) else {}
+
+
 async def handle_web_signin_start(request):
-    """Create a XUMM SignIn payload for the standalone web surface — no session
-    required (this IS how a web session begins)."""
+    """Begin a web sign-in.
+
+    Default (`provider` absent/`"xaman"`): create a XUMM SignIn payload — no
+    session required, this IS how a web session begins. With
+    `provider="walletconnect"` (#447) there is no XUMM payload at all: we issue
+    a durable server-side nonce the wallet signs into a never-submitted proof
+    transaction, redeemed at POST /api/web/signin/proof.
+    """
+    body = await _json_body(request)
+    provider = str(body.get("provider") or "xaman")
     if _web_rate_limited(_client_ip(request)):
         return web.json_response(
             {"error": "too many sign-in attempts", "code": "rate_limited"}, status=429
+        )
+    if provider == "walletconnect":
+        if not config.wc_enabled():
+            return web.json_response(
+                {"error": "walletconnect is not configured", "code": "wc_disabled"}, status=503
+            )
+        nonce = secrets.token_hex(32)
+        row = await asyncio.to_thread(
+            sign_request_store.create,
+            wallet="",  # unknown until the proof names it
+            purpose="signin",
+            txjson=None,
+            nonce=nonce,
+            ttl_seconds=signing_proof.SIGNIN_TTL,
+            ip=_client_ip(request),
+        )
+        return web.json_response(
+            {
+                "sign_id": row["id"],
+                "nonce": nonce,
+                "source_tag": config.SOURCE_TAG,
+                "memos": signing_proof.build_proof_tx(
+                    _MEMO_TEMPLATE_ACCOUNT, nonce, memos.ACTION_SIGNIN
+                )["Memos"],
+                "expires_at": row["expires_at"],
+                "provider": "walletconnect",
+            }
         )
     _prune_web_signin_payloads()
     # Only an allowlisted Origin becomes the Xaman post-sign bounce target —
@@ -7322,6 +7376,31 @@ async def handle_web_signin_start(request):
     return web.json_response({"uuid": payload["uuid"], "signin_link": payload["xumm_url"]})
 
 
+async def _finish_web_signin(wallet: str, provider: str) -> web.Response:
+    """Link the proven wallet as a platform="web" identity and issue its token.
+
+    Shared by both web sign-in arms: the XUMM SignIn poll and the
+    WalletConnect signed-proof redemption (#447).
+    """
+    # A wallet already known from another surface keeps its display handle;
+    # a brand-new one gets a readable shortened address.
+    handle = await asyncio.to_thread(identity_store.handle_for_wallet, wallet)
+    name = handle or f"{wallet[:6]}…{wallet[-4:]}"
+    if not await asyncio.to_thread(identity_store.link, "web", wallet, name, wallet):
+        return web.json_response({"error": "identity link failed"}, status=500)
+    token = make_session_token(
+        {"id": wallet, "name": name, "platform": "web", "provider": provider}
+    )
+    return web.json_response(
+        {
+            "state": "signed",
+            "wallet": wallet,
+            "session_token": token,
+            "user": {"id": wallet, "username": name},
+        }
+    )
+
+
 async def handle_web_signin_status(request):
     uuid = request.match_info["payload_uuid"]
     if uuid not in web_signin_payloads:
@@ -7331,31 +7410,56 @@ async def handle_web_signin_status(request):
         return web.json_response({"error": "could not reach Xaman"}, status=502)
     if s["signed"] and s["account"] and is_valid_classic_address(s["account"]):
         wallet = s["account"]
-        # A wallet already known from another surface keeps its display handle;
-        # a brand-new one gets a readable shortened address.
-        handle = await asyncio.to_thread(identity_store.handle_for_wallet, wallet)
-        name = handle or f"{wallet[:6]}…{wallet[-4:]}"
-        if not await asyncio.to_thread(identity_store.link, "web", wallet, name, wallet):
-            return web.json_response({"error": "identity link failed"}, status=500)
         # #135: capture the push token so later sign requests push to Xaman.
+        # Only XUMM issues one, so this stays on the Xaman path.
         if s.get("user_token"):
             await asyncio.to_thread(
                 identity_store.set_user_token, "web", wallet, s["user_token"], signer_wallet=wallet
             )
-        del web_signin_payloads[uuid]
-        token = make_session_token({"id": wallet, "name": name, "platform": "web"})
-        return web.json_response(
-            {
-                "state": "signed",
-                "wallet": wallet,
-                "session_token": token,
-                "user": {"id": wallet, "username": name},
-            }
-        )
+        resp = await _finish_web_signin(wallet, "xaman")
+        if resp.status == 200:
+            del web_signin_payloads[uuid]
+        return resp
     if s["expired"]:
         del web_signin_payloads[uuid]
         return web.json_response({"state": "expired"})
     return web.json_response({"state": "opened" if s["opened"] else "pending"})
+
+
+async def handle_web_signin_proof(request):
+    """Redeem a signed wallet-ownership proof for a web session (#447).
+
+    No auth: the bearer secret is the single-use `sign_id`, and the proof is
+    only accepted if it carries THAT row's server-issued nonce and verifies
+    against the signing key it names. The row is compare-and-set to `consumed`
+    before the session is issued, so a replay loses the race and gets a 409.
+    """
+    body = await _json_body(request)
+    sign_id = str(body.get("sign_id") or "")
+    tx_json = body.get("tx_json")
+    row = await asyncio.to_thread(sign_request_store.get, sign_id)
+    if row is None or row.get("purpose") != "signin":
+        return web.json_response({"error": "not found"}, status=404)
+    if row["state"] == "expired" or row["expires_at"] < time.time():
+        await asyncio.to_thread(sign_request_store.set_state, sign_id, "expired")
+        return web.json_response({"error": "sign-in expired", "code": "proof_expired"}, status=410)
+    if row["state"] != "pending":
+        return web.json_response({"error": "already used", "code": "proof_replayed"}, status=409)
+    # Proof Memos are otherwise unbounded — cap the body before verifying.
+    if not isinstance(tx_json, dict) or len(json.dumps(tx_json)) > WC_PROOF_MAX_BYTES:
+        return web.json_response({"error": "bad proof", "code": "bad_proof"}, status=400)
+    try:
+        wallet = signing_proof.verify_proof(
+            tx_json, wallet_hint=None, nonce=row["nonce"], action=memos.ACTION_SIGNIN
+        )
+    except signing_proof.ProofError as e:
+        logging.warning(f"bad signin proof {sign_id}: {e.reason}")
+        return web.json_response({"error": "bad proof", "code": "bad_proof"}, status=400)
+    if not await asyncio.to_thread(
+        sign_request_store.set_state, sign_id, "consumed", result={"wallet": wallet}
+    ):
+        return web.json_response({"error": "already used", "code": "proof_replayed"}, status=409)
+    return await _finish_web_signin(wallet, "walletconnect")
 
 
 async def handle_config(request):
@@ -8443,6 +8547,7 @@ def create_app() -> web.Application:
     app.router.add_get("/api/signin/{payload_uuid}", handle_signin_status)
     # Standalone web surface (spec 2026-07-16): client-callable wallet signin.
     app.router.add_post("/api/web/signin", handle_web_signin_start)
+    app.router.add_post("/api/web/signin/proof", handle_web_signin_proof)
     app.router.add_get("/api/web/signin/{payload_uuid}", handle_web_signin_status)
     app.router.add_get("/api/nfts", handle_nfts)
     app.router.add_get("/api/leaderboard", handle_leaderboard)
