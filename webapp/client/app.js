@@ -539,12 +539,15 @@ async function postSignResult(id, body, expiresAt) {
     try {
       r = await api(path, { method: 'POST', body: JSON.stringify(body) });
     } catch (e) {
-      const code = (e.body || {}).code;
-      if (code === 'tx_mismatch') {
+      const body = e.body || {};
+      if (body.code === 'tx_mismatch') {
         showError('Joey signed a different transaction — aborted.');
-        return null;
       }
-      if (code === 'ledger_unavailable' && Date.now() / 1000 < expiresAt) {
+      // A terminal refusal (409 already_resolved / 409 tx_mismatch / 410
+      // expired) IS an answer — return it so the caller retires the id
+      // instead of re-posting the outcome forever.
+      if (signDeliveryPure.wcOutcomeTerminal(body)) return body;
+      if (body.code === 'ledger_unavailable' && Date.now() / 1000 < expiresAt) {
         await wcSleep(WC_POLL_MS);
         continue;
       }
@@ -563,20 +566,33 @@ async function postSignResult(id, body, expiresAt) {
 // Drive one `lfg-wc://` sign request to a recorded outcome.
 //
 // applySignDelivery is called from every flow poller's re-render, so wcSign
-// runs on EVERY tick for a live request. Three module Sets keep that from
-// turning into a loop:
-//   wcInFlight — a run is already under way for this id;
-//   wcDone     — the request is resolved (server said non-pending, or we
-//                posted a result), so stop even issuing the GET;
-//   wcFailed   — a run failed WITHOUT recording an outcome (modal dismissed,
-//                relay unreachable, lost pairing). The row is still pending
-//                server-side, so without this the next tick would re-open the
-//                modal and re-toast, forever. Cleared only by wcRetry().
+// runs on EVERY tick for a live request. Three module Sets and one Map keep
+// that from turning into a loop — or into a wedge:
+//   wcInFlight       — a run is already under way for this id;
+//   wcDone           — the request is RESOLVED SERVER-SIDE (the GET said
+//                      non-pending, or a result POST came back terminal), so
+//                      stop even issuing the GET;
+//   wcFailed         — a run failed without recording an outcome (modal
+//                      dismissed, relay unreachable, lost pairing). The row is
+//                      still pending, so without this the next tick would
+//                      re-open the modal and re-toast, forever;
+//   wcPendingResults — id -> {outcome, expiresAt} for a signature/rejection we
+//                      HAVE but could not report yet (the POST failed in
+//                      transit, or gave up on a non-terminal 202/503). The row
+//                      is still pending, so the id must NOT be retired — but
+//                      the transaction may already be on-ledger, so the next
+//                      tick must RE-POST the stored outcome, never re-sign.
 const wcInFlight = new Set();
 const wcDone = new Set();
 const wcFailed = new Set();
+const wcPendingResults = new Map();
+// How long past a request's own expiry to keep re-posting an unreported
+// outcome before handing the user the retry affordance.
+const WC_REPORT_GRACE_SECONDS = 60;
 
-// Retry a WalletConnect sign request the user was told had failed.
+// Retry a request the user was told had failed. When an outcome is already
+// stored, wcSign re-posts THAT — a retry must never produce a second
+// signature for a transaction that may already have been submitted.
 function wcRetry(id) {
   wcFailed.delete(id);
   wcSign(id);
@@ -587,12 +603,34 @@ function wcSignFailed(id, msg) {
   showError(`${msg} — press “Retry Joey” to try again.`);
 }
 
+// Report an outcome we hold, and retire the id ONLY on a terminal answer.
+async function wcReportOutcome(id, outcome, expiresAt) {
+  wcPendingResults.set(id, { outcome, expiresAt });
+  const answer = await postSignResult(id, outcome, expiresAt);
+  if (signDeliveryPure.wcOutcomeTerminal(answer)) {
+    wcPendingResults.delete(id);
+    wcDone.add(id);
+    return;
+  }
+  // Still unreported. The outcome stays for the next tick to re-post; past the
+  // grace window the automatic retries stop and the user drives — the entry is
+  // deliberately KEPT so "Retry Joey" re-posts instead of re-signing.
+  if (Date.now() / 1000 > expiresAt + WC_REPORT_GRACE_SECONDS) {
+    wcSignFailed(id, 'Could not report the result to LFG');
+  }
+}
+
 async function wcSign(id) {
   if (!id || wcInFlight.has(id) || wcDone.has(id) || wcFailed.has(id)) return;
-  const wc = wcConfig();
-  if (!wc) { wcSignFailed(id, 'Joey Wallet is not available here'); return; }
   wcInFlight.add(id);
   try {
+    // An outcome we already hold outranks everything: re-post it, never sign
+    // again (the transaction may already be on-ledger).
+    const held = wcPendingResults.get(id);
+    if (held) { await wcReportOutcome(id, held.outcome, held.expiresAt); return; }
+
+    const wc = wcConfig();
+    if (!wc) { wcSignFailed(id, 'Joey Wallet is not available here'); return; }
     const r = await api(`/api/sign/${encodeURIComponent(id)}`);
     if (r.state !== 'pending') { wcDone.add(id); return; } // signed/rejected/expired
     const mod = await loadWc();
@@ -601,24 +639,22 @@ async function wcSign(id) {
       // ask for a fresh one before there is anything to sign.
       await mod.connect({ projectId: wc.project_id, chain: wc.chain, metadata: wcMetadata() });
     }
-    toast('📲 Approve in Joey Wallet…');
-    let resp;
+    toast('\u{1F4F2} Approve in Joey Wallet…');
+    let outcome;
     try {
-      resp = await mod.signTx({ chain: wc.chain, txJson: r.txjson, autofill: true, submit: true });
+      const resp = await mod.signTx({
+        chain: wc.chain, txJson: r.txjson, autofill: true, submit: true,
+      });
+      outcome = signDeliveryPure.wcResultAction(resp);
     } catch (e) {
-      const outcome = signDeliveryPure.isWcRejection(e)
+      outcome = signDeliveryPure.isWcRejection(e)
         ? { rejected: true }
         : { error: String((e && e.message) || e) };
-      // An outcome was recorded either way, so the row is no longer pending.
-      wcDone.add(id);
-      await postSignResult(id, outcome, r.expires_at);
-      return;
     }
-    wcDone.add(id);
-    await postSignResult(id, signDeliveryPure.wcResultAction(resp), r.expires_at);
+    await wcReportOutcome(id, outcome, r.expires_at);
   } catch (e) {
-    // Nothing was posted: the row is still pending and the poller will call
-    // back on its next tick, so park it until the user asks for a retry.
+    // Nothing was signed and nothing posted: the row is still pending and the
+    // poller will call back next tick, so park it until the user retries.
     wcSignFailed(id, e.message || String(e));
   } finally {
     wcInFlight.delete(id);

@@ -84,3 +84,25 @@ export function isWcRejection(err) {
   if (code === 5000 || code === 4001) return true;
   return typeof err.message === 'string' && /reject/i.test(err.message);
 }
+
+// Is the server's answer to POST /api/sign/{id}/result the LAST word on this
+// request? Only a terminal answer may retire the id client-side.
+//
+// A non-terminal answer — 202 (not on-ledger yet), 503 (ledger unreachable),
+// or no body at all (the POST never landed) — means the row is STILL pending
+// server-side. The client must then re-post the same stored outcome on a later
+// tick; it must never re-sign, because the transaction may already have been
+// submitted and a second signature would double-submit it.
+const WC_TERMINAL_STATES = ['signed', 'rejected', 'failed', 'mismatch', 'expired',
+                            'already_resolved'];
+// Terminal refusals carry a code and no state: 409 already_resolved, 409
+// tx_mismatch, 410 tx_not_found (expired without ever validating).
+const WC_TERMINAL_CODES = ['already_resolved', 'tx_mismatch', 'tx_not_found'];
+
+export function wcOutcomeTerminal(body) {
+  if (!body) return false;
+  // `state` is the authority where present: a 202 carries state 'pending'
+  // alongside the tx_not_found code, and retiring it would wedge the request.
+  if (body.state) return WC_TERMINAL_STATES.includes(body.state);
+  return WC_TERMINAL_CODES.includes(body.code);
+}

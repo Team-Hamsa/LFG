@@ -180,3 +180,45 @@ def test_is_wc_rejection_matches_the_rejection_codes_and_message():
     assert run_js("M.isWcRejection({message: 'User Rejected Request'})") is True
     assert run_js("M.isWcRejection({code: -32000, message: 'relay timeout'})") is False
     assert run_js("M.isWcRejection(null)") is False
+
+
+# ---------------------------------------------------------------------------
+# wcOutcomeTerminal(body) — is the server's answer to POST /api/sign/{id}/result
+# the LAST word on this request? Only a terminal answer may retire the id: a
+# non-terminal one (202 not-yet-on-ledger, 503 ledger unreachable, a POST that
+# never landed) leaves the row pending server-side, and the client must re-post
+# the SAME stored outcome later — never re-sign, since the transaction may
+# already be on-ledger.
+# ---------------------------------------------------------------------------
+
+
+def test_wc_outcome_terminal_accepts_resolved_states():
+    for state in ("signed", "rejected", "failed", "mismatch", "expired", "already_resolved"):
+        assert run_js(f"M.wcOutcomeTerminal({{state: '{state}'}})") is True
+
+
+def test_wc_outcome_terminal_rejects_pending_and_missing_answers():
+    # 202: the transaction is not visible on-ledger yet.
+    assert run_js("M.wcOutcomeTerminal({state: 'pending', code: 'tx_not_found'})") is False
+    # The POST never produced a body at all (transport failure / gave up).
+    assert run_js("M.wcOutcomeTerminal(null)") is False
+    assert run_js("M.wcOutcomeTerminal(undefined)") is False
+    assert run_js("M.wcOutcomeTerminal({})") is False
+
+
+def test_wc_outcome_terminal_accepts_stateless_terminal_codes():
+    # 409 already_resolved / 409 tx_mismatch / 410 tx_not_found carry no state.
+    assert run_js("M.wcOutcomeTerminal({code: 'already_resolved'})") is True
+    assert run_js("M.wcOutcomeTerminal({code: 'tx_mismatch'})") is True
+    assert run_js("M.wcOutcomeTerminal({code: 'tx_not_found'})") is True
+
+
+def test_wc_outcome_terminal_rejects_retryable_codes():
+    # 503: not evidence about the transaction — keep the outcome and re-post.
+    assert run_js("M.wcOutcomeTerminal({code: 'ledger_unavailable'})") is False
+
+
+def test_wc_outcome_terminal_prefers_state_over_code():
+    # A 202 carries BOTH a pending state and the tx_not_found code; the state
+    # is the authority, or the client would retire a still-pending row.
+    assert run_js("M.wcOutcomeTerminal({state: 'pending', code: 'tx_not_found'})") is False
