@@ -35,26 +35,37 @@ directly (app.py, mint/swap/market/bulk/burn2mint flows). Every builder ends in
 `xumm_ops.get_payload_status(uuid)`; every flow already threads a per-session
 `push_user_token` into each builder. The design piggybacks on that plumbing:
 
-- Each session dataclass (`MintSession`, `SwapSession`, market
-  `List/Buy/Cancel/Bid/BidAccept/TraitSell` sessions, `BulkMintJob`, burn2mint) gains
-  `provider: str = "xaman"` (additive; persisted records load unchanged). It is threaded
-  through the same builder kwargs `push_user_token` uses, sourced from the session token.
-- `_create_xumm_payload` and `get_payload_status` dispatch via `get_provider(name)`:
-  - `xaman` → today's code, wrapped by `XamanProvider`; zero behavior change.
-  - `walletconnect` → `WalletConnectProvider` (`lfg_core/signing/walletconnect.py`).
+- **Provider selection is ambient, not threaded (amended 2026-08-28).** Threading a
+  `provider` kwarg through every session dataclass and ~60 builder/poll call sites in
+  `app.py` was the original plan; the amended design keeps those sites byte-identical.
+  The session token (`make_session_token`) gains a `provider` field
+  (`"xaman"` default, `"walletconnect"` set at WC sign-in). `require_auth` sets two
+  `contextvars` (`lfg_core/signing/context.py`: `current_provider`, `current_wallet`)
+  from the verified token for the duration of the request; `asyncio.create_task`
+  copies the context, so the background flow tasks a handler launches inherit them.
+  Startup-resumed jobs and the settlement sweeps run with the defaults (`xaman`,
+  `None`) — their only user-signed payloads are re-offers, which a Joey user can still
+  sign via Xaman; acceptable for v1.
+- `_create_xumm_payload` and `get_payload_status`/`cancel_xumm_payload` dispatch:
+  - `current_provider() == "walletconnect"` **and** `txjson["Account"] ==
+    current_wallet()` (see §3 cross-wallet rule) **and** `TransactionType != "SignIn"`
+    → `WalletConnectProvider` (`lfg_core/signing/walletconnect.py`), via the
+    `BaseSigningProvider.create` template so stamping/validation is enforced there too.
+  - otherwise → today's XUMM code path, unchanged.
 - `WalletConnectProvider._create()` stores the stamped txjson in a new `sign_requests`
   table (app DB, `lfg_core/signing/store.py`):
-  `id TEXT PK ("wc-<uuid4>"), wallet, purpose ("tx"|"signin"|"link"), txjson JSON,
+  `id TEXT PK ("wc-<uuid4 hex>"), wallet, purpose ("tx"|"signin"|"link"), txjson JSON,
   nonce, state ("pending"|"signed"|"rejected"|"failed"|"mismatch"|"expired"|
   "cancelled"|"consumed"), txid, result_json, ip, created_at, expires_at`.
-  It returns the handle dict flows already expect:
-  `{uuid:"wc-…", sign_mode:"walletconnect", txjson, xumm_url:None, qr_url:None,
-  pushed:False, push:None}`.
-- Handle ids are namespaced (`wc-` prefix) so `get_payload_status` routes without a
-  lookup table.
-- The session token (`_issue_session_token` / `_session_from_request`) gains a
-  `provider` field, set at sign-in; handlers pass it into session constructors exactly
-  where they pass `push_user_token`.
+  It returns the handle dict every flow already reads:
+  `{uuid:"wc-…", xumm_url:"lfg-wc://wc-…", qr_url:None, pushed:False, push:None,
+  sign_mode:"walletconnect"}`. The `lfg-wc://<id>` pseudo-link is the trick that keeps
+  the 10 server emit sites and the client's per-flow wire names (`link`,
+  `payment_link`, `accept_deeplink`, `xumm_url`, …) untouched: every one of them
+  already funnels into the client's single `applySignDelivery()` choke point, which
+  recognises the scheme and hands the id to `wc.js` instead of rendering a QR.
+- Handle ids are namespaced (`wc-` prefix) so `get_payload_status` routes before its
+  XUMM uuid regex; `watch_payload` and the #260 cancel script skip them.
 - New env: `REOWN_PROJECT_ID` (feature OFF and button hidden when unset),
   `WC_SURFACES` (default `web,telegram`; see §4).
 
@@ -112,8 +123,9 @@ A Xaman session links a second wallet by reusing the existing XUMM SignIn payloa
 `walletconnect` the stamped txjson (SourceTag + memos from `stamp_and_validate`,
 `Account` pinned to the session wallet per the #314 signer-pinning rule) is stored as a
 `wc-` row, `purpose:"tx"`, `expires_at = now + 900 s` (same lifetime as XUMM payloads).
-Every session poll endpoint already returns the handle dict, so the client receives
-`txjson` to sign.
+The client learns the request from the `lfg-wc://<id>` link every poll already
+returns, then `GET /api/sign/{id}` (authed, own rows only) fetches `{id, state, txjson,
+expires_at}` to sign.
 
 **Sign + submit (client).** `xrpl_signTransaction {tx_json, options:{autofill:true,
 submit:true}}` — Joey autofills `Fee`/`Sequence`/`LastLedgerSequence`, signs, submits.
@@ -208,8 +220,9 @@ confirms them.
   and `sign()`; assert accept; mutate each field (wrong nonce, `Fee≠0`, extra
   `Destination`, pubkey≠account, tampered signature, reuse, expired) → each rejects with
   the right code.
-- `tests/test_wc_provider.py`: chokepoint dispatch — builders with
-  `provider="walletconnect"` return `wc-` handles; `get_payload_status` state mapping;
+- `tests/test_wc_provider.py`: chokepoint dispatch — builders called under
+  `current_provider="walletconnect"` + matching `current_wallet` return `wc-` handles
+  (and Xaman handles for a foreign `Account` or a `SignIn`); `get_payload_status` state mapping;
   `/result` with mocked `get_tx` (match, mismatch, unvalidated, wrong `Account`,
   foreign session).
 - `tests/test_identity_proof_links.py`: `wallet_proof_links` edge merges buckets;
