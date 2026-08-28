@@ -602,3 +602,21 @@ def test_result_just_inside_the_grace_still_signs(monkeypatch):
     _fake_tx(monkeypatch, result=_onledger())
     r = _post(row["id"], {"hash": HASH})
     assert r.status == 200 and _body(r)["state"] == "signed"
+
+
+def test_lost_txid_race_still_ends_mismatch(monkeypatch):
+    """txid_in_use is only a pre-check. If it comes back clean because another
+    post claimed the hash a microsecond later, the unique index refuses the
+    write and the loser must still land `mismatch` + 409 — never a second
+    `signed` row on one transaction."""
+    first = _row()
+    _fake_tx(monkeypatch, result=_onledger())
+    assert _post(first["id"], {"hash": HASH}).status == 200
+    second = _row()
+    monkeypatch.setattr(store, "txid_in_use", lambda *a, **kw: False)
+    r = _post(second["id"], {"hash": HASH})
+    assert r.status == 409 and _body(r)["code"] == "tx_mismatch"
+    assert store.get(second["id"])["state"] == "mismatch"
+    assert store.get(second["id"])["txid"] is None
+    assert store.get(first["id"])["state"] == "signed"
+    assert store.get(first["id"])["txid"] == HASH

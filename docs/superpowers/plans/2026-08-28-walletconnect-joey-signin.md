@@ -940,7 +940,7 @@ def test_config_reports_block_when_enabled(monkeypatch):
 
 - [ ] **Step 2: Run** → AttributeError.
 - [ ] **Step 3: Implement** per interfaces; `handle_config` ignores its `request` today (it does — the test passes `None`; if it reads request, use the `_Req` fake from Task 6). Add the two env lines to `CLAUDE.md`'s env block:
-```
+```text
 REOWN_PROJECT_ID=<reown-cloud-project-id>                   # optional (#447); WalletConnect/Joey Wallet sign-in + signing — unset = feature OFF, button hidden
 WC_SURFACES=web,telegram                                    # optional (#447); surfaces that show "Connect with Joey" (discord-activity needs URL Mappings first)
 ```

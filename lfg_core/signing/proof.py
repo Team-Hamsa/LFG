@@ -129,6 +129,18 @@ def verify_proof(tx_json: Any, *, wallet_hint: str | None, nonce: str, action: s
         raise ProofError("action")
     if _nonce_from(tx_json.get("Memos")) != nonce:
         raise ProofError("nonce")
+    # The provenance block must be EXACTLY what build_proof_tx asks for — no
+    # extra memos, no re-pointed initiator/platform. Derived from the canonical
+    # builder so a schema change can't silently loosen this.
+    expected = dict(
+        memos.decode_memos(
+            memos.build_memos_json(memos.INITIATOR_USER, memos.PLATFORM_WEBAPP, action)
+        )
+        or {}
+    )
+    expected[NONCE_MEMO_TYPE] = nonce
+    if decoded != expected:
+        raise ProofError("memos")
 
     account = tx_json.get("Account")
     pub = tx_json.get("SigningPubKey")

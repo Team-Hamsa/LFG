@@ -82,3 +82,23 @@ def test_txid_in_use_ignores_the_excluded_row():
     assert store.txid_in_use("DEAD", exclude_id=a["id"]) is False
     assert store.txid_in_use("DEAD", exclude_id=b["id"]) is True
     assert store.txid_in_use("BEEF") is False
+
+
+def test_a_txid_can_only_be_claimed_once():
+    """The unique index — not the txid_in_use pre-check — is what makes the
+    hash claim atomic: two rows can never both settle on one transaction."""
+    a = store.create(wallet="rA", purpose="tx", txjson={}, nonce=None, ttl_seconds=900)
+    b = store.create(wallet="rA", purpose="tx", txjson={}, nonce=None, ttl_seconds=900)
+    assert store.set_state(a["id"], "signed", txid="H" * 64) is True
+    with pytest.raises(store.TxidClaimed):
+        store.set_state(b["id"], "signed", txid="H" * 64)
+    assert store.get(b["id"])["state"] == "pending"
+
+
+def test_many_rows_may_hold_a_null_txid():
+    rows = [
+        store.create(wallet="rA", purpose="tx", txjson={}, nonce=None, ttl_seconds=900)
+        for _ in range(3)
+    ]
+    for r in rows:
+        assert store.set_state(r["id"], "rejected") is True

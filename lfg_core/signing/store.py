@@ -15,6 +15,10 @@ DATABASE = _DEFAULT_DB
 STATES = ("pending", "signed", "rejected", "failed", "mismatch", "expired", "cancelled", "consumed")
 
 
+class TxidClaimed(Exception):
+    """Another row already owns this transaction hash (unique-index refusal)."""
+
+
 def _conn() -> sqlite3.Connection:
     conn = sqlite3.connect(DATABASE, timeout=30)
     conn.row_factory = sqlite3.Row
@@ -43,6 +47,13 @@ def ensure_table() -> None:
         )
         conn.execute(
             "CREATE INDEX IF NOT EXISTS idx_sign_requests_wallet ON sign_requests(wallet, state)"
+        )
+        # One transaction hash settles exactly one request. txid_in_use() is the
+        # cheap pre-check; this index is what makes the claim actually atomic,
+        # so two concurrent posts of the same validated hash cannot both win.
+        conn.execute(
+            "CREATE UNIQUE INDEX IF NOT EXISTS idx_sign_requests_txid"
+            " ON sign_requests(txid) WHERE txid IS NOT NULL"
         )
         conn.commit()
     finally:
@@ -125,7 +136,14 @@ def set_state(
         if expect is not None:
             sql += " AND state = ?"
             args.append(expect)
-        cur = conn.execute(sql, args)
+        try:
+            cur = conn.execute(sql, args)
+        except sqlite3.IntegrityError as e:
+            # The unique txid index refused the claim: another row got this
+            # hash first. Surface it as such rather than as a generic DB error.
+            if txid is not None and "txid" in str(e):
+                raise TxidClaimed(str(e)) from e
+            raise
         conn.commit()
         return cur.rowcount == 1
     finally:

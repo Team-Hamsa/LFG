@@ -211,3 +211,31 @@ def test_error_message_leaks_no_key_material():
     assert tx["TxnSignature"] not in rendered
     assert tx["SigningPubKey"] not in rendered
     assert rendered == "bad proof: signature"
+
+
+def test_changed_platform_memo_rejects():
+    """The memo set must be EXACTLY the one build_proof_tx asks for: a proof
+    re-pointed at another platform is not the proof we issued."""
+
+    def _repoint(t):
+        want = str_to_hex("platform")
+        for m in t["Memos"]:
+            if m["Memo"]["MemoType"] == want:
+                m["Memo"]["MemoData"] = str_to_hex(memos.PLATFORM_TELEGRAM)
+
+    _, tx = _signed(mutate=_repoint)
+    with pytest.raises(proof.ProofError) as ei:
+        proof.verify_proof(tx, wallet_hint=None, nonce=NONCE, action=memos.ACTION_SIGNIN)
+    assert ei.value.reason == "memos"
+
+
+def test_extra_memo_rejects():
+    def _add(t):
+        t["Memos"].append(
+            {"Memo": {"MemoType": str_to_hex("lfg/extra"), "MemoData": str_to_hex("x")}}
+        )
+
+    _, tx = _signed(mutate=_add)
+    with pytest.raises(proof.ProofError) as ei:
+        proof.verify_proof(tx, wallet_hint=None, nonce=NONCE, action=memos.ACTION_SIGNIN)
+    assert ei.value.reason == "memos"

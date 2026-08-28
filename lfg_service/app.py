@@ -7767,9 +7767,25 @@ async def _record_sign_outcome(
     Losing the CAS means a concurrent post resolved the row first; answer with
     what the row actually says rather than a state we did not write.
     """
-    if await asyncio.to_thread(
-        sign_request_store.set_state, request_id, state, txid=txid, result=result
-    ):
+    try:
+        claimed = await asyncio.to_thread(
+            sign_request_store.set_state, request_id, state, txid=txid, result=result
+        )
+    except sign_request_store.TxidClaimed:
+        # Lost the race for this hash between txid_in_use() and the write —
+        # exactly the case that pre-check exists to catch cheaply. Same
+        # outcome: this row did not earn the transaction.
+        logging.warning(f"sign result {request_id}: hash {txid} already claimed by another request")
+        return await _record_sign_outcome(
+            request_id,
+            "mismatch",
+            result={"hash": txid},
+            response=web.json_response(
+                {"error": "the signed transaction does not match", "code": "tx_mismatch"},
+                status=409,
+            ),
+        )
+    if claimed:
         return response
     row = await asyncio.to_thread(sign_request_store.get, request_id)
     if row is None:
@@ -8079,6 +8095,11 @@ async def handle_wallet_link_start(request):
     # not spend a second slot of the app-wide XUMM open-payload budget (#260).
     for uuid, rec in wallet_link_payloads.items():
         if rec.get("wallet") == session_wallet:
+            # Never re-serve a payload already known signed/expired (same rule
+            # _pending_signin_for applies): a dead QR is not a reusable one.
+            s = xumm_ops.cached_status(uuid)
+            if s and (s.get("signed") or s.get("expired")):
+                continue
             return web.json_response(
                 {
                     "provider": "xaman",

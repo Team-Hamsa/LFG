@@ -463,3 +463,16 @@ def test_xaman_link_payload_carries_consent_instruction(monkeypatch):
     assert "Only approve if BOTH wallets are yours." in meta["instruction"]
     assert meta["identifier"].startswith("lfg-link-")
     assert len(meta["identifier"]) <= app._LINK_IDENTIFIER_MAX
+
+
+def test_a_signed_link_payload_is_not_reused(monkeypatch):
+    """A dead QR is never re-served: once the cached status says signed (or
+    expired), the reuse loop skips the record and mints a fresh payload —
+    the same rule _pending_signin_for applies to sign-in."""
+    monkeypatch.setattr(app.xumm_ops, "create_signin_payload", _fake_create())
+    first = _body(_run(app.handle_wallet_link_start(_Req(body={}))))
+    monkeypatch.setattr(app.xumm_ops, "cached_status", lambda uuid: {"signed": True})
+    monkeypatch.setattr(app.xumm_ops, "create_signin_payload", _fake_create(uuid="u-link-2"))
+    second = _body(_run(app.handle_wallet_link_start(_Req(body={}))))
+    assert second["uuid"] == "u-link-2" != first["uuid"]
+    assert CAPTURED["calls"] == 2  # a second payload really was minted
