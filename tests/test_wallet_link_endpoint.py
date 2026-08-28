@@ -66,6 +66,7 @@ def _hermetic(monkeypatch, tmp_path):
     app.wallet_link_payloads.clear()
     app._web_signin_hits.clear()
     app._web_proof_hits.clear()
+    CAPTURED.clear()
 
 
 def _sign(wallet, nonce, action=memos.ACTION_LINK):
@@ -130,11 +131,9 @@ def test_valid_proof_links_the_new_wallet_into_the_bucket(monkeypatch):
 
 def test_proving_the_session_wallet_itself_is_400(monkeypatch):
     """Linking a wallet to itself proves nothing — refuse rather than no-op."""
-    b = _start_wc(monkeypatch)
-    # Craft a proof whose signer IS the session wallet by pinning DEV_OWNER to
-    # a real keypair for this test.
+    # Pin the session wallet to a real keypair so the proof CAN be signed by it.
     w = Wallet.create()
-    app.mock_economy.DEV_OWNER = w.classic_address
+    monkeypatch.setattr(app.mock_economy, "DEV_OWNER", w.classic_address, raising=False)
     b = _start_wc(monkeypatch)
     r = _run(
         app.handle_wallet_link_proof(
@@ -232,8 +231,13 @@ def test_link_proof_is_rate_limited_per_ip(monkeypatch):
 # --- Xaman arm ---------------------------------------------------------------
 
 
+CAPTURED: dict = {}
+
+
 def _fake_create(uuid="u-link-1"):
-    async def fake(return_url=None):
+    async def fake(return_url=None, custom_meta=None):
+        CAPTURED["custom_meta"] = custom_meta
+        CAPTURED["calls"] = CAPTURED.get("calls", 0) + 1
         return {
             "uuid": uuid,
             "xumm_url": f"https://xumm.app/sign/{uuid}",
@@ -348,3 +352,114 @@ def test_a_link_row_cannot_be_redeemed_as_a_signin(monkeypatch):
     r = _run(app.handle_web_signin_proof(_Req(body={"sign_id": b["sign_id"], "tx_json": tx})))
     assert r.status == 404
     assert store.get(b["sign_id"])["state"] == "pending"
+
+
+# --- review fixes: write failures, rate limiting, payload reuse, consent -----
+
+
+def test_link_write_failure_is_500_and_leaves_the_row_pending(monkeypatch):
+    """A swallowed DB failure must never answer "linked" (the WC arm would
+    also have burned the nonce). The row stays pending so the user can retry."""
+
+    def boom(*a, **kw):
+        raise identity_store.LinkWriteError("disk on fire")
+
+    b = _start_wc(monkeypatch)
+    w = Wallet.create()
+    monkeypatch.setattr(identity_store, "link_proof", boom)
+    r = _run(
+        app.handle_wallet_link_proof(
+            _Req(body={"sign_id": b["sign_id"], "tx_json": _sign(w, b["nonce"])})
+        )
+    )
+    assert r.status == 500
+    assert _body(r)["code"] == "link_failed"
+    assert store.get(b["sign_id"])["state"] == "pending"
+
+
+def test_xaman_link_write_failure_is_500(monkeypatch):
+    def boom(*a, **kw):
+        raise identity_store.LinkWriteError("disk on fire")
+
+    monkeypatch.setattr(app.xumm_ops, "create_signin_payload", _fake_create())
+    _run(app.handle_wallet_link_start(_Req(body={})))
+    monkeypatch.setattr(app.xumm_ops, "get_payload_status", _fake_status())
+    monkeypatch.setattr(identity_store, "link_proof", boom)
+    r = _run(app.handle_wallet_link_status(_Req(match={"payload_uuid": "u-link-1"})))
+    assert r.status == 500
+    assert _body(r)["code"] == "link_failed"
+
+
+def test_relinking_an_existing_edge_still_succeeds(monkeypatch):
+    """link_proof returning False means "already linked" — a success, not an
+    error. Two proofs from the same wallet must both answer 200."""
+    w = Wallet.create()
+    for _ in range(2):
+        b = _start_wc(monkeypatch)
+        r = _run(
+            app.handle_wallet_link_proof(
+                _Req(body={"sign_id": b["sign_id"], "tx_json": _sign(w, b["nonce"])})
+            )
+        )
+        assert r.status == 200
+        assert _body(r)["state"] == "linked"
+
+
+def test_link_start_is_rate_limited_on_the_shared_signin_bucket(monkeypatch):
+    """Both arms mint a sign request; the Xaman one spends XUMM open-payload
+    budget (#260), so start must be limited like web sign-in."""
+    monkeypatch.setattr(app.config, "REOWN_PROJECT_ID", "pid")
+    for _ in range(app.WEB_SIGNIN_RATE_MAX):
+        assert (
+            _run(app.handle_wallet_link_start(_Req(body={"provider": "walletconnect"}))).status
+            == 200
+        )
+    r = _run(app.handle_wallet_link_start(_Req(body={"provider": "walletconnect"})))
+    assert r.status == 429
+    assert _body(r)["code"] == "rate_limited"
+
+
+def test_wc_disabled_link_start_does_not_burn_the_budget(monkeypatch):
+    monkeypatch.setattr(app.config, "REOWN_PROJECT_ID", "")
+    for _ in range(app.WEB_SIGNIN_RATE_MAX + 3):
+        assert (
+            _run(app.handle_wallet_link_start(_Req(body={"provider": "walletconnect"}))).status
+            == 503
+        )
+    assert app._web_signin_hits == {}
+
+
+def test_xaman_link_start_reuses_a_live_payload(monkeypatch):
+    """Re-opening the link panel must not spend a second XUMM payload slot."""
+    monkeypatch.setattr(app.xumm_ops, "create_signin_payload", _fake_create())
+    first = _body(_run(app.handle_wallet_link_start(_Req(body={}))))
+    second = _body(_run(app.handle_wallet_link_start(_Req(body={}))))
+    assert second["uuid"] == first["uuid"]
+    assert second["signin_link"] == first["signin_link"]
+    assert second["qr_url"] == first["qr_url"]
+    assert CAPTURED["calls"] == 1
+
+
+def test_another_sessions_live_payload_is_not_reused(monkeypatch):
+    app.wallet_link_payloads["theirs"] = {
+        "wallet": "rSomeoneElse",
+        "created_at": time.time(),
+        "signin_link": "https://xumm.app/sign/theirs",
+    }
+    monkeypatch.setattr(app.xumm_ops, "create_signin_payload", _fake_create())
+    b = _body(_run(app.handle_wallet_link_start(_Req(body={}))))
+    assert b["uuid"] == "u-link-1"
+    assert CAPTURED["calls"] == 1
+
+
+def test_xaman_link_payload_carries_consent_instruction(monkeypatch):
+    """A bare SignIn shows the signer nothing about what approving means; the
+    custom_meta instruction is the only place we can say it (#447)."""
+    monkeypatch.setattr(app.xumm_ops, "create_signin_payload", _fake_create())
+    _run(app.handle_wallet_link_start(_Req(body={})))
+    meta = CAPTURED["custom_meta"]
+    assert DEV_OWNER[:6] in meta["instruction"]
+    assert DEV_OWNER[-4:] in meta["instruction"]
+    assert "Only approve if BOTH wallets are yours." in meta["instruction"]
+    assert meta["identifier"].startswith("lfg-link-")
+    assert len(meta["identifier"]) <= app._LINK_IDENTIFIER_MAX

@@ -7448,7 +7448,7 @@ async def _redeem_proof(
     action: str,
     wallet_hint: str | None = None,
     expect_wallet: str | None = None,
-    on_verified: Callable[[str], web.Response | None] | None = None,
+    on_verified: Callable[[str], Awaitable[web.Response | None]] | None = None,
 ) -> tuple[str, None] | tuple[None, web.Response]:
     """Load → validate → verify → consume one signed-proof row (#447).
 
@@ -7461,8 +7461,12 @@ async def _redeem_proof(
     `expect_wallet` scopes a row to the session that created it (a mismatch is
     a 404, not a 403 — an authed caller learns nothing about other sessions'
     ids). `on_verified` runs AFTER the signature verifies but BEFORE the row is
-    consumed, so a semantic refusal (e.g. proving the wallet you already are)
-    leaves the nonce usable for the correct wallet.
+    consumed. Two reasons that ordering matters: a semantic refusal (e.g.
+    proving the wallet you already are) leaves the nonce usable for the correct
+    wallet, and a durable side effect performed there is committed BEFORE the
+    row is spent — so a side effect that fails leaves the row pending and
+    retryable, and if the consume then loses the CAS race the side effect is
+    already durable (it must therefore be idempotent).
 
     Returns `(wallet, None)` on success, `(None, response)` otherwise.
     """
@@ -7502,7 +7506,7 @@ async def _redeem_proof(
         logging.warning(f"bad {purpose} proof {sign_id}: {e.reason}")
         return None, web.json_response({"error": "bad proof", "code": "bad_proof"}, status=400)
     if on_verified is not None:
-        refusal = on_verified(wallet)
+        refusal = await on_verified(wallet)
         if refusal is not None:
             return None, refusal
     if not await asyncio.to_thread(
@@ -7555,9 +7559,15 @@ def _prune_wallet_link_payloads():
             del wallet_link_payloads[uuid]
 
 
-async def _finish_wallet_link(session_wallet: str, other: str, proof_kind: str) -> web.Response:
-    """Record the proved edge and answer with the caller's new wallet set."""
+async def _write_proof_link(session_wallet: str, other: str, proof_kind: str) -> None:
+    """Durably record the proved edge. Raises identity.LinkWriteError on a DB
+    failure — never answer "linked" for an edge that was not written.
+    Idempotent: re-recording an existing edge is a no-op success."""
     await asyncio.to_thread(identity_store.link_proof, session_wallet, other, proof_kind)
+
+
+async def _linked_response(session_wallet: str, other: str) -> web.Response:
+    """The success body, built AFTER the edge is durably written."""
     try:
         wallets = await _linked_wallets_for(session_wallet)
     except identity_store.BucketLookupError:
@@ -7572,6 +7582,40 @@ def _same_wallet_response() -> web.Response:
     )
 
 
+def _link_failed_response() -> web.Response:
+    return web.json_response({"error": "link failed", "code": "link_failed"}, status=500)
+
+
+def _short_wallet(wallet: str) -> str:
+    """Human-readable abbreviation of a classic address for display copy."""
+    return f"{wallet[:6]}…{wallet[-4:]}" if len(wallet) > 10 else wallet
+
+
+# XUMM caps custom_meta.identifier; keep ours comfortably short. "lfg-link-"
+# (9) + 30 hex chars = 39, under the 40-char limit.
+_LINK_IDENTIFIER_MAX = 40
+
+
+def _link_custom_meta(session_wallet: str) -> dict[str, str]:
+    """Purpose text shown in Xaman above the SignIn prompt (#447).
+
+    A bare SignIn tells the signer nothing about what they are consenting to —
+    which matters here, because approving it links that wallet to ANOTHER
+    account. `instruction` is the only channel we have to say so, so it names
+    the account being linked to and states the "both wallets must be yours"
+    precondition explicitly.
+    """
+    identifier = f"lfg-link-{secrets.token_hex(15)}"
+    assert len(identifier) <= _LINK_IDENTIFIER_MAX
+    return {
+        "instruction": (
+            f"Link this wallet to {_short_wallet(session_wallet)} on LFG. "
+            "Only approve if BOTH wallets are yours."
+        ),
+        "identifier": identifier,
+    }
+
+
 @require_wallet
 async def handle_wallet_link_start(request):
     """Begin proving a second wallet.
@@ -7584,11 +7628,19 @@ async def handle_wallet_link_start(request):
     body = await _json_body(request)
     provider = str(body.get("provider") or "xaman")
     session_wallet = request["wallet"]
+    # The feature gate precedes the limiter: a 503 for an unconfigured provider
+    # must not burn the caller's budget (same rule as handle_web_signin_start).
+    if provider == "walletconnect" and not config.wc_enabled():
+        return web.json_response(
+            {"error": "walletconnect is not configured", "code": "wc_disabled"}, status=503
+        )
+    # Shared bucket with web sign-in: both arms mint a sign request, and the
+    # Xaman arm spends from the app-wide XUMM open-payload budget (#260).
+    if _web_rate_limited(_client_ip(request)):
+        return web.json_response(
+            {"error": "too many link attempts", "code": "rate_limited"}, status=429
+        )
     if provider == "walletconnect":
-        if not config.wc_enabled():
-            return web.json_response(
-                {"error": "walletconnect is not configured", "code": "wc_disabled"}, status=503
-            )
         nonce = secrets.token_hex(32)
         row = await asyncio.to_thread(
             sign_request_store.create,
@@ -7612,12 +7664,29 @@ async def handle_wallet_link_start(request):
             }
         )
     _prune_wallet_link_payloads()
-    payload = await xumm_ops.create_signin_payload()
+    # Reuse a still-live payload for this session rather than minting another
+    # (mirrors _start_brix_trustline): a user re-opening the link panel must
+    # not spend a second slot of the app-wide XUMM open-payload budget (#260).
+    for uuid, rec in wallet_link_payloads.items():
+        if rec.get("wallet") == session_wallet:
+            return web.json_response(
+                {
+                    "provider": "xaman",
+                    "uuid": uuid,
+                    "signin_link": rec["signin_link"],
+                    "qr_url": rec.get("qr_url"),
+                }
+            )
+    payload = await xumm_ops.create_signin_payload(
+        custom_meta=_link_custom_meta(session_wallet),
+    )
     if not payload:
         return _xumm_unavailable_response()
     wallet_link_payloads[payload["uuid"]] = {
         "wallet": session_wallet,
         "created_at": time.time(),
+        "signin_link": payload["xumm_url"],
+        "qr_url": payload.get("qr_url"),
     }
     return web.json_response(
         {
@@ -7639,26 +7708,43 @@ async def handle_wallet_link_proof(request):
     if _web_proof_rate_limited(_client_ip(request)):
         return web.json_response({"error": "too many attempts", "code": "rate_limited"}, status=429)
     _prune_web_signin_payloads()
+    _prune_wallet_link_payloads()
     body = await _json_body(request)
     session_wallet = request["wallet"]
+
+    async def _before_consume(proven: str) -> web.Response | None:
+        # Refused BEFORE the row is consumed, so the user can re-sign with the
+        # wallet they actually meant against the same nonce.
+        if proven == session_wallet:
+            return _same_wallet_response()
+        # The link write also happens BEFORE the consume: a failed write leaves
+        # the row pending (the user can retry), and if the consume then loses
+        # the CAS race the edge is already durable — link_proof is idempotent,
+        # so neither ordering can answer "linked" without a written edge.
+        try:
+            await _write_proof_link(session_wallet, proven, "wc-signed-tx")
+        except identity_store.LinkWriteError:
+            logging.exception(f"wallet link write failed for {session_wallet}")
+            return _link_failed_response()
+        return None
+
     wallet, refusal = await _redeem_proof(
         str(body.get("sign_id") or ""),
         body.get("tx_json"),
         purpose="link",
         action=memos.ACTION_LINK,
         expect_wallet=session_wallet,
-        # Refused BEFORE the row is consumed, so the user can re-sign with the
-        # wallet they actually meant against the same nonce.
-        on_verified=lambda w: _same_wallet_response() if w == session_wallet else None,
+        on_verified=_before_consume,
     )
     if refusal is not None:
         return refusal
-    return await _finish_wallet_link(session_wallet, cast(str, wallet), "wc-signed-tx")
+    return await _linked_response(session_wallet, cast(str, wallet))
 
 
 @require_wallet
 async def handle_wallet_link_status(request):
     """Poll the Xaman arm of wallet linking (#447)."""
+    _prune_wallet_link_payloads()
     uuid = request.match_info["payload_uuid"]
     rec = wallet_link_payloads.get(uuid)
     session_wallet = request["wallet"]
@@ -7673,7 +7759,12 @@ async def handle_wallet_link_status(request):
         del wallet_link_payloads[uuid]
         if s["account"] == session_wallet:
             return _same_wallet_response()
-        return await _finish_wallet_link(session_wallet, s["account"], "xaman-signin")
+        try:
+            await _write_proof_link(session_wallet, s["account"], "xaman-signin")
+        except identity_store.LinkWriteError:
+            logging.exception(f"wallet link write failed for {session_wallet}")
+            return _link_failed_response()
+        return await _linked_response(session_wallet, s["account"])
     if s["expired"]:
         del wallet_link_payloads[uuid]
         return web.json_response({"state": "expired"})

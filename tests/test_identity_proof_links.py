@@ -46,6 +46,14 @@ def test_lookup_failure_still_raises(_db, monkeypatch):
         identity.bucket_for_wallet("rA")
 
 
+def test_write_failure_raises_instead_of_returning_false(_db, monkeypatch):
+    """False means "already linked" (a success). A DB failure must be loud, or
+    a caller answers "linked" for an edge that was never written."""
+    monkeypatch.setattr(identity, "DATABASE", "/nonexistent/dir/x.db")
+    with pytest.raises(identity.LinkWriteError):
+        identity.link_proof("rA", "rB", "wc-signed-tx")
+
+
 def test_proof_link_is_transitive_across_three_wallets(_db):
     identity.link("web", "rA", "rA", "rA")
     identity.link_proof("rA", "rB", "wc-signed-tx")

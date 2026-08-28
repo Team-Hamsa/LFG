@@ -253,6 +253,11 @@ def link_proof(wallet_a: str, wallet_b: str, proof_kind: str) -> bool:
 
     Raises ValueError on a self-link: an edge from a wallet to itself proves
     nothing and would be a silent no-op the caller could mistake for success.
+
+    FAIL-LOUD, unlike the best-effort writers in this module: a database
+    failure raises LinkWriteError rather than returning False, because the
+    caller's next act is to tell the user "linked". False means ONLY "that
+    edge already existed" (which is itself a success).
     """
     if wallet_a == wallet_b:
         raise ValueError("cannot proof-link a wallet to itself")
@@ -267,9 +272,9 @@ def link_proof(wallet_a: str, wallet_b: str, proof_kind: str) -> bool:
         )
         conn.commit()
         return cur.rowcount > 0
-    except Exception as e:
+    except sqlite3.Error as e:
         logging.error(f"identity.link_proof failed: {e}")
-        return False
+        raise LinkWriteError(f"proof link write failed: {e}") from e
     finally:
         if conn is not None:
             conn.close()
@@ -425,6 +430,15 @@ def handle_for_wallet(wallet: str) -> str | None:
 # never cross-links) is multiple buckets — per-bucket gating (free-mint B2)
 # deters casual double-claiming, it is not sybil-proof.
 # ---------------------------------------------------------------------------
+
+
+class LinkWriteError(Exception):
+    """A proved wallet-link write failed at the database layer (#447).
+
+    Distinct from `link_proof` returning False, which means "that edge already
+    existed" — a success. A swallowed write failure would let a caller answer
+    "linked" for an edge that was never recorded, so this one is raised.
+    """
 
 
 class BucketLookupError(Exception):

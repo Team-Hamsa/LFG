@@ -250,6 +250,7 @@ async def _create_xumm_payload(
     options: dict[str, Any] | None = None,
     user_token: str | None = None,
     memos_json: list[dict[str, Any]] | None = None,
+    custom_meta: dict[str, Any] | None = None,
 ) -> dict[str, Any] | None:
     """POST a payload to the XUMM platform API; returns qr/deeplink dict or None.
 
@@ -292,6 +293,13 @@ async def _create_xumm_payload(
     # be misread as a token.
     if user_token:
         payload["user_token"] = user_token
+    # custom_meta is likewise a TOP-LEVEL payload field. XUMM renders
+    # `instruction` above the sign prompt in Xaman, which is the only place we
+    # can tell the signer what approving actually means — load-bearing for the
+    # wallet-link SignIn (#447), where a bare SignIn otherwise carries no
+    # on-screen indication of what it consents to.
+    if custom_meta:
+        payload["custom_meta"] = custom_meta
     sent_token = bool(user_token)
     if rate_limited():
         # Post-429 cooldown: don't spend another call we know will be
@@ -656,14 +664,22 @@ async def create_trustset_payload(
     )
 
 
-async def create_signin_payload(return_url: dict[str, str] | None = None) -> dict[str, Any] | None:
+async def create_signin_payload(
+    return_url: dict[str, str] | None = None,
+    custom_meta: dict[str, Any] | None = None,
+) -> dict[str, Any] | None:
     """XUMM SignIn payload: the user scans/approves in Xaman and the signed
-    payload reveals their wallet address (registration flow, issue #24)."""
+    payload reveals their wallet address (registration flow, issue #24).
+
+    `custom_meta` ({"instruction": str, "identifier": str}) surfaces a purpose
+    string in Xaman above the prompt — used by wallet linking (#447) so the
+    signer sees WHICH account they are about to be linked to."""
     return await _create_xumm_payload(
         {
             "TransactionType": "SignIn",
         },
         options=_with_return_url({}, return_url),
+        custom_meta=custom_meta,
     )
 
 
