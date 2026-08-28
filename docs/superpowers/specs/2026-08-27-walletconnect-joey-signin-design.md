@@ -141,6 +141,30 @@ flows read today: `signed` (True / False / None-pending), `resolved`, `txid`,
 **Cancel.** `cancel()` sets `state=cancelled`. The #260 open-payload cap script skips
 `wc-` rows; expiry is the row's `expires_at`.
 
+### Cross-wallet payloads always go through Xaman (gap closed 2026-08-28)
+
+A signed transaction is only valid when `SigningPubKey` is the `Account`'s own master
+or regular key, or a member of that account's SignerList
+([transaction common fields](https://xrpl.org/docs/references/protocol/transactions/common-fields)).
+A WalletConnect session is bound to exactly one connected account, so a `wc-` request
+whose `Account` is *another* wallet can never be signed from it (Joey's
+`xrpl_signTransactionFor` is the multi-sign variant — it needs the target account to
+list the connected account as a signer, which LFG users never have).
+
+The app already builds one such payload: the #446 linked-wallet trustline
+(`POST /api/brix/trustline {wallet: <bucket sibling>}`), whose `TrustSet.Account` is the
+sibling, not the session wallet. Rule, enforced at the chokepoint rather than per call
+site: **`_create_xumm_payload` forces `provider="xaman"` whenever
+`txjson.Account != wallet` (the session wallet)**, logging the downgrade at INFO. The
+XUMM QR / deep link is signable by whichever Xaman install holds that account, and the
+existing signer-mismatch guard on the trustline status poll (#441) still rejects a
+wrong-wallet signature. The handle then carries `sign_mode:"xaman"` even inside a Joey
+session, and the client keys its rendering on `sign_mode` per §4 — so the claim-all
+"Set trustline" row shows the QR with copy "Scan with the Xaman app holding
+`<wallet>`", never the "Approve in Joey Wallet…" spinner. A future "connect that
+wallet in Joey instead" switch is out of scope (v2). Any new flow that hands a payload
+to a different wallet inherits this rule automatically.
+
 **Known gaps (documented, not solved):** #58 pre-simulate does not run on the Joey path
 (Joey autofills; the final tx is never seen before submit). RegularKey-signed accounts
 work for transactions (verified by `Account` on-ledger) but not for the pseudo-tx proof.
