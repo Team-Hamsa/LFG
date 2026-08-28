@@ -143,3 +143,20 @@ def expire_stale(now: float | None = None) -> int:
         return cur.rowcount
     finally:
         conn.close()
+
+
+def delete_terminal_older_than(seconds: int, now: float | None = None) -> int:
+    """Prune resolved rows past their retention window. Only non-pending rows
+    are removed — a pending row is still live work no matter how old the clock
+    says it is (expire_stale is what retires those)."""
+    cutoff = (now if now is not None else time.time()) - seconds
+    conn = _conn()
+    try:
+        cur = conn.execute(
+            "DELETE FROM sign_requests WHERE state != 'pending' AND created_at < ?",
+            (cutoff,),
+        )
+        conn.commit()
+        return cur.rowcount
+    finally:
+        conn.close()

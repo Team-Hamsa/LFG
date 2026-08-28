@@ -53,3 +53,22 @@ def test_expire_stale_flips_only_pending_past_deadline():
     assert store.get(old["id"])["state"] == "expired"
     assert store.get(fresh["id"])["state"] == "pending"
     assert store.get(done["id"])["state"] == "signed"
+
+
+def test_delete_terminal_older_than_spares_pending_and_fresh():
+    old_done = store.create(wallet="rA", purpose="tx", txjson={}, nonce=None, ttl_seconds=900)
+    old_pending = store.create(wallet="rA", purpose="tx", txjson={}, nonce=None, ttl_seconds=900)
+    fresh_done = store.create(wallet="rA", purpose="tx", txjson={}, nonce=None, ttl_seconds=900)
+    store.set_state(old_done["id"], "signed")
+    store.set_state(fresh_done["id"], "signed")
+    conn = store._conn()
+    conn.execute(
+        "UPDATE sign_requests SET created_at = ? WHERE id IN (?, ?)",
+        (time.time() - 8 * 86400, old_done["id"], old_pending["id"]),
+    )
+    conn.commit()
+    conn.close()
+    assert store.delete_terminal_older_than(seconds=7 * 86400) == 1
+    assert store.get(old_done["id"]) is None
+    assert store.get(old_pending["id"])["state"] == "pending"
+    assert store.get(fresh_done["id"])["state"] == "signed"

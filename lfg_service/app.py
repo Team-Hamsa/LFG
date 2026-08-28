@@ -4773,6 +4773,10 @@ async def _settlement_sweep_loop() -> None:
             await sweep_pending_closet_accepts()
         except Exception:
             logging.error(f"closet pending-accept sweep loop crashed: {traceback.format_exc()}")
+        try:
+            await sweep_sign_requests()
+        except Exception:
+            logging.error(f"sign request sweep loop crashed: {traceback.format_exc()}")
         await asyncio.sleep(_SWEEP_PERIOD_SECONDS)
 
 
@@ -7543,6 +7547,190 @@ async def handle_web_signin_proof(request):
 
 
 # --- Explicit wallet linking (#447) ------------------------------------------
+# WalletConnect sign requests (#447): the browser fetches the txjson we asked
+# for, has Joey sign+submit it, and posts the hash back. The claimed hash is
+# never trusted on its word — it is fetched from the ledger and compared
+# field-by-field against what we stored before the row can read "signed".
+
+# Fields the wallet/ledger fills in or the `tx` RPC adds. They are not part of
+# what we asked to be signed, so they can never be a mismatch.
+_AUTOFILL_KEYS = frozenset(
+    {
+        "Fee",
+        "Sequence",
+        "LastLedgerSequence",
+        "SigningPubKey",
+        "TxnSignature",
+        "hash",
+        "NetworkID",
+        "Flags",
+        "ctid",
+        "date",
+        "ledger_index",
+        "inLedger",
+        "validated",
+        "meta",
+        "TicketSequence",
+        "AccountTxnID",
+    }
+)
+_TX_HASH_RE = re.compile(r"^[0-9A-Fa-f]{64}$")
+_SIGN_RESULT_RETENTION_SECONDS = 7 * 86400
+
+
+def _semantic_match(stored: dict[str, Any], onledger: dict[str, Any]) -> bool:
+    """True when every field we asked to be signed survived to the ledger.
+
+    `Flags` is autofilled by wallets (tfFullyCanonicalSig and friends), so it
+    is only compared when WE set a non-zero value — otherwise a wallet adding
+    flags of its own would read as tampering.
+    """
+    for key, value in stored.items():
+        if key in _AUTOFILL_KEYS:
+            continue
+        if onledger.get(key) != value:
+            return False
+    stored_flags = stored.get("Flags")
+    if isinstance(stored_flags, int) and stored_flags:
+        return onledger.get("Flags") == stored_flags
+    return True
+
+
+def _sign_row_for(row: dict[str, Any] | None, wallet: str) -> web.Response | None:
+    """Shared ownership gate: 404 for unknown/not-a-tx, 403 for someone else's."""
+    if row is None or row.get("purpose") != "tx":
+        return web.json_response({"error": "not found"}, status=404)
+    if row.get("wallet") != wallet:
+        return web.json_response(
+            {"error": "not your sign request", "code": "not_your_request"}, status=403
+        )
+    return None
+
+
+@require_wallet
+async def handle_sign_request(request):
+    """Fetch a pending WalletConnect sign request's transaction (#447)."""
+    request_id = request.match_info["request_id"]
+    await asyncio.to_thread(sign_request_store.expire_stale)
+    row = await asyncio.to_thread(sign_request_store.get, request_id)
+    # A foreign row is a 404, not a 403: an authed caller learns nothing about
+    # other sessions' request ids.
+    if row is None or row.get("purpose") != "tx" or row.get("wallet") != request["wallet"]:
+        return web.json_response({"error": "not found"}, status=404)
+    return web.json_response(
+        {
+            "id": row["id"],
+            "state": row["state"],
+            "txjson": row["txjson"],
+            "expires_at": row["expires_at"],
+            "txid": row.get("txid"),
+        }
+    )
+
+
+@require_wallet
+async def handle_sign_result(request):
+    """Record the outcome of a WalletConnect sign request (#447).
+
+    A `hash` is only believed after the transaction is found VALIDATED on-ledger
+    and matches the txjson we stored — signer, type, and every field we set.
+    Anything else flags the row `mismatch` and is refused.
+    """
+    request_id = request.match_info["request_id"]
+    body = await _json_body(request)
+    row = await asyncio.to_thread(sign_request_store.get, request_id)
+    refusal = _sign_row_for(row, request["wallet"])
+    if refusal is not None:
+        return refusal
+    assert row is not None
+
+    tx_hash = body.get("hash")
+    if tx_hash is not None:
+        if not isinstance(tx_hash, str) or not _TX_HASH_RE.match(tx_hash):
+            return web.json_response(
+                {"error": "hash must be 64 hex characters", "code": "bad_request"}, status=400
+            )
+        tx_hash = tx_hash.upper()
+    elif not (body.get("rejected") or body.get("error")):
+        return web.json_response(
+            {"error": "one of hash/rejected/error is required", "code": "bad_request"}, status=400
+        )
+
+    if row["state"] != "pending":
+        # Re-posting the same hash for an already-resolved row is the client
+        # retrying a lost response, not a conflict.
+        if tx_hash is not None and row.get("txid") == tx_hash:
+            return web.json_response({"state": row["state"], "txid": row["txid"]})
+        return web.json_response(
+            {"error": "already resolved", "code": "already_resolved", "state": row["state"]},
+            status=409,
+        )
+
+    if tx_hash is None:
+        if body.get("rejected"):
+            await asyncio.to_thread(sign_request_store.set_state, request_id, "rejected")
+            return web.json_response({"state": "rejected"})
+        await asyncio.to_thread(
+            sign_request_store.set_state,
+            request_id,
+            "failed",
+            result={"error": str(body.get("error"))[:200]},
+        )
+        return web.json_response({"state": "failed"})
+
+    try:
+        result = await xrpl_ops.get_tx(tx_hash)
+    except Exception:
+        # The lookup broke — that is not evidence about the transaction, so the
+        # row stays pending and the client retries.
+        logging.warning(f"sign result {request_id}: tx lookup failed", exc_info=True)
+        return web.json_response(
+            {"error": "could not reach the ledger", "code": "ledger_unavailable"}, status=503
+        )
+    if not (result or {}).get("validated"):
+        if row["expires_at"] < time.time():
+            await asyncio.to_thread(sign_request_store.set_state, request_id, "expired")
+            return web.json_response(
+                {"error": "transaction never validated", "code": "tx_not_found"}, status=410
+            )
+        return web.json_response({"state": "pending", "code": "tx_not_found"}, status=202)
+
+    tx = result.get("tx_json") or result
+    stored = row["txjson"] or {}
+    if (
+        tx.get("Account") != row["wallet"]
+        or tx.get("TransactionType") != stored.get("TransactionType")
+        or not _semantic_match(stored, tx)
+    ):
+        await asyncio.to_thread(
+            sign_request_store.set_state, request_id, "mismatch", result={"hash": tx_hash}
+        )
+        logging.warning(
+            f"sign result {request_id}: on-ledger tx {tx_hash} does not match the request"
+        )
+        return web.json_response(
+            {"error": "the signed transaction does not match", "code": "tx_mismatch"}, status=409
+        )
+    await asyncio.to_thread(
+        sign_request_store.set_state,
+        request_id,
+        "signed",
+        txid=tx_hash,
+        result={"meta_result": (result.get("meta") or {}).get("TransactionResult")},
+    )
+    return web.json_response({"state": "signed", "txid": tx_hash})
+
+
+async def sweep_sign_requests() -> None:
+    """Retire lapsed sign requests and prune long-resolved ones (#447)."""
+    expired = await asyncio.to_thread(sign_request_store.expire_stale)
+    pruned = await asyncio.to_thread(
+        sign_request_store.delete_terminal_older_than, _SIGN_RESULT_RETENTION_SECONDS
+    )
+    if expired or pruned:
+        logging.info(f"sign request sweep: expired={expired} pruned={pruned}")
+
+
 # The user is already signed in with one wallet and wants a SECOND wallet
 # recognised as theirs (so /api/brix claim-all, history, and the profile span
 # both). Proof of control is required either way: a WalletConnect signature
@@ -8858,6 +9046,9 @@ def create_app() -> web.Application:
     app.router.add_post("/api/web/signin", handle_web_signin_start)
     app.router.add_post("/api/web/signin/proof", handle_web_signin_proof)
     app.router.add_get("/api/web/signin/{payload_uuid}", handle_web_signin_status)
+    # WalletConnect sign requests (#447): fetch the tx to sign, post the result.
+    app.router.add_get("/api/sign/{request_id}", handle_sign_request)
+    app.router.add_post("/api/sign/{request_id}/result", handle_sign_result)
     app.router.add_post("/api/wallet/link", handle_wallet_link_start)
     app.router.add_post("/api/wallet/link/proof", handle_wallet_link_proof)
     app.router.add_get("/api/wallet/link/{payload_uuid}", handle_wallet_link_status)
