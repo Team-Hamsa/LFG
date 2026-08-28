@@ -4761,18 +4761,22 @@ async def sweep_pending_closet_accepts() -> None:
 
 async def _settlement_sweep_loop() -> None:
     while True:
-        try:
-            await settle_pending_trait_sales()
-        except Exception:
-            logging.error(f"settlement sweep loop crashed: {traceback.format_exc()}")
-        try:
-            await sweep_shop_orders()
-        except Exception:
-            logging.error(f"shop sweep loop crashed: {traceback.format_exc()}")
-        try:
-            await sweep_pending_closet_accepts()
-        except Exception:
-            logging.error(f"closet pending-accept sweep loop crashed: {traceback.format_exc()}")
+        if config.ECONOMY_ENABLED:
+            # The economy sweeps read trait-economy tables that only exist when
+            # the economy is on; the loop itself may now be running purely for
+            # the WalletConnect sweep below.
+            try:
+                await settle_pending_trait_sales()
+            except Exception:
+                logging.error(f"settlement sweep loop crashed: {traceback.format_exc()}")
+            try:
+                await sweep_shop_orders()
+            except Exception:
+                logging.error(f"shop sweep loop crashed: {traceback.format_exc()}")
+            try:
+                await sweep_pending_closet_accepts()
+            except Exception:
+                logging.error(f"closet pending-accept sweep loop crashed: {traceback.format_exc()}")
         try:
             await sweep_sign_requests()
         except Exception:
@@ -4814,9 +4818,13 @@ async def _start_brix_claim_recovery(app: web.Application) -> None:
 
 async def _start_settlement_sweep(app: web.Application) -> None:
     """aiohttp on_startup hook: schedule the settlement sweep as a background
-    task for the lifetime of the app. Gated on ECONOMY_ENABLED — with the
-    trait economy off there are no trait listings to settle."""
-    if not config.ECONOMY_ENABLED:
+    task for the lifetime of the app.
+
+    Started when the trait economy has listings to settle OR WalletConnect is
+    configured — the loop also retires lapsed sign requests (#447), which is
+    independent of the economy.
+    """
+    if not (config.ECONOMY_ENABLED or config.wc_enabled()):
         return
     app["settlement_sweep_task"] = asyncio.get_event_loop().create_task(_settlement_sweep_loop())
 
@@ -7552,48 +7560,99 @@ async def handle_web_signin_proof(request):
 # never trusted on its word — it is fetched from the ledger and compared
 # field-by-field against what we stored before the row can read "signed".
 
-# Fields the wallet/ledger fills in or the `tx` RPC adds. They are not part of
-# what we asked to be signed, so they can never be a mismatch.
+# Fields the WALLET fills in when it signs. They are not part of what we asked
+# to be signed, so they can never be a mismatch.
 _AUTOFILL_KEYS = frozenset(
     {
         "Fee",
         "Sequence",
         "LastLedgerSequence",
-        "SigningPubKey",
-        "TxnSignature",
-        "hash",
-        "NetworkID",
         "Flags",
+        "TicketSequence",
+        "AccountTxnID",
+        "NetworkID",
+    }
+)
+# Read-only fields the `tx` RPC bolts onto the transaction it returns. Kept
+# separate from _AUTOFILL_KEYS so the two intents stay readable: these were
+# never signed by anyone, they are the server describing the tx.
+_LEDGER_EXTRA_KEYS = frozenset(
+    {
+        "hash",
         "ctid",
         "date",
         "ledger_index",
         "inLedger",
         "validated",
         "meta",
-        "TicketSequence",
-        "AccountTxnID",
+        "meta_blob",
+        "tx_blob",
+        "status",
+        "close_time_iso",
+        "DeliverMax",
+        "TxnSignature",
+        "SigningPubKey",
+        "Signers",
+        "NetworkID",
+        "ledger_hash",
     }
 )
 _TX_HASH_RE = re.compile(r"^[0-9A-Fa-f]{64}$")
 _SIGN_RESULT_RETENTION_SECONDS = 7 * 86400
+# Every wallet sets tfFullyCanonicalSig; it is noise, not intent.
+_TF_FULLY_CANONICAL_SIG = 0x80000000
+_RIPPLE_EPOCH_OFFSET = 946684800
+# How far a validated tx may predate its own sign request — clock skew between
+# us and the ledger's close time, nothing more.
+_SIGN_TX_TIME_SLACK_SECONDS = 120
+
+
+def _flags_match(stored: dict[str, Any], onledger: dict[str, Any]) -> bool:
+    """Compare Flags with tfFullyCanonicalSig masked off on both sides.
+
+    Anything left is intent: a flag WE set must survive, and a flag the wallet
+    added on its own (tfPartialPayment, say) is tampering, not autofill.
+    """
+
+    def _mask(value: Any) -> int:
+        return (value & ~_TF_FULLY_CANONICAL_SIG) if isinstance(value, int) else 0
+
+    return _mask(stored.get("Flags")) == _mask(onledger.get("Flags"))
 
 
 def _semantic_match(stored: dict[str, Any], onledger: dict[str, Any]) -> bool:
-    """True when every field we asked to be signed survived to the ledger.
+    """True when the on-ledger transaction is EXACTLY what we asked for.
 
-    `Flags` is autofilled by wallets (tfFullyCanonicalSig and friends), so it
-    is only compared when WE set a non-zero value — otherwise a wallet adding
-    flags of its own would read as tampering.
+    Strict in both directions: every field we set must survive unchanged, and
+    the ledger tx may carry no field beyond ours plus the wallet/RPC additions
+    above — an injected Destination or Expiration is a mismatch.
     """
+    allowed = set(stored) | _AUTOFILL_KEYS | _LEDGER_EXTRA_KEYS
+    if any(key not in allowed for key in onledger):
+        return False
     for key, value in stored.items():
         if key in _AUTOFILL_KEYS:
             continue
         if onledger.get(key) != value:
             return False
-    stored_flags = stored.get("Flags")
-    if isinstance(stored_flags, int) and stored_flags:
-        return onledger.get("Flags") == stored_flags
-    return True
+    return _flags_match(stored, onledger)
+
+
+def _ledger_tx_time(tx: dict[str, Any], result: dict[str, Any]) -> float | None:
+    """Wall-clock close time of a validated tx, or None if the server told us
+    neither `close_time_iso` nor `date`."""
+    for src in (tx, result):
+        iso = src.get("close_time_iso")
+        if isinstance(iso, str):
+            try:
+                return datetime.datetime.fromisoformat(iso.replace("Z", "+00:00")).timestamp()
+            except ValueError:
+                pass
+    for src in (tx, result):
+        date = src.get("date")
+        if isinstance(date, int):
+            return float(date + _RIPPLE_EPOCH_OFFSET)
+    return None
 
 
 def _sign_row_for(row: dict[str, Any] | None, wallet: str) -> web.Response | None:
@@ -7605,6 +7664,34 @@ def _sign_row_for(row: dict[str, Any] | None, wallet: str) -> web.Response | Non
             {"error": "not your sign request", "code": "not_your_request"}, status=403
         )
     return None
+
+
+async def _record_sign_outcome(
+    request_id: str,
+    state: str,
+    *,
+    response: web.Response,
+    txid: str | None = None,
+    result: dict[str, Any] | None = None,
+) -> web.Response:
+    """Write a terminal state, honouring the store's compare-and-set.
+
+    Losing the CAS means a concurrent post resolved the row first; answer with
+    what the row actually says rather than a state we did not write.
+    """
+    if await asyncio.to_thread(
+        sign_request_store.set_state, request_id, state, txid=txid, result=result
+    ):
+        return response
+    row = await asyncio.to_thread(sign_request_store.get, request_id)
+    if row is None:
+        return web.json_response({"error": "not found"}, status=404)
+    if row["state"] == "signed" and txid is not None and row.get("txid") == txid:
+        return web.json_response({"state": "signed", "txid": row["txid"]})
+    return web.json_response(
+        {"error": "already resolved", "code": "already_resolved", "state": row["state"]},
+        status=409,
+    )
 
 
 @require_wallet
@@ -7668,15 +7755,15 @@ async def handle_sign_result(request):
 
     if tx_hash is None:
         if body.get("rejected"):
-            await asyncio.to_thread(sign_request_store.set_state, request_id, "rejected")
-            return web.json_response({"state": "rejected"})
-        await asyncio.to_thread(
-            sign_request_store.set_state,
+            return await _record_sign_outcome(
+                request_id, "rejected", response=web.json_response({"state": "rejected"})
+            )
+        return await _record_sign_outcome(
             request_id,
             "failed",
             result={"error": str(body.get("error"))[:200]},
+            response=web.json_response({"state": "failed"}),
         )
-        return web.json_response({"state": "failed"})
 
     try:
         result = await xrpl_ops.get_tx(tx_hash)
@@ -7695,30 +7782,45 @@ async def handle_sign_result(request):
             )
         return web.json_response({"state": "pending", "code": "tx_not_found"}, status=202)
 
-    tx = result.get("tx_json") or result
+    tx = dict(result.get("tx_json") or result)
+    # API v2 renamed Payment's Amount to DeliverMax on the way out; restore the
+    # name we signed so the comparison below is apples to apples.
+    if "DeliverMax" in tx and "Amount" not in tx:
+        tx["Amount"] = tx["DeliverMax"]
     stored = row["txjson"] or {}
+    # The hash must belong to THIS request: not a transaction already claimed
+    # by another row, and not one that closed before we even asked for it.
+    tx_time = _ledger_tx_time(tx, result)
+    reused = await asyncio.to_thread(sign_request_store.txid_in_use, tx_hash, request_id)
     if (
         tx.get("Account") != row["wallet"]
         or tx.get("TransactionType") != stored.get("TransactionType")
         or not _semantic_match(stored, tx)
+        or reused
+        # No timestamp at all is fail-closed: we cannot bind the tx to the row.
+        or tx_time is None
+        or tx_time < row["created_at"] - _SIGN_TX_TIME_SLACK_SECONDS
     ):
-        await asyncio.to_thread(
-            sign_request_store.set_state, request_id, "mismatch", result={"hash": tx_hash}
-        )
         logging.warning(
             f"sign result {request_id}: on-ledger tx {tx_hash} does not match the request"
+            f"{' (hash already claimed)' if reused else ''}"
         )
-        return web.json_response(
-            {"error": "the signed transaction does not match", "code": "tx_mismatch"}, status=409
+        return await _record_sign_outcome(
+            request_id,
+            "mismatch",
+            result={"hash": tx_hash},
+            response=web.json_response(
+                {"error": "the signed transaction does not match", "code": "tx_mismatch"},
+                status=409,
+            ),
         )
-    await asyncio.to_thread(
-        sign_request_store.set_state,
+    return await _record_sign_outcome(
         request_id,
         "signed",
         txid=tx_hash,
         result={"meta_result": (result.get("meta") or {}).get("TransactionResult")},
+        response=web.json_response({"state": "signed", "txid": tx_hash}),
     )
-    return web.json_response({"state": "signed", "txid": tx_hash})
 
 
 async def sweep_sign_requests() -> None:

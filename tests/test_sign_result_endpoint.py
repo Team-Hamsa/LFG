@@ -16,6 +16,7 @@ from lfg_core.signing import store
 DEV_OWNER = Wallet.create().classic_address
 OTHER = Wallet.create().classic_address
 HASH = "A" * 64
+RIPPLE_EPOCH = 946684800
 
 
 def _run(coro):
@@ -86,8 +87,16 @@ def _fake_tx(monkeypatch, result=None, exc=None):
 
 def _onledger(**over):
     tx = dict(TXJSON)
+    tx.update(
+        {
+            "Fee": "12",
+            "Sequence": 4,
+            "SigningPubKey": "ED00",
+            "hash": HASH,
+            "date": int(time.time()) - RIPPLE_EPOCH + 5,
+        }
+    )
     tx.update(over)
-    tx.update({"Fee": "12", "Sequence": 4, "SigningPubKey": "ED00", "hash": HASH})
     return {"validated": True, "meta": {"TransactionResult": "tesSUCCESS"}, "tx_json": tx}
 
 
@@ -182,6 +191,105 @@ def test_nonzero_stored_flags_are_compared(monkeypatch):
     row = _row(txjson={**TXJSON, "Flags": 131072})
     _fake_tx(monkeypatch, result=_onledger(Flags=0))
     assert _post(row["id"], {"hash": HASH}).status == 409
+
+
+def test_fully_canonical_sig_flag_is_masked(monkeypatch):
+    row = _row(txjson={**TXJSON, "Flags": 1})
+    _fake_tx(monkeypatch, result=_onledger(Flags=0x80000001))
+    assert _post(row["id"], {"hash": HASH}).status == 200
+
+
+def test_wallet_may_add_only_fully_canonical_sig(monkeypatch):
+    row = _row()
+    _fake_tx(monkeypatch, result=_onledger(Flags=0x80000000))
+    assert _post(row["id"], {"hash": HASH}).status == 200
+
+
+def test_wallet_added_flag_is_mismatch(monkeypatch):
+    row = _row()
+    _fake_tx(monkeypatch, result=_onledger(Flags=0x00020000))
+    r = _post(row["id"], {"hash": HASH})
+    assert r.status == 409 and _body(r)["code"] == "tx_mismatch"
+
+
+def test_added_ledger_field_is_mismatch(monkeypatch):
+    row = _row()
+    _fake_tx(monkeypatch, result=_onledger(Expiration=99))
+    r = _post(row["id"], {"hash": HASH})
+    assert r.status == 409 and _body(r)["code"] == "tx_mismatch"
+    assert store.get(row["id"])["state"] == "mismatch"
+
+
+def test_added_destination_is_mismatch(monkeypatch):
+    row = _row()
+    _fake_tx(monkeypatch, result=_onledger(Destination=OTHER))
+    assert _post(row["id"], {"hash": HASH}).status == 409
+
+
+def test_deliver_max_is_read_as_amount(monkeypatch):
+    payment = {
+        "TransactionType": "Payment",
+        "Account": DEV_OWNER,
+        "Destination": OTHER,
+        "Amount": "100",
+    }
+    row = _row(txjson=payment)
+    res = _onledger()
+    tx = dict(payment)
+    tx.pop("Amount")
+    tx.update({"DeliverMax": "100", "date": res["tx_json"]["date"], "hash": HASH})
+    _fake_tx(monkeypatch, result={**res, "tx_json": tx})
+    assert _post(row["id"], {"hash": HASH}).status == 200
+
+
+def test_hash_already_claimed_by_another_row_is_mismatch(monkeypatch):
+    first = _row()
+    _fake_tx(monkeypatch, result=_onledger())
+    assert _post(first["id"], {"hash": HASH}).status == 200
+    second = _row()
+    r = _post(second["id"], {"hash": HASH})
+    assert r.status == 409 and _body(r)["code"] == "tx_mismatch"
+    assert store.get(second["id"])["state"] == "mismatch"
+
+
+def test_tx_older_than_the_request_is_mismatch(monkeypatch):
+    row = _row()
+    _fake_tx(monkeypatch, result=_onledger(date=int(time.time()) - RIPPLE_EPOCH - 3600))
+    r = _post(row["id"], {"hash": HASH})
+    assert r.status == 409 and _body(r)["code"] == "tx_mismatch"
+
+
+def test_close_time_iso_is_preferred(monkeypatch):
+    row = _row()
+    res = _onledger()
+    res["tx_json"].pop("date")
+    res["close_time_iso"] = "2100-01-01T00:00:00Z"
+    _fake_tx(monkeypatch, result=res)
+    assert _post(row["id"], {"hash": HASH}).status == 200
+
+
+def test_no_timestamp_fails_closed(monkeypatch):
+    row = _row()
+    res = _onledger()
+    res["tx_json"].pop("date")
+    _fake_tx(monkeypatch, result=res)
+    r = _post(row["id"], {"hash": HASH})
+    assert r.status == 409 and _body(r)["code"] == "tx_mismatch"
+
+
+def test_lost_cas_answers_the_rows_real_state(monkeypatch):
+    row = _row()
+    _fake_tx(monkeypatch, result=_onledger())
+    real_set_state = store.set_state
+
+    def _racing(request_id, state, **kw):
+        # Simulate a concurrent post resolving the row a moment earlier.
+        real_set_state(request_id, "rejected")
+        return real_set_state(request_id, state, **kw)
+
+    monkeypatch.setattr(store, "set_state", _racing)
+    r = _post(row["id"], {"hash": HASH})
+    assert r.status == 409 and _body(r)["state"] == "rejected"
 
 
 def test_not_yet_validated_is_202(monkeypatch):
@@ -292,3 +400,27 @@ def test_routes_registered():
     }
     assert ("GET", "/api/sign/{request_id}") in routes
     assert ("POST", "/api/sign/{request_id}/result") in routes
+
+
+def test_sweep_loop_starts_with_economy_off_and_wc_on(monkeypatch):
+    monkeypatch.setattr(app.config, "ECONOMY_ENABLED", False)
+    monkeypatch.setattr(app.config, "REOWN_PROJECT_ID", "pid")
+    started = {}
+
+    async def _go():
+        holder: dict = {}
+        await app._start_settlement_sweep(holder)
+        started["task"] = holder.get("settlement_sweep_task")
+        if started["task"] is not None:
+            started["task"].cancel()
+
+    _run(_go())
+    assert started["task"] is not None
+
+
+def test_sweep_loop_stays_off_with_both_disabled(monkeypatch):
+    monkeypatch.setattr(app.config, "ECONOMY_ENABLED", False)
+    monkeypatch.setattr(app.config, "REOWN_PROJECT_ID", "")
+    holder: dict = {}
+    _run(app._start_settlement_sweep(holder))
+    assert "settlement_sweep_task" not in holder

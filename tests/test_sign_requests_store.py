@@ -72,3 +72,13 @@ def test_delete_terminal_older_than_spares_pending_and_fresh():
     assert store.get(old_done["id"]) is None
     assert store.get(old_pending["id"])["state"] == "pending"
     assert store.get(fresh_done["id"])["state"] == "signed"
+
+
+def test_txid_in_use_ignores_the_excluded_row():
+    a = store.create(wallet="rA", purpose="tx", txjson={}, nonce=None, ttl_seconds=900)
+    b = store.create(wallet="rB", purpose="tx", txjson={}, nonce=None, ttl_seconds=900)
+    store.set_state(a["id"], "signed", txid="DEAD")
+    assert store.txid_in_use("DEAD") is True
+    assert store.txid_in_use("DEAD", exclude_id=a["id"]) is False
+    assert store.txid_in_use("DEAD", exclude_id=b["id"]) is True
+    assert store.txid_in_use("BEEF") is False

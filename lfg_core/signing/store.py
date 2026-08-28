@@ -160,3 +160,18 @@ def delete_terminal_older_than(seconds: int, now: float | None = None) -> int:
         return cur.rowcount
     finally:
         conn.close()
+
+
+def txid_in_use(txid: str, exclude_id: str | None = None) -> bool:
+    """True when another row already claims this transaction hash — one signed
+    transaction can only settle the one request that asked for it."""
+    conn = _conn()
+    try:
+        sql = "SELECT 1 FROM sign_requests WHERE txid = ?"
+        args: list[Any] = [txid]
+        if exclude_id is not None:
+            sql += " AND id != ?"
+            args.append(exclude_id)
+        return conn.execute(sql + " LIMIT 1", args).fetchone() is not None
+    finally:
+        conn.close()
