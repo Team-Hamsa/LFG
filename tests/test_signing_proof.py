@@ -170,3 +170,44 @@ def test_network_id_allowed_off_mainnet_only(monkeypatch):
     with pytest.raises(proof.ProofError) as ei:
         proof.verify_proof(tx, wallet_hint=None, nonce=NONCE, action=memos.ACTION_SIGNIN)
     assert ei.value.reason == "network_id"
+
+
+def test_lowercase_hex_fields_still_verify():
+    """Joey-style clients may emit lower-case hex; the proof must still verify."""
+    w, tx = _signed()
+    tx["SigningPubKey"] = tx["SigningPubKey"].lower()
+    tx["TxnSignature"] = tx["TxnSignature"].lower()
+    assert (
+        proof.verify_proof(tx, wallet_hint=None, nonce=NONCE, action=memos.ACTION_SIGNIN)
+        == w.classic_address
+    )
+
+
+def test_non_hex_signature_rejects_as_shape():
+    _, tx = _signed()
+    tx["TxnSignature"] = "zz" + tx["TxnSignature"][2:]
+    with pytest.raises(proof.ProofError) as ei:
+        proof.verify_proof(tx, wallet_hint=None, nonce=NONCE, action=memos.ACTION_SIGNIN)
+    assert ei.value.reason == "shape"
+
+
+def test_only_signin_and_link_are_proof_actions():
+    with pytest.raises(ValueError):
+        proof.build_proof_tx("rN7n7otQDd6FczFgLdSqtcsAUxDkw6fzRH", NONCE, memos.ACTION_MINT)
+    _, tx = _signed()
+    with pytest.raises(proof.ProofError) as ei:
+        proof.verify_proof(tx, wallet_hint=None, nonce=NONCE, action=memos.ACTION_MINT)
+    assert ei.value.reason == "action"
+
+
+def test_error_message_leaks_no_key_material():
+    _, tx = _signed()
+    tx["TxnSignature"] = tx["TxnSignature"][:-2] + (
+        "00" if tx["TxnSignature"][-2:] != "00" else "11"
+    )
+    with pytest.raises(proof.ProofError) as ei:
+        proof.verify_proof(tx, wallet_hint=None, nonce=NONCE, action=memos.ACTION_SIGNIN)
+    rendered = str(ei.value)
+    assert tx["TxnSignature"] not in rendered
+    assert tx["SigningPubKey"] not in rendered
+    assert rendered == "bad proof: signature"

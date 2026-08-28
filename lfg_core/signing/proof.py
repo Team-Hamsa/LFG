@@ -10,6 +10,7 @@
 # be smuggled in as a "proof".
 from __future__ import annotations
 
+import re
 from typing import Any
 
 from xrpl.core.binarycodec import encode_for_signing
@@ -21,6 +22,12 @@ from lfg_core.signing import provenance
 
 NONCE_MEMO_TYPE = "lfg/nonce"
 SIGNIN_TTL = 300
+
+# The only two actions a proof may carry. Anything else is a real app action and
+# has no business being signed as a never-submitted pseudo-transaction.
+_PROOF_ACTIONS = (memos.ACTION_SIGNIN, memos.ACTION_LINK)
+
+_HEX_RE = re.compile(r"[0-9A-Fa-f]+")
 
 # CLOSED allowlist. Anything else — a Destination, an Amount, a TicketSequence
 # — and the "proof" could be a real, submittable transaction.
@@ -51,6 +58,8 @@ class ProofError(Exception):
 
 def build_proof_tx(wallet: str, nonce: str, action: str) -> dict[str, Any]:
     """The canonical unsigned proof transaction the wallet is asked to sign."""
+    if action not in _PROOF_ACTIONS:
+        raise ValueError(f"not a proof action: {action!r}")
     tx: dict[str, Any] = {
         "TransactionType": "AccountSet",
         "Account": wallet,
@@ -92,6 +101,8 @@ def verify_proof(tx_json: Any, *, wallet_hint: str | None, nonce: str, action: s
     """Return the classic address proven by `tx_json`, or raise `ProofError`."""
     if not isinstance(tx_json, dict):
         raise ProofError("shape")
+    if action not in _PROOF_ACTIONS:
+        raise ProofError("action")
     # Transaction type first: a wholesale swap to a real tx type should read as
     # "type", not as whatever extra field that type happens to require.
     if tx_json.get("TransactionType") != "AccountSet":
@@ -126,6 +137,13 @@ def verify_proof(tx_json: Any, *, wallet_hint: str | None, nonce: str, action: s
         raise ProofError("shape")
     if not (account and pub and sig):
         raise ProofError("shape")
+    # Joey-style clients may emit lower-case hex; `keypairs.is_valid_message`
+    # dispatches on the literal "ED" prefix, so normalise once here (after
+    # proving both fields really are hex) rather than at each use site.
+    if not (_HEX_RE.fullmatch(pub) and _HEX_RE.fullmatch(sig)):
+        raise ProofError("shape")
+    pub = pub.upper()
+    sig = sig.upper()
     try:
         derived = derive_classic_address(pub)
     except Exception as e:  # malformed pubkey
@@ -136,6 +154,7 @@ def verify_proof(tx_json: Any, *, wallet_hint: str | None, nonce: str, action: s
         raise ProofError("wallet_hint")
 
     unsigned = {k: v for k, v in tx_json.items() if k != "TxnSignature"}
+    unsigned["SigningPubKey"] = pub
     try:
         blob = bytes.fromhex(encode_for_signing(unsigned))
         ok = is_valid_message(blob, bytes.fromhex(sig), pub)
