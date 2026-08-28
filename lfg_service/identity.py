@@ -106,6 +106,29 @@ def ensure_identities_table() -> None:
         conn.execute(
             "CREATE INDEX IF NOT EXISTS idx_wallet_token_links_wallet ON wallet_token_links(wallet)"
         )
+        # #447: an EXPLICIT wallet<->wallet edge, written only when the second
+        # wallet signed a server-issued nonce proving it is held by the same
+        # human (or completed a Xaman SignIn while the first wallet held the
+        # session). Unlike wallet_token_links this is deliberate user intent,
+        # not an inferred co-observation. The pair is stored lexically ordered
+        # so the PK makes the edge undirected and the write idempotent.
+        conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS wallet_proof_links (
+                wallet_a   TEXT NOT NULL,
+                wallet_b   TEXT NOT NULL,
+                proof_kind TEXT NOT NULL,
+                linked_at  TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                PRIMARY KEY (wallet_a, wallet_b)
+            )
+            """
+        )
+        conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_wallet_proof_links_a ON wallet_proof_links(wallet_a)"
+        )
+        conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_wallet_proof_links_b ON wallet_proof_links(wallet_b)"
+        )
         # Deliberately NOT seeded from identities.user_token: link() preserves
         # the stored token across a wallet relink, so seeding would pair the
         # token with a wallet it was never observed signing as — a bucket
@@ -214,6 +237,39 @@ def observe_token(wallet: str | None, token: str | None) -> None:
         conn.commit()
     except Exception as e:
         logging.error(f"identity.observe_token failed: {e}")
+    finally:
+        if conn is not None:
+            conn.close()
+
+
+def link_proof(wallet_a: str, wallet_b: str, proof_kind: str) -> bool:
+    """Record an explicit, proved wallet<->wallet link (#447).
+
+    Call ONLY once `wallet_b` has demonstrated control — a signed proof
+    carrying our server-issued nonce, or a completed Xaman SignIn — while
+    `wallet_a` held the session. The edge is undirected: the pair is ordered
+    lexically before the write, so the primary key makes a repeat (in either
+    argument order) a no-op. Returns True only when a NEW row was inserted.
+
+    Raises ValueError on a self-link: an edge from a wallet to itself proves
+    nothing and would be a silent no-op the caller could mistake for success.
+    """
+    if wallet_a == wallet_b:
+        raise ValueError("cannot proof-link a wallet to itself")
+    a, b = sorted((wallet_a, wallet_b))
+    conn = None
+    try:
+        conn = sqlite3.connect(DATABASE)
+        cur = conn.execute(
+            "INSERT OR IGNORE INTO wallet_proof_links (wallet_a, wallet_b, proof_kind) "
+            "VALUES (?, ?, ?)",
+            (a, b, proof_kind),
+        )
+        conn.commit()
+        return cur.rowcount > 0
+    except Exception as e:
+        logging.error(f"identity.link_proof failed: {e}")
+        return False
     finally:
         if conn is not None:
             conn.close()
@@ -434,8 +490,9 @@ def _bucket_bfs(
     seed_wallets: set[str],
 ) -> dict[str, object]:
     """Connected-component BFS over BOTH edge types: identity—wallet
-    (wallet_links) and wallet—wallet via shared token hashes
-    (wallet_token_links, #445). Alternates identity->wallet and
+    (wallet_links), wallet—wallet via shared token hashes
+    (wallet_token_links, #445), and explicit proved wallet—wallet links
+    (wallet_proof_links, #447). Alternates identity->wallet and
     wallet->{identity, token-sibling-wallet} expansions to fixpoint."""
     identities: set[tuple[str, str]] = set(seed_ids)
     wallets: set[str] = set(seed_wallets)
@@ -473,6 +530,16 @@ def _bucket_bfs(
                 if w2 not in wallets:
                     wallets.add(w2)
                     frontier_wallets.append(w2)
+            # wallets -> explicitly proof-linked wallets (#447). Undirected:
+            # the stored pair is lexically ordered, so both columns are probed.
+            for (w2,) in conn.execute(
+                "SELECT wallet_b FROM wallet_proof_links WHERE wallet_a = ? "
+                "UNION SELECT wallet_a FROM wallet_proof_links WHERE wallet_b = ?",
+                (w, w),
+            ):
+                if w2 not in wallets:
+                    wallets.add(w2)
+                    frontier_wallets.append(w2)
     members = sorted(identities)
     # A wallets-only bucket (web wallets known solely through token
     # observations) has no identity member to name it; fall back to the
@@ -488,7 +555,7 @@ def _bucket_bfs(
 def bucket_for_wallet(wallet: str) -> dict[str, object] | None:
     """bucket_for keyed by wallet (#445) — the entry point web-surface callers
     need (their only key IS the wallet). Returns None for a wallet with no
-    wallet_links row AND no token observation; raises BucketLookupError on DB
+    wallet_links row, no token observation AND no proof link; raises BucketLookupError on DB
     failure (fail-closed, same contract as bucket_for). Wallets are matched
     verbatim — never case-fold."""
     conn = None
@@ -496,8 +563,9 @@ def bucket_for_wallet(wallet: str) -> dict[str, object] | None:
         conn = sqlite3.connect(DATABASE)
         known = conn.execute(
             "SELECT 1 FROM wallet_links WHERE wallet = ? "
-            "UNION SELECT 1 FROM wallet_token_links WHERE wallet = ? LIMIT 1",
-            (wallet, wallet),
+            "UNION SELECT 1 FROM wallet_token_links WHERE wallet = ? "
+            "UNION SELECT 1 FROM wallet_proof_links WHERE wallet_a = ? OR wallet_b = ? LIMIT 1",
+            (wallet, wallet, wallet, wallet),
         ).fetchone()
         if not known:
             return None
