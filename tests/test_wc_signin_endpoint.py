@@ -60,6 +60,7 @@ def _hermetic(monkeypatch, tmp_path):
     store.ensure_table()
     app.web_signin_payloads.clear()
     app._web_signin_hits.clear()
+    app._web_proof_hits.clear()
 
 
 def _fake_create():
@@ -83,6 +84,17 @@ def test_wc_start_requires_feature(monkeypatch):
     assert json.loads(r.text)["code"] == "wc_disabled"
 
 
+def test_wc_disabled_does_not_consume_the_signin_budget(monkeypatch):
+    """A 503 for an unconfigured provider must not burn the XUMM budget."""
+    monkeypatch.setattr(app.config, "REOWN_PROJECT_ID", "")
+    for _ in range(app.WEB_SIGNIN_RATE_MAX + 3):
+        r = _run(app.handle_web_signin_start(_Req(body={"provider": "walletconnect"})))
+        assert r.status == 503
+    assert app._web_signin_hits == {}
+    monkeypatch.setattr(app.xumm_ops, "create_signin_payload", _fake_create())
+    assert _run(app.handle_web_signin_start(_Req(body={}))).status == 200
+
+
 def test_wc_start_issues_nonce_row(monkeypatch):
     monkeypatch.setattr(app.config, "REOWN_PROJECT_ID", "pid")
     r = _run(app.handle_web_signin_start(_Req(body={"provider": "walletconnect"})))
@@ -95,7 +107,7 @@ def test_wc_start_issues_nonce_row(monkeypatch):
     # The memos are account-independent; the client builds the proof tx itself.
     assert (
         b["memos"]
-        == proof.build_proof_tx("rrrrrrrrrrrrrrrrrrrrrhoLvTp", b["nonce"], memos.ACTION_SIGNIN)[
+        == proof.build_proof_tx(app._MEMO_TEMPLATE_ACCOUNT, b["nonce"], memos.ACTION_SIGNIN)[
             "Memos"
         ]
     )
@@ -195,6 +207,60 @@ def test_expired_proof_is_410(monkeypatch):
     r = _run(app.handle_web_signin_proof(_Req(body={"sign_id": b["sign_id"], "tx_json": {}})))
     assert r.status == 410
     assert json.loads(r.text)["code"] == "proof_expired"
+
+
+def test_consumed_row_stays_409_after_expiry(monkeypatch):
+    """A row already spent answers "you used this", not "this timed out"."""
+    b = _start(monkeypatch)
+    w = Wallet.create()
+    tx = _sign(w, b["nonce"])
+    ok = _run(app.handle_web_signin_proof(_Req(body={"sign_id": b["sign_id"], "tx_json": tx})))
+    assert ok.status == 200
+    store.expire_stale(now=time.time() + proof.SIGNIN_TTL + 1)  # no-op: not pending
+    r = _run(app.handle_web_signin_proof(_Req(body={"sign_id": b["sign_id"], "tx_json": tx})))
+    assert r.status == 409
+    assert json.loads(r.text)["code"] == "proof_replayed"
+
+
+def test_proof_is_rate_limited_per_ip():
+    for _ in range(app.WEB_SIGNIN_RATE_MAX):
+        assert (
+            _run(
+                app.handle_web_signin_proof(_Req(body={"sign_id": "wc-" + "0" * 32, "tx_json": {}}))
+            ).status
+            == 404
+        )
+    r = _run(app.handle_web_signin_proof(_Req(body={"sign_id": "wc-" + "0" * 32, "tx_json": {}})))
+    assert r.status == 429
+    assert json.loads(r.text)["code"] == "rate_limited"
+    # a different IP is unaffected
+    other = _Req(body={"sign_id": "wc-" + "0" * 32, "tx_json": {}}, remote="5.6.7.8")
+    assert _run(app.handle_web_signin_proof(other)).status == 404
+
+
+def test_proof_limiter_is_independent_of_the_start_limiter(monkeypatch):
+    """A fumbled signature must never lock the caller out of the Xaman arm."""
+    for _ in range(app.WEB_SIGNIN_RATE_MAX + 1):
+        _run(app.handle_web_signin_proof(_Req(body={"sign_id": "wc-" + "0" * 32, "tx_json": {}})))
+    assert app._web_signin_hits == {}
+    monkeypatch.setattr(app.xumm_ops, "create_signin_payload", _fake_create())
+    assert _run(app.handle_web_signin_start(_Req(body={}))).status == 200
+    # …and the reverse: exhausting the start budget leaves /proof usable.
+    app._web_proof_hits.clear()
+    for _ in range(app.WEB_SIGNIN_RATE_MAX + 1):
+        _run(app.handle_web_signin_start(_Req(body={})))
+    assert (
+        _run(
+            app.handle_web_signin_proof(_Req(body={"sign_id": "wc-" + "0" * 32, "tx_json": {}}))
+        ).status
+        == 404
+    )
+
+
+def test_stale_proof_rate_limit_ips_are_pruned():
+    app._web_proof_hits["203.0.113.9"] = [0.0]  # far in the past
+    _run(app.handle_web_signin_proof(_Req(body={"sign_id": "wc-" + "0" * 32, "tx_json": {}})))
+    assert "203.0.113.9" not in app._web_proof_hits
 
 
 def test_unknown_sign_id_is_404():

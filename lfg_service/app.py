@@ -7269,6 +7269,7 @@ web_signin_payloads: dict[str, Any] = {}
 WEB_SIGNIN_RATE_MAX = 5  # payload creations…
 WEB_SIGNIN_RATE_WINDOW = 60.0  # …per IP per window (protects the XUMM API)
 _web_signin_hits: dict[str, list[float]] = {}
+_web_proof_hits: dict[str, list[float]] = {}  # …and the same, for /api/web/signin/proof
 
 
 def _client_ip(request) -> str:
@@ -7282,15 +7283,25 @@ def _client_ip(request) -> str:
     return request.remote or "?"
 
 
-def _web_rate_limited(ip: str) -> bool:
+def _rate_limited(bucket: dict[str, list[float]], ip: str) -> bool:
     now = time.time()
-    hits = [t for t in _web_signin_hits.get(ip, []) if now - t < WEB_SIGNIN_RATE_WINDOW]
+    hits = [t for t in bucket.get(ip, []) if now - t < WEB_SIGNIN_RATE_WINDOW]
     if len(hits) >= WEB_SIGNIN_RATE_MAX:
-        _web_signin_hits[ip] = hits
+        bucket[ip] = hits
         return True
     hits.append(now)
-    _web_signin_hits[ip] = hits
+    bucket[ip] = hits
     return False
+
+
+def _web_rate_limited(ip: str) -> bool:
+    return _rate_limited(_web_signin_hits, ip)
+
+
+def _web_proof_rate_limited(ip: str) -> bool:
+    # A SEPARATE bucket from the start limiter: a fumbled signature (or a
+    # client retry loop) must never lock the caller out of the Xaman arm.
+    return _rate_limited(_web_proof_hits, ip)
 
 
 def _prune_web_signin_payloads():
@@ -7300,9 +7311,10 @@ def _prune_web_signin_payloads():
         if rec["created_at"] < cutoff:
             del web_signin_payloads[uuid]
     # Rate-limit bookkeeping must not grow forever across distinct IPs.
-    for ip, hits in list(_web_signin_hits.items()):
-        if all(now - t >= WEB_SIGNIN_RATE_WINDOW for t in hits):
-            del _web_signin_hits[ip]
+    for bucket in (_web_signin_hits, _web_proof_hits):
+        for ip, hits in list(bucket.items()):
+            if all(now - t >= WEB_SIGNIN_RATE_WINDOW for t in hits):
+                del bucket[ip]
 
 
 # The proof Memos are account-independent, so they can be built against any
@@ -7333,15 +7345,17 @@ async def handle_web_signin_start(request):
     """
     body = await _json_body(request)
     provider = str(body.get("provider") or "xaman")
+    # The feature gate is checked BEFORE the limiter: a 503 for an unconfigured
+    # provider must not burn the caller's XUMM sign-in budget.
+    if provider == "walletconnect" and not config.wc_enabled():
+        return web.json_response(
+            {"error": "walletconnect is not configured", "code": "wc_disabled"}, status=503
+        )
     if _web_rate_limited(_client_ip(request)):
         return web.json_response(
             {"error": "too many sign-in attempts", "code": "rate_limited"}, status=429
         )
     if provider == "walletconnect":
-        if not config.wc_enabled():
-            return web.json_response(
-                {"error": "walletconnect is not configured", "code": "wc_disabled"}, status=503
-            )
         nonce = secrets.token_hex(32)
         row = await asyncio.to_thread(
             sign_request_store.create,
@@ -7434,23 +7448,37 @@ async def handle_web_signin_proof(request):
     against the signing key it names. The row is compare-and-set to `consumed`
     before the session is issued, so a replay loses the race and gets a 409.
     """
+    if _web_proof_rate_limited(_client_ip(request)):
+        return web.json_response(
+            {"error": "too many sign-in attempts", "code": "rate_limited"}, status=429
+        )
+    _prune_web_signin_payloads()
     body = await _json_body(request)
     sign_id = str(body.get("sign_id") or "")
     tx_json = body.get("tx_json")
     row = await asyncio.to_thread(sign_request_store.get, sign_id)
     if row is None or row.get("purpose") != "signin":
         return web.json_response({"error": "not found"}, status=404)
-    if row["state"] == "expired" or row["expires_at"] < time.time():
-        await asyncio.to_thread(sign_request_store.set_state, sign_id, "expired")
+    # A row already spent stays 409 even once its TTL lapses — "you used this"
+    # is the more precise answer than "this timed out".
+    if row["state"] == "expired":
         return web.json_response({"error": "sign-in expired", "code": "proof_expired"}, status=410)
     if row["state"] != "pending":
         return web.json_response({"error": "already used", "code": "proof_replayed"}, status=409)
+    if row["expires_at"] < time.time():
+        await asyncio.to_thread(sign_request_store.set_state, sign_id, "expired")
+        return web.json_response({"error": "sign-in expired", "code": "proof_expired"}, status=410)
     # Proof Memos are otherwise unbounded — cap the body before verifying.
     if not isinstance(tx_json, dict) or len(json.dumps(tx_json)) > WC_PROOF_MAX_BYTES:
         return web.json_response({"error": "bad proof", "code": "bad_proof"}, status=400)
     try:
-        wallet = signing_proof.verify_proof(
-            tx_json, wallet_hint=None, nonce=row["nonce"], action=memos.ACTION_SIGNIN
+        # Signature verification is CPU-bound — keep it off the event loop.
+        wallet = await asyncio.to_thread(
+            signing_proof.verify_proof,
+            tx_json,
+            wallet_hint=None,
+            nonce=row["nonce"],
+            action=memos.ACTION_SIGNIN,
         )
     except signing_proof.ProofError as e:
         logging.warning(f"bad signin proof {sign_id}: {e.reason}")
