@@ -31,7 +31,7 @@ import * as harvestPure from './harvest_pure.js?v=2';
 // Xaman sign-request delivery decisions (#142): mobile-primary deep link vs
 // desktop-primary QR is a pure truth table, Node-testable
 // (tests/test_signdelivery_pure_js.py); applySignDelivery() below is the glue.
-import * as signDeliveryPure from './signdelivery_pure.js?v=1';
+import * as signDeliveryPure from './signdelivery_pure.js?v=2';
 // Daily BRIX drip card (#48): what the card renders and how each claim error
 // code is handled are pure decisions, Node-testable (tests/test_brix_pure_js.py);
 // loadBrix()/claimBrix() below are the glue.
@@ -104,6 +104,11 @@ function confirmDialog({ title, text, confirmLabel = 'Confirm' }) {
 }
 
 let sessionToken = null;
+// /api/config, fetched once in main() and kept module-level so the Joey
+// Wallet paths (#447) can read cfg.walletconnect without re-fetching. Null
+// until that fetch lands (or forever, if it failed) — every read must treat
+// a missing config as "feature off".
+let appCfg = null;
 let me = null;
 let pollTimer = null;
 let pollGen = 0; // bumps on every pollMint call, invalidating in-flight ticks
@@ -370,6 +375,16 @@ function makeQrToggle() {
 // button (+ optional disclosure toggle) per the signDelivery truth table.
 // Pass autoOpen:false for panels reached passively (not a fresh sign ask).
 function applySignDelivery({ qrEl, linkBtn, toggleBtn, link, qrData, push, autoOpen = true }) {
+  // #447: a WalletConnect sign request has no QR and no deep link — the
+  // transaction goes to Joey over the live session instead. Every flow keeps
+  // calling this exactly as before; only the rendering differs.
+  if (signDeliveryPure.isWcLink(link)) {
+    if (linkBtn) linkBtn.hidden = true;
+    if (qrEl) qrEl.hidden = true;
+    if (toggleBtn) toggleBtn.hidden = true;
+    wcSign(signDeliveryPure.wcRequestId(link));
+    return { linkPrimary: false, qrCollapsed: true, autoOpen: false };
+  }
   const d = signDeliveryPure.signDelivery({
     push,
     coarse: isCoarsePointer(),
@@ -394,6 +409,325 @@ function applySignDelivery({ qrEl, linkBtn, toggleBtn, link, qrData, push, autoO
   }
   if (autoOpen && d.autoOpen) maybeAutoOpen(link);
   return d;
+}
+
+// --- WalletConnect / Joey Wallet (#447) --------------------------------
+//
+// A fourth signing path alongside Xaman's QR/deep link: the user pairs their
+// Joey Wallet once (sign-in), and every later sign request is pushed down
+// that live WalletConnect session instead of rendering a QR. The 600 KB
+// vendored bundle is behind a dynamic import so a Xaman user never loads it.
+
+const WC_MODULE = './wc.js?v=1';
+const WC_POLL_MS = 3000;
+
+function wcSurface() {
+  return insideTelegram ? 'telegram' : insideWeb ? 'web' : 'discord-activity';
+}
+
+// The /api/config walletconnect block, but only when this surface is one the
+// operator enabled. Null (feature off) whenever the config never arrived.
+function wcConfig() {
+  const wc = appCfg && appCfg.walletconnect;
+  if (!wc || !wc.project_id || !wc.chain) return null;
+  const surfaces = Array.isArray(wc.surfaces) ? wc.surfaces : [];
+  return surfaces.includes(wcSurface()) ? wc : null;
+}
+
+// Reveal the Joey / link-wallet entry points once /api/config has landed.
+// Both nodes are hidden in the markup, so a failed config fetch (or a cached
+// older index.html) simply leaves today's Xaman-only UI.
+function applyWcVisibility() {
+  const wcBtn = el('register-wc-btn');
+  if (wcBtn) wcBtn.hidden = !wcConfig();
+  // Linking is a multi-wallet convenience for the wallet-is-login surfaces;
+  // the Xaman arm is always available, so this does not depend on wcConfig().
+  const linkBtn = el('link-wallet-btn');
+  if (linkBtn) linkBtn.hidden = !(insideWeb || insideTelegram);
+}
+
+// Wallet-facing app identity shown in Joey's pairing prompt. Deliberately a
+// fixed public host, never the page's own reported origin: inside the Discord
+// Activity the page is served from Discord's *.discordsays.com sandbox proxy, so an
+// origin-derived name/icon would be both wrong and unreachable.
+const WC_APP_URL = 'https://build.letseffinggo.com';
+
+function wcMetadata() {
+  return {
+    name: 'LFG',
+    description: "Let's Effing Go — mint and trade NFTs on the XRP Ledger",
+    url: WC_APP_URL,
+    icons: [`${WC_APP_URL}/assets/icon-192.png`],
+  };
+}
+
+function loadWc() {
+  return import(WC_MODULE);
+}
+
+const wcSleep = (ms) => new Promise((r) => setTimeout(r, ms));
+
+// The proof transaction is built client-side from the server's canonical
+// pieces (nonce-bearing memos + SourceTag); it is NEVER submitted — Joey
+// signs it with autofill/submit off and the service verifies the signature.
+function wcProofTx(wallet, start) {
+  return {
+    TransactionType: 'AccountSet',
+    Account: wallet,
+    Fee: '0',
+    Sequence: 0,
+    LastLedgerSequence: 0,
+    SourceTag: start.source_tag,
+    Memos: start.memos,
+  };
+}
+
+// Report a sign request's outcome. A 202 (transaction not yet visible
+// on-ledger) and a 503 (we could not reach the ledger) are both "ask again",
+// not failures — retry until the request's own expiry.
+async function postSignResult(id, body, expiresAt) {
+  const path = `/api/sign/${encodeURIComponent(id)}/result`;
+  for (;;) {
+    let r;
+    try {
+      r = await api(path, { method: 'POST', body: JSON.stringify(body) });
+    } catch (e) {
+      const code = (e.body || {}).code;
+      if (code === 'tx_mismatch') {
+        showError('Joey signed a different transaction — aborted.');
+        return null;
+      }
+      if (code === 'ledger_unavailable' && Date.now() / 1000 < expiresAt) {
+        await wcSleep(WC_POLL_MS);
+        continue;
+      }
+      showError(e.message);
+      return null;
+    }
+    if (r && r.state === 'pending' && r.code === 'tx_not_found') {
+      if (Date.now() / 1000 >= expiresAt) return null;
+      await wcSleep(WC_POLL_MS);
+      continue;
+    }
+    return r;
+  }
+}
+
+// Drive one `lfg-wc://` sign request to a recorded outcome. Deduped per id:
+// every flow's poller re-renders on each tick and would otherwise re-ask Joey
+// to sign the same transaction. The per-flow pollers are untouched — they see
+// `signed` through their own status polls exactly as with Xaman.
+const wcInFlight = new Set();
+async function wcSign(id) {
+  if (!id || wcInFlight.has(id)) return;
+  const wc = wcConfig();
+  if (!wc) { showError('Joey Wallet is not available here.'); return; }
+  wcInFlight.add(id);
+  try {
+    const r = await api(`/api/sign/${encodeURIComponent(id)}`);
+    if (r.state !== 'pending') return; // already signed/rejected/expired
+    const mod = await loadWc();
+    if (!mod.activeWallet()) {
+      // The pairing was lost (reload, wallet-side disconnect) — re-attach or
+      // ask for a fresh one before there is anything to sign.
+      await mod.connect({ projectId: wc.project_id, chain: wc.chain, metadata: wcMetadata() });
+    }
+    toast('📲 Approve in Joey Wallet…');
+    let resp;
+    try {
+      resp = await mod.signTx({ chain: wc.chain, txJson: r.txjson, autofill: true, submit: true });
+    } catch (e) {
+      const outcome = signDeliveryPure.isWcRejection(e)
+        ? { rejected: true }
+        : { error: String((e && e.message) || e) };
+      await postSignResult(id, outcome, r.expires_at);
+      return;
+    }
+    await postSignResult(id, signDeliveryPure.wcResultAction(resp), r.expires_at);
+  } catch (e) {
+    showError(e.message || String(e));
+  } finally {
+    wcInFlight.delete(id);
+  }
+}
+
+// Sign in with Joey: a server nonce, signed into a never-submitted proof
+// transaction, redeemed for the same platform="web" session the Xaman arm
+// issues.
+async function startWcSignin() {
+  const wc = wcConfig();
+  if (!wc) { showError('Joey Wallet is not available here.'); return; }
+  clearTimeout(signinPollTimer);
+  showPanel('register-panel');
+  renderSignin({ sub: 'Opening Joey Wallet…', spinner: true });
+  try {
+    const start = await api('/api/web/signin', {
+      method: 'POST',
+      body: JSON.stringify({ provider: 'walletconnect' }),
+    });
+    const mod = await loadWc();
+    const { wallet } = await mod.connect({
+      projectId: wc.project_id, chain: wc.chain, metadata: wcMetadata(),
+    });
+    if (!wallet) throw new Error('Joey Wallet did not share an XRPL account.');
+    renderSignin({ sub: 'Approve the sign-in request in Joey Wallet…', spinner: true });
+    const resp = await mod.signTx({
+      chain: wc.chain, txJson: wcProofTx(wallet, start), autofill: false, submit: false,
+    });
+    const s = await api('/api/web/signin/proof', {
+      method: 'POST',
+      body: JSON.stringify({ sign_id: start.sign_id, tx_json: resp.tx_json }),
+    });
+    sessionToken = s.session_token;
+    try { localStorage.setItem(WEB_SESSION_KEY, s.session_token); } catch (_) { /* private mode */ }
+    me = { ...s.user, wallet: s.wallet };
+    showMintHome();
+  } catch (e) {
+    if (signDeliveryPure.isWcRejection(e)) {
+      renderSignin({ sub: 'Sign-in declined in Joey Wallet.', retry: true });
+      return;
+    }
+    showError(e.message || String(e));
+    renderSignin({ sub: 'Could not sign in with Joey Wallet.', retry: true });
+  }
+}
+
+// --- Link another wallet (#447) ----------------------------------------
+//
+// Prove a SECOND wallet belongs to the same person, so the claim-all card can
+// pay out to it. Two arms — a Joey proof (never submitted) or a Xaman SignIn
+// QR — both ending at a durable identity edge.
+
+let linkPollTimer = null;
+let linkPollGen = 0;
+
+function renderLink({ sub, spinner, buttons, link, qrData, push }) {
+  const subEl = el('link-sub');
+  if (subEl) subEl.textContent = sub;
+  const spin = el('link-spinner');
+  if (spin) spin.hidden = !spinner;
+  const joey = el('link-joey-btn');
+  // The Joey arm only exists where /api/config armed it for this surface;
+  // the Xaman arm is always available.
+  if (joey) joey.hidden = !buttons || !wcConfig();
+  const xaman = el('link-xaman-btn');
+  if (xaman) xaman.hidden = !buttons;
+  applySignDelivery({
+    qrEl: el('link-qr'),
+    linkBtn: el('link-link-btn'),
+    toggleBtn: el('link-qr-toggle'),
+    link, qrData, push,
+  });
+}
+
+function startLinkWallet() {
+  clearTimeout(linkPollTimer);
+  linkPollGen++;
+  showPanel('link-panel');
+  renderLink({
+    sub: 'Prove a second wallet is yours — sign in with it, then it can receive your BRIX.',
+    buttons: true,
+  });
+}
+
+function finishLink(s) {
+  clearTimeout(linkPollTimer);
+  linkPollGen++;
+  toast(`🔗 Linked ${s.wallet}`);
+  loadBrix();
+  showMintHome();
+}
+
+async function startLinkJoey() {
+  const wc = wcConfig();
+  if (!wc) { showError('Joey Wallet is not available here.'); return; }
+  const gen = ++linkPollGen;
+  const stale = () => gen !== linkPollGen || !!(el('link-panel') || {}).hidden;
+  renderLink({ sub: 'Opening Joey Wallet…', spinner: true });
+  try {
+    const start = await api('/api/wallet/link', {
+      method: 'POST',
+      body: JSON.stringify({ provider: 'walletconnect' }),
+    });
+    const mod = await loadWc();
+    // fresh: the point is to bring a DIFFERENT wallet than the session's, so
+    // never silently reuse the pairing that is already signed in.
+    const { wallet } = await mod.connect({
+      projectId: wc.project_id, chain: wc.chain, metadata: wcMetadata(), fresh: true,
+    });
+    if (!wallet) throw new Error('Joey Wallet did not share an XRPL account.');
+    if (stale()) return;
+    renderLink({ sub: 'Approve the linking request in Joey Wallet…', spinner: true });
+    const resp = await mod.signTx({
+      chain: wc.chain, txJson: wcProofTx(wallet, start), autofill: false, submit: false,
+    });
+    const s = await api('/api/wallet/link/proof', {
+      method: 'POST',
+      body: JSON.stringify({ sign_id: start.sign_id, tx_json: resp.tx_json }),
+    });
+    if (stale()) return;
+    finishLink(s);
+  } catch (e) {
+    if (stale()) return;
+    if (signDeliveryPure.isWcRejection(e)) {
+      renderLink({ sub: 'Linking declined in Joey Wallet.', buttons: true });
+      return;
+    }
+    renderLink({ sub: e.message || 'Could not link that wallet.', buttons: true });
+  }
+}
+
+async function startLinkXaman() {
+  const gen = ++linkPollGen;
+  const stale = () => gen !== linkPollGen || !!(el('link-panel') || {}).hidden;
+  renderLink({ sub: 'Setting up the Xaman sign-in…', spinner: true });
+  let s;
+  try {
+    s = await api('/api/wallet/link', { method: 'POST', body: JSON.stringify({ provider: 'xaman' }) });
+  } catch (e) {
+    if (stale()) return;
+    renderLink({ sub: e.message || 'Could not start the Xaman sign-in.', buttons: true });
+    return;
+  }
+  if (stale()) return;
+  renderLink({
+    sub: 'Sign in with the OTHER wallet in Xaman — only approve if both wallets are yours.',
+    link: s.signin_link,
+    qrData: s.signin_link, // same as the sign-in panel: the deep link IS the QR
+  });
+  pollLinkXaman(s.uuid, gen);
+}
+
+function pollLinkXaman(uuid, gen) {
+  clearTimeout(linkPollTimer);
+  const stale = () => gen !== linkPollGen || !!(el('link-panel') || {}).hidden;
+  const tick = async () => {
+    if (stale()) return;
+    let s;
+    try {
+      s = await api(`/api/wallet/link/${uuid}`);
+    } catch (e) {
+      if (stale()) return;
+      const code = (e.body || {}).code;
+      if (code === 'same_wallet' || e.status === 404) {
+        renderLink({ sub: e.message || 'That is the wallet you are already signed in with.', buttons: true });
+        return;
+      }
+      linkPollTimer = setTimeout(tick, WC_POLL_MS); // transient; keep polling
+      return;
+    }
+    if (stale()) return;
+    if (s.state === 'linked') { finishLink(s); return; }
+    if (s.state === 'expired') {
+      renderLink({ sub: 'The sign-in request expired.', buttons: true });
+      return;
+    }
+    if (s.state === 'opened') {
+      renderLink({ sub: 'QR scanned — approve the sign-in in Xaman…', spinner: true });
+    }
+    linkPollTimer = setTimeout(tick, WC_POLL_MS);
+  };
+  linkPollTimer = setTimeout(tick, WC_POLL_MS);
 }
 
 // --- "Share on X" (#41 T9) ---------------------------------------------
@@ -648,7 +982,8 @@ async function setupTelegram() {
 const ALL_PANELS = ['register-panel', 'mint-panel', 'flow-panel', 'bulk-panel',
                     'swap-panel', 'swap-traits-panel', 'swap-result-panel',
                     'dressup-panel', 'market-panel', 'market-list-form-panel',
-                    'offers-panel', 'trustline-panel', 'claimall-panel'];
+                    'offers-panel', 'trustline-panel', 'claimall-panel',
+                    'link-panel'];
 
 function showPanel(id) {
   for (const panel of ALL_PANELS) {
@@ -1222,8 +1557,12 @@ async function startBrixTrustline({ back, onSet, wallet } = {}) {
   // in flight: this response owns nothing any more.
   if (gen !== trustlinePollGen || el('trustline-panel').hidden) return;
   if (s.state === 'already_set') { finishTrustline(s.state); return; }
+  const pending = brixPure.trustlineView('pending');
   renderTrustline({
-    ...brixPure.trustlineView('pending'),
+    ...pending,
+    // #447: a LINKED wallet's trustline is always a Xaman QR, even inside a
+    // Joey session (the server downgrades it) — name the wallet to scan with.
+    sub: wallet ? `Scan with the Xaman app holding ${wallet}` : pending.sub,
     link: s.xumm_url, qrData: s.xumm_url, push: s.push,
   });
   pollTrustline(s.uuid, s);
@@ -2217,11 +2556,46 @@ function pollWebSignin(uuid) {
   signinPollTimer = setTimeout(tick, 3000);
 }
 
+// The `provider` claim of a session token, read WITHOUT verifying the
+// signature — the server is the only thing that trusts this value; the client
+// uses it purely to decide whether to re-attach a Joey pairing (#447).
+function sessionProvider(token) {
+  try {
+    const body = token.split('.')[0].replace(/-/g, '+').replace(/_/g, '/');
+    return JSON.parse(atob(body)).provider || null;
+  } catch (_) {
+    return null;
+  }
+}
+
+// Re-attach the stored WalletConnect session. Resolves to the wallet, or null
+// when there is no live pairing left (wallet-side disconnect, cleared storage).
+async function wcRestore() {
+  const wc = wcConfig();
+  if (!wc) return null;
+  try {
+    const mod = await loadWc();
+    return await mod.restore({ projectId: wc.project_id, metadata: wcMetadata() });
+  } catch (e) {
+    console.error(e);
+    return null;
+  }
+}
+
 async function setupWeb() {
   let stored = null;
   try { stored = localStorage.getItem(WEB_SESSION_KEY); } catch (_) { /* private mode */ }
   if (stored) {
     sessionToken = stored;
+    // #447: a session minted through Joey needs its WalletConnect pairing
+    // back before any sign request can be delivered. If the pairing is gone,
+    // the LFG session is useless for signing — drop it and re-sign-in.
+    if (sessionProvider(stored) === 'walletconnect' && !(await wcRestore())) {
+      sessionToken = null;
+      try { localStorage.removeItem(WEB_SESSION_KEY); } catch (_) { /* private mode */ }
+      await startWebSignin();
+      return null;
+    }
     try {
       return await api('/api/me'); // still valid → straight in
     } catch (e) {
@@ -5105,6 +5479,17 @@ async function main() {
   el('swap-confirm-btn').onclick = confirmSwap;
   el('swap-done-btn').onclick = () => showMintHome();
   el('change-wallet-btn').onclick = () => (insideWeb ? startWebSignin() : startSignin());
+  // #447 — null-guarded: a cached older index.html has none of these nodes.
+  const wcBtn = el('register-wc-btn');
+  if (wcBtn) wcBtn.onclick = () => startWcSignin();
+  const linkBtn = el('link-wallet-btn');
+  if (linkBtn) linkBtn.onclick = () => startLinkWallet();
+  const linkJoey = el('link-joey-btn');
+  if (linkJoey) linkJoey.onclick = () => startLinkJoey();
+  const linkXaman = el('link-xaman-btn');
+  if (linkXaman) linkXaman.onclick = () => startLinkXaman();
+  const linkBack = el('link-back-btn');
+  if (linkBack) linkBack.onclick = () => { clearTimeout(linkPollTimer); linkPollGen++; showMintHome(); };
   el('flow-done-btn').onclick = () => { showMintHome(); };
   el('bulk-done-btn').onclick = () => { clearTimeout(bulkPollTimer); bulkPollGen++; currentBulkId = null; showMintHome(); };
   el('offers-btn').onclick = () => openOffers();
@@ -5143,6 +5528,7 @@ async function main() {
   // Dev live-reload: runs even in degraded mode (no frame_id).
   try {
     const cfg = await api('/api/config');
+    appCfg = cfg;
     // Closet / trait economy ships after the mainnet MVP: with the feature
     // off, hide the Build entry point (the API answers 403 regardless).
     if (cfg.economy_enabled === false) el('swap-btn').hidden = true;
@@ -5152,6 +5538,7 @@ async function main() {
     setupBulkStepper(cfg);
     applyShopVisibility(cfg);
     applyShareConfig(cfg);
+    applyWcVisibility();
     // Dev reload is same-origin only — never against a cross-origin API base.
     if (cfg.dev_mode && !API_BASE && 'EventSource' in window) {
       new EventSource('/__dev/reload').onmessage = () => location.reload();

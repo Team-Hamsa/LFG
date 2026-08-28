@@ -44,3 +44,43 @@ export function autoOpenOutcome(seen, link, launched) {
   if (launched === false) return seen.filter((l) => l !== link);
   return seen;
 }
+
+// --- WalletConnect / Joey Wallet (#447) ---------------------------------
+//
+// A WalletConnect sign request reuses every flow's existing `link` field, but
+// with an `lfg-wc://<request_id>` scheme in place of a xumm.app URL (see
+// lfg_core/signing/walletconnect.py). There is no QR and no deep link to
+// open: app.js hands the id to wcSign(), which fetches the txjson from
+// /api/sign/{id} and asks Joey to sign it.
+
+const WC_SCHEME = 'lfg-wc://';
+
+export function isWcLink(link) {
+  return typeof link === 'string' && link.startsWith(WC_SCHEME);
+}
+
+// The sign-request id carried by a WalletConnect link, or null for anything
+// else (including a scheme with no id after it).
+export function wcRequestId(link) {
+  if (!isWcLink(link)) return null;
+  return link.slice(WC_SCHEME.length) || null;
+}
+
+// What to POST to /api/sign/{id}/result for a Joey `xrpl_signTransaction`
+// response. `hash` is present only when the wallet actually SUBMITTED the
+// transaction; a submit that failed inside the wallet returns the signed
+// tx_json with no hash, which is a failure — never report it as success.
+export function wcResultAction(resp) {
+  const hash = resp && resp.hash;
+  if (typeof hash === 'string' && hash) return { hash };
+  return { error: 'no hash returned' };
+}
+
+// A user declining in Joey arrives as a WalletConnect JSON-RPC error rather
+// than a transport failure: post {rejected:true}, not {error}.
+export function isWcRejection(err) {
+  if (!err) return false;
+  const code = err.code;
+  if (code === 5000 || code === 4001) return true;
+  return typeof err.message === 'string' && /reject/i.test(err.message);
+}

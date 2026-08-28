@@ -44,6 +44,9 @@
       <img id="register-qr" class="qr" alt="Sign-in QR — scan with Xaman" hidden>
       <p><button id="register-link-btn" class="link" hidden>Open in Xaman ↗</button></p>
       <p><button id="register-retry-btn" class="primary" hidden>↻ Try again</button></p>
+      <!-- #447: WalletConnect / Joey Wallet arm. Hidden until /api/config
+           reports the feature armed for THIS surface. -->
+      <p><button id="register-wc-btn" class="secondary" hidden>🐨 Connect with Joey Wallet</button></p>
     </section>
 
     <!-- BRIX trustline flow (#441): the exit from a trustline_required
@@ -60,6 +63,21 @@
       <p><button id="trustline-back-btn" class="link">← Back</button></p>
     </section>
 
+    <!-- Link another wallet (#447): prove a SECOND wallet is yours so the
+         claim-all card can pay out to it. Two arms — a Joey proof signature
+         or a Xaman sign-in QR. -->
+    <section id="link-panel" class="card sticker" hidden>
+      <h2>🔗 Link another wallet</h2>
+      <p id="link-sub" class="card-sub"></p>
+      <div id="link-spinner" class="spinner" role="img" aria-label="Working…" hidden></div>
+      <p><button id="link-joey-btn" class="secondary" hidden>🐨 Prove with Joey</button></p>
+      <p><button id="link-xaman-btn" class="secondary" hidden>🪙 Prove with Xaman</button></p>
+      <button id="link-qr-toggle" class="link qr-toggle" hidden>Show QR to sign on another device</button>
+      <img id="link-qr" class="qr" alt="Wallet-link QR — scan with Xaman" hidden>
+      <p><button id="link-link-btn" class="link" hidden>Open in Xaman ↗</button></p>
+      <p><button id="link-back-btn" class="link">← Back</button></p>
+    </section>
+
     <section id="claimall-panel" class="card sticker" hidden>
       <h2>🧱 Claiming your BRIX</h2>
       <p id="claimall-sub" class="card-sub"></p>
@@ -69,7 +87,8 @@
 
     <section id="mint-panel" class="card sticker" hidden>
       <p class="wallet-line"><span class="wallet-lbl">Wallet</span> <code id="wallet-display"></code>
-        <button id="change-wallet-btn" class="link">change</button></p>
+        <button id="change-wallet-btn" class="link">change</button>
+        <button id="link-wallet-btn" class="link" hidden>link another</button></p>
       <div class="actions">
         <div class="mint-row">
           <button id="mint-btn" class="primary big">⛏️ Mint</button>
@@ -405,6 +424,6 @@
        Telegram (window.Telegram stays undefined); loaded BEFORE app.js so the
        dual-mode boot can detect the Telegram context. -->
   <script src="telegram-web-app.js"></script>
-  <script type="module" src="app.js?v=78"></script>
+  <script type="module" src="app.js?v=79"></script>
 </body>
 </html>
