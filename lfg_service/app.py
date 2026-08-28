@@ -80,6 +80,7 @@ from lfg_core import (
     xumm_ops,
 )
 from lfg_core.db_helpers import get_nft_data, record_nft_mint
+from lfg_core.signing import context as signing_context
 from lfg_core.user_db import create_users_table, get_user, register_user
 from lfg_service import identity as identity_store
 from lfg_service import x_oauth
@@ -694,6 +695,7 @@ def make_session_token(user: dict[str, Any]) -> str:
         "id": user["id"],
         "name": user["name"],
         "platform": user.get("platform", "discord"),
+        "provider": user.get("provider", "xaman"),
         "exp": int(time.time()) + SESSION_TTL,
     }
     body = base64.urlsafe_b64encode(json.dumps(payload).encode()).decode()
@@ -766,7 +768,12 @@ def require_auth(handler):
         if not user:
             return web.json_response({"error": "unauthorized"}, status=401)
         request["user"] = user
-        return await handler(request)
+        # #447: the provider a user signed in with is ambient for the request
+        # (and for tasks the handler spawns). Web sessions use the wallet as
+        # the platform_user_id, so it doubles as the WC "sign as" account.
+        wallet = user["id"] if user.get("platform") == "web" else None
+        with signing_context.use(user.get("provider", "xaman"), wallet):
+            return await handler(request)
 
     return wrapper
 
