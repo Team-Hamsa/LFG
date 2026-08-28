@@ -19,6 +19,7 @@ from xrpl.utils import xrp_to_drops
 
 from lfg_core import config, memos
 from lfg_core.signing import provenance
+from lfg_core.signing.types import SignRequest
 
 _XUMM_HEADERS = {
     "accept": "application/json",
@@ -225,6 +226,25 @@ async def _post_xumm_payload(payload: dict[str, Any]) -> dict[str, Any]:
     }
 
 
+def should_use_walletconnect(txjson: dict[str, Any]) -> bool:
+    """#447: ambient dispatch. WalletConnect only when the session is a WC one
+    AND the tx is signable by the connected account (spec §3 cross-wallet
+    rule) AND it is a real transaction (SignIn is Xaman's pseudo-tx)."""
+    from lfg_core.signing import context
+
+    if context.current_provider() != "walletconnect":
+        return False
+    if txjson.get("TransactionType") == "SignIn":
+        return False
+    wallet = context.current_wallet()
+    if wallet and txjson.get("Account") == wallet:
+        return True
+    logging.info(
+        f"sign request for {txjson.get('Account')} downgraded to xaman (session wallet {wallet})"
+    )
+    return False
+
+
 async def _create_xumm_payload(
     txjson: dict[str, Any],
     options: dict[str, Any] | None = None,
@@ -242,6 +262,17 @@ async def _create_xumm_payload(
     QR/deep-link sign). If payload creation itself fails WITH a token (e.g. a
     token XUMM rejects outright after an app-key rotation), it is retried once
     without the token so a bad stored token can never block signing."""
+    if should_use_walletconnect(txjson):
+        # Before any XUMM network call, and before stamping: the provider
+        # template (BaseSigningProvider.create) stamps and validates, so
+        # doing it here too would be a second, divergable copy.
+        from lfg_core.signing import get_provider
+
+        handle = await get_provider("walletconnect").create(
+            SignRequest(txjson=txjson, memos_json=memos_json, options=options, user_token=None)
+        )
+        return handle.raw if handle else None
+
     # Make Waves hackathon: every signed transaction must carry the source tag,
     # and provenance memos (#54). SignIn is a pseudo-transaction (no ledger
     # effect), so it is exempt from both.
@@ -640,7 +671,16 @@ async def cancel_xumm_payload(uuid: str) -> bool:
     """Cancel one open XUMM payload (DELETE /payload/{uuid}). Returns True
     only when XUMM confirms it cancelled; False for already-resolved/expired/
     opened payloads and for transport errors (safe to call blindly during a
-    backlog cleanup — see scripts/cancel_xumm_payloads.py)."""
+    backlog cleanup — see scripts/cancel_xumm_payloads.py).
+
+    A `wc-` id is a WalletConnect sign request, not a XUMM payload — cancel it
+    in our own store instead of DELETEing a uuid XUMM never issued (#447)."""
+    from lfg_core.signing.walletconnect import is_wc_id
+
+    if is_wc_id(uuid):
+        from lfg_core.signing import store
+
+        return store.set_state(uuid, "cancelled")
     if rate_limited():
         logging.warning(f"XUMM payload cancel {uuid} skipped: rate-limit cooldown active")
         return False
@@ -780,7 +820,14 @@ async def get_payload_status(uuid: str, *, force: bool = False) -> dict[str, Any
     expired, and the signing account once signed. Served from the event-fed
     cache when possible (see above); force=True bypasses the cache and the
     freshness throttle (the ws watcher uses it on events). None on API errors
-    or a malformed uuid (which is interpolated into the API URL)."""
+    or a malformed uuid (which is interpolated into the API URL).
+
+    WalletConnect ids are answered from our own store, BEFORE the uuid check
+    below (which would reject them as malformed) (#447)."""
+    from lfg_core.signing.walletconnect import WalletConnectProvider, is_wc_id
+
+    if is_wc_id(uuid):
+        return WalletConnectProvider.status_dict(uuid)
     if not (isinstance(uuid, str) and _UUID_RE.match(uuid)):
         logging.error(f"Invalid XUMM payload uuid: {uuid!r}")
         return None

@@ -35,6 +35,8 @@ async def main() -> int:
     uuids = []
     for line in fileinput.input(args.files):
         candidate = line.strip()
+        # Only XUMM uuids: `wc-` WalletConnect sign-request ids (#447) never
+        # match this regex, so they are skipped here by construction.
         if _UUID.match(candidate):
             uuids.append(candidate)
     uuids = list(dict.fromkeys(uuids))
