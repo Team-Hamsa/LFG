@@ -1,0 +1,55 @@
+import time
+
+import pytest
+
+from lfg_core.signing import store
+
+
+@pytest.fixture(autouse=True)
+def _db(tmp_path, monkeypatch):
+    monkeypatch.setattr(store, "DATABASE", str(tmp_path / "app.db"))
+    store.ensure_table()
+
+
+def test_create_and_get_round_trip():
+    row = store.create(
+        wallet="rA",
+        purpose="tx",
+        txjson={"TransactionType": "Payment"},
+        nonce=None,
+        ttl_seconds=900,
+        ip="1.1.1.1",
+    )
+    assert row["id"].startswith("wc-") and len(row["id"]) == 3 + 32
+    got = store.get(row["id"])
+    assert got["state"] == "pending" and got["txjson"] == {"TransactionType": "Payment"}
+    assert got["expires_at"] > time.time() + 800
+
+
+def test_get_unknown_is_none():
+    assert store.get("wc-nope") is None
+
+
+def test_set_state_is_compare_and_set():
+    row = store.create(wallet="rA", purpose="signin", txjson=None, nonce="abc", ttl_seconds=300)
+    assert store.set_state(row["id"], "consumed") is True
+    assert store.set_state(row["id"], "consumed") is False  # already consumed
+    assert store.get(row["id"])["state"] == "consumed"
+
+
+def test_set_state_records_txid_and_result():
+    row = store.create(wallet="rA", purpose="tx", txjson={}, nonce=None, ttl_seconds=900)
+    assert store.set_state(row["id"], "signed", txid="ABC", result={"ok": 1})
+    got = store.get(row["id"])
+    assert got["txid"] == "ABC" and got["result"] == {"ok": 1}
+
+
+def test_expire_stale_flips_only_pending_past_deadline():
+    old = store.create(wallet="rA", purpose="tx", txjson={}, nonce=None, ttl_seconds=1)
+    fresh = store.create(wallet="rA", purpose="tx", txjson={}, nonce=None, ttl_seconds=900)
+    done = store.create(wallet="rA", purpose="tx", txjson={}, nonce=None, ttl_seconds=1)
+    store.set_state(done["id"], "signed")
+    assert store.expire_stale(now=time.time() + 5) == 1
+    assert store.get(old["id"])["state"] == "expired"
+    assert store.get(fresh["id"])["state"] == "pending"
+    assert store.get(done["id"])["state"] == "signed"

@@ -81,6 +81,7 @@ from lfg_core import (
 )
 from lfg_core.db_helpers import get_nft_data, record_nft_mint
 from lfg_core.signing import context as signing_context
+from lfg_core.signing import store as sign_request_store
 from lfg_core.user_db import create_users_table, get_user, register_user
 from lfg_service import identity as identity_store
 from lfg_service import x_oauth
@@ -8387,6 +8388,7 @@ async def no_cache_mw(request, handler):
 def create_app() -> web.Application:
     app = web.Application(middlewares=[cors_mw, no_cache_mw])
     identity_store.ensure_identities_table()
+    sign_request_store.ensure_table()
     identity_store.migrate_users_to_identities()
     app.router.add_get("/api/config", handle_config)
     app.router.add_get("/api/health", handle_health)
