@@ -19,6 +19,7 @@ import mimetypes
 import os
 import pathlib
 import re
+import secrets
 import sqlite3
 import sys
 import tempfile
@@ -28,7 +29,7 @@ import traceback
 import uuid as uuid_lib
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, field
-from decimal import Decimal
+from decimal import Decimal, InvalidOperation
 from html import escape
 from typing import Any, TypeVar, cast
 from urllib.parse import urlparse
@@ -80,6 +81,9 @@ from lfg_core import (
     xumm_ops,
 )
 from lfg_core.db_helpers import get_nft_data, record_nft_mint
+from lfg_core.signing import context as signing_context
+from lfg_core.signing import proof as signing_proof
+from lfg_core.signing import store as sign_request_store
 from lfg_core.user_db import create_users_table, get_user, register_user
 from lfg_service import identity as identity_store
 from lfg_service import x_oauth
@@ -694,6 +698,7 @@ def make_session_token(user: dict[str, Any]) -> str:
         "id": user["id"],
         "name": user["name"],
         "platform": user.get("platform", "discord"),
+        "provider": user.get("provider", "xaman"),
         "exp": int(time.time()) + SESSION_TTL,
     }
     body = base64.urlsafe_b64encode(json.dumps(payload).encode()).decode()
@@ -766,7 +771,12 @@ def require_auth(handler):
         if not user:
             return web.json_response({"error": "unauthorized"}, status=401)
         request["user"] = user
-        return await handler(request)
+        # #447: the provider a user signed in with is ambient for the request
+        # (and for tasks the handler spawns). Web sessions use the wallet as
+        # the platform_user_id, so it doubles as the WC "sign as" account.
+        wallet = user["id"] if user.get("platform") == "web" else None
+        with signing_context.use(user.get("provider", "xaman"), wallet):
+            return await handler(request)
 
     return wrapper
 
@@ -4751,18 +4761,26 @@ async def sweep_pending_closet_accepts() -> None:
 
 async def _settlement_sweep_loop() -> None:
     while True:
+        if config.ECONOMY_ENABLED:
+            # The economy sweeps read trait-economy tables that only exist when
+            # the economy is on; the loop itself may now be running purely for
+            # the WalletConnect sweep below.
+            try:
+                await settle_pending_trait_sales()
+            except Exception:
+                logging.error(f"settlement sweep loop crashed: {traceback.format_exc()}")
+            try:
+                await sweep_shop_orders()
+            except Exception:
+                logging.error(f"shop sweep loop crashed: {traceback.format_exc()}")
+            try:
+                await sweep_pending_closet_accepts()
+            except Exception:
+                logging.error(f"closet pending-accept sweep loop crashed: {traceback.format_exc()}")
         try:
-            await settle_pending_trait_sales()
+            await sweep_sign_requests()
         except Exception:
-            logging.error(f"settlement sweep loop crashed: {traceback.format_exc()}")
-        try:
-            await sweep_shop_orders()
-        except Exception:
-            logging.error(f"shop sweep loop crashed: {traceback.format_exc()}")
-        try:
-            await sweep_pending_closet_accepts()
-        except Exception:
-            logging.error(f"closet pending-accept sweep loop crashed: {traceback.format_exc()}")
+            logging.error(f"sign request sweep loop crashed: {traceback.format_exc()}")
         await asyncio.sleep(_SWEEP_PERIOD_SECONDS)
 
 
@@ -4800,9 +4818,13 @@ async def _start_brix_claim_recovery(app: web.Application) -> None:
 
 async def _start_settlement_sweep(app: web.Application) -> None:
     """aiohttp on_startup hook: schedule the settlement sweep as a background
-    task for the lifetime of the app. Gated on ECONOMY_ENABLED — with the
-    trait economy off there are no trait listings to settle."""
-    if not config.ECONOMY_ENABLED:
+    task for the lifetime of the app.
+
+    Started when the trait economy has listings to settle OR WalletConnect is
+    configured — the loop also retires lapsed sign requests (#447), which is
+    independent of the economy.
+    """
+    if not (config.ECONOMY_ENABLED or config.wc_enabled()):
         return
     app["settlement_sweep_task"] = asyncio.get_event_loop().create_task(_settlement_sweep_loop())
 
@@ -7259,6 +7281,7 @@ web_signin_payloads: dict[str, Any] = {}
 WEB_SIGNIN_RATE_MAX = 5  # payload creations…
 WEB_SIGNIN_RATE_WINDOW = 60.0  # …per IP per window (protects the XUMM API)
 _web_signin_hits: dict[str, list[float]] = {}
+_web_proof_hits: dict[str, list[float]] = {}  # …and the same, for /api/web/signin/proof
 
 
 def _client_ip(request) -> str:
@@ -7272,15 +7295,25 @@ def _client_ip(request) -> str:
     return request.remote or "?"
 
 
-def _web_rate_limited(ip: str) -> bool:
+def _rate_limited(bucket: dict[str, list[float]], ip: str) -> bool:
     now = time.time()
-    hits = [t for t in _web_signin_hits.get(ip, []) if now - t < WEB_SIGNIN_RATE_WINDOW]
+    hits = [t for t in bucket.get(ip, []) if now - t < WEB_SIGNIN_RATE_WINDOW]
     if len(hits) >= WEB_SIGNIN_RATE_MAX:
-        _web_signin_hits[ip] = hits
+        bucket[ip] = hits
         return True
     hits.append(now)
-    _web_signin_hits[ip] = hits
+    bucket[ip] = hits
     return False
+
+
+def _web_rate_limited(ip: str) -> bool:
+    return _rate_limited(_web_signin_hits, ip)
+
+
+def _web_proof_rate_limited(ip: str) -> bool:
+    # A SEPARATE bucket from the start limiter: a fumbled signature (or a
+    # client retry loop) must never lock the caller out of the Xaman arm.
+    return _rate_limited(_web_proof_hits, ip)
 
 
 def _prune_web_signin_payloads():
@@ -7290,17 +7323,72 @@ def _prune_web_signin_payloads():
         if rec["created_at"] < cutoff:
             del web_signin_payloads[uuid]
     # Rate-limit bookkeeping must not grow forever across distinct IPs.
-    for ip, hits in list(_web_signin_hits.items()):
-        if all(now - t >= WEB_SIGNIN_RATE_WINDOW for t in hits):
-            del _web_signin_hits[ip]
+    for bucket in (_web_signin_hits, _web_proof_hits):
+        for ip, hits in list(bucket.items()):
+            if all(now - t >= WEB_SIGNIN_RATE_WINDOW for t in hits):
+                del bucket[ip]
+
+
+# The proof Memos are account-independent, so they can be built against any
+# address; the client fills in its own Account. ACCOUNT_ZERO is used as an
+# unmistakably-not-a-user placeholder.
+_MEMO_TEMPLATE_ACCOUNT = "rrrrrrrrrrrrrrrrrrrrrhoLvTp"
+# A proof carries a handful of small fields plus our memos. Anything larger is
+# not a proof — refuse it before spending CPU on signature verification.
+WC_PROOF_MAX_BYTES = 8192
+
+
+async def _json_body(request) -> dict[str, Any]:
+    try:
+        body = await request.json()
+    except Exception:
+        return {}
+    return body if isinstance(body, dict) else {}
 
 
 async def handle_web_signin_start(request):
-    """Create a XUMM SignIn payload for the standalone web surface — no session
-    required (this IS how a web session begins)."""
+    """Begin a web sign-in.
+
+    Default (`provider` absent/`"xaman"`): create a XUMM SignIn payload — no
+    session required, this IS how a web session begins. With
+    `provider="walletconnect"` (#447) there is no XUMM payload at all: we issue
+    a durable server-side nonce the wallet signs into a never-submitted proof
+    transaction, redeemed at POST /api/web/signin/proof.
+    """
+    body = await _json_body(request)
+    provider = str(body.get("provider") or "xaman")
+    # The feature gate is checked BEFORE the limiter: a 503 for an unconfigured
+    # provider must not burn the caller's XUMM sign-in budget.
+    if provider == "walletconnect" and not config.wc_enabled():
+        return web.json_response(
+            {"error": "walletconnect is not configured", "code": "wc_disabled"}, status=503
+        )
     if _web_rate_limited(_client_ip(request)):
         return web.json_response(
             {"error": "too many sign-in attempts", "code": "rate_limited"}, status=429
+        )
+    if provider == "walletconnect":
+        nonce = secrets.token_hex(32)
+        row = await asyncio.to_thread(
+            sign_request_store.create,
+            wallet="",  # unknown until the proof names it
+            purpose="signin",
+            txjson=None,
+            nonce=nonce,
+            ttl_seconds=signing_proof.SIGNIN_TTL,
+            ip=_client_ip(request),
+        )
+        return web.json_response(
+            {
+                "sign_id": row["id"],
+                "nonce": nonce,
+                "source_tag": config.SOURCE_TAG,
+                "memos": signing_proof.build_proof_tx(
+                    _MEMO_TEMPLATE_ACCOUNT, nonce, memos.ACTION_SIGNIN
+                )["Memos"],
+                "expires_at": row["expires_at"],
+                "provider": "walletconnect",
+            }
         )
     _prune_web_signin_payloads()
     # Only an allowlisted Origin becomes the Xaman post-sign bounce target —
@@ -7314,6 +7402,31 @@ async def handle_web_signin_start(request):
     return web.json_response({"uuid": payload["uuid"], "signin_link": payload["xumm_url"]})
 
 
+async def _finish_web_signin(wallet: str, provider: str) -> web.Response:
+    """Link the proven wallet as a platform="web" identity and issue its token.
+
+    Shared by both web sign-in arms: the XUMM SignIn poll and the
+    WalletConnect signed-proof redemption (#447).
+    """
+    # A wallet already known from another surface keeps its display handle;
+    # a brand-new one gets a readable shortened address.
+    handle = await asyncio.to_thread(identity_store.handle_for_wallet, wallet)
+    name = handle or f"{wallet[:6]}…{wallet[-4:]}"
+    if not await asyncio.to_thread(identity_store.link, "web", wallet, name, wallet):
+        return web.json_response({"error": "identity link failed"}, status=500)
+    token = make_session_token(
+        {"id": wallet, "name": name, "platform": "web", "provider": provider}
+    )
+    return web.json_response(
+        {
+            "state": "signed",
+            "wallet": wallet,
+            "session_token": token,
+            "user": {"id": wallet, "username": name},
+        }
+    )
+
+
 async def handle_web_signin_status(request):
     uuid = request.match_info["payload_uuid"]
     if uuid not in web_signin_payloads:
@@ -7323,29 +7436,768 @@ async def handle_web_signin_status(request):
         return web.json_response({"error": "could not reach Xaman"}, status=502)
     if s["signed"] and s["account"] and is_valid_classic_address(s["account"]):
         wallet = s["account"]
-        # A wallet already known from another surface keeps its display handle;
-        # a brand-new one gets a readable shortened address.
-        handle = await asyncio.to_thread(identity_store.handle_for_wallet, wallet)
-        name = handle or f"{wallet[:6]}…{wallet[-4:]}"
-        if not await asyncio.to_thread(identity_store.link, "web", wallet, name, wallet):
-            return web.json_response({"error": "identity link failed"}, status=500)
         # #135: capture the push token so later sign requests push to Xaman.
+        # Only XUMM issues one, so this stays on the Xaman path.
         if s.get("user_token"):
             await asyncio.to_thread(
                 identity_store.set_user_token, "web", wallet, s["user_token"], signer_wallet=wallet
             )
-        del web_signin_payloads[uuid]
-        token = make_session_token({"id": wallet, "name": name, "platform": "web"})
-        return web.json_response(
-            {
-                "state": "signed",
-                "wallet": wallet,
-                "session_token": token,
-                "user": {"id": wallet, "username": name},
-            }
-        )
+        resp = await _finish_web_signin(wallet, "xaman")
+        if resp.status == 200:
+            del web_signin_payloads[uuid]
+        return resp
     if s["expired"]:
         del web_signin_payloads[uuid]
+        return web.json_response({"state": "expired"})
+    return web.json_response({"state": "opened" if s["opened"] else "pending"})
+
+
+async def _redeem_proof(
+    sign_id: str,
+    tx_json: Any,
+    *,
+    purpose: str,
+    action: str,
+    wallet_hint: str | None = None,
+    expect_wallet: str | None = None,
+    on_verified: Callable[[str], Awaitable[web.Response | None]] | None = None,
+) -> tuple[str, None] | tuple[None, web.Response]:
+    """Load → validate → verify → consume one signed-proof row (#447).
+
+    The single implementation shared by web sign-in and wallet linking, so the
+    two can never drift on the parts that matter: which rows are redeemable,
+    what each refusal looks like, and — critically — that the row is
+    compare-and-set to `consumed` before the caller acts on the proof, so a
+    replay loses the race and gets a 409.
+
+    `expect_wallet` scopes a row to the session that created it (a mismatch is
+    a 404, not a 403 — an authed caller learns nothing about other sessions'
+    ids). `on_verified` runs AFTER the signature verifies but BEFORE the row is
+    consumed. Two reasons that ordering matters: a semantic refusal (e.g.
+    proving the wallet you already are) leaves the nonce usable for the correct
+    wallet, and a durable side effect performed there is committed BEFORE the
+    row is spent — so a side effect that fails leaves the row pending and
+    retryable, and if the consume then loses the CAS race the side effect is
+    already durable (it must therefore be idempotent).
+
+    Returns `(wallet, None)` on success, `(None, response)` otherwise.
+    """
+    row = await asyncio.to_thread(sign_request_store.get, sign_id)
+    if row is None or row.get("purpose") != purpose:
+        return None, web.json_response({"error": "not found"}, status=404)
+    if expect_wallet is not None and row.get("wallet") != expect_wallet:
+        return None, web.json_response({"error": "not found"}, status=404)
+    # A row already spent stays 409 even once its TTL lapses — "you used this"
+    # is the more precise answer than "this timed out".
+    if row["state"] == "expired":
+        return None, web.json_response(
+            {"error": "sign-in expired", "code": "proof_expired"}, status=410
+        )
+    if row["state"] != "pending":
+        return None, web.json_response(
+            {"error": "already used", "code": "proof_replayed"}, status=409
+        )
+    if row["expires_at"] < time.time():
+        await asyncio.to_thread(sign_request_store.set_state, sign_id, "expired")
+        return None, web.json_response(
+            {"error": "sign-in expired", "code": "proof_expired"}, status=410
+        )
+    # Proof Memos are otherwise unbounded — cap the body before verifying.
+    if not isinstance(tx_json, dict) or len(json.dumps(tx_json)) > WC_PROOF_MAX_BYTES:
+        return None, web.json_response({"error": "bad proof", "code": "bad_proof"}, status=400)
+    try:
+        # Signature verification is CPU-bound — keep it off the event loop.
+        wallet = await asyncio.to_thread(
+            signing_proof.verify_proof,
+            tx_json,
+            wallet_hint=wallet_hint,
+            nonce=row["nonce"],
+            action=action,
+        )
+    except signing_proof.ProofError as e:
+        logging.warning(f"bad {purpose} proof {sign_id}: {e.reason}")
+        return None, web.json_response({"error": "bad proof", "code": "bad_proof"}, status=400)
+    if on_verified is not None:
+        refusal = await on_verified(wallet)
+        if refusal is not None:
+            return None, refusal
+    if not await asyncio.to_thread(
+        sign_request_store.set_state, sign_id, "consumed", result={"wallet": wallet}
+    ):
+        return None, web.json_response(
+            {"error": "already used", "code": "proof_replayed"}, status=409
+        )
+    return wallet, None
+
+
+async def handle_web_signin_proof(request):
+    """Redeem a signed wallet-ownership proof for a web session (#447).
+
+    No auth: the bearer secret is the single-use `sign_id`, and the proof is
+    only accepted if it carries THAT row's server-issued nonce and verifies
+    against the signing key it names.
+    """
+    if _web_proof_rate_limited(_client_ip(request)):
+        return web.json_response(
+            {"error": "too many sign-in attempts", "code": "rate_limited"}, status=429
+        )
+    _prune_web_signin_payloads()
+    body = await _json_body(request)
+    wallet, refusal = await _redeem_proof(
+        str(body.get("sign_id") or ""),
+        body.get("tx_json"),
+        purpose="signin",
+        action=memos.ACTION_SIGNIN,
+    )
+    if refusal is not None:
+        return refusal
+    return await _finish_web_signin(cast(str, wallet), "walletconnect")
+
+
+# --- Explicit wallet linking (#447) ------------------------------------------
+# WalletConnect sign requests (#447): the browser fetches the txjson we asked
+# for, has Joey sign+submit it, and posts the hash back. The claimed hash is
+# never trusted on its word — it is fetched from the ledger and compared
+# field-by-field against what we stored before the row can read "signed".
+
+# Fields the WALLET fills in when it signs. They are not part of what we asked
+# to be signed, so they can never be a mismatch.
+_AUTOFILL_KEYS = frozenset(
+    {
+        "Fee",
+        "Sequence",
+        "LastLedgerSequence",
+        "Flags",
+        "TicketSequence",
+        "AccountTxnID",
+        "NetworkID",
+    }
+)
+# Read-only fields the `tx` RPC bolts onto the transaction it returns. Kept
+# separate from _AUTOFILL_KEYS so the two intents stay readable: these were
+# never signed by anyone, they are the server describing the tx.
+_LEDGER_EXTRA_KEYS = frozenset(
+    {
+        "hash",
+        "ctid",
+        "date",
+        "ledger_index",
+        "inLedger",
+        "validated",
+        "meta",
+        "meta_blob",
+        "tx_blob",
+        "status",
+        "close_time_iso",
+        "DeliverMax",
+        "TxnSignature",
+        "SigningPubKey",
+        "Signers",
+        "NetworkID",
+        "ledger_hash",
+    }
+)
+_TX_HASH_RE = re.compile(r"^[0-9A-Fa-f]{64}$")
+_SIGN_RESULT_RETENTION_SECONDS = 7 * 86400
+# Every wallet sets tfFullyCanonicalSig; it is noise, not intent.
+_TF_FULLY_CANONICAL_SIG = 0x80000000
+_RIPPLE_EPOCH_OFFSET = 946684800
+# How far a validated tx may predate its own sign request — clock skew between
+# us and the ledger's close time, nothing more.
+_SIGN_TX_TIME_SLACK_SECONDS = 120
+# A result posted at the very edge of the TTL (the wallet was slow, the tx
+# validated just in time) is still honoured; past this grace the row is
+# abandoned, not late.
+_SIGN_RESULT_GRACE_SECONDS = 60
+
+
+def _flags_match(stored: dict[str, Any], onledger: dict[str, Any]) -> bool:
+    """Compare Flags with tfFullyCanonicalSig masked off on both sides.
+
+    Anything left is intent: a flag WE set must survive, and a flag the wallet
+    added on its own (tfPartialPayment, say) is tampering, not autofill.
+    """
+
+    def _mask(value: Any) -> int:
+        return (value & ~_TF_FULLY_CANONICAL_SIG) if isinstance(value, int) else 0
+
+    return _mask(stored.get("Flags")) == _mask(onledger.get("Flags"))
+
+
+# rippled hands blob fields back UPPER-case hex and canonicalizes IOU `value`
+# strings ("5" → "5" but "5.0" → "5", 40-char currency codes upper-cased), so a
+# raw `!=` against the txjson WE stored (lower-case hex memos, whatever decimal
+# shape the caller wrote) would flag every honest transaction a mismatch.
+# Normalize both sides into one shape before comparing — the comparison stays
+# strict, it just stops reading encoding as tampering.
+_HEX_BLOB_KEYS = frozenset(
+    {
+        "URI",
+        "Domain",
+        "InvoiceID",
+        "EmailHash",
+        "MemoType",
+        "MemoData",
+        "MemoFormat",
+        "NFTokenID",
+        "NFTokenOfferID",
+        "Digest",
+        "WalletLocator",
+        "Condition",
+        "Fulfillment",
+        "MessageKey",
+    }
+)
+# Fields whose scalar form is XRP drops — an integer string, so "10" == "010".
+_AMOUNT_KEYS = frozenset(
+    {
+        "Amount",
+        "LimitAmount",
+        "SendMax",
+        "DeliverMin",
+        "DeliverMax",
+        "TakerPays",
+        "TakerGets",
+        "NFTokenBrokerFee",
+    }
+)
+_HEX_RE = re.compile(r"^[0-9a-fA-F]*$")
+_CURRENCY_HEX_RE = re.compile(r"^[0-9a-fA-F]{40}$")
+
+
+def _canonical_decimal(value: str) -> str:
+    """ "5.0" and "5" are the same IOU amount; render both the same way."""
+    try:
+        dec = Decimal(value)
+    except (InvalidOperation, ValueError):
+        return value
+    if not dec.is_finite():
+        return value
+    dec = dec.normalize()
+    if dec == dec.to_integral_value():
+        dec = dec.quantize(Decimal(1))
+    return format(dec, "f")
+
+
+def _canonical_tx_field(key: str, value: Any) -> Any:
+    """Encoding-insensitive form of one transaction field (recursive)."""
+    if isinstance(value, dict):
+        if "currency" in value and "value" in value:
+            out: dict[str, Any] = {}
+            for k, v in value.items():
+                if k == "value" and isinstance(v, str):
+                    out[k] = _canonical_decimal(v)
+                elif k == "currency" and isinstance(v, str) and _CURRENCY_HEX_RE.match(v):
+                    out[k] = v.upper()
+                else:
+                    out[k] = _canonical_tx_field(k, v)
+            return out
+        return {k: _canonical_tx_field(k, v) for k, v in value.items()}
+    if isinstance(value, list):
+        return [_canonical_tx_field(key, v) for v in value]
+    if isinstance(value, str):
+        if key in _HEX_BLOB_KEYS and _HEX_RE.match(value):
+            return value.upper()
+        if key in _AMOUNT_KEYS:
+            try:
+                return str(int(value))
+            except ValueError:
+                return value
+        if key == "currency" and _CURRENCY_HEX_RE.match(value):
+            return value.upper()
+    return value
+
+
+def _semantic_match(stored: dict[str, Any], onledger: dict[str, Any]) -> bool:
+    """True when the on-ledger transaction is EXACTLY what we asked for.
+
+    Strict in both directions: every field we set must survive unchanged, and
+    the ledger tx may carry no field beyond ours plus the wallet/RPC additions
+    above — an injected Destination or Expiration is a mismatch.
+    """
+    allowed = set(stored) | _AUTOFILL_KEYS | _LEDGER_EXTRA_KEYS
+    if any(key not in allowed for key in onledger):
+        return False
+    for key, value in stored.items():
+        if key in _AUTOFILL_KEYS:
+            continue
+        if _canonical_tx_field(key, onledger.get(key)) != _canonical_tx_field(key, value):
+            return False
+    return _flags_match(stored, onledger)
+
+
+def _ledger_tx_time(tx: dict[str, Any], result: dict[str, Any]) -> float | None:
+    """Wall-clock close time of a validated tx, or None if the server told us
+    neither `close_time_iso` nor `date`."""
+    for src in (tx, result):
+        iso = src.get("close_time_iso")
+        if isinstance(iso, str):
+            try:
+                return datetime.datetime.fromisoformat(iso.replace("Z", "+00:00")).timestamp()
+            except ValueError:
+                pass
+    for src in (tx, result):
+        date = src.get("date")
+        if isinstance(date, int):
+            return float(date + _RIPPLE_EPOCH_OFFSET)
+    return None
+
+
+def _sign_row_for(row: dict[str, Any] | None, wallet: str) -> web.Response | None:
+    """Shared ownership gate: 404 for unknown/not-a-tx, 403 for someone else's."""
+    if row is None or row.get("purpose") != "tx":
+        return web.json_response({"error": "not found"}, status=404)
+    if row.get("wallet") != wallet:
+        return web.json_response(
+            {"error": "not your sign request", "code": "not_your_request"}, status=403
+        )
+    return None
+
+
+async def _record_sign_outcome(
+    request_id: str,
+    state: str,
+    *,
+    response: web.Response,
+    txid: str | None = None,
+    result: dict[str, Any] | None = None,
+) -> web.Response:
+    """Write a terminal state, honouring the store's compare-and-set.
+
+    Losing the CAS means a concurrent post resolved the row first; answer with
+    what the row actually says rather than a state we did not write.
+    """
+    try:
+        claimed = await asyncio.to_thread(
+            sign_request_store.set_state, request_id, state, txid=txid, result=result
+        )
+    except sign_request_store.TxidClaimed:
+        # Lost the race for this hash between txid_in_use() and the write —
+        # exactly the case that pre-check exists to catch cheaply. Same
+        # outcome: this row did not earn the transaction.
+        logging.warning(f"sign result {request_id}: hash {txid} already claimed by another request")
+        return await _record_sign_outcome(
+            request_id,
+            "mismatch",
+            result={"hash": txid},
+            response=web.json_response(
+                {"error": "the signed transaction does not match", "code": "tx_mismatch"},
+                status=409,
+            ),
+        )
+    if claimed:
+        return response
+    row = await asyncio.to_thread(sign_request_store.get, request_id)
+    if row is None:
+        return web.json_response({"error": "not found"}, status=404)
+    if row["state"] == "signed" and txid is not None and row.get("txid") == txid:
+        return web.json_response({"state": "signed", "txid": row["txid"]})
+    return web.json_response(
+        {"error": "already resolved", "code": "already_resolved", "state": row["state"]},
+        status=409,
+    )
+
+
+@require_wallet
+async def handle_sign_request(request):
+    """Fetch a pending WalletConnect sign request's transaction (#447)."""
+    request_id = request.match_info["request_id"]
+    await asyncio.to_thread(sign_request_store.expire_stale)
+    row = await asyncio.to_thread(sign_request_store.get, request_id)
+    # A foreign row is a 404, not a 403: an authed caller learns nothing about
+    # other sessions' request ids.
+    if row is None or row.get("purpose") != "tx" or row.get("wallet") != request["wallet"]:
+        return web.json_response({"error": "not found"}, status=404)
+    return web.json_response(
+        {
+            "id": row["id"],
+            "state": row["state"],
+            "txjson": row["txjson"],
+            "expires_at": row["expires_at"],
+            "txid": row.get("txid"),
+        }
+    )
+
+
+@require_wallet
+async def handle_sign_result(request):
+    """Record the outcome of a WalletConnect sign request (#447).
+
+    A `hash` is only believed after the transaction is found VALIDATED on-ledger
+    and matches the txjson we stored — signer, type, and every field we set.
+    Anything else flags the row `mismatch` and is refused.
+    """
+    request_id = request.match_info["request_id"]
+    body = await _json_body(request)
+    row = await asyncio.to_thread(sign_request_store.get, request_id)
+    refusal = _sign_row_for(row, request["wallet"])
+    if refusal is not None:
+        return refusal
+    assert row is not None
+
+    tx_hash = body.get("hash")
+    if tx_hash is not None:
+        if not isinstance(tx_hash, str) or not _TX_HASH_RE.match(tx_hash):
+            return web.json_response(
+                {"error": "hash must be 64 hex characters", "code": "bad_request"}, status=400
+            )
+        tx_hash = tx_hash.upper()
+    elif not (body.get("rejected") or body.get("error")):
+        return web.json_response(
+            {"error": "one of hash/rejected/error is required", "code": "bad_request"}, status=400
+        )
+
+    if row["state"] != "pending":
+        # Re-posting the same hash for an already-resolved row is the client
+        # retrying a lost response, not a conflict.
+        if tx_hash is not None and row.get("txid") == tx_hash:
+            return web.json_response({"state": row["state"], "txid": row["txid"]})
+        return web.json_response(
+            {"error": "already resolved", "code": "already_resolved", "state": row["state"]},
+            status=409,
+        )
+
+    if tx_hash is None:
+        if body.get("rejected"):
+            return await _record_sign_outcome(
+                request_id, "rejected", response=web.json_response({"state": "rejected"})
+            )
+        return await _record_sign_outcome(
+            request_id,
+            "failed",
+            result={"error": str(body.get("error"))[:200]},
+            response=web.json_response({"state": "failed"}),
+        )
+
+    try:
+        result = await xrpl_ops.get_tx(tx_hash)
+    except Exception:
+        # The lookup broke — that is not evidence about the transaction, so the
+        # row stays pending and the client retries.
+        logging.warning(f"sign result {request_id}: tx lookup failed", exc_info=True)
+        return web.json_response(
+            {"error": "could not reach the ledger", "code": "ledger_unavailable"}, status=503
+        )
+    if not (result or {}).get("validated"):
+        if row["expires_at"] < time.time():
+            await asyncio.to_thread(sign_request_store.set_state, request_id, "expired")
+            return web.json_response(
+                {"error": "transaction never validated", "code": "tx_not_found"}, status=410
+            )
+        return web.json_response({"state": "pending", "code": "tx_not_found"}, status=202)
+
+    tx = dict(result.get("tx_json") or result)
+    # API v2 renamed Payment's Amount to DeliverMax on the way out; restore the
+    # name we signed so the comparison below is apples to apples.
+    if "DeliverMax" in tx and "Amount" not in tx:
+        tx["Amount"] = tx["DeliverMax"]
+    stored = row["txjson"] or {}
+    # The hash must belong to THIS request: not a transaction already claimed
+    # by another row, and not one that closed before we even asked for it.
+    tx_time = _ledger_tx_time(tx, result)
+    reused = await asyncio.to_thread(sign_request_store.txid_in_use, tx_hash, request_id)
+    if (
+        tx.get("Account") != row["wallet"]
+        or tx.get("TransactionType") != stored.get("TransactionType")
+        or not _semantic_match(stored, tx)
+        or reused
+        # No timestamp at all is fail-closed: we cannot bind the tx to the row.
+        or tx_time is None
+        or tx_time < row["created_at"] - _SIGN_TX_TIME_SLACK_SECONDS
+    ):
+        logging.warning(
+            f"sign result {request_id}: on-ledger tx {tx_hash} does not match the request"
+            f"{' (hash already claimed)' if reused else ''}"
+        )
+        return await _record_sign_outcome(
+            request_id,
+            "mismatch",
+            result={"hash": tx_hash},
+            response=web.json_response(
+                {"error": "the signed transaction does not match", "code": "tx_mismatch"},
+                status=409,
+            ),
+        )
+    # A validated transaction is not necessarily a SUCCESSFUL one. A tec* result
+    # is on-ledger and final but did nothing we asked for, so it must never read
+    # "signed" to the flows polling this row.
+    meta_result = (result.get("meta") or {}).get("TransactionResult")
+    if meta_result != "tesSUCCESS":
+        return await _record_sign_outcome(
+            request_id,
+            "failed",
+            result={"meta_result": meta_result},
+            response=web.json_response(
+                {
+                    "error": "transaction failed on-ledger",
+                    "code": "tx_failed",
+                    "state": "failed",
+                },
+                status=409,
+            ),
+        )
+    # Matched and successful, but posted long after the request lapsed: the row
+    # is abandoned, and whatever flow was waiting on it is gone. Retire it as
+    # expired rather than resurrecting it.
+    if time.time() > row["expires_at"] + _SIGN_RESULT_GRACE_SECONDS:
+        return await _record_sign_outcome(
+            request_id,
+            "expired",
+            response=web.json_response(
+                {"error": "sign request expired", "code": "expired", "state": "expired"},
+                status=410,
+            ),
+        )
+    return await _record_sign_outcome(
+        request_id,
+        "signed",
+        txid=tx_hash,
+        result={"meta_result": meta_result},
+        response=web.json_response({"state": "signed", "txid": tx_hash}),
+    )
+
+
+async def sweep_sign_requests() -> None:
+    """Retire lapsed sign requests and prune long-resolved ones (#447)."""
+    expired = await asyncio.to_thread(sign_request_store.expire_stale)
+    pruned = await asyncio.to_thread(
+        sign_request_store.delete_terminal_older_than, _SIGN_RESULT_RETENTION_SECONDS
+    )
+    if expired or pruned:
+        logging.info(f"sign request sweep: expired={expired} pruned={pruned}")
+
+
+# The user is already signed in with one wallet and wants a SECOND wallet
+# recognised as theirs (so /api/brix claim-all, history, and the profile span
+# both). Proof of control is required either way: a WalletConnect signature
+# over our nonce, or a completed Xaman SignIn. Nothing here moves value — the
+# only durable effect is a wallet_proof_links edge.
+
+wallet_link_payloads: dict[str, Any] = {}
+
+
+def _prune_wallet_link_payloads():
+    cutoff = time.time() - SIGNIN_TTL
+    for uuid, rec in list(wallet_link_payloads.items()):
+        if rec["created_at"] < cutoff:
+            del wallet_link_payloads[uuid]
+
+
+async def _write_proof_link(session_wallet: str, other: str, proof_kind: str) -> None:
+    """Durably record the proved edge. Raises identity.LinkWriteError on a DB
+    failure — never answer "linked" for an edge that was not written.
+    Idempotent: re-recording an existing edge is a no-op success."""
+    await asyncio.to_thread(identity_store.link_proof, session_wallet, other, proof_kind)
+
+
+async def _linked_response(session_wallet: str, other: str) -> web.Response:
+    """The success body, built AFTER the edge is durably written."""
+    try:
+        wallets = await _linked_wallets_for(session_wallet)
+    except identity_store.BucketLookupError:
+        # The edge is durably written; only the echo of the new set failed.
+        wallets = [session_wallet, other]
+    return web.json_response({"state": "linked", "wallet": other, "wallets": wallets})
+
+
+def _same_wallet_response() -> web.Response:
+    return web.json_response(
+        {"error": "that is the wallet you are signed in with", "code": "same_wallet"}, status=400
+    )
+
+
+def _link_failed_response() -> web.Response:
+    return web.json_response({"error": "link failed", "code": "link_failed"}, status=500)
+
+
+def _short_wallet(wallet: str) -> str:
+    """Human-readable abbreviation of a classic address for display copy."""
+    return f"{wallet[:6]}…{wallet[-4:]}" if len(wallet) > 10 else wallet
+
+
+# XUMM caps custom_meta.identifier; keep ours comfortably short. "lfg-link-"
+# (9) + 30 hex chars = 39, under the 40-char limit.
+_LINK_IDENTIFIER_MAX = 40
+
+
+def _link_custom_meta(session_wallet: str) -> dict[str, str]:
+    """Purpose text shown in Xaman above the SignIn prompt (#447).
+
+    A bare SignIn tells the signer nothing about what they are consenting to —
+    which matters here, because approving it links that wallet to ANOTHER
+    account. `instruction` is the only channel we have to say so, so it names
+    the account being linked to and states the "both wallets must be yours"
+    precondition explicitly.
+    """
+    # Truncate rather than assert: an over-long identifier would have XUMM
+    # refuse the whole payload, and a shortened random token is still unique
+    # enough for a display-only field.
+    identifier = f"lfg-link-{secrets.token_hex(15)}"[:_LINK_IDENTIFIER_MAX]
+    return {
+        "instruction": (
+            f"Link this wallet to {_short_wallet(session_wallet)} on LFG. "
+            "Only approve if BOTH wallets are yours."
+        ),
+        "identifier": identifier,
+    }
+
+
+@require_wallet
+async def handle_wallet_link_start(request):
+    """Begin proving a second wallet.
+
+    `provider="walletconnect"` issues a nonce row (purpose `link`) whose
+    `wallet` column is the SESSION wallet — the one the prover must differ
+    from. The default Xaman arm creates a plain SignIn payload instead and is
+    always available (no feature flag: it is the shipped signing path).
+    """
+    body = await _json_body(request)
+    provider = str(body.get("provider") or "xaman")
+    session_wallet = request["wallet"]
+    # The feature gate precedes the limiter: a 503 for an unconfigured provider
+    # must not burn the caller's budget (same rule as handle_web_signin_start).
+    if provider == "walletconnect" and not config.wc_enabled():
+        return web.json_response(
+            {"error": "walletconnect is not configured", "code": "wc_disabled"}, status=503
+        )
+    # Shared bucket with web sign-in: both arms mint a sign request, and the
+    # Xaman arm spends from the app-wide XUMM open-payload budget (#260).
+    if _web_rate_limited(_client_ip(request)):
+        return web.json_response(
+            {"error": "too many link attempts", "code": "rate_limited"}, status=429
+        )
+    if provider == "walletconnect":
+        nonce = secrets.token_hex(32)
+        row = await asyncio.to_thread(
+            sign_request_store.create,
+            wallet=session_wallet,
+            purpose="link",
+            txjson=None,
+            nonce=nonce,
+            ttl_seconds=signing_proof.SIGNIN_TTL,
+            ip=_client_ip(request),
+        )
+        return web.json_response(
+            {
+                "provider": "walletconnect",
+                "sign_id": row["id"],
+                "nonce": nonce,
+                "source_tag": config.SOURCE_TAG,
+                "memos": signing_proof.build_proof_tx(
+                    _MEMO_TEMPLATE_ACCOUNT, nonce, memos.ACTION_LINK
+                )["Memos"],
+                "expires_at": row["expires_at"],
+            }
+        )
+    _prune_wallet_link_payloads()
+    # Reuse a still-live payload for this session rather than minting another
+    # (mirrors _start_brix_trustline): a user re-opening the link panel must
+    # not spend a second slot of the app-wide XUMM open-payload budget (#260).
+    for uuid, rec in wallet_link_payloads.items():
+        if rec.get("wallet") == session_wallet:
+            # Never re-serve a payload already known signed/expired (same rule
+            # _pending_signin_for applies): a dead QR is not a reusable one.
+            s = xumm_ops.cached_status(uuid)
+            if s and (s.get("signed") or s.get("expired")):
+                continue
+            return web.json_response(
+                {
+                    "provider": "xaman",
+                    "uuid": uuid,
+                    "signin_link": rec["signin_link"],
+                    "qr_url": rec.get("qr_url"),
+                }
+            )
+    payload = await xumm_ops.create_signin_payload(
+        custom_meta=_link_custom_meta(session_wallet),
+    )
+    if not payload:
+        return _xumm_unavailable_response()
+    wallet_link_payloads[payload["uuid"]] = {
+        "wallet": session_wallet,
+        "created_at": time.time(),
+        "signin_link": payload["xumm_url"],
+        "qr_url": payload.get("qr_url"),
+    }
+    return web.json_response(
+        {
+            "provider": "xaman",
+            "uuid": payload["uuid"],
+            "signin_link": payload["xumm_url"],
+            "qr_url": payload.get("qr_url"),
+        }
+    )
+
+
+@require_wallet
+async def handle_wallet_link_proof(request):
+    """Redeem a WalletConnect link proof (#447).
+
+    Authed, but rate-limited on the same bucket as the sign-in proof endpoint:
+    the signature verification costs the same either way.
+    """
+    if _web_proof_rate_limited(_client_ip(request)):
+        return web.json_response({"error": "too many attempts", "code": "rate_limited"}, status=429)
+    _prune_web_signin_payloads()
+    _prune_wallet_link_payloads()
+    body = await _json_body(request)
+    session_wallet = request["wallet"]
+
+    async def _before_consume(proven: str) -> web.Response | None:
+        # Refused BEFORE the row is consumed, so the user can re-sign with the
+        # wallet they actually meant against the same nonce.
+        if proven == session_wallet:
+            return _same_wallet_response()
+        # The link write also happens BEFORE the consume: a failed write leaves
+        # the row pending (the user can retry), and if the consume then loses
+        # the CAS race the edge is already durable — link_proof is idempotent,
+        # so neither ordering can answer "linked" without a written edge.
+        try:
+            await _write_proof_link(session_wallet, proven, "wc-signed-tx")
+        except identity_store.LinkWriteError:
+            logging.exception(f"wallet link write failed for {session_wallet}")
+            return _link_failed_response()
+        return None
+
+    wallet, refusal = await _redeem_proof(
+        str(body.get("sign_id") or ""),
+        body.get("tx_json"),
+        purpose="link",
+        action=memos.ACTION_LINK,
+        expect_wallet=session_wallet,
+        on_verified=_before_consume,
+    )
+    if refusal is not None:
+        return refusal
+    return await _linked_response(session_wallet, cast(str, wallet))
+
+
+@require_wallet
+async def handle_wallet_link_status(request):
+    """Poll the Xaman arm of wallet linking (#447)."""
+    _prune_wallet_link_payloads()
+    uuid = request.match_info["payload_uuid"]
+    rec = wallet_link_payloads.get(uuid)
+    session_wallet = request["wallet"]
+    # Another session's payload is a 404, never a 403 — a caller learns nothing
+    # about uuids that are not theirs.
+    if rec is None or rec.get("wallet") != session_wallet:
+        return web.json_response({"error": "not found"}, status=404)
+    s = await xumm_ops.get_payload_status(uuid)
+    if not s:
+        return web.json_response({"error": "could not reach Xaman"}, status=502)
+    if s["signed"] and s["account"] and is_valid_classic_address(s["account"]):
+        del wallet_link_payloads[uuid]
+        if s["account"] == session_wallet:
+            return _same_wallet_response()
+        try:
+            await _write_proof_link(session_wallet, s["account"], "xaman-signin")
+        except identity_store.LinkWriteError:
+            logging.exception(f"wallet link write failed for {session_wallet}")
+            return _link_failed_response()
+        return await _linked_response(session_wallet, s["account"])
+    if s["expired"]:
+        del wallet_link_payloads[uuid]
         return web.json_response({"state": "expired"})
     return web.json_response({"state": "opened" if s["opened"] else "pending"})
 
@@ -7371,6 +8223,15 @@ async def handle_config(request):
             "public_share_base_url": config.PUBLIC_SHARE_BASE_URL,
             "x_user_share": config.X_USER_SHARE_ENABLED,
             "bithomp_base_url": _bithomp_base_url(),
+            "walletconnect": (
+                {
+                    "project_id": config.REOWN_PROJECT_ID,
+                    "chain": config.WC_CHAIN,
+                    "surfaces": sorted(config.WC_SURFACES),
+                }
+                if config.wc_enabled()
+                else None
+            ),
         }
     )
 
@@ -8380,6 +9241,7 @@ async def no_cache_mw(request, handler):
 def create_app() -> web.Application:
     app = web.Application(middlewares=[cors_mw, no_cache_mw])
     identity_store.ensure_identities_table()
+    sign_request_store.ensure_table()
     identity_store.migrate_users_to_identities()
     app.router.add_get("/api/config", handle_config)
     app.router.add_get("/api/health", handle_health)
@@ -8425,7 +9287,14 @@ def create_app() -> web.Application:
     app.router.add_get("/api/signin/{payload_uuid}", handle_signin_status)
     # Standalone web surface (spec 2026-07-16): client-callable wallet signin.
     app.router.add_post("/api/web/signin", handle_web_signin_start)
+    app.router.add_post("/api/web/signin/proof", handle_web_signin_proof)
     app.router.add_get("/api/web/signin/{payload_uuid}", handle_web_signin_status)
+    # WalletConnect sign requests (#447): fetch the tx to sign, post the result.
+    app.router.add_get("/api/sign/{request_id}", handle_sign_request)
+    app.router.add_post("/api/sign/{request_id}/result", handle_sign_result)
+    app.router.add_post("/api/wallet/link", handle_wallet_link_start)
+    app.router.add_post("/api/wallet/link/proof", handle_wallet_link_proof)
+    app.router.add_get("/api/wallet/link/{payload_uuid}", handle_wallet_link_status)
     app.router.add_get("/api/nfts", handle_nfts)
     app.router.add_get("/api/leaderboard", handle_leaderboard)
     app.router.add_get("/api/brix", handle_brix_status)

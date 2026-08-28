@@ -41,6 +41,10 @@ def get_provider(name: str | None = None) -> BaseSigningProvider:
         from lfg_core.signing.xaman import XamanProvider
 
         provider: BaseSigningProvider = XamanProvider()
+    elif key == "walletconnect":
+        from lfg_core.signing.walletconnect import WalletConnectProvider
+
+        provider = WalletConnectProvider()
     else:
         raise ValueError(f"unknown signing provider: {name!r}")
     if not isinstance(provider, BaseSigningProvider):

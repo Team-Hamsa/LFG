@@ -141,6 +141,8 @@ LISTENER_AUTO_CATCHUP_COOLDOWN=600                          # optional (#402); m
 ECONOMY_AUDIT_WEBHOOK_URL=<discord-webhook-url>             # optional (#322); nightly trait-economy audit posts here on a non-clean run (unset = log only)
 PRESUBMIT_SIMULATE=1                                        # optional (#58); pre-submit `simulate` pre-flight on backend-signed txs — deterministic tem*/tef*/tec* refuses before signing (no fee burned), transport errors degrade open; 0 disables
 SESSION_ABANDON_TTL_SECONDS=1020                            # optional (#424); age after which an abandoned PRE-money session (mint/swap awaiting_payment, market awaiting_signature/awaiting_onramp) is expired so the deployer drain can finish — default 15 min payload expire + 120 s slack, minimum 900 (the payload lifetime — lower values fall back to the default); paid/signed sessions are never expired
+REOWN_PROJECT_ID=<reown-cloud-project-id>                   # optional (#447); WalletConnect/Joey Wallet sign-in + signing — unset = feature OFF, button hidden
+WC_SURFACES=web,telegram                                    # optional (#447); surfaces that show "Connect with Joey" (discord-activity needs URL Mappings first)
 ```
 
 > **Sponsored free mint — the archive baseline is a hard prerequisite.**
@@ -1418,6 +1420,50 @@ stay lfg_core-import-free). Runtime entrypoints (`main.py`, pm2 processes,
    > `build_economy_deps(conn, user_token=…)`) push too; the only QR-only
    > payload sites left are the CLI economy scripts (deliberate — no identity
    > context) and the Discord bot's trustline button.
+
+   **WalletConnect / Joey Wallet (#447):** a second signing provider,
+   ambient-dispatched — `require_auth` reads the session token's `provider`
+   field into `lfg_core/signing/context.py` (`current_provider`/
+   `current_wallet`, contextvars, inherited by spawned tasks); every XUMM
+   chokepoint (`_create_xumm_payload`/`get_payload_status`/
+   `cancel_xumm_payload`) calls `xumm_ops.should_use_walletconnect(txjson)` to
+   decide per-tx. **Cross-wallet rule:** WC fires only when `provider ==
+   walletconnect` AND `txjson.Account == session wallet` AND the tx isn't a
+   `SignIn` (Xaman's pseudo-tx) — anything else (e.g. the #446 linked-wallet
+   TrustSet, signed by a *different* wallet than the session's) downgrades to
+   Xaman. A WC request is a `sign_requests` row (`lfg_core/signing/store.py`,
+   app DB); the create response is XUMM-shaped with `xumm_url:
+   "lfg-wc://<id>"` and `qr_url: null` so surfaces need no branching — the
+   client's `wc.js` intercepts the `lfg-wc://` scheme and drives Joey
+   directly. `GET /api/sign/{id}` + `POST /api/sign/{id}/result` verify the
+   client-reported hash on-ledger (validated, Account, type, closed field
+   allowlist, Flags masked for `tfFullyCanonicalSig`, hash not reused, tx
+   postdates the row) before a row is trusted "signed"; `sweep_sign_requests`
+   runs in `_settlement_sweep_loop` (now started when `ECONOMY_ENABLED or
+   config.wc_enabled()`). Sign-in/linking prove ownership via
+   `lfg_core/signing/proof.py`: a SIGNED, NEVER-SUBMITTED `AccountSet` (Fee
+   "0"/Sequence 0/LastLedgerSequence 0, provenance memos + `lfg/nonce`,
+   closed field allowlist) — Joey exposes no `signMessage`. **RegularKey is
+   NOT accepted**: `verify_proof` derives the address from `SigningPubKey`
+   and requires it to equal `Account`, so only the master key can prove
+   ownership. A proved link is an append-only `wallet_proof_links` edge
+   (`identity.link_proof`, undirected, sorted-pair PK — repeats are a no-op;
+   undo is an admin `DELETE`, there is no unlink endpoint). **Ops:**
+   `REOWN_PROJECT_ID` unset (default) = feature off everywhere ("Connect with
+   Joey" hidden); `WC_SURFACES` (default `web,telegram`) gates which surfaces
+   show the button — `discord-activity` needs URL Mappings configured in the
+   Reown/WalletConnect dashboard first, so it's excluded from the default;
+   the Reown dashboard's allowed-origins list must also include every surface
+   origin actually enabled. **Joey sign-in AND Joey transaction signing are
+   web-only in v1**: only the web sign-in mints a `provider="walletconnect"`
+   session token, and `signing_context.current_wallet` is set only for
+   `platform == "web"`, so the cross-wallet rule can never fire anywhere else.
+   `WC_SURFACES` therefore gates just the link panel's Joey arm (a proof
+   signature, not a session) on Telegram; the Discord Activity is unchanged.
+   Known gaps: the #58
+   pre-submit `simulate` pre-flight does not run on the Joey path (the client
+   submits directly); the Xaman link arm proves consent via a `SignIn` +
+   `custom_meta` instruction only, not a signed proof.
    >
    > **#212 push hardening:** tokens are now (re)captured from EVERY signed
    > payload a flow polls (`_capture_issued_token` in mint/market flows,

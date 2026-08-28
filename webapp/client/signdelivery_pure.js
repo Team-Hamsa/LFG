@@ -44,3 +44,65 @@ export function autoOpenOutcome(seen, link, launched) {
   if (launched === false) return seen.filter((l) => l !== link);
   return seen;
 }
+
+// --- WalletConnect / Joey Wallet (#447) ---------------------------------
+//
+// A WalletConnect sign request reuses every flow's existing `link` field, but
+// with an `lfg-wc://<request_id>` scheme in place of a xumm.app URL (see
+// lfg_core/signing/walletconnect.py). There is no QR and no deep link to
+// open: app.js hands the id to wcSign(), which fetches the txjson from
+// /api/sign/{id} and asks Joey to sign it.
+
+const WC_SCHEME = 'lfg-wc://';
+
+export function isWcLink(link) {
+  return typeof link === 'string' && link.startsWith(WC_SCHEME);
+}
+
+// The sign-request id carried by a WalletConnect link, or null for anything
+// else (including a scheme with no id after it).
+export function wcRequestId(link) {
+  if (!isWcLink(link)) return null;
+  return link.slice(WC_SCHEME.length) || null;
+}
+
+// What to POST to /api/sign/{id}/result for a Joey `xrpl_signTransaction`
+// response. `hash` is present only when the wallet actually SUBMITTED the
+// transaction; a submit that failed inside the wallet returns the signed
+// tx_json with no hash, which is a failure — never report it as success.
+export function wcResultAction(resp) {
+  const hash = resp && resp.hash;
+  if (typeof hash === 'string' && hash) return { hash };
+  return { error: 'no hash returned' };
+}
+
+// A user declining in Joey arrives as a WalletConnect JSON-RPC error rather
+// than a transport failure: post {rejected:true}, not {error}.
+export function isWcRejection(err) {
+  if (!err) return false;
+  const code = err.code;
+  if (code === 5000 || code === 4001) return true;
+  return typeof err.message === 'string' && /reject/i.test(err.message);
+}
+
+// Is the server's answer to POST /api/sign/{id}/result the LAST word on this
+// request? Only a terminal answer may retire the id client-side.
+//
+// A non-terminal answer — 202 (not on-ledger yet), 503 (ledger unreachable),
+// or no body at all (the POST never landed) — means the row is STILL pending
+// server-side. The client must then re-post the same stored outcome on a later
+// tick; it must never re-sign, because the transaction may already have been
+// submitted and a second signature would double-submit it.
+const WC_TERMINAL_STATES = ['signed', 'rejected', 'failed', 'mismatch', 'expired',
+                            'already_resolved'];
+// Terminal refusals carry a code and no state: 409 already_resolved, 409
+// tx_mismatch, 410 tx_not_found (expired without ever validating).
+const WC_TERMINAL_CODES = ['already_resolved', 'tx_mismatch', 'tx_not_found'];
+
+export function wcOutcomeTerminal(body) {
+  if (!body) return false;
+  // `state` is the authority where present: a 202 carries state 'pending'
+  // alongside the tx_not_found code, and retiring it would wedge the request.
+  if (body.state) return WC_TERMINAL_STATES.includes(body.state);
+  return WC_TERMINAL_CODES.includes(body.code);
+}
