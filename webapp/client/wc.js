@@ -56,9 +56,32 @@ function liveSession(c, t) {
   try { return c.session.get(t) || null; } catch (_) { return null; }
 }
 
+// A pairing used for ONE transaction and then thrown away: reported to the
+// caller without touching the module's session state or localStorage. The
+// wallet-link flow pairs a SECOND wallet purely to prove ownership; adopting
+// it would silently repoint every later signTx (and the next reload's
+// restore) at the wrong account, against the signed-in wallet's LFG session.
+function borrow(session) {
+  return { wallet: accountOf(session), topic: session.topic };
+}
+
+// Close a borrowed one-shot pairing. Best-effort, and hard-guarded against
+// ever tearing down the primary session.
+export async function release(borrowedTopic) {
+  if (!client || !borrowedTopic || borrowedTopic === topic) return;
+  try {
+    await client.disconnect({
+      topic: borrowedTopic,
+      reason: { code: 6000, message: 'user disconnected' },
+    });
+  } catch (_) { /* already gone */ }
+}
+
 // Connect (or re-attach) a Joey session. Resolves to {wallet, topic}.
 //   fresh: true forces a NEW pairing even when a live session exists — the
-//          wallet-link flow needs the user to bring a DIFFERENT wallet.
+//          wallet-link flow needs the user to bring a DIFFERENT wallet. That
+//          pairing is BORROWED, never adopted: pass its topic to signTx and
+//          hand it to release() when done.
 export async function connect({ projectId, chain, metadata, fresh = false } = {}) {
   const c = await ensureClient({ projectId, metadata });
   if (!fresh) {
@@ -77,7 +100,7 @@ export async function connect({ projectId, chain, metadata, fresh = false } = {}
   if (uri) await modal.openModal({ uri });
   try {
     const session = await approval();
-    return adopt(session);
+    return fresh ? borrow(session) : adopt(session);
   } finally {
     try { modal.closeModal(); } catch (_) { /* already closed */ }
   }
@@ -98,10 +121,15 @@ export async function restore({ projectId, metadata } = {}) {
 // Ask Joey to sign (and optionally submit) a transaction. Returns the raw
 // response `{tx_json, hash?}`; a user rejection throws the WalletConnect
 // JSON-RPC error unchanged (signdelivery_pure.isWcRejection classifies it).
-export async function signTx({ chain, txJson, autofill = true, submit = true } = {}) {
-  if (!client || !topic) throw new Error('no Joey Wallet session');
+//
+// `topic` overrides the session pairing — that is how a borrowed one-shot
+// pairing signs its link proof without ever becoming the session.
+export async function signTx({ chain, txJson, autofill = true, submit = true,
+                              topic: requestTopic } = {}) {
+  const t = requestTopic || topic;
+  if (!client || !t) throw new Error('no Joey Wallet session');
   return client.request({
-    topic,
+    topic: t,
     chainId: chain,
     request: { method: XRPL_METHOD, params: { tx_json: txJson, options: { autofill, submit } } },
   });

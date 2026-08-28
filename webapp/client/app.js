@@ -756,22 +756,32 @@ async function startLinkJoey() {
   const gen = ++linkPollGen;
   const stale = () => gen !== linkPollGen || !!(el('link-panel') || {}).hidden;
   renderLink({ sub: 'Opening Joey Wallet…', spinner: true });
+  // The proving wallet's pairing is BORROWED for exactly one signature and
+  // released in the finally below — success, decline or crash. It must never
+  // become the session pairing: adopting it would repoint every later signTx
+  // (and the next reload's restore) at the linked wallet while the LFG
+  // session still belongs to the signed-in one.
+  let mod = null;
+  let borrowedTopic = null;
   try {
     const start = await api('/api/wallet/link', {
       method: 'POST',
       body: JSON.stringify({ provider: 'walletconnect' }),
     });
-    const mod = await loadWc();
+    mod = await loadWc();
     // fresh: the point is to bring a DIFFERENT wallet than the session's, so
     // never silently reuse the pairing that is already signed in.
-    const { wallet } = await mod.connect({
+    const borrowed = await mod.connect({
       projectId: wc.project_id, chain: wc.chain, metadata: wcMetadata(), fresh: true,
     });
+    borrowedTopic = borrowed.topic;
+    const wallet = borrowed.wallet;
     if (!wallet) throw new Error('Joey Wallet did not share an XRPL account.');
     if (stale()) return;
     renderLink({ sub: 'Approve the linking request in Joey Wallet…', spinner: true });
     const resp = await mod.signTx({
       chain: wc.chain, txJson: wcProofTx(wallet, start), autofill: false, submit: false,
+      topic: borrowedTopic, // sign as the PROVING wallet, not the session's
     });
     const s = await api('/api/wallet/link/proof', {
       method: 'POST',
@@ -786,6 +796,10 @@ async function startLinkJoey() {
       return;
     }
     renderLink({ sub: e.message || 'Could not link that wallet.', buttons: true });
+  } finally {
+    // release() is a no-op on the session's own topic, so this can never tear
+    // down the signed-in wallet's pairing.
+    if (mod && borrowedTopic) { try { await mod.release(borrowedTopic); } catch (_) { /* gone */ } }
   }
 }
 
