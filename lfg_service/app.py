@@ -7379,6 +7379,15 @@ async def handle_config(request):
             "public_share_base_url": config.PUBLIC_SHARE_BASE_URL,
             "x_user_share": config.X_USER_SHARE_ENABLED,
             "bithomp_base_url": _bithomp_base_url(),
+            "walletconnect": (
+                {
+                    "project_id": config.REOWN_PROJECT_ID,
+                    "chain": config.WC_CHAIN,
+                    "surfaces": sorted(config.WC_SURFACES),
+                }
+                if config.wc_enabled()
+                else None
+            ),
         }
     )
 

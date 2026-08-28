@@ -530,3 +530,23 @@ SHARE_FORWARD_URL = os.getenv("SHARE_FORWARD_URL", "").strip().rstrip("/")
 # node + playwright chromium on the box (scripts/share_card/ — see the spec
 # addendum). Off (default) = twitter:image keeps pointing at the raw art.
 SHARE_CARD_RENDER_ENABLED = os.getenv("SHARE_CARD_RENDER_ENABLED", "0").strip() == "1"
+
+# WalletConnect / Joey Wallet sign-in + signing (#447). Unset REOWN_PROJECT_ID
+# (default) = feature OFF everywhere ("Connect with Joey" hidden); WC_SURFACES
+# controls which surfaces show the button (discord-activity needs URL Mappings
+# configured in the Reown/WalletConnect dashboard first, so it's excluded from
+# the default set).
+REOWN_PROJECT_ID = os.getenv("REOWN_PROJECT_ID", "").strip()
+
+
+def parse_wc_surfaces(raw: str) -> frozenset[str]:
+    """Parse a comma-separated surfaces list: lowercase, stripped, empty dropped."""
+    return frozenset(s.strip().lower() for s in raw.split(",") if s.strip())
+
+
+WC_SURFACES = parse_wc_surfaces(os.getenv("WC_SURFACES", "web,telegram"))
+WC_CHAIN = "xrpl:0" if XRPL_NETWORK == "mainnet" else "xrpl:1"
+
+
+def wc_enabled() -> bool:
+    return bool(REOWN_PROJECT_ID)
