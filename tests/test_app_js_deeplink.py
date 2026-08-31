@@ -71,7 +71,7 @@ def test_dynamic_sign_panels_route_through_apply_sign_delivery():
 
 def test_cache_busters_bumped():
     html = _read("index.html")
-    assert "app.js?v=79" in html
+    assert "app.js?v=80" in html
 
 
 # ---------------------------------------------------------------------------
