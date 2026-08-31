@@ -56,17 +56,118 @@ def test_claimable_drops_other_destinations_and_open_offers():
     assert [o["offer_index"] for o in kept] == ["OFFc"]
 
 
-def test_claimable_drops_priced_offers():
-    # The signing account also holds PRICED destination-locked sells (Trait
-    # Shop #217: XRP-drops string or BRIX amount dict). Only free gifts
-    # ("0" drops) are claimable — anything else would charge on accept.
+def test_claimable_keeps_priced_offers_it_can_label(monkeypatch):
+    # Priced destination-locked sells the tray can price honestly ARE
+    # claimable — a swap-remint delivery offer is priced (the swap fee is
+    # collected on the accept) and hiding it stranded the NFT at the issuer
+    # (the 2026-08-30 Tinkerbell incident). The client renders the price on
+    # the Accept button, so the user is never charged unknowingly.
+    monkeypatch.setattr(
+        xrpl_ops.config, "BRIX_CURRENCY_HEX", "4252495800000000000000000000000000000000"
+    )
+    monkeypatch.setattr(xrpl_ops.config, "BRIX_ISSUER", "rBRIXISSUER")
     offers = [
         _offer(offer_index="xrp", amount="10000000"),
-        _offer(offer_index="brix", amount={"currency": "4C46", "issuer": "rISS", "value": "5"}),
+        _offer(
+            offer_index="brix",
+            amount={
+                "currency": "4252495800000000000000000000000000000000",
+                "issuer": "rBRIXISSUER",
+                "value": "10",
+            },
+        ),
+        _offer(offer_index="gift"),
+    ]
+    kept = xrpl_ops.filter_claimable_offers(offers, WALLET, 1_800_000_000)
+    assert [o["offer_index"] for o in kept] == ["OFFxrp", "OFFbrix", "OFFgift"]
+
+
+def test_claimable_drops_unpriceable_currency_offers(monkeypatch):
+    # An IOU amount that is not the configured BRIX pair cannot be rendered
+    # honestly — fail closed and keep it out of the tray (the original
+    # Greptile P1 concern: never let a user sign a charge they can't read).
+    monkeypatch.setattr(
+        xrpl_ops.config, "BRIX_CURRENCY_HEX", "4252495800000000000000000000000000000000"
+    )
+    monkeypatch.setattr(xrpl_ops.config, "BRIX_ISSUER", "rBRIXISSUER")
+    offers = [
+        _offer(offer_index="lfgo", amount={"currency": "4C46", "issuer": "rISS", "value": "5"}),
+        _offer(
+            offer_index="wrongissuer",
+            amount={
+                "currency": "4252495800000000000000000000000000000000",
+                "issuer": "rSOMEONEELSE",
+                "value": "5",
+            },
+        ),
         _offer(offer_index="gift"),
     ]
     kept = xrpl_ops.filter_claimable_offers(offers, WALLET, 1_800_000_000)
     assert [o["offer_index"] for o in kept] == ["OFFgift"]
+
+
+def test_offer_price_label_forms(monkeypatch):
+    # Free → None; XRP drops → trimmed "N XRP"; configured BRIX pair →
+    # "N BRIX"; anything else → None (unpriceable, excluded by the filter).
+    monkeypatch.setattr(
+        xrpl_ops.config, "BRIX_CURRENCY_HEX", "4252495800000000000000000000000000000000"
+    )
+    monkeypatch.setattr(xrpl_ops.config, "BRIX_ISSUER", "rBRIXISSUER")
+    assert xrpl_ops.offer_price_label("0") is None
+    assert xrpl_ops.offer_price_label("10000000") == "10 XRP"
+    assert xrpl_ops.offer_price_label("10500000") == "10.5 XRP"
+    brix = {
+        "currency": "4252495800000000000000000000000000000000",
+        "issuer": "rBRIXISSUER",
+        "value": "10",
+    }
+    assert xrpl_ops.offer_price_label(brix) == "10 BRIX"
+    assert xrpl_ops.offer_price_label(dict(brix, value="2.50")) == "2.5 BRIX"
+    assert xrpl_ops.offer_price_label(dict(brix, issuer="rX")) is None
+    assert xrpl_ops.offer_price_label({"currency": "4C46", "issuer": "rX", "value": "1"}) is None
+    assert xrpl_ops.offer_price_label("nonsense") is None
+
+
+def test_pending_offer_row_carries_price_label(monkeypatch, tmp_path):
+    # Every tray row exposes price_label so the client can render the cost on
+    # the Accept button ("Accept — 10 BRIX"); free gifts carry None.
+    import lfg_core.nft_index as nft_index
+    from lfg_service import app
+
+    monkeypatch.setattr(
+        app.xrpl_ops.config, "BRIX_CURRENCY_HEX", "4252495800000000000000000000000000000000"
+    )
+    monkeypatch.setattr(app.xrpl_ops.config, "BRIX_ISSUER", "rBRIXISSUER")
+    char_db = str(tmp_path / "char.db")
+    econ_db = str(tmp_path / "econ.db")
+    conn = nft_index.init_db(char_db)
+    conn.execute(
+        "INSERT INTO onchain_nfts (nft_id, nft_number, image, is_burned) VALUES (?, ?, ?, 0)",
+        ("00081B58" + "0" * 56, 1125, "https://cdn.example/1125.png"),
+    )
+    conn.commit()
+    conn.close()
+    nft_index.init_db(econ_db).close()
+    monkeypatch.setattr(
+        app.nft_index, "index_db_path", lambda net: char_db if net == "MAINNET" else econ_db
+    )
+    brix = {
+        "currency": "4252495800000000000000000000000000000000",
+        "issuer": "rBRIXISSUER",
+        "value": "10",
+    }
+    priced = {"offer_index": "OFFp", "nft_id": "00081B58" + "0" * 56, "amount": brix}
+    free = {"offer_index": "OFFf", "nft_id": "00081B58" + "0" * 56, "amount": "0"}
+    assert app._pending_offer_row(priced, "MAINNET", "TESTNET", None)["price_label"] == "10 BRIX"
+    assert app._pending_offer_row(free, "MAINNET", "TESTNET", None)["price_label"] is None
+
+
+def test_client_renders_price_label_on_accept():
+    # Source-assertion guard (no JS harness): the tray's Accept button must
+    # surface price_label so a priced accept is never mislabeled as free.
+    with open(os.path.join(CLIENT, "app.js")) as f:
+        src = f.read()
+    assert "price_label" in src
 
 
 def test_claimable_drops_buy_offers():
