@@ -2266,7 +2266,9 @@ function offerRow(o) {
   row.appendChild(label);
   const btn = document.createElement('button');
   btn.className = 'secondary';
-  btn.textContent = 'Accept';
+  // Priced offers (e.g. a swap-remint delivery carrying the swap fee) show
+  // the honest cost — the server excludes anything it can't price.
+  btn.textContent = o.price_label ? `Accept — ${o.price_label}` : 'Accept';
   btn.onclick = () => offerAccept(o, row, btn);
   row.appendChild(btn);
   return row;

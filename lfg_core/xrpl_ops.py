@@ -1300,6 +1300,38 @@ async def get_account_nft_offers(address: str) -> list[dict[str, Any]]:
             return out
 
 
+def offer_price_label(amount: Any) -> str | None:
+    """Human-readable cost of accepting an NFTokenOffer amount, or None when
+    the offer is free ("0" drops) OR the amount cannot be priced honestly
+    (an IOU that is not the configured BRIX pair, or an unparseable shape).
+    The tray uses None-on-free to keep the plain "Accept" button, and the
+    claimability filter uses None-on-unpriceable to exclude the offer
+    entirely — never surface a charge the user can't read."""
+    if amount == "0":
+        return None
+    if isinstance(amount, str):
+        if not amount.isdigit():
+            return None
+        return f"{_trim_decimal(Decimal(amount) / 1_000_000)} XRP"
+    if isinstance(amount, dict):
+        if (
+            amount.get("currency") != config.BRIX_CURRENCY_HEX
+            or amount.get("issuer") != config.BRIX_ISSUER
+        ):
+            return None
+        try:
+            value = Decimal(str(amount.get("value")))
+        except InvalidOperation:
+            return None
+        return f"{_trim_decimal(value)} BRIX"
+    return None
+
+
+def _trim_decimal(value: Decimal) -> str:
+    text = format(value, "f")
+    return text.rstrip("0").rstrip(".") if "." in text else text
+
+
 def filter_claimable_offers(
     offers: list[dict[str, Any]], wallet: str, now_unix: float
 ) -> list[dict[str, Any]]:
@@ -1313,11 +1345,14 @@ def filter_claimable_offers(
             continue
         if o.get("destination") != wallet:
             continue
-        # Free gifts only ("0" = zero XRP drops). The signing account also
-        # holds PRICED destination-locked offers (Trait Shop #217 sells, XRP
-        # or BRIX-dict amounts) — surfacing those as claimable would let a
-        # user unknowingly sign a charging transaction (Greptile P1).
-        if o.get("amount") != "0":
+        # Free gifts and honestly-priceable charges only. A priced offer the
+        # tray can label (XRP drops or the configured BRIX pair) IS claimable
+        # — swap-remint delivery offers carry the swap fee and hiding them
+        # strands the NFT at the issuer. An amount we cannot render (foreign
+        # IOU, unparseable shape) stays excluded: never surface a charge the
+        # user can't read (Greptile P1).
+        amount = o.get("amount")
+        if amount != "0" and offer_price_label(amount) is None:
             continue
         exp = o.get("expiration")
         if exp is not None and exp + RIPPLE_EPOCH_OFFSET <= now_unix:

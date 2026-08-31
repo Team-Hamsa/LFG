@@ -5804,7 +5804,12 @@ def _pending_offer_row(
     but lives in closet_tokens — without this branch a brand-new user saw
     "0010000… Accept" with no hint the offer was ours (2026-08-22). Closet
     rows resolve to kind="closet" + owner so the tray can name it. A token
-    unknown to all three keeps the bare fallback (kind=None)."""
+    unknown to all three keeps the bare fallback (kind=None).
+
+    Every row carries price_label — None for a free gift, else the honest
+    cost string ("10 BRIX") the client renders on the Accept button; the
+    claimability filter guarantees no unpriceable amount reaches here."""
+    price_label = xrpl_ops.offer_price_label(o.get("amount", "0"))
     conn = nft_index.init_db(nft_index.index_db_path(char_network))
     try:
         meta = conn.execute(
@@ -5820,6 +5825,7 @@ def _pending_offer_row(
             "nft_number": meta[0],
             "image": meta[1],
             "amount": o["amount"],
+            "price_label": price_label,
         }
     conn = nft_index.init_db(nft_index.index_db_path(econ_network))
     try:
@@ -5847,6 +5853,7 @@ def _pending_offer_row(
             "value": value,
             "image_url": _trait_image_url(cfg, slot, value),
             "amount": o["amount"],
+            "price_label": price_label,
         }
     if crow is not None:
         return {
@@ -5857,6 +5864,7 @@ def _pending_offer_row(
             "owner": crow[0],
             "image": None,
             "amount": o["amount"],
+            "price_label": price_label,
         }
     return {
         "offer_index": o["offer_index"],
@@ -5865,6 +5873,7 @@ def _pending_offer_row(
         "nft_number": None,
         "image": None,
         "amount": o["amount"],
+        "price_label": price_label,
     }
 
 
