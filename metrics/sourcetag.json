@@ -1,6 +1,6 @@
 {
-  "archive_max_close_time": "2026-09-04T23:18:11+00:00",
-  "as_of": "2026-09-05T00:20:01+00:00",
+  "archive_max_close_time": "2026-09-05T23:54:22+00:00",
+  "as_of": "2026-09-06T00:20:03+00:00",
   "by_type": {
     "NFTokenAcceptOffer": 1675,
     "NFTokenBurn": 1106,
@@ -8,7 +8,7 @@
     "NFTokenCreateOffer": 2217,
     "NFTokenMint": 2232,
     "NFTokenModify": 1245,
-    "Payment": 1819,
+    "Payment": 1821,
     "TrustSet": 19
   },
   "daily": [
@@ -271,6 +271,10 @@
     {
       "count": 22,
       "date": "2026-09-04"
+    },
+    {
+      "count": 2,
+      "date": "2026-09-05"
     }
   ],
   "excluded": [
@@ -283,7 +287,7 @@
   "first_tagged_tx": "2026-07-02",
   "network": "mainnet",
   "source_tag": 2606160021,
-  "total_tagged_txs": 10318,
+  "total_tagged_txs": 10320,
   "unique_wallets": 654,
   "xrp_payment_volume": {
     "in_drops": 280905707,
