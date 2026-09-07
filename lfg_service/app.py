@@ -84,7 +84,7 @@ from lfg_core.db_helpers import get_nft_data, record_nft_mint
 from lfg_core.signing import context as signing_context
 from lfg_core.signing import proof as signing_proof
 from lfg_core.signing import store as sign_request_store
-from lfg_core.user_db import create_users_table, get_user, register_user
+from lfg_core.user_db import create_users_table, delete_user, get_user, register_user
 from lfg_service import identity as identity_store
 from lfg_service import x_oauth
 from lfg_service.auth import require_service_token, surface_for_token
@@ -706,6 +706,29 @@ def make_session_token(user: dict[str, Any]) -> str:
     return f"{body}.{sig}"
 
 
+# Session tokens are stateless HMAC, so "log out" needs a process-local
+# denylist: signature -> exp. Entries expire with the token they revoke, so
+# the dict is bounded by (logouts per SESSION_TTL). Single-process by design
+# (lfg_service is one pm2 process per stack); a restart forgets revocations,
+# and the client drops its copy of the token too, so that is acceptable.
+_revoked_sessions: dict[str, float] = {}
+
+
+def _prune_revoked_sessions(now: float) -> None:
+    for sig in [k for k, exp in _revoked_sessions.items() if exp < now]:
+        del _revoked_sessions[sig]
+
+
+def revoke_session_token(token: str) -> None:
+    """Deny this token for the rest of its lifetime. Garbage / expired /
+    forged tokens are ignored (nothing to revoke)."""
+    payload = verify_session_token(token)
+    if not payload:
+        return
+    _prune_revoked_sessions(time.time())
+    _revoked_sessions[token.rsplit(".", 1)[1]] = float(payload["exp"])
+
+
 def verify_session_token(token: str):
     try:
         body, sig = token.rsplit(".", 1)
@@ -714,6 +737,8 @@ def verify_session_token(token: str):
             return None
         payload = json.loads(base64.urlsafe_b64decode(body))
         if payload["exp"] < time.time():
+            return None
+        if sig in _revoked_sessions:
             return None
         return payload
     except Exception:
@@ -1442,6 +1467,38 @@ async def handle_me(request):
     except Exception as e:
         logging.warning(f"touch_handle failed for {_platform(user)}:{user['id']}: {e}")
     return web.json_response({"id": user["id"], "username": user["name"], "wallet": wallet})
+
+
+@require_auth
+async def handle_logout(request):
+    """Log out: revoke the bearer session token server-side. The web surface
+    calls this before dropping its localStorage copy; Discord/Telegram
+    re-authenticate through their host handshake, so for them the meaningful
+    action is /api/wallet/disconnect."""
+    revoke_session_token(request.headers.get("Authorization", "")[7:])
+    return web.json_response({"ok": True})
+
+
+@require_auth
+async def handle_wallet_disconnect(request):
+    """Disconnect the caller's wallet. Discord/Telegram: unlink the wallet
+    from the platform identity (plus the legacy Users row for Discord, which
+    _resolve_wallet would otherwise fall back to) — the next /api/me shows no
+    wallet and the client re-offers the Xaman sign-in. Web: the wallet IS the
+    identity, so this is a logout (the identities row and its push token are
+    kept for the wallet's next sign-in)."""
+    user = request["user"]
+    platform = _platform(user)
+    if platform == "web":
+        revoke_session_token(request.headers.get("Authorization", "")[7:])
+        return web.json_response({"ok": True, "wallet": None})
+    ok = await asyncio.to_thread(identity_store.unlink, platform, user["id"])
+    if ok and platform == "discord":
+        ok = await asyncio.to_thread(delete_user, user["id"])
+    if not ok:
+        return web.json_response({"error": "could not disconnect wallet"}, status=500)
+    logging.info(f"wallet disconnected for {platform}:{user['id']}")
+    return web.json_response({"ok": True, "wallet": None})
 
 
 @require_wallet
@@ -9257,6 +9314,8 @@ def create_app() -> web.Application:
     app.router.add_post("/api/telegram/auth", handle_telegram_auth)
     app.router.add_get("/api/me", handle_me)
     app.router.add_get("/api/account", handle_account)
+    app.router.add_post("/api/logout", handle_logout)
+    app.router.add_post("/api/wallet/disconnect", handle_wallet_disconnect)
     app.router.add_post("/api/register", handle_register)
     app.router.add_post("/api/mint", handle_mint_start)
     # /active must register BEFORE /{session_id}: aiohttp dispatches in

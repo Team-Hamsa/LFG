@@ -88,7 +88,8 @@
     <section id="mint-panel" class="card sticker" hidden>
       <p class="wallet-line"><span class="wallet-lbl">Wallet</span> <code id="wallet-display"></code>
         <button id="change-wallet-btn" class="link">change</button>
-        <button id="link-wallet-btn" class="link" hidden>link another</button></p>
+        <button id="link-wallet-btn" class="link" hidden>link another</button>
+        <button id="disconnect-wallet-btn" class="link">disconnect</button></p>
       <div class="actions">
         <div class="mint-row">
           <button id="mint-btn" class="primary big">⛏️ Mint</button>
@@ -424,6 +425,6 @@
        Telegram (window.Telegram stays undefined); loaded BEFORE app.js so the
        dual-mode boot can detect the Telegram context. -->
   <script src="telegram-web-app.js"></script>
-  <script type="module" src="app.js?v=79"></script>
+  <script type="module" src="app.js?v=80"></script>
 </body>
 </html>

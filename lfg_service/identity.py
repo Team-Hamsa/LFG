@@ -335,6 +335,27 @@ def user_token_for(platform: str, platform_user_id: str) -> str | None:
             conn.close()
 
 
+def unlink(platform: str, platform_user_id: str) -> bool:
+    """Disconnect the CURRENT wallet from an identity (the "disconnect wallet"
+    button). Deletes the identities row only — the append-only wallet_links
+    history is deliberately kept, so bucket resolution (claim-all, linked
+    balances) still knows this identity once held that wallet. Idempotent: an
+    unknown identity is a successful no-op. Returns False only on a DB error."""
+    try:
+        conn = sqlite3.connect(DATABASE)
+        conn.execute(
+            "DELETE FROM identities WHERE platform = ? AND platform_user_id = ?",
+            (platform, platform_user_id),
+        )
+        conn.commit()
+        return True
+    except Exception as e:
+        logging.error(f"identity.unlink failed: {e}")
+        return False
+    finally:
+        conn.close()
+
+
 def resolve(platform: str, platform_user_id: str) -> str | None:
     try:
         conn = sqlite3.connect(DATABASE)
