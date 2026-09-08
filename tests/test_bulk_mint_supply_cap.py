@@ -269,7 +269,7 @@ def test_credit_failure_leaves_unit_retryable(tmp_path, monkeypatch):
 
     monkeypatch.setattr(bulk_mint_flow.mint_credits, "add_credit", _boom)
 
-    job = bulk_mint_flow.BulkMintJob("u1", "rUSER", 1)
+    job = bulk_mint_flow.BulkMintJob("u1", "rN7n7otQDd6FczFgLdSqtcsAUxDkw6fzRH", 1)
     job.quantity = 1
     job.units = [bulk_mint_flow.Unit(index=0)]
     job.entitlement = bulk_mint_flow.entitlement.PaymentEntitlement(quantity=1)
@@ -290,7 +290,7 @@ def test_paid_job_exception_stays_resumable(tmp_path, monkeypatch):
         raise RuntimeError("boom")
 
     monkeypatch.setattr(bulk_mint_flow, "_fulfill_unit", _explode)
-    job = bulk_mint_flow.BulkMintJob("u1", "rUSER", 1)
+    job = bulk_mint_flow.BulkMintJob("u1", "rN7n7otQDd6FczFgLdSqtcsAUxDkw6fzRH", 1)
     job.quantity = 1
     job.units = [bulk_mint_flow.Unit(index=0)]
     job.state = bulk_mint_flow.PAID

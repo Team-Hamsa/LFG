@@ -8,7 +8,11 @@ from typing import Any
 
 from lfg_core import swap_meta, trait_economy
 
-DEV_OWNER = "rDevOwnerLFG000000000000000000000"
+# A syntactically VALID classic address (derived from a throwaway keypair,
+# no funds, nobody holds the key): startup-resume refuses job records whose
+# wallet fails is_valid_classic_address (2026-09-08 incident) and dev mode
+# gets no exemption — the signing path is not mocked there.
+DEV_OWNER = "rnmQUgXYCKpFSF6aaUmPf4LGvhKg3RxxNd"
 
 # Closet token lifecycle states — mirror lfg_core/closet_token.py constants.
 _CLOSET_NONE = "none"

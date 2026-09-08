@@ -511,7 +511,9 @@ def test_resume_bulk_jobs_rebuilds_headroom_and_relaunches(dev_auth, monkeypatch
 
     # A durable resumable job: paid, one unit minted (on-chain, maybe not yet
     # indexed), one unit still pending fulfillment.
-    job = bulk_mint_flow.BulkMintJob("dev", "rTest", 2, platform="discord")
+    job = bulk_mint_flow.BulkMintJob(
+        "dev", "rnmQUgXYCKpFSF6aaUmPf4LGvhKg3RxxNd", 2, platform="discord"
+    )
     job.clamp_to_headroom()  # reserves 2 under bulk:<id>
     job.state = bulk_mint_flow.PAID
     job.units[0].state = bulk_mint_flow.MINTED
@@ -553,7 +555,10 @@ class _AcceptReq(_StatusReq):
 
 def _offered_job(sessions):
     job = bulk_mint_flow.BulkMintJob(
-        discord_id="dev", wallet_address="rDEV", requested_qty=2, platform="discord"
+        discord_id="dev",
+        wallet_address="rnmQUgXYCKpFSF6aaUmPf4LGvhKg3RxxNd",
+        requested_qty=2,
+        platform="discord",
     )
     job.quantity = 2
     job.units = [bulk_mint_flow.Unit(index=0), bulk_mint_flow.Unit(index=1)]

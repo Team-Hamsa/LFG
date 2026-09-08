@@ -22,6 +22,10 @@ import pytest  # noqa: E402
 
 from lfg_core import bulk_mint_flow, headroom, supply  # noqa: E402
 
+# A VALID classic address: load_all_resumable refuses records with a malformed
+# wallet (2026-09-08 incident), so a placeholder no longer round-trips.
+USER = "rN7n7otQDd6FczFgLdSqtcsAUxDkw6fzRH"
+
 
 @pytest.fixture(autouse=True)
 def _headroom_env(tmp_path, monkeypatch):
@@ -51,7 +55,7 @@ def _paid_job(tmp_path, monkeypatch, state):
     # Hermetic consumed-payment ledger (#228): cancel()'s claimed-payment
     # guard and the resume reconciliation read sqlite via config.DB_PATH.
     monkeypatch.setattr(bulk_mint_flow.config, "DB_PATH", str(tmp_path / "app.db"))
-    j = bulk_mint_flow.BulkMintJob("u1", "rUSER", 3, platform="discord")
+    j = bulk_mint_flow.BulkMintJob("u1", USER, 3, platform="discord")
     j.entitlement = bulk_mint_flow.entitlement.PaymentEntitlement(quantity=3)
     j.quantity = 3
     j.units = [bulk_mint_flow.Unit(index=i) for i in range(3)]
@@ -74,7 +78,7 @@ def test_persist_and_reload_roundtrip(tmp_path, monkeypatch):
     assert len(reloaded) == 1
     r = reloaded[0]
     assert r.id == j.id
-    assert r.wallet_address == "rUSER"
+    assert r.wallet_address == USER
     assert r.units[0].state == bulk_mint_flow.OFFERED
     assert r.units[0].nft_id == "N0"
     assert r.entitlement.quantity == 3
@@ -122,7 +126,7 @@ def test_resume_skips_done_units_no_double_mint(tmp_path, monkeypatch):
     monkeypatch.setattr(bulk_mint_flow.xrpl_ops, "wait_for_payment", _count_wait)
 
     # A job already fulfilling with 2 of 3 done, persisted to disk.
-    j = bulk_mint_flow.BulkMintJob("u1", "rUSER", 3, platform="discord")
+    j = bulk_mint_flow.BulkMintJob("u1", USER, 3, platform="discord")
     j.clamp_to_headroom()
     j.pay_amount = "30"
     j.state = bulk_mint_flow.FULFILLING
@@ -177,7 +181,7 @@ def test_resume_minted_unit_is_reoffered_not_reminted(tmp_path, monkeypatch):
     monkeypatch.setattr(bulk_mint_flow.xrpl_ops, "get_nft_sell_offers", _no_offers)
     monkeypatch.setattr(bulk_mint_flow.xrpl_ops, "nft_info", _indeterminate_owner)
 
-    j = bulk_mint_flow.BulkMintJob("u1", "rUSER", 1, platform="discord")
+    j = bulk_mint_flow.BulkMintJob("u1", USER, 1, platform="discord")
     j.clamp_to_headroom()
     j.pay_amount = "10"
     j.state = bulk_mint_flow.FULFILLING
@@ -224,7 +228,7 @@ def test_on_mint_callback_persists_minted_before_offer_step(tmp_path, monkeypatc
 
     monkeypatch.setattr(bulk_mint_flow, "persist", _spy_persist)
 
-    j = bulk_mint_flow.BulkMintJob("u1", "rUSER", 1, platform="discord")
+    j = bulk_mint_flow.BulkMintJob("u1", USER, 1, platform="discord")
     j.clamp_to_headroom()
     j.pay_amount = "10"
     j.state = bulk_mint_flow.FULFILLING
@@ -268,13 +272,13 @@ def test_resume_minted_unit_adopts_existing_live_offer(tmp_path, monkeypatch):
         return "SHOULD_NOT_BE_CREATED"
 
     async def _live_offers(nft_id, **kw):
-        return [_gift_offer(bot, "rUSER")]
+        return [_gift_offer(bot, USER)]
 
     monkeypatch.setattr(bulk_mint_flow.mint_flow, "mint_one_unit", _count_mint)
     monkeypatch.setattr(bulk_mint_flow.xrpl_ops, "create_nft_offer", _count_offer)
     monkeypatch.setattr(bulk_mint_flow.xrpl_ops, "get_nft_sell_offers", _live_offers)
 
-    j = bulk_mint_flow.BulkMintJob("u1", "rUSER", 1, platform="discord")
+    j = bulk_mint_flow.BulkMintJob("u1", USER, 1, platform="discord")
     j.clamp_to_headroom()
     j.pay_amount = "10"
     j.state = bulk_mint_flow.FULFILLING
@@ -306,10 +310,10 @@ def test_ensure_offer_ignores_non_matching_offers(monkeypatch):
 
     async def _foreign_offers(nft_id, **kw):
         return [
-            _gift_offer("rSOMEONEELSE", "rUSER", offer_index="F1"),  # foreign owner
+            _gift_offer("rSOMEONEELSE", USER, offer_index="F1"),  # foreign owner
             _gift_offer(bot, "rOTHER", offer_index="F2"),  # wrong destination
-            _gift_offer(bot, "rUSER", amount="5000000", offer_index="F3"),  # priced
-            _gift_offer(bot, "rUSER", expiration=777, offer_index="F4"),  # expires
+            _gift_offer(bot, USER, amount="5000000", offer_index="F3"),  # priced
+            _gift_offer(bot, USER, expiration=777, offer_index="F4"),  # expires
         ]
 
     async def _bot_still_owns(nft_id, **kw):
@@ -319,7 +323,7 @@ def test_ensure_offer_ignores_non_matching_offers(monkeypatch):
     monkeypatch.setattr(bulk_mint_flow.xrpl_ops, "get_nft_sell_offers", _foreign_offers)
     monkeypatch.setattr(bulk_mint_flow.xrpl_ops, "nft_info", _bot_still_owns)
 
-    j = bulk_mint_flow.BulkMintJob("u1", "rUSER", 1, platform="discord")
+    j = bulk_mint_flow.BulkMintJob("u1", USER, 1, platform="discord")
     u = bulk_mint_flow.Unit(index=0, state=bulk_mint_flow.MINTED, nft_id="X")
     asyncio.run(bulk_mint_flow._ensure_offer(j, u))
 
@@ -351,14 +355,14 @@ def test_resume_minted_unit_accepted_offer_marks_delivered(tmp_path, monkeypatch
         return []  # accept consumed the offer object
 
     async def _buyer_owns(nft_id, **kw):
-        return {"nft_id": nft_id, "owner": "rUSER"}
+        return {"nft_id": nft_id, "owner": USER}
 
     monkeypatch.setattr(bulk_mint_flow.mint_flow, "mint_one_unit", _count_mint)
     monkeypatch.setattr(bulk_mint_flow.xrpl_ops, "create_nft_offer", _count_offer)
     monkeypatch.setattr(bulk_mint_flow.xrpl_ops, "get_nft_sell_offers", _no_offers)
     monkeypatch.setattr(bulk_mint_flow.xrpl_ops, "nft_info", _buyer_owns)
 
-    j = bulk_mint_flow.BulkMintJob("u1", "rUSER", 1, platform="discord")
+    j = bulk_mint_flow.BulkMintJob("u1", USER, 1, platform="discord")
     j.clamp_to_headroom()
     j.pay_amount = "10"
     j.state = bulk_mint_flow.FULFILLING
@@ -458,7 +462,7 @@ def test_persist_failure_during_fulfillment_never_remints_or_aborts(tmp_path, mo
 
     monkeypatch.setattr(bulk_mint_flow.os, "replace", _replace)
 
-    j = bulk_mint_flow.BulkMintJob("u1", "rUSER", 1, platform="discord")
+    j = bulk_mint_flow.BulkMintJob("u1", USER, 1, platform="discord")
     j.clamp_to_headroom()
     j.pay_amount = "10"
     j.state = bulk_mint_flow.FULFILLING
@@ -583,7 +587,7 @@ def test_resumed_awaiting_payment_honours_preclaimed_payment(tmp_path, monkeypat
     bulk_mint_flow.persist(j)
     # The pre-crash process claimed the K x payment under this job's tag.
     assert bulk_mint_flow.payment_ledger.try_consume(
-        "TXHASH1", "rUSER", "rDEST", claimant=j.payment_claimant
+        "TXHASH1", USER, "rDEST", claimant=j.payment_claimant
     )
 
     resumed = bulk_mint_flow.load_all_resumable()[0]
@@ -627,7 +631,7 @@ def test_cancel_refused_once_payment_claimed(tmp_path, monkeypatch):
     j = _paid_job(tmp_path, monkeypatch, bulk_mint_flow.AWAITING_PAYMENT)
     bulk_mint_flow.persist(j)
     assert bulk_mint_flow.payment_ledger.try_consume(
-        "TXHASH2", "rUSER", "rDEST", claimant=j.payment_claimant
+        "TXHASH2", USER, "rDEST", claimant=j.payment_claimant
     )
     assert j.cancel() is False
     assert j.state == bulk_mint_flow.AWAITING_PAYMENT
@@ -705,7 +709,7 @@ def test_cancel_refuses_on_indeterminate_claim_check(tmp_path, monkeypatch):
     unprovable, so cancel must refuse rather than risk deleting a paid job."""
     monkeypatch.setattr(bulk_mint_flow, "JOBS_DIR", str(tmp_path))
     monkeypatch.setattr(bulk_mint_flow.payment_ledger, "find_claimed", lambda c: None)
-    j = bulk_mint_flow.BulkMintJob("u1", "rUSER", 1, platform="discord")
+    j = bulk_mint_flow.BulkMintJob("u1", USER, 1, platform="discord")
     j.clamp_to_headroom()
     assert j.cancel() is False
     assert j.state == bulk_mint_flow.AWAITING_PAYMENT
@@ -750,7 +754,7 @@ def test_ensure_offer_lookup_failure_leaves_unit_minted(tmp_path, monkeypatch):
     monkeypatch.setattr(bulk_mint_flow.xrpl_ops, "create_nft_offer", _count_offer)
     monkeypatch.setattr(bulk_mint_flow.xrpl_ops, "get_nft_sell_offers", _lookup_boom)
 
-    j = bulk_mint_flow.BulkMintJob("u1", "rUSER", 1, platform="discord")
+    j = bulk_mint_flow.BulkMintJob("u1", USER, 1, platform="discord")
     j.clamp_to_headroom()
     unit = j.units[0]
     unit.state = bulk_mint_flow.MINTED
