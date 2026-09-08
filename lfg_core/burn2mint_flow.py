@@ -227,14 +227,21 @@ def load_all_resumable() -> list[Burn2MintSession]:
             # cap-exempt mint job at boot (the 2026-09-08 incident vector).
             refusal = bulk_mint_flow.record_refusal(session.network, session.wallet_address)
             if refusal:
-                session.state = FAILED
-                session.error = f"refused at resume: {refusal}"
-                persist(session)
                 logging.critical(
-                    "burn2mint %s NOT resumed (%s) — session failed, no mint job launched",
+                    "burn2mint %s NOT resumed (%s) — no mint job launched",
                     session.id,
                     refusal,
                 )
+                # Same filename/id + write-failure discipline as the bulk loader.
+                if name != f"{session.id}.json":
+                    logging.critical(
+                        "burn2mint record %s embeds id %s — not rewritten", name, session.id
+                    )
+                    continue
+                session.state = FAILED
+                session.error = f"refused at resume: {refusal}"
+                if not persist(session):
+                    logging.critical("burn2mint %s: could not persist refusal", session.id)
                 continue
             out.append(session)
         except Exception:

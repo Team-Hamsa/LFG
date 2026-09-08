@@ -928,17 +928,29 @@ def load_all_resumable() -> list[BulkMintJob]:
             job = BulkMintJob.from_serialized(data)
             refusal = record_refusal(job.network, job.wallet_address)
             if refusal:
-                # Fail it durably so the next boot does not re-walk it — and
-                # never launch: launching is what mints.
-                job.state = FAILED
-                job.error = f"refused at resume: {refusal}"
-                persist(job)
+                # Never launch: launching is what mints. Fail the record
+                # durably so the next boot does not re-walk it — but only
+                # under its own filename: persist() writes <id>.json, so a
+                # record whose embedded id does not match its filename is
+                # left alone (rewriting it could clobber another job's
+                # record) and simply refused again next boot. A failed write
+                # is logged for the same reason — refusal is already safe,
+                # persistence only stops the log noise.
                 logging.critical(
-                    "bulk job %s NOT resumed (%s) — record failed; minted units "
-                    "(if any) sit in the issuer wallet for manual handling",
+                    "bulk job %s NOT resumed (%s) — minted units (if any) sit in "
+                    "the issuer wallet for manual handling",
                     job.id,
                     refusal,
                 )
+                if name != f"{job.id}.json":
+                    logging.critical(
+                        "bulk job record %s embeds id %s — not rewritten", name, job.id
+                    )
+                    continue
+                job.state = FAILED
+                job.error = f"refused at resume: {refusal}"
+                if not persist(job):
+                    logging.critical("bulk job %s: could not persist refusal", job.id)
                 continue
             out.append(job)
         except Exception:

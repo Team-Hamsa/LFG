@@ -79,6 +79,39 @@ def test_bulk_loader_refuses_and_fails_untrusted_records(tmp_path, monkeypatch):
     assert [j.id for j in bulk_mint_flow.load_all_resumable()] == ["good"]
 
 
+def test_bulk_loader_never_rewrites_a_record_under_another_id(tmp_path, monkeypatch):
+    # CodeRabbit on #459: persist() writes <id>.json; a refused record whose
+    # filename does not match its embedded id must be left untouched (never
+    # rewritten over another job's file) and still never resumed.
+    monkeypatch.setattr(bulk_mint_flow, "JOBS_DIR", str(tmp_path))
+    monkeypatch.setattr(config, "XRPL_NETWORK", "mainnet")
+    _write(
+        str(tmp_path / "victim.json"),
+        _bulk_record("victim", network="mainnet", wallet=VALID, state=bulk_mint_flow.PAID),
+    )
+    _write(
+        str(tmp_path / "stray.json"),
+        _bulk_record("victim", network="testnet", wallet=VALID, state=bulk_mint_flow.PAID),
+    )
+    before = (tmp_path / "victim.json").read_text()
+    resumed = bulk_mint_flow.load_all_resumable()
+    assert [j.id for j in resumed] == ["victim"]
+    assert (tmp_path / "victim.json").read_text() == before
+    with open(tmp_path / "stray.json") as f:
+        assert json.load(f)["state"] == bulk_mint_flow.PAID  # untouched, just refused
+
+
+def test_bulk_loader_persist_failure_still_refuses(tmp_path, monkeypatch):
+    monkeypatch.setattr(bulk_mint_flow, "JOBS_DIR", str(tmp_path))
+    monkeypatch.setattr(config, "XRPL_NETWORK", "mainnet")
+    _write(
+        str(tmp_path / "bad.json"),
+        _bulk_record("bad", network="testnet", wallet=VALID, state=bulk_mint_flow.PAID),
+    )
+    monkeypatch.setattr(bulk_mint_flow, "persist", lambda job: False)
+    assert bulk_mint_flow.load_all_resumable() == []
+
+
 def test_burn2mint_loader_refuses_and_fails_untrusted_sessions(tmp_path, monkeypatch):
     monkeypatch.setattr(burn2mint_flow, "JOBS_DIR", str(tmp_path))
     monkeypatch.setattr(config, "XRPL_NETWORK", "mainnet")

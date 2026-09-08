@@ -24,12 +24,14 @@ import tempfile
 # its next boot and minted 32 real mainnet editions to an undeliverable
 # wallet (the records are quarantined; see the incident write-up on the
 # PR). Pin both dirs to a throwaway temp dir here, before any import, so no
-# test can ever write a record the live service would trust. (setdefault,
-# like everything below — an explicit export still wins.)
+# test can ever write a record the live service would trust. HARD-SET, not
+# setdefault (CodeRabbit on #459): an inherited shell/pm2 export of these
+# vars would otherwise point the suite straight at the live record dirs —
+# the one case where "explicit export wins" must lose.
 # (Inlined mkdtemp: ruff's E402 pre-import allowance covers os.environ
 # statements only, not a helper assignment.)
-os.environ.setdefault("BULK_MINT_JOBS_DIR", tempfile.mkdtemp(prefix="lfg-test-jobs-bulk-"))
-os.environ.setdefault("BURN2MINT_JOBS_DIR", tempfile.mkdtemp(prefix="lfg-test-jobs-b2m-"))
+os.environ["BULK_MINT_JOBS_DIR"] = tempfile.mkdtemp(prefix="lfg-test-jobs-bulk-")
+os.environ["BURN2MINT_JOBS_DIR"] = tempfile.mkdtemp(prefix="lfg-test-jobs-b2m-")
 
 # --- Isolate the suite from the deployed .env (#323) ---
 # lfg_core/config.py gates its load_dotenv() on LFG_SKIP_DOTENV, so with this
