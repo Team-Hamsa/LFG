@@ -50,10 +50,10 @@ def record_refusal(network: str, wallet_address: str) -> str | None:
     resumed by prod minted 32 real mainnet editions before this existed."""
     if network != config.XRPL_NETWORK:
         return f"record network {network!r} is not this stack's {config.XRPL_NETWORK!r}"
-    # Dev mode (WEBAPP_DEV_MODE) runs against the mock economy with a
-    # placeholder owner address and never signs anything — the wallet-shape
-    # check only matters where a real offer would be built.
-    if not config.WEBAPP_DEV_MODE and not is_valid_classic_address(wallet_address):
+    # No dev-mode exemption (Greptile on #459): WEBAPP_DEV_MODE does not mock
+    # the mint/offer signing path, so a malformed wallet would still mint and
+    # strand the token. mock_economy.DEV_OWNER is a valid address for this.
+    if not is_valid_classic_address(wallet_address):
         return "record wallet is not a valid classic address"
     return None
 

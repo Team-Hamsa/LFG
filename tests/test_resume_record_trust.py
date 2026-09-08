@@ -29,6 +29,12 @@ def test_record_refusal_reasons(monkeypatch):
     assert "network" in bulk_mint_flow.record_refusal("testnet", VALID)
     assert "wallet" in bulk_mint_flow.record_refusal("mainnet", "rUSERUSERUSERUSERUSERUSERUSERUSER")
     assert "wallet" in bulk_mint_flow.record_refusal("mainnet", "")
+    # dev mode gets no exemption — the signing path is not mocked there
+    monkeypatch.setattr(config, "WEBAPP_DEV_MODE", True)
+    assert "wallet" in bulk_mint_flow.record_refusal("mainnet", "rDevOwnerLFG000000000000000000000")
+    from webapp import mock_economy
+
+    assert bulk_mint_flow.record_refusal("mainnet", mock_economy.DEV_OWNER) is None
 
 
 def _write(path, data):
