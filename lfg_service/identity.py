@@ -341,6 +341,7 @@ def unlink(platform: str, platform_user_id: str) -> bool:
     history is deliberately kept, so bucket resolution (claim-all, linked
     balances) still knows this identity once held that wallet. Idempotent: an
     unknown identity is a successful no-op. Returns False only on a DB error."""
+    conn = None
     try:
         conn = sqlite3.connect(DATABASE)
         conn.execute(
@@ -353,7 +354,58 @@ def unlink(platform: str, platform_user_id: str) -> bool:
         logging.error(f"identity.unlink failed: {e}")
         return False
     finally:
+        if conn is not None:
+            conn.close()
+
+
+# --- revoked session tokens (log out) ---
+# Session tokens are stateless HMAC, so a logout must be remembered
+# somewhere durable for the rest of the token's lifetime — a process-local
+# set would forget every revocation on a routine deployer restart (Greptile
+# P1 on #458). Rows expire with the token they revoke.
+
+
+def ensure_revoked_sessions_table() -> None:
+    conn = sqlite3.connect(DATABASE)
+    try:
+        conn.execute(
+            "CREATE TABLE IF NOT EXISTS revoked_sessions (sig TEXT PRIMARY KEY, exp REAL NOT NULL)"
+        )
+        conn.commit()
+    finally:
         conn.close()
+
+
+def add_revoked_session(sig: str, exp: float, now: float) -> bool:
+    """Persist one revocation and drop the ones already past their exp."""
+    conn = None
+    try:
+        conn = sqlite3.connect(DATABASE)
+        conn.execute("DELETE FROM revoked_sessions WHERE exp < ?", (now,))
+        conn.execute("INSERT OR REPLACE INTO revoked_sessions (sig, exp) VALUES (?, ?)", (sig, exp))
+        conn.commit()
+        return True
+    except Exception as e:
+        logging.error(f"identity.add_revoked_session failed: {e}")
+        return False
+    finally:
+        if conn is not None:
+            conn.close()
+
+
+def load_revoked_sessions(now: float) -> dict[str, float]:
+    """Every still-live revocation (sig -> exp), for the in-process cache."""
+    conn = None
+    try:
+        conn = sqlite3.connect(DATABASE)
+        rows = conn.execute("SELECT sig, exp FROM revoked_sessions WHERE exp >= ?", (now,))
+        return {sig: float(exp) for sig, exp in rows}
+    except Exception as e:
+        logging.error(f"identity.load_revoked_sessions failed: {e}")
+        return {}
+    finally:
+        if conn is not None:
+            conn.close()
 
 
 def resolve(platform: str, platform_user_id: str) -> str | None:

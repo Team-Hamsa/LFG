@@ -706,11 +706,12 @@ def make_session_token(user: dict[str, Any]) -> str:
     return f"{body}.{sig}"
 
 
-# Session tokens are stateless HMAC, so "log out" needs a process-local
-# denylist: signature -> exp. Entries expire with the token they revoke, so
-# the dict is bounded by (logouts per SESSION_TTL). Single-process by design
-# (lfg_service is one pm2 process per stack); a restart forgets revocations,
-# and the client drops its copy of the token too, so that is acceptable.
+# Session tokens are stateless HMAC, so "log out" needs a denylist:
+# signature -> exp. The in-process dict is the hot path every request checks;
+# it is write-through to the app DB (identity_store.revoked_sessions) and
+# reloaded at startup, so a deployer restart does NOT resurrect a logged-out
+# token (Greptile P1 on #458). Entries expire with the token they revoke, so
+# both are bounded by (logouts per SESSION_TTL).
 _revoked_sessions: dict[str, float] = {}
 
 
@@ -719,14 +720,27 @@ def _prune_revoked_sessions(now: float) -> None:
         del _revoked_sessions[sig]
 
 
-def revoke_session_token(token: str) -> None:
+def load_revoked_sessions() -> None:
+    """Startup: rehydrate the denylist from the DB (durable across restarts)."""
+    now = time.time()
+    _revoked_sessions.clear()
+    _revoked_sessions.update(identity_store.load_revoked_sessions(now))
+
+
+def revoke_session_token(token: str) -> bool:
     """Deny this token for the rest of its lifetime. Garbage / expired /
-    forged tokens are ignored (nothing to revoke)."""
+    forged tokens are ignored (nothing to revoke). Returns False only when the
+    durable write failed — the in-memory denial still applies, but a restart
+    would forget it, so callers report the logout as not fully done."""
     payload = verify_session_token(token)
     if not payload:
-        return
-    _prune_revoked_sessions(time.time())
-    _revoked_sessions[token.rsplit(".", 1)[1]] = float(payload["exp"])
+        return True
+    now = time.time()
+    _prune_revoked_sessions(now)
+    sig = token.rsplit(".", 1)[1]
+    exp = float(payload["exp"])
+    _revoked_sessions[sig] = exp
+    return identity_store.add_revoked_session(sig, exp, now)
 
 
 def verify_session_token(token: str):
@@ -1475,7 +1489,8 @@ async def handle_logout(request):
     calls this before dropping its localStorage copy; Discord/Telegram
     re-authenticate through their host handshake, so for them the meaningful
     action is /api/wallet/disconnect."""
-    revoke_session_token(request.headers.get("Authorization", "")[7:])
+    if not revoke_session_token(request.headers.get("Authorization", "")[7:]):
+        return web.json_response({"error": "could not persist logout"}, status=500)
     return web.json_response({"ok": True})
 
 
@@ -1490,7 +1505,8 @@ async def handle_wallet_disconnect(request):
     user = request["user"]
     platform = _platform(user)
     if platform == "web":
-        revoke_session_token(request.headers.get("Authorization", "")[7:])
+        if not revoke_session_token(request.headers.get("Authorization", "")[7:]):
+            return web.json_response({"error": "could not persist logout"}, status=500)
         return web.json_response({"ok": True, "wallet": None})
     ok = await asyncio.to_thread(identity_store.unlink, platform, user["id"])
     if ok and platform == "discord":
@@ -9298,6 +9314,8 @@ async def no_cache_mw(request, handler):
 def create_app() -> web.Application:
     app = web.Application(middlewares=[cors_mw, no_cache_mw])
     identity_store.ensure_identities_table()
+    identity_store.ensure_revoked_sessions_table()
+    load_revoked_sessions()
     sign_request_store.ensure_table()
     identity_store.migrate_users_to_identities()
     app.router.add_get("/api/config", handle_config)

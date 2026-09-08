@@ -39,6 +39,7 @@ def _fresh_dbs(tmp_path, monkeypatch):
     monkeypatch.setattr(identity, "DATABASE", db)
     monkeypatch.setattr(user_db, "DATABASE", db)
     identity.ensure_identities_table()
+    identity.ensure_revoked_sessions_table()
     user_db.create_users_table()
     return db
 
@@ -76,7 +77,8 @@ def test_user_db_delete_user(tmp_path, monkeypatch):
 # --- token revocation ---
 
 
-def test_revoked_token_fails_verification():
+def test_revoked_token_fails_verification(tmp_path, monkeypatch):
+    _fresh_dbs(tmp_path, monkeypatch)
     tok = server.make_session_token({"id": "1", "name": "bob"})
     other = server.make_session_token({"id": "2", "name": "eve"})
     assert server.verify_session_token(tok)
@@ -85,13 +87,39 @@ def test_revoked_token_fails_verification():
     assert server.verify_session_token(other)  # unaffected
 
 
-def test_revoke_garbage_token_is_noop():
-    server.revoke_session_token("not-a-token")
-    server.revoke_session_token("")
+def test_revoke_garbage_token_is_noop(tmp_path, monkeypatch):
+    _fresh_dbs(tmp_path, monkeypatch)
+    assert server.revoke_session_token("not-a-token") is True
+    assert server.revoke_session_token("") is True
     assert server._revoked_sessions == {}
+    assert identity.load_revoked_sessions(0) == {}
 
 
-def test_logout_endpoint_revokes_bearer_token():
+def test_revocation_survives_restart(tmp_path, monkeypatch):
+    # Greptile P1 on #458: a deployer restart must not resurrect a logged-out
+    # token. Simulate the restart by wiping the in-process cache and reloading.
+    _fresh_dbs(tmp_path, monkeypatch)
+    tok = server.make_session_token({"id": "1", "name": "bob"})
+    server.revoke_session_token(tok)
+    server._revoked_sessions.clear()
+    assert server.verify_session_token(tok)  # cache gone → would be accepted
+    server.load_revoked_sessions()
+    assert server.verify_session_token(tok) is None
+    # an expired revocation is dropped on reload, so the table stays bounded
+    assert identity.load_revoked_sessions(now=10**12) == {}
+
+
+def test_logout_reports_persist_failure(tmp_path, monkeypatch):
+    _fresh_dbs(tmp_path, monkeypatch)
+    monkeypatch.setattr(identity, "add_revoked_session", lambda *_a: False)
+    tok = server.make_session_token({"id": "1", "name": "bob"})
+    resp = _run(server.handle_logout(_Req({"Authorization": f"Bearer {tok}"})))
+    assert resp.status == 500
+    assert server.verify_session_token(tok) is None  # still denied in-process
+
+
+def test_logout_endpoint_revokes_bearer_token(tmp_path, monkeypatch):
+    _fresh_dbs(tmp_path, monkeypatch)
     tok = server.make_session_token({"id": "1", "name": "bob"})
     resp = _run(server.handle_logout(_Req({"Authorization": f"Bearer {tok}"})))
     assert resp.status == 200 and _body(resp) == {"ok": True}
