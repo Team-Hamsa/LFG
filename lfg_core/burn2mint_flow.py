@@ -219,8 +219,24 @@ def load_all_resumable() -> list[Burn2MintSession]:
         try:
             with open(os.path.join(JOBS_DIR, name)) as f:
                 data = json.load(f)
-            if data.get("state") in (AWAITING_BURNS, FULFILLING):
-                out.append(Burn2MintSession.from_serialized(data))
+            if data.get("state") not in (AWAITING_BURNS, FULFILLING):
+                continue
+            session = Burn2MintSession.from_serialized(data)
+            # Same record-trust check as the bulk loader: a stray/fabricated
+            # session's "validated" burns would otherwise convert into a real
+            # cap-exempt mint job at boot (the 2026-09-08 incident vector).
+            refusal = bulk_mint_flow.record_refusal(session.network, session.wallet_address)
+            if refusal:
+                session.state = FAILED
+                session.error = f"refused at resume: {refusal}"
+                persist(session)
+                logging.critical(
+                    "burn2mint %s NOT resumed (%s) — session failed, no mint job launched",
+                    session.id,
+                    refusal,
+                )
+                continue
+            out.append(session)
         except Exception:
             logging.error("skipping unreadable burn2mint record %s", name)
     return out

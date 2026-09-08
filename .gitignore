@@ -85,3 +85,6 @@ share_cards/
 # ~52k lines of them, which is larger than the change itself and blinds PR
 # review tooling.
 .superpowers/
+
+# ops: job records pulled out of the resume path (2026-09-08 fixture-leak incident)
+quarantine-*/

@@ -35,7 +35,9 @@ from lfg_core import (  # noqa: E402
 )
 from lfg_service import app as server  # noqa: E402
 
-WALLET = "rUSERUSERUSERUSERUSERUSERUSERUSER"
+# A VALID classic address: load_all_resumable now refuses records whose wallet
+# is malformed (2026-09-08 incident), so placeholders no longer round-trip.
+WALLET = "rN7n7otQDd6FczFgLdSqtcsAUxDkw6fzRH"
 
 
 def _run(coro):
@@ -616,12 +618,17 @@ def test_convert_requires_durable_job_before_fulfilling(monkeypatch):
         launched.append(job)
         return job
 
-    monkeypatch.setattr(bulk_mint_flow, "persist", lambda job: False)
-    _run(burn2mint_flow.convert(s, _launch))
+    # A SCOPED patch, never monkeypatch.undo(): undo() reverts every patch on
+    # the shared fixture object, including the autouse _hermetic JOBS_DIR
+    # pins — the retry below then wrote a FULFILLING fixture session into the
+    # repo's real burn2mint_jobs/, which the prod service resumed and minted
+    # for real on mainnet (2026-09-08 incident, 32 editions).
+    with pytest.MonkeyPatch.context() as mp:
+        mp.setattr(bulk_mint_flow, "persist", lambda job: False)
+        _run(burn2mint_flow.convert(s, _launch))
     assert s.state == burn2mint_flow.AWAITING_BURNS  # NOT fulfilling
     assert s.bulk_job_id is None
     assert launched == []
-    monkeypatch.undo()
     # Retry (what the next status poll / resume does) now converts fully.
     _run(burn2mint_flow.convert(s, _launch))
     assert s.state == burn2mint_flow.FULFILLING

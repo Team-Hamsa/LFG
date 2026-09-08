@@ -13,6 +13,23 @@
 # networks to testnet here too, giving the suite a coherent enabled+matching
 # posture. (setdefault, so explicit shell exports still win.)
 import os
+import tempfile
+
+# --- Durable job records must NEVER land in the checkout (2026-09-08) ---
+# bulk_mint_flow / burn2mint_flow read their record directories from the
+# environment at import. A test that escaped its per-file hermetic fixture
+# (a bare monkeypatch.undo() also undid the autouse patch) wrote fixture
+# burn-to-mint sessions — "validated" burns, wallet rUSERUSER…, network
+# testnet — into ~/LFG/burn2mint_jobs/. The PROD service resumed them at
+# its next boot and minted 32 real mainnet editions to an undeliverable
+# wallet (the records are quarantined; see the incident write-up on the
+# PR). Pin both dirs to a throwaway temp dir here, before any import, so no
+# test can ever write a record the live service would trust. (setdefault,
+# like everything below — an explicit export still wins.)
+# (Inlined mkdtemp: ruff's E402 pre-import allowance covers os.environ
+# statements only, not a helper assignment.)
+os.environ.setdefault("BULK_MINT_JOBS_DIR", tempfile.mkdtemp(prefix="lfg-test-jobs-bulk-"))
+os.environ.setdefault("BURN2MINT_JOBS_DIR", tempfile.mkdtemp(prefix="lfg-test-jobs-b2m-"))
 
 # --- Isolate the suite from the deployed .env (#323) ---
 # lfg_core/config.py gates its load_dotenv() on LFG_SKIP_DOTENV, so with this

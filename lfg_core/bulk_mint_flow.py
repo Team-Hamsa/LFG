@@ -20,6 +20,8 @@ from dataclasses import asdict, dataclass
 from decimal import Decimal
 from typing import Any
 
+from xrpl.core.addresscodec import is_valid_classic_address
+
 from lfg_core import (
     config,
     db_path,
@@ -34,6 +36,27 @@ from lfg_core import (
 )
 
 JOBS_DIR = os.getenv("BULK_MINT_JOBS_DIR", "bulk_mint_jobs")
+
+
+def record_refusal(network: str, wallet_address: str) -> str | None:
+    """Why an on-disk job record must NOT be resumed, or None when it may.
+
+    A record on disk is otherwise trusted enough to spend the issuer's
+    signing key, so the startup sweep re-checks the two facts a stray or
+    fabricated record gets wrong: it belongs to THIS stack's network, and
+    its destination is a well-formed classic address (an offer to anything
+    else can never be created, so every unit minted for it strands in the
+    issuer wallet). 2026-09-08: 32 fixture records (testnet, rUSERUSER…)
+    resumed by prod minted 32 real mainnet editions before this existed."""
+    if network != config.XRPL_NETWORK:
+        return f"record network {network!r} is not this stack's {config.XRPL_NETWORK!r}"
+    # Dev mode (WEBAPP_DEV_MODE) runs against the mock economy with a
+    # placeholder owner address and never signs anything — the wallet-shape
+    # check only matters where a real offer would be built.
+    if not config.WEBAPP_DEV_MODE and not is_valid_classic_address(wallet_address):
+        return "record wallet is not a valid classic address"
+    return None
+
 
 AWAITING_PAYMENT = "awaiting_payment"
 PAID = "paid"
@@ -900,8 +923,24 @@ def load_all_resumable() -> list[BulkMintJob]:
         try:
             with open(os.path.join(JOBS_DIR, name)) as f:
                 data = json.load(f)
-            if data.get("state") in (AWAITING_PAYMENT, PAID, FULFILLING):
-                out.append(BulkMintJob.from_serialized(data))
+            if data.get("state") not in (AWAITING_PAYMENT, PAID, FULFILLING):
+                continue
+            job = BulkMintJob.from_serialized(data)
+            refusal = record_refusal(job.network, job.wallet_address)
+            if refusal:
+                # Fail it durably so the next boot does not re-walk it — and
+                # never launch: launching is what mints.
+                job.state = FAILED
+                job.error = f"refused at resume: {refusal}"
+                persist(job)
+                logging.critical(
+                    "bulk job %s NOT resumed (%s) — record failed; minted units "
+                    "(if any) sit in the issuer wallet for manual handling",
+                    job.id,
+                    refusal,
+                )
+                continue
+            out.append(job)
         except Exception:
             logging.error("skipping unreadable bulk job record %s", name)
     return out
