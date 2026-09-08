@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import re
 import xml.etree.ElementTree as ET
 from pathlib import Path
 
@@ -40,6 +41,28 @@ def test_output_is_well_formed_xml_and_contains_flows() -> None:
         assert name in svg
     for landmark in ("lfg_service", "lfg_core", "XRP Ledger", "Xaman", "BunnyCDN"):
         assert landmark in svg
+
+
+def _visible_texts(svg: str) -> list[str]:
+    # The rendered <text> element contents only — NOT the root aria-label,
+    # which independently names the surfaces (Greptile on #460): a box could
+    # vanish from the diagram while a substring search still passed.
+    return re.findall(r"<text[^>]*>([^<]*)</text>", svg)
+
+
+def test_top_row_contains_five_clients_not_a_social_funnel() -> None:
+    svg = ras.build_svg(ras.discover_flow_modules())
+    texts = _visible_texts(svg)
+    for surface in (
+        "Discord Bot",
+        "Discord Activity",
+        "Telegram Bot",
+        "Telegram Mini App",
+        "Web App",
+    ):
+        assert texts.count(surface) == 1, surface
+    assert "X funnel" not in texts
+    assert "X funnel" not in svg
 
 
 def test_new_flow_module_appears_automatically(tmp_path: Path) -> None:
