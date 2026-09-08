@@ -1,7 +1,7 @@
 """Regenerate the README architecture diagram (assets/architecture.svg).
 
-A brand-kit block diagram of the system: the four client surfaces plus the
-X funnel path flowing into the shared lfg_service backend, lfg_core beneath
+A brand-kit block diagram of the system: the five client surfaces flowing
+into the shared lfg_service backend, lfg_core beneath
 it (with the session-flow modules discovered live from lfg_core/*_flow.py,
 so a new flow module appears in the diagram automatically), the listener
 process group with its per-network SQLite stores, and the external systems
@@ -137,9 +137,9 @@ def layout_chips(
 
 def build_svg(flow_modules: list[str]) -> str:
     label = (
-        "LFG system architecture: four client surfaces (Discord bot, Discord "
-        "Activity, Telegram bot + Mini App, and the web app at "
-        "build.letseffinggo.com) plus the X funnel path all call the shared "
+        "LFG system architecture: five client surfaces (Discord bot, Discord "
+        "Activity, Telegram bot, Telegram Mini App, and the web app at "
+        "build.letseffinggo.com) all call the shared "
         "lfg_service backend, which runs the session state machines over "
         "lfg_core (" + ", ".join(flow_modules) + "). A separate listener "
         "process group streams the Clio transaction feed into per-network "
@@ -173,13 +173,13 @@ def build_svg(flow_modules: list[str]) -> str:
         "no custody</text>"
     )
 
-    # Row 1: four client surfaces + the X funnel path
+    # Row 1: five client surfaces
     surfaces = [
         ("Discord Bot", "slash commands", GREEN),
         ("Discord Activity", "embedded client", PURPLE),
-        ("Telegram", "bot + Mini App", YELLOW),
+        ("Telegram Bot", "chat client", YELLOW),
+        ("Telegram Mini App", "embedded client", BLUE),
         ("Web App", "build.letseffinggo.com", ORANGE),
-        ("X funnel", "share cards → PWA", BLUE),
     ]
     row1_y, row1_h, gap = 60, 62, 8
     sw = (AREA_W - gap * (len(surfaces) - 1)) / len(surfaces)  # 158.8
@@ -187,7 +187,17 @@ def build_svg(flow_modules: list[str]) -> str:
     for i, (title, sub, accent) in enumerate(surfaces):
         sx = PAD + i * (sw + gap)
         centers.append(sx + sw / 2)
-        parts += box(sx, row1_y, sw, row1_h, accent, title, sub, title_size=12, sub_size=9.5)
+        parts += box(
+            sx,
+            row1_y,
+            sw,
+            row1_h,
+            accent,
+            title,
+            sub,
+            title_size=11.5,
+            sub_size=9.5,
+        )
 
     # Row 2: lfg_service
     svc_x, svc_w = 170, 560

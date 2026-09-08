@@ -42,6 +42,19 @@ def test_output_is_well_formed_xml_and_contains_flows() -> None:
         assert landmark in svg
 
 
+def test_top_row_contains_five_clients_not_a_social_funnel() -> None:
+    svg = ras.build_svg(ras.discover_flow_modules())
+    for surface in (
+        "Discord Bot",
+        "Discord Activity",
+        "Telegram Bot",
+        "Telegram Mini App",
+        "Web App",
+    ):
+        assert surface in svg
+    assert "X funnel" not in svg
+
+
 def test_new_flow_module_appears_automatically(tmp_path: Path) -> None:
     (tmp_path / "mint_flow.py").write_text("")
     base = ras.build_svg(ras.discover_flow_modules(tmp_path))

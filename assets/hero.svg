@@ -6,7 +6,7 @@
   <image x="285.0" y="30" width="390" height="66.0" href="__LOGO_HREF__"/>
   <!-- headline + subtitle -->
   <text x="480.0" y="178" text-anchor="middle" font-family="-apple-system,'Segoe UI',Roboto,Helvetica,Arial,sans-serif" font-size="38" font-weight="800" fill="#F5F4F1">Mint &#183; Swap &#183; Trade on the XRP Ledger</text>
-  <text x="480.0" y="210" text-anchor="middle" font-family="-apple-system,'Segoe UI',Roboto,Helvetica,Arial,sans-serif" font-size="16" fill="#9C9A94">Dynamic trait-layer NFTs, signed with Xaman &#8212; one pipeline, four surfaces.</text>
+  <text x="480.0" y="210" text-anchor="middle" font-family="-apple-system,'Segoe UI',Roboto,Helvetica,Arial,sans-serif" font-size="16" fill="#9C9A94">Dynamic trait-layer NFTs, signed with Xaman &#8212; one pipeline, five surfaces.</text>
   <!-- surface chips -->
   <rect x="179.5" y="228" width="66" height="34" rx="17.0" fill="#181818" stroke="#4890C0" stroke-width="2.5"/>
   <text x="212.5" y="251" text-anchor="middle" font-family="-apple-system,'Segoe UI',Roboto,Helvetica,Arial,sans-serif" font-size="16" font-weight="700" fill="#4890C0">XRPL</text>

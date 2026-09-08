@@ -9,7 +9,7 @@
 <a href="https://build.letseffinggo.com"><img src="https://img.shields.io/badge/web_app-live-D89030?style=flat-square" alt="Web app live at build.letseffinggo.com"></a>
 <img src="https://img.shields.io/badge/XRPL-NFTs-3E8DE3?style=flat-square" alt="Built on the XRP Ledger">
 <img src="https://img.shields.io/badge/Xaman-signing-F76B1C?style=flat-square" alt="Signed in Xaman">
-<img src="https://img.shields.io/badge/surfaces-Discord%20%C2%B7%20Telegram%20%C2%B7%20Web-5865F2?style=flat-square" alt="Surfaces: Discord, Telegram, Web">
+<img src="https://img.shields.io/badge/surfaces-5-5865F2?style=flat-square" alt="Five surfaces: Discord bot, Discord Activity, Telegram bot, Telegram Mini App, and web app">
 <img src="https://img.shields.io/badge/X-share%20%E2%86%92%20mint-000000?style=flat-square&logo=x&logoColor=white" alt="Share on X — per-NFT cards funnel into the app">
 <img src="https://img.shields.io/badge/PWA-installable-6B4FBB?style=flat-square" alt="Installable PWA">
 <img src="https://img.shields.io/badge/tests-4%2C108-2ea043?style=flat-square" alt="4,108 tests">
@@ -33,7 +33,7 @@
 
 You mint NFTs — one at a time, or many behind a single payment — swap individual traits between NFTs you own, and list, browse, and buy on an in-app marketplace. Two project-issued tokens drive the economy: **LFGO** pays for mints, and **BRIX** pays trait-swap fees and prices trait listings (with an XRP→BRIX AMM on-ramp for buyers who hold neither). Characters trade in XRP; traits trade in BRIX.
 
-Every transaction is signed by the user in the [Xaman](https://xaman.app/) wallet (formerly XUMM) — **no private keys ever touch the app** — and carries on-chain **provenance memos** recording who signed, from which surface, and what action it was. The same flows run from four client surfaces on one shared backend: a Discord bot, a Discord Activity, a Telegram bot, and a standalone web app at [build.letseffinggo.com](https://build.letseffinggo.com). The web app is an **installable PWA** that runs anywhere a browser does — including X's own in-app browser, so a mint can start from a timeline via each NFT's **Share on X** card page.
+Every transaction is signed by the user in the [Xaman](https://xaman.app/) wallet (formerly XUMM) — **no private keys ever touch the app** — and carries on-chain **provenance memos** recording who signed, from which surface, and what action it was. The same flows run from five client surfaces on one shared backend: a Discord bot, a Discord Activity, a Telegram bot, a Telegram Mini App, and a standalone web app at [build.letseffinggo.com](https://build.letseffinggo.com). The web app is an **installable PWA** that runs anywhere a browser does — including the in-app browser of X or any other social platform, so a mint can start from a shared link without creating another client surface.
 
 **The collection is live on XRPL mainnet** — cut over **2026-07-10** (3,535 editions — minted NFTs — reconciled with zero drift) and grown to **~4,000 live editions** since.
 
@@ -98,7 +98,7 @@ Short walkthroughs of each core flow:
 <td>📲 <b>Xaman push delivery</b><br>Sign requests pushed straight to the app, with QR fallback.</td>
 </tr>
 <tr>
-<td>🌐 <b>Four surfaces, one backend</b><br>Discord bot, Telegram bot, Discord Activity, and <a href="https://build.letseffinggo.com">the web app</a> on <code>lfg_service</code>.</td>
+<td>🌐 <b>Five surfaces, one backend</b><br>Discord bot + Activity, Telegram bot + Mini App, and <a href="https://build.letseffinggo.com">the web app</a> on <code>lfg_service</code>.</td>
 <td>🏆 <b>8 leaderboards</b><br>Holders, swaps, builds, per-NFT swap counts, BRIX richlist, LP, BRIX earned, rarity — with time windows.</td>
 </tr>
 <tr>
@@ -192,19 +192,20 @@ A nightly reconcile + conservation audit (`scripts/audit_trait_economy.py`) guar
 ## Architecture
 
 <div align="center">
-<img src="assets/architecture.svg" alt="LFG architecture — four client surfaces plus the X funnel into lfg_service, lfg_core flow modules, listener processes with per-network SQLite, and XRPL, Xaman, and BunnyCDN" width="820">
+<img src="assets/architecture.svg" alt="LFG architecture — five client surfaces into lfg_service, lfg_core flow modules, listener processes with per-network SQLite, and XRPL, Xaman, and BunnyCDN" width="820">
 </div>
 
-Four thin client surfaces all talk over REST/WS to one aiohttp backend (`lfg_service`):
+Five thin client surfaces all talk over REST/WS to one aiohttp backend (`lfg_service`):
 
 - **Discord bot** — the classic in-chat surface, fully refactored onto the shared backend
 - **Discord Activity** — the embedded web client
-- **Telegram bot** — which can alternatively serve the same client as a Mini App
+- **Telegram bot** — the in-chat command and inline-keyboard client
+- **Telegram Mini App** — the embedded web client launched from Telegram
 - **Web app** — the same no-build client, served by GitHub Pages at [build.letseffinggo.com](https://build.letseffinggo.com)
 
 `lfg_service` runs the mint / swap / market / economy session state machines, submits every XRPL transaction, and builds every Xaman signing payload. Shared domain logic lives in `lfg_core`; a **separate listener process group** streams the Clio transaction feed into the per-network SQLite index and ledger-history stores that the backend reads. **No private keys ever touch the app** — all signing happens in the user's Xaman wallet, images and metadata are hosted on BunnyCDN, and the NFT schema is pinned on IPFS.
 
-A fifth path in — not a client surface — is the **X funnel**: `lfg_service` also serves per-NFT share-card pages whose Twitter/OG tags render a branded card on X and whose body forwards humans into the web app, which, as an installable PWA, mints happily from X's in-app browser. The brand-account auto-poster (`run_x.py`) is built and flag-gated behind `X_ENABLED`.
+Social links are entry routes into the existing **web app**, not additional client surfaces: `lfg_service` serves per-NFT share-card pages whose Twitter/OG tags render a branded card and whose body forwards humans into the installable PWA. That works in X's in-app browser—or any social platform's in-app browser. The X brand-account auto-poster (`run_x.py`) is built and flag-gated behind `X_ENABLED`.
 
 <div align="center">
 <img src="assets/tech_overview.svg" alt="LFG under the hood" width="820">
