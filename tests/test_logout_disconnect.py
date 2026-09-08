@@ -6,6 +6,9 @@
 #   wallet IS the identity, so it degrades to a logout.
 import asyncio
 import json
+import sqlite3
+
+import pytest
 
 import lfg_core.user_db as user_db
 import lfg_service.identity as identity
@@ -107,6 +110,17 @@ def test_revocation_survives_restart(tmp_path, monkeypatch):
     assert server.verify_session_token(tok) is None
     # an expired revocation is dropped on reload, so the table stays bounded
     assert identity.load_revoked_sessions(now=10**12) == {}
+
+
+def test_load_revocations_fails_closed(tmp_path, monkeypatch):
+    # Greptile P1 (round 2): an unreadable revocation table must not become an
+    # empty denylist. The loader raises, and the cache is left untouched.
+    _fresh_dbs(tmp_path, monkeypatch)
+    server._revoked_sessions["keep"] = 10**12
+    monkeypatch.setattr(identity, "DATABASE", str(tmp_path / "missing" / "x.db"))
+    with pytest.raises(sqlite3.OperationalError):
+        server.load_revoked_sessions()
+    assert server._revoked_sessions == {"keep": 10**12}
 
 
 def test_logout_reports_persist_failure(tmp_path, monkeypatch):

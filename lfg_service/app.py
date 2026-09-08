@@ -721,10 +721,12 @@ def _prune_revoked_sessions(now: float) -> None:
 
 
 def load_revoked_sessions() -> None:
-    """Startup: rehydrate the denylist from the DB (durable across restarts)."""
-    now = time.time()
+    """Startup: rehydrate the denylist from the DB (durable across restarts).
+    Fail-closed: the DB is read BEFORE the cache is cleared, and a read error
+    propagates so create_app refuses to boot with an empty denylist."""
+    loaded = identity_store.load_revoked_sessions(time.time())
     _revoked_sessions.clear()
-    _revoked_sessions.update(identity_store.load_revoked_sessions(now))
+    _revoked_sessions.update(loaded)
 
 
 def revoke_session_token(token: str) -> bool:

@@ -394,18 +394,16 @@ def add_revoked_session(sig: str, exp: float, now: float) -> bool:
 
 
 def load_revoked_sessions(now: float) -> dict[str, float]:
-    """Every still-live revocation (sig -> exp), for the in-process cache."""
-    conn = None
+    """Every still-live revocation (sig -> exp), for the in-process cache.
+    Fails CLOSED: a read error raises instead of returning {} — an empty
+    denylist would silently re-admit every logged-out token until it expires
+    (Greptile P1 on #458), so startup must refuse rather than guess."""
+    conn = sqlite3.connect(DATABASE)
     try:
-        conn = sqlite3.connect(DATABASE)
         rows = conn.execute("SELECT sig, exp FROM revoked_sessions WHERE exp >= ?", (now,))
         return {sig: float(exp) for sig, exp in rows}
-    except Exception as e:
-        logging.error(f"identity.load_revoked_sessions failed: {e}")
-        return {}
     finally:
-        if conn is not None:
-            conn.close()
+        conn.close()
 
 
 def resolve(platform: str, platform_user_id: str) -> str | None:
