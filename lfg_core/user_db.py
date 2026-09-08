@@ -107,6 +107,25 @@ def get_user(discord_id: str) -> dict[str, Any] | None:
             conn.close()
 
 
+def delete_user(discord_id: str) -> bool:
+    """Remove a legacy Users row (the Discord "disconnect wallet" path).
+    _resolve_wallet falls back to this table for Discord callers, so an
+    identity unlink alone would silently resurrect the old wallet. Idempotent;
+    False only on a DB error."""
+    conn = None
+    try:
+        conn = sqlite3.connect(DATABASE)
+        conn.execute("DELETE FROM Users WHERE discord_id = ?", (discord_id,))
+        conn.commit()
+        return True
+    except Exception as e:
+        logging.error(f"Error deleting user: {e}")
+        return False
+    finally:
+        if conn is not None:
+            conn.close()
+
+
 def get_all_registered_users() -> list[dict[str, Any]]:
     """
     Retrieve all registered users from the Users table.

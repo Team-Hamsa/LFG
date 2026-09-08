@@ -2724,6 +2724,31 @@ async function wcRestore() {
   }
 }
 
+// Log out (web) / disconnect wallet (Discord, Telegram). Web: the wallet IS
+// the session, so revoke the token server-side, forget the stored copy and
+// re-offer the Xaman sign-in. Discord/Telegram: the host session stays (the
+// Activity re-auths through Discord/Telegram anyway); the wallet link is
+// removed server-side, so the next /api/me has no wallet and the register
+// panel comes back. Either way the Joey (#447) pairing is dropped too.
+async function disconnectWallet() {
+  clearTimeout(signinPollTimer);
+  await wcSignOut();
+  if (insideWeb) {
+    try { await api('/api/logout', { method: 'POST', body: '{}' }); }
+    catch (e) { if (e.status !== 401) throw e; } // already dead = logged out
+    sessionToken = null;
+    try { localStorage.removeItem(WEB_SESSION_KEY); } catch (_) { /* private mode */ }
+    me = null;
+    status('Logged out. Sign in with Xaman to continue.');
+    await startWebSignin();
+    return;
+  }
+  await api('/api/wallet/disconnect', { method: 'POST', body: '{}' });
+  me.wallet = null;
+  status(`Wallet disconnected — sign in with Xaman to reconnect, ${me.username}.`);
+  await startSignin();
+}
+
 async function setupWeb() {
   let stored = null;
   try { stored = localStorage.getItem(WEB_SESSION_KEY); } catch (_) { /* private mode */ }
@@ -5631,6 +5656,35 @@ async function main() {
     await wcSignOut(); // #447: switching wallets must drop the Joey pairing too
     return insideWeb ? startWebSignin() : startSignin();
   };
+  // Log out / disconnect wallet (P0). Two-tap confirm: Discord's sandboxed
+  // iframe makes window.confirm a silent no-op, so the button itself asks.
+  // Null-guarded like the #447 nodes — a cached older index.html has no button.
+  const discBtn = el('disconnect-wallet-btn');
+  if (discBtn) {
+    discBtn.textContent = insideWeb ? 'log out' : 'disconnect';
+    let armed = null;
+    discBtn.onclick = async () => {
+      if (!armed) {
+        discBtn.textContent = insideWeb ? 'log out? tap again' : 'disconnect? tap again';
+        armed = setTimeout(() => {
+          armed = null;
+          discBtn.textContent = insideWeb ? 'log out' : 'disconnect';
+        }, 5000);
+        return;
+      }
+      clearTimeout(armed);
+      armed = null;
+      discBtn.disabled = true;
+      try {
+        await disconnectWallet();
+      } catch (e) {
+        showError(e.message);
+      } finally {
+        discBtn.disabled = false;
+        discBtn.textContent = insideWeb ? 'log out' : 'disconnect';
+      }
+    };
+  }
   // #447 — null-guarded: a cached older index.html has none of these nodes.
   const wcBtn = el('register-wc-btn');
   if (wcBtn) wcBtn.onclick = () => startWcSignin();
