@@ -90,6 +90,18 @@ def test_revoked_token_fails_verification(tmp_path, monkeypatch):
     assert server.verify_session_token(other)  # unaffected
 
 
+def test_same_second_tokens_revoke_independently(tmp_path, monkeypatch):
+    # CodeRabbit on #458: two sign-ins for one user within a second must not
+    # share a signature, or logging one out would revoke the other.
+    _fresh_dbs(tmp_path, monkeypatch)
+    a = server.make_session_token({"id": "1", "name": "bob"})
+    b = server.make_session_token({"id": "1", "name": "bob"})
+    assert a != b
+    server.revoke_session_token(a)
+    assert server.verify_session_token(a) is None
+    assert server.verify_session_token(b)
+
+
 def test_revoke_garbage_token_is_noop(tmp_path, monkeypatch):
     _fresh_dbs(tmp_path, monkeypatch)
     assert server.revoke_session_token("not-a-token") is True

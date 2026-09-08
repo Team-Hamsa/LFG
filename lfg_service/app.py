@@ -700,6 +700,9 @@ def make_session_token(user: dict[str, Any]) -> str:
         "platform": user.get("platform", "discord"),
         "provider": user.get("provider", "xaman"),
         "exp": int(time.time()) + SESSION_TTL,
+        # Unique per issuance so revoke-by-signature (logout) can never hit a
+        # sibling token minted for the same user in the same second.
+        "jti": secrets.token_hex(8),
     }
     body = base64.urlsafe_b64encode(json.dumps(payload).encode()).decode()
     sig = hmac.new(_session_secret(), body.encode(), hashlib.sha256).hexdigest()
@@ -1491,7 +1494,8 @@ async def handle_logout(request):
     calls this before dropping its localStorage copy; Discord/Telegram
     re-authenticate through their host handshake, so for them the meaningful
     action is /api/wallet/disconnect."""
-    if not revoke_session_token(request.headers.get("Authorization", "")[7:]):
+    token = request.headers.get("Authorization", "")[7:]
+    if not await asyncio.to_thread(revoke_session_token, token):
         return web.json_response({"error": "could not persist logout"}, status=500)
     return web.json_response({"ok": True})
 
@@ -1507,7 +1511,8 @@ async def handle_wallet_disconnect(request):
     user = request["user"]
     platform = _platform(user)
     if platform == "web":
-        if not revoke_session_token(request.headers.get("Authorization", "")[7:]):
+        token = request.headers.get("Authorization", "")[7:]
+        if not await asyncio.to_thread(revoke_session_token, token):
             return web.json_response({"error": "could not persist logout"}, status=500)
         return web.json_response({"ok": True, "wallet": None})
     ok = await asyncio.to_thread(identity_store.unlink, platform, user["id"])
