@@ -21,7 +21,7 @@ from xrpl.core.addresscodec import is_valid_classic_address
 REPO_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
 sys.path.insert(0, REPO_ROOT)
 
-from lfg_core import config, db_path, history_store, sponsored_mint, xrpl_ops  # noqa: E402
+from lfg_core import config, db_path, funding, history_store, sponsored_mint, xrpl_ops  # noqa: E402
 
 _APP_TABLE_COLUMNS = {
     "free_mint_campaigns": {
@@ -244,6 +244,34 @@ def _incomplete_check(conn: sqlite3.Connection, *, network: str) -> dict[str, An
     }
 
 
+def _funder_coverage_check(conn: sqlite3.Connection, *, network: str) -> dict[str, Any]:
+    """#461: the all-time funder gate joins free_mint_claims against
+    wallet_funders, so a claimant wallet without a funder row is invisible to
+    dedup. Fails until scripts/backfill_wallet_funders.py has covered every
+    historical claimant."""
+    tables = {
+        row[0]
+        for row in conn.execute("SELECT name FROM sqlite_master WHERE type = 'table'").fetchall()
+    }
+    if "wallet_funders" not in tables:
+        total = conn.execute(
+            "SELECT count(DISTINCT wallet) FROM free_mint_claims WHERE network = ?",
+            (network,),
+        ).fetchone()[0]
+        return {"ok": total == 0, "claimants": total, "missing": total}
+    total, missing = conn.execute(
+        """
+        SELECT count(DISTINCT c.wallet),
+               count(DISTINCT CASE WHEN f.wallet IS NULL THEN c.wallet END)
+        FROM free_mint_claims c
+        LEFT JOIN wallet_funders f ON f.wallet = c.wallet
+        WHERE c.network = ?
+        """,
+        (network,),
+    ).fetchone()
+    return {"ok": missing == 0, "claimants": total, "missing": missing}
+
+
 async def build_report(
     *,
     network: str,
@@ -274,6 +302,7 @@ async def build_report(
                 )
                 checks["debt"], debt_amount = _debt_check(conn, network=network)
                 checks["incomplete_claims"] = _incomplete_check(conn, network=network)
+                checks["funder_coverage"] = _funder_coverage_check(conn, network=network)
             else:
                 raise sqlite3.DatabaseError(detail)
     except (OSError, sqlite3.Error) as exc:
@@ -281,6 +310,7 @@ async def build_report(
         checks.setdefault("campaign", {"ok": False, "state": "unknown", "detail": str(exc)})
         checks.setdefault("debt", {"ok": False, "detail": str(exc)})
         checks.setdefault("incomplete_claims", {"ok": False, "detail": str(exc)})
+        checks.setdefault("funder_coverage", {"ok": False, "detail": str(exc)})
 
     archive_ok = False
     latest_close_time: int | None = None
@@ -442,6 +472,13 @@ async def build_report(
         "history_db": os.path.abspath(history_db),
         "checked_at": timestamp,
         "checks": checks,
+        # Informational: the admission-time sybil gates (same-funder /
+        # same-device dedup, all-time across campaigns) and the exchange
+        # funders exempt from dedup, for operator review.
+        "sybil_gates": {
+            "dedup": "all-time",
+            "funder_exchange_allowlist": dict(funding.EXCHANGES),
+        },
     }
 
 
@@ -464,6 +501,13 @@ def _human_lines(report: dict[str, Any]) -> list[str]:
             f"age={checks['listener_freshness'].get('age_seconds')}s",
         ),
         ("unique_count", f"unique count={checks['unique_count'].get('count')}"),
+        (
+            "funder_coverage",
+            "funder coverage "
+            f"claimants={checks.get('funder_coverage', {}).get('claimants')} "
+            f"missing={checks.get('funder_coverage', {}).get('missing')} "
+            "(run scripts/backfill_wallet_funders.py if missing>0)",
+        ),
         (
             "exclusions",
             "configured exclusions="
