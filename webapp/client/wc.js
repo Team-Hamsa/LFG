@@ -8,6 +8,9 @@
 
 const TOPIC_KEY = 'lfg_wc_topic';
 const XRPL_METHOD = 'xrpl_signTransaction';
+// Joey Wallet's listing id in the WalletConnect explorer (from Joey's docs).
+const JOEY_WALLET_ID =
+  'd9f5432e932c6fad8e19a0cea9d4a3372a84aed16e98a52e6655dd2821a63404';
 
 let client = null;      // SignClient singleton
 let topic = null;       // live session topic
@@ -95,7 +98,15 @@ export async function connect({ projectId, chain, metadata, fresh = false } = {}
   });
   if (!modal) {
     const { WalletConnectModal } = await import('./vendor/walletconnect.js?v=1');
-    modal = new WalletConnectModal({ projectId, chains: [chain] });
+    modal = new WalletConnectModal({
+      projectId,
+      chains: [chain],
+      // Pin Joey (its WalletConnect explorer listing id) and hide the rest of
+      // the directory: this button IS "Connect with Joey", so the modal should
+      // offer Joey's QR/deeplink directly instead of a searchable wallet list.
+      explorerRecommendedWalletIds: [JOEY_WALLET_ID],
+      explorerExcludedWalletIds: 'ALL',
+    });
   }
   if (uri) await modal.openModal({ uri });
   try {
