@@ -1140,15 +1140,40 @@ def set_claim_device_key(db_path: str, *, network: str, wallet: str, device_key:
     if not device_key:
         return
     ensure_schema(db_path)
+    wallet = wallet.strip()
     with _connect(db_path) as conn:
         conn.execute("BEGIN IMMEDIATE")
+        # A late backfill can reveal a collision the gate could not see (two
+        # first-contact wallets on one device, neither with a stored token at
+        # reserve time). The key is still recorded — it makes the gate block
+        # wallet #3 — and the collision is audited for operator review; an
+        # admitted claim may already be minted, so it is never auto-unwound.
+        duplicate = conn.execute(
+            """
+            SELECT wallet FROM free_mint_claims
+            WHERE network = ? AND device_key = ? AND wallet != ?
+            LIMIT 1
+            """,
+            (network, device_key, wallet),
+        ).fetchone()
         conn.execute(
             """
             UPDATE free_mint_claims SET device_key = ?
             WHERE network = ? AND wallet = ? AND device_key IS NULL
             """,
-            (device_key, network, wallet.strip()),
+            (device_key, network, wallet),
         )
+        if duplicate is not None:
+            _audit(
+                conn,
+                network=network,
+                actor=wallet,
+                action="device_key_duplicate",
+                at=_timestamp(None),
+                campaign_id=None,
+                result="recorded",
+                details={"other_wallet": duplicate[0], "device_key": device_key},
+            )
 
 
 def campaign_status(
@@ -1221,20 +1246,29 @@ def reserve_if_eligible(
     if not os.path.isfile(history_path) or not os.access(history_path, os.R_OK | os.W_OK):
         return ReservationResult(False, "eligibility_unavailable", None)
 
+    resolved_funder: funding.FunderResult | None = None
     if funder_lookup is not None:
         # Resolve outside the final write transaction — the lookup is an RPC.
         # Funders never change, so the cache is trusted forever; a transport
         # failure fails closed (a farm must not get in by timing lookups
-        # against a flaky endpoint).
+        # against a flaky endpoint). An unfunded (None, None) result is NOT
+        # cached: actNotFound is transient — the wallet may be funded
+        # tomorrow — and a stale row would refuse it forever.
         with _connect(db_path) as conn:
-            needs_lookup = not funding.has_cached_funder(conn, wallet)
-        if needs_lookup:
+            row = conn.execute(
+                "SELECT funder, ledger_index FROM wallet_funders WHERE wallet = ?",
+                (wallet,),
+            ).fetchone()
+        if row is not None:
+            resolved_funder = (row[0], row[1])
+        else:
             try:
-                funder, funder_ledger = funder_lookup(wallet)
+                resolved_funder = funder_lookup(wallet)
             except funding.FunderLookupError:
                 return ReservationResult(False, "eligibility_unavailable", None)
-            with _connect(db_path) as conn:
-                funding.record_funder(conn, wallet, funder, funder_ledger)
+            if resolved_funder != (None, None):
+                with _connect(db_path) as conn:
+                    funding.record_funder(conn, wallet, *resolved_funder)
 
     final_conn: sqlite3.Connection | None = None
     try:
@@ -1295,13 +1329,9 @@ def reserve_if_eligible(
         # is not an independent user. Checked inside the write transaction so
         # two concurrent reservations from one cluster cannot both pass.
         if funder_lookup is not None:
-            funder_row = conn.execute(
-                "SELECT funder, ledger_index FROM wallet_funders WHERE wallet = ?",
-                (wallet,),
-            ).fetchone()
-            if funder_row is None:
+            if resolved_funder is None:
                 return ReservationResult(False, "eligibility_unavailable", None)
-            funder, funder_ledger = funder_row[0], funder_row[1]
+            funder, funder_ledger = resolved_funder
             if funder is None and funder_ledger is None:
                 # No transactions at all: unfunded wallets cannot pay fees and
                 # are the cheapest sybil shape (2026-08-17 incident).

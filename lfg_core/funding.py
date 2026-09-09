@@ -90,13 +90,24 @@ def lookup_funder(wallet: str) -> FunderResult:
         result = resp.result
     except Exception as e:  # noqa: BLE001 - any transport failure fails closed
         raise FunderLookupError(str(e)) from e
+    if result.get("error") != "actNotFound" and not resp.is_successful():
+        raise FunderLookupError(str(result.get("error") or "unsuccessful account_tx"))
+    return parse_account_tx(result, wallet)
+
+
+def parse_account_tx(result: dict, wallet: str) -> FunderResult:
+    """Interpret an account_tx result for the wallet's activation funder.
+
+    (None, None) means the account does not exist (actNotFound) — genuinely
+    unfunded. An empty transactions list on an EXISTING account is a
+    partial-history endpoint, not an unfunded wallet, and fails closed so a
+    legitimate old account is never misclassified.
+    """
     if result.get("error") == "actNotFound":
         return None, None
-    if not resp.is_successful():
-        raise FunderLookupError(str(result.get("error") or "unsuccessful account_tx"))
     txs = result.get("transactions") or []
     if not txs:
-        return None, None
+        raise FunderLookupError("account_tx returned no transactions (partial-history endpoint?)")
     t = txs[0]
     tx = t.get("tx") or t.get("tx_json") or {}
     ledger = t.get("ledger_index") or tx.get("ledger_index")

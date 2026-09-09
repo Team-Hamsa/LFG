@@ -502,6 +502,13 @@ def _human_lines(report: dict[str, Any]) -> list[str]:
         ),
         ("unique_count", f"unique count={checks['unique_count'].get('count')}"),
         (
+            "funder_coverage",
+            "funder coverage "
+            f"claimants={checks.get('funder_coverage', {}).get('claimants')} "
+            f"missing={checks.get('funder_coverage', {}).get('missing')} "
+            "(run scripts/backfill_wallet_funders.py if missing>0)",
+        ),
+        (
             "exclusions",
             "configured exclusions="
             f"{','.join(checks['exclusions'].get('configured', [])) or 'none'} "

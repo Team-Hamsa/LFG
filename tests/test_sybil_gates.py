@@ -221,3 +221,71 @@ def test_backfill_wallet_funders_covers_legacy_claimants(tmp_path, monkeypatch):
         assert funding.cached_funder(conn, "rLegacy") == FARM_FUNDER
     # idempotent: nothing left to do
     assert script.main() == 0
+
+
+# --- #461 review round 2 ----------------------------------------------------
+
+
+def test_parse_account_tx_empty_transactions_fails_closed():
+    """A partial-history endpoint answers a funded account with an empty
+    transactions list; treating that as 'unfunded' would refuse a legit user
+    forever. It must fail closed (retryable) instead."""
+    import pytest
+
+    with pytest.raises(funding.FunderLookupError):
+        funding.parse_account_tx({"transactions": []}, "rW")
+
+
+def test_parse_account_tx_act_not_found_is_unfunded():
+    assert funding.parse_account_tx({"error": "actNotFound"}, "rW") == (None, None)
+
+
+def test_parse_account_tx_first_payment_is_funder():
+    result = {
+        "transactions": [
+            {
+                "ledger_index": 7,
+                "tx": {"TransactionType": "Payment", "Destination": "rW", "Account": "rF"},
+            }
+        ]
+    }
+    assert funding.parse_account_tx(result, "rW") == ("rF", 7)
+
+
+def test_unfunded_lookup_result_is_not_cached(tmp_path):
+    """actNotFound is transient — the wallet may be funded tomorrow. Caching
+    (None, None) would refuse it forever."""
+    db, history = paths(tmp_path)
+    calls = []
+
+    def lookup(wallet):
+        calls.append(wallet)
+        return (None, None)
+
+    sm.start_campaign(db, network="mainnet", actor="42", now=100)
+    assert not reserve(db, history, "rA", "s1", funder_lookup=lookup).sponsored
+    assert not reserve(db, history, "rA", "s2", funder_lookup=lookup).sponsored
+    assert calls == ["rA", "rA"]
+
+
+def test_device_key_backfill_duplicate_writes_key_and_audits(tmp_path):
+    """Two wallets on one device can both be admitted before either has a
+    stored token (first-contact window). The late backfill that reveals the
+    collision must still record the key (so the gate blocks wallet #3) and
+    leave an audit row for operator review."""
+    db, history = paths(tmp_path)
+    sm.start_campaign(db, network="mainnet", actor="42", now=100)
+    assert reserve(db, history, "rA", "s1", device_key="dev1").sponsored
+    assert reserve(db, history, "rB", "s2").sponsored
+
+    sm.set_claim_device_key(db, network="mainnet", wallet="rB", device_key="dev1")
+
+    with sqlite3.connect(db) as conn:
+        key = conn.execute("SELECT device_key FROM free_mint_claims WHERE wallet='rB'").fetchone()[
+            0
+        ]
+        audit = conn.execute(
+            "SELECT count(*) FROM free_mint_audit WHERE action='device_key_duplicate'"
+        ).fetchone()[0]
+    assert key == "dev1"
+    assert audit == 1
