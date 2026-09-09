@@ -131,8 +131,10 @@ JOEY_WALLET_ID = "d9f5432e932c6fad8e19a0cea9d4a3372a84aed16e98a52e6655dd2821a634
 
 
 def test_wc_modal_pins_joey_and_hides_the_directory():
-    src = _read("wc.js")
-    assert JOEY_WALLET_ID in src
+    # Whitespace-collapsed so the multi-line declaration reads as one bind:
+    # the ASSIGNMENT is asserted, not mere presence of the id anywhere.
+    src = re.sub(r"\s+", " ", _read("wc.js"))
+    assert f"const JOEY_WALLET_ID = '{JOEY_WALLET_ID}';" in src
     assert "explorerRecommendedWalletIds: [JOEY_WALLET_ID]" in src
     assert "explorerExcludedWalletIds: 'ALL'" in src
 
