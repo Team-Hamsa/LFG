@@ -446,6 +446,22 @@ async def _run_mint_session_and_publish(session: Any) -> None:
         )
     else:
         await mint_flow.run_mint_session(session)
+    # Sybil-gate backfill, server-side (#461 review): the flow captures the
+    # push token whether or not the client ever polls again (the #216
+    # killed-Activity scenario), so stamp the claim's device key here rather
+    # than only from the polled status route.
+    device_key = _sponsored_device_key(getattr(session, "push_user_token", None))
+    if getattr(session, "sponsored", False) and device_key:
+        try:
+            await asyncio.to_thread(
+                sponsored_mint.set_claim_device_key,
+                db_path.app_db_path(config.XRPL_NETWORK),
+                network=config.XRPL_NETWORK,
+                wallet=session.wallet_address,
+                device_key=device_key,
+            )
+        except Exception as e:
+            logging.error(f"device-key backfill failed for mint session {session.id}: {e}")
     try:
         await _publish_mint_terminal(session)
     except Exception as e:

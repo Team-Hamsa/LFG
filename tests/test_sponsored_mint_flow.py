@@ -3104,3 +3104,62 @@ def test_readiness_report_surfaces_sybil_gate_config(_service_env, monkeypatch):
     sybil = report["sybil_gates"]
     assert sybil["funder_exchange_allowlist"] == funding.EXCHANGES
     assert sybil["dedup"] == "all-time"
+
+
+def test_server_side_run_backfills_device_key_without_polling(_service_env, monkeypatch):
+    """#461 review: a user who signs and never polls again must still get
+    their claim's device_key stamped from the server-side session runner."""
+    import hashlib
+
+    calls = {}
+
+    async def fake_run(session, **kwargs):
+        session.push_user_token = "tok"
+
+    async def fake_publish(session):
+        return None
+
+    monkeypatch.setattr(server.mint_flow, "run_mint_session", fake_run)
+    monkeypatch.setattr(server, "_publish_mint_terminal", fake_publish)
+    monkeypatch.setattr(
+        server.sponsored_mint,
+        "set_claim_device_key",
+        lambda db, **kw: calls.update(kw),
+    )
+    session = mint_flow.MintSession("dev", "rW", platform="discord", sponsored=True)
+    _run(server._run_mint_session_and_publish(session))
+    assert calls["wallet"] == "rW"
+    assert calls["device_key"] == hashlib.sha256(b"tok").hexdigest()
+
+
+def test_readiness_audit_fails_on_claimants_missing_funder_rows(_service_env, monkeypatch):
+    """#461 review: pre-gate claimants have no wallet_funders rows, so the
+    funder join cannot see them. The readiness audit must fail until the
+    backfill covers every claimant wallet."""
+    from lfg_core import funding
+
+    audit = importlib.import_module("scripts.audit_sponsored_mint_readiness")
+    monkeypatch.setattr(audit.config, "SPONSORED_MINT_EXCLUDED_WALLETS", _PLACEHOLDER_EXCLUSIONS)
+    sponsored_mint.start_campaign(_service_env.app_db, network="mainnet", actor="t", now=100)
+    _reserve_recovery_claim(_service_env, "rLegacyClaimant", "legacy-1")
+
+    def report():
+        return _run(
+            audit.build_report(
+                network="mainnet",
+                app_db=_service_env.app_db,
+                history_db=_service_env.history_db,
+                now=4000,
+                balance_fetch=lambda: Decimal("1000"),
+            )
+        )
+
+    first = report()
+    assert first["checks"]["funder_coverage"]["ok"] is False
+    assert first["checks"]["funder_coverage"]["missing"] == 1
+
+    with sqlite3.connect(_service_env.app_db) as conn:
+        funding.record_funder(conn, "rLegacyClaimant", "rSomeFunder", 1)
+    second = report()
+    assert second["checks"]["funder_coverage"]["ok"] is True
+    assert second["checks"]["funder_coverage"]["missing"] == 0

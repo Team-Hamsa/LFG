@@ -192,3 +192,32 @@ def test_device_key_backfill_on_existing_claim(tmp_path):
     result = reserve(db, history, "rB", "s2", device_key="dev1")
     assert not result.sponsored
     assert result.reason == "ineligible"
+
+
+# --- backfill script --------------------------------------------------------
+
+
+def test_backfill_wallet_funders_covers_legacy_claimants(tmp_path, monkeypatch):
+    import importlib
+    import sys
+
+    from tests.sponsored_helpers import ready_history
+
+    db = str(tmp_path / "app.db")
+    history = str(tmp_path / "history.db")
+    ready_history(history)
+    sm.start_campaign(db, network="mainnet", actor="42", now=100)
+    assert sm.reserve_if_eligible(
+        db, history, network="mainnet", wallet="rLegacy", session_id="s1", now=101
+    ).sponsored
+
+    script = importlib.import_module("scripts.backfill_wallet_funders")
+    monkeypatch.setattr(script.config, "XRPL_NETWORK", "mainnet")
+    monkeypatch.setattr(script.funding, "lookup_funder", lambda w: (FARM_FUNDER, 7))
+    monkeypatch.setattr(sys, "argv", ["backfill", "--network", "mainnet", "--app-db", db])
+    assert script.main() == 0
+
+    with sqlite3.connect(db) as conn:
+        assert funding.cached_funder(conn, "rLegacy") == FARM_FUNDER
+    # idempotent: nothing left to do
+    assert script.main() == 0
