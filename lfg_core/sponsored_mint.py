@@ -1156,14 +1156,14 @@ def set_claim_device_key(db_path: str, *, network: str, wallet: str, device_key:
             """,
             (network, device_key, wallet),
         ).fetchone()
-        conn.execute(
+        changed = conn.execute(
             """
             UPDATE free_mint_claims SET device_key = ?
             WHERE network = ? AND wallet = ? AND device_key IS NULL
             """,
             (device_key, network, wallet),
-        )
-        if duplicate is not None:
+        ).rowcount
+        if duplicate is not None and changed > 0:
             _audit(
                 conn,
                 network=network,

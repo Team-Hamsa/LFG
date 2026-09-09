@@ -262,7 +262,7 @@ def _funder_coverage_check(conn: sqlite3.Connection, *, network: str) -> dict[st
     total, missing = conn.execute(
         """
         SELECT count(DISTINCT c.wallet),
-               count(DISTINCT c.wallet) FILTER (WHERE f.wallet IS NULL)
+               count(DISTINCT CASE WHEN f.wallet IS NULL THEN c.wallet END)
         FROM free_mint_claims c
         LEFT JOIN wallet_funders f ON f.wallet = c.wallet
         WHERE c.network = ?

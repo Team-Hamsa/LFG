@@ -289,3 +289,22 @@ def test_device_key_backfill_duplicate_writes_key_and_audits(tmp_path):
         ).fetchone()[0]
     assert key == "dev1"
     assert audit == 1
+
+
+def test_device_key_duplicate_audit_only_when_a_claim_changed(tmp_path):
+    """No audit noise when the backfill is a no-op: the caller has no claim,
+    or already carries a (possibly rotated-token) key."""
+    db, history = paths(tmp_path)
+    sm.start_campaign(db, network="mainnet", actor="42", now=100)
+    assert reserve(db, history, "rA", "s1", device_key="dev1").sponsored
+
+    # claimless wallet sharing the device (e.g. a market session)
+    sm.set_claim_device_key(db, network="mainnet", wallet="rNoClaim", device_key="dev1")
+    # rA again with a rotated token: key already set, update is a no-op
+    sm.set_claim_device_key(db, network="mainnet", wallet="rA", device_key="dev2rotated")
+
+    with sqlite3.connect(db) as conn:
+        audit = conn.execute(
+            "SELECT count(*) FROM free_mint_audit WHERE action='device_key_duplicate'"
+        ).fetchone()[0]
+    assert audit == 0
