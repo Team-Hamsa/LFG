@@ -119,3 +119,23 @@ def test_link_joey_signs_with_the_borrowed_topic_and_releases_it():
     # released on every exit — success, decline or crash
     assert "} finally {" in fn
     assert "release(borrowedTopic)" in fn
+
+
+# ---------------------------------------------------------------------------
+# #464 — the "Connect with Joey" modal must pin Joey (its WalletConnect
+# explorer listing id) and hide the generic directory, or users are back to
+# searching for Joey on every sign-in. The wc.js delivery pin in app.js is a
+# cache key: an unbumped import silently serves the stale module.
+
+JOEY_WALLET_ID = "d9f5432e932c6fad8e19a0cea9d4a3372a84aed16e98a52e6655dd2821a63404"
+
+
+def test_wc_modal_pins_joey_and_hides_the_directory():
+    src = _read("wc.js")
+    assert JOEY_WALLET_ID in src
+    assert "explorerRecommendedWalletIds: [JOEY_WALLET_ID]" in src
+    assert "explorerExcludedWalletIds: 'ALL'" in src
+
+
+def test_wc_module_delivery_pin_matches():
+    assert "const WC_MODULE = './wc.js?v=2';" in _read("app.js")
