@@ -48,6 +48,13 @@ def ensure_table() -> None:
         conn.execute(
             "CREATE INDEX IF NOT EXISTS idx_sign_requests_wallet ON sign_requests(wallet, state)"
         )
+        # Self-migrating: the validated ledger index observed when the request
+        # was created — what binds a proof's LastLedgerSequence to a real
+        # window (#462; NULL on legacy rows / when the ledger was unreadable).
+        try:
+            conn.execute("ALTER TABLE sign_requests ADD COLUMN created_ledger INTEGER")
+        except sqlite3.OperationalError:
+            pass  # column already exists
         # One transaction hash settles exactly one request. txid_in_use() is the
         # cheap pre-check; this index is what makes the claim actually atomic,
         # so two concurrent posts of the same validated hash cannot both win.
@@ -77,14 +84,15 @@ def create(
     nonce: str | None,
     ttl_seconds: int,
     ip: str | None = None,
+    created_ledger: int | None = None,
 ) -> dict[str, Any]:
     now = time.time()
     rid = "wc-" + uuid.uuid4().hex
     conn = _conn()
     try:
         conn.execute(
-            "INSERT INTO sign_requests (id, wallet, purpose, txjson, nonce, state, ip, created_at, expires_at)"
-            " VALUES (?, ?, ?, ?, ?, 'pending', ?, ?, ?)",
+            "INSERT INTO sign_requests (id, wallet, purpose, txjson, nonce, state, ip, created_at, expires_at, created_ledger)"
+            " VALUES (?, ?, ?, ?, ?, 'pending', ?, ?, ?, ?)",
             (
                 rid,
                 wallet,
@@ -94,6 +102,7 @@ def create(
                 ip,
                 now,
                 now + ttl_seconds,
+                created_ledger,
             ),
         )
         conn.commit()

@@ -70,10 +70,20 @@ def _fake_create():
     return fake
 
 
+@pytest.fixture(autouse=True)
+def _stub_proof_creation_ledger(monkeypatch):
+    """No network from the start endpoints: pin the observed validated ledger."""
+
+    async def _ledger():
+        return 1000
+
+    monkeypatch.setattr(app.xrpl_ops, "current_validated_ledger_index", _ledger)
+
+
 def _sign(wallet, nonce, action=memos.ACTION_SIGNIN):
     tx = proof.build_proof_tx(wallet.classic_address, nonce, action)
     # What Joey does before signing (autofill: true).
-    tx.update(Fee="12", Sequence=42, LastLedgerSequence=99_000_000)
+    tx.update(Fee="12", Sequence=42, LastLedgerSequence=1500)
     tx["SigningPubKey"] = wallet.public_key
     tx["TxnSignature"] = keypairs.sign(bytes.fromhex(encode_for_signing(tx)), wallet.private_key)
     return tx
@@ -281,3 +291,32 @@ def test_route_registered():
         (r.method, r.resource.canonical) for r in app.create_app().router.routes() if r.resource
     }
     assert ("POST", "/api/web/signin/proof") in routes
+
+
+def test_far_future_lls_rejected_via_created_ledger(monkeypatch):
+    """#462: the row's created_ledger bounds the proof's LastLedgerSequence."""
+    b = _start(monkeypatch)
+    assert store.get(b["sign_id"])["created_ledger"] == 1000
+    w = Wallet.create()
+    tx = proof.build_proof_tx(w.classic_address, b["nonce"], memos.ACTION_SIGNIN)
+    tx.update(Fee="12", Sequence=42, LastLedgerSequence=4294967295)
+    tx["SigningPubKey"] = w.public_key
+    tx["TxnSignature"] = keypairs.sign(bytes.fromhex(encode_for_signing(tx)), w.private_key)
+    r = _run(app.handle_web_signin_proof(_Req(body={"sign_id": b["sign_id"], "tx_json": tx})))
+    assert r.status == 400
+    assert json.loads(r.text)["code"] == "bad_proof"
+
+
+def test_unreadable_ledger_degrades_open(monkeypatch):
+    """A None created_ledger (RPC blip) skips the LLS bound rather than 503ing."""
+
+    async def _none():
+        return None
+
+    monkeypatch.setattr(app.xrpl_ops, "current_validated_ledger_index", _none)
+    b = _start(monkeypatch)
+    assert store.get(b["sign_id"])["created_ledger"] is None
+    w = Wallet.create()
+    tx = _sign(w, b["nonce"], memos.ACTION_SIGNIN)
+    r = _run(app.handle_web_signin_proof(_Req(body={"sign_id": b["sign_id"], "tx_json": tx})))
+    assert r.status == 200

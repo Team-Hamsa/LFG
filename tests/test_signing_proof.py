@@ -279,3 +279,30 @@ def test_blackhole_cannot_prove_itself():
     _, tx = _signed(mutate=lambda t: t.update(Account=proof.PROOF_DESTINATION))
     with pytest.raises(proof.ProofError):
         proof.verify_proof(tx, wallet_hint=None, nonce=NONCE, action=memos.ACTION_SIGNIN)
+
+
+def test_lls_beyond_window_rejects():
+    _, tx = _signed(mutate=lambda t: t.update(LastLedgerSequence=4294967295))
+    with pytest.raises(proof.ProofError) as ei:
+        proof.verify_proof(
+            tx,
+            wallet_hint=None,
+            nonce=NONCE,
+            action=memos.ACTION_SIGNIN,
+            max_last_ledger=1000 + proof.PROOF_LLS_WINDOW,
+        )
+    assert ei.value.reason == "last_ledger"
+
+
+def test_lls_within_window_verifies():
+    w, tx = _signed(mutate=lambda t: t.update(LastLedgerSequence=1500))
+    assert (
+        proof.verify_proof(
+            tx,
+            wallet_hint=None,
+            nonce=NONCE,
+            action=memos.ACTION_SIGNIN,
+            max_last_ledger=1000 + proof.PROOF_LLS_WINDOW,
+        )
+        == w.classic_address
+    )

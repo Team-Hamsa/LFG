@@ -38,6 +38,13 @@ PROOF_AMOUNT = "1"  # drops
 # above any sane autofill.
 MAX_PROOF_FEE_DROPS = 1_000_000
 
+# How many ledgers past the request's creation ledger a proof's autofilled
+# LastLedgerSequence may reach. The 300 s nonce TTL is ~75-80 ledgers and Joey
+# autofills LLS a handful ahead of current; 900 (~1 h) is a wide honest margin
+# that still forbids the far-future values (e.g. 2^32-1) that would keep a
+# leaked blob submittable indefinitely.
+PROOF_LLS_WINDOW = 900
+
 # tfFullyCanonicalSig — legacy-harmless flag some signers set on everything.
 _TF_FULLY_CANONICAL = 0x80000000
 
@@ -123,7 +130,14 @@ def _nonce_from(memos_list: Any) -> str | None:
     return None
 
 
-def verify_proof(tx_json: Any, *, wallet_hint: str | None, nonce: str, action: str) -> str:
+def verify_proof(
+    tx_json: Any,
+    *,
+    wallet_hint: str | None,
+    nonce: str,
+    action: str,
+    max_last_ledger: int | None = None,
+) -> str:
     """Return the classic address proven by `tx_json`, or raise `ProofError`."""
     if not isinstance(tx_json, dict):
         raise ProofError("shape")
@@ -149,6 +163,12 @@ def verify_proof(tx_json: Any, *, wallet_hint: str | None, nonce: str, action: s
     # seconds if anyone ever tried to submit it.
     lls = tx_json.get("LastLedgerSequence")
     if not (isinstance(lls, int) and not isinstance(lls, bool) and lls > 0):
+        raise ProofError("last_ledger")
+    # Bound the expiry to the request's creation ledger (when the caller
+    # observed one): a far-future LLS (e.g. 2^32-1) would otherwise keep a
+    # leaked blob submittable indefinitely, defeating the expires-in-seconds
+    # property the honest autofill provides.
+    if max_last_ledger is not None and lls > max_last_ledger:
         raise ProofError("last_ledger")
     if tx_json.get("SourceTag") != config.SOURCE_TAG:
         raise ProofError("source_tag")
