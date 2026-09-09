@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import sqlite3
 from collections.abc import Callable
+from typing import Any
 
 # Known exchange/custodial hot wallets seen funding user wallets (XRPScan
 # labels). An exchange funder aggregates unrelated people — never a farm
@@ -95,7 +96,7 @@ def lookup_funder(wallet: str) -> FunderResult:
     return parse_account_tx(result, wallet)
 
 
-def parse_account_tx(result: dict, wallet: str) -> FunderResult:
+def parse_account_tx(result: dict[str, Any], wallet: str) -> FunderResult:
     """Interpret an account_tx result for the wallet's activation funder.
 
     (None, None) means the account does not exist (actNotFound) — genuinely
