@@ -3091,9 +3091,7 @@ def test_readiness_report_surfaces_sybil_gate_config(_service_env, monkeypatch):
     from lfg_core import funding
 
     audit = importlib.import_module("scripts.audit_sponsored_mint_readiness")
-    monkeypatch.setattr(
-        audit.config, "SPONSORED_MINT_EXCLUDED_WALLETS", _PLACEHOLDER_EXCLUSIONS
-    )
+    monkeypatch.setattr(audit.config, "SPONSORED_MINT_EXCLUDED_WALLETS", _PLACEHOLDER_EXCLUSIONS)
     report = _run(
         audit.build_report(
             network="mainnet",
