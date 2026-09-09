@@ -1,13 +1,19 @@
 # lfg_core/signing/proof.py
 # Wallet-ownership proof for WalletConnect sign-in and linking (#447).
 #
-# Joey exposes no signMessage, so the proof is a SIGNED, NEVER-SUBMITTED
-# pseudo-transaction: an AccountSet with Fee "0", Sequence 0 and
-# LastLedgerSequence 0 — unsubmittable on any XRPL network — carrying our
-# provenance memos plus a server-issued nonce. verify_proof re-derives the
-# signing account from SigningPubKey and checks the signature locally with
-# xrpl-py; the allowlist of fields is CLOSED so a real transaction can never
-# be smuggled in as a "proof".
+# Joey exposes no signMessage, and (verified live 2026-09-09 + confirmed by the
+# Joey developer) its signing pipeline refuses the classic "unsubmittable
+# pseudo-tx" shape (Fee "0" / Sequence 0) outright. Joey's supported ownership
+# proof is a WELL-FORMED, NEVER-SUBMITTED 1-drop Payment to the NAME-reservation
+# blackhole address — Joey autofills Fee/Sequence/LastLedgerSequence, signs with
+# `submit: false`, and hands the blob back. We never submit it; even if the blob
+# leaked and someone else submitted it, it expires with its autofilled
+# LastLedgerSequence and costs the signer at most 1 drop + the fee.
+#
+# verify_proof re-derives the signing account from SigningPubKey and checks the
+# signature locally with xrpl-py; the allowlist of fields is CLOSED and the
+# Destination/Amount are pinned so a real, spendable transaction can never be
+# smuggled in as a "proof".
 from __future__ import annotations
 
 import re
@@ -23,17 +29,41 @@ from lfg_core.signing import provenance
 NONCE_MEMO_TYPE = "lfg/nonce"
 SIGNIN_TTL = 300
 
+# The XRPL "NAME reservation" blackhole — no known key, nothing can ever spend
+# from it. Joey's own convention for ownership proofs.
+PROOF_DESTINATION = "rrrrrrrrrrrrrrrrrNAMEtxvNvQ"
+PROOF_AMOUNT = "1"  # drops
+# Joey autofills the Fee; cap what we will accept so a hostile "proof" can't
+# carry a ruinous fee if it ever were submitted. Autofill is ~10-15 drops and
+# open-ledger escalation rarely reaches four figures; 10,000 drops (0.01 XRP)
+# is a wide honest margin that keeps the worst leaked-blob cost negligible.
+MAX_PROOF_FEE_DROPS = 10_000
+
+# How many ledgers past the request's creation ledger a proof's autofilled
+# LastLedgerSequence may reach. The 300 s nonce TTL is ~75-80 ledgers and Joey
+# autofills LLS a handful ahead of current; 900 (~1 h) is a wide honest margin
+# that still forbids the far-future values (e.g. 2^32-1) that would keep a
+# leaked blob submittable indefinitely.
+PROOF_LLS_WINDOW = 900
+
+# tfFullyCanonicalSig — legacy-harmless flag some signers set on everything.
+_TF_FULLY_CANONICAL = 0x80000000
+
 # The only two actions a proof may carry. Anything else is a real app action and
-# has no business being signed as a never-submitted pseudo-transaction.
+# has no business being signed as a never-submitted proof transaction.
 _PROOF_ACTIONS = (memos.ACTION_SIGNIN, memos.ACTION_LINK)
 
 _HEX_RE = re.compile(r"[0-9A-Fa-f]+")
 
-# CLOSED allowlist. Anything else — a Destination, an Amount, a TicketSequence
-# — and the "proof" could be a real, submittable transaction.
+# CLOSED allowlist. Destination and Amount are pinned by value below;
+# Fee/Sequence/LastLedgerSequence are Joey-autofilled and range-checked. A
+# DestinationTag, SendMax, Paths — anything else — and the "proof" could be a
+# meaningfully different transaction.
 _ALLOWED = {
     "TransactionType",
     "Account",
+    "Destination",
+    "Amount",
     "Fee",
     "Sequence",
     "LastLedgerSequence",
@@ -57,15 +87,19 @@ class ProofError(Exception):
 
 
 def build_proof_tx(wallet: str, nonce: str, action: str) -> dict[str, Any]:
-    """The canonical unsigned proof transaction the wallet is asked to sign."""
+    """The canonical unsigned proof transaction the wallet is asked to sign.
+
+    Deliberately WITHOUT Fee/Sequence/LastLedgerSequence: Joey autofills those
+    (`autofill: true`) and refuses zeroed placeholders. The signed result is
+    still never submitted by anyone.
+    """
     if action not in _PROOF_ACTIONS:
         raise ValueError(f"not a proof action: {action!r}")
     tx: dict[str, Any] = {
-        "TransactionType": "AccountSet",
+        "TransactionType": "Payment",
         "Account": wallet,
-        "Fee": "0",
-        "Sequence": 0,
-        "LastLedgerSequence": 0,
+        "Destination": PROOF_DESTINATION,
+        "Amount": PROOF_AMOUNT,
     }
     provenance.stamp_and_validate(
         tx,
@@ -97,27 +131,49 @@ def _nonce_from(memos_list: Any) -> str | None:
     return None
 
 
-def verify_proof(tx_json: Any, *, wallet_hint: str | None, nonce: str, action: str) -> str:
+def verify_proof(
+    tx_json: Any,
+    *,
+    wallet_hint: str | None,
+    nonce: str,
+    action: str,
+    max_last_ledger: int | None = None,
+) -> str:
     """Return the classic address proven by `tx_json`, or raise `ProofError`."""
     if not isinstance(tx_json, dict):
         raise ProofError("shape")
     if action not in _PROOF_ACTIONS:
         raise ProofError("action")
-    # Transaction type first: a wholesale swap to a real tx type should read as
+    # Transaction type first: a wholesale swap to another tx type should read as
     # "type", not as whatever extra field that type happens to require.
-    if tx_json.get("TransactionType") != "AccountSet":
+    if tx_json.get("TransactionType") != "Payment":
         raise ProofError("type")
     if set(tx_json) - _ALLOWED:
         raise ProofError("extra_field")
-    if tx_json.get("Fee") != "0":
+    if tx_json.get("Destination") != PROOF_DESTINATION:
+        raise ProofError("destination")
+    if tx_json.get("Amount") != PROOF_AMOUNT:
+        raise ProofError("amount")
+    fee = tx_json.get("Fee")
+    if not (isinstance(fee, str) and fee.isdigit() and 0 < int(fee) <= MAX_PROOF_FEE_DROPS):
         raise ProofError("fee")
-    if tx_json.get("Sequence") != 0:
+    seq = tx_json.get("Sequence")
+    if not (isinstance(seq, int) and not isinstance(seq, bool) and seq > 0):
         raise ProofError("sequence")
-    if tx_json.get("LastLedgerSequence") != 0:
+    # LastLedgerSequence is REQUIRED: it is what makes a leaked blob expire in
+    # seconds if anyone ever tried to submit it.
+    lls = tx_json.get("LastLedgerSequence")
+    if not (isinstance(lls, int) and not isinstance(lls, bool) and lls > 0):
+        raise ProofError("last_ledger")
+    # Bound the expiry to the request's creation ledger (when the caller
+    # observed one): a far-future LLS (e.g. 2^32-1) would otherwise keep a
+    # leaked blob submittable indefinitely, defeating the expires-in-seconds
+    # property the honest autofill provides.
+    if max_last_ledger is not None and lls > max_last_ledger:
         raise ProofError("last_ledger")
     if tx_json.get("SourceTag") != config.SOURCE_TAG:
         raise ProofError("source_tag")
-    if "Flags" in tx_json and tx_json["Flags"] != 0:
+    if "Flags" in tx_json and tx_json["Flags"] not in (0, _TF_FULLY_CANONICAL):
         raise ProofError("flags")
     if "NetworkID" in tx_json and (
         config.XRPL_NETWORK == "mainnet" or not isinstance(tx_json["NetworkID"], int)
@@ -149,6 +205,8 @@ def verify_proof(tx_json: Any, *, wallet_hint: str | None, nonce: str, action: s
         raise ProofError("shape")
     if not (account and pub and sig):
         raise ProofError("shape")
+    if account == PROOF_DESTINATION:
+        raise ProofError("account")
     # Joey-style clients may emit lower-case hex; `keypairs.is_valid_message`
     # dispatches on the literal "ED" prefix, so normalise once here (after
     # proving both fields really are hex) rather than at each use site.

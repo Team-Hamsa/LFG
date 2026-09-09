@@ -11,7 +11,7 @@ to *do* everything a Xaman session can.
 | # | Decision |
 |---|----------|
 | 1 | **Provider: WalletConnect v2 / Joey Wallet only.** No xrpl-connect, Crossmark or GemWallet. The server side is provider-agnostic so other client adapters can be added later without server changes. |
-| 2 | **Sign-in / link proof = a signed, never-submitted pseudo-transaction** (`AccountSet`, `Fee:"0"`, `Sequence:0`, `LastLedgerSequence:0`, nonce memo), verified locally with xrpl-py. Joey exposes no `xrpl_signMessage`. |
+| 2 | **Sign-in / link proof = a signed, never-submitted 1-drop Payment to the NAME-reservation blackhole** (`rrrrrrrrrrrrrrrrrNAMEtxvNvQ`, Joey-autofilled Fee/Sequence/LastLedgerSequence, nonce memo), verified locally with xrpl-py. Joey exposes no `xrpl_signMessage`, and (verified live 2026-09-09 + confirmed by the Joey developer) its pipeline refuses zeroed pseudo-tx placeholders — the original `AccountSet`/`Fee:"0"` shape errored inside Joey. |
 | 3 | **Explicit wallet linking** writes a new append-only `wallet_proof_links` table that becomes a third edge type in `identity._bucket_bfs`. **Unlinking is out of scope** (admin sqlite `DELETE`). |
 | 4 | **Full transaction signing** over WalletConnect: Joey autofills + submits; the client posts the hash; the server verifies on-ledger and never trusts the client. |
 
@@ -83,21 +83,29 @@ return `{sign_id, nonce, source_tag, expires_at}`. Same per-IP 5/60 s limiter.
 
 ### Proof transaction (built client-side, canonical shape enforced server-side)
 ```
-{ TransactionType:"AccountSet", Account:<wallet>, Fee:"0", Sequence:0,
-  LastLedgerSequence:0, SourceTag:2606160021,
+{ TransactionType:"Payment", Account:<wallet>,
+  Destination:"rrrrrrrrrrrrrrrrrNAMEtxvNvQ", Amount:"1",
+  SourceTag:2606160021,
   Memos:[ <lfg provenance memos: action=signin|link, platform=webapp>,
           { MemoType:hex("lfg/nonce"), MemoData:hex(nonce) } ] }
 ```
-Signed via `xrpl_signTransaction` with `options:{autofill:false, submit:false}`.
-`Fee:"0"` (`temBAD_FEE`) and `LastLedgerSequence:0` make it unsubmittable anywhere.
+Signed via `xrpl_signTransaction` with `options:{autofill:true, submit:false}` —
+Joey fills `Fee`/`Sequence`/`LastLedgerSequence`, signs, and returns the blob
+without submitting (its documented ownership-proof pattern; the wallet refuses
+zeroed placeholders, which killed the original `AccountSet` pseudo-tx shape).
+Nobody ever submits it; the Destination is the keyless NAME-reservation
+blackhole and the autofilled `LastLedgerSequence` expires a leaked blob within
+seconds, so the worst case is 1 drop + fee.
 
 ### Verify — `POST /api/web/signin/proof {sign_id, tx_json}`
 `lfg_core/signing/proof.py`, pure xrpl-py, no network:
 1. Row exists, `pending`, unexpired, `purpose` matches → else 410 / 409.
-2. `TransactionType=="AccountSet"`, `Fee=="0"`, `Sequence==0`,
-   `LastLedgerSequence==0`, `SourceTag==SOURCE_TAG`, nonce memo == stored nonce
-   (exact bytes). **Any field outside the allowlist rejects** — a real transaction can
-   never be smuggled in as a "proof".
+2. `TransactionType=="Payment"`, `Destination==` the blackhole, `Amount=="1"`,
+   Joey-autofilled `Fee` (0 < fee ≤ 1 XRP) / `Sequence` (>0) /
+   `LastLedgerSequence` (required, >0), `SourceTag==SOURCE_TAG`, nonce memo ==
+   stored nonce (exact bytes). **Any field outside the allowlist rejects**
+   (`DestinationTag`, `SendMax`, `Paths`, …) — a meaningfully different
+   transaction can never be smuggled in as a "proof".
 3. `derive_classic_address(SigningPubKey) == Account`. RegularKey-signed proofs are
    NOT accepted in v1 (documented limitation).
 4. `keypairs.is_valid_message(encode_for_signing(tx), TxnSignature, SigningPubKey)`.

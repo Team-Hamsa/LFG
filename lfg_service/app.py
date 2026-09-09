@@ -7496,6 +7496,7 @@ async def handle_web_signin_start(request):
             nonce=nonce,
             ttl_seconds=signing_proof.SIGNIN_TTL,
             ip=_client_ip(request),
+            created_ledger=await _proof_creation_ledger(),
         )
         return web.json_response(
             {
@@ -7571,6 +7572,21 @@ async def handle_web_signin_status(request):
     return web.json_response({"state": "opened" if s["opened"] else "pending"})
 
 
+async def _proof_creation_ledger() -> int | None:
+    """The validated ledger index stamped on a new proof request (#462).
+
+    Binds the proof's Joey-autofilled `LastLedgerSequence` to a real window at
+    verify time. Best-effort: an unreadable ledger yields None (the bound is
+    simply not enforced for that row) rather than blocking sign-in — the
+    exposure it guards is capped at 1 drop + the fee ceiling of the signer's
+    own funds.
+    """
+    try:
+        return await xrpl_ops.current_validated_ledger_index()
+    except Exception:
+        return None
+
+
 async def _redeem_proof(
     sign_id: str,
     tx_json: Any,
@@ -7626,12 +7642,16 @@ async def _redeem_proof(
         return None, web.json_response({"error": "bad proof", "code": "bad_proof"}, status=400)
     try:
         # Signature verification is CPU-bound — keep it off the event loop.
+        created_ledger = row.get("created_ledger")
         wallet = await asyncio.to_thread(
             signing_proof.verify_proof,
             tx_json,
             wallet_hint=wallet_hint,
             nonce=row["nonce"],
             action=action,
+            max_last_ledger=(
+                created_ledger + signing_proof.PROOF_LLS_WINDOW if created_ledger else None
+            ),
         )
     except signing_proof.ProofError as e:
         logging.warning(f"bad {purpose} proof {sign_id}: {e.reason}")
@@ -8195,6 +8215,7 @@ async def handle_wallet_link_start(request):
             nonce=nonce,
             ttl_seconds=signing_proof.SIGNIN_TTL,
             ip=_client_ip(request),
+            created_ledger=await _proof_creation_ledger(),
         )
         return web.json_response(
             {

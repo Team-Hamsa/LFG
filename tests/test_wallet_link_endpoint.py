@@ -69,8 +69,20 @@ def _hermetic(monkeypatch, tmp_path):
     CAPTURED.clear()
 
 
+@pytest.fixture(autouse=True)
+def _stub_proof_creation_ledger(monkeypatch):
+    """No network from the start endpoints: pin the observed validated ledger."""
+
+    async def _ledger():
+        return 1000
+
+    monkeypatch.setattr(app.xrpl_ops, "current_validated_ledger_index", _ledger)
+
+
 def _sign(wallet, nonce, action=memos.ACTION_LINK):
     tx = proof.build_proof_tx(wallet.classic_address, nonce, action)
+    # What Joey does before signing (autofill: true).
+    tx.update(Fee="12", Sequence=42, LastLedgerSequence=1500)
     tx["SigningPubKey"] = wallet.public_key
     tx["TxnSignature"] = keypairs.sign(bytes.fromhex(encode_for_signing(tx)), wallet.private_key)
     return tx

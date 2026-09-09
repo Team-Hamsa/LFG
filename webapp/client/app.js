@@ -516,14 +516,16 @@ const wcSleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
 // The proof transaction is built client-side from the server's canonical
 // pieces (nonce-bearing memos + SourceTag); it is NEVER submitted — Joey
-// signs it with autofill/submit off and the service verifies the signature.
+// autofills Fee/Sequence/LastLedgerSequence, signs with submit off, and the
+// service verifies the signature. A 1-drop Payment to the NAME-reservation
+// blackhole is Joey's supported ownership-proof shape (its pipeline refuses
+// zeroed pseudo-tx placeholders).
 function wcProofTx(wallet, start) {
   return {
-    TransactionType: 'AccountSet',
+    TransactionType: 'Payment',
     Account: wallet,
-    Fee: '0',
-    Sequence: 0,
-    LastLedgerSequence: 0,
+    Destination: 'rrrrrrrrrrrrrrrrrNAMEtxvNvQ',
+    Amount: '1',
     SourceTag: start.source_tag,
     Memos: start.memos,
   };
@@ -684,7 +686,7 @@ async function startWcSignin() {
     if (!wallet) throw new Error('Joey Wallet did not share an XRPL account.');
     renderSignin({ sub: 'Approve the sign-in request in Joey Wallet…', spinner: true });
     const resp = await mod.signTx({
-      chain: wc.chain, txJson: wcProofTx(wallet, start), autofill: false, submit: false,
+      chain: wc.chain, txJson: wcProofTx(wallet, start), autofill: true, submit: false,
     });
     const s = await api('/api/web/signin/proof', {
       method: 'POST',
@@ -780,7 +782,7 @@ async function startLinkJoey() {
     if (stale()) return;
     renderLink({ sub: 'Approve the linking request in Joey Wallet…', spinner: true });
     const resp = await mod.signTx({
-      chain: wc.chain, txJson: wcProofTx(wallet, start), autofill: false, submit: false,
+      chain: wc.chain, txJson: wcProofTx(wallet, start), autofill: true, submit: false,
       topic: borrowedTopic, // sign as the PROVING wallet, not the session's
     });
     const s = await api('/api/wallet/link/proof', {

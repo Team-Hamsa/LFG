@@ -1441,9 +1441,13 @@ stay lfg_core-import-free). Runtime entrypoints (`main.py`, pm2 processes,
    postdates the row) before a row is trusted "signed"; `sweep_sign_requests`
    runs in `_settlement_sweep_loop` (now started when `ECONOMY_ENABLED or
    config.wc_enabled()`). Sign-in/linking prove ownership via
-   `lfg_core/signing/proof.py`: a SIGNED, NEVER-SUBMITTED `AccountSet` (Fee
-   "0"/Sequence 0/LastLedgerSequence 0, provenance memos + `lfg/nonce`,
-   closed field allowlist) — Joey exposes no `signMessage`. **RegularKey is
+   `lfg_core/signing/proof.py`: a SIGNED, NEVER-SUBMITTED 1-drop Payment to
+   the NAME-reservation blackhole `rrrrrrrrrrrrrrrrrNAMEtxvNvQ`
+   (Joey-autofilled Fee/Sequence/LastLedgerSequence — required, range-checked;
+   provenance memos + `lfg/nonce`, closed field allowlist, Destination/Amount
+   pinned) — Joey exposes no `signMessage` and its pipeline refuses zeroed
+   pseudo-tx placeholders (the original `AccountSet`/`Fee:"0"` shape errored
+   inside Joey, verified live 2026-09-09). **RegularKey is
    NOT accepted**: `verify_proof` derives the address from `SigningPubKey`
    and requires it to equal `Account`, so only the master key can prove
    ownership. A proved link is an append-only `wallet_proof_links` edge
