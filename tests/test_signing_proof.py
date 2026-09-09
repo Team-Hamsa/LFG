@@ -344,3 +344,23 @@ def test_extra_field_names_surface_in_detail_only():
         proof.verify_proof(tx, wallet_hint=None, nonce=NONCE, action=memos.ACTION_SIGNIN)
     assert ei.value.reason == "extra_field"
     assert ei.value.detail == "SendMax"
+
+
+def test_deliver_max_only_normalises_to_amount():
+    """API v2 may carry DeliverMax INSTEAD of Amount; the signed bytes always
+    contain Amount, so it is normalised back before signature verification."""
+    w, tx = _signed()
+    tx["DeliverMax"] = tx.pop("Amount")
+    assert (
+        proof.verify_proof(tx, wallet_hint=None, nonce=NONCE, action=memos.ACTION_SIGNIN)
+        == w.classic_address
+    )
+
+
+def test_deliver_max_only_with_wrong_value_rejects():
+    _, tx = _signed()
+    tx.pop("Amount")
+    tx["DeliverMax"] = "1000000"
+    with pytest.raises(proof.ProofError) as ei:
+        proof.verify_proof(tx, wallet_hint=None, nonce=NONCE, action=memos.ACTION_SIGNIN)
+    assert ei.value.reason == "amount"

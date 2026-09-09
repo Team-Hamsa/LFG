@@ -174,11 +174,15 @@ def verify_proof(
     # "type", not as whatever extra field that type happens to require.
     if tx_json.get("TransactionType") != "Payment":
         raise ProofError("type")
-    # API v2 responses mirror a Payment's Amount as DeliverMax; tolerate the
-    # echo only when it agrees with Amount, then drop it with the other
-    # unsigned response artifacts.
-    if "DeliverMax" in tx_json and tx_json["DeliverMax"] != tx_json.get("Amount"):
-        raise ProofError("amount")
+    # API v2 renames a Payment's Amount to DeliverMax. A response may mirror
+    # both or carry only DeliverMax; the signed bytes always contain Amount,
+    # so normalise DeliverMax back into Amount when absent, and reject a
+    # mirrored pair that disagrees.
+    if "DeliverMax" in tx_json:
+        if "Amount" not in tx_json:
+            tx_json = {**tx_json, "Amount": tx_json["DeliverMax"]}
+        elif tx_json["DeliverMax"] != tx_json["Amount"]:
+            raise ProofError("amount")
     tx_json = {k: v for k, v in tx_json.items() if k not in _RESPONSE_ARTIFACTS | {"DeliverMax"}}
     extra = set(tx_json) - _ALLOWED
     if extra:

@@ -7654,7 +7654,9 @@ async def _redeem_proof(
             ),
         )
     except signing_proof.ProofError as e:
-        detail = f" ({e.detail})" if e.detail else ""
+        # e.detail carries request-derived field names — repr() so control
+        # characters cannot forge log lines.
+        detail = f" ({e.detail!r})" if e.detail else ""
         logging.warning(f"bad {purpose} proof {sign_id}: {e.reason}{detail}")
         return None, web.json_response({"error": "bad proof", "code": "bad_proof"}, status=400)
     if on_verified is not None:
