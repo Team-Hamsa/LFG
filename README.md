@@ -9,14 +9,14 @@
 <a href="https://build.letseffinggo.com"><img src="https://img.shields.io/badge/web_app-live-D89030?style=flat-square" alt="Web app live at build.letseffinggo.com"></a>
 <img src="https://img.shields.io/badge/XRPL-NFTs-3E8DE3?style=flat-square" alt="Built on the XRP Ledger">
 <img src="https://img.shields.io/badge/Xaman-signing-F76B1C?style=flat-square" alt="Signed in Xaman">
-<img src="https://img.shields.io/badge/surfaces-5-5865F2?style=flat-square" alt="Five surfaces: Discord bot, Discord Activity, Telegram bot, Telegram Mini App, and web app">
+<img src="https://img.shields.io/badge/surfaces-Discord%20%C2%B7%20Telegram%20%C2%B7%20Web-5865F2?style=flat-square" alt="Surfaces: Discord, Telegram, Web">
 <img src="https://img.shields.io/badge/X-share%20%E2%86%92%20mint-000000?style=flat-square&logo=x&logoColor=white" alt="Share on X — per-NFT cards funnel into the app">
 <img src="https://img.shields.io/badge/PWA-installable-6B4FBB?style=flat-square" alt="Installable PWA">
-<img src="https://img.shields.io/badge/tests-4%2C108-2ea043?style=flat-square" alt="4,108 tests">
+<img src="https://img.shields.io/badge/tests-4%2C129-2ea043?style=flat-square" alt="4,129 tests">
 <a href="https://github.com/Team-Hamsa/LFG/actions/workflows/ci.yml"><img src="https://img.shields.io/github/actions/workflow/status/Team-Hamsa/LFG/ci.yml?branch=main&style=flat-square&label=CI" alt="CI status on main"></a>
 <img src="https://img.shields.io/github/license/Team-Hamsa/LFG?style=flat-square&color=blue" alt="MIT license">
 <img src="https://img.shields.io/badge/SourceTag-2606160021-8957E5?style=flat-square" alt="XRPL SourceTag 2606160021">
-<img src="https://img.shields.io/badge/tagged_txs-10%2C372-3E8DE3?style=flat-square" alt="10,372 SourceTag-tagged XRPL transactions">
+<img src="https://img.shields.io/badge/tagged_txs-10%2C386-3E8DE3?style=flat-square" alt="10,386 SourceTag-tagged XRPL transactions">
 <!-- badges:end -->
 
 <br><br>
