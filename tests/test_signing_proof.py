@@ -1,11 +1,13 @@
-# Tests for the signed-pseudo-transaction wallet-ownership proof (#447).
+# Tests for the signed, never-submitted wallet-ownership proof (#447).
 #
-# The proof is signed at the binary-codec level rather than via
-# `xrpl.transaction.sign`, because several negative cases deliberately mutate
-# the transaction into shapes xrpl-py's typed models reject outright (a
-# `Destination` on an `AccountSet`, a zero `Fee`). `encode_for_signing` +
-# `keypairs.sign` is exactly what a wallet does, and it will encode any
-# well-known field regardless of transaction type.
+# The proof is a 1-drop Payment to the NAME-reservation blackhole, autofilled
+# and signed by the wallet with `submit: false` (Joey's supported pattern —
+# its pipeline refuses zeroed pseudo-tx placeholders). Tests sign at the
+# binary-codec level rather than via `xrpl.transaction.sign`, because several
+# negative cases deliberately mutate the transaction into shapes xrpl-py's
+# typed models reject outright. `encode_for_signing` + `keypairs.sign` is
+# exactly what a wallet does, and it will encode any well-known field
+# regardless of transaction type.
 import pytest
 from xrpl.core import keypairs
 from xrpl.core.binarycodec import encode_for_signing
@@ -18,9 +20,17 @@ from lfg_core.signing import proof
 NONCE = "a" * 64
 
 
+def _autofill(tx):
+    """What Joey does before signing: fill Fee/Sequence/LastLedgerSequence."""
+    tx.setdefault("Fee", "12")
+    tx.setdefault("Sequence", 42)
+    tx.setdefault("LastLedgerSequence", 99_000_000)
+    return tx
+
+
 def _signed(wallet=None, nonce=NONCE, action=memos.ACTION_SIGNIN, mutate=None):
     w = wallet or Wallet.create()
-    tx = proof.build_proof_tx(w.classic_address, nonce, action)
+    tx = _autofill(proof.build_proof_tx(w.classic_address, nonce, action))
     if mutate:
         mutate(tx)
     tx["SigningPubKey"] = w.public_key
@@ -28,10 +38,13 @@ def _signed(wallet=None, nonce=NONCE, action=memos.ACTION_SIGNIN, mutate=None):
     return w, tx
 
 
-def test_build_is_canonical_and_unsubmittable():
+def test_build_is_canonical_and_wallet_autofillable():
     tx = proof.build_proof_tx("rN7n7otQDd6FczFgLdSqtcsAUxDkw6fzRH", NONCE, memos.ACTION_SIGNIN)
-    assert tx["TransactionType"] == "AccountSet"
-    assert tx["Fee"] == "0" and tx["Sequence"] == 0 and tx["LastLedgerSequence"] == 0
+    assert tx["TransactionType"] == "Payment"
+    assert tx["Destination"] == proof.PROOF_DESTINATION
+    assert tx["Amount"] == "1"
+    # Left for Joey's autofill — its pipeline refuses zeroed placeholders.
+    assert "Fee" not in tx and "Sequence" not in tx and "LastLedgerSequence" not in tx
     assert tx["SourceTag"] == config.SOURCE_TAG
     decoded = memos.decode_memos(tx["Memos"])
     assert decoded["action"] == "signin"
@@ -57,20 +70,31 @@ def test_link_action_round_trips():
 @pytest.mark.parametrize(
     "mutate,reason",
     [
-        (lambda t: t.update(Fee="10"), "fee"),
-        (lambda t: t.update(Sequence=5), "sequence"),
-        (lambda t: t.update(LastLedgerSequence=99), "last_ledger"),
-        (lambda t: t.update(Destination="rN7n7otQDd6FczFgLdSqtcsAUxDkw6fzRH"), "extra_field"),
+        (lambda t: t.update(Fee="0"), "fee"),
+        (lambda t: t.update(Fee="2000000"), "fee"),
+        (lambda t: t.update(Sequence=0), "sequence"),
+        (lambda t: t.pop("LastLedgerSequence"), "last_ledger"),
+        (lambda t: t.update(LastLedgerSequence=0), "last_ledger"),
+        (lambda t: t.update(Destination="rN7n7otQDd6FczFgLdSqtcsAUxDkw6fzRH"), "destination"),
+        (lambda t: t.update(Amount="1000000"), "amount"),
         (
             lambda t: t.update(
-                TransactionType="Payment",
-                Destination="rN7n7otQDd6FczFgLdSqtcsAUxDkw6fzRH",
-                Amount="1",
+                Amount={"currency": "USD", "issuer": proof.PROOF_DESTINATION, "value": "1"}
+            ),
+            "amount",
+        ),
+        (lambda t: t.update(DestinationTag=7), "extra_field"),
+        (lambda t: t.update(SendMax="1000000"), "extra_field"),
+        (
+            lambda t: (
+                t.update(TransactionType="AccountSet"),
+                t.pop("Destination"),
+                t.pop("Amount"),
             ),
             "type",
         ),
         (lambda t: t.update(SourceTag=1), "source_tag"),
-        (lambda t: t.update(Flags=2147483648), "flags"),
+        (lambda t: t.update(Flags=131072), "flags"),
     ],
 )
 def test_noncanonical_fields_reject(mutate, reason):
@@ -239,3 +263,19 @@ def test_extra_memo_rejects():
     with pytest.raises(proof.ProofError) as ei:
         proof.verify_proof(tx, wallet_hint=None, nonce=NONCE, action=memos.ACTION_SIGNIN)
     assert ei.value.reason == "memos"
+
+
+def test_fully_canonical_sig_flag_is_allowed():
+    w, tx = _signed(mutate=lambda t: t.update(Flags=2147483648))
+    assert (
+        proof.verify_proof(tx, wallet_hint=None, nonce=NONCE, action=memos.ACTION_SIGNIN)
+        == w.classic_address
+    )
+
+
+def test_blackhole_cannot_prove_itself():
+    # Account == the pinned Destination is nonsense; nobody holds that key, but
+    # reject the shape outright rather than relying on signature failure.
+    _, tx = _signed(mutate=lambda t: t.update(Account=proof.PROOF_DESTINATION))
+    with pytest.raises(proof.ProofError):
+        proof.verify_proof(tx, wallet_hint=None, nonce=NONCE, action=memos.ACTION_SIGNIN)
