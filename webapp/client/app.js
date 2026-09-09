@@ -441,7 +441,7 @@ function applySignDelivery({ qrEl, linkBtn, toggleBtn, link, qrData, push, autoO
 // on. WC_SURFACES gates the link panel's Joey arm (a proof, not a session)
 // on the other surfaces it names.
 
-const WC_MODULE = './wc.js?v=1';
+const WC_MODULE = './wc.js?v=2';
 const WC_POLL_MS = 3000;
 
 function wcSurface() {
