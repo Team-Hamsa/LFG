@@ -803,7 +803,8 @@ async def _persist_issued_user_token(user: dict[str, Any], session: Any) -> None
         signer_wallet=getattr(session, "wallet_address", None),
     )
     wallet = getattr(session, "wallet_address", None)
-    if wallet:
+    device_key = _sponsored_device_key(token)
+    if wallet and device_key:
         # Sybil gate backfill: a claim reserved before the push token was
         # known learns its device key from the signature that consumed it.
         await asyncio.to_thread(
@@ -811,7 +812,7 @@ async def _persist_issued_user_token(user: dict[str, Any], session: Any) -> None
             db_path.app_db_path(config.XRPL_NETWORK),
             network=config.XRPL_NETWORK,
             wallet=wallet,
-            device_key=_sponsored_device_key(token),
+            device_key=device_key,
         )
 
 
