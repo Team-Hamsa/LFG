@@ -34,9 +34,10 @@ SIGNIN_TTL = 300
 PROOF_DESTINATION = "rrrrrrrrrrrrrrrrrNAMEtxvNvQ"
 PROOF_AMOUNT = "1"  # drops
 # Joey autofills the Fee; cap what we will accept so a hostile "proof" can't
-# carry a ruinous fee if it ever were submitted. 1 XRP is orders of magnitude
-# above any sane autofill.
-MAX_PROOF_FEE_DROPS = 1_000_000
+# carry a ruinous fee if it ever were submitted. Autofill is ~10-15 drops and
+# open-ledger escalation rarely reaches four figures; 10,000 drops (0.01 XRP)
+# is a wide honest margin that keeps the worst leaked-blob cost negligible.
+MAX_PROOF_FEE_DROPS = 10_000
 
 # How many ledgers past the request's creation ledger a proof's autofilled
 # LastLedgerSequence may reach. The 300 s nonce TTL is ~75-80 ledgers and Joey

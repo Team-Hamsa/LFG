@@ -53,8 +53,11 @@ def ensure_table() -> None:
         # window (#462; NULL on legacy rows / when the ledger was unreadable).
         try:
             conn.execute("ALTER TABLE sign_requests ADD COLUMN created_ledger INTEGER")
-        except sqlite3.OperationalError:
-            pass  # column already exists
+        except sqlite3.OperationalError as exc:
+            # Only the already-migrated case is benign; a lock or disk fault
+            # here would otherwise surface later as a confusing INSERT failure.
+            if "duplicate column name" not in str(exc).lower():
+                raise
         # One transaction hash settles exactly one request. txid_in_use() is the
         # cheap pre-check; this index is what makes the claim actually atomic,
         # so two concurrent posts of the same validated hash cannot both win.

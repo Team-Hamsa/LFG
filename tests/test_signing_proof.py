@@ -71,7 +71,7 @@ def test_link_action_round_trips():
     "mutate,reason",
     [
         (lambda t: t.update(Fee="0"), "fee"),
-        (lambda t: t.update(Fee="2000000"), "fee"),
+        (lambda t: t.update(Fee="20000"), "fee"),
         (lambda t: t.update(Sequence=0), "sequence"),
         (lambda t: t.pop("LastLedgerSequence"), "last_ledger"),
         (lambda t: t.update(LastLedgerSequence=0), "last_ledger"),
