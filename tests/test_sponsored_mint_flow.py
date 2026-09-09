@@ -340,6 +340,8 @@ def test_cancel_during_sponsored_reservation_cleans_session_claim_and_headroom(
         assert proceed.wait(5)
         try:
             kwargs["now"] = 101
+            # No network in tests: stand in for the real funder lookup.
+            kwargs["funder_lookup"] = lambda _wallet: ("rTestFunder", 1)
             return real_reserve(*args, **kwargs)
         finally:
             committed.set()
@@ -3008,3 +3010,99 @@ def test_readiness_audit_tolerates_undeliverable_minted_claims(_service_env, mon
     assert report["checks"]["incomplete_claims"]["ok"] is True
     assert report["checks"]["incomplete_claims"]["minted"] == 0
     assert report["checks"]["incomplete_claims"]["minted_undeliverable"] == 1
+
+
+def test_mint_start_passes_sybil_gate_inputs(_service_env, monkeypatch):
+    """Admission must arm the funder gate with the real ledger lookup and
+    hand over the caller's device key (hashed push token)."""
+    from lfg_core import funding
+
+    observed = {}
+
+    def reserve(*args, **kwargs):
+        observed.update(kwargs)
+        return _not_admitted("ineligible")
+
+    async def token(_user):
+        return "xumm-push-token"
+
+    async def fake_wrapper(session):
+        return None
+
+    monkeypatch.setattr(server.sponsored_mint, "reserve_if_eligible", reserve)
+    monkeypatch.setattr(server, "_push_token", token)
+    monkeypatch.setattr(mint_flow.MintSession, "prepare_payment", _paid_prepare())
+    monkeypatch.setattr(server, "_run_mint_session_and_publish", fake_wrapper)
+
+    async def scenario():
+        await server.handle_mint_start(_post_request())
+        session = next(iter(server.mint_sessions.values()))
+        await session.task
+
+    _run(scenario())
+
+    assert observed["funder_lookup"] is funding.lookup_funder
+    import hashlib
+
+    assert observed["device_key"] == hashlib.sha256(b"xumm-push-token").hexdigest()
+
+
+def test_mint_start_omits_device_key_without_push_token(_service_env, monkeypatch):
+    observed = {}
+
+    def reserve(*args, **kwargs):
+        observed.update(kwargs)
+        return _not_admitted("ineligible")
+
+    async def fake_wrapper(session):
+        return None
+
+    monkeypatch.setattr(server.sponsored_mint, "reserve_if_eligible", reserve)
+    monkeypatch.setattr(mint_flow.MintSession, "prepare_payment", _paid_prepare())
+    monkeypatch.setattr(server, "_run_mint_session_and_publish", fake_wrapper)
+
+    async def scenario():
+        await server.handle_mint_start(_post_request())
+        session = next(iter(server.mint_sessions.values()))
+        await session.task
+
+    _run(scenario())
+
+    assert observed["device_key"] is None
+
+
+def test_persist_issued_token_backfills_claim_device_key(_service_env, monkeypatch):
+    import hashlib
+
+    calls = {}
+    monkeypatch.setattr(server.identity_store, "set_user_token", lambda *a, **k: None)
+    monkeypatch.setattr(
+        server.sponsored_mint,
+        "set_claim_device_key",
+        lambda db, **kw: calls.update(kw),
+    )
+    session = SimpleNamespace(issued_user_token="tok", wallet_address="rW")
+    _run(server._persist_issued_user_token({"id": "u", "name": "u"}, session))
+    assert calls["wallet"] == "rW"
+    assert calls["device_key"] == hashlib.sha256(b"tok").hexdigest()
+
+
+def test_readiness_report_surfaces_sybil_gate_config(_service_env, monkeypatch):
+    from lfg_core import funding
+
+    audit = importlib.import_module("scripts.audit_sponsored_mint_readiness")
+    monkeypatch.setattr(
+        audit.config, "SPONSORED_MINT_EXCLUDED_WALLETS", _PLACEHOLDER_EXCLUSIONS
+    )
+    report = _run(
+        audit.build_report(
+            network="mainnet",
+            app_db=_service_env.app_db,
+            history_db=_service_env.history_db,
+            now=4000,
+            balance_fetch=lambda: Decimal("1000"),
+        )
+    )
+    sybil = report["sybil_gates"]
+    assert sybil["funder_exchange_allowlist"] == funding.EXCHANGES
+    assert sybil["dedup"] == "all-time"

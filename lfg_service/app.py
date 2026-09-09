@@ -52,6 +52,7 @@ from lfg_core import (
     db_path,
     economy_flow,
     economy_store,
+    funding,
     headroom,
     history_store,
     image_archive,
@@ -801,6 +802,17 @@ async def _persist_issued_user_token(user: dict[str, Any], session: Any) -> None
         token,
         signer_wallet=getattr(session, "wallet_address", None),
     )
+    wallet = getattr(session, "wallet_address", None)
+    if wallet:
+        # Sybil gate backfill: a claim reserved before the push token was
+        # known learns its device key from the signature that consumed it.
+        await asyncio.to_thread(
+            sponsored_mint.set_claim_device_key,
+            db_path.app_db_path(config.XRPL_NETWORK),
+            network=config.XRPL_NETWORK,
+            wallet=wallet,
+            device_key=_sponsored_device_key(token),
+        )
 
 
 def require_auth(handler):
@@ -5159,6 +5171,14 @@ def _mint_referrer(body: Any, wallet: str) -> str | None:
     return ref
 
 
+def _sponsored_device_key(push_user_token: str | None) -> str | None:
+    """Hash of the caller's Xaman push token — the same per-device correlator
+    the #445 clustering uses. Only the digest is persisted on claims."""
+    if not push_user_token:
+        return None
+    return hashlib.sha256(push_user_token.encode()).hexdigest()
+
+
 def _cleanup_cancelled_mint_admission(session: mint_flow.MintSession) -> None:
     """Synchronously unwind every resource acquired after session insertion.
 
@@ -5417,6 +5437,8 @@ async def handle_mint_start(request):
                         network=config.XRPL_NETWORK,
                         wallet=session.wallet_address,
                         session_id=session.id,
+                        device_key=_sponsored_device_key(push_user_token),
+                        funder_lookup=funding.lookup_funder,
                     )
                 )
                 reservation = await _await_mint_admission_thread(reserve_task, session)

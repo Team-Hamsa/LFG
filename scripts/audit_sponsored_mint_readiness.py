@@ -21,7 +21,7 @@ from xrpl.core.addresscodec import is_valid_classic_address
 REPO_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
 sys.path.insert(0, REPO_ROOT)
 
-from lfg_core import config, db_path, history_store, sponsored_mint, xrpl_ops  # noqa: E402
+from lfg_core import config, db_path, funding, history_store, sponsored_mint, xrpl_ops  # noqa: E402
 
 _APP_TABLE_COLUMNS = {
     "free_mint_campaigns": {
@@ -442,6 +442,13 @@ async def build_report(
         "history_db": os.path.abspath(history_db),
         "checked_at": timestamp,
         "checks": checks,
+        # Informational: the admission-time sybil gates (same-funder /
+        # same-device dedup, all-time across campaigns) and the exchange
+        # funders exempt from dedup, for operator review.
+        "sybil_gates": {
+            "dedup": "all-time",
+            "funder_exchange_allowlist": dict(funding.EXCHANGES),
+        },
     }
 
 

@@ -13,7 +13,7 @@ from typing import Any, Literal, cast
 from urllib.parse import quote
 from uuid import uuid4
 
-from lfg_core import config, db_path, history_events, history_store, market_ops
+from lfg_core import config, db_path, funding, history_events, history_store, market_ops
 
 CampaignState = Literal["off", "active", "stopped", "expired", "full", "at_capacity"]
 
@@ -350,6 +350,7 @@ def ensure_schema(db_path: str) -> None:
             "mint_metadata_json": "TEXT",
             "mint_body_type": "TEXT",
             "mint_still_token": "TEXT",
+            "device_key": "TEXT",
         }
         for column, declaration in claim_migrations.items():
             if column not in claim_columns:
@@ -358,6 +359,7 @@ def ensure_schema(db_path: str) -> None:
             "CREATE UNIQUE INDEX IF NOT EXISTS idx_free_mint_claims_signed_hash "
             "ON free_mint_claims(mint_signed_tx_hash) WHERE mint_signed_tx_hash IS NOT NULL"
         )
+        funding.ensure_schema(conn)
         burn_migrations = {
             # The first deployed schema did not have these two columns. Add
             # them before any query or index assumes a later schema version.
@@ -1131,6 +1133,24 @@ def _unique_tagged_wallets(
         return None
 
 
+def set_claim_device_key(db_path: str, *, network: str, wallet: str, device_key: str) -> None:
+    """Backfill the device key onto a wallet's claims once it becomes known
+    (e.g. the push token captured when the claim payload is signed). Never
+    overwrites a key already recorded at reservation time."""
+    if not device_key:
+        return
+    ensure_schema(db_path)
+    with _connect(db_path) as conn:
+        conn.execute("BEGIN IMMEDIATE")
+        conn.execute(
+            """
+            UPDATE free_mint_claims SET device_key = ?
+            WHERE network = ? AND wallet = ? AND device_key IS NULL
+            """,
+            (device_key, network, wallet.strip()),
+        )
+
+
 def campaign_status(
     db_path: str,
     history_path: str,
@@ -1166,6 +1186,8 @@ def reserve_if_eligible(
     wallet: str,
     session_id: str,
     now: int | None = None,
+    device_key: str | None = None,
+    funder_lookup: funding.FunderLookup | None = None,
 ) -> ReservationResult:
     wallet = wallet.strip()
     session_id = session_id.strip()
@@ -1198,6 +1220,21 @@ def reserve_if_eligible(
         return ReservationResult(False, "ineligible", None)
     if not os.path.isfile(history_path) or not os.access(history_path, os.R_OK | os.W_OK):
         return ReservationResult(False, "eligibility_unavailable", None)
+
+    if funder_lookup is not None:
+        # Resolve outside the final write transaction — the lookup is an RPC.
+        # Funders never change, so the cache is trusted forever; a transport
+        # failure fails closed (a farm must not get in by timing lookups
+        # against a flaky endpoint).
+        with _connect(db_path) as conn:
+            needs_lookup = not funding.has_cached_funder(conn, wallet)
+        if needs_lookup:
+            try:
+                funder, funder_ledger = funder_lookup(wallet)
+            except funding.FunderLookupError:
+                return ReservationResult(False, "eligibility_unavailable", None)
+            with _connect(db_path) as conn:
+                funding.record_funder(conn, wallet, funder, funder_ledger)
 
     final_conn: sqlite3.Connection | None = None
     try:
@@ -1253,6 +1290,46 @@ def reserve_if_eligible(
                     return ReservationResult(True, "reserved", existing)
                 return ReservationResult(False, "already_reserved", None)
 
+        # Sybil gates (all-time, cross-campaign): a wallet sharing a
+        # non-exchange activation funder or a device with any prior claimant
+        # is not an independent user. Checked inside the write transaction so
+        # two concurrent reservations from one cluster cannot both pass.
+        if funder_lookup is not None:
+            funder_row = conn.execute(
+                "SELECT funder, ledger_index FROM wallet_funders WHERE wallet = ?",
+                (wallet,),
+            ).fetchone()
+            if funder_row is None:
+                return ReservationResult(False, "eligibility_unavailable", None)
+            funder, funder_ledger = funder_row[0], funder_row[1]
+            if funder is None and funder_ledger is None:
+                # No transactions at all: unfunded wallets cannot pay fees and
+                # are the cheapest sybil shape (2026-08-17 incident).
+                return ReservationResult(False, "ineligible", None)
+            if funder is not None and funder not in funding.EXCHANGES:
+                sibling = conn.execute(
+                    """
+                    SELECT 1 FROM free_mint_claims c
+                    JOIN wallet_funders f ON f.wallet = c.wallet
+                    WHERE c.network = ? AND c.wallet != ? AND f.funder = ?
+                    LIMIT 1
+                    """,
+                    (network, wallet, funder),
+                ).fetchone()
+                if sibling is not None:
+                    return ReservationResult(False, "ineligible", None)
+        if device_key is not None:
+            same_device = conn.execute(
+                """
+                SELECT 1 FROM free_mint_claims
+                WHERE network = ? AND device_key = ? AND wallet != ?
+                LIMIT 1
+                """,
+                (network, device_key, wallet),
+            ).fetchone()
+            if same_device is not None:
+                return ReservationResult(False, "ineligible", None)
+
         if state == "at_capacity" or sum(counts.values()) >= campaign["cap"]:
             return ReservationResult(False, "at_capacity", None)
 
@@ -1268,6 +1345,7 @@ def reserve_if_eligible(
                 """
                 UPDATE free_mint_claims
                 SET campaign_id = ?, session_id = ?, status = 'reserved',
+                    device_key = COALESCE(?, device_key),
                     reserved_at = ?, reservation_expires_at = ?, released_at = NULL,
                     mint_tx_hash = NULL, mint_signed_tx_hash = NULL,
                     mint_signed_tx_blob = NULL, mint_signed_ledger_floor = NULL,
@@ -1282,6 +1360,7 @@ def reserve_if_eligible(
                 (
                     campaign["id"],
                     session_id,
+                    device_key,
                     timestamp,
                     campaign["enabled_until"],
                     timestamp,
@@ -1307,10 +1386,10 @@ def reserve_if_eligible(
                     id, network, wallet, campaign_id, session_id, status,
                     reserved_at, reservation_expires_at, released_at,
                     mint_tx_hash, nft_id, offer_id, accept_tx_hash, tagged_at,
-                    last_error, created_at, updated_at
+                    last_error, created_at, updated_at, device_key
                 ) VALUES (
                     ?, ?, ?, ?, ?, 'reserved', ?, ?, NULL,
-                    NULL, NULL, NULL, NULL, NULL, NULL, ?, ?
+                    NULL, NULL, NULL, NULL, NULL, NULL, ?, ?, ?
                 )
                 """,
                 (
@@ -1323,6 +1402,7 @@ def reserve_if_eligible(
                     campaign["enabled_until"],
                     timestamp,
                     timestamp,
+                    device_key,
                 ),
             )
             _audit(
