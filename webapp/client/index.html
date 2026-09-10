@@ -37,16 +37,40 @@
     </header>
 
     <section id="register-panel" class="card sticker" hidden>
-      <h2>👋 Register your wallet</h2>
+      <p class="wallet-onboarding-kicker">Live on the XRP Ledger</p>
+      <h2>👋 Welcome to LFG</h2>
+      <p class="wallet-onboarding-intro">Mint characters, customize their traits, earn BRIX, and trade on the XRP Ledger.</p>
+      <div class="wallet-onboarding-summary">
+        <h3>Why connect a wallet?</h3>
+        <p>Connecting proves you control the selected address and connects your wallet to your LFG identity so LFG can find the characters you own.</p>
+        <ul>
+          <li>LFG can read your public address and on-chain assets.</li>
+          <li>LFG cannot access your funds or approve transactions.</li>
+        </ul>
+      </div>
       <p id="register-sub" class="card-sub">Scan with Xaman to sign in — your wallet address is captured automatically.</p>
       <div id="register-spinner" class="spinner" role="img" aria-label="Working…" hidden></div>
       <button id="register-qr-toggle" class="link qr-toggle" hidden>Show QR to sign on another device</button>
       <img id="register-qr" class="qr" alt="Sign-in QR — scan with Xaman" hidden>
-      <p><button id="register-link-btn" class="link" hidden>Open in Xaman ↗</button></p>
-      <p><button id="register-retry-btn" class="primary" hidden>↻ Try again</button></p>
-      <!-- #447: WalletConnect / Joey Wallet arm. Hidden until /api/config
+      <!-- #447: the Joey/WalletConnect arm stays hidden until /api/config
            reports the feature armed for THIS surface. -->
-      <p><button id="register-wc-btn" class="secondary" hidden>🐨 Connect with Joey Wallet</button></p>
+      <div class="wallet-provider-row">
+        <button id="register-link-btn" class="link wallet-provider-btn" aria-label="Open in Xaman" aria-describedby="xaman-verification-note" hidden><img id="xaman-app-icon" src="assets/xaman-app-icon.png" alt=""></button>
+        <button id="register-wc-btn" class="wallet-provider-btn" aria-label="Connect with Joey Wallet" aria-describedby="joey-verification-note" hidden><img id="joey-app-icon" src="assets/joey-app-icon.png" alt=""></button>
+      </div>
+      <p><button id="register-retry-btn" class="primary" hidden>↻ Try again</button></p>
+      <details id="wallet-verification-help" class="wallet-verification-help">
+        <summary>How wallet verification works</summary>
+        <div id="xaman-verification-note" class="wallet-verification-note">
+          <h3>Xaman</h3>
+          <p>Xaman asks you to sign a SignIn pseudotransaction. It proves wallet ownership and is never submitted to the XRP Ledger. No XRP moves and no network fee is charged.</p>
+        </div>
+        <div id="joey-verification-note" class="wallet-verification-note">
+          <h3>Joey Wallet</h3>
+          <p>Joey asks you to sign a proof shaped like a 1-drop payment. LFG verifies the signature but never submits the payment to the XRP Ledger. No XRP moves and no network fee is charged.</p>
+        </div>
+      </details>
+      <p class="wallet-mainnet-note"><strong>Signing in is off-ledger.</strong> Minting, building, swapping, and trading may create real on-ledger transactions. LFG will show you what you’re approving before each request.</p>
     </section>
 
     <!-- BRIX trustline flow (#441): the exit from a trustline_required
