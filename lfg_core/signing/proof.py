@@ -76,14 +76,40 @@ _ALLOWED = {
 }
 
 
+# Response artifacts a wallet may echo INSIDE tx_json when it reports a signed
+# transaction back (xrpl.js types a response's tx_json as `SubmittableTransaction
+# & {hash?: string}`; rippled tx/submit responses put `hash`, `ctid`, `date`,
+# `meta` and friends beside the signed fields; API v2 mirrors a Payment's
+# Amount as DeliverMax). None of these are part of the signed bytes — the
+# signature check below still guarantees the integrity of every field that
+# matters — so they are stripped before the closed-allowlist check rather than
+# rejected. Observed live 2026-09-09: Joey mobile signs with submit:false
+# honored (nothing reached the ledger — verified via account_tx) but its
+# returned tx_json still tripped the allowlist with artifact fields.
+_RESPONSE_ARTIFACTS = {
+    "hash",
+    "ctid",
+    "date",
+    "ledger_index",
+    "inLedger",
+    "validated",
+    "meta",
+    "close_time_iso",
+    "status",
+}
+
+
 class ProofError(Exception):
     """A submitted proof is not a valid, canonical wallet-ownership proof."""
 
     code = "bad_proof"
 
-    def __init__(self, reason: str):
-        super().__init__(f"bad proof: {reason}")
+    def __init__(self, reason: str, detail: str | None = None):
+        super().__init__(f"bad proof: {reason}" + (f" ({detail})" if detail else ""))
         self.reason = reason
+        # Extra context for the server log only (e.g. WHICH fields were
+        # unexpected) — never key material, never sent to the client.
+        self.detail = detail
 
 
 def build_proof_tx(wallet: str, nonce: str, action: str) -> dict[str, Any]:
@@ -148,8 +174,19 @@ def verify_proof(
     # "type", not as whatever extra field that type happens to require.
     if tx_json.get("TransactionType") != "Payment":
         raise ProofError("type")
-    if set(tx_json) - _ALLOWED:
-        raise ProofError("extra_field")
+    # API v2 renames a Payment's Amount to DeliverMax. A response may mirror
+    # both or carry only DeliverMax; the signed bytes always contain Amount,
+    # so normalise DeliverMax back into Amount when absent, and reject a
+    # mirrored pair that disagrees.
+    if "DeliverMax" in tx_json:
+        if "Amount" not in tx_json:
+            tx_json = {**tx_json, "Amount": tx_json["DeliverMax"]}
+        elif tx_json["DeliverMax"] != tx_json["Amount"]:
+            raise ProofError("amount")
+    tx_json = {k: v for k, v in tx_json.items() if k not in _RESPONSE_ARTIFACTS | {"DeliverMax"}}
+    extra = set(tx_json) - _ALLOWED
+    if extra:
+        raise ProofError("extra_field", detail=",".join(sorted(extra)))
     if tx_json.get("Destination") != PROOF_DESTINATION:
         raise ProofError("destination")
     if tx_json.get("Amount") != PROOF_AMOUNT:

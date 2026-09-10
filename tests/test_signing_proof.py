@@ -306,3 +306,61 @@ def test_lls_within_window_verifies():
         )
         == w.classic_address
     )
+
+
+def test_response_artifacts_are_tolerated():
+    """A wallet's signed-tx response may echo unsigned artifacts inside
+    tx_json (hash/ctid/date/meta etc. — the shapes rippled itself uses); they
+    are not smuggled fields (observed live with Joey mobile 2026-09-09)."""
+    w, tx = _signed()
+    tx.update(
+        hash="A" * 64,
+        ctid="C0000001",
+        date=800000000,
+        ledger_index=99000123,
+        validated=True,
+        meta={"TransactionResult": "tesSUCCESS"},
+        close_time_iso="2026-09-09T23:30:00Z",
+        status="success",
+        DeliverMax=tx["Amount"],
+    )
+    assert (
+        proof.verify_proof(tx, wallet_hint=None, nonce=NONCE, action=memos.ACTION_SIGNIN)
+        == w.classic_address
+    )
+
+
+def test_deliver_max_mismatch_rejects():
+    _, tx = _signed()
+    tx["DeliverMax"] = "1000000"
+    with pytest.raises(proof.ProofError) as ei:
+        proof.verify_proof(tx, wallet_hint=None, nonce=NONCE, action=memos.ACTION_SIGNIN)
+    assert ei.value.reason == "amount"
+
+
+def test_extra_field_names_surface_in_detail_only():
+    _, tx = _signed(mutate=lambda t: t.update(SendMax="1000000"))
+    with pytest.raises(proof.ProofError) as ei:
+        proof.verify_proof(tx, wallet_hint=None, nonce=NONCE, action=memos.ACTION_SIGNIN)
+    assert ei.value.reason == "extra_field"
+    assert ei.value.detail == "SendMax"
+
+
+def test_deliver_max_only_normalises_to_amount():
+    """API v2 may carry DeliverMax INSTEAD of Amount; the signed bytes always
+    contain Amount, so it is normalised back before signature verification."""
+    w, tx = _signed()
+    tx["DeliverMax"] = tx.pop("Amount")
+    assert (
+        proof.verify_proof(tx, wallet_hint=None, nonce=NONCE, action=memos.ACTION_SIGNIN)
+        == w.classic_address
+    )
+
+
+def test_deliver_max_only_with_wrong_value_rejects():
+    _, tx = _signed()
+    tx.pop("Amount")
+    tx["DeliverMax"] = "1000000"
+    with pytest.raises(proof.ProofError) as ei:
+        proof.verify_proof(tx, wallet_hint=None, nonce=NONCE, action=memos.ACTION_SIGNIN)
+    assert ei.value.reason == "amount"
