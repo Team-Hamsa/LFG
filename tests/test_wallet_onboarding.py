@@ -72,4 +72,5 @@ def test_wallet_copy_distinguishes_identity_linking_and_provider_proofs():
     assert "1-drop payment" in joey
     assert "never submits the payment to the XRP Ledger" in joey
     assert "Signing in is off-ledger" in panel
-    assert "real Mainnet transactions" in panel
+    assert "real on-ledger transactions" in panel
+    assert "Mainnet" not in panel
