@@ -78,6 +78,7 @@ def test_wallet_actions_use_local_decorative_app_icons_with_accessible_names():
         assert not " ".join(dom.text[action_id]).strip()
         assert icon["tag"] == "img"
         assert icon["attrs"].get("src") == src
+        assert (INDEX.parent / src).is_file()
         assert icon["attrs"].get("alt") == ""
         assert any(ancestor.get("id") == action_id for ancestor in icon["ancestors"])
 
