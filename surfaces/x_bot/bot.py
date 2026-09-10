@@ -174,6 +174,24 @@ async def _upload_media(image_bytes: bytes, deps: Deps) -> str | None:
         return None
 
 
+def _image_candidates(event: Mapping[str, Any]) -> list[str]:
+    """Media-download URLs in preference order (#477): the branded share-card
+    render first when SHARE_CARD_RENDER_ENABLED is on (fetched from the local
+    service — its endpoint itself 302s to raw art on a render failure, which
+    the HTTP client follows transparently), then the raw CDN art. Animated
+    mints get the same treatment: the card embeds the PNG first-frame, keeping
+    brand posts visually consistent with user-share unfurls."""
+    data = event.get("data") or {}
+    candidates: list[str] = []
+    nft_number = data.get("nft_number")
+    if config.SHARE_CARD_RENDER_ENABLED and nft_number is not None:
+        candidates.append(f"{x_config.LFG_SERVICE_URL}/nft/{nft_number}/card.png")
+    image_url = data.get("image_url")
+    if image_url:
+        candidates.append(image_url)
+    return candidates
+
+
 def _apply_429_backoff(exc: XApiError, deps: Deps) -> None:
     deps.backoff_until = (
         exc.reset_at if exc.reset_at is not None else deps.now() + _DEFAULT_BACKOFF_SECONDS
@@ -270,17 +288,21 @@ async def handle_event(event: Mapping[str, Any], deps: Deps) -> str | None:
 
     text = poster.compose(event, rank_traits=deps.rank_traits)
     media_id: str | None = None
-    image_url = (event.get("data") or {}).get("image_url")
-    if image_url:
-        image_bytes = await _download_image(image_url, deps)
-        if image_bytes is not None:
-            try:
-                media_id = await _upload_media(image_bytes, deps)
-            except XApiError as exc:
-                _apply_429_backoff(exc, deps)
-                logging.error(f"x_bot: media upload rate-limited; failing {event_key} ({exc})")
-                state.record(deps.db_path, event_key, "failed")
-                return "failed"
+    for candidate_url in _image_candidates(event):
+        image_bytes = await _download_image(candidate_url, deps)
+        if image_bytes is None:
+            continue
+        try:
+            media_id = await _upload_media(image_bytes, deps)
+        except XApiError as exc:
+            _apply_429_backoff(exc, deps)
+            logging.error(f"x_bot: media upload rate-limited; failing {event_key} ({exc})")
+            state.record(deps.db_path, event_key, "failed")
+            return "failed"
+        if media_id is not None:
+            break
+        # Non-429 upload failure (e.g. X rejecting the file): try the next
+        # candidate rather than silently going text-only with art available.
 
     try:
         tweet_id = await _retry(
