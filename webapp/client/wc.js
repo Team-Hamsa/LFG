@@ -4,18 +4,16 @@
 // signing an `lfg-wc://` request): the vendored bundle is ~600 KB, and a
 // Xaman user must never pay for it. Everything DOM-free lives in
 // signdelivery_pure.js; this module owns the client singleton, the pairing
-// session and the one JSON-RPC method Joey speaks.
+// session and the one JSON-RPC method Joey speaks. Pairing UI is the
+// caller's: connect() hands the wc: URI to onUri instead of opening the
+// stock Reown wallet modal (retired — its QR read as unscannable/foreign to
+// Joey users; app.js renders our own branded QR + joey:// deep link).
 
 const TOPIC_KEY = 'lfg_wc_topic';
 const XRPL_METHOD = 'xrpl_signTransaction';
-// Joey Wallet's listing id in the WalletConnect explorer (from Joey's docs).
-const JOEY_WALLET_ID =
-  'd9f5432e932c6fad8e19a0cea9d4a3372a84aed16e98a52e6655dd2821a63404';
-
 let client = null;      // SignClient singleton
 let topic = null;       // live session topic
 let wallet = null;      // XRPL classic address of the connected account
-let modal = null;       // WalletConnectModal singleton
 
 function storeTopic(t) {
   topic = t;
@@ -47,7 +45,7 @@ async function ensureClient({ projectId, metadata }) {
   const { SignClient } = await import('./vendor/walletconnect.js?v=1');
   client = await SignClient.init({ projectId, metadata });
   // The wallet may drop the pairing from its side at any time — forget it so
-  // the next connect() opens a fresh modal instead of signing into a corpse.
+  // the next connect() starts a fresh pairing instead of signing into a corpse.
   client.on('session_delete', (e) => {
     if (!e || e.topic === topic) { storeTopic(null); wallet = null; }
   });
@@ -85,7 +83,12 @@ export async function release(borrowedTopic) {
 //          wallet-link flow needs the user to bring a DIFFERENT wallet. That
 //          pairing is BORROWED, never adopted: pass its topic to signTx and
 //          hand it to release() when done.
-export async function connect({ projectId, chain, metadata, fresh = false } = {}) {
+//   onUri: called with the raw `wc:` pairing URI when a NEW pairing is
+//          needed (skipped when an existing session is re-attached). The
+//          caller renders it — app.js draws the branded /api/qr.png QR and
+//          Joey deep link; the stock Reown wallet modal is gone (#447
+//          follow-up: its Xaman-styled modal QR confused Joey users).
+export async function connect({ projectId, chain, metadata, fresh = false, onUri } = {}) {
   const c = await ensureClient({ projectId, metadata });
   if (!fresh) {
     const existing = liveSession(c, topic || storedTopic());
@@ -96,28 +99,12 @@ export async function connect({ projectId, chain, metadata, fresh = false } = {}
       xrpl: { chains: [chain], methods: [XRPL_METHOD], events: [] },
     },
   });
-  if (!modal) {
-    const { WalletConnectModal } = await import('./vendor/walletconnect.js?v=1');
-    modal = new WalletConnectModal({
-      projectId,
-      chains: [chain],
-      // Pin Joey (its WalletConnect explorer listing id) and hide the rest of
-      // the directory: this button IS "Connect with Joey", so the modal should
-      // offer Joey's QR/deeplink directly instead of a searchable wallet list.
-      explorerRecommendedWalletIds: [JOEY_WALLET_ID],
-      explorerExcludedWalletIds: 'ALL',
-    });
-  }
-  if (uri) await modal.openModal({ uri });
-  try {
-    const session = await approval();
-    return fresh ? borrow(session) : adopt(session);
-  } finally {
-    try { modal.closeModal(); } catch (_) { /* already closed */ }
-  }
+  if (uri && onUri) onUri(uri);
+  const session = await approval();
+  return fresh ? borrow(session) : adopt(session);
 }
 
-// Re-attach a stored session without ever opening the modal. Returns the
+// Re-attach a stored session without ever starting a new pairing. Returns the
 // wallet on success, or null when the pairing is gone (the caller then falls
 // back to a fresh sign-in).
 export async function restore({ projectId, metadata } = {}) {

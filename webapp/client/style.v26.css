@@ -1102,3 +1102,10 @@ button.link.wallet-provider-btn.sign-primary:hover {
   border-radius: 13px;
 }
 button.link.qr-toggle { font-size: .85rem; opacity: .8; }
+
+/* --- Wallet picker (sign-in provider choice; no QR until a pick) --- */
+.wallet-picker {
+  display: flex; gap: 14px; justify-content: center; align-items: center;
+  margin: 14px 0;
+}
+.wallet-picker[hidden] { display: none; }

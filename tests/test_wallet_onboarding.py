@@ -98,3 +98,59 @@ def test_wallet_copy_distinguishes_identity_linking_and_provider_proofs():
     assert "Signing in is off-ledger" in panel
     assert "real on-ledger transactions" in panel
     assert "Mainnet" not in panel
+
+
+def test_wallet_picker_offers_both_providers_behind_one_neutral_prompt():
+    """Catch the picker regressing to auto-Xaman copy or unlabeled arms."""
+    dom = _registration_dom()
+    nodes = dom.nodes
+
+    # One shared, provider-neutral prompt — no per-button "Sign in with X" text.
+    sub = " ".join(" ".join(dom.text["register-sub"]).split())
+    assert sub == "Select wallet to connect."
+
+    picker = nodes["register-picker"]
+    assert any(a.get("id") == "register-panel" for a in picker["ancestors"])
+
+    # Both arms live inside the picker, icon-only with accessible names.
+    expected = {
+        "register-xaman-btn": (
+            "Connect with Xaman",
+            "xaman-verification-note",
+            "assets/xaman-app-icon.png",
+        ),
+        "register-wc-btn": (
+            "Connect with Joey Wallet",
+            "joey-verification-note",
+            "assets/joey-app-icon.png",
+        ),
+    }
+    for btn_id, (label, note_id, src) in expected.items():
+        btn = nodes[btn_id]
+        assert any(a.get("id") == "register-picker" for a in btn["ancestors"])
+        assert btn["attrs"].get("aria-label") == label
+        assert btn["attrs"].get("aria-describedby") == note_id
+        assert not " ".join(dom.text[btn_id]).strip()
+        icons = [
+            n
+            for n in dom.nodes.values()
+            if n["tag"] == "img" and any(a.get("id") == btn_id for a in n["ancestors"])
+        ]
+        assert [i["attrs"].get("src") for i in icons] == [src]
+
+    # The escape hatch back to the picker exists and starts hidden.
+    switch = nodes["register-switch-btn"]
+    assert "hidden" in switch["attrs"]
+
+
+def test_wc_qr_overlay_is_branded_and_joey_specific():
+    """Catch the Joey pairing overlay losing its QR/deep-link/cancel affordances."""
+    dom = _registration_dom()
+    nodes = dom.nodes
+
+    overlay = nodes["wc-qr-overlay"]
+    assert "hidden" in overlay["attrs"]
+    for node_id in ("wc-qr-img", "wc-qr-open-btn", "wc-qr-toggle", "wc-qr-cancel-btn"):
+        assert any(a.get("id") == "wc-qr-overlay" for a in nodes[node_id]["ancestors"])
+    assert "Joey" in nodes["wc-qr-img"]["attrs"].get("alt", "")
+    assert nodes["wc-qr-open-btn"]["attrs"].get("aria-label") == "Open in Joey Wallet"

@@ -169,6 +169,38 @@ function qrUrl(data) {
   return `${API_BASE}/api/qr.png?d=${encodeURIComponent(data)}`;
 }
 
+// --- Branded Joey Wallet pairing overlay (#447) --------------------------
+// Replaces the stock WalletConnect modal: wc.js hands the raw `wc:` pairing
+// URI to whoever passed connect() an onUri callback, and this overlay renders
+// it as our own branded QR (/api/qr.png) plus Joey's deep link. The deep-link
+// wrapper is the WalletConnect-standard construction on Joey's registered
+// `joey://` native scheme (its explorer listing; Joey has no desktop app, so
+// on desktop the QR is the whole story).
+function joeyDeepLink(uri) {
+  return `joey://wc?uri=${encodeURIComponent(uri)}`;
+}
+
+let wcQrOnCancel = null;
+
+function showWcQr(uri, onCancel) {
+  wcQrOnCancel = onCancel || null;
+  const overlay = el('wc-qr-overlay');
+  if (!overlay) return; // cached older index.html — pairing still completes via deep link apps
+  applySignDelivery({
+    qrEl: el('wc-qr-img'),
+    linkBtn: el('wc-qr-open-btn'),
+    toggleBtn: el('wc-qr-toggle'),
+    link: joeyDeepLink(uri), qrData: uri,
+  });
+  overlay.hidden = false;
+}
+
+function hideWcQr() {
+  wcQrOnCancel = null;
+  const overlay = el('wc-qr-overlay');
+  if (overlay) overlay.hidden = true;
+}
+
 // CDN images are cross-origin and blocked by the Activity's CSP, so they are
 // routed through the backend's same-origin proxy (like the QR codes).
 // Grid/roster tiles pass THUMB_W: the proxy then serves a pre-built ~10 KB
@@ -441,7 +473,7 @@ function applySignDelivery({ qrEl, linkBtn, toggleBtn, link, qrData, push, autoO
 // on. WC_SURFACES gates the link panel's Joey arm (a proof, not a session)
 // on the other surfaces it names.
 
-const WC_MODULE = './wc.js?v=2';
+const WC_MODULE = './wc.js?v=3';
 const WC_POLL_MS = 3000;
 
 function wcSurface() {
@@ -638,8 +670,17 @@ async function wcSign(id) {
     const mod = await loadWc();
     if (!mod.activeWallet()) {
       // The pairing was lost (reload, wallet-side disconnect) — re-attach or
-      // ask for a fresh one before there is anything to sign.
-      await mod.connect({ projectId: wc.project_id, chain: wc.chain, metadata: wcMetadata() });
+      // ask for a fresh one before there is anything to sign. Cancel just
+      // hides the QR; the pending pairing expires on its own and this run
+      // fails into the "Retry Joey" affordance like any other connect error.
+      try {
+        await mod.connect({
+          projectId: wc.project_id, chain: wc.chain, metadata: wcMetadata(),
+          onUri: (uri) => showWcQr(uri, hideWcQr),
+        });
+      } finally {
+        hideWcQr();
+      }
     }
     toast('\u{1F4F2} Approve in Joey Wallet…');
     let outcome;
@@ -666,37 +707,69 @@ async function wcSign(id) {
 // Sign in with Joey: a server nonce, signed into a never-submitted proof
 // transaction, redeemed for the same platform="web" session the Xaman arm
 // issues.
+// Joey's browser extension (beta) injects a provider at window.joey /
+// window.xrpl.joey (XLS-72d / Wallet Standard — @joeywallet/wallet-sdk is a
+// dependency-free convenience layer over these same globals). Detection is
+// deliberately synchronous page-global reads only: the extension's MV3
+// worker may be cold, and its own SDK never awaits the wallet to detect it.
+function joeyExtension() {
+  try {
+    return window.joey || (window.xrpl || {}).joey || null;
+  } catch (_) {
+    return null;
+  }
+}
+
 async function startWcSignin() {
   const wc = wcConfig();
   // Web only in v1: the other surfaces authenticate through Discord/Telegram
   // and only USE a Joey pairing for signing, never to establish the session.
   if (!wc || !insideWeb) { showError('Joey Wallet sign-in is not available here.'); return; }
   clearTimeout(signinPollTimer);
+  const gen = ++signinGen;
+  const stale = () => gen !== signinGen || !!el('register-panel').hidden;
   showPanel('register-panel');
   renderSignin({ sub: 'Opening Joey Wallet…', spinner: true });
+  // TODO(#473): when the Joey browser extension is present, sign in
+  // through it instead of a WalletConnect pairing QR — provider.signIn()
+  // (CAIP-122 message, or a canonical never-submittable 1-drop Payment for
+  // hardware accounts) verified server-side, then provider-side signing via
+  // signAndSubmitTransaction. Needs its own server proof path; until then the
+  // extension user gets the same QR/deep-link pairing as everyone else.
   try {
     const start = await api('/api/web/signin', {
       method: 'POST',
       body: JSON.stringify({ provider: 'walletconnect' }),
     });
+    if (stale()) return;
     const mod = await loadWc();
-    const { wallet } = await mod.connect({
-      projectId: wc.project_id, chain: wc.chain, metadata: wcMetadata(),
-    });
+    let wallet;
+    try {
+      ({ wallet } = await mod.connect({
+        projectId: wc.project_id, chain: wc.chain, metadata: wcMetadata(),
+        onUri: (uri) => showWcQr(uri, () => { hideWcQr(); showSigninPicker(); }),
+      }));
+    } finally {
+      hideWcQr();
+    }
+    if (stale()) return;
     if (!wallet) throw new Error('Joey Wallet did not share an XRPL account.');
     renderSignin({ sub: 'Approve the sign-in request in Joey Wallet…', spinner: true });
     const resp = await mod.signTx({
       chain: wc.chain, txJson: wcProofTx(wallet, start), autofill: true, submit: false,
     });
+    if (stale()) return;
     const s = await api('/api/web/signin/proof', {
       method: 'POST',
       body: JSON.stringify({ sign_id: start.sign_id, tx_json: resp.tx_json }),
     });
+    if (stale()) return;
     sessionToken = s.session_token;
     try { localStorage.setItem(WEB_SESSION_KEY, s.session_token); } catch (_) { /* private mode */ }
     me = { ...s.user, wallet: s.wallet };
     showMintHome();
   } catch (e) {
+    if (stale()) return; // the user already moved on (picker / other arm)
     if (signDeliveryPure.isWcRejection(e)) {
       renderSignin({ sub: 'Sign-in declined in Joey Wallet.', retry: true });
       return;
@@ -773,9 +846,19 @@ async function startLinkJoey() {
     mod = await loadWc();
     // fresh: the point is to bring a DIFFERENT wallet than the session's, so
     // never silently reuse the pairing that is already signed in.
-    const borrowed = await mod.connect({
-      projectId: wc.project_id, chain: wc.chain, metadata: wcMetadata(), fresh: true,
-    });
+    let borrowed;
+    try {
+      borrowed = await mod.connect({
+        projectId: wc.project_id, chain: wc.chain, metadata: wcMetadata(), fresh: true,
+        onUri: (uri) => showWcQr(uri, () => {
+          hideWcQr();
+          linkPollGen++; // abandon this arm; a late approval is released below
+          renderLink({ sub: 'Prove a second wallet is yours — sign in with it, then it can receive your BRIX.', buttons: true });
+        }),
+      });
+    } finally {
+      hideWcQr();
+    }
     borrowedTopic = borrowed.topic;
     const wallet = borrowed.wallet;
     if (!wallet) throw new Error('Joey Wallet did not share an XRPL account.');
@@ -2598,10 +2681,18 @@ async function cancelMint(maybeSigned) {
 // --- Registration via Xaman Sign In (issue #24) ---
 
 let signinPollTimer = null;
+// Bumped whenever the register panel changes hands (picker shown, a provider
+// flow starts): an async Joey pairing that resolves late checks it and
+// abandons instead of logging in over whatever the user switched to.
+let signinGen = 0;
 
-function renderSignin({ sub, spinner, qrLink, retry }) {
+function renderSignin({ sub, spinner, qrLink, retry, picker }) {
   el('register-sub').textContent = sub;
   el('register-spinner').hidden = !spinner;
+  // Wallet picker (no payload exists yet) vs a live provider flow. The
+  // picker nodes are null-guarded: a cached older index.html has neither.
+  const pick = el('register-picker');
+  if (pick) pick.hidden = !picker;
   // #142: same delivery decision as every other sign screen — the sign-in QR
   // data IS the deep link.
   applySignDelivery({
@@ -2611,10 +2702,36 @@ function renderSignin({ sub, spinner, qrLink, retry }) {
     link: qrLink, qrData: qrLink,
   });
   el('register-retry-btn').hidden = !retry;
+  // The way back to the picker, shown only mid-flow and only where the
+  // picker exists at all (web with Joey armed).
+  const sw = el('register-switch-btn');
+  if (sw) sw.hidden = !!picker || !signinPickerArmed();
+}
+
+// The provider picker exists only where there is a choice to make: the web
+// surface with the Joey/WalletConnect arm armed. Everywhere else sign-in
+// auto-starts the Xaman flow exactly as before.
+function signinPickerArmed() {
+  return insideWeb && !!wcConfig();
+}
+
+function showSigninPicker() {
+  clearTimeout(signinPollTimer);
+  signinGen++; // invalidate any in-flight Joey pairing adoption
+  showPanel('register-panel');
+  renderSignin({ sub: 'Select wallet to connect.', picker: true });
+}
+
+// Single entry point for "the user needs to sign in": picker when there is
+// a real choice, otherwise straight into the Xaman flow.
+function startSigninFlow() {
+  if (signinPickerArmed()) { showSigninPicker(); return Promise.resolve(); }
+  return insideWeb ? startWebSignin() : startSignin();
 }
 
 async function startSignin() {
   clearTimeout(signinPollTimer);
+  signinGen++; // a pending Joey pairing must not adopt over this flow
   showPanel('register-panel');
   renderSignin({ sub: 'Setting up your Xaman sign-in…', spinner: true });
   try {
@@ -2665,6 +2782,7 @@ function pollSignin(uuid) {
 
 async function startWebSignin() {
   clearTimeout(signinPollTimer);
+  signinGen++; // a pending Joey pairing must not adopt over this flow
   showPanel('register-panel');
   renderSignin({ sub: 'Setting up your Xaman sign-in…', spinner: true });
   try {
@@ -2751,14 +2869,14 @@ async function disconnectWallet() {
     sessionToken = null;
     try { localStorage.removeItem(WEB_SESSION_KEY); } catch (_) { /* private mode */ }
     me = null;
-    status('Logged out. Sign in with Xaman to continue.');
-    await startWebSignin();
+    status('Logged out. Connect a wallet to continue.');
+    await startSigninFlow();
     return;
   }
   await api('/api/wallet/disconnect', { method: 'POST', body: '{}' });
   me.wallet = null;
-  status(`Wallet disconnected — sign in with Xaman to reconnect, ${me.username}.`);
-  await startSignin();
+  status(`Wallet disconnected — connect your wallet to reconnect, ${me.username}.`);
+  await startSigninFlow();
 }
 
 async function setupWeb() {
@@ -2775,7 +2893,7 @@ async function setupWeb() {
     if (sessionProvider(stored) === 'walletconnect' && wcConfig() && !(await wcRestore())) {
       sessionToken = null;
       try { localStorage.removeItem(WEB_SESSION_KEY); } catch (_) { /* private mode */ }
-      await startWebSignin();
+      await startSigninFlow();
       return null;
     }
     try {
@@ -2788,7 +2906,7 @@ async function setupWeb() {
       sessionToken = null;
     }
   }
-  await startWebSignin();
+  await startSigninFlow();
   return null; // the sign-in flow drives the UI from here
 }
 
@@ -5645,7 +5763,7 @@ async function main() {
   setupLogo();
   setupLeaderboard();
   setupBrixCard();
-  el('register-retry-btn').onclick = () => (insideWeb ? startWebSignin() : startSignin());
+  el('register-retry-btn').onclick = () => startSigninFlow();
   el('mint-btn').onclick = () => startMint();
   el('flow-regen-btn').onclick = onFlowRegen;
   el('swap-btn').onclick = () => openDressup();
@@ -5666,7 +5784,7 @@ async function main() {
   el('swap-done-btn').onclick = () => showMintHome();
   el('change-wallet-btn').onclick = async () => {
     await wcSignOut(); // #447: switching wallets must drop the Joey pairing too
-    return insideWeb ? startWebSignin() : startSignin();
+    return startSigninFlow();
   };
   // Log out / disconnect wallet (P0). Two-tap confirm: Discord's sandboxed
   // iframe makes window.confirm a silent no-op, so the button itself asks.
@@ -5700,6 +5818,12 @@ async function main() {
   // #447 — null-guarded: a cached older index.html has none of these nodes.
   const wcBtn = el('register-wc-btn');
   if (wcBtn) wcBtn.onclick = () => startWcSignin();
+  const xamanBtn = el('register-xaman-btn');
+  if (xamanBtn) xamanBtn.onclick = () => (insideWeb ? startWebSignin() : startSignin());
+  const switchBtn = el('register-switch-btn');
+  if (switchBtn) switchBtn.onclick = () => showSigninPicker();
+  const wcQrCancel = el('wc-qr-cancel-btn');
+  if (wcQrCancel) wcQrCancel.onclick = () => { const cb = wcQrOnCancel; hideWcQr(); if (cb) cb(); };
   const linkBtn = el('link-wallet-btn');
   if (linkBtn) linkBtn.onclick = () => startLinkWallet();
   const linkJoey = el('link-joey-btn');
@@ -5798,8 +5922,8 @@ async function main() {
       if (!(await resumeAnyFlow())) showMintHome();
     }
     else {
-      status(`Hey ${me.username} — sign in with Xaman to start building.`);
-      await startSignin();
+      status(`Hey ${me.username} — connect your wallet to start building.`);
+      await startSigninFlow();
     }
   } catch (e) {
     console.error(e);
