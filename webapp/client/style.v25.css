@@ -1080,4 +1080,25 @@ button.link.sign-primary {
   border-radius: 10px;
   text-decoration: none;
 }
+button.wallet-provider-btn,
+button.link.wallet-provider-btn.sign-primary {
+  width: 76px;
+  height: 76px;
+  padding: 4px;
+  border: 2px solid var(--line);
+  border-radius: 18px;
+  overflow: hidden;
+  background: var(--surface-2);
+  line-height: 0;
+}
+button.wallet-provider-btn:hover,
+button.link.wallet-provider-btn.sign-primary:hover {
+  border-color: var(--blue);
+}
+.wallet-provider-btn img {
+  display: block;
+  width: 64px;
+  height: 64px;
+  border-radius: 13px;
+}
 button.link.qr-toggle { font-size: .85rem; opacity: .8; }

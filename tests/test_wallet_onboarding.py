@@ -59,6 +59,29 @@ def test_each_wallet_action_describes_its_own_off_ledger_proof():
     assert any(ancestor.get("id") == "register-panel" for ancestor in details["ancestors"])
 
 
+def test_wallet_actions_use_local_decorative_app_icons_with_accessible_names():
+    """Catch icon-only wallet actions losing identity or local artwork."""
+    dom = _registration_dom()
+
+    expected = {
+        "register-link-btn": ("Open in Xaman", "xaman-app-icon", "assets/xaman-app-icon.png"),
+        "register-wc-btn": (
+            "Connect with Joey Wallet",
+            "joey-app-icon",
+            "assets/joey-app-icon.png",
+        ),
+    }
+    for action_id, (label, icon_id, src) in expected.items():
+        action = dom.nodes[action_id]
+        icon = dom.nodes[icon_id]
+        assert action["attrs"].get("aria-label") == label
+        assert not " ".join(dom.text[action_id]).strip()
+        assert icon["tag"] == "img"
+        assert icon["attrs"].get("src") == src
+        assert icon["attrs"].get("alt") == ""
+        assert any(ancestor.get("id") == action_id for ancestor in icon["ancestors"])
+
+
 def test_wallet_copy_distinguishes_identity_linking_and_provider_proofs():
     """Catch misleading cross-surface or on-ledger wallet explanations."""
     dom = _registration_dom()
