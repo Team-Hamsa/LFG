@@ -17,9 +17,9 @@ import sys
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-from dotenv import load_dotenv
+from lfg_core.envload import load_dotenv_unless_skipped
 
-load_dotenv()
+load_dotenv_unless_skipped()
 
 from lfg_core import config, rarity  # noqa: E402
 

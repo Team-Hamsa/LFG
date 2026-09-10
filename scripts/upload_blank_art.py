@@ -20,12 +20,13 @@ import os
 import sys
 
 import aiohttp
-from dotenv import load_dotenv
 
 REPO_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
 sys.path.insert(0, REPO_ROOT)
 
-load_dotenv()
+from lfg_core.envload import load_dotenv_unless_skipped  # noqa: E402
+
+load_dotenv_unless_skipped()
 
 CDN_PATH = "blank/silhouette.png"
 _EXPECTED_SIZE = (1080, 1080)

@@ -38,8 +38,6 @@ from collections.abc import Callable
 from dataclasses import dataclass
 from logging.handlers import RotatingFileHandler
 
-from dotenv import load_dotenv
-
 DEFAULT_URL = "https://letseffinggo.tail82fcc6.ts.net/lfg/api/health"
 
 
@@ -180,7 +178,12 @@ def _positive(name: str, raw: str, cast: Callable[[str], float]) -> float:
 def main() -> None:
     # The pm2 entry supplies no env block, so the operator's `.env` is the only
     # place FUNNEL_HEALTH_* overrides live — without this they were dead knobs.
-    load_dotenv()
+    import sys
+
+    sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
+    from lfg_core.envload import load_dotenv_unless_skipped
+
+    load_dotenv_unless_skipped()
 
     url = os.environ.get("FUNNEL_HEALTH_URL", DEFAULT_URL)
     try:
