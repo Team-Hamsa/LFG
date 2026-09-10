@@ -1080,16 +1080,6 @@ button.link.sign-primary {
   border-radius: 10px;
   text-decoration: none;
 }
-/* Provider icons sit side by side, bounded to the QR's rendered width
-   (210px + 12px padding + 3px border per side = 240px) so they line up
-   under it. [hidden] buttons still collapse — they set no display. */
-.wallet-provider-row {
-  display: flex;
-  justify-content: center;
-  gap: 14px;
-  max-width: 240px;
-  margin: 12px auto 6px;
-}
 button.wallet-provider-btn,
 button.link.wallet-provider-btn.sign-primary {
   width: 76px;
@@ -1112,3 +1102,10 @@ button.link.wallet-provider-btn.sign-primary:hover {
   border-radius: 13px;
 }
 button.link.qr-toggle { font-size: .85rem; opacity: .8; }
+
+/* --- Wallet picker (sign-in provider choice; no QR until a pick) --- */
+.wallet-picker {
+  display: flex; gap: 14px; justify-content: center; align-items: center;
+  margin: 14px 0;
+}
+.wallet-picker[hidden] { display: none; }

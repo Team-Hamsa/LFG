@@ -24,7 +24,7 @@
   <meta name="twitter:description" content="Mint, dress up, and trade LFG NFTs on the XRP Ledger.">
   <meta name="twitter:image" content="https://build.letseffinggo.com/assets/og-card.png">
   <link rel="stylesheet" href="fonts/fonts.css">
-  <link rel="stylesheet" href="style.v26.css">
+  <link rel="stylesheet" href="style.v27.css">
 </head>
 <body>
   <main id="app">
@@ -48,17 +48,20 @@
           <li>LFG cannot access your funds or approve transactions.</li>
         </ul>
       </div>
-      <p id="register-sub" class="card-sub">Scan with Xaman to sign in — your wallet address is captured automatically.</p>
+      <p id="register-sub" class="card-sub">Select wallet to connect.</p>
       <div id="register-spinner" class="spinner" role="img" aria-label="Working…" hidden></div>
-      <button id="register-qr-toggle" class="link qr-toggle" hidden>Show QR to sign on another device</button>
-      <img id="register-qr" class="qr" alt="Sign-in QR — scan with Xaman" hidden>
-      <!-- #447: the Joey/WalletConnect arm stays hidden until /api/config
-           reports the feature armed for THIS surface. -->
-      <div class="wallet-provider-row">
-        <button id="register-link-btn" class="link wallet-provider-btn" aria-label="Open in Xaman" aria-describedby="xaman-verification-note" hidden><img id="xaman-app-icon" src="assets/xaman-app-icon.png" alt=""></button>
+      <!-- Wallet picker: no payload/QR is created until the user picks a
+           provider. The Joey arm (#447) additionally stays hidden until
+           /api/config reports the feature armed for THIS surface. -->
+      <div id="register-picker" class="wallet-picker" hidden>
+        <button id="register-xaman-btn" class="wallet-provider-btn" aria-label="Connect with Xaman" aria-describedby="xaman-verification-note"><img id="xaman-pick-icon" src="assets/xaman-app-icon.png" alt=""></button>
         <button id="register-wc-btn" class="wallet-provider-btn" aria-label="Connect with Joey Wallet" aria-describedby="joey-verification-note" hidden><img id="joey-app-icon" src="assets/joey-app-icon.png" alt=""></button>
       </div>
+      <button id="register-qr-toggle" class="link qr-toggle" hidden>Show QR to sign on another device</button>
+      <img id="register-qr" class="qr" alt="Sign-in QR — scan with Xaman" hidden>
+      <p><button id="register-link-btn" class="link wallet-provider-btn" aria-label="Open in Xaman" aria-describedby="xaman-verification-note" hidden><img id="xaman-app-icon" src="assets/xaman-app-icon.png" alt=""></button></p>
       <p><button id="register-retry-btn" class="primary" hidden>↻ Try again</button></p>
+      <p><button id="register-switch-btn" class="link" hidden>← Use a different wallet</button></p>
       <details id="wallet-verification-help" class="wallet-verification-help">
         <summary>How wallet verification works</summary>
         <div id="xaman-verification-note" class="wallet-verification-note">
@@ -440,6 +443,24 @@
     </div>
   </div>
 
+  <!-- Branded Joey Wallet pairing overlay (#447): replaces the stock
+       WalletConnect modal. The QR is our own /api/qr.png rendering of the
+       wc: pairing URI; the open button carries Joey's joey://wc deep link.
+       applySignDelivery drives QR-vs-link exactly like every Xaman panel. -->
+  <div id="wc-qr-overlay" class="confirm-overlay" role="dialog" aria-modal="true"
+       aria-labelledby="wc-qr-title" hidden>
+    <div class="confirm-box card">
+      <h2 id="wc-qr-title">🐨 Joey Wallet</h2>
+      <p id="wc-qr-sub" class="card-sub">Scan with Joey Wallet and approve the connection.</p>
+      <button id="wc-qr-toggle" class="link qr-toggle" hidden>Show QR to sign on another device</button>
+      <img id="wc-qr-img" class="qr" alt="Connection QR — scan with Joey Wallet" hidden>
+      <p><button id="wc-qr-open-btn" class="link wallet-provider-btn" aria-label="Open in Joey Wallet" hidden><img id="wc-qr-open-icon" src="assets/joey-app-icon.png" alt=""></button></p>
+      <div class="confirm-actions">
+        <button id="wc-qr-cancel-btn" class="secondary">Cancel</button>
+      </div>
+    </div>
+  </div>
+
   <!-- Deploy-time surface config (standalone web surface, spec 2026-07-16).
        The repo default sets window.LFG_WEB = null; the GitHub Pages deploy
        overwrites it with the cross-origin API base. Loaded BEFORE app.js so
@@ -449,6 +470,6 @@
        Telegram (window.Telegram stays undefined); loaded BEFORE app.js so the
        dual-mode boot can detect the Telegram context. -->
   <script src="telegram-web-app.js"></script>
-  <script type="module" src="app.js?v=84"></script>
+  <script type="module" src="app.js?v=85"></script>
 </body>
 </html>

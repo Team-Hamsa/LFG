@@ -71,7 +71,7 @@ def test_dynamic_sign_panels_route_through_apply_sign_delivery():
 
 def test_cache_busters_bumped():
     html = _read("index.html")
-    assert "app.js?v=84" in html
+    assert "app.js?v=85" in html
 
 
 # ---------------------------------------------------------------------------
@@ -122,22 +122,27 @@ def test_link_joey_signs_with_the_borrowed_topic_and_releases_it():
 
 
 # ---------------------------------------------------------------------------
-# #464 — the "Connect with Joey" modal must pin Joey (its WalletConnect
-# explorer listing id) and hide the generic directory, or users are back to
-# searching for Joey on every sign-in. The wc.js delivery pin in app.js is a
-# cache key: an unbumped import silently serves the stale module.
+# Branded Joey pairing QR: the stock WalletConnectModal is retired (its
+# Xaman-styled QR read as foreign/unscannable to Joey users). wc.js must hand
+# the raw wc: pairing URI to the caller via onUri, and app.js must render it
+# through the branded /api/qr.png pipeline plus Joey's joey://wc deep link.
+# The wc.js delivery pin in app.js is a cache key: an unbumped import
+# silently serves the stale module.
 
-JOEY_WALLET_ID = "d9f5432e932c6fad8e19a0cea9d4a3372a84aed16e98a52e6655dd2821a63404"
 
-
-def test_wc_modal_pins_joey_and_hides_the_directory():
-    # Whitespace-collapsed so the multi-line declaration reads as one bind:
-    # the ASSIGNMENT is asserted, not mere presence of the id anywhere.
-    src = re.sub(r"\s+", " ", _read("wc.js"))
-    assert f"const JOEY_WALLET_ID = '{JOEY_WALLET_ID}';" in src
-    assert "explorerRecommendedWalletIds: [JOEY_WALLET_ID]" in src
-    assert "explorerExcludedWalletIds: 'ALL'" in src
+def test_wc_pairing_uri_is_rendered_by_the_branded_overlay_not_the_stock_modal():
+    wc = _read("wc.js")
+    assert "WalletConnectModal" not in wc
+    assert "onUri" in wc
+    src = _read("app.js")
+    start = src.index("function showWcQr(")
+    fn = src[start : src.index("function hideWcQr(", start)]
+    assert "applySignDelivery(" in fn
+    assert "joeyDeepLink(uri)" in fn
+    assert "joey://wc?uri=" in src  # Joey's registered native scheme wrapper
+    # every connect() that can mint a NEW pairing routes its URI to the overlay
+    assert src.count("onUri:") >= 3  # sign-in, wallet-link, lost-pairing re-attach
 
 
 def test_wc_module_delivery_pin_matches():
-    assert "const WC_MODULE = './wc.js?v=2';" in _read("app.js")
+    assert "const WC_MODULE = './wc.js?v=3';" in _read("app.js")
