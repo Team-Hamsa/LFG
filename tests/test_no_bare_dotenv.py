@@ -14,7 +14,7 @@ Allowed exceptions:
 
 from __future__ import annotations
 
-import re
+import ast
 from pathlib import Path
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
@@ -26,10 +26,23 @@ ALLOWED = {
     Path("lfg_core/db_path.py"),
 }
 
-# Matches importing or referencing dotenv's loader directly.
-_BARE_DOTENV = re.compile(
-    r"(from\s+dotenv\s+import\b[^\n]*\bload_dotenv\b|\bdotenv\.load_dotenv\b)"
-)
+
+def _uses_dotenv_loader(source: str, filename: str) -> bool:
+    """AST-based check: does this module import or reference dotenv's loader?
+
+    Catches ``from dotenv import load_dotenv`` in any layout (aliased,
+    parenthesized/multiline), and any ``dotenv.load_dotenv`` attribute access.
+    """
+    tree = ast.parse(source, filename=filename)
+    for node in ast.walk(tree):
+        if isinstance(node, ast.ImportFrom) and node.module == "dotenv":
+            if any(alias.name == "load_dotenv" for alias in node.names):
+                return True
+        elif isinstance(node, ast.Attribute) and node.attr == "load_dotenv":
+            value = node.value
+            if isinstance(value, ast.Name) and value.id == "dotenv":
+                return True
+    return False
 
 
 def test_no_module_calls_dotenv_load_dotenv_directly():
@@ -42,7 +55,7 @@ def test_no_module_calls_dotenv_load_dotenv_directly():
             # Test modules may legitimately reference/monkeypatch the symbol.
             if path.name.startswith("test_") or path.name == "conftest.py":
                 continue
-            if _BARE_DOTENV.search(path.read_text(encoding="utf-8")):
+            if _uses_dotenv_loader(path.read_text(encoding="utf-8"), str(rel)):
                 offenders.append(str(rel))
     assert not offenders, (
         "These modules use dotenv.load_dotenv directly; call "
