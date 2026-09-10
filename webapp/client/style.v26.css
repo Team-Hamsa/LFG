@@ -1080,6 +1080,16 @@ button.link.sign-primary {
   border-radius: 10px;
   text-decoration: none;
 }
+/* Provider icons sit side by side, bounded to the QR's rendered width
+   (210px + 12px padding + 3px border per side = 240px) so they line up
+   under it. [hidden] buttons still collapse — they set no display. */
+.wallet-provider-row {
+  display: flex;
+  justify-content: center;
+  gap: 14px;
+  max-width: 240px;
+  margin: 12px auto 6px;
+}
 button.wallet-provider-btn,
 button.link.wallet-provider-btn.sign-primary {
   width: 76px;

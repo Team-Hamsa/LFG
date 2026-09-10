@@ -24,7 +24,7 @@
   <meta name="twitter:description" content="Mint, dress up, and trade LFG NFTs on the XRP Ledger.">
   <meta name="twitter:image" content="https://build.letseffinggo.com/assets/og-card.png">
   <link rel="stylesheet" href="fonts/fonts.css">
-  <link rel="stylesheet" href="style.v25.css">
+  <link rel="stylesheet" href="style.v26.css">
 </head>
 <body>
   <main id="app">
@@ -52,11 +52,13 @@
       <div id="register-spinner" class="spinner" role="img" aria-label="Working…" hidden></div>
       <button id="register-qr-toggle" class="link qr-toggle" hidden>Show QR to sign on another device</button>
       <img id="register-qr" class="qr" alt="Sign-in QR — scan with Xaman" hidden>
-      <p><button id="register-link-btn" class="link wallet-provider-btn" aria-label="Open in Xaman" aria-describedby="xaman-verification-note" hidden><img id="xaman-app-icon" src="assets/xaman-app-icon.png" alt=""></button></p>
-      <p><button id="register-retry-btn" class="primary" hidden>↻ Try again</button></p>
-      <!-- #447: WalletConnect / Joey Wallet arm. Hidden until /api/config
+      <!-- #447: the Joey/WalletConnect arm stays hidden until /api/config
            reports the feature armed for THIS surface. -->
-      <p><button id="register-wc-btn" class="wallet-provider-btn" aria-label="Connect with Joey Wallet" aria-describedby="joey-verification-note" hidden><img id="joey-app-icon" src="assets/joey-app-icon.png" alt=""></button></p>
+      <div class="wallet-provider-row">
+        <button id="register-link-btn" class="link wallet-provider-btn" aria-label="Open in Xaman" aria-describedby="xaman-verification-note" hidden><img id="xaman-app-icon" src="assets/xaman-app-icon.png" alt=""></button>
+        <button id="register-wc-btn" class="wallet-provider-btn" aria-label="Connect with Joey Wallet" aria-describedby="joey-verification-note" hidden><img id="joey-app-icon" src="assets/joey-app-icon.png" alt=""></button>
+      </div>
+      <p><button id="register-retry-btn" class="primary" hidden>↻ Try again</button></p>
       <details id="wallet-verification-help" class="wallet-verification-help">
         <summary>How wallet verification works</summary>
         <div id="xaman-verification-note" class="wallet-verification-note">
