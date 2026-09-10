@@ -114,6 +114,68 @@ h2 {
   margin: 0 auto 14px;
   max-width: 36ch;
 }
+.wallet-onboarding-kicker {
+  margin: 0 0 8px;
+  color: var(--blue);
+  font-family: 'JetBrains Mono', monospace;
+  font-size: .7rem;
+  font-weight: 700;
+  letter-spacing: .12em;
+  text-transform: uppercase;
+}
+.wallet-onboarding-intro {
+  margin: 0 auto 18px;
+  max-width: 38ch;
+  color: #cfcdc7;
+  line-height: 1.5;
+}
+.wallet-onboarding-summary {
+  margin: 0 0 18px;
+  padding: 14px 16px;
+  border: 1px solid var(--line);
+  border-radius: 12px;
+  background: #111;
+  text-align: left;
+}
+.wallet-onboarding-summary h3,
+.wallet-verification-note h3 {
+  margin: 0 0 6px;
+  font-size: .95rem;
+}
+.wallet-onboarding-summary p,
+.wallet-onboarding-summary ul,
+.wallet-verification-note p {
+  margin: 0;
+  color: #cfcdc7;
+  font-size: .85rem;
+  line-height: 1.5;
+}
+.wallet-onboarding-summary ul {
+  margin-top: 8px;
+  padding-left: 20px;
+}
+.wallet-verification-help {
+  margin-top: 18px;
+  text-align: left;
+}
+.wallet-verification-help summary {
+  color: var(--blue);
+  cursor: pointer;
+  font-size: .85rem;
+  font-weight: 600;
+}
+.wallet-verification-note {
+  margin-top: 12px;
+  padding-left: 12px;
+  border-left: 2px solid var(--line);
+}
+.wallet-mainnet-note {
+  margin: 16px 0 0;
+  color: var(--muted);
+  font-size: .78rem;
+  line-height: 1.5;
+  text-align: left;
+}
 code {
   color: var(--green);
   word-break: break-all;
