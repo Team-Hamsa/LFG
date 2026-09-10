@@ -952,6 +952,74 @@ def test_handle_event_posts_successfully_with_image_and_media(tmp_path):
     assert sleeps == []
 
 
+def test_handle_event_prefers_share_card_render_when_enabled(tmp_path, monkeypatch):
+    """#477: with SHARE_CARD_RENDER_ENABLED on, the poster fetches the branded
+    card PNG from the local service first; the raw art URL is never touched."""
+    monkeypatch.setattr(config, "SHARE_CARD_RENDER_ENABLED", True)
+    x_api_fake = _FakeXApi(upload_media=["media-42"], post_tweet=["tweet-99"])
+    http = _FakeHttp(_FakeImageResponse(200, b"cardbytes"))
+    event = _mint_event(image_url="https://cdn.example.com/nft.png")
+    deps, _ = _make_deps(tmp_path, x_api_fake, http=http)
+    status = _run(bot.handle_event(event, deps))
+    assert status == "posted"
+    from surfaces.x_bot import config as x_config
+
+    assert http.get_calls == [f"{x_config.LFG_SERVICE_URL}/nft/1234/card.png"]
+    assert x_api_fake.upload_media_calls == [b"cardbytes"]
+    assert x_api_fake.post_tweet_calls[0][1] == "media-42"
+
+
+def test_handle_event_card_fetch_failure_falls_back_to_raw_art(tmp_path, monkeypatch):
+    """#477: a failed card download (after retries) falls back to the raw
+    CDN art, mirroring the card endpoint's own degrade path."""
+    monkeypatch.setattr(config, "SHARE_CARD_RENDER_ENABLED", True)
+    x_api_fake = _FakeXApi(upload_media=["media-7"], post_tweet=["tweet-7"])
+    http = _FakeHttp(
+        _FakeImageResponse(404, b""),  # 4xx: no retry on the card URL
+        _FakeImageResponse(200, b"rawbytes"),
+    )
+    event = _mint_event(image_url="https://cdn.example.com/nft.png")
+    deps, _ = _make_deps(tmp_path, x_api_fake, http=http)
+    status = _run(bot.handle_event(event, deps))
+    assert status == "posted"
+    from surfaces.x_bot import config as x_config
+
+    assert http.get_calls == [
+        f"{x_config.LFG_SERVICE_URL}/nft/1234/card.png",
+        "https://cdn.example.com/nft.png",
+    ]
+    assert x_api_fake.upload_media_calls == [b"rawbytes"]
+
+
+def test_handle_event_card_disabled_fetches_raw_art_only(tmp_path, monkeypatch):
+    """#477: flag off = today's behavior, raw art only."""
+    monkeypatch.setattr(config, "SHARE_CARD_RENDER_ENABLED", False)
+    x_api_fake = _FakeXApi(upload_media=["media-1"], post_tweet=["tweet-1"])
+    http = _FakeHttp(_FakeImageResponse(200, b"pngbytes"))
+    event = _mint_event(image_url="https://cdn.example.com/nft.png")
+    deps, _ = _make_deps(tmp_path, x_api_fake, http=http)
+    status = _run(bot.handle_event(event, deps))
+    assert status == "posted"
+    assert http.get_calls == ["https://cdn.example.com/nft.png"]
+    assert x_api_fake.upload_media_calls == [b"pngbytes"]
+
+
+def test_handle_event_all_image_sources_fail_degrades_to_text_only(tmp_path, monkeypatch):
+    """#477: card AND raw art both failing still posts text-only."""
+    monkeypatch.setattr(config, "SHARE_CARD_RENDER_ENABLED", True)
+    x_api_fake = _FakeXApi(post_tweet=["tweet-2"])
+    http = _FakeHttp(
+        _FakeImageResponse(404, b""),  # card: 4xx, no retry
+        _FakeImageResponse(404, b""),  # raw art: 4xx, no retry
+    )
+    event = _mint_event(image_url="https://cdn.example.com/nft.png")
+    deps, _ = _make_deps(tmp_path, x_api_fake, http=http)
+    status = _run(bot.handle_event(event, deps))
+    assert status == "posted"
+    assert x_api_fake.upload_media_calls == []
+    assert x_api_fake.post_tweet_calls[0][1] is None
+
+
 def test_rank_traits_by_rarity_orders_rarest_first_with_hat_head_mapping(tmp_path, monkeypatch):
     monkeypatch.setattr(config, "DB_PATH", str(tmp_path / "rarity_test.db"))
     conn = rarity.connect()
