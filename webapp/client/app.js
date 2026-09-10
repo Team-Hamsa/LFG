@@ -793,6 +793,7 @@ async function startWcSignin() {
     if (stale()) return;
     const mod = await loadWc();
     let wallet;
+    let myCancel = null;
     try {
       ({ wallet } = await mod.connect({
         projectId: wc.project_id, chain: wc.chain, metadata: wcMetadata(),
@@ -804,6 +805,7 @@ async function startWcSignin() {
           // api/loadWc awaits above): don't resurrect the abandoned panel —
           // cancel the pairing on the spot.
           if (stale()) { cancel(); return; }
+          myCancel = cancel;
           wcSigninCancel = cancel;
           renderSignin({
             sub: 'Scan with Joey Wallet and approve the connection.',
@@ -812,7 +814,9 @@ async function startWcSignin() {
         },
       }));
     } finally {
-      wcSigninCancel = null;
+      // Release the shared slot only if it still holds THIS flow's cancel —
+      // a newer flow may have stored its own by the time this one settles.
+      if (wcSigninCancel === myCancel) wcSigninCancel = null;
     }
     if (stale()) return;
     if (!wallet) throw new Error('Joey Wallet did not share an XRPL account.');
@@ -917,6 +921,7 @@ async function startLinkJoey() {
     // fresh: the point is to bring a DIFFERENT wallet than the session's, so
     // never silently reuse the pairing that is already signed in.
     let borrowed;
+    let myCancel = null;
     try {
       borrowed = await mod.connect({
         projectId: wc.project_id, chain: wc.chain, metadata: wcMetadata(), fresh: true,
@@ -924,6 +929,7 @@ async function startLinkJoey() {
         // arms or leaving the panel cancels via cancelWcSignin().
         onUri: (uri, cancel) => {
           if (stale()) { cancel(); return; } // user already left this arm
+          myCancel = cancel;
           wcSigninCancel = cancel;
           renderLink({
             sub: 'Scan with Joey Wallet using the OTHER wallet and approve the connection.',
@@ -932,7 +938,9 @@ async function startLinkJoey() {
         },
       });
     } finally {
-      wcSigninCancel = null;
+      // Only release the slot if it is still THIS flow's cancel (see the
+      // sign-in arm — a newer flow may have stored its own meanwhile).
+      if (wcSigninCancel === myCancel) wcSigninCancel = null;
     }
     borrowedTopic = borrowed.topic;
     const wallet = borrowed.wallet;
