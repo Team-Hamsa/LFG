@@ -31,16 +31,17 @@ def _uses_dotenv_loader(source: str, filename: str) -> bool:
     """AST-based check: does this module import or reference dotenv's loader?
 
     Catches ``from dotenv import load_dotenv`` in any layout (aliased,
-    parenthesized/multiline), and any ``dotenv.load_dotenv`` attribute access.
+    parenthesized/multiline) and any ``import dotenv`` (aliased or not) —
+    importing the module at all is enough to reach ``dotenv.load_dotenv``,
+    and no scanned module has a legitimate reason to import dotenv directly.
     """
     tree = ast.parse(source, filename=filename)
     for node in ast.walk(tree):
         if isinstance(node, ast.ImportFrom) and node.module == "dotenv":
             if any(alias.name == "load_dotenv" for alias in node.names):
                 return True
-        elif isinstance(node, ast.Attribute) and node.attr == "load_dotenv":
-            value = node.value
-            if isinstance(value, ast.Name) and value.id == "dotenv":
+        elif isinstance(node, ast.Import):
+            if any(alias.name.split(".")[0] == "dotenv" for alias in node.names):
                 return True
     return False
 
