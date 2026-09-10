@@ -778,7 +778,7 @@ async function startWcSignin() {
   const gen = ++signinGen;
   const stale = () => gen !== signinGen || !!el('register-panel').hidden;
   showPanel('register-panel');
-  renderSignin({ sub: 'Opening Joey Wallet…', spinner: true });
+  renderSignin({ sub: 'Opening Joey Wallet…', spinner: true, provider: 'joey' });
   // TODO(#473): when the Joey browser extension is present, sign in
   // through it instead of a WalletConnect pairing QR — provider.signIn()
   // (CAIP-122 message, or a canonical never-submittable 1-drop Payment for
@@ -800,6 +800,10 @@ async function startWcSignin() {
         // (picker / Xaman / retry) cancels the pending pairing via
         // cancelWcSignin(); "← Use a different wallet" is the way out.
         onUri: (uri, cancel) => {
+          // The URI can arrive after the user already switched arms (the
+          // api/loadWc awaits above): don't resurrect the abandoned panel —
+          // cancel the pairing on the spot.
+          if (stale()) { cancel(); return; }
           wcSigninCancel = cancel;
           renderSignin({
             sub: 'Scan with Joey Wallet and approve the connection.',
@@ -812,7 +816,7 @@ async function startWcSignin() {
     }
     if (stale()) return;
     if (!wallet) throw new Error('Joey Wallet did not share an XRPL account.');
-    renderSignin({ sub: 'Approve the sign-in request in Joey Wallet…', spinner: true });
+    renderSignin({ sub: 'Approve the sign-in request in Joey Wallet…', spinner: true, provider: 'joey' });
     const resp = await mod.signTx({
       chain: wc.chain, txJson: wcProofTx(wallet, start), autofill: true, submit: false,
     });
@@ -829,11 +833,11 @@ async function startWcSignin() {
   } catch (e) {
     if (stale()) return; // the user already moved on (picker / other arm)
     if (signDeliveryPure.isWcRejection(e)) {
-      renderSignin({ sub: 'Sign-in declined in Joey Wallet.', retry: true });
+      renderSignin({ sub: 'Sign-in declined in Joey Wallet.', retry: true, provider: 'joey' });
       return;
     }
     showError(e.message || String(e));
-    renderSignin({ sub: 'Could not sign in with Joey Wallet.', retry: true });
+    renderSignin({ sub: 'Could not sign in with Joey Wallet.', retry: true, provider: 'joey' });
   }
 }
 
@@ -849,6 +853,12 @@ let linkPollGen = 0;
 function renderLink({ sub, spinner, buttons, link, qrData, push, joey: joeyArm }) {
   const openBtn = el('link-link-btn');
   if (openBtn) openBtn.textContent = joeyArm ? 'Open in Joey Wallet ↗' : 'Open in Xaman ↗';
+  const qrImg = el('link-qr');
+  if (qrImg) {
+    qrImg.alt = joeyArm
+      ? 'Wallet-link pairing QR — scan with Joey Wallet'
+      : 'Wallet-link QR — scan with Xaman';
+  }
   const subEl = el('link-sub');
   if (subEl) subEl.textContent = sub;
   const spin = el('link-spinner');
@@ -913,6 +923,7 @@ async function startLinkJoey() {
         // Inline in the link panel, same slots as the Xaman arm. Switching
         // arms or leaving the panel cancels via cancelWcSignin().
         onUri: (uri, cancel) => {
+          if (stale()) { cancel(); return; } // user already left this arm
           wcSigninCancel = cancel;
           renderLink({
             sub: 'Scan with Joey Wallet using the OTHER wallet and approve the connection.',
