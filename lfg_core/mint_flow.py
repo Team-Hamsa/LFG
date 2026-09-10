@@ -1123,13 +1123,22 @@ async def update_scan_state(session: MintSession) -> None:
                 # finally. Idempotent with the dying task's own finally.
                 settle_headroom(session)
                 return
-            session.qr_scanned = s["opened"] or s["signed"]
+            # A payload that reached a terminal-not-signed state (Xaman payload
+            # expired after scan; Joey sign failed or was rejected) must NOT
+            # keep the session on the "approve in your wallet" spinner — drop
+            # qr_scanned so the client falls back to the pay panel, where the
+            # regen affordance mints a fresh payload (live smoke 2026-09-10:
+            # a dry Joey wallet's failed Payment wedged the mint on "Approve
+            # in Xaman" until cancel).
+            terminal_unsigned = bool(s.get("expired")) and not s["signed"]
+            session.qr_scanned = (s["opened"] or s["signed"]) and not terminal_unsigned
             session.payment_signed = bool(s["signed"])
             _capture_issued_token(session, s)
     elif session.state == OFFER_READY and session.accept_uuid and not session.accept_signed:
         s = await xumm_ops.get_payload_status(session.accept_uuid)
         if s:
-            session.accept_scanned = s["opened"] or s["signed"]
+            accept_terminal = bool(s.get("expired")) and not s["signed"]
+            session.accept_scanned = (s["opened"] or s["signed"]) and not accept_terminal
             session.accept_signed = s["signed"]
             _capture_issued_token(session, s)
 

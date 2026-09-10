@@ -1845,14 +1845,24 @@ function showFlow({ title, text, qrData, link, push, image, video, done, stage, 
 // The pay screen adapts to the backend's silently-detected payment path:
 // LFGO holders pay LFGO, everyone else pays XRP. Only the pill and the
 // price differ — the mechanics are never explained.
+// Wallet-aware wording for sign panels: the delivery link tells us whether
+// this request is driven by Joey (lfg-wc://) or Xaman.
+function signWalletName(link) {
+  return signDeliveryPure.isWcLink(link) ? 'Joey Wallet' : 'Xaman';
+}
+
 function mintPayView(s) {
   const xrp = s.pay_with === 'XRP';
   const pill = { kind: xrp ? 'xrp' : 'lfgo', text: `Paying with ${xrp ? 'XRP' : 'LFGO'}` };
-  // QR already scanned: drop it and show a spinner while Xaman finishes (issue #22)
+  const wname = signWalletName(s.payment_link);
+  const joeyPay = signDeliveryPure.isWcLink(s.payment_link);
+  // Request opened in the wallet: drop the QR and show a spinner while the
+  // wallet finishes (issue #22). Joey requests carry no QR — "opened" simply
+  // means the sign request reached the app.
   if (s.qr_scanned) {
     return {
-      title: '📲 Approve in Xaman',
-      text: 'QR scanned — approve the payment in Xaman and hang tight here.',
+      title: `📲 Approve in ${wname}`,
+      text: `Approve the payment in ${wname} and hang tight here.`,
       pill,
       spinner: true,
       stage: s.state,
@@ -1864,8 +1874,8 @@ function mintPayView(s) {
   return {
     title: '💰 Pay to build',
     text: signText(s.payment_push, xrp
-      ? `Pay ${s.pay_amount} XRP to mint your avatar — no trustline needed. Scan with Xaman, approve, and hang tight here.`
-      : `Pay ${s.pay_amount || 1} LFGO — burned on mint. Scan with Xaman, approve, and hang tight here.`),
+      ? `Pay ${s.pay_amount} XRP to mint your avatar — no trustline needed. ${joeyPay ? 'Approve in Joey Wallet' : 'Scan with Xaman, approve,'} and hang tight here.`
+      : `Pay ${s.pay_amount || 1} LFGO — burned on mint. ${joeyPay ? 'Approve in Joey Wallet' : 'Scan with Xaman, approve,'} and hang tight here.`),
     pill,
     qrData: s.payment_link,
     link: s.payment_link,
@@ -1931,8 +1941,8 @@ function pollMint(sessionId) {
       showFlow({
         title: `🎉 Minted! #${s.nft_number} is yours`,
         text: s.accept_scanned
-          ? 'Approve the transfer in Xaman to claim it to your wallet… Normal XRPL network fees and account reserve requirements may still apply.'
-          : signText(s.accept_push, 'Scan to accept the transfer and claim it to your wallet. Welcome to the job site. Normal XRPL network fees and account reserve requirements may still apply.'),
+          ? `Approve the transfer in ${signWalletName(s.accept_deeplink)} to claim it to your wallet… Normal XRPL network fees and account reserve requirements may still apply.`
+          : signText(s.accept_push, `${signDeliveryPure.isWcLink(s.accept_deeplink) ? 'Approve in Joey Wallet' : 'Scan'} to accept the transfer and claim it to your wallet. Welcome to the job site. Normal XRPL network fees and account reserve requirements may still apply.`),
         qrData: s.accept_scanned ? null : s.accept_deeplink,
         spinner: s.accept_scanned,
         link: s.accept_deeplink,
