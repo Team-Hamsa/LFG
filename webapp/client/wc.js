@@ -83,11 +83,19 @@ export async function release(borrowedTopic) {
 //          wallet-link flow needs the user to bring a DIFFERENT wallet. That
 //          pairing is BORROWED, never adopted: pass its topic to signTx and
 //          hand it to release() when done.
-//   onUri: called with the raw `wc:` pairing URI when a NEW pairing is
-//          needed (skipped when an existing session is re-attached). The
-//          caller renders it — app.js draws the branded /api/qr.png QR and
-//          Joey deep link; the stock Reown wallet modal is gone (#447
+//   onUri: called with (uri, cancel) when a NEW pairing is needed (skipped
+//          when an existing session is re-attached). The caller renders the
+//          raw `wc:` pairing URI — app.js draws the branded /api/qr.png QR
+//          and Joey deep link; the stock Reown wallet modal is gone (#447
 //          follow-up: its Xaman-styled modal QR confused Joey users).
+//          Invoking `cancel` rejects this connect() with a `.cancelled`
+//          error immediately, and a wallet approval landing AFTER the cancel
+//          is disconnected in the background — it must never adopt (a late
+//          sign-in over whatever the user switched to) or be signed against.
+export function isCancellation(e) {
+  return !!(e && e.cancelled);
+}
+
 export async function connect({ projectId, chain, metadata, fresh = false, onUri } = {}) {
   const c = await ensureClient({ projectId, metadata });
   if (!fresh) {
@@ -99,8 +107,31 @@ export async function connect({ projectId, chain, metadata, fresh = false, onUri
       xrpl: { chains: [chain], methods: [XRPL_METHOD], events: [] },
     },
   });
-  if (uri && onUri) onUri(uri);
-  const session = await approval();
+  let cancelReject = null;
+  let cancelledFlag = false;
+  const cancelled = new Promise((_, reject) => { cancelReject = reject; });
+  const cancel = () => {
+    cancelledFlag = true;
+    cancelReject(Object.assign(new Error('Joey Wallet pairing cancelled'), { cancelled: true }));
+  };
+  if (uri && onUri) onUri(uri, cancel);
+  let session;
+  try {
+    session = await Promise.race([approval(), cancelled]);
+  } catch (e) {
+    if (cancelledFlag) {
+      // The QR may already have been scanned: tear down a session that the
+      // wallet approves after the cancel, so it can never be signed into.
+      approval().then(
+        (s) => c.disconnect({
+          topic: s.topic,
+          reason: { code: 6000, message: 'user cancelled' },
+        }).catch(() => { /* already gone */ }),
+        () => { /* never approved — nothing to tear down */ },
+      );
+    }
+    throw e;
+  }
   return fresh ? borrow(session) : adopt(session);
 }
 

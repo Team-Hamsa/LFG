@@ -181,6 +181,7 @@ function joeyDeepLink(uri) {
 }
 
 let wcQrOnCancel = null;
+let wcQrPrevFocus = null;
 
 function showWcQr(uri, onCancel) {
   wcQrOnCancel = onCancel || null;
@@ -193,12 +194,48 @@ function showWcQr(uri, onCancel) {
     link: joeyDeepLink(uri), qrData: uri,
   });
   overlay.hidden = false;
+  // aria-modal alone moves no focus: park it on Cancel and keep it inside
+  // (wcQrKeydown traps Tab / maps Escape) until the dialog closes.
+  wcQrPrevFocus = document.activeElement;
+  const cancelBtn = el('wc-qr-cancel-btn');
+  if (cancelBtn) cancelBtn.focus();
 }
 
 function hideWcQr() {
   wcQrOnCancel = null;
   const overlay = el('wc-qr-overlay');
   if (overlay) overlay.hidden = true;
+  const prev = wcQrPrevFocus;
+  wcQrPrevFocus = null;
+  if (prev && prev.focus && document.contains(prev)) prev.focus();
+}
+
+// Focus trap + Escape for the pairing dialog; registered once at init and a
+// no-op while the overlay is hidden.
+function wcQrKeydown(e) {
+  const overlay = el('wc-qr-overlay');
+  if (!overlay || overlay.hidden) return;
+  if (e.key === 'Escape') {
+    e.preventDefault();
+    const cb = wcQrOnCancel;
+    hideWcQr();
+    if (cb) cb();
+    return;
+  }
+  if (e.key !== 'Tab') return;
+  const focusables = Array.from(
+    overlay.querySelectorAll('button:not([hidden]), a[href]'),
+  );
+  if (!focusables.length) return;
+  const first = focusables[0];
+  const last = focusables[focusables.length - 1];
+  if (!overlay.contains(document.activeElement)) {
+    e.preventDefault(); first.focus();
+  } else if (e.shiftKey && document.activeElement === first) {
+    e.preventDefault(); last.focus();
+  } else if (!e.shiftKey && document.activeElement === last) {
+    e.preventDefault(); first.focus();
+  }
 }
 
 // CDN images are cross-origin and blocked by the Activity's CSP, so they are
@@ -670,13 +707,14 @@ async function wcSign(id) {
     const mod = await loadWc();
     if (!mod.activeWallet()) {
       // The pairing was lost (reload, wallet-side disconnect) — re-attach or
-      // ask for a fresh one before there is anything to sign. Cancel just
-      // hides the QR; the pending pairing expires on its own and this run
-      // fails into the "Retry Joey" affordance like any other connect error.
+      // ask for a fresh one before there is anything to sign. Cancel rejects
+      // the connect() immediately, so this run fails straight into the
+      // "Retry Joey" affordance instead of sitting in wcInFlight until the
+      // pairing URI expires.
       try {
         await mod.connect({
           projectId: wc.project_id, chain: wc.chain, metadata: wcMetadata(),
-          onUri: (uri) => showWcQr(uri, hideWcQr),
+          onUri: (uri, cancel) => showWcQr(uri, cancel),
         });
       } finally {
         hideWcQr();
@@ -747,7 +785,7 @@ async function startWcSignin() {
     try {
       ({ wallet } = await mod.connect({
         projectId: wc.project_id, chain: wc.chain, metadata: wcMetadata(),
-        onUri: (uri) => showWcQr(uri, () => { hideWcQr(); showSigninPicker(); }),
+        onUri: (uri, cancel) => showWcQr(uri, () => { cancel(); showSigninPicker(); }),
       }));
     } finally {
       hideWcQr();
@@ -850,9 +888,9 @@ async function startLinkJoey() {
     try {
       borrowed = await mod.connect({
         projectId: wc.project_id, chain: wc.chain, metadata: wcMetadata(), fresh: true,
-        onUri: (uri) => showWcQr(uri, () => {
-          hideWcQr();
-          linkPollGen++; // abandon this arm; a late approval is released below
+        onUri: (uri, cancel) => showWcQr(uri, () => {
+          cancel(); // rejects connect(); a late wallet approval is torn down in wc.js
+          linkPollGen++;
           renderLink({ sub: 'Prove a second wallet is yours — sign in with it, then it can receive your BRIX.', buttons: true });
         }),
       });
@@ -2749,8 +2787,13 @@ async function startSignin() {
 
 function pollSignin(uuid) {
   clearTimeout(signinPollTimer);
+  // Capture the generation: the user may return to the picker and start the
+  // Joey arm while a tick's request is in flight — a late "signed" answer
+  // must not install the abandoned Xaman session over the new flow.
+  const gen = signinGen;
+  const stale = () => gen !== signinGen || el('register-panel').hidden;
   const tick = async () => {
-    if (el('register-panel').hidden) return; // user navigated away
+    if (stale()) return; // user navigated away or switched arms
     let s;
     try {
       s = await api(`/api/signin/${uuid}`);
@@ -2758,6 +2801,7 @@ function pollSignin(uuid) {
       signinPollTimer = setTimeout(tick, 3000); // transient; keep polling
       return;
     }
+    if (stale()) return;
     if (s.state === 'signed') {
       me.wallet = s.wallet;
       showMintHome();
@@ -2800,8 +2844,12 @@ async function startWebSignin() {
 
 function pollWebSignin(uuid) {
   clearTimeout(signinPollTimer);
+  // Same staleness rule as pollSignin: a late "signed" answer from an
+  // abandoned Xaman payload must not log in over the picker or the Joey arm.
+  const gen = signinGen;
+  const stale = () => gen !== signinGen || el('register-panel').hidden;
   const tick = async () => {
-    if (el('register-panel').hidden) return; // user navigated away
+    if (stale()) return; // user navigated away or switched arms
     let s;
     try {
       s = await api(`/api/web/signin/${uuid}`);
@@ -2809,6 +2857,7 @@ function pollWebSignin(uuid) {
       signinPollTimer = setTimeout(tick, 3000); // transient; keep polling
       return;
     }
+    if (stale()) return;
     if (s.state === 'signed') {
       sessionToken = s.session_token;
       try { localStorage.setItem(WEB_SESSION_KEY, s.session_token); } catch (_) { /* private mode */ }
@@ -5824,6 +5873,7 @@ async function main() {
   if (switchBtn) switchBtn.onclick = () => showSigninPicker();
   const wcQrCancel = el('wc-qr-cancel-btn');
   if (wcQrCancel) wcQrCancel.onclick = () => { const cb = wcQrOnCancel; hideWcQr(); if (cb) cb(); };
+  document.addEventListener('keydown', wcQrKeydown);
   const linkBtn = el('link-wallet-btn');
   if (linkBtn) linkBtn.onclick = () => startLinkWallet();
   const linkJoey = el('link-joey-btn');
