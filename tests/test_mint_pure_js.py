@@ -529,5 +529,5 @@ def test_paid_lfgo_xrp_view_snapshot_is_unchanged():
         # #142: mintPayView now threads `push` into showFlow for the
         # mobile-primary deep-link delivery decision. #447: wallet-aware copy
         # — "Approve in Joey Wallet" when the delivery link is lfg-wc://.
-        == "c5e1ab037d8d34f179b5c656a9577dd42efe37b4a6b03b740c670abf31076a4c"
+        == "9c2de7b075dbc875f75f3e1fff8d80e623fbaf04aea36f2eaadda75ac3a14b67"
     )

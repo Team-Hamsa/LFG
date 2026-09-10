@@ -1855,6 +1855,7 @@ function mintPayView(s) {
   const xrp = s.pay_with === 'XRP';
   const pill = { kind: xrp ? 'xrp' : 'lfgo', text: `Paying with ${xrp ? 'XRP' : 'LFGO'}` };
   const wname = signWalletName(s.payment_link);
+  const joeyPay = signDeliveryPure.isWcLink(s.payment_link);
   // Request opened in the wallet: drop the QR and show a spinner while the
   // wallet finishes (issue #22). Joey requests carry no QR — "opened" simply
   // means the sign request reached the app.
@@ -1873,8 +1874,8 @@ function mintPayView(s) {
   return {
     title: '💰 Pay to build',
     text: signText(s.payment_push, xrp
-      ? `Pay ${s.pay_amount} XRP to mint your avatar — no trustline needed. Approve in ${wname} and hang tight here.`
-      : `Pay ${s.pay_amount || 1} LFGO — burned on mint. Approve in ${wname} and hang tight here.`),
+      ? `Pay ${s.pay_amount} XRP to mint your avatar — no trustline needed. ${joeyPay ? 'Approve in Joey Wallet' : 'Scan with Xaman, approve,'} and hang tight here.`
+      : `Pay ${s.pay_amount || 1} LFGO — burned on mint. ${joeyPay ? 'Approve in Joey Wallet' : 'Scan with Xaman, approve,'} and hang tight here.`),
     pill,
     qrData: s.payment_link,
     link: s.payment_link,
@@ -1941,7 +1942,7 @@ function pollMint(sessionId) {
         title: `🎉 Minted! #${s.nft_number} is yours`,
         text: s.accept_scanned
           ? `Approve the transfer in ${signWalletName(s.accept_deeplink)} to claim it to your wallet… Normal XRPL network fees and account reserve requirements may still apply.`
-          : signText(s.accept_push, 'Scan to accept the transfer and claim it to your wallet. Welcome to the job site. Normal XRPL network fees and account reserve requirements may still apply.'),
+          : signText(s.accept_push, `${signDeliveryPure.isWcLink(s.accept_deeplink) ? 'Approve in Joey Wallet' : 'Scan'} to accept the transfer and claim it to your wallet. Welcome to the job site. Normal XRPL network fees and account reserve requirements may still apply.`),
         qrData: s.accept_scanned ? null : s.accept_deeplink,
         spinner: s.accept_scanned,
         link: s.accept_deeplink,
