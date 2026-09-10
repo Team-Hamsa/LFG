@@ -170,14 +170,25 @@ function qrUrl(data) {
 }
 
 // --- Branded Joey Wallet pairing overlay (#447) --------------------------
-// Replaces the stock WalletConnect modal: wc.js hands the raw `wc:` pairing
-// URI to whoever passed connect() an onUri callback, and this overlay renders
-// it as our own branded QR (/api/qr.png) plus Joey's deep link. The deep-link
+// Used ONLY for the mid-transaction lost-pairing re-attach in wcSign, which
+// can fire over any panel; sign-in and wallet-link render their pairing QR
+// INLINE in their own panels (renderSignin/renderLink), same slots as Xaman. The deep-link
 // wrapper is the WalletConnect-standard construction on Joey's registered
 // `joey://` native scheme (its explorer listing; Joey has no desktop app, so
 // on desktop the QR is the whole story).
 function joeyDeepLink(uri) {
   return `joey://wc?uri=${encodeURIComponent(uri)}`;
+}
+
+// Pending Joey sign-in pairing's cancel: invoked when the user switches
+// arms (picker, Xaman, retry) so the abandoned connect() rejects at once
+// and a late wallet approval is torn down inside wc.js.
+let wcSigninCancel = null;
+
+function cancelWcSignin() {
+  const cancel = wcSigninCancel;
+  wcSigninCancel = null;
+  if (cancel) cancel();
 }
 
 let wcQrOnCancel = null;
@@ -785,10 +796,19 @@ async function startWcSignin() {
     try {
       ({ wallet } = await mod.connect({
         projectId: wc.project_id, chain: wc.chain, metadata: wcMetadata(),
-        onUri: (uri, cancel) => showWcQr(uri, () => { cancel(); showSigninPicker(); }),
+        // Inline, same slots as the Xaman flow — no modal. Leaving this arm
+        // (picker / Xaman / retry) cancels the pending pairing via
+        // cancelWcSignin(); "← Use a different wallet" is the way out.
+        onUri: (uri, cancel) => {
+          wcSigninCancel = cancel;
+          renderSignin({
+            sub: 'Scan with Joey Wallet and approve the connection.',
+            link: joeyDeepLink(uri), qrData: uri, provider: 'joey',
+          });
+        },
       }));
     } finally {
-      hideWcQr();
+      wcSigninCancel = null;
     }
     if (stale()) return;
     if (!wallet) throw new Error('Joey Wallet did not share an XRPL account.');
@@ -826,7 +846,9 @@ async function startWcSignin() {
 let linkPollTimer = null;
 let linkPollGen = 0;
 
-function renderLink({ sub, spinner, buttons, link, qrData, push }) {
+function renderLink({ sub, spinner, buttons, link, qrData, push, joey: joeyArm }) {
+  const openBtn = el('link-link-btn');
+  if (openBtn) openBtn.textContent = joeyArm ? 'Open in Joey Wallet ↗' : 'Open in Xaman ↗';
   const subEl = el('link-sub');
   if (subEl) subEl.textContent = sub;
   const spin = el('link-spinner');
@@ -888,14 +910,18 @@ async function startLinkJoey() {
     try {
       borrowed = await mod.connect({
         projectId: wc.project_id, chain: wc.chain, metadata: wcMetadata(), fresh: true,
-        onUri: (uri, cancel) => showWcQr(uri, () => {
-          cancel(); // rejects connect(); a late wallet approval is torn down in wc.js
-          linkPollGen++;
-          renderLink({ sub: 'Prove a second wallet is yours — sign in with it, then it can receive your BRIX.', buttons: true });
-        }),
+        // Inline in the link panel, same slots as the Xaman arm. Switching
+        // arms or leaving the panel cancels via cancelWcSignin().
+        onUri: (uri, cancel) => {
+          wcSigninCancel = cancel;
+          renderLink({
+            sub: 'Scan with Joey Wallet using the OTHER wallet and approve the connection.',
+            link: joeyDeepLink(uri), qrData: uri, joey: true,
+          });
+        },
       });
     } finally {
-      hideWcQr();
+      wcSigninCancel = null;
     }
     borrowedTopic = borrowed.topic;
     const wallet = borrowed.wallet;
@@ -927,6 +953,7 @@ async function startLinkJoey() {
 }
 
 async function startLinkXaman() {
+  cancelWcSignin(); // a pending Joey pairing must not survive an arm switch
   const gen = ++linkPollGen;
   const stale = () => gen !== linkPollGen || !!(el('link-panel') || {}).hidden;
   renderLink({ sub: 'Setting up the Xaman sign-in…', spinner: true });
@@ -2724,20 +2751,37 @@ let signinPollTimer = null;
 // abandons instead of logging in over whatever the user switched to.
 let signinGen = 0;
 
-function renderSignin({ sub, spinner, qrLink, retry, picker }) {
+// The register panel's one open/deep-link button serves whichever provider
+// flow is live: same slots, swapped branding (icon, accessible name, note).
+function setSigninProviderBranding(provider) {
+  const joey = provider === 'joey';
+  const btn = el('register-link-btn');
+  if (btn) {
+    btn.setAttribute('aria-label', joey ? 'Open in Joey Wallet' : 'Open in Xaman');
+    btn.setAttribute('aria-describedby', joey ? 'joey-verification-note' : 'xaman-verification-note');
+  }
+  const icon = el('xaman-app-icon');
+  if (icon) icon.src = joey ? 'assets/joey-app-icon.png' : 'assets/xaman-app-icon.png';
+  const qr = el('register-qr');
+  if (qr) qr.alt = joey ? 'Pairing QR — scan with Joey Wallet' : 'Sign-in QR — scan with Xaman';
+}
+
+function renderSignin({ sub, spinner, qrLink, link, qrData, retry, picker, provider }) {
   el('register-sub').textContent = sub;
   el('register-spinner').hidden = !spinner;
   // Wallet picker (no payload exists yet) vs a live provider flow. The
   // picker nodes are null-guarded: a cached older index.html has neither.
   const pick = el('register-picker');
   if (pick) pick.hidden = !picker;
-  // #142: same delivery decision as every other sign screen — the sign-in QR
-  // data IS the deep link.
+  setSigninProviderBranding(provider || 'xaman');
+  // #142: same delivery decision as every other sign screen. For Xaman the
+  // sign-in QR data IS the deep link (qrLink); the Joey pairing passes them
+  // separately (qrData = raw wc: URI, link = joey:// wrapper).
   applySignDelivery({
     qrEl: el('register-qr'),
     linkBtn: el('register-link-btn'),
     toggleBtn: el('register-qr-toggle'),
-    link: qrLink, qrData: qrLink,
+    link: link || qrLink, qrData: qrData || qrLink,
   });
   el('register-retry-btn').hidden = !retry;
   // The way back to the picker, shown only mid-flow and only where the
@@ -2756,6 +2800,7 @@ function signinPickerArmed() {
 function showSigninPicker() {
   clearTimeout(signinPollTimer);
   signinGen++; // invalidate any in-flight Joey pairing adoption
+  cancelWcSignin();
   showPanel('register-panel');
   renderSignin({ sub: 'Select wallet to connect.', picker: true });
 }
@@ -2770,6 +2815,7 @@ function startSigninFlow() {
 async function startSignin() {
   clearTimeout(signinPollTimer);
   signinGen++; // a pending Joey pairing must not adopt over this flow
+  cancelWcSignin();
   showPanel('register-panel');
   renderSignin({ sub: 'Setting up your Xaman sign-in…', spinner: true });
   try {
@@ -2827,6 +2873,7 @@ function pollSignin(uuid) {
 async function startWebSignin() {
   clearTimeout(signinPollTimer);
   signinGen++; // a pending Joey pairing must not adopt over this flow
+  cancelWcSignin();
   showPanel('register-panel');
   renderSignin({ sub: 'Setting up your Xaman sign-in…', spinner: true });
   try {
@@ -5881,7 +5928,7 @@ async function main() {
   const linkXaman = el('link-xaman-btn');
   if (linkXaman) linkXaman.onclick = () => startLinkXaman();
   const linkBack = el('link-back-btn');
-  if (linkBack) linkBack.onclick = () => { clearTimeout(linkPollTimer); linkPollGen++; showMintHome(); };
+  if (linkBack) linkBack.onclick = () => { clearTimeout(linkPollTimer); linkPollGen++; cancelWcSignin(); showMintHome(); };
   el('flow-done-btn').onclick = () => { showMintHome(); };
   el('bulk-done-btn').onclick = () => { clearTimeout(bulkPollTimer); bulkPollGen++; currentBulkId = null; showMintHome(); };
   el('offers-btn').onclick = () => openOffers();
