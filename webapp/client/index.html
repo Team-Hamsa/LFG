@@ -24,7 +24,7 @@
   <meta name="twitter:description" content="Mint, dress up, and trade LFG NFTs on the XRP Ledger.">
   <meta name="twitter:image" content="https://build.letseffinggo.com/assets/og-card.png">
   <link rel="stylesheet" href="fonts/fonts.css">
-  <link rel="stylesheet" href="style.v27.css">
+  <link rel="stylesheet" href="style.v28.css">
 </head>
 <body>
   <main id="app">
@@ -121,6 +121,10 @@
         <div class="mint-row">
           <button id="mint-btn" class="primary big">⛏️ Mint</button>
         </div>
+        <!-- Sponsored free-mint preview: filled from
+             /api/mint/sponsored/eligibility on each home landing, hidden
+             unless there is something worth advertising (see freeMintBadge). -->
+        <p id="free-mint-badge" class="free-mint-badge" hidden></p>
         <button id="swap-btn" class="secondary">🏗️ Build</button>
         <button id="swapper-btn" class="secondary">🔁 Swap</button>
         <button id="market-btn" class="secondary">🛒 Trade</button>
@@ -470,6 +474,6 @@
        Telegram (window.Telegram stays undefined); loaded BEFORE app.js so the
        dual-mode boot can detect the Telegram context. -->
   <script src="telegram-web-app.js"></script>
-  <script type="module" src="app.js?v=85"></script>
+  <script type="module" src="app.js?v=86"></script>
 </body>
 </html>

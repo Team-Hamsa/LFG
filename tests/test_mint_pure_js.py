@@ -531,3 +531,98 @@ def test_paid_lfgo_xrp_view_snapshot_is_unchanged():
         # — "Approve in Joey Wallet" when the delivery link is lfg-wc://.
         == "9c2de7b075dbc875f75f3e1fff8d80e623fbaf04aea36f2eaadda75ac3a14b67"
     )
+
+
+# ---------------------------------------------------------------------------
+# freeMintBadge(resp) -> {show, text}
+#   resp: body of GET /api/mint/sponsored/eligibility ({eligible, reason}) or
+#         null when the fetch failed. The badge only ever ADVERTISES a live,
+#         claimable (or already-reserved) free mint; refusals and unknowns
+#         hide it — the reservation at mint start remains the verdict.
+# ---------------------------------------------------------------------------
+
+
+def test_free_mint_badge_shows_when_eligible():
+    out = run_js("M.freeMintBadge({eligible: true, reason: 'eligible'})")
+    assert out["show"] is True
+    assert "Free mint" in out["text"]
+
+
+def test_free_mint_badge_shows_own_live_reservation():
+    out = run_js("M.freeMintBadge({eligible: true, reason: 'reserved'})")
+    assert out["show"] is True
+    assert "reserved" in out["text"].lower()
+
+
+def test_free_mint_badge_tells_consumed_and_full():
+    consumed = run_js("M.freeMintBadge({eligible: false, reason: 'already_consumed'})")
+    assert consumed["show"] is True and "claimed" in consumed["text"].lower()
+    full = run_js("M.freeMintBadge({eligible: false, reason: 'at_capacity'})")
+    assert full["show"] is True and "gone" in full["text"].lower()
+
+
+def test_free_mint_badge_hides_off_unknown_and_refusals():
+    for reason in ("campaign_off", "campaign_expired", "eligibility_unavailable", "ineligible"):
+        assert (
+            run_js(f"M.freeMintBadge({{eligible: false, reason: '{reason}'}})")["show"] is False
+        ), reason
+    assert run_js("M.freeMintBadge(null)")["show"] is False
+
+
+def test_app_js_refreshes_free_mint_badge_on_home():
+    src = open(APP_JS).read()
+    home = _function_source(src, "showMintHome")
+    assert "refreshFreeMintBadge()" in home
+    assert "/api/mint/sponsored/eligibility" in _function_source(src, "refreshFreeMintBadge")
+    assert 'id="free-mint-badge"' in open(os.path.join(ROOT, "webapp/client/index.html")).read()
+
+
+def test_free_mint_badge_refresh_discards_stale_responses():
+    """Greptile #472: a slow earlier home-entry fetch must not overwrite the
+    badge rendered by a later one — the refresh carries a generation token."""
+    src = open(APP_JS).read()
+    body = _function_source(src, "refreshFreeMintBadge")
+    assert "freeMintBadgeGen" in body
+    assert "if (gen !== freeMintBadgeGen) return;" in body
+
+
+def test_free_mint_badge_refresh_out_of_order_responses_keep_the_latest():
+    """CodeRabbit #472: run the REAL refreshFreeMintBadge under Node with
+    stubbed `el`/`api`. Two refreshes start; the SECOND response resolves
+    first, then the first (stale) one — the badge must keep the second."""
+    src = open(APP_JS).read()
+    fn = (
+        "async function refreshFreeMintBadge"
+        + _function_source(src, "refreshFreeMintBadge")
+        + "\n}"
+    )
+    script = (
+        f"import * as mintPure from {json.dumps(MODULE_REL)};\n"
+        "let freeMintBadgeGen = 0;\n"
+        "const badge = { hidden: true, textContent: '' };\n"
+        "const el = () => badge;\n"
+        "const pending = [];\n"
+        "const api = () => new Promise((resolve) => pending.push(resolve));\n"
+        f"{fn}\n"
+        "const first = refreshFreeMintBadge();\n"
+        "const second = refreshFreeMintBadge();\n"
+        "pending[1]({eligible: false, reason: 'at_capacity'});\n"
+        "await second;\n"
+        "const afterSecond = badge.textContent;\n"
+        "pending[0]({eligible: true, reason: 'eligible'});\n"
+        "await first;\n"
+        "console.log(JSON.stringify({afterSecond, final: badge.textContent, hidden: badge.hidden}));\n"
+    )
+    proc = subprocess.run(
+        [NODE, "--input-type=module"],
+        input=script,
+        capture_output=True,
+        text=True,
+        cwd=ROOT,
+        timeout=15,
+    )
+    assert proc.returncode == 0, proc.stderr
+    out = json.loads(proc.stdout)
+    assert "gone" in out["afterSecond"].lower()
+    assert out["final"] == out["afterSecond"]
+    assert out["hidden"] is False

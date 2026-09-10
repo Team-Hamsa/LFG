@@ -73,6 +73,25 @@ export function qtyMintTarget(selectedQty) {
   return selectedQty > 1 ? 'bulk' : 'single';
 }
 
+// Home-screen free-mint badge from GET /api/mint/sponsored/eligibility
+// ({eligible, reason}, or null when the fetch failed). The preview runs the
+// same gates as the reservation, but it is advisory: the badge only ever
+// ADVERTISES a claimable / already-reserved free mint (plus the two honest
+// "you already did" / "all gone" states). A campaign that is off, an unknown
+// verdict, and a sybil refusal all hide it — never announce a refusal the
+// mint itself would state, and never leak the gate outcome pre-mint.
+export function freeMintBadge(resp) {
+  const hidden = { show: false, text: '' };
+  if (!resp) return hidden;
+  if (resp.eligible && resp.reason === 'reserved') {
+    return { show: true, text: '🎁 A free mint is reserved for this wallet' };
+  }
+  if (resp.eligible) return { show: true, text: '🎁 Free mint available for this wallet' };
+  if (resp.reason === 'already_consumed') return { show: true, text: '🎁 You’ve already claimed your free mint' };
+  if (resp.reason === 'at_capacity') return { show: true, text: '🎁 Free mints are all gone for this campaign' };
+  return hidden;
+}
+
 // Sponsored sessions skip the normal LFGO/XRP payment request, but the user
 // still needs to accept the completed NFT transfer in Xaman.
 export function sponsoredMintCopy(session) {
