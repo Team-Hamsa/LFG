@@ -304,6 +304,17 @@ def test_preview_still_reports_own_reservation_after_campaign_stops_or_expires(t
     assert other.reason == "campaign_off"
 
 
+def test_preview_reports_campaign_expired_for_a_wallet_without_a_promise(tmp_path):
+    """CodeRabbit #472: the expiry branch on its own — an ACTIVE campaign
+    aged past enabled_until, queried by a wallet holding no reservation."""
+    db, history = _paths(tmp_path)
+    started = sm.start_campaign(db, network="mainnet", actor="42", now=100)
+    result = sm.preview_eligibility(
+        db, history, network="mainnet", wallet="rLate", now=started.enabled_until + 1
+    )
+    assert (result.sponsored, result.reason) == (False, "campaign_expired")
+
+
 def test_eligibility_endpoint_fails_closed_on_unresolved_preflight(_service_env, monkeypatch):
     _live_campaign(_service_env, monkeypatch)
 
