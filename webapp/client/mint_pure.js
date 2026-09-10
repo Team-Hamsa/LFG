@@ -84,7 +84,7 @@ export function freeMintBadge(resp) {
   const hidden = { show: false, text: '' };
   if (!resp) return hidden;
   if (resp.eligible && resp.reason === 'reserved') {
-    return { show: true, text: '🎁 A free mint is reserved for you — hit Mint to finish it' };
+    return { show: true, text: '🎁 A free mint is reserved for this wallet' };
   }
   if (resp.eligible) return { show: true, text: '🎁 Free mint available for this wallet' };
   if (resp.reason === 'already_consumed') return { show: true, text: '🎁 You’ve already claimed your free mint' };
