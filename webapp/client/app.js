@@ -9,7 +9,7 @@
 // money math, and wizard-step labels. Kept in a separate module so they're
 // unit-testable under Node (tests/test_market_pure_js.py) without a browser
 // — see webapp/client/market_pure.js's own header for the full rationale.
-import * as marketPure from './market_pure.js?v=25';
+import * as marketPure from './market_pure.js?v=26';
 // Mint-flow pure helpers (issue #141): the cancel-outcome decision lives in
 // its own module so it's Node-testable too (tests/test_mint_pure_js.py).
 import * as mintPure from './mint_pure.js?v=24';
@@ -4532,7 +4532,7 @@ const MARKET_STATUS_PATH = {
   trait_list: (id) => `/api/market/trait/list/${id}`,
 };
 
-const marketState = { tab: 'browse', kind: 'character', offset: 0 };
+const marketState = { tab: 'browse', kind: 'character', offset: 0, sortTouched: false };
 let marketPendingItem = null; // the character/trait/closet-asset the list-form panel is acting on
 let marketFlowTimer = null;
 // Generation counter (mirrors pollMint's pollGen): clearTimeout alone cannot
@@ -5726,8 +5726,11 @@ async function main() {
     if (!btn || btn.dataset.kind === marketState.kind) return;
     marketState.kind = btn.dataset.kind;
     highlightTabs('market-kind', 'kind', marketState.kind);
+    // Per-kind default sort until the user picks one (market_pure.resolveMarketSort).
+    el('market-sort').value = marketPure.resolveMarketSort(marketState.kind, marketState.sortTouched, el('market-sort').value);
     loadMarketBrowse();
   });
+  el('market-sort').onchange = () => { marketState.sortTouched = true; };
   el('market-filter-apply').onclick = () => loadMarketBrowse();
   el('market-include-external').onchange = () => loadMarketBrowse();
   el('market-mine-only').onchange = () => loadMarketBrowse();
