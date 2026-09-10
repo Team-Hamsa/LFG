@@ -112,28 +112,24 @@ def test_non_https_redirect_is_refused():
 
 
 def test_main_rejects_invalid_interval(monkeypatch):
-    monkeypatch.setattr(hc, "load_dotenv", lambda *a, **k: None)
     monkeypatch.setenv("FUNNEL_HEALTH_INTERVAL", "0")
     with pytest.raises(ValueError, match="FUNNEL_HEALTH_INTERVAL"):
         hc.main()
 
 
 def test_main_rejects_plaintext_url(monkeypatch):
-    monkeypatch.setattr(hc, "load_dotenv", lambda *a, **k: None)
     monkeypatch.setenv("FUNNEL_HEALTH_URL", "http://example.invalid/health")
     with pytest.raises(ValueError, match="https://"):
         hc.main()
 
 
 def test_main_rejects_https_url_without_host(monkeypatch):
-    monkeypatch.setattr(hc, "load_dotenv", lambda *a, **k: None)
     monkeypatch.setenv("FUNNEL_HEALTH_URL", "https:///health")
     with pytest.raises(ValueError, match="https:// URL with a host"):
         hc.main()
 
 
 def test_main_rejects_invalid_port(monkeypatch):
-    monkeypatch.setattr(hc, "load_dotenv", lambda *a, **k: None)
     monkeypatch.setenv("FUNNEL_HEALTH_URL", "https://example.invalid:notaport/health")
     with pytest.raises(ValueError, match="FUNNEL_HEALTH_URL is invalid"):
         hc.main()

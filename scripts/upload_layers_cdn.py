@@ -8,9 +8,12 @@ import os
 import sys
 
 import aiohttp
-from dotenv import load_dotenv
 
-load_dotenv()
+sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
+
+from lfg_core.envload import load_dotenv_unless_skipped  # noqa: E402
+
+load_dotenv_unless_skipped()
 BASE = (os.getenv("BUNNY_CDN_BASE_URL") or "").rstrip("/")
 ZONE = os.getenv("BUNNY_CDN_STORAGE_ZONE")
 KEY = os.getenv("BUNNY_CDN_ACCESS_KEY")

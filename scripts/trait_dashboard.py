@@ -23,9 +23,9 @@ from aiohttp import web
 REPO_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
 sys.path.insert(0, REPO_ROOT)
 
-from dotenv import load_dotenv  # noqa: E402
+from lfg_core.envload import load_dotenv_unless_skipped  # noqa: E402
 
-load_dotenv()
+load_dotenv_unless_skipped()
 
 from lfg_core import config, rarity, shop  # noqa: E402
 from lfg_core.db_path import app_db_path  # noqa: E402
