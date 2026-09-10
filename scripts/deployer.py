@@ -73,6 +73,7 @@ STACKS: dict[str, StackConfig] = {
             "lfg-telegram",
             "lfg-index-mainnet",
             "lfg-funnel-health",
+            "lfg-x",
         ),
         pip=f"{HOME}/LFG/.venv/bin/pip",
     ),

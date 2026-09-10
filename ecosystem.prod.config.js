@@ -22,6 +22,10 @@ module.exports = {
     // pm2 cron_restart fires in HOST-LOCAL time (no timezone option); this box runs Etc/UTC
     // (timedatectl, verified 2026-08-16) — keep the host on UTC or adjust these schedules.
     { name: "lfg-market-sweep", cwd: CWD, script: "scripts/backfill_market.py", interpreter: PY, args: ["--network", "mainnet", "--report"], cron_restart: "30 3 * * *", autorestart: false },
+    // X auto-poster (#41) — firehose consumer posting from the brand X account.
+    // stop_exit_codes:[0] parks the process (instead of restart-thrashing) when
+    // X_ENABLED is off / creds incomplete and bot.py exits 0 by design.
+    { name: "lfg-x", cwd: CWD, script: "run_x.py", interpreter: PY, stop_exit_codes: [0] },
     { name: "lfg-deployer", cwd: CWD, script: "scripts/deployer.py", interpreter: PY, args: ["prod"] },
     // Public-edge funnel health probe (full TLS handshake through the ts.net funnel).
     // Log-only → reports/funnel_healthcheck.log; catches SSL/blank-site outages the :8176 probe can't see.
