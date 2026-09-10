@@ -268,6 +268,17 @@ configured/effective sets for operator review; the concrete wallets for this
 deployment are prescribed in `docs/ops/sponsored-free-mint.md`); automatic
 signer/issuer exclusions do not satisfy that check. Sponsored admission also stays disabled until startup
 recovery succeeds, while paid minting remains available after a recovery fault.
+**Funder-at-login:** every sign-in / wallet-link arm fires a best-effort
+`funding.warm_funder_cache` (one `account_tx`, cached forever in
+`wallet_funders`; unfunded results are never cached) so the sybil funder gate
+finds the funder locally at mint time, and `GET /api/mint/sponsored/eligibility`
+(authed) returns `{eligible, reason}` from `sponsored_mint.preview_eligibility`
+— the SAME gate sequence as `reserve_if_eligible` in `preview=True` mode, which
+writes no claim — so the home-screen free-mint badge (`freeMintBadge` in
+`mint_pure.js`) can never disagree with the reservation. The reservation at
+mint start remains the verdict; the preview is advisory. Joey/WalletConnect
+logins expose NO device correlator (the provider hardcodes `user_token=None`),
+so for them the funder gate is the only sybil arm with data behind it.
 Offer reconciliation is authoritative only when strict XRPL offer parsing
 accepts the amount and destination shapes; every per-claim error is persisted,
 all claims are attempted, and a per-claim offer failure does NOT revoke

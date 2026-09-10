@@ -531,3 +531,47 @@ def test_paid_lfgo_xrp_view_snapshot_is_unchanged():
         # — "Approve in Joey Wallet" when the delivery link is lfg-wc://.
         == "9c2de7b075dbc875f75f3e1fff8d80e623fbaf04aea36f2eaadda75ac3a14b67"
     )
+
+
+# ---------------------------------------------------------------------------
+# freeMintBadge(resp) -> {show, text}
+#   resp: body of GET /api/mint/sponsored/eligibility ({eligible, reason}) or
+#         null when the fetch failed. The badge only ever ADVERTISES a live,
+#         claimable (or already-reserved) free mint; refusals and unknowns
+#         hide it — the reservation at mint start remains the verdict.
+# ---------------------------------------------------------------------------
+
+
+def test_free_mint_badge_shows_when_eligible():
+    out = run_js("M.freeMintBadge({eligible: true, reason: 'eligible'})")
+    assert out["show"] is True
+    assert "Free mint" in out["text"]
+
+
+def test_free_mint_badge_shows_own_live_reservation():
+    out = run_js("M.freeMintBadge({eligible: true, reason: 'reserved'})")
+    assert out["show"] is True
+    assert "reserved" in out["text"].lower()
+
+
+def test_free_mint_badge_tells_consumed_and_full():
+    consumed = run_js("M.freeMintBadge({eligible: false, reason: 'already_consumed'})")
+    assert consumed["show"] is True and "claimed" in consumed["text"].lower()
+    full = run_js("M.freeMintBadge({eligible: false, reason: 'at_capacity'})")
+    assert full["show"] is True and "gone" in full["text"].lower()
+
+
+def test_free_mint_badge_hides_off_unknown_and_refusals():
+    for reason in ("campaign_off", "campaign_expired", "eligibility_unavailable", "ineligible"):
+        assert (
+            run_js(f"M.freeMintBadge({{eligible: false, reason: '{reason}'}})")["show"] is False
+        ), reason
+    assert run_js("M.freeMintBadge(null)")["show"] is False
+
+
+def test_app_js_refreshes_free_mint_badge_on_home():
+    src = open(APP_JS).read()
+    home = _function_source(src, "showMintHome")
+    assert "refreshFreeMintBadge()" in home
+    assert "/api/mint/sponsored/eligibility" in _function_source(src, "refreshFreeMintBadge")
+    assert 'id="free-mint-badge"' in open(os.path.join(ROOT, "webapp/client/index.html")).read()

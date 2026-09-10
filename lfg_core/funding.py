@@ -96,6 +96,36 @@ def lookup_funder(wallet: str) -> FunderResult:
     return parse_account_tx(result, wallet)
 
 
+def warm_funder_cache(db_path: str, wallet: str, *, lookup: FunderLookup | None = None) -> bool:
+    """Best-effort, login-time cache warm for the funder gate.
+
+    Resolves and records the wallet's activation funder if it is not cached
+    yet, so the sponsored-mint reservation (and the eligibility preview) find
+    it locally instead of paying the RPC on the mint hot path. Returns True
+    only when a new row was written. Mirrors the reservation's caching rule:
+    an unfunded (None, None) result is transient and is NOT cached. Never
+    raises — a lookup failure just leaves the cache cold for the reservation
+    to retry.
+    """
+    wallet = wallet.strip()
+    if not wallet:
+        return False
+    resolver = lookup or lookup_funder
+    with sqlite3.connect(db_path) as conn:
+        ensure_schema(conn)
+        if has_cached_funder(conn, wallet):
+            return False
+    try:
+        funder, ledger = resolver(wallet)
+    except FunderLookupError:
+        return False
+    if funder is None and ledger is None:
+        return False
+    with sqlite3.connect(db_path) as conn:
+        record_funder(conn, wallet, funder, ledger)
+    return True
+
+
 def parse_account_tx(result: dict[str, Any], wallet: str) -> FunderResult:
     """Interpret an account_tx result for the wallet's activation funder.
 

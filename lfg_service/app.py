@@ -5144,6 +5144,7 @@ async def handle_register(request):
             platform,
             user["id"],
         )
+    _warm_funder_cache(wallet)
     # Best-effort Closet issuance post-registration: kick off ensure_closet so the
     # user's Closet NFToken is minted immediately on registration. This never blocks
     # or fails the registration response — any error is logged and ignored.
@@ -5186,6 +5187,63 @@ def _mint_referrer(body: Any, wallet: str) -> str | None:
     if not ref or not is_valid_classic_address(ref) or ref == wallet:
         return None
     return ref
+
+
+_funder_warm_tasks: set[asyncio.Task[Any]] = set()
+
+
+def _warm_funder_cache(wallet: str | None) -> None:
+    """Fire-and-forget the funder-gate cache warm at sign-in / wallet link.
+
+    Best-effort by design: it never blocks or fails the login, and a cold
+    cache only means the sponsored reservation pays the one RPC itself.
+    """
+    if not wallet or not config.XRPL_NETWORK:
+        return
+
+    async def _run() -> None:
+        try:
+            await asyncio.to_thread(
+                funding.warm_funder_cache,
+                db_path.app_db_path(config.XRPL_NETWORK),
+                wallet,
+                lookup=funding.lookup_funder,
+            )
+        except Exception as e:  # noqa: BLE001 - never surface to the caller
+            logging.warning(f"funder cache warm failed for {wallet}: {e}")
+
+    task = asyncio.create_task(_run())
+    _funder_warm_tasks.add(task)
+    task.add_done_callback(_funder_warm_tasks.discard)
+
+
+@require_wallet
+async def handle_sponsored_eligibility(request):
+    """Read-only sponsored-mint eligibility preview for the signed-in wallet.
+
+    Runs the SAME gate sequence the reservation does (preview mode) so the
+    badge and the mint can never disagree; writes no claim. Fails closed as
+    `eligibility_unavailable` until startup recovery has armed admission,
+    exactly like handle_mint_start.
+    """
+    wallet = request["wallet"]
+    if not _sponsored_recovery_ready:
+        return web.json_response({"eligible": False, "reason": "eligibility_unavailable"})
+    push_user_token = await _push_token(request["user"])
+    try:
+        result = await asyncio.to_thread(
+            sponsored_mint.preview_eligibility,
+            db_path.app_db_path(config.XRPL_NETWORK),
+            history_store.history_db_path(config.XRPL_NETWORK),
+            network=config.XRPL_NETWORK,
+            wallet=wallet,
+            device_key=_sponsored_device_key(push_user_token),
+            funder_lookup=funding.lookup_funder,
+        )
+    except Exception as e:  # noqa: BLE001 - a preview must never 500 the client
+        logging.warning(f"sponsored eligibility preview failed for {wallet}: {e}")
+        return web.json_response({"eligible": False, "reason": "eligibility_unavailable"})
+    return web.json_response({"eligible": result.sponsored, "reason": result.reason})
 
 
 def _sponsored_device_key(push_user_token: str | None) -> str | None:
@@ -7361,6 +7419,7 @@ async def handle_signin_status(request):
                 platform,
                 rec["user_id"],
             )
+        _warm_funder_cache(s["account"])
         # #135: capture the XUMM push token issued on this sign-in so future
         # sign requests can be push-delivered. Independent of link() success —
         # a transient link failure over an already-present identity row must
@@ -7534,6 +7593,7 @@ async def _finish_web_signin(wallet: str, provider: str) -> web.Response:
     name = handle or f"{wallet[:6]}…{wallet[-4:]}"
     if not await asyncio.to_thread(identity_store.link, "web", wallet, name, wallet):
         return web.json_response({"error": "identity link failed"}, status=500)
+    _warm_funder_cache(wallet)
     token = make_session_token(
         {"id": wallet, "name": name, "platform": "web", "provider": provider}
     )
@@ -9415,6 +9475,7 @@ def create_app() -> web.Application:
     # same reason — "bulk" would otherwise be swallowed as a session id.
     app.router.add_post("/api/mint/bulk", handle_bulk_mint_start)
     app.router.add_get("/api/mint/bulk/active", handle_bulk_mint_active)
+    app.router.add_get("/api/mint/sponsored/eligibility", handle_sponsored_eligibility)
     app.router.add_post("/api/mint/bulk/{session_id}/cancel", handle_bulk_mint_cancel)
     app.router.add_post(
         "/api/mint/bulk/{session_id}/units/{index}/accept", handle_bulk_mint_unit_accept

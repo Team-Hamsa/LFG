@@ -12,7 +12,7 @@
 import * as marketPure from './market_pure.js?v=26';
 // Mint-flow pure helpers (issue #141): the cancel-outcome decision lives in
 // its own module so it's Node-testable too (tests/test_mint_pure_js.py).
-import * as mintPure from './mint_pure.js?v=24';
+import * as mintPure from './mint_pure.js?v=25';
 // Build-panel decision logic lives in its own pure module so it's
 // Node-testable too (tests/test_build_pure_js.py).
 import * as buildPure from './build_pure.js?v=29';
@@ -1163,6 +1163,21 @@ function showMintHome() {
   brixTrustlineNeeded = false;
   loadBrix();
   refreshOffersBadge();
+  refreshFreeMintBadge();
+}
+
+// Sponsored free-mint preview (funder-at-login): the server runs the same
+// gates the reservation will, without writing a claim, so the home screen can
+// say "free mint available" before the user commits to a Mint. Best-effort —
+// a failed fetch just leaves the badge hidden; the mint start stays the verdict.
+async function refreshFreeMintBadge() {
+  const badge = el('free-mint-badge');
+  if (!badge) return;
+  let resp = null;
+  try { resp = await api('/api/mint/sponsored/eligibility'); } catch (_) { resp = null; }
+  const view = mintPure.freeMintBadge(resp);
+  badge.hidden = !view.show;
+  badge.textContent = view.text;
 }
 
 // --- Leaderboard (home-screen card) ---

@@ -36,6 +36,8 @@ UNDELIVERABLE_OFFER_BLOCKED = (
 UNDELIVERABLE_ERRORS: tuple[str, ...] = (UNDELIVERABLE_UNFUNDED, UNDELIVERABLE_OFFER_BLOCKED)
 ReservationReason = Literal[
     "invalid_request",
+    # preview_eligibility only: every gate passed, nothing was written.
+    "eligible",
     # Destination pre-flight (#388/#408): the recipient provably cannot take
     # delivery, so nothing is spent on it. Checked in the service before this
     # function runs — reserve_if_eligible is synchronous pure-sqlite and cannot
@@ -1213,10 +1215,15 @@ def reserve_if_eligible(
     now: int | None = None,
     device_key: str | None = None,
     funder_lookup: funding.FunderLookup | None = None,
+    preview: bool = False,
 ) -> ReservationResult:
+    """Reserve a sponsored slot for `wallet`, or — with `preview=True` — run
+    every gate the reservation would and report the verdict without writing a
+    claim (`session_id` is ignored; the wallet's own live reservation, if any,
+    is surfaced as "reserved"). Use `preview_eligibility` for the latter."""
     wallet = wallet.strip()
     session_id = session_id.strip()
-    if not wallet or not session_id:
+    if not wallet or (not session_id and not preview):
         return ReservationResult(False, "invalid_request", None)
     if network not in SUPPORTED_NETWORKS:
         return ReservationResult(False, "wrong_network", None)
@@ -1320,7 +1327,7 @@ def reserve_if_eligible(
             if existing.nft_id is not None or existing.status in _CONSUMED_CLAIM_STATES:
                 return ReservationResult(False, "already_consumed", None)
             if existing.status in ("reserved", "minting"):
-                if existing.session_id == session_id:
+                if preview or existing.session_id == session_id:
                     return ReservationResult(True, "reserved", existing)
                 return ReservationResult(False, "already_reserved", None)
 
@@ -1362,6 +1369,12 @@ def reserve_if_eligible(
 
         if state == "at_capacity" or sum(counts.values()) >= campaign["cap"]:
             return ReservationResult(False, "at_capacity", None)
+
+        if preview:
+            # Every gate passed. Roll back the IMMEDIATE transaction without
+            # touching free_mint_claims — the reservation is the mint's job.
+            conn.rollback()
+            return ReservationResult(True, "eligible", None)
 
         if existing is not None and existing.status == "released":
             previous: dict[str, object] = {
@@ -1456,6 +1469,33 @@ def reserve_if_eligible(
             (claim_id,),
         ).fetchone()
         return ReservationResult(True, "reserved", _claim(row))
+
+
+def preview_eligibility(
+    db_path: str,
+    history_path: str,
+    *,
+    network: str,
+    wallet: str,
+    now: int | None = None,
+    device_key: str | None = None,
+    funder_lookup: funding.FunderLookup | None = None,
+) -> ReservationResult:
+    """Read-only verdict of `reserve_if_eligible` for the client's "free mint
+    available?" badge. Runs the identical gate sequence (so the two can never
+    disagree) and writes nothing to free_mint_claims; the only side effect is
+    the funder-cache warm the reservation would also perform."""
+    return reserve_if_eligible(
+        db_path,
+        history_path,
+        network=network,
+        wallet=wallet,
+        session_id="",
+        now=now,
+        device_key=device_key,
+        funder_lookup=funder_lookup,
+        preview=True,
+    )
 
 
 def release_reservation(

@@ -1019,3 +1019,6 @@ button.link.sign-primary {
   text-decoration: none;
 }
 button.link.qr-toggle { font-size: .85rem; opacity: .8; }
+
+/* Sponsored free-mint preview badge (funder-at-login) */
+.free-mint-badge { margin: 4px 0 8px; text-align: center; font-size: 0.9rem; opacity: 0.9; }
