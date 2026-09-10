@@ -691,6 +691,17 @@ def test_connect_passes_explicit_busy_timeout(tmp_path, monkeypatch):
 # ---------------------------------------------------------------------------
 
 
+@pytest.fixture(autouse=True)
+def _share_card_flag_off(monkeypatch):
+    """Pin SHARE_CARD_RENDER_ENABLED False for every test in this module
+    (#477): mid-suite, a script module's bare load_dotenv() can leak the
+    deployed .env's flag=1 into os.environ, and a later config reload (e.g.
+    test_shop_config's fixture) freezes it True — which would flip the
+    pipeline's media source out from under the raw-art tests. Tests that
+    exercise the card path setattr it True explicitly on top of this."""
+    monkeypatch.setattr(config, "SHARE_CARD_RENDER_ENABLED", False)
+
+
 class _FakeXApi:
     """Stand-in for XApi in bot.py pipeline tests: call counters + a queue of
     canned results (return values, or exceptions to raise) per method."""
