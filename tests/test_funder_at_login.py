@@ -176,6 +176,9 @@ def test_preview_matches_reservation_verdict_for_a_consumed_wallet(tmp_path):
 
 
 def _signin_env(_service_env, monkeypatch, lookup):
+    # Other sign-in tests leave warm tasks from their (closed) loops behind;
+    # gathering one of those raises "belongs to a different loop".
+    server._funder_warm_tasks.clear()
     monkeypatch.setattr(server.funding, "lookup_funder", lookup)
     monkeypatch.setattr(server.identity_store, "DATABASE", str(_service_env.app_db), raising=False)
     server.identity_store.ensure_identities_table()
