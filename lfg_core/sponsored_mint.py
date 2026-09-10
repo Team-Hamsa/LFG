@@ -1237,6 +1237,26 @@ def reserve_if_eligible(
         existing = _claim_for_session(conn, network, wallet, session_id)
         if existing is not None and existing.status in _ACTIVE_CLAIM_STATES:
             return ReservationResult(True, "reserved", existing)
+        if preview:
+            # The wallet's own live promise outranks the campaign-state fast
+            # path below: a reservation made before the campaign stopped,
+            # expired, or filled is still the wallet's to finish.
+            promised = _claim(
+                conn.execute(
+                    """
+                    SELECT id, network, wallet, campaign_id, session_id, status,
+                           reserved_at, reservation_expires_at, released_at,
+                           mint_tx_hash, nft_id, offer_id, accept_tx_hash, tagged_at,
+                           last_error, created_at, updated_at
+                    FROM free_mint_claims
+                    WHERE network = ? AND wallet = ? AND status IN ('reserved', 'minting')
+                      AND nft_id IS NULL
+                    """,
+                    (network, wallet),
+                ).fetchone()
+            )
+            if promised is not None:
+                return ReservationResult(True, "reserved", promised)
 
         # Advisory fast path. The campaign/cap is checked again in the final
         # write transaction because the archive lives in a separate database.

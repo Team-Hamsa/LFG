@@ -10,6 +10,7 @@ ops clustering script share one list.
 
 from __future__ import annotations
 
+import logging
 import sqlite3
 from collections.abc import Callable
 from typing import Any
@@ -111,19 +112,20 @@ def warm_funder_cache(db_path: str, wallet: str, *, lookup: FunderLookup | None 
     if not wallet:
         return False
     resolver = lookup or lookup_funder
-    with sqlite3.connect(db_path) as conn:
-        ensure_schema(conn)
-        if has_cached_funder(conn, wallet):
-            return False
     try:
+        with sqlite3.connect(db_path) as conn:
+            ensure_schema(conn)
+            if has_cached_funder(conn, wallet):
+                return False
         funder, ledger = resolver(wallet)
-    except FunderLookupError:
+        if funder is None and ledger is None:
+            return False
+        with sqlite3.connect(db_path) as conn:
+            record_funder(conn, wallet, funder, ledger)
+        return True
+    except Exception as e:  # noqa: BLE001 - best-effort: the whole op is contained
+        logging.warning(f"warm_funder_cache({wallet}) skipped: {e}")
         return False
-    if funder is None and ledger is None:
-        return False
-    with sqlite3.connect(db_path) as conn:
-        record_funder(conn, wallet, funder, ledger)
-    return True
 
 
 def parse_account_tx(result: dict[str, Any], wallet: str) -> FunderResult:

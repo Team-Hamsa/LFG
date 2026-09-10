@@ -575,3 +575,12 @@ def test_app_js_refreshes_free_mint_badge_on_home():
     assert "refreshFreeMintBadge()" in home
     assert "/api/mint/sponsored/eligibility" in _function_source(src, "refreshFreeMintBadge")
     assert 'id="free-mint-badge"' in open(os.path.join(ROOT, "webapp/client/index.html")).read()
+
+
+def test_free_mint_badge_refresh_discards_stale_responses():
+    """Greptile #472: a slow earlier home-entry fetch must not overwrite the
+    badge rendered by a later one — the refresh carries a generation token."""
+    src = open(APP_JS).read()
+    body = _function_source(src, "refreshFreeMintBadge")
+    assert "freeMintBadgeGen" in body
+    assert "if (gen !== freeMintBadgeGen) return;" in body

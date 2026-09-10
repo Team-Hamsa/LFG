@@ -5229,6 +5229,23 @@ async def handle_sponsored_eligibility(request):
     wallet = request["wallet"]
     if not _sponsored_recovery_ready:
         return web.json_response({"eligible": False, "reason": "eligibility_unavailable"})
+    # Same destination pre-flight as handle_mint_start (#388/#408): a wallet
+    # that provably cannot take delivery is refused with the same code the
+    # mint would use, and an UNRESOLVED lookup fails closed for sponsorship
+    # exactly as admission does — otherwise the badge could advertise a free
+    # mint the mint start then declines (Greptile #472).
+    try:
+        preflight = await asyncio.wait_for(
+            xrpl_ops.destination_preflight(wallet), timeout=_PREFLIGHT_TIMEOUT_SECONDS
+        )
+    except Exception as e:  # noqa: BLE001 - timeout / transport → unresolved
+        logging.warning(f"destination pre-flight failed for eligibility preview {wallet}: {e}")
+        preflight = xrpl_ops.DestinationPreflight(None, None, None, None)
+    refusal = _preflight_refusal(preflight)
+    if refusal is not None:
+        return web.json_response({"eligible": False, "reason": refusal})
+    if not preflight.resolved:
+        return web.json_response({"eligible": False, "reason": "eligibility_unavailable"})
     push_user_token = await _push_token(request["user"])
     try:
         result = await asyncio.to_thread(
@@ -8190,6 +8207,9 @@ async def _write_proof_link(session_wallet: str, other: str, proof_kind: str) ->
     failure — never answer "linked" for an edge that was not written.
     Idempotent: re-recording an existing edge is a no-op success."""
     await asyncio.to_thread(identity_store.link_proof, session_wallet, other, proof_kind)
+    # A freshly linked wallet is a candidate sponsored-mint destination too —
+    # warm its funder like a sign-in would (Greptile #472).
+    _warm_funder_cache(other)
 
 
 async def _linked_response(session_wallet: str, other: str) -> web.Response:

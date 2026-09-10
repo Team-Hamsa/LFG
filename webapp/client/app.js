@@ -1170,11 +1170,16 @@ function showMintHome() {
 // gates the reservation will, without writing a claim, so the home screen can
 // say "free mint available" before the user commits to a Mint. Best-effort —
 // a failed fetch just leaves the badge hidden; the mint start stays the verdict.
+let freeMintBadgeGen = 0;
 async function refreshFreeMintBadge() {
   const badge = el('free-mint-badge');
   if (!badge) return;
+  // Generation token: a slow fetch from an EARLIER home entry must not
+  // overwrite the badge a later entry rendered (Greptile #472).
+  const gen = ++freeMintBadgeGen;
   let resp = null;
   try { resp = await api('/api/mint/sponsored/eligibility'); } catch (_) { resp = null; }
+  if (gen !== freeMintBadgeGen) return;
   const view = mintPure.freeMintBadge(resp);
   badge.hidden = !view.show;
   badge.textContent = view.text;

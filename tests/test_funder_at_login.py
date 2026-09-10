@@ -17,7 +17,7 @@ import time
 from lfg_core import funding
 from lfg_core import sponsored_mint as sm
 from lfg_service import app as server
-from tests.sponsored_helpers import ready_history
+from tests.sponsored_helpers import ready_history, stub_clean_preflight
 from tests.test_sponsored_mint_flow import (  # noqa: F401 - fixture re-export
     _PostRequest,
     _run,
@@ -214,9 +214,8 @@ def test_web_signin_survives_funder_lookup_failure(_service_env, monkeypatch):
 
 def test_eligibility_endpoint_returns_preview(_service_env, monkeypatch):
     # The endpoint runs on wall-clock time, so the campaign must be live NOW.
-    sm.start_campaign(_service_env.app_db, network="mainnet", actor="42")
-    ready_history(_service_env.history_db, network="mainnet", now=int(time.time()))
-    monkeypatch.setattr(server.funding, "lookup_funder", lambda _w: ("rFunder", 3))
+    _live_campaign(_service_env, monkeypatch)
+    stub_clean_preflight(monkeypatch, server)
 
     resp = _run(server.handle_sponsored_eligibility(_PostRequest()))
 
@@ -239,3 +238,78 @@ def test_eligibility_endpoint_fails_closed_before_recovery(_service_env, monkeyp
 def test_eligibility_route_is_registered():
     routes = {r.resource.canonical for r in server.create_app().router.routes() if r.resource}
     assert "/api/mint/sponsored/eligibility" in routes
+
+
+# --- Greptile review (PR #472) ------------------------------------------------
+
+
+def test_warm_never_raises_on_unexpected_resolver_or_db_errors(tmp_path):
+    def explode(_wallet):
+        raise RuntimeError("not a FunderLookupError")
+
+    assert funding.warm_funder_cache(str(tmp_path / "app.db"), "rBoom", lookup=explode) is False
+    # An unwritable db path (a directory) must be contained too.
+    assert funding.warm_funder_cache(str(tmp_path), "rDir", lookup=lambda _w: ("rF", 1)) is False
+
+
+def test_proof_link_warms_the_newly_linked_wallet(_service_env, monkeypatch):
+    _signin_env(_service_env, monkeypatch, lambda _w: ("rFunder", 9))
+    monkeypatch.setattr(server.identity_store, "link_proof", lambda *a, **k: True)
+
+    async def scenario():
+        await server._write_proof_link("rSession", "rLinked", "wc-signed-tx")
+        await asyncio.gather(*server._funder_warm_tasks)
+
+    _run(scenario())
+    assert _funders(_service_env.app_db) == [("rLinked", "rFunder", 9)]
+
+
+def _live_campaign(_service_env, monkeypatch):
+    sm.start_campaign(_service_env.app_db, network="mainnet", actor="42")
+    ready_history(_service_env.history_db, network="mainnet", now=int(time.time()))
+    monkeypatch.setattr(server.funding, "lookup_funder", lambda _w: ("rFunder", 3))
+
+
+def test_eligibility_endpoint_refuses_a_destination_that_cannot_take_delivery(
+    _service_env, monkeypatch
+):
+    _live_campaign(_service_env, monkeypatch)
+
+    async def unfunded(_wallet):
+        return server.xrpl_ops.DestinationPreflight(False, None, None, None)
+
+    monkeypatch.setattr(server.xrpl_ops, "destination_preflight", unfunded)
+    resp = _run(server.handle_sponsored_eligibility(_PostRequest()))
+    assert json.loads(resp.text) == {"eligible": False, "reason": "wallet_unfunded"}
+
+
+def test_preview_still_reports_own_reservation_after_campaign_stops_or_expires(tmp_path):
+    """CodeRabbit #472: the wallet's live promise outranks the campaign-state
+    fast path — a stopped/expired campaign must not hide it."""
+    db, history = _paths(tmp_path)
+    sm.start_campaign(db, network="mainnet", actor="42", now=100)
+    reserved = sm.reserve_if_eligible(
+        db, history, network="mainnet", wallet="rMine", session_id="s1", now=101
+    )
+    assert reserved.sponsored
+
+    sm.stop_campaign(db, network="mainnet", actor="42", now=102)
+    stopped = sm.preview_eligibility(db, history, network="mainnet", wallet="rMine", now=103)
+    assert (stopped.sponsored, stopped.reason) == (True, "reserved")
+
+    expired = sm.preview_eligibility(db, history, network="mainnet", wallet="rMine", now=5000)
+    assert (expired.sponsored, expired.reason) == (True, "reserved")
+    # …while a wallet WITHOUT a promise still sees the campaign state.
+    other = sm.preview_eligibility(db, history, network="mainnet", wallet="rOther", now=103)
+    assert other.reason == "campaign_off"
+
+
+def test_eligibility_endpoint_fails_closed_on_unresolved_preflight(_service_env, monkeypatch):
+    _live_campaign(_service_env, monkeypatch)
+
+    async def unresolved(_wallet):
+        raise TimeoutError("account_info blip")
+
+    monkeypatch.setattr(server.xrpl_ops, "destination_preflight", unresolved)
+    resp = _run(server.handle_sponsored_eligibility(_PostRequest()))
+    assert json.loads(resp.text) == {"eligible": False, "reason": "eligibility_unavailable"}
