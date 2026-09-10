@@ -627,3 +627,17 @@ def test_shop_slot_counts():
     counts = run_js(f"M.shopSlotCounts({json.dumps(SHOP_ITEMS)})")
     assert counts[0] == {"slot": "all", "count": 4}
     assert {"slot": "Eyes", "count": 2} in counts and {"slot": "Head", "count": 2} in counts
+
+
+def test_default_market_sort_per_kind():
+    assert run_js("M.defaultMarketSort('trait')") == "price_desc"
+    assert run_js("M.defaultMarketSort('character')") == "price_asc"
+
+
+def test_resolve_market_sort_applies_kind_default_until_touched():
+    # Untouched: the kind's default wins regardless of the current select value.
+    assert run_js("M.resolveMarketSort('trait', false, 'price_asc')") == "price_desc"
+    assert run_js("M.resolveMarketSort('character', false, 'price_desc')") == "price_asc"
+    # Touched: the user's own choice is carried across kind switches.
+    assert run_js("M.resolveMarketSort('trait', true, 'newest')") == "newest"
+    assert run_js("M.resolveMarketSort('character', true, 'rarity_desc')") == "rarity_desc"

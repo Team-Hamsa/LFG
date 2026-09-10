@@ -360,6 +360,20 @@ export function sortRows(rows, sort) {
   return arr;
 }
 
+/**
+ * The browse sort to apply after a kind switch. Trait listings are
+ * rarity-priced (Trait Shop formula), so priciest-first reads as a catalogue
+ * — rarest at the top; characters keep cheapest-first. A sort the user picked
+ * themselves (`touched`) always wins and is carried across kind switches.
+ */
+export function defaultMarketSort(kind) {
+  return kind === 'trait' ? 'price_desc' : 'price_asc';
+}
+
+export function resolveMarketSort(kind, touched, current) {
+  return touched ? current : defaultMarketSort(kind);
+}
+
 /** "Slot:Value" trait-filter query token, matching handle_market_listings's `trait=Slot:Value` parsing. */
 export function traitFilterToken(slot, value) {
   return `${slot}:${value}`;
