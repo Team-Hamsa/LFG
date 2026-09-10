@@ -4532,7 +4532,8 @@ const MARKET_STATUS_PATH = {
   trait_list: (id) => `/api/market/trait/list/${id}`,
 };
 
-const marketState = { tab: 'browse', kind: 'character', offset: 0 };
+const marketState = { tab: 'browse', kind: 'character', offset: 0, sortTouched: false };
+function defaultMarketSort(kind) { return kind === 'trait' ? 'price_desc' : 'price_asc'; }
 let marketPendingItem = null; // the character/trait/closet-asset the list-form panel is acting on
 let marketFlowTimer = null;
 // Generation counter (mirrors pollMint's pollGen): clearTimeout alone cannot
@@ -5726,8 +5727,12 @@ async function main() {
     if (!btn || btn.dataset.kind === marketState.kind) return;
     marketState.kind = btn.dataset.kind;
     highlightTabs('market-kind', 'kind', marketState.kind);
+    // Per-kind default sort until the user picks one: traits read best
+    // priciest-first (rarity-priced), characters cheapest-first.
+    if (!marketState.sortTouched) el('market-sort').value = defaultMarketSort(marketState.kind);
     loadMarketBrowse();
   });
+  el('market-sort').onchange = () => { marketState.sortTouched = true; };
   el('market-filter-apply').onclick = () => loadMarketBrowse();
   el('market-include-external').onchange = () => loadMarketBrowse();
   el('market-mine-only').onchange = () => loadMarketBrowse();
