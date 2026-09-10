@@ -1015,6 +1015,26 @@ def test_handle_event_card_disabled_fetches_raw_art_only(tmp_path, monkeypatch):
     assert x_api_fake.upload_media_calls == [b"pngbytes"]
 
 
+def test_handle_event_card_upload_failure_falls_back_to_raw_art(tmp_path, monkeypatch):
+    """#477 (CodeRabbit): a non-429 media-upload failure on the card bytes
+    (e.g. X rejecting the file) still tries the raw art before degrading."""
+    monkeypatch.setattr(config, "SHARE_CARD_RENDER_ENABLED", True)
+    x_api_fake = _FakeXApi(
+        upload_media=[XApiError(400, "bad media"), "media-9"],
+        post_tweet=["tweet-9"],
+    )
+    http = _FakeHttp(
+        _FakeImageResponse(200, b"cardbytes"),
+        _FakeImageResponse(200, b"rawbytes"),
+    )
+    event = _mint_event(image_url="https://cdn.example.com/nft.png")
+    deps, _ = _make_deps(tmp_path, x_api_fake, http=http)
+    status = _run(bot.handle_event(event, deps))
+    assert status == "posted"
+    assert x_api_fake.upload_media_calls == [b"cardbytes", b"rawbytes"]
+    assert x_api_fake.post_tweet_calls[0][1] == "media-9"
+
+
 def test_handle_event_all_image_sources_fail_degrades_to_text_only(tmp_path, monkeypatch):
     """#477: card AND raw art both failing still posts text-only."""
     monkeypatch.setattr(config, "SHARE_CARD_RENDER_ENABLED", True)

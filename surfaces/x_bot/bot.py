@@ -299,7 +299,10 @@ async def handle_event(event: Mapping[str, Any], deps: Deps) -> str | None:
             logging.error(f"x_bot: media upload rate-limited; failing {event_key} ({exc})")
             state.record(deps.db_path, event_key, "failed")
             return "failed"
-        break
+        if media_id is not None:
+            break
+        # Non-429 upload failure (e.g. X rejecting the file): try the next
+        # candidate rather than silently going text-only with art available.
 
     try:
         tweet_id = await _retry(
