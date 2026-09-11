@@ -213,3 +213,14 @@ def test_listings_dev_mode_trait_group():
         assert r["count"] >= 1 and r["floor_brix"] == r["amount_brix"]
         assert [o["offer_index"] for o in r["offers"]][0] == r["offer_index"]
     assert body["total"] == len(body["rows"])
+
+
+@pytest.mark.filterwarnings("ignore::aiohttp.web_exceptions.NotAppKeyWarning")
+def test_listings_dev_mode_trait_applies_brix_bounds():
+    # #481 parity: the mock path must honour min/max_brix like the real one.
+    req = make_mocked_request("GET", "/api/market/listings?kind=trait&max_brix=4")
+    body = json.loads(_run(server.handle_market_listings(req)).body)
+    assert body["rows"] and all(float(r["amount_brix"]) <= 4 for r in body["rows"])
+    req = make_mocked_request("GET", "/api/market/listings?kind=trait&min_brix=10")
+    body = json.loads(_run(server.handle_market_listings(req)).body)
+    assert body["rows"] and all(float(r["amount_brix"]) >= 10 for r in body["rows"])

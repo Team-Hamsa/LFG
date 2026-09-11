@@ -2961,3 +2961,27 @@ def test_browse_character_ignores_group(onchain_env):
     body = _browse("kind=character&group=1")
     assert body["total"] == 1
     assert "count" not in body["rows"][0] and "offers" not in body["rows"][0]
+
+
+def test_browse_trait_group_bounds_nested_offers(onchain_env):
+    conn = _reopen(onchain_env)
+    n = server.market_store.GROUP_OFFERS_MAX + 3
+    for i in range(n):
+        nft_id = TRAIT1[:-3] + f"{i:03x}"
+        upsert_trait_token(conn, nft_id, SELLER, "Hat", "Wizard Hat")
+        _seed_listing(
+            conn,
+            offer_index=f"{i:064x}",
+            nft_id=nft_id,
+            kind="trait",
+            slot="Hat",
+            value="Wizard Hat",
+            amount_drops=None,
+            amount_brix=str(i + 1),
+        )
+    conn.commit()
+    conn.close()
+    body = _browse("kind=trait&group=1")
+    (hat,) = body["rows"]
+    assert hat["count"] == n
+    assert len(hat["offers"]) == server.market_store.GROUP_OFFERS_MAX

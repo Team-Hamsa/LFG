@@ -250,3 +250,15 @@ def test_grouped_trait_cards_wiring():
     css = _stylesheet()
     assert ".market-card-count" in css
     assert ".listing-offers" in css
+
+
+def test_grouped_trait_count_badge_survives_card_rebuild():
+    # The card body is rebuilt with card.replaceChildren(img, name); a badge
+    # appended BEFORE that call is silently dropped (CodeRabbit on #482).
+    js = _read("app.js")
+    start = js.index("function renderMarketGrid(")
+    end = js.index("\n}\n", start)
+    body = js[start:end]
+    rebuild = body.index("card.replaceChildren(img, name)")
+    badge = body.index("cnt.className = 'market-card-count'")
+    assert badge > rebuild, "count badge must be appended after replaceChildren"

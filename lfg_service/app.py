@@ -2790,6 +2790,22 @@ async def handle_market_listings(request: web.Request) -> web.Response:
         )
         if seller_filter:  # #203 parity with the real path's post-cache filter
             rows = [r for r in rows if r["seller"] == seller_filter]
+        # #481 parity: BRIX bounds were parsed but never applied on the mock
+        # path, so dev-mode groups/counts/floors diverged from prod.
+        if min_brix is not None:
+            floor = Decimal(min_brix)
+            rows = [
+                r
+                for r in rows
+                if r.get("amount_brix") is not None and Decimal(r["amount_brix"]) >= floor
+            ]
+        if max_brix is not None:
+            ceiling = Decimal(max_brix)
+            rows = [
+                r
+                for r in rows
+                if r.get("amount_brix") is not None and Decimal(r["amount_brix"]) <= ceiling
+            ]
         if group:  # #481 parity: mock rows are already serialized; grouping is shape-agnostic
             rows = market_store.group_trait_rows(rows)
         page = rows[offset : offset + limit]

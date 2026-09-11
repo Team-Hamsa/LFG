@@ -934,3 +934,25 @@ class TestGroupTraitRows:
         rows = [self._row("A" * 64, "Hat", "Wizard Hat", "5")]
         market_store.group_trait_rows(rows)
         assert "offers" not in rows[0] and "count" not in rows[0]
+
+    def test_legacy_xrp_trait_row_never_merges_into_brix_group(self):
+        # A legacy XRP-denominated trait listing (awaiting the backfill's
+        # stale-close) shares (slot, value) with BRIX rows but is unbuyable
+        # (410) and incomparable in price — it must stay its own row and can
+        # never become a group head with a None floor.
+        legacy = self._row("A" * 64, "Hat", "Wizard Hat", None)
+        legacy["amount_drops"] = 1  # 1 drop < any BRIX value if compared raw
+        rows = [legacy, self._row("B" * 64, "Hat", "Wizard Hat", "5")]
+        groups = market_store.group_trait_rows(rows)
+        assert len(groups) == 2
+        brix = next(g for g in groups if g["amount_brix"] == "5")
+        assert brix["count"] == 1 and brix["floor_brix"] == "5"
+        assert [o["offer_index"] for o in brix["offers"]] == ["B" * 64]
+
+    def test_offers_are_capped_but_count_is_total(self):
+        rows = [self._row(chr(65 + i) * 64, "Hat", "Wizard Hat", str(i + 1)) for i in range(30)]
+        (hat,) = market_store.group_trait_rows(rows, max_offers=25)
+        assert hat["count"] == 30
+        assert len(hat["offers"]) == 25
+        assert hat["offers"][0]["amount_brix"] == "1" and hat["offers"][-1]["amount_brix"] == "25"
+        assert hat["floor_brix"] == "1"
