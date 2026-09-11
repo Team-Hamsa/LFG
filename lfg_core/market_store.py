@@ -330,6 +330,57 @@ def listing_price(row: Any) -> Decimal:
     return Decimal(row["amount_drops"] or 0)
 
 
+# #481: cap on the per-group `offers[]` a grouped browse row embeds. Pagination
+# bounds GROUPS, not offers, so without this one popular (slot, value) could
+# serialize the whole browse cache into a single page. `count` stays the true
+# total; the client says "and N more" past the cap.
+GROUP_OFFERS_MAX = 25
+
+
+def group_trait_rows(
+    rows: list[dict[str, Any]], max_offers: int = GROUP_OFFERS_MAX
+) -> list[dict[str, Any]]:
+    """#481: collapse identical (slot, value) trait listings into one row per
+    key so the browse grid isn't a wall of near-duplicate cards.
+
+    Each group row is a COPY of the group's cheapest listing (so a client
+    that ignores the group fields still renders and buys a real offer),
+    plus `count`, `floor_brix` (the cheapest price, as the row's own
+    `amount_brix` string) and `offers` — every listing in the group as its
+    own dict, cheapest first, ties by offer_index. External (destination-
+    locked, #131) rows are never merged: they are read-only price discovery
+    with their own marketplace link, so each keeps its own row. Neither is a
+    legacy XRP-denominated trait row (no `amount_brix`; awaiting the
+    backfill's stale-close): it is unbuyable (410) and its drops are not
+    comparable to BRIX, so it could otherwise become a group head with a
+    None floor. `offers` is capped at `max_offers` (cheapest kept); `count`
+    is always the true total.
+
+    Groups keep the order in which their key first appears, so a caller that
+    sorts BEFORE grouping gets that sort honoured at group level (price_asc
+    → groups ordered by floor; price_desc → by ceiling, which is what a
+    "most expensive first" browse expects). Input rows are not mutated.
+    """
+    buckets: dict[tuple[Any, ...], list[dict[str, Any]]] = {}
+    for r in rows:
+        mergeable = not r.get("destination") and r.get("amount_brix") is not None
+        key: tuple[Any, ...] = (
+            (r.get("slot"), r.get("value"), None)
+            if mergeable
+            else (r.get("slot"), r.get("value"), r["offer_index"])
+        )
+        buckets.setdefault(key, []).append(r)
+    out: list[dict[str, Any]] = []
+    for members in buckets.values():
+        offers = sorted(members, key=lambda r: (listing_price(r), r["offer_index"]))
+        head = dict(offers[0])
+        head["count"] = len(offers)
+        head["floor_brix"] = offers[0].get("amount_brix")
+        head["offers"] = [dict(o) for o in offers[:max_offers]]
+        out.append(head)
+    return out
+
+
 def _attributes_match(attrs: list[dict[str, str]], filters: dict[str, list[str]]) -> bool:
     """AND across slots in `filters`, OR within a slot's value list. `attrs`
     is a list of {"trait_type": ..., "value": ...} entries (the normalized

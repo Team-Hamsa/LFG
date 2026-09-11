@@ -2687,6 +2687,8 @@ def _parse_market_int_param(
 @require_market
 async def handle_market_listings(request: web.Request) -> web.Response:
     """Public: GET /api/market/listings?kind=&trait=&min_xrp=&max_xrp=&sort=&limit=&offset=
+    &group=1 (#481: kind=trait only — one row per (slot, value) with count /
+    floor_brix / offers[], paginated over groups)
     &include_external= (#131: opt-in known-broker external rows, buyable:false)
     &seller= (#203: only listings by one wallet) — sort additionally accepts
     rarity_desc (#203: collection-wide statistical rarity, characters only;
@@ -2715,6 +2717,9 @@ async def handle_market_listings(request: web.Request) -> web.Response:
     # read-only price-discovery rows, tagged buyable:false in the response.
     # Default output stays destination-free, exactly as before.
     include_external = request.query.get("include_external", "0") in ("1", "true")
+    # #481: collapse identical (slot, value) trait listings into one row each
+    # (count / floor_brix / offers[]). Trait-only; ignored for characters.
+    group = kind == "trait" and request.query.get("group", "0") in ("1", "true")
 
     trait_filters: dict[str, list[str]] = {}
     for raw in request.query.getall("trait", []):
@@ -2785,6 +2790,24 @@ async def handle_market_listings(request: web.Request) -> web.Response:
         )
         if seller_filter:  # #203 parity with the real path's post-cache filter
             rows = [r for r in rows if r["seller"] == seller_filter]
+        # #481 parity: BRIX bounds were parsed but never applied on the mock
+        # path, so dev-mode groups/counts/floors diverged from prod.
+        if min_brix is not None:
+            floor = Decimal(min_brix)
+            rows = [
+                r
+                for r in rows
+                if r.get("amount_brix") is not None and Decimal(r["amount_brix"]) >= floor
+            ]
+        if max_brix is not None:
+            ceiling = Decimal(max_brix)
+            rows = [
+                r
+                for r in rows
+                if r.get("amount_brix") is not None and Decimal(r["amount_brix"]) <= ceiling
+            ]
+        if group:  # #481 parity: mock rows are already serialized; grouping is shape-agnostic
+            rows = market_store.group_trait_rows(rows)
         page = rows[offset : offset + limit]
         return web.json_response({"rows": page, "total": len(rows)})
 
@@ -2863,11 +2886,26 @@ async def handle_market_listings(request: web.Request) -> web.Response:
     else:  # newest
         filtered = sorted(filtered, key=lambda r: (-(r["created_ts"] or 0), r["offer_index"]))
 
+    # #481: grouping runs AFTER filter + sort so (a) min/max_brix drop
+    # individual offers and empty groups fall away, and (b) group order
+    # follows the sort (first-seen key order = sorted order of the head
+    # row). Pagination and `total` then count groups, not offers — the
+    # reason grouping is server-side at all: a page of 24 raw rows would
+    # split a key across pages and understate every count and floor.
+    if group:
+        filtered = market_store.group_trait_rows(filtered)
+
     page = filtered[offset : offset + limit]
     cfg = trait_config.get_config()
-    return web.json_response(
-        {"rows": [_serialize_listing_row(r, kind, cfg) for r in page], "total": len(filtered)}
-    )
+    rows_out = []
+    for r in page:
+        out = _serialize_listing_row(r, kind, cfg)
+        if group:
+            out["count"] = r["count"]
+            out["floor_brix"] = r["floor_brix"]
+            out["offers"] = [_serialize_listing_row(o, kind, cfg) for o in r["offers"]]
+        rows_out.append(out)
+    return web.json_response({"rows": rows_out, "total": len(filtered)})
 
 
 def _compute_mine_data(char_network: str, econ_network: str, wallet: str) -> dict[str, Any]:

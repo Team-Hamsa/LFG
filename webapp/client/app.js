@@ -9,7 +9,7 @@
 // money math, and wizard-step labels. Kept in a separate module so they're
 // unit-testable under Node (tests/test_market_pure_js.py) without a browser
 // — see webapp/client/market_pure.js's own header for the full rationale.
-import * as marketPure from './market_pure.js?v=26';
+import * as marketPure from './market_pure.js?v=27';
 // Mint-flow pure helpers (issue #141): the cancel-outcome decision lives in
 // its own module so it's Node-testable too (tests/test_mint_pure_js.py).
 import * as mintPure from './mint_pure.js?v=25';
@@ -4877,6 +4877,15 @@ function renderMarketGrid(rows, { append = false } = {}) {
       name.appendChild(badge);
     }
     card.replaceChildren(img, name);
+    // #481: a grouped trait card wears its offer count (appended AFTER the
+    // replaceChildren rebuild above, which would otherwise drop it).
+    if (vm.count > 1) {
+      const cnt = document.createElement('span');
+      cnt.className = 'market-card-count';
+      cnt.textContent = `×${vm.count}`;
+      cnt.title = `${vm.count} offers`;
+      card.appendChild(cnt);
+    }
     // #298: grid tiles stay static stills; the badge flags art that plays as
     // video in the listing-detail overlay (same marker as the swap grid).
     if (mediaPure.isAnimated(row)) {
@@ -4927,8 +4936,52 @@ function renderListingHistory(items) {
   }
 }
 
-async function openListingDetail(row) {
+// #481: renders a grouped trait row's individual offers inside the detail
+// overlay (cheapest first; the one currently shown is marked). Picking one
+// re-opens the overlay on that offer while keeping the group context so the
+// list stays put — Buy always acts on whichever offer is shown.
+function renderListingOffers(offers, activeOfferIndex, groupOffers, total) {
+  const box = el('listing-detail-offers');
+  box.replaceChildren();
+  if (!offers || offers.length < 2) { box.hidden = true; return; }
+  total = total || offers.length;
+  const title = document.createElement('p');
+  title.className = 'card-sub';
+  title.textContent = total > offers.length
+    ? `${offers.length} cheapest of ${total} offers`
+    : `${offers.length} offers`;
+  box.appendChild(title);
+  const list = document.createElement('ul');
+  list.className = 'listing-offers-list';
+  for (const o of offers) {
+    const li = document.createElement('li');
+    const btn = document.createElement('button');
+    btn.type = 'button';
+    btn.className = 'listing-offer-row';
+    const active = o.offer_index === activeOfferIndex;
+    if (active) { btn.classList.add('active'); btn.setAttribute('aria-current', 'true'); }
+    const price = document.createElement('span');
+    price.className = 'market-card-price';
+    price.textContent = marketPure.priceLabel(o);
+    const seller = document.createElement('span');
+    seller.className = 'listing-offer-seller';
+    seller.textContent = o.seller ? `${o.seller.slice(0, 6)}…${o.seller.slice(-4)}` : '';
+    btn.replaceChildren(price, seller);
+    btn.onclick = () => { if (!active) openListingDetail(o, groupOffers, total).catch((e) => showError(e.message)); };
+    li.appendChild(btn);
+    list.appendChild(li);
+  }
+  box.appendChild(list);
+  box.hidden = false;
+}
+
+async function openListingDetail(row, groupOffers = null, groupTotal = 0) {
   const vm = marketPure.mapListingRow(row);
+  // #481: a grouped row carries its own offers (server-capped; vm.count is
+  // the true total); an offer picked from that list carries the group's
+  // offers + total back in via `groupOffers`/`groupTotal`.
+  const offers = groupOffers || (vm.count > 1 ? vm.offers : null);
+  const offersTotal = groupOffers ? groupTotal : vm.count;
   const requestId = vm.offerIndex || vm.nftId;
   activeListingId = requestId;
   lastListingTrigger = document.activeElement;
@@ -4951,6 +5004,7 @@ async function openListingDetail(row) {
   el('listing-detail-sub').textContent = [
     vm.badge,
     rarity,
+    offers ? `${offersTotal} available` : '',
     vm.external ? marketPure.externalLabel(vm) : '',
     sellerShort ? `Seller ${sellerShort}` : '',
   ].filter(Boolean).join(' · ');
@@ -4993,6 +5047,7 @@ async function openListingDetail(row) {
     action.disabled = false;
     action.onclick = () => { closeListingDetail(); openBuyFlow(row).catch((e) => showError(e.message)); };
   }
+  renderListingOffers(offers, vm.offerIndex, offers, offersTotal);
   renderListingHistory([]);
   // #283: bids apply to characters only, and only when the viewer isn't the
   // seller (external listings included — that's the point: act on them here).
@@ -5070,6 +5125,9 @@ async function loadMarketBrowse({ append = false } = {}) {
     // whole grid. Missing element -> the old default behavior.
     includeExternal: Boolean(el('market-include-external')?.checked ?? true),
     seller: el('market-mine-only')?.checked && me && me.wallet ? me.wallet : '',
+    // #481: one card per (slot, value) for traits — server-side, so paging
+    // never splits a group and counts/floors are collection-wide.
+    group: isTrait,
   });
   const qs = new URLSearchParams();
   for (const [k, v] of pairs) qs.append(k, v);

@@ -641,3 +641,50 @@ def test_resolve_market_sort_applies_kind_default_until_touched():
     # Touched: the user's own choice is carried across kind switches.
     assert run_js("M.resolveMarketSort('trait', true, 'newest')") == "newest"
     assert run_js("M.resolveMarketSort('character', true, 'rarity_desc')") == "rarity_desc"
+
+
+# --- #481: grouped trait cards ---
+
+
+def test_price_label_grouped_row_reads_from_floor():
+    # A grouped row (count > 1) prices as "from <floor> BRIX"; a group of one
+    # (or an ungrouped row) keeps the plain label.
+    assert run_js("M.priceLabel({amount_brix: '5', count: 3, floor_brix: '5'})") == "from 5 BRIX"
+    assert run_js("M.priceLabel({amount_brix: '5', count: 1, floor_brix: '5'})") == "5 BRIX"
+    assert run_js("M.priceLabel({amount_brix: '5'})") == "5 BRIX"
+
+
+def test_map_listing_row_exposes_group_fields():
+    row = {
+        "nft_id": "T1",
+        "kind": "trait",
+        "slot": "Hat",
+        "value": "Wizard Hat",
+        "amount_brix": "5",
+        "seller": "rS",
+        "offer_index": "B" * 64,
+        "count": 3,
+        "floor_brix": "5",
+        "offers": [
+            {"offer_index": "B" * 64, "amount_brix": "5", "seller": "rS"},
+            {"offer_index": "C" * 64, "amount_brix": "9.5", "seller": "rT"},
+        ],
+    }
+    vm = run_js(f"M.mapListingRow({json.dumps(row)})")
+    assert vm["count"] == 3
+    assert vm["priceLabel"] == "from 5 BRIX"
+    assert len(vm["offers"]) == 2 and vm["offers"][1]["offer_index"] == "C" * 64
+    # Ungrouped rows: count 1, offers = just the row itself, so the detail
+    # overlay can always iterate `offers` without branching.
+    single = run_js(
+        f"M.mapListingRow({json.dumps({k: v for k, v in row.items() if k not in ('count', 'floor_brix', 'offers')})})"
+    )
+    assert single["count"] == 1 and len(single["offers"]) == 1
+    assert single["offers"][0]["offer_index"] == "B" * 64
+
+
+def test_build_listings_params_group_flag():
+    pairs = run_js("M.buildListingsParams({kind: 'trait', group: true})")
+    assert ["group", "1"] in pairs
+    pairs = run_js("M.buildListingsParams({kind: 'trait', group: false})")
+    assert not any(k == "group" for k, _ in pairs)

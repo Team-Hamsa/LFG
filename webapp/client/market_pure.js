@@ -200,6 +200,9 @@ export function brixRoyaltyDisclosure(brixStr) {
  * legacy (pre-BRIX) trait row so the grid never renders "undefined".
  */
 export function priceLabel(row) {
+  // #481: a grouped trait row (several identical (slot, value) listings
+  // collapsed into one card) prices from its floor.
+  if (row.count > 1 && row.floor_brix != null) return `from ${row.floor_brix} BRIX`;
   if (row.amount_brix != null) return `${row.amount_brix} BRIX`;
   if (row.amount_xrp != null) return `${row.amount_xrp} XRP`;
   return '';
@@ -236,6 +239,11 @@ export function mapListingRow(row) {
     slot: row.slot ?? null,
     value: row.value ?? null,
     nftNumber: row.nft_number ?? null,
+    // #481: grouped trait rows carry count + the individual offers (cheapest
+    // first). An ungrouped row is a group of one — `offers` always holds at
+    // least the row itself so consumers never branch on presence.
+    count: row.count ?? 1,
+    offers: Array.isArray(row.offers) && row.offers.length ? row.offers : [row],
     // #131: external (brokered) listings are read-only price discovery.
     // Absent `buyable` (older server / mine rows) defaults to buyable.
     buyable: row.buyable !== false,
@@ -386,9 +394,11 @@ export function traitFilterToken(slot, value) {
  * of "Slot:Value" tokens) becomes one repeated `trait` param per entry,
  * matching request.query.getall('trait') server-side.
  */
-export function buildListingsParams({ kind, traits, minXrp, maxXrp, minBrix, maxBrix, sort, limit, offset, includeExternal, seller } = {}) {
+export function buildListingsParams({ kind, traits, minXrp, maxXrp, minBrix, maxBrix, sort, limit, offset, includeExternal, seller, group } = {}) {
   const pairs = [];
   if (kind) pairs.push(['kind', kind]);
+  // #481: server-side (slot, value) grouping for trait browse.
+  if (group) pairs.push(['group', '1']);
   // #131: opt-in known-broker external (read-only) rows.
   if (includeExternal) pairs.push(['include_external', '1']);
   // #203: "listed by me" — server-side exact-match seller filter.

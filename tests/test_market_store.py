@@ -859,3 +859,100 @@ class TestBrowseExternal:
         market_store.close_listing(conn, "A" * 64, "cancelled")
         rows = market_store.browse(conn, kind="character", external_destinations={self.BROKER})
         assert rows == []
+
+
+class TestGroupTraitRows:
+    """#481: collapse identical (slot, value) trait listings into one row.
+    Operates on plain browse() dicts (post-cache, post-filter in the handler)."""
+
+    @staticmethod
+    def _row(offer_index, slot, value, brix, seller=SELLER, destination=None, created_ts=1000):
+        return {
+            "offer_index": offer_index,
+            "nft_id": TRAIT_NFT[:-1] + offer_index[0],
+            "kind": "trait",
+            "seller": seller,
+            "amount_drops": None,
+            "amount_brix": brix,
+            "destination": destination,
+            "slot": slot,
+            "value": value,
+            "created_ts": created_ts,
+        }
+
+    def test_groups_by_slot_value_with_count_and_floor(self):
+        rows = [
+            self._row("A" * 64, "Hat", "Wizard Hat", "12"),
+            self._row("B" * 64, "Hat", "Wizard Hat", "5"),
+            self._row("C" * 64, "Hat", "Wizard Hat", "9.5"),
+            self._row("D" * 64, "Eyes", "Hypno", "7"),
+        ]
+        groups = market_store.group_trait_rows(rows)
+        assert len(groups) == 2
+        hat = next(g for g in groups if g["value"] == "Wizard Hat")
+        assert hat["count"] == 3
+        assert hat["floor_brix"] == "5"
+        # The group row IS the cheapest listing, so a client that ignores the
+        # group fields still renders/buys a real offer.
+        assert hat["offer_index"] == "B" * 64
+        assert hat["amount_brix"] == "5"
+        # offers: full listing dicts, cheapest first, ties by offer_index.
+        assert [o["offer_index"] for o in hat["offers"]] == ["B" * 64, "C" * 64, "A" * 64]
+        eyes = next(g for g in groups if g["value"] == "Hypno")
+        assert eyes["count"] == 1 and eyes["offers"][0]["offer_index"] == "D" * 64
+
+    def test_floor_compares_numerically_not_lexically(self):
+        rows = [
+            self._row("A" * 64, "Hat", "Wizard Hat", "10"),
+            self._row("B" * 64, "Hat", "Wizard Hat", "9"),
+        ]
+        (hat,) = market_store.group_trait_rows(rows)
+        assert hat["floor_brix"] == "9"
+
+    def test_external_rows_are_never_grouped(self):
+        rows = [
+            self._row("A" * 64, "Hat", "Wizard Hat", "5"),
+            self._row("B" * 64, "Hat", "Wizard Hat", "5", destination="rBROKER"),
+        ]
+        groups = market_store.group_trait_rows(rows)
+        assert len(groups) == 2
+        ext = next(g for g in groups if g["destination"] == "rBROKER")
+        assert ext["count"] == 1 and len(ext["offers"]) == 1
+
+    def test_preserves_first_seen_order_of_groups(self):
+        # The handler sorts BEFORE grouping; grouping must keep the order in
+        # which each key first appears so the sort is honoured at group level.
+        rows = [
+            self._row("A" * 64, "Eyes", "Hypno", "7"),
+            self._row("B" * 64, "Hat", "Wizard Hat", "5"),
+            self._row("C" * 64, "Eyes", "Hypno", "8"),
+        ]
+        groups = market_store.group_trait_rows(rows)
+        assert [g["value"] for g in groups] == ["Hypno", "Wizard Hat"]
+
+    def test_input_rows_not_mutated(self):
+        rows = [self._row("A" * 64, "Hat", "Wizard Hat", "5")]
+        market_store.group_trait_rows(rows)
+        assert "offers" not in rows[0] and "count" not in rows[0]
+
+    def test_legacy_xrp_trait_row_never_merges_into_brix_group(self):
+        # A legacy XRP-denominated trait listing (awaiting the backfill's
+        # stale-close) shares (slot, value) with BRIX rows but is unbuyable
+        # (410) and incomparable in price — it must stay its own row and can
+        # never become a group head with a None floor.
+        legacy = self._row("A" * 64, "Hat", "Wizard Hat", None)
+        legacy["amount_drops"] = 1  # 1 drop < any BRIX value if compared raw
+        rows = [legacy, self._row("B" * 64, "Hat", "Wizard Hat", "5")]
+        groups = market_store.group_trait_rows(rows)
+        assert len(groups) == 2
+        brix = next(g for g in groups if g["amount_brix"] == "5")
+        assert brix["count"] == 1 and brix["floor_brix"] == "5"
+        assert [o["offer_index"] for o in brix["offers"]] == ["B" * 64]
+
+    def test_offers_are_capped_but_count_is_total(self):
+        rows = [self._row(chr(65 + i) * 64, "Hat", "Wizard Hat", str(i + 1)) for i in range(30)]
+        (hat,) = market_store.group_trait_rows(rows, max_offers=25)
+        assert hat["count"] == 30
+        assert len(hat["offers"]) == 25
+        assert hat["offers"][0]["amount_brix"] == "1" and hat["offers"][-1]["amount_brix"] == "25"
+        assert hat["floor_brix"] == "1"

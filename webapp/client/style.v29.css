@@ -1111,3 +1111,21 @@ button.link.qr-toggle { font-size: .85rem; opacity: .8; }
   margin: 14px 0;
 }
 .wallet-picker[hidden] { display: none; }
+/* #481: grouped trait cards — count badge on the tile, per-offer list in the
+   detail overlay. */
+.market-card-count {
+  position: absolute; top: 6px; left: 6px;
+  background: var(--yellow); color: #111; font-size: .62rem; font-weight: 800;
+  padding: 2px 6px; border-radius: 999px; pointer-events: none;
+}
+.listing-offers { margin: 6px 0 2px; text-align: left; }
+.listing-offers-list { list-style: none; margin: 4px 0 0; padding: 0; max-height: 160px; overflow-y: auto; }
+.listing-offers-list li + li { margin-top: 4px; }
+.listing-offer-row {
+  display: flex; justify-content: space-between; align-items: center; gap: 8px;
+  width: 100%; margin: 0; padding: 6px 10px; border-radius: 8px;
+  background: rgba(255,255,255,.05); border: 1px solid transparent; font: inherit; cursor: pointer;
+}
+.listing-offer-row .market-card-price { margin: 0; display: inline; }
+.listing-offer-row.active { border-color: var(--yellow); cursor: default; }
+.listing-offer-seller { color: var(--muted); font-size: .68rem; }
