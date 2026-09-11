@@ -2864,3 +2864,100 @@ def test_cancel_status_bid_target_closes_bid(onchain_env, market_wallet, monkeyp
     conn.close()
     assert row["is_live"] == 0
     assert row["closed_reason"] == "cancelled"
+
+
+# --- #481: group=1 collapses identical (slot, value) trait listings ---
+
+
+def _seed_grouped_traits(onchain_path):
+    """3× Hat/Wizard Hat (12, 5, 9.5 BRIX, distinct tokens) + 1× Eyes/Hypno (7)."""
+    conn = _reopen(onchain_path)
+    specs = [
+        ("A", "Hat", "Wizard Hat", "12"),
+        ("B", "Hat", "Wizard Hat", "5"),
+        ("C", "Hat", "Wizard Hat", "9.5"),
+        ("D", "Eyes", "Hypno", "7"),
+    ]
+    for tag, slot, value, brix in specs:
+        nft_id = TRAIT1[:-1] + tag.lower()
+        upsert_trait_token(conn, nft_id, SELLER, slot, value)
+        _seed_listing(
+            conn,
+            offer_index=tag * 64,
+            nft_id=nft_id,
+            kind="trait",
+            slot=slot,
+            value=value,
+            amount_drops=None,
+            amount_brix=brix,
+        )
+    conn.commit()
+    conn.close()
+
+
+def _browse(query):
+    req = _mocked_request("GET", f"/api/market/listings?{query}")
+    resp = _run(server.handle_market_listings(req))
+    assert resp.status == 200, resp.text
+    return _run(_read_json(resp))
+
+
+def test_browse_trait_group_collapses_duplicates(onchain_env):
+    _seed_grouped_traits(onchain_env)
+    body = _browse("kind=trait&group=1&sort=price_asc")
+    assert body["total"] == 2
+    assert [r["value"] for r in body["rows"]] == ["Wizard Hat", "Hypno"]  # floors 5 < 7
+    hat = body["rows"][0]
+    assert hat["count"] == 3
+    assert hat["floor_brix"] == "5"
+    assert hat["amount_brix"] == "5" and hat["offer_index"] == "B" * 64
+    assert [o["offer_index"] for o in hat["offers"]] == ["B" * 64, "C" * 64, "A" * 64]
+    # offers are fully serialized listing rows (seller/buyable/image present).
+    assert all(
+        o["seller"] == SELLER and o["buyable"] is True and "image" in o for o in hat["offers"]
+    )
+    assert body["rows"][1]["count"] == 1
+
+
+def test_browse_trait_group_price_desc_orders_by_ceiling(onchain_env):
+    _seed_grouped_traits(onchain_env)
+    body = _browse("kind=trait&group=1&sort=price_desc")
+    assert [r["value"] for r in body["rows"]] == ["Wizard Hat", "Hypno"]  # 12 > 7
+    # The group row is still the cheapest offer, regardless of sort.
+    assert body["rows"][0]["amount_brix"] == "5"
+
+
+def test_browse_trait_group_paginates_over_groups(onchain_env):
+    _seed_grouped_traits(onchain_env)
+    body = _browse("kind=trait&group=1&limit=1&offset=1")
+    assert body["total"] == 2
+    assert len(body["rows"]) == 1 and body["rows"][0]["value"] == "Hypno"
+
+
+def test_browse_trait_group_price_filter_applies_per_offer(onchain_env):
+    _seed_grouped_traits(onchain_env)
+    body = _browse("kind=trait&group=1&max_brix=9")
+    # Hat keeps only the 5 BRIX offer; Hypno (7) survives.
+    by_value = {r["value"]: r for r in body["rows"]}
+    assert by_value["Wizard Hat"]["count"] == 1
+    assert by_value["Hypno"]["count"] == 1
+    body = _browse("kind=trait&group=1&max_brix=6")
+    assert [r["value"] for r in body["rows"]] == ["Wizard Hat"]  # Hypno group dropped entirely
+
+
+def test_browse_trait_without_group_is_unchanged(onchain_env):
+    _seed_grouped_traits(onchain_env)
+    body = _browse("kind=trait")
+    assert body["total"] == 4
+    assert all("count" not in r and "offers" not in r for r in body["rows"])
+
+
+def test_browse_character_ignores_group(onchain_env):
+    conn = _reopen(onchain_env)
+    _seed_character(conn, CHAR1, SELLER, 1)
+    _seed_listing(conn)
+    conn.commit()
+    conn.close()
+    body = _browse("kind=character&group=1")
+    assert body["total"] == 1
+    assert "count" not in body["rows"][0] and "offers" not in body["rows"][0]

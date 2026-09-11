@@ -235,3 +235,18 @@ def test_shop_filter_wiring():
     assert "marketPure.shopSlotCounts(shopState.items)" in js
     assert "el('shop-search').oninput" in js
     assert "el('shop-sort').onchange" in js
+
+
+def test_grouped_trait_cards_wiring():
+    # #481: trait browse asks the server to collapse duplicate (slot, value)
+    # listings; the card shows a count badge and the detail overlay lists the
+    # individual offers so a buyer can still pick a specific one.
+    js = _read("app.js")
+    assert "group: isTrait" in js
+    assert "market-card-count" in js
+    assert "function renderListingOffers(" in js
+    html = _read("index.html")
+    assert 'id="listing-detail-offers"' in html
+    css = _stylesheet()
+    assert ".market-card-count" in css
+    assert ".listing-offers" in css

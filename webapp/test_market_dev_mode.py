@@ -197,3 +197,19 @@ def test_trait_list_wizard_dev_mode_progresses_to_listed():
         if state == "listed":
             break
     assert state == "listed"
+
+
+@pytest.mark.filterwarnings("ignore::aiohttp.web_exceptions.NotAppKeyWarning")
+def test_listings_dev_mode_trait_group():
+    # #481: dev mode honours group=1 with the same row shape as the real path.
+    req = make_mocked_request("GET", "/api/market/listings?kind=trait&group=1&sort=price_asc")
+    resp = _run(server.handle_market_listings(req))
+    assert resp.status == 200
+    body = json.loads(resp.body)
+    assert body["rows"]
+    keys = [(r["slot"], r["value"]) for r in body["rows"]]
+    assert len(keys) == len(set(keys))  # one row per (slot, value)
+    for r in body["rows"]:
+        assert r["count"] >= 1 and r["floor_brix"] == r["amount_brix"]
+        assert [o["offer_index"] for o in r["offers"]][0] == r["offer_index"]
+    assert body["total"] == len(body["rows"])

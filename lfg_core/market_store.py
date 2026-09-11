@@ -330,6 +330,43 @@ def listing_price(row: Any) -> Decimal:
     return Decimal(row["amount_drops"] or 0)
 
 
+def group_trait_rows(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """#481: collapse identical (slot, value) trait listings into one row per
+    key so the browse grid isn't a wall of near-duplicate cards.
+
+    Each group row is a COPY of the group's cheapest listing (so a client
+    that ignores the group fields still renders and buys a real offer),
+    plus `count`, `floor_brix` (the cheapest price, as the row's own
+    `amount_brix` string) and `offers` — every listing in the group as its
+    own dict, cheapest first, ties by offer_index. External (destination-
+    locked, #131) rows are never merged: they are read-only price discovery
+    with their own marketplace link, so each keeps its own row.
+
+    Groups keep the order in which their key first appears, so a caller that
+    sorts BEFORE grouping gets that sort honoured at group level (price_asc
+    → groups ordered by floor; price_desc → by ceiling, which is what a
+    "most expensive first" browse expects). Input rows are not mutated.
+    """
+    buckets: dict[tuple[Any, ...], list[dict[str, Any]]] = {}
+    for r in rows:
+        dest = r.get("destination")
+        key: tuple[Any, ...] = (
+            (r.get("slot"), r.get("value"), None)
+            if not dest
+            else (r.get("slot"), r.get("value"), r["offer_index"])
+        )
+        buckets.setdefault(key, []).append(r)
+    out: list[dict[str, Any]] = []
+    for members in buckets.values():
+        offers = sorted(members, key=lambda r: (listing_price(r), r["offer_index"]))
+        head = dict(offers[0])
+        head["count"] = len(offers)
+        head["floor_brix"] = offers[0].get("amount_brix")
+        head["offers"] = [dict(o) for o in offers]
+        out.append(head)
+    return out
+
+
 def _attributes_match(attrs: list[dict[str, str]], filters: dict[str, list[str]]) -> bool:
     """AND across slots in `filters`, OR within a slot's value list. `attrs`
     is a list of {"trait_type": ..., "value": ...} entries (the normalized
