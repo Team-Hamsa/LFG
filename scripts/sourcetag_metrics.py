@@ -26,6 +26,7 @@ import re
 import sqlite3
 import subprocess
 import sys
+from collections.abc import Iterable, Mapping
 from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
@@ -33,7 +34,8 @@ from typing import Any
 REPO_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, REPO_ROOT)
 
-from lfg_core import config, history_store, system_wallets  # noqa: E402
+from lfg_core import config, funding, history_store, system_wallets  # noqa: E402
+from lfg_core.db_path import app_db_path  # noqa: E402
 
 # The operator's own wallets. The backend-signing issuer is resolved from
 # config at call time instead of being listed here, so rotating the signing
@@ -100,7 +102,75 @@ def build_daily(rows: list[tuple[str, int]]) -> list[dict[str, Any]]:
     return out
 
 
-def collect(db_path: str, network: str) -> dict[str, Any]:
+def dedup_by_funder(wallets: Iterable[str], funders: Mapping[str, str | None]) -> int:
+    """Count distinct ACTORS among `wallets`, collapsing wallet farms.
+
+    Two wallets activated by the same non-exchange funder are one person
+    (the #461 sybil rule, shared with `sponsored_mint.reserve_if_eligible`).
+    A funder in `funding.EXCHANGES` aggregates unrelated customers and is
+    never a farm signal, so exchange-funded wallets each count separately —
+    and so does a wallet with NO funder row at all. That last case is a
+    deliberate fail-OPEN, the opposite of the admission gate: missing funder
+    coverage must never silently shrink a published number.
+
+    A funder that is itself one of the counted wallets collapses into the
+    same actor as the wallets it funded, so a farm's parent wallet doesn't
+    count twice.
+    """
+    keys = set()
+    for wallet in wallets:
+        funder = funders.get(wallet)
+        if funder and funder not in funding.EXCHANGES:
+            keys.add(funder)
+        else:
+            keys.add(wallet)
+    return len(keys)
+
+
+class AppDBError(RuntimeError):
+    """The app DB (source of `wallet_funders`) could not be read.
+
+    Distinct from a history-archive failure so the diagnostic names the
+    database that actually failed — the two are different files, and the
+    archive is usually fine when this is raised (CodeRabbit on #490).
+    """
+
+    def __init__(self, path: str) -> None:
+        super().__init__(f"failed to read app DB {path}")
+        self.path = path
+
+
+def load_funders(app_db: str | None) -> dict[str, str | None]:
+    """`wallet -> activation funder` from the app DB, or {} if unavailable.
+
+    Funder rows live in the app DB (`lfg_nfts.db`), NOT in the history
+    archive this script otherwise reads. A missing file or a DB that simply
+    has no `wallet_funders` table yet is not an error: dedup falls open to
+    the raw wallet count.
+
+    Every OTHER sqlite failure (corruption, I/O, an incompatible schema)
+    raises `AppDBError`, so `main()` exits 2 naming the app DB. Swallowing those would
+    be indistinguishable from "no funder coverage" and would publish
+    `unique_actors == unique_wallets` with no operational signal at all
+    (Greptile P2 on #490).
+    """
+    if not app_db or not os.path.exists(app_db):
+        return {}
+    try:
+        conn = sqlite3.connect(app_db)
+        try:
+            if not conn.execute(
+                "SELECT 1 FROM sqlite_master WHERE type='table' AND name='wallet_funders'"
+            ).fetchone():
+                return {}
+            return dict(conn.execute("SELECT wallet, funder FROM wallet_funders"))
+        finally:
+            conn.close()
+    except sqlite3.Error as exc:
+        raise AppDBError(app_db) from exc
+
+
+def collect(db_path: str, network: str, app_db: str | None = None) -> dict[str, Any]:
     """Compute the full metrics payload from a history archive.
 
     All reads run inside one explicit read transaction so they observe a
@@ -126,11 +196,15 @@ def collect(db_path: str, network: str) -> dict[str, Any]:
         # NOTE: the exclusion set applies here and ONLY here. `total`, `by_type`
         # and `daily` deliberately count backend-signed rows too — that is the
         # project's tagged volume regardless of who pressed the button.
-        unique = conn.execute(
-            f"SELECT COUNT(DISTINCT account) FROM xrpl_txs"
-            f" WHERE source_tag = ? AND account NOT IN ({placeholders})",
-            (tag, *excluded),
-        ).fetchone()[0]
+        accounts = [
+            row[0]
+            for row in conn.execute(
+                f"SELECT DISTINCT account FROM xrpl_txs"
+                f" WHERE source_tag = ? AND account NOT IN ({placeholders})",
+                (tag, *excluded),
+            )
+        ]
+        unique = len(accounts)
 
         by_type = {
             row[0]: row[1]
@@ -199,6 +273,10 @@ def collect(db_path: str, network: str) -> dict[str, Any]:
         "network": network,
         "total_tagged_txs": total,
         "unique_wallets": unique,
+        # Same wallet set, collapsed by activation funder (#461 rule). This
+        # is the number the hackathon leaderboards report; `unique_wallets`
+        # stays published alongside it so the raw/deduped gap is visible.
+        "unique_actors": dedup_by_funder(accounts, load_funders(app_db)),
         "by_type": by_type,
         "daily": daily,
         "excluded": excluded,
@@ -235,6 +313,7 @@ ALLOWED_KEYS = frozenset(
         "network",
         "total_tagged_txs",
         "unique_wallets",
+        "unique_actors",
         "by_type",
         "daily",
         "excluded",
@@ -282,7 +361,7 @@ def validate_payload(payload: dict[str, Any]) -> None:
         if not isinstance(payload[key], int) or isinstance(payload[key], bool):
             raise ValueError(f"{key} must be an int")
 
-    for key in ("source_tag", "total_tagged_txs", "unique_wallets"):
+    for key in ("source_tag", "total_tagged_txs", "unique_wallets", "unique_actors"):
         _int(key)
 
     if not _NETWORK_RE.fullmatch(str(payload["network"])):
@@ -412,6 +491,15 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("--network", default=config.XRPL_NETWORK)
     ap.add_argument("--db", default=None, help="override the history DB path")
     ap.add_argument(
+        "--app-db",
+        default=None,
+        help=(
+            "override the app DB path (source of wallet_funders, which dedups "
+            "unique_actors). A missing DB/table is not an error: dedup falls open "
+            "and unique_actors equals unique_wallets."
+        ),
+    )
+    ap.add_argument(
         "--out",
         default=None,
         help=(
@@ -433,7 +521,10 @@ def main(argv: list[str] | None = None) -> int:
         return 2
 
     try:
-        payload = collect(db_path, args.network)
+        payload = collect(db_path, args.network, app_db=args.app_db or app_db_path(args.network))
+    except AppDBError as exc:
+        print(f"{exc}: {exc.__cause__}", file=sys.stderr)
+        return 2
     except sqlite3.Error as exc:
         print(f"failed to read {db_path}: {exc}", file=sys.stderr)
         return 2
@@ -448,7 +539,8 @@ def main(argv: list[str] | None = None) -> int:
         else:
             print(
                 f"{payload['total_tagged_txs']} tagged txs · "
-                f"{payload['unique_wallets']} unique wallets → (no local write; --push "
+                f"{payload['unique_actors']} actors ({payload['unique_wallets']} wallets) "
+                f"→ (no local write; --push "
                 "with no explicit --out never touches a checkout)"
             )
     else:
@@ -459,7 +551,7 @@ def main(argv: list[str] | None = None) -> int:
         else:
             print(
                 f"{payload['total_tagged_txs']} tagged txs · "
-                f"{payload['unique_wallets']} unique wallets → {out}"
+                f"{payload['unique_actors']} actors ({payload['unique_wallets']} wallets) → {out}"
             )
 
     if args.push:
