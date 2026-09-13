@@ -31,7 +31,7 @@ import * as harvestPure from './harvest_pure.js?v=2';
 // Xaman sign-request delivery decisions (#142): mobile-primary deep link vs
 // desktop-primary QR is a pure truth table, Node-testable
 // (tests/test_signdelivery_pure_js.py); applySignDelivery() below is the glue.
-import * as signDeliveryPure from './signdelivery_pure.js?v=2';
+import * as signDeliveryPure from './signdelivery_pure.js?v=3';
 // Daily BRIX drip card (#48): what the card renders and how each claim error
 // code is handled are pure decisions, Node-testable (tests/test_brix_pure_js.py);
 // loadBrix()/claimBrix() below are the glue.
@@ -174,10 +174,11 @@ function qrUrl(data) {
 // can fire over any panel; sign-in and wallet-link render their pairing QR
 // INLINE in their own panels (renderSignin/renderLink), same slots as Xaman. The deep-link
 // wrapper is the WalletConnect-standard construction on Joey's registered
-// `joey://` native scheme (its explorer listing; Joey has no desktop app, so
-// on desktop the QR is the whole story).
+// `joey://settings` native scheme (its explorer listing; Joey has no desktop
+// app, so on desktop the QR is the whole story). Built in signdelivery_pure.js
+// so the exact route is pinned by tests.
 function joeyDeepLink(uri) {
-  return `joey://wc?uri=${encodeURIComponent(uri)}`;
+  return signDeliveryPure.joeyDeepLink(uri);
 }
 
 // Pending Joey sign-in pairing's cancel: invoked when the user switches

@@ -450,7 +450,7 @@
 
   <!-- Branded Joey Wallet pairing overlay (#447): replaces the stock
        WalletConnect modal. The QR is our own /api/qr.png rendering of the
-       wc: pairing URI; the open button carries Joey's joey://wc deep link.
+       wc: pairing URI; the open button carries Joey's joey://settings/wc deep link.
        applySignDelivery drives QR-vs-link exactly like every Xaman panel. -->
   <div id="wc-qr-overlay" class="confirm-overlay" role="dialog" aria-modal="true"
        aria-labelledby="wc-qr-title" hidden>
@@ -475,6 +475,6 @@
        Telegram (window.Telegram stays undefined); loaded BEFORE app.js so the
        dual-mode boot can detect the Telegram context. -->
   <script src="telegram-web-app.js"></script>
-  <script type="module" src="app.js?v=87"></script>
+  <script type="module" src="app.js?v=88"></script>
 </body>
 </html>
