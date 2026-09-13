@@ -688,7 +688,16 @@ chain on every request.
   backend activity reclassifies as an external wallet and permanently
   inflates `unique_wallets`; `total_tagged_txs` and `by_type`
   deliberately do not (backend-signed mints are still the project's tagged
-  volume). `xrp_payment_volume` (`in_drops`/`out_drops`/`other_drops`) sums
+  volume). **`unique_actors` (#490)** is that same wallet set collapsed by
+  activation funder — the #461 sybil rule (`funding.EXCHANGES`-funded and
+  funder-less wallets each still count as one) — and is the number the badge
+  renders, since it matches what the hackathon leaderboards report;
+  `unique_wallets` stays published beside it so the raw/deduped gap is
+  visible. Funder rows live in the **app DB** (`wallet_funders`), not the
+  history archive, and a missing row fails **open** (counts as its own
+  actor), so keep coverage current with `scripts/backfill_wallet_funders.py
+  --network mainnet --from-history` — otherwise the deduped number quietly
+  drifts back toward the raw one. `xrp_payment_volume` (`in_drops`/`out_drops`/`other_drops`) sums
   `meta.delivered_amount` of tagged `tesSUCCESS` XRP `Payment`s, split by
   whether the project's wallets are receiver / sender / neither — XRP only,
   IOU (BRIX/LFGO) payments are NOT valued; it exists to be compared against

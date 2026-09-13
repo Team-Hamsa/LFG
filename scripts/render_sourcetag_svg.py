@@ -65,7 +65,10 @@ def _fallback_label(type_name: str) -> str:
 
 def build_svg(data: dict[str, Any]) -> str:
     """Sticker-style badge: two stat tiles, a type breakdown, a daily sparkline."""
-    wallets = int(data["unique_wallets"])
+    # Prefer the funder-deduped actor count (one wallet farm = one person),
+    # which is what the hackathon leaderboards report. Snapshots published
+    # before that field existed still render off the raw wallet count.
+    wallets = int(data.get("unique_actors", data["unique_wallets"]))
     total = int(data["total_tagged_txs"])
     tag = data["source_tag"]
     by_type = data.get("by_type") or {}
@@ -87,7 +90,7 @@ def build_svg(data: dict[str, Any]) -> str:
 
     label = (
         f"XRPL source tag {tag}: {fmt(total)} tagged transactions "
-        f"from {fmt(wallets)} unique wallets"
+        f"from {fmt(wallets)} unique holders"
     )
 
     parts = [open_svg(w, h, label)]
@@ -100,7 +103,7 @@ def build_svg(data: dict[str, Any]) -> str:
         72,
         area_w,
         [
-            (fmt(wallets), "unique wallets", BLUE),
+            (fmt(wallets), "unique holders", BLUE),
             (fmt(total), "tagged transactions", ORANGE),
         ],
     )

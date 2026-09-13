@@ -42,6 +42,7 @@ def _valid_payload(**overrides):
         "network": "testnet",
         "total_tagged_txs": 5,
         "unique_wallets": 2,
+        "unique_actors": 2,
         "by_type": {"Payment": 5},
         "daily": [{"date": "2026-07-20", "count": 5}],
         "excluded": sorted(stm.OPERATOR_WALLETS),
@@ -562,3 +563,76 @@ def test_xrp_payment_volume_skips_non_numeric_delivered_amount(tmp_path):
         "out_drops": 0,
         "other_drops": 0,
     }
+
+
+# --- funder dedup (#490): unique_actors collapses one-operator wallet farms ---
+
+EXCHANGE = next(iter(__import__("lfg_core.funding", fromlist=["x"]).EXCHANGES))
+FARM_FUNDER = "rFarmFunderrrrrrrrrrrrrrrrrrrrrrrr"
+
+
+def _app_db(tmp_path, rows):
+    """rows: (wallet, funder|None). Builds an app DB with wallet_funders."""
+    import sqlite3 as _sq
+
+    from lfg_core import funding
+
+    path = str(tmp_path / "lfg_nfts.db")
+    conn = _sq.connect(path)
+    funding.ensure_schema(conn)
+    for wallet, funder in rows:
+        funding.record_funder(conn, wallet, funder, 1)
+    conn.commit()
+    conn.close()
+    return path
+
+
+def test_dedup_by_funder_collapses_wallets_sharing_a_non_exchange_funder():
+    wallets = ["rA", "rB", "rC"]
+    funders = {"rA": FARM_FUNDER, "rB": FARM_FUNDER, "rC": "rOther"}
+    assert stm.dedup_by_funder(wallets, funders) == 2
+
+
+def test_dedup_by_funder_keeps_exchange_funded_wallets_separate():
+    wallets = ["rA", "rB"]
+    assert stm.dedup_by_funder(wallets, {"rA": EXCHANGE, "rB": EXCHANGE}) == 2
+
+
+def test_dedup_by_funder_counts_wallets_with_no_funder_row_individually():
+    assert stm.dedup_by_funder(["rA", "rB"], {}) == 2
+
+
+def test_dedup_by_funder_folds_a_funder_that_is_itself_a_tagged_wallet():
+    # The farm's parent wallet also transacted: parent + children are one actor.
+    wallets = ["rParent", "rChild1", "rChild2"]
+    funders = {"rChild1": "rParent", "rChild2": "rParent"}
+    assert stm.dedup_by_funder(wallets, funders) == 1
+
+
+def test_collect_reports_unique_actors_deduped_by_funder(tmp_path):
+    path = _db(
+        tmp_path,
+        [
+            ("h1", DAY0, "Payment", USER_A, TAG),
+            ("h2", DAY0, "Payment", USER_B, TAG),
+        ],
+    )
+    app = _app_db(tmp_path, [(USER_A, FARM_FUNDER), (USER_B, FARM_FUNDER)])
+
+    out = stm.collect(path, "testnet", app_db=app)
+
+    assert out["unique_wallets"] == 2
+    assert out["unique_actors"] == 1
+
+
+def test_collect_unique_actors_falls_open_to_raw_count_without_an_app_db(tmp_path):
+    path = _db(tmp_path, [("h1", DAY0, "Payment", USER_A, TAG)])
+
+    out = stm.collect(path, "testnet", app_db=str(tmp_path / "nope.db"))
+
+    assert out["unique_actors"] == out["unique_wallets"] == 1
+
+
+def test_validate_payload_requires_unique_actors_to_be_an_int():
+    with pytest.raises(ValueError):
+        stm.validate_payload(_valid_payload(unique_actors="1"))

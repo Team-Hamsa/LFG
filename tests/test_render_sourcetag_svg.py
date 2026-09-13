@@ -254,3 +254,15 @@ def test_main_fails_cleanly_on_structurally_malformed_json(tmp_path, monkeypatch
 
     assert rs.main() != 0
     assert not dest.exists()
+
+
+def test_wallet_tile_renders_the_deduped_actor_count_when_present():
+    svg = rs.build_svg(dict(DATA, unique_wallets=16, unique_actors=9))
+    assert ">9<" in svg
+    assert ">16<" not in svg
+
+
+def test_wallet_tile_falls_back_to_unique_wallets_on_a_legacy_snapshot():
+    # A snapshot published before unique_actors existed must still render.
+    legacy = {k: v for k, v in DATA.items() if k != "unique_actors"}
+    assert ">16<" in rs.build_svg(legacy)

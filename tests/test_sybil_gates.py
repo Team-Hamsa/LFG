@@ -308,3 +308,39 @@ def test_device_key_duplicate_audit_only_when_a_claim_changed(tmp_path):
             "SELECT count(*) FROM free_mint_audit WHERE action='device_key_duplicate'"
         ).fetchone()[0]
     assert audit == 0
+
+
+def test_backfill_wallet_funders_covers_tagged_accounts_from_history(tmp_path, monkeypatch):
+    """#490: the SourceTag badge dedups every tagged signer, not just
+    free-mint claimants, so the backfill must be able to sweep the archive."""
+    import importlib
+    import sys
+
+    from lfg_core import config as cfg
+    from lfg_core import history_store
+
+    db = str(tmp_path / "app.db")
+    history = str(tmp_path / "history.db")
+    conn = history_store.init_history_db(history)
+    conn.executemany(
+        "INSERT INTO xrpl_txs (tx_hash, ledger_index, close_time, tx_type,"
+        " account, source_tag, raw_json) VALUES (?,1,1,'Payment',?,?,'{}')",
+        [("h1", "rTagged1", cfg.SOURCE_TAG), ("h2", "rUntagged", None)],
+    )
+    conn.commit()
+    conn.close()
+
+    script = importlib.import_module("scripts.backfill_wallet_funders")
+    monkeypatch.setattr(script.config, "XRPL_NETWORK", "mainnet")
+    monkeypatch.setattr(script.funding, "lookup_funder", lambda w: (FARM_FUNDER, 7))
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        ["backfill", "--network", "mainnet", "--app-db", db, "--from-history", history],
+    )
+    assert script.main() == 0
+
+    with sqlite3.connect(db) as conn:
+        assert funding.cached_funder(conn, "rTagged1") == FARM_FUNDER
+        # an untagged signer is not part of the published metric
+        assert funding.cached_funder(conn, "rUntagged") is None
