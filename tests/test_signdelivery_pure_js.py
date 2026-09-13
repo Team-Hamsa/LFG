@@ -236,7 +236,10 @@ def test_wc_outcome_terminal_prefers_state_over_code():
 def test_joey_deep_link_uses_registered_settings_route():
     uri = "wc:abc123@2?relay-protocol=irn&symKey=deadbeef"
     link = run_js(f"M.joeyDeepLink({json.dumps(uri)})")
-    assert link == "joey://settings/wc?uri=" + "wc%3Aabc123%402%3Frelay-protocol%3Dirn%26symKey%3Ddeadbeef"
+    assert (
+        link
+        == "joey://settings/wc?uri=" + "wc%3Aabc123%402%3Frelay-protocol%3Dirn%26symKey%3Ddeadbeef"
+    )
 
 
 def test_joey_deep_link_round_trips_the_pairing_uri():
