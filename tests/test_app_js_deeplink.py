@@ -71,7 +71,7 @@ def test_dynamic_sign_panels_route_through_apply_sign_delivery():
 
 def test_cache_busters_bumped():
     html = _read("index.html")
-    assert "app.js?v=87" in html
+    assert "app.js?v=88" in html
 
 
 # ---------------------------------------------------------------------------
@@ -139,7 +139,11 @@ def test_wc_pairing_uri_is_rendered_by_the_branded_overlay_not_the_stock_modal()
     fn = src[start : src.index("function hideWcQr(", start)]
     assert "applySignDelivery(" in fn
     assert "joeyDeepLink(uri)" in fn
-    assert "joey://wc?uri=" in src  # Joey's registered native scheme wrapper
+    # Joey's registered native scheme is `joey://settings`; the route is built
+    # (and pinned) in signdelivery_pure.js — a bare joey://wc?uri= is rejected.
+    assert "joey://wc?uri=" not in src
+    assert "signDeliveryPure.joeyDeepLink(uri)" in src
+    assert "const JOEY_NATIVE = 'joey://settings'" in _read("signdelivery_pure.js")
     # every connect() that can mint a NEW pairing routes its URI to the overlay
     assert src.count("onUri:") >= 3  # sign-in, wallet-link, lost-pairing re-attach
 

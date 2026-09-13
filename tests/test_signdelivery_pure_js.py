@@ -222,3 +222,26 @@ def test_wc_outcome_terminal_prefers_state_over_code():
     # A 202 carries BOTH a pending state and the tx_not_found code; the state
     # is the authority, or the client would retire a still-pending row.
     assert run_js("M.wcOutcomeTerminal({state: 'pending', code: 'tx_not_found'})") is False
+
+
+# ---------------------------------------------------------------------------
+# joeyDeepLink(wcUri) — Joey's WalletConnect explorer listing registers the
+# native scheme `joey://settings` (no universal link). Reown's formatNativeUrl
+# builds `<native>/wc?uri=<encoded>` from it, so the link the (retired) modal
+# opened was `joey://settings/wc?uri=…`. A bare `joey://wc?uri=…` opens the app
+# but Joey rejects the route with "invalid deep link" (iPhone Safari, 2026-09-13).
+# ---------------------------------------------------------------------------
+
+
+def test_joey_deep_link_uses_registered_settings_route():
+    uri = "wc:abc123@2?relay-protocol=irn&symKey=deadbeef"
+    link = run_js(f"M.joeyDeepLink({json.dumps(uri)})")
+    assert link == "joey://settings/wc?uri=" + "wc%3Aabc123%402%3Frelay-protocol%3Dirn%26symKey%3Ddeadbeef"
+
+
+def test_joey_deep_link_round_trips_the_pairing_uri():
+    uri = "wc:ff00@2?relay-protocol=irn&symKey=00&expiryTimestamp=1"
+    out = run_js(
+        f"new URL(M.joeyDeepLink({json.dumps(uri)}).replace('joey://', 'https://x/')).searchParams.get('uri')"
+    )
+    assert out == uri

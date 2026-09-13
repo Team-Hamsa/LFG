@@ -55,6 +55,17 @@ export function autoOpenOutcome(seen, link, launched) {
 
 const WC_SCHEME = 'lfg-wc://';
 
+// Joey Wallet's deep link for a WalletConnect pairing URI. Joey's explorer
+// listing registers the native scheme `joey://settings` (no universal link);
+// Reown's formatNativeUrl derives `<native>/wc?uri=<encoded>` from it, so this
+// is exactly what the retired wallet modal opened. A bare `joey://wc?uri=…`
+// launches the app but Joey rejects the route ("invalid deep link").
+const JOEY_NATIVE = 'joey://settings';
+
+export function joeyDeepLink(wcUri) {
+  return `${JOEY_NATIVE}/wc?uri=${encodeURIComponent(wcUri)}`;
+}
+
 export function isWcLink(link) {
   return typeof link === 'string' && link.startsWith(WC_SCHEME);
 }
