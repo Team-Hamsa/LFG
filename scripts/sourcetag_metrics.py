@@ -127,6 +127,19 @@ def dedup_by_funder(wallets: Iterable[str], funders: Mapping[str, str | None]) -
     return len(keys)
 
 
+class AppDBError(RuntimeError):
+    """The app DB (source of `wallet_funders`) could not be read.
+
+    Distinct from a history-archive failure so the diagnostic names the
+    database that actually failed — the two are different files, and the
+    archive is usually fine when this is raised (CodeRabbit on #490).
+    """
+
+    def __init__(self, path: str) -> None:
+        super().__init__(f"failed to read app DB {path}")
+        self.path = path
+
+
 def load_funders(app_db: str | None) -> dict[str, str | None]:
     """`wallet -> activation funder` from the app DB, or {} if unavailable.
 
@@ -136,22 +149,25 @@ def load_funders(app_db: str | None) -> dict[str, str | None]:
     the raw wallet count.
 
     Every OTHER sqlite failure (corruption, I/O, an incompatible schema)
-    propagates, so `main()` exits 2 with a diagnostic. Swallowing those would
+    raises `AppDBError`, so `main()` exits 2 naming the app DB. Swallowing those would
     be indistinguishable from "no funder coverage" and would publish
     `unique_actors == unique_wallets` with no operational signal at all
     (Greptile P2 on #490).
     """
     if not app_db or not os.path.exists(app_db):
         return {}
-    conn = sqlite3.connect(app_db)
     try:
-        if not conn.execute(
-            "SELECT 1 FROM sqlite_master WHERE type='table' AND name='wallet_funders'"
-        ).fetchone():
-            return {}
-        return dict(conn.execute("SELECT wallet, funder FROM wallet_funders"))
-    finally:
-        conn.close()
+        conn = sqlite3.connect(app_db)
+        try:
+            if not conn.execute(
+                "SELECT 1 FROM sqlite_master WHERE type='table' AND name='wallet_funders'"
+            ).fetchone():
+                return {}
+            return dict(conn.execute("SELECT wallet, funder FROM wallet_funders"))
+        finally:
+            conn.close()
+    except sqlite3.Error as exc:
+        raise AppDBError(app_db) from exc
 
 
 def collect(db_path: str, network: str, app_db: str | None = None) -> dict[str, Any]:
@@ -506,6 +522,9 @@ def main(argv: list[str] | None = None) -> int:
 
     try:
         payload = collect(db_path, args.network, app_db=args.app_db or app_db_path(args.network))
+    except AppDBError as exc:
+        print(f"{exc}: {exc.__cause__}", file=sys.stderr)
+        return 2
     except sqlite3.Error as exc:
         print(f"failed to read {db_path}: {exc}", file=sys.stderr)
         return 2

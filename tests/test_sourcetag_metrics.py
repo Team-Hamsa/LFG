@@ -653,13 +653,13 @@ def test_load_funders_surfaces_a_corrupt_db_instead_of_silently_deduping_nothing
 
     path = tmp_path / "corrupt.db"
     path.write_bytes(b"SQLite format 3\x00" + b"\x00" * 200)
-    with pytest.raises(_sq.Error):
+    with pytest.raises(stm.AppDBError) as exc:
         stm.load_funders(str(path))
+    assert exc.value.path == str(path)
+    assert isinstance(exc.value.__cause__, _sq.Error)
 
 
 def test_main_exits_2_when_the_app_db_is_unreadable(tmp_path, monkeypatch, capsys):
-    import sqlite3 as _sq
-
     history = _db(tmp_path, [("h1", DAY0, "Payment", USER_A, TAG)])
     bad = tmp_path / "corrupt.db"
     bad.write_bytes(b"SQLite format 3\x00" + b"\x00" * 200)
@@ -668,5 +668,8 @@ def test_main_exits_2_when_the_app_db_is_unreadable(tmp_path, monkeypatch, capsy
     rc = stm.main(["--network", "testnet", "--db", history, "--app-db", str(bad)])
 
     assert rc == 2
-    assert isinstance(_sq.Error, type)
+    err = capsys.readouterr().err
+    # the diagnostic must name the APP db, not the (perfectly fine) archive
+    assert str(bad) in err
+    assert history not in err
     assert not (tmp_path / "metrics" / "sourcetag.json").exists()
