@@ -131,16 +131,25 @@ def load_funders(app_db: str | None) -> dict[str, str | None]:
     """`wallet -> activation funder` from the app DB, or {} if unavailable.
 
     Funder rows live in the app DB (`lfg_nfts.db`), NOT in the history
-    archive this script otherwise reads. A missing file or missing table is
-    not an error: dedup simply falls open to the raw wallet count.
+    archive this script otherwise reads. A missing file or a DB that simply
+    has no `wallet_funders` table yet is not an error: dedup falls open to
+    the raw wallet count.
+
+    Every OTHER sqlite failure (corruption, I/O, an incompatible schema)
+    propagates, so `main()` exits 2 with a diagnostic. Swallowing those would
+    be indistinguishable from "no funder coverage" and would publish
+    `unique_actors == unique_wallets` with no operational signal at all
+    (Greptile P2 on #490).
     """
     if not app_db or not os.path.exists(app_db):
         return {}
     conn = sqlite3.connect(app_db)
     try:
+        if not conn.execute(
+            "SELECT 1 FROM sqlite_master WHERE type='table' AND name='wallet_funders'"
+        ).fetchone():
+            return {}
         return dict(conn.execute("SELECT wallet, funder FROM wallet_funders"))
-    except sqlite3.Error:
-        return {}
     finally:
         conn.close()
 

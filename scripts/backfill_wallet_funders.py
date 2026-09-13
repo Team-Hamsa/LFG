@@ -95,20 +95,28 @@ def main() -> int:
     if a.from_history is not None:
         history_path = a.from_history or history_store.history_db_path(a.network)
         if not os.path.exists(history_path):
-            print(f"history DB not found: {history_path}")
+            conn.close()
+            print(f"history DB not found: {history_path}", file=sys.stderr)
             return 2
-        hist = sqlite3.connect(history_path)
+        # A corrupt or incompatible history file is an operator-facing
+        # failure, not a traceback (CodeRabbit on #490).
         try:
-            tagged = [
-                r[0]
-                for r in hist.execute(
-                    "SELECT DISTINCT account FROM xrpl_txs"
-                    " WHERE source_tag = ? AND account IS NOT NULL",
-                    (config.SOURCE_TAG,),
-                )
-            ]
-        finally:
-            hist.close()
+            hist = sqlite3.connect(history_path)
+            try:
+                tagged = [
+                    r[0]
+                    for r in hist.execute(
+                        "SELECT DISTINCT account FROM xrpl_txs"
+                        " WHERE source_tag = ? AND account IS NOT NULL",
+                        (config.SOURCE_TAG,),
+                    )
+                ]
+            finally:
+                hist.close()
+        except sqlite3.Error as exc:
+            conn.close()
+            print(f"failed to read history DB {history_path}: {exc}", file=sys.stderr)
+            return 2
         known = set(wallets)
         extra = []
         for wallet in tagged:

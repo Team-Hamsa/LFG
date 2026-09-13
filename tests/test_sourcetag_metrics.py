@@ -636,3 +636,37 @@ def test_collect_unique_actors_falls_open_to_raw_count_without_an_app_db(tmp_pat
 def test_validate_payload_requires_unique_actors_to_be_an_int():
     with pytest.raises(ValueError):
         stm.validate_payload(_valid_payload(unique_actors="1"))
+
+
+def test_load_funders_returns_empty_when_the_table_does_not_exist(tmp_path):
+    import sqlite3 as _sq
+
+    path = str(tmp_path / "empty.db")
+    _sq.connect(path).close()
+    assert stm.load_funders(path) == {}
+
+
+def test_load_funders_surfaces_a_corrupt_db_instead_of_silently_deduping_nothing(tmp_path):
+    """A corrupt/unreadable app DB must NOT look like 'no funder coverage' —
+    that would quietly publish unique_actors == unique_wallets with no signal."""
+    import sqlite3 as _sq
+
+    path = tmp_path / "corrupt.db"
+    path.write_bytes(b"SQLite format 3\x00" + b"\x00" * 200)
+    with pytest.raises(_sq.Error):
+        stm.load_funders(str(path))
+
+
+def test_main_exits_2_when_the_app_db_is_unreadable(tmp_path, monkeypatch, capsys):
+    import sqlite3 as _sq
+
+    history = _db(tmp_path, [("h1", DAY0, "Payment", USER_A, TAG)])
+    bad = tmp_path / "corrupt.db"
+    bad.write_bytes(b"SQLite format 3\x00" + b"\x00" * 200)
+    monkeypatch.chdir(tmp_path)
+
+    rc = stm.main(["--network", "testnet", "--db", history, "--app-db", str(bad)])
+
+    assert rc == 2
+    assert isinstance(_sq.Error, type)
+    assert not (tmp_path / "metrics" / "sourcetag.json").exists()

@@ -344,3 +344,24 @@ def test_backfill_wallet_funders_covers_tagged_accounts_from_history(tmp_path, m
         assert funding.cached_funder(conn, "rTagged1") == FARM_FUNDER
         # an untagged signer is not part of the published metric
         assert funding.cached_funder(conn, "rUntagged") is None
+
+
+def test_backfill_from_history_exits_2_on_an_unreadable_history_db(tmp_path, monkeypatch, capsys):
+    """A corrupt/incompatible history file must be a diagnostic + exit 2, not
+    an uncaught sqlite3.Error traceback."""
+    import importlib
+    import sys
+
+    db = str(tmp_path / "app.db")
+    bad = tmp_path / "history.db"
+    bad.write_bytes(b"SQLite format 3\x00" + b"\x00" * 200)
+
+    script = importlib.import_module("scripts.backfill_wallet_funders")
+    monkeypatch.setattr(script.config, "XRPL_NETWORK", "mainnet")
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        ["backfill", "--network", "mainnet", "--app-db", db, "--from-history", str(bad)],
+    )
+    assert script.main() == 2
+    assert "history" in capsys.readouterr().err.lower()
