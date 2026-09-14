@@ -26,6 +26,9 @@ MINT_TERMINAL: frozenset[str] = frozenset(
 )
 SWAP_TERMINAL: frozenset[str] = frozenset({"done", "failed", "offers_ready", "payment_timeout"})
 SIGNIN_TERMINAL: frozenset[str] = frozenset({"signed", "expired"})
+# From lfg_service.app.handle_brix_trustline_status (#441). "validating" is
+# NOT terminal: a signed TrustSet only counts once it validates tesSUCCESS.
+BRIX_TRUSTLINE_TERMINAL: frozenset[str] = frozenset({"signed", "rejected", "expired"})
 
 
 # Codes that must never be retried because the SERVER already committed state
@@ -248,6 +251,34 @@ class LFGServiceClient:
 
     async def brix_claim_status(self, user_id: str, claim_id: int) -> dict[str, Any]:
         return await self._user_request("GET", f"/api/brix/claim/{claim_id}", user_id)
+
+    async def brix_trustline(self, user_id: str, *, username: str = "") -> dict[str, Any]:
+        """Start the BRIX TrustSet sign request (#441) for the caller's wallet:
+        {state: "already_set"} or {state: "pending", uuid, xumm_url, qr_png, push}.
+        The BRIX pair, not LFGO — a claim's trustline_required is about BRIX."""
+        return await self._user_request(
+            "POST", "/api/brix/trustline", user_id, username=username, json={}
+        )
+
+    async def brix_trustline_status(self, user_id: str, uuid: str) -> dict[str, Any]:
+        return await self._user_request("GET", f"/api/brix/trustline/{uuid}", user_id)
+
+    async def wait_for_brix_trustline(
+        self,
+        user_id: str,
+        uuid: str,
+        *,
+        interval: float = 3.0,
+        timeout: float = 600.0,
+        sleep: Callable[[float], Awaitable[None]] = asyncio.sleep,
+    ) -> dict[str, Any]:
+        return await self._poll(
+            lambda: self.brix_trustline_status(user_id, uuid),
+            BRIX_TRUSTLINE_TERMINAL,
+            interval,
+            timeout,
+            sleep,
+        )
 
     # ---- mint ----
 

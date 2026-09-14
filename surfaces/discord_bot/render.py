@@ -112,6 +112,27 @@ def signin_embed(signin_link: str) -> Embed:
     return embed
 
 
+def brix_trustline_embed(xumm_link: str, push: Any = None) -> Embed:
+    """The BRIX TrustSet sign request behind /claim's trustline button. The
+    BRIX pair — not the LFGO line /letsgo's button sets."""
+    embed = Embed(
+        title="🔗 Set Up Your BRIX Trustline",
+        description=(
+            "BRIX payouts need a BRIX trustline on your registered wallet.\n\n"
+            "**Steps:**\n"
+            "1. Scan the QR code with Xaman\n"
+            "2. Approve the trustline\n"
+            "3. Wait for confirmation, then run `/claim` again\n\n"
+            f"[Open in Xaman]({xumm_link})"
+            f"{_push_hint(push)}"
+        ),
+        color=0x00FF00,
+    )
+    embed.set_image(url="attachment://brix_trustline_qr.png")
+    embed.set_footer(text="The trustline request expires after 15 minutes")
+    return embed
+
+
 def linked_embed(summary: str) -> Embed:
     """Confirmation for a completed cross-surface link (#90). ``summary`` comes
     from surfaces._shared.account_result.linked_summary."""

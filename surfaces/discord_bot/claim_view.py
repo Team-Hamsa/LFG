@@ -67,6 +67,126 @@ def claimed_embed(result: dict[str, Any]) -> Embed:
     )
 
 
+# Discord webhook tokens die 15 minutes after the click, so the final follow-up
+# must land before then even though the Xaman request itself lives 15 minutes.
+# A line approved after the poll gives up still counts: /claim re-checks it
+# on-ledger.
+TRUSTLINE_POLL_TIMEOUT = 12 * 60
+# How long the button under the trustline_required message stays pressable.
+TRUSTLINE_VIEW_TIMEOUT = 600
+
+
+class BrixTrustlineView(discord.ui.View):
+    def __init__(self, svc: LFGServiceClient) -> None:
+        super().__init__(timeout=TRUSTLINE_VIEW_TIMEOUT)
+        self._svc = svc
+
+    @discord.ui.button(label="🔗 Set BRIX Trustline", style=discord.ButtonStyle.primary)
+    async def set_brix_trustline(
+        self, interaction: discord.Interaction, button: discord.ui.Button[Any]
+    ) -> None:
+        await handle_brix_trustline(self._svc, interaction)
+
+
+def trustline_outcome_embed(final: dict[str, Any]) -> Embed:
+    """The end of a BRIX trustline request, from the last status the service
+    returned (lfg_service.app.handle_brix_trustline_status)."""
+    state = final.get("state")
+    title = "⚠️ BRIX trustline"
+    if state == "signed":
+        return Embed(
+            title="✅ BRIX trustline set",
+            description="Your wallet can now receive BRIX — run `/claim` again to collect it.",
+            color=0x00FF00,
+        )
+    if state == "expired":
+        return render.error_embed(
+            "The trustline request expired. Run `/claim` again for a new one.", title=title
+        )
+    if state == "rejected" and final.get("code") == "signer_mismatch":
+        return render.error_embed(
+            "That was signed by a different wallet — sign it with the wallet you "
+            "registered, then run `/claim` again.",
+            title=title,
+        )
+    if state == "rejected":
+        return render.error_embed(
+            "The trustline transaction did not confirm on the ledger. Run `/claim` again to retry.",
+            title=title,
+        )
+    # Timed out still pending/opened/validating: it may yet land, so claim
+    # neither success nor failure.
+    return Embed(
+        title="⏳ BRIX trustline",
+        description=(
+            "Still waiting on Xaman. Once you've approved the trustline, run `/claim` again."
+        ),
+        color=0xFFAA00,
+    )
+
+
+async def handle_brix_trustline(svc: LFGServiceClient, interaction: discord.Interaction) -> None:
+    await interaction.response.defer(ephemeral=True)
+    user_id = str(interaction.user.id)
+    username = str(interaction.user)
+
+    try:
+        start = await svc.brix_trustline(user_id, username=username)
+    except ServiceError as e:
+        await interaction.followup.send(
+            embed=render.error_embed(friendly_error(e), title="⚠️ BRIX trustline"),
+            ephemeral=True,
+        )
+        return
+
+    if start.get("state") == "already_set":
+        await interaction.followup.send(
+            embed=Embed(
+                title="✅ BRIX trustline",
+                description="Your wallet already has a BRIX trustline — run `/claim` again.",
+                color=0x00FF00,
+            ),
+            ephemeral=True,
+        )
+        return
+
+    uuid = start["uuid"]
+    xumm_link = start.get("xumm_url", "")
+    try:
+        qr_png = await svc.qr_png(xumm_link)
+        await interaction.followup.send(
+            embed=render.brix_trustline_embed(xumm_link, start.get("push")),
+            file=render.file_from_png(qr_png, "brix_trustline_qr.png"),
+            ephemeral=True,
+        )
+        final = await svc.wait_for_brix_trustline(user_id, uuid, timeout=TRUSTLINE_POLL_TIMEOUT)
+    except ServiceError as e:
+        # Past the start, the request may already be approved (a service
+        # restart forgets it and 404s the poll) — /claim re-checks on-ledger.
+        logging.error(f"brix trustline {uuid} failed: {e}")
+        await _send_late(
+            interaction,
+            uuid,
+            render.error_embed(
+                "Couldn't finish checking the trustline request. Run `/claim` again — it "
+                "picks up a trustline you already approved, or offers a new request.",
+                title="⚠️ BRIX trustline",
+            ),
+        )
+        return
+
+    await _send_late(interaction, uuid, trustline_outcome_embed(final))
+
+
+async def _send_late(interaction: discord.Interaction, uuid: str, embed: Embed) -> None:
+    """A follow-up sent after the Xaman wait, which can outlive the webhook
+    token: an undeliverable message is logged, never raised."""
+    try:
+        await interaction.followup.send(embed=embed, ephemeral=True)
+    except discord.HTTPException as e:  # NotFound included: the webhook token expired
+        logging.warning(f"brix trustline {uuid}: message not delivered: {e}")
+
+
 async def handle_claim(svc: LFGServiceClient, interaction: discord.Interaction) -> None:
     await interaction.response.defer(ephemeral=True)
     user_id = str(interaction.user.id)
@@ -97,13 +217,15 @@ async def handle_claim(svc: LFGServiceClient, interaction: discord.Interaction) 
         result = await svc.brix_claim(user_id, username=username)
     except ServiceError as e:
         if e.code == "trustline_required":
+            # Not /letsgo's button: that sets the LFGO line, and payouts are BRIX.
             await interaction.followup.send(
                 embed=render.error_embed(
-                    "You need a BRIX trustline before you can receive a payout. Use the "
-                    "**Set Trustline** button in `/letsgo`, then run `/claim` again. Your "
-                    "balance is safe in the meantime.",
+                    "You need a BRIX trustline before you can receive a payout. Press "
+                    "**Set BRIX Trustline** below, approve it in Xaman, then run `/claim` "
+                    "again. Your balance is safe in the meantime.",
                     title="⚠️ Trustline required",
                 ),
+                view=BrixTrustlineView(svc),
                 ephemeral=True,
             )
             return
