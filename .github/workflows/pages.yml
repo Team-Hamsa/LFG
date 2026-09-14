@@ -1,6 +1,6 @@
 # Standalone web surface (spec 2026-07-16): publish webapp/client/ to GitHub
 # Pages on every prod promote (push to `deploy`), so the client at
-# build.letseffinggo.com always matches the API the funnel serves. config.js
+# build.letseffinggo.com always matches the API prod serves. config.js
 # is rewritten at deploy time to point at the public API base — the repo copy
 # stays null so Discord/Telegram/dev serving is untouched.
 name: Deploy web surface to GitHub Pages
@@ -23,8 +23,12 @@ concurrency:
   cancel-in-progress: true
 
 env:
-  # Public HTTPS route to the prod service (:8176) — the Tailscale Funnel.
-  WEB_API_BASE: https://letseffinggo.tail82fcc6.ts.net/lfg
+  # Public HTTPS route to the prod service (:8176) — the Cloudflare Tunnel
+  # `lfg-share` (~/.cloudflared/config.yml). NOT the Tailscale Funnel hostname
+  # (2026-09-14): tailnet clients resolve *.ts.net to a 100.64/10 address that
+  # Firefox's Local Network Access treats as a local device (it cancelled most
+  # grid image loads), and public resolvers served a stale NXDOMAIN for it.
+  WEB_API_BASE: https://api.letseffinggo.com
 
 jobs:
   deploy:

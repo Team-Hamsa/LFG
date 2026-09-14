@@ -1,21 +1,21 @@
 # Web surface (build.letseffinggo.com) — ops runbook
 
-The Activity as a plain website (#240). Front-end on GitHub Pages, API on the
-prod funnel. Spec: `docs/superpowers/specs/2026-07-16-web-surface-design.md`.
+The Activity as a plain website (#240). Front-end on GitHub Pages, API on prod via
+the Cloudflare Tunnel. Spec: `docs/superpowers/specs/2026-07-16-web-surface-design.md`.
 
 ## Moving parts
 
 | Piece | Where | Trigger |
 |---|---|---|
 | Front-end | GitHub Pages (this repo, workflow build) | `.github/workflows/pages.yml` on push to `deploy` |
-| API | prod `lfg-activity` :8176 via funnel `https://letseffinggo.tail82fcc6.ts.net/lfg` | `scripts/promote.sh` |
+| API | prod `lfg-activity` :8176 via Cloudflare Tunnel `https://api.letseffinggo.com` (pm2 `lfg-tunnel`, ingress in `~/.cloudflared/config.yml`) | `scripts/promote.sh` |
 | CORS | `WEB_ALLOWED_ORIGINS` in prod `.env` | service restart |
 | Auth | `POST /api/web/signin` → XUMM SignIn → `platform="web"` session | — |
 
 ## Go-live checklist
 
 1. **Merge + promote** — the Pages workflow fires on the `deploy` push and
-   publishes `webapp/client/` with `config.js` pointing at the funnel.
+   publishes `webapp/client/` with `config.js` pointing at `https://api.letseffinggo.com`.
 2. **Prod env** — `WEB_ALLOWED_ORIGINS=https://build.letseffinggo.com,https://team-hamsa.github.io`
    in `~/LFG/.env` (already staged 2026-07-16), picked up on the deployer's
    drain-restart.
@@ -40,11 +40,11 @@ curl -s --resolve build.letseffinggo.com:80:185.199.108.153 \
 # CORS preflight against prod:
 curl -si -X OPTIONS -H 'Origin: https://build.letseffinggo.com' \
   -H 'Access-Control-Request-Method: POST' \
-  https://letseffinggo.tail82fcc6.ts.net/lfg/api/web/signin | head -8
+  https://api.letseffinggo.com/api/web/signin | head -8
 # expect: 204 + Access-Control-Allow-Origin echo
 
 # Signin bootstrap (creates a real XUMM payload — rate-limited 5/min/IP):
-curl -s -X POST https://letseffinggo.tail82fcc6.ts.net/lfg/api/web/signin
+curl -s -X POST https://api.letseffinggo.com/api/web/signin
 ```
 
 ## Failure modes
@@ -52,8 +52,16 @@ curl -s -X POST https://letseffinggo.tail82fcc6.ts.net/lfg/api/web/signin
 - **Site up, API calls fail with CORS errors** → `WEB_ALLOWED_ORIGINS` missing
   on prod or service not restarted since; check
   `curl -si -X OPTIONS …` above. Origins are exact-match (scheme included).
-- **White screen + zero requests in the webapp log** → funnel down; restart
-  `tailscaled` (known failure mode, see `lfg-activity-funnel-ingress` memory).
+- **White screen + zero requests in the webapp log** → tunnel down;
+  `pm2 logs lfg-tunnel` / `cloudflared tunnel list` (expect live connections
+  on `lfg-share`), then `pm2 restart lfg-tunnel`. (The Discord Activity still
+  rides the Tailscale Funnel — a funnel outage is `tailscaled`, not this.)
+- **Blank art / `200 0` bytes in the webapp log for one browser** → that client
+  is reaching the API over a local/tailnet address and the browser's Local
+  Network Access check is cancelling loads (Firefox 154, 2026-09-14). Why the
+  web API is NOT on the `*.ts.net` funnel name: tailnet devices resolve it to
+  100.64/10, and public resolvers have served stale NXDOMAIN for it. Keep
+  `WEB_API_BASE` on a hostname in our own DNS zone.
 - **`build.letseffinggo.com` 404s from GitHub** → Pages custom domain unset or
   another repo claimed it; `gh api repos/Team-Hamsa/LFG/pages` should show
   `"cname": "build.letseffinggo.com"`.
