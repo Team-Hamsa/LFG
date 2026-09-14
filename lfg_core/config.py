@@ -454,6 +454,40 @@ SHOP_MIN_BRIX = int(os.getenv("SHOP_MIN_BRIX", "5"))
 SHOP_MAX_BRIX = int(os.getenv("SHOP_MAX_BRIX", "5000"))
 SHOP_OFFER_TTL_SECONDS = int(os.getenv("SHOP_OFFER_TTL_SECONDS", "900"))
 
+# Closet Market (#443): off-ledger trait asks + TokenEscrow-backed bids.
+# CLOSET_MARKET_ENABLED gates NEW orders only; cancel/status/settlement run
+# whenever closet_market_settleable() so flipping the flag off never strands
+# BRIX locked in an escrow (same posture as SHOP_ENABLED).
+CLOSET_MARKET_ENABLED_DEFAULT = "0"
+CLOSET_MARKET_ENABLED = env_flag("CLOSET_MARKET_ENABLED", CLOSET_MARKET_ENABLED_DEFAULT)
+CLOSET_MARKET_FEE_BPS = int(os.getenv("CLOSET_MARKET_FEE_BPS", "700"))
+CLOSET_BID_TTL_SECONDS = int(os.getenv("CLOSET_BID_TTL_SECONDS", "604800"))
+# Fernet key encrypting each bid's escrow fulfillment at rest. Without it the
+# backend could never finish (or refund) an escrow, so both gates require it.
+CLOSET_MARKET_ENC_KEY = os.getenv("CLOSET_MARKET_ENC_KEY", "")
+# LastLedgerSequence headroom on backend Closet Market txs — what makes an
+# unknown outcome decidable (same role as BRIX_CLAIM_LEDGER_MARGIN).
+CLOSET_MARKET_LEDGER_MARGIN = int(os.getenv("CLOSET_MARKET_LEDGER_MARGIN", "40"))
+
+
+def validate_closet_market_fee_bps(bps: int) -> None:
+    if not 0 <= bps < 10000:
+        raise ValueError(f"CLOSET_MARKET_FEE_BPS must be in [0, 10000), got {bps}")
+
+
+validate_closet_market_fee_bps(CLOSET_MARKET_FEE_BPS)
+
+
+def closet_market_settleable() -> bool:
+    """Cancel/status/settlement may run (escrows can be finished/cancelled)."""
+    return bool(ECONOMY_ENABLED and CLOSET_MARKET_ENC_KEY)
+
+
+def closet_market_enabled() -> bool:
+    """New asks/bids/buys/fills may be placed."""
+    return bool(closet_market_settleable() and CLOSET_MARKET_ENABLED)
+
+
 # #283: on-ledger Expiration for native buy offers (bids) placed in-app.
 # Bids escrow nothing, so they must always age out; default 7 days.
 MARKET_BID_TTL_SECONDS = int(os.getenv("MARKET_BID_TTL_SECONDS", "604800"))

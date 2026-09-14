@@ -85,6 +85,13 @@ ACTION_BRIX_CLAIM = "brix-claim"  # #48: daily-drip payout from the distributor
 # #447: never-submitted proof pseudo-transactions signed to prove wallet control.
 ACTION_SIGNIN = "signin"
 ACTION_LINK = "link"
+# Closet Market (#443). Prefixed so they never collide with #283's native
+# NFTokenOffer `bid`. Asks have no action: they never touch the ledger.
+ACTION_CLOSET_BID = "closet-bid"  # user EscrowCreate locking a bid's BRIX
+ACTION_CLOSET_BUY = "closet-buy"  # user Payment taking an ask
+ACTION_CLOSET_FILL = "closet-fill"  # backend EscrowFinish funding a fill
+ACTION_CLOSET_FORWARD = "closet-forward"  # backend Payment app -> seller
+ACTION_CLOSET_REFUND = "closet-refund"  # backend refund Payment / EscrowCancel
 _ACTIONS = frozenset(
     {
         ACTION_MINT,
@@ -111,6 +118,11 @@ _ACTIONS = frozenset(
         ACTION_BRIX_CLAIM,
         ACTION_SIGNIN,
         ACTION_LINK,
+        ACTION_CLOSET_BID,
+        ACTION_CLOSET_BUY,
+        ACTION_CLOSET_FILL,
+        ACTION_CLOSET_FORWARD,
+        ACTION_CLOSET_REFUND,
     }
 )
 
