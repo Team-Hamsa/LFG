@@ -23,12 +23,25 @@ cost is foregone royalty revenue on LFG-routed sales, not new spend.
 
 The seller-side arithmetic is the whole pitch:
 
-| Route | Seller nets |
-|---|---|
-| xrp.cafe | `ask - 1.589% broker - 7% royalty` ~= **91.4%** |
-| LFG accept, refund active | no broker fee, royalty returned = **100%** |
+| Route | Seller nets | Buyer pays |
+|---|---|---|
+| xrp.cafe | `ask - 7% royalty` = **93%** | `ask + ~1.589% broker fee` ~= **101.6%** |
+| LFG accept, no refund | `ask - 7% royalty` = **93%** | **100%** |
+| LFG accept, refund active | royalty returned = **100%** | **100%** |
 
-~8.6 points is enough to change behavior.
+The broker fee sits on the **buyer's** side: cafe's bot only settles a bid
+that covers the ask *plus* its fee, so the seller never pays it.
+
+**Correction (2026-09-14).** This table originally read "xrp.cafe seller nets
+`ask - 1.589% broker - 7% royalty` ~= 91.4%" and claimed an ~8.6-point gap.
+That double-counted the broker fee. Measured on `history_mainnet.db` across
+all 1,197 cafe-brokered XRP sales of our characters: the seller's XRP balance
+delta was **>= 93.0% of the ask in every sale** (median exactly 93.0%), and the
+buyer paid a median **101.589%** of the ask. The real seller-side gap this
+refund would open is 7 points, not 8.6. See
+`docs/superpowers/specs/2026-09-14-marketplace-fee-cover-design.md` for the
+efficacy probe and the approach chosen instead. That spec also covers why this
+seller refund is deferred.
 
 ## The volume effect
 
