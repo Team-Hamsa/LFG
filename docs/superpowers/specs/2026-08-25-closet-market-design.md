@@ -1,6 +1,6 @@
 # Closet Market — off-ledger trait asks & escrow-backed bids
 
-**Status:** design approved in chat 2026-08-25, awaiting implementation plan.
+**Status:** design approved in chat 2026-08-25. Implementation plan: `docs/superpowers/plans/2026-09-14-closet-market.md` (2026-09-14). The plan's "Spec deltas" section supersedes this document where they differ, including the issuer correction below and the #496 trait-bid additions.
 **Supersedes for Closet assets:** the Extract → List → Accept trait-sell wizard
 (`market_flow.TraitSellSession`, #44/#239). That path stays for tokens that are
 already extracted.
@@ -27,15 +27,19 @@ holder fill it.
 ## Ledger prerequisites (verified on mainnet 2026-08-25)
 
 - `Escrow`, `TokenEscrow`, `fixTokenEscrowV1` amendments: **enabled**.
-- BRIX issuer `rLfgoMintj3KBcs4s2XKtquvDwEte2kYfJ` (= `config._default_brix_issuer`)
-  has master disabled, regular key `rUi3o9XG…` (`.env MAINNET_REGKEY_SEED`),
-  and **`lsfAllowTrustLineLocking` NOT set.** One-time ops step before
-  enabling the feature: `AccountSet` `SetFlag=17` (asfAllowTrustLineLocking),
-  signed with the regkey and `Account` set explicitly to the issuer. The flag
-  cannot be cleared while any BRIX is locked in an escrow — treat as one-way.
+- **Corrected 2026-09-14:** the mainnet BRIX issuer is
+  `rLfgoBriX5ZaMP32mtc7RUZJcjnisKh2Px` (= `config._default_brix_issuer`), NOT
+  `rLfgoMint…` (that is the NFT issuer / app wallet). Its master key is
+  disabled and its RegularKey is the distributor `rwr84Q12…`
+  (`BRIX_DISTRIBUTOR_SEED`). **`lsfAllowTrustLineLocking` NOT set.** One-time
+  ops step before enabling the feature: `AccountSet` `SetFlag=17`
+  (asfAllowTrustLineLocking), signed with the distributor key and `Account` set
+  explicitly to the issuer. The flag cannot be cleared while any BRIX is locked
+  in an escrow — treat as one-way.
 - The app wallet must hold a BRIX trustline with limit ≥ the largest open
-  bid (`EscrowFinish` fails otherwise). It already holds one for royalties;
-  the audit script checks headroom.
+  bid (`EscrowFinish` fails otherwise). It already holds one for royalties,
+  but its limit was only 258,055 (balance 45,509) on 2026-09-14. The plan's
+  setup script raises it to `BRIX_TRUSTLINE_LIMIT`.
 - TokenEscrow moves the bidder's BRIX out of their trustline at
   `EscrowCreate` — a real lock, not a promise.
 
