@@ -299,8 +299,8 @@ def build_svg(flow_modules: list[str]) -> str:
     parts.append(
         f'<text x="{W / 2}" y="{h_total - 22}" text-anchor="middle" font-family="{FONT}" '
         f'font-size="11.5" fill="{MUTED}">every XRPL transaction carries SourceTag '
-        "2606160021 + provenance memos — all signing happens in the user’s "
-        "Xaman wallet</text>"
+        "2606160021 + provenance memos — users sign in their own Xaman or "
+        "Joey wallet</text>"
     )
     parts.append("</svg>")
     return "\n".join(parts) + "\n"

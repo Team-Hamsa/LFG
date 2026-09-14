@@ -39,28 +39,41 @@ class FlagInfo:
 # default" column is parsed from lfg_core/config.py so it can never drift.
 FLAGS: dict[str, FlagInfo] = {
     "ECONOMY_ENABLED": FlagInfo(
-        "Dress-up trait economy — Closet, harvest/assemble/equip, trait tokens, Trait Shop",
+        "Dress-up trait economy — Closet, harvest/assemble/equip, trait tokens"
+        " (the Trait Shop also needs `SHOP_ENABLED`)",
         "`1` since 2026-07-21 ([#185](../../issues/185))",
     ),
+    "SHOP_ENABLED": FlagInfo(
+        "Trait Shop — the project mints and sells traits on demand for BRIX"
+        " (also requires `ECONOMY_ENABLED`)",
+        "off (default) since [#410](../../pull/410)",
+    ),
     "MARKET_ENABLED": FlagInfo(
-        "In-app NFT marketplace (list / browse / buy via Xaman)",
+        "In-app NFT marketplace (list / browse / buy / bid; trait listings also need"
+        " `ECONOMY_ENABLED`)",
         "on (default)",
     ),
     "BULK_MINT_UI_ENABLED": FlagInfo(
         "Activity bulk-mint quantity stepper (server bulk endpoints stay live regardless)",
-        "staging first; enable per stack",
+        "on (`1`) in production and staging",
     ),
     "X_ENABLED": FlagInfo(
-        "X brand-account auto-poster (also requires all four OAuth creds)",
-        "off — go-live is a pending ops step ([#41](../../issues/41))",
+        "X mint auto-poster (also requires all four OAuth creds)",
+        "`1` since 2026-09-10 ([#41](../../issues/41))",
     ),
     "SHARE_CARD_RENDER_ENABLED": FlagInfo(
         "Branded share-card PNG for X cards (needs node + Playwright Chromium)",
-        "off — raw art serves as the card image",
+        "`1` — the branded PNG is the card image and the auto-poster's tweet image"
+        " (raw art on render failure)",
     ),
     "WEB_ALLOWED_ORIGINS": FlagInfo(
         "Standalone web surface CORS allowlist (empty = feature off)",
         "set to the GitHub Pages origins ([#240](../../issues/240))",
+    ),
+    "REOWN_PROJECT_ID": FlagInfo(
+        "Joey Wallet sign-in + signing over WalletConnect on the web app"
+        " (`WC_SURFACES` also gates the link-a-wallet Joey option)",
+        "set ([#447](../../issues/447))",
     ),
 }
 
@@ -99,7 +112,7 @@ def parse_default(flag: str, config_text: str) -> str:
 
 def describe_default(flag: str, raw: str) -> str:
     """Human-readable rendering of a parsed default value."""
-    if flag == "WEB_ALLOWED_ORIGINS":
+    if flag in ("WEB_ALLOWED_ORIGINS", "REOWN_PROJECT_ID"):
         return "empty (off)" if raw == "" else f"`{raw}`"
     return f"`{raw}` (off)" if raw in ("", "0", "false", "False") else f"`{raw}` (on)"
 

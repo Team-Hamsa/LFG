@@ -51,8 +51,8 @@ STATIC_BADGES = [
         None,
     ),
     (
-        "https://img.shields.io/badge/Xaman-signing-F76B1C?style=flat-square",
-        "Signed in Xaman",
+        "https://img.shields.io/badge/signing-Xaman%20%C2%B7%20Joey-F76B1C?style=flat-square",
+        "Signed in Xaman or Joey Wallet",
         None,
     ),
     (

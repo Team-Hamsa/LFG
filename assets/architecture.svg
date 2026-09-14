@@ -86,5 +86,5 @@
 <rect x="613.0" y="483.0" width="6" height="40.0" rx="3" fill="#4890C0"/>
 <text x="629.0" y="499.0" font-family="-apple-system,'Segoe UI',Roboto,Helvetica,Arial,sans-serif" font-size="15" font-weight="800" fill="#F5F4F1">BunnyCDN + IPFS</text>
 <text x="629.0" y="516.0" font-family="-apple-system,'Segoe UI',Roboto,Helvetica,Arial,sans-serif" font-size="10" fill="#9C9A94">image + metadata hosting</text>
-<text x="450.0" y="578" text-anchor="middle" font-family="-apple-system,'Segoe UI',Roboto,Helvetica,Arial,sans-serif" font-size="11.5" fill="#9C9A94">every XRPL transaction carries SourceTag 2606160021 + provenance memos — all signing happens in the user’s Xaman wallet</text>
+<text x="450.0" y="578" text-anchor="middle" font-family="-apple-system,'Segoe UI',Roboto,Helvetica,Arial,sans-serif" font-size="11.5" fill="#9C9A94">every XRPL transaction carries SourceTag 2606160021 + provenance memos — users sign in their own Xaman or Joey wallet</text>
 </svg>

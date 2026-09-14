@@ -8,7 +8,7 @@
 <img src="https://img.shields.io/badge/mainnet-live-2ea043?style=flat-square" alt="Mainnet: live">
 <a href="https://build.letseffinggo.com"><img src="https://img.shields.io/badge/web_app-live-D89030?style=flat-square" alt="Web app live at build.letseffinggo.com"></a>
 <img src="https://img.shields.io/badge/XRPL-NFTs-3E8DE3?style=flat-square" alt="Built on the XRP Ledger">
-<img src="https://img.shields.io/badge/Xaman-signing-F76B1C?style=flat-square" alt="Signed in Xaman">
+<img src="https://img.shields.io/badge/signing-Xaman%20%C2%B7%20Joey-F76B1C?style=flat-square" alt="Signed in Xaman or Joey Wallet">
 <img src="https://img.shields.io/badge/surfaces-Discord%20%C2%B7%20Telegram%20%C2%B7%20Web-5865F2?style=flat-square" alt="Surfaces: Discord, Telegram, Web">
 <img src="https://img.shields.io/badge/X-share%20%E2%86%92%20mint-000000?style=flat-square&logo=x&logoColor=white" alt="Share on X — per-NFT cards funnel into the app">
 <img src="https://img.shields.io/badge/PWA-installable-6B4FBB?style=flat-square" alt="Installable PWA">
@@ -21,7 +21,7 @@
 
 <br><br>
 
-**Mint NFTs, swap their traits, and trade them for XRP — signed in Xaman, live on the XRP Ledger, from Discord, Telegram, or the web.**
+**Mint NFTs, swap their traits, and trade them for XRP — signed in your own Xaman or Joey wallet, live on the XRP Ledger, from Discord, Telegram, or the web.**
 
 **🌐 Try it right now in your browser → [build.letseffinggo.com](https://build.letseffinggo.com)**
 
@@ -31,11 +31,11 @@
 
 **LFG is an XRPL NFT platform where the art is composed at mint time from trait layers — and the traits themselves are tradeable on-ledger assets.**
 
-You mint NFTs — one at a time, or many behind a single payment — swap individual traits between NFTs you own, and list, browse, and buy on an in-app marketplace. Two project-issued tokens drive the economy: **LFGO** pays for mints, and **BRIX** pays trait-swap fees and prices trait listings (with an XRP→BRIX AMM on-ramp for buyers who hold neither). Characters trade in XRP; traits trade in BRIX.
+You mint NFTs — one at a time, or many behind a single payment — swap individual traits between NFTs you own, and list, browse, and buy on an in-app marketplace. Two project-issued tokens drive the economy: **LFGO** pays for mints and **BRIX** pays trait-swap fees and prices trait listings. Wallets without enough of the token pay in XRP instead — the backend buys the LFGO or BRIX off the DEX/AMM and burns it, and trait buyers get an XRP→BRIX AMM on-ramp. Holders also earn BRIX: 1 per unlisted NFT per day, claimed in the app. Characters trade in XRP; traits trade in BRIX.
 
-Every transaction is signed by the user in the [Xaman](https://xaman.app/) wallet (formerly XUMM) — **no private keys ever touch the app** — and carries on-chain **provenance memos** recording who signed, from which surface, and what action it was. The same flows run from five client surfaces on one shared backend: a Discord bot, a Discord Activity, a Telegram bot, a Telegram Mini App, and a standalone web app at [build.letseffinggo.com](https://build.letseffinggo.com). The web app is an **installable PWA** that runs anywhere a browser does — including the in-app browser of X or any other social platform, so a mint can start from a shared link without creating another client surface.
+Users sign their own transactions in the [Xaman](https://xaman.app/) wallet (formerly XUMM) — or, on the web app, in Joey Wallet over WalletConnect — so **the app never holds a user's keys**. The backend signs only the project's own operations (mints, NFT delivery offers, in-place `NFTokenModify` updates, burns, BRIX claim payouts) with hot keys on the deploy box — see *Environment variables*. Every transaction carries on-chain **provenance memos** recording who signed, from which surface, and what action it was. The same flows run from five client surfaces on one shared backend: a Discord bot, a Discord Activity, a Telegram bot, a Telegram Mini App, and a standalone web app at [build.letseffinggo.com](https://build.letseffinggo.com). The web app is an **installable PWA** that runs anywhere a browser does — including the in-app browser of X or any other social platform, so a mint can start from a shared link without creating another client surface.
 
-**The collection is live on XRPL mainnet** — cut over **2026-07-10** (3,535 editions — minted NFTs — reconciled with zero drift) and grown to **~4,000 live editions** since.
+**The collection is live on XRPL mainnet** — cut over **2026-07-10** (3,535 editions — minted NFTs — reconciled with zero drift) and grown past **5,100 live editions** since — edition #5,200 was minted on 2026-09-14.
 
 > **XRPL Make Waves Hackathon** — every XRPL transaction and Xaman signing payload the app builds carries `SourceTag 2606160021` (an XRPL field identifying the submitting application), so all of the volume counts toward this entry.
 
@@ -57,7 +57,7 @@ Short walkthroughs of each core flow:
 </tr>
 <tr>
 <td align="center"><img src="assets/demo/animated.gif" width="380" alt="Animated NFTs — GIF/MP4 trait layers compose into living video NFTs"><br><b>Animated NFTs</b></td>
-<td align="center"><img src="assets/demo/market.gif" width="380" alt="Marketplace — browse XRP listings, buy and settle on native NFTokenOffers"><br><b>Marketplace</b></td>
+<td align="center"><img src="assets/demo/market.gif" width="380" alt="Marketplace — browse XRP character listings, manage your listings and bids, and see trait prices in BRIX"><br><b>Marketplace</b></td>
 </tr>
 </table>
 </div>
@@ -75,11 +75,11 @@ Short walkthroughs of each core flow:
 <!-- hackathon-loc:end -->
 
 <div align="center">
-<img src="assets/dashboard.svg" alt="Repo vitals — tests, modules, commits, surfaces, mainnet status" width="728">
+<img src="assets/dashboard.svg" alt="Repo vitals — tests, modules, commits, surfaces, and commits per day" width="728">
 </div>
 
 <div align="center">
-<img src="assets/sourcetag.svg" alt="XRPL source tag 2606160021: tagged transaction volume and unique wallets" width="728">
+<img src="assets/sourcetag.svg" alt="XRPL source tag 2606160021: tagged transaction volume and unique wallets, deduplicated by activation funder" width="728">
 </div>
 
 **→ [Full hackathon build log](docs/HACKATHON.md)** — every feature, with the PRs and issues that landed it, plus a merged-PR changelog that regenerates on every merge.
@@ -94,28 +94,32 @@ Short walkthroughs of each core flow:
 <td>🔀 <b>Trait Swapper</b><br>Exchange traits between two NFTs in place via <code>NFTokenModify</code>.</td>
 </tr>
 <tr>
-<td>🛒 <b>In-app Marketplace</b><br>Characters in XRP, traits in BRIX, on native <code>NFTokenOffer</code>s — no escrow, no custody.</td>
-<td>📲 <b>Xaman push delivery</b><br>Sign requests pushed straight to the app, with QR fallback.</td>
+<td>🛒 <b>In-app Marketplace</b><br>Characters in XRP, traits in BRIX, on native <code>NFTokenOffer</code>s — plus bids, and Buy now on xrp.cafe listings. No escrow, no custody.</td>
+<td>📲 <b>Xaman + Joey Wallet</b><br>Sign requests pushed straight to Xaman (QR fallback), or signed in Joey over WalletConnect on the web.</td>
 </tr>
 <tr>
 <td>🌐 <b>Five surfaces, one backend</b><br>Discord bot + Activity, Telegram bot + Mini App, and <a href="https://build.letseffinggo.com">the web app</a> on <code>lfg_service</code>.</td>
 <td>🏆 <b>8 leaderboards</b><br>Holders, swaps, builds, per-NFT swap counts, BRIX richlist, LP, BRIX earned, rarity — with time windows.</td>
 </tr>
 <tr>
-<td>🎞 <b>Animated NFTs</b><br>GIF/MP4 trait layers compose into video NFTs with a PNG thumbnail.</td>
+<td>🎞 <b>Animated NFTs</b><br>GIF/WebM/MP4 trait layers compose into video NFTs with a PNG thumbnail.</td>
 <td>🧬 <b>Declarative trait rules</b><br><code>trait_config.yaml</code> drives z-order, body affinity, and the swap matrix.</td>
 </tr>
 <tr>
 <td>🔗 <b>On-chain index + history DB</b><br><a href="https://github.com/XRPLF/clio">Clio</a> (XRPL history server) listeners keep per-network SQLite index and ledger-history stores fresh.</td>
-<td>🔐 <b>No custody</b><br>No private keys in the app — every transaction is signed in the user's Xaman wallet.</td>
+<td>🔐 <b>No custody</b><br>No user keys in the app — users sign in their own Xaman (or, on the web, Joey) wallet; the backend signs only project-side operations.</td>
 </tr>
 <tr>
 <td>🧾 <b>On-chain provenance</b><br>Every tx carries <code>SourceTag</code> + Memos — who signed, which surface, what action.</td>
 <td>📦 <b>Bulk minting</b><br>Pay once, mint N editions in one durable, crash-resumable batch job.</td>
 </tr>
 <tr>
-<td>📣 <b>Share on X</b><br>Per-NFT card pages render branded Twitter cards; humans are forwarded into the app, with share attribution.</td>
+<td>📣 <b>X integration</b><br>Every mint auto-posts to X with its branded share card; per-NFT card pages forward humans into the app, with share attribution.</td>
 <td>📱 <b>Installable PWA</b><br>Web manifest + homescreen icons — the app runs (and mints) even inside X's in-app browser.</td>
+</tr>
+<tr>
+<td>🧥 <b>Dress-up trait economy</b><br>Harvest traits into a soulbound Closet, re-dress characters in place, extract traits as tradeable tokens.</td>
+<td>🧱 <b>BRIX daily drip</b><br>1 BRIX per unlisted NFT per day, claimed on-chain from the app or Discord <code>/claim</code>.</td>
 </tr>
 </table>
 
@@ -125,7 +129,7 @@ Short walkthroughs of each core flow:
 | Feature | Status |
 |---|---|
 | Dynamic NFT generation (trait selection + ffmpeg compositing) | ✅ |
-| Animated NFT support (`.gif`/`.mp4` layers → video NFT + PNG thumbnail) | ✅ |
+| Animated NFT support (`.gif`/`.webm`/`.mp4` layers → video NFT + PNG thumbnail) | ✅ |
 | Unified CDN/local trait layer store | ✅ |
 | Xaman QR signing (payment, trustline, offer acceptance) | ✅ |
 | Trait Swapper — in-place swap via `NFTokenModify` (mutable NFTs) | ✅ |
@@ -135,20 +139,24 @@ Short walkthroughs of each core flow:
 | Standalone web app — the same Activity in any browser at [build.letseffinggo.com](https://build.letseffinggo.com) (GitHub Pages front-end + wallet sign-in) | ✅ |
 | Installable PWA (web manifest, homescreen + maskable icons, social share card) — mints from X's in-app browser | ✅ |
 | Variable rarity engine (mainnet-seeded weights, network-scoped) | ✅ |
-| BRIX trustline setup button | ✅ |
+| Trustline setup — LFGO from the Discord bot's `/letsgo` button; BRIX in the Activity when a claim or trait buy needs one | ✅ |
 | Admin panel (stats, NFT lookup, burn with audit log) | ✅ |
 | Shared-services spine — one `lfg_service` backend, thin surface clients | ✅ |
 | Telegram surface (bot + trait swapper + Mini App) | ✅ |
 | Dress-up trait economy (Closet, harvest/assemble/equip, tradeable trait tokens) | ✅ live on mainnet |
-| In-app NFT marketplace (list / browse / buy via Xaman; characters in XRP, traits in BRIX with an XRP→BRIX AMM on-ramp) | ✅ |
-| Bulk minting — pay once, mint N editions in one durable, crash-resumable batch job (`/api/mint/bulk`) | ✅ (Activity stepper UI flag-gated, `BULK_MINT_UI_ENABLED`) |
+| In-app NFT marketplace (list / browse / buy / bid; characters in XRP, traits in BRIX with an XRP→BRIX AMM on-ramp; xrp.cafe listings shown read-only with a clearing-price Buy now) | ✅ |
+| Bulk minting — pay once, mint N editions in one durable, crash-resumable batch job (`/api/mint/bulk`) | ✅ (Activity quantity stepper behind `BULK_MINT_UI_ENABLED` — on in production) |
+| Sponsored free mint — admin-started, time-boxed campaigns (one hour, 100 slots) give a wallet with no prior SourceTag-tagged transaction one free mint, behind a fail-closed eligibility archive and funder + device sybil gates | ✅ mainnet — run as on-demand campaigns |
 | Share on X — per-NFT OG/Twitter card pages, JS click-through forward into the web app, `?ref=` share attribution | ✅ |
-| X brand-account auto-post on mint (`run_x.py`, budget-capped, admin runtime toggle) | ⏸ built, flag-gated (`X_ENABLED`) — go-live is a pending ops step (see Roadmap) |
+| X auto-post on mint (`run_x.py`: link-free text + branded share-card image, budget-capped, admin runtime toggle) | ✅ live in production since 2026-09-10 (`X_ENABLED`) |
+| Share from my account — per-user X OAuth2 PKCE posting ([#252](../../issues/252)) | ⏸ built, off in production |
 | Animated NFTs play as live video in the Activity and Telegram (not frozen posters) | ✅ |
-| Trait Shop — BRIX-priced on-demand trait minting with rarity-based pricing | ✅ live on mainnet |
+| Trait Shop — BRIX-priced on-demand trait minting with rarity-based pricing | ⏸ built, flag-gated (`SHOP_ENABLED`) — off in production since [#410](../../pull/410); the marketplace Traits tab (user listings) stays on |
 | On-chain provenance memos (initiator / platform / action stamped on every transaction) | ✅ |
 | Xaman push delivery (sign requests pushed to the app, QR fallback) | ✅ |
+| Joey Wallet over WalletConnect — sign-in and transaction signing on the web app, plus proof-signed wallet linking (`REOWN_PROJECT_ID`) | ✅ |
 | Ledger history database + Activity leaderboards (incl. BRIX richlist) | ✅ |
+| BRIX daily drip — 1 BRIX per unlisted NFT per UTC day, accrued nightly from the ledger archive and paid on-chain from a pre-funded distributor when claimed (Activity card, Discord `/claim`, claim-all across linked wallets) | ✅ live on mainnet |
 | On-chain NFT index with live listeners | ✅ |
 | Seasonal trait manifest (Season 3 mint exclusion) | ✅ |
 | Declarative trait rules engine (`trait_config.yaml`: z-order, body affinity, validation CLI) | ✅ |
@@ -164,12 +172,14 @@ Short walkthroughs of each core flow:
 
 | Flag | Code default | Feature | Production |
 |---|---|---|---|
-| `ECONOMY_ENABLED` | `0` (off) | Dress-up trait economy — Closet, harvest/assemble/equip, trait tokens, Trait Shop | `1` since 2026-07-21 ([#185](../../issues/185)) |
-| `MARKET_ENABLED` | `1` (on) | In-app NFT marketplace (list / browse / buy via Xaman) | on (default) |
-| `BULK_MINT_UI_ENABLED` | `0` (off) | Activity bulk-mint quantity stepper (server bulk endpoints stay live regardless) | staging first; enable per stack |
-| `X_ENABLED` | `0` (off) | X brand-account auto-poster (also requires all four OAuth creds) | off — go-live is a pending ops step ([#41](../../issues/41)) |
-| `SHARE_CARD_RENDER_ENABLED` | `0` (off) | Branded share-card PNG for X cards (needs node + Playwright Chromium) | off — raw art serves as the card image |
+| `ECONOMY_ENABLED` | `0` (off) | Dress-up trait economy — Closet, harvest/assemble/equip, trait tokens (the Trait Shop also needs `SHOP_ENABLED`) | `1` since 2026-07-21 ([#185](../../issues/185)) |
+| `SHOP_ENABLED` | `0` (off) | Trait Shop — the project mints and sells traits on demand for BRIX (also requires `ECONOMY_ENABLED`) | off (default) since [#410](../../pull/410) |
+| `MARKET_ENABLED` | `1` (on) | In-app NFT marketplace (list / browse / buy / bid; trait listings also need `ECONOMY_ENABLED`) | on (default) |
+| `BULK_MINT_UI_ENABLED` | `0` (off) | Activity bulk-mint quantity stepper (server bulk endpoints stay live regardless) | on (`1`) in production and staging |
+| `X_ENABLED` | `0` (off) | X mint auto-poster (also requires all four OAuth creds) | `1` since 2026-09-10 ([#41](../../issues/41)) |
+| `SHARE_CARD_RENDER_ENABLED` | `0` (off) | Branded share-card PNG for X cards (needs node + Playwright Chromium) | `1` — the branded PNG is the card image and the auto-poster's tweet image (raw art on render failure) |
 | `WEB_ALLOWED_ORIGINS` | empty (off) | Standalone web surface CORS allowlist (empty = feature off) | set to the GitHub Pages origins ([#240](../../issues/240)) |
+| `REOWN_PROJECT_ID` | empty (off) | Joey Wallet sign-in + signing over WalletConnect on the web app (`WC_SURFACES` also gates the link-a-wallet Joey option) | set ([#447](../../issues/447)) |
 <!-- feature-flags:end -->
 
 </details>
@@ -183,9 +193,9 @@ Traits aren't just pixels baked into an image — they're assets you can own sep
 - **Harvest** — strip a character you own; its traits land in your **Closet**, a soulbound on-ledger inventory NFT
 - **Assemble / Equip** — dress a blank character (or swap a single slot) from your Closet, in place via `NFTokenModify`
 - **Extract / Deposit** — convert a Closet trait into a standalone tradeable trait token and back, so traits can be listed on the marketplace (priced in BRIX)
-- **Trait Shop** — mint any specific trait on demand, priced by rarity in BRIX ([#217](../../issues/217))
+- **Trait Shop** — mint any specific trait on demand, priced by rarity in BRIX ([#217](../../issues/217)); built, but off in production since [#410](../../pull/410) (`SHOP_ENABLED=0`), so traits are bought from marketplace listings instead
 
-A nightly reconcile + conservation audit (`scripts/audit_trait_economy.py`) guards supply integrity.
+A nightly reconcile + conservation audit (`scripts/audit_trait_economy.py`) checks supply against the frozen genesis and reports drift.
 
 ---
 
@@ -197,15 +207,15 @@ A nightly reconcile + conservation audit (`scripts/audit_trait_economy.py`) guar
 
 Five thin client surfaces all talk over REST/WS to one aiohttp backend (`lfg_service`):
 
-- **Discord bot** — the classic in-chat surface, fully refactored onto the shared backend
+- **Discord bot** — the classic in-chat surface, refactored onto the shared backend (admin burns and the trustline button stay bot-local)
 - **Discord Activity** — the embedded web client
 - **Telegram bot** — the in-chat command and inline-keyboard client
 - **Telegram Mini App** — the embedded web client launched from Telegram
 - **Web app** — the same no-build client, served by GitHub Pages at [build.letseffinggo.com](https://build.letseffinggo.com)
 
-`lfg_service` runs the mint / swap / market / economy session state machines, submits every XRPL transaction, and builds every Xaman signing payload. Shared domain logic lives in `lfg_core`; a **separate listener process group** streams the Clio transaction feed into the per-network SQLite index and ledger-history stores that the backend reads. **No private keys ever touch the app** — all signing happens in the user's Xaman wallet, images and metadata are hosted on BunnyCDN, and the NFT schema is pinned on IPFS.
+`lfg_service` runs the mint / swap / market / economy session state machines, signs and submits the backend's own XRPL transactions, and builds every signing request users approve in their own wallet (a Xaman payload, or on the web a WalletConnect request to Joey Wallet). Shared domain logic lives in `lfg_core`; a **separate listener process group** streams the Clio transaction feed into the per-network SQLite index and ledger-history stores that the backend reads. **No user keys ever touch the app** — users sign in their own wallet. Minted images and metadata are uploaded to BunnyCDN (pre-cutover editions still reference IPFS), and the NFT schema is pinned on IPFS.
 
-Social links are entry routes into the existing **web app**, not additional client surfaces: `lfg_service` serves per-NFT share-card pages whose Twitter/OG tags render a branded card and whose body forwards humans into the installable PWA. That works in X's in-app browser—or any social platform's in-app browser. The X brand-account auto-poster (`run_x.py`) is built and flag-gated behind `X_ENABLED`.
+Social links are entry routes into the existing **web app**, not additional client surfaces: `lfg_service` serves per-NFT share-card pages whose Twitter/OG tags render a branded card and whose body forwards humans into the installable PWA. That works in X's in-app browser—or any social platform's in-app browser. The X auto-poster (`run_x.py`, pm2 `lfg-x`) runs in production behind `X_ENABLED`, tweeting each mint as link-free text with the branded share-card image.
 
 <div align="center">
 <img src="assets/tech_overview.svg" alt="LFG under the hood" width="820">
@@ -217,26 +227,28 @@ Social links are entry routes into the existing **web app**, not additional clie
 LFG/
 ├── main.py                 # Classic Discord bot launch shim
 ├── run_telegram.py         # Telegram surface launch shim
-├── run_x.py                # X auto-poster launch shim (flag-gated, X_ENABLED)
+├── run_x.py                # X mint auto-poster launch shim (X_ENABLED)
 ├── lfg_service/            # Shared REST/WS backend (aiohttp) — the hub
-│   └── app.py              # API, Activity static host, session state machines
+│   ├── app.py              # API, Activity static host, session state machines
+│   └── identity.py         # (platform, user) → wallet identity resolution
 ├── lfg_core/               # Shared domain library (used by every process)
 │   ├── config.py           # All environment configuration
 │   ├── xrpl_ops.py         # Mint, burn, offers, payment watching
 │   ├── xumm_ops.py         # Xaman payload builders + SourceTag/Memos
+│   ├── signing/            # Signing-provider seam (Xaman, WalletConnect/Joey) with enforced provenance
 │   ├── mint_flow.py        # Mint session state machine
 │   ├── swap_flow.py        # Trait-swap state machine
 │   ├── market_flow.py      # Marketplace list/buy/cancel state machines
 │   ├── economy_flow.py     # Dress-up economy flows
 │   ├── shop_flow.py        # Trait Shop — BRIX-priced on-demand trait mint
 │   ├── bulk_mint_flow.py   # Bulk mint — pay once, mint N editions
-│   ├── burn2mint_flow.py   # Burn-to-mint — burn M own NFTs for M fresh mints (#220)
-│   ├── layer_store.py      # Trait layer store (local-first)
+│   ├── burn2mint_flow.py   # Burn-to-mint — burn M own NFTs for M fresh mints (#220; flag-gated, off)
+│   ├── layer_store.py      # Trait layer store (local dir or BunnyCDN, via LAYER_SOURCE)
 │   └── traits.py           # Rules-driven trait selection
 ├── surfaces/
 │   ├── discord_bot/        # Discord bot (bot.py, commands, views, admin)
 │   ├── telegram_bot/       # Telegram bot + Mini App
-│   ├── x_bot/              # X (Twitter) brand-account auto-poster
+│   ├── x_bot/              # X (Twitter) mint auto-poster
 │   └── _client/, _shared/  # Surface SDK (LFGServiceClient) + plumbing
 ├── webapp/
 │   ├── server.py           # Launch shim → lfg_service.app
@@ -253,15 +265,18 @@ LFG/
 
 Production runs as two branch-driven [pm2](https://pm2.keymetrics.io/) stacks on one host:
 **`main` → staging** (testnet) and **`deploy` → prod** (mainnet). Each stack runs the
-bot, the Activity backend, the Telegram surface, a clio index/history listener, a nightly
-balance-snapshot cron, and a polling **deployer** that fast-forwards its checkout when its
-branch moves, reinstalls on dependency changes, and drain-restarts the processes. Merging to
+bot, the Activity backend, the Telegram surface, a clio index/history listener, nightly
+cron jobs (balance snapshot, trait-economy reconcile + audit, BRIX drip accrual, marketplace
+self-heal sweep), and a polling **deployer** that fast-forwards its checkout when its
+branch moves, reinstalls on dependency changes, and drain-restarts the long-running processes.
+Prod additionally runs the X mint auto-poster (`lfg-x`), the nightly SourceTag metrics push,
+and a public-edge health probe. Merging to
 `main` auto-deploys staging only; promoting to prod is an explicit fast-forward
 (`scripts/promote.sh`). Ecosystem files: `ecosystem.prod.config.js` / `ecosystem.staging.config.js`.
 
 The standalone web app is the same `webapp/client/` bundle, published to GitHub Pages
 at [build.letseffinggo.com](https://build.letseffinggo.com) by `.github/workflows/pages.yml`
-on every push to `deploy`; the prod API answers it cross-origin, gated by the
+on every push to `deploy` that changes `webapp/client/`; the prod API answers it cross-origin, gated by the
 `WEB_ALLOWED_ORIGINS` allowlist.
 
 </details>
@@ -270,18 +285,20 @@ on every push to `deploy`; the prod API answers it cross-origin, gated by the
 
 ## Quick start
 
-**Prerequisites:** Python 3.10+, `ffmpeg` on the system path (`apt-get install ffmpeg` / `brew install ffmpeg`), a Discord application (bot token + Client ID/Secret), [Xaman API credentials](https://apps.xumm.dev/), a BunnyCDN storage zone, and a funded XRPL account ([testnet faucet](https://xrpl.org/xrp-testnet-faucet.html) for testing). To just run the test suite, Python + ffmpeg are enough.
+**Prerequisites:** Python 3.10+, `ffmpeg` on the system path (`apt-get install ffmpeg` / `brew install ffmpeg`; `.webm` trait layers need a build with `libvpx`), a Discord application (bot token + Client ID/Secret), [Xaman API credentials](https://apps.xumm.dev/), a BunnyCDN storage zone, and a funded XRPL account ([testnet faucet](https://xrpl.org/xrp-testnet-faucet.html) for testing). To just run the test suite, Python + ffmpeg are enough.
 
 > ⚠️ **Set `XRPL_NETWORK=testnet` before your first run — the default is mainnet.**
 
 ```bash
 git clone https://github.com/Team-Hamsa/LFG.git
 cd LFG
-./setup.sh            # builds .venv, installs deps, installs the pre-push hook
+./setup.sh            # Linux: installs ffmpeg if missing, builds .venv, installs deps + the pre-push hook
 source .venv/bin/activate
 ```
 
-Then create a `.env` in the repo root (variable reference in the collapsed section below) and run a surface — start with `lfg_service`, the hub every other surface talks to:
+On macOS `setup.sh` exits without doing anything — create the venv by hand (`python3 -m venv .venv && .venv/bin/pip install -r requirements.txt -r requirements-dev.txt && .venv/bin/pre-commit install --hook-type pre-push`).
+
+Then create a `.env` in the repo root (variable reference in the collapsed section below) and run a surface — start with `lfg_service`, the hub every other surface talks to. Trait art is not in the repo (`layers/` is gitignored), so point `LAYER_SOURCE=local` / `LAYERS_DIR` at your own tree:
 
 ```bash
 # The shared backend + Discord Activity host (run this first — port 8176)
@@ -304,6 +321,9 @@ Minimum to mint from the classic bot:
 
 ```plaintext
 DISCORD_BOT_TOKEN=...        # classic bot only
+ADMIN_LOG_CHANNEL_ID=...     # classic bot only (burn audit log)
+LFG_SERVICE_URL=http://localhost:8176
+SERVICE_TOKEN_DISCORD=...    # shared secret: same value in the bot's and the service's env
 XUMM_API_KEY=...
 XUMM_API_SECRET=...
 SEED=...                     # XRPL wallet seed used for minting/backend signing
@@ -333,14 +353,14 @@ reserve, and the hot key can do anything the account can: mint, burn, create
 and cancel offers, send XRP and issued currency, set trust lines. What the
 split does give you is that the credential on the deploy box is *rotatable
 without moving the collection*: a box compromise is answered with a
-`SetRegularKey`, not by re-issuing 3,500+ NFTs under a new issuer. Losing it is
+`SetRegularKey`, not by re-issuing 5,000+ NFTs under a new issuer. Losing it is
 an incident, not an inconvenience — and note there is **no written rotation
 runbook yet**: the linked document covers the original `SEED`/`SIGNING_ACCOUNT`
 cutover, not the on-ledger `SetRegularKey` you would need during one. Cutover
 procedure: [`docs/runbooks/mainnet-mvp-launch.md`](docs/runbooks/mainnet-mvp-launch.md)
 ("Blocker 1 — Regular-key signing").
 
-The Discord Activity additionally needs:
+`lfg_service` hosts the Discord Activity and refuses to start without the Discord app credentials, so every setup also needs these (`WEBAPP_SESSION_SECRET` falls back to a value derived from the XUMM secret; set it in production):
 
 ```plaintext
 DISCORD_CLIENT_ID=...
@@ -350,18 +370,27 @@ WEBAPP_PORT=8176
 ```
 
 Optional surfaces / features: `TELEGRAM_BOT_TOKEN`, `SERVICE_TOKEN_TELEGRAM`,
-`TELEGRAM_MINI_APP_URL` (Mini App), `MARKET_ENABLED` (character marketplace, `1`
-by default), `ECONOMY_ENABLED` (trait economy + Trait Shop; default `0`, set to
-`1` in production), `BULK_MINT_UI_ENABLED` (Activity bulk-mint stepper, default `0`),
-`MAX_COLLECTION_SIZE` / `BULK_MINT_MAX` (bulk-mint caps), `SHOP_BASE_BRIX` /
-`SHOP_MIN_BRIX` / `SHOP_MAX_BRIX` (Trait Shop pricing), `WEB_ALLOWED_ORIGINS`
-(standalone web app CORS allowlist; empty = off), `PUBLIC_SHARE_BASE_URL` /
-`SHARE_FORWARD_URL` / `SHARE_CARD_RENDER_ENABLED` (Share-on-X card pages +
-forwarding), `X_ENABLED` + `X_*` OAuth creds (brand-account auto-poster),
-`XRPL_NETWORK`, `XRPL_CLIO_WS_URL`, `BRIX_DISTRIBUTOR_ADDRESS`,
+`TELEGRAM_MINI_APP_URL` (Mini App), `MARKET_ENABLED` (in-app marketplace, `1`
+by default; trait listings also need `ECONOMY_ENABLED`), `ECONOMY_ENABLED` (trait
+economy; default `0`, set to `1` in production), `SHOP_ENABLED` (Trait Shop, also
+needs `ECONOMY_ENABLED`; default `0`, off in production), `BULK_MINT_UI_ENABLED`
+(Activity bulk-mint stepper, default `0`), `MAX_COLLECTION_SIZE` (live-edition cap
+on every mint path, default 10,000) / `BULK_MINT_MAX` (per-request bulk quantity,
+default 10), `SHOP_BASE_BRIX` / `SHOP_MIN_BRIX` / `SHOP_MAX_BRIX` (Trait Shop
+pricing), `WEB_ALLOWED_ORIGINS` (standalone web app CORS allowlist; empty = off),
+`REOWN_PROJECT_ID` / `WC_SURFACES` (Joey Wallet over WalletConnect; unset = off —
+sign-in and transaction signing are web-only, and `WC_SURFACES` also gates the Joey
+option in the link-a-wallet panel), `PUBLIC_SHARE_BASE_URL` / `SHARE_FORWARD_URL` /
+`SHARE_CARD_RENDER_ENABLED` (Share-on-X card pages + forwarding), `X_ENABLED` + the
+four `X_CONSUMER_*` / `X_ACCESS_*` OAuth 1.0a creds + `SERVICE_TOKEN_X` (mint
+auto-poster), `X_OAUTH_CLIENT_ID` / `X_OAUTH_CALLBACK_URL` / `X_TOKEN_ENC_KEY`
+(per-user "Share from my account"; off unless all three are set), `XRPL_NETWORK`,
+`XRPL_CLIO_WS_URL`, `BRIX_DISTRIBUTOR_ADDRESS`, `BRIX_DISTRIBUTOR_SEED` (second
+backend hot key: signs BRIX drip claim payouts; unset = claims disabled),
 `BRIX_AMM_ACCOUNT`.
 
-The full list with defaults lives in `lfg_core/config.py`. **Defaults target
+The full list with defaults lives in `lfg_core/config.py` (surface-only variables
+in `surfaces/<surface>/config.py`). **Defaults target
 mainnet** (`XRPL_NETWORK=mainnet`, `s1.ripple.com`); set `XRPL_NETWORK=testnet`
 for testing. Xaman was formerly called XUMM — the API credentials, the developer
 console, and `lfg_core/xumm_ops.py` still use the old name. Full Discord Activity
@@ -380,12 +409,13 @@ minted image/metadata uploads.
 layers/
 ├── shared/     # universal art every body pulls from (Background, Back)
 ├── male/  female/  ape/  milady/  skeleton/
-│   └── Body/ Clothing/ Mouth/ Eyebrows/ Eyes/ Head/ Accessory/
+│   └── Body/ Clothing/ Mouth/ Eyebrows/ Eyes/ Head/ Accessory/  (+ body-only Back/)
+└── seasons.json  # seasonal trait manifest (the one tracked file under layers/)
 ```
 
 Trait legality — layer order, per-value body affinity, and the cross-body swap
 matrix — lives in `trait_config.yaml` at the repo root, validated by
-`scripts/validate_trait_config.py` (runs in pre-commit and CI).
+`scripts/validate_trait_config.py` (runs in the pre-push gate and CI).
 
 </details>
 
@@ -406,18 +436,16 @@ collection (not a general tool). Full rationale per row in
 | **OPP-027 Dynamic NFT Framework** — URI-update post-mint | ✅ Fulfilled | Mutable mints (`NFT_FLAGS=25`) + `NFTokenModify` in-place trait swaps, harvest/assemble/equip; soulbound mutable Closet whose on-chain metadata is the source of truth — `lfg_core/swap_flow.py`, `economy_flow.py`, `closet_token.py` |
 | **OPP-053 XRPL Transaction Indexer** — TheGraph-equivalent | 🟡 Partial | Streaming listener + resumable backfills, raw tx archive with derived/rebuildable event tables, continuity-gap certification and self-healing catch-up — `scripts/onchain_listener.py`, `lfg_core/nft_index.py`, `history_store.py` |
 | **OPP-046 Gaming Utility-NFT Framework** — play-to-earn, asset interop | 🟡 Partial | Dress-up trait economy (harvest/assemble/equip/extract/deposit), tradeable trait tokens, BRIX hold-to-earn drip, supply-conservation ledger + nightly audit |
-| **OPP-001 / OPP-010 Session continuity · social onboarding** | 🟡 Partial | One identity across Discord, Telegram and web resolved to a wallet; Xaman push-signing so returning users never rescan a QR — `lfg_service/identity.py` |
-| **OPP-062 Community-Ops automation** | 🟡 Partial | X auto-poster, Discord/Telegram bots, nightly audits posting drift to a webhook — project-specific, not a service |
+| **OPP-001 / OPP-010 Session continuity · social onboarding** | 🟡 Partial | One identity across Discord, Telegram and web resolved to a wallet, with profiles above per-platform identities and proof-linked extra wallets; Xaman push delivery so returning users can sign without rescanning a QR, and a reusable Joey Wallet (WalletConnect) session on the web — `lfg_service/identity.py` |
+| **OPP-062 Community-Ops automation** | 🟡 Partial | X mint auto-poster, Discord/Telegram bots, nightly audits that report drift (webhook alerting built, not configured in production) — project-specific, not a service |
 | **OPP-016 POAP / event NFT** | 🔜 Buildable | Campaign-scoped sponsored free mint (slots, TTL, eligibility archive, `campaign` memo) is the whole substrate — a POAP is a fixed-trait campaign |
-| **OPP-074 Dev Utilities Pack** · **OPP-019 dApp analytics** | 🔜 Extractable | `scripts/` ops tooling (airdrop payouts, recovery, snapshots) and the per-SourceTag metrics badge / leaderboard API |
+| **OPP-074 Dev Utilities Pack** · **OPP-019 dApp analytics** | 🔜 Extractable | `scripts/` ops tooling (BRIX drip accrual + claim recovery, payload cancellation, snapshots) and the per-SourceTag metrics badge / leaderboard API |
 
 ---
 
 ## Roadmap
 
 **Remaining** — synced automatically from [`roadmap`-labelled issues](../../issues?q=label%3Aroadmap)
-
-- [ ] **X auto-poster go-live** — code shipped and flag-gated (`X_ENABLED`); what's left is ops (brand-account credentials + pm2 registration)
 
 <!-- roadmap:start -->
 - [ ] [#39 — Admin tooling for authoring trait_config.yaml (config-gen UI)](../../issues/39)
@@ -454,9 +482,9 @@ collection (not a general tool). Full rationale per row in
 - [x] [#47 — AMM integration backend](../../issues/47) — incl. the live XRP→BRIX on-ramp (PR [#248](../../pull/248))
 - [x] [#49 — XRPL AI-agent integration exploration](../../issues/49) — closed as a decision: custody deferred
 - [x] [#215 — Bulk minting (pay once, mint N editions in one durable batch job)](../../issues/215)
-- [x] [#217 — Trait Shop (BRIX-priced on-demand trait minting)](../../issues/217) — live on mainnet with the [#185](../../issues/185) economy flip
+- [x] [#217 — Trait Shop (BRIX-priced on-demand trait minting)](../../issues/217) — shipped with the [#185](../../issues/185) economy flip; off by default since [#410](../../pull/410) (`SHOP_ENABLED`)
 - [x] [#240 — Standalone web surface — the Activity live in any browser at build.letseffinggo.com](../../issues/240)
-- [x] [#41 — X (Twitter) integration](../../issues/41) — auto-post on mint (PR [#245](../../pull/245)), admin runtime toggle ([#255](../../pull/255)), Share-on-X buttons + per-NFT card pages ([#258](../../pull/258)), click-through forwarding + share attribution ([#274](../../pull/274)); auto-poster go-live tracked above
+- [x] [#41 — X (Twitter) integration](../../issues/41) — auto-post on mint (PR [#245](../../pull/245)), admin runtime toggle ([#255](../../pull/255)), Share-on-X buttons + per-NFT card pages ([#258](../../pull/258)), click-through forwarding + share attribution ([#274](../../pull/274)); auto-poster live in production since 2026-09-10, posting the branded share-card render ([#479](../../pull/479))
 - [x] PWA install + social share card — manifest, favicons, homescreen icons (PR [#246](../../pull/246))
 - [x] BRIX-denominated trait listings + XRP→BRIX AMM on-ramp (PR [#248](../../pull/248), shared payment-path helper [#238](../../issues/238))
 - [x] Bulk-mint Activity UI behind `BULK_MINT_UI_ENABLED` (PR [#272](../../pull/272))
