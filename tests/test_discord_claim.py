@@ -311,6 +311,19 @@ def test_losing_track_of_the_request_mid_poll_still_points_back_at_claim():
     assert "not found" not in outcome.description.lower()
 
 
+def test_a_poll_failure_after_the_token_expired_does_not_crash_either():
+    """The recovery message after a failed poll is just as late as the normal
+    outcome, so its send must be guarded the same way."""
+    svc = _Svc(
+        trustline={"state": "pending", "uuid": "tl-1", "xumm_url": "https://xumm.app/sign/tl-1"},
+        trustline_final=ServiceError("not found", code=None, status=404),
+    )
+    it = _Interaction(fail_on=2)
+    _run(claim_view.handle_brix_trustline(svc, it))  # must not raise
+    assert it.followup.calls[-1].get("failed") is True
+    assert "/claim" in it.followup.calls[-1]["embed"].description
+
+
 def test_trustline_flow_survives_an_expired_interaction_token():
     """A long Xaman wait can outlive the webhook token; the final send failing
     must not crash the handler."""

@@ -164,20 +164,27 @@ async def handle_brix_trustline(svc: LFGServiceClient, interaction: discord.Inte
         # Past the start, the request may already be approved (a service
         # restart forgets it and 404s the poll) — /claim re-checks on-ledger.
         logging.error(f"brix trustline {uuid} failed: {e}")
-        await interaction.followup.send(
-            embed=render.error_embed(
+        await _send_late(
+            interaction,
+            uuid,
+            render.error_embed(
                 "Couldn't finish checking the trustline request. Run `/claim` again — it "
                 "picks up a trustline you already approved, or offers a new request.",
                 title="⚠️ BRIX trustline",
             ),
-            ephemeral=True,
         )
         return
 
+    await _send_late(interaction, uuid, trustline_outcome_embed(final))
+
+
+async def _send_late(interaction: discord.Interaction, uuid: str, embed: Embed) -> None:
+    """A follow-up sent after the Xaman wait, which can outlive the webhook
+    token: an undeliverable message is logged, never raised."""
     try:
-        await interaction.followup.send(embed=trustline_outcome_embed(final), ephemeral=True)
+        await interaction.followup.send(embed=embed, ephemeral=True)
     except discord.HTTPException as e:  # NotFound included: the webhook token expired
-        logging.warning(f"brix trustline {uuid}: outcome not delivered: {e}")
+        logging.warning(f"brix trustline {uuid}: message not delivered: {e}")
 
 
 async def handle_claim(svc: LFGServiceClient, interaction: discord.Interaction) -> None:
