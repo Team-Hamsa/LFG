@@ -29,7 +29,7 @@ import traceback
 import uuid as uuid_lib
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, field
-from decimal import Decimal, InvalidOperation
+from decimal import Decimal, DecimalException, InvalidOperation
 from html import escape
 from typing import Any, TypeVar, cast
 from urllib.parse import urlparse
@@ -1481,11 +1481,16 @@ async def _admin_json(request: Any) -> dict[str, Any]:
 def _xrp_field_drops(body: dict[str, Any], name: str, *, allow_zero: bool) -> int:
     try:
         value = Decimal(str(body.get(name)))
-    except (InvalidOperation, ValueError):
+    except DecimalException:
         raise ValueError(f"{name} must be a number") from None
     if not value.is_finite() or value < 0 or (value == 0 and not allow_zero):
         raise ValueError(f"{name} must be {'zero or more' if allow_zero else 'greater than zero'}")
-    drops = value * 1_000_000
+    if value > market_ops.MAX_XRP:
+        raise ValueError(f"{name} exceeds the total XRP supply")
+    try:
+        drops = value * 1_000_000
+    except DecimalException:
+        raise ValueError(f"{name} exceeds the total XRP supply") from None
     if drops != drops.to_integral_value():
         raise ValueError(f"{name} has more than 6 decimal places")
     return int(drops)
@@ -1494,11 +1499,16 @@ def _xrp_field_drops(body: dict[str, Any], name: str, *, allow_zero: bool) -> in
 def _fee_cover_knobs(body: dict[str, Any]) -> fee_cover_store.Knobs:
     try:
         pct = Decimal(str(body.get("coverage_pct")))
-    except (InvalidOperation, ValueError):
+    except DecimalException:
         raise ValueError("coverage_pct must be a number") from None
     if not pct.is_finite():
         raise ValueError("coverage_pct must be a number")
-    bps = pct * 100
+    if pct < 0 or pct > 100:
+        raise ValueError("coverage_pct must be between 0 and 100 with at most 2 decimals")
+    try:
+        bps = pct * 100
+    except DecimalException:
+        raise ValueError("coverage_pct must be between 0 and 100 with at most 2 decimals") from None
     if bps != bps.to_integral_value() or not 0 <= bps <= fee_cover_store.BPS:
         raise ValueError("coverage_pct must be between 0 and 100 with at most 2 decimals")
     knobs = fee_cover_store.Knobs(
@@ -1517,11 +1527,17 @@ def _fee_cover_duration(body: dict[str, Any]) -> int | None:
         return None
     try:
         hours = Decimal(str(raw))
-    except (InvalidOperation, ValueError):
+    except DecimalException:
         raise ValueError("duration_hours must be a number") from None
     if not hours.is_finite() or hours <= 0:
         raise ValueError("duration_hours must be greater than zero")
-    return int(hours * 3600)
+    if hours > 87_600:
+        raise ValueError("duration_hours must be at most 87600")
+    try:
+        seconds = hours * 3600
+    except DecimalException:
+        raise ValueError("duration_hours must be at most 87600") from None
+    return int(seconds)
 
 
 def _bad_request(message: str) -> web.Response:
