@@ -2623,6 +2623,57 @@ def _carries_memo(tx: dict[str, Any], tag: str) -> bool:
     return False
 
 
+async def _find_memo_tagged_tx(
+    sender: str,
+    tag: str,
+    is_genuine: Callable[[dict[str, Any]], bool],
+    min_ledger: int | None,
+    label: str,
+) -> str | None:
+    """Hash of the first `sender` account_tx entry carrying memo `tag` that
+    `is_genuine` accepts, or None if absent. Shared by BRIX claim and fee-cover
+    recovery: the memo makes a payout findable, `is_genuine` makes it
+    trustworthy (memos are user-writable). Absence is NOT proof of failure."""
+    client = rpc_client()
+    # Bounded: a payout cannot predate the ledger window it was built for.
+    scan_from = -1 if min_ledger is None else max(1, min_ledger - _CLAIM_SCAN_LEDGER_SLACK)
+    marker: Any = None
+    while True:
+        request = AccountTx(account=sender, limit=200, marker=marker, ledger_index_min=scan_from)
+        response = await asyncio.to_thread(client.request, request)
+        if not response.is_successful():
+            # An error response carries no `transactions`; reading it as
+            # "absent" past LastLedgerSequence would fail a payout that may
+            # have landed, and a retry/requeue would pay it twice.
+            raise RuntimeError(f"account_tx error: {response.result!r}")
+        result = response.result
+        if not isinstance(result, dict):
+            raise RuntimeError(f"account_tx returned an unexpected payload: {result!r}")
+        for entry in result.get("transactions", []):
+            tx = entry.get("tx") or entry.get("tx_json") or {}
+            if not _carries_memo(tx, tag):
+                continue
+            if not is_genuine(entry):
+                logging.warning(
+                    "%s: ignoring a transaction carrying memo %s that is not a genuine payout",
+                    label,
+                    tag,
+                )
+                continue
+            tx_hash = entry.get("hash") or tx.get("hash")
+            if not isinstance(tx_hash, str) or not tx_hash:
+                # Real and validated but unnameable. Returning None would read
+                # as "absent", which past LastLedgerSequence means "failed" —
+                # and that would pay twice.
+                raise RuntimeError(
+                    f"{label}: payout for {tag} found on-ledger but carries no usable hash"
+                )
+            return tx_hash
+        marker = result.get("marker")
+        if not marker:
+            return None
+
+
 async def find_claim_payment(
     claim_id: int, wallet: str, amount: int, min_ledger: int | None = None
 ) -> str | None:
@@ -2634,45 +2685,138 @@ async def find_claim_payment(
     LastLedgerSequence.
     """
     sender = distributor_address()
-    tag = claim_memo_tag(claim_id)
-    client = rpc_client()
-    # Bound the scan. A claim that was never paid is the COMMON recovery case,
-    # and unbounded it would page the distributor's entire history — once per
-    # open claim, growing forever as successful claims accumulate. The payout
-    # cannot predate the ledger window the claim was built for, so start a
-    # little before its deadline.
-    scan_from = -1 if min_ledger is None else max(1, min_ledger - _CLAIM_SCAN_LEDGER_SLACK)
-    marker: Any = None
-    while True:
-        request = AccountTx(account=sender, limit=200, marker=marker, ledger_index_min=scan_from)
-        response = await asyncio.to_thread(client.request, request)
-        result = response.result
-        if not isinstance(result, dict):
-            raise RuntimeError(f"account_tx returned an unexpected payload: {result!r}")
-        for entry in result.get("transactions", []):
-            tx = entry.get("tx") or entry.get("tx_json") or {}
-            if not _carries_memo(tx, tag):
-                continue
-            if not _is_genuine_claim_payout(entry, wallet, amount, sender):
-                logging.warning(
-                    "find_claim_payment: ignoring a transaction carrying claim %s's memo that "
-                    "is not a valid payout from the distributor",
-                    claim_id,
-                )
-                continue
-            tx_hash = entry.get("hash") or tx.get("hash")
-            if not isinstance(tx_hash, str) or not tx_hash:
-                # The payout is real and validated; we simply cannot name it.
-                # Returning None would mean "absent" to the caller, which past
-                # LastLedgerSequence is treated as proof of failure — the
-                # accruals would be unbound and the same BRIX paid twice.
-                raise RuntimeError(
-                    f"claim {claim_id}'s payout was found on-ledger but carries no usable hash"
-                )
-            return tx_hash
-        marker = result.get("marker")
-        if not marker:
-            return None
+    return await _find_memo_tagged_tx(
+        sender,
+        claim_memo_tag(claim_id),
+        lambda entry: _is_genuine_claim_payout(entry, wallet, amount, sender),
+        min_ledger,
+        f"find_claim_payment(claim {claim_id})",
+    )
+
+
+# --- Marketplace fee cover (spec 2026-09-14-marketplace-fee-cover-design.md) ---
+
+
+def fee_cover_memo_tag(accept_tx_hash: str) -> str:
+    """The on-chain marker that makes a fee-cover refund self-identifying."""
+    return f"lfg:fee_cover:{accept_tx_hash}"
+
+
+async def send_fee_cover_refund(
+    destination: str,
+    drops: int,
+    accept_tx_hash: str,
+    *,
+    campaign_id: int,
+    max_last_ledger_seq: int | None = None,
+) -> ClaimPayment:
+    """Refund `drops` XRP from the signing account (mainnet: the NFT issuer via
+    its regular key — the account the royalty landed in) to `destination`.
+
+    Same tri-state contract as send_brix_claim. LastLedgerSequence is pinned
+    before submission and clamped to the deadline the caller already recorded,
+    so the stored deadline is an upper bound at every instant.
+
+    Every pre-flight step (drops check, signing wallet, ledger-index read,
+    Payment construction) raises ClaimNotSubmitted — chaining the original
+    error — because nothing has reached the ledger yet: the caller can safely
+    return the refund to `owed` instead of parking a user-visible failure."""
+    try:
+        if int(drops) <= 0:
+            raise ClaimNotSubmitted("a fee-cover refund must be at least 1 drop")
+        wallet = Wallet.from_seed(config.SEED)
+        client = rpc_client()
+        current = await _current_validated_ledger_index(client)
+        if current is None:
+            raise ClaimNotSubmitted(
+                "could not read the validated ledger index; refusing to submit a refund"
+            )
+        last_ledger_seq = current + config.FEE_COVER_LEDGER_MARGIN
+        if max_last_ledger_seq is not None:
+            last_ledger_seq = min(last_ledger_seq, max_last_ledger_seq)
+
+        payment = Payment(
+            account=config.SIGNING_ACCOUNT,  # explicit: SEED is a regular key on mainnet
+            destination=destination,
+            amount=str(int(drops)),
+            source_tag=config.SOURCE_TAG,
+            last_ledger_sequence=last_ledger_seq,
+            memos=[
+                *memos.build_memo_models(
+                    memos.INITIATOR_BACKEND,
+                    memos.PLATFORM_BACKEND,
+                    memos.ACTION_FEE_COVER,
+                    campaign=f"fee-cover-{int(campaign_id)}",
+                ),
+                Memo(memo_data=fee_cover_memo_tag(accept_tx_hash).encode().hex().upper()),
+            ],
+        )
+    except ClaimNotSubmitted:
+        raise
+    except Exception as exc:
+        raise ClaimNotSubmitted(f"fee-cover refund pre-flight failed: {exc!r}") from exc
+    try:
+        result = await _submit_and_confirm(payment, wallet, client, "send_fee_cover_refund")
+    except IndeterminateResultError:
+        logging.warning("send_fee_cover_refund: %s outcome indeterminate", accept_tx_hash)
+        return ClaimPayment("unknown", None, last_ledger_seq)
+    except asyncio.CancelledError:
+        raise
+    except Exception:
+        logging.exception(
+            "send_fee_cover_refund: %s raised after the deadline was set", accept_tx_hash
+        )
+        return ClaimPayment("unknown", None, last_ledger_seq)
+    if result is None:
+        return ClaimPayment("failed", None, last_ledger_seq)
+    tx_hash = result.get("hash")
+    return ClaimPayment("confirmed", tx_hash if isinstance(tx_hash, str) else None, last_ledger_seq)
+
+
+def _is_genuine_xrp_refund(
+    entry: dict[str, Any], destination: str, drops: int, sender: str
+) -> bool:
+    if not entry.get("validated"):
+        return False
+    meta = entry.get("meta") or entry.get("metaData") or {}
+    if not isinstance(meta, dict) or meta.get("TransactionResult") != "tesSUCCESS":
+        return False
+    tx = entry.get("tx") or entry.get("tx_json") or {}
+    if tx.get("TransactionType") != "Payment" or tx.get("Account") != sender:
+        return False
+    if tx.get("Destination") != destination:
+        return False
+    delivered = meta.get("delivered_amount", tx.get("DeliverMax", tx.get("Amount")))
+    return isinstance(delivered, str) and delivered.isdigit() and int(delivered) == int(drops)
+
+
+async def find_fee_cover_payment(
+    accept_tx_hash: str, *, destination: str, drops: int, min_ledger: int | None
+) -> str | None:
+    """Hash of the genuine on-ledger refund for `accept_tx_hash`, or None."""
+    sender = config.SIGNING_ACCOUNT
+    return await _find_memo_tagged_tx(
+        sender,
+        fee_cover_memo_tag(accept_tx_hash),
+        lambda entry: _is_genuine_xrp_refund(entry, destination, drops, sender),
+        min_ledger,
+        f"find_fee_cover_payment({accept_tx_hash})",
+    )
+
+
+async def get_xrp_balance_drops(address: str) -> int | None:
+    """Total XRP balance of `address` in drops (not net of reserve), or None
+    when the lookup failed — the admin status shows it next to budget left."""
+    try:
+        client = async_rpc_client()
+        response = await client.request(AccountInfo(account=address, ledger_index="validated"))
+    except Exception as e:
+        logging.warning(f"get_xrp_balance_drops({address}) lookup failed: {e}")
+        return None
+    if not response.is_successful():
+        return None
+    balance = (response.result.get("account_data") or {}).get("Balance")
+    return int(balance) if isinstance(balance, str) and balance.isdigit() else None
 
 
 async def current_validated_ledger_index() -> int | None:

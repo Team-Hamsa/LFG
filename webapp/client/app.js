@@ -9,7 +9,7 @@
 // money math, and wizard-step labels. Kept in a separate module so they're
 // unit-testable under Node (tests/test_market_pure_js.py) without a browser
 // — see webapp/client/market_pure.js's own header for the full rationale.
-import * as marketPure from './market_pure.js?v=27';
+import * as marketPure from './market_pure.js?v=29';
 // Mint-flow pure helpers (issue #141): the cancel-outcome decision lives in
 // its own module so it's Node-testable too (tests/test_mint_pure_js.py).
 import * as mintPure from './mint_pure.js?v=25';
@@ -5032,7 +5032,7 @@ async function openListingDetail(row, groupOffers = null, groupTotal = 0) {
     action.textContent = buyNow;
     action.disabled = false;
     action.onclick = () => { buyExternalNow(row, vm).catch((e) => showError(e.message)); };
-    feeNote.textContent = marketPure.externalFeeNote(vm);
+    feeNote.textContent = marketPure.feeCoverNote(vm) || marketPure.externalFeeNote(vm);
     feeNote.hidden = false;
     if (vm.externalUrl) {
       extLink.textContent = `View on ${vm.marketplace} ↗`;
@@ -5750,12 +5750,16 @@ async function placeBid(row, priceXrp) {
 
 const EXTERNAL_FILL_WAIT_MS = 5 * 60 * 1000;
 const EXTERNAL_FILL_POLL_MS = 5000;
+// Fee cover (spec 2026-09-14): after an external Buy-now fills, how long to
+// keep polling for the refund to move from "on its way" to "Refunded" before
+// settling for the honest "on its way" as the final copy.
+const FEE_COVER_REFUND_WAIT_MS = 2 * 60 * 1000;
 let externalFillTimer = null;
 
 async function buyExternalNow(row, vm) {
   const ok = await confirmDialog({
     title: `Buy now via ${vm.marketplace || 'the marketplace'}?`,
-    text: `${vm.clearingXrp} XRP — ${marketPure.externalFeeNote(vm)} Your offer expires on its own if it isn't taken (nothing is held).`,
+    text: `${vm.clearingXrp} XRP — ${marketPure.feeCoverNote(vm) || marketPure.externalFeeNote(vm)} Your offer expires on its own if it isn't taken (nothing is held).`,
     confirmLabel: 'Place offer',
   });
   if (!ok) return;
@@ -5771,22 +5775,25 @@ async function buyExternalNow(row, vm) {
 function marketExternalBuyRender(marketplace) {
   return (s) => {
     if (s.state === 'done') {
-      const copy = marketPure.externalFillCopy(marketplace, s.fill);
+      const copy = marketPure.externalFillCopy(marketplace, s.fill, s.fee_cover);
+      const refundWait = s.fill === 'accepted' && marketPure.feeCoverPending(s.fee_cover);
       // Start the fill watch AFTER showFlow() has painted this render (it
       // bumps flowRenderGen; a watch armed before it would see itself as
       // superseded and stop).
-      if (!copy.done) setTimeout(() => watchExternalFill(s.id, marketplace, Date.now()), 0);
+      if (!copy.done || refundWait) setTimeout(() => watchExternalFill(s.id, marketplace, Date.now(), null), 0);
       return { ...copy, spinner: !copy.done };
     }
     const base = marketBidRender(s);
     if (s.state === 'awaiting_signature') {
-      return { ...base, title: '🛒 Buy now', text: signText(s.push, `Scan to sign your ${marketplace || 'marketplace'} offer in Xaman.`) };
+      const quote = marketPure.feeCoverLine(s.fee_cover);
+      const text = `Scan to sign your ${marketplace || 'marketplace'} offer in Xaman.${quote ? ` ${quote}` : ''}`;
+      return { ...base, title: '🛒 Buy now', text: signText(s.push, text) };
     }
     return base;
   };
 }
 
-function watchExternalFill(sessionId, marketplace, startedAt) {
+function watchExternalFill(sessionId, marketplace, startedAt, acceptedAt) {
   clearTimeout(externalFillTimer);
   const gen = marketFlowGen;
   const ownerGen = flowRenderGen;
@@ -5797,15 +5804,22 @@ function watchExternalFill(sessionId, marketplace, startedAt) {
     try {
       s = await api(MARKET_STATUS_PATH.bid(sessionId));
     } catch (e) {
-      if (gen === marketFlowGen && ownerGen === flowRenderGen) watchExternalFill(sessionId, marketplace, startedAt);
+      if (gen === marketFlowGen && ownerGen === flowRenderGen) watchExternalFill(sessionId, marketplace, startedAt, acceptedAt);
       return;
     }
     if (gen !== marketFlowGen || ownerGen !== flowRenderGen) return;
     const unfilled = s.fill == null || s.fill === 'live';
     const fill = unfilled && (Date.now() - startedAt) >= EXTERNAL_FILL_WAIT_MS ? 'waiting' : s.fill;
-    const copy = marketPure.externalFillCopy(marketplace, fill);
+    const copy = marketPure.externalFillCopy(marketplace, fill, s.fee_cover);
     showFlow({ ...copy, spinner: !copy.done });
-    if (!copy.done) watchExternalFill(sessionId, marketplace, startedAt);
+    // Fee cover: after the fill, keep polling briefly so "on its way" becomes
+    // "Refunded" in place; past the wait, "on its way" is the honest final copy
+    // (the settlement sweep pays it).
+    const acceptedSince = s.fill === 'accepted' ? (acceptedAt ?? Date.now()) : null;
+    const refundWait = acceptedSince != null
+      && marketPure.feeCoverPending(s.fee_cover)
+      && (Date.now() - acceptedSince) < FEE_COVER_REFUND_WAIT_MS;
+    if (!copy.done || refundWait) watchExternalFill(sessionId, marketplace, startedAt, acceptedSince);
   }, EXTERNAL_FILL_POLL_MS);
 }
 

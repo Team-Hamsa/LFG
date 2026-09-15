@@ -22,6 +22,9 @@ module.exports = {
     // pm2 cron_restart fires in HOST-LOCAL time (no timezone option); this box runs Etc/UTC
     // (timedatectl, verified 2026-08-16) — keep the host on UTC or adjust these schedules.
     { name: "lfg-market-sweep", cwd: CWD, script: "scripts/backfill_market.py", interpreter: PY, args: ["--network", "mainnet", "--report"], cron_restart: "30 3 * * *", autorestart: false },
+    // Fee cover (spec 2026-09-14): nightly refund audit — exits non-zero on any refund
+    // above its promise / observed fee / 50% of observed royalty. Parks "stopped" between runs.
+    { name: "lfg-fee-cover-audit", cwd: CWD, script: "scripts/fee_cover_report.py", interpreter: PY, args: ["--network", "mainnet", "--audit"], cron_restart: "40 3 * * *", autorestart: false },
     // X auto-poster (#41) — firehose consumer posting from the brand X account.
     // stop_exit_codes:[0] parks the process (instead of restart-thrashing) when
     // X_ENABLED is off / creds incomplete and bot.py exits 0 by design.

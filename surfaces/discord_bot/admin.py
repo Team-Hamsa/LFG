@@ -19,7 +19,7 @@ from lfg_core import rarity as _rarity
 from lfg_core import xrpl_ops
 from lfg_core.config import SOURCE_TAG
 from surfaces._client.errors import ServiceError
-from surfaces.discord_bot import config
+from surfaces.discord_bot import config, fee_cover_admin
 from surfaces.discord_bot.bot import svc, tree
 
 SEED = config.SEED
@@ -725,6 +725,23 @@ class AdminView(View):
                 f"❌ Failed to refresh sponsored mint: {e.message}", ephemeral=True
             )
 
+    @discord.ui.button(label="💸 Fee Cover", style=discord.ButtonStyle.secondary, row=3)
+    async def fee_cover_button(self, interaction: discord.Interaction, button: Button[Any]):
+        await interaction.response.defer(ephemeral=True)
+        try:
+            status = await svc.fee_cover_status()
+        except ServiceError as e:
+            logging.error("Fee cover status failed: %s", e)
+            await interaction.followup.send(
+                f"❌ Failed to load fee cover: {e.message}", ephemeral=True
+            )
+            return
+        await interaction.followup.send(
+            embed=fee_cover_admin.fee_cover_status_embed(status),
+            view=fee_cover_admin.FeeCoverView(_admin_interaction_check, log_admin_action),
+            ephemeral=True,
+        )
+
 
 @tree.command(name="admin", description="Admin control panel for NFT management")
 @app_commands.checks.has_permissions(administrator=True)  # Add explicit permission check
@@ -747,7 +764,8 @@ async def admin_command(interaction: discord.Interaction):
             "**Available Actions:**\n"
             "• 📊 View Stats - Check minting statistics\n"
             "• 🔍 Lookup NFT - View details of specific NFT\n"
-            "• 🔥 Burn NFT - Burn a specific NFT"
+            "• 🔥 Burn NFT - Burn a specific NFT\n"
+            "• 💸 Fee Cover - Marketplace fee-cover campaign\n"
         ),
         color=0x9C84EF,
     )

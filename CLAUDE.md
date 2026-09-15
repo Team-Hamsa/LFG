@@ -128,6 +128,7 @@ BULK_MINT_UI_ENABLED=0                                      # optional (#215); A
 BURN_TO_MINT_ENABLED=0                                      # optional (#220); burn-to-mint endpoints — off = new sessions 403; startup resume of already-burned sessions runs regardless
 BROKER_ALLOWLIST_PATH=<path-to-json>                        # optional (#131); external-marketplace broker allowlist overlay ({addr: {name, url_template, broker_rate}}); unset = built-ins in lfg_core/brokers.py; edits are picked up live (mtime-keyed cache). broker_rate (#426) = fee fraction of the BUY amount in [0, 0.25), null/absent = unmeasured (no Buy-now)
 BROKER_CLEARING_BUFFER_DROPS=0                              # optional (#426); extra drops added to every external Buy-now clearing price (cheap insurance against a broker rate bump — the overshoot goes to the seller)
+FEE_COVER_LEDGER_MARGIN=40                                  # optional (fee cover); ledgers of LastLedgerSequence headroom on a fee-cover refund Payment — what makes an indeterminate refund decidable
 BRIX_CURRENCY_HEX=<hex-currency-code>                       # optional; trait-economy BRIX pair (shop/trait listings/on-ramp), defaults to SWAP_OFFER_CURRENCY_HEX — never TOKEN_* (LFGO)
 BRIX_ISSUER=<xrpl-address>                                  # optional; trait-economy BRIX issuer, defaults to SWAP_OFFER_ISSUER
 BRIX_TRUSTLINE_LIMIT=1000000000                             # optional (#441); limit on the BRIX trustline the Activity sets via POST /api/brix/trustline — must exceed any single drip payout (a lower line fails the claim Payment tecPATH_DRY); NOT TOKEN_TRUSTLINE_LIMIT
@@ -1213,6 +1214,36 @@ the wrong chain.
   Closet" wizard (`market_flow.TraitSellSession`): Extract (existing Phase-4
   flow, signature 1) then the plain List flow on the freshly-owned token
   (signature 2), driven together as one polled session.
+
+**Marketplace fee cover** (spec `docs/superpowers/specs/2026-09-14-marketplace-fee-cover-design.md`):
+a Discord `/admin` → 💸 Fee Cover campaign refunds an allowlisted broker's fee
+(cafe's measured 1.589%) on bids placed THROUGH LFG that the broker's bot
+settles — so Buy-now costs the ask. Promise at bid finalize reserves budget
+(`fee_cover_promises`, app DB), evaluated on the listing the quote saved
+(still live, or already sold to this bidder — a fast broker fill closes it
+before the first `done` poll); the settlement sweep also advances quoted,
+unfinished in-memory bid sessions so a client that stopped polling still gets
+its promise, but a session lost to a service restart before its bid validates
+stays uncovered. Refund = min(promise, observed
+`NFTokenBrokerFee` × coverage, 50% of observed royalty) from the validated
+accept (`fee_cover_refunds`, PK accept hash — double-pay impossible); paid as
+a tagged XRP `Payment` from `SIGNING_ACCOUNT` with memo action `fee-cover` +
+`lfg:fee_cover:<accept hash>`. Stop blocks new promises and honors open ones.
+The settlement loop now always starts (it settles/pays/releases fee-cover rows
+on any stack). Indeterminate payouts resolve via startup recovery; a refund
+refused before submit (`ClaimNotSubmitted`, unreadable ledger) goes back to
+`owed` and retries next sweep. Two reasons park `failed`, neither ever retried
+automatically: `payout_failed` (a validated definitive failure) and
+`payout_expired` (recovery found no payout past its LastLedgerSequence). An
+operator fixes the cause, then requeues either with
+`scripts/recover_fee_cover_refunds.py --network <net> --requeue <accept_hash>`
+(it re-checks the chain first and refuses, exit 1, if the payout is found or
+the lookup errors).
+Report/audit: `scripts/fee_cover_report.py --network <net> --audit` (pm2
+`lfg-fee-cover-audit` / `stg-fee-cover-audit`, 03:40 UTC — registering it is an
+ops step: `pm2 start ecosystem.prod.config.js --only lfg-fee-cover-audit && pm2 save`).
+Refund Payments count in `sourcetag_metrics` `xrp_payment_volume.out_drops`;
+they are not marketplace volume. Ships with no campaign active.
 
 **Trait settlement:** a sold trait's `NFTokenAcceptOffer` must still be burned
 back into the buyer's Closet — the buy-status handler runs this as its
