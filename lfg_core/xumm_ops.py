@@ -683,6 +683,65 @@ async def create_signin_payload(
     )
 
 
+async def create_closet_bid_payload(
+    account: str,
+    amount: dict[str, str],
+    destination: str,
+    condition: str,
+    cancel_after: int,
+    *,
+    return_url: dict[str, str] | None = None,
+    user_token: str | None = None,
+    platform: str = memos.PLATFORM_BACKEND,
+) -> dict[str, Any] | None:
+    """#443: the bidder locks BRIX in a TokenEscrow to the app wallet. Only the
+    backend holds the fulfillment for `condition`; CancelAfter bounds the lock."""
+    return await _create_xumm_payload(
+        {
+            "TransactionType": "EscrowCreate",
+            "Account": account,
+            "Destination": destination,
+            "Amount": amount,
+            "Condition": condition,
+            "CancelAfter": cancel_after,
+        },
+        options=_with_return_url({}, return_url),
+        user_token=user_token,
+        memos_json=memos.build_memos_json(memos.INITIATOR_USER, platform, memos.ACTION_CLOSET_BID),
+    )
+
+
+async def create_closet_buy_payload(
+    account: str,
+    amount: dict[str, str],
+    destination: str,
+    invoice_id: str,
+    *,
+    send_max_drops: str | None = None,
+    return_url: dict[str, str] | None = None,
+    user_token: str | None = None,
+    platform: str = memos.PLATFORM_BACKEND,
+) -> dict[str, Any] | None:
+    """#443: the buyer pays a Closet ask to the app wallet. InvoiceID (sha256 of
+    the fill id) ties the payment to its fill. send_max_drops turns it into an
+    XRP->BRIX path payment for buyers holding too little BRIX."""
+    txjson: dict[str, Any] = {
+        "TransactionType": "Payment",
+        "Account": account,
+        "Destination": destination,
+        "Amount": amount,
+        "InvoiceID": invoice_id,
+    }
+    if send_max_drops is not None:
+        txjson["SendMax"] = send_max_drops
+    return await _create_xumm_payload(
+        txjson,
+        options=_with_return_url({}, return_url),
+        user_token=user_token,
+        memos_json=memos.build_memos_json(memos.INITIATOR_USER, platform, memos.ACTION_CLOSET_BUY),
+    )
+
+
 async def cancel_xumm_payload(uuid: str) -> bool:
     """Cancel one open XUMM payload (DELETE /payload/{uuid}). Returns True
     only when XUMM confirms it cancelled; False for already-resolved/expired/

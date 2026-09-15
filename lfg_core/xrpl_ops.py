@@ -35,12 +35,16 @@ from xrpl.models.requests import (
     AccountTx,
     AMMInfo,
     Ledger,
+    LedgerEntry,
     NFTBuyOffers,
     NFTSellOffers,
     Subscribe,
     Tx,
 )
+from xrpl.models.requests.ledger_entry import Escrow as LedgerEntryEscrow
 from xrpl.models.transactions import (
+    EscrowCancel,
+    EscrowFinish,
     Memo,
     NFTokenBurn,
     NFTokenCancelOffer,
@@ -1685,6 +1689,163 @@ async def _current_validated_ledger_index(client: JsonRpcClient) -> int | None:
         ledger = result.get("ledger")
         raw_index = ledger.get("ledger_index") if isinstance(ledger, dict) else None
     return _ledger_index(raw_index)
+
+
+# --- Closet Market (#443) ------------------------------------------------------
+#
+# Backend txs from the app wallet (config.SIGNING_ACCOUNT) with a pinned
+# LastLedgerSequence and a per-phase `lfg:closet_<phase>:<id>` memo. The
+# memo makes a tx findable; the pinned LLS makes absence decidable. The same
+# rule as BRIX claims: "unknown" is never a failure until the validated
+# ledger has passed last_ledger_seq and find_app_txs_by_memo finds nothing.
+
+
+@dataclass(frozen=True)
+class TxOutcome:
+    state: str  # "confirmed" | "failed" | "unknown"
+    tx_hash: str | None
+    last_ledger_seq: int | None
+
+
+class TxNotSubmitted(RuntimeError):
+    """Nothing reached the ledger (the validated index could not be read)."""
+
+
+def _closet_memos(action: str, tag: str) -> list[Memo]:
+    return [
+        *memos.build_memo_models(memos.INITIATOR_BACKEND, memos.PLATFORM_BACKEND, action),
+        Memo(memo_data=tag.encode().hex().upper()),
+    ]
+
+
+async def _submit_app_tx(build: Callable[[int], Transaction], label: str) -> TxOutcome:
+    client = JsonRpcClient(config.JSON_RPC_URL)
+    current = await _current_validated_ledger_index(client)
+    if current is None:
+        raise TxNotSubmitted(f"{label}: could not read the validated ledger index")
+    last_ledger_seq = current + config.CLOSET_MARKET_LEDGER_MARGIN
+    tx = build(last_ledger_seq)
+    wallet = Wallet.from_seed(config.SEED)
+    try:
+        result = await _submit_and_confirm(tx, wallet, client, label)
+    except IndeterminateResultError:
+        return TxOutcome("unknown", None, last_ledger_seq)
+    except asyncio.CancelledError:
+        raise
+    except Exception:
+        logging.exception(f"{label}: submit raised; treating the outcome as unknown")
+        return TxOutcome("unknown", None, last_ledger_seq)
+    if result is None:
+        return TxOutcome("failed", None, last_ledger_seq)
+    tx_hash = result.get("hash")
+    return TxOutcome("confirmed", tx_hash if isinstance(tx_hash, str) else None, last_ledger_seq)
+
+
+async def app_brix_payment(destination: str, value: str, tag: str, action: str) -> TxOutcome:
+    """BRIX Payment app wallet -> destination (fill forward, overshoot or refund)."""
+    return await _submit_app_tx(
+        lambda lls: Payment(
+            account=config.SIGNING_ACCOUNT,
+            destination=destination,
+            amount=IssuedCurrencyAmount(
+                currency=config.BRIX_CURRENCY_HEX, issuer=config.BRIX_ISSUER, value=value
+            ),
+            source_tag=config.SOURCE_TAG,
+            last_ledger_sequence=lls,
+            memos=_closet_memos(action, tag),
+        ),
+        "app_brix_payment",
+    )
+
+
+async def escrow_finish(
+    owner: str, offer_sequence: int, condition: str, fulfillment: str, tag: str
+) -> TxOutcome:
+    return await _submit_app_tx(
+        lambda lls: EscrowFinish(
+            account=config.SIGNING_ACCOUNT,
+            owner=owner,
+            offer_sequence=offer_sequence,
+            condition=condition,
+            fulfillment=fulfillment,
+            source_tag=config.SOURCE_TAG,
+            last_ledger_sequence=lls,
+            memos=_closet_memos(memos.ACTION_CLOSET_FILL, tag),
+        ),
+        "escrow_finish",
+    )
+
+
+async def escrow_cancel(owner: str, offer_sequence: int, tag: str) -> TxOutcome:
+    """Return an expired bid's BRIX to its owner (valid only after CancelAfter)."""
+    return await _submit_app_tx(
+        lambda lls: EscrowCancel(
+            account=config.SIGNING_ACCOUNT,
+            owner=owner,
+            offer_sequence=offer_sequence,
+            source_tag=config.SOURCE_TAG,
+            last_ledger_sequence=lls,
+            memos=_closet_memos(memos.ACTION_CLOSET_REFUND, tag),
+        ),
+        "escrow_cancel",
+    )
+
+
+async def get_escrow(owner: str, sequence: int) -> dict[str, Any] | None:
+    """The validated Escrow ledger object, or None if it does not exist
+    (finished / cancelled / never created). Raises on any other failure —
+    a failed lookup is never "absent"."""
+    client = JsonRpcClient(config.JSON_RPC_URL)
+    request = LedgerEntry(
+        escrow=LedgerEntryEscrow(owner=owner, seq=sequence), ledger_index="validated"
+    )
+    response = await asyncio.to_thread(client.request, request)
+    result = response.result
+    if (
+        response.is_successful()
+        and isinstance(result, dict)
+        and isinstance(result.get("node"), dict)
+    ):
+        return cast(dict[str, Any], result["node"])
+    if isinstance(result, dict) and result.get("error") == "entryNotFound":
+        return None
+    raise RuntimeError(f"escrow lookup failed for {owner}/{sequence}: {result!r}")
+
+
+def tx_entry_hash(entry: dict[str, Any]) -> str | None:
+    tx = entry.get("tx") or entry.get("tx_json") or {}
+    value = entry.get("hash") or tx.get("hash")
+    return value if isinstance(value, str) and value else None
+
+
+def tx_entry_result(entry: dict[str, Any]) -> str | None:
+    meta = entry.get("meta") or entry.get("metaData") or {}
+    return meta.get("TransactionResult") if isinstance(meta, dict) else None
+
+
+async def find_app_txs_by_memo(tag: str, min_ledger: int | None = None) -> list[dict[str, Any]]:
+    """Every VALIDATED transaction SENT by the app wallet carrying `tag`.
+    Inbound transactions are ignored: memos are user-writable, so a stranger
+    could send the app wallet a tx with a guessed tag. Raises on transport
+    failure (never report a failed scan as "nothing found")."""
+    account = config.SIGNING_ACCOUNT
+    client = JsonRpcClient(config.JSON_RPC_URL)
+    scan_from = -1 if min_ledger is None else max(1, min_ledger - _CLAIM_SCAN_LEDGER_SLACK)
+    found: list[dict[str, Any]] = []
+    marker: Any = None
+    while True:
+        request = AccountTx(account=account, limit=200, marker=marker, ledger_index_min=scan_from)
+        response = await asyncio.to_thread(client.request, request)
+        result = response.result
+        if not response.is_successful() or not isinstance(result, dict):
+            raise RuntimeError(f"account_tx failed while scanning for {tag}: {result!r}")
+        for entry in result.get("transactions", []):
+            tx = entry.get("tx") or entry.get("tx_json") or {}
+            if entry.get("validated") and tx.get("Account") == account and _carries_memo(tx, tag):
+                found.append(entry)
+        marker = result.get("marker")
+        if not marker:
+            return found
 
 
 async def sponsored_burn_identity_expired(signed_tx_blob: str) -> int | None:
