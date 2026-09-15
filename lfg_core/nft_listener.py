@@ -15,6 +15,7 @@ from typing import Any
 from xrpl.core import addresscodec
 
 from lfg_core import (
+    closet_market_store,
     closet_token,
     config,
     economy_store,
@@ -181,8 +182,17 @@ def _apply_closet(
         economy_store.delete_closet(conn, owner)
         return
     if isinstance(metadata, dict):
-        assets, bodies = closet_token.parse_closet_metadata(metadata, genesis)
-        economy_store.set_closet_contents(conn, owner, assets, bodies)
+        if closet_market_store.has_recent_fill(conn, owner):
+            # #443: a Closet Market fill moved a unit in the DB first; this
+            # owner's token metadata is behind until the fill's mirror modify
+            # lands (and clio may lag a few minutes past that). Rebuilding
+            # now would resurrect the moved unit.
+            logging.info(
+                f"_apply_closet: {owner} has a recent Closet Market fill; keeping DB contents"
+            )
+        else:
+            assets, bodies = closet_token.parse_closet_metadata(metadata, genesis)
+            economy_store.set_closet_contents(conn, owner, assets, bodies)
     else:
         # Fail closed on UNRESOLVED metadata (fetch returned None — RPC/IPFS
         # failure or a #345 side-call timeout): rebuilding from {} would wipe

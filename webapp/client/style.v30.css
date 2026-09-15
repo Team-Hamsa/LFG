@@ -1129,3 +1129,11 @@ button.link.qr-toggle { font-size: .85rem; opacity: .8; }
 .listing-offer-row .market-card-price { margin: 0; display: inline; }
 .listing-offer-row.active { border-color: var(--yellow); cursor: default; }
 .listing-offer-seller { color: var(--muted); font-size: .68rem; }
+
+/* Closet Market (#443/#496): best Closet bid on a grouped trait card */
+.market-card-bid {
+  position: absolute; top: 6px; right: 6px;
+  background: #3ecf8e; color: #111; font-size: .62rem; font-weight: 800;
+  padding: 2px 6px; border-radius: 999px; pointer-events: none;
+}
+#closet-bid-form-panel select { width: 100%; margin: 4px 0 10px; }

@@ -312,7 +312,13 @@ class MockMarket:
             if t["nft_id"] not in listed_ids
         ]
         closet_assets = [
-            {"slot": s, "value": v, "count": c, "image_url": _mine_trait_image_url(s, v)}
+            {
+                "slot": s,
+                "value": v,
+                "count": c,
+                "listed": 0,
+                "image_url": _mine_trait_image_url(s, v),
+            }
             for (s, v), c in econ.assets.items()
             if c > 0
         ]

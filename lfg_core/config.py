@@ -514,6 +514,10 @@ CLOSET_MARKET_ENC_KEY = os.getenv("CLOSET_MARKET_ENC_KEY", "")
 # LastLedgerSequence headroom on backend Closet Market txs — what makes an
 # unknown outcome decidable (same role as BRIX_CLAIM_LEDGER_MARGIN).
 CLOSET_MARKET_LEDGER_MARGIN = int(os.getenv("CLOSET_MARKET_LEDGER_MARGIN", "40"))
+# LastLedgerSequence window pinned on the USER's Closet Market txs (buy Payment,
+# bid EscrowCreate). ~20 min covers the 15-minute Xaman payload expiry; it is
+# what lets "nothing landed" be decided at all (PR #502 G1).
+CLOSET_USER_TX_LEDGER_WINDOW = int(os.getenv("CLOSET_USER_TX_LEDGER_WINDOW", "300"))
 
 
 def validate_closet_market_fee_bps(bps: int) -> None:

@@ -577,7 +577,7 @@ def test_mine_returns_four_groups(onchain_env, layer_art, monkeypatch):
 
     closet = body["closet_assets"]
     assert [{k: v for k, v in a.items() if k != "image_url"} for a in closet] == [
-        {"slot": "Mouth", "value": "Grin", "count": 2}
+        {"slot": "Mouth", "value": "Grin", "count": 2, "listed": 0}
     ]
     _assert_layer_url_resolves(closet[0]["image_url"])
 
@@ -884,7 +884,7 @@ def test_split_network_mine_all_four_groups(split_network_env, layer_art, monkey
     assert all("video" in c for c in body["unlisted_characters"])
     assert {t["nft_id"] for t in body["unlisted_trait_tokens"]} == {TRAIT2_UNLISTED}
     assert [{k: v for k, v in a.items() if k != "image_url"} for a in body["closet_assets"]] == [
-        {"slot": "Mouth", "value": "Grin", "count": 2}
+        {"slot": "Mouth", "value": "Grin", "count": 2, "listed": 0}
     ]
     _assert_layer_url_resolves(body["closet_assets"][0]["image_url"])
     _assert_layer_url_resolves(body["unlisted_trait_tokens"][0]["image_url"])

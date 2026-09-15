@@ -92,6 +92,7 @@ ACTION_CLOSET_BUY = "closet-buy"  # user Payment taking an ask
 ACTION_CLOSET_FILL = "closet-fill"  # backend EscrowFinish funding a fill
 ACTION_CLOSET_FORWARD = "closet-forward"  # backend Payment app -> seller
 ACTION_CLOSET_REFUND = "closet-refund"  # backend refund Payment / EscrowCancel
+ACTION_ACCOUNT_SET = "account-set"  # ops AccountSet (e.g. #443 asfAllowTrustLineLocking)
 _ACTIONS = frozenset(
     {
         ACTION_MINT,
@@ -123,6 +124,7 @@ _ACTIONS = frozenset(
         ACTION_CLOSET_FILL,
         ACTION_CLOSET_FORWARD,
         ACTION_CLOSET_REFUND,
+        ACTION_ACCOUNT_SET,
     }
 )
 
