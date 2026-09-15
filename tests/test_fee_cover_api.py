@@ -15,6 +15,7 @@ from lfg_core.market_store import (
     BuyOffer,
     MarketListing,
     close_bid,
+    close_listing,
     init_bid_schema,
     upsert_bid,
     upsert_listing,
@@ -272,6 +273,171 @@ def test_bid_finalize_records_the_promise_and_the_poll_reports_it(env, monkeypat
         and promise["broker"] == CAFE
         and promise["ask_drops"] == 4_990_000
     )
+
+
+def _finalizing_advance(offer_index="D" * 64, raise_for=()):
+    async def fake_advance(s):
+        if s.id in raise_for:
+            raise RuntimeError("xumm down")
+        if s.state == server.market_flow.DONE:
+            return None
+        s.state = server.market_flow.DONE
+        s.offer_index = offer_index
+        return {
+            "offer_index": offer_index,
+            "nft_id": s.nft_id,
+            "bidder": s.wallet_address,
+            "amount_drops": s.amount_drops,
+            "expiration": 900_000_000,
+        }
+
+    return fake_advance
+
+
+def _start_quoted_bid(env, monkeypatch):
+    _seed_char_with_cafe_listing(env["onchain"])
+    _campaign(env["app_db"])
+    _fake_payload(monkeypatch)
+    body = _body(
+        _run(
+            server.handle_market_bid_start(
+                _post("/api/market/bid", {"nft_id": CHAR, "price_xrp": "5.075"})
+            )
+        )
+    )
+    assert body["fee_cover"]["state"] == "quoted"
+    assert "fee_cover_listing" not in body  # server-side only
+    return server.market_sessions[body["id"]]
+
+
+def _close_cafe_listing_sold(onchain, buyer):
+    conn = init_onchain_db(onchain)
+    try:
+        close_listing(conn, "E" * 64, "sold", buyer=buyer)
+    finally:
+        conn.close()
+
+
+def _promise_row(app_db, offer_index="D" * 64):
+    conn = fee_cover_store.connect(app_db)
+    try:
+        return fee_cover_store.get_promise(conn, offer_index)
+    finally:
+        conn.close()
+
+
+def test_quote_saves_the_listing_on_the_session(env, monkeypatch):
+    session = _start_quoted_bid(env, monkeypatch)
+    assert session.fee_cover_listing == {
+        "offer_index": "E" * 64,
+        "seller": OWNER,
+        "ask_drops": 4_990_000,
+        "broker": CAFE,
+        "broker_rate": 0.01589,
+    }
+
+
+def test_covered_fill_that_closes_the_listing_before_finalize_still_records_the_promise(
+    env, monkeypatch
+):
+    """The broker's bot fills the bid and the listener closes the cafe listing
+    `sold` to this bidder before the client's first `done` poll: the promise the
+    user was quoted must still be written."""
+    session = _start_quoted_bid(env, monkeypatch)
+    _close_cafe_listing_sold(env["onchain"], BIDDER)
+    monkeypatch.setattr(server.market_flow, "advance_bid_session", _finalizing_advance())
+    body = _body(_run(server.handle_market_bid_status(_StatusReq(session.id))))
+    assert body["fee_cover"]["state"] == "open" and body["fee_cover"]["drops"] == 80_642
+    promise = _promise_row(env["app_db"])
+    assert promise["state"] == "open"
+    assert promise["ask_drops"] == 4_990_000 and promise["broker"] == CAFE
+
+
+def test_listing_sold_to_a_different_buyer_before_finalize_records_no_promise(env, monkeypatch):
+    session = _start_quoted_bid(env, monkeypatch)
+    _close_cafe_listing_sold(env["onchain"], "rSomeoneElse000000000000000000000")
+    monkeypatch.setattr(server.market_flow, "advance_bid_session", _finalizing_advance())
+    body = _body(_run(server.handle_market_bid_status(_StatusReq(session.id))))
+    assert body["fee_cover"] is None
+    assert _promise_row(env["app_db"]) is None
+
+
+def test_finalize_rechecks_the_campaign_against_the_saved_listing(env, monkeypatch):
+    session = _start_quoted_bid(env, monkeypatch)
+    conn = fee_cover_store.connect(env["app_db"])
+    fee_cover_store.stop_campaign(conn, network="testnet", actor="t")
+    conn.close()
+    monkeypatch.setattr(server.market_flow, "advance_bid_session", _finalizing_advance())
+    body = _body(_run(server.handle_market_bid_status(_StatusReq(session.id))))
+    assert body["fee_cover"] is None
+    assert _promise_row(env["app_db"]) is None
+
+
+def test_sweep_advances_a_quoted_bid_session_so_its_promise_is_written(env, monkeypatch):
+    """The client stopped polling before the bid validated: the sweep advances
+    the in-memory session itself, so the quoted promise is still recorded."""
+    session = _start_quoted_bid(env, monkeypatch)
+    monkeypatch.setattr(server.market_flow, "advance_bid_session", _finalizing_advance())
+    swept = []
+
+    async def fake_sweep_once(deps, **kwargs):
+        swept.append(deps)
+        return fee_cover_settle.SweepReport()
+
+    monkeypatch.setattr(server.fee_cover_settle, "sweep_once", fake_sweep_once)
+    monkeypatch.setattr(server, "_fee_cover_deps", lambda: "deps")
+    _run(server.sweep_fee_cover())
+    assert session.state == server.market_flow.DONE
+    assert session.fee_cover["state"] == "open"
+    assert _promise_row(env["app_db"])["state"] == "open"
+    assert swept == ["deps"]
+
+
+def test_sweep_advances_only_quoted_live_bid_sessions_and_survives_a_failure(env, monkeypatch):
+    _seed_char_with_cafe_listing(env["onchain"])
+    _campaign(env["app_db"])
+    quoted = {"state": "quoted", "drops": 1, "xrp": "0.000001", "reason": None}
+
+    def bid(fee_cover, state=server.market_flow.AWAITING_SIGNATURE):
+        s = server.market_flow.BidSession(
+            discord_id="dev",
+            wallet_address=BIDDER,
+            nft_id=CHAR,
+            owner=OWNER,
+            amount_drops=5_075_000,
+        )
+        s.fee_cover = dict(fee_cover) if fee_cover else None
+        s.state = state
+        server.market_sessions[s.id] = s
+        return s
+
+    failing = bid(quoted)
+    good = bid(quoted)
+    ordinary = bid(None)
+    declined = bid({**quoted, "state": "declined", "reason": "below_clearing"})
+    finished = bid(quoted, state=server.market_flow.FAILED)
+    advanced = []
+    inner = _finalizing_advance(raise_for={failing.id})
+
+    async def tracking_advance(s):
+        advanced.append(s.id)
+        return await inner(s)
+
+    monkeypatch.setattr(server.market_flow, "advance_bid_session", tracking_advance)
+    swept = []
+
+    async def fake_sweep_once(deps, **kwargs):
+        swept.append(deps)
+        return fee_cover_settle.SweepReport()
+
+    monkeypatch.setattr(server.fee_cover_settle, "sweep_once", fake_sweep_once)
+    monkeypatch.setattr(server, "_fee_cover_deps", lambda: "deps")
+    _run(server.sweep_fee_cover())
+    assert sorted(advanced) == sorted([failing.id, good.id])
+    assert ordinary.id not in advanced and declined.id not in advanced
+    assert finished.id not in advanced
+    assert _promise_row(env["app_db"])["state"] == "open"
+    assert swept == ["deps"]
 
 
 def test_poll_after_the_fill_settles_the_refund(env, monkeypatch):

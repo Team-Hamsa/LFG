@@ -127,7 +127,7 @@ buyer an **automatic XRP refund** from the issuer.
 POST /api/market/bid ──► quote (read-only: campaign active? budget + wallet cap headroom?)
         │                      returned as session.fee_cover = {state:"quoted", drops}
         ▼
-bid validates on-ledger (advance_bid_session → _write_bid_row)
+bid validates on-ledger (advance_bid_session → _write_bid_row; status poll or sweep)
         │
         ▼
 promise: INSERT fee_cover_promises (PK offer_index), reserve drops   ── or declined(reason)
@@ -149,9 +149,23 @@ refund row: INSERT fee_cover_refunds (PK accept_tx_hash, UNIQUE offer_index)
 A promise is made only when **all** of these hold:
 
 1. **A campaign is active.** Status is `active` and `now < ends_at` when set.
-2. **The NFT has a live `market_listings` row whose `destination` resolves
-   via `brokers.resolve`** to an allowlisted broker with `broker_rate is not
-   None`, and whose `seller` is the NFT's current owner-of-record.
+2. **At quote time, the NFT has a live `market_listings` row whose
+   `destination` resolves via `brokers.resolve`** to an allowlisted broker
+   with `broker_rate is not None`, and whose `seller` is the NFT's current
+   owner-of-record.
+   - The quote saves that listing on the session
+     (`BidSession.fee_cover_listing`, server-side only).
+   - **At promise time the same row must still be live, or closed `sold`
+     with `buyer == bidder`.** The broker's bot can fill a clearing bid within
+     seconds, and the listener can close the listing `sold` before the
+     session's first `done` poll; re-reading only live listings would erase
+     the promise the buyer was just shown. The listing is rebuilt from that
+     row, so its broker must still resolve with a measured rate and its seller
+     must still be the bid-time owner.
+   - Sold to anyone else, cancelled, stale or missing → no promise (an
+     ordinary bid).
+   - A bid with no saved listing (no quote, e.g. no campaign at quote time)
+     falls back to the live lookup.
 3. **`bid_drops >= brokers.clearing_drops(ask_drops, rate)`.** This is the bid
    the broker's bot will fill now. A below-clearing bid is an ordinary bid: if
    it fills later, the buyer paid only what they bid, so there is no "extra" to
@@ -287,6 +301,12 @@ promise.
 
 ### Fill detection and promise release
 
+- **Promise write.** The promise is written when the bid session finalizes:
+  on the client's status poll, or — when the client stopped polling before
+  the bid validated — by `sweep_fee_cover()`, which first advances every
+  in-memory bid session that is not terminal and whose `fee_cover.state` is
+  `quoted`. Sessions live only in memory, so a bid whose session is lost to a
+  service restart before validation stays uncovered.
 - **Primary trigger.** The bid status poll. In `_advance_market_session`'s
   `bid` branch, after computing `session.fill`: when `fill == "accepted"` and a
   promise exists, call `fee_cover.settle_promise(network, offer_index)`. This

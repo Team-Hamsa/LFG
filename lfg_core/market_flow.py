@@ -279,6 +279,11 @@ class BidSession:
     # Fee cover (spec 2026-09-14): the quote at start, then the promise/refund
     # view — {"state", "drops", "xrp", "reason", "payout_tx_hash"} | None.
     fee_cover: dict[str, Any] | None = None
+    # Fee cover: the external listing the quote was evaluated against
+    # ({"offer_index", "seller", "ask_drops", "broker", "broker_rate"}) — the
+    # finalize re-reads THAT row, because a broker fill can close it `sold`
+    # before the first `done` poll. Server-side only: never in to_dict().
+    fee_cover_listing: dict[str, Any] | None = field(default=None, repr=False)
 
     def to_dict(self) -> dict[str, Any]:
         return {

@@ -1200,7 +1200,12 @@ the wrong chain.
 a Discord `/admin` → 💸 Fee Cover campaign refunds an allowlisted broker's fee
 (cafe's measured 1.589%) on bids placed THROUGH LFG that the broker's bot
 settles — so Buy-now costs the ask. Promise at bid finalize reserves budget
-(`fee_cover_promises`, app DB); refund = min(promise, observed
+(`fee_cover_promises`, app DB), evaluated on the listing the quote saved
+(still live, or already sold to this bidder — a fast broker fill closes it
+before the first `done` poll); the settlement sweep also advances quoted,
+unfinished in-memory bid sessions so a client that stopped polling still gets
+its promise, but a session lost to a service restart before its bid validates
+stays uncovered. Refund = min(promise, observed
 `NFTokenBrokerFee` × coverage, 50% of observed royalty) from the validated
 accept (`fee_cover_refunds`, PK accept hash — double-pay impossible); paid as
 a tagged XRP `Payment` from `SIGNING_ACCOUNT` with memo action `fee-cover` +

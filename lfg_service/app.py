@@ -4073,9 +4073,33 @@ def _fee_cover_safe(fn: Callable[..., Any], *args: Any) -> Any:
         return None
 
 
+def _fee_cover_saved_listing(
+    oconn: sqlite3.Connection, saved: dict[str, Any], nft_id: str, owner: str, bidder: str
+) -> fee_cover.ExternalListing | None:
+    """The listing the quote was evaluated against, re-read at finalize. It
+    still qualifies while live, or once closed `sold` to THIS bidder: the
+    broker's bot can fill the bid and the listener close the listing before
+    the session's first `done` poll. Rebuilt from the row, so the broker must
+    still resolve with a measured rate and the seller still be `owner`."""
+    row = market_store.get_listing(oconn, str(saved["offer_index"]))
+    if row is None or row.get("nft_id") != nft_id:
+        return None
+    sold_to_bidder = row.get("closed_reason") == "sold" and row.get("buyer") == bidder
+    if row.get("is_live") != 1 and not sold_to_bidder:
+        return None
+    return fee_cover.external_listing_for([row], owner, nft_id)
+
+
 def _fee_cover_evaluate(
-    nft_id: str, owner: str, bidder: str, bid_drops: int
+    nft_id: str,
+    owner: str,
+    bidder: str,
+    bid_drops: int,
+    saved_listing: dict[str, Any] | None = None,
 ) -> tuple[fee_cover_store.Campaign | None, fee_cover.ExternalListing | None, str | None, int]:
+    """Campaign + external listing + pure decline reason + promise size.
+    `saved_listing` (the quote's listing) pins the finalize to that row;
+    without one the NFT's live listings are searched."""
     conn = fee_cover_store.connect(_fee_cover_db())
     try:
         campaign = fee_cover_store.live_campaign(conn, config.XRPL_NETWORK)
@@ -4086,9 +4110,12 @@ def _fee_cover_evaluate(
         oconn = nft_index.init_db(nft_index.index_db_path(_market_network("character")))
         try:
             market_store.init_db(oconn)
-            listing = fee_cover.external_listing_for(
-                market_store.live_listings_for_nft(oconn, nft_id), owner, nft_id
-            )
+            if saved_listing is not None:
+                listing = _fee_cover_saved_listing(oconn, saved_listing, nft_id, owner, bidder)
+            else:
+                listing = fee_cover.external_listing_for(
+                    market_store.live_listings_for_nft(oconn, nft_id), owner, nft_id
+                )
         finally:
             oconn.close()
     reason = fee_cover.promise_decline_reason(
@@ -4106,11 +4133,16 @@ def _fee_cover_evaluate(
     return campaign, listing, reason, drops
 
 
-def _fee_cover_quote(nft_id: str, owner: str, bidder: str, bid_drops: int) -> dict[str, Any] | None:
-    """Advisory quote at POST /api/market/bid — reserves nothing."""
+def _fee_cover_quote(
+    nft_id: str, owner: str, bidder: str, bid_drops: int
+) -> tuple[dict[str, Any] | None, dict[str, Any] | None]:
+    """Advisory quote at POST /api/market/bid — reserves nothing. Returns
+    (view, listing): the view for session.fee_cover and the external listing
+    it was evaluated against for session.fee_cover_listing; (None, None) for
+    an ordinary bid."""
     campaign, listing, reason, drops = _fee_cover_evaluate(nft_id, owner, bidder, bid_drops)
     if campaign is None or listing is None:
-        return None  # an ordinary bid
+        return None, None  # an ordinary bid
     if reason is None:
         conn = fee_cover_store.connect(_fee_cover_db())
         try:
@@ -4120,22 +4152,29 @@ def _fee_cover_quote(nft_id: str, owner: str, bidder: str, bid_drops: int) -> di
         finally:
             conn.close()
     shown = drops if reason is None else 0
-    return {
+    view = {
         "state": "quoted" if reason is None else "declined",
         "drops": shown,
         "xrp": market_ops.drops_to_xrp_str(str(shown)),
         "reason": reason,
         "payout_tx_hash": None,
     }
+    return view, dataclasses.asdict(listing)
 
 
 def _fee_cover_record_promise(session: Any, bid_row: dict[str, Any]) -> dict[str, Any] | None:
     """The bid is on-ledger: write the promise (budget reservation), re-evaluated
-    against fresh state. Returns the view, or None for an ordinary bid."""
+    against fresh state — on the quote's own listing when one was saved (live,
+    or already sold to this bidder), else the NFT's live listings. Returns the
+    view, or None for an ordinary bid."""
     bid_drops = int(bid_row["amount_drops"])
     bidder = str(bid_row["bidder"])
     campaign, listing, reason, drops = _fee_cover_evaluate(
-        session.nft_id, session.owner, bidder, bid_drops
+        session.nft_id,
+        session.owner,
+        bidder,
+        bid_drops,
+        getattr(session, "fee_cover_listing", None),
     )
     if campaign is None or listing is None:
         return None
@@ -4389,9 +4428,11 @@ async def handle_market_bid_start(request):
     session.xumm_url = payload["xumm_url"]
     session.payload_uuid = payload.get("uuid")
     session.push = payload.get("push")
-    session.fee_cover = await loop.run_in_executor(
+    quote = await loop.run_in_executor(
         None, _fee_cover_safe, _fee_cover_quote, nft_id, owner, wallet, amount_drops
     )
+    if quote is not None:
+        session.fee_cover, session.fee_cover_listing = quote
     market_sessions[session.id] = session
     return web.json_response(session.to_dict())
 
@@ -5324,9 +5365,32 @@ def _write_fee_cover_giveup(row: dict[str, Any]) -> None:
         logging.error(f"failed to write fee cover giveup record: {traceback.format_exc()}")
 
 
+async def _advance_quoted_bid_sessions() -> None:
+    """Advance every in-memory bid session still awaiting its on-ledger
+    validation whose quote said "covered", so its promise is written even when
+    the client stopped polling. A session lost to a service restart before
+    validation stays uncovered (it only ever lived in memory)."""
+    loop = asyncio.get_event_loop()
+    for session in list(market_sessions.values()):
+        if (
+            getattr(session, "kind", None) != "bid"
+            or session.state in market_flow.TERMINAL_STATES
+            or (getattr(session, "fee_cover", None) or {}).get("state") != "quoted"
+        ):
+            continue
+        try:
+            await _advance_market_session("bid", session, loop)
+        except Exception:
+            logging.warning(
+                "fee cover sweep: advancing bid session %s failed", session.id, exc_info=True
+            )
+
+
 async def sweep_fee_cover() -> None:
-    """Settle filled promises, release dead ones, pay owed refunds, recover
-    submitted ones (spec §Fill detection and promise release)."""
+    """Advance quoted bid sessions, settle filled promises, release dead ones,
+    pay owed refunds, recover submitted ones (spec §Fill detection and promise
+    release)."""
+    await _advance_quoted_bid_sessions()
     report = await fee_cover_settle.sweep_once(
         _fee_cover_deps(),
         attempts=_fee_cover_attempts,
