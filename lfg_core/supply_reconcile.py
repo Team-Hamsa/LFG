@@ -56,12 +56,13 @@ def reconcile_growth(conn: sqlite3.Connection, *, dry_run: bool = False) -> dict
         ):
             canonical[edition] = rec
     for edition, rec in sorted(canonical.items()):
-        if economy_store.supply_change_exists_for_edition(
-            conn, edition
-        ) and trait_economy.attrs_are_blank(rec.attributes):
-            skipped_known_blank.append(edition)
-            continue
+        known_edition = economy_store.supply_change_exists_for_edition(conn, edition)
         try:
+            # Inside the guard: attrs_are_blank reads every entry, so malformed
+            # attributes must land in skipped_unreadable, not abort the sweep.
+            if known_edition and trait_economy.attrs_are_blank(rec.attributes):
+                skipped_known_blank.append(edition)
+                continue
             body_value = swap_meta.get_attr(rec.attributes, "Body")
             deltas = {
                 f"{slot}|{trait_economy.slot_value(rec, slot)}": 1

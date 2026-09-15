@@ -535,6 +535,8 @@ async def run_harvest(session: HarvestSession, deps: EconomyDeps) -> None:
                 # (it could undo a landed blank against a Closet we never
                 # credited — or "restore" a never-changed one), no Closet credit.
                 session.pending_tx_hash = _pending_tx_hash(e)
+                # The art MAY have changed; dropping the archived still is safe either way.
+                _invalidate_archived_art("harvest", session.edition)
                 session.fail(_indeterminate_error("harvest (blanking the character)", session.id))
                 _write_record(
                     deps.records_dir,
@@ -559,6 +561,8 @@ async def run_harvest(session: HarvestSession, deps: EconomyDeps) -> None:
                 # unknown burn (the listener records a landed out-of-band burn
                 # itself, #322), no remint, no Closet credit.
                 session.pending_tx_hash = _pending_tx_hash(e)
+                # The art MAY have changed; dropping the archived still is safe either way.
+                _invalidate_archived_art("harvest", session.edition)
                 session.fail(_indeterminate_error("harvest (burning the character)", session.id))
                 _write_record(
                     deps.records_dir,
@@ -596,6 +600,8 @@ async def run_harvest(session: HarvestSession, deps: EconomyDeps) -> None:
                 # blank remint MAY have landed in the issuer wallet. No +1 mint
                 # row for an unknown mint, no offer, no Closet credit.
                 session.pending_tx_hash = _pending_tx_hash(e)
+                # The art MAY have changed; dropping the archived still is safe either way.
+                _invalidate_archived_art("harvest", session.edition)
                 session.fail(
                     _indeterminate_error(
                         "harvest (character burned; re-minting it as a blank)", session.id
@@ -902,6 +908,8 @@ async def run_assemble(session: AssembleSession, deps: EconomyDeps) -> None:
             # #493: the dress modify MAY have landed. No modify-back, no Closet
             # debit — reconcile from chain.
             session.pending_tx_hash = _pending_tx_hash(e)
+            # The art MAY have changed; dropping the archived still is safe either way.
+            _invalidate_archived_art("assemble", session.edition)
             session.fail(_indeterminate_error("assemble (dressing the character)", session.id))
             _write_record(
                 deps.records_dir,
@@ -1307,6 +1315,8 @@ async def run_equip(session: EquipSession, deps: EconomyDeps) -> None:
             # (the client must not redraw from the index or invite a re-save).
             session.resolution = "uncertain"
             session.pending_tx_hash = _pending_tx_hash(e)
+            # The art MAY have changed; dropping the archived still is safe either way.
+            _invalidate_archived_art("equip", rec.nft_number)
             session.fail(_indeterminate_error("equip (updating the character)", session.id))
             _write_record(
                 deps.records_dir, "equip", session.id, session._record("equip_modify_indeterminate")

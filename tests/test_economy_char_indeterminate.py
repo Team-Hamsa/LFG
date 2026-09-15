@@ -376,3 +376,33 @@ def test_deposit_burn_indeterminate(tmp_path):
     assert rec["pending_tx_hash"] == "PENDDEPBURN"
     assert (rec["slot"], rec["value"]) == ("Hat", "Cap")
     assert rec["burn_hash"] is None
+
+
+# --- Archived art (PR #497 review) -----------------------------------------------
+# Every indeterminate CHARACTER outcome may have changed the edition's on-chain
+# art (blank / dressed / burned). Dropping the archived still is safe either way
+# (/api/img falls back to the token's own URL), so the stale pre-op thumbnail
+# must not keep being served while the journal awaits reconciliation.
+
+
+def _art_scenarios():
+    return [
+        (test_harvest_mutable_modify_indeterminate, "harvest"),
+        (test_harvest_legacy_burn_indeterminate, "harvest"),
+        (test_harvest_legacy_remint_indeterminate_keeps_burn_row_only, "harvest"),
+        (test_harvest_mutable_revert_indeterminate, "harvest"),
+        (test_assemble_modify_indeterminate, "assemble"),
+        (test_assemble_revert_indeterminate, "assemble"),
+        (test_equip_modify_indeterminate, "equip"),
+        (test_equip_revert_indeterminate, "equip"),
+    ]
+
+
+def test_indeterminate_character_outcomes_invalidate_archived_art(monkeypatch, tmp_path):
+    for i, (scenario, op) in enumerate(_art_scenarios()):
+        calls: list[str] = []
+        monkeypatch.setattr(
+            ef, "_invalidate_archived_art", lambda o, ed, calls=calls: calls.append(o)
+        )
+        scenario(tmp_path / str(i))
+        assert calls == [op], (scenario.__name__, calls)

@@ -231,3 +231,22 @@ def test_known_edition_reminted_dressed_is_still_growth():
 
     assert report["written"] == [5]
     assert report["skipped_known_blank"] == []
+
+
+def test_malformed_attributes_at_ledger_known_edition_are_unreadable_not_raised():
+    # PR #497 review: the known-blank check must sit inside the malformed-
+    # metadata guard — a ledger-known edition with broken attribute entries is
+    # reported unreadable, and the sweep carries on to later editions.
+    conn = _db()
+    _freeze(conn, [1, 5])
+    _burn_row(conn, 5, "ID000005")
+    nft_index.upsert(
+        conn, _token(5, nft_id="IDBROKEN5", attrs=[{"value": "orphan"}, {"trait_type": "Eyes"}])
+    )
+    nft_index.upsert(conn, _token(12))
+
+    report = supply_reconcile.reconcile_growth(conn)
+
+    assert report["skipped_unreadable"] == [5]
+    assert report["skipped_known_blank"] == []
+    assert report["written"] == [12]
