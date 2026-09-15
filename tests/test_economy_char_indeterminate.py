@@ -67,8 +67,12 @@ def test_submit_and_confirm_indeterminate_carries_signed_hash(monkeypatch):
     class _Resp:
         result = {"error": "txnNotFound"}
 
+    class _Client:
+        def request(self, _req):
+            return _Resp()
+
     monkeypatch.setattr(xrpl_ops, "submit_and_wait", submit_boom)
-    monkeypatch.setattr(xrpl_ops.JsonRpcClient, "request", lambda self, req: _Resp())
+    monkeypatch.setattr(xrpl_ops, "rpc_client", lambda: _Client())
     try:
         _run(xrpl_ops.burn_nft("NFTID", owner="rOwner"))
     except xrpl_ops.IndeterminateResultError as e:
