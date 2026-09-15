@@ -1217,7 +1217,9 @@ refused before submit (`ClaimNotSubmitted`, unreadable ledger) goes back to
 automatically: `payout_failed` (a validated definitive failure) and
 `payout_expired` (recovery found no payout past its LastLedgerSequence). An
 operator fixes the cause, then requeues either with
-`scripts/recover_fee_cover_refunds.py --network <net> --requeue <accept_hash>`.
+`scripts/recover_fee_cover_refunds.py --network <net> --requeue <accept_hash>`
+(it re-checks the chain first and refuses, exit 1, if the payout is found or
+the lookup errors).
 Report/audit: `scripts/fee_cover_report.py --network <net> --audit` (pm2
 `lfg-fee-cover-audit` / `stg-fee-cover-audit`, 03:40 UTC — registering it is an
 ops step: `pm2 start ecosystem.prod.config.js --only lfg-fee-cover-audit && pm2 save`).

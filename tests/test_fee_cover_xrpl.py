@@ -165,13 +165,19 @@ def _entry(
 
 @pytest.fixture()
 def account_tx(monkeypatch):
-    box = {"entries": []}
+    box = {"entries": [], "error": None}
 
     class _Resp:
-        def __init__(self, result):
+        def __init__(self, result, ok=True):
             self.result = result
+            self._ok = ok
+
+        def is_successful(self):
+            return self._ok
 
     def fake_request(self, request):
+        if box["error"] is not None:
+            return _Resp(box["error"], ok=False)
         return _Resp({"transactions": box["entries"], "marker": None})
 
     monkeypatch.setattr(xrpl_ops.JsonRpcClient, "request", fake_request, raising=False)
@@ -204,6 +210,14 @@ def test_find_fee_cover_payment_accepts_a_genuine_refund(account_tx):
 def test_find_fee_cover_payment_rejects_anything_not_our_refund(account_tx, overrides):
     account_tx["entries"] = [_entry(**overrides)]
     assert _find() is None
+
+
+def test_find_fee_cover_payment_raises_on_an_account_tx_error_response(account_tx):
+    """An error response carries no `transactions`: read as "absent", recovery
+    would park a refund that may have landed and a requeue would pay it twice."""
+    account_tx["error"] = {"error": "lgrIdxMalformed", "status": "error"}
+    with pytest.raises(RuntimeError, match="account_tx error"):
+        _find()
 
 
 def test_get_xrp_balance_drops(monkeypatch):

@@ -6,7 +6,7 @@ import asyncio
 
 import pytest
 
-from lfg_core import config, db_path, fee_cover, fee_cover_settle
+from lfg_core import config, db_path, fee_cover, fee_cover_settle, xrpl_ops
 from lfg_core import fee_cover_store as store
 from scripts import fee_cover_report, recover_fee_cover_refunds
 
@@ -70,15 +70,72 @@ def test_recover_cli_refuses_a_network_mismatch(app_db):
     assert recover_fee_cover_refunds.main(["--network", "mainnet"]) == 2
 
 
-def test_recover_cli_requeues_a_parked_failure(app_db):
+def _private_loop_run(coro):
+    # main() uses asyncio.run(), which leaves the global event loop unset on
+    # Python 3.10 and breaks later modules that call get_event_loop().
+    loop = asyncio.new_event_loop()
+    try:
+        return loop.run_until_complete(coro)
+    finally:
+        loop.close()
+
+
+def _chain_lookup(monkeypatch, *, found=None, error=None):
+    calls = []
+
+    async def fake_find(accept_tx_hash, *, destination, drops, min_ledger):
+        calls.append((accept_tx_hash, destination, drops, min_ledger))
+        if error is not None:
+            raise error
+        return found
+
+    monkeypatch.setattr(xrpl_ops, "find_fee_cover_payment", fake_find)
+    monkeypatch.setattr(asyncio, "run", _private_loop_run)
+    return calls
+
+
+def _failed_refund(app_db):
     conn = _refund(app_db, state="failed")
+    conn.execute("UPDATE fee_cover_refunds SET last_ledger_seq = 7040")
+    conn.commit()
     conn.close()
-    assert recover_fee_cover_refunds.main(["--network", NET, "--requeue", "ACC1"]) == 0
+
+
+def _state(app_db):
     conn = store.connect(app_db)
-    assert store.get_refund(conn, "ACC1")["state"] == "owed"
+    try:
+        return store.get_refund(conn, "ACC1")["state"]
+    finally:
+        conn.close()
+
+
+def test_recover_cli_requeues_a_parked_failure(app_db, monkeypatch):
+    _failed_refund(app_db)
+    calls = _chain_lookup(monkeypatch, found=None)
+    assert recover_fee_cover_refunds.main(["--network", NET, "--requeue", "ACC1"]) == 0
+    assert calls == [("ACC1", "rB", 80_642, 7040)]
+    assert _state(app_db) == "owed"
     assert (
         recover_fee_cover_refunds.main(["--network", NET, "--requeue", "ACC1"]) == 1
     )  # not failed any more
+    assert len(calls) == 1  # no chain read for a row that is not failed
+
+
+def test_recover_cli_refuses_to_requeue_a_refund_found_on_ledger(app_db, monkeypatch, capsys):
+    _failed_refund(app_db)
+    _chain_lookup(monkeypatch, found="PAYOUTHASH")
+    assert recover_fee_cover_refunds.main(["--network", NET, "--requeue", "ACC1"]) == 1
+    assert "PAYOUTHASH found on-ledger; not requeued" in capsys.readouterr().out
+    assert _state(app_db) == "failed"
+
+
+def test_recover_cli_refuses_to_requeue_when_the_chain_check_errors(app_db, monkeypatch, capsys):
+    _failed_refund(app_db)
+    _chain_lookup(monkeypatch, error=RuntimeError("account_tx error: {'error': 'tooBusy'}"))
+    assert recover_fee_cover_refunds.main(["--network", NET, "--requeue", "ACC1"]) == 1
+    captured = capsys.readouterr()
+    assert "account_tx error" in captured.out + captured.err
+    assert _state(app_db) == "failed"
 
 
 def test_recover_cli_runs_chain_recovery(app_db, monkeypatch, capsys):

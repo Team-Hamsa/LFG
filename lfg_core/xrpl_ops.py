@@ -2620,6 +2620,11 @@ async def _find_memo_tagged_tx(
     while True:
         request = AccountTx(account=sender, limit=200, marker=marker, ledger_index_min=scan_from)
         response = await asyncio.to_thread(client.request, request)
+        if not response.is_successful():
+            # An error response carries no `transactions`; reading it as
+            # "absent" past LastLedgerSequence would fail a payout that may
+            # have landed, and a retry/requeue would pay it twice.
+            raise RuntimeError(f"account_tx error: {response.result!r}")
         result = response.result
         if not isinstance(result, dict):
             raise RuntimeError(f"account_tx returned an unexpected payload: {result!r}")

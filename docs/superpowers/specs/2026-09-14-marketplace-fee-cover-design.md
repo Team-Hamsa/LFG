@@ -278,7 +278,9 @@ promise.
     `delivered_amount == refund_drops`.
   - Found → `confirmed`. Absent **and** validated ledger past
     `last_ledger_seq` → `failed` with reason **`payout_expired`**. Anything
-    else stays untouched.
+    else stays untouched — including an `account_tx` error response, which
+    raises rather than reading as "absent" (absence past the deadline would
+    otherwise park a payout that landed, and a requeue would pay it twice).
 - **A `failed` row is parked, never retried automatically**, whether its
   reason is `payout_failed` or `payout_expired`. Typical causes:
   - a destination property (`tecDST_TAG_NEEDED`, DepositAuth `tecNO_PERMISSION`)
@@ -290,6 +292,11 @@ promise.
   <accept_tx_hash>`. That moves `failed → owed` only while the campaign budget
   still has headroom for it. The result code is in the service log line from
   `_submit_and_confirm`.
+  - Before requeueing, `--requeue` re-checks the chain with
+    `find_fee_cover_payment(accept, destination=bidder, drops=refund_drops,
+    min_ledger=last_ledger_seq)`. A hash found → it prints `<hash> found
+    on-ledger; not requeued` and exits 1; a lookup error → it prints the error
+    and exits 1. Only a clean "absent" requeues.
 
 ### Payout transaction
 
