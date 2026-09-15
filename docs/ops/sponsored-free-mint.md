@@ -111,16 +111,17 @@ box-local DBs:
 
 ```bash
 .venv/bin/python scripts/sponsored_mint_admin.py status --network mainnet
-.venv/bin/python scripts/sponsored_mint_admin.py start  --network mainnet --actor <you>
-.venv/bin/python scripts/sponsored_mint_admin.py stop   --network mainnet --actor <you>
+.venv/bin/python scripts/sponsored_mint_admin.py start  --network mainnet
+.venv/bin/python scripts/sponsored_mint_admin.py stop   --network mainnet --note "why"
 ```
 
 `start` also runs the Step 0b archive re-verification synchronously and
 reports the result in its exit code (`0` usable, `3` campaign active but
-admission still fail-closed — fix the archive and `start` again; `2` the
-`--network` flag does not match the box's `XRPL_NETWORK`; `1` refused by the
-library). Audit rows are written with actor `cli:<you>` so they are
-distinguishable from Discord-driven flips. The script exposes nothing over
+admission still fail-closed — fix the archive and `start` again; `4` started
+with `--skip-reverify`, usability unknown; `2` the `--network` flag does not
+match the box's `XRPL_NETWORK`; `1` refused by the library). Audit rows are
+written with actor `cli:<os-login>` (the shell account, not a flag; `--note`
+appends a label) so they are distinguishable from Discord-driven flips. The script exposes nothing over
 the network and needs the box's `.env` and DB files, so a checkout of the
 public repo alone cannot operate the campaign.
 
