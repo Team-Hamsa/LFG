@@ -262,8 +262,10 @@ def _apply_possible_growth(
 
 def _attrs_are_blank(attrs: list[dict[str, str]]) -> bool:
     """Every TRAIT_ORDER slot explicitly present with value "None" (the shape
-    `trait_economy.blank_attributes()` writes)."""
-    return all(swap_meta.get_attr(attrs, slot) == "None" for slot in swap_meta.TRAIT_ORDER)
+    `trait_economy.blank_attributes()` writes). Delegates to the shared
+    `trait_economy.attrs_are_blank` so the reconciler's twin guard (#493)
+    agrees byte-for-byte."""
+    return trait_economy.attrs_are_blank(attrs)
 
 
 def _record_burn_shrinkage(

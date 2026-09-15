@@ -13,7 +13,9 @@ effective genesis (frozen genesis + supply_changes), it writes the same growth
 row the listener would have (actor "reconciler", reason
 "growth reconcile <nft_id>"), built from the index's stored metadata. Tokens
 with unreadable metadata (no attributes / no Body) are skipped and REPORTED,
-never guessed at. Idempotent; safe to re-run. Also a pre-flight check for the
+never guessed at. A BLANK token at an edition the supply ledger already knows
+(the legacy harvest upgrade's remint) is skipped too — it is not growth (#493,
+the listener's #429 guard). Idempotent; safe to re-run. Also a pre-flight check for the
 economy mainnet flip: a clean run writes nothing.
 
 DRY-RUN BY DEFAULT: prints what it WOULD write and exits. Pass --apply to write.
@@ -70,6 +72,12 @@ def main() -> int:
     print(f"{args.network}: {mode} {len(report['written'])} growth row(s)")
     for edition in report["written"]:
         print(f"  mint edition #{edition}")
+    for edition in report["skipped_known_blank"]:
+        print(
+            f"  skipped #{edition}: blank remint of an edition the supply ledger already "
+            "knows (legacy harvest upgrade) — not growth; its harvest mint row is missing, "
+            "check the harvest journal"
+        )
     for edition in report["skipped_unreadable"]:
         print(f"  SKIPPED #{edition}: unreadable metadata — repair the index row first")
     return 1 if report["skipped_unreadable"] else 0

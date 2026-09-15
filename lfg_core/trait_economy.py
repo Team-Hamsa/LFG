@@ -66,7 +66,15 @@ def is_blank(rec: OnchainNft) -> bool:
     overwrite a real (but unreadable) character's traits. Note the census
     consequence: an unreadable char now counts as dressed with all-None slots,
     which matches pre-blank-model census behavior for unreadable tokens."""
-    return all(swap_meta.get_attr(rec.attributes, s) == "None" for s in swap_meta.TRAIT_ORDER)
+    return attrs_are_blank(rec.attributes)
+
+
+def attrs_are_blank(attrs: list[dict[str, str]]) -> bool:
+    """`is_blank` over a bare attribute list: every TRAIT_ORDER slot explicitly
+    present with value "None" (the shape `blank_attributes()` writes). Shared by
+    the listener's and the reconciler's known-edition blank-remint growth guard
+    (#429/#493) so the two can never disagree on what a blank is."""
+    return all(swap_meta.get_attr(attrs, s) == "None" for s in swap_meta.TRAIT_ORDER)
 
 
 def body_class_map(genesis: Genesis) -> dict[str, str]:

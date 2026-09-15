@@ -42,6 +42,56 @@
 #   failed_revert_mint /          compensation ALSO failed         admin: locate the journaled
 #   failed_revert                                                  token and resolve manually
 #
+# Character / trait-token indeterminate outcomes (#493): a char_*_fn /
+# trait_*_fn submit that raises xrpl_ops.IndeterminateResultError (submit raised
+# — e.g. public-node `tooBusy` — and the signed hash could not be confirmed
+# either way) MUST NOT fall into the generic `failed` status: nothing revisits
+# a `failed` journal, and on 2026-09-13 every such tx had actually landed. Each
+# step journals its own NON-terminal status carrying `pending_tx_hash` (the
+# signed hash, when xrpl_ops knew it) plus everything already known, fails the
+# session with an honest "outcome unknown — do not retry" message, and runs NO
+# on-chain compensation and NO supply_changes write for the unknown step (rows
+# for steps that definitively succeeded — e.g. the legacy burn — stay).
+# `pending_tx_hash` is also recorded on the Closet `<op>_sync_indeterminate`
+# statuses when the cause chain carries it.
+#
+#   status                          unknown step                  operator action
+#   -----------------------------   ---------------------------   ---------------------------
+#   harvest_modify_indeterminate    mutable blank NFTokenModify   look up pending_tx_hash: if
+#                                                                 it landed, credit
+#                                                                 moved_assets to the Closet;
+#                                                                 else nothing changed
+#   harvest_burn_indeterminate      legacy NFTokenBurn            landed: listener wrote the -1
+#                                                                 row (#322) — remint the
+#                                                                 edition blank + credit
+#                                                                 moved_assets; else nothing
+#   harvest_remint_indeterminate    legacy blank NFTokenMint      burn row stays; landed: write
+#                                   (burn already committed)      the +1 mint row, offer the
+#                                                                 blank, credit moved_assets;
+#                                                                 else remint (as
+#                                                                 burned_no_remint)
+#   harvest_revert_indeterminate    modify-back after a failed    Closet NOT credited; landed:
+#                                   Closet deposit                character restored, done;
+#                                                                 else credit moved_assets
+#   assemble_modify_indeterminate   dress NFTokenModify           landed: debit the Closet
+#                                                                 (chosen + body); else nothing
+#   assemble_revert_indeterminate   modify-back after a failed    Closet NOT debited; landed:
+#                                   Closet debit                  done; else debit or re-blank
+#   equip_modify_indeterminate      equip NFTokenModify           landed: apply the journaled
+#                                                                 Closet swap; else nothing
+#   equip_revert_indeterminate      modify-back after a failed    Closet NOT swapped; landed:
+#                                   Closet swap                   done; else apply the swap
+#   extract_mint_indeterminate      trait-token NFTokenMint       landed: burn the stray issuer-
+#                                                                 held token (Closet untouched)
+#                                                                 or complete the extract
+#   extract_revert_indeterminate    compensating trait burn       Closet NOT decremented;
+#                                   after a failed decrement      landed: done; else burn nft_id
+#   deposit_burn_indeterminate      trait-token NFTokenBurn       landed: credit (slot, value)
+#                                                                 to the Closet; else nothing
+#
+# All of these are reconciled FROM CHAIN by pending_tx_hash — NEVER blind
+# re-apply or retry, and the session's `resolution` (equip) is "uncertain".
+#
 # Harvest-specific statuses (strip-to-blank, #<blank-harvest>):
 #
 #   harvesting                    assets snapshotted, no chain     none (in-flight)
@@ -103,7 +153,7 @@ from dataclasses import dataclass, field
 from typing import Any, TypeVar
 
 from lfg_core import closet_token as bt
-from lfg_core import config, db_helpers, nft_index, owner_lock
+from lfg_core import config, db_helpers, nft_index, owner_lock, xrpl_ops
 from lfg_core import economy_store as es
 from lfg_core import trait_economy as te
 from lfg_core import trait_token as tt
@@ -206,6 +256,34 @@ def _write_record(records_dir: str, op: str, session_id: str, record: dict[str, 
             json.dump(record, f, indent=2)
     except Exception:
         logging.error(f"Failed to write economy record: {traceback.format_exc()}")
+
+
+def _pending_tx_hash(exc: BaseException) -> str | None:
+    """The signed hash of the tx whose on-ledger outcome is unknown, if xrpl_ops
+    knew it (#493). Walks the `__cause__` chain: the character/trait deps pass
+    `xrpl_ops.IndeterminateResultError` through raw, while the Closet side wraps
+    it in `closet_token.ClosetIndeterminateError` (once in `_economy_deps.
+    _closet_modify`, again in `sync_closet`)."""
+    cur: BaseException | None = exc
+    for _ in range(8):  # bounded: a cause chain is never this deep legitimately
+        if cur is None:
+            return None
+        if isinstance(cur, xrpl_ops.IndeterminateResultError):
+            return cur.tx_hash
+        cur = cur.__cause__
+    return None
+
+
+def _indeterminate_error(step: str, session_id: str) -> str:
+    """The honest user-facing message for an indeterminate character / trait-
+    token step (#493): the ledger may or may not have applied it, so the user
+    must NOT retry (a retry against an op that actually landed double-applies
+    it) — the journal is reconciled from chain instead."""
+    return (
+        f"{step}: the XRPL network did not confirm whether this went through, so the "
+        f"outcome is unknown. Please do not retry — it will be reconciled from the ledger "
+        f"(journal {session_id})."
+    )
 
 
 def _apply_rarity_change(deps: EconomyDeps, op: str, apply: Callable[[Any], Any]) -> None:
@@ -382,6 +460,9 @@ class HarvestSession:
     moved_assets: list[tuple[str, str]] = field(default_factory=list)
     sync_tx_hash: str | None = None
     mirror_pending: bool = False
+    # Hash of the tx whose outcome is UNKNOWN on an `*_indeterminate` journal
+    # (#493) — what a reconciler looks up on-ledger. None otherwise.
+    pending_tx_hash: str | None = None
     id: str = field(default_factory=lambda: uuid.uuid4().hex)
 
     @property
@@ -402,6 +483,7 @@ class HarvestSession:
             "new_nft_id": self.new_nft_id,
             "sync_tx_hash": self.sync_tx_hash,
             "mirror_pending": self.mirror_pending,
+            "pending_tx_hash": self.pending_tx_hash,
             "status": status,
             "error": self.error,
         }
@@ -446,7 +528,21 @@ async def run_harvest(session: HarvestSession, deps: EconomyDeps) -> None:
             return
 
         if rec.mutable:
-            modify_hash = await deps.char_modify_fn(rec.nft_id, owner, blank_meta_url)
+            try:
+                modify_hash = await deps.char_modify_fn(rec.nft_id, owner, blank_meta_url)
+            except xrpl_ops.IndeterminateResultError as e:
+                # #493 (#3730): the blank modify MAY have landed. No modify-back
+                # (it could undo a landed blank against a Closet we never
+                # credited — or "restore" a never-changed one), no Closet credit.
+                session.pending_tx_hash = _pending_tx_hash(e)
+                session.fail(_indeterminate_error("harvest (blanking the character)", session.id))
+                _write_record(
+                    deps.records_dir,
+                    "harvest",
+                    session.id,
+                    session._record("harvest_modify_indeterminate"),
+                )
+                return
             if not modify_hash:
                 session.fail(f"failed to blank character {rec.nft_id}; nothing was changed")
                 _write_record(
@@ -456,7 +552,21 @@ async def run_harvest(session: HarvestSession, deps: EconomyDeps) -> None:
             session.modify_hash = modify_hash
         else:
             session.legacy_upgrade = True
-            burn_hash = await deps.char_burn_fn(rec.nft_id, owner)
+            try:
+                burn_hash = await deps.char_burn_fn(rec.nft_id, owner)
+            except xrpl_ops.IndeterminateResultError as e:
+                # #493 (#2475): the burn MAY have landed. No -1 supply row for an
+                # unknown burn (the listener records a landed out-of-band burn
+                # itself, #322), no remint, no Closet credit.
+                session.pending_tx_hash = _pending_tx_hash(e)
+                session.fail(_indeterminate_error("harvest (burning the character)", session.id))
+                _write_record(
+                    deps.records_dir,
+                    "harvest",
+                    session.id,
+                    session._record("harvest_burn_indeterminate"),
+                )
+                return
             if not burn_hash:
                 session.fail(f"failed to burn character {rec.nft_id}; nothing was lost")
                 _write_record(
@@ -479,7 +589,25 @@ async def run_harvest(session: HarvestSession, deps: EconomyDeps) -> None:
             )
             _write_record(deps.records_dir, "harvest", session.id, session._record("burned"))
 
-            new_id = await deps.char_mint_fn(blank_meta_url)
+            try:
+                new_id = await deps.char_mint_fn(blank_meta_url)
+            except xrpl_ops.IndeterminateResultError as e:
+                # #493 (#2783): the burn is definitive (its -1 row stays); the
+                # blank remint MAY have landed in the issuer wallet. No +1 mint
+                # row for an unknown mint, no offer, no Closet credit.
+                session.pending_tx_hash = _pending_tx_hash(e)
+                session.fail(
+                    _indeterminate_error(
+                        "harvest (character burned; re-minting it as a blank)", session.id
+                    )
+                )
+                _write_record(
+                    deps.records_dir,
+                    "harvest",
+                    session.id,
+                    session._record("harvest_remint_indeterminate"),
+                )
+                return
             if not new_id:
                 session.fail(
                     f"character burned but the blank remint failed — admin must remint "
@@ -588,6 +716,7 @@ async def run_harvest(session: HarvestSession, deps: EconomyDeps) -> None:
             return
         except bt.ClosetIndeterminateError as e:
             # Unknown whether the deposit committed: fail-closed — no re-apply.
+            session.pending_tx_hash = _pending_tx_hash(e)
             session.fail(
                 f"character blanked but the Closet deposit outcome is unknown ({e}); "
                 f"reconcile from chain (journal {session.id})"
@@ -606,7 +735,28 @@ async def run_harvest(session: HarvestSession, deps: EconomyDeps) -> None:
             # original URI — otherwise the assets ride in the journal.
             if rec.mutable and not session.legacy_upgrade:
                 old_uri = _raw_uri(rec.uri_hex)
-                revert = await deps.char_modify_fn(rec.nft_id, owner, old_uri) if old_uri else None
+                try:
+                    revert = (
+                        await deps.char_modify_fn(rec.nft_id, owner, old_uri) if old_uri else None
+                    )
+                except xrpl_ops.IndeterminateResultError as re_:
+                    # #493: the modify-back MAY have landed — the character is
+                    # blank or restored; the Closet was definitively NOT credited.
+                    session.pending_tx_hash = _pending_tx_hash(re_)
+                    session.fail(
+                        _indeterminate_error(
+                            f"harvest failed depositing to the Closet ({e}); restoring your "
+                            f"character",
+                            session.id,
+                        )
+                    )
+                    _write_record(
+                        deps.records_dir,
+                        "harvest",
+                        session.id,
+                        session._record("harvest_revert_indeterminate"),
+                    )
+                    return
                 if revert:
                     session.fail(
                         f"harvest failed depositing to the Closet ({e}); "
@@ -685,6 +835,7 @@ class AssembleSession:
     results: list[dict[str, Any]] = field(default_factory=list)
     sync_tx_hash: str | None = None
     mirror_pending: bool = False
+    pending_tx_hash: str | None = None  # unknown-outcome tx on *_indeterminate (#493)
     id: str = field(default_factory=lambda: uuid.uuid4().hex)
 
     @property
@@ -702,6 +853,7 @@ class AssembleSession:
             "modify_hash": self.modify_hash,
             "sync_tx_hash": self.sync_tx_hash,
             "mirror_pending": self.mirror_pending,
+            "pending_tx_hash": self.pending_tx_hash,
             "status": status,
             "error": self.error,
         }
@@ -744,7 +896,20 @@ async def run_assemble(session: AssembleSession, deps: EconomyDeps) -> None:
         _write_record(deps.records_dir, "assemble", session.id, session._record("assembling"))
 
         # Reversible: NFTokenModify keeps the nft_id; we can modify back.
-        modify_hash = await deps.char_modify_fn(rec.nft_id, owner, meta_url)
+        try:
+            modify_hash = await deps.char_modify_fn(rec.nft_id, owner, meta_url)
+        except xrpl_ops.IndeterminateResultError as e:
+            # #493: the dress modify MAY have landed. No modify-back, no Closet
+            # debit — reconcile from chain.
+            session.pending_tx_hash = _pending_tx_hash(e)
+            session.fail(_indeterminate_error("assemble (dressing the character)", session.id))
+            _write_record(
+                deps.records_dir,
+                "assemble",
+                session.id,
+                session._record("assemble_modify_indeterminate"),
+            )
+            return
         if not modify_hash:
             session.fail(f"failed to dress character {rec.nft_id}; your Closet is untouched")
             _write_record(
@@ -806,6 +971,7 @@ async def run_assemble(session: AssembleSession, deps: EconomyDeps) -> None:
         except bt.ClosetIndeterminateError as e:
             # Debit outcome unknown: fail-closed — no revert against an
             # unknown Closet; an admin reconciles from chain.
+            session.pending_tx_hash = _pending_tx_hash(e)
             session.fail(
                 f"assemble closet debit outcome unknown ({e}); the character keeps its new "
                 f"traits — reconcile from chain (journal {session.id})"
@@ -822,7 +988,26 @@ async def run_assemble(session: AssembleSession, deps: EconomyDeps) -> None:
             # character back to its pre-assemble (blank) URI; the Closet is
             # untouched.
             old_uri = _raw_uri(rec.uri_hex)
-            revert_hash = await deps.char_modify_fn(rec.nft_id, owner, old_uri) if old_uri else None
+            try:
+                revert_hash = (
+                    await deps.char_modify_fn(rec.nft_id, owner, old_uri) if old_uri else None
+                )
+            except xrpl_ops.IndeterminateResultError as re_:
+                # #493: the modify-back MAY have landed — dressed or blank.
+                session.pending_tx_hash = _pending_tx_hash(re_)
+                session.fail(
+                    _indeterminate_error(
+                        f"assemble failed updating the closet ({e}); reverting your character",
+                        session.id,
+                    )
+                )
+                _write_record(
+                    deps.records_dir,
+                    "assemble",
+                    session.id,
+                    session._record("assemble_revert_indeterminate"),
+                )
+                return
             if revert_hash:
                 session.fail(
                     f"assemble failed updating the closet ({e}); your character was reverted"
@@ -1022,6 +1207,7 @@ class EquipSession:
     modify_hash: str | None = None
     sync_tx_hash: str | None = None
     mirror_pending: bool = False
+    pending_tx_hash: str | None = None  # unknown-outcome tx on *_indeterminate (#493)
     # Machine-readable outcome discriminator for the client (#316):
     #   "committed"  — new traits are on-ledger (incl. complete_pending_mirror)
     #   "reverted"   — character definitively unchanged on-ledger
@@ -1044,6 +1230,7 @@ class EquipSession:
             "modify_hash": self.modify_hash,
             "sync_tx_hash": self.sync_tx_hash,
             "mirror_pending": self.mirror_pending,
+            "pending_tx_hash": self.pending_tx_hash,
             "status": status,
             "error": self.error,
             # Recovery must not lose the outcome discriminator: a recovered
@@ -1113,7 +1300,18 @@ async def run_equip(session: EquipSession, deps: EconomyDeps) -> None:
         _write_record(deps.records_dir, "equip", session.id, session._record("equipping"))
 
         # Reversible: NFTokenModify keeps the nft_id; we can modify back.
-        modify_hash = await deps.char_modify_fn(rec.nft_id, owner, meta_url)
+        try:
+            modify_hash = await deps.char_modify_fn(rec.nft_id, owner, meta_url)
+        except xrpl_ops.IndeterminateResultError as e:
+            # #493: the modify MAY have landed — "uncertain", never "reverted"
+            # (the client must not redraw from the index or invite a re-save).
+            session.resolution = "uncertain"
+            session.pending_tx_hash = _pending_tx_hash(e)
+            session.fail(_indeterminate_error("equip (updating the character)", session.id))
+            _write_record(
+                deps.records_dir, "equip", session.id, session._record("equip_modify_indeterminate")
+            )
+            return
         if not modify_hash:
             session.resolution = "reverted"
             session.fail(f"failed to update character {rec.nft_id}; your character is unchanged")
@@ -1158,6 +1356,7 @@ async def run_equip(session: EquipSession, deps: EconomyDeps) -> None:
             # Swap outcome unknown: fail-closed — no revert against an unknown
             # Closet; an admin reconciles from chain.
             session.resolution = "uncertain"
+            session.pending_tx_hash = _pending_tx_hash(e)
             session.fail(
                 f"equip closet swap outcome unknown ({e}); the character keeps its new traits — "
                 f"reconcile from chain (journal {session.id})"
@@ -1174,7 +1373,27 @@ async def run_equip(session: EquipSession, deps: EconomyDeps) -> None:
             # decodable old URI to revert to) means the character may still carry
             # the new traits while the Closet was not updated — that is the
             # failed_revert case (admin recovery), not a clean reverted_modify.
-            revert_hash = await deps.char_modify_fn(rec.nft_id, owner, old_uri) if old_uri else None
+            try:
+                revert_hash = (
+                    await deps.char_modify_fn(rec.nft_id, owner, old_uri) if old_uri else None
+                )
+            except xrpl_ops.IndeterminateResultError as re_:
+                # #493: the modify-back MAY have landed — old or new traits.
+                session.resolution = "uncertain"
+                session.pending_tx_hash = _pending_tx_hash(re_)
+                session.fail(
+                    _indeterminate_error(
+                        f"equip failed updating the closet ({e}); reverting your character",
+                        session.id,
+                    )
+                )
+                _write_record(
+                    deps.records_dir,
+                    "equip",
+                    session.id,
+                    session._record("equip_revert_indeterminate"),
+                )
+                return
             if revert_hash:
                 session.resolution = "reverted"
                 session.fail(f"equip failed updating the closet ({e}); your character was reverted")
@@ -1235,6 +1454,7 @@ class ExtractSession:
     accept: dict[str, Any] | None = None
     sync_tx_hash: str | None = None
     mirror_pending: bool = False
+    pending_tx_hash: str | None = None  # unknown-outcome tx on *_indeterminate (#493)
     id: str = field(default_factory=lambda: uuid.uuid4().hex)
 
     def _record(self, status: str) -> dict[str, Any]:
@@ -1247,6 +1467,7 @@ class ExtractSession:
             "nft_id": self.nft_id,
             "sync_tx_hash": self.sync_tx_hash,
             "mirror_pending": self.mirror_pending,
+            "pending_tx_hash": self.pending_tx_hash,
             "status": status,
             "error": self.error,
         }
@@ -1281,7 +1502,21 @@ async def run_extract(session: ExtractSession, deps: EconomyDeps) -> None:
         meta_url = await deps.trait_upload_fn(tt.build_trait_metadata(slot, value, image_url))  # type: ignore[misc]
         _write_record(deps.records_dir, "extract", session.id, session._record("minting"))
 
-        nft_id = await deps.trait_mint_fn(meta_url)  # type: ignore[misc]
+        try:
+            nft_id = await deps.trait_mint_fn(meta_url)  # type: ignore[misc]
+        except xrpl_ops.IndeterminateResultError as e:
+            # #493: the trait token MAY have been minted (issuer-held). No
+            # burn-back (we cannot name a token we never learned the id of), no
+            # Closet decrement — reconcile from chain.
+            session.pending_tx_hash = _pending_tx_hash(e)
+            session.fail(_indeterminate_error("extract (minting the trait token)", session.id))
+            _write_record(
+                deps.records_dir,
+                "extract",
+                session.id,
+                session._record("extract_mint_indeterminate"),
+            )
+            return
         if not nft_id:
             session.fail(f"failed to mint trait token for {value} {slot}; your Closet is untouched")
             _write_record(deps.records_dir, "extract", session.id, session._record("failed_mint"))
@@ -1302,6 +1537,7 @@ async def run_extract(session: ExtractSession, deps: EconomyDeps) -> None:
         except bt.ClosetIndeterminateError as e:
             # Decrement outcome unknown: fail-closed. Keep the token (id
             # journaled), no burn — an admin reconciles from chain.
+            session.pending_tx_hash = _pending_tx_hash(e)
             session.fail(
                 f"extract Closet decrement outcome unknown ({e}); trait token {nft_id} is kept — "
                 f"reconcile from chain (journal {session.id})"
@@ -1315,7 +1551,26 @@ async def run_extract(session: ExtractSession, deps: EconomyDeps) -> None:
             return
         except Exception as e:
             # Ledger-failed: the decrement definitively did not commit.
-            revert = await deps.trait_burn_fn(nft_id, "")  # type: ignore[misc]
+            try:
+                revert = await deps.trait_burn_fn(nft_id, "")  # type: ignore[misc]
+            except xrpl_ops.IndeterminateResultError as re_:
+                # #493: the compensating burn MAY have landed. Keep nft_id in the
+                # journal (the token may still exist); the Closet is untouched.
+                session.pending_tx_hash = _pending_tx_hash(re_)
+                session.fail(
+                    _indeterminate_error(
+                        f"extract failed updating the Closet ({e}); burning trait token {nft_id} "
+                        f"back",
+                        session.id,
+                    )
+                )
+                _write_record(
+                    deps.records_dir,
+                    "extract",
+                    session.id,
+                    session._record("extract_revert_indeterminate"),
+                )
+                return
             if revert:
                 session.nft_id = None
                 session.fail(f"extract failed updating the Closet ({e}); your Closet is untouched")
@@ -1416,6 +1671,7 @@ class DepositSession:
     burn_hash: str | None = None
     sync_tx_hash: str | None = None
     mirror_pending: bool = False
+    pending_tx_hash: str | None = None  # unknown-outcome tx on *_indeterminate (#493)
     id: str = field(default_factory=lambda: uuid.uuid4().hex)
 
     def _record(self, status: str) -> dict[str, Any]:
@@ -1429,6 +1685,7 @@ class DepositSession:
             "burn_hash": self.burn_hash,
             "sync_tx_hash": self.sync_tx_hash,
             "mirror_pending": self.mirror_pending,
+            "pending_tx_hash": self.pending_tx_hash,
             "status": status,
             "error": self.error,
         }
@@ -1476,7 +1733,21 @@ async def run_deposit(session: DepositSession, deps: EconomyDeps) -> None:
         session.slot, session.value = parsed
         _write_record(deps.records_dir, "deposit", session.id, session._record("depositing"))
 
-        burn_hash = await deps.trait_burn_fn(nft_id, owner)  # type: ignore[misc]
+        try:
+            burn_hash = await deps.trait_burn_fn(nft_id, owner)  # type: ignore[misc]
+        except xrpl_ops.IndeterminateResultError as e:
+            # #493 (f23aa6de): the burn MAY have landed. No Closet credit (it
+            # would double-credit if the token still exists) and the trait_tokens
+            # row stays for the listener to retire on a landed burn.
+            session.pending_tx_hash = _pending_tx_hash(e)
+            session.fail(_indeterminate_error("deposit (burning the trait token)", session.id))
+            _write_record(
+                deps.records_dir,
+                "deposit",
+                session.id,
+                session._record("deposit_burn_indeterminate"),
+            )
+            return
         if not burn_hash:
             session.fail(f"failed to burn trait token {nft_id}; nothing was lost")
             _write_record(deps.records_dir, "deposit", session.id, session._record("failed_burn"))
@@ -1504,6 +1775,7 @@ async def run_deposit(session: DepositSession, deps: EconomyDeps) -> None:
         except bt.ClosetIndeterminateError as e:
             # Credit outcome unknown: fail-closed — reconcile from chain
             # before any re-credit (never blind re-apply).
+            session.pending_tx_hash = _pending_tx_hash(e)
             session.fail(
                 f"trait burned but the Closet credit outcome is unknown ({e}); "
                 f"reconcile from chain before any re-credit (journal {session.id})"

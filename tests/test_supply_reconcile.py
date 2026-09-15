@@ -158,3 +158,76 @@ def test_malformed_attribute_entries_are_skipped_not_raised():
 
     assert report["skipped_unreadable"] == [11]
     assert report["written"] == [12]
+
+
+# --- #493: mirror the #429 listener guard — a BLANK token at an edition the
+# supply ledger already knows is the legacy harvest upgrade's remint, not growth.
+
+
+def _burn_row(conn, edition, nft_id):
+    es.record_supply_change(
+        conn,
+        "burn",
+        edition,
+        "Straight",
+        "male",
+        {f"{s}|None": -1 for s in trait_economy.NON_BODY_SLOTS},
+        "harvest",
+        f"legacy harvest upgrade test-{edition}",
+        nft_id=nft_id,
+    )
+
+
+def test_skips_blank_remint_of_edition_the_ledger_already_knows():
+    # Edition #2783 (2026-09-13): burn row written, blank remint landed but its
+    # mint row never did (indeterminate) — the nightly wrote +8 `<Slot>|None`.
+    conn = _db()
+    _freeze(conn, [1, 5])
+    _burn_row(conn, 5, "ID000005")
+    nft_index.upsert(conn, _token(5, nft_id="IDBLANK5", attrs=trait_economy.blank_attributes()))
+
+    report = supply_reconcile.reconcile_growth(conn)
+
+    assert report["written"] == []
+    assert report["skipped_known_blank"] == [5]
+    assert [r["kind"] for r in es.read_supply_changes(conn) if r["edition"] == 5] == ["burn"]
+
+
+def test_dry_run_also_skips_known_blank():
+    conn = _db()
+    _freeze(conn, [1, 5])
+    _burn_row(conn, 5, "ID000005")
+    nft_index.upsert(conn, _token(5, nft_id="IDBLANK5", attrs=trait_economy.blank_attributes()))
+
+    report = supply_reconcile.reconcile_growth(conn, dry_run=True)
+
+    assert report["written"] == []
+    assert report["skipped_known_blank"] == [5]
+
+
+def test_still_records_genuinely_new_editions_alongside_known_blank():
+    conn = _db()
+    _freeze(conn, [1, 5])
+    _burn_row(conn, 5, "ID000005")
+    nft_index.upsert(conn, _token(5, nft_id="IDBLANK5", attrs=trait_economy.blank_attributes()))
+    nft_index.upsert(conn, _token(8, attrs=_attrs(body="Bones", Head="Wizard Hat")))
+    # A brand-new BLANK edition the ledger has never seen is still growth
+    # (same as the listener: the guard needs BOTH a known edition and blank attrs).
+    nft_index.upsert(conn, _token(9, attrs=trait_economy.blank_attributes()))
+
+    report = supply_reconcile.reconcile_growth(conn)
+
+    assert report["written"] == [8, 9]
+    assert report["skipped_known_blank"] == [5]
+
+
+def test_known_edition_reminted_dressed_is_still_growth():
+    conn = _db()
+    _freeze(conn, [1, 5])
+    _burn_row(conn, 5, "ID000005")
+    nft_index.upsert(conn, _token(5, nft_id="IDDRESSED5", attrs=_attrs(Head="Crown")))
+
+    report = supply_reconcile.reconcile_growth(conn)
+
+    assert report["written"] == [5]
+    assert report["skipped_known_blank"] == []

@@ -52,6 +52,15 @@ def main() -> int:
         print(f"  mint edition #{edition}")
     for edition, nft_id in shrinkage["written"]:
         print(f"  burn edition #{edition} ({nft_id})")
+    for edition in growth["skipped_known_blank"]:
+        # Not growth (#493): a blank remint of an edition the ledger already
+        # knows. A COMPLETED legacy harvest writes its own mint row, so reaching
+        # here means that row is missing — check the harvest journal (e.g. a
+        # harvest_remint_indeterminate record) for this edition.
+        print(
+            f"  skipped #{edition}: blank remint of a ledger-known edition (not growth) — "
+            "its harvest mint row is missing; check the harvest journal"
+        )
     unreadable = [(e, "") for e in growth["skipped_unreadable"]] + list(
         shrinkage["skipped_unreadable"]
     )
