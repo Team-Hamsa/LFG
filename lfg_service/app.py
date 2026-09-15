@@ -5312,6 +5312,203 @@ async def handle_closet_fill_status(request):
     return web.json_response(_closet_fill_view(fill, wallet))
 
 
+@require_closet_market
+@require_wallet
+async def handle_closet_bid_create(request):
+    """POST /api/closet/bid {slot, value, price_brix}: one Xaman signature
+    locks the BRIX in a TokenEscrow to the app wallet. The fulfillment is
+    generated here and stored sealed; the bid opens once the escrow is
+    verified on-ledger (GET /api/closet/bid/{id})."""
+    wallet, user = request["wallet"], request["user"]
+    body = await _json_body(request)
+    slot, value = body.get("slot"), body.get("value")
+    price = _parse_brix_price(body.get("price_brix"))
+    if not isinstance(slot, str) or not isinstance(value, str) or price is None:
+        return web.json_response(
+            {"error": "slot, value and a valid price_brix are required", "code": "bad_request"},
+            status=400,
+        )
+    network = config.ECONOMY_NETWORK
+    loop = asyncio.get_event_loop()
+    if not await loop.run_in_executor(None, _known_trait, network, slot, value):
+        return web.json_response({"error": "unknown trait", "code": "unknown_trait"}, status=404)
+    if not await loop.run_in_executor(None, _closet_active, network, wallet):
+        return web.json_response(
+            {"error": "closet_required", "code": "closet_required"}, status=403
+        )
+    if await _closet_db(closet_market_store.has_live_bid, wallet, slot, value):
+        return web.json_response(
+            {
+                "error": "you already have a live bid on this trait — cancel it first",
+                "code": "bid_exists",
+            },
+            status=409,
+        )
+    state, balance = await xrpl_ops.get_trustline_state(
+        wallet, config.BRIX_CURRENCY_HEX, config.BRIX_ISSUER
+    )
+    if state == xrpl_ops.TrustlineState.ABSENT:
+        return web.json_response(
+            {"error": "a BRIX trustline is required", "code": "trustline_required"}, status=409
+        )
+    if state != xrpl_ops.TrustlineState.PRESENT or balance is None:
+        return web.json_response(
+            {
+                "error": "could not read your BRIX balance — try again",
+                "code": "balance_unavailable",
+            },
+            status=503,
+        )
+    if balance < Decimal(price):
+        return web.json_response(
+            {
+                "error": f"you hold {balance} BRIX; this bid locks {price}",
+                "code": "insufficient_brix",
+            },
+            status=409,
+        )
+    preimage = crypto_condition.new_preimage()
+    condition = crypto_condition.condition_hex(preimage)
+    sealed = crypto_condition.seal(crypto_condition.fulfillment_hex(preimage))
+    cancel_after = int(time.time()) - xrpl_ops.RIPPLE_EPOCH_OFFSET + config.CLOSET_BID_TTL_SECONDS
+    payload = await xumm_ops.create_closet_bid_payload(
+        wallet,
+        market_ops.brix_amount_dict(price),
+        config.SIGNING_ACCOUNT,
+        condition,
+        cancel_after,
+        return_url=xumm_ops.discord_return_url(body.get("guild_id"), body.get("channel_id")),
+        user_token=await _push_token(user),
+        platform=memos.platform_for_surface(_platform(user)),
+    )
+    if not payload:
+        return web.json_response({"error": "could not reach Xaman"}, status=502)
+    try:
+        order = await _closet_db(
+            closet_market_store.create_pending_bid,
+            owner=wallet,
+            slot=slot,
+            value=value,
+            price_brix=price,
+            platform=_platform(user),
+            condition=condition,
+            fulfillment_enc=sealed,
+            cancel_after=cancel_after,
+            payload_uuid=payload.get("uuid"),
+            xumm_url=payload.get("xumm_url"),
+            qr_url=payload.get("qr_url"),
+            push=payload.get("push"),
+        )
+    except closet_market_store.OrderError as exc:
+        if payload.get("uuid"):
+            await xumm_ops.cancel_xumm_payload(payload["uuid"])
+        return _order_error_response(exc)
+    return web.json_response(_closet_bid_view(order))
+
+
+@require_closet_settleable
+@require_wallet
+async def handle_closet_bid_status(request):
+    wallet, order_id = request["wallet"], request.match_info["order_id"]
+    order = await _closet_db(closet_market_store.get_order, order_id)
+    if order is None or order["side"] != closet_market_store.SIDE_BID or order["owner"] != wallet:
+        return web.json_response({"error": "bid not found", "code": "not_found"}, status=404)
+    if order["state"] == closet_market_store.PENDING_ESCROW:
+        fill_id = await closet_market_flow.advance_bid(order_id, _closet_market_deps())
+        if fill_id:
+            _schedule_closet_settle(fill_id)
+        _invalidate_closet_book()
+        order = await _closet_db(closet_market_store.get_order, order_id)
+    elif order["state"] == closet_market_store.CANCELLING:
+        _schedule_closet_bid(order_id)
+    return web.json_response(_closet_bid_view(order))
+
+
+@require_closet_settleable
+@require_wallet
+async def handle_closet_bid_cancel(request):
+    order_id = request.match_info["order_id"]
+    try:
+        order = await _closet_db(
+            closet_market_store.begin_cancel_bid, order_id, owner=request["wallet"], reason="user"
+        )
+    except closet_market_store.OrderError as exc:
+        return _order_error_response(exc)
+    _invalidate_closet_book()
+    _schedule_closet_bid(order_id)
+    return web.json_response(_closet_bid_view(order))
+
+
+@require_closet_market
+@require_wallet
+async def handle_closet_ask_buy(request):
+    """POST /api/closet/ask/{id}/buy: one Xaman signature pays the ask to the
+    app wallet (InvoiceID = sha256(fill id)). Non-holders pay XRP via SendMax
+    on the same Payment — no trustline needed, the BRIX lands at the app."""
+    wallet, user = request["wallet"], request["user"]
+    order_id = request.match_info["order_id"]
+    ask = await _closet_db(closet_market_store.get_order, order_id)
+    if ask is None or ask["side"] != closet_market_store.SIDE_ASK:
+        return web.json_response({"error": "listing not found", "code": "not_found"}, status=404)
+    if ask["state"] != closet_market_store.OPEN:
+        return web.json_response(
+            {"error": "this trait was just sold or unlisted", "code": "not_open"}, status=409
+        )
+    if ask["owner"] == wallet:
+        return web.json_response(
+            {"error": "you can't buy your own listing", "code": "self_cross"}, status=400
+        )
+    try:
+        pay_with, quote = await brix_payment.detect_payment_path(
+            wallet, ask["price_brix"], currency=config.BRIX_CURRENCY_HEX, issuer=config.BRIX_ISSUER
+        )
+    except RuntimeError:
+        return web.json_response(
+            {"error": "pricing unavailable — try again", "code": "pricing_unavailable"}, status=503
+        )
+    try:
+        fill = await _closet_db(
+            closet_market_store.create_take_fill,
+            order_id,
+            wallet,
+            fee_bps=config.CLOSET_MARKET_FEE_BPS,
+            platform=_platform(user),
+        )
+    except closet_market_store.OrderError as exc:
+        return _order_error_response(exc)
+    payload = await xumm_ops.create_closet_buy_payload(
+        wallet,
+        market_ops.brix_amount_dict(ask["price_brix"]),
+        config.SIGNING_ACCOUNT,
+        closet_market_store.invoice_id(fill["id"]),
+        send_max_drops=market_ops.xrp_to_drops_str(quote) if pay_with == "XRP" else None,
+        return_url=xumm_ops.discord_return_url(None, None),
+        user_token=await _push_token(user),
+        platform=memos.platform_for_surface(_platform(user)),
+    )
+    if not payload:
+        await _closet_db(
+            closet_market_store.update_fill,
+            fill["id"],
+            state=closet_market_store.FAILED,
+            error="could not reach Xaman",
+        )
+        return web.json_response({"error": "could not reach Xaman"}, status=502)
+    await _closet_db(
+        closet_market_store.update_fill,
+        fill["id"],
+        payload_uuid=payload.get("uuid"),
+        xumm_url=payload.get("xumm_url"),
+        qr_url=payload.get("qr_url"),
+        push=payload.get("push"),
+    )
+    fill = await _closet_db(closet_market_store.get_fill, fill["id"])
+    view = _closet_fill_view(fill, wallet)
+    view["pay_with"] = pay_with
+    view["price_xrp_quote"] = quote if pay_with == "XRP" else None
+    return web.json_response(view)
+
+
 async def _settlement_sweep_loop() -> None:
     while True:
         if config.ECONOMY_ENABLED:
@@ -10010,6 +10207,10 @@ def create_app() -> web.Application:
     app.router.add_delete("/api/closet/ask/{order_id}", handle_closet_ask_cancel)
     app.router.add_post("/api/closet/bid/{order_id}/fill", handle_closet_bid_fill)
     app.router.add_get("/api/closet/fill/{fill_id}", handle_closet_fill_status)
+    app.router.add_post("/api/closet/bid", handle_closet_bid_create)
+    app.router.add_get("/api/closet/bid/{order_id}", handle_closet_bid_status)
+    app.router.add_delete("/api/closet/bid/{order_id}", handle_closet_bid_cancel)
+    app.router.add_post("/api/closet/ask/{order_id}/buy", handle_closet_ask_buy)
     app.router.add_post("/api/swap", handle_swap_start)
     app.router.add_get("/api/swap/{session_id}", handle_swap_status)
     app.router.add_post("/api/swap/{session_id}/regenerate", handle_swap_regenerate)
