@@ -13,7 +13,9 @@ ROOT = pathlib.Path(__file__).resolve().parents[1]
 
 
 def _load(name):
-    spec = importlib.util.spec_from_file_location(f"{name}_under_test", ROOT / "scripts" / f"{name}.py")
+    spec = importlib.util.spec_from_file_location(
+        f"{name}_under_test", ROOT / "scripts" / f"{name}.py"
+    )
     mod = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(mod)
     return mod
@@ -34,9 +36,21 @@ def _conn():
 
 
 def _settled_fill(c, *, forward=True):
-    bid = cms.create_pending_bid(c, owner=BUYER, slot="Head", value="Crown", price_brix="10", platform=None,
-                                 condition="C", fulfillment_enc="S", cancel_after=9, payload_uuid=None,
-                                 xumm_url=None, qr_url=None, push=None)
+    bid = cms.create_pending_bid(
+        c,
+        owner=BUYER,
+        slot="Head",
+        value="Crown",
+        price_brix="10",
+        platform=None,
+        condition="C",
+        fulfillment_enc="S",
+        cancel_after=9,
+        payload_uuid=None,
+        xumm_url=None,
+        qr_url=None,
+        push=None,
+    )
     cms.mark_bid_open(c, bid["id"], escrow_tx_hash="E", escrow_owner_seq=3)
     fill = cms.fill_bid(c, bid["id"], SELLER, fee_bps=0, platform=None)
     cms.update_fill(c, fill["id"], state=cms.FUNDED, escrow_finish_hash="FIN")
@@ -73,9 +87,21 @@ def test_stuck_fill_is_reported():
 
 def test_onchain_missing_escrow_and_short_balance(monkeypatch):
     c = _conn()
-    bid = cms.create_pending_bid(c, owner=BUYER, slot="Head", value="Tiara", price_brix="10", platform=None,
-                                 condition="C", fulfillment_enc="S", cancel_after=9, payload_uuid=None,
-                                 xumm_url=None, qr_url=None, push=None)
+    bid = cms.create_pending_bid(
+        c,
+        owner=BUYER,
+        slot="Head",
+        value="Tiara",
+        price_brix="10",
+        platform=None,
+        condition="C",
+        fulfillment_enc="S",
+        cancel_after=9,
+        payload_uuid=None,
+        xumm_url=None,
+        qr_url=None,
+        push=None,
+    )
     cms.mark_bid_open(c, bid["id"], escrow_tx_hash="E2", escrow_owner_seq=4)
     _settled_fill(c)
     fill_id = c.execute("SELECT id FROM closet_fills").fetchone()[0]
@@ -110,4 +136,61 @@ def test_setup_helpers(monkeypatch):
 
 
 def test_account_set_memo_action_exists():
-    assert memos.build_memo_models(memos.INITIATOR_BACKEND, memos.PLATFORM_BACKEND, memos.ACTION_ACCOUNT_SET)
+    assert memos.build_memo_models(
+        memos.INITIATOR_BACKEND, memos.PLATFORM_BACKEND, memos.ACTION_ACCOUNT_SET
+    )
+
+
+def test_unforwarded_brix_forward_landed_overshoot_pending():
+    """Forward paid, overshoot still pending → owed == overshoot."""
+    c = _conn()
+    fill = _settled_fill(c)
+    # Simulate: forward landed, overshoot pending
+    cms.update_fill(
+        c,
+        fill["id"],
+        state=cms.ASSET_MOVED,
+        forward_tx_hash="FWD",
+        overshoot_tx_hash=None,
+    )
+    # Direct DB update to set overshoot (not via update_fill, which doesn't allow it)
+    c.execute(
+        "UPDATE closet_fills SET overshoot_brix = ? WHERE id = ?",
+        ("3", fill["id"]),
+    )
+    c.commit()
+    owed = audit.unforwarded_brix(c)
+    assert owed == Decimal("3")
+
+
+def test_unforwarded_brix_nothing_paid_asset_moved():
+    """Nothing paid on asset_moved cross fill → owed == (price - fee) + overshoot."""
+    c = _conn()
+    fill = _settled_fill(c)
+    # Simulate: funds moved, but forward and overshoot not yet paid
+    cms.update_fill(
+        c,
+        fill["id"],
+        state=cms.ASSET_MOVED,
+        forward_tx_hash=None,
+        overshoot_tx_hash=None,
+    )
+    # Direct DB update to set overshoot
+    c.execute(
+        "UPDATE closet_fills SET overshoot_brix = ? WHERE id = ?",
+        ("3", fill["id"]),
+    )
+    c.commit()
+    # fill was created with price_brix="10", fee_bps=0 (so fee_brix="0")
+    owed = audit.unforwarded_brix(c)
+    assert owed == Decimal("13")  # (10 - 0) + 3
+
+
+def test_unforwarded_brix_refund_pending_with_refund_brix():
+    """Refund_pending with refund_brix set → owed == refund_brix."""
+    c = _conn()
+    fill = _settled_fill(c)
+    # Simulate: refund_pending with a specific refund_brix value
+    cms.update_fill(c, fill["id"], state=cms.REFUND_PENDING, refund_brix="2.5")
+    owed = audit.unforwarded_brix(c)
+    assert owed == Decimal("2.5")

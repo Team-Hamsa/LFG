@@ -1,7 +1,9 @@
 #!/usr/bin/env python3
 """Closet Market (#443) ledger prerequisites. Read-only unless an --apply-* flag is given.
 
-  --check                  issuer lsfAllowTrustLineLocking + the app wallet's BRIX line
+Outputs a status check (issuer lsfAllowTrustLineLocking + the app wallet's BRIX line) on every invocation.
+
+Flags:
   --apply-issuer-flag      AccountSet SetFlag=17 (asfAllowTrustLineLocking) on BRIX_ISSUER.
                            ONE-WAY IN PRACTICE: it cannot be cleared while any BRIX is escrowed.
   --apply-app-limit        TrustSet the app wallet's BRIX line limit to BRIX_TRUSTLINE_LIMIT

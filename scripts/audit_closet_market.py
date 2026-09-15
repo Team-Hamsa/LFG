@@ -102,7 +102,27 @@ def unforwarded_brix(conn: sqlite3.Connection) -> Decimal:
     ):
         if not (f["payment_tx_hash"] or f["escrow_finish_hash"]):
             continue
-        total += Decimal(f["refund_brix"] or cms.fill_in_amount(f))
+        # Compute remaining obligation per fill: only count what hasn't been paid out yet.
+        if f["state"] == cms.REFUNDED or f["state"] == cms.REFUND_PENDING:
+            # Refund-phase fills: owed = refund_brix if set, else full fill_in_amount
+            owed = Decimal(f["refund_brix"] or cms.fill_in_amount(f))
+        elif f["state"] == cms.INDETERMINATE and f.get("pending_phase") == "refund":
+            # Write-ahead intent in refund phase: same as refund_pending
+            owed = Decimal(f["refund_brix"] or cms.fill_in_amount(f))
+        else:
+            # Other states: forward and overshoot legs paid separately
+            forward_part = (
+                Decimal(0)
+                if f["forward_tx_hash"]
+                else Decimal(f["price_brix"]) - Decimal(f["fee_brix"])
+            )
+            overshoot_part = (
+                Decimal(0)
+                if f["overshoot_tx_hash"] or Decimal(f["overshoot_brix"]) <= 0
+                else Decimal(f["overshoot_brix"])
+            )
+            owed = forward_part + overshoot_part
+        total += owed
     return total
 
 
