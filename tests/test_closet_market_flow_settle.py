@@ -8,9 +8,11 @@ from lfg_core import closet_market_store as cms
 from lfg_core import closet_token as ct
 from lfg_core import economy_store as es
 from lfg_core import market_ops, memos
+from lfg_core.xrpl_ops import RIPPLE_EPOCH_OFFSET
 from tests.closet_market_helpers import (
     APP,
     BUYER,
+    CANCEL_AFTER,
     OTHER,
     SELLER,
     Fakes,
@@ -342,3 +344,118 @@ def test_finish_intent_recorded_before_crash_retries(tmp_path):
     d = deps(path, f, tmp_path)
     assert run(cmf.settle_fill(fl["id"], d)) == cms.MIRRORED
     assert len(f.finishes) == 1 and len(f.payments) == 1
+
+
+# --- review fix round 1: money-safety fixes ------------------------------------
+
+
+def test_finish_refused_inside_expiry_guard_window(tmp_path):
+    """(#443 review fix) A fill against a just-expired bid must not get stuck
+    forever: past CancelAfter the ledger rejects EscrowFinish outright (tec*),
+    so attempting it would just burn a doomed submit while the seller's unit
+    stays encumbered and the bid sits `matched` (invisible to the expiry
+    sweep). Route it straight to cancelling instead."""
+    path, f = _db(tmp_path), Fakes()
+    fl = _holder_fill(path, f)
+    now = RIPPLE_EPOCH_OFFSET + CANCEL_AFTER - 100  # inside the 300s guard window
+    d = deps(path, f, tmp_path, now=now)
+    assert run(cmf.settle_fill(fl["id"], d)) == cms.FAILED
+    assert f.finishes == []
+    c = conn(path)
+    bid = cms.get_order(c, fl["bid_order_id"])
+    assert bid["state"] == cms.CANCELLING and bid["cancel_reason"] == "expired"
+    assert cms.available_count(c, SELLER, "Head", "Crown") == 1  # never encumbered
+    c.close()
+
+
+def test_failed_finish_with_node_present_past_cancel_after_aborts(tmp_path):
+    """(#443 review fix) The pre-submit guard read passes (still inside the
+    window), but real wall-clock time advances past CancelAfter while the
+    EscrowFinish is in flight and comes back `failed` with the escrow node
+    still present — the same abort-to-cancelling applies, keyed on a fresh
+    read of `now`, not the stale one from the guard check."""
+    path, f = _db(tmp_path), Fakes(finish_outcomes=["failed"])
+    fl = _holder_fill(path, f)
+    before = RIPPLE_EPOCH_OFFSET + CANCEL_AFTER - (cmf.FINISH_GUARD_SECONDS + 1)
+    after = RIPPLE_EPOCH_OFFSET + CANCEL_AFTER + 1
+    clock = iter([before, after])
+    d = deps(path, f, tmp_path)
+    d.now_fn = lambda: next(clock)
+    assert run(cmf.settle_fill(fl["id"], d)) == cms.FAILED
+    assert len(f.finishes) == 1
+    c = conn(path)
+    bid = cms.get_order(c, fl["bid_order_id"])
+    assert bid["state"] == cms.CANCELLING and bid["cancel_reason"] == "expired"
+    c.close()
+
+
+def test_take_none_status_past_old_window_still_waits(tmp_path):
+    """(#443 review fix) A None payload status (XUMM API error / 429) must
+    never be treated like an explicit expiry, no matter how long it's been —
+    `signing_wait_seconds` plays no role in this branch any more."""
+    path, f = _db(tmp_path), Fakes()
+    _, fl = _take(path, f)
+    d = deps(path, f, tmp_path, now=fl["created_ts"] + 3700)  # past the old window
+    assert run(cmf.settle_fill(fl["id"], d)) == cms.FUNDS_PENDING
+
+
+def test_take_signed_tx_not_found_for_a_long_time_still_waits(tmp_path):
+    """(#443 review fix) A signed tx that the lookup can't find yet (no
+    LastLedgerSequence to judge absence against) must keep waiting, however
+    long it's been — never declared "never validated" on a timer."""
+    path, f = _db(tmp_path), Fakes()
+    _, fl = _take(path, f)
+    f.payload_status["PU"] = {"signed": True, "account": BUYER, "txid": "PAYTX"}
+    # no f.txs["PAYTX"] entry -> get_tx_fn's default {"validated": False}, no LastLedgerSequence
+    d = deps(path, f, tmp_path, now=fl["created_ts"] + 3700)
+    assert run(cmf.settle_fill(fl["id"], d)) == cms.FUNDS_PENDING
+
+
+def test_take_unvalidated_past_last_ledger_sequence_fails(tmp_path):
+    """(#443 review fix) Once found but unvalidated, failure is decided by the
+    validated ledger passing the tx's OWN LastLedgerSequence — not a wall-clock
+    timer."""
+    path, f = _db(tmp_path), Fakes()
+    _, fl = _take(path, f)
+    f.payload_status["PU"] = {"signed": True, "account": BUYER, "txid": "PAYTX"}
+    f.txs["PAYTX"] = {"validated": False, "tx_json": {"LastLedgerSequence": 50}}
+    f.ledger_index = 100  # already past the tx's own deadline
+    d = deps(path, f, tmp_path, now=fl["created_ts"] + 10)
+    assert run(cmf.settle_fill(fl["id"], d)) == cms.FAILED
+
+
+def test_phase_outcome_uses_prescan_index_not_a_later_one(tmp_path):
+    """(#443 review fix) Reading the ledger index AFTER the memo scan let a tx
+    that validates in between look "absent" and get resubmitted (double pay).
+    The fix reads the index BEFORE scanning and never consults a later
+    reading, even when one is available."""
+    path, f = _db(tmp_path), Fakes()
+    fl = _holder_fill(path, f)
+    c = conn(path)
+    cms.update_fill(c, fl["id"], state=cms.INDETERMINATE, pending_phase="finish", pending_lls=140)
+    c.close()
+    readings = iter([100, 200])  # only the first (pre-scan) value may ever be used
+    d = deps(path, f, tmp_path)
+
+    async def index_fn():
+        return next(readings)
+
+    d.ledger_index_fn = index_fn
+    assert run(cmf.settle_fill(fl["id"], d)) == cms.INDETERMINATE
+    got = fill(path, fl["id"])
+    assert got["pending_phase"] == "finish" and got["escrow_finish_hash"] is None
+    assert f.finishes == []  # never resubmitted
+
+
+def test_intent_not_yet_past_lls_waits_without_resubmitting(tmp_path):
+    """An intent whose lls has not passed yet must simply wait — no resubmit,
+    no state change."""
+    path, f = _db(tmp_path), Fakes()
+    fl = _holder_fill(path, f)
+    c = conn(path)
+    cms.update_fill(c, fl["id"], pending_phase="finish", pending_lls=140)
+    c.close()
+    f.ledger_index = 100  # has not passed the recorded lls yet
+    d = deps(path, f, tmp_path)
+    assert run(cmf.settle_fill(fl["id"], d)) == cms.FUNDS_PENDING
+    assert f.finishes == []

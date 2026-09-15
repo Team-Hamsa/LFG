@@ -1851,25 +1851,42 @@ async def find_app_txs_by_memo(tag: str, min_ledger: int | None = None) -> list[
     """Every VALIDATED transaction SENT by the app wallet carrying `tag`.
     Inbound transactions are ignored: memos are user-writable, so a stranger
     could send the app wallet a tx with a guessed tag. Raises on transport
-    failure (never report a failed scan as "nothing found")."""
+    failure (never report a failed scan as "nothing found").
+
+    Also raises if the queried server's own reported `ledger_index_max`
+    (across every page) never reaches `min_ledger`: a lagging or
+    load-balanced server can validate a tx between `_phase_outcome`'s two
+    reads and still answer this scan from a stale view that predates
+    `min_ledger`, which would otherwise report a false "absent" and
+    resubmit (double-send) a tx that already landed."""
     account = config.SIGNING_ACCOUNT
     client = JsonRpcClient(config.JSON_RPC_URL)
     scan_from = -1 if min_ledger is None else max(1, min_ledger - _CLAIM_SCAN_LEDGER_SLACK)
     found: list[dict[str, Any]] = []
     marker: Any = None
+    scanned_to: int | None = None
     while True:
         request = AccountTx(account=account, limit=200, marker=marker, ledger_index_min=scan_from)
         response = await asyncio.to_thread(client.request, request)
         result = response.result
         if not response.is_successful() or not isinstance(result, dict):
             raise RuntimeError(f"account_tx failed while scanning for {tag}: {result!r}")
+        reported_max = result.get("ledger_index_max")
+        if isinstance(reported_max, int):
+            scanned_to = reported_max if scanned_to is None else max(scanned_to, reported_max)
         for entry in result.get("transactions", []):
             tx = entry.get("tx") or entry.get("tx_json") or {}
             if entry.get("validated") and tx.get("Account") == account and _carries_memo(tx, tag):
                 found.append(entry)
         marker = result.get("marker")
         if not marker:
-            return found
+            break
+    if min_ledger is not None and scanned_to is not None and scanned_to < min_ledger:
+        raise RuntimeError(
+            f"account_tx scan for {tag} only reached ledger {scanned_to}, short of the "
+            f"deadline {min_ledger} — the queried server is lagging"
+        )
+    return found
 
 
 async def sponsored_burn_identity_expired(signed_tx_blob: str) -> int | None:

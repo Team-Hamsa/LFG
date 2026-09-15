@@ -173,12 +173,24 @@ def test_find_app_txs_by_memo_pages_and_ignores_inbound(monkeypatch):
     }
     unvalidated = {"validated": False, "hash": "U", "tx_json": {"Account": app, "Memos": memo}}
     _Client.responses = [
-        _Resp({"transactions": [inbound, unvalidated], "marker": "m"}),
-        _Resp({"transactions": [mine]}),
+        _Resp({"transactions": [inbound, unvalidated], "marker": "m", "ledger_index_max": 550}),
+        _Resp({"transactions": [mine], "ledger_index_max": 700}),
     ]
     found = _run(xrpl_ops.find_app_txs_by_memo(tag, 500))
     assert [xrpl_ops.tx_entry_hash(e) for e in found] == ["OK"]
     assert xrpl_ops.tx_entry_result(found[0]) == "tesSUCCESS"
+
+
+def test_find_app_txs_by_memo_raises_when_scan_lags_deadline(monkeypatch):
+    """(#443 review fix) If the server answering account_tx never reported a
+    ledger_index_max reaching min_ledger, its view of "nothing found" is too
+    stale to trust — raise so the caller treats it as "wait", not "absent"
+    (which would resubmit a tx that may have already landed)."""
+    monkeypatch.setattr(xrpl_ops, "JsonRpcClient", _Client)
+    tag = "lfg:closet_forward:F1"
+    _Client.responses = [_Resp({"transactions": [], "ledger_index_max": 400})]
+    with pytest.raises(RuntimeError):
+        _run(xrpl_ops.find_app_txs_by_memo(tag, 500))
 
 
 def test_closet_payload_builders(monkeypatch):
