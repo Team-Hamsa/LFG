@@ -628,6 +628,70 @@ def test_verify_endpoint_chain_accepts_the_real_mainnet_identity(conn, monkeypat
     assert asyncio.run(brix_drip.verify_endpoint_chain(conn, "mainnet")) is None
 
 
+def _per_url_ledger_transport(monkeypatch, hashes):
+    """Stub the failover client's per-URL HTTP exchange: `hashes` maps URL ->
+    ledger-32570 hash, or an exception instance the endpoint raises."""
+    from xrpl.models.response import Response, ResponseStatus
+
+    from lfg_core import xrpl_rpc
+
+    xrpl_rpc.reset_cooldowns()
+    calls = []
+
+    async def post(url, payload, timeout):
+        calls.append(url)
+        outcome = hashes[url]
+        if isinstance(outcome, BaseException):
+            raise outcome
+        index = payload["params"][0]["ledger_index"]
+        if index != "validated":
+            return Response(
+                status=ResponseStatus.SUCCESS,
+                result={"ledger_index": index, "ledger_hash": outcome},
+            )
+        return Response(status=ResponseStatus.SUCCESS, result={"ledger_index": 99})
+
+    monkeypatch.setattr(xrpl_rpc, "_post_json_rpc", post)
+    return calls
+
+
+def test_verify_endpoint_chain_checks_every_failover_endpoint(conn, monkeypatch):
+    """With JSON-RPC failover a read may land on ANY configured endpoint, so a
+    wrong-chain fallback must refuse even when the primary is on-chain."""
+    import httpx
+
+    from lfg_core import config
+
+    good, bad = "https://good.example/", "https://other-chain.example/"
+    monkeypatch.setattr(config, "JSON_RPC_URLS", (good, bad))
+    _per_url_ledger_transport(
+        monkeypatch, {good: brix_drip.MAINNET_GENESIS_HASH, bad: "OTHER_CHAIN_HASH"}
+    )
+    error = asyncio.run(brix_drip.verify_endpoint_chain(conn, "mainnet"))
+    assert error is not None and bad in error and "not on the mainnet chain" in error
+
+    # an unreachable fallback is skipped (warned) as long as one endpoint verifies
+    _per_url_ledger_transport(
+        monkeypatch, {good: brix_drip.MAINNET_GENESIS_HASH, bad: httpx.ConnectError("down")}
+    )
+    assert asyncio.run(brix_drip.verify_endpoint_chain(conn, "mainnet")) is None
+
+
+def test_verify_endpoint_chain_raises_when_no_endpoint_answers(conn, monkeypatch):
+    import httpx
+
+    from lfg_core import config
+
+    a, b = "https://a.example/", "https://b.example/"
+    monkeypatch.setattr(config, "JSON_RPC_URLS", (a, b))
+    calls = _per_url_ledger_transport(
+        monkeypatch, {a: httpx.ConnectError("a down"), b: httpx.ConnectError("b down")}
+    )
+    with pytest.raises(httpx.ConnectError, match="b down"):
+        asyncio.run(brix_drip.verify_endpoint_chain(conn, "mainnet"))
+    assert calls == [a, b]
+
+
 def test_verify_endpoint_chain_ignores_hash_case(conn, monkeypatch):
     """Ledger hashes are hex; a case-only difference between the server's
     rendering and the stored value must not reject a correct endpoint."""

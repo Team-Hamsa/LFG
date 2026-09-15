@@ -506,7 +506,7 @@ def test_sponsored_mint_prepare_signs_once_with_floor_and_claim_correlation(monk
     monkeypatch.setattr(xrpl_ops, "_current_validated_ledger_index", floor)
     monkeypatch.setattr(xrpl_ops, "autofill_and_sign", sign)
     monkeypatch.setattr(xrpl_ops.Wallet, "from_seed", lambda _seed: SimpleNamespace())
-    monkeypatch.setattr(xrpl_ops, "JsonRpcClient", lambda _url: SimpleNamespace())
+    monkeypatch.setattr(xrpl_ops, "rpc_client", lambda: SimpleNamespace())
 
     result = _run(
         xrpl_ops.prepare_sponsored_mint(
@@ -541,7 +541,7 @@ def test_sponsored_mint_submit_forwards_only_persisted_blob_and_classifies_exact
 
     monkeypatch.setattr(xrpl_ops.Transaction, "from_blob", lambda _blob: _SignedMint())
     monkeypatch.setattr(xrpl_ops, "submit_and_wait", submit)
-    monkeypatch.setattr(xrpl_ops, "JsonRpcClient", lambda _url: SimpleNamespace())
+    monkeypatch.setattr(xrpl_ops, "rpc_client", lambda: SimpleNamespace())
 
     result = _run(
         xrpl_ops.submit_sponsored_mint(
@@ -607,7 +607,7 @@ def test_expired_unvalidated_prepared_mint_is_definitively_failed_without_forwar
     monkeypatch.setattr(xrpl_ops, "_current_validated_ledger_index", current_ledger)
     monkeypatch.setattr(xrpl_ops, "_confirm_by_hash", absent)
     monkeypatch.setattr(xrpl_ops, "submit_and_wait", forbidden)
-    monkeypatch.setattr(xrpl_ops, "JsonRpcClient", lambda _url: SimpleNamespace())
+    monkeypatch.setattr(xrpl_ops, "rpc_client", lambda: SimpleNamespace())
 
     result = _run(
         xrpl_ops.submit_sponsored_mint(
@@ -719,7 +719,7 @@ def test_sponsored_mint_reconciliation_never_submits(monkeypatch):
                 }
             )
 
-    monkeypatch.setattr(xrpl_ops, "JsonRpcClient", lambda _url: Client())
+    monkeypatch.setattr(xrpl_ops, "rpc_client", lambda: Client())
 
     def forbidden(*_args, **_kwargs):
         raise AssertionError("reconciliation must never submit")
@@ -1245,7 +1245,7 @@ def test_concurrent_mint_offer_and_burn_share_transaction_account_coordinator(mo
     monkeypatch.setattr(config, "TOKEN_ISSUER_ADDRESS", token_issuer)
     monkeypatch.setattr(config, "XRPL_NETWORK", "testnet")
     monkeypatch.setattr(xrpl_ops.Wallet, "from_seed", lambda _seed: fake_wallet)
-    monkeypatch.setattr(xrpl_ops, "JsonRpcClient", lambda _url: object())
+    monkeypatch.setattr(xrpl_ops, "rpc_client", lambda: object())
     monkeypatch.setattr(xrpl_ops, "_current_validated_ledger_index", ledger_index)
     monkeypatch.setattr(xrpl_ops, "autofill_and_sign", fake_sign)
     monkeypatch.setattr(xrpl_ops, "submit_and_wait", fake_submit)

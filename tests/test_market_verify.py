@@ -66,7 +66,7 @@ class TestGetNftSellOffers:
                 {"nft_offer_index": OFFER_INDEX, "amount": "1000000", "owner": "rSeller"},
             ]
         }
-        monkeypatch.setattr(xrpl_ops, "JsonRpcClient", _fake_json_rpc_client(result))
+        monkeypatch.setattr(xrpl_ops, "rpc_client", _fake_json_rpc_client(result))
         offers = _run(xrpl_ops.get_nft_sell_offers(NFT_ID))
         assert offers[0]["offer_index"] == OFFER_INDEX
 
@@ -76,7 +76,7 @@ class TestGetNftSellOffers:
                 {"index": OFFER_INDEX, "amount": "2000000", "owner": "rSeller"},
             ]
         }
-        monkeypatch.setattr(xrpl_ops, "JsonRpcClient", _fake_json_rpc_client(result))
+        monkeypatch.setattr(xrpl_ops, "rpc_client", _fake_json_rpc_client(result))
         offers = _run(xrpl_ops.get_nft_sell_offers(NFT_ID))
         assert offers[0]["offer_index"] == OFFER_INDEX
 
@@ -90,7 +90,7 @@ class TestGetNftSellOffers:
                 {"index": "OTHER", "amount": "2000000"},
             ]
         }
-        monkeypatch.setattr(xrpl_ops, "JsonRpcClient", _fake_json_rpc_client(result))
+        monkeypatch.setattr(xrpl_ops, "rpc_client", _fake_json_rpc_client(result))
         offers = _run(xrpl_ops.get_nft_sell_offers(NFT_ID))
         assert offers[0]["expiration"] == 800_000_000
         assert offers[1]["expiration"] is None
@@ -101,19 +101,19 @@ class TestGetNftSellOffers:
         result = json.loads(
             json.dumps({"offers": [{"nft_offer_index": OFFER_INDEX, "amount": "1000000"}]})
         )
-        monkeypatch.setattr(xrpl_ops, "JsonRpcClient", _fake_json_rpc_client(result))
+        monkeypatch.setattr(xrpl_ops, "rpc_client", _fake_json_rpc_client(result))
         offers = _run(xrpl_ops.get_nft_sell_offers(NFT_ID))
         assert offers[0]["offer_index"] == OFFER_INDEX
 
     def test_returns_empty_list_on_rpc_exception(self, monkeypatch) -> None:
         monkeypatch.setattr(
-            xrpl_ops, "JsonRpcClient", _fake_json_rpc_client(exc=RuntimeError("rpc down"))
+            xrpl_ops, "rpc_client", _fake_json_rpc_client(exc=RuntimeError("rpc down"))
         )
         offers = _run(xrpl_ops.get_nft_sell_offers(NFT_ID))
         assert offers == []
 
     def test_returns_empty_list_when_no_offers_key(self, monkeypatch) -> None:
-        monkeypatch.setattr(xrpl_ops, "JsonRpcClient", _fake_json_rpc_client({}))
+        monkeypatch.setattr(xrpl_ops, "rpc_client", _fake_json_rpc_client({}))
         offers = _run(xrpl_ops.get_nft_sell_offers(NFT_ID))
         assert offers == []
 
@@ -123,32 +123,32 @@ class TestGetNftSellOffers:
         swallowed failure would let the stale-close pass close a real live
         listing."""
         monkeypatch.setattr(
-            xrpl_ops, "JsonRpcClient", _fake_json_rpc_client(exc=RuntimeError("rpc down"))
+            xrpl_ops, "rpc_client", _fake_json_rpc_client(exc=RuntimeError("rpc down"))
         )
         with pytest.raises(RuntimeError):
             _run(xrpl_ops.get_nft_sell_offers(NFT_ID, raise_on_error=True))
 
     def test_strict_missing_offers_key_raises(self, monkeypatch) -> None:
         """Strict recovery cannot treat a malformed result as authoritative absence."""
-        monkeypatch.setattr(xrpl_ops, "JsonRpcClient", _fake_json_rpc_client({}))
+        monkeypatch.setattr(xrpl_ops, "rpc_client", _fake_json_rpc_client({}))
         with pytest.raises(RuntimeError, match="malformed nft_sell_offers response"):
             _run(xrpl_ops.get_nft_sell_offers(NFT_ID, raise_on_error=True))
 
     def test_strict_non_list_offers_raises(self, monkeypatch) -> None:
         result = {"offers": {"nft_offer_index": OFFER_INDEX}}
-        monkeypatch.setattr(xrpl_ops, "JsonRpcClient", _fake_json_rpc_client(result))
+        monkeypatch.setattr(xrpl_ops, "rpc_client", _fake_json_rpc_client(result))
         with pytest.raises(RuntimeError, match="malformed nft_sell_offers response"):
             _run(xrpl_ops.get_nft_sell_offers(NFT_ID, raise_on_error=True))
 
     def test_strict_malformed_offer_entry_raises(self, monkeypatch) -> None:
         result = {"offers": ["not-an-offer"]}
-        monkeypatch.setattr(xrpl_ops, "JsonRpcClient", _fake_json_rpc_client(result))
+        monkeypatch.setattr(xrpl_ops, "rpc_client", _fake_json_rpc_client(result))
         with pytest.raises(RuntimeError, match="malformed nft_sell_offers response"):
             _run(xrpl_ops.get_nft_sell_offers(NFT_ID, raise_on_error=True))
 
     def test_strict_offer_missing_authoritative_fields_raises(self, monkeypatch) -> None:
         result = {"offers": [{"nft_offer_index": OFFER_INDEX}]}
-        monkeypatch.setattr(xrpl_ops, "JsonRpcClient", _fake_json_rpc_client(result))
+        monkeypatch.setattr(xrpl_ops, "rpc_client", _fake_json_rpc_client(result))
         with pytest.raises(RuntimeError, match="malformed nft_sell_offers response"):
             _run(xrpl_ops.get_nft_sell_offers(NFT_ID, raise_on_error=True))
 
@@ -173,7 +173,7 @@ class TestGetNftSellOffers:
             "owner": "rOWNER",
         }
         offer[field] = value
-        monkeypatch.setattr(xrpl_ops, "JsonRpcClient", _fake_json_rpc_client({"offers": [offer]}))
+        monkeypatch.setattr(xrpl_ops, "rpc_client", _fake_json_rpc_client({"offers": [offer]}))
 
         with pytest.raises(RuntimeError, match="malformed nft_sell_offers response"):
             _run(xrpl_ops.get_nft_sell_offers(NFT_ID, raise_on_error=True))
@@ -187,21 +187,21 @@ class TestGetNftSellOffers:
             "flags": xrpl_ops.LSF_SELL_NFTOKEN,
             "owner": "rOWNER",
         }
-        monkeypatch.setattr(xrpl_ops, "JsonRpcClient", _fake_json_rpc_client({"offers": [offer]}))
+        monkeypatch.setattr(xrpl_ops, "rpc_client", _fake_json_rpc_client({"offers": [offer]}))
 
         assert (
             _run(xrpl_ops.get_nft_sell_offers(NFT_ID, raise_on_error=True))[0]["amount"] == amount
         )
 
     def test_strict_empty_offers_list_is_authoritative(self, monkeypatch) -> None:
-        monkeypatch.setattr(xrpl_ops, "JsonRpcClient", _fake_json_rpc_client({"offers": []}))
+        monkeypatch.setattr(xrpl_ops, "rpc_client", _fake_json_rpc_client({"offers": []}))
         assert _run(xrpl_ops.get_nft_sell_offers(NFT_ID, raise_on_error=True)) == []
 
     def test_strict_object_not_found_result_returns_empty(self, monkeypatch) -> None:
         """objectNotFound is the ONLY unsuccessful RESULT that legitimately
         means "no offers" — in strict mode it must still return [], not raise."""
         result = {"error": "objectNotFound", "status": "error"}
-        monkeypatch.setattr(xrpl_ops, "JsonRpcClient", _fake_json_rpc_client(result))
+        monkeypatch.setattr(xrpl_ops, "rpc_client", _fake_json_rpc_client(result))
         offers = _run(xrpl_ops.get_nft_sell_offers(NFT_ID, raise_on_error=True))
         assert offers == []
 
@@ -211,14 +211,14 @@ class TestGetNftSellOffers:
         buy-verify paths would misread as "offer absent" and close a live
         listing)."""
         result = {"error": "tooBusy", "status": "error"}
-        monkeypatch.setattr(xrpl_ops, "JsonRpcClient", _fake_json_rpc_client(result))
+        monkeypatch.setattr(xrpl_ops, "rpc_client", _fake_json_rpc_client(result))
         with pytest.raises(RuntimeError):
             _run(xrpl_ops.get_nft_sell_offers(NFT_ID, raise_on_error=True))
 
     def test_non_strict_soft_error_result_returns_empty(self, monkeypatch) -> None:
         """Non-strict callers are unchanged: any unsuccessful result -> []."""
         result = {"error": "tooBusy", "status": "error"}
-        monkeypatch.setattr(xrpl_ops, "JsonRpcClient", _fake_json_rpc_client(result))
+        monkeypatch.setattr(xrpl_ops, "rpc_client", _fake_json_rpc_client(result))
         offers = _run(xrpl_ops.get_nft_sell_offers(NFT_ID))
         assert offers == []
 
@@ -238,7 +238,7 @@ class TestGetTx:
             "meta": {"TransactionResult": "tesSUCCESS", "AffectedNodes": []},
             "hash": "ABCDEF",
         }
-        monkeypatch.setattr(xrpl_ops, "JsonRpcClient", _fake_json_rpc_client(result))
+        monkeypatch.setattr(xrpl_ops, "rpc_client", _fake_json_rpc_client(result))
         tx = _run(xrpl_ops.get_tx("ABCDEF"))
         assert tx == result
 
@@ -247,13 +247,13 @@ class TestGetTx:
         # caller's `tx.get("validated")` check must treat this the same as
         # "not yet validated" without this function raising or special-casing it.
         result = {"error": "txnNotFound", "error_code": 29, "status": "error"}
-        monkeypatch.setattr(xrpl_ops, "JsonRpcClient", _fake_json_rpc_client(result))
+        monkeypatch.setattr(xrpl_ops, "rpc_client", _fake_json_rpc_client(result))
         tx = _run(xrpl_ops.get_tx("UNKNOWNHASH"))
         assert tx.get("validated") is None
 
     def test_raises_on_rpc_exception(self, monkeypatch) -> None:
         monkeypatch.setattr(
-            xrpl_ops, "JsonRpcClient", _fake_json_rpc_client(exc=RuntimeError("rpc down"))
+            xrpl_ops, "rpc_client", _fake_json_rpc_client(exc=RuntimeError("rpc down"))
         )
         with pytest.raises(RuntimeError):
             _run(xrpl_ops.get_tx("ABCDEF"))
@@ -375,7 +375,7 @@ class TestVerifySellOffer:
                 {"nft_offer_index": OFFER_INDEX, "amount": "5000000", "owner": "rSeller"},
             ]
         }
-        monkeypatch.setattr(xrpl_ops, "JsonRpcClient", _fake_json_rpc_client(result))
+        monkeypatch.setattr(xrpl_ops, "rpc_client", _fake_json_rpc_client(result))
         assert _run(market_ops.verify_sell_offer(NFT_ID, OFFER_INDEX, 5_000_000)) is True
 
     def test_default_fetch_offers_path_nonstrict_rpc_failure_is_false(self, monkeypatch) -> None:
@@ -383,7 +383,7 @@ class TestVerifySellOffer:
         get_nft_sell_offers (raise_on_error=False is threaded from
         strict=False), so verify fails closed to False."""
         monkeypatch.setattr(
-            xrpl_ops, "JsonRpcClient", _fake_json_rpc_client(exc=RuntimeError("rpc down"))
+            xrpl_ops, "rpc_client", _fake_json_rpc_client(exc=RuntimeError("rpc down"))
         )
         assert _run(market_ops.verify_sell_offer(NFT_ID, OFFER_INDEX, 5_000_000)) is False
 
@@ -392,7 +392,7 @@ class TestVerifySellOffer:
         raise_on_error=True into get_nft_sell_offers so the RPC failure
         propagates instead of reading as 'offer absent'."""
         monkeypatch.setattr(
-            xrpl_ops, "JsonRpcClient", _fake_json_rpc_client(exc=RuntimeError("rpc down"))
+            xrpl_ops, "rpc_client", _fake_json_rpc_client(exc=RuntimeError("rpc down"))
         )
         with pytest.raises(RuntimeError):
             _run(market_ops.verify_sell_offer(NFT_ID, OFFER_INDEX, 5_000_000, strict=True))

@@ -10,7 +10,6 @@ from typing import Any
 import discord
 from discord import Embed, TextStyle, app_commands
 from discord.ui import Button, Modal, TextInput, View
-from xrpl.clients import JsonRpcClient
 from xrpl.models.transactions import NFTokenBurn
 from xrpl.transaction import submit_and_wait
 from xrpl.wallet import Wallet
@@ -18,16 +17,17 @@ from xrpl.wallet import Wallet
 from lfg_core import config as core_config
 from lfg_core import rarity as _rarity
 from lfg_core import xrpl_ops
-from lfg_core.config import JSON_RPC_URL, SOURCE_TAG
+from lfg_core.config import SOURCE_TAG
 from surfaces._client.errors import ServiceError
 from surfaces.discord_bot import config
 from surfaces.discord_bot.bot import svc, tree
 
 SEED = config.SEED
-# JSON_RPC_URL is the network-aware endpoint from lfg_core.config (resolves via
-# XRPL_NETWORK / XRPL_JSON_RPC_URL) — same source lfg_core/xrpl_ops uses, so
-# admin burns hit mainnet on a mainnet deploy. (Was hardcoded to testnet;
-# Greptile P1 on #79.)
+# The JSON-RPC client comes from xrpl_ops.rpc_client(): the network-aware
+# endpoint list from lfg_core.config (XRPL_NETWORK / XRPL_JSON_RPC_URL +
+# XRPL_JSON_RPC_FALLBACK_URLS) with failover — same source every backend tx
+# uses, so admin burns hit mainnet on a mainnet deploy. (Was hardcoded to
+# testnet; Greptile P1 on #79.)
 ADMIN_LOG_CHANNEL_ID = config.ADMIN_LOG_CHANNEL_ID
 
 
@@ -51,7 +51,7 @@ async def burn_nft(nft_id: str) -> bool:
         logging.info(f"Attempting to burn NFT: {nft_id}")
 
         wallet = Wallet.from_seed(SEED)
-        client = JsonRpcClient(JSON_RPC_URL)
+        client = xrpl_ops.rpc_client()
 
         # Create NFTokenBurn transaction. Account is SIGNING_ACCOUNT, not the
         # seed-derived address — on mainnet SEED holds the issuer's regular-key

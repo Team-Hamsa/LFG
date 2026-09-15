@@ -93,7 +93,7 @@ class _Resp:
 
 def _stub_client(monkeypatch, response=None, raises=None):
     class _Client:
-        def __init__(self, _url):
+        def __init__(self):
             pass
 
         async def request(self, _req):
@@ -101,7 +101,7 @@ def _stub_client(monkeypatch, response=None, raises=None):
                 raise raises
             return response
 
-    monkeypatch.setattr(xrpl_ops, "AsyncJsonRpcClient", _Client)
+    monkeypatch.setattr(xrpl_ops, "async_rpc_client", _Client)
 
 
 def test_preflight_absent_account_is_definitively_unfunded(monkeypatch):
