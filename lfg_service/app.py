@@ -1467,6 +1467,152 @@ async def handle_sponsored_mint_status(request):
     return web.json_response(status)
 
 
+# --- Fee cover campaign admin (Discord /admin only) ------------------------
+
+
+async def _admin_json(request: Any) -> dict[str, Any]:
+    try:
+        body = await request.json()
+    except (json.JSONDecodeError, ValueError):
+        return {}
+    return body if isinstance(body, dict) else {}
+
+
+def _xrp_field_drops(body: dict[str, Any], name: str, *, allow_zero: bool) -> int:
+    try:
+        value = Decimal(str(body.get(name)))
+    except (InvalidOperation, ValueError):
+        raise ValueError(f"{name} must be a number") from None
+    if not value.is_finite() or value < 0 or (value == 0 and not allow_zero):
+        raise ValueError(f"{name} must be {'zero or more' if allow_zero else 'greater than zero'}")
+    drops = value * 1_000_000
+    if drops != drops.to_integral_value():
+        raise ValueError(f"{name} has more than 6 decimal places")
+    return int(drops)
+
+
+def _fee_cover_knobs(body: dict[str, Any]) -> fee_cover_store.Knobs:
+    try:
+        pct = Decimal(str(body.get("coverage_pct")))
+    except (InvalidOperation, ValueError):
+        raise ValueError("coverage_pct must be a number") from None
+    if not pct.is_finite():
+        raise ValueError("coverage_pct must be a number")
+    bps = pct * 100
+    if bps != bps.to_integral_value() or not 0 <= bps <= fee_cover_store.BPS:
+        raise ValueError("coverage_pct must be between 0 and 100 with at most 2 decimals")
+    knobs = fee_cover_store.Knobs(
+        coverage_bps=int(bps),
+        budget_drops=_xrp_field_drops(body, "budget_xrp", allow_zero=False),
+        wallet_cap_drops=_xrp_field_drops(body, "wallet_cap_xrp", allow_zero=False),
+        min_bid_drops=_xrp_field_drops(body, "min_bid_xrp", allow_zero=True),
+    )
+    knobs.validate()
+    return knobs
+
+
+def _fee_cover_duration(body: dict[str, Any]) -> int | None:
+    raw = body.get("duration_hours")
+    if raw is None or raw == "":
+        return None
+    try:
+        hours = Decimal(str(raw))
+    except (InvalidOperation, ValueError):
+        raise ValueError("duration_hours must be a number") from None
+    if not hours.is_finite() or hours <= 0:
+        raise ValueError("duration_hours must be greater than zero")
+    return int(hours * 3600)
+
+
+def _bad_request(message: str) -> web.Response:
+    return web.json_response({"error": message, "code": "bad_request"}, status=400)
+
+
+def _fee_cover_admin_run(action: Callable[[sqlite3.Connection], str | None]) -> dict[str, Any]:
+    conn = fee_cover_store.connect(_fee_cover_db())
+    try:
+        result = action(conn)
+        status = fee_cover_store.status_summary(conn, config.XRPL_NETWORK)
+    finally:
+        conn.close()
+    if result is not None:
+        status["result"] = result
+    return status
+
+
+async def _fee_cover_admin_response(
+    action: Callable[[sqlite3.Connection], str | None],
+) -> web.Response:
+    status = await asyncio.get_event_loop().run_in_executor(None, _fee_cover_admin_run, action)
+    status["issuer_balance_drops"] = await xrpl_ops.get_xrp_balance_drops(config.SIGNING_ACCOUNT)
+    return web.json_response(status)
+
+
+@require_service_token
+async def handle_fee_cover_status(request):
+    denied = _require_discord_surface(request)
+    if denied is not None:
+        return denied
+    return await _fee_cover_admin_response(lambda conn: None)
+
+
+@require_service_token
+async def handle_fee_cover_start(request):
+    denied = _require_discord_surface(request)
+    if denied is not None:
+        return denied
+    body = await _admin_json(request)
+    actor = body.get("actor")
+    if not isinstance(actor, str) or not actor.strip():
+        return _bad_request("actor is required")
+    try:
+        knobs = _fee_cover_knobs(body)
+        duration = _fee_cover_duration(body)
+    except ValueError as e:
+        return _bad_request(str(e))
+    return await _fee_cover_admin_response(
+        lambda conn: fee_cover_store.start_campaign(
+            conn, network=config.XRPL_NETWORK, actor=actor, knobs=knobs, duration_seconds=duration
+        )[1]
+    )
+
+
+@require_service_token
+async def handle_fee_cover_update(request):
+    denied = _require_discord_surface(request)
+    if denied is not None:
+        return denied
+    body = await _admin_json(request)
+    actor = body.get("actor")
+    if not isinstance(actor, str) or not actor.strip():
+        return _bad_request("actor is required")
+    try:
+        knobs = _fee_cover_knobs(body)
+    except ValueError as e:
+        return _bad_request(str(e))
+    return await _fee_cover_admin_response(
+        lambda conn: fee_cover_store.update_campaign(
+            conn, network=config.XRPL_NETWORK, actor=actor, knobs=knobs
+        )[1]
+    )
+
+
+@require_service_token
+async def handle_fee_cover_stop(request):
+    denied = _require_discord_surface(request)
+    if denied is not None:
+        return denied
+    body = await _admin_json(request)
+    actor = body.get("actor")
+    if not isinstance(actor, str) or not actor.strip():
+        return _bad_request("actor is required")
+    return await _fee_cover_admin_response(
+        lambda conn: fee_cover_store.stop_campaign(conn, network=config.XRPL_NETWORK, actor=actor)[
+            1
+        ]
+    )
+
+
 async def handle_telegram_auth(request):
     """Validate a Telegram Mini App `initData` payload and mint a
     platform="telegram" session token (#89).
@@ -9896,6 +10042,10 @@ def create_app() -> web.Application:
     app.router.add_post("/api/admin/sponsored-mint/start", handle_sponsored_mint_start)
     app.router.add_post("/api/admin/sponsored-mint/stop", handle_sponsored_mint_stop)
     app.router.add_get("/api/admin/sponsored-mint/status", handle_sponsored_mint_status)
+    app.router.add_get("/api/admin/fee-cover/status", handle_fee_cover_status)
+    app.router.add_post("/api/admin/fee-cover/start", handle_fee_cover_start)
+    app.router.add_post("/api/admin/fee-cover/update", handle_fee_cover_update)
+    app.router.add_post("/api/admin/fee-cover/stop", handle_fee_cover_stop)
     app.router.add_get("/events", handle_events)
     app.router.add_get("/events/me", handle_events_me)
     app.router.add_get("/__dev/reload", handle_dev_reload)
