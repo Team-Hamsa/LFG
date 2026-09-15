@@ -70,3 +70,12 @@ def test_app_js_wires_closet_market():
 
 def test_badge_is_styled():
     assert ".market-card-bid" in _stylesheet()
+
+
+def test_bid_render_only_celebrates_a_filled_bid():
+    """(#443 final review I1) `matched` renders as pending now; the done branch
+    distinguishes a live (open) bid from a filled one."""
+    js = _read("webapp/client/app.js")
+    body = js[js.index("function closetBidRender(s)") : js.index("function closetFillRender(s)")]
+    assert "Your bid was filled — the trait is in your Closet." in body
+    assert "Bid matched" not in body

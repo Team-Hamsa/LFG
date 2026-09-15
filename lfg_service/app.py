@@ -5082,7 +5082,7 @@ def _closet_order_public(order: dict[str, Any]) -> dict[str, Any]:
 
 _BID_VIEW_STATE = {
     closet_market_store.OPEN: "done",
-    closet_market_store.MATCHED: "done",
+    closet_market_store.MATCHED: "pending",  # a match can still abort
     closet_market_store.FILLED: "done",
     closet_market_store.CANCELLING: "pending",
     closet_market_store.CANCELLED: "failed",
@@ -5115,11 +5115,11 @@ def _closet_fill_view(fill: dict[str, Any], wallet: str) -> dict[str, Any]:
         and not fill["signed_txid"]
     ):
         state = "awaiting_signature"
-    elif s in (
-        closet_market_store.ASSET_MOVED,
-        closet_market_store.PAID,
-        closet_market_store.MIRRORED,
+    elif s in (closet_market_store.PAID, closet_market_store.MIRRORED) or (
+        s == closet_market_store.ASSET_MOVED and wallet == fill["buyer"]
     ):
+        # The buyer holds the trait from asset_moved; the seller is only done
+        # once the forward payment has landed (paid).
         state = "done"
     elif s in (closet_market_store.REFUNDED, closet_market_store.FAILED):
         state = "failed"

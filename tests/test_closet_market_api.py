@@ -225,8 +225,42 @@ def test_fill_view_state_mapping():
         ]
         == "pending"
     )
+    # (#443 final review I1) the seller is not paid at asset_moved — only the buyer is done
     assert server._closet_fill_view({**base, "state": "asset_moved"}, "rB")["state"] == "done"
+    assert server._closet_fill_view({**base, "state": "asset_moved"}, "rS")["state"] == "pending"
+    for settled in ("paid", "mirrored"):
+        assert server._closet_fill_view({**base, "state": settled}, "rS")["state"] == "done"
+        assert server._closet_fill_view({**base, "state": settled}, "rB")["state"] == "done"
     assert server._closet_fill_view({**base, "state": "refunded"}, "rB")["state"] == "failed"
+
+
+def test_bid_view_state_mapping():
+    """(#443 final review I1) a match can still abort — only open and filled are done."""
+    base = {
+        "id": "O",
+        "side": "bid",
+        "slot": "Head",
+        "value": "Crown",
+        "price_brix": "1",
+        "created_ts": 1,
+        "cancel_after": 9,
+        "error": None,
+        "signed_txid": "T",
+        "qr_url": None,
+        "xumm_url": None,
+        "push": None,
+    }
+    expected = {
+        "open": "done",
+        "filled": "done",
+        "matched": "pending",
+        "cancelling": "pending",
+        "cancelled": "failed",
+        "expired": "failed",
+    }
+    for order_state, view_state in expected.items():
+        view = server._closet_bid_view({**base, "state": order_state})
+        assert (view["state"], view["order_state"]) == (view_state, order_state)
 
 
 def _no_brix_line(monkeypatch, state="ABSENT"):

@@ -5635,12 +5635,15 @@ function closetBidRender(s) {
     return { title: '🏷️ Place bid', text: signText(s.push, 'Scan to lock your bid in escrow with Xaman.'), qrData: s.xumm_url, link: s.xumm_url, push: s.push };
   }
   if (s.state === 'pending') {
-    return { title: '⏳ Confirming', text: s.order_state === 'cancelling' ? 'Returning your BRIX…' : 'Signature received — verifying your escrow on-ledger…', spinner: true };
+    const waiting = s.order_state === 'cancelling' ? 'Returning your BRIX…'
+      : s.order_state === 'matched' ? `Your bid matched — settling ${s.slot}: ${s.value}…`
+      : 'Signature received — verifying your escrow on-ledger…';
+    return { title: '⏳ Confirming', text: waiting, spinner: true };
   }
   if (s.state === 'done') {
     return s.order_state === 'open'
       ? { title: '🎉 Bid live', text: `${s.price_brix} BRIX is locked in escrow for ${s.slot}: ${s.value}. Any holder can fill it; cancel any time from Mine.`, done: true }
-      : { title: '🎉 Bid matched', text: `Your bid matched a Closet listing — ${s.slot}: ${s.value} is on its way to your Closet.`, done: true, celebrate: true };
+      : { title: '🎉 Bid filled', text: 'Your bid was filled — the trait is in your Closet.', done: true, celebrate: true };
   }
   return { title: '❌ Bid not placed', text: s.error || 'Something went wrong.', done: true };
 }
