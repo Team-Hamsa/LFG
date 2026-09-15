@@ -47,8 +47,11 @@ from lfg_core import (
     brokers,
     bulk_mint_flow,
     burn2mint_flow,
+    closet_market_flow,
+    closet_market_store,
     closet_token,
     config,
+    crypto_condition,
     db_path,
     economy_flow,
     economy_store,
@@ -65,6 +68,7 @@ from lfg_core import (
     memos,
     mint_flow,
     nft_index,
+    owner_lock,
     rarity,
     share_clicks,
     shop,
@@ -4906,6 +4910,408 @@ async def sweep_pending_closet_accepts() -> None:
         conn.close()
 
 
+# ---- Closet Market (#443) ----------------------------------------------------
+#
+# New orders are gated on config.closet_market_enabled(); cancel, status and
+# settlement only on closet_market_settleable(), so the kill switch never
+# strands BRIX in an escrow. The DB (closet_market_store) is authoritative;
+# settlement is closet_market_flow, run inline and by _settlement_sweep_loop.
+
+
+def _closet_market_disabled_response():
+    return web.json_response(
+        {"error": "the Closet market is not enabled", "code": "closet_market_disabled"}, status=403
+    )
+
+
+def require_closet_market(handler):
+    @functools.wraps(handler)
+    async def wrapper(request):
+        if not config.closet_market_enabled():
+            return _closet_market_disabled_response()
+        return await handler(request)
+
+    return wrapper
+
+
+def require_closet_settleable(handler):
+    @functools.wraps(handler)
+    async def wrapper(request):
+        if not config.closet_market_settleable():
+            return _closet_market_disabled_response()
+        return await handler(request)
+
+    return wrapper
+
+
+def _closet_conn() -> sqlite3.Connection:
+    conn = nft_index.init_db(nft_index.index_db_path(config.ECONOMY_NETWORK))
+    economy_store.init_economy_schema(conn)
+    return conn
+
+
+async def _closet_db(fn: Callable[..., Any], *args: Any, **kwargs: Any) -> Any:
+    """Run one closet_market_store call on a fresh connection off the loop."""
+
+    def run() -> Any:
+        conn = _closet_conn()
+        try:
+            return fn(conn, *args, **kwargs)
+        finally:
+            conn.close()
+
+    return await asyncio.get_event_loop().run_in_executor(None, run)
+
+
+_CLOSET_BOOK_CACHE: dict[tuple[str, str | None, str | None], tuple[float, dict[str, Any]]] = {}
+_CLOSET_BOOK_TTL = 60.0
+
+
+def _invalidate_closet_book() -> None:
+    _CLOSET_BOOK_CACHE.clear()
+
+
+_ORDER_ERROR_STATUS = {
+    "not_found": 404,
+    "not_open": 409,
+    "not_available": 409,
+    "bid_exists": 409,
+    "self_cross": 400,
+    "closet_required": 403,
+}
+
+
+def _order_error_response(exc: closet_market_store.OrderError) -> web.Response:
+    if (
+        exc.code == "closet_required"
+    ):  # the client keys promptClosetRequired() off this exact message
+        return web.json_response(
+            {"error": "closet_required", "code": "closet_required"}, status=403
+        )
+    return web.json_response(
+        {"error": str(exc), "code": exc.code}, status=_ORDER_ERROR_STATUS.get(exc.code, 400)
+    )
+
+
+def _parse_brix_price(raw: Any) -> str | None:
+    if not isinstance(raw, str):
+        return None
+    try:
+        return market_ops.validate_brix_value(raw)
+    except (TypeError, ValueError):
+        return None
+
+
+_ORDER_PUBLIC_FIELDS = (
+    "id",
+    "side",
+    "slot",
+    "value",
+    "price_brix",
+    "state",
+    "created_ts",
+    "cancel_after",
+    "error",
+)
+
+
+def _closet_order_public(order: dict[str, Any]) -> dict[str, Any]:
+    return {k: order.get(k) for k in _ORDER_PUBLIC_FIELDS}
+
+
+_BID_VIEW_STATE = {
+    closet_market_store.OPEN: "done",
+    closet_market_store.MATCHED: "done",
+    closet_market_store.FILLED: "done",
+    closet_market_store.CANCELLING: "pending",
+    closet_market_store.CANCELLED: "failed",
+    closet_market_store.EXPIRED: "failed",
+}
+
+
+def _closet_bid_view(order: dict[str, Any]) -> dict[str, Any]:
+    """Market-flow-compatible session dict (states the client's marketFlow knows)."""
+    if order["state"] == closet_market_store.PENDING_ESCROW:
+        state = "pending" if order["signed_txid"] else "awaiting_signature"
+    else:
+        state = _BID_VIEW_STATE[order["state"]]
+    return {
+        **_closet_order_public(order),
+        "kind": "closet_bid",
+        "state": state,
+        "order_state": order["state"],
+        "qr_url": order["qr_url"],
+        "xumm_url": order["xumm_url"],
+        "push": order["push"],
+    }
+
+
+def _closet_fill_view(fill: dict[str, Any], wallet: str) -> dict[str, Any]:
+    s = fill["state"]
+    if (
+        s == closet_market_store.FUNDS_PENDING
+        and fill["funds_source"] == closet_market_store.FUNDS_PAYMENT
+        and not fill["signed_txid"]
+    ):
+        state = "awaiting_signature"
+    elif s in (
+        closet_market_store.ASSET_MOVED,
+        closet_market_store.PAID,
+        closet_market_store.MIRRORED,
+    ):
+        state = "done"
+    elif s in (closet_market_store.REFUNDED, closet_market_store.FAILED):
+        state = "failed"
+    else:
+        state = "pending"
+    return {
+        "id": fill["id"],
+        "kind": "closet_fill",
+        "state": state,
+        "fill_state": s,
+        "role": "buyer" if wallet == fill["buyer"] else "seller",
+        **{
+            k: fill[k]
+            for k in (
+                "slot",
+                "value",
+                "price_brix",
+                "fee_brix",
+                "overshoot_brix",
+                "error",
+                "qr_url",
+                "xumm_url",
+                "push",
+            )
+        },
+    }
+
+
+def _known_trait(network: str, slot: str, value: str) -> bool:
+    conn = sqlite3.connect(db_path.app_db_path(network))
+    try:
+        rarity.ensure_schema(conn)
+        return (
+            conn.execute(
+                "SELECT 1 FROM trait_rarity WHERE network = ? AND category = ? AND trait = ? LIMIT 1",
+                (network, slot, value),
+            ).fetchone()
+            is not None
+        )
+    finally:
+        conn.close()
+
+
+def _closet_keys(network: str) -> list[dict[str, Any]]:
+    conn = sqlite3.connect(db_path.app_db_path(network))
+    try:
+        rarity.ensure_schema(conn)
+        rows = conn.execute(
+            "SELECT DISTINCT category, trait FROM trait_rarity WHERE network = ? AND category != ? "
+            "AND trait != 'None' ORDER BY category, trait",
+            (network, rarity.BODY_CATEGORY),
+        ).fetchall()
+    finally:
+        conn.close()
+    cfg = trait_config.get_config()
+    return [{"slot": s, "value": v, "image_url": _trait_image_url(cfg, s, v)} for s, v in rows]
+
+
+async def _closet_market_mirror(conn: sqlite3.Connection, owner: str) -> None:
+    """Re-sync one owner's Closet token from the DB (settlement step 4)."""
+    deps = economy_api.build_settlement_deps(conn)
+    assets = [
+        (s, v, c) for (o, s, v, c) in economy_store.read_closet_assets(conn) if o == owner and c > 0
+    ]
+    await closet_token.sync_closet(
+        conn, owner, assets, [], upload_fn=deps.closet_upload_fn, modify_fn=deps.closet_modify_fn
+    )
+
+
+def _closet_market_deps() -> closet_market_flow.ClosetMarketDeps:
+    return closet_market_flow.ClosetMarketDeps(
+        conn_factory=_closet_conn,
+        app_account=config.SIGNING_ACCOUNT,
+        fee_bps=config.CLOSET_MARKET_FEE_BPS,
+        payload_status_fn=xumm_ops.get_payload_status,
+        get_tx_fn=xrpl_ops.get_tx,
+        get_escrow_fn=xrpl_ops.get_escrow,
+        escrow_finish_fn=xrpl_ops.escrow_finish,
+        escrow_cancel_fn=xrpl_ops.escrow_cancel,
+        payment_fn=xrpl_ops.app_brix_payment,
+        find_txs_fn=xrpl_ops.find_app_txs_by_memo,
+        ledger_index_fn=xrpl_ops.current_validated_ledger_index,
+        mirror_fn=_closet_market_mirror,
+        unseal_fn=crypto_condition.unseal,
+        records_dir=config.ECONOMY_RECORDS_DIR,
+        ledger_margin=config.CLOSET_MARKET_LEDGER_MARGIN,
+    )
+
+
+_closet_tasks: dict[str, asyncio.Task[Any]] = {}
+
+
+def _schedule_closet(key: str, make_coro: Callable[[], Awaitable[Any]]) -> None:
+    for done in [k for k, t in _closet_tasks.items() if t.done()]:
+        del _closet_tasks[done]
+    if key in _closet_tasks:
+        return
+
+    async def run() -> None:
+        try:
+            await make_coro()
+        except Exception:
+            logging.error(f"closet market task {key} crashed: {traceback.format_exc()}")
+        finally:
+            _invalidate_closet_book()
+
+    _closet_tasks[key] = asyncio.get_event_loop().create_task(run())
+
+
+def _schedule_closet_settle(fill_id: str) -> None:
+    _schedule_closet(
+        f"fill:{fill_id}", lambda: closet_market_flow.settle_fill(fill_id, _closet_market_deps())
+    )
+
+
+def _schedule_closet_bid(order_id: str) -> None:
+    async def go() -> None:
+        fill_id = await closet_market_flow.advance_bid(order_id, _closet_market_deps())
+        if fill_id:
+            _schedule_closet_settle(fill_id)
+
+    _schedule_closet(f"bid:{order_id}", go)
+
+
+@require_closet_market
+async def handle_closet_book(request):
+    """GET /api/closet/book[?slot=&value=] — public. Both params: price
+    levels for one key; otherwise one summary row per key with open orders."""
+    slot = request.query.get("slot") or None
+    value = request.query.get("value") or None
+    key = (config.ECONOMY_NETWORK, slot, value)
+    now_mono = time.monotonic()
+    cached = _CLOSET_BOOK_CACHE.get(key)
+    if cached is not None and now_mono - cached[0] < _CLOSET_BOOK_TTL:
+        return web.json_response(cached[1])
+    if slot is not None and value is not None:
+        body = await _closet_db(closet_market_store.book_levels, slot, value)
+        summary = await _closet_db(closet_market_store.book_summary, slot, value)
+        body["summary"] = summary[0] if summary else None
+    else:
+        body = {"rows": await _closet_db(closet_market_store.book_summary, slot, value)}
+    _CLOSET_BOOK_CACHE[key] = (now_mono, body)
+    return web.json_response(body)
+
+
+@require_closet_market
+async def handle_closet_keys(request):
+    rows = await asyncio.get_event_loop().run_in_executor(
+        None, _closet_keys, config.ECONOMY_NETWORK
+    )
+    return web.json_response({"keys": rows})
+
+
+@require_closet_settleable
+@require_wallet
+async def handle_closet_orders_mine(request):
+    wallet = request["wallet"]
+
+    def run(conn: sqlite3.Connection) -> dict[str, Any]:
+        data = closet_market_store.orders_for_owner(conn, wallet)
+        data["bids_on_my_traits"] = (
+            closet_market_store.bids_on_holdings(conn, wallet)
+            if config.closet_market_enabled()
+            else []
+        )
+        return data
+
+    return web.json_response(await _closet_db(run))
+
+
+@require_closet_market
+@require_wallet
+async def handle_closet_ask_create(request):
+    wallet, user = request["wallet"], request["user"]
+    body = await _json_body(request)
+    slot, value = body.get("slot"), body.get("value")
+    price = _parse_brix_price(body.get("price_brix"))
+    if not isinstance(slot, str) or not isinstance(value, str) or price is None:
+        return web.json_response(
+            {"error": "slot, value and a valid price_brix are required", "code": "bad_request"},
+            status=400,
+        )
+    try:
+        async with owner_lock.owner_lock(wallet):
+            order = await _closet_db(
+                closet_market_store.create_ask,
+                owner=wallet,
+                slot=slot,
+                value=value,
+                price_brix=price,
+                platform=_platform(user),
+            )
+    except closet_market_store.OrderError as exc:
+        return _order_error_response(exc)
+    fill = await _closet_db(
+        closet_market_store.cross_incoming, order["id"], fee_bps=config.CLOSET_MARKET_FEE_BPS
+    )
+    _invalidate_closet_book()
+    if fill:
+        _schedule_closet_settle(fill["id"])
+    return web.json_response(
+        {
+            "order": _closet_order_public(order),
+            "fill": _closet_fill_view(fill, wallet) if fill else None,
+        }
+    )
+
+
+@require_closet_settleable
+@require_wallet
+async def handle_closet_ask_cancel(request):
+    try:
+        order = await _closet_db(
+            closet_market_store.cancel_ask, request.match_info["order_id"], request["wallet"]
+        )
+    except closet_market_store.OrderError as exc:
+        return _order_error_response(exc)
+    _invalidate_closet_book()
+    return web.json_response({"order": _closet_order_public(order)})
+
+
+@require_closet_market
+@require_wallet
+async def handle_closet_bid_fill(request):
+    wallet, user = request["wallet"], request["user"]
+    try:
+        async with owner_lock.owner_lock(wallet):
+            fill = await _closet_db(
+                closet_market_store.fill_bid,
+                request.match_info["order_id"],
+                wallet,
+                fee_bps=config.CLOSET_MARKET_FEE_BPS,
+                platform=_platform(user),
+            )
+    except closet_market_store.OrderError as exc:
+        return _order_error_response(exc)
+    _invalidate_closet_book()
+    _schedule_closet_settle(fill["id"])
+    return web.json_response(_closet_fill_view(fill, wallet))
+
+
+@require_closet_settleable
+@require_wallet
+async def handle_closet_fill_status(request):
+    wallet = request["wallet"]
+    fill = await _closet_db(closet_market_store.get_fill, request.match_info["fill_id"])
+    if fill is None or wallet not in (fill["seller"], fill["buyer"]):
+        return web.json_response({"error": "fill not found", "code": "not_found"}, status=404)
+    if fill["state"] not in closet_market_store.TERMINAL_FILL_STATES:
+        _schedule_closet_settle(fill["id"])
+    return web.json_response(_closet_fill_view(fill, wallet))
+
+
 async def _settlement_sweep_loop() -> None:
     while True:
         if config.ECONOMY_ENABLED:
@@ -9597,6 +10003,13 @@ def create_app() -> web.Application:
     app.router.add_get("/api/shop/catalog", handle_shop_catalog)
     app.router.add_post("/api/shop/buy", handle_shop_buy_start)
     app.router.add_get("/api/shop/buy/{session_id}", handle_shop_buy_status)
+    app.router.add_get("/api/closet/book", handle_closet_book)
+    app.router.add_get("/api/closet/keys", handle_closet_keys)
+    app.router.add_get("/api/closet/orders/mine", handle_closet_orders_mine)
+    app.router.add_post("/api/closet/ask", handle_closet_ask_create)
+    app.router.add_delete("/api/closet/ask/{order_id}", handle_closet_ask_cancel)
+    app.router.add_post("/api/closet/bid/{order_id}/fill", handle_closet_bid_fill)
+    app.router.add_get("/api/closet/fill/{fill_id}", handle_closet_fill_status)
     app.router.add_post("/api/swap", handle_swap_start)
     app.router.add_get("/api/swap/{session_id}", handle_swap_status)
     app.router.add_post("/api/swap/{session_id}/regenerate", handle_swap_regenerate)
