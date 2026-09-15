@@ -33,7 +33,7 @@ from decimal import Decimal, InvalidOperation
 from typing import Any
 
 from lfg_core import closet_market_store as cms
-from lfg_core import config, market_ops, memos, owner_lock
+from lfg_core import closet_token, config, market_ops, memos, owner_lock
 from lfg_core.xrpl_ops import (
     RIPPLE_EPOCH_OFFSET,
     TxNotSubmitted,
@@ -422,3 +422,402 @@ async def _advance_cancelling_bid(
             conn, order, out, phase="cancel_refund", hash_field="cancel_refund_hash", complete=True
         )
     _journal(deps, "order", cms.get_order(conn, oid))
+
+
+# --- fills ----------------------------------------------------------------------
+
+
+def _brix_value(amount: Any) -> Decimal | None:
+    if not isinstance(amount, dict):
+        return None
+    if str(amount.get("currency", "")).upper() != str(config.BRIX_CURRENCY_HEX).upper():
+        return None
+    if amount.get("issuer") != config.BRIX_ISSUER:
+        return None
+    try:
+        return Decimal(str(amount.get("value")))
+    except (InvalidOperation, ValueError):
+        return None
+
+
+def _fail(conn: sqlite3.Connection, fill: dict[str, Any], reason: str) -> bool:
+    cms.update_fill(conn, fill["id"], state=cms.FAILED, error=reason)
+    return True
+
+
+async def _begin_fill_phase(
+    conn: sqlite3.Connection, fill: dict[str, Any], phase: str, deps: ClosetMarketDeps
+) -> int | None:
+    """Write-ahead intent for a fill, mirroring `_begin_order_phase`: persist
+    pending_phase/pending_lls BEFORE the backend tx is submitted (without
+    touching `state`), so a crash between the tx landing and this process
+    recording the outcome still leaves a resolvable trail. Returns None
+    (submit nothing) if the ledger index can't be read."""
+    idx = await deps.ledger_index_fn()
+    if idx is None:
+        return None
+    lls = idx + deps.ledger_margin
+    cms.update_fill(conn, fill["id"], pending_phase=phase, pending_lls=lls)
+    return lls
+
+
+def _apply_fill_outcome(
+    conn: sqlite3.Connection,
+    fill: dict[str, Any],
+    out: TxOutcome | None,
+    *,
+    phase: str,
+    hash_field: str,
+    success_state: str | None = None,
+) -> str:
+    if out is None:
+        # Nothing reached the ledger — the write-ahead intent recorded by
+        # _begin_fill_phase describes a tx that was never sent, so clear it.
+        cms.update_fill(
+            conn,
+            fill["id"],
+            pending_phase=None,
+            pending_lls=None,
+            error=f"{phase} failed; will retry",
+        )
+        return "not_submitted"
+    if out.state == "confirmed":
+        fields: dict[str, Any] = {
+            hash_field: out.tx_hash or cms.HASH_UNKNOWN,
+            "pending_phase": None,
+            "pending_lls": None,
+            "error": None,
+        }
+        if success_state is not None:
+            fields["state"] = success_state
+        cms.update_fill(conn, fill["id"], **fields)
+    elif out.state == "unknown":
+        # The write-ahead intent already recorded this phase; keep it, but
+        # trust the outcome's own last_ledger_seq (the tx that actually left,
+        # bounded by max_last_ledger_seq) over our pre-submit estimate.
+        cms.update_fill(
+            conn,
+            fill["id"],
+            state=cms.INDETERMINATE,
+            pending_phase=phase,
+            pending_lls=out.last_ledger_seq,
+        )
+    else:
+        cms.update_fill(
+            conn,
+            fill["id"],
+            pending_phase=None,
+            pending_lls=None,
+            attempts=int(fill["attempts"]) + 1,
+            error=f"{phase} failed; will retry",
+        )
+    return out.state
+
+
+async def _funds(conn: sqlite3.Connection, fill: dict[str, Any], deps: ClosetMarketDeps) -> bool:
+    if fill["funds_source"] == cms.FUNDS_PAYMENT:
+        return await _take_funds(conn, fill, deps)
+    return await _escrow_funds(conn, fill, deps)
+
+
+async def _take_funds(
+    conn: sqlite3.Connection, fill: dict[str, Any], deps: ClosetMarketDeps
+) -> bool:
+    waited = deps.now_fn() - fill["created_ts"]
+    if not fill["signed_txid"]:
+        status = (
+            await deps.payload_status_fn(fill["payload_uuid"]) if fill["payload_uuid"] else None
+        )
+        if status is None or not status.get("signed"):
+            if (status or {}).get("expired") or waited > deps.signing_wait_seconds:
+                return _fail(conn, fill, "payment request expired")
+            return False
+        txid = status.get("txid")
+        if not txid:
+            return False
+        cms.update_fill(conn, fill["id"], signed_txid=txid)
+        return True
+    try:
+        tx = await deps.get_tx_fn(fill["signed_txid"])
+    except Exception:
+        logging.warning(
+            f"closet fill {fill['id']}: payment lookup failed: {traceback.format_exc()}"
+        )
+        return False
+    if not tx.get("validated"):
+        if waited > deps.signing_wait_seconds:
+            return _fail(conn, fill, "the payment never validated")
+        return False
+    meta = tx.get("meta") or {}
+    body = _tx_body(tx)
+    if meta.get("TransactionResult") != "tesSUCCESS":
+        return _fail(conn, fill, f"payment failed: {meta.get('TransactionResult')}")
+    if (
+        body.get("TransactionType") != "Payment"
+        or body.get("Destination") != deps.app_account
+        or str(body.get("InvoiceID", "")).upper() != cms.invoice_id(fill["id"])
+    ):
+        logging.error(
+            f"closet fill {fill['id']}: signed tx {fill['signed_txid']} is not this fill's payment"
+        )
+        return _fail(conn, fill, "the signed transaction is not this purchase's payment")
+    delivered = _brix_value(meta.get("delivered_amount"))
+    if delivered is None or delivered <= 0:
+        return _fail(conn, fill, "the payment delivered no BRIX")
+    tx_hash = str(tx.get("hash") or body.get("hash") or fill["signed_txid"])
+    sender = body.get("Account")
+    try:
+        if sender != fill["buyer"] or delivered < Decimal(fill["price_brix"]):
+            reason = (
+                "payment signed by a different account"
+                if sender != fill["buyer"]
+                else "partial payment"
+            )
+            cms.update_fill(
+                conn,
+                fill["id"],
+                state=cms.REFUND_PENDING,
+                payment_tx_hash=tx_hash,
+                refund_to=sender,
+                refund_brix=cms.fmt_brix(delivered),
+                error=reason,
+            )
+            return True
+        cms.claim_ask_for_payment(conn, fill["id"], tx_hash)
+    except sqlite3.IntegrityError:
+        return _fail(conn, fill, "this payment was already used for another purchase")
+    return True
+
+
+async def _escrow_funds(
+    conn: sqlite3.Connection, fill: dict[str, Any], deps: ClosetMarketDeps
+) -> bool:
+    blocker = cms.fill_blocker(conn, fill["id"])
+    if blocker is not None:
+        cms.abort_unfunded_fill(conn, fill["id"], blocker)
+        return True
+    bid = cms.get_order(conn, fill["bid_order_id"])
+    assert bid is not None and bid["escrow_owner_seq"] is not None
+    lls = await _begin_fill_phase(conn, fill, "finish", deps)
+    if lls is None:
+        return False
+    out = await _submit(
+        deps.escrow_finish_fn,
+        bid["owner"],
+        bid["escrow_owner_seq"],
+        bid["condition"],
+        deps.unseal_fn(bid["fulfillment_enc"]),
+        cms.memo_tag("finish", fill["id"]),
+        max_last_ledger_seq=lls,
+    )
+    verdict = _apply_fill_outcome(
+        conn, fill, out, phase="finish", hash_field="escrow_finish_hash", success_state=cms.FUNDED
+    )
+    if verdict in ("confirmed", "unknown"):
+        return True
+    if verdict == "failed":
+        try:
+            node = await deps.get_escrow_fn(bid["owner"], bid["escrow_owner_seq"])
+        except Exception:
+            return False
+        if node is None:
+            cms.abort_unfunded_fill(
+                conn,
+                fill["id"],
+                "the bid's escrow is gone (expired or cancelled)",
+                bid_state=cms.EXPIRED,
+            )
+            return True
+    return False
+
+
+async def _move(conn: sqlite3.Connection, fill: dict[str, Any], deps: ClosetMarketDeps) -> bool:
+    if fill["seller"] == fill["buyer"]:
+        raise RuntimeError(f"closet fill {fill['id']} has seller == buyer")
+    first, second = sorted((fill["seller"], fill["buyer"]))
+    async with owner_lock.owner_lock(first), owner_lock.owner_lock(second):
+        result = cms.move_asset(conn, fill["id"])
+    return result in (cms.ASSET_MOVED, cms.REFUND_PENDING)
+
+
+async def _pay(conn: sqlite3.Connection, fill: dict[str, Any], deps: ClosetMarketDeps) -> bool:
+    fid = fill["id"]
+    changed = False
+    if fill["forward_tx_hash"] is None:
+        net = Decimal(fill["price_brix"]) - Decimal(fill["fee_brix"])
+        if net <= 0:
+            cms.update_fill(conn, fid, forward_tx_hash=cms.HASH_NOTHING_DUE)
+        else:
+            lls = await _begin_fill_phase(conn, fill, "forward", deps)
+            if lls is None:
+                return False
+            out = await _submit(
+                deps.payment_fn,
+                fill["seller"],
+                cms.fmt_brix(net),
+                cms.memo_tag("forward", fid),
+                memos.ACTION_CLOSET_FORWARD,
+                max_last_ledger_seq=lls,
+            )
+            verdict = _apply_fill_outcome(
+                conn, fill, out, phase="forward", hash_field="forward_tx_hash"
+            )
+            if verdict != "confirmed":
+                return verdict == "unknown"
+        changed = True
+        fill = cms.get_fill(conn, fid) or fill
+    if Decimal(fill["overshoot_brix"]) > 0 and fill["overshoot_tx_hash"] is None:
+        lls = await _begin_fill_phase(conn, fill, "overshoot", deps)
+        if lls is None:
+            return changed
+        out = await _submit(
+            deps.payment_fn,
+            fill["buyer"],
+            fill["overshoot_brix"],
+            cms.memo_tag("overshoot", fid),
+            memos.ACTION_CLOSET_REFUND,
+            max_last_ledger_seq=lls,
+        )
+        verdict = _apply_fill_outcome(
+            conn, fill, out, phase="overshoot", hash_field="overshoot_tx_hash"
+        )
+        if verdict != "confirmed":
+            return changed or verdict == "unknown"
+    cms.update_fill(conn, fid, state=cms.PAID, error=None)
+    return True
+
+
+async def _mirror(conn: sqlite3.Connection, fill: dict[str, Any], deps: ClosetMarketDeps) -> bool:
+    """Re-sync each side's Closet token from the (authoritative) DB. A full
+    overwrite from current DB state is idempotent, so every error — including
+    an indeterminate modify — is simply retried."""
+    changed = False
+    for side in ("seller", "buyer"):
+        if fill[f"{side}_mirrored"]:
+            continue
+        owner = fill[side]
+        try:
+            async with owner_lock.owner_lock(owner):
+                await deps.mirror_fn(conn, owner)
+        except closet_token.ClosetMirrorError:
+            pass  # the modify committed; only the token-record mirror write failed
+        except Exception:
+            logging.warning(
+                f"closet fill {fill['id']}: mirror for {owner} failed: {traceback.format_exc()}"
+            )
+            cms.update_fill(
+                conn,
+                fill["id"],
+                attempts=int(fill["attempts"]) + 1,
+                error=f"Closet update for {owner} failed; will retry",
+            )
+            continue
+        cms.mark_side_mirrored(conn, fill["id"], side)
+        changed = True
+    return changed
+
+
+async def _refund(conn: sqlite3.Connection, fill: dict[str, Any], deps: ClosetMarketDeps) -> bool:
+    to = fill["refund_to"] or fill["buyer"]
+    value = fill["refund_brix"] or cms.fill_in_amount(fill)
+    if Decimal(value) <= 0:
+        cms.update_fill(conn, fill["id"], state=cms.REFUNDED, refund_tx_hash=cms.HASH_NOTHING_DUE)
+        return True
+    lls = await _begin_fill_phase(conn, fill, "refund", deps)
+    if lls is None:
+        return False
+    out = await _submit(
+        deps.payment_fn,
+        to,
+        value,
+        cms.memo_tag("refund", fill["id"]),
+        memos.ACTION_CLOSET_REFUND,
+        max_last_ledger_seq=lls,
+    )
+    verdict = _apply_fill_outcome(
+        conn, fill, out, phase="refund", hash_field="refund_tx_hash", success_state=cms.REFUNDED
+    )
+    return verdict in ("confirmed", "unknown")
+
+
+_PHASE_ROLLBACK = {
+    "finish": cms.FUNDS_PENDING,
+    "forward": cms.ASSET_MOVED,
+    "overshoot": cms.ASSET_MOVED,
+    "refund": cms.REFUND_PENDING,
+}
+
+
+async def _resolve_fill_phase(
+    conn: sqlite3.Connection, fill: dict[str, Any], deps: ClosetMarketDeps
+) -> bool:
+    phase = fill["pending_phase"]
+    if phase not in _PHASE_ROLLBACK:
+        logging.error(f"closet fill {fill['id']}: indeterminate with unknown phase {phase!r}")
+        return False
+    verdict, tx_hash = await _phase_outcome(
+        deps, cms.memo_tag(phase, fill["id"]), fill["pending_lls"]
+    )
+    if verdict == "wait":
+        return False
+    fields: dict[str, Any] = {
+        "state": _PHASE_ROLLBACK[phase],
+        "pending_phase": None,
+        "pending_lls": None,
+    }
+    if verdict == "landed":
+        if phase == "finish":
+            fields.update(state=cms.FUNDED, escrow_finish_hash=tx_hash)
+        elif phase == "refund":
+            fields.update(state=cms.REFUNDED, refund_tx_hash=tx_hash)
+        else:
+            fields[f"{phase}_tx_hash"] = tx_hash
+    cms.update_fill(conn, fill["id"], **fields)
+    return True
+
+
+_STEPS: dict[
+    str, Callable[[sqlite3.Connection, dict[str, Any], ClosetMarketDeps], Awaitable[bool]]
+] = {
+    cms.FUNDS_PENDING: _funds,
+    cms.FUNDED: _move,
+    cms.ASSET_MOVED: _pay,
+    cms.PAID: _mirror,
+    cms.REFUND_PENDING: _refund,
+    cms.INDETERMINATE: _resolve_fill_phase,
+}
+
+
+async def settle_fill(fill_id: str, deps: ClosetMarketDeps) -> str | None:
+    """Advance one fill as far as it can go right now. Serialized per fill
+    (inline kick + sweep may race); returns the state it stopped at."""
+    async with owner_lock.owner_lock(f"closet-fill:{fill_id}"):
+        state: str | None = None
+        for _ in range(MAX_STEPS):
+            conn = deps.conn_factory()
+            try:
+                current = cms.get_fill(conn, fill_id)
+                if current is None:
+                    return None
+                state = str(current["state"])
+                if state in cms.TERMINAL_FILL_STATES:
+                    return state
+                if current["pending_phase"]:
+                    # A crash can leave a write-ahead intent recorded for a
+                    # phase whose backend tx (or lack thereof) predates the
+                    # fill's current `state` transition — that intent must be
+                    # resolved BEFORE dispatching on `state`, or a retry would
+                    # resubmit a tx that may already be on-ledger.
+                    progressed = await _resolve_fill_phase(conn, current, deps)
+                else:
+                    progressed = await _STEPS[state](conn, current, deps)
+                after = cms.get_fill(conn, fill_id)
+                assert after is not None
+                if progressed:
+                    _journal(deps, "fill", after)
+                state = str(after["state"])
+                if not progressed or state in cms.TERMINAL_FILL_STATES:
+                    return state
+            finally:
+                conn.close()
+        return state

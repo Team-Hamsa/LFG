@@ -66,6 +66,9 @@ FUNDS_ESCROW = "escrow"
 # Never None: a None hash means "not done yet" to the state machine.
 HASH_UNKNOWN = "confirmed-hash-unavailable"
 
+# Stored as forward_tx_hash when price - fee is zero (nothing to send).
+HASH_NOTHING_DUE = "nothing-due"
+
 _TAG_PHASES = frozenset(
     {"finish", "forward", "overshoot", "refund", "cancel", "cancel_finish", "cancel_refund"}
 )
