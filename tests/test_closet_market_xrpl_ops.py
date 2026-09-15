@@ -7,7 +7,11 @@ from lfg_core import config, memos, xrpl_ops, xumm_ops
 
 
 def _run(coro):
-    return asyncio.new_event_loop().run_until_complete(coro)
+    loop = asyncio.new_event_loop()
+    try:
+        return loop.run_until_complete(coro)
+    finally:
+        loop.close()
 
 
 def _tag_hex(tag):
