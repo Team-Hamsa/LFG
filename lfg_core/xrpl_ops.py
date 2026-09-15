@@ -2634,7 +2634,7 @@ async def _find_memo_tagged_tx(
     `is_genuine` accepts, or None if absent. Shared by BRIX claim and fee-cover
     recovery: the memo makes a payout findable, `is_genuine` makes it
     trustworthy (memos are user-writable). Absence is NOT proof of failure."""
-    client = JsonRpcClient(config.JSON_RPC_URL)
+    client = rpc_client()
     # Bounded: a payout cannot predate the ledger window it was built for.
     scan_from = -1 if min_ledger is None else max(1, min_ledger - _CLAIM_SCAN_LEDGER_SLACK)
     marker: Any = None
@@ -2725,7 +2725,7 @@ async def send_fee_cover_refund(
         if int(drops) <= 0:
             raise ClaimNotSubmitted("a fee-cover refund must be at least 1 drop")
         wallet = Wallet.from_seed(config.SEED)
-        client = JsonRpcClient(config.JSON_RPC_URL)
+        client = rpc_client()
         current = await _current_validated_ledger_index(client)
         if current is None:
             raise ClaimNotSubmitted(
@@ -2808,7 +2808,7 @@ async def get_xrp_balance_drops(address: str) -> int | None:
     """Total XRP balance of `address` in drops (not net of reserve), or None
     when the lookup failed — the admin status shows it next to budget left."""
     try:
-        client = AsyncJsonRpcClient(config.JSON_RPC_URL)
+        client = async_rpc_client()
         response = await client.request(AccountInfo(account=address, ledger_index="validated"))
     except Exception as e:
         logging.warning(f"get_xrp_balance_drops({address}) lookup failed: {e}")
