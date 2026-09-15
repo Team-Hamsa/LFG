@@ -468,3 +468,92 @@ def test_intent_not_yet_past_lls_waits_without_resubmitting(tmp_path):
     d = deps(path, f, tmp_path)
     assert run(cmf.settle_fill(fl["id"], d)) == cms.FUNDS_PENDING
     assert f.finishes == []
+
+
+# --- review fix round 2: _take_funds race + 24h giveup -------------------------
+
+
+def test_take_race_uses_preread_index_not_a_later_one(tmp_path):
+    """(#443 review fix round 2) `_take_funds` had the same read-order race as
+    `_phase_outcome`: get_tx_fn is called, THEN the ledger index is read. Here
+    get_tx_fn itself simulates the ledger advancing past the tx's own
+    LastLedgerSequence WHILE the lookup runs (as a real round-trip could) — if
+    the index were read after the lookup, that later value (200) would wrongly
+    fail a fill whose BRIX had already arrived; read before, only the earlier
+    value (140, still under the LLS of 150) is ever consulted."""
+    path, f = _db(tmp_path), Fakes()
+    _, fl = _take(path, f)
+    f.payload_status["PU"] = {"signed": True, "account": BUYER, "txid": "PAYTX"}
+    clock = {"value": 140}
+    d = deps(path, f, tmp_path, now=fl["created_ts"] + 10)
+
+    async def index_fn():
+        return clock["value"]
+
+    async def get_tx_fn(tx_hash):
+        clock["value"] = 200  # the ledger advances past the tx's LLS during the lookup itself
+        return {"validated": False, "tx_json": {"LastLedgerSequence": 150}}
+
+    d.ledger_index_fn = index_fn
+    d.get_tx_fn = get_tx_fn
+    assert run(cmf.settle_fill(fl["id"], d)) == cms.FUNDS_PENDING
+
+
+def test_take_recheck_finds_validated_is_not_failed(tmp_path):
+    """(#443 review fix round 2) The pre-read index is legitimately past the
+    tx's LLS, but a re-check (one extra lookup) finds it actually validated in
+    the gap — that must not fail the fill; the next pass processes it
+    normally."""
+    path, f = _db(tmp_path), Fakes()
+    _, fl = _take(path, f)
+    f.payload_status["PU"] = {"signed": True, "account": BUYER, "txid": "PAYTX"}
+    f.ledger_index = 100
+    calls = {"n": 0}
+
+    async def get_tx_fn(tx_hash):
+        calls["n"] += 1
+        if calls["n"] == 1:
+            return {"validated": False, "tx_json": {"LastLedgerSequence": 50}}
+        return _payment_tx(fl["id"])
+
+    d = deps(path, f, tmp_path, now=fl["created_ts"] + 10)
+    d.get_tx_fn = get_tx_fn
+    assert run(cmf.settle_fill(fl["id"], d)) == cms.FUNDS_PENDING
+    assert calls["n"] == 2  # first lookup + one re-check, no fail
+    assert run(cmf.settle_fill(fl["id"], d)) == cms.MIRRORED
+
+
+def test_take_none_status_beyond_giveup_fails(tmp_path):
+    """(#443 review fix round 2) A None payload status that never resolves
+    must eventually give up — a fill can't poll forever with no path to a
+    terminal state."""
+    path, f = _db(tmp_path), Fakes()
+    _, fl = _take(path, f)
+    d = deps(path, f, tmp_path, now=fl["created_ts"] + cmf.PAYMENT_GIVEUP_SECONDS + 1)
+    assert run(cmf.settle_fill(fl["id"], d)) == cms.FAILED
+
+
+def test_take_none_status_just_under_giveup_still_waits(tmp_path):
+    path, f = _db(tmp_path), Fakes()
+    _, fl = _take(path, f)
+    d = deps(path, f, tmp_path, now=fl["created_ts"] + 23 * 3600)
+    assert run(cmf.settle_fill(fl["id"], d)) == cms.FUNDS_PENDING
+
+
+def test_take_not_found_tx_beyond_giveup_fails(tmp_path):
+    """(#443 review fix round 2) A signed tx the lookup can never find (no
+    LastLedgerSequence to judge absence against) must also eventually give
+    up."""
+    path, f = _db(tmp_path), Fakes()
+    _, fl = _take(path, f)
+    f.payload_status["PU"] = {"signed": True, "account": BUYER, "txid": "PAYTX"}
+    d = deps(path, f, tmp_path, now=fl["created_ts"] + cmf.PAYMENT_GIVEUP_SECONDS + 1)
+    assert run(cmf.settle_fill(fl["id"], d)) == cms.FAILED
+
+
+def test_take_not_found_tx_just_under_giveup_still_waits(tmp_path):
+    path, f = _db(tmp_path), Fakes()
+    _, fl = _take(path, f)
+    f.payload_status["PU"] = {"signed": True, "account": BUYER, "txid": "PAYTX"}
+    d = deps(path, f, tmp_path, now=fl["created_ts"] + 23 * 3600)
+    assert run(cmf.settle_fill(fl["id"], d)) == cms.FUNDS_PENDING

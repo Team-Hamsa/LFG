@@ -193,6 +193,17 @@ def test_find_app_txs_by_memo_raises_when_scan_lags_deadline(monkeypatch):
         _run(xrpl_ops.find_app_txs_by_memo(tag, 500))
 
 
+def test_find_app_txs_by_memo_raises_when_ledger_index_max_absent(monkeypatch):
+    """(#443 review fix round 2) No page reporting ledger_index_max at all is
+    just as untrustworthy as an insufficient one — raise rather than treat
+    the scan's silence as a genuine "nothing found"."""
+    monkeypatch.setattr(xrpl_ops, "JsonRpcClient", _Client)
+    tag = "lfg:closet_forward:F1"
+    _Client.responses = [_Resp({"transactions": []})]  # no ledger_index_max key at all
+    with pytest.raises(RuntimeError):
+        _run(xrpl_ops.find_app_txs_by_memo(tag, 500))
+
+
 def test_closet_payload_builders(monkeypatch):
     calls = []
 

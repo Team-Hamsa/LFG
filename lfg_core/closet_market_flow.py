@@ -529,17 +529,24 @@ async def _funds(conn: sqlite3.Connection, fill: dict[str, Any], deps: ClosetMar
     return await _escrow_funds(conn, fill, deps)
 
 
+PAYMENT_GIVEUP_SECONDS = 86400  # 24h backstop for a take fill with no path to a terminal state:
+# Xaman/Joey autofill LastLedgerSequence on every payload, so a signed tx that's still
+# unfindable/unvalidated a full day later cannot go on to validate later either.
+
+
 async def _take_funds(
     conn: sqlite3.Connection, fill: dict[str, Any], deps: ClosetMarketDeps
 ) -> bool:
     """(#443 review fix) A `None` status/tx read (a transient XUMM API error,
-    a 429, a lagging tx-lookup server) is never treated as failure — only a
-    definitive signal is: the payload service explicitly reporting `expired`
-    before signing, or the validated ledger having passed the signed tx's own
-    `LastLedgerSequence` while it's still unvalidated. `signing_wait_seconds`
-    plays no role here (that's a different, arbitrary wall-clock budget) —
-    an indefinitely-`None`/not-found read simply waits forever rather than
-    risk failing a fill whose BRIX may already be on its way."""
+    a 429, a lagging tx-lookup server) is never treated as failure on its own
+    — only a definitive signal is: the payload service explicitly reporting
+    `expired` before signing, the validated ledger having passed the signed
+    tx's own `LastLedgerSequence` while it's still unvalidated (re-checked
+    once against a fresh lookup to rule out a landing-in-the-gap race, the
+    same hazard `_phase_outcome` had), or PAYMENT_GIVEUP_SECONDS of no
+    definitive answer at all — a backstop so a fill can never poll forever
+    with no path to a terminal state. `signing_wait_seconds` plays no role
+    here (that's a different, much shorter, arbitrary wall-clock budget)."""
     if not fill["signed_txid"]:
         status = (
             await deps.payload_status_fn(fill["payload_uuid"]) if fill["payload_uuid"] else None
@@ -547,12 +554,19 @@ async def _take_funds(
         if status is None or not status.get("signed"):
             if status is not None and status.get("expired"):
                 return _fail(conn, fill, "payment request expired")
+            if deps.now_fn() - fill["created_ts"] > PAYMENT_GIVEUP_SECONDS:
+                return _fail(conn, fill, "no payment arrived within 24 hours")
             return False
         txid = status.get("txid")
         if not txid:
             return False
         cms.update_fill(conn, fill["id"], signed_txid=txid)
         return True
+    # Read the ledger index BEFORE the tx lookup (#443 review fix round 2):
+    # reading it after let a tx that validates in the gap between the two
+    # reads look "never validated" and fail a fill whose BRIX had already
+    # arrived — the same race `_phase_outcome` had.
+    index = await deps.ledger_index_fn()
     try:
         tx = await deps.get_tx_fn(fill["signed_txid"])
     except Exception:
@@ -563,11 +577,22 @@ async def _take_funds(
     body = _tx_body(tx)
     if not tx.get("validated"):
         last_ledger_seq = body.get("LastLedgerSequence")
-        if not isinstance(last_ledger_seq, int):
-            return False  # not found yet / no deadline to judge absence against
-        index = await deps.ledger_index_fn()
-        if index is not None and index > last_ledger_seq:
-            return _fail(conn, fill, "the payment never validated")
+        if isinstance(last_ledger_seq, int) and index is not None and index > last_ledger_seq:
+            # `index` was read before this lookup, so the tx could have
+            # validated in the gap between the two — re-check once before
+            # trusting "failed".
+            try:
+                recheck = await deps.get_tx_fn(fill["signed_txid"])
+            except Exception:
+                logging.warning(
+                    f"closet fill {fill['id']}: payment re-check failed: {traceback.format_exc()}"
+                )
+                return False
+            if not recheck.get("validated"):
+                return _fail(conn, fill, "the payment never validated")
+            return False  # validated after all — the next pass processes it normally
+        if deps.now_fn() - fill["created_ts"] > PAYMENT_GIVEUP_SECONDS:
+            return _fail(conn, fill, "no payment arrived within 24 hours")
         return False
     meta = tx.get("meta") or {}
     if meta.get("TransactionResult") != "tesSUCCESS":
@@ -616,16 +641,20 @@ def _ripple_now(deps: ClosetMarketDeps) -> int:
     return int(deps.now_fn()) - RIPPLE_EPOCH_OFFSET
 
 
-def _expire_unfinishable_bid(conn: sqlite3.Connection, fill: dict[str, Any], bid_id: str) -> None:
+def _expire_unfinishable_bid(conn: sqlite3.Connection, fill: dict[str, Any]) -> None:
     """The bid can no longer be finished (we're inside the guard window, or a
     finish just failed while its CancelAfter has already passed). Route it to
     cancelling — the bid machine's own EscrowCancel/EscrowFinish+refund path
     returns the BRIX and finalizes it EXPIRED — rather than looping forever on
-    a finish the ledger will keep rejecting (tec*)."""
+    a finish the ledger will keep rejecting (tec*). One atomic update sets
+    both the bid's state and its cancel_reason."""
     cms.abort_unfunded_fill(
-        conn, fill["id"], "the bid expired before it could be filled", bid_state=cms.CANCELLING
+        conn,
+        fill["id"],
+        "the bid expired before it could be filled",
+        bid_state=cms.CANCELLING,
+        cancel_reason="expired",
     )
-    cms.update_order(conn, bid_id, cancel_reason="expired")
 
 
 async def _escrow_funds(
@@ -646,7 +675,7 @@ async def _escrow_funds(
         # left unhandled, this step returns False forever, encumbering the
         # seller's unit and leaving the bid stuck `matched` (a state the
         # expiry sweep's orders_needing_attention never looks at).
-        _expire_unfinishable_bid(conn, fill, bid["id"])
+        _expire_unfinishable_bid(conn, fill)
         return True
     fulfillment = deps.unseal_fn(bid["fulfillment_enc"])  # before any intent is written
     lls = await _begin_fill_phase(conn, fill, "finish", deps)
@@ -680,7 +709,7 @@ async def _escrow_funds(
             )
             return True
         if bid["cancel_after"] is not None and _ripple_now(deps) >= bid["cancel_after"]:
-            _expire_unfinishable_bid(conn, fill, bid["id"])
+            _expire_unfinishable_bid(conn, fill)
             return True
     return False
 

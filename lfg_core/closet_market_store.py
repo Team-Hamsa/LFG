@@ -799,11 +799,21 @@ def fill_blocker(conn: sqlite3.Connection, fill_id: str) -> str | None:
 
 
 def abort_unfunded_fill(
-    conn: sqlite3.Connection, fill_id: str, reason: str, *, bid_state: str | None = None
+    conn: sqlite3.Connection,
+    fill_id: str,
+    reason: str,
+    *,
+    bid_state: str | None = None,
+    cancel_reason: str | None = None,
 ) -> None:
     """A pre-funding fill can't proceed: nothing moved on-ledger. Release the
     orders — a short seller's ask is cancelled, a buyer without a Closet has
-    their bid sent to cancelling (so its escrow is returned)."""
+    their bid sent to cancelling (so its escrow is returned).
+
+    `cancel_reason` is applied in the SAME guarded UPDATE as `bid_state`
+    (only when `bid_state` is given, and only on the matched bid) so a caller
+    that needs both never has to follow up with a second, non-atomic
+    `update_order` call."""
     with _immediate(conn):
         fill = get_fill(conn, fill_id)
         assert fill is not None
@@ -820,15 +830,15 @@ def abort_unfunded_fill(
             )
         if fill["bid_order_id"]:
             if bid_state is not None:
-                new_state, cancel_reason = bid_state, None
+                new_state, reason_to_set = bid_state, cancel_reason
             elif not closet_active(conn, fill["buyer"]):
-                new_state, cancel_reason = CANCELLING, "no_closet"
+                new_state, reason_to_set = CANCELLING, "no_closet"
             else:
-                new_state, cancel_reason = OPEN, None
+                new_state, reason_to_set = OPEN, None
             conn.execute(
                 "UPDATE closet_orders SET state = ?, cancel_reason = COALESCE(?, cancel_reason), "
                 "updated_ts = ? WHERE id = ? AND state = 'matched'",
-                (new_state, cancel_reason, ts, fill["bid_order_id"]),
+                (new_state, reason_to_set, ts, fill["bid_order_id"]),
             )
 
 

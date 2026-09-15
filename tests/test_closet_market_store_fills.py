@@ -161,6 +161,24 @@ def test_abort_unfunded_fill_reopens_bid_and_cancels_short_ask():
     assert cms.get_order(c, fill["ask_order_id"])["state"] == cms.CANCELLED
 
 
+def test_abort_unfunded_fill_cancel_reason_sets_atomically():
+    """(#443 review fix round 2) A caller that needs both bid_state and
+    cancel_reason must get them in the same guarded UPDATE, not a second
+    non-atomic update_order call."""
+    c = _conn()
+    bid = _open_bid(c)
+    fill = cms.fill_bid(c, bid["id"], SELLER, fee_bps=0, platform=None)
+    cms.abort_unfunded_fill(
+        c,
+        fill["id"],
+        "the bid expired before it could be filled",
+        bid_state=cms.CANCELLING,
+        cancel_reason="expired",
+    )
+    got = cms.get_order(c, bid["id"])
+    assert (got["state"], got["cancel_reason"]) == (cms.CANCELLING, "expired")
+
+
 def test_begin_cancel_only_from_open():
     c = _conn()
     bid = _open_bid(c)

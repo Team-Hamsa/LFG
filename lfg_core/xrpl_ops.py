@@ -1854,11 +1854,12 @@ async def find_app_txs_by_memo(tag: str, min_ledger: int | None = None) -> list[
     failure (never report a failed scan as "nothing found").
 
     Also raises if the queried server's own reported `ledger_index_max`
-    (across every page) never reaches `min_ledger`: a lagging or
-    load-balanced server can validate a tx between `_phase_outcome`'s two
-    reads and still answer this scan from a stale view that predates
-    `min_ledger`, which would otherwise report a false "absent" and
-    resubmit (double-send) a tx that already landed."""
+    (across every page) never reaches `min_ledger` — including when no page
+    reported one at all, which is just as untrustworthy as an insufficient
+    one: a lagging or load-balanced server can validate a tx between
+    `_phase_outcome`'s two reads and still answer this scan from a stale view
+    that predates `min_ledger`, which would otherwise report a false "absent"
+    and resubmit (double-send) a tx that already landed."""
     account = config.SIGNING_ACCOUNT
     client = JsonRpcClient(config.JSON_RPC_URL)
     scan_from = -1 if min_ledger is None else max(1, min_ledger - _CLAIM_SCAN_LEDGER_SLACK)
@@ -1881,10 +1882,10 @@ async def find_app_txs_by_memo(tag: str, min_ledger: int | None = None) -> list[
         marker = result.get("marker")
         if not marker:
             break
-    if min_ledger is not None and scanned_to is not None and scanned_to < min_ledger:
+    if min_ledger is not None and (scanned_to is None or scanned_to < min_ledger):
         raise RuntimeError(
-            f"account_tx scan for {tag} only reached ledger {scanned_to}, short of the "
-            f"deadline {min_ledger} — the queried server is lagging"
+            f"account_tx scan for {tag} never reported reaching the deadline ledger "
+            f"{min_ledger} (last known: {scanned_to}) — the queried server is lagging"
         )
     return found
 
