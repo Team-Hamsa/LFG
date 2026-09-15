@@ -50,9 +50,11 @@ Move to the next URL ONLY on:
       errors (``txnNotFound``, ``tooBusy``, ...) with HTTP 200 unless the
       request opts into ``ripplerpc`` >= 3.0, which xrpl-py never sends, so
       those are classified by (b), not by status;
-    * a 2xx with a non-JSON body (``XRPLRequestFailureException``) or a JSON
+    * a 2xx with a non-JSON body (``XRPLRequestFailureException``), a JSON
       body without the ``result``/``status`` envelope (``KeyError`` — the #385
-      malformed-200 shape).
+      malformed-200 shape), or valid JSON of the wrong shape such as ``[]`` or
+      ``{"result": null}`` (``XRPLRequestFailureException``, chained from the
+      conversion's TypeError/AttributeError).
 
 (b) a response whose ``error`` is in ``SOFT_ERROR_CODES`` — the server is
     saying "I can't serve anyone right now", not "your request is wrong":
@@ -233,11 +235,23 @@ async def _post_json_rpc(url: str, payload: dict[str, Any], timeout: float) -> R
         status = response.status_code
         if 200 <= status < 300:
             try:
-                return json_to_response(response.json())
+                body = response.json()
             except JSONDecodeError:
                 raise XRPLRequestFailureException(
                     {"error": status, "error_message": response.text}
                 ) from None
+            try:
+                return json_to_response(body)
+            except (TypeError, AttributeError) as exc:
+                # Valid JSON, wrong shape (`[]`, `{"result": null}`, ...): not
+                # an answer from the ledger. Caught ONLY around this conversion
+                # so a genuine TypeError elsewhere still propagates as a bug;
+                # raised as the transport-failure type so the loop fails over.
+                # (A missing `result` key stays KeyError — the #385 classifier
+                # in xrpl_ops matches on it.)
+                raise XRPLRequestFailureException(
+                    {"error": status, "error_message": "malformed JSON-RPC envelope"}
+                ) from exc
         parsed = _parse_envelope(response)
         if 400 <= status < 500 and status not in RETRYABLE_HTTP_4XX:
             if parsed is not None:

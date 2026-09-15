@@ -692,6 +692,28 @@ def test_verify_endpoint_chain_raises_when_no_endpoint_answers(conn, monkeypatch
     assert calls == [a, b]
 
 
+def test_verify_endpoint_chain_builds_single_endpoint_clients_via_the_factory(conn, monkeypatch):
+    """No backend site constructs the failover client class directly: the
+    per-endpoint check asks xrpl_ops.rpc_client for one single-URL client each."""
+    from lfg_core import config, xrpl_ops
+
+    a, b = "https://a.example/", "https://b.example/"
+    monkeypatch.setattr(config, "JSON_RPC_URLS", (a, b))
+    _per_url_ledger_transport(
+        monkeypatch, {a: brix_drip.MAINNET_GENESIS_HASH, b: brix_drip.MAINNET_GENESIS_HASH}
+    )
+    real_factory = xrpl_ops.rpc_client
+    requested = []
+
+    def spy(urls=None):
+        requested.append(None if urls is None else tuple(urls))
+        return real_factory(urls=urls)
+
+    monkeypatch.setattr(xrpl_ops, "rpc_client", spy)
+    assert asyncio.run(brix_drip.verify_endpoint_chain(conn, "mainnet")) is None
+    assert requested == [(a,), (b,)]
+
+
 def test_verify_endpoint_chain_ignores_hash_case(conn, monkeypatch):
     """Ledger hashes are hex; a case-only difference between the server's
     rendering and the stored value must not reject a correct endpoint."""

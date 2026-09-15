@@ -10,7 +10,7 @@ import os
 import tempfile
 import time
 import traceback
-from collections.abc import AsyncIterator, Callable
+from collections.abc import AsyncIterator, Callable, Sequence
 from contextlib import asynccontextmanager
 from dataclasses import dataclass
 from datetime import datetime
@@ -58,17 +58,19 @@ from xrpl.wallet import Wallet
 from lfg_core import config, memos, owner_lock, payment_ledger, xrpl_rpc
 
 
-def rpc_client() -> JsonRpcClient:
-    """THE sync JSON-RPC client factory: fails over across
-    `config.JSON_RPC_URLS` (primary first) on busy/unsynced/unreachable
-    endpoints — never on a transaction result or any other real answer.
-    Rules and the duplicate-submit safety argument: lfg_core/xrpl_rpc.py."""
-    return xrpl_rpc.FailoverJsonRpcClient(config.JSON_RPC_URLS)
+def rpc_client(urls: Sequence[str] | None = None) -> JsonRpcClient:
+    """THE sync JSON-RPC client factory — no backend site constructs a client
+    class directly. Fails over across `urls` (default `config.JSON_RPC_URLS`,
+    primary first) on busy/unsynced/unreachable endpoints — never on a
+    transaction result or any other real answer. Pass a one-element `urls` for
+    a single-endpoint client (e.g. per-endpoint chain verification). Rules and
+    the duplicate-submit safety argument: lfg_core/xrpl_rpc.py."""
+    return xrpl_rpc.FailoverJsonRpcClient(config.JSON_RPC_URLS if urls is None else urls)
 
 
-def async_rpc_client() -> AsyncJsonRpcClient:
+def async_rpc_client(urls: Sequence[str] | None = None) -> AsyncJsonRpcClient:
     """Async twin of `rpc_client` (same URL list, same failover rules)."""
-    return xrpl_rpc.AsyncFailoverJsonRpcClient(config.JSON_RPC_URLS)
+    return xrpl_rpc.AsyncFailoverJsonRpcClient(config.JSON_RPC_URLS if urls is None else urls)
 
 
 # On-ledger NFToken flag bits (mirror the tf* mint flags)

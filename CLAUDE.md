@@ -573,8 +573,10 @@ the backend default) — the memo, like the SourceTag, must never be omitted.
   with a 45 s per-URL cooldown; if all fail, the last outcome surfaces
   unchanged. Re-sending a submit is safe: `_submit_and_confirm` signs once, the
   client only re-posts the identical signed blob (same hash + Sequence, at most
-  one can validate). Never construct `JsonRpcClient(config.JSON_RPC_URL)`
-  directly. WS / clio endpoints have no failover.
+  one can validate). Never construct a JSON-RPC client class directly
+  (`JsonRpcClient(...)` or the failover classes) — pass `urls=[url]` to the
+  factory when a single endpoint is needed (e.g. `brix_drip`'s per-endpoint
+  chain check). WS / clio endpoints have no failover.
 - Wallet is initialized from SEED environment variable
 - All NFT minting uses `NFTokenMint` with transfer fees (`TransferFee = 7000`; the field is in units of 1/100,000, so 7000 = **7%** secondary sales fee — not 70%, which the 50000-unit field cap makes impossible)
 - NFT flags = 25 (burnable + transferable + mutable — Dynamic NFTs amendment).
@@ -823,7 +825,8 @@ DB and paid on-chain only when the holder explicitly claims. Design:
   ```
   `accrue_brix.py` refuses to run (exit 2) unless `--network` matches
   `XRPL_NETWORK`, every reachable JSON-RPC failover endpoint's ledger-32570
-  hash matches the chain identity the archive recorded (at least one must
+  hash matches the chain identity the archive recorded (each checked through
+  its own single-endpoint `xrpl_ops.rpc_client(urls=[url])`; at least one must
   answer), **and** the collection index is non-empty
   (`nft_index.collection_owners`) — an empty index would make every token look
   ineligible and certify a silent zero-pay day.

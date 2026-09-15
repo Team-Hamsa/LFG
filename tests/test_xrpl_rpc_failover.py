@@ -381,6 +381,12 @@ def test_factories_use_configured_url_list(monkeypatch):
     assert sync_client.urls == (B, C) and async_client.urls == (B, C)
 
 
+def test_factories_accept_an_explicit_url_list(monkeypatch):
+    monkeypatch.setattr(config, "JSON_RPC_URLS", (B, C))
+    assert xrpl_ops.rpc_client(urls=[A]).urls == (A,)
+    assert xrpl_ops.async_rpc_client(urls=[A, C]).urls == (A, C)
+
+
 # --- config: ordered, de-duplicated URL list ---
 
 
@@ -655,6 +661,56 @@ def test_http_400_json_is_returned_as_the_answer(monkeypatch):
     out = _sync(client.request, Ledger(ledger_index="validated"))
     assert not out.is_successful() and out.result["error"] == "invalidParams"
     assert seen == [A]
+
+
+@pytest.mark.parametrize(
+    "body",
+    [[], {"result": None}, {"result": "oops"}, [{"result": {"status": "success"}}]],
+    ids=["array", "result-null", "result-string", "array-of-envelopes"],
+)
+def test_http_2xx_wrong_json_shape_fails_over(monkeypatch, body):
+    seen: list = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        url = str(request.url)
+        seen.append(url)
+        if url == A:
+            return httpx.Response(200, json=body)
+        return httpx.Response(200, json=_OK_BODY)
+
+    monkeypatch.setattr(xrpl_rpc, "_http_transport", httpx.MockTransport(handler))
+    client = xrpl_rpc.FailoverJsonRpcClient([A, B])
+    assert _sync(client.request, Ledger(ledger_index="validated")).is_successful()
+    assert seen == [A, B]
+
+
+def test_http_2xx_wrong_json_shape_on_last_endpoint_raises_request_failure(monkeypatch):
+    monkeypatch.setattr(
+        xrpl_rpc,
+        "_http_transport",
+        httpx.MockTransport(lambda request: httpx.Response(200, json={"result": None})),
+    )
+    client = xrpl_rpc.FailoverJsonRpcClient([A])
+    with pytest.raises(XRPLRequestFailureException) as info:
+        _sync(client.request, Ledger(ledger_index="validated"))
+    assert info.value.error == 200
+
+
+def test_indeterminate_submit_through_failover_still_carries_signed_hash(monkeypatch, tmp_path):
+    """#497: when every endpoint is busy for the submit AND the confirm, the
+    IndeterminateResultError still names the one signed hash."""
+    wallet, tx, state = _submit_confirm_fixture(monkeypatch, tmp_path)
+    monkeypatch.setattr(xrpl_ops.asyncio, "sleep", _no_sleep)
+    _install(monkeypatch, {A: [_err("tooBusy")], B: [httpx.ConnectError("down")]})
+    client = xrpl_rpc.FailoverJsonRpcClient([A, B])
+    with pytest.raises(xrpl_ops.IndeterminateResultError) as info:
+        _run(xrpl_ops._submit_and_confirm(tx, wallet, client, "all busy"))
+    assert info.value.tx_hash == state["tx"].get_hash()
+    assert state["signs"] == 1
+
+
+async def _no_sleep(_seconds):
+    return None
 
 
 def test_http_2xx_non_json_still_fails_over(monkeypatch):

@@ -35,7 +35,7 @@ from typing import Any, Protocol
 
 from xrpl.models.requests import Request
 
-from lfg_core import config, epoch_state, history_store, xrpl_ops, xrpl_rpc
+from lfg_core import config, epoch_state, history_store, xrpl_ops
 
 logger = logging.getLogger(__name__)
 
@@ -740,19 +740,18 @@ async def verify_endpoint_chain(conn: sqlite3.Connection, network: str) -> str |
         return None
 
     # JSON-RPC failover means a later read may be served by ANY configured
-    # endpoint, so each one is checked on its own (single-URL client, no
-    # failover). A reachable endpoint on the wrong chain refuses; one that
-    # cannot answer is skipped with a warning, as long as at least one
-    # endpoint verifies — otherwise the last failure propagates, as it did
-    # when there was a single endpoint.
+    # endpoint, so each one is checked on its own: a single-endpoint client
+    # from the xrpl_ops.rpc_client factory (urls=[url], so nothing to fail over
+    # to). A reachable endpoint on the wrong chain refuses; one that cannot
+    # answer is skipped with a warning, as long as at least one endpoint
+    # verifies — otherwise the last failure propagates, as it did when there
+    # was a single endpoint.
     last_exc: BaseException | None = None
     verified = False
     for url in config.JSON_RPC_URLS:
-        client = xrpl_rpc.FailoverJsonRpcClient([url])
+        client = xrpl_ops.rpc_client(urls=[url])
 
-        async def request_fn(
-            req: dict[str, Any], client: xrpl_rpc.FailoverJsonRpcClient = client
-        ) -> dict[str, Any]:
+        async def request_fn(req: dict[str, Any], client: Any = client) -> dict[str, Any]:
             # xrpl-py's JsonRpcClient exposes no timeout, so an unresponsive
             # endpoint would hang the accrual run indefinitely instead of
             # failing it. Bound it here.
