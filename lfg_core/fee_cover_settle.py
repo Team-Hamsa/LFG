@@ -26,6 +26,10 @@ RIPPLE_EPOCH_OFFSET = 946_684_800
 # A promise is written when its bid validates; its accept cannot predate that,
 # but clocks differ between the service and ledger close times — allow slack.
 ACCEPT_LOOKBACK_SECONDS = 3600
+# The listener flushes the archive's validated cursor ahead of committing the
+# derived nft_events sale row; allow margin so an accept straddling the expiry
+# is not released before it's fully indexed (seconds of listener lag).
+EXPIRY_RELEASE_MARGIN_SECONDS = 600
 
 
 def _unix_now() -> int:
@@ -226,18 +230,31 @@ def _release_reason(deps: FeeCoverDeps, promise: dict[str, Any]) -> str | None:
     hconn = history_store.init_history_db(deps.history_db_path)
     try:
         since = int(promise["created_at"]) - ACCEPT_LOOKBACK_SECONDS
+        # Check if the bid was accepted (filled): settle_promise owns it.
         if find_accept_tx(hconn, nft_id, offer_index, since) is not None:
-            return None  # filled: settle_promise owns it (e.g. get_tx was down)
+            return None
+        # Check if the bid was cancelled.
         if cancel_seen(hconn, nft_id, offer_index):
             return "cancelled"
+        # Check expiration: if no expiration set, keep the promise open.
         expiration = promise["bid_expiration"]
         if expiration is None:
             return None
         expiry_unix = int(expiration) + RIPPLE_EPOCH_OFFSET
+        # Bid is not expired yet.
+        if deps.now() <= expiry_unix:
+            return None
+        # Bid is expired. Check archive state before releasing: the listener
+        # may still be indexing the accept that validates at or near the expiry.
+        # Only release if the archive is certified past expiry + margin.
         if (
-            deps.now() <= expiry_unix
-            or archive_blocker(hconn, deps.network, expiry_unix) is not None
+            archive_blocker(hconn, deps.network, expiry_unix + EXPIRY_RELEASE_MARGIN_SECONDS)
+            is not None
         ):
+            return None
+        # Final check: archive is past expiry+margin; if the accept now appears,
+        # settle_promise will own it (e.g. listener just indexed it).
+        if find_accept_tx(hconn, nft_id, offer_index, since) is not None:
             return None
         return "expired"
     finally:

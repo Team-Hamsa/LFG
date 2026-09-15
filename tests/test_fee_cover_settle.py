@@ -505,3 +505,62 @@ def test_sweep_gives_up_on_a_refund_after_max_attempts(env):
         _run(settle.sweep_once(deps, attempts=attempts, max_attempts=2, on_giveup=gave_up.append))
     assert len(ledger.sent) == 2
     assert [row["accept_tx_hash"] for row in gave_up] == [ACCEPT]
+
+
+# --- expiry release margin tests ---
+
+
+def test_expired_release_with_archived_accept_but_get_tx_fails_stays_open(env):
+    """Expired bid with accept archived but get_tx down: release nothing, stay open."""
+    deps, ledger, campaign = env
+    test_offer = "E" * 64
+    # Create promise and archive accept for the same offer (so accept lookup finds it)
+    _promise(deps, campaign, offer_index=test_offer, bidder="rOtherBidder", expiration=800_000_000)
+    # Archive an accept but with the test_offer as NFTokenBuyOffer
+    tx = _tx()
+    tx["NFTokenBuyOffer"] = test_offer
+    _archive_accept(deps, tx=tx, ts=ACCEPT_TS)
+    ledger.get_tx_error = RuntimeError("rpc down")
+    _archive_state(deps, close_time=NOW)
+    report = _run(settle.sweep_once(deps, attempts={}, max_attempts=5, on_giveup=lambda row: None))
+    assert report.released == 0
+    conn = store.connect(deps.app_db_path)
+    try:
+        promise = store.get_promise(conn, test_offer)
+        assert promise["state"] == "open" and promise["reason"] is None
+    finally:
+        conn.close()
+
+
+def test_expired_release_respects_archive_margin(env):
+    """Expired bid without accept: within margin (expiry+300) → not released;
+    past margin (expiry+601) → released."""
+    deps, _, campaign = env
+    expiration = 800_000_000
+    _promise(deps, campaign, offer_index="E" * 64, bidder="rOtherBidder", expiration=expiration)
+    expiry_unix = expiration + settle.RIPPLE_EPOCH_OFFSET
+    # Test within margin: archive close_time = expiry_unix + 300
+    _archive_state(deps, close_time=expiry_unix + 300)
+    report = _run(settle.sweep_once(deps, attempts={}, max_attempts=5, on_giveup=lambda row: None))
+    assert report.released == 0
+    # Test past margin: archive close_time = expiry_unix + 601
+    _archive_state(deps, close_time=expiry_unix + 601)
+    report = _run(settle.sweep_once(deps, attempts={}, max_attempts=5, on_giveup=lambda row: None))
+    assert report.released == 1
+    conn = store.connect(deps.app_db_path)
+    try:
+        promise = store.get_promise(conn, "E" * 64)
+        assert promise["reason"] == "expired"
+    finally:
+        conn.close()
+
+
+def test_pay_refund_with_failed_claim_payment(env):
+    """pay_refund where send_refund returns ClaimPayment("failed", None, 7_040)
+    → returns "failed", row state becomes "failed", reason becomes "payout_failed"."""
+    deps, ledger, campaign = env
+    _owed(deps, campaign)
+    ledger.payment = xrpl_ops.ClaimPayment("failed", None, 7_040)
+    assert _run(settle.pay_refund(deps, ACCEPT)) == "failed"
+    row = _refund(deps)
+    assert row["state"] == "failed" and row["reason"] == "payout_failed"
