@@ -4,7 +4,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Project Overview
 
-**LFG Bot** is a Discord bot that allows users to mint NFTs on the XRP Ledger (XRPL) and trade tokens (LFGO) using the XUMM app. The bot dynamically generates NFT images by compositing trait layers, uploads them to BunnyCDN, and mints them on the XRPL.
+**LFG** is an XRPL NFT platform — one `lfg_service` backend behind five client surfaces (Discord bot, Discord Activity, Telegram bot, Telegram Mini App, web app at build.letseffinggo.com). Users mint NFTs (paid in LFGO, or XRP via a DEX buy-and-burn), swap traits in place via `NFTokenModify`, trade on an in-app marketplace, and run a dress-up trait economy; users sign in Xaman or (web only) Joey Wallet over WalletConnect, and the backend signs the project-side ops with the issuer's regular key. Art is composed at mint time from trait layers, uploaded to BunnyCDN, and minted on XRPL mainnet (5,200+ editions as of 2026-09-14).
 
 ## Feature Workflow: Brainstorming → Spec → Plan → Issue Link
 
@@ -85,7 +85,7 @@ NFT_FLAGS=25
 CLOSET_TAXON=1762                                           # optional; Closet soulbound taxon (default 1762)
 TRAIT_TAXON=176                                             # optional; tradeable trait token taxon (default 176, flipped from 1763 for #217)
 ASSEMBLE_TAXON=1760                                         # optional; taxon for Assemble-minted rebirth characters, distinct from NFT_TAXON=0 (default 1760)
-SHOP_ENABLED=0                                              # optional; Trait Shop master flag — 0 (default) = the PROJECT never sells traits; users only buy them from each other via the marketplace
+SHOP_ENABLED=0                                              # optional; Trait Shop master flag — 0 (default, and prod) = no on-demand project trait minting; the marketplace Traits tab (user + fixture listings) stays on
 SHOP_BASE_BRIX=1.0                                          # optional; Trait Shop price numerator, BRIX (default 1.0, #217)
 SHOP_MIN_BRIX=5                                             # optional; Trait Shop price floor, BRIX (default 5, #217)
 SHOP_MAX_BRIX=5000                                          # optional; Trait Shop price ceiling, BRIX (default 5000, #217)
@@ -228,6 +228,9 @@ auto-restart hook is retired.
 | `lfg-sourcetag` (cron 00:20) | not registered yet (post-merge ops step) |
 | `lfg-brix-accrue` (cron 00:40) | `stg-brix-accrue` (cron 00:40, testnet) |
 | `lfg-market-sweep` (cron 03:30) | `stg-market-sweep` (cron 03:30, testnet) |
+| `lfg-economy-reconcile` (cron 00:20) → `lfg-economy-audit` (00:25) | `stg-economy-reconcile` / `stg-economy-audit` (testnet) |
+| `lfg-x` (X mint auto-poster, live since 2026-09-10) | none (no staging X creds) |
+| `lfg-funnel-health` | not registered |
 | `lfg-deployer` | `stg-deployer` |
 
 `lfg-market-sweep` / `stg-market-sweep` (#288) run `scripts/backfill_market.py
@@ -244,7 +247,16 @@ running stack — going live is an ops step per stack:
 `pm2 start ecosystem.prod.config.js --only lfg-market-sweep && pm2 save`
 (staging: `--only stg-market-sweep`).
 
-The X auto-poster (#41, `run_x.py`) is not yet in the pm2 tables — it goes live via the ops checklist on #41 (`lfg-x`, with `stop_exit_codes: [0]` so the X_ENABLED-off exit(0) parks instead of thrashing).
+The X auto-poster (#41, `run_x.py`) runs in prod as `lfg-x` (registered in
+`ecosystem.prod.config.js` with `stop_exit_codes: [0]` so an X_ENABLED-off
+exit(0) parks instead of thrashing) since 2026-09-10: `X_ENABLED=1` + all four
+OAuth 1.0a creds + `SERVICE_TOKEN_X` in the prod `.env`, posting as
+@JoshuaHamsa for now, tweets are link-free text with the branded share-card
+render attached (`SHARE_CARD_RENDER_ENABLED=1`, #479). Per-user "Share from
+my account" (#252) is built but DARK in prod — `X_TOKEN_ENC_KEY` is not set,
+so `/api/config` reports `x_user_share:false`. Nightly economy audits have
+reported `Conservation: DRIFT` since the flip and `ECONOMY_AUDIT_WEBHOOK_URL`
+is unset in prod, so nothing alerts — tracked in #493.
 
 Ecosystem files: `ecosystem.prod.config.js` / `ecosystem.staging.config.js`.
 Staging env deltas: `docs/ops/env.staging.example`. The `~/LFG` working copy
@@ -1424,9 +1436,9 @@ stay lfg_core-import-free). Runtime entrypoints (`main.py`, pm2 processes,
 
 ## Important Notes
 
-1. **Token Trustline Required**: Users must set up a trustline for LFGO tokens before receiving payment instructions. The `/letsgo` command provides a "Set LFGO Trustline" button.
+1. **Trustlines**: LFGO is only needed to pay in LFGO (wallets without enough LFGO pay XRP; the backend buys-and-burns the LFGO). The Discord `/letsgo` "Set LFGO Trustline" button is bot-local and sets the `TOKEN_*` (LFGO) line only. BRIX (drip claims, trait buys) uses the Activity's `POST /api/brix/trustline` flow (#442), which opens on `trustline_required`. Known bug: the Discord `/claim` error text points at the LFGO button, which does not fix a BRIX `trustline_required` (task spawned 2026-09-14).
 
-2. **XUMM Flow**: All signing is handled by XUMM (no private keys in bot). Users scan QR codes to approve transactions in their XUMM wallet app.
+2. **Signing**: users sign their own transactions in Xaman (every surface) or Joey Wallet over WalletConnect (web-only sign-in + signing, #447) — the app never holds a *user's* key. The backend DOES hold hot keys: `SEED` (the issuer's regular key, submitted for `SIGNING_ACCOUNT`) signs mints, delivery/shop offers, `NFTokenModify`, burns and the AMM buy-and-burn, and `BRIX_DISTRIBUTOR_SEED` signs drip payouts — ~77% of tagged mainnet txs are backend-signed. Never write "no private keys in the app" in user-facing docs; the accurate claim is "no user keys".
 
    **Push delivery (#135):** for a returning, registered user the sign request
    is *push-delivered* to their Xaman app instead of forcing a fresh QR scan.
