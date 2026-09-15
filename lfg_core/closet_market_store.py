@@ -936,6 +936,33 @@ def has_unmirrored_fill(conn: sqlite3.Connection, owner: str) -> bool:
     return row is not None
 
 
+MIRROR_SETTLE_SECONDS = 300
+
+
+def has_recent_fill(
+    conn: sqlite3.Connection,
+    owner: str,
+    window_seconds: int = MIRROR_SETTLE_SECONDS,
+    *,
+    now: int | None = None,
+) -> bool:
+    """The listener/backfill rebuild guard (#443 final review I2): True while
+    `has_unmirrored_fill`, and for `window_seconds` after this owner's side of
+    a fill was marked mirrored — clio can keep serving the pre-mirror Closet
+    metadata for a while after the modify validates, and rebuilding from it
+    would resurrect the moved unit. `updated_ts` stands in for the mirror time
+    (a later write to the fill only lengthens the guard)."""
+    if has_unmirrored_fill(conn, owner):
+        return True
+    since = (now if now is not None else _now()) - window_seconds
+    row = conn.execute(
+        "SELECT 1 FROM closet_fills WHERE ((seller = ? AND seller_mirrored = 1) OR "
+        "(buyer = ? AND buyer_mirrored = 1)) AND updated_ts >= ? LIMIT 1",
+        (owner, owner, since),
+    ).fetchone()
+    return row is not None
+
+
 def open_orders_for_meta(conn: sqlite3.Connection, owner: str) -> list[dict[str, Any]] | None:
     rows = _many(
         conn,

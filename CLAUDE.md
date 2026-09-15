@@ -1312,8 +1312,9 @@ Off-ledger trait order book for loose Closet assets. Design:
   lookup or LLS passing (never "absent = failed").
 - **The DB is ahead of the Closet token between asset move and mirror.**
   `nft_listener._apply_closet` and `backfill_economy._reconcile_closet` skip
-  rebuilding `closet_assets` for an owner with an unmirrored fill
-  (`has_unmirrored_fill`) — removing that guard resurrects moved units.
+  rebuilding `closet_assets` for an owner with an unmirrored fill, or one
+  mirrored in the last 5 minutes (clio can serve stale metadata right after
+  the modify) — `has_recent_fill`; removing that guard resurrects moved units.
 - Mainnet BRIX issuer is `rLfgoBriX…` (RegularKey = distributor), not the NFT
   issuer; testnet's SEED account is both issuer and app wallet.
 

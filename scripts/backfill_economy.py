@@ -100,9 +100,9 @@ def _reconcile_closet(
         return False
     if not isinstance(metadata, dict):
         return False  # unreadable read must not masquerade as an empty closet
-    if closet_market_store.has_unmirrored_fill(conn, owner):
+    if closet_market_store.has_recent_fill(conn, owner):
         # #443: DB is ahead of the token until the fill's mirror lands — see nft_listener._apply_closet.
-        print(f"skip contents for {owner}: unmirrored Closet Market fill")
+        print(f"skip contents for {owner}: recent Closet Market fill")
     else:
         assets, bodies = closet_token.parse_closet_metadata(metadata, genesis)
         economy_store.set_closet_contents(conn, owner, assets, bodies)

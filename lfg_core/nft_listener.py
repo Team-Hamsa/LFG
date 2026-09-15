@@ -182,12 +182,13 @@ def _apply_closet(
         economy_store.delete_closet(conn, owner)
         return
     if isinstance(metadata, dict):
-        if closet_market_store.has_unmirrored_fill(conn, owner):
+        if closet_market_store.has_recent_fill(conn, owner):
             # #443: a Closet Market fill moved a unit in the DB first; this
             # owner's token metadata is behind until the fill's mirror modify
-            # lands. Rebuilding now would resurrect the moved unit.
+            # lands (and clio may lag a few minutes past that). Rebuilding
+            # now would resurrect the moved unit.
             logging.info(
-                f"_apply_closet: {owner} has an unmirrored Closet Market fill; keeping DB contents"
+                f"_apply_closet: {owner} has a recent Closet Market fill; keeping DB contents"
             )
         else:
             assets, bodies = closet_token.parse_closet_metadata(metadata, genesis)

@@ -125,6 +125,29 @@ def test_move_asset_is_atomic_and_closes_orders():
     assert cms.get_fill(c, fill["id"])["state"] == cms.MIRRORED
 
 
+def test_has_recent_fill_covers_a_just_mirrored_side():
+    """(#443 final review I2) clio can serve the pre-mirror Closet metadata
+    for a while after the mirror modify, so a side stays guarded for a
+    window after it is marked mirrored."""
+    c = _conn()
+    bid = _open_bid(c)
+    fill = cms.fill_bid(c, bid["id"], SELLER, fee_bps=0, platform=None)
+    assert not cms.has_recent_fill(c, SELLER)  # pre-move: the DB is not ahead yet
+    cms.update_fill(c, fill["id"], state=cms.FUNDED, escrow_finish_hash="F")
+    cms.move_asset(c, fill["id"])
+    assert cms.has_recent_fill(c, SELLER) and cms.has_recent_fill(c, BUYER)  # unmirrored
+    cms.update_fill(c, fill["id"], state=cms.PAID)
+    cms.mark_side_mirrored(c, fill["id"], "seller")
+    cms.mark_side_mirrored(c, fill["id"], "buyer")
+    assert cms.get_fill(c, fill["id"])["state"] == cms.MIRRORED
+    mirrored_at = cms.get_fill(c, fill["id"])["updated_ts"]
+    assert cms.has_recent_fill(c, SELLER, now=mirrored_at + 10)
+    assert cms.has_recent_fill(c, BUYER, now=mirrored_at + 300)
+    assert not cms.has_recent_fill(c, SELLER, now=mirrored_at + 301)
+    assert not cms.has_recent_fill(c, BUYER, window_seconds=5, now=mirrored_at + 10)
+    assert not cms.has_recent_fill(c, OTHER, now=mirrored_at)
+
+
 def test_move_asset_refunds_when_seller_no_longer_holds():
     c = _conn()
     ask = cms.create_ask(c, owner=SELLER, slot="Head", value="Crown", price_brix="5", platform=None)

@@ -2,6 +2,7 @@ import asyncio
 import importlib.util
 import pathlib
 import sqlite3
+import time
 
 from lfg_core import closet_market_store as cms
 from lfg_core import closet_token as ct
@@ -96,12 +97,47 @@ def test_backfill_does_not_resurrect_a_moved_unit():
     assert cms.holding_count(c, SELLER, "Head", "Crown") == 0
 
 
-def test_listener_rebuilds_normally_once_mirrored():
+def _mirrored_fill_conn(seconds_ago):
     c = _moved_fill_conn()
     fill_id = c.execute("SELECT id FROM closet_fills").fetchone()[0]
     cms.update_fill(c, fill_id, state=cms.PAID)
     cms.mark_side_mirrored(c, fill_id, "seller")
     cms.mark_side_mirrored(c, fill_id, "buyer")
+    c.execute(
+        "UPDATE closet_fills SET updated_ts = ? WHERE id = ?",
+        (int(time.time()) - seconds_ago, fill_id),
+    )
+    c.commit()
+    return c
+
+
+def test_listener_still_skips_a_just_mirrored_owner():
+    """(#443 final review I2) the mirror modify just landed but clio can still
+    serve the stale pre-fill metadata — rebuilding now resurrects the unit."""
+    c = _mirrored_fill_conn(10)
+    nft_listener._apply_closet(
+        c, {"owner": SELLER, "nft_id": "C-rSeller", "uri_hex": "00"}, _stale_seller_meta()
+    )
+    assert cms.holding_count(c, SELLER, "Head", "Crown") == 0
+
+
+def test_backfill_still_skips_a_just_mirrored_owner():
+    path = pathlib.Path(__file__).resolve().parents[1] / "scripts" / "backfill_economy.py"
+    spec = importlib.util.spec_from_file_location("backfill_economy_under_test", path)
+    mod = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(mod)
+    c = _mirrored_fill_conn(10)
+    mod._reconcile_closet(
+        c,
+        {"owner": SELLER, "nft_id": "C-rSeller", "uri_hex": "00"},
+        _stale_seller_meta(),
+        "rIssuer",
+    )
+    assert cms.holding_count(c, SELLER, "Head", "Crown") == 0
+
+
+def test_listener_rebuilds_normally_once_mirrored_long_enough():
+    c = _mirrored_fill_conn(400)
     nft_listener._apply_closet(
         c,
         {"owner": SELLER, "nft_id": "C-rSeller", "uri_hex": "00"},
