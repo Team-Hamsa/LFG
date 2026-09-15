@@ -589,12 +589,13 @@ def _insert_fill(
     overshoot_brix: str,
     platform: str | None,
     ts: int,
+    user_lls: int | None = None,
 ) -> str:
     fid = new_id()
     conn.execute(
         "INSERT INTO closet_fills (id, ask_order_id, bid_order_id, funds_source, seller, buyer, slot, "
-        "value, price_brix, fee_brix, overshoot_brix, state, platform, created_ts, updated_ts) "
-        "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'funds_pending', ?, ?, ?)",
+        "value, price_brix, fee_brix, overshoot_brix, state, platform, user_lls, created_ts, updated_ts) "
+        "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'funds_pending', ?, ?, ?, ?)",
         (
             fid,
             ask_order_id,
@@ -608,6 +609,7 @@ def _insert_fill(
             fee_brix,
             overshoot_brix,
             platform,
+            user_lls,
             ts,
             ts,
         ),
@@ -726,6 +728,7 @@ def create_take_fill(
     *,
     fee_bps: int,
     platform: str | None,
+    user_lls: int | None = None,
     now: int | None = None,
 ) -> dict[str, Any]:
     """A buyer starts paying for an ask. The ask is NOT reserved: the first
@@ -755,6 +758,7 @@ def create_take_fill(
             overshoot_brix="0",
             platform=platform,
             ts=ts,
+            user_lls=user_lls,
         )
     fill = get_fill(conn, fid)
     assert fill is not None

@@ -214,7 +214,13 @@ def test_bid_create_refuses_when_the_ledger_is_unreadable(closet_env, monkeypatc
     c.close()
 
 
-def test_ask_buy_fails_the_fill_when_the_ledger_is_unreadable(closet_env, monkeypatch):
+def test_ask_buy_refuses_before_creating_a_fill_when_the_ledger_is_unreadable(
+    closet_env, monkeypatch
+):
+    """(#502 follow-up) The ledger index is read BEFORE create_take_fill, so an
+    unreadable ledger must leave no closet_fills row at all — a process exit
+    between an insert and a later update could otherwise strand a fill with
+    neither payload_uuid nor user_lls, unresolvable by the settlement sweep."""
     c = _db(closet_env)
     ask = cms.create_ask(c, owner=ME, slot="Head", value="Crown", price_brix="5", platform=None)
     c.close()
@@ -237,8 +243,10 @@ def test_ask_buy_fails_the_fill_when_the_ledger_is_unreadable(closet_env, monkey
     assert built == []
     c = _db(closet_env)
     rows = c.execute("SELECT state, error FROM closet_fills").fetchall()
+    ask_row = cms.get_order(c, ask["id"])
     c.close()
-    assert rows == [(cms.FAILED, "could not read the ledger")]
+    assert rows == []
+    assert ask_row["state"] == cms.OPEN
 
 
 # --- PR #502: persist the recovery intent BEFORE any Xaman payload exists -----

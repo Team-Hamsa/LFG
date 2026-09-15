@@ -5611,6 +5611,17 @@ async def handle_closet_ask_buy(request):
         return web.json_response(
             {"error": "pricing unavailable — try again", "code": "pricing_unavailable"}, status=503
         )
+    # (PR #502 G1, #502 follow-up) The Payment pins a LastLedgerSequence so "no
+    # payment arrived" is decidable; no validated index, no fill, no payload —
+    # reading it BEFORE create_take_fill means a process exit can never leave
+    # a fill with no user_lls for the settlement sweep to resolve by.
+    idx = await xrpl_ops.current_validated_ledger_index()
+    if idx is None:
+        return web.json_response(
+            {"error": "could not read the ledger — try again", "code": "ledger_unavailable"},
+            status=503,
+        )
+    lls = idx + config.CLOSET_USER_TX_LEDGER_WINDOW
     try:
         fill = await _closet_db(
             closet_market_store.create_take_fill,
@@ -5618,28 +5629,10 @@ async def handle_closet_ask_buy(request):
             wallet,
             fee_bps=config.CLOSET_MARKET_FEE_BPS,
             platform=_platform(user),
+            user_lls=lls,
         )
     except closet_market_store.OrderError as exc:
         return _order_error_response(exc)
-    # (PR #502 G1) The Payment pins a LastLedgerSequence so "no payment
-    # arrived" is decidable; no validated index, no deadline, no payload.
-    idx = await xrpl_ops.current_validated_ledger_index()
-    if idx is None:
-        await _closet_db(
-            closet_market_store.update_fill,
-            fill["id"],
-            state=closet_market_store.FAILED,
-            error="could not read the ledger",
-        )
-        return web.json_response(
-            {"error": "could not read the ledger — try again", "code": "ledger_unavailable"},
-            status=503,
-        )
-    lls = idx + config.CLOSET_USER_TX_LEDGER_WINDOW
-    # (PR #502) Persist the deadline BEFORE any payload exists, so a payload
-    # pushed to the wallet ahead of a None return (or a crash) still leaves a
-    # fill the flow can resolve by InvoiceID once the ledger passes user_lls.
-    await _closet_db(closet_market_store.update_fill, fill["id"], user_lls=lls)
     payload = await xumm_ops.create_closet_buy_payload(
         wallet,
         market_ops.brix_amount_dict(ask["price_brix"]),

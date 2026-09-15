@@ -339,6 +339,18 @@ def test_user_lls_is_persisted_on_bids_and_fills():
     assert (got["payload_uuid"], got["user_lls"]) == ("PU", 777)
 
 
+def test_create_take_fill_persists_user_lls_in_the_same_insert():
+    """(#502 follow-up) user_lls must be writable at creation, not only via a
+    later update_fill — a crash between the two would otherwise leave a fill
+    the settlement path can never resolve."""
+    c = _conn()
+    ask = cms.create_ask(c, owner=SELLER, slot="Head", value="Crown", price_brix="5", platform=None)
+    fl = cms.create_take_fill(c, ask["id"], BUYER, fee_bps=0, platform=None, user_lls=123)
+    assert fl["user_lls"] == 123
+    got = cms.get_fill(c, fl["id"])
+    assert got["user_lls"] == 123
+
+
 def test_ensure_schema_adds_user_lls_to_existing_tables():
     c = sqlite3.connect(":memory:")
     legacy = "\n".join(line for line in cms._SCHEMA.splitlines() if "user_lls" not in line)
