@@ -427,20 +427,29 @@ def test_take_unvalidated_past_last_ledger_sequence_fails(tmp_path):
 def test_phase_outcome_uses_prescan_index_not_a_later_one(tmp_path):
     """(#443 review fix) Reading the ledger index AFTER the memo scan let a tx
     that validates in between look "absent" and get resubmitted (double pay).
-    The fix reads the index BEFORE scanning and never consults a later
-    reading, even when one is available."""
+    The fix reads the index BEFORE scanning: `find_txs_fn` here simulates the
+    ledger advancing past `lls` WHILE the scan runs (as a real account_tx
+    round-trip could) — if the index is read after the scan, that later value
+    (200) wrongly clears the intent and resubmits; read before, only the
+    earlier value (100) is ever consulted and the fill correctly keeps
+    waiting."""
     path, f = _db(tmp_path), Fakes()
     fl = _holder_fill(path, f)
     c = conn(path)
     cms.update_fill(c, fl["id"], state=cms.INDETERMINATE, pending_phase="finish", pending_lls=140)
     c.close()
-    readings = iter([100, 200])  # only the first (pre-scan) value may ever be used
+    clock = {"value": 100}
     d = deps(path, f, tmp_path)
 
     async def index_fn():
-        return next(readings)
+        return clock["value"]
+
+    async def find_txs_fn(tag, lls):
+        clock["value"] = 200  # the ledger advances past lls during the scan itself
+        return []
 
     d.ledger_index_fn = index_fn
+    d.find_txs_fn = find_txs_fn
     assert run(cmf.settle_fill(fl["id"], d)) == cms.INDETERMINATE
     got = fill(path, fl["id"])
     assert got["pending_phase"] == "finish" and got["escrow_finish_hash"] is None
