@@ -92,6 +92,52 @@ if _signing_override:
 SIGNING_ACCOUNT = _signing_override or _seed_address()
 
 JSON_RPC_URL = os.getenv("XRPL_JSON_RPC_URL", _default_rpc)
+
+# JSON-RPC failover (#493 follow-up): after the primary, these same-chain
+# endpoints are tried in order when one is busy/unsynced/unreachable — see
+# lfg_core/xrpl_rpc.py for the exact rules. XRPL_JSON_RPC_FALLBACK_URLS
+# (comma-separated) replaces the per-network defaults when set non-empty.
+MAINNET_JSON_RPC_FALLBACK_URLS = (
+    "https://xrplcluster.com/",
+    "https://s2.ripple.com:51234/",
+    "https://s1.ripple.com:51234/",
+)
+TESTNET_JSON_RPC_FALLBACK_URLS = (
+    "https://s.altnet.rippletest.net:51234/",
+    "https://testnet.xrpl-labs.com/",
+)
+
+
+def json_rpc_urls(primary: str, fallbacks: str | None, *, network: str) -> tuple[str, ...]:
+    """Ordered, de-duplicated JSON-RPC URL list: `primary` first, then the
+    comma-separated `fallbacks` or — when that is unset/blank — the network's
+    defaults. Duplicates compare case-insensitively ignoring a trailing slash;
+    the first spelling wins. A network without known defaults gets none:
+    failing over onto another chain's endpoint would be worse than no failover.
+    Pure (no env reads) so a test can assert the shipped defaults (#323)."""
+    if fallbacks is not None and fallbacks.strip():
+        extra: tuple[str, ...] = tuple(fallbacks.split(","))
+    elif network == "mainnet":
+        extra = MAINNET_JSON_RPC_FALLBACK_URLS
+    elif network == "testnet":
+        extra = TESTNET_JSON_RPC_FALLBACK_URLS
+    else:
+        extra = ()
+    urls: list[str] = []
+    seen: set[str] = set()
+    for raw in (primary, *extra):
+        url = raw.strip()
+        key = url.rstrip("/").lower()
+        if not url or key in seen:
+            continue
+        seen.add(key)
+        urls.append(url)
+    return tuple(urls)
+
+
+JSON_RPC_URLS = json_rpc_urls(
+    JSON_RPC_URL, os.getenv("XRPL_JSON_RPC_FALLBACK_URLS"), network=XRPL_NETWORK
+)
 WS_URL = os.getenv("XRPL_WS_URL", _default_ws)
 # clio (XLS-46) endpoint. nft_info / nft_exists are clio-only methods — the
 # plain rippled WS (WS_URL) answers them with `unknownCmd` -> None, which the

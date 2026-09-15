@@ -1021,7 +1021,7 @@ def test_startup_offer_recovery_does_not_create_after_malformed_lookup(_service_
         create_calls.append((args, kwargs))
         return "OFFER-MUST-NOT-BE-CREATED"
 
-    monkeypatch.setattr(server.xrpl_ops, "JsonRpcClient", MalformedClient)
+    monkeypatch.setattr(server.xrpl_ops, "rpc_client", MalformedClient)
     monkeypatch.setattr(server.xrpl_ops, "create_nft_offer", create_offer)
 
     # Per-claim failures are logged + persisted on the claim, never raised: one
@@ -1090,7 +1090,7 @@ def test_offer_recovery_does_not_create_for_malformed_classification_fields(
         create_calls.append((args, kwargs))
         return "OFFER-MUST-NOT-BE-CREATED"
 
-    monkeypatch.setattr(server.xrpl_ops, "JsonRpcClient", MalformedClient)
+    monkeypatch.setattr(server.xrpl_ops, "rpc_client", MalformedClient)
     monkeypatch.setattr(server.xrpl_ops, "create_nft_offer", create_offer)
 
     # Per-claim failures are logged + persisted on the claim, never raised: one
@@ -2670,7 +2670,7 @@ def test_offer_recovery_skips_unfunded_destination_without_blocking_admission(
         assert address == claim.wallet
         return False
 
-    monkeypatch.setattr(server.xrpl_ops, "JsonRpcClient", _NoSellOffersClient)
+    monkeypatch.setattr(server.xrpl_ops, "rpc_client", _NoSellOffersClient)
     monkeypatch.setattr(server.xrpl_ops, "create_nft_offer", create_offer)
     monkeypatch.setattr(server.xrpl_ops, "account_exists", account_exists)
 
@@ -2709,7 +2709,7 @@ def test_offer_recovery_still_fails_closed_when_account_lookup_is_indeterminate(
     async def disallows(address):
         return None  # flag lookup also unknown -- must stay fail-closed
 
-    monkeypatch.setattr(server.xrpl_ops, "JsonRpcClient", _NoSellOffersClient)
+    monkeypatch.setattr(server.xrpl_ops, "rpc_client", _NoSellOffersClient)
     monkeypatch.setattr(server.xrpl_ops, "create_nft_offer", create_offer)
     monkeypatch.setattr(server.xrpl_ops, "account_exists", account_exists)
     monkeypatch.setattr(server.xrpl_ops, "disallows_incoming_nft_offers", disallows)
@@ -2741,7 +2741,7 @@ def test_offer_recovery_one_undeliverable_claim_does_not_block_a_deliverable_one
     async def account_exists(address):
         return address != bad.wallet
 
-    monkeypatch.setattr(server.xrpl_ops, "JsonRpcClient", _NoSellOffersClient)
+    monkeypatch.setattr(server.xrpl_ops, "rpc_client", _NoSellOffersClient)
     monkeypatch.setattr(server.xrpl_ops, "create_nft_offer", create_offer)
     monkeypatch.setattr(server.xrpl_ops, "account_exists", account_exists)
 
@@ -2795,7 +2795,7 @@ def _account_client(response):
     ],
 )
 def test_account_exists_three_way_contract(monkeypatch, response, expected):
-    monkeypatch.setattr(server.xrpl_ops, "AsyncJsonRpcClient", _account_client(response))
+    monkeypatch.setattr(server.xrpl_ops, "async_rpc_client", _account_client(response))
     assert _run(server.xrpl_ops.account_exists("rSOMEBODY")) is expected
 
 
@@ -2828,7 +2828,7 @@ def test_undeliverable_note_failure_does_not_disable_admission(
     async def create_offer(*args, **kwargs):
         raise AssertionError("must not submit a doomed offer")
 
-    monkeypatch.setattr(server.xrpl_ops, "JsonRpcClient", _NoSellOffersClient)
+    monkeypatch.setattr(server.xrpl_ops, "rpc_client", _NoSellOffersClient)
     monkeypatch.setattr(server.xrpl_ops, "create_nft_offer", create_offer)
     monkeypatch.setattr(server.xrpl_ops, "account_exists", account_exists)
     monkeypatch.setattr(server.sponsored_mint, "record_offer", broken_record_offer)
@@ -2873,7 +2873,7 @@ def test_undeliverable_claim_leaves_startup_recovery_ready(_service_env, monkeyp
     async def create_offer(*args, **kwargs):
         raise AssertionError("must not submit a doomed offer")
 
-    monkeypatch.setattr(server.xrpl_ops, "JsonRpcClient", _NoSellOffersClient)
+    monkeypatch.setattr(server.xrpl_ops, "rpc_client", _NoSellOffersClient)
     monkeypatch.setattr(server.xrpl_ops, "create_nft_offer", create_offer)
     monkeypatch.setattr(server.xrpl_ops, "account_exists", account_exists)
     monkeypatch.setattr(server, "_sponsored_recovery_ready", False, raising=False)
@@ -2912,7 +2912,7 @@ def test_offer_recovery_skips_offer_blocked_destination_without_blocking_admissi
         assert address == claim.wallet
         return True
 
-    monkeypatch.setattr(server.xrpl_ops, "JsonRpcClient", _NoSellOffersClient)
+    monkeypatch.setattr(server.xrpl_ops, "rpc_client", _NoSellOffersClient)
     monkeypatch.setattr(server.xrpl_ops, "create_nft_offer", create_offer)
     monkeypatch.setattr(server.xrpl_ops, "account_exists", account_exists)
     monkeypatch.setattr(server.xrpl_ops, "disallows_incoming_nft_offers", disallows)
@@ -2963,7 +2963,7 @@ def test_disallows_incoming_nft_offers_three_way_contract(monkeypatch, result, e
         async def request(self, req):
             return Resp(result)
 
-    monkeypatch.setattr(server.xrpl_ops, "AsyncJsonRpcClient", Client)
+    monkeypatch.setattr(server.xrpl_ops, "async_rpc_client", Client)
     assert _run(server.xrpl_ops.disallows_incoming_nft_offers("rX")) is expected
 
 

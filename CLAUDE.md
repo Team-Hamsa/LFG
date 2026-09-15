@@ -140,6 +140,7 @@ SPONSORED_MINT_ARCHIVE_MAX_LAG_SECONDS=900                  # optional; how stal
 LISTENER_AUTO_CATCHUP=1                                     # optional (#402); default ON — on (re)subscribe the index listener auto-runs the bounded --catch-up-from-gap in the background when the archive is certified-but-gapped (needs BRIX_DISTRIBUTOR_ADDRESS; skips otherwise)
 LISTENER_AUTO_CATCHUP_COOLDOWN=600                          # optional (#402); min seconds between auto catch-up attempts (flap debounce)
 ECONOMY_AUDIT_WEBHOOK_URL=<discord-webhook-url>             # optional (#322); nightly trait-economy audit posts here on a non-clean run (unset = log only)
+XRPL_JSON_RPC_FALLBACK_URLS=<url,url>                       # optional (#493); comma-separated JSON-RPC failover endpoints tried after XRPL_JSON_RPC_URL on busy/unsynced/unreachable servers (never on tx results) — unset = per-network defaults (mainnet xrplcluster, s2, s1; testnet altnet, xrpl-labs); must be the SAME chain
 PRESUBMIT_SIMULATE=1                                        # optional (#58); pre-submit `simulate` pre-flight on backend-signed txs — deterministic tem*/tef*/tec* refuses before signing (no fee burned), transport errors degrade open; 0 disables
 SESSION_ABANDON_TTL_SECONDS=1020                            # optional (#424); age after which an abandoned PRE-money session (mint/swap awaiting_payment, market awaiting_signature/awaiting_onramp) is expired so the deployer drain can finish — default 15 min payload expire + 120 s slack, minimum 900 (the payload lifetime — lower values fall back to the default); paid/signed sessions are never expired
 REOWN_PROJECT_ID=<reown-cloud-project-id>                   # optional (#447); WalletConnect/Joey Wallet sign-in + signing — unset = feature OFF, button hidden
@@ -564,6 +565,19 @@ the backend default) — the memo, like the SourceTag, must never be omitted.
 
 - **Testnet URL**: `https://s.altnet.rippletest.net:51234/` (main.py:198)
 - **Mainnet URL**: `https://s1.ripple.com:51234/` (ts_helpers.py:40)
+- **JSON-RPC failover (#493):** every backend JSON-RPC call goes through
+  `xrpl_ops.rpc_client()` / `async_rpc_client()` (`lfg_core/xrpl_rpc.py`),
+  which walks `config.JSON_RPC_URLS` (`XRPL_JSON_RPC_URL` first, then
+  `XRPL_JSON_RPC_FALLBACK_URLS` or the per-network defaults). It moves on only
+  on transport failures and named server-state errors (`tooBusy`, `slowDown`,
+  `noCurrent`, `notSynced`, …) — never on an engine result or any other error —
+  with a 45 s per-URL cooldown; if all fail, the last outcome surfaces
+  unchanged. Re-sending a submit is safe: `_submit_and_confirm` signs once, the
+  client only re-posts the identical signed blob (same hash + Sequence, at most
+  one can validate). Never construct a JSON-RPC client class directly
+  (`JsonRpcClient(...)` or the failover classes) — pass `urls=[url]` to the
+  factory when a single endpoint is needed (e.g. `brix_drip`'s per-endpoint
+  chain check). WS / clio endpoints have no failover.
 - Wallet is initialized from SEED environment variable
 - All NFT minting uses `NFTokenMint` with transfer fees (`TransferFee = 7000`; the field is in units of 1/100,000, so 7000 = **7%** secondary sales fee — not 70%, which the 50000-unit field cap makes impossible)
 - NFT flags = 25 (burnable + transferable + mutable — Dynamic NFTs amendment).
@@ -811,8 +825,13 @@ DB and paid on-chain only when the holder explicitly claims. Design:
   .venv/bin/python scripts/backfill_brix_gap.py --network mainnet --apply
   ```
   `accrue_brix.py` refuses to run (exit 2) unless `--network` matches
-  `XRPL_NETWORK`, the endpoint's ledger-32570 hash matches the chain identity
-  the archive recorded, **and** the collection index is non-empty
+  `XRPL_NETWORK`, every reachable JSON-RPC failover endpoint's ledger-32570
+  hash matches the chain identity the archive recorded (each checked through
+  its own single-endpoint `xrpl_ops.rpc_client(urls=[url])`; at least one must
+  answer; an endpoint that can't produce the hash — unreachable, or a
+  history-pruned `online_delete` node answering `lgrNotFound` — is skipped,
+  not refused, and excluded from that run's default clients via
+  `xrpl_rpc.restrict_to`; the next run re-checks it), **and** the collection index is non-empty
   (`nft_index.collection_owners`) — an empty index would make every token look
   ineligible and certify a silent zero-pay day.
 - **The archive replay is only as good as the DERIVED table, and both jobs

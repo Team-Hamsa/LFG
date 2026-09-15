@@ -81,13 +81,12 @@ def lookup_funder(wallet: str) -> FunderResult:
     Raises FunderLookupError on any transport/endpoint failure so callers
     fail closed. Returns (None, None) for a wallet with no transactions.
     """
-    from xrpl.clients import JsonRpcClient
     from xrpl.models.requests import AccountTx
 
-    from lfg_core import config
+    from lfg_core import xrpl_ops
 
     try:
-        client = JsonRpcClient(config.JSON_RPC_URL)
+        client = xrpl_ops.rpc_client()
         resp = client.request(AccountTx(account=wallet, forward=True, limit=1))
         result = resp.result
     except Exception as e:  # noqa: BLE001 - any transport failure fails closed
