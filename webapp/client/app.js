@@ -5624,10 +5624,13 @@ function applyClosetMarketVisibility(cfg) {
   closetBidTtlDays = Math.round(Number(cfg.closet_bid_ttl_seconds || 604800) / 86400);
   const chip = document.querySelector('#market-tabs [data-tab="book"]');
   if (chip) chip.hidden = !closetMarketEnabled;
+  // Null-guarded: a cached older index.html may lack these ids (PR #502 C5).
   for (const id of ['mine-closet-orders-section', 'mine-closet-incoming-section', 'mine-closet-fills-section']) {
-    el(id).hidden = !closetMarketEnabled;
+    const node = el(id);
+    if (node) node.hidden = !closetMarketEnabled;
   }
-  if (!closetMarketEnabled) el('market-book').hidden = true;
+  const book = el('market-book');
+  if (!closetMarketEnabled && book) book.hidden = true;
 }
 
 function closetBidRender(s) {
@@ -6274,13 +6277,21 @@ async function main() {
   el('market-list-price').addEventListener('input', updateListFormRoyaltyPreview);
   el('market-list-confirm-btn').onclick = submitListForm;
   el('market-list-cancel-btn').onclick = () => showPanel('market-panel');
-  el('closet-bid-new-btn').onclick = () => openClosetBidForm().catch((e) => showError(e.message));
-  el('closet-bid-confirm-btn').onclick = () => submitClosetBidForm().catch((e) => showError(e.message));
-  el('closet-bid-cancel-btn').onclick = () => showPanel('market-panel');
-  el('closet-bid-price').oninput = () => {
-    const raw = el('closet-bid-price').value.trim();
-    el('closet-bid-note').textContent = closetPure.bidDisclosure(marketPure.validateBrixPrice(raw).ok ? raw : null, closetBidTtlDays);
-  };
+  // Null-guarded: a missing id (cached older index.html) must not abort main() (PR #502 C5).
+  const closetBidNew = el('closet-bid-new-btn');
+  if (closetBidNew) closetBidNew.onclick = () => openClosetBidForm().catch((e) => showError(e.message));
+  const closetBidConfirm = el('closet-bid-confirm-btn');
+  if (closetBidConfirm) closetBidConfirm.onclick = () => submitClosetBidForm().catch((e) => showError(e.message));
+  const closetBidCancel = el('closet-bid-cancel-btn');
+  if (closetBidCancel) closetBidCancel.onclick = () => showPanel('market-panel');
+  const closetBidPrice = el('closet-bid-price');
+  const closetBidNote = el('closet-bid-note');
+  if (closetBidPrice) {
+    closetBidPrice.oninput = () => {
+      const raw = closetBidPrice.value.trim();
+      if (closetBidNote) closetBidNote.textContent = closetPure.bidDisclosure(marketPure.validateBrixPrice(raw).ok ? raw : null, closetBidTtlDays);
+    };
+  }
 
   // Dev live-reload: runs even in degraded mode (no frame_id).
   try {

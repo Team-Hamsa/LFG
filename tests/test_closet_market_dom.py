@@ -79,3 +79,23 @@ def test_bid_render_only_celebrates_a_filled_bid():
     body = js[js.index("function closetBidRender(s)") : js.index("function closetFillRender(s)")]
     assert "Your bid was filled — the trait is in your Closet." in body
     assert "Bid matched" not in body
+
+
+def test_closet_market_dom_lookups_are_null_guarded():
+    """PR #502 C5: a cached older index.html can pair with this app.js (Discord).
+    A missing Closet Market id must not throw inside main() and skip the rest
+    of config / auth / handler setup."""
+    js = _read("webapp/client/app.js")
+    body = js[
+        js.index("function applyClosetMarketVisibility(") : js.index("function closetBidRender(s)")
+    ]
+    assert "el(id).hidden" not in body
+    assert "el('market-book').hidden" not in body
+    for element_id in (
+        "closet-bid-new-btn",
+        "closet-bid-confirm-btn",
+        "closet-bid-cancel-btn",
+        "closet-bid-price",
+    ):
+        assert f"el('{element_id}').on" not in js, element_id
+    assert "if (closetBidNote) closetBidNote.textContent" in js
