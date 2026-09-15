@@ -65,6 +65,42 @@ def test_definitive_failure_and_unknown(submit):
     assert out == xrpl_ops.TxOutcome("unknown", None, 1040)
 
 
+def test_max_last_ledger_seq_clamps_and_is_reported(submit):
+    """Write-ahead intent (#443 review fix): a caller that already persisted a
+    deadline before submitting must never have it silently extended."""
+    out = _run(
+        xrpl_ops.app_brix_payment(
+            "rSeller",
+            "9.3",
+            "lfg:closet_forward:F1",
+            memos.ACTION_CLOSET_FORWARD,
+            max_last_ledger_seq=1020,
+        )
+    )
+    assert out == xrpl_ops.TxOutcome("confirmed", "H1", 1020)
+    assert submit["tx"].last_ledger_sequence == 1020
+
+    out = _run(
+        xrpl_ops.escrow_finish(
+            "rBidder", 5, "A025", "A022", "lfg:closet_finish:F1", max_last_ledger_seq=1020
+        )
+    )
+    assert out.last_ledger_seq == 1020 and submit["tx"].last_ledger_sequence == 1020
+
+    out = _run(
+        xrpl_ops.escrow_cancel("rBidder", 5, "lfg:closet_cancel:O1", max_last_ledger_seq=1020)
+    )
+    assert out.last_ledger_seq == 1020 and submit["tx"].last_ledger_sequence == 1020
+
+    # A cap ABOVE the freshly-computed value is a no-op — it never extends the deadline.
+    out = _run(
+        xrpl_ops.app_brix_payment(
+            "rS", "1", "lfg:closet_refund:X", memos.ACTION_CLOSET_REFUND, max_last_ledger_seq=5000
+        )
+    )
+    assert out.last_ledger_seq == 1040 and submit["tx"].last_ledger_sequence == 1040
+
+
 def test_unreadable_ledger_means_not_submitted(submit):
     submit["ledger"] = None
     with pytest.raises(xrpl_ops.TxNotSubmitted):

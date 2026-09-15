@@ -1718,12 +1718,18 @@ def _closet_memos(action: str, tag: str) -> list[Memo]:
     ]
 
 
-async def _submit_app_tx(build: Callable[[int], Transaction], label: str) -> TxOutcome:
+async def _submit_app_tx(
+    build: Callable[[int], Transaction], label: str, *, max_last_ledger_seq: int | None = None
+) -> TxOutcome:
     client = JsonRpcClient(config.JSON_RPC_URL)
     current = await _current_validated_ledger_index(client)
     if current is None:
         raise TxNotSubmitted(f"{label}: could not read the validated ledger index")
     last_ledger_seq = current + config.CLOSET_MARKET_LEDGER_MARGIN
+    if max_last_ledger_seq is not None:
+        # Never exceed a deadline the caller already durably recorded (write-ahead
+        # intent) before this submit — same rationale as send_brix_claim's clamp.
+        last_ledger_seq = min(last_ledger_seq, max_last_ledger_seq)
     tx = build(last_ledger_seq)
     wallet = Wallet.from_seed(config.SEED)
     try:
@@ -1741,7 +1747,14 @@ async def _submit_app_tx(build: Callable[[int], Transaction], label: str) -> TxO
     return TxOutcome("confirmed", tx_hash if isinstance(tx_hash, str) else None, last_ledger_seq)
 
 
-async def app_brix_payment(destination: str, value: str, tag: str, action: str) -> TxOutcome:
+async def app_brix_payment(
+    destination: str,
+    value: str,
+    tag: str,
+    action: str,
+    *,
+    max_last_ledger_seq: int | None = None,
+) -> TxOutcome:
     """BRIX Payment app wallet -> destination (fill forward, overshoot or refund)."""
     return await _submit_app_tx(
         lambda lls: Payment(
@@ -1755,11 +1768,18 @@ async def app_brix_payment(destination: str, value: str, tag: str, action: str) 
             memos=_closet_memos(action, tag),
         ),
         "app_brix_payment",
+        max_last_ledger_seq=max_last_ledger_seq,
     )
 
 
 async def escrow_finish(
-    owner: str, offer_sequence: int, condition: str, fulfillment: str, tag: str
+    owner: str,
+    offer_sequence: int,
+    condition: str,
+    fulfillment: str,
+    tag: str,
+    *,
+    max_last_ledger_seq: int | None = None,
 ) -> TxOutcome:
     return await _submit_app_tx(
         lambda lls: EscrowFinish(
@@ -1773,10 +1793,13 @@ async def escrow_finish(
             memos=_closet_memos(memos.ACTION_CLOSET_FILL, tag),
         ),
         "escrow_finish",
+        max_last_ledger_seq=max_last_ledger_seq,
     )
 
 
-async def escrow_cancel(owner: str, offer_sequence: int, tag: str) -> TxOutcome:
+async def escrow_cancel(
+    owner: str, offer_sequence: int, tag: str, *, max_last_ledger_seq: int | None = None
+) -> TxOutcome:
     """Return an expired bid's BRIX to its owner (valid only after CancelAfter)."""
     return await _submit_app_tx(
         lambda lls: EscrowCancel(
@@ -1788,6 +1811,7 @@ async def escrow_cancel(owner: str, offer_sequence: int, tag: str) -> TxOutcome:
             memos=_closet_memos(memos.ACTION_CLOSET_REFUND, tag),
         ),
         "escrow_cancel",
+        max_last_ledger_seq=max_last_ledger_seq,
     )
 
 

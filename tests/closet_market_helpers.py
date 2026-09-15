@@ -57,23 +57,36 @@ class Fakes:
     async def get_escrow_fn(self, owner, seq):
         return self.escrows.get((owner, seq))
 
-    async def escrow_finish_fn(self, owner, seq, condition, fulfillment, tag):
+    async def escrow_finish_fn(
+        self, owner, seq, condition, fulfillment, tag, *, max_last_ledger_seq=None
+    ):
         self.finishes.append((owner, seq, condition, fulfillment, tag))
         state = self.finish_outcomes.pop(0) if self.finish_outcomes else "confirmed"
+        if state == "crash":
+            # Simulates the tx landing on-ledger and the process dying before
+            # it can record the outcome: the escrow is gone, but nothing here
+            # ever gets to persist a hash.
+            self.escrows.pop((owner, seq), None)
+            raise RuntimeError("simulated crash after the tx landed")
         if state == "confirmed":
             self.escrows.pop((owner, seq), None)
         return TxOutcome(state, f"FIN{len(self.finishes)}" if state == "confirmed" else None, 140)
 
-    async def escrow_cancel_fn(self, owner, seq, tag):
+    async def escrow_cancel_fn(self, owner, seq, tag, *, max_last_ledger_seq=None):
         self.cancels.append((owner, seq, tag))
         state = self.cancel_outcomes.pop(0) if self.cancel_outcomes else "confirmed"
+        if state == "crash":
+            self.escrows.pop((owner, seq), None)
+            raise RuntimeError("simulated crash after the tx landed")
         if state == "confirmed":
             self.escrows.pop((owner, seq), None)
         return TxOutcome(state, "CAN" if state == "confirmed" else None, 140)
 
-    async def payment_fn(self, destination, value, tag, action):
+    async def payment_fn(self, destination, value, tag, action, *, max_last_ledger_seq=None):
         self.payments.append((destination, value, tag, action))
         state = self.payment_outcomes.pop(0) if self.payment_outcomes else "confirmed"
+        if state == "crash":
+            raise RuntimeError("simulated crash after the tx landed")
         return TxOutcome(state, f"PAY{len(self.payments)}" if state == "confirmed" else None, 140)
 
     async def find_txs_fn(self, tag, lls):

@@ -1,3 +1,5 @@
+import pytest
+
 from lfg_core import closet_market_flow as cmf
 from lfg_core import closet_market_store as cms
 from lfg_core import market_ops, memos
@@ -144,9 +146,77 @@ def test_unknown_cancel_finish_absent_past_lls_retries(tmp_path):
     assert len(f.finishes) == 2 and order(path, bid["id"])["state"] == cms.CANCELLED
 
 
-def test_cancel_when_escrow_already_gone_sends_nothing(tmp_path):
+def test_crash_after_landed_cancel_finish_recovers_from_memo(tmp_path):
+    """A crash between the EscrowFinish landing and this process recording
+    the hash must not strand the BRIX in the app wallet — the write-ahead
+    pending_phase/pending_lls, persisted before submit, is what lets the next
+    pass find the landed tx and still send the refund."""
+    path, f = _db(tmp_path), Fakes(finish_outcomes=["crash"])
+    bid = open_bid(path, f)
+    c = conn(path)
+    cms.begin_cancel_bid(c, bid["id"], owner=BUYER, reason="user")
+    c.close()
+    d = deps(path, f, tmp_path)
+    with pytest.raises(RuntimeError):
+        run(cmf.advance_bid(bid["id"], d))
+    got = order(path, bid["id"])
+    assert got["state"] == cms.CANCELLING and got["pending_phase"] == "cancel_finish"
+    assert got["cancel_finish_hash"] is None
+    f.found[f"lfg:closet_cancel_finish:{bid['id']}"] = [landed("FINX")]
+    run(cmf.advance_bid(bid["id"], d))
+    got = order(path, bid["id"])
+    assert (got["state"], got["cancel_finish_hash"]) == (cms.CANCELLED, "FINX")
+    assert len(f.finishes) == 1 and len(f.payments) == 1
+
+
+def test_crash_after_landed_cancel_refund_never_double_pays(tmp_path):
+    """Same crash window on the refund Payment: a second attempt must never
+    pay twice just because the hash never made it to disk."""
+    path, f = _db(tmp_path), Fakes(payment_outcomes=["crash"])
+    bid = open_bid(path, f, price="10")
+    c = conn(path)
+    cms.begin_cancel_bid(c, bid["id"], owner=BUYER, reason="user")
+    c.close()
+    d = deps(path, f, tmp_path)
+    with pytest.raises(RuntimeError):
+        run(cmf.advance_bid(bid["id"], d))
+    got = order(path, bid["id"])
+    assert got["state"] == cms.CANCELLING and got["pending_phase"] == "cancel_refund"
+    assert got["cancel_finish_hash"] is not None and got["cancel_refund_hash"] is None
+    assert len(f.payments) == 1
+    f.found[f"lfg:closet_cancel_refund:{bid['id']}"] = [landed("REFX")]
+    run(cmf.advance_bid(bid["id"], d))
+    got = order(path, bid["id"])
+    assert (got["state"], got["cancel_refund_hash"]) == (cms.CANCELLED, "REFX")
+    assert len(f.payments) == 1  # no second payment was ever sent
+
+
+def test_cancel_finish_intent_recorded_before_crash_retries(tmp_path):
+    """A crash after the intent is durably recorded but before the backend
+    tx was even submitted: the memo lookup finds nothing, the validated
+    ledger has already passed the recorded deadline, so it's decidably
+    absent — clear the stale intent and retry cleanly."""
     path, f = _db(tmp_path), Fakes()
     bid = open_bid(path, f)
+    c = conn(path)
+    cms.begin_cancel_bid(c, bid["id"], owner=BUYER, reason="user")
+    cms.update_order(c, bid["id"], pending_phase="cancel_finish", pending_lls=50)
+    c.close()
+    f.ledger_index = 100  # already past the recorded (stale) lls of 50
+    run(cmf.advance_bid(bid["id"], deps(path, f, tmp_path)))
+    got = order(path, bid["id"])
+    assert got["state"] == cms.CANCELLED
+    assert len(f.finishes) == 1 and len(f.payments) == 1
+
+
+def test_cancel_when_escrow_already_gone_sends_nothing(tmp_path):
+    """Legitimate case: pending_phase is unset (no backend tx of ours can be
+    in flight — the write-ahead branch above always resolves that first) and
+    the escrow is simply gone, so the bidder must have EscrowCancel'ed it
+    themselves after CancelAfter. Nothing needs to be sent."""
+    path, f = _db(tmp_path), Fakes()
+    bid = open_bid(path, f)
+    assert bid["pending_phase"] is None
     f.escrows.clear()  # the bidder EscrowCancel'ed it themselves after CancelAfter
     c = conn(path)
     cms.begin_cancel_bid(c, bid["id"], owner=BUYER, reason="user")

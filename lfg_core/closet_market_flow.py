@@ -56,9 +56,12 @@ class ClosetMarketDeps:
     payload_status_fn: Callable[[str], Awaitable[dict[str, Any] | None]]
     get_tx_fn: Callable[[str], Awaitable[dict[str, Any]]]
     get_escrow_fn: Callable[[str, int], Awaitable[dict[str, Any] | None]]
-    escrow_finish_fn: Callable[[str, int, str, str, str], Awaitable[TxOutcome]]
-    escrow_cancel_fn: Callable[[str, int, str], Awaitable[TxOutcome]]
-    payment_fn: Callable[[str, str, str, str], Awaitable[TxOutcome]]
+    # Each backend-tx callable also takes a keyword-only `max_last_ledger_seq`
+    # (Callable[..., ...] rather than a fixed positional signature, so both the
+    # real xrpl_ops functions and the test fakes can accept it).
+    escrow_finish_fn: Callable[..., Awaitable[TxOutcome]]
+    escrow_cancel_fn: Callable[..., Awaitable[TxOutcome]]
+    payment_fn: Callable[..., Awaitable[TxOutcome]]
     find_txs_fn: Callable[[str, int | None], Awaitable[list[dict[str, Any]]]]
     ledger_index_fn: Callable[[], Awaitable[int | None]]
     mirror_fn: Callable[[sqlite3.Connection, str], Awaitable[None]]
@@ -66,6 +69,7 @@ class ClosetMarketDeps:
     records_dir: str = config.ECONOMY_RECORDS_DIR
     now_fn: Callable[[], float] = time.time
     signing_wait_seconds: int = 3600
+    ledger_margin: int = 40
 
 
 def _journal(deps: ClosetMarketDeps, kind: str, row: dict[str, Any] | None) -> None:
@@ -100,12 +104,34 @@ def _tx_body(tx: dict[str, Any]) -> dict[str, Any]:
     return body if isinstance(body, dict) else tx
 
 
-async def _submit(fn: Callable[..., Awaitable[TxOutcome]], *args: Any) -> TxOutcome | None:
+async def _submit(
+    fn: Callable[..., Awaitable[TxOutcome]], *args: Any, **kwargs: Any
+) -> TxOutcome | None:
     try:
-        return await fn(*args)
+        return await fn(*args, **kwargs)
     except TxNotSubmitted as exc:
         logging.warning(f"closet market tx not submitted: {exc}")
         return None
+
+
+async def _begin_order_phase(
+    conn: sqlite3.Connection, order: dict[str, Any], phase: str, deps: ClosetMarketDeps
+) -> int | None:
+    """Write-ahead intent: persist pending_phase/pending_lls BEFORE the backend
+    tx is submitted, and bound the tx's own LastLedgerSequence to that same
+    value (via max_last_ledger_seq). A crash between the tx landing on-ledger
+    and this process recording the outcome then still leaves a resolvable
+    trail: the next pass finds pending_phase already set and resolves it via
+    _phase_outcome's memo lookup, bounded by the SAME lls that was durably
+    recorded before anything was sent. Returns None (submit nothing) if the
+    ledger index can't be read, matching xrpl_ops' own refuse-to-submit
+    posture for an unpinnable deadline."""
+    idx = await deps.ledger_index_fn()
+    if idx is None:
+        return None
+    lls = idx + deps.ledger_margin
+    cms.update_order(conn, order["id"], pending_phase=phase, pending_lls=lls)
+    return lls
 
 
 async def _phase_outcome(
@@ -267,16 +293,39 @@ def _apply_order_outcome(
     complete: bool,
 ) -> str:
     if out is None:
+        # Nothing reached the ledger — the write-ahead intent recorded by
+        # _begin_order_phase describes a tx that was never sent, so clear it.
+        cms.update_order(
+            conn,
+            order["id"],
+            pending_phase=None,
+            pending_lls=None,
+            error=f"{phase} failed; will retry",
+        )
         return "not_submitted"
     if out.state == "confirmed":
-        fields: dict[str, Any] = {hash_field: out.tx_hash or cms.HASH_UNKNOWN, "error": None}
+        fields: dict[str, Any] = {
+            hash_field: out.tx_hash or cms.HASH_UNKNOWN,
+            "pending_phase": None,
+            "pending_lls": None,
+            "error": None,
+        }
         if complete:
             fields["state"] = _final_cancel_state(order)
         cms.update_order(conn, order["id"], **fields)
     elif out.state == "unknown":
+        # The write-ahead intent already recorded this phase; keep it, but
+        # trust the outcome's own last_ledger_seq (the tx that actually left,
+        # bounded by max_last_ledger_seq) over our pre-submit estimate.
         cms.update_order(conn, order["id"], pending_phase=phase, pending_lls=out.last_ledger_seq)
     else:
-        cms.update_order(conn, order["id"], error=f"{phase} failed; will retry")
+        cms.update_order(
+            conn,
+            order["id"],
+            pending_phase=None,
+            pending_lls=None,
+            error=f"{phase} failed; will retry",
+        )
     return out.state
 
 
@@ -317,13 +366,23 @@ async def _advance_cancelling_bid(
             _journal(deps, "order", cms.get_order(conn, oid))
             return
         if _bid_expired(order, deps):
+            lls = await _begin_order_phase(conn, order, "cancel", deps)
+            if lls is None:
+                return
             out = await _submit(
-                deps.escrow_cancel_fn, order["owner"], seq, cms.memo_tag("cancel", oid)
+                deps.escrow_cancel_fn,
+                order["owner"],
+                seq,
+                cms.memo_tag("cancel", oid),
+                max_last_ledger_seq=lls,
             )
             _apply_order_outcome(
                 conn, order, out, phase="cancel", hash_field="cancel_refund_hash", complete=True
             )
             _journal(deps, "order", cms.get_order(conn, oid))
+            return
+        lls = await _begin_order_phase(conn, order, "cancel_finish", deps)
+        if lls is None:
             return
         out = await _submit(
             deps.escrow_finish_fn,
@@ -332,6 +391,7 @@ async def _advance_cancelling_bid(
             order["condition"],
             deps.unseal_fn(order["fulfillment_enc"]),
             cms.memo_tag("cancel_finish", oid),
+            max_last_ledger_seq=lls,
         )
         if (
             _apply_order_outcome(
@@ -347,12 +407,16 @@ async def _advance_cancelling_bid(
             return
         order = cms.get_order(conn, oid) or order
     if order["cancel_refund_hash"] is None:
+        lls = await _begin_order_phase(conn, order, "cancel_refund", deps)
+        if lls is None:
+            return
         out = await _submit(
             deps.payment_fn,
             order["owner"],
             order["price_brix"],
             cms.memo_tag("cancel_refund", oid),
             memos.ACTION_CLOSET_REFUND,
+            max_last_ledger_seq=lls,
         )
         _apply_order_outcome(
             conn, order, out, phase="cancel_refund", hash_field="cancel_refund_hash", complete=True
