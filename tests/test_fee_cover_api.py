@@ -493,3 +493,45 @@ def test_startup_recovery_resolves_submitted_refunds(monkeypatch):
     _run(go())
     assert called == [sentinel]
     assert server._start_fee_cover_recovery in server.create_app().on_startup
+
+
+# --- Task 10: browse estimate -------------------------------------------------
+
+
+def _browse():
+    req = make_mocked_request("GET", "/api/market/listings?include_external=1")
+    rows = _body(_run(server.handle_market_listings(req)))["rows"]
+    return next(r for r in rows if r.get("source") == "external")
+
+
+def test_browse_external_row_carries_the_fee_cover_estimate(env):
+    _seed_char_with_cafe_listing(env["onchain"])
+    _campaign(env["app_db"])
+    row = _browse()
+    assert row["clearing_drops"] == 5_070_572
+    assert row["fee_cover_drops"] == 80_572  # ceil(5_070_572 × 0.01589) at 100% coverage
+    assert row["fee_cover_xrp"] == "0.080572"
+
+
+def test_browse_estimate_follows_the_campaign_not_the_cache(env):
+    _seed_char_with_cafe_listing(env["onchain"])
+    assert "fee_cover_drops" not in _browse()  # no campaign; cache now warm
+    _campaign(env["app_db"])
+    assert _browse()["fee_cover_drops"] == 80_572  # same cached rows, fresh campaign read
+    conn = fee_cover_store.connect(env["app_db"])
+    fee_cover_store.stop_campaign(conn, network="testnet", actor="t")
+    conn.close()
+    assert "fee_cover_drops" not in _browse()
+
+
+def test_browse_estimate_is_hidden_without_budget_headroom(env):
+    _seed_char_with_cafe_listing(env["onchain"])
+    conn = fee_cover_store.connect(env["app_db"])
+    knobs = fee_cover_store.Knobs(
+        coverage_bps=10_000, budget_drops=80_571, wallet_cap_drops=5_000_000, min_bid_drops=0
+    )
+    fee_cover_store.start_campaign(
+        conn, network="testnet", actor="t", knobs=knobs, duration_seconds=None
+    )
+    conn.close()
+    assert "fee_cover_drops" not in _browse()

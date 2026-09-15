@@ -3070,6 +3070,13 @@ async def handle_market_listings(request: web.Request) -> web.Response:
             out["floor_brix"] = r["floor_brix"]
             out["offers"] = [_serialize_listing_row(o, kind, cfg) for o in r["offers"]]
         rows_out.append(out)
+    if include_external and kind == "character":
+        fee_cover_state = await asyncio.get_event_loop().run_in_executor(
+            None, _fee_cover_safe, _fee_cover_browse_state
+        )
+        if fee_cover_state is not None:
+            for out in rows_out:
+                _apply_fee_cover_estimate(out, fee_cover_state)
     return web.json_response({"rows": rows_out, "total": len(filtered)})
 
 
@@ -4192,6 +4199,35 @@ async def _fee_cover_settle_safe(offer_index: str) -> dict[str, Any] | None:
     except Exception:
         logging.warning("fee cover: settling %s failed", offer_index, exc_info=True)
         return None
+
+
+def _fee_cover_browse_state() -> tuple[int, int, int] | None:
+    """(coverage_bps, remaining_budget_drops, min_bid_drops) of the live
+    campaign, or None. Read on every browse, AFTER the 60 s market cache, so
+    a Stop is reflected immediately."""
+    conn = fee_cover_store.connect(_fee_cover_db())
+    try:
+        campaign = fee_cover_store.live_campaign(conn, config.XRPL_NETWORK)
+        if campaign is None:
+            return None
+        remaining = campaign.budget_drops - fee_cover_store.committed_drops(conn, campaign.id)
+    finally:
+        conn.close()
+    return campaign.coverage_bps, remaining, campaign.min_bid_drops
+
+
+def _apply_fee_cover_estimate(out: dict[str, Any], state: tuple[int, int, int]) -> None:
+    """Public, unauthenticated estimate for a Buy-now at the clearing price.
+    Ignores per-wallet caps (the client copy says "limits apply")."""
+    coverage_bps, remaining, min_bid = state
+    clearing = out.get("clearing_drops")
+    rate = out.get("broker_rate")
+    if not isinstance(clearing, int) or rate is None or clearing < min_bid:
+        return
+    estimate = fee_cover.promise_drops(clearing, float(rate), coverage_bps)
+    if 0 < estimate <= remaining:
+        out["fee_cover_drops"] = estimate
+        out["fee_cover_xrp"] = market_ops.drops_to_xrp_str(str(estimate))
 
 
 def _get_bid_sync(network: str, offer_index: str) -> dict[str, Any] | None:
