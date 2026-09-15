@@ -215,7 +215,14 @@ def test_closet_payload_builders(monkeypatch):
     amount = {"currency": "BRIX", "issuer": "rI", "value": "10"}
     _run(
         xumm_ops.create_closet_bid_payload(
-            "rBidder", amount, "rApp", "A025", 123, user_token="T", platform=memos.PLATFORM_WEBAPP
+            "rBidder",
+            amount,
+            "rApp",
+            "A025",
+            123,
+            last_ledger_sequence=555,
+            user_token="T",
+            platform=memos.PLATFORM_WEBAPP,
         )
     )
     txjson, options, token, memos_json = calls[0]
@@ -226,6 +233,7 @@ def test_closet_payload_builders(monkeypatch):
         "Amount": amount,
         "Condition": "A025",
         "CancelAfter": 123,
+        "LastLedgerSequence": 555,
     }
     assert token == "T" and options["expire"] == xumm_ops.DEFAULT_EXPIRE_MINUTES
     assert memos_json == memos.build_memos_json(
@@ -233,16 +241,26 @@ def test_closet_payload_builders(monkeypatch):
     )
     _run(
         xumm_ops.create_closet_buy_payload(
-            "rBuyer", amount, "rApp", "AB" * 32, send_max_drops="2500000"
+            "rBuyer",
+            amount,
+            "rApp",
+            "AB" * 32,
+            send_max_drops="2500000",
+            last_ledger_sequence=556,
         )
     )
     txjson = calls[1][0]
     assert (
         txjson["InvoiceID"] == "AB" * 32
         and txjson["SendMax"] == "2500000"
+        and txjson["LastLedgerSequence"] == 556
         and "Memos" not in txjson
     )
-    _run(xumm_ops.create_closet_buy_payload("rBuyer", amount, "rApp", "AB" * 32))
+    _run(
+        xumm_ops.create_closet_buy_payload(
+            "rBuyer", amount, "rApp", "AB" * 32, last_ledger_sequence=557
+        )
+    )
     assert "SendMax" not in calls[2][0]
 
 
@@ -325,3 +343,45 @@ def test_find_escrow_by_condition(monkeypatch):
     _Client.responses = [_Resp({"error": "tooBusy"}, ok=False)]
     with pytest.raises(RuntimeError):
         _run(xrpl_ops.find_escrow_by_condition("rBidder", "A025FF"))
+
+
+# --- PR #502 G1: reconciliation lookups prove coverage through require_ledger --
+
+
+def test_find_invoice_payment_require_ledger_coverage(monkeypatch):
+    monkeypatch.setattr(xrpl_ops, "JsonRpcClient", _RecordingClient)
+    invoice = "AB" * 32
+    _Client.responses = [
+        _Resp({"transactions": [], "marker": "m", "ledger_index_max": 140}),
+        _Resp({"transactions": [], "ledger_index_max": 149}),
+    ]
+    with pytest.raises(RuntimeError):
+        _run(xrpl_ops.find_invoice_payment(invoice, 100, require_ledger=150))
+    _Client.responses = [_Resp({"transactions": []})]  # coverage not reported at all
+    with pytest.raises(RuntimeError):
+        _run(xrpl_ops.find_invoice_payment(invoice, 100, require_ledger=150))
+    _Client.responses = [
+        _Resp({"transactions": [], "marker": "m", "ledger_index_max": 140}),
+        _Resp({"transactions": [], "ledger_index_max": 150}),
+    ]
+    assert _run(xrpl_ops.find_invoice_payment(invoice, 100, require_ledger=150)) is None
+
+
+def test_find_escrow_by_condition_require_ledger_coverage(monkeypatch):
+    monkeypatch.setattr(xrpl_ops, "JsonRpcClient", _RecordingClient)
+    _Client.responses = [_Resp({"account_objects": [], "ledger_index": 149})]
+    with pytest.raises(RuntimeError):
+        _run(xrpl_ops.find_escrow_by_condition("rBidder", "A025FF", require_ledger=150))
+    _Client.responses = [_Resp({"account_objects": [], "ledger_current_index": 999})]
+    with pytest.raises(RuntimeError):
+        _run(xrpl_ops.find_escrow_by_condition("rBidder", "A025FF", require_ledger=150))
+    _Client.responses = [_Resp({"error": "actNotFound"}, ok=False)]
+    with pytest.raises(RuntimeError):
+        _run(xrpl_ops.find_escrow_by_condition("rBidder", "A025FF", require_ledger=150))
+    _Client.responses = [
+        _Resp({"account_objects": [], "marker": "m", "ledger_index": 151}),
+        _Resp({"account_objects": [], "ledger_index": 150}),
+    ]
+    assert _run(xrpl_ops.find_escrow_by_condition("rBidder", "A025FF", require_ledger=150)) is None
+    _Client.responses = [_Resp({"error": "actNotFound", "ledger_index": 160}, ok=False)]
+    assert _run(xrpl_ops.find_escrow_by_condition("rBidder", "A025FF", require_ledger=150)) is None

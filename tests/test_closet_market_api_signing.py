@@ -28,6 +28,7 @@ def _capture_bid_payload(monkeypatch, result=None):
             destination=destination,
             condition=condition,
             cancel_after=cancel_after,
+            last_ledger_sequence=kwargs["last_ledger_sequence"],
         )
         return (
             result
@@ -66,6 +67,7 @@ def test_bid_create_builds_escrow_payload_and_seals_fulfillment(closet_env, monk
     row = cms.get_order(c, view["id"])
     c.close()
     assert row["condition"] == seen["condition"] and row["cancel_after"] == seen["cancel_after"]
+    assert row["user_lls"] == seen["last_ledger_sequence"] == 1000 + 300
     fulfillment = crypto_condition.unseal(row["fulfillment_enc"])
     assert crypto_condition.condition_hex(bytes.fromhex(fulfillment[8:])) == seen["condition"]
 
@@ -159,7 +161,12 @@ def test_ask_buy_builds_invoice_payment(closet_env, monkeypatch):
     seen = {}
 
     async def fake_buy(account, amount, destination, invoice_id, **kwargs):
-        seen.update(account=account, invoice_id=invoice_id, send_max=kwargs.get("send_max_drops"))
+        seen.update(
+            account=account,
+            invoice_id=invoice_id,
+            send_max=kwargs.get("send_max_drops"),
+            lls=kwargs["last_ledger_sequence"],
+        )
         return {"uuid": "PU", "xumm_url": "https://xumm.app/sign/PU", "qr_url": "q", "push": None}
 
     monkeypatch.setattr(server.xumm_ops, "create_closet_buy_payload", fake_buy)
@@ -169,6 +176,10 @@ def test_ask_buy_builds_invoice_payment(closet_env, monkeypatch):
     assert (view["state"], view["role"], view["pay_with"]) == ("awaiting_signature", "buyer", "XRP")
     assert seen["account"] == BIDDER and seen["send_max"] == "2500000"
     assert seen["invoice_id"] == cms.invoice_id(view["id"])
+    c = _db(closet_env)
+    row = cms.get_fill(c, view["id"])
+    c.close()
+    assert row["user_lls"] == seen["lls"] == 1000 + 300 and row["payload_uuid"] == "PU"
 
 
 def test_ask_buy_own_listing_is_refused(closet_env, monkeypatch):
@@ -182,3 +193,49 @@ def test_ask_buy_own_listing_is_refused(closet_env, monkeypatch):
     monkeypatch.setattr(server.brix_payment, "detect_payment_path", brix_path)
     resp = _run(server.handle_closet_ask_buy(_req("POST", "/", match_info={"order_id": ask["id"]})))
     assert resp.status == 400 and _json(resp)["code"] == "self_cross"
+
+
+def test_bid_create_refuses_when_the_ledger_is_unreadable(closet_env, monkeypatch):
+    """PR #502 G1: the escrow payload pins LastLedgerSequence, so without a
+    validated ledger index there is no deadline to pin — refuse, build nothing."""
+    monkeypatch.setattr(server, "_known_trait", lambda net, s, v: True)
+    _trustline(monkeypatch)
+    seen = _capture_bid_payload(monkeypatch)
+    closet_env["ledger"]["index"] = None
+    resp = _run(
+        server.handle_closet_bid_create(
+            _req("POST", "/", {"slot": "Head", "value": "Tiara", "price_brix": "10"})
+        )
+    )
+    assert resp.status == 503 and _json(resp)["code"] == "ledger_unavailable"
+    assert seen == {}
+    c = _db(closet_env)
+    assert c.execute("SELECT COUNT(*) FROM closet_orders").fetchone()[0] == 0
+    c.close()
+
+
+def test_ask_buy_fails_the_fill_when_the_ledger_is_unreadable(closet_env, monkeypatch):
+    c = _db(closet_env)
+    ask = cms.create_ask(c, owner=ME, slot="Head", value="Crown", price_brix="5", platform=None)
+    c.close()
+    monkeypatch.setattr(server.mock_economy, "DEV_OWNER", BIDDER)
+
+    async def brix_path(wallet, amount, **kwargs):
+        return "BRIX", amount
+
+    monkeypatch.setattr(server.brix_payment, "detect_payment_path", brix_path)
+    built = []
+
+    async def fake_buy(*args, **kwargs):
+        built.append(args)
+        return {"uuid": "PU", "xumm_url": "x", "qr_url": "q", "push": None}
+
+    monkeypatch.setattr(server.xumm_ops, "create_closet_buy_payload", fake_buy)
+    closet_env["ledger"]["index"] = None
+    resp = _run(server.handle_closet_ask_buy(_req("POST", "/", match_info={"order_id": ask["id"]})))
+    assert resp.status == 503 and _json(resp)["code"] == "ledger_unavailable"
+    assert built == []
+    c = _db(closet_env)
+    rows = c.execute("SELECT state, error FROM closet_fills").fetchall()
+    c.close()
+    assert rows == [(cms.FAILED, "could not read the ledger")]

@@ -17,6 +17,14 @@ Fill (closet_fills):
   with pending_phase/pending_lls. It resolves ONLY by finding the memo-tagged
   tx (landed) or by the validated ledger passing pending_lls with nothing
   found (absent -> retry). Absence alone is never failure.
+
+User txs (the buy Payment, the bid EscrowCreate) carry a pinned
+LastLedgerSequence, recorded as `user_lls` on the row (PR #502 G1). A
+"nothing landed" decision (fail a take fill / cancel an unopened bid) on a row
+with user_lls set needs BOTH a validated ledger index, read before the
+reconciliation lookup, past user_lls AND that lookup proving it covers
+user_lls; anything short of that waits. Rows with user_lls NULL keep the
+pre-G1 behavior.
 """
 
 from __future__ import annotations
@@ -71,13 +79,11 @@ class ClosetMarketDeps:
     signing_wait_seconds: int = 3600
     ledger_margin: int = 40
     # On-ledger reconciliation before a terminal "nothing arrived" decision
-    # (#443 final review C2). None skips the lookup (the old behavior).
-    find_invoice_payment_fn: (
-        Callable[[str, int | None], Awaitable[dict[str, Any] | None]] | None
-    ) = None
-    find_escrow_by_condition_fn: Callable[[str, str], Awaitable[dict[str, Any] | None]] | None = (
-        None
-    )
+    # (#443 final review C2). None skips the lookup (the old behavior) — but a
+    # row with user_lls set can then never prove absence, so it waits.
+    # Both take a keyword `require_ledger` (the row's user_lls, or None).
+    find_invoice_payment_fn: Callable[..., Awaitable[dict[str, Any] | None]] | None = None
+    find_escrow_by_condition_fn: Callable[..., Awaitable[dict[str, Any] | None]] | None = None
 
 
 def _journal(deps: ClosetMarketDeps, kind: str, row: dict[str, Any] | None) -> None:
@@ -226,11 +232,22 @@ async def _reconcile_escrow(
     status must not untrack a live escrow until CancelAfter.
 
     ("opened", fill_id | None) when a matching escrow was found and the bid
-    opened; ("wait", None) when a lookup failed; ("absent", None) otherwise."""
+    opened; ("wait", None) when a lookup failed; ("absent", None) otherwise.
+
+    (PR #502 G1) With user_lls set, "absent" additionally needs a validated
+    ledger index — read BEFORE the lookup — past user_lls, and a lookup that
+    proves it covers user_lls; otherwise ("wait", None)."""
+    user_lls = order["user_lls"]
     if deps.find_escrow_by_condition_fn is None:
-        return "absent", None
+        return ("absent" if user_lls is None else "wait"), None
+    if user_lls is not None:
+        index = await deps.ledger_index_fn()
+        if index is None or index <= user_lls:
+            return "wait", None
     try:
-        node = await deps.find_escrow_by_condition_fn(order["owner"], order["condition"])
+        node = await deps.find_escrow_by_condition_fn(
+            order["owner"], order["condition"], require_ledger=user_lls
+        )
     except Exception:
         logging.warning(
             f"closet bid {order['id']}: escrow-by-condition lookup failed: {traceback.format_exc()}"
@@ -374,7 +391,13 @@ async def _advance_pending_bid(
         )
     if problem is not None or seq is None:
         logging.error(f"closet bid {order['id']}: validated escrow rejected ({problem})")
-        _cancel_unopened(conn, order, deps, f"escrow did not match the bid ({problem})")
+        reason = f"escrow did not match the bid ({problem})"
+        if order["user_lls"] is not None:
+            # (PR #502 G1) "no longer on-ledger" may be a lagging node, and the
+            # tracked tx is not the only way an escrow can land: gate the
+            # cancel on the deadline and a covered by-condition lookup.
+            return await _cancel_unopened_unless_found(conn, order, deps, reason)
+        _cancel_unopened(conn, order, deps, reason)
         return None
     cms.mark_bid_open(conn, order["id"], escrow_tx_hash=order["signed_txid"], escrow_owner_seq=seq)
     _journal(deps, "order", cms.get_order(conn, order["id"]))
@@ -621,7 +644,11 @@ async def _funds(conn: sqlite3.Connection, fill: dict[str, Any], deps: ClosetMar
 
 
 async def _reconcile_invoice(
-    conn: sqlite3.Connection, fill: dict[str, Any], deps: ClosetMarketDeps
+    conn: sqlite3.Connection,
+    fill: dict[str, Any],
+    deps: ClosetMarketDeps,
+    *,
+    exclude_hash: str | None = None,
 ) -> str:
     """(#443 final review C2) Before a take fill is failed with no verified
     funds, look for its Payment on-ledger by InvoiceID — a Joey sign row
@@ -630,16 +657,26 @@ async def _reconcile_invoice(
     "found": a validated tesSUCCESS payment was found under a hash we weren't
     tracking; signed_txid now points at it and the next pass settles (claim or
     refund). "wait": a lookup failed, or it is the tx we already track and the
-    tx server has not caught up. "absent": nothing — the failure stands."""
+    tx server has not caught up. "absent": nothing — the failure stands.
+
+    (PR #502 G1) With user_lls set, "absent" needs the validated index (read
+    before the lookup) past user_lls AND a lookup covering user_lls; until
+    then this waits. `exclude_hash` is a tracked tx already known to be
+    validated and unusable, so finding it again proves nothing."""
+    user_lls = fill["user_lls"]
     if deps.find_invoice_payment_fn is None:
-        return "absent"
+        return "absent" if user_lls is None else "wait"
     idx = await deps.ledger_index_fn()
     if idx is None:
+        return "wait"
+    if user_lls is not None and idx <= user_lls:
         return "wait"
     elapsed = max(0.0, deps.now_fn() - fill["created_ts"])
     min_ledger = max(1, idx - int(elapsed / 3) - 1000)
     try:
-        entry = await deps.find_invoice_payment_fn(cms.invoice_id(fill["id"]), min_ledger)
+        entry = await deps.find_invoice_payment_fn(
+            cms.invoice_id(fill["id"]), min_ledger, require_ledger=user_lls
+        )
     except Exception:
         logging.warning(
             f"closet fill {fill['id']}: invoice payment lookup failed: {traceback.format_exc()}"
@@ -650,6 +687,8 @@ async def _reconcile_invoice(
     tx_hash = tx_entry_hash(entry)
     if not tx_hash:
         return "wait"
+    if exclude_hash is not None and tx_hash == exclude_hash:
+        return "absent"
     if tx_hash == fill["signed_txid"]:
         return "wait"
     logging.warning(f"closet fill {fill['id']}: payment {tx_hash} found on-ledger by InvoiceID")
@@ -658,9 +697,23 @@ async def _reconcile_invoice(
 
 
 async def _fail_unless_paid(
-    conn: sqlite3.Connection, fill: dict[str, Any], deps: ClosetMarketDeps, reason: str
+    conn: sqlite3.Connection,
+    fill: dict[str, Any],
+    deps: ClosetMarketDeps,
+    reason: str,
+    *,
+    tracked_validated: bool = False,
 ) -> bool:
-    verdict = await _reconcile_invoice(conn, fill, deps)
+    """Fail the fill only once no payment can still arrive. `tracked_validated`
+    marks a failure decided from the tracked tx having validated unusable
+    (tec, wrong shape): pre-G1 rows (user_lls NULL) fail at once as before;
+    with user_lls set the same deadline + covered-lookup gate applies, and
+    the tracked hash itself is ignored by the lookup (PR #502 G1)."""
+    if tracked_validated and fill["user_lls"] is None:
+        return _fail(conn, fill, reason)
+    verdict = await _reconcile_invoice(
+        conn, fill, deps, exclude_hash=fill["signed_txid"] if tracked_validated else None
+    )
     if verdict == "found":
         return True
     if verdict == "wait":
@@ -772,7 +825,13 @@ async def _take_funds(
         return False
     meta = tx.get("meta") or {}
     if meta.get("TransactionResult") != "tesSUCCESS":
-        return _fail(conn, fill, f"payment failed: {meta.get('TransactionResult')}")
+        return await _fail_unless_paid(
+            conn,
+            fill,
+            deps,
+            f"payment failed: {meta.get('TransactionResult')}",
+            tracked_validated=True,
+        )
     delivered = _brix_value(meta.get("delivered_amount"))
     tx_hash = str(tx.get("hash") or body.get("hash") or fill["signed_txid"])
     sender = body.get("Account")
@@ -793,9 +852,17 @@ async def _take_funds(
             and delivered > 0
             and isinstance(sender, str)
         ):
-            return _fail(conn, fill, "the signed transaction is not this purchase's payment")
+            return await _fail_unless_paid(
+                conn,
+                fill,
+                deps,
+                "the signed transaction is not this purchase's payment",
+                tracked_validated=True,
+            )
     elif delivered is None or delivered <= 0:
-        return _fail(conn, fill, "the payment delivered no BRIX")
+        return await _fail_unless_paid(
+            conn, fill, deps, "the payment delivered no BRIX", tracked_validated=True
+        )
     assert delivered is not None
     try:
         if not_this_payment or sender != fill["buyer"] or delivered < Decimal(fill["price_brix"]):
@@ -817,7 +884,13 @@ async def _take_funds(
             return True
         cms.claim_ask_for_payment(conn, fill["id"], tx_hash)
     except sqlite3.IntegrityError:
-        return _fail(conn, fill, "this payment was already used for another purchase")
+        return await _fail_unless_paid(
+            conn,
+            fill,
+            deps,
+            "this payment was already used for another purchase",
+            tracked_validated=True,
+        )
     return True
 
 

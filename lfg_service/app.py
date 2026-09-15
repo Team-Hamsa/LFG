@@ -5462,6 +5462,15 @@ async def handle_closet_bid_create(request):
             },
             status=409,
         )
+    # (PR #502 G1) The escrow pins a LastLedgerSequence so "it never landed"
+    # is decidable; no validated index, no deadline, no payload.
+    idx = await xrpl_ops.current_validated_ledger_index()
+    if idx is None:
+        return web.json_response(
+            {"error": "could not read the ledger — try again", "code": "ledger_unavailable"},
+            status=503,
+        )
+    lls = idx + config.CLOSET_USER_TX_LEDGER_WINDOW
     preimage = crypto_condition.new_preimage()
     condition = crypto_condition.condition_hex(preimage)
     sealed = crypto_condition.seal(crypto_condition.fulfillment_hex(preimage))
@@ -5472,6 +5481,7 @@ async def handle_closet_bid_create(request):
         config.SIGNING_ACCOUNT,
         condition,
         cancel_after,
+        last_ledger_sequence=lls,
         return_url=xumm_ops.discord_return_url(body.get("guild_id"), body.get("channel_id")),
         user_token=await _push_token(user),
         platform=memos.platform_for_surface(_platform(user)),
@@ -5493,6 +5503,7 @@ async def handle_closet_bid_create(request):
             xumm_url=payload.get("xumm_url"),
             qr_url=payload.get("qr_url"),
             push=payload.get("push"),
+            user_lls=lls,
         )
     except closet_market_store.OrderError as exc:
         if payload.get("uuid"):
@@ -5574,11 +5585,27 @@ async def handle_closet_ask_buy(request):
         )
     except closet_market_store.OrderError as exc:
         return _order_error_response(exc)
+    # (PR #502 G1) The Payment pins a LastLedgerSequence so "no payment
+    # arrived" is decidable; no validated index, no deadline, no payload.
+    idx = await xrpl_ops.current_validated_ledger_index()
+    if idx is None:
+        await _closet_db(
+            closet_market_store.update_fill,
+            fill["id"],
+            state=closet_market_store.FAILED,
+            error="could not read the ledger",
+        )
+        return web.json_response(
+            {"error": "could not read the ledger — try again", "code": "ledger_unavailable"},
+            status=503,
+        )
+    lls = idx + config.CLOSET_USER_TX_LEDGER_WINDOW
     payload = await xumm_ops.create_closet_buy_payload(
         wallet,
         market_ops.brix_amount_dict(ask["price_brix"]),
         config.SIGNING_ACCOUNT,
         closet_market_store.invoice_id(fill["id"]),
+        last_ledger_sequence=lls,
         send_max_drops=market_ops.xrp_to_drops_str(quote) if pay_with == "XRP" else None,
         return_url=xumm_ops.discord_return_url(None, None),
         user_token=await _push_token(user),
@@ -5599,6 +5626,7 @@ async def handle_closet_ask_buy(request):
         xumm_url=payload.get("xumm_url"),
         qr_url=payload.get("qr_url"),
         push=payload.get("push"),
+        user_lls=lls,
     )
     fill = await _closet_db(closet_market_store.get_fill, fill["id"])
     view = _closet_fill_view(fill, wallet)

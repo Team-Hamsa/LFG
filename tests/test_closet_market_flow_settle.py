@@ -159,13 +159,14 @@ def test_mirror_failure_stays_paid_and_retries(tmp_path):
     assert run(cmf.settle_fill(fl["id"], d)) == cms.MIRRORED
 
 
-def _take(path, f, *, price="5"):
+def _take(path, f, *, price="5", user_lls=None):
     c = conn(path)
     ask = cms.create_ask(
         c, owner=SELLER, slot="Head", value="Crown", price_brix=price, platform=None
     )
     fl = cms.create_take_fill(c, ask["id"], BUYER, fee_bps=0, platform=None)
-    cms.update_fill(c, fl["id"], payload_uuid="PU")
+    cms.update_fill(c, fl["id"], payload_uuid="PU", user_lls=user_lls)
+    fl = cms.get_fill(c, fl["id"])
     c.close()
     return ask, fl
 
@@ -734,3 +735,78 @@ def test_take_ignores_a_failed_invoice_payment(tmp_path):
     f.found_invoices[cms.invoice_id(fl["id"])] = entry
     d = deps(path, f, tmp_path, now=fl["created_ts"] + 10)
     assert run(cmf.settle_fill(fl["id"], d)) == cms.FAILED
+
+
+# --- PR #502 G1: a pinned user LastLedgerSequence gates "nothing arrived" -----
+
+USER_LLS = 150
+
+
+def test_take_expired_before_user_lls_waits_without_a_lookup(tmp_path):
+    """A Joey `expired` row (or a late WalletConnect approval) can still
+    validate up to the Payment's pinned LastLedgerSequence."""
+    path, f = _db(tmp_path), Fakes(ledger_index=USER_LLS)
+    _, fl = _take(path, f, user_lls=USER_LLS)
+    assert fl["user_lls"] == USER_LLS
+    f.payload_status["PU"] = {"signed": False, "expired": True}
+    d = deps(path, f, tmp_path, now=fl["created_ts"] + 10)
+    assert run(cmf.settle_fill(fl["id"], d)) == cms.FUNDS_PENDING
+    assert f.invoice_lookups == []
+
+
+def test_take_expired_past_user_lls_waits_while_the_lookup_lacks_coverage(tmp_path):
+    path, f = _db(tmp_path), Fakes(ledger_index=USER_LLS + 1, lookup_coverage=USER_LLS - 1)
+    _, fl = _take(path, f, user_lls=USER_LLS)
+    f.payload_status["PU"] = {"signed": False, "expired": True}
+    d = deps(path, f, tmp_path, now=fl["created_ts"] + 10)
+    assert run(cmf.settle_fill(fl["id"], d)) == cms.FUNDS_PENDING
+    assert f.invoice_requires == [USER_LLS]
+
+
+def test_take_expired_past_user_lls_with_coverage_and_nothing_found_fails(tmp_path):
+    path, f = _db(tmp_path), Fakes(ledger_index=USER_LLS + 1)
+    _, fl = _take(path, f, user_lls=USER_LLS)
+    f.payload_status["PU"] = {"signed": False, "expired": True}
+    d = deps(path, f, tmp_path, now=fl["created_ts"] + 10)
+    assert run(cmf.settle_fill(fl["id"], d)) == cms.FAILED
+    assert f.invoice_requires == [USER_LLS]
+
+
+def test_take_never_validated_with_user_lls_needs_the_gate(tmp_path):
+    path, f = _db(tmp_path), Fakes(ledger_index=USER_LLS)
+    _, fl = _take(path, f, user_lls=USER_LLS)
+    f.payload_status["PU"] = {"signed": True, "account": BUYER, "txid": "PAYTX"}
+    f.txs["PAYTX"] = {"validated": False, "tx_json": {"LastLedgerSequence": 50}}
+    d = deps(path, f, tmp_path, now=fl["created_ts"] + 10)
+    assert run(cmf.settle_fill(fl["id"], d)) == cms.FUNDS_PENDING
+    f.ledger_index = USER_LLS + 1
+    assert run(cmf.settle_fill(fl["id"], d)) == cms.FAILED
+
+
+def test_take_validated_failure_with_user_lls_looks_past_the_tracked_tx(tmp_path):
+    """A validated tec (or wrong-shape) tracked tx is not proof nothing else
+    landed: with user_lls set it waits for the deadline, then a covered
+    InvoiceID lookup — which ignores the tracked hash — decides."""
+    path, f = _db(tmp_path), Fakes(ledger_index=USER_LLS)
+    _, fl = _take(path, f, user_lls=USER_LLS)
+    f.payload_status["PU"] = {"signed": True, "account": BUYER, "txid": "TECTX"}
+    tec = _payment_tx(fl["id"])
+    tec["hash"] = "TECTX"
+    tec["meta"]["TransactionResult"] = "tecPATH_DRY"
+    f.txs["TECTX"] = tec
+    d = deps(path, f, tmp_path, now=fl["created_ts"] + 10)
+    assert run(cmf.settle_fill(fl["id"], d)) == cms.FUNDS_PENDING
+    f.ledger_index = USER_LLS + 1
+    f.found_invoices[cms.invoice_id(fl["id"])] = _invoice_entry(fl["id"], tx_hash="TECTX")
+    assert run(cmf.settle_fill(fl["id"], d)) == cms.FAILED  # only the tracked hash: absent
+
+    path2 = str(tmp_path / "second.db")
+    make_db(path2)
+    f2 = Fakes(ledger_index=USER_LLS + 1)
+    _, fl2 = _take(path2, f2, user_lls=USER_LLS)
+    f2.payload_status["PU"] = {"signed": True, "account": BUYER, "txid": "TECTX"}
+    f2.txs["TECTX"] = tec
+    f2.found_invoices[cms.invoice_id(fl2["id"])] = _invoice_entry(fl2["id"])
+    f2.txs["PAYTX"] = _payment_tx(fl2["id"])
+    d2 = deps(path2, f2, tmp_path, now=fl2["created_ts"] + 10)
+    assert run(cmf.settle_fill(fl2["id"], d2)) == cms.MIRRORED

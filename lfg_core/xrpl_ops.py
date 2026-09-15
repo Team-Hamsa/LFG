@@ -1890,18 +1890,27 @@ async def find_app_txs_by_memo(tag: str, min_ledger: int | None = None) -> list[
     return found
 
 
-async def find_invoice_payment(invoice_id: str, min_ledger: int | None) -> dict[str, Any] | None:
+async def find_invoice_payment(
+    invoice_id: str, min_ledger: int | None, require_ledger: int | None = None
+) -> dict[str, Any] | None:
     """The VALIDATED inbound Payment to the app wallet carrying `InvoiceID`
     (a Closet Market buy, #443), or None. A tesSUCCESS entry is preferred
     over a failed one. The reconciliation read before a buy is written off as
     "nothing arrived": a Joey/Xaman status can report expired while the
     client-submitted tx validated. Raises on transport failure or an
-    unsuccessful response — a failed scan is never "not found"."""
+    unsuccessful response — a failed scan is never "not found".
+
+    With `require_ledger` (the buy Payment's pinned LastLedgerSequence, PR
+    #502 G1) it also raises unless the scan's reported `ledger_index_max`
+    (the max across pages) reaches it — a lagging server's "nothing found" is
+    not proof the payment can't still be found."""
     account = config.SIGNING_ACCOUNT
     want = invoice_id.upper()
     client = JsonRpcClient(config.JSON_RPC_URL)
     fallback: dict[str, Any] | None = None
     marker: Any = None
+    scanned_to: int | None = None
+    found: dict[str, Any] | None = None
     while True:
         request = AccountTx(
             account=account,
@@ -1913,6 +1922,9 @@ async def find_invoice_payment(invoice_id: str, min_ledger: int | None) -> dict[
         result = response.result
         if not response.is_successful() or not isinstance(result, dict):
             raise RuntimeError(f"account_tx failed while scanning for invoice {want}: {result!r}")
+        reported_max = result.get("ledger_index_max")
+        if isinstance(reported_max, int):
+            scanned_to = reported_max if scanned_to is None else max(scanned_to, reported_max)
         for entry in result.get("transactions", []):
             tx = entry.get("tx") or entry.get("tx_json") or {}
             if (
@@ -1922,19 +1934,45 @@ async def find_invoice_payment(invoice_id: str, min_ledger: int | None) -> dict[
                 and str(tx.get("InvoiceID", "")).upper() == want
             ):
                 if tx_entry_result(entry) == "tesSUCCESS":
-                    return cast(dict[str, Any], entry)
+                    found = found or cast(dict[str, Any], entry)
                 fallback = fallback or cast(dict[str, Any], entry)
         marker = result.get("marker")
         if not marker:
-            return fallback
+            break
+    if require_ledger is not None and (scanned_to is None or scanned_to < require_ledger):
+        raise RuntimeError(
+            f"account_tx scan for invoice {want} never reported reaching ledger "
+            f"{require_ledger} (last known: {scanned_to}) — the queried server is lagging"
+        )
+    return found or fallback
 
 
-async def find_escrow_by_condition(owner: str, condition: str) -> dict[str, Any] | None:
+async def find_escrow_by_condition(
+    owner: str, condition: str, require_ledger: int | None = None
+) -> dict[str, Any] | None:
     """The validated Escrow object owned by `owner` whose `Condition` matches,
     or None (including an unfunded / unknown owner, `actNotFound`). Used to
     find a bid escrow whose signing status was lost. Raises on any other
-    failure."""
+    failure.
+
+    With `require_ledger` (the bid EscrowCreate's pinned LastLedgerSequence,
+    PR #502 G1) every response — `actNotFound` included — must report a
+    validated `ledger_index` at or past it, or this raises: an answer from a
+    ledger before the deadline can't rule out the escrow still landing.
+    (`ledger_current_index` describes an open, unvalidated ledger and never
+    counts.)"""
     want = condition.upper()
+
+    def check_coverage(result: dict[str, Any]) -> None:
+        if require_ledger is None:
+            return
+        seen = result.get("ledger_index")
+        if not isinstance(seen, int) or seen < require_ledger:
+            raise RuntimeError(
+                f"account_objects for {owner} answered from ledger {seen!r}, "
+                f"before the required ledger {require_ledger}"
+            )
+
     client = JsonRpcClient(config.JSON_RPC_URL)
     marker: Any = None
     while True:
@@ -1951,8 +1989,10 @@ async def find_escrow_by_condition(owner: str, condition: str) -> dict[str, Any]
             raise RuntimeError(f"account_objects failed for {owner}: {result!r}")
         if not response.is_successful():
             if result.get("error") == "actNotFound":
+                check_coverage(result)
                 return None
             raise RuntimeError(f"account_objects failed for {owner}: {result!r}")
+        check_coverage(result)
         for node in result.get("account_objects", []):
             if isinstance(node, dict) and str(node.get("Condition") or "").upper() == want:
                 return cast(dict[str, Any], node)

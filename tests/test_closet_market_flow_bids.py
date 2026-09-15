@@ -346,3 +346,92 @@ def test_cancel_unseal_failure_writes_no_intent(tmp_path):
     got = order(path, bid["id"])
     assert (got["state"], got["pending_phase"], got["pending_lls"]) == (cms.CANCELLING, None, None)
     assert f.finishes == []
+
+
+# --- PR #502 G1: a pinned user LastLedgerSequence gates "nothing landed" ------
+
+USER_LLS = 150
+
+
+def test_expired_bid_waits_until_the_validated_ledger_passes_user_lls(tmp_path):
+    """A Joey row can lapse to `expired` while the client-submitted
+    EscrowCreate can still validate up to its pinned LastLedgerSequence."""
+    path, f = _db(tmp_path), Fakes(ledger_index=USER_LLS)
+    bid = pending_bid(path, user_lls=USER_LLS)
+    assert order(path, bid["id"])["user_lls"] == USER_LLS
+    f.payload_status[bid["payload_uuid"]] = {"signed": False, "expired": True}
+    run(cmf.advance_bid(bid["id"], deps(path, f, tmp_path, now=bid["created_ts"] + 5)))
+    assert order(path, bid["id"])["state"] == cms.PENDING_ESCROW
+    assert f.escrow_lookups == []
+
+
+def test_expired_bid_past_user_lls_waits_while_the_lookup_lacks_coverage(tmp_path):
+    path, f = _db(tmp_path), Fakes(ledger_index=USER_LLS + 1, lookup_coverage=USER_LLS - 1)
+    bid = pending_bid(path, user_lls=USER_LLS)
+    f.payload_status[bid["payload_uuid"]] = {"signed": False, "expired": True}
+    run(cmf.advance_bid(bid["id"], deps(path, f, tmp_path, now=bid["created_ts"] + 5)))
+    assert order(path, bid["id"])["state"] == cms.PENDING_ESCROW
+    assert f.escrow_requires == [USER_LLS]
+
+
+def test_expired_bid_past_user_lls_with_coverage_and_no_escrow_cancels(tmp_path):
+    path, f = _db(tmp_path), Fakes(ledger_index=USER_LLS + 1)
+    bid = pending_bid(path, user_lls=USER_LLS)
+    f.payload_status[bid["payload_uuid"]] = {"signed": False, "expired": True}
+    run(cmf.advance_bid(bid["id"], deps(path, f, tmp_path, now=bid["created_ts"] + 5)))
+    assert order(path, bid["id"])["state"] == cms.CANCELLED
+    assert f.escrow_requires == [USER_LLS]
+
+
+def test_signer_mismatch_with_user_lls_waits_then_cancels(tmp_path):
+    path, f = _db(tmp_path), Fakes(ledger_index=USER_LLS)
+    bid = pending_bid(path, user_lls=USER_LLS)
+    f.payload_status[bid["payload_uuid"]] = {"signed": True, "account": OTHER, "txid": "T"}
+    d = deps(path, f, tmp_path, now=bid["created_ts"] + 5)
+    run(cmf.advance_bid(bid["id"], d))
+    assert order(path, bid["id"])["state"] == cms.PENDING_ESCROW
+    f.ledger_index = USER_LLS + 1
+    run(cmf.advance_bid(bid["id"], d))
+    assert order(path, bid["id"])["state"] == cms.CANCELLED
+
+
+def test_escrow_gone_with_user_lls_needs_the_deadline_and_a_covered_lookup(tmp_path):
+    """ "The escrow is no longer on-ledger" is a lagging account_objects /
+    ledger_entry node as often as a real absence: with user_lls set it cancels
+    only past the deadline AND after a covered by-condition lookup finds
+    nothing (a found escrow opens the bid instead)."""
+    path, f = _db(tmp_path), Fakes(ledger_index=USER_LLS)
+    bid = pending_bid(path, price="10", user_lls=USER_LLS)
+    f.payload_status[bid["payload_uuid"]] = {"signed": True, "account": BUYER, "txid": "ECH"}
+    f.txs["ECH"] = escrow_create_tx(BUYER, "10", seq=7)  # validated, but get_escrow -> None
+    d = deps(path, f, tmp_path, now=bid["created_ts"] + 5)
+    run(cmf.advance_bid(bid["id"], d))
+    assert order(path, bid["id"])["state"] == cms.PENDING_ESCROW
+
+    f.ledger_index = USER_LLS + 1
+    f.lookup_coverage = USER_LLS - 1
+    run(cmf.advance_bid(bid["id"], d))
+    assert order(path, bid["id"])["state"] == cms.PENDING_ESCROW
+
+    f.lookup_coverage = None
+    _recoverable_escrow(f, seq=7)
+    run(cmf.advance_bid(bid["id"], d))
+    got = order(path, bid["id"])
+    assert (got["state"], got["escrow_owner_seq"]) == (cms.OPEN, 7)
+
+    bid2 = pending_bid(path, owner=OTHER, price="10", user_lls=USER_LLS)
+    f.payload_status[bid2["payload_uuid"]] = {"signed": True, "account": OTHER, "txid": "ECH2"}
+    f.txs["ECH2"] = escrow_create_tx(OTHER, "10", seq=8)
+    run(cmf.advance_bid(bid2["id"], deps(path, f, tmp_path, now=bid2["created_ts"] + 5)))
+    assert order(path, bid2["id"])["state"] == cms.CANCELLED
+    assert f.escrow_requires[-1] == USER_LLS
+
+
+def test_escrow_gone_without_user_lls_cancels_as_before(tmp_path):
+    path, f = _db(tmp_path), Fakes()
+    bid = pending_bid(path, price="10")
+    f.payload_status[bid["payload_uuid"]] = {"signed": True, "account": BUYER, "txid": "ECH"}
+    f.txs["ECH"] = escrow_create_tx(BUYER, "10", seq=7)
+    run(cmf.advance_bid(bid["id"], deps(path, f, tmp_path, now=bid["created_ts"] + 5)))
+    assert order(path, bid["id"])["state"] == cms.CANCELLED
+    assert f.escrow_lookups == []

@@ -690,12 +690,15 @@ async def create_closet_bid_payload(
     condition: str,
     cancel_after: int,
     *,
+    last_ledger_sequence: int,
     return_url: dict[str, str] | None = None,
     user_token: str | None = None,
     platform: str = memos.PLATFORM_BACKEND,
 ) -> dict[str, Any] | None:
     """#443: the bidder locks BRIX in a TokenEscrow to the app wallet. Only the
-    backend holds the fulfillment for `condition`; CancelAfter bounds the lock."""
+    backend holds the fulfillment for `condition`; CancelAfter bounds the lock.
+    The pinned LastLedgerSequence is the deadline after which the service may
+    decide the escrow never landed (PR #502 G1)."""
     return await _create_xumm_payload(
         {
             "TransactionType": "EscrowCreate",
@@ -704,6 +707,7 @@ async def create_closet_bid_payload(
             "Amount": amount,
             "Condition": condition,
             "CancelAfter": cancel_after,
+            "LastLedgerSequence": last_ledger_sequence,
         },
         options=_with_return_url({}, return_url),
         user_token=user_token,
@@ -717,6 +721,7 @@ async def create_closet_buy_payload(
     destination: str,
     invoice_id: str,
     *,
+    last_ledger_sequence: int,
     send_max_drops: str | None = None,
     return_url: dict[str, str] | None = None,
     user_token: str | None = None,
@@ -724,13 +729,15 @@ async def create_closet_buy_payload(
 ) -> dict[str, Any] | None:
     """#443: the buyer pays a Closet ask to the app wallet. InvoiceID (sha256 of
     the fill id) ties the payment to its fill. send_max_drops turns it into an
-    XRP->BRIX path payment for buyers holding too little BRIX."""
+    XRP->BRIX path payment for buyers holding too little BRIX. The pinned
+    LastLedgerSequence bounds when "no payment arrived" is decidable (PR #502 G1)."""
     txjson: dict[str, Any] = {
         "TransactionType": "Payment",
         "Account": account,
         "Destination": destination,
         "Amount": amount,
         "InvoiceID": invoice_id,
+        "LastLedgerSequence": last_ledger_sequence,
     }
     if send_max_drops is not None:
         txjson["SendMax"] = send_max_drops

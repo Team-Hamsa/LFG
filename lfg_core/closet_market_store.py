@@ -100,6 +100,7 @@ CREATE TABLE IF NOT EXISTS closet_orders (
     cancel_refund_hash TEXT,
     pending_phase    TEXT,
     pending_lls      INTEGER,
+    user_lls         INTEGER,
     error            TEXT
 );
 CREATE INDEX IF NOT EXISTS idx_closet_orders_book ON closet_orders (state, side, slot, value);
@@ -137,6 +138,7 @@ CREATE TABLE IF NOT EXISTS closet_fills (
     refund_brix        TEXT,
     pending_phase      TEXT,
     pending_lls        INTEGER,
+    user_lls           INTEGER,
     seller_mirrored    INTEGER NOT NULL DEFAULT 0,
     buyer_mirrored     INTEGER NOT NULL DEFAULT 0,
     attempts           INTEGER NOT NULL DEFAULT 0,
@@ -186,6 +188,7 @@ _FILL_MUTABLE = frozenset(
         "refund_brix",
         "pending_phase",
         "pending_lls",
+        "user_lls",
         "seller_mirrored",
         "buyer_mirrored",
         "attempts",
@@ -202,8 +205,19 @@ class OrderError(ValueError):
         self.code = code
 
 
+# Columns added after the tables first shipped: (table, column, type).
+_ADDED_COLUMNS = (
+    ("closet_orders", "user_lls", "INTEGER"),
+    ("closet_fills", "user_lls", "INTEGER"),
+)
+
+
 def ensure_schema(conn: sqlite3.Connection) -> None:
     conn.executescript(_SCHEMA)
+    for table, column, decl in _ADDED_COLUMNS:
+        existing = {row[1] for row in conn.execute(f"PRAGMA table_info({table})")}
+        if column not in existing:
+            conn.execute(f"ALTER TABLE {table} ADD COLUMN {column} {decl}")
     conn.commit()
 
 
@@ -475,6 +489,7 @@ def create_pending_bid(
     xumm_url: str | None,
     qr_url: str | None,
     push: str | None,
+    user_lls: int | None = None,
     now: int | None = None,
 ) -> dict[str, Any]:
     ts = now if now is not None else _now()
@@ -486,8 +501,8 @@ def create_pending_bid(
             conn.execute(
                 "INSERT INTO closet_orders (id, side, owner, slot, value, price_brix, state, created_ts, "
                 "updated_ts, platform, payload_uuid, xumm_url, qr_url, push, condition, "
-                "fulfillment_enc, cancel_after) VALUES (?, 'bid', ?, ?, ?, ?, 'pending_escrow', ?, ?, ?, "
-                "?, ?, ?, ?, ?, ?, ?)",
+                "fulfillment_enc, cancel_after, user_lls) VALUES (?, 'bid', ?, ?, ?, ?, "
+                "'pending_escrow', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
                 (
                     oid,
                     owner,
@@ -504,6 +519,7 @@ def create_pending_bid(
                     condition,
                     fulfillment_enc,
                     cancel_after,
+                    user_lls,
                 ),
             )
     except sqlite3.IntegrityError as exc:

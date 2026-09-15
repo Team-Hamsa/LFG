@@ -307,3 +307,47 @@ def test_orders_for_owner_live_states_and_fills():
     orders_limited = cms.orders_for_owner(c, SELLER, fills_limit=1)
     assert len(orders_limited["fills"]) == 1
     assert orders_limited["fills"][0]["id"] == fill_ask2["id"]  # newest
+
+
+# --- PR #502 G1: the user tx's pinned LastLedgerSequence ------------------------
+
+
+def test_user_lls_is_persisted_on_bids_and_fills():
+    c = _conn()
+    bid = cms.create_pending_bid(
+        c,
+        owner=BUYER,
+        slot="Head",
+        value="Crown",
+        price_brix="10",
+        platform="web",
+        condition="A0",
+        fulfillment_enc="sealed",
+        cancel_after=999999,
+        payload_uuid="U",
+        xumm_url="x",
+        qr_url="q",
+        push=None,
+        user_lls=4321,
+    )
+    assert cms.get_order(c, bid["id"])["user_lls"] == 4321
+    ask = cms.create_ask(c, owner=SELLER, slot="Head", value="Crown", price_brix="5", platform=None)
+    fl = cms.create_take_fill(c, ask["id"], OTHER, fee_bps=0, platform=None)
+    assert fl["user_lls"] is None
+    cms.update_fill(c, fl["id"], payload_uuid="PU", user_lls=777)
+    got = cms.get_fill(c, fl["id"])
+    assert (got["payload_uuid"], got["user_lls"]) == ("PU", 777)
+
+
+def test_ensure_schema_adds_user_lls_to_existing_tables():
+    c = sqlite3.connect(":memory:")
+    legacy = "\n".join(line for line in cms._SCHEMA.splitlines() if "user_lls" not in line)
+    c.executescript(legacy)
+    for table in ("closet_orders", "closet_fills"):
+        cols = {r[1] for r in c.execute(f"PRAGMA table_info({table})")}
+        assert "user_lls" not in cols
+    cms.ensure_schema(c)
+    cms.ensure_schema(c)  # idempotent
+    for table in ("closet_orders", "closet_fills"):
+        cols = {r[1] for r in c.execute(f"PRAGMA table_info({table})")}
+        assert "user_lls" in cols

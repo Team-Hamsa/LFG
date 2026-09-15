@@ -46,6 +46,12 @@ class Fakes:
     lookup_error: Exception | None = None  # raised by both reconciliation lookups
     invoice_lookups: list = field(default_factory=list)
     escrow_lookups: list = field(default_factory=list)
+    # require_ledger passed to each reconciliation lookup, in call order
+    invoice_requires: list = field(default_factory=list)
+    escrow_requires: list = field(default_factory=list)
+    # Highest ledger the reconciliation lookups can prove they cover; None =
+    # always covered. Below a lookup's require_ledger the lookup raises.
+    lookup_coverage: int | None = None
     ledger_index: int | None = 100
     mirror_error: Exception | None = None
     finishes: list = field(default_factory=list)
@@ -97,16 +103,26 @@ class Fakes:
     async def find_txs_fn(self, tag, lls):
         return self.found.get(tag, [])
 
-    async def find_invoice_payment_fn(self, invoice_id, min_ledger):
-        self.invoice_lookups.append((invoice_id, min_ledger))
+    def _check_coverage(self, require_ledger):
         if self.lookup_error is not None:
             raise self.lookup_error
+        if (
+            require_ledger is not None
+            and self.lookup_coverage is not None
+            and self.lookup_coverage < require_ledger
+        ):
+            raise RuntimeError("lookup does not cover the required ledger")
+
+    async def find_invoice_payment_fn(self, invoice_id, min_ledger, *, require_ledger=None):
+        self.invoice_lookups.append((invoice_id, min_ledger))
+        self.invoice_requires.append(require_ledger)
+        self._check_coverage(require_ledger)
         return self.found_invoices.get(invoice_id)
 
-    async def find_escrow_by_condition_fn(self, owner, condition):
+    async def find_escrow_by_condition_fn(self, owner, condition, *, require_ledger=None):
         self.escrow_lookups.append((owner, condition))
-        if self.lookup_error is not None:
-            raise self.lookup_error
+        self.escrow_requires.append(require_ledger)
+        self._check_coverage(require_ledger)
         return self.escrows_by_condition.get((owner, condition))
 
     async def ledger_index_fn(self):
@@ -140,7 +156,7 @@ def deps(path, f, tmp_path, *, fee_bps=0, now=1_000_000.0):
     )
 
 
-def pending_bid(path, *, owner=BUYER, price="10"):
+def pending_bid(path, *, owner=BUYER, price="10", user_lls=None):
     c = conn(path)
     order = cms.create_pending_bid(
         c,
@@ -156,6 +172,7 @@ def pending_bid(path, *, owner=BUYER, price="10"):
         xumm_url="x",
         qr_url="q",
         push=None,
+        user_lls=user_lls,
     )
     c.close()
     return order

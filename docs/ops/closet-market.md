@@ -37,6 +37,7 @@ CLOSET_MARKET_ENC_KEY=<fernet key>     # REQUIRED; losing it strands every open 
 CLOSET_MARKET_FEE_BPS=700              # 0 <= bps < 10000
 CLOSET_BID_TTL_SECONDS=604800
 CLOSET_MARKET_LEDGER_MARGIN=40
+CLOSET_USER_TX_LEDGER_WINDOW=300   # LastLedgerSequence window pinned on user buy/bid txs (~20 min)
 CLOSET_MARKET_ENABLED=1                # last — new orders only
 ```
 

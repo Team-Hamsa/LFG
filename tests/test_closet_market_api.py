@@ -61,8 +61,15 @@ def closet_env(tmp_path, monkeypatch):
         return server.xrpl_ops.TrustlineState.PRESENT, Decimal("100")
 
     monkeypatch.setattr(server.xrpl_ops, "get_trustline_state", brix_line)
+    ledger = {"index": 1000}
+
+    async def validated_index():
+        return ledger["index"]
+
+    monkeypatch.setattr(server.xrpl_ops, "current_validated_ledger_index", validated_index)
+    monkeypatch.setattr(server.config, "CLOSET_USER_TX_LEDGER_WINDOW", 300)
     server._CLOSET_BOOK_CACHE.clear()
-    yield {"path": path, "scheduled": scheduled}
+    yield {"path": path, "scheduled": scheduled, "ledger": ledger}
     server._CLOSET_BOOK_CACHE.clear()
 
 
