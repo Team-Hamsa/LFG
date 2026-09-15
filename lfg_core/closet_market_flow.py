@@ -537,28 +537,40 @@ PAYMENT_GIVEUP_SECONDS = 86400  # 24h backstop for a take fill with no path to a
 async def _take_funds(
     conn: sqlite3.Connection, fill: dict[str, Any], deps: ClosetMarketDeps
 ) -> bool:
-    """(#443 review fix) A `None` status/tx read (a transient XUMM API error,
-    a 429, a lagging tx-lookup server) is never treated as failure on its own
-    — only a definitive signal is: the payload service explicitly reporting
-    `expired` before signing, the validated ledger having passed the signed
-    tx's own `LastLedgerSequence` while it's still unvalidated (re-checked
-    once against a fresh lookup to rule out a landing-in-the-gap race, the
-    same hazard `_phase_outcome` had), or PAYMENT_GIVEUP_SECONDS of no
-    definitive answer at all — a backstop so a fill can never poll forever
-    with no path to a terminal state. `signing_wait_seconds` plays no role
-    here (that's a different, much shorter, arbitrary wall-clock budget)."""
+    """(#443 review fix, tightened in round 3) A `None` read — a transient
+    XUMM API error, a 429 with an empty cache, a lagging/overloaded tx-lookup
+    server — is NEVER treated as failure, at any age. The only paths to
+    failure before a definitive success/failure tx is found:
+      - pre-sign: the status read is NOT None and is either explicitly
+        `expired`, or `signed` with no `txid` yet, for longer than
+        PAYMENT_GIVEUP_SECONDS;
+      - post-sign, LLS-decidable: the validated ledger has passed the signed
+        tx's own `LastLedgerSequence` while it's still unvalidated —
+        re-checked once against a fresh lookup first, to rule out a
+        landing-in-the-gap race (the same hazard `_phase_outcome` had);
+      - post-sign, not LLS-decidable: BOTH the initial lookup and one
+        re-fetch come back with `error == "txnNotFound"`, for longer than
+        PAYMENT_GIVEUP_SECONDS. Any other error body (`tooBusy`, `slowDown`,
+        ...), a raised exception, or simply an unvalidated tx with no
+        deadline to judge — all of these wait, however long it's been.
+    `signing_wait_seconds` plays no role here (a different, much shorter,
+    arbitrary wall-clock budget)."""
     if not fill["signed_txid"]:
         status = (
             await deps.payload_status_fn(fill["payload_uuid"]) if fill["payload_uuid"] else None
         )
-        if status is None or not status.get("signed"):
-            if status is not None and status.get("expired"):
+        if status is None:
+            return False  # never fails on a None read, no matter how old
+        if not status.get("signed"):
+            if status.get("expired"):
                 return _fail(conn, fill, "payment request expired")
             if deps.now_fn() - fill["created_ts"] > PAYMENT_GIVEUP_SECONDS:
                 return _fail(conn, fill, "no payment arrived within 24 hours")
             return False
         txid = status.get("txid")
         if not txid:
+            if deps.now_fn() - fill["created_ts"] > PAYMENT_GIVEUP_SECONDS:
+                return _fail(conn, fill, "no payment arrived within 24 hours")
             return False
         cms.update_fill(conn, fill["id"], signed_txid=txid)
         return True
@@ -591,8 +603,24 @@ async def _take_funds(
             if not recheck.get("validated"):
                 return _fail(conn, fill, "the payment never validated")
             return False  # validated after all — the next pass processes it normally
-        if deps.now_fn() - fill["created_ts"] > PAYMENT_GIVEUP_SECONDS:
-            return _fail(conn, fill, "no payment arrived within 24 hours")
+        # No LastLedgerSequence to judge absence against (a genuine
+        # not-found, or a bare rippled error body like tooBusy/slowDown).
+        # The ONLY way this ever fails is a confirmed txnNotFound on BOTH
+        # this read and one fresh re-fetch, and only past the giveup — any
+        # other error, or simply not knowing, waits indefinitely.
+        if (
+            tx.get("error") == "txnNotFound"
+            and deps.now_fn() - fill["created_ts"] > PAYMENT_GIVEUP_SECONDS
+        ):
+            try:
+                recheck = await deps.get_tx_fn(fill["signed_txid"])
+            except Exception:
+                logging.warning(
+                    f"closet fill {fill['id']}: payment giveup re-check failed: {traceback.format_exc()}"
+                )
+                return False
+            if recheck.get("error") == "txnNotFound":
+                return _fail(conn, fill, "no payment arrived within 24 hours")
         return False
     meta = tx.get("meta") or {}
     if meta.get("TransactionResult") != "tesSUCCESS":

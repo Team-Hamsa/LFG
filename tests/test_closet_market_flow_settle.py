@@ -523,14 +523,15 @@ def test_take_recheck_finds_validated_is_not_failed(tmp_path):
     assert run(cmf.settle_fill(fl["id"], d)) == cms.MIRRORED
 
 
-def test_take_none_status_beyond_giveup_fails(tmp_path):
-    """(#443 review fix round 2) A None payload status that never resolves
-    must eventually give up — a fill can't poll forever with no path to a
-    terminal state."""
+def test_take_none_status_never_fails_even_past_giveup(tmp_path):
+    """(#443 review fix round 3) A `None` payload status — an XUMM API error,
+    a 429 with an empty cache (always true right after a restart) — is NEVER
+    a failure signal, no matter how old the fill is. Only a definite,
+    non-None answer (unsigned, or signed-with-no-txid) can give up."""
     path, f = _db(tmp_path), Fakes()
     _, fl = _take(path, f)
-    d = deps(path, f, tmp_path, now=fl["created_ts"] + cmf.PAYMENT_GIVEUP_SECONDS + 1)
-    assert run(cmf.settle_fill(fl["id"], d)) == cms.FAILED
+    d = deps(path, f, tmp_path, now=fl["created_ts"] + cmf.PAYMENT_GIVEUP_SECONDS + 3600)
+    assert run(cmf.settle_fill(fl["id"], d)) == cms.FUNDS_PENDING
 
 
 def test_take_none_status_just_under_giveup_still_waits(tmp_path):
@@ -540,18 +541,76 @@ def test_take_none_status_just_under_giveup_still_waits(tmp_path):
     assert run(cmf.settle_fill(fl["id"], d)) == cms.FUNDS_PENDING
 
 
-def test_take_not_found_tx_beyond_giveup_fails(tmp_path):
-    """(#443 review fix round 2) A signed tx the lookup can never find (no
-    LastLedgerSequence to judge absence against) must also eventually give
-    up."""
+def test_take_unsigned_status_beyond_giveup_fails(tmp_path):
+    """(#443 review fix round 3) A non-None, explicitly-unsigned status past
+    the giveup DOES fail — unlike a None read, this is a definite answer."""
+    path, f = _db(tmp_path), Fakes()
+    _, fl = _take(path, f)
+    f.payload_status["PU"] = {"signed": False}
+    d = deps(path, f, tmp_path, now=fl["created_ts"] + cmf.PAYMENT_GIVEUP_SECONDS + 3600)
+    assert run(cmf.settle_fill(fl["id"], d)) == cms.FAILED
+
+
+def test_take_signed_no_txid_beyond_giveup_fails(tmp_path):
+    """(#443 review fix round 3, folded minor) A signed-but-no-txid-yet
+    status is also a definite (non-None) answer, so it must not poll forever
+    either."""
+    path, f = _db(tmp_path), Fakes()
+    _, fl = _take(path, f)
+    f.payload_status["PU"] = {"signed": True}  # no "txid" key
+    d = deps(path, f, tmp_path, now=fl["created_ts"] + cmf.PAYMENT_GIVEUP_SECONDS + 3600)
+    assert run(cmf.settle_fill(fl["id"], d)) == cms.FAILED
+
+
+def test_take_too_busy_error_never_fails_even_past_giveup(tmp_path):
+    """(#443 review fix round 3) A bare rippled error body that ISN'T
+    txnNotFound (tooBusy, slowDown, ...) must never be treated as absence —
+    only a confirmed txnNotFound-on-both-reads can give up post-sign."""
     path, f = _db(tmp_path), Fakes()
     _, fl = _take(path, f)
     f.payload_status["PU"] = {"signed": True, "account": BUYER, "txid": "PAYTX"}
-    d = deps(path, f, tmp_path, now=fl["created_ts"] + cmf.PAYMENT_GIVEUP_SECONDS + 1)
+    f.txs["PAYTX"] = {"error": "tooBusy"}
+    d = deps(path, f, tmp_path, now=fl["created_ts"] + cmf.PAYMENT_GIVEUP_SECONDS + 3600)
+    assert run(cmf.settle_fill(fl["id"], d)) == cms.FUNDS_PENDING
+
+
+def test_take_txnnotfound_then_toobusy_recheck_still_waits(tmp_path):
+    """(#443 review fix round 3) txnNotFound on the initial read triggers the
+    giveup re-check, but if THAT re-fetch comes back some other error
+    (tooBusy here, e.g. a partial-history node lagging behind another that
+    briefly saw the tx as not-found), the giveup does not fire — both reads
+    must agree it's txnNotFound."""
+    path, f = _db(tmp_path), Fakes()
+    _, fl = _take(path, f)
+    f.payload_status["PU"] = {"signed": True, "account": BUYER, "txid": "PAYTX"}
+    calls = {"n": 0}
+
+    async def get_tx_fn(tx_hash):
+        calls["n"] += 1
+        return {"error": "txnNotFound"} if calls["n"] == 1 else {"error": "tooBusy"}
+
+    d = deps(path, f, tmp_path, now=fl["created_ts"] + cmf.PAYMENT_GIVEUP_SECONDS + 3600)
+    d.get_tx_fn = get_tx_fn
+    assert run(cmf.settle_fill(fl["id"], d)) == cms.FUNDS_PENDING
+    assert calls["n"] == 2
+
+
+def test_take_txnnotfound_both_reads_beyond_giveup_fails(tmp_path):
+    """(#443 review fix round 3) Only when BOTH the initial lookup and the
+    one re-fetch agree `error == "txnNotFound"`, past the giveup, does the
+    fill fail."""
+    path, f = _db(tmp_path), Fakes()
+    _, fl = _take(path, f)
+    f.payload_status["PU"] = {"signed": True, "account": BUYER, "txid": "PAYTX"}
+    f.txs["PAYTX"] = {"error": "txnNotFound"}
+    d = deps(path, f, tmp_path, now=fl["created_ts"] + cmf.PAYMENT_GIVEUP_SECONDS + 3600)
     assert run(cmf.settle_fill(fl["id"], d)) == cms.FAILED
 
 
 def test_take_not_found_tx_just_under_giveup_still_waits(tmp_path):
+    """A bare `{"validated": False}` (no "error" key — the Fakes' generic
+    not-yet-seen shape) never fails regardless of age: there's no
+    LastLedgerSequence AND no txnNotFound to agree on."""
     path, f = _db(tmp_path), Fakes()
     _, fl = _take(path, f)
     f.payload_status["PU"] = {"signed": True, "account": BUYER, "txid": "PAYTX"}
