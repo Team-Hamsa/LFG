@@ -4948,11 +4948,9 @@ async def _start_brix_claim_recovery(app: web.Application) -> None:
 
     async def _run() -> None:
         try:
-            conn = await asyncio.to_thread(_brix_conn)
-            try:
-                outcomes = await brix_drip.recover_from_chain(conn)
-            finally:
-                conn.close()
+            # Each DB phase opens its own connection in the worker thread that
+            # uses it — a to_thread-opened connection is unusable on the loop.
+            outcomes = await brix_drip.recover_from_chain_threaded(_brix_conn)
             if outcomes:
                 logging.info(
                     "brix claim recovery resolved %s claim(s): %s", len(outcomes), outcomes

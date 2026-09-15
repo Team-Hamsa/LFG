@@ -28,7 +28,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import sqlite3
-from collections.abc import Callable, Iterable, Mapping, Sequence
+from collections.abc import Awaitable, Callable, Iterable, Mapping, Sequence
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from typing import Any, Protocol
@@ -945,13 +945,55 @@ def recover(
 
 
 async def recover_from_chain(conn: sqlite3.Connection) -> dict[int, str]:
-    """Reconcile every open claim against the ledger.
+    """Reconcile every open claim against the ledger, on `conn`'s own thread.
 
-    Wraps `recover` with the two async lookups it needs. A lookup that FAILED
-    stays distinguishable from one that found nothing: conflating them would
-    mark a genuinely paid claim failed and unbind it, letting the same BRIX be
-    claimed twice — so failures are surfaced as a raising finder, which keeps
-    recover()'s "never guess" branch in charge.
+    For callers that own a connection on the event-loop thread (the CLI).
+    Service code must use `recover_from_chain_threaded` instead: a connection
+    opened in a worker thread cannot be used from the loop.
+    """
+
+    async def run_db(fn: Callable[[sqlite3.Connection], Any]) -> Any:
+        return fn(conn)
+
+    return await _recover_from_chain(run_db)
+
+
+async def recover_from_chain_threaded(
+    open_conn: Callable[[], sqlite3.Connection],
+) -> dict[int, str]:
+    """`recover_from_chain` with every DB phase run off the event loop.
+
+    Each phase opens its own connection via `open_conn` INSIDE the worker
+    thread and closes it there — sqlite connections never cross threads (the
+    startup hook once opened one in `asyncio.to_thread` and used it on the
+    loop, so recovery died with ProgrammingError on every boot). Keeping the
+    DB work off the loop matters because the history DB is shared with the
+    listener and waits on a 30 s busy_timeout.
+    """
+
+    async def run_db(fn: Callable[[sqlite3.Connection], Any]) -> Any:
+        def _in_thread() -> Any:
+            conn = open_conn()
+            try:
+                return fn(conn)
+            finally:
+                conn.close()
+
+        return await asyncio.to_thread(_in_thread)
+
+    return await _recover_from_chain(run_db)
+
+
+async def _recover_from_chain(
+    run_db: Callable[[Callable[[sqlite3.Connection], Any]], Awaitable[Any]],
+) -> dict[int, str]:
+    """Wraps `recover` with the two async lookups it needs.
+
+    A lookup that FAILED stays distinguishable from one that found nothing:
+    conflating them would mark a genuinely paid claim failed and unbind it,
+    letting the same BRIX be claimed twice — so failures are surfaced as a
+    raising finder, which keeps recover()'s "never guess" branch in charge.
+    `run_db` decides which thread/connection each DB phase runs on.
     """
     validated = await xrpl_ops.current_validated_ledger_index()
     if validated is None:
@@ -959,14 +1001,17 @@ async def recover_from_chain(conn: sqlite3.Connection) -> dict[int, str]:
         # ledger index. Do nothing rather than half-decide mid-outage.
         return {}
 
-    open_claims = [
-        (int(r[0]), str(r[1]), int(r[2]), None if r[3] is None else int(r[3]))
-        for r in conn.execute(
-            f"SELECT claim_id, wallet, amount, last_ledger_seq FROM brix_claims"  # noqa: S608
-            f" WHERE state IN ({','.join('?' * len(OPEN_STATES))})",
-            OPEN_STATES,
-        ).fetchall()
-    ]
+    def _open_claims(conn: sqlite3.Connection) -> list[tuple[int, str, int, int | None]]:
+        return [
+            (int(r[0]), str(r[1]), int(r[2]), None if r[3] is None else int(r[3]))
+            for r in conn.execute(
+                f"SELECT claim_id, wallet, amount, last_ledger_seq FROM brix_claims"  # noqa: S608
+                f" WHERE state IN ({','.join('?' * len(OPEN_STATES))})",
+                OPEN_STATES,
+            ).fetchall()
+        ]
+
+    open_claims = await run_db(_open_claims)
 
     found: dict[int, str | None] = {}
     failed_lookups: set[int] = set()
@@ -985,6 +1030,11 @@ async def recover_from_chain(conn: sqlite3.Connection) -> dict[int, str]:
     def finder(claim_id: int) -> str | None:
         if claim_id in failed_lookups:
             raise RuntimeError(f"account_tx lookup failed for claim {claim_id}")
-        return found.get(claim_id)
+        if claim_id not in found:
+            # Opened after the lookup pass: never looked up, so its absence
+            # proves nothing. Raising keeps recover() from guessing.
+            raise RuntimeError(f"claim {claim_id} was not looked up")
+        return found[claim_id]
 
-    return recover(conn, finder, validated)
+    result: dict[int, str] = await run_db(lambda conn: recover(conn, finder, validated))
+    return result
