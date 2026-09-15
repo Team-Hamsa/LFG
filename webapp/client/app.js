@@ -444,6 +444,11 @@ function maybeAutoOpen(link) {
   autoOpenedLinks = signDeliveryPure.autoOpenOutcome(autoOpenedLinks, link, launched !== null);
 }
 
+// Payload links whose "Show QR" disclosure the user opened. Same per-link
+// memory as autoOpenedLinks: every status poll re-runs applySignDelivery, and
+// without this the next render re-collapsed the QR seconds after the click.
+let qrExpandedLinks = [];
+
 // "Show QR to sign on another device" disclosure button for dynamically
 // built sign panels; hidden until applySignDelivery collapses the QR.
 function makeQrToggle() {
@@ -486,6 +491,7 @@ function applySignDelivery({ qrEl, linkBtn, toggleBtn, link, qrData, push, autoO
     coarse: isCoarsePointer(),
     hasLink: !!link,
     hasQr: !!qrData,
+    expanded: qrExpandedLinks.includes(link),
   });
   if (linkBtn) {
     // Undo a "Retry Joey" relabel if this panel ever renders a Xaman link.
@@ -504,6 +510,7 @@ function applySignDelivery({ qrEl, linkBtn, toggleBtn, link, qrData, push, autoO
   if (toggleBtn) {
     toggleBtn.hidden = !d.qrCollapsed;
     toggleBtn.onclick = () => {
+      if (link && !qrExpandedLinks.includes(link)) qrExpandedLinks.push(link);
       toggleBtn.hidden = true;
       if (qrEl) qrEl.hidden = false;
     };
