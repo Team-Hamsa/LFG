@@ -328,6 +328,12 @@ async def _advance_pending_bid(
 ) -> str | None:
     waited = deps.now_fn() - order["created_ts"]
     if not order["signed_txid"]:
+        if not order["payload_uuid"] and order["user_lls"] is not None:
+            # (PR #502) The row was persisted before the payload and Xaman's
+            # create call never returned one — but the request may still have
+            # reached the wallet. Only the deadline gate + a covered
+            # by-condition lookup can open or cancel it.
+            return await _cancel_unopened_unless_found(conn, order, deps, "could not reach Xaman")
         status = (
             await deps.payload_status_fn(order["payload_uuid"]) if order["payload_uuid"] else None
         )
@@ -774,6 +780,12 @@ async def _take_funds(
     InvoiceID (`_fail_unless_paid`, final review C2): a found payment is
     adopted and settled; a failed lookup waits."""
     if not fill["signed_txid"]:
+        if not fill["payload_uuid"] and fill["user_lls"] is not None:
+            # (PR #502) user_lls was persisted before the payload and Xaman's
+            # create call never returned one — the payment may still have been
+            # pushed and signed. Only the deadline gate + a covered InvoiceID
+            # lookup can adopt it or fail the fill.
+            return await _fail_unless_paid(conn, fill, deps, "no payment arrived")
         status = (
             await deps.payload_status_fn(fill["payload_uuid"]) if fill["payload_uuid"] else None
         )

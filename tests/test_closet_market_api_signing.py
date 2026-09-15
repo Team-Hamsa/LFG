@@ -239,3 +239,153 @@ def test_ask_buy_fails_the_fill_when_the_ledger_is_unreadable(closet_env, monkey
     rows = c.execute("SELECT state, error FROM closet_fills").fetchall()
     c.close()
     assert rows == [(cms.FAILED, "could not read the ledger")]
+
+
+# --- PR #502: persist the recovery intent BEFORE any Xaman payload exists -----
+
+
+def _order_rows(env):
+    c = _db(env)
+    try:
+        return [
+            dict(zip(("id", "state", "condition", "user_lls", "payload_uuid"), r, strict=True))
+            for r in c.execute(
+                "SELECT id, state, condition, user_lls, payload_uuid FROM closet_orders"
+            )
+        ]
+    finally:
+        c.close()
+
+
+def test_bid_create_persists_the_pending_row_before_building_the_payload(closet_env, monkeypatch):
+    """`_create_xumm_payload` can push to the wallet before it returns: the
+    condition, sealed fulfillment and user_lls must already be recorded."""
+    monkeypatch.setattr(server, "_known_trait", lambda net, s, v: True)
+    _trustline(monkeypatch)
+    at_build = []
+
+    async def fake(account, amount, destination, condition, cancel_after, **kwargs):
+        at_build.append((condition, kwargs["last_ledger_sequence"], _order_rows(closet_env)))
+        return {"uuid": "BU", "xumm_url": "https://xumm.app/sign/BU", "qr_url": "q", "push": "sent"}
+
+    monkeypatch.setattr(server.xumm_ops, "create_closet_bid_payload", fake)
+    resp = _run(
+        server.handle_closet_bid_create(
+            _req("POST", "/", {"slot": "Head", "value": "Tiara", "price_brix": "10"})
+        )
+    )
+    assert resp.status == 200
+    [(condition, lls, rows)] = at_build
+    assert len(rows) == 1
+    assert (
+        rows[0]["state"],
+        rows[0]["condition"],
+        rows[0]["user_lls"],
+        rows[0]["payload_uuid"],
+    ) == (
+        cms.PENDING_ESCROW,
+        condition,
+        lls,
+        None,
+    )
+    view = _json(resp)
+    assert view["id"] == rows[0]["id"] and view["xumm_url"] == "https://xumm.app/sign/BU"
+    c = _db(closet_env)
+    row = cms.get_order(c, view["id"])
+    c.close()
+    assert (row["payload_uuid"], row["xumm_url"], row["qr_url"], row["push"]) == (
+        "BU",
+        "https://xumm.app/sign/BU",
+        "q",
+        "sent",
+    )
+
+
+def test_bid_create_payload_failure_keeps_the_pending_row_for_the_sweep(closet_env, monkeypatch):
+    """A None payload is ambiguous (the request may have reached the wallet):
+    keep the pending_escrow row so the sweep can find or rule out the escrow."""
+    monkeypatch.setattr(server, "_known_trait", lambda net, s, v: True)
+    _trustline(monkeypatch)
+    cancelled = []
+
+    async def none_payload(*args, **kwargs):
+        return None
+
+    async def fake_cancel(uuid):
+        cancelled.append(uuid)
+
+    monkeypatch.setattr(server.xumm_ops, "create_closet_bid_payload", none_payload)
+    monkeypatch.setattr(server.xumm_ops, "cancel_xumm_payload", fake_cancel)
+    resp = _run(
+        server.handle_closet_bid_create(
+            _req("POST", "/", {"slot": "Head", "value": "Tiara", "price_brix": "10"})
+        )
+    )
+    assert resp.status == 502
+    body = _json(resp)
+    rows = _order_rows(closet_env)
+    assert body["code"] == "xaman_unavailable" and body["error"] == "could not reach Xaman"
+    assert [(r["id"], r["state"], r["user_lls"]) for r in rows] == [
+        (body["id"], cms.PENDING_ESCROW, 1000 + 300)
+    ]
+    assert rows[0]["condition"] and cancelled == []
+
+
+def _fill_rows(env):
+    c = _db(env)
+    try:
+        return [
+            dict(zip(("id", "state", "user_lls", "payload_uuid", "error"), r, strict=True))
+            for r in c.execute("SELECT id, state, user_lls, payload_uuid, error FROM closet_fills")
+        ]
+    finally:
+        c.close()
+
+
+def _buyable_ask(env, monkeypatch):
+    c = _db(env)
+    ask = cms.create_ask(c, owner=ME, slot="Head", value="Crown", price_brix="5", platform=None)
+    c.close()
+    monkeypatch.setattr(server.mock_economy, "DEV_OWNER", BIDDER)
+
+    async def brix_path(wallet, amount, **kwargs):
+        return "BRIX", amount
+
+    monkeypatch.setattr(server.brix_payment, "detect_payment_path", brix_path)
+    return ask
+
+
+def test_ask_buy_persists_user_lls_before_building_the_payload(closet_env, monkeypatch):
+    ask = _buyable_ask(closet_env, monkeypatch)
+    at_build = []
+
+    async def fake_buy(account, amount, destination, invoice_id, **kwargs):
+        at_build.append((kwargs["last_ledger_sequence"], _fill_rows(closet_env)))
+        return {"uuid": "PU", "xumm_url": "x", "qr_url": "q", "push": None}
+
+    monkeypatch.setattr(server.xumm_ops, "create_closet_buy_payload", fake_buy)
+    resp = _run(server.handle_closet_ask_buy(_req("POST", "/", match_info={"order_id": ask["id"]})))
+    assert resp.status == 200
+    [(lls, rows)] = at_build
+    assert [(r["state"], r["user_lls"], r["payload_uuid"]) for r in rows] == [
+        (cms.FUNDS_PENDING, lls, None)
+    ]
+    assert _fill_rows(closet_env)[0]["payload_uuid"] == "PU"
+
+
+def test_ask_buy_payload_failure_leaves_the_fill_funds_pending(closet_env, monkeypatch):
+    """The payment may still land: a None payload must not fail the fill."""
+    ask = _buyable_ask(closet_env, monkeypatch)
+
+    async def none_payload(*args, **kwargs):
+        return None
+
+    monkeypatch.setattr(server.xumm_ops, "create_closet_buy_payload", none_payload)
+    resp = _run(server.handle_closet_ask_buy(_req("POST", "/", match_info={"order_id": ask["id"]})))
+    assert resp.status == 502
+    body = _json(resp)
+    rows = _fill_rows(closet_env)
+    assert body["code"] == "xaman_unavailable" and body["id"] == rows[0]["id"]
+    assert [(r["state"], r["user_lls"], r["payload_uuid"]) for r in rows] == [
+        (cms.FUNDS_PENDING, 1000 + 300, None)
+    ]

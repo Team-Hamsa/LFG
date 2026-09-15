@@ -5493,6 +5493,30 @@ async def handle_closet_bid_create(request):
     condition = crypto_condition.condition_hex(preimage)
     sealed = crypto_condition.seal(crypto_condition.fulfillment_hex(preimage))
     cancel_after = int(time.time()) - xrpl_ops.RIPPLE_EPOCH_OFFSET + config.CLOSET_BID_TTL_SECONDS
+    # (PR #502) Persist the recovery intent BEFORE any payload exists:
+    # `_create_xumm_payload` can push to the wallet before it returns, and a
+    # None return (or a crash) must not leave a signable EscrowCreate whose
+    # condition / fulfillment / deadline are recorded nowhere. This insert is
+    # also the authoritative live-bid uniqueness check.
+    try:
+        order = await _closet_db(
+            closet_market_store.create_pending_bid,
+            owner=wallet,
+            slot=slot,
+            value=value,
+            price_brix=price,
+            platform=_platform(user),
+            condition=condition,
+            fulfillment_enc=sealed,
+            cancel_after=cancel_after,
+            payload_uuid=None,
+            xumm_url=None,
+            qr_url=None,
+            push=None,
+            user_lls=lls,
+        )
+    except closet_market_store.OrderError as exc:
+        return _order_error_response(exc)
     payload = await xumm_ops.create_closet_bid_payload(
         wallet,
         market_ops.brix_amount_dict(price),
@@ -5505,28 +5529,22 @@ async def handle_closet_bid_create(request):
         platform=memos.platform_for_surface(_platform(user)),
     )
     if not payload:
-        return web.json_response({"error": "could not reach Xaman"}, status=502)
-    try:
-        order = await _closet_db(
-            closet_market_store.create_pending_bid,
-            owner=wallet,
-            slot=slot,
-            value=value,
-            price_brix=price,
-            platform=_platform(user),
-            condition=condition,
-            fulfillment_enc=sealed,
-            cancel_after=cancel_after,
-            payload_uuid=payload.get("uuid"),
-            xumm_url=payload.get("xumm_url"),
-            qr_url=payload.get("qr_url"),
-            push=payload.get("push"),
-            user_lls=lls,
+        # Ambiguous: the request may have reached the wallet. Keep the
+        # pending_escrow row; the sweep opens the bid if the escrow lands by
+        # user_lls, and cancels it once a covered lookup proves it didn't.
+        return web.json_response(
+            {"error": "could not reach Xaman", "code": "xaman_unavailable", "id": order["id"]},
+            status=502,
         )
-    except closet_market_store.OrderError as exc:
-        if payload.get("uuid"):
-            await xumm_ops.cancel_xumm_payload(payload["uuid"])
-        return _order_error_response(exc)
+    await _closet_db(
+        closet_market_store.update_order,
+        order["id"],
+        payload_uuid=payload.get("uuid"),
+        xumm_url=payload.get("xumm_url"),
+        qr_url=payload.get("qr_url"),
+        push=payload.get("push"),
+    )
+    order = await _closet_db(closet_market_store.get_order, order["id"])
     return web.json_response(_closet_bid_view(order))
 
 
@@ -5618,6 +5636,10 @@ async def handle_closet_ask_buy(request):
             status=503,
         )
     lls = idx + config.CLOSET_USER_TX_LEDGER_WINDOW
+    # (PR #502) Persist the deadline BEFORE any payload exists, so a payload
+    # pushed to the wallet ahead of a None return (or a crash) still leaves a
+    # fill the flow can resolve by InvoiceID once the ledger passes user_lls.
+    await _closet_db(closet_market_store.update_fill, fill["id"], user_lls=lls)
     payload = await xumm_ops.create_closet_buy_payload(
         wallet,
         market_ops.brix_amount_dict(ask["price_brix"]),
@@ -5630,13 +5652,13 @@ async def handle_closet_ask_buy(request):
         platform=memos.platform_for_surface(_platform(user)),
     )
     if not payload:
-        await _closet_db(
-            closet_market_store.update_fill,
-            fill["id"],
-            state=closet_market_store.FAILED,
-            error="could not reach Xaman",
+        # Ambiguous: the payment may still land. Leave the fill funds_pending
+        # with no payload_uuid; the flow adopts a payment found by InvoiceID
+        # or fails the fill once absence is proven past user_lls.
+        return web.json_response(
+            {"error": "could not reach Xaman", "code": "xaman_unavailable", "id": fill["id"]},
+            status=502,
         )
-        return web.json_response({"error": "could not reach Xaman"}, status=502)
     await _closet_db(
         closet_market_store.update_fill,
         fill["id"],
@@ -5644,7 +5666,6 @@ async def handle_closet_ask_buy(request):
         xumm_url=payload.get("xumm_url"),
         qr_url=payload.get("qr_url"),
         push=payload.get("push"),
-        user_lls=lls,
     )
     fill = await _closet_db(closet_market_store.get_fill, fill["id"])
     view = _closet_fill_view(fill, wallet)

@@ -435,3 +435,41 @@ def test_escrow_gone_without_user_lls_cancels_as_before(tmp_path):
     run(cmf.advance_bid(bid["id"], deps(path, f, tmp_path, now=bid["created_ts"] + 5)))
     assert order(path, bid["id"])["state"] == cms.CANCELLED
     assert f.escrow_lookups == []
+
+
+# --- PR #502: a uuid-less pending bid (Xaman unreachable) is found by condition -
+
+
+def test_uuidless_bid_before_user_lls_waits(tmp_path):
+    path, f = _db(tmp_path), Fakes(ledger_index=USER_LLS)
+    bid = pending_bid(path, user_lls=USER_LLS, payload_uuid=None)
+    _recoverable_escrow(f, seq=7)
+    run(cmf.advance_bid(bid["id"], deps(path, f, tmp_path, now=bid["created_ts"] + 5)))
+    assert order(path, bid["id"])["state"] == cms.PENDING_ESCROW
+    assert f.escrow_lookups == []
+
+
+def test_uuidless_bid_with_the_escrow_found_by_condition_opens(tmp_path):
+    path, f = _db(tmp_path), Fakes(ledger_index=USER_LLS + 1)
+    bid = pending_bid(path, user_lls=USER_LLS, payload_uuid=None)
+    _recoverable_escrow(f, seq=7)
+    run(cmf.advance_bid(bid["id"], deps(path, f, tmp_path, now=bid["created_ts"] + 5)))
+    got = order(path, bid["id"])
+    assert (got["state"], got["escrow_tx_hash"], got["escrow_owner_seq"]) == (cms.OPEN, "ECH", 7)
+    assert f.escrow_requires == [USER_LLS]
+
+
+def test_uuidless_bid_past_user_lls_with_proven_absence_cancels(tmp_path):
+    path, f = _db(tmp_path), Fakes(ledger_index=USER_LLS + 1, lookup_coverage=USER_LLS - 1)
+    bid = pending_bid(path, user_lls=USER_LLS, payload_uuid=None)
+    d = deps(path, f, tmp_path, now=bid["created_ts"] + 5)
+    run(cmf.advance_bid(bid["id"], d))
+    assert order(path, bid["id"])["state"] == cms.PENDING_ESCROW  # lookup lacks coverage
+    f.lookup_coverage = None
+    run(cmf.advance_bid(bid["id"], d))
+    got = order(path, bid["id"])
+    assert (got["state"], got["cancel_reason"], got["error"]) == (
+        cms.CANCELLED,
+        "unopened",
+        "could not reach Xaman",
+    )

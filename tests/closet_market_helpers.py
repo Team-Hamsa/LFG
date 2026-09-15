@@ -156,7 +156,10 @@ def deps(path, f, tmp_path, *, fee_bps=0, now=1_000_000.0):
     )
 
 
-def pending_bid(path, *, owner=BUYER, price="10", user_lls=None):
+_UNSET: Any = object()
+
+
+def pending_bid(path, *, owner=BUYER, price="10", user_lls=None, payload_uuid=_UNSET):
     c = conn(path)
     order = cms.create_pending_bid(
         c,
@@ -168,9 +171,9 @@ def pending_bid(path, *, owner=BUYER, price="10", user_lls=None):
         condition="COND",
         fulfillment_enc="SEALED",
         cancel_after=CANCEL_AFTER,
-        payload_uuid=f"U-{owner}",
-        xumm_url="x",
-        qr_url="q",
+        payload_uuid=f"U-{owner}" if payload_uuid is _UNSET else payload_uuid,
+        xumm_url=None if payload_uuid is None else "x",
+        qr_url=None if payload_uuid is None else "q",
         push=None,
         user_lls=user_lls,
     )

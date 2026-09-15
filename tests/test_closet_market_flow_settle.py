@@ -159,13 +159,13 @@ def test_mirror_failure_stays_paid_and_retries(tmp_path):
     assert run(cmf.settle_fill(fl["id"], d)) == cms.MIRRORED
 
 
-def _take(path, f, *, price="5", user_lls=None):
+def _take(path, f, *, price="5", user_lls=None, payload_uuid="PU"):
     c = conn(path)
     ask = cms.create_ask(
         c, owner=SELLER, slot="Head", value="Crown", price_brix=price, platform=None
     )
     fl = cms.create_take_fill(c, ask["id"], BUYER, fee_bps=0, platform=None)
-    cms.update_fill(c, fl["id"], payload_uuid="PU", user_lls=user_lls)
+    cms.update_fill(c, fl["id"], payload_uuid=payload_uuid, user_lls=user_lls)
     fl = cms.get_fill(c, fl["id"])
     c.close()
     return ask, fl
@@ -858,3 +858,47 @@ def test_take_reconcile_with_only_junk_refunds_the_junk_sender(tmp_path):
     assert (got["signed_txid"], got["refund_to"], got["refund_brix"]) == ("JUNK1", OTHER, "2")
     assert f.payments[0][:2] == (OTHER, "2")
     assert _counts(path) == (1, 0)
+
+
+# --- PR #502: a uuid-less fill (Xaman unreachable) is recovered by InvoiceID ----
+
+
+def test_uuidless_take_before_user_lls_waits(tmp_path):
+    path, f = _db(tmp_path), Fakes(ledger_index=USER_LLS)
+    _, fl = _take(path, f, user_lls=USER_LLS, payload_uuid=None)
+    d = deps(path, f, tmp_path, now=fl["created_ts"] + 10)
+    assert run(cmf.settle_fill(fl["id"], d)) == cms.FUNDS_PENDING
+    assert f.invoice_lookups == []
+
+
+def test_uuidless_take_with_the_payment_found_by_invoice_is_adopted(tmp_path):
+    """The payload may have reached the wallet even though Xaman's create call
+    came back empty: a validated Payment under this fill's InvoiceID is
+    adopted and settled."""
+    path, f = _db(tmp_path), Fakes(ledger_index=USER_LLS + 1)
+    _, fl = _take(path, f, user_lls=USER_LLS, payload_uuid=None)
+    f.found_invoices[cms.invoice_id(fl["id"])] = [_invoice_entry(fl["id"])]
+    f.txs["PAYTX"] = _payment_tx(fl["id"])
+    d = deps(path, f, tmp_path, now=fl["created_ts"] + 10)
+    assert run(cmf.settle_fill(fl["id"], d)) == cms.MIRRORED
+    got = fill(path, fl["id"])
+    assert (got["signed_txid"], got["payment_tx_hash"]) == ("PAYTX", "PAYTX")
+    assert f.invoice_requires == [USER_LLS]
+
+
+def test_uuidless_take_past_user_lls_with_proven_absence_fails(tmp_path):
+    path, f = _db(tmp_path), Fakes(ledger_index=USER_LLS + 1, lookup_coverage=USER_LLS - 1)
+    _, fl = _take(path, f, user_lls=USER_LLS, payload_uuid=None)
+    d = deps(path, f, tmp_path, now=fl["created_ts"] + 10)
+    assert run(cmf.settle_fill(fl["id"], d)) == cms.FUNDS_PENDING  # lookup lacks coverage
+    f.lookup_coverage = None
+    assert run(cmf.settle_fill(fl["id"], d)) == cms.FAILED
+    assert fill(path, fl["id"])["error"] == "no payment arrived"
+
+
+def test_uuidless_take_without_user_lls_keeps_waiting(tmp_path):
+    path, f = _db(tmp_path), Fakes(ledger_index=10_000)
+    _, fl = _take(path, f, payload_uuid=None)
+    d = deps(path, f, tmp_path, now=fl["created_ts"] + cmf.PAYMENT_GIVEUP_SECONDS + 10)
+    assert run(cmf.settle_fill(fl["id"], d)) == cms.FUNDS_PENDING
+    assert f.invoice_lookups == []
