@@ -12,7 +12,7 @@ from __future__ import annotations
 import logging
 from collections.abc import Awaitable, Callable
 from decimal import Decimal, DecimalException
-from typing import Any
+from typing import Any, cast
 
 import discord
 from discord import Embed
@@ -30,6 +30,10 @@ AdminLog = Callable[[Any, str], Awaitable[None]]
 # in the bot process. XRP_TOTAL_SUPPLY matches the service's own bound.
 XRP_TOTAL_SUPPLY = Decimal(100_000_000_000)
 MAX_DURATION_HOURS = Decimal(87_600)
+# XRP's drop precision. Also closes the mirror-image hardening gap: a large
+# NEGATIVE exponent like "1e-9999999999" is finite, positive, and under every
+# maximum, but would still reach `format(...)` unless rejected first.
+MAX_DECIMAL_PLACES = 6
 
 
 def _xrp(drops: Any) -> str:
@@ -55,6 +59,19 @@ def parse_form(
             )
         if maximum is not None and value > maximum:
             raise ValueError(f"{label} must be at most {maximum}")
+        # Read the exponent off the AS-PARSED value, not a normalized one:
+        # normalize() is a context operation, and the default decimal
+        # context's Emin (-999999) silently underflows an extreme negative
+        # exponent — e.g. "1e-9999999999" — to Decimal('0'), which would
+        # sail straight past a check performed on the normalized result
+        # (verified: Decimal("1e-9999999999").normalize() == Decimal("0")).
+        # `.as_tuple().exponent` on the raw value is an O(1) attribute read
+        # regardless of magnitude — is_finite() above guarantees it's always
+        # an int here, never the 'n'/'N'/'F' special-value markers — so this
+        # check is both cheap and exact, and runs before any formatting.
+        exponent = cast(int, value.as_tuple().exponent)
+        if exponent < -MAX_DECIMAL_PLACES:
+            raise ValueError(f"{label} has more than {MAX_DECIMAL_PLACES} decimal places")
         return format(value.normalize(), "f")
 
     out = {

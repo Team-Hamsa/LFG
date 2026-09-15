@@ -133,6 +133,12 @@ def test_parse_form_normalizes_numbers_and_omits_blank_duration(mods):
         ]
         == "24"
     )
+    assert (
+        fca.parse_form(coverage="50", budget="1", wallet_cap="1", min_bid="0.000001", duration="")[
+            "min_bid_xrp"
+        ]
+        == "0.000001"
+    )
 
 
 @pytest.mark.parametrize(
@@ -151,6 +157,21 @@ def test_parse_form_normalizes_numbers_and_omits_blank_duration(mods):
             "duration": "",
         },
         {"coverage": "100", "budget": "1", "wallet_cap": "1", "min_bid": "0", "duration": "100000"},
+        {
+            "coverage": "100",
+            "budget": "1e-9999999999",
+            "wallet_cap": "1",
+            "min_bid": "0",
+            "duration": "",
+        },
+        {
+            "coverage": "100",
+            "budget": "1",
+            "wallet_cap": "1",
+            "min_bid": "0.0000001",
+            "duration": "",
+        },
+        {"coverage": "1e-20", "budget": "1", "wallet_cap": "1", "min_bid": "0", "duration": ""},
     ],
 )
 def test_parse_form_rejects_bad_input(mods, fields):
