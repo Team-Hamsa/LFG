@@ -4989,10 +4989,28 @@ async def _closet_db(fn: Callable[..., Any], *args: Any, **kwargs: Any) -> Any:
 
 _CLOSET_BOOK_CACHE: dict[tuple[str, str | None, str | None], tuple[float, dict[str, Any]]] = {}
 _CLOSET_BOOK_TTL = 60.0
+# Each distinct public (slot, value) query is its own key: bound the cache.
+_CLOSET_BOOK_CACHE_MAX = 64
 
 
 def _invalidate_closet_book() -> None:
     _CLOSET_BOOK_CACHE.clear()
+
+
+def _closet_book_cache_put(
+    key: tuple[str, str | None, str | None], value: dict[str, Any], now_mono: float
+) -> None:
+    """Insert one book response: drop entries older than the TTL, insert (as
+    the newest), then evict the oldest while over _CLOSET_BOOK_CACHE_MAX."""
+    for stale in [
+        k for k, (ts, _) in _CLOSET_BOOK_CACHE.items() if now_mono - ts >= _CLOSET_BOOK_TTL
+    ]:
+        del _CLOSET_BOOK_CACHE[stale]
+    _CLOSET_BOOK_CACHE.pop(key, None)
+    _CLOSET_BOOK_CACHE[key] = (now_mono, value)
+    while len(_CLOSET_BOOK_CACHE) > _CLOSET_BOOK_CACHE_MAX:
+        oldest = min(_CLOSET_BOOK_CACHE, key=lambda k: _CLOSET_BOOK_CACHE[k][0])
+        del _CLOSET_BOOK_CACHE[oldest]
 
 
 _ORDER_ERROR_STATUS = {
@@ -5295,7 +5313,7 @@ async def handle_closet_book(request):
         body["summary"] = summary[0] if summary else None
     else:
         body = {"rows": await _closet_db(closet_market_store.book_summary, slot, value)}
-    _CLOSET_BOOK_CACHE[key] = (now_mono, body)
+    _closet_book_cache_put(key, body, now_mono)
     return web.json_response(body)
 
 

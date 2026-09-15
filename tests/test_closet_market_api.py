@@ -355,3 +355,25 @@ def test_price_beyond_15_significant_digits_is_refused(closet_env):
     assert resp.status == 400 and _json(resp)["code"] == "bad_request"
     assert server._parse_brix_price("100000000.000001") == "100000000.000001"  # exactly 15
     assert server._parse_brix_price("1000000000000000") == "1000000000000000"  # trailing zeros
+
+
+def test_closet_book_cache_is_bounded_and_drops_stale_entries(closet_env):
+    """PR #502 C2: every distinct (slot, value) query adds a key, so the cache
+    must evict — stale entries first, then the oldest past the max."""
+    assert server._CLOSET_BOOK_CACHE_MAX == 64
+    for i in range(server._CLOSET_BOOK_CACHE_MAX + 20):
+        server._closet_book_cache_put(("testnet", "Head", f"V{i}"), {"i": i}, 1000.0 + i)
+        assert len(server._CLOSET_BOOK_CACHE) <= server._CLOSET_BOOK_CACHE_MAX
+    newest = ("testnet", "Head", f"V{server._CLOSET_BOOK_CACHE_MAX + 19}")
+    assert newest in server._CLOSET_BOOK_CACHE
+    assert ("testnet", "Head", "V0") not in server._CLOSET_BOOK_CACHE
+    later = 1000.0 + server._CLOSET_BOOK_CACHE_MAX + 20 + server._CLOSET_BOOK_TTL
+    server._closet_book_cache_put(("testnet", None, None), {"fresh": True}, later)
+    assert list(server._CLOSET_BOOK_CACHE) == [("testnet", None, None)]
+
+
+def test_closet_book_handler_uses_the_bounded_cache(closet_env, monkeypatch):
+    monkeypatch.setattr(server, "_CLOSET_BOOK_CACHE_MAX", 3)
+    for i in range(6):
+        _run(server.handle_closet_book(_req("GET", f"/api/closet/book?slot=Head&value=V{i}")))
+    assert len(server._CLOSET_BOOK_CACHE) == 3
