@@ -19,6 +19,8 @@ from contextlib import contextmanager
 from dataclasses import asdict, dataclass
 from typing import Any
 
+from lfg_core import market_ops
+
 BPS = 10_000
 DEFAULT_WALLET_WINDOW_SECONDS = 30 * 86_400
 
@@ -397,3 +399,409 @@ def stop_campaign(
             result="stopped",
         )
     return get_campaign(conn, current.id), "stopped"
+
+
+# --- promises and refunds -------------------------------------------------
+
+_COMMITTED_REFUND_STATES = ("owed", "submitted", "confirmed")
+# Pure-rule verdicts that mean "an ordinary bid": nothing is recorded for them.
+_UNRECORDED_DECLINES = frozenset({"campaign_inactive", "not_external_listing"})
+
+
+@dataclass(frozen=True)
+class PromiseInput:
+    offer_index: str
+    network: str
+    nft_id: str
+    bidder: str
+    bid_drops: int
+    ask_drops: int
+    broker: str
+    broker_rate: float
+    bid_expiration: int | None
+
+
+@dataclass(frozen=True)
+class RefundDecision:
+    accept_tx_hash: str
+    seller: str | None
+    broker: str | None
+    observed_fee_drops: int | None
+    observed_royalty_drops: int | None
+    refund_drops: int
+    reason: str | None  # None => owed; otherwise the decline reason
+
+
+def _row(row: sqlite3.Row | None) -> dict[str, Any] | None:
+    return dict(row) if row is not None else None
+
+
+def committed_drops(conn: sqlite3.Connection, campaign_id: int) -> int:
+    """Budget in use: open promises plus refunds that are owed, in flight or paid."""
+    row = conn.execute(
+        "SELECT COALESCE((SELECT SUM(promised_drops) FROM fee_cover_promises"
+        "                 WHERE campaign_id = ? AND state = 'open'), 0)"
+        "     + COALESCE((SELECT SUM(refund_drops) FROM fee_cover_refunds"
+        "                 WHERE campaign_id = ? AND state IN ('owed','submitted','confirmed')), 0)",
+        (campaign_id, campaign_id),
+    ).fetchone()
+    return int(row[0])
+
+
+def paid_drops(conn: sqlite3.Connection, campaign_id: int) -> int:
+    row = conn.execute(
+        "SELECT COALESCE(SUM(refund_drops), 0) FROM fee_cover_refunds"
+        " WHERE campaign_id = ? AND state = 'confirmed'",
+        (campaign_id,),
+    ).fetchone()
+    return int(row[0])
+
+
+def wallet_usage_drops(conn: sqlite3.Connection, network: str, wallet: str, since: int) -> int:
+    """One wallet's open promises + committed refunds created since `since`, across campaigns."""
+    row = conn.execute(
+        "SELECT COALESCE((SELECT SUM(promised_drops) FROM fee_cover_promises"
+        "                 WHERE network = ? AND bidder = ? AND state = 'open' AND created_at >= ?), 0)"
+        "     + COALESCE((SELECT SUM(refund_drops) FROM fee_cover_refunds"
+        "                 WHERE network = ? AND bidder = ? AND state IN ('owed','submitted','confirmed')"
+        "                   AND created_at >= ?), 0)",
+        (network, wallet, since, network, wallet, since),
+    ).fetchone()
+    return int(row[0])
+
+
+def headroom_reason(
+    conn: sqlite3.Connection, campaign: Campaign, network: str, bidder: str, drops: int, now: int
+) -> str | None:
+    if committed_drops(conn, campaign.id) + drops > campaign.budget_drops:
+        return "budget_exhausted"
+    since = now - campaign.wallet_window_seconds
+    if wallet_usage_drops(conn, network, bidder, since) + drops > campaign.wallet_cap_drops:
+        return "wallet_cap"
+    return None
+
+
+def get_promise(conn: sqlite3.Connection, offer_index: str) -> dict[str, Any] | None:
+    return _row(
+        conn.execute(
+            "SELECT * FROM fee_cover_promises WHERE offer_index = ?", (offer_index,)
+        ).fetchone()
+    )
+
+
+def open_promises(conn: sqlite3.Connection, network: str) -> list[dict[str, Any]]:
+    return [
+        dict(r)
+        for r in conn.execute(
+            "SELECT * FROM fee_cover_promises WHERE network = ? AND state = 'open' ORDER BY created_at",
+            (network,),
+        )
+    ]
+
+
+def record_promise(
+    conn: sqlite3.Connection,
+    campaign: Campaign,
+    inp: PromiseInput,
+    *,
+    promised_drops: int,
+    decline_reason: str | None,
+    now: int | None = None,
+) -> dict[str, Any] | None:
+    """Write the promise for one on-ledger bid (idempotent on offer_index).
+
+    `decline_reason` is the pure-rule verdict (fee_cover.promise_decline_reason).
+    Budget and wallet-cap headroom are decided HERE, inside the write lock, so
+    two bids can never both take the last of the budget. Coverage is
+    snapshotted from `campaign` (the read the caller priced against). Returns
+    None — writing nothing — when the campaign stopped before the lock.
+    """
+    if decline_reason in _UNRECORDED_DECLINES:
+        raise ValueError(f"{decline_reason} is never recorded")
+    ts = _now(now)
+    with _immediate(conn):
+        existing = conn.execute(
+            "SELECT * FROM fee_cover_promises WHERE offer_index = ?", (inp.offer_index,)
+        ).fetchone()
+        if existing is not None:
+            return dict(existing)
+        fresh = get_campaign(conn, campaign.id)
+        if fresh is None or not fresh.is_live(ts):
+            return None
+        reason = decline_reason
+        if reason is None:
+            reason = headroom_reason(conn, fresh, inp.network, inp.bidder, promised_drops, ts)
+        state = "open" if reason is None else "declined"
+        conn.execute(
+            "INSERT INTO fee_cover_promises (offer_index, campaign_id, network, nft_id, bidder, bid_drops,"
+            " ask_drops, broker, broker_rate, coverage_bps, promised_drops, bid_expiration, state, reason,"
+            " created_at, closed_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            (
+                inp.offer_index,
+                fresh.id,
+                inp.network,
+                inp.nft_id,
+                inp.bidder,
+                inp.bid_drops,
+                inp.ask_drops,
+                inp.broker,
+                inp.broker_rate,
+                campaign.coverage_bps,
+                promised_drops,
+                inp.bid_expiration,
+                state,
+                reason,
+                ts,
+                None if state == "open" else ts,
+            ),
+        )
+    return get_promise(conn, inp.offer_index)
+
+
+def release_promise(
+    conn: sqlite3.Connection, offer_index: str, reason: str, now: int | None = None
+) -> bool:
+    cursor = conn.execute(
+        "UPDATE fee_cover_promises SET state = 'released', reason = ?, closed_at = ?"
+        " WHERE offer_index = ? AND state = 'open'",
+        (reason, _now(now), offer_index),
+    )
+    conn.commit()
+    return cursor.rowcount == 1
+
+
+def get_refund(conn: sqlite3.Connection, accept_tx_hash: str) -> dict[str, Any] | None:
+    return _row(
+        conn.execute(
+            "SELECT * FROM fee_cover_refunds WHERE accept_tx_hash = ?", (accept_tx_hash,)
+        ).fetchone()
+    )
+
+
+def get_refund_by_offer(conn: sqlite3.Connection, offer_index: str) -> dict[str, Any] | None:
+    return _row(
+        conn.execute(
+            "SELECT * FROM fee_cover_refunds WHERE offer_index = ?", (offer_index,)
+        ).fetchone()
+    )
+
+
+def refunds_in_state(conn: sqlite3.Connection, network: str, state: str) -> list[dict[str, Any]]:
+    return [
+        dict(r)
+        for r in conn.execute(
+            "SELECT * FROM fee_cover_refunds WHERE network = ? AND state = ? ORDER BY created_at",
+            (network, state),
+        )
+    ]
+
+
+def fill_promise(
+    conn: sqlite3.Connection, offer_index: str, decision: RefundDecision, now: int | None = None
+) -> dict[str, Any] | None:
+    """Close an open promise against its validated accept and write the refund
+    row, atomically. Idempotent: a repeat (poll + sweep race) returns the
+    existing refund. None when the promise is not open and has no refund."""
+    ts = _now(now)
+    with _immediate(conn):
+        existing = conn.execute(
+            "SELECT * FROM fee_cover_refunds WHERE offer_index = ? OR accept_tx_hash = ?",
+            (offer_index, decision.accept_tx_hash),
+        ).fetchone()
+        if existing is not None:
+            return dict(existing)
+        promise = conn.execute(
+            "SELECT * FROM fee_cover_promises WHERE offer_index = ? AND state = 'open'",
+            (offer_index,),
+        ).fetchone()
+        if promise is None:
+            return None
+        conn.execute(
+            "UPDATE fee_cover_promises SET state = 'filled', accept_tx_hash = ?, closed_at = ?"
+            " WHERE offer_index = ?",
+            (decision.accept_tx_hash, ts, offer_index),
+        )
+        owed = decision.reason is None
+        conn.execute(
+            "INSERT INTO fee_cover_refunds (accept_tx_hash, offer_index, campaign_id, network, bidder, seller,"
+            " broker, observed_fee_drops, observed_royalty_drops, refund_drops, state, reason, created_at,"
+            " updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            (
+                decision.accept_tx_hash,
+                offer_index,
+                promise["campaign_id"],
+                promise["network"],
+                promise["bidder"],
+                decision.seller,
+                decision.broker,
+                decision.observed_fee_drops,
+                decision.observed_royalty_drops,
+                decision.refund_drops if owed else 0,
+                "owed" if owed else "declined",
+                decision.reason,
+                ts,
+                ts,
+            ),
+        )
+    return get_refund(conn, decision.accept_tx_hash)
+
+
+def claim_for_payout(
+    conn: sqlite3.Connection, accept_tx_hash: str, last_ledger_seq: int, now: int | None = None
+) -> bool:
+    """owed -> submitted in ONE conditional write that also records the
+    provisional deadline. Only the caller whose update changed a row submits."""
+    cursor = conn.execute(
+        "UPDATE fee_cover_refunds SET state = 'submitted', last_ledger_seq = ?, updated_at = ?"
+        " WHERE accept_tx_hash = ? AND state = 'owed'",
+        (last_ledger_seq, _now(now), accept_tx_hash),
+    )
+    conn.commit()
+    return cursor.rowcount == 1
+
+
+def record_payout(
+    conn: sqlite3.Connection,
+    accept_tx_hash: str,
+    *,
+    state: str,
+    tx_hash: str | None,
+    last_ledger_seq: int | None,
+    now: int | None = None,
+) -> None:
+    if state not in ("confirmed", "failed", "submitted"):
+        raise ValueError(f"not a payout outcome: {state}")
+    conn.execute(
+        "UPDATE fee_cover_refunds SET state = ?, payout_tx_hash = COALESCE(?, payout_tx_hash),"
+        " last_ledger_seq = COALESCE(?, last_ledger_seq),"
+        " reason = CASE WHEN ? = 'failed' THEN 'payout_failed' ELSE reason END, updated_at = ?"
+        " WHERE accept_tx_hash = ? AND state = 'submitted'",
+        (state, tx_hash, last_ledger_seq, state, _now(now), accept_tx_hash),
+    )
+    conn.commit()
+
+
+def return_to_owed(conn: sqlite3.Connection, accept_tx_hash: str, now: int | None = None) -> bool:
+    """Only for a payout refused BEFORE anything was submitted (ClaimNotSubmitted)."""
+    cursor = conn.execute(
+        "UPDATE fee_cover_refunds SET state = 'owed', last_ledger_seq = NULL, updated_at = ?"
+        " WHERE accept_tx_hash = ? AND state = 'submitted'",
+        (_now(now), accept_tx_hash),
+    )
+    conn.commit()
+    return cursor.rowcount == 1
+
+
+def requeue_failed(conn: sqlite3.Connection, accept_tx_hash: str, now: int | None = None) -> str:
+    """failed -> owed for an operator who fixed the cause. A failed payout can
+    never validate later, so paying again cannot double-pay. Refused when the
+    campaign budget no longer has room for it."""
+    ts = _now(now)
+    with _immediate(conn):
+        row = conn.execute(
+            "SELECT * FROM fee_cover_refunds WHERE accept_tx_hash = ?", (accept_tx_hash,)
+        ).fetchone()
+        if row is None or row["state"] != "failed":
+            return "not_failed"
+        campaign = get_campaign(conn, int(row["campaign_id"]))
+        if (
+            campaign is None
+            or committed_drops(conn, campaign.id) + int(row["refund_drops"]) > campaign.budget_drops
+        ):
+            return "budget_exhausted"
+        conn.execute(
+            "UPDATE fee_cover_refunds SET state = 'owed', reason = NULL, payout_tx_hash = NULL,"
+            " last_ledger_seq = NULL, updated_at = ? WHERE accept_tx_hash = ?",
+            (ts, accept_tx_hash),
+        )
+    return "requeued"
+
+
+def view_for_offer(conn: sqlite3.Connection, offer_index: str) -> dict[str, Any] | None:
+    """The single fee_cover object the API returns: the refund's state once a
+    refund row exists, the promise's state before that."""
+    refund = get_refund_by_offer(conn, offer_index)
+    if refund is not None:
+        drops = int(refund["refund_drops"])
+        return {
+            "state": refund["state"],
+            "drops": drops,
+            "xrp": market_ops.drops_to_xrp_str(str(drops)),
+            "reason": refund["reason"],
+            "payout_tx_hash": refund["payout_tx_hash"],
+        }
+    promise = get_promise(conn, offer_index)
+    if promise is None:
+        return None
+    drops = int(promise["promised_drops"]) if promise["state"] == "open" else 0
+    return {
+        "state": promise["state"],
+        "drops": drops,
+        "xrp": market_ops.drops_to_xrp_str(str(drops)),
+        "reason": promise["reason"],
+        "payout_tx_hash": None,
+    }
+
+
+def status_summary(
+    conn: sqlite3.Connection, network: str, now: int | None = None
+) -> dict[str, Any]:
+    ts = _now(now)
+    campaign = current_campaign(conn, network) or latest_campaign(conn, network)
+    if campaign is None:
+        state = "never_started"
+    elif campaign.status == "active":
+        state = "active" if campaign.is_live(ts) else "expired"
+    else:
+        state = "stopped"
+    out: dict[str, Any] = {
+        "network": network,
+        "state": state,
+        "campaign": asdict(campaign) if campaign is not None else None,
+        "committed_drops": 0,
+        "paid_drops": 0,
+        "remaining_drops": 0,
+        "open_promises": 0,
+        "refunds_by_state": {},
+        "declines_by_reason": {},
+        "top_wallets": [],
+    }
+    if campaign is None:
+        return out
+    cid = campaign.id
+    committed = committed_drops(conn, cid)
+    out["committed_drops"] = committed
+    out["paid_drops"] = paid_drops(conn, cid)
+    out["remaining_drops"] = max(0, campaign.budget_drops - committed)
+    out["open_promises"] = int(
+        conn.execute(
+            "SELECT COUNT(*) FROM fee_cover_promises WHERE campaign_id = ? AND state = 'open'",
+            (cid,),
+        ).fetchone()[0]
+    )
+    out["refunds_by_state"] = {
+        str(r[0]): int(r[1])
+        for r in conn.execute(
+            "SELECT state, COUNT(*) FROM fee_cover_refunds WHERE campaign_id = ? GROUP BY state",
+            (cid,),
+        )
+    }
+    declines: dict[str, int] = {}
+    for table in ("fee_cover_promises", "fee_cover_refunds"):
+        for reason, count in conn.execute(
+            f"SELECT reason, COUNT(*) FROM {table} WHERE campaign_id = ? AND state = 'declined'"  # noqa: S608
+            " GROUP BY reason",
+            (cid,),
+        ):
+            declines[str(reason)] = declines.get(str(reason), 0) + int(count)
+    out["declines_by_reason"] = declines
+    out["top_wallets"] = [
+        {"wallet": str(w), "drops": int(d)}
+        for w, d in conn.execute(
+            "SELECT bidder, SUM(refund_drops) FROM fee_cover_refunds"
+            " WHERE campaign_id = ? AND state IN ('owed','submitted','confirmed')"
+            " GROUP BY bidder ORDER BY SUM(refund_drops) DESC LIMIT 5",
+            (cid,),
+        )
+    ]
+    return out
