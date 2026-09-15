@@ -46,6 +46,7 @@ sys.path.insert(0, REPO_ROOT)
 import aiohttp  # noqa: E402
 
 from lfg_core import (  # noqa: E402
+    closet_market_store,
     closet_token,
     config,
     economy_store,
@@ -99,8 +100,12 @@ def _reconcile_closet(
         return False
     if not isinstance(metadata, dict):
         return False  # unreadable read must not masquerade as an empty closet
-    assets, bodies = closet_token.parse_closet_metadata(metadata, genesis)
-    economy_store.set_closet_contents(conn, owner, assets, bodies)
+    if closet_market_store.has_unmirrored_fill(conn, owner):
+        # #443: DB is ahead of the token until the fill's mirror lands — see nft_listener._apply_closet.
+        print(f"skip contents for {owner}: unmirrored Closet Market fill")
+    else:
+        assets, bodies = closet_token.parse_closet_metadata(metadata, genesis)
+        economy_store.set_closet_contents(conn, owner, assets, bodies)
     status = closet_token.ACTIVE if owner != issuer else closet_token.PENDING_ACCEPT
     existing = economy_store.get_closet_record(conn, owner)
     existing_offer_id = existing[3] if existing is not None else None
