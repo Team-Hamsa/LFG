@@ -77,7 +77,16 @@ class IndeterminateResultError(RuntimeError):
     economy this raise is what makes closet_token.sync_closet surface
     ClosetIndeterminateError so the phase-aware _sync_then_persist taxonomy (#107)
     engages instead of collapsing an unknown outcome to a plain ClosetError
-    ('did NOT commit') and running an asset-destroying compensation (#179)."""
+    ('did NOT commit') and running an asset-destroying compensation (#179).
+
+    `tx_hash` is the signed transaction's hash when it is known (always, for a
+    raise out of `_submit_and_confirm`, which signs exactly once), so callers can
+    journal the pending hash and a reconciler can look the outcome up later
+    (#493). None when no single hash identifies the outcome."""
+
+    def __init__(self, *args: object, tx_hash: str | None = None) -> None:
+        super().__init__(*args)
+        self.tx_hash = tx_hash
 
 
 @dataclass(frozen=True)
@@ -443,7 +452,8 @@ async def _submit_and_confirm(
             )
             if confirmed is None:
                 raise IndeterminateResultError(
-                    f"{label}: on-ledger outcome unknown after submit raised ({e})"
+                    f"{label}: on-ledger outcome unknown after submit raised ({e})",
+                    tx_hash=signed.get_hash(),
                 ) from e
             validated = _validated_result(confirmed, label)
         else:
@@ -553,7 +563,8 @@ async def mint_nft(
         # definitive-failure None — the NFT is on-ledger and must not be treated
         # as "mint failed".
         raise IndeterminateResultError(
-            "NFTokenMint validated (tesSUCCESS) but its NFTokenID could not be resolved from meta"
+            "NFTokenMint validated (tesSUCCESS) but its NFTokenID could not be resolved from meta",
+            tx_hash=result.get("hash"),
         )
 
     except IndeterminateResultError:
@@ -997,7 +1008,8 @@ async def create_nft_offer(
         offer_id = meta.get("offer_id") if isinstance(meta, dict) else None
         if not isinstance(offer_id, str) or not offer_id:
             raise IndeterminateResultError(
-                "NFTokenCreateOffer validated but its offer ID was absent"
+                "NFTokenCreateOffer validated but its offer ID was absent",
+                tx_hash=result.get("hash"),
             )
         logging.info(f"Offer created: {offer_id}")
         return offer_id
