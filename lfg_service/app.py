@@ -52,6 +52,9 @@ from lfg_core import (
     db_path,
     economy_flow,
     economy_store,
+    fee_cover,
+    fee_cover_settle,
+    fee_cover_store,
     funding,
     headroom,
     history_store,
@@ -3685,6 +3688,10 @@ async def _advance_market_session(prefix: str, session: Any, loop: Any) -> None:
         bid_row = await market_flow.advance_bid_session(session)
         if bid_row is not None:
             await loop.run_in_executor(None, _write_bid_row, _market_network("character"), bid_row)
+            # Fee cover: the bid is on-ledger, so its promise is written now.
+            session.fee_cover = await loop.run_in_executor(
+                None, _fee_cover_safe, _fee_cover_record_promise, session, bid_row
+            )
         # #426: once the bid is on-ledger, report whether the indexed buy
         # offer is still live or has been consumed (a broker's brokered
         # accept closes it 'accepted' via the listener) — the external
@@ -3694,6 +3701,15 @@ async def _advance_market_session(prefix: str, session: Any, loop: Any) -> None:
             session.fill = await loop.run_in_executor(
                 None, _bid_fill_state, _market_network("character"), session.offer_index
             )
+            if session.fee_cover is not None:
+                if session.fill == "accepted":
+                    settled = await _fee_cover_settle_safe(session.offer_index)
+                    session.fee_cover = settled or session.fee_cover
+                else:
+                    refreshed = await loop.run_in_executor(
+                        None, _fee_cover_safe, _fee_cover_view, session.offer_index
+                    )
+                    session.fee_cover = refreshed or session.fee_cover
     elif prefix == "bid_accept":
         accepted = await market_flow.advance_bid_accept_session(session)
         if accepted is not None:
@@ -3839,6 +3855,183 @@ def _close_bid_sync(network: str, offer_index: str, reason: str) -> None:
         conn.close()
 
 
+# --- Marketplace fee cover (docs/superpowers/specs/2026-09-14-marketplace-fee-cover-design.md) ---
+# LFG refunds an allowlisted broker's fee on bids placed through LFG that the
+# broker's bot settles. Everything here is best-effort with respect to the bid
+# flow: a fee-cover failure must never fail a bid.
+
+
+def _fee_cover_db() -> str:
+    return db_path.app_db_path(config.XRPL_NETWORK)
+
+
+def _fee_cover_system_wallets() -> frozenset[str]:
+    configured = frozenset(w for w in (config.BRIX_DISTRIBUTOR_ADDRESS,) if w)
+    return sponsored_mint.excluded_wallets() | system_wallets.with_durable(configured)
+
+
+def _fee_cover_linked(bidder: str, seller: str) -> bool:
+    """Same logical user (identity bucket) or the same non-exchange activation
+    funder (#461). Fail-open on lookup errors: the refund is capped below the
+    royalty, so a missed link can never make LFG a net payer."""
+    try:
+        bucket = identity_store.bucket_for_wallet(bidder)
+    except identity_store.BucketLookupError:
+        bucket = None
+    if bucket is not None and seller in cast(list[str], bucket.get("wallets") or []):
+        return True
+    conn = sqlite3.connect(_fee_cover_db())
+    try:
+        funding.ensure_schema(conn)
+        funder_a = funding.cached_funder(conn, bidder)
+        funder_b = funding.cached_funder(conn, seller)
+    finally:
+        conn.close()
+    return funder_a is not None and funder_a == funder_b and funder_a not in funding.EXCHANGES
+
+
+def _fee_cover_deps() -> fee_cover_settle.FeeCoverDeps:
+    return fee_cover_settle.FeeCoverDeps(
+        network=config.XRPL_NETWORK,
+        app_db_path=_fee_cover_db(),
+        history_db_path=history_store.history_db_path(config.XRPL_NETWORK),
+        payer=config.SIGNING_ACCOUNT,
+        ledger_margin=config.FEE_COVER_LEDGER_MARGIN,
+        get_tx=xrpl_ops.get_tx,
+        send_refund=xrpl_ops.send_fee_cover_refund,
+        find_refund_payment=xrpl_ops.find_fee_cover_payment,
+        current_ledger=xrpl_ops.current_validated_ledger_index,
+        broker_rate_for=lambda account, nft_id: (brokers.resolve(account, nft_id) or {}).get(
+            "broker_rate"
+        ),
+        linked=_fee_cover_linked,
+    )
+
+
+def _fee_cover_safe(fn: Callable[..., Any], *args: Any) -> Any:
+    try:
+        return fn(*args)
+    except Exception:
+        logging.warning("fee cover: %s failed", getattr(fn, "__name__", fn), exc_info=True)
+        return None
+
+
+def _fee_cover_evaluate(
+    nft_id: str, owner: str, bidder: str, bid_drops: int
+) -> tuple[fee_cover_store.Campaign | None, fee_cover.ExternalListing | None, str | None, int]:
+    conn = fee_cover_store.connect(_fee_cover_db())
+    try:
+        campaign = fee_cover_store.live_campaign(conn, config.XRPL_NETWORK)
+    finally:
+        conn.close()
+    listing: fee_cover.ExternalListing | None = None
+    if campaign is not None:
+        oconn = nft_index.init_db(nft_index.index_db_path(_market_network("character")))
+        try:
+            market_store.init_db(oconn)
+            listing = fee_cover.external_listing_for(
+                market_store.live_listings_for_nft(oconn, nft_id), owner, nft_id
+            )
+        finally:
+            oconn.close()
+    reason = fee_cover.promise_decline_reason(
+        campaign=campaign,
+        listing=listing,
+        bid_drops=bid_drops,
+        bidder=bidder,
+        system_wallets=_fee_cover_system_wallets(),
+    )
+    drops = (
+        fee_cover.promise_drops(bid_drops, listing.broker_rate, campaign.coverage_bps)
+        if campaign is not None and listing is not None
+        else 0
+    )
+    return campaign, listing, reason, drops
+
+
+def _fee_cover_quote(nft_id: str, owner: str, bidder: str, bid_drops: int) -> dict[str, Any] | None:
+    """Advisory quote at POST /api/market/bid — reserves nothing."""
+    campaign, listing, reason, drops = _fee_cover_evaluate(nft_id, owner, bidder, bid_drops)
+    if campaign is None or listing is None:
+        return None  # an ordinary bid
+    if reason is None:
+        conn = fee_cover_store.connect(_fee_cover_db())
+        try:
+            reason = fee_cover_store.headroom_reason(
+                conn, campaign, config.XRPL_NETWORK, bidder, drops, int(time.time())
+            )
+        finally:
+            conn.close()
+    shown = drops if reason is None else 0
+    return {
+        "state": "quoted" if reason is None else "declined",
+        "drops": shown,
+        "xrp": market_ops.drops_to_xrp_str(str(shown)),
+        "reason": reason,
+        "payout_tx_hash": None,
+    }
+
+
+def _fee_cover_record_promise(session: Any, bid_row: dict[str, Any]) -> dict[str, Any] | None:
+    """The bid is on-ledger: write the promise (budget reservation), re-evaluated
+    against fresh state. Returns the view, or None for an ordinary bid."""
+    bid_drops = int(bid_row["amount_drops"])
+    bidder = str(bid_row["bidder"])
+    campaign, listing, reason, drops = _fee_cover_evaluate(
+        session.nft_id, session.owner, bidder, bid_drops
+    )
+    if campaign is None or listing is None:
+        return None
+    offer_index = str(bid_row["offer_index"])
+    conn = fee_cover_store.connect(_fee_cover_db())
+    try:
+        row = fee_cover_store.record_promise(
+            conn,
+            campaign,
+            fee_cover_store.PromiseInput(
+                offer_index=offer_index,
+                network=config.XRPL_NETWORK,
+                nft_id=session.nft_id,
+                bidder=bidder,
+                bid_drops=bid_drops,
+                ask_drops=listing.ask_drops,
+                broker=listing.broker,
+                broker_rate=listing.broker_rate,
+                bid_expiration=bid_row.get("expiration"),
+            ),
+            promised_drops=drops,
+            decline_reason=reason,
+        )
+        return None if row is None else fee_cover_store.view_for_offer(conn, offer_index)
+    finally:
+        conn.close()
+
+
+def _fee_cover_view(offer_index: str) -> dict[str, Any] | None:
+    conn = fee_cover_store.connect(_fee_cover_db())
+    try:
+        return fee_cover_store.view_for_offer(conn, offer_index)
+    finally:
+        conn.close()
+
+
+def _fee_cover_views(offer_indexes: list[str]) -> dict[str, dict[str, Any]]:
+    conn = fee_cover_store.connect(_fee_cover_db())
+    try:
+        views = {oi: fee_cover_store.view_for_offer(conn, oi) for oi in offer_indexes}
+    finally:
+        conn.close()
+    return {oi: v for oi, v in views.items() if v is not None}
+
+
+async def _fee_cover_settle_safe(offer_index: str) -> dict[str, Any] | None:
+    try:
+        return await fee_cover_settle.settle_promise(_fee_cover_deps(), offer_index)
+    except Exception:
+        logging.warning("fee cover: settling %s failed", offer_index, exc_info=True)
+        return None
+
+
 def _get_bid_sync(network: str, offer_index: str) -> dict[str, Any] | None:
     conn = nft_index.init_db(nft_index.index_db_path(network))
     conn.row_factory = sqlite3.Row
@@ -3912,9 +4105,17 @@ async def handle_market_bids_mine(request):
             conn.close()
 
     mine, incoming = await asyncio.get_event_loop().run_in_executor(None, _compute)
+    views = (
+        await asyncio.get_event_loop().run_in_executor(
+            None, _fee_cover_safe, _fee_cover_views, [r["offer_index"] for r in mine]
+        )
+        or {}
+    )
     return web.json_response(
         {
-            "my_bids": [_serialize_bid(r) for r in mine],
+            "my_bids": [
+                {**_serialize_bid(r), "fee_cover": views.get(r["offer_index"])} for r in mine
+            ],
             "bids_on_my_nfts": [_serialize_bid(r) for r in incoming],
         }
     )
@@ -4002,6 +4203,9 @@ async def handle_market_bid_start(request):
     session.xumm_url = payload["xumm_url"]
     session.payload_uuid = payload.get("uuid")
     session.push = payload.get("push")
+    session.fee_cover = await loop.run_in_executor(
+        None, _fee_cover_safe, _fee_cover_quote, nft_id, owner, wallet, amount_drops
+    )
     market_sessions[session.id] = session
     return web.json_response(session.to_dict())
 
