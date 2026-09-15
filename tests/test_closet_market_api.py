@@ -335,3 +335,16 @@ def test_ask_buy_requires_a_brix_trustline(closet_env, monkeypatch):
     c = _db(closet_env)
     assert c.execute("SELECT COUNT(*) FROM closet_fills").fetchone()[0] == 0
     c.close()
+
+
+def test_price_beyond_15_significant_digits_is_refused(closet_env):
+    """(#443 final review I5) an XRPL IOU amount carries at most 15
+    significant digits; a longer price can never be escrowed or paid."""
+    resp = _run(
+        server.handle_closet_ask_create(
+            _req("POST", "/", {"slot": "Head", "value": "Crown", "price_brix": "1000000000.000001"})
+        )
+    )
+    assert resp.status == 400 and _json(resp)["code"] == "bad_request"
+    assert server._parse_brix_price("100000000.000001") == "100000000.000001"  # exactly 15
+    assert server._parse_brix_price("1000000000000000") == "1000000000000000"  # trailing zeros

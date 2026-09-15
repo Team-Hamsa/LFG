@@ -324,3 +324,25 @@ def test_signer_mismatch_with_no_owner_escrow_still_cancels(tmp_path):
     run(cmf.advance_bid(bid["id"], deps(path, f, tmp_path, now=bid["created_ts"] + 5)))
     assert order(path, bid["id"])["state"] == cms.CANCELLED
     assert f.escrow_lookups == [(BUYER, "COND")]
+
+
+def test_cancel_unseal_failure_writes_no_intent(tmp_path):
+    """(#443 final review I3) the fulfillment is unsealed BEFORE the
+    write-ahead intent: a bad enc key must not leave a pending_phase that
+    names an EscrowFinish that was never sent."""
+    path, f = _db(tmp_path), Fakes()
+    bid = open_bid(path, f)
+    c = conn(path)
+    cms.begin_cancel_bid(c, bid["id"], owner=BUYER, reason="user")
+    c.close()
+    d = deps(path, f, tmp_path)
+
+    def bad_unseal(blob):
+        raise ValueError("InvalidToken")
+
+    d.unseal_fn = bad_unseal
+    with pytest.raises(ValueError):
+        run(cmf.advance_bid(bid["id"], d))
+    got = order(path, bid["id"])
+    assert (got["state"], got["pending_phase"], got["pending_lls"]) == (cms.CANCELLING, None, None)
+    assert f.finishes == []

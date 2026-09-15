@@ -5058,9 +5058,13 @@ def _parse_brix_price(raw: Any) -> str | None:
     if not isinstance(raw, str):
         return None
     try:
-        return market_ops.validate_brix_value(raw)
+        value = market_ops.validate_brix_value(raw)
     except (TypeError, ValueError):
         return None
+    # An XRPL IOU amount carries at most 15 significant digits (#443 I5).
+    if len(Decimal(value).normalize().as_tuple().digits) > 15:
+        return None
+    return value
 
 
 _ORDER_PUBLIC_FIELDS = (

@@ -480,6 +480,7 @@ async def _advance_cancelling_bid(
             )
             _journal(deps, "order", cms.get_order(conn, oid))
             return
+        fulfillment = deps.unseal_fn(order["fulfillment_enc"])  # before any intent is written
         lls = await _begin_order_phase(conn, order, "cancel_finish", deps)
         if lls is None:
             return
@@ -488,7 +489,7 @@ async def _advance_cancelling_bid(
             order["owner"],
             seq,
             order["condition"],
-            deps.unseal_fn(order["fulfillment_enc"]),
+            fulfillment,
             cms.memo_tag("cancel_finish", oid),
             max_last_ledger_seq=lls,
         )

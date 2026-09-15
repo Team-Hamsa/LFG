@@ -41,8 +41,9 @@ CLOSET_MARKET_ENABLED=1                # last — new orders only
 ```
 
 Back up `CLOSET_MARKET_ENC_KEY` with the other secrets. Without it the backend can
-neither fill nor refund an open bid early; the bidder's funds return only after
-`CancelAfter` via EscrowCancel (anyone may submit it).
+neither fill nor refund an open bid early, and the settlement sweep stops
+entirely — including the EscrowCancel of expired bids. Bidders must then cancel
+their own escrows after `CancelAfter` (EscrowCancel; anyone may submit it).
 
 ## 3. Audit cron
 
