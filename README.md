@@ -450,6 +450,7 @@ collection (not a general tool). Full rationale per row in
 <!-- roadmap:start -->
 - [ ] [#39 — Admin tooling for authoring trait_config.yaml (config-gen UI)](../../issues/39)
 - [ ] [#355 — Skeleton body is missing ~247 pieces of trait art (Clothing + Head parity)](../../issues/355)
+- [ ] [#499 — Marketplace: fee cover — refund the marketplace fee on buys placed through LFG](../../issues/499)
 
 **Recently completed** (moved here automatically when a roadmap issue closes)
 
