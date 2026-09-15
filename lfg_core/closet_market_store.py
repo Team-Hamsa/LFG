@@ -443,3 +443,554 @@ def book_levels(conn: sqlite3.Connection, slot: str, value: str) -> dict[str, An
         "asks": [pub(r) for r in asks],
         "bids": [pub(r) for r in bids],
     }
+
+
+_LIVE_BID_STATES = (PENDING_ESCROW, OPEN, MATCHED, CANCELLING)
+
+
+def has_live_bid(conn: sqlite3.Connection, owner: str, slot: str, value: str) -> bool:
+    row = conn.execute(
+        "SELECT 1 FROM closet_orders WHERE side = 'bid' AND owner = ? AND slot = ? AND value = ? "
+        "AND state IN (?, ?, ?, ?) LIMIT 1",
+        (owner, slot, value, *_LIVE_BID_STATES),
+    ).fetchone()
+    return row is not None
+
+
+def create_pending_bid(
+    conn: sqlite3.Connection,
+    *,
+    owner: str,
+    slot: str,
+    value: str,
+    price_brix: str,
+    platform: str | None,
+    condition: str,
+    fulfillment_enc: str,
+    cancel_after: int,
+    payload_uuid: str | None,
+    xumm_url: str | None,
+    qr_url: str | None,
+    push: str | None,
+    now: int | None = None,
+) -> dict[str, Any]:
+    ts = now if now is not None else _now()
+    oid = new_id()
+    try:
+        with _immediate(conn):
+            if not closet_active(conn, owner):
+                raise OrderError("closet_required", "Create and claim your Closet first.")
+            conn.execute(
+                "INSERT INTO closet_orders (id, side, owner, slot, value, price_brix, state, created_ts, "
+                "updated_ts, platform, payload_uuid, xumm_url, qr_url, push, condition, "
+                "fulfillment_enc, cancel_after) VALUES (?, 'bid', ?, ?, ?, ?, 'pending_escrow', ?, ?, ?, "
+                "?, ?, ?, ?, ?, ?, ?)",
+                (
+                    oid,
+                    owner,
+                    slot,
+                    value,
+                    price_brix,
+                    ts,
+                    ts,
+                    platform,
+                    payload_uuid,
+                    xumm_url,
+                    qr_url,
+                    push,
+                    condition,
+                    fulfillment_enc,
+                    cancel_after,
+                ),
+            )
+    except sqlite3.IntegrityError as exc:
+        raise OrderError(
+            "bid_exists", "you already have a live bid on this trait — cancel it first"
+        ) from exc
+    order = get_order(conn, oid)
+    assert order is not None
+    return order
+
+
+def mark_bid_open(
+    conn: sqlite3.Connection, order_id: str, *, escrow_tx_hash: str, escrow_owner_seq: int
+) -> dict[str, Any]:
+    with _immediate(conn):
+        order = get_order(conn, order_id)
+        if order is None or order["side"] != SIDE_BID:
+            raise OrderError("not_found", "bid not found")
+        if order["state"] != PENDING_ESCROW:
+            raise OrderError("not_open", f"this bid is {order['state']}")
+        conn.execute(
+            "UPDATE closet_orders SET state = 'open', escrow_tx_hash = ?, escrow_owner_seq = ?, "
+            "updated_ts = ? WHERE id = ?",
+            (escrow_tx_hash, escrow_owner_seq, _now(), order_id),
+        )
+    opened = get_order(conn, order_id)
+    assert opened is not None
+    return opened
+
+
+def begin_cancel_bid(
+    conn: sqlite3.Connection, order_id: str, *, owner: str | None, reason: str
+) -> dict[str, Any]:
+    with _immediate(conn):
+        order = get_order(conn, order_id)
+        if (
+            order is None
+            or order["side"] != SIDE_BID
+            or (owner is not None and order["owner"] != owner)
+        ):
+            raise OrderError("not_found", "bid not found")
+        if order["state"] != OPEN:
+            raise OrderError(
+                "not_open", f"only an open bid can be cancelled (this one is {order['state']})"
+            )
+        conn.execute(
+            "UPDATE closet_orders SET state = 'cancelling', cancel_reason = ?, updated_ts = ? WHERE id = ?",
+            (reason, _now(), order_id),
+        )
+    got = get_order(conn, order_id)
+    assert got is not None
+    return got
+
+
+def _insert_fill(
+    conn: sqlite3.Connection,
+    *,
+    ask_order_id: str | None,
+    bid_order_id: str | None,
+    funds_source: str,
+    seller: str,
+    buyer: str,
+    slot: str,
+    value: str,
+    price_brix: str,
+    fee_brix: str,
+    overshoot_brix: str,
+    platform: str | None,
+    ts: int,
+) -> str:
+    fid = new_id()
+    conn.execute(
+        "INSERT INTO closet_fills (id, ask_order_id, bid_order_id, funds_source, seller, buyer, slot, "
+        "value, price_brix, fee_brix, overshoot_brix, state, platform, created_ts, updated_ts) "
+        "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'funds_pending', ?, ?, ?)",
+        (
+            fid,
+            ask_order_id,
+            bid_order_id,
+            funds_source,
+            seller,
+            buyer,
+            slot,
+            value,
+            price_brix,
+            fee_brix,
+            overshoot_brix,
+            platform,
+            ts,
+            ts,
+        ),
+    )
+    return fid
+
+
+def _best_counter(conn: sqlite3.Connection, order: dict[str, Any]) -> dict[str, Any] | None:
+    other = SIDE_BID if order["side"] == SIDE_ASK else SIDE_ASK
+    rows = _many(
+        conn,
+        "SELECT * FROM closet_orders WHERE state = 'open' AND side = ? AND slot = ? AND value = ? AND owner != ?",
+        (other, order["slot"], order["value"], order["owner"]),
+    )
+    mine = Decimal(order["price_brix"])
+    if order["side"] == SIDE_ASK:
+        eligible = [r for r in rows if Decimal(r["price_brix"]) >= mine]
+        eligible.sort(key=lambda r: (-Decimal(r["price_brix"]), r["created_ts"], r["id"]))
+    else:
+        eligible = [r for r in rows if Decimal(r["price_brix"]) <= mine]
+        eligible.sort(key=lambda r: (Decimal(r["price_brix"]), r["created_ts"], r["id"]))
+    return eligible[0] if eligible else None
+
+
+def cross_incoming(
+    conn: sqlite3.Connection, order_id: str, *, fee_bps: int, now: int | None = None
+) -> dict[str, Any] | None:
+    """Auto-cross a just-opened order against the best resting counter-order.
+    The RESTING order's price is the fill price; a bid above it records the
+    difference as overshoot (refunded at settlement). Both orders -> matched
+    and an escrow-funded fill is created, in one transaction."""
+    ts = now if now is not None else _now()
+    fid: str | None = None
+    with _immediate(conn):
+        incoming = get_order(conn, order_id)
+        if incoming is None or incoming["state"] != OPEN:
+            return None
+        resting = _best_counter(conn, incoming)
+        if resting is None:
+            return None
+        ask, bid = (incoming, resting) if incoming["side"] == SIDE_ASK else (resting, incoming)
+        price = resting["price_brix"]
+        conn.execute(
+            "UPDATE closet_orders SET state = 'matched', updated_ts = ? WHERE id IN (?, ?)",
+            (ts, ask["id"], bid["id"]),
+        )
+        fid = _insert_fill(
+            conn,
+            ask_order_id=ask["id"],
+            bid_order_id=bid["id"],
+            funds_source=FUNDS_ESCROW,
+            seller=ask["owner"],
+            buyer=bid["owner"],
+            slot=ask["slot"],
+            value=ask["value"],
+            price_brix=price,
+            fee_brix=fee_for(price, fee_bps),
+            overshoot_brix=fmt_brix(Decimal(bid["price_brix"]) - Decimal(price)),
+            platform=incoming["platform"],
+            ts=ts,
+        )
+    return get_fill(conn, fid)
+
+
+def fill_bid(
+    conn: sqlite3.Connection,
+    bid_id: str,
+    filler: str,
+    *,
+    fee_bps: int,
+    platform: str | None,
+    now: int | None = None,
+) -> dict[str, Any]:
+    ts = now if now is not None else _now()
+    with _immediate(conn):
+        bid = get_order(conn, bid_id)
+        if bid is None or bid["side"] != SIDE_BID:
+            raise OrderError("not_found", "bid not found")
+        if bid["state"] != OPEN:
+            raise OrderError("not_open", "this bid is no longer open")
+        if bid["owner"] == filler:
+            raise OrderError("self_cross", "you can't fill your own bid")
+        if not closet_active(conn, filler):
+            raise OrderError("closet_required", "Create and claim your Closet first.")
+        if available_count(conn, filler, bid["slot"], bid["value"]) < 1:
+            raise OrderError(
+                "not_available", f"no unlisted '{bid['value']}' ({bid['slot']}) in your Closet"
+            )
+        conn.execute(
+            "UPDATE closet_orders SET state = 'matched', updated_ts = ? WHERE id = ?", (ts, bid_id)
+        )
+        fid = _insert_fill(
+            conn,
+            ask_order_id=None,
+            bid_order_id=bid_id,
+            funds_source=FUNDS_ESCROW,
+            seller=filler,
+            buyer=bid["owner"],
+            slot=bid["slot"],
+            value=bid["value"],
+            price_brix=bid["price_brix"],
+            fee_brix=fee_for(bid["price_brix"], fee_bps),
+            overshoot_brix="0",
+            platform=platform,
+            ts=ts,
+        )
+    fill = get_fill(conn, fid)
+    assert fill is not None
+    return fill
+
+
+def create_take_fill(
+    conn: sqlite3.Connection,
+    ask_id: str,
+    buyer: str,
+    *,
+    fee_bps: int,
+    platform: str | None,
+    now: int | None = None,
+) -> dict[str, Any]:
+    """A buyer starts paying for an ask. The ask is NOT reserved: the first
+    validated payment wins (claim_ask_for_payment), later ones are refunded."""
+    ts = now if now is not None else _now()
+    with _immediate(conn):
+        ask = get_order(conn, ask_id)
+        if ask is None or ask["side"] != SIDE_ASK:
+            raise OrderError("not_found", "ask not found")
+        if ask["state"] != OPEN:
+            raise OrderError("not_open", "this trait was just sold or unlisted")
+        if ask["owner"] == buyer:
+            raise OrderError("self_cross", "you can't buy your own listing")
+        if not closet_active(conn, buyer):
+            raise OrderError("closet_required", "Create and claim your Closet first.")
+        fid = _insert_fill(
+            conn,
+            ask_order_id=ask_id,
+            bid_order_id=None,
+            funds_source=FUNDS_PAYMENT,
+            seller=ask["owner"],
+            buyer=buyer,
+            slot=ask["slot"],
+            value=ask["value"],
+            price_brix=ask["price_brix"],
+            fee_brix=fee_for(ask["price_brix"], fee_bps),
+            overshoot_brix="0",
+            platform=platform,
+            ts=ts,
+        )
+    fill = get_fill(conn, fid)
+    assert fill is not None
+    return fill
+
+
+def claim_ask_for_payment(conn: sqlite3.Connection, fill_id: str, payment_tx_hash: str) -> str:
+    """Funds for a take landed. FUNDED if the ask was still open (ask ->
+    matched), else REFUND_PENDING. Raises sqlite3.IntegrityError if this
+    payment hash already funds another fill."""
+    with _immediate(conn):
+        fill = get_fill(conn, fill_id)
+        assert fill is not None
+        if fill["state"] != FUNDS_PENDING:
+            return str(fill["state"])
+        ask = get_order(conn, fill["ask_order_id"])
+        ts = _now()
+        if ask is not None and ask["state"] == OPEN and ask["owner"] == fill["seller"]:
+            conn.execute(
+                "UPDATE closet_orders SET state = 'matched', updated_ts = ? WHERE id = ?",
+                (ts, ask["id"]),
+            )
+            conn.execute(
+                "UPDATE closet_fills SET state = 'funded', payment_tx_hash = ?, updated_ts = ? WHERE id = ?",
+                (payment_tx_hash, ts, fill_id),
+            )
+            return FUNDED
+        conn.execute(
+            "UPDATE closet_fills SET state = 'refund_pending', payment_tx_hash = ?, refund_to = ?, "
+            "refund_brix = ?, error = ?, updated_ts = ? WHERE id = ?",
+            (
+                payment_tx_hash,
+                fill["buyer"],
+                fill["price_brix"],
+                "the listing was no longer available",
+                ts,
+                fill_id,
+            ),
+        )
+        return REFUND_PENDING
+
+
+def fill_in_amount(fill: dict[str, Any]) -> str:
+    """BRIX the app wallet receives for this fill (escrow = the whole bid)."""
+    if fill["funds_source"] == FUNDS_ESCROW:
+        return fmt_brix(Decimal(fill["price_brix"]) + Decimal(fill["overshoot_brix"]))
+    return str(fill["price_brix"])
+
+
+def fill_blocker(conn: sqlite3.Connection, fill_id: str) -> str | None:
+    fill = get_fill(conn, fill_id)
+    assert fill is not None
+    if not closet_active(conn, fill["buyer"]):
+        return "the buyer has no active Closet"
+    if holding_count(conn, fill["seller"], fill["slot"], fill["value"]) < 1:
+        return "the seller no longer holds the trait"
+    return None
+
+
+def abort_unfunded_fill(
+    conn: sqlite3.Connection, fill_id: str, reason: str, *, bid_state: str | None = None
+) -> None:
+    """A pre-funding fill can't proceed: nothing moved on-ledger. Release the
+    orders — a short seller's ask is cancelled, a buyer without a Closet has
+    their bid sent to cancelling (so its escrow is returned)."""
+    with _immediate(conn):
+        fill = get_fill(conn, fill_id)
+        assert fill is not None
+        ts = _now()
+        conn.execute(
+            "UPDATE closet_fills SET state = 'failed', error = ?, updated_ts = ? WHERE id = ?",
+            (reason, ts, fill_id),
+        )
+        seller_short = holding_count(conn, fill["seller"], fill["slot"], fill["value"]) < 1
+        if fill["ask_order_id"]:
+            conn.execute(
+                "UPDATE closet_orders SET state = ?, updated_ts = ? WHERE id = ? AND state = 'matched'",
+                (CANCELLED if seller_short else OPEN, ts, fill["ask_order_id"]),
+            )
+        if fill["bid_order_id"]:
+            if bid_state is not None:
+                new_state, cancel_reason = bid_state, None
+            elif not closet_active(conn, fill["buyer"]):
+                new_state, cancel_reason = CANCELLING, "no_closet"
+            else:
+                new_state, cancel_reason = OPEN, None
+            conn.execute(
+                "UPDATE closet_orders SET state = ?, cancel_reason = COALESCE(?, cancel_reason), "
+                "updated_ts = ? WHERE id = ? AND state = 'matched'",
+                (new_state, cancel_reason, ts, fill["bid_order_id"]),
+            )
+
+
+def move_asset(conn: sqlite3.Connection, fill_id: str, *, now: int | None = None) -> str:
+    """Settlement step 2 — ONE transaction: seller -1, buyer +1, both orders
+    filled, fill asset_moved. If the buyer lost their Closet or the seller no
+    longer holds the unit, nothing moves and the fill goes refund_pending.
+    Callers MUST hold owner_lock for seller and buyer (economy flows
+    full-overwrite closet_assets from a snapshot read under that lock)."""
+    ts = now if now is not None else _now()
+    with _immediate(conn):
+        fill = get_fill(conn, fill_id)
+        assert fill is not None
+        if fill["state"] != FUNDED:
+            return str(fill["state"])
+        buyer_ok = closet_active(conn, fill["buyer"])
+        seller_ok = holding_count(conn, fill["seller"], fill["slot"], fill["value"]) >= 1
+        if not (buyer_ok and seller_ok):
+            reason = (
+                "the buyer has no active Closet"
+                if not buyer_ok
+                else "the seller no longer holds the trait"
+            )
+            conn.execute(
+                "UPDATE closet_fills SET state = 'refund_pending', refund_to = ?, refund_brix = ?, error = ?, "
+                "updated_ts = ? WHERE id = ?",
+                (fill["buyer"], fill_in_amount(fill), reason, ts, fill_id),
+            )
+            if fill["ask_order_id"]:
+                conn.execute(
+                    "UPDATE closet_orders SET state = ?, updated_ts = ? WHERE id = ?",
+                    (CANCELLED if not seller_ok else OPEN, ts, fill["ask_order_id"]),
+                )
+            if fill["bid_order_id"]:  # its escrow is already finished: the refund returns the BRIX
+                conn.execute(
+                    "UPDATE closet_orders SET state = 'cancelled', cancel_reason = 'undeliverable', "
+                    "updated_ts = ? WHERE id = ?",
+                    (ts, fill["bid_order_id"]),
+                )
+            return REFUND_PENDING
+        key = (fill["slot"], fill["value"])
+        conn.execute(
+            "UPDATE closet_assets SET count = count - 1 WHERE owner = ? AND slot = ? AND value = ?",
+            (fill["seller"], *key),
+        )
+        conn.execute(
+            "DELETE FROM closet_assets WHERE owner = ? AND slot = ? AND value = ? AND count <= 0",
+            (fill["seller"], *key),
+        )
+        conn.execute(
+            "INSERT INTO closet_assets (owner, slot, value, count) VALUES (?, ?, ?, 1) "
+            "ON CONFLICT(owner, slot, value) DO UPDATE SET count = count + 1",
+            (fill["buyer"], *key),
+        )
+        for oid in (fill["ask_order_id"], fill["bid_order_id"]):
+            if oid:
+                conn.execute(
+                    "UPDATE closet_orders SET state = 'filled', updated_ts = ? WHERE id = ?",
+                    (ts, oid),
+                )
+        conn.execute(
+            "UPDATE closet_fills SET state = 'asset_moved', updated_ts = ? WHERE id = ?",
+            (ts, fill_id),
+        )
+    return ASSET_MOVED
+
+
+def mark_side_mirrored(conn: sqlite3.Connection, fill_id: str, side: str) -> None:
+    if side not in ("seller", "buyer"):
+        raise ValueError(side)
+    with _immediate(conn):
+        conn.execute(
+            f"UPDATE closet_fills SET {side}_mirrored = 1, updated_ts = ? WHERE id = ?",  # noqa: S608
+            (_now(), fill_id),
+        )
+        conn.execute(
+            "UPDATE closet_fills SET state = 'mirrored' WHERE id = ? AND state = 'paid' "
+            "AND seller_mirrored = 1 AND buyer_mirrored = 1",
+            (fill_id,),
+        )
+
+
+_UNMIRRORED = "(state IN ('asset_moved', 'paid') OR (state = 'indeterminate' AND pending_phase IN ('forward', 'overshoot')))"
+
+
+def has_unmirrored_fill(conn: sqlite3.Connection, owner: str) -> bool:
+    """True while this owner's DB contents are ahead of their Closet token.
+    The listener/backfill must not rebuild closet_assets for an owner with an unmirrored fill.
+    Otherwise pre-fill Closet metadata resurrects the moved unit (duplication)."""
+    row = conn.execute(
+        "SELECT 1 FROM closet_fills WHERE ((seller = ? AND seller_mirrored = 0) OR "
+        f"(buyer = ? AND buyer_mirrored = 0)) AND {_UNMIRRORED} LIMIT 1",  # noqa: S608
+        (owner, owner),
+    ).fetchone()
+    return row is not None
+
+
+def open_orders_for_meta(conn: sqlite3.Connection, owner: str) -> list[dict[str, Any]] | None:
+    rows = _many(
+        conn,
+        "SELECT side, slot, value, price_brix FROM closet_orders WHERE owner = ? "
+        "AND state IN ('open', 'matched') ORDER BY created_ts, id",
+        (owner,),
+    )
+    return rows or None
+
+
+def orders_for_owner(conn: sqlite3.Connection, owner: str, fills_limit: int = 20) -> dict[str, Any]:
+    orders = _many(
+        conn,
+        "SELECT id, side, slot, value, price_brix, state, created_ts, cancel_after, error FROM closet_orders "
+        "WHERE owner = ? AND state IN ('pending_escrow', 'open', 'matched', 'cancelling') ORDER BY created_ts DESC",
+        (owner,),
+    )
+    fills = _many(
+        conn,
+        "SELECT id, seller, buyer, slot, value, price_brix, fee_brix, overshoot_brix, state, error, created_ts "
+        "FROM closet_fills WHERE seller = ? OR buyer = ? ORDER BY created_ts DESC LIMIT ?",
+        (owner, owner, fills_limit),
+    )
+    return {"orders": orders, "fills": fills}
+
+
+def bids_on_holdings(conn: sqlite3.Connection, owner: str) -> list[dict[str, Any]]:
+    """#496: open bids someone else placed on a key this wallet can deliver —
+    from a loose Closet copy (fill directly) or else an extracted trait token
+    (deposit first)."""
+    bids = _many(
+        conn,
+        "SELECT id, owner, slot, value, price_brix, cancel_after, created_ts FROM closet_orders "
+        "WHERE side = 'bid' AND state = 'open' AND owner != ?",
+        (owner,),
+    )
+    bids.sort(key=lambda r: (-Decimal(r["price_brix"]), r["created_ts"], r["id"]))
+    tokens: dict[tuple[str, str], str] = {}
+    for nft_id, slot, value in conn.execute(
+        "SELECT nft_id, slot, value FROM trait_tokens WHERE owner = ? ORDER BY nft_id", (owner,)
+    ):
+        tokens.setdefault((slot, value), nft_id)
+    enc = encumbrance(conn, owner)
+    out: list[dict[str, Any]] = []
+    for b in bids:
+        key = (b["slot"], b["value"])
+        pub = {k: b[k] for k in ("id", "slot", "value", "price_brix", "cancel_after")}
+        if holding_count(conn, owner, *key) - enc.get(key, 0) >= 1:
+            out.append({**pub, "source": "closet", "nft_id": None})
+        elif key in tokens:
+            out.append({**pub, "source": "token", "nft_id": tokens[key]})
+    return out
+
+
+def orders_needing_attention(conn: sqlite3.Connection) -> list[str]:
+    return [
+        r[0]
+        for r in conn.execute(
+            "SELECT id FROM closet_orders WHERE side = 'bid' AND state IN ('pending_escrow', 'open', 'cancelling') "
+            "ORDER BY updated_ts"
+        )
+    ]
+
+
+def fills_needing_attention(conn: sqlite3.Connection) -> list[str]:
+    return [
+        r[0]
+        for r in conn.execute(
+            "SELECT id FROM closet_fills WHERE state NOT IN ('mirrored', 'refunded', 'failed') ORDER BY updated_ts"
+        )
+    ]
