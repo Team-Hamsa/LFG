@@ -41,6 +41,11 @@ class Fakes:
     cancel_outcomes: list = field(default_factory=list)
     payment_outcomes: list = field(default_factory=list)
     found: dict = field(default_factory=dict)
+    found_invoices: dict = field(default_factory=dict)  # invoice_id -> account_tx entry
+    escrows_by_condition: dict = field(default_factory=dict)  # (owner, condition) -> node
+    lookup_error: Exception | None = None  # raised by both reconciliation lookups
+    invoice_lookups: list = field(default_factory=list)
+    escrow_lookups: list = field(default_factory=list)
     ledger_index: int | None = 100
     mirror_error: Exception | None = None
     finishes: list = field(default_factory=list)
@@ -92,6 +97,18 @@ class Fakes:
     async def find_txs_fn(self, tag, lls):
         return self.found.get(tag, [])
 
+    async def find_invoice_payment_fn(self, invoice_id, min_ledger):
+        self.invoice_lookups.append((invoice_id, min_ledger))
+        if self.lookup_error is not None:
+            raise self.lookup_error
+        return self.found_invoices.get(invoice_id)
+
+    async def find_escrow_by_condition_fn(self, owner, condition):
+        self.escrow_lookups.append((owner, condition))
+        if self.lookup_error is not None:
+            raise self.lookup_error
+        return self.escrows_by_condition.get((owner, condition))
+
     async def ledger_index_fn(self):
         return self.ledger_index
 
@@ -116,6 +133,8 @@ def deps(path, f, tmp_path, *, fee_bps=0, now=1_000_000.0):
         ledger_index_fn=f.ledger_index_fn,
         mirror_fn=f.mirror_fn,
         unseal_fn=lambda blob: "FULFILL",
+        find_invoice_payment_fn=f.find_invoice_payment_fn,
+        find_escrow_by_condition_fn=f.find_escrow_by_condition_fn,
         records_dir=str(tmp_path / "records"),
         now_fn=lambda: now,
     )
@@ -153,12 +172,13 @@ def open_bid(path, f, *, owner=BUYER, price="10", seq=5):
     return order
 
 
-def escrow_node(owner, price, condition="COND"):
+def escrow_node(owner, price, condition="COND", **extra):
     return {
         "Account": owner,
         "Destination": APP,
         "Amount": market_ops.brix_amount_dict(price),
         "Condition": condition,
+        **extra,
     }
 
 

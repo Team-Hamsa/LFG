@@ -244,3 +244,84 @@ def test_closet_payload_builders(monkeypatch):
     )
     _run(xumm_ops.create_closet_buy_payload("rBuyer", amount, "rApp", "AB" * 32))
     assert "SendMax" not in calls[2][0]
+
+
+# --- on-ledger reconciliation lookups (#443 final review C2) ------------------
+
+
+class _RecordingClient(_Client):
+    requests: list = []
+
+    def request(self, req):
+        _RecordingClient.requests.append(req)
+        return _Client.responses.pop(0)
+
+
+def _invoice_entry(invoice, *, account="rBuyer", destination=None, validated=True, h="PAY"):
+    return {
+        "validated": validated,
+        "hash": h,
+        "meta": {"TransactionResult": "tesSUCCESS"},
+        "tx_json": {
+            "TransactionType": "Payment",
+            "Account": account,
+            "Destination": destination or config.SIGNING_ACCOUNT,
+            "InvoiceID": invoice,
+        },
+    }
+
+
+def test_find_invoice_payment_pages_and_filters_inbound(monkeypatch):
+    monkeypatch.setattr(xrpl_ops, "JsonRpcClient", _RecordingClient)
+    _RecordingClient.requests = []
+    invoice = "AB" * 32
+    outbound = _invoice_entry(
+        invoice, account=config.SIGNING_ACCOUNT, destination="rOther", h="OUT"
+    )
+    unvalidated = _invoice_entry(invoice, validated=False, h="U")
+    other_invoice = _invoice_entry("CD" * 32, h="OTHER")
+    not_payment = _invoice_entry(invoice, h="CHK")
+    not_payment["tx_json"]["TransactionType"] = "CheckCreate"
+    mine = _invoice_entry(invoice.lower(), h="MINE")
+    _Client.responses = [
+        _Resp({"transactions": [outbound, unvalidated, other_invoice, not_payment], "marker": "m"}),
+        _Resp({"transactions": [mine]}),
+    ]
+    found = _run(xrpl_ops.find_invoice_payment(invoice, 900))
+    assert xrpl_ops.tx_entry_hash(found) == "MINE"
+    assert [r.ledger_index_min for r in _RecordingClient.requests] == [900, 900]
+    assert _RecordingClient.requests[0].account == config.SIGNING_ACCOUNT
+    assert _RecordingClient.requests[1].marker == "m"
+
+
+def test_find_invoice_payment_not_found_and_transport_failure(monkeypatch):
+    monkeypatch.setattr(xrpl_ops, "JsonRpcClient", _RecordingClient)
+    _RecordingClient.requests = []
+    _Client.responses = [_Resp({"transactions": [_invoice_entry("CD" * 32)]})]
+    assert _run(xrpl_ops.find_invoice_payment("AB" * 32, None)) is None
+    assert _RecordingClient.requests[0].ledger_index_min == -1
+    _Client.responses = [_Resp({"error": "tooBusy"}, ok=False)]
+    with pytest.raises(RuntimeError):
+        _run(xrpl_ops.find_invoice_payment("AB" * 32, 5))
+
+
+def test_find_escrow_by_condition(monkeypatch):
+    monkeypatch.setattr(xrpl_ops, "JsonRpcClient", _RecordingClient)
+    _RecordingClient.requests = []
+    wanted = {"LedgerEntryType": "Escrow", "Condition": "a025ff", "PreviousTxnID": "ECH"}
+    _Client.responses = [
+        _Resp({"account_objects": [{"Condition": "OTHER"}], "marker": "m"}),
+        _Resp({"account_objects": [wanted]}),
+    ]
+    assert _run(xrpl_ops.find_escrow_by_condition("rBidder", "A025FF")) == wanted
+    first = _RecordingClient.requests[0]
+    assert first.account == "rBidder" and first.ledger_index == "validated"
+    assert first.type == xrpl_ops.AccountObjectType.ESCROW
+    assert _RecordingClient.requests[1].marker == "m"
+    _Client.responses = [_Resp({"account_objects": [{"Condition": "OTHER"}]})]
+    assert _run(xrpl_ops.find_escrow_by_condition("rBidder", "A025FF")) is None
+    _Client.responses = [_Resp({"error": "actNotFound"}, ok=False)]
+    assert _run(xrpl_ops.find_escrow_by_condition("rBidder", "A025FF")) is None
+    _Client.responses = [_Resp({"error": "tooBusy"}, ok=False)]
+    with pytest.raises(RuntimeError):
+        _run(xrpl_ops.find_escrow_by_condition("rBidder", "A025FF"))

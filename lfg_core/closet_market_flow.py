@@ -70,6 +70,14 @@ class ClosetMarketDeps:
     now_fn: Callable[[], float] = time.time
     signing_wait_seconds: int = 3600
     ledger_margin: int = 40
+    # On-ledger reconciliation before a terminal "nothing arrived" decision
+    # (#443 final review C2). None skips the lookup (the old behavior).
+    find_invoice_payment_fn: (
+        Callable[[str, int | None], Awaitable[dict[str, Any] | None]] | None
+    ) = None
+    find_escrow_by_condition_fn: Callable[[str, str], Awaitable[dict[str, Any] | None]] | None = (
+        None
+    )
 
 
 def _journal(deps: ClosetMarketDeps, kind: str, row: dict[str, Any] | None) -> None:
@@ -197,6 +205,82 @@ def _cancel_unopened(
     _journal(deps, "order", cms.get_order(conn, order["id"]))
 
 
+def _escrow_create_sequence(tx: dict[str, Any], owner: str) -> int | None:
+    """The owner-sequence of a validated, successful EscrowCreate from `owner`."""
+    body = _tx_body(tx)
+    if (
+        (tx.get("meta") or {}).get("TransactionResult") != "tesSUCCESS"
+        or body.get("TransactionType") != "EscrowCreate"
+        or body.get("Account") != owner
+    ):
+        return None
+    seq_raw = body.get("Sequence") or body.get("TicketSequence")
+    return seq_raw if isinstance(seq_raw, int) else None
+
+
+async def _reconcile_escrow(
+    conn: sqlite3.Connection, order: dict[str, Any], deps: ClosetMarketDeps
+) -> tuple[str, str | None]:
+    """(#443 final review C2) Before a pending bid is cancelled "unopened",
+    look for its escrow on-ledger by Condition: a lost or lapsed signing
+    status must not untrack a live escrow until CancelAfter.
+
+    ("opened", fill_id | None) when a matching escrow was found and the bid
+    opened; ("wait", None) when a lookup failed; ("absent", None) otherwise."""
+    if deps.find_escrow_by_condition_fn is None:
+        return "absent", None
+    try:
+        node = await deps.find_escrow_by_condition_fn(order["owner"], order["condition"])
+    except Exception:
+        logging.warning(
+            f"closet bid {order['id']}: escrow-by-condition lookup failed: {traceback.format_exc()}"
+        )
+        return "wait", None
+    if (
+        node is None
+        or _escrow_mismatch(node, order, deps) is not None
+        or node.get("CancelAfter") != order["cancel_after"]
+        or node.get("FinishAfter") is not None
+    ):
+        return "absent", None
+    # The escrow object doesn't carry its creating Sequence (the EscrowFinish /
+    # EscrowCancel key); recover it from the EscrowCreate that created it.
+    prev = node.get("PreviousTxnID")
+    if not isinstance(prev, str) or not prev:
+        return "absent", None
+    try:
+        tx = await deps.get_tx_fn(prev)
+    except Exception:
+        logging.warning(
+            f"closet bid {order['id']}: escrow create lookup failed: {traceback.format_exc()}"
+        )
+        return "wait", None
+    if not tx.get("validated"):
+        return "wait", None
+    seq = _escrow_create_sequence(tx, order["owner"])
+    if seq is None:
+        return "absent", None
+    logging.warning(f"closet bid {order['id']}: escrow found on-ledger by condition (seq {seq})")
+    cms.mark_bid_open(
+        conn,
+        order["id"],
+        escrow_tx_hash=prev,
+        escrow_owner_seq=seq,
+    )
+    _journal(deps, "order", cms.get_order(conn, order["id"]))
+    fill = cms.cross_incoming(conn, order["id"], fee_bps=deps.fee_bps)
+    return "opened", str(fill["id"]) if fill else None
+
+
+async def _cancel_unopened_unless_found(
+    conn: sqlite3.Connection, order: dict[str, Any], deps: ClosetMarketDeps, reason: str
+) -> str | None:
+    verdict, fill_id = await _reconcile_escrow(conn, order, deps)
+    if verdict == "absent":
+        _cancel_unopened(conn, order, deps, reason)
+    return fill_id
+
+
 async def advance_bid(order_id: str, deps: ClosetMarketDeps) -> str | None:
     async with owner_lock.owner_lock(f"closet-order:{order_id}"):
         conn = deps.conn_factory()
@@ -232,13 +316,16 @@ async def _advance_pending_bid(
         )
         if status is None or not status.get("signed"):
             if (status or {}).get("expired") or waited > deps.signing_wait_seconds:
-                _cancel_unopened(conn, order, deps, "signing request expired")
+                return await _cancel_unopened_unless_found(
+                    conn, order, deps, "signing request expired"
+                )
             return None
         if status.get("account") != order["owner"]:
-            _cancel_unopened(
+            # An escrow from a different account never matches (Account check),
+            # so this still cancels unless the owner's own escrow exists.
+            return await _cancel_unopened_unless_found(
                 conn, order, deps, "the bid was signed by a different account than yours"
             )
-            return None
         txid = status.get("txid")
         if not txid:
             return None
@@ -251,12 +338,15 @@ async def _advance_pending_bid(
         return None
     if not tx.get("validated"):
         if waited > deps.signing_wait_seconds:
-            _cancel_unopened(conn, order, deps, "the escrow never validated")
+            return await _cancel_unopened_unless_found(
+                conn, order, deps, "the escrow never validated"
+            )
         return None
     result = (tx.get("meta") or {}).get("TransactionResult")
     if result != "tesSUCCESS":
-        _cancel_unopened(conn, order, deps, f"escrow create failed: {result}")
-        return None
+        return await _cancel_unopened_unless_found(
+            conn, order, deps, f"escrow create failed: {result}"
+        )
     body = _tx_body(tx)
     problem: str | None
     if body.get("TransactionType") != "EscrowCreate":
@@ -529,6 +619,54 @@ async def _funds(conn: sqlite3.Connection, fill: dict[str, Any], deps: ClosetMar
     return await _escrow_funds(conn, fill, deps)
 
 
+async def _reconcile_invoice(
+    conn: sqlite3.Connection, fill: dict[str, Any], deps: ClosetMarketDeps
+) -> str:
+    """(#443 final review C2) Before a take fill is failed with no verified
+    funds, look for its Payment on-ledger by InvoiceID — a Joey sign row
+    lapses to "expired" even when the client-submitted tx validated.
+
+    "found": a validated tesSUCCESS payment was found under a hash we weren't
+    tracking; signed_txid now points at it and the next pass settles (claim or
+    refund). "wait": a lookup failed, or it is the tx we already track and the
+    tx server has not caught up. "absent": nothing — the failure stands."""
+    if deps.find_invoice_payment_fn is None:
+        return "absent"
+    idx = await deps.ledger_index_fn()
+    if idx is None:
+        return "wait"
+    elapsed = max(0.0, deps.now_fn() - fill["created_ts"])
+    min_ledger = max(1, idx - int(elapsed / 3) - 1000)
+    try:
+        entry = await deps.find_invoice_payment_fn(cms.invoice_id(fill["id"]), min_ledger)
+    except Exception:
+        logging.warning(
+            f"closet fill {fill['id']}: invoice payment lookup failed: {traceback.format_exc()}"
+        )
+        return "wait"
+    if entry is None or not entry.get("validated") or tx_entry_result(entry) != "tesSUCCESS":
+        return "absent"
+    tx_hash = tx_entry_hash(entry)
+    if not tx_hash:
+        return "wait"
+    if tx_hash == fill["signed_txid"]:
+        return "wait"
+    logging.warning(f"closet fill {fill['id']}: payment {tx_hash} found on-ledger by InvoiceID")
+    cms.update_fill(conn, fill["id"], signed_txid=tx_hash)
+    return "found"
+
+
+async def _fail_unless_paid(
+    conn: sqlite3.Connection, fill: dict[str, Any], deps: ClosetMarketDeps, reason: str
+) -> bool:
+    verdict = await _reconcile_invoice(conn, fill, deps)
+    if verdict == "found":
+        return True
+    if verdict == "wait":
+        return False
+    return _fail(conn, fill, reason)
+
+
 PAYMENT_GIVEUP_SECONDS = 86400  # 24h backstop for a take fill with no path to a terminal state:
 # Xaman/Joey autofill LastLedgerSequence on every payload, so a signed tx that's still
 # unfindable/unvalidated a full day later cannot go on to validate later either.
@@ -554,7 +692,10 @@ async def _take_funds(
         ...), a raised exception, or simply an unvalidated tx with no
         deadline to judge — all of these wait, however long it's been.
     `signing_wait_seconds` plays no role here (a different, much shorter,
-    arbitrary wall-clock budget)."""
+    arbitrary wall-clock budget).
+    Each of those failures first looks for the Payment on-ledger by
+    InvoiceID (`_fail_unless_paid`, final review C2): a found payment is
+    adopted and settled; a failed lookup waits."""
     if not fill["signed_txid"]:
         status = (
             await deps.payload_status_fn(fill["payload_uuid"]) if fill["payload_uuid"] else None
@@ -563,14 +704,18 @@ async def _take_funds(
             return False  # never fails on a None read, no matter how old
         if not status.get("signed"):
             if status.get("expired"):
-                return _fail(conn, fill, "payment request expired")
+                return await _fail_unless_paid(conn, fill, deps, "payment request expired")
             if deps.now_fn() - fill["created_ts"] > PAYMENT_GIVEUP_SECONDS:
-                return _fail(conn, fill, "no payment arrived within 24 hours")
+                return await _fail_unless_paid(
+                    conn, fill, deps, "no payment arrived within 24 hours"
+                )
             return False
         txid = status.get("txid")
         if not txid:
             if deps.now_fn() - fill["created_ts"] > PAYMENT_GIVEUP_SECONDS:
-                return _fail(conn, fill, "no payment arrived within 24 hours")
+                return await _fail_unless_paid(
+                    conn, fill, deps, "no payment arrived within 24 hours"
+                )
             return False
         cms.update_fill(conn, fill["id"], signed_txid=txid)
         return True
@@ -601,7 +746,7 @@ async def _take_funds(
                 )
                 return False
             if not recheck.get("validated"):
-                return _fail(conn, fill, "the payment never validated")
+                return await _fail_unless_paid(conn, fill, deps, "the payment never validated")
             return False  # validated after all — the next pass processes it normally
         # No LastLedgerSequence to judge absence against (a genuine
         # not-found, or a bare rippled error body like tooBusy/slowDown).
@@ -620,32 +765,45 @@ async def _take_funds(
                 )
                 return False
             if recheck.get("error") == "txnNotFound":
-                return _fail(conn, fill, "no payment arrived within 24 hours")
+                return await _fail_unless_paid(
+                    conn, fill, deps, "no payment arrived within 24 hours"
+                )
         return False
     meta = tx.get("meta") or {}
     if meta.get("TransactionResult") != "tesSUCCESS":
         return _fail(conn, fill, f"payment failed: {meta.get('TransactionResult')}")
-    if (
+    delivered = _brix_value(meta.get("delivered_amount"))
+    tx_hash = str(tx.get("hash") or body.get("hash") or fill["signed_txid"])
+    sender = body.get("Account")
+    not_this_payment = (
         body.get("TransactionType") != "Payment"
         or body.get("Destination") != deps.app_account
         or str(body.get("InvoiceID", "")).upper() != cms.invoice_id(fill["id"])
-    ):
+    )
+    if not_this_payment:
         logging.error(
             f"closet fill {fill['id']}: signed tx {fill['signed_txid']} is not this fill's payment"
         )
-        return _fail(conn, fill, "the signed transaction is not this purchase's payment")
-    delivered = _brix_value(meta.get("delivered_amount"))
-    if delivered is None or delivered <= 0:
+        # (#443 final review I4) BRIX that did arrive at the app wallet is
+        # returned to its sender rather than kept with the fill failed.
+        if not (
+            body.get("Destination") == deps.app_account
+            and delivered is not None
+            and delivered > 0
+            and isinstance(sender, str)
+        ):
+            return _fail(conn, fill, "the signed transaction is not this purchase's payment")
+    elif delivered is None or delivered <= 0:
         return _fail(conn, fill, "the payment delivered no BRIX")
-    tx_hash = str(tx.get("hash") or body.get("hash") or fill["signed_txid"])
-    sender = body.get("Account")
+    assert delivered is not None
     try:
-        if sender != fill["buyer"] or delivered < Decimal(fill["price_brix"]):
-            reason = (
-                "payment signed by a different account"
-                if sender != fill["buyer"]
-                else "partial payment"
-            )
+        if not_this_payment or sender != fill["buyer"] or delivered < Decimal(fill["price_brix"]):
+            if not_this_payment:
+                reason = "the signed transaction is not this purchase's payment"
+            elif sender != fill["buyer"]:
+                reason = "payment signed by a different account"
+            else:
+                reason = "partial payment"
             cms.update_fill(
                 conn,
                 fill["id"],

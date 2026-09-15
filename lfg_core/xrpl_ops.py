@@ -1890,6 +1890,77 @@ async def find_app_txs_by_memo(tag: str, min_ledger: int | None = None) -> list[
     return found
 
 
+async def find_invoice_payment(invoice_id: str, min_ledger: int | None) -> dict[str, Any] | None:
+    """The VALIDATED inbound Payment to the app wallet carrying `InvoiceID`
+    (a Closet Market buy, #443), or None. A tesSUCCESS entry is preferred
+    over a failed one. The reconciliation read before a buy is written off as
+    "nothing arrived": a Joey/Xaman status can report expired while the
+    client-submitted tx validated. Raises on transport failure or an
+    unsuccessful response — a failed scan is never "not found"."""
+    account = config.SIGNING_ACCOUNT
+    want = invoice_id.upper()
+    client = JsonRpcClient(config.JSON_RPC_URL)
+    fallback: dict[str, Any] | None = None
+    marker: Any = None
+    while True:
+        request = AccountTx(
+            account=account,
+            limit=200,
+            marker=marker,
+            ledger_index_min=min_ledger if min_ledger else -1,
+        )
+        response = await asyncio.to_thread(client.request, request)
+        result = response.result
+        if not response.is_successful() or not isinstance(result, dict):
+            raise RuntimeError(f"account_tx failed while scanning for invoice {want}: {result!r}")
+        for entry in result.get("transactions", []):
+            tx = entry.get("tx") or entry.get("tx_json") or {}
+            if (
+                entry.get("validated")
+                and tx.get("TransactionType") == "Payment"
+                and tx.get("Destination") == account
+                and str(tx.get("InvoiceID", "")).upper() == want
+            ):
+                if tx_entry_result(entry) == "tesSUCCESS":
+                    return cast(dict[str, Any], entry)
+                fallback = fallback or cast(dict[str, Any], entry)
+        marker = result.get("marker")
+        if not marker:
+            return fallback
+
+
+async def find_escrow_by_condition(owner: str, condition: str) -> dict[str, Any] | None:
+    """The validated Escrow object owned by `owner` whose `Condition` matches,
+    or None (including an unfunded / unknown owner, `actNotFound`). Used to
+    find a bid escrow whose signing status was lost. Raises on any other
+    failure."""
+    want = condition.upper()
+    client = JsonRpcClient(config.JSON_RPC_URL)
+    marker: Any = None
+    while True:
+        request = AccountObjects(
+            account=owner,
+            type=AccountObjectType.ESCROW,
+            ledger_index="validated",
+            limit=200,
+            marker=marker,
+        )
+        response = await asyncio.to_thread(client.request, request)
+        result = response.result
+        if not isinstance(result, dict):
+            raise RuntimeError(f"account_objects failed for {owner}: {result!r}")
+        if not response.is_successful():
+            if result.get("error") == "actNotFound":
+                return None
+            raise RuntimeError(f"account_objects failed for {owner}: {result!r}")
+        for node in result.get("account_objects", []):
+            if isinstance(node, dict) and str(node.get("Condition") or "").upper() == want:
+                return cast(dict[str, Any], node)
+        marker = result.get("marker")
+        if not marker:
+            return None
+
+
 async def sponsored_burn_identity_expired(signed_tx_blob: str) -> int | None:
     """Return the expired identity's LLS only after a later validated ledger."""
 

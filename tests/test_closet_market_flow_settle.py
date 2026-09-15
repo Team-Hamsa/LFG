@@ -227,12 +227,33 @@ def test_take_partial_delivery_refunds_what_arrived(tmp_path):
     assert f.payments[0][:2] == (BUYER, "4.5")
 
 
-def test_take_wrong_invoice_fails_without_refund(tmp_path):
+def test_take_wrong_invoice_that_delivered_brix_refunds_the_sender(tmp_path):
+    """(#443 final review I4) A validated payment to the app wallet that
+    delivered BRIX but isn't this fill's invoice is still money we hold —
+    refund it to its sender instead of failing with nothing returned."""
+    path, f = _db(tmp_path), Fakes()
+    _, fl = _take(path, f)
+    f.payload_status["PU"] = {"signed": True, "account": BUYER, "txid": "PAYTX"}
+    tx = _payment_tx(fl["id"], delivered="4")
+    tx["tx_json"]["InvoiceID"] = "00" * 32
+    f.txs["PAYTX"] = tx
+    assert (
+        run(cmf.settle_fill(fl["id"], deps(path, f, tmp_path, now=fl["created_ts"] + 10)))
+        == cms.REFUNDED
+    )
+    assert f.payments == [
+        (BUYER, "4", cms.memo_tag("refund", fl["id"]), memos.ACTION_CLOSET_REFUND)
+    ]
+    assert _counts(path) == (1, 0)
+
+
+def test_take_wrong_type_with_no_brix_still_fails_without_refund(tmp_path):
     path, f = _db(tmp_path), Fakes()
     _, fl = _take(path, f)
     f.payload_status["PU"] = {"signed": True, "account": BUYER, "txid": "PAYTX"}
     tx = _payment_tx(fl["id"])
     tx["tx_json"]["InvoiceID"] = "00" * 32
+    tx["meta"]["delivered_amount"] = "1000000"  # XRP, not BRIX
     f.txs["PAYTX"] = tx
     assert (
         run(cmf.settle_fill(fl["id"], deps(path, f, tmp_path, now=fl["created_ts"] + 10)))
@@ -616,3 +637,100 @@ def test_take_not_found_tx_just_under_giveup_still_waits(tmp_path):
     f.payload_status["PU"] = {"signed": True, "account": BUYER, "txid": "PAYTX"}
     d = deps(path, f, tmp_path, now=fl["created_ts"] + 23 * 3600)
     assert run(cmf.settle_fill(fl["id"], d)) == cms.FUNDS_PENDING
+
+
+# --- final review C2: reconcile on-ledger before "nothing arrived" -------------
+
+
+def _invoice_entry(fill_id, tx_hash="PAYTX"):
+    return {
+        "validated": True,
+        "hash": tx_hash,
+        "meta": {"TransactionResult": "tesSUCCESS"},
+        "tx_json": {"TransactionType": "Payment", "InvoiceID": cms.invoice_id(fill_id)},
+    }
+
+
+def test_take_expired_status_but_invoice_payment_found_settles(tmp_path):
+    """(#443 final review C2) A Joey user who signs and closes the tab leaves
+    the sign row lapsing to "expired" while the client-submitted Payment
+    validated — look it up by InvoiceID before writing the buy off."""
+    path, f = _db(tmp_path), Fakes()
+    _, fl = _take(path, f)
+    f.payload_status["PU"] = {"signed": False, "expired": True}
+    f.found_invoices[cms.invoice_id(fl["id"])] = _invoice_entry(fl["id"])
+    now = fl["created_ts"] + 30
+    d = deps(path, f, tmp_path, now=now)
+    assert run(cmf.settle_fill(fl["id"], d)) == cms.FUNDS_PENDING  # tx not readable yet
+    got = fill(path, fl["id"])
+    assert got["state"] != cms.FAILED and got["signed_txid"] == "PAYTX"
+    # min_ledger = validated index - elapsed/3s - 1000 slack, floored at 1
+    assert f.invoice_lookups[0] == (cms.invoice_id(fl["id"]), 1)
+    f.txs["PAYTX"] = _payment_tx(fl["id"])
+    assert run(cmf.settle_fill(fl["id"], d)) == cms.MIRRORED
+    assert _counts(path) == (0, 1)
+
+
+def test_take_invoice_lookup_min_ledger_estimate(tmp_path):
+    path, f = _db(tmp_path), Fakes(ledger_index=90_000)
+    _, fl = _take(path, f)
+    f.payload_status["PU"] = {"signed": False, "expired": True}
+    run(cmf.settle_fill(fl["id"], deps(path, f, tmp_path, now=fl["created_ts"] + 3000)))
+    assert f.invoice_lookups == [(cms.invoice_id(fl["id"]), 90_000 - 1000 - 1000)]
+    assert fill(path, fl["id"])["state"] == cms.FAILED  # nothing found: today's behavior
+
+
+def test_take_giveup_but_invoice_payment_found_is_not_failed(tmp_path):
+    path, f = _db(tmp_path), Fakes()
+    _, fl = _take(path, f)
+    f.payload_status["PU"] = {"signed": False}
+    f.found_invoices[cms.invoice_id(fl["id"])] = _invoice_entry(fl["id"])
+    f.txs["PAYTX"] = _payment_tx(fl["id"])
+    d = deps(path, f, tmp_path, now=fl["created_ts"] + cmf.PAYMENT_GIVEUP_SECONDS + 3600)
+    assert run(cmf.settle_fill(fl["id"], d)) == cms.MIRRORED
+
+
+def test_take_post_sign_giveup_adopts_the_found_invoice_payment(tmp_path):
+    path, f = _db(tmp_path), Fakes()
+    _, fl = _take(path, f)
+    f.payload_status["PU"] = {"signed": True, "account": BUYER, "txid": "WRONGTXID"}
+    f.txs["WRONGTXID"] = {"error": "txnNotFound"}
+    f.found_invoices[cms.invoice_id(fl["id"])] = _invoice_entry(fl["id"])
+    f.txs["PAYTX"] = _payment_tx(fl["id"])
+    d = deps(path, f, tmp_path, now=fl["created_ts"] + cmf.PAYMENT_GIVEUP_SECONDS + 3600)
+    assert run(cmf.settle_fill(fl["id"], d)) == cms.MIRRORED
+    assert fill(path, fl["id"])["payment_tx_hash"] == "PAYTX"
+
+
+def test_take_lls_passed_but_invoice_payment_found_is_not_failed(tmp_path):
+    path, f = _db(tmp_path), Fakes()
+    _, fl = _take(path, f)
+    f.payload_status["PU"] = {"signed": True, "account": BUYER, "txid": "PAYTX"}
+    f.txs["PAYTX"] = {"validated": False, "tx_json": {"LastLedgerSequence": 50}}
+    f.found_invoices[cms.invoice_id(fl["id"])] = _invoice_entry(fl["id"])  # same hash
+    d = deps(path, f, tmp_path, now=fl["created_ts"] + 10)
+    assert run(cmf.settle_fill(fl["id"], d)) == cms.FUNDS_PENDING  # the tx server lags: wait
+    f.txs["PAYTX"] = _payment_tx(fl["id"])
+    assert run(cmf.settle_fill(fl["id"], d)) == cms.MIRRORED
+
+
+def test_take_invoice_lookup_raising_waits(tmp_path):
+    path, f = _db(tmp_path), Fakes(lookup_error=RuntimeError("account_tx down"))
+    _, fl = _take(path, f)
+    f.payload_status["PU"] = {"signed": False, "expired": True}
+    d = deps(path, f, tmp_path, now=fl["created_ts"] + cmf.PAYMENT_GIVEUP_SECONDS + 3600)
+    assert run(cmf.settle_fill(fl["id"], d)) == cms.FUNDS_PENDING
+    f.payload_status["PU"] = {"signed": True, "account": BUYER, "txid": "PAYTX"}
+    f.txs["PAYTX"] = {"error": "txnNotFound"}
+    assert run(cmf.settle_fill(fl["id"], d)) == cms.FUNDS_PENDING
+
+
+def test_take_ignores_a_failed_invoice_payment(tmp_path):
+    path, f = _db(tmp_path), Fakes()
+    _, fl = _take(path, f)
+    f.payload_status["PU"] = {"signed": False, "expired": True}
+    entry = _invoice_entry(fl["id"])
+    entry["meta"]["TransactionResult"] = "tecPATH_PARTIAL"
+    f.found_invoices[cms.invoice_id(fl["id"])] = entry
+    d = deps(path, f, tmp_path, now=fl["created_ts"] + 10)
+    assert run(cmf.settle_fill(fl["id"], d)) == cms.FAILED

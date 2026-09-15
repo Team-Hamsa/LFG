@@ -238,3 +238,89 @@ def test_open_bid_recrosses_on_sweep(tmp_path):
     c.commit()
     c.close()
     assert run(cmf.advance_bid(bid["id"], deps(path, f, tmp_path))) is not None
+
+
+# --- final review C2: find the escrow by condition before "unopened" -----------
+
+
+def _recoverable_escrow(f, *, owner=BUYER, price="10", seq=7, prev="ECH"):
+    f.escrows_by_condition[(owner, "COND")] = escrow_node(
+        owner, price, CancelAfter=CANCEL_AFTER, PreviousTxnID=prev
+    )
+    f.txs[prev] = escrow_create_tx(owner, price, seq=seq)
+
+
+def test_expired_payload_but_escrow_found_opens_the_bid(tmp_path):
+    """(#443 final review C2) The signing status lapsed to expired, but the
+    escrow exists on-ledger: open the bid with the sequence recovered from the
+    EscrowCreate (PreviousTxnID) instead of untracking a live escrow."""
+    path, f = _db(tmp_path), Fakes()
+    bid = pending_bid(path, price="10")
+    f.payload_status[bid["payload_uuid"]] = {"signed": False, "expired": True}
+    _recoverable_escrow(f, seq=7)
+    assert (
+        run(cmf.advance_bid(bid["id"], deps(path, f, tmp_path, now=bid["created_ts"] + 5))) is None
+    )
+    got = order(path, bid["id"])
+    assert (got["state"], got["escrow_owner_seq"], got["escrow_tx_hash"]) == (cms.OPEN, 7, "ECH")
+    assert f.escrow_lookups == [(BUYER, "COND")]
+
+
+def test_found_escrow_opens_and_crosses_a_resting_ask(tmp_path):
+    path, f = _db(tmp_path), Fakes()
+    c = conn(path)
+    ask = cms.create_ask(c, owner=SELLER, slot="Head", value="Crown", price_brix="8", platform=None)
+    c.close()
+    bid = pending_bid(path, price="10")
+    _recoverable_escrow(f, seq=9)
+    d = deps(path, f, tmp_path, now=bid["created_ts"] + cmf.PAYMENT_GIVEUP_SECONDS)  # status None
+    assert run(cmf.advance_bid(bid["id"], d)) is not None
+    assert order(path, bid["id"])["state"] == cms.MATCHED
+    assert order(path, ask["id"])["state"] == cms.MATCHED
+
+
+def test_never_validated_and_failed_create_check_for_the_escrow(tmp_path):
+    path, f = _db(tmp_path), Fakes()
+    bid = pending_bid(path, price="10")
+    f.payload_status[bid["payload_uuid"]] = {"signed": True, "account": BUYER, "txid": "TX1"}
+    f.txs["TX1"] = escrow_create_tx(BUYER, "10", result="tecUNFUNDED")
+    _recoverable_escrow(f, seq=11)
+    run(cmf.advance_bid(bid["id"], deps(path, f, tmp_path, now=bid["created_ts"] + 5)))
+    got = order(path, bid["id"])
+    assert (got["state"], got["escrow_owner_seq"]) == (cms.OPEN, 11)
+
+
+def test_escrow_lookup_raising_keeps_the_bid_pending(tmp_path):
+    path, f = _db(tmp_path), Fakes(lookup_error=RuntimeError("account_objects down"))
+    bid = pending_bid(path)
+    f.payload_status[bid["payload_uuid"]] = {"signed": False, "expired": True}
+    run(cmf.advance_bid(bid["id"], deps(path, f, tmp_path, now=bid["created_ts"] + 5)))
+    assert order(path, bid["id"])["state"] == cms.PENDING_ESCROW
+
+
+def test_found_escrow_with_wrong_expiry_or_foreign_creator_still_cancels(tmp_path):
+    path, f = _db(tmp_path), Fakes()
+    bid = pending_bid(path, price="10")
+    f.payload_status[bid["payload_uuid"]] = {"signed": False, "expired": True}
+    f.escrows_by_condition[(BUYER, "COND")] = escrow_node(
+        BUYER, "10", CancelAfter=CANCEL_AFTER + 1, PreviousTxnID="ECH"
+    )
+    f.txs["ECH"] = escrow_create_tx(BUYER, "10")
+    run(cmf.advance_bid(bid["id"], deps(path, f, tmp_path, now=bid["created_ts"] + 5)))
+    assert order(path, bid["id"])["state"] == cms.CANCELLED
+
+    bid2 = pending_bid(path, owner=OTHER, price="10")
+    f.payload_status[bid2["payload_uuid"]] = {"signed": False, "expired": True}
+    _recoverable_escrow(f, owner=OTHER, prev="FOREIGN")
+    f.txs["FOREIGN"]["tx_json"]["Account"] = SELLER
+    run(cmf.advance_bid(bid2["id"], deps(path, f, tmp_path, now=bid2["created_ts"] + 5)))
+    assert order(path, bid2["id"])["state"] == cms.CANCELLED
+
+
+def test_signer_mismatch_with_no_owner_escrow_still_cancels(tmp_path):
+    path, f = _db(tmp_path), Fakes()
+    bid = pending_bid(path)
+    f.payload_status[bid["payload_uuid"]] = {"signed": True, "account": OTHER, "txid": "T"}
+    run(cmf.advance_bid(bid["id"], deps(path, f, tmp_path, now=bid["created_ts"] + 5)))
+    assert order(path, bid["id"])["state"] == cms.CANCELLED
+    assert f.escrow_lookups == [(BUYER, "COND")]
