@@ -134,7 +134,7 @@ def _deps(path: str, statuses: dict) -> cmf.ClosetMarketDeps:
         unseal_fn=crypto_condition.unseal,
         records_dir=os.path.dirname(path),
         ledger_margin=config.CLOSET_MARKET_LEDGER_MARGIN,
-        find_invoice_payment_fn=xrpl_ops.find_invoice_payment,
+        find_invoice_payments_fn=xrpl_ops.find_invoice_payments,
         find_escrow_by_condition_fn=xrpl_ops.find_escrow_by_condition,
     )
 

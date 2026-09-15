@@ -289,7 +289,7 @@ def _invoice_entry(invoice, *, account="rBuyer", destination=None, validated=Tru
     }
 
 
-def test_find_invoice_payment_pages_and_filters_inbound(monkeypatch):
+def test_find_invoice_payments_pages_and_filters_inbound(monkeypatch):
     monkeypatch.setattr(xrpl_ops, "JsonRpcClient", _RecordingClient)
     _RecordingClient.requests = []
     invoice = "AB" * 32
@@ -301,26 +301,34 @@ def test_find_invoice_payment_pages_and_filters_inbound(monkeypatch):
     not_payment = _invoice_entry(invoice, h="CHK")
     not_payment["tx_json"]["TransactionType"] = "CheckCreate"
     mine = _invoice_entry(invoice.lower(), h="MINE")
+    junk = _invoice_entry(invoice, account="rJunk", h="JUNK")
+    failed = _invoice_entry(invoice, h="TEC")
+    failed["meta"]["TransactionResult"] = "tecPATH_DRY"
     _Client.responses = [
-        _Resp({"transactions": [outbound, unvalidated, other_invoice, not_payment], "marker": "m"}),
+        _Resp(
+            {
+                "transactions": [outbound, junk, unvalidated, other_invoice, not_payment, failed],
+                "marker": "m",
+            }
+        ),
         _Resp({"transactions": [mine]}),
     ]
-    found = _run(xrpl_ops.find_invoice_payment(invoice, 900))
-    assert xrpl_ops.tx_entry_hash(found) == "MINE"
+    found = _run(xrpl_ops.find_invoice_payments(invoice, 900))
+    assert [xrpl_ops.tx_entry_hash(e) for e in found] == ["JUNK", "MINE"]
     assert [r.ledger_index_min for r in _RecordingClient.requests] == [900, 900]
     assert _RecordingClient.requests[0].account == config.SIGNING_ACCOUNT
     assert _RecordingClient.requests[1].marker == "m"
 
 
-def test_find_invoice_payment_not_found_and_transport_failure(monkeypatch):
+def test_find_invoice_payments_not_found_and_transport_failure(monkeypatch):
     monkeypatch.setattr(xrpl_ops, "JsonRpcClient", _RecordingClient)
     _RecordingClient.requests = []
     _Client.responses = [_Resp({"transactions": [_invoice_entry("CD" * 32)]})]
-    assert _run(xrpl_ops.find_invoice_payment("AB" * 32, None)) is None
+    assert _run(xrpl_ops.find_invoice_payments("AB" * 32, None)) == []
     assert _RecordingClient.requests[0].ledger_index_min == -1
     _Client.responses = [_Resp({"error": "tooBusy"}, ok=False)]
     with pytest.raises(RuntimeError):
-        _run(xrpl_ops.find_invoice_payment("AB" * 32, 5))
+        _run(xrpl_ops.find_invoice_payments("AB" * 32, 5))
 
 
 def test_find_escrow_by_condition(monkeypatch):
@@ -348,7 +356,7 @@ def test_find_escrow_by_condition(monkeypatch):
 # --- PR #502 G1: reconciliation lookups prove coverage through require_ledger --
 
 
-def test_find_invoice_payment_require_ledger_coverage(monkeypatch):
+def test_find_invoice_payments_require_ledger_coverage(monkeypatch):
     monkeypatch.setattr(xrpl_ops, "JsonRpcClient", _RecordingClient)
     invoice = "AB" * 32
     _Client.responses = [
@@ -356,15 +364,15 @@ def test_find_invoice_payment_require_ledger_coverage(monkeypatch):
         _Resp({"transactions": [], "ledger_index_max": 149}),
     ]
     with pytest.raises(RuntimeError):
-        _run(xrpl_ops.find_invoice_payment(invoice, 100, require_ledger=150))
+        _run(xrpl_ops.find_invoice_payments(invoice, 100, require_ledger=150))
     _Client.responses = [_Resp({"transactions": []})]  # coverage not reported at all
     with pytest.raises(RuntimeError):
-        _run(xrpl_ops.find_invoice_payment(invoice, 100, require_ledger=150))
+        _run(xrpl_ops.find_invoice_payments(invoice, 100, require_ledger=150))
     _Client.responses = [
         _Resp({"transactions": [], "marker": "m", "ledger_index_max": 140}),
         _Resp({"transactions": [], "ledger_index_max": 150}),
     ]
-    assert _run(xrpl_ops.find_invoice_payment(invoice, 100, require_ledger=150)) is None
+    assert _run(xrpl_ops.find_invoice_payments(invoice, 100, require_ledger=150)) == []
 
 
 def test_find_escrow_by_condition_require_ledger_coverage(monkeypatch):

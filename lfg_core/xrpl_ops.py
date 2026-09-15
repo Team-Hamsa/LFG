@@ -1890,15 +1890,16 @@ async def find_app_txs_by_memo(tag: str, min_ledger: int | None = None) -> list[
     return found
 
 
-async def find_invoice_payment(
+async def find_invoice_payments(
     invoice_id: str, min_ledger: int | None, require_ledger: int | None = None
-) -> dict[str, Any] | None:
-    """The VALIDATED inbound Payment to the app wallet carrying `InvoiceID`
-    (a Closet Market buy, #443), or None. A tesSUCCESS entry is preferred
-    over a failed one. The reconciliation read before a buy is written off as
-    "nothing arrived": a Joey/Xaman status can report expired while the
-    client-submitted tx validated. Raises on transport failure or an
-    unsuccessful response — a failed scan is never "not found".
+) -> list[dict[str, Any]]:
+    """Every VALIDATED tesSUCCESS inbound Payment to the app wallet carrying
+    `InvoiceID` (a Closet Market buy, #443), in account_tx order. The
+    reconciliation read before a buy is written off as "nothing arrived": a
+    Joey/Xaman status can report expired while the client-submitted tx
+    validated. InvoiceID is public, so anyone can add a junk entry — ALL are
+    returned and the caller picks (PR #502 G2). Raises on transport failure or
+    an unsuccessful response — a failed scan is never "not found".
 
     With `require_ledger` (the buy Payment's pinned LastLedgerSequence, PR
     #502 G1) it also raises unless the scan's reported `ledger_index_max`
@@ -1907,10 +1908,9 @@ async def find_invoice_payment(
     account = config.SIGNING_ACCOUNT
     want = invoice_id.upper()
     client = JsonRpcClient(config.JSON_RPC_URL)
-    fallback: dict[str, Any] | None = None
     marker: Any = None
     scanned_to: int | None = None
-    found: dict[str, Any] | None = None
+    found: list[dict[str, Any]] = []
     while True:
         request = AccountTx(
             account=account,
@@ -1932,10 +1932,9 @@ async def find_invoice_payment(
                 and tx.get("TransactionType") == "Payment"
                 and tx.get("Destination") == account
                 and str(tx.get("InvoiceID", "")).upper() == want
+                and tx_entry_result(entry) == "tesSUCCESS"
             ):
-                if tx_entry_result(entry) == "tesSUCCESS":
-                    found = found or cast(dict[str, Any], entry)
-                fallback = fallback or cast(dict[str, Any], entry)
+                found.append(cast(dict[str, Any], entry))
         marker = result.get("marker")
         if not marker:
             break
@@ -1944,7 +1943,7 @@ async def find_invoice_payment(
             f"account_tx scan for invoice {want} never reported reaching ledger "
             f"{require_ledger} (last known: {scanned_to}) — the queried server is lagging"
         )
-    return found or fallback
+    return found
 
 
 async def find_escrow_by_condition(

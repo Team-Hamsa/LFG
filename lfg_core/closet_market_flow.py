@@ -82,7 +82,7 @@ class ClosetMarketDeps:
     # (#443 final review C2). None skips the lookup (the old behavior) — but a
     # row with user_lls set can then never prove absence, so it waits.
     # Both take a keyword `require_ledger` (the row's user_lls, or None).
-    find_invoice_payment_fn: Callable[..., Awaitable[dict[str, Any] | None]] | None = None
+    find_invoice_payments_fn: Callable[..., Awaitable[list[dict[str, Any]]]] | None = None
     find_escrow_by_condition_fn: Callable[..., Awaitable[dict[str, Any] | None]] | None = None
 
 
@@ -643,6 +643,19 @@ async def _funds(conn: sqlite3.Connection, fill: dict[str, Any], deps: ClosetMar
     return await _escrow_funds(conn, fill, deps)
 
 
+def _pays_fill_in_full(entry: dict[str, Any], fill: dict[str, Any]) -> bool:
+    """The account_tx entry is the buyer's own payment delivering at least the
+    price in BRIX."""
+    tx = entry.get("tx") or entry.get("tx_json") or {}
+    meta = entry.get("meta") or entry.get("metaData") or {}
+    delivered = _brix_value(meta.get("delivered_amount") if isinstance(meta, dict) else None)
+    return (
+        tx.get("Account") == fill["buyer"]
+        and delivered is not None
+        and delivered >= Decimal(fill["price_brix"])
+    )
+
+
 async def _reconcile_invoice(
     conn: sqlite3.Connection,
     fill: dict[str, Any],
@@ -664,7 +677,7 @@ async def _reconcile_invoice(
     then this waits. `exclude_hash` is a tracked tx already known to be
     validated and unusable, so finding it again proves nothing."""
     user_lls = fill["user_lls"]
-    if deps.find_invoice_payment_fn is None:
+    if deps.find_invoice_payments_fn is None:
         return "absent" if user_lls is None else "wait"
     idx = await deps.ledger_index_fn()
     if idx is None:
@@ -674,7 +687,7 @@ async def _reconcile_invoice(
     elapsed = max(0.0, deps.now_fn() - fill["created_ts"])
     min_ledger = max(1, idx - int(elapsed / 3) - 1000)
     try:
-        entry = await deps.find_invoice_payment_fn(
+        entries = await deps.find_invoice_payments_fn(
             cms.invoice_id(fill["id"]), min_ledger, require_ledger=user_lls
         )
     except Exception:
@@ -682,13 +695,23 @@ async def _reconcile_invoice(
             f"closet fill {fill['id']}: invoice payment lookup failed: {traceback.format_exc()}"
         )
         return "wait"
-    if entry is None or not entry.get("validated") or tx_entry_result(entry) != "tesSUCCESS":
+    candidates = [
+        e
+        for e in entries
+        if e.get("validated")
+        and tx_entry_result(e) == "tesSUCCESS"
+        and (exclude_hash is None or tx_entry_hash(e) != exclude_hash)
+    ]
+    if not candidates:
         return "absent"
+    # (PR #502 G2) InvoiceID is public: a junk Payment (wrong sender, short)
+    # listed first must not mask the buyer's real one. Prefer the buyer's
+    # full payment; only if there is none adopt the first entry, which then
+    # takes the wrong-sender / partial refund path.
+    entry = next((e for e in candidates if _pays_fill_in_full(e, fill)), candidates[0])
     tx_hash = tx_entry_hash(entry)
     if not tx_hash:
         return "wait"
-    if exclude_hash is not None and tx_hash == exclude_hash:
-        return "absent"
     if tx_hash == fill["signed_txid"]:
         return "wait"
     logging.warning(f"closet fill {fill['id']}: payment {tx_hash} found on-ledger by InvoiceID")

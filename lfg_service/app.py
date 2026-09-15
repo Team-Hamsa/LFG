@@ -5210,7 +5210,7 @@ def _closet_market_deps() -> closet_market_flow.ClosetMarketDeps:
         unseal_fn=crypto_condition.unseal,
         records_dir=config.ECONOMY_RECORDS_DIR,
         ledger_margin=config.CLOSET_MARKET_LEDGER_MARGIN,
-        find_invoice_payment_fn=xrpl_ops.find_invoice_payment,
+        find_invoice_payments_fn=xrpl_ops.find_invoice_payments,
         find_escrow_by_condition_fn=xrpl_ops.find_escrow_by_condition,
     )
 

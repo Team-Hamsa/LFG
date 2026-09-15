@@ -659,7 +659,7 @@ def test_take_expired_status_but_invoice_payment_found_settles(tmp_path):
     path, f = _db(tmp_path), Fakes()
     _, fl = _take(path, f)
     f.payload_status["PU"] = {"signed": False, "expired": True}
-    f.found_invoices[cms.invoice_id(fl["id"])] = _invoice_entry(fl["id"])
+    f.found_invoices[cms.invoice_id(fl["id"])] = [_invoice_entry(fl["id"])]
     now = fl["created_ts"] + 30
     d = deps(path, f, tmp_path, now=now)
     assert run(cmf.settle_fill(fl["id"], d)) == cms.FUNDS_PENDING  # tx not readable yet
@@ -685,7 +685,7 @@ def test_take_giveup_but_invoice_payment_found_is_not_failed(tmp_path):
     path, f = _db(tmp_path), Fakes()
     _, fl = _take(path, f)
     f.payload_status["PU"] = {"signed": False}
-    f.found_invoices[cms.invoice_id(fl["id"])] = _invoice_entry(fl["id"])
+    f.found_invoices[cms.invoice_id(fl["id"])] = [_invoice_entry(fl["id"])]
     f.txs["PAYTX"] = _payment_tx(fl["id"])
     d = deps(path, f, tmp_path, now=fl["created_ts"] + cmf.PAYMENT_GIVEUP_SECONDS + 3600)
     assert run(cmf.settle_fill(fl["id"], d)) == cms.MIRRORED
@@ -696,7 +696,7 @@ def test_take_post_sign_giveup_adopts_the_found_invoice_payment(tmp_path):
     _, fl = _take(path, f)
     f.payload_status["PU"] = {"signed": True, "account": BUYER, "txid": "WRONGTXID"}
     f.txs["WRONGTXID"] = {"error": "txnNotFound"}
-    f.found_invoices[cms.invoice_id(fl["id"])] = _invoice_entry(fl["id"])
+    f.found_invoices[cms.invoice_id(fl["id"])] = [_invoice_entry(fl["id"])]
     f.txs["PAYTX"] = _payment_tx(fl["id"])
     d = deps(path, f, tmp_path, now=fl["created_ts"] + cmf.PAYMENT_GIVEUP_SECONDS + 3600)
     assert run(cmf.settle_fill(fl["id"], d)) == cms.MIRRORED
@@ -708,7 +708,7 @@ def test_take_lls_passed_but_invoice_payment_found_is_not_failed(tmp_path):
     _, fl = _take(path, f)
     f.payload_status["PU"] = {"signed": True, "account": BUYER, "txid": "PAYTX"}
     f.txs["PAYTX"] = {"validated": False, "tx_json": {"LastLedgerSequence": 50}}
-    f.found_invoices[cms.invoice_id(fl["id"])] = _invoice_entry(fl["id"])  # same hash
+    f.found_invoices[cms.invoice_id(fl["id"])] = [_invoice_entry(fl["id"])]  # same hash
     d = deps(path, f, tmp_path, now=fl["created_ts"] + 10)
     assert run(cmf.settle_fill(fl["id"], d)) == cms.FUNDS_PENDING  # the tx server lags: wait
     f.txs["PAYTX"] = _payment_tx(fl["id"])
@@ -732,7 +732,7 @@ def test_take_ignores_a_failed_invoice_payment(tmp_path):
     f.payload_status["PU"] = {"signed": False, "expired": True}
     entry = _invoice_entry(fl["id"])
     entry["meta"]["TransactionResult"] = "tecPATH_PARTIAL"
-    f.found_invoices[cms.invoice_id(fl["id"])] = entry
+    f.found_invoices[cms.invoice_id(fl["id"])] = [entry]
     d = deps(path, f, tmp_path, now=fl["created_ts"] + 10)
     assert run(cmf.settle_fill(fl["id"], d)) == cms.FAILED
 
@@ -797,7 +797,7 @@ def test_take_validated_failure_with_user_lls_looks_past_the_tracked_tx(tmp_path
     d = deps(path, f, tmp_path, now=fl["created_ts"] + 10)
     assert run(cmf.settle_fill(fl["id"], d)) == cms.FUNDS_PENDING
     f.ledger_index = USER_LLS + 1
-    f.found_invoices[cms.invoice_id(fl["id"])] = _invoice_entry(fl["id"], tx_hash="TECTX")
+    f.found_invoices[cms.invoice_id(fl["id"])] = [_invoice_entry(fl["id"], tx_hash="TECTX")]
     assert run(cmf.settle_fill(fl["id"], d)) == cms.FAILED  # only the tracked hash: absent
 
     path2 = str(tmp_path / "second.db")
@@ -806,7 +806,55 @@ def test_take_validated_failure_with_user_lls_looks_past_the_tracked_tx(tmp_path
     _, fl2 = _take(path2, f2, user_lls=USER_LLS)
     f2.payload_status["PU"] = {"signed": True, "account": BUYER, "txid": "TECTX"}
     f2.txs["TECTX"] = tec
-    f2.found_invoices[cms.invoice_id(fl2["id"])] = _invoice_entry(fl2["id"])
+    f2.found_invoices[cms.invoice_id(fl2["id"])] = [_invoice_entry(fl2["id"])]
     f2.txs["PAYTX"] = _payment_tx(fl2["id"])
     d2 = deps(path2, f2, tmp_path, now=fl2["created_ts"] + 10)
     assert run(cmf.settle_fill(fl2["id"], d2)) == cms.MIRRORED
+
+
+# --- PR #502 G2: a public InvoiceID must not let junk mask the real payment -----
+
+
+def _paying_entry(fill_id, *, tx_hash, account=BUYER, delivered="5"):
+    entry = _invoice_entry(fill_id, tx_hash=tx_hash)
+    entry["tx_json"].update(Account=account, Destination=APP)
+    entry["meta"]["delivered_amount"] = market_ops.brix_amount_dict(delivered)
+    return entry
+
+
+def test_take_reconcile_prefers_the_buyers_full_payment_over_junk(tmp_path):
+    """Anyone can send the app wallet a Payment carrying this fill's InvoiceID.
+    A junk entry (wrong sender / underpaid) listed first must not be adopted
+    over the buyer's own full payment."""
+    path, f = _db(tmp_path), Fakes()
+    _, fl = _take(path, f)
+    f.payload_status["PU"] = {"signed": False, "expired": True}
+    junk_sender = _paying_entry(fl["id"], tx_hash="JUNK1", account=OTHER)
+    junk_short = _paying_entry(fl["id"], tx_hash="JUNK2", delivered="1")
+    real = _paying_entry(fl["id"], tx_hash="PAYTX")
+    f.found_invoices[cms.invoice_id(fl["id"])] = [junk_sender, junk_short, real]
+    f.txs["PAYTX"] = _payment_tx(fl["id"])
+    d = deps(path, f, tmp_path, now=fl["created_ts"] + 10)
+    assert run(cmf.settle_fill(fl["id"], d)) == cms.MIRRORED
+    got = fill(path, fl["id"])
+    assert (got["signed_txid"], got["payment_tx_hash"]) == ("PAYTX", "PAYTX")
+    assert _counts(path) == (0, 1)
+
+
+def test_take_reconcile_with_only_junk_refunds_the_junk_sender(tmp_path):
+    path, f = _db(tmp_path), Fakes()
+    _, fl = _take(path, f)
+    f.payload_status["PU"] = {"signed": False, "expired": True}
+    f.found_invoices[cms.invoice_id(fl["id"])] = [
+        _paying_entry(fl["id"], tx_hash="JUNK1", account=OTHER, delivered="2")
+    ]
+    junk_tx = _payment_tx(fl["id"], account=OTHER, delivered="2")
+    junk_tx["hash"] = "JUNK1"
+    f.txs["JUNK1"] = junk_tx
+    d = deps(path, f, tmp_path, now=fl["created_ts"] + 10)
+    f.payment_outcomes = ["unknown"]  # stop right after the refund is sent
+    run(cmf.settle_fill(fl["id"], d))
+    got = fill(path, fl["id"])
+    assert (got["signed_txid"], got["refund_to"], got["refund_brix"]) == ("JUNK1", OTHER, "2")
+    assert f.payments[0][:2] == (OTHER, "2")
+    assert _counts(path) == (1, 0)
