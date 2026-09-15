@@ -1537,6 +1537,10 @@ def _fee_cover_duration(body: dict[str, Any]) -> int | None:
         seconds = hours * 3600
     except DecimalException:
         raise ValueError("duration_hours must be at most 87600") from None
+    if int(seconds) <= 0:
+        # A positive duration under one second would end the campaign the
+        # moment it starts.
+        raise ValueError("duration_hours must be at least one second")
     return int(seconds)
 
 
@@ -4272,6 +4276,8 @@ def _apply_fee_cover_estimate(out: dict[str, Any], state: tuple[int, int, int]) 
     if 0 < estimate <= remaining:
         out["fee_cover_drops"] = estimate
         out["fee_cover_xrp"] = market_ops.drops_to_xrp_str(str(estimate))
+        # Lets the client promise "you pay the ask" only at 100% coverage.
+        out["fee_cover_coverage_bps"] = coverage_bps
 
 
 def _get_bid_sync(network: str, offer_index: str) -> dict[str, Any] | None:

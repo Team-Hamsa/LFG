@@ -98,6 +98,7 @@ def test_status_before_any_campaign():
         {"actor": "discord:1", **KNOBS, "wallet_cap_xrp": "NaN"},
         {"actor": "discord:1", **KNOBS, "min_bid_xrp": "0.0000001"},
         {"actor": "discord:1", **KNOBS, "duration_hours": "-1"},
+        {"actor": "discord:1", **KNOBS, "duration_hours": "0.0001"},  # truncates to 0 s
         {"actor": "discord:1", **KNOBS, "coverage_pct": "1e999999999"},
         {"actor": "discord:1", **KNOBS, "budget_xrp": "1e999999999"},
         {"actor": "discord:1", **KNOBS, "wallet_cap_xrp": "1e999999999"},

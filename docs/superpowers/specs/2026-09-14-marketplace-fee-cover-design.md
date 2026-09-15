@@ -472,8 +472,9 @@ had a qualifying external listing. So `below_clearing`, `below_min_bid`,
 ### Client (vanilla-JS Activity)
 
 - **`/api/market/listings` serialization.** External rows that already carry
-  `clearing_*` gain `fee_cover_drops` / `fee_cover_xrp` when a campaign is
-  active and the campaign has budget headroom for that estimate. This is a
+  `clearing_*` gain `fee_cover_drops` / `fee_cover_xrp` /
+  `fee_cover_coverage_bps` when a campaign is active and the campaign has
+  budget headroom for that estimate. This is a
   public, unauthenticated estimate: it ignores wallet caps, so the copy says
   "limits apply".
   - **The campaign read happens post-cache.** It is not folded into the 60 s
@@ -482,7 +483,10 @@ had a qualifying external listing. So `below_clearing`, `below_min_bid`,
   - `buyNowLabel` is unchanged.
   - New `feeCoverNote(vm)` renders "LFG refunds xrp.cafe's 0.08 XRP fee after
     it settles, so you pay the 5.08 XRP ask." It replaces `externalFeeNote`
-    when `vm.feeCoverXrp` is set.
+    when `vm.feeCoverXrp` is set. Only at 100% coverage
+    (`vm.feeCoverCoverageBps === 10000`) does it promise the ask; below that,
+    or with coverage unknown, it reads "LFG refunds 0.04 XRP of xrp.cafe's fee
+    after it settles (campaign limits apply)."
   - `externalFillCopy` gains refund lines, keyed on the status response's
     `fee_cover.state`. That state is one field folding promise and refund:
     the refund's state once a refund row exists, the promise's state before

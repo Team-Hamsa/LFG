@@ -257,6 +257,9 @@ export function mapListingRow(row) {
     // Fee cover (spec 2026-09-14): what LFG refunds of the marketplace fee on a
     // Buy-now through LFG — null when no live campaign covers this row.
     feeCoverXrp: row.fee_cover_xrp ?? null,
+    // The live campaign's coverage in basis points (10000 = 100%) — only a
+    // full cover lets the copy promise "you pay the ask".
+    feeCoverCoverageBps: row.fee_cover_coverage_bps ?? null,
     // #203: collection-wide statistical rarity (characters only; null for
     // traits and for Mine rows, which never pass through the browse cache).
     rarityRank: row.rarity_rank ?? null,
@@ -309,11 +312,16 @@ export function externalFeeNote(vm) {
 
 /**
  * Fee cover: replaces externalFeeNote when a live campaign refunds the
- * marketplace fee on this Buy-now. Empty string when not covered.
+ * marketplace fee on this Buy-now. Empty string when not covered. Only a
+ * 100% cover (feeCoverCoverageBps === 10000) promises "you pay the ask";
+ * below that — or with coverage unknown — it names the partial refund.
  */
 export function feeCoverNote(vm) {
   if (!vm.external || vm.clearingXrp == null || vm.feeCoverXrp == null) return '';
   const who = vm.marketplace ? `${vm.marketplace}'s` : "the marketplace's";
+  if (vm.feeCoverCoverageBps !== 10000) {
+    return `LFG refunds ${vm.feeCoverXrp} XRP of ${who} fee after it settles (campaign limits apply).`;
+  }
   const ask = vm.amountXrp != null ? `, so you pay the ${vm.amountXrp} XRP ask` : '';
   return `LFG refunds ${who} ${vm.feeCoverXrp} XRP fee after it settles${ask} (campaign limits apply).`;
 }

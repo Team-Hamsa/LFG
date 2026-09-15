@@ -34,7 +34,8 @@ def run_js(expr):
     return json.loads(proc.stdout)
 
 
-EXTERNAL_VM = '{external: true, clearingXrp: "5.070572", amountXrp: "4.99", marketplace: "xrp.cafe", feeCoverXrp: "0.080572"}'
+EXTERNAL_VM = '{external: true, clearingXrp: "5.070572", amountXrp: "4.99", marketplace: "xrp.cafe", feeCoverXrp: "0.080572", feeCoverCoverageBps: 10000}'
+PARTIAL_VM = '{external: true, clearingXrp: "5.070572", amountXrp: "4.99", marketplace: "xrp.cafe", feeCoverXrp: "0.040286", feeCoverCoverageBps: 5000}'
 
 
 def _fc(state, reason=None):
@@ -55,6 +56,13 @@ def test_map_listing_row_carries_the_estimate():
         == "0.080572"
     )
     assert run_js('M.mapListingRow({kind: "character"}).feeCoverXrp') is None
+    assert (
+        run_js(
+            'M.mapListingRow({kind: "character", fee_cover_coverage_bps: 5000}).feeCoverCoverageBps'
+        )
+        == 5000
+    )
+    assert run_js('M.mapListingRow({kind: "character"}).feeCoverCoverageBps') is None
 
 
 def test_fee_cover_note():
@@ -63,6 +71,21 @@ def test_fee_cover_note():
     )
     assert run_js('M.feeCoverNote({external: true, clearingXrp: "5", feeCoverXrp: null})') == ""
     assert run_js('M.feeCoverNote({external: false, clearingXrp: "5", feeCoverXrp: "1"})') == ""
+
+
+def test_fee_cover_note_below_full_coverage_never_promises_the_ask():
+    assert run_js(f"M.feeCoverNote({PARTIAL_VM})") == (
+        "LFG refunds 0.040286 XRP of xrp.cafe's fee after it settles (campaign limits apply)."
+    )
+    # unknown coverage (older server) is treated as partial: never over-promise
+    unknown = EXTERNAL_VM.replace(", feeCoverCoverageBps: 10000", "")
+    assert run_js(f"M.feeCoverNote({unknown})") == (
+        "LFG refunds 0.080572 XRP of xrp.cafe's fee after it settles (campaign limits apply)."
+    )
+    no_name = PARTIAL_VM.replace('marketplace: "xrp.cafe", ', "")
+    assert run_js(f"M.feeCoverNote({no_name})") == (
+        "LFG refunds 0.040286 XRP of the marketplace's fee after it settles (campaign limits apply)."
+    )
 
 
 @pytest.mark.parametrize(
@@ -155,4 +178,4 @@ def test_market_pure_import_and_app_js_cache_busters_move_together():
     import_v = int(re.search(r"market_pure\.js\?v=(\d+)", src).group(1))
     with open(os.path.join(ROOT, "webapp", "client", "index.html"), encoding="utf-8") as f:
         app_v = int(re.search(r"app\.js\?v=(\d+)", f.read()).group(1))
-    assert import_v >= 28 and app_v >= 89
+    assert import_v >= 29 and app_v >= 90

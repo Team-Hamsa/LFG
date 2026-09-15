@@ -678,6 +678,22 @@ def test_browse_external_row_carries_the_fee_cover_estimate(env):
     assert row["clearing_drops"] == 5_070_572
     assert row["fee_cover_drops"] == 80_572  # ceil(5_070_572 × 0.01589) at 100% coverage
     assert row["fee_cover_xrp"] == "0.080572"
+    assert row["fee_cover_coverage_bps"] == 10_000
+
+
+def test_browse_estimate_carries_partial_coverage(env):
+    _seed_char_with_cafe_listing(env["onchain"])
+    conn = fee_cover_store.connect(env["app_db"])
+    knobs = fee_cover_store.Knobs(
+        coverage_bps=5_000, budget_drops=50_000_000, wallet_cap_drops=5_000_000, min_bid_drops=0
+    )
+    fee_cover_store.start_campaign(
+        conn, network="testnet", actor="t", knobs=knobs, duration_seconds=None
+    )
+    conn.close()
+    row = _browse()
+    assert row["fee_cover_drops"] == 40_286  # ceil(5_070_572 × 0.01589) × 50%
+    assert row["fee_cover_coverage_bps"] == 5_000
 
 
 def test_browse_estimate_follows_the_campaign_not_the_cache(env):
@@ -701,7 +717,8 @@ def test_browse_estimate_is_hidden_without_budget_headroom(env):
         conn, network="testnet", actor="t", knobs=knobs, duration_seconds=None
     )
     conn.close()
-    assert "fee_cover_drops" not in _browse()
+    row = _browse()
+    assert "fee_cover_drops" not in row and "fee_cover_coverage_bps" not in row
 
 
 # --- linked-counterparty lookup is fail-open ---------------------------------
