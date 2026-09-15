@@ -52,7 +52,16 @@ def _brix(value: str) -> IssuedCurrencyAmount:
 
 def _fund_with_brix(client: JsonRpcClient, wallet: Wallet, amount: str) -> None:
     submit_and_wait(
-        TrustSet(account=wallet.classic_address, limit_amount=_brix("1000000")), client, wallet
+        TrustSet(
+            account=wallet.classic_address,
+            limit_amount=_brix("1000000"),
+            source_tag=config.SOURCE_TAG,
+            memos=memos.build_memo_models(
+                memos.INITIATOR_BACKEND, memos.PLATFORM_BACKEND, memos.ACTION_TRUSTSET
+            ),
+        ),
+        client,
+        wallet,
     )
     if Decimal(amount) > 0:
         issuer = Wallet.from_seed(config.SEED)
