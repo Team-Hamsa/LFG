@@ -630,7 +630,9 @@ def test_verify_endpoint_chain_accepts_the_real_mainnet_identity(conn, monkeypat
 
 def _per_url_ledger_transport(monkeypatch, hashes):
     """Stub the failover client's per-URL HTTP exchange: `hashes` maps URL ->
-    ledger-32570 hash, or an exception instance the endpoint raises."""
+    ledger-32570 hash, an exception instance the endpoint raises, or an error
+    code string prefixed "error:" that the endpoint answers the 32570 request
+    with (e.g. a history-pruned node's "error:lgrNotFound")."""
     from xrpl.models.response import Response, ResponseStatus
 
     from lfg_core import xrpl_rpc
@@ -644,6 +646,13 @@ def _per_url_ledger_transport(monkeypatch, hashes):
         if isinstance(outcome, BaseException):
             raise outcome
         index = payload["params"][0]["ledger_index"]
+        if isinstance(outcome, str) and outcome.startswith("error:"):
+            if index != "validated":
+                return Response(
+                    status=ResponseStatus.ERROR,
+                    result={"error": outcome.removeprefix("error:"), "error_code": 21},
+                )
+            return Response(status=ResponseStatus.SUCCESS, result={"ledger_index": 99})
         if index != "validated":
             return Response(
                 status=ResponseStatus.SUCCESS,
@@ -690,6 +699,95 @@ def test_verify_endpoint_chain_raises_when_no_endpoint_answers(conn, monkeypatch
     with pytest.raises(httpx.ConnectError, match="b down"):
         asyncio.run(brix_drip.verify_endpoint_chain(conn, "mainnet"))
     assert calls == [a, b]
+
+
+def test_unverified_endpoint_is_excluded_from_later_default_clients(conn, monkeypatch):
+    """A fallback that could not be chain-verified must not serve the rest of
+    the run's reads through the default factory (CodeRabbit on #501)."""
+    import httpx
+
+    from lfg_core import config, xrpl_ops, xrpl_rpc
+
+    a, b, c = "https://a.example/", "https://b.example/", "https://c.example/"
+    monkeypatch.setattr(config, "JSON_RPC_URLS", (a, b, c))
+    _per_url_ledger_transport(
+        monkeypatch,
+        {
+            a: brix_drip.MAINNET_GENESIS_HASH,
+            b: httpx.ConnectError("down during the check"),
+            c: brix_drip.MAINNET_GENESIS_HASH,
+        },
+    )
+    assert asyncio.run(brix_drip.verify_endpoint_chain(conn, "mainnet")) is None
+    assert xrpl_ops.rpc_client().urls == (a, c)
+    assert xrpl_ops.async_rpc_client().urls == (a, c)
+    assert xrpl_ops.rpc_client(urls=[b]).urls == (b,)  # explicit lists unaffected
+    assert xrpl_rpc.endpoint_restriction() == frozenset({a, c})
+
+
+@pytest.mark.parametrize("code", ["lgrNotFound", "ledgerNotFound"])
+def test_history_pruned_primary_is_unverifiable_not_wrong_chain(conn, monkeypatch, code):
+    """The operator's own online_delete node cannot serve ledger 32570. That is
+    "cannot verify this endpoint" (skip + exclude), never a wrong-chain refusal:
+    with verifying public fallbacks the run proceeds, restricted to them."""
+    from lfg_core import config, xrpl_ops, xrpl_rpc
+
+    own, pub1, pub2 = "https://own.node/", "https://pub1.example/", "https://pub2.example/"
+    monkeypatch.setattr(config, "JSON_RPC_URLS", (own, pub1, pub2))
+    _per_url_ledger_transport(
+        monkeypatch,
+        {
+            own: f"error:{code}",
+            pub1: brix_drip.MAINNET_GENESIS_HASH,
+            pub2: brix_drip.MAINNET_GENESIS_HASH,
+        },
+    )
+    assert asyncio.run(brix_drip.verify_endpoint_chain(conn, "mainnet")) is None
+    assert xrpl_rpc.endpoint_restriction() == frozenset({pub1, pub2})
+    assert xrpl_ops.rpc_client().urls == (pub1, pub2)
+
+
+def test_history_pruned_primary_alone_raises_rather_than_refusing(conn, monkeypatch):
+    """With no fallback able to verify, the pruned node's lookup failure
+    propagates (unchanged single-endpoint behavior) — not a wrong-chain string."""
+    from lfg_core import config, xrpl_rpc
+
+    own = "https://own.node/"
+    monkeypatch.setattr(config, "JSON_RPC_URLS", (own,))
+    _per_url_ledger_transport(monkeypatch, {own: "error:lgrNotFound"})
+    with pytest.raises(RuntimeError, match="lgrNotFound"):
+        asyncio.run(brix_drip.verify_endpoint_chain(conn, "mainnet"))
+    assert xrpl_rpc.endpoint_restriction() is None
+
+
+def test_all_endpoints_verified_leaves_no_restriction(conn, monkeypatch):
+    from lfg_core import config, xrpl_ops, xrpl_rpc
+
+    a, b = "https://a.example/", "https://b.example/"
+    monkeypatch.setattr(config, "JSON_RPC_URLS", (a, b))
+    _per_url_ledger_transport(
+        monkeypatch, {a: brix_drip.MAINNET_GENESIS_HASH, b: brix_drip.MAINNET_GENESIS_HASH}
+    )
+    assert asyncio.run(brix_drip.verify_endpoint_chain(conn, "mainnet")) is None
+    assert xrpl_rpc.endpoint_restriction() is None
+    assert xrpl_ops.rpc_client().urls == (a, b)
+
+
+def test_refusal_and_unverified_testnet_do_not_restrict(conn, monkeypatch):
+    import httpx
+
+    from lfg_core import config, xrpl_rpc
+
+    a, b = "https://a.example/", "https://b.example/"
+    monkeypatch.setattr(config, "JSON_RPC_URLS", (a, b))
+    # wrong chain on a reachable endpoint -> refusal, no restriction
+    _per_url_ledger_transport(monkeypatch, {a: httpx.ConnectError("down"), b: "OTHER_CHAIN_HASH"})
+    assert asyncio.run(brix_drip.verify_endpoint_chain(conn, "mainnet")) is not None
+    assert xrpl_rpc.endpoint_restriction() is None
+    # testnet with no recorded identity: nothing was verified -> no restriction
+    monkeypatch.setattr(history_store, "get_archive_state", lambda c, net: None)
+    assert asyncio.run(brix_drip.verify_endpoint_chain(conn, "testnet")) is None
+    assert xrpl_rpc.endpoint_restriction() is None
 
 
 def test_verify_endpoint_chain_builds_single_endpoint_clients_via_the_factory(conn, monkeypatch):

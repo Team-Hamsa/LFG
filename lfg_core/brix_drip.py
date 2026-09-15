@@ -35,7 +35,7 @@ from typing import Any, Protocol
 
 from xrpl.models.requests import Request
 
-from lfg_core import config, epoch_state, history_store, xrpl_ops
+from lfg_core import config, epoch_state, history_store, xrpl_ops, xrpl_rpc
 
 logger = logging.getLogger(__name__)
 
@@ -717,8 +717,10 @@ async def verify_endpoint_chain(conn: sqlite3.Connection, network: str) -> str |
     The anchor is ledger 32570's hash: stable forever on a given chain,
     different across chains, and already recorded per network by the archive.
 
-    Returns None when the endpoint is verified (or cannot be verified because
-    the archive has no recorded identity yet), or an error string to refuse on.
+    Returns None when the endpoints are verified (or cannot be verified because
+    the archive has no recorded identity yet — then nothing is restricted), or
+    an error string to refuse on. On success with some endpoints unverifiable,
+    the process's default JSON-RPC clients are restricted to the verified ones.
     """
     expected = MAINNET_GENESIS_HASH if network == "mainnet" else ""
     if not expected:
@@ -742,12 +744,22 @@ async def verify_endpoint_chain(conn: sqlite3.Connection, network: str) -> str |
     # JSON-RPC failover means a later read may be served by ANY configured
     # endpoint, so each one is checked on its own: a single-endpoint client
     # from the xrpl_ops.rpc_client factory (urls=[url], so nothing to fail over
-    # to). A reachable endpoint on the wrong chain refuses; one that cannot
-    # answer is skipped with a warning, as long as at least one endpoint
-    # verifies — otherwise the last failure propagates, as it did when there
-    # was a single endpoint.
+    # to). Only a RETURNED ledger-32570 hash that differs from the expected one
+    # is a wrong-chain refusal. An endpoint that cannot produce that hash —
+    # unreachable, timed out, or answering with an error such as `lgrNotFound`
+    # (a stock rippled with online_delete has pruned that far back) — is
+    # "cannot verify": skipped with a warning, as long as at least one endpoint
+    # verifies; otherwise the last failure propagates, as it did when there was
+    # a single endpoint.
+    #
+    # A skipped endpoint is then EXCLUDED from the rest of this process's
+    # default-factory clients (xrpl_rpc.restrict_to), so it cannot come back
+    # mid-run and serve reads unverified. accrue_brix.py / backfill_brix_gap.py
+    # are one-shot processes that call this before any other RPC, so the next
+    # run re-checks every endpoint and restores one that has recovered.
     last_exc: BaseException | None = None
-    verified = False
+    verified_urls: list[str] = []
+    skipped = False
     for url in config.JSON_RPC_URLS:
         client = xrpl_ops.rpc_client(urls=[url])
 
@@ -767,8 +779,13 @@ async def verify_endpoint_chain(conn: sqlite3.Connection, network: str) -> str |
         try:
             snapshot = await history_store.fetch_endpoint_snapshot(request_fn)
         except Exception as e:  # noqa: BLE001 - unverifiable endpoint; see above
-            logger.warning("brix_drip: could not verify endpoint %s's chain: %s", url, e)
+            logger.warning(
+                "brix_drip: could not verify endpoint %s's chain (excluded for this run): %s",
+                url,
+                e,
+            )
             last_exc = e
+            skipped = True
             continue
         # Ledger hashes are hex; servers and stored values differ in case, and a
         # case-only mismatch would reject a perfectly correct endpoint.
@@ -778,9 +795,11 @@ async def verify_endpoint_chain(conn: sqlite3.Connection, network: str) -> str |
                 f"(ledger {history_store.EARLIEST_AVAILABLE_LEDGER} hash "
                 f"{snapshot.genesis_hash[:16]}… != recorded {expected[:16]}…)"
             )
-        verified = True
-    if not verified and last_exc is not None:
+        verified_urls.append(url)
+    if not verified_urls and last_exc is not None:
         raise last_exc
+    if skipped and verified_urls:
+        xrpl_rpc.restrict_to(verified_urls)
     return None
 
 

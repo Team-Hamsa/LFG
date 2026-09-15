@@ -110,6 +110,21 @@ raises) — so callers' existing handling
 (``is_successful`` checks, ``IndeterminateResultError``, the #385 malformed
 retry) behaves unchanged.
 
+Endpoint restriction
+--------------------
+``restrict_to(urls)`` narrows the factories' DEFAULT url list
+(``xrpl_ops.rpc_client()`` / ``async_rpc_client()`` with no ``urls``) to the
+configured URLs that are also in ``urls``, in configured order, for the rest of
+the process. ``brix_drip.verify_endpoint_chain`` uses it so an endpoint it could
+not chain-verify (unreachable, or a history-pruned node answering
+``lgrNotFound`` for ledger 32570) cannot come back and serve that run's later
+reads — which would reopen the misconfigured-fallback hole the check closes.
+Explicit ``urls=[...]`` calls are never filtered. A restriction that leaves no
+URL fails closed (``ValueError`` from the client). The BRIX accrual / gap
+backfill are one-shot processes, so the next run re-checks every endpoint and
+naturally restores one that has recovered. ``clear_restriction()`` lifts it
+(tests / ops).
+
 Scope: JSON-RPC only. ``XRPL_WS_URL`` / ``XRPL_CLIO_WS_URL`` are not covered.
 """
 
@@ -192,6 +207,34 @@ _cooldown_lock = threading.Lock()
 
 def _monotonic() -> float:
     return time.monotonic()
+
+
+_restriction: frozenset[str] | None = None
+
+
+def restrict_to(urls: Sequence[str]) -> None:
+    """Limit the factories' default url list to `urls` (see module docstring)."""
+    global _restriction
+    _restriction = frozenset(urls)
+
+
+def clear_restriction() -> None:
+    """Lift any `restrict_to` restriction."""
+    global _restriction
+    _restriction = None
+
+
+def endpoint_restriction() -> frozenset[str] | None:
+    """The active restriction, or None when every configured URL is allowed."""
+    return _restriction
+
+
+def default_urls(configured: Sequence[str]) -> tuple[str, ...]:
+    """`configured` filtered by the active restriction, order preserved."""
+    restriction = _restriction
+    if restriction is None:
+        return tuple(configured)
+    return tuple(u for u in configured if u in restriction)
 
 
 def reset_cooldowns() -> None:

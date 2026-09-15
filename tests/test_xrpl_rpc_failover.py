@@ -381,6 +381,27 @@ def test_factories_use_configured_url_list(monkeypatch):
     assert sync_client.urls == (B, C) and async_client.urls == (B, C)
 
 
+def test_restriction_filters_default_factory_urls_preserving_order(monkeypatch):
+    monkeypatch.setattr(config, "JSON_RPC_URLS", (A, B, C))
+    xrpl_rpc.restrict_to([C, A])
+    assert xrpl_rpc.endpoint_restriction() == frozenset({A, C})
+    assert xrpl_ops.rpc_client().urls == (A, C)
+    assert xrpl_ops.async_rpc_client().urls == (A, C)
+    # an explicit url list is never filtered
+    assert xrpl_ops.rpc_client(urls=[B]).urls == (B,)
+    assert xrpl_ops.async_rpc_client(urls=[B, C]).urls == (B, C)
+    xrpl_rpc.clear_restriction()
+    assert xrpl_rpc.endpoint_restriction() is None
+    assert xrpl_ops.rpc_client().urls == (A, B, C)
+
+
+def test_restriction_that_excludes_everything_fails_closed(monkeypatch):
+    monkeypatch.setattr(config, "JSON_RPC_URLS", (A, B))
+    xrpl_rpc.restrict_to([C])
+    with pytest.raises(ValueError):
+        xrpl_ops.rpc_client()
+
+
 def test_factories_accept_an_explicit_url_list(monkeypatch):
     monkeypatch.setattr(config, "JSON_RPC_URLS", (B, C))
     assert xrpl_ops.rpc_client(urls=[A]).urls == (A,)

@@ -827,7 +827,10 @@ DB and paid on-chain only when the holder explicitly claims. Design:
   `XRPL_NETWORK`, every reachable JSON-RPC failover endpoint's ledger-32570
   hash matches the chain identity the archive recorded (each checked through
   its own single-endpoint `xrpl_ops.rpc_client(urls=[url])`; at least one must
-  answer), **and** the collection index is non-empty
+  answer; an endpoint that can't produce the hash — unreachable, or a
+  history-pruned `online_delete` node answering `lgrNotFound` — is skipped,
+  not refused, and excluded from that run's default clients via
+  `xrpl_rpc.restrict_to`; the next run re-checks it), **and** the collection index is non-empty
   (`nft_index.collection_owners`) — an empty index would make every token look
   ineligible and certify a silent zero-pay day.
 - **The archive replay is only as good as the DERIVED table, and both jobs
