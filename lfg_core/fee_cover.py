@@ -7,6 +7,7 @@ Spec: docs/superpowers/specs/2026-09-14-marketplace-fee-cover-design.md.
 from __future__ import annotations
 
 import math
+import sqlite3
 from collections.abc import Callable, Collection, Mapping, Sequence
 from dataclasses import dataclass
 from typing import Any
@@ -193,3 +194,34 @@ def compute_refund(
     if refund < 1:
         return decline("zero_refund", fee=fee, royalty=royalty)
     return RefundDecision(tx_hash, seller, broker, fee, royalty, refund, None)
+
+
+def audit_violations(conn: sqlite3.Connection, network: str) -> list[str]:
+    """Every committed refund must stay within its promise, its observed fee ×
+    coverage, and ROYALTY_CEILING_BPS of its observed royalty; no campaign may
+    pay more than its budget. Empty list = clean."""
+    problems: list[str] = []
+    for accept, refund, fee, royalty, promised, coverage in conn.execute(
+        "SELECT r.accept_tx_hash, r.refund_drops, r.observed_fee_drops, r.observed_royalty_drops,"
+        " p.promised_drops, p.coverage_bps FROM fee_cover_refunds r"
+        " JOIN fee_cover_promises p ON p.offer_index = r.offer_index"
+        " WHERE r.network = ? AND r.state IN ('owed','submitted','confirmed')",
+        (network,),
+    ):
+        if refund > promised:
+            problems.append(f"{accept}: refund {refund} exceeds promise {promised}")
+        if fee is None or refund > fee * coverage // BPS:
+            problems.append(f"{accept}: refund {refund} exceeds observed fee x coverage")
+        if royalty is None or refund > royalty * ROYALTY_CEILING_BPS // BPS:
+            problems.append(
+                f"{accept}: refund {refund} exceeds {ROYALTY_CEILING_BPS // 100}% of observed royalty"
+            )
+    for campaign_id, budget, paid in conn.execute(
+        "SELECT c.id, c.budget_drops, COALESCE(SUM(r.refund_drops), 0) FROM fee_cover_campaigns c"
+        " LEFT JOIN fee_cover_refunds r ON r.campaign_id = c.id AND r.state = 'confirmed'"
+        " WHERE c.network = ? GROUP BY c.id",
+        (network,),
+    ):
+        if paid > budget:
+            problems.append(f"campaign {campaign_id}: confirmed {paid} exceeds budget {budget}")
+    return problems

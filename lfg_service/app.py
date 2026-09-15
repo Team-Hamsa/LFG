@@ -4060,21 +4060,9 @@ def _fee_cover_linked(bidder: str, seller: str) -> bool:
 
 
 def _fee_cover_deps() -> fee_cover_settle.FeeCoverDeps:
-    return fee_cover_settle.FeeCoverDeps(
-        network=config.XRPL_NETWORK,
-        app_db_path=_fee_cover_db(),
-        history_db_path=history_store.history_db_path(config.XRPL_NETWORK),
-        payer=config.SIGNING_ACCOUNT,
-        ledger_margin=config.FEE_COVER_LEDGER_MARGIN,
-        get_tx=xrpl_ops.get_tx,
-        send_refund=xrpl_ops.send_fee_cover_refund,
-        find_refund_payment=xrpl_ops.find_fee_cover_payment,
-        current_ledger=xrpl_ops.current_validated_ledger_index,
-        broker_rate_for=lambda account, nft_id: (brokers.resolve(account, nft_id) or {}).get(
-            "broker_rate"
-        ),
-        linked=_fee_cover_linked,
-    )
+    deps = fee_cover_settle.service_deps(config.XRPL_NETWORK, linked=_fee_cover_linked)
+    deps.app_db_path = _fee_cover_db()
+    return deps
 
 
 def _fee_cover_safe(fn: Callable[..., Any], *args: Any) -> Any:

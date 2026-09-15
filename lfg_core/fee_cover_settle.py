@@ -20,7 +20,7 @@ from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
 from typing import Any
 
-from lfg_core import fee_cover, fee_cover_store, history_store, xrpl_ops
+from lfg_core import brokers, config, db_path, fee_cover, fee_cover_store, history_store, xrpl_ops
 
 RIPPLE_EPOCH_OFFSET = 946_684_800
 # A promise is written when its bid validates; its accept cannot predate that,
@@ -406,3 +406,23 @@ async def sweep_once(
                 report.paid += 1
     report.recovered = len(await recover_refunds(deps))
     return report
+
+
+def service_deps(network: str, *, linked: Callable[[str, str], bool]) -> FeeCoverDeps:
+    """The production wiring: real ledger calls, the network's app DB and
+    history archive, refunds signed by config.SIGNING_ACCOUNT."""
+    return FeeCoverDeps(
+        network=network,
+        app_db_path=db_path.app_db_path(network),
+        history_db_path=history_store.history_db_path(network),
+        payer=config.SIGNING_ACCOUNT,
+        ledger_margin=config.FEE_COVER_LEDGER_MARGIN,
+        get_tx=xrpl_ops.get_tx,
+        send_refund=xrpl_ops.send_fee_cover_refund,
+        find_refund_payment=xrpl_ops.find_fee_cover_payment,
+        current_ledger=xrpl_ops.current_validated_ledger_index,
+        broker_rate_for=lambda account, nft_id: (brokers.resolve(account, nft_id) or {}).get(
+            "broker_rate"
+        ),
+        linked=linked,
+    )
