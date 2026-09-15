@@ -90,6 +90,11 @@ SHOP_BASE_BRIX=1.0                                          # optional; Trait Sh
 SHOP_MIN_BRIX=5                                             # optional; Trait Shop price floor, BRIX (default 5, #217)
 SHOP_MAX_BRIX=5000                                          # optional; Trait Shop price ceiling, BRIX (default 5000, #217)
 SHOP_OFFER_TTL_SECONDS=900                                  # optional; Trait Shop sell-offer expiry window in seconds (default 900, #217)
+CLOSET_MARKET_ENABLED=0                                     # optional (#443); Closet Market NEW orders — cancel/status/settlement run whenever ECONOMY_ENABLED + CLOSET_MARKET_ENC_KEY
+CLOSET_MARKET_ENC_KEY=<fernet-key>                          # optional (#443); seals each bid's escrow fulfillment — REQUIRED for the feature; back it up
+CLOSET_MARKET_FEE_BPS=700                                   # optional (#443); market fee on fills, 0 <= bps < 10000
+CLOSET_BID_TTL_SECONDS=604800                               # optional (#443); bid escrow CancelAfter
+CLOSET_MARKET_LEDGER_MARGIN=40                              # optional (#443); LastLedgerSequence headroom on backend Closet Market txs
 NFT_SCHEMA_URL=ipfs://QmNpi8rcXEkohca8iXu7zysKKSJYqCvBJn3xJwga8jXqWU
 EXTERNAL_WEBSITE_URL=https://www.letseffinggo.com   # use www — apex TLS is broken (Squarespace cert lacks apex SAN, verified 2026-07-10)
 RETRY_MAX_ATTEMPTS=5
@@ -1284,6 +1289,33 @@ matching Extract/List seller first. Design:
 - **Taxon:** trait tokens minted by the shop share `TRAIT_TAXON` with Extract
   — see the flip to 176 noted above; `ASSEMBLE_TAXON = 1760` is unrelated
   (Assemble-minted rebirth characters, not shop trait tokens).
+
+### Closet Market (#443)
+
+Off-ledger trait order book for loose Closet assets. Design:
+`docs/superpowers/specs/2026-08-25-closet-market-design.md`; plan + spec deltas:
+`docs/superpowers/plans/2026-09-14-closet-market.md`; ops: `docs/ops/closet-market.md`.
+
+- **Asks** are `closet_orders` rows (zero signatures). They ENCUMBER, never
+  decrement: `available = closet_assets.count − open/matched asks − pre-move
+  holder fills` (`closet_market_store.encumbrance`). Equip/Assemble/Extract
+  refuse listed units (`economy_flow._listed_error`).
+- **Bids** lock BRIX in an XRPL TokenEscrow to the app wallet with a
+  PREIMAGE-SHA-256 condition (`lfg_core/crypto_condition.py`); the fulfillment
+  is Fernet-sealed with `CLOSET_MARKET_ENC_KEY`. Bids open only after the
+  validated EscrowCreate AND the escrow ledger object match.
+- **Fills** (`closet_market_flow.settle_fill`): funds (buyer Payment with
+  `InvoiceID = sha256(fill id)`, or EscrowFinish) → ONE sqlite tx moves the
+  unit and closes both orders → forward `price − fee` (+ overshoot refund) →
+  re-sync both Closet tokens. Backend txs carry `lfg:closet_<phase>:<id>`
+  memos + pinned LastLedgerSequence; unknown outcomes resolve only by memo
+  lookup or LLS passing (never "absent = failed").
+- **The DB is ahead of the Closet token between asset move and mirror.**
+  `nft_listener._apply_closet` and `backfill_economy._reconcile_closet` skip
+  rebuilding `closet_assets` for an owner with an unmirrored fill
+  (`has_unmirrored_fill`) — removing that guard resurrects moved units.
+- Mainnet BRIX issuer is `rLfgoBriX…` (RegularKey = distributor), not the NFT
+  issuer; testnet's SEED account is both issuer and app wallet.
 
 ### Share-on-X beacon (`share_intents`)
 

@@ -14,6 +14,7 @@ module.exports = {
     { name: "stg-snapshot", cwd: CWD, script: "scripts/snapshot_balances.py", interpreter: PY, args: ["--network", "testnet"], cron_restart: "10 0 * * *", autorestart: false },
     { name: "stg-economy-reconcile", cwd: CWD, script: "scripts/economy_nightly_reconcile.py", interpreter: PY, args: ["--network", "testnet"], cron_restart: "20 0 * * *", autorestart: false },
     { name: "stg-economy-audit", cwd: CWD, script: "scripts/audit_trait_economy.py", interpreter: PY, args: ["--network", "testnet"], cron_restart: "25 0 * * *", autorestart: false },
+    { name: "stg-closet-market-audit", cwd: CWD, script: "scripts/audit_closet_market.py", interpreter: PY, args: ["--network", "testnet", "--onchain"], cron_restart: "35 0 * * *", autorestart: false },
     // BRIX daily drip accrual (#48), testnet twin of lfg-brix-accrue — same 00:40 slot.
     // No stg-sourcetag twin: the metrics badge is a mainnet-only, main-committing job.
     { name: "stg-brix-accrue", cwd: CWD, script: "scripts/accrue_brix.py", interpreter: PY, args: ["--network", "testnet"], cron_restart: "40 0 * * *", autorestart: false },

@@ -12,6 +12,8 @@ module.exports = {
     { name: "lfg-snapshot", cwd: CWD, script: "scripts/snapshot_balances.py", interpreter: PY, args: ["--network", "mainnet"], cron_restart: "10 0 * * *", autorestart: false },
     { name: "lfg-economy-reconcile", cwd: CWD, script: "scripts/economy_nightly_reconcile.py", interpreter: PY, args: ["--network", "mainnet"], cron_restart: "20 0 * * *", autorestart: false },
     { name: "lfg-economy-audit", cwd: CWD, script: "scripts/audit_trait_economy.py", interpreter: PY, args: ["--network", "mainnet"], cron_restart: "25 0 * * *", autorestart: false },
+    // Closet Market (#443) conservation/escrow audit — 00:35, after the 00:20/00:25 economy crons.
+    { name: "lfg-closet-market-audit", cwd: CWD, script: "scripts/audit_closet_market.py", interpreter: PY, args: ["--network", "mainnet", "--onchain"], cron_restart: "35 0 * * *", autorestart: false },
     // SourceTag metrics badge — commits metrics/sourcetag.json to main via the GitHub API.
     { name: "lfg-sourcetag", cwd: CWD, script: "scripts/sourcetag_metrics.py", interpreter: PY, args: ["--network", "mainnet", "--push"], cron_restart: "20 0 * * *", autorestart: false },
     // BRIX daily drip accrual (#48). 00:40, NOT the 00:20 the script's docstring
