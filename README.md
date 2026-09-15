@@ -241,6 +241,7 @@ LFG/
 │   ├── market_flow.py      # Marketplace list/buy/cancel state machines
 │   ├── economy_flow.py     # Dress-up economy flows
 │   ├── shop_flow.py        # Trait Shop — BRIX-priced on-demand trait mint
+│   ├── closet_market_flow.py # Closet Market — escrow bids, asks, fill settlement (#443)
 │   ├── bulk_mint_flow.py   # Bulk mint — pay once, mint N editions
 │   ├── burn2mint_flow.py   # Burn-to-mint — burn M own NFTs for M fresh mints (#220; flag-gated, off)
 │   ├── layer_store.py      # Trait layer store (local dir or BunnyCDN, via LAYER_SOURCE)
