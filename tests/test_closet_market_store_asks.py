@@ -31,7 +31,9 @@ def test_active_constant_matches_closet_token():
 
 def test_create_ask_encumbers_without_touching_count():
     c = _conn()
-    ask = cms.create_ask(c, owner=SELLER, slot="Head", value="Crown", price_brix="12.5", platform="discord")
+    ask = cms.create_ask(
+        c, owner=SELLER, slot="Head", value="Crown", price_brix="12.5", platform="discord"
+    )
     assert ask["state"] == cms.OPEN and ask["side"] == cms.SIDE_ASK
     assert cms.holding_count(c, SELLER, "Head", "Crown") == 2
     assert cms.available_count(c, SELLER, "Head", "Crown") == 1
@@ -70,12 +72,20 @@ def test_cancel_ask_frees_the_unit_and_is_owner_only():
 
 def test_book_summary_and_levels_sort_by_decimal_not_text():
     c = _conn()
-    cms.create_ask(c, owner=SELLER, slot="Head", value="Crown", price_brix="9", platform=None, now=1)
-    cms.create_ask(c, owner=SELLER, slot="Head", value="Crown", price_brix="10", platform=None, now=2)
+    cms.create_ask(
+        c, owner=SELLER, slot="Head", value="Crown", price_brix="9", platform=None, now=1
+    )
+    cms.create_ask(
+        c, owner=SELLER, slot="Head", value="Crown", price_brix="10", platform=None, now=2
+    )
     [row] = cms.book_summary(c)
     assert row == {
-        "slot": "Head", "value": "Crown",
-        "best_ask_brix": "9", "ask_count": 2, "best_bid_brix": None, "bid_count": 0,
+        "slot": "Head",
+        "value": "Crown",
+        "best_ask_brix": "9",
+        "ask_count": 2,
+        "best_bid_brix": None,
+        "bid_count": 0,
     }
     levels = cms.book_levels(c, "Head", "Crown")
     assert [a["price_brix"] for a in levels["asks"]] == ["9", "10"]
