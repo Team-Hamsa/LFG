@@ -226,16 +226,25 @@ promise.
 - **`fee_cover_refunds.accept_tx_hash` is the PRIMARY KEY** and
   `offer_index` is `UNIQUE`. Sqlite makes a second payout for one sale
   impossible, whether from a replay, a double poll, or sweep + poll racing.
-- **Order: record `owed` → submit → record outcome.** The claim path is the
-  template (`app.py::_claim_one_wallet`):
-  - A provisional `last_ledger_seq` is written before submission.
+- **Order: record `owed` → claim → submit → record outcome.** The claim path
+  is the template (`app.py::_claim_one_wallet`):
+  - **The claim is one conditional write.** `UPDATE … SET
+    state='submitted', last_ledger_seq=<provisional> WHERE accept_tx_hash=?
+    AND state='owed'`. Only the caller whose update changes a row submits, so
+    the poll path and the sweep can race without paying twice.
+  - The provisional deadline (`current + FEE_COVER_LEDGER_MARGIN × 10`) is
+    recorded in that same write, so no `submitted` row ever lacks a deadline.
   - Submission goes through `xrpl_ops.send_fee_cover_refund(dest, drops,
-    refund_key, max_last_ledger_seq)`, modelled on `send_brix_claim`.
+    refund_key, max_last_ledger_seq)`, modelled on `send_brix_claim` and
+    returning its `ClaimPayment` tri-state.
 - **Outcomes:**
   - `confirmed` on validated `tesSUCCESS`.
-  - `failed` only on a **definitive** failure: a validated `tec`, or
-    `ClaimNotSubmitted`-equivalent pre-submit refusal.
-  - Everything else is `submitted` with `last_ledger_seq` recorded.
+  - `failed` on a **definitive** failure: a validated non-success result, or a
+    presubmit `simulate` rejection. `_submit_and_confirm` logs the result code
+    but does not return it.
+  - `ClaimNotSubmitted` (refused before anything was built) → back to `owed`.
+  - An unknown outcome stays `submitted` with the payment's own
+    `last_ledger_seq`.
 - **An indeterminate outcome is never retried blind.** Recovery resolves it.
 - **Recovery** is `lfg_core/fee_cover.recover(...)`, run at service startup
   (like `_start_brix_claim_recovery`) and by
@@ -248,12 +257,16 @@ promise.
     `delivered_amount == refund_drops`.
   - Found → `confirmed`. Absent **and** validated ledger past
     `last_ledger_seq` → `failed`. Anything else stays untouched.
-- **What to do with a definitive failure** depends on the result code:
-  - `tecDST_TAG_NEEDED`, `tecNO_PERMISSION` (DepositAuth), or `tecNO_DST`
-    parks the row `failed` with the result code. No retry: it is a property of
-    the destination.
-  - `tecUNFUNDED_PAYMENT` (issuer short of spendable XRP) goes back to `owed`
-    for the sweep to retry, and logs at WARNING.
+- **A `failed` row is parked, never retried automatically.** Typical causes:
+  - a destination property (`tecDST_TAG_NEEDED`, DepositAuth `tecNO_PERMISSION`)
+  - an issuer short of spendable XRP (`tecUNFUNDED_PAYMENT`)
+
+  A failed payment can never validate later, so resubmitting it is safe. An
+  operator fixes the cause (tops up the issuer, or accepts that a destination
+  cannot receive), then runs `scripts/recover_fee_cover_refunds.py --requeue
+  <accept_tx_hash>`. That moves `failed → owed` only while the campaign budget
+  still has headroom for it. The result code is in the service log line from
+  `_submit_and_confirm`.
 
 ### Payout transaction
 
@@ -291,17 +304,24 @@ promise.
       settles.
   - `sweep_fee_cover()` is a single indexed query when nothing is open.
 
-  For each open promise whose `buy_offers` row is no longer live:
+  For **every open promise**. The `buy_offers` index is not a usable
+  trigger: an expired offer stays on-ledger, and in the index as live, until
+  someone cancels it.
   - **Accept found** in the history archive (`nft_events` sale for
-    `P.nft_id` at `ts ≥ P.created_at` whose `xrpl_txs.raw_json`
+    `P.nft_id` at `ts ≥ P.created_at - 3600` whose `xrpl_txs.raw_json`
     `NFTokenBuyOffer == P.offer_index`) → `settle_promise`.
-  - **Cancel found** (`offer_cancel` event for `offer_index`) → release
+  - **Cancel found** (an `offer_cancel` event for `P.nft_id` whose
+    comma-joined `offer_index` contains `P.offer_index`) → release
     `cancelled`.
-  - **Neither**, and now > bid `expiration` + 1 day **and** the archive is
-    validated past the expiration with no open continuity gap → release
-    `expired`.
+  - **Neither, and the bid has expired**, and the archive covers the expiry
+    (baseline complete, no continuity gap, `validated_close_time` past
+    `bid_expiration + 946684800`, the same test as `epoch_state.certify_epoch`)
+    → release `expired`. An expired offer can never be accepted, so an archive
+    that has seen past the expiry without an accept proves none happened.
   - **Otherwise** leave open. It fails closed: never released early, never
-    paid without a tx.
+    paid without a tx. On an archive without a certified baseline (staging,
+    typically), expired promises stay open, holding their budget, until it is
+    certified.
 - **Retry of `owed` rows.** A row with retryable state is retried each sweep
   with an in-memory attempt counter. After `_SWEEP_MAX_ATTEMPTS` it is
   journaled to `ECONOMY_RECORDS_DIR/fee-cover-giveup-<accept_tx_hash>.json`,
@@ -351,11 +371,12 @@ CREATE TABLE IF NOT EXISTS fee_cover_refunds (
   offer_index TEXT NOT NULL UNIQUE REFERENCES fee_cover_promises(offer_index),
   campaign_id INTEGER NOT NULL,
   network TEXT NOT NULL,
-  bidder TEXT NOT NULL, seller TEXT NOT NULL, broker TEXT NOT NULL,
+  bidder TEXT NOT NULL,
+  seller TEXT, broker TEXT,             -- NULL when a declined accept had no parsable offer/broker
   observed_fee_drops INTEGER, observed_royalty_drops INTEGER,
   refund_drops INTEGER NOT NULL DEFAULT 0,
   state TEXT NOT NULL CHECK (state IN ('owed','submitted','confirmed','failed','declined')),
-  reason TEXT, result_code TEXT,
+  reason TEXT,
   payout_tx_hash TEXT, last_ledger_seq INTEGER,
   created_at INTEGER NOT NULL, updated_at INTEGER NOT NULL
 );
@@ -367,8 +388,12 @@ CREATE TABLE IF NOT EXISTS fee_cover_audit (       -- same shape as free_mint_au
 );
 ```
 
-**Declined promises are recorded too** (`state='declined'`, reason).
-Every "not covered" can be explained later.
+**Declined promises are recorded** (`state='declined'`, reason) whenever the
+buyer could have seen "LFG covers the fee": a campaign was live **and** the NFT
+had a qualifying external listing. So `below_clearing`, `below_min_bid`,
+`system_wallet`, `budget_exhausted` and `wallet_cap` are recorded, and every
+"not covered" the UI shows can be explained later. `campaign_inactive` and
+`not_external_listing` write nothing; those are ordinary bids.
 
 **Decline and release reasons** (closed set):
 
@@ -430,8 +455,7 @@ Every "not covered" can be explained later.
     - `owed` / `submitted`: "Your 0.08 XRP fee refund is on its way."
     - `confirmed`: "Refunded 0.08 XRP (tx link)."
     - `declined`: "This purchase isn't covered: \<reason copy\>."
-    - `failed`: "We couldn't send your fee refund (\<result code copy\>).
-      Contact support."
+    - `failed`: "We couldn't send your fee refund. Contact support."
 - **`app.js::buyExternalNow`.** The confirm dialog shows the fee-cover note.
   `watchExternalFill` keeps polling after `fill == accepted` until
   `fee_cover.state` is terminal or 2 minutes pass. After that, "on its way" is
@@ -494,8 +518,9 @@ Every "not covered" can be explained later.
 - **Budget squatting.** Many bids placed and left open to lock budget. This is
   bounded by the per-wallet cap, which counts open promises, and the 7-day bid
   TTL.
-- **Issuer runs short of spendable XRP.** `tecUNFUNDED_PAYMENT` returns the
-  row to `owed` and logs WARNING. The status embed surfaces headroom.
+- **Issuer runs short of spendable XRP.** The payout fails definitively and
+  parks `failed`. The status embed shows the issuer's XRP balance next to
+  budget remaining. After a top-up, `--requeue` pays it.
 - **Archive gap delays a refund.** Promises fail closed and settle once #402
   catch-up heals the archive. The buyer sees "on its way", never a false
   "declined".
@@ -516,7 +541,10 @@ Every "not covered" can be explained later.
   - An indeterminate submit stays `submitted`.
   - Recovery finds the memo → `confirmed`.
   - Absent before `last_ledger_seq` → untouched; absent after → `failed`.
-  - `tecUNFUNDED_PAYMENT` → back to `owed`; `tecDST_TAG_NEEDED` → parked.
+  - A definitive failure parks `failed`; `--requeue` moves it back to `owed`
+    only with budget headroom; `ClaimNotSubmitted` → back to `owed`.
+  - Two concurrent `pay_refund` calls on one `owed` row → exactly one
+    submission.
 - **Release.**
   - A cancel event releases.
   - Expiry releases only once the archive is certified past expiration.
