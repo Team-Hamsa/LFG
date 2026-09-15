@@ -10,7 +10,7 @@ import logging
 import sqlite3
 from typing import Any
 
-from lfg_core import config, trait_economy
+from lfg_core import closet_market_store, config, trait_economy
 
 # Written into genesis_meta as the final step of a freeze; genesis_exists keys
 # off this flag alone, so a partially-written (e.g. interrupted) genesis never
@@ -193,6 +193,7 @@ def init_economy_schema(conn: sqlite3.Connection) -> None:
     _migrate_closet_columns(conn)
     _migrate_supply_changes_columns(conn)
     ensure_closet_token_uniqueness(conn)
+    closet_market_store.ensure_schema(conn)  # #443: orders/fills share this DB
 
 
 def genesis_exists(conn: sqlite3.Connection) -> bool:
