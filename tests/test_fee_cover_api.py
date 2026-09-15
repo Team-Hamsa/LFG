@@ -400,3 +400,96 @@ def test_bids_mine_rows_carry_fee_cover(env):
         _run(server.handle_market_bids_mine(make_mocked_request("GET", "/api/market/bids/mine")))
     )
     assert body["my_bids"][0]["fee_cover"]["state"] == "open"
+
+
+# --- Task 7: sweep + startup recovery -------------------------------------
+
+
+class _Stop(BaseException):
+    """Escapes the loop's `except Exception` guards to end one iteration."""
+
+
+def test_sweep_fee_cover_runs_sweep_once_with_service_deps(monkeypatch):
+    seen = {}
+    sentinel = object()
+    monkeypatch.setattr(server, "_fee_cover_deps", lambda: sentinel)
+
+    async def fake_sweep_once(deps, *, attempts, max_attempts, on_giveup):
+        seen.update(deps=deps, attempts=attempts, max_attempts=max_attempts, on_giveup=on_giveup)
+        return fee_cover_settle.SweepReport()
+
+    monkeypatch.setattr(server.fee_cover_settle, "sweep_once", fake_sweep_once)
+    _run(server.sweep_fee_cover())
+    assert seen["deps"] is sentinel
+    assert seen["attempts"] is server._fee_cover_attempts
+    assert seen["max_attempts"] == server._SWEEP_MAX_ATTEMPTS
+    assert seen["on_giveup"] is server._write_fee_cover_giveup
+
+
+def test_settlement_loop_runs_the_fee_cover_sweep_with_the_economy_off(monkeypatch):
+    calls = []
+    monkeypatch.setattr(server.config, "ECONOMY_ENABLED", False)
+
+    async def sign_requests():
+        calls.append("sign")
+
+    async def fee_cover_sweep():
+        calls.append("fee_cover")
+        raise _Stop
+
+    monkeypatch.setattr(server, "sweep_sign_requests", sign_requests)
+    monkeypatch.setattr(server, "sweep_fee_cover", fee_cover_sweep)
+    with pytest.raises(_Stop):
+        _run(server._settlement_sweep_loop())
+    assert calls == ["sign", "fee_cover"]
+
+
+def test_a_crashing_fee_cover_sweep_does_not_kill_the_loop(monkeypatch):
+    calls = []
+    monkeypatch.setattr(server.config, "ECONOMY_ENABLED", False)
+
+    async def sign_requests():
+        calls.append("sign")
+        if len(calls) > 1:
+            raise _Stop
+
+    async def fee_cover_sweep():
+        calls.append("fee_cover")
+        raise RuntimeError("db locked")
+
+    monkeypatch.setattr(server, "sweep_sign_requests", sign_requests)
+    monkeypatch.setattr(server, "sweep_fee_cover", fee_cover_sweep)
+    monkeypatch.setattr(server, "_SWEEP_PERIOD_SECONDS", 0)
+    with pytest.raises(_Stop):
+        _run(server._settlement_sweep_loop())
+    assert calls == ["sign", "fee_cover", "sign"]
+
+
+def test_giveup_journal_is_written(tmp_path, monkeypatch):
+    monkeypatch.setattr(server.config, "ECONOMY_RECORDS_DIR", str(tmp_path))
+    server._write_fee_cover_giveup(
+        {"accept_tx_hash": "ACC", "offer_index": "OFF", "bidder": "rB", "refund_drops": 80_642}
+    )
+    record = json.loads((tmp_path / "fee-cover-giveup-ACC.json").read_text())
+    assert record["status"] == "abandoned" and record["refund_drops"] == 80_642
+
+
+def test_startup_recovery_resolves_submitted_refunds(monkeypatch):
+    called = []
+    sentinel = object()
+    monkeypatch.setattr(server, "_fee_cover_deps", lambda: sentinel)
+
+    async def fake_recover(deps):
+        called.append(deps)
+        return {"ACC": "confirmed"}
+
+    monkeypatch.setattr(server.fee_cover_settle, "recover_refunds", fake_recover)
+
+    async def go():
+        app: dict = {}
+        await server._start_fee_cover_recovery(app)
+        await app["fee_cover_recovery_task"]
+
+    _run(go())
+    assert called == [sentinel]
+    assert server._start_fee_cover_recovery in server.create_app().on_startup

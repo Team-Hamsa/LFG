@@ -5110,6 +5110,47 @@ async def sweep_pending_closet_accepts() -> None:
         conn.close()
 
 
+_fee_cover_attempts: dict[str, int] = {}
+
+
+def _write_fee_cover_giveup(row: dict[str, Any]) -> None:
+    """Journal (ECONOMY_RECORDS_DIR) that the sweep stopped retrying an owed
+    fee-cover refund. Nothing is lost: the row stays `owed` for an operator."""
+    try:
+        os.makedirs(config.ECONOMY_RECORDS_DIR, exist_ok=True)
+        path = os.path.join(
+            config.ECONOMY_RECORDS_DIR, f"fee-cover-giveup-{row['accept_tx_hash']}.json"
+        )
+        with open(path, "w") as f:
+            json.dump(
+                {
+                    "accept_tx_hash": row["accept_tx_hash"],
+                    "offer_index": row["offer_index"],
+                    "bidder": row["bidder"],
+                    "refund_drops": row["refund_drops"],
+                    "attempts": _SWEEP_MAX_ATTEMPTS,
+                    "status": "abandoned",
+                },
+                f,
+                indent=2,
+            )
+    except Exception:
+        logging.error(f"failed to write fee cover giveup record: {traceback.format_exc()}")
+
+
+async def sweep_fee_cover() -> None:
+    """Settle filled promises, release dead ones, pay owed refunds, recover
+    submitted ones (spec §Fill detection and promise release)."""
+    report = await fee_cover_settle.sweep_once(
+        _fee_cover_deps(),
+        attempts=_fee_cover_attempts,
+        max_attempts=_SWEEP_MAX_ATTEMPTS,
+        on_giveup=_write_fee_cover_giveup,
+    )
+    if report.settled or report.released or report.paid or report.recovered:
+        logging.info("fee cover sweep: %s", report)
+
+
 async def _settlement_sweep_loop() -> None:
     while True:
         if config.ECONOMY_ENABLED:
@@ -5132,6 +5173,10 @@ async def _settlement_sweep_loop() -> None:
             await sweep_sign_requests()
         except Exception:
             logging.error(f"sign request sweep loop crashed: {traceback.format_exc()}")
+        try:
+            await sweep_fee_cover()
+        except Exception:
+            logging.error(f"fee cover sweep loop crashed: {traceback.format_exc()}")
         await asyncio.sleep(_SWEEP_PERIOD_SECONDS)
 
 
@@ -5165,16 +5210,33 @@ async def _start_brix_claim_recovery(app: web.Application) -> None:
     app["brix_recovery_task"] = asyncio.get_event_loop().create_task(_run())
 
 
+async def _start_fee_cover_recovery(app: web.Application) -> None:
+    """aiohttp on_startup hook: resolve fee-cover refunds left `submitted` by a
+    crash. Fire-and-forget and fully guarded — never delays startup, and reads
+    the ledger only when a submitted row exists."""
+
+    async def _run() -> None:
+        try:
+            outcomes = await fee_cover_settle.recover_refunds(_fee_cover_deps())
+            if outcomes:
+                logging.info(
+                    "fee cover recovery resolved %s refund(s): %s", len(outcomes), outcomes
+                )
+        except Exception:
+            logging.warning("fee cover recovery failed at startup", exc_info=True)
+
+    app["fee_cover_recovery_task"] = asyncio.get_event_loop().create_task(_run())
+
+
 async def _start_settlement_sweep(app: web.Application) -> None:
     """aiohttp on_startup hook: schedule the settlement sweep as a background
     task for the lifetime of the app.
 
-    Started when the trait economy has listings to settle OR WalletConnect is
-    configured — the loop also retires lapsed sign requests (#447), which is
-    independent of the economy.
+    Always started: the fee-cover sweep must settle open promises and pay owed
+    refunds on every stack, even one with the economy and WalletConnect off.
+    Each sweep inside the loop keeps its own gate, and all are cheap no-ops
+    when they have no rows.
     """
-    if not (config.ECONOMY_ENABLED or config.wc_enabled()):
-        return
     app["settlement_sweep_task"] = asyncio.get_event_loop().create_task(_settlement_sweep_loop())
 
 
@@ -9841,6 +9903,7 @@ def create_app() -> web.Application:
     app.router.add_static("/", CLIENT_DIR)
     app.on_startup.append(_start_settlement_sweep)
     app.on_startup.append(_start_brix_claim_recovery)
+    app.on_startup.append(_start_fee_cover_recovery)
     app.on_cleanup.append(_stop_settlement_sweep)
     app.on_startup.append(_start_bulk_resume)
     app.on_startup.append(_start_sponsored_burn_worker)
