@@ -2688,6 +2688,20 @@ def _parse_market_int_param(
     return value
 
 
+def _attach_closet_book(
+    rows_out: list[dict[str, Any]], raw_rows: list[dict[str, Any]], summary: list[dict[str, Any]]
+) -> None:
+    """#496: a grouped trait card shows the Closet book beside its floor."""
+    by_key = {(r["slot"], r["value"]): r for r in summary}
+    for out, raw in zip(rows_out, raw_rows, strict=True):
+        hit = by_key.get((raw.get("slot"), raw.get("value")))
+        out["book"] = (
+            {k: hit[k] for k in ("best_ask_brix", "ask_count", "best_bid_brix", "bid_count")}
+            if hit
+            else None
+        )
+
+
 @require_market
 async def handle_market_listings(request: web.Request) -> web.Response:
     """Public: GET /api/market/listings?kind=&trait=&min_xrp=&max_xrp=&sort=&limit=&offset=
@@ -2909,6 +2923,9 @@ async def handle_market_listings(request: web.Request) -> web.Response:
             out["floor_brix"] = r["floor_brix"]
             out["offers"] = [_serialize_listing_row(o, kind, cfg) for o in r["offers"]]
         rows_out.append(out)
+    if kind == "trait" and group and config.closet_market_enabled():
+        summary = await _closet_db(closet_market_store.book_summary)
+        _attach_closet_book(rows_out, page, summary)
     return web.json_response({"rows": rows_out, "total": len(filtered)})
 
 
@@ -2978,8 +2995,15 @@ def _compute_mine_data(char_network: str, econ_network: str, wallet: str) -> dic
             if o == wallet and nid not in listed_trait_ids
         ]
 
+        listed = closet_market_store.encumbrance(conn, wallet)
         closet_assets = [
-            {"slot": s, "value": v, "count": c, "image_url": _img(s, v)}
+            {
+                "slot": s,
+                "value": v,
+                "count": c,
+                "listed": listed.get((s, v), 0),
+                "image_url": _img(s, v),
+            }
             for (o, s, v, c) in economy_store.read_closet_assets(conn)
             if o == wallet and c > 0
         ]
@@ -5183,6 +5207,34 @@ def _schedule_closet_bid(order_id: str) -> None:
     _schedule_closet(f"bid:{order_id}", go)
 
 
+async def sweep_closet_market() -> None:
+    """2-minute backstop: poll pending bid escrows, expire/cancel bids, retry
+    every non-terminal fill. Runs whenever settlement is possible — NOT gated
+    on CLOSET_MARKET_ENABLED (the kill switch must not strand escrows)."""
+    if not config.closet_market_settleable():
+        return
+    deps = _closet_market_deps()
+    order_ids = await _closet_db(closet_market_store.orders_needing_attention)
+    fill_ids = await _closet_db(closet_market_store.fills_needing_attention)
+    for order_id in order_ids:
+        try:
+            fill_id = await closet_market_flow.advance_bid(order_id, deps)
+            if fill_id and fill_id not in fill_ids:
+                fill_ids.append(fill_id)
+        except Exception:
+            logging.error(
+                f"closet market bid sweep crashed for {order_id}: {traceback.format_exc()}"
+            )
+    for fill_id in fill_ids:
+        try:
+            await closet_market_flow.settle_fill(fill_id, deps)
+        except Exception:
+            logging.error(
+                f"closet market fill sweep crashed for {fill_id}: {traceback.format_exc()}"
+            )
+    _invalidate_closet_book()
+
+
 @require_closet_market
 async def handle_closet_book(request):
     """GET /api/closet/book[?slot=&value=] — public. Both params: price
@@ -5527,6 +5579,10 @@ async def _settlement_sweep_loop() -> None:
                 await sweep_pending_closet_accepts()
             except Exception:
                 logging.error(f"closet pending-accept sweep loop crashed: {traceback.format_exc()}")
+            try:
+                await sweep_closet_market()
+            except Exception:
+                logging.error(f"closet market sweep loop crashed: {traceback.format_exc()}")
         try:
             await sweep_sign_requests()
         except Exception:
