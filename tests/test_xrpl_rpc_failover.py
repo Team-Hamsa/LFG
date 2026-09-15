@@ -481,3 +481,203 @@ def test_busy_primary_no_longer_strands_a_submit_as_indeterminate(monkeypatch, t
     assert len(sign_calls) == 1
     submits = [p["params"][0]["tx_blob"] for _, p in t.calls if p["method"] == "submit"]
     assert len(submits) == 2 and len(set(submits)) == 1
+
+
+# --- duplicate submit: the primary may have relayed before failing ---
+
+
+def _submit_confirm_fixture(monkeypatch, tmp_path):
+    """Real one-time signing + a Payment for _submit_and_confirm replays."""
+    monkeypatch.setenv("PRESUBMIT_SIMULATE", "0")
+    monkeypatch.setenv("XRPL_SUBMISSION_LOCK_DIR", str(tmp_path))
+    monkeypatch.setattr("xrpl.asyncio.transaction.reliable_submission._LEDGER_CLOSE_TIME", 0)
+    wallet = Wallet.create()
+    tx = Payment(
+        account=wallet.classic_address,
+        destination="rrrrrrrrrrrrrrrrrrrrrhoLvTp",
+        amount="1",
+        source_tag=config.SOURCE_TAG,
+    )
+    state: dict = {"signs": 0}
+
+    def fake_autofill_and_sign(unsigned, client, signer):
+        state["signs"] += 1
+        state["tx"] = sign(
+            Payment(
+                account=unsigned.account,
+                destination=unsigned.destination,
+                amount=unsigned.amount,
+                source_tag=unsigned.source_tag,
+                fee="12",
+                sequence=9,
+                last_ledger_sequence=200,
+            ),
+            signer,
+        )
+        return state["tx"]
+
+    monkeypatch.setattr(xrpl_ops, "autofill_and_sign", fake_autofill_and_sign)
+    return wallet, tx, state
+
+
+def _validated_tx(state: dict) -> Response:
+    return _ok(
+        {
+            "hash": state["tx"].get_hash(),
+            "validated": True,
+            "meta": {"TransactionResult": "tesSUCCESS"},
+        }
+    )
+
+
+@pytest.mark.parametrize("dup_result", ["tefPAST_SEQ", "tefALREADY"])
+def test_duplicate_engine_result_from_fallback_resolves_the_original_hash(
+    monkeypatch, tmp_path, dup_result
+):
+    """Primary times out AFTER relaying; the fallback sees the same signed blob
+    as a duplicate (tefPAST_SEQ / tefALREADY). submit_and_wait must poll the
+    ORIGINAL hash and resolve it: no second signature, no Indeterminate."""
+    wallet, tx, state = _submit_confirm_fixture(monkeypatch, tmp_path)
+
+    def fallback(payload: dict) -> Response:
+        method = payload["method"]
+        if method == "submit":
+            return _ok({"engine_result": dup_result, "engine_result_message": "dup"})
+        if method == "ledger":
+            return _ok({"ledger_index": 150})
+        if method == "tx":
+            assert payload["params"][0]["transaction"] == state["tx"].get_hash()
+            return _validated_tx(state)
+        raise AssertionError(f"unexpected method {method}")
+
+    t = _install(monkeypatch, {A: [httpx.ReadTimeout("relayed, then timed out")], B: [fallback]})
+    client = xrpl_rpc.FailoverJsonRpcClient([A, B])
+    result = _run(xrpl_ops._submit_and_confirm(tx, wallet, client, "duplicate replay"))
+
+    assert result is not None and result["hash"] == state["tx"].get_hash()
+    assert state["signs"] == 1
+    submits = [p["params"][0]["tx_blob"] for _, p in t.calls if p["method"] == "submit"]
+    assert len(submits) == 2 and len(set(submits)) == 1
+    polled = {p["params"][0]["transaction"] for _, p in t.calls if p["method"] == "tx"}
+    assert polled == {state["tx"].get_hash()}
+
+
+def test_duplicate_submit_whose_poll_fails_resolves_via_confirm_by_hash(monkeypatch, tmp_path):
+    """Same duplicate, but submit_and_wait's own poll dies on every endpoint:
+    _confirm_by_hash must then look up the ORIGINAL hash and resolve it."""
+    wallet, tx, state = _submit_confirm_fixture(monkeypatch, tmp_path)
+    seen = {"tx": 0}
+
+    def fallback(payload: dict) -> Response:
+        method = payload["method"]
+        if method == "submit":
+            return _ok({"engine_result": "tefPAST_SEQ", "engine_result_message": "dup"})
+        if method == "ledger":
+            return _ok({"ledger_index": 150})
+        if method == "tx":
+            assert payload["params"][0]["transaction"] == state["tx"].get_hash()
+            seen["tx"] += 1
+            if seen["tx"] == 1:  # submit_and_wait's own poll
+                raise httpx.ReadTimeout("poll lost")
+            return _validated_tx(state)
+        raise AssertionError(f"unexpected method {method}")
+
+    t = _install(monkeypatch, {A: [_err("tooBusy")], B: [fallback]})
+    client = xrpl_rpc.FailoverJsonRpcClient([A, B])
+    result = _run(xrpl_ops._submit_and_confirm(tx, wallet, client, "duplicate confirm"))
+
+    assert result is not None and result["hash"] == state["tx"].get_hash()
+    assert state["signs"] == 1
+    assert seen["tx"] >= 2  # the poll failed; confirm-by-hash resolved
+    submits = [p["params"][0]["tx_blob"] for _, p in t.calls if p["method"] == "submit"]
+    assert len(set(submits)) == 1
+
+
+# --- HTTP status handling in the real per-URL exchange ---
+
+
+def _http(monkeypatch, handlers: dict) -> list:
+    """Route the real _post_json_rpc through httpx.MockTransport. `handlers`
+    maps URL -> (status, body); a dict body is JSON, a str body is text."""
+    seen: list = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        url = str(request.url)
+        seen.append(url)
+        status, body = handlers[url]
+        if isinstance(body, dict):
+            return httpx.Response(status, json=body)
+        return httpx.Response(status, text=body)
+
+    monkeypatch.setattr(xrpl_rpc, "_http_transport", httpx.MockTransport(handler))
+    return seen
+
+
+_OK_BODY = {"result": {"status": "success", "ledger_index": 5}}
+
+
+@pytest.mark.parametrize(
+    "status,body",
+    [
+        (503, {"result": {"status": "error", "error": "internal"}}),
+        (500, {"result": {"status": "error", "error": "internal"}}),
+        (502, "<html>Bad Gateway</html>"),
+        (504, "gateway timeout"),
+        (429, "Too Many Requests"),
+        (403, "Forbidden"),
+        (404, "Not Found"),
+        (408, "Request Timeout"),
+        (401, "Unauthorized"),
+        (301, "moved"),
+    ],
+)
+def test_endpoint_level_http_status_fails_over(monkeypatch, status, body):
+    seen = _http(monkeypatch, {A: (status, body), B: (200, _OK_BODY)})
+    client = xrpl_rpc.FailoverJsonRpcClient([A, B])
+    out = _sync(client.request, Ledger(ledger_index="validated"))
+    assert out.is_successful() and out.result["ledger_index"] == 5
+    assert seen == [A, B]
+
+
+def test_http_400_text_is_a_real_bad_request_not_failed_over(monkeypatch):
+    seen = _http(monkeypatch, {A: (400, "params unparseable"), B: (200, _OK_BODY)})
+    client = xrpl_rpc.FailoverJsonRpcClient([A, B])
+    with pytest.raises(XRPLRequestFailureException) as info:
+        _sync(client.request, Ledger(ledger_index="validated"))
+    assert info.value.error == 400
+    assert seen == [A]
+
+
+def test_http_400_json_is_returned_as_the_answer(monkeypatch):
+    body = {"result": {"status": "error", "error": "invalidParams"}}
+    seen = _http(monkeypatch, {A: (400, body), B: (200, _OK_BODY)})
+    client = xrpl_rpc.FailoverJsonRpcClient([A, B])
+    out = _sync(client.request, Ledger(ledger_index="validated"))
+    assert not out.is_successful() and out.result["error"] == "invalidParams"
+    assert seen == [A]
+
+
+def test_http_2xx_non_json_still_fails_over(monkeypatch):
+    seen = _http(monkeypatch, {A: (200, "<html>maintenance</html>"), B: (200, _OK_BODY)})
+    client = xrpl_rpc.FailoverJsonRpcClient([A, B])
+    assert _sync(client.request, Ledger(ledger_index="validated")).is_successful()
+    assert seen == [A, B]
+
+
+def test_all_fail_last_5xx_json_body_surfaces_as_the_response(monkeypatch):
+    # Clio answers a plain-HTTP tooBusy as 503 + JSON; with nowhere left to go
+    # the caller gets that Response, exactly as a single-endpoint client did.
+    body = {"result": {"status": "error", "error": "tooBusy"}}
+    _http(monkeypatch, {A: (502, "bad gateway"), B: (503, body)})
+    client = xrpl_rpc.FailoverJsonRpcClient([A, B])
+    out = _sync(client.request, Ledger(ledger_index="validated"))
+    assert not out.is_successful() and out.result["error"] == "tooBusy"
+
+
+def test_all_fail_last_5xx_text_raises_request_failure(monkeypatch):
+    busy = {"result": {"status": "error", "error": "tooBusy"}}
+    _http(monkeypatch, {A: (503, busy), B: (502, "bad gateway")})
+    client = xrpl_rpc.FailoverJsonRpcClient([A, B])
+    with pytest.raises(XRPLRequestFailureException) as info:
+        _sync(client.request, Ledger(ledger_index="validated"))
+    assert info.value.error == 502

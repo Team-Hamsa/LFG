@@ -27,12 +27,32 @@ Failover rules — exact, because this path carries transaction submission
 -------------------------------------------------------------------------
 Move to the next URL ONLY on:
 
-(a) transport failure — ``httpx.RequestError`` (connect error, timeout,
-    protocol/network error), a non-JSON body (``XRPLRequestFailureException``;
-    what a proxy's 5xx/429 HTML page or rippled's plain-text "Server is
-    overloaded" 503 becomes), or a JSON body without the ``result``/``status``
-    envelope (``KeyError`` — the #385 malformed-200 shape). None of these is an
-    answer from the XRP Ledger.
+(a) transport failure — none of these is an answer from the XRP Ledger:
+
+    * ``httpx.RequestError``: connect error, timeout, protocol/network error;
+    * an endpoint-level HTTP status (``HTTPStatusFailure``), judged BEFORE the
+      body: any 5xx (rippled's plain-text "Server is overloaded" 503, a proxy's
+      502/504 page, and also a 5xx carrying a JSON body such as Clio's
+      ``503 {"error":"tooBusy"}`` or ``500 {"error":"internal"}`` — xrpl-py's
+      ``json_to_response`` ignores the HTTP status, so without this check a 5xx
+      JSON body would read as a normal answer), any 1xx/3xx (httpx does not
+      follow redirects; a redirecting URL is a misconfigured endpoint), and the
+      4xx codes that describe the ENDPOINT rather than the request —
+      ``RETRYABLE_HTTP_4XX``: 401/403 (this node refuses us, e.g. an IP-blocked
+      or admin-only port), 404 (wrong path on that host), 408 (request
+      timeout), 429 (a public node or its proxy rate-limiting our IP). Every
+      other 4xx — above all 400, which rippled and Clio use for a genuinely
+      malformed request ("params unparseable", "Null method", invalid API
+      version) — is a real answer: the identical payload would get the
+      identical 400 anywhere. It surfaces immediately with no failover and no
+      cooldown, as a single-endpoint client did (JSON body -> ``Response``;
+      otherwise ``XRPLRequestFailureException``). rippled answers ordinary RPC
+      errors (``txnNotFound``, ``tooBusy``, ...) with HTTP 200 unless the
+      request opts into ``ripplerpc`` >= 3.0, which xrpl-py never sends, so
+      those are classified by (b), not by status;
+    * a 2xx with a non-JSON body (``XRPLRequestFailureException``) or a JSON
+      body without the ``result``/``status`` envelope (``KeyError`` — the #385
+      malformed-200 shape).
 
 (b) a response whose ``error`` is in ``SOFT_ERROR_CODES`` — the server is
     saying "I can't serve anyone right now", not "your request is wrong":
@@ -81,7 +101,10 @@ failing fast. A success clears that URL's cooldown.
 
 When every URL fails, the LAST outcome surfaces exactly as a single-endpoint
 client would have produced it — the soft-error ``Response`` is returned, or the
-last transport exception is re-raised as-is — so callers' existing handling
+last transport exception is re-raised as-is (for an endpoint-level HTTP
+status: the JSON ``Response`` when the body carried one, else an
+``XRPLRequestFailureException`` with the status as ``error``, the shape xrpl-py
+raises) — so callers' existing handling
 (``is_successful`` checks, ``IndeterminateResultError``, the #385 malformed
 retry) behaves unchanged.
 
@@ -131,12 +154,33 @@ SOFT_ERROR_CODES: frozenset[str] = frozenset(
     }
 )
 
+# 4xx statuses that describe the endpoint, not the request (see docstring).
+RETRYABLE_HTTP_4XX: frozenset[int] = frozenset({401, 403, 404, 408, 429})
+
+
+class HTTPStatusFailure(XRPLRequestFailureException):
+    """An endpoint-level HTTP status: fail over. `response` is the parsed JSON
+    body when there was one (surfaced if this was the last endpoint)."""
+
+    def __init__(self, status: int, text: str, response: Response | None) -> None:
+        super().__init__({"error": status, "error_message": text})
+        self.status = status
+        self.response = response
+
+
+class DefinitiveRequestFailure(XRPLRequestFailureException):
+    """A request-level HTTP 4xx without a JSON answer: raised as-is, no failover."""
+
+
 # Transport-level failures: no answer from the ledger was received.
 TRANSPORT_ERRORS: tuple[type[BaseException], ...] = (
     httpx.RequestError,
     XRPLRequestFailureException,
     KeyError,
 )
+
+# Test seam: an httpx transport (e.g. httpx.MockTransport); None = real network.
+_http_transport: httpx.AsyncBaseTransport | None = None
 
 COOLDOWN_SECONDS = 45.0
 
@@ -172,16 +216,34 @@ def _attempt_order(urls: Sequence[str]) -> list[str]:
     return [u for u in urls if u not in cooling] + [u for u in urls if u in cooling]
 
 
+def _parse_envelope(response: httpx.Response) -> Response | None:
+    """The body as an xrpl-py Response, or None if it is not a JSON-RPC envelope."""
+    try:
+        return json_to_response(response.json())
+    except (JSONDecodeError, KeyError, TypeError, AttributeError):
+        return None
+
+
 async def _post_json_rpc(url: str, payload: dict[str, Any], timeout: float) -> Response:
-    """One HTTP exchange with one endpoint — mirrors JsonRpcBase._request_impl."""
-    async with httpx.AsyncClient(timeout=timeout) as http_client:
+    """One HTTP exchange with one endpoint. A 2xx mirrors
+    JsonRpcBase._request_impl exactly; a non-2xx is classified by status first
+    (see the module docstring)."""
+    async with httpx.AsyncClient(timeout=timeout, transport=_http_transport) as http_client:
         response = await http_client.post(url, json=payload)
-        try:
-            return json_to_response(response.json())
-        except JSONDecodeError:
-            raise XRPLRequestFailureException(
-                {"error": response.status_code, "error_message": response.text}
-            ) from None
+        status = response.status_code
+        if 200 <= status < 300:
+            try:
+                return json_to_response(response.json())
+            except JSONDecodeError:
+                raise XRPLRequestFailureException(
+                    {"error": status, "error_message": response.text}
+                ) from None
+        parsed = _parse_envelope(response)
+        if 400 <= status < 500 and status not in RETRYABLE_HTTP_4XX:
+            if parsed is not None:
+                return parsed
+            raise DefinitiveRequestFailure({"error": status, "error_message": response.text})
+        raise HTTPStatusFailure(status, response.text, parsed)
 
 
 def _soft_error(response: Response) -> str | None:
@@ -206,6 +268,14 @@ async def failover_request(
     for index, url in enumerate(order):
         try:
             response = await _post_json_rpc(url, payload, timeout)
+        except DefinitiveRequestFailure:
+            raise
+        except HTTPStatusFailure as exc:
+            reason = f"HTTP {exc.status}"
+            if exc.response is not None:
+                last_exc, last_response = None, exc.response
+            else:
+                last_exc, last_response = exc, None
         except TRANSPORT_ERRORS as exc:
             reason = type(exc).__name__
             last_exc, last_response = exc, None
