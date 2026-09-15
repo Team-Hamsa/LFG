@@ -193,3 +193,76 @@ def test_meta_orders_and_sweep_queries():
     assert cms.fills_needing_attention(c) == []
     fill = cms.fill_bid(c, bid["id"], SELLER, fee_bps=0, platform=None)
     assert cms.fills_needing_attention(c) == [fill["id"]]
+
+
+def test_orders_for_owner_live_states_and_fills():
+    c = _conn(seller_count=5)
+    es.set_closet_contents(c, BUYER, [("Head", "Crown", 2)], [])
+    # SELLER creates asks and bids
+    ask1 = cms.create_ask(
+        c,
+        owner=SELLER,
+        slot="Head",
+        value="Crown",
+        price_brix="5",
+        platform=None,
+        now=10,
+    )
+    ask2 = cms.create_ask(
+        c,
+        owner=SELLER,
+        slot="Head",
+        value="Crown",
+        price_brix="6",
+        platform=None,
+        now=30,
+    )
+    seller_bid = _open_bid(c, owner=SELLER, price="3", now=70)
+    # BUYER creates a bid
+    buyer_bid1 = _open_bid(c, owner=BUYER, price="5", now=20)
+    # Cancel ask1 to have a non-live order
+    cms.cancel_ask(c, ask1["id"], SELLER)
+    # Fill buyer_bid1 (holder fill: SELLER fills BUYER's bid directly)
+    fill_bid1 = cms.fill_bid(c, buyer_bid1["id"], SELLER, fee_bps=0, platform=None, now=40)
+    cms.update_fill(c, fill_bid1["id"], state=cms.FUNDED, escrow_finish_hash="F")
+    cms.move_asset(c, fill_bid1["id"])
+    # Fill ask2 with a payment (BUYER pays for SELLER's ask)
+    fill_ask2 = cms.create_take_fill(c, ask2["id"], BUYER, fee_bps=0, platform=None, now=50)
+    cms.claim_ask_for_payment(c, fill_ask2["id"], "PAY1")
+
+    # orders_for_owner for SELLER: seller_bid (open) + ask2 (matched) only
+    # ask1 is cancelled (not live), buyer_bid1 is not SELLER's
+    orders = cms.orders_for_owner(c, SELLER)
+    live_orders = orders["orders"]
+    # Should be newest-first: seller_bid (open, 70) then ask2 (matched, 30)
+    assert len(live_orders) == 2
+    assert live_orders[0]["id"] == seller_bid["id"] and live_orders[0]["state"] == cms.OPEN
+    assert live_orders[1]["id"] == ask2["id"] and live_orders[1]["state"] == cms.MATCHED
+    # No fulfillment_enc/condition in returned dicts for asks
+    for order in live_orders:
+        if order["side"] == cms.SIDE_ASK:
+            assert "fulfillment_enc" not in order
+            assert "condition" not in order
+
+    # fills for SELLER: fill_bid1 (seller) and fill_ask2 (seller)
+    fills = orders["fills"]
+    assert len(fills) == 2
+    assert all(f["seller"] == SELLER or f["buyer"] == SELLER for f in fills)
+    # fills are newest-first: fill_ask2 (50) then fill_bid1 (40)
+    assert fills[0]["id"] == fill_ask2["id"]
+    assert fills[1]["id"] == fill_bid1["id"]
+
+    # orders_for_owner for BUYER: no live orders (buyer_bid1 is filled, not live)
+    # orders_for_owner only returns pending_escrow/open/matched/cancelling states
+    orders_buyer = cms.orders_for_owner(c, BUYER)
+    buyer_orders = orders_buyer["orders"]
+    assert len(buyer_orders) == 0  # buyer_bid1 is filled after move_asset
+    # fills: fill_ask2 (buyer) and fill_bid1 (buyer) where BUYER is seller or buyer
+    buyer_fills = orders_buyer["fills"]
+    assert len(buyer_fills) == 2
+    assert all(f["seller"] == BUYER or f["buyer"] == BUYER for f in buyer_fills)
+
+    # Test fills_limit truncation
+    orders_limited = cms.orders_for_owner(c, SELLER, fills_limit=1)
+    assert len(orders_limited["fills"]) == 1
+    assert orders_limited["fills"][0]["id"] == fill_ask2["id"]  # newest
